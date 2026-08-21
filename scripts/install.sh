@@ -193,10 +193,7 @@ install_binary() {
 
     case "$OS" in
         Linux)  PLATFORM="linux" ;;
-        Darwin)
-            echo "macOS is not supported for a minute while we figure out a pipeline that works."
-            exit 1
-            ;;
+        Darwin) PLATFORM="darwin" ;;
         *)      echo "Unsupported OS: $OS"; exit 1 ;;
     esac
 

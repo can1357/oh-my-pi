@@ -3,9 +3,9 @@
  * Publish workspace packages.
  *
  * The default mode publishes public JS packages and the `@pk-nerdsaver-ai/pi-natives`
- * core package. Generated native leaf packages are published separately with
- * `--native-leaf <tag>` from the release_binary matrix after that matrix entry
- * downloads the matching `.node` artifacts.
+ * core package after all generated native leaf packages succeed in the dedicated
+ * `release_npm_native` matrix. Each leaf is published with `--native-leaf <tag>`
+ * from already-built same-run `.node` artifacts.
  *
  * For each public TypeScript package we:
  *   1. Emit `.d.ts` declarations into `dist/types/` so consumers get
@@ -262,12 +262,10 @@ export async function prepareNativeCorePackage(pkgDir: string, write: boolean): 
  *
  * The tarball is handed to `npm publish` — not `bun publish` — because only the
  * npm CLI performs the OIDC trusted-publishing token exchange; `bun publish`
- * has no OIDC support (oven-sh/bun#22423). In CI with `id-token: write` granted
- * and `NODE_AUTH_TOKEN` set, npm tries OIDC per package and silently falls back
- * to the configured token when the package has no matching trusted publisher —
- * which also covers a package's first-ever publish. npm auto-enables provenance
- * only on the OIDC path, so we never pass `--provenance` (it would hard-fail the
- * token fallback).
+ * has no OIDC support (oven-sh/bun#22423). CI grants `id-token: write` and
+ * intentionally supplies no long-lived token fallback. Every published package
+ * must therefore have an exact npm trusted-publisher entry before the release.
+ * npm auto-enables provenance on the OIDC path, so we never pass `--provenance`.
  */
 async function packAndPublish(dir: string, name: string): Promise<void> {
 	if (isDryRun) {

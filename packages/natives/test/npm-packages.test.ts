@@ -22,6 +22,11 @@ describe("generated native npm leaf packages", () => {
 		expect(addonFiles).toContain(manifest.main.slice("./".length));
 		expect(manifest.files).toContain("*.node");
 		expect(manifest.files).toContain("README.md");
+		expect(manifest.repository).toEqual({
+			type: "git",
+			url: "git+https://github.com/kingkillery/oh-my-pk.git",
+			directory: "packages/natives",
+		});
 		expect("exports" in manifest).toBe(false);
 	});
 
@@ -68,6 +73,9 @@ describe("generated native npm leaf packages", () => {
 				"darwin-arm64",
 				"win32-x64",
 			]);
+			expect(leaves.map(leaf => leaf.manifest.repository.url)).toEqual(
+				Array.from({ length: 5 }, () => "git+https://github.com/kingkillery/oh-my-pk.git"),
+			);
 			const linuxX64 = leaves.find(leaf => leaf.tag === "linux-x64");
 			expect(linuxX64?.files).toEqual(["pi_natives.linux-x64-baseline.node", "pi_natives.linux-x64-modern.node"]);
 			expect(await Bun.file(path.join(packageDir, "npm/linux-x64/pi_natives.linux-x64-modern.node")).text()).toBe(
@@ -75,6 +83,7 @@ describe("generated native npm leaf packages", () => {
 			);
 			const manifest = await Bun.file(path.join(packageDir, "npm/linux-x64/package.json")).json();
 			expect(manifest.main).toBe("./pi_natives.linux-x64-baseline.node");
+			expect(manifest.repository.url).toBe("git+https://github.com/kingkillery/oh-my-pk.git");
 			expect("exports" in manifest).toBe(false);
 		} finally {
 			await fs.rm(packageDir, { recursive: true, force: true });

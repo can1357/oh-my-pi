@@ -1,142 +1,222 @@
 # Releasing this fork
 
-The **primary** release path is automatic: `bun scripts/release.ts <version>`
-pushes the release commit and its `v*` tag, and GitHub Actions — running on free,
-unlimited, public-repository GitHub-hosted runners — builds the five platform
-binaries and publishes a GitHub Release. npm is **opt-in** (manual dispatch with
-`publish_npm`); see [`.github/workflows/README.md`](../.github/workflows/README.md).
+A complete OMPK release has three independent publication gates. Finishing one
+gate does not finish either of the others:
 
-This document covers the **installer distribution channel** and the local
-fallback used when Actions is unavailable. It builds binaries on local hosts and
-serves them from a **private Hugging Face repo** behind the install endpoint.
-The current install scripts use this channel; it is independent of GitHub Releases.
+| Gate | Published artifact | Used by |
+| --- | --- | --- |
+| **GitHub** | the `vX.Y.Z` tag and GitHub Release assets | release history and direct GitHub asset consumers |
+| **Hugging Face** | five standalone binaries in the private model repository, plus its `VERSION` pointer | explicit `--binary` / `-Binary` installs |
+| **npm** | the selected 13-package core/workspace graph and all five native leaf packages | the default installer mode and direct `bun install -g` |
 
-## Primary vs. fallback
+`bun scripts/release.ts X.Y.Z` creates the tag and drives the GitHub gate. It
+does not publish the private Hugging Face channel, and a GitHub Release is not
+evidence that either installer mode has moved to the same version. In
+particular, npm is an independent, required gate: the default installers cannot
+receive `X.Y.Z` until the complete npm package graph for `X.Y.Z` is available.
 
-| Path | Trigger | Binaries | npm |
-|---|---|---|---|
-| **Primary — GitHub Actions** | `bun scripts/release.ts <v>` pushes commit + `v*` tag; Actions detects the tag at HEAD and builds all five targets on GitHub-hosted runners | GitHub Release (automatic) | opt-in via manual `publish_npm` dispatch |
-| **Fallback — local (below)** | `bun scripts/release-local.ts <v>` on one or two hosts | private Hugging Face repo behind the install endpoint | local `npm publish` (`--npm`, opt-in) |
+## Installer behavior
 
-The two paths are independent; either can ship a release.
+The canonical installer endpoints serve the installer scripts, not a
+preselected binary:
 
-## Installer distribution model (Hugging Face)
+```sh
+# Default on macOS and Linux: install/validate Bun, then install the npm package.
+curl -fsSL https://oh-my-pk.pkking.computer/install.sh | sh
 
-- Installers (`scripts/install.ps1`, `scripts/install.sh`) download the compiled
-  `omp` binary from a Cloudflare Worker (`oh-my-pk.pkking.computer`) that serves a
-  **private Hugging Face repo** (`pkkidking/oh-my-pi-binaries`, override with
-  `HF_REPO`).
-- The repo layout is `VERSION` (a single line, e.g. `v16.1.10`) plus
-  `<tag>/omp-<platform>` for each platform. Installs resolve whatever tag
-  `VERSION` points at, so **`VERSION` must only point at a tag that has all
-  platform binaries**, or the missing platforms 404.
-- Required platform binaries (all five): `omp-darwin-arm64`, `omp-darwin-x64`,
-  `omp-linux-arm64`, `omp-linux-x64`, `omp-windows-x64.exe`.
-- npm packages publish to `registry.npmjs.org` under `@pk-nerdsaver-ai/*`
-  (`npm whoami` should be `pk-nerdsaver-ai`).
+# Explicit standalone binary mode.
+curl -fsSL https://oh-my-pk.pkking.computer/install.sh | sh -s -- --binary
+```
+
+```powershell
+# Default on Windows: install/validate Bun, then install the npm package.
+irm https://oh-my-pk.pkking.computer/install.ps1 | iex
+
+# Explicit standalone binary mode.
+& ([scriptblock]::Create((irm https://oh-my-pk.pkking.computer/install.ps1))) -Binary
+```
+
+Default mode installs `@pk-nerdsaver-ai/pi-coding-agent` from npm. Explicit
+binary mode supports macOS x64/arm64, Linux x64/arm64, and Windows x64. The two
+modes have separate publication gates even though a complete release should use
+the same `X.Y.Z` version in both.
+
+Passing `--ref` / `-Ref` without the binary flag selects the source-install
+path. Passing it together with the binary flag selects that exact binary tag.
+
+## Hugging Face binary-channel contract
+
+The standalone binaries live in the private Hugging Face **model** repository
+`pkkidking/oh-my-pi-binaries` by default. `HF_REPO` can select another private
+repository. The Cloudflare Worker holds the read token; installer clients never
+receive a Hugging Face credential.
+
+The repository layout for a complete release is:
+
+```text
+VERSION                         # exactly: vX.Y.Z plus a newline
+vX.Y.Z/omp-darwin-arm64
+vX.Y.Z/omp-darwin-x64
+vX.Y.Z/omp-linux-arm64
+vX.Y.Z/omp-linux-x64
+vX.Y.Z/omp-windows-x64.exe
+```
+
+The public install endpoint exposes those private objects as:
+
+```text
+https://oh-my-pk.pkking.computer/version
+https://oh-my-pk.pkking.computer/bin/vX.Y.Z/<filename>
+```
+
+`VERSION` must contain the **V-prefixed tag**, such as `v16.4.6`, never the bare
+package version. The Unix and PowerShell installers use `/version` only in
+explicit binary mode, then request `/bin/<tag>/<filename>`.
+
+[`publish-binaries-hf.ts`](../scripts/publish-binaries-hf.ts) checks the five
+filenames above across the requested build and files already present under the
+tag. It flips `VERSION` only after the tag is complete. Partial uploads remain
+addressable by their versioned `/bin/vX.Y.Z/...` paths, but unpinned binary
+installs continue resolving the previous complete tag.
+
+`--force-version` bypasses the completeness guard and can expose 404s on missing
+platforms; reserve it for a deliberately partial channel. `--no-version`
+uploads without changing the live pointer. `--force-build` rebuilds and
+re-uploads requested files that already exist.
 
 ## Prerequisites
 
-- `bun`, `sd`, `git`, and (for the bump's lockfile regen) `cargo`.
-- `HF_TOKEN` — a write-scoped Hugging Face token (env var) and the `hf` CLI
-  (`pip install -U huggingface_hub`).
-- For `--npm`: be logged in to npm as the owning org (`npm whoami`).
-- The native toolchain for any non-host platform you build (see the gotcha
-  below).
+- `bun`, `sd`, `git`, and the Rust/Cargo toolchain used by the release and
+  native-build scripts.
+- The native toolchain and prebuilt native addon required by every binary target
+  requested on a build host.
+- The Hugging Face `hf` CLI and a write-scoped `HF_TOKEN` for the private model
+  repository.
+- A configured npm publication identity. CI publication should use the
+  repository's trusted-publishing/token route rather than treating a local
+  login on one build host as cross-platform completion.
 
-## One command
+Never place either Hugging Face or npm credentials in commands committed to the
+repository, release notes, or logs.
 
-```sh
-# Bump/tag/push + build the host binary and upload it to Hugging Face:
-bun scripts/release-local.ts 16.1.10
+## Release procedure
 
-# Also publish npm:
-bun scripts/release-local.ts 16.1.10 --npm
+Use an unprefixed semantic version (`X.Y.Z`) with `release.ts`; it creates the
+V-prefixed Git tag (`vX.Y.Z`).
 
-# Dry run (prints every sub-command; HF/npm run in their own dry-run modes):
-bun scripts/release-local.ts 16.1.10 --dry-run
-```
-
-`release-local.ts` runs three steps and is **idempotent** — re-running with a
-version that is already bumped+tagged skips the bump and goes straight to
-publishing (use `--skip-tag` to force that). Binary publishing is idempotent too:
-targets already present under the release tag in Hugging Face are skipped before
-local compilation.
-
-## The cross-platform reality (two hosts cover all five)
-
-The compiled binary embeds a native Rust/N-API addon (`@pk-nerdsaver-ai/pi-natives`),
-so each target needs that target's std plus a way to link it. In practice **two
-hosts build all five platforms**:
-
-- **Windows host** — builds `win32-x64` natively.
-- **Apple-Silicon Mac** — builds `darwin-arm64` natively and cross-builds
-  `darwin-x64`, `linux-x64`, `linux-arm64` via `cargo-zigbuild`. (CI used an
-  Intel runner for `darwin-x64`; on Apple Silicon, cross-build it with zigbuild.)
-
-`publish-binaries-hf.ts` **only flips the `VERSION` pointer when every required
-platform binary exists for the tag** (just-built ∪ already in the repo), so a
-host-only run uploads its binary under `<tag>/` and leaves `VERSION` on the last
-complete tag.
-
-### Mesh recipe (tested for v16.1.10 — Windows + an Apple-Silicon Mac over Tailscale)
+### 1. GitHub gate
 
 ```sh
-# --- Windows host: bump/tag/push + win binary (VERSION stays put, 1/5) ---
-bun scripts/release-local.ts 16.1.10
-
-# --- Apple-Silicon Mac, reached over Tailscale SSH (e.g. ssh k@mac2) ---
-# One-time: bun + repo on MAIN (not the tag, see PITFALL) + deps
-curl -fsSL https://bun.sh/install | bash
-git clone --branch main https://github.com/kingkillery/oh-my-pk.git ompbuild && cd ompbuild && bun install
-# Cross toolchain — rust targets MUST be added from INSIDE the repo so they land
-# on the pinned rust-toolchain.toml channel, not the default:
-rustup target add x86_64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
-brew install zig cargo-zigbuild
-export PATH="$HOME/.cargo/bin:$HOME/.bun/bin:$PATH" SDKROOT="$(xcrun --show-sdk-path)" HF_TOKEN=hf_xxx
-
-# Build each native FIRST (ci-release-build-binaries only EMBEDS a prebuilt addon):
-bun run build:native                                                                                        # darwin-arm64 (host)
-CROSS_TARGET=x86_64-apple-darwin       TARGET_PLATFORM=darwin TARGET_ARCH=x64   TARGET_VARIANT=baseline bun --cwd=packages/natives run build
-CROSS_TARGET=x86_64-unknown-linux-gnu.2.17  TARGET_PLATFORM=linux TARGET_ARCH=x64   TARGET_VARIANT=baseline bun --cwd=packages/natives run build
-CROSS_TARGET=aarch64-unknown-linux-gnu.2.17 TARGET_PLATFORM=linux TARGET_ARCH=arm64                       bun --cwd=packages/natives run build
-
-# Then the binaries + upload (darwin is ad-hoc codesigned automatically on macOS):
-bun scripts/publish-binaries-hf.ts --tag v16.1.10 --targets darwin-arm64,darwin-x64
-bun scripts/publish-binaries-hf.ts --tag v16.1.10 --targets linux-x64,linux-arm64   # completes 5/5 -> VERSION auto-flips
+bun scripts/release.ts X.Y.Z
 ```
 
-> **PITFALL (this caused a brief broken-linux window once):** build hosts MUST use
-> the **guarded** `publish-binaries-hf.ts` from `main`. The VERSION-flip
-> completeness guard was committed to `main` *after* the release tag, so a host
-> that clones the *tag* gets the old script that flips `VERSION` unconditionally —
-> publishing a partial set (e.g. 3/5) then silently 404s the missing platforms.
-> Clone `main`, or `scp` / `git checkout` the guarded
-> `scripts/publish-binaries-hf.ts` onto the host before publishing. The `.2.17`
-> suffix on the linux `CROSS_TARGET`s is the glibc floor (zigbuild).
+The script performs preflight checks, updates public package/workspace versions
+and changelogs, commits, tags, pushes, and waits for the enabled GitHub Actions
+release run. The GitHub result is one gate only.
 
-Escape hatches on `publish-binaries-hf.ts`: `--force-version` flips `VERSION`
-even if platforms are missing (only when you intend a partial release);
-`--no-version` uploads binaries without ever touching `VERSION`; `--force-build`
-rebuilds/re-uploads requested targets even when they already exist under the tag.
+### 2. Hugging Face binary gate
 
-## Manual installer-channel steps
+Run the publisher on hosts with the required native artifacts and toolchains.
+Always pass the intended V-prefixed tag explicitly:
+
+```powershell
+# Windows x64 host
+$env:HF_TOKEN = "<write-scoped-token>"
+bun scripts/publish-binaries-hf.ts --tag vX.Y.Z --targets win32-x64
+```
 
 ```sh
-# 1. Bump/tag/push (release.ts watches CI to completion now that Actions runs):
-bun scripts/release.ts 16.1.10
+# Linux build host
+HF_TOKEN="<write-scoped-token>" bun scripts/publish-binaries-hf.ts \
+  --tag vX.Y.Z --targets linux-x64,linux-arm64
 
-# 2. Build + upload the host binary; VERSION flips only when all platforms exist:
-HF_TOKEN=hf_xxx bun scripts/publish-binaries-hf.ts --tag v16.1.10
-
-# 3. npm (publishes every public workspace):
-bun run publish        # = bun run check && npm publish -ws --access public
+# macOS build host
+HF_TOKEN="<write-scoped-token>" bun scripts/publish-binaries-hf.ts \
+  --tag vX.Y.Z --targets darwin-x64,darwin-arm64
 ```
 
-## npm + native packages
+Requested cross-target builds still need that target's native addon and
+toolchain; the binary publisher does not manufacture a missing cross-platform
+native build. Reruns are idempotent unless `--force-build` is supplied. The last
+run that makes all five filenames present flips `VERSION` to `vX.Y.Z`.
 
-`bun run publish` publishes every public `@pk-nerdsaver-ai/*` workspace. The
-native package ships per-platform addons; a single host only produces its own,
-so a cross-platform-correct npm release needs each platform built. Both the
-GitHub Release built by Actions and the Hugging Face installer channel are
-independent of npm. Treat `--npm` from one host as host-platform-complete only.
+For local recovery,
+[`release-local.ts`](../scripts/release-local.ts) composes the tag step and the
+Hugging Face publisher:
+
+```sh
+bun scripts/release-local.ts X.Y.Z
+bun scripts/release-local.ts X.Y.Z --skip-tag --targets darwin-x64,darwin-arm64
+bun scripts/release-local.ts X.Y.Z --dry-run
+```
+
+It builds the host target by default. Its `--npm` option invokes the general npm
+publish command, but that alone is not evidence that all five generated native
+leaf packages were published; use the complete npm publication route below.
+
+### 3. npm gate
+
+The npm release must publish the same `X.Y.Z` across:
+
+- the selected 13-package core/workspace graph published by
+  [`ci-release-publish.ts`](../scripts/ci-release-publish.ts), including
+  `@pk-nerdsaver-ai/pi-coding-agent` and `@pk-nerdsaver-ai/pi-natives`; and
+- `@pk-nerdsaver-ai/pi-natives-linux-x64`,
+  `@pk-nerdsaver-ai/pi-natives-linux-arm64`,
+  `@pk-nerdsaver-ai/pi-natives-darwin-x64`,
+  `@pk-nerdsaver-ai/pi-natives-darwin-arm64`, and
+  `@pk-nerdsaver-ai/pi-natives-win32-x64`.
+
+[`ci-release-publish.ts`](../scripts/ci-release-publish.ts) deliberately splits
+this work. Its default mode publishes the selected 13-package core/workspace
+graph, including the native core package. After the GitHub release is verified,
+the dedicated `release_npm_native` matrix downloads each target's matching
+`.node` artifacts and invokes the native-leaf mode before `release_npm` can
+publish the core/workspace graph.
+
+Trusted publishing must be configured for all 18 npm packages with repository
+`kingkillery/oh-my-pk`, workflow `ci.yml`, and no npm environment restriction.
+A package that has never been published cannot yet have that trusted publisher
+configured; seed it once with a short-lived granular token, configure the
+trusted publisher, then revoke the bootstrap token. For this remediation,
+`@pk-nerdsaver-ai/pi-deep-research` is the only package requiring that one-time
+seed.
+
+For a new shared version, publish all five native leaves successfully before
+publishing the workspace/core graph:
+
+```text
+bun scripts/ci-release-publish.ts --native-leaf linux-x64
+bun scripts/ci-release-publish.ts --native-leaf linux-arm64
+bun scripts/ci-release-publish.ts --native-leaf darwin-x64
+bun scripts/ci-release-publish.ts --native-leaf darwin-arm64
+bun scripts/ci-release-publish.ts --native-leaf win32-x64
+bun scripts/ci-release-publish.ts
+```
+
+These are CI publication interfaces, not a claim that one local host has all
+native artifacts. Use the repository's release publication job so every
+native-leaf invocation receives the artifact produced for its platform. Do not
+publish the workspace/core graph first: it would make the default package
+version visible before its complete cross-platform native dependency set.
+
+The npm gate is complete only when the registry contains the workspace/core
+packages and all five native leaf packages at `X.Y.Z`. Until then, do not
+describe the release as available through the default installers, regardless of
+the GitHub Release or Hugging Face `VERSION` value.
+
+## Completion checklist
+
+- [ ] GitHub has the intended `vX.Y.Z` tag and completed GitHub Release.
+- [ ] The private Hugging Face model repository contains all five binaries under
+      `vX.Y.Z/`.
+- [ ] Hugging Face `VERSION` contains exactly `vX.Y.Z`.
+- [ ] `/bin/vX.Y.Z/<filename>` maps to each expected platform asset through the
+      Worker.
+- [ ] npm has the selected 13-package core/workspace graph and all five native
+      leaf packages at `X.Y.Z`.
+- [ ] The default installer resolves the npm release; explicit binary mode
+      resolves the Hugging Face release.
+
+See [the install-redirect guide](../infra/install-redirect/README.md) for Worker
+route and secret configuration.

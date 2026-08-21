@@ -310,7 +310,14 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
 				{
 					label: "scripts",
 					cwd: ".",
-					command: ["bun", "test", "--parallel=4", ...onlyFailuresArgs, "scripts/ci-concurrency.test.ts"],
+					command: [
+						"bun",
+						"test",
+						"--parallel=4",
+						...onlyFailuresArgs,
+						"scripts/ci-concurrency.test.ts",
+						"scripts/install-smoke.test.ts",
+					],
 				},
 			];
 		case "native":

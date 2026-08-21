@@ -96,7 +96,7 @@ export function buildLeafManifest({ tag, os, cpu, files, version }: BuildLeafMan
 		license: "MIT",
 		repository: {
 			type: "git",
-			url: "git+https://github.com/can1357/oh-my-pi.git",
+			url: "git+https://github.com/kingkillery/oh-my-pk.git",
 			directory: "packages/natives",
 		},
 		engines: {

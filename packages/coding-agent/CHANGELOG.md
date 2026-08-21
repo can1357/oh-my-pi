@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Enabled explicit macOS x64 and arm64 binary installation through the private release channel, with cross-platform target and version-pointer regression coverage.
+- Separated retryable npm native-leaf publication from binary builds, enforced leaf-before-core ordering, and corrected trusted-publisher repository metadata across the complete package graph.
+
 ## [16.4.5] - 2026-08-21
 
 ### Added

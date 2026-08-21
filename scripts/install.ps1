@@ -236,7 +236,41 @@ function Install-ViaBun {
     Write-Host "Run 'oh-my-pk' (or 'ompk') to get started!"
 }
 
+function Get-WindowsOsArchitecture {
+    try {
+        $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+        if ($architecture) {
+            return $architecture.ToString().ToUpperInvariant()
+        }
+    } catch {
+        # Fall through for older Windows PowerShell/.NET installations.
+    }
+
+    $architecture = if ($env:PROCESSOR_ARCHITEW6432) {
+        $env:PROCESSOR_ARCHITEW6432
+    } else {
+        $env:PROCESSOR_ARCHITECTURE
+    }
+    if (-not $architecture) {
+        return "UNKNOWN"
+    }
+    switch ($architecture.ToUpperInvariant()) {
+        "AMD64" { return "X64" }
+        "X86_64" { return "X64" }
+        "ARM64" { return "ARM64" }
+        default { return $architecture.ToUpperInvariant() }
+    }
+}
+
+function Assert-BinaryArchitecture {
+    $architecture = Get-WindowsOsArchitecture
+    if ($architecture -ne "X64") {
+        throw "Unsupported architecture: $architecture. Prebuilt binary installs support Windows x64 only; use the default npm/Bun installer mode on this host."
+    }
+}
+
 function Install-Binary {
+    Assert-BinaryArchitecture
     # Resolve version: an explicit -Ref pins the tag; otherwise ask the
     # distribution endpoint (Cloudflare Worker -> private Hugging Face repo).
     if ($Ref) {

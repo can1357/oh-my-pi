@@ -611,7 +611,6 @@ jobs:
       runs-on: ${{ matrix.os }}
       permissions:
          contents: read
-         id-token: write
       env:
          MACOS_SIGNING: ${{ secrets.APPLE_CERTIFICATE_P12 != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_ISSUER_ID != '' && secrets.APPLE_API_KEY != '' }}
       steps:
@@ -622,15 +621,6 @@ jobs:
            env:
               SCCACHE_BUCKET: ""
               AWS_ACCESS_KEY_ID: ""
-         - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
-           if: ${{ inputs.publish_npm }}
-           with:
-              node-version: "24"
-              registry-url: "https://registry.npmjs.org"
-         # Keep npm aligned with trusted publishing setup (>= 11.16.0).
-         - name: Ensure npm supports trusted publishing
-           if: ${{ inputs.publish_npm }}
-           run: npm install -g npm@latest
          - name: Cache bun dependencies
            uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
@@ -670,14 +660,6 @@ jobs:
               runtime_dir="$(mktemp -d)"
               HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "${{ matrix.binary_path }}" --version
               HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "${{ matrix.binary_path }}" --smoke-test
-         - name: Publish native addon package
-           if: ${{ inputs.publish_npm }}
-           env:
-              # Fallback auth: setup-node wrote an .npmrc referencing
-              # NODE_AUTH_TOKEN; npm uses it only when OIDC has no trusted
-              # publisher for the package (or on a first publish).
-              NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-           run: bun run ci:release:publish-native-leaf ${{ matrix.target_id }}
          - name: Upload release binary artifact
            uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
            with:
@@ -756,18 +738,65 @@ jobs:
               # lookup, so surface the result without gating the release on it.
               spctl -a -t exec -vv ./omp-darwin-arm64 || echo "spctl non-zero (expected for unstapled bare binary; ticket served online)"
 
-   release_npm:
-      name: Publish to npm
+   # npm publication starts only after the GitHub release is published and
+   # verified. Each matrix child publishes exactly one generated native package
+   # from the same-run artifact; fail-fast is disabled so every missing leaf is
+   # attempted before the aggregate job is gated.
+   release_npm_native:
+      name: "Publish npm native leaf: ${{ matrix.target_id }}"
       if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
-         needs.release_binary.result == 'success' &&
          needs.release_github_verify.result == 'success' &&
          inputs.publish_npm }}
-      needs: [release_metadata, release_binary, release_github_verify, native_artifact_lookup]
+      needs: [release_metadata, release_github_verify, native_artifact_lookup]
       runs-on: ubuntu-22.04
-      # `id-token: write` lets npm mint the GitHub OIDC token it exchanges for a
-      # short-lived publish token (trusted publishing + provenance). When a
-      # package has no matching trusted publisher configured, npm silently falls
-      # back to NODE_AUTH_TOKEN below — which also covers first-ever publishes.
+      strategy:
+         fail-fast: false
+         matrix:
+            include:
+               - { platform: linux, arch: x64, target_id: linux-x64 }
+               - { platform: linux, arch: arm64, target_id: linux-arm64 }
+               - { platform: darwin, arch: x64, target_id: darwin-x64 }
+               - { platform: darwin, arch: arm64, target_id: darwin-arm64 }
+               - { platform: win32, arch: x64, target_id: win32-x64 }
+      permissions:
+         contents: read
+         id-token: write
+      steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           with:
+              bun-version: "1.3.14"
+         - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+           with:
+              node-version: "24.19.0"
+         - name: Install npm 11.19.0
+           run: npm install --global npm@11.19.0
+         - name: Cache bun dependencies
+           uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              path: ~/.bun/install/cache
+              key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
+         - run: bun install --frozen-lockfile
+         - name: Download native addon
+           uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+           with:
+              pattern: pi-natives-${{ matrix.platform }}-${{ matrix.arch }}*-h${{ needs.native_artifact_lookup.outputs.source-hash }}
+              path: packages/natives/native
+              merge-multiple: true
+         - name: Publish native addon package
+           run: bun run ci:release:publish-native-leaf ${{ matrix.target_id }}
+
+   release_npm:
+      name: Publish npm workspace/core packages
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
+         needs.release_github_verify.result == 'success' &&
+         needs.release_npm_native.result == 'success' &&
+         inputs.publish_npm }}
+      needs: [release_metadata, release_github_verify, release_npm_native, native_artifact_lookup]
+      runs-on: ubuntu-22.04
+      # npm exchanges this job's GitHub OIDC identity for a short-lived publish
+      # token. Every package must have a matching npm trusted publisher; this
+      # workflow intentionally has no long-lived token fallback.
       permissions:
          id-token: write
          contents: read
@@ -775,14 +804,12 @@ jobs:
          - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
          - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
            with:
-              bun-version: "1.3"
+              bun-version: "1.3.14"
          - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
            with:
-              node-version: "24"
-              registry-url: "https://registry.npmjs.org"
-         # Keep npm aligned with trusted publishing setup (>= 11.16.0).
-         - name: Ensure npm supports trusted publishing
-           run: npm install -g npm@latest
+              node-version: "24.19.0"
+         - name: Install npm 11.19.0
+           run: npm install --global npm@11.19.0
          - name: Cache bun dependencies
            uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
@@ -800,12 +827,7 @@ jobs:
               pattern: pi-natives-linux-x64-*-h${{ needs.native_artifact_lookup.outputs.source-hash }}
               path: packages/natives/native
               merge-multiple: true
-         - name: Publish to npm
-           env:
-              # Fallback auth: setup-node wrote an .npmrc referencing
-              # NODE_AUTH_TOKEN; npm uses it only when OIDC has no trusted
-              # publisher for the package (or on a first publish).
-              NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+         - name: Publish workspace/core packages to npm
            run: bun run ci:release:publish
 
    # Regenerate the Homebrew tap formula (can1357/homebrew-tap) from the freshly

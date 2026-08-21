@@ -30,16 +30,13 @@ Canonical product name: `oh-my-pk`. Canonical install endpoint: `https://oh-my-p
 
 ## Install
 
+The installer scripts install or validate Bun and then install the
+`@pk-nerdsaver-ai/pi-coding-agent` npm package by default.
+
 **macOS · Linux**
 
 ```sh
 curl -fsSL https://oh-my-pk.pkking.computer/install.sh | sh
-```
-
-**Bun (recommended)**
-
-```sh
-bun install -g @pk-nerdsaver-ai/pi-coding-agent
 ```
 
 **Windows (PowerShell)**
@@ -48,14 +45,44 @@ bun install -g @pk-nerdsaver-ai/pi-coding-agent
 irm https://oh-my-pk.pkking.computer/install.ps1 | iex
 ```
 
-`oh-my-pk` requires Bash on Windows. Install Git for Windows (recommended), or use WSL, Cygwin, or MSYS2; the installer detects Git Bash or `bash.exe` on `PATH` and records the shell path.
+`oh-my-pk` requires Bash on Windows. Install Git for Windows (recommended), or
+use WSL, Cygwin, or MSYS2; the installer detects Git Bash or `bash.exe` on
+`PATH` and records the shell path.
 
-macOS · Linux · Windows · bun ≥ 1.3.14
+**Direct npm package install with Bun**
 
-The install scripts install/validate Bun and use the npm package by default. Prebuilt binaries are currently available with `--binary` on Linux x64/arm64 and `-Binary` on Windows x64; macOS uses the Bun/npm install path.
-There is no Homebrew tap or mise registry entry for this fork —
-don't use `brew install kingkillery/tap/omp` or `mise use -g
-github:kingkillery/oh-my-pi`, neither is published.
+```sh
+bun install -g @pk-nerdsaver-ai/pi-coding-agent
+```
+
+The default path supports macOS, Linux, and Windows and requires Bun >= 1.3.14.
+Publishing a GitHub Release or the separate binary channel does not update this
+path: the same release must also be published to npm.
+
+### Explicit binary install
+
+Prebuilt binaries are an explicit alternative; they are never selected by the
+default installer commands above.
+
+```sh
+# macOS or Linux
+curl -fsSL https://oh-my-pk.pkking.computer/install.sh | sh -s -- --binary
+```
+
+```powershell
+# Windows
+& ([scriptblock]::Create((irm https://oh-my-pk.pkking.computer/install.ps1))) -Binary
+```
+
+Binary mode supports macOS x64/arm64, Linux x64/arm64, and Windows x64. It
+downloads the selected platform asset from the private Hugging Face model
+repository through the install endpoint; clients never receive the repository
+token. See [the fork release guide](docs/RELEASING-FORK.md) for the separate
+GitHub, Hugging Face, and npm release gates.
+
+There is no Homebrew tap or mise registry entry for this fork — don't use
+`brew install kingkillery/tap/omp` or
+`mise use -g github:kingkillery/oh-my-pi`; neither is published.
 
 ### Shell completions
 
