@@ -3,7 +3,7 @@
   "version": "16.4.11",
   "description": "Native Rust bindings for grep, clipboard, image processing, syntax highlighting, PTY, and shell operations via N-API",
   "type": "module",
-  "homepage": "https://github.com/kingkillery/oh-my-pi",
+  "homepage": "https://github.com/kingkillery/oh-my-pk",
   "author": "Can Boluk",
   "license": "MIT",
   "repository": {
@@ -12,7 +12,7 @@
     "directory": "packages/natives"
   },
   "bugs": {
-    "url": "https://github.com/kingkillery/oh-my-pi/issues"
+    "url": "https://github.com/kingkillery/oh-my-pk/issues"
   },
   "keywords": [
     "napi",

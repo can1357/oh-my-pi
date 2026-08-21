@@ -2,7 +2,7 @@
 	"name": "@pk-nerdsaver-ai/pi-deep-research",
 	"version": "16.4.11",
 	"description": "Supervisor/researcher deep research agent (TypeScript port of langchain-ai/open_deep_research) built on pi-ai",
-	"homepage": "https://github.com/kingkillery/oh-my-pi",
+	"homepage": "https://github.com/kingkillery/oh-my-pk",
 	"license": "MIT",
 	"repository": {
 		"type": "git",
@@ -10,7 +10,7 @@
 		"directory": "packages/deep-research"
 	},
 	"bugs": {
-		"url": "https://github.com/kingkillery/oh-my-pi/issues"
+		"url": "https://github.com/kingkillery/oh-my-pk/issues"
 	},
 	"type": "module",
 	"main": "./src/index.ts",
@@ -38,5 +38,8 @@
 	"engines": {
 		"bun": ">=1.3.14"
 	},
-	"files": ["src", "CHANGELOG.md"]
+	"files": [
+		"src",
+		"CHANGELOG.md"
+	]
 }

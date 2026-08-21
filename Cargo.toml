@@ -8,8 +8,8 @@ version = "16.4.11"
 edition = "2024"
 license = "MIT"
 authors = ["Can Boluk"]
-homepage = "https://github.com/kingkillery/oh-my-pi"
-repository = "https://github.com/kingkillery/oh-my-pi"
+homepage = "https://github.com/kingkillery/oh-my-pk"
+repository = "https://github.com/kingkillery/oh-my-pk"
 
 [patch.crates-io]
 brush-core = { path = "crates/brush-core-vendored" }

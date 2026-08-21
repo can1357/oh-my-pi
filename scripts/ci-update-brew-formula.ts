@@ -11,8 +11,8 @@
 
 import { $ } from "bun";
 
-const REPO = process.env.OMP_REPO ?? "kingkillery/oh-my-pi";
-const HOMEPAGE = "https://github.com/kingkillery/oh-my-pi";
+const REPO = process.env.OMP_REPO ?? "kingkillery/oh-my-pk";
+const HOMEPAGE = "https://github.com/kingkillery/oh-my-pk";
 const DESC = "Coding agent with the IDE wired in";
 
 interface ReleaseAsset {

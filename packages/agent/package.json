@@ -3,7 +3,7 @@
 	"name": "@pk-nerdsaver-ai/pi-agent-core",
 	"version": "16.4.11",
 	"description": "General-purpose agent with transport abstraction, state management, and attachment support",
-	"homepage": "https://github.com/kingkillery/oh-my-pi",
+	"homepage": "https://github.com/kingkillery/oh-my-pk",
 	"author": "Can Boluk",
 	"contributors": [
 		"Mario Zechner"
@@ -15,7 +15,7 @@
 		"directory": "packages/agent"
 	},
 	"bugs": {
-		"url": "https://github.com/kingkillery/oh-my-pi/issues"
+		"url": "https://github.com/kingkillery/oh-my-pk/issues"
 	},
 	"keywords": [
 		"ai",

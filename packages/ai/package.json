@@ -3,7 +3,7 @@
 	"name": "@pk-nerdsaver-ai/pi-ai",
 	"version": "16.4.11",
 	"description": "Unified LLM API with automatic model discovery and provider configuration",
-	"homepage": "https://github.com/kingkillery/oh-my-pi",
+	"homepage": "https://github.com/kingkillery/oh-my-pk",
 	"author": "Can Boluk",
 	"contributors": [
 		"Mario Zechner"
@@ -15,7 +15,7 @@
 		"directory": "packages/ai"
 	},
 	"bugs": {
-		"url": "https://github.com/kingkillery/oh-my-pi/issues"
+		"url": "https://github.com/kingkillery/oh-my-pk/issues"
 	},
 	"keywords": [
 		"ai",

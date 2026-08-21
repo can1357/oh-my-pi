@@ -3,7 +3,7 @@
 	"name": "@pk-nerdsaver-ai/pi-catalog",
 	"version": "16.4.11",
 	"description": "Model catalog for omp: bundled model database, provider discovery descriptors, model identity, classification, and equivalence",
-	"homepage": "https://github.com/kingkillery/oh-my-pi",
+	"homepage": "https://github.com/kingkillery/oh-my-pk",
 	"author": "Can Boluk",
 	"license": "MIT",
 	"repository": {
@@ -12,7 +12,7 @@
 		"directory": "packages/catalog"
 	},
 	"bugs": {
-		"url": "https://github.com/kingkillery/oh-my-pi/issues"
+		"url": "https://github.com/kingkillery/oh-my-pk/issues"
 	},
 	"keywords": [
 		"ai",

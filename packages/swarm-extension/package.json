@@ -3,16 +3,16 @@
 	"name": "@pk-nerdsaver-ai/swarm-extension",
 	"version": "16.4.11",
 	"description": "Swarm orchestration extension for omp",
-	"homepage": "https://github.com/kingkillery/oh-my-pi",
+	"homepage": "https://github.com/kingkillery/oh-my-pk",
 	"author": "Derek Rynd",
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/kingkillery/oh-my-pi.git",
+		"url": "git+https://github.com/kingkillery/oh-my-pk.git",
 		"directory": "packages/swarm-extension"
 	},
 	"bugs": {
-		"url": "https://github.com/kingkillery/oh-my-pi/issues"
+		"url": "https://github.com/kingkillery/oh-my-pk/issues"
 	},
 	"keywords": [
 		"swarm",
