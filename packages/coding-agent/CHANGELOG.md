@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.4.9] - 2026-08-21
+
 ### Fixed
 
 - Enabled explicit macOS x64 and arm64 binary installation through the private release channel, with cross-platform target and version-pointer regression coverage.
