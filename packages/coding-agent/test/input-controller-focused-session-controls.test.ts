@@ -15,6 +15,7 @@ function createHarness() {
 	const mainPrompt = vi.fn(async () => {});
 	const focusedPrompt = vi.fn(async () => {});
 	const showStatus = vi.fn();
+	const showError = vi.fn();
 	const invalidateStatusLine = vi.fn();
 	const updateEditorBorderColor = vi.fn();
 
@@ -60,7 +61,7 @@ function createHarness() {
 		showStatus,
 		statusLine: { invalidate: invalidateStatusLine },
 		updateEditorBorderColor,
-		showError: vi.fn(),
+		showError,
 		updatePendingMessagesDisplay: vi.fn(),
 		ui: { requestRender: vi.fn() },
 	} as unknown as InteractiveModeContext;
@@ -79,6 +80,7 @@ function createHarness() {
 			mainPrompt,
 			focusedPrompt,
 			showStatus,
+			showError,
 			invalidateStatusLine,
 			updateEditorBorderColor,
 		},
@@ -104,6 +106,7 @@ describe("InputController focused subagent controls", () => {
 
 		await controller.cycleRoleModel();
 
+		expect(spies.showError).not.toHaveBeenCalled();
 		expect(spies.focusedCycleRoleModels).toHaveBeenCalledTimes(1);
 		expect(spies.mainCycleRoleModels).not.toHaveBeenCalled();
 		expect(spies.showStatus).toHaveBeenCalledWith(expect.stringContaining("worker model: Focused M"));
