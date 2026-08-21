@@ -117,8 +117,9 @@ export class SelectorController {
 	 */
 	focusActiveEditorArea(): void {
 		const children = this.ctx.editorContainer.children;
-		const active = children.length > 0 ? children[children.length - 1] : undefined;
-		this.ctx.ui.setFocus((active ?? this.ctx.editor) as Component);
+		const mountedEditor = children.includes(this.ctx.editor) ? this.ctx.editor : undefined;
+		const replacement = children.length > 0 ? children[children.length - 1] : undefined;
+		this.ctx.ui.setFocus((mountedEditor ?? replacement ?? this.ctx.editor) as Component);
 	}
 
 	/**

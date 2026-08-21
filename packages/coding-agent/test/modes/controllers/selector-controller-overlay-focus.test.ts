@@ -57,6 +57,23 @@ describe("SelectorController.focusActiveEditorArea", () => {
 		expect(setFocus).toHaveBeenCalledWith(editor);
 	});
 
+	it("focuses the mounted editor between passive composer decorations so printable input reaches it", () => {
+		const handleInput = vi.fn();
+		const modeBar = { id: "mode-bar" };
+		const editor = { id: "editor", handleInput };
+		const diagnostics = { id: "diagnostics" };
+		// Mirrors the normal composer mount order: mode bar, editor, diagnostics.
+		const slot = createEditorSlot(modeBar, editor, diagnostics);
+		const { ctx, setFocus } = createCtx(slot, editor);
+
+		new SelectorController(ctx).focusActiveEditorArea();
+
+		const focused = setFocus.mock.calls[0]?.[0] as { handleInput: (input: string) => void };
+		focused.handleInput("x");
+		expect(setFocus).toHaveBeenCalledWith(editor);
+		expect(handleInput).toHaveBeenCalledWith("x");
+	});
+
 	it("focuses the active hook-selector-style prompt when the slot holds it instead of the editor", () => {
 		const editor = { id: "editor" };
 		const approvalPrompt = { id: "approval-prompt" };

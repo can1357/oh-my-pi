@@ -9,6 +9,7 @@
 ### Fixed
 
 - Supported `/login`, `/logout`, and `auth-broker login` provider aliases (`antigravity` -> `google-antigravity`).
+- Restored composer text input after changing MOA or other settings by focusing the mounted editor instead of passive mode-bar or diagnostics decorations.
 - Retried the `v16.4.4` release after a transient sccache/GitHub Actions cache network failure aborted the install-method smoke test and stalled the modern Linux x64 native build; no source change.
 
 ## [16.4.4] - 2026-08-19
