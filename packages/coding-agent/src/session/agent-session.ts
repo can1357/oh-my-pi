@@ -7060,6 +7060,7 @@ export class AgentSession {
 			modelRegistry: this.#modelRegistry,
 			model: this.model ?? undefined,
 			models: createExtensionModelQuery(this.#modelRegistry, this.settings, () => this.model ?? undefined),
+			getSetting: path => this.settings.get(path),
 			isIdle: () => !this.isStreaming,
 			abort: () => {
 				void this.abort();

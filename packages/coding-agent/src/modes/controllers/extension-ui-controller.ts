@@ -544,6 +544,7 @@ export class ExtensionUiController {
 							this.ctx.session.settings,
 							() => this.ctx.session.model,
 						),
+						getSetting: path => this.ctx.session.settings.get(path),
 						isIdle: () => !this.ctx.session.isStreaming && !isOwnerCommandInFlight(this.ctx.sessionManager),
 						hasPendingMessages: () => this.ctx.session.queuedMessageCount > 0,
 						abort: () => {

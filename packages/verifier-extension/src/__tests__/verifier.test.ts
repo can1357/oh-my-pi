@@ -1,20 +1,26 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { CompareRepetition } from "../index";
-import {
+import type { ExtensionAPI, ExtensionContext } from "@pk-nerdsaver-ai/pi-coding-agent";
+import verifierExtension, {
 	buildCompareBreakdown,
 	buildSummaryLines,
+	type CompareRepetition,
 	chooseWinner,
+	createWorkspaceAuditRequest,
+	criteriaFromVerifierContract,
 	extractTaggedScore,
 	extractTextSource,
 	isVerifierRequestParams,
 	planSubagentOrchestration,
 	readEvidenceBlocks,
+	readVerifierModelSpec,
 	runVerifierRequest,
+	runVerifierSlashCommand,
 	selectOverallWinner,
 	truncate,
+	type VerifierRequestParams,
 	weightedMean,
 	weightedStdDev,
 } from "../index";
@@ -296,6 +302,195 @@ describe("isVerifierRequestParams", () => {
 			criteria: [{ description: "works" }],
 		};
 		expect(isVerifierRequestParams(example)).toBe(false);
+	});
+});
+
+describe("/verify workspace audit", () => {
+	it("registers the verifier slash command with the extension", () => {
+		const registerCommand = vi.fn();
+		const typeFactory = new Proxy(
+			{},
+			{
+				get: () => () => ({}),
+			},
+		);
+		const pi = {
+			setLabel: vi.fn(),
+			typebox: { Type: typeFactory },
+			registerTool: vi.fn(),
+			registerCommand,
+		} as unknown as ExtensionAPI;
+
+		verifierExtension(pi);
+
+		expect(registerCommand).toHaveBeenCalledWith(
+			"verify",
+			expect.objectContaining({
+				description: expect.stringContaining("tracked workspace diff"),
+				handler: expect.any(Function),
+			}),
+		);
+	});
+
+	it("turns explicit acceptance bullets into narrow verifier criteria", () => {
+		const criteria = criteriaFromVerifierContract(
+			"Objective: ship the installer\n\nAcceptance:\n- npm remains the default\n- unsupported binaries fail before download",
+		);
+
+		expect(criteria.map(criterion => criterion.description)).toEqual([
+			"npm remains the default",
+			"unsupported binaries fail before download",
+		]);
+	});
+
+	it("accepts numbered and inline acceptance criteria", () => {
+		expect(
+			criteriaFromVerifierContract(
+				"Objective: ship safely\n\nAcceptance criteria:\n1. focused tests pass\n2) no unsupported fallback",
+			).map(criterion => criterion.description),
+		).toEqual(["focused tests pass", "no unsupported fallback"]);
+		expect(
+			criteriaFromVerifierContract("Objective: ship safely\nAcceptance: focused tests pass")[0]?.description,
+		).toBe("focused tests pass");
+	});
+
+	it("fails closed when explicit acceptance criteria cannot be parsed", () => {
+		expect(() => criteriaFromVerifierContract("Objective: ship safely")).toThrow("Include an Acceptance: section");
+		expect(() => criteriaFromVerifierContract("Objective: ship safely\nAcceptance:\nfocused tests pass")).toThrow(
+			"The Acceptance: section must contain",
+		);
+		const tooManyCriteria = Array.from({ length: 7 }, (_, index) => `- criterion ${index + 1}`).join("\n");
+		expect(() => criteriaFromVerifierContract(`Objective: ship safely\nAcceptance:\n${tooManyCriteria}`)).toThrow(
+			"The Acceptance: section supports at most 6 criteria.",
+		);
+	});
+
+	it("reads the verifier model from the active extension context", () => {
+		const getSetting = vi.fn(() => " independent/verifier ");
+		const ctx = { getSetting } as unknown as ExtensionContext;
+
+		expect(readVerifierModelSpec(ctx)).toBe("independent/verifier");
+		expect(getSetting).toHaveBeenCalledWith("delegate.verifierModel");
+		expect(readVerifierModelSpec({} as ExtensionContext)).toBe("pi/task");
+	});
+
+	it("builds a single-candidate audit using the configured verifier model", () => {
+		const request = createWorkspaceAuditRequest(
+			"Objective: preserve behavior\n\nAcceptance:\n- focused tests pass",
+			{ diff: "diff --git a/file.ts b/file.ts\n+fixed", status: " M file.ts" },
+			"independent/verifier",
+		);
+
+		expect(request).toMatchObject({
+			backend: "pi-model-ensemble",
+			mode: "audit",
+			model: "independent/verifier",
+			maxCandidateChars: 40000,
+			maxEvidenceChars: 20000,
+			candidates: [{ id: "workspace-diff" }],
+		});
+		expect(request.criteria.map(criterion => criterion.id)).toEqual(["acceptance-1"]);
+	});
+
+	it("rejects a workspace audit when there is no tracked diff", () => {
+		expect(() =>
+			createWorkspaceAuditRequest(
+				"Objective: preserve behavior",
+				{ diff: "", status: "?? untracked.ts" },
+				"independent/verifier",
+			),
+		).toThrow("No tracked workspace diff is available to audit.");
+	});
+
+	it("fails before verification when workspace evidence would be truncated", () => {
+		expect(() =>
+			createWorkspaceAuditRequest(
+				"Objective: preserve behavior\n\nAcceptance:\n- focused tests pass",
+				{ diff: "x".repeat(40001), status: "" },
+				"independent/verifier",
+			),
+		).toThrow("Tracked workspace diff is 40001 characters; /verify supports at most 40000.");
+	});
+
+	it("rejects an empty non-interactive request before reading git", async () => {
+		const exec = vi.fn();
+		const pi = { exec } as unknown as ExtensionAPI;
+		const ctx = {
+			cwd: process.cwd(),
+			hasUI: false,
+		} as unknown as ExtensionContext;
+
+		await expect(
+			runVerifierSlashCommand(pi, ctx, "", {
+				readModelSpec: () => "independent/verifier",
+				runRequest: async () => ({ summaryLines: [] }),
+			}),
+		).rejects.toThrow("Usage: /verify <objective and acceptance criteria>");
+		expect(exec).not.toHaveBeenCalled();
+	});
+
+	it("surfaces git capture failures without launching the verifier", async () => {
+		const runRequest = vi.fn(async () => ({ summaryLines: [] }));
+		const exec = vi.fn(async (_command: string, args: string[]) => ({
+			stdout: "",
+			stderr: args[0] === "diff" ? "fatal: not a git repository" : "",
+			code: args[0] === "diff" ? 128 : 0,
+			killed: false,
+		}));
+		const pi = { exec } as unknown as ExtensionAPI;
+		const ctx = { cwd: process.cwd(), hasUI: false } as unknown as ExtensionContext;
+
+		await expect(
+			runVerifierSlashCommand(pi, ctx, "Objective: preserve behavior\n\nAcceptance:\n- focused tests pass", {
+				readModelSpec: () => "independent/verifier",
+				runRequest,
+			}),
+		).rejects.toThrow("fatal: not a git repository");
+		expect(runRequest).not.toHaveBeenCalled();
+	});
+
+	it("launches from an empty slash command through the criteria editor", async () => {
+		let capturedRequest: VerifierRequestParams | undefined;
+		const editor = vi.fn(async () => "Objective: preserve behavior\n\nAcceptance:\n- focused tests pass");
+		const notify = vi.fn();
+		const exec = vi.fn(async (_command: string, args: string[]) => ({
+			stdout: args[0] === "diff" ? "diff --git a/file.ts b/file.ts\n+fixed" : " M file.ts",
+			stderr: "",
+			code: 0,
+			killed: false,
+		}));
+		const pi = { exec } as unknown as ExtensionAPI;
+		const ctx = {
+			cwd: process.cwd(),
+			hasUI: true,
+			ui: { editor, notify },
+		} as unknown as ExtensionContext;
+
+		const launched = await runVerifierSlashCommand(pi, ctx, "", {
+			readModelSpec: () => "independent/verifier",
+			runRequest: async (_pi, _ctx, params) => {
+				capturedRequest = params;
+				return { summaryLines: ["audit complete"] };
+			},
+		});
+
+		expect(launched).toBe(true);
+		expect(editor).toHaveBeenCalledWith(
+			"LLM verifier objective and acceptance criteria",
+			expect.stringContaining("Acceptance:"),
+			undefined,
+			{ promptStyle: true },
+		);
+		expect(capturedRequest).toMatchObject({
+			model: "independent/verifier",
+			criteria: [{ description: "focused tests pass" }],
+		});
+		expect(notify).toHaveBeenCalledWith("audit complete", "info");
+		expect(exec).toHaveBeenNthCalledWith(1, "git", ["diff", "--no-ext-diff", "HEAD"], {
+			cwd: process.cwd(),
+			timeout: 30000,
+		});
+		expect(exec).toHaveBeenNthCalledWith(2, "git", ["status", "--short"], { cwd: process.cwd(), timeout: 30000 });
 	});
 });
 

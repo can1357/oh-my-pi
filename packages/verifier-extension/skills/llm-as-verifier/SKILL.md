@@ -197,6 +197,25 @@ Use `mock` mode only for smoke tests and pipeline validation.
 
 ## Tooling in this packet
 
+### Settings and slash command
+
+Use `/settings` → **Tasks** → **Subagents** → **LLM Verifier Model** to choose the model used by the verifier lane. Prefer a model/provider independent from the implementation model.
+
+Run `/verify` after implementation to audit the current staged and unstaged tracked diff. With no arguments, the command opens an objective/acceptance editor. Inline form:
+
+```text
+/verify Objective: preserve installer defaults
+
+Acceptance:
+- npm/Bun remains the default
+- unsupported binary architectures fail before download
+- focused installer tests pass
+```
+
+`/verify` runs a repeated single-candidate audit and reports criterion-level evidence. It does not run tests for the implementer. The command audits tracked diffs only; use `llm_as_verifier` directly for saved or untracked candidates and multi-candidate comparison.
+
+The command fails before contacting the model when the tracked diff exceeds 40,000 characters or status evidence exceeds 20,000 characters, so verification never silently scores a truncated workspace. Narrow the change set or call `llm_as_verifier` with a saved candidate.
+
 ### Extension tool
 
 Use the `llm_as_verifier` tool for normal operation.

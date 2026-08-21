@@ -514,6 +514,7 @@ export class ExtensionRunner {
 				return getModel();
 			},
 			models: createExtensionModelQuery(this.modelRegistry, this.settings, getModel),
+			getSetting: path => this.settings?.get(path),
 			isIdle: () => this.#isIdleFn(),
 			abort: () => this.#abortFn(),
 			hasPendingMessages: () => this.#hasPendingMessagesFn(),

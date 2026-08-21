@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Exposed the verifier model in Tasks settings for default verifier delegate lanes and `/verify` when the verifier extension is enabled.
+- Added read-only effective-setting access to extension contexts so extensions can honor active session configuration without importing the global settings singleton.
+
 ## [16.4.9] - 2026-08-21
 
 ### Fixed

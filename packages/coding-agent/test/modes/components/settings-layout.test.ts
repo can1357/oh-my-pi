@@ -87,6 +87,20 @@ describe("settings layout", () => {
 		}
 	});
 
+	it("exposes the on-demand LLM verifier model in task settings", () => {
+		const def = getSettingsForTab("tasks").find(def => def.path === "delegate.verifierModel");
+
+		expect(def).toMatchObject({
+			path: "delegate.verifierModel",
+			type: "text",
+			label: "LLM Verifier Model",
+			group: "Subagents",
+		});
+		expect(def?.description).toContain("/verify");
+		expect(def?.description).toContain("verifier extension is enabled");
+		expect(def?.description).toContain("never replaces, tests");
+	});
+
 	it("shows provider request limits as a providers services submenu setting", () => {
 		const [def] = getSettingsForTab("providers").filter(item => item.path === "providers.maxInFlightRequests");
 

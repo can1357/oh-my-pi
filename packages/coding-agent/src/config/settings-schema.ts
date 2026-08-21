@@ -4565,6 +4565,13 @@ export const SETTINGS_SCHEMA = {
 	"delegate.verifierModel": {
 		type: "string",
 		default: "pi/task",
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "LLM Verifier Model",
+			description:
+				"Model used by the default verifier delegate lane and, when the verifier extension is enabled, /verify. Prefer an independent provider; verification runs on demand and complements, never replaces, tests.",
+		},
 	},
 
 	"delegate.synthesizerModel": {

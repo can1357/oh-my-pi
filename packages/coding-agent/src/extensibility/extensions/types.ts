@@ -36,6 +36,7 @@ import type { Type as arktype } from "arktype";
 import type * as zod from "zod/v4";
 import type { KeybindingsManager } from "../../config/keybindings";
 import type { ModelRegistry } from "../../config/model-registry";
+import type { SettingPath, SettingValue } from "../../config/settings-schema";
 import type { EditToolDetails } from "../../edit";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
@@ -357,6 +358,8 @@ export interface ExtensionContext {
 	model: Model | undefined;
 	/** Read-only model query facade: list / current / resolve / family. */
 	models: ExtensionModelQuery;
+	/** Read one effective setting from the active session without exposing mutable settings state. */
+	getSetting<P extends SettingPath>(path: P): SettingValue<P> | undefined;
 	/** Whether the agent is idle (not streaming) */
 	isIdle(): boolean;
 	/** Abort the current agent operation */

@@ -7,6 +7,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentMessage, AgentTool } from "@pk-nerdsaver-ai/pi-agent-core";
 import { ModelRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/config/model-registry";
+import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { discoverAndLoadExtensions } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/extensions/loader";
 import {
 	EXTENSION_HANDLER_TIMEOUT_MS,
@@ -71,6 +72,24 @@ describe("ExtensionRunner", () => {
 			errors: result.errors.filter(error => isTestScoped(error.path)),
 		};
 	};
+
+	describe("settings context", () => {
+		it("exposes effective settings as read-only command context values", async () => {
+			const result = await loadTestExtensions();
+			const configuredSettings = Settings.isolated({ "delegate.verifierModel": "independent/verifier" });
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+				undefined,
+				configuredSettings,
+			);
+
+			expect(runner.createContext().getSetting("delegate.verifierModel")).toBe("independent/verifier");
+		});
+	});
 
 	describe("shortcut conflicts", () => {
 		it("warns when extension shortcut conflicts with built-in", async () => {

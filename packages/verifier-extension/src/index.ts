@@ -1380,7 +1380,7 @@ export const buildSummaryLines = (
 	return lines;
 };
 
-interface VerifierRequestParams {
+export interface VerifierRequestParams {
 	backend?: Backend;
 	mode?: "compare" | "audit";
 	task: string;
@@ -1399,6 +1399,99 @@ interface VerifierRequestParams {
 	maxCandidateChars?: number;
 	maxEvidenceChars?: number;
 	mock?: boolean;
+}
+
+export interface WorkspaceVerificationSnapshot {
+	diff: string;
+	status: string;
+}
+
+const VERIFY_COMMAND_PREFILL = `Objective:
+
+Acceptance:
+- `;
+
+const ACCEPTANCE_HEADER_PATTERN = /^acceptance(?:\s+criteria)?\s*:\s*(.*?)\s*$/i;
+const ACCEPTANCE_ITEM_PATTERN = /^\s*(?:[-*]|\d+[.)])\s+(.+?)\s*$/;
+const WORKSPACE_AUDIT_MAX_CRITERIA = 6;
+const WORKSPACE_AUDIT_MAX_DIFF_CHARS = 40000;
+const WORKSPACE_AUDIT_MAX_EVIDENCE_CHARS = 20000;
+const WORKSPACE_STATUS_EVIDENCE_PREFIX = "git status --short:\n";
+
+export function criteriaFromVerifierContract(contract: string): CriterionInput[] {
+	const lines = contract.split(/\r?\n/);
+	const acceptanceIndex = lines.findIndex(line => ACCEPTANCE_HEADER_PATTERN.test(line.trim()));
+	if (acceptanceIndex < 0) {
+		throw new Error("Include an Acceptance: section with one or more explicit criteria.");
+	}
+
+	const headerMatch = lines[acceptanceIndex]?.trim().match(ACCEPTANCE_HEADER_PATTERN);
+	const inlineCriterion = headerMatch?.[1]?.trim();
+	const descriptions = [
+		...(inlineCriterion ? [inlineCriterion] : []),
+		...lines
+			.slice(acceptanceIndex + 1)
+			.map(line => line.match(ACCEPTANCE_ITEM_PATTERN)?.[1]?.trim())
+			.filter((description): description is string => Boolean(description)),
+	];
+	if (!descriptions.length) {
+		throw new Error("The Acceptance: section must contain a bullet, numbered item, or inline criterion.");
+	}
+	if (descriptions.length > WORKSPACE_AUDIT_MAX_CRITERIA) {
+		throw new Error(`The Acceptance: section supports at most ${WORKSPACE_AUDIT_MAX_CRITERIA} criteria.`);
+	}
+
+	return descriptions.map((description, index) => ({
+		id: `acceptance-${index + 1}`,
+		name: description.length > 72 ? `${description.slice(0, 69)}...` : description,
+		description,
+	}));
+}
+
+export function createWorkspaceAuditRequest(
+	contract: string,
+	snapshot: WorkspaceVerificationSnapshot,
+	modelSpec: string,
+): VerifierRequestParams {
+	const task = contract.trim();
+	if (!task || task === VERIFY_COMMAND_PREFILL.trim()) {
+		throw new Error("Verifier objective and acceptance criteria are required.");
+	}
+	const diff = snapshot.diff.trim();
+	if (!diff) {
+		throw new Error(
+			"No tracked workspace diff is available to audit. Use llm_as_verifier directly for saved candidates or add the intended files to git.",
+		);
+	}
+	if (diff.length > WORKSPACE_AUDIT_MAX_DIFF_CHARS) {
+		throw new Error(
+			`Tracked workspace diff is ${diff.length} characters; /verify supports at most ${WORKSPACE_AUDIT_MAX_DIFF_CHARS}. Narrow the change set or use llm_as_verifier with a saved candidate.`,
+		);
+	}
+	const status = snapshot.status.trim();
+	const statusEvidence = status ? `${WORKSPACE_STATUS_EVIDENCE_PREFIX}${status}` : "";
+	if (statusEvidence.length > WORKSPACE_AUDIT_MAX_EVIDENCE_CHARS) {
+		throw new Error(
+			`Workspace status evidence is ${statusEvidence.length} characters; /verify supports at most ${WORKSPACE_AUDIT_MAX_EVIDENCE_CHARS}. Narrow the change set before auditing.`,
+		);
+	}
+	return {
+		backend: "pi-model-ensemble",
+		mode: "audit",
+		task,
+		candidates: [
+			{
+				id: "workspace-diff",
+				content: diff,
+				summary: "Current staged and unstaged tracked workspace changes",
+				...(statusEvidence ? { evidenceText: statusEvidence } : {}),
+			},
+		],
+		criteria: criteriaFromVerifierContract(task),
+		model: modelSpec.trim() || DEFAULT_SUBAGENT_MODEL_SPEC,
+		maxCandidateChars: WORKSPACE_AUDIT_MAX_DIFF_CHARS,
+		maxEvidenceChars: WORKSPACE_AUDIT_MAX_EVIDENCE_CHARS,
+	};
 }
 
 export function isVerifierRequestParams(value: unknown): value is VerifierRequestParams {
@@ -1641,6 +1734,72 @@ export const runVerifierRequest = async (
 	};
 };
 
+export interface VerifierSlashCommandDependencies {
+	readModelSpec(ctx: ExtensionContext): string;
+	runRequest(
+		pi: ExtensionAPI,
+		ctx: ExtensionContext,
+		params: VerifierRequestParams,
+	): Promise<{ summaryLines: string[] }>;
+}
+
+export function readVerifierModelSpec(ctx: ExtensionContext): string {
+	const configured = ctx.getSetting?.("delegate.verifierModel");
+	return configured?.trim() || DEFAULT_SUBAGENT_MODEL_SPEC;
+}
+
+const DEFAULT_VERIFIER_SLASH_COMMAND_DEPENDENCIES: VerifierSlashCommandDependencies = {
+	readModelSpec: readVerifierModelSpec,
+	runRequest: (pi, ctx, params) => runVerifierRequest(pi, ctx, params),
+};
+
+async function captureWorkspaceVerificationSnapshot(
+	pi: ExtensionAPI,
+	cwd: string,
+): Promise<WorkspaceVerificationSnapshot> {
+	const [diffResult, statusResult] = await Promise.all([
+		pi.exec("git", ["diff", "--no-ext-diff", "HEAD"], { cwd, timeout: 30000 }),
+		pi.exec("git", ["status", "--short"], { cwd, timeout: 30000 }),
+	]);
+	if (diffResult.code !== 0) {
+		throw new Error(diffResult.stderr.trim() || "Unable to read the tracked workspace diff.");
+	}
+	if (statusResult.code !== 0) {
+		throw new Error(statusResult.stderr.trim() || "Unable to read workspace status.");
+	}
+	return { diff: diffResult.stdout, status: statusResult.stdout };
+}
+
+export async function runVerifierSlashCommand(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	args: string,
+	dependencies: VerifierSlashCommandDependencies = DEFAULT_VERIFIER_SLASH_COMMAND_DEPENDENCIES,
+): Promise<boolean> {
+	let contract = args.trim();
+	if (!contract) {
+		if (!ctx.hasUI) {
+			throw new Error("Usage: /verify <objective and acceptance criteria>");
+		}
+		const edited = await ctx.ui.editor(
+			"LLM verifier objective and acceptance criteria",
+			VERIFY_COMMAND_PREFILL,
+			undefined,
+			{ promptStyle: true },
+		);
+		if (edited === undefined) return false;
+		contract = edited.trim();
+	}
+
+	const snapshot = await captureWorkspaceVerificationSnapshot(pi, ctx.cwd);
+	const request = createWorkspaceAuditRequest(contract, snapshot, dependencies.readModelSpec(ctx));
+	const run = await dependencies.runRequest(pi, ctx, request);
+	const message = run.summaryLines.join("\n");
+	if (ctx.hasUI) ctx.ui.notify(message, "info");
+	else pi.logger.info(message);
+	return true;
+}
+
 export default function verifierExtension(pi: ExtensionAPI): void {
 	pi.setLabel("LLM as Verifier");
 
@@ -1862,6 +2021,19 @@ export default function verifierExtension(pi: ExtensionAPI): void {
 					sharedEvidenceSources: run.sharedEvidenceSources,
 				},
 			};
+		},
+	});
+
+	pi.registerCommand("verify", {
+		description: "Audit the current tracked workspace diff with repeated criteria-decomposed LLM verification",
+		handler: async (args, ctx) => {
+			try {
+				await runVerifierSlashCommand(pi, ctx, args);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				if (ctx.hasUI) ctx.ui.notify(message, "error");
+				else pi.logger.error(message);
+			}
 		},
 	});
 

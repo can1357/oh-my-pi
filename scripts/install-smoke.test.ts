@@ -133,7 +133,16 @@ $script:DownloadUrl = ""
 $Ref = "v16.4.6"
 $DistBase = "https://dist.example.test"
 $BinaryName = "omp-windows-x64.exe"
-$InstallDir = "C:\unused-installer-smoke"
+# Use a host-local temp path so Linux pwsh (CI) does not attempt to create
+# a Windows drive path before the download mock can capture the request.
+$InstallDir = Join-Path ([System.IO.Path]::GetTempPath()) "ompk-installer-smoke"
+
+# Install-Binary creates the install directory before downloading. Stub the
+# filesystem side effects so architecture/network assertions stay hermetic.
+function New-Item {
+    param($ItemType, $Path)
+    return [pscustomobject]@{ FullName = $Path }
+}
 
 function Invoke-RestMethod {
     $script:NetworkCalls += 1
@@ -211,7 +220,15 @@ powershellTest(
 	() => {
 		const result = runPowerShellInstallerHarness("X64");
 
-		expect(result.exitCode).toBe(0);
+		if (result.exitCode !== 0) {
+			throw new Error(
+				[
+					`PowerShell x64 installer smoke failed with exit ${result.exitCode}`,
+					`stdout:\n${result.stdout || "<empty>"}`,
+					`stderr:\n${result.stderr || "<empty>"}`,
+				].join("\n"),
+			);
+		}
 		expect(result.stderr).toBe("");
 		expect(result.stdout).toContain("download=https://dist.example.test/bin/v16.4.6/omp-windows-x64.exe");
 	},
@@ -223,7 +240,15 @@ powershellTest(
 	() => {
 		const result = runPowerShellInstallerHarness("ARM64");
 
-		expect(result.exitCode).toBe(0);
+		if (result.exitCode !== 0) {
+			throw new Error(
+				[
+					`PowerShell ARM64 installer smoke failed with exit ${result.exitCode}`,
+					`stdout:\n${result.stdout || "<empty>"}`,
+					`stderr:\n${result.stderr || "<empty>"}`,
+				].join("\n"),
+			);
+		}
 		expect(result.stderr).toBe("");
 		expect(result.stdout).toContain("rejected=ARM64 network=0");
 	},
