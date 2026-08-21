@@ -20,7 +20,7 @@ service = "ompk-collab"
 # Private Hugging Face repo that stores the release binaries (free storage + egress).
 HF_REPO = "pkkidking/oh-my-pi-binaries"
 # "models" (default) or "datasets".
-HF_REPO_TYPE = "models"
+HF_REPO_TYPE = "datasets"
 
 # HF_TOKEN is a SECRET — never commit it. Set it once with:
 #   wrangler secret put HF_TOKEN
