@@ -1783,7 +1783,7 @@ export class InputController {
 
 	async cycleRoleModel(direction: "forward" | "backward" = "forward"): Promise<void> {
 		try {
-			const cycleOrder = settings.get("cycleOrder");
+			const cycleOrder = this.ctx.settings.get("cycleOrder");
 			const result = await this.ctx.viewSession.cycleRoleModels(cycleOrder, direction);
 			if (!result) {
 				this.ctx.showStatus("Only one role model available");
