@@ -1949,6 +1949,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"providers.anthropic.serverSideFallbackModels": {
+		type: "array",
+		default: ["claude-opus-4-8"] as string[],
+		ui: {
+			tab: "model",
+			group: "Retry & Fallback",
+			label: "Anthropic Server-Side Fallback Chain",
+			description:
+				'Ordered bare Anthropic model ids forwarded as the server-side `fallbacks` chain when Anthropic Server-Side Fallback is enabled, e.g. ["claude-opus-5", "claude-opus-4-8"]. These are API model ids, not provider/model selectors. An empty list sends no fallbacks even when the toggle is on; the API accepts at most three entries, so longer chains use the first three.',
+		},
+	},
+
 	// ────────────────────────────────────────────────────────────────────────
 	// Interaction
 	// ────────────────────────────────────────────────────────────────────────
