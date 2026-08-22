@@ -119,7 +119,21 @@ export class SelectorController {
 		const children = this.ctx.editorContainer.children;
 		const mountedEditor = children.includes(this.ctx.editor) ? this.ctx.editor : undefined;
 		const replacement = children.length > 0 ? children[children.length - 1] : undefined;
-		this.ctx.ui.setFocus((mountedEditor ?? replacement ?? this.ctx.editor) as Component);
+		const target = (mountedEditor ?? replacement ?? this.ctx.editor) as Component;
+		const label = (c: Component | undefined) => c?.constructor?.name ?? "none";
+		console.error(
+			"[DEBUG-a4f2] focusActiveEditorArea children=[" +
+				children.map(c => c?.constructor?.name ?? typeof c).join(",") +
+				"] mountedEditor=" +
+				label(mountedEditor) +
+				" replacement=" +
+				label(replacement) +
+				" editor=" +
+				label(this.ctx.editor) +
+				" → target=" +
+				label(target),
+		);
+		this.ctx.ui.setFocus(target);
 	}
 
 	/**
@@ -145,7 +159,16 @@ export class SelectorController {
 			// the transcript stays untouched underneath.
 			let overlayHandle: OverlayHandle | undefined;
 			const done = () => {
+				console.error(
+					"[DEBUG-a4f2] settings done BEFORE hide children=[" +
+						this.ctx.editorContainer.children.map(c => c?.constructor?.name ?? typeof c).join(",") +
+						"]",
+				);
 				overlayHandle?.hide();
+				console.error(
+					"[DEBUG-a4f2] settings done AFTER hide editorMounted=" +
+						this.ctx.editorContainer.children.includes(this.ctx.editor),
+				);
 				// The overlay never touched the editor slot — a hook prompt may be
 				// occupying it, and it (not the editor) must get the focus back (#3349).
 				this.focusActiveEditorArea();
