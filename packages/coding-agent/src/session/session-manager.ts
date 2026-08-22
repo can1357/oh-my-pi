@@ -2715,6 +2715,82 @@ export class SessionManager {
 		return entry.id;
 	}
 
+	/** Whether an entry id exists in the journal (on- or off-branch). */
+	hasEntry(id: string): boolean {
+		return this.#index.has(id);
+	}
+
+	/**
+	 * gc: prune the off-branch tails of older user-undo branches, keeping the
+	 * newest `keep` tails intact so their `/redo` still works.
+	 *
+	 * Only entries unreachable from the current leaf are removed; the active
+	 * path is never touched. Pruned markers keep their metadata (steps, count)
+	 * but are scrubbed of `droppedPrompts` and `undoOf` — after the tail is
+	 * gone, the prompt list would be the last surviving copy of content the
+	 * operator explicitly retracted.
+	 */
+	async pruneUserUndoTails(keep = 1, apply = true): Promise<{ markers: number; removed: number }> {
+		const markers = this.#entries.filter(entry => {
+			if (entry.type !== "branch_summary") return false;
+			return ((entry as BranchSummaryEntry).details as { kind?: string } | undefined)?.kind === "user-undo";
+		}) as BranchSummaryEntry[];
+		if (markers.length <= keep) return { markers: 0, removed: 0 };
+
+		// Reachability from the current leaf (active path + its ancestors).
+		const reachable = new Set<string>();
+		for (let id = this.getLeafId(); id; ) {
+			reachable.add(id);
+			id = this.#index.get(id)?.parentId ?? null;
+		}
+
+		const doomed = new Set<string>();
+		const toScrub: BranchSummaryEntry[] = [];
+		for (const marker of markers.slice(0, markers.length - keep)) {
+			toScrub.push(marker);
+			const details = marker.details as { undoOf?: string | null } | undefined;
+			const stop = marker.parentId ?? null;
+			let id = details?.undoOf ?? null;
+			while (id && id !== stop && !reachable.has(id)) {
+				const entry = this.#index.get(id);
+				if (!entry) break;
+				doomed.add(id);
+				for (const child of this.#index.childrenOf(id)) doomed.add(child.id);
+				id = entry.parentId ?? null;
+			}
+			// Descendants of the chain (redo remnants, subagent forks off the
+			// dropped tail) are covered by childrenOf only one level deep;
+			// collect transitively.
+			const queue = [...doomed];
+			while (queue.length > 0) {
+				const current = queue.pop()!;
+				for (const child of this.#index.childrenOf(current)) {
+					if (!doomed.has(child.id)) {
+						doomed.add(child.id);
+						queue.push(child.id);
+					}
+				}
+			}
+		}
+		// Never remove anything on the active path (post-redo scenarios can
+		// make an old tail live again).
+		if (!apply) return { markers: toScrub.length, removed: doomed.size };
+
+		for (const marker of toScrub) {
+			const details = marker.details as { steps?: number; rewoundAt?: string } | undefined;
+			marker.details = {
+				kind: "user-undo",
+				steps: details?.steps,
+				rewoundAt: details?.rewoundAt,
+				prunedAt: nowIso(),
+			};
+		}
+		this.#entries = this.#entries.filter(entry => !doomed.has(entry.id));
+		this.#index.rebuild(this.#entries);
+		await this.rewriteEntries();
+		return { markers: toScrub.length, removed: doomed.size };
+	}
+
 	/**
 	 * Create a new session file containing only the path from root to `leafId`.
 	 * Returns the new file path, or undefined when not persisting.

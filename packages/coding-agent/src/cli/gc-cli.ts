@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
@@ -16,6 +17,7 @@ import { Settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
 import { BLOB_HASH_RE } from "../session/blob-store";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
+import { SessionManager } from "../session/session-manager";
 import { FileSessionStorage } from "../session/session-storage";
 
 const BLOB_FILE_RE = /^([a-f0-9]{64})(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/;
@@ -37,6 +39,8 @@ export interface GcCommandFlags {
 	blobs?: boolean;
 	archive?: boolean;
 	wal?: boolean;
+	undoTails?: boolean;
+	keepUndoTails?: number;
 	coldArchiveAfterDays?: number;
 	retainNewestGlobal?: number;
 	retainNewestPerCwd?: number;
@@ -44,6 +48,15 @@ export interface GcCommandFlags {
 
 export interface GcCommandArgs {
 	flags: GcCommandFlags;
+}
+
+export interface UndoTailGcResult {
+	filesScanned: number;
+	markersPruned: number;
+	entriesRemoved: number;
+	keep: number;
+	files: Array<{ file: string; markers: number; removed: number }>;
+	errors: string[];
 }
 
 export interface BlobGcResult {
@@ -91,6 +104,7 @@ export interface GcResult {
 	blobs?: BlobGcResult;
 	archive?: ArchiveGcResult;
 	wal?: WalGcResult;
+	undoTails?: UndoTailGcResult;
 	lockPath: string;
 }
 
@@ -114,6 +128,8 @@ interface ResolvedGcOptions {
 	runBlobs: boolean;
 	runArchive: boolean;
 	runWal: boolean;
+	runUndoTails: boolean;
+	keepUndoTails: number;
 	coldArchiveAfterDays: number;
 	retainNewestGlobal: number;
 	retainNewestPerCwd: number;
@@ -150,7 +166,7 @@ function numberSetting(value: number | undefined, fallback: unknown, defaultValu
 
 async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions> {
 	const agentDir = path.resolve(flags.agentDir ?? getAgentDir());
-	const selected = flags.blobs === true || flags.archive === true || flags.wal === true;
+	const selected = flags.blobs === true || flags.archive === true || flags.wal === true || flags.undoTails === true;
 	const archiveSelected = selected && flags.archive === true;
 	const needsArchiveSettings =
 		archiveSelected &&
@@ -173,6 +189,8 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 		runBlobs: selected ? flags.blobs === true : getBoolean("gc.blobs"),
 		runArchive: selected ? flags.archive === true : getBoolean("gc.archive"),
 		runWal: selected ? flags.wal === true : getBoolean("gc.wal"),
+		runUndoTails: selected ? flags.undoTails === true : false,
+		keepUndoTails: Math.max(0, flags.keepUndoTails ?? 1),
 		coldArchiveAfterDays: numberSetting(
 			flags.coldArchiveAfterDays,
 			getNumber("gc.coldArchiveAfterDays"),
@@ -1552,11 +1570,55 @@ function renderText(result: GcResult): string {
 		if (result.archive.skippedActive > 0) lines.push(`sessions skipped active: ${result.archive.skippedActive}`);
 		if (result.archive.errors.length > 0) lines.push(`session errors: ${result.archive.errors.length}`);
 	}
+	if (result.undoTails) {
+		const t = result.undoTails;
+		lines.push(
+			`undo tails: ${t.markersPruned} markers pruned, ${t.entriesRemoved} entries removed, keep=${t.keep}, ${t.filesScanned} files scanned`,
+		);
+		if (t.errors.length > 0) lines.push(`undo tail errors: ${t.errors.length}`);
+	}
 	if (result.wal) {
 		const state = result.wal.checkpointed ? "checkpointed" : "checkpoint dry-run";
 		lines.push(`wal: ${state}, ${formatBytes(result.wal.walBytes)} across ${result.wal.databases.length} dbs`);
 	}
 	return `${lines.join("\n")}\n`;
+}
+
+/**
+ * Prune off-branch tails of older user-undo branches across active sessions.
+ * Skips sessions with live statuses — an open AgentSession still holds those
+ * entries in memory and would re-append them.
+ */
+async function runUndoTailGc(options: ResolvedGcOptions): Promise<UndoTailGcResult> {
+	const sessionsRoot = getSessionsDir(options.agentDir);
+	const result: UndoTailGcResult = {
+		filesScanned: 0,
+		markersPruned: 0,
+		entriesRemoved: 0,
+		keep: options.keepUndoTails,
+		files: [],
+		errors: [],
+	};
+	const candidates = (await listActiveSessions(sessionsRoot)).filter(
+		session => !session.status || !ACTIVE_STATUSES.has(session.status),
+	);
+	for (const session of candidates) {
+		result.filesScanned++;
+		try {
+			// File-backed manager either way: reading real session files needs
+			// FileSessionStorage, and apply=false returns before any rewrite,
+			// so the dry run never writes the target file.
+			const manager = SessionManager.create(os.tmpdir(), await fs.mkdtemp(path.join(os.tmpdir(), "gc-undo-")));
+			await manager.setSessionFile(session.path);
+			const counts = await manager.pruneUserUndoTails(options.keepUndoTails, options.apply);
+			result.markersPruned += counts.markers;
+			result.entriesRemoved += counts.removed;
+			if (counts.markers > 0) result.files.push({ file: session.path, ...counts });
+		} catch (error) {
+			result.errors.push(`${session.path}: ${errorMessage(error)}`);
+		}
+	}
+	return result;
 }
 
 export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
@@ -1567,6 +1629,7 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 		if (options.runBlobs) next.blobs = await runBlobGc(options, archiveRoot);
 		if (options.runArchive) next.archive = await runArchiveGc(options, archiveRoot);
 		if (options.runWal) next.wal = await runWalGc(options);
+		if (options.runUndoTails) next.undoTails = await runUndoTailGc(options);
 		return next;
 	});
 

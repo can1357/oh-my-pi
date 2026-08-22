@@ -8237,6 +8237,9 @@ export class AgentSession {
 			};
 		}
 		const tipId = details.undoOf;
+		if (!this.sessionManager.hasEntry(tipId)) {
+			return { ok: false, error: "The undone turns were pruned by gc; redo is no longer possible." };
+		}
 		// Silent like /undo: the marker renders nothing, so context after
 		// /redo is simply the restored turns — no trace that an undo cycle
 		// happened.
