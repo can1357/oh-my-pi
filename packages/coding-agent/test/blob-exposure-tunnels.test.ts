@@ -40,7 +40,10 @@ function shellLiteral(value: string): string {
 	return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
-function prepareFake(output: string, options: { exitCode?: number; restartOnce?: boolean } = {}): FakeInvocation {
+function prepareFake(
+	output: string,
+	options: { exitCode?: number; exitDelaySeconds?: number; restartOnce?: boolean } = {},
+): FakeInvocation {
 	const suffix = String(invocationSequence++);
 	const invocationDir = path.join(fakeBinDir, suffix);
 	fs.mkdirSync(invocationDir);
@@ -52,20 +55,21 @@ function prepareFake(output: string, options: { exitCode?: number; restartOnce?:
 	fs.writeFileSync(
 		target,
 		`#!/bin/sh\n` +
-			`: > ${shellLiteral(argsFile)}\n` +
-			`for arg do printf '%s\\n' "$arg" >> ${shellLiteral(argsFile)}; done\n` +
-			`printf 'run\\n' >> ${shellLiteral(runsFile)}\n` +
-			`trap 'printf "SIGINT\\n" >> ${shellLiteral(signalsFile)}; exit 0' INT\n` +
-			`trap 'printf "SIGTERM\\n" >> ${shellLiteral(signalsFile)}; exit 0' TERM\n` +
-			`printf '%s\\n' ${shellLiteral(output)}\n` +
-			(restartMarker
-				? `if [ ! -e ${shellLiteral(restartMarker)} ]; then\n` +
-					`  printf 'first\\n' > ${shellLiteral(restartMarker)}\n` +
-					`  exit 23\n` +
-					`fi\n` +
-					`printf 'restarted\\n' >> ${shellLiteral(restartMarker)}\n`
-				: "") +
-			(options.exitCode === undefined ? `while :; do /bin/sleep 1; done\n` : `exit ${options.exitCode}\n`),
+		`: > ${shellLiteral(argsFile)}\n` +
+		`for arg do printf '%s\\n' "$arg" >> ${shellLiteral(argsFile)}; done\n` +
+		`printf 'run\\n' >> ${shellLiteral(runsFile)}\n` +
+		`trap 'printf "SIGINT\\n" >> ${shellLiteral(signalsFile)}; exit 0' INT\n` +
+		`trap 'printf "SIGTERM\\n" >> ${shellLiteral(signalsFile)}; exit 0' TERM\n` +
+		`printf '%s\\n' ${shellLiteral(output)}\n` +
+		(restartMarker
+			? `if [ ! -e ${shellLiteral(restartMarker)} ]; then\n` +
+			`  printf 'first\\n' > ${shellLiteral(restartMarker)}\n` +
+			`  exit 23\n` +
+			`fi\n` +
+			`printf 'restarted\\n' >> ${shellLiteral(restartMarker)}\n`
+			: "") +
+		(options.exitDelaySeconds === undefined ? "" : `/bin/sleep ${options.exitDelaySeconds}\n`) +
+		(options.exitCode === undefined ? `while :; do /bin/sleep 1; done\n` : `exit ${options.exitCode}\n`),
 	);
 	fs.chmodSync(target, 0o755);
 	for (const name of ["ssh", "devtunnel", "zrok", "bore", "cloudflared"]) {
@@ -119,6 +123,7 @@ async function stopAndObserve(exposure: ActiveExposure, invocation: FakeInvocati
 
 beforeAll(() => {
 	fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-blob-tunnels-"));
+
 });
 
 afterAll(async () => {
@@ -126,6 +131,7 @@ afterAll(async () => {
 	await Promise.all(activeExposures.map(active => active.exited));
 	if (originalPath === undefined) delete process.env.PATH;
 	else process.env.PATH = originalPath;
+
 	fs.rmSync(fakeBinDir, { recursive: true, force: true });
 });
 
@@ -196,7 +202,13 @@ describe("startExposure tunnel adapters", () => {
 	});
 
 	it("never reconnects a free Pinggy tunnel behind a different published hostname", async () => {
-		const invocation = prepareFake("Tunnel established at https://random-one.a.pinggy.link", { exitCode: 23 });
+		// The delayed exit keeps startup deterministic: free Pinggy is
+		// unsupervised, so a child that dies before its URL is scanned is
+		// rejected rather than recovered from the log after exit.
+		const invocation = prepareFake("Tunnel established at https://random-one.a.pinggy.link", {
+			exitCode: 23,
+			exitDelaySeconds: 1,
+		});
 		const active = await startExposure(exposure("pinggy"), PORT);
 		activeExposures.push(active);
 		expect(active.baseUrl).toBe("https://random-one.a.pinggy.link");
