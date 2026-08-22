@@ -261,8 +261,7 @@ async function spawnUrlTunnel(
 	let scanned = 0;
 	let baseUrl: string | undefined;
 	const scanLog = (text: string): string | undefined => {
-		if (text.length <= scanned) return undefined;
-		if (baseUrl === undefined) {
+		if (text.length > scanned && baseUrl === undefined) {
 			for (const line of text.slice(scanned).split("\n")) {
 				const url = extract(line);
 				if (url) {
