@@ -165,11 +165,17 @@ describe("AgentSession user undo/redo", () => {
 		expect(text).not.toContain(SECRET_C);
 	});
 
-	it("branch summary renders generic text; details carry the prompt list", async () => {
+	it("undo is silent: empty summary, no report message, details intact", async () => {
 		session = await makeSession();
 		await seedThreeTurns();
 
 		session.userUndo(1);
+
+		// No undo-report custom message on the branch — silent contract.
+		const reportEntries = sessionManager
+			.getBranch()
+			.filter(entry => entry.type === "custom_message" && JSON.stringify(entry).includes("rewound"));
+		expect(reportEntries.length).toBe(0);
 
 		const branchEntries = sessionManager
 			.getBranch()
@@ -179,9 +185,9 @@ describe("AgentSession user undo/redo", () => {
 		}>;
 		expect(branchEntries.length).toBe(1);
 		const marker = branchEntries[0]!;
-		// The summary RENDERS into context — it must be generic.
-		expect(marker.summary).not.toContain(SECRET_C);
-		expect(marker.summary).toMatch(/dropped 1 user turn/i);
+		// The summary is EMPTY — session-context.ts renders branch summaries
+		// only when non-empty, so nothing about the undo reaches the model.
+		expect(marker.summary).toBe("");
 		// The prompt list lives in details, which never renders.
 		expect(marker.details?.kind).toBe("user-undo");
 		expect(marker.details?.steps).toBe(1);
