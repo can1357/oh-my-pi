@@ -234,12 +234,35 @@ describe("startExposure tunnel adapters", () => {
 		);
 		activeExposures.push(active);
 		expect(active.baseUrl).toBe("https://stable.example.test");
-		expect(recordedArgs(invocation)).toContain("fake-pinggy-token@pro.pinggy.io");
+		// Wait for the restarted child before inspecting args: each spawn truncates
+		// and rewrites the args file, so reading it earlier races the respawn. Both
+		// runs receive identical argv, so the post-restart contents are equivalent.
 		await waitForRestart(invocation.restartMarker!);
+		expect(recordedArgs(invocation)).toContain("fake-pinggy-token@pro.pinggy.io");
 		expect(fs.readFileSync(invocation.runsFile, "utf8")).toBe("run\nrun\n");
-		expect(active.baseUrl).toBe("https://stable.example.test");
 		await stopAndObserve(active, invocation);
 	});
+
+	it("backs off and gives up on a stable Pinggy tunnel that keeps dying after publishing its URL", async () => {
+		// Every run prints a URL and exits immediately, mimicking a persistent
+		// auth failure. Without backoff the supervisor would hot-loop respawns
+		// and `exited` would never settle.
+		const invocation = prepareFake("Tunnel established at https://doomed-random.a.pinggy.link", { exitCode: 23 });
+		const startedAt = Date.now();
+		const active = await startExposure(
+			exposure("pinggy", {
+				publicBaseUrl: "https://stable.example.test/",
+				credentials: { token: "fake-pinggy-token" },
+			}),
+			PORT,
+		);
+		activeExposures.push(active);
+		await active.exited;
+		// Bounded: exactly the quick-exit budget of runs, never a hot loop.
+		expect(fs.readFileSync(invocation.runsFile, "utf8")).toBe("run\n".repeat(5));
+		// Delayed: respawns sit behind 250/500/1000/2000ms backoff sleeps.
+		expect(Date.now() - startedAt).toBeGreaterThanOrEqual(3_500);
+	}, 20_000);
 
 	it("starts devtunnel and zrok with public HTTP argv", async () => {
 		const devInvocation = prepareFake(`Hosting port ${PORT} at https://blue-${PORT}.use2.devtunnels.ms/`);
