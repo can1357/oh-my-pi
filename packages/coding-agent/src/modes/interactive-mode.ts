@@ -1018,6 +1018,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Reload slash commands and autocomplete for the provided working directory. */
 	async refreshSlashCommandState(cwd?: string): Promise<void> {
 		const basePath = cwd ?? this.sessionManager.getCwd();
+		// Resync the in-place skill-command map from current session.skills so
+		// `/skill:<name>` autocomplete/dispatch reflects any `reloadSkills()`
+		// update. Deliberately NO disk re-discovery here: that belongs to the
+		// explicit reload pipelines, not every generic command refresh.
+		this.syncSkillCommands();
 		const fileCommands = await loadSlashCommands({ cwd: basePath });
 		this.fileSlashCommands = new Set(fileCommands.map(cmd => cmd.name));
 		const fileSlashCommands: SlashCommand[] = fileCommands.map(cmd => ({
@@ -1052,6 +1057,27 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 		this.editor.setAutocompleteProvider(autocompleteProvider);
 		this.session.setSlashCommands(fileCommands);
+	}
+
+	/**
+	 * Rebuild the `skill:*` command entries in place. Mutates the existing Map
+	 * and pending list rather than replacing them: InputController and the
+	 * autocomplete provider hold references captured at construction.
+	 */
+	syncSkillCommands(): void {
+		this.skillCommands.clear();
+		const freshSkillCommands: SlashCommand[] = [];
+		if (settings.get("skills.enableSkillCommands")) {
+			for (const skill of this.session.skills) {
+				const commandName = `skill:${skill.name}`;
+				this.skillCommands.set(commandName, skill.filePath);
+				freshSkillCommands.push({ name: commandName, description: skill.description });
+			}
+		}
+		this.#pendingSlashCommands = [
+			...this.#pendingSlashCommands.filter(command => !command.name.startsWith("skill:")),
+			...freshSkillCommands,
+		];
 	}
 
 	/**

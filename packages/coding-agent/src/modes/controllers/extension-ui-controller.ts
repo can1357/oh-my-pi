@@ -276,6 +276,7 @@ export class ExtensionUiController {
 					const projectPath = await resolveActiveProjectRegistryPath(cwd);
 					clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
 					resetCapabilities();
+					await this.ctx.session.reloadSkills();
 					await this.ctx.refreshSlashCommandState(cwd);
 					await this.ctx.session.refreshSshTool({ activateIfAvailable: true });
 				},

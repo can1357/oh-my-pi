@@ -2,8 +2,10 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { reset as resetCapabilities } from "@pk-nerdsaver-ai/pi-coding-agent/capability";
 import { ModelRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/config/model-registry";
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
+import { getActiveSkills } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/skills";
 import type { Skill } from "@pk-nerdsaver-ai/pi-coding-agent/sdk";
 import { createAgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/sdk";
 import { AuthStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/auth-storage";
@@ -170,5 +172,147 @@ Loaded via symbolic link.
 		expect(session.skills).toEqual([customSkill]);
 		// No warnings since we didn't discover
 		expect(session.skillWarnings).toEqual([]);
+	});
+});
+
+describe("createAgentSession reloadSkills", () => {
+	let tempDir: string;
+	let tempHomeDir = "";
+	let originalHome: string | undefined;
+	let sharedDir: string;
+	let sharedAuthStorage: AuthStorage;
+	let sharedModelRegistry: ModelRegistry;
+
+	beforeAll(async () => {
+		sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-sdk-skills-reload-shared-"));
+		sharedAuthStorage = await AuthStorage.create(path.join(sharedDir, "auth.db"));
+		sharedModelRegistry = new ModelRegistry(sharedAuthStorage, path.join(sharedDir, "models.yml"));
+	});
+
+	afterAll(() => {
+		sharedAuthStorage.close();
+		removeSyncWithRetries(sharedDir);
+	});
+
+	beforeEach(() => {
+		tempDir = path.join(os.tmpdir(), `pi-sdk-reload-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		fs.mkdirSync(path.join(tempDir, ".ompk", "skills", "initial-skill"), { recursive: true });
+		fs.writeFileSync(
+			path.join(tempDir, ".ompk", "skills", "initial-skill", "SKILL.md"),
+			`---
+name: initial-skill
+description: Present at session start.
+---
+
+# Initial Skill
+`,
+		);
+		originalHome = process.env.HOME;
+		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-sdk-reload-home-"));
+		process.env.HOME = tempHomeDir;
+	});
+
+	afterEach(
+		cleanupTempHome(() => ({
+			tempDir,
+			tempHomeDir,
+			originalHome,
+		})),
+	);
+
+	function writeSkill(name: string, description: string): void {
+		const dir = path.join(tempDir, ".ompk", "skills", name);
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, "SKILL.md"),
+			`---
+name: ${name}
+description: ${description}
+---
+
+# ${name}
+`,
+		);
+	}
+
+	it("picks up added and removed skills across reloadSkills()", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(tempDir),
+			modelRegistry: sharedModelRegistry,
+			settings: createIsolatedSkillsSettings(),
+		});
+
+		expect(session.skills.some((s: Skill) => s.name === "initial-skill")).toBe(true);
+
+		writeSkill("reloaded-skill", "Added after session creation.");
+		fs.rmSync(path.join(tempDir, ".ompk", "skills", "initial-skill"), { recursive: true, force: true });
+
+		// Mirror the /reload-plugins pipelines: capability cache must be dropped
+		// or the re-discovery below would read the stale cached skill set.
+		resetCapabilities();
+		const changed = await session.reloadSkills();
+
+		expect(changed).toBe(true);
+		expect(session.skills.some((s: Skill) => s.name === "reloaded-skill")).toBe(true);
+		expect(session.skills.some((s: Skill) => s.name === "initial-skill")).toBe(false);
+
+		// The stale-closure regression: the SDK prompt builder closed over the
+		// construction-time skills array, so the rebuilt prompt kept advertising
+		// removed skills and never mentioned new ones.
+		const promptText = session.systemPrompt.join("\n");
+		expect(promptText).toContain("reloaded-skill");
+		expect(promptText).not.toContain("initial-skill");
+
+		// Tool-facing resolution: the read tool resolves `skill://` through the
+		// ToolSession's live skills getter, not a construction-time snapshot.
+		const readTool = session.getToolByName("read");
+		if (!readTool) throw new Error("Expected read tool");
+		const readResult = await readTool.execute("reload-skill-read", {
+			path: "skill://reloaded-skill",
+		});
+		const readText = JSON.stringify(readResult);
+		expect(readText).toContain("reloaded-skill");
+	});
+	it("updates the process-global active-skills registry used by skill:// reads", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(tempDir),
+			modelRegistry: sharedModelRegistry,
+			settings: createIsolatedSkillsSettings(),
+		});
+
+		writeSkill("late-skill", "Only visible after reload.");
+		resetCapabilities();
+		await session.reloadSkills();
+
+		const active = getActiveSkills();
+		expect(active.some((s: Skill) => s.name === "late-skill")).toBe(true);
+	});
+
+	it("refuses to rediscover when options.skills was explicit", async () => {
+		const customSkill: Skill = {
+			name: "custom-skill",
+			description: "Caller-owned list",
+			filePath: "/fake/path/SKILL.md",
+			baseDir: "/fake/path",
+			source: "custom" as const,
+		};
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(tempDir),
+			modelRegistry: sharedModelRegistry,
+			skills: [customSkill],
+			settings: createIsolatedSkillsSettings(),
+		});
+
+		writeSkill("ignored-skill", "Must NOT be discovered.");
+		const changed = await session.reloadSkills();
+
+		expect(changed).toBe(false);
+		expect(session.skills).toEqual([customSkill]);
 	});
 });

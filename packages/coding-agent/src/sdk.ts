@@ -1476,16 +1476,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		preconnectModelHost(model.baseUrl);
 	}
 
-	let skills: Skill[];
+	// Mutable holder: `rebuildSystemPrompt` closes over this object (not the raw
+	// array) so a mid-session `reloadSkills()` is visible to the next prompt build.
+	const skillsState: { current: Skill[] } = { current: [] };
 	let skillWarnings: SkillWarning[];
 	if (options.skills !== undefined) {
-		skills = options.skills;
+		skillsState.current = options.skills;
 		skillWarnings = [];
 	} else {
 		const discovered = await (discoveredSkillsPromise ?? Promise.resolve({ skills: [], warnings: [] }));
-		skills = discovered.skills;
+		skillsState.current = discovered.skills;
 		skillWarnings = discovered.warnings;
 	}
+	const skills = (): Skill[] => skillsState.current;
 
 	// Discover rules and bucket them in one pass to avoid repeated scans over large rule sets.
 	const { ttsrManager, rulebookRules, alwaysApplyRules, allRules } = await logger.time(
@@ -1649,7 +1652,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			skipPythonPreflight: options.skipPythonPreflight,
 			contextFiles,
 			workspaceTree: resolvedWorkspaceTree,
-			skills,
+			// Getter, not a captured array: tool-facing `skill://` resolution reads
+			// `context.skills` and would otherwise keep the construction-time set
+			// after a mid-session reloadSkills().
+			get skills() {
+				return skillsState.current;
+			},
 			rules: allRules,
 			eventBus,
 			outputSchema: options.outputSchema,
@@ -1768,7 +1776,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// parent's ArtifactManager) so one lookup hits everything.
 		const getArtifactsDir = () => sessionManager.getArtifactsDir();
 		if (!options.parentTaskPrefix) {
-			setActiveSkills(skills);
+			setActiveSkills(skills());
 			// Include TTSR rules so `rule://<name>` can resolve them too. They are
 			// registered with the manager and bucketed out before rulebook/always,
 			// so without this a TTSR-only rule (e.g. a triggered builtin) is not
@@ -2477,7 +2485,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const defaultPrompt = await buildSystemPromptInternal({
 				cwd,
 				resolvedCustomPrompt: options.customSystemPrompt,
-				skills,
+				skills: skills(),
 				contextFiles,
 				tools: promptTools,
 				toolNames,
@@ -3032,8 +3040,22 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			slashCommands,
 			extensionRunner,
 			customCommands: customCommandsResult.commands,
-			skills,
+			skills: skills(),
 			skillWarnings,
+			reloadSkills:
+				options.skills === undefined
+					? async () =>
+							await logger.time("discoverSkills", discoverSkills, sessionManager.getCwd(), agentDir, {
+								...settings.getGroup("skills"),
+								disabledExtensions: settings.get("disabledExtensions") ?? [],
+							})
+					: undefined,
+			onSkillsChanged: next => {
+				skillsState.current = next;
+				if (!options.parentTaskPrefix) {
+					setActiveSkills(next);
+				}
+			},
 			skillsSettings: settings.getGroup("skills"),
 			moa: moaResolved.moa
 				? {

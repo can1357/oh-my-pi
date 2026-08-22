@@ -564,6 +564,14 @@ export interface AgentSessionConfig {
 	skills?: Skill[];
 	/** Skill loading warnings (already captured by SDK) */
 	skillWarnings?: SkillWarning[];
+	/**
+	 * Discovery closure used by `reloadSkills()`. Only provided when skills were
+	 * auto-discovered; callers that passed explicit `options.skills` intentionally
+	 * own that list and must not have it replaced by a disk re-scan.
+	 */
+	reloadSkills?: () => Promise<{ skills: Skill[]; warnings?: SkillWarning[] }>;
+	/** Invoked by `reloadSkills()` after `#skills` is replaced, so the SDK can refresh its prompt snapshot and the global active-skills registry. */
+	onSkillsChanged?: (skills: Skill[]) => void;
 	/** Custom commands (TypeScript slash commands) */
 	customCommands?: LoadedCustomCommand[];
 	skillsSettings?: SkillsSettings;
@@ -1429,6 +1437,10 @@ export class AgentSession {
 
 	#skills: Skill[];
 	#skillWarnings: SkillWarning[];
+	/** Re-discovers skills from disk for `reloadSkills()`; absent when the caller supplied explicit `options.skills`. */
+	#reloadSkillsDiscovery: (() => Promise<{ skills: Skill[]; warnings?: SkillWarning[] }>) | undefined;
+	/** Notifies the SDK layer so the prompt-closure snapshot and the process-global active-skills stay in sync. */
+	#onSkillsChanged: ((skills: Skill[]) => void) | undefined;
 
 	// Custom commands (TypeScript slash commands)
 	#customCommands: LoadedCustomCommand[] = [];
@@ -1761,6 +1773,8 @@ export class AgentSession {
 		this.#extensionRunner = config.extensionRunner;
 		this.#skills = config.skills ?? [];
 		this.#skillWarnings = config.skillWarnings ?? [];
+		this.#reloadSkillsDiscovery = config.reloadSkills;
+		this.#onSkillsChanged = config.onSkillsChanged;
 		this.#customCommands = config.customCommands ?? [];
 		this.#skillsSettings = config.skillsSettings;
 		this.#modelRegistry = config.modelRegistry;
@@ -7622,6 +7636,23 @@ export class AgentSession {
 		return this.#skillWarnings;
 	}
 
+	/**
+	 * Re-discover skills from disk and propagate the new set everywhere it is
+	 * read: `#skills`/`#skillWarnings` (prompt metadata + `/skill:*` commands),
+	 * the SDK's prompt-closure snapshot (via `onSkillsChanged`), and the
+	 * process-global active-skills registry that `skill://` reads resolve
+	 * against. Returns false when the session was constructed with explicit
+	 * `options.skills` — those are caller-owned and never re-discovered.
+	 */
+	async reloadSkills(): Promise<boolean> {
+		if (!this.#reloadSkillsDiscovery) return false;
+		const discovered = await this.#reloadSkillsDiscovery();
+		this.#skills = discovered.skills;
+		this.#skillWarnings = discovered.warnings ?? [];
+		this.#onSkillsChanged?.(discovered.skills);
+		await this.refreshBaseSystemPrompt();
+		return true;
+	}
 	getTodoPhases(): TodoPhase[] {
 		return this.#cloneTodoPhases(this.#todoPhases);
 	}

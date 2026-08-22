@@ -30,6 +30,7 @@ import {
 	createAcpMcpHostInteraction,
 } from "@pk-nerdsaver-ai/pi-coding-agent/modes/acp/acp-agent";
 import type { PlanModeState } from "@pk-nerdsaver-ai/pi-coding-agent/plan-mode/state";
+import { discoverSkills } from "@pk-nerdsaver-ai/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent } from "@pk-nerdsaver-ai/pi-coding-agent/session/agent-session";
 import { SILENT_ABORT_MARKER } from "@pk-nerdsaver-ai/pi-coding-agent/session/messages";
 import { SessionManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-manager";
@@ -131,6 +132,17 @@ class FakeAgentSession {
 	customMessages: Array<{ customType: string; content: string; details?: unknown }> = [];
 	skillsSettings = { enableSkillCommands: true };
 	skills: Array<{ name: string; description: string; filePath: string; baseDir: string; source: string }> = [];
+	/**
+	 * Mirrors the real AgentSession contract so `/reload-plugins` exercises the
+	 * same pipeline: re-discover from this session's cwd and replace `skills`.
+	 */
+	async reloadSkills(): Promise<boolean> {
+		const discovered = await discoverSkills(this.sessionManager.getCwd(), undefined, {
+			...this.settings.getGroup("skills"),
+		});
+		this.skills = discovered.skills;
+		return true;
+	}
 	planModeState: PlanModeState | undefined;
 	waitForIdleCalls = 0;
 	waitForIdleBlocker: (() => Promise<void>) | undefined;
@@ -1559,23 +1571,15 @@ describe("ACP agent", () => {
 	it("advertises ACP-safe builtins and skill commands", async () => {
 		const harness = await createHarness();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
-		const session = harness.findSession(created.sessionId)!;
-		const skillDir = path.join(harness.cwdA, ".skills", "sample");
+		const skillDir = path.join(harness.cwdA, ".ompk", "skills", "sample");
 		const skillPath = path.join(skillDir, "SKILL.md");
 		await fs.promises.mkdir(skillDir, { recursive: true });
-		await fs.promises.writeFile(skillPath, "---\ndescription: Sample skill\n---\n# Sample\nDo work.\n");
-		session.skills = [
-			{
-				name: "sample",
-				description: "Sample skill",
-				filePath: skillPath,
-				baseDir: skillDir,
-				source: "test",
-			},
-		];
+		await fs.promises.writeFile(skillPath, "---\nname: sample\ndescription: Sample skill\n---\n# Sample\nDo work.\n");
+		// No manual session.skills assignment here: `/reload-plugins` must pick the
+		// skill up through real re-discovery (capability reset → reloadSkills()).
 		await harness.agent.prompt({
 			sessionId: created.sessionId,
-			messageId: "00000000-0000-4000-8000-000000000004",
+
 			prompt: [{ type: "text", text: "/reload-plugins" }],
 		} as PromptRequest);
 

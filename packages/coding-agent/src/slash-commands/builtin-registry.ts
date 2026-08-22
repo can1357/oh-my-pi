@@ -5,6 +5,7 @@ import { resolveOAuthProvider } from "@pk-nerdsaver-ai/pi-ai/oauth";
 import * as requestDebug from "@pk-nerdsaver-ai/pi-ai/utils/request-debug";
 import { type AutocompleteItem, Markdown, Spacer } from "@pk-nerdsaver-ai/pi-tui";
 import { $which, APP_NAME, getProjectDir, prompt, setProjectDir } from "@pk-nerdsaver-ai/pi-utils";
+import { reset as resetCapabilities } from "../capability";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
 import { writeCollabLinkFile } from "../collab/link-file";
@@ -2762,6 +2763,10 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			// listClaudePluginRoots re-reads from disk on next access.
 			const projectPath = await resolveActiveProjectRegistryPath(runtime.ctx.sessionManager.getCwd());
 			clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
+			// Skill discovery goes through the capability loader — without this
+			// reset, reloadSkills() below would re-read the stale cached skill set.
+			resetCapabilities();
+			await runtime.ctx.session.reloadSkills();
 			await runtime.ctx.refreshSlashCommandState();
 			await runtime.ctx.session.refreshSshTool({ activateIfAvailable: true });
 			runtime.ctx.showStatus("Plugins reloaded.");
