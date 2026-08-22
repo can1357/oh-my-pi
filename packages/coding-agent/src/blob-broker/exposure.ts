@@ -296,6 +296,13 @@ function processExposure(kind: ExposureKind, baseUrl: string, proc: Bun.Subproce
 	};
 }
 
+/** A supervised tunnel exiting sooner than this after (re)spawn counts as a quick exit. */
+const PINGGY_QUICK_EXIT_WINDOW_MS = 5_000;
+const PINGGY_RESTART_BACKOFF_MS = 250;
+const PINGGY_RESTART_BACKOFF_MAX_MS = 5_000;
+/** Consecutive quick exits before supervision gives up instead of respawning. */
+const PINGGY_MAX_CONSECUTIVE_QUICK_EXITS = 5;
+
 /**
  * Keep an authenticated Pinggy tunnel behind its configured stable hostname.
  * Random-hostname modes deliberately return their child exit to the broker:
@@ -306,10 +313,29 @@ function restartingPinggyExposure(baseUrl: string, argv: string[], initialProc: 
 	let stopping = false;
 	proc.unref();
 	const exited = (async () => {
+		let spawnedAt = Date.now();
+		let quickExits = 0;
 		while (true) {
 			await proc.exited;
 			if (stopping) return;
+			// A persistently failing tunnel (for example rejected auth) can print
+			// its URL and exit immediately, which would otherwise hot-loop this
+			// supervisor: back off between respawns and give up after repeated
+			// quick exits. A run that survives the window earns a fresh budget.
+			if (Date.now() - spawnedAt < PINGGY_QUICK_EXIT_WINDOW_MS) {
+				quickExits += 1;
+				if (quickExits >= PINGGY_MAX_CONSECUTIVE_QUICK_EXITS) {
+					logger.warn("blob-broker: authenticated Pinggy tunnel keeps exiting right after startup; giving up");
+					return;
+				}
+				const backoff = Math.min(PINGGY_RESTART_BACKOFF_MS << (quickExits - 1), PINGGY_RESTART_BACKOFF_MAX_MS);
+				await Bun.sleep(backoff);
+				if (stopping) return;
+			} else {
+				quickExits = 0;
+			}
 			try {
+				spawnedAt = Date.now();
 				const restarted = await spawnUrlTunnel(argv, parsePinggyUrl);
 				if (stopping) {
 					killTunnelProcess(restarted.proc);
