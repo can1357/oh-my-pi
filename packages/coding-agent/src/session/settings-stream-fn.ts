@@ -19,6 +19,7 @@ import {
 import { type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { serverSideFallbackModels } from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
 import type { Encoding } from "@oh-my-pi/pi-natives";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import { type AnthropicSlowModeLanes, anthropicSlowModeLanes } from "./anthropic-slow-mode";
 
@@ -27,6 +28,7 @@ import {
 	cfgModelLoopGuardEnabled,
 	cfgOmitThinking,
 	cfgProvidersAnthropicServerSideFallback,
+	cfgProvidersAnthropicServerSideFallbackModels,
 	cfgProvidersAnthropicSlowMode,
 	cfgProvidersAntigravityEndpoint,
 	cfgProvidersCacheRetention,
@@ -45,6 +47,32 @@ import {
 export function resolveOpenAIWebsocketPreference(settings: Settings): boolean | undefined {
 	const setting = cfgProvidersOpenaiWebsockets.get(settings);
 	return setting === "on" ? true : setting === "off" ? false : undefined;
+}
+
+/** Anthropic `MessageCreateParams.fallbacks` accepts at most three entries. */
+const ANTHROPIC_MAX_FALLBACK_MODELS = 3;
+
+/**
+ * Clean a configured `providers.anthropic.serverSideFallbackModels` value into
+ * the wire chain. The registry guarantees an array (a non-array configured
+ * value falls back to the default), but not its element types: hand-edited
+ * YAML can supply non-string entries, which are dropped instead of throwing.
+ * The wire contract allows at most three entries
+ * (MessageCreateParams.fallbacks) and an overlong chain would be rejected by
+ * the API instead of falling back, so cap deliberately and loudly.
+ */
+function configuredServerSideFallbackModels(configured: readonly unknown[]): string[] {
+	const models = configured
+		.filter((id): id is string => typeof id === "string")
+		.map(id => id.trim())
+		.filter(id => id.length > 0);
+	if (models.length > ANTHROPIC_MAX_FALLBACK_MODELS) {
+		logger.warn("providers.anthropic.serverSideFallbackModels exceeds the wire limit; using the first three", {
+			configured: models.length,
+			limit: ANTHROPIC_MAX_FALLBACK_MODELS,
+		});
+	}
+	return models.slice(0, ANTHROPIC_MAX_FALLBACK_MODELS);
 }
 
 function timeoutSecondsToMs(value: number): number | undefined {
@@ -103,15 +131,22 @@ export function createSettingsAwareStreamFn(
 		const cacheRetention = cacheRetentionSetting === "auto" ? undefined : cacheRetentionSetting;
 		const streamFirstEventTimeoutMs = timeoutSecondsToMs(cfgProvidersStreamFirstEventTimeoutSeconds.get(settings));
 		const streamIdleTimeoutMs = timeoutSecondsToMs(cfgProvidersStreamIdleTimeoutSeconds.get(settings));
-		// Server-side fallback (opt-in): when the user enables it, inject the
-		// catalog-owned `fallbacks` chain (`server-side-fallback-models` axis,
-		// authored for Fable/Mythos on first-party Anthropic). The provider
-		// layer picks it up, sends the beta header, and honors the response
-		// signals. Models without a rule-assigned chain are untouched.
-		const serverSideFallbackChain =
+		// Server-side fallback (opt-in): when the user enables it AND the
+		// catalog assigns the model a chain (`server-side-fallback-models` axis,
+		// authored for Fable/Mythos on first-party Anthropic), inject `fallbacks`.
+		// A configured `providers.anthropic.serverSideFallbackModels` replaces the
+		// catalog chain, and an empty configured chain sends nothing even with the
+		// toggle on. The provider layer picks it up, sends the beta header, and
+		// honors the response signals. Models without a rule-assigned chain are
+		// untouched.
+		const catalogFallbackChain =
 			streamOptions?.fallbacks === undefined && cfgProvidersAnthropicServerSideFallback.get(settings)
 				? serverSideFallbackModels(model)
 				: [];
+		const serverSideFallbackChain =
+			catalogFallbackChain.length > 0 && cfgProvidersAnthropicServerSideFallbackModels.isConfigured(settings)
+				? configuredServerSideFallbackModels(cfgProvidersAnthropicServerSideFallbackModels.get(settings))
+				: catalogFallbackChain;
 		const fallbacks =
 			streamOptions?.fallbacks ??
 			(serverSideFallbackChain.length > 0 ? serverSideFallbackChain.map(id => ({ model: id })) : undefined);

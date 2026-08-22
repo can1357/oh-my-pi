@@ -32,6 +32,8 @@ const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait"];
+/** Mirrors the catalog's `server-side-fallback-models` chain for Fable/Mythos on first-party Anthropic. */
+const DEFAULT_ANTHROPIC_SERVER_SIDE_FALLBACK_MODELS: string[] = ["claude-opus-5"];
 
 // Power assertions: macOS IOKit, Linux login1/ScreenSaver, Windows execution state.
 export const cfgPowerSleepPrevention = register({
@@ -850,6 +852,19 @@ export const cfgProvidersAnthropicServerSideFallback = register({
 		label: "Anthropic Server-Side Fallback (Fable 5)",
 		description:
 			"When a Claude Fable 5 / Mythos 5 request is blocked by Anthropic's safety classifier, retry it on Claude Opus 5 server-side (Anthropic `server-side-fallback-2026-06-01` beta). Opt-in — leaving this off preserves the pre-fallback behavior for every request.",
+	},
+});
+
+export const cfgProvidersAnthropicServerSideFallbackModels = register({
+	id: "providers.anthropic.serverSideFallbackModels",
+	type: "array",
+	default: DEFAULT_ANTHROPIC_SERVER_SIDE_FALLBACK_MODELS,
+	ui: {
+		tab: "model",
+		group: "Retry & Fallback",
+		label: "Anthropic Server-Side Fallback Chain",
+		description:
+			'Ordered bare Anthropic model ids forwarded as the server-side `fallbacks` chain when Anthropic Server-Side Fallback is enabled, e.g. ["claude-opus-5", "claude-opus-4-8"]. These are API model ids, not provider/model selectors, and each must be in the requested model\'s allowed fallback models. Unset follows the catalog chain for the model (Claude Opus 5 for Fable/Mythos). An empty list sends no fallbacks even when the toggle is on; the API accepts at most three entries, so longer chains use the first three.',
 	},
 });
 
