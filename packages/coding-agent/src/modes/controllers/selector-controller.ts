@@ -86,6 +86,7 @@ import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
 import { getAssistantMessageLinkTargets } from "../utils/interactive-context-helpers";
+import { RevertTurnSelectorComponent } from "../components/revert-turn-selector";
 import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "../components/advisor-config";
 import { AgentHubOverlayComponent } from "../components/agent-hub";
 import { AgentsHubComponent } from "../components/agents-hub";
@@ -386,6 +387,35 @@ export class SelectorController {
 			this.ctx.ui.setFocus(overlay);
 			this.ctx.ui.requestRender();
 		})();
+	}
+
+	showRevertTurnSelector(): void {
+		const turns = this.ctx.session.getUserTurns?.() ?? [];
+		if (turns.length === 0) {
+			this.ctx.showError("No user turns to revert to");
+			return;
+		}
+		this.showSelector(done => {
+			const selector = new RevertTurnSelectorComponent(
+				turns,
+				entryId => {
+					done();
+					const result = this.ctx.session.userUndoTo(entryId);
+					if (result.ok) {
+						this.ctx.rebuildChatFromMessages();
+						this.ctx.showStatus(`Reverted — dropped ${result.droppedTurns} turn(s) (files untouched)`);
+					} else {
+						this.ctx.showError(result.error ?? "Revert failed");
+					}
+					this.ctx.ui.requestRender();
+				},
+				() => {
+					done();
+					this.ctx.ui.requestRender();
+				},
+			);
+			return { component: selector, focus: selector.getSelectList() };
+		});
 	}
 
 	showHistorySearch(): void {

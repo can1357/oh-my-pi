@@ -201,6 +201,105 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		},
 	},
 	{
+		name: "undo",
+		description: "Undo the last user turn(s) from context — files untouched (use git)",
+		usage: "[steps]",
+		acpInputHint: "[steps]",
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime =>
+			runtime.ctx.session.isStreaming ? "Undo: unavailable while streaming" : "Undo: drop last turn(s) from context",
+		handle: async (command, runtime) => {
+			const steps = Number.parseInt(command.args?.trim() ?? "1", 10);
+			const result = runtime.session.userUndo(Number.isFinite(steps) ? steps : 1);
+			await runtime.output(result.ok ? `Undid ${result.droppedTurns} turn(s).` : result.error ?? "Undo failed.");
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			runtime.ctx.editor.setText("");
+			const steps = Number.parseInt(command.args?.trim() ?? "1", 10);
+			const result = runtime.ctx.session.userUndo(Number.isFinite(steps) ? steps : 1);
+			if (result.ok) {
+				runtime.ctx.rebuildChatFromMessages();
+				runtime.ctx.showStatus(`Undid ${result.droppedTurns} turn(s) — context rewound (files untouched)`);
+			} else {
+				runtime.ctx.showError(result.error ?? "Undo failed");
+			}
+		},
+	},
+	{
+		name: "redo",
+		description: "Restore the turns dropped by the last /undo",
+		getTuiAutocompleteDescription: runtime =>
+			runtime.ctx.session.isStreaming ? "Redo: unavailable while streaming" : "Redo: restore undone turns",
+		handle: async (_command, runtime) => {
+			const result = runtime.session.userRedo();
+			await runtime.output(result.ok ? "Redone — undone turns restored." : result.error ?? "Redo failed.");
+			return commandConsumed();
+		},
+		handleTui: async (_command, runtime) => {
+			runtime.ctx.editor.setText("");
+			const result = runtime.ctx.session.userRedo();
+			if (result.ok) {
+				runtime.ctx.rebuildChatFromMessages();
+				runtime.ctx.showStatus("Redone — undone turns restored");
+			} else {
+				runtime.ctx.showError(result.error ?? "Redo failed");
+			}
+		},
+	},
+	{
+		name: "revert",
+		description: "Pick any earlier user turn and rewind the context to before it (files untouched)",
+		inlineHint: "[turn#]",
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime =>
+			runtime.ctx.session.isStreaming ? "Revert: unavailable while streaming" : "Revert: rewind to a chosen turn",
+		handle: async (command, runtime) => {
+			const turns = runtime.session.getUserTurns();
+			if (turns.length === 0) {
+				await runtime.output("No user turns to revert to.");
+				return commandConsumed();
+			}
+			const arg = command.args.trim();
+			if (!arg) {
+				const listing = turns
+					.map((turn, i) => `${i + 1}. ${turn.preview} (${turn.timestamp})`)
+					.join("\n");
+				await runtime.output(`User turns (oldest first):\n${listing}\nUse /revert <turn#>.`);
+				return commandConsumed();
+			}
+			const idx = Number.parseInt(arg, 10) - 1;
+			if (!Number.isInteger(idx) || idx < 0 || idx >= turns.length) {
+				await runtime.output(`Invalid turn number: ${arg}`);
+				return commandConsumed();
+			}
+			const result = runtime.session.userUndoTo(turns[idx]!.entryId);
+			await runtime.output(result.ok ? `Reverted — dropped ${result.droppedTurns} turn(s).` : result.error ?? "Revert failed.");
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			runtime.ctx.editor.setText("");
+			const arg = command.args.trim();
+			if (arg) {
+				const turns = runtime.ctx.session.getUserTurns();
+				const idx = Number.parseInt(arg, 10) - 1;
+				if (!Number.isInteger(idx) || idx < 0 || idx >= turns.length) {
+					runtime.ctx.showError(`Invalid turn number: ${arg}`);
+					return;
+				}
+				const result = runtime.ctx.session.userUndoTo(turns[idx]!.entryId);
+				if (result.ok) {
+					runtime.ctx.rebuildChatFromMessages();
+					runtime.ctx.showStatus(`Reverted — dropped ${result.droppedTurns} turn(s) (files untouched)`);
+				} else {
+					runtime.ctx.showError(result.error ?? "Revert failed");
+				}
+				return;
+			}
+			runtime.ctx.showRevertTurnSelector();
+		},
+	},
+	{
 		name: "clear",
 		icon: "eraser",
 		description: "Clear the conversation context in place, keeping the session",
