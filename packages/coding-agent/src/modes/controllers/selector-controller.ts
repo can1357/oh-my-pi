@@ -91,6 +91,7 @@ import {
 	setTerminalTitleStateEnabled,
 } from "../../utils/title-generator";
 import { getAssistantMessageLinkTargets } from "@oh-my-pi/pi-tui/prompt/interactive-context-helpers";
+import { RevertTurnSelectorComponent } from "../components/revert-turn-selector";
 import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { createAgentsHubDeps } from "../agents-hub-deps";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
@@ -476,6 +477,35 @@ export class SelectorController {
 			this.ctx.ui.setFocus(overlay);
 			this.ctx.ui.requestRender();
 		})();
+	}
+
+	showRevertTurnSelector(): void {
+		const turns = this.ctx.session.getUserTurns?.() ?? [];
+		if (turns.length === 0) {
+			this.ctx.showError("No user turns to revert to");
+			return;
+		}
+		this.showSelector(done => {
+			const selector = new RevertTurnSelectorComponent(
+				turns,
+				entryId => {
+					done();
+					const result = this.ctx.session.userUndoTo(entryId);
+					if (result.ok) {
+						this.ctx.rebuildChatFromMessages();
+						this.ctx.showStatus(`Reverted — dropped ${result.droppedTurns} turn(s) (files untouched)`);
+					} else {
+						this.ctx.showError(result.error ?? "Revert failed");
+					}
+					this.ctx.ui.requestRender();
+				},
+				() => {
+					done();
+					this.ctx.ui.requestRender();
+				},
+			);
+			return { component: selector, focus: selector.getSelectList() };
+		});
 	}
 
 	showHistorySearch(): void {
