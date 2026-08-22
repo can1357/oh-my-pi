@@ -8187,18 +8187,19 @@ export class AgentSession {
 				return `- ${firstLine.slice(0, 120)}`;
 			})
 			.join("\n");
-		// The in-context report stays GENERIC: quoting dropped prompts would
-		// leak their content straight back into the context the operator just
-		// removed. The prompt list lives in the branch summary (off-path,
-		// persisted for the operator, never sent to the model).
-		const report = `The operator rewound this session: dropped the last ${n} user turn(s). Treat the dropped turns as retracted; wait for the operator's next message.`;
+		// SILENT undo contract: state after /undo is indistinguishable in
+		// context from the dropped turns never having happened. No rendered
+		// summary, no undo-report message — the rewound context is
+		// self-coherent because /undo drops a TAIL (kept, earlier entries
+		// cannot reference dropped, later ones). Durability and /redo ride on
+		// the branch entry's details (kind/undoOf/droppedPrompts), which
+		// persist in the append-only journal but never render; the empty
+		// summary makes session-context.ts skip rendering (same pattern as
+		// DISCARDED_ENTRY_BRANCH_MARKER).
 		this.#bash.withBranchTransition(() => {
-			// The summary RENDERS INTO CONTEXT (session-context.ts turns
-			// branch_summary into a message), so it stays generic too; the
-			// dropped-prompt list lives in details, which never renders.
 			this.sessionManager.branchWithSummary(
 				anchorId,
-				`Operator /undo: dropped ${n} user turn(s) — retracted.`,
+				"",
 				{
 					kind: "user-undo",
 					undoOf: previousLeafId,
@@ -8208,13 +8209,6 @@ export class AgentSession {
 				},
 			);
 		});
-		this.sessionManager.appendCustomMessageEntry(
-			"undo-report",
-			report,
-			false,
-			{ kind: "user-undo", steps: n },
-			"agent",
-		);
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#advisors.resetSessionState({ preserveCost: true });
