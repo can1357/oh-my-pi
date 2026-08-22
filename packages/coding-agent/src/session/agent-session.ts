@@ -346,7 +346,7 @@ import {
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
-import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
+import type { BranchSummaryEntry, NewSessionOptions, SessionEntry, SessionMessageEntry } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
 import {
 	COMPACTION_CHECK_NONE,
@@ -8109,6 +8109,157 @@ export class AgentSession {
 		this.#checkpointState = undefined;
 		this.#pendingRewindReport = undefined;
 	}
+
+	/** Operator-facing context rollback: `/undo [steps]`. */
+	userUndo(steps = 1): { ok: boolean; error?: string; droppedTurns?: number; rewoundTo?: string } {
+		if (this.isStreaming) {
+			return { ok: false, error: "Session is streaming — abort or wait before /undo." };
+		}
+		const entries = this.sessionManager.getBranch();
+		const userIdx = entries.reduce<number[]>((acc, entry, i) => {
+			if (entry.type === "message" && (entry as SessionMessageEntry).message.role === "user") acc.push(i);
+			return acc;
+		}, []);
+		if (userIdx.length === 0) {
+			return { ok: false, error: "No user turns to undo." };
+		}
+		const n = Math.max(1, Math.min(Math.floor(steps) || 1, userIdx.length));
+		return this.#rewindUserTurnsBefore(entries, userIdx[userIdx.length - n]!, n);
+	}
+
+	/** Active-path user turns (oldest first), for the `/revert` picker. */
+	getUserTurns(limit = 50): Array<{ entryId: string; timestamp: string; preview: string }> {
+		return this.sessionManager
+			.getBranch()
+			.filter((entry): entry is SessionMessageEntry => entry.type === "message" && entry.message.role === "user")
+			.slice(-limit)
+			.map(entry => {
+				const content = entry.message.content;
+				const text = typeof content === "string"
+					? content
+					: content.filter(part => part.type === "text").map(part => part.text).join(" ");
+				const firstLine = text.split("\n").find(line => line.trim().length > 0) ?? "(empty)";
+				return { entryId: entry.id, timestamp: entry.timestamp, preview: firstLine.slice(0, 120) };
+			});
+	}
+
+	/** `/revert <entryId>`: rewind to before an arbitrary earlier user turn. */
+	userUndoTo(entryId: string): { ok: boolean; error?: string; droppedTurns?: number } {
+		if (this.isStreaming) {
+			return { ok: false, error: "Session is streaming — abort or wait before /revert." };
+		}
+		const entries = this.sessionManager.getBranch();
+		const idx = entries.findIndex(
+			entry =>
+				entry.id === entryId &&
+				entry.type === "message" &&
+				(entry as SessionMessageEntry).message.role === "user",
+		);
+		if (idx === -1) {
+			return { ok: false, error: "Turn not found on the active path." };
+		}
+		let turns = 0;
+		for (let i = idx; i < entries.length; i++) {
+			const entry = entries[i]!;
+			if (entry.type === "message" && (entry as SessionMessageEntry).message.role === "user") turns++;
+		}
+		return this.#rewindUserTurnsBefore(entries, idx, turns);
+	}
+
+	/** Shared `/undo`|`/revert` core: branch off just before `entries[userTurnIdx]`. */
+	#rewindUserTurnsBefore(
+		entries: SessionEntry[],
+		userTurnIdx: number,
+		n: number,
+	): { ok: boolean; error?: string; droppedTurns?: number; rewoundTo?: string } {
+		const target = entries[userTurnIdx] as SessionMessageEntry;
+		const anchorId = entries[userTurnIdx - 1]?.id ?? null;
+		const previousLeafId = this.sessionManager.getLeafId();
+		const droppedPrompts = entries
+			.slice(userTurnIdx)
+			.filter((entry): entry is SessionMessageEntry => entry.type === "message" && entry.message.role === "user")
+			.map(entry => {
+				const content = entry.message.content;
+				const text = typeof content === "string"
+					? content
+					: content.filter(part => part.type === "text").map(part => part.text).join(" ");
+				const firstLine = text.split("\n").find(line => line.trim().length > 0) ?? "(empty)";
+				return `- ${firstLine.slice(0, 120)}`;
+			})
+			.join("\n");
+		// The in-context report stays GENERIC: quoting dropped prompts would
+		// leak their content straight back into the context the operator just
+		// removed. The prompt list lives in the branch summary (off-path,
+		// persisted for the operator, never sent to the model).
+		const report = `The operator rewound this session: dropped the last ${n} user turn(s). Treat the dropped turns as retracted; wait for the operator's next message.`;
+		this.#bash.withBranchTransition(() => {
+			// The summary RENDERS INTO CONTEXT (session-context.ts turns
+			// branch_summary into a message), so it stays generic too; the
+			// dropped-prompt list lives in details, which never renders.
+			this.sessionManager.branchWithSummary(
+				anchorId,
+				`Operator /undo: dropped ${n} user turn(s) — retracted.`,
+				{
+					kind: "user-undo",
+					undoOf: previousLeafId,
+					steps: n,
+					droppedPrompts,
+					rewoundAt: new Date().toISOString(),
+				},
+			);
+		});
+		this.sessionManager.appendCustomMessageEntry(
+			"undo-report",
+			report,
+			false,
+			{ kind: "user-undo", steps: n },
+			"agent",
+		);
+		const sessionContext = this.buildDisplaySessionContext();
+		this.agent.replaceMessages(sessionContext.messages);
+		this.#advisors.resetSessionState({ preserveCost: true });
+		this.#todo.syncFromBranch();
+		this.#closeCodexProviderSessionsForHistoryRewrite();
+		return { ok: true, droppedTurns: n, rewoundTo: target.timestamp };
+	}
+
+	/**
+	 * `/redo`: reattach the turns dropped by the most recent `/undo` (located
+	 * via the active path's user-undo branch marker). Turns appended after that
+	 * /undo are preserved as their own off-branch path.
+	 */
+	userRedo(): { ok: boolean; error?: string } {
+		if (this.isStreaming) {
+			return { ok: false, error: "Session is streaming — abort or wait before /redo." };
+		}
+		const entries = this.sessionManager.getBranch();
+		let lastBranch: BranchSummaryEntry | undefined;
+		for (let i = entries.length - 1; i >= 0; i--) {
+			if (entries[i]!.type === "branch_summary") {
+				lastBranch = entries[i] as BranchSummaryEntry;
+				break;
+			}
+		}
+		const details = lastBranch?.details as { kind?: string; undoOf?: string | null } | undefined;
+		if (details?.kind !== "user-undo" || !details.undoOf) {
+			return { ok: false, error: "No /undo to redo (last branch change was not a /undo, or turns were appended since)." };
+		}
+		const tipId = details.undoOf;
+		this.#bash.withBranchTransition(() => {
+			this.sessionManager.branchWithSummary(
+				tipId,
+				"Operator /redo: restored the turns dropped by the preceding /undo.",
+				{ kind: "user-redo", redoOf: lastBranch!.id },
+			);
+		});
+		const sessionContext = this.buildDisplaySessionContext();
+		this.agent.replaceMessages(sessionContext.messages);
+		this.#advisors.resetSessionState({ preserveCost: true });
+		this.#todo.syncFromBranch();
+		this.#closeCodexProviderSessionsForHistoryRewrite();
+		return { ok: true };
+	}
+
 	/** Plan-mode decision affordances: `ask`, or plan approval via `write xd://propose`. */
 	#isPlanDecisionTool(toolCall: { name: string; arguments?: Record<string, unknown> }): boolean {
 		return toolCall.name === "ask" || isProposeToolCall(toolCall);
