@@ -11,6 +11,7 @@ export * from "./provider-models";
 export * from "./types";
 export * from "./utils";
 export * from "./variant-collapse";
+export * from "./wire/alibaba-token-plan";
 export * from "./wire/codex";
 export * from "./wire/coreweave";
 export * from "./wire/gemini-headers";

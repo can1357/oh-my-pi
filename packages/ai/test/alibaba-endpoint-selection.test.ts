@@ -187,6 +187,26 @@ describe("alibaba-coding-plan endpoint selection", () => {
 
 		await expect(loginAlibabaCodingPlan(options)).rejects.toThrow("Login cancelled");
 	});
+	it("appends Coding Plan key hint when validation returns 401", async () => {
+		const { ApiKeyRequiredError } = await import("../src/error");
+		validateSpy.mockRejectedValue(
+			new ApiKeyRequiredError(
+				'Alibaba Coding Plan API key validation failed (401): {"error":{"code":"invalid_api_key"}}',
+			),
+		);
+
+		const options: OAuthController = {
+			onAuth: () => {},
+			onProgress: () => {},
+			onPrompt: async prompt => {
+				if (prompt.message.includes("Select Alibaba")) return "1";
+				if (prompt.message.includes("Paste your")) return "sk-wrong";
+				return "";
+			},
+		};
+
+		await expect(loginAlibabaCodingPlan(options)).rejects.toThrow(/sk-sp-/);
+	});
 });
 
 describe("alibaba-coding-plan JSON apiKey", () => {

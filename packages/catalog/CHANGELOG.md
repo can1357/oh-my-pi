@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `alibaba-token-plan` provider catalog (QwenCloud Token Plan) with a curated static model seed aligned to the official Personal Edition "Supported models" table — `qwen3.8-max`, `qwen3.8-max-preview`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-flash`, `glm-5.2`, `deepseek-v4-pro`, `deepseek-v4-pro-0813`, and `deepseek-v4-flash-0731` — with region-locked discovery honoring the credential base URL, generation-time seeding plus name pinning, and a non-chat prefix filter for the multimodal (image/video/audio) APIs.
+- Added `deepseek-v4-pro-0813` to the `alibaba-coding-plan` catalog seed with OpenAI-compatible completions and reasoning support.
+
 ## [16.4.5] - 2026-08-21
 
 ### Fixed

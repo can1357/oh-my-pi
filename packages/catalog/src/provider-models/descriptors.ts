@@ -11,6 +11,7 @@ import { ollamaCloudModelManagerOptions } from "./ollama";
 import {
 	aimlApiModelManagerOptions,
 	alibabaCodingPlanModelManagerOptions,
+	alibabaTokenPlanModelManagerOptions,
 	anthropicModelManagerOptions,
 	cerebrasModelManagerOptions,
 	clineModelManagerOptions,
@@ -74,6 +75,14 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["ALIBABA_CODING_PLAN_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => alibabaCodingPlanModelManagerOptions(config),
 		catalogDiscovery: { label: "Alibaba Coding Plan" },
+	},
+	{
+		id: "alibaba-token-plan",
+		defaultModel: "qwen3.7-plus",
+		envVars: ["ALIBABA_TOKEN_PLAN_API_KEY", "BAILIAN_TOKEN_PLAN_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => alibabaTokenPlanModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "QwenCloud Token Plan" },
 	},
 	{
 		id: "amazon-bedrock",

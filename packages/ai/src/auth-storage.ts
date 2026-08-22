@@ -10,6 +10,7 @@
 import { Database, type Statement } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { parseAlibabaTokenPlanCredential } from "@pk-nerdsaver-ai/pi-catalog/wire/alibaba-token-plan";
 import { getAgentDbPath, logger } from "@pk-nerdsaver-ai/pi-utils";
 import type { ApiKeyResolver } from "./auth-retry";
 import * as AIError from "./error";
@@ -35,6 +36,7 @@ import type {
 	UsageReport,
 } from "./usage";
 import { resolveUsedFraction } from "./usage";
+import { alibabaTokenPlanRankingStrategy, alibabaTokenPlanUsageProvider } from "./usage/alibaba-token-plan";
 import { claudeRankingStrategy, claudeUsageProvider } from "./usage/claude";
 import { googleGeminiCliUsageProvider } from "./usage/gemini";
 import { githubCopilotUsageProvider } from "./usage/github-copilot";
@@ -494,6 +496,7 @@ async function defaultConfigValueResolver(config: string): Promise<string | unde
 // ─────────────────────────────────────────────────────────────────────────────
 
 const DEFAULT_USAGE_PROVIDERS: UsageProvider[] = [
+	alibabaTokenPlanUsageProvider,
 	openaiCodexUsageProvider,
 	kimiUsageProvider,
 	antigravityUsageProvider,
@@ -758,6 +761,7 @@ function resolveDefaultUsageProvider(provider: Provider): UsageProvider | undefi
 }
 
 const DEFAULT_RANKING_STRATEGIES = new Map<Provider, CredentialRankingStrategy>([
+	["alibaba-token-plan", alibabaTokenPlanRankingStrategy],
 	["openai-codex", codexRankingStrategy],
 	["anthropic", claudeRankingStrategy],
 	["google-antigravity", antigravityRankingStrategy],
@@ -4661,7 +4665,14 @@ function matchesReplacementCredential(
 ): boolean {
 	if (!existing || existing.type !== incoming.type) return false;
 	if (incoming.type === "api_key") {
-		return existing.type === "api_key" && existing.key === incoming.key;
+		if (existing.type !== "api_key") return false;
+		if (existing.key === incoming.key) return true;
+		if (provider !== "alibaba-token-plan") return false;
+		// Token Plan logins re-store the same token with a refreshed optional
+		// quota cookie; replace the row instead of appending a duplicate.
+		const existingToken = parseAlibabaTokenPlanCredential(existing.key)?.token;
+		const incomingToken = parseAlibabaTokenPlanCredential(incoming.key)?.token;
+		return existingToken !== undefined && existingToken === incomingToken;
 	}
 	const incomingIdentityKey = resolveCredentialIdentityKey(provider, incoming);
 	return incomingIdentityKey !== null && incomingIdentityKey === existingIdentityKey;

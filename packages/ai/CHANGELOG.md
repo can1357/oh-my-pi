@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the native QwenCloud Token Plan provider (`alibaba-token-plan`, `/login alibaba-token-plan`) with region-aware login (International Singapore / China Beijing / custom), `ALIBABA_TOKEN_PLAN_API_KEY` / `BAILIAN_TOKEN_PLAN_API_KEY` env support, dedicated `sk-sp-…` credential parsing that never falls back to the generic `OPENAI_API_KEY`, optional console-cookie quota reporting, and region-aware inference/discovery routing.
+
+### Fixed
+
+- Clarified Alibaba Coding Plan login copy (`sk-sp-…` exclusive key) and appended an actionable hint when validation returns `401 invalid_api_key`, which usually means a general Model Studio/`Token Plan` key or the wrong region was used against the Coding Plan endpoint.
+
 ## [16.4.5] - 2026-08-21
 
 ### Fixed

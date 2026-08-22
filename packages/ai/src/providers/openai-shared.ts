@@ -13,6 +13,7 @@ import type {
 	ResolvedOpenAISharedCompat,
 	VercelGatewayRouting,
 } from "@pk-nerdsaver-ai/pi-catalog/types";
+import { parseAlibabaTokenPlanCredential } from "@pk-nerdsaver-ai/pi-catalog/wire/alibaba-token-plan";
 import {
 	COREWEAVE_PROJECT_HEADER,
 	coreWeaveProjectHeaders,
@@ -228,6 +229,19 @@ export function resolveOpenAIRequestSetup(
 		Object.assign(headers, copilot.headers);
 		copilotPremiumRequests = copilot.premiumRequests;
 		baseUrl = resolveGitHubCopilotBaseUrl(model.baseUrl, rawApiKey) ?? model.baseUrl;
+	}
+
+	if (model.provider === "alibaba-token-plan") {
+		// Require an explicitly resolved Token Plan credential. The generic
+		// `$env.OPENAI_API_KEY` fallback above matches the broad `sk-*` token
+		// grammar and would otherwise be sent to QwenCloud as bearer material.
+		if (!options.apiKey) {
+			throw new AIError.MissingApiKeyError("alibaba-token-plan");
+		}
+		const credential = parseAlibabaTokenPlanCredential(rawApiKey);
+		if (!credential) throw new AIError.ConfigurationError("Invalid QwenCloud Token Plan credential");
+		apiKey = credential.token;
+		if (credential.baseUrl) baseUrl = credential.baseUrl;
 	}
 
 	if (options.alibabaCodingPlanAuth && model.provider === "alibaba-coding-plan") {

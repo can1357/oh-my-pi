@@ -184,3 +184,60 @@ describe("AuthStorage api-key login upsert", () => {
 		expect(await authStorage.getApiKey("deepseek", "session-deepseek-relogin")).toBe("same-deepseek-key");
 	});
 });
+describe("alibaba-token-plan credential cookie refresh", () => {
+	let tempDir = "";
+	let dbPath = "";
+	let store: SqliteAuthCredentialStore | null = null;
+	let authStorage: AuthStorage | null = null;
+
+	beforeEach(async () => {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-auth-token-plan-"));
+		dbPath = path.join(tempDir, "agent.db");
+		store = await SqliteAuthCredentialStore.open(dbPath);
+		authStorage = new AuthStorage(store);
+	});
+
+	afterEach(async () => {
+		store?.close();
+		store = null;
+		authStorage = null;
+		dbPath = "";
+		if (tempDir) {
+			await removeWithRetries(tempDir);
+			tempDir = "";
+		}
+	});
+
+	it("re-uploading the same Token Plan key with a fresh cookie replaces the row", async () => {
+		if (!store || !authStorage || !dbPath) throw new Error("test setup failed");
+		const { serializeAlibabaTokenPlanCredential } = await import(
+			"@pk-nerdsaver-ai/pi-catalog/wire/alibaba-token-plan"
+		);
+
+		const firstToken = "sk-sp-token-plan";
+		authStorage.upsertCredential("alibaba-token-plan", {
+			type: "api_key",
+			key: serializeAlibabaTokenPlanCredential(firstToken, "session=old"),
+		});
+		authStorage.upsertCredential("alibaba-token-plan", {
+			type: "api_key",
+			key: serializeAlibabaTokenPlanCredential(firstToken, "session=fresh"),
+		});
+		authStorage.upsertCredential("alibaba-token-plan", {
+			type: "api_key",
+			key: serializeAlibabaTokenPlanCredential("sk-sp-other", "session=second"),
+		});
+
+		expect(countCredentialRows(dbPath, "alibaba-token-plan")).toBe(2);
+		expect(store.listAuthCredentials("alibaba-token-plan").map(entry => entry.credential)).toEqual([
+			{
+				type: "api_key",
+				key: serializeAlibabaTokenPlanCredential(firstToken, "session=fresh"),
+			},
+			{
+				type: "api_key",
+				key: serializeAlibabaTokenPlanCredential("sk-sp-other", "session=second"),
+			},
+		]);
+	});
+});

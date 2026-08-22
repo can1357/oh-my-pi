@@ -10,6 +10,7 @@ import type { ModelManagerOptions } from "../model-manager";
 import { getBundledModels } from "../models";
 import type { Api, FetchImpl, Model, ModelSpec, OpenAICompat, Provider, ThinkingConfig } from "../types";
 import { isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
+import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
 import { coreWeaveProjectHeaders } from "../wire/coreweave";
 import {
 	COPILOT_API_HEADERS,
@@ -2390,6 +2391,28 @@ export interface AlibabaCodingPlanModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
+export const ALIBABA_CODING_PLAN_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: "deepseek-v4-pro-0813",
+		name: "DeepSeek V4 Pro (0813)",
+		api: "openai-completions",
+		provider: "alibaba-coding-plan",
+		baseUrl: "https://coding-intl.dashscope.aliyuncs.com/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 384_000,
+		thinking: {
+			mode: "effort",
+			efforts: [Effort.High, Effort.XHigh],
+		},
+		compat: {
+			supportsDeveloperRole: false,
+		},
+	},
+];
+
 export function alibabaCodingPlanModelManagerOptions(
 	config?: AlibabaCodingPlanModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
@@ -2410,6 +2433,249 @@ export function alibabaCodingPlanModelManagerOptions(
 				},
 				fetch: config?.fetch,
 			}),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Alibaba Token Plan
+// ---------------------------------------------------------------------------
+
+export { ALIBABA_TOKEN_PLAN_BASE_URL };
+
+const ALIBABA_TOKEN_PLAN_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
+const ALIBABA_TOKEN_PLAN_COMPAT: OpenAICompat = {
+	supportsDeveloperRole: false,
+};
+const ALIBABA_TOKEN_PLAN_REASONING: ThinkingConfig = {
+	mode: "effort",
+	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+};
+
+export const ALIBABA_TOKEN_PLAN_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: "qwen3.8-max",
+		name: "Qwen3.8 Max",
+		api: "openai-completions",
+		provider: "alibaba-token-plan",
+		baseUrl: ALIBABA_TOKEN_PLAN_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: ALIBABA_TOKEN_PLAN_COST,
+		contextWindow: 1_000_000,
+		maxTokens: 131_072,
+		thinking: {
+			mode: "effort",
+			efforts: [Effort.Low, Effort.High, Effort.XHigh],
+			requiresEffort: true,
+		},
+		compat: {
+			...ALIBABA_TOKEN_PLAN_COMPAT,
+			supportsReasoningEffort: true,
+		},
+	},
+	{
+		id: "qwen3.8-max-preview",
+		name: "Qwen3.8 Max Preview",
+		api: "openai-completions",
+		provider: "alibaba-token-plan",
+		baseUrl: ALIBABA_TOKEN_PLAN_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: ALIBABA_TOKEN_PLAN_COST,
+		contextWindow: 983_616,
+		maxTokens: 131_072,
+		thinking: {
+			mode: "effort",
+			efforts: [Effort.Low, Effort.High, Effort.XHigh],
+			requiresEffort: true,
+		},
+		compat: {
+			...ALIBABA_TOKEN_PLAN_COMPAT,
+			supportsReasoningEffort: true,
+		},
+	},
+	{
+		id: "qwen3.7-max",
+		name: "Qwen3.7 Max",
+		api: "openai-completions",
+		provider: "alibaba-token-plan",
+		baseUrl: ALIBABA_TOKEN_PLAN_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: ALIBABA_TOKEN_PLAN_COST,
+		contextWindow: 1_000_000,
+		maxTokens: 65_536,
+		thinking: ALIBABA_TOKEN_PLAN_REASONING,
+		compat: ALIBABA_TOKEN_PLAN_COMPAT,
+	},
+	{
+		id: "qwen3.7-plus",
+		name: "Qwen3.7 Plus",
+		api: "openai-completions",
+		provider: "alibaba-token-plan",
+		baseUrl: ALIBABA_TOKEN_PLAN_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: ALIBABA_TOKEN_PLAN_COST,
+		contextWindow: 1_000_000,
+		maxTokens: 64_000,
+		thinking: ALIBABA_TOKEN_PLAN_REASONING,
+		compat: ALIBABA_TOKEN_PLAN_COMPAT,
+	},
+	{
+		id: "qwen3.6-flash",
+		name: "Qwen3.6 Flash",
+		api: "openai-completions",
+		provider: "alibaba-token-plan",
+		baseUrl: ALIBABA_TOKEN_PLAN_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: ALIBABA_TOKEN_PLAN_COST,
+		contextWindow: 1_000_000,
+		maxTokens: 65_536,
+		thinking: ALIBABA_TOKEN_PLAN_REASONING,
+		compat: ALIBABA_TOKEN_PLAN_COMPAT,
+	},
+	{
+		id: "glm-5.2",
+		name: "GLM-5.2",
+		api: "openai-completions",
+		provider: "alibaba-token-plan",
+		baseUrl: ALIBABA_TOKEN_PLAN_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: ALIBABA_TOKEN_PLAN_COST,
+		contextWindow: 1_000_000,
+		maxTokens: 131_072,
+		thinking: {
+			mode: "effort",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+		},
+		compat: ALIBABA_TOKEN_PLAN_COMPAT,
+	},
+	{
+		id: "deepseek-v4-pro",
+		name: "DeepSeek V4 Pro",
+		api: "openai-completions",
+		provider: "alibaba-token-plan",
+		baseUrl: ALIBABA_TOKEN_PLAN_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: ALIBABA_TOKEN_PLAN_COST,
+		contextWindow: 1_000_000,
+		maxTokens: 384_000,
+		thinking: {
+			mode: "effort",
+			efforts: [Effort.High, Effort.XHigh],
+		},
+		compat: ALIBABA_TOKEN_PLAN_COMPAT,
+	},
+	{
+		id: "deepseek-v4-pro-0813",
+		name: "DeepSeek V4 Pro (0813)",
+		api: "openai-completions",
+		provider: "alibaba-token-plan",
+		baseUrl: ALIBABA_TOKEN_PLAN_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: ALIBABA_TOKEN_PLAN_COST,
+		contextWindow: 1_000_000,
+		maxTokens: 384_000,
+		thinking: {
+			mode: "effort",
+			efforts: [Effort.High, Effort.XHigh],
+		},
+		compat: ALIBABA_TOKEN_PLAN_COMPAT,
+	},
+	{
+		id: "deepseek-v4-flash-0731",
+		name: "DeepSeek V4 Flash (0731)",
+		api: "openai-completions",
+		provider: "alibaba-token-plan",
+		baseUrl: ALIBABA_TOKEN_PLAN_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: ALIBABA_TOKEN_PLAN_COST,
+		contextWindow: 1_000_000,
+		maxTokens: 65_536,
+		thinking: {
+			mode: "effort",
+			efforts: [Effort.High, Effort.XHigh],
+		},
+		compat: ALIBABA_TOKEN_PLAN_COMPAT,
+	},
+];
+
+const ALIBABA_TOKEN_PLAN_NON_CHAT_MODEL_PREFIXES = [
+	"fun-asr",
+	"happyhorse-",
+	"qwen-audio-",
+	"qwen-image-",
+	"text-embedding-",
+	"wan2.7-",
+] as const;
+
+function isAlibabaTokenPlanChatModelId(id: string): boolean {
+	const normalized = id.trim().toLowerCase();
+	return (
+		normalized.length > 0 && !ALIBABA_TOKEN_PLAN_NON_CHAT_MODEL_PREFIXES.some(prefix => normalized.startsWith(prefix))
+	);
+}
+
+export interface AlibabaTokenPlanModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function alibabaTokenPlanModelManagerOptions(
+	config?: AlibabaTokenPlanModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const credential = config?.apiKey ? parseAlibabaTokenPlanCredential(config.apiKey.trim()) : undefined;
+	const apiKey = credential?.token;
+	// A region-locked credential (China/custom) dictates the discovery endpoint:
+	// its key only authenticates against its own region, so fetching /models from
+	// any other base URL would 401 (#6682).
+	const baseUrl = credential?.baseUrl ?? config?.baseUrl ?? ALIBABA_TOKEN_PLAN_BASE_URL;
+	return {
+		providerId: "alibaba-token-plan",
+		dynamicModelsAuthoritative: true,
+		staticModels: ALIBABA_TOKEN_PLAN_STATIC_MODELS,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "alibaba-token-plan",
+					baseUrl,
+					apiKey,
+					filterModel: (_entry, model) => isAlibabaTokenPlanChatModelId(model.id),
+					mapModel: (_entry, defaults) => {
+						const reference = ALIBABA_TOKEN_PLAN_STATIC_MODELS.find(model => model.id === defaults.id);
+						if (reference) {
+							return {
+								...reference,
+								id: defaults.id,
+								api: defaults.api,
+								provider: defaults.provider,
+								baseUrl: defaults.baseUrl,
+							};
+						}
+						// DeepSeek V4 family models discovered dynamically need reasoning config
+						if (defaults.id.startsWith("deepseek-v4")) {
+							return {
+								...defaults,
+								reasoning: true,
+								thinking: {
+									mode: "effort" as const,
+									efforts: [Effort.High, Effort.XHigh],
+								},
+							};
+						}
+						return defaults;
+					},
+					fetch: config?.fetch,
+				}),
+		}),
 	};
 }
 

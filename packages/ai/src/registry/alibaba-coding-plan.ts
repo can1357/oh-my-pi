@@ -8,6 +8,8 @@ const CHINA_AUTH_URL = "https://dashscope.console.aliyun.com/";
 const DEFAULT_API_BASE_URL = "https://coding-intl.dashscope.aliyuncs.com/v1";
 const CHINA_API_BASE_URL = "https://coding.dashscope.aliyuncs.com/v1";
 const VALIDATION_MODEL = "qwen3.5-plus";
+const CODING_PLAN_KEY_HINT =
+	"Use the Coding Plan exclusive API key (starts with sk-sp-), not a general Model Studio sk- key or a Token Plan key. Match China vs International to the key's region, and confirm the Coding Plan subscription is active.";
 
 export async function loginAlibabaCodingPlan(options: OAuthController): Promise<OAuthCredentials> {
 	if (!options.onPrompt) {
@@ -32,7 +34,8 @@ export async function loginAlibabaCodingPlan(options: OAuthController): Promise<
 	if (choice === "2") {
 		baseUrl = CHINA_API_BASE_URL;
 		authUrl = CHINA_AUTH_URL;
-		instructions = "Copy your API key from the Alibaba Cloud DashScope console (China mainland)";
+		instructions =
+			"Copy your Coding Plan exclusive API key (sk-sp-...) from the China mainland Coding Plan page — not a general Model Studio sk- key";
 	} else if (choice === "3") {
 		const customUrl = await options.onPrompt({
 			message: "Enter custom base URL",
@@ -44,11 +47,12 @@ export async function loginAlibabaCodingPlan(options: OAuthController): Promise<
 		}
 		baseUrl = trimmedUrl;
 		authUrl = DEFAULT_AUTH_URL;
-		instructions = "Copy your API key from the Alibaba Cloud DashScope console";
+		instructions = "Copy your Coding Plan exclusive API key (sk-sp-...) for the custom endpoint";
 	} else {
 		baseUrl = DEFAULT_API_BASE_URL;
 		authUrl = DEFAULT_AUTH_URL;
-		instructions = "Copy your API key from the Alibaba Cloud DashScope console (International)";
+		instructions =
+			"Copy your Coding Plan exclusive API key (sk-sp-...) from the International Coding Plan page — not a general Model Studio sk- key";
 	}
 
 	options.onAuth?.({
@@ -58,7 +62,7 @@ export async function loginAlibabaCodingPlan(options: OAuthController): Promise<
 
 	const apiKey = await options.onPrompt({
 		message: "Paste your Alibaba Coding Plan API key",
-		placeholder: "sk-...",
+		placeholder: "sk-sp-...",
 	});
 
 	if (options.signal?.aborted) {
@@ -71,13 +75,20 @@ export async function loginAlibabaCodingPlan(options: OAuthController): Promise<
 	}
 
 	options.onProgress?.("Validating API key...");
-	await apiKeyValidation.validateOpenAICompatibleApiKey({
-		provider: "Alibaba Coding Plan",
-		apiKey: trimmed,
-		baseUrl,
-		model: VALIDATION_MODEL,
-		signal: options.signal,
-	});
+	try {
+		await apiKeyValidation.validateOpenAICompatibleApiKey({
+			provider: "Alibaba Coding Plan",
+			apiKey: trimmed,
+			baseUrl,
+			model: VALIDATION_MODEL,
+			signal: options.signal,
+		});
+	} catch (error) {
+		if (error instanceof AIError.ApiKeyRequiredError && /\(401\)/.test(error.message)) {
+			throw new AIError.ApiKeyRequiredError(`${error.message}\n${CODING_PLAN_KEY_HINT}`);
+		}
+		throw error;
+	}
 
 	return {
 		access: trimmed,
