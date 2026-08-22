@@ -233,6 +233,14 @@ describe("startExposure tunnel adapters", () => {
 		expect(fs.readFileSync(invocation.runsFile, "utf8")).toBe("run\n");
 	});
 
+	it("rejects an unsupervised Pinggy tunnel that exits after publishing its URL", async () => {
+		const invocation = prepareFake("Tunnel established at https://already-dead.a.pinggy.link", { exitCode: 23 });
+		await expect(startExposure(exposure("pinggy"), PORT)).rejects.toThrow(
+			"exited with code 23 after reporting a tunnel URL",
+		);
+		expect(fs.readFileSync(invocation.runsFile, "utf8")).toBe("run\n");
+	});
+
 	it("uses a configured stable Pinggy base with authenticated SSH", async () => {
 		const invocation = prepareFake("Tunnel established at https://different-random.a.pinggy.link", {
 			restartOnce: true,
