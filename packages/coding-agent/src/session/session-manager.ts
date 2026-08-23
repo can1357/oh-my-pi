@@ -20,6 +20,7 @@ import {
 	stringifyJson,
 	toError,
 	tryAcquireFileLock,
+	withFileLock,
 } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentSchemaMode } from "../task/types";
 import { ArtifactManager } from "./artifacts";
@@ -86,33 +87,49 @@ function ownerSidecarPath(sessionFile: string): string {
 	return `${sessionFile}.owner`;
 }
 
-function writeOwnerSidecar(sessionFile: string): void {
+async function withOwnerSidecarLock<T>(sessionFile: string, fn: () => Promise<T>): Promise<T> {
+	// withFileLock derives `<sidecar>.lock` for the sidecar file itself —
+	// distinct from the session file's own lock, which this process may
+	// already hold for its append writer.
+	return withFileLock(ownerSidecarPath(sessionFile), fn);
+}
+
+async function writeOwnerSidecar(sessionFile: string): Promise<void> {
 	try {
-		// Append, never overwrite: another process may already hold a claim.
+		// Serialized against removal in other processes: an unregister's
+		// read-modify-write must never discard a claim appended concurrently.
 		// One line per manager instance — two managers in one process each
 		// append, and each close removes exactly one own-pid line, so the
 		// surviving manager keeps the session owned. Readers dedup by pid.
-		fs.appendFileSync(ownerSidecarPath(sessionFile), `${process.pid}\n`, { encoding: "utf-8", mode: 0o600 });
+		await withOwnerSidecarLock(sessionFile, () => {
+			fs.appendFileSync(ownerSidecarPath(sessionFile), `${process.pid}\n`, { encoding: "utf-8", mode: 0o600 });
+			return Promise.resolve();
+		});
 	} catch {
 		// Best-effort ownership hint; readers fall back to treating the
 		// session as unowned when the sidecar is unreadable.
 	}
 }
 
-function removeOwnerSidecar(sessionFile: string): void {
+async function removeOwnerSidecar(sessionFile: string): Promise<void> {
 	try {
 		const file = ownerSidecarPath(sessionFile);
-		// Remove exactly ONE own-pid line: sibling managers in this process
+		// Serialized against registration in other processes so this
+		// read-modify-write cannot discard a concurrently appended claim.
+		// Removes exactly ONE own-pid line: sibling managers in this process
 		// keep theirs, so ownership survives until the last manager closes.
-		const lines = fs
-			.readFileSync(file, "utf-8")
-			.split("\n")
-			.map(line => line.trim())
-			.filter(line => line !== "");
-		const own = lines.findIndex(line => Number(line) === process.pid);
-		if (own !== -1) lines.splice(own, 1);
-		if (lines.length === 0) fs.unlinkSync(file);
-		else fs.writeFileSync(file, `${lines.join("\n")}\n`, { encoding: "utf-8", mode: 0o600 });
+		await withOwnerSidecarLock(sessionFile, () => {
+			const lines = fs
+				.readFileSync(file, "utf-8")
+				.split("\n")
+				.map(line => line.trim())
+				.filter(line => line !== "");
+			const own = lines.findIndex(line => Number(line) === process.pid);
+			if (own !== -1) lines.splice(own, 1);
+			if (lines.length === 0) fs.unlinkSync(file);
+			else fs.writeFileSync(file, `${lines.join("\n")}\n`, { encoding: "utf-8", mode: 0o600 });
+			return Promise.resolve();
+		});
 	} catch {
 		// Absent, or already replaced by a newer owner's claim.
 	}
@@ -617,6 +634,7 @@ export class SessionManager {
 	#writer: SessionStorageWriter | undefined;
 	#writerLock: FileLockHandle | undefined;
 	#ownerRegisteredFile: string | undefined;
+	#sidecarTail: Promise<void> = Promise.resolve();
 	/** Sealed by {@link releaseRetainedEntries}: every later append/title/rewrite is a dropped no-op. */
 	#released = false;
 	/** Serializes async disk work (flush/close/atomic rewrite). Appends are synchronous and bypass it. */
@@ -799,15 +817,17 @@ export class SessionManager {
 		const sessionFile = this.#sessionFile;
 		if (!sessionFile || !(this.#storage instanceof FileSessionStorage)) return;
 		if (this.#ownerRegisteredFile === sessionFile) return;
-		writeOwnerSidecar(sessionFile);
 		this.#ownerRegisteredFile = sessionFile;
+		// Serialized against other processes' removals; chained on the
+		// sidecar tail so register/remove keep strict per-manager order.
+		this.#sidecarTail = this.#sidecarTail.then(() => writeOwnerSidecar(sessionFile));
 	}
 
 	#unregisterOwnerSidecar(): void {
 		const registered = this.#ownerRegisteredFile;
 		if (!registered) return;
 		this.#ownerRegisteredFile = undefined;
-		removeOwnerSidecar(registered);
+		this.#sidecarTail = this.#sidecarTail.then(() => removeOwnerSidecar(registered));
 	}
 
 	#latchIndeterminate(operationError: Error, recoveryErrors: readonly Error[]): SessionPersistenceIndeterminateError {
@@ -2036,6 +2056,9 @@ export class SessionManager {
 		// on IndexedSessionStorage during `flushSync`) so callers relying on
 		// flush() see the write durably visible to readers.
 		await this.#storage.drain();
+		// Ownership removal is durable before close resolves, so a gc run
+		// started right after close never sees this process as an owner.
+		await this.#sidecarTail;
 		if (this.#diskFailure) throw this.#diskFailure;
 	}
 
