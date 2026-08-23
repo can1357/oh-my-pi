@@ -21,6 +21,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { getLatestTodoPhasesFromEntries } from "../src/tools/todo";
 
 const SECRET_A = "MARKER-ALPHA-7";
 const SECRET_B = "MARKER-BRAVO-3";
@@ -314,6 +315,32 @@ describe("AgentSession user undo/redo", () => {
 		const redo = session.userRedo();
 		expect(redo.ok).toBe(true);
 		expect(session.getTodoPhases()).toEqual(phases);
+	});
+
+	it("an emptied todo list is journaled as an explicit empty snapshot after undo", async () => {
+		session = await makeSession();
+		// Branch carries an older non-empty todo state (tool result or earlier
+		// snapshot); the live list has since been cleared.
+		sessionManager.appendCustomEntry("user_todo_edit", {
+			phases: [{ name: "work", tasks: [{ content: "old", status: "pending" as const }] }],
+		});
+		await seedThreeTurns();
+		session.setTodoPhases([]);
+
+		const undo = session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		expect(session.getTodoPhases()).toEqual([]);
+
+		const branch = sessionManager.getBranch();
+		const markerIdx = branch.findIndex(entry => entry.type === "branch_summary");
+		const snapshot = branch
+			.slice(markerIdx + 1)
+			.find(entry => entry.type === "custom" && entry.customType === "user_todo_edit") as
+			| { data?: { phases?: unknown[] } }
+			| undefined;
+		expect(snapshot?.data?.phases).toEqual([]);
+		// A reload syncing from the branch sees the empty state, not the older list.
+		expect(getLatestTodoPhasesFromEntries(branch)).toEqual([]);
 	});
 
 	it("undo refuses while post-prompt work is pending", async () => {

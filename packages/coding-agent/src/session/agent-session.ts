@@ -215,7 +215,12 @@ import {
 	writeDeviceDispatch,
 } from "../tools/resolve";
 import { supportsExternalThinking } from "../tools/think";
-import { getLatestTodoPhasesFromEntries, type TodoPhase, USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
+import {
+	getLatestTodoPhasesFromEntries,
+	type TodoPhase,
+	todoPhasesEqual,
+	USER_TODO_EDIT_CUSTOM_TYPE,
+} from "../tools/todo";
 import { ToolError } from "../tools/tool-errors";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import { parseCommandArgs } from "../utils/command-args";
@@ -8169,9 +8174,10 @@ export class AgentSession {
 	 */
 	#recordTodoSnapshot(): void {
 		const phases = this.getTodoPhases();
-		if (phases.length === 0) return;
 		const branchLatest = getLatestTodoPhasesFromEntries(this.sessionManager.getBranch());
-		if (JSON.stringify(branchLatest) === JSON.stringify(phases)) return;
+		if (todoPhasesEqual(branchLatest, phases)) return;
+		// Journal the empty list too: the branch's older non-empty state is
+		// what a reload would otherwise restore.
 		this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
 	}
 
