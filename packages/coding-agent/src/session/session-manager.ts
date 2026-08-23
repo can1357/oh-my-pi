@@ -89,9 +89,9 @@ function ownerSidecarPath(sessionFile: string): string {
 function writeOwnerSidecar(sessionFile: string): void {
 	try {
 		// Append, never overwrite: another process may already hold a claim.
-		// Registration is manager-scoped (not writer-scoped), so skip when
-		// this pid is already recorded for the file.
-		if (readSessionOwnerPids(sessionFile).includes(process.pid)) return;
+		// One line per manager instance — two managers in one process each
+		// append, and each close removes exactly one own-pid line, so the
+		// surviving manager keeps the session owned. Readers dedup by pid.
 		fs.appendFileSync(ownerSidecarPath(sessionFile), `${process.pid}\n`, { encoding: "utf-8", mode: 0o600 });
 	} catch {
 		// Best-effort ownership hint; readers fall back to treating the
@@ -102,13 +102,17 @@ function writeOwnerSidecar(sessionFile: string): void {
 function removeOwnerSidecar(sessionFile: string): void {
 	try {
 		const file = ownerSidecarPath(sessionFile);
-		const kept = fs
+		// Remove exactly ONE own-pid line: sibling managers in this process
+		// keep theirs, so ownership survives until the last manager closes.
+		const lines = fs
 			.readFileSync(file, "utf-8")
 			.split("\n")
-			.filter(line => line.trim() !== "" && Number(line.trim()) !== process.pid)
-			.map(line => line.trim());
-		if (kept.length === 0) fs.unlinkSync(file);
-		else fs.writeFileSync(file, `${kept.join("\n")}\n`, { encoding: "utf-8", mode: 0o600 });
+			.map(line => line.trim())
+			.filter(line => line !== "");
+		const own = lines.findIndex(line => Number(line) === process.pid);
+		if (own !== -1) lines.splice(own, 1);
+		if (lines.length === 0) fs.unlinkSync(file);
+		else fs.writeFileSync(file, `${lines.join("\n")}\n`, { encoding: "utf-8", mode: 0o600 });
 	} catch {
 		// Absent, or already replaced by a newer owner's claim.
 	}
@@ -144,13 +148,19 @@ export class SessionFileLockError extends Error {
 	}
 }
 
-/** True when a pid is still running (EPERM counts as alive: exists, not ours). */
+/**
+ * True when a pid is still running. Fails CLOSED: only ESRCH (no such
+ * process) and EINVAL prove death — EPERM (exists, not ours) and any
+ * unknown probe error count as alive, so gc never prunes a live owner
+ * because a platform/runtime hiccup made the probe ambiguous.
+ */
 export function isProcessAlive(pid: number): boolean {
 	try {
 		process.kill(pid, 0);
 		return true;
 	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === "EPERM";
+		const code = (error as NodeJS.ErrnoException).code;
+		return !(code === "ESRCH" || code === "EINVAL");
 	}
 }
 
