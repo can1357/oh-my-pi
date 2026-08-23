@@ -1919,6 +1919,7 @@ export class SessionManager {
 		this.#sessionDir = snapshot.sessionDir;
 		this.#sessionFile = snapshot.sessionFile;
 		this.#expectedDiskSize = snapshot.expectedDiskSize;
+		this.#registerOwnerSidecar();
 		this.#fileIsCurrent = snapshot.onDisk;
 		this.#rewriteRequired = snapshot.needsRewrite;
 		this.#forceFileCreation = snapshot.onDisk;
@@ -2020,6 +2021,7 @@ export class SessionManager {
 			this.#forceFileCreation = true;
 			await this.#rewriteAtomically();
 			this.#fileIsCurrent = true;
+			this.#registerOwnerSidecar();
 			return;
 		}
 
@@ -2063,6 +2065,10 @@ export class SessionManager {
 		this.#artifactManagerSessionFile = null;
 
 		if (this.sanitizeLoadedOpenAIResponsesReplayMetadata()) this.#rewriteRequired = true;
+		// Ownership on open, not first entry: a resumed session that stays
+		// idle (or only retitles, a path that bypasses #recordEntry) is still
+		// a live manager whose in-memory tree gc must not prune under.
+		this.#registerOwnerSidecar();
 	}
 
 	/**
@@ -2246,6 +2252,7 @@ export class SessionManager {
 				// holds no bytes this manager wrote, so a recreate-from-memory must
 				// publish against an absent file rather than a stale size.
 				if (sessionPathChanged && !sessionMoved) this.#expectedDiskSize = null;
+				this.#registerOwnerSidecar();
 				this.#artifactManager = null;
 				this.#artifactManagerSessionFile = null;
 				// Path is repointed; hot-path appends may use `#sessionFile` again.
