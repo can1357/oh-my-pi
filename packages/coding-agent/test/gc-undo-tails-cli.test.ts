@@ -17,7 +17,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { removeSyncWithRetries, Snowflake, tryAcquireFileLock } from "@oh-my-pi/pi-utils";
 import { collectGcErrors, type GcResult } from "../src/cli/gc-cli";
-import { isProcessAlive, readSessionOwnerPids, SessionManager } from "../src/session/session-manager";
+import {
+	isProcessAlive,
+	readSessionOwnerPids,
+	SessionFileLockError,
+	SessionManager,
+} from "../src/session/session-manager";
 import { FileSessionStorage, MemorySessionStorage } from "../src/session/session-storage";
 
 function userMessage(text: string) {
@@ -398,6 +403,18 @@ describe("omp gc --undo-tails (CLI)", () => {
 		} finally {
 			await manager.close();
 		}
+	});
+
+	it("setSessionFile refuses the load when ownership never establishes", async () => {
+		await buildSessionWithTwoUndoTails();
+		// A sidecar path that cannot be written (a directory) makes every
+		// registration attempt fail fast instead of contending 5s on a lock.
+		fs.mkdirSync(`${sessionFile}.owner`, { recursive: true });
+		const manager = SessionManager.create(sessionsDir, sessionsDir);
+		await expect(manager.setSessionFile(sessionFile)).rejects.toBeInstanceOf(SessionFileLockError);
+		expect(readSessionOwnerPids(sessionFile)).toEqual([]);
+		fs.rmSync(`${sessionFile}.owner`, { recursive: true, force: true });
+		await manager.close();
 	});
 
 	it("fork registers ownership of the new session file", async () => {
