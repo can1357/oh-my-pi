@@ -1,6 +1,5 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
@@ -17,7 +16,7 @@ import { Settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
 import { BLOB_HASH_RE } from "../session/blob-store";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
-import { SessionManager } from "../session/session-manager";
+import { isProcessAlive, readSessionOwnerPid, SessionManager } from "../session/session-manager";
 import { FileSessionStorage } from "../session/session-storage";
 
 const BLOB_FILE_RE = /^([a-f0-9]{64})(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/;
@@ -51,6 +50,8 @@ export interface GcCommandArgs {
 }
 
 export interface UndoTailGcResult {
+	/** Sessions skipped because a live owner process holds the append writer. */
+	skippedLive: number;
 	filesScanned: number;
 	markersPruned: number;
 	entriesRemoved: number;
@@ -213,6 +214,7 @@ export function collectGcErrors(result: GcResult): string[] {
 	return [
 		...(result.blobs?.errors ?? []).map(error => `blobs: ${error}`),
 		...(result.archive?.errors ?? []).map(error => `archive: ${error}`),
+		...(result.undoTails?.errors ?? []).map(error => `undo-tails: ${error}`),
 	];
 }
 
@@ -1575,6 +1577,7 @@ function renderText(result: GcResult): string {
 		lines.push(
 			`undo tails: ${t.markersPruned} markers pruned, ${t.entriesRemoved} entries removed, keep=${t.keep}, ${t.filesScanned} files scanned`,
 		);
+		if (t.skippedLive) lines.push(`sessions skipped live: ${t.skippedLive}`);
 		if (t.errors.length > 0) lines.push(`undo tail errors: ${t.errors.length}`);
 	}
 	if (result.wal) {
@@ -1586,8 +1589,8 @@ function renderText(result: GcResult): string {
 
 /**
  * Prune off-branch tails of older user-undo branches across active sessions.
- * Skips sessions with live statuses — an open AgentSession still holds those
- * entries in memory and would re-append them.
+ * Sessions with a live owner process (append-writer sidecar) are skipped: an
+ * open AgentSession holds those entries in memory and would re-append them.
  */
 async function runUndoTailGc(options: ResolvedGcOptions): Promise<UndoTailGcResult> {
 	const sessionsRoot = getSessionsDir(options.agentDir);
@@ -1595,25 +1598,38 @@ async function runUndoTailGc(options: ResolvedGcOptions): Promise<UndoTailGcResu
 		filesScanned: 0,
 		markersPruned: 0,
 		entriesRemoved: 0,
+		skippedLive: 0,
 		keep: options.keepUndoTails,
 		files: [],
 		errors: [],
 	};
-	const candidates = (await listActiveSessions(sessionsRoot)).filter(
-		session => !session.status || !ACTIVE_STATUSES.has(session.status),
-	);
+	const candidates = await listActiveSessions(sessionsRoot);
 	for (const session of candidates) {
+		// Liveness gate via the owner sidecar: a live process holding this
+		// session's append writer would re-append pruned entries from its
+		// in-memory tree. SessionStatus is journal-tail state ("complete"
+		// means the last turn yielded, not that nobody has it open), so it is
+		// deliberately not used here.
+		const ownerPid = readSessionOwnerPid(session.path);
+		if (ownerPid !== undefined && isProcessAlive(ownerPid)) {
+			result.skippedLive++;
+			continue;
+		}
 		result.filesScanned++;
 		try {
-			// File-backed manager either way: reading real session files needs
-			// FileSessionStorage, and apply=false returns before any rewrite,
-			// so the dry run never writes the target file.
-			const manager = SessionManager.create(os.tmpdir(), await fs.mkdtemp(path.join(os.tmpdir(), "gc-undo-")));
-			await manager.setSessionFile(session.path);
-			const counts = await manager.pruneUserUndoTails(options.keepUndoTails, options.apply);
-			result.markersPruned += counts.markers;
-			result.entriesRemoved += counts.removed;
-			if (counts.markers > 0) result.files.push({ file: session.path, ...counts });
+			// suppressBreadcrumb keeps storage maintenance side-effect-free:
+			// otherwise scanning repoints this terminal's --continue target
+			// at whichever session happened to be read last. apply=false
+			// returns before any rewrite, so dry runs never write the file.
+			const manager = await SessionManager.open(session.path, undefined, undefined, { suppressBreadcrumb: true });
+			try {
+				const counts = await manager.pruneUserUndoTails(options.keepUndoTails, options.apply);
+				result.markersPruned += counts.markers;
+				result.entriesRemoved += counts.removed;
+				if (counts.markers > 0) result.files.push({ file: session.path, ...counts });
+			} finally {
+				await manager.close();
+			}
 		} catch (error) {
 			result.errors.push(`${session.path}: ${errorMessage(error)}`);
 		}

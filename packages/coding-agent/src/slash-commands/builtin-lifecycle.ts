@@ -22,7 +22,7 @@ import {
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { resolveToCwd } from "../tools/path-utils";
-import { commandConsumed, errorMessage, usage } from "./helpers/parse";
+import { commandConsumed, errorMessage, parsePositiveSteps, parseTurnNumber, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
 import type {
 	ParsedSlashCommand,
@@ -209,15 +209,23 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		getTuiAutocompleteDescription: runtime =>
 			runtime.ctx.session.isStreaming ? "Undo: unavailable while streaming" : "Undo: drop last turn(s) from context",
 		handle: async (command, runtime) => {
-			const steps = Number.parseInt(command.args?.trim() ?? "1", 10);
-			const result = runtime.session.userUndo(Number.isFinite(steps) ? steps : 1);
+			const parsed = parsePositiveSteps(command.args);
+			if (!parsed.ok) {
+				await runtime.output(parsed.error);
+				return commandConsumed();
+			}
+			const result = runtime.session.userUndo(parsed.steps);
 			await runtime.output(result.ok ? `Undid ${result.droppedTurns} turn(s).` : (result.error ?? "Undo failed."));
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
 			runtime.ctx.editor.setText("");
-			const steps = Number.parseInt(command.args?.trim() ?? "1", 10);
-			const result = runtime.ctx.session.userUndo(Number.isFinite(steps) ? steps : 1);
+			const parsed = parsePositiveSteps(command.args);
+			if (!parsed.ok) {
+				runtime.ctx.showError(parsed.error);
+				return;
+			}
+			const result = runtime.ctx.session.userUndo(parsed.steps);
 			if (result.ok) {
 				runtime.ctx.rebuildChatFromMessages();
 				runtime.ctx.showStatus(`Undid ${result.droppedTurns} turn(s) — context rewound (files untouched)`);
@@ -266,12 +274,12 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				await runtime.output(`User turns (oldest first):\n${listing}\nUse /revert <turn#>.`);
 				return commandConsumed();
 			}
-			const idx = Number.parseInt(arg, 10) - 1;
-			if (!Number.isInteger(idx) || idx < 0 || idx >= turns.length) {
-				await runtime.output(`Invalid turn number: ${arg}`);
+			const parsed = parseTurnNumber(arg);
+			if (!parsed.ok || parsed.index >= turns.length) {
+				await runtime.output(parsed.ok ? `Invalid turn number: ${arg}` : parsed.error);
 				return commandConsumed();
 			}
-			const result = runtime.session.userUndoTo(turns[idx]!.entryId);
+			const result = runtime.session.userUndoTo(turns[parsed.index]!.entryId);
 			await runtime.output(
 				result.ok ? `Reverted — dropped ${result.droppedTurns} turn(s).` : (result.error ?? "Revert failed."),
 			);
@@ -282,12 +290,12 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			const arg = command.args.trim();
 			if (arg) {
 				const turns = runtime.ctx.session.getUserTurns();
-				const idx = Number.parseInt(arg, 10) - 1;
-				if (!Number.isInteger(idx) || idx < 0 || idx >= turns.length) {
-					runtime.ctx.showError(`Invalid turn number: ${arg}`);
+				const parsed = parseTurnNumber(arg);
+				if (!parsed.ok || parsed.index >= turns.length) {
+					runtime.ctx.showError(parsed.ok ? `Invalid turn number: ${arg}` : parsed.error);
 					return;
 				}
-				const result = runtime.ctx.session.userUndoTo(turns[idx]!.entryId);
+				const result = runtime.ctx.session.userUndoTo(turns[parsed.index]!.entryId);
 				if (result.ok) {
 					runtime.ctx.rebuildChatFromMessages();
 					runtime.ctx.showStatus(`Reverted — dropped ${result.droppedTurns} turn(s) (files untouched)`);

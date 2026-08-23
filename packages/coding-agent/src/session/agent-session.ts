@@ -8117,7 +8117,7 @@ export class AgentSession {
 		}
 		const entries = this.sessionManager.getBranch();
 		const userIdx = entries.reduce<number[]>((acc, entry, i) => {
-			if (entry.type === "message" && (entry as SessionMessageEntry).message.role === "user") acc.push(i);
+			if (this.#isUserTurnEntry(entry)) acc.push(i);
 			return acc;
 		}, []);
 		if (userIdx.length === 0) {
@@ -8131,7 +8131,7 @@ export class AgentSession {
 	getUserTurns(limit = 50): Array<{ entryId: string; timestamp: string; preview: string }> {
 		return this.sessionManager
 			.getBranch()
-			.filter((entry): entry is SessionMessageEntry => entry.type === "message" && entry.message.role === "user")
+			.filter(entry => this.#isUserTurnEntry(entry))
 			.slice(-limit)
 			.map(entry => ({
 				entryId: entry.id,
@@ -8151,23 +8151,30 @@ export class AgentSession {
 		return text.split("\n").find(line => line.trim().length > 0) ?? "(empty)";
 	}
 
+	/**
+	 * Canonical operator-visible user turn: a plain user message, or a
+	 * user-invoked `/skill:<name>` prompt (same definition the auto-thinking
+	 * classifier uses). Centralized so /undo, /revert, and the picker agree.
+	 */
+	#isUserTurnEntry(entry: SessionEntry): entry is SessionMessageEntry {
+		if (entry.type !== "message") return false;
+		const message = entry.message;
+		return message.role === "user" || (message.role === "custom" && isUserInvokedSkillPrompt(message));
+	}
+
 	/** `/revert <entryId>`: rewind to before an arbitrary earlier user turn. */
 	userUndoTo(entryId: string): { ok: boolean; error?: string; droppedTurns?: number } {
 		if (this.isStreaming) {
 			return { ok: false, error: "Session is streaming — abort or wait before /revert." };
 		}
 		const entries = this.sessionManager.getBranch();
-		const idx = entries.findIndex(
-			entry =>
-				entry.id === entryId && entry.type === "message" && (entry as SessionMessageEntry).message.role === "user",
-		);
+		const idx = entries.findIndex(entry => entry.id === entryId && this.#isUserTurnEntry(entry));
 		if (idx === -1) {
 			return { ok: false, error: "Turn not found on the active path." };
 		}
 		let turns = 0;
 		for (let i = idx; i < entries.length; i++) {
-			const entry = entries[i]!;
-			if (entry.type === "message" && (entry as SessionMessageEntry).message.role === "user") turns++;
+			if (this.#isUserTurnEntry(entries[i]!)) turns++;
 		}
 		return this.#rewindUserTurnsBefore(entries, idx, turns);
 	}
@@ -8183,7 +8190,7 @@ export class AgentSession {
 		const previousLeafId = this.sessionManager.getLeafId();
 		const droppedPrompts = entries
 			.slice(userTurnIdx)
-			.filter((entry): entry is SessionMessageEntry => entry.type === "message" && entry.message.role === "user")
+			.filter(entry => this.#isUserTurnEntry(entry))
 			.map(entry => `- ${this.#messageTextPreview(entry.message).slice(0, 120)}`)
 			.join("\n");
 		// SILENT undo contract: state after /undo is indistinguishable in
@@ -8207,15 +8214,16 @@ export class AgentSession {
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#advisors.resetSessionState({ preserveCost: true });
-		this.#todo.syncFromBranch();
+		// Todos are deliberately NOT rehydrated from the rewound branch: the
+		// rollback contract is context-only, so live todo state survives.
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		return { ok: true, droppedTurns: n, rewoundTo: target.timestamp };
 	}
 
 	/**
-	 * `/redo`: reattach the turns dropped by the most recent `/undo` (located
-	 * via the active path's user-undo branch marker). Turns appended after that
-	 * /undo are preserved as their own off-branch path.
+	 * `/redo`: reattach the turns dropped by the most recent `/undo`. Only
+	 * valid while that undo marker is still the active leaf; once the operator
+	 * appends new turns, redo refuses rather than abandon them.
 	 */
 	userRedo(): { ok: boolean; error?: string } {
 		if (this.isStreaming) {
@@ -8236,6 +8244,13 @@ export class AgentSession {
 				error: "No /undo to redo (last branch change was not a /undo, or turns were appended since).",
 			};
 		}
+		// Appending plain turns creates no branch summaries, so the marker can
+		// still be found after the operator continued. Redo is only safe while
+		// the marker is the active leaf: rebranching past newer turns would
+		// silently abandon them.
+		if (!lastBranch || lastBranch.id !== this.sessionManager.getLeafId()) {
+			return { ok: false, error: "Turns were appended after the /undo — redo is no longer possible." };
+		}
 		const tipId = details.undoOf;
 		if (!this.sessionManager.hasEntry(tipId)) {
 			return { ok: false, error: "The undone turns were pruned by gc; redo is no longer possible." };
@@ -8249,7 +8264,6 @@ export class AgentSession {
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#advisors.resetSessionState({ preserveCost: true });
-		this.#todo.syncFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		return { ok: true };
 	}

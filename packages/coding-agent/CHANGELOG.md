@@ -690,6 +690,8 @@
 - Added provider-wide Amazon Bedrock guardrail settings to models configuration, including custom models.
 - Added the `/pin` slash command to pin and unpin sessions so they stay at the top of the `--resume` picker UI.
 - Optional edit parse-regression capture appends the before/after content, model, variant, and arguments to `~/.omp/agent/edit-blackbox.jsonl` when `edit.blackbox.enabled` is enabled.
+- Added `/undo [steps]`, `/revert`, and `/redo` for operator context rollback: the conversation rewinds to before chosen user turns via journal branching (silent in context, files and todos untouched), `/revert` offers a turn picker, and `/redo` restores the last undo while nothing has been appended since.
+- Added `omp gc --undo-tails [--keep-undo-tails N]` to prune the journal tails left behind by older `/undo` branches; dry-run by default, `--apply` to execute, sessions with a live owner process are skipped.
 
 ### Changed
 

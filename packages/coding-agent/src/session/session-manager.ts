@@ -69,6 +69,54 @@ import {
 	visitEntriesFromFile,
 } from "./session-loader";
 import { generateId, migrateToCurrentVersion } from "./session-migrations";
+
+/**
+ * Owner sidecar (`<session>.jsonl.owner`): written while this process holds
+ * the session's append writer, removed when the writer closes. Crash-safe
+ * liveness signal for out-of-process maintenance (gc): a stale sidecar is
+ * detected by checking the recorded pid.
+ */
+function ownerSidecarPath(sessionFile: string): string {
+	return `${sessionFile}.owner`;
+}
+
+function writeOwnerSidecar(sessionFile: string): void {
+	try {
+		fs.writeFileSync(ownerSidecarPath(sessionFile), `${process.pid}\n`, { encoding: "utf-8", mode: 0o600 });
+	} catch {
+		// Best-effort ownership hint; readers fall back to treating the
+		// session as unowned when the sidecar is unreadable.
+	}
+}
+
+function removeOwnerSidecar(sessionFile: string): void {
+	try {
+		fs.unlinkSync(ownerSidecarPath(sessionFile));
+	} catch {
+		// Absent, or already replaced by a newer owner's claim.
+	}
+}
+
+/** Recorded owner pid for a session file, when a sidecar exists and parses. */
+export function readSessionOwnerPid(sessionFile: string): number | undefined {
+	try {
+		const pid = Number.parseInt(fs.readFileSync(ownerSidecarPath(sessionFile), "utf-8").trim(), 10);
+		return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** True when a pid is still running (EPERM counts as alive: exists, not ours). */
+export function isProcessAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
 import {
 	computeDefaultSessionDir,
 	readTerminalBreadcrumbEntry,
@@ -670,14 +718,19 @@ export class SessionManager {
 	#closeWriterEventually(): void {
 		const writer = this.#writer;
 		this.#writer = undefined;
-		if (writer) void writer.close().catch(() => undefined);
+		if (writer) {
+			void writer.close().catch(() => undefined);
+			if (this.#sessionFile) removeOwnerSidecar(this.#sessionFile);
+		}
 	}
 
 	async #closeWriterHandle(): Promise<void> {
 		const writer = this.#writer;
 		if (!writer) return;
 		this.#writer = undefined;
+		const sessionFile = this.#sessionFile;
 		await writer.close();
+		if (sessionFile) removeOwnerSidecar(sessionFile);
 	}
 
 	#latchIndeterminate(operationError: Error, recoveryErrors: readonly Error[]): SessionPersistenceIndeterminateError {
@@ -810,6 +863,7 @@ export class SessionManager {
 			flags: "a",
 			onError: err => this.#noteDiskFailure(err),
 		});
+		if (this.#persist) writeOwnerSidecar(this.#sessionFile);
 		return this.#writer;
 	}
 
@@ -2731,9 +2785,16 @@ export class SessionManager {
 	 * operator explicitly retracted.
 	 */
 	async pruneUserUndoTails(keep = 1, apply = true): Promise<{ markers: number; removed: number }> {
+		// Already-pruned markers (scrubbed of undoOf, stamped prunedAt) are
+		// excluded so repeated runs are idempotent and never rewrite a file
+		// just to refresh prunedAt.
 		const markers = this.#entries.filter(entry => {
 			if (entry.type !== "branch_summary") return false;
-			return ((entry as BranchSummaryEntry).details as { kind?: string } | undefined)?.kind === "user-undo";
+			const details = (entry as BranchSummaryEntry).details as
+				| { kind?: string; undoOf?: string | null; prunedAt?: string }
+				| undefined;
+			if (details?.kind !== "user-undo") return false;
+			return !!details.undoOf && !details.prunedAt;
 		}) as BranchSummaryEntry[];
 		if (markers.length <= keep) return { markers: 0, removed: 0 };
 
