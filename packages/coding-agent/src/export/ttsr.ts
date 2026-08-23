@@ -549,16 +549,21 @@ export class TtsrManager {
 	 * (not merge) keeps the records in lockstep with the journal state a
 	 * session was rewound or reloaded to.
 	 */
-	restoreInjected(ruleNames: string[]): void {
-		// Rules still present keep their timing records: a gap-based
-		// repeatMode rule injected shortly before a rewind must NOT become
-		// instantly re-eligible — its injection is still in the retained
-		// context. Only rules absent before (genuinely new, or re-armed
-		// after their injection went off-branch) start at zero.
+	restoreInjected(ruleNames: string[], injectionPositions?: ReadonlyMap<string, number>): void {
+		// Timing precedence per rule: an explicit branch position (turn
+		// units, from where its last ttsr_injection entry sits) — this is
+		// what a redo reintroduces, since its live record was dropped with
+		// the undo; else the preserved live record for rules that stayed
+		// injected; else zero for genuinely new rules.
 		const previous = new Map(this.#injectionRecords);
 		this.#injectionRecords.clear();
 		for (const name of ruleNames) {
-			this.#injectionRecords.set(name, { lastInjectedAt: previous.get(name)?.lastInjectedAt ?? 0 });
+			const position = injectionPositions?.get(name);
+			const lastInjectedAt =
+				position !== undefined && Number.isInteger(position) && position >= 0
+					? position
+					: (previous.get(name)?.lastInjectedAt ?? 0);
+			this.#injectionRecords.set(name, { lastInjectedAt });
 		}
 		if (ruleNames.length > 0) {
 			logger.debug("TTSR injected state restored", { ruleNames });

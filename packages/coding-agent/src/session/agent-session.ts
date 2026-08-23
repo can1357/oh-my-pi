@@ -5531,8 +5531,18 @@ export class AgentSession {
 	 * the approved plan (or re-inject a duplicate of) it.
 	 */
 	#reconcilePlanReference(): void {
-		this.#planReferenceSent = this.sessionManager
-			.getBranch()
+		// Only the context-visible region counts: a reference older than the
+		// latest /clear or compaction boundary is excluded from the rebuilt
+		// model context (session-context.ts), so it must not mark the plan
+		// as delivered either.
+		const branch = this.sessionManager.getBranch();
+		let contextStart = 0;
+		for (let i = 0; i < branch.length; i++) {
+			const entry = branch[i];
+			if (entry && (entry.type === "reset_boundary" || entry.type === "compaction")) contextStart = i + 1;
+		}
+		this.#planReferenceSent = branch
+			.slice(contextStart)
 			.some(
 				entry =>
 					entry.type === "message" &&
@@ -5545,6 +5555,12 @@ export class AgentSession {
 		const manager = this.#ttsr.manager;
 		if (!manager) return;
 		const ruleNames = new Set<string>();
+		// Injection positions in turn units, taken from where each rule's
+		// LAST ttsr_injection entry sits on the branch: a rule a redo
+		// reintroduces has no live timing record to preserve, and zeroing it
+		// against the restored branch's full turn count would make it
+		// instantly eligible.
+		const injectionPositions = new Map<string, number>();
 		// The live counter advances once per completed user turn
 		// (TtsrCoordinator.onTurnEnd), so rewind in the same units — every
 		// persisted message would overcount tool-heavy branches and make
@@ -5558,7 +5574,10 @@ export class AgentSession {
 				}
 			}
 			if (entry.type === "ttsr_injection") {
-				for (const name of entry.injectedRules) ruleNames.add(name);
+				for (const name of entry.injectedRules) {
+					ruleNames.add(name);
+					injectionPositions.set(name, branchTurnCount);
+				}
 			} else if (entry.type === "message") {
 				const message = entry.message as { role?: string; customType?: string; details?: { rules?: unknown } };
 				if (message.role === "custom" && message.customType === "ttsr-injection") {
@@ -5570,7 +5589,7 @@ export class AgentSession {
 				}
 			}
 		}
-		manager.restoreInjected([...ruleNames]);
+		manager.restoreInjected([...ruleNames], injectionPositions);
 		// Counter and injection positions realign together: the live counter
 		// would otherwise still sit at its pre-rewind value, making retained
 		// after-gap rules instantly eligible.
