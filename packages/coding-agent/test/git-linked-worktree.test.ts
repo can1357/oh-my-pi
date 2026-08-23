@@ -20,6 +20,38 @@ function linkWorktree(project: string, worktreeRoot: string): void {
 	fs.writeFileSync(path.join(worktreeRoot, ".git"), `gitdir: ${path.relative(worktreeRoot, gitDir)}\n`, "utf8");
 }
 
+// Builds the on-disk shape of a linked worktree created *from within a
+// checked-out submodule*: the submodule's own git dir lives at
+// `<super>/.git/modules/<name>` (not `<checkout>/.git`) and points back at
+// its checkout via `core.worktree` in its `config` file — the same
+// indirection `git init --separate-git-dir` uses. A worktree of that
+// submodule therefore has a common dir whose basename is the submodule
+// name, not `.git`, and whose `core.worktree` (in the common dir's config)
+// must be followed to reach the submodule checkout.
+function linkSubmoduleWorktree(superRoot: string, submoduleCheckout: string, worktreeRoot: string): void {
+	const commonDir = path.join(superRoot, ".git", "modules", path.basename(submoduleCheckout));
+	fs.mkdirSync(commonDir, { recursive: true });
+	fs.mkdirSync(submoduleCheckout, { recursive: true });
+	fs.writeFileSync(path.join(commonDir, "HEAD"), "ref: refs/heads/main\n", "utf8");
+	fs.writeFileSync(
+		path.join(commonDir, "config"),
+		`[core]\n\tworktree = ${path.relative(commonDir, submoduleCheckout)}\n`,
+		"utf8",
+	);
+	fs.writeFileSync(
+		path.join(submoduleCheckout, ".git"),
+		`gitdir: ${path.relative(submoduleCheckout, commonDir)}\n`,
+		"utf8",
+	);
+
+	const gitDir = path.join(commonDir, "worktrees", path.basename(worktreeRoot));
+	fs.mkdirSync(gitDir, { recursive: true });
+	fs.mkdirSync(worktreeRoot, { recursive: true });
+	fs.writeFileSync(path.join(gitDir, "HEAD"), "ref: refs/heads/feature\n", "utf8");
+	fs.writeFileSync(path.join(gitDir, "commondir"), `${path.relative(gitDir, commonDir)}\n`, "utf8");
+	fs.writeFileSync(path.join(worktreeRoot, ".git"), `gitdir: ${path.relative(worktreeRoot, gitDir)}\n`, "utf8");
+}
+
 describe("git linked worktree resolution", () => {
 	let tempRoot: string;
 
@@ -61,5 +93,15 @@ describe("git linked worktree resolution", () => {
 		fs.mkdirSync(bare, { recursive: true });
 
 		expect(vcs.git(bare)?.linkedWorktree() ?? null).toBeNull();
+	});
+
+	it("resolves a worktree of a submodule to the submodule's own checkout, not the internal .git/modules store", () => {
+		const superRoot = path.join(tempRoot, "super");
+		const submoduleCheckout = path.join(superRoot, "sub");
+		const worktreeRoot = path.join(tempRoot, ".tree", "sub", "xx");
+		linkSubmoduleWorktree(superRoot, submoduleCheckout, worktreeRoot);
+
+		expect(vcs.git(worktreeRoot)?.primaryRoot()).toBe(submoduleCheckout);
+		expect(vcs.git(submoduleCheckout)?.primaryRoot()).toBe(submoduleCheckout);
 	});
 });
