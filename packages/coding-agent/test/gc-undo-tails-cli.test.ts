@@ -11,7 +11,7 @@
  * the child resolves inside the test's temp tree and any unsuppressed
  * breadcrumb write would land where the test can see it.
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -516,6 +516,68 @@ describe("omp gc --undo-tails (CLI)", () => {
 		expect(await readSessionOwnerPids(otherFile)).toEqual([]);
 		await manager.close();
 		expect(await readSessionOwnerPids(sessionFile)).toEqual([]);
+	});
+
+	it("moveTo claims the destination sidecar before the journal rename", async () => {
+		await buildSessionWithTwoUndoTails();
+		const manager = SessionManager.create(sessionsDir, sessionsDir);
+		await manager.setSessionFile(sessionFile);
+
+		const destDir = path.join(agentDir, "sessions", "moved-bucket");
+		const dest = path.join(destDir, path.basename(sessionFile));
+		const originalRename = fs.promises.rename.bind(fs.promises);
+		let journalRenameSeen = false;
+		const renameSpy = spyOn(fs.promises, "rename").mockImplementation(async (from, to) => {
+			if (path.resolve(String(to)) === path.resolve(dest) && String(from).endsWith(".jsonl")) {
+				// The invariant: the moment the journal becomes visible at
+				// its destination, the destination sidecar already carries
+				// this manager's pid.
+				const sidecar = fs.readFileSync(`${dest}.owner`, "utf-8");
+				expect(sidecar.trim().split("\n")).toContain(String(process.pid));
+				journalRenameSeen = true;
+			}
+			return originalRename(from, to);
+		});
+		try {
+			await manager.moveTo(path.join(agentDir, "project"), destDir);
+		} finally {
+			renameSpy.mockRestore();
+		}
+		expect(journalRenameSeen).toBe(true);
+		expect(await readSessionOwnerPids(dest)).toContain(process.pid);
+		expect(await readSessionOwnerPids(sessionFile)).toEqual([]);
+		await manager.close();
+		expect(await readSessionOwnerPids(dest)).toEqual([]);
+	});
+
+	it("a failed switch followed by rollback does not double-claim the old session", async () => {
+		await buildSessionWithTwoUndoTails();
+		// The manager's storage churns ONLY the switch target, so the
+		// target's identity gate can never stabilize: the switch fails
+		// AFTER its registration succeeded.
+		const otherFile = path.join(sessionsDir, `20260823T000004_${Snowflake.next()}.jsonl`);
+		fs.writeFileSync(otherFile, fs.readFileSync(sessionFile));
+		class SwitchChurn extends FileSessionStorage {
+			override statSync(filePath: string) {
+				const stat = super.statSync(filePath);
+				if (path.resolve(filePath) === path.resolve(otherFile)) {
+					fs.appendFileSync(filePath, "\n");
+				}
+				return stat;
+			}
+		}
+		const manager = await SessionManager.open(sessionFile, sessionsDir, new SwitchChurn());
+		const snapshot = manager.captureState();
+
+		await expect(manager.setSessionFile(otherFile)).rejects.toBeInstanceOf(SessionFileLockError);
+
+		// Rollback: switchSession's catch restores the snapshot. Exactly ONE
+		// claim line for the old session — the retained one, not a second.
+		manager.restoreState(snapshot);
+		const sidecarFile = `${sessionFile}.owner`;
+		expect(fs.readFileSync(sidecarFile, "utf-8").trim().split("\n")).toEqual([String(process.pid)]);
+		await manager.close();
+		expect(fs.existsSync(sidecarFile)).toBe(false);
 	});
 
 	it("fork registers ownership of the new session file", async () => {
