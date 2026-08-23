@@ -234,8 +234,12 @@ export async function readSessionOwnerPids(sessionFile: string): Promise<number[
 					.filter(pid => Number.isInteger(pid) && pid > 0),
 			),
 		];
-	} catch {
-		return [];
+	} catch (error) {
+		// Only a genuinely absent sidecar means "no owners". Any other read
+		// failure (permissions, transient I/O) must fail closed — reporting
+		// no owners would let gc prune beneath a live manager.
+		if (isEnoent(error)) return [];
+		throw error;
 	}
 }
 
@@ -1295,6 +1299,9 @@ export class SessionManager {
 					// under it would set up a resurrect-on-rewrite. Aborting
 					// here leaves disk untouched; gc reports a skip.
 					if (this.#undoTailPruneActive) {
+						// Unreadable sidecar (non-ENOENT) throws and aborts
+						// the publish rather than risk pruning under a live
+						// owner.
 						const foreignOwners = (await readSessionOwnerPids(sessionFile)).filter(pid => pid !== process.pid);
 						if (foreignOwners.some(pid => isProcessAlive(pid))) return false;
 					}
@@ -1783,6 +1790,23 @@ export class SessionManager {
 		this.#sessionFile = resolvedSessionFile;
 		this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
 
+		// Ownership established below must not outlive a failed load: a
+		// rejected open() leaves no manager reference to close, so gc would
+		// treat the session as owned until this process exits.
+		try {
+			await this.#setSessionFileGated(resolvedSessionFile, loadedSession, loadedIdentity);
+		} catch (error) {
+			this.#unregisterOwnerSidecar();
+			await this.#sidecarTail;
+			throw error;
+		}
+	}
+
+	async #setSessionFileGated(
+		resolvedSessionFile: string,
+		loadedSession: SessionLoadResult | undefined,
+		loadedIdentity: JournalIdentity | undefined,
+	): Promise<void> {
 		// Load gates, all bounded (exhaustion refuses the load rather than
 		// accepting history a concurrent gc prune just removed — a later
 		// full rewrite would resurrect it):
@@ -3492,8 +3516,11 @@ export class SessionManager {
 		storage: SessionStorage = new FileSessionStorage(),
 		options?: { initialCwd?: string; suppressBreadcrumb?: boolean },
 	): Promise<SessionManager> {
-		const loaded = await loadSessionFile(filePath, storage);
+		// Identity strictly before the read: a publish landing between the
+		// two would pair pre-prune content with a post-prune identity, and
+		// the gate loop would accept the stale snapshot as current.
 		const loadedIdentity = await journalIdentity(filePath);
+		const loaded = await loadSessionFile(filePath, storage);
 		const header = loaded.entries.find(entry => entry.type === "session") as SessionHeader | undefined;
 		// Resume into the session's recorded cwd only when it is verifiably
 		// accessible. A deleted or permission-blocked (macOS TCC denial) project

@@ -1600,7 +1600,16 @@ async function runUndoTailGc(options: ResolvedGcOptions): Promise<UndoTailGcResu
 		// in-memory tree. SessionStatus is journal-tail state ("complete"
 		// means the last turn yielded, not that nobody has it open), so it is
 		// deliberately not used here.
-		const ownerPids = await readSessionOwnerPids(session.path);
+		let ownerPids: number[];
+		try {
+			ownerPids = await readSessionOwnerPids(session.path);
+		} catch (error) {
+			// Unreadable sidecar fails closed: skip the session as an error
+			// rather than treating it as unowned and pruning beneath a
+			// possibly-live manager.
+			result.errors.push(`${session.path}: owner sidecar unreadable: ${errorMessage(error)}`);
+			continue;
+		}
 		if (ownerPids.some(pid => isProcessAlive(pid))) {
 			result.skippedLive++;
 			continue;
