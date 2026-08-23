@@ -152,6 +152,49 @@ describe("SessionManager.pruneUserUndoTails", () => {
 		expect(result).toEqual({ markers: 0, removed: 0 });
 	});
 
+	it("a newer undo nested inside an older tail survives pruning of the older marker", async () => {
+		// undo, redo back into the tail, undo again, then move the active
+		// leaf elsewhere: m2 (newest) lives inside m1's tail and must stay
+		// fully redoable while m1's tail is pruned.
+		const manager = SessionManager.inMemory();
+		manager.appendMessage(userMessage("u1"));
+		const a1 = manager.appendMessage(assistantMessage("a1"));
+		manager.appendMessage(userMessage(SECRET_TAIL_1));
+		const a2 = manager.appendMessage(assistantMessage("a2-response"));
+		const m1 = manager.branchWithSummary(a1, "", { kind: "user-undo", undoOf: a2, steps: 1, droppedPrompts: "" });
+		// redo: branch back to the a2 tip (marker m2 = user-redo, not pruned
+		// material), then continue inside the restored tail.
+		const redo = manager.branchWithSummary(a2, "", { kind: "user-redo", redoOf: m1 });
+		const u5 = manager.appendMessage(userMessage("late-in-tail"));
+		const a5 = manager.appendMessage(assistantMessage("a5-response"));
+		// undo again from inside the tail: m2's tail includes u5/a5 and the
+		// redo marker entry itself.
+		const m2 = manager.branchWithSummary(redo, "", { kind: "user-undo", undoOf: a5, steps: 1, droppedPrompts: "" });
+		// tree-switch away: active path continues from a1, markers go off-branch.
+		manager.branchWithSummary(a1, "", { kind: "manual", note: "switched away" });
+		manager.appendMessage(userMessage("fresh"));
+		manager.appendMessage(assistantMessage("fresh-reply"));
+
+		const result = await manager.pruneUserUndoTails(1, true);
+
+		// Only m1 is older than the newest marker. m2's ancestor spine runs
+		// through m1's tail, so the older prune degrades to a scrub: the tail
+		// survives instead of orphaning the retained marker.
+		expect(result.markers).toBe(1);
+		expect(result.removed).toBe(0);
+		for (const kept of [redo, u5, a5, m2, a2]) expect(manager.hasEntry(kept)).toBe(true);
+		// m2 stays redoable: its undoOf target survived.
+		const m2Entry = manager.getEntries().find(entry => entry.id === m2) as
+			| { details?: { undoOf?: string } }
+			| undefined;
+		expect(manager.hasEntry(m2Entry?.details?.undoOf ?? "")).toBe(true);
+		// The second undo's own tail must NOT survive as garbage either when
+		// it is the pruned one: run again with keep=0 semantics covered by the
+		// scrub rule instead; here just confirm idempotence.
+		const again = await manager.pruneUserUndoTails(1, true);
+		expect(again.markers).toBe(0);
+	});
+
 	it("a second run after apply is a no-op (pruned markers are excluded)", async () => {
 		const { manager } = await buildTopology();
 		const first = await manager.pruneUserUndoTails(1, true);

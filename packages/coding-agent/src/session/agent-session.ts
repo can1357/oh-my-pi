@@ -8111,9 +8111,27 @@ export class AgentSession {
 	}
 
 	/** Operator-facing context rollback: `/undo [steps]`. */
+	/**
+	 * Why rollback must refuse right now, or undefined when idle. Mirrors the
+	 * /btw branch guard: streaming, in-flight bash/python results, compaction,
+	 * handoff generation, and retries all append or rewrite history after the
+	 * operator pressed the key, and would land past the rollback boundary
+	 * (reintroducing retracted content or an invalid compaction boundary).
+	 */
+	#rollbackBlockReason(): string | undefined {
+		if (this.isStreaming) return "streaming";
+		if (this.isBashRunning) return "a bash execution is running";
+		if (this.isEvalRunning) return "a python execution is running";
+		if (this.isCompacting) return "compaction is running";
+		if (this.isGeneratingHandoff) return "handoff generation is running";
+		if (this.isRetrying) return "a retry is in progress";
+		return undefined;
+	}
+
 	userUndo(steps = 1): { ok: boolean; error?: string; droppedTurns?: number; rewoundTo?: string } {
-		if (this.isStreaming) {
-			return { ok: false, error: "Session is streaming — abort or wait before /undo." };
+		const busy = this.#rollbackBlockReason();
+		if (busy) {
+			return { ok: false, error: `Cannot /undo while ${busy}.` };
 		}
 		const entries = this.sessionManager.getBranch();
 		const userIdx = entries.reduce<number[]>((acc, entry, i) => {
@@ -8164,8 +8182,9 @@ export class AgentSession {
 
 	/** `/revert <entryId>`: rewind to before an arbitrary earlier user turn. */
 	userUndoTo(entryId: string): { ok: boolean; error?: string; droppedTurns?: number } {
-		if (this.isStreaming) {
-			return { ok: false, error: "Session is streaming — abort or wait before /revert." };
+		const busy = this.#rollbackBlockReason();
+		if (busy) {
+			return { ok: false, error: `Cannot /revert while ${busy}.` };
 		}
 		const entries = this.sessionManager.getBranch();
 		const idx = entries.findIndex(entry => entry.id === entryId && this.#isUserTurnEntry(entry));
@@ -8216,6 +8235,11 @@ export class AgentSession {
 		this.#advisors.resetSessionState({ preserveCost: true });
 		// Todos are deliberately NOT rehydrated from the rewound branch: the
 		// rollback contract is context-only, so live todo state survives.
+		// Checkpoint/rewind runtime state IS rebuilt from the new branch (same
+		// as session switch): a #checkpointState pointing into the dropped
+		// tail would make #enforceRewindBeforeYield branch straight back to
+		// it, restoring what /undo just removed.
+		this.#rehydrateCheckpointRewindState();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		return { ok: true, droppedTurns: n, rewoundTo: target.timestamp };
 	}
@@ -8226,8 +8250,9 @@ export class AgentSession {
 	 * appends new turns, redo refuses rather than abandon them.
 	 */
 	userRedo(): { ok: boolean; error?: string } {
-		if (this.isStreaming) {
-			return { ok: false, error: "Session is streaming — abort or wait before /redo." };
+		const busy = this.#rollbackBlockReason();
+		if (busy) {
+			return { ok: false, error: `Cannot /redo while ${busy}.` };
 		}
 		const entries = this.sessionManager.getBranch();
 		let lastBranch: BranchSummaryEntry | undefined;
@@ -8264,6 +8289,8 @@ export class AgentSession {
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#advisors.resetSessionState({ preserveCost: true });
+		// Same as /undo: rebuild checkpoint state from the restored branch.
+		this.#rehydrateCheckpointRewindState();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		return { ok: true };
 	}

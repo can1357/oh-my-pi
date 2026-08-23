@@ -71,10 +71,13 @@ import {
 import { generateId, migrateToCurrentVersion } from "./session-migrations";
 
 /**
- * Owner sidecar (`<session>.jsonl.owner`): written while this process holds
- * the session's append writer, removed when the writer closes. Crash-safe
- * liveness signal for out-of-process maintenance (gc): a stale sidecar is
- * detected by checking the recorded pid.
+ * Owner sidecar (`<session>.jsonl.owner`): append-only registry of the pids
+ * holding this session's append writer, one per line. A process appends its
+ * line when it acquires the writer and removes only its own line on close
+ * (the file is unlinked once empty). Crash-safe liveness signal for
+ * out-of-process maintenance (gc): concurrent owners each keep a line, and
+ * stale lines name dead pids, so the session counts as unowned only when
+ * every recorded pid is gone.
  */
 function ownerSidecarPath(sessionFile: string): string {
 	return `${sessionFile}.owner`;
@@ -82,7 +85,8 @@ function ownerSidecarPath(sessionFile: string): string {
 
 function writeOwnerSidecar(sessionFile: string): void {
 	try {
-		fs.writeFileSync(ownerSidecarPath(sessionFile), `${process.pid}\n`, { encoding: "utf-8", mode: 0o600 });
+		// Append, never overwrite: another process may already hold a claim.
+		fs.appendFileSync(ownerSidecarPath(sessionFile), `${process.pid}\n`, { encoding: "utf-8", mode: 0o600 });
 	} catch {
 		// Best-effort ownership hint; readers fall back to treating the
 		// session as unowned when the sidecar is unreadable.
@@ -91,19 +95,33 @@ function writeOwnerSidecar(sessionFile: string): void {
 
 function removeOwnerSidecar(sessionFile: string): void {
 	try {
-		fs.unlinkSync(ownerSidecarPath(sessionFile));
+		const file = ownerSidecarPath(sessionFile);
+		const kept = fs
+			.readFileSync(file, "utf-8")
+			.split("\n")
+			.filter(line => line.trim() !== "" && Number(line.trim()) !== process.pid)
+			.map(line => line.trim());
+		if (kept.length === 0) fs.unlinkSync(file);
+		else fs.writeFileSync(file, `${kept.join("\n")}\n`, { encoding: "utf-8", mode: 0o600 });
 	} catch {
 		// Absent, or already replaced by a newer owner's claim.
 	}
 }
 
-/** Recorded owner pid for a session file, when a sidecar exists and parses. */
-export function readSessionOwnerPid(sessionFile: string): number | undefined {
+/** Recorded owner pids for a session file (stale/dead pids included). */
+export function readSessionOwnerPids(sessionFile: string): number[] {
 	try {
-		const pid = Number.parseInt(fs.readFileSync(ownerSidecarPath(sessionFile), "utf-8").trim(), 10);
-		return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+		return [
+			...new Set(
+				fs
+					.readFileSync(ownerSidecarPath(sessionFile), "utf-8")
+					.split("\n")
+					.map(line => Number.parseInt(line.trim(), 10))
+					.filter(pid => Number.isInteger(pid) && pid > 0),
+			),
+		];
 	} catch {
-		return undefined;
+		return [];
 	}
 }
 
@@ -2805,6 +2823,37 @@ export class SessionManager {
 			id = this.#index.get(id)?.parentId ?? null;
 		}
 
+		// Retained markers stay fully redoable, which protects more than their
+		// own tail: a newer undo can live inside an older undo's tail (undo,
+		// redo back into it, undo again), and its marker is topologically a
+		// descendant of that tail. Deleting the older tail would orphan the
+		// retained marker, so protection covers the retained marker itself,
+		// its rewind target's full ancestor spine (journal integrity: a kept
+		// entry needs its parents), and the target's subtree (the restored
+		// conversation). When a retained marker sits inside an older tail,
+		// that older prune degrades to a marker scrub with nothing removed.
+		const protectedIds = new Set<string>();
+		const protectSubtree = (root: string): void => {
+			const queue = [root];
+			while (queue.length > 0) {
+				const id = queue.pop()!;
+				if (protectedIds.has(id)) continue;
+				protectedIds.add(id);
+				for (const child of this.#index.childrenOf(id)) queue.push(child.id);
+			}
+		};
+		for (const retained of markers.slice(markers.length - keep)) {
+			protectedIds.add(retained.id);
+			const details = retained.details as { undoOf?: string | null } | undefined;
+			const tip = details?.undoOf ?? null;
+			if (!tip || !this.#index.has(tip)) continue;
+			protectSubtree(tip);
+			for (let id = this.#index.get(tip)?.parentId ?? null; id; id = this.#index.get(id)?.parentId ?? null) {
+				if (protectedIds.has(id)) break;
+				protectedIds.add(id);
+			}
+		}
+
 		const doomed = new Set<string>();
 		const toScrub: BranchSummaryEntry[] = [];
 		for (const marker of markers.slice(0, markers.length - keep)) {
@@ -2812,21 +2861,23 @@ export class SessionManager {
 			const details = marker.details as { undoOf?: string | null } | undefined;
 			const stop = marker.parentId ?? null;
 			let id = details?.undoOf ?? null;
-			while (id && id !== stop && !reachable.has(id)) {
+			while (id && id !== stop && !reachable.has(id) && !protectedIds.has(id)) {
 				const entry = this.#index.get(id);
 				if (!entry) break;
 				doomed.add(id);
-				for (const child of this.#index.childrenOf(id)) doomed.add(child.id);
+				for (const child of this.#index.childrenOf(id)) {
+					if (!protectedIds.has(child.id)) doomed.add(child.id);
+				}
 				id = entry.parentId ?? null;
 			}
 			// Descendants of the chain (redo remnants, subagent forks off the
 			// dropped tail) are covered by childrenOf only one level deep;
-			// collect transitively.
+			// collect transitively, never crossing into protected subtrees.
 			const queue = [...doomed];
 			while (queue.length > 0) {
 				const current = queue.pop()!;
 				for (const child of this.#index.childrenOf(current)) {
-					if (!doomed.has(child.id)) {
+					if (!doomed.has(child.id) && !protectedIds.has(child.id)) {
 						doomed.add(child.id);
 						queue.push(child.id);
 					}
