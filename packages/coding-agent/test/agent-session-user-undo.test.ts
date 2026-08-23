@@ -75,7 +75,7 @@ describe("AgentSession user undo/redo", () => {
 	let tempDir: string;
 	const authStorages: AuthStorage[] = [];
 
-	async function makeSession(): Promise<AgentSession> {
+	async function makeSession(ttsrSettings?: Record<string, unknown>): Promise<AgentSession> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
 		mockModel = mock;
@@ -91,7 +91,7 @@ describe("AgentSession user undo/redo", () => {
 		// Scoped to the test temp dir so local:// artifact URLs (plan files)
 		// resolve inside the sandbox instead of the real session store.
 		sessionManager = SessionManager.inMemory(tempDir);
-		ttsrManager = new TtsrManager();
+		ttsrManager = new TtsrManager(ttsrSettings as never);
 		return new AgentSession({
 			agent,
 			sessionManager,
@@ -130,6 +130,31 @@ describe("AgentSession user undo/redo", () => {
 		sessionManager.appendMessage(assistantMessage("OK B"));
 		sessionManager.appendMessage(userMessage(`Remember ${SECRET_C}`));
 		sessionManager.appendMessage(assistantMessage("OK C"));
+	}
+
+	async function makeFileBackedSession(sessionFileName: string): Promise<void> {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		mockModel = mock;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(path.join(tempDir, `auth-${sessionFileName}.db`));
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		sessionManager = SessionManager.create(tempDir, tempDir);
+		await sessionManager.setSessionFile(path.join(tempDir, sessionFileName));
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+			ttsrManager: new TtsrManager(),
+		});
 	}
 
 	it("undo recomputes the plan-reference delivery flag from the branch", async () => {
@@ -658,6 +683,96 @@ describe("AgentSession user undo/redo", () => {
 		manager.incrementMessageCount();
 		const matched = manager.checkSnapshot(snapshot(), context);
 		expect(matched.map(rule => rule.name)).toEqual(["gap-rule"]);
+	});
+
+	it("a plan reference before a reset boundary does not count as delivered", async () => {
+		await makeFileBackedSession("plan-boundary.jsonl");
+		const planUrl = "local" + "://approved-plan-boundary.md";
+		const resolved = resolveLocalUrlToPath(planUrl, {
+			getArtifactsDir: () => sessionManager.getArtifactsDir() ?? tempDir,
+			getSessionId: () => sessionManager.getSessionId(),
+		});
+		fs.mkdirSync(path.dirname(resolved), { recursive: true });
+		fs.writeFileSync(resolved, "# Approved Plan\n");
+
+		// Delivered reference inside turn A...
+		sessionManager.appendMessage(userMessage(`Remember ${SECRET_A}`));
+		sessionManager.appendMessage({
+			role: "custom",
+			customType: "plan-mode-reference",
+			content: [{ type: "text", text: `Plan at ${planUrl}` }],
+			display: false,
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+		sessionManager.appendMessage(assistantMessage("OK A"));
+		// ...then /clear, then a later turn with no reference.
+		sessionManager.appendResetBoundary();
+		sessionManager.appendMessage(userMessage(`Remember ${SECRET_B}`));
+		sessionManager.appendMessage(assistantMessage("OK B"));
+		session.setPlanReferencePath(planUrl);
+		session.markPlanReferenceSent();
+
+		const undo = session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		// The only reference predates the boundary and is excluded from the
+		// rebuilt context, so delivery is NOT marked and the next prompt
+		// re-injects the plan.
+		await session.sendUserMessage("next turn");
+		const seen = mockModel.calls.at(-1)?.context.messages ?? [];
+		const seenText = seen
+			.map(message => {
+				if (!("content" in message)) return "";
+				return typeof message.content === "string"
+					? message.content
+					: Array.isArray(message.content)
+						? message.content.map(part => (part.type === "text" ? part.text : "")).join(" ")
+						: "";
+			})
+			.join("\n");
+		expect(seenText).toContain(planUrl);
+		await sessionManager.close();
+	});
+
+	it("redo restores TTSR timing from the branch, not zero", async () => {
+		session = await makeSession({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "after-gap",
+			repeatGap: 2,
+		});
+		ttsrManager.addRule({
+			name: "redo-rule",
+			path: "/tmp/redo-rule.md",
+			content: "body",
+			condition: ["REDOMARK"],
+			_source: {
+				provider: "test",
+				providerName: "test",
+				path: "/tmp/redo-rule.md",
+				level: "user",
+			},
+		});
+		// Turn A, then turn B carrying the injection.
+		sessionManager.appendMessage(userMessage(`Remember ${SECRET_A}`));
+		sessionManager.appendMessage(assistantMessage("OK A"));
+		sessionManager.appendMessage(userMessage(`Remember ${SECRET_B}`));
+		sessionManager.appendTtsrInjection(["redo-rule"]);
+		sessionManager.appendMessage(assistantMessage("OK B"));
+
+		const undo = session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		expect(ttsrManager.getInjectedRuleNames()).toEqual([]);
+
+		const redo = session.userRedo();
+		expect(redo.ok).toBe(true);
+		expect(ttsrManager.getInjectedRuleNames()).toEqual(["redo-rule"]);
+		// Restored branch has 2 turns and the injection sits at position 2:
+		// gap 0, the rule must NOT be eligible yet. A zeroed record would
+		// give gap 2 and re-trigger immediately.
+		expect(ttsrManager.getMessageCount()).toBe(2);
+		expect(ttsrManager.checkSnapshot("payload REDOMARK", { source: "text" })).toEqual([]);
 	});
 
 	it("getUserTurns previews are sanitized and width-bounded", async () => {
