@@ -343,17 +343,88 @@ describe("AgentSession user undo/redo", () => {
 		expect(getLatestTodoPhasesFromEntries(branch)).toEqual([]);
 	});
 
+	it("undo preserves the model role the session was switched through", async () => {
+		session = await makeSession();
+		await seedThreeTurns();
+		sessionManager.appendMessage(userMessage(`More ${SECRET_C}`));
+		sessionManager.appendMessage(assistantMessage("OK tail"));
+		// Role switch lands inside the dropped tail.
+		const smol = getBundledModel("anthropic", "claude-haiku-4-5")!;
+		await session.setModel(smol, "smol");
+
+		const undo = session.userUndo(1);
+		expect(undo.ok).toBe(true);
+
+		expect(sessionManager.getLastModelChangeRole()).toBe("smol");
+		const branch = sessionManager.getBranch();
+		const markerIdx = branch.findIndex(entry => entry.type === "branch_summary");
+		const roleEntry = branch.slice(markerIdx + 1).find(entry => entry.type === "model_change") as
+			| { model?: string; role?: string }
+			| undefined;
+		expect(roleEntry?.model).toBe("anthropic/claude-haiku-4-5");
+		expect(roleEntry?.role).toBe("smol");
+	});
+
+	it("undo re-journals the live mode so a reload keeps it", async () => {
+		session = await makeSession();
+		await seedThreeTurns();
+		sessionManager.appendMessage(userMessage(`More ${SECRET_C}`));
+		sessionManager.appendMessage(assistantMessage("OK tail"));
+		// The mode transition lives in the dropped tail; the live process
+		// keeps running in the mode, so it must be re-recorded.
+		sessionManager.appendModeChange("plan", { planFilePath: "/tmp/plan.md" });
+
+		const undo = session.userUndo(1);
+		expect(undo.ok).toBe(true);
+
+		const branch = sessionManager.getBranch();
+		const markerIdx = branch.findIndex(entry => entry.type === "branch_summary");
+		const modeEntry = branch.slice(markerIdx + 1).find(entry => entry.type === "mode_change") as
+			| { mode?: string; data?: Record<string, unknown> }
+			| undefined;
+		expect(modeEntry?.mode).toBe("plan");
+		expect(modeEntry?.data?.planFilePath).toBe("/tmp/plan.md");
+		expect(sessionManager.buildSessionContext().mode).toBe("plan");
+
+		// The snapshot entry rides after the marker: redo still applies.
+		const redo = session.userRedo();
+		expect(redo.ok).toBe(true);
+	});
+
+	it("getUserTurns previews are sanitized and width-bounded", async () => {
+		session = await makeSession();
+		const wide = "漢".repeat(200);
+		sessionManager.appendMessage(userMessage(`tab\there ${wide} \u001b[31mred\u001b[0m`));
+
+		const turns = session.getUserTurns();
+		expect(turns.length).toBe(1);
+		const preview = turns[0]!.preview;
+		expect(preview.includes("\t")).toBe(false);
+		expect(preview.includes("\u001b")).toBe(false);
+		expect(Bun.stringWidth(preview) <= 120).toBe(true);
+	});
+
+	it("getUserTurns reaches turns beyond the old fifty-turn window", async () => {
+		session = await makeSession();
+		for (let i = 0; i < 55; i++) {
+			sessionManager.appendMessage(userMessage(`turn-${i}`));
+		}
+		const turns = session.getUserTurns();
+		expect(turns.length).toBe(55);
+		expect(turns[0]!.entryId).toBeDefined();
+	});
+
 	it("undo refuses while post-prompt work is pending", async () => {
 		session = await makeSession();
 		await seedThreeTurns();
-		let settle: (() => void) | undefined;
-		session.trackPostPromptTaskForTests(new Promise<void>(resolve => (settle = resolve)));
+		const { promise: pending, resolve: settle } = Promise.withResolvers<void>();
+		session.trackPostPromptTaskForTests(pending);
 
 		const undo = session.userUndo(1);
 		expect(undo.ok).toBe(false);
 		expect(undo.error).toContain("post-prompt work");
 
-		settle?.();
+		settle();
 		// The tracked task removes itself in a .finally() microtask.
 		await Bun.sleep(1);
 		const after = session.userUndo(1);

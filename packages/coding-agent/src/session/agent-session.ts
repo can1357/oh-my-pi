@@ -81,6 +81,7 @@ import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { type EditStore, PowerAssertion, type PowerAssertionOptions } from "@oh-my-pi/pi-natives";
+import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
 import {
 	$env,
 	escapeXmlText,
@@ -93,6 +94,7 @@ import {
 	postmortem,
 	prompt,
 	Snowflake,
+	sanitizeText,
 	stringProperty,
 	withTimeout,
 } from "@oh-my-pi/pi-utils";
@@ -8125,7 +8127,7 @@ export class AgentSession {
 	 * the old model. Entries land after the undo marker; userRedo tolerates
 	 * control entries between the marker and the leaf for exactly this reason.
 	 */
-	#rejournalControlEntries(): void {
+	#rejournalControlEntries(liveRole: string = "default"): void {
 		let branchModel: string | undefined;
 		let branchThinkingLevel: string | undefined;
 		let branchThinkingConfigured: string | undefined;
@@ -8144,7 +8146,7 @@ export class AgentSession {
 		}
 		const live = this.model;
 		if (live && `${live.provider}/${live.id}` !== branchModel) {
-			this.sessionManager.appendModelChange(`${live.provider}/${live.id}`, "default");
+			this.sessionManager.appendModelChange(`${live.provider}/${live.id}`, liveRole);
 		}
 		const liveThinking = this.thinkingLevel;
 		// Compare the configured selector too: `medium` vs `auto` resolving to
@@ -8172,6 +8174,18 @@ export class AgentSession {
 	 * reload syncs phases from the branch, where the latest todo tool result
 	 * is now off-branch; without a snapshot the visible list reverts on load.
 	 */
+	/**
+	 * Re-record the live mode on the rewound branch. Mode transitions always
+	 * journal, so the pre-rewind journal entry IS the live state; when the
+	 * rewind drops the transition, a reload would otherwise reconcile to
+	 * `none` while the process keeps running in that mode.
+	 */
+	#rejournalModeEntry(mode: string, modeData: Record<string, unknown> | undefined): void {
+		const rewound = this.sessionManager.buildSessionContext();
+		if (rewound.mode === mode) return;
+		this.sessionManager.appendModeChange(mode, modeData);
+	}
+
 	#recordTodoSnapshot(): void {
 		const phases = this.getTodoPhases();
 		const branchLatest = getLatestTodoPhasesFromEntries(this.sessionManager.getBranch());
@@ -8218,7 +8232,7 @@ export class AgentSession {
 	}
 
 	/** Active-path user turns (oldest first), for the `/revert` picker. */
-	getUserTurns(limit = 50): Array<{ entryId: string; timestamp: string; preview: string }> {
+	getUserTurns(limit = Number.POSITIVE_INFINITY): Array<{ entryId: string; timestamp: string; preview: string }> {
 		return this.sessionManager
 			.getBranch()
 			.filter(entry => this.#isUserTurnEntry(entry))
@@ -8226,8 +8240,17 @@ export class AgentSession {
 			.map(entry => ({
 				entryId: entry.id,
 				timestamp: entry.timestamp,
-				preview: this.#messageTextPreview(entry.message).slice(0, 120),
+				preview: this.#previewText(entry.message),
 			}));
+	}
+
+	/**
+	 * Sanitized, display-width-bounded first line of a message, for pickers
+	 * and journal metadata: tabs expand, control/escape sequences strip, and
+	 * truncation follows rendered width rather than code units.
+	 */
+	#previewText(message: AgentMessage): string {
+		return truncateToWidth(replaceTabs(sanitizeText(this.#messageTextPreview(message))), 120);
 	}
 
 	/** First non-empty text line of a message, for previews and prompt lists. */
@@ -8279,10 +8302,16 @@ export class AgentSession {
 		const target = entries[userTurnIdx] as SessionMessageEntry;
 		const anchorId = entries[userTurnIdx - 1]?.id ?? null;
 		const previousLeafId = this.sessionManager.getLeafId();
+		// Live role and mode state are only derivable from the pre-rewind
+		// journal: capture before the branch switch, then re-journal what the
+		// rewound branch lost (role for retry-fallback chains, mode so a
+		// reload does not silently exit plan/vibe/goal).
+		const liveRole = this.sessionManager.getLastModelChangeRole() ?? "default";
+		const preRewindMode = this.sessionManager.buildSessionContext();
 		const droppedPrompts = entries
 			.slice(userTurnIdx)
 			.filter(entry => this.#isUserTurnEntry(entry))
-			.map(entry => `- ${this.#messageTextPreview(entry.message).slice(0, 120)}`)
+			.map(entry => `- ${this.#previewText(entry.message)}`)
 			.join("\n");
 		// SILENT undo contract: state after /undo is indistinguishable in
 		// context from the dropped turns never having happened. No rendered
@@ -8312,8 +8341,9 @@ export class AgentSession {
 		// tail would make #enforceRewindBeforeYield branch straight back to
 		// it, restoring what /undo just removed.
 		this.#rehydrateCheckpointRewindState();
-		this.#rejournalControlEntries();
+		this.#rejournalControlEntries(liveRole);
 		this.#recordTodoSnapshot();
+		this.#rejournalModeEntry(preRewindMode.mode, preRewindMode.modeData);
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		return { ok: true, droppedTurns: n, rewoundTo: target.timestamp };
 	}
@@ -8360,6 +8390,7 @@ export class AgentSession {
 						entry.type === "model_change" ||
 						entry.type === "thinking_level_change" ||
 						entry.type === "service_tier_change" ||
+						entry.type === "mode_change" ||
 						(entry.type === "custom" && entry.customType === USER_TODO_EDIT_CUSTOM_TYPE),
 				);
 		if (!lastBranch || (lastBranch.id !== this.sessionManager.getLeafId() && !onlyControlsTrailing)) {
