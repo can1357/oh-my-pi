@@ -282,6 +282,22 @@ describe("omp gc --undo-tails (CLI)", () => {
 		expect(readSessionOwnerPids(sessionFile)).toEqual([]);
 	});
 
+	it("a resumed session owns its file from open, without appending anything", async () => {
+		await buildSessionWithTwoUndoTails();
+		const manager = SessionManager.create(sessionsDir, sessionsDir);
+		await manager.setSessionFile(sessionFile);
+		// No entries recorded: ownership must already be registered so an
+		// idle resume (or a title-only change, which bypasses #recordEntry)
+		// is not pruned by gc.
+		expect(readSessionOwnerPids(sessionFile)).toContain(process.pid);
+
+		await manager.setSessionName("retitle-only", "user");
+		expect(readSessionOwnerPids(sessionFile)).toContain(process.pid);
+
+		await manager.close();
+		expect(readSessionOwnerPids(sessionFile)).toEqual([]);
+	});
+
 	it("a compaction-style rewriteEntries keeps the session owned while the manager is open", async () => {
 		const manager = SessionManager.create(sessionsDir, sessionsDir);
 		await manager.setSessionFile(sessionFile);
