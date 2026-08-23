@@ -8159,9 +8159,7 @@ export class AgentSession {
 		const entries = this.sessionManager.getBranch();
 		const idx = entries.findIndex(
 			entry =>
-				entry.id === entryId &&
-				entry.type === "message" &&
-				(entry as SessionMessageEntry).message.role === "user",
+				entry.id === entryId && entry.type === "message" && (entry as SessionMessageEntry).message.role === "user",
 		);
 		if (idx === -1) {
 			return { ok: false, error: "Turn not found on the active path." };
@@ -8198,17 +8196,13 @@ export class AgentSession {
 		// summary makes session-context.ts skip rendering (same pattern as
 		// DISCARDED_ENTRY_BRANCH_MARKER).
 		this.#bash.withBranchTransition(() => {
-			this.sessionManager.branchWithSummary(
-				anchorId,
-				"",
-				{
-					kind: "user-undo",
-					undoOf: previousLeafId,
-					steps: n,
-					droppedPrompts,
-					rewoundAt: new Date().toISOString(),
-				},
-			);
+			this.sessionManager.branchWithSummary(anchorId, "", {
+				kind: "user-undo",
+				undoOf: previousLeafId,
+				steps: n,
+				droppedPrompts,
+				rewoundAt: new Date().toISOString(),
+			});
 		});
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
@@ -8237,7 +8231,10 @@ export class AgentSession {
 		}
 		const details = lastBranch?.details as { kind?: string; undoOf?: string | null } | undefined;
 		if (details?.kind !== "user-undo" || !details.undoOf) {
-			return { ok: false, error: "No /undo to redo (last branch change was not a /undo, or turns were appended since)." };
+			return {
+				ok: false,
+				error: "No /undo to redo (last branch change was not a /undo, or turns were appended since).",
+			};
 		}
 		const tipId = details.undoOf;
 		// Silent like /undo: the marker renders nothing, so context after

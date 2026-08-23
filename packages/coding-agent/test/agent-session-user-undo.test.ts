@@ -11,6 +11,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
+import type { Message } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -20,8 +21,6 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { Message } from "@oh-my-pi/pi-ai";
 
 const SECRET_A = "MARKER-ALPHA-7";
 const SECRET_B = "MARKER-BRAVO-3";
@@ -39,7 +38,14 @@ function assistantMessage(text: string): Message {
 		provider: "anthropic",
 		model: "test-model",
 		stopReason: "stop",
-		usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 } },
+		usage: {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 },
+		},
 		timestamp: Date.now(),
 	};
 }
@@ -155,7 +161,9 @@ describe("AgentSession user undo/redo", () => {
 		expect(sessionManager.getEntries().length).toBeGreaterThan(preUndoEntries);
 		const anyText = sessionManager
 			.getEntries()
-			.map(entry => (entry.type === "message" && "content" in entry.message ? JSON.stringify(entry.message.content) : ""))
+			.map(entry =>
+				entry.type === "message" && "content" in entry.message ? JSON.stringify(entry.message.content) : "",
+			)
 			.join("");
 		expect(anyText).toContain(SECRET_C);
 	});
@@ -184,9 +192,7 @@ describe("AgentSession user undo/redo", () => {
 			.filter(entry => entry.type === "custom_message" && JSON.stringify(entry).includes("rewound"));
 		expect(reportEntries.length).toBe(0);
 
-		const branchEntries = sessionManager
-			.getBranch()
-			.filter(entry => entry.type === "branch_summary") as Array<{
+		const branchEntries = sessionManager.getBranch().filter(entry => entry.type === "branch_summary") as Array<{
 			summary: string;
 			details?: { droppedPrompts?: string; kind?: string; steps?: number; undoOf?: string | null };
 		}>;

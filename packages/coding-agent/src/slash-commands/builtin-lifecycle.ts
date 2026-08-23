@@ -211,7 +211,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		handle: async (command, runtime) => {
 			const steps = Number.parseInt(command.args?.trim() ?? "1", 10);
 			const result = runtime.session.userUndo(Number.isFinite(steps) ? steps : 1);
-			await runtime.output(result.ok ? `Undid ${result.droppedTurns} turn(s).` : result.error ?? "Undo failed.");
+			await runtime.output(result.ok ? `Undid ${result.droppedTurns} turn(s).` : (result.error ?? "Undo failed."));
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
@@ -233,7 +233,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			runtime.ctx.session.isStreaming ? "Redo: unavailable while streaming" : "Redo: restore undone turns",
 		handle: async (_command, runtime) => {
 			const result = runtime.session.userRedo();
-			await runtime.output(result.ok ? "Redone — undone turns restored." : result.error ?? "Redo failed.");
+			await runtime.output(result.ok ? "Redone — undone turns restored." : (result.error ?? "Redo failed."));
 			return commandConsumed();
 		},
 		handleTui: async (_command, runtime) => {
@@ -262,9 +262,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			}
 			const arg = command.args.trim();
 			if (!arg) {
-				const listing = turns
-					.map((turn, i) => `${i + 1}. ${turn.preview} (${turn.timestamp})`)
-					.join("\n");
+				const listing = turns.map((turn, i) => `${i + 1}. ${turn.preview} (${turn.timestamp})`).join("\n");
 				await runtime.output(`User turns (oldest first):\n${listing}\nUse /revert <turn#>.`);
 				return commandConsumed();
 			}
@@ -274,7 +272,9 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				return commandConsumed();
 			}
 			const result = runtime.session.userUndoTo(turns[idx]!.entryId);
-			await runtime.output(result.ok ? `Reverted — dropped ${result.droppedTurns} turn(s).` : result.error ?? "Revert failed.");
+			await runtime.output(
+				result.ok ? `Reverted — dropped ${result.droppedTurns} turn(s).` : (result.error ?? "Revert failed."),
+			);
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
