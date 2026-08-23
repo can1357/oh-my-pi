@@ -2015,9 +2015,24 @@ export class SessionManager {
 
 		const timestamp = nowIso();
 		this.#sessionId = mintSessionId();
+		const forkedSessionFile = path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
+		// Claim the fork target BEFORE switching the manager onto it: an
+		// idle fork with no durable claim and no later entry would never hit
+		// the registration backstop, and gc could prune its in-memory
+		// history. A failed claim refuses the fork with nothing changed —
+		// the old session stays claimed and active.
+		let forkClaimed = false;
+		this.#sidecarTail = this.#sidecarTail.then(async () => {
+			forkClaimed = await this.#claimOwnerSidecarFor(forkedSessionFile);
+		});
+		await this.#sidecarTail;
+		if (!forkClaimed) {
+			this.#sessionId = parentSessionId;
+			throw new SessionFileLockError(forkedSessionFile);
+		}
 		this.#unregisterOwnerSidecar();
-		this.#sessionFile = path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
-		this.#registerOwnerSidecar();
+		this.#sessionFile = forkedSessionFile;
+		this.#ownerRegisteredFile = forkedSessionFile;
 		await this.#sidecarTail;
 		this.#header = {
 			type: "session",
@@ -2107,11 +2122,18 @@ export class SessionManager {
 					// journal rename and the old claim's release, gc could
 					// discover the moved file with no destination sidecar,
 					// prune it, and have this manager's stale tree resurrect
-					// the tail on its next rewrite.
+					// the tail on its next rewrite. A failed preclaim aborts
+					// the move (nothing renamed, source claim intact) —
+					// moving without a destination claim would leave a live
+					// manager gc treats as unowned.
+					let destinationClaimed = false;
 					this.#sidecarTail = this.#sidecarTail.then(async () => {
-						await this.#claimOwnerSidecarFor(newSessionFile);
+						destinationClaimed = await this.#claimOwnerSidecarFor(newSessionFile);
 					});
 					await this.#sidecarTail;
+					if (!destinationClaimed) {
+						throw new SessionFileLockError(newSessionFile);
+					}
 				}
 
 				try {
