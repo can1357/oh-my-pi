@@ -877,15 +877,18 @@ export class SessionManager {
 	 * stays owned while this process holds it open, so gc skips it even
 	 * between writer reopens (compaction rewrites, recovery, mid-close).
 	 */
-	#registerOwnerSidecar(): void {
-		if (!this.#persist) return;
+	#registerOwnerSidecar(): Promise<void> {
+		if (!this.#persist) return this.#sidecarTail;
 		const sessionFile = this.#sessionFile;
-		if (!sessionFile || !(this.#storage instanceof FileSessionStorage)) return;
-		if (this.#ownerRegisteredFile === sessionFile) return;
+		if (!sessionFile || !(this.#storage instanceof FileSessionStorage)) return this.#sidecarTail;
+		if (this.#ownerRegisteredFile === sessionFile) return this.#sidecarTail;
 		this.#ownerRegisteredFile = sessionFile;
 		// Serialized against other processes' removals; chained on the
 		// sidecar tail so register/remove keep strict per-manager order.
+		// The returned promise resolves once OUR pid is on disk, so load
+		// paths can establish ownership before accepting a journal.
 		this.#sidecarTail = this.#sidecarTail.then(() => writeOwnerSidecar(sessionFile));
+		return this.#sidecarTail;
 	}
 
 	#unregisterOwnerSidecar(): void {
@@ -1737,12 +1740,19 @@ export class SessionManager {
 		this.#sessionFile = resolvedSessionFile;
 		this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
 
-		// Register BEFORE checking the prune marker: gc creates its marker
-		// before its publish-time owner recheck, so a marker that appears
-		// after our check implies a recheck that already saw our pid and
+		// Register — and AWAIT the sidecar write — before checking the prune
+		// marker: gc creates its marker before its publish-time owner
+		// recheck, so once our pid is durably on disk, a marker that appears
+		// after our check implies a recheck that already saw the pid and
 		// aborted. Registration is kept across the reload below — an
-		// unregistered reload window would reopen the race.
-		this.#registerOwnerSidecar();
+		// unregistered reload window would reopen the race. The write is
+		// best-effort (contention is swallowed), so verify the pid landed
+		// and retry a bounded number of times before proceeding unowned.
+		for (let attempt = 0; attempt < 5; attempt++) {
+			await this.#registerOwnerSidecar();
+			if (readSessionOwnerPids(resolvedSessionFile).includes(process.pid)) break;
+			this.#ownerRegisteredFile = undefined;
+		}
 		for (let attempt = 0; attempt < 5; attempt++) {
 			if ((await readUndoTailPruneMarkerPid(resolvedSessionFile)) === undefined) break;
 			await waitClearUndoTailPruneMarker(resolvedSessionFile);

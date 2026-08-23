@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { removeSyncWithRetries, Snowflake, tryAcquireFileLock } from "@oh-my-pi/pi-utils";
 import { collectGcErrors, type GcResult } from "../src/cli/gc-cli";
 import { isProcessAlive, readSessionOwnerPids, SessionManager } from "../src/session/session-manager";
 import { FileSessionStorage, MemorySessionStorage } from "../src/session/session-storage";
@@ -357,6 +357,30 @@ describe("omp gc --undo-tails (CLI)", () => {
 			await victim.close().catch(() => undefined);
 			await writer.close();
 		}
+	});
+
+	it("setSessionFile awaits the owner sidecar write before accepting the load", async () => {
+		await buildSessionWithTwoUndoTails();
+		// Hold the sidecar lock the way an in-flight gc marker write would.
+		// tryAcquireFileLock derives `<target>.lock`, matching the sidecar
+		// lock withFileLock(ownerSidecarPath(file)) uses.
+		const handle = tryAcquireFileLock(`${sessionFile}.owner`);
+		expect(handle?.acquired).toBe(true);
+		const manager = SessionManager.create(sessionsDir, sessionsDir);
+		let opened = false;
+		const opening = (async () => {
+			await manager.setSessionFile(sessionFile);
+			opened = true;
+		})();
+		await Bun.sleep(200);
+		// Registration is queued behind the lock, and the marker check
+		// follows the durable pid write — so the load is not accepted yet.
+		expect(opened).toBe(false);
+		handle?.release();
+		await opening;
+		expect(opened).toBe(true);
+		expect(readSessionOwnerPids(sessionFile)).toContain(process.pid);
+		await manager.close();
 	});
 
 	it("a stale marker left by a dead gc process is recovered, not awaited", async () => {

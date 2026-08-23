@@ -5524,6 +5524,23 @@ export class AgentSession {
 	 * (repeatMode "once" would then never fire again in this process while a
 	 * reload of the same branch would allow them).
 	 */
+	/**
+	 * The plan-reference delivery flag must mirror the active branch: an
+	 * undo/redo that removes or restores the delivered `plan-mode-reference`
+	 * message has to flip it too, or the next prompt would skip re-injecting
+	 * the approved plan (or re-inject a duplicate of) it.
+	 */
+	#reconcilePlanReference(): void {
+		this.#planReferenceSent = this.sessionManager
+			.getBranch()
+			.some(
+				entry =>
+					entry.type === "message" &&
+					(entry.message as { role?: string; customType?: string }).role === "custom" &&
+					(entry.message as { role?: string; customType?: string }).customType === "plan-mode-reference",
+			);
+	}
+
 	#reconcileTtsrInjections(): void {
 		const manager = this.#ttsr.manager;
 		if (!manager) return;
@@ -8377,6 +8394,7 @@ export class AgentSession {
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#advisors.resetSessionState({ preserveCost: true });
 		this.#reconcileTtsrInjections();
+		this.#reconcilePlanReference();
 		// Todos are deliberately NOT rehydrated from the rewound branch: the
 		// rollback contract is context-only, so live todo state survives.
 		// Checkpoint/rewind runtime state IS rebuilt from the new branch (same
@@ -8460,6 +8478,7 @@ export class AgentSession {
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#advisors.resetSessionState({ preserveCost: true });
 		this.#reconcileTtsrInjections();
+		this.#reconcilePlanReference();
 		// Same as /undo: rebuild checkpoint state from the restored branch.
 		this.#rehydrateCheckpointRewindState();
 		this.#rejournalControlEntries(liveRole);
