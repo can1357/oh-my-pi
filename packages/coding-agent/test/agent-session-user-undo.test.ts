@@ -268,6 +268,54 @@ describe("AgentSession user undo/redo", () => {
 		expect(redo.ok).toBe(true);
 	});
 
+	it("a tier cleared in live state is re-recorded as an explicit null after undo", async () => {
+		session = await makeSession();
+		await seedThreeTurns();
+		// Kept region set a tier; the dropped tail cleared it; the live state
+		// (null) must win and be recorded explicitly.
+		sessionManager.appendServiceTierChange({ openai: "priority" });
+		sessionManager.appendMessage(userMessage(`More ${SECRET_C}`));
+		sessionManager.appendMessage(assistantMessage("OK tail"));
+
+		const undo = session.userUndo(1);
+		expect(undo.ok).toBe(true);
+
+		const branch = sessionManager.getBranch();
+		const markerIdx = branch.findIndex(entry => entry.type === "branch_summary");
+		const trailing = branch.slice(markerIdx + 1);
+		const tierEntry = trailing.find(entry => entry.type === "service_tier_change") as
+			| { serviceTier: unknown }
+			| undefined;
+		expect(tierEntry).toBeDefined();
+		expect(tierEntry?.serviceTier).toBeNull();
+	});
+
+	it("undo snapshots live todo phases durably on the new branch", async () => {
+		session = await makeSession();
+		await seedThreeTurns();
+		const phases = [{ name: "work", tasks: [{ content: "one", status: "pending" as const }] }];
+		session.setTodoPhases(phases);
+
+		const undo = session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		// Live phases untouched...
+		expect(session.getTodoPhases()).toEqual(phases);
+		// ...and a durable snapshot entry exists after the marker, so a reload
+		// syncs back to the same phases instead of the off-branch tool result.
+		const branch = sessionManager.getBranch();
+		const markerIdx = branch.findIndex(entry => entry.type === "branch_summary");
+		const snapshot = branch
+			.slice(markerIdx + 1)
+			.find(entry => entry.type === "custom" && entry.customType === "user_todo_edit") as
+			| { data?: { phases?: Array<{ name: string; tasks: Array<{ content: string; status: string }> }> } }
+			| undefined;
+		expect(snapshot?.data?.phases).toEqual(phases);
+
+		const redo = session.userRedo();
+		expect(redo.ok).toBe(true);
+		expect(session.getTodoPhases()).toEqual(phases);
+	});
+
 	it("undo refuses while post-prompt work is pending", async () => {
 		session = await makeSession();
 		await seedThreeTurns();

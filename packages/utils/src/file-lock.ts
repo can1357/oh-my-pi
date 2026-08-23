@@ -42,6 +42,9 @@ async function acquireLock(filePath: string, options: FileLockOptions = {}): Pro
 	throw new Error(`Failed to acquire lock for ${filePath} after ${opts.retries} attempts`);
 }
 
+/** Named handle type for the OS-backed lock (stable API surface for callers). */
+export type FileLockHandle = NativeFileLock;
+
 /**
  * Synchronous non-blocking claim on the same lock {@link withFileLock} uses.
  * Sync call sites (session writer open, synchronous rewrites) pair this with
