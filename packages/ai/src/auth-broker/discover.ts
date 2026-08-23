@@ -42,6 +42,24 @@ export interface DiscoverAuthStorageOptions {
 	accountPool?: AuthBrokerAccountPool;
 }
 
+const SNAPSHOT_CACHE_REACHABILITY_TIMEOUT_MS = 500;
+
+/**
+ * Bound only the reachability decision. The client's health request uses the
+ * same fetch transport (including proxy routing) as snapshot requests, while
+ * the authenticated snapshot body keeps its normal request timeout.
+ */
+async function isAuthBrokerReachable(client: AuthBrokerClient): Promise<boolean> {
+	try {
+		await client.healthz(AbortSignal.timeout(SNAPSHOT_CACHE_REACHABILITY_TIMEOUT_MS));
+		return true;
+	} catch (error) {
+		// Any HTTP response proves the transport reached the broker. Network and
+		// timeout failures leave startup on the fresh cached snapshot.
+		return error instanceof AuthBrokerError && error.status !== undefined;
+	}
+}
+
 /** Path to the local bearer token file. Created by `omp auth-broker token`. */
 export function getAuthBrokerTokenFilePath(): string {
 	return path.join(getConfigRootDir(), "auth-broker.token");
@@ -270,23 +288,23 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		}
 
 		let initialSnapshot = cachedSnapshot;
-		if (!cachedSnapshot) {
-			// No usable cache: block on the broker so a misconfigured/unreachable
-			// broker or revoked token fails startup with an actionable error
-			// (issue #8096) instead of yielding an empty credential store.
-			const initialResult = await client.fetchSnapshot();
-			if (initialResult.status !== 200)
-				throw new AuthBrokerError("Auth broker returned no initial snapshot", {
-					status: initialResult.status,
-				});
-			initialSnapshot = initialResult.snapshot;
-			persist?.(initialSnapshot);
+		if (!cachedSnapshot || (await isAuthBrokerReachable(client))) {
+			try {
+				// No usable cache must fail normally. With a fresh cache, a
+				// reachable broker gets a full authenticated fetch so the current
+				// snapshot or an authorization rejection wins synchronously.
+				const initialResult = await client.fetchSnapshot();
+				if (initialResult.status !== 200)
+					throw new AuthBrokerError("Auth broker returned no initial snapshot", {
+						status: initialResult.status,
+					});
+				initialSnapshot = initialResult.snapshot;
+				persist?.(initialSnapshot);
+			} catch (error) {
+				if (!cachedSnapshot || (error instanceof AuthBrokerError && [401, 403].includes(error.status ?? 0)))
+					throw error;
+			}
 		}
-		// Fresh cache: stale-while-revalidate. The store's constructor starts its
-		// background snapshot stream (or long-poll) immediately, which delivers
-		// the current generation within one RTT without blocking startup on a
-		// broker round trip. A token revoked since the cache was written surfaces
-		// through that background path exactly like a mid-session revocation.
 		const store = new RemoteAuthCredentialStore({
 			client,
 			initialSnapshot,
