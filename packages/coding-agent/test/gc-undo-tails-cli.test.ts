@@ -19,6 +19,7 @@ import { removeSyncWithRetries, Snowflake, tryAcquireFileLock } from "@oh-my-pi/
 import { collectGcErrors, type GcResult } from "../src/cli/gc-cli";
 import {
 	isProcessAlive,
+	journalIdentity,
 	readSessionOwnerPids,
 	SessionFileLockError,
 	SessionManager,
@@ -62,7 +63,7 @@ interface GcChildOutcome {
 async function runGcChild(
 	agentDir: string,
 	apply: boolean,
-	extra?: { passes?: string[]; keep?: number },
+	extra?: { passes?: string[]; keep?: number; interpose?: "change" | "owner" },
 ): Promise<GcChildOutcome> {
 	// Static fixture module (test/fixtures/gc-undo-tails-child.ts): the
 	// spawn env carries the agent dir, so the child's top-level imports
@@ -79,8 +80,10 @@ async function runGcChild(
 			ZELLIJ_PANE_ID: "gc-breadcrumb-test",
 			GC_TEST_AGENT_DIR: agentDir,
 			GC_TEST_APPLY: apply ? "1" : "0",
+			GC_TEST_PARENT_PID: String(process.pid),
 			...(extra?.passes ? { GC_TEST_EXTRA: extra.passes.join(",") } : {}),
 			...(extra?.keep !== undefined ? { GC_TEST_KEEP: String(extra.keep) } : {}),
+			...(extra?.interpose ? { GC_TEST_INTERPOSE: extra.interpose } : {}),
 		},
 		stdout: "pipe",
 		stderr: "pipe",
@@ -604,7 +607,7 @@ describe("omp gc --undo-tails (CLI)", () => {
 			"archive",
 			"sessions",
 			"fixture-bucket",
-			path.basename(sessionFile) + ".gz",
+			`${path.basename(sessionFile)}.gz`,
 		);
 		const restored = Bun.gunzipSync(new Uint8Array(fs.readFileSync(archiveGz)));
 		const archivedText = Buffer.from(restored).toString("utf-8");
@@ -645,6 +648,90 @@ describe("omp gc --undo-tails (CLI)", () => {
 		expect(await readSessionOwnerPids(sessionFile)).toEqual([]);
 		await manager.close();
 		expect(await readSessionOwnerPids(dest)).toEqual([]);
+	});
+
+	it("moveTo refuses while a foreign writer owns the source journal", async () => {
+		await buildSessionWithTwoUndoTails();
+		const manager = SessionManager.create(sessionsDir, sessionsDir);
+		await manager.setSessionFile(sessionFile);
+
+		const destDir = path.join(agentDir, "sessions", "move-locked");
+		// A separate process opens the append writer (and with it the
+		// journal's file lock) and stays alive.
+		const fixture = path.resolve(import.meta.dir, "fixtures/gc-undo-tails-child.ts");
+		const child = Bun.spawn({
+			cmd: [process.execPath, fixture],
+			cwd: path.resolve(import.meta.dir, ".."),
+			env: {
+				...process.env,
+				PI_CODING_AGENT_DIR: agentDir,
+				GC_TEST_MODE: "hold-writer",
+				GC_TEST_SESSION_FILE: sessionFile,
+			},
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const heldMarker = `${sessionFile}.held`;
+		try {
+			// Wait until the child's append writer (and its journal lock) is
+			// actually open — signaled via marker file, not the held-open pipe.
+			const deadline = Date.now() + 10_000;
+			while (!fs.existsSync(heldMarker)) {
+				if (Date.now() > deadline) throw new Error("hold-writer child never signaled");
+				await Bun.sleep(50);
+			}
+			await expect(manager.moveTo(path.join(agentDir, "project-locked"), destDir)).rejects.toBeInstanceOf(
+				SessionFileLockError,
+			);
+			// Nothing moved and the source claim is intact.
+			expect(fs.existsSync(sessionFile)).toBe(true);
+			expect(fs.existsSync(path.join(destDir, path.basename(sessionFile)))).toBe(false);
+			expect(await readSessionOwnerPids(sessionFile)).toContain(process.pid);
+		} finally {
+			child.kill();
+			await child.exited;
+			fs.rmSync(heldMarker, { force: true });
+		}
+
+		// The holder is gone; the same move now succeeds.
+		await manager.moveTo(path.join(agentDir, "project-locked"), destDir);
+		expect(manager.getSessionFile()).not.toBe(sessionFile);
+		await manager.close();
+	});
+
+	it("prune mtime restore skips a journal that changed after the prune", async () => {
+		await buildSessionWithTwoUndoTails();
+		const old = new Date(Date.now() - 30 * 86_400_000);
+		fs.utimesSync(sessionFile, old, old);
+		const staleMtime = fs.statSync(sessionFile).mtimeMs;
+		// A concurrent update lands between the prune publish and the
+		// restore decision (child interposes on the prune): the journal is
+		// no longer the one we pruned.
+		const outcome = await runGcChild(agentDir, true, { interpose: "change" });
+		expect(outcome.entriesRemoved).toBeGreaterThan(0);
+		// The concurrent update's fresh mtime survived — restoring the stale
+		// one would let a later archive pass treat the live session as cold.
+		expect(fs.statSync(sessionFile).mtimeMs).toBeGreaterThan(staleMtime);
+	});
+
+	it("prune mtime restore skips when a live owner appears", async () => {
+		await buildSessionWithTwoUndoTails();
+		const old = new Date(Date.now() - 30 * 86_400_000);
+		fs.utimesSync(sessionFile, old, old);
+		const staleMtime = fs.statSync(sessionFile).mtimeMs;
+		// The gc child itself registers as a live owner between prune and
+		// restore decision.
+		const outcome = await runGcChild(agentDir, true, { interpose: "owner" });
+		expect(outcome.entriesRemoved).toBeGreaterThan(0);
+		expect(fs.statSync(sessionFile).mtimeMs).toBeGreaterThan(staleMtime);
+	});
+
+	it("journal identity fails closed on unreadable stats", async () => {
+		// ENOENT reads as absent; every other stat failure propagates.
+		expect(await journalIdentity(path.join(agentDir, "missing.jsonl"))).toBeUndefined();
+		const asFile = path.join(agentDir, "not-a-dir");
+		fs.writeFileSync(asFile, "x");
+		await expect(journalIdentity(path.join(asFile, "child.jsonl"))).rejects.toThrow();
 	});
 
 	it("a failed switch followed by rollback does not double-claim the old session", async () => {

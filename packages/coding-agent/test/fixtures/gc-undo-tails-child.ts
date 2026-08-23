@@ -27,10 +27,50 @@ if (process.env.GC_TEST_MODE === "hold-open") {
 	await manager.close();
 }
 
+// Interposition for mtime-restore race coverage: mutate the journal (or
+// its ownership) between a prune's publish and the gc pass's restore
+// decision, exactly where a concurrent manager would land.
+if (process.env.GC_TEST_INTERPOSE === "change" || process.env.GC_TEST_INTERPOSE === "owner") {
+	const original = SessionManager.prototype.pruneUserUndoTails;
+	SessionManager.prototype.pruneUserUndoTails = async function (this: SessionManager, ...args) {
+		const counts = await original.apply(this, args);
+		const file = this.getSessionFile()!;
+		if (process.env.GC_TEST_INTERPOSE === "change") {
+			fs.appendFileSync(file, `${JSON.stringify({ type: "title", v: 1, title: "" })}\n`);
+		} else {
+			// A third-party owner: a live process that is not the gc child
+			// itself (its own claim is legitimate during the prune). The
+			// spawning test runner's pid is alive for the child's whole run.
+			fs.writeFileSync(`${file}.owner`, `${process.env.GC_TEST_PARENT_PID!}\n`);
+		}
+		return counts;
+	} as typeof original;
+}
+
 // Extra passes for ordering coverage (comma-separated): the combined run
 // must prune undo tails BEFORE archive moves journals out of the active
 // tree and BEFORE blob GC records tail-only references.
 const extra = (process.env.GC_TEST_EXTRA ?? "").split(",").filter(Boolean);
+// Hold-open mode with the append writer actually open: the child owns the
+// journal's file lock, so a moveTo in another process must refuse.
+if (process.env.GC_TEST_MODE === "hold-writer") {
+	const manager = await SessionManager.open(process.env.GC_TEST_SESSION_FILE!, undefined, undefined, {
+		suppressBreadcrumb: true,
+	});
+	manager.appendMessage({
+		role: "user",
+		content: [{ type: "text", text: "held" }],
+		timestamp: Date.now(),
+	} as never);
+	// Marker file instead of stdout: the test polls for it without waiting
+	// on a pipe this never-exiting child would hold open.
+	fs.writeFileSync(`${process.env.GC_TEST_SESSION_FILE!}.held`, `${process.pid}\n`);
+	console.log(`GC_TEST_HELD ${process.pid}`);
+	const { promise } = Promise.withResolvers<never>();
+	await promise;
+	await manager.close();
+}
+
 const result = await runGcCommand({
 	flags: {
 		apply,
