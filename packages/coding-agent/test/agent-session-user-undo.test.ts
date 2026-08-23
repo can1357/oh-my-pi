@@ -242,6 +242,49 @@ describe("AgentSession user undo/redo", () => {
 		expect(text).not.toContain(SECRET_C);
 	});
 
+	it("model controls changed in the undone tail are re-recorded on the new branch", async () => {
+		session = await makeSession();
+		await seedThreeTurns();
+		// Operator switched models mid-tail, then undoes past it: the live
+		// model must be re-recorded after the marker so a reload resumes it
+		// instead of the dropped entry's model.
+		sessionManager.appendModelChange("openai/gpt-dropped", "default");
+		sessionManager.appendMessage(userMessage(`One more ${SECRET_C}`));
+		sessionManager.appendMessage(assistantMessage("OK tail"));
+
+		const undo = session.userUndo(1);
+		expect(undo.ok).toBe(true);
+
+		const branch = sessionManager.getBranch();
+		const markerIdx = branch.findIndex(entry => entry.type === "branch_summary");
+		const trailing = branch.slice(markerIdx + 1);
+		expect(
+			trailing.some(entry => entry.type === "model_change" && entry.model === "anthropic/claude-sonnet-4-5"),
+		).toBe(true);
+		expect(trailing.some(entry => entry.type === "model_change" && entry.model === "openai/gpt-dropped")).toBe(false);
+
+		// Control entries after the marker do not block /redo.
+		const redo = session.userRedo();
+		expect(redo.ok).toBe(true);
+	});
+
+	it("undo refuses while post-prompt work is pending", async () => {
+		session = await makeSession();
+		await seedThreeTurns();
+		let settle: (() => void) | undefined;
+		session.trackPostPromptTaskForTests(new Promise<void>(resolve => (settle = resolve)));
+
+		const undo = session.userUndo(1);
+		expect(undo.ok).toBe(false);
+		expect(undo.error).toContain("post-prompt work");
+
+		settle?.();
+		// The tracked task removes itself in a .finally() microtask.
+		await Bun.sleep(1);
+		const after = session.userUndo(1);
+		expect(after.ok).toBe(true);
+	});
+
 	it("a user-invoked skill prompt counts as a user turn for /undo and /revert", async () => {
 		session = await makeSession();
 		sessionManager.appendMessage(userMessage(`Remember ${SECRET_A}`));

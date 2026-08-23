@@ -8112,6 +8112,42 @@ export class AgentSession {
 
 	/** Operator-facing context rollback: `/undo [steps]`. */
 	/**
+	 * Re-record the live model/thinking/tier controls on the rewound branch.
+	 * Rollback drops control-change entries that lived in the discarded tail,
+	 * but the operator's live controls survive the rollback (same contract as
+	 * todos): without re-recording, the branch would describe the old controls
+	 * while turns run under the new ones, and a reload would silently resume
+	 * the old model. Entries land after the undo marker; userRedo tolerates
+	 * control entries between the marker and the leaf for exactly this reason.
+	 */
+	#rejournalControlEntries(): void {
+		let branchModel: string | undefined;
+		let branchThinking: string | undefined;
+		let branchTier: string | undefined;
+		for (const entry of this.sessionManager.getBranch()) {
+			if (entry.type === "model_change") {
+				if ((entry.role ?? "default") === "default" && entry.model) branchModel = entry.model;
+			} else if (entry.type === "thinking_level_change") {
+				branchThinking = entry.thinkingLevel ?? "off";
+			} else if (entry.type === "service_tier_change") {
+				branchTier = JSON.stringify(entry.serviceTier ?? null);
+			}
+		}
+		const live = this.model;
+		if (live && `${live.provider}/${live.id}` !== branchModel) {
+			this.sessionManager.appendModelChange(`${live.provider}/${live.id}`, "default");
+		}
+		const liveThinking = this.thinkingLevel;
+		if (liveThinking !== undefined && liveThinking !== branchThinking) {
+			this.sessionManager.appendThinkingLevelChange(liveThinking, this.configuredThinkingLevel());
+		}
+		const liveTierEntry = this.#models.serviceTierEntry();
+		if (liveTierEntry && JSON.stringify(liveTierEntry) !== branchTier) {
+			this.sessionManager.appendServiceTierChange(liveTierEntry);
+		}
+	}
+
+	/**
 	 * Why rollback must refuse right now, or undefined when idle. Mirrors the
 	 * /btw branch guard: streaming, in-flight bash/python results, compaction,
 	 * handoff generation, and retries all append or rewrite history after the
@@ -8125,6 +8161,8 @@ export class AgentSession {
 		if (this.isCompacting) return "compaction is running";
 		if (this.isGeneratingHandoff) return "handoff generation is running";
 		if (this.isRetrying) return "a retry is in progress";
+		if (this.hasPendingAsyncWork()) return "async work is still pending";
+		if (this.hasPostPromptWork) return "post-prompt work is still pending";
 		return undefined;
 	}
 
@@ -8240,6 +8278,7 @@ export class AgentSession {
 		// tail would make #enforceRewindBeforeYield branch straight back to
 		// it, restoring what /undo just removed.
 		this.#rehydrateCheckpointRewindState();
+		this.#rejournalControlEntries();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		return { ok: true, droppedTurns: n, rewoundTo: target.timestamp };
 	}
@@ -8272,8 +8311,22 @@ export class AgentSession {
 		// Appending plain turns creates no branch summaries, so the marker can
 		// still be found after the operator continued. Redo is only safe while
 		// the marker is the active leaf: rebranching past newer turns would
-		// silently abandon them.
-		if (!lastBranch || lastBranch.id !== this.sessionManager.getLeafId()) {
+		// silently abandon them. Control entries (model/thinking/tier
+		// re-recorded by the rollback itself) are the one tolerated trailing
+		// kind: they carry no conversation.
+		const branchEntries = this.sessionManager.getBranch();
+		const markerIdx = lastBranch ? branchEntries.findIndex(entry => entry.id === lastBranch!.id) : -1;
+		const onlyControlsTrailing =
+			markerIdx !== -1 &&
+			branchEntries
+				.slice(markerIdx + 1)
+				.every(
+					entry =>
+						entry.type === "model_change" ||
+						entry.type === "thinking_level_change" ||
+						entry.type === "service_tier_change",
+				);
+		if (!lastBranch || (lastBranch.id !== this.sessionManager.getLeafId() && !onlyControlsTrailing)) {
 			return { ok: false, error: "Turns were appended after the /undo — redo is no longer possible." };
 		}
 		const tipId = details.undoOf;
@@ -8291,6 +8344,7 @@ export class AgentSession {
 		this.#advisors.resetSessionState({ preserveCost: true });
 		// Same as /undo: rebuild checkpoint state from the restored branch.
 		this.#rehydrateCheckpointRewindState();
+		this.#rejournalControlEntries();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		return { ok: true };
 	}

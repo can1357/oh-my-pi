@@ -190,6 +190,30 @@ describe("omp gc --undo-tails (CLI)", () => {
 		}
 	});
 
+	it("a second process' writer claim blocks appends to the same session file", async () => {
+		await buildSessionWithTwoUndoTails();
+		// Manager one holds the append writer (and its lock claim).
+		const holder = SessionManager.create(sessionsDir, sessionsDir);
+		await holder.setSessionFile(sessionFile);
+		holder.appendMessage(userMessage("held-cold"));
+		// First append rewrites the whole file (cold path, claim released);
+		// the SECOND opens the persistent append writer and holds the claim.
+		holder.appendMessage(userMessage("held"));
+		await holder.flush();
+		try {
+			const rival = SessionManager.create(sessionsDir, sessionsDir);
+			await rival.setSessionFile(sessionFile);
+			expect(() => rival.appendMessage(userMessage("rival"))).toThrow(/locked by another process/);
+		} finally {
+			await holder.close();
+		}
+		// Claim released on close: a later writer can append again.
+		const successor = SessionManager.create(sessionsDir, sessionsDir);
+		await successor.setSessionFile(sessionFile);
+		successor.appendMessage(userMessage("successor"));
+		await successor.close();
+	});
+
 	it("collectGcErrors surfaces undo-tail failures for the exit status", () => {
 		const errors = collectGcErrors({
 			undoTails: {

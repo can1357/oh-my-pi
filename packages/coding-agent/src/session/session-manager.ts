@@ -17,6 +17,7 @@ import {
 	logger,
 	stringifyJson,
 	toError,
+	tryAcquireFileLock,
 } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentSchemaMode } from "../task/types";
 import { ArtifactManager } from "./artifacts";
@@ -122,6 +123,19 @@ export function readSessionOwnerPids(sessionFile: string): number[] {
 		];
 	} catch {
 		return [];
+	}
+}
+
+/**
+ * Raised when the session file's exclusive claim is held elsewhere (gc or
+ * another writer). Callers surface this instead of queueing a rewrite: a
+ * queued rewrite would interleave with the holder's replacement and tear the
+ * file or resurrect pruned history.
+ */
+export class SessionFileLockError extends Error {
+	constructor(sessionFile: string) {
+		super(`Session file is locked by another process (maintenance or gc); retry shortly: ${sessionFile}`);
+		this.name = "SessionFileLockError";
 	}
 }
 
@@ -586,6 +600,7 @@ export class SessionManager {
 
 	/** The single open append writer; the manager only ever writes one file at a time. */
 	#writer: SessionStorageWriter | undefined;
+	#writerLock: ReturnType<typeof tryAcquireFileLock> | undefined;
 	/** Sealed by {@link releaseRetainedEntries}: every later append/title/rewrite is a dropped no-op. */
 	#released = false;
 	/** Serializes async disk work (flush/close/atomic rewrite). Appends are synchronous and bypass it. */
@@ -740,6 +755,7 @@ export class SessionManager {
 			void writer.close().catch(() => undefined);
 			if (this.#sessionFile) removeOwnerSidecar(this.#sessionFile);
 		}
+		this.#releaseWriterLock();
 	}
 
 	async #closeWriterHandle(): Promise<void> {
@@ -747,8 +763,17 @@ export class SessionManager {
 		if (!writer) return;
 		this.#writer = undefined;
 		const sessionFile = this.#sessionFile;
+		// Release the claim before awaiting the fd close: an append landing
+		// during the in-flight close must be able to open a fresh writer, not
+		// collide with our own unreleased handle.
+		this.#releaseWriterLock();
 		await writer.close();
 		if (sessionFile) removeOwnerSidecar(sessionFile);
+	}
+
+	#releaseWriterLock(): void {
+		this.#writerLock?.release();
+		this.#writerLock = undefined;
 	}
 
 	#latchIndeterminate(operationError: Error, recoveryErrors: readonly Error[]): SessionPersistenceIndeterminateError {
@@ -877,6 +902,19 @@ export class SessionManager {
 
 		if (this.#writer?.isOpen()) return this.#writer;
 
+		if (this.#persist) {
+			// Exclusive claim, held until the writer closes: a gc rewrite (or
+			// any other whole-file replacement) must never interleave with an
+			// open append fd, or appends land on the replaced-away inode and
+			// vanish. Same-process re-acquisition fails by design, so exactly
+			// one handle owns a session file at a time.
+			const lock = tryAcquireFileLock(this.#sessionFile);
+			if (!lock?.acquired) {
+				lock?.release();
+				throw new SessionFileLockError(this.#sessionFile);
+			}
+			this.#writerLock = lock;
+		}
 		this.#writer = this.#storage.openWriter(this.#sessionFile, {
 			flags: "a",
 			onError: err => this.#noteDiskFailure(err),
@@ -942,11 +980,29 @@ export class SessionManager {
 		const targetPath = this.#liveRelocationWritePath() ?? this.#sessionFile;
 		if (!targetPath) return;
 
+		// Close (and release the append-writer claim on) any open writer
+		// before claiming the rewrite lock: both claims use the same lock
+		// path and a second same-process acquire fails by design. With the
+		// writer closed, no append fd outlives the replacement below.
+		this.#closeWriterEventually();
+
+		let rewriteLock: ReturnType<typeof tryAcquireFileLock> | undefined;
+		if (this.#persist) {
+			// Same exclusive claim the append writer holds, covering the
+			// replacement itself: an appender that woke up between gc's owner
+			// preflight and this rewrite fails its writer open (or we fail
+			// here when it got there first) instead of silently losing turns
+			// to the swapped-out inode.
+			rewriteLock = tryAcquireFileLock(targetPath);
+			if (!rewriteLock?.acquired) {
+				rewriteLock?.release();
+				throw new SessionFileLockError(targetPath);
+			}
+		}
 		try {
 			const body = this.#fileBody();
 			this.#diskEpoch++;
 			this.#diskTail = Promise.resolve();
-			this.#closeWriterEventually();
 			this.#storage.writeTextSync(targetPath, body);
 			this.#clearDiskError();
 			// Only mark the manager current when writing the active session path.
@@ -965,7 +1021,10 @@ export class SessionManager {
 				this.#hasTitleSlot = true;
 			}
 		} catch (err) {
+			if (err instanceof SessionFileLockError) throw err;
 			this.#noteDiskFailure(err);
+		} finally {
+			rewriteLock?.release();
 		}
 	}
 
@@ -1103,6 +1162,7 @@ export class SessionManager {
 				});
 			}
 		} catch (err) {
+			if (err instanceof SessionFileLockError) throw err;
 			this.#fileIsCurrent = false;
 			this.#rewriteRequired = true;
 			this.#noteDiskFailure(err);

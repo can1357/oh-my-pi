@@ -42,6 +42,16 @@ async function acquireLock(filePath: string, options: FileLockOptions = {}): Pro
 	throw new Error(`Failed to acquire lock for ${filePath} after ${opts.retries} attempts`);
 }
 
+/**
+ * Synchronous non-blocking claim on the same lock {@link withFileLock} uses.
+ * Sync call sites (session writer open, synchronous rewrites) pair this with
+ * `release()` in a `finally`; contended acquirers surface an error rather
+ * than blocking.
+ */
+export function tryAcquireFileLock(filePath: string): NativeFileLock | null {
+	return tryAcquireLock(getLockPath(filePath));
+}
+
 /** Run `fn` while holding an OS-backed exclusive lock for `filePath`. */
 export async function withFileLock<T>(
 	filePath: string,
