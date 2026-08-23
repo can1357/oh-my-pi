@@ -101,10 +101,12 @@ async function writeOwnerSidecar(sessionFile: string): Promise<void> {
 		// One line per manager instance — two managers in one process each
 		// append, and each close removes exactly one own-pid line, so the
 		// surviving manager keeps the session owned. Readers dedup by pid.
-		await withOwnerSidecarLock(sessionFile, () => {
-			fs.appendFileSync(ownerSidecarPath(sessionFile), `${process.pid}\n`, { encoding: "utf-8", mode: 0o600 });
-			return Promise.resolve();
-		});
+		await withOwnerSidecarLock(sessionFile, () =>
+			fs.promises.appendFile(ownerSidecarPath(sessionFile), `${process.pid}\n`, {
+				encoding: "utf-8",
+				mode: 0o600,
+			}),
+		);
 	} catch {
 		// Best-effort ownership hint; readers fall back to treating the
 		// session as unowned when the sidecar is unreadable.
@@ -181,17 +183,16 @@ async function removeOwnerSidecar(sessionFile: string): Promise<void> {
 		// read-modify-write cannot discard a concurrently appended claim.
 		// Removes exactly ONE own-pid line: sibling managers in this process
 		// keep theirs, so ownership survives until the last manager closes.
-		await withOwnerSidecarLock(sessionFile, () => {
-			const lines = fs
-				.readFileSync(file, "utf-8")
+		await withOwnerSidecarLock(sessionFile, async () => {
+			const content = await fs.promises.readFile(file, "utf-8");
+			const lines = content
 				.split("\n")
 				.map(line => line.trim())
 				.filter(line => line !== "");
 			const own = lines.findIndex(line => Number(line) === process.pid);
 			if (own !== -1) lines.splice(own, 1);
-			if (lines.length === 0) fs.unlinkSync(file);
-			else fs.writeFileSync(file, `${lines.join("\n")}\n`, { encoding: "utf-8", mode: 0o600 });
-			return Promise.resolve();
+			if (lines.length === 0) await fs.promises.rm(file, { force: true });
+			else await fs.promises.writeFile(file, `${lines.join("\n")}\n`, { encoding: "utf-8", mode: 0o600 });
 		});
 	} catch {
 		// Absent, or already replaced by a newer owner's claim.
@@ -1748,10 +1749,24 @@ export class SessionManager {
 		// unregistered reload window would reopen the race. The write is
 		// best-effort (contention is swallowed), so verify the pid landed
 		// and retry a bounded number of times before proceeding unowned.
-		for (let attempt = 0; attempt < 5; attempt++) {
-			await this.#registerOwnerSidecar();
-			if (readSessionOwnerPids(resolvedSessionFile).includes(process.pid)) break;
-			this.#ownerRegisteredFile = undefined;
+		if (this.#persist && this.#storage instanceof FileSessionStorage) {
+			let ownershipEstablished = false;
+			for (let attempt = 0; attempt < 5; attempt++) {
+				await this.#registerOwnerSidecar();
+				if (readSessionOwnerPids(resolvedSessionFile).includes(process.pid)) {
+					ownershipEstablished = true;
+					break;
+				}
+				this.#ownerRegisteredFile = undefined;
+			}
+			// Becoming live without a durable claim would let a concurrent
+			// gc prune history this manager still holds (its later full
+			// rewrite would resurrect the tail), so refuse the load instead.
+			// The flag is left cleared for the #recordEntry backstop if the
+			// caller retries.
+			if (!ownershipEstablished) {
+				throw new SessionFileLockError(resolvedSessionFile);
+			}
 		}
 		for (let attempt = 0; attempt < 5; attempt++) {
 			if ((await readUndoTailPruneMarkerPid(resolvedSessionFile)) === undefined) break;
@@ -1861,6 +1876,7 @@ export class SessionManager {
 		this.#unregisterOwnerSidecar();
 		this.#sessionFile = path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
 		this.#registerOwnerSidecar();
+		await this.#sidecarTail;
 		this.#header = {
 			type: "session",
 			version: CURRENT_SESSION_VERSION,
@@ -1993,6 +2009,7 @@ export class SessionManager {
 				this.#unregisterOwnerSidecar();
 				this.#sessionFile = newSessionFile;
 				this.#registerOwnerSidecar();
+				await this.#sidecarTail;
 				this.#artifactManager = null;
 				this.#artifactManagerSessionFile = null;
 				// Path is repointed; hot-path appends may use `#sessionFile` again.
@@ -2221,6 +2238,10 @@ export class SessionManager {
 	async close(): Promise<void> {
 		if (!this.#persist) return;
 		this.#unregisterOwnerSidecar();
+		// Removal is fs-async now: make the sidecar claim release durable
+		// before close() returns, or a gc run right after close would still
+		// see this manager as a live owner.
+		await this.#sidecarTail;
 		await this.#scheduleDiskWork(async () => {
 			const hadWriter = this.#writer !== undefined;
 			await this.#closeWriterHandle();

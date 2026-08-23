@@ -19,7 +19,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionFileLockError, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { TtsrManager } from "../src/export/ttsr";
 import { resolveLocalUrlToPath } from "../src/internal-urls";
@@ -589,6 +589,56 @@ describe("AgentSession user undo/redo", () => {
 		const redo = session.userRedo();
 		expect(redo.ok).toBe(true);
 		expect(ttsrManager.getInjectedRuleNames().sort()).toEqual(["dropped-rule", "kept-rule"]);
+	});
+
+	it("rollback preserves TTSR gap timing for retained rules", async () => {
+		const manager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "after-gap",
+			repeatGap: 5,
+		});
+		expect(
+			manager.addRule({
+				name: "gap-rule",
+				path: "/tmp/gap-rule.md",
+				content: "body",
+				condition: ["GAPMARK-\\d+"],
+				_source: {
+					provider: "test",
+					providerName: "test",
+					path: "/tmp/gap-rule.md",
+					level: "user",
+				},
+			}),
+		).toBe(true);
+		const context = { source: "text" as const };
+		let n = 0;
+		const snapshot = () => `chunk GAPMARK-${n++}`;
+
+		// Injected at message 3 of a gap of 5.
+		manager.incrementMessageCount();
+		manager.incrementMessageCount();
+		manager.incrementMessageCount();
+		manager.markInjectedByNames(["gap-rule"]);
+
+		// The rewind reconcile: same rule still on the retained branch.
+		manager.restoreInjected(["gap-rule"]);
+
+		// Two more messages (count 5): with timing preserved the gap is 2 —
+		// the rule must stay ineligible. A zeroed record would already
+		// re-trigger here (gap 5).
+		manager.incrementMessageCount();
+		manager.incrementMessageCount();
+		expect(manager.checkSnapshot(snapshot(), context)).toEqual([]);
+
+		// Eligible again once the real gap (5 messages since injection) elapses.
+		manager.incrementMessageCount();
+		manager.incrementMessageCount();
+		manager.incrementMessageCount();
+		const matched = manager.checkSnapshot(snapshot(), context);
+		expect(matched.map(rule => rule.name)).toEqual(["gap-rule"]);
 	});
 
 	it("getUserTurns previews are sanitized and width-bounded", async () => {
