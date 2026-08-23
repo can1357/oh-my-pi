@@ -276,15 +276,15 @@ describe("startExposure tunnel adapters", () => {
 		// and `exited` would never settle.
 		const invocation = prepareFake("Tunnel established at https://doomed-random.a.pinggy.link", { exitCode: 23 });
 		const startedAt = Date.now();
-		const active = await startExposure(
-			exposure("pinggy", {
-				publicBaseUrl: "https://stable.example.test/",
-				credentials: { token: "fake-pinggy-token" },
-			}),
-			PORT,
-		);
-		activeExposures.push(active);
-		await active.exited;
+		await expect(
+			startExposure(
+				exposure("pinggy", {
+					publicBaseUrl: "https://stable.example.test/",
+					credentials: { token: "fake-pinggy-token" },
+				}),
+				PORT,
+			),
+		).rejects.toThrow("keeps exiting right after startup");
 		// Bounded: exactly the quick-exit budget of runs, never a hot loop.
 		expect(fs.readFileSync(invocation.runsFile, "utf8")).toBe("run\n".repeat(5));
 		// Delayed: respawns sit behind 250/500/1000/2000ms backoff sleeps.
