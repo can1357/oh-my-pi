@@ -263,7 +263,7 @@ describe("omp gc --undo-tails (CLI)", () => {
 		await manager.close();
 	});
 
-	it("authoritative recovery releases the writer claim and owner sidecar", async () => {
+	it("authoritative recovery releases the writer claim but keeps manager ownership", async () => {
 		const manager = SessionManager.create(sessionsDir, sessionsDir);
 		await manager.setSessionFile(sessionFile);
 		manager.appendMessage(userMessage("recovery-cold"));
@@ -271,12 +271,30 @@ describe("omp gc --undo-tails (CLI)", () => {
 		await manager.flush();
 		expect(readSessionOwnerPids(sessionFile)).toContain(process.pid);
 
-		// Repair closes the writer and rewrites; the claim and the sidecar
-		// must go with it, or the next append fails its own stale lock.
+		// Repair closes the writer and rewrites under its own claim; the
+		// manager stays open, so ownership (and the gc skip) must survive.
 		await manager.recoverPersistenceFromCurrentState();
-		expect(readSessionOwnerPids(sessionFile)).toEqual([]);
+		expect(readSessionOwnerPids(sessionFile)).toContain(process.pid);
 
+		// The next append still works (no stale self-lock) and re-arms nothing.
 		manager.appendMessage(userMessage("recovery-after"));
+		await manager.close();
+		expect(readSessionOwnerPids(sessionFile)).toEqual([]);
+	});
+
+	it("a compaction-style rewriteEntries keeps the session owned while the manager is open", async () => {
+		const manager = SessionManager.create(sessionsDir, sessionsDir);
+		await manager.setSessionFile(sessionFile);
+		manager.appendMessage(userMessage("compaction-cold"));
+		manager.appendMessage(userMessage("compaction-writer"));
+		await manager.flush();
+		expect(readSessionOwnerPids(sessionFile)).toContain(process.pid);
+
+		// rewriteEntries closes the append writer for an atomic whole-file
+		// rewrite; the manager remains live, so gc must still see an owner.
+		await manager.rewriteEntries();
+		expect(readSessionOwnerPids(sessionFile)).toContain(process.pid);
+
 		await manager.close();
 		expect(readSessionOwnerPids(sessionFile)).toEqual([]);
 	});

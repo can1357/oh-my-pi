@@ -97,6 +97,9 @@ function ownerSidecarPath(sessionFile: string): string {
 function writeOwnerSidecar(sessionFile: string): void {
 	try {
 		// Append, never overwrite: another process may already hold a claim.
+		// Registration is manager-scoped (not writer-scoped), so skip when
+		// this pid is already recorded for the file.
+		if (readSessionOwnerPids(sessionFile).includes(process.pid)) return;
 		fs.appendFileSync(ownerSidecarPath(sessionFile), `${process.pid}\n`, { encoding: "utf-8", mode: 0o600 });
 	} catch {
 		// Best-effort ownership hint; readers fall back to treating the
@@ -821,6 +824,7 @@ export class SessionManager {
 	/** The single open append writer; the manager only ever writes one file at a time. */
 	#writer: SessionStorageWriter | undefined;
 	#writerLock: FileLockHandle | undefined;
+	#ownerRegisteredFile: string | undefined;
 	/** Sealed by {@link releaseRetainedEntries}: every later append/title/rewrite is a dropped no-op. */
 	#released = false;
 	/** Serializes async disk work (flush/close/atomic rewrite). Appends are synchronous and bypass it. */
@@ -983,7 +987,6 @@ export class SessionManager {
 		this.#writer = undefined;
 		if (writer) {
 			void writer.close().catch(() => undefined);
-			if (this.#sessionFile && this.#storage instanceof FileSessionStorage) removeOwnerSidecar(this.#sessionFile);
 		}
 		this.#releaseWriterLock();
 	}
@@ -992,18 +995,37 @@ export class SessionManager {
 		const writer = this.#writer;
 		if (!writer) return;
 		this.#writer = undefined;
-		const sessionFile = this.#sessionFile;
 		// Release the claim before awaiting the fd close: an append landing
 		// during the in-flight close must be able to open a fresh writer, not
 		// collide with our own unreleased handle.
 		this.#releaseWriterLock();
 		await writer.close();
-		if (sessionFile && this.#storage instanceof FileSessionStorage) removeOwnerSidecar(sessionFile);
 	}
 
 	#releaseWriterLock(): void {
 		this.#writerLock?.release();
 		this.#writerLock = undefined;
+	}
+
+	/**
+	 * Ownership follows the LIVE manager, not the append writer: a session
+	 * stays owned while this process holds it open, so gc skips it even
+	 * between writer reopens (compaction rewrites, recovery, mid-close).
+	 */
+	#registerOwnerSidecar(): void {
+		if (!this.#persist) return;
+		const sessionFile = this.#sessionFile;
+		if (!sessionFile || !(this.#storage instanceof FileSessionStorage)) return;
+		if (this.#ownerRegisteredFile === sessionFile) return;
+		writeOwnerSidecar(sessionFile);
+		this.#ownerRegisteredFile = sessionFile;
+	}
+
+	#unregisterOwnerSidecar(): void {
+		const registered = this.#ownerRegisteredFile;
+		if (!registered) return;
+		this.#ownerRegisteredFile = undefined;
+		removeOwnerSidecar(registered);
 	}
 
 	#latchIndeterminate(operationError: Error, recoveryErrors: readonly Error[]): SessionPersistenceIndeterminateError {
@@ -1077,8 +1099,6 @@ export class SessionManager {
 			if (writer) {
 				try {
 					await writer.close();
-					if (this.#sessionFile && this.#storage instanceof FileSessionStorage)
-						removeOwnerSidecar(this.#sessionFile);
 				} catch (error) {
 					closeError = toError(error);
 				}
@@ -1184,7 +1204,6 @@ export class SessionManager {
 			this.#releaseWriterLock();
 			throw error;
 		}
-		if (this.#persist && fileBacked) writeOwnerSidecar(this.#sessionFile);
 		return this.#writer;
 	}
 
@@ -1695,6 +1714,7 @@ export class SessionManager {
 		this.#inMemoryArtifactCounter = 0;
 
 		if (this.#persist) {
+			this.#unregisterOwnerSidecar();
 			this.#sessionFile =
 				forcedSessionFile ??
 				path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
@@ -1738,6 +1758,7 @@ export class SessionManager {
 			logger.warn("Dropped session entry appended after terminal release", { type: entry.type });
 			return;
 		}
+		this.#registerOwnerSidecar();
 		this.#entries.push(entry);
 		this.#index.insert(entry);
 		const batch = this.#atomicEntryBatch;
@@ -1890,6 +1911,7 @@ export class SessionManager {
 
 	restoreState(snapshot: SessionManagerStateSnapshot): void {
 		this.#closeWriterEventually();
+		this.#unregisterOwnerSidecar();
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
 
@@ -1980,7 +2002,7 @@ export class SessionManager {
 				`Cannot resume session "${resolvedSessionFile}": the session header is missing or malformed. The file was not modified.`,
 			);
 		}
-
+		this.#unregisterOwnerSidecar();
 		this.#sessionFile = resolvedSessionFile;
 		this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
 
@@ -2081,6 +2103,7 @@ export class SessionManager {
 
 		const timestamp = nowIso();
 		this.#sessionId = mintSessionId();
+		this.#unregisterOwnerSidecar();
 		this.#sessionFile = path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
 		this.#expectedDiskSize = null;
 		this.#header = {
@@ -2215,6 +2238,7 @@ export class SessionManager {
 					];
 				}
 
+				this.#unregisterOwnerSidecar();
 				this.#sessionFile = newSessionFile;
 				// The freshness expectation must describe the NEW path. A successful
 				// rename carried this manager's tracked bytes to `newSessionFile`, so
@@ -2465,6 +2489,7 @@ export class SessionManager {
 	/** Flush, then close the append writer. */
 	async close(): Promise<void> {
 		if (!this.#persist) return;
+		this.#unregisterOwnerSidecar();
 		await this.#scheduleDiskWork(async () => {
 			const hadWriter = this.#writer !== undefined;
 			await this.#closeWriterHandle();
@@ -2519,6 +2544,7 @@ export class SessionManager {
 	 */
 	releaseRetainedEntries(): void {
 		this.seal();
+		this.#unregisterOwnerSidecar();
 		this.#entries = [];
 		this.#index.clear();
 		this.#closeWriterEventually();

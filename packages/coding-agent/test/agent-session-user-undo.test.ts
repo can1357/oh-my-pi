@@ -451,6 +451,32 @@ describe("AgentSession user undo/redo", () => {
 		expect(modeEntry?.data?.planFilePath).toBe("/tmp/plan-new.md");
 	});
 
+	it("redo re-journals a mode entered after the undo", async () => {
+		session = await makeSession();
+		await seedThreeTurns();
+		sessionManager.appendMessage(userMessage(`More ${SECRET_C}`));
+		sessionManager.appendMessage(assistantMessage("OK tail"));
+
+		expect(session.userUndo(1).ok).toBe(true);
+		// Operator enters a mode AFTER the undo; the trailing mode_change is
+		// tolerated, so redo proceeds — the live mode must come with it.
+		sessionManager.appendModeChange("vibe", { previousTools: [] });
+
+		expect(session.userRedo().ok).toBe(true);
+
+		const branch = sessionManager.getBranch();
+		const redoMarkerIdx = branch.findIndex(
+			entry =>
+				entry.type === "branch_summary" && (entry.details as { kind?: string } | undefined)?.kind === "user-redo",
+		);
+		expect(redoMarkerIdx).toBeGreaterThan(-1);
+		const modeEntry = branch.slice(redoMarkerIdx + 1).find(entry => entry.type === "mode_change") as
+			| { mode?: string }
+			| undefined;
+		expect(modeEntry?.mode).toBe("vibe");
+		expect(sessionManager.buildSessionContext().mode).toBe("vibe");
+	});
+
 	it("getUserTurns previews are sanitized and width-bounded", async () => {
 		session = await makeSession();
 		const wide = "漢".repeat(200);
