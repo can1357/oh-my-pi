@@ -8239,12 +8239,11 @@ export class AgentSession {
 			return { ok: false, error: "No /undo to redo (last branch change was not a /undo, or turns were appended since)." };
 		}
 		const tipId = details.undoOf;
+		// Silent like /undo: the marker renders nothing, so context after
+		// /redo is simply the restored turns — no trace that an undo cycle
+		// happened.
 		this.#bash.withBranchTransition(() => {
-			this.sessionManager.branchWithSummary(
-				tipId,
-				"Operator /redo: restored the turns dropped by the preceding /undo.",
-				{ kind: "user-redo", redoOf: lastBranch!.id },
-			);
+			this.sessionManager.branchWithSummary(tipId, "", { kind: "user-redo", redoOf: lastBranch!.id });
 		});
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
