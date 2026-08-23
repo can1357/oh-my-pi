@@ -605,9 +605,9 @@ describe("AgentSession user undo/redo", () => {
 
 		const undo = session.userUndo(1);
 		expect(undo.ok).toBe(true);
-		// Branch after undo: user A + assistant A remain (injections do not
-		// count as messages) — the counter realigns to the branch.
-		expect(ttsrManager.getMessageCount()).toBe(2);
+		// Branch after undo: one completed user turn remains (turns, not
+		// messages — the live counter advances once per turn end).
+		expect(ttsrManager.getMessageCount()).toBe(1);
 	});
 
 	it("rollback preserves TTSR gap timing for retained rules", async () => {
