@@ -223,6 +223,7 @@ import {
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
 import { releaseComputerSessionsForOwner } from "../tools/computer/supervisor";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
+import { TRUNCATE_LENGTHS } from "../tools/render-utils";
 import {
 	buildResolveReminderMessage,
 	isPreviewResolutionToolCall,
@@ -8878,14 +8879,19 @@ export class AgentSession {
 	 * control entries between the marker and the leaf for exactly this reason.
 	 */
 	#rejournalControlEntries(liveRole: string = "default"): void {
-		let branchModel: string | undefined;
+		const branchModels: Record<string, string> = {};
+		let lastModelRole: string | undefined;
 		let branchThinkingLevel: string | undefined;
 		let branchThinkingConfigured: string | undefined;
 		let branchTier: string | undefined;
 		let sawTierEntry = false;
 		for (const entry of this.sessionManager.getBranch()) {
 			if (entry.type === "model_change") {
-				if ((entry.role ?? "default") === "default" && entry.model) branchModel = entry.model;
+				if (entry.model) {
+					const role = entry.role ?? "default";
+					branchModels[role] = entry.model;
+					lastModelRole = role;
+				}
 			} else if (entry.type === "thinking_level_change") {
 				branchThinkingLevel = entry.thinkingLevel ?? "off";
 				branchThinkingConfigured = entry.configured ?? entry.thinkingLevel ?? "off";
@@ -8895,8 +8901,15 @@ export class AgentSession {
 			}
 		}
 		const live = this.model;
-		if (live && `${live.provider}/${live.id}` !== branchModel) {
-			this.sessionManager.appendModelChange(`${live.provider}/${live.id}`, liveRole);
+		if (live) {
+			const liveModel = `${live.provider}/${live.id}`;
+			// Re-journal when the live role's recorded model differs (the
+			// concrete model changed under this role) or when the branch's
+			// last role is not the live role (a same-model role switch would
+			// otherwise reload as default and break role-keyed fallbacks).
+			if (branchModels[liveRole] !== liveModel || lastModelRole !== liveRole) {
+				this.sessionManager.appendModelChange(liveModel, liveRole);
+			}
 		}
 		const liveThinking = this.thinkingLevel;
 		// Compare the configured selector too: `medium` vs `auto` resolving to
@@ -8932,7 +8945,9 @@ export class AgentSession {
 	 */
 	#rejournalModeEntry(mode: string, modeData: Record<string, unknown> | undefined): void {
 		const rewound = this.sessionManager.buildSessionContext();
-		if (rewound.mode === mode) return;
+		if (rewound.mode === mode && JSON.stringify(rewound.modeData ?? null) === JSON.stringify(modeData ?? null)) {
+			return;
+		}
 		this.sessionManager.appendModeChange(mode, modeData);
 	}
 
@@ -9000,7 +9015,7 @@ export class AgentSession {
 	 * truncation follows rendered width rather than code units.
 	 */
 	#previewText(message: AgentMessage): string {
-		return truncateToWidth(replaceTabs(sanitizeText(this.#messageTextPreview(message))), 120);
+		return truncateToWidth(replaceTabs(sanitizeText(this.#messageTextPreview(message))), TRUNCATE_LENGTHS.LINE);
 	}
 
 	/** First non-empty text line of a message, for previews and prompt lists. */
@@ -9150,6 +9165,10 @@ export class AgentSession {
 		if (!this.sessionManager.hasEntry(tipId)) {
 			return { ok: false, error: "The undone turns were pruned by gc; redo is no longer possible." };
 		}
+		// Live role comes from the pre-restore journal (the undo path's
+		// re-journal made it the last role); pass it so redo does not flatten
+		// a smol/slow selection back to default.
+		const liveRole = this.sessionManager.getLastModelChangeRole() ?? "default";
 		// Silent like /undo: the marker renders nothing, so context after
 		// /redo is simply the restored turns — no trace that an undo cycle
 		// happened.
@@ -9161,7 +9180,7 @@ export class AgentSession {
 		this.#advisors.resetSessionState({ preserveCost: true });
 		// Same as /undo: rebuild checkpoint state from the restored branch.
 		this.#rehydrateCheckpointRewindState();
-		this.#rejournalControlEntries();
+		this.#rejournalControlEntries(liveRole);
 		this.#recordTodoSnapshot();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		return { ok: true };

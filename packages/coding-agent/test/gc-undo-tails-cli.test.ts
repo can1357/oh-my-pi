@@ -18,7 +18,7 @@ import * as path from "node:path";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { collectGcErrors, type GcResult } from "../src/cli/gc-cli";
 import { isProcessAlive, readSessionOwnerPids, SessionManager } from "../src/session/session-manager";
-import { MemorySessionStorage } from "../src/session/session-storage";
+import { FileSessionStorage, MemorySessionStorage } from "../src/session/session-storage";
 
 function userMessage(text: string) {
 	return { role: "user" as const, content: [{ type: "text" as const, text }], timestamp: Date.now() };
@@ -235,6 +235,31 @@ describe("omp gc --undo-tails (CLI)", () => {
 			.filter(entry => entry.type === "message")
 			.map(entry => JSON.stringify(entry));
 		expect(userTexts.some(text => text.includes("memory-writer"))).toBe(true);
+		await manager.close();
+	});
+
+	it("a failed writer open releases the exclusive claim", async () => {
+		class FailingWriterStorage extends FileSessionStorage {
+			override openWriter(): never {
+				throw new Error("simulated EMFILE");
+			}
+		}
+		const manager = SessionManager.create(sessionsDir, sessionsDir, new FailingWriterStorage());
+		await manager.setSessionFile(sessionFile);
+		// The first file-backed append takes the cold whole-file rewrite; the
+		// second opens the append writer. The open failure is swallowed by the
+		// hot path by design (callers stay non-throwing), but the claim the
+		// writer was about to hold must be released, not leaked.
+		manager.appendMessage(userMessage("cold"));
+		manager.appendMessage(userMessage("doomed"));
+		// Settle this manager's pending rewrite under the repair claim, then
+		// prove the claim is free: another manager locks and appends.
+		await manager.recoverPersistenceFromCurrentState();
+		const successor = SessionManager.create(sessionsDir, sessionsDir);
+		await successor.setSessionFile(sessionFile);
+		successor.appendMessage(userMessage("after-failure-cold"));
+		successor.appendMessage(userMessage("after-failure"));
+		await successor.close();
 		await manager.close();
 	});
 

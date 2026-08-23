@@ -391,6 +391,66 @@ describe("AgentSession user undo/redo", () => {
 		expect(redo.ok).toBe(true);
 	});
 
+	it("a same-model role switch is re-journaled after undo, not flattened to default", async () => {
+		session = await makeSession();
+		await seedThreeTurns();
+		sessionManager.appendMessage(userMessage(`More ${SECRET_C}`));
+		sessionManager.appendMessage(assistantMessage("OK tail"));
+		// Branch already carries the default-role model; the tail switches the
+		// smol role to that same concrete model.
+		sessionManager.appendModelChange("anthropic/claude-sonnet-4-5", "default");
+		const same = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		await session.setModel(same, "smol");
+
+		const undo = session.userUndo(1);
+		expect(undo.ok).toBe(true);
+
+		expect(sessionManager.getLastModelChangeRole()).toBe("smol");
+		const branch = sessionManager.getBranch();
+		const markerIdx = branch.findIndex(entry => entry.type === "branch_summary");
+		const roleEntry = branch.slice(markerIdx + 1).find(entry => entry.type === "model_change") as
+			| { model?: string; role?: string }
+			| undefined;
+		expect(roleEntry?.model).toBe("anthropic/claude-sonnet-4-5");
+		expect(roleEntry?.role).toBe("smol");
+	});
+
+	it("redo keeps the restored tail's model role", async () => {
+		session = await makeSession();
+		await seedThreeTurns();
+		sessionManager.appendMessage(userMessage(`More ${SECRET_C}`));
+		sessionManager.appendMessage(assistantMessage("OK tail"));
+		const smol = getBundledModel("anthropic", "claude-haiku-4-5")!;
+		await session.setModel(smol, "smol");
+
+		expect(session.userUndo(1).ok).toBe(true);
+		expect(session.userRedo().ok).toBe(true);
+
+		// The restored tail's role entry is the last one; redo must not
+		// re-journal the model under a default role.
+		expect(sessionManager.getLastModelChangeRole()).toBe("smol");
+	});
+
+	it("undo re-journals the mode when only its payload changed in the tail", async () => {
+		session = await makeSession();
+		await seedThreeTurns();
+		sessionManager.appendModeChange("plan", { planFilePath: "/tmp/plan-old.md" });
+		sessionManager.appendMessage(userMessage(`More ${SECRET_C}`));
+		sessionManager.appendMessage(assistantMessage("OK tail"));
+		sessionManager.appendModeChange("plan", { planFilePath: "/tmp/plan-new.md" });
+
+		const undo = session.userUndo(1);
+		expect(undo.ok).toBe(true);
+
+		const branch = sessionManager.getBranch();
+		const markerIdx = branch.findIndex(entry => entry.type === "branch_summary");
+		const modeEntry = branch.slice(markerIdx + 1).find(entry => entry.type === "mode_change") as
+			| { mode?: string; data?: Record<string, unknown> }
+			| undefined;
+		expect(modeEntry?.mode).toBe("plan");
+		expect(modeEntry?.data?.planFilePath).toBe("/tmp/plan-new.md");
+	});
+
 	it("getUserTurns previews are sanitized and width-bounded", async () => {
 		session = await makeSession();
 		const wide = "漢".repeat(200);
