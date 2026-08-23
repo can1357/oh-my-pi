@@ -331,6 +331,43 @@ describe("omp gc --undo-tails (CLI)", () => {
 		expect(readSessionOwnerPids(sessionFile)).toEqual([]);
 	});
 
+	it("an open that overlaps a prune marker waits and reloads post-prune content", async () => {
+		await buildSessionWithTwoUndoTails();
+		const writer = SessionManager.create(sessionsDir, sessionsDir);
+		await writer.setSessionFile(sessionFile);
+
+		// Simulate an in-flight gc prune: marker present while the victim opens.
+		fs.writeFileSync(`${sessionFile}.owner.pruning`, `${process.pid}\n`);
+		const victim = SessionManager.create(sessionsDir, sessionsDir);
+		let opened: Promise<void> | undefined;
+		try {
+			opened = victim.setSessionFile(sessionFile);
+			await Bun.sleep(80);
+			// The prune "finishes": new content lands, then the marker clears.
+			writer.appendMessage(userMessage("extra-during-prune"));
+			fs.rmSync(`${sessionFile}.owner.pruning`);
+			await opened;
+			// The victim reloaded after the marker cleared: its tree matches
+			// disk, including the entry the "prune" wrote under it.
+			expect(JSON.stringify(victim.getBranch()).includes("extra-during-prune")).toBe(true);
+		} finally {
+			await victim.close().catch(() => undefined);
+			await writer.close();
+		}
+	});
+
+	it("fork registers ownership of the new session file", async () => {
+		await buildSessionWithTwoUndoTails();
+		const manager = SessionManager.create(sessionsDir, sessionsDir);
+		await manager.setSessionFile(sessionFile);
+		const forked = await manager.fork();
+		expect(forked).toBeDefined();
+		expect(readSessionOwnerPids(forked!.newSessionFile)).toContain(process.pid);
+		expect(readSessionOwnerPids(sessionFile)).toEqual([]);
+		await manager.close();
+		expect(readSessionOwnerPids(forked!.newSessionFile)).toEqual([]);
+	});
+
 	it("two managers on one session keep it owned until the last closes", async () => {
 		await buildSessionWithTwoUndoTails();
 		const first = SessionManager.create(sessionsDir, sessionsDir);
