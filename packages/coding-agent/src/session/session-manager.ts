@@ -111,6 +111,47 @@ async function writeOwnerSidecar(sessionFile: string): Promise<void> {
 	}
 }
 
+function pruneMarkerPath(sessionFile: string): string {
+	return `${ownerSidecarPath(sessionFile)}.pruning`;
+}
+
+/**
+ * Record that an undo-tail prune is publishing under the session claim.
+ * Openers check this after registering: a marker present during their load
+ * means the loaded journal may be pre-prune, so they wait for it to clear
+ * and reload — closing the load-vs-publish race without sharing the
+ * session claim (which same-process siblings must never double-acquire).
+ */
+async function markUndoTailPruneInProgress(sessionFile: string): Promise<void> {
+	try {
+		await withOwnerSidecarLock(sessionFile, () => {
+			fs.writeFileSync(pruneMarkerPath(sessionFile), `${process.pid}\n`, { encoding: "utf-8", mode: 0o600 });
+			return Promise.resolve();
+		});
+	} catch {
+		// Best-effort: the publish-time owner recheck still guards the prune.
+	}
+}
+
+async function clearUndoTailPruneMarker(sessionFile: string): Promise<void> {
+	try {
+		await withOwnerSidecarLock(sessionFile, () => {
+			fs.rmSync(pruneMarkerPath(sessionFile), { force: true });
+			return Promise.resolve();
+		});
+	} catch {
+		// Marker files are also self-healing: a later prune rewrites them.
+	}
+}
+
+async function undoTailPruneInProgress(sessionFile: string): Promise<boolean> {
+	try {
+		return fs.existsSync(pruneMarkerPath(sessionFile));
+	} catch {
+		return false;
+	}
+}
+
 async function removeOwnerSidecar(sessionFile: string): Promise<void> {
 	try {
 		const file = ownerSidecarPath(sessionFile);
@@ -1664,7 +1705,7 @@ export class SessionManager {
 		this.#draftOnlySessionCleanupArmed = false;
 
 		const resolvedSessionFile = path.resolve(sessionFile);
-		const loaded = loadedSession ?? (await loadSessionFile(resolvedSessionFile, this.#storage));
+		let loaded = loadedSession ?? (await loadSessionFile(resolvedSessionFile, this.#storage));
 		if (loaded.invalidHeader) {
 			throw new Error(
 				`Cannot resume session "${resolvedSessionFile}": the session header is missing or malformed. The file was not modified.`,
@@ -1674,6 +1715,26 @@ export class SessionManager {
 		this.#sessionFile = resolvedSessionFile;
 		this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
 
+		// A gc undo-tail prune can publish between our load and registration
+		// (its publish-time recheck only sees pids registered before it).
+		// When its marker is present, the loaded journal may be pre-prune:
+		// wait for the prune to finish, reload, and re-register — the reloaded
+		// tree matches disk, so a later full rewrite cannot resurrect pruned
+		// tails. Bounded: after retries we are registered, and every later
+		// gc run's recheck skips us.
+		for (let attempt = 0; attempt < 5; attempt++) {
+			if (!(await undoTailPruneInProgress(resolvedSessionFile))) break;
+			await Bun.sleep(50);
+			while (await undoTailPruneInProgress(resolvedSessionFile)) await Bun.sleep(50);
+			loaded = await loadSessionFile(resolvedSessionFile, this.#storage);
+			if (loaded.invalidHeader) {
+				throw new Error(
+					`Cannot resume session "${resolvedSessionFile}": the session header is missing or malformed. The file was not modified.`,
+				);
+			}
+			this.#unregisterOwnerSidecar();
+			this.#registerOwnerSidecar();
+		}
 		const { entries: fileEntries, titleSlot } = loaded;
 		if (fileEntries.length === 0) {
 			// Explicit but empty/missing path (e.g. --session flag): start fresh but
@@ -1771,6 +1832,7 @@ export class SessionManager {
 		this.#sessionId = mintSessionId();
 		this.#unregisterOwnerSidecar();
 		this.#sessionFile = path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
+		this.#registerOwnerSidecar();
 		this.#header = {
 			type: "session",
 			version: CURRENT_SESSION_VERSION,
@@ -3098,11 +3160,14 @@ export class SessionManager {
 		// owner appeared since the preflight, nothing lands on disk and the
 		// caller reports a skip instead of a prune.
 		this.#undoTailPruneActive = true;
+		const sessionFileForPrune = this.#sessionFile!;
+		await markUndoTailPruneInProgress(sessionFileForPrune);
 		let published = false;
 		try {
 			published = await this.rewriteEntries();
 		} finally {
 			this.#undoTailPruneActive = false;
+			await clearUndoTailPruneMarker(sessionFileForPrune);
 		}
 		if (!published) return { markers: 0, removed: 0, skippedLive: true };
 		return { markers: toScrub.length, removed: doomed.size };
