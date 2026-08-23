@@ -672,6 +672,7 @@
 
 ### Added
 
+- Added `--provider-api-keys` for loading a named provider-key bundle and `--provider-api-keys-fd` for consuming an exact launcher descriptor, both process-local and never persisted.
 - Plan review can save a plan to a chosen path and start a new session.
 - Edit results now warn when an edit leaves a previously parsing file unparseable, independent of the `edit.blackbox.enabled` recorder.
 - Added provider-wide Amazon Bedrock guardrail settings to models configuration, including custom models.

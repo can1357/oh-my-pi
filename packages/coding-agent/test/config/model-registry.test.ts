@@ -12,6 +12,7 @@ function createStubAuthStorage(): AuthStorage {
 		setFallbackResolver: () => {},
 		clearConfigApiKeys: () => {},
 		hasAuth: () => false,
+		getRuntimeApiKey: () => undefined,
 		getApiKey: async () => undefined,
 	};
 	return stub as unknown as AuthStorage;

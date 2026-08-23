@@ -143,6 +143,77 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(await registry.getApiKey(models[0])).toBe("cmd-api-key");
 	});
 
+	test("runtime API keys override command-backed provider config", async () => {
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					anthropic: {
+						apiKey: `!${stdoutCommand("cmd-api-key")}`,
+						authHeader: true,
+					},
+				},
+			}),
+		);
+
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.getAll().find(candidate => candidate.provider === "anthropic");
+		if (!model) throw new Error("Expected anthropic model");
+		authStorage.setRuntimeApiKey("anthropic", "runtime-api-key");
+
+		expect(await registry.getApiKey(model)).toBe("runtime-api-key");
+		expect({ ...model.headers }.Authorization).toBe("Bearer runtime-api-key");
+		expect(await registry.getApiKeyForProvider("anthropic")).toBe("runtime-api-key");
+	});
+
+	test("runtime API keys override command-backed auth headers on custom model overlays", async () => {
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${stdoutCommand("cmd-api-key")}`,
+						authHeader: true,
+						headers: { authorization: "Bearer stale-config-key" },
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+		authStorage.setRuntimeApiKey("custom-proxy", "runtime-api-key");
+
+		expect(await registry.getApiKey(model)).toBe("runtime-api-key");
+		expect({ ...model.headers }).toEqual({ Authorization: "Bearer runtime-api-key" });
+	});
+
+	test("runtime API keys replace configured auth headers without provider apiKey config", async () => {
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					anthropic: {
+						authHeader: true,
+						headers: { Authorization: "Bearer stale-config-key" },
+					},
+				},
+			}),
+		);
+
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.getAll().find(candidate => candidate.provider === "anthropic");
+		if (!model) throw new Error("Expected anthropic model");
+		authStorage.setRuntimeApiKey("anthropic", "runtime-api-key");
+
+		expect(await registry.getApiKey(model)).toBe("runtime-api-key");
+		expect({ ...model.headers }).toEqual({ Authorization: "Bearer runtime-api-key" });
+	});
+
 	test("modelOverrides headers resolve from command stdout", async () => {
 		fs.writeFileSync(
 			modelsPath,

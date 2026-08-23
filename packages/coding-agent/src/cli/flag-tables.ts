@@ -163,6 +163,15 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--api-key": (result, value) => {
 		result.apiKey = value;
 	},
+	"--provider-api-keys": (result, value) => {
+		result.providerApiKeys = value;
+	},
+	"--provider-api-keys-fd": (result, value) => {
+		if (result.providerApiKeysFd !== undefined) {
+			throw new CliUsageError("--provider-api-keys-fd may only be specified once");
+		}
+		result.providerApiKeysFd = value;
+	},
 	"--system-prompt": (result, value) => {
 		result.systemPrompt = value;
 	},

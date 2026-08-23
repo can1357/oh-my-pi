@@ -6,6 +6,7 @@
  */
 import * as fsSync from "node:fs";
 import * as os from "node:os";
+import * as nodePath from "node:path";
 import { createInterface } from "node:readline/promises";
 import { EventLoopKeepalive, type ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
@@ -24,13 +25,21 @@ import {
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "./capability";
-import { type Args, reportUnrecognizedFlags, validateToolNames } from "./cli/args";
+import { type Args, reportCliUsageError, reportUnrecognizedFlags, validateToolNames } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
+import {
+	closeProviderApiKeyBundleFd,
+	installProviderApiKeys,
+	type ProviderApiKeyEntries,
+	readProviderApiKeyBundle,
+	readProviderApiKeyBundleFd,
+} from "./cli/provider-api-keys";
 import { selectSession } from "./cli/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { getLatestRelease } from "./cli/update-cli";
+import { CliUsageError } from "./cli/usage-error";
 import { findConfigFile } from "./config";
 import { ModelRegistry } from "./config/model-registry";
 import {
@@ -1408,6 +1417,15 @@ export async function runRootCommand(
 		await logger.time("initTheme:initial", ensureTheme);
 
 		const parsedArgs = parsed;
+		const startupDirectoryState = {
+			cwd: process.cwd(),
+			projectDir: getProjectDir(),
+			parsedCwd: parsedArgs.cwd,
+		};
+		const providerApiKeysPath =
+			parsedArgs.providerApiKeys && !nodePath.isAbsolute(parsedArgs.providerApiKeys)
+				? nodePath.resolve(startupDirectoryState.cwd, parsedArgs.providerApiKeys)
+				: parsedArgs.providerApiKeys;
 		try {
 			await logger.time("applyStartupCwd", applyStartupCwd, parsedArgs);
 		} catch (error: unknown) {
@@ -1442,6 +1460,33 @@ export async function runRootCommand(
 			process.stderr.write(`${chalk.red("Error: @file arguments are not supported in RPC mode")}\n`);
 			process.exit(1);
 		}
+		// Consume the credential bundle before startup can spawn a child or claim
+		// stdin. A launcher-supplied descriptor stays inheritable until it is closed,
+		// and discoverAuthStorage below resolves `!command` broker URL/token values
+		// through a shell, so a later read would expose the bundle to that child.
+		let providerApiKeys: ProviderApiKeyEntries | undefined;
+		if (parsedArgs.providerApiKeys !== undefined || parsedArgs.providerApiKeysFd !== undefined) {
+			try {
+				if (parsedArgs.providerApiKeys !== undefined && parsedArgs.providerApiKeysFd !== undefined) {
+					await closeProviderApiKeyBundleFd(parsedArgs.providerApiKeysFd);
+					throw new CliUsageError("--provider-api-keys and --provider-api-keys-fd are mutually exclusive");
+				}
+				if (parsedArgs.providerApiKeysFd !== undefined) {
+					providerApiKeys = await readProviderApiKeyBundleFd(parsedArgs.providerApiKeysFd);
+				} else if (parsedArgs.providerApiKeys !== undefined) {
+					providerApiKeys = await readProviderApiKeyBundle(providerApiKeysPath ?? parsedArgs.providerApiKeys);
+				}
+			} catch (error) {
+				parsedArgs.cwd = startupDirectoryState.parsedCwd;
+				setProjectDir(startupDirectoryState.projectDir);
+				if (process.cwd() !== startupDirectoryState.cwd) process.chdir(startupDirectoryState.cwd);
+				stopStartupWatchdog();
+				if (!reportCliUsageError(error)) throw error;
+				process.exitCode = 2;
+				return;
+			}
+		}
+
 		const mode = parsedArgs.mode || "text";
 		// RPC owns stdin. Claim its singleton stream before plugin/extension discovery can load an in-process consumer.
 		const rpcInput = mode === "rpc" || mode === "rpc-ui" ? claimRpcInput() : undefined;
@@ -1506,6 +1551,7 @@ export async function runRootCommand(
 			process.stderr.write(`${chalk.red(`Error: ${message}`)}\n`);
 			process.exit(1);
 		}
+		if (providerApiKeys) installProviderApiKeys(providerApiKeys, authStorage);
 
 		const settingsInstance = await settingsPromise;
 		if (parsedArgs.approvalMode) {

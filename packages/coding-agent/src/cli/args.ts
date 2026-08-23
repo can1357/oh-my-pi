@@ -42,6 +42,8 @@ export interface Args {
 	planYoloInto?: string;
 	maxTime?: number;
 	apiKey?: string;
+	providerApiKeys?: string;
+	providerApiKeysFd?: string;
 	systemPrompt?: string;
 	appendSystemPrompt?: string;
 	thinking?: ConfiguredThinkingLevel;
@@ -215,6 +217,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 				const consumed = consumeBuiltInStringValue(arg, args, i + 1);
 				i = consumed.index;
 				STRING_SETTERS[arg](result, consumed.value, parseDeps);
+			} else if (arg === "--provider-api-keys" || arg === "--provider-api-keys-fd") {
+				STRING_SETTERS[arg](result, "", parseDeps);
 			}
 		} else if (OPTIONAL_VALUE_FLAGS.has(arg)) {
 			const config = OPTIONAL_FLAGS[arg];
