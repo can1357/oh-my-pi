@@ -498,6 +498,47 @@ describe("omp gc --undo-tails (CLI)", () => {
 		expect(await readSessionOwnerPids(sessionFile)).toEqual([]);
 	});
 
+	it("moveTo aborts before renaming when the destination claim fails", async () => {
+		await buildSessionWithTwoUndoTails();
+		const manager = SessionManager.create(sessionsDir, sessionsDir);
+		await manager.setSessionFile(sessionFile);
+
+		const destDir = path.join(agentDir, "sessions", "moved-blocked");
+		const dest = path.join(destDir, path.basename(sessionFile));
+		fs.mkdirSync(destDir, { recursive: true });
+		fs.mkdirSync(`${dest}.owner`, { recursive: true }); // unwritable claim path
+
+		await expect(manager.moveTo(path.join(agentDir, "project2"), destDir)).rejects.toBeInstanceOf(
+			SessionFileLockError,
+		);
+		// Nothing moved: the journal is still at the source, still owned.
+		expect(fs.existsSync(dest)).toBe(false);
+		expect(await readSessionOwnerPids(sessionFile)).toContain(process.pid);
+		fs.rmSync(`${dest}.owner`, { recursive: true, force: true });
+		await manager.close();
+		expect(await readSessionOwnerPids(sessionFile)).toEqual([]);
+	});
+
+	it("fork refuses when the new file's owner claim cannot be established", async () => {
+		await buildSessionWithTwoUndoTails();
+		const manager = SessionManager.create(sessionsDir, sessionsDir);
+		await manager.setSessionFile(sessionFile);
+
+		// No sidecar file can be created while the session dir is read-only,
+		// so the fork's preclaim fails and the fork must be refused with the
+		// old session left claimed and active.
+		fs.chmodSync(sessionsDir, 0o500);
+		try {
+			await expect(manager.fork()).rejects.toBeInstanceOf(SessionFileLockError);
+		} finally {
+			fs.chmodSync(sessionsDir, 0o700);
+		}
+		expect(await readSessionOwnerPids(sessionFile)).toContain(process.pid);
+		expect(manager.getSessionFile()).toBe(sessionFile);
+		await manager.close();
+		expect(await readSessionOwnerPids(sessionFile)).toEqual([]);
+	});
+
 	it("a failed session switch keeps the previous session owned", async () => {
 		await buildSessionWithTwoUndoTails();
 		const manager = SessionManager.create(sessionsDir, sessionsDir);
