@@ -619,7 +619,8 @@ describe("AgentSession user undo/redo", () => {
 	it("rollback rewinds the TTSR message counter with the branch", async () => {
 		session = await makeSession();
 		sessionManager.appendMessage(userMessage(`Remember ${SECRET_A}`));
-		sessionManager.appendMessage(assistantMessage("OK A"));
+		sessionManager.appendMessage(assistantMessage("OK A tool"));
+		sessionManager.appendMessage(assistantMessage("OK A final"));
 		sessionManager.appendTtsrInjection(["kept-rule"]);
 		ttsrManager.markInjectedByNames(["kept-rule"]);
 		sessionManager.appendMessage(userMessage(`Remember ${SECRET_B}`));
@@ -630,9 +631,10 @@ describe("AgentSession user undo/redo", () => {
 
 		const undo = session.userUndo(1);
 		expect(undo.ok).toBe(true);
-		// Branch after undo: one completed user turn remains (turns, not
-		// messages — the live counter advances once per turn end).
-		expect(ttsrManager.getMessageCount()).toBe(1);
+		// Branch after undo keeps turn A's TWO model turns (a tool-using
+		// prompt produces several turn_end events) — the counter rewinds in
+		// model-turn units, not user-turn units.
+		expect(ttsrManager.getMessageCount()).toBe(2);
 	});
 
 	it("rollback preserves TTSR gap timing for retained rules", async () => {
@@ -768,9 +770,9 @@ describe("AgentSession user undo/redo", () => {
 		const redo = session.userRedo();
 		expect(redo.ok).toBe(true);
 		expect(ttsrManager.getInjectedRuleNames()).toEqual(["redo-rule"]);
-		// Restored branch has 2 turns and the injection sits at position 2:
-		// gap 0, the rule must NOT be eligible yet. A zeroed record would
-		// give gap 2 and re-trigger immediately.
+		// Restored branch has 2 model turns and the injection sits at
+		// position 1 (after A's reply, before B's): gap 1, the rule must NOT
+		// be eligible yet. A zeroed record would give gap 2 and re-trigger.
 		expect(ttsrManager.getMessageCount()).toBe(2);
 		expect(ttsrManager.checkSnapshot("payload REDOMARK", { source: "text" })).toEqual([]);
 	});

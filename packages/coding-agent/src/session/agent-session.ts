@@ -5561,17 +5561,14 @@ export class AgentSession {
 		// against the restored branch's full turn count would make it
 		// instantly eligible.
 		const injectionPositions = new Map<string, number>();
-		// The live counter advances once per completed user turn
-		// (TtsrCoordinator.onTurnEnd), so rewind in the same units — every
-		// persisted message would overcount tool-heavy branches and make
-		// after-gap rules eligible early.
+		// The live counter advances once per MODEL turn end
+		// (TtsrCoordinator.onTurnEnd fires per assistant turn — a tool-using
+		// user prompt produces several), so rewind in the same units: count
+		// assistant messages, the persisted model-turn boundary.
 		let branchTurnCount = 0;
 		for (const entry of this.sessionManager.getBranch()) {
 			if (entry.type === "message") {
-				const message = entry.message as { role?: string; customType?: string };
-				if (message.role === "user" || (message.role === "custom" && message.customType === "skill-prompt")) {
-					branchTurnCount++;
-				}
+				if ((entry.message as { role?: string }).role === "assistant") branchTurnCount++;
 			}
 			if (entry.type === "ttsr_injection") {
 				for (const name of entry.injectedRules) {
