@@ -12,7 +12,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Message } from "@oh-my-pi/pi-ai";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -22,6 +22,7 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { TtsrManager } from "../src/export/ttsr";
+import { resolveLocalUrlToPath } from "../src/internal-urls";
 import { getLatestTodoPhasesFromEntries } from "../src/tools/todo";
 
 const SECRET_A = "MARKER-ALPHA-7";
@@ -70,12 +71,14 @@ describe("AgentSession user undo/redo", () => {
 	let session: AgentSession;
 	let sessionManager: SessionManager;
 	let ttsrManager: TtsrManager;
+	let mockModel: MockModel;
 	let tempDir: string;
 	const authStorages: AuthStorage[] = [];
 
 	async function makeSession(): Promise<AgentSession> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		mockModel = mock;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [] },
@@ -85,7 +88,9 @@ describe("AgentSession user undo/redo", () => {
 		const authStorage = await AuthStorage.create(path.join(tempDir, `auth-${authStorages.length}.db`));
 		authStorages.push(authStorage);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		sessionManager = SessionManager.inMemory();
+		// Scoped to the test temp dir so local:// artifact URLs (plan files)
+		// resolve inside the sandbox instead of the real session store.
+		sessionManager = SessionManager.inMemory(tempDir);
 		ttsrManager = new TtsrManager();
 		return new AgentSession({
 			agent,
@@ -126,6 +131,88 @@ describe("AgentSession user undo/redo", () => {
 		sessionManager.appendMessage(userMessage(`Remember ${SECRET_C}`));
 		sessionManager.appendMessage(assistantMessage("OK C"));
 	}
+
+	it("undo recomputes the plan-reference delivery flag from the branch", async () => {
+		// File-backed (not in-memory): the local:// plan URL must resolve
+		// through THIS session's artifacts dir — in-memory managers return a
+		// null artifacts dir and fall back to the ambient agent registry.
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		mockModel = mock;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(path.join(tempDir, "auth-plan-undo.db"));
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		sessionManager = SessionManager.create(tempDir, tempDir);
+		const sessionFile = path.join(tempDir, "plan-undo.jsonl");
+		await sessionManager.setSessionFile(sessionFile);
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+			ttsrManager: new TtsrManager(),
+		});
+		const planUrl = "local://approved-plan-undo.md";
+		const resolved = resolveLocalUrlToPath(planUrl, {
+			getArtifactsDir: () => sessionManager.getArtifactsDir(),
+			getSessionId: () => sessionManager.getSessionId(),
+		});
+		fs.mkdirSync(path.dirname(resolved), { recursive: true });
+		fs.writeFileSync(resolved, "# Approved Plan\n");
+
+		// Turn A, then turn B whose span carries the delivered plan reference.
+		sessionManager.appendMessage(userMessage(`Remember ${SECRET_A}`));
+		sessionManager.appendMessage(assistantMessage("OK A"));
+		sessionManager.appendMessage(userMessage(`Remember ${SECRET_B}`));
+		sessionManager.appendMessage({
+			role: "custom",
+			customType: "plan-mode-reference",
+			content: [{ type: "text", text: `Plan at ${planUrl}` }],
+			display: false,
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+		sessionManager.appendMessage(assistantMessage("OK B"));
+		session.setPlanReferencePath(planUrl);
+		session.markPlanReferenceSent();
+
+		const result = session.userUndo();
+		expect(result.ok).toBe(true);
+		// The delivered reference left the branch with the turn.
+		expect(
+			sessionManager
+				.getBranch()
+				.some(
+					entry =>
+						entry.type === "message" &&
+						(entry.message as { customType?: string }).customType === "plan-mode-reference",
+				),
+		).toBe(false);
+
+		// The flag was reconciled from the branch: the next prompt re-injects
+		// the approved plan reference instead of running without it.
+		await session.sendUserMessage("next turn");
+		const seen = mockModel.calls.at(-1)?.context.messages ?? [];
+		const seenText = seen
+			.map(message => {
+				if (!("content" in message)) return "";
+				return typeof message.content === "string"
+					? message.content
+					: Array.isArray(message.content)
+						? message.content.map(part => (part.type === "text" ? part.text : "")).join(" ")
+						: "";
+			})
+			.join("\n");
+		expect(seenText).toContain(planUrl);
+		await sessionManager.close();
+	});
 
 	it("undo drops the last turn from the active context", async () => {
 		session = await makeSession();
