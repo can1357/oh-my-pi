@@ -119,8 +119,12 @@ describe("TurnRecovery silentEmptyStopFallback", () => {
 		host.settings = Settings.isolated({
 			"features.silentEmptyStopFallback": flagOn,
 		});
+		const events: Array<{ type: string; success?: boolean; finalError?: string }> = [];
+		host.emitSessionEvent = async event => {
+			events.push(event as { type: string });
+		};
 		const recovery = new TurnRecovery(host);
-		return recovery;
+		return { recovery, events };
 	}
 
 	function zeroBilled(): AssistantMessage {
@@ -137,13 +141,15 @@ describe("TurnRecovery silentEmptyStopFallback", () => {
 	}
 
 	it("1. promotes zero-billed clean stop when flag is ON (one-shot budget extension)", async () => {
-		const recovery = makeRecovery(true);
+		const { recovery, events } = makeRecovery(true);
 		const msg = zeroBilled();
 		for (let i = 0; i < 3; i++) {
 			expect(await recovery.handleEmptyAssistantStop(msg)).toBe("continue");
 		}
 		// 4th empty: cap reached -> single silent promotion -> retry scheduled.
 		expect(await recovery.handleEmptyAssistantStop(msg)).toBe("continue");
+		// SILENT contract: no terminal failure event may fire for the promoted turn.
+		expect(events.filter(e => e.type === "auto_retry_end" && e.success === false)).toEqual([]);
 		// Latch spent: subsequent empties walk the legacy path to terminal.
 		expect(await recovery.handleEmptyAssistantStop(msg)).toBe("continue");
 		expect(await recovery.handleEmptyAssistantStop(msg)).toBe("continue");
@@ -154,7 +160,7 @@ describe("TurnRecovery silentEmptyStopFallback", () => {
 	});
 
 	it("2. does NOT promote billed-but-dropped (filter) stops — output tokens present", async () => {
-		const recovery = makeRecovery(true);
+		const { recovery } = makeRecovery(true);
 		const msg = makeMessage([], model, { usage: usage({ output: 137 }) });
 		const result = await driveToCap(recovery, msg);
 		expect(result).toBe("terminal");
@@ -163,7 +169,7 @@ describe("TurnRecovery silentEmptyStopFallback", () => {
 	});
 
 	it("3. does NOT touch reasoning-only stops (has content; not an empty stop)", async () => {
-		const recovery = makeRecovery(true);
+		const { recovery } = makeRecovery(true);
 		const msg = makeMessage([{ type: "thinking", thinking: "hmm" }], model, {
 			usage: usage({ output: 5 }),
 		});
@@ -174,7 +180,7 @@ describe("TurnRecovery silentEmptyStopFallback", () => {
 	});
 
 	it("4. does NOT promote the providerEmptyOutput error path", async () => {
-		const recovery = makeRecovery(true);
+		const { recovery } = makeRecovery(true);
 		const msg = makeMessage([{ type: "thinking", thinking: "partial reasoning" }], model, {
 			stopReason: "error",
 			errorMessage: "upstream network_error",
@@ -186,7 +192,7 @@ describe("TurnRecovery silentEmptyStopFallback", () => {
 	});
 
 	it("5. does NOT promote EOS-only one-token invisible stop (output=1)", async () => {
-		const recovery = makeRecovery(true);
+		const { recovery } = makeRecovery(true);
 		const msg = makeMessage([], model, { usage: usage({ output: 1 }) });
 		const result = await driveToCap(recovery, msg);
 		expect(result).toBe("terminal");
@@ -194,7 +200,7 @@ describe("TurnRecovery silentEmptyStopFallback", () => {
 	});
 
 	it("6. does NOT promote when cacheRead > 0 (request WAS processed)", async () => {
-		const recovery = makeRecovery(true);
+		const { recovery } = makeRecovery(true);
 		const msg = makeMessage([], model, { usage: usage({ cacheRead: 4096 }) });
 		const result = await driveToCap(recovery, msg);
 		expect(result).toBe("terminal");
@@ -202,15 +208,34 @@ describe("TurnRecovery silentEmptyStopFallback", () => {
 	});
 
 	it("7. does NOT promote when input tokens were billed", async () => {
-		const recovery = makeRecovery(true);
+		const { recovery } = makeRecovery(true);
 		const msg = makeMessage([], model, { usage: usage({ input: 24381 }) });
 		const result = await driveToCap(recovery, msg);
 		expect(result).toBe("terminal");
 		expect(msg.stopReason).toBe("stop");
 	});
 
+	it("6b. does NOT promote when cacheWrite > 0 (prompt processed as cache writes)", async () => {
+		const { recovery, events } = makeRecovery(true);
+		const msg = makeMessage([], model, { usage: usage({ cacheWrite: 2048 }) });
+		const result = await driveToCap(recovery, msg);
+		expect(result).toBe("terminal");
+		expect(msg.stopReason).toBe("stop");
+		expect(events.filter(e => e.type === "auto_retry_end" && e.success === false).length).toBe(1);
+	});
+
+	it("7b. does NOT promote reasoning-billed empties (output === reasoningTokens)", async () => {
+		const { recovery } = makeRecovery(true);
+		const msg = makeMessage([], model, {
+			usage: usage({ output: 64, reasoningTokens: 64 }),
+		});
+		const result = await driveToCap(recovery, msg);
+		expect(result).toBe("terminal");
+		expect(msg.stopReason).toBe("stop");
+	});
+
 	it("8. flag OFF preserves legacy terminal behavior for zero-billed stops", async () => {
-		const recovery = makeRecovery(false);
+		const { recovery } = makeRecovery(false);
 		const msg = zeroBilled();
 		const result = await driveToCap(recovery, msg);
 		expect(result).toBe("terminal");
@@ -231,7 +256,7 @@ describe("TurnRecovery silentEmptyStopFallback", () => {
 	});
 
 	it("10. counter resets after a non-empty turn between empties", async () => {
-		const recovery = makeRecovery(false);
+		const { recovery } = makeRecovery(false);
 		const msgA = zeroBilled();
 		await recovery.handleEmptyAssistantStop(msgA);
 		await recovery.handleEmptyAssistantStop(msgA);

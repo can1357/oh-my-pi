@@ -770,6 +770,52 @@ export class TurnRecovery {
 				finalError =
 					"Assistant returned empty stop after retry cap; try switching models or `/shake images` to remove archived frames";
 			}
+			const zeroBilled =
+				!providerEmptyOutput &&
+				assistantMessage.content.length === 0 &&
+				assistantMessage.usage.input === 0 &&
+				assistantMessage.usage.output === 0 &&
+				assistantMessage.usage.cacheRead === 0 &&
+				assistantMessage.usage.cacheWrite === 0 &&
+				outputTokensExcludingKnownReasoning === 0;
+
+			// Zero-billed empty stops are upstream dispatch failures laundered into a
+			// clean HTTP-200 stop (#9415): nothing was ever dispatched, so no usage
+			// bucket is nonzero. Promote ONCE per run, BEFORE the terminal
+			// `auto_retry_end` emission, so the user never sees the retry-cap banner:
+			// the synthetic retriable error flows through handleRetryableError where
+			// retry.modelFallback / fallbackChains pick a healthy provider silently.
+			// The synthetic object keeps the original turn untouched — the original is
+			// dropped durably either way, and pending-error bookkeeping references the
+			// object that handleRetryableError persists.
+			if (
+				zeroBilled &&
+				!this.#silentEmptyStopFallbackArmed &&
+				this.#host.settings.get("features.silentEmptyStopFallback")
+			) {
+				this.#silentEmptyStopFallbackArmed = true;
+				logger.warn("Promoting zero-billed empty stop to retriable error for silent model fallback", {
+					attempts,
+					model: assistantMessage.model,
+					provider: assistantMessage.provider,
+				});
+				const synthetic: AssistantMessage = {
+					...assistantMessage,
+					stopReason: "error",
+					errorMessage: finalError,
+					errorId: AIError.create(AIError.Flag.EmptyResponse | AIError.Flag.Transient),
+				};
+				await this.#dropAssistantTurnDurably(assistantMessage);
+				const didRetry = await this.handleRetryableError(synthetic, { allowModelFallback: true });
+				if (didRetry) {
+					this.#emptyStopRetryCount = 0;
+					return "continue";
+				}
+				// No chain or budget could take over: fall through to the visible
+				// terminal settle below rather than looping against the same pipe.
+				this.#silentEmptyStopFallbackArmed = false;
+			}
+
 			assistantMessage.errorMessage = finalError;
 			if (providerEmptyOutput) assistantMessage.errorId = AIError.create();
 			logger.warn(finalError, {
@@ -792,43 +838,6 @@ export class TurnRecovery {
 			// and re-trigger compaction at the same boundary. Remove every capped
 			// empty output; toolUse orphans still need this for Anthropic history.
 			await this.#dropAssistantTurnDurably(assistantMessage);
-			// Zero-billed empty stops are upstream dispatch failures laundered into a
-			// clean HTTP-200 stop (see #9415): the gateway never generated anything.
-			// When configured, promote the turn to a synthetic retriable error and
-			// consult modelFallback/fallbackChains instead of surfacing the cap. The
-			// caller's `stopReason === "error"` routing treats this like any other
-			// retryable failure: if no chain can take over, it settles as terminal.
-			if (
-				this.#host.settings.get("features.silentEmptyStopFallback") &&
-				!providerEmptyOutput &&
-				outputTokensExcludingKnownReasoning === 0 &&
-				assistantMessage.usage.input === 0 &&
-				(assistantMessage.usage.cacheRead ?? 0) === 0 &&
-				assistantMessage.content.length === 0
-			) {
-				if (!this.#silentEmptyStopFallbackArmed) {
-					// One promotion per run: the retry consumes one normal attempt; if
-					// the pipe is still dead, settle terminal instead of looping.
-					this.#silentEmptyStopFallbackArmed = true;
-					assistantMessage.errorMessage = finalError;
-					assistantMessage.errorId = AIError.create(AIError.Flag.EmptyResponse | AIError.Flag.Transient);
-					assistantMessage.stopReason = "error";
-					logger.warn("Promoting zero-billed empty stop to retriable error for model fallback", {
-						attempts,
-						model: assistantMessage.model,
-						provider: assistantMessage.provider,
-					});
-					// The scheduled retry is a fresh request; this message object is
-					// already dropped, so its stop reason can be restored right away.
-					const didRetry = await this.handleRetryableError(assistantMessage, { allowModelFallback: true });
-					assistantMessage.stopReason = "stop";
-					if (didRetry) {
-						this.#emptyStopRetryCount = 0;
-						return "continue";
-					}
-					this.#silentEmptyStopFallbackArmed = false;
-				}
-			}
 			return "terminal";
 		}
 		// The reparented leaf must be durably persisted before the retry continues:
