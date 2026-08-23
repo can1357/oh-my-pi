@@ -819,11 +819,23 @@ export class SessionManager {
 		this.#diskEpoch++;
 		const epoch = this.#diskEpoch;
 		this.#writer = undefined;
-		// Drop the append writer's claim now: the repair rewrite below takes
-		// its own exclusive claim, and a same-process second acquire while
-		// this one is still held would fail the repair itself. The sidecar is
-		// removed once the fd close succeeds, matching #closeWriterHandle.
-		this.#releaseWriterLock();
+		// Hold ONE exclusive claim across the entire repair — writer close,
+		// drain, and atomic publication. A resumed process must not open an
+		// append fd onto the old inode between the writer dropping and the
+		// replace publishing. When the append writer's claim is already held,
+		// keep it (gapless handoff; the repair's inline writeTextAtomic does
+		// not reacquire). The sidecar is removed once the fd close succeeds,
+		// matching #closeWriterHandle.
+		const fileBacked = this.#sessionFile ? this.#storage instanceof FileSessionStorage : false;
+		let repairLock: FileLockHandle | null = this.#writerLock ?? null;
+		this.#writerLock = undefined;
+		if (fileBacked && !repairLock) {
+			repairLock = tryAcquireFileLock(this.#sessionFile!);
+			if (!repairLock?.acquired) {
+				repairLock?.release();
+				throw new SessionFileLockError(this.#sessionFile!);
+			}
+		}
 		this.#diskTail = Promise.resolve();
 		this.#forceFileCreation = true;
 		this.#fileIsCurrent = false;
@@ -903,6 +915,7 @@ export class SessionManager {
 			throw this.#latchIndeterminate(operationError, [toError(error)]);
 		} finally {
 			if (this.#atomicRewriteFenceEpoch === epoch) this.#atomicRewriteFenceEpoch = null;
+			repairLock?.release();
 		}
 	}
 
@@ -929,10 +942,17 @@ export class SessionManager {
 			}
 			this.#writerLock = lock;
 		}
-		this.#writer = this.#storage.openWriter(this.#sessionFile, {
-			flags: "a",
-			onError: err => this.#noteDiskFailure(err),
-		});
+		try {
+			this.#writer = this.#storage.openWriter(this.#sessionFile, {
+				flags: "a",
+				onError: err => this.#noteDiskFailure(err),
+			});
+		} catch (error) {
+			// The claim outlived the writer it was taken for: drop it or this
+			// process (and every other) stays locked out of the session.
+			this.#releaseWriterLock();
+			throw error;
+		}
 		if (this.#persist && fileBacked) writeOwnerSidecar(this.#sessionFile);
 		return this.#writer;
 	}
