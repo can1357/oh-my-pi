@@ -95,6 +95,16 @@ impl GitRepo {
 				.to_owned();
 		}
 		if self.is_linked_worktree() {
+			// A common dir that is not literally `.git` is a relocated git
+			// dir — a submodule's internal store (`<super>/.git/modules/<name>`)
+			// or a `--separate-git-dir` checkout. Its primary checkout lives
+			// where the common dir's `core.worktree` points (the indirection
+			// git itself follows), not at the common dir. Bare repositories
+			// carry no `core.worktree`, so their worktrees keep collapsing on
+			// the shared common dir.
+			if let Some(worktree) = configured_worktree(&self.info.common_dir) {
+				return worktree;
+			}
 			return self.info.common_dir.clone();
 		}
 		self.info.repo_root.clone()
@@ -239,6 +249,61 @@ fn resolve_common_dir(git_dir: &Path) -> PathBuf {
 
 fn read_optional(path: &Path) -> Option<String> {
 	std::fs::read_to_string(path).ok()
+}
+
+/// Resolve a git dir's explicit `core.worktree` override to an absolute
+/// path — the mechanism `git submodule` and `git init --separate-git-dir`
+/// both use to point a git dir at a work tree that is not its own parent
+/// directory. `None` when unset, the ordinary case. Read textually: the
+/// discovery paths this serves must stay gix-free.
+fn configured_worktree(git_dir: &Path) -> Option<PathBuf> {
+	let content = read_optional(&git_dir.join("config"))?;
+	let worktree = parse_core_worktree(&content)?;
+	let path = Path::new(&worktree);
+	if path.is_absolute() {
+		Some(normalize_path(path))
+	} else {
+		Some(normalize_path(&git_dir.join(path)))
+	}
+}
+
+/// Parse `core.worktree` out of git-config text. Sections and keys compare
+/// case-insensitively; subsections (`[core "x"]`) never match; quoted values
+/// unquote, unquoted values drop trailing `#`/`;` comments.
+fn parse_core_worktree(content: &str) -> Option<String> {
+	let mut in_core = false;
+	for raw in content.lines() {
+		let line = raw.trim();
+		if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+			continue;
+		}
+		if let Some(section) = line.strip_prefix('[') {
+			in_core = section
+				.strip_suffix(']')
+				.is_some_and(|name| name.trim().eq_ignore_ascii_case("core"));
+			continue;
+		}
+		if !in_core {
+			continue;
+		}
+		let Some((key, value)) = line.split_once('=') else {
+			continue;
+		};
+		if !key.trim().eq_ignore_ascii_case("worktree") {
+			continue;
+		}
+		let mut value = value.trim();
+		if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
+			value = value[1..value.len() - 1].trim();
+		} else if let Some(comment) = value.find(['#', ';']) {
+			value = value[..comment].trim_end();
+		}
+		if value.is_empty() {
+			return None;
+		}
+		return Some(value.to_owned());
+	}
+	None
 }
 
 /// Lexically normalize `.`/`..` segments without touching the filesystem, so
