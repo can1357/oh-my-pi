@@ -272,6 +272,29 @@ describe("AgentSession user undo/redo", () => {
 		expect(marker.details?.droppedPrompts).toContain(SECRET_B);
 	});
 
+	it("undo and redo leave live todo state untouched", async () => {
+		session = await makeSession();
+		const phases = [
+			{
+				name: "work",
+				tasks: [
+					{ content: "already done", status: "completed" as const },
+					{ content: "still open", status: "pending" as const },
+				],
+			},
+		];
+		session.setTodoPhases(phases);
+		await seedThreeTurns();
+
+		const undo = session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		expect(session.getTodoPhases()).toEqual(phases);
+
+		const redo = session.userRedo();
+		expect(redo.ok).toBe(true);
+		expect(session.getTodoPhases()).toEqual(phases);
+	});
+
 	it("redo fails when no undo branch marker is on the active path", async () => {
 		session = await makeSession();
 		await seedThreeTurns();
