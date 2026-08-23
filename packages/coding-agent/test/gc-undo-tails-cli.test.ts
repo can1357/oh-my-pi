@@ -412,9 +412,36 @@ describe("omp gc --undo-tails (CLI)", () => {
 		fs.mkdirSync(`${sessionFile}.owner`, { recursive: true });
 		const manager = SessionManager.create(sessionsDir, sessionsDir);
 		await expect(manager.setSessionFile(sessionFile)).rejects.toBeInstanceOf(SessionFileLockError);
-		expect(await readSessionOwnerPids(sessionFile)).toEqual([]);
+		// An unreadable sidecar fails closed now: readers surface the error
+		// instead of reporting "no owners" for a live process to prune under.
+		await expect(readSessionOwnerPids(sessionFile)).rejects.toMatchObject({ code: "EISDIR" });
 		fs.rmSync(`${sessionFile}.owner`, { recursive: true, force: true });
 		await manager.close();
+	});
+
+	it("a load aborted by gate exhaustion releases its ownership claim", async () => {
+		await buildSessionWithTwoUndoTails();
+		// Churn the journal deterministically INSIDE each load attempt:
+		// loadSessionFile stats through the storage, so appending after the
+		// stat but before the entry read guarantees the post-registration
+		// identity probe never matches the pre-load identity. Every attempt
+		// reloads until the gate exhausts.
+		class ChurningStorage extends FileSessionStorage {
+			override statSync(filePath: string) {
+				const stat = super.statSync(filePath);
+				if (path.resolve(filePath) === path.resolve(sessionFile)) {
+					fs.appendFileSync(filePath, "\n");
+				}
+				return stat;
+			}
+		}
+		await expect(SessionManager.open(sessionFile, sessionsDir, new ChurningStorage())).rejects.toBeInstanceOf(
+			SessionFileLockError,
+		);
+		// The rejected open left no manager reference to close, so the claim
+		// must already be gone — otherwise gc sees this pid as an owner
+		// until process exit.
+		expect(await readSessionOwnerPids(sessionFile)).toEqual([]);
 	});
 
 	it("fork registers ownership of the new session file", async () => {
