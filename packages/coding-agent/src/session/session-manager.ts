@@ -83,6 +83,25 @@ import { generateId, migrateToCurrentVersion } from "./session-migrations";
  * stale lines name dead pids, so the session counts as unowned only when
  * every recorded pid is gone.
  */
+/** File identity used to detect a journal replacement (atomic rename). */
+type JournalIdentity = { dev: number; ino: number; size: number; mtimeMs: number };
+
+async function journalIdentity(sessionFile: string): Promise<JournalIdentity | undefined> {
+	try {
+		const stat = await fs.promises.stat(sessionFile);
+		return { dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs };
+	} catch {
+		return undefined;
+	}
+}
+
+function sameJournalIdentity(a: JournalIdentity | undefined, b: JournalIdentity | undefined): boolean {
+	// Both absent (file never existed) is stable; one-sided presence or any
+	// field difference means the journal was replaced or appended to.
+	if (!a || !b) return a === b;
+	return a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs;
+}
+
 function ownerSidecarPath(sessionFile: string): string {
 	return `${sessionFile}.owner`;
 }
@@ -1750,63 +1769,83 @@ export class SessionManager {
 		await this.#setSessionFile(sessionFile);
 	}
 
-	async #setSessionFile(sessionFile: string, loadedSession?: SessionLoadResult): Promise<void> {
+	async #setSessionFile(
+		sessionFile: string,
+		loadedSession?: SessionLoadResult,
+		loadedIdentity?: JournalIdentity,
+	): Promise<void> {
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
 		this.#draftOnlySessionCleanupArmed = false;
 
 		const resolvedSessionFile = path.resolve(sessionFile);
-		let loaded = loadedSession ?? (await loadSessionFile(resolvedSessionFile, this.#storage));
-		if (loaded.invalidHeader) {
-			throw new Error(
-				`Cannot resume session "${resolvedSessionFile}": the session header is missing or malformed. The file was not modified.`,
-			);
-		}
 		this.#unregisterOwnerSidecar();
 		this.#sessionFile = resolvedSessionFile;
 		this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
 
-		// Register — and AWAIT the sidecar write — before checking the prune
-		// marker: gc creates its marker before its publish-time owner
-		// recheck, so once our pid is durably on disk, a marker that appears
-		// after our check implies a recheck that already saw the pid and
-		// aborted. Registration is kept across the reload below — an
-		// unregistered reload window would reopen the race. The write is
-		// best-effort (contention is swallowed), so verify the pid landed
-		// and retry a bounded number of times before proceeding unowned.
-		if (this.#persist && this.#storage instanceof FileSessionStorage) {
-			let ownershipEstablished = false;
-			for (let attempt = 0; attempt < 5; attempt++) {
-				if (await this.#registerOwnerSidecar()) {
-					ownershipEstablished = true;
-					break;
-				}
-				this.#ownerRegisteredFile = undefined;
-			}
-			// Becoming live without a durable claim would let a concurrent
-			// gc prune history this manager still holds (its later full
-			// rewrite would resurrect the tail), so refuse the load instead.
-			// The flag is left cleared for the #recordEntry backstop if the
-			// caller retries.
-			if (!ownershipEstablished) {
-				throw new SessionFileLockError(resolvedSessionFile);
-			}
-		}
+		// Load gates, all bounded (exhaustion refuses the load rather than
+		// accepting history a concurrent gc prune just removed — a later
+		// full rewrite would resurrect it):
+		// 1. Durable, awaited owner registration before ANY loaded journal is
+		//    accepted. gc creates its marker before its publish-time recheck,
+		//    so once our pid is on disk, a marker that appears afterwards
+		//    implies a recheck that saw us and aborted.
+		// 2. A marker present after registration means an in-flight prune:
+		//    wait for it, then discard the snapshot (it is pre-prune).
+		// 3. A prune that completed ENTIRELY between our load and
+		//    registration leaves no marker, but its publish is an atomic
+		//    rename — the journal identity probe after registration catches
+		//    it and forces a reload. The identity is anchored at the load
+		//    read (open() captures it for its preload).
+		let loaded: SessionLoadResult | undefined = loadedSession;
+		let loadIdentity = loadedIdentity;
 		for (let attempt = 0; attempt < 5; attempt++) {
-			if ((await readUndoTailPruneMarkerPid(resolvedSessionFile)) === undefined) break;
-			await waitClearUndoTailPruneMarker(resolvedSessionFile);
-			// A marker that outlived the bounded wait means a live gc is
-			// still mid-publish; reloading under it could accept pre-prune
-			// history, so refuse the load rather than race the publication.
-			if ((await readUndoTailPruneMarkerPid(resolvedSessionFile)) !== undefined) {
-				throw new SessionFileLockError(resolvedSessionFile);
+			if (loaded === undefined) {
+				loadIdentity = await journalIdentity(resolvedSessionFile);
+				loaded = await loadSessionFile(resolvedSessionFile, this.#storage);
 			}
-			loaded = await loadSessionFile(resolvedSessionFile, this.#storage);
+
 			if (loaded.invalidHeader) {
 				throw new Error(
 					`Cannot resume session "${resolvedSessionFile}": the session header is missing or malformed. The file was not modified.`,
 				);
 			}
+
+			if (this.#persist && this.#storage instanceof FileSessionStorage) {
+				let ownershipEstablished = false;
+				for (let registrationAttempt = 0; registrationAttempt < 5; registrationAttempt++) {
+					if (await this.#registerOwnerSidecar()) {
+						ownershipEstablished = true;
+						break;
+					}
+					this.#ownerRegisteredFile = undefined;
+				}
+				// Live without a durable claim is exactly what gc would
+				// misclassify; the flag stays cleared for the #recordEntry
+				// backstop if the caller retries.
+				if (!ownershipEstablished) {
+					throw new SessionFileLockError(resolvedSessionFile);
+				}
+				if ((await readUndoTailPruneMarkerPid(resolvedSessionFile)) !== undefined) {
+					await waitClearUndoTailPruneMarker(resolvedSessionFile);
+					// A marker that outlived the bounded wait means a live
+					// gc is still mid-publish; refuse rather than race it.
+					if ((await readUndoTailPruneMarkerPid(resolvedSessionFile)) !== undefined) {
+						throw new SessionFileLockError(resolvedSessionFile);
+					}
+					loaded = undefined; // the prune published; snapshot is stale
+					continue;
+				}
+				if (!sameJournalIdentity(loadIdentity, await journalIdentity(resolvedSessionFile))) {
+					loaded = undefined; // replaced or appended underneath us
+					continue;
+				}
+			}
+			break;
+		}
+		if (loaded === undefined) {
+			// The journal kept churning across every retry.
+			throw new SessionFileLockError(resolvedSessionFile);
 		}
 		const { entries: fileEntries, titleSlot } = loaded;
 		if (fileEntries.length === 0) {
@@ -3454,6 +3493,7 @@ export class SessionManager {
 		options?: { initialCwd?: string; suppressBreadcrumb?: boolean },
 	): Promise<SessionManager> {
 		const loaded = await loadSessionFile(filePath, storage);
+		const loadedIdentity = await journalIdentity(filePath);
 		const header = loaded.entries.find(entry => entry.type === "session") as SessionHeader | undefined;
 		// Resume into the session's recorded cwd only when it is verifiably
 		// accessible. A deleted or permission-blocked (macOS TCC denial) project
@@ -3471,7 +3511,7 @@ export class SessionManager {
 				: path.dirname(path.resolve(filePath)));
 		const manager = new SessionManager(cwd, dir, true, storage);
 		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
-		await manager.#setSessionFile(filePath, loaded);
+		await manager.#setSessionFile(filePath, loaded, loadedIdentity);
 		return manager;
 	}
 

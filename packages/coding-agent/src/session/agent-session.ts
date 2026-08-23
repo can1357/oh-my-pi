@@ -5545,9 +5545,18 @@ export class AgentSession {
 		const manager = this.#ttsr.manager;
 		if (!manager) return;
 		const ruleNames = new Set<string>();
-		let branchMessageCount = 0;
+		// The live counter advances once per completed user turn
+		// (TtsrCoordinator.onTurnEnd), so rewind in the same units — every
+		// persisted message would overcount tool-heavy branches and make
+		// after-gap rules eligible early.
+		let branchTurnCount = 0;
 		for (const entry of this.sessionManager.getBranch()) {
-			if (entry.type === "message") branchMessageCount++;
+			if (entry.type === "message") {
+				const message = entry.message as { role?: string; customType?: string };
+				if (message.role === "user" || (message.role === "custom" && message.customType === "skill-prompt")) {
+					branchTurnCount++;
+				}
+			}
 			if (entry.type === "ttsr_injection") {
 				for (const name of entry.injectedRules) ruleNames.add(name);
 			} else if (entry.type === "message") {
@@ -5565,7 +5574,7 @@ export class AgentSession {
 		// Counter and injection positions realign together: the live counter
 		// would otherwise still sit at its pre-rewind value, making retained
 		// after-gap rules instantly eligible.
-		manager.rewindMessageCount(branchMessageCount);
+		manager.rewindMessageCount(branchTurnCount);
 	}
 
 	#rehydrateCheckpointRewindState(): void {
