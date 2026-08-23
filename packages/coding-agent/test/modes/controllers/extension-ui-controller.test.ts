@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
-import { Container, type OverlayOptions, setKeybindings } from "@oh-my-pi/pi-tui";
+import { Container, type OverlayOptions, setKeybindings, TERMINAL } from "@oh-my-pi/pi-tui";
 import { KeybindingsManager } from "../../../src/config/keybindings";
 import type { ExtensionAskDialogQuestion, ExtensionUIContext } from "../../../src/extensibility/extensions";
 import { AskDialogComponent } from "../../../src/modes/components/ask-dialog";
@@ -18,7 +18,7 @@ beforeAll(async () => {
 	setThemeInstance(dark);
 });
 
-function makeHarness() {
+function makeHarness(options: { askNotify?: string; sessionName?: string; streaming?: boolean } = {}) {
 	const editor = new CustomEditor(getEditorTheme());
 	const editorContainer = new Container();
 	editorContainer.addChild(editor);
@@ -44,7 +44,10 @@ function makeHarness() {
 		session: {
 			extensionRunner: undefined,
 			setUsageFallbackConfirmer: vi.fn(),
+			isStreaming: options.streaming ?? false,
 		},
+		settings: { get: (key: string) => (key === "ask.notify" ? (options.askNotify ?? "on") : undefined) },
+		sessionManager: { getSessionName: () => options.sessionName ?? "" },
 		setToolUIContext(context: ExtensionUIContext, hasUI: boolean): void {
 			expect(hasUI).toBe(true);
 			uiContext = context;
@@ -349,5 +352,107 @@ describe("ExtensionUiController custom overlay", () => {
 		expect(component.dispose).toHaveBeenCalledTimes(1);
 		expect(harness.editorContainer.children).toEqual([harness.editor]);
 		expect(harness.editor.getText()).toBe("draft typed while factory is pending");
+	});
+});
+
+describe("prompts that block a turn announce themselves", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	/** Bodies of the announcements made so far, oldest first. */
+	const announcedBodies = (notify: Mock<(...args: never[]) => unknown>): string[] =>
+		notify.mock.calls.map(call => (call[0] as { body: string }).body);
+
+	it("announces a prompt whose caller says the agent is waiting", async () => {
+		const ui = await makeHarness({ sessionName: "my-session", streaming: true }).init();
+		const notify = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
+
+		// One dialog owns the surface at a time, so each is dismissed before the
+		// next. `announce` is what tool approvals, the coding-plan reserve question
+		// and relayed collab-guest requests pass.
+		const openers = [
+			(signal: AbortSignal) => ui.select("omp wants to run bash", ["Approve", "Deny"], { signal, announce: true }),
+			(signal: AbortSignal) =>
+				ui.confirm("Coding-plan reserve reached", "Switch to the fallback?", { signal, announce: true }),
+			(signal: AbortSignal) => ui.input?.("Name the branch", undefined, { signal, announce: true }),
+			(signal: AbortSignal) => ui.editor?.("Describe the change", undefined, { signal, announce: true }),
+		];
+		for (const open of openers) {
+			const dismiss = new AbortController();
+			void open(dismiss.signal);
+			dismiss.abort();
+			await Promise.resolve();
+		}
+
+		expect(announcedBodies(notify)).toEqual([
+			"omp wants to run bash",
+			"Coding-plan reserve reached",
+			"Name the branch",
+			"Describe the change",
+		]);
+		expect(notify.mock.calls[0]?.[0]).toMatchObject({ title: "my-session", type: "ask", actions: "focus" });
+	});
+
+	it("announces a queued prompt when it reaches the screen, and never one aborted while queued", async () => {
+		const ui = await makeHarness({ sessionName: "my-session", streaming: true }).init();
+		const notify = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
+
+		const active = new AbortController();
+		const abortedWhileQueued = new AbortController();
+		void ui.select("first prompt", ["Approve", "Deny"], { signal: active.signal, announce: true });
+		void ui.select("aborted before its turn", ["Approve", "Deny"], {
+			signal: abortedWhileQueued.signal,
+			announce: true,
+		});
+		void ui.input?.("second prompt", undefined, { announce: true });
+
+		// Only the dialog actually on screen has announced; the two behind it sit
+		// in the queue, invisible, and must stay silent.
+		expect(announcedBodies(notify)).toEqual(["first prompt"]);
+
+		abortedWhileQueued.abort();
+		active.abort();
+		await Promise.resolve();
+
+		// The queue advanced past the aborted request to the one now visible.
+		expect(announcedBodies(notify)).toEqual(["first prompt", "second prompt"]);
+	});
+
+	it("stays silent for every dialog whose caller did not ask, even mid-turn", async () => {
+		const harness = makeHarness({ sessionName: "my-session", streaming: true });
+		const ui = await harness.init();
+		const notify = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
+		const questions: ExtensionAskDialogQuestion[] = [
+			{ id: "q", question: "Which branch?", options: [{ label: "main" }, { label: "next" }] },
+		];
+
+		// A turn being in flight is not the same as the turn waiting on this
+		// dialog: the large-paste menu, slash-command pickers, user-run extension
+		// commands and fire-and-forget `message_end` handlers all reach these
+		// presenters mid-turn without blocking the loop.
+		void harness.controller.showHookSelector("Pasted 400 lines", ["Attach as file", "Insert inline"]);
+		const openers = [
+			() => ui.select("Pick a model", ["a", "b"]),
+			() => ui.confirm("Extension command", "Proceed?"),
+			() => ui.input?.("Name it"),
+			() => ui.editor?.("Write it"),
+			() => ui.askDialog?.(questions),
+		];
+		for (const open of openers) {
+			void open();
+			await Promise.resolve();
+		}
+
+		expect(notify).not.toHaveBeenCalled();
+	});
+
+	it("stays silent when ask.notify is off, even for a waiting prompt", async () => {
+		const silenced = await makeHarness({ streaming: true, askNotify: "off" }).init();
+		const notify = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
+
+		void silenced.select("omp wants to run bash", ["Approve", "Deny"], { announce: true });
+
+		expect(notify).not.toHaveBeenCalled();
 	});
 });

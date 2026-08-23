@@ -11,6 +11,8 @@
 
 ### Fixed
 
+- Notifications now reach Herdr panes. Herdr multiplexes panes like tmux but swallows bare OSC 9 / OSC 99, has no DCS passthrough envelope, and its bell relay never flags a backgrounded tab, so a pane in the background got no signal at all that the agent had finished or was waiting. Delivery now runs through `herdr notification show`, the way cmux surfaces already do, mapping a waiting question onto Herdr's `request` sound and a settled turn onto `done`.
+- Prompts the agent is waiting on now announce themselves, not just the `ask` tool: tool approvals and the coding-plan reserve question ("switch to the fallback model?"). Such a prompt raised while the pane sits in the background used to be invisible — the turn simply stopped. Dialogs the human opens mid-turn (the large-paste menu, slash-command pickers, user-run extension commands) stay silent, and the `ask.notify` switch governs these too.
 	- Fixed GPT-6 Astra extended-context support and preserved maximum context windows reported by OpenAI Codex discovery ([#10980](https://github.com/can1357/oh-my-pi/pull/10980) by [@H4vC](https://github.com/H4vC)).
 
 ### Fixed

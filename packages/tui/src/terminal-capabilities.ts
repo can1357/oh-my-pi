@@ -72,6 +72,45 @@ function sendCmuxNotification(message: string | TerminalNotification, env: NodeJ
 	return true;
 }
 
+const HERDR_PANE_ID_PATTERN = /^[0-9A-Za-z:_-]{1,64}$/u;
+
+/**
+ * Route a notification through Herdr when the process runs inside one of its
+ * panes. Herdr multiplexes panes like tmux but swallows bare OSC 9 / OSC 99 and
+ * has no DCS passthrough envelope, and its bell relay does not flag a
+ * backgrounded tab — so without this branch a backgrounded pane gets no signal
+ * at all that the agent finished or is waiting for input.
+ *
+ * `sound` maps the notification kind onto what Herdr offers: a question waiting
+ * on the user rings `request`, a settled turn rings `done`, anything else stays
+ * silent. Returns whether Herdr owns delivery, so every existing terminal
+ * fallback is preserved when the pane id is absent or the binary is missing.
+ */
+function sendHerdrNotification(message: string | TerminalNotification, env: NodeJS.ProcessEnv = Bun.env): boolean {
+	if (env.HERDR_ENV?.trim() !== "1") return false;
+	const paneId = env.HERDR_PANE_ID?.trim();
+	if (!paneId || !HERDR_PANE_ID_PATTERN.test(paneId)) return false;
+
+	const title =
+		typeof message === "string" ? CMUX_NOTIFICATION_TITLE : message.title?.trim() || CMUX_NOTIFICATION_TITLE;
+	const body = typeof message === "string" ? message : (message.body ?? "");
+	const kinds = typeof message === "string" ? [] : [message.type ?? []].flat();
+	const sound = kinds.includes("ask") ? "request" : kinds.includes("completion") ? "done" : "none";
+	try {
+		const child = Bun.spawn({
+			cmd: ["herdr", "notification", "show", title, "--body", body, "--sound", sound],
+			stdin: "ignore",
+			stdout: "ignore",
+			stderr: "ignore",
+		});
+		child.unref();
+	} catch {
+		// A missing herdr binary leaves delivery to the existing terminal fallback.
+		return false;
+	}
+	return true;
+}
+
 function hasNeedleBefore(line: string, needle: string, limit: number): boolean {
 	const index = line.indexOf(needle);
 	return index !== -1 && index + needle.length <= limit;
@@ -159,6 +198,11 @@ export class TerminalInfo {
 
 	sendNotification(message: string | TerminalNotification): void {
 		if (isNotificationSuppressed() || isTerminalHeadless()) return;
+		// Innermost surface first. A Herdr pane launched inside a cmux surface
+		// inherits both `HERDR_PANE_ID` and the outer `CMUX_SURFACE_ID`; routing to
+		// cmux there would flag the containing surface and leave the backgrounded
+		// Herdr pane — the one actually waiting — without a sound or a marker.
+		if (sendHerdrNotification(message)) return;
 		if (sendCmuxNotification(message)) return;
 		const formatted = this.formatNotification(message);
 		// Under tmux, terminals whose notify protocol is OSC 9 / OSC 99 would

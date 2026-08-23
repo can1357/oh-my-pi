@@ -74,6 +74,9 @@ function createControllerContext() {
 		editor,
 		editorContainer,
 		ui,
+		// `InteractiveModeContext.session` is required; the controller reads
+		// `isStreaming` to decide whether a blocking prompt needs an alert.
+		session: { isStreaming: false },
 		hookEditor: undefined,
 	} as unknown as TestContext;
 

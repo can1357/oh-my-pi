@@ -184,6 +184,14 @@ export function getExtensionUISelectOptionLabel(option: ExtensionUISelectItem): 
  */
 export interface ExtensionUIDialogOptions {
 	signal?: AbortSignal;
+	/**
+	 * Opt in to announcing this prompt once it is on screen, so a pane in the
+	 * background shows that the turn is waiting. Silent unless set: a turn being
+	 * in flight does not mean the turn is blocked on this dialog, and a handler
+	 * that opens one without blocking the loop must not claim otherwise. Set it
+	 * when the caller genuinely waits for the answer.
+	 */
+	announce?: boolean;
 	timeout?: number;
 	/** Invoked when the UI times out while waiting for a selection/input */
 	onTimeout?: () => void;
