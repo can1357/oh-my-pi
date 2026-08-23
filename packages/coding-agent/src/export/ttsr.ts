@@ -544,8 +544,13 @@ export class TtsrManager {
 		return Array.from(this.#injectionRecords.keys());
 	}
 
-	/** Restore injected state from a list of rule names. */
+	/**
+	 * Replace injected state with exactly the given rule names. Replacement
+	 * (not merge) keeps the records in lockstep with the journal state a
+	 * session was rewound or reloaded to.
+	 */
 	restoreInjected(ruleNames: string[]): void {
+		this.#injectionRecords.clear();
 		for (const name of ruleNames) {
 			this.#injectionRecords.set(name, { lastInjectedAt: 0 });
 		}

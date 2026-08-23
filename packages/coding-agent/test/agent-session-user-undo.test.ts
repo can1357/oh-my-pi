@@ -21,6 +21,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { TtsrManager } from "../src/export/ttsr";
 import { getLatestTodoPhasesFromEntries } from "../src/tools/todo";
 
 const SECRET_A = "MARKER-ALPHA-7";
@@ -68,6 +69,7 @@ function contextText(session: AgentSession): string {
 describe("AgentSession user undo/redo", () => {
 	let session: AgentSession;
 	let sessionManager: SessionManager;
+	let ttsrManager: TtsrManager;
 	let tempDir: string;
 	const authStorages: AuthStorage[] = [];
 
@@ -84,16 +86,19 @@ describe("AgentSession user undo/redo", () => {
 		authStorages.push(authStorage);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		sessionManager = SessionManager.inMemory();
+		ttsrManager = new TtsrManager();
 		return new AgentSession({
 			agent,
 			sessionManager,
 			settings: Settings.isolated(),
 			modelRegistry: new ModelRegistry(authStorage),
 			agentId: "Main",
+			ttsrManager,
 		});
 	}
 
 	beforeEach(() => {
+		ttsrManager = new TtsrManager();
 		tempDir = path.join(os.tmpdir(), `pi-user-undo-test-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
 	});
@@ -475,6 +480,28 @@ describe("AgentSession user undo/redo", () => {
 			| undefined;
 		expect(modeEntry?.mode).toBe("vibe");
 		expect(sessionManager.buildSessionContext().mode).toBe("vibe");
+	});
+
+	it("undo reconciles TTSR injection records with the rewound branch", async () => {
+		session = await makeSession();
+		// Kept region injection stays; the tail injection goes off-branch.
+		sessionManager.appendTtsrInjection(["kept-rule"]);
+		await seedThreeTurns();
+		sessionManager.appendMessage(userMessage(`More ${SECRET_C}`));
+		sessionManager.appendMessage(assistantMessage("OK tail"));
+		sessionManager.appendTtsrInjection(["dropped-rule"]);
+		ttsrManager.markInjectedByNames(["kept-rule", "dropped-rule"]);
+		expect(ttsrManager.getInjectedRuleNames().sort()).toEqual(["dropped-rule", "kept-rule"]);
+
+		const undo = session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		// Records now mirror the rewound branch exactly: kept-rule survives,
+		// dropped-rule can trigger again (same as a reload of this branch).
+		expect(ttsrManager.getInjectedRuleNames()).toEqual(["kept-rule"]);
+
+		const redo = session.userRedo();
+		expect(redo.ok).toBe(true);
+		expect(ttsrManager.getInjectedRuleNames().sort()).toEqual(["dropped-rule", "kept-rule"]);
 	});
 
 	it("getUserTurns previews are sanitized and width-bounded", async () => {

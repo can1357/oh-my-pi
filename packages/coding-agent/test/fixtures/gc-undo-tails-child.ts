@@ -10,9 +10,22 @@
 import * as fs from "node:fs";
 import { getTerminalSessionsDir } from "@oh-my-pi/pi-utils";
 import { runGcCommand } from "../../src/cli/gc-cli";
+import { SessionManager } from "../../src/session/session-manager";
 
 const agentDir = process.env.GC_TEST_AGENT_DIR!;
 const apply = process.env.GC_TEST_APPLY === "1";
+
+// Hold-open mode: open a session and stay alive so the parent can exercise
+// cross-process ownership (gc preflight/publish vs a live foreign manager).
+if (process.env.GC_TEST_MODE === "hold-open") {
+	const manager = await SessionManager.open(process.env.GC_TEST_SESSION_FILE!, undefined, undefined, {
+		suppressBreadcrumb: true,
+	});
+	console.log(`GC_TEST_HELD ${process.pid}`);
+	const { promise } = Promise.withResolvers<never>();
+	await promise;
+	await manager.close();
+}
 
 const result = await runGcCommand({
 	flags: {

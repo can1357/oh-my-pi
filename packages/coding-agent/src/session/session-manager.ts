@@ -852,6 +852,8 @@ export class SessionManager {
 	#writer: SessionStorageWriter | undefined;
 	#writerLock: FileLockHandle | undefined;
 	#ownerRegisteredFile: string | undefined;
+	/** True only while a gc undo-tail prune is publishing; gates the owner recheck. */
+	#undoTailPruneActive = false;
 	#sidecarTail: Promise<void> = Promise.resolve();
 	/** Sealed by {@link releaseRetainedEntries}: every later append/title/rewrite is a dropped no-op. */
 	#released = false;
@@ -1438,10 +1440,11 @@ export class SessionManager {
 	 * synchronous rewrite from being overwritten by the stale body serialized
 	 * before it ran.
 	 */
-	async #rewriteAtomically(): Promise<void> {
-		if (!this.#persist || !this.#sessionFile) return;
-		if (this.#released) return;
+	async #rewriteAtomically(): Promise<boolean> {
+		if (!this.#persist || !this.#sessionFile) return true;
+		if (this.#released) return false;
 
+		let published = false;
 		const startEpoch = this.#diskEpoch;
 		await this.#scheduleDiskWork(
 			async () => {
@@ -1450,10 +1453,12 @@ export class SessionManager {
 					this.#materializeBreadcrumb();
 					this.#rewriteRequired = false;
 					this.#hasTitleSlot = true;
+					published = true;
 				}
 			},
 			{ epoch: startEpoch },
 		);
+		return published;
 	}
 
 	/**
@@ -1489,6 +1494,15 @@ export class SessionManager {
 				}
 				const body = this.#fileBody();
 				try {
+					// Gc's undo-tail prune rechecks ownership INSIDE the
+					// exclusive claim: a manager that opened after gc's
+					// preflight loaded the pre-prune history, and publishing
+					// under it would set up a resurrect-on-rewrite. Aborting
+					// here leaves disk untouched; gc reports a skip.
+					if (this.#undoTailPruneActive) {
+						const foreignOwners = readSessionOwnerPids(sessionFile).filter(pid => pid !== process.pid);
+						if (foreignOwners.some(pid => isProcessAlive(pid))) return false;
+					}
 					await this.#storage.writeTextAtomic(sessionFile, body, {
 						expectedSize: this.#expectedDiskSize,
 						commitGuard: () => !this.#released && this.#diskEpoch === epoch,
@@ -3158,9 +3172,9 @@ export class SessionManager {
 	 * Rewrite the session file after in-place entry updates (e.g. pruning old tool
 	 * outputs). Use sparingly.
 	 */
-	async rewriteEntries(): Promise<void> {
-		if (!this.#persist || !this.#sessionFile) return;
-		await this.#rewriteAtomically();
+	async rewriteEntries(): Promise<boolean> {
+		if (!this.#persist || !this.#sessionFile) return true;
+		return await this.#rewriteAtomically();
 	}
 
 	/**
@@ -3431,7 +3445,10 @@ export class SessionManager {
 	 * gone, the prompt list would be the last surviving copy of content the
 	 * operator explicitly retracted.
 	 */
-	async pruneUserUndoTails(keep = 1, apply = true): Promise<{ markers: number; removed: number }> {
+	async pruneUserUndoTails(
+		keep = 1,
+		apply = true,
+	): Promise<{ markers: number; removed: number; skippedLive?: boolean }> {
 		// Already-pruned markers (scrubbed of undoOf, stamped prunedAt) are
 		// excluded so repeated runs are idempotent and never rewrite a file
 		// just to refresh prunedAt.
@@ -3528,7 +3545,17 @@ export class SessionManager {
 		}
 		this.#entries = this.#entries.filter(entry => !doomed.has(entry.id));
 		this.#index.rebuild(this.#entries);
-		await this.rewriteEntries();
+		// The publish rechecks ownership under the exclusive claim; if an
+		// owner appeared since the preflight, nothing lands on disk and the
+		// caller reports a skip instead of a prune.
+		this.#undoTailPruneActive = true;
+		let published = false;
+		try {
+			published = await this.rewriteEntries();
+		} finally {
+			this.#undoTailPruneActive = false;
+		}
+		if (!published) return { markers: 0, removed: 0, skippedLive: true };
 		return { markers: toScrub.length, removed: doomed.size };
 	}
 
