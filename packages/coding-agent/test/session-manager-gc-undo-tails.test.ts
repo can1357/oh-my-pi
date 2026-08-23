@@ -151,4 +151,26 @@ describe("SessionManager.pruneUserUndoTails", () => {
 
 		expect(result).toEqual({ markers: 0, removed: 0 });
 	});
+
+	it("a second run after apply is a no-op (pruned markers are excluded)", async () => {
+		const { manager } = await buildTopology();
+		const first = await manager.pruneUserUndoTails(1, true);
+		expect(first.markers).toBeGreaterThanOrEqual(1);
+
+		const second = await manager.pruneUserUndoTails(1, true);
+		expect(second.markers).toBe(0);
+		expect(second.removed).toBe(0);
+
+		// The scrubbed marker keeps its kind but no longer claims an undoOf.
+		const scrubbed = manager
+			.getEntries()
+			.find(
+				entry =>
+					entry.type === "branch_summary" &&
+					(entry as { details?: { kind?: string } }).details?.kind === "user-undo",
+			);
+		expect(scrubbed).toBeDefined();
+		expect((scrubbed as { details?: { undoOf?: string | null; prunedAt?: string } }).details?.undoOf).toBeFalsy();
+		expect((scrubbed as { details?: { prunedAt?: string } }).details?.prunedAt).toBeTruthy();
+	});
 });

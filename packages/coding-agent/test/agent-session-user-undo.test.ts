@@ -222,6 +222,56 @@ describe("AgentSession user undo/redo", () => {
 		expect(text).toContain(SECRET_C);
 	});
 
+	it("redo refuses once turns were appended after the undo (no silent abandonment)", async () => {
+		session = await makeSession();
+		await seedThreeTurns();
+
+		session.userUndo(1);
+		// Operator continues: plain appended turns create no branch summary,
+		// so the undo marker is still the last branch_summary on the path —
+		// redo must refuse instead of branching away the new conversation.
+		sessionManager.appendMessage(userMessage("Post-undo continuation"));
+		sessionManager.appendMessage(assistantMessage("Fresh answer"));
+
+		const redo = session.userRedo();
+		expect(redo.ok).toBe(false);
+		expect(redo.error).toContain("appended after the /undo");
+
+		const text = contextText(session);
+		expect(text).toContain("Post-undo continuation");
+		expect(text).not.toContain(SECRET_C);
+	});
+
+	it("a user-invoked skill prompt counts as a user turn for /undo and /revert", async () => {
+		session = await makeSession();
+		sessionManager.appendMessage(userMessage(`Remember ${SECRET_A}`));
+		sessionManager.appendMessage(assistantMessage("OK A"));
+		sessionManager.appendMessage({
+			role: "custom",
+			customType: "skill-prompt",
+			content: [{ type: "text", text: `Run ${SECRET_B} now` }],
+			display: false,
+			attribution: "user",
+			timestamp: Date.now(),
+		});
+		sessionManager.appendMessage(assistantMessage("OK skill"));
+
+		const turns = session.getUserTurns();
+		expect(turns.length).toBe(2);
+		expect(turns[1]!.preview).toContain(SECRET_B);
+
+		const undo = session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		expect(undo.droppedTurns).toBe(1);
+		const text = contextText(session);
+		expect(text).toContain(SECRET_A);
+		expect(text).not.toContain(SECRET_B);
+
+		const branchEntries = sessionManager.getEntries().filter(entry => entry.type === "branch_summary");
+		const marker = branchEntries.at(-1) as { details?: { droppedPrompts?: string } };
+		expect(marker.details?.droppedPrompts).toContain(SECRET_B);
+	});
+
 	it("redo fails when no undo branch marker is on the active path", async () => {
 		session = await makeSession();
 		await seedThreeTurns();
@@ -278,29 +328,6 @@ describe("AgentSession user undo/redo", () => {
 		const result = session.userUndo();
 		expect(result.ok).toBe(false);
 		expect(result.error).toBeDefined();
-	});
-
-	it("redo after new turns appended post-undo rebranches (documented semantics)", async () => {
-		session = await makeSession();
-		await seedThreeTurns();
-
-		session.userUndo(1);
-		// The operator continues on the rewound branch instead of redoing.
-		sessionManager.appendMessage(userMessage("Fresh start after undo"));
-		sessionManager.appendMessage(assistantMessage("Noted"));
-
-		const textBefore = contextText(session);
-		expect(textBefore).toContain(SECRET_B);
-		expect(textBefore).toContain("Fresh start after undo");
-
-		// Redo is still reachable: the undo marker is on the active path, and
-		// the post-undo turns fork off onto their own side branch.
-		const redo = session.userRedo();
-		expect(redo.ok).toBe(true);
-
-		const textAfter = contextText(session);
-		expect(textAfter).toContain(SECRET_C);
-		expect(textAfter).not.toContain("Fresh start after undo");
 	});
 
 	it("getUserTurns lists active-path user turns oldest-first with previews", async () => {
