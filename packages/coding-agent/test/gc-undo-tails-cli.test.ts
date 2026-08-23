@@ -282,6 +282,25 @@ describe("omp gc --undo-tails (CLI)", () => {
 		expect(readSessionOwnerPids(sessionFile)).toEqual([]);
 	});
 
+	it("two managers on one session keep it owned until the last closes", async () => {
+		await buildSessionWithTwoUndoTails();
+		const first = SessionManager.create(sessionsDir, sessionsDir);
+		await first.setSessionFile(sessionFile);
+		const second = SessionManager.create(sessionsDir, sessionsDir);
+		await second.setSessionFile(sessionFile);
+		expect(readSessionOwnerPids(sessionFile)).toContain(process.pid);
+
+		// Either close removes only its own line; the survivor keeps the
+		// session owned so gc cannot prune under it.
+		await first.close();
+		expect(readSessionOwnerPids(sessionFile)).toContain(process.pid);
+
+		await second.close();
+		expect(readSessionOwnerPids(sessionFile)).toEqual([]);
+		// Last line removed: the sidecar file itself is gone, not left empty.
+		expect(fs.existsSync(`${sessionFile}.owner`)).toBe(false);
+	});
+
 	it("a resumed session owns its file from open, without appending anything", async () => {
 		await buildSessionWithTwoUndoTails();
 		const manager = SessionManager.create(sessionsDir, sessionsDir);
