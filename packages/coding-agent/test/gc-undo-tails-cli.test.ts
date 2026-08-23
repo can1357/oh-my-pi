@@ -18,6 +18,7 @@ import * as path from "node:path";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { collectGcErrors, type GcResult } from "../src/cli/gc-cli";
 import { isProcessAlive, readSessionOwnerPids, SessionManager } from "../src/session/session-manager";
+import { MemorySessionStorage } from "../src/session/session-storage";
 
 function userMessage(text: string) {
 	return { role: "user" as const, content: [{ type: "text" as const, text }], timestamp: Date.now() };
@@ -215,6 +216,44 @@ describe("omp gc --undo-tails (CLI)", () => {
 		await successor.setSessionFile(sessionFile);
 		successor.appendMessage(userMessage("successor"));
 		await successor.close();
+	});
+
+	it("memory storage with a virtual session path appends without OS locks", async () => {
+		const storage = new MemorySessionStorage();
+		const virtualPath = "/sessions/proj/virtual-session.jsonl";
+		// Memory storage stats must find the path, so seed an empty file.
+		storage.writeTextSync(virtualPath, "");
+		const manager = SessionManager.create(sessionsDir, sessionsDir, storage);
+		await manager.setSessionFile(virtualPath);
+		// Before the fileBacked gate this threw trying to create
+		// /sessions/proj/virtual-session.jsonl.lock on the local filesystem.
+		manager.appendMessage(userMessage("memory-cold"));
+		manager.appendMessage(userMessage("memory-writer"));
+		await manager.flush();
+		const userTexts = manager
+			.getBranch()
+			.filter(entry => entry.type === "message")
+			.map(entry => JSON.stringify(entry));
+		expect(userTexts.some(text => text.includes("memory-writer"))).toBe(true);
+		await manager.close();
+	});
+
+	it("authoritative recovery releases the writer claim and owner sidecar", async () => {
+		const manager = SessionManager.create(sessionsDir, sessionsDir);
+		await manager.setSessionFile(sessionFile);
+		manager.appendMessage(userMessage("recovery-cold"));
+		manager.appendMessage(userMessage("recovery-writer"));
+		await manager.flush();
+		expect(readSessionOwnerPids(sessionFile)).toContain(process.pid);
+
+		// Repair closes the writer and rewrites; the claim and the sidecar
+		// must go with it, or the next append fails its own stale lock.
+		await manager.recoverPersistenceFromCurrentState();
+		expect(readSessionOwnerPids(sessionFile)).toEqual([]);
+
+		manager.appendMessage(userMessage("recovery-after"));
+		await manager.close();
+		expect(readSessionOwnerPids(sessionFile)).toEqual([]);
 	});
 
 	it("collectGcErrors surfaces undo-tail failures for the exit status", () => {

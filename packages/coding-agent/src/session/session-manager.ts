@@ -983,7 +983,7 @@ export class SessionManager {
 		this.#writer = undefined;
 		if (writer) {
 			void writer.close().catch(() => undefined);
-			if (this.#sessionFile) removeOwnerSidecar(this.#sessionFile);
+			if (this.#sessionFile && this.#storage instanceof FileSessionStorage) removeOwnerSidecar(this.#sessionFile);
 		}
 		this.#releaseWriterLock();
 	}
@@ -998,7 +998,7 @@ export class SessionManager {
 		// collide with our own unreleased handle.
 		this.#releaseWriterLock();
 		await writer.close();
-		if (sessionFile) removeOwnerSidecar(sessionFile);
+		if (sessionFile && this.#storage instanceof FileSessionStorage) removeOwnerSidecar(sessionFile);
 	}
 
 	#releaseWriterLock(): void {
@@ -1048,6 +1048,11 @@ export class SessionManager {
 		this.#diskEpoch++;
 		const epoch = this.#diskEpoch;
 		this.#writer = undefined;
+		// Drop the append writer's claim now: the repair rewrite below takes
+		// its own exclusive claim, and a same-process second acquire while
+		// this one is still held would fail the repair itself. The sidecar is
+		// removed once the fd close succeeds, matching #closeWriterHandle.
+		this.#releaseWriterLock();
 		this.#diskTail = Promise.resolve();
 		this.#forceFileCreation = true;
 		this.#fileIsCurrent = false;
@@ -1060,6 +1065,8 @@ export class SessionManager {
 			if (writer) {
 				try {
 					await writer.close();
+					if (this.#sessionFile && this.#storage instanceof FileSessionStorage)
+						removeOwnerSidecar(this.#sessionFile);
 				} catch (error) {
 					closeError = toError(error);
 				}
@@ -1135,7 +1142,12 @@ export class SessionManager {
 
 		if (this.#writer?.isOpen()) return this.#writer;
 
-		if (this.#persist) {
+		// OS-path locks and the owner sidecar only exist for file-backed
+		// storage: IndexedSessionStorage backends (Redis/SQL) and memory
+		// storage no-op directory creation and would otherwise fail lock file
+		// creation on their virtual session paths.
+		const fileBacked = this.#storage instanceof FileSessionStorage;
+		if (this.#persist && fileBacked) {
 			// Exclusive claim, held until the writer closes: a gc rewrite (or
 			// any other whole-file replacement) must never interleave with an
 			// open append fd, or appends land on the replaced-away inode and
@@ -1152,7 +1164,7 @@ export class SessionManager {
 			flags: "a",
 			onError: err => this.#noteDiskFailure(err),
 		});
-		if (this.#persist) writeOwnerSidecar(this.#sessionFile);
+		if (this.#persist && fileBacked) writeOwnerSidecar(this.#sessionFile);
 		return this.#writer;
 	}
 
@@ -1271,10 +1283,12 @@ export class SessionManager {
 			// preflight and this rewrite fails its writer open (or we fail
 			// here when it got there first) instead of silently losing turns
 			// to the swapped-out inode.
-			rewriteLock = tryAcquireFileLock(targetPath);
-			if (!rewriteLock?.acquired) {
-				rewriteLock?.release();
-				throw new SessionFileLockError(targetPath);
+			if (this.#storage instanceof FileSessionStorage) {
+				rewriteLock = tryAcquireFileLock(targetPath);
+				if (!rewriteLock?.acquired) {
+					rewriteLock?.release();
+					throw new SessionFileLockError(targetPath);
+				}
 			}
 		}
 		try {
@@ -1396,10 +1410,13 @@ export class SessionManager {
 				// rewrite: held across the atomic publication so a process
 				// resuming the session after gc's owner preflight cannot open
 				// an append fd onto the inode this replace detaches.
-				const publishLock: FileLockHandle | null = tryAcquireFileLock(sessionFile);
-				if (!publishLock?.acquired) {
-					publishLock?.release();
-					throw new SessionFileLockError(sessionFile);
+				let publishLock: FileLockHandle | null = null;
+				if (this.#storage instanceof FileSessionStorage) {
+					publishLock = tryAcquireFileLock(sessionFile);
+					if (!publishLock?.acquired) {
+						publishLock?.release();
+						throw new SessionFileLockError(sessionFile);
+					}
 				}
 				const body = this.#fileBody();
 				try {
@@ -1415,7 +1432,7 @@ export class SessionManager {
 					}
 					throw error;
 				} finally {
-					publishLock.release();
+					publishLock?.release();
 				}
 				if (this.#diskEpoch !== epoch) return false;
 				this.#recordFullRewrite(body);
