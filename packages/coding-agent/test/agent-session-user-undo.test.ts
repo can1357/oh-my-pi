@@ -591,6 +591,25 @@ describe("AgentSession user undo/redo", () => {
 		expect(ttsrManager.getInjectedRuleNames().sort()).toEqual(["dropped-rule", "kept-rule"]);
 	});
 
+	it("rollback rewinds the TTSR message counter with the branch", async () => {
+		session = await makeSession();
+		sessionManager.appendMessage(userMessage(`Remember ${SECRET_A}`));
+		sessionManager.appendMessage(assistantMessage("OK A"));
+		sessionManager.appendTtsrInjection(["kept-rule"]);
+		ttsrManager.markInjectedByNames(["kept-rule"]);
+		sessionManager.appendMessage(userMessage(`Remember ${SECRET_B}`));
+		sessionManager.appendMessage(assistantMessage("OK B"));
+		// The live counter ran far past the branch: many turns have elapsed
+		// since the injection, but most of them just got undone.
+		for (let i = 0; i < 20; i++) ttsrManager.incrementMessageCount();
+
+		const undo = session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		// Branch after undo: user A + assistant A remain (injections do not
+		// count as messages) — the counter realigns to the branch.
+		expect(ttsrManager.getMessageCount()).toBe(2);
+	});
+
 	it("rollback preserves TTSR gap timing for retained rules", async () => {
 		const manager = new TtsrManager({
 			enabled: true,
