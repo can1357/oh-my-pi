@@ -94,22 +94,26 @@ async function withOwnerSidecarLock<T>(sessionFile: string, fn: () => Promise<T>
 	return withFileLock(ownerSidecarPath(sessionFile), fn);
 }
 
-async function writeOwnerSidecar(sessionFile: string): Promise<void> {
+async function writeOwnerSidecar(sessionFile: string): Promise<boolean> {
+	// Serialized against removal in other processes: an unregister's
+	// read-modify-write must never discard a claim appended concurrently.
+	// One line per manager instance — two managers in one process each
+	// append, and each close removes exactly one own-pid line, so the
+	// surviving manager keeps the session owned. Readers dedup by pid.
+	// Reports whether THIS append landed: a same-process sibling's existing
+	// pid line must not mask this manager's failed registration.
 	try {
-		// Serialized against removal in other processes: an unregister's
-		// read-modify-write must never discard a claim appended concurrently.
-		// One line per manager instance — two managers in one process each
-		// append, and each close removes exactly one own-pid line, so the
-		// surviving manager keeps the session owned. Readers dedup by pid.
 		await withOwnerSidecarLock(sessionFile, () =>
 			fs.promises.appendFile(ownerSidecarPath(sessionFile), `${process.pid}\n`, {
 				encoding: "utf-8",
 				mode: 0o600,
 			}),
 		);
+		return true;
 	} catch {
 		// Best-effort ownership hint; readers fall back to treating the
 		// session as unowned when the sidecar is unreadable.
+		return false;
 	}
 }
 
@@ -200,12 +204,12 @@ async function removeOwnerSidecar(sessionFile: string): Promise<void> {
 }
 
 /** Recorded owner pids for a session file (stale/dead pids included). */
-export function readSessionOwnerPids(sessionFile: string): number[] {
+export async function readSessionOwnerPids(sessionFile: string): Promise<number[]> {
 	try {
+		const content = await fs.promises.readFile(ownerSidecarPath(sessionFile), "utf-8");
 		return [
 			...new Set(
-				fs
-					.readFileSync(ownerSidecarPath(sessionFile), "utf-8")
+				content
 					.split("\n")
 					.map(line => Number.parseInt(line.trim(), 10))
 					.filter(pid => Number.isInteger(pid) && pid > 0),
@@ -698,6 +702,14 @@ export class SessionManager {
 	#writer: SessionStorageWriter | undefined;
 	#writerLock: FileLockHandle | undefined;
 	#ownerRegisteredFile: string | undefined;
+	/**
+	 * Successful sidecar claim appends by THIS manager, decremented
+	 * one-for-one by removals. Read/written only inside sidecar-tail
+	 * callbacks, so the accounting settles in tail order — a registration
+	 * still in flight when close() chains its removal is counted before
+	 * that removal runs.
+	 */
+	#ownerClaimLines = 0;
 	/** True only while a gc undo-tail prune is publishing; gates the owner recheck. */
 	#undoTailPruneActive = false;
 	#sidecarTail: Promise<void> = Promise.resolve();
@@ -878,25 +890,38 @@ export class SessionManager {
 	 * stays owned while this process holds it open, so gc skips it even
 	 * between writer reopens (compaction rewrites, recovery, mid-close).
 	 */
-	#registerOwnerSidecar(): Promise<void> {
-		if (!this.#persist) return this.#sidecarTail;
+	#registerOwnerSidecar(): Promise<boolean> {
+		if (!this.#persist) return Promise.resolve(true);
 		const sessionFile = this.#sessionFile;
-		if (!sessionFile || !(this.#storage instanceof FileSessionStorage)) return this.#sidecarTail;
-		if (this.#ownerRegisteredFile === sessionFile) return this.#sidecarTail;
+		if (!sessionFile || !(this.#storage instanceof FileSessionStorage)) return Promise.resolve(true);
+		if (this.#ownerRegisteredFile === sessionFile) return Promise.resolve(this.#ownerClaimLines > 0);
 		this.#ownerRegisteredFile = sessionFile;
 		// Serialized against other processes' removals; chained on the
 		// sidecar tail so register/remove keep strict per-manager order.
-		// The returned promise resolves once OUR pid is on disk, so load
-		// paths can establish ownership before accepting a journal.
-		this.#sidecarTail = this.#sidecarTail.then(() => writeOwnerSidecar(sessionFile));
-		return this.#sidecarTail;
+		// The returned promise reports whether THIS manager's append landed
+		// (a sibling's identical pid line must not mask a failure), so load
+		// paths can establish their own claim before accepting a journal.
+		let written = false;
+		this.#sidecarTail = this.#sidecarTail.then(async () => {
+			written = await writeOwnerSidecar(sessionFile);
+			if (written) this.#ownerClaimLines++;
+		});
+		return this.#sidecarTail.then(() => written);
 	}
 
 	#unregisterOwnerSidecar(): void {
 		const registered = this.#ownerRegisteredFile;
 		if (!registered) return;
 		this.#ownerRegisteredFile = undefined;
-		this.#sidecarTail = this.#sidecarTail.then(() => removeOwnerSidecar(registered));
+		this.#sidecarTail = this.#sidecarTail.then(async () => {
+			// Decided in tail order: every registration chained before this
+			// point has completed, so the counter reflects exactly how many
+			// lines THIS manager contributed. Remove one per contribution —
+			// a manager whose registration failed strips nothing.
+			if (this.#ownerClaimLines <= 0) return;
+			this.#ownerClaimLines--;
+			await removeOwnerSidecar(registered);
+		});
 	}
 
 	#latchIndeterminate(operationError: Error, recoveryErrors: readonly Error[]): SessionPersistenceIndeterminateError {
@@ -1251,7 +1276,7 @@ export class SessionManager {
 					// under it would set up a resurrect-on-rewrite. Aborting
 					// here leaves disk untouched; gc reports a skip.
 					if (this.#undoTailPruneActive) {
-						const foreignOwners = readSessionOwnerPids(sessionFile).filter(pid => pid !== process.pid);
+						const foreignOwners = (await readSessionOwnerPids(sessionFile)).filter(pid => pid !== process.pid);
 						if (foreignOwners.some(pid => isProcessAlive(pid))) return false;
 					}
 					await this.#storage.writeTextAtomic(sessionFile, this.#fileBody(), {
@@ -1752,8 +1777,7 @@ export class SessionManager {
 		if (this.#persist && this.#storage instanceof FileSessionStorage) {
 			let ownershipEstablished = false;
 			for (let attempt = 0; attempt < 5; attempt++) {
-				await this.#registerOwnerSidecar();
-				if (readSessionOwnerPids(resolvedSessionFile).includes(process.pid)) {
+				if (await this.#registerOwnerSidecar()) {
 					ownershipEstablished = true;
 					break;
 				}
@@ -1771,6 +1795,12 @@ export class SessionManager {
 		for (let attempt = 0; attempt < 5; attempt++) {
 			if ((await readUndoTailPruneMarkerPid(resolvedSessionFile)) === undefined) break;
 			await waitClearUndoTailPruneMarker(resolvedSessionFile);
+			// A marker that outlived the bounded wait means a live gc is
+			// still mid-publish; reloading under it could accept pre-prune
+			// history, so refuse the load rather than race the publication.
+			if ((await readUndoTailPruneMarkerPid(resolvedSessionFile)) !== undefined) {
+				throw new SessionFileLockError(resolvedSessionFile);
+			}
 			loaded = await loadSessionFile(resolvedSessionFile, this.#storage);
 			if (loaded.invalidHeader) {
 				throw new Error(

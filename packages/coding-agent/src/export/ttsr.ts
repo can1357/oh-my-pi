@@ -589,6 +589,22 @@ export class TtsrManager {
 		this.#messageCount++;
 	}
 
+	/**
+	 * Realign the message counter (and any injection timing ahead of it) with
+	 * a rewound branch. Rollback keeps the live counter at its pre-rewind
+	 * value while restored injection records keep their positions — an
+	 * after-gap rule whose injection survives the rewind would otherwise look
+	 * ages old and trigger immediately. Clamping records down to the rewound
+	 * count mirrors what reloading the same branch would produce: the full
+	 * repeatGap has to elapse again.
+	 */
+	rewindMessageCount(count: number): void {
+		this.#messageCount = Math.max(0, count);
+		for (const record of this.#injectionRecords.values()) {
+			if (record.lastInjectedAt > this.#messageCount) record.lastInjectedAt = this.#messageCount;
+		}
+	}
+
 	/** Get current message count. */
 	getMessageCount(): number {
 		return this.#messageCount;

@@ -1600,7 +1600,7 @@ async function runUndoTailGc(options: ResolvedGcOptions): Promise<UndoTailGcResu
 		// in-memory tree. SessionStatus is journal-tail state ("complete"
 		// means the last turn yielded, not that nobody has it open), so it is
 		// deliberately not used here.
-		const ownerPids = readSessionOwnerPids(session.path);
+		const ownerPids = await readSessionOwnerPids(session.path);
 		if (ownerPids.some(pid => isProcessAlive(pid))) {
 			result.skippedLive++;
 			continue;

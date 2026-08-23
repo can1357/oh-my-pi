@@ -123,7 +123,7 @@ describe("omp gc --undo-tails (CLI)", () => {
 		const tipTwo = manager.getLeafId();
 		manager.branchWithSummary(a1, "", { kind: "user-undo", undoOf: tipTwo, steps: 1, droppedPrompts: "" });
 		await manager.close();
-		expect(readSessionOwnerPids(sessionFile)).toEqual([]);
+		expect(await readSessionOwnerPids(sessionFile)).toEqual([]);
 	}
 
 	it("dry run reports pruneable tails without writing anything, breadcrumbs included", async () => {
@@ -183,7 +183,7 @@ describe("omp gc --undo-tails (CLI)", () => {
 		const sleeper = Bun.spawn(["sleep", "60"], { stdout: "ignore", stderr: "ignore" });
 		try {
 			fs.writeFileSync(`${sessionFile}.owner`, `${dead.pid}\n${sleeper.pid}\n`, { encoding: "utf-8" });
-			expect(readSessionOwnerPids(sessionFile).length).toBe(2);
+			expect((await readSessionOwnerPids(sessionFile)).length).toBe(2);
 
 			const outcome = await runGcChild(agentDir, true);
 
@@ -222,7 +222,7 @@ describe("omp gc --undo-tails (CLI)", () => {
 			// Wait until the child's registration is visible on the sidecar.
 			for (let i = 0; i < 100 && childPid === undefined; i++) {
 				await Bun.sleep(20);
-				const foreign = readSessionOwnerPids(sessionFile).filter(pid => pid !== process.pid);
+				const foreign = (await readSessionOwnerPids(sessionFile)).filter(pid => pid !== process.pid);
 				if (foreign.length > 0) childPid = foreign[0];
 			}
 			expect(childPid).toBeDefined();
@@ -323,17 +323,17 @@ describe("omp gc --undo-tails (CLI)", () => {
 		manager.appendMessage(userMessage("recovery-cold"));
 		manager.appendMessage(userMessage("recovery-writer"));
 		await manager.flush();
-		expect(readSessionOwnerPids(sessionFile)).toContain(process.pid);
+		expect(await readSessionOwnerPids(sessionFile)).toContain(process.pid);
 
 		// Repair closes the writer and rewrites under its own claim; the
 		// manager stays open, so ownership (and the gc skip) must survive.
 		await manager.recoverPersistenceFromCurrentState();
-		expect(readSessionOwnerPids(sessionFile)).toContain(process.pid);
+		expect(await readSessionOwnerPids(sessionFile)).toContain(process.pid);
 
 		// The next append still works (no stale self-lock) and re-arms nothing.
 		manager.appendMessage(userMessage("recovery-after"));
 		await manager.close();
-		expect(readSessionOwnerPids(sessionFile)).toEqual([]);
+		expect(await readSessionOwnerPids(sessionFile)).toEqual([]);
 	});
 
 	it("an open that overlaps a prune marker waits and reloads post-prune content", async () => {
@@ -350,7 +350,7 @@ describe("omp gc --undo-tails (CLI)", () => {
 			await Bun.sleep(80);
 			// Registration happens BEFORE the marker check: our pid is already
 			// visible to any gc recheck while we wait out the prune.
-			expect(readSessionOwnerPids(sessionFile)).toContain(process.pid);
+			expect(await readSessionOwnerPids(sessionFile)).toContain(process.pid);
 			// The prune "finishes": new content lands, then the marker clears.
 			writer.appendMessage(userMessage("extra-during-prune"));
 			fs.rmSync(`${sessionFile}.owner.pruning`);
@@ -384,7 +384,7 @@ describe("omp gc --undo-tails (CLI)", () => {
 		handle?.release();
 		await opening;
 		expect(opened).toBe(true);
-		expect(readSessionOwnerPids(sessionFile)).toContain(process.pid);
+		expect(await readSessionOwnerPids(sessionFile)).toContain(process.pid);
 		await manager.close();
 	});
 
@@ -398,7 +398,7 @@ describe("omp gc --undo-tails (CLI)", () => {
 		const manager = SessionManager.create(sessionsDir, sessionsDir);
 		try {
 			await manager.setSessionFile(sessionFile); // must not hang
-			expect(readSessionOwnerPids(sessionFile)).toContain(process.pid);
+			expect(await readSessionOwnerPids(sessionFile)).toContain(process.pid);
 			expect(fs.existsSync(`${sessionFile}.owner.pruning`)).toBe(false);
 		} finally {
 			await manager.close();
@@ -412,7 +412,7 @@ describe("omp gc --undo-tails (CLI)", () => {
 		fs.mkdirSync(`${sessionFile}.owner`, { recursive: true });
 		const manager = SessionManager.create(sessionsDir, sessionsDir);
 		await expect(manager.setSessionFile(sessionFile)).rejects.toBeInstanceOf(SessionFileLockError);
-		expect(readSessionOwnerPids(sessionFile)).toEqual([]);
+		expect(await readSessionOwnerPids(sessionFile)).toEqual([]);
 		fs.rmSync(`${sessionFile}.owner`, { recursive: true, force: true });
 		await manager.close();
 	});
@@ -423,10 +423,10 @@ describe("omp gc --undo-tails (CLI)", () => {
 		await manager.setSessionFile(sessionFile);
 		const forked = await manager.fork();
 		expect(forked).toBeDefined();
-		expect(readSessionOwnerPids(forked!.newSessionFile)).toContain(process.pid);
-		expect(readSessionOwnerPids(sessionFile)).toEqual([]);
+		expect(await readSessionOwnerPids(forked!.newSessionFile)).toContain(process.pid);
+		expect(await readSessionOwnerPids(sessionFile)).toEqual([]);
 		await manager.close();
-		expect(readSessionOwnerPids(forked!.newSessionFile)).toEqual([]);
+		expect(await readSessionOwnerPids(forked!.newSessionFile)).toEqual([]);
 	});
 
 	it("two managers on one session keep it owned until the last closes", async () => {
@@ -435,15 +435,15 @@ describe("omp gc --undo-tails (CLI)", () => {
 		await first.setSessionFile(sessionFile);
 		const second = SessionManager.create(sessionsDir, sessionsDir);
 		await second.setSessionFile(sessionFile);
-		expect(readSessionOwnerPids(sessionFile)).toContain(process.pid);
+		expect(await readSessionOwnerPids(sessionFile)).toContain(process.pid);
 
 		// Either close removes only its own line; the survivor keeps the
 		// session owned so gc cannot prune under it.
 		await first.close();
-		expect(readSessionOwnerPids(sessionFile)).toContain(process.pid);
+		expect(await readSessionOwnerPids(sessionFile)).toContain(process.pid);
 
 		await second.close();
-		expect(readSessionOwnerPids(sessionFile)).toEqual([]);
+		expect(await readSessionOwnerPids(sessionFile)).toEqual([]);
 		// Last line removed: the sidecar file itself is gone, not left empty.
 		expect(fs.existsSync(`${sessionFile}.owner`)).toBe(false);
 	});
@@ -455,13 +455,13 @@ describe("omp gc --undo-tails (CLI)", () => {
 		// No entries recorded: ownership must already be registered so an
 		// idle resume (or a title-only change, which bypasses #recordEntry)
 		// is not pruned by gc.
-		expect(readSessionOwnerPids(sessionFile)).toContain(process.pid);
+		expect(await readSessionOwnerPids(sessionFile)).toContain(process.pid);
 
 		await manager.setSessionName("retitle-only", "user");
-		expect(readSessionOwnerPids(sessionFile)).toContain(process.pid);
+		expect(await readSessionOwnerPids(sessionFile)).toContain(process.pid);
 
 		await manager.close();
-		expect(readSessionOwnerPids(sessionFile)).toEqual([]);
+		expect(await readSessionOwnerPids(sessionFile)).toEqual([]);
 	});
 
 	it("a compaction-style rewriteEntries keeps the session owned while the manager is open", async () => {
@@ -470,15 +470,15 @@ describe("omp gc --undo-tails (CLI)", () => {
 		manager.appendMessage(userMessage("compaction-cold"));
 		manager.appendMessage(userMessage("compaction-writer"));
 		await manager.flush();
-		expect(readSessionOwnerPids(sessionFile)).toContain(process.pid);
+		expect(await readSessionOwnerPids(sessionFile)).toContain(process.pid);
 
 		// rewriteEntries closes the append writer for an atomic whole-file
 		// rewrite; the manager remains live, so gc must still see an owner.
 		await manager.rewriteEntries();
-		expect(readSessionOwnerPids(sessionFile)).toContain(process.pid);
+		expect(await readSessionOwnerPids(sessionFile)).toContain(process.pid);
 
 		await manager.close();
-		expect(readSessionOwnerPids(sessionFile)).toEqual([]);
+		expect(await readSessionOwnerPids(sessionFile)).toEqual([]);
 	});
 
 	it("collectGcErrors surfaces undo-tail failures for the exit status", () => {
