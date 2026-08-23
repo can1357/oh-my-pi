@@ -21,10 +21,11 @@ const ENV_KEYS = [
 ] as const;
 const PROVIDER = "unit-auth-broker-cache";
 const TOKEN = "coding-agent-cache-token";
+const nativeFetch = globalThis.fetch;
 
 const savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
 
-function makeSnapshot(urlTime: number): SnapshotResponse {
+function makeSnapshot(urlTime: number, apiKey = "cached-api-key"): SnapshotResponse {
 	return {
 		generation: 11,
 		generatedAt: urlTime,
@@ -39,7 +40,7 @@ function makeSnapshot(urlTime: number): SnapshotResponse {
 			{
 				id: 1,
 				provider: PROVIDER,
-				credential: { type: "api_key", key: "cached-api-key" },
+				credential: { type: "api_key", key: apiKey },
 				identityKey: null,
 				rotatesInMs: null,
 			},
@@ -65,6 +66,7 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 	});
 
 	afterEach(async () => {
+		globalThis.fetch = nativeFetch;
 		for (const key of ENV_KEYS) {
 			if (savedEnv[key] === undefined) delete process.env[key];
 			else process.env[key] = savedEnv[key];
@@ -166,6 +168,104 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 		} finally {
 			storage?.close();
 			server.stop(true);
+		}
+	});
+
+	test("rejects a fresh cache when the broker rejects its bearer token", async () => {
+		const cachePath = path.join(tempDir, "snapshot.enc");
+		const server = Bun.serve({
+			port: 0,
+			fetch: () => new Response("unauthorized", { status: 401 }),
+		});
+		const url = server.url.toString();
+		try {
+			process.env.OMP_AUTH_BROKER_URL = url;
+			process.env.OMP_AUTH_BROKER_TOKEN = TOKEN;
+			process.env.OMP_AUTH_BROKER_SNAPSHOT_CACHE = cachePath;
+			process.env.OMP_AUTH_BROKER_SNAPSHOT_TTL_MS = "3600000";
+			await writeAuthBrokerSnapshotCache({
+				path: cachePath,
+				token: TOKEN,
+				url,
+				snapshot: makeSnapshot(Date.now()),
+			});
+
+			await expect(discoverAuthStorage(tempDir)).rejects.toMatchObject({ status: 401 });
+		} finally {
+			server.stop(true);
+		}
+	});
+
+	test("prefers a reachable broker snapshot over a fresh cached snapshot", async () => {
+		const cachePath = path.join(tempDir, "snapshot.enc");
+		const brokerStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "broker.db"));
+		brokerStore.saveApiKey(PROVIDER, "broker-api-key");
+		const brokerStorage = new AuthStorage(brokerStore);
+		await brokerStorage.reload();
+		let handle: AuthBrokerServerHandle | undefined;
+		let storage: AuthStorage | undefined;
+		try {
+			handle = startAuthBroker({
+				storage: brokerStorage,
+				bind: "127.0.0.1:0",
+				bearerTokens: [TOKEN],
+				disableRefresher: true,
+			});
+			process.env.OMP_AUTH_BROKER_URL = handle.url;
+			process.env.OMP_AUTH_BROKER_TOKEN = TOKEN;
+			process.env.OMP_AUTH_BROKER_SNAPSHOT_CACHE = cachePath;
+			process.env.OMP_AUTH_BROKER_SNAPSHOT_TTL_MS = "3600000";
+			await writeAuthBrokerSnapshotCache({
+				path: cachePath,
+				token: TOKEN,
+				url: handle.url,
+				snapshot: makeSnapshot(Date.now()),
+			});
+
+			storage = await discoverAuthStorage(tempDir);
+			expect(await storage.getApiKey(PROVIDER)).toBe("broker-api-key");
+		} finally {
+			storage?.close();
+			await handle?.close();
+			brokerStorage.close();
+			brokerStore.close();
+		}
+	});
+
+	test("uses the proxy-aware client transport for cached-broker reachability", async () => {
+		const cachePath = path.join(tempDir, "snapshot.enc");
+		const brokerUrl = "https://broker.proxy-only.invalid";
+		const requests: string[] = [];
+		let storage: AuthStorage | undefined;
+		globalThis.fetch = (async (input: string | URL | Request) => {
+			const requestedUrl = input instanceof Request ? input.url : String(input);
+			requests.push(requestedUrl);
+			const pathname = new URL(requestedUrl).pathname;
+			if (pathname === "/v1/healthz") return Response.json({ ok: true });
+			if (pathname === "/v1/snapshot") return Response.json(makeSnapshot(Date.now(), "broker-api-key"));
+			return new Response("not found", { status: 404 });
+		}) as typeof globalThis.fetch;
+
+		try {
+			process.env.OMP_AUTH_BROKER_URL = brokerUrl;
+			process.env.OMP_AUTH_BROKER_TOKEN = TOKEN;
+			process.env.OMP_AUTH_BROKER_SNAPSHOT_CACHE = cachePath;
+			process.env.OMP_AUTH_BROKER_SNAPSHOT_TTL_MS = "3600000";
+			await writeAuthBrokerSnapshotCache({
+				path: cachePath,
+				token: TOKEN,
+				url: brokerUrl,
+				snapshot: makeSnapshot(Date.now()),
+			});
+
+			storage = await discoverAuthStorage(tempDir);
+			expect(await storage.getApiKey(PROVIDER)).toBe("broker-api-key");
+			expect(requests.slice(0, 2)).toEqual([
+				`${brokerUrl}/v1/healthz`,
+				`${brokerUrl}/v1/snapshot`,
+			]);
+		} finally {
+			storage?.close();
 		}
 	});
 });
