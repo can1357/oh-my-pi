@@ -262,6 +262,7 @@ export class TurnRecovery {
 	#emptyStopRetryCount = 0;
 	#unexpectedStopRetryCount = 0;
 	#acceptTerminalEmptyStopForPrompt = false;
+	#silentEmptyStopFallbackArmed = false;
 	// Three fields sit near the word "serve" and are deliberately distinct:
 	// `#activeRetryFallback.served` gates the one-shot `retry_fallback_succeeded`
 	// event for the current arm, `#fallbackRouted` says how the CURRENT model was
@@ -392,6 +393,7 @@ export class TurnRecovery {
 		this.#emptyStopRetryCount = 0;
 		this.#unexpectedStopRetryCount = 0;
 		this.#acceptTerminalEmptyStopForPrompt = false;
+		this.#silentEmptyStopFallbackArmed = false;
 	}
 
 	/** Sets whether one terminal empty stop is accepted for the current prompt. */
@@ -790,6 +792,43 @@ export class TurnRecovery {
 			// and re-trigger compaction at the same boundary. Remove every capped
 			// empty output; toolUse orphans still need this for Anthropic history.
 			await this.#dropAssistantTurnDurably(assistantMessage);
+			// Zero-billed empty stops are upstream dispatch failures laundered into a
+			// clean HTTP-200 stop (see #9415): the gateway never generated anything.
+			// When configured, promote the turn to a synthetic retriable error and
+			// consult modelFallback/fallbackChains instead of surfacing the cap. The
+			// caller's `stopReason === "error"` routing treats this like any other
+			// retryable failure: if no chain can take over, it settles as terminal.
+			if (
+				this.#host.settings.get("features.silentEmptyStopFallback") &&
+				!providerEmptyOutput &&
+				outputTokensExcludingKnownReasoning === 0 &&
+				assistantMessage.usage.input === 0 &&
+				(assistantMessage.usage.cacheRead ?? 0) === 0 &&
+				assistantMessage.content.length === 0
+			) {
+				if (!this.#silentEmptyStopFallbackArmed) {
+					// One promotion per run: the retry consumes one normal attempt; if
+					// the pipe is still dead, settle terminal instead of looping.
+					this.#silentEmptyStopFallbackArmed = true;
+					assistantMessage.errorMessage = finalError;
+					assistantMessage.errorId = AIError.create(AIError.Flag.EmptyResponse | AIError.Flag.Transient);
+					assistantMessage.stopReason = "error";
+					logger.warn("Promoting zero-billed empty stop to retriable error for model fallback", {
+						attempts,
+						model: assistantMessage.model,
+						provider: assistantMessage.provider,
+					});
+					// The scheduled retry is a fresh request; this message object is
+					// already dropped, so its stop reason can be restored right away.
+					const didRetry = await this.handleRetryableError(assistantMessage, { allowModelFallback: true });
+					assistantMessage.stopReason = "stop";
+					if (didRetry) {
+						this.#emptyStopRetryCount = 0;
+						return "continue";
+					}
+					this.#silentEmptyStopFallbackArmed = false;
+				}
+			}
 			return "terminal";
 		}
 		// The reparented leaf must be durably persisted before the retry continues:
