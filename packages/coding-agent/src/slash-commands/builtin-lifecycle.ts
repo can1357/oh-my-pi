@@ -203,7 +203,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "undo",
 		description: "Undo the last user turn(s) from context — files untouched (use git)",
-		usage: "[steps]",
+		inlineHint: "[steps]",
 		acpInputHint: "[steps]",
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime =>

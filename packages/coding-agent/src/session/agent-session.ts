@@ -8133,14 +8133,22 @@ export class AgentSession {
 			.getBranch()
 			.filter((entry): entry is SessionMessageEntry => entry.type === "message" && entry.message.role === "user")
 			.slice(-limit)
-			.map(entry => {
-				const content = entry.message.content;
-				const text = typeof content === "string"
-					? content
-					: content.filter(part => part.type === "text").map(part => part.text).join(" ");
-				const firstLine = text.split("\n").find(line => line.trim().length > 0) ?? "(empty)";
-				return { entryId: entry.id, timestamp: entry.timestamp, preview: firstLine.slice(0, 120) };
-			});
+			.map(entry => ({
+				entryId: entry.id,
+				timestamp: entry.timestamp,
+				preview: this.#messageTextPreview(entry.message).slice(0, 120),
+			}));
+	}
+
+	/** First non-empty text line of a message, for previews and prompt lists. */
+	#messageTextPreview(message: AgentMessage): string {
+		if (!("content" in message)) return "(empty)";
+		const { content } = message;
+		const text =
+			typeof content === "string"
+				? content
+				: content.flatMap(part => (part.type === "text" ? [part.text] : [])).join(" ");
+		return text.split("\n").find(line => line.trim().length > 0) ?? "(empty)";
 	}
 
 	/** `/revert <entryId>`: rewind to before an arbitrary earlier user turn. */
@@ -8178,14 +8186,7 @@ export class AgentSession {
 		const droppedPrompts = entries
 			.slice(userTurnIdx)
 			.filter((entry): entry is SessionMessageEntry => entry.type === "message" && entry.message.role === "user")
-			.map(entry => {
-				const content = entry.message.content;
-				const text = typeof content === "string"
-					? content
-					: content.filter(part => part.type === "text").map(part => part.text).join(" ");
-				const firstLine = text.split("\n").find(line => line.trim().length > 0) ?? "(empty)";
-				return `- ${firstLine.slice(0, 120)}`;
-			})
+			.map(entry => `- ${this.#messageTextPreview(entry.message).slice(0, 120)}`)
 			.join("\n");
 		// SILENT undo contract: state after /undo is indistinguishable in
 		// context from the dropped turns never having happened. No rendered
