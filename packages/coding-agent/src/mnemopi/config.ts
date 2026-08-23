@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { MnemopiOptions } from "@oh-my-pi/pi-mnemopi";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getMemoriesDir, logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 
@@ -49,7 +50,9 @@ export function loadMnemopiConfig(settings: Settings, agentDir: string): Mnemopi
 		: path.join(getMemoriesDir(agentDir), "mnemopi", "mnemopi.db");
 	const scope = computeMnemopiBankScope(settings.get("mnemopi.bank"), cwd, scoping);
 	const recallBanks =
-		scoping === "global" ? scope.recallBanks : extendRecallWithLegacyBanks(scope.recallBanks, dbPath, cwd);
+		scoping === "global"
+			? scope.recallBanks
+			: extendRecallWithLegacyBanks(scope.recallBanks, dbPath, cwd, settings.get("mnemopi.bank"));
 	const llmMode = settings.get("mnemopi.llmMode");
 	const embeddingOverride = settings.get("mnemopi.embeddingModel");
 	const embeddingVariant = settings.get("mnemopi.embeddingVariant");
@@ -122,8 +125,8 @@ export interface MnemopiBankScope {
  *
  * Mnemopi has no tag-filtered recall, so `per-project-tagged` maps to a
  * project-local write bank plus a shared recall-visible bank. The project
- * bank is derived purely from {@link cwd} — see {@link projectBank} for the
- * stability contract.
+ * bank is derived from {@link cwd}'s resolved primary project root — see
+ * {@link projectBank} for the stability contract.
  */
 export function computeMnemopiBankScope(
 	configured: string | undefined,
@@ -165,16 +168,50 @@ function sharedBank(configured: string | undefined): string {
 }
 
 /**
- * Derive the per-project bank id from `cwd` alone.
+ * Resolve the primary project root for bank derivation: the repository's
+ * primary checkout root, so every linked git worktree, colocated jj
+ * workspace (`jj workspace add --colocate` creates a real git worktree, so
+ * git resolution already covers it), and non-colocated jj workspace
+ * resolves to the same directory. Falls back to `directory` itself outside
+ * any repository, preserving the plain cwd-based behavior from #2412.
  *
- * Earlier versions resolved the enclosing git root before hashing, which
- * made the bank id unstable: removing or adding a `.git` anywhere above the
- * cwd repointed the same conversation directory to a different bank and
- * fragmented memories (#2412). The git lookup is gone here; the rescue path
- * for already-fragmented installs lives in {@link extendRecallWithLegacyBanks}.
+ * Discovery and arbitration live in the native `vcs.repo()`: both git and
+ * jj lookups walk upward and the deeper root wins, so a pure jj workspace
+ * nested under an unrelated outer git checkout resolves to the jj
+ * workspace's primary root, not the outer checkout — the topology that
+ * would otherwise mix the memories `per-project` is meant to isolate.
+ */
+function resolveProjectRoot(directory: string): string {
+	try {
+		return vcs.repo(directory)?.primaryRoot() ?? directory;
+	} catch (error) {
+		logger.debug("mnemopi: project root resolution failed, using cwd", { directory, error: String(error) });
+		return directory;
+	}
+}
+
+/**
+ * Derive the per-project bank id from the resolved primary project root.
+ *
+ * Earlier versions hashed the enclosing git root before it was resolved to a
+ * *primary* checkout, which made the bank id unstable: removing or adding a
+ * `.git` anywhere above the cwd repointed the same conversation directory to
+ * a different bank and fragmented memories (#2412). The fix at the time
+ * dropped git resolution entirely and hashed the raw cwd, which traded that
+ * instability for a worse one: every git worktree or jj workspace of the
+ * same repository got its own isolated bank.
+ *
+ * {@link resolveProjectRoot} restores git/jj resolution, but only ever
+ * widens to a *primary* checkout root (mirroring the Hindsight backend's
+ * `projectLabel` in `hindsight/bank.ts`), never to an arbitrary ancestor —
+ * a stray or unrelated `.git`/`.jj` above the project root still does not
+ * resolve to a repository unless it actually is one. Any bank a resolution
+ * change strands is recovered the same way #2412 fragmentation was: once
+ * every row in an orphaned bank tags the same cwd, `extendRecallWithLegacyBanks`
+ * widens recall to include it.
  */
 function projectBank(configured: string | undefined, cwd: string): string {
-	const projectRoot = path.resolve(cwd || ".");
+	const projectRoot = resolveProjectRoot(path.resolve(cwd || "."));
 	const project = projectBankSegment(projectRoot);
 	const base = sanitizeBankName(configured);
 	return limitBankName(base ? `${base}-${project}` : project);
@@ -206,6 +243,7 @@ export function extendRecallWithLegacyBanks(
 	resolved: readonly string[],
 	dbPath: string,
 	cwd: string,
+	configured?: string,
 ): readonly string[] {
 	const banksDir = path.join(path.dirname(dbPath), "banks");
 	const cwdAbs = path.resolve(cwd || ".");
@@ -217,6 +255,18 @@ export function extendRecallWithLegacyBanks(
 	}
 	const have = new Set(resolved);
 	const extras: string[] = [];
+	// The pre-root-resolution scheme derived the bank from the raw cwd alone
+	// (`limitBankName(base ? `${base}-${segment}` : segment)`), so this
+	// worktree's previous bank name is deterministic. Probe it directly:
+	// the capped exploratory scan below walks readdir order and can run out
+	// of budget before reaching it in installations with many banks.
+	const rawCwdSegment = projectBankSegment(cwdAbs);
+	const base = sanitizeBankName(configured);
+	const knownLegacyBank = limitBankName(base ? `${base}-${rawCwdSegment}` : rawCwdSegment);
+	if (!have.has(knownLegacyBank) && bankOnlyHasCwd(path.join(banksDir, knownLegacyBank, "mnemopi.db"), cwdAbs)) {
+		extras.push(knownLegacyBank);
+		have.add(knownLegacyBank);
+	}
 	let scanned = 0;
 	for (const entry of entries) {
 		if (!entry.isDirectory() || have.has(entry.name)) continue;
