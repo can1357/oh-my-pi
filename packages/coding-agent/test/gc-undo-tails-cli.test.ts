@@ -444,6 +444,40 @@ describe("omp gc --undo-tails (CLI)", () => {
 		expect(await readSessionOwnerPids(sessionFile)).toEqual([]);
 	});
 
+	it("an unreadable prune marker aborts the load instead of clearing it", async () => {
+		await buildSessionWithTwoUndoTails();
+		// A marker path that cannot be read (a directory) must not report
+		// "no prune in flight" — that would accept a possibly pre-prune
+		// journal.
+		fs.mkdirSync(`${sessionFile}.owner.pruning`, { recursive: true });
+		const manager = SessionManager.create(sessionsDir, sessionsDir);
+		await expect(manager.setSessionFile(sessionFile)).rejects.toMatchObject({ code: "EISDIR" });
+		// The aborted load released its claim.
+		fs.rmSync(`${sessionFile}.owner.pruning`, { recursive: true, force: true });
+		expect(await readSessionOwnerPids(sessionFile)).toEqual([]);
+		await manager.close();
+	});
+
+	it("a failed session switch keeps the previous session owned", async () => {
+		await buildSessionWithTwoUndoTails();
+		const manager = SessionManager.create(sessionsDir, sessionsDir);
+		await manager.setSessionFile(sessionFile);
+
+		// Switch target whose load fails: its sidecar cannot be written.
+		const otherFile = path.join(sessionsDir, `20260823T000001_${Snowflake.next()}.jsonl`);
+		fs.writeFileSync(otherFile, fs.readFileSync(sessionFile));
+		fs.mkdirSync(`${otherFile}.owner`, { recursive: true });
+		await expect(manager.setSessionFile(otherFile)).rejects.toBeInstanceOf(SessionFileLockError);
+		fs.rmSync(`${otherFile}.owner`, { recursive: true, force: true });
+
+		// The previous session's claim survived the failed switch — the
+		// rollback snapshot stays protected from gc.
+		expect(await readSessionOwnerPids(sessionFile)).toContain(process.pid);
+		expect(await readSessionOwnerPids(otherFile)).toEqual([]);
+		await manager.close();
+		expect(await readSessionOwnerPids(sessionFile)).toEqual([]);
+	});
+
 	it("fork registers ownership of the new session file", async () => {
 		await buildSessionWithTwoUndoTails();
 		const manager = SessionManager.create(sessionsDir, sessionsDir);

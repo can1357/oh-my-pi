@@ -160,8 +160,12 @@ async function readUndoTailPruneMarkerPid(sessionFile: string): Promise<number |
 		const content = await fs.promises.readFile(pruneMarkerPath(sessionFile), "utf-8");
 		const pid = Number.parseInt(content.trim(), 10);
 		return Number.isInteger(pid) ? pid : undefined;
-	} catch {
-		return undefined; // absent or unreadable — treated as no prune in flight
+	} catch (error) {
+		// Only a genuinely absent marker means "no prune in flight". Other
+		// read failures (permissions, transient I/O) fail closed: reporting
+		// a cleared marker could accept a pre-prune journal.
+		if (isEnoent(error)) return undefined;
+		throw error;
 	}
 }
 
@@ -1160,10 +1164,8 @@ export class SessionManager {
 		return this.#sidecarTail.then(() => written);
 	}
 
-	#unregisterOwnerSidecar(): void {
-		const registered = this.#ownerRegisteredFile;
-		if (!registered) return;
-		this.#ownerRegisteredFile = undefined;
+	#releaseOwnerClaim(sessionFile: string | undefined): void {
+		if (!sessionFile) return;
 		this.#sidecarTail = this.#sidecarTail.then(async () => {
 			// Decided in tail order: every registration chained before this
 			// point has completed, so the counter reflects exactly how many
@@ -1171,8 +1173,15 @@ export class SessionManager {
 			// a manager whose registration failed strips nothing.
 			if (this.#ownerClaimLines <= 0) return;
 			this.#ownerClaimLines--;
-			await removeOwnerSidecar(registered);
+			await removeOwnerSidecar(sessionFile);
 		});
+	}
+
+	#unregisterOwnerSidecar(): void {
+		const registered = this.#ownerRegisteredFile;
+		if (!registered) return;
+		this.#ownerRegisteredFile = undefined;
+		this.#releaseOwnerClaim(registered);
 	}
 
 	#latchIndeterminate(operationError: Error, recoveryErrors: readonly Error[]): SessionPersistenceIndeterminateError {
@@ -2160,7 +2169,12 @@ export class SessionManager {
 				: this.#storage.existsSync(resolvedSessionFile)
 					? this.#storage.statSync(resolvedSessionFile).size
 					: null;
-		this.#unregisterOwnerSidecar();
+		// The PREVIOUS claim is kept until the new session's gates pass: a
+		// switch that fails mid-load rolls back to the old in-memory
+		// snapshot, and releasing the old journal's claim early would let gc
+		// prune it during the fallible reconciliation and set up a resurrect
+		// when the stale snapshot is restored.
+		const previousClaim = this.#ownerRegisteredFile;
 		this.#sessionFile = resolvedSessionFile;
 		this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
 
@@ -2168,9 +2182,22 @@ export class SessionManager {
 		// rejected open() leaves no manager reference to close, so gc would
 		// treat the session as owned until this process exits.
 		try {
-			await this.#setSessionFileGated(resolvedSessionFile, loadedSession, loadedIdentity);
+			await this.#setSessionFileGated(resolvedSessionFile, loadedSession, loadedIdentity, options, sourceSize);
+			if (previousClaim && previousClaim !== resolvedSessionFile) {
+				// The switch committed only now — release the old claim.
+				this.#releaseOwnerClaim(previousClaim);
+			}
 		} catch (error) {
-			this.#unregisterOwnerSidecar();
+			// Whatever THIS load established is released; the previous
+			// claim was never dropped, so the rollback snapshot stays
+			// protected. Restore the previous slot too — the gated load
+			// may have cleared or replaced it, and without it a later
+			// close() could not release the surviving claim.
+			if (this.#ownerRegisteredFile === resolvedSessionFile) {
+				this.#unregisterOwnerSidecar();
+			} else {
+				this.#ownerRegisteredFile = previousClaim;
+			}
 			await this.#sidecarTail;
 			throw error;
 		}
@@ -2180,6 +2207,8 @@ export class SessionManager {
 		resolvedSessionFile: string,
 		loadedSession: SessionLoadResult | undefined,
 		loadedIdentity: JournalIdentity | undefined,
+		options?: { throwIfMissing?: boolean; newSession?: NewSessionOptions },
+		sourceSize?: number | null,
 	): Promise<void> {
 		// Load gates, all bounded (exhaustion refuses the load rather than
 		// accepting history a concurrent gc prune just removed — a later
