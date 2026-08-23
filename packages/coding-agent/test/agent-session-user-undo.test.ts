@@ -272,6 +272,25 @@ describe("AgentSession user undo/redo", () => {
 		expect(marker.details?.droppedPrompts).toContain(SECRET_B);
 	});
 
+	it("undo rebuilds checkpoint state so a dropped-tail checkpoint cannot rewind it back", async () => {
+		session = await makeSession();
+		await seedThreeTurns();
+		const droppedEntries = sessionManager.getBranch().slice(-2);
+		const checkpointEntryId = droppedEntries[0]!.id;
+		session.setCheckpointState({ checkpointMessageCount: 6, checkpointEntryId, startedAt: new Date().toISOString() });
+
+		const undo = session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		// The kept branch carries no checkpoint entries, so rehydration from
+		// the new branch clears the stale state instead of leaving it aimed
+		// at an entry that just went off-branch.
+		expect(session.getCheckpointState()).toBeUndefined();
+
+		const redo = session.userRedo();
+		expect(redo.ok).toBe(true);
+		expect(session.getCheckpointState()).toBeUndefined();
+	});
+
 	it("undo and redo leave live todo state untouched", async () => {
 		session = await makeSession();
 		const phases = [

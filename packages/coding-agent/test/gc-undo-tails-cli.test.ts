@@ -17,7 +17,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { collectGcErrors, type GcResult } from "../src/cli/gc-cli";
-import { isProcessAlive, readSessionOwnerPid, SessionManager } from "../src/session/session-manager";
+import { isProcessAlive, readSessionOwnerPids, SessionManager } from "../src/session/session-manager";
 
 function userMessage(text: string) {
 	return { role: "user" as const, content: [{ type: "text" as const, text }], timestamp: Date.now() };
@@ -43,41 +43,6 @@ function assistantMessage(text: string) {
 	};
 }
 
-// The child script imports by env-carried path on purpose: the module must
-// load only after the child has pointed PI_CODING_AGENT_DIR at the test tree
-// (static imports there would resolve against the real agent dir singleton).
-const GC_CHILD_SCRIPT = `
-process.env.PI_CODING_AGENT_DIR = process.env.GC_TEST_AGENT_DIR;
-process.env.ZELLIJ_PANE_ID = "gc-breadcrumb-test";
-const { runGcCommand } = await import(process.env.GC_TEST_GC_CLI);
-const { getTerminalSessionsDir } = await import("@oh-my-pi/pi-utils");
-const fs = await import("node:fs");
-const result = await runGcCommand({
-	flags: {
-		apply: process.env.GC_TEST_APPLY === "1",
-		undoTails: true,
-		agentDir: process.env.GC_TEST_AGENT_DIR,
-		keepUndoTails: 1,
-	},
-});
-const bcDir = getTerminalSessionsDir(process.env.GC_TEST_AGENT_DIR);
-let breadcrumb = "ABSENT";
-if (fs.existsSync(bcDir)) {
-	const files = fs.readdirSync(bcDir);
-	breadcrumb = files.length === 0 ? "EMPTY-DIR" : files.map(name => {
-		const file = path => fs.readFileSync(path, "utf8");
-		return name + "=" + file(bcDir + "/" + name).replace(/\\n/g, "|");
-	}).join(";");
-}
-console.log("GC_TEST_RESULT " + JSON.stringify({
-	skippedLive: result.undoTails?.skippedLive ?? 0,
-	markersPruned: result.undoTails?.markersPruned ?? 0,
-	entriesRemoved: result.undoTails?.entriesRemoved ?? 0,
-	errors: result.undoTails?.errors?.length ?? 0,
-}));
-console.log("GC_TEST_BREADCRUMB " + breadcrumb);
-`;
-
 interface GcChildOutcome {
 	skippedLive: number;
 	markersPruned: number;
@@ -87,17 +52,21 @@ interface GcChildOutcome {
 }
 
 async function runGcChild(agentDir: string, apply: boolean): Promise<GcChildOutcome> {
-	const gcCliPath = path.resolve(import.meta.dir, "../src/cli/gc-cli.ts");
-	// process.execPath: the child must run under the same bun that runs the
-	// tests (the repo pins bun >=1.4 for Bun.JSONL in session listing).
+	// Static fixture module (test/fixtures/gc-undo-tails-child.ts): the
+	// spawn env carries the agent dir, so the child's top-level imports
+	// resolve the singleton inside the test tree. process.execPath keeps the
+	// child under the same bun that runs the tests (repo pins bun >=1.4 for
+	// Bun.JSONL in session listing).
+	const fixture = path.resolve(import.meta.dir, "fixtures/gc-undo-tails-child.ts");
 	const proc = Bun.spawn({
-		cmd: [process.execPath, "-e", GC_CHILD_SCRIPT],
+		cmd: [process.execPath, fixture],
 		cwd: path.resolve(import.meta.dir, ".."),
 		env: {
 			...process.env,
+			PI_CODING_AGENT_DIR: agentDir,
+			ZELLIJ_PANE_ID: "gc-breadcrumb-test",
 			GC_TEST_AGENT_DIR: agentDir,
 			GC_TEST_APPLY: apply ? "1" : "0",
-			GC_TEST_GC_CLI: gcCliPath,
 		},
 		stdout: "pipe",
 		stderr: "pipe",
@@ -148,7 +117,7 @@ describe("omp gc --undo-tails (CLI)", () => {
 		const tipTwo = manager.getLeafId();
 		manager.branchWithSummary(a1, "", { kind: "user-undo", undoOf: tipTwo, steps: 1, droppedPrompts: "" });
 		await manager.close();
-		expect(readSessionOwnerPid(sessionFile)).toBeUndefined();
+		expect(readSessionOwnerPids(sessionFile)).toEqual([]);
 	}
 
 	it("dry run reports pruneable tails without writing anything, breadcrumbs included", async () => {
@@ -198,6 +167,27 @@ describe("omp gc --undo-tails (CLI)", () => {
 		expect(outcome.skippedLive).toBe(0);
 		expect(outcome.markersPruned).toBe(1);
 		expect(outcome.entriesRemoved).toBeGreaterThan(0);
+	});
+
+	it("a sidecar with several owners skips while any one pid is alive", async () => {
+		await buildSessionWithTwoUndoTails();
+		const before = fs.readFileSync(sessionFile, "utf8");
+		const dead = Bun.spawn(["bun", "-e", "process.exit(0)"], { stdout: "ignore", stderr: "ignore" });
+		await dead.exited;
+		const sleeper = Bun.spawn(["sleep", "60"], { stdout: "ignore", stderr: "ignore" });
+		try {
+			fs.writeFileSync(`${sessionFile}.owner`, `${dead.pid}\n${sleeper.pid}\n`, { encoding: "utf-8" });
+			expect(readSessionOwnerPids(sessionFile).length).toBe(2);
+
+			const outcome = await runGcChild(agentDir, true);
+
+			expect(outcome.skippedLive).toBe(1);
+			expect(outcome.entriesRemoved).toBe(0);
+			expect(fs.readFileSync(sessionFile, "utf8")).toBe(before);
+		} finally {
+			sleeper.kill();
+			await sleeper.exited;
+		}
 	});
 
 	it("collectGcErrors surfaces undo-tail failures for the exit status", () => {
