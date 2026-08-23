@@ -458,6 +458,46 @@ describe("omp gc --undo-tails (CLI)", () => {
 		await manager.close();
 	});
 
+	it("a non-gated registration failure retries via the record backstop", async () => {
+		await buildSessionWithTwoUndoTails();
+		const manager = SessionManager.create(sessionsDir, sessionsDir);
+		await manager.setSessionFile(sessionFile);
+		expect(await readSessionOwnerPids(sessionFile)).toContain(process.pid);
+
+		// Same-file restore: the claim must survive restoreState untouched.
+		const snapshot = manager.captureState();
+		manager.restoreState(snapshot);
+		expect(await readSessionOwnerPids(sessionFile)).toContain(process.pid);
+		await manager.close();
+	});
+
+	it("a non-gated registration failure retries via the record backstop", async () => {
+		await buildSessionWithTwoUndoTails();
+		const source = SessionManager.create(sessionsDir, sessionsDir);
+		await source.setSessionFile(sessionFile);
+		const snapshot = source.captureState();
+		await source.close();
+
+		// restoreState onto the snapshot's file is a NON-gated registration:
+		// its append fails against an unwritable sidecar, which must unlatch
+		// the slot so the #recordEntry backstop retries once it clears.
+		const otherFile = path.join(sessionsDir, `20260823T000003_${Snowflake.next()}.jsonl`);
+		fs.writeFileSync(otherFile, fs.readFileSync(sessionFile));
+		const manager = SessionManager.create(sessionsDir, sessionsDir);
+		await manager.setSessionFile(otherFile);
+		fs.mkdirSync(`${sessionFile}.owner`, { recursive: true });
+		manager.restoreState(snapshot);
+		await Bun.sleep(50);
+		fs.rmSync(`${sessionFile}.owner`, { recursive: true, force: true });
+
+		// The next recorded entry retries registration for the live file.
+		manager.appendMessage(userMessage("after restore"));
+		await Bun.sleep(50);
+		expect(await readSessionOwnerPids(sessionFile)).toContain(process.pid);
+		await manager.close();
+		expect(await readSessionOwnerPids(sessionFile)).toEqual([]);
+	});
+
 	it("a failed session switch keeps the previous session owned", async () => {
 		await buildSessionWithTwoUndoTails();
 		const manager = SessionManager.create(sessionsDir, sessionsDir);

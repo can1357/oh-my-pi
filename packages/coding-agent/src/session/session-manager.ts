@@ -931,7 +931,14 @@ export class SessionManager {
 		let written = false;
 		this.#sidecarTail = this.#sidecarTail.then(async () => {
 			written = await writeOwnerSidecar(sessionFile);
-			if (written) this.#ownerClaimLines++;
+			if (written) {
+				this.#ownerClaimLines++;
+			} else if (this.#ownerRegisteredFile === sessionFile) {
+				// A failed append must not latch the slot: the #recordEntry
+				// backstop would early-return forever and never retry, leaving
+				// a live manager unowned.
+				this.#ownerRegisteredFile = undefined;
+			}
 		});
 		return this.#sidecarTail.then(() => written);
 	}
@@ -1721,7 +1728,15 @@ export class SessionManager {
 
 	restoreState(snapshot: SessionManagerStateSnapshot): void {
 		this.#closeWriterEventually();
-		this.#unregisterOwnerSidecar();
+		// Restoring the SAME session must not churn its ownership claim:
+		// switchSession's rollback lands here after a failed switch, and an
+		// unregister→re-register gap there lets gc publish beneath the
+		// restored in-memory snapshot. A different file keeps the old
+		// release-then-register behavior.
+		const targetSessionFile = snapshot.sessionFile ? path.resolve(snapshot.sessionFile) : undefined;
+		if (this.#ownerRegisteredFile !== targetSessionFile) {
+			this.#unregisterOwnerSidecar();
+		}
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
 
