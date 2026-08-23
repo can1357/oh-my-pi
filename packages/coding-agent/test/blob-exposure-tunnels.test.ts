@@ -42,7 +42,12 @@ function shellLiteral(value: string): string {
 
 function prepareFake(
 	output: string,
-	options: { exitCode?: number; exitDelaySeconds?: number; restartOnce?: boolean } = {},
+	options: {
+		exitCode?: number;
+		exitDelaySeconds?: number;
+		restartOnce?: boolean;
+		restartReadyDelaySeconds?: number;
+	} = {},
 ): FakeInvocation {
 	const suffix = String(invocationSequence++);
 	const invocationDir = path.join(fakeBinDir, suffix);
@@ -60,14 +65,18 @@ function prepareFake(
 		`printf 'run\\n' >> ${shellLiteral(runsFile)}\n` +
 		`trap 'printf "SIGINT\\n" >> ${shellLiteral(signalsFile)}; exit 0' INT\n` +
 		`trap 'printf "SIGTERM\\n" >> ${shellLiteral(signalsFile)}; exit 0' TERM\n` +
-		`printf '%s\\n' ${shellLiteral(output)}\n` +
 		(restartMarker
 			? `if [ ! -e ${shellLiteral(restartMarker)} ]; then\n` +
+			`  printf '%s\\n' ${shellLiteral(output)}\n` +
 			`  printf 'first\\n' > ${shellLiteral(restartMarker)}\n` +
 			`  exit 23\n` +
 			`fi\n` +
+			(options.restartReadyDelaySeconds === undefined
+				? ""
+				: `/bin/sleep ${options.restartReadyDelaySeconds}\n`) +
 			`printf 'restarted\\n' >> ${shellLiteral(restartMarker)}\n`
 			: "") +
+		`printf '%s\\n' ${shellLiteral(output)}\n` +
 		(options.exitDelaySeconds === undefined ? "" : `/bin/sleep ${options.exitDelaySeconds}\n`) +
 		(options.exitCode === undefined ? `while :; do /bin/sleep 1; done\n` : `exit ${options.exitCode}\n`),
 	);
@@ -99,10 +108,6 @@ async function waitForFileContent(filePath: string, matches: (text: string) => b
 	} finally {
 		fs.unwatchFile(filePath, listener);
 	}
-}
-
-async function waitForRestart(marker: string): Promise<void> {
-	await waitForFileContent(marker, text => text.includes("restarted"));
 }
 
 function recordedArgs(invocation: FakeInvocation): string[] {
@@ -241,9 +246,12 @@ describe("startExposure tunnel adapters", () => {
 		expect(fs.readFileSync(invocation.runsFile, "utf8")).toBe("run\n");
 	});
 
-	it("uses a configured stable Pinggy base with authenticated SSH", async () => {
+	it("waits for replacement readiness before publishing a configured stable Pinggy base", async () => {
 		const invocation = prepareFake("Tunnel established at https://different-random.a.pinggy.link", {
 			restartOnce: true,
+			// Keep the replacement unready past the broker's one-second stable-host
+			// probe window. Startup must wait rather than expose that dead window.
+			restartReadyDelaySeconds: 2,
 		});
 		const active = await startExposure(
 			exposure("pinggy", {
@@ -254,10 +262,9 @@ describe("startExposure tunnel adapters", () => {
 		);
 		activeExposures.push(active);
 		expect(active.baseUrl).toBe("https://stable.example.test");
-		// Wait for the restarted child before inspecting args: each spawn truncates
-		// and rewrites the args file, so reading it earlier races the respawn. Both
-		// runs receive identical argv, so the post-restart contents are equivalent.
-		await waitForRestart(invocation.restartMarker!);
+		// The restarted marker is written immediately before the replacement URL,
+		// so its presence on return proves startup waited for replacement readiness.
+		expect(fs.readFileSync(invocation.restartMarker!, "utf8")).toBe("first\nrestarted\n");
 		expect(recordedArgs(invocation)).toContain("fake-pinggy-token@pro.pinggy.io");
 		expect(fs.readFileSync(invocation.runsFile, "utf8")).toBe("run\nrun\n");
 		await stopAndObserve(active, invocation);

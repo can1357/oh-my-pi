@@ -245,11 +245,19 @@ interface SpawnUrlTunnelOptions {
 	recoverPostExitUrl?: boolean;
 }
 
+type SpawnedUrlTunnelLifecycle = "running" | "exited-after-ready";
+
+interface SpawnedUrlTunnel {
+	proc: Bun.Subprocess;
+	baseUrl: string;
+	lifecycle: SpawnedUrlTunnelLifecycle;
+}
+
 async function spawnUrlTunnel(
 	argv: string[],
 	extract: (line: string) => string | null,
 	options: SpawnUrlTunnelOptions = {},
-): Promise<{ proc: Bun.Subprocess; baseUrl: string }> {
+): Promise<SpawnedUrlTunnel> {
 	const { readyPattern, recoverPostExitUrl = false } = options;
 	const logPath = path.join(os.tmpdir(), `omp-blob-tunnel-${Date.now().toString(36)}-${process.pid}.log`);
 	const fd = fs.openSync(logPath, "w");
@@ -301,11 +309,13 @@ async function spawnUrlTunnel(
 				// The diagnostic below remains authoritative when no log exists.
 			}
 			readyUrl = scanLog(text);
-			if (recoverPostExitUrl && readyUrl) return { proc, baseUrl: readyUrl };
-			const lifecycle = readyUrl ? "after reporting a tunnel URL" : "before reporting a tunnel URL";
-			throw new Error(`${argv[0]} exited with code ${proc.exitCode} ${lifecycle}`);
+			if (recoverPostExitUrl && readyUrl) {
+				return { proc, baseUrl: readyUrl, lifecycle: "exited-after-ready" };
+			}
+			const exitTiming = readyUrl ? "after reporting a tunnel URL" : "before reporting a tunnel URL";
+			throw new Error(`${argv[0]} exited with code ${proc.exitCode} ${exitTiming}`);
 		}
-		if (readyUrl) return { proc, baseUrl: readyUrl };
+		if (readyUrl) return { proc, baseUrl: readyUrl, lifecycle: "running" };
 		await Bun.sleep(150);
 	}
 	killTunnelProcess(proc);
@@ -334,9 +344,16 @@ const PINGGY_MAX_CONSECUTIVE_QUICK_EXITS = 5;
  * Random-hostname modes deliberately return their child exit to the broker:
  * restarting those would silently invalidate every already-published URL.
  */
-function restartingPinggyExposure(baseUrl: string, argv: string[], initialProc: Bun.Subprocess): ActiveExposure {
+async function restartingPinggyExposure(
+	baseUrl: string,
+	argv: string[],
+	initialProc: Bun.Subprocess,
+	initialLifecycle: SpawnedUrlTunnelLifecycle,
+): Promise<ActiveExposure> {
 	let proc = initialProc;
 	let stopping = false;
+	const startup = Promise.withResolvers<void>();
+	if (initialLifecycle === "running" && proc.exitCode === null) startup.resolve();
 	proc.unref();
 	const exited = (async () => {
 		let spawnedAt = Date.now();
@@ -351,7 +368,9 @@ function restartingPinggyExposure(baseUrl: string, argv: string[], initialProc: 
 			if (Date.now() - spawnedAt < PINGGY_QUICK_EXIT_WINDOW_MS) {
 				quickExits += 1;
 				if (quickExits >= PINGGY_MAX_CONSECUTIVE_QUICK_EXITS) {
-					logger.warn("blob-broker: authenticated Pinggy tunnel keeps exiting right after startup; giving up");
+					const message = "blob-broker: authenticated Pinggy tunnel keeps exiting right after startup; giving up";
+					logger.warn(message);
+					startup.reject(new Error(message));
 					return;
 				}
 				const backoff = Math.min(PINGGY_RESTART_BACKOFF_MS << (quickExits - 1), PINGGY_RESTART_BACKOFF_MAX_MS);
@@ -373,13 +392,15 @@ function restartingPinggyExposure(baseUrl: string, argv: string[], initialProc: 
 				spawnedAt = Date.now();
 				proc = restarted.proc;
 				proc.unref();
-			} catch {
+				if (restarted.lifecycle === "running" && proc.exitCode === null) startup.resolve();
+			} catch (error) {
 				logger.warn("blob-broker: authenticated Pinggy tunnel failed to reconnect");
+				startup.reject(error);
 				return;
 			}
 		}
 	})();
-	return {
+	const exposure: ActiveExposure = {
 		kind: "pinggy",
 		baseUrl,
 		exited,
@@ -388,6 +409,8 @@ function restartingPinggyExposure(baseUrl: string, argv: string[], initialProc: 
 			killTunnelProcess(proc);
 		},
 	};
+	await startup.promise;
+	return exposure;
 }
 
 /**
@@ -483,9 +506,11 @@ export async function startExposure(config: ExposureConfig, port: number): Promi
 						"free.pinggy.io",
 					];
 			const supervised = Boolean(token && config.publicBaseUrl);
-			const { proc, baseUrl } = await spawnUrlTunnel(argv, parsePinggyUrl, { recoverPostExitUrl: supervised });
+			const { proc, baseUrl, lifecycle } = await spawnUrlTunnel(argv, parsePinggyUrl, {
+				recoverPostExitUrl: supervised,
+			});
 			if (token && config.publicBaseUrl) {
-				return restartingPinggyExposure(normalizeBaseUrl(config.publicBaseUrl), argv, proc);
+				return restartingPinggyExposure(normalizeBaseUrl(config.publicBaseUrl), argv, proc, lifecycle);
 			}
 			return processExposure("pinggy", baseUrl, proc);
 		}
