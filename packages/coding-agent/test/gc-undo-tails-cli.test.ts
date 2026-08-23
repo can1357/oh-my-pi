@@ -343,6 +343,9 @@ describe("omp gc --undo-tails (CLI)", () => {
 		try {
 			opened = victim.setSessionFile(sessionFile);
 			await Bun.sleep(80);
+			// Registration happens BEFORE the marker check: our pid is already
+			// visible to any gc recheck while we wait out the prune.
+			expect(readSessionOwnerPids(sessionFile)).toContain(process.pid);
 			// The prune "finishes": new content lands, then the marker clears.
 			writer.appendMessage(userMessage("extra-during-prune"));
 			fs.rmSync(`${sessionFile}.owner.pruning`);
@@ -353,6 +356,23 @@ describe("omp gc --undo-tails (CLI)", () => {
 		} finally {
 			await victim.close().catch(() => undefined);
 			await writer.close();
+		}
+	});
+
+	it("a stale marker left by a dead gc process is recovered, not awaited", async () => {
+		await buildSessionWithTwoUndoTails();
+		// A gc that died mid-prune: marker names a reaped (provably dead) pid.
+		const dead = Bun.spawnSync({ cmd: [process.execPath, "-e", ""] });
+		const deadPid = dead.pid!;
+		expect(isProcessAlive(deadPid)).toBe(false);
+		fs.writeFileSync(`${sessionFile}.owner.pruning`, `${deadPid}\n`);
+		const manager = SessionManager.create(sessionsDir, sessionsDir);
+		try {
+			await manager.setSessionFile(sessionFile); // must not hang
+			expect(readSessionOwnerPids(sessionFile)).toContain(process.pid);
+			expect(fs.existsSync(`${sessionFile}.owner.pruning`)).toBe(false);
+		} finally {
+			await manager.close();
 		}
 	});
 

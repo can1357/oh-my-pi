@@ -122,33 +122,55 @@ function pruneMarkerPath(sessionFile: string): string {
  * and reload — closing the load-vs-publish race without sharing the
  * session claim (which same-process siblings must never double-acquire).
  */
-async function markUndoTailPruneInProgress(sessionFile: string): Promise<void> {
+async function readUndoTailPruneMarkerPid(sessionFile: string): Promise<number | undefined> {
 	try {
-		await withOwnerSidecarLock(sessionFile, () => {
-			fs.writeFileSync(pruneMarkerPath(sessionFile), `${process.pid}\n`, { encoding: "utf-8", mode: 0o600 });
-			return Promise.resolve();
-		});
+		const content = await fs.promises.readFile(pruneMarkerPath(sessionFile), "utf-8");
+		const pid = Number.parseInt(content.trim(), 10);
+		return Number.isInteger(pid) ? pid : undefined;
 	} catch {
-		// Best-effort: the publish-time owner recheck still guards the prune.
+		return undefined; // absent or unreadable — treated as no prune in flight
 	}
+}
+
+async function markUndoTailPruneInProgress(sessionFile: string): Promise<void> {
+	await withOwnerSidecarLock(sessionFile, () =>
+		fs.promises.writeFile(pruneMarkerPath(sessionFile), `${process.pid}\n`, { encoding: "utf-8", mode: 0o600 }),
+	);
 }
 
 async function clearUndoTailPruneMarker(sessionFile: string): Promise<void> {
-	try {
-		await withOwnerSidecarLock(sessionFile, () => {
-			fs.rmSync(pruneMarkerPath(sessionFile), { force: true });
-			return Promise.resolve();
-		});
-	} catch {
-		// Marker files are also self-healing: a later prune rewrites them.
-	}
+	await withOwnerSidecarLock(sessionFile, () => fs.promises.rm(pruneMarkerPath(sessionFile), { force: true }));
 }
 
-async function undoTailPruneInProgress(sessionFile: string): Promise<boolean> {
-	try {
-		return fs.existsSync(pruneMarkerPath(sessionFile));
-	} catch {
-		return false;
+/**
+ * Remove a marker whose recording gc process is provably dead (ESRCH).
+ * Re-validated under the sidecar lock so a marker a successor prune just
+ * re-created with its own live pid is never removed.
+ */
+async function removeStaleUndoTailPruneMarker(sessionFile: string): Promise<void> {
+	await withOwnerSidecarLock(sessionFile, async () => {
+		const pid = await readUndoTailPruneMarkerPid(sessionFile);
+		if (pid === undefined || isProcessAlive(pid)) return;
+		await fs.promises.rm(pruneMarkerPath(sessionFile), { force: true });
+	});
+}
+
+/**
+ * Wait for an in-flight prune to finish publishing. Bounded: a marker whose
+ * gc process died is removed (dead pids are proven by liveness, fail-closed),
+ * and a hard 30s cap ends the wait — the caller reloads either way, and it is
+ * already registered, so every later prune's owner recheck skips it.
+ */
+async function waitClearUndoTailPruneMarker(sessionFile: string): Promise<void> {
+	const deadline = Date.now() + 30_000;
+	while (Date.now() < deadline) {
+		const pid = await readUndoTailPruneMarkerPid(sessionFile);
+		if (pid === undefined) return;
+		if (!isProcessAlive(pid)) {
+			await removeStaleUndoTailPruneMarker(sessionFile).catch(() => undefined);
+			return;
+		}
+		await Bun.sleep(50);
 	}
 }
 
@@ -1715,25 +1737,21 @@ export class SessionManager {
 		this.#sessionFile = resolvedSessionFile;
 		this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
 
-		// A gc undo-tail prune can publish between our load and registration
-		// (its publish-time recheck only sees pids registered before it).
-		// When its marker is present, the loaded journal may be pre-prune:
-		// wait for the prune to finish, reload, and re-register — the reloaded
-		// tree matches disk, so a later full rewrite cannot resurrect pruned
-		// tails. Bounded: after retries we are registered, and every later
-		// gc run's recheck skips us.
+		// Register BEFORE checking the prune marker: gc creates its marker
+		// before its publish-time owner recheck, so a marker that appears
+		// after our check implies a recheck that already saw our pid and
+		// aborted. Registration is kept across the reload below — an
+		// unregistered reload window would reopen the race.
+		this.#registerOwnerSidecar();
 		for (let attempt = 0; attempt < 5; attempt++) {
-			if (!(await undoTailPruneInProgress(resolvedSessionFile))) break;
-			await Bun.sleep(50);
-			while (await undoTailPruneInProgress(resolvedSessionFile)) await Bun.sleep(50);
+			if ((await readUndoTailPruneMarkerPid(resolvedSessionFile)) === undefined) break;
+			await waitClearUndoTailPruneMarker(resolvedSessionFile);
 			loaded = await loadSessionFile(resolvedSessionFile, this.#storage);
 			if (loaded.invalidHeader) {
 				throw new Error(
 					`Cannot resume session "${resolvedSessionFile}": the session header is missing or malformed. The file was not modified.`,
 				);
 			}
-			this.#unregisterOwnerSidecar();
-			this.#registerOwnerSidecar();
 		}
 		const { entries: fileEntries, titleSlot } = loaded;
 		if (fileEntries.length === 0) {
