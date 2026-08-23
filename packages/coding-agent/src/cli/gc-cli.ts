@@ -16,7 +16,13 @@ import { Settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
 import { BLOB_HASH_RE } from "../session/blob-store";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
-import { isProcessAlive, readSessionOwnerPids, SessionManager } from "../session/session-manager";
+import {
+	isProcessAlive,
+	journalIdentity,
+	readSessionOwnerPids,
+	SessionManager,
+	sameJournalIdentity,
+} from "../session/session-manager";
 import { FileSessionStorage } from "../session/session-storage";
 
 const BLOB_FILE_RE = /^([a-f0-9]{64})(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/;
@@ -1632,13 +1638,25 @@ async function runUndoTailGc(options: ResolvedGcOptions): Promise<UndoTailGcResu
 					result.markersPruned += counts.markers;
 					result.entriesRemoved += counts.removed;
 					if (counts.markers > 0) result.files.push({ file: session.path, ...counts });
-					if (options.apply && (counts.removed > 0 || counts.markers > 0)) {
+					if (options.apply && counts.published) {
 						// The prune rewrote the journal; pruning does not
 						// change the session's logical age, so the original
 						// mtime is restored — otherwise a later pass in this
 						// same run (archive's write grace) would skip the
-						// file as just-modified.
-						await fs.utimes(session.path, before.atime, before.mtime);
+						// file as just-modified. Restore only when the
+						// journal is still the one the prune published and
+						// no third-party owner appeared: a concurrent
+						// update's fresh mtime must survive so the grace
+						// keeps protecting it.
+						if (
+							sameJournalIdentity(counts.published, await journalIdentity(session.path)) &&
+							// The gc process's own claim is expected here (its
+							// SessionManager.open registered it); only a
+							// third-party owner means someone else went live.
+							!(await readSessionOwnerPids(session.path)).some(pid => pid !== process.pid && isProcessAlive(pid))
+						) {
+							await fs.utimes(session.path, before.atime, before.mtime);
+						}
 					}
 				}
 			} finally {

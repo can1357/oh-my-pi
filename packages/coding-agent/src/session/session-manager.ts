@@ -84,18 +84,23 @@ import { generateId, migrateToCurrentVersion } from "./session-migrations";
  * every recorded pid is gone.
  */
 /** File identity used to detect a journal replacement (atomic rename). */
-type JournalIdentity = { dev: number; ino: number; size: number; mtimeMs: number };
+export type JournalIdentity = { dev: number; ino: number; size: number; mtimeMs: number };
 
-async function journalIdentity(sessionFile: string): Promise<JournalIdentity | undefined> {
+export async function journalIdentity(sessionFile: string): Promise<JournalIdentity | undefined> {
 	try {
 		const stat = await fs.promises.stat(sessionFile);
 		return { dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs };
-	} catch {
-		return undefined;
+	} catch (error) {
+		// Only ENOENT means "journal absent". A transient I/O or permission
+		// error must not read as absence: two failed probes would compare
+		// equal (undefined === undefined) and accept a stale snapshot while
+		// a concurrent prune replaced the file.
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
 	}
 }
 
-function sameJournalIdentity(a: JournalIdentity | undefined, b: JournalIdentity | undefined): boolean {
+export function sameJournalIdentity(a: JournalIdentity | undefined, b: JournalIdentity | undefined): boolean {
 	// Both absent (file never existed) is stable; one-sided presence or any
 	// field difference means the journal was replaced or appended to.
 	if (!a || !b) return a === b;
@@ -2096,6 +2101,11 @@ export class SessionManager {
 			this.#sessionFileRelocating = { source, dest };
 		}
 
+		// Held from before the rename until the destination rewrite lands:
+		// a foreign append writer keyed to the source path would keep
+		// appending to the replaced-away inode while this manager rewrites
+		// the destination, losing those entries.
+		let sourceLock: ReturnType<typeof tryAcquireFileLock> | undefined;
 		try {
 			if (this.#persist && this.#sessionFile) {
 				this.#storage.ensureDirSync(nextSessionDir);
@@ -2112,6 +2122,23 @@ export class SessionManager {
 					newArtifactsDir !== null &&
 					path.resolve(oldArtifactsDir) !== path.resolve(newArtifactsDir);
 				sessionFileExisted = this.#storage.existsSync(oldSessionFile);
+
+				// Only a path-changing move can split a foreign writer's
+				// appends across a rename; a same-path move is serialized by
+				// the fenced rewrite's own publish lock (acquiring here too
+				// would collide with it in-process).
+				if (sessionFileExisted && sessionPathChanged && this.#storage instanceof FileSessionStorage) {
+					// Our own writer lock was released by the drain above, so
+					// acquiring here fails only when a foreign manager owns
+					// the journal — refuse the move rather than split its
+					// appends across the rename.
+					const lock = tryAcquireFileLock(oldSessionFile);
+					if (!lock?.acquired) {
+						lock?.release();
+						throw new SessionFileLockError(oldSessionFile);
+					}
+					sourceLock = lock;
+				}
 
 				let sessionMoved = false;
 				let artifactsMoved = false;
@@ -2232,6 +2259,7 @@ export class SessionManager {
 			if (this.#sessionFile) this.#rememberBreadcrumb(resolvedCwd, this.#sessionFile);
 		} finally {
 			this.#sessionFileRelocating = null;
+			sourceLock?.release();
 		}
 	}
 
@@ -3297,7 +3325,16 @@ export class SessionManager {
 	async pruneUserUndoTails(
 		keep = 1,
 		apply = true,
-	): Promise<{ markers: number; removed: number; skippedLive?: boolean }> {
+	): Promise<{
+		markers: number;
+		removed: number;
+		skippedLive?: boolean;
+		/** Identity statted immediately after the publish, so callers can
+		 *  detect third-party writes that land between publish and their
+		 *  next read (the rewrite's atomic rename changes the inode, so a
+		 *  pre-prune identity can never match). */
+		published?: JournalIdentity;
+	}> {
 		// Already-pruned markers (scrubbed of undoOf, stamped prunedAt) are
 		// excluded so repeated runs are idempotent and never rewrite a file
 		// just to refresh prunedAt.
@@ -3408,7 +3445,8 @@ export class SessionManager {
 			await clearUndoTailPruneMarker(sessionFileForPrune);
 		}
 		if (!published) return { markers: 0, removed: 0, skippedLive: true };
-		return { markers: toScrub.length, removed: doomed.size };
+		const publishedIdentity = this.#sessionFile ? await journalIdentity(sessionFileForPrune) : undefined;
+		return { markers: toScrub.length, removed: doomed.size, published: publishedIdentity };
 	}
 
 	/**
