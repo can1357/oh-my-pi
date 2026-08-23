@@ -21,31 +21,38 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { Message } from "@oh-my-pi/pi-ai";
 
 const SECRET_A = "MARKER-ALPHA-7";
 const SECRET_B = "MARKER-BRAVO-3";
 const SECRET_C = "MARKER-CHARLIE-9";
 
-function userMessage(text: string): AgentMessage {
-	return { role: "user", content: [{ type: "text", text }] };
+function userMessage(text: string): Message {
+	return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() };
 }
 
-function assistantMessage(text: string): AgentMessage {
+function assistantMessage(text: string): Message {
 	return {
 		role: "assistant",
 		content: [{ type: "text", text }],
+		api: "anthropic",
+		provider: "anthropic",
+		model: "test-model",
 		stopReason: "stop",
-		usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0 },
-	} as AgentMessage;
+		usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 } },
+		timestamp: Date.now(),
+	};
 }
 
 function contextText(session: AgentSession): string {
 	return session
 		.buildDisplaySessionContext()
 		.messages.map(message => {
-			if (typeof message.content === "string") return message.content;
-			return Array.isArray(message.content)
-				? message.content.map(part => (part.type === "text" ? part.text : "")).join(" ")
+			if (!("content" in message)) return "";
+			const { content } = message;
+			if (typeof content === "string") return content;
+			return Array.isArray(content)
+				? content.flatMap(part => (part.type === "text" ? [part.text] : [])).join(" ")
 				: "";
 		})
 		.join("\n");
@@ -148,7 +155,7 @@ describe("AgentSession user undo/redo", () => {
 		expect(sessionManager.getEntries().length).toBeGreaterThan(preUndoEntries);
 		const anyText = sessionManager
 			.getEntries()
-			.map(entry => (entry.type === "message" ? JSON.stringify(entry.message.content) : ""))
+			.map(entry => (entry.type === "message" && "content" in entry.message ? JSON.stringify(entry.message.content) : ""))
 			.join("");
 		expect(anyText).toContain(SECRET_C);
 	});
