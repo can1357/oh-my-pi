@@ -943,6 +943,13 @@ export class SessionManager {
 		return this.#sidecarTail.then(() => written);
 	}
 
+	#claimOwnerSidecarFor(sessionFile: string): Promise<boolean> {
+		return writeOwnerSidecar(sessionFile).then(written => {
+			if (written) this.#ownerClaimLines++;
+			return written;
+		});
+	}
+
 	#releaseOwnerClaim(sessionFile: string | undefined): void {
 		if (!sessionFile) return;
 		this.#sidecarTail = this.#sidecarTail.then(async () => {
@@ -1829,16 +1836,16 @@ export class SessionManager {
 				this.#releaseOwnerClaim(previousClaim);
 			}
 		} catch (error) {
-			// Whatever THIS load established is released; the previous
-			// claim was never dropped, so the rollback snapshot stays
-			// protected. Restore the previous slot too — the gated load
-			// may have cleared or replaced it, and without it a later
-			// close() could not release the surviving claim.
-			if (this.#ownerRegisteredFile === resolvedSessionFile) {
+			// Release only what THIS load established — never the retained
+			// previous claim (a same-file reload failure must keep it), then
+			// restore the previous slot. Without the slot restore, the
+			// rollback path's restoreState() would see an empty slot and
+			// append a SECOND claim for the already-owned old session, and
+			// the eventual close() removes only one line.
+			if (this.#ownerRegisteredFile === resolvedSessionFile && previousClaim !== resolvedSessionFile) {
 				this.#unregisterOwnerSidecar();
-			} else {
-				this.#ownerRegisteredFile = previousClaim;
 			}
+			this.#ownerRegisteredFile = previousClaim;
 			await this.#sidecarTail;
 			throw error;
 		}
@@ -2093,6 +2100,19 @@ export class SessionManager {
 
 				let sessionMoved = false;
 				let artifactsMoved = false;
+				const preClaimedDestination = sessionFileExisted && sessionPathChanged;
+
+				if (preClaimedDestination) {
+					// Destination ownership BEFORE the rename: between the
+					// journal rename and the old claim's release, gc could
+					// discover the moved file with no destination sidecar,
+					// prune it, and have this manager's stale tree resurrect
+					// the tail on its next rewrite.
+					this.#sidecarTail = this.#sidecarTail.then(async () => {
+						await this.#claimOwnerSidecarFor(newSessionFile);
+					});
+					await this.#sidecarTail;
+				}
 
 				try {
 					if (sessionFileExisted && sessionPathChanged) {
@@ -2132,6 +2152,11 @@ export class SessionManager {
 						}
 					}
 
+					if (preClaimedDestination) {
+						// The journal never stayed at the destination — drop
+						// the premature claim; the old one is untouched.
+						this.#releaseOwnerClaim(newSessionFile);
+					}
 					throw err;
 				}
 
@@ -2141,9 +2166,16 @@ export class SessionManager {
 					];
 				}
 
-				this.#unregisterOwnerSidecar();
 				this.#sessionFile = newSessionFile;
-				this.#registerOwnerSidecar();
+				if (preClaimedDestination) {
+					// Claim already durable at the destination since before
+					// the rename — adopt it and release the source claim.
+					this.#ownerRegisteredFile = newSessionFile;
+					this.#releaseOwnerClaim(oldSessionFile);
+				} else {
+					this.#unregisterOwnerSidecar();
+					this.#registerOwnerSidecar();
+				}
 				await this.#sidecarTail;
 				this.#artifactManager = null;
 				this.#artifactManagerSessionFile = null;
