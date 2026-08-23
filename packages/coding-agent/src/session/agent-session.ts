@@ -5518,6 +5518,33 @@ export class AgentSession {
 	 *     `#checkpointState` so the next `rewind` call can complete the
 	 *     checkpoint instead of failing with "No active checkpoint".
 	 */
+	/**
+	 * Rebuild TTSR injection records from the active branch: a rollback can
+	 * strand records for rules whose ttsr_injection entries went off-branch
+	 * (repeatMode "once" would then never fire again in this process while a
+	 * reload of the same branch would allow them).
+	 */
+	#reconcileTtsrInjections(): void {
+		const manager = this.#ttsr.manager;
+		if (!manager) return;
+		const ruleNames = new Set<string>();
+		for (const entry of this.sessionManager.getBranch()) {
+			if (entry.type === "ttsr_injection") {
+				for (const name of entry.injectedRules) ruleNames.add(name);
+			} else if (entry.type === "message") {
+				const message = entry.message as { role?: string; customType?: string; details?: { rules?: unknown } };
+				if (message.role === "custom" && message.customType === "ttsr-injection") {
+					if (Array.isArray(message.details?.rules)) {
+						for (const name of message.details.rules) {
+							if (typeof name === "string") ruleNames.add(name);
+						}
+					}
+				}
+			}
+		}
+		manager.restoreInjected([...ruleNames]);
+	}
+
 	#rehydrateCheckpointRewindState(): void {
 		this.#clearCheckpointRuntimeState();
 		let completed: CompletedRewindState | undefined;
@@ -8349,6 +8376,7 @@ export class AgentSession {
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#advisors.resetSessionState({ preserveCost: true });
+		this.#reconcileTtsrInjections();
 		// Todos are deliberately NOT rehydrated from the rewound branch: the
 		// rollback contract is context-only, so live todo state survives.
 		// Checkpoint/rewind runtime state IS rebuilt from the new branch (same
@@ -8431,6 +8459,7 @@ export class AgentSession {
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#advisors.resetSessionState({ preserveCost: true });
+		this.#reconcileTtsrInjections();
 		// Same as /undo: rebuild checkpoint state from the restored branch.
 		this.#rehydrateCheckpointRewindState();
 		this.#rejournalControlEntries(liveRole);

@@ -1614,9 +1614,15 @@ async function runUndoTailGc(options: ResolvedGcOptions): Promise<UndoTailGcResu
 			const manager = await SessionManager.open(session.path, undefined, undefined, { suppressBreadcrumb: true });
 			try {
 				const counts = await manager.pruneUserUndoTails(options.keepUndoTails, options.apply);
-				result.markersPruned += counts.markers;
-				result.entriesRemoved += counts.removed;
-				if (counts.markers > 0) result.files.push({ file: session.path, ...counts });
+				if (counts.skippedLive) {
+					// An owner registered between the preflight and the
+					// publish claim; the file was left untouched.
+					result.skippedLive++;
+				} else {
+					result.markersPruned += counts.markers;
+					result.entriesRemoved += counts.removed;
+					if (counts.markers > 0) result.files.push({ file: session.path, ...counts });
+				}
 			} finally {
 				await manager.close();
 			}

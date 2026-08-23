@@ -191,6 +191,55 @@ describe("omp gc --undo-tails (CLI)", () => {
 		}
 	});
 
+	it("an owner appearing between preflight and publish turns the prune into a skip", async () => {
+		await buildSessionWithTwoUndoTails();
+		// A live manager in ANOTHER process opens the session after gc's
+		// preflight would have run; its registration must abort the publish
+		// under the claim, leaving disk intact.
+		const fixture = path.resolve(import.meta.dir, "fixtures/gc-undo-tails-child.ts");
+		const holder = Bun.spawn({
+			cmd: [process.execPath, fixture],
+			cwd: path.resolve(import.meta.dir, ".."),
+			env: {
+				...process.env,
+				PI_CODING_AGENT_DIR: agentDir,
+				ZELLIJ_PANE_ID: "gc-hold-open-test",
+				GC_TEST_AGENT_DIR: agentDir,
+				GC_TEST_APPLY: "0",
+				GC_TEST_MODE: "hold-open",
+				GC_TEST_SESSION_FILE: sessionFile,
+			},
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		let childPid: number | undefined;
+		try {
+			// Wait until the child's registration is visible on the sidecar.
+			for (let i = 0; i < 100 && childPid === undefined; i++) {
+				await Bun.sleep(20);
+				const foreign = readSessionOwnerPids(sessionFile).filter(pid => pid !== process.pid);
+				if (foreign.length > 0) childPid = foreign[0];
+			}
+			expect(childPid).toBeDefined();
+
+			const gcManager = await SessionManager.open(sessionFile, undefined, undefined, { suppressBreadcrumb: true });
+			try {
+				const counts = await gcManager.pruneUserUndoTails(0, true);
+				expect(counts.skippedLive).toBe(true);
+				expect(counts.markers).toBe(0);
+				// Disk untouched: both markers still carry an undoOf.
+				const onDisk = fs.readFileSync(sessionFile, "utf-8");
+				expect(onDisk.includes("user-undo")).toBe(true);
+				expect(onDisk.includes("prunedAt")).toBe(false);
+			} finally {
+				await gcManager.close();
+			}
+		} finally {
+			holder.kill();
+			await holder.exited;
+		}
+	});
+
 	it("a second process' writer claim blocks appends to the same session file", async () => {
 		await buildSessionWithTwoUndoTails();
 		// Manager one holds the append writer (and its lock claim).
