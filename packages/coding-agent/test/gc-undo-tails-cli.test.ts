@@ -204,6 +204,9 @@ describe("omp gc --undo-tails (CLI)", () => {
 			const rival = SessionManager.create(sessionsDir, sessionsDir);
 			await rival.setSessionFile(sessionFile);
 			expect(() => rival.appendMessage(userMessage("rival"))).toThrow(/locked by another process/);
+			// The atomic publication path takes the same claim: a whole-file
+			// rewrite under contention raises instead of publishing.
+			await expect(rival.rewriteEntries()).rejects.toThrow(/locked by another process/);
 		} finally {
 			await holder.close();
 		}

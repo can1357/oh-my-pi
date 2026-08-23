@@ -12,6 +12,8 @@ import type {
 import { createSyntheticToolResultMessage } from "@oh-my-pi/pi-agent-core";
 import {
 	directoryIsEnterable,
+	directoryExists,
+	type FileLockHandle,
 	getBlobsDir,
 	getProjectDir,
 	getSessionsDir,
@@ -818,7 +820,7 @@ export class SessionManager {
 
 	/** The single open append writer; the manager only ever writes one file at a time. */
 	#writer: SessionStorageWriter | undefined;
-	#writerLock: ReturnType<typeof tryAcquireFileLock> | undefined;
+	#writerLock: FileLockHandle | undefined;
 	/** Sealed by {@link releaseRetainedEntries}: every later append/title/rewrite is a dropped no-op. */
 	#released = false;
 	/** Serializes async disk work (flush/close/atomic rewrite). Appends are synchronous and bypass it. */
@@ -1262,7 +1264,7 @@ export class SessionManager {
 		// writer closed, no append fd outlives the replacement below.
 		this.#closeWriterEventually();
 
-		let rewriteLock: ReturnType<typeof tryAcquireFileLock> | undefined;
+		let rewriteLock: FileLockHandle | null = null;
 		if (this.#persist) {
 			// Same exclusive claim the append writer holds, covering the
 			// replacement itself: an appender that woke up between gc's owner
@@ -1390,6 +1392,15 @@ export class SessionManager {
 				const sessionFile = this.#sessionFile;
 				if (!sessionFile) return false;
 				if (this.#diskEpoch !== epoch) return false;
+				// Same exclusive claim as the append writer and the sync
+				// rewrite: held across the atomic publication so a process
+				// resuming the session after gc's owner preflight cannot open
+				// an append fd onto the inode this replace detaches.
+				const publishLock: FileLockHandle | null = tryAcquireFileLock(sessionFile);
+				if (!publishLock?.acquired) {
+					publishLock?.release();
+					throw new SessionFileLockError(sessionFile);
+				}
 				const body = this.#fileBody();
 				try {
 					await this.#storage.writeTextAtomic(sessionFile, body, {
@@ -1403,6 +1414,8 @@ export class SessionManager {
 						// Preserve the publish error when durable state cannot be read back.
 					}
 					throw error;
+				} finally {
+					publishLock.release();
 				}
 				if (this.#diskEpoch !== epoch) return false;
 				this.#recordFullRewrite(body);

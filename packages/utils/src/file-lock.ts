@@ -59,6 +59,10 @@ function acquireLockSync(filePath: string, options: FileLockOptions = {}): Nativ
 	}
 
 	throw new Error(`Failed to acquire lock for ${filePath} after ${opts.retries} attempts`);
+}
+
+/** Named handle type for the OS-backed lock (stable API surface for callers). */
+export type FileLockHandle = NativeFileLock;
 /**
  * Synchronous non-blocking claim on the same lock {@link withFileLock} uses.
  * Sync call sites (session writer open, synchronous rewrites) pair this with
@@ -67,7 +71,6 @@ function acquireLockSync(filePath: string, options: FileLockOptions = {}): Nativ
  */
 export function tryAcquireFileLock(filePath: string): NativeFileLock | null {
 	return tryAcquireLock(getLockPath(filePath));
-}
 }
 
 /** Run `fn` while holding an OS-backed exclusive lock for `filePath`. */
