@@ -41,6 +41,7 @@ import {
 	formatCollabLink,
 	formatCollabWebLink,
 	generateRoomId,
+	normalizeRelayOrigin,
 	parseCollabLink,
 } from "./protocol";
 import { CollabSocket } from "./relay-client";
@@ -123,6 +124,7 @@ export type CollabGuestUiResult = { kind: "answered"; value: CollabUiResponseVal
 export class CollabHost {
 	#ctx: InteractiveModeContext;
 	#socket: CollabSocket | null = null;
+	#relayOrigin = "";
 	#link = "";
 	#webLink = "";
 	#viewLink = "";
@@ -143,6 +145,11 @@ export class CollabHost {
 
 	constructor(ctx: InteractiveModeContext) {
 		this.#ctx = ctx;
+	}
+
+	/** Normalized ws(s) origin of the relay this room is hosted through; empty before {@link start}. */
+	get relayOrigin(): string {
+		return this.#relayOrigin;
 	}
 
 	get link(): string {
@@ -214,6 +221,9 @@ export class CollabHost {
 		const writeToken = generateWriteToken();
 		const roomId = generateRoomId();
 		this.#writeToken = writeToken;
+		const normalizedOrigin = normalizeRelayOrigin(relayUrl);
+		if ("error" in normalizedOrigin) throw new Error(normalizedOrigin.error);
+		this.#relayOrigin = normalizedOrigin.origin;
 		this.#link = formatCollabLink(relayUrl, roomId, rawKey, writeToken);
 		this.#webLink = formatCollabWebLink(relayUrl, roomId, rawKey, writeToken, webUrl);
 		this.#viewLink = formatCollabLink(relayUrl, roomId, rawKey);
@@ -322,9 +332,11 @@ export class CollabHost {
 		this.#peers.clear();
 		this.#socket?.close();
 		this.#socket = null;
-		this.#ctx.collabHost = undefined;
-		this.#ctx.statusLine.setCollabStatus(null);
-		this.#ctx.ui.requestRender();
+		if (this.#ctx.collabHost === this) {
+			this.#ctx.collabHost = undefined;
+			this.#ctx.statusLine.setCollabStatus(null);
+			this.#ctx.ui.requestRender();
+		}
 	}
 
 	#broadcast(frame: CollabFrame): void {

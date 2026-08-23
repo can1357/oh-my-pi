@@ -5,6 +5,7 @@
 ### Added
 
 - Added the `retry.waitForUsageReset` setting: when a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), the session sleeps until the reset instead of failing fast past `retry.maxDelayMs`.
+- Added extension-facing collab hosting methods (`pi.startCollab()`, `pi.getCollabLinks()`, and `pi.stopCollab()`) to start, inspect, and stop live session sharing programmatically without routing through terminal commands.
 
 ### Fixed
 
