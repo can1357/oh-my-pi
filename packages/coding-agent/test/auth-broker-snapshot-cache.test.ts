@@ -260,10 +260,7 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 
 			storage = await discoverAuthStorage(tempDir);
 			expect(await storage.getApiKey(PROVIDER)).toBe("broker-api-key");
-			expect(requests.slice(0, 2)).toEqual([
-				`${brokerUrl}/v1/healthz`,
-				`${brokerUrl}/v1/snapshot`,
-			]);
+			expect(requests.slice(0, 2)).toEqual([`${brokerUrl}/v1/healthz`, `${brokerUrl}/v1/snapshot`]);
 		} finally {
 			storage?.close();
 		}
