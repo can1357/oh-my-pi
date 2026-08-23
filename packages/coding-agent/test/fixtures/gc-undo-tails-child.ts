@@ -27,12 +27,18 @@ if (process.env.GC_TEST_MODE === "hold-open") {
 	await manager.close();
 }
 
+// Extra passes for ordering coverage (comma-separated): the combined run
+// must prune undo tails BEFORE archive moves journals out of the active
+// tree and BEFORE blob GC records tail-only references.
+const extra = (process.env.GC_TEST_EXTRA ?? "").split(",").filter(Boolean);
 const result = await runGcCommand({
 	flags: {
 		apply,
 		undoTails: true,
 		agentDir,
-		keepUndoTails: 1,
+		keepUndoTails: Number(process.env.GC_TEST_KEEP ?? "1"),
+		blobs: extra.includes("blobs"),
+		archive: extra.includes("archive"),
 	},
 });
 
@@ -53,6 +59,8 @@ console.log(
 			markersPruned: result.undoTails?.markersPruned ?? 0,
 			entriesRemoved: result.undoTails?.entriesRemoved ?? 0,
 			errors: result.undoTails?.errors?.length ?? 0,
+			archived: result.archive?.archived ?? 0,
+			blobsDeleted: result.blobs?.deleted ?? 0,
 		}),
 );
 console.log(`GC_TEST_BREADCRUMB ${breadcrumb}`);

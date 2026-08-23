@@ -54,10 +54,16 @@ interface GcChildOutcome {
 	markersPruned: number;
 	entriesRemoved: number;
 	errors: number;
+	archived: number;
+	blobsDeleted: number;
 	breadcrumb: string;
 }
 
-async function runGcChild(agentDir: string, apply: boolean): Promise<GcChildOutcome> {
+async function runGcChild(
+	agentDir: string,
+	apply: boolean,
+	extra?: { passes?: string[]; keep?: number },
+): Promise<GcChildOutcome> {
 	// Static fixture module (test/fixtures/gc-undo-tails-child.ts): the
 	// spawn env carries the agent dir, so the child's top-level imports
 	// resolve the singleton inside the test tree. process.execPath keeps the
@@ -73,6 +79,8 @@ async function runGcChild(agentDir: string, apply: boolean): Promise<GcChildOutc
 			ZELLIJ_PANE_ID: "gc-breadcrumb-test",
 			GC_TEST_AGENT_DIR: agentDir,
 			GC_TEST_APPLY: apply ? "1" : "0",
+			...(extra?.passes ? { GC_TEST_EXTRA: extra.passes.join(",") } : {}),
+			...(extra?.keep !== undefined ? { GC_TEST_KEEP: String(extra.keep) } : {}),
 		},
 		stdout: "pipe",
 		stderr: "pipe",
@@ -557,6 +565,54 @@ describe("omp gc --undo-tails (CLI)", () => {
 		expect(await readSessionOwnerPids(otherFile)).toEqual([]);
 		await manager.close();
 		expect(await readSessionOwnerPids(sessionFile)).toEqual([]);
+	});
+
+	it("combined run prunes undo tails before archive and blob passes", async () => {
+		// A tail referencing a blob that nothing else mentions, aged past
+		// every threshold, with keep 0 so the whole tail goes away.
+		const hash = new Bun.SHA256().update("ordering-blob").digest("hex");
+		const manager = SessionManager.create(sessionsDir, sessionsDir);
+		await manager.setSessionFile(sessionFile);
+		manager.appendMessage(userMessage("u1"));
+		const a1 = manager.appendMessage(assistantMessage("a1"));
+		manager.appendMessage(userMessage(`tail-with-blob ${hash}`));
+		manager.appendMessage(assistantMessage("tail-reply"));
+		const tip = manager.getLeafId();
+		manager.branchWithSummary(a1, "", { kind: "user-undo", undoOf: tip, steps: 1, droppedPrompts: "" });
+		await manager.close();
+		fs.mkdirSync(path.join(agentDir, "blobs"), { recursive: true });
+		fs.writeFileSync(path.join(agentDir, "blobs", hash), "blob-bytes");
+		const old = new Date(Date.now() - 30 * 86_400_000);
+		fs.utimesSync(sessionFile, old, old);
+		fs.utimesSync(path.join(agentDir, "blobs", hash), old, old);
+		// Default retention keeps the newest session unarchived; the point
+		// here is pass ordering, so retention is zeroed via config.
+		fs.writeFileSync(
+			path.join(agentDir, "config.yml"),
+			["gc:", "  retainNewestGlobal: 0", "  retainNewestPerCwd: 0", ""].join("\n"),
+		);
+
+		const outcome = await runGcChild(agentDir, true, { passes: ["archive", "blobs"], keep: 0 });
+
+		// Same run: tails pruned, journal archived WITHOUT the tail, blob
+		// swept because its only reference was in the pruned tail.
+		expect(outcome.entriesRemoved).toBeGreaterThan(0);
+		expect(outcome.archived).toBe(1);
+		expect(outcome.blobsDeleted).toBe(1);
+		const archiveGz = path.join(
+			agentDir,
+			"archive",
+			"sessions",
+			"fixture-bucket",
+			path.basename(sessionFile) + ".gz",
+		);
+		const restored = Bun.gunzipSync(new Uint8Array(fs.readFileSync(archiveGz)));
+		const archivedText = Buffer.from(restored).toString("utf-8");
+		// The tail entries are gone from the archived journal and the
+		// marker is stamped pruned — the prune ran BEFORE the move.
+		expect(archivedText).not.toContain("tail-with-blob");
+		expect(archivedText).toContain("prunedAt");
+		expect(fs.existsSync(path.join(agentDir, "blobs", hash))).toBe(false);
 	});
 
 	it("moveTo claims the destination sidecar before the journal rename", async () => {

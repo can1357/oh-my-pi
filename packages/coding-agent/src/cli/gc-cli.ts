@@ -1620,6 +1620,7 @@ async function runUndoTailGc(options: ResolvedGcOptions): Promise<UndoTailGcResu
 			// otherwise scanning repoints this terminal's --continue target
 			// at whichever session happened to be read last. apply=false
 			// returns before any rewrite, so dry runs never write the file.
+			const before = await fs.stat(session.path);
 			const manager = await SessionManager.open(session.path, undefined, undefined, { suppressBreadcrumb: true });
 			try {
 				const counts = await manager.pruneUserUndoTails(options.keepUndoTails, options.apply);
@@ -1631,6 +1632,14 @@ async function runUndoTailGc(options: ResolvedGcOptions): Promise<UndoTailGcResu
 					result.markersPruned += counts.markers;
 					result.entriesRemoved += counts.removed;
 					if (counts.markers > 0) result.files.push({ file: session.path, ...counts });
+					if (options.apply && (counts.removed > 0 || counts.markers > 0)) {
+						// The prune rewrote the journal; pruning does not
+						// change the session's logical age, so the original
+						// mtime is restored — otherwise a later pass in this
+						// same run (archive's write grace) would skip the
+						// file as just-modified.
+						await fs.utimes(session.path, before.atime, before.mtime);
+					}
 				}
 			} finally {
 				await manager.close();
@@ -1647,10 +1656,14 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	const archiveRoot = getArchivedSessionsDir(options.agentDir);
 	const result = await withGcLock(options.agentDir, async lockPath => {
 		const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath };
+		// Undo-tail pruning must run before the passes that consume the
+		// active-session tree: archive would move still-tailed journals out
+		// of the tree before the scan, and blob GC would record references
+		// from tails that are pruned afterward.
+		if (options.runUndoTails) next.undoTails = await runUndoTailGc(options);
 		if (options.runBlobs) next.blobs = await runBlobGc(options, archiveRoot);
 		if (options.runArchive) next.archive = await runArchiveGc(options, archiveRoot);
 		if (options.runWal) next.wal = await runWalGc(options);
-		if (options.runUndoTails) next.undoTails = await runUndoTailGc(options);
 		return next;
 	});
 

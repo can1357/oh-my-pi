@@ -5566,23 +5566,37 @@ export class AgentSession {
 		// user prompt produces several), so rewind in the same units: count
 		// assistant messages, the persisted model-turn boundary.
 		let branchTurnCount = 0;
+		let lastMessageWasAssistant = false;
 		for (const entry of this.sessionManager.getBranch()) {
 			if (entry.type === "message") {
-				if ((entry.message as { role?: string }).role === "assistant") branchTurnCount++;
-			}
-			if (entry.type === "ttsr_injection") {
-				for (const name of entry.injectedRules) {
-					ruleNames.add(name);
-					injectionPositions.set(name, branchTurnCount);
-				}
-			} else if (entry.type === "message") {
 				const message = entry.message as { role?: string; customType?: string; details?: { rules?: unknown } };
+				if (message.role === "assistant") {
+					branchTurnCount++;
+					lastMessageWasAssistant = true;
+					continue;
+				}
+				lastMessageWasAssistant = false;
 				if (message.role === "custom" && message.customType === "ttsr-injection") {
 					if (Array.isArray(message.details?.rules)) {
 						for (const name of message.details.rules) {
 							if (typeof name === "string") ruleNames.add(name);
 						}
 					}
+				}
+			} else if (entry.type === "ttsr_injection") {
+				for (const name of entry.injectedRules) {
+					ruleNames.add(name);
+					// Per-tool injections are appended by afterToolCall once
+					// the assistant message that issued the tool call is
+					// already persisted but BEFORE onTurnEnd advances the
+					// live counter — their pre-turn-end timing is one behind
+					// the assistant count at the entry. In-message
+					// injections ride a custom message before the turn
+					// starts and need no adjustment.
+					injectionPositions.set(
+						name,
+						lastMessageWasAssistant ? Math.max(0, branchTurnCount - 1) : branchTurnCount,
+					);
 				}
 			}
 		}

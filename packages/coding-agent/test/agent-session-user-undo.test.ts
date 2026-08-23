@@ -777,6 +777,47 @@ describe("AgentSession user undo/redo", () => {
 		expect(ttsrManager.checkSnapshot("payload REDOMARK", { source: "text" })).toEqual([]);
 	});
 
+	it("per-tool ttsr injections restore pre-turn-end timing after undo", async () => {
+		session = await makeSession({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "after-gap",
+			repeatGap: 1,
+		});
+		ttsrManager.addRule({
+			name: "per-tool-rule",
+			path: "/tmp/per-tool-rule.md",
+			content: "body",
+			condition: ["PERTOOLMARK"],
+			_source: {
+				provider: "test",
+				providerName: "test",
+				path: "/tmp/per-tool-rule.md",
+				level: "user",
+			},
+		});
+		// Per-tool path: afterToolCall appends the injection entry AFTER the
+		// assistant message that issued the call, before onTurnEnd advances
+		// the live counter.
+		sessionManager.appendMessage(userMessage("Remember A"));
+		sessionManager.appendMessage(assistantMessage("OK A"));
+		sessionManager.appendTtsrInjection(["per-tool-rule"]);
+		sessionManager.appendMessage(userMessage("Remember B"));
+		sessionManager.appendMessage(assistantMessage("OK B"));
+
+		const undo = session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		expect(ttsrManager.getInjectedRuleNames()).toEqual(["per-tool-rule"]);
+		// Restored branch: 1 assistant message, injection entry after it →
+		// pre-turn-end position 0, counter 1, gap 1 ≥ repeatGap 1 → the
+		// rule must be eligible right away. Counting the assistant message
+		// itself (old behavior) put the position at 1 and made it wait one
+		// extra model turn.
+		expect(ttsrManager.getMessageCount()).toBe(1);
+		expect(ttsrManager.checkSnapshot("payload PERTOOLMARK", { source: "text" }).length).toBeGreaterThan(0);
+	});
+
 	it("getUserTurns previews are sanitized and width-bounded", async () => {
 		session = await makeSession();
 		const wide = "漢".repeat(200);
