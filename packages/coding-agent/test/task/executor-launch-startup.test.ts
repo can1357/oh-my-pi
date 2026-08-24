@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
 import { AuthStorage } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
@@ -106,4 +107,54 @@ it("overlaps registry refresh with session-file opening and session setup", asyn
 
 	refreshGate.resolve();
 	expect((await run).exitCode).toBe(0);
+});
+
+it("closes a session manager abandoned by abort before adoption", async () => {
+	const tempDir = TempDir.createSync("@pi-task-abandoned-");
+	tempDirs.push(tempDir);
+	const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+	authStorages.push(authStorage);
+
+	// A real file-backed manager with a durable owner claim, handed to the
+	// executor only after the abort has already torn setup down.
+	const sessionFile = tempDir.join("abandoned.jsonl");
+	const abandonedManager = SessionManager.create(tempDir.path(), tempDir.path());
+	await abandonedManager.setSessionFile(sessionFile);
+
+	const openGate = Promise.withResolvers<SessionManager>();
+	const openStarted = Promise.withResolvers<void>();
+	vi.spyOn(SessionManager, "open").mockImplementation(() => {
+		openStarted.resolve();
+		return openGate.promise;
+	});
+
+	const abortController = new AbortController();
+	const run = runSubprocess({
+		cwd: tempDir.path(),
+		artifactsDir: tempDir.path(),
+		agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+		task: "test",
+		index: 0,
+		id: "task-abandoned-claim",
+		authStorage,
+		enableLsp: false,
+		enableIrc: false,
+		signal: abortController.signal,
+	});
+	await openStarted.promise;
+	abortController.abort();
+	// The manager fulfills only after setup already exited: nothing consumes
+	// it, so the abandonment path must close it and release its claim.
+	openGate.resolve(abandonedManager);
+	const result = await run;
+	expect(result.exitCode).not.toBe(0);
+
+	// The owner sidecar claim must be gone (allowing undo-tail gc in the
+	// parent to collect the session instead of skipping a live pid).
+	const sidecar = `${sessionFile}.owner`;
+	await Bun.sleep(150);
+	if (fs.existsSync(sidecar)) {
+		const content = fs.readFileSync(sidecar, "utf-8");
+		expect(content.trim()).toBe("");
+	}
 });
