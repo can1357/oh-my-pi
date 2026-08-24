@@ -6417,7 +6417,7 @@ export class AgentSession {
 			// instead of matching customType strings.
 			for (const msg of messages) {
 				if (msg?.role !== "custom") continue;
-				msg.details = { ...(msg.details as Record<string, unknown> | undefined), promptPrelude: true };
+				stampCustomMessageMarker(msg, "promptPrelude");
 			}
 			// Pending tool-roster and xd:// deltas accompany the next user-authored
 			// prompt, never an agent-initiated continuation. Reserve their pre-user
@@ -6432,7 +6432,7 @@ export class AgentSession {
 			// known customTypes. Non-triggering custom context (deliverAs
 			// queues) never passes through here and stays unstamped.
 			if (message.role === "custom" && message.attribution === "user") {
-				message.details = { ...(message.details as Record<string, unknown> | undefined), userTurn: true };
+				stampCustomMessageMarker(message, "userTurn");
 			}
 			// Inject any pending "nextTurn" messages as context alongside the user message
 			for (const msg of this.#pendingNextTurnMessages) {
@@ -6535,18 +6535,8 @@ export class AgentSession {
 			if (xdevMountNotice || toolRosterNotice) {
 				// Same ownership stamp: the notice is spliced ahead of the
 				// user message and belongs to this turn.
-				if (xdevMountNotice) {
-					xdevMountNotice.details = {
-						...(xdevMountNotice.details as Record<string, unknown> | undefined),
-						promptPrelude: true,
-					} as XdevMountNoticeDetails;
-				}
-				if (toolRosterNotice) {
-					toolRosterNotice.details = {
-						...(toolRosterNotice.details as Record<string, unknown> | undefined),
-						promptPrelude: true,
-					};
-				}
+				if (xdevMountNotice) stampCustomMessageMarker(xdevMountNotice, "promptPrelude");
+				if (toolRosterNotice) stampCustomMessageMarker(toolRosterNotice, "promptPrelude");
 				messages.splice(
 					xdevMountNoticeIndex,
 					0,
@@ -11341,4 +11331,20 @@ export class AgentSession {
 	get extensionRunner(): ExtensionRunner | undefined {
 		return this.#extensionRunner;
 	}
+}
+
+/**
+ * Stamp a persisted ownership marker (`promptPrelude` / `userTurn`) onto a
+ * custom message without destructively merging into an arbitrary `details`
+ * payload: `CustomMessage<T = unknown>` allows primitives and arrays, and an
+ * object spread would coerce them into character-keyed records, desyncing the
+ * model-facing message from the journal. Only `undefined` or a plain record is
+ * merged; any other payload is preserved untouched (the marker is simply not
+ * persisted for that message, and recognition falls back to the customType
+ * allowlists).
+ */
+export function stampCustomMessageMarker(message: CustomMessage, marker: "promptPrelude" | "userTurn"): void {
+	const details = message.details;
+	if (details !== undefined && !isRecord(details)) return;
+	message.details = { ...details, [marker]: true };
 }

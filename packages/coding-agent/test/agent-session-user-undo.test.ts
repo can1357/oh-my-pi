@@ -16,7 +16,7 @@ import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock"
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, stampCustomMessageMarker } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionFileLockError, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -1725,5 +1725,55 @@ describe("AgentSession user undo/redo", () => {
 		const queued = JSON.stringify(session.buildDisplaySessionContext().messages);
 		expect(queued).not.toContain(SECRET_B);
 		expect(queued).toContain("queued note");
+	});
+	it("stampCustomMessageMarker preserves non-object details payloads", () => {
+		// CustomMessage<T = unknown> allows primitive/array details; the stamp
+		// must not coerce them into character-keyed records.
+		const primitive = {
+			role: "custom",
+			customType: "my-prompt",
+			content: "x",
+			display: true,
+			details: "foo",
+			attribution: "user",
+			timestamp: Date.now(),
+		} as unknown as import("@oh-my-pi/pi-coding-agent/session/messages").CustomMessage;
+		stampCustomMessageMarker(primitive, "userTurn");
+		expect(primitive.details).toBe("foo");
+
+		const array = {
+			role: "custom",
+			customType: "my-prompt",
+			content: "x",
+			display: true,
+			details: ["a", "b"],
+			attribution: "user",
+			timestamp: Date.now(),
+		} as unknown as import("@oh-my-pi/pi-coding-agent/session/messages").CustomMessage;
+		stampCustomMessageMarker(array, "userTurn");
+		expect(array.details).toEqual(["a", "b"]);
+
+		const record = {
+			role: "custom",
+			customType: "my-prompt",
+			content: "x",
+			display: true,
+			details: { ext: 1 },
+			attribution: "user",
+			timestamp: Date.now(),
+		} as unknown as import("@oh-my-pi/pi-coding-agent/session/messages").CustomMessage;
+		stampCustomMessageMarker(record, "userTurn");
+		expect(record.details).toEqual({ ext: 1, userTurn: true });
+
+		const absent = {
+			role: "custom",
+			customType: "my-prompt",
+			content: "x",
+			display: true,
+			attribution: "user",
+			timestamp: Date.now(),
+		} as unknown as import("@oh-my-pi/pi-coding-agent/session/messages").CustomMessage;
+		stampCustomMessageMarker(absent, "userTurn");
+		expect(absent.details).toEqual({ userTurn: true });
 	});
 });
