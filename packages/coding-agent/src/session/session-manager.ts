@@ -3574,22 +3574,28 @@ export class SessionManager {
 		// caller reports a skip instead of a prune.
 		this.#undoTailPruneActive = true;
 		const sessionFileForPrune = this.#sessionFile!;
-		await markUndoTailPruneInProgress(sessionFileForPrune);
 		let published = false;
+		let markerPlaced = false;
 		try {
+			await markUndoTailPruneInProgress(sessionFileForPrune);
+			markerPlaced = true;
 			published = await this.rewriteEntries();
 		} catch (error) {
-			// Exceptional pre-publication path (e.g. another writer took the
-			// journal lock mid-rewrite): nothing landed on disk, so restore
-			// the in-memory tree and remove the marker BEFORE rethrowing —
-			// otherwise the surviving marker names this still-running pid
-			// and concurrent opens of the session wait out their bounded
-			// window only to fail, for as long as this process lives.
+			// Pre-publication failures — marker creation I/O as well as a
+			// throwing publish (e.g. another writer took the journal lock
+			// mid-rewrite): nothing landed on disk, so restore the scrubbed
+			// markers and pruned in-memory tree and remove the marker (only
+			// if one was placed — a cleanup error must not mask the original
+			// failure) BEFORE rethrowing — otherwise a caller that catches
+			// the error could later flush or rewrite the mutated tree and
+			// silently commit the reported-as-failed prune, and a surviving
+			// marker names this still-running pid, blocking opens of the
+			// session for as long as this process lives.
 			this.#undoTailPruneActive = false;
 			for (const [marker, details] of detailsBeforeScrub) marker.details = details as typeof marker.details;
 			this.#entries = entriesBeforePrune;
 			this.#index.rebuild(this.#entries);
-			await clearUndoTailPruneMarker(sessionFileForPrune);
+			if (markerPlaced) await clearUndoTailPruneMarker(sessionFileForPrune);
 			throw error;
 		} finally {
 			this.#undoTailPruneActive = false;
@@ -3608,8 +3614,13 @@ export class SessionManager {
 				});
 				await clearUndoTailPruneMarker(sessionFileForPrune).catch(() => undefined);
 			}
-			const publishedIdentity = this.#sessionFile ? await journalIdentity(sessionFileForPrune) : undefined;
-			return { markers: toScrub.length, removed: doomed.size, published: publishedIdentity };
+			// #loadedJournalIdentity was captured under the publication
+			// lock, immediately after the atomic rename (see
+			// #runFencedAtomicRewrite): re-statting here instead would let a
+			// manager that waited out the marker append and close first, and
+			// its fresh identity would be accepted as the prune's baseline —
+			// letting the caller's mtime restore clobber that append.
+			return { markers: toScrub.length, removed: doomed.size, published: this.#loadedJournalIdentity };
 		}
 		// Aborted publish: restore the in-memory tree FIRST (nothing landed
 		// on disk, but a cleanup failure thrown from a finally would
