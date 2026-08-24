@@ -855,6 +855,52 @@ describe("omp gc --undo-tails (CLI)", () => {
 		expect(fs.readFileSync(`${sessionFile}.owner`, "utf8")).toBe(`${process.pid}\n`);
 	}, 30_000);
 
+	it("a post-publish identity failure is treated as committed", async () => {
+		await buildSessionWithTwoUndoTails();
+		const manager = await SessionManager.open(sessionFile, sessionsDir, undefined, {
+			suppressBreadcrumb: true,
+		});
+
+		// First stat call is the publish-time precheck (under the lock);
+		// the SECOND is the post-rename identity capture. Fail only that
+		// one with a transient non-ENOENT error: the prune must still be
+		// reported as published — the atomic rename already landed, so the
+		// "nothing published" recovery (restored tree + rethrow) would let a
+		// later rewrite resurrect tails that are already gone from disk.
+		const realStat = fs.promises.stat.bind(fs.promises);
+		let statCalls = 0;
+		const statSpy = spyOn(fs.promises, "stat").mockImplementation((async (target: fs.PathLike) => {
+			statCalls += 1;
+			if (statCalls === 2 && path.resolve(String(target)) === path.resolve(sessionFile)) {
+				throw Object.assign(new Error("transient stat failure"), { code: "EIO" });
+			}
+			return (await realStat(target as string)) as never;
+		}) as never);
+		try {
+			const counts = await manager.pruneUserUndoTails(0, true);
+			// Committed, but with no trustworthy baseline identity: callers
+			// fail closed (no mtime restore) rather than clobber.
+			expect(counts.markers).toBe(2);
+			expect(counts.skippedLive).toBeFalsy();
+			expect(counts.published).toBeUndefined();
+		} finally {
+			statSpy.mockRestore();
+		}
+		await manager.close();
+
+		const reloaded = await SessionManager.open(sessionFile, sessionsDir, undefined, {
+			suppressBreadcrumb: true,
+		});
+		// The committed prune is on disk: markers are scrubbed of undoOf and
+		// the dropped tail content is gone — not resurrected.
+		const serialized = JSON.stringify(reloaded.getEntries());
+		expect(serialized).not.toContain("undoOf");
+		expect(serialized).not.toContain("droppedPrompts");
+		expect(serialized).not.toContain("tail-one");
+		expect(serialized).not.toContain("tail-two");
+		await reloaded.close();
+	});
+
 	it("a locked-out append diverges the journal so the next append fully rewrites", async () => {
 		await buildSessionWithTwoUndoTails();
 		const manager = await SessionManager.open(sessionFile, sessionsDir, undefined, {

@@ -1775,6 +1775,19 @@ export class SessionManager {
 					} catch {
 						// Preserve the publish error when durable state cannot be read back.
 					}
+					if (this.#storage instanceof FileSessionStorage) {
+						// The atomic rename already landed: a failing identity
+						// probe must not escape as a publish failure — the prune
+						// recovery path would restore the pre-prune tree and a
+						// later rewrite would resurrect the tails that just
+						// published away. Clear the cached identity instead:
+						// identity-gated callers fail closed on the mismatch.
+						try {
+							this.#loadedJournalIdentity = await journalIdentity(sessionFile);
+						} catch {
+							this.#loadedJournalIdentity = undefined;
+						}
+					}
 					throw error;
 				} finally {
 					publishLock?.release();
