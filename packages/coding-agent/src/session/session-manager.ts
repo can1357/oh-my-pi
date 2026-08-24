@@ -208,14 +208,15 @@ async function waitClearUndoTailPruneMarker(sessionFile: string): Promise<void> 
 	}
 }
 
-async function removeOwnerSidecar(sessionFile: string): Promise<void> {
-	try {
-		const file = ownerSidecarPath(sessionFile);
-		// Serialized against registration in other processes so this
-		// read-modify-write cannot discard a concurrently appended claim.
-		// Removes exactly ONE own-pid line: sibling managers in this process
-		// keep theirs, so ownership survives until the last manager closes.
-		await withOwnerSidecarLock(sessionFile, async () => {
+export async function removeOwnerSidecar(sessionFile: string): Promise<boolean> {
+	const file = ownerSidecarPath(sessionFile);
+	// Serialized against registration in other processes so this
+	// read-modify-write cannot discard a concurrently appended claim.
+	// Removes exactly ONE own-pid line: sibling managers in this process
+	// keep theirs, so ownership survives until the last manager closes.
+	let removed = false;
+	await withOwnerSidecarLock(sessionFile, async () => {
+		try {
 			const content = await fs.promises.readFile(file, "utf-8");
 			const lines = content
 				.split("\n")
@@ -225,10 +226,16 @@ async function removeOwnerSidecar(sessionFile: string): Promise<void> {
 			if (own !== -1) lines.splice(own, 1);
 			if (lines.length === 0) await fs.promises.rm(file, { force: true });
 			else await fs.promises.writeFile(file, `${lines.join("\n")}\n`, { encoding: "utf-8", mode: 0o600 });
-		});
-	} catch {
-		// Absent, or already replaced by a newer owner's claim.
-	}
+			removed = true;
+		} catch (error) {
+			// Only genuine absence counts as removed (AGENTS.md L139-147):
+			// reporting success on an unreadable or unwritable sidecar drops
+			// the caller's claim accounting while the pid line lives on,
+			// pinning the session as owned with no retry path.
+			removed = isEnoent(error);
+		}
+	});
+	return removed;
 }
 
 /** Recorded owner pids for a session file (stale/dead pids included). */
@@ -259,18 +266,22 @@ export async function readSessionOwnerPids(sessionFile: string): Promise<number[
  */
 export async function readOwnerClaimCounts(sessionFile: string): Promise<Map<number, number>> {
 	const counts = new Map<number, number>();
-	try {
-		const content = await fs.promises.readFile(ownerSidecarPath(sessionFile), "utf-8");
-		for (const line of content.split("\n")) {
-			const pid = Number.parseInt(line.trim(), 10);
-			if (!Number.isInteger(pid) || pid <= 0) continue;
-			counts.set(pid, (counts.get(pid) ?? 0) + 1);
-		}
-		return counts;
-	} catch (error) {
-		if (isEnoent(error)) return counts;
+	// Under the same lock registration and removal hold: removal rewrites
+	// the sidecar with a truncating writeFile, so an unlocked read can
+	// observe a partially-written file, miss a remaining live owner, and
+	// let gc publish a prune beneath it.
+	const content = await withOwnerSidecarLock(sessionFile, async () =>
+		fs.promises.readFile(ownerSidecarPath(sessionFile), "utf-8"),
+	).catch(error => {
+		if (isEnoent(error)) return "";
 		throw error;
+	});
+	for (const line of content.split("\n")) {
+		const pid = Number.parseInt(line.trim(), 10);
+		if (!Number.isInteger(pid) || pid <= 0) continue;
+		counts.set(pid, (counts.get(pid) ?? 0) + 1);
 	}
+	return counts;
 }
 
 /**
@@ -985,7 +996,13 @@ export class SessionManager {
 			// a manager whose registration failed strips nothing.
 			if (this.#ownerClaimLines <= 0) return;
 			this.#ownerClaimLines--;
-			await removeOwnerSidecar(sessionFile);
+			if (await removeOwnerSidecar(sessionFile)) return;
+			// Removal failed for a non-absence reason: retain the
+			// contribution and re-latch the slot so a later release from
+			// this still-alive manager retries instead of leaving a stale
+			// live-pid line nothing will ever shed.
+			this.#ownerClaimLines++;
+			if (!this.#ownerRegisteredFile) this.#ownerRegisteredFile = sessionFile;
 		});
 	}
 
@@ -2329,11 +2346,23 @@ export class SessionManager {
 		manager.#entries = structuredClone(this.#entries);
 		manager.#index.rebuild(manager.#entries);
 		manager.#forceFileCreation = true;
-		await manager.#rewriteAtomically();
-		// Same contract as forkFrom: an idle copy never appends, so the
-		// owner claim must exist before the manager is returned.
-		if (!(await manager.#registerOwnerSidecar())) {
-			throw new SessionFileLockError(manager.#sessionFile!);
+		// Same contract as forkFrom: preclaim before the copy's journal
+		// becomes visible, and drop the claim if materialization fails.
+		if (manager.#storage instanceof FileSessionStorage) {
+			let claimed = false;
+			manager.#sidecarTail = manager.#sidecarTail.then(async () => {
+				claimed = await manager.#claimOwnerSidecarFor(manager.#sessionFile!);
+			});
+			await manager.#sidecarTail;
+			if (!claimed) throw new SessionFileLockError(manager.#sessionFile!);
+			manager.#ownerRegisteredFile = manager.#sessionFile;
+		}
+		try {
+			await manager.#rewriteAtomically();
+		} catch (error) {
+			manager.#releaseOwnerClaim(manager.#sessionFile!);
+			manager.#ownerRegisteredFile = undefined;
+			throw error;
 		}
 		return manager;
 	}
@@ -3683,15 +3712,29 @@ export class SessionManager {
 		manager.#index.rebuild(history);
 		manager.sanitizeLoadedOpenAIResponsesReplayMetadata();
 		manager.#forceFileCreation = true;
-		await manager.#rewriteAtomically();
-		if (options?.copyArtifacts !== false) {
-			await copySessionArtifacts(sourcePath, manager.#sessionFile!);
+		// Preclaim BEFORE the materializing rewrite makes the journal
+		// visible: between the rewrite (plus a potentially large artifact
+		// copy) and registration, concurrent gc would see the file as
+		// unowned and could prune it beneath this manager's tree.
+		if (manager.#storage instanceof FileSessionStorage) {
+			let claimed = false;
+			manager.#sidecarTail = manager.#sidecarTail.then(async () => {
+				claimed = await manager.#claimOwnerSidecarFor(manager.#sessionFile!);
+			});
+			await manager.#sidecarTail;
+			if (!claimed) throw new SessionFileLockError(manager.#sessionFile!);
+			manager.#ownerRegisteredFile = manager.#sessionFile;
 		}
-		// The returned manager holds the copied tree in memory; an idle fork
-		// never appends, so the #recordEntry backstop would not fire and gc
-		// could prune beneath it. The claim must exist before we return.
-		if (!(await manager.#registerOwnerSidecar())) {
-			throw new SessionFileLockError(manager.#sessionFile!);
+		try {
+			await manager.#rewriteAtomically();
+			if (options?.copyArtifacts !== false) {
+				await copySessionArtifacts(sourcePath, manager.#sessionFile!);
+			}
+		} catch (error) {
+			// Materialization failed after the preclaim: drop it again.
+			manager.#releaseOwnerClaim(manager.#sessionFile!);
+			manager.#ownerRegisteredFile = undefined;
+			throw error;
 		}
 		return manager;
 	}

@@ -50,6 +50,14 @@ if (process.env.GC_TEST_INTERPOSE === "change" || process.env.GC_TEST_INTERPOSE 
 // Extra passes for ordering coverage (comma-separated): the combined run
 // must prune undo tails BEFORE archive moves journals out of the active
 // tree and BEFORE blob GC records tail-only references.
+if (process.env.GC_TEST_INTERPOSE === "preopen-change") {
+	const original = SessionManager.open;
+	SessionManager.open = async function (this: unknown, ...args) {
+		fs.appendFileSync(args[0], `${JSON.stringify({ type: "title", v: 1, title: "" })}\n`);
+		return original.apply(this, args);
+	} as typeof original;
+}
+
 const extra = (process.env.GC_TEST_EXTRA ?? "").split(",").filter(Boolean);
 // Hold-open mode with the append writer actually open: the child owns the
 // journal's file lock, so a moveTo in another process must refuse.

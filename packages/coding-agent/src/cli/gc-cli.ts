@@ -1628,7 +1628,13 @@ async function runUndoTailGc(options: ResolvedGcOptions): Promise<UndoTailGcResu
 			// at whichever session happened to be read last. apply=false
 			// returns before any rewrite, so dry runs never write the file.
 			const before = await fs.stat(session.path);
+			const beforeIdentity = { dev: before.dev, ino: before.ino, size: before.size, mtimeMs: before.mtimeMs };
 			const manager = await SessionManager.open(session.path, undefined, undefined, { suppressBreadcrumb: true });
+			// Identity of the generation the gated load actually accepted:
+			// if the journal was updated and closed between the `before`
+			// stat and the load, restoring `before`'s timestamp would let a
+			// later archive pass treat the just-updated session as cold.
+			const atLoad = await journalIdentity(session.path);
 			try {
 				const counts = await manager.pruneUserUndoTails(options.keepUndoTails, options.apply);
 				if (counts.skippedLive) {
@@ -1650,6 +1656,7 @@ async function runUndoTailGc(options: ResolvedGcOptions): Promise<UndoTailGcResu
 						// update's fresh mtime must survive so the grace
 						// keeps protecting it.
 						if (
+							sameJournalIdentity(beforeIdentity, atLoad) &&
 							sameJournalIdentity(counts.published, await journalIdentity(session.path)) &&
 							// This gc manager contributes exactly one own-pid
 							// claim line; a second same-process line is a
