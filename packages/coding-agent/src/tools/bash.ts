@@ -967,24 +967,25 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			"bash",
 			label,
 			async ({ jobId, signal: runSignal, reportProgress, reportAgentProgress }) => {
-				const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
 				let confirmedProgressArtifactId: string | undefined;
-				const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES);
-				const progressLines =
-					options.progressDelivery || options.deferredProgressDelivery
-						? new ProgressLines(line =>
-								reportAgentProgress(line.text, {
-									artifactId: confirmedProgressArtifactId,
-									truncated: line.truncated,
-									streamProvenance: line.streamProvenance,
-								}),
-							)
-						: undefined;
-				progressSampler = progressLines;
-				const wallTimeStart = performance.now();
 				let exitCode: number | undefined;
 				let timedOut = false;
 				try {
+					const { path: artifactPath, id: artifactId } =
+						(await this.session.allocateOutputArtifact?.("bash")) ?? {};
+					const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES);
+					const progressLines =
+						options.progressDelivery || options.deferredProgressDelivery
+							? new ProgressLines(line =>
+									reportAgentProgress(line.text, {
+										artifactId: confirmedProgressArtifactId,
+										truncated: line.truncated,
+										streamProvenance: line.streamProvenance,
+									}),
+								)
+							: undefined;
+					progressSampler = progressLines;
+					const wallTimeStart = performance.now();
 					let result: BashResult;
 					try {
 						result = await executeBash(options.command, {
