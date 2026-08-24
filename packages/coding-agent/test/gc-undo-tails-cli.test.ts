@@ -817,6 +817,41 @@ describe("omp gc --undo-tails (CLI)", () => {
 		await manager.close();
 	});
 
+	it("a locked-out append diverges the journal so the next append fully rewrites", async () => {
+		await buildSessionWithTwoUndoTails();
+		const manager = await SessionManager.open(sessionFile, sessionsDir, undefined, {
+			suppressBreadcrumb: true,
+		});
+		const idsAfterOpen = manager.getBranch().map(entry => entry.id);
+
+		// Another writer holds the journal lock: the hot-path append throws
+		// SessionFileLockError after the entry was already recorded
+		// in-memory. The manager must diverge (#rewriteRequired) — otherwise
+		// the next append would persist only ITSELF on the hot path and the
+		// locked-out entry (its parentId names a never-written id) would be
+		// orphaned on reload.
+		const lock = tryAcquireFileLock(sessionFile);
+		expect(lock?.acquired).toBe(true);
+		try {
+			expect(() => manager.appendMessage(userMessage("locked-out"))).toThrow(SessionFileLockError);
+		} finally {
+			lock?.release();
+		}
+		manager.appendMessage(userMessage("after-contention"));
+		await manager.close();
+
+		const expectedIds = [...idsAfterOpen];
+		const branch = manager.getBranch();
+		const lockedOut = branch.at(-2);
+		const afterContention = branch.at(-1);
+		expectedIds.push(lockedOut!.id, afterContention!.id);
+		const reloaded = await SessionManager.open(sessionFile, sessionsDir, undefined, {
+			suppressBreadcrumb: true,
+		});
+		expect(reloaded.getBranch().map(entry => entry.id)).toEqual(expectedIds);
+		await reloaded.close();
+	});
+
 	it("fork of a memory-backed session skips filesystem claims entirely", async () => {
 		const manager = SessionManager.create(sessionsDir, sessionsDir, new MemorySessionStorage());
 		manager.appendMessage(userMessage("u1"));

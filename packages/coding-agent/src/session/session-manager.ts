@@ -1529,9 +1529,16 @@ export class SessionManager {
 				});
 			}
 		} catch (err) {
-			if (err instanceof SessionFileLockError) throw err;
+			// The entry never reached disk — not for a plain write failure,
+			// and not for transient lock contention either. Diverge the
+			// journal BEFORE any rethrow: #recordEntry has already inserted
+			// the entry into the in-memory tree, so a rethrown lock error
+			// that left #fileIsCurrent true would let the next append take
+			// the hot path, persist only that later entry, and orphan the
+			// locked-out one (its parentId names an id never written).
 			this.#fileIsCurrent = false;
 			this.#rewriteRequired = true;
+			if (err instanceof SessionFileLockError) throw err;
 			this.#noteDiskFailure(err);
 		}
 	}
