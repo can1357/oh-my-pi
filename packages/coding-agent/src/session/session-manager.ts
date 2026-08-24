@@ -2696,6 +2696,13 @@ export class SessionManager {
 	/** Flush, then close the append writer. */
 	async close(): Promise<void> {
 		if (!this.#persist) return;
+		// The divergent-journal flush must run while the owner claim is STILL
+		// held: releasing the claim first lets a concurrent undo-tail gc
+		// classify the session as unowned, prune beneath this closing
+		// manager, and release the journal lock — and the close-time rewrite
+		// (which does not revalidate the prune marker) would then resurrect
+		// the just-pruned tail.
+		const closeFlushError = await this.flushDivergentJournal();
 		this.#unregisterOwnerSidecar();
 		// Removal is fs-async now: make the sidecar claim release durable
 		// before close() returns, or a gc run right after close would still
@@ -2716,7 +2723,6 @@ export class SessionManager {
 				logger.warn("Session owner sidecar claim survived close", { sessionFile: file, claims: count });
 			}
 		}
-		const closeFlushError = await this.flushDivergentJournal();
 		await this.#scheduleDiskWork(async () => {
 			const hadWriter = this.#writer !== undefined;
 			await this.#closeWriterHandle();

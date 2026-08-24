@@ -1636,12 +1636,15 @@ async function runUndoTailGc(options: ResolvedGcOptions): Promise<UndoTailGcResu
 				// mutate the directory and fail outright on a read-only mount.
 				noOwnerClaim: !options.apply,
 			});
-			// Identity of the generation the gated load actually accepted:
-			// if the journal was updated and closed between the `before`
-			// stat and the load, restoring `before`'s timestamp would let a
-			// later archive pass treat the just-updated session as cold.
-			const atLoad = await journalIdentity(session.path);
 			try {
+				// Identity of the generation the gated load actually accepted:
+				// if the journal was updated and closed between the `before`
+				// stat and the load, restoring `before`'s timestamp would let a
+				// later archive pass treat the just-updated session as cold.
+				// Probed INSIDE the guarded region: a throw here must still
+				// close the manager, or its live-pid owner claim pins the
+				// session against every later undo-tail scan in this process.
+				const atLoad = await journalIdentity(session.path);
 				const counts = await manager.pruneUserUndoTails(options.keepUndoTails, options.apply);
 				if (counts.skippedLive) {
 					// An owner registered between the preflight and the
