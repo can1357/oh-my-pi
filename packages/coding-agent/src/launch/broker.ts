@@ -211,7 +211,7 @@ interface OutputRegistration extends DaemonOutputWireSubscription {
 	artifactBase: number;
 	/** Reconnect-grace cleanup for registrations without an attached live client. */
 	offlineTimer?: NodeJS.Timeout;
-	/** Artifact persistence failed; retain only the terminal expiry until client cleanup. */
+	/** Delivery is terminally expired; retain only its expiry until client cleanup. */
 	disabled?: boolean;
 	/** Model-facing line previews accumulated from this registration's attach point. */
 	progressPreview: ProgressPreviewAccumulator;
@@ -1197,10 +1197,41 @@ class DaemonBroker {
 	}
 
 	/**
-	 * Drop a registration with no attached client once the reconnect grace
-	 * elapses. Disabled registrations keep their retained expiry for a
-	 * reconnecting client only until then, so a client that crashed after the
-	 * expiry frame cannot pin them for the broker's lifetime.
+	 * A daemon-bound registration whose client stayed away for the whole
+	 * reconnect grace missed output that no replay can recover: terminally
+	 * expire it, retaining only the expiry for an exact-identity reconnect so
+	 * the client learns the capture is incomplete instead of reattaching to an
+	 * artifact with an unmarked gap. Registrations disabled for another
+	 * terminal reason have already advertised their expiry and are dropped;
+	 * an unbound start-pending registration has no output gap to preserve.
+	 */
+	#expireOfflineOutputRegistration(registrationKey: string, registration: OutputRegistration): void {
+		if (this.#outputRegistrations.get(registrationKey) !== registration) return;
+		if (registration.disabled || registration.daemonId === undefined) {
+			this.#disposeOutputRegistration(registrationKey, registration);
+			return;
+		}
+		registration.disabled = true;
+		this.#progressBatcher.clear(registration.batchKey);
+		void this.#disposeOutputArtifact(registration);
+		const expired: DaemonMonitorWireNotification = {
+			event: "daemon-monitor-expired",
+			monitorId: registration.id,
+			registrationId: registration.registrationId,
+			name: registration.name,
+			daemonId: registration.daemonId,
+		};
+		registration.pending = [{ notification: expired, bytes: 0 }];
+		registration.pendingBytes = 0;
+		registration.replayGap = undefined;
+		this.#writeMonitorNotification(registration, expired);
+	}
+
+	/**
+	 * Once the reconnect grace elapses with no attached client, expire (or,
+	 * for an already-expired registration, drop) it so a client that crashed
+	 * after the expiry frame cannot pin the registration for the broker's
+	 * lifetime.
 	 */
 	#scheduleOutputRegistrationCleanup(registrationKey: string, registration: OutputRegistration): void {
 		clearTimeout(registration.offlineTimer);
@@ -1208,7 +1239,7 @@ class DaemonBroker {
 			if (registration.offlineTimer !== timer) return;
 			registration.offlineTimer = undefined;
 			if (registration.socket && !registration.socket.destroyed) return;
-			this.#disposeOutputRegistration(registrationKey, registration);
+			this.#expireOfflineOutputRegistration(registrationKey, registration);
 		}, this.#outputReplayLimits.RETENTION_MS);
 		registration.offlineTimer = timer;
 		timer.unref();
@@ -1552,7 +1583,7 @@ class DaemonBroker {
 			}
 			return;
 		}
-		// A replacement, artifact expiry, or same-name daemon can land while the
+		// Replacement, terminal expiry, or a same-name daemon can land while the
 		// artifact flush yields. Delivery must still be live and bound to this
 		// registration and daemon incarnation.
 		if (
