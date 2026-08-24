@@ -2287,10 +2287,10 @@ export class AgentSession {
 			job.progressArtifactId !== undefined
 				? { artifactId: job.progressArtifactId, leftover: job.completionLeftover }
 				: undefined;
-		// Suppress only byte-identical terminal text explicitly classified as
-		// covered by delivered progress (or its completion leftover). Successful
-		// post-processing such as Bash minimization is terminal-only provenance
-		// and must remain visible just like failure text.
+		// Suppress only terminal text whose pre-format source is explicitly
+		// classified as the raw stream covered by progress (or its completion
+		// leftover). Successful post-processing such as Bash minimization is
+		// terminal-only provenance and must remain visible just like failure text.
 		const formatted =
 			progressSummary && job?.terminalTextProvenance === "progress"
 				? ""

@@ -450,7 +450,7 @@ describe("AsyncJobManager model progress", () => {
 		expect(completions).toEqual(["full result body"]);
 	});
 
-	test("classifies cumulative raw provenance with split surrogate pairs as progress", async () => {
+	test("classifies cumulative raw provenance across display reset and split surrogate pairs as progress", async () => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({});
 		const recorder = recordingSink();
@@ -483,6 +483,8 @@ describe("AsyncJobManager model progress", () => {
 		sampler.append(`${emoji[1]} batch\n`);
 		vi.advanceTimersByTime(200);
 		expect(recorder.seen.map(item => item.text)).toEqual([`first ${emoji} batch`]);
+
+		sampler.resetDisplay();
 
 		sampler.append("second batch\n\n");
 		vi.advanceTimersByTime(200);
