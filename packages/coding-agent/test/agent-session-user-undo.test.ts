@@ -1491,7 +1491,7 @@ describe("AgentSession user undo/redo", () => {
 		expect(preparations[0]!.entries).toContain(firstTurnId);
 	});
 
-	it("undo and redo reset the announced-mount baseline for the replaced branch", async () => {
+	it("undo and redo reconcile the announced-mount baseline for the replaced branch", async () => {
 		await makeFileBackedSession("xdev-baseline.jsonl");
 		await seedThreeTurns();
 		// Journal an xdev mount notice on the branch being rolled back: after
@@ -1505,22 +1505,72 @@ describe("AgentSession user undo/redo", () => {
 		sessionManager.appendMessage(userMessage("fourth"));
 		sessionManager.appendMessage(assistantMessage("OK fourth"));
 
-		let resets = 0;
-		const original = SessionTools.prototype.resetAnnouncedMounts;
-		SessionTools.prototype.resetAnnouncedMounts = function (this: SessionTools) {
-			resets++;
+		let reconciles = 0;
+		const original = SessionTools.prototype.reconcileAnnouncedMounts;
+		SessionTools.prototype.reconcileAnnouncedMounts = function (this: SessionTools) {
+			reconciles++;
 			return original.call(this);
 		};
 		try {
 			const undo = await session.userUndo(1);
 			expect(undo.ok).toBe(true);
-			expect(resets).toBe(1);
+			expect(reconciles).toBe(1);
 
 			const redo = await session.userRedo();
 			expect(redo.ok).toBe(true);
-			expect(resets).toBe(2);
+			expect(reconciles).toBe(2);
 		} finally {
-			SessionTools.prototype.resetAnnouncedMounts = original;
+			SessionTools.prototype.reconcileAnnouncedMounts = original;
 		}
+	});
+
+	it("reconcileAnnouncedMounts requeues rolled-back mount deltas", () => {
+		const makeTools = (messages: unknown[], mountedNames: string[]) => {
+			const toolRegistry = new Map();
+			return new SessionTools(
+				{
+					model: () => undefined,
+					agent: { state: { messages } },
+					settings: Settings.isolated(),
+				} as unknown as ConstructorParameters<typeof SessionTools>[0],
+				{
+					toolRegistry,
+					xdev: {
+						tools: toolRegistry,
+						mountedNames: new Set(mountedNames),
+						builtInNames: new Set(),
+					},
+				} as unknown as ConstructorParameters<typeof SessionTools>[1],
+			);
+		};
+		const notice = (details: { added: string[]; removed: string[] }) => ({
+			role: "custom",
+			customType: "xdev-mount-notice",
+			content: "notice",
+			display: false,
+			details,
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+
+		// Rolled-back unmount: the surviving transcript still announces demo as
+		// mounted, but the live mount set no longer has it — the removal must
+		// be requeued so the next prompt re-delivers it.
+		const unmounted = makeTools([notice({ added: ["demo"], removed: [] })], []);
+		unmounted.reconcileAnnouncedMounts();
+		const unmountNotice = unmounted.takePendingXdevMountNotice(true);
+		expect(unmountNotice?.details?.removed).toContain("demo");
+
+		// Rolled-back mount: the surviving transcript never learned about demo,
+		// but the device is live — the mount must be requeued.
+		const mounted = makeTools([], ["demo"]);
+		mounted.reconcileAnnouncedMounts();
+		const mountNotice = mounted.takePendingXdevMountNotice(true);
+		expect(mountNotice?.details?.added).toContain("demo");
+
+		// Consistent state: transcript matches live mounts — nothing requeued.
+		const consistent = makeTools([notice({ added: ["demo"], removed: [] })], ["demo"]);
+		consistent.reconcileAnnouncedMounts();
+		expect(consistent.takePendingXdevMountNotice(true)).toBeUndefined();
 	});
 });
