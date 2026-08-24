@@ -14,6 +14,7 @@ import { Markdown } from "../components/markdown";
 import { Spacer } from "../components/spacer";
 import { Text } from "../components/text";
 import { type Component, Container } from "../tui";
+import { replaceTabs } from "../utils";
 import { getMarkdownTheme, type Theme, type ThemeColor, theme } from "../theme/index";
 /** Message shape consumed by the shared frame. */
 export interface FramedMessage {
@@ -147,6 +148,7 @@ export class FramedMessageComponent<M extends FramedMessage> extends Container {
 				.map(content => content.text)
 				.join("\n");
 		}
+		text = replaceTabs(text);
 
 		const collapseAfterLines = this.#options.collapseAfterLines;
 		if (!this.#expanded && collapseAfterLines !== undefined) {
