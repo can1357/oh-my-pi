@@ -222,7 +222,7 @@ function killTunnelProcess(proc: Bun.Subprocess): void {
 /**
  * Spawn a tunnel process with its output redirected to a temp log file and
  * poll the file until `extract` yields the public URL. Kills the child and
- * throws on exit or timeout.
+ * throws on exit, timeout, or abort.
  *
  * Deliberately avoids piped stdio: a piped subprocess with an active reader
  * spuriously settles `proc.exited` after `unref()` (observed on Bun 1.3.14,
@@ -240,6 +240,8 @@ interface SpawnUrlTunnelOptions {
 	 * instead of health-probing a dead tunnel.
 	 */
 	recoverPostExitUrl?: boolean;
+	/** Abort readiness and terminate the spawned tunnel process. */
+	signal?: AbortSignal;
 }
 
 type SpawnedUrlTunnelLifecycle = "running" | "exited-after-ready";
@@ -255,7 +257,7 @@ async function spawnUrlTunnel(
 	extract: (line: string) => string | null,
 	options: SpawnUrlTunnelOptions = {},
 ): Promise<SpawnedUrlTunnel> {
-	const { readyPattern, recoverPostExitUrl = false } = options;
+	const { readyPattern, recoverPostExitUrl = false, signal } = options;
 	const logPath = path.join(os.tmpdir(), `omp-blob-tunnel-${Date.now().toString(36)}-${process.pid}.log`);
 	const fd = fs.openSync(logPath, "w");
 	let proc: Bun.Subprocess;
@@ -264,6 +266,14 @@ async function spawnUrlTunnel(
 	} finally {
 		fs.closeSync(fd);
 	}
+
+	const aborted = Promise.withResolvers<void>();
+	const abort = (): void => {
+		killTunnelProcess(proc);
+		aborted.resolve();
+	};
+	signal?.addEventListener("abort", abort, { once: true });
+	if (signal?.aborted) abort();
 
 	const deadline = Date.now() + READY_TIMEOUT_MS;
 	let scanned = 0;
@@ -284,39 +294,48 @@ async function spawnUrlTunnel(
 		return baseUrl !== undefined && (!readyPattern || readyPattern.test(text)) ? baseUrl : undefined;
 	};
 
-	while (Date.now() < deadline) {
-		// Capture exit before reading: a process observed dead here cannot write
-		// after the read below, so that read sees its final output. Checking exit
-		// after the read races a fast tunnel that prints its URL and then exits.
-		const exitCode = proc.exitCode;
-		let text = "";
-		try {
-			text = await Bun.file(logPath).text();
-		} catch {
-			// Log file not flushed yet; keep polling.
-		}
-		let readyUrl = scanLog(text);
-		if (exitCode !== null || proc.exitCode !== null) {
-			// The child may exit after the poll's read. Drain it and scan its
-			// final output before deciding whether recovery is allowed.
-			await proc.exited;
+	try {
+		while (Date.now() < deadline) {
+			if (signal?.aborted) {
+				await proc.exited;
+				signal.throwIfAborted();
+			}
+			// Capture exit before reading so a process already dead here cannot
+			// race its final log write against the readiness scan.
+			const exitCode = proc.exitCode;
+			let text = "";
 			try {
 				text = await Bun.file(logPath).text();
 			} catch {
-				// The diagnostic below remains authoritative when no log exists.
+				// Log file not flushed yet; keep polling.
 			}
-			readyUrl = scanLog(text);
-			if (recoverPostExitUrl && readyUrl) {
-				return { proc, baseUrl: readyUrl, lifecycle: "exited-after-ready" };
+			let readyUrl = scanLog(text);
+			if (exitCode !== null || proc.exitCode !== null) {
+				// exitCode may become visible after the poll's read but before the
+				// child descriptor is fully drained. Read once more after exit so a
+				// valid URL is not mistaken for a missing banner.
+				await proc.exited;
+				signal?.throwIfAborted();
+				try {
+					text = await Bun.file(logPath).text();
+				} catch {
+					// The diagnostic below remains authoritative when no log exists.
+				}
+				readyUrl = scanLog(text);
+				if (recoverPostExitUrl && readyUrl) {
+					return { proc, baseUrl: readyUrl, lifecycle: "exited-after-ready" };
+				}
+				const exitTiming = readyUrl ? "after reporting a tunnel URL" : "before reporting a tunnel URL";
+				throw new Error(`${argv[0]} exited with code ${proc.exitCode} ${exitTiming}`);
 			}
-			const exitTiming = readyUrl ? "after reporting a tunnel URL" : "before reporting a tunnel URL";
-			throw new Error(`${argv[0]} exited with code ${proc.exitCode} ${exitTiming}`);
+			if (readyUrl) return { proc, baseUrl: readyUrl, lifecycle: "running" };
+			await (signal ? Promise.race([Bun.sleep(150), aborted.promise]) : Bun.sleep(150));
 		}
-		if (readyUrl) return { proc, baseUrl: readyUrl, lifecycle: "running" };
-		await Bun.sleep(150);
+		killTunnelProcess(proc);
+		throw new Error(`${argv[0]} did not report a tunnel URL within ${READY_TIMEOUT_MS / 1000}s`);
+	} finally {
+		signal?.removeEventListener("abort", abort);
 	}
-	killTunnelProcess(proc);
-	throw new Error(`${argv[0]} did not report a tunnel URL within ${READY_TIMEOUT_MS / 1000}s`);
 }
 
 function processExposure(kind: ExposureKind, baseUrl: string, proc: Bun.Subprocess): ActiveExposure {
@@ -351,6 +370,7 @@ async function restartingPinggyExposure(
 	let stopping = false;
 	const startup = Promise.withResolvers<void>();
 	if (initialLifecycle === "running" && proc.exitCode === null) startup.resolve();
+	let restartController: AbortController | undefined;
 	proc.unref();
 	const exited = (async () => {
 		let spawnedAt = Date.now();
@@ -376,8 +396,13 @@ async function restartingPinggyExposure(
 			} else {
 				quickExits = 0;
 			}
+			const controller = new AbortController();
+			restartController = controller;
 			try {
-				const restarted = await spawnUrlTunnel(argv, parsePinggyUrl, { recoverPostExitUrl: true });
+				const restarted = await spawnUrlTunnel(argv, parsePinggyUrl, {
+					recoverPostExitUrl: true,
+					signal: controller.signal,
+				});
 				if (stopping) {
 					killTunnelProcess(restarted.proc);
 					await restarted.proc.exited;
@@ -391,9 +416,13 @@ async function restartingPinggyExposure(
 				proc.unref();
 				if (restarted.lifecycle === "running" && proc.exitCode === null) startup.resolve();
 			} catch (error) {
-				logger.warn("blob-broker: authenticated Pinggy tunnel failed to reconnect");
-				startup.reject(error);
+				if (!stopping) {
+					logger.warn("blob-broker: authenticated Pinggy tunnel failed to reconnect");
+					startup.reject(error);
+				}
 				return;
+			} finally {
+				if (restartController === controller) restartController = undefined;
 			}
 		}
 	})();
@@ -403,6 +432,7 @@ async function restartingPinggyExposure(
 		exited,
 		stop: () => {
 			stopping = true;
+			restartController?.abort();
 			killTunnelProcess(proc);
 		},
 	};

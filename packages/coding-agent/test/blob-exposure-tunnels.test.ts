@@ -24,6 +24,7 @@ interface FakeInvocation {
 	runsFile: string;
 	signalsFile: string;
 	restartMarker?: string;
+	restartReadyGate?: string;
 }
 
 function exposure(kind: ExposureConfig["kind"], overrides: Partial<ExposureConfig> = {}): ExposureConfig {
@@ -47,6 +48,7 @@ function prepareFake(
 		exitDelaySeconds?: number;
 		restartOnce?: boolean;
 		restartReadyDelaySeconds?: number;
+		gateRestartReadiness?: boolean;
 	} = {},
 ): FakeInvocation {
 	const suffix = String(invocationSequence++);
@@ -56,6 +58,7 @@ function prepareFake(
 	const runsFile = path.join(invocationDir, "runs.txt");
 	const signalsFile = path.join(invocationDir, "signals.txt");
 	const restartMarker = options.restartOnce ? path.join(invocationDir, "restart.txt") : undefined;
+	const restartReadyGate = options.gateRestartReadiness ? path.join(invocationDir, "restart-ready") : undefined;
 	const target = path.join(invocationDir, "fake-tunnel");
 	fs.writeFileSync(
 		target,
@@ -69,12 +72,16 @@ function prepareFake(
 			? `if [ ! -e ${shellLiteral(restartMarker)} ]; then\n` +
 			`  printf '%s\\n' ${shellLiteral(output)}\n` +
 			`  printf 'first\\n' > ${shellLiteral(restartMarker)}\n` +
+			(options.exitDelaySeconds === undefined ? "" : `  /bin/sleep ${options.exitDelaySeconds}\n`) +
 			`  exit 23\n` +
 			`fi\n` +
 			(options.restartReadyDelaySeconds === undefined
 				? ""
 				: `/bin/sleep ${options.restartReadyDelaySeconds}\n`) +
-			`printf 'restarted\\n' >> ${shellLiteral(restartMarker)}\n`
+			`printf 'restarted\\n' >> ${shellLiteral(restartMarker)}\n` +
+			(restartReadyGate === undefined
+				? ""
+				: `while [ ! -e ${shellLiteral(restartReadyGate)} ]; do /bin/sleep 0.05; done\n`)
 			: "") +
 		`printf '%s\\n' ${shellLiteral(output)}\n` +
 		(options.exitDelaySeconds === undefined ? "" : `/bin/sleep ${options.exitDelaySeconds}\n`) +
@@ -85,7 +92,7 @@ function prepareFake(
 		fs.symlinkSync(target, path.join(invocationDir, name));
 	}
 	process.env.PATH = invocationDir;
-	return { argsFile, runsFile, signalsFile, restartMarker };
+	return { argsFile, runsFile, signalsFile, restartMarker, restartReadyGate };
 }
 
 async function waitForFileContent(filePath: string, matches: (text: string) => boolean): Promise<void> {
@@ -268,6 +275,28 @@ describe("startExposure tunnel adapters", () => {
 		expect(recordedArgs(invocation)).toContain("fake-pinggy-token@pro.pinggy.io");
 		expect(fs.readFileSync(invocation.runsFile, "utf8")).toBe("run\nrun\n");
 		await stopAndObserve(active, invocation);
+	});
+
+	it("cancels an authenticated Pinggy restart that has not published readiness", async () => {
+		const invocation = prepareFake("Tunnel established at https://gated-random.a.pinggy.link", {
+			restartOnce: true,
+			exitDelaySeconds: 1,
+			gateRestartReadiness: true,
+		});
+		const active = await startExposure(
+			exposure("pinggy", {
+				publicBaseUrl: "https://stable.example.test/",
+				credentials: { token: "fake-pinggy-token" },
+			}),
+			PORT,
+		);
+		activeExposures.push(active);
+		await waitForFileContent(invocation.restartMarker!, text => text.includes("restarted"));
+		expect(fs.existsSync(invocation.restartReadyGate!)).toBe(false);
+
+		await stopAndObserve(active, invocation);
+		expect(fs.readFileSync(invocation.runsFile, "utf8")).toBe("run\nrun\n");
+		expect(fs.existsSync(invocation.restartReadyGate!)).toBe(false);
 	});
 
 	it("backs off and gives up on a stable Pinggy tunnel that keeps dying after publishing its URL", async () => {
