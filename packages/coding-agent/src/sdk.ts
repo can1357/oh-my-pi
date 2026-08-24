@@ -1868,6 +1868,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			captureLaunchProgressEpoch: () => session?.captureLaunchProgressEpoch() ?? 0,
 			queueLaunchProgress: (notification, delivery, startedAt, epoch, artifactId) =>
 				session?.queueLaunchProgress(notification, delivery, startedAt, epoch, artifactId),
+			discardLaunchProgress: (monitorId, epoch) => session?.discardLaunchProgress(monitorId, epoch),
 			setLaunchMonitorActive: (monitorId, delivery, active, epoch) =>
 				session?.setLaunchMonitorActive(monitorId, delivery, active, epoch),
 			registerDisposeCallback: callback => {
@@ -3701,6 +3702,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			captureLaunchProgressEpoch: () => session?.captureLaunchProgressEpoch() ?? 0,
 			queueLaunchProgress: (notification, delivery, startedAt, epoch, artifactId) =>
 				session?.queueLaunchProgress(notification, delivery, startedAt, epoch, artifactId),
+			discardLaunchProgress: (monitorId, epoch) => session?.discardLaunchProgress(monitorId, epoch),
 			setLaunchMonitorActive: (monitorId, delivery, active, epoch) =>
 				session?.setLaunchMonitorActive(monitorId, delivery, active, epoch),
 			getAgentId: () => "advisor",

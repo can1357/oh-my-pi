@@ -1538,6 +1538,118 @@ describe("AgentSession owner-routed async delivery", () => {
 		await manager.waitForAll();
 	});
 
+	it("discards queued wake and ambient progress only for the detached process monitor", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const busyStarted = Promise.withResolvers<void>();
+		const releaseBusy = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			handler: async () => {
+				busyStarted.resolve();
+				await releaseBusy.promise;
+				return { content: ["Done"] };
+			},
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+
+		const epoch = session.captureLaunchProgressEpoch();
+		const activeTurn = session.sendUserMessage("hold process progress");
+		await busyStarted.promise;
+		session.queueLaunchProgress(
+			{
+				event: "daemon-output",
+				monitorId: "detached-monitor",
+				name: "watched",
+				daemonId: "shared-daemon",
+				seq: 1,
+				text: "DETACHED AMBIENT PROGRESS",
+				batchKind: "progress",
+				suppressedEvents: 0,
+			},
+			"ambient",
+			Date.now(),
+			epoch,
+		);
+		session.queueLaunchProgress(
+			{
+				event: "daemon-output",
+				monitorId: "detached-monitor",
+				name: "watched",
+				daemonId: "shared-daemon",
+				seq: 2,
+				text: "DETACHED WAKE PROGRESS",
+				batchKind: "progress",
+				suppressedEvents: 0,
+			},
+			"wake",
+			Date.now(),
+			epoch,
+		);
+		session.queueLaunchProgress(
+			{
+				event: "daemon-output",
+				monitorId: "unrelated-monitor",
+				name: "other",
+				daemonId: "other-daemon",
+				seq: 1,
+				text: "UNRELATED PROCESS PROGRESS",
+				batchKind: "progress",
+				suppressedEvents: 0,
+			},
+			"ambient",
+			Date.now(),
+			epoch,
+		);
+
+		session.discardLaunchProgress("detached-monitor", epoch);
+		session.queueLaunchProgress(
+			{
+				event: "daemon-output",
+				monitorId: "reattached-monitor",
+				name: "watched",
+				daemonId: "shared-daemon",
+				seq: 1,
+				text: "REATTACHED PROCESS PROGRESS",
+				batchKind: "progress",
+				suppressedEvents: 0,
+			},
+			"ambient",
+			Date.now(),
+			epoch,
+		);
+
+		releaseBusy.resolve();
+		await activeTurn;
+		await session.sendUserMessage("flush remaining process progress");
+
+		const observedText = mock.calls
+			.flatMap(call =>
+				call.context.messages.flatMap(message =>
+					typeof message.content === "string"
+						? [message.content]
+						: message.content.flatMap(content => (content.type === "text" ? [content.text] : [])),
+				),
+			)
+			.join("\n");
+		expect(observedText).not.toContain("DETACHED AMBIENT PROGRESS");
+		expect(observedText).not.toContain("DETACHED WAKE PROGRESS");
+		expect(observedText).toContain("UNRELATED PROCESS PROGRESS");
+		expect(observedText).toContain("REATTACHED PROCESS PROGRESS");
+	});
+
 	it("acknowledges managed ambient progress without deleting a colliding process source", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const progressMarker = "ACKNOWLEDGED PROGRESS MUST STAY STALE";
