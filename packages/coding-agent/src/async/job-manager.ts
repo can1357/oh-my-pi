@@ -901,6 +901,7 @@ export class AsyncJobManager {
 			// completion never outruns output this counter claims was delivered.
 			job.progressDeliveredCount = (job.progressDeliveredCount ?? 0) + 1;
 		} catch (error) {
+			job.progressDeliveryCoverage = "gapped";
 			logger.warn("Async job progress delivery failed", {
 				jobId: job.id,
 				error: error instanceof Error ? error.message : String(error),
