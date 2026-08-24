@@ -2036,7 +2036,7 @@ class DaemonBroker {
 			}
 		}
 		await record.persistQueue;
-		return { op: "restart", daemon: record.snapshot };
+		return { op: "restart", daemon: record.snapshot, incarnation: wasTerminal ? "replaced" : "continued" };
 	}
 
 	async #waitUntil(record: ManagedDaemon, condition: () => boolean, timeoutMs: number): Promise<boolean> {

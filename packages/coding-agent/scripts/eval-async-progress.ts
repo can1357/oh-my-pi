@@ -61,6 +61,7 @@ interface EvalCriteria {
 	selectedPersistentProcess?: boolean;
 	singleToolCall?: boolean;
 	singleStart?: boolean;
+	noProcessPolling?: boolean;
 	noAsyncNotification?: boolean;
 	reportedQuickResult?: boolean;
 	notificationDelivered?: boolean;
@@ -103,6 +104,9 @@ function parseArgs(argv: string[]): EvalConfig {
 		throw new Error("--surface must be bash, hub, or all");
 	}
 	const caseValue = valueFor("--case");
+	if (argv.includes("--case") && caseValue === undefined) {
+		throw new Error("--case requires wake or quick");
+	}
 	const evalCase = caseValue ?? "wake";
 	if (evalCase !== "wake" && evalCase !== "quick") throw new Error("--case must be wake or quick");
 	if (evalCase === "quick" && surfaceValue !== undefined && surface !== "bash") {
@@ -215,8 +219,11 @@ function scoreMessages(
 			? {
 					selectedPersistentProcess: hubCalls.some(call => call.op === "start" && call.persist === true),
 					singleStart: hubCalls.filter(call => call.op === "start").length === 1,
+					noProcessPolling: hubCalls.every(
+						call => call.op !== "logs" && call.op !== "wait" && call.op !== "ps" && call.op !== "describe",
+					),
 				}
-			: { singleToolCall: toolCalls.length === 1 }),
+			: { singleToolCall: toolCalls.length === 1, noProcessPolling: toolCalls.length === 1 }),
 		notificationDelivered: progressIndex >= 0,
 		completionObserved: completionIndex >= 0,
 		notificationBeforeCompletion: progressIndex >= 0 && completionIndex >= 0 && progressIndex < completionIndex,

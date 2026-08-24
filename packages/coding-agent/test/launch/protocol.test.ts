@@ -432,6 +432,32 @@ describe("launch monitor watchers", () => {
 	});
 });
 
+describe("restart incarnation protocol", () => {
+	const restart: Extract<DaemonOperation, { op: "restart" }> = { op: "restart", name: "web" };
+
+	it.each(["continued", "replaced", "unknown"] as const)(
+		"decodes %s atomically with the restart snapshot",
+		incarnation => {
+			expect(parseDaemonRpcResult(restart, { daemon: baseSnapshot, incarnation })).toEqual({
+				op: "restart",
+				daemon: baseSnapshot,
+				incarnation,
+			});
+		},
+	);
+
+	it("maps a missing incarnation to unknown and rejects unrecognized states", () => {
+		expect(parseDaemonRpcResult(restart, { daemon: baseSnapshot })).toEqual({
+			op: "restart",
+			daemon: baseSnapshot,
+			incarnation: "unknown",
+		});
+		expect(() => parseDaemonRpcResult(restart, { daemon: baseSnapshot, incarnation: "maybe" })).toThrow(
+			"Unknown restart incarnation: maybe",
+		);
+	});
+});
+
 describe("regex-derived protocol fields", () => {
 	it("preserves an empty readiness match", () => {
 		expect(parseDaemonSnapshot({ ...baseSnapshot, readyMatch: "" }).readyMatch).toBe("");
