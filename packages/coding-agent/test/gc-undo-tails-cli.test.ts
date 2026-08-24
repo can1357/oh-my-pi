@@ -767,6 +767,33 @@ describe("omp gc --undo-tails (CLI)", () => {
 		await fresh.close();
 	});
 
+	it("a throwing publish restores the tree and clears the prune marker", async () => {
+		await buildSessionWithTwoUndoTails();
+		const before = fs.readFileSync(sessionFile, "utf-8");
+		const manager = await SessionManager.open(sessionFile, sessionsDir, undefined, {
+			suppressBreadcrumb: true,
+		});
+		const entriesBefore = manager.getBranch().map(entry => entry.id);
+
+		// Hold the journal lock so the prune's publish throws instead of
+		// completing (the same contention another writer creates mid-window).
+		const lock = tryAcquireFileLock(sessionFile);
+		expect(lock?.acquired).toBe(true);
+		try {
+			await expect(manager.pruneUserUndoTails(0, true)).rejects.toThrow();
+		} finally {
+			lock?.release();
+		}
+
+		// Nothing published and no marker left behind: the file is byte
+		// identical, the in-memory tree is restored (a later append would
+		// otherwise resurrect the prune), and opens are not blocked.
+		expect(fs.readFileSync(sessionFile, "utf-8")).toBe(before);
+		expect(fs.existsSync(`${sessionFile}.owner.pruning`)).toBe(false);
+		expect(manager.getBranch().map(entry => entry.id)).toEqual(entriesBefore);
+		await manager.close();
+	});
+
 	it("fork of a memory-backed session skips filesystem claims entirely", async () => {
 		const manager = SessionManager.create(sessionsDir, sessionsDir, new MemorySessionStorage());
 		manager.appendMessage(userMessage("u1"));
