@@ -71,6 +71,8 @@ export interface AsyncProgressEntry {
 	text: string;
 	job: AsyncJob | undefined;
 	source?: AsyncProgressSource;
+	/** Broker output registration that produced this process entry. */
+	monitorId?: string;
 	seq: number;
 	elapsedMs: number;
 	epoch: number;
