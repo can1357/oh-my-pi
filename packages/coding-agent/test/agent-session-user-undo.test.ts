@@ -1652,4 +1652,47 @@ describe("AgentSession user undo/redo", () => {
 		expect(serialized).toContain("first guest prompt");
 		expect(serialized).not.toContain("second guest prompt");
 	});
+	it("agent-authored user-role messages are not user turns", async () => {
+		await makeFileBackedSession("agent-steer-undo.jsonl");
+		await seedThreeTurns();
+		// Parent IRC steers / MCP notification batches ride the provider-facing
+		// user role with agent attribution — internal context, not a turn.
+		sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "internal steer notice" }],
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+		sessionManager.appendMessage(assistantMessage("OK steer"));
+
+		const undo = await session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		// The operator's third turn is what got undone — the steer rode along
+		// with it. Pre-fix the steer itself was the "turn", so SECRET_C stayed.
+		const serialized = JSON.stringify(session.buildDisplaySessionContext().messages);
+		expect(serialized).not.toContain(SECRET_C);
+		expect(serialized).not.toContain("internal steer notice");
+	});
+
+	it("legacy unstamped prelude types rewind with their turn", async () => {
+		await makeFileBackedSession("legacy-prelude-undo.jsonl");
+		await seedThreeTurns();
+		// A journal written before the promptPrelude stamp: plan-mode-reference
+		// was already persisted immediately before its user turn.
+		sessionManager.appendCustomMessageEntry("plan-mode-reference", "legacy plan reference", false);
+		sessionManager.appendMessage(userMessage("fourth"));
+		sessionManager.appendMessage(assistantMessage("OK fourth"));
+
+		const undo = await session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		const serialized = JSON.stringify(session.buildDisplaySessionContext().messages);
+		expect(serialized).not.toContain("fourth");
+		// display:false keeps the prelude out of the rendered context, so the
+		// invariant lives on the branch: the anchor moved before the whole
+		// prelude batch, leaving no stale plan reference on the active path.
+		const preludeOnBranch = sessionManager
+			.getBranch()
+			.some(entry => entry.type === "custom_message" && entry.customType === "plan-mode-reference");
+		expect(preludeOnBranch).toBe(false);
+	});
 });
