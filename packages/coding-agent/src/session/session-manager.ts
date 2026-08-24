@@ -927,6 +927,11 @@ export class SessionManager {
 			});
 
 		const reported = scheduled.catch(err => {
+			// Transient lock contention is not a disk failure: latching it
+			// would poison the manager (close() rethrows #diskFailure) for
+			// what every other rewrite path already treats as a retryable
+			// SessionFileLockError passthrough.
+			if (err instanceof SessionFileLockError) throw err;
 			throw this.#noteDiskFailure(err);
 		});
 		this.#diskTail = reported.catch(() => undefined);
@@ -3573,6 +3578,19 @@ export class SessionManager {
 		let published = false;
 		try {
 			published = await this.rewriteEntries();
+		} catch (error) {
+			// Exceptional pre-publication path (e.g. another writer took the
+			// journal lock mid-rewrite): nothing landed on disk, so restore
+			// the in-memory tree and remove the marker BEFORE rethrowing —
+			// otherwise the surviving marker names this still-running pid
+			// and concurrent opens of the session wait out their bounded
+			// window only to fail, for as long as this process lives.
+			this.#undoTailPruneActive = false;
+			for (const [marker, details] of detailsBeforeScrub) marker.details = details as typeof marker.details;
+			this.#entries = entriesBeforePrune;
+			this.#index.rebuild(this.#entries);
+			await clearUndoTailPruneMarker(sessionFileForPrune);
+			throw error;
 		} finally {
 			this.#undoTailPruneActive = false;
 		}
