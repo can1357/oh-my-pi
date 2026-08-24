@@ -20,7 +20,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { removeSyncWithRetries, Snowflake, tryAcquireFileLock } from "@oh-my-pi/pi-utils";
 import { TtsrManager } from "../src/export/ttsr";
 import { resolveLocalUrlToPath } from "../src/internal-urls";
 import { getLatestTodoPhasesFromEntries } from "../src/tools/todo";
@@ -252,6 +252,60 @@ describe("AgentSession user undo/redo", () => {
 		expect(text).toContain(SECRET_B);
 		expect(text).not.toContain(SECRET_C);
 		expect(text).not.toContain("OK C");
+	});
+
+	it("undo under append-lock contention completes the rollback in-memory", async () => {
+		const sessionFile = path.join(tempDir, "contended-undo.jsonl");
+		await makeFileBackedSession("contended-undo.jsonl");
+		await seedThreeTurns();
+
+		// Another writer holds the journal lock: the marker append throws
+		// SessionFileLockError AFTER the branch switch applied in-memory.
+		// The rollback must complete anyway (context rewound) — a
+		// half-transition would run the next turn on pre-undo agent
+		// messages while persisting beneath the undo branch.
+		await sessionManager.rewriteEntries();
+		const lock = tryAcquireFileLock(sessionFile);
+		expect(lock?.acquired).toBe(true);
+		try {
+			const result = session.userUndo();
+			expect(result.ok).toBe(true);
+		} finally {
+			lock?.release();
+		}
+		const text = contextText(session);
+		expect(text).toContain(SECRET_B);
+		expect(text).not.toContain(SECRET_C);
+
+		// The divergence flag routes the next append through a full
+		// rewrite, so the deferred branch is durable afterwards.
+		sessionManager.appendMessage(userMessage("after-contention"));
+		const onDisk = fs.readFileSync(sessionFile, "utf8");
+		expect(onDisk).toContain("user-undo");
+		expect(onDisk).toContain("after-contention");
+	});
+
+	it("redo under append-lock contention completes the restore in-memory", async () => {
+		const sessionFile = path.join(tempDir, "contended-redo.jsonl");
+		await makeFileBackedSession("contended-redo.jsonl");
+		await seedThreeTurns();
+		expect(session.userUndo().ok).toBe(true);
+
+		await sessionManager.rewriteEntries();
+		const lock = tryAcquireFileLock(sessionFile);
+		expect(lock?.acquired).toBe(true);
+		try {
+			const result = session.userRedo();
+			expect(result.ok).toBe(true);
+		} finally {
+			lock?.release();
+		}
+		expect(contextText(session)).toContain(SECRET_C);
+
+		sessionManager.appendMessage(userMessage("after-contention"));
+		const onDisk = fs.readFileSync(sessionFile, "utf8");
+		expect(onDisk).toContain("user-redo");
+		expect(onDisk).toContain("after-contention");
 	});
 
 	it("undo N drops the last N turns", async () => {
