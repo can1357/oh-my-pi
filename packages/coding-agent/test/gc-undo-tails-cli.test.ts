@@ -1117,6 +1117,30 @@ describe("omp gc --undo-tails (CLI)", () => {
 		expect(await readSessionOwnerPids(sessionFile)).toEqual([]);
 	});
 
+	it("open skips the filesystem identity probe for virtual storage", async () => {
+		// A virtual key whose host path cannot be stat'ed: "not-a-dir" is a
+		// regular FILE, so anything beneath it fails with ENOTDIR.
+		fs.writeFileSync(path.join(sessionsDir, "not-a-dir"), "regular file");
+		const virtualKey = path.join(sessionsDir, "not-a-dir", "virtual", "session.jsonl");
+		const scratch = path.join(sessionsDir, "scratch.jsonl");
+		const writer = SessionManager.create(sessionsDir, sessionsDir);
+		await writer.setSessionFile(scratch);
+		writer.appendMessage(userMessage("virtual-u1"));
+		await writer.close();
+		const jsonl = fs.readFileSync(scratch, "utf8");
+		fs.rmSync(scratch);
+		const storage = new MemorySessionStorage();
+		storage.writeTextSync(virtualKey, jsonl);
+
+		// Pre-fix, open() stat'ed the host path BEFORE the backend read and
+		// failed with ENOTDIR; virtual keys must reach the storage backend.
+		const reopened = await SessionManager.open(virtualKey, sessionsDir, storage, {
+			suppressBreadcrumb: true,
+		});
+		expect(reopened.getBranch().length).toBeGreaterThan(0);
+		await reopened.close();
+	});
+
 	it("fork of a memory-backed session skips filesystem claims entirely", async () => {
 		const manager = SessionManager.create(sessionsDir, sessionsDir, new MemorySessionStorage());
 		manager.appendMessage(userMessage("u1"));
