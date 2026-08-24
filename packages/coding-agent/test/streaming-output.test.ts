@@ -331,6 +331,38 @@ describe("OutputSink", () => {
 		expect(artifactText).toBe("headabcdefgh");
 	});
 
+	test("delivers mirrored text and settles its stamp when artifact flushing fails", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "missing", "output.log");
+		const events: Array<
+			| { type: "chunk"; chunk: string; stamp: number; artifactId: string | undefined }
+			| { type: "settled"; stamp: number }
+		> = [];
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "unavailable-artifact",
+			artifactWriteMode: "mirror",
+			chunkStamp: () => 11,
+			onChunk: (chunk, stamp, artifactId) => events.push({ type: "chunk", chunk, stamp, artifactId }),
+			onChunkSettled: stamp => events.push({ type: "settled", stamp }),
+		});
+
+		sink.push("live despite persistence failure");
+		const dumped = await sink.dump();
+
+		expect(events).toEqual([
+			{
+				type: "chunk",
+				chunk: "live despite persistence failure",
+				stamp: 11,
+				artifactId: undefined,
+			},
+			{ type: "settled", stamp: 11 },
+		]);
+		expect(dumped.artifactId).toBeUndefined();
+		expect(await Bun.file(artifactPath).exists()).toBeFalse();
+	});
+
 	test("settles a sampled mirror delivery when preview delivery throws", async () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "preview-failure.log");
@@ -585,7 +617,7 @@ describe("OutputSink", () => {
 			sink.push("cannot persist");
 			const dumped = await sink.dump();
 
-			expect(deliveries).toEqual([]);
+			expect(deliveries).toEqual(["cannot persist"]);
 			expect(settled).toEqual([7]);
 			expect(dumped.output).toBe("cannot persist");
 			expect(dumped.artifactId).toBeUndefined();
