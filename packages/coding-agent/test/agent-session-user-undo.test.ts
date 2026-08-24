@@ -616,6 +616,37 @@ describe("AgentSession user undo/redo", () => {
 		expect(ttsrManager.getInjectedRuleNames().sort()).toEqual(["dropped-rule", "kept-rule"]);
 	});
 
+	it("undo classifies a post-turn injection after its custom_message as post-turn", async () => {
+		session = await makeSession();
+		// Interrupt-mode delivery: assistant turn COMPLETED, then the steering
+		// text persists as a custom_message and the injection record follows.
+		// The custom_message must not keep the per-tool pre-turn-end
+		// adjustment alive, or the restored position lands one turn too low
+		// and an after-gap rule repeats one model turn early.
+		sessionManager.appendMessage(userMessage(`Remember ${SECRET_A}`));
+		sessionManager.appendMessage(assistantMessage("OK A"));
+		sessionManager.appendCustomMessageEntry("ttsr-injection", [{ type: "text", text: "steering text" }], false, {
+			rules: ["gap-rule"],
+		});
+		sessionManager.appendTtsrInjection(["gap-rule"]);
+		sessionManager.appendMessage(userMessage(`More ${SECRET_C}`));
+		sessionManager.appendMessage(assistantMessage("OK tail"));
+
+		const positions = new Map<string, number>();
+		const original = ttsrManager.restoreInjected.bind(ttsrManager);
+		ttsrManager.restoreInjected = (names: string[], pos?: ReadonlyMap<string, number>) => {
+			if (pos) for (const [name, value] of pos) positions.set(name, value);
+			return original(names, pos);
+		};
+
+		const undo = session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		// One assistant turn precedes the injection on the rewound branch, and
+		// the live counter had already advanced past it: position 1, not the
+		// per-tool-adjusted 0.
+		expect(positions.get("gap-rule")).toBe(1);
+	});
+
 	it("rollback rewinds the TTSR message counter with the branch", async () => {
 		session = await makeSession();
 		sessionManager.appendMessage(userMessage(`Remember ${SECRET_A}`));
