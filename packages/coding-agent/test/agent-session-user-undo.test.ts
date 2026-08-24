@@ -1695,4 +1695,35 @@ describe("AgentSession user undo/redo", () => {
 			.some(entry => entry.type === "custom_message" && entry.customType === "plan-mode-reference");
 		expect(preludeOnBranch).toBe(false);
 	});
+	it("user-attributed custom prompts stamped userTurn count as turns", async () => {
+		await makeFileBackedSession("ext-prompt-undo.jsonl");
+		// An extension sendMessage({ customType, attribution: "user",
+		// triggerTurn: true }) turn, persisted exactly as #promptWithMessage
+		// now stamps it: details.userTurn on a user-attributed custom_message.
+		sessionManager.appendCustomMessageEntry("my-prompt", "extension asks", true, { userTurn: true }, "user");
+		sessionManager.appendMessage(assistantMessage("OK ext"));
+
+		const undo = await session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		expect(undo.droppedTurns).toBe(1);
+		const serialized = JSON.stringify(session.buildDisplaySessionContext().messages);
+		expect(serialized).not.toContain("extension asks");
+
+		// Unstamped user-attributed custom context (deliverAs queue that never
+		// triggered a turn) must NOT count as a turn: /undo 1 rewinds the
+		// operator turn BEFORE it is... placed between turns, the note is
+		// ordinary branch content and survives the rollback of the turn that
+		// follows it.
+		await makeFileBackedSession("ext-queue-undo.jsonl");
+		sessionManager.appendMessage(userMessage(`Remember ${SECRET_A}`));
+		sessionManager.appendMessage(assistantMessage("OK A"));
+		sessionManager.appendCustomMessageEntry("my-note", "queued note", true, undefined, "user");
+		sessionManager.appendMessage(userMessage(`Remember ${SECRET_B}`));
+		sessionManager.appendMessage(assistantMessage("OK B"));
+		const undoQueued = await session.userUndo(1);
+		expect(undoQueued.ok).toBe(true);
+		const queued = JSON.stringify(session.buildDisplaySessionContext().messages);
+		expect(queued).not.toContain(SECRET_B);
+		expect(queued).toContain("queued note");
+	});
 });

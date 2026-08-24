@@ -6425,6 +6425,15 @@ export class AgentSession {
 			// whether the final provider prompt still carries the base catalog.
 			const xdevMountNoticeIndex = messages.length;
 			messages.push(message);
+			// A user-attributed custom message entering the prompt flow IS the
+			// turn (user-invoked skills, collab guest prompts, extension
+			// sendMessage({ triggerTurn: true })): stamp persisted ownership so
+			// /undo recognizes every prompt-shaped custom message, not just the
+			// known customTypes. Non-triggering custom context (deliverAs
+			// queues) never passes through here and stays unstamped.
+			if (message.role === "custom" && message.attribution === "user") {
+				message.details = { ...(message.details as Record<string, unknown> | undefined), userTurn: true };
+			}
 			// Inject any pending "nextTurn" messages as context alongside the user message
 			for (const msg of this.#pendingNextTurnMessages) {
 				messages.push(msg);
@@ -8436,16 +8445,20 @@ export class AgentSession {
 	}
 
 	/**
-	 * A user turn: a user message, a user-invoked `/skill:<name>` prompt, or a
-	 * collaborative guest prompt (persisted via promptCustomMessage as a
-	 * COLLAB_PROMPT_MESSAGE_TYPE custom_message with user attribution).
-	 * Centralized so /undo, /revert, and the picker agree. Skill and collab
-	 * prompts reach the journal in both shapes: appendMessage keeps a
-	 * message-role "custom" entry, while appendCustomMessageEntry persists
-	 * a `custom_message` entry carrying customType/attribution directly.
+	 * A user turn: a user message, a user-invoked `/skill:<name>` prompt, a
+	 * collaborative guest prompt, or any user-attributed custom message that
+	 * went through the prompt flow (extension sendMessage with triggerTurn) —
+	 * the latter is persisted ownership via details.userTurn, stamped by
+	 * #promptWithMessage. Skill and collab prompts also reach the journal as
+	 * legacy customTypes. Centralized so /undo, /revert, and the picker agree.
+	 * Both prompt shapes persist `details` verbatim through
+	 * appendCustomMessageEntry / #persistMessageEnd.
 	 */
 	#isUserTurnEntry(entry: SessionEntry): boolean {
 		if (entry.type === "custom_message") {
+			if (isRecord(entry.details) && entry.details.userTurn === true && entry.attribution === "user") {
+				return true;
+			}
 			return (
 				(entry.customType === SKILL_PROMPT_MESSAGE_TYPE || entry.customType === COLLAB_PROMPT_MESSAGE_TYPE) &&
 				entry.attribution === "user"
@@ -8459,7 +8472,8 @@ export class AgentSession {
 		return (
 			(message.role === "user" && message.attribution !== "agent") ||
 			(message.role === "custom" &&
-				(isUserInvokedSkillPrompt(message) ||
+				((isRecord(message.details) && message.details.userTurn === true && message.attribution === "user") ||
+					isUserInvokedSkillPrompt(message) ||
 					(message.customType === COLLAB_PROMPT_MESSAGE_TYPE && message.attribution === "user")))
 		);
 	}
