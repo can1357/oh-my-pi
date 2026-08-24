@@ -101,8 +101,9 @@ import {
 	toError,
 	withTimeout,
 } from "@oh-my-pi/pi-utils";
+import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
-import { loadAdvisorTranscriptCosts } from "../advisor";
+import { type AdvisorRuntimeStatus, loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
@@ -9185,20 +9186,29 @@ export class AgentSession {
 	}
 
 	/**
-	 * Canonical operator-visible user turn: a plain user message, or a
-	 * user-invoked `/skill:<name>` prompt (same definition the auto-thinking
-	 * classifier uses). Centralized so /undo, /revert, and the picker agree.
-	 * Skill prompts reach the journal in both shapes: appendMessage keeps a
+	 * A user turn: a user message, a user-invoked `/skill:<name>` prompt, or a
+	 * collaborative guest prompt (persisted via promptCustomMessage as a
+	 * COLLAB_PROMPT_MESSAGE_TYPE custom_message with user attribution).
+	 * Centralized so /undo, /revert, and the picker agree. Skill and collab
+	 * prompts reach the journal in both shapes: appendMessage keeps a
 	 * message-role "custom" entry, while appendCustomMessageEntry persists
 	 * a `custom_message` entry carrying customType/attribution directly.
 	 */
 	#isUserTurnEntry(entry: SessionEntry): boolean {
 		if (entry.type === "custom_message") {
-			return entry.customType === SKILL_PROMPT_MESSAGE_TYPE && entry.attribution === "user";
+			return (
+				(entry.customType === SKILL_PROMPT_MESSAGE_TYPE || entry.customType === COLLAB_PROMPT_MESSAGE_TYPE) &&
+				entry.attribution === "user"
+			);
 		}
 		if (entry.type !== "message") return false;
 		const message = entry.message;
-		return message.role === "user" || (message.role === "custom" && isUserInvokedSkillPrompt(message));
+		return (
+			message.role === "user" ||
+			(message.role === "custom" &&
+				(isUserInvokedSkillPrompt(message) ||
+					(message.customType === COLLAB_PROMPT_MESSAGE_TYPE && message.attribution === "user")))
+		);
 	}
 
 	/** Preview line for either user-turn shape: message or persisted skill prompt. */
