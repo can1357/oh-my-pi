@@ -312,4 +312,37 @@ describe("AgentSession approved-plan reference re-injection after compaction (is
 
 		expect(continuation.messageTexts.some(text => text.includes("## Existing Plan"))).toBe(false);
 	});
+
+	// /undo reconcile must recognize the PERSISTED shape of a delivered plan
+	// reference: custom messages journal as `custom_message` entries carrying
+	// customType directly, so a scan limited to message-role "custom" entries
+	// would wrongly clear the delivered flag and re-inject the plan.
+	it("does not re-inject the plan reference after an undo that keeps the delivered reference", async () => {
+		const { session, sessionManager, observedCalls } = await createHarness();
+
+		const planUrl = "local://undo-kept-plan.md";
+		writePlanFile(sessionManager, planUrl, "# Undo Kept Plan\n");
+		session.setPlanReferencePath(planUrl);
+
+		await session.prompt("seed turn");
+		// The delivered reference, persisted exactly as #persistMessageEnd
+		// writes it: a custom_message journal entry.
+		sessionManager.appendCustomMessageEntry(
+			"plan-mode-reference",
+			[{ type: "text", text: `Approved plan at ${planUrl}` }],
+			true,
+		);
+		session.markPlanReferenceSent();
+		await session.prompt("turn to undo");
+
+		const undo = session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		// The surviving reference must satisfy the delivered flag: the next
+		// prompt carries the in-context copy exactly once, never a second
+		// injection on top of it (the delivered reference's own rendered
+		// text contains the MUST-read instruction, so count, not absence).
+		await session.prompt("continue after undo");
+		const afterUndo = observedCalls.at(-1)!;
+		expect(afterUndo.messageTexts.filter(text => text.includes("MUST read")).length).toBe(1);
+	});
 });

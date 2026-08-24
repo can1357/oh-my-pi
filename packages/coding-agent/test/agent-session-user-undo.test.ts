@@ -888,6 +888,35 @@ describe("AgentSession user undo/redo", () => {
 		expect(marker.details?.droppedPrompts).toContain(SECRET_B);
 	});
 
+	it("a persisted custom_message skill prompt counts as a user turn for /undo and /revert", async () => {
+		session = await makeSession();
+		sessionManager.appendMessage(userMessage(`Remember ${SECRET_A}`));
+		sessionManager.appendMessage(assistantMessage("OK A"));
+		// appendCustomMessageEntry is the persistence path real skill
+		// invocations take (#persistMessageEnd): the journal entry is a
+		// `custom_message` carrying customType/attribution directly, with no
+		// message-role "custom" shape to match.
+		sessionManager.appendCustomMessageEntry(
+			"skill-prompt",
+			[{ type: "text", text: `Run ${SECRET_B} now` }],
+			false,
+			undefined,
+			"user",
+		);
+		sessionManager.appendMessage(assistantMessage("OK skill"));
+
+		const turns = session.getUserTurns();
+		expect(turns.length).toBe(2);
+		expect(turns[1]!.preview).toContain(SECRET_B);
+
+		const undo = session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		expect(undo.droppedTurns).toBe(1);
+		const text = contextText(session);
+		expect(text).toContain(SECRET_A);
+		expect(text).not.toContain(SECRET_B);
+	});
+
 	it("undo rebuilds checkpoint state so a dropped-tail checkpoint cannot rewind it back", async () => {
 		session = await makeSession();
 		await seedThreeTurns();
