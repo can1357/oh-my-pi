@@ -2072,7 +2072,8 @@ export class SessionManager {
 		let loadIdentity = loadedIdentity;
 		for (let attempt = 0; attempt < 5; attempt++) {
 			if (loaded === undefined) {
-				loadIdentity = await journalIdentity(resolvedSessionFile);
+				loadIdentity =
+					this.#storage instanceof FileSessionStorage ? await journalIdentity(resolvedSessionFile) : undefined;
 				loaded = await loadSessionFile(resolvedSessionFile, this.#storage);
 			}
 
@@ -4028,8 +4029,11 @@ export class SessionManager {
 	): Promise<SessionManager> {
 		// Identity strictly before the read: a publish landing between the
 		// two would pair pre-prune content with a post-prune identity, and
-		// the gate loop would accept the stale snapshot as current.
-		const loadedIdentity = await journalIdentity(filePath);
+		// the gate loop would accept the stale snapshot as current. Only the
+		// FILE backend has a filesystem generation to probe: a virtual key
+		// (memory/indexed storage) must not fail on whatever host path the
+		// key string resolves to (EACCES/ENOTDIR) before the backend read.
+		const loadedIdentity = storage instanceof FileSessionStorage ? await journalIdentity(filePath) : undefined;
 		const loaded = await loadSessionFile(filePath, storage);
 		const header = loaded.entries.find(entry => entry.type === "session") as SessionHeader | undefined;
 		// Resume into the session's recorded cwd only when it is verifiably
