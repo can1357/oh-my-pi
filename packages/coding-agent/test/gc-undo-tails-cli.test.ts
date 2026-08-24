@@ -773,6 +773,62 @@ describe("omp gc --undo-tails (CLI)", () => {
 		await actor.close();
 	});
 
+	it("forkFrom registers ownership of the materialized session", async () => {
+		await buildSessionWithTwoUndoTails();
+		const forked = await SessionManager.forkFrom(sessionFile, path.join(agentDir, "proj"), sessionsDir, undefined, {
+			suppressBreadcrumb: true,
+		});
+		try {
+			const forkedFile = forked.getSessionFile()!;
+			expect(forkedFile).not.toBe(sessionFile);
+			// The idle fork holds the copied tree; its claim must already
+			// exist or gc could prune beneath it.
+			expect(await readSessionOwnerPids(forkedFile)).toContain(process.pid);
+		} finally {
+			await forked.close();
+		}
+		expect(await readSessionOwnerPids(forked.getSessionFile()!)).toEqual([]);
+	});
+
+	it("persistCopy registers ownership of the copied session", async () => {
+		await buildSessionWithTwoUndoTails();
+		const manager = SessionManager.create(sessionsDir, sessionsDir);
+		await manager.setSessionFile(sessionFile);
+		const copy = await manager.persistCopy(undefined, undefined);
+		try {
+			const copyFile = copy.getSessionFile()!;
+			expect(copyFile).not.toBe(sessionFile);
+			expect(await readSessionOwnerPids(copyFile)).toContain(process.pid);
+		} finally {
+			await copy.close();
+		}
+		await manager.close();
+		expect(await readSessionOwnerPids(copy.getSessionFile()!)).toEqual([]);
+	});
+
+	it("createBranchedSession transfers the claim from source to branch", async () => {
+		await buildSessionWithTwoUndoTails();
+		const manager = SessionManager.create(sessionsDir, sessionsDir);
+		await manager.setSessionFile(sessionFile);
+		expect(await readSessionOwnerPids(sessionFile)).toContain(process.pid);
+
+		const entries = manager.getBranch();
+		const anchorEntry = entries.find(entry => entry.id !== undefined && entry.type === "message");
+		const branchFile = manager.createBranchedSession(anchorEntry!.id);
+		expect(branchFile).toBeDefined();
+
+		// The transfer is queued on the sidecar tail; wait for it to settle.
+		const deadline = Date.now() + 5_000;
+		while ((await readSessionOwnerPids(branchFile!)).length === 0 && Date.now() < deadline) {
+			await Bun.sleep(25);
+		}
+		expect(await readSessionOwnerPids(branchFile!)).toContain(process.pid);
+		expect(await readSessionOwnerPids(sessionFile)).toEqual([]);
+
+		await manager.close();
+		expect(await readSessionOwnerPids(branchFile!)).toEqual([]);
+	});
+
 	it("journal identity fails closed on unreadable stats", async () => {
 		// ENOENT reads as absent; every other stat failure propagates.
 		expect(await journalIdentity(path.join(agentDir, "missing.jsonl"))).toBeUndefined();
