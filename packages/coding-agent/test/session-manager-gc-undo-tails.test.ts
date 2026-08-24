@@ -16,6 +16,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@oh-my-pi/pi-ai";
+import { exportFromFile } from "@oh-my-pi/pi-coding-agent/export/html/index";
 import { readSessionOwnerPids, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage, type WriteTextAtomicOptions } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { tryAcquireFileLock } from "@oh-my-pi/pi-utils";
@@ -337,6 +338,26 @@ describe("SessionManager.pruneUserUndoTails", () => {
 			const lock = tryAcquireFileLock(sessionFile);
 			expect(lock?.acquired).toBe(true);
 			lock?.release();
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+	it("read-only consumers (export/share) claim no owner sidecar", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-readonly-open-"));
+		try {
+			const sessionFile = path.join(tempDir, "readonly.jsonl");
+			const writer = SessionManager.create(tempDir, tempDir);
+			await writer.setSessionFile(sessionFile);
+			writer.appendMessage(userMessage("u1"));
+			await writer.close();
+
+			// exportFromFile is a pure read-only consumer: opening the session
+			// must not append an .owner sidecar claim (read-only dirs would
+			// throw SessionFileLockError, and a retained live-pid claim makes
+			// undo-tail gc skip the session in long-lived callers).
+			await exportFromFile(sessionFile, { outputPath: path.join(tempDir, "out.html") });
+			const pids = await readSessionOwnerPids(sessionFile);
+			expect(pids.includes(process.pid)).toBe(false);
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
