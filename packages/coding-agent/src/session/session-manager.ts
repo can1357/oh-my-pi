@@ -2330,6 +2330,11 @@ export class SessionManager {
 		manager.#index.rebuild(manager.#entries);
 		manager.#forceFileCreation = true;
 		await manager.#rewriteAtomically();
+		// Same contract as forkFrom: an idle copy never appends, so the
+		// owner claim must exist before the manager is returned.
+		if (!(await manager.#registerOwnerSidecar())) {
+			throw new SessionFileLockError(manager.#sessionFile!);
+		}
 		return manager;
 	}
 
@@ -3564,6 +3569,20 @@ export class SessionManager {
 		}
 
 		this.#sessionFile = newSessionFile;
+		// Ownership transfer at the switch: release the source claim and
+		// claim the branch file (queued in tail order). Without this, the
+		// first #recordEntry backstop would overwrite the slot and leak the
+		// source claim — close() removes only the branch line, and the old
+		// session stays owned by this pid until process exit, blocking
+		// undo-tail GC.
+		this.#unregisterOwnerSidecar();
+		this.#ownerRegisteredFile = newSessionFile;
+		this.#sidecarTail = this.#sidecarTail.then(async () => {
+			if (await this.#claimOwnerSidecarFor(newSessionFile)) return;
+			// Same contract as #registerOwnerSidecar: a failed claim must
+			// not latch the slot, so the #recordEntry backstop retries.
+			if (this.#ownerRegisteredFile === newSessionFile) this.#ownerRegisteredFile = undefined;
+		});
 		this.#rewriteSynchronously();
 		this.#rememberBreadcrumb(this.#cwd, newSessionFile);
 		return newSessionFile;
@@ -3667,6 +3686,12 @@ export class SessionManager {
 		await manager.#rewriteAtomically();
 		if (options?.copyArtifacts !== false) {
 			await copySessionArtifacts(sourcePath, manager.#sessionFile!);
+		}
+		// The returned manager holds the copied tree in memory; an idle fork
+		// never appends, so the #recordEntry backstop would not fire and gc
+		// could prune beneath it. The claim must exist before we return.
+		if (!(await manager.#registerOwnerSidecar())) {
+			throw new SessionFileLockError(manager.#sessionFile!);
 		}
 		return manager;
 	}
