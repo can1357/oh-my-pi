@@ -4939,6 +4939,62 @@ describe("ACP agent", () => {
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});
+	it("settles envelope-corrupt built-in bash results as a FAILED degraded card, not a succeeded empty one", async () => {
+		// Sibling of the two details-violation degrade tests above, guarding the
+		// OTHER failure class that reaches `degradeOrThrow`: when the *envelope
+		// itself* fails `legacyEnvelopeSchema` (`result: "not-an-envelope"`),
+		// the salvaged base collapses to `content: []`/`isError: false`. Without
+		// the seam's fail-closed rule this would flip producer/transport
+		// corruption into a succeeded empty card — reachable without a transport
+		// bug, since an extension `afterToolCall` transform can return a
+		// non-envelope just as easily as bad details.
+		const harness = await createHarness({ terminalMeta: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.registerBuiltinTool("bash");
+		const finishPrompt = holdPromptStreaming(session);
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000089",
+			prompt: [{ type: "text", text: "malformed bash envelope" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		emit({
+			type: "tool_execution_start",
+			toolCallId: "corrupt-bash",
+			toolName: "bash",
+			args: { command: "echo corrupt" },
+			progressProtocol: "legacy_snapshot",
+		} as AgentSessionEvent);
+		emit({
+			type: "tool_execution_end",
+			toolCallId: "corrupt-bash",
+			toolName: "bash",
+			isError: false,
+			result: "not-an-envelope",
+			progressProtocol: "legacy_snapshot",
+		} as AgentSessionEvent);
+
+		finishPrompt();
+		await expect(prompt).resolves.toMatchObject({ stopReason: "end_turn" });
+		const end = harness.updates
+			.map(notification => notification.update)
+			.find(
+				update =>
+					update.sessionUpdate === "tool_call_update" &&
+					update.toolCallId === "corrupt-bash" &&
+					"status" in update &&
+					update.status === "failed",
+			);
+		expect(end).toBeDefined();
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
 
 	it("publishes only the final settled body for legacy bash progress, never a duplicated or lossy live delta", async () => {
 		const harness = await createHarness({ terminalMeta: true });
