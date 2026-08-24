@@ -1280,6 +1280,47 @@ describe("hub process output monitoring", () => {
 		expect(harness.completionEpochs).toEqual([17, 17]);
 	});
 
+	it("retains terminal monitor state until synthesized completion delivery succeeds on retry", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+		const attempts: DaemonCompletionNotification[] = [];
+		const committed: DaemonCompletionNotification[] = [];
+		vi.spyOn(harness.session, "queueLaunchCompletion").mockImplementation(async notification => {
+			attempts.push(notification);
+			if (attempts.length === 1) throw new Error("idle completion injection failed");
+			committed.push(notification);
+		});
+
+		await executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "wake" });
+		const subscription = harness.getSubscription();
+		const sink = harness.getOutputSink();
+		if (!subscription || !sink) throw new Error("Expected output subscription");
+		const stopped: DaemonSnapshot = { ...daemon, state: "exited", pid: undefined, exitedAt: 3, exitCode: 143 };
+		const terminal: DaemonMonitorNotification = {
+			event: "daemon-monitor-completed",
+			monitorId: subscription.id,
+			daemon: stopped,
+			ownerNotified: false,
+		};
+
+		await expect(sink(terminal)).rejects.toThrow("idle completion injection failed");
+
+		expect(harness.getSubscription()).toBe(subscription);
+		expect(harness.registrationCount()).toBe(1);
+		expect(harness.unregisterCount()).toBe(0);
+		expect(harness.active.at(-1)).toEqual({ monitorId: subscription.id, delivery: "wake", active: true });
+
+		await sink(terminal);
+
+		expect(attempts).toHaveLength(2);
+		expect(attempts[1]).toEqual(attempts[0]);
+		expect(committed).toEqual([attempts[1]]);
+		expect(harness.getSubscription()).toBeUndefined();
+		expect(harness.registrationCount()).toBe(0);
+		expect(harness.unregisterCount()).toBe(1);
+		expect(harness.active.at(-1)).toEqual({ monitorId: subscription.id, delivery: "wake", active: false });
+	});
+
 	it("suppresses the synthesized completion when the monitoring session stopped the process itself", async () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
@@ -1542,6 +1583,7 @@ describe("hub process output monitoring", () => {
 		const order: string[] = [];
 		let deliveredProgress: Extract<DaemonMonitorNotification, { event: "daemon-output" }> | undefined;
 		let deliveredTerminal: DaemonCompletionNotification | undefined;
+		const completionReceipt = Promise.withResolvers<void>();
 		vi.spyOn(harness.session, "queueLaunchProgress").mockImplementation(notification => {
 			deliveredProgress = notification;
 			order.push("progress");
@@ -1549,10 +1591,12 @@ describe("hub process output monitoring", () => {
 		vi.spyOn(harness.session, "queueLaunchCompletion").mockImplementation(notification => {
 			deliveredTerminal = notification;
 			order.push(`terminal:${notification.daemon.state}`);
-			return Promise.resolve();
+			return completionReceipt.promise;
 		});
 		const startBuffered = Promise.withResolvers<void>();
 		const releaseStart = Promise.withResolvers<void>();
+		let terminalReceipt: Promise<void> | undefined;
+		let terminalAcknowledged = false;
 		const exited: DaemonSnapshot = {
 			...daemon,
 			state: "exited",
@@ -1588,11 +1632,15 @@ describe("hub process output monitoring", () => {
 					suppressedEvents: 1,
 				});
 			}
-			await sink({
-				event: "daemon-monitor-completed",
-				monitorId: subscription.id,
-				daemon: exited,
-				ownerNotified: false,
+			terminalReceipt = Promise.resolve(
+				sink({
+					event: "daemon-monitor-completed",
+					monitorId: subscription.id,
+					daemon: exited,
+					ownerNotified: false,
+				}),
+			).then(() => {
+				terminalAcknowledged = true;
 			});
 			startBuffered.resolve();
 			await releaseStart.promise;
@@ -1612,9 +1660,15 @@ describe("hub process output monitoring", () => {
 		});
 		await startBuffered.promise;
 		expect(order).toEqual([]);
+		expect(terminalAcknowledged).toBeFalse();
 
 		releaseStart.resolve();
 		await launch;
+		expect(terminalAcknowledged).toBeFalse();
+		expect(harness.unregisterCount()).toBe(0);
+		completionReceipt.resolve();
+		await terminalReceipt;
+		expect(terminalAcknowledged).toBeTrue();
 
 		expect(order).toEqual(["progress", "terminal:exited", "resolved"]);
 		expect(Buffer.byteLength(deliveredProgress?.text ?? "", "utf8")).toBeLessThanOrEqual(
@@ -1635,6 +1689,7 @@ describe("hub process output monitoring", () => {
 	it("discards coalesced speculative progress and terminal completion when the start fails", async () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+		let terminalReceipt: Promise<void> | undefined;
 		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
 			if (operation.op === "ping") {
 				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
@@ -1657,12 +1712,14 @@ describe("hub process output monitoring", () => {
 					suppressedEvents: 1,
 				});
 			}
-			await sink({
-				event: "daemon-monitor-completed",
-				monitorId: subscription.id,
-				daemon: { ...daemon, state: "exited", pid: undefined, exitedAt: 3, exitCode: 0 },
-				ownerNotified: false,
-			});
+			terminalReceipt = Promise.resolve(
+				sink({
+					event: "daemon-monitor-completed",
+					monitorId: subscription.id,
+					daemon: { ...daemon, state: "exited", pid: undefined, exitedAt: 3, exitCode: 0 },
+					ownerNotified: false,
+				}),
+			);
 			throw new Error(`Daemon ${daemon.name} is already running`);
 		});
 
@@ -1676,6 +1733,7 @@ describe("hub process output monitoring", () => {
 				progress: "wake",
 			}),
 		).rejects.toThrow("already running");
+		await terminalReceipt;
 		await drainMicrotasks();
 
 		expect(harness.progress).toEqual([]);
