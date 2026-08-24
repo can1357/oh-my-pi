@@ -1222,4 +1222,66 @@ describe("AgentSession user undo/redo", () => {
 		await session.dispose();
 		expect(fs.readFileSync(sessionFile, "utf8")).toContain("locked-out");
 	});
+
+	it("undo rewinds past the turn's prompt-owned prelude messages", async () => {
+		await makeFileBackedSession("prelude-undo.jsonl");
+		const sessionFile = path.join(tempDir, "prelude-undo.jsonl");
+		await seedThreeTurns();
+
+		// A turn-owned prelude exactly as #promptWithMessage persists it:
+		// custom_message entries immediately before the user message.
+		sessionManager.appendCustomMessageEntry("ultrathink-notice", "hidden notice", false, undefined, "user");
+		sessionManager.appendMessage(userMessage(`${SECRET_C}`));
+		sessionManager.appendMessage(assistantMessage("OK C"));
+
+		const undo = await session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		// The hidden notice belonged to the undone turn: it must leave the
+		// context with it, not linger as in-context residue.
+		const onDisk = fs.readFileSync(sessionFile, "utf8");
+		expect(onDisk).toContain("user-undo");
+		const context = session.buildDisplaySessionContext();
+		const noticeInContext = context.messages.some(
+			message =>
+				message.role === "custom" && (message as { customType?: string }).customType === "ultrathink-notice",
+		);
+		expect(noticeInContext).toBe(false);
+	});
+
+	it("a cancelling session_before_tree handler blocks undo and redo", async () => {
+		const fakeRunner = {
+			hasHandlers: (type: string) => type === "session_before_tree",
+			emit: async () => ({ cancel: true }),
+		} as unknown as ExtensionRunner;
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		mockModel = mock;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(path.join(tempDir, "auth-before-tree.db"));
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		sessionManager = SessionManager.create(tempDir, tempDir);
+		await sessionManager.setSessionFile(path.join(tempDir, "before-tree.jsonl"));
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+			ttsrManager: new TtsrManager(),
+			extensionRunner: fakeRunner,
+		});
+		await seedThreeTurns();
+
+		const undo = await session.userUndo(1);
+		expect(undo.ok).toBe(false);
+		expect(undo.error).toContain("cancelled");
+		// Nothing branched: the leaf is still the pre-attempt tip.
+		expect(sessionManager.getBranch().at(-1)?.type).not.toBe("branch_summary");
+	});
 });
