@@ -765,15 +765,24 @@ export class SessionManager {
 	/** The single open append writer; the manager only ever writes one file at a time. */
 	#writer: SessionStorageWriter | undefined;
 	#writerLock: FileLockHandle | undefined;
-	#ownerRegisteredFile: string | undefined;
 	/**
-	 * Successful sidecar claim appends by THIS manager, decremented
-	 * one-for-one by removals. Read/written only inside sidecar-tail
-	 * callbacks, so the accounting settles in tail order — a registration
-	 * still in flight when close() chains its removal is counted before
-	 * that removal runs.
+	 * Successful sidecar claim appends by THIS manager, per session file,
+	 * decremented one-for-one by removals. Read/written only inside
+	 * sidecar-tail callbacks, so the accounting settles in tail order — a
+	 * registration still in flight when close() chains its removal is
+	 * counted before that removal runs. Per-file rather than a single
+	 * slot: a release that fails during a transfer (switch/fork/moveTo)
+	 * must keep BOTH files as retry targets, or the source's live-pid
+	 * line is orphaned until process exit.
 	 */
-	#ownerClaimLines = 0;
+	#ownerClaims = new Map<string, number>();
+	/**
+	 * Identity of the journal this manager last accepted (gated load) or
+	 * published (atomic rewrite). The gc prune rechecks it under the
+	 * publish lock so a concurrent manager's append-and-close between the
+	 * load and the prune cannot be overwritten by a stale snapshot.
+	 */
+	#loadedJournalIdentity: JournalIdentity | undefined;
 	/** True only while a gc undo-tail prune is publishing; gates the owner recheck. */
 	#undoTailPruneActive = false;
 	#sidecarTail: Promise<void> = Promise.resolve();
@@ -958,23 +967,22 @@ export class SessionManager {
 		if (!this.#persist) return Promise.resolve(true);
 		const sessionFile = this.#sessionFile;
 		if (!sessionFile || !(this.#storage instanceof FileSessionStorage)) return Promise.resolve(true);
-		if (this.#ownerRegisteredFile === sessionFile) return Promise.resolve(this.#ownerClaimLines > 0);
-		this.#ownerRegisteredFile = sessionFile;
+		if ((this.#ownerClaims.get(sessionFile) ?? 0) > 0) return Promise.resolve(true);
 		// Serialized against other processes' removals; chained on the
 		// sidecar tail so register/remove keep strict per-manager order.
-		// The returned promise reports whether THIS manager's append landed
-		// (a sibling's identical pid line must not mask a failure), so load
-		// paths can establish their own claim before accepting a journal.
+		// The count is latched SYNCHRONOUSLY when the write is chained —
+		// not when it lands — so the guard above suppresses a duplicate
+		// registration racing this one, and a close() that snapshots the
+		// claims while the write is still queued still releases it (the
+		// release runs later in tail order, after the write). A failed
+		// append rolls the latch back so the #recordEntry backstop can
+		// retry instead of leaving a live manager unowned.
+		this.#ownerClaims.set(sessionFile, (this.#ownerClaims.get(sessionFile) ?? 0) + 1);
 		let written = false;
 		this.#sidecarTail = this.#sidecarTail.then(async () => {
 			written = await writeOwnerSidecar(sessionFile);
-			if (written) {
-				this.#ownerClaimLines++;
-			} else if (this.#ownerRegisteredFile === sessionFile) {
-				// A failed append must not latch the slot: the #recordEntry
-				// backstop would early-return forever and never retry, leaving
-				// a live manager unowned.
-				this.#ownerRegisteredFile = undefined;
+			if (!written) {
+				this.#ownerClaims.set(sessionFile, Math.max(0, (this.#ownerClaims.get(sessionFile) ?? 0) - 1));
 			}
 		});
 		return this.#sidecarTail.then(() => written);
@@ -982,7 +990,7 @@ export class SessionManager {
 
 	#claimOwnerSidecarFor(sessionFile: string): Promise<boolean> {
 		return writeOwnerSidecar(sessionFile).then(written => {
-			if (written) this.#ownerClaimLines++;
+			if (written) this.#ownerClaims.set(sessionFile, (this.#ownerClaims.get(sessionFile) ?? 0) + 1);
 			return written;
 		});
 	}
@@ -991,26 +999,33 @@ export class SessionManager {
 		if (!sessionFile) return;
 		this.#sidecarTail = this.#sidecarTail.then(async () => {
 			// Decided in tail order: every registration chained before this
-			// point has completed, so the counter reflects exactly how many
-			// lines THIS manager contributed. Remove one per contribution —
-			// a manager whose registration failed strips nothing.
-			if (this.#ownerClaimLines <= 0) return;
-			this.#ownerClaimLines--;
+			// point has completed, so the per-file count reflects exactly
+			// how many lines THIS manager contributed to that file. Remove
+			// one per contribution — a manager whose registration failed
+			// strips nothing.
+			const count = this.#ownerClaims.get(sessionFile) ?? 0;
+			if (count <= 0) return;
+			this.#ownerClaims.set(sessionFile, count - 1);
 			if (await removeOwnerSidecar(sessionFile)) return;
 			// Removal failed for a non-absence reason: retain the
-			// contribution and re-latch the slot so a later release from
-			// this still-alive manager retries instead of leaving a stale
-			// live-pid line nothing will ever shed.
-			this.#ownerClaimLines++;
-			if (!this.#ownerRegisteredFile) this.#ownerRegisteredFile = sessionFile;
+			// contribution so a later release from this still-alive manager
+			// retries instead of leaving a stale live-pid line nothing will
+			// ever shed. Per-file accounting keeps this file a retry target
+			// even when the manager has since claimed another session.
+			this.#ownerClaims.set(sessionFile, (this.#ownerClaims.get(sessionFile) ?? 0) + 1);
 		});
 	}
 
-	#unregisterOwnerSidecar(): void {
-		const registered = this.#ownerRegisteredFile;
-		if (!registered) return;
-		this.#ownerRegisteredFile = undefined;
-		this.#releaseOwnerClaim(registered);
+	#unregisterOwnerSidecar(except?: string): void {
+		// Release every claim this manager holds, optionally sparing one
+		// file: close() sheds everything, while transfers release the
+		// source and keep the destination they already claimed. The full
+		// per-file count is shed — a file can legitimately hold more than
+		// one contribution (registration plus a transfer preclaim).
+		for (const [file, count] of [...this.#ownerClaims]) {
+			if (except !== undefined && file === except) continue;
+			for (let i = 0; i < count; i++) this.#releaseOwnerClaim(file);
+		}
 	}
 
 	#latchIndeterminate(operationError: Error, recoveryErrors: readonly Error[]): SessionPersistenceIndeterminateError {
@@ -1365,6 +1380,16 @@ export class SessionManager {
 					// under it would set up a resurrect-on-rewrite. Aborting
 					// here leaves disk untouched; gc reports a skip.
 					if (this.#undoTailPruneActive) {
+						// Out-of-band writes: a concurrent manager can open,
+						// append, and close entirely between this manager's
+						// gated load and the prune marker, leaving no live
+						// owner here. Rewriting from the older in-memory
+						// snapshot would silently drop that append, so the
+						// journal must still be the exact generation this
+						// manager accepted or last published.
+						if (!sameJournalIdentity(this.#loadedJournalIdentity, await journalIdentity(sessionFile))) {
+							return false;
+						}
 						// Unreadable sidecar (non-ENOENT) throws and aborts
 						// the publish rather than risk pruning under a live
 						// owner. Raw claim counts, not deduplicated pids: this
@@ -1383,6 +1408,9 @@ export class SessionManager {
 					await this.#storage.writeTextAtomic(sessionFile, this.#fileBody(), {
 						commitGuard: () => !this.#released && this.#diskEpoch === epoch,
 					});
+					if (this.#storage instanceof FileSessionStorage) {
+						this.#loadedJournalIdentity = await journalIdentity(sessionFile);
+					}
 				} finally {
 					publishLock?.release();
 				}
@@ -1793,9 +1821,7 @@ export class SessionManager {
 		// restored in-memory snapshot. A different file keeps the old
 		// release-then-register behavior.
 		const targetSessionFile = snapshot.sessionFile ? path.resolve(snapshot.sessionFile) : undefined;
-		if (this.#ownerRegisteredFile !== targetSessionFile) {
-			this.#unregisterOwnerSidecar();
-		}
+		this.#unregisterOwnerSidecar(targetSessionFile);
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
 
@@ -1874,7 +1900,8 @@ export class SessionManager {
 		// snapshot, and releasing the old journal's claim early would let gc
 		// prune it during the fallible reconciliation and set up a resurrect
 		// when the stale snapshot is restored.
-		const previousClaim = this.#ownerRegisteredFile;
+		const previousClaims = new Map(this.#ownerClaims);
+		const previouslyClaimed = (previousClaims.get(resolvedSessionFile) ?? 0) > 0;
 		this.#sessionFile = resolvedSessionFile;
 		this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
 
@@ -1883,21 +1910,22 @@ export class SessionManager {
 		// treat the session as owned until this process exits.
 		try {
 			await this.#setSessionFileGated(resolvedSessionFile, loadedSession, loadedIdentity);
-			if (previousClaim && previousClaim !== resolvedSessionFile) {
-				// The switch committed only now — release the old claim.
-				this.#releaseOwnerClaim(previousClaim);
+			// The switch committed only now — release every retained claim
+			// that is not for the new file (a same-file switch keeps it).
+			for (const [file, count] of previousClaims) {
+				if (file === resolvedSessionFile) continue;
+				for (let i = 0; i < count; i++) this.#releaseOwnerClaim(file);
 			}
 		} catch (error) {
 			// Release only what THIS load established — never the retained
-			// previous claim (a same-file reload failure must keep it), then
-			// restore the previous slot. Without the slot restore, the
-			// rollback path's restoreState() would see an empty slot and
-			// append a SECOND claim for the already-owned old session, and
-			// the eventual close() removes only one line.
-			if (this.#ownerRegisteredFile === resolvedSessionFile && previousClaim !== resolvedSessionFile) {
-				this.#unregisterOwnerSidecar();
+			// previous claims (a same-file reload failure must keep them).
+			// Per-file accounting means a failed switch cannot orphan the
+			// old session's claim, and the gated load's own new-file claim
+			// is dropped here in full.
+			if (!previouslyClaimed) {
+				const established = this.#ownerClaims.get(resolvedSessionFile) ?? 0;
+				for (let i = 0; i < established; i++) this.#releaseOwnerClaim(resolvedSessionFile);
 			}
-			this.#ownerRegisteredFile = previousClaim;
 			await this.#sidecarTail;
 			throw error;
 		}
@@ -1943,7 +1971,7 @@ export class SessionManager {
 						ownershipEstablished = true;
 						break;
 					}
-					this.#ownerRegisteredFile = undefined;
+					// A failed append records no claim, so a plain retry is safe.
 				}
 				// Live without a durable claim is exactly what gc would
 				// misclassify; the flag stays cleared for the #recordEntry
@@ -1972,6 +2000,10 @@ export class SessionManager {
 			// The journal kept churning across every retry.
 			throw new SessionFileLockError(resolvedSessionFile);
 		}
+		// The gates accepted exactly this generation of the journal; later
+		// rewrites (gc prune publishes) revalidate against it under the
+		// exclusive claim.
+		this.#loadedJournalIdentity = loadIdentity;
 		const { entries: fileEntries, titleSlot } = loaded;
 		if (fileEntries.length === 0) {
 			// Explicit but empty/missing path (e.g. --session flag): start fresh but
@@ -2087,9 +2119,11 @@ export class SessionManager {
 			this.#sessionId = parentSessionId;
 			throw new SessionFileLockError(forkedSessionFile);
 		}
-		this.#unregisterOwnerSidecar();
+		// The fork target's claim is already durable; shed only the old
+		// session's claim (queued after, in tail order) so both files stay
+		// correctly accounted through the switch.
+		this.#unregisterOwnerSidecar(forkedSessionFile);
 		this.#sessionFile = forkedSessionFile;
-		if (fileBacked) this.#ownerRegisteredFile = forkedSessionFile;
 		await this.#sidecarTail;
 		this.#header = {
 			type: "session",
@@ -2271,7 +2305,6 @@ export class SessionManager {
 				if (preClaimedDestination) {
 					// Claim already durable at the destination since before
 					// the rename — adopt it and release the source claim.
-					this.#ownerRegisteredFile = newSessionFile;
 					this.#releaseOwnerClaim(oldSessionFile);
 				} else {
 					this.#unregisterOwnerSidecar();
@@ -2355,13 +2388,11 @@ export class SessionManager {
 			});
 			await manager.#sidecarTail;
 			if (!claimed) throw new SessionFileLockError(manager.#sessionFile!);
-			manager.#ownerRegisteredFile = manager.#sessionFile;
 		}
 		try {
 			await manager.#rewriteAtomically();
 		} catch (error) {
 			manager.#releaseOwnerClaim(manager.#sessionFile!);
-			manager.#ownerRegisteredFile = undefined;
 			throw error;
 		}
 		return manager;
@@ -3604,13 +3635,13 @@ export class SessionManager {
 		// source claim — close() removes only the branch line, and the old
 		// session stays owned by this pid until process exit, blocking
 		// undo-tail GC.
-		this.#unregisterOwnerSidecar();
-		this.#ownerRegisteredFile = newSessionFile;
+		this.#unregisterOwnerSidecar(newSessionFile);
 		this.#sidecarTail = this.#sidecarTail.then(async () => {
 			if (await this.#claimOwnerSidecarFor(newSessionFile)) return;
 			// Same contract as #registerOwnerSidecar: a failed claim must
-			// not latch the slot, so the #recordEntry backstop retries.
-			if (this.#ownerRegisteredFile === newSessionFile) this.#ownerRegisteredFile = undefined;
+			// not count, so the #recordEntry backstop retries.
+			const claimed = this.#ownerClaims.get(newSessionFile) ?? 0;
+			if (claimed > 0) this.#ownerClaims.set(newSessionFile, claimed - 1);
 		});
 		this.#rewriteSynchronously();
 		this.#rememberBreadcrumb(this.#cwd, newSessionFile);
@@ -3723,7 +3754,6 @@ export class SessionManager {
 			});
 			await manager.#sidecarTail;
 			if (!claimed) throw new SessionFileLockError(manager.#sessionFile!);
-			manager.#ownerRegisteredFile = manager.#sessionFile;
 		}
 		try {
 			await manager.#rewriteAtomically();
@@ -3733,7 +3763,6 @@ export class SessionManager {
 		} catch (error) {
 			// Materialization failed after the preclaim: drop it again.
 			manager.#releaseOwnerClaim(manager.#sessionFile!);
-			manager.#ownerRegisteredFile = undefined;
 			throw error;
 		}
 		return manager;
