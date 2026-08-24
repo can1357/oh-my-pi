@@ -374,7 +374,7 @@ import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
-import { SessionTools, type SessionToolsHost } from "./session-tools";
+import { SessionTools, type SessionToolsHost, type XdevMountNoticeDetails } from "./session-tools";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { skillPromptTitleInput } from "./skill-title-input";
 import { ToolChoiceQueue } from "./tool-choice-queue";
@@ -6407,6 +6407,17 @@ export class AgentSession {
 				return false;
 			}
 
+			// Persisted ownership stamp: every custom message ahead of the user
+			// message in this array was placed there by the prompt pipeline
+			// (plan/goal/vibe mode context, plan reference, caller preludes) and
+			// belongs to the turn that follows. `#persistMessageEnd` copies
+			// `details` to the journal entry verbatim, so the flag survives
+			// restarts and lets /undo rewind the whole batch with its turn
+			// instead of matching customType strings.
+			for (const msg of messages) {
+				if (msg?.role !== "custom") continue;
+				msg.details = { ...(msg.details as Record<string, unknown> | undefined), promptPrelude: true };
+			}
 			// Pending tool-roster and xd:// deltas accompany the next user-authored
 			// prompt, never an agent-initiated continuation. Reserve their pre-user
 			// position, but consume xd:// only after before_agent_start determines
@@ -6512,6 +6523,20 @@ export class AgentSession {
 				: undefined;
 			const toolRosterNotice = isUserQueuedMessage(message) ? this.#tools.takePendingToolRosterNotice() : undefined;
 			if (xdevMountNotice || toolRosterNotice) {
+				// Same ownership stamp: the notice is spliced ahead of the
+				// user message and belongs to this turn.
+				if (xdevMountNotice) {
+					xdevMountNotice.details = {
+						...(xdevMountNotice.details as Record<string, unknown> | undefined),
+						promptPrelude: true,
+					} as XdevMountNoticeDetails;
+				}
+				if (toolRosterNotice) {
+					toolRosterNotice.details = {
+						...(toolRosterNotice.details as Record<string, unknown> | undefined),
+						promptPrelude: true,
+					};
+				}
 				messages.splice(
 					xdevMountNoticeIndex,
 					0,
@@ -8680,16 +8705,25 @@ export class AgentSession {
 	}
 
 	/**
-	 * Prompt-owned prelude entries: the custom_message types #promptWithMessage
-	 * inserts immediately before a user turn (magic-keyword notices, eager
-	 * todo/task guidance, image-description notices). They belong to the turn
-	 * that follows them, so a rollback anchor must precede the whole batch.
-	 * Deliberately a whitelist: an extension's independent
-	 * sendCustomMessage({ triggerTurn: false }) is also a contiguous
-	 * custom_message but predates the turn boundary and must survive.
+	 * Prompt-owned prelude entries: custom_message entries the prompt
+	 * pipeline places immediately before a user turn (plan/goal/vibe mode
+	 * context, plan reference, magic-keyword notices, eager todo/task
+	 * guidance, image-description and xdev-mount notices). They belong to
+	 * the turn that follows them, so a rollback anchor must precede the
+	 * whole batch.
+	 *
+	 * Ownership is persisted: #promptWithMessage stamps each prelude
+	 * message's `details` with `promptPrelude: true` before dispatch and
+	 * #persistMessageEnd copies it to the journal entry, so any future
+	 * prelude type is covered without touching this predicate. The
+	 * customType whitelist below remains only for journals persisted before
+	 * the stamp existed. An extension's independent
+	 * sendCustomMessage({ triggerTurn: false }) carries neither marker and
+	 * survives.
 	 */
 	#isPromptPreludeEntry(entry: SessionEntry): boolean {
 		if (entry.type !== "custom_message") return false;
+		if (isRecord(entry.details) && entry.details.promptPrelude === true) return true;
 		const customType = entry.customType;
 		return (
 			customType === "ultrathink-notice" ||
@@ -8712,11 +8746,29 @@ export class AgentSession {
 	async #beforeRollbackTreeChange(anchorId: string | null): Promise<string | undefined> {
 		if (!this.#extensionRunner?.hasHandlers("session_before_tree")) return undefined;
 		const oldLeafId = this.sessionManager.getLeafId();
-		const anchor = anchorId ?? this.sessionManager.getBranch()[0]?.id;
-		const collected = anchor
-			? collectEntriesForBranchSummary(this.sessionManager, oldLeafId, anchor)
-			: { entries: [] as SessionEntry[], commonAncestorId: null as string | null };
-		const entriesToSummarize = collected.entries;
+		let entriesToSummarize: SessionEntry[];
+		let commonAncestorId: string | null;
+		if (anchorId === null) {
+			// Root rewind: the target is BEFORE the first entry, so the entire
+			// old chain — including its first entry — is abandoned and there
+			// is no common ancestor on the target branch. Substituting the
+			// first entry as the collection anchor would exclude it from the
+			// reported delta.
+			entriesToSummarize = [];
+			let current = oldLeafId;
+			while (current) {
+				const entry = this.sessionManager.getEntry(current);
+				if (!entry) break;
+				entriesToSummarize.push(entry);
+				current = entry.parentId;
+			}
+			entriesToSummarize.reverse();
+			commonAncestorId = null;
+		} else {
+			const collected = collectEntriesForBranchSummary(this.sessionManager, oldLeafId, anchorId);
+			entriesToSummarize = collected.entries;
+			commonAncestorId = collected.commonAncestorId;
+		}
 		const result = (await this.#extensionRunner.emit({
 			type: "session_before_tree",
 			preparation: {
@@ -8724,7 +8776,7 @@ export class AgentSession {
 				// the session root), mirroring the null-leaf tree semantics.
 				targetId: anchorId ?? "",
 				oldLeafId,
-				commonAncestorId: collected.commonAncestorId,
+				commonAncestorId,
 				entriesToSummarize,
 				userWantsSummary: false,
 			},

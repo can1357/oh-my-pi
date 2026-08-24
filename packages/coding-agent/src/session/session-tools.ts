@@ -180,9 +180,11 @@ const XDEV_MOUNT_NOTICE_MESSAGE_TYPE = "xdev-mount-notice";
  * (and re-splice a redundant developer message that busts the provider
  * prompt-cache prefix).
  */
-interface XdevMountNoticeDetails {
+export interface XdevMountNoticeDetails {
 	added: string[];
 	removed: string[];
+	/** Persisted prompt-prelude ownership stamp (see #promptWithMessage). */
+	promptPrelude?: boolean;
 }
 
 /** Owns tool registration, presentation, prompt rebuilding, skills, and permissions. */
