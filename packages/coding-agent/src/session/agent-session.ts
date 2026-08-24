@@ -8453,8 +8453,11 @@ export class AgentSession {
 		}
 		if (entry.type !== "message") return false;
 		const message = entry.message;
+		// Agent-authored messages that ride the provider-facing `user` role
+		// (parent IRC steers, MCP notification batches carry attribution
+		// "agent") are internal context, not operator turns.
 		return (
-			message.role === "user" ||
+			(message.role === "user" && message.attribution !== "agent") ||
 			(message.role === "custom" &&
 				(isUserInvokedSkillPrompt(message) ||
 					(message.customType === COLLAB_PROMPT_MESSAGE_TYPE && message.attribution === "user")))
@@ -8749,7 +8752,15 @@ export class AgentSession {
 			customType === "workflow-notice" ||
 			customType === IMAGE_ATTACHMENT_DESCRIPTION_TYPE ||
 			customType === "eager-todo-prelude" ||
-			customType === "eager-task-prelude"
+			customType === "eager-task-prelude" ||
+			// Legacy journals persisted before the stamp: the context types
+			// #promptWithMessage already placed immediately before the user
+			// message (plan reference/context, mode contexts, xdev notices).
+			customType === "plan-mode-reference" ||
+			customType === "plan-mode-context" ||
+			customType === "goal-mode-context" ||
+			customType === "vibe-mode-context" ||
+			customType === "xdev-mount-notice"
 		);
 	}
 
