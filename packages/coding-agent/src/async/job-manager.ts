@@ -1030,13 +1030,13 @@ export class AsyncJobManager {
 	): Promise<boolean> {
 		const deadline =
 			options?.timeoutMs === undefined ? Number.POSITIVE_INFINITY : Date.now() + Math.max(0, options.timeoutMs);
-		const awaited = new Set<string>();
+		const awaited = new Set<AsyncJob>();
 		for (;;) {
 			const pending = this.#filterJobs(this.#jobs.values(), { ownerId }).filter(
-				job => !awaited.has(job.id) && (options?.excludeSuppressed !== true || !this.isDeliverySuppressed(job.id)),
+				job => !awaited.has(job) && (options?.excludeSuppressed !== true || !this.isDeliverySuppressed(job.id)),
 			);
 			if (pending.length === 0) return true;
-			for (const job of pending) awaited.add(job.id);
+			for (const job of pending) awaited.add(job);
 			const settled = await this.#waitForDeliveryPromise(
 				Promise.all(pending.map(job => job.promise)).then(() => {}),
 				deadline,
