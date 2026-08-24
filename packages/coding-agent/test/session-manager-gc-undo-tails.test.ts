@@ -295,4 +295,50 @@ describe("SessionManager.pruneUserUndoTails", () => {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
+	it("close() releases the writer lock and owner claim after a latched disk failure", async () => {
+		// Pre-fix: with #diskFailure latched by an earlier failed rewrite,
+		// #scheduleDiskWork rejected before running the close callback, so
+		// close() exited without closing the writer (journal lock held) or
+		// unregistering the owner sidecar — the session stayed pinned as a
+		// live owner for undo-tail gc until process exit.
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-close-failure-"));
+		const sessionFile = path.join(tempDir, "close-failure.jsonl");
+		let failWrites = false;
+		class FailingStorage extends FileSessionStorage {
+			override async writeTextAtomic(
+				fpath: string,
+				content: string,
+				options?: WriteTextAtomicOptions,
+			): Promise<void> {
+				if (failWrites && fpath.endsWith(".jsonl")) throw new Error("synthetic disk failure");
+				return super.writeTextAtomic(fpath, content, options);
+			}
+		}
+		try {
+			const manager = SessionManager.create(tempDir, tempDir, new FailingStorage());
+			await manager.setSessionFile(sessionFile);
+			manager.appendMessage(userMessage("u1"));
+
+			failWrites = true;
+			await manager.rewriteEntries().catch(() => undefined);
+			failWrites = false;
+
+			let closeThrew = false;
+			try {
+				await manager.close();
+			} catch {
+				closeThrew = true;
+			}
+			// The latched persistence error still surfaces...
+			expect(closeThrew).toBe(true);
+			// ...but the resources are released: no owner claim, journal lock free.
+			const pids = await readSessionOwnerPids(sessionFile);
+			expect(pids.includes(process.pid)).toBe(false);
+			const lock = tryAcquireFileLock(sessionFile);
+			expect(lock?.acquired).toBe(true);
+			lock?.release();
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
 });
