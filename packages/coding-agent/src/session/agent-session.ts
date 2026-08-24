@@ -8465,7 +8465,15 @@ export class AgentSession {
 		n: number,
 	): Promise<{ ok: boolean; error?: string; droppedTurns?: number; rewoundTo?: string }> {
 		const target = entries[userTurnIdx] as SessionMessageEntry;
-		const anchorId = entries[userTurnIdx - 1]?.id ?? null;
+		// The prompt-owned prelude (magic-keyword notices, eager todo/task
+		// guidance, image-description notices) is persisted immediately
+		// before the user message: anchor BEFORE the whole batch, or /undo
+		// leaves the dropped turn's hidden prelude — e.g. an image
+		// description — in the model context, violating the silent-rollback
+		// contract.
+		let anchorIdx = userTurnIdx - 1;
+		while (anchorIdx >= 0 && this.#isPromptPreludeEntry(entries[anchorIdx]!)) anchorIdx--;
+		const anchorId = anchorIdx >= 0 ? entries[anchorIdx]!.id : null;
 		const previousLeafId = this.sessionManager.getLeafId();
 		// Live role and mode state are only derivable from the pre-rewind
 		// journal: capture before the branch switch, then re-journal what the
@@ -8473,11 +8481,18 @@ export class AgentSession {
 		// reload does not silently exit plan/vibe/goal).
 		const liveRole = this.sessionManager.getLastModelChangeRole() ?? "default";
 		const preRewindMode = this.sessionManager.buildSessionContext();
-		const droppedPrompts = entries
-			.slice(userTurnIdx)
+		const droppedEntries = entries.slice(anchorIdx + 1);
+		const droppedPrompts = droppedEntries
 			.filter(entry => this.#isUserTurnEntry(entry))
 			.map(entry => `- ${this.#userTurnPreview(entry)}`)
 			.join("\n");
+		// Cancellable pre-tree hook, same contract as ordinary tree
+		// navigation: extensions that guard tree mutation get a say before
+		// the rollback commits.
+		const cancelledByHook = await this.#beforeRollbackTreeChange(anchorId, droppedEntries);
+		if (cancelledByHook) {
+			return { ok: false, error: cancelledByHook };
+		}
 		// SILENT undo contract: state after /undo is indistinguishable in
 		// context from the dropped turns never having happened. No rendered
 		// summary, no undo-report message — the rewound context is
@@ -8598,6 +8613,12 @@ export class AgentSession {
 		// Silent like /undo: the marker renders nothing, so context after
 		// /redo is simply the restored turns — no trace that an undo cycle
 		// happened.
+		// Cancellable pre-tree hook before the restore commits, mirroring
+		// the /undo path and ordinary tree navigation.
+		const cancelledByHook = await this.#beforeRollbackTreeChange(tipId, []);
+		if (cancelledByHook) {
+			return { ok: false, error: cancelledByHook };
+		}
 		const previousLeafId = this.sessionManager.getLeafId();
 		let markerId: string | undefined;
 		try {
@@ -8648,6 +8669,45 @@ export class AgentSession {
 				error: String(error),
 			});
 		}
+	}
+
+	/**
+	 * Prompt-owned prelude entries: `custom_message` entries persisted
+	 * immediately before a user turn (magic-keyword notices, eager todo/task
+	 * guidance, image-description notices). They belong to the turn that
+	 * follows them, so a rollback anchor must precede the whole batch.
+	 * Skill prompts are user turns themselves and stop the walk.
+	 */
+	#isPromptPreludeEntry(entry: SessionEntry): boolean {
+		return entry.type === "custom_message" && !this.#isUserTurnEntry(entry);
+	}
+
+	/**
+	 * Emit the cancellable `session_before_tree` event for an operator
+	 * rollback (/undo, /revert, /redo) BEFORE the branch switch commits —
+	 * same contract as ordinary tree navigation. Returns an error message
+	 * when a handler cancelled, undefined to proceed.
+	 */
+	async #beforeRollbackTreeChange(
+		anchorId: string | null,
+		droppedEntries: SessionEntry[],
+	): Promise<string | undefined> {
+		if (!this.#extensionRunner?.hasHandlers("session_before_tree")) return undefined;
+		const result = (await this.#extensionRunner.emit({
+			type: "session_before_tree",
+			preparation: {
+				// Empty targetId means "before the first entry" (rewind to
+				// the session root), mirroring the null-leaf tree semantics.
+				targetId: anchorId ?? "",
+				oldLeafId: this.sessionManager.getLeafId(),
+				commonAncestorId: anchorId,
+				entriesToSummarize: droppedEntries,
+				userWantsSummary: false,
+			},
+			signal: new AbortController().signal,
+		})) as SessionBeforeTreeResult | undefined;
+		if (result?.cancel) return "An extension cancelled the rollback.";
+		return undefined;
 	}
 
 	/**
