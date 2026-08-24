@@ -3644,7 +3644,11 @@ export class SessionManager {
 		// rewrite resurrect the removed entries. A failed preclaim refuses
 		// the branch while the manager is still exactly on its source
 		// state — header, tree, index, and session file untouched.
-		if (this.#persist) {
+		// FileSessionStorage only: a Memory/Indexed backend keeps the journal
+		// inside the storage, so a filesystem sidecar there would either
+		// throw on an absent virtual directory or litter an unrelated
+		// .owner file. Same guard every other claim path uses.
+		if (this.#persist && this.#storage instanceof FileSessionStorage) {
 			if (!writeOwnerSidecarSync(newSessionFile)) {
 				throw new SessionFileLockError(newSessionFile);
 			}

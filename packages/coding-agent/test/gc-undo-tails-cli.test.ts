@@ -883,6 +883,21 @@ describe("omp gc --undo-tails (CLI)", () => {
 		expect(fileAfter).toContain("after refused branch");
 	});
 
+	it("createBranchedSession skips sidecar claims for virtual storage", async () => {
+		// A persisted manager over MemorySessionStorage keeps its journal in
+		// the storage backend: the branch must neither throw on an absent
+		// virtual directory nor litter a filesystem .owner file.
+		const manager = SessionManager.create(sessionsDir, sessionsDir, new MemorySessionStorage());
+		const anchorId = manager.appendMessage(userMessage("seed"));
+		manager.appendMessage(assistantMessage("reply"));
+
+		const branchFile = manager.createBranchedSession(anchorId);
+		expect(branchFile).toBeDefined();
+		expect(fs.existsSync(branchFile!)).toBe(false);
+		expect(fs.existsSync(`${branchFile}.owner`)).toBe(false);
+		await manager.close();
+	});
+
 	it("journal identity fails closed on unreadable stats", async () => {
 		// ENOENT reads as absent; every other stat failure propagates.
 		expect(await journalIdentity(path.join(agentDir, "missing.jsonl"))).toBeUndefined();
