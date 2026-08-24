@@ -125,6 +125,35 @@ describe("SessionManager.continueRecent relocation", () => {
 		}
 	});
 
+	it("keeps same-cwd breadcrumbs inside an explicit sessionDir", async () => {
+		const explicitSessionDir = path.join(testAgentDir, "intended-sessions");
+		const foreignSessionDir = path.join(testAgentDir, "foreign-sessions");
+		const intended = SessionManager.create(cwdB, explicitSessionDir);
+		intended.appendMessage({ role: "user", content: "intended session", timestamp: 1 });
+		intended.appendMessage(makeAssistantMessage());
+		await intended.flush();
+		const intendedFile = intended.getSessionFile();
+		if (!intendedFile) throw new Error("Expected persisted intended session file");
+		await intended.close();
+
+		const foreign = SessionManager.create(cwdB, foreignSessionDir);
+		foreign.appendMessage({ role: "user", content: "foreign session", timestamp: 2 });
+		foreign.appendMessage(makeAssistantMessage());
+		await foreign.flush();
+		const foreignFile = foreign.getSessionFile();
+		if (!foreignFile) throw new Error("Expected persisted foreign session file");
+		await foreign.close();
+
+		writeBreadcrumb(cwdB, foreignFile);
+
+		const resumed = await SessionManager.continueRecent(cwdB, explicitSessionDir);
+		try {
+			expect(resumed.getSessionFile()).toBe(intendedFile);
+		} finally {
+			await resumed.close();
+		}
+	});
+
 	it("does not re-root when the new directory already has its own sessions", async () => {
 		const moved = SessionManager.create(cwdA);
 		moved.appendMessage({ role: "user", content: "moved", timestamp: 1 });
