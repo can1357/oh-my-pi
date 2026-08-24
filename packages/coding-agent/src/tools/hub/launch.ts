@@ -470,6 +470,7 @@ async function registerOutputSink(
 	let unregisterContextBoundary: (() => void) | void;
 	let outputUnregister: DaemonOutputUnregister | undefined;
 	let cleanupPromise: Promise<void> | undefined;
+	let speculativeTerminalReceipt: PromiseWithResolvers<void> | undefined;
 	const registration: OutputRegistration = {
 		id,
 		name,
@@ -489,6 +490,9 @@ async function registerOutputSink(
 			// Fence synchronous re-entry before unregistering broker/session
 			// callbacks; every underlying resource must be released at most once.
 			cleanupPromise = Promise.resolve();
+			const terminalReceipt = speculativeTerminalReceipt;
+			speculativeTerminalReceipt = undefined;
+			terminalReceipt?.resolve();
 			session.setLaunchMonitorActive?.(id, registration.delivery, false, registration.epoch);
 			outputUnregister?.();
 			unregisterDispose?.();
@@ -542,7 +546,6 @@ async function registerOutputSink(
 			}
 		}
 		registration.terminalState = notification.daemon.state;
-		await registration.cleanup();
 		// The owner session receives the real daemon-completed through its
 		// completion subscription, so a synthesized one would duplicate it — but
 		// only when the broker actually emitted one. A stop issued by another
@@ -550,36 +553,43 @@ async function registerOutputSink(
 		// ownerNotified=false and this terminal notification is then the only
 		// signal the monitoring session will ever get. An absent flag means an
 		// older broker: keep the historical suppression.
-		if (notification.daemon.owner === owner && notification.ownerNotified !== false) return;
+		if (notification.daemon.owner === owner && notification.ownerNotified !== false) {
+			await registration.cleanup();
+			return;
+		}
 		// Once a local stop RPC reports terminal settlement, its tool result is
 		// the single completion surface even when the monitor notification
 		// arrives after the response.
-		if (registration.localStop.state === "terminal-response") return;
+		if (registration.localStop.state === "terminal-response") {
+			await registration.cleanup();
+			return;
+		}
 		const completion = session.queueLaunchCompletion?.(
 			{
 				event: "daemon-completed",
-				completionId: `monitor:${id}:${notification.daemon.id}:${notification.daemon.exitedAt ?? Date.now()}`,
+				completionId: `monitor:${id}:${notification.daemon.id}:${notification.daemon.exitedAt ?? "terminal"}`,
 				owner,
 				daemon: notification.daemon,
 			},
 			registration.epoch,
 		);
-		const releaseEpochAssociation = (): void => {
+		if (!completion) throw new Error("Session cannot accept launch completion delivery");
+		const commitTerminalDelivery = async (): Promise<void> => {
+			await completion;
 			releaseCompletionDaemonAssociation(session, client, owner, notification.daemon.id);
+			await registration.cleanup();
 		};
 		if (waitForTerminalCompletion) {
-			try {
-				await completion;
-			} finally {
-				releaseEpochAssociation();
-			}
+			await commitTerminalDelivery();
 		} else {
-			// Buffered terminal notifications were already accepted by the
-			// client sink while the start RPC was pending. Queue the completion
-			// after their preceding output, but do not wait for its delivery
-			// receipt: that receipt can require the current tool step to finish.
-			void completion?.then(releaseEpochAssociation, error => {
-				releaseEpochAssociation();
+			// Buffered terminal notifications reach the client sink while the
+			// start RPC is pending. Queue completion after their preceding output,
+			// but let the sink's deferred receipt wait for commit: awaiting it here
+			// can require the current tool step itself to finish.
+			void commitTerminalDelivery().catch(error => {
+				const terminalReceipt = speculativeTerminalReceipt;
+				speculativeTerminalReceipt = undefined;
+				terminalReceipt?.reject(error);
 				logger.warn("Buffered launch monitor completion delivery failed", {
 					monitorId: id,
 					name,
@@ -602,7 +612,9 @@ async function registerOutputSink(
 	const sink = async (notification: DaemonMonitorNotification): Promise<void> => {
 		if (speculative) {
 			bufferSpeculativeMonitorNotification(speculative, notification);
-			return;
+			if (notification.event !== "daemon-monitor-completed") return;
+			speculativeTerminalReceipt ??= Promise.withResolvers<void>();
+			return speculativeTerminalReceipt.promise;
 		}
 		if (speculativeFlush) await speculativeFlush;
 		await deliver(notification);
