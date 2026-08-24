@@ -20,6 +20,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionFileLockError, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionTools } from "@oh-my-pi/pi-coding-agent/session/session-tools";
 import { removeSyncWithRetries, Snowflake, tryAcquireFileLock } from "@oh-my-pi/pi-utils";
 import { TtsrManager } from "../src/export/ttsr";
 import type { ExtensionRunner } from "../src/extensibility/extensions/runner";
@@ -1488,5 +1489,38 @@ describe("AgentSession user undo/redo", () => {
 		// there is no common ancestor on the target branch.
 		expect(preparations[0]!.commonAncestorId).toBeNull();
 		expect(preparations[0]!.entries).toContain(firstTurnId);
+	});
+
+	it("undo and redo reset the announced-mount baseline for the replaced branch", async () => {
+		await makeFileBackedSession("xdev-baseline.jsonl");
+		await seedThreeTurns();
+		// Journal an xdev mount notice on the branch being rolled back: after
+		// the branch switch, the announced-mount baseline must re-seed from
+		// the surviving transcript, not keep treating the notice as delivered.
+		sessionManager.appendCustomMessageEntry("xdev-mount-notice", "mounted xd://demo", false, {
+			added: ["demo"],
+			removed: [],
+			promptPrelude: true,
+		});
+		sessionManager.appendMessage(userMessage("fourth"));
+		sessionManager.appendMessage(assistantMessage("OK fourth"));
+
+		let resets = 0;
+		const original = SessionTools.prototype.resetAnnouncedMounts;
+		SessionTools.prototype.resetAnnouncedMounts = function (this: SessionTools) {
+			resets++;
+			return original.call(this);
+		};
+		try {
+			const undo = await session.userUndo(1);
+			expect(undo.ok).toBe(true);
+			expect(resets).toBe(1);
+
+			const redo = await session.userRedo();
+			expect(redo.ok).toBe(true);
+			expect(resets).toBe(2);
+		} finally {
+			SessionTools.prototype.resetAnnouncedMounts = original;
+		}
 	});
 });
