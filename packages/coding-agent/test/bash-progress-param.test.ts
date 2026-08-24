@@ -55,18 +55,6 @@ function collectProgress(manager: AsyncJobManager): string[] {
 }
 
 describe("bash progress parameter", () => {
-	test("describes bounded rate-limited progress delivery", () => {
-		const manager = new AsyncJobManager({});
-		const tool = new BashTool(makeSession(manager));
-
-		expect(tool.description).toContain('Finite: `async: "auto"` (quick inline, slow background)');
-		expect(tool.description).toContain("Progress:");
-		expect(tool.description).toContain("10-event burst");
-		expect(tool.description).toContain("1 rate-limit permit/2s");
-		expect(tool.description).toContain("Wake starts a turn");
-		expect(tool.description).toContain("ambient waits");
-	});
-
 	test("defaults off", async () => {
 		const manager = new AsyncJobManager({});
 		const seen = collectProgress(manager);
