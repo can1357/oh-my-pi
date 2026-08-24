@@ -182,6 +182,12 @@ describe("shortenPath", () => {
 		const sibling = String.raw`C:\Users\me2\projects\demo`;
 		expect(shortenPath(sibling, home)).toBe(sibling);
 	});
+
+	it("shortens closing-delimited homes without matching longer path components", () => {
+		const home = "/Users/alice";
+		expect(shortenEmbeddedPaths(`{"cwd":"${home}","next":1}`, home)).toBe('{"cwd":"~","next":1}');
+		expect(shortenEmbeddedPaths(`{"cwd":"${home}.backup","next":1}`, home)).toBe(`{"cwd":"${home}.backup","next":1}`);
+	});
 });
 
 describe("formatDiagnostics", () => {
