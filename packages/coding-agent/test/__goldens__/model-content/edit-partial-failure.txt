@@ -1,0 +1,4 @@
+--- text ---
+Updated a.txt
+Failed missing.txt: file does not exist
+

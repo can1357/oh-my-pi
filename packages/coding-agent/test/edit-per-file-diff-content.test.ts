@@ -168,3 +168,81 @@ describe("executeReplace — oldText/newText propagation", () => {
 		expect(text).not.toMatch(/^\[[^\]\n]+#[0-9A-F]{4}\]/);
 	});
 });
+
+// ─── AgentToolResult.outcome propagation ────────────────────────────────
+//
+// Edit producers now set `AgentToolResult.outcome` directly instead of
+// leaving callers (`toolResultFailed`) to fall back to
+// `isError`/`details.isError`. These assert the real
+// `aggregateEditOutcome`-derived `outcome` now lands on the result for both
+// a clean multi-entry call and one with a failing entry.
+
+describe("AgentToolResult.outcome — single successful call", () => {
+	test("a clean update carries a succeeded outcome and no isError", async () => {
+		await Bun.write(path.join(tempDir, "ok.txt"), "a\n");
+
+		const result = await executePatchSingle({
+			session: makeSession(tempDir),
+			path: "ok.txt",
+			params: { op: "update", diff: "@@\n-a\n+b" },
+			allowFuzzy: true,
+			fuzzyThreshold: DEFAULT_FUZZY_THRESHOLD,
+			writethrough: writethroughNoop,
+			beginDeferredDiagnosticsForPath: noopBeginDeferred,
+		});
+
+		expect(result.outcome).toEqual({ kind: "succeeded" });
+		expect(result.isError).toBeUndefined();
+	});
+});
+
+describe("AgentToolResult.outcome — multi-entry single-path failure", () => {
+	test("a second entry that fails to match carries a failed outcome naming the path", async () => {
+		await Bun.write(path.join(tempDir, "seq.txt"), "a\n");
+		const tool = new EditTool(makeSession(tempDir));
+
+		const result = await tool.execute("call-seq-fail", {
+			path: "seq.txt",
+			edits: [
+				{ op: "update", diff: "@@\n-a\n+b" },
+				// This hunk's anchor no longer exists after the first entry landed.
+				{ op: "update", diff: "@@\n-does-not-exist\n+z" },
+			],
+		});
+
+		expect(result.isError).toBe(true);
+		expect(result.outcome?.kind).toBe("failed");
+		if (result.outcome?.kind === "failed") {
+			expect(result.outcome.failure.message).toContain("seq.txt");
+		}
+	});
+});
+
+describe("AgentToolResult.outcome — apply_patch multi-file failure", () => {
+	test("one file failing marks the aggregate outcome failed with a per-file message", async () => {
+		await Bun.write(path.join(tempDir, "good.txt"), "a\n");
+		const tool = new EditTool(makeSession(tempDir), "apply_patch");
+
+		const input = [
+			"*** Begin Patch",
+			"*** Update File: good.txt",
+			"@@",
+			"-a",
+			"+b",
+			"*** Update File: missing.txt",
+			"@@",
+			"-x",
+			"+y",
+			"*** End Patch",
+			"",
+		].join("\n");
+
+		const result = await tool.execute("call-apply-patch-fail", { input });
+
+		expect(result.isError).toBe(true);
+		expect(result.outcome?.kind).toBe("failed");
+		if (result.outcome?.kind === "failed") {
+			expect(result.outcome.failure.message).toContain("missing.txt");
+		}
+	});
+});

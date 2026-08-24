@@ -25,7 +25,7 @@ describe("executePythonWithKernel streaming", () => {
 
 		const result = await executePythonWithKernel(kernel, "sleep", { timeoutMs: 2000 });
 
-		expect(result.cancelled).toBe(true);
+		expect(result.termination !== undefined).toBe(true);
 		expect(result.exitCode).toBeUndefined();
 		expect(result.output).toContain("eval cell timed out after 2s");
 	});

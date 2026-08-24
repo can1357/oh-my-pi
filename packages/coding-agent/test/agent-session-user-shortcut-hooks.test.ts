@@ -65,6 +65,7 @@ describe("AgentSession user shortcut hooks", () => {
 			output: "hooked bash output",
 			exitCode: 0,
 			cancelled: false,
+			timedOut: false,
 			truncated: false,
 			totalLines: 1,
 			totalBytes: 18,
@@ -101,7 +102,7 @@ describe("AgentSession user shortcut hooks", () => {
 		const replacement = {
 			output: "hooked python output",
 			exitCode: 0,
-			cancelled: false,
+			termination: undefined,
 			truncated: false,
 			totalLines: 1,
 			totalBytes: 20,
@@ -146,6 +147,7 @@ describe("AgentSession user shortcut hooks", () => {
 			output: "bash fallback",
 			exitCode: 0,
 			cancelled: false,
+			timedOut: false,
 			truncated: false,
 			totalLines: 1,
 			totalBytes: 13,
@@ -155,7 +157,7 @@ describe("AgentSession user shortcut hooks", () => {
 		vi.spyOn(pythonExecutor, "executePython").mockResolvedValue({
 			output: "python fallback",
 			exitCode: 0,
-			cancelled: false,
+			termination: undefined,
 			truncated: false,
 			totalLines: 1,
 			totalBytes: 15,

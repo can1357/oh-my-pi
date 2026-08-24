@@ -52,21 +52,6 @@ Unless user tells you exactly what to write:
   History: `with { type: "file" }` only copied the entry as a raw asset (workers crashed silently in compiled binaries — issues #1011, #1027), and the later literal-path + extra-entrypoint pattern required keeping spawn literals and two build scripts in sync (issue #1150). The smoke probe below is the live validation of this contract.
   Validate any new worker with the dedicated smoke probe: `omp --smoke-test` spawns the stats sync worker and the tiny-model subprocess, pings them, and exits — it's wired into `ci:test:smoke` and `scripts/install-tests/run-ci.sh` so binary, source-link, and tarball installs all exercise it. Add a sibling smoke if the new worker is on a different module graph.
 
-## Before Opening a PR
-
-If a change adds or corrects a documented invariant (a "Do"/"Don't" bullet, a new
-doc file, a code comment stating a constraint) in the same diff as code, grep the
-**entire diff** for every other place that invariant applies before submitting —
-not just the file you happened to be in when you learned it. Fixing the reported
-instance and leaving a sibling instance for review to catch a second time is a
-process bug, not bad luck: the reviewer doing that grep for you isn't access to
-information you lacked, it's you skipping a step you already had everything
-needed to do yourself. Concrete case: a documented invariant that "Zed's terminal
-renderer drops every sibling `content` item" while adding two separate code
-paths (bash notices, eval images) that violated it — review caught the second
-path three rounds after the first was fixed, quoting the PR's own new doc back
-at its own new code.
-
 ## Central Utilities
 
 Before writing a helper, check whether one already exists — `packages/coding-agent/src/utils/`, `@oh-my-pi/pi-utils`, `@oh-my-pi/pi-tui`, and the domain modules next to your callsite. This applies to **everything**: VCS wrappers, formatting/truncation/path-display helpers, image handling, clipboard, streams, temp files, caching. The central versions carry hardening a fresh copy always loses (timeouts, output caps, non-interactive env, lock avoidance, caching, TUI sanitization).

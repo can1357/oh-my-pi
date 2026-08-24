@@ -1,5 +1,7 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { formatOutputNotice, sanitizeOutputMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import type { ToolPresentationEvent } from "@oh-my-pi/pi-agent-core/presentation";
+import { salvageOutputMeta } from "@oh-my-pi/pi-coding-agent/presentation/schemas/output-meta";
+import { formatOutputNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 
 function stringField(value: object, key: string): string | undefined {
 	if (!(key in value)) return undefined;
@@ -10,19 +12,26 @@ function stringField(value: object, key: string): string | undefined {
 /**
  * Every string a producer recorded structurally for a renderer to surface,
  * shared by `test/acp-producer-wire.test.ts`'s matrix and
- * `test/acp-event-mapper.test.ts`'s `mapUpdates()` wrapper (rule 15/17).
+ * `test/acp-event-mapper.test.ts`'s `mapUpdates()` wrapper (mechanism 2).
  *
- * `details.notices`/`details.notice`/`details.meta`'s rendered notice are the
- * axes the matrix already declared; the top-level `errorMessage`/`message`/
- * `text` framework note (mirroring the mapper's own `extractDirectText`) is
- * the axis that had none — the eval image fallback dropped it in
- * `terminalMetaCapable` mode with no test anywhere asking whether it survived.
+ * `details.notices`/`details.notice`/`details.meta`'s rendered notice cover a
+ * legacy/external producer's declared facts; a migrated producer on the
+ * presentation protocol (bash/eval's ordinary routes) never populates
+ * `details` with any of these any more — its facts are real `ToolFact`s on
+ * `presentationEvents`, read here too when the caller has them. The
+ * top-level `errorMessage`/`message`/`text` framework note (mirroring the
+ * mapper's own `extractDirectText`) is the axis that had none — the eval
+ * image fallback dropped it in `terminalMetaCapable` mode with no test
+ * anywhere asking whether it survived.
  */
 function artifactIds(text: string): string[] {
 	return [...text.matchAll(/artifact:\/\/(\w+)/g)].map(m => m[1] as string);
 }
 
-export function producerFacts(result: AgentToolResult<unknown> | Record<string, unknown>): string[] {
+export function producerFacts(
+	result: AgentToolResult<unknown> | Record<string, unknown>,
+	presentationEvents?: readonly ToolPresentationEvent[],
+): string[] {
 	const facts: string[] = [];
 	if (typeof result === "object" && result !== null) {
 		const directText =
@@ -41,24 +50,23 @@ export function producerFacts(result: AgentToolResult<unknown> | Record<string, 
 			if (single) noticeLines.push(single);
 			facts.push(...noticeLines);
 			if ("meta" in details) {
-				// Mirrors the mapper's own `sanitizeOutputMeta` read path: a
+				// Mirrors the mapper's own `salvageOutputMeta` read path: a
 				// producer's `meta` isn't guaranteed well-formed (an extension/MCP
-				// tool, a corrupted replay record), and formatting it unsanitized
+				// tool, a corrupted replay record), and formatting it unsalvaged
 				// would either throw on a malformed sibling or restate a fact the
 				// mapper itself would have dropped.
-				const metaNotice = formatOutputNotice(sanitizeOutputMeta((details as { meta?: unknown }).meta));
+				const metaNotice = formatOutputNotice(salvageOutputMeta((details as { meta?: unknown }).meta));
 				if (metaNotice) {
 					// A spilled result can carry the same recovery pointer from two
-					// independent subsystems — bash's own `[raw output: artifact://N]`
-					// push (`details.notices`) and `OutputSink`'s elision summary
-					// (`details.meta.truncation`) — in different wording. A real
-					// producer never sets both for the *same* spill (bash's push is a
-					// last-defense fallback that no-ops once the sink already spilled),
-					// so requiring the meta wording verbatim on top of the notices
-					// wording would demand two representations of one fact; the
-					// mapper's own `extractTerminalNotices` already dedupes on shared
-					// artifact ids, and this check only needs the underlying fact (the
-					// artifact id) to survive once, not both phrasings.
+					// independent subsystems — a legacy producer's own
+					// `[raw output: artifact://N]` push (`details.notices`) and
+					// `OutputSink`'s elision summary (`details.meta.truncation`) — in
+					// different wording. A real producer never sets both for the
+					// *same* spill, so requiring the meta wording verbatim on top of
+					// the notices wording would demand two representations of one
+					// fact; the mapper's own `extractTerminalNotices` already dedupes
+					// on shared artifact ids, and this check only needs the underlying
+					// fact (the artifact id) to survive once, not both phrasings.
 					const coveredIds = new Set(artifactIds(noticeLines.join("\n")));
 					const metaIds = artifactIds(metaNotice);
 					const alreadyCovered = metaIds.length > 0 && metaIds.every(id => coveredIds.has(id));
@@ -66,6 +74,11 @@ export function producerFacts(result: AgentToolResult<unknown> | Record<string, 
 				}
 			}
 		}
+	}
+	for (const event of presentationEvents ?? []) {
+		if (event.type !== "fact") continue;
+		const text = "text" in event.fact ? event.fact.text : undefined;
+		if (typeof text === "string" && text.length > 0) facts.push(text);
 	}
 	return facts.flatMap(fact =>
 		fact
@@ -107,10 +120,10 @@ export function frameTexts(update: Record<string, unknown>): string[] {
  * compose a synthesized note directly into this text (an executor's
  * `dump(notice)` annotation, `eval`'s synthesized `Command exited with code
  * N` suffix) without ever declaring it as a separate structural fact, so a
- * check confined to `producerFacts` is vacuous on exactly that class of bug
- * (a producer's `details`
- * simply had no `notices` field at all pre-fix, so nothing was "missing"
- * from a check that only compares against what got declared).
+ * check confined to `producerFacts` is vacuous on exactly that class of bug —
+ * a producer whose `details` simply has no `notices` field at all, so
+ * nothing is "missing" from a check that only compares against what got
+ * declared.
  */
 export function producerFinalBodyText(result: AgentToolResult<unknown> | Record<string, unknown>): string {
 	if (typeof result !== "object" || result === null) return "";
@@ -143,7 +156,7 @@ export function producerFinalBodyText(result: AgentToolResult<unknown> | Record<
  * A short-line-prefix match (first 40 chars) additionally tolerates
  * legitimate per-line column truncation (`tools.maxColumn`) without
  * requiring the caller to enumerate every normalization a producer might
- * apply — the same "structural, not enumerated" approach rule 10 takes for
+ * apply — the same "structural, not enumerated" approach mechanism 2 takes for
  * re-render classification.
  */
 export function missingFinalBodyLines(finalBodyText: string, deliveredTexts: readonly string[]): string[] {

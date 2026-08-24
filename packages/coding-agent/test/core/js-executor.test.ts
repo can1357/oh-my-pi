@@ -530,7 +530,7 @@ describe("executeJs", () => {
 			timeoutMs: 20,
 		});
 
-		expect(result.cancelled).toBe(true);
+		expect(result.termination !== undefined).toBe(true);
 		expect(result.exitCode).toBeUndefined();
 		expect(result.output).toContain("Command timed out");
 	});

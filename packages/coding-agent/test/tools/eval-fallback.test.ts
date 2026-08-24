@@ -33,6 +33,7 @@ const mockResult = {
 	output: "ok",
 	exitCode: 0,
 	cancelled: false,
+	termination: undefined,
 	truncated: false,
 	artifactId: undefined,
 	totalLines: 1,

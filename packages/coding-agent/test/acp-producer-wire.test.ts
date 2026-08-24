@@ -4,33 +4,56 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { SessionNotification } from "@agentclientprotocol/sdk";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { ToolCallPresentation, ToolPresentationEvent } from "@oh-my-pi/pi-agent-core/presentation";
+import {
+	executionToolArguments,
+	publicToolArguments,
+	streamId,
+	ToolPresentationStream,
+} from "@oh-my-pi/pi-agent-core/presentation";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import * as evalIndex from "@oh-my-pi/pi-coding-agent/eval";
+import { toExecutorBackendResult } from "@oh-my-pi/pi-coding-agent/eval/backend-helpers";
 import { executePythonWithKernel } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import type { EvalToolDetails } from "@oh-my-pi/pi-coding-agent/eval/types";
 import type { DaemonBrokerClient } from "@oh-my-pi/pi-coding-agent/launch/client";
 import * as daemonClient from "@oh-my-pi/pi-coding-agent/launch/client";
 import type { DaemonRpcResult } from "@oh-my-pi/pi-coding-agent/launch/protocol";
 import {
+	buildToolCallPresentation,
 	mapAgentSessionEventToAcpSessionUpdates,
-	wantsMetaTerminal,
 } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-event-mapper";
 import { checkAcpUpdateInvariants } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-update-invariants";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { BashTool, type BashToolDetails } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import { BashTool, type BashToolDetails, bashOutcome } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { executeLaunch } from "@oh-my-pi/pi-coding-agent/tools/hub/launch";
-import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import { formatOutputNotice, wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import { formatLegacyOutputNotice } from "../src/modes/acp/legacy-output-meta";
+import { checkedNotificationPayload, encodeToolFrames } from "../src/modes/acp/view/encoder";
+import { negotiateTerminalMetaCap } from "../src/modes/acp/view/frames";
+import {
+	legacyEditFramesWithLocations,
+	legacyEditSettlementEvents,
+	legacyEditStartedEvent,
+	legacyEditUpdateFrames,
+} from "../src/modes/acp/view/legacy-edit";
+import { LegacyEvalPresentation } from "../src/modes/acp/view/legacy-eval";
+import type { AcpRenderContext } from "../src/modes/acp/view/reducer";
+import { INITIAL_ACP_TOOL_VIEW, reduceAcpToolView } from "../src/modes/acp/view/reducer";
+import { BuiltinResultSchemaError, parseLegacyToolResult } from "../src/presentation/known-tool-result";
 import { frameTexts, missingFinalBodyLines, producerFacts, producerFinalBodyText } from "./helpers/acp-producer-facts";
 
 /**
  * Crosses the seam every other ACP test skips: the mapper suite fabricates
  * `details` by hand, so nothing there can ask whether a real producer actually
- * populates the field the mapper reads. Several bugs lived in that gap (the
- * spilled-artifact pointer, a failing eval's status and exit code, …), each
- * found by a reviewer rather than by a test.
+ * populates the field the mapper reads. This exact gap — a producer's
+ * `details` silently diverging from what a real invocation actually
+ * populates — is where the spilled-artifact pointer, a failing eval's
+ * status/exit code, and similar facts have gone missing before, because
+ * nothing here exercises the real producer path by hand.
  *
  * So the coverage here is a matrix, not a case per bug: every ACP-relevant
  * producer outcome runs through its real tool (wrapped exactly as production
@@ -117,11 +140,11 @@ const SPILLING_COMMAND = "seq 1 20000";
  * through a `TailBuffer(DEFAULT_MAX_BYTES)` that trims to a line boundary, and
  * 51,200 / 64 is exact, so the last streamed snapshot lands *exactly* on the
  * 50 KB rollover floor every run instead of a line-width-dependent byte or two
- * under it — the difference between reliably reproducing the bug and passing
- * by luck. The final result is then `OutputSink`'s middle-elided head+tail
- * summary, which starts with the run's original head (zero overlap with the
- * streamed tail) and is longer than the watermark once its elision marker and
- * notices are appended.
+ * under it — the difference between reliably reproducing the rollover edge
+ * case and passing by luck. The final
+ * result is then `OutputSink`'s middle-elided head+tail summary, which starts
+ * with the run's original head (zero overlap with the streamed tail) and is
+ * longer than the watermark once its elision marker and notices are appended.
  */
 const WIDE_LINE_COMMAND = `awk 'BEGIN{for(i=0;i<3000;i++) printf "%063d\\n", i}'`;
 
@@ -149,7 +172,7 @@ async function runFailingEval(toolCallId: string): Promise<{
 	vi.spyOn(evalIndex.jsBackend, "execute").mockImplementation((async () => ({
 		output: "boom\n",
 		exitCode: 1,
-		cancelled: false,
+		termination: undefined,
 		truncated: false,
 		artifactId: undefined,
 		totalLines: 1,
@@ -180,10 +203,10 @@ describe("ACP producer-to-wire crossing", () => {
 		// failure.
 		const meta = (result.details as { meta?: { truncation?: { artifactId?: string } } } | undefined)?.meta;
 		expect(meta?.truncation?.artifactId).toBeDefined();
-		// And the gap this test exists to catch: bash's own `details.notices`
-		// does NOT carry the pointer (that's the whole bug).
-		const notices = (result.details as { notices?: string[] } | undefined)?.notices ?? [];
-		expect(notices.some(n => n.includes("artifact://"))).toBe(false);
+		// bash no longer mirrors that pointer into `details.notices` at all
+		// (deleted with the rest of the legacy mirror) — `meta.truncation`
+		// above is the sole structural source now, and the assertion above is
+		// the whole test.
 	});
 
 	it("delivers the spilled artifact pointer to a meta-capable ACP client with no invariant violation", async () => {
@@ -277,16 +300,27 @@ describe("ACP producer-to-wire crossing", () => {
 
 interface ProducerOutcome {
 	toolName: string;
+	/**
+	 * Real legacy adapter (`AcpAgent#handleLegacyEditEvent`/
+	 * `#handleLegacyEvalEvent`) this outcome must be replayed through, when the
+	 * producer is a built-in edit/eval call the mapper no longer branches on.
+	 * `presentationEvents` rows are already migrated and use that field
+	 * instead; a row with neither takes the mapper's generic rawOutput arm.
+	 */
+	legacyAdapter?: "edit" | "eval";
+	/** The session cwd, when the producer ran with one — threaded through `replayThroughLegacyAdapter` the same way `record.session.sessionManager.getCwd()` is threaded through the live legacy adapters. */
+	cwd?: string;
 	args: Record<string, unknown>;
 	result: AgentToolResult<unknown>;
 	/**
 	 * Every partial result the producer pushed through `onUpdate`, in order.
-	 * Replaying these through the mapper before the final result is what makes
-	 * the delta/watermark machinery observable: a matrix that only feeds
-	 * `tool_execution_end` leaves `getMetaTerminalSent` empty, so every frame
-	 * takes the first-send path and no incremental state is ever exercised.
+	 * The mapper's raw arm publishes nothing for these (settlement is the only
+	 * publish point — see `buildSettledMetaTerminalOutput`), so replaying them
+	 * here proves that silence rather than exercising any incremental state.
 	 */
 	updates: AgentToolResult<unknown>[];
+	/** Typed events for a migrated producer route; mutually exclusive with legacy updates. */
+	presentationEvents?: readonly ToolPresentationEvent[];
 }
 
 /**
@@ -314,8 +348,11 @@ interface ProducerCase {
 	 * the result, so the assertion can't restate the mapper's own logic.
 	 */
 	status: "completed" | "failed";
-	/** `undefined` = the frame must not claim an exit code it cannot know. */
-	exitCode?: number;
+	/**
+	 * `undefined` = the frame must not claim an exit code it cannot know;
+	 * `null` = the route explicitly settled without one (for example, timeout).
+	 */
+	exitCode?: number | null;
 	/** The call created a client-owned terminal the frame must still reference. */
 	terminalId?: string;
 	/**
@@ -364,20 +401,21 @@ interface ProducerCase {
 	 * passes. That is how a bash timeout reached the wire with no statement of
 	 * why it stopped: the mirror into `details.notices` was gated on the same
 	 * condition that suppresses the text echo, so exactly the path that needed
-	 * it skipped it, and every check downstream had nothing to miss. Pinning
-	 * the producer half makes the axis non-vacuous for this row specifically,
-	 * rather than trusting the matrix-wide guard that only asks whether *some*
-	 * row populates *some* axis.
+	 * it skipped it, and every check downstream had nothing to miss.
+	 * Pinning the producer half
+	 * makes the axis non-vacuous for this row specifically, rather than
+	 * trusting the matrix-wide guard that only asks whether *some* row
+	 * populates *some* axis.
 	 */
 	expectProducerFacts?: readonly string[];
 	/**
 	 * How many non-blank lines of the producer's own final body text
 	 * (`producerFinalBodyText`) legitimately never reach the client on any
 	 * rendered channel. Declared per row, default 0 — a real omission (an
-	 * eval-annotation regression) is never an allowance to grant, only a
-	 * `plain` mode's own `ACP_TEXT_LIMIT` head truncation on a body that
-	 * exceeds it legitimately earns one. Asserted for equality, same reason
-	 * as `discontinuities`.
+	 * eval-annotation regression that dropped its own text silently)
+	 * is never an allowance to grant, only a `plain` mode's own
+	 * `ACP_TEXT_LIMIT` head truncation on a body that exceeds it legitimately
+	 * earns one. Asserted for equality, same reason as `discontinuities`.
 	 */
 	allowUndeliveredFinalLines?: number | Partial<Record<ModeName, number>>;
 	/**
@@ -405,7 +443,7 @@ function stubJsBackend(overrides: Record<string, unknown>): void {
 	vi.spyOn(evalIndex.jsBackend, "execute").mockImplementation((async () => ({
 		output: "",
 		exitCode: 0,
-		cancelled: false,
+		termination: undefined,
 		truncated: false,
 		artifactId: undefined,
 		totalLines: 0,
@@ -445,7 +483,7 @@ async function runStreamingEval(toolCallId: string, lines: number): Promise<Prod
 		return {
 			output,
 			exitCode: 0,
-			cancelled: false,
+			termination: undefined,
 			truncated: false,
 			artifactId: undefined,
 			totalLines: lines,
@@ -465,7 +503,7 @@ async function runStreamingEval(toolCallId: string, lines: number): Promise<Prod
 /**
  * A real `EvalTool.execute()` through the Python backend's *actual* kernel
  * seam (`executePythonWithKernel`, `executor-base.ts`), not the JS backend
- * stub every other row uses. This is the seam that produces the bug:
+ * stub every other row uses. This is the seam where
  * `OutputSink.dump(notice)` bakes
  * a kernel-timeout/stdin-requested annotation into the returned `output`
  * text but never calls `onChunk` with it, so a matrix confined to the JS
@@ -499,26 +537,22 @@ async function runEvalPythonKernel(
 				};
 			},
 		};
-		return await executePythonWithKernel(kernel as never, code, options as never);
+		return toExecutorBackendResult(await executePythonWithKernel(kernel as never, code, options as never));
 	}) as never);
-	const args = { language: "py", code: "print('streamed'); input()" } as const;
 	const tool = wrapToolWithMetaNotice(new EvalTool(makeEvalSession()));
+	const args = { language: "py", code: "print('streamed'); input()" } as const;
 	const updates: AgentToolResult<unknown>[] = [];
 	const result = await tool.execute(toolCallId, args, undefined, update => updates.push(update));
 	return { toolName: "eval", args: { ...args }, result, updates };
 }
 
 /**
- * The abort/cancellation row streamed through a real cancellation (not just a
- * hand-fabricated `cancelled: true` final result): `chunks` deliver through
- * `onChunk` first, so `getMetaTerminalSent` is non-empty when the mapper
- * reaches `tool_execution_end` and the grow/re-render classifier in
- * `buildFinalMetaTerminalDelta` actually runs on a *failure* row, not only on
- * the success-only streaming row above it (`runStreamingEval`). Before this,
- * every streamed row in this matrix ended in success; a matrix that never
- * feeds the delta classifier a failing final snapshot can't catch a class of
- * bug that only shows up there (this exact one: an annotation-prefixed final
- * snapshot after real streamed output).
+ * The abort/cancellation row streams through a real cancellation (not just a
+ * hand-fabricated `cancelled: true` final result), so the settled body
+ * carries a real synthesized "\nCommand aborted" suffix appended after real
+ * streamed output — this is a *failure* row, not only the success-only
+ * streaming row above it (`runStreamingEval`), which check #6
+ * (`missingFinalBodyLines`) must find intact in the one settlement publish.
  */
 async function runStreamingEvalAborted(toolCallId: string, chunks: readonly string[]): Promise<ProducerOutcome> {
 	const streamed = chunks.join("");
@@ -530,7 +564,7 @@ async function runStreamingEvalAborted(toolCallId: string, chunks: readonly stri
 		return {
 			output: `${streamed}\nCommand aborted`,
 			exitCode: undefined,
-			cancelled: true,
+			termination: { kind: "interrupted" },
 			truncated: false,
 			artifactId: undefined,
 			totalLines: chunks.length,
@@ -583,18 +617,22 @@ async function runEvalImage(toolCallId: string): Promise<ProducerOutcome> {
 /**
  * A real `EvalTool.execute()` via its `proxyExecutor` constructor option
  * (`eval.ts`'s `#proxyExecutor` branch, an existing production seam for
- * MCP-proxied eval-shaped tools) returning `details.notice` — the only
- * honest way to populate that field through a real producer entrypoint,
- * since `ResolvedBackend.notice` (the ordinary cell-resolution path's
- * writer) has no caller anywhere in `src/`.
+ * MCP-proxied eval-shaped tools) returning both details-only fact axes:
+ * `details.notice` and `details.notices`. A proxy result is the only honest
+ * way to populate either through a real producer entrypoint —
+ * `ResolvedBackend.notice` (the ordinary cell-resolution path's writer) has no
+ * caller anywhere in `src/`, and `LegacyEvalPresentation` (the proxy
+ * executor's permanent `legacy_snapshot` adapter, the one eval route that
+ * never reaches a typed producer) is the only reader of
+ * `EvalToolDetails.notices` on any live route, so this row is where the
+ * delivery of both is checked.
  *
  * Deliberately does *not* also return an image: `EvalProxyExecutor`'s own
  * declared return type (`EvalToolResult`) restricts `content` to
  * `{type:"text"}` — no typed production entrypoint can combine an image
  * with a proxy-sourced notice, confirmed by `tsgo` rejecting the combined
  * shape outright. That combination is real and fixed (see the mapper-level
- * regression tests in `acp-event-mapper.test.ts`), just not reachable
- * through any
+ * regression tests in `acp-event-mapper.test.ts`), just not reachable through any
  * single typed producer this matrix can construct — this row instead
  * covers the `details.notice` axis on its own, honestly.
  */
@@ -604,19 +642,23 @@ async function runEvalProxyNotice(toolCallId: string): Promise<ProducerOutcome> 
 		new EvalTool(null, {
 			proxyExecutor: async () => ({
 				content: [{ type: "text", text: "ok" }],
-				details: { notice: "Fell back to the js backend." },
+				details: {
+					notice: "Fell back to the js backend.",
+					notices: ["Proxy kernel restarted before this cell."],
+				},
 			}),
 		}),
 	);
 	const updates: AgentToolResult<unknown>[] = [];
 	const result = await tool.execute(toolCallId, args, undefined, update => updates.push(update));
-	return { toolName: "eval", args: { ...args }, result, updates };
+	return { toolName: "eval", legacyAdapter: "eval", args: { ...args }, result, updates };
 }
 
 /**
  * A client-owned terminal that never exits, so the tool's own timeout fires
- * while the terminal is live — the one bash path that used to throw instead of
- * returning a result, discarding `details.terminalId` and every notice with it.
+ * while the terminal is live. This runs on the presentation protocol: the client
+ * owns its process bytes, while the producer declares its binding, timeout fact,
+ * and one settlement.
  */
 const HUNG_TERMINAL_ID = "producer-wire-term-1";
 
@@ -634,10 +676,26 @@ async function runTimingOutBridgeBash(toolCallId: string): Promise<ProducerOutco
 	};
 	(session as { getClientBridge: () => unknown }).getClientBridge = () => bridge;
 	const args = { command: "sleep 30", timeout: 1 };
-	const tool = wrapToolWithMetaNotice(new BashTool(session));
-	const updates: AgentToolResult<unknown>[] = [];
-	const result = await tool.execute(toolCallId, args, undefined, update => updates.push(update));
-	return { toolName: "bash", args, result, updates };
+	const tool = new BashTool(session);
+	const presentationEvents: ToolPresentationEvent[] = [];
+	const presentation = new ToolPresentationStream(streamId(toolCallId), event => presentationEvents.push(event));
+	const selection = tool.presentation.selects.call(tool, executionToolArguments(args), undefined);
+	if (selection === false) throw new Error("expected the client-terminal presentation route");
+	const routing = typeof selection === "object" ? selection.routing : undefined;
+	const call = tool.presentation.start.call(tool, toolCallId, publicToolArguments(args), routing);
+	presentationEvents.push({ type: "started", call });
+	const result = await tool.execute(toolCallId, args, undefined, undefined, {
+		toolCall: {
+			batchId: "producer-wire",
+			index: 0,
+			total: 1,
+			toolCalls: [{ id: toolCallId, name: "bash" }],
+			progress: { kind: "presentation_events", presentation },
+		},
+	} as never);
+	await presentation.freeze();
+	presentationEvents.push({ type: "settled", outcome: bashOutcome(result) });
+	return { toolName: "bash", args, result, updates: [], presentationEvents };
 }
 
 /**
@@ -732,7 +790,7 @@ async function runPartiallyFailingEdit(toolCallId: string): Promise<ProducerOutc
 	const tool = wrapToolWithMetaNotice(new EditTool(session));
 	const updates: AgentToolResult<unknown>[] = [];
 	const result = await tool.execute(toolCallId, args as never, undefined, update => updates.push(update));
-	return { toolName: "edit", args, result, updates };
+	return { toolName: "edit", legacyAdapter: "edit", cwd: root, args, result, updates };
 }
 
 const PRODUCER_CASES: readonly ProducerCase[] = [
@@ -754,16 +812,10 @@ const PRODUCER_CASES: readonly ProducerCase[] = [
 		status: "completed",
 		exitCode: 0,
 		// `seq 1 20000` is ~110 KB of variable-width lines through a 50 KB tail
-		// buffer. Whether the mapper ever sees a snapshot gap wider than that
-		// window depends on pipe read sizes, so 0 and 1 are both honest for
-		// this stream and pinning either one would be a coin flip dressed as an
-		// assertion. Two is not: that is the final re-rendered summary being
-		// misread as a rollover on top of a genuine one. The deterministic
-		// counterpart lives in the fixed-width row below, which pins 1 exactly.
-		discontinuities: {
-			upTo: 1,
-			because: "pipe read sizes decide whether one delta exceeds the 50 KB window; both 0 and 1 are honest here",
-		},
+		// buffer. The mapper's raw arm now publishes nothing before settlement
+		// (see `buildSettledMetaTerminalOutput`), so no discontinuity notice can
+		// ever appear here regardless of how many times the producer's own
+		// window rolled while streaming.
 		producerDroppedBytes:
 			"OutputSink elides the middle of a 110 KB run into a head+tail summary; the elided lines exist only in artifact://<id>",
 	},
@@ -772,12 +824,10 @@ const PRODUCER_CASES: readonly ProducerCase[] = [
 		run: id => runBash(id, { command: WIDE_LINE_COMMAND }),
 		status: "completed",
 		exitCode: 0,
-		// The producer's own 50 KB window rolls between the two snapshots it
-		// emits for a 192 KB run, so one honest discontinuity is expected. The
-		// second one the mapper used to add — for the final elided summary,
-		// which is a re-render of what already streamed, not a continuation of
-		// it — came with a duplicate copy of the whole summary.
-		discontinuities: 1,
+		// The producer's own 50 KB window rolls twice across a 192 KB run, but
+		// the mapper's raw arm no longer diffs against a streamed watermark at
+		// all — settlement publishes the one authoritative body it received,
+		// so no discontinuity claim is possible here either.
 		producerDroppedBytes:
 			"the 50 KB tail window rolls twice across a 192 KB run, so the final summary's middle never reached the mapper",
 	},
@@ -785,19 +835,30 @@ const PRODUCER_CASES: readonly ProducerCase[] = [
 		name: "bash, timeout with a live client terminal",
 		run: runTimingOutBridgeBash,
 		status: "failed",
+		exitCode: null,
 		terminalId: HUNG_TERMINAL_ID,
 		// The client's terminal only ever received process bytes; the timeout
-		// annotation is not one, so `details.notices` is the only channel that
-		// can tell the user why the command stopped.
+		// annotation is not one, so the `stop_annotation` fact is the only channel
+		// that can tell the user why the command stopped.
 		expectProducerFacts: ["Command timed out"],
+		modeSkips: {
+			meta: "A client-terminal route requires terminal/create; the meta-only mode deliberately has no client-owned terminal.",
+			"real-terminal-only":
+				"Without _meta.terminal_output there is no capable terminal channel for the typed timeout fact.",
+			plain: "A client-terminal route requires terminal/create; the plain mode deliberately has no client-owned terminal.",
+		},
 	},
 	{
 		name: "bash, timeout on the local executor",
 		run: runTimingOutLocalBash,
 		status: "failed",
 		// `sink.dump(notice)` composes this into the body without streaming it,
-		// so the structural mirror has to exist independently of the text.
-		expectProducerFacts: ["Command timed out"],
+		// but this row runs with no presentation producer wired (see
+		// `runTimingOutLocalBash`'s own doc comment) — bash no longer mirrors
+		// the annotation into any `details` field for that case, so there is no
+		// structural fact to declare here. Check #6 (`missingFinalBodyLines`)
+		// independently confirms the annotation still reaches the wire via the
+		// tool's own text.
 	},
 	{
 		name: "eval, exit 0",
@@ -814,17 +875,16 @@ const PRODUCER_CASES: readonly ProducerCase[] = [
 	{
 		name: "eval, aborted mid-cell",
 		// Streamed through a real cancellation (not a hand-fabricated final
-		// result): the aggregate `output` grows past the watermark with
-		// "\nCommand aborted" appended, so this row also exercises
-		// `buildFinalMetaTerminalDelta`'s grow/re-render classifier on a
-		// *failure*, which no row did before this (every other streamed row
-		// ends in success).
+		// result): the aggregate `output` synthesizes a "\nCommand aborted"
+		// suffix, so check #6's `missingFinalBodyLines` must find that suffix
+		// in the single settlement publish, on a *failure* row (no other
+		// streamed row here ends in failure).
 		run: id => runStreamingEvalAborted(id, ["aborted-cell-line-1\n", "aborted-cell-line-2\n"]),
 		status: "failed",
 	},
 	{
 		name: "eval via python kernel, kernel timeout mid-stream",
-		// The seam behind this row:
+		// The seam behind the kernel-timeout annotation bug:
 		// `executeWithKernelBase`'s cancelled/timed-out branch calls
 		// `sink.dump(annotation)`, which bakes the annotation into `output`
 		// without ever streaming it through `onChunk` — unlike the JS backend
@@ -934,11 +994,11 @@ const COVERAGE: Record<string, Record<OutcomeName, CoverageCell>> = {
 		image: { none: "bash returns text only; no code path produces an image result" },
 		"stdin request": { none: "bash never asks for stdin; the eval kernels do" },
 		"details-only notice": {
-			none: "bash always mirrors its notices into `details.notices`; the details-only axis belongs to eval's `details.notice`",
+			none: "bash always composes its notices into the model-facing text and its own `stop_annotation`/`notice` facts; it never carries a details-only axis distinct from those, and eval's `details.notice` covers that axis",
 		},
 		"partial failure": { none: "a single command either ran or did not; no per-item breakdown exists" },
 		"duplicate per-file notice": {
-			none: "bash has one details.notices list, not per-path text; there is no second file to collide with",
+			none: "bash has no per-path notice list at all; there is no second file to collide with",
 		},
 	},
 	"bash (client terminal)": {
@@ -1061,24 +1121,61 @@ describe("ACP producer matrix coverage", () => {
 });
 
 /**
- * Bytes a client would append to the display-only terminal, in delivery order.
- * `AcpAgent` keeps the watermark per tool call across the whole sequence
- * (`metaTerminalSent`), so the replay below has to as well or the incremental
- * path is never entered.
+ * Bytes a client would append to the display-only terminal, in delivery
+ * order. The mapper's raw arm publishes nothing before settlement (see
+ * `buildSettledMetaTerminalOutput`), so replaying every intermediate
+ * `onUpdate` snapshot proves that silence rather than exercising any
+ * incremental state.
  */
 function replayThroughMapper(
 	toolCallId: string,
 	outcome: ProducerOutcome,
 	mode: (typeof MODES)[ModeName],
-): { frames: SessionNotification[]; terminalChunks: string[]; allDeliveredTexts: string[] } {
-	const watermarks = new Map<string, string>();
+): {
+	allFrames: SessionNotification[];
+	frames: SessionNotification[];
+	terminalChunks: string[];
+	allDeliveredTexts: string[];
+} {
+	if (outcome.presentationEvents !== undefined) {
+		const cap = negotiateTerminalMetaCap(mode.terminalMetaCapable);
+		const context: AcpRenderContext = {
+			phase: "live",
+			terminal: mode.realTerminalCapable
+				? { kind: "real", metaCap: cap }
+				: cap === undefined
+					? { kind: "none" }
+					: { kind: "meta_only", cap },
+			fence: true,
+		};
+		let state = INITIAL_ACP_TOOL_VIEW;
+		const allFrames: SessionNotification[] = [];
+		const terminalChunks: string[] = [];
+		const allDeliveredTexts: string[] = [];
+		let frames: SessionNotification[] = [];
+		for (const event of outcome.presentationEvents) {
+			const step = reduceAcpToolView(state, event, context);
+			state = step.state;
+			const encoded = encodeToolFrames("session-1", step.frames).map(checked => checkedNotificationPayload(checked));
+			allFrames.push(...encoded);
+			if (event.type === "settled") frames = encoded;
+			for (const frame of encoded) {
+				const meta = (frame.update as { _meta?: { terminal_output?: { data?: unknown } } })._meta;
+				if (typeof meta?.terminal_output?.data === "string") {
+					terminalChunks.push(meta.terminal_output.data);
+					allDeliveredTexts.push(meta.terminal_output.data);
+				}
+				allDeliveredTexts.push(...frameTexts(frame.update as unknown as Record<string, unknown>));
+			}
+		}
+		return { allFrames, frames, terminalChunks, allDeliveredTexts };
+	}
+	if (outcome.legacyAdapter !== undefined) {
+		return replayThroughLegacyAdapter(toolCallId, outcome, mode);
+	}
 	const options = {
 		...mode,
 		getToolArgs: () => outcome.args,
-		getMetaTerminalSent: (id: string) => watermarks.get(id),
-		setMetaTerminalSent: (id: string, value: string) => {
-			watermarks.set(id, value);
-		},
 	};
 	const frames: SessionNotification[] = [];
 	for (const partialResult of outcome.updates) {
@@ -1123,7 +1220,119 @@ function replayThroughMapper(
 		}
 		allDeliveredTexts.push(...frameTexts(frame.update as unknown as Record<string, unknown>));
 	}
-	return { frames: endFrames, terminalChunks, allDeliveredTexts };
+	const settlementFrames = endFrames.filter(frame => {
+		const status = (frame.update as { status?: unknown }).status;
+		return status === "completed" || status === "failed";
+	});
+	return { allFrames: frames, frames: settlementFrames, terminalChunks, allDeliveredTexts };
+}
+
+/**
+ * Replays a built-in edit/eval outcome through the same adapter composition
+ * `AcpAgent#handleLegacyEditEvent`/`#handleLegacyEvalEvent` runs live
+ * (`legacyEditSettlementEvents`/`LegacyEvalPresentation` → `reduceAcpToolView`
+ * → `encodeToolFrames`), instead of the mapper: that dispatch now happens
+ * entirely in `acp-agent.ts` before the mapper is ever called, so a row for
+ * one of these two tools has no mapper branch left to exercise. The render
+ * context mirrors `AcpAgent#buildRenderContext`.
+ */
+function replayThroughLegacyAdapter(
+	toolCallId: string,
+	outcome: ProducerOutcome,
+	mode: (typeof MODES)[ModeName],
+): {
+	allFrames: SessionNotification[];
+	frames: SessionNotification[];
+	terminalChunks: string[];
+	allDeliveredTexts: string[];
+} {
+	const cap = negotiateTerminalMetaCap(mode.terminalMetaCapable);
+	const context: AcpRenderContext = mode.realTerminalCapable
+		? { phase: "live", terminal: { kind: "real", metaCap: cap }, fence: true }
+		: { phase: "live", terminal: cap === undefined ? { kind: "none" } : { kind: "meta_only", cap }, fence: true };
+	// Mirrors the live adapters' own call construction, not just the render
+	// context: `#handleLegacyEditEvent`/`#handleLegacyEvalEvent` both pass the
+	// session cwd, and the eval adapter additionally copies `args.code` onto
+	// `sourceEcho` (its `legacyEvalCode`) — the eval source header the reducer
+	// delivers before any output bytes. Dropping either here would let a
+	// mode-specific regression in that delivery pass this matrix.
+	const baseCall = buildToolCallPresentation({
+		toolCallId,
+		toolName: outcome.toolName,
+		args: outcome.args,
+		...(outcome.cwd === undefined ? {} : { cwd: outcome.cwd }),
+	});
+	const evalCode = outcome.args.code;
+	const call: ToolCallPresentation =
+		outcome.legacyAdapter === "eval" && typeof evalCode === "string"
+			? { ...baseCall, sourceEcho: evalCode }
+			: baseCall;
+	const allFrames: SessionNotification[] = [];
+	const settlementFrames: SessionNotification[] = [];
+	const pushFrames = (notifications: readonly SessionNotification[], settled: boolean) => {
+		allFrames.push(...notifications);
+		if (settled) settlementFrames.push(...notifications);
+	};
+	const source = { origin: "builtin" as const, name: outcome.toolName };
+	if (outcome.legacyAdapter === "edit") {
+		for (const partial of outcome.updates) {
+			const result = parseLegacyToolResult(source, partial);
+			if (result.tool !== "edit") throw new Error(`expected edit partial, got ${result.tool}`);
+			pushFrames(
+				encodeToolFrames("session-1", legacyEditUpdateFrames(toolCallId, result)).map(checkedNotificationPayload),
+				false,
+			);
+		}
+		let state = reduceAcpToolView(INITIAL_ACP_TOOL_VIEW, legacyEditStartedEvent(call), context).state;
+		const finalResult = parseLegacyToolResult(source, outcome.result);
+		if (finalResult.tool !== "edit") throw new Error(`expected edit result, got ${finalResult.tool}`);
+		const failed = outcome.result.isError === true || finalResult.isError;
+		for (const event of legacyEditSettlementEvents(toolCallId, finalResult, failed, formatOutputNotice)) {
+			const step = reduceAcpToolView(state, event, context);
+			state = step.state;
+			const frames =
+				event.type === "settled"
+					? legacyEditFramesWithLocations(toolCallId, step.frames, finalResult, outcome.cwd)
+					: step.frames;
+			pushFrames(encodeToolFrames("session-1", frames).map(checkedNotificationPayload), event.type === "settled");
+		}
+	} else {
+		const presentation = new LegacyEvalPresentation(toolCallId, formatLegacyOutputNotice);
+		let state = reduceAcpToolView(INITIAL_ACP_TOOL_VIEW, { type: "started", call }, context).state;
+		const applyEvents = (events: readonly ToolPresentationEvent[]) => {
+			for (const event of events) {
+				const step = reduceAcpToolView(state, event, context);
+				state = step.state;
+				pushFrames(
+					encodeToolFrames("session-1", step.frames).map(checkedNotificationPayload),
+					event.type === "settled",
+				);
+			}
+		};
+		for (const partial of outcome.updates) {
+			const result = parseLegacyToolResult(source, partial);
+			if (result.tool !== "eval") throw new Error(`expected eval partial, got ${result.tool}`);
+			applyEvents(presentation.update(result));
+		}
+		const finalResult = parseLegacyToolResult(source, outcome.result);
+		if (finalResult.tool !== "eval") throw new Error(`expected eval result, got ${finalResult.tool}`);
+		applyEvents(presentation.settle(finalResult, outcome.result.isError === true));
+	}
+	const terminalChunks: string[] = [];
+	const allDeliveredTexts: string[] = [];
+	for (const frame of allFrames) {
+		const meta = (frame.update as { _meta?: { terminal_output?: { data?: unknown } } })._meta;
+		if (typeof meta?.terminal_output?.data === "string") {
+			terminalChunks.push(meta.terminal_output.data);
+			allDeliveredTexts.push(meta.terminal_output.data);
+		}
+		allDeliveredTexts.push(...frameTexts(frame.update as unknown as Record<string, unknown>));
+	}
+	const frames = settlementFrames.filter(frame => {
+		const status = (frame.update as { status?: unknown }).status;
+		return status === "completed" || status === "failed";
+	});
+	return { allFrames, frames, terminalChunks, allDeliveredTexts };
 }
 
 const DISCONTINUITY_MARKER = "terminal output discontinuity";
@@ -1157,13 +1366,17 @@ describe("ACP producer matrix", () => {
 				const toolCallId = `matrix-${producerCase.name.replace(/[^a-z0-9]+/gi, "-")}-${modeName}`;
 				const outcome = await producerCase.run(toolCallId);
 				const mode = MODES[modeName];
-				const { frames, terminalChunks, allDeliveredTexts } = replayThroughMapper(toolCallId, outcome, mode);
+				const { allFrames, frames, terminalChunks, allDeliveredTexts } = replayThroughMapper(
+					toolCallId,
+					outcome,
+					mode,
+				);
 				expect(frames).toHaveLength(1);
 				const update = frames[0]!.update as unknown as Record<string, unknown>;
 
 				// 1. Declared outcome.
 				expect(update.status).toBe(producerCase.status);
-				const exit = (update._meta as { terminal_exit?: { exit_code?: number } } | undefined)?.terminal_exit;
+				const exit = (update._meta as { terminal_exit?: { exit_code?: number | null } } | undefined)?.terminal_exit;
 				if (exit) {
 					expect(exit.exit_code).toBe(producerCase.exitCode);
 				}
@@ -1176,9 +1389,12 @@ describe("ACP producer matrix", () => {
 				// every mode, including the one where the check applies.
 				const rendersClientTerminal =
 					producerCase.terminalId !== undefined &&
-					(update.content as Array<{ type: string; terminalId?: string }> | undefined)?.some(
-						item => item.type === "terminal" && item.terminalId === producerCase.terminalId,
-					) === true;
+					allFrames.some(
+						frame =>
+							(frame.update as { content?: Array<{ type: string; terminalId?: string }> }).content?.some(
+								item => item.type === "terminal" && item.terminalId === producerCase.terminalId,
+							) === true,
+					);
 				if (producerCase.terminalId && mode.realTerminalCapable) {
 					expect(rendersClientTerminal).toBe(true);
 				}
@@ -1186,7 +1402,7 @@ describe("ACP producer matrix", () => {
 				// 2. No structurally-recorded producer fact silently dropped —
 				// and, for a row that names them, the producer really did record
 				// them, so the comparison isn't against an empty set.
-				const declared = producerFacts(outcome.result);
+				const declared = producerFacts(outcome.result, outcome.presentationEvents);
 				for (const expected of producerCase.expectProducerFacts ?? []) {
 					expect(declared.join("\n"), "producer recorded no such fact").toContain(expected);
 				}
@@ -1198,18 +1414,14 @@ describe("ACP producer matrix", () => {
 				// 3. Append-only terminal stream: nothing delivered twice.
 				expectAppendOnly(terminalChunks);
 
-				// 4. No fabricated data loss. The replay feeds the mapper every
-				// snapshot the producer emitted, so it may only claim dropped
-				// bytes when the producer's own tail buffer rolled between two of
-				// them. The producer-side count is declared per row; the wire
-				// budget is derived, because only a display-only meta terminal
-				// has a mapper-owned buffer to lose its place in — every other
-				// mode must carry exactly zero, and asserting equality means a
-				// stale allowance fails instead of hiding a fabrication.
+				// 4. No fabricated data loss. The mapper's raw arm publishes only
+				// once, at settlement, so it can never claim a discontinuity —
+				// only a `presentationEvents` row (a bounded queue that actually
+				// dropped bytes) has a legitimate source for one, asserted exactly
+				// against the row's own declared count.
 				const claimed = terminalChunks.filter(chunk => chunk.includes(DISCONTINUITY_MARKER)).length;
-				const usesMetaTerminal = wantsMetaTerminal(outcome.toolName, outcome.args, mode);
 				const declaredRolls = producerCase.discontinuities ?? 0;
-				if (!usesMetaTerminal) {
+				if (outcome.presentationEvents === undefined) {
 					expect(claimed).toBe(0);
 				} else if (typeof declaredRolls === "number") {
 					expect(claimed).toBe(declaredRolls);
@@ -1246,6 +1458,24 @@ describe("ACP producer matrix", () => {
 					const missing = missingFinalBodyLines(finalBodyText, allDeliveredTexts);
 					expect(missing.length, `undelivered final-body lines: ${JSON.stringify(missing)}`).toBe(allowed);
 				}
+
+				// 7. Eval-only: the source header (`legacyAdapter: "eval"` rows'
+				// `args.code`, delivered via `sourceEcho` — see
+				// `replayThroughLegacyAdapter`) must reach some rendered
+				// channel. `checkAcpUpdateInvariants`/checks #1-6 above assert
+				// on the producer's *result*, never on the call's own args, so
+				// none of them would catch `sourceEcho` silently dropped from
+				// the real adapter's call construction — this is the
+				// regression class where the echo silently vanishes.
+				if (outcome.legacyAdapter === "eval") {
+					const code = outcome.args.code;
+					if (typeof code === "string" && code.length > 0) {
+						expect(
+							allDeliveredTexts.join("\n"),
+							"eval source echo missing from every rendered channel",
+						).toContain(code);
+					}
+				}
 			});
 		}
 	}
@@ -1255,8 +1485,7 @@ describe("ACP producer matrix", () => {
  * The failure mode this guards against: `producerFacts` declares three
  * axes (`details.notices`, `details.notice`, `details.meta`), but check #2
  * above is vacuous on any axis no row's *real* result populates — exactly
- * how `details.notice` shipped uncovered for the whole life of this matrix:
- * the axis was declared, the
+ * how `details.notice` shipped uncovered for the whole life of this matrix: the axis was declared, the
  * check read it, and nothing ever failed because no row's producer ever set
  * it. Asserting non-vacuity here, once, is cheaper than re-discovering it
  * from a missed bug every time a new axis is declared.
@@ -1291,115 +1520,162 @@ describe("ACP producer matrix vacuity guard", () => {
 	});
 });
 
-/**
- * `asEditDetails`/`extractToolCallContent` narrow a real producer's
- * `details` by hand (see `AcpEditFields`'s comment in the mapper): every
- * leaf field the validators inspect is a place a malformed or degenerate
- * value — from an extension, an MCP-proxied edit-shaped tool, or a
- * corrupted `session/load` replay record — can reach the mapper instead of
- * `EditToolPerFileResult`'s own type guarantees. Several specific mutations
- * found by review each closed one gap here; this
- * walks every leaf of a *real* producer's `details` and mutates it six
- * ways, so the next one is found here instead.
- */
-describe("ACP mapper survives mutated real edit details", () => {
-	/** Every leaf path of a JSON-shaped value, dot/bracket-free — `["a", 0, "b"]` for `{a: [{b: 1}]}`. */
-	function leafPaths(value: unknown, prefix: (string | number)[] = []): (string | number)[][] {
-		if (Array.isArray(value)) {
-			return value.flatMap((item, i) => leafPaths(item, [...prefix, i]));
+describe("ACP legacy edit parser boundary", () => {
+	it("uses built-in provenance for apply_patch and shadows an external result unparsed", () => {
+		// The malformed-envelope-throws contract this test used to assert via
+		// the mapper moved with the dispatch: `apply_patch`/`edit`/`patch` never
+		// reach the mapper at all now (`AcpAgent#handlePromptEvent` intercepts
+		// every built-in-dispatched name before the mapper is ever called), so
+		// a malformed built-in result poisons the real live route instead —
+		// see "fails closed for a malformed built-in apply_patch result
+		// envelope instead of a degraded success" in `acp-agent.test.ts`.
+		const valid = {
+			content: [{ type: "text", text: "applied" }],
+			details: {
+				diff: "",
+				perFileResults: [{ path: "src/ok.ts", diff: "", oldText: "before", newText: "after" }],
+			},
+		};
+		expect(parseLegacyToolResult({ origin: "builtin", name: "apply_patch" }, valid)).toMatchObject({
+			tool: "edit",
+			toolName: "apply_patch",
+		});
+		expect(
+			parseLegacyToolResult(
+				{ origin: "external", name: "apply_patch", provider: "mcp" },
+				{ ...valid, details: { perFileResults: [{ path: 42 }] } },
+			),
+		).toMatchObject({ tool: "external", provider: "mcp" });
+	});
+
+	it("accepts absent/empty built-in edit details as the agent loop's own thrown-result shape, rejects other malformed shapes", () => {
+		// `undefined`/`null` collapse to `{}` before the schema even runs — this is
+		// the fix for a live bug: previously the required `diff` field made `{}`
+		// fail the schema and poison the whole ACP prompt for every failed edit
+		// call, not just a contract violation.
+		for (const details of [undefined, null]) {
+			expect(parseLegacyToolResult({ origin: "builtin", name: "edit" }, { details }).tool).toBe("edit");
 		}
-		if (value !== null && typeof value === "object") {
-			const entries = Object.entries(value as Record<string, unknown>);
-			if (entries.length === 0) return prefix.length > 0 ? [prefix] : [];
-			return entries.flatMap(([key, v]) => leafPaths(v, [...prefix, key]));
+		for (const details of ["not an object", { path: "src/ok.ts" }]) {
+			expect(() => parseLegacyToolResult({ origin: "builtin", name: "edit" }, { details })).toThrow(
+				BuiltinResultSchemaError,
+			);
 		}
-		return prefix.length > 0 ? [prefix] : [];
-	}
+	});
 
-	/** Deep-clone `root`, apply `mutate` at `path`, deleting the key if `mutate` returns the sentinel. */
-	const DELETE_KEY = Symbol("delete");
-	function withMutation(root: unknown, path: (string | number)[], mutate: (leaf: unknown) => unknown): unknown {
-		const clone = structuredClone(root as Record<string, unknown>);
-		let parent: Record<string, unknown> | unknown[] = clone as Record<string, unknown>;
-		for (let i = 0; i < path.length - 1; i++) {
-			parent = (parent as Record<string | number, unknown>)[path[i]!] as Record<string, unknown> | unknown[];
-		}
-		const key = path[path.length - 1]!;
-		const container = parent as Record<string | number, unknown>;
-		const replacement = mutate(container[key]);
-		if (replacement === DELETE_KEY) {
-			if (Array.isArray(container)) container.splice(key as number, 1);
-			else delete container[key as string];
-		} else {
-			container[key] = replacement;
-		}
-		return clone;
-	}
+	it("keeps a non-built-in-dispatched edit on the mapper's generic path", () => {
+		// With `getToolSource` removed, the mapper no longer special-cases edit
+		// provenance at all: any edit that reaches it (an extension shadow, or
+		// any edit call the session did not register as a built-in) always
+		// takes this one generic arm, deriving content through the generic
+		// extractors and reaching the wire through the checked tool-frame
+		// encoder, whose `rawOutput` is the bounded `AcpToolDiagnostic`
+		// settlement marker (view/frames.ts) — never an untyped raw-result
+		// passthrough.
+		const result = { content: [{ type: "text", text: "extension result" }], details: null };
+		const [notification] = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "tool_execution_end",
+				toolCallId: "shadowed-edit",
+				toolName: "edit",
+				isError: false,
+				result,
+			} as AgentSessionEvent,
+			"session-1",
+		);
+		expect(notification?.update).toMatchObject({
+			status: "completed",
+			content: [{ type: "content", content: { type: "text", text: "```\nextension result\n```" } }],
+			rawOutput: { kind: "tool_settlement", tool: "edit", outcome: "completed" },
+		});
+		expect(JSON.stringify((notification?.update as { rawOutput?: unknown } | undefined)?.rawOutput)).not.toContain(
+			"extension result",
+		);
+	});
 
-	const MUTATIONS: { name: string; apply: (leaf: unknown) => unknown }[] = [
-		{ name: "delete", apply: () => DELETE_KEY },
-		{ name: "null", apply: () => null },
-		{ name: "number", apply: () => 42 },
-		{ name: "string", apply: () => "mutated" },
-		{ name: "object", apply: () => ({}) },
-		{ name: "array", apply: () => [] },
-	];
-
-	interface MinimalToolCallUpdate {
-		sessionUpdate?: string;
-		content?: unknown[];
-		_meta?: Record<string, unknown>;
-	}
-
-	it("never throws and always emits one well-formed frame for a mutated real edit result", async () => {
-		const { result } = await runPartiallyFailingEdit("mutation-base");
-		const details: unknown = result.details;
-		expect(typeof details).toBe("object");
-		const paths = leafPaths(details);
-		expect(paths.length).toBeGreaterThan(5); // guards against a degenerate fixture with nothing to mutate
-
-		const failures: string[] = [];
-		for (const path of paths) {
-			for (const mutation of MUTATIONS) {
-				const original = path.reduce<unknown>((v, key) => (v as Record<string | number, unknown>)[key], details);
-				// Skip a no-op mutation (e.g. "string" on a field already a string
-				// with the same value) — it proves nothing about malformed input.
-				if (mutation.name === "string" && original === "mutated") continue;
-				const mutatedDetails = withMutation(details, path, mutation.apply);
-				const label = `${path.join(".")} → ${mutation.name}`;
-				for (const [modeName, mode] of Object.entries(MODES)) {
-					const event = {
-						type: "tool_execution_end",
-						toolCallId: `mutation-${label}-${modeName}`,
-						toolName: "edit",
-						isError: result.isError === true,
-						result: { content: result.content, details: mutatedDetails },
-					} as unknown as AgentSessionEvent;
-					try {
-						const notifications = mapAgentSessionEventToAcpSessionUpdates(event, "session-1", mode);
-						const updateNotifications = notifications.filter(
-							n => (n.update as MinimalToolCallUpdate).sessionUpdate === "tool_call_update",
-						);
-						if (updateNotifications.length !== 1) {
-							failures.push(
-								`${label} [${modeName}]: expected exactly 1 tool_call_update, got ${updateNotifications.length}`,
-							);
-							continue;
-						}
-						const violations = checkAcpUpdateInvariants(updateNotifications[0]!, {
-							terminalMetaCapable: mode.terminalMetaCapable,
-						});
-						if (violations.length > 0) failures.push(`${label} [${modeName}]: ${violations.join("; ")}`);
-						const update = updateNotifications[0]!.update as MinimalToolCallUpdate;
-						const nonEmpty =
-							(update.content !== undefined && update.content.length > 0) || update._meta !== undefined;
-						if (!nonEmpty) failures.push(`${label} [${modeName}]: emitted an empty frame`);
-					} catch (error) {
-						failures.push(`${label} [${modeName}]: ${error instanceof Error ? error.message : String(error)}`);
-					}
-				}
+	it("encodes built-in edit frames with resolved images, diff-first notices, and the legacy text limit", () => {
+		// Retargeted onto the real settlement adapter composition
+		// (`legacyEditSettlementEvents` → `reduceAcpToolView` →
+		// `encodeToolFrames`, the same chain `AcpAgent#handleLegacyEditEvent`
+		// runs live): the mapper itself no longer branches on edit provenance,
+		// so `mapAgentSessionEventToAcpSessionUpdates` has nothing left to
+		// exercise this contract with.
+		const context: AcpRenderContext = { phase: "live", terminal: { kind: "none" }, fence: true };
+		const replaySettlement = (rawResult: unknown, resolveImageData?: (data: string) => string) => {
+			const result = parseLegacyToolResult({ origin: "builtin", name: "edit" }, rawResult);
+			if (result.tool !== "edit") throw new Error(`expected edit result, got ${result.tool}`);
+			const call = buildToolCallPresentation({ toolCallId: "legacy-edit-settlement", toolName: "edit", args: {} });
+			let state = reduceAcpToolView(INITIAL_ACP_TOOL_VIEW, legacyEditStartedEvent(call), context).state;
+			const notifications: SessionNotification[] = [];
+			for (const event of legacyEditSettlementEvents(
+				call.toolCallId,
+				result,
+				result.isError === true,
+				formatOutputNotice,
+				resolveImageData,
+			)) {
+				const step = reduceAcpToolView(state, event, context);
+				state = step.state;
+				const frames =
+					event.type === "settled"
+						? legacyEditFramesWithLocations(call.toolCallId, step.frames, result)
+						: step.frames;
+				notifications.push(...encodeToolFrames("session-1", frames).map(checkedNotificationPayload));
 			}
-		}
-		expect(failures).toEqual([]);
+			return notifications;
+		};
+
+		const resolveImageData = (data: string): string => {
+			expect(data).toBe("blob:edit-image");
+			return "data:image/png;base64,RESOLVED";
+		};
+		const [imageNotification] = replaySettlement(
+			{
+				content: [
+					{ type: "text", text: "no diff" },
+					{ type: "image", data: "blob:edit-image", mimeType: "image/png" },
+				],
+				details: { diff: "" },
+			},
+			resolveImageData,
+		);
+		expect(imageNotification?.update).toMatchObject({
+			content: [
+				{ type: "content", content: { type: "text", text: "```\nno diff\n```" } },
+				{
+					type: "content",
+					content: { type: "image", data: "data:image/png;base64,RESOLVED", mimeType: "image/png" },
+				},
+			],
+		});
+
+		const [diffNotification] = replaySettlement({
+			content: [{ type: "text", text: "Updated a.ts" }],
+			details: {
+				diff: "--- a/a.ts\n+++ b/a.ts",
+				perFileResults: [{ path: "a.ts", diff: "...", oldText: "before", newText: "after" }],
+				meta: { diagnostics: { summary: "1 warning", messages: ["a.ts:1: warning"] } },
+			},
+		});
+		expect(diffNotification).toBeDefined();
+		expect((diffNotification!.update as { content?: unknown[] }).content).toEqual([
+			{ type: "diff", path: "a.ts", oldText: "before", newText: "after" },
+			{
+				type: "content",
+				content: {
+					type: "text",
+					text: `\`\`\`\n${formatOutputNotice({ diagnostics: { summary: "1 warning", messages: ["a.ts:1: warning"] } }).trim()}\n\`\`\``,
+				},
+			},
+		]);
+
+		const [truncatedNotification] = replaySettlement({
+			content: [{ type: "text", text: "x".repeat(4_001) }],
+			details: { diff: "" },
+		});
+		expect(truncatedNotification).toBeDefined();
+		const truncated = (truncatedNotification!.update as { content?: Array<{ content?: { text?: string } }> })
+			.content?.[0]?.content?.text;
+		expect(truncated).toBe(`\`\`\`\n${"x".repeat(3_999)}…\n\`\`\``);
 	});
 });

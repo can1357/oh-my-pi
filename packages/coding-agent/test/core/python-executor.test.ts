@@ -46,7 +46,7 @@ describe("executePythonWithKernel", () => {
 		const result = await executePythonWithKernel(kernel, "raise ValueError('nope')");
 
 		expect(result.exitCode).toBe(1);
-		expect(result.cancelled).toBe(false);
+		expect(result.termination !== undefined).toBe(false);
 		expect(result.output).toContain("Traceback");
 	});
 
@@ -74,7 +74,7 @@ describe("executePythonWithKernel", () => {
 		const result = await executePythonWithKernel(kernel, "while True: pass", { timeoutMs: 4100 });
 
 		expect(result.exitCode).toBeUndefined();
-		expect(result.cancelled).toBe(true);
+		expect(result.termination !== undefined).toBe(true);
 		expect(result.output).toContain("eval cell timed out after 4s");
 	});
 
@@ -89,7 +89,7 @@ describe("executePythonWithKernel", () => {
 		const result = await executePythonWithKernel(kernel, "while True: pass");
 
 		expect(result.exitCode).toBeUndefined();
-		expect(result.cancelled).toBe(true);
+		expect(result.termination !== undefined).toBe(true);
 		expect(result.output).toContain("cancelled output");
 		expect(result.output).not.toContain("Command timed out");
 	});

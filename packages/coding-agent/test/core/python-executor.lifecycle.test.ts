@@ -174,11 +174,11 @@ describe("executePython session lifecycle", () => {
 		await flushMicrotasks();
 		abortController.abort(Object.assign(new Error("replacement wait cancelled"), { name: "AbortError" }));
 
-		expect((await cancelled).cancelled).toBe(true);
+		expect((await cancelled).termination !== undefined).toBe(true);
 		expect(startCount).toBe(2);
 
 		releaseReplacement.resolve();
-		expect((await retained).cancelled).toBe(false);
+		expect((await retained).termination !== undefined).toBe(false);
 		expect(replacement.executeCalls).toEqual(["print('retained')"]);
 	});
 
@@ -213,8 +213,8 @@ describe("executePython session lifecycle", () => {
 		await flushMicrotasks();
 		releaseReplacement.resolve();
 
-		expect((await obsolete).cancelled).toBe(true);
-		expect((await reset).cancelled).toBe(false);
+		expect((await obsolete).termination !== undefined).toBe(true);
+		expect((await reset).termination !== undefined).toBe(false);
 		expect(staleReplacement.executeCalls).toEqual([]);
 		expect(staleReplacement.shutdownCalls).toBe(1);
 		expect(freshKernel.executeCalls).toEqual(["print('reset')"]);
@@ -267,8 +267,8 @@ describe("executePython session lifecycle", () => {
 		await flushMicrotasks();
 		releaseReplacements.resolve();
 
-		expect((await ownerExecution).cancelled).toBe(true);
-		expect((await globalExecution).cancelled).toBe(true);
+		expect((await ownerExecution).termination !== undefined).toBe(true);
+		expect((await globalExecution).termination !== undefined).toBe(true);
 		await Promise.all([ownerDisposal, globalDisposal]);
 		expect(ownerReplacement.executeCalls).toEqual([]);
 		expect(globalReplacement.executeCalls).toEqual([]);
@@ -366,7 +366,7 @@ describe("executePython session lifecycle", () => {
 		abortController.abort(Object.assign(new Error("queue wait cancelled"), { name: "AbortError" }));
 
 		const second = await secondPromise;
-		expect(second.cancelled).toBe(true);
+		expect(second.termination !== undefined).toBe(true);
 		expect(second.exitCode).toBeUndefined();
 		expect(second.output).toBe("");
 		expect(kernel.executeCalls).toEqual(["print('one')"]);
@@ -374,7 +374,7 @@ describe("executePython session lifecycle", () => {
 		releaseFirst.resolve();
 		const first = await firstPromise;
 
-		expect(first.cancelled).toBe(false);
+		expect(first.termination !== undefined).toBe(false);
 		expect(first.output).toContain("first");
 		expect(startCount).toBe(1);
 		expect(kernel.executeCalls).toEqual(["print('one')"]);

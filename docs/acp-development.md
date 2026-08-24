@@ -16,14 +16,18 @@ A tool result is rendered twice, from two different sources:
 
 Zed renders a terminal-bearing tool call *exclusively* through the terminal
 (`has_terminals`, `thread_view.rs`), so for those calls the second list is the
-only channel that exists. Every ACP bug found across producer/mapper
-review rounds was one cell of `producers × facts`: the producer recorded a fact
+only channel that exists. Every bug in this subsystem is one cell of
+`producers × facts`: the producer recorded a fact
 in the body and not structurally, or structurally in a field the mapper did not
 read. Fixing them one producer at a time does not converge — the matrix keeps
 growing.
 
 Two mechanisms close the class instead of instances. Both are essential;
-neither is optional to keep in mind when adding a producer:
+neither is optional to keep in mind when adding a producer. Cited elsewhere as
+"mechanism 1"/"mechanism 2" (distinct from this doc's own numbered rules below
+and from `checkAcpUpdateInvariants`'s own numbered invariants, cited as
+"invariant 1"/"invariant 2"/"invariant 3" — three independent numbered lists,
+never share a number across them):
 
 1. **A fact baked into text travels with the text.** `OutputSink.dump(notice)`
    composes its annotation into the returned body and never calls `onChunk`, so
@@ -47,7 +51,8 @@ advice; extend the mechanism.
 | Mechanism | Rejects | Runs at |
 | --- | --- | --- |
 | `checkAcpUpdateInvariants` (`acp-update-invariants.ts`) | a sibling `content` item beside a `terminal` item when the client negotiated `_meta.terminal_output`; any `_meta.terminal_*` key the client never negotiated; `status: "completed"` paired with a nonzero `_meta.terminal_exit.exit_code` | `AcpAgent#sendUpdate`, plus `mapUpdates()` in `acp-event-mapper.test.ts` |
-| `EvalSourceDeliveryAuditor` (`acp-update-invariants.ts`) | a whole frame *sequence* for one `eval` call that never echoes the cell source on any rendered channel | `acp-event-mapper.test.ts`, `acp-agent.test.ts` replay tests |
+| `EvalSourceDeliveryAuditor` (`acp-update-invariants.ts`) | a whole frame *sequence* for an **external/legacy tool literally named `eval`** on the untyped generic mapper that never echoes the cell source on any rendered channel — the built-in `eval` tool is routed away from this mapper entirely | `acp-event-mapper.test.ts` |
+| `PresentationDeliveryLedger` (`test/helpers/acp-delivery-ledger.ts`) | for the typed `reduceAcpToolView` path: a declared fact whose reducer receipt disagrees with the audience/capability-derived policy; a call's `sourceEcho` that reaches settlement without appearing on any rendered channel (the generalized form of `EvalSourceDeliveryAuditor`) | `driveAcpToolView` — `acp-view-reducer.test.ts`, `bash-presentation-protocol.test.ts`, `eval-e2e-wire.test.ts` |
 | `MetaTerminalOutput` brand (`acp-event-mapper.ts`) | a hand-rolled `{terminal_id, data}` literal — `buildMetaTerminalOutput` is the sole constructor, and it is what knows to prepend an eval's source | `tsgo` |
 | `buildTerminalMeta` (`acp-event-mapper.ts`) | an ungated `_meta.terminal_*` write — it returns `undefined` unless `terminalMetaCapable` | compile time + the invariant above |
 | `toolResultFailed` (`tools/tool-result.ts`) | a second, drifting `result.isError ?? details.isError` derivation; the ACP mapper and the TUI renderers share this one | code review, one call site |
@@ -57,6 +62,9 @@ advice; extend the mechanism.
 | `acp-probe` | the same append-only property on the real wire (`duplicateTerminalDeliveries`, exit 1 on a repeat); `scripts/acp-stress-matrix.sh` requires its exit code, not just a byte floor | every probe run |
 
 ## Rules a mechanism cannot enforce
+
+Cited elsewhere as "doc rule N" (1-8 below) — distinct from "mechanism N" above
+and "invariant N" in `acp-update-invariants.ts`'s own header comment.
 
 1. **Never guess the wire shape. Trace it.** Capture real JSON-RPC frames with
    [`acp-probe`](https://github.com/marton78/acp-probe) before forming a
@@ -110,8 +118,42 @@ grep -n "tool_call" /tmp/frames.log
 - `--isolate` hides real credentials, so a `prompt` there fails with
   `No model selected`. Use it for handshake probing only.
 - `stress-output <bytes>` and `kill-mid-tool <text...>` exercise the
-  truncation/watermark and dangling-replay classes directly.
-  `scripts/acp-stress-matrix.sh` runs the whole grid.
+  truncation/watermark and dangling-replay classes directly against the real
+  wire. The dangling-replay (`kill-mid-tool`) class also has deterministic
+  in-process coverage that does not need a real process kill or a live
+  provider: `test/acp-deterministic-phase-gate.test.ts` captures a real,
+  still-running tool call's durable on-disk journal signature and drives it
+  through the production `session/load` replay chain
+  (`correlateReplayableToolExecution` -> `hydrateReplayableToolExecution` ->
+  `reduceAcpToolView(phase:'replay')`); `test/interactive-mode-journaled-
+  dangling-rebuild.test.ts` drives the same capture through the TUI render
+  path. `packages/coding-agent/test/acp-live-e2e.test.ts` (run directly with
+  `bun test`, or via `scripts/acp-stress-matrix.sh`, a thin fail-fast
+  dispatcher with no assertion logic of its own) runs a capability-combo
+  grid again: 2 migrated-route byte-equality checks (meta-terminal channel),
+  2 fenced/plain-channel byte-equality checks (same assertion, no client
+  terminal capability advertised -- the one gap neither those nor the
+  deterministic in-process gate covers, since bash/eval's presentation
+  route dropped the old `ACP_TEXT_LIMIT` bound), and 4 `kill-mid-tool`
+  capability combos (`none`/`terminal`/`meta`/`both`) with a real `SIGKILL`
+  -- the crash-recovery race the in-process replay above cannot reproduce.
+  This is a genuine end-to-end test, not a shallow smoke check: every row
+  asserts byte-exact delivery or a real crash-recovery outcome through the
+  actual built CLI, real stdio, real `AgentSideConnection`. It drives all 8
+  rows through the deterministic, zero-cost `stress-mock` model
+  (`packages/coding-agent/scripts/acp-stress-mock-model.ts`) by default, not
+  a live provider, since a live model can silently rewrite the exact
+  requested command (observed empirically: a fast/cheap model appended
+  `> /dev/null` to a `stress-output` command "to just report the exit
+  code" -- a HARNESS_INVALID-shaped failure a naive floor check cannot tell
+  apart from a real regression). Set `ACP_STRESS_LIVE_PROVIDER=1` for
+  genuine live-provider conformance checking instead -- under that mode it
+  still exits non-zero only on a genuine `REGRESSION` classification
+  (`acp-live-smoke-classifier.ts`), never on a live provider simply not
+  calling the requested tool (`HARNESS_INVALID`). The deterministic
+  in-process gate (`bash`/`bash_async`/`bash_auto`/`eval`, exact equality,
+  `test/acp-deterministic-phase-gate.test.ts`) is unaffected either way and
+  runs as part of any normal `bun test`, no external checkout needed.
 
 Frame logs are the source of truth. Read the literal `content` array, `title`,
 `kind` and `_meta` sent for the call you're working on before changing mapper

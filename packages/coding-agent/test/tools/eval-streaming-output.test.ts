@@ -20,7 +20,7 @@ function baseResult(overrides: Record<string, unknown> = {}) {
 	return {
 		output: "",
 		exitCode: 0,
-		cancelled: false,
+		termination: undefined,
 		truncated: false,
 		artifactId: undefined,
 		totalLines: 0,
@@ -169,7 +169,7 @@ describe("EvalTool live stdout streaming", () => {
 
 	it("marks a cancelled eval as a top-level tool error", async () => {
 		vi.spyOn(evalIndex.jsBackend, "execute").mockResolvedValue(
-			baseResult({ output: "Command aborted", exitCode: undefined, cancelled: true }) as never,
+			baseResult({ output: "Command aborted", exitCode: undefined, termination: { kind: "interrupted" } }) as never,
 		);
 
 		const result = await new EvalTool(makeSession()).execute("call-cancelled", {

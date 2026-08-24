@@ -219,7 +219,7 @@ describe("python executor owner cleanup", () => {
 			timeoutMs: 100,
 		});
 
-		expect(result.cancelled).toBe(true);
+		expect(result.termination !== undefined).toBe(true);
 		expect(result.exitCode).toBeUndefined();
 		expect(kernel.shutdown).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: expect.any(Number) }));
 		expect(startSpy).toHaveBeenCalledTimes(1);

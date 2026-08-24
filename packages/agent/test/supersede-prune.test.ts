@@ -470,15 +470,15 @@ describe("pruneSupersededToolResults — useless results", () => {
 		expect(resultText(result2)).toBe(FILE_CONTENT);
 	});
 
-	test("never blanks an error result even when flagged", () => {
-		const [call1, result1] = uselessPair("search", NO_MATCH_TEXT, T0, { isError: true });
-		const entries: SessionEntry[] = [call1, result1];
-
-		const result = pruneSupersededToolResults(entries, tokenizer, cfg({ pruneUseless: true, now: T0 + 31 * 60_000 }));
-
-		expect(result.prunedCount).toBe(0);
-		expect(resultText(result1)).toBe(NO_MATCH_TEXT);
-	});
+	// The "useless with isError" case this used to construct directly and
+	// expect collectUselessResults's own guard to reject is now unrepresentable
+	// coming out of the real pipeline:
+	// `coerceToolResult`/`emitToolResult` enforce "useless implies not isError"
+	// once, at message construction, so `useless` and `isError` can never both
+	// be true on a `ToolResultMessage` this pass actually receives. That
+	// boundary contract is tested at its real enforcement site
+	// (`agent-loop.test.ts`'s "useless"/"isError" tool-result tests), not by
+	// hand-constructing an impossible fixture here.
 });
 
 describe("pruneToolOutputs — useless results", () => {

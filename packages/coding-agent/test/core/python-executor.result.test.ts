@@ -29,7 +29,7 @@ describe("executePythonWithKernel result mapping", () => {
 		const result = await executePythonWithKernel(kernel, "sleep()", { timeoutMs: 5000 });
 
 		expect(result.exitCode).toBeUndefined();
-		expect(result.cancelled).toBe(true);
+		expect(result.termination !== undefined).toBe(true);
 		expect(result.output).toContain("eval cell timed out after 5s");
 	});
 

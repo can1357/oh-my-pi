@@ -14,7 +14,7 @@ function toolCallUpdate(fields: Partial<SessionNotification["update"]>): Session
 }
 
 describe("checkAcpUpdateInvariants", () => {
-	it("flags a terminal item sent alongside sibling content (rule 7)", () => {
+	it("flags a terminal item sent alongside sibling content (invariant 1)", () => {
 		const notification = toolCallUpdate({
 			content: [
 				{ type: "terminal", terminalId: "term-1" },
@@ -34,7 +34,7 @@ describe("checkAcpUpdateInvariants", () => {
 		// best-effort `[terminal, content]` sibling append for a real-terminal
 		// client that never negotiated Zed's `_meta.terminal_output` extension —
 		// `has_terminals` (Zed's exclusivity renderer quirk) doesn't apply to
-		// that client, so rule 7 must not fire here.
+		// that client, so invariant 1 must not fire here.
 		const notification = toolCallUpdate({
 			content: [
 				{ type: "terminal", terminalId: "term-1" },
@@ -62,7 +62,7 @@ describe("checkAcpUpdateInvariants", () => {
 		expect(checkAcpUpdateInvariants(notification, { terminalMetaCapable: true })).toEqual([]);
 	});
 
-	it("flags _meta.terminal_output when the client never negotiated the capability (rule 9)", () => {
+	it("flags _meta.terminal_output when the client never negotiated the capability (invariant 2)", () => {
 		const notification = toolCallUpdate({
 			_meta: { terminal_output: { terminal_id: "call-1", data: "hi" } },
 		});
@@ -87,7 +87,7 @@ describe("checkAcpUpdateInvariants", () => {
 		expect(checkAcpUpdateInvariants(notification, { terminalMetaCapable: false })).toEqual([]);
 	});
 
-	it("flags a nonzero terminal exit reported with a completed status (rule 14)", () => {
+	it("flags a nonzero terminal exit reported with a completed status (invariant 3)", () => {
 		// The card's status and its
 		// terminal's exit line are two derivations of the same result; a user
 		// reads them together, so a success check above "exit code 1" is a

@@ -1,0 +1,6 @@
+--- text ---
+Updated src/index.ts
+
+
+src/index.ts:12:5: error: Cannot find name 'foo'.
+src/index.ts:30: warning: 'bar' is declared but never used.

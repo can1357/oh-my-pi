@@ -403,7 +403,7 @@ describe("AgentSession python cleanup", () => {
 					resolve({
 						output: "Command aborted",
 						exitCode: undefined,
-						cancelled: true,
+						termination: { kind: "timed_out", timeoutMs: 1000 },
 						truncated: false,
 						totalLines: 1,
 						totalBytes: 15,
@@ -499,6 +499,7 @@ describe("AgentSession python cleanup", () => {
 		// restarted, and keeps serving the surviving session.
 		await expect(firstExecution).resolves.toMatchObject({
 			cancelled: true,
+			timedOut: true,
 			stdinRequested: false,
 		});
 		await secondSession.executePython("print('owner-b after detach')");
@@ -519,7 +520,7 @@ describe("AgentSession python cleanup", () => {
 		const executeSpy = vi.spyOn(pythonExecutor, "executePython").mockResolvedValue({
 			output: "late",
 			exitCode: 0,
-			cancelled: false,
+			termination: undefined,
 			truncated: false,
 			totalLines: 1,
 			totalBytes: 4,
@@ -553,7 +554,7 @@ describe("AgentSession python cleanup", () => {
 		const executeSpy = vi.spyOn(pythonExecutor, "executePython").mockResolvedValue({
 			output: "late",
 			exitCode: 0,
-			cancelled: false,
+			termination: undefined,
 			truncated: false,
 			totalLines: 1,
 			totalBytes: 4,
@@ -592,7 +593,7 @@ describe("AgentSession python cleanup", () => {
 					result: {
 						output: "hooked late",
 						exitCode: 0,
-						cancelled: false,
+						termination: undefined,
 						truncated: false,
 						totalLines: 1,
 						totalBytes: 11,
@@ -607,7 +608,7 @@ describe("AgentSession python cleanup", () => {
 		const executeSpy = vi.spyOn(pythonExecutor, "executePython").mockResolvedValue({
 			output: "late",
 			exitCode: 0,
-			cancelled: false,
+			termination: undefined,
 			truncated: false,
 			totalLines: 1,
 			totalBytes: 4,
@@ -640,7 +641,7 @@ describe("AgentSession python cleanup", () => {
 		const executeSpy = vi.spyOn(pythonExecutor, "executePython").mockResolvedValue({
 			output: "late",
 			exitCode: 0,
-			cancelled: false,
+			termination: undefined,
 			truncated: false,
 			totalLines: 1,
 			totalBytes: 4,
@@ -667,7 +668,7 @@ describe("AgentSession python cleanup", () => {
 		const executeSpy = vi.spyOn(pythonExecutor, "executePython").mockResolvedValue({
 			output: "late",
 			exitCode: 0,
-			cancelled: false,
+			termination: undefined,
 			truncated: false,
 			totalLines: 1,
 			totalBytes: 4,
@@ -733,8 +734,8 @@ describe("AgentSession python cleanup", () => {
 		expectSleepNear(sleepSpy, 3000);
 		const [firstResult, secondResult] = await Promise.all([firstExecution, secondExecution]);
 
-		expect(firstResult.cancelled).toBe(true);
-		expect(secondResult.cancelled).toBe(true);
+		expect(firstResult.termination !== undefined).toBe(true);
+		expect(secondResult.termination !== undefined).toBe(true);
 		expect(kernel.executeCalls).toEqual(["print('blocked')", "print('blocked')"]);
 		expect(kernel.shutdownCalls).toBe(1);
 	});

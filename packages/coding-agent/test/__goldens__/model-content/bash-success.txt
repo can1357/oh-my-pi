@@ -1,0 +1,5 @@
+--- text ---
+hi
+
+
+Wall time: 0.01 seconds

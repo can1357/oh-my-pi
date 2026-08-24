@@ -1,9 +1,14 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { factId, toolExecutionId } from "@oh-my-pi/pi-agent-core/presentation";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { type CompactionSummaryMessage, INTERRUPTED_THINKING_MESSAGE_TYPE } from "../../src/session/messages";
-import { buildSessionContext, type StrippedToolCallsMarker } from "../../src/session/session-context";
+import {
+	buildSessionContext,
+	type InterruptedToolCallsMarker,
+	type StrippedToolCallsMarker,
+} from "../../src/session/session-context";
 import type { SessionEntry } from "../../src/session/session-entries";
 
 const timestamp = "2026-07-09T00:00:00.000Z";
@@ -158,6 +163,370 @@ describe("buildSessionContext dangling toolCalls", () => {
 
 		expect(danglingCallIds(context.messages)).toEqual([]);
 		expect(context.messages.some(message => message.role === "assistant")).toBe(false);
+	});
+});
+
+describe("buildSessionContext dangling toolCalls with a v4 tool journal", () => {
+	it("resolves a journal-covered dangling toolCall to an interrupted card instead of the elision count", () => {
+		const entries: SessionEntry[] = [
+			...danglingToolCallEntries,
+			{
+				type: "tool_execution_started",
+				id: "j1",
+				parentId: "m2",
+				timestamp,
+				recordVersion: 1,
+				executionId: toolExecutionId("exec-SCTX0001"),
+				call: {
+					toolCallId: "call-1",
+					toolName: "bash",
+					title: "Run FIXTURE_MARKER_SCTX0001",
+					kind: "execute",
+				},
+				presentation: { version: 1, facts: [{ id: factId("fact-SCTX0001"), kind: "wall_time", ms: 5 }] },
+			},
+		];
+
+		const context = buildSessionContext(entries, undefined, undefined, { transcript: true });
+
+		// The dangling block is still stripped from `content` — it never becomes a
+		// synthetic toolResult candidate for the next provider request — but the
+		// turn now carries the folded journal record instead of a bare count.
+		expect(danglingCallIds(context.messages)).toEqual([]);
+		const assistant = context.messages.find(message => message.role === "assistant");
+		expect(assistant).toBeDefined();
+		expect((assistant as AgentMessage & StrippedToolCallsMarker).strippedToolCalls).toBeUndefined();
+		const interrupted = (assistant as AgentMessage & InterruptedToolCallsMarker).interruptedToolCalls;
+		expect(interrupted).toEqual([
+			{
+				state: "interrupted",
+				call: {
+					toolCallId: "call-1",
+					toolName: "bash",
+					title: "Run FIXTURE_MARKER_SCTX0001",
+					kind: "execute",
+				},
+				reason: expect.stringContaining("Interrupted"),
+				presentation: { version: 1, facts: [{ id: factId("fact-SCTX0001"), kind: "wall_time", ms: 5 }] },
+			},
+		]);
+	});
+
+	it("keeps the plain elision count when no journal record exists (pre-v4/legacy_snapshot)", () => {
+		// Identical to the pre-existing dangling-call fixture with no journal
+		// entries at all — the universal legacy/legacy_snapshot case.
+		const context = buildSessionContext(danglingToolCallEntries, undefined, undefined, { transcript: true });
+
+		const assistant = context.messages.find(message => message.role === "assistant");
+		expect((assistant as AgentMessage & StrippedToolCallsMarker).strippedToolCalls).toBe(1);
+		expect((assistant as AgentMessage & InterruptedToolCallsMarker).interruptedToolCalls).toBeUndefined();
+	});
+
+	it("disqualifies a recycled toolCallId with partial journal coverage and falls back to elision for both occurrences", () => {
+		const entries: SessionEntry[] = [
+			...danglingToolCallEntries,
+			{
+				type: "message",
+				id: "m4",
+				parentId: "m2",
+				timestamp,
+				message: {
+					role: "assistant",
+					// Same toolCallId recycled by the provider for a second, still-dangling call.
+					content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "sleep 30" } }],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-sonnet-4-5",
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 3,
+				},
+			},
+			// Only the SECOND occurrence's started record is journaled — a short
+			// pairing (1 branch start, 2 transcript occurrences) that the cursor's
+			// totality gate must disqualify for every occurrence of the id.
+			{
+				type: "tool_execution_started",
+				id: "j1",
+				parentId: "m4",
+				timestamp,
+				recordVersion: 1,
+				executionId: toolExecutionId("exec-SCTX0002"),
+				call: { toolCallId: "call-1", toolName: "bash", title: "second occurrence", kind: "execute" },
+				presentation: { version: 1, facts: [] },
+			},
+		];
+
+		const context = buildSessionContext(entries, undefined, undefined, { transcript: true });
+
+		expect(danglingCallIds(context.messages)).toEqual([]);
+		const assistants = context.messages.filter(message => message.role === "assistant");
+		expect(assistants).toHaveLength(2);
+		for (const assistant of assistants) {
+			expect((assistant as AgentMessage & InterruptedToolCallsMarker).interruptedToolCalls).toBeUndefined();
+		}
+		expect((assistants[1] as AgentMessage & StrippedToolCallsMarker).strippedToolCalls).toBe(1);
+	});
+
+	it("uses the collapsed transcript's own window when a recycled toolCallId's earlier start sits before the compaction cut (disqualification-loss)", () => {
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "m1",
+				parentId: null,
+				timestamp,
+				message: { role: "user", content: [{ type: "text", text: "start" }], timestamp: 1 },
+			},
+			{
+				type: "message",
+				id: "m2",
+				parentId: "m1",
+				timestamp,
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "echo AAA111" } }],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-sonnet-4-5",
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 2,
+				},
+			},
+			// Pre-compaction started record for call-1 — dropped from the collapsed
+			// transcript's `messages`, but still on the full `path` lineage.
+			{
+				type: "tool_execution_started",
+				id: "j1",
+				parentId: "m2",
+				timestamp,
+				recordVersion: 1,
+				executionId: toolExecutionId("exec-SCTX0003"),
+				call: { toolCallId: "call-1", toolName: "bash", title: "Run FIXTURE_MARKER_SCTX0003_PRE", kind: "execute" },
+				presentation: { version: 1, facts: [] },
+			},
+			{
+				type: "message",
+				id: "m3",
+				parentId: "j1",
+				timestamp,
+				message: { role: "user", content: [{ type: "text", text: "keep-start" }], timestamp: 3 },
+			},
+			{
+				type: "compaction",
+				id: "c1",
+				parentId: "m3",
+				timestamp,
+				summary: "summary",
+				firstKeptEntryId: "m3",
+				tokensBefore: 123,
+			},
+			{
+				type: "message",
+				id: "m4",
+				parentId: "c1",
+				timestamp,
+				message: { role: "user", content: [{ type: "text", text: "after compaction" }], timestamp: 4 },
+			},
+			{
+				type: "message",
+				id: "m5",
+				parentId: "m4",
+				timestamp,
+				message: {
+					role: "assistant",
+					// Same toolCallId recycled by the provider post-compaction, still dangling.
+					content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "echo BBB222" } }],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-sonnet-4-5",
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 5,
+				},
+			},
+			// Post-compaction started record for the recycled call — inside the
+			// collapsed window, and the only one an aligned totality gate should see.
+			{
+				type: "tool_execution_started",
+				id: "j2",
+				parentId: "m5",
+				timestamp,
+				recordVersion: 1,
+				executionId: toolExecutionId("exec-SCTX0004"),
+				call: {
+					toolCallId: "call-1",
+					toolName: "bash",
+					title: "Run FIXTURE_MARKER_SCTX0004_POST",
+					kind: "execute",
+				},
+				presentation: { version: 1, facts: [] },
+			},
+		];
+
+		const context = buildSessionContext(entries, undefined, undefined, {
+			transcript: true,
+			collapseCompactedHistory: true,
+		});
+
+		expect(danglingCallIds(context.messages)).toEqual([]);
+		const assistant = context.messages.find(message => message.role === "assistant" && message.content.length === 0);
+		expect(assistant).toBeDefined();
+		// Fixed behaviour: the post-compaction start is the only one inside the
+		// collapsed window, so the totality gate is total and resolves this call
+		// to an interrupted card carrying its OWN (post-compaction) record —
+		// never disqualified by the pre-compaction start the transcript no
+		// longer contains.
+		expect((assistant as AgentMessage & StrippedToolCallsMarker).strippedToolCalls).toBeUndefined();
+		const interrupted = (assistant as AgentMessage & InterruptedToolCallsMarker).interruptedToolCalls;
+		expect(interrupted).toEqual([
+			{
+				state: "interrupted",
+				call: {
+					toolCallId: "call-1",
+					toolName: "bash",
+					title: "Run FIXTURE_MARKER_SCTX0004_POST",
+					kind: "execute",
+				},
+				reason: expect.stringContaining("Interrupted"),
+				presentation: { version: 1, facts: [] },
+			},
+		]);
+	});
+
+	it("never misattributes a recycled toolCallId's pre-compaction record to the collapsed transcript's post-compaction call", () => {
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "m1",
+				parentId: null,
+				timestamp,
+				message: { role: "user", content: [{ type: "text", text: "start" }], timestamp: 1 },
+			},
+			{
+				type: "message",
+				id: "m2",
+				parentId: "m1",
+				timestamp,
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "echo AAA111" } }],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-sonnet-4-5",
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 2,
+				},
+			},
+			// The ONLY started record for call-1 on the whole branch, and it
+			// belongs to the pre-compaction call above — dropped from the
+			// collapsed transcript's `messages`, but still on the full `path`.
+			{
+				type: "tool_execution_started",
+				id: "j1",
+				parentId: "m2",
+				timestamp,
+				recordVersion: 1,
+				executionId: toolExecutionId("exec-SCTX0005"),
+				call: { toolCallId: "call-1", toolName: "bash", title: "Run FIXTURE_MARKER_SCTX0005_PRE", kind: "execute" },
+				presentation: { version: 1, facts: [] },
+			},
+			{
+				type: "message",
+				id: "m3",
+				parentId: "j1",
+				timestamp,
+				message: { role: "user", content: [{ type: "text", text: "keep-start" }], timestamp: 3 },
+			},
+			{
+				type: "compaction",
+				id: "c1",
+				parentId: "m3",
+				timestamp,
+				summary: "summary",
+				firstKeptEntryId: "m3",
+				tokensBefore: 123,
+			},
+			{
+				type: "message",
+				id: "m4",
+				parentId: "c1",
+				timestamp,
+				message: { role: "user", content: [{ type: "text", text: "after compaction" }], timestamp: 4 },
+			},
+			{
+				type: "message",
+				id: "m5",
+				parentId: "m4",
+				timestamp,
+				message: {
+					role: "assistant",
+					// Recycled toolCallId, post-compaction, and journals NO started
+					// record of its own — the only start in the full branch is the
+					// pre-compaction one above, which an unaligned totality gate
+					// (full `path` starts vs trimmed `messages` occurrences: 1 == 1)
+					// would wrongly accept and hand to this call.
+					content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "echo BBB222" } }],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-sonnet-4-5",
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 5,
+				},
+			},
+		];
+
+		const context = buildSessionContext(entries, undefined, undefined, {
+			transcript: true,
+			collapseCompactedHistory: true,
+		});
+
+		expect(danglingCallIds(context.messages)).toEqual([]);
+		const assistant = context.messages.find(message => message.role === "assistant" && message.content.length === 0);
+		expect(assistant).toBeDefined();
+		// Fixed behaviour: the collapsed window holds no `tool_execution_started`
+		// record for call-1 at all (the only one is pre-compaction, outside the
+		// window), so this call must fall back to the plain elision count —
+		// never render the earlier execution's title under its own name.
+		expect((assistant as AgentMessage & InterruptedToolCallsMarker).interruptedToolCalls).toBeUndefined();
+		expect((assistant as AgentMessage & StrippedToolCallsMarker).strippedToolCalls).toBe(1);
 	});
 });
 

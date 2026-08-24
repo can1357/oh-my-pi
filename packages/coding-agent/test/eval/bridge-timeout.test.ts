@@ -151,7 +151,7 @@ it("defers external aborts until an in-flight agent bridge call resumes", async 
 	expect(await observed.promise).toBe(false);
 	release.resolve();
 	const result = await resultPromise;
-	expect(result.cancelled).toBe(true);
+	expect(result.termination !== undefined).toBe(true);
 	expect(result.exitCode).toBeUndefined();
 });
 
@@ -197,7 +197,7 @@ it("does not defer external aborts for a completion bridge call", async () => {
 	expect(await observed.promise).toBe(true);
 	release.resolve();
 	const result = await resultPromise;
-	expect(result.cancelled).toBe(true);
+	expect(result.termination !== undefined).toBe(true);
 	expect(result.exitCode).toBeUndefined();
 });
 

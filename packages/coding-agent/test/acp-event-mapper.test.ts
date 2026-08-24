@@ -19,7 +19,6 @@ import { AcpAgent } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import {
 	type AcpEventMapperOptions,
 	buildToolCallStartUpdate,
-	deliveredOverlap,
 	mapAgentSessionEventToAcpSessionUpdates,
 	normalizeReplayToolArguments,
 } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-event-mapper";
@@ -40,18 +39,28 @@ import { expectAcpStructure, expectAcpStructureRejects } from "./helpers/acp-sch
  * sits one layer above the mapper, so without this wrapper the bulk of ACP
  * frame coverage — every test that calls the mapper directly — validated only
  * against the ACP JSON schema, which by design says nothing about Zed's
- * renderer rules. That gap is how a `[terminal, text]` frame shipped before
- * the guard that rejects it existed.
+ * renderer rules. That gap is how a `[terminal, text]` frame can pass
+ * schema validation while violating that renderer rule — the invariant
+ * check below exists specifically to catch it before it reaches a client.
  *
  * The capability context is the mapper's own options, so a test can never
  * assert one negotiation state while the check assumes another.
  *
- * Also runs `evalSourceAuditor` (rule 13) over the same frames: a per-frame
+ * Also runs `evalSourceAuditor` (doc rule 6) over the same frames: a per-frame
  * check has no notion of "the call this frame belongs to", so it cannot
  * catch a sequence that never once delivers an eval call's own source — the
- * bug class — it has a sibling in the eval-image fallback. Reset per test
- * in `beforeEach` below so ids reused across tests (`"tc-1"`, etc.) never
- * leak state between them.
+ * bug class, with a sibling case
+ * in the eval-image fallback. This suite's built-in-`eval`-shaped fixtures
+ * (`toolName: "eval"` with `args`/`getToolArgs`, no `getToolSource`) now
+ * exercise the auditor's one surviving real seam: an *external* tool
+ * literally named `eval` still reaches this generic mapper branch on a
+ * `terminalMetaCapable` client (`wantsMetaTerminal` matches on name alone,
+ * with no built-in-origin check) — the actual built-in `eval` tool is routed
+ * away from this mapper entirely (`acp-agent.ts`'s `legacyEvalSource`
+ * dispatch) onto `reduceAcpToolView`, whose own generalized guard is
+ * `PresentationDeliveryLedger.checkSourceEcho`. Reset
+ * per test in `beforeEach` below so ids reused across tests (`"tc-1"`, etc.)
+ * never leak state between them.
  */
 let evalSourceAuditor = new EvalSourceDeliveryAuditor();
 beforeEach(() => {
@@ -62,15 +71,15 @@ beforeEach(() => {
  * `checkAcpUpdateInvariants`/`EvalSourceDeliveryAuditor` check frame *shape*
  * and the eval *source* respectively; neither has any notion of "did every
  * fact the producer recorded structurally survive onto this frame" — the
- * general form of the artifact-pointer/notice losses (rule 12/15). Running
+ * general form of the artifact-pointer/notice losses (mechanism 2). Running
  * `producerFacts`/`frameTexts` here, on every `tool_execution_end` this ~90
  * test suite builds, is what the matrix in `acp-producer-wire.test.ts`
  * cannot do by itself: that matrix's own fixtures are real producer results,
  * but no row produces both an image and a details-only fact, so the axis
  * this check exists for had zero coverage there. This suite's fixtures are
- * hand-fabricated, so they *can* combine any shape — the fact-delivery
- * check is only meaningful when a fixture actually declares a fact, which
- * is why the new regression tests
+ * hand-fabricated, so they
+ * *can* combine any shape — the fact-delivery check is only meaningful when
+ * a fixture actually declares a fact, which is why the new regression tests
  * for this finding set `details.notice`/`errorMessage` explicitly instead of
  * relying on this generic check to invent one.
  */
@@ -188,6 +197,40 @@ class ReplayTestSession {
 }
 
 describe("ACP event mapper", () => {
+	it("keeps an eval result with no known builtin provenance on the generic mapper path", () => {
+		// `getToolSource` was removed from `AcpEventMapperOptions`: the mapper no
+		// longer branches on tool provenance for edit/eval at all — that
+		// dispatch now happens entirely in `acp-agent.ts` before the mapper is
+		// ever called (see the real-route eval adapter tests in
+		// `acp-agent.test.ts`). This exercises the one remaining generic arm:
+		// an eval end with no special-cased provenance still derives its
+		// content through the generic extractors and reaches the wire through
+		// the checked tool-frame encoder, whose `rawOutput` is the bounded
+		// `AcpToolDiagnostic` settlement marker (view/frames.ts) — never the
+		// tool's raw result (a stray unmodelled `details.notice` field is
+		// silently ignored rather than surfacing on the wire).
+		const result = { content: [{ type: "text", text: "external eval" }], details: { notice: 42 } };
+		const updates = mapUpdates(
+			{
+				type: "tool_execution_end",
+				toolCallId: "external-eval-mapper",
+				toolName: "eval",
+				isError: false,
+				result,
+			} as AgentSessionEvent,
+			"session-1",
+		);
+		const update = updates[0]!.update as { content?: unknown; status?: string; rawOutput?: unknown };
+		expect(update.status).toBe("completed");
+		expect(update.content).toEqual([{ type: "content", content: { type: "text", text: "```\nexternal eval\n```" } }]);
+		// Bounded, redacted settlement marker only — never the raw `result` above
+		// (Zed's `acp_thread.rs` gates tool-output-refusal classification on
+		// `raw_output.is_some()` for a completed call; dropping the field
+		// entirely would misclassify a later refusal as a rejection of the
+		// user's prompt and truncate the visible turn).
+		expect(update.rawOutput).toEqual({ kind: "tool_settlement", tool: "eval", outcome: "completed" });
+		expect(JSON.stringify(update.rawOutput)).not.toContain("external eval");
+	});
 	it("attaches a stable messageId to live assistant chunks", () => {
 		const assistantMessage = makeAssistantMessage("chunk");
 		const getMessageId = (message: unknown): string | undefined =>
@@ -1148,7 +1191,7 @@ describe("ACP event mapper", () => {
 		expect((applyPatchStart[0]!.update as { title?: string }).title).toBe("Edit src/baz.ts");
 	});
 
-	it("resolves live image blob refs for ACP content without expanding rawOutput", () => {
+	it("resolves live image blob refs for ACP content, with no rawOutput channel to leak the unresolved ref through", () => {
 		const blobRef = "blob:sha256:77467fcfe2bbdc034e0eabb4778c9d7de521c0d7c3e0d0a62566468e4d7da3a5";
 		const resolvedImageData = "resolved-webp-base64";
 		const events: AgentSessionEvent[] = [
@@ -1191,7 +1234,18 @@ describe("ACP event mapper", () => {
 				{ type: "content", content: { type: "image", data: resolvedImageData, mimeType: "image/webp" } },
 			]);
 			expect(JSON.stringify(update.content)).not.toContain("blob:sha256:");
-			expect(JSON.stringify(update.rawOutput)).toContain(blobRef);
+			if (event.type === "tool_execution_update") {
+				// A non-settling progress frame carries no `AcpToolDiagnostic` and
+				// therefore no `rawOutput` at all (`view/encoder.ts`).
+				expect(Object.hasOwn(update, "rawOutput")).toBe(false);
+			} else {
+				// The settlement frame's `rawOutput` is the bounded `AcpToolDiagnostic`
+				// marker, never the raw result — so the unresolved blob ref cannot leak
+				// through this channel either, unlike the old
+				// `rawOutput: event.result` passthrough this replaces.
+				expect(update.rawOutput).toEqual({ kind: "tool_settlement", tool: "generate_image", outcome: "completed" });
+				expect(JSON.stringify(update.rawOutput)).not.toContain("blob:sha256:");
+			}
 		}
 	});
 
@@ -1621,8 +1675,8 @@ describe("ACP event mapper", () => {
 		// so without re-deriving the notice from `details.meta`, the
 		// recovery link and the "bytes were elided" acknowledgement vanish
 		// entirely for every large bash call. This is the same underlying gap
-		// as the "no acknowledgement when a producer silently drops bytes" case
-		// elsewhere.
+		// as any other path where a producer silently drops bytes without
+		// ever surfacing an acknowledgement that they were dropped.
 		const updates = mapUpdates(
 			{
 				type: "tool_execution_end",
@@ -2143,7 +2197,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("routes eval images through a plain content card instead of the terminal-only one", () => {
-		// Regression test, round 3 of the same finding: Zed's `has_terminals`
+		// Regression test: Zed's `has_terminals`
 		// drops *every* sibling `content` item once a `terminal` item exists —
 		// not just text (see `docs/acp-development.md`'s "Do" rule). Images
 		// have no `_meta.terminal_output`-style byte-stream equivalent either
@@ -2180,9 +2234,9 @@ describe("ACP event mapper", () => {
 		expect(end.content).toEqual([
 			// The eval source has no other rendered channel once the terminal
 			// item is dropped from this update (see `buildMetaTerminalOutput`'s
-			// doc comment) — this was the same finding class as the dangling-
-			// replay fix, round 4: `buildToolStartContent` is the same source
-			// echo the non-meta fallback already prepends, kept in sync for free.
+			// doc comment), so `buildToolStartContent` — the same source
+			// echo the non-meta fallback already prepends — is reused here too,
+			// keeping both paths in sync for free.
 			{ type: "content", content: { type: "text", text: "[py]\nplt.show()" } },
 			{ type: "content", content: { type: "text", text: "```\n(displayed 1 image; no text output)\n```" } },
 			{ type: "content", content: { type: "image", data: imageData, mimeType: "image/png" } },
@@ -2357,7 +2411,13 @@ describe("ACP event mapper", () => {
 		expect(occurrences).toBe(1);
 	});
 
-	it("streams cumulative output through the meta-terminal convention on tool_execution_update", () => {
+	it("publishes no live meta-terminal output on tool_execution_update, only the started terminal reference", () => {
+		// Regression test: the mapper used to convert a growing cumulative
+		// snapshot into an append-only delta on every `tool_execution_update`
+		// (`buildMetaTerminalDelta`, deleted). A producer only guarantees a
+		// *cumulative snapshot of a bounded tail window*, never an append-safe
+		// byte offset, so no update may publish partial `terminal_output` —
+		// settlement is the one moment the whole body is knowable.
 		const updates = mapUpdates(
 			{
 				type: "tool_execution_update",
@@ -2377,90 +2437,22 @@ describe("ACP event mapper", () => {
 			_meta?: Record<string, unknown>;
 		};
 		expect(update.status).toBe("in_progress");
-		// No incremental `content` story for a meta-terminal call (see
-		// `wantsMetaTerminal`'s doc) — the cumulative-so-far text instead lands in
-		// `_meta.terminal_output`, same shape `tool_execution_end` uses, so the
-		// terminal fills in live instead of staying blank until completion.
 		expect(update.content).toBeUndefined();
-		expect(update._meta).toEqual({
-			terminal_output: { terminal_id: "tc-eval-progress", data: `print('hi')\n${"─".repeat(48)}\nhi\nmore` },
-		});
+		expect("_meta" in update).toBe(false);
 	});
 
-	it("emits only the new bytes on tool_execution_end after a tool_execution_update already streamed a prefix", () => {
-		// Regression test: Zed appends `terminal_output.data` to the terminal's
-		// buffer rather than replacing it, so resending the full cumulative
-		// snapshot at both `tool_execution_update` and `tool_execution_end`
-		// duplicates every byte already streamed. `getMetaTerminalSent`/
-		// `setMetaTerminalSent` must be backed by the same state across both
-		// calls for the delta to be computed correctly.
-		const sent = new Map<string, string>();
-		const options = {
-			terminalMetaCapable: true,
-			getMetaTerminalSent: (id: string) => sent.get(id),
-			setMetaTerminalSent: (id: string, text: string) => {
-				sent.set(id, text);
-			},
-		};
-		const updateUpdates = mapUpdates(
-			{
-				type: "tool_execution_update",
-				toolCallId: "tc-eval-delta",
-				toolName: "eval",
-				args: { language: "py", title: "hello", code: "print('hi')" },
-				partialResult: { content: [{ type: "text", text: "hi" }], details: {} },
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const update = updateUpdates[0]!.update as { _meta?: Record<string, unknown> };
-		expect(update._meta).toEqual({
-			terminal_output: { terminal_id: "tc-eval-delta", data: `print('hi')\n${"─".repeat(48)}\nhi` },
-		});
-
-		const endUpdates = mapUpdates(
-			{
-				type: "tool_execution_end",
-				toolCallId: "tc-eval-delta",
-				toolName: "eval",
-				isError: false,
-				result: { content: [{ type: "text", text: "hi\nmore" }], details: {} },
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const end = endUpdates[0]!.update as { _meta?: Record<string, unknown> };
-		// Only the newly-appended "\nmore" — never the "print('hi')" header or
-		// "hi" already delivered by the update above.
-		expect(end._meta).toEqual({
-			terminal_output: { terminal_id: "tc-eval-delta", data: "\nmore" },
-			terminal_exit: { terminal_id: "tc-eval-delta", exit_code: 0, signal: null },
-		});
-	});
-
-	it("streams past the 4000-char ACP_TEXT_LIMIT without stalling or truncating meta-terminal output", () => {
+	it("publishes the whole body exactly once at settlement, with no header repeated and no bytes lost across a large run", () => {
 		// Regression test: `extractTerminalStreamText` must not run the
-		// meta-terminal snapshot through `limitText`. A terminal is an
+		// settlement snapshot through `limitText`. A terminal is an
 		// append-only byte stream, not a text content block — clamping the
-		// snapshot to `ACP_TEXT_LIMIT` (4000 chars) makes every snapshot past
-		// that size byte-identical to the previous one once truncated, so
-		// `buildMetaTerminalDelta` sees no change and drops the rest of the
-		// stream, including the final `tool_execution_end` payload.
-		const sent = new Map<string, string>();
-		const options = {
-			terminalMetaCapable: true,
-			getMetaTerminalSent: (id: string) => sent.get(id),
-			setMetaTerminalSent: (id: string, text: string) => {
-				sent.set(id, text);
-			},
-		};
+		// final body to `ACP_TEXT_LIMIT` (4,000 chars) would silently drop
+		// everything past that size.
 		const args = { language: "py", title: "hello", code: "print('hi')" };
 		const header = `print('hi')\n${"─".repeat(48)}\n`;
 		let raw = "";
-		let delivered = "";
 		for (let i = 0; i < 20; i++) {
 			raw += `line ${i} ${"y".repeat(500)}\n`;
-			const updates = mapUpdates(
+			mapUpdates(
 				{
 					type: "tool_execution_update",
 					toolCallId: "tc-eval-large",
@@ -2469,11 +2461,8 @@ describe("ACP event mapper", () => {
 					partialResult: { content: [{ type: "text", text: raw }], details: {} },
 				} as AgentSessionEvent,
 				"session-1",
-				options,
+				{ terminalMetaCapable: true },
 			);
-			const update = updates[0]!.update as { _meta?: { terminal_output?: { data: string } } };
-			const data = update._meta?.terminal_output?.data;
-			if (data) delivered += data;
 		}
 		expect(raw.length).toBeGreaterThan(4000);
 		const endUpdates = mapUpdates(
@@ -2485,955 +2474,10 @@ describe("ACP event mapper", () => {
 				result: { content: [{ type: "text", text: raw }], details: {} },
 			} as AgentSessionEvent,
 			"session-1",
-			options,
+			{ terminalMetaCapable: true, getToolArgs: () => args },
 		);
 		const end = endUpdates[0]!.update as { _meta?: { terminal_output?: { data: string } } };
-		if (end._meta?.terminal_output?.data) delivered += end._meta.terminal_output.data;
-		// The header is sent exactly once, up front; every raw byte follows
-		// verbatim, with no truncation, no duplication, and no trailing-newline
-		// loss — `extractTerminalStreamText` preserves terminal snapshots as
-		// append-only process bytes instead of trimming them like the
-		// text-content path.
-		expect(delivered).toBe(header + raw);
-	});
-
-	it("splices only the undelivered remainder when a snapshot rolls its tail window forward without being a plain extension", () => {
-		// A bounded tail buffer's window can roll forward such that the new
-		// snapshot is neither a superset nor a subset of what was delivered
-		// (old leading bytes fell off the window). `terminal_output.data` is
-		// append-only, so the delta must be exactly the bytes past the overlap
-		// with what's already on screen — never the whole rolled window.
-		const sent = new Map<string, string>();
-		const options = {
-			terminalMetaCapable: true,
-			getMetaTerminalSent: (id: string) => sent.get(id),
-			setMetaTerminalSent: (id: string, text: string) => {
-				sent.set(id, text);
-			},
-		};
-		mapUpdates(
-			{
-				type: "tool_execution_update",
-				toolCallId: "tc-roll",
-				toolName: "bash",
-				args: { command: "seq 1 100000" },
-				partialResult: { content: [{ type: "text", text: "line1\nline2\nline3" }], details: {} },
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const rolled = mapUpdates(
-			{
-				type: "tool_execution_update",
-				toolCallId: "tc-roll",
-				toolName: "bash",
-				args: { command: "seq 1 100000" },
-				// The window dropped "line1\n" off the front and gained "line4" at
-				// the back — an overlap of "line2\nline3", not a superset.
-				partialResult: { content: [{ type: "text", text: "line2\nline3\nline4" }], details: {} },
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const update = rolled[0]!.update as { _meta?: Record<string, unknown> };
-		expect(update._meta).toEqual({
-			terminal_output: { terminal_id: "tc-roll", data: "\nline4" },
-		});
-	});
-
-	it("resolves overlap correctly when it exceeds the old fixed 4096-byte trial cap", () => {
-		// The naive longest-candidate-first scan this superseded only tried
-		// suffixes up to MAX_OVERLAP_TRIAL_BYTES (4096); a tail-buffer roll on
-		// eval's 100 KB / bash's 50 KB window commonly overlaps by far more
-		// than that, which made the old scan return 0 and suppress the rest of
-		// the stream. Build a rollover whose genuine overlap is well past 4096
-		// bytes and confirm only the truly new bytes are delivered.
-		const sent = new Map<string, string>();
-		const options = {
-			terminalMetaCapable: true,
-			getMetaTerminalSent: (id: string) => sent.get(id),
-			setMetaTerminalSent: (id: string, text: string) => {
-				sent.set(id, text);
-			},
-		};
-		const lines = Array.from({ length: 200 }, (_, i) => `line ${i} ${"y".repeat(40)}`);
-		const full = `${lines.join("\n")}\n`;
-		const droppedPrefix = `${lines.slice(0, 10).join("\n")}\n`;
-		const overlap = full.slice(droppedPrefix.length);
-		expect(overlap.length).toBeGreaterThan(4096);
-		mapUpdates(
-			{
-				type: "tool_execution_update",
-				toolCallId: "tc-big-roll",
-				toolName: "bash",
-				args: { command: "seq 1 200" },
-				partialResult: { content: [{ type: "text", text: full }], details: {} },
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const rolled = mapUpdates(
-			{
-				type: "tool_execution_update",
-				toolCallId: "tc-big-roll",
-				toolName: "bash",
-				args: { command: "seq 1 200" },
-				partialResult: { content: [{ type: "text", text: `${overlap}NEW_LINE_APPENDED` }], details: {} },
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const update = rolled[0]!.update as { _meta?: Record<string, unknown> };
-		expect(update._meta).toEqual({
-			terminal_output: { terminal_id: "tc-big-roll", data: "NEW_LINE_APPENDED" },
-		});
-	});
-
-	it("does not diff a column-truncated final result against the raw watermark as a discontinuity (regression: false rollover resync)", () => {
-		// Wire capture: a long single-line eval output streams raw via
-		// tool_execution_update, but eval.ts's tool_execution_end result is a
-		// *display re-render* for the model — truncated per-line at
-		// `tools.maxColumn` (768 chars) with `details.meta.limits.
-		// columnTruncated` set. Diffing that re-render against the raw
-		// watermark via `deliveredOverlap` found zero overlap (the truncated
-		// line's suffix never matches the raw tail's), which fired the
-		// rollover-resync branch: a false "[terminal output discontinuity:
-		// earlier bytes were dropped]" notice plus a *re-send* of the
-		// (already-truncated) re-rendered text, even though every byte had
-		// already reached the client live. Neither must happen once a prefix
-		// has already streamed for this call.
-		const sent = new Map<string, string>();
-		const options = {
-			terminalMetaCapable: true,
-			getMetaTerminalSent: (id: string) => sent.get(id),
-			setMetaTerminalSent: (id: string, text: string) => {
-				sent.set(id, text);
-			},
-		};
-		const raw = "A".repeat(30000);
-		mapUpdates(
-			{
-				type: "tool_execution_update",
-				toolCallId: "tc-column-truncated",
-				toolName: "eval",
-				args: { language: "python", code: "sys.stdout.write('A' * 30000)" },
-				partialResult: { content: [{ type: "text", text: raw }], details: {} },
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const rendered = `${"A".repeat(768)}…`;
-		const endUpdates = mapUpdates(
-			{
-				type: "tool_execution_end",
-				toolCallId: "tc-column-truncated",
-				toolName: "eval",
-				isError: false,
-				result: {
-					content: [{ type: "text", text: rendered }],
-					details: { meta: { limits: { columnTruncated: { maxColumn: 768 } } } },
-				},
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const end = endUpdates[0]!.update as { _meta?: Record<string, unknown> };
-		// No discontinuity notice, no re-sent body — only the terminal's
-		// lifecycle finalizing plus the genuinely new fact
-		// (`details.meta.limits.columnTruncated`) that only the discarded final
-		// body carried; `extractTerminalNotices` recovers it instead of losing
-		// it the way `details.notices` alone would (finding 2, review
-		// 4821242767: a fact that exists only in `details.meta`/the tool's own
-		// text is invisible to the terminal-content path unless something
-		// re-derives it structurally).
-		const meta = { limits: { columnTruncated: { maxColumn: 768 } } };
-		expect(end._meta).toEqual({
-			terminal_output: { terminal_id: "tc-column-truncated", data: `\n${formatOutputNotice(meta).trim()}\n` },
-			terminal_exit: { terminal_id: "tc-column-truncated", exit_code: 0, signal: null },
-		});
-	});
-
-	it("still surfaces bash's exit notices on a column-truncated final result instead of dropping them entirely", () => {
-		// Same hazard as above, but for bash: `details.notices` (wall time,
-		// artifact pointer) must still reach the client through _meta even
-		// though the truncated body itself is no longer re-diffed — and so
-		// must `details.meta.limits.columnTruncated`, the genuine fact that
-		// was only otherwise visible in that same discarded body text
-		// (finding 2, review 4821242767).
-		const sent = new Map<string, string>();
-		const options = {
-			terminalMetaCapable: true,
-			getMetaTerminalSent: (id: string) => sent.get(id),
-			setMetaTerminalSent: (id: string, text: string) => {
-				sent.set(id, text);
-			},
-		};
-		const raw = "A".repeat(30000);
-		mapUpdates(
-			{
-				type: "tool_execution_update",
-				toolCallId: "tc-bash-column-truncated",
-				toolName: "bash",
-				args: { command: "head -c 30000 /dev/zero | tr '\\0' 'A'" },
-				partialResult: { content: [{ type: "text", text: raw }], details: {} },
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const rendered = `${"A".repeat(768)}…\n\nWall time: 0.02 seconds\n\n[Some lines truncated to 768 chars]`;
-		const endUpdates = mapUpdates(
-			{
-				type: "tool_execution_end",
-				toolCallId: "tc-bash-column-truncated",
-				toolName: "bash",
-				isError: false,
-				result: {
-					content: [{ type: "text", text: rendered }],
-					details: {
-						notices: ["Wall time: 0.02 seconds"],
-						meta: { limits: { columnTruncated: { maxColumn: 768 } } },
-					},
-				},
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const end = endUpdates[0]!.update as { _meta?: Record<string, unknown> };
-		const meta = { limits: { columnTruncated: { maxColumn: 768 } } };
-		expect(end._meta).toEqual({
-			terminal_output: {
-				terminal_id: "tc-bash-column-truncated",
-				data: `\nWall time: 0.02 seconds\n\n${formatOutputNotice(meta).trim()}\n`,
-			},
-			terminal_exit: { terminal_id: "tc-bash-column-truncated", exit_code: 0, signal: null },
-		});
-	});
-
-	it("does not report a discontinuity when the final result merely re-normalizes whitespace it already streamed", () => {
-		// Regression test: the
-		// re-render markers (`limits.columnTruncated`, `truncation`) are not
-		// the only way a `tool_execution_end` result stops being a byte-wise
-		// continuation of the streamed watermark. `eval.ts` builds its final
-		// output from `result.output.trim()`, so streamed "  indented\n"
-		// becomes "indented" with *no* meta marker at all: no suffix of the
-		// watermark is a prefix of the final text, `deliveredOverlap` reads
-		// zero, and the rollover-resync branch fabricates a data-loss warning
-		// plus a duplicate re-send of output the user is already looking at.
-		// On the final frame of a call that has already streamed, a
-		// non-continuation must never be reported as dropped bytes.
-		const sent = new Map<string, string>();
-		const options = {
-			terminalMetaCapable: true,
-			getMetaTerminalSent: (id: string) => sent.get(id),
-			setMetaTerminalSent: (id: string, text: string) => {
-				sent.set(id, text);
-			},
-		};
-		mapUpdates(
-			{
-				type: "tool_execution_update",
-				toolCallId: "tc-trimmed",
-				toolName: "eval",
-				args: { language: "python", code: "print('  indented')" },
-				partialResult: { content: [{ type: "text", text: "  indented\n" }], details: {} },
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const endUpdates = mapUpdates(
-			{
-				type: "tool_execution_end",
-				toolCallId: "tc-trimmed",
-				toolName: "eval",
-				isError: false,
-				result: { content: [{ type: "text", text: "indented" }], details: {} },
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const end = endUpdates[0]!.update as { _meta?: Record<string, unknown> };
-		expect(end._meta).toEqual({
-			terminal_exit: { terminal_id: "tc-trimmed", exit_code: 0, signal: null },
-		});
-	});
-
-	it("does not report a discontinuity when eval substitutes '(no output)' for an all-whitespace stream", () => {
-		// Regression test: the prior
-		// fix only handled the final result being no
-		// *longer* than the watermark. `eval.ts` also substitutes `(no
-		// output)` for a stream that was all whitespace — final.length (11)
-		// now *exceeds* the raw watermark's length (4, "   \n"), which the
-		// growth branch unconditionally trusted as genuine new output. Zero
-		// overlap between "   \n" and "(no output)" then fired the same false
-		// discontinuity + duplicate re-send this whole mechanism exists to
-		// prevent — just via the grow side instead of the shrink side.
-		const sent = new Map<string, string>();
-		const options = {
-			terminalMetaCapable: true,
-			getMetaTerminalSent: (id: string) => sent.get(id),
-			setMetaTerminalSent: (id: string, text: string) => {
-				sent.set(id, text);
-			},
-		};
-		mapUpdates(
-			{
-				type: "tool_execution_update",
-				toolCallId: "tc-whitespace-only",
-				toolName: "eval",
-				args: { language: "python", code: "print('   ')" },
-				partialResult: { content: [{ type: "text", text: "   \n" }], details: {} },
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const endUpdates = mapUpdates(
-			{
-				type: "tool_execution_end",
-				toolCallId: "tc-whitespace-only",
-				toolName: "eval",
-				isError: false,
-				result: { content: [{ type: "text", text: "(no output)" }], details: {} },
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const end = endUpdates[0]!.update as { _meta?: Record<string, unknown> };
-		// No discontinuity and no re-send of the whitespace — but `(no output)`
-		// itself never streamed, so `undeliveredBodyLines` delivers that one
-		// line. Without it the terminal shows four spaces and stops, and the
-		// substitution the producer made to explain the empty run is invisible.
-		expect(end._meta).toEqual({
-			terminal_output: { terminal_id: "tc-whitespace-only", data: "\n(no output)\n" },
-			terminal_exit: { terminal_id: "tc-whitespace-only", exit_code: 0, signal: null },
-		});
-	});
-
-	it("does not report a discontinuity when a trailing-newline mismatch survives trimming plus a synthesized exit-code suffix", () => {
-		// Same class, via the other growth path Codex named: a nonzero eval's
-		// trimmed output gains a synthesized "Command exited with code N"
-		// suffix. The raw watermark's trailing newline count doesn't line up
-		// with the trimmed+suffixed final text, so `deliveredOverlap` finds
-		// zero even though the core content ("hello") is identical.
-		const sent = new Map<string, string>();
-		const options = {
-			terminalMetaCapable: true,
-			getMetaTerminalSent: (id: string) => sent.get(id),
-			setMetaTerminalSent: (id: string, text: string) => {
-				sent.set(id, text);
-			},
-		};
-		mapUpdates(
-			{
-				type: "tool_execution_update",
-				toolCallId: "tc-trailing-newlines",
-				toolName: "eval",
-				args: { language: "python", code: "print('hello')" },
-				partialResult: { content: [{ type: "text", text: "hello\n\n\n" }], details: {} },
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const endUpdates = mapUpdates(
-			{
-				type: "tool_execution_end",
-				toolCallId: "tc-trailing-newlines",
-				toolName: "eval",
-				isError: true,
-				result: { content: [{ type: "text", text: "hello\n\nCommand exited with code 1" }], details: {} },
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const end = endUpdates[0]!.update as { _meta?: Record<string, unknown> };
-		// The already-streamed "hello" is not re-sent, but the synthesized
-		// exit-code suffix is a fact this fixture declares nowhere structurally
-		// (no `details.notices`), so the body reconciliation is the only thing
-		// that gets it to a terminal-rendering client.
-		expect(end._meta).toEqual({
-			terminal_output: { terminal_id: "tc-trailing-newlines", data: "\nCommand exited with code 1\n" },
-			terminal_exit: { terminal_id: "tc-trailing-newlines", signal: null },
-		});
-	});
-
-	it("still diffs a genuine final-frame continuation whose growth overlaps the streamed watermark", () => {
-		// The fix above must not regress the legitimate case this mechanism
-		// exists to serve: real new bytes that only arrived in the final
-		// snapshot (no intervening tool_execution_update saw them). "hi" is a
-		// real suffix-of-watermark/prefix-of-final overlap, so this must
-		// still emit just the new bytes, not fall back to notices-only.
-		const sent = new Map<string, string>();
-		const options = {
-			terminalMetaCapable: true,
-			getMetaTerminalSent: (id: string) => sent.get(id),
-			setMetaTerminalSent: (id: string, text: string) => {
-				sent.set(id, text);
-			},
-		};
-		mapUpdates(
-			{
-				type: "tool_execution_update",
-				toolCallId: "tc-genuine-tail-growth",
-				toolName: "eval",
-				args: { language: "python", code: "print('hi', end='')" },
-				partialResult: { content: [{ type: "text", text: "hi" }], details: {} },
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const endUpdates = mapUpdates(
-			{
-				type: "tool_execution_end",
-				toolCallId: "tc-genuine-tail-growth",
-				toolName: "eval",
-				isError: false,
-				result: { content: [{ type: "text", text: "hi\nmore" }], details: {} },
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const end = endUpdates[0]!.update as { _meta?: { terminal_output?: { data: string } } };
-		expect(end._meta?.terminal_output?.data).toBe("\nmore");
-	});
-
-	it("does not diff a middle-elided final result against the raw watermark as a discontinuity", () => {
-		// Same class as the column-truncation case, via the other re-render
-		// mechanism named in review 4820560308: head/tail elision past the
-		// artifact-spill threshold sets `details.meta.truncation`, and the
-		// elided body shares no byte-for-byte suffix with the raw streamed
-		// tail. The genuine facts (bytes were dropped by the *producer*, and
-		// where to recover them) travel as notices, not as a fabricated
-		// terminal-stream discontinuity. `meta.truncation.artifactId` matches
-		// the id `details.notices` already names (both name the same spill,
-		// bash.ts's own `[raw output: artifact://N]` push and the sink's own
-		// `truncationFromSummary` describing the same elision) —
-		// `extractTerminalNotices` must not restate it a second time in a
-		// different wording.
-		const sent = new Map<string, string>();
-		const options = {
-			terminalMetaCapable: true,
-			getMetaTerminalSent: (id: string) => sent.get(id),
-			setMetaTerminalSent: (id: string, text: string) => {
-				sent.set(id, text);
-			},
-		};
-		mapUpdates(
-			{
-				type: "tool_execution_update",
-				toolCallId: "tc-elided",
-				toolName: "bash",
-				args: { command: "yes hello | head -c 60000" },
-				partialResult: { content: [{ type: "text", text: "hello\n".repeat(10000) }], details: {} },
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const endUpdates = mapUpdates(
-			{
-				type: "tool_execution_end",
-				toolCallId: "tc-elided",
-				toolName: "bash",
-				isError: false,
-				result: {
-					content: [{ type: "text", text: `${"hello\n".repeat(100)}… [elided] …\n${"hello\n".repeat(100)}` }],
-					details: {
-						notices: ["(output truncated)", "[raw output: artifact://7]"],
-						meta: {
-							truncation: {
-								direction: "middle",
-								truncatedBy: "middle",
-								totalLines: 20000,
-								totalBytes: 140000,
-								outputLines: 200,
-								outputBytes: 1400,
-								headRange: { start: 1, end: 100 },
-								tailRange: { start: 19901, end: 20000 },
-								elidedBytes: 40000,
-								elidedLines: 19700,
-								artifactId: "7",
-							},
-						},
-					},
-				},
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const end = endUpdates[0]!.update as { _meta?: Record<string, unknown> };
-		// The elided body is not re-diffed, but its elision marker is a line the
-		// client never received (the head/tail lines around it did stream), so
-		// the body reconciliation delivers exactly that one line ahead of the
-		// notices — the marker is the only in-band statement of *where* the gap
-		// is. Everything else stays suppressed: 200 already-streamed `hello`
-		// lines are recognised as delivered rather than re-sent.
-		expect(end._meta).toEqual({
-			terminal_output: {
-				terminal_id: "tc-elided",
-				data: "\n… [elided] …\n\n(output truncated)\n[raw output: artifact://7]\n",
-			},
-			terminal_exit: { terminal_id: "tc-elided", exit_code: 0, signal: null },
-		});
-	});
-
-	it("does not let a malformed diagnostics sibling re-arm the rollover/discontinuity bug on a valid truncation marker", () => {
-		// Regression test: `isDisplayReRendered` used to read `meta` through the
-		// all-or-nothing `asOutputMeta` — one malformed sibling field
-		// (`diagnostics.messages: null` here) rejected the *entire* `meta`
-		// object, discarding an otherwise-valid `truncation` marker along with
-		// it. That marker only matters on the *grow* path past bash's 50 KB
-		// rollover floor (`DEFAULT_MAX_BYTES`, `buildFinalMetaTerminalDelta`):
-		// a middle-elided head+tail summary can be genuinely longer than the
-		// live watermark it replaces (the watermark holds only the bounded
-		// tail buffer's window; the elided summary retains head *and* tail),
-		// and shares no byte-for-byte suffix with it. Losing the marker there
-		// reclassified that re-render as a plausible rollover continuation,
-		// which resynced via `deliveredOverlap` (zero, correctly, since it's
-		// not a continuation) and fired a false
-		// "[terminal output discontinuity]" notice plus a full re-send of the
-		// already-shown body — the exact review-4824091334 bug this marker
-		// exists to prevent, re-armed by an unrelated sibling's malformed
-		// shape.
-		const sent = new Map<string, string>();
-		const options = {
-			terminalMetaCapable: true,
-			getMetaTerminalSent: (id: string) => sent.get(id),
-			setMetaTerminalSent: (id: string, text: string) => {
-				sent.set(id, text);
-			},
-		};
-		// The live watermark: exactly bash's 50 KB rollover floor
-		// (`DEFAULT_MAX_BYTES`), one repeated character so its own content
-		// shares nothing with the elided summary below.
-		mapUpdates(
-			{
-				type: "tool_execution_update",
-				toolCallId: "tc-malformed-diagnostics-sibling",
-				toolName: "bash",
-				args: { command: "yes | head -c 51200" },
-				partialResult: { content: [{ type: "text", text: "y".repeat(51200) }], details: {} },
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const truncation = {
-			direction: "middle" as const,
-			truncatedBy: "middle" as const,
-			totalLines: 1,
-			totalBytes: 60000,
-			outputLines: 2,
-			outputBytes: 60000,
-			headRange: { start: 1, end: 1 },
-			tailRange: { start: 1, end: 1 },
-			elidedBytes: 0,
-			elidedLines: 0,
-			artifactId: "7",
-		};
-		// The final result: a middle-elided head+tail summary of *different*
-		// content ("a"/"b", disjoint from the watermark's "y") that totals
-		// more bytes (60013) than the watermark (51200) — the grow case, past
-		// the rollover floor, with zero real overlap. Only `isDisplayReRendered`
-		// (via `meta.truncation`) can correctly classify this as a re-render
-		// instead of a rollover.
-		const endUpdates = mapUpdates(
-			{
-				type: "tool_execution_end",
-				toolCallId: "tc-malformed-diagnostics-sibling",
-				toolName: "bash",
-				isError: false,
-				result: {
-					content: [{ type: "text", text: `${"a".repeat(30000)}\n… [elided] …\n${"b".repeat(30000)}` }],
-					details: {
-						notices: ["(output truncated)"],
-						// The only difference from a well-formed result: a malformed
-						// sibling next to the otherwise-valid `truncation`.
-						// `messages: null` fails `isValidDiagnosticMeta` (it requires an
-						// array), so this field alone must be dropped — not the whole
-						// `meta`, and not the `truncation` beside it.
-						meta: { truncation, diagnostics: { summary: "broken", messages: null } },
-					},
-				},
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const end = endUpdates[0]!.update as { _meta?: { terminal_output?: { data: string } } };
-		const data = end._meta?.terminal_output?.data ?? "";
-		// No false discontinuity notice.
-		expect(data).not.toContain("terminal output discontinuity");
-		// No duplicate re-send of the 60 KB re-rendered body: `undeliveredBodyLines`'s
-		// own cap (`MAX_RECONCILED_BODY_BYTES`, 2000) refuses to reconcile a
-		// divergence this large, so the delivered bytes stay at notice size —
-		// nowhere near the ~60 KB a re-sent body would add.
-		expect(data.length).toBeLessThan(500);
-		expect(data).toBe(
-			"\n(output truncated)\n\n[Showing lines 1-1 and 1-1 of 1; 0 middle lines (0B) elided. Read artifact://7 for full output]\n",
-		);
-	});
-
-	it("delivers a re-rendered final body's line that the producer declared nowhere structurally", () => {
-		// The class every round of this review kept re-finding one instance of:
-		// a producer bakes a fact into its own text (here an `OutputSink.dump`
-		// timeout annotation, prefixed onto the body and never streamed through
-		// `onChunk`) and declares it in no structural field. `details` is empty
-		// on purpose — a check that compares the frame against declared facts is
-		// vacuous by construction here, which is exactly why the reconciliation
-		// reads the authoritative body instead.
-		const sent = new Map<string, string>();
-		const options = {
-			terminalMetaCapable: true,
-			getMetaTerminalSent: (id: string) => sent.get(id),
-			setMetaTerminalSent: (id: string, text: string) => {
-				sent.set(id, text);
-			},
-		};
-		mapUpdates(
-			{
-				type: "tool_execution_update",
-				toolCallId: "tc-undeclared-annotation",
-				toolName: "bash",
-				args: { command: "sleep 30" },
-				partialResult: { content: [{ type: "text", text: "working\n" }], details: {} },
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const endUpdates = mapUpdates(
-			{
-				type: "tool_execution_end",
-				toolCallId: "tc-undeclared-annotation",
-				toolName: "bash",
-				isError: true,
-				result: {
-					content: [{ type: "text", text: "[Command timed out after 2 seconds]\nworking\n" }],
-					details: {},
-				},
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const end = endUpdates[0]!.update as { _meta?: { terminal_output?: { data: string } } };
-		expect(end._meta?.terminal_output?.data).toBe("\n[Command timed out after 2 seconds]\n");
-	});
-
-	it("leaves a wholesale body divergence to the existing re-render classification", () => {
-		// The other half of the cap's contract: past a handful of lines the
-		// difference is not an annotation but a body that diverged wholesale
-		// (an elided summary whose head the producer dropped, a rolled
-		// watermark). Re-delivering that is the duplicate-send bug of review
-		// 4824091334 — a client concatenates whatever arrives — so the
-		// reconciliation reports nothing and the frame carries facts alone.
-		const sent = new Map<string, string>();
-		const options = {
-			terminalMetaCapable: true,
-			getMetaTerminalSent: (id: string) => sent.get(id),
-			setMetaTerminalSent: (id: string, text: string) => {
-				sent.set(id, text);
-			},
-		};
-		mapUpdates(
-			{
-				type: "tool_execution_update",
-				toolCallId: "tc-wholesale-divergence",
-				toolName: "bash",
-				args: { command: "printf 'streamed\\n'" },
-				partialResult: { content: [{ type: "text", text: "streamed\n" }], details: {} },
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const replaced = Array.from({ length: 40 }, (_, i) => `replacement line ${i}`).join("\n");
-		const endUpdates = mapUpdates(
-			{
-				type: "tool_execution_end",
-				toolCallId: "tc-wholesale-divergence",
-				toolName: "bash",
-				isError: false,
-				result: {
-					content: [{ type: "text", text: replaced }],
-					details: { notices: ["Wall time: 0.02 seconds"] },
-				},
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const end = endUpdates[0]!.update as { _meta?: { terminal_output?: { data: string } } };
-		expect(end._meta?.terminal_output?.data).toBe("\nWall time: 0.02 seconds\n");
-	});
-
-	it("fuzz: deliveredOverlap matches a brute-force reference across randomized byte strings", () => {
-		// This function has been the single densest source of review findings
-		// in this subsystem (4096-byte trial cap, in-band NUL-separator
-		// collision, k===m fallback) — each caught by one hand-picked example
-		// at a time. A deterministic (seeded) fuzz loop against a trivial O(n^2)
-		// reference implementation covers the input space an example-based
-		// suite can't anticipate: NUL bytes, multi-byte unicode, and long
-		// runs of repeated characters (self-similar inputs are exactly where a
-		// KMP failure-function bug hides).
-		function mulberry32(seed: number): () => number {
-			let state = seed;
-			return () => {
-				state = (state + 0x6d2b79f5) | 0;
-				let t = state;
-				t = Math.imul(t ^ (t >>> 15), t | 1);
-				t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-				return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-			};
-		}
-		function bruteForceOverlap(sent: string, next: string): number {
-			const max = Math.min(sent.length, next.length);
-			for (let len = max; len > 0; len--) {
-				if (sent.slice(-len) === next.slice(0, len)) return len;
-			}
-			return 0;
-		}
-		const alphabet = ["\0", "a", "b", "\n", "🎉", "é"];
-		const rand = mulberry32(0x5eed);
-		const randomString = (maxLen: number): string => {
-			const len = Math.floor(rand() * maxLen);
-			let s = "";
-			for (let i = 0; i < len; i++) {
-				s += alphabet[Math.floor(rand() * alphabet.length)];
-			}
-			return s;
-		};
-		for (let trial = 0; trial < 500; trial++) {
-			const sent = randomString(60);
-			const next = randomString(60);
-			expect(deliveredOverlap(sent, next)).toBe(bruteForceOverlap(sent, next));
-		}
-	});
-
-	it("fuzz: buildMetaTerminalDelta's delivered stream always ends with the current producer window", () => {
-		// End-to-end simulation of a bounded tail buffer (like bash's/eval's
-		// real `TailBuffer`) streaming through the mapper across many random
-		// rollovers, including NUL bytes and unicode. Concatenating every
-		// `_meta.terminal_output.data` byte ever delivered for a tool call must
-		// always end with the producer's current visible window — the
-		// append-only contract `terminal_output.data` makes to the client
-		// (bytes can be appended, never replaced or erased). Breaking this
-		// invariant is exactly the corruption class the overlap/rollover/NUL
-		// findings kept re-discovering one fixed example at a time.
-		function mulberry32(seed: number): () => number {
-			let state = seed;
-			return () => {
-				state = (state + 0x6d2b79f5) | 0;
-				let t = state;
-				t = Math.imul(t ^ (t >>> 15), t | 1);
-				t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-				return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-			};
-		}
-		const alphabet = ["\0", "x", "y", "\n", "🎉"];
-		const rand = mulberry32(0xc0ffee);
-		for (let trial = 0; trial < 30; trial++) {
-			const windowSize = 40 + Math.floor(rand() * 150);
-			const sent = new Map<string, string>();
-			const options = {
-				terminalMetaCapable: true,
-				getMetaTerminalSent: (id: string) => sent.get(id),
-				setMetaTerminalSent: (id: string, text: string) => {
-					sent.set(id, text);
-				},
-			};
-			const toolCallId = `tc-fuzz-delta-${trial}`;
-			let trueOutput = "";
-			let delivered = "";
-			for (let step = 0; step < 40; step++) {
-				const chunkLen = 1 + Math.floor(rand() * 25);
-				let chunk = "";
-				for (let c = 0; c < chunkLen; c++) {
-					chunk += alphabet[Math.floor(rand() * alphabet.length)];
-				}
-				trueOutput += chunk;
-				// Simulates a bounded producer tail buffer: only the most recent
-				// `windowSize` chars survive in the snapshot the mapper sees.
-				const window = trueOutput.length > windowSize ? trueOutput.slice(-windowSize) : trueOutput;
-				const updates = mapUpdates(
-					{
-						type: "tool_execution_update",
-						toolCallId,
-						toolName: "bash",
-						args: { command: "noisy fuzz command" },
-						partialResult: { content: [{ type: "text", text: window }], details: {} },
-					} as AgentSessionEvent,
-					"session-1",
-					options,
-				);
-				const data = (updates[0]!.update as { _meta?: { terminal_output?: { data: string } } })._meta
-					?.terminal_output?.data;
-				if (data) delivered += data;
-				expect(delivered.endsWith(window)).toBe(true);
-			}
-		}
-	});
-
-	it("bounds the delivered watermark instead of growing it across every tail-buffer roll", () => {
-		// Regression test: once the producer's tail buffer starts rolling
-		// forward, `buildMetaTerminalDelta` stored `prior + delta` as the new
-		// watermark on every update — the *total* history ever delivered to
-		// the client, not the bounded producer window. That grows without
-		// bound for a long, chatty command, and `deliveredOverlap`'s KMP scan
-		// costs O(len(prior) + len(next)) per update, so it's both unbounded
-		// memory and effectively quadratic CPU across the command's lifetime.
-		const sent = new Map<string, string>();
-		const options = {
-			terminalMetaCapable: true,
-			getMetaTerminalSent: (id: string) => sent.get(id),
-			setMetaTerminalSent: (id: string, text: string) => {
-				sent.set(id, text);
-			},
-		};
-		const lineSize = 500;
-		const windowLines = 20;
-		const totalLines = 600;
-		const allLines: string[] = [];
-		let maxWatermarkSeen = 0;
-		for (let i = 0; i < totalLines; i++) {
-			allLines.push(`line ${i} ${"y".repeat(lineSize)}`);
-			// Simulates the producer's own bounded tail buffer: only the most
-			// recent `windowLines` survive in each snapshot, so once the window
-			// fills, every later update is a genuine roll (drops the oldest
-			// line, gains a new one) rather than a plain extension.
-			const windowText = `${allLines.slice(-windowLines).join("\n")}\n`;
-			mapUpdates(
-				{
-					type: "tool_execution_update",
-					toolCallId: "tc-watermark-bound",
-					toolName: "bash",
-					args: { command: "a very noisy long-running command" },
-					partialResult: { content: [{ type: "text", text: windowText }], details: {} },
-				} as AgentSessionEvent,
-				"session-1",
-				options,
-			);
-			const stored = sent.get("tc-watermark-bound");
-			if (stored) maxWatermarkSeen = Math.max(maxWatermarkSeen, stored.length);
-		}
-		// 600 lines * ~510 bytes each ≈ 306,000 bytes streamed in total, far
-		// more than any single producer window — confirms rolling actually
-		// happened and the watermark grew past one window's worth of content.
-		expect(maxWatermarkSeen).toBeGreaterThan(windowLines * (lineSize + 10));
-		// ...but never past the bound, regardless of how long the command runs.
-		expect(maxWatermarkSeen).toBeLessThanOrEqual(200_000);
-	});
-
-	it("resyncs with a discontinuity notice on a non-overlapping tail rollover instead of freezing", () => {
-		// Regression test: no genuine
-		// overlap exists between the delivered watermark and the new snapshot —
-		// a verbose command outrunning the producer's own tail-buffer window
-		// between two updates is a real, recoverable case, not corruption. The
-		// old behavior returned `undefined` without moving the watermark, which
-		// freezes the meta terminal forever: every later snapshot keeps
-		// diverging from the same stale watermark. The fix must emit a
-		// discontinuity notice plus the whole new tail, and advance the
-		// watermark so a later, genuinely overlapping snapshot resumes
-		// delivering deltas instead of staying suppressed.
-		const sent = new Map<string, string>();
-		const options = {
-			terminalMetaCapable: true,
-			getMetaTerminalSent: (id: string) => sent.get(id),
-			setMetaTerminalSent: (id: string, text: string) => {
-				sent.set(id, text);
-			},
-		};
-		mapUpdates(
-			{
-				type: "tool_execution_update",
-				toolCallId: "tc-diverge",
-				toolName: "bash",
-				args: { command: "echo hi" },
-				partialResult: { content: [{ type: "text", text: "alpha beta gamma" }], details: {} },
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const diverged = mapUpdates(
-			{
-				type: "tool_execution_update",
-				toolCallId: "tc-diverge",
-				toolName: "bash",
-				args: { command: "echo hi" },
-				partialResult: { content: [{ type: "text", text: "zzz completely unrelated" }], details: {} },
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const update = diverged[0]!.update as {
-			_meta?: { terminal_output?: { terminal_id: string; data: string } };
-		};
-		expect(update._meta?.terminal_output).toEqual({
-			terminal_id: "tc-diverge",
-			data: "\n[terminal output discontinuity: earlier bytes were dropped]\nzzz completely unrelated",
-		});
-
-		// The watermark must now track the resynced snapshot, not the stale
-		// pre-rollover one — a later snapshot that genuinely extends it resumes
-		// delivering plain deltas instead of diverging (and resyncing) again.
-		const resumed = mapUpdates(
-			{
-				type: "tool_execution_update",
-				toolCallId: "tc-diverge",
-				toolName: "bash",
-				args: { command: "echo hi" },
-				partialResult: { content: [{ type: "text", text: "zzz completely unrelated MORE" }], details: {} },
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const resumedUpdate = resumed[0]!.update as {
-			_meta?: { terminal_output?: { terminal_id: string; data: string } };
-		};
-		expect(resumedUpdate._meta?.terminal_output).toEqual({
-			terminal_id: "tc-diverge",
-			data: " MORE",
-		});
-	});
-
-	it("computes overlap correctly when both strings contain a literal NUL byte", () => {
-		// Regression test: the prior
-		// `deliveredOverlap` joined `sent`/`next` with an in-band `"\0"`
-		// separator. Terminal output can genuinely contain NUL bytes (binary
-		// commands, `find -print0`), so a real NUL in the input collided with
-		// the separator: `sent = "a"`, `next = "\0a"` returned an overlap of 2
-		// despite the two strings sharing no actual overlap at all, corrupting
-		// the delta (`cumulativeOutput.slice(overlap)` sliced past the end).
-		// The sentinel-free KMP automaton must return the correct answer (no
-		// overlap) for this exact input.
-		const sent = new Map<string, string>();
-		const options = {
-			terminalMetaCapable: true,
-			getMetaTerminalSent: (id: string) => sent.get(id),
-			setMetaTerminalSent: (id: string, text: string) => {
-				sent.set(id, text);
-			},
-		};
-		mapUpdates(
-			{
-				type: "tool_execution_update",
-				toolCallId: "tc-nul",
-				toolName: "bash",
-				args: { command: "echo hi" },
-				partialResult: { content: [{ type: "text", text: "a" }], details: {} },
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		);
-		const update = mapUpdates(
-			{
-				type: "tool_execution_update",
-				toolCallId: "tc-nul",
-				toolName: "bash",
-				args: { command: "echo hi" },
-				partialResult: { content: [{ type: "text", text: "\0a" }], details: {} },
-			} as AgentSessionEvent,
-			"session-1",
-			options,
-		).at(0)!.update as { _meta?: { terminal_output?: { terminal_id: string; data: string } } };
-		// No real overlap between "a" and "\0a": must resync with the whole new
-		// tail via the discontinuity path, never a corrupted (over-sliced) delta.
-		expect(update._meta?.terminal_output).toEqual({
-			terminal_id: "tc-nul",
-			data: "\n[terminal output discontinuity: earlier bytes were dropped]\n\u0000a",
-		});
+		expect(end._meta?.terminal_output?.data).toBe(header + raw);
 	});
 
 	it("emits no meta-terminal output on tool_execution_update when there is no partial output yet", () => {
@@ -3758,10 +2802,9 @@ describe("ACP event mapper", () => {
 			expect(toolCall?.rawInput).toEqual({ command: "echo hi" });
 			expect(toolCall?.rawInput).not.toEqual({ input: { command: "echo hi" } });
 			expect(toolCall?.content).toBeUndefined();
-			// The persisted terminal id belongs to the connection that ran the
-			// command, so replay shows the recorded output instead of a terminal
-			// widget this client cannot resolve.
-			expect(finalUpdate?.content).toEqual([{ type: "content", content: { type: "text", text: "```\ndone\n```" } }]);
+			// Legacy replay preserves only the persisted settled body; it never
+			// reconstructs the old terminal from a connection-specific id.
+			expect(finalUpdate?.content).toEqual([{ type: "content", content: { type: "text", text: "done" } }]);
 		} finally {
 			abortController.abort();
 			await fs.promises.rm(root, { recursive: true, force: true });
@@ -4054,8 +3097,9 @@ describe("ACP event mapper", () => {
 	// A malformed `meta` costs only its notice, not the whole edit result:
 	// `oldText`/`newText`/`path` feed the `diff` frame and must reject the
 	// result when broken, but rejecting the details for a bad `meta` too would
-	// also disarm `isDisplayReRendered`'s re-render classifier, re-arming the
-	// 51 KB duplicate-delivery bug.
+	// also disarm every notice-reading consumer of a sibling that did parse
+	// (a duplicate-delivery bug where the salvage-per-sibling policy exists
+	// to prevent an all-or-nothing rejection).
 	it("keeps a valid diff and drops only the notice for a malformed output meta", () => {
 		const updates = mapUpdates(
 			{

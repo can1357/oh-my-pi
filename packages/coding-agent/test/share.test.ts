@@ -350,6 +350,93 @@ describe("buildShareSnapshot", () => {
 		expect(flat).not.toContain(friendlyTrigger);
 	});
 
+	test("redacts tool journal call descriptor fields (title, cwd, sourceEcho, locations, rawInput) before sharing", () => {
+		const secret = "journal-share-secret-QWERTY";
+		const ts = "2026-06-12T00:00:00.000Z";
+		const entries: SessionEntry[] = [
+			{
+				type: "tool_execution_started",
+				id: "j1",
+				parentId: null,
+				timestamp: ts,
+				recordVersion: 1,
+				executionId: "exec-1",
+				call: {
+					toolCallId: "call-1",
+					toolName: "bash",
+					title: `printf ${secret}`,
+					kind: "execute",
+					cwd: `/private/${secret}/workdir`,
+					sourceEcho: `echo ${secret}`,
+					locations: [{ path: `/tmp/${secret}/file.txt`, line: 1 }],
+					rawInput: { command: `printf ${secret}` },
+				},
+				presentation: { version: 1, facts: [] },
+			} as unknown as SessionEntry,
+		];
+		const sm = {
+			getHeader: () => sessionData([], "x").header,
+			getEntries: () => entries,
+			getLeafId: () => "j1",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+
+		const snapshot = buildShareSnapshot(sm, { obfuscator });
+		const flat = JSON.stringify(snapshot);
+
+		expect(flat).not.toContain(secret);
+		// Non-secret structure survives redaction.
+		expect(flat).toContain("bash");
+		expect(flat).toContain("execute");
+		// Source entries keep the real values; redaction is share-only.
+		expect(JSON.stringify(entries)).toContain(secret);
+	});
+
+	test("includes the tool journal call descriptor's rawInput in the regex collision pre-scan", () => {
+		// Mirrors "collects regex-protected values across the whole snapshot" below, but with
+		// the regex-matching secret living only in the journal's `rawInput` instead of a bash
+		// output field: the header's unrelated plain secret must not be redacted under a
+		// friendly-name placeholder whose prefix spells out the regex secret's shape, which
+		// only holds if `collectShareRegexSecretValues` actually walks `entry.call.rawInput`.
+		const plainSecret = "OTHER_JOURNAL_SECRET";
+		const friendlyName = "TOKJRNL123";
+		const regexSecret = "tok_jrnl123";
+		const ts = "2026-06-12T00:00:00.000Z";
+		const entries: SessionEntry[] = [
+			{
+				type: "tool_execution_started",
+				id: "j1",
+				parentId: null,
+				timestamp: ts,
+				recordVersion: 1,
+				executionId: "exec-1",
+				call: {
+					toolCallId: "call-1",
+					toolName: "bash",
+					title: "printf token",
+					kind: "execute",
+					rawInput: { command: `printf ${regexSecret}` },
+				},
+				presentation: { version: 1, facts: [] },
+			} as unknown as SessionEntry,
+		];
+		const sm = {
+			getHeader: () => ({ ...sessionData([], "x").header, title: `investigating ${plainSecret}` }),
+			getEntries: () => entries,
+			getLeafId: () => "j1",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([
+			{ type: "plain", content: plainSecret, friendlyName },
+			{ type: "regex", content: "tok_jrnl[a-z0-9]+" },
+		]);
+
+		const flat = JSON.stringify(buildShareSnapshot(sm, { obfuscator }));
+
+		expect(flat).not.toContain(plainSecret);
+		expect(flat).not.toContain(regexSecret);
+		expect(flat).not.toContain(`${friendlyName}_`);
+	});
+
 	test("collects regex-protected values across the whole snapshot so an earlier field's friendly-name placeholder cannot leak a later field's secret", () => {
 		// `buildShareSnapshot` must precompute regex-matched secret values across the ENTIRE
 		// snapshot (header + entries) before redacting any single field. Otherwise the header

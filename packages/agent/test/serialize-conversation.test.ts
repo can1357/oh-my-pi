@@ -53,15 +53,15 @@ describe("serializeConversation — useless pairs", () => {
 		expect(out).not.toContain("No matches found");
 	});
 
-	test("error results stay serialized even when flagged useless", () => {
-		const out = serializeConversation([
-			assistantMessage([{ type: "toolCall", id: "c-err", name: "search", arguments: { pattern: "beta" } }]),
-			toolResultMessage("c-err", "grep crashed", { useless: true, isError: true }),
-		]);
-
-		expect(out).toContain('search(pattern="beta")');
-		expect(out).toContain("[Tool Result]: grep crashed");
-	});
+	// The "useless with isError" case this used to construct directly and
+	// expect serializeConversation's own guard to reject is now unrepresentable
+	// coming out of the real pipeline:
+	// `coerceToolResult`/`emitToolResult` enforce "useless implies not isError"
+	// once, at message construction, so `useless` and `isError` can never both
+	// be true on a `ToolResultMessage` this function actually receives. That
+	// boundary contract is tested at its real enforcement site
+	// (`agent-loop.test.ts`'s "useless"/"isError" tool-result tests), not by
+	// hand-constructing an impossible fixture here.
 
 	test("renders native dialect transcripts when a dialect is provided", () => {
 		const out = serializeConversation(

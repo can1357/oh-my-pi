@@ -3,6 +3,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
+import {
+	byteOffset,
+	createLiveTerminalBinding,
+	streamId,
+	ToolPresentationStream,
+	toolExecutionId,
+} from "@oh-my-pi/pi-agent-core/presentation";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -13,18 +20,19 @@ import {
 	AcpAgent,
 	createAcpExtensionUiContext,
 } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
-import { EvalSourceDeliveryAuditor } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-update-invariants";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
 import type {
 	AgentSession,
 	AgentSessionEvent,
 	UsageFallbackConfirmation,
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { ClientBridge } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "@oh-my-pi/pi-coding-agent/stt/models";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import {
 	DEFAULT_TTS_LOCAL_MODEL_KEY,
 	DEFAULT_TTS_VOICE,
@@ -49,6 +57,15 @@ import {
 	zPromptResponse,
 	zSessionNotification,
 } from "@oh-my-pi/pi-utils/acp";
+import type { z } from "zod/v4";
+import {
+	checkedNotificationPayload,
+	encodeToolFrames,
+	INITIAL_ACP_TOOL_VIEW,
+	reduceAcpToolView,
+} from "../src/modes/acp/view";
+import { hydrateReplayableToolExecution } from "../src/presentation/hydrate";
+import type { ReplayableToolExecution } from "../src/presentation/journal";
 import { TOOL_NAME as DELAYED_MCP_TOOL_NAME } from "./fixtures/delayed-tool-mcp";
 
 /** Validates an ACP wire payload against the in-house protocol schemas. */
@@ -123,7 +140,11 @@ function makeAssistantMessage(text: string, thinking?: string) {
 class FakeAgentSession {
 	sessionManager: SessionManager;
 	sessionId: string;
-	agent: { sessionId: string; waitForIdle: () => Promise<void> };
+	agent: {
+		sessionId: string;
+		waitForIdle: () => Promise<void>;
+		state: { tools: Array<{ name: string; customWireName?: string }> };
+	};
 	model: Model | undefined;
 	thinkingLevel: string | undefined;
 	customCommands: [] = [];
@@ -157,6 +178,7 @@ class FakeAgentSession {
 	retryResult = false;
 	retryCalls = 0;
 	#listeners = new Set<(event: AgentSessionEvent) => void>();
+	#builtInToolNames = new Set<string>();
 
 	constructor(
 		cwd: string,
@@ -169,8 +191,11 @@ class FakeAgentSession {
 			waitForIdle: async () => {
 				await this.waitForIdle();
 			},
+			state: { tools: [] },
 		};
 		this.model = models[0];
+		this.registerBuiltinTool("edit", "apply_patch");
+		this.registerBuiltinTool("patch");
 	}
 
 	get sessionName(): string {
@@ -189,6 +214,31 @@ class FakeAgentSession {
 
 	getAvailableThinkingLevels(): ReadonlyArray<string> {
 		return ["low", "medium", "high"];
+	}
+
+	/** Test double for the session registry's exact-name-first dispatch provenance. */
+	hasBuiltInToolDispatch(name: string): boolean {
+		const tools = this.agent.state.tools;
+		const dispatched =
+			tools.find(tool => tool.name === name) ??
+			tools.find(tool => tool.customWireName !== undefined && tool.customWireName === name);
+		return dispatched !== undefined && this.#builtInToolNames.has(dispatched.name);
+	}
+
+	registerBuiltinTool(name: string, customWireName?: string): void {
+		this.#builtInToolNames.add(name);
+		this.#registerTool({ name, ...(customWireName === undefined ? {} : { customWireName }) });
+	}
+
+	registerExternalTool(name: string): void {
+		this.#builtInToolNames.delete(name);
+		this.#registerTool({ name });
+	}
+
+	#registerTool(tool: { name: string; customWireName?: string }): void {
+		const index = this.agent.state.tools.findIndex(existing => existing.name === tool.name);
+		if (index === -1) this.agent.state.tools.push(tool);
+		else this.agent.state.tools[index] = tool;
 	}
 
 	setThinkingLevel(level: string | undefined): void {
@@ -345,7 +395,12 @@ class FakeAgentSession {
 
 	setActiveToolsByName(_toolNames: string[]): void {}
 
-	setClientBridge(_bridge: unknown): void {}
+	/** The bridge `AcpAgent` installed, so a test can drive its real permission path. */
+	clientBridge: ClientBridge | undefined;
+
+	setClientBridge(bridge: unknown): void {
+		this.clientBridge = bridge as ClientBridge;
+	}
 
 	getPlanModeState(): PlanModeState | undefined {
 		return this.planModeState;
@@ -445,6 +500,18 @@ type SetToolUIContextSpy = (uiContext: ExtensionUIContext, hasUI: boolean) => vo
 interface AgentHarness {
 	agent: AcpAgent;
 	updates: SessionNotification[];
+	/**
+	 * Labels of everything that actually reached the fake writer, in wire order —
+	 * session updates *and* the `session/request_permission` request, which is a
+	 * separate JSON-RPC call that has to join the same ordering domain.
+	 */
+	writes: string[];
+	/**
+	 * Resolve once a write with exactly this label has landed in {@link writes}.
+	 * Resolves immediately if it already has. Deterministic completion signal for
+	 * ordering assertions — never a fixed-duration sleep.
+	 */
+	waitForWrite(label: string): Promise<void>;
 	abortController: AbortController;
 	sessions: FakeAgentSession[];
 	setToolUIContextSpies: SetToolUIContextSpy[];
@@ -452,6 +519,14 @@ interface AgentHarness {
 	cwdA: string;
 	cwdB: string;
 	findSession(sessionId: string): FakeAgentSession | undefined;
+}
+
+/** Short, stable label for one outbound notification. */
+function writeLabel(notification: SessionNotification): string {
+	const update = notification.update as { sessionUpdate?: string; toolCallId?: string };
+	return update.toolCallId === undefined
+		? String(update.sessionUpdate)
+		: `${update.sessionUpdate}:${update.toolCallId}`;
 }
 
 function getChunkMessageId(notification: SessionNotification): string | undefined {
@@ -490,6 +565,20 @@ async function createHarness(
 		clientCapabilities?: ClientCapabilities;
 		/** Runs before a notification is recorded, so a test can delay one delivery. */
 		sessionUpdateHook?: (notification: SessionNotification) => Promise<void> | void;
+		/** Advertise `_meta.terminal_output` so the reducer picks the display-only meta terminal. */
+		terminalMeta?: boolean;
+		/** Advertise a real client terminal and record its lifecycle calls on `writes`. */
+		terminal?: boolean;
+		/** Optional raw ACP terminal/release hook, including intentionally hung peers. */
+		terminalRelease?: () => Promise<void>;
+		/** Delay every session update, simulating a slow client write. */
+		writeDelayMs?: number;
+		/** Reject a session update the way a broken connection would. */
+		failWrite?: (notification: SessionNotification) => Error | undefined;
+		/** Handle `session/request_permission`; the label recorded is `request_permission:<id>`. */
+		requestPermission?: (request: {
+			toolCall: { toolCallId: string };
+		}) => Promise<{ outcome: { outcome: "selected"; optionId: string } | { outcome: "cancelled" } }>;
 	} = {},
 ): Promise<AgentHarness> {
 	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-acp-test-"));
@@ -504,6 +593,22 @@ async function createHarness(
 	await Settings.init({ agentDir, inMemory: true });
 
 	const updates: SessionNotification[] = [];
+	const writes: string[] = [];
+	const writeWaiters = new Map<string, Array<() => void>>();
+	const notifyWrite = (label: string): void => {
+		const waiters = writeWaiters.get(label);
+		if (waiters === undefined) return;
+		writeWaiters.delete(label);
+		for (const resolve of waiters) resolve();
+	};
+	const waitForWrite = (label: string): Promise<void> => {
+		if (writes.includes(label)) return Promise.resolve();
+		const { promise, resolve } = Promise.withResolvers<void>();
+		const waiters = writeWaiters.get(label) ?? [];
+		waiters.push(resolve);
+		writeWaiters.set(label, waiters);
+		return promise;
+	};
 	const abortController = new AbortController();
 	const sessions: FakeAgentSession[] = [];
 	const setToolUIContextSpies: SetToolUIContextSpy[] = [];
@@ -513,8 +618,37 @@ async function createHarness(
 			// Only await when a hook is configured: `await undefined` would insert a
 			// microtask before the push and perturb ordering-sensitive tests.
 			if (options.sessionUpdateHook) await options.sessionUpdateHook(notification);
+			if (options.writeDelayMs !== undefined) await Bun.sleep(options.writeDelayMs);
+			const failure = options.failWrite?.(notification);
+			if (failure) throw failure;
 			updates.push(notification);
+			const label = writeLabel(notification);
+			writes.push(label);
+			notifyWrite(label);
 		},
+		requestPermission: options.requestPermission
+			? async (request: { toolCall: { toolCallId: string } }) => {
+					// The *write* happens when the request is issued; the user's answer comes
+					// later, which is the whole point of the reserved slot.
+					const label = `request_permission:${request.toolCall.toolCallId}`;
+					writes.push(label);
+					notifyWrite(label);
+					return options.requestPermission!(request);
+				}
+			: undefined,
+		createTerminal: options.terminal
+			? async () => ({
+					id: "client-term-1",
+					currentOutput: async () => ({ output: "", truncated: false }),
+					waitForExit: async () => ({ exitCode: 0, signal: null }),
+					kill: async () => {},
+					release: async () => {
+						writes.push("release_terminal:client-term-1");
+						notifyWrite("release_terminal:client-term-1");
+						await options.terminalRelease?.();
+					},
+				})
+			: undefined,
 		unstable_createElicitation: options.elicitationHandler
 			? async (req: CreateElicitationRequest) => options.elicitationHandler!(req)
 			: undefined,
@@ -536,6 +670,15 @@ async function createHarness(
 	const agent = new AcpAgent(connection, factory, initialSession as unknown as AgentSession);
 	const clientCapabilities =
 		options.clientCapabilities ?? (options.elicitationHandler ? { elicitation: { form: {} } } : undefined);
+	if (options.terminalMeta || options.terminal) {
+		await agent.initialize({
+			protocolVersion: 1,
+			clientCapabilities: {
+				...(options.terminalMeta ? { _meta: { terminal_output: true } } : {}),
+				...(options.terminal ? { terminal: true } : {}),
+			},
+		} as Parameters<typeof agent.initialize>[0]);
+	}
 	if (clientCapabilities) {
 		await agent.initialize({
 			protocolVersion: 1,
@@ -546,6 +689,8 @@ async function createHarness(
 	return {
 		agent,
 		updates,
+		writes,
+		waitForWrite,
 		abortController,
 		sessions,
 		setToolUIContextSpies,
@@ -766,7 +911,7 @@ describe("ACP agent", () => {
 	});
 
 	it("plan-proposal handler treats dismissed elicitation as refine, never approves", async () => {
-		// Regression for the P1 review finding on #1870: when a form-capable
+		// Regression: when a form-capable
 		// ACP client dismissed/cancelled the elicitation, the handler was
 		// returning the dismissal as approval — silently granting write
 		// access without explicit consent. Dismissal MUST fall through to
@@ -861,7 +1006,7 @@ describe("ACP agent", () => {
 	});
 
 	it("suppresses lifetime config_option_update during the bootstrap window", async () => {
-		// Regression for codex review on #1060: an extension `session_start`
+		// Regression: an extension `session_start`
 		// handler calling `setThinkingLevel` must not push a
 		// `config_option_update` for a session id the client has not been told
 		// about yet (matches Zed's `Received session notification for unknown
@@ -1464,11 +1609,79 @@ describe("ACP agent", () => {
 		expect(completions).toHaveLength(1);
 		expect(completions[0]).toEqual(
 			expect.objectContaining({
-				content: expect.arrayContaining([
-					{ type: "content", content: { type: "text", text: "```\ntests passed\n```" } },
-				]),
+				content: expect.arrayContaining([{ type: "content", content: { type: "text", text: "tests passed" } }]),
 			}),
 		);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("replays terminal-shaped legacy results as their settled body without terminal frames", async () => {
+		const harness = await createHarness();
+		await harness.agent.initialize({
+			protocolVersion: 1,
+			clientCapabilities: { _meta: { terminal_output: true } },
+		} as Parameters<typeof harness.agent.initialize>[0]);
+		const stored = new FakeAgentSession(harness.cwdA);
+		harness.sessions.push(stored);
+		stored.sessionManager.appendMessage({ role: "user", content: "run code", timestamp: Date.now() });
+		stored.sessionManager.appendMessage({
+			...makeAssistantMessage(""),
+			content: [
+				{
+					type: "tool_use",
+					id: "toolu_legacy_eval",
+					name: "eval",
+					input: { language: "py", code: "print('legacy')" },
+				},
+			] as unknown as Array<{ type: "toolCall"; id: string; name: string; arguments: Record<string, unknown> }>,
+			stopReason: "toolUse",
+		});
+		stored.sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "toolu_legacy_eval",
+			toolName: "eval",
+			content: [
+				{ type: "text", text: "legacy stdout\n" },
+				{ type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+			],
+			details: { terminalId: "stale-terminal", exitCode: 0, notices: "ignored legacy notice" },
+			isError: false,
+			timestamp: Date.now(),
+		});
+		await stored.sessionManager.ensureOnDisk();
+		await stored.sessionManager.flush();
+
+		await harness.agent.loadSession({
+			sessionId: stored.sessionId,
+			cwd: harness.cwdA,
+			mcpServers: [],
+		});
+
+		const toolUpdates = harness.updates
+			.filter(notification => notification.sessionId === stored.sessionId)
+			.map(notification => notification.update)
+			.filter(update => "toolCallId" in update && update.toolCallId === "toolu_legacy_eval");
+		expect(toolUpdates).toEqual([
+			{
+				sessionUpdate: "tool_call",
+				toolCallId: "toolu_legacy_eval",
+				title: "[py]",
+				kind: "execute",
+				status: "pending",
+				rawInput: { language: "py", code: "print('legacy')" },
+			},
+			{
+				sessionUpdate: "tool_call_update",
+				toolCallId: "toolu_legacy_eval",
+				status: "completed",
+				content: [
+					{ type: "content", content: { type: "text", text: "legacy stdout\n" } },
+					{ type: "content", content: { type: "image", data: "aGVsbG8=", mimeType: "image/png" } },
+				],
+			},
+		]);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
@@ -1628,28 +1841,7 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
-	it("sends terminal_exit alongside the failed status for a dangling meta-terminal replay", async () => {
-		// Regression test: a dangling `eval`/`bash` call under the display-only
-		// meta-terminal convention (`_meta.terminal_output` client capability)
-		// registers `terminal_info` at its replayed `tool_call` start. The prior
-		// fix only changed the tool call's `status` to `failed` on cleanup and
-		// never sent the matching `terminal_exit`, leaving the embedded terminal
-		// card permanently unterminated even though the call itself reads failed.
-		//
-		// Follow-up regression: Zed's
-		// `has_terminals` (`thread_view.rs`) routes a terminal-bearing tool call
-		// exclusively through the terminal card, so a sibling `content` text
-		// block explaining the interruption never renders — it must ride as
-		// `terminal_output` bytes on the same terminal id instead, and the
-		// sibling `content` block must not be sent at all for this case.
-		//
-		// Second follow-up: the
-		// original fixture used `input: { cells: [] }`, an empty eval with no
-		// source — `buildEvalCodeText` degenerates to `undefined` for it, so
-		// the eval-source-loss bug this test exists to catch (the cleanup wrote
-		// only the interruption text, never the interrupted code) was invisible
-		// no matter which shape shipped. A real single-cell `code` argument is
-		// required for this assertion to be capable of failing.
+	it("settles a dangling legacy tool call as interrupted without a terminal frame", async () => {
 		const harness = await createHarness();
 		await harness.agent.initialize({
 			protocolVersion: 1,
@@ -1698,36 +1890,769 @@ describe("ACP agent", () => {
 				(update): update is Extract<typeof update, { toolCallId: string }> =>
 					"toolCallId" in update && update.toolCallId === "toolu_dangling_meta",
 			);
-		const failedUpdate = toolUpdates.at(-1) as {
-			status?: string;
-			content?: unknown;
-			_meta?: {
-				terminal_exit?: { terminal_id: string; exit_code: number | null; signal: null };
-				terminal_output?: { terminal_id: string; data: string };
-			};
+		expect(toolUpdates).toEqual([
+			{
+				sessionUpdate: "tool_call",
+				toolCallId: "toolu_dangling_meta",
+				title: "[py]",
+				kind: "execute",
+				status: "pending",
+				rawInput: { language: "py", code: "print('interrupted')" },
+			},
+			{
+				sessionUpdate: "tool_call_update",
+				toolCallId: "toolu_dangling_meta",
+				status: "failed",
+				content: [
+					{
+						type: "content",
+						content: { type: "text", text: "Interrupted: no result recorded before the process ended." },
+					},
+				],
+			},
+		]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	/** Compute the notifications `hydrateReplayableToolExecution` + `reduceAcpToolView(phase:'replay')` + `encodeToolFrames` produce directly, for comparison against the wired replay path. */
+	function computeDirectHydratedNotifications(
+		sessionId: string,
+		cwd: string,
+		execution: ReplayableToolExecution,
+	): Extract<SessionNotification["update"], { toolCallId: string }>[] {
+		let state = INITIAL_ACP_TOOL_VIEW;
+		const frames = [];
+		for (const event of hydrateReplayableToolExecution(execution)) {
+			const step = reduceAcpToolView(state, event, {
+				phase: "replay",
+				terminal: { kind: "none" },
+				cwd,
+				fence: true,
+			});
+			state = step.state;
+			frames.push(...step.frames);
+		}
+		return encodeToolFrames(sessionId, frames)
+			.map(checked => checkedNotificationPayload(checked).update)
+			.filter(
+				(update): update is Extract<SessionNotification["update"], { toolCallId: string }> =>
+					"toolCallId" in update,
+			);
+	}
+
+	function appendPresentationCallEntries(
+		stored: FakeAgentSession,
+		toolCallId: string,
+		toolName: string,
+		toolInput: Record<string, unknown>,
+	): void {
+		stored.sessionManager.appendMessage({ role: "user", content: "run marker command", timestamp: Date.now() });
+		stored.sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "tool_use", id: toolCallId, name: toolName, input: toolInput }] as unknown as Array<{
+				type: "toolCall";
+				id: string;
+				name: string;
+				arguments: Record<string, unknown>;
+			}>,
+			api: "openai-responses",
+			provider: "openai",
+			model: TEST_MODELS[1].id,
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		});
+	}
+
+	it("routes a settled presentation-protocol tool journal entry through the hydration adapter on replay", async () => {
+		// Proves the hydration path is genuinely wired, not merely present in
+		// code -- the walk must locate the v4 journal pair via
+		// `correlateReplayableToolExecution(getBranch(), ...)` and produce exactly
+		// what `hydrateReplayableToolExecution` + `reduceAcpToolView(phase:'replay')`
+		// + `encodeToolFrames` compute directly for the same execution.
+		const harness = await createHarness();
+		const stored = new FakeAgentSession(harness.cwdA);
+		harness.sessions.push(stored);
+		const toolCallId = "toolu_pres_settled_9K2M";
+		appendPresentationCallEntries(stored, toolCallId, "bash", { command: "echo MARKER_SETTLE_9K2M" });
+		const executionId = toolExecutionId("exec-pres-settled-9K2M");
+		stored.sessionManager.appendToolExecutionStarted({
+			recordVersion: 1,
+			executionId,
+			call: { toolCallId, toolName: "bash", title: "run marker", kind: "execute" },
+			presentation: { version: 1, facts: [] },
+		});
+		const outputText = "MARKER_SETTLE_9K2M_OUTPUT_LINE";
+		stored.sessionManager.appendToolExecutionSettled({
+			recordVersion: 1,
+			executionId,
+			outcome: { kind: "succeeded" },
+			presentation: {
+				version: 1,
+				stream: {
+					streamId: streamId(toolCallId),
+					startByte: byteOffset(0),
+					endByte: byteOffset(outputText.length),
+					text: outputText,
+					gaps: [],
+				},
+				facts: [],
+				attachments: [],
+			},
+			modelProjection: { version: 1, content: [{ type: "text", text: outputText }] },
+		});
+		// The legacy-shaped `toolResult` message a real agent loop also persists
+		// alongside the journal pair; the new path must suppress its own start/
+		// settlement, not double-announce.
+		stored.sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId,
+			toolName: "bash",
+			content: [{ type: "text", text: outputText }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+		await stored.sessionManager.ensureOnDisk();
+		await stored.sessionManager.flush();
+
+		await harness.agent.loadSession({ sessionId: stored.sessionId, cwd: harness.cwdA, mcpServers: [] });
+
+		const toolUpdates = harness.updates
+			.filter(update => update.sessionId === stored.sessionId)
+			.map(notification => notification.update)
+			.filter(
+				(update): update is Extract<typeof update, { toolCallId: string }> =>
+					"toolCallId" in update && update.toolCallId === toolCallId,
+			);
+		const execution: ReplayableToolExecution = {
+			state: "settled",
+			call: { toolCallId, toolName: "bash", title: "run marker", kind: "execute" },
+			outcome: { kind: "succeeded" },
+			presentation: {
+				version: 1,
+				stream: {
+					streamId: streamId(toolCallId),
+					startByte: byteOffset(0),
+					endByte: byteOffset(outputText.length),
+					text: outputText,
+					gaps: [],
+				},
+				facts: [],
+				attachments: [],
+			},
+			modelProjection: { version: 1, content: [{ type: "text", text: outputText }] },
 		};
-		expect(failedUpdate.status).toBe("failed");
-		expect(failedUpdate._meta?.terminal_exit).toEqual({
-			terminal_id: "toolu_dangling_meta",
-			exit_code: null,
-			signal: null,
+		expect(toolUpdates).toEqual(computeDirectHydratedNotifications(stored.sessionId, harness.cwdA, execution));
+		expect(toolUpdates).toEqual([
+			expect.objectContaining({ sessionUpdate: "tool_call", toolCallId, status: "pending" }),
+			expect.objectContaining({
+				sessionUpdate: "tool_call_update",
+				toolCallId,
+				status: "completed",
+				content: [{ type: "content", content: { type: "text", text: `\`\`\`\n${outputText}\n\`\`\`` } }],
+			}),
+		]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("streams a forked session's message and tool-call history to the client", async () => {
+		// New coverage: the existing fork test at ~line 719 only asserts backend
+		// session-manager state (`buildSessionContext().messages`). Nothing
+		// previously asserted that the ACP client actually receives the copied
+		// history over the wire for the FORKED sessionId, mirroring what
+		// "replays messageIds and returns turn usage for prompts" asserts for
+		// `loadSession`.
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const source = harness.findSession(created.sessionId)!;
+		source.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "FORKHIST_USER_MARKER_7QX2" }],
+			timestamp: Date.now(),
 		});
-		expect(failedUpdate._meta?.terminal_output).toEqual({
-			terminal_id: "toolu_dangling_meta",
-			data: `print('interrupted')\n${"─".repeat(48)}\n\nInterrupted: no result recorded before the process ended.\n`,
+		source.sessionManager.appendMessage(makeAssistantMessage("FORKHIST_ASSISTANT_MARKER_7QX2"));
+		await source.sessionManager.ensureOnDisk();
+		await source.sessionManager.flush();
+
+		const forked = await harness.agent.unstable_forkSession({
+			sessionId: created.sessionId,
+			cwd: harness.cwdA,
+			mcpServers: [],
 		});
-		expect(failedUpdate.content).toBeUndefined();
-		// Generic guard (rule 13): whatever channel the final frame actually
-		// renders through, the interrupted eval's own source must appear on it
-		// somewhere across the whole replay sequence — not just in this one
-		// hand-picked `terminal_output` assertion above. Feeding the full
-		// `announcedToolCallIds` sequence through the same auditor the mapper
-		// suite uses exercises the actual `#replaySessionHistory` code path
-		// this bug lived in, not a mapper-only reproduction of it.
-		const auditor = new EvalSourceDeliveryAuditor();
-		auditor.expect("toolu_dangling_meta", "eval", { language: "py", code: "print('interrupted')" });
-		const violations = toolUpdates.flatMap(update => auditor.observe({ sessionId: stored.sessionId, update }));
-		expect(violations).toEqual([]);
+		expectAcpStructure(zForkSessionResponse, forked);
+		expect(forked.sessionId).not.toBe(created.sessionId);
+
+		// The replay is deferred behind the bootstrap race guard (see
+		// `#replayForkedSessionHistory`) because the client cannot have
+		// registered this brand-new session id before observing this response.
+		await waitForBootstrapGuard();
+
+		const forkedUpdates = harness.updates.filter(update => update.sessionId === forked.sessionId);
+		const userChunk = forkedUpdates.find(
+			update =>
+				update.update.sessionUpdate === "user_message_chunk" &&
+				update.update.content.type === "text" &&
+				update.update.content.text === "FORKHIST_USER_MARKER_7QX2",
+		);
+		const assistantChunk = forkedUpdates.find(
+			update =>
+				update.update.sessionUpdate === "agent_message_chunk" &&
+				update.update.content.type === "text" &&
+				update.update.content.text === "FORKHIST_ASSISTANT_MARKER_7QX2",
+		);
+		expect(userChunk).toBeDefined();
+		expect(assistantChunk).toBeDefined();
+
+		// The replay must target the FORKED id, never the source -- a misroute
+		// here would silently duplicate the source session's history onto its
+		// own transcript instead of streaming it to the new one.
+		const sourceMarkerLeak = harness.updates.some(
+			update =>
+				update.sessionId === created.sessionId &&
+				update.update.sessionUpdate === "user_message_chunk" &&
+				update.update.content.type === "text" &&
+				update.update.content.text === "FORKHIST_USER_MARKER_7QX2",
+		);
+		expect(sourceMarkerLeak).toBe(false);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("replays a forked session's v4-journaled tool call through the same hydration adapter as session/load", async () => {
+		// (b): a settled presentation_events journal entry must replay through
+		// the shared hydration adapter (`hydrateReplayableToolExecution` ->
+		// `reduceAcpToolView(phase:'replay')` -> `encodeToolFrames`) on fork,
+		// not a second, parallel mechanism -- proven by an exact match against
+		// what the same helper computes directly, identical to the loadSession
+		// assertion in "routes a settled presentation-protocol tool journal
+		// entry through the hydration adapter on replay" above.
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const source = harness.findSession(created.sessionId)!;
+		const toolCallId = "toolu_fork_pres_settled_5H8N";
+		appendPresentationCallEntries(source, toolCallId, "bash", { command: "echo MARKER_FORK_SETTLE_5H8N" });
+		const executionId = toolExecutionId("exec-fork-pres-settled-5H8N");
+		source.sessionManager.appendToolExecutionStarted({
+			recordVersion: 1,
+			executionId,
+			call: { toolCallId, toolName: "bash", title: "run marker", kind: "execute" },
+			presentation: { version: 1, facts: [] },
+		});
+		const outputText = "MARKER_FORK_SETTLE_5H8N_OUTPUT_LINE";
+		source.sessionManager.appendToolExecutionSettled({
+			recordVersion: 1,
+			executionId,
+			outcome: { kind: "succeeded" },
+			presentation: {
+				version: 1,
+				stream: {
+					streamId: streamId(toolCallId),
+					startByte: byteOffset(0),
+					endByte: byteOffset(outputText.length),
+					text: outputText,
+					gaps: [],
+				},
+				facts: [],
+				attachments: [],
+			},
+			modelProjection: { version: 1, content: [{ type: "text", text: outputText }] },
+		});
+		source.sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId,
+			toolName: "bash",
+			content: [{ type: "text", text: outputText }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+		await source.sessionManager.ensureOnDisk();
+		await source.sessionManager.flush();
+
+		const forked = await harness.agent.unstable_forkSession({
+			sessionId: created.sessionId,
+			cwd: harness.cwdA,
+			mcpServers: [],
+		});
+		await waitForBootstrapGuard();
+
+		const toolUpdates = harness.updates
+			.filter(update => update.sessionId === forked.sessionId)
+			.map(notification => notification.update)
+			.filter(
+				(update): update is Extract<typeof update, { toolCallId: string }> =>
+					"toolCallId" in update && update.toolCallId === toolCallId,
+			);
+		const execution: ReplayableToolExecution = {
+			state: "settled",
+			call: { toolCallId, toolName: "bash", title: "run marker", kind: "execute" },
+			outcome: { kind: "succeeded" },
+			presentation: {
+				version: 1,
+				stream: {
+					streamId: streamId(toolCallId),
+					startByte: byteOffset(0),
+					endByte: byteOffset(outputText.length),
+					text: outputText,
+					gaps: [],
+				},
+				facts: [],
+				attachments: [],
+			},
+			modelProjection: { version: 1, content: [{ type: "text", text: outputText }] },
+		};
+		expect(toolUpdates).toEqual(computeDirectHydratedNotifications(forked.sessionId, harness.cwdA, execution));
+		expect(toolUpdates).toEqual([
+			expect.objectContaining({ sessionUpdate: "tool_call", toolCallId, status: "pending" }),
+			expect.objectContaining({
+				sessionUpdate: "tool_call_update",
+				toolCallId,
+				status: "completed",
+				content: [{ type: "content", content: { type: "text", text: `\`\`\`\n${outputText}\n\`\`\`` } }],
+			}),
+		]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("settles a dangling presentation-protocol tool call as interrupted through the hydration adapter", async () => {
+		// An execution whose `tool_execution_started` journal entry has
+		// no matching settled counterpart folds to `interrupted` and replays
+		// through the same hydration adapter, not the legacy dangling-cleanup
+		// synthetic-`failed` loop.
+		const harness = await createHarness();
+		const stored = new FakeAgentSession(harness.cwdA);
+		harness.sessions.push(stored);
+		const toolCallId = "toolu_pres_dangling_4M7Q";
+		appendPresentationCallEntries(stored, toolCallId, "bash", { command: "sleep 100" });
+		const executionId = toolExecutionId("exec-pres-dangling-4M7Q");
+		stored.sessionManager.appendToolExecutionStarted({
+			recordVersion: 1,
+			executionId,
+			call: { toolCallId, toolName: "bash", title: "run marker", kind: "execute" },
+			presentation: { version: 1, facts: [] },
+		});
+		await stored.sessionManager.ensureOnDisk();
+		await stored.sessionManager.flush();
+
+		await harness.agent.loadSession({ sessionId: stored.sessionId, cwd: harness.cwdA, mcpServers: [] });
+
+		const toolUpdates = harness.updates
+			.filter(update => update.sessionId === stored.sessionId)
+			.map(notification => notification.update)
+			.filter(
+				(update): update is Extract<typeof update, { toolCallId: string }> =>
+					"toolCallId" in update && update.toolCallId === toolCallId,
+			);
+		const execution: ReplayableToolExecution = {
+			state: "interrupted",
+			call: { toolCallId, toolName: "bash", title: "run marker", kind: "execute" },
+			reason: "Interrupted: no settlement record was persisted before the process ended.",
+			presentation: { version: 1, facts: [] },
+		};
+		expect(toolUpdates).toEqual(computeDirectHydratedNotifications(stored.sessionId, harness.cwdA, execution));
+		// The hydrated interrupted call must resolve on its own -- it must never
+		// also be swept into `#replaySessionHistory`'s legacy dangling-cleanup
+		// synthetic-`failed` loop (that loop's text differs: "no result recorded",
+		// not "no settlement record was persisted").
+		expect(
+			toolUpdates.some(
+				update =>
+					update.sessionUpdate === "tool_call_update" &&
+					JSON.stringify(update.content ?? []).includes("no result recorded"),
+			),
+		).toBe(false);
+		expect(toolUpdates.at(-1)).toEqual(
+			expect.objectContaining({ sessionUpdate: "tool_call_update", status: "failed" }),
+		);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("replays a mixed legacy_snapshot and presentation-protocol pair from the same session correctly", async () => {
+		// A legacy_snapshot call (no journal entry, falls back
+		// to the untouched legacy reconstruction) and a presentation_events call
+		// (journal entry present, routes through hydration) must coexist in one
+		// replay walk without cross-contaminating each other's notifications.
+		const harness = await createHarness();
+		const stored = new FakeAgentSession(harness.cwdA);
+		harness.sessions.push(stored);
+
+		const legacyToolCallId = "toolu_legacy_mix_2P8L";
+		stored.sessionManager.appendMessage({ role: "user", content: "run legacy command", timestamp: Date.now() });
+		stored.sessionManager.appendMessage({
+			role: "assistant",
+			content: [
+				{ type: "tool_use", id: legacyToolCallId, name: "read", input: { path: "/repo/legacy.txt" } },
+			] as unknown as Array<{ type: "toolCall"; id: string; name: string; arguments: Record<string, unknown> }>,
+			api: "openai-responses",
+			provider: "openai",
+			model: TEST_MODELS[1].id,
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		});
+		const legacyOutputText = "MARKER_LEGACY_2P8L_BODY";
+		stored.sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: legacyToolCallId,
+			toolName: "read",
+			content: [{ type: "text", text: legacyOutputText }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		const presentToolCallId = "toolu_present_mix_6R3W";
+		appendPresentationCallEntries(stored, presentToolCallId, "bash", { command: "echo MARKER_MIX_6R3W" });
+		const executionId = toolExecutionId("exec-pres-mix-6R3W");
+		stored.sessionManager.appendToolExecutionStarted({
+			recordVersion: 1,
+			executionId,
+			call: { toolCallId: presentToolCallId, toolName: "bash", title: "run marker mix", kind: "execute" },
+			presentation: { version: 1, facts: [] },
+		});
+		const presentOutputText = "MARKER_MIX_6R3W_OUTPUT_LINE";
+		stored.sessionManager.appendToolExecutionSettled({
+			recordVersion: 1,
+			executionId,
+			outcome: { kind: "succeeded" },
+			presentation: {
+				version: 1,
+				stream: {
+					streamId: streamId(presentToolCallId),
+					startByte: byteOffset(0),
+					endByte: byteOffset(presentOutputText.length),
+					text: presentOutputText,
+					gaps: [],
+				},
+				facts: [],
+				attachments: [],
+			},
+			modelProjection: { version: 1, content: [{ type: "text", text: presentOutputText }] },
+		});
+		stored.sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: presentToolCallId,
+			toolName: "bash",
+			content: [{ type: "text", text: presentOutputText }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+		await stored.sessionManager.ensureOnDisk();
+		await stored.sessionManager.flush();
+
+		await harness.agent.loadSession({ sessionId: stored.sessionId, cwd: harness.cwdA, mcpServers: [] });
+
+		const updatesFor = (toolCallId: string) =>
+			harness.updates
+				.filter(update => update.sessionId === stored.sessionId)
+				.map(notification => notification.update)
+				.filter(
+					(update): update is Extract<typeof update, { toolCallId: string }> =>
+						"toolCallId" in update && update.toolCallId === toolCallId,
+				);
+
+		// Legacy call: untouched settled-body-only reconstruction.
+		expect(updatesFor(legacyToolCallId)).toEqual([
+			expect.objectContaining({ sessionUpdate: "tool_call", toolCallId: legacyToolCallId }),
+			expect.objectContaining({
+				sessionUpdate: "tool_call_update",
+				toolCallId: legacyToolCallId,
+				status: "completed",
+				content: [{ type: "content", content: { type: "text", text: legacyOutputText } }],
+			}),
+		]);
+		// Presentation call: hydrated through the new path, matching the direct
+		// pipeline computation, and carrying its own marker rather than the
+		// legacy call's.
+		const presentExecution: ReplayableToolExecution = {
+			state: "settled",
+			call: { toolCallId: presentToolCallId, toolName: "bash", title: "run marker mix", kind: "execute" },
+			outcome: { kind: "succeeded" },
+			presentation: {
+				version: 1,
+				stream: {
+					streamId: streamId(presentToolCallId),
+					startByte: byteOffset(0),
+					endByte: byteOffset(presentOutputText.length),
+					text: presentOutputText,
+					gaps: [],
+				},
+				facts: [],
+				attachments: [],
+			},
+			modelProjection: { version: 1, content: [{ type: "text", text: presentOutputText }] },
+		};
+		expect(updatesFor(presentToolCallId)).toEqual(
+			computeDirectHydratedNotifications(stored.sessionId, harness.cwdA, presentExecution),
+		);
+		expect(
+			updatesFor(presentToolCallId).some(
+				update =>
+					update.sessionUpdate === "tool_call_update" && JSON.stringify(update.content).includes(legacyOutputText),
+			),
+		).toBe(false);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("replays a fully-journaled recycled toolCallId as two independent executions without rejecting the load", async () => {
+		// Regression: a provider recycling a
+		// toolCallId across two turns, with BOTH occurrences correctly journaled
+		// (distinct executionIds, distinct output), must not carry the first
+		// hydrated execution's terminal `settled` reducer state into the second
+		// -- that made `reduceStarted` reject the second occurrence as "started
+		// twice", which the fail-closed catch turned into a rejected
+		// `session/load` for a fully-valid pair.
+		const harness = await createHarness();
+		const stored = new FakeAgentSession(harness.cwdA);
+		harness.sessions.push(stored);
+		const recycledId = "toolu_recycled_5K9J";
+
+		appendPresentationCallEntries(stored, recycledId, "bash", { command: "echo RECYCLED_FIRST_5K9J" });
+		const firstExecutionId = toolExecutionId("exec-recycled-first-5K9J");
+		stored.sessionManager.appendToolExecutionStarted({
+			recordVersion: 1,
+			executionId: firstExecutionId,
+			call: { toolCallId: recycledId, toolName: "bash", title: "run marker recycled first", kind: "execute" },
+			presentation: { version: 1, facts: [] },
+		});
+		const firstOutputText = "RECYCLED_FIRST_OUTPUT_LINE_5K9J";
+		stored.sessionManager.appendToolExecutionSettled({
+			recordVersion: 1,
+			executionId: firstExecutionId,
+			outcome: { kind: "succeeded" },
+			presentation: {
+				version: 1,
+				stream: {
+					streamId: streamId(recycledId),
+					startByte: byteOffset(0),
+					endByte: byteOffset(firstOutputText.length),
+					text: firstOutputText,
+					gaps: [],
+				},
+				facts: [],
+				attachments: [],
+			},
+			modelProjection: { version: 1, content: [{ type: "text", text: firstOutputText }] },
+		});
+		stored.sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: recycledId,
+			toolName: "bash",
+			content: [{ type: "text", text: firstOutputText }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// Second occurrence: the SAME toolCallId, a fresh journal pair with its
+		// own executionId and its own output.
+		appendPresentationCallEntries(stored, recycledId, "bash", { command: "echo RECYCLED_SECOND_5K9J" });
+		const secondExecutionId = toolExecutionId("exec-recycled-second-5K9J");
+		stored.sessionManager.appendToolExecutionStarted({
+			recordVersion: 1,
+			executionId: secondExecutionId,
+			call: { toolCallId: recycledId, toolName: "bash", title: "run marker recycled second", kind: "execute" },
+			presentation: { version: 1, facts: [] },
+		});
+		const secondOutputText = "RECYCLED_SECOND_OUTPUT_LINE_5K9J";
+		stored.sessionManager.appendToolExecutionSettled({
+			recordVersion: 1,
+			executionId: secondExecutionId,
+			outcome: { kind: "succeeded" },
+			presentation: {
+				version: 1,
+				stream: {
+					streamId: streamId(recycledId),
+					startByte: byteOffset(0),
+					endByte: byteOffset(secondOutputText.length),
+					text: secondOutputText,
+					gaps: [],
+				},
+				facts: [],
+				attachments: [],
+			},
+			modelProjection: { version: 1, content: [{ type: "text", text: secondOutputText }] },
+		});
+		stored.sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: recycledId,
+			toolName: "bash",
+			content: [{ type: "text", text: secondOutputText }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+		await stored.sessionManager.ensureOnDisk();
+		await stored.sessionManager.flush();
+
+		// The load itself must resolve -- a rejection here is exactly the P1 bug.
+		await harness.agent.loadSession({ sessionId: stored.sessionId, cwd: harness.cwdA, mcpServers: [] });
+
+		const toolUpdates = harness.updates
+			.filter(update => update.sessionId === stored.sessionId)
+			.map(notification => notification.update)
+			.filter(
+				(update): update is Extract<typeof update, { toolCallId: string }> =>
+					"toolCallId" in update && update.toolCallId === recycledId,
+			);
+		expect(toolUpdates).toEqual([
+			expect.objectContaining({ sessionUpdate: "tool_call", toolCallId: recycledId, status: "pending" }),
+			expect.objectContaining({
+				sessionUpdate: "tool_call_update",
+				toolCallId: recycledId,
+				status: "completed",
+				content: [{ type: "content", content: { type: "text", text: `\`\`\`\n${firstOutputText}\n\`\`\`` } }],
+			}),
+			expect.objectContaining({ sessionUpdate: "tool_call", toolCallId: recycledId, status: "pending" }),
+			expect.objectContaining({
+				sessionUpdate: "tool_call_update",
+				toolCallId: recycledId,
+				status: "completed",
+				content: [{ type: "content", content: { type: "text", text: `\`\`\`\n${secondOutputText}\n\`\`\`` } }],
+			}),
+		]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("falls every occurrence of a partially-journaled recycled toolCallId back to legacy replay instead of misattributing the lone record", async () => {
+		// Regression: a provider recycling a
+		// toolCallId where only the LATER occurrence was journaled must not
+		// assign that record to the earlier occurrence -- that erased the
+		// earlier call's own real legacy history and rendered the later record's
+		// title/output at the earlier call's position. Both occurrences must
+		// replay through the untouched legacy path, each with its own body.
+		const harness = await createHarness();
+		const stored = new FakeAgentSession(harness.cwdA);
+		harness.sessions.push(stored);
+		const mixedId = "toolu_recycled_mixed_2Q4T";
+
+		// First occurrence: pure legacy_snapshot, no journal entry at all.
+		stored.sessionManager.appendMessage({ role: "user", content: "run recycled mixed first", timestamp: Date.now() });
+		stored.sessionManager.appendMessage({
+			role: "assistant",
+			content: [
+				{ type: "tool_use", id: mixedId, name: "bash", input: { command: "echo MIXED_FIRST_2Q4T" } },
+			] as unknown as Array<{ type: "toolCall"; id: string; name: string; arguments: Record<string, unknown> }>,
+			api: "openai-responses",
+			provider: "openai",
+			model: TEST_MODELS[1].id,
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		});
+		const firstLegacyBody = "MIXED_FIRST_LEGACY_BODY_2Q4T";
+		stored.sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: mixedId,
+			toolName: "bash",
+			content: [{ type: "text", text: firstLegacyBody }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// Second occurrence: the SAME toolCallId, this time with a real v4
+		// journal pair -- the only journal record for this id on the branch.
+		appendPresentationCallEntries(stored, mixedId, "bash", { command: "echo MIXED_SECOND_2Q4T" });
+		const secondExecutionId = toolExecutionId("exec-recycled-mixed-second-2Q4T");
+		stored.sessionManager.appendToolExecutionStarted({
+			recordVersion: 1,
+			executionId: secondExecutionId,
+			call: { toolCallId: mixedId, toolName: "bash", title: "run marker recycled mixed second", kind: "execute" },
+			presentation: { version: 1, facts: [] },
+		});
+		const secondJournaledOutput = "MIXED_SECOND_JOURNALED_OUTPUT_2Q4T";
+		stored.sessionManager.appendToolExecutionSettled({
+			recordVersion: 1,
+			executionId: secondExecutionId,
+			outcome: { kind: "succeeded" },
+			presentation: {
+				version: 1,
+				stream: {
+					streamId: streamId(mixedId),
+					startByte: byteOffset(0),
+					endByte: byteOffset(secondJournaledOutput.length),
+					text: secondJournaledOutput,
+					gaps: [],
+				},
+				facts: [],
+				attachments: [],
+			},
+			modelProjection: { version: 1, content: [{ type: "text", text: secondJournaledOutput }] },
+		});
+		stored.sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: mixedId,
+			toolName: "bash",
+			content: [{ type: "text", text: secondJournaledOutput }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+		await stored.sessionManager.ensureOnDisk();
+		await stored.sessionManager.flush();
+
+		await harness.agent.loadSession({ sessionId: stored.sessionId, cwd: harness.cwdA, mcpServers: [] });
+
+		const toolUpdates = harness.updates
+			.filter(update => update.sessionId === stored.sessionId)
+			.map(notification => notification.update)
+			.filter(
+				(update): update is Extract<typeof update, { toolCallId: string }> =>
+					"toolCallId" in update && update.toolCallId === mixedId,
+			);
+		// Both occurrences replay via the legacy plain-content shape (unfenced,
+		// args-derived title) -- neither ever reaches the hydration adapter.
+		expect(toolUpdates).toEqual([
+			expect.objectContaining({ sessionUpdate: "tool_call", toolCallId: mixedId, status: "pending" }),
+			expect.objectContaining({
+				sessionUpdate: "tool_call_update",
+				toolCallId: mixedId,
+				status: "completed",
+				content: [{ type: "content", content: { type: "text", text: firstLegacyBody } }],
+			}),
+			expect.objectContaining({ sessionUpdate: "tool_call", toolCallId: mixedId, status: "pending" }),
+			expect.objectContaining({
+				sessionUpdate: "tool_call_update",
+				toolCallId: mixedId,
+				status: "completed",
+				content: [{ type: "content", content: { type: "text", text: secondJournaledOutput } }],
+			}),
+		]);
+		// The earlier occurrence's real body must survive intact -- P2 erased it
+		// by attaching the later record to the earlier position instead.
+		expect(JSON.stringify(toolUpdates)).toContain(firstLegacyBody);
+		// Neither occurrence is fenced (the hydration adapter's markdown-fence
+		// signature) -- proves neither took the hydrated path.
+		expect(JSON.stringify(toolUpdates)).not.toContain("```");
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
@@ -1941,10 +2866,15 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
-	it("replays todo tool results as ACP plan updates", async () => {
+	it("settles a replayed todo call before replaying its plan update", async () => {
 		const harness = await createHarness();
 		const stored = new FakeAgentSession(harness.cwdA);
 		harness.sessions.push(stored);
+		stored.sessionManager.appendMessage({
+			...makeAssistantMessage(""),
+			content: [{ type: "toolCall", id: "todo_replay", name: "todo", arguments: {} }],
+			stopReason: "toolUse",
+		});
 		stored.sessionManager.appendMessage({
 			role: "toolResult",
 			toolCallId: "todo_replay",
@@ -1965,10 +2895,33 @@ describe("ACP agent", () => {
 			mcpServers: [],
 		});
 
-		expect(harness.updates.map(update => update.update)).toContainEqual({
-			sessionUpdate: "plan",
-			entries: [{ content: "Restore plan", priority: "medium", status: "pending" }],
-		});
+		const replayUpdates = harness.updates
+			.filter(notification => notification.sessionId === stored.sessionId)
+			.map(notification => notification.update)
+			.filter(
+				update =>
+					("toolCallId" in update && update.toolCallId === "todo_replay") || update.sessionUpdate === "plan",
+			);
+		expect(replayUpdates).toEqual([
+			{
+				sessionUpdate: "tool_call",
+				toolCallId: "todo_replay",
+				title: "todo",
+				kind: "think",
+				status: "pending",
+				rawInput: {},
+			},
+			{
+				sessionUpdate: "tool_call_update",
+				toolCallId: "todo_replay",
+				status: "completed",
+				content: [{ type: "content", content: { type: "text", text: "updated" } }],
+			},
+			{
+				sessionUpdate: "plan",
+				entries: [{ content: "Restore plan", priority: "medium", status: "pending" }],
+			},
+		]);
 		expectAcpNotifications(harness.updates);
 
 		harness.abortController.abort();
@@ -2648,6 +3601,1908 @@ describe("ACP agent", () => {
 		await secondPrompt;
 		expect(session.promptCalls).toEqual(["cancel me", "after cancel"]);
 
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("dispatches a legacy tool's permission request right after its start frame", async () => {
+		// The literal writer order for a permission-gated **legacy** route. The reserved
+		// slot keys off delivered starts, and the legacy mapper path used to enqueue its
+		// `tool_call` announcement untagged — so the start could not pass the slot that
+		// was waiting for it, and both the card and the dialog appeared only after the
+		// 10-second barrier expired.
+		const answer = Promise.withResolvers<{ outcome: { outcome: "selected"; optionId: string } }>();
+		const harness = await createHarness({ requestPermission: () => answer.promise });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const finishPrompt = holdPromptStreaming(session);
+
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000071",
+			prompt: [{ type: "text", text: "edit a file" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+		harness.writes.length = 0;
+
+		// The permission gate wraps `execute`, and `processAgentEvent` fan-out is async,
+		// so the gate can reach the bridge before the start frame has been written.
+		const bridge = session.clientBridge;
+		if (!bridge?.requestPermission) throw new Error("expected the ACP client bridge to own requestPermission");
+		const permission = bridge.requestPermission({ toolCallId: "edit-1", toolName: "edit", title: "edit a.txt" }, [
+			{ optionId: "allow", name: "Allow", kind: "allow_once" },
+		]);
+
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		emit({
+			type: "tool_execution_start",
+			toolCallId: "edit-1",
+			toolName: "edit",
+			args: { path: "a.txt", old_text: "a", new_text: "b" },
+		} as AgentSessionEvent);
+		emit({
+			type: "message_update",
+			message: makeAssistantMessage("unrelated"),
+			assistantMessageEvent: { type: "text_delta", delta: "unrelated" },
+		} as AgentSessionEvent);
+
+		// Deterministic completion signals, not a latency snapshot: wait for exactly
+		// the writes this assertion cares about to land, in the order they must land.
+		await harness.waitForWrite("tool_call:edit-1");
+		await harness.waitForWrite("request_permission:edit-1");
+		await harness.waitForWrite("agent_message_chunk");
+
+		// Bootstrap notifications (`available_commands_update`, `session_info_update`)
+		// ride the same writer but belong to session setup, not to this ordering claim.
+		const ordered = harness.writes.filter(label => !label.endsWith("_update") || label.includes(":"));
+		expect(ordered).toEqual(["tool_call:edit-1", "request_permission:edit-1", "agent_message_chunk"]);
+
+		// ...and all of that happened while the dialog was still open: race the
+		// permission response against an already-resolved sentinel and require the
+		// sentinel wins, proving `permission` has not settled yet.
+		const sentinel = Symbol("still-pending");
+		const raced = await Promise.race([permission, Promise.resolve(sentinel)]);
+		expect(raced).toBe(sentinel);
+
+		answer.resolve({ outcome: { outcome: "selected", optionId: "allow" } });
+		expect(await permission).toEqual({ outcome: "selected", optionId: "allow", kind: "allow_once" });
+
+		finishPrompt();
+		await prompt;
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("delivers a live apply_patch start, snapshot, and terminal edit frame through the encoded queue exactly once", async () => {
+		const harness = await createHarness({ writeDelayMs: 5 });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const finishPrompt = holdPromptStreaming(session);
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000073",
+			prompt: [{ type: "text", text: "patch a file" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		emit({
+			type: "tool_execution_start",
+			toolCallId: "live-apply-patch",
+			toolName: "apply_patch",
+			args: { path: "src/live.ts", input: "*** Begin Patch" },
+		} as AgentSessionEvent);
+		emit({
+			type: "tool_execution_update",
+			toolCallId: "live-apply-patch",
+			toolName: "apply_patch",
+			args: { path: "src/live.ts" },
+			partialResult: { content: [{ type: "text", text: "in progress" }], details: { diff: "" } },
+		} as AgentSessionEvent);
+		emit({
+			type: "tool_execution_end",
+			toolCallId: "live-apply-patch",
+			toolName: "apply_patch",
+			isError: false,
+			result: {
+				content: [{ type: "text", text: "applied" }],
+				details: {
+					diff: "",
+					perFileResults: [{ path: "src/live.ts", diff: "", oldText: "before\n", newText: "after\n" }],
+				},
+			},
+		} as AgentSessionEvent);
+
+		finishPrompt();
+		await prompt;
+		const updates = harness.updates
+			.map(
+				notification =>
+					notification.update as {
+						sessionUpdate?: string;
+						toolCallId?: string;
+						status?: string;
+						content?: unknown[];
+						locations?: unknown[];
+					},
+			)
+			.filter(update => update.toolCallId === "live-apply-patch");
+		expect(updates.map(update => update.sessionUpdate)).toEqual([
+			"tool_call",
+			"tool_call_update",
+			"tool_call_update",
+		]);
+		expect(updates[1]).toMatchObject({
+			status: "in_progress",
+			content: [{ type: "content", content: { type: "text", text: "```\nin progress\n```" } }],
+			locations: [{ path: path.join(harness.cwdA, "src/live.ts") }],
+		});
+		expect(updates[2]).toMatchObject({
+			status: "completed",
+			content: [{ type: "diff", path: "src/live.ts", oldText: "before\n", newText: "after\n" }],
+			locations: [{ path: path.join(harness.cwdA, "src/live.ts") }],
+		});
+		expect(updates.filter(update => update.status === "completed")).toHaveLength(1);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("keeps an exact external apply_patch shadow on the live external path without poisoning the queue", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		// Match the real dispatcher setup: the built-in edit tool advertises the
+		// apply_patch wire alias, but an exact external name wins before aliases.
+		session.registerBuiltinTool("edit", "apply_patch");
+		session.registerExternalTool("apply_patch");
+		expect(session.hasBuiltInToolDispatch("apply_patch")).toBeFalse();
+
+		const finishPrompt = holdPromptStreaming(session);
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000074",
+			prompt: [{ type: "text", text: "run external patch" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		emit({
+			type: "tool_execution_start",
+			toolCallId: "external-apply-patch",
+			toolName: "apply_patch",
+			args: { external: true },
+		} as AgentSessionEvent);
+		emit({
+			type: "tool_execution_end",
+			toolCallId: "external-apply-patch",
+			toolName: "apply_patch",
+			isError: false,
+			// A built-in edit parse must reject this missing-diff payload. Its
+			// successful external delivery proves the live witness chose the
+			// dispatcher-selected external tool instead.
+			result: { content: [{ type: "text", text: "external result" }], details: { external: true } },
+		} as AgentSessionEvent);
+
+		finishPrompt();
+		await expect(prompt).resolves.toMatchObject({ stopReason: "end_turn" });
+
+		const updates = harness.updates
+			.map(
+				notification =>
+					notification.update as {
+						sessionUpdate?: string;
+						toolCallId?: string;
+						kind?: string;
+						status?: string;
+						content?: unknown[];
+					},
+			)
+			.filter(update => update.toolCallId === "external-apply-patch");
+		expect(updates).toMatchObject([
+			{ sessionUpdate: "tool_call", kind: "other" },
+			{
+				sessionUpdate: "tool_call_update",
+				status: "completed",
+				content: [{ type: "content", content: { type: "text", text: "external result" } }],
+			},
+		]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("routes a real built-in EvalTool proxy result through typed ACP frames", async () => {
+		const harness = await createHarness({ terminalMeta: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.registerBuiltinTool("eval");
+		const finishPrompt = holdPromptStreaming(session);
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000077",
+			prompt: [{ type: "text", text: "run proxied eval" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const proxy = new EvalTool(null, {
+			proxyExecutor: async () => ({
+				content: [{ type: "text", text: "proxy stdout" }],
+				details: { notice: "Fell back to the js backend." },
+			}),
+		});
+		const args = { language: "js", code: "fallback()" };
+		const result = await proxy.execute("proxy-eval", args as never);
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		emit({
+			type: "tool_execution_start",
+			toolCallId: "proxy-eval",
+			toolName: "eval",
+			args,
+			progressProtocol: "legacy_snapshot",
+		} as AgentSessionEvent);
+		emit({
+			type: "tool_execution_end",
+			toolCallId: "proxy-eval",
+			toolName: "eval",
+			isError: false,
+			result,
+			progressProtocol: "legacy_snapshot",
+		} as AgentSessionEvent);
+
+		finishPrompt();
+		await prompt;
+		const updates = harness.updates
+			.map(notification => notification.update)
+			.filter(
+				(update): update is Extract<typeof update, { toolCallId: string }> =>
+					"toolCallId" in update && update.toolCallId === "proxy-eval",
+			);
+		expect(updates).toEqual([
+			{
+				sessionUpdate: "tool_call",
+				toolCallId: "proxy-eval",
+				title: "[js]",
+				kind: "execute",
+				status: "pending",
+				rawInput: args,
+				content: [{ type: "terminal", terminalId: "proxy-eval" }],
+				_meta: { terminal_info: { terminal_id: "proxy-eval", cwd: harness.cwdA } },
+			},
+			{
+				sessionUpdate: "tool_call_update",
+				toolCallId: "proxy-eval",
+				status: "in_progress",
+				_meta: {
+					terminal_output: { terminal_id: "proxy-eval", data: `fallback()\n${"─".repeat(48)}\nproxy stdout` },
+				},
+			},
+			{
+				sessionUpdate: "tool_call_update",
+				toolCallId: "proxy-eval",
+				_meta: { terminal_output: { terminal_id: "proxy-eval", data: "\nFell back to the js backend.\n" } },
+			},
+			{
+				sessionUpdate: "tool_call_update",
+				toolCallId: "proxy-eval",
+				status: "completed",
+				_meta: { terminal_exit: { terminal_id: "proxy-eval", exit_code: 0, signal: null } },
+			},
+		]);
+		expect(updates.some(update => "rawOutput" in update)).toBe(false);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("keeps the real local EvalTool presentation route out of the proxy adapter", async () => {
+		const harness = await createHarness({ terminalMeta: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.registerBuiltinTool("eval");
+		const finishPrompt = holdPromptStreaming(session);
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000079",
+			prompt: [{ type: "text", text: "run local eval" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const local = new EvalTool(null);
+		const args = { language: "js", code: "local()" };
+		expect(local.presentation.selects.call(local, args as never, undefined)).toBe(true);
+		const call = local.presentation.start.call(local, "local-eval", args as never, undefined);
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		emit({
+			type: "tool_execution_start",
+			toolCallId: "local-eval",
+			toolName: "eval",
+			args,
+			progressProtocol: "presentation_events",
+		} as AgentSessionEvent);
+		emit({ type: "tool_presentation", toolCallId: "local-eval", toolName: "eval", event: { type: "started", call } });
+		emit({
+			type: "tool_presentation",
+			toolCallId: "local-eval",
+			toolName: "eval",
+			event: { type: "settled", outcome: { kind: "succeeded", process: { kind: "exited", code: 0 } } },
+		});
+		emit({
+			type: "tool_execution_end",
+			toolCallId: "local-eval",
+			toolName: "eval",
+			result: { content: [], details: {} },
+			progressProtocol: "presentation_events",
+		} as AgentSessionEvent);
+
+		finishPrompt();
+		await expect(prompt).resolves.toMatchObject({ stopReason: "end_turn" });
+		const updates = harness.updates
+			.map(notification => notification.update)
+			.filter(
+				(update): update is Extract<typeof update, { toolCallId: string }> =>
+					"toolCallId" in update && update.toolCallId === "local-eval",
+			);
+		expect(updates).toEqual([
+			{
+				sessionUpdate: "tool_call",
+				toolCallId: "local-eval",
+				title: "Eval",
+				kind: "execute",
+				status: "pending",
+				rawInput: args,
+				content: [{ type: "terminal", terminalId: "local-eval" }],
+				_meta: { terminal_info: { terminal_id: "local-eval", cwd: harness.cwdA } },
+			},
+			{
+				sessionUpdate: "tool_call_update",
+				toolCallId: "local-eval",
+				status: "completed",
+				_meta: {
+					terminal_output: {
+						terminal_id: "local-eval",
+						data: `local()\n${"─".repeat(48)}\n`,
+					},
+					terminal_exit: { terminal_id: "local-eval", exit_code: 0, signal: null },
+				},
+			},
+		]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("routes a real built-in EvalTool proxy result with an image through a replacement content card", async () => {
+		// Companion to the notice/image proxy-eval coverage above: an image in
+		// the result forces the reducer's meta-terminal-to-content transition
+		// (`acp-view-reducer.test.ts`'s "finalizes the display-only terminal in
+		// its own frame before emitting attachment content"), so the terminal
+		// card's sourceEcho/notice text must survive onto the final content
+		// frame alongside the image instead of vanishing behind the dropped
+		// terminal item.
+		const harness = await createHarness({ terminalMeta: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.registerBuiltinTool("eval");
+		const finishPrompt = holdPromptStreaming(session);
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000201",
+			prompt: [{ type: "text", text: "run proxied eval with image" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const proxy = new EvalTool(null, {
+			proxyExecutor: async () => ({
+				content: [{ type: "text", text: "(displayed image)" }],
+				details: {
+					notice: "Fell back to the js backend.",
+					images: [{ type: "image", data: "image-data", mimeType: "image/png" }],
+				},
+			}),
+		});
+		const args = { language: "py", code: "show()" };
+		const result = await proxy.execute("proxy-eval-image", args as never);
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		emit({
+			type: "tool_execution_start",
+			toolCallId: "proxy-eval-image",
+			toolName: "eval",
+			args,
+			progressProtocol: "legacy_snapshot",
+		} as AgentSessionEvent);
+		emit({
+			type: "tool_execution_end",
+			toolCallId: "proxy-eval-image",
+			toolName: "eval",
+			isError: false,
+			result,
+			progressProtocol: "legacy_snapshot",
+		} as AgentSessionEvent);
+
+		finishPrompt();
+		await prompt;
+		const updates = harness.updates
+			.map(notification => notification.update)
+			.filter(
+				(update): update is Extract<typeof update, { toolCallId: string }> =>
+					"toolCallId" in update && update.toolCallId === "proxy-eval-image",
+			);
+		expect(updates.at(-1)).toMatchObject({
+			sessionUpdate: "tool_call_update",
+			toolCallId: "proxy-eval-image",
+			content: [
+				{
+					type: "content",
+					content: { type: "text", text: "show()\n\n```\n(displayed image)\n```\n\nFell back to the js backend." },
+				},
+				{ type: "content", content: { type: "image", data: "image-data", mimeType: "image/png" } },
+			],
+		});
+		expect(updates.some(update => "rawOutput" in update)).toBe(false);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("streams a built-in proxy eval update as an appended terminal chunk without snapshot overlap reconciliation", async () => {
+		const harness = await createHarness({ terminalMeta: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.registerBuiltinTool("eval");
+		const finishPrompt = holdPromptStreaming(session);
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000202",
+			prompt: [{ type: "text", text: "run streaming proxied eval" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const args = { language: "js", code: "stream()" };
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		emit({
+			type: "tool_execution_start",
+			toolCallId: "proxy-eval-update",
+			toolName: "eval",
+			args,
+			progressProtocol: "legacy_snapshot",
+		} as AgentSessionEvent);
+		emit({
+			type: "tool_execution_update",
+			toolCallId: "proxy-eval-update",
+			toolName: "eval",
+			args,
+			partialResult: {
+				content: [{ type: "text", text: "one explicit legacy snapshot" }],
+				details: { notice: "still running" },
+			},
+			progressProtocol: "legacy_snapshot",
+		} as AgentSessionEvent);
+
+		finishPrompt();
+		await prompt;
+		const updates = harness.updates
+			.map(notification => notification.update)
+			.filter(
+				(update): update is Extract<typeof update, { toolCallId: string }> =>
+					"toolCallId" in update && update.toolCallId === "proxy-eval-update",
+			);
+		expect(updates.slice(1)).toEqual([
+			{
+				sessionUpdate: "tool_call_update",
+				toolCallId: "proxy-eval-update",
+				status: "in_progress",
+				_meta: {
+					terminal_output: {
+						terminal_id: "proxy-eval-update",
+						data: `stream()\n${"─".repeat(48)}\none explicit legacy snapshot`,
+					},
+				},
+			},
+			{
+				sessionUpdate: "tool_call_update",
+				toolCallId: "proxy-eval-update",
+				_meta: { terminal_output: { terminal_id: "proxy-eval-update", data: "\nstill running\n" } },
+			},
+		]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("derives real proxy eval failure and cancellation settlements from strict details", async () => {
+		const harness = await createHarness({ terminalMeta: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.registerBuiltinTool("eval");
+		const finishPrompt = holdPromptStreaming(session);
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000203",
+			prompt: [{ type: "text", text: "run failing and cancelled proxied eval" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const args = { language: "py", code: "sleep()" };
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		emit({
+			type: "tool_execution_start",
+			toolCallId: "proxy-eval-failure",
+			toolName: "eval",
+			args,
+			progressProtocol: "legacy_snapshot",
+		} as AgentSessionEvent);
+		emit({
+			type: "tool_execution_end",
+			toolCallId: "proxy-eval-failure",
+			toolName: "eval",
+			isError: false,
+			result: {
+				content: [{ type: "text", text: "failed" }],
+				details: { cells: [{ index: 0, code: "", output: "", status: "error", exitCode: 7 }] },
+			},
+			progressProtocol: "legacy_snapshot",
+		} as AgentSessionEvent);
+		emit({
+			type: "tool_execution_start",
+			toolCallId: "proxy-eval-cancelled",
+			toolName: "eval",
+			args,
+			progressProtocol: "legacy_snapshot",
+		} as AgentSessionEvent);
+		emit({
+			type: "tool_execution_end",
+			toolCallId: "proxy-eval-cancelled",
+			toolName: "eval",
+			isError: true,
+			result: { content: [{ type: "text", text: "aborted" }], details: { termination: { kind: "interrupted" } } },
+			progressProtocol: "legacy_snapshot",
+		} as AgentSessionEvent);
+
+		finishPrompt();
+		await prompt;
+		const updateFor = (toolCallId: string) =>
+			harness.updates
+				.map(notification => notification.update)
+				.filter(
+					(update): update is Extract<typeof update, { toolCallId: string }> =>
+						"toolCallId" in update && update.toolCallId === toolCallId,
+				)
+				.at(-1);
+		expect(updateFor("proxy-eval-failure")).toMatchObject({
+			status: "failed",
+			_meta: { terminal_exit: { terminal_id: "proxy-eval-failure", exit_code: 7, signal: null } },
+		});
+		expect(updateFor("proxy-eval-cancelled")).toMatchObject({
+			status: "failed",
+			_meta: { terminal_exit: { terminal_id: "proxy-eval-cancelled", exit_code: null, signal: null } },
+		});
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("uses replacement content frames for a real built-in proxy eval without terminal capability", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.registerBuiltinTool("eval");
+		const finishPrompt = holdPromptStreaming(session);
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000204",
+			prompt: [{ type: "text", text: "run plain proxied eval" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const args = { language: "js", code: "plain()" };
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		emit({
+			type: "tool_execution_start",
+			toolCallId: "proxy-eval-plain",
+			toolName: "eval",
+			args,
+			progressProtocol: "legacy_snapshot",
+		} as AgentSessionEvent);
+		emit({
+			type: "tool_execution_end",
+			toolCallId: "proxy-eval-plain",
+			toolName: "eval",
+			isError: false,
+			result: { content: [{ type: "text", text: "plain result" }], details: {} },
+			progressProtocol: "legacy_snapshot",
+		} as AgentSessionEvent);
+
+		finishPrompt();
+		await prompt;
+		const updates = harness.updates
+			.map(notification => notification.update)
+			.filter(
+				(update): update is Extract<typeof update, { toolCallId: string }> =>
+					"toolCallId" in update && update.toolCallId === "proxy-eval-plain",
+			);
+		expect(updates[0]).toMatchObject({
+			sessionUpdate: "tool_call",
+			toolCallId: "proxy-eval-plain",
+			status: "pending",
+			content: [{ type: "content", content: { type: "text", text: "plain()" } }],
+		});
+		expect(updates.at(-1)).toMatchObject({
+			sessionUpdate: "tool_call_update",
+			toolCallId: "proxy-eval-plain",
+			status: "completed",
+			content: [{ type: "content", content: { type: "text", text: expect.stringContaining("plain result") } }],
+		});
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("routes omitted-protocol synthetic built-in eval through the checked legacy lifecycle", async () => {
+		const harness = await createHarness({ terminalMeta: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.registerBuiltinTool("eval");
+		const finishPrompt = holdPromptStreaming(session);
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000080",
+			prompt: [{ type: "text", text: "synthetic skipped eval" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const args = { language: "js", code: "never()" };
+		const result = {
+			content: [{ type: "text", text: "Tool call was not executed because the assistant ended its turn." }],
+			details: { __synthetic: true, source: "assistant_stop_skipped", executed: false },
+		};
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		// `AgentSessionEvent` intentionally omits progressProtocol for synthetic
+		// skipped/aborted calls; absence means legacy_snapshot.
+		emit({ type: "tool_execution_start", toolCallId: "synthetic-eval", toolName: "eval", args } as AgentSessionEvent);
+		emit({
+			type: "tool_execution_end",
+			toolCallId: "synthetic-eval",
+			toolName: "eval",
+			isError: true,
+			result,
+		} as AgentSessionEvent);
+
+		finishPrompt();
+		await expect(prompt).resolves.toMatchObject({ stopReason: "end_turn" });
+		const updates = harness.updates
+			.map(notification => notification.update)
+			.filter(
+				(update): update is Extract<typeof update, { toolCallId: string }> =>
+					"toolCallId" in update && update.toolCallId === "synthetic-eval",
+			);
+		expect(updates).toEqual([
+			{
+				sessionUpdate: "tool_call",
+				toolCallId: "synthetic-eval",
+				title: "[js]",
+				kind: "execute",
+				status: "pending",
+				rawInput: args,
+				content: [{ type: "terminal", terminalId: "synthetic-eval" }],
+				_meta: { terminal_info: { terminal_id: "synthetic-eval", cwd: harness.cwdA } },
+			},
+			{
+				sessionUpdate: "tool_call_update",
+				toolCallId: "synthetic-eval",
+				status: "in_progress",
+				_meta: {
+					terminal_output: {
+						terminal_id: "synthetic-eval",
+						data: `never()\n${"─".repeat(48)}\nTool call was not executed because the assistant ended its turn.`,
+					},
+				},
+			},
+			{
+				sessionUpdate: "tool_call_update",
+				toolCallId: "synthetic-eval",
+				status: "failed",
+				_meta: { terminal_exit: { terminal_id: "synthetic-eval", exit_code: null, signal: null } },
+			},
+		]);
+		expect(updates.some(update => "rawOutput" in update)).toBe(false);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("fails closed for an omitted-protocol built-in eval end without its legacy start", async () => {
+		const harness = await createHarness({ terminalMeta: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.registerBuiltinTool("eval");
+		const finishPrompt = holdPromptStreaming(session);
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000081",
+			prompt: [{ type: "text", text: "orphan synthetic eval" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		emit({
+			type: "tool_execution_end",
+			toolCallId: "orphan-synthetic-eval",
+			toolName: "eval",
+			isError: true,
+			result: {
+				content: [{ type: "text", text: "Tool execution was aborted" }],
+				details: { __synthetic: true, source: "assistant_stop_aborted", executed: false },
+			},
+		} as AgentSessionEvent);
+
+		finishPrompt();
+		await expect(prompt).rejects.toThrow("ACP built-in eval ended without a legacy start: orphan-synthetic-eval");
+		expect(
+			harness.updates.some(
+				(update: { update: unknown }) =>
+					typeof update.update === "object" &&
+					update.update !== null &&
+					"toolCallId" in update.update &&
+					(update.update as { toolCallId?: unknown }).toolCallId === "orphan-synthetic-eval",
+			),
+		).toBe(false);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("keeps an exact external eval shadow on the generic ACP compatibility route", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.registerBuiltinTool("eval");
+		session.registerExternalTool("eval");
+		expect(session.hasBuiltInToolDispatch("eval")).toBeFalse();
+		const finishPrompt = holdPromptStreaming(session);
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000078",
+			prompt: [{ type: "text", text: "run external eval" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		emit({
+			type: "tool_execution_start",
+			toolCallId: "external-eval",
+			toolName: "eval",
+			args: { external: true },
+		} as AgentSessionEvent);
+		emit({
+			type: "tool_execution_end",
+			toolCallId: "external-eval",
+			toolName: "eval",
+			isError: false,
+			result: { content: [{ type: "text", text: "external result" }], details: { notice: 42 } },
+		} as AgentSessionEvent);
+
+		finishPrompt();
+		await expect(prompt).resolves.toMatchObject({ stopReason: "end_turn" });
+		const end = harness.updates
+			.map(notification => notification.update)
+			.find(update => update.sessionUpdate === "tool_call_update" && update.toolCallId === "external-eval");
+		expect(end).toMatchObject({
+			status: "completed",
+			content: [{ type: "content", content: { type: "text", text: "```\nexternal result\n```" } }],
+			rawOutput: { kind: "tool_settlement", tool: "eval", outcome: "completed" },
+		});
+		// Bounded settlement marker only — never the raw result above (Zed's
+		// `acp_thread.rs` gates tool-output-refusal classification on
+		// `raw_output.is_some()` for a completed call).
+		expect(JSON.stringify((end as { rawOutput?: unknown } | undefined)?.rawOutput)).not.toContain("external result");
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("routes an omitted-protocol synthetic built-in shell alias through checked typed frames", async () => {
+		const harness = await createHarness({ terminalMeta: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.registerBuiltinTool("bash", "shell");
+		const finishPrompt = holdPromptStreaming(session);
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000082",
+			prompt: [{ type: "text", text: "synthetic skipped shell" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const args = { command: "echo never" };
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		// Synthetic lifecycle emitters have no producer handle. Their omitted tag is
+		// therefore an explicit legacy_snapshot declaration, not a route guess.
+		emit({
+			type: "tool_execution_start",
+			toolCallId: "synthetic-shell",
+			toolName: "shell",
+			args,
+		} as AgentSessionEvent);
+		emit({
+			type: "tool_execution_end",
+			toolCallId: "synthetic-shell",
+			toolName: "shell",
+			isError: true,
+			result: {
+				content: [{ type: "text", text: "Tool call was not executed because the assistant ended its turn." }],
+				details: { __synthetic: true, source: "assistant_stop_skipped", executed: false },
+			},
+		} as AgentSessionEvent);
+
+		finishPrompt();
+		await expect(prompt).resolves.toMatchObject({ stopReason: "end_turn" });
+		const updates = harness.updates
+			.map(notification => notification.update)
+			.filter(
+				(update): update is Extract<typeof update, { toolCallId: string }> =>
+					"toolCallId" in update && update.toolCallId === "synthetic-shell",
+			);
+		expect(updates).toEqual([
+			{
+				sessionUpdate: "tool_call",
+				toolCallId: "synthetic-shell",
+				title: "echo never",
+				kind: "execute",
+				status: "pending",
+				rawInput: args,
+				content: [{ type: "terminal", terminalId: "synthetic-shell" }],
+				_meta: { terminal_info: { terminal_id: "synthetic-shell", cwd: harness.cwdA } },
+			},
+			{
+				sessionUpdate: "tool_call_update",
+				toolCallId: "synthetic-shell",
+				status: "in_progress",
+				_meta: {
+					terminal_output: {
+						terminal_id: "synthetic-shell",
+						data: "Tool call was not executed because the assistant ended its turn.",
+					},
+				},
+			},
+			{
+				sessionUpdate: "tool_call_update",
+				toolCallId: "synthetic-shell",
+				status: "failed",
+				_meta: { terminal_exit: { terminal_id: "synthetic-shell", exit_code: null, signal: null } },
+			},
+		]);
+		expect(updates.some(update => "rawOutput" in update)).toBe(false);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("keeps an explicit-presentation built-in bash route out of the legacy adapter", async () => {
+		const harness = await createHarness({ terminalMeta: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.registerBuiltinTool("bash");
+		const finishPrompt = holdPromptStreaming(session);
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000083",
+			prompt: [{ type: "text", text: "local bash presentation" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const args = { command: "echo local" };
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		emit({
+			type: "tool_execution_start",
+			toolCallId: "local-bash",
+			toolName: "bash",
+			args,
+			progressProtocol: "presentation_events",
+		} as AgentSessionEvent);
+		emit({
+			type: "tool_presentation",
+			toolCallId: "local-bash",
+			toolName: "bash",
+			event: {
+				type: "started",
+				call: {
+					toolCallId: "local-bash",
+					toolName: "bash",
+					title: "echo local",
+					kind: "execute",
+					cwd: harness.cwdA,
+					rawInput: args,
+				},
+			},
+		});
+		emit({
+			type: "tool_presentation",
+			toolCallId: "local-bash",
+			toolName: "bash",
+			event: { type: "settled", outcome: { kind: "succeeded", process: { kind: "exited", code: 0 } } },
+		});
+		// This would fail the strict legacy parser if the explicit presentation route
+		// accidentally re-entered the compatibility adapter at end-of-lifecycle.
+		emit({
+			type: "tool_execution_end",
+			toolCallId: "local-bash",
+			toolName: "bash",
+			result: { content: [], details: { exitCode: "not-a-number" } },
+			progressProtocol: "presentation_events",
+		} as AgentSessionEvent);
+
+		finishPrompt();
+		await expect(prompt).resolves.toMatchObject({ stopReason: "end_turn" });
+		const updates = harness.updates
+			.map(notification => notification.update)
+			.filter(
+				(update): update is Extract<typeof update, { toolCallId: string }> =>
+					"toolCallId" in update && update.toolCallId === "local-bash",
+			);
+		expect(updates).toEqual([
+			{
+				sessionUpdate: "tool_call",
+				toolCallId: "local-bash",
+				title: "echo local",
+				kind: "execute",
+				status: "pending",
+				rawInput: args,
+				content: [{ type: "terminal", terminalId: "local-bash" }],
+				_meta: { terminal_info: { terminal_id: "local-bash", cwd: harness.cwdA } },
+			},
+			{
+				sessionUpdate: "tool_call_update",
+				toolCallId: "local-bash",
+				status: "completed",
+				_meta: { terminal_exit: { terminal_id: "local-bash", exit_code: 0, signal: null } },
+			},
+		]);
+		expect(updates.some(update => "rawOutput" in update)).toBe(false);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("keeps an exact external shell shadow on the generic ACP compatibility route", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.registerBuiltinTool("bash", "shell");
+		session.registerExternalTool("shell");
+		expect(session.hasBuiltInToolDispatch("shell")).toBeFalse();
+		const finishPrompt = holdPromptStreaming(session);
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000084",
+			prompt: [{ type: "text", text: "external shell" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const result = { content: [{ type: "text", text: "external result" }], details: { external: true } };
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		emit({
+			type: "tool_execution_start",
+			toolCallId: "external-shell",
+			toolName: "shell",
+			args: { external: true },
+		} as AgentSessionEvent);
+		emit({
+			type: "tool_execution_end",
+			toolCallId: "external-shell",
+			toolName: "shell",
+			isError: false,
+			result,
+		} as AgentSessionEvent);
+
+		finishPrompt();
+		await expect(prompt).resolves.toMatchObject({ stopReason: "end_turn" });
+		const end = harness.updates
+			.map(notification => notification.update)
+			.find(update => update.sessionUpdate === "tool_call_update" && update.toolCallId === "external-shell");
+		expect(end).toMatchObject({
+			status: "completed",
+			content: [{ type: "content", content: { type: "text", text: "```\nexternal result\n```" } }],
+			rawOutput: { kind: "tool_settlement", tool: "shell", outcome: "completed" },
+		});
+		// Bounded settlement marker only — never the raw result above (Zed's
+		// `acp_thread.rs` gates tool-output-refusal classification on
+		// `raw_output.is_some()` for a completed call).
+		expect(JSON.stringify((end as { rawOutput?: unknown } | undefined)?.rawOutput)).not.toContain("external result");
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("publishes only a settled full body for an external shell shadow's meta terminal, with no live progress and no discontinuity notice", async () => {
+		// The one remaining live consumer of the display-only meta-terminal
+		// convention's raw mapper arm: an external/MCP tool literally
+		// named `bash`/`shell`/`exec`/`eval` that fails `hasBuiltInToolDispatch`.
+		// `wantsMetaTerminal` gates on the *name*, never on origin, and a
+		// terminalMeta-capable client with no real terminal routes it here.
+		const harness = await createHarness({ terminalMeta: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.registerBuiltinTool("bash", "shell");
+		session.registerExternalTool("shell");
+		expect(session.hasBuiltInToolDispatch("shell")).toBeFalse();
+		const finishPrompt = holdPromptStreaming(session);
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000085",
+			prompt: [{ type: "text", text: "external shell meta terminal" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const args = { external: true };
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		emit({
+			type: "tool_execution_start",
+			toolCallId: "external-shell-meta",
+			toolName: "shell",
+			args,
+		} as AgentSessionEvent);
+		// Two bounded-window snapshots that would previously have forced the
+		// KMP overlap/rollover-resync branch: neither is a prefix extension of
+		// the last, so the deleted machinery would have fabricated a
+		// "[terminal output discontinuity]" notice and duplicated bytes. The
+		// settled-body-only policy must instead publish nothing here at all.
+		emit({
+			type: "tool_execution_update",
+			toolCallId: "external-shell-meta",
+			toolName: "shell",
+			args,
+			partialResult: { content: [{ type: "text", text: "abcde" }], details: {} },
+		} as AgentSessionEvent);
+		emit({
+			type: "tool_execution_update",
+			toolCallId: "external-shell-meta",
+			toolName: "shell",
+			args,
+			partialResult: { content: [{ type: "text", text: "cdefg" }], details: {} },
+		} as AgentSessionEvent);
+		emit({
+			type: "tool_execution_end",
+			toolCallId: "external-shell-meta",
+			toolName: "shell",
+			isError: false,
+			result: { content: [{ type: "text", text: "cdefgh" }], details: { exitCode: 0 } },
+		} as AgentSessionEvent);
+
+		finishPrompt();
+		await expect(prompt).resolves.toMatchObject({ stopReason: "end_turn" });
+		const callUpdates = harness.updates
+			.map(notification => notification.update)
+			.filter(
+				(update): update is Extract<typeof update, { toolCallId: string }> =>
+					"toolCallId" in update && update.toolCallId === "external-shell-meta",
+			);
+		const terminalOutputs = callUpdates
+			.map(update =>
+				"_meta" in update
+					? (update._meta as { terminal_output?: { data?: string } } | undefined)?.terminal_output?.data
+					: undefined,
+			)
+			.filter((data): data is string => typeof data === "string");
+		// Nothing published while the call ran; settlement is the single
+		// publish, carrying the true final body with no fabricated notice.
+		expect(terminalOutputs).toEqual(["cdefgh"]);
+		expect(terminalOutputs.join("\n")).not.toContain("terminal output discontinuity");
+		const end = callUpdates.find(update => "status" in update && update.status === "completed");
+		expect(end).toMatchObject({
+			status: "completed",
+			content: [{ type: "terminal", terminalId: "external-shell-meta" }],
+		});
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("fails closed for an omitted-protocol built-in bash alias end without a legacy start", async () => {
+		const harness = await createHarness({ terminalMeta: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.registerBuiltinTool("bash", "exec");
+		const finishPrompt = holdPromptStreaming(session);
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000085",
+			prompt: [{ type: "text", text: "orphan synthetic exec" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		for (const listener of session.listeners()) {
+			listener({
+				type: "tool_execution_end",
+				toolCallId: "orphan-exec",
+				toolName: "exec",
+				isError: true,
+				result: {
+					content: [{ type: "text", text: "Tool execution was aborted" }],
+					details: { __synthetic: true, source: "assistant_stop_aborted", executed: false },
+				},
+			} as AgentSessionEvent);
+		}
+
+		finishPrompt();
+		await expect(prompt).rejects.toThrow("ACP built-in bash ended without a legacy start: orphan-exec");
+		expect(
+			harness.updates.some(
+				(update: { update: unknown }) =>
+					typeof update.update === "object" &&
+					update.update !== null &&
+					"toolCallId" in update.update &&
+					(update.update as { toolCallId?: unknown }).toolCallId === "orphan-exec",
+			),
+		).toBe(false);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("settles a real argument-validation failure as a typed failed frame without poisoning the prompt", async () => {
+		const harness = await createHarness({ terminalMeta: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.registerBuiltinTool("bash");
+		const finishPrompt = holdPromptStreaming(session);
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000086",
+			prompt: [{ type: "text", text: "validation failure bash" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const args = { command: 42 };
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		// Mirrors `agent-loop.ts`'s `record.validationErrorMessage` branch exactly:
+		// both events explicitly declare `legacy_snapshot`, and the result details
+		// carry `{ isError: true, error }` rather than a bash-specific shape.
+		emit({
+			type: "tool_execution_start",
+			toolCallId: "validation-bash",
+			toolName: "bash",
+			args,
+			progressProtocol: "legacy_snapshot",
+		} as AgentSessionEvent);
+		emit({
+			type: "tool_execution_end",
+			toolCallId: "validation-bash",
+			toolName: "bash",
+			isError: true,
+			result: {
+				content: [{ type: "text", text: "bad args" }],
+				details: { isError: true, error: "bad args" },
+			},
+			progressProtocol: "legacy_snapshot",
+		} as AgentSessionEvent);
+
+		finishPrompt();
+		// The old behavior failed the built-in schema on this well-formed
+		// validation-failure shape and poisoned the queue, rejecting the prompt.
+		await expect(prompt).resolves.toMatchObject({ stopReason: "end_turn" });
+		const end = harness.updates
+			.map(notification => notification.update)
+			.find(
+				update =>
+					update.sessionUpdate === "tool_call_update" &&
+					update.toolCallId === "validation-bash" &&
+					"status" in update &&
+					update.status === "failed",
+			);
+		expect(end).toBeDefined();
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("fails closed for a malformed built-in bash result envelope instead of an empty success", async () => {
+		const harness = await createHarness({ terminalMeta: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.registerBuiltinTool("bash");
+		const finishPrompt = holdPromptStreaming(session);
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000087",
+			prompt: [{ type: "text", text: "malformed bash envelope" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const args = { command: "echo malformed" };
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		emit({
+			type: "tool_execution_start",
+			toolCallId: "malformed-bash",
+			toolName: "bash",
+			args,
+			progressProtocol: "legacy_snapshot",
+		} as AgentSessionEvent);
+		emit({
+			type: "tool_execution_end",
+			toolCallId: "malformed-bash",
+			toolName: "bash",
+			isError: false,
+			// Not an AgentToolResult envelope at all: a producer/transport bug, not
+			// real tool output.
+			result: "not-an-envelope",
+			progressProtocol: "legacy_snapshot",
+		} as AgentSessionEvent);
+
+		finishPrompt();
+		await expect(prompt).rejects.toThrow();
+		const updates = harness.updates
+			.map(notification => notification.update)
+			.filter(
+				(update): update is Extract<typeof update, { toolCallId: string }> =>
+					"toolCallId" in update && update.toolCallId === "malformed-bash",
+			);
+		// The old behavior silently coerced the malformed envelope into a
+		// successful empty bash result instead of failing closed.
+		expect(updates.some(update => "status" in update && update.status === "completed")).toBe(false);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("fails closed for a malformed built-in apply_patch result envelope before framing", async () => {
+		// Companion to the malformed-bash-envelope test above, for the legacy
+		// edit adapter: a real `apply_patch`/`edit`/`patch` result that fails
+		// `parseLegacyToolResult`'s strict schema must poison the queue instead
+		// of silently degrading to an empty/successful edit. This is the real
+		// route that replaced the old mapper-level
+		// `BuiltinResultSchemaError`-throw coverage in
+		// `acp-producer-wire.test.ts`'s legacy edit parser boundary tests —
+		// `apply_patch` never reaches the mapper at all once the session
+		// registers it as a built-in dispatch.
+		const harness = await createHarness({ terminalMeta: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.registerBuiltinTool("edit", "apply_patch");
+		const finishPrompt = holdPromptStreaming(session);
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000205",
+			prompt: [{ type: "text", text: "malformed apply_patch envelope" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const args = { input: "*** Begin Patch\n*** End Patch\n" };
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		emit({
+			type: "tool_execution_start",
+			toolCallId: "malformed-apply-patch",
+			toolName: "apply_patch",
+			args,
+		} as AgentSessionEvent);
+		emit({
+			type: "tool_execution_end",
+			toolCallId: "malformed-apply-patch",
+			toolName: "apply_patch",
+			isError: false,
+			// A well-formed content array but a `perFileResults` entry whose
+			// `path` is the wrong type — fails the built-in edit schema before
+			// any diff/notice framing runs.
+			result: {
+				content: [{ type: "text", text: "applied" }],
+				details: { perFileResults: [{ path: 42 }] },
+			},
+		} as AgentSessionEvent);
+
+		finishPrompt();
+		await expect(prompt).rejects.toThrow();
+		const updates = harness.updates
+			.map(notification => notification.update)
+			.filter(
+				(update): update is Extract<typeof update, { toolCallId: string }> =>
+					"toolCallId" in update && update.toolCallId === "malformed-apply-patch",
+			);
+		expect(updates.some(update => "status" in update && update.status === "completed")).toBe(false);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("publishes only the final settled body for legacy bash progress, never a duplicated or lossy live delta", async () => {
+		const harness = await createHarness({ terminalMeta: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.registerBuiltinTool("bash");
+		const finishPrompt = holdPromptStreaming(session);
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000088",
+			prompt: [{ type: "text", text: "cumulative legacy bash" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const args = { command: "print-progressively" };
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		emit({
+			type: "tool_execution_start",
+			toolCallId: "cumulative-bash",
+			toolName: "bash",
+			args,
+			progressProtocol: "legacy_snapshot",
+		} as AgentSessionEvent);
+		// A bounded tail window slides on every chunk (`TailBuffer`): none of
+		// these three snapshots is a prefix extension of the last, so an
+		// append-the-whole-thing publish would duplicate ("abcde" + "bcdef" +
+		// "cdefg") and a prefix-diff against the previous snapshot would
+		// permanently lose "fg" the instant the window first slides.
+		for (const snapshot of ["abcde", "bcdef", "cdefg"]) {
+			emit({
+				type: "tool_execution_update",
+				toolCallId: "cumulative-bash",
+				toolName: "bash",
+				args,
+				partialResult: { content: [{ type: "text", text: snapshot }], details: {} },
+			} as AgentSessionEvent);
+		}
+		emit({
+			type: "tool_execution_end",
+			toolCallId: "cumulative-bash",
+			toolName: "bash",
+			isError: false,
+			result: { content: [{ type: "text", text: "cdefgh" }], details: { exitCode: 0 } },
+			progressProtocol: "legacy_snapshot",
+		} as AgentSessionEvent);
+
+		finishPrompt();
+		await expect(prompt).resolves.toMatchObject({ stopReason: "end_turn" });
+		const terminalOutputs = harness.updates
+			.map(notification => notification.update)
+			.filter(
+				(update): update is Extract<typeof update, { toolCallId: string }> =>
+					"toolCallId" in update && update.toolCallId === "cumulative-bash",
+			)
+			.map(update =>
+				"_meta" in update
+					? (update._meta as { terminal_output?: { data?: string } } | undefined)?.terminal_output?.data
+					: undefined,
+			)
+			.filter((data): data is string => typeof data === "string");
+		// None of the three intermediate snapshots produced a live delta — a
+		// bounded rolling snapshot cannot be safely diffed without either
+		// duplicating or losing bytes, so this adapter never tries.
+		// Settlement is the single publish, carrying the true final body byte
+		// for byte, with nothing lost from the window sliding underneath it.
+		expect(terminalOutputs).toEqual(["cdefgh"]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("does not resolve prompt() before queued tool frames reach a slow writer", async () => {
+		// The reducer enqueues frame batches fire-and-forget (delivery order is the
+		// coordinator's job). Without an explicit drain the ACP response overtook the
+		// settlement frame that describes the turn's own result.
+		const harness = await createHarness({ terminalMeta: true, writeDelayMs: 15 });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const finishPrompt = holdPromptStreaming(session);
+
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000072",
+			prompt: [{ type: "text", text: "run a command" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		emit({
+			type: "tool_presentation",
+			toolCallId: "slow-call",
+			toolName: "bash",
+			event: {
+				type: "started",
+				call: { toolCallId: "slow-call", toolName: "bash", title: "echo hi", kind: "execute" },
+			},
+		} as AgentSessionEvent);
+		emit({
+			type: "tool_presentation",
+			toolCallId: "slow-call",
+			toolName: "bash",
+			event: { type: "settled", outcome: { kind: "succeeded" } },
+		} as AgentSessionEvent);
+
+		finishPrompt();
+		await prompt;
+
+		// Snapshot immediately after the response resolves — no extra sleep, which is
+		// exactly what a client sees.
+		expect(harness.writes).toContain("tool_call:slow-call");
+		expect(harness.writes).toContain("tool_call_update:slow-call");
+		const settlement = harness.updates.find(
+			update => (update.update as { toolCallId?: string; status?: string }).status === "completed",
+		);
+		expect((settlement?.update as { _meta?: { terminal_exit?: unknown } } | undefined)?._meta?.terminal_exit).toEqual(
+			{ terminal_id: "slow-call", exit_code: 0, signal: null },
+		);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("releases a client terminal only after slow-writer settlement delivery for normal, timeout, and cancellation", async () => {
+		const cases = [
+			{
+				name: "normal",
+				fact: { kind: "wall_time", ms: 12 } as const,
+				outcome: { kind: "succeeded", process: { kind: "exited", code: 0 } } as const,
+				status: "completed",
+			},
+			{
+				name: "timeout",
+				fact: { kind: "stop_annotation", text: "Command timed out after 1 seconds" } as const,
+				outcome: {
+					kind: "failed",
+					failure: { reason: "process", message: "Command timed out after 1 seconds" },
+					process: { kind: "timed_out", timeoutMs: 1_000 },
+				} as const,
+				status: "failed",
+			},
+			{
+				name: "cancellation",
+				fact: { kind: "stop_annotation", text: "[Command aborted]" } as const,
+				outcome: { kind: "interrupted", reason: "User interrupted the run" } as const,
+				status: "failed",
+			},
+		] as const;
+
+		for (const scenario of cases) {
+			const harness = await createHarness({ terminalMeta: true, terminal: true, writeDelayMs: 15 });
+			const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+			const session = harness.findSession(created.sessionId)!;
+			const bridge = session.clientBridge;
+			if (!bridge?.createTerminal) throw new Error("expected the ACP client terminal bridge");
+			const toolCallId = `release-${scenario.name}`;
+			const terminal = await bridge.createTerminal({ toolCallId, command: "/bin/sh" });
+			const finishPrompt = holdPromptStreaming(session);
+			const prompt = harness.agent.prompt({
+				sessionId: created.sessionId,
+				messageId: `00000000-0000-4000-8000-00000000008${cases.indexOf(scenario)}`,
+				prompt: [{ type: "text", text: scenario.name }],
+			} as PromptRequest);
+			await Bun.sleep(0);
+
+			const emit = (event: AgentSessionEvent): void => {
+				for (const listener of session.listeners()) listener(event);
+			};
+			const producer = new ToolPresentationStream(streamId(toolCallId), event =>
+				emit({ type: "tool_presentation", toolCallId, toolName: "bash", event } as AgentSessionEvent),
+			);
+			emit({
+				type: "tool_presentation",
+				toolCallId,
+				toolName: "bash",
+				event: {
+					type: "started",
+					call: { toolCallId, toolName: "bash", title: "sleep 1", kind: "execute", awaitsLiveTerminal: true },
+				},
+			} as AgentSessionEvent);
+			producer.attachLiveTerminal(createLiveTerminalBinding(terminal.terminalId));
+			producer.fact(scenario.fact);
+			await producer.freeze();
+			emit({
+				type: "tool_presentation",
+				toolCallId,
+				toolName: "bash",
+				event: { type: "settled", outcome: scenario.outcome },
+			} as AgentSessionEvent);
+
+			finishPrompt();
+			await prompt;
+			const releaseAt = harness.writes.indexOf("release_terminal:client-term-1");
+			expect(releaseAt).toBeGreaterThan(-1);
+			const finalUpdateAt = harness.writes.lastIndexOf(`tool_call_update:${toolCallId}`);
+			expect(releaseAt).toBeGreaterThan(finalUpdateAt);
+			const settlement = harness.updates.find(
+				update =>
+					(update.update as { toolCallId?: string; status?: string }).toolCallId === toolCallId &&
+					(update.update as { status?: string }).status === scenario.status,
+			);
+			expect(settlement).toBeDefined();
+			expect(
+				(settlement?.update as { _meta?: { terminal_exit?: { terminal_id?: string } } } | undefined)?._meta
+					?.terminal_exit?.terminal_id,
+			).toBe("client-term-1");
+			harness.abortController.abort();
+			await Bun.sleep(0);
+		}
+	});
+
+	it("bounds a hung raw ACP terminal release after settlement without blocking prompt delivery", async () => {
+		// This exercises the actual ACP bridge hand-off: the raw terminal/release hook
+		// never resolves, so an unbounded await in the final FIFO task would leave both
+		// the queued assistant write and prompt() permanently blocked.
+		const neverRelease = new Promise<void>(() => {});
+		const harness = await createHarness({
+			terminalMeta: true,
+			terminal: true,
+			writeDelayMs: 15,
+			terminalRelease: () => neverRelease,
+		});
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const bridge = session.clientBridge;
+		if (!bridge?.createTerminal) throw new Error("expected the ACP client terminal bridge");
+		const toolCallId = "hung-release";
+		const terminal = await bridge.createTerminal({ toolCallId, command: "/bin/sh" });
+		const finishPrompt = holdPromptStreaming(session);
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000083",
+			prompt: [{ type: "text", text: "hung release" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		const producer = new ToolPresentationStream(streamId(toolCallId), event =>
+			emit({ type: "tool_presentation", toolCallId, toolName: "bash", event } as AgentSessionEvent),
+		);
+		emit({
+			type: "tool_presentation",
+			toolCallId,
+			toolName: "bash",
+			event: {
+				type: "started",
+				call: { toolCallId, toolName: "bash", title: "sleep 1", kind: "execute", awaitsLiveTerminal: true },
+			},
+		} as AgentSessionEvent);
+		producer.attachLiveTerminal(createLiveTerminalBinding(terminal.terminalId));
+		producer.fact({ kind: "wall_time", ms: 12 });
+		await producer.freeze();
+		emit({
+			type: "tool_presentation",
+			toolCallId,
+			toolName: "bash",
+			event: { type: "settled", outcome: { kind: "succeeded", process: { kind: "exited", code: 0 } } },
+		} as AgentSessionEvent);
+
+		finishPrompt();
+		expect(await Promise.race([prompt.then(() => "completed"), Bun.sleep(2_500).then(() => "timed_out")])).toBe(
+			"completed",
+		);
+		const releaseAt = harness.writes.indexOf("release_terminal:client-term-1");
+		const finalUpdateAt = harness.writes.lastIndexOf(`tool_call_update:${toolCallId}`);
+		expect(releaseAt).toBeGreaterThan(finalUpdateAt);
+		expect(harness.writes).toContain("agent_message_chunk");
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("tears the managed session down when an outbound write fails", async () => {
+		// Poisoning is terminal for the session, and the teardown has exactly one owner.
+		// The earlier hand-rolled rejection left the subscription installed, the prompt
+		// slot occupied and — worst — the record in `#sessions` holding a permanently
+		// poisoned coordinator, so the next prompt subscribed again and had every frame
+		// rejected without a wire attempt.
+		const failure = new Error("connection closed");
+		const harness = await createHarness({
+			terminalMeta: true,
+			failWrite: notification =>
+				(notification.update as { sessionUpdate?: string }).sessionUpdate === "tool_call_update"
+					? failure
+					: undefined,
+		});
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const finishPrompt = holdPromptStreaming(session);
+		let aborts = 0;
+		session.abort = async () => {
+			aborts++;
+			session.isStreaming = false;
+		};
+		// Deterministic teardown-completion signal: `#tearDownPoisonedSession` runs
+		// fire-and-forget after `#finishPrompt` rejects the prompt, so awaiting the
+		// prompt alone does not prove `dispose()` (and therefore `disposed`/listener
+		// cleanup) has actually finished.
+		const disposed = Promise.withResolvers<void>();
+		const originalDispose = session.dispose.bind(session);
+		session.dispose = async () => {
+			await originalDispose();
+			disposed.resolve();
+		};
+
+		const prompt = harness.agent
+			.prompt({
+				sessionId: created.sessionId,
+				messageId: "00000000-0000-4000-8000-000000000073",
+				prompt: [{ type: "text", text: "run a command" }],
+			} as PromptRequest)
+			.then(
+				() => "resolved",
+				(error: unknown) => error,
+			);
+		await Bun.sleep(0);
+
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		emit({
+			type: "tool_presentation",
+			toolCallId: "poison-call",
+			toolName: "bash",
+			event: {
+				type: "started",
+				call: { toolCallId: "poison-call", toolName: "bash", title: "echo hi", kind: "execute" },
+			},
+		} as AgentSessionEvent);
+		await harness.waitForWrite("tool_call:poison-call");
+		expect(harness.writes).toEqual(["tool_call:poison-call"]);
+
+		// The settlement write fails.
+		emit({
+			type: "tool_presentation",
+			toolCallId: "poison-call",
+			toolName: "bash",
+			event: { type: "settled", outcome: { kind: "succeeded" } },
+		} as AgentSessionEvent);
+
+		// The active prompt is rejected exactly once, with the send failure.
+		expect(await prompt).toBe(failure);
+		// Wait for the managed teardown this poison triggers, not a fixed duration.
+		await disposed.promise;
+		// The session was aborted through the managed path and disposed, so its lifetime
+		// subscription is gone too.
+		expect(aborts).toBe(1);
+		expect(session.disposed).toBe(true);
+		expect(session.listeners()).toHaveLength(0);
+
+		// No later write is even attempted. Listeners are already empty, so this emit
+		// is synchronously a no-op — no wait needed to prove nothing was attempted.
+		const writesAfterPoison = harness.writes.length;
+		emit({
+			type: "tool_presentation",
+			toolCallId: "later-call",
+			toolName: "bash",
+			event: {
+				type: "started",
+				call: { toolCallId: "later-call", toolName: "bash", title: "echo later", kind: "execute" },
+			},
+		} as AgentSessionEvent);
+		expect(harness.writes).toHaveLength(writesAfterPoison);
+
+		// And a subsequent prompt cannot silently reuse the poisoned coordinator.
+		await expect(
+			harness.agent.prompt({
+				sessionId: created.sessionId,
+				messageId: "00000000-0000-4000-8000-000000000074",
+				prompt: [{ type: "text", text: "try again" }],
+			} as PromptRequest),
+		).rejects.toThrow();
+
+		finishPrompt();
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("poisons the queue and rejects the prompt when the frame encoder rejects a reduced frame", async () => {
+		// Same failure class and same required outcome as an outbound write failure,
+		// but triggered *before* any write is attempted: the reducer accepts a
+		// malformed `started` call (it does not validate `kind`), and the encoder's
+		// own runtime assertion — real, not weakened for this test — rejects the
+		// resulting announce frame for missing `kind`. That must poison the queue
+		// exactly like a transport failure, not just get logged while the prompt
+		// finishes as though delivery had succeeded.
+		const harness = await createHarness({ terminalMeta: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const finishPrompt = holdPromptStreaming(session);
+		let aborts = 0;
+		session.abort = async () => {
+			aborts++;
+			session.isStreaming = false;
+		};
+		// Deterministic teardown-completion signal — see the identical pattern in
+		// "tears the managed session down when an outbound write fails" above.
+		const disposed = Promise.withResolvers<void>();
+		const originalDispose = session.dispose.bind(session);
+		session.dispose = async () => {
+			await originalDispose();
+			disposed.resolve();
+		};
+
+		const prompt = harness.agent
+			.prompt({
+				sessionId: created.sessionId,
+				messageId: "00000000-0000-4000-8000-000000000075",
+				prompt: [{ type: "text", text: "run a command" }],
+			} as PromptRequest)
+			.then(
+				() => "resolved",
+				(error: unknown) => error,
+			);
+		await Bun.sleep(0);
+
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		const writesBeforeMalformedEvent = harness.writes.length;
+		emit({
+			type: "tool_presentation",
+			toolCallId: "malformed-call",
+			toolName: "bash",
+			event: {
+				type: "started",
+				call: { toolCallId: "malformed-call", toolName: "bash", title: "echo hi", kind: undefined as never },
+			},
+		} as AgentSessionEvent);
+
+		// The prompt is rejected, not resolved as though the turn completed normally —
+		// this is the deterministic completion signal for the whole encoder→poison→
+		// finishPrompt chain triggered synchronously above.
+		const outcome = await prompt;
+		expect(outcome).not.toBe("resolved");
+		expect(outcome).toBeInstanceOf(Error);
+		// No write was attempted for the malformed announce; the encoder rejected it
+		// before the coordinator ever saw a batch.
+		expect(harness.writes.length).toBe(writesBeforeMalformedEvent);
+		// Teardown follows the existing single-owner poison path — same as a
+		// transport failure — not a bespoke recovery for encoder errors. Wait for the
+		// managed teardown itself, not a fixed duration: `#tearDownPoisonedSession`
+		// runs fire-and-forget after the prompt already rejected.
+		await disposed.promise;
+		expect(aborts).toBe(1);
+		expect(session.disposed).toBe(true);
+		expect(session.listeners()).toHaveLength(0);
+
+		// No later write is even attempted, for an unrelated, well-formed call. Listeners
+		// are already empty, so this emit is synchronously a no-op — no wait needed.
+		const writesAfterPoison = harness.writes.length;
+		emit({
+			type: "tool_presentation",
+			toolCallId: "later-call",
+			toolName: "bash",
+			event: {
+				type: "started",
+				call: { toolCallId: "later-call", toolName: "bash", title: "echo later", kind: "execute" },
+			},
+		} as AgentSessionEvent);
+		expect(harness.writes).toHaveLength(writesAfterPoison);
+
+		// A subsequent prompt cannot silently reuse the poisoned coordinator.
+		await expect(
+			harness.agent.prompt({
+				sessionId: created.sessionId,
+				messageId: "00000000-0000-4000-8000-000000000076",
+				prompt: [{ type: "text", text: "try again" }],
+			} as PromptRequest),
+		).rejects.toThrow();
+
+		finishPrompt();
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+	it("keeps reducing a started tool call to its terminal exit after cancel", async () => {
+		// Cancellation resolves the ACP response immediately, but a tool call that
+		// already announced itself must still reach its one `settled` event: otherwise
+		// its card and its display-only terminal stay "running" forever. Ordinary
+		// assistant content is still suppressed — that is what the cancel asked for.
+		const harness = await createHarness({ terminalMeta: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		let releaseAbort!: () => void;
+		const abortBlocked = Promise.withResolvers<void>();
+		const abortReleased = new Promise<void>(resolve => {
+			releaseAbort = resolve;
+		});
+		session.abort = async () => {
+			session.isStreaming = false;
+			abortBlocked.resolve();
+			await abortReleased;
+		};
+		const finishPrompt = holdPromptStreaming(session);
+
+		const firstPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000061",
+			prompt: [{ type: "text", text: "cancel mid-tool" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		// The call announces itself before the cancel lands.
+		emit({
+			type: "tool_presentation",
+			toolCallId: "cleanup-call",
+			toolName: "bash",
+			event: {
+				type: "started",
+				call: { toolCallId: "cleanup-call", toolName: "bash", title: "sleep 20", kind: "execute" },
+			},
+		} as AgentSessionEvent);
+		await Bun.sleep(5);
+		expect(
+			harness.updates.some(update => (update.update as { sessionUpdate?: string }).sessionUpdate === "tool_call"),
+		).toBe(true);
+
+		const cancelPrompt = harness.agent.cancel({ sessionId: created.sessionId });
+		await abortBlocked.promise;
+		expect((await firstPrompt).stopReason).toBe("cancelled");
+
+		const afterCancel = harness.updates.length;
+		// Assistant prose after the cancel stays suppressed...
+		emit({
+			type: "message_update",
+			message: makeAssistantMessage("late"),
+			assistantMessageEvent: { type: "text_delta", delta: "late" },
+		} as AgentSessionEvent);
+		// ...while the tool call's settlement is still delivered.
+		emit({
+			type: "tool_presentation",
+			toolCallId: "cleanup-call",
+			toolName: "bash",
+			event: { type: "settled", outcome: { kind: "interrupted", reason: "User interrupted the run" } },
+		} as AgentSessionEvent);
+		await Bun.sleep(20);
+
+		const cleanupFrames = harness.updates.slice(afterCancel);
+		expect(cleanupFrames).toHaveLength(1);
+		const settlement = cleanupFrames[0]?.update as unknown as {
+			sessionUpdate: string;
+			status: string;
+			_meta: { terminal_exit: { terminal_id: string; exit_code: number | null; signal: string | null } };
+		};
+		expect(settlement.sessionUpdate).toBe("tool_call_update");
+		// Status and terminal exit arrive together, in one frame — never split.
+		expect(settlement.status).toBe("failed");
+		expect(settlement._meta.terminal_exit).toEqual({
+			terminal_id: "cleanup-call",
+			exit_code: null,
+			signal: null,
+		});
+
+		releaseAbort();
+		await cancelPrompt;
+		finishPrompt();
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});

@@ -11,12 +11,13 @@ import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
-import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import { formatOutputNotice, wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import * as toolTimeouts from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { $which, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { openArchive, readArchiveEntries } from "@oh-my-pi/pi-utils/ar";
+import { type } from "@oh-my-pi/omptype";
 import { GlobTool } from "../src/tools/glob";
 import { DEFAULT_FILE_LIMIT, GrepTool, MULTI_FILE_PER_FILE_MATCHES } from "../src/tools/grep";
 import { HubTool } from "../src/tools/hub";
@@ -952,6 +953,19 @@ describe("Coding Agent Tools", () => {
 				expect(truncation?.artifactId).toBeDefined();
 				expect(Buffer.byteLength(output, "utf-8")).toBeLessThan(20 * 1024);
 				expect(output).toContain("artifact://");
+				// The stale pre-spill fact (a smaller, pre-spill window) must not
+				// survive the spill. `outputMetaFactBodies` no longer bails on
+				// `direction: "middle"` (this spill's shape, since
+				// `artifactHeadBytes: 1` forces head retention), so
+				// `presentationFacts` is now the RE-DERIVED post-spill fact, not
+				// `undefined` — proven distinct from the stale window by asserting
+				// it carries the post-spill `artifactId`.
+				const facts = result.details?.presentationFacts;
+				expect(facts?.map(f => f.kind)).toEqual(["truncation"]);
+				expect(facts?.[0]?.kind === "truncation" ? facts[0].meta.direction : undefined).toBe("middle");
+				expect(facts?.[0]?.kind === "truncation" ? facts[0].meta.artifactId : undefined).toBe(
+					truncation?.artifactId,
+				);
 				expect(truncation?.nextOffset).toBe(defaultLimit + 1);
 				expect(output).toContain(`Use :${defaultLimit + 1} to continue`);
 
@@ -1091,6 +1105,187 @@ describe("Coding Agent Tools", () => {
 				expect(result.details?.meta?.truncation?.artifactId).toBeDefined();
 				// The tool's own rawContent is left untouched.
 				expect(result.details?.rawContent).toEqual(rawContent);
+			} finally {
+				await spillManager.close();
+			}
+		});
+
+		it("routes a migrated tool's spill-triggered notice through its own modelContentProjection", async () => {
+			// Forces the tail-only (non-`middle`) spill branch: `renderNoticeTrail`
+			// refuses `direction: "middle"` outright, so `artifactHeadBytes: 0` is
+			// required to exercise the fact-projection path at all.
+			const testFile = path.join(testDir, "oversized-read-tail.txt");
+			const lineCount = 200;
+			const lines = Array.from({ length: lineCount }, (_, i) =>
+				`line-${String(i + 1).padStart(4, "0")}`.padEnd(40, "."),
+			);
+			fs.writeFileSync(testFile, lines.join("\n"));
+			const spillSettings = Settings.isolated({
+				"tools.artifactSpillThreshold": 1,
+				"tools.artifactTailBytes": 1,
+				"tools.artifactTailLines": 5,
+				"tools.artifactHeadBytes": 0,
+			});
+			const spillManager = SessionManager.create(testDir, path.join(testDir, "tail-spill-sessions"));
+			await spillManager.ensureOnDisk();
+			const spillSession = createTestToolSession(testDir, spillSettings, {
+				getSessionFile: () => spillManager.getSessionFile() ?? null,
+				getArtifactsDir: () => spillManager.getArtifactsDir(),
+				localProtocolOptions: {
+					getArtifactsDir: () => spillManager.getArtifactsDir(),
+					getSessionId: () => spillManager.getSessionId(),
+				},
+			});
+			const rawReadTool = new ReadTool(spillSession);
+			const projectionSpy = vi.spyOn(rawReadTool, "modelContentProjection");
+			const spillReadTool = wrapToolWithMetaNotice(rawReadTool);
+			const context = {
+				...createTestToolContext(["read"]),
+				settings: spillSettings,
+				sessionManager: spillManager,
+			};
+
+			try {
+				const result = await spillReadTool.execute(
+					"test-call-read-tail-spill",
+					{ path: testFile },
+					undefined,
+					undefined,
+					context,
+				);
+				const truncation = result.details?.meta?.truncation;
+				const output = getTextOutput(result);
+
+				expect(truncation?.artifactId).toBeDefined();
+				expect(truncation?.direction).toBe("tail");
+
+				// The gap this step closes: a migrated tool's spill notice must go
+				// through its own registered projection, not fall through to the
+				// legacy `appendOutputNotice(meta)` bracket.
+				const facts = result.details?.presentationFacts;
+				expect(facts).toEqual([
+					{
+						kind: "truncation",
+						meta: {
+							direction: "tail",
+							totalBytes: truncation!.totalBytes,
+							retainedBytes: truncation!.outputBytes,
+							totalLines: truncation!.totalLines,
+							retainedLines: truncation!.outputLines,
+							shownLineRange: truncation!.shownRange,
+							truncatedBy: truncation!.truncatedBy === "middle" ? undefined : truncation!.truncatedBy,
+							maxBytes: truncation!.maxBytes,
+							nextOffset: truncation!.nextOffset,
+							artifactId: truncation!.artifactId,
+						},
+					},
+				]);
+				expect(projectionSpy).toHaveBeenCalledTimes(1);
+				expect(projectionSpy).toHaveBeenCalledWith(facts);
+
+				// Byte-identity: the projection-composed trail must
+				// match the legacy `formatOutputNotice(meta)` bracket exactly — same
+				// bytes, produced through the typed fact path instead of the string
+				// composer.
+				const legacyNotice = formatOutputNotice(result.details?.meta);
+				expect(legacyNotice.length).toBeGreaterThan(0);
+				expect(output.endsWith(legacyNotice)).toBe(true);
+			} finally {
+				await spillManager.close();
+			}
+		});
+
+		it("does not add a presentationFacts key to an unrelated tool's spilled details", async () => {
+			// Clearing `truncationFact`/`columnLimitValue` unconditionally on every
+			// spilled result would add a new enumerable `presentationFacts` key
+			// (set to `undefined`) to a tool that never declared one. This tool
+			// never touches `presentationFacts` at all, so its spilled details
+			// must gain no such key.
+			const line = "0123456789".repeat(20);
+			const bigOutput = Array.from({ length: 3500 }, () => line).join("\n");
+			const fakeTool: AgentTool = {
+				name: "fake-big-output",
+				label: "Fake",
+				description: "Fake tool with oversized output",
+				parameters: type({}),
+				async execute() {
+					return { content: [{ type: "text" as const, text: bigOutput }] };
+				},
+			};
+			const spillSettings = Settings.isolated({
+				"tools.artifactSpillThreshold": 20,
+				"tools.artifactTailBytes": 1,
+				"tools.artifactTailLines": 10,
+				"tools.artifactHeadBytes": 1,
+			});
+			const spillManager = SessionManager.create(testDir, path.join(testDir, "fake-spill-sessions"));
+			await spillManager.ensureOnDisk();
+			const context = {
+				...createTestToolContext(["fake-big-output"]),
+				settings: spillSettings,
+				sessionManager: spillManager,
+			};
+			try {
+				const wrapped = wrapToolWithMetaNotice(fakeTool);
+				const result = await wrapped.execute("test-call-fake-spill", {}, undefined, undefined, context);
+				expect(result.details?.meta?.truncation?.artifactId).toBeDefined();
+				expect(result.details && "presentationFacts" in result.details).toBe(false);
+			} finally {
+				await spillManager.close();
+			}
+		});
+
+		it("renders a byte-identical legacy spill notice for a tool with no registered modelContentProjection", async () => {
+			// Harmlessness proof: `wrappedExecute` only takes the
+			// fact-driven trail when `this.modelContentProjection` exists AND
+			// returns non-`undefined`. A tool with no registered projection must
+			// render the exact same legacy `appendOutputNotice(meta)` bracket
+			// whether or not `spillLargeResultToArtifact` also populates
+			// `presentationFacts` on this codepath.
+			const lineCount = 200;
+			const lines = Array.from({ length: lineCount }, (_, i) =>
+				`fact-line-${String(i + 1).padStart(4, "0")}`.padEnd(40, "."),
+			);
+			const bigOutput = lines.join("\n");
+			const fakeTool: AgentTool = {
+				name: "fake-tail-spill",
+				label: "Fake",
+				description: "Fake tool with oversized output and no modelContentProjection",
+				parameters: type({}),
+				async execute() {
+					return { content: [{ type: "text" as const, text: bigOutput }] };
+				},
+			};
+			const spillSettings = Settings.isolated({
+				"tools.artifactSpillThreshold": 1,
+				"tools.artifactTailBytes": 1,
+				"tools.artifactTailLines": 5,
+				"tools.artifactHeadBytes": 0,
+			});
+			const spillManager = SessionManager.create(testDir, path.join(testDir, "fake-tail-spill-sessions"));
+			await spillManager.ensureOnDisk();
+			const context = {
+				...createTestToolContext(["fake-tail-spill"]),
+				settings: spillSettings,
+				sessionManager: spillManager,
+			};
+			try {
+				const wrapped = wrapToolWithMetaNotice(fakeTool);
+				const result = await wrapped.execute("test-call-fake-tail-spill", {}, undefined, undefined, context);
+				const truncation = result.details?.meta?.truncation;
+				expect(truncation?.artifactId).toBeDefined();
+				expect(truncation?.direction).toBe("tail");
+				// No registered projection declared this key before the spill and
+				// this tool's contract has no such field, so the spill must not add
+				// one — matching the "unrelated tool" invariant above: clearing spill
+				// fields unconditionally on every spilled result must not add a new
+				// enumerable presentationFacts key to a tool that never produced one.
+				expect(result.details && "presentationFacts" in result.details).toBe(false);
+
+				const output = getTextOutput(result);
+				const legacyNotice = formatOutputNotice(result.details?.meta);
+				expect(legacyNotice.length).toBeGreaterThan(0);
+				expect(output.endsWith(legacyNotice)).toBe(true);
 			} finally {
 				await spillManager.close();
 			}

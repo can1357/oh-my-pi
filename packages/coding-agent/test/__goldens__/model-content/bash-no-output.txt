@@ -1,0 +1,4 @@
+--- text ---
+(no output)
+
+Wall time: 0.00 seconds

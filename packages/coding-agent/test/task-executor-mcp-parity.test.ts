@@ -1,14 +1,16 @@
 import { describe, expect, it, vi } from "bun:test";
+import type { TSchema } from "@oh-my-pi/pi-ai";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
-import type { CustomToolContext } from "../src/extensibility/custom-tools/types";
+import type { CustomTool, CustomToolContext } from "../src/extensibility/custom-tools/types";
 import type { ExtensionRunner } from "../src/extensibility/extensions/runner";
 import type { RegisteredTool } from "../src/extensibility/extensions/types";
 import { wrapRegisteredTool } from "../src/extensibility/extensions/wrapper";
 import { MCPManager } from "../src/mcp/manager";
-import { DeferredMCPTool, MCPTool } from "../src/mcp/tool-bridge";
+import { DeferredMCPTool, MCPTool, type MCPToolDetails } from "../src/mcp/tool-bridge";
 import type { MCPServerConnection, MCPToolDefinition } from "../src/mcp/types";
 import { customToolToDefinition } from "../src/sdk";
 import { createMCPProxyTools } from "../src/task/executor";
+import { toolResultFailed } from "../src/tools/tool-result";
 import { createMockConnection, createMockTransport } from "./mcp-test-utils";
 
 type CapturedRequest = { method: string; params: Record<string, unknown> | undefined };
@@ -148,5 +150,77 @@ describe("Task MCP proxy parity", () => {
 
 		expect(freshCalls).toHaveLength(1);
 		expect(staleCalls).toHaveLength(0);
+	});
+});
+
+describe("Task MCP proxy error symmetry", () => {
+	// `task/executor.ts`'s proxy branches marked a caught execution error only
+	// in `details.isError`, not the top-level flag `tool-result.ts#toolResultFailed`
+	// reads first. A regression here
+	// means the subagent path reports a failed MCP call as a success card and,
+	// through `deriveToolOutcome`'s `isError`-derived synthetic branch, as a
+	// successful tool result to the model.
+	it("marks a caught proxy execution error on both the top-level and details flag", async () => {
+		// The proxy's own `catch (error)` branch (not `MCPTool`'s internal
+		// `buildErrorResult`, which is already symmetric) is reached only when
+		// `source.execute` itself rejects rather than resolving to an error
+		// result — e.g. the per-call timeout race in `withAbortTimeout`. A fake
+		// tool with a rejecting `execute` isolates that branch directly.
+		const throwingTool: CustomTool<TSchema, MCPToolDetails> = {
+			name: "comment",
+			label: "comment",
+			description: "Post a comment",
+			parameters: STRICT_TOOL.inputSchema as unknown as TSchema,
+			mcpServerName: "srv",
+			mcpToolName: "comment",
+			execute: async () => {
+				throw new Error("PROXY_EXECUTE_REJECTION_FIXTURE_9F21");
+			},
+		};
+		const manager = new MCPManager(process.cwd());
+		vi.spyOn(manager, "getTools").mockReturnValue([throwingTool]);
+
+		const [proxy] = createMCPProxyTools(manager);
+		if (!proxy?.execute) {
+			expect.unreachable("proxy tool missing execute");
+			return;
+		}
+
+		const result = await proxy.execute(
+			"call-1",
+			{ body: "PROXY_ERROR_SYMMETRY_FIXTURE_9F21" },
+			undefined,
+			unusedContext,
+			undefined,
+		);
+
+		expect(result.isError).toBe(true);
+		expect(result.details).toMatchObject({ isError: true });
+		expect(toolResultFailed(result)).toBe(true);
+	});
+
+	it("marks the source-unavailable branch on both the top-level and details flag", async () => {
+		const manager = new MCPManager(process.cwd());
+		vi.spyOn(manager, "getTools")
+			.mockReturnValueOnce([new MCPTool(createCapturedConnection([]), STRICT_TOOL)])
+			.mockReturnValue([]);
+
+		const [proxy] = createMCPProxyTools(manager);
+		if (!proxy?.execute) {
+			expect.unreachable("proxy tool missing execute");
+			return;
+		}
+
+		const result = await proxy.execute(
+			"call-1",
+			{ body: "PROXY_UNAVAILABLE_FIXTURE_4B17" },
+			undefined,
+			unusedContext,
+			undefined,
+		);
+
+		expect(result.isError).toBe(true);
+		expect(result.details).toMatchObject({ isError: true });
+		expect(toolResultFailed(result)).toBe(true);
 	});
 });

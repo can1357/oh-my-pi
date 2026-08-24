@@ -11,7 +11,6 @@ import {
 	executeHashlineSingle,
 	executePatchSingle,
 	executeReplace,
-	type hashlineEditParamsSchema,
 } from "@oh-my-pi/pi-coding-agent/edit";
 import { HashlineFilesystem } from "@oh-my-pi/pi-coding-agent/edit/hashline/filesystem";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
@@ -213,7 +212,7 @@ describe("HashlineFilesystem ACP fs routing", () => {
 
 // ─── executeHashlineSingle end-to-end (model-visible payload) ────────────────
 
-function getText(result: AgentToolResult<EditToolDetails, typeof hashlineEditParamsSchema>): string {
+function getText(result: AgentToolResult<EditToolDetails>): string {
 	const first = result.content[0];
 	return first?.type === "text" ? first.text : "";
 }

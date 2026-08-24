@@ -60,7 +60,7 @@ afterEach(() => {
 });
 
 describe("BashTool ACP terminal routing", () => {
-	it("routes through bridge, emits terminalId update, and releases the handle", async () => {
+	it("routes through bridge without emitting a legacy terminal snapshot, and releases the handle", async () => {
 		const stubText = "hello from terminal\n";
 
 		const handle: ClientBridgeTerminalHandle = {
@@ -79,11 +79,11 @@ describe("BashTool ACP terminal routing", () => {
 		const createSpy = spyOn(bridge, "createTerminal");
 		const releaseSpy = spyOn(handle, "release");
 
-		const updates: Array<{ details?: { terminalId?: string } }> = [];
+		let updates = 0;
 
 		const tool = new BashTool(makeSession(bridge));
-		const result = await tool.execute("call-1", { command: "echo hi" }, undefined, update => {
-			updates.push(update as { details?: { terminalId?: string } });
+		const result = await tool.execute("call-1", { command: "echo hi" }, undefined, () => {
+			updates++;
 		});
 
 		// createTerminal must send the resolved bash shell + `-l -c <line>` so
@@ -95,16 +95,14 @@ describe("BashTool ACP terminal routing", () => {
 		expect(params.command).toBe("/bin/bash");
 		expect(params.args).toEqual(["-l", "-c", "echo hi"]);
 
-		// The first onUpdate must carry the terminalId so the editor can embed it
-		expect(updates.length).toBeGreaterThanOrEqual(1);
-		expect(updates[0]!.details?.terminalId).toBe("term-xyz");
+		// A client-owned terminal renders its own process bytes. This direct-use
+		// harness has no presentation producer, so the obsolete cumulative callback
+		// must remain silent rather than providing a second delivery channel.
+		expect(updates).toBe(0);
 
 		// The final result text must contain the stub output
 		const text = result.content.find(c => c.type === "text");
 		expect(text?.text).toContain("hello from terminal");
-
-		// The result details must carry terminalId for the ACP event mapper
-		expect(result.details?.terminalId).toBe("term-xyz");
 
 		// The handle must always be released
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
@@ -164,6 +162,40 @@ describe("BashTool ACP terminal routing", () => {
 		);
 
 		expect(createSpy).toHaveBeenCalledTimes(0);
+	});
+
+	it("kills and releases a terminal created after cancellation wins the allocation race", async () => {
+		const created = Promise.withResolvers<ClientBridgeTerminalHandle>();
+		const createStarted = Promise.withResolvers<void>();
+		const handle: ClientBridgeTerminalHandle = {
+			terminalId: "term-late-create",
+			waitForExit: async () => ({ exitCode: 0, signal: null }),
+			currentOutput: async () => ({ output: "", truncated: false }),
+			kill: async () => {},
+			release: async () => {},
+		};
+		const bridge: ClientBridge = {
+			capabilities: { terminal: true },
+			createTerminal: () => {
+				createStarted.resolve();
+				return created.promise;
+			},
+		};
+		const killSpy = spyOn(handle, "kill");
+		const releaseSpy = spyOn(handle, "release");
+		const controller = new AbortController();
+		const tool = new BashTool(makeSession(bridge));
+
+		const execution = tool.execute("call-late-create", { command: "sleep 60" }, controller.signal);
+		await createStarted.promise;
+		controller.abort();
+		await expect(execution).rejects.toThrow(/Command aborted/);
+
+		created.resolve(handle);
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(killSpy).toHaveBeenCalledTimes(1);
+		expect(releaseSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("resolves using the last polled output when final output retrieval fails", async () => {
@@ -290,11 +322,10 @@ describe("BashTool ACP terminal routing", () => {
 		// A timeout is a completed-but-failed command, returned as an error
 		// *result* rather than thrown: a throw becomes `buildToolErrorResult`
 		// (`cursor.ts`), which carries no `details`, so every renderer would
-		// lose the live terminal id and the timeout/wall-time notices with it.
+		// lose the timeout and wall-time facts with it.
 		const result = await executePromise;
 		expect(result.isError).toBe(true);
 		expect(result.content.find(c => c.type === "text")?.text).toMatch(/Command timed out after 1 seconds/);
-		expect(result.details?.terminalId).toBe("term-timeout");
 		expect(result.details?.timedOut).toBe(true);
 
 		expect(killSpy).toHaveBeenCalledTimes(1);
@@ -329,9 +360,8 @@ describe("BashTool ACP terminal routing", () => {
 		const result = await executePromise;
 		expect(result.isError).toBe(true);
 		expect(result.content.find(c => c.type === "text")?.text).toMatch(/Command timed out after 1 seconds/);
-		// The hung poll read means no output snapshot arrived, but the terminal
-		// the client already owns must still be named on the result.
-		expect(result.details?.terminalId).toBe("term-hung-poll");
+		// The hung poll read means no model-output snapshot arrived, but the timeout
+		// result still settles after killing and releasing the client terminal.
 		expect(killSpy).toHaveBeenCalledTimes(1);
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
 	}, 8000);

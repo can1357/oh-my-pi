@@ -66,11 +66,11 @@ describe("EvalTool display() text surfacing", () => {
 		expect(text).not.toBe("(no text output)");
 	});
 
-	it("interleaves stdout text and display() JSON values", async () => {
+	it("uses the shared stdout-to-display layout in model content", async () => {
 		vi.spyOn(pyKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
 		vi.spyOn(evalIndex.jsBackend, "execute").mockResolvedValue(
 			baseResult({
-				output: "before\n",
+				output: "before",
 				displayOutputs: [{ type: "json", data: [1, 2, 3] }],
 			}) as never,
 		);
@@ -82,9 +82,38 @@ describe("EvalTool display() text surfacing", () => {
 		});
 
 		const text = result.content.map(c => (c.type === "text" ? c.text : "")).join("\n");
-		expect(text).toContain("before");
-		expect(text.indexOf("before")).toBeLessThan(text.indexOf("display[1]"));
-		expect(text).toContain("[\n  1,\n  2,\n  3\n]");
+		expect(text).toBe("before\n\ndisplay[1]:\n[\n  1,\n  2,\n  3\n]");
+	});
+
+	it("preserves the Phase 0 trimmed stdout-only model body", async () => {
+		vi.spyOn(pyKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		vi.spyOn(evalIndex.jsBackend, "execute").mockResolvedValue(baseResult({ output: " \n\t before \n\n " }) as never);
+
+		const result = await new EvalTool(makeSession()).execute("call-trimmed-stdout", {
+			language: "js",
+			code: "```js\nprint('before');\n```\n",
+		});
+
+		const text = result.content.map(content => (content.type === "text" ? content.text : "")).join("\n");
+		expect(text).toBe("before");
+	});
+
+	it("trims stdout before composing it with display output for the model", async () => {
+		vi.spyOn(pyKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		vi.spyOn(evalIndex.jsBackend, "execute").mockResolvedValue(
+			baseResult({
+				output: " \n before \n\t ",
+				displayOutputs: [{ type: "json", data: { value: 1 } }],
+			}) as never,
+		);
+
+		const result = await new EvalTool(makeSession()).execute("call-trimmed-mixed", {
+			language: "js",
+			code: "```js\nprint('before'); display({value: 1});\n```\n",
+		});
+
+		const text = result.content.map(content => (content.type === "text" ? content.text : "")).join("\n");
+		expect(text).toBe('before\n\ndisplay[1]:\n{\n  "value": 1\n}');
 	});
 
 	it("surfaces displayed images to the model as ImageContent blocks, not inlined base64", async () => {
@@ -177,5 +206,47 @@ describe("EvalTool display() text surfacing", () => {
 		const text = result.content.map(c => (c.type === "text" ? c.text : "")).join("\n");
 		expect(text).toContain("ch elided");
 		expect(text.length).toBeLessThan(20000);
+	});
+
+	it("normalizes invalid backend display values to a stable typed fallback", async () => {
+		vi.spyOn(pyKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		const cyclic: { self?: unknown } = {};
+		cyclic.self = cyclic;
+		const accessor = {};
+		Object.defineProperty(accessor, "value", {
+			enumerable: true,
+			get: () => {
+				throw new Error("display accessor must not run");
+			},
+		});
+		const reflectionFailure = new Proxy(
+			{},
+			{
+				ownKeys: () => {
+					throw new Error("display reflection must not run");
+				},
+			},
+		);
+		vi.spyOn(evalIndex.jsBackend, "execute").mockResolvedValue(
+			baseResult({
+				displayOutputs: [
+					{ type: "json", data: new Map([["key", "value"]]) },
+					{ type: "json", data: new Date(0) },
+					{ type: "json", data: BigInt(1) },
+					{ type: "json", data: Number.NaN },
+					{ type: "json", data: cyclic },
+					{ type: "json", data: accessor },
+					{ type: "json", data: reflectionFailure },
+				],
+			}) as never,
+		);
+
+		const result = await new EvalTool(makeSession()).execute("call-invalid-display", {
+			language: "js",
+			code: "```js\ndisplay(untrusted);\n```\n",
+		});
+		const text = result.content.map(content => (content.type === "text" ? content.text : "")).join("\n");
+		expect((text.match(/\[unavailable: non-JSON display value\]/g) ?? []).length).toBe(7);
+		expect(result.details?.jsonOutputs).toBeUndefined();
 	});
 });

@@ -91,7 +91,7 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 			setTimeout(() => ac.abort(new DOMException("user cancelled", "AbortError")), 50);
 			const result = await pending;
 			const elapsed = Date.now() - start;
-			expect(result.cancelled).toBe(true);
+			expect(result.termination !== undefined).toBe(true);
 			expect(elapsed).toBeLessThan(2_000);
 			// Kernel must survive cancellation and remain usable.
 			const next = await executePythonWithKernel(kernel, "print('alive')");

@@ -1,0 +1,6 @@
+--- text ---
+[Command timed out after 1 seconds]
+working
+
+
+Wall time: 1.00 seconds

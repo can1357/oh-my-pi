@@ -3883,6 +3883,68 @@ describe("agentLoop useless-flag propagation", () => {
 	});
 });
 
+describe("agentLoop outcome→wire isError bridge", () => {
+	async function runOutcomeProbe(toolReturn: unknown): Promise<ToolResultMessage> {
+		const toolSchema = type({});
+		const tool: AgentTool<typeof toolSchema> = {
+			name: "probe",
+			label: "Probe",
+			description: "Probe tool",
+			parameters: toolSchema,
+			async execute() {
+				return toolReturn as never;
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "probe", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("go")], context, config, undefined, mock.stream)) {
+			events.push(event);
+		}
+		const message = events
+			.filter(e => e.type === "message_end")
+			.map(e => (e as { message: AgentMessage }).message)
+			.find(m => m.role === "toolResult");
+		expect(message).toBeDefined();
+		return message as ToolResultMessage;
+	}
+
+	// A migrated producer is not obliged to keep its legacy `isError` bit
+	// consistent with `outcome`: `outcome` alone must reach the
+	// LLM wire. Without the bridge, `ToolResultMessage.isError` stays `false` —
+	// which for Anthropic-style providers means a genuinely failed call is
+	// reported to the model as a success.
+	it("reports a failed outcome on the wire even when the legacy isError bit is unset", async () => {
+		const message = await runOutcomeProbe({
+			content: [{ type: "text", text: "OUTCOME_BRIDGE_FAILED_FIXTURE_71C4" }],
+			details: {},
+			outcome: {
+				kind: "failed",
+				failure: { reason: "tool_reported", message: "OUTCOME_BRIDGE_FAILED_FIXTURE_71C4" },
+			},
+		});
+		expect(message.isError).toBe(true);
+	});
+
+	// The reverse direction: `outcome` is the authority, not merely a hint
+	// consulted when the legacy bit agrees.
+	it("reports a succeeded outcome on the wire even when a stray legacy isError bit is set", async () => {
+		const message = await runOutcomeProbe({
+			content: [{ type: "text", text: "OUTCOME_BRIDGE_SUCCEEDED_FIXTURE_5A38" }],
+			details: {},
+			isError: true,
+			outcome: { kind: "succeeded" },
+		});
+		expect(message.isError).toBe(false);
+	});
+});
+
 describe("agentLoopContinue with AgentMessage", () => {
 	it("should throw when context has no messages", () => {
 		const context: AgentContext = {
@@ -4237,8 +4299,11 @@ describe("agentLoopContinue with AgentMessage", () => {
 			afterToolCall: async ({ args, isError }) => {
 				seen.push({ args, isError });
 				return {
-					content: [{ type: "text", text: "rewritten" }],
-					isError: true,
+					kind: "transform_external_result",
+					// `transform_external_result` fully replaces the result as a structured
+					// effect, not the old field-by-field patch, so `details`
+					// must be restated explicitly to survive.
+					raw: { content: [{ type: "text", text: "rewritten" }], details: { value: "hello" }, isError: true },
 				};
 			},
 		};
@@ -4256,7 +4321,7 @@ describe("agentLoopContinue with AgentMessage", () => {
 		if (toolEnd?.type === "tool_execution_end") {
 			expect(toolEnd.isError).toBe(true);
 			expect(toolEnd.result.content).toEqual([{ type: "text", text: "rewritten" }]);
-			// details preserved when override omits the field
+			// details restated explicitly in the effect's raw payload
 			expect(toolEnd.result.details).toEqual({ value: "hello" });
 		}
 
@@ -4294,14 +4359,18 @@ describe("agentLoopContinue with AgentMessage", () => {
 			convertToLlm: identityConverter,
 			afterToolCall: async () =>
 				({
-					providerMetadata: {
-						type: "computer",
-						screenshot: {
-							type: "computer_screenshot",
-							image_url: "data:image/png;base64,AAEC",
-							file_id: "file_conflicting_ref",
+					kind: "transform_external_result",
+					raw: {
+						content: [],
+						providerMetadata: {
+							type: "computer",
+							screenshot: {
+								type: "computer_screenshot",
+								image_url: "data:image/png;base64,AAEC",
+								file_id: "file_conflicting_ref",
+							},
+							acknowledgedSafetyChecks: [{ id: 42 }],
 						},
-						acknowledgedSafetyChecks: [{ id: 42 }],
 					},
 				}) as never,
 		};
@@ -4349,7 +4418,10 @@ describe("agentLoopContinue with AgentMessage", () => {
 			convertToLlm: identityConverter,
 			afterToolCall: async (_context, signal) => {
 				hookSawAbortedSignal = signal?.aborted === true;
-				return { content: [{ type: "text", text: "rewritten after abort" }] };
+				return {
+					kind: "transform_external_result",
+					raw: { content: [{ type: "text", text: "rewritten after abort" }] },
+				};
 			},
 		};
 
