@@ -209,9 +209,9 @@ interface OutputRegistration extends DaemonOutputWireSubscription {
 	artifactDisposal?: Promise<void>;
 	/** Bytes already on disk when this registration's sink opened; its own capture appends past them. */
 	artifactBase: number;
-	/** Reconnect-grace cleanup for registrations without an attached live client. */
+	/** Reconnect/reap cleanup for registrations without an attached live client. */
 	offlineTimer?: NodeJS.Timeout;
-	/** Delivery is terminally expired; retain only its expiry until client cleanup. */
+	/** Delivery is terminally expired; retain only its expiry through one final reconnect grace. */
 	disabled?: boolean;
 	/** Model-facing line previews accumulated from this registration's attach point. */
 	progressPreview: ProgressPreviewAccumulator;
@@ -1225,6 +1225,10 @@ class DaemonBroker {
 		registration.pendingBytes = 0;
 		registration.replayGap = undefined;
 		this.#writeMonitorNotification(registration, expired);
+		// Bound the terminal tombstone to one additional reconnect grace. An
+		// exact-identity reconnect cancels this timer and consumes the expiry;
+		// otherwise the disabled branch above disposes the registration.
+		this.#scheduleOutputRegistrationCleanup(registrationKey, registration);
 	}
 
 	/**
@@ -2284,7 +2288,7 @@ export interface DaemonBrokerStartOptions {
 	clientAuthTimeoutMs?: number;
 	/** Collection window for monitored output previews. */
 	progressBatchIntervalMs?: number;
-	/** Grace for a disconnected monitor client to reconnect before its registration is dropped. */
+	/** Grace for reconnect before capture expiry, then again before its offline tombstone is reaped. */
 	outputReconnectGraceMs?: number;
 	/** Unacknowledged output batches retained per monitor before the oldest are evicted. */
 	maxRetainedOutputBatches?: number;
