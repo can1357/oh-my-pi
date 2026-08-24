@@ -128,6 +128,14 @@ describe("formatScreenshot", () => {
 		expect(shortenEmbeddedPaths(`{"cwd":"${home}.backup","next":1}`, home)).toBe(`{"cwd":"${home}.backup","next":1}`);
 	});
 
+	it("keeps shortened home paths inside file URLs syntactically valid", () => {
+		const home = "/home/alice";
+		const shortened = shortenEmbeddedPaths(`file://${home}/project/output.log`, home);
+
+		expect(shortened).toBe("file:///~/project/output.log");
+		expect(new URL(shortened).protocol).toBe("file:");
+	});
+
 	it("formats non-home path without tilde", () => {
 		const filePath = path.join(path.parse(os.homedir()).root, "omp-render-utils", "capture.png");
 		const resized = fakeResized({ mimeType: "image/webp", buffer: new Uint8Array(1024) });

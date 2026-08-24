@@ -12,6 +12,7 @@ import { createDaemonBrokerClient } from "../../src/launch/client";
 import { daemonBrokerEndpoint } from "../../src/launch/paths";
 import {
 	DAEMON_IDLE_GRACE_ENV,
+	DAEMON_OUTPUT_MONITOR_CAPABILITY,
 	DAEMON_PROJECT_DIR_ENV,
 	DAEMON_RUNTIME_DIR_ENV,
 	type DaemonWireRequest,
@@ -199,7 +200,7 @@ describe("daemon broker idle shutdown", () => {
 			expect(await response).toEqual({
 				id,
 				ok: true,
-				result: { op: "ping", projectDir },
+				result: { op: "ping", projectDir, capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] },
 			});
 		} finally {
 			socket.destroy();

@@ -748,7 +748,9 @@ export function shortenEmbeddedPaths(text: string, homeDir = os.homedir()): stri
 			`(?<![\\p{L}\\p{N}_-])${RegExp.escape(homePath)}${trailingBoundary}`,
 			caseInsensitive ? "giu" : "gu",
 		);
-		shortened = shortened.replace(homePrefix, "~");
+		shortened = shortened.replace(homePrefix, (_home, offset: number) =>
+			shortened.startsWith("file://", offset - "file://".length) ? "/~" : "~",
+		);
 	}
 	return shortened;
 }
