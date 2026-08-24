@@ -19,7 +19,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
-import { SessionFileLockError, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { TtsrManager } from "../src/export/ttsr";
 import { resolveLocalUrlToPath } from "../src/internal-urls";

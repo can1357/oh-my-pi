@@ -3635,6 +3635,21 @@ export class SessionManager {
 			parentId = labelEntry.id;
 		}
 
+		// Durable owner claim BEFORE anything in memory switches and before
+		// the branch file becomes visible: the rewrite below publishes
+		// synchronously and the branched journal already carries its
+		// user-undo marker, so gc must see this pid on disk the moment the
+		// file appears, or a concurrent `omp gc --undo-tails --apply` could
+		// prune beneath this manager's retained tree and a later full
+		// rewrite resurrect the removed entries. A failed preclaim refuses
+		// the branch while the manager is still exactly on its source
+		// state — header, tree, index, and session file untouched.
+		if (this.#persist) {
+			if (!writeOwnerSidecarSync(newSessionFile)) {
+				throw new SessionFileLockError(newSessionFile);
+			}
+			this.#ownerClaims.set(newSessionFile, (this.#ownerClaims.get(newSessionFile) ?? 0) + 1);
+		}
 		this.#header = header;
 		this.#entries = [...entriesToKeep, ...labels];
 		this.#sessionId = newSessionId;
@@ -3654,18 +3669,6 @@ export class SessionManager {
 			return undefined;
 		}
 
-		// Durable owner claim BEFORE the branch file becomes visible: the
-		// rewrite below publishes synchronously and the branched journal
-		// already carries its user-undo marker, so gc must see this pid on
-		// disk the moment the file appears, or a concurrent
-		// `omp gc --undo-tails --apply` could prune beneath this manager's
-		// retained tree and a later full rewrite resurrect the removed
-		// entries. A failed preclaim refuses the branch (in-memory state
-		// untouched) instead of publishing unowned.
-		if (!writeOwnerSidecarSync(newSessionFile)) {
-			throw new SessionFileLockError(newSessionFile);
-		}
-		this.#ownerClaims.set(newSessionFile, (this.#ownerClaims.get(newSessionFile) ?? 0) + 1);
 		this.#sessionFile = newSessionFile;
 		// Release the source claim only now — queued in tail order after any
 		// earlier writes to it — while the destination claim recorded above
