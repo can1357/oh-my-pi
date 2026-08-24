@@ -304,6 +304,9 @@
 - Fixed Codex WebSocket cleanup failures caused by already-closed sockets.
 - Added safe retries for transient mid-stream socket closures across OpenAI Responses, Chat Completions, Azure OpenAI Responses, and Codex SSE when no replay-unsafe output has been emitted.
 - Fixed usage and cost reporting for OpenAI-compatible gateways backed by Vertex AI or Gemini by recognizing cached prompt tokens reported through `cachedContentTokenCount`.
+### Added
+
+- Added `/login anysearch` and `ANYSEARCH_API_KEY` credential discovery.
 
 ## [18.0.4] - 2026-08-24
 

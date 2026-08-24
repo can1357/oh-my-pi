@@ -11,6 +11,11 @@ export const SEARCH_PROVIDER_OPTIONS = [
 		description: "Automatically uses the first configured web-search provider",
 	},
 	{
+		value: "anysearch",
+		label: "AnySearch",
+		description: "API via /login anysearch or ANYSEARCH_API_KEY; explicit keyless use can configure a generated key",
+	},
+	{
 		value: "perplexity",
 		label: "Perplexity",
 		description: "Uses auth when configured; explicit selection falls back to anonymous search",

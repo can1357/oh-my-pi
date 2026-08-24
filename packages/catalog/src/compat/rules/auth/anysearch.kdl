@@ -1,0 +1,9 @@
+auth "anysearch" {
+	name "AnySearch"
+	env "ANYSEARCH_API_KEY"
+	login "api-key" {
+		auth-url "https://www.anysearch.com/console"
+		instructions "Create or copy your API key from the AnySearch console."
+		prompt "Paste your AnySearch API key" placeholder="API key"
+	}
+}

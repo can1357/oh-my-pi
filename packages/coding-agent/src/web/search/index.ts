@@ -25,6 +25,7 @@ import {
 	getSearchProvider,
 	getSearchProviderLabel,
 	resolveProviderCandidates,
+	type SearchParams,
 	type SearchProvider,
 	type SearchProviderCandidate,
 } from "./provider";
@@ -134,6 +135,21 @@ interface ExecuteSearchOptions {
 	signal?: AbortSignal;
 }
 
+interface AnySearchCredentialProvisioningProvider extends SearchProvider {
+	readonly id: "anysearch";
+	searchWithCredentialProvisioning(params: SearchParams): Promise<SearchResponse>;
+}
+
+function isAnySearchCredentialProvisioningProvider(
+	provider: SearchProvider,
+): provider is AnySearchCredentialProvisioningProvider {
+	return (
+		provider.id === "anysearch" &&
+		"searchWithCredentialProvisioning" in provider &&
+		typeof provider.searchWithCredentialProvisioning === "function"
+	);
+}
+
 /** Execute web search */
 async function executeSearch(
 	_toolCallId: string,
@@ -183,7 +199,7 @@ async function executeSearch(
 	const failures: Array<{ provider: Pick<SearchProvider, "id" | "label">; error: unknown }> = [];
 	let availableProviderCount = 0;
 	let lastProvider: Pick<SearchProvider, "id" | "label"> | undefined;
-	for (const candidate of candidates) {
+	for (const [candidateIndex, candidate] of candidates.entries()) {
 		let provider: SearchProvider | undefined;
 		const providerMeta = { id: candidate.id, label: getSearchProviderLabel(candidate.id) };
 		lastProvider = providerMeta;
@@ -202,7 +218,7 @@ async function executeSearch(
 			availableProviderCount++;
 			lastProvider = provider;
 
-			const response = await provider.search({
+			const searchParams: SearchParams = {
 				query: params.query,
 				parsedQuery,
 				limit: params.limit,
@@ -218,7 +234,11 @@ async function executeSearch(
 				sessionId,
 				antigravityEndpointMode,
 				geminiModel,
-			});
+			};
+			const response =
+				candidateIndex === 0 && candidate.explicit && isAnySearchCredentialProvisioningProvider(provider)
+					? await provider.searchWithCredentialProvisioning(searchParams)
+					: await provider.search(searchParams);
 
 			// Lenient constraint pass over whatever the provider returned: enforce
 			// site:/inurl:/intitle:/filetype:/date directives the provider could
