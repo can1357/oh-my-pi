@@ -65,6 +65,7 @@ interface AdvertisedOutputSubscription {
 	daemonId?: string;
 	lastEpoch?: string;
 	lastSeq?: number;
+	artifactBytes?: number;
 }
 
 interface BrokerRequest {
@@ -1828,7 +1829,7 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const previousTitle = process.title;
 		const broker = startBroker(projectDir, runtimeDir, {
-			outputReconnectGraceMs: 100,
+			outputReconnectGraceMs: 500,
 			progressBatchIntervalMs: 0,
 		});
 		const endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
@@ -1888,18 +1889,10 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 			first.socket.destroy();
 			await disconnected.promise;
 			// This exercises the real socket-close eviction timer; fake timers cannot
-			// drive the broker socket loop. Emit the gap only after capture disposal.
-			await Bun.sleep(300);
+			// drive the broker socket loop. Emit the gap after the first grace expires,
+			// but reconnect within the bounded second grace retaining the tombstone.
+			await Bun.sleep(700);
 			await client.request({ op: "send", name: subscription.name, data: "GAP\n" });
-			const gap = await client.request({
-				op: "wait",
-				name: subscription.name,
-				for: "exit",
-				pattern: "GAP",
-				timeoutMs: 2_000,
-			});
-			if (gap.op !== "wait") throw new Error("unexpected wait result");
-			expect(gap.matched).toBe("GAP");
 
 			second = await openRawBrokerSocket(endpoint);
 			second.socket.write(envelope("reattach-expired-gap", [subscription]));
@@ -1914,6 +1907,15 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 				daemonId: started.daemon.id,
 			});
 			await second.waitFor(message => message.id === "reattach-expired-gap");
+			const gap = await client.request({
+				op: "wait",
+				name: subscription.name,
+				for: "exit",
+				pattern: "GAP",
+				timeoutMs: 2_000,
+			});
+			if (gap.op !== "wait") throw new Error("unexpected wait result");
+			expect(gap.matched).toBe("GAP");
 
 			await client.request({ op: "send", name: subscription.name, data: "AFTER_REATTACH\n" });
 			const after = await client.request({
@@ -1934,6 +1936,237 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 			first?.socket.destroy();
 			second?.socket.destroy();
 			await client.request({ op: "stop", name: "expired-gap", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 20_000);
+
+	it("reaps an abandoned capture-gap tombstone after the daemon exits", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-expired-reap-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const scriptPath = path.join(projectDir, "service.ts");
+		await Bun.write(
+			scriptPath,
+			`process.stdin.setEncoding("utf8");
+process.stdin.resume();
+process.stdin.on("data", chunk => {
+	if (chunk.includes("FINISH")) process.exit(0);
+});
+`,
+		);
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir, {
+			outputReconnectGraceMs: 300,
+			progressBatchIntervalMs: 0,
+		});
+		const endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
+		const subscriptionId = "expired-reap-client";
+		let first: RawBrokerSocket | undefined;
+		let second: RawBrokerSocket | undefined;
+		try {
+			const started = await client.request({
+				op: "start",
+				spec: {
+					name: "expired-reap",
+					application: process.execPath,
+					args: [scriptPath],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+			});
+			if (started.op !== "start") throw new Error("unexpected start result");
+			const subscription: AdvertisedOutputSubscription = {
+				id: "expired-reap-monitor",
+				registrationId: "expired-reap-registration",
+				name: "expired-reap",
+				owner: "raw-owner",
+				artifactPath: path.join(tempDir.path(), "expired-reap-progress.log"),
+				daemonId: started.daemon.id,
+			};
+			const token = (await Bun.file(path.join(runtimeDir, "broker.token")).text()).trim();
+			const envelope = (id: string): string =>
+				`${JSON.stringify({
+					id,
+					token,
+					outputSubscriptionId: subscriptionId,
+					outputSubscriptions: [subscription],
+					operation: { op: "ping" },
+				})}\n`;
+
+			first = await openRawBrokerSocket(endpoint);
+			first.socket.write(envelope("register-expired-reap"));
+			await first.waitFor(message => message.id === "register-expired-reap");
+			const disconnected = Promise.withResolvers<void>();
+			first.socket.once("close", disconnected.resolve);
+			first.socket.destroy();
+			await disconnected.promise;
+
+			// The broker's socket-close timer must elapse on the real event loop;
+			// fake timers cannot drive the socket lifecycle that installs it.
+			await Bun.sleep(450);
+			await client.request({ op: "send", name: subscription.name, data: "FINISH\n" });
+			const exited = await client.request({
+				op: "wait",
+				name: subscription.name,
+				for: "exit",
+				timeoutMs: 2_000,
+			});
+			if (exited.op !== "wait") throw new Error("unexpected wait result");
+			expect(exited.daemon).toMatchObject({ state: "exited", exitCode: 0 });
+			// Cross the second grace without any reconnect. Re-advertising the exact
+			// identity must now create a terminal registration, not replay expiry.
+			await Bun.sleep(300);
+
+			second = await openRawBrokerSocket(endpoint);
+			second.socket.write(envelope("register-after-expired-reap"));
+			await second.waitFor(message => message.id === "register-after-expired-reap");
+			const completed = await second.waitFor(
+				message => message.event === "daemon-monitor-completed" && message.monitorId === subscription.id,
+			);
+			expect(completed).toMatchObject({
+				monitorId: subscription.id,
+				registrationId: subscription.registrationId,
+				daemon: { id: started.daemon.id, state: "exited", exitCode: 0 },
+			});
+			expect(second.messages.some(message => message.event === "daemon-monitor-expired")).toBeFalse();
+		} finally {
+			first?.socket.destroy();
+			second?.socket.destroy();
+			await client.request({ op: "stop", name: "expired-reap", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 20_000);
+
+	it("does not let an expired registration cleanup remove its replacement", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-expired-replacement-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const scriptPath = path.join(projectDir, "service.ts");
+		await Bun.write(
+			scriptPath,
+			`process.stdin.setEncoding("utf8");
+process.stdin.resume();
+process.stdin.on("data", chunk => process.stdout.write(chunk));
+`,
+		);
+		const artifactPath = path.join(tempDir.path(), "expired-replacement-progress.log");
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir, {
+			outputReconnectGraceMs: 500,
+			progressBatchIntervalMs: 0,
+		});
+		const endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
+		const subscriptionId = "expired-replacement-client";
+		let first: RawBrokerSocket | undefined;
+		let replay: RawBrokerSocket | undefined;
+		let replacement: RawBrokerSocket | undefined;
+		try {
+			const started = await client.request({
+				op: "start",
+				spec: {
+					name: "expired-replacement",
+					application: process.execPath,
+					args: [scriptPath],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+			});
+			if (started.op !== "start") throw new Error("unexpected start result");
+			const original: AdvertisedOutputSubscription = {
+				id: "expired-replacement-monitor",
+				registrationId: "expired-replacement-original",
+				name: "expired-replacement",
+				owner: "raw-owner",
+				artifactPath,
+				daemonId: started.daemon.id,
+			};
+			// A new registration identity continues the old capture only past the
+			// size the client already delivered; without that ack it would start a
+			// fresh artifact.
+			const replacementSubscription: AdvertisedOutputSubscription = {
+				...original,
+				registrationId: "expired-replacement-new",
+				artifactBytes: "BEFORE\n".length,
+			};
+			const token = (await Bun.file(path.join(runtimeDir, "broker.token")).text()).trim();
+			const envelope = (id: string, subscription: AdvertisedOutputSubscription): string =>
+				`${JSON.stringify({
+					id,
+					token,
+					outputSubscriptionId: subscriptionId,
+					outputSubscriptions: [subscription],
+					operation: { op: "ping" },
+				})}\n`;
+
+			first = await openRawBrokerSocket(endpoint);
+			first.socket.write(envelope("register-expired-replacement", original));
+			await first.waitFor(message => message.id === "register-expired-replacement");
+			await client.request({ op: "send", name: original.name, data: "BEFORE\n" });
+			await first.waitFor(message => message.event === "daemon-output" && message.monitorId === original.id);
+			const firstDisconnected = Promise.withResolvers<void>();
+			first.socket.once("close", firstDisconnected.resolve);
+			first.socket.destroy();
+			await firstDisconnected.promise;
+
+			// Enter the bounded tombstone retention using the broker's real
+			// socket-close timer, then prove the old identity is still replayable.
+			await Bun.sleep(700);
+			replay = await openRawBrokerSocket(endpoint);
+			replay.socket.write(envelope("replay-expired-replacement", original));
+			await replay.waitFor(
+				message => message.event === "daemon-monitor-expired" && message.monitorId === original.id,
+			);
+			await replay.waitFor(message => message.id === "replay-expired-replacement");
+			const replayDisconnected = Promise.withResolvers<void>();
+			replay.socket.once("close", replayDisconnected.resolve);
+			replay.socket.destroy();
+			await replayDisconnected.promise;
+
+			replacement = await openRawBrokerSocket(endpoint);
+			replacement.socket.write(envelope("replace-expired-registration", replacementSubscription));
+			await replacement.waitFor(message => message.id === "replace-expired-registration");
+			expect(replacement.messages.some(message => message.event === "daemon-monitor-expired")).toBeFalse();
+
+			// Cross the disconnected old registration's cleanup deadline. Its timer
+			// must be cancelled or rejected by registration-instance identity.
+			await Bun.sleep(700);
+			await client.request({ op: "send", name: original.name, data: "FRESH\n" });
+			const fresh = await replacement.waitFor(
+				message =>
+					message.event === "daemon-output" &&
+					message.monitorId === replacementSubscription.id &&
+					message.registrationId === replacementSubscription.registrationId,
+			);
+			expect(fresh).toMatchObject({
+				event: "daemon-output",
+				monitorId: replacementSubscription.id,
+				registrationId: replacementSubscription.registrationId,
+				text: "FRESH",
+			});
+			expect(await Bun.file(artifactPath).text()).toBe("BEFORE\nFRESH\n");
+		} finally {
+			first?.socket.destroy();
+			replay?.socket.destroy();
+			replacement?.socket.destroy();
+			await client.request({ op: "stop", name: "expired-replacement", timeoutMs: 2_000 }).catch(() => undefined);
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
 			await broker;
