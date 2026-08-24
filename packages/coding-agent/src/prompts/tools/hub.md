@@ -3,7 +3,7 @@ Use `op: "list"` to discover live peers. Default is running+idle plus running/id
 
 # Messaging & Jobs
 
-Background jobs auto-deliver when they finish. You NEVER need to poll; if `jobs`/`wait` observes a settled job first, that snapshot is the delivery and suppresses duplicate `async-result`.
+Background jobs auto-deliver when they finish. Do not call `jobs`/`wait` merely to watch them; if either observes a settled job first, that snapshot is the delivery and suppresses duplicate `async-result`.
 
 - **The user is NOT a peer.** `Main` answers the user ONLY in a plain text block; a `send` shows them a tool-card preview (2 lines while collapsed). Thinking is not output either.
 - **`send`** (with `to`): fire-and-forget, NEVER blocks. Delivery receipts (`delivered`/`failed`) immediate; `failed` → peer gone, don't retry.
@@ -25,7 +25,7 @@ Background jobs auto-deliver when they finish. You NEVER need to poll; if `jobs`
 Project-scoped long-running processes shared by every omp instance in the same directory. A long-running service, watcher, debugger, REPL, or process needing later input MUST use `op:"start"`, not `bash`.
 
 - **`start`** launches `application` + `args` directly. `cwd` defaults to the session directory; `pty` defaults true.
-  - `ready.log` is a JavaScript `RegExp` compiled with the `u` flag; PCRE inline modifiers such as `(?i)` are REJECTED — use `[Rr]eady` instead. `ready.port` is a TCP port. Both supplied? BOTH MUST pass. `ready.timeout` is seconds. Readiness MUST be observed; process creation alone is not readiness.
+  - `ready.log` is a regex; `ready.port` is a TCP port. Both supplied? BOTH MUST pass. `ready.timeout` is seconds. Readiness MUST be observed; process creation alone is not readiness.
   - Names are unique per project directory. A completed name MAY be started again; a live name MUST be stopped or restarted.
   - `restart` policy defaults `no`; `on-failure` and `always` use bounded backoff.
   - `persist: true` opts out of last-omp teardown; `detached: true` survives broker shutdown and all omp exits (implies persist, disables PTY input). Omit both unless their survival guarantees are required.
@@ -38,7 +38,7 @@ Project-scoped long-running processes shared by every omp instance in the same d
 - `ps` and `describe` list each process's watchers (owner session, wake/ambient, attached since, artifact, disconnected/awaiting-start state) so you can see who is monitoring what.
 - Progress and completion are separate. Do not poll `logs`/`ps`/`wait` for progress or to keep the turn alive; end the turn and let progress wake you. `wait` with `name` plus `for`/`pattern`/`timeout` is fine when you need readiness or exit before continuing.
 - **`ps`**, **`logs`**, **`wait`** (with `name`), **`send`** (with `name`), **`stop`**, **`restart`**, **`describe`**, and **`monitor`** address the stable `name`.
-- **`logs`** defaults to the last 100 lines. `head: true` reads the beginning. `grep` is a JavaScript `RegExp` compiled with the `u` flag (no inline modifiers such as `(?i)`). `follow: true` waits for output after `cursor`; reuse the returned cursor on the next call.
-- **`wait`** with `name` blocks until readiness/exit/`pattern` or `timeout` (seconds). `pattern` is a JavaScript `RegExp` compiled with the `u` flag (no inline modifiers such as `(?i)`).
+- **`logs`** defaults to the last 100 lines. `head: true` reads the beginning. `grep` is a regex. `follow: true` waits for output after `cursor`; reuse the returned cursor on the next call.
+- **`wait`** with `name` blocks until readiness/exit/`pattern` or `timeout` (seconds).
 - **`send`** with `name`: `text` writes stdin (`enter` defaults true); `keys` supports ENTER, TAB, ESCAPE, CTRL_C, CTRL_D, UP, DOWN, LEFT, RIGHT; `signal` supports SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGKILL. PTY input is serialized; writes share one input stream.
 - **`stop`** performs graceful process-tree termination before hard-kill; NEVER kill an unverified PID through bash. **`restart`** reuses the retained launch spec.
