@@ -116,9 +116,9 @@ export function checkAcpUpdateInvariants(notification: SessionNotification, cont
 	// same result (`isFailedToolResult`/`extractExitCode` in
 	// `acp-event-mapper.ts`), so they can only disagree if one derivation is
 	// taught about a producer's failure signal and the other isn't — exactly
-	// how that mismatch once shipped (`eval` records a
+	// how this shipped as a real bug: `eval` records a
 	// nonzero exit only in `details`, so the frame claimed exit 0 and
-	// `completed` for a failed cell). The reverse pairing is not checked:
+	// `completed` for a failed cell. The reverse pairing is not checked:
 	// `failed` with exit 0 is legitimate (a tool can fail for reasons the
 	// process's own status code never expresses).
 	if (update.sessionUpdate === "tool_call_update" && update.status === "completed") {
@@ -157,26 +157,40 @@ export function assertAcpUpdateInvariants(notification: SessionNotification, con
 }
 
 /**
- * Stream-level guard for the eval-source-loss bug class (doc rule 13): an
- * `eval` tool call's own source code has exactly one rendered channel per
- * call — meta-terminal `_meta.terminal_output` bytes on the call's own
- * terminal id while the terminal survives to the final frame, or plain
- * `content` text when the terminal is dropped from that frame instead (see
- * `buildMetaTerminalOutput`'s doc comment) — and it must reach the client on
- * whichever channel the final frame actually uses.
+ * Stream-level guard for the eval-source-loss bug class (doc rule 6: "a
+ * fixture that degenerates the feature under test converts an omission into a
+ * passing assertion"), scoped
+ * today to the one seam that still runs a tool literally named `eval` through
+ * the untyped generic mapper (`mapAgentSessionEventToAcpSessionUpdates`'s
+ * `wantsMetaTerminal` carve-out — `toolName === "eval"` unconditionally, with
+ * no `origin: "builtin"` check): an *external* (MCP/extension) tool named
+ * `eval` on a `terminalMetaCapable` client.
  *
- * `checkAcpUpdateInvariants` above cannot express this: it is a pure
- * function of one frame, but "was the source ever delivered" is a property
- * of the whole sequence for a tool call — the header can legitimately ride
- * on any frame in the sequence (the first one sent), so a single-frame check
- * has no way to fail a sequence that simply never sent it. This mirrors how
- * a real ACP client accumulates `terminal_output.data` for a terminal id
- * across `tool_execution_update`/`tool_execution_end`, so it catches the
- * same class of loss a human staring at Zed's rendered card would notice —
- * not just a malformed single frame.
+ * The built-in `eval` tool itself no longer risks this bug class. Its two
+ * production routes — the fully-typed `presentation_events` producer
+ * (`tools/eval.ts`'s `sourceEcho`) and the legacy proxy adapter
+ * (`AcpAgent#handleLegacyEvalEvent` → `LegacyEvalPresentation`, which copies
+ * `args.code` onto the same typed `sourceEcho` field before ever reaching a
+ * presentation event) — both terminate in `reduceAcpToolView`, so both
+ * inherit whatever guarantee the reducer's own `sourceEchoSent` state machine
+ * provides; see `PresentationDeliveryLedger.checkSourceEcho` for that
+ * generalized, structural version of this check, wired
+ * into every suite that drives `reduceAcpToolView` (`acp-view-reducer`,
+ * `bash-presentation-protocol`, `eval-e2e-wire`). That check also caught a
+ * latent, currently-unreachable gap in the reducer's own state machine on the
+ * `meta_terminal → live_terminal_attached` transition — see that test: the
+ * gap is flagged there but left unfixed, since the transition is currently
+ * unreachable under any real producer.
  *
- * This is the guard that would have caught the `session/load` dangling-cleanup path
- * (`acp-agent.ts`) and its sibling in
+ * `checkAcpUpdateInvariants` above cannot express even the narrowed seam this
+ * class still guards: it is a pure function of one frame, but "was the
+ * source ever delivered" is a property of the whole sequence for a tool call
+ * — the header can legitimately ride on any frame in the sequence (the first
+ * one sent), so a single-frame check has no way to fail a sequence that
+ * simply never sent it.
+ *
+ * This is the guard that would have caught the `session/load`
+ * dangling-cleanup path's regression (the missing header) and its sibling in
  * the eval-image fallback: both left `expected` non-empty with nothing ever
  * landing in `#delivered`/`#contentText`. The test fixture also has to be
  * capable of exercising it — `input: { cells: [] }` degenerates

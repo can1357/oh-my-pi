@@ -11,7 +11,13 @@
  * flows — diff visualization degrades gracefully for over-threshold edits.
  */
 
-import type { EditToolDetails, EditToolPerFileResult } from "./renderer";
+import type {
+	AppliedEditFile,
+	EditFileOutcome,
+	EditToolDetails,
+	EditToolPerFileResult,
+	FileChangeEvidence,
+} from "./types";
 
 /**
  * Combined `oldText` + `newText` character budget for a single edit-tool
@@ -74,4 +80,60 @@ export function pruneOversizedEditSnapshots(
 		return { ...pruned, perFileResults: capPerFileSnapshots(pruned.perFileResults) };
 	}
 	return pruned;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Union-level pruning — operates on `EditFileOutcome` before projection
+// to the legacy bag, so `FileChangeEvidence`'s `pruned` variant becomes the
+// single source of truth instead of `pruneOversizedEditSnapshots` stripping
+// keys off an already-built bag. Mirrors the walk above exactly (same
+// budget, same per-entry-then-aggregate order); kept as a parallel
+// implementation rather than rewriting the bag-level walk in terms of this
+// one because `pruneOversizedEditSnapshots` and its exact bag-shaped output
+// are still pinned by `edit-snapshot-details.test.ts` and by direct callers
+// that still consume the bag shape.
+
+function evidenceByteCost(evidence: FileChangeEvidence): number {
+	if (evidence.kind === "pruned") return 0;
+	const { change } = evidence;
+	return (change.before?.length ?? 0) + (change.after?.length ?? 0);
+}
+
+/** Strip an applied file's content snapshot, keeping only the tag data {@link PrunedFileChange} retains. */
+function pruneEvidence(evidence: FileChangeEvidence): FileChangeEvidence {
+	const { change } = evidence;
+	return {
+		kind: "pruned",
+		reason: "aggregate-byte-budget",
+		change:
+			change.operation === "move"
+				? { operation: "move", sourcePath: change.sourcePath }
+				: { operation: change.operation },
+	};
+}
+
+function pruneAppliedFileIfOversized(file: AppliedEditFile): AppliedEditFile {
+	if (file.evidence.kind === "pruned" || evidenceByteCost(file.evidence) <= MAX_EDIT_SNAPSHOT_TEXT_CHARS) return file;
+	return { ...file, evidence: pruneEvidence(file.evidence) };
+}
+
+/**
+ * Walk a call's file outcomes in order with a shared byte budget, pruning
+ * `applied` entries whose evidence survives individual capping but pushes
+ * the running aggregate past {@link MAX_EDIT_SNAPSHOT_TEXT_CHARS}. `failed`/
+ * `skipped` entries carry no snapshot and pass through unchanged.
+ */
+export function pruneEditFileSnapshots(files: readonly EditFileOutcome[]): EditFileOutcome[] {
+	let remaining = MAX_EDIT_SNAPSHOT_TEXT_CHARS;
+	return files.map(file => {
+		if (file.kind !== "applied") return file;
+		const perEntry = pruneAppliedFileIfOversized(file);
+		const kept = evidenceByteCost(perEntry.evidence);
+		if (kept === 0) return perEntry;
+		if (kept <= remaining) {
+			remaining -= kept;
+			return perEntry;
+		}
+		return { ...perEntry, evidence: pruneEvidence(perEntry.evidence) };
+	});
 }

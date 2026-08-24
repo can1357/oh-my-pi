@@ -1,5 +1,19 @@
 import { type } from "@oh-my-pi/omptype";
-import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type {
+	AgentTool,
+	AgentToolContext,
+	AgentToolResult,
+	AgentToolUpdateCallback,
+	ToolPresentationAdapter,
+} from "@oh-my-pi/pi-agent-core";
+import type {
+	ToolDisplayItem,
+	ToolDisplayOutput,
+	ToolFactBody,
+	ToolOutcome,
+	ToolPresentationProducer,
+} from "@oh-my-pi/pi-agent-core/presentation";
+import { nonZeroExitCode, presentationProducerOf } from "@oh-my-pi/pi-agent-core/presentation";
 import type { ImageContent, ToolExample } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import {
@@ -14,18 +28,27 @@ import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-ti
 import { IdleTimeout } from "../eval/idle-timeout";
 import type { BackendProbeOptions } from "../eval/probe";
 import { defaultEvalSessionId } from "../eval/session-id";
-import type { EvalCellResult, EvalDisplayOutput, EvalLanguage, EvalStatusEvent, EvalToolDetails } from "../eval/types";
+import type { EvalCellResult, EvalLanguage, EvalStatusEvent, EvalTermination, EvalToolDetails } from "../eval/types";
+import { normalizeDisplayJson } from "../presentation/display-json";
+import {
+	outputSegmentSeparator,
+	renderDisplayOutput,
+	renderNoticeTrail,
+	renderToolOutputSegments,
+	type ToolOutputSegment,
+} from "../presentation/projections";
 import evalDescription from "../prompts/tools/eval.md" with { type: "text" };
 import evalCodeModeDescription from "../prompts/tools/eval-code-mode.md" with { type: "text" };
 import { DEFAULT_MAX_BYTES, OutputSink, type OutputSummary, TailBuffer } from "../session/streaming-output";
 import { resolveSpawnPolicy } from "../task/spawn-policy";
 import { webpExclusionForModel } from "../utils/image-loading";
-import { formatDimensionNote, resizeImage } from "../utils/image-resize";
+import { resizeImage } from "../utils/image-resize";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { type EvalBackendsAllowance, resolveEvalBackends } from "./eval-backends";
 import { generateCodeModeDeclarations } from "./eval-format/code-mode-declarations";
 import { upsertStatusEvent } from "./eval-render";
+import type { OutputMeta } from "./output-meta";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "./output-meta";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
@@ -135,38 +158,6 @@ export type EvalToolResult = {
 };
 
 export type EvalProxyExecutor = (params: EvalToolParams, signal?: AbortSignal) => Promise<EvalToolResult>;
-
-/** Cap per `display()` value sent back to the model. */
-const MAX_DISPLAY_TEXT_BYTES = 8000;
-
-function formatDisplayJsonForText(value: unknown): string {
-	let text: string;
-	try {
-		text = JSON.stringify(value, null, 2) ?? String(value);
-	} catch {
-		text = String(value);
-	}
-	if (text.length > MAX_DISPLAY_TEXT_BYTES) {
-		text = `${text.slice(0, MAX_DISPLAY_TEXT_BYTES)}\n[…${text.length - MAX_DISPLAY_TEXT_BYTES}ch elided…]`;
-	}
-	return text;
-}
-
-/**
- * Format display() JSON values into text the model can see. Images are surfaced
- * separately as ImageContent so the model can actually inspect them; this helper
- * intentionally does not touch images.
- */
-function formatDisplayOutputsForText(outputs: EvalDisplayOutput[]): string {
-	const chunks: string[] = [];
-	let displayIndex = 0;
-	for (const output of outputs) {
-		if (output.type !== "json") continue;
-		displayIndex++;
-		chunks.push(`display[${displayIndex}]:\n${formatDisplayJsonForText(output.data)}`);
-	}
-	return chunks.join("\n\n");
-}
 
 export interface EvalToolDescriptionOptions {
 	py?: boolean;
@@ -295,6 +286,52 @@ async function resolveBackend(
 	}
 	if (!allowJs) throw new ToolError("JavaScript backend is disabled (PI_JS=0 or eval.js = false).");
 	return { backend: jsBackend };
+}
+
+/**
+ * Derive the authoritative {@link ToolOutcome} from an eval result while its
+ * `EvalToolDetails` are still known. Mirrors {@link bashOutcome} but switches
+ * on the discriminated {@link EvalTermination} union, not text or optional
+ * booleans: the termination kind is the sole source of classification.
+ *
+ * - `timed_out` carries the configured timeout — never a fabricated `0`.
+ * - `interrupted` is a user/system abort, not a defect.
+ * - A nonzero exit is a process failure.
+ * - Anything else with `isError` is a tool-reported failure.
+ */
+export function evalOutcome(result: AgentToolResult<EvalToolDetails | undefined>): ToolOutcome {
+	const details = result.details;
+	const termination = details?.termination;
+	if (termination !== undefined) {
+		switch (termination.kind) {
+			case "timed_out":
+				return {
+					kind: "failed",
+					failure: { reason: "process", message: "Command timed out" },
+					process: { kind: "timed_out", timeoutMs: termination.timeoutMs },
+				};
+			case "interrupted":
+				return { kind: "interrupted", reason: "Command aborted" };
+			default: {
+				const exhaustive: never = termination;
+				throw new Error(`Unhandled eval termination: ${JSON.stringify(exhaustive)}`);
+			}
+		}
+	}
+	const cells = details?.cells;
+	const lastCell = cells?.[cells.length - 1];
+	const exitCode = lastCell?.exitCode;
+	if (typeof exitCode === "number" && exitCode !== 0) {
+		return {
+			kind: "failed",
+			failure: { reason: "process", message: `Command exited with code ${exitCode}` },
+			process: { kind: "exited", code: nonZeroExitCode(exitCode) },
+		};
+	}
+	if (result.isError === true) {
+		return { kind: "failed", failure: { reason: "tool_reported", message: "Command failed" } };
+	}
+	return { kind: "succeeded", process: { kind: "exited", code: 0 } };
 }
 function formatEvalInputLanguage(value: string): string {
 	if (value === "py" || value === "python") return "python";
@@ -427,6 +464,51 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		return title || `running ${language}`;
 	};
 
+	/**
+	 * Opt-in to the typed presentation protocol for the local execution route.
+	 *
+	 * The proxy executor stays explicitly on `legacy_snapshot`: its early
+	 * `execute()` return receives no producer handle, so ACP adapts its strict
+	 * legacy result at the Phase-2 boundary. `selects` returns
+	 * `true` for every local call — eval has a single route (no PTY/client-terminal
+	 * split like bash), and every backend (py/js/rb/jl) publishes through the same
+	 * `OutputSink` → `terminal_append` path.
+	 *
+	 * Images are discovered only at cell completion (inside `displayOutputs`), so
+	 * protocol selection commits up front. The reducer handles the
+	 * `meta_terminal → content` transition at settlement when an `attachment` event
+	 * is present — no fallback is needed.
+	 */
+	readonly presentation: ToolPresentationAdapter<typeof evalSchema, EvalToolDetails | undefined> = {
+		selects: () => !this.#proxyExecutor,
+		start: (toolCallId, params) => ({
+			toolCallId,
+			toolName: this.name,
+			// The cell title is a short label; the code itself is the source echo,
+			// because eval's title is NOT the code the way bash's is.
+			title: typeof params.title === "string" ? params.title : this.label,
+			kind: "execute",
+			// eval's source needs its own rendering surface: the title is a short
+			// `[lang] label`, and the code has nowhere else to render on a terminal
+			// frame. `sourceEcho` rides the first terminal payload.
+			sourceEcho: typeof params.code === "string" ? params.code : undefined,
+			...(typeof params.code === "string" ? { rawInput: { language: params.language, code: params.code } } : {}),
+		}),
+	};
+
+	/**
+	 * `wrappedExecute` (`tools/output-meta.ts`) calls this with only the fact
+	 * bodies a call declared on `details.presentationFacts` (never the raw
+	 * result), and only ever uses the returned string as a trail to append via
+	 * `appendTrailingText` — never as a content replacement. Eval has a
+	 * bespoke trail for a non-`middle` truncation fact and/or a
+	 * `limit`/`"column"` fact (all of `execute()`'s `.truncationFromSummary()`
+	 * sites are migrated onto `ToolResultBuilder#truncationFactFromSummary`);
+	 * every other call returns `undefined` and falls through to the default
+	 * `appendOutputNotice`.
+	 */
+	readonly modelContentProjection = (facts: readonly ToolFactBody[]): string | undefined => renderNoticeTrail(facts);
+
 	readonly #proxyExecutor?: EvalProxyExecutor;
 
 	#paramsKey?: string;
@@ -447,11 +529,11 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		this.#proxyExecutor = options?.proxyExecutor;
 	}
 
-	async execute(
+	async #executeCore(
 		_toolCallId: string,
 		params: typeof evalSchema.infer,
 		signal?: AbortSignal,
-		onUpdate?: AgentToolUpdateCallback,
+		onUpdate?: AgentToolUpdateCallback<EvalToolDetails | undefined>,
 		ctx?: AgentToolContext,
 	): Promise<AgentToolResult<EvalToolDetails | undefined>> {
 		if (this.#proxyExecutor) {
@@ -461,6 +543,10 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		if (!this.session) {
 			throw new ToolError("Eval tool requires a session when not using proxy executor");
 		}
+		// Extract the presentation producer only when the agent loop chose the
+		// presentation protocol for this call. The proxy executor stays on
+		// legacy_snapshot — its early return receives no producer handle.
+		const presentation = presentationProducerOf(ctx?.toolCall?.progress);
 		const session = this.session;
 		const excludeWebP = webpExclusionForModel(session.getActiveModel?.());
 
@@ -511,6 +597,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				signal: runSignal,
 				sessionAbortController,
 				emitUpdate,
+				presentation,
 			});
 			return session.trackEvalExecution?.(execution, sessionAbortController) ?? execution;
 		};
@@ -670,8 +757,19 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		signal: AbortSignal | undefined;
 		sessionAbortController: AbortController;
 		emitUpdate?: (text: string, details: EvalToolDetails) => void;
+		presentation: ToolPresentationProducer | undefined;
 	}): Promise<AgentToolResult<EvalToolDetails | undefined>> {
-		const { session, cells, languages, notice, excludeWebP, signal, sessionAbortController, emitUpdate } = options;
+		const {
+			session,
+			cells,
+			languages,
+			notice,
+			excludeWebP,
+			signal,
+			sessionAbortController,
+			emitUpdate,
+			presentation,
+		} = options;
 		let outputSink: OutputSink | undefined;
 		let outputSummary: OutputSummary | undefined;
 		let outputDumped = false;
@@ -688,16 +786,14 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			session.assertEvalExecutionAllowed?.();
 
 			const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES * 2);
-			const jsonOutputs: unknown[] = [];
+			const jsonOutputs: Extract<ToolDisplayItem, { kind: "json" }>["value"][] = [];
 			const images: ImageContent[] = [];
 			const statusEvents: EvalStatusEvent[] = [];
-			// Executor-synthesized notes (kernel timeout/kill, a stdin request)
-			// mirrored from `ExecutorBackendResult.annotation`: `dump(notice)`
-			// bakes them into the model-facing `output` text but never streams
-			// them through `onChunk`, so the ACP terminal path — which reads only
-			// structured facts — would otherwise lose the reason a cell stopped. Same convention as
-			// `BashToolDetails.notices`.
-			const cellNotices: string[] = [];
+			// Executor-synthesized notes (kernel timeout/kill, a stdin request) are
+			// already composed into the model-facing `output` text by
+			// `OutputSink.dump(notice)`; the presentation protocol declares each
+			// one separately as its own `stop_annotation` fact below, from
+			// `ExecutorBackendResult.annotation` directly.
 
 			const cellResults: EvalCellResult[] = cells.map(cell => ({
 				index: cell.index,
@@ -718,6 +814,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			// `OutputSink.onChunk` (display/image notes) are appended — re-adding
 			// the already-streamed stdout would duplicate it.
 			let activeLiveCell: { result: EvalCellResult; buf: TailBuffer } | undefined;
+
 			// Mirrors the `"\n\n"` join between entries of `cellOutputs` below
 			// (the eventual authoritative `combinedOutput`) so the *streamed*
 			// tail — the live ACP meta-terminal watches this cumulative text —
@@ -757,13 +854,11 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				if (notice) {
 					details.notice = notice;
 				}
-				if (cellNotices.length > 0) {
-					details.notices = [...cellNotices];
-				}
 				return details;
 			};
 
 			const pushUpdate = () => {
+				if (presentation) return;
 				emitUpdate?.(tailBuffer.text(), buildUpdateDetails());
 			};
 
@@ -776,6 +871,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				artifactId,
 				headBytes: resolveOutputSinkHeadBytes(session.settings),
 				maxColumns: resolveOutputMaxColumns(session.settings),
+				...(presentation === undefined ? {} : { presentation }),
 				onChunk: chunk => {
 					appendTail(chunk);
 					if (activeLiveCell) {
@@ -786,6 +882,37 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				},
 			});
 			const sessionId = session.getEvalSessionId?.() ?? defaultEvalSessionId(session);
+
+			// Declare truncation and artifact facts from the result's OutputMeta on
+			// the presentation protocol. These are "human"-audience facts: the
+			// model-facing body carries the elision marker the sink wrote into the
+			// retained bytes and nothing else. Called after each return path builds its
+			// result so the meta is available.
+			const publishEvalTruncationFacts = (meta: OutputMeta | undefined): void => {
+				if (!presentation || !meta) return;
+				const truncation = meta.truncation;
+				if (truncation) {
+					presentation.fact({
+						kind: "truncation",
+						meta: {
+							direction: truncation.direction,
+							totalBytes: truncation.totalBytes,
+							retainedBytes: truncation.outputBytes,
+							totalLines: truncation.totalLines,
+							retainedLines: truncation.outputLines,
+							...(truncation.elidedBytes === undefined ? {} : { elidedBytes: truncation.elidedBytes }),
+							...(truncation.elidedLines === undefined ? {} : { elidedLines: truncation.elidedLines }),
+						},
+					});
+					if (truncation.artifactId !== undefined) {
+						presentation.fact({ kind: "artifact", artifactId: truncation.artifactId });
+					}
+				}
+				const columnTruncated = meta.limits?.columnTruncated;
+				if (columnTruncated) {
+					presentation.fact({ kind: "limit", meta: { limit: "column", value: columnTruncated.maxColumn } });
+				}
+			};
 
 			for (let i = 0; i < cells.length; i++) {
 				const cell = cells[i];
@@ -854,63 +981,63 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					activeLiveCell = undefined;
 				}
 				const durationMs = Date.now() - startTime;
-				// Already bracketed by `OutputSink.dump` and spelled exactly as
-				// the copy baked into `output`, so the mirror can't drift from
-				// the text (see `OutputSummary.annotation`).
-				if (result.annotation) cellNotices.push(result.annotation);
+				// Declare the annotation as a structured fact on the presentation
+				// protocol. `dump(notice)` bakes it into the model-facing text but
+				// never streams it through `onChunk`, so the ACP terminal path
+				// would otherwise lose the reason a cell stopped.
+				if (result.annotation) presentation?.fact({ kind: "stop_annotation", text: result.annotation });
 
 				const cellStatusEvents: EvalStatusEvent[] = [];
-				const cellDisplayOutputs: EvalDisplayOutput[] = [];
-				const cellImageNotes: string[] = [];
+				const cellDisplayItems: ToolDisplayItem[] = [];
 				let cellHasMarkdown = false;
 				for (const output of result.displayOutputs) {
 					if (output.type === "json") {
-						jsonOutputs.push(output.data);
-						cellDisplayOutputs.push(output);
+						const item = normalizeDisplayJson(output.data);
+						cellDisplayItems.push(item);
+						if (item.kind === "json") jsonOutputs.push(item.value);
 					}
 					if (output.type === "image") {
 						const resized = await resizeImage(
-							{
-								type: "image",
-								data: output.data,
-								mimeType: output.mimeType,
-							},
+							{ type: "image", data: output.data, mimeType: output.mimeType },
 							{ excludeWebP },
 						);
-						const image: ImageContent = {
-							type: "image",
-							data: resized.data,
-							mimeType: resized.mimeType,
-						};
+						const image: ImageContent = { type: "image", data: resized.data, mimeType: resized.mimeType };
 						images.push(image);
-						cellDisplayOutputs.push({
-							type: "image",
-							data: image.data,
-							mimeType: image.mimeType,
-						});
-						const dimensionNote = formatDimensionNote(resized);
-						if (dimensionNote) {
-							cellImageNotes.push(`display image ${cellImageNotes.length + 1}: ${dimensionNote}`);
+						presentation?.attachment({ kind: "image", data: resized.data, mimeType: resized.mimeType });
+						if (
+							resized.wasResized &&
+							resized.originalWidth !== undefined &&
+							resized.originalHeight !== undefined &&
+							resized.width !== undefined &&
+							resized.height !== undefined
+						) {
+							cellDisplayItems.push({
+								kind: "image_dimensions",
+								originalWidth: resized.originalWidth,
+								originalHeight: resized.originalHeight,
+								width: resized.width,
+								height: resized.height,
+							});
 						}
 					}
 					if (output.type === "status") {
 						upsertStatusEvent(statusEvents, output.event);
 						upsertStatusEvent(cellStatusEvents, output.event);
 					}
-					if (output.type === "markdown") {
-						cellHasMarkdown = true;
-					}
+					if (output.type === "markdown") cellHasMarkdown = true;
 				}
 
-				const stdoutTrimmed = result.output.trim();
-				const imageText = cellImageNotes.join("\n");
-				const displayText = formatDisplayOutputsForText(cellDisplayOutputs);
-				const visibleDisplayText =
-					displayText && imageText ? `${displayText}\n\n${imageText}` : displayText || imageText;
-				const cellOutput =
-					stdoutTrimmed && visibleDisplayText
-						? `${stdoutTrimmed}\n\n${visibleDisplayText}`
-						: stdoutTrimmed || visibleDisplayText;
+				const display: ToolDisplayOutput | undefined =
+					cellDisplayItems.length === 0 ? undefined : { kind: "sequence", items: cellDisplayItems };
+				const visibleDisplayText = display === undefined ? "" : renderDisplayOutput(display);
+				// The model-facing cell body retains Phase 0's normalization contract:
+				// stdout is trimmed before it is composed with display values. The
+				// presentation producer above still receives OutputSink's raw chunks.
+				const modelProcessText = result.output.trim();
+				const outputSegments: ToolOutputSegment[] = [];
+				if (modelProcessText.length > 0) outputSegments.push({ kind: "process", text: modelProcessText });
+				if (display !== undefined) outputSegments.push({ kind: "display", display });
+				const cellOutput = renderToolOutputSegments(outputSegments);
 				cellResult.output = cellOutput;
 				cellResult.exitCode = result.exitCode;
 				cellResult.durationMs = durationMs;
@@ -919,13 +1046,20 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 
 				if (cellOutput) {
 					cellOutputs.push(cellOutput);
-					if (visibleDisplayText) {
-						appendTail(stdoutTrimmed ? `\n\n${visibleDisplayText}` : visibleDisplayText);
+					if (display !== undefined) {
+						presentation?.declareDisplay(display);
+						if (!presentation) {
+							appendTail(
+								modelProcessText.length > 0
+									? `${outputSegmentSeparator(modelProcessText)}${visibleDisplayText}`
+									: visibleDisplayText,
+							);
+						}
 					}
 					awaitingCellSeparator = true;
 				}
 
-				if (result.cancelled) {
+				if (result.termination !== undefined) {
 					cellResult.status = "error";
 					pushUpdate();
 					const errorMsg = result.output || "Command aborted";
@@ -940,15 +1074,17 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						jsonOutputs: jsonOutputs.length > 0 ? jsonOutputs : undefined,
 						statusEvents: statusEvents.length > 0 ? statusEvents : undefined,
 						isError: true,
+						termination: result.termination,
 					};
 					if (notice) details.notice = notice;
-					if (cellNotices.length > 0) details.notices = [...cellNotices];
 
-					return toolResult(details)
+					const built = toolResult(details)
 						.content([{ type: "text", text: outputText }, ...images])
-						.truncationFromSummary(summaryForMeta, { direction: "tail" })
+						.truncationFactFromSummary(summaryForMeta, { direction: "tail" })
 						.error()
 						.done();
+					publishEvalTruncationFacts(built.details?.meta);
+					return built;
 				}
 
 				if (result.exitCode !== 0 && result.exitCode !== undefined) {
@@ -957,7 +1093,6 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					const combinedOutput = cellOutputs.join("\n\n");
 					const exitNotice = `Command exited with code ${result.exitCode}`;
 					const outputText = combinedOutput ? `${combinedOutput}\n\n${exitNotice}` : exitNotice;
-					cellNotices.push(exitNotice);
 
 					const summaryForMeta = await summarizeFinal(combinedOutput, finalizeOutput);
 					const details: EvalToolDetails = {
@@ -969,13 +1104,14 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						isError: true,
 					};
 					if (notice) details.notice = notice;
-					if (cellNotices.length > 0) details.notices = [...cellNotices];
 
-					return toolResult(details)
+					const built = toolResult(details)
 						.content([{ type: "text", text: outputText }, ...images])
-						.truncationFromSummary(summaryForMeta, { direction: "tail" })
+						.truncationFactFromSummary(summaryForMeta, { direction: "tail" })
 						.error()
 						.done();
+					publishEvalTruncationFacts(built.details?.meta);
+					return built;
 				}
 
 				cellResult.status = "complete";
@@ -999,12 +1135,13 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				statusEvents: statusEvents.length > 0 ? statusEvents : undefined,
 			};
 			if (notice) details.notice = notice;
-			if (cellNotices.length > 0) details.notices = [...cellNotices];
 
-			return toolResult(details)
+			const built = toolResult(details)
 				.content([{ type: "text", text: outputText }, ...images])
-				.truncationFromSummary(summaryForMeta, { direction: "tail" })
+				.truncationFactFromSummary(summaryForMeta, { direction: "tail" })
 				.done();
+			publishEvalTruncationFacts(built.details?.meta);
+			return built;
 		} finally {
 			if (!outputDumped) {
 				try {
@@ -1012,6 +1149,26 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				} catch {}
 			}
 		}
+	}
+
+	/**
+	 * Public entry point: attaches the authoritative {@link ToolOutcome}
+	 * to `#executeCore`'s result, including the proxy-executor
+	 * early return -- the old adapter-based derivation applied `evalOutcome`
+	 * unconditionally to every completed `execute()` call (it read
+	 * `tool.presentation`, a class-level field, not whether `selects()`
+	 * actually chose the presentation route for this particular call), so
+	 * this preserves that exact scope.
+	 */
+	async execute(
+		toolCallId: string,
+		params: typeof evalSchema.infer,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<EvalToolDetails | undefined>,
+		ctx?: AgentToolContext,
+	): Promise<AgentToolResult<EvalToolDetails | undefined>> {
+		const result = await this.#executeCore(toolCallId, params, signal, onUpdate, ctx);
+		return { ...result, outcome: evalOutcome(result) };
 	}
 }
 

@@ -5,7 +5,6 @@ import type { ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai"
 import type { Component, TUI } from "@oh-my-pi/pi-tui";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
-import type { EditToolDetails } from "../../edit";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
 import type * as PiCodingAgent from "../../index";
 import type { Theme } from "../../modes/theme/theme";
@@ -44,6 +43,7 @@ import type {
 	TurnEndEvent,
 	TurnStartEvent,
 } from "../shared-events";
+import type { EditToolResultDetails } from "../tool-event-details";
 
 // Re-export for backward compatibility
 export type { ExecOptions, ExecResult } from "../../exec/exec";
@@ -338,7 +338,7 @@ export interface ReadToolResultEvent extends ToolResultEventBase {
 /** Tool result event for edit tool */
 export interface EditToolResultEvent extends ToolResultEventBase {
 	toolName: "edit";
-	details: EditToolDetails | undefined;
+	details: EditToolResultDetails | undefined;
 }
 
 /** Tool result event for write tool */

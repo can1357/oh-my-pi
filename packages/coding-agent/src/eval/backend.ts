@@ -1,7 +1,7 @@
-import { buildEvalUrlRoots, type LocalProtocolOptions } from "../internal-urls";
+import { buildEvalUrlRoots, type LocalProtocolOptions } from "../internal-urls/local-protocol";
 import type { ToolSession } from "../tools";
 import type { BackendProbeOptions } from "./probe";
-import type { EvalDisplayOutput, EvalLanguage, EvalStatusEvent } from "./types";
+import type { EvalDisplayOutput, EvalLanguage, EvalStatusEvent, EvalTermination } from "./types";
 
 /** Per-cell execute() options. */
 export interface ExecutorBackendExecOptions {
@@ -31,11 +31,21 @@ export interface ExecutorBackendExecOptions {
 	onStatus?: (event: EvalStatusEvent) => void;
 }
 
+/** How a backend cell terminated, if not by ordinary completion. */
+export type ExecutorTermination = EvalTermination;
+
 /** Result returned by a backend's execute(). */
 export interface ExecutorBackendResult {
 	output: string;
 	exitCode: number | undefined;
-	cancelled: boolean;
+	/**
+	 * How the cell terminated abnormally, if not by ordinary completion.
+	 * `undefined` means the cell completed normally (exit code 0 or nonzero).
+	 * A discriminated union so `{cancelled:false, timedOut:true}` is
+	 * unrepresentable — the old optional-booleans bag silently treated it
+	 * as ordinary completion.
+	 */
+	termination: ExecutorTermination | undefined;
 	truncated: boolean;
 	artifactId: string | undefined;
 	totalLines: number;
@@ -47,10 +57,16 @@ export interface ExecutorBackendResult {
 	 * `OutputSummary.annotation` verbatim: the bracketed synthesized note
 	 * (kernel timeout/kill, stdin request) `OutputSink.dump(notice)` baked into
 	 * `output` without ever streaming it through `onChunk`, unlike `push()`,
-	 * which every other chunk goes through. `eval.ts` mirrors it into
-	 * `EvalToolDetails.notices` so the ACP terminal path — which reads only
-	 * structured facts, never the model-facing text — doesn't silently drop the
-	 * reason a cell stopped.
+	 * which every other chunk goes through. `eval.ts` declares it on the call's
+	 * presentation protocol as its own fact —
+	 * `presentation?.fact({ kind: "stop_annotation", text: result.annotation })`
+	 * — so the ACP terminal path, which reads only structured facts and never
+	 * the model-facing text, doesn't silently drop the reason a cell stopped.
+	 * This path no longer mirrors
+	 * the note into the legacy `EvalToolDetails.notices` field; that field's
+	 * sole remaining writer is an injected `EvalProxyExecutor`, which returns a
+	 * whole `EvalToolResult` of its own and never produces an
+	 * `ExecutorBackendResult` to read this from.
 	 */
 	annotation?: string;
 }

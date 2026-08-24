@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import type { SessionEntry } from "./session-entries";
+import { correlateReplayableToolExecution } from "./tool-journal-correlation";
 
 export const TOOL_EXECUTION_START_CUSTOM_TYPE = "tool_execution_start";
 export const SESSION_EXIT_CUSTOM_TYPE = "session_exit";
@@ -268,6 +269,100 @@ function applyMessageEntry(pending: Map<string, PendingToolCallRecord>, message:
 	appendAssistantToolCalls(pending, message);
 }
 
+/**
+ * Count each `toolCallId`'s `TOOL_EXECUTION_START_CUSTOM_TYPE` legacy marker
+ * entries across the whole branch — deliberately **not** a count of
+ * assistant-message tool-call content parts.
+ *
+ * `#recordToolExecutionStart` writes this marker unconditionally, for every
+ * tool call regardless of protocol (`legacy_snapshot` or
+ * `presentation_events`), and — like the v4 journal's own `started` write —
+ * *synchronously*, in `#processAgentEvent`'s `tool_execution_start` branch,
+ * before that event's own extension-delivery await and entirely independent
+ * of the `tool_presentation` branch or of `message_end`'s persistence chain
+ * (`agent-session.ts` lines 2510-2520: both branches run before the shared
+ * `await this.#emitSessionEvent(...)`, and neither depends on the other or
+ * on the assistant message's own, separately-gated persistence). Counting
+ * from assistant-message content instead would reintroduce the
+ * message-persistence-lag race one level up: a pending occurrence whose own
+ * assistant message has not yet reached disk would silently undercount,
+ * making an *unrelated*, already-resolved occurrence's journal coverage
+ * look total when it is not. Counting from the marker keeps both sides of
+ * the totality comparison below sourced from writes with the same
+ * synchronous-relative-to-their-own-event guarantee, closing that race.
+ */
+function countLegacyMarkerOccurrences(entries: readonly SessionEntry[]): Map<string, number> {
+	const counts = new Map<string, number>();
+	for (const entry of entries) {
+		const marker = readToolExecutionStart(entry);
+		if (!marker) continue;
+		counts.set(marker.toolCallId, (counts.get(marker.toolCallId) ?? 0) + 1);
+	}
+	return counts;
+}
+
+/** Count each `toolCallId`'s `tool_execution_started` journal entries across the whole branch. */
+function countJournalStartedOccurrences(entries: readonly SessionEntry[]): Map<string, number> {
+	const counts = new Map<string, number>();
+	for (const entry of entries) {
+		if (entry.type !== "tool_execution_started") continue;
+		const id = entry.call.toolCallId;
+		counts.set(id, (counts.get(id) ?? 0) + 1);
+	}
+	return counts;
+}
+
+/**
+ * Source a pending call's diagnostic fields from its v4 journal record
+ * instead of the legacy `tool_execution_start` marker scan, when the branch
+ * actually has one (the journal is the call-descriptor
+ * authority). `toolName`/`args` come from the journal's `call` (public,
+ * pre-transform `rawInput` — richer than the marker's truncated
+ * command/path projection). `intent` and `startedAt` are not part of
+ * {@link ReplayableToolExecution}'s `call`/`presentation` shape — no producer
+ * persists either there — so those two fields keep whatever the legacy scan
+ * already populated on `record`; this is a per-field source substitution, not
+ * a two-record merge.
+ *
+ * **Totality gate** (the same policy `ReplayToolJournalCursor` established
+ * for the ACP replay walker): a recycled `toolCallId` can have
+ * *some* of its occurrences on the typed `presentation_events` protocol
+ * (journaled) and others still on `legacy_snapshot` (not journaled) — mixed
+ * per-call route selection, not a hypothetical. If an *earlier*, already
+ * fully-resolved occurrence of the id was journaled but the *pending*
+ * (tail) occurrence itself never reached `presentation_events`, an unbounded
+ * `correlateReplayableToolExecution` scan would still find that earlier
+ * occurrence's `started` record — the only one that exists — and
+ * misattribute its descriptor to the pending occurrence, even though the
+ * pending occurrence has zero journal coverage of its own. Nothing persisted
+ * says which occurrence a lone `started` record belongs to once coverage is
+ * partial, so guessing would silently corrupt the diagnostic rather than
+ * degrade it (the same disambiguation policy applies here: a short/partial
+ * pairing disqualifies the id *entirely*, falling back to the legacy scan).
+ * `markerCounts`/`journalCounts` are compared once per `toolCallId`;
+ * only an *exact* match (every occurrence has its own journal entry) trusts
+ * the correlation. On an exact match the earlier tail-occurrence-only
+ * argument holds: the last matching `started` record is unambiguously the
+ * pending occurrence's own, since every prior occurrence already accounted
+ * for its own record and nothing later than the tail exists to add another.
+ */
+function projectPendingToolCall(
+	entries: readonly SessionEntry[],
+	record: PendingToolCallRecord,
+	markerCounts: ReadonlyMap<string, number>,
+	journalCounts: ReadonlyMap<string, number>,
+): PendingToolCallDiagnostic {
+	const { key: _key, ...diagnostic } = record;
+	const toolCallId = diagnostic.toolCallId;
+	if (toolCallId === undefined) return diagnostic;
+	if ((markerCounts.get(toolCallId) ?? 0) !== (journalCounts.get(toolCallId) ?? 0)) return diagnostic;
+	const execution = correlateReplayableToolExecution(entries, toolCallId);
+	if (execution === undefined) return diagnostic;
+	diagnostic.toolName = execution.call.toolName;
+	diagnostic.args = execution.call.rawInput;
+	return diagnostic;
+}
+
 /** Finds tool calls left pending at the end of a session branch. */
 export function collectPendingToolCalls(entries: readonly SessionEntry[]): PendingToolCallDiagnostic[] {
 	const pending = new Map<string, PendingToolCallRecord>();
@@ -279,7 +374,9 @@ export function collectPendingToolCalls(entries: readonly SessionEntry[]): Pendi
 		const marker = readToolExecutionStart(entry);
 		if (marker) applyToolExecutionStart(pending, marker);
 	}
-	return [...pending.values()].map(({ key: _key, ...toolCall }) => toolCall);
+	const markerCounts = countLegacyMarkerOccurrences(entries);
+	const journalCounts = countJournalStartedOccurrences(entries);
+	return [...pending.values()].map(record => projectPendingToolCall(entries, record, markerCounts, journalCounts));
 }
 
 function appendArgumentSummary(parts: string[], args: unknown): void {

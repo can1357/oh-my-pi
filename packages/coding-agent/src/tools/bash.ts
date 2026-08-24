@@ -6,7 +6,22 @@ import type {
 	AgentToolResult,
 	AgentToolUpdateCallback,
 	ToolApprovalDecision,
+	ToolPresentationAdapter,
 } from "@oh-my-pi/pi-agent-core";
+import type {
+	ExecutionToolArguments,
+	PublicToolArguments,
+	ToolCallPresentation,
+	ToolFactBody,
+	ToolOutcome,
+	ToolPresentationProducer,
+} from "@oh-my-pi/pi-agent-core/presentation";
+import {
+	afterPresentationSettlement,
+	createLiveTerminalBinding,
+	nonZeroExitCode,
+	presentationProducerOf,
+} from "@oh-my-pi/pi-agent-core/presentation";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 import { getProjectDir, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
@@ -22,6 +37,7 @@ import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { InternalUrlRouter } from "../internal-urls";
 import { truncateToVisualLines } from "../modes/components/visual-truncate";
 import { highlightCode, type Theme } from "../modes/theme/theme";
+import { renderNoticeTrail } from "../presentation/projections";
 import bashDescription from "../prompts/tools/bash.md" with { type: "text" };
 import type {
 	ClientBridgeTerminalExitStatus,
@@ -31,7 +47,7 @@ import type {
 import {
 	DEFAULT_MAX_BYTES,
 	enforceInlineByteCap,
-	formatRawOutputArtifactNotice,
+	type OutputSink,
 	streamTailUpdates,
 	TailBuffer,
 } from "../session/streaming-output";
@@ -40,7 +56,8 @@ import { CachedOutputBlock, markFramedBlockComponent, outputBlockContentWidth } 
 import { getSixelLineMask } from "../utils/sixel";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
-import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
+import type { BashInteractiveResult } from "./bash-interactive";
+import * as bashInteractive from "./bash-interactive";
 import { checkBashInterception } from "./bash-interceptor";
 import { canUseInteractiveBashPty } from "./bash-pty-selection";
 import { expandInternalUrls, type InternalUrlExpansionOptions } from "./bash-skill-urls";
@@ -52,6 +69,7 @@ import {
 	resolveInlineByteCapBudget,
 	stripOutputNotice,
 	stripRawOutputArtifactNotice,
+	stripTrailingText,
 } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
 import {
@@ -358,15 +376,18 @@ export interface BashToolDetails {
 	exitCode?: number;
 	/** True when the command was killed by its timeout deadline (not a failure). */
 	timedOut?: boolean;
-	terminalId?: string;
 	/**
-	 * Agent-synthesized notes appended after the raw output (wall time,
-	 * `(output truncated)`, exit code, `[raw output: artifact://N]`). A renderer
-	 * that shows the raw stream some other way — an ACP client-bridge terminal
-	 * replaces the inline text entirely — surfaces these separately so the exit
-	 * code and the artifact pointer survive.
+	 * Fact bodies this call declared for `BashTool#modelContentProjection`
+	 * (the typed model-content projection escape hatch, shared with `read`/`grep`/`glob` via
+	 * `renderNoticeTrail` in `presentation/projections.ts`) — see
+	 * `ToolResultBuilder#truncationFactFromSummary`'s doc comment. `meta.truncation`/
+	 * `meta.limits.columnTruncated` above stay populated exactly as before for every
+	 * consumer that already reads them (the ACP facts publisher below,
+	 * `spillLargeResultToArtifact`, `formatStyledTruncationWarning`); this array is
+	 * what `#modelContentProjection` and this file's own TUI render function use
+	 * instead of `stripOutputNotice`/`appendOutputNotice`'s string round-trip.
 	 */
-	notices?: readonly string[];
+	presentationFacts?: readonly ToolFactBody[];
 	async?: {
 		state: "running" | "completed" | "failed";
 		jobId: string;
@@ -390,7 +411,8 @@ interface ManagedBashJobHandle {
 	jobId: string;
 	completion: Promise<ManagedBashJobCompletion>;
 	getLatestText: () => string;
-	stopUpdates: () => void;
+	/** Stop publishing through the original foreground call before it settles. */
+	stopForegroundDelivery: () => void;
 }
 
 function normalizeResultOutput(result: BashResult | BashInteractiveResult): string {
@@ -512,6 +534,61 @@ function formatTimeoutClampNotice(
 	return `Timeout clamped to ${effectiveTimeoutSec}s (requested ${requestedTimeoutSec}s; ${limit}).`;
 }
 
+/**
+ * The typed outcome of a completed bash execution.
+ *
+ * Derived from `details` while the type is still known at the dispatcher boundary,
+ * so nothing downstream has to recover "did this time out / exit nonzero" from an
+ * erased `details: unknown`.
+ *
+ * A timeout is a **failure** here. `#buildCompletedResult` already returns
+ * `isError: true` for the model on timeout; the softer warning border a renderer
+ * shows is a projection attribute of the termination kind, not a third outcome.
+ */
+/**
+ * The closed set of routes {@link BashTool.execute} can take. Exactly one per call.
+ *
+ * A discriminant rather than a bag of booleans re-derived at each branch: the
+ * presentation protocol is only publishable on its migrated local routes, so
+ * "which route" and "which protocol" have to be one decision.
+ */
+export type BashRoute =
+	| { readonly kind: "async_job" }
+	| { readonly kind: "auto_background" }
+	| { readonly kind: "client_terminal" }
+	| { readonly kind: "pty" }
+	| { readonly kind: "local_foreground" };
+
+export function bashOutcome(result: AgentToolResult<BashToolDetails>): ToolOutcome {
+	const details = result.details;
+	if (details?.timedOut === true) {
+		const timeoutMs = (details.timeoutSeconds ?? 0) * 1000;
+		return {
+			kind: "failed",
+			failure: {
+				reason: "process",
+				message:
+					details.timeoutSeconds === undefined
+						? "Command timed out"
+						: `Command timed out after ${details.timeoutSeconds} seconds`,
+			},
+			process: { kind: "timed_out", timeoutMs },
+		};
+	}
+	const exitCode = details?.exitCode;
+	if (typeof exitCode === "number" && exitCode !== 0) {
+		return {
+			kind: "failed",
+			failure: { reason: "process", message: `Command exited with code ${exitCode}` },
+			process: { kind: "exited", code: nonZeroExitCode(exitCode) },
+		};
+	}
+	if (result.isError === true) {
+		return { kind: "failed", failure: { reason: "tool_reported", message: "Command failed" } };
+	}
+	return { kind: "succeeded", process: { kind: "exited", code: 0 } };
+}
+
 function formatWallTimeSeconds(wallTimeMs: number): string {
 	return (wallTimeMs / 1000).toFixed(2);
 }
@@ -597,6 +674,20 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		return [`Command: ${truncateForPrompt(command)}`];
 	};
 	readonly label = "Bash";
+	/**
+	 * Phase-3 escape hatch ("a typed custom projection registered
+	 * on the tool contract"). `wrapToolWithMetaNotice`'s `wrappedExecute`
+	 * calls this with only the fact bodies a call declared on
+	 * `details.presentationFacts` (never the raw result), and only ever uses
+	 * the returned string as a trail to append via `appendTrailingText` —
+	 * never as a content replacement. Bash has a bespoke trail for a
+	 * non-`middle` truncation fact and/or a `limit`/`"column"` fact (both of
+	 * `#buildCompletedResult`'s `.truncationFromSummary()` sites are now
+	 * migrated onto `ToolResultBuilder#truncationFactFromSummary`); every
+	 * other call returns `undefined` and falls through to the default
+	 * `appendOutputNotice`.
+	 */
+	readonly modelContentProjection = (facts: readonly ToolFactBody[]): string | undefined => renderNoticeTrail(facts);
 	readonly loadMode = "essential";
 	get description(): string {
 		const evalBackends = resolveEvalBackends(this.session);
@@ -626,6 +717,98 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 	readonly concurrency = (args: Partial<BashToolInput>): "shared" | "exclusive" =>
 		args.pty === true ? "exclusive" : "shared";
 	readonly strict = true;
+
+	/**
+	 * The **one** route decision for a bash call.
+	 *
+	 * Both `presentation.selects` and `execute` call this; neither re-evaluates the
+	 * predicates itself. That is what makes "the protocol the dispatcher selected" and
+	 * "the branch the tool takes" agree by construction rather than by two lists of
+	 * conditions staying in sync — and the dispatcher now selects from the *transformed*
+	 * arguments, so the args this sees at selection are the args `execute` receives.
+	 *
+	 * Order mirrors `execute`'s branches exactly.
+	 */
+	#resolveRoute(input: {
+		readonly pty: boolean;
+		readonly asyncRequested: boolean;
+		readonly ctx: AgentToolContext | undefined;
+	}): BashRoute {
+		if (input.asyncRequested) return { kind: "async_job" };
+		const clientBridge = this.session.getClientBridge?.();
+		const bridgeTerminalAvailable = Boolean(
+			clientBridge?.capabilities.terminal && clientBridge.createTerminal && !input.pty,
+		);
+		const autoBgManager = this.session.asyncJobManager;
+		if (
+			this.#autoBackgroundEnabled &&
+			!input.pty &&
+			!bridgeTerminalAvailable &&
+			autoBgManager &&
+			!autoBgManager.atCapacity
+		) {
+			return { kind: "auto_background" };
+		}
+		if (bridgeTerminalAvailable) return { kind: "client_terminal" };
+		if (canUseInteractiveBashPty(input.pty, input.ctx)) return { kind: "pty" };
+		return { kind: "local_foreground" };
+	}
+
+	/**
+	 * Presentation-protocol adapter for migrated local foreground routes.
+	 *
+	 * `local_foreground`, the local PTY overlay, explicit async jobs, and auto-
+	 * background are presentation routes. An auto-background call owns bytes only
+	 * while it is foreground-waiting; if it backgrounds, it detaches the scoped
+	 * producer before settlement and the manager owns its one follow-up delivery.
+	 *
+	 * `local_foreground` and the local PTY overlay are producer-owned: both execute
+	 * locally and their `OutputSink` can append directly to the scoped stream. The
+	 * The client-bridge terminal is also a typed route: its process bytes are owned
+	 * directly by the client terminal, while the producer declares its binding,
+	 * facts, and settlement. `async: true` publishes its launch notice as a typed
+	 * fact. An auto-background call likewise declares its launch notice as a typed
+	 * fact; its manager follow-up is distinct from this call's progress protocol.
+	 *
+	 * `selects` is exactly "`#resolveRoute` says a migrated local route", and
+	 * `execute` re-resolves with the same function and refuses to run a producer-bearing
+	 * call on any other route. There is no second list of predicates to drift.
+	 */
+	readonly presentation: ToolPresentationAdapter<BashToolSchema, BashToolDetails> = {
+		selects: (params: ExecutionToolArguments<Partial<BashToolInput>>, ctx?: AgentToolContext) => {
+			const route = this.#resolveRoute({
+				pty: params.pty === true,
+				asyncRequested: params.async === true,
+				ctx,
+			});
+			if (route.kind === "client_terminal") return { kind: "presentation_events", routing: route.kind };
+			return (
+				route.kind === "local_foreground" ||
+				route.kind === "pty" ||
+				route.kind === "async_job" ||
+				route.kind === "auto_background"
+			);
+		},
+		start: (
+			toolCallId: string,
+			params: PublicToolArguments<Partial<BashToolInput>>,
+			route: unknown,
+		): ToolCallPresentation => {
+			return {
+				toolCallId,
+				toolName: this.name,
+				// bash's title *is* its command, so it needs no separate source echo the way
+				// `eval` does (whose title is a short `[lang] label`). `params` is the model's
+				// own pre-transform text — never a host transform's deobfuscated command.
+				title: typeof params.command === "string" ? params.command : this.label,
+				kind: "execute",
+				cwd: params.cwd ? resolveToCwd(params.cwd, this.session.cwd) : this.session.cwd,
+				...(route === "client_terminal" ? { awaitsLiveTerminal: true } : {}),
+				...(typeof params.command === "string" ? { rawInput: { command: params.command } } : {}),
+			};
+		},
+	};
+
 	readonly #asyncEnabled: boolean;
 	readonly #autoBackgroundEnabled: boolean;
 	readonly #autoBackgroundThresholdMs: number;
@@ -688,17 +871,30 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		options: {
 			requestedTimeoutSec?: number;
 			notices?: readonly string[];
-			terminalId?: string;
 			wallTimeMs?: number;
+			/**
+			 * A requested capability the host couldn't honour (currently: `pty: true`
+			 * with no interactive UI). Included in `notices`/`outputLines` exactly like
+			 * before — this option exists only so the fact publisher below can declare
+			 * it as its own {@link ToolFactBody} kind instead of a generic `notice`,
+			 * without double-publishing the same string.
+			 */
+			ptyFallbackNotice?: string;
+			/**
+			 * Producer for a call on the presentation protocol. Facts are published
+			 * here, from the same structured values this method already composed,
+			 * never recovered from rendered text afterwards.
+			 */
+			presentation?: ToolPresentationProducer;
 		} = {},
 	): Promise<AgentToolResult<BashToolDetails>> {
 		const exitCode = result.exitCode;
 		const failedExit = exitCode !== undefined && exitCode !== 0;
 
 		const outputLines = [this.#formatResultOutput(result)];
-		// Every notice appended below is mirrored into `details.notices`: they are
-		// agent-synthesized, absent from the process byte stream, and would be lost
-		// by a renderer that replaces the inline text with a live terminal widget.
+		// Every notice appended below is composed straight into the model-facing
+		// text below (`outputLines`); a live presentation-protocol client also
+		// gets each one as its own structured fact via `publishReturnedResultFacts`.
 		const notices: string[] = [];
 		if (options.wallTimeMs !== undefined) {
 			notices.push(formatWallTimeNotice(options.wallTimeMs));
@@ -708,11 +904,15 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				if (notice) notices.push(notice);
 			}
 		}
+		// Same position as before: this used to reach here by being pushed onto the
+		// shared `pendingNotices` array (after the clamp notice) and read back through
+		// `options.notices`. It is threaded explicitly now so the fact publisher below
+		// never has to recover "is this notice the pty-fallback text" by comparing
+		// strings — see `publishBashFacts`.
+		if (options.ptyFallbackNotice !== undefined) notices.push(options.ptyFallbackNotice);
 		if (notices.length > 0) outputLines.push("", ...notices);
 		if (failedExit) {
-			const exitNotice = formatExitCodeNotice(exitCode);
-			notices.push(exitNotice);
-			outputLines.push("", exitNotice);
+			outputLines.push("", formatExitCodeNotice(exitCode));
 		}
 		const outputText = outputLines.join("\n");
 
@@ -731,9 +931,6 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		}
 		if (options.requestedTimeoutSec !== undefined && options.requestedTimeoutSec !== timeoutSec) {
 			details.requestedTimeoutSeconds = options.requestedTimeoutSec;
-		}
-		if (options.terminalId !== undefined) {
-			details.terminalId = options.terminalId;
 		}
 		if (options.wallTimeMs !== undefined) {
 			details.wallTimeMs = options.wallTimeMs;
@@ -766,28 +963,38 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			// two without re-deriving the wording, so the *text* echo stays
 			// conditional — it must appear exactly once.
 			//
-			// The *structural* mirror is unconditional. `details.notices` is the
-			// only channel a terminal-rendering client has: for a live
-			// client-owned terminal the process bytes went straight to the
-			// terminal and this annotation never did, and for a display-only
-			// meta terminal the mapper classifies an annotation-prefixed final
-			// body as a re-render and sends structured facts alone. Gating this
-			// push on the text branch is what hid the timeout reason from both.
+			// `result.annotation` is passed to the fact publisher below as an explicit
+			// `stopAnnotation` (not re-derived from rendered text), so a live
+			// presentation-protocol client sees it as a structured fact regardless of
+			// whether the text echo above fired.
 			const annotation =
 				result.annotation ??
 				`[${timeoutSec === undefined ? "Command timed out" : `Command timed out after ${timeoutSec} seconds`}]`;
 			if (!normalizeResultOutput(result).startsWith(`${annotation}\n`)) {
 				outputLines.push("", annotation);
 			}
-			notices.push(annotation);
 			const timeoutOutputText = await enforceInlineByteCap(outputLines.join("\n"), inlineCap);
-			if (spilledArtifactId) notices.push(formatRawOutputArtifactNotice(spilledArtifactId));
-			if (notices.length > 0) details.notices = notices;
-			return toolResult(details)
+			const timedOutResult = toolResult(details)
 				.text(timeoutOutputText)
-				.truncationFromSummary(result, { direction: "tail" })
+				.truncationFactFromSummary(result, { direction: "tail" })
 				.error()
 				.done();
+			if (options.presentation !== undefined) {
+				// The timeout annotation is a *head* fact: `dump()` composed it onto the head
+				// of the retained body, so every projection renders it as the stream's first
+				// line. Passing it explicitly is what lets the fact publisher stop
+				// re-classifying rendered notice strings by prefix.
+				publishReturnedResultFacts(options.presentation, {
+					...(options.wallTimeMs === undefined ? {} : { wallTimeMs: options.wallTimeMs }),
+					notices: options.notices ?? [],
+					stopAnnotation: annotation,
+					...(options.ptyFallbackNotice === undefined ? {} : { ptyFallbackNotice: options.ptyFallbackNotice }),
+					// This call's own text (`timeoutOutputText`, just composed above) includes
+					// `options.notices` and the pty-fallback notice, so the model must see them too.
+					...(timedOutResult.details?.meta === undefined ? {} : { meta: timedOutResult.details.meta }),
+				});
+			}
+			return timedOutResult;
 		}
 
 		// Non-timeout cancellations and missing exit status still propagate as thrown errors.
@@ -795,14 +1002,23 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 
 		// No-op for already-bounded output; see `inlineCap` above.
 		const cappedOutputText = await enforceInlineByteCap(outputText, inlineCap);
-		if (spilledArtifactId) notices.push(formatRawOutputArtifactNotice(spilledArtifactId));
-		if (notices.length > 0) details.notices = notices;
 
 		const resultBuilder = toolResult(details)
 			.text(cappedOutputText)
-			.truncationFromSummary(result, { direction: "tail" });
+			.truncationFactFromSummary(result, { direction: "tail" });
 		if (failedExit) resultBuilder.error();
-		return resultBuilder.done();
+		const completed = resultBuilder.done();
+		if (options.presentation !== undefined) {
+			publishReturnedResultFacts(options.presentation, {
+				...(options.wallTimeMs === undefined ? {} : { wallTimeMs: options.wallTimeMs }),
+				notices: options.notices ?? [],
+				...(options.ptyFallbackNotice === undefined ? {} : { ptyFallbackNotice: options.ptyFallbackNotice }),
+				// This call's own text (`cappedOutputText`, just composed above) includes
+				// `options.notices` and the pty-fallback notice, so the model must see them too.
+				...(completed.details?.meta === undefined ? {} : { meta: completed.details.meta }),
+			});
+		}
+		return completed;
 	}
 
 	#buildBackgroundStartResult(
@@ -850,6 +1066,10 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		notices?: readonly string[];
 
 		resolvedEnv?: Record<string, string>;
+		/** Captured owner for an explicit async route and its cancellation path. */
+		ownerId?: string;
+		/** Producer for the foreground portion of a managed presentation route. */
+		presentation?: ToolPresentationProducer;
 		onUpdate?: AgentToolUpdateCallback<BashToolDetails>;
 		forwardUpdates: boolean;
 	}): ManagedBashJobHandle {
@@ -861,6 +1081,8 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		const label = options.command.length > 120 ? `${options.command.slice(0, 117)}...` : options.command;
 		let latestText = "";
 		let forwardUpdates = options.forwardUpdates;
+		let foregroundPresentation = options.presentation;
+		let outputSink: OutputSink | undefined;
 		const completion = Promise.withResolvers<ManagedBashJobCompletion>();
 
 		const jobId = manager.register(
@@ -879,10 +1101,17 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						env: options.resolvedEnv,
 						artifactPath,
 						artifactId,
+						...(foregroundPresentation === undefined ? {} : { presentation: foregroundPresentation }),
+						presentationActive: () => foregroundPresentation !== undefined,
+						onOutputSink: sink => {
+							outputSink = sink;
+						},
 						onChunk: chunk => {
 							tailBuffer.append(chunk);
 							latestText = tailBuffer.text();
-							void reportProgress(latestText, { async: { state: "running", jobId, type: "bash" } });
+							if (foregroundPresentation === undefined && forwardUpdates) {
+								void reportProgress(latestText, { async: { state: "running", jobId, type: "bash" } });
+							}
 						},
 						onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 					});
@@ -891,6 +1120,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						requestedTimeoutSec: options.requestedTimeoutSec,
 						notices: options.notices ?? [],
 						wallTimeMs,
+						...(foregroundPresentation === undefined ? {} : { presentation: foregroundPresentation }),
 					});
 					const finalText = this.#extractTextResult(finalResult);
 					latestText = finalText;
@@ -904,18 +1134,22 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						// delivers the error text, matching prior throw-based behavior.
 						throw new ToolError(finalText);
 					}
-					await reportProgress(finalText, { async: { state: "completed", jobId, type: "bash" } });
+					if (foregroundPresentation === undefined && forwardUpdates) {
+						await reportProgress(finalText, { async: { state: "completed", jobId, type: "bash" } });
+					}
 					return finalText;
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
 					latestText = message;
 					completion.resolve({ kind: "failed", error });
-					await reportProgress(message, { async: { state: "failed", jobId, type: "bash" } });
+					if (foregroundPresentation === undefined && forwardUpdates) {
+						await reportProgress(message, { async: { state: "failed", jobId, type: "bash" } });
+					}
 					throw error;
 				}
 			},
 			{
-				ownerId: this.session.getAgentId?.() ?? undefined,
+				ownerId: options.ownerId ?? this.session.getAgentId?.() ?? undefined,
 				onProgress: async text => {
 					latestText = text;
 					if (!forwardUpdates) return;
@@ -931,14 +1165,16 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			jobId,
 			completion: completion.promise,
 			getLatestText: () => latestText,
-			stopUpdates: () => {
+			stopForegroundDelivery: () => {
+				outputSink?.detachPresentation();
 				forwardUpdates = false;
+				foregroundPresentation = undefined;
 			},
 		};
 	}
 
-	async execute(
-		_toolCallId: string,
+	async #executeCore(
+		toolCallId: string,
 		{
 			command: rawCommand,
 			env: rawEnv,
@@ -970,6 +1206,16 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		if (asyncRequested && !this.#asyncEnabled) {
 			throw new ToolError("Async bash execution is disabled. Enable async.enabled to use async mode.");
 		}
+
+		// The protocol the dispatcher selected for THIS call, and the route that goes with
+		// it. Both come from `#resolveRoute` — the same function `presentation.selects`
+		// used — so the branch taken below and the protocol published on cannot disagree.
+		const presentation = presentationProducerOf(ctx?.toolCall?.progress);
+		const route = this.#resolveRoute({
+			pty,
+			asyncRequested,
+			ctx,
+		});
 
 		// Check both the original command and the cwd-normalized command so
 		// leading `cd ... &&` wrappers do not hide either shell-navigation rules
@@ -1050,10 +1296,12 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			if (timeoutClampNotice) pendingNotices.push(timeoutClampNotice);
 		}
 
-		if (asyncRequested) {
-			if (!this.session.asyncJobManager) {
+		if (route.kind === "async_job") {
+			const manager = this.session.asyncJobManager;
+			if (!manager) {
 				throw new ToolError("Async job manager unavailable for this session.");
 			}
+			const ownerId = this.session.getAgentId?.() ?? undefined;
 			const job = this.#startManagedBashJob({
 				command,
 				commandCwd,
@@ -1063,33 +1311,74 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				notices: pendingNotices,
 
 				resolvedEnv,
+				...(ownerId === undefined ? {} : { ownerId }),
+				...(presentation === undefined ? {} : { presentation }),
 				onUpdate,
 				forwardUpdates: false,
 			});
-			return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
+			const started = this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
 				requestedTimeoutSec,
 				notices: pendingNotices,
 			});
+			if (presentation === undefined) {
+				return started;
+			}
+
+			// The launch message and the process stream are distinct typed events. The
+			// manager still owns execution and its owner-scoped follow-up delivery, but
+			// the presenting tool call remains open until the manager's run has really
+			// stopped; otherwise late chunks would race the loop's freeze barrier.
+			presentation.fact({ kind: "notice", text: formatBackgroundNotice(job.jobId) });
+			const abort = Promise.withResolvers<void>();
+			const cancelJob = () => manager.cancel(job.jobId, ownerId === undefined ? undefined : { ownerId });
+			const onAbort = () => {
+				cancelJob();
+				abort.resolve();
+			};
+			signal?.addEventListener("abort", onAbort, { once: true });
+			// Pre-job setup above awaits URL/cwd resolution. An abort may therefore
+			// already be latched before this listener exists; consume that state now
+			// through the same owner-scoped cancellation path.
+			if (signal?.aborted) onAbort();
+			try {
+				const completed = await Promise.race([
+					job.completion,
+					abort.promise.then(() => ({ kind: "aborted" as const })),
+				]);
+				if (completed.kind === "aborted") {
+					cancelJob();
+					await job.completion;
+					publishCancellationFacts(presentation, {
+						notices: pendingNotices,
+						stopAnnotation: "[Command aborted]",
+					});
+					throw new ToolAbortError(job.getLatestText() || "Command aborted");
+				}
+				if (completed.kind === "failed") {
+					throw completed.error;
+				}
+				// Keep the model-visible launch bytes stable. The manager's existing,
+				// owner-routed async-result follow-up remains the model's completion
+				// delivery; ACP receives the final process facts and settlement above.
+				return { ...completed.result, content: started.content };
+			} finally {
+				signal?.removeEventListener("abort", onAbort);
+			}
 		}
 
 		// The client-bridge terminal provides a live terminal card in the editor;
 		// when available it wins over auto-backgrounding (both are opt-in, and
-		// auto-background would otherwise silently disable the terminal route).
+		// auto-background would otherwise silently disable the terminal route). Both of
+		// those precedence rules now live in `#resolveRoute`, not here.
 		const clientBridge = this.session.getClientBridge?.();
-		const bridgeTerminalAvailable = Boolean(
-			clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty,
-		);
 
 		const autoBgManager = this.session.asyncJobManager;
-		// At the running-job cap, fall through to direct foreground execution
-		// instead of failing every bash call until a slot frees up.
-		if (
-			this.#autoBackgroundEnabled &&
-			!pty &&
-			!bridgeTerminalAvailable &&
-			autoBgManager &&
-			!autoBgManager.atCapacity
-		) {
+		// At the running-job cap, `#resolveRoute` falls through to direct foreground
+		// execution instead of failing every bash call until a slot frees up.
+		if (route.kind === "auto_background") {
+			if (!autoBgManager) {
+				throw new ToolError("Async job manager unavailable for this session.");
+			}
 			const autoBackgroundWaitMs = resolveAutoBackgroundWaitMs(this.#autoBackgroundThresholdMs, timeoutMs);
 			const startBackgrounded = autoBackgroundWaitMs === 0;
 			const job = this.#startManagedBashJob({
@@ -1102,18 +1391,27 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 
 				resolvedEnv,
 				onUpdate,
-				forwardUpdates: !startBackgrounded,
+				...(presentation === undefined || startBackgrounded ? {} : { presentation }),
+				// A typed foreground portion publishes direct deltas. Once it hands off,
+				// neither the original call nor the manager's progress callback may create
+				// a legacy snapshot; only the manager's distinct completion follow-up remains.
+				forwardUpdates: presentation === undefined && !startBackgrounded,
 			});
+			// A fast completion must remain suppressed until either the foreground call
+			// consumes it or the loop settles the background launch card.
+			autoBgManager.acknowledgeDeliveries([job.jobId]);
 			if (startBackgrounded) {
+				if (presentation !== undefined) {
+					publishBackgroundStartFacts(presentation, pendingNotices, job.jobId);
+					afterPresentationSettlement(presentation, () => autoBgManager.resumeDeliveries([job.jobId]));
+				} else {
+					autoBgManager.resumeDeliveries([job.jobId]);
+				}
 				return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
 					requestedTimeoutSec,
 					notices: pendingNotices,
 				});
 			}
-			// Suppress the completion delivery up front so a job finishing while we
-			// foreground-wait cannot also be injected by the delivery loop. Lifted
-			// via resumeDeliveries() if we end up backgrounding after all.
-			autoBgManager.acknowledgeDeliveries([job.jobId]);
 			const waitResult = await raceJobSettlement(
 				job.completion,
 				autoBackgroundWaitMs,
@@ -1127,17 +1425,30 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				throw waitResult.error;
 			}
 			if (waitResult.kind === "aborted") {
+				job.stopForegroundDelivery();
 				autoBgManager.cancel(job.jobId);
+				await job.completion;
 				throw new ToolAbortError(job.getLatestText() || "Command aborted");
 			}
-			job.stopUpdates();
-			autoBgManager.resumeDeliveries([job.jobId]);
+			// The original presentation call settles as the launch card below. Its scoped
+			// producer must stop first: the manager may continue to receive process bytes,
+			// but appending them after the loop freezes this call would be a second,
+			// invalid stream. `resumeDeliveries` then gives the manager exactly one
+			// owner-routed completion follow-up, including a completion that raced this
+			// hand-off while suppression was active.
+			job.stopForegroundDelivery();
 			// "steer": a queued user/peer message arrived mid-wait — background
 			// the command (it keeps running) so the message injects promptly.
 			const notices =
 				waitResult.kind === "steer"
 					? [...pendingNotices, "Backgrounded early to handle an incoming message; the command keeps running."]
 					: pendingNotices;
+			if (presentation !== undefined) {
+				publishBackgroundStartFacts(presentation, notices, job.jobId);
+				afterPresentationSettlement(presentation, () => autoBgManager.resumeDeliveries([job.jobId]));
+			} else {
+				autoBgManager.resumeDeliveries([job.jobId]);
+			}
 			return this.#buildBackgroundStartResult(job.jobId, job.getLatestText(), timeoutSec, {
 				requestedTimeoutSec,
 				notices,
@@ -1155,8 +1466,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		// (the backend's own timeout is installed only after this await), matching
 		// the executeBash branch so a cold `.envrc` can't outlast a short call.
 		const backendPreflight =
-			(clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty) ||
-			canUseInteractiveBashPty(pty, ctx)
+			route.kind === "client_terminal" || route.kind === "pty"
 				? await applyDirenvPreflight(command, commandCwd, {
 						callerEnv: resolvedEnv,
 						signal,
@@ -1167,8 +1477,11 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				: undefined;
 
 		// Route through the client terminal when the client advertises the terminal capability.
-		// Skip when pty=true (PTY needs the local terminal UI).
-		if (clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty) {
+		// Skip when pty=true (PTY needs the local terminal UI) — encoded in the route.
+		if (route.kind === "client_terminal") {
+			if (!clientBridge?.createTerminal) {
+				throw new ToolError("Client terminal route resolved without a client terminal factory");
+			}
 			// Invariant (ACP terminal bridge): createTerminal has no signal in its
 			// contract; allocation cannot be cancelled retroactively. Guard before
 			// allocation. Shared timeout helper / pure AbortSignal fusion rejected:
@@ -1192,6 +1505,8 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			const timeoutTimer = timeoutMs ? setTimeout(() => resolveTimeout({ kind: "timeout" }), timeoutMs) : undefined;
 			const { promise: abortedP, resolve: resolveAborted } = Promise.withResolvers<void>();
 			let handle: ClientBridgeTerminalHandle | undefined;
+			const releaseAfterPresentationSettlement =
+				presentation !== undefined && clientBridge.releaseTerminalAfterPresentationSettlement !== undefined;
 			let killStarted = false;
 			const fireKill = (): Promise<void> => {
 				if (killStarted) return Promise.resolve();
@@ -1233,6 +1548,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				const bridgeEnv = backendPreflight?.env ?? resolvedEnv;
 				const shellSpawn = wrapShellLineForClientTerminal(bridgeCommand, this.session.settings.getShellConfig());
 				const createP = clientBridge.createTerminal({
+					...(releaseAfterPresentationSettlement ? { toolCallId } : {}),
 					command: shellSpawn.command,
 					args: shellSpawn.args,
 					cwd: commandCwd,
@@ -1269,19 +1585,21 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					// details, not a throw — a throw is turned into
 					// `buildToolErrorResult` (`cursor.ts`), which has no `details`
 					// at all, so every fact a renderer reads structurally (the
-					// timeout annotation and timeout/clamp notices here, plus the
-					// live terminal id below) would be dropped.
+					// timeout annotation and timeout/clamp notices here) would be
+					// dropped before the typed settlement can publish them.
 					return this.#buildCompletedResult(timedOutResult, timeoutSec, {
 						requestedTimeoutSec,
 						notices: pendingNotices,
 						wallTimeMs: performance.now() - bridgeWallTimeStart,
+						...(presentation === undefined ? {} : { presentation }),
 					});
 				}
 
 				handle = createRaced.handle;
-
-				// Emit partial update so the editor can embed the live terminal card.
-				onUpdate?.({ content: [], details: { terminalId: handle.terminalId } });
+				// The client owns this process and its raw bytes. Bind its existing terminal
+				// to the typed stream exactly once; polling below is retained only to build
+				// the model-facing result and must never re-deliver a snapshot through meta.
+				presentation?.attachLiveTerminal(createLiveTerminalBinding(handle.terminalId));
 
 				const exitPromise = handle.waitForExit();
 				let exitStatus!: ClientBridgeTerminalExitStatus;
@@ -1344,19 +1662,17 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 							outputLines: current.output.length > 0 ? current.output.split("\n").length : 0,
 							outputBytes: current.output.length,
 						};
-						// Keep the client-owned terminal id (and the notices) on the
-						// result: the ACP mapper renders this call through that
-						// terminal, and a thrown error carries no `details`, so the
-						// live terminal card would be replaced by a plain text block
-						// at the exact moment the user needs to see why it stopped.
+						// Return an error result rather than throw so the producer can
+						// publish the timeout facts before its typed settlement. The
+						// live-terminal binding was already emitted separately.
 						const timeoutNotices = current.truncated
 							? ["(output truncated)", ...pendingNotices]
 							: [...pendingNotices];
 						return this.#buildCompletedResult(timedOutResult, timeoutSec, {
 							requestedTimeoutSec,
 							notices: timeoutNotices,
-							terminalId: handle.terminalId,
 							wallTimeMs: performance.now() - bridgeWallTimeStart,
+							...(presentation === undefined ? {} : { presentation }),
 						});
 					}
 
@@ -1365,9 +1681,10 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						break;
 					}
 
-					// Poll tick: push current output so agent-loop transcript stays consistent.
-					// Race the read against abort/timeout so a stuck `terminal/output` RPC does
-					// not delay cancellation or let the command outlive its deadline.
+					// Poll only to retain a model-facing result/fallback. The client terminal
+					// already renders these process bytes directly, so sending them through a
+					// producer or legacy snapshot would duplicate its output. Race the read
+					// against abort/timeout so a stuck RPC cannot delay either transition.
 					const pollOutput = await Promise.race([handle.currentOutput(), abortPollRacer, timeoutPollRacer]);
 					if (pollOutput === undefined) {
 						// Abort or timeout fired during the poll-tick read; let the next loop
@@ -1375,10 +1692,6 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						continue;
 					}
 					lastPolledOutput = pollOutput;
-					onUpdate?.({
-						content: [{ type: "text", text: pollOutput.output }],
-						details: { terminalId: handle.terminalId },
-					});
 				}
 
 				// Fetch final output; the terminal is released in the outer finally.
@@ -1422,13 +1735,21 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				return this.#buildCompletedResult(bridgeResult, timeoutSec, {
 					requestedTimeoutSec,
 					notices: bridgeNotices,
-					terminalId: handle.terminalId,
 					wallTimeMs: performance.now() - bridgeWallTimeStart,
+					...(presentation === undefined ? {} : { presentation }),
 				});
+			} catch (error) {
+				if (presentation !== undefined && error instanceof ToolAbortError) {
+					publishCancellationFacts(presentation, {
+						notices: pendingNotices,
+						stopAnnotation: "[Command aborted]",
+					});
+				}
+				throw error;
 			} finally {
 				clearTimeout(timeoutTimer);
 				signal?.removeEventListener("abort", onAbortSignal);
-				if (handle) {
+				if (handle && !releaseAfterPresentationSettlement) {
 					const releaseHandle = handle;
 					// Bound release like kill/output: a hung `terminal/release` RPC must not
 					// keep the tool pending after the result is already decided.
@@ -1448,13 +1769,20 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		// Allocate artifact for truncated output storage
 		const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
 
-		const interactiveUi = canUseInteractiveBashPty(pty, ctx) ? ctx?.ui : undefined;
-		if (pty && !interactiveUi) {
-			pendingNotices.push("pty requested but unavailable in this environment; ran without a terminal");
-		}
+		const interactiveUi = route.kind === "pty" ? ctx?.ui : undefined;
+		const ptyFallbackNotice: string | undefined =
+			pty && !interactiveUi
+				? "pty requested but unavailable in this environment; ran without a terminal"
+				: undefined;
+		// Not pushed onto `pendingNotices`: it used to ride that shared array so both
+		// the body composition and the fact publisher could read it back, but that made
+		// the fact publisher recover "is this the pty notice" by string-equality, which
+		// can misfire on an unrelated identical string. It is threaded to
+		// `#buildCompletedResult`/`publishBashFacts` as its own field on every call below
+		// instead.
 		const wallTimeStart = performance.now();
 		const result: BashResult | BashInteractiveResult = interactiveUi
-			? await runInteractiveBashPty(interactiveUi, {
+			? await bashInteractive.runInteractiveBashPty(interactiveUi, {
 					// PTY bypasses executeBash, so feed it the direnv-transformed
 					// command + merged env (backendPreflight is defined whenever this
 					// branch runs, since both gate on canUseInteractiveBashPty).
@@ -1465,6 +1793,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					env: backendPreflight?.env ?? resolvedEnv,
 					artifactPath,
 					artifactId,
+					...(presentation === undefined ? {} : { presentation }),
 				})
 			: // executeBash runs its OWN direnv preflight internally — pass the RAW
 				// command + resolvedEnv here so the unset prefix / env merge is not
@@ -1477,7 +1806,18 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					env: resolvedEnv,
 					artifactPath,
 					artifactId,
-					onChunk: streamTailUpdates(tailBuffer, onUpdate),
+					// Exactly one progress channel. On the presentation protocol the sink
+					// emits direct append events (and registers its throttle flush with the
+					// freeze barrier); on the legacy protocol it emits cumulative snapshots.
+					// Never both: `onUpdate` is `undefined` whenever a producer exists.
+					...(presentation === undefined
+						? { onChunk: streamTailUpdates(tailBuffer, onUpdate) }
+						: {
+								presentation,
+								onChunk: (chunk: string) => {
+									tailBuffer.append(chunk);
+								},
+							}),
 					onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 				});
 		const wallTimeMs = performance.now() - wallTimeStart;
@@ -1498,18 +1838,203 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					: out
 						? `${out}\n\n[Command aborted]`
 						: "Command aborted";
+				// The reason a command stopped is not in the process byte stream: `dump()`
+				// composed it into the returned body and never streamed it. On the
+				// presentation protocol that body is not the delivery channel, so the
+				// annotation has to be declared — otherwise cancellation text reaches neither
+				// the ACP terminal nor the model projection. `result.annotation` carries the
+				// exact wording the sink used, so nothing re-derives it from the text.
+				if (presentation !== undefined) {
+					publishCancellationFacts(presentation, {
+						notices: pendingNotices,
+						stopAnnotation: result.annotation ?? "[Command aborted]",
+						// No wall time: a cancelled run never reported one, and adding it here
+						// would put a line in the projection that the current model-facing text
+						// does not have.
+						...(ptyFallbackNotice === undefined ? {} : { ptyFallbackNotice }),
+						// The thrown `message` above is only the process output plus the
+						// cancellation annotation — it never carries `pendingNotices` (e.g. a
+						// timeout-clamp notice) or the pty-fallback text. `publishCancellationFacts`
+						// maps them to the human-only `unreported_annotation` kind, so a
+						// terminal-rendering client still learns about them without the model
+						// projection growing a line the producer's own bytes disagree with.
+					});
+				}
 				if (signal?.aborted) {
 					throw new ToolAbortError(message);
 				}
 				throw new ToolError(message);
 			}
 		}
-		return this.#buildCompletedResult(result, timeoutSec, {
+		const completed = await this.#buildCompletedResult(result, timeoutSec, {
 			requestedTimeoutSec,
 			notices: pendingNotices,
 			wallTimeMs,
+			...(ptyFallbackNotice === undefined ? {} : { ptyFallbackNotice }),
+			...(presentation === undefined ? {} : { presentation }),
 		});
+		return completed;
 	}
+
+	/**
+	 * Public entry point: attaches the authoritative {@link ToolOutcome}
+	 * to whichever completion `#executeCore` reached -- it has
+	 * several internal early returns (async job launch, auto-background
+	 * hand-off, foreground completion), and every one of them is a real,
+	 * terminal result that needs the same outcome derivation, not just the
+	 * final statement. Streamed `onUpdate` partials never pass through here,
+	 * so they stay outcome-free -- outcome is terminal-only.
+	 */
+	async execute(
+		toolCallId: string,
+		input: BashToolInput,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<BashToolDetails>,
+		ctx?: AgentToolContext,
+	): Promise<AgentToolResult<BashToolDetails>> {
+		const result = await this.#executeCore(toolCallId, input, signal, onUpdate, ctx);
+		return { ...result, outcome: bashOutcome(result) };
+	}
+}
+
+/**
+ * Sources for the facts a bash run declares, each already structured.
+ *
+ * Deliberately not `details.notices`: the previous version re-read that mirror and
+ * filtered it by string prefix (`"Wall time:"`, `"Command exited with code "`,
+ * `"[raw output: artifact://"`) to avoid duplicating what the outcome already
+ * carries. Parsing our own rendered strings back is the exact practice this design
+ * exists to delete, so the caller passes the parts instead.
+ *
+ * Fact construction is tied to the result-construction path so incompatible states
+ * are not representable. There is no producer-authored audience field: the function
+ * called *is* the audience decision.
+ *
+ * - {@link publishReturnedResultFacts}: success/timeout. The result body
+ *   `#buildCompletedResult` returns includes `notices` and `ptyFallbackNotice`, so
+ *   the model must see them too — they publish as `notice`/`capability_notice`
+ *   (`"all"` audience). `stopAnnotation` is also in the body.
+ * - {@link publishCancellationFacts}: cancellation. The thrown message is only the
+ *   process output plus the cancellation annotation — it never carries
+ *   `pendingNotices` or the pty-fallback text. Those publish as
+ *   `unreported_annotation` (`"human"` audience), so a terminal-rendering client
+ *   still learns about them without the model projection growing a line the
+ *   producer's own bytes disagree with. `stopAnnotation` is `"all"` audience because
+ *   it appears in the thrown model text.
+ */
+
+/** Shared fields available on every bash fact path. */
+interface BashFactBase {
+	readonly wallTimeMs?: number;
+	/** Trailing agent notes: timeout clamp, backgrounded early. */
+	readonly notices: readonly string[];
+	/**
+	 * A requested capability the host couldn't honour, carried separately from
+	 * `notices` so it publishes as its own structured kind instead of a generic
+	 * `notice`.
+	 */
+	readonly ptyFallbackNotice?: string;
+	/**
+	 * The head annotation `OutputSink.dump()` composed onto the retained body — the
+	 * reason the process stopped early. Carried verbatim from `OutputSummary.annotation`.
+	 */
+	readonly stopAnnotation?: string;
+	readonly meta?: OutputMeta;
+}
+
+/** Shared helper: emit the common facts (stop_annotation, wall_time, truncation, artifact, limit). */
+function publishCommonFacts(presentation: ToolPresentationProducer, base: BashFactBase): void {
+	const facts: ToolFactBody[] = [];
+	if (base.stopAnnotation !== undefined) {
+		facts.push({ kind: "stop_annotation", text: base.stopAnnotation });
+	}
+	if (base.wallTimeMs !== undefined) facts.push({ kind: "wall_time", ms: base.wallTimeMs });
+	const truncation = base.meta?.truncation;
+	if (truncation) {
+		facts.push({
+			kind: "truncation",
+			meta: {
+				direction: truncation.direction,
+				totalBytes: truncation.totalBytes,
+				retainedBytes: truncation.outputBytes,
+				totalLines: truncation.totalLines,
+				retainedLines: truncation.outputLines,
+				...(truncation.elidedBytes === undefined ? {} : { elidedBytes: truncation.elidedBytes }),
+				...(truncation.elidedLines === undefined ? {} : { elidedLines: truncation.elidedLines }),
+			},
+		});
+		if (truncation.artifactId !== undefined) {
+			facts.push({ kind: "artifact", artifactId: truncation.artifactId });
+		}
+	}
+	const columnTruncated = base.meta?.limits?.columnTruncated;
+	if (columnTruncated) {
+		facts.push({ kind: "limit", meta: { limit: "column", value: columnTruncated.maxColumn } });
+	}
+	for (const fact of facts) presentation.fact(fact);
+}
+
+/**
+ * Declare facts for a returned result (success or timeout).
+ *
+ * `#buildCompletedResult` composes `notices` and `ptyFallbackNotice` into the
+ * returned body, so the model sees them — they publish as `notice`/
+ * `capability_notice` (`"all"` audience). The exit code is deliberately **not** a
+ * fact here — it lives in the `ToolOutcome`, and duplicating it would let the two
+ * drift.
+ */
+function publishReturnedResultFacts(presentation: ToolPresentationProducer, sources: BashFactBase): void {
+	const facts: ToolFactBody[] = [];
+	if (sources.ptyFallbackNotice !== undefined) {
+		facts.push({ kind: "capability_notice", text: sources.ptyFallbackNotice });
+	}
+	for (const notice of sources.notices) {
+		if (!notice) continue;
+		facts.push({ kind: "notice", text: notice });
+	}
+	for (const fact of facts) presentation.fact(fact);
+	publishCommonFacts(presentation, sources);
+}
+
+/**
+ * The original auto-background call settles as a launch card while the manager
+ * owns the later follow-up. Its rendered result body is not mapped on the
+ * presentation protocol, so publish the stable launch text explicitly.
+ */
+function publishBackgroundStartFacts(
+	presentation: ToolPresentationProducer,
+	notices: readonly string[],
+	jobId: string,
+): void {
+	for (const notice of notices) {
+		if (notice) presentation.fact({ kind: "notice", text: notice });
+	}
+	presentation.fact({ kind: "notice", text: formatBackgroundNotice(jobId) });
+}
+
+/**
+ * Declare facts for a thrown cancellation.
+ *
+ * The thrown message is only the process output plus the cancellation annotation —
+ * it never carries `pendingNotices` or the pty-fallback text. Those publish as
+ * `unreported_annotation` (`"human"` audience), so a terminal-rendering client still
+ * learns about them without the model projection growing a line the producer's own
+ * bytes disagree with. No wall time: a cancelled run never reported one, and adding
+ * it here would put a line in the projection that the current model-facing text does
+ * not have. `stopAnnotation` is `"all"` audience because it appears in the thrown
+ * model text.
+ */
+function publishCancellationFacts(presentation: ToolPresentationProducer, sources: BashFactBase): void {
+	const facts: ToolFactBody[] = [];
+	if (sources.ptyFallbackNotice !== undefined) {
+		facts.push({ kind: "unreported_annotation", text: sources.ptyFallbackNotice });
+	}
+	for (const notice of sources.notices) {
+		if (!notice) continue;
+		facts.push({ kind: "unreported_annotation", text: notice });
+	}
+	for (const fact of facts) presentation.fact(fact);
+	publishCommonFacts(presentation, sources);
 }
 
 // =============================================================================
@@ -1703,7 +2228,14 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 						return cachedLines;
 					}
 					const withoutBackground = stripBackgroundNotice(rawOutput, details?.async);
-					const strippedOutput = stripOutputNotice(withoutBackground, details?.meta);
+					// `presentationFacts`-carrying results (phase-3 escape hatch)
+					// derive the trail to strip from the fact/projection instead of
+					// re-deriving it from `details.meta`, matching read.ts's own renderer.
+					const factTrail = details?.presentationFacts ? renderNoticeTrail(details.presentationFacts) : undefined;
+					const strippedOutput =
+						factTrail !== undefined
+							? stripTrailingText(withoutBackground, factTrail)
+							: stripOutputNotice(withoutBackground, details?.meta);
 					const withoutExit = stripExitCodeNotice(strippedOutput, details?.exitCode);
 					const withoutWall = stripWallTimeNotice(withoutExit, details?.wallTimeMs);
 					const rawOutputArtifact = stripRawOutputArtifactNotice(withoutWall);

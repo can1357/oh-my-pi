@@ -1,9 +1,10 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, MessageAttribution, ServiceTierByFamily, TextContent } from "@oh-my-pi/pi-ai";
+import type { PersistedToolExecutionSettled, PersistedToolExecutionStarted } from "../presentation/journal";
 import type { StructuredSubagentSchemaMode } from "../task/types";
 import type { CompactionMethod } from "./compaction-methods";
 
-export const CURRENT_SESSION_VERSION = 3;
+export const CURRENT_SESSION_VERSION = 4;
 
 export const SESSION_TITLE_SLOT_BYTES = 256;
 
@@ -178,6 +179,8 @@ declare module "@oh-my-pi/pi-agent-core/compaction/entries" {
 	interface CustomCompactionSessionEntries {
 		titleChange: TitleChangeEntry;
 		credentialPin: CredentialPinEntry;
+		toolExecutionStarted: ToolExecutionStartedEntry;
+		toolExecutionSettled: ToolExecutionSettledEntry;
 	}
 }
 
@@ -268,6 +271,30 @@ export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 	attribution?: MessageAttribution;
 }
 
+/**
+ * `started` arm of the v4 persisted tool journal, as a
+ * `SessionEntry`: the call descriptor, persisted before the tool runs, so the
+ * append-only journal survives a process death between call and settlement.
+ * Written by `AgentSession#trackToolPresentation` and folded into a
+ * {@link ReplayableToolExecution} by `tool-journal-correlation.ts`'s
+ * hydration path — see `../presentation/journal.ts`.
+ */
+export type ToolExecutionStartedEntry = SessionEntryBase &
+	Omit<PersistedToolExecutionStarted, "type"> & {
+		type: "tool_execution_started";
+	};
+
+/**
+ * `settled` arm of the v4 persisted tool journal, as a
+ * `SessionEntry`: outcome, replayable presentation record, and the frozen
+ * model projection, referencing its `started` record by `executionId` rather
+ * than duplicating `call`.
+ */
+export type ToolExecutionSettledEntry = SessionEntryBase &
+	Omit<PersistedToolExecutionSettled, "type"> & {
+		type: "tool_execution_settled";
+	};
+
 /** Session entry - has id/parentId for tree structure (returned by "read" methods in SessionManager) */
 export type SessionEntry =
 	| SessionMessageEntry
@@ -284,7 +311,10 @@ export type SessionEntry =
 	| SessionInitEntry
 	| ModeChangeEntry
 	| CredentialPinEntry
-	| ResetBoundaryEntry;
+1:
+	| ResetBoundaryEntry
+	| ToolExecutionStartedEntry
+	| ToolExecutionSettledEntry;
 
 /** Raw logical file entry after loaders strip any fixed-width title slot. */
 export type FileEntry = SessionHeader | SessionEntry;

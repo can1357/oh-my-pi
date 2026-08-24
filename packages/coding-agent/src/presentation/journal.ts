@@ -17,12 +17,15 @@ import { jsonRecordSchema } from "./schemas/journal";
  * `SessionEntry` union with an explicit `migrateV3ToV4` arm behind them
  * (`../session/session-entries.ts`, `../session/session-migrations.ts`), so a
  * record of either shape is a legal, versioned part of the persisted format.
- * `AgentSession#recordToolExecutionStartedJournal` (`../session/agent-session.ts`)
- * is the first producer: it writes a {@link PersistedToolExecutionStarted}
- * record from the `tool_presentation` `started` event for every
- * `presentation_events`-protocol call. No producer writes the `settled` arm yet
- * and no consumer reads a {@link ReplayableToolExecution}: routing
- * `#replaySessionHistory` through a hydration adapter is a later step.
+ * `AgentSession#trackToolPresentation` (`../session/agent-session.ts`) writes
+ * both arms: a {@link PersistedToolExecutionStarted} record from the
+ * `tool_presentation` `started` event, and the matching
+ * {@link PersistedToolExecutionSettled} at settlement (reusing the same
+ * `executionId`). Consumers read a {@link ReplayableToolExecution} through the
+ * hydration adapter: `#replaySessionHistory` (`../modes/acp/acp-agent.ts`) via
+ * `correlateReplayableToolExecution`/`hydrateReplayableToolExecution`
+ * (`../session/tool-journal-correlation.ts`), plus `session-context.ts`'s
+ * interrupted-tool markers and `session/exit-diagnostics.ts`.
  */
 
 /** Version tag of {@link FrozenModelProjection}'s formatter — its own scope, distinct from `recordVersion`. */

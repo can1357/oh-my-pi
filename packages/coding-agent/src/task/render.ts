@@ -34,6 +34,7 @@ import {
 	parseFindingDetails,
 	type SubmitReviewDetails,
 } from "../tools/review";
+import { toolResultFailed } from "../tools/tool-result";
 import { framedBlock, renderStatusLine } from "../tui";
 import { repairDoubleEncodedJsonString } from "./repair-args";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
@@ -1494,7 +1495,7 @@ export function renderResult(
 
 	if (!details) {
 		const text = result.content.find(c => c.type === "text")?.text || "";
-		const errored = result.isError === true;
+		const errored = toolResultFailed(result);
 		const header = errored
 			? renderStatusLine({ icon: "error", title: "Task", description: agentLabel }, theme)
 			: renderStatusLine(
@@ -1540,7 +1541,7 @@ export function renderResult(
 	const aborted = abortedCount > 0;
 	const failed = failCount > 0;
 	const mergeFailed = mergeFailedCount > 0;
-	const isError = aborted || failed;
+	const isError = aborted || failed || toolResultFailed(result);
 	const agentCount = hasResults ? details.results.length : (details.progress?.length ?? 0);
 	const icon: ToolUIStatus = options.isPartial ? "running" : isError ? "error" : mergeFailed ? "warning" : "success";
 	// Header meta is the spawn count only; each row carries its own ⟨agent⟩

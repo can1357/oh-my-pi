@@ -53,7 +53,6 @@ import type {
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
 import type { KeybindingsManager } from "../../config/keybindings";
 import type { ModelRegistry } from "../../config/model-registry";
-import type { EditToolDetails } from "../../edit";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
@@ -118,6 +117,7 @@ import type {
 	TurnStartEvent,
 } from "../shared-events";
 import type { SlashCommandInfo } from "../slash-commands";
+import type { EditToolResultDetails } from "../tool-event-details";
 
 export type { OverlayHandle, OverlayOptions } from "@oh-my-pi/pi-tui";
 export type { AppKeybinding, KeybindingsManager } from "../../config/keybindings";
@@ -997,7 +997,7 @@ export interface ReadToolResultEvent extends ToolResultEventBase {
 
 export interface EditToolResultEvent extends ToolResultEventBase {
 	toolName: "edit";
-	details: EditToolDetails | undefined;
+	details: EditToolResultDetails | undefined;
 }
 
 export interface WriteToolResultEvent extends ToolResultEventBase {

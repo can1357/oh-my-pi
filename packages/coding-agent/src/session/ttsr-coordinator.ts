@@ -2,12 +2,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	type AfterToolCallContext,
-	type AfterToolCallResult,
+	type AfterToolCallEffect,
 	type Agent,
 	type AgentEvent,
 	type AgentMessage,
 	createToolScopedAbortReason,
 } from "@oh-my-pi/pi-agent-core";
+import { factId } from "@oh-my-pi/pi-agent-core/presentation";
 import type { AssistantMessage, ToolCall } from "@oh-my-pi/pi-ai";
 import { isRecord, prompt, relativePathWithinRoot } from "@oh-my-pi/pi-utils";
 import type { Rule } from "../capability/rule";
@@ -122,7 +123,7 @@ export class TtsrCoordinator {
 	}
 
 	/** Folds per-tool reminders into the matched tool's result. */
-	afterToolCall(ctx: AfterToolCallContext): AfterToolCallResult | undefined {
+	afterToolCall(ctx: AfterToolCallContext): AfterToolCallEffect | undefined {
 		const rules = this.#perToolInjections.get(ctx.toolCall.id);
 		if (!rules || rules.length === 0) return undefined;
 		this.#perToolInjections.delete(ctx.toolCall.id);
@@ -137,7 +138,10 @@ export class TtsrCoordinator {
 			.join("\n\n");
 		const ruleNames = rules.map(rule => rule.name.trim()).filter(name => name.length > 0);
 		if (ruleNames.length > 0) this.#host.sessionManager.appendTtsrInjection(ruleNames);
-		return { content: [{ type: "text", text: reminder }, ...ctx.result.content] };
+		return {
+			kind: "add_guidance_fact",
+			fact: { id: factId(`ttsr:${ctx.toolCall.id}`), kind: "model_guidance", source: "ttsr", text: reminder },
+		};
 	}
 
 	/** Resolves and clears the current resume gate. */

@@ -526,6 +526,21 @@ export class SessionTools {
 		return operation;
 	}
 
+	/**
+	 * Whether a live dispatch name belongs to a registered built-in. This also
+	 * resolves a built-in's custom wire name (for example EditTool's
+	 * `apply_patch`) using the same exact-name-first precedence as the agent
+	 * dispatcher. An external tool called `apply_patch` must shadow EditTool's
+	 * wire alias rather than inheriting its built-in provenance.
+	 */
+	hasBuiltInToolDispatch(name: string): boolean {
+		const tools = this.#host.agent.state.tools;
+		const dispatched =
+			tools.find(tool => tool.name === name) ??
+			tools.find(tool => tool.customWireName !== undefined && tool.customWireName === name);
+		return dispatched !== undefined && this.#builtInToolNames.has(dispatched.name);
+	}
+
 	/** Names of every registered tool. */
 	getAllToolNames(): string[] {
 		return Array.from(this.#toolRegistry.keys());

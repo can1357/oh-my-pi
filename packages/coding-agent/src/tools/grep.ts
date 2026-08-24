@@ -10,6 +10,7 @@ import type {
 	AgentToolUpdateCallback,
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
+import type { ToolFactBody } from "@oh-my-pi/pi-agent-core/presentation";
 import { type GrepMatch, GrepOutputMode, type GrepResult, grep } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
@@ -26,6 +27,7 @@ import type { LocalProtocolOptions } from "../internal-urls/local-protocol";
 import { InternalUrlRouter } from "../internal-urls/router";
 import type { InternalResource, ResolveContext } from "../internal-urls/types";
 import type { Theme } from "../modes/theme/theme";
+import { renderNoticeTrail } from "../presentation/projections";
 import grepDescription from "../prompts/tools/grep.md" with { type: "text" };
 import { DEFAULT_MAX_COLUMN, type TruncationResult, truncateHead, truncateLine } from "../session/streaming-output";
 import { isScoutSpawnable } from "../task/spawn-policy";
@@ -866,6 +868,17 @@ export interface GrepToolDetails {
 	perFileLimitReached?: number;
 	linesTruncated?: boolean;
 	meta?: OutputMeta;
+	/**
+	 * Fact bodies for `GrepTool#modelContentProjection` (the typed model-content projection escape
+	 * hatch, shared with `read`/`glob` via `renderNoticeTrail` in
+	 * `presentation/projections.ts`) — see `ToolResultBuilder#truncationFact`'s
+	 * doc comment. `meta.truncation`/`meta.limits.columnTruncated` above stay
+	 * populated exactly as before for every consumer that already reads them
+	 * (ACP mapper, `spillLargeResultToArtifact`, `formatStyledTruncationWarning`);
+	 * this array is what `#modelContentProjection` uses instead of
+	 * `stripOutputNotice`/`appendOutputNotice`'s string round-trip.
+	 */
+	presentationFacts?: readonly ToolFactBody[];
 	scopePath?: string;
 	matchCount?: number;
 	fileCount?: number;
@@ -933,6 +946,18 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 
 	readonly #contextOverride?: number;
 	readonly #totalMatchLimit?: number;
+
+	/**
+	 * Grep's typed model projection for its head/tail truncation notice (plan
+	 * §3.3's escape hatch). Grep authors only a `truncationFact` — it has no
+	 * co-occurring `resultLimit`/`matchLimit` fact today (see
+	 * `presentation/projections.ts`'s `renderNoticeTrail` doc comment: grep's
+	 * own match-count caps surface as a hand-composed `limitMessage` string
+	 * baked directly into the body, never through `OutputMetaBuilder`, so
+	 * there is no such fact to declare). Every other call returns `undefined`
+	 * and falls through to the default `appendOutputNotice`.
+	 */
+	readonly modelContentProjection = (facts: readonly ToolFactBody[]): string | undefined => renderNoticeTrail(facts);
 
 	constructor(
 		private readonly session: ToolSession,
@@ -1595,11 +1620,20 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				};
 				if (truncation.truncated) details.truncation = truncation;
 				if (linesTruncated) details.linesTruncated = true;
-				const resultBuilder = toolResult(details)
-					.text(output)
-					.limits({ columnMax: linesTruncated ? DEFAULT_MAX_COLUMN : undefined });
+				const resultBuilder = toolResult(details).text(output);
 				if (truncation.truncated) {
-					resultBuilder.truncation(truncation, { direction: "head" });
+					// Co-occurring column truncation joins the SAME bracket via
+					// `truncationFact`'s `columnLimitValue` (mirrors read's
+					// `head_lines_plus_column` case); a lone column cap with no line
+					// truncation stays on the untouched `.limits()` legacy path below,
+					// matching read's own precedent for its lone-`columnMax` sites.
+					resultBuilder.truncationFact(
+						truncation,
+						{ direction: "head" },
+						linesTruncated ? DEFAULT_MAX_COLUMN : undefined,
+					);
+				} else if (linesTruncated) {
+					resultBuilder.limits({ columnMax: DEFAULT_MAX_COLUMN });
 				}
 				return resultBuilder.done();
 			} finally {

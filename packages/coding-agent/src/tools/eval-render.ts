@@ -18,6 +18,7 @@ import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { formatContextUsage } from "../modes/components/status-line/context-thresholds";
 import { truncateToVisualLines } from "../modes/components/visual-truncate";
 import { getMarkdownTheme, type Theme } from "../modes/theme/theme";
+import { renderNoticeTrail } from "../presentation/projections";
 import { markFramedBlockComponent, outputBlockContentWidth, renderCodeCell } from "../tui";
 import { formatEvalCodeForDisplay } from "./eval-format";
 import {
@@ -29,7 +30,7 @@ import {
 	JSON_TREE_SCALAR_LEN_EXPANDED,
 	renderJsonTreeLines,
 } from "./json-tree";
-import { formatStyledTruncationWarning, stripOutputNotice } from "./output-meta";
+import { formatStyledTruncationWarning, stripOutputNotice, stripTrailingText } from "./output-meta";
 import {
 	formatBadge,
 	formatDuration,
@@ -562,7 +563,13 @@ export const evalToolRenderer = {
 			options.renderContext?.output ?? (result.content?.find(c => c.type === "text")?.text ?? "").trimEnd();
 		// Strip the LLM-facing notice (appended by wrappedExecute) before display;
 		// the styled `warningLine` below carries the same text in ⟨…⟩ form.
-		const output = stripOutputNotice(rawOutput, details?.meta).trimEnd();
+		// `presentationFacts`-carrying results (phase-3 escape hatch)
+		// derive the trail to strip from the fact/projection instead of
+		// re-deriving it from `details.meta`, matching read.ts/bash.ts's own renderer.
+		const factTrail = details?.presentationFacts ? renderNoticeTrail(details.presentationFacts) : undefined;
+		const output = (
+			factTrail !== undefined ? stripTrailingText(rawOutput, factTrail) : stripOutputNotice(rawOutput, details?.meta)
+		).trimEnd();
 
 		const jsonOutputs = details?.jsonOutputs ?? [];
 		const treeExpanded = options.renderContext?.expanded ?? options.expanded;

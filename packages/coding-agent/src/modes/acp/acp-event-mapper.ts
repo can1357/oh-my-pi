@@ -5,17 +5,28 @@ import type {
 	ToolCallContent,
 	ToolCallLocation,
 	ToolKind,
+3:
 } from "@oh-my-pi/pi-utils/acp";
+import type { ToolCallPresentation } from "@oh-my-pi/pi-agent-core/presentation";
 import { logger } from "@oh-my-pi/pi-utils";
-import { type EditToolDetails, type EditToolPerFileResult, parseEditTargetPath } from "../../edit";
+import { parseEditTargetPath } from "../../edit";
 import { parseXdUrl } from "../../internal-urls/xd-protocol";
+import { fenceBlock } from "../../presentation/projections";
 import type { AgentSessionEvent } from "../../session/agent-session";
-import { DEFAULT_MAX_BYTES } from "../../session/streaming-output";
-import { formatOutputNotice, isRecord, type OutputMeta, sanitizeOutputMeta } from "../../tools/output-meta";
 import { resolveToCwd } from "../../tools/path-utils";
 import type { TodoStatus } from "../../tools/todo";
 import { toolResultFailed } from "../../tools/tool-result";
 import { canonicalizeMessage } from "../../utils/thinking-display";
+import {
+	asExternalEditDetails,
+	externalEditDiffContent,
+	externalEditFailureText,
+	externalEditNoticeText,
+	externalEditPrunedPathsText,
+} from "./external-edit-details";
+import { checkedNotificationPayload, encodeToolFrame } from "./view/encoder";
+import type { AcpRawInput, AcpStatusChange, AcpToolDiagnostic, AcpToolFrame, NonTerminalContent } from "./view/frames";
+import { nonTerminalContent, statusChanges } from "./view/frames";
 
 interface MessageProgress {
 	textEmitted: boolean;
@@ -65,21 +76,6 @@ export interface AcpEventMapperOptions {
 	 * matter how capable the client is.
 	 */
 	realTerminalCapable?: boolean;
-	/**
-	 * The full cumulative meta-terminal output text already delivered to the
-	 * client for `toolCallId` (raw output only — never the eval source header
-	 * `buildMetaTerminalOutput` prepends once up front), or `undefined` if
-	 * nothing has been sent yet. `tool_execution_update`/`tool_execution_end`
-	 * both carry the entire output-so-far (see `streamTailUpdates`/`eval.ts`'s
-	 * `pushUpdate`), but Zed's `terminal_output.data` is append-only bytes —
-	 * resending the same prefix on every progress tick and again at
-	 * completion duplicates it in the client's terminal. Backed by
-	 * session-scoped state in the caller so it survives across the
-	 * `tool_execution_update` → `tool_execution_end` sequence for one call.
-	 */
-	getMetaTerminalSent?: (toolCallId: string) => string | undefined;
-	/** Records the cumulative output text just delivered for `toolCallId` (see `getMetaTerminalSent`). */
-	setMetaTerminalSent?: (toolCallId: string, text: string) => void;
 }
 
 interface ContentArrayContainer {
@@ -275,6 +271,12 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			return mapAssistantMessageEnd(event, sessionId, options);
 		case "tool_execution_start": {
 			if (isInternalHubMessageTool(event.toolName, event.args)) return [];
+			if (!wantsMetaTerminal(event.toolName, event.args, options)) {
+				const frame = buildGenericStartFrame(event, options);
+				if (frame !== undefined) {
+					return [checkedNotificationPayload(encodeToolFrame(sessionId, frame))];
+				}
+			}
 			const update = buildToolCallStartUpdate(
 				{
 					toolCallId: event.toolCallId,
@@ -289,30 +291,43 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 		}
 		case "tool_execution_update": {
 			if (isInternalHubMessageTool(event.toolName, event.args)) return [];
+			const metaTerminal = wantsMetaTerminal(event.toolName, event.args, options);
+			if (!metaTerminal) {
+				const frame = buildGenericUpdateFrame(event, options);
+				if (frame !== undefined) {
+					return [checkedNotificationPayload(encodeToolFrame(sessionId, frame))];
+				}
+			}
+			// Permanently-legacy arm (plan §8, 2026-08-24 amendment): the
+			// verbatim `rawOutput` passthrough survives here indefinitely as
+			// wire compatibility for clients that read `raw_output` (Zed).
+			// Reached only by external/MCP tools matching this mapper's two
+			// accepted carve-outs (command-named, or a result carrying a live
+			// terminal / rich resource_link shape) — never by a built-in, and
+			// never by replay, whose dedicated builders send status + content
+			// only. The encoder-scoped "never a raw pass-through" guarantee is
+			// therefore not violated: it holds for every frame encoded through
+			// `encodeToolFrame`, which this hand-built update bypasses.
 			const update: SessionUpdate = {
 				sessionUpdate: "tool_call_update",
 				toolCallId: event.toolCallId,
 				status: "in_progress",
 				rawOutput: event.partialResult,
 			};
-			// A meta-terminal call already got its (empty) terminal reference on
-			// `tool_execution_start`; `content` has no incremental-append story for
-			// it (see `wantsMetaTerminal`'s doc), but `partialResult` is the same
-			// cumulative-so-far text a live terminal would show (see
-			// `streamTailUpdates`/`eval.ts`'s `pushUpdate`), so mirror it into
-			// `_meta.terminal_output` instead of leaving the terminal blank until
-			// `tool_execution_end`. `buildMetaTerminalDelta` diffs against what was
-			// already sent so a growing cumulative snapshot becomes an append-only
-			// byte stream instead of duplicating everything shown so far.
-			if (wantsMetaTerminal(event.toolName, event.args, options)) {
-				const partialText = extractTerminalStreamText(event.partialResult);
-				if (partialText) {
-					const delta = buildMetaTerminalDelta(event.toolCallId, event.toolName, event.args, partialText, options);
-					if (delta) {
-						update._meta = buildTerminalMeta(options, { output: delta });
-					}
-				}
-			} else {
+			// A meta-terminal call publishes no output while it runs: its
+			// producer's cumulative snapshots cannot be turned into an
+			// append-only byte stream without either duplicating or losing bytes,
+			// so settlement delivers the one full body instead (see
+			// `buildSettledMetaTerminalOutput`). The terminal reference itself
+			// already went out on `tool_execution_start`, and `content` has no
+			// incremental-append story for it (see `wantsMetaTerminal`'s doc).
+			//
+			// The content arm below is reached for a non-meta-terminal call whose
+			// `buildGenericUpdateFrame` refused (a non-built-in tool's own result
+			// happened to carry a live `terminalId`, or a `resource_link` block
+			// with `title`/`description`/`size` — see `toFrameContent`); the
+			// common case already returned through the checked tool-frame encoder.
+			if (!metaTerminal) {
 				const codeFence = shouldCodeFenceToolOutput(event.toolName);
 				const content = mergeToolUpdateContent(
 					buildToolStartContent(event.toolName, event.args),
@@ -334,6 +349,23 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			// Prefer the result-level flag, but retain the details fallback for
 			// legacy replay data and external producers (see `isFailedToolResult`).
 			const failed = isFailedToolResult(event.result, event.isError);
+			if (!wantsMetaTerminal(event.toolName, args, options)) {
+				const frame = buildGenericEndFrame(event, args, failed, options);
+				if (frame !== undefined) {
+					const notifications = [checkedNotificationPayload(encodeToolFrame(sessionId, frame))];
+					const planUpdate = mapTodoResultToPlanUpdate(event);
+					if (planUpdate) {
+						notifications.push(toSessionNotification(sessionId, planUpdate));
+					}
+					return notifications;
+				}
+			}
+			// Permanently-legacy arm (plan §8, 2026-08-24 amendment): same
+			// verbatim `rawOutput` passthrough as the generic-fallback update
+			// above — reached only by external/MCP tools matching this mapper's
+			// two carve-outs (command-named, or a live-terminal/rich
+			// resource_link result shape); the encoder-scoped raw-result ban
+			// does not apply.
 			const update: SessionUpdate = {
 				sessionUpdate: "tool_call_update",
 				toolCallId: event.toolCallId,
@@ -360,13 +392,14 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 					// path already prepends, so this stays in sync with it for free.
 					//
 					// This branch composes `content` by hand instead of going through
-					// `extractToolCallContent`/`buildFinalMetaTerminalDelta`, so it has
-					// its own obligation to deliver whatever `extractTerminalDeliverableFacts`
-					// collects (`details.notices`/`notice`, a spilled `details.meta`
-					// notice, a framework-level `directText`) — the terminal item it just
-					// dropped was the only channel those facts could otherwise ride via
-					// `_meta.terminal_output`, and there is no such channel left once the
-					// image forces this fallback. `missingNoticeLines` skips whichever facts already
+					// `extractToolCallContent`/`buildSettledMetaTerminalOutput`, so it
+					// has its own obligation to deliver whatever
+					// `extractTerminalDeliverableFacts` collects (`details.notices`/
+					// `notice`, a spilled `details.meta` notice, a framework-level
+					// `directText`) — the terminal item it just dropped was the only
+					// channel those facts could otherwise ride via
+					// `_meta.terminal_output`, and there is no such channel left once
+					// the image forces this fallback. `missingNoticeLines` skips whichever facts already
 					// landed verbatim in `finalOutput` (the `details.meta` notice rides
 					// there via `wrapToolWithMetaNotice`'s `appendOutputNotice`), so this
 					// never restates a fact the body already carries.
@@ -400,18 +433,18 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 					// text block — matches `claude-agent-acp`'s `terminal_output`/
 					// `terminal_exit` shape, and (unlike a live terminal id) survives
 					// `session/load` replay verbatim since it carries no client-owned
-					// resource reference.
+					// resource reference. This is the call's only terminal payload:
+					// nothing was published while it ran (see
+					// `buildSettledMetaTerminalOutput`).
 					update.content = [terminalToolCallContent(event.toolCallId)];
-					const delta = buildFinalMetaTerminalDelta(
-						event.toolCallId,
-						event.toolName,
-						args,
-						finalOutput,
-						event.result,
-						options,
-					);
 					update._meta = buildTerminalMeta(options, {
-						...(delta !== undefined ? { output: delta } : {}),
+						output: buildSettledMetaTerminalOutput(
+							event.toolCallId,
+							event.toolName,
+							args,
+							finalOutput,
+							event.result,
+						),
 						exit: {
 							terminal_id: event.toolCallId,
 							exit_code: extractExitCode(event.result, failed),
@@ -474,8 +507,10 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 				if (content.length > 0) {
 					update.content = content;
 				}
-				// `details.notices` (bash's exit code/wall-time/truncation/artifact
-				// notes) can't ride as sibling `content` next to a real live
+				// `details.notices` (a legacy/external producer's exit code/wall-time/
+				// truncation/artifact notes — no first-party built-in populates this any
+				// more; both bash and eval declare these as typed facts instead) can't
+				// ride as sibling `content` next to a real live
 				// terminal — Zed's `has_terminals` (`thread_view.rs`) renders it
 				// exclusively through the terminal card, dropping every other
 				// `content` item from the live view (see `extractToolCallContent`).
@@ -523,6 +558,236 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 		default:
 			return [];
 	}
+}
+
+/**
+ * Convert one legacy `ToolCallContent` item into an {@link AcpToolFrame}
+ * content item, or `undefined` when it can't be losslessly represented in
+ * the current {@link NonTerminalContent} union. The caller then keeps the
+ * whole update on the pre-existing hand-built `SessionUpdate` path instead
+ * of silently dropping data — the same carve-out class as
+ * `wantsMetaTerminal`, just triggered by content shape instead of tool name.
+ *
+ * Two cases fall back today:
+ *  - `type: "terminal"` — the frame union's `content` channel is exclusively
+ *    non-terminal by construction (see `frames.ts`); a live terminal
+ *    reference surfacing here means a non-built-in tool's own result
+ *    happened to carry a `terminalId` (`extractTerminalId`), which stays on
+ *    the legacy path exactly like the meta-terminal carve-out.
+ *  - a `resource_link` block carrying `title`/`description`/`size` —
+ *    `NonTerminalContent`'s `resource_link` variant only carries
+ *    `uri`/`name`/`mimeType` (unchanged by this migration, since no current
+ *    producer sets the extra fields); extending it is out of this step's
+ *    scope, but dropping them silently would still be a byte loss, so this
+ *    is a deterministic representability check, not an inferred heuristic.
+ */
+function toFrameContent(item: ToolCallContent): NonTerminalContent | undefined {
+	switch (item.type) {
+		case "terminal":
+			return undefined;
+		case "diff":
+			return { type: "diff", path: item.path, oldText: item.oldText ?? null, newText: item.newText };
+		case "content":
+			switch (item.content.type) {
+				case "text":
+					return { type: "text", text: item.content.text };
+				case "image":
+					return { type: "image", data: item.content.data, mimeType: item.content.mimeType };
+				case "audio":
+					return { type: "audio", data: item.content.data, mimeType: item.content.mimeType };
+				case "resource_link":
+					if (
+						(item.content.title ?? undefined) !== undefined ||
+						(item.content.description ?? undefined) !== undefined ||
+						(item.content.size ?? undefined) !== undefined
+					) {
+						return undefined;
+					}
+					return {
+						type: "resource_link",
+						uri: item.content.uri,
+						name: item.content.name,
+						...(item.content.mimeType == null ? {} : { mimeType: item.content.mimeType }),
+					};
+				case "resource": {
+					const resource = item.content.resource;
+					return {
+						type: "resource",
+						resource:
+							"text" in resource
+								? {
+										uri: resource.uri,
+										text: resource.text,
+										...(resource.mimeType == null ? {} : { mimeType: resource.mimeType }),
+									}
+								: {
+										uri: resource.uri,
+										blob: resource.blob,
+										...(resource.mimeType == null ? {} : { mimeType: resource.mimeType }),
+									},
+					};
+				}
+				default:
+					return undefined;
+			}
+		default:
+			return undefined;
+	}
+}
+
+/** Convert a whole content array, or `undefined` if any item is unrepresentable (see {@link toFrameContent}). */
+function toFrameContentList(items: readonly ToolCallContent[]): NonTerminalContent[] | undefined {
+	const converted: NonTerminalContent[] = [];
+	for (const item of items) {
+		const frameItem = toFrameContent(item);
+		if (frameItem === undefined) return undefined;
+		converted.push(frameItem);
+	}
+	return converted;
+}
+
+/**
+ * The object guard `AcpRawInput` requires (its index signature demands an
+ * object). `args` is `unknown`, and a malformed/unusual external tool call
+ * can hand it a bare string or array — neither is expressible as
+ * `AcpRawInput`, so those calls announce with no `rawInput` instead of one
+ * the encoder's type couldn't accept. Same guard `buildToolCallPresentation`
+ * already applies for the same reason.
+ */
+function toFrameRawInput(args: unknown): AcpRawInput | undefined {
+	return typeof args === "object" && args !== null && !Array.isArray(args) ? (args as AcpRawInput) : undefined;
+}
+
+/** Generic (non-meta-terminal) start frame — see `wantsMetaTerminal`. */
+function buildGenericStartFrame(
+	event: Extract<AgentSessionEvent, { type: "tool_execution_start" }>,
+	options: AcpEventMapperOptions,
+): AcpToolFrame | undefined {
+	const frameContent = toFrameContentList(buildToolStartContent(event.toolName, event.args));
+	if (frameContent === undefined) return undefined;
+	const locations = extractToolLocations(event.args, options.cwd);
+	const changes = statusChanges([
+		{ kind: "status", value: "pending" },
+		{ kind: "title", value: buildToolTitle(event.toolName, event.args, event.intent) },
+		{ kind: "tool_kind", value: mapToolKind(event.toolName, event.args) },
+		...(locations.length === 0 ? [] : [{ kind: "locations", value: locations } as AcpStatusChange]),
+	]);
+	if (changes === undefined) return undefined;
+	const rawInput = toFrameRawInput(event.args);
+	const content = nonTerminalContent(frameContent);
+	return content === undefined
+		? { toolCallId: event.toolCallId, announce: true, channel: "status", changes, ...(rawInput && { rawInput }) }
+		: {
+				toolCallId: event.toolCallId,
+				announce: true,
+				channel: "content",
+				contentMode: "replacement_snapshot",
+				content,
+				changes,
+				...(rawInput && { rawInput }),
+			};
+}
+
+/** Generic (non-meta-terminal) progress frame — see `wantsMetaTerminal`. */
+function buildGenericUpdateFrame(
+	event: Extract<AgentSessionEvent, { type: "tool_execution_update" }>,
+	options: AcpEventMapperOptions,
+): AcpToolFrame | undefined {
+	const codeFence = shouldCodeFenceToolOutput(event.toolName);
+	const merged = mergeToolUpdateContent(
+		buildToolStartContent(event.toolName, event.args),
+		extractToolCallContent(event.partialResult, options, codeFence),
+	);
+	const frameContent = toFrameContentList(merged);
+	if (frameContent === undefined) return undefined;
+	const locations = extractToolLocations(event.args, options.cwd);
+	const changes = statusChanges([
+		{ kind: "status", value: "in_progress" },
+		...(locations.length === 0 ? [] : [{ kind: "locations", value: locations } as AcpStatusChange]),
+	]);
+	if (changes === undefined) return undefined;
+	const content = nonTerminalContent(frameContent);
+	return content === undefined
+		? { toolCallId: event.toolCallId, announce: false, channel: "status", changes }
+		: {
+				toolCallId: event.toolCallId,
+				announce: false,
+				channel: "content",
+				contentMode: "replacement_snapshot",
+				content,
+				changes,
+			};
+}
+
+/**
+ * Generic (non-meta-terminal) settlement frame — see `wantsMetaTerminal`.
+ * Content derivation is copied verbatim from the legacy literal path
+ * (diff-first, per-file failure text, `recoverTruncatedNoticeContent`); only
+ * how the result reaches the wire changes. `hasTerminalItem`'s
+ * `liveTerminalNoticeMeta` side channel in the old path only fires once a
+ * terminal item survives into the merged content — the same shape
+ * `toFrameContent` refuses, so that case already falls back to the legacy
+ * path via this function returning `undefined`, where the notice meta still
+ * runs exactly as before.
+ */
+function buildGenericEndFrame(
+	event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>,
+	args: unknown,
+	failed: boolean,
+	options: AcpEventMapperOptions,
+): AcpToolFrame | undefined {
+	const codeFence = shouldCodeFenceToolOutput(event.toolName);
+	const diffContent = extractDiffToolCallContent(event.result);
+	let resultContent: ToolCallContent[];
+	if (diffContent.length > 0 && !failed) {
+		const prunedText = extractPrunedEditPathsText(event.result);
+		const noticeText = extractOutputNoticeText(event.result);
+		const combinedText = [prunedText, noticeText].filter((t): t is string => !!t).join("\n\n");
+		resultContent = combinedText
+			? [...diffContent, textToolCallContent(codeFence ? fenceCodeBlock(combinedText) : combinedText)]
+			: diffContent;
+	} else if (diffContent.length > 0 && failed) {
+		const prunedText = extractPrunedEditPathsText(event.result);
+		const failureText = extractEditFailureText(event.result);
+		const combinedText = failureText
+			? [prunedText, failureText, extractOutputNoticeText(event.result)].filter((t): t is string => !!t).join("\n\n")
+			: extractReadableText(event.result);
+		resultContent = combinedText
+			? [...diffContent, textToolCallContent(codeFence ? fenceCodeBlock(combinedText) : combinedText)]
+			: diffContent;
+	} else {
+		resultContent = recoverTruncatedNoticeContent(
+			[...diffContent, ...extractToolCallContent(event.result, options, codeFence)],
+			event.result,
+			codeFence,
+		);
+	}
+	const merged = mergeToolUpdateContent(buildToolStartContent(event.toolName, args), resultContent);
+	const frameContent = toFrameContentList(merged);
+	if (frameContent === undefined) return undefined;
+	const locations = extractToolLocationsFromResult(event.result, options.cwd);
+	const changes = statusChanges([
+		{ kind: "status", value: failed ? "failed" : "completed" },
+		...(locations.length === 0 ? [] : [{ kind: "locations", value: locations } as AcpStatusChange]),
+	]);
+	if (changes === undefined) return undefined;
+	const diagnostic: AcpToolDiagnostic = {
+		kind: "tool_settlement",
+		tool: event.toolName,
+		outcome: failed ? "failed" : "completed",
+	};
+	const content = nonTerminalContent(frameContent);
+	return content === undefined
+		? { toolCallId: event.toolCallId, announce: false, channel: "status", changes, diagnostic }
+		: {
+				toolCallId: event.toolCallId,
+				announce: false,
+				channel: "content",
+				contentMode: "replacement_snapshot",
+				content,
+				changes,
+				diagnostic,
+			};
 }
 
 function mapAssistantMessageUpdate(
@@ -645,10 +910,29 @@ function mapTodoStatus(status: TodoStatus): "pending" | "in_progress" | "complet
 function mapTodoResultToPlanUpdate(
 	event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>,
 ): SessionUpdate | undefined {
-	if (event.toolName !== "todo" || event.isError) {
-		return undefined;
-	}
-	const phases = extractTodoPhases(event.result);
+	return buildTodoPlanUpdate(event.toolName, event.isError, event.result);
+}
+
+/**
+ * ACP's todo tool settles into a plan update rather than a tool card. Legacy
+ * replay keeps that protocol projection while bypassing the live snapshot
+ * mapper used by other tool results.
+ */
+export function buildLegacyReplayTodoPlanUpdate(
+	toolName: string,
+	isError: boolean | undefined,
+	result: unknown,
+): SessionUpdate | undefined {
+	return buildTodoPlanUpdate(toolName, isError, result);
+}
+
+function buildTodoPlanUpdate(
+	toolName: string,
+	isError: boolean | undefined,
+	result: unknown,
+): SessionUpdate | undefined {
+	if (toolName !== "todo" || isError === true) return undefined;
+	const phases = extractTodoPhases(result);
 	if (!Array.isArray(phases)) {
 		return undefined;
 	}
@@ -713,7 +997,7 @@ function isTodoStatus(status: unknown): status is TodoStatus {
  * this convention in `docs/acp-development.md`). Returns `undefined` unless
  * the client negotiated `terminalMetaCapable`, so an ungated `_meta.terminal_*`
  * write is not expressible — every call site builds its object through this
- * function instead of writing the keys directly (rule 9).
+ * function instead of writing the keys directly (invariant 2).
  */
 export function buildTerminalMeta(
 	options: Pick<AcpEventMapperOptions, "terminalMetaCapable">,
@@ -765,6 +1049,68 @@ export function buildToolCallStartUpdate(
 			update.content = content;
 		}
 	}
+	const locations = extractToolLocations(input.args, input.cwd);
+	if (locations.length > 0) {
+		update.locations = locations;
+	}
+	return update;
+}
+
+/** Typed call descriptor shared by the legacy-edit adapter and the old mapper. */
+export function buildToolCallPresentation(input: {
+	toolCallId: string;
+	toolName: string;
+	args: unknown;
+	intent?: string;
+	cwd?: string;
+}): ToolCallPresentation {
+	const locations = extractToolLocations(input.args, input.cwd);
+	const rawInput =
+		typeof input.args === "object" && input.args !== null && !Array.isArray(input.args)
+			? (input.args as { readonly [key: string]: unknown })
+			: undefined;
+	return {
+		toolCallId: input.toolCallId,
+		toolName: input.toolName,
+		title: buildToolTitle(input.toolName, input.args, input.intent),
+		kind: mapToolKind(input.toolName, input.args),
+		...(locations.length === 0
+			? {}
+			: {
+					locations: locations.map(location =>
+						location.line === null || location.line === undefined
+							? { path: location.path }
+							: { path: location.path, line: location.line },
+					),
+				}),
+		...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+		...(rawInput === undefined ? {} : { rawInput }),
+	};
+}
+
+/**
+ * The start frame for a pre-presentation persisted tool call. Legacy history
+ * has only snapshot-shaped results, not a replayable terminal/event journal,
+ * so it deliberately never registers a terminal or renders call arguments as
+ * result content. Its matching settlement is assembled from the persisted
+ * settled body by `AcpAgent`, not by the live event mapper.
+ */
+export function buildLegacyReplayToolCallStartUpdate(input: {
+	toolCallId: string;
+	toolName: string;
+	args: unknown;
+	intent?: string;
+	cwd?: string;
+}): (ToolCall & { sessionUpdate: "tool_call" }) | undefined {
+	if (isInternalHubMessageTool(input.toolName, input.args)) return undefined;
+	const update: ToolCall & { sessionUpdate: "tool_call" } = {
+		sessionUpdate: "tool_call",
+		toolCallId: input.toolCallId,
+		title: buildToolTitle(input.toolName, input.args, input.intent),
+		kind: mapToolKind(input.toolName, input.args),
+		status: "pending",
+		rawInput: input.args,
+	};
 	const locations = extractToolLocations(input.args, input.cwd);
 	if (locations.length > 0) {
 		update.locations = locations;
@@ -900,7 +1246,7 @@ declare const metaTerminalOutputBrand: unique symbol;
  * call site hand-rolling the literal — the `session/load` dangling-call
  * cleanup in `acp-agent.ts` and,
  * in a different channel, the image fallback below. `buildTerminalMeta`
- * (rule 9) already made an *ungated* `_meta.terminal_*` write unexpressible;
+ * (invariant 2) already made an *ungated* `_meta.terminal_*` write unexpressible;
  * this makes an *uncomposed* one unexpressible too.
  */
 export interface MetaTerminalOutput {
@@ -922,23 +1268,18 @@ export interface MetaTerminalOutput {
  * own text stream, echoed ahead of the real output like a shell echoing the
  * command it's about to run.
  *
- * The header rides on the *first* payload for a terminal id and never again:
- * `getMetaTerminalSent` is `undefined` only before anything has been
- * delivered for that call, which is exactly the append-only stream's
- * beginning. Callers therefore need no `isFirstSend` flag to get right —
- * every one of them just hands over its bytes.
+ * `eval`'s header rides the call's single payload: a meta-terminal call
+ * delivers its output exactly once, at settlement (see
+ * `buildSettledMetaTerminalOutput`), so there is no later payload for it to
+ * repeat on and callers need no `isFirstSend` flag to get right.
  */
 export function buildMetaTerminalOutput(
 	terminalId: string,
 	toolName: string,
 	args: unknown,
 	data: string,
-	options: Pick<AcpEventMapperOptions, "getMetaTerminalSent">,
 ): MetaTerminalOutput {
-	const code =
-		toolName === "eval" && options.getMetaTerminalSent?.(terminalId) === undefined
-			? buildEvalCodeText(args)
-			: undefined;
+	const code = toolName === "eval" ? buildEvalCodeText(args) : undefined;
 	return {
 		terminal_id: terminalId,
 		data: code ? `${code}\n${"─".repeat(48)}\n${data}` : data,
@@ -946,340 +1287,23 @@ export function buildMetaTerminalOutput(
 }
 
 /**
- * Length of the longest suffix of `sent` that is also a prefix of `next`,
- * i.e. how many trailing bytes of `sent` reappear at the start of `next`.
+ * `notices` lines absent from `text`, joined; `""` when it already has them all.
  *
- * Searches the *entire* retained `sent`/`next` window rather than a fixed
- * trial bound. A naive longest-candidate-first scan capped at some byte
- * count (to keep per-candidate `startsWith` trials affordable) misses
- * genuine overlap once a tail-buffer roll — 50 KB for bash, 100 KB for eval,
- * see `DEFAULT_MAX_BYTES` — exceeds that cap: `deliveredOverlap` then
- * returns 0, and the caller suppresses the rest of the stream including the
- * final `tool_execution_end` payload. Instead this runs in
- * O(sent.length + next.length): `next`'s own KMP failure function drives a
- * matching automaton scanned once over `sent`'s characters, with no
- * artificial separator between the two strings. An in-band delimiter byte
- * (e.g. joining them as `next + "\0" + sent"`) is unsafe here — terminal
- * output can genuinely contain `\0` (binary commands, `find -print0`), and
- * a real NUL then collides with the separator, producing an overlap length
- * that exceeds either input and corrupts the delta (see the >`next.length`
- * regression test below).
+ * Permanent compatibility mechanism (plan §8, 2026-08-24 amendment,
+ * broadened at fix pass 3), in the same register as this mapper's other
+ * defensive walkers over untyped input. It reconciles rendered notice text
+ * against the already-rendered body — the exact class §4 scheduled for
+ * deletion "once facts are structural" — and its live callers are:
+ * external/MCP tools matching this mapper's carve-outs, AND legacy built-ins
+ * without a presentation adapter (e.g. `read`/`grep`/`glob`/`fetch` — common
+ * instances, not exhaustive) whose spilled
+ * results re-attach their notice here via `recoverTruncatedNoticeContent`.
+ * The adapter-bearing built-ins (bash/eval/edit) never reach it — they are
+ * intercepted upstream in `acp-agent.ts` or emit typed facts — and replay's
+ * dedicated builders never route through this mapper. No future phase
+ * deletes this by migrating those producers away; the plan's own amendment
+ * supersedes the ledger line for exactly these arms.
  */
-export function deliveredOverlap(sent: string, next: string): number {
-	const m = next.length;
-	if (sent.length === 0 || m === 0) return 0;
-	const failure = new Uint32Array(m);
-	for (let i = 1; i < m; i++) {
-		let j = failure[i - 1];
-		while (j > 0 && next[i] !== next[j]) j = failure[j - 1];
-		if (next[i] === next[j]) j++;
-		failure[i] = j;
-	}
-	let k = 0;
-	for (let i = 0; i < sent.length; i++) {
-		const c = sent[i];
-		// `k === m` (a full match of `next` completed mid-scan) needs the same
-		// fallback as a literal mismatch: `next[m]` doesn't exist, and the
-		// longest-suffix answer we want is anchored at the *last* character of
-		// `sent`, not the first full match found.
-		while (k > 0 && (k === m || c !== next[k])) {
-			k = failure[k - 1];
-		}
-		if (c === next[k]) k++;
-	}
-	return k;
-}
-
-/**
- * The `_meta.terminal_output` payload to emit for `cumulativeOutput`, or
- * `undefined` when there is nothing new to send. Diffs against the
- * previously-delivered text (see `AcpEventMapperOptions.
- * getMetaTerminalSent`) so a growing cumulative-so-far snapshot — the shape
- * both `tool_execution_update` and `tool_execution_end` carry — becomes an
- * append-only byte stream instead of resending everything already shown
- * (Zed treats `terminal_output.data` as bytes to append, never a
- * replacement). The one-time eval source header from
- * `buildMetaTerminalOutput` is included only on the very first send for
- * this tool call, never repeated on later deltas.
- *
- * The recorded state is the raw producer bytes delivered so far, excluding the
- * one-time eval source header — every later snapshot from the producer is raw
- * (see `eval.ts`'s `pushUpdate`), so a header-prefixed watermark would never
- * match the fast `startsWith` path below. It is never the producer's latest
- * snapshot either, so a snapshot that regresses cannot make later deltas
- * re-send bytes already on screen.
- */
-function buildMetaTerminalDelta(
-	toolCallId: string,
-	toolName: string,
-	args: unknown,
-	cumulativeOutput: string,
-	options: AcpEventMapperOptions,
-): MetaTerminalOutput | undefined {
-	const prior = options.getMetaTerminalSent?.(toolCallId);
-	if (prior === undefined) {
-		const first = buildMetaTerminalOutput(toolCallId, toolName, args, cumulativeOutput, options);
-		options.setMetaTerminalSent?.(toolCallId, cumulativeOutput);
-		return first;
-	}
-	if (cumulativeOutput === prior) {
-		return undefined;
-	}
-	if (cumulativeOutput.startsWith(prior)) {
-		options.setMetaTerminalSent?.(toolCallId, cumulativeOutput);
-		return buildMetaTerminalOutput(toolCallId, toolName, args, cumulativeOutput.slice(prior.length), options);
-	}
-	// The snapshot is not an extension of what the client already appended.
-	// `terminal_output.data` is append-only: delivered bytes can be neither
-	// replaced nor erased, so re-sending the whole snapshot duplicates visible
-	// output instead of resynchronizing. Two producers reach here legitimately —
-	// an authoritative snapshot that is shorter than the live-streamed tail it
-	// replaces, and a bounded tail buffer whose window rolled forward — so send
-	// only the genuinely undelivered remainder, and keep the delivered text as
-	// the watermark either way.
-	if (prior.startsWith(cumulativeOutput)) {
-		return undefined;
-	}
-	const overlap = deliveredOverlap(prior, cumulativeOutput);
-	if (overlap === 0) {
-		// A verbose command can emit more than one producer tail-buffer window
-		// (50 KB bash / 100 KB eval) between two updates, so the retained tail
-		// rolled forward with zero bytes shared against `prior` — this is a
-		// recoverable rollover, not a corrupted snapshot. Returning `undefined`
-		// here without moving the watermark would freeze the meta terminal at
-		// its first window forever: every later snapshot keeps diverging from
-		// the same stale `prior`, so the overlap stays 0 on every subsequent
-		// call too, silently dropping the final output and exit/truncation
-		// notices along with it. Resync instead: emit an explicit discontinuity
-		// notice plus the entire current tail (none of it overlaps what was
-		// already delivered), and reset the watermark to it so the next call's
-		// overlap scan has real, current data to compare against.
-		logger.warn("ACP terminal output snapshot rolled over with no overlap; resyncing", {
-			toolCallId,
-			toolName,
-			deliveredBytes: prior.length,
-			snapshotBytes: cumulativeOutput.length,
-		});
-		options.setMetaTerminalSent?.(toolCallId, cumulativeOutput);
-		return buildMetaTerminalOutput(
-			toolCallId,
-			toolName,
-			args,
-			`\n[terminal output discontinuity: earlier bytes were dropped]\n${cumulativeOutput}`,
-			options,
-		);
-	}
-	const delta = cumulativeOutput.slice(overlap);
-	if (!delta) {
-		return undefined;
-	}
-	// `prior + delta` is the full logical history ever delivered to the
-	// client, which keeps growing across every roll of the producer's own
-	// bounded tail buffer (50 KB bash / 100 KB eval, see `DEFAULT_MAX_BYTES`)
-	// for as long as the command keeps streaming. Only the trailing
-	// `MAX_WATERMARK_BYTES` bytes are ever useful for the *next*
-	// `deliveredOverlap` call — a genuine overlap can never exceed the
-	// producer's own window — so retaining more than that is pure waste:
-	// unbounded memory, and quadratic CPU overall since `deliveredOverlap`'s
-	// KMP scan costs O(len(prior) + len(next)) on every update of a long,
-	// chatty command.
-	const watermark = prior + delta;
-	options.setMetaTerminalSent?.(
-		toolCallId,
-		watermark.length > MAX_WATERMARK_BYTES ? watermark.slice(watermark.length - MAX_WATERMARK_BYTES) : watermark,
-	);
-	return buildMetaTerminalOutput(toolCallId, toolName, args, delta, options);
-}
-
-/**
- * `buildMetaTerminalDelta` specialized for `tool_execution_end`. A final
- * result is not guaranteed to be a byte-wise continuation of the raw stream
- * `tool_execution_update` delivered — `eval.ts` trims leading/trailing
- * whitespace off its final output, column truncation and head/tail elision
- * both re-render already-streamed lines, and there is no enumerable list of
- * every normalization a producer might apply.
- *
- * A display re-render can shrink OR grow relative to what already streamed:
- * trimming/truncation shrink it, but `eval.ts` also *substitutes* `(no
- * output)` for an all-whitespace stream and *appends* a synthesized
- * `Command exited with code N` suffix after trimming — both grow the final
- * text past the raw watermark's length without adding a single genuine
- * process byte. So "final is
- * longer than the watermark" is not proof of genuine new output the way
- * "final is no longer than the watermark" is proof of a re-render — that
- * asymmetry is exactly the bug: the shrink case is unconditionally treated
- * as a re-render (below), but the grow case used to be unconditionally
- * trusted as genuine, which fired a false discontinuity notice plus a
- * duplicate re-send whenever the growth came from synthesis instead of the
- * process.
- *
- * Shrink/equal: always a re-render — nothing left to resync for at the last
- * frame, so fabricating a "[terminal output discontinuity]" notice and
- * re-sending a re-rendered/truncated body would be pure noise on top of
- * what the user already watched stream live.
- *
- * Grow: only trust it as a genuine continuation when `deliveredOverlap`
- * finds a real suffix/prefix boundary, or when the streamed watermark is
- * already large enough that the producer's own bounded tail buffer could
- * plausibly have rolled forward (50 KB bash / 100 KB eval, `DEFAULT_MAX_BYTES`)
- * *and* the producer didn't say it re-rendered its final body. That last
- * condition is not redundant: past the floor, a middle-elided summary
- * (`OutputSink`'s head+tail retention) starts with the run's *original head*
- * while the watermark holds its *tail*, so overlap is legitimately zero while
- * the elision marker and appended notices push it past the watermark's length
- * — the floor alone then classified a pure re-render as a rollover and
- * fabricated a discontinuity notice plus a second copy of the whole summary
- * (a `seq 1 20000` run delivered
- * 127 KB for a 51 KB body, with the head shown twice). `isDisplayReRendered`
- * reads the producer's own `details.meta` markers, so it is a positive signal
- * where the length invariant above is a structural one — neither subsumes the
- * other: markers catch a re-render that grew, length catches one no marker
- * describes. Otherwise falls through to `buildMetaTerminalDelta`'s
- * overlap/rollover handling, which still runs its own (fuzz-tested) resync
- * check for a plausible mid-stream roll.
- *
- * Genuinely new facts (wall time, an `artifact://` recovery pointer, a real
- * truncation warning, a framework-level note, `eval`'s backend-fallback
- * `details.notice`) always ride through via `extractTerminalDeliverableFacts`
- * (`details.notices`/`notice` plus the same-source truncation notice a spilled
- * `details.meta` carries, plus `directText`), same as
- * `buildLiveTerminalNoticeMeta`, regardless of which branch below fires: the
- * re-render branch sends them on their own, and the two continuation branches
- * append whichever lines the body doesn't already carry itself (bash puts its
- * notices inline in the final text, `eval` keeps `details.notice` out of it).
- * The re-render branch additionally reconciles against the authoritative body
- * (`undeliveredBodyLines`), which needs no structural declaration at all — the
- * backstop for a producer that bakes a fact into its text and declares
- * nothing.
- */
-function buildFinalMetaTerminalDelta(
-	toolCallId: string,
-	toolName: string,
-	args: unknown,
-	cumulativeOutput: string,
-	result: unknown,
-	options: AcpEventMapperOptions,
-): MetaTerminalOutput | undefined {
-	const prior = options.getMetaTerminalSent?.(toolCallId);
-	const facts = extractTerminalDeliverableFacts(result);
-	// Continuation branches send the body, so only fact lines the body itself
-	// lacks are appended. The re-render/shrink decision below compares the raw
-	// snapshot, never this augmented one — appended fact bytes must not turn
-	// a re-render into an apparent growth.
-	const missingFacts = missingNoticeLines(cumulativeOutput, facts);
-	const withFacts = missingFacts ? `${cumulativeOutput}\n\n${missingFacts}` : cumulativeOutput;
-	if (prior === undefined) {
-		return buildMetaTerminalDelta(toolCallId, toolName, args, withFacts, options);
-	}
-	if (cumulativeOutput.length > prior.length) {
-		const rolloverFloorBytes = toolName === "eval" ? DEFAULT_MAX_BYTES * 2 : DEFAULT_MAX_BYTES;
-		const isPlausibleContinuation =
-			deliveredOverlap(prior, cumulativeOutput) > 0 ||
-			(prior.length >= rolloverFloorBytes && !isDisplayReRendered(result));
-		if (isPlausibleContinuation) {
-			return buildMetaTerminalDelta(toolCallId, toolName, args, withFacts, options);
-		}
-	}
-	options.setMetaTerminalSent?.(toolCallId, cumulativeOutput);
-	// A re-render replaces nothing the user already watched stream, so the body
-	// itself is deliberately not re-sent. What must still go out is anything the
-	// client has never seen on this terminal: the synthesized facts (never part
-	// of the process byte stream) plus — the safety net — any line of the
-	// producer's own authoritative body that never reached it.
-	//
-	// That second half is what makes this path robust to a producer that
-	// composes a fact straight into its text without declaring it structurally.
-	// Every guard in `docs/acp-development.md` catches bytes a frame shouldn't
-	// contain; none could catch a fact nobody declared, because there was
-	// nothing to compare against. Reconciling against the body — the same text
-	// a plain-content client renders verbatim — needs no declaration to exist.
-	const undelivered = undeliveredBodyLines(cumulativeOutput, prior);
-	// Facts keep their own spacing and come last (they are trailers: wall time,
-	// exit code, a recovery pointer). A reconciled line that a fact already
-	// states is dropped rather than restated in a second wording.
-	const bodyOnly = facts
-		? undelivered
-				.split("\n")
-				.filter(line => line.length > 0 && !facts.includes(line))
-				.join("\n")
-		: undelivered;
-	const payload = [bodyOnly, facts].filter((part): part is string => !!part).join("\n\n");
-	return payload ? buildMetaTerminalOutput(toolCallId, toolName, args, `\n${payload}\n`, options) : undefined;
-}
-
-/**
- * Lines of a re-rendered final body that never reached the client, or `""`
- * when there are more of them than a synthesized annotation could plausibly
- * account for.
- *
- * The cap is the whole design. A handful of undelivered lines is a producer
- * baking a note into its text — a `dump(notice)` timeout/kill/stdin
- * annotation, a synthesized exit-code suffix — and re-delivering it costs one
- * line and closes the omission class for producers not yet written. Hundreds
- * of them mean the body diverged wholesale: a middle-elided summary whose head
- * the producer's own tail window dropped long before the mapper saw it, or a
- * watermark that rolled past `MAX_WATERMARK_BYTES`. Re-sending *that* is the
- * duplicate-delivery bug already fixed once (a 51 KB body shown twice) — the terminal is append-only, so
- * a client concatenates whatever arrives. Above the cap this reports nothing
- * and leaves the existing classification alone; the loss there is already
- * acknowledged by the producer's own elision notice, which rides in `facts`.
- */
-function undeliveredBodyLines(finalBody: string, delivered: string): string {
-	const deliveredLines = new Set(delivered.split("\n"));
-	const missing: string[] = [];
-	let bytes = 0;
-	for (const rawLine of finalBody.split("\n")) {
-		const line = rawLine.trim();
-		if (line.length === 0 || deliveredLines.has(line) || delivered.includes(line)) continue;
-		// A line whose head already reached the client is a re-render of it, not
-		// a new fact: per-line column truncation (`tools.maxColumn`) rewrites the
-		// tail of an already-streamed line, and re-delivering the shortened copy
-		// would show it twice. Matching on the head keeps this structural instead
-		// of enumerating every normalization a producer might apply.
-		const head = line.slice(0, RECONCILE_LINE_HEAD_CHARS);
-		if (head.length >= RECONCILE_LINE_HEAD_CHARS && delivered.includes(head)) continue;
-		missing.push(line);
-		bytes += line.length + 1;
-		if (missing.length > MAX_RECONCILED_BODY_LINES || bytes > MAX_RECONCILED_BODY_BYTES) return "";
-	}
-	return missing.join("\n");
-}
-
-/**
- * How much re-rendered body `undeliveredBodyLines` may re-deliver before it
- * classifies the difference as a wholesale divergence rather than a
- * synthesized annotation. Sized for the largest real annotation block observed
- * (a kernel timeout note plus a wall-time/exit-code trailer), well under any
- * elided summary or rolled window.
- */
-const MAX_RECONCILED_BODY_LINES = 8;
-const MAX_RECONCILED_BODY_BYTES = 2_000;
-
-/**
- * Head length that identifies a body line as one already delivered in a
- * different rendering. Long enough that two genuinely distinct notices don't
- * collide, short enough to survive a per-line column cap.
- */
-const RECONCILE_LINE_HEAD_CHARS = 40;
-
-/**
- * Whether the producer says this result's body is a re-render of what already
- * streamed rather than more of it: head/tail elision or column truncation both
- * rewrite already-delivered lines (`OutputSink`, `wrapToolWithMetaNotice`).
- *
- * A positive marker signal, complementing `buildFinalMetaTerminalDelta`'s
- * structural length invariant — a re-render that *grew* (elision marker plus
- * appended notices on a snapshot past the producer's own buffer window) has no
- * length signal to catch it, and its zero overlap is legitimate rather than
- * evidence of a rollover.
- */
-function isDisplayReRendered(result: unknown): boolean {
-	const meta = sanitizeOutputMeta(asEditDetails(result)?.meta);
-	if (!meta) return false;
-	return meta.truncation !== undefined || meta.limits?.columnTruncated !== undefined;
-}
-
-/** `notices` lines absent from `text`, joined; `""` when it already has them all. */
 function missingNoticeLines(text: string, notices: string | undefined): string {
 	if (!notices) return "";
 	return notices
@@ -1289,12 +1313,50 @@ function missingNoticeLines(text: string, notices: string | undefined): string {
 }
 
 /**
- * Generous headroom over the largest known producer tail-buffer window
- * (`eval.ts`'s `TailBuffer(DEFAULT_MAX_BYTES * 2)`, i.e. 100 KB) — see
- * `buildMetaTerminalDelta`'s watermark-growth comment for why anything past
- * this is never useful for the next overlap computation.
+ * The one and only `_meta.terminal_output` payload a display-only meta
+ * terminal ever emits: the authoritative final body, plus whichever
+ * `extractTerminalDeliverableFacts` lines that body does not already carry
+ * itself (bash puts its notices inline in the final text, `eval` keeps
+ * `details.notice` out of it).
+ *
+ * Nothing is published before settlement, by design. A producer on this route
+ * hands the mapper a *cumulative snapshot of a bounded tail window* on every
+ * `tool_execution_update` (see `streamTailUpdates`/`eval.ts`'s `pushUpdate`),
+ * while `terminal_output.data` is an append-only byte stream a client
+ * concatenates: delivered bytes can be neither replaced nor erased. No diff of
+ * one against the other can be both duplicate-free and lossless, so the
+ * reconstruction layer that used to live here — a KMP suffix/prefix overlap
+ * scan, a per-call delivered-byte watermark, a rollover-vs-re-render
+ * classifier, and a fabricated "[terminal output discontinuity]" notice — was
+ * a generator of duplicate-delivery and false-data-loss bugs rather than a
+ * feature. Settlement is the one moment the whole body is knowable, so it is
+ * the one moment anything is sent.
+ *
+ * Same settled-body-only policy already applied to `session/load` legacy
+ * replay and to `LegacyBashPresentation.update()`. The cost is accepted and
+ * named, not worked around: an external/MCP tool literally called
+ * `bash`/`shell`/`exec`/`eval` (the only producer that still reaches this
+ * path — every built-in is intercepted upstream in `acp-agent.ts`) shows an
+ * empty terminal card until it finishes, then its entire output at once.
+ * Byte-offset-accurate live streaming is what the presentation protocol
+ * (`terminal_append`/`terminal_gap`) exists for; a foreign producer sharing a
+ * built-in's name declares no offsets, so nothing here may invent them.
  */
-const MAX_WATERMARK_BYTES = 200_000;
+function buildSettledMetaTerminalOutput(
+	toolCallId: string,
+	toolName: string,
+	args: unknown,
+	finalOutput: string,
+	result: unknown,
+): MetaTerminalOutput {
+	const missingFacts = missingNoticeLines(finalOutput, extractTerminalDeliverableFacts(result));
+	return buildMetaTerminalOutput(
+		toolCallId,
+		toolName,
+		args,
+		missingFacts ? `${finalOutput}\n\n${missingFacts}` : finalOutput,
+	);
+}
 
 /**
  * Short label for the tool call's title/header, which a live-terminal-style
@@ -1541,7 +1603,7 @@ function toAcpLocationPath(value: string, cwd?: string): string {
  */
 const INTERNAL_URL_SUBJECT = /^[a-z][a-z0-9+.-]*:\/\//i;
 
-function extractToolLocations(args: unknown, cwd?: string): ToolCallLocation[] {
+export function extractToolLocations(args: unknown, cwd?: string): ToolCallLocation[] {
 	const locations: ToolCallLocation[] = [];
 	const seen = new Set<string>();
 	const pushPath = (raw: string | undefined) => {
@@ -1559,84 +1621,9 @@ function extractToolLocations(args: unknown, cwd?: string): ToolCallLocation[] {
 	return locations;
 }
 
-/**
- * The subset of `edit/renderer.ts`'s result types the ACP mapper reads, kept
- * as `Pick`s rather than a hand-copied shape: the runtime validators below
- * describe the producer by hand, so a field renamed or retyped in
- * `EditToolPerFileResult`/`EditToolDetails` would otherwise make every real
- * edit result fail `asEditDetails` and silently fall back to plain content —
- * the same silent-omission class this subsystem exists to close, moved into
- * the validator. Derived here, `tsgo` fails instead.
- *
- * `isError`/`errorText`/`displayErrorText` are per-file only on the producer
- * (`EditToolDetails` has no such fields), so the aggregate declares them
- * itself for the extension/MCP results that reach this narrowing.
- *
- * `meta` stays `unknown` here and is narrowed per read by `sanitizeOutputMeta`:
- * unlike `oldText`/`newText`/`path`, which compose a `diff` frame and must
- * reject the whole result when malformed, a bad `meta` costs only its notice.
- * Rejecting the details for it would also disarm `isDisplayReRendered` — the
- * re-render classifier every producer's watermark goes through — and that is
- * the 51 KB duplicate-delivery bug
- * re-armed by a validation failure.
- */
-type AcpEditFields = Pick<
-	EditToolPerFileResult,
-	"path" | "oldText" | "newText" | "isError" | "errorText" | "displayErrorText" | "snapshotsPruned" | "meta"
->;
-
-type AcpEditEntry = Omit<AcpEditFields, "meta"> & { meta?: unknown };
-
-interface AcpEditDetails
-	extends Partial<Omit<Pick<EditToolDetails, "path" | "oldText" | "newText" | "snapshotsPruned" | "meta">, "meta">> {
-	meta?: unknown;
-	isError?: boolean;
-	errorText?: string;
-	displayErrorText?: string;
-	perFileResults?: AcpEditEntry[];
-	unattemptedPaths?: EditToolDetails["unattemptedPaths"];
-}
-
-function hasValidEditFields(value: Record<string, unknown>): boolean {
-	for (const key of [
-		"path",
-		"oldText",
-		"newText",
-		"errorText",
-		"displayErrorText",
-	] as const satisfies readonly (keyof AcpEditEntry)[]) {
-		if (value[key] !== undefined && typeof value[key] !== "string") return false;
-	}
-	for (const key of ["isError", "snapshotsPruned"] as const satisfies readonly (keyof AcpEditEntry)[]) {
-		if (value[key] !== undefined && typeof value[key] !== "boolean") return false;
-	}
-	return true;
-}
-
-function isAcpEditEntry(value: unknown): value is AcpEditEntry {
-	return isRecord(value) && typeof value.path === "string" && hasValidEditFields(value);
-}
-
-/** Reject malformed custom-tool details and let callers use their plain-content fallback. */
-function asEditDetails(result: unknown): AcpEditDetails | undefined {
-	if (!isRecord(result)) return undefined;
-	const details = result.details;
-	if (!isRecord(details) || !hasValidEditFields(details)) return undefined;
-	const perFileResults = details.perFileResults;
-	if (perFileResults !== undefined && (!Array.isArray(perFileResults) || !perFileResults.every(isAcpEditEntry))) {
-		return undefined;
-	}
-	const unattemptedPaths = details.unattemptedPaths;
-	if (unattemptedPaths !== undefined) {
-		if (!Array.isArray(unattemptedPaths) || !unattemptedPaths.every(path => typeof path === "string"))
-			return undefined;
-	}
-	return details as AcpEditDetails;
-}
-
 /** Pull locations from a tool result's details (e.g. EditToolDetails.perFileResults[].path). */
 function extractToolLocationsFromResult(result: unknown, cwd?: string): ToolCallLocation[] {
-	const details = asEditDetails(result);
+	const details = asExternalEditDetails(result);
 	if (!details) return [];
 	const direct = extractToolLocations(details, cwd);
 	if (!details.perFileResults) return direct;
@@ -1651,125 +1638,24 @@ function extractToolLocationsFromResult(result: unknown, cwd?: string): ToolCall
 	return locations;
 }
 
-/** Emit a `diff` ToolCallContent for each per-file edit result that carries oldText/newText. */
 function extractDiffToolCallContent(result: unknown): ToolCallContent[] {
-	const details = asEditDetails(result);
-	if (!details) return [];
-	const entries: (AcpEditEntry | AcpEditDetails)[] = details.perFileResults ?? [details];
-	const blocks: ToolCallContent[] = [];
-	for (const entry of entries) {
-		const block = buildDiffContent(entry);
-		if (block) blocks.push(block);
-	}
-	return blocks;
+	const details = asExternalEditDetails(result);
+	return details ? externalEditDiffContent(details) : [];
 }
 
-/**
- * Join the per-file error messages from a partially-failed multi-file edit,
- * skipping succeeded entries, followed by which files were never attempted
- * (see `EditToolDetails.unattemptedPaths`) — mirrors the executor's own
- * `Files NOT applied: ...` guidance line so the ACP display can tell a
- * skipped-after-failure file apart from one that was never part of the edit.
- */
 function extractEditFailureText(result: unknown): string | undefined {
-	const details = asEditDetails(result);
-	if (!details?.perFileResults) return undefined;
-	const lines: string[] = [];
-	for (const entry of details.perFileResults) {
-		if (entry.isError !== true) continue;
-		const message = entry.displayErrorText || entry.errorText;
-		if (!message) continue;
-		const path = entry.path.length > 0 ? entry.path : undefined;
-		lines.push(path ? `Error editing ${path}: ${message}` : message);
-	}
-	if (lines.length === 0) return undefined;
-	if (Array.isArray(details.unattemptedPaths) && details.unattemptedPaths.length > 0) {
-		const paths = details.unattemptedPaths.filter((p): p is string => typeof p === "string" && p.length > 0);
-		if (paths.length > 0) {
-			lines.push(
-				`Files NOT applied: ${paths.join(", ")}; re-read the affected files and re-issue only the failed and unapplied files.`,
-			);
-		}
-	}
-	return lines.join("\n");
+	const details = asExternalEditDetails(result);
+	return details ? externalEditFailureText(details) : undefined;
 }
 
-/**
- * Names of successfully-edited files whose `oldText`/`newText` were dropped
- * by {@link pruneOversizedEditSnapshots} once the multi-file aggregate budget
- * (`MAX_EDIT_SNAPSHOT_TEXT_CHARS`) ran out — see `snapshot-details.ts`. Early
- * entries keep their diff; a later entry in the same batch can lose its
- * snapshot despite editing the file just as successfully. `buildDiffContent`
- * then has nothing to render for it, so without this note the file
- * disappears from the ACP content entirely even though the edit succeeded.
- *
- * Only entries with no diff of their own are named here — a pruned entry
- * that still has room for its own snapshot never reaches this path.
- */
 function extractPrunedEditPathsText(result: unknown): string | undefined {
-	const details = asEditDetails(result);
-	if (!details?.perFileResults) return undefined;
-	const paths: string[] = [];
-	for (const entry of details.perFileResults) {
-		if (entry.isError === true || entry.snapshotsPruned !== true) continue;
-		if (buildDiffContent(entry)) continue;
-		if (entry.path.length > 0) paths.push(entry.path);
-	}
-	if (paths.length === 0) return undefined;
-	return `Also applied (diff omitted: file snapshot too large): ${paths.join(", ")}`;
+	const details = asExternalEditDetails(result);
+	return details ? externalEditPrunedPathsText(details) : undefined;
 }
 
-/**
- * Re-render `wrapToolWithMetaNotice`'s notice (truncation/limit text, and
- * critically LSP diagnostics from a successful edit) directly from the
- * structured `details.meta` field, independent of whatever text content it
- * was originally appended to. The edit-content branches above discard the
- * general content array whenever a diff exists, which would otherwise take
- * this notice down with it — diagnostics on a successful edit are exactly as
- * real as diagnostics on any other tool call and must survive next to the
- * diff, not just in "Copy as Markdown" export.
- *
- * `executeApplyPatchPerFile`'s multi-file aggregate has no top-level
- * `details.meta` at all — each file's own `meta` (with its own diagnostics)
- * lives only in `details.perFileResults[].meta` (see `edit/index.ts`). Scan
- * those too, prefixed by path since distinct files can carry distinct
- * notices, and dedupe against the aggregate in case the two ever coincide.
- */
 function extractOutputNoticeText(result: unknown): string | undefined {
-	const details = asEditDetails(result);
-	if (!details) return undefined;
-	const notices: string[] = [];
-	const seen = new Set<string>();
-	const pushNotice = (meta: OutputMeta | undefined, path: string | undefined) => {
-		const notice = formatOutputNotice(meta).trim();
-		const attributedNotice = path ? `${path}: ${notice}` : notice;
-		if (!notice || seen.has(attributedNotice)) return;
-		seen.add(attributedNotice);
-		notices.push(attributedNotice);
-	};
-	pushNotice(sanitizeOutputMeta(details.meta), undefined);
-	for (const entry of details.perFileResults ?? []) {
-		pushNotice(sanitizeOutputMeta(entry.meta), entry.path.length > 0 ? entry.path : undefined);
-	}
-	return notices.length > 0 ? notices.join("\n\n") : undefined;
-}
-
-function buildDiffContent(entry: {
-	path?: string;
-	oldText?: string;
-	newText?: string;
-	isError?: boolean;
-}): ToolCallContent | undefined {
-	if (entry.isError === true) return undefined;
-	const path = entry.path && entry.path.length > 0 ? entry.path : undefined;
-	if (!path) return undefined;
-	if (entry.oldText === undefined && entry.newText === undefined) return undefined;
-	return {
-		type: "diff",
-		path,
-		oldText: entry.oldText ?? null,
-		newText: entry.newText ?? "",
-	};
+	const details = asExternalEditDetails(result);
+	return details ? externalEditNoticeText(details) : undefined;
 }
 
 function extractTerminalId(value: unknown): string | undefined {
@@ -1811,7 +1697,7 @@ function extractToolCallContent(value: unknown, options: AcpEventMapperOptions, 
 		// renderer choice, so a different compliant client might still render
 		// sibling text fine. Keep the old best-effort sibling append for it:
 		// strictly not worse than silently dropping the notices everywhere.
-		// `checkAcpUpdateInvariants`'s rule 7 is gated on `terminalMetaCapable`
+		// `checkAcpUpdateInvariants`'s invariant 1 is gated on `terminalMetaCapable`
 		// for exactly this reason — it must never flag this fallback branch.
 		const notices = options.terminalMetaCapable ? undefined : extractTerminalNotices(value);
 		const nonTextContent = combinedContent.filter(item => !(item.type === "content" && item.content.type === "text"));
@@ -2107,14 +1993,18 @@ function hasTerminalContent(content: ToolCallContent[], terminalId: string): boo
 }
 
 /**
- * `details.notices`: notes a tool appended after its raw output (exit code,
- * wall time, truncation marker, `[raw output: artifact://N]` pointer). Only
- * `bash`/`shell`/`exec` populate this. `eval` has its own singular
- * `details.notice` for a backend-fallback explanation, which its TUI card
- * renders as a dim bracketed line (`eval-render.ts`) — read both, or the same
- * class of loss as every other terminal-path notice applies to whichever one
- * this doesn't know about. The caller decides how to deliver it — for a real
- * live terminal, see `buildLiveTerminalNoticeMeta`.
+ * `details.notices`: notes a legacy/external producer appended after its raw
+ * output (exit code, wall time, truncation marker, `[raw output:
+ * artifact://N]` pointer). No first-party built-in populates this any more —
+ * both `bash` and `eval`'s ordinary routes declare these as typed
+ * `presentation_events` facts instead; this reader remains for external/MCP
+ * results and pre-migration legacy data that carry the field. `eval`'s proxy
+ * executor (the one route permanently on `legacy_snapshot`) still writes its
+ * own singular `details.notice` for a backend-fallback explanation, which its
+ * TUI card renders as a dim bracketed line (`eval-render.ts`) — read both, or
+ * the same class of loss as every other terminal-path notice applies to
+ * whichever one this doesn't know about. The caller decides how to deliver
+ * it — for a real live terminal, see `buildLiveTerminalNoticeMeta`.
  */
 function extractDetailsNotices(value: unknown): string | undefined {
 	if (typeof value !== "object" || value === null) return undefined;
@@ -2132,17 +2022,17 @@ function extractDetailsNotices(value: unknown): string | undefined {
 /**
  * `extractDetailsNotices` plus the same `details.meta` truncation/limit/
  * diagnostics notice `extractOutputNoticeText` re-derives for edit results —
- * generalized here to any tool: `asEditDetails` validates the edit-shaped
+ * generalized here to any tool: `asExternalEditDetails` validates the edit-shaped
  * fields and `details.meta` only when present, so a non-edit result carrying
  * just a `meta` still narrows and a malformed one falls back to plain text.
  *
  * Needed because the truncation/artifact-recovery notice
  * (`wrapToolWithMetaNotice` → `formatOutputNotice`) is appended to the
- * *text* content `enforceInlineByteCap`'s own producer-side notice-push
- * (`bash.ts`) never reaches: `spilledArtifactId` there is populated only
- * inside `enforceInlineByteCap`'s callback, which no-ops once `OutputSink`
- * already spilled the body under the inline cap — the ordinary, common
- * spill path. So for a call whose output already exceeded the sink's
+ * *text* content a producer-side notice-push into `details.notices` never
+ * reaches for a spill that happened via `OutputSink`'s own inline-cap path
+ * rather than a caller-composed one: the recovery pointer there lives only in
+ * `details.meta.truncation.artifactId`, never mirrored into `details.notices`
+ * at all. So for a legacy/external result whose output already exceeded that
  * threshold, `details.notices` alone omits the one fact (byte count elided,
  * `artifact://<id>` recovery pointer) a terminal-rendering client has no
  * other channel to see, since the terminal path never surfaces tool text.
@@ -2175,10 +2065,10 @@ function extractTerminalNotices(value: unknown): string | undefined {
  *
  * The two are the same class of fact and were previously collected pairwise at
  * whichever site remembered both: `buildLiveTerminalNoticeMeta` joined them by
- * hand, `buildFinalMetaTerminalDelta` read only the notices (so a display-only
- * meta terminal — every `eval`, `pty: true`, `session/load` replay — dropped
- * the framework note), and the eval-image content fallback read neither.
- * Every emit path that renders a
+ * hand, the settled meta-terminal payload read only the notices (so a
+ * display-only meta terminal — every `eval`, `pty: true`, `session/load`
+ * replay — dropped the framework note), and the eval-image content fallback
+ * read neither. Every emit path that renders a
  * terminal, or replaces one, composes through this so a fact added to the
  * collection point reaches all of them at once instead of the one branch its
  * reporter happened to name.
@@ -2233,11 +2123,12 @@ function recoverTruncatedNoticeContent(
 
 /**
  * `_meta.terminal_output` for a real, client-owned live terminal (as opposed
- * to the display-only meta-terminal convention in `buildMetaTerminalDelta`).
+ * to the display-only meta-terminal convention in
+ * `buildSettledMetaTerminalOutput`).
  * Zed's `on_terminal_provider_event` (`agent_servers/acp.rs`) writes
  * `terminal_output` bytes straight into whatever terminal buffer already owns
  * that id — real or display-only — so this is a one-shot append of
- * `extractTerminalDeliverableFacts` (bash's own `details.notices` plus the
+ * `extractTerminalDeliverableFacts` (a legacy/external producer's `details.notices` plus the
  * truncation/artifact-recovery notice a spilled result's `details.meta`
  * carries, plus any framework-level `directText` such as "Permission request
  * cancelled") onto the *same* terminal id the live command already used,
@@ -2266,7 +2157,7 @@ function buildLiveTerminalNoticeMeta(
 	const combined = extractTerminalDeliverableFacts(value);
 	if (!combined) return undefined;
 	return buildTerminalMeta(options, {
-		output: buildMetaTerminalOutput(terminalId, toolName, args, `\n${combined}\n`, options),
+		output: buildMetaTerminalOutput(terminalId, toolName, args, `\n${combined}\n`),
 	});
 }
 
@@ -2280,12 +2171,11 @@ function buildLiveTerminalNoticeMeta(
  * `{content:[],details:{}}` blob landing in a terminal.
  *
  * `ACP_TEXT_LIMIT` must not apply here. It bounds *text content blocks*, where
- * a head truncation plus `…` is a readable degradation; a meta-terminal stream
- * is append-only bytes, so clamping it silently freezes the terminal: every
- * snapshot past the limit truncates to the same 4000 chars, so
- * `buildMetaTerminalDelta` sees an unchanged snapshot and emits nothing —
- * losing the rest of the stream including the final `tool_execution_end`
- * payload. The producers already bound this text (`eval.ts` streams through a
+ * a head truncation plus `…` is a readable degradation; a meta-terminal
+ * stream is the settled body delivered exactly once (see
+ * `buildSettledMetaTerminalOutput`), so clamping it would silently drop
+ * everything past the limit instead of degrading readably. The producers
+ * already bound this text (`eval.ts` streams through a
  * `TailBuffer(DEFAULT_MAX_BYTES * 2)`, bash truncates and says so in its own
  * notices), `claude-agent-acp` sends `terminal_output` untruncated, and Zed
  * truncates for display on its own (`original_content_len` vs `content.len()`
@@ -2440,12 +2330,8 @@ function safeJsonStringify(value: unknown): string | undefined {
  * (comments, Markdown-looking output) render as code, not headings.
  */
 function fenceCodeBlock(text: string): string {
-	let fence = "```";
-	// A closing fence may be indented up to three spaces (CommonMark), so an
-	// indented run of backticks closes the block just as a flush one does.
-	for (const match of text.matchAll(/^ {0,3}`{3,}/gm)) {
-		const run = match[0].trimStart();
-		while (run.length >= fence.length) fence += "`";
-	}
-	return `${fence}\n${text}\n${fence}`;
+	// Delegates to the presentation boundary's `fenceBlock`, which owns the
+	// CommonMark fence-widening rule. Two implementations of this would be a bug
+	// even while both paths exist.
+	return fenceBlock(text);
 }

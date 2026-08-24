@@ -12,6 +12,7 @@
  */
 import {
 	type BlockResolution,
+	buildCompactDiffPreview,
 	type Clipboard,
 	commitClipboard,
 	forkClipboard,
@@ -25,20 +26,27 @@ import {
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { FileDiagnosticsResult, WritethroughCallback, WritethroughDeferredHandle } from "../../lsp";
 import type { ToolSession } from "../../tools";
+import { outputMeta } from "../../tools/output-meta";
 import { ToolError } from "../../tools/tool-errors";
 import type { AppliedEditObserver } from "../blackbox";
 import { generateDiffString } from "../diff";
 import { getEditClipboard } from "../edit-clipboard";
 import { getFileSnapshotStore } from "../file-snapshot-store";
-import type { EditToolDetails, EditToolPerFileResult, LspBatchRequest } from "../renderer";
 import {
-	createAggregateEditDetails,
-	createAggregateEditToolResult,
-	createEditResult,
-	getEditResultText,
-	joinEditResultText,
-	toEditToolResult,
-} from "../result";
+	legacyEditDetails,
+	legacyEditFileResult,
+	legacyUnattemptedPaths,
+	type SingleFileProduction,
+} from "../legacy-bag";
+import type { LspBatchRequest } from "../renderer";
+import { pruneEditFileSnapshots } from "../snapshot-details";
+import {
+	type AppliedEditFile,
+	type AvailableFileChange,
+	aggregateEditOutcome,
+	type EditToolDetails,
+	normalizedPath,
+} from "../types";
 import { nativeBlockResolver } from "./block-resolver";
 import { HashlineFilesystem } from "./filesystem";
 import { hashPatchInput, NOOP_HARD_LIMIT, recordNoopEdit, resetNoopEdit } from "./noop-loop-guard";
@@ -106,11 +114,6 @@ function narrowBatchRequest(outer: LspBatchRequest | undefined, isLast: boolean)
 	return { id: outer.id, flush: isLast && outer.flush };
 }
 
-interface RenderedSection {
-	toolResult: AgentToolResult<EditToolDetails, typeof hashlineEditParamsSchema>;
-	perFileResult: EditToolPerFileResult;
-}
-
 async function observeAppliedSection(
 	observer: AppliedEditObserver | undefined,
 	prepared: PreparedSection,
@@ -145,64 +148,69 @@ function formatBlockResolution(resolution: BlockResolution): string {
 	return `${op} → resolved ${span} (${lines} line${lines === 1 ? "" : "s"})${suffix}`;
 }
 
+/** A no-op section never changed a file — there is no `EditFileOutcome` to build; the call succeeded without an aggregate. */
+function renderNoopResult(path: string): AgentToolResult<EditToolDetails> {
+	return {
+		content: [{ type: "text", text: noChangeDiagnostic(path) }],
+		details: { diff: "", op: "update", meta: outputMeta().get() },
+		outcome: { kind: "succeeded" },
+	};
+}
+
+/** Render one committed (non-noop) hashline section into its `EditFileOutcome` plus the presentation data the union doesn't carry. */
 function renderSection(
 	result: PatchSectionResult,
 	diagnostics: FileDiagnosticsResult | undefined,
 	sourcePath: string,
-): RenderedSection {
+): SingleFileProduction {
 	if (result.op === "delete") {
-		const editResult = createEditResult({
-			displayPath: result.path,
-			resultPath: result.path,
-			diff: "",
-			op: "delete",
-			oldText: result.before,
-		});
+		const change: AvailableFileChange = { operation: "delete", before: result.before, after: null };
 		return {
-			toolResult: toEditToolResult(editResult),
-			perFileResult: editResult.perFileResult,
-		};
-	}
-
-	if (result.op === "noop") {
-		const editResult = createEditResult({
-			displayPath: result.path,
-			diff: "",
-			op: "update",
-			text: noChangeDiagnostic(result.path),
-		});
-		return {
-			toolResult: toEditToolResult(editResult),
-			perFileResult: editResult.perFileResult,
+			file: { kind: "applied", path: normalizedPath(result.path), evidence: { kind: "available", change } },
+			presentation: { diff: "", meta: outputMeta().get() },
+			move: undefined,
+			text: `Deleted ${result.path}`,
 		};
 	}
 
 	const diff = generateDiffString(result.before, result.after, undefined, { path: result.path });
+	const preview = buildCompactDiffPreview(diff.diff);
+	const meta = outputMeta()
+		.diagnostics(diagnostics?.summary ?? "", diagnostics?.messages ?? [])
+		.get();
+
+	const warningsBlock = result.warnings.length > 0 ? `\n\nWarnings:\n${result.warnings.join("\n")}` : "";
+	const previewBlock = preview.preview ? `\n${preview.preview}` : "";
+	const blockBlock =
+		result.blockResolutions && result.blockResolutions.length > 0
+			? `\n${result.blockResolutions.map(formatBlockResolution).join("\n")}`
+			: "";
+	const moveBlock = result.moveDest ? `\nMoved to ${result.moveDest}` : "";
 	const firstChangedLine = result.firstChangedLine ?? diff.firstChangedLine;
-	const editResult = createEditResult({
-		displayPath: result.moveDest ?? result.path,
-		resultPath: result.moveDest ?? result.path,
-		header: result.header,
-		diff: diff.diff,
-		firstChangedLine,
-		diagnostics,
-		op: result.op,
-		move: result.moveDest,
-		sourcePath: result.moveDest ? sourcePath : undefined,
-		oldText: result.before,
-		newText: result.after,
-		beforePreview: result.blockResolutions?.map(formatBlockResolution),
-		warnings: result.warnings,
-	});
+	const destinationPath = result.moveDest ?? result.path;
+	// hashline's `Patcher.prepare` throws before `commit` when the section's
+	// own path does not already exist (`File not found: … Use the write tool
+	// to create new files.`), so `result.op` here is only ever `"update"` —
+	// hashline has no create path, unlike `patch`/`apply_patch`.
+	const change: AvailableFileChange = result.moveDest
+		? { operation: "move", sourcePath, before: result.before, after: result.after }
+		: { operation: "update", before: result.before, after: result.after };
 	return {
-		toolResult: toEditToolResult(editResult),
-		perFileResult: editResult.perFileResult,
+		file: {
+			kind: "applied",
+			path: normalizedPath(destinationPath),
+			evidence: { kind: "available", change },
+			diagnostics,
+		},
+		presentation: { diff: diff.diff, firstChangedLine, meta },
+		move: result.moveDest,
+		text: `${result.header}${blockBlock}${moveBlock}${previewBlock}${warningsBlock}`,
 	};
 }
 
 export async function executeHashlineSingle(
 	options: ExecuteHashlineSingleOptions,
-): Promise<AgentToolResult<EditToolDetails, typeof hashlineEditParamsSchema>> {
+): Promise<AgentToolResult<EditToolDetails>> {
 	const patch = Patch.parse(options.input, { cwd: options.session.cwd });
 	if (patch.sections.length === 0) {
 		throw new Error("No hashline sections found in input.");
@@ -238,10 +246,18 @@ export async function executeHashlineSingle(
 			if (escalate) {
 				throw new ToolError(noChangeLoopDiagnostic(sectionResult.path, count));
 			}
-			return renderSection(sectionResult, undefined, prepared.section.path).toolResult;
+			return renderNoopResult(sectionResult.path);
 		}
 		resetNoopEdit(options.session, sectionResult.canonicalPath);
-		return renderSection(sectionResult, fs.consumeDiagnostics(sectionResult.path), prepared.section.path).toolResult;
+		const production = renderSection(sectionResult, fs.consumeDiagnostics(sectionResult.path), prepared.section.path);
+		const [prunedFile] = pruneEditFileSnapshots([production.file]) as [AppliedEditFile];
+		const { outcome, isError } = aggregateEditOutcome([prunedFile]);
+		return {
+			content: [{ type: "text", text: production.text }],
+			details: legacyEditDetails(prunedFile, production.presentation, production.move, true),
+			outcome,
+			...(isError ? { isError } : {}),
+		};
 	}
 
 	// Multi-section: prepare every section up front so we fail fast before
@@ -269,7 +285,7 @@ export async function executeHashlineSingle(
 	// Then commit each one, narrowing the LSP batch flush flag to the final
 	// section only. A no-op apply mid-batch is treated as a hard failure —
 	// the model authored anchors that match the current file content.
-	const rendered: RenderedSection[] = [];
+	const rendered: SingleFileProduction[] = [];
 	for (let i = 0; i < prepared.length; i++) {
 		const isLast = i === prepared.length - 1;
 		fs.setBatchRequest(narrowBatchRequest(options.batchRequest, isLast));
@@ -285,10 +301,31 @@ export async function executeHashlineSingle(
 		resetNoopEdit(options.session, sectionResult.canonicalPath);
 		rendered.push(renderSection(sectionResult, fs.consumeDiagnostics(sectionResult.path), prepared[i].section.path));
 	}
-	return createAggregateEditToolResult(
-		joinEditResultText(rendered.map(entry => getEditResultText(entry.toolResult))),
-		createAggregateEditDetails({ perFileResults: rendered.map(entry => entry.perFileResult) }),
+	const files = pruneEditFileSnapshots(rendered.map(r => r.file)) as AppliedEditFile[];
+	const { outcome, isError } = aggregateEditOutcome(files);
+	// `perFileResult` never carried `meta` for hashline's multi-section path
+	// (only the single-section fast path's top-level `details.meta` did) —
+	// preserved here rather than fixed, since `outputNotices()` reading
+	// `entry.meta` per file means adding it would newly surface per-file
+	// diagnostic notices in ACP output for multi-section hashline edits.
+	const perFileResults = files.map((file, i) =>
+		legacyEditFileResult(file, { ...rendered[i].presentation, meta: undefined }, rendered[i].move, true),
 	);
+	return {
+		content: [
+			{
+				type: "text",
+				text: rendered.map(r => r.text).join("\n\n"),
+			},
+		],
+		details: {
+			diff: rendered.map(r => r.presentation.diff).join("\n"),
+			perFileResults,
+			unattemptedPaths: legacyUnattemptedPaths(files),
+		},
+		outcome,
+		...(isError ? { isError } : {}),
+	};
 }
 
 export { HashlineMismatchError, type HashlineParams, hashlineEditParamsSchema };

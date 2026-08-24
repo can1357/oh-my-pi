@@ -48,6 +48,7 @@ import {
 	type ResetBoundaryEntry,
 	type ServiceTierChangeEntry,
 	type SessionEntry,
+	type SessionEntryBase,
 	type SessionHeader,
 	type SessionInitEntry,
 	type SessionMessageEntry,
@@ -56,6 +57,8 @@ import {
 	type ThinkingLevelChangeEntry,
 	TITLE_CHANGE_ENTRY_TYPE,
 	type TitleChangeEntry,
+	type ToolExecutionSettledEntry,
+	type ToolExecutionStartedEntry,
 	type TtsrInjectionEntry,
 	type UsageStatistics,
 } from "./session-entries";
@@ -2406,6 +2409,40 @@ export class SessionManager {
 
 	appendCustomEntry(customType: string, data?: unknown): string {
 		const entry: CustomEntry = { type: "custom", customType, data, ...this.#freshEntryFields() };
+		this.#recordEntry(entry);
+		return entry.id;
+	}
+
+	/**
+	 * Append the `started` arm of the v4 persisted tool journal:
+	 * the call descriptor, persisted before the tool runs so the append-only
+	 * journal survives a process death between call and settlement. Additive
+	 * alongside `appendCustomEntry(TOOL_EXECUTION_START_CUSTOM_TYPE, ...)` —
+	 * that bookkeeping entry serves a different consumer (resume-warning
+	 * diagnostics) and is untouched by this one.
+	 */
+	appendToolExecutionStarted(journal: Omit<ToolExecutionStartedEntry, keyof SessionEntryBase>): string {
+		const entry: ToolExecutionStartedEntry = {
+			type: "tool_execution_started",
+			...journal,
+			...this.#freshEntryFields(),
+		};
+		this.#recordEntry(entry);
+		return entry.id;
+	}
+
+	/**
+	 * Append the `settled` arm of the v4 persisted tool journal:
+	 * the outcome, the finished replayable presentation record, and the frozen
+	 * model projection, referencing the `started` entry's `executionId` rather
+	 * than duplicating `call` — mirrors `appendToolExecutionStarted` exactly.
+	 */
+	appendToolExecutionSettled(journal: Omit<ToolExecutionSettledEntry, keyof SessionEntryBase>): string {
+		const entry: ToolExecutionSettledEntry = {
+			type: "tool_execution_settled",
+			...journal,
+			...this.#freshEntryFields(),
+		};
 		this.#recordEntry(entry);
 		return entry.id;
 	}

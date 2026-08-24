@@ -22,10 +22,24 @@ import type {
 	ClientBridgeTerminalHandle,
 } from "../../session/client-bridge";
 
+/**
+ * Ordering dependency the permission path needs.
+ *
+ * Injected rather than reached for: today's permission call lives in
+ * `session-tools.ts`, which cannot see a barrier private to `AcpAgent`. Without
+ * this, `connection.requestPermission` — an independent JSON-RPC *request* outside
+ * the notification stream — can beat the queued `started` frame for the same tool
+ * call, and the dialog references a card the client has not rendered.
+ */
+export interface AcpPermissionSequencer {
+	reservePermission<T>(toolCallId: string, invoke: () => Promise<T>): { readonly response: Promise<T> };
+}
+
 export function createAcpClientBridge(
 	connection: AgentSideConnection,
 	sessionId: string,
 	clientCapabilities: ClientCapabilities | undefined,
+	sequencer?: AcpPermissionSequencer,
 ): ClientBridge {
 	const capabilities: ClientBridgeCapabilities = {
 		readTextFile: clientCapabilities?.fs?.readTextFile === true,
@@ -37,6 +51,10 @@ export function createAcpClientBridge(
 	};
 
 	const bridge: ClientBridge = { capabilities, deferAgentInitiatedTurns: true };
+	// Client terminal release is a wire-visible lifecycle action. Keep the raw ACP
+	// handles keyed by their typed call so AcpAgent can perform it after (never before)
+	// that call's settlement batch reaches the shared outbound writer.
+	const terminalsAwaitingSettlement = new Map<string, AcpTerminalHandle>();
 
 	if (capabilities.readTextFile) {
 		bridge.readTextFile = async params => {
@@ -62,11 +80,17 @@ export function createAcpClientBridge(
 
 	if (capabilities.terminal) {
 		bridge.createTerminal = (params: ClientBridgeCreateTerminalParams) =>
-			createTerminalHandle(connection, sessionId, params);
+			createTerminalHandle(connection, sessionId, params, terminalsAwaitingSettlement);
+		bridge.releaseTerminalAfterPresentationSettlement = async toolCallId => {
+			const terminal = terminalsAwaitingSettlement.get(toolCallId);
+			if (terminal === undefined) return;
+			terminalsAwaitingSettlement.delete(toolCallId);
+			await terminal.release();
+		};
 	}
 
 	bridge.requestPermission = (toolCall, options, signal) =>
-		requestPermission(connection, sessionId, toolCall, options, signal);
+		requestPermission(connection, sessionId, toolCall, options, signal, sequencer);
 
 	return bridge;
 }
@@ -75,6 +99,7 @@ async function createTerminalHandle(
 	connection: AgentSideConnection,
 	sessionId: string,
 	params: ClientBridgeCreateTerminalParams,
+	terminalsAwaitingSettlement: Map<string, AcpTerminalHandle>,
 ): Promise<ClientBridgeTerminalHandle> {
 	const handle = await connection.createTerminal({
 		sessionId,
@@ -84,10 +109,15 @@ async function createTerminalHandle(
 		...(params.cwd ? { cwd: params.cwd } : {}),
 		...(typeof params.outputByteLimit === "number" ? { outputByteLimit: params.outputByteLimit } : {}),
 	});
-	return wrapTerminalHandle(handle);
+	if (params.toolCallId !== undefined) terminalsAwaitingSettlement.set(params.toolCallId, handle);
+	return wrapTerminalHandle(handle, () => {
+		if (params.toolCallId !== undefined && terminalsAwaitingSettlement.get(params.toolCallId) === handle) {
+			terminalsAwaitingSettlement.delete(params.toolCallId);
+		}
+	});
 }
 
-function wrapTerminalHandle(handle: AcpTerminalHandle): ClientBridgeTerminalHandle {
+function wrapTerminalHandle(handle: AcpTerminalHandle, forget: () => void): ClientBridgeTerminalHandle {
 	return {
 		terminalId: handle.id,
 		async currentOutput() {
@@ -106,6 +136,7 @@ function wrapTerminalHandle(handle: AcpTerminalHandle): ClientBridgeTerminalHand
 			await handle.kill();
 		},
 		async release() {
+			forget();
 			await handle.release();
 		},
 	};
@@ -117,6 +148,7 @@ async function requestPermission(
 	toolCall: ClientBridgePermissionToolCall,
 	options: ClientBridgePermissionOption[],
 	signal: AbortSignal | undefined,
+	sequencer: AcpPermissionSequencer | undefined,
 ): Promise<ClientBridgePermissionOutcome> {
 	const update: ToolCallUpdate = {
 		toolCallId: toolCall.toolCallId,
@@ -140,7 +172,14 @@ async function requestPermission(
 	if (signal?.aborted) {
 		return { outcome: "cancelled" };
 	}
-	const response = await connection.requestPermission(request);
+	// The reservation is taken synchronously; the *user's answer* is awaited out
+	// here, outside the sequencer. Awaiting it inside would head-of-line-block every
+	// later session update behind an open dialog, and handing the caller a
+	// `Promise<Promise<T>>` would recreate the same block through promise
+	// assimilation — hence the box.
+	const response = sequencer
+		? await sequencer.reservePermission(toolCall.toolCallId, () => connection.requestPermission(request)).response
+		: await connection.requestPermission(request);
 	const outcome = response.outcome;
 	if (outcome.outcome === "cancelled") {
 		return { outcome: "cancelled" };

@@ -3894,10 +3894,15 @@ describe("ACP agent", () => {
 				sessionUpdate: "tool_call_update",
 				toolCallId: "proxy-eval",
 				status: "completed",
+				rawOutput: { kind: "tool_settlement", tool: "eval", outcome: "completed" },
 				_meta: { terminal_exit: { terminal_id: "proxy-eval", exit_code: 0, signal: null } },
 			},
 		]);
-		expect(updates.some(update => "rawOutput" in update)).toBe(false);
+		// Exactly one update carries rawOutput — the bounded settlement marker,
+		// never a raw result object.
+		expect(updates.filter(update => "rawOutput" in update).map(update => update.rawOutput)).toEqual([
+			{ kind: "tool_settlement", tool: "eval", outcome: "completed" },
+		]);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
@@ -3968,6 +3973,7 @@ describe("ACP agent", () => {
 				sessionUpdate: "tool_call_update",
 				toolCallId: "local-eval",
 				status: "completed",
+				rawOutput: { kind: "tool_settlement", tool: "eval", outcome: "completed" },
 				_meta: {
 					terminal_output: {
 						terminal_id: "local-eval",
@@ -4051,7 +4057,11 @@ describe("ACP agent", () => {
 				{ type: "content", content: { type: "image", data: "image-data", mimeType: "image/png" } },
 			],
 		});
-		expect(updates.some(update => "rawOutput" in update)).toBe(false);
+		// Exactly one update carries rawOutput — the bounded settlement marker,
+		// never a raw result object.
+		expect(updates.filter(update => "rawOutput" in update).map(update => update.rawOutput)).toEqual([
+			{ kind: "tool_settlement", tool: "eval", outcome: "completed" },
+		]);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
@@ -4322,10 +4332,15 @@ describe("ACP agent", () => {
 				sessionUpdate: "tool_call_update",
 				toolCallId: "synthetic-eval",
 				status: "failed",
+				rawOutput: { kind: "tool_settlement", tool: "eval", outcome: "failed" },
 				_meta: { terminal_exit: { terminal_id: "synthetic-eval", exit_code: null, signal: null } },
 			},
 		]);
-		expect(updates.some(update => "rawOutput" in update)).toBe(false);
+		// Exactly one update carries rawOutput — the bounded settlement marker,
+		// never a raw result object.
+		expect(updates.filter(update => "rawOutput" in update).map(update => update.rawOutput)).toEqual([
+			{ kind: "tool_settlement", tool: "eval", outcome: "failed" },
+		]);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
@@ -4494,10 +4509,15 @@ describe("ACP agent", () => {
 				sessionUpdate: "tool_call_update",
 				toolCallId: "synthetic-shell",
 				status: "failed",
+				rawOutput: { kind: "tool_settlement", tool: "shell", outcome: "failed" },
 				_meta: { terminal_exit: { terminal_id: "synthetic-shell", exit_code: null, signal: null } },
 			},
 		]);
-		expect(updates.some(update => "rawOutput" in update)).toBe(false);
+		// Exactly one update carries rawOutput — the bounded settlement marker,
+		// never a raw result object.
+		expect(updates.filter(update => "rawOutput" in update).map(update => update.rawOutput)).toEqual([
+			{ kind: "tool_settlement", tool: "shell", outcome: "failed" },
+		]);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
@@ -4582,10 +4602,15 @@ describe("ACP agent", () => {
 				sessionUpdate: "tool_call_update",
 				toolCallId: "local-bash",
 				status: "completed",
+				rawOutput: { kind: "tool_settlement", tool: "bash", outcome: "completed" },
 				_meta: { terminal_exit: { terminal_id: "local-bash", exit_code: 0, signal: null } },
 			},
 		]);
-		expect(updates.some(update => "rawOutput" in update)).toBe(false);
+		// Exactly one update carries rawOutput — the bounded settlement marker,
+		// never a raw result object.
+		expect(updates.filter(update => "rawOutput" in update).map(update => update.rawOutput)).toEqual([
+			{ kind: "tool_settlement", tool: "bash", outcome: "completed" },
+		]);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
@@ -4829,7 +4854,7 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
-	it("fails closed for a malformed built-in bash result envelope instead of an empty success", async () => {
+	it("degrades a schema-violating built-in bash result into a minimal failed frame without poisoning the prompt", async () => {
 		const harness = await createHarness({ terminalMeta: true });
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
@@ -4838,54 +4863,67 @@ describe("ACP agent", () => {
 		const prompt = harness.agent.prompt({
 			sessionId: created.sessionId,
 			messageId: "00000000-0000-4000-8000-000000000087",
-			prompt: [{ type: "text", text: "malformed bash envelope" }],
+			prompt: [{ type: "text", text: "degraded bash result" }],
 		} as PromptRequest);
 		await Bun.sleep(0);
 
-		const args = { command: "echo malformed" };
+		const args = { command: "echo degraded" };
 		const emit = (event: AgentSessionEvent): void => {
 			for (const listener of session.listeners()) listener(event);
 		};
 		emit({
 			type: "tool_execution_start",
-			toolCallId: "malformed-bash",
+			toolCallId: "degraded-bash",
 			toolName: "bash",
 			args,
 			progressProtocol: "legacy_snapshot",
 		} as AgentSessionEvent);
 		emit({
 			type: "tool_execution_end",
-			toolCallId: "malformed-bash",
+			toolCallId: "degraded-bash",
 			toolName: "bash",
-			isError: false,
-			// Not an AgentToolResult envelope at all: a producer/transport bug, not
-			// real tool output.
-			result: "not-an-envelope",
+			isError: true,
+			// A well-formed envelope whose `details` fail `legacyBashDetailsSchema`
+			// — reachable without any producer bug via an extension
+			// `afterToolCall` transform_external_result — must settle as a minimal
+			// typed FAILED card carrying the salvaged content text instead of
+			// poisoning the queue via `record.outbound.poison`.
+			result: {
+				content: [{ type: "text", text: "salvaged output" }],
+				details: { exitCode: "three" },
+			},
 			progressProtocol: "legacy_snapshot",
 		} as AgentSessionEvent);
 
 		finishPrompt();
-		await expect(prompt).rejects.toThrow();
-		const updates = harness.updates
+		await expect(prompt).resolves.toMatchObject({ stopReason: "end_turn" });
+		// With `terminalMeta` negotiated, the settled bash body streams as
+		// terminal_output rather than inline update content — assert the salvaged
+		// text reached the wire anywhere on this call's update stream.
+		const end = harness.updates
 			.map(notification => notification.update)
-			.filter(
-				(update): update is Extract<typeof update, { toolCallId: string }> =>
-					"toolCallId" in update && update.toolCallId === "malformed-bash",
+			.find(
+				update =>
+					update.sessionUpdate === "tool_call_update" &&
+					update.toolCallId === "degraded-bash" &&
+					"status" in update &&
+					update.status === "failed",
 			);
-		// The old behavior silently coerced the malformed envelope into a
-		// successful empty bash result instead of failing closed.
-		expect(updates.some(update => "status" in update && update.status === "completed")).toBe(false);
+		expect(end).toBeDefined();
+		expect(JSON.stringify(harness.updates)).toContain("salvaged output");
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});
 
-	it("fails closed for a malformed built-in apply_patch result envelope before framing", async () => {
-		// Companion to the malformed-bash-envelope test above, for the legacy
-		// edit adapter: a real `apply_patch`/`edit`/`patch` result that fails
-		// `parseLegacyToolResult`'s strict schema must poison the queue instead
-		// of silently degrading to an empty/successful edit. This is the real
-		// route that replaced the old mapper-level
+	it("degrades a schema-violating built-in apply_patch result into an empty completed card without poisoning the prompt", async () => {
+		// Companion to the degraded-bash test above, for the legacy edit adapter:
+		// a real `apply_patch`/`edit`/`patch` result that fails
+		// `parseLegacyToolResult`'s strict schema degrades into a minimal typed
+		// edit result — salvaged content blocks, envelope `isError`, empty details
+		// (`editDetailsRows()` yields no rows for `strictObject({})`) — so it
+		// settles as an empty completed card instead of poisoning the queue.
+		// This is the real route that replaced the old mapper-level
 		// `BuiltinResultSchemaError`-throw coverage in
 		// `acp-producer-wire.test.ts`'s legacy edit parser boundary tests —
 		// `apply_patch` never reaches the mapper at all once the session
@@ -4898,7 +4936,7 @@ describe("ACP agent", () => {
 		const prompt = harness.agent.prompt({
 			sessionId: created.sessionId,
 			messageId: "00000000-0000-4000-8000-000000000205",
-			prompt: [{ type: "text", text: "malformed apply_patch envelope" }],
+			prompt: [{ type: "text", text: "degraded apply_patch result" }],
 		} as PromptRequest);
 		await Bun.sleep(0);
 
@@ -4908,13 +4946,13 @@ describe("ACP agent", () => {
 		};
 		emit({
 			type: "tool_execution_start",
-			toolCallId: "malformed-apply-patch",
+			toolCallId: "degraded-apply-patch",
 			toolName: "apply_patch",
 			args,
 		} as AgentSessionEvent);
 		emit({
 			type: "tool_execution_end",
-			toolCallId: "malformed-apply-patch",
+			toolCallId: "degraded-apply-patch",
 			toolName: "apply_patch",
 			isError: false,
 			// A well-formed content array but a `perFileResults` entry whose
@@ -4927,14 +4965,18 @@ describe("ACP agent", () => {
 		} as AgentSessionEvent);
 
 		finishPrompt();
-		await expect(prompt).rejects.toThrow();
-		const updates = harness.updates
+		await expect(prompt).resolves.toMatchObject({ stopReason: "end_turn" });
+		const end = harness.updates
 			.map(notification => notification.update)
-			.filter(
-				(update): update is Extract<typeof update, { toolCallId: string }> =>
-					"toolCallId" in update && update.toolCallId === "malformed-apply-patch",
+			.find(
+				update =>
+					update.sessionUpdate === "tool_call_update" &&
+					update.toolCallId === "degraded-apply-patch" &&
+					"status" in update &&
+					update.status === "completed",
 			);
-		expect(updates.some(update => "status" in update && update.status === "completed")).toBe(false);
+		expect(end).toBeDefined();
+		expect(JSON.stringify(end)).toContain("applied");
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
@@ -4996,9 +5038,66 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("degrades a schema-violating built-in eval result into a minimal failed frame without poisoning the prompt", async () => {
+		// Eval companion to the degraded-bash/degraded-apply-patch tests above:
+		// all three legacy adapters share the unmodelled_builtin conversion, so
+		// each family needs its own live-route regression against drift.
+		const harness = await createHarness({ terminalMeta: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.registerBuiltinTool("eval");
+		const finishPrompt = holdPromptStreaming(session);
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000090",
+			prompt: [{ type: "text", text: "degraded eval result" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		emit({
+			type: "tool_execution_start",
+			toolCallId: "degraded-eval",
+			toolName: "eval",
+			args: { code: "1+1" },
+			progressProtocol: "legacy_snapshot",
+		} as AgentSessionEvent);
+		emit({
+			type: "tool_execution_end",
+			toolCallId: "degraded-eval",
+			toolName: "eval",
+			isError: false,
+			// A well-formed envelope whose `details` fail `evalDetailsSchema`.
+			result: {
+				content: [{ type: "text", text: "salvaged eval output" }],
+				details: { cells: "three" },
+			},
+			progressProtocol: "legacy_snapshot",
+		} as AgentSessionEvent);
+
+		finishPrompt();
+		await expect(prompt).resolves.toMatchObject({ stopReason: "end_turn" });
+		const end = harness.updates
+			.map(notification => notification.update)
+			.find(
+				update =>
+					update.sessionUpdate === "tool_call_update" &&
+					update.toolCallId === "degraded-eval" &&
+					"status" in update &&
+					update.status === "completed",
+			);
+		expect(end).toBeDefined();
+		expect(JSON.stringify(harness.updates)).toContain("salvaged eval output");
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
 	it("publishes only the final settled body for legacy bash progress, never a duplicated or lossy live delta", async () => {
 		const harness = await createHarness({ terminalMeta: true });
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+
 		const session = harness.findSession(created.sessionId)!;
 		session.registerBuiltinTool("bash");
 		const finishPrompt = holdPromptStreaming(session);

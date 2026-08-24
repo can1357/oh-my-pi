@@ -245,10 +245,10 @@ export interface CustomTool<TParams extends TSchema = TSchema, TDetails = any> {
 	execute(
 		toolCallId: string,
 		params: Static<TParams>,
-		onUpdate: AgentToolUpdateCallback<TDetails, TParams> | undefined,
+		onUpdate: AgentToolUpdateCallback<TDetails> | undefined,
 		ctx: CustomToolContext,
 		signal?: AbortSignal,
-	): Promise<AgentToolResult<TDetails, TParams>>;
+	): Promise<AgentToolResult<TDetails>>;
 
 	/** Called on session lifecycle events - use to reconstruct state or cleanup resources */
 	onSession?: (event: CustomToolSessionEvent, ctx: CustomToolContext) => void | Promise<void>;

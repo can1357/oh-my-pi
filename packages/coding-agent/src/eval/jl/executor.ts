@@ -1,9 +1,11 @@
 import * as path from "node:path";
 import { getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
+import type { ExecutorTermination } from "../backend";
 import {
 	buildManagedKernelEnv,
 	buildManagedKernelEnvPatch,
+	cancellationTermination,
 	createCancelledKernelResult,
 	executeWithKernelBase,
 	getExecutionDeadlineMs,
@@ -57,7 +59,7 @@ export interface JuliaKernelExecutor {
 export interface JuliaResult {
 	output: string;
 	exitCode: number | undefined;
-	cancelled: boolean;
+	termination: ExecutorTermination | undefined;
 	truncated: boolean;
 	artifactId: string | undefined;
 	totalLines: number;
@@ -135,9 +137,14 @@ function formatKernelTimeoutAnnotation(timeoutMs: number | undefined, kernelKill
 	return `[execution timed out after ${rounded}s${explanation}]`;
 }
 
-function createCancelledJuliaResult(_timedOut: boolean, timeoutMs?: number): JuliaResult {
-	const output = formatTimeoutAnnotation(timeoutMs) ?? "[execution cancelled]\n";
-	return createCancelledKernelResult(output);
+function createCancelledJuliaResult(timedOut: boolean, timeoutMs?: number): JuliaResult {
+	// Gate on `timedOut` like the Python/Ruby siblings: this factory also serves
+	// plain user aborts, which must not claim `[cell timed out after Ns]` just
+	// because a timeout was configured.
+	const output = timedOut
+		? (formatTimeoutAnnotation(timeoutMs) ?? "[execution cancelled]\n")
+		: "[execution cancelled]\n";
+	return { ...createCancelledKernelResult(output, cancellationTermination(timedOut, timeoutMs)) };
 }
 
 async function startKernel(cwd: string, options: JuliaExecutorOptions): Promise<JuliaKernel> {
@@ -257,7 +264,10 @@ export async function executeJulia(code: string, options?: JuliaExecutorOptions)
 		return await sessionRegistry.executeOnSession(code, cwd, executionOptions);
 	} catch (err) {
 		if (isJuliaCancellationError(err) || executionOptions.signal?.aborted) {
-			return createCancelledJuliaResult(isTimedOutJuliaCancellation(err, executionOptions.signal));
+			return createCancelledJuliaResult(
+				isTimedOutJuliaCancellation(err, executionOptions.signal),
+				executionOptions.timeoutMs,
+			);
 		}
 		throw err;
 	}

@@ -42,6 +42,14 @@ import { frameTexts } from "./acp-producer-facts";
  *    ledger cannot disagree with the reducer about which mode a call is in while
  *    still agreeing about capability.
  *
+ * Expectations are stashed at fact-declaration time under the then-active
+ * channel. Because the reducer resolves plain-era promises at the
+ * `plain → live_terminal` transition itself (never through a closing snapshot),
+ * the ledger converts still-unresolved plain-derived expectations when that
+ * transition arrives: a negotiated terminal-meta witness turns them into
+ * `terminal_output` deliveries, its absence into explicit `no_capable_channel`
+ * suppressions — mirroring the reducer frame for frame.
+ *
  * The ledger also folds in the one non-fact obligation the old auditor covered: a
  * call's own `sourceEcho` (eval's cell source) must reach some rendered channel
  * before the call settles. `sourceEcho` is not a `ToolFact` — it carries no
@@ -218,12 +226,27 @@ interface SourceEchoExpectation {
 	settled: boolean;
 }
 
+/**
+ * One stashed expectation plus the channel kind it was derived under. The
+ * origin matters because a plain-era promise changes meaning at the
+ * `plain → live_terminal` transition: the closing-snapshot settlement that used
+ * to resolve it no longer exists, so {@link PresentationDeliveryLedger#record}
+ * converts exactly these records when the attach event arrives.
+ */
+interface StashedExpectation {
+	record: FactDeliveryExpectationRecord;
+	readonly originKind: LedgerFactChannel["kind"];
+}
+
 /** The event-stream-derived delivery ledger for one tool call. */
 export class PresentationDeliveryLedger {
 	#channel: LedgerFactChannel | undefined;
-	readonly #expectations: FactDeliveryExpectationRecord[] = [];
+	readonly #expectations: StashedExpectation[] = [];
 	readonly #violations: string[] = [];
 	readonly #sourceEchoes: SourceEchoExpectation[] = [];
+	/** Fact ids whose plain-derived expectation was converted at the attach
+	 * transition; their pre-transition `content` promise receipts are retired. */
+	readonly #convertedFromPlain = new Set<FactId>();
 
 	/** Fold one presentation event: track the channel, stash fact/echo expectations. */
 	record(event: ToolPresentationEvent, context: AcpRenderContext): void {
@@ -244,9 +267,31 @@ export class PresentationDeliveryLedger {
 					});
 				}
 				return;
-			case "live_terminal_attached":
-				this.#channel = { kind: "live_terminal", metaCap: terminalMetaCapOf(context.terminal) };
+			case "live_terminal_attached": {
+				const metaCap = terminalMetaCapOf(context.terminal);
+				this.#channel = { kind: "live_terminal", metaCap };
+				// The reducer no longer settles plain-era promises through a closing
+				// content snapshot — it resolves them at this transition (a
+				// `terminal_output` data frame, or explicit suppressions when no
+				// capable channel exists). Convert exactly the expectations derived
+				// while the channel was `plain`; meta-terminal-derived ones were
+				// already delivered on their own receipts. Model-only facts never
+				// reach a human channel in either world, so they keep their
+				// `no_wire_delivery` expectation untouched.
+				for (const stashed of this.#expectations) {
+					if (stashed.originKind !== "plain") continue;
+					if (stashed.record.expectation.outcome === "no_wire_delivery") continue;
+					stashed.record = {
+						...stashed.record,
+						expectation:
+							metaCap === undefined
+								? ({ outcome: "suppressed", reason: "no_capable_channel" } as const)
+								: ({ outcome: "delivered", channel: "terminal_output" } as const),
+					};
+					this.#convertedFromPlain.add(stashed.record.factId);
+				}
 				return;
+			}
 			case "fact":
 				this.#recordFact(event.fact);
 				return;
@@ -291,12 +336,28 @@ export class PresentationDeliveryLedger {
 
 	/** Expectations stashed so far, in declaration order. */
 	get expectations(): readonly FactDeliveryExpectationRecord[] {
-		return this.#expectations;
+		return this.#expectations.map(stashed => stashed.record);
 	}
 
-	/** Every disagreement between the derived policy and the reducer's receipts. */
+	/**
+	 * Every disagreement between the derived policy and the reducer's receipts.
+	 * A fact whose expectation was converted at `plain → live_terminal` had its
+	 * declaration-time `fact/content` receipt issued as a *promise* of the old
+	 * closing snapshot; that snapshot no longer exists, so such promise receipts
+	 * are retired here rather than read as contradicting deliveries.
+	 */
 	check(receipts: readonly DeliveryReceipt[]): string[] {
-		return [...this.#violations, ...checkFactDelivery(this.#expectations, receipts)];
+		const observable = receipts.filter(
+			receipt =>
+				receipt.kind !== "fact" || receipt.channel !== "content" || !this.#convertedFromPlain.has(receipt.factId),
+		);
+		return [
+			...this.#violations,
+			...checkFactDelivery(
+				this.#expectations.map(s => s.record),
+				observable,
+			),
+		];
 	}
 
 	#recordFact(fact: ToolFact): void {
@@ -313,9 +374,12 @@ export class PresentationDeliveryLedger {
 			return;
 		}
 		this.#expectations.push({
-			factId: fact.id,
-			kind: fact.kind,
-			expectation: factDeliveryExpectation(expected, channel),
+			record: {
+				factId: fact.id,
+				kind: fact.kind,
+				expectation: factDeliveryExpectation(expected, channel),
+			},
+			originKind: channel.kind,
 		});
 	}
 }

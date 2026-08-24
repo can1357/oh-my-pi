@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ToolPresentationEvent } from "@oh-my-pi/pi-agent-core/presentation";
+import type { ToolPresentationEvent, TruncationFactMeta } from "@oh-my-pi/pi-agent-core/presentation";
 import { byteLengthOf, byteOffset, streamId, ToolPresentationStream } from "@oh-my-pi/pi-agent-core/presentation";
 import {
 	enforceInlineByteCap,
@@ -10,6 +10,7 @@ import {
 	formatMiddleElisionMarker,
 	formatTailTruncationNotice,
 	OutputSink,
+	PRESENTATION_MAX_RETAINED_BYTES,
 	TailBuffer,
 	truncateHead,
 	truncateHeadBytes,
@@ -933,5 +934,264 @@ describe("OutputSink presentation producer errors", () => {
 		} finally {
 			dispose();
 		}
+	});
+
+	test("dispose swallows a throwing pending-chunk flush instead of masking the tool error", async () => {
+		// Round-5 review P20: dispose() runs in the executors' `finally`; a throw
+		// from the pending flush would replace the original tool error — the same
+		// masking its `#finalizeFile` sibling guards against. The swallow must
+		// hold when the emitter itself is the thrower, and must not derive a
+		// truncation fact from counters diverged by the failed append.
+		const { events: warnings, dispose } = collectWarnings();
+		try {
+			let fail = false;
+			const events: ToolPresentationEvent[] = [];
+			const producer = new ToolPresentationStream(streamId("dispose-flush-throw-probe"), event => {
+				if (fail) throw new Error("emitter failed");
+				events.push(event);
+			});
+			const sink = new OutputSink({ presentation: producer, chunkThrottleMs: 60_000 });
+			sink.push("first"); // the throttle boundary lets the first push straight through
+			fail = true;
+			sink.push("buffered"); // pends inside the throttle window; flush will throw
+			expect(events.filter(event => event.type === "fact")).toHaveLength(0);
+
+			await expect(sink.dispose()).resolves.toBeUndefined();
+
+			// The failure is observable, not silent...
+			expect(
+				warnings.some(warning => warning.message === "OutputSink dispose failed to flush the pending chunk"),
+			).toBe(true);
+			// ...and no fabricated truncation fact was derived from diverged counters.
+			expect(events.filter(event => event.type === "fact")).toHaveLength(0);
+		} finally {
+			dispose();
+		}
+	});
+});
+
+describe("OutputSink presentation retention cap", () => {
+	function collectingProducer(): { producer: ToolPresentationStream; events: ToolPresentationEvent[] } {
+		const events: ToolPresentationEvent[] = [];
+		return {
+			producer: new ToolPresentationStream(streamId("s-cap"), event => events.push(event)),
+			events,
+		};
+	}
+	function truncationMetas(events: readonly ToolPresentationEvent[]): TruncationFactMeta[] {
+		const metas: TruncationFactMeta[] = [];
+		for (const event of events) {
+			if (event.type !== "fact") continue;
+			if (event.fact.kind !== "truncation") continue;
+			metas.push(event.fact.meta);
+		}
+		return metas;
+	}
+	function appendedBytes(events: readonly ToolPresentationEvent[]): number {
+		return events.reduce(
+			(sum, event) => (event.type === "terminal_append" ? sum + byteLengthOf(event.data) : sum),
+			0,
+		);
+	}
+
+	test("bounds a single oversized chunk and reports its full size as dropped", async () => {
+		const { producer, events } = collectingProducer();
+		const sink = new OutputSink({ presentation: producer });
+		const chunk = "x".repeat(PRESENTATION_MAX_RETAINED_BYTES + 512 * 1024);
+		await sink.push(chunk);
+
+		// Hard bound enforced during the append itself, not checked afterwards.
+		expect(appendedBytes(events)).toBe(PRESENTATION_MAX_RETAINED_BYTES);
+
+		// Nothing declared until finalization...
+		expect(truncationMetas(events)).toHaveLength(0);
+
+		await sink.dump();
+
+		// ...then exactly one fact, with the FINAL totals: the produced-but-dropped
+		// remainder shows up in totalBytes, not silently vanished.
+		const [meta] = truncationMetas(events);
+		expect(truncationMetas(events)).toHaveLength(1);
+		expect(meta).toMatchObject({
+			direction: "head",
+			truncatedBy: "bytes",
+			maxBytes: PRESENTATION_MAX_RETAINED_BYTES,
+			retainedBytes: PRESENTATION_MAX_RETAINED_BYTES,
+			totalBytes: byteLengthOf(chunk),
+		});
+	});
+
+	test("declares exactly one truncation fact at dump() with truthful totals", async () => {
+		const { producer, events } = collectingProducer();
+		const sink = new OutputSink({ presentation: producer });
+		const chunk = "x".repeat(64 * 1024);
+		for (let i = 0; i < 20; i++) await sink.push(chunk);
+		await sink.dump();
+
+		const metas = truncationMetas(events);
+		expect(metas).toHaveLength(1);
+		expect(metas[0]).toMatchObject({
+			direction: "head",
+			truncatedBy: "bytes",
+			maxBytes: PRESENTATION_MAX_RETAINED_BYTES,
+			retainedBytes: PRESENTATION_MAX_RETAINED_BYTES,
+			totalBytes: 20 * 64 * 1024,
+		});
+		expect(metas[0]?.totalBytes).toBeGreaterThan(metas[0]?.retainedBytes ?? 0);
+
+		// Retained head window is capped; the rest was dropped, not appended.
+		expect(appendedBytes(events)).toBe(PRESENTATION_MAX_RETAINED_BYTES);
+	});
+
+	test("stream ending at exactly the cap declares no truncation fact", async () => {
+		const { producer, events } = collectingProducer();
+		const sink = new OutputSink({ presentation: producer });
+		const chunk = "x".repeat(64 * 1024); // 16 × 64 KiB === 1 MiB exactly
+		for (let i = 0; i < 16; i++) await sink.push(chunk);
+		expect(appendedBytes(events)).toBe(PRESENTATION_MAX_RETAINED_BYTES);
+
+		await sink.dump();
+
+		expect(truncationMetas(events)).toHaveLength(0);
+		expect(events.some(event => event.type === "fact")).toBe(false);
+	});
+	test("latches rollover when a boundary back-off leaves residual budget", async () => {
+		// Regression: a multibyte code point straddling the exact cap makes
+		// utf8PrefixWithin back off, landing retainedBytes at MAX-1. Without the
+		// latch, the next chunk passed the `retained >= MAX` short-circuit and its
+		// head appended AFTER the previous chunk's dropped tail — punching a hole
+		// in the pure head prefix the truncation fact declares.
+		const { producer, events } = collectingProducer();
+		const sink = new OutputSink({ presentation: producer });
+		await sink.push("x".repeat(PRESENTATION_MAX_RETAINED_BYTES - 1));
+		expect(appendedBytes(events)).toBe(PRESENTATION_MAX_RETAINED_BYTES - 1);
+
+		await sink.push("é"); // 2-byte code point; prefix within 1 byte backs off to ""
+		await sink.push("z"); // must be rejected by the latch, not appended at MAX-1
+
+		const text = events.map(event => (event.type === "terminal_append" ? event.data : "")).join("");
+		expect(text).toBe("x".repeat(PRESENTATION_MAX_RETAINED_BYTES - 1));
+		expect(appendedBytes(events)).toBe(PRESENTATION_MAX_RETAINED_BYTES - 1);
+
+		await sink.dump();
+		const [meta] = truncationMetas(events);
+		expect(truncationMetas(events)).toHaveLength(1);
+		expect(meta).toMatchObject({
+			retainedBytes: PRESENTATION_MAX_RETAINED_BYTES - 1,
+			totalBytes: PRESENTATION_MAX_RETAINED_BYTES + 2,
+		});
+	});
+	test("declares the rollover fact from dispose when the executor threw without dumping", async () => {
+		// Round-3 review P7: executeBash's catch rethrows without calling dump();
+		// its `finally` runs sink.dispose() before the agent loop's freeze, so
+		// that path is still pre-freeze and must carry the disclosure — a command
+		// that streamed past the cap and then threw used to settle with a capped
+		// transcript and no truncation fact at all.
+		const { producer, events } = collectingProducer();
+		const sink = new OutputSink({ presentation: producer });
+		await sink.push("x".repeat(PRESENTATION_MAX_RETAINED_BYTES + 1024));
+		expect(truncationMetas(events)).toHaveLength(0);
+
+		await sink.dispose(); // the throw-path exit: no dump()
+
+		const [meta] = truncationMetas(events);
+		expect(truncationMetas(events)).toHaveLength(1);
+		expect(meta).toMatchObject({
+			retainedBytes: PRESENTATION_MAX_RETAINED_BYTES,
+			totalBytes: PRESENTATION_MAX_RETAINED_BYTES + 1024,
+		});
+		// Idempotent: a later dump() must not declare a second fact.
+		await sink.dump();
+		expect(truncationMetas(events)).toHaveLength(1);
+	});
+
+	test("dispose flushes the throttled pending chunk before declaring the rollover fact", async () => {
+		// Round-4 review P10: bash's live path always throttles (50 ms), so the
+		// throw-path dispose can fire with bytes still coalescing in
+		// `#pendingChunk` — invisible to both presentation counters. Declaring
+		// before flushing made the fact's totals stale, and skipped it entirely
+		// when the cap crossing fell inside the pending window.
+		const { producer, events } = collectingProducer();
+		const sink = new OutputSink({ presentation: producer, chunkThrottleMs: 60_000 });
+		// First chunk is emitted immediately (no throttle window open yet)...
+		await sink.push("x".repeat(PRESENTATION_MAX_RETAINED_BYTES - 1024));
+		// ...the second lands in the pending buffer and crosses the cap there.
+		await sink.push("y".repeat(4096));
+		expect(truncationMetas(events)).toHaveLength(0);
+
+		await sink.dispose(); // the throttled throw-path exit: no dump()
+
+		const [meta] = truncationMetas(events);
+		expect(truncationMetas(events)).toHaveLength(1);
+		expect(meta).toMatchObject({
+			retainedBytes: PRESENTATION_MAX_RETAINED_BYTES,
+			totalBytes: PRESENTATION_MAX_RETAINED_BYTES - 1024 + 4096,
+		});
+	});
+
+	test("a failed dispose flush poisons the latch so a later dump() cannot fabricate a fact", async () => {
+		// Round-6 review P21: the flush-failure knowledge must outlive dispose()'s
+		// stack frame. The thrown append increments `#presentationTotalBytes` but
+		// not retained bytes, so the counters stay diverged forever; a fail-once
+		// emitter that recovers before a later dump() (the suite-pinned
+		// dispose-then-dump lifecycle) would otherwise derive and publish exactly
+		// the fabricated truncation fact the skip exists to prevent.
+		const events: ToolPresentationEvent[] = [];
+		let fail = false;
+		const producer = new ToolPresentationStream(streamId("s-fail-once"), event => {
+			if (fail) throw new Error("emitter failed");
+			events.push(event);
+		});
+		const sink = new OutputSink({ presentation: producer, chunkThrottleMs: 60_000 });
+		sink.push("first"); // emitted immediately
+		fail = true;
+		sink.push("buffered"); // pends; its flush throws during dispose
+		await sink.dispose();
+		expect(truncationMetas(events)).toHaveLength(0);
+
+		fail = false; // the emitter recovers...
+		await sink.dump(); // ...but the poisoned latch keeps dump() honest too
+
+		expect(truncationMetas(events)).toHaveLength(0);
+	});
+
+	test("a scoped flush crossing the cap during freeze neither throws nor declares", async () => {
+		// Regression: the throttled pending chunk is delivered through the freeze
+		// barrier's scope while `phase === "flushing"` / `"frozen"`. Declaring the
+		// rollover from the append path used to call `producer.fact()` there and
+		// throw "declared a fact after freeze".
+		const { producer, events } = collectingProducer();
+		const sink = new OutputSink({ presentation: producer, chunkThrottleMs: 60_000 });
+		sink.push("x".repeat(PRESENTATION_MAX_RETAINED_BYTES - 4)); // first push bypasses the throttle
+		sink.push("yyyy"); // buffered by the throttle, flushed through the freeze scope
+		await expect(producer.freeze()).resolves.toBeUndefined(); // must not throw
+
+		expect(appendedBytes(events)).toBe(PRESENTATION_MAX_RETAINED_BYTES);
+		// The stream froze before dump(), so the fact can no longer be declared —
+		// correctly absent rather than thrown.
+		expect(truncationMetas(events)).toHaveLength(0);
+		await expect(sink.dump()).resolves.toBeDefined();
+		expect(truncationMetas(events)).toHaveLength(0);
+	});
+
+	test("an ordinary chunk crossing the cap mid-freeze neither throws nor declares", async () => {
+		const { producer, events } = collectingProducer();
+		const gate = Promise.withResolvers<void>();
+		producer.registerFlusher(async () => {
+			await gate.promise;
+		});
+		const sink = new OutputSink({ presentation: producer });
+		sink.push("x".repeat(PRESENTATION_MAX_RETAINED_BYTES - 4));
+		const freezing = producer.freeze();
+		expect(producer.phase).toBe("flushing");
+		expect(() => sink.push("y".repeat(PRESENTATION_MAX_RETAINED_BYTES))).not.toThrow();
+		gate.resolve();
+		await freezing;
+
+		// The mid-freeze chunk was dropped wholesale (bounded feed, warned drop).
+		expect(appendedBytes(events)).toBeLessThanOrEqual(PRESENTATION_MAX_RETAINED_BYTES);
+		expect(truncationMetas(events)).toHaveLength(0);
+		await expect(sink.dump()).resolves.toBeDefined();
+		expect(truncationMetas(events)).toHaveLength(0);
 	});
 });

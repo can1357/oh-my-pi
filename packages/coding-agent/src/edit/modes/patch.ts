@@ -7,9 +7,9 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { type } from "@oh-my-pi/omptype";
 import {
 	type FileDiagnosticsResult,
 	flushLspWritethroughBatch,
@@ -21,18 +21,19 @@ import type { ToolSession } from "../../tools";
 import { routeWriteThroughBridge } from "../../tools/acp-bridge";
 import { assertEditableFile } from "../../tools/auto-generated-guard";
 import {
+	invalidateFsScanAfterDelete,
+	invalidateFsScanAfterRename,
+	invalidateFsScanAfterWrite,
+} from "../../tools/fs-cache-invalidation";
+import { outputMeta } from "../../tools/output-meta";
+import { resolveToCwd } from "../../tools/path-utils";
+import { enforcePlanModeWrite, resolvePlanPath } from "../../tools/plan-mode-guard";
+import {
 	deleteFileWithFallback,
 	hasFileWriteFallback,
 	isPermissionDeniedError,
 	writeFileWithFallback,
 } from "../../tools/file-write-fallback";
-import {
-	invalidateFsScanAfterDelete,
-	invalidateFsScanAfterRename,
-	invalidateFsScanAfterWrite,
-} from "../../tools/fs-cache-invalidation";
-import { resolveToCwd } from "../../tools/path-utils";
-import { enforcePlanModeWrite, resolvePlanPath } from "../../tools/plan-mode-guard";
 import { ToolError } from "../../tools/tool-errors";
 import type { AppliedEditObserver } from "../blackbox";
 import {
@@ -42,6 +43,7 @@ import {
 	normalizeCreateContent,
 	parseDiffHunks,
 } from "../diff";
+import { legacyEditDetails, type SingleFileProduction } from "../legacy-bag";
 import {
 	adjustIndentation,
 	convertLeadingTabsToSpaces,
@@ -54,8 +56,15 @@ import {
 	stripBom,
 } from "../normalize";
 import { readEditFileText, serializeEditFileText } from "../read-file";
-import type { EditToolDetails, LspBatchRequest } from "../renderer";
-import { createEditResult, type EditPreviewSource, toEditToolResult } from "../result";
+import type { LspBatchRequest } from "../renderer";
+import { pruneEditFileSnapshots } from "../snapshot-details";
+import {
+	type AppliedEditFile,
+	type AvailableFileChange,
+	aggregateEditOutcome,
+	type EditToolDetails,
+	normalizedPath,
+} from "../types";
 import {
 	type ContextLineResult,
 	DEFAULT_FUZZY_THRESHOLD,
@@ -113,10 +122,6 @@ export interface ApplyPatchOptions {
 	allowCreateOverwrite?: boolean;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Default File System
-// ═══════════════════════════════════════════════════════════════════════════
-
 /**
  * Create a patch target's parent directory, tolerating a permission denial when a
  * file-write fallback is registered.
@@ -136,6 +141,10 @@ async function mkdirAllowingFallback(dir: string): Promise<void> {
 		if (!hasFileWriteFallback() || !isPermissionDeniedError(error)) throw error;
 	}
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Default File System
+// ═══════════════════════════════════════════════════════════════════════════
 
 /** Default filesystem implementation using Bun APIs */
 export const defaultFileSystem: FileSystem = {
@@ -1821,9 +1830,7 @@ function mergeDiagnosticsWithWarnings(
 	};
 }
 
-export async function executePatchSingle(
-	options: ExecutePatchSingleOptions,
-): Promise<AgentToolResult<EditToolDetails, typeof patchEditEntrySchema>> {
+export async function executePatchSingleProduction(options: ExecutePatchSingleOptions): Promise<SingleFileProduction> {
 	const {
 		session,
 		path,
@@ -1831,11 +1838,10 @@ export async function executePatchSingle(
 		signal,
 		batchRequest,
 		allowFuzzy,
-		fuzzyThreshold,
-		allowCreateOverwrite,
-		writethrough,
 		beginDeferredDiagnosticsForPath,
 		onApplied,
+		allowCreateOverwrite,
+		writethrough,
 	} = options;
 	const { op: rawOp, rename, diff } = params;
 
@@ -1922,7 +1928,6 @@ export async function executePatchSingle(
 		diff: "",
 		firstChangedLine: undefined,
 	};
-	let previewSource: EditPreviewSource | undefined;
 	if (
 		result.change.type === "update" &&
 		result.change.oldContent !== undefined &&
@@ -1930,15 +1935,27 @@ export async function executePatchSingle(
 	) {
 		const normalizedOld = normalizeToLF(stripBom(result.change.oldContent).text);
 		const normalizedNew = normalizeToLF(stripBom(result.change.newContent).text);
-		const path = result.change.newPath ?? result.change.path;
-		diffResult = generateUnifiedDiffString(normalizedOld, normalizedNew, undefined, { path });
-		previewSource = { before: normalizedOld, after: normalizedNew, path };
+		diffResult = generateUnifiedDiffString(normalizedOld, normalizedNew, undefined, {
+			path: result.change.newPath ?? result.change.path,
+		});
 	} else if (result.change.type === "create" && result.change.newContent !== undefined) {
 		// The result is authoritative for rendering, so emit the added-content
 		// diff here rather than relying on the call-phase streaming preview.
 		const normalizedNew = normalizeToLF(stripBom(result.change.newContent).text);
 		diffResult = generateUnifiedDiffString("", normalizedNew, undefined, { path: result.change.path });
-		previewSource = { before: "", after: normalizedNew, path: result.change.path };
+	}
+
+	let resultText: string;
+	switch (result.change.type) {
+		case "create":
+			resultText = `Created ${path}`;
+			break;
+		case "delete":
+			resultText = `Deleted ${path}`;
+			break;
+		case "update":
+			resultText = effectiveRename ? `Updated and moved ${path} to ${effectiveRename}` : `Updated ${path}`;
+			break;
 	}
 
 	let diagnostics = patchFileSystem.getDiagnostics();
@@ -1947,33 +1964,80 @@ export async function executePatchSingle(
 		diagnostics ??= flushedDiagnostics;
 	}
 	const mergedDiagnostics = mergeDiagnosticsWithWarnings(diagnostics, result.warnings ?? []);
-	const oldText = result.change.type !== "create" ? result.change.oldContent : undefined;
-	const newText = result.change.type !== "delete" ? result.change.newContent : undefined;
-	if (oldText !== undefined && newText !== undefined) {
+	const meta = outputMeta()
+		.diagnostics(mergedDiagnostics?.summary ?? "", mergedDiagnostics?.messages ?? [])
+		.get();
+	if (result.change.oldContent !== undefined && result.change.newContent !== undefined) {
 		await onApplied?.({
 			path: result.change.newPath ?? resolvedPath,
-			prev: oldText,
-			next: newText,
+			prev: result.change.oldContent,
+			next: result.change.newContent,
 		});
 	}
 
-	const editResult = createEditResult({
-		displayPath: path,
-		// When the patch moves the file, anchor the diff to the destination
-		// path. ACP `ToolCallContent.diff.path` comes from this field, and
-		// clients use it to open or focus the file post-change; pointing at
-		// the (now-deleted) source navigates to nothing.
-		resultPath: result.change.newPath ?? resolvedPath,
-		diff: diffResult.diff,
-		firstChangedLine: diffResult.firstChangedLine,
+	function requireContent(value: string | undefined, label: string): string {
+		if (value === undefined) {
+			throw new Error(`executePatchSingle: applyPatch ${label} result is missing expected content`);
+		}
+		return value;
+	}
+
+	const destinationPath = result.change.newPath ?? resolvedPath;
+	const change: AvailableFileChange =
+		result.change.type === "create"
+			? { operation: "create", before: null, after: requireContent(result.change.newContent, "create.newContent") }
+			: result.change.type === "delete"
+				? {
+						operation: "delete",
+						before: requireContent(result.change.oldContent, "delete.oldContent"),
+						after: null,
+					}
+				: effectiveRename
+					? {
+							operation: "move",
+							sourcePath: resolvedPath,
+							before: requireContent(result.change.oldContent, "update.oldContent"),
+							after: requireContent(result.change.newContent, "update.newContent"),
+						}
+					: {
+							operation: "update",
+							before: requireContent(result.change.oldContent, "update.oldContent"),
+							after: requireContent(result.change.newContent, "update.newContent"),
+						};
+
+	const file: AppliedEditFile = {
+		kind: "applied",
+		path: normalizedPath(destinationPath),
+		evidence: { kind: "available", change },
 		diagnostics: mergedDiagnostics,
-		op,
+	};
+	const [prunedFile] = pruneEditFileSnapshots([file]) as [AppliedEditFile];
+
+	return {
+		file: prunedFile,
+		presentation: { diff: diffResult.diff, firstChangedLine: diffResult.firstChangedLine, meta },
 		move: effectiveRename,
-		sourcePath: result.change.newPath ? resolvedPath : undefined,
-		oldText,
-		newText,
-		warnings: result.warnings,
-		previewSource,
-	});
-	return toEditToolResult(editResult);
+		text: resultText,
+	};
+}
+
+/**
+ * Thin `AgentToolResult` wrapper around {@link executePatchSingleProduction}
+ * for direct single-file callers (tests, the `patch`/`apply_patch` edit
+ * modes' single-entry fast path). Multi-entry/multi-file callers
+ * (`executeSinglePathEntries`/`executeApplyPatchPerFile` in `edit/index.ts`)
+ * call the production function directly and build one aggregate outcome
+ * across every entry instead of one per file.
+ */
+export async function executePatchSingle(
+	options: ExecutePatchSingleOptions,
+): Promise<AgentToolResult<EditToolDetails>> {
+	const { file, presentation, move, text } = await executePatchSingleProduction(options);
+	const { outcome, isError } = aggregateEditOutcome([file]);
+	return {
+		content: [{ type: "text", text }],
+		details: legacyEditDetails(file, presentation, move, true),
+		outcome,
+		...(isError ? { isError } : {}),
+	};
 }

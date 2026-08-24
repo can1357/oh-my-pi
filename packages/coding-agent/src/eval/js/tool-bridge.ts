@@ -2,6 +2,7 @@ import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ToolSession } from "../../tools";
 import { ToolError } from "../../tools/tool-errors";
+import { toolResultFailed } from "../../tools/tool-result";
 import { EVAL_AGENT_BRIDGE_NAME, runEvalAgent } from "../agent-bridge";
 import { EVAL_BUDGET_BRIDGE_NAME, type EvalBudgetResult, runEvalBudget } from "../budget-bridge";
 import { EVAL_COMPLETION_BRIDGE_NAME, runEvalCompletion } from "../completion-bridge";
@@ -26,15 +27,6 @@ type ToolValue =
 			images?: Array<{ mimeType: string; data: string }>;
 			hasError?: boolean;
 	  };
-function toolResultHasError(result: AgentToolResult): boolean {
-	if ((result as { isError?: unknown }).isError === true) {
-		return true;
-	}
-	if (!(result.details && typeof result.details === "object")) {
-		return false;
-	}
-	return (result.details as { isError?: unknown }).isError === true;
-}
 
 function getTool(session: ToolSession, name: string): AgentTool {
 	const tool = session.getToolForEvalBridge ? session.getToolForEvalBridge(name) : session.getToolByName?.(name);
@@ -145,7 +137,7 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 				content.type === "image" && typeof content.mimeType === "string" && typeof content.data === "string",
 		);
 		const text = textBlocks.map(block => block.text).join("");
-		const hasError = toolResultHasError(result);
+		const hasError = toolResultFailed(result);
 		options.emitStatus?.(summarizeToolResult(name, normalizedArgs, result, text, hasError));
 		if (result.details === undefined && imageBlocks.length === 0 && !hasError) {
 			return text;

@@ -33,7 +33,7 @@
   "scripts": {
     "build": "bun scripts/build-binary.ts",
     "check": "biome check . && bun run check:types",
-    "check:types": "tsgo -p tsconfig.json --noEmit",
+    "check:types": "tsgo -p tsconfig.json --noEmit && tsgo -p tsconfig.presentation.json --noEmit",
     "lint": "biome lint .",
     "test": "bun ../../scripts/ci-test-ts.ts coding-agent-heavy --full",
     "fix": "biome check --write --unsafe . && bun run format-prompts",

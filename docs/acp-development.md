@@ -36,12 +36,22 @@ never share a number across them):
    `ExecutorBackendResult` inherit it, and the tools mirror it into their own
    `details.notices`. Re-deriving that string at a mirror site instead of
    carrying it is what produced two of these bugs.
-2. **The mapper reconciles against the body.** `undeliveredBodyLines`
-   (`acp-event-mapper.ts`) delivers any line of the producer's authoritative
-   final body that never reached the terminal, needing no structural
-   declaration to work. Bounded (`MAX_RECONCILED_BODY_LINES`/`_BYTES`): a few
-   lines is a synthesized annotation, hundreds is a body that diverged
-   wholesale, and re-sending *that* duplicates output on an append-only stream.
+2. **Structural facts ride the typed fact algebra.** The string-reconciliation
+   machinery this guide used to describe here (`undeliveredBodyLines`,
+   `MAX_RECONCILED_BODY_LINES`/`_BYTES`) is deleted: on every migrated path
+   (tools with a presentation adapter), no code reconciles rendered text
+   against the body. A producer declares a `ToolFact` (wall time, truncation
+   window, artifact pointer, …) and the central audience table + reducer
+   decide which channel carries it — see `presentation/facts.ts` and
+   `modes/acp/view/reducer.ts`. Permanent exceptions live in the untyped
+   mapper compatibility paths (`missingNoticeLines`, `acp-event-mapper.ts`): external/MCP
+   tools matching the mapper's carve-outs, plus any legacy built-in without
+   a presentation adapter whose oversized result spills — every built-in is
+   wrapped by `wrapToolWithMetaNotice`, so any of them can spill via
+   `spillLargeResultToArtifact`, whose appended notice this path then
+   re-attaches (`recoverTruncatedNoticeContent` -> `missingNoticeLines`;
+   `read`/`grep`/`glob`/`fetch` are common instances, not an exhaustive
+   list). Do not use them as a template for new code.
 
 ## Enforced invariants
 

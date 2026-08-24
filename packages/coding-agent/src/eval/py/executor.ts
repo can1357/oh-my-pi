@@ -2,9 +2,11 @@ import * as fs from "node:fs";
 
 import { getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
+import type { ExecutorTermination } from "../backend";
 import {
 	buildManagedKernelEnv,
 	buildManagedKernelEnvPatch,
+	cancellationTermination,
 	createCancelledKernelResult,
 	executeWithKernelBase,
 	getExecutionDeadlineMs,
@@ -114,9 +116,9 @@ export interface PythonResult {
 	/** Combined stdout + stderr output (sanitized, possibly truncated) */
 	output: string;
 	/** Execution exit code (0 ok, 1 error, undefined if cancelled) */
+	/** Execution exit code (0 ok, 1 error, undefined if terminated). */
 	exitCode: number | undefined;
-	/** Whether the execution was cancelled via signal */
-	cancelled: boolean;
+	termination: ExecutorTermination | undefined;
 	/** Whether the output was truncated */
 	truncated: boolean;
 	/** Artifact ID if full output was saved to artifact storage */
@@ -200,7 +202,7 @@ const formatKernelTimeoutAnnotation = formatSessionKernelTimeoutAnnotation;
 
 function createCancelledPythonResult(timedOut: boolean, timeoutMs?: number): PythonResult {
 	const output = timedOut ? (formatTimeoutAnnotation(timeoutMs) ?? "Command timed out") : "";
-	return createCancelledKernelResult(output);
+	return { ...createCancelledKernelResult(output, cancellationTermination(timedOut, timeoutMs)) };
 }
 
 // ---------------------------------------------------------------------------
@@ -435,6 +437,7 @@ export async function executePython(code: string, options?: PythonExecutorOption
 		if (isCancellationError(err, PythonExecutionCancelledError) || executionOptions.signal?.aborted) {
 			return createCancelledPythonResult(
 				isTimedOutCancellation(err, PythonExecutionCancelledError, executionOptions.signal),
+				executionOptions.timeoutMs,
 			);
 		}
 		throw err;

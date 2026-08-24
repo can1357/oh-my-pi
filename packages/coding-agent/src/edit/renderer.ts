@@ -7,10 +7,8 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { sliceWithWidth, visibleWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
-import type { FileDiagnosticsResult } from "../lsp";
 import { renderDiff as renderDiffColored } from "../modes/components/diff";
 import { getLanguageFromPath, type Theme } from "../modes/theme/theme";
-import type { OutputMeta } from "../tools/output-meta";
 import {
 	cachedRenderedString,
 	createRenderedStringCache,
@@ -45,68 +43,9 @@ import { type ApplyPatchEntry, expandApplyPatchToEntries, expandApplyPatchToPrev
 import type { Operation } from "./modes/patch";
 import { type SloppySection, splitSloppySections } from "./sloppy";
 import type { PerFileDiffPreview } from "./streaming";
-
-// ═══════════════════════════════════════════════════════════════════════════
-// LSP Batching
-// ═══════════════════════════════════════════════════════════════════════════
+import type { EditToolDetails, EditToolPerFileResult } from "./types";
 
 export { getLspBatchRequest, type LspBatchRequest };
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Tool Details Types
-// ═══════════════════════════════════════════════════════════════════════════
-
-export interface EditToolPerFileResult {
-	path: string;
-	diff: string;
-	firstChangedLine?: number;
-	diagnostics?: FileDiagnosticsResult;
-	op?: Operation;
-	move?: string;
-	isError?: boolean;
-	errorText?: string;
-	/** TUI-friendly error text. When present, rendered to the user instead of `errorText`.
-	 * Set when the underlying error carries a `displayMessage` (e.g. {@link HashlineMismatchError}). */
-	displayErrorText?: string;
-	meta?: OutputMeta;
-	/** Source-of-truth content before the edit; `undefined` for create operations. */
-	oldText?: string;
-	/** Source-of-truth content after the edit; `undefined` for delete operations. */
-	newText?: string;
-	/** True when {@link pruneOversizedEditSnapshots} dropped `oldText`/`newText` from this entry. Aggregators check this to suppress misleading combined snapshots when at least one entry of a multi-entry single-path edit was pruned. */
-	snapshotsPruned?: boolean;
-	/** Pre-move source path; set only when the edit moved/renamed the file. The header renders `sourcePath → path`. */
-	sourcePath?: string;
-}
-
-export interface EditToolDetails {
-	/** Unified diff of the changes made */
-	diff: string;
-	/** Line number of the first change in the new file (for editor navigation) */
-	firstChangedLine?: number;
-	/** Diagnostic result (if available) */
-	diagnostics?: FileDiagnosticsResult;
-	/** Operation type (patch mode only) */
-	op?: Operation;
-	/** New path after move/rename (patch mode only) */
-	move?: string;
-	/** Structured output metadata */
-	meta?: OutputMeta;
-	/** Per-file results (multi-file edits) */
-	perFileResults?: EditToolPerFileResult[];
-	/** Paths of files never attempted because an earlier file in the same multi-file edit failed first. */
-	unattemptedPaths?: string[];
-	/** Absolute file path for single-file edit results. Required by ACP diff metadata consumers. */
-	path?: string;
-	/** Source-of-truth content before the edit; `undefined` for create operations. */
-	oldText?: string;
-	/** Source-of-truth content after the edit; `undefined` for delete operations. */
-	newText?: string;
-	/** True when {@link pruneOversizedEditSnapshots} dropped `oldText`/`newText` from this entry. Aggregators check this to suppress misleading combined snapshots when at least one entry of a multi-entry single-path edit was pruned. */
-	snapshotsPruned?: boolean;
-	/** Pre-move source path; set only when the edit moved/renamed the file. The header renders `sourcePath → path`. */
-	sourcePath?: string;
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TUI Renderer

@@ -476,16 +476,23 @@ describe("ACP tool view reducer — announcement rawInput", () => {
 		});
 	});
 
-	it("omits rawInput when the producer declared none, and never emits rawOutput", () => {
+	it("omits rawInput when the producer declared none, and emits only the bounded settlement marker as rawOutput", () => {
 		const { updates } = run([
 			{ type: "started", call: bashCall() },
 			{ type: "settled", outcome: { kind: "succeeded" } },
 		]);
 		for (const update of updates) {
 			expect(Object.hasOwn(update, "rawInput")).toBe(false);
-			// `rawOutput` stays removed: it leaked the untyped result object onto the wire.
+		}
+		// Non-settlement frames carry no `rawOutput` at all. The settlement frame
+		// carries exactly the three-key `AcpToolDiagnostic` marker Zed's
+		// `acp_thread.rs` needs (see `frames.ts`) — never a raw result object.
+		for (const update of updates.slice(0, -1)) {
 			expect(Object.hasOwn(update, "rawOutput")).toBe(false);
 		}
+		expect(updates.at(-1)).toMatchObject({
+			rawOutput: { kind: "tool_settlement", tool: "bash", outcome: "completed" },
+		});
 	});
 
 	it("carries rawInput on a plain-channel announcement too", () => {
@@ -559,6 +566,252 @@ describe("ACP tool view reducer — fact delivery by audience", () => {
 		);
 		expect(terminalOutputs(updates)).toEqual(["\nWall time: 1.00 seconds\n"]);
 		expect(receipts.some(receipt => receipt.kind === "fact_suppressed")).toBe(false);
+	});
+
+	describe("ACP tool view reducer — plain to live_terminal transition", () => {
+		it("delivers carried plain-era output at attach and never replaces the terminal card at settlement", () => {
+			// THE P17 REGRESSION: the closing-snapshot settle arm used to remove the
+			// live terminal item from the card and erase every byte displayed after
+			// attachment. The carry now resolves at the transition, where the
+			// pre-attach bytes precede post-attach live bytes in the client's
+			// terminal buffer; settlement touches only correlated status/exit state.
+			const cap = negotiateTerminalMetaCap(true);
+			if (!cap) throw new Error("expected a capability witness");
+			const { events, producer } = record();
+			producer.appendTerminal("abc");
+			producer.fact({ kind: "wall_time", ms: 2500 });
+			events.splice(2, 0, { type: "live_terminal_attached", binding: createLiveTerminalBinding("term-9") });
+			producer.appendTerminal("def");
+
+			const { updates, receipts } = run(
+				[
+					{ type: "started", call: bashCall({ kind: "read" }) },
+					...events,
+					{ type: "settled", outcome: { kind: "succeeded" } },
+				],
+				{
+					phase: "live",
+					terminal: { kind: "real", metaCap: cap },
+					fence: true,
+				},
+			);
+
+			// `_meta.terminal_output`; the post-attach append emits no frame.
+			expect(terminalOutputs(updates)).toEqual(["abc\nWall time: 2.50 seconds\n"]);
+			expect(JSON.stringify(updates)).not.toContain("def");
+
+			// Settlement emits ONLY the exit frame with its diagnostic — no content
+			// replacement of any kind, so the card keeps its terminal item and every
+			// byte the terminal displayed.
+			expect(updates).toHaveLength(4);
+			const settle = updates.at(-1) as unknown as {
+				status?: string;
+				content?: unknown;
+				rawOutput?: unknown;
+				_meta?: { terminal_exit?: unknown };
+			};
+			expect(settle.status).toBe("completed");
+			expect(settle.content).toBeUndefined();
+			// The AcpToolDiagnostic rides the literal wire as `rawOutput` (encoder).
+			expect(settle.rawOutput).toEqual({ kind: "tool_settlement", tool: "bash", outcome: "completed" });
+			expect(settle._meta?.terminal_exit).toEqual({ terminal_id: "term-9", exit_code: 0, signal: null });
+
+			// The attach batch receipted the carried byte span and fact on the
+			// channel that actually carried them.
+			const carriedStream = receipts.some(
+				receipt =>
+					receipt.kind === "stream" &&
+					receipt.channel === "terminal_output" &&
+					plain(receipt.fromByte) === 0 &&
+					plain(receipt.toByte) === 3,
+			);
+			const carriedFact = receipts.some(receipt => receipt.kind === "fact" && receipt.channel === "terminal_output");
+			expect(carriedStream).toBe(true);
+			expect(carriedFact).toBe(true);
+		});
+
+		it("records explicit suppressions at attach when no terminal-meta channel exists", () => {
+			const { events, producer } = record();
+			producer.appendTerminal("abc");
+			producer.fact({ kind: "wall_time", ms: 2500 });
+			events.splice(2, 0, { type: "live_terminal_attached", binding: createLiveTerminalBinding("term-10") });
+
+			const { updates, receipts } = run(
+				[
+					{ type: "started", call: bashCall({ kind: "read" }) },
+					...events,
+					{ type: "settled", outcome: { kind: "succeeded" } },
+				],
+				{
+					phase: "live",
+					terminal: { kind: "real", metaCap: undefined },
+					fence: true,
+				},
+			);
+
+			// No `_meta.terminal_output` witness: nothing can replay the carried
+			// bytes or fact, and each is recorded as deliberately suppressed.
+			expect(terminalOutputs(updates)).toEqual([]);
+			const suppressedStreams = receipts.flatMap(receipt =>
+				receipt.kind === "stream_suppressed"
+					? [[plain(receipt.fromByte), plain(receipt.toByte), receipt.reason] as const]
+					: [],
+			);
+			expect(suppressedStreams).toEqual([[0, 3, "no_capable_channel"]]);
+			const suppressedFacts = receipts.flatMap(receipt =>
+				receipt.kind === "fact_suppressed" ? [[receipt.factId, receipt.reason] as const] : [],
+			);
+			const declaredFact = events.find(
+				(event): event is Extract<(typeof events)[number], { type: "fact" }> => event.type === "fact",
+			);
+			expect(declaredFact).toBeDefined();
+			expect(suppressedFacts).toEqual(
+				declaredFact === undefined ? [] : [[declaredFact.fact.id, "no_capable_channel"]],
+			);
+
+			// Settlement emits nothing but the status frame with its diagnostic.
+			expect(updates).toHaveLength(3);
+			const settle = updates.at(-1) as unknown as {
+				status?: string;
+				content?: unknown;
+				rawOutput?: unknown;
+				_meta?: unknown;
+			};
+			expect(settle.status).toBe("completed");
+			expect(settle.content).toBeUndefined();
+			expect(settle._meta).toBeUndefined();
+			// The AcpToolDiagnostic rides the literal wire as `rawOutput` (encoder).
+			expect(settle.rawOutput).toEqual({ kind: "tool_settlement", tool: "bash", outcome: "completed" });
+		});
+
+		it("accepts-and-suppresses an attachment declared while the view is live_terminal", () => {
+			// P18: an image has no byte form the client-owned terminal buffer could
+			// replay, and a sibling content item would erase the terminal card — so
+			// the attachment is accepted, never framed, and explicitly suppressed.
+			const cap = negotiateTerminalMetaCap(true);
+			if (!cap) throw new Error("expected a capability witness");
+			const { events, producer } = record();
+			producer.attachLiveTerminal(createLiveTerminalBinding("term-11"));
+			producer.attachment({ kind: "image", data: "AAAA", mimeType: "image/png" });
+
+			const { updates, receipts } = run(
+				[
+					{ type: "started", call: bashCall({ kind: "read" }) },
+					...events,
+					{ type: "settled", outcome: { kind: "succeeded" } },
+				],
+				{ phase: "live", terminal: { kind: "real", metaCap: cap }, fence: true },
+			);
+
+			expect(receipts.filter(receipt => receipt.kind === "attachment_suppressed")).toHaveLength(1);
+			// The only content-bearing update is the attach announcement's terminal
+			// item; neither the attachment nor settlement ever introduces content.
+			const contentBearing = updates.filter(update =>
+				Array.isArray((update as unknown as { content?: unknown[] }).content),
+			);
+			expect(contentBearing).toHaveLength(1);
+			expect(JSON.stringify(updates)).not.toContain("AAAA");
+			expect(JSON.stringify(updates)).not.toContain("replacement_snapshot");
+		});
+
+		it("suppresses an attachment accepted while plain when the live terminal attaches", () => {
+			// `kind: "read"` is load-bearing: an `execute` call on a terminal-capable
+			// client selects meta_terminal at started, which would exercise the
+			// meta->live arm instead of the genuinely-plain acceptance loop this
+			// test exists for (round-3 review P8).
+			const cap = negotiateTerminalMetaCap(true);
+			if (!cap) throw new Error("expected a capability witness");
+			const { events, producer } = record();
+			producer.attachment({ kind: "image", data: "AAAA", mimeType: "image/png" });
+			producer.attachLiveTerminal(createLiveTerminalBinding("term-12"));
+
+			const { receipts } = run([{ type: "started", call: bashCall({ kind: "read" }) }, ...events], {
+				phase: "live",
+				terminal: { kind: "real", metaCap: cap },
+				fence: true,
+			});
+
+			// Suppressed once, at the transition — not silently dropped until a
+			// settlement that no longer replays it.
+			expect(receipts.filter(receipt => receipt.kind === "attachment_suppressed")).toHaveLength(1);
+		});
+
+		it("suppresses an attachment pending on the display-only terminal when a real one attaches", () => {
+			const { events, producer } = record();
+			producer.appendTerminal("plot ready\n");
+			producer.attachment({ kind: "image", data: "AAAA", mimeType: "image/png" });
+			producer.attachLiveTerminal(createLiveTerminalBinding("term-13"));
+
+			const { updates, receipts } = run([
+				{ type: "started", call: bashCall() },
+				...events,
+				{ type: "settled", outcome: { kind: "succeeded" } },
+			]);
+
+			expect(receipts.filter(receipt => receipt.kind === "attachment_suppressed")).toHaveLength(1);
+			expect(JSON.stringify(updates)).not.toContain("AAAA");
+			// Settlement after the transition is still exit-state only: no closing
+			// content snapshot resurrects the suppressed attachment.
+			const settle = updates.at(-1) as unknown as { content?: unknown };
+			expect(settle.content).toBeUndefined();
+		});
+
+		it("receipts the attach transition's carried spans excluding declared gaps", () => {
+			// Round-3 review P5: the transition used to claim the whole [0, cursor)
+			// range as delivered, including gap bytes whose own stream_gap receipts
+			// already record them as never received.
+			const cap = negotiateTerminalMetaCap(true);
+			if (!cap) throw new Error("expected a capability witness");
+			const { events, producer } = record();
+			producer.appendTerminal("head\n"); // [0, 5)
+			producer.declareGap(1024); // declared: [5, 1029)
+			producer.appendTerminal("tail\n"); // [1029, 1034)
+			events.push({ type: "live_terminal_attached", binding: createLiveTerminalBinding("term-14") });
+
+			const { receipts } = run([{ type: "started", call: bashCall({ kind: "read" }) }, ...events], {
+				phase: "live",
+				terminal: { kind: "real", metaCap: cap },
+				fence: true,
+			});
+
+			const delivered = receipts.flatMap(receipt =>
+				receipt.kind === "stream" && receipt.channel === "terminal_output"
+					? [[plain(receipt.fromByte), plain(receipt.toByte)] as const]
+					: [],
+			);
+			expect(delivered).toEqual([
+				[0, 5],
+				[1029, 1034],
+			]);
+			const suppressed = receipts.flatMap(receipt =>
+				receipt.kind === "stream_suppressed" ? [[plain(receipt.fromByte), plain(receipt.toByte)]] : [],
+			);
+			expect(suppressed).toEqual([]);
+		});
+
+		it("suppresses only the appended spans when no terminal-meta channel exists", () => {
+			const { events, producer } = record();
+			producer.appendTerminal("head\n"); // [0, 5)
+			producer.declareGap(1024); // declared: [5, 1029)
+			producer.appendTerminal("tail\n"); // [1029, 1034)
+			events.push({ type: "live_terminal_attached", binding: createLiveTerminalBinding("term-15") });
+
+			const { receipts } = run([{ type: "started", call: bashCall({ kind: "read" }) }, ...events], {
+				phase: "live",
+				terminal: { kind: "real", metaCap: undefined },
+				fence: true,
+			});
+
+			const suppressed = receipts.flatMap(receipt =>
+				receipt.kind === "stream_suppressed"
+					? [[plain(receipt.fromByte), plain(receipt.toByte), receipt.reason] as const]
+					: [],
+			);
+			expect(suppressed).toEqual([
+				[0, 5, "no_capable_channel"],
+				[1029, 1034, "no_capable_channel"],
+			]);
+		});
 	});
 });
 

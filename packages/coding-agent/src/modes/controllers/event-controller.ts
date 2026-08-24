@@ -294,6 +294,12 @@ export class EventController {
 				this.ctx.ui.requestRender(true);
 			},
 			goal_updated: async () => {},
+			// The TUI still renders tool calls from the `tool_execution_*` pair, which
+			// every route keeps emitting. It is not a presentation-event consumer yet
+			// (phase 3 moves TUI rendering onto the projection family), so this is a
+			// deliberate no-op rather than an oversight — the exhaustive handler map is
+			// what forced the decision to be written down here at all.
+			tool_presentation: async () => {},
 		} satisfies AgentSessionEventHandlers;
 	}
 

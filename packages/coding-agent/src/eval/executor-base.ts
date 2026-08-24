@@ -3,6 +3,7 @@ import { Settings } from "../config/settings";
 import { OutputSink } from "../session/streaming-output";
 import type { ToolSession } from "../tools";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../tools/output-meta";
+import type { ExecutorTermination } from "./backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP, isEvalTimeoutControlEvent } from "./bridge-timeout";
 import type { JsStatusEvent } from "./js/shared/types";
 import type { KernelDisplayOutput } from "./py/display";
@@ -54,7 +55,7 @@ export interface KernelExecutorBaseOptions {
 export interface KernelExecutionResult {
 	output: string;
 	exitCode: number | undefined;
-	cancelled: boolean;
+	termination: ExecutorTermination | undefined;
 	truncated: boolean;
 	artifactId: string | undefined;
 	totalLines: number;
@@ -256,13 +257,13 @@ function createBridgeAbortShield(source: AbortSignal | undefined): BridgeAbortSh
 	return shield;
 }
 
-export function createCancelledKernelResult(output: string): KernelExecutionResult {
+export function createCancelledKernelResult(output: string, termination: ExecutorTermination): KernelExecutionResult {
 	const outputBytes = Buffer.byteLength(output, "utf-8");
 	const outputLines = output.length > 0 ? 1 : 0;
 	return {
 		output,
 		exitCode: undefined,
-		cancelled: true,
+		termination,
 		truncated: false,
 		artifactId: undefined,
 		totalLines: outputLines,
@@ -272,6 +273,11 @@ export function createCancelledKernelResult(output: string): KernelExecutionResu
 		displayOutputs: [],
 		stdinRequested: false,
 	};
+}
+export function cancellationTermination(timedOut: boolean, timeoutMs: number | undefined): ExecutorTermination {
+	if (!timedOut) return { kind: "interrupted" };
+	if (timeoutMs === undefined) throw new Error("Timed-out eval execution has no configured timeout");
+	return { kind: "timed_out", timeoutMs };
 }
 
 // ---------------------------------------------------------------------------
@@ -543,7 +549,7 @@ export async function executeWithKernelBase<
 			const dumped = await sink.dump(annotation);
 			return {
 				exitCode: undefined,
-				cancelled: true,
+				termination: cancellationTermination(timedOut, executionTimeoutMs ?? options?.idleTimeoutMs),
 				truncated: dumped.truncated,
 				output: dumped.output,
 				artifactId: dumped.artifactId ?? undefined,
@@ -562,7 +568,7 @@ export async function executeWithKernelBase<
 			const dumped = await sink.dump(annotation);
 			return {
 				exitCode: 1,
-				cancelled: false,
+				termination: undefined,
 				truncated: dumped.truncated,
 				output: dumped.output,
 				artifactId: dumped.artifactId ?? undefined,
@@ -580,7 +586,7 @@ export async function executeWithKernelBase<
 		const dumped = await sink.dump();
 		return {
 			exitCode,
-			cancelled: false,
+			termination: undefined,
 			truncated: dumped.truncated,
 			output: dumped.output,
 			artifactId: dumped.artifactId ?? undefined,
@@ -600,7 +606,7 @@ export async function executeWithKernelBase<
 			const dumped = await sink.dump(annotation);
 			return {
 				exitCode: undefined,
-				cancelled: true,
+				termination: cancellationTermination(timedOut, executionTimeoutMs ?? options?.idleTimeoutMs),
 				truncated: dumped.truncated,
 				output: dumped.output,
 				artifactId: dumped.artifactId ?? undefined,

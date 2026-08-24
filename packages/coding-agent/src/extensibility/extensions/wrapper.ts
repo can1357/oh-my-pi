@@ -21,6 +21,7 @@ import {
 } from "../../tools/approval";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
+import { normalizeToolEventDetails } from "../tool-event-details";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
 import type { ExtensionRunner } from "./runner";
@@ -178,9 +179,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		toolCallId: string,
 		params: Static<TParameters>,
 		signal?: AbortSignal,
-		onUpdate?: AgentToolUpdateCallback<TDetails, TParameters>,
+		onUpdate?: AgentToolUpdateCallback<TDetails>,
 		context?: AgentToolContext,
-	): Promise<AgentToolResult<TDetails, TParameters>> {
+	): Promise<AgentToolResult<TDetails>> {
 		// The agent loop emits `tool_call` at arg-prep time (session
 		// `beforeToolCall` wiring) so a handler revision lands before concurrency
 		// scheduling and `tool_execution_start`. Consume the marker
@@ -346,7 +347,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		}
 
 		// Execute the actual tool
-		let result: AgentToolResult<TDetails, TParameters>;
+		let result: AgentToolResult<TDetails>;
 		let executionError: Error | undefined;
 
 		try {
@@ -378,7 +379,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					resolveToolEventInput(this.tool, toolEventArgs(effectiveParams, context)),
 				),
 				content: result.content,
-				details: result.details,
+				details: normalizeToolEventDetails(this.tool.name, result.details),
 				isError: !!executionError,
 			});
 

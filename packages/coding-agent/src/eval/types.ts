@@ -1,7 +1,9 @@
 /** Runtime backend that an eval cell dispatches to. */
 export type EvalLanguage = "python" | "js" | "ruby" | "julia";
 
+import type { JsonValue, ToolFactBody } from "@oh-my-pi/pi-agent-core/presentation";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { evalTerminationSchema } from "../presentation/schemas/details";
 import type { OutputMeta } from "../tools/output-meta";
 
 /** Status event emitted by eval prelude helpers for TUI rendering. */
@@ -34,10 +36,16 @@ export interface EvalCellResult {
 /** Tool result detail object surfaced to the UI/transcript. */
 export interface EvalToolDetails {
 	cells?: EvalCellResult[];
-	jsonOutputs?: unknown[];
+	jsonOutputs?: JsonValue[];
 	images?: ImageContent[];
 	statusEvents?: EvalStatusEvent[];
 	isError?: boolean;
+	/**
+	 * How the cell terminated, if not by ordinary completion. A discriminated
+	 * union so contradictory states (`timedOut` without `cancelled`) are
+	 * unrepresentable. `undefined` means the cell completed normally.
+	 */
+	termination?: EvalTermination;
 	meta?: OutputMeta;
 	/** First backend that produced cells. Kept for transcript compatibility. */
 	language?: EvalLanguage;
@@ -52,11 +60,43 @@ export interface EvalToolDetails {
 		type: "eval";
 	};
 	/**
-	 * Agent-synthesized notes (kernel timeout/kill, a stdin request) that are
-	 * absent from the process byte stream — mirrored from
-	 * `ExecutorBackendResult.annotation` so the ACP terminal path, which reads
-	 * only structured facts and never the model-facing text, doesn't silently
-	 * drop the reason a cell stopped. Same convention as `BashToolDetails.notices`.
+	 * Agent-synthesized notes a producer wants a terminal-rendering client to
+	 * see even though they never streamed through `onChunk`. No local backend
+	 * writes this any more (the ordinary kernel-execution path composes its
+	 * `ExecutorBackendResult.annotation` straight into the model-facing text
+	 * and declares it as its own `stop_annotation` fact instead of mirroring
+	 * it here) — the sole remaining writer is an injected `EvalProxyExecutor`
+	 * (an MCP-proxied eval-shaped tool, permanently on the `legacy_snapshot`
+	 * lifecycle), and the sole reader is `LegacyEvalPresentation`, that
+	 * proxy's own compatibility adapter.
 	 */
 	notices?: readonly string[];
+	/**
+	 * Fact bodies this call declared for `EvalTool#modelContentProjection`
+	 * (the typed model-content projection escape hatch, shared with `read`/`grep`/`glob`/`bash` via
+	 * `renderNoticeTrail` in `presentation/projections.ts`) — see
+	 * `ToolResultBuilder#truncationFactFromSummary`'s doc comment.
+	 * `meta.truncation`/`meta.limits.columnTruncated` above stay populated
+	 * exactly as before for every consumer that already reads them (eval's own
+	 * `publishEvalTruncationFacts` live-wire publisher,
+	 * `spillLargeResultToArtifact`, `formatStyledTruncationWarning`); this
+	 * array is what `#modelContentProjection` and `eval-render.ts`'s TUI
+	 * render function use instead of `stripOutputNotice`/`appendOutputNotice`'s
+	 * string round-trip.
+	 */
+	presentationFacts?: readonly ToolFactBody[];
 }
+
+/**
+ * How an eval cell terminated abnormally. A discriminated union derived from
+ * `evalTerminationSchema` so the runtime schema and the static type cannot
+ * drift — a rename on either side fails `bun check` (exact parity test in
+ * `presentation-schemas.test.ts`).
+ *
+ * - `interrupted`: a user/system abort (not a timeout). Maps to
+ *   `ToolOutcome.kind === "interrupted"`.
+ * - `timed_out`: the cell's timeout deadline fired. Carries the configured
+ *   timeout in milliseconds — never a fabricated `0`. Maps to
+ *   `ToolOutcome.kind === "failed"` with `process.kind === "timed_out"`.
+ */
+export type EvalTermination = (typeof evalTerminationSchema)["_output"];

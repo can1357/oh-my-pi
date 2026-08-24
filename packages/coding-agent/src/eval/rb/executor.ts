@@ -2,9 +2,11 @@ import * as fs from "node:fs";
 
 import { getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
+import type { ExecutorTermination } from "../backend";
 import {
 	buildManagedKernelEnv,
 	buildManagedKernelEnvPatch,
+	cancellationTermination,
 	createCancelledKernelResult,
 	executeWithKernelBase,
 	getExecutionDeadlineMs,
@@ -90,7 +92,7 @@ export interface RubyKernelExecutor {
 export interface RubyResult {
 	output: string;
 	exitCode: number | undefined;
-	cancelled: boolean;
+	termination: ExecutorTermination | undefined;
 	truncated: boolean;
 	artifactId?: string;
 	totalLines: number;
@@ -141,7 +143,7 @@ const formatKernelTimeoutAnnotation = formatSessionKernelTimeoutAnnotation;
 
 function createCancelledRubyResult(timedOut: boolean, timeoutMs?: number): RubyResult {
 	const output = timedOut ? (formatTimeoutAnnotation(timeoutMs) ?? "Command timed out") : "";
-	return createCancelledKernelResult(output);
+	return { ...createCancelledKernelResult(output, cancellationTermination(timedOut, timeoutMs)) };
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +265,7 @@ export async function executeRuby(code: string, options?: RubyExecutorOptions): 
 		if (isCancellationError(err, RubyExecutionCancelledError) || executionOptions.signal?.aborted) {
 			return createCancelledRubyResult(
 				isTimedOutCancellation(err, RubyExecutionCancelledError, executionOptions.signal),
+				executionOptions.timeoutMs,
 			);
 		}
 		throw err;

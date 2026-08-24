@@ -24,7 +24,7 @@ export function readInterpreterSetting(session: ToolSession, key: string): strin
 export function toExecutorBackendResult(result: {
 	output: string;
 	exitCode: number | undefined;
-	cancelled: boolean;
+	termination: ExecutorBackendResult["termination"];
 	truncated: boolean;
 	artifactId?: string | undefined;
 	totalLines: number;
@@ -37,7 +37,7 @@ export function toExecutorBackendResult(result: {
 	return {
 		output: result.output,
 		exitCode: result.exitCode,
-		cancelled: result.cancelled,
+		termination: result.termination,
 		truncated: result.truncated,
 		artifactId: result.artifactId,
 		totalLines: result.totalLines,

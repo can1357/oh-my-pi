@@ -1,5 +1,5 @@
-import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
-import { type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
+import type { ToolPresentationProducer } from "@oh-my-pi/pi-agent-core/presentation";
+import { type PtyRunResult, PtySession, type PtyStartOptions } from "@oh-my-pi/pi-natives";
 import {
 	type Component,
 	extractPrintableText,
@@ -25,6 +25,49 @@ export interface BashInteractiveResult extends OutputSummary {
 	exitCode: number | undefined;
 	cancelled: boolean;
 	timedOut: boolean;
+}
+
+/** The UI surface used by the interactive runner. */
+export interface InteractivePtyTui {
+	readonly terminal: {
+		readonly columns: number;
+		readonly rows: number;
+	};
+	requestRender(): void;
+}
+
+export type InteractivePtyUiFactory<T> = (
+	tui: InteractivePtyTui,
+	theme: Theme,
+	_keybindings: unknown,
+	done: (result: T) => void,
+) => Component | Promise<Component>;
+
+/** Narrow UI contract for the interactive runner. */
+export interface InteractivePtyUi {
+	custom<T>(factory: InteractivePtyUiFactory<T>, options?: { overlay?: boolean }): Promise<T>;
+}
+
+/** Stateful process operations used by the interactive runner. */
+export interface InteractivePtySession {
+	start(
+		options: PtyStartOptions,
+		onChunk?: ((error: Error | null, chunk: string) => void) | null,
+	): Promise<PtyRunResult>;
+	write(data: string): void;
+	resize(cols: number, rows: number): void;
+	kill(): void;
+}
+
+/** Runtime-only dependencies for the interactive runner. */
+export interface InteractivePtyRunnerDependencies {
+	loadRuntimeSettings(): Promise<{
+		readonly shell: string;
+		readonly headBytes: number;
+		readonly maxColumns: number;
+	}>;
+	loadTerminal(): Promise<typeof XtermModule.Terminal>;
+	createSession(): InteractivePtySession;
 }
 
 function normalizeCaptureChunk(chunk: string): string {
@@ -116,7 +159,7 @@ class BashInteractiveOverlayComponent implements Component {
 	#onInput: (data: string) => void = () => {};
 	#onDismiss: () => void = () => {};
 	#onDispose: () => void = () => {};
-	#session: PtySession | null = null;
+	#session: InteractivePtySession | null = null;
 	#lastCols = 0;
 	#lastRows = 0;
 	#writeQueue: string[] = [];
@@ -211,7 +254,7 @@ class BashInteractiveOverlayComponent implements Component {
 		return promise;
 	}
 
-	setSession(session: PtySession): void {
+	setSession(session: InteractivePtySession): void {
 		this.#session = session;
 	}
 
@@ -319,8 +362,21 @@ class BashInteractiveOverlayComponent implements Component {
 	}
 }
 
+const defaultInteractivePtyRunnerDependencies: InteractivePtyRunnerDependencies = {
+	async loadRuntimeSettings() {
+		const settings = await Settings.init();
+		return {
+			shell: settings.getShellConfig().shell,
+			headBytes: resolveOutputSinkHeadBytes(settings),
+			maxColumns: resolveOutputMaxColumns(settings),
+		};
+	},
+	loadTerminal: loadXtermTerminal,
+	createSession: () => new PtySession(),
+};
+
 export async function runInteractiveBashPty(
-	ui: NonNullable<AgentToolContext["ui"]>,
+	ui: InteractivePtyUi,
 	options: {
 		command: string;
 		cwd: string;
@@ -329,22 +385,24 @@ export async function runInteractiveBashPty(
 		env?: Record<string, string>;
 		artifactPath?: string;
 		artifactId?: string;
+		presentation?: ToolPresentationProducer;
 	},
+	dependencies: InteractivePtyRunnerDependencies = defaultInteractivePtyRunnerDependencies,
 ): Promise<BashInteractiveResult> {
-	const settings = await Settings.init();
+	const runtimeSettings = await dependencies.loadRuntimeSettings();
 	// Load the xterm Terminal ctor here (async boundary) — the ui.custom factory below is sync.
-	const XtermTerminal = await loadXtermTerminal();
-	const { shell: resolvedShell } = settings.getShellConfig();
+	const XtermTerminal = await dependencies.loadTerminal();
 	const sink = new OutputSink({
 		artifactPath: options.artifactPath,
 		artifactId: options.artifactId,
-		headBytes: resolveOutputSinkHeadBytes(settings),
-		maxColumns: resolveOutputMaxColumns(settings),
+		headBytes: runtimeSettings.headBytes,
+		maxColumns: runtimeSettings.maxColumns,
+		presentation: options.presentation,
 	});
 	try {
 		const result = await ui.custom<BashInteractiveResult>(
 			(tui, uiTheme, _keybindings, done) => {
-				const session = new PtySession();
+				const session = dependencies.createSession();
 				const component = new BashInteractiveOverlayComponent(
 					options.command,
 					uiTheme,
@@ -410,7 +468,7 @@ export async function runInteractiveBashPty(
 							signal: options.signal,
 							cols,
 							rows,
-							shell: resolvedShell,
+							shell: runtimeSettings.shell,
 						},
 						(err, chunk) => {
 							if (finished || err || !chunk) return;

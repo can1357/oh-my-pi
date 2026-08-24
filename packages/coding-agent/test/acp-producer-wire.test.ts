@@ -1526,9 +1526,10 @@ describe("ACP legacy edit parser boundary", () => {
 		// the mapper moved with the dispatch: `apply_patch`/`edit`/`patch` never
 		// reach the mapper at all now (`AcpAgent#handlePromptEvent` intercepts
 		// every built-in-dispatched name before the mapper is ever called), so
-		// a malformed built-in result poisons the real live route instead —
-		// see "fails closed for a malformed built-in apply_patch result
-		// envelope instead of a degraded success" in `acp-agent.test.ts`.
+		// a schema-violating built-in result degrades on the real live route
+		// into a minimal typed card instead of poisoning it — see "degrades a
+		// schema-violating built-in apply_patch result into an empty completed
+		// card without poisoning the prompt" in `acp-agent.test.ts`.
 		const valid = {
 			content: [{ type: "text", text: "applied" }],
 			details: {
