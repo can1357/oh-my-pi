@@ -610,6 +610,21 @@ export class TtsrManager {
 		}
 	}
 
+	/**
+	 * Process-local gap per injected rule (counter − lastInjectedAt,
+	 * clamped at zero): the timing distance a rollback must preserve across
+	 * its counter realignment. A resumed process starts both the counter
+	 * and restored records at zero, so live records cannot be compared
+	 * against historical branch positions directly.
+	 */
+	getInjectionGaps(): Map<string, number> {
+		const gaps = new Map<string, number>();
+		for (const [name, record] of this.#injectionRecords) {
+			gaps.set(name, Math.max(0, this.#messageCount - record.lastInjectedAt));
+		}
+		return gaps;
+	}
+
 	/** Get current message count. */
 	getMessageCount(): number {
 		return this.#messageCount;

@@ -5584,6 +5584,9 @@ export class AgentSession {
 		const manager = this.#ttsr.manager;
 		if (!manager) return;
 		const ruleNames = new Set<string>();
+		// Captured BEFORE restoreInjected clears the live records: each
+		// surviving rule's process-local elapsed-since-injection distance.
+		const liveGaps = manager.getInjectionGaps();
 		// Injection positions in turn units, taken from where each rule's
 		// LAST ttsr_injection entry sits on the branch: a rule a redo
 		// reintroduces has no live timing record to preserve, and zeroing it
@@ -5646,10 +5649,19 @@ export class AgentSession {
 				}
 			}
 		}
+		// Rules with a live timing record keep their PROCESS-LOCAL gap, not
+		// their historical position: a resumed session restores injected
+		// rules at lastInjectedAt 0 with the counter also at 0, so the live
+		// gap is the real elapsed-since-injection distance in this process.
+		// Substituting the branch's lifetime assistant count for the counter
+		// would make an after-gap rule injected before resume instantly
+		// eligible merely because a rollback ran. Rules WITHOUT a live
+		// record (a redo reintroducing an off-branch injection) keep the
+		// branch position computed above.
+		for (const [name, gap] of liveGaps) {
+			injectionPositions.set(name, Math.max(0, branchTurnCount - gap));
+		}
 		manager.restoreInjected([...ruleNames], injectionPositions);
-		// Counter and injection positions realign together: the live counter
-		// would otherwise still sit at its pre-rewind value, making retained
-		// after-gap rules instantly eligible.
 		manager.rewindMessageCount(branchTurnCount);
 	}
 

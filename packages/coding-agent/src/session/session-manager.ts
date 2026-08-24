@@ -1150,15 +1150,17 @@ export class SessionManager {
 
 	#releaseOwnerClaim(sessionFile: string | undefined): void {
 		if (!sessionFile) return;
+		// The release is latched SYNCHRONOUSLY at call time — mirroring
+		// #registerOwnerSidecar's synchronous latch — never inside the tail
+		// callback. A resume of file A racing a switch-away's queued removal
+		// must see the contribution already gone and queue a fresh
+		// registration behind the removal; accepting the pending-to-be-
+		// removed count as durable ownership would leave the manager idle on
+		// A with no owner row once the queued removal lands.
+		const count = this.#ownerClaims.get(sessionFile) ?? 0;
+		if (count <= 0) return;
+		this.#ownerClaims.set(sessionFile, count - 1);
 		this.#sidecarTail = this.#sidecarTail.then(async () => {
-			// Decided in tail order: every registration chained before this
-			// point has completed, so the per-file count reflects exactly
-			// how many lines THIS manager contributed to that file. Remove
-			// one per contribution — a manager whose registration failed
-			// strips nothing.
-			const count = this.#ownerClaims.get(sessionFile) ?? 0;
-			if (count <= 0) return;
-			this.#ownerClaims.set(sessionFile, count - 1);
 			let removed = false;
 			try {
 				removed = await removeOwnerSidecar(sessionFile);
