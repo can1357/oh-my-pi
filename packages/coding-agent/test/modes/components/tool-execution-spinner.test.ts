@@ -389,7 +389,15 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				ui: { requestRender: () => {} },
 				chatContainer,
 				resetObserverRegistry: () => {},
-				renderInitialMessages: () => Promise.resolve(),
+				// Mirrors the commit step of UiHelpers.renderInitialMessages: the
+				// staged transcript swaps in and the previously visible children are
+				// disposed (ui-helpers.ts), which is the moment the shared-ticker
+				// registrations of orphaned live blocks must drop. The guest resync
+				// path performs no eager teardown before this call.
+				renderInitialMessages: () => {
+					chatContainer.disposeChildren();
+					return Promise.resolve();
+				},
 				reloadTodos: () => Promise.resolve(),
 				showStatus: () => {},
 				showError: () => {},
