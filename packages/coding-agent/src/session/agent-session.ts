@@ -5541,14 +5541,17 @@ export class AgentSession {
 			const entry = branch[i];
 			if (entry && (entry.type === "reset_boundary" || entry.type === "compaction")) contextStart = i + 1;
 		}
-		this.#planReferenceSent = branch
-			.slice(contextStart)
-			.some(
-				entry =>
-					entry.type === "message" &&
-					(entry.message as { role?: string; customType?: string }).role === "custom" &&
-					(entry.message as { role?: string; customType?: string }).customType === "plan-mode-reference",
-			);
+		this.#planReferenceSent = branch.slice(contextStart).some(
+			entry =>
+				// Custom messages persist as `custom_message` journal entries
+				// carrying customType directly (there is no message-role
+				// "custom" entry on a reloaded journal), so both shapes are
+				// recognized here.
+				(entry.type === "custom_message" && entry.customType === "plan-mode-reference") ||
+				(entry.type === "message" &&
+					entry.message.role === "custom" &&
+					entry.message.customType === "plan-mode-reference"),
+		);
 	}
 
 	#reconcileTtsrInjections(): void {
@@ -8344,7 +8347,7 @@ export class AgentSession {
 			.map(entry => ({
 				entryId: entry.id,
 				timestamp: entry.timestamp,
-				preview: this.#previewText(entry.message),
+				preview: this.#userTurnPreview(entry),
 			}));
 	}
 
@@ -8372,11 +8375,32 @@ export class AgentSession {
 	 * Canonical operator-visible user turn: a plain user message, or a
 	 * user-invoked `/skill:<name>` prompt (same definition the auto-thinking
 	 * classifier uses). Centralized so /undo, /revert, and the picker agree.
+	 * Skill prompts reach the journal in both shapes: appendMessage keeps a
+	 * message-role "custom" entry, while appendCustomMessageEntry persists
+	 * a `custom_message` entry carrying customType/attribution directly.
 	 */
-	#isUserTurnEntry(entry: SessionEntry): entry is SessionMessageEntry {
+	#isUserTurnEntry(entry: SessionEntry): boolean {
+		if (entry.type === "custom_message") {
+			return entry.customType === SKILL_PROMPT_MESSAGE_TYPE && entry.attribution === "user";
+		}
 		if (entry.type !== "message") return false;
 		const message = entry.message;
 		return message.role === "user" || (message.role === "custom" && isUserInvokedSkillPrompt(message));
+	}
+
+	/** Preview line for either user-turn shape: message or persisted skill prompt. */
+	#userTurnPreview(entry: SessionEntry): string {
+		if (entry.type === "custom_message") {
+			const text =
+				typeof entry.content === "string"
+					? entry.content
+					: (entry.content ?? []).flatMap(part => (part.type === "text" ? [part.text] : [])).join(" ");
+			return truncateToWidth(
+				replaceTabs(sanitizeText(text.split("\n").find(line => line.trim().length > 0) ?? "(empty)")),
+				TRUNCATE_LENGTHS.LINE,
+			);
+		}
+		return entry.type === "message" ? this.#previewText(entry.message) : "(empty)";
 	}
 
 	/** `/revert <entryId>`: rewind to before an arbitrary earlier user turn. */
@@ -8415,7 +8439,7 @@ export class AgentSession {
 		const droppedPrompts = entries
 			.slice(userTurnIdx)
 			.filter(entry => this.#isUserTurnEntry(entry))
-			.map(entry => `- ${this.#previewText(entry.message)}`)
+			.map(entry => `- ${this.#userTurnPreview(entry)}`)
 			.join("\n");
 		// SILENT undo contract: state after /undo is indistinguishable in
 		// context from the dropped turns never having happened. No rendered

@@ -830,9 +830,16 @@ describe("omp gc --undo-tails (CLI)", () => {
 		const branchFile = manager.createBranchedSession(anchorEntry!.id);
 		expect(branchFile).toBeDefined();
 
-		// The transfer is queued on the sidecar tail; wait for it to settle.
+		// The destination claim is durable the moment createBranchedSession
+		// returns (a synchronous preclaim precedes the publish), while the
+		// source release is queued on the sidecar tail; wait for both sides
+		// of the transfer to settle.
 		const deadline = Date.now() + 5_000;
-		while ((await readSessionOwnerPids(branchFile!)).length === 0 && Date.now() < deadline) {
+		while (
+			((await readSessionOwnerPids(branchFile!)).length === 0 ||
+				(await readSessionOwnerPids(sessionFile)).length > 0) &&
+			Date.now() < deadline
+		) {
 			await Bun.sleep(25);
 		}
 		expect(await readSessionOwnerPids(branchFile!)).toContain(process.pid);

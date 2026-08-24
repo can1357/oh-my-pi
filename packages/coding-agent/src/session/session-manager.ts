@@ -141,6 +141,32 @@ async function writeOwnerSidecar(sessionFile: string): Promise<boolean> {
 	}
 }
 
+/**
+ * Synchronous {@link writeOwnerSidecar} for callers that must have the
+ * claim durable BEFORE the session file itself becomes visible on disk
+ * (branch creation publishes via a synchronous rewrite). Same locking and
+ * one-line-per-manager contract as the async variant.
+ */
+function writeOwnerSidecarSync(sessionFile: string): boolean {
+	const lock = tryAcquireFileLock(ownerSidecarPath(sessionFile));
+	if (!lock?.acquired) {
+		lock?.release();
+		return false;
+	}
+	try {
+		fs.appendFileSync(ownerSidecarPath(sessionFile), `${process.pid}\n`, {
+			encoding: "utf-8",
+			mode: 0o600,
+		});
+		return true;
+	} catch {
+		// Best-effort ownership hint, same contract as the async variant.
+		return false;
+	} finally {
+		lock.release();
+	}
+}
+
 function pruneMarkerPath(sessionFile: string): string {
 	return `${ownerSidecarPath(sessionFile)}.pruning`;
 }
@@ -3628,21 +3654,24 @@ export class SessionManager {
 			return undefined;
 		}
 
+		// Durable owner claim BEFORE the branch file becomes visible: the
+		// rewrite below publishes synchronously and the branched journal
+		// already carries its user-undo marker, so gc must see this pid on
+		// disk the moment the file appears, or a concurrent
+		// `omp gc --undo-tails --apply` could prune beneath this manager's
+		// retained tree and a later full rewrite resurrect the removed
+		// entries. A failed preclaim refuses the branch (in-memory state
+		// untouched) instead of publishing unowned.
+		if (!writeOwnerSidecarSync(newSessionFile)) {
+			throw new SessionFileLockError(newSessionFile);
+		}
+		this.#ownerClaims.set(newSessionFile, (this.#ownerClaims.get(newSessionFile) ?? 0) + 1);
 		this.#sessionFile = newSessionFile;
-		// Ownership transfer at the switch: release the source claim and
-		// claim the branch file (queued in tail order). Without this, the
-		// first #recordEntry backstop would overwrite the slot and leak the
-		// source claim — close() removes only the branch line, and the old
-		// session stays owned by this pid until process exit, blocking
-		// undo-tail GC.
+		// Release the source claim only now — queued in tail order after any
+		// earlier writes to it — while the destination claim recorded above
+		// stays, so both files remain correctly accounted through the switch
+		// and close() sheds each exactly once.
 		this.#unregisterOwnerSidecar(newSessionFile);
-		this.#sidecarTail = this.#sidecarTail.then(async () => {
-			if (await this.#claimOwnerSidecarFor(newSessionFile)) return;
-			// Same contract as #registerOwnerSidecar: a failed claim must
-			// not count, so the #recordEntry backstop retries.
-			const claimed = this.#ownerClaims.get(newSessionFile) ?? 0;
-			if (claimed > 0) this.#ownerClaims.set(newSessionFile, claimed - 1);
-		});
 		this.#rewriteSynchronously();
 		this.#rememberBreadcrumb(this.#cwd, newSessionFile);
 		return newSessionFile;
