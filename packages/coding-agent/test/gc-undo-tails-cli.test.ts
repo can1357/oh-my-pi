@@ -767,6 +767,29 @@ describe("omp gc --undo-tails (CLI)", () => {
 		await fresh.close();
 	});
 
+	it("a failing marker creation restores the prune state before rethrowing", async () => {
+		await buildSessionWithTwoUndoTails();
+		const before = fs.readFileSync(sessionFile, "utf-8");
+		const manager = await SessionManager.open(sessionFile, sessionsDir, undefined, {
+			suppressBreadcrumb: true,
+		});
+		const entriesBefore = manager.getBranch().map(entry => entry.id);
+
+		// The marker cannot even be created while the session dir is
+		// read-only: the prune must reject with the ORIGINAL error and the
+		// in-memory tree intact, or a later rewrite from the same manager
+		// would silently commit the reported-as-failed prune.
+		fs.chmodSync(sessionsDir, 0o500);
+		try {
+			await expect(manager.pruneUserUndoTails(0, true)).rejects.toThrow();
+		} finally {
+			fs.chmodSync(sessionsDir, 0o700);
+		}
+		expect(fs.readFileSync(sessionFile, "utf-8")).toBe(before);
+		expect(manager.getBranch().map(entry => entry.id)).toEqual(entriesBefore);
+		await manager.close();
+	});
+
 	it("a throwing publish restores the tree and clears the prune marker", async () => {
 		await buildSessionWithTwoUndoTails();
 		const before = fs.readFileSync(sessionFile, "utf-8");
