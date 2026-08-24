@@ -3467,6 +3467,16 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				// holding live LSP/MCP child processes — dispose it when it does so
 				// a cancelled subagent cannot leak them.
 				void sessionPromise.then(created => created.session.dispose()).catch(() => {});
+				// The OTHER failure shape: the factory itself rejected before
+				// constructing an AgentSession (e.g. duplicate agent
+				// registration). Its error path does not dispose an
+				// externally supplied session manager, and the holder above
+				// was already cleared at adoption — close the manager here so
+				// its live-pid owner claim does not pin the session against
+				// undo-tail gc in the parent.
+				sessionPromise.catch(() => {
+					void sessionManager.close().catch(() => {});
+				});
 				throw err;
 			}
 			sessionCreatedAt = performance.now();

@@ -158,3 +158,47 @@ it("closes a session manager abandoned by abort before adoption", async () => {
 		expect(content.trim()).toBe("");
 	}
 });
+
+it("closes the session manager when the session factory rejects before adoption completes", async () => {
+	const tempDir = TempDir.createSync("@pi-task-factory-reject-");
+	tempDirs.push(tempDir);
+	const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+	authStorages.push(authStorage);
+
+	// A real file-backed manager with a durable owner claim, handed to the
+	// executor before the session factory rejects.
+	const sessionFile = tempDir.join("factory-reject.jsonl");
+	const manager = SessionManager.create(tempDir.path(), tempDir.path());
+	await manager.setSessionFile(sessionFile);
+
+	const openGate = Promise.withResolvers<SessionManager>();
+	vi.spyOn(SessionManager, "open").mockImplementation(() => openGate.promise);
+	// The factory fails before constructing an AgentSession (e.g. duplicate
+	// agent registration): its error path does not dispose the externally
+	// supplied manager.
+	vi.spyOn(sdkModule, "createAgentSession").mockRejectedValue(new Error("agent already owned"));
+
+	const run = runSubprocess({
+		cwd: tempDir.path(),
+		artifactsDir: tempDir.path(),
+		agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+		task: "test",
+		index: 0,
+		id: "task-factory-reject-claim",
+		authStorage,
+		enableLsp: false,
+		enableIrc: false,
+	});
+	openGate.resolve(manager);
+	const result = await run;
+	expect(result.exitCode).not.toBe(0);
+
+	// The owner sidecar claim must be released so undo-tail gc in the
+	// parent does not skip the session.
+	const sidecar = `${sessionFile}.owner`;
+	await Bun.sleep(150);
+	if (fs.existsSync(sidecar)) {
+		const content = fs.readFileSync(sidecar, "utf-8");
+		expect(content.trim()).toBe("");
+	}
+});
