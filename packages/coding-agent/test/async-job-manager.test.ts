@@ -824,6 +824,38 @@ describe("AsyncJobManager", () => {
 		expect(manager.getJob("hung-1")?.status).toBe("cancelled");
 	});
 
+	test("waitForOwnerJobs follows a reused public ID into its new generation", async () => {
+		const manager = new AsyncJobManager({ retentionMs: 0 });
+		const firstGate = Promise.withResolvers<string>();
+		const secondGate = Promise.withResolvers<string>();
+		const jobId = manager.register("bash", "first generation", () => firstGate.promise, {
+			id: "reused",
+			ownerId: "Sub",
+		});
+		const firstJob = manager.getJob(jobId)!;
+		const replacementRegistered = firstJob.promise.then(() => {
+			expect(
+				manager.register("bash", "second generation", () => secondGate.promise, {
+					id: jobId,
+					ownerId: "Sub",
+				}),
+			).toBe(jobId);
+		});
+		const waiting = manager.waitForOwnerJobs("Sub");
+		let settled = false;
+		void waiting.then(() => {
+			settled = true;
+		});
+
+		firstGate.resolve("first done");
+		await replacementRegistered;
+		await Promise.resolve();
+		expect(settled).toBe(false);
+
+		secondGate.resolve("second done");
+		await expect(waiting).resolves.toBe(true);
+	});
+
 	test("merges resolved run-result details into latestDetails over the last progress report", async () => {
 		const manager = new AsyncJobManager({ onJobComplete: async () => {} });
 		const jobId = manager.register("bash", "exit seven", async ({ reportProgress }) => {
