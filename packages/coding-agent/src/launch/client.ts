@@ -56,7 +56,7 @@ interface OutputSinkRegistration {
 	subscription: DaemonOutputSubscription;
 	registrationId: string;
 	sink: (notification: DaemonMonitorNotification) => Promise<void> | void;
-	/** Daemon incarnation bound by the first matching notification. */
+	/** Daemon incarnation supplied at attach time or bound by the first matching notification. */
 	daemonId?: string;
 	/** Resolves once broker acknowledgement or terminal delivery confirms this subscription. */
 	resolveReady: () => void;
@@ -291,6 +291,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	close(): void {
 		if (this.#closed) return;
 		this.#closed = true;
+		this.#socketGeneration++;
 		clearTimeout(this.#completionReconnectTimer);
 		this.#completionReconnectTimer = undefined;
 		this.#socket?.destroy();
@@ -345,6 +346,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			subscription,
 			registrationId: crypto.randomUUID(),
 			sink,
+			daemonId: subscription.daemonId,
 			resolveReady: () => {
 				if (readySettled) return;
 				readySettled = true;
@@ -361,7 +363,6 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			this.#outputSinks.delete(subscription.id);
 			previous.rejectReady(new Error("Daemon output registration was replaced before it was acknowledged"));
 		}
-
 		if (
 			this.#brokerCapabilities !== undefined &&
 			!this.#brokerCapabilities.includes(DAEMON_OUTPUT_MONITOR_CAPABILITY)
@@ -381,7 +382,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				clearTimeout(this.#completionReconnectTimer);
 				this.#completionReconnectTimer = undefined;
 			}
-			this.#publishSubscriptions();
+			void this.#publishSubscriptions();
 		};
 		return Object.defineProperty(unregister, "ready", { value: ready }) as DaemonOutputUnregister;
 	}
@@ -396,6 +397,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		return [...this.#outputSinks.values()].map(entry => ({
 			...entry.subscription,
 			registrationId: entry.registrationId,
+			...(entry.daemonId === undefined ? {} : { daemonId: entry.daemonId }),
 			...(entry.lastEpoch === undefined ? {} : { lastEpoch: entry.lastEpoch, lastSeq: entry.lastSeq ?? 0 }),
 			...(entry.lastArtifactBytes === undefined ? {} : { artifactBytes: entry.lastArtifactBytes }),
 		}));
@@ -403,7 +405,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 
 	#publishCompletionOwners(): void {
 		if (this.#closed) return;
-		this.#publishSubscriptions();
+		void this.#publishSubscriptions();
 	}
 
 	#publishSubscriptions(): void {
@@ -517,7 +519,9 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			// The close handler rejects pending requests with one stable error.
 		});
 		socket.on("close", () => {
-			if (this.#socket === socket) this.#socket = undefined;
+			if (this.#socket !== socket || generation !== this.#socketGeneration) return;
+			this.#socket = undefined;
+			this.#socketGeneration++;
 			this.#rejectPending(new Error("Daemon broker connection closed"));
 			this.#scheduleCompletionReconnect();
 		});
@@ -552,11 +556,15 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				continue;
 			}
 			if ("event" in message) {
+				const daemonId =
+					message.event === "daemon-completed" || message.event === "daemon-monitor-completed"
+						? message.daemon.id
+						: message.daemonId;
 				if (message.event === "daemon-completed") {
-					void this.#queueNotificationDelivery(message.daemon.id, `completion:${message.owner}`, async () => {
-						if (this.#closed || generation !== this.#socketGeneration) return;
-						await this.#deliverCompletion(message);
-					});
+					if (this.#closed || generation !== this.#socketGeneration) continue;
+					void this.#queueNotificationDelivery(daemonId, `completion:${message.owner}`, () =>
+						this.#deliverCompletion(message, generation),
+					);
 				} else {
 					void this.#deliverOutput(message, generation);
 				}
@@ -598,7 +606,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		return delivery;
 	}
 
-	async #deliverCompletion(message: DaemonCompletionNotification): Promise<void> {
+	async #deliverCompletion(message: DaemonCompletionNotification, generation: number): Promise<void> {
 		if (this.#seenCompletionIds.has(message.completionId)) {
 			this.#ackCompletion(message.completionId);
 			return;
@@ -621,7 +629,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				completionId: message.completionId,
 				error: error instanceof Error ? error.message : String(error),
 			});
-			this.#socket?.destroy();
+			if (generation === this.#socketGeneration) this.#socket?.destroy();
 		} finally {
 			this.#inFlightCompletionIds.delete(message.completionId);
 		}
@@ -637,8 +645,9 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			if (message.registrationId !== entry.registrationId) return;
 			const notificationName = message.event === "daemon-monitor-completed" ? message.daemon.name : message.name;
 			if (notificationName !== entry.subscription.name) return;
-			if (entry.daemonId === undefined) entry.daemonId = notificationDaemonId;
-			else if (entry.daemonId !== notificationDaemonId) return;
+			const boundDaemonId = entry.daemonId ?? entry.subscription.daemonId;
+			if (boundDaemonId === undefined) entry.daemonId = notificationDaemonId;
+			else if (boundDaemonId !== notificationDaemonId) return;
 			// Destroying a socket does not retract frames already parsed from that
 			// socket. Once this connection's callback rejects, suppress everything
 			// queued behind it instead of invoking the sink again.
@@ -646,7 +655,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			if (message.event !== "daemon-output" && entry.completionBlocked) {
 				entry.resolveReady();
 				this.#outputSinks.delete(message.monitorId);
-				this.#publishSubscriptions();
+				void this.#publishSubscriptions();
 				return;
 			}
 			const notification = publicMonitorNotification(message);
@@ -668,13 +677,17 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			if (message.event !== "daemon-output" && this.#outputSinks.get(message.monitorId) === entry) {
 				entry.resolveReady();
 				this.#outputSinks.delete(message.monitorId);
-				this.#publishSubscriptions();
+				void this.#publishSubscriptions();
 			}
 		};
 		await this.#queueNotificationDelivery(notificationDaemonId, `monitor:${entry.registrationId}`, async () => {
 			try {
 				await deliver();
 			} catch (error) {
+				// The sink may have been deliberately removed or replaced while its
+				// callback was in flight. Only a failure from the current registration
+				// may poison delivery and tear down the shared connection.
+				if (this.#outputSinks.get(message.monitorId) !== entry) return;
 				entry.failedDeliveryGeneration = generation;
 				entry.completionBlocked = true;
 				logger.warn("Daemon output sink failed", {

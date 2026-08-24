@@ -13,7 +13,7 @@ import type { LaunchParams, LaunchToolDetails } from "./launch";
 /**
  * Hub operations: messaging (`send`/`wait`/`inbox`/`list`), jobs
  * (`wait`/`cancel`/`jobs`), and process supervision (`start`/`ps`/`logs`/
- * `stop`/`restart`/`describe`, plus `send`/`wait` when they carry `name`).
+ * `monitor`/`stop`/`restart`/`describe`, plus `send`/`wait` when they carry `name`).
  */
 export type HubOp =
 	| "send"
@@ -23,6 +23,7 @@ export type HubOp =
 	| "jobs"
 	| "cancel"
 	| "start"
+	| "monitor"
 	| "ps"
 	| "logs"
 	| "stop"
