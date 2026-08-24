@@ -29,7 +29,13 @@ Project-scoped long-running processes shared by every omp instance in the same d
   - Names are unique per project directory. A completed name MAY be started again; a live name MUST be stopped or restarted.
   - `restart` policy defaults `no`; `on-failure` and `always` use bounded backoff.
   - `persist: true` opts out of last-omp teardown; `detached: true` survives broker shutdown and all omp exits (implies persist, disables PTY input). Omit both unless their survival guarantees are required.
-- **`ps`**, **`logs`**, **`wait`** (with `name`), **`send`** (with `name`), **`stop`**, **`restart`**, and **`describe`** address the stable `name`.
+  - For actionable output, set `progress: "wake"`. Complete non-empty merged lines join a trailing 200 ms batch; a final partial line joins the last batch before completion. Wake starts a follow-up turn while idle; `progress: "ambient"` waits for an active turn.
+  - Truncated or suppressed progress links the monitor's full `artifact://<id>` capture.
+- `progress` on `start` stays attached. Use **`monitor`** only to attach later, retune, or detach (`progress: "off"`). Monitoring starts with future output; it does not replay logs.
+- If progress is noisy, lower source verbosity or use a filtering wrapper executable/script. If safe, stop then start with quieter arguments; `restart` reuses the noisy launch spec. If relaunch is unsafe, retune the monitor to `ambient` or `off`.
+- Monitoring and process lifetime are independent. `persist`/`detached` govern survival; monitoring never keeps a process alive. Detached processes cannot be live-monitored.
+- Progress and completion are separate. NEVER call `wait`, follow logs, or block to receive progress or keep the turn alive; use async progress and end the turn instead.
+- **`ps`**, **`logs`**, **`wait`** (with `name`), **`send`** (with `name`), **`stop`**, **`restart`**, **`describe`**, and **`monitor`** address the stable `name`.
 - **`logs`** defaults to the last 100 lines. `head: true` reads the beginning. `grep` is a JavaScript `RegExp` compiled with the `u` flag (no inline modifiers such as `(?i)`). `follow: true` waits for output after `cursor`; reuse the returned cursor on the next call.
 - **`wait`** with `name` blocks until readiness/exit/`pattern` or `timeout` (seconds). `pattern` is a JavaScript `RegExp` compiled with the `u` flag (no inline modifiers such as `(?i)`).
 - **`send`** with `name`: `text` writes stdin (`enter` defaults true); `keys` supports ENTER, TAB, ESCAPE, CTRL_C, CTRL_D, UP, DOWN, LEFT, RIGHT; `signal` supports SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGKILL. PTY input is serialized; writes share one input stream.

@@ -120,6 +120,13 @@ interface ManagedDaemon {
 	pty?: PtySession;
 	generation: number;
 	stopRequested: boolean;
+	/**
+	 * True when the record's last settlement emitted (or queued) a
+	 * `daemon-completed` notification for its owner; forwarded on
+	 * `daemon-monitor-completed` so owner-session monitors know whether a
+	 * separate owner completion covers the terminal state.
+	 */
+	ownerCompletionEmitted: boolean;
 	logReady: boolean;
 	portReady: boolean;
 	readinessBuffer: string;
@@ -201,6 +208,7 @@ interface OutputRegistration extends DaemonOutputWireSubscription {
 	artifactDisposal?: Promise<void>;
 	/** Bytes already on disk when this registration's sink opened; its own capture appends past them. */
 	artifactBase: number;
+	/** Reconnect-grace cleanup for registrations without an attached live client. */
 	offlineTimer?: NodeJS.Timeout;
 	/** Artifact persistence failed; retain only the terminal expiry until client cleanup. */
 	disabled?: boolean;
@@ -862,6 +870,7 @@ class DaemonBroker {
 				log: await DaemonLog.open(dir),
 				generation: 0,
 				stopRequested: false,
+				ownerCompletionEmitted: false,
 				logReady: !spec.ready?.log,
 				portReady: spec.ready?.port === undefined,
 				readinessBuffer: "",
@@ -908,6 +917,7 @@ class DaemonBroker {
 		record.generation++;
 		const generation = record.generation;
 		record.stopRequested = false;
+		record.ownerCompletionEmitted = false;
 		record.snapshot.state = record.spec.ready ? "starting" : "running";
 		record.snapshot.startedAt = Date.now();
 		record.snapshot.readyAt = undefined;
@@ -1222,6 +1232,7 @@ class DaemonBroker {
 						existing.owner = subscription.owner;
 						existing.startPending = subscription.startPending;
 						const reconnected = existing.socket !== socket;
+						existing.startPending = subscription.startPending;
 						existing.socket = socket;
 						this.#acknowledgeOutput(existing, subscription);
 						if (reconnected) {
@@ -1271,14 +1282,29 @@ class DaemonBroker {
 						existingArtifactBytes = await this.#artifactSize(subscription.artifactPath);
 						if (!current()) return;
 					}
+					const currentDaemonId = subscription.startPending === true ? undefined : record?.snapshot.id;
 					const registration = createOutputRegistration(
 						subscription,
 						socket,
 						subscriptionId,
-						subscription.startPending === true ? undefined : record?.snapshot.id,
+						subscription.daemonId ?? currentDaemonId,
 						existingArtifactBytes,
 					);
 					this.#outputRegistrations.set(key, registration);
+					if (
+						subscription.startPending !== true &&
+						subscription.daemonId !== undefined &&
+						subscription.daemonId !== currentDaemonId
+					) {
+						this.#sendMonitorNotification(registration, {
+							event: "daemon-monitor-expired",
+							monitorId: registration.id,
+							registrationId: registration.registrationId,
+							name: registration.name,
+							daemonId: subscription.daemonId,
+						});
+						return;
+					}
 					if (
 						record &&
 						terminalState(record.snapshot.state) &&
@@ -1475,11 +1501,14 @@ class DaemonBroker {
 		} catch (error) {
 			if (this.#outputRegistrations.get(key) === registration) {
 				// The retained expiry stays replayable for a reconnecting client, but
-				// only through the reconnect grace already running for an offline
-				// registration: its cleanup timer is deliberately left armed.
+				// only through one reconnect grace: an offline registration keeps (or
+				// regains) its cleanup timer instead of pinning itself forever.
 				registration.disabled = true;
 				this.#progressBatcher.clear(registration.batchKey);
 				void this.#disposeOutputArtifact(registration);
+				if (!registration.socket || registration.socket.destroyed) {
+					this.#scheduleOutputRegistrationCleanup(key, registration);
+				}
 				this.#sendMonitorNotification(registration, {
 					event: "daemon-monitor-expired",
 					monitorId: registration.id,
@@ -1538,6 +1567,7 @@ class DaemonBroker {
 				monitorId: registration.id,
 				registrationId: registration.registrationId,
 				daemon: { ...record.snapshot },
+				ownerNotified: record.ownerCompletionEmitted,
 			});
 		}
 	}
@@ -1762,6 +1792,7 @@ class DaemonBroker {
 					} satisfies DaemonCompletionNotification)
 				: undefined;
 		if (completion) record.pendingCompletions.push(completion);
+		record.ownerCompletionEmitted = completion !== undefined;
 		this.#persist(record);
 		await record.log?.close();
 		record.log = undefined;
@@ -2007,6 +2038,7 @@ class DaemonBroker {
 			spec: record.spec,
 			completionEvents: record.completionCapable,
 			completionSubscriptionId: record.completionSubscriptionId,
+			ownerNotified: record.ownerCompletionEmitted,
 			completionPending: record.pendingCompletions.length > 0,
 			pendingCompletion: record.pendingCompletions.at(-1)?.daemon,
 			pendingCompletions: record.pendingCompletions.map(completion => ({
@@ -2088,6 +2120,7 @@ class DaemonBroker {
 					dir,
 					generation: 0,
 					stopRequested: !detached || snapshot.state === "stopping",
+					ownerCompletionEmitted: "ownerNotified" in decoded && decoded.ownerNotified === true,
 					logReady: detached && (!spec.ready?.log || snapshot.state === "ready"),
 					portReady: detached && (spec.ready?.port === undefined || snapshot.state === "ready"),
 					readinessBuffer: "",
@@ -2142,6 +2175,7 @@ class DaemonBroker {
 						daemon: { ...snapshot },
 					});
 				}
+				if (record.pendingCompletions.length > 0) record.ownerCompletionEmitted = true;
 				syncReadyPending(record);
 				this.#records.set(snapshot.name, record);
 				if (snapshot.owner && record.completionCapable && (detached || record.pendingCompletions.length > 0)) {

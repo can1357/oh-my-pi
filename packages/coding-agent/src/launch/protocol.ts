@@ -146,6 +146,12 @@ export interface DaemonOutputSubscription {
 	owner: string;
 	/** Session artifact written directly by the broker while the subscription is active. */
 	artifactPath: string;
+	/**
+	 * Daemon incarnation already accepted by this client. On republish after
+	 * broker-side registration expiry, the broker expires this subscription
+	 * instead of silently binding it to a different same-name process.
+	 */
+	daemonId?: string;
 	/** Client-managed cumulative ack: broker registration epoch of the last delivered output batch. */
 	lastEpoch?: string;
 	/** Client-managed cumulative ack: highest `seq` delivered for {@link lastEpoch}. */
@@ -212,11 +218,19 @@ export interface DaemonOutputWireNotification extends DaemonOutputNotification {
 	registrationId: string;
 }
 
-/** Terminal process state for a monitor whose owner is not the process owner. */
+/** Terminal process state for a registered output monitor. */
 export interface DaemonMonitorCompletionNotification {
 	event: "daemon-monitor-completed";
 	monitorId: string;
 	daemon: DaemonSnapshot;
+	/**
+	 * True when the broker emitted (or queued) a `daemon-completed`
+	 * notification to the daemon's owner for this settlement. False when no
+	 * owner completion covered it (e.g. the daemon was stopped by another
+	 * client), so an owner-session monitor must synthesize its own terminal
+	 * notification instead of waiting for one that will never arrive.
+	 */
+	ownerNotified?: boolean;
 }
 
 /** Socket form of monitor completion, scoped to the exact advertised registration. */
@@ -333,6 +347,7 @@ function outputSubscriptions(value: unknown): DaemonOutputWireSubscription[] {
 			owner: stringValue(source.owner, `request.outputSubscriptions[${index}].owner`),
 			artifactPath: stringValue(source.artifactPath, `request.outputSubscriptions[${index}].artifactPath`),
 			registrationId: stringValue(source.registrationId, `request.outputSubscriptions[${index}].registrationId`),
+			daemonId: optionalString(source.daemonId, `request.outputSubscriptions[${index}].daemonId`),
 			lastEpoch: optionalString(source.lastEpoch, `request.outputSubscriptions[${index}].lastEpoch`),
 			lastSeq:
 				source.lastSeq === undefined
@@ -517,6 +532,10 @@ export function parseDaemonWireMessage(value: unknown): DaemonWireMessage {
 			monitorId: stringValue(source.monitorId, "monitor completion.monitorId"),
 			registrationId: stringValue(source.registrationId, "monitor completion.registrationId"),
 			daemon: parseDaemonSnapshot(source.daemon),
+			ownerNotified:
+				source.ownerNotified === undefined
+					? undefined
+					: booleanValue(source.ownerNotified, "monitor completion.ownerNotified"),
 		};
 	}
 	if (source.event === "daemon-monitor-expired") {
