@@ -63,7 +63,7 @@ interface OutputSinkRegistration {
 	rejectReady: (error: Error) => void;
 	/** Connection generation whose rejected callback suppresses already-queued deliveries. */
 	failedDeliveryGeneration?: number;
-	/** A callback rejection permanently suppresses terminal delivery to this sink. */
+	/** A non-completion callback rejection permanently suppresses terminal delivery to this sink. */
 	completionBlocked?: boolean;
 	/** Broker registration epoch of the last output batch delivered to the sink. */
 	lastEpoch?: string;
@@ -707,6 +707,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				this.#publishDeliveryAcks();
 				return;
 			}
+			if (message.event === "daemon-monitor-completed") entry.resolveReady();
 			await entry.sink(notification);
 			if (message.event !== "daemon-output" && this.#outputSinks.get(message.monitorId) === entry) {
 				entry.resolveReady();
@@ -723,7 +724,9 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				// may poison delivery and tear down the shared connection.
 				if (this.#outputSinks.get(message.monitorId) !== entry) return;
 				entry.failedDeliveryGeneration = generation;
-				entry.completionBlocked = true;
+				// Lost output or expiry makes a later completion misleading, but a
+				// failed completion callback must remain eligible for broker replay.
+				if (message.event !== "daemon-monitor-completed") entry.completionBlocked = true;
 				logger.warn("Daemon output sink failed", {
 					monitorId: message.monitorId,
 					error: error instanceof Error ? error.message : String(error),

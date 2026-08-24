@@ -251,6 +251,79 @@ process.stdin.once("data", () => {
 		}
 	}, 20_000);
 
+	it("replays terminal state after its sink rejects without acknowledging the registration", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-terminal-retry-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const scriptPath = path.join(projectDir, "service.ts");
+		const monitorArtifactPath = path.join(tempDir.path(), "terminal-retry.log");
+		await Bun.write(
+			scriptPath,
+			`process.stdin.resume();
+process.stdin.once("data", () => process.exit(0));
+`,
+		);
+
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir);
+		const terminalAttempts: DaemonMonitorNotification[] = [];
+		const retried = Promise.withResolvers<void>();
+		const unregister = client.onOutput?.(
+			{
+				id: "terminal-retry-monitor",
+				name: "terminal-retry",
+				owner: "terminal-retry-owner",
+				artifactPath: monitorArtifactPath,
+			},
+			notification => {
+				if (notification.event !== "daemon-monitor-completed") return;
+				terminalAttempts.push(notification);
+				if (terminalAttempts.length === 1) throw new Error("completion receipt failed");
+				retried.resolve();
+			},
+		);
+		if (!unregister) throw new Error("Expected output monitoring support");
+
+		try {
+			await unregister.ready;
+			const started = await client.request({
+				op: "start",
+				owner: "terminal-retry-owner",
+				spec: {
+					name: "terminal-retry",
+					application: process.execPath,
+					args: [scriptPath],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+			});
+			if (started.op !== "start") throw new Error("unexpected start result");
+			await client.request({ op: "send", name: "terminal-retry", data: "finish\n" });
+			await retried.promise;
+
+			expect(terminalAttempts).toHaveLength(2);
+			expect(terminalAttempts[1]).toEqual(terminalAttempts[0]);
+			expect(terminalAttempts[1]).toMatchObject({
+				event: "daemon-monitor-completed",
+				daemon: { name: "terminal-retry", state: "exited", exitCode: 0 },
+				ownerNotified: false,
+			});
+		} finally {
+			unregister();
+			await client.request({ op: "stop", name: "terminal-retry", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 20_000);
+
 	it("delivers observer output and terminal state while the owner completion sink is blocked", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-monitor-consumer-order-");
 		const projectDir = path.join(tempDir.path(), "project");
