@@ -200,8 +200,6 @@ interface ToolRosterNoticeDetails {
 export interface XdevMountNoticeDetails {
 	added: string[];
 	removed: string[];
-	/** Persisted prompt-prelude ownership stamp (see #promptWithMessage). */
-	promptPrelude?: boolean;
 }
 
 interface PendingNoticePreview<T> {

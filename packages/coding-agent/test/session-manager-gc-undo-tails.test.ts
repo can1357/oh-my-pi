@@ -17,7 +17,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@oh-my-pi/pi-ai";
 import { exportFromFile } from "@oh-my-pi/pi-coding-agent/export/html/index";
-import { readSessionOwnerPids, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import {
+	isProcessInstanceAlive,
+	processStartToken,
+	readSessionOwnerPids,
+	SessionManager,
+} from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage, type WriteTextAtomicOptions } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { tryAcquireFileLock } from "@oh-my-pi/pi-utils";
 
@@ -361,5 +366,20 @@ describe("SessionManager.pruneUserUndoTails", () => {
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
+	});
+	it("prune-marker liveness binds pid to the process start identity", () => {
+		// A recycled pid is alive but is NOT the pruner that recorded the
+		// marker: stale-detection must treat it as dead so a crashed gc's
+		// leftover marker cannot block opens until the timeout.
+		const token = processStartToken(process.pid);
+		expect(token).toBeDefined();
+		expect(isProcessInstanceAlive(process.pid, token)).toBe(true);
+		expect(isProcessInstanceAlive(process.pid, "0")).toBe(false);
+		// Legacy markers (and non-Linux hosts) carry no token: pid-only
+		// liveness, matching the previous behavior.
+		expect(isProcessInstanceAlive(process.pid, undefined)).toBe(true);
+		const dead = Bun.spawnSync(["/usr/bin/env", "true"]);
+		expect(dead.pid).toBeGreaterThan(0);
+		expect(isProcessInstanceAlive(dead.pid, token)).toBe(false);
 	});
 });
