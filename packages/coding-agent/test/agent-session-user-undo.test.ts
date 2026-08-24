@@ -1284,4 +1284,128 @@ describe("AgentSession user undo/redo", () => {
 		// Nothing branched: the leaf is still the pre-attempt tip.
 		expect(sessionManager.getBranch().at(-1)?.type).not.toBe("branch_summary");
 	});
+
+	it("undo keeps independent extension messages sent outside a turn", async () => {
+		await makeFileBackedSession("extension-note-undo.jsonl");
+		await seedThreeTurns();
+
+		// An idle sendCustomMessage({ triggerTurn: false }) lands as a
+		// custom_message immediately before the NEXT user turn, but it
+		// predates the turn boundary and must survive /undo.
+		sessionManager.appendCustomMessageEntry("extension-note", "independent notice", false, undefined, "agent");
+		sessionManager.appendMessage(userMessage("fourth"));
+		sessionManager.appendMessage(assistantMessage("OK fourth"));
+
+		const undo = await session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		const context = session.buildDisplaySessionContext();
+		const noteInContext = context.messages.some(
+			message => message.role === "custom" && (message as { customType?: string }).customType === "extension-note",
+		);
+		expect(noteInContext).toBe(true);
+	});
+
+	it("redo's session_before_tree preparation carries the real branch delta", async () => {
+		const preparations: Array<{ targetId: string; commonAncestorId: string | null; entryCount: number }> = [];
+		const fakeRunner = {
+			hasHandlers: (type: string) => type === "session_before_tree",
+			emit: async (event: {
+				preparation?: { targetId: string; commonAncestorId: string | null; entriesToSummarize: unknown[] };
+			}) => {
+				if (event.preparation) {
+					preparations.push({
+						targetId: event.preparation.targetId,
+						commonAncestorId: event.preparation.commonAncestorId,
+						entryCount: event.preparation.entriesToSummarize.length,
+					});
+				}
+				return {};
+			},
+		} as unknown as ExtensionRunner;
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		mockModel = mock;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(path.join(tempDir, "auth-redo-prep.db"));
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		sessionManager = SessionManager.create(tempDir, tempDir);
+		await sessionManager.setSessionFile(path.join(tempDir, "redo-prep.jsonl"));
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+			ttsrManager: new TtsrManager(),
+			extensionRunner: fakeRunner,
+		});
+		await seedThreeTurns();
+
+		const undo = await session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		const redo = await session.userRedo();
+		expect(redo.ok).toBe(true);
+		// The redo preparation (second event) must describe the entries being
+		// abandoned (the undo marker plus trailing re-journaled controls),
+		// not an empty delta.
+		expect(preparations.length).toBe(2);
+		expect(preparations[1]!.entryCount).toBeGreaterThan(0);
+		expect(preparations[1]!.commonAncestorId).toBeDefined();
+	});
+
+	it("a contended undo still emits session_tree with the rollback marker", async () => {
+		const treeEvents: Array<{ summaryEntry?: unknown }> = [];
+		const fakeRunner = {
+			hasHandlers: (type: string) => type === "session_tree",
+			emit: async (event: { type: string; summaryEntry?: unknown }) => {
+				treeEvents.push(event);
+				return {};
+			},
+		} as unknown as ExtensionRunner;
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		mockModel = mock;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(path.join(tempDir, "auth-marker-recover.db"));
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		sessionManager = SessionManager.create(tempDir, tempDir);
+		await sessionManager.setSessionFile(path.join(tempDir, "marker-recover.jsonl"));
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+			ttsrManager: new TtsrManager(),
+			extensionRunner: fakeRunner,
+		});
+		await seedThreeTurns();
+		await sessionManager.rewriteEntries();
+
+		const lock = tryAcquireFileLock(path.join(tempDir, "marker-recover.jsonl"));
+		expect(lock?.acquired).toBe(true);
+		try {
+			const undo = await session.userUndo(1);
+			expect(undo.ok).toBe(true);
+		} finally {
+			lock?.release();
+		}
+		// The contended branchWithSummary threw before returning its id, but
+		// the marker landed in memory: the event must still carry it.
+		expect(treeEvents.length).toBe(1);
+		const summary = treeEvents[0]!.summaryEntry as { details?: { kind?: string } } | undefined;
+		expect(summary?.details?.kind).toBe("user-undo");
+	});
 });
