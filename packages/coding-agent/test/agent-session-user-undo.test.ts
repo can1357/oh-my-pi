@@ -1757,4 +1757,32 @@ describe("AgentSession user undo/redo", () => {
 		expect(prelude.details).toEqual({ ext: 1 });
 		expect(prelude.promptPrelude).toBe(true);
 	});
+	it("undo preserves the resumed process-local TTSR counter epoch", async () => {
+		session = await makeSession();
+		// A long journal whose injection happened long before this process
+		// resumed the session: sdk restored the record with lastInjectedAt 0
+		// and the live counter at 0 (gap 0).
+		sessionManager.appendTtsrInjection(["old-rule"]);
+		await seedThreeTurns();
+		sessionManager.appendMessage(userMessage("tail"));
+		sessionManager.appendMessage(assistantMessage("OK tail"));
+		ttsrManager.restoreInjected(["old-rule"]);
+
+		const positions = new Map<string, number>();
+		const original = ttsrManager.restoreInjected.bind(ttsrManager);
+		ttsrManager.restoreInjected = (names: string[], pos?: ReadonlyMap<string, number>) => {
+			if (pos) for (const [name, value] of pos) positions.set(name, value);
+			return original(names, pos);
+		};
+
+		const undo = await session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		// The rewound branch has three assistant turns; the rule's restored
+		// position must sit at that full count (process-local gap 0 kept),
+		// NOT at its historical injection point 0-with-gap-3 — which would
+		// make the after-gap rule instantly eligible merely because a
+		// rollback ran.
+		expect(positions.get("old-rule")).toBe(3);
+		expect(ttsrManager.getMessageCount()).toBe(3);
+	});
 });

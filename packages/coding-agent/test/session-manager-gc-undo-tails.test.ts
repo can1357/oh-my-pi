@@ -469,4 +469,31 @@ describe("SessionManager.pruneUserUndoTails", () => {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
 	});
+	it("resuming a session whose claim release is still queued re-registers it", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-claim-reregister-"));
+		try {
+			const fileA = path.join(dir, "a.jsonl");
+			const fileB = path.join(dir, "b.jsonl");
+			const manager = SessionManager.create(dir, dir);
+			await manager.setSessionFile(fileA);
+			manager.appendMessage(userMessage("u1"));
+			manager.appendMessage(assistantMessage("a1"));
+
+			// Switch away (queues A's claim removal on the sidecar tail,
+			// unawaited) and immediately resume A — the guard in
+			// #registerOwnerSidecar must not mistake the queued-away claim
+			// for durable ownership.
+			await manager.setSessionFile(fileB);
+			await manager.setSessionFile(fileA);
+			await Bun.sleep(50);
+
+			// A must still carry this manager's claim once the tail drains.
+			const claims = await readOwnerClaims(fileA);
+			const own = claims.get(process.pid);
+			expect(own?.count).toBeGreaterThanOrEqual(1);
+			await manager.close();
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
 });
