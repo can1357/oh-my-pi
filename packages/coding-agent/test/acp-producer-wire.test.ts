@@ -28,10 +28,9 @@ import { frameTexts, missingFinalBodyLines, producerFacts, producerFinalBodyText
 /**
  * Crosses the seam every other ACP test skips: the mapper suite fabricates
  * `details` by hand, so nothing there can ask whether a real producer actually
- * populates the field the mapper reads. Six review findings on
- * oh-my-pi/oh-my-pi#7078 lived in that gap (the spilled-artifact pointer, a
- * failing eval's status and exit code, …), each found by a reviewer rather
- * than by a test.
+ * populates the field the mapper reads. Several bugs lived in that gap (the
+ * spilled-artifact pointer, a failing eval's status and exit code, …), each
+ * found by a reviewer rather than by a test.
  *
  * So the coverage here is a matrix, not a case per bug: every ACP-relevant
  * producer outcome runs through its real tool (wrapped exactly as production
@@ -118,11 +117,11 @@ const SPILLING_COMMAND = "seq 1 20000";
  * through a `TailBuffer(DEFAULT_MAX_BYTES)` that trims to a line boundary, and
  * 51,200 / 64 is exact, so the last streamed snapshot lands *exactly* on the
  * 50 KB rollover floor every run instead of a line-width-dependent byte or two
- * under it — the difference between reproducing
- * oh-my-pi/oh-my-pi#7078 review 4824091334 and passing by luck. The final
- * result is then `OutputSink`'s middle-elided head+tail summary, which starts
- * with the run's original head (zero overlap with the streamed tail) and is
- * longer than the watermark once its elision marker and notices are appended.
+ * under it — the difference between reliably reproducing the bug and passing
+ * by luck. The final result is then `OutputSink`'s middle-elided head+tail
+ * summary, which starts with the run's original head (zero overlap with the
+ * streamed tail) and is longer than the watermark once its elision marker and
+ * notices are appended.
  */
 const WIDE_LINE_COMMAND = `awk 'BEGIN{for(i=0;i<3000;i++) printf "%063d\\n", i}'`;
 
@@ -365,21 +364,20 @@ interface ProducerCase {
 	 * passes. That is how a bash timeout reached the wire with no statement of
 	 * why it stopped: the mirror into `details.notices` was gated on the same
 	 * condition that suppresses the text echo, so exactly the path that needed
-	 * it skipped it, and every check downstream had nothing to miss
-	 * (oh-my-pi/oh-my-pi#7078 review r3694816752). Pinning the producer half
-	 * makes the axis non-vacuous for this row specifically, rather than
-	 * trusting the matrix-wide guard that only asks whether *some* row
-	 * populates *some* axis.
+	 * it skipped it, and every check downstream had nothing to miss. Pinning
+	 * the producer half makes the axis non-vacuous for this row specifically,
+	 * rather than trusting the matrix-wide guard that only asks whether *some*
+	 * row populates *some* axis.
 	 */
 	expectProducerFacts?: readonly string[];
 	/**
 	 * How many non-blank lines of the producer's own final body text
 	 * (`producerFinalBodyText`) legitimately never reach the client on any
-	 * rendered channel. Declared per row, default 0 — a real omission (this
-	 * PR's own eval-annotation regression, oh-my-pi/oh-my-pi#7078 review
-	 * r3693523855) is never an allowance to grant, only a `plain` mode's own
-	 * `ACP_TEXT_LIMIT` head truncation on a body that exceeds it legitimately
-	 * earns one. Asserted for equality, same reason as `discontinuities`.
+	 * rendered channel. Declared per row, default 0 — a real omission (an
+	 * eval-annotation regression) is never an allowance to grant, only a
+	 * `plain` mode's own `ACP_TEXT_LIMIT` head truncation on a body that
+	 * exceeds it legitimately earns one. Asserted for equality, same reason
+	 * as `discontinuities`.
 	 */
 	allowUndeliveredFinalLines?: number | Partial<Record<ModeName, number>>;
 	/**
@@ -467,8 +465,8 @@ async function runStreamingEval(toolCallId: string, lines: number): Promise<Prod
 /**
  * A real `EvalTool.execute()` through the Python backend's *actual* kernel
  * seam (`executePythonWithKernel`, `executor-base.ts`), not the JS backend
- * stub every other row uses. This is the seam that produced
- * oh-my-pi/oh-my-pi#7078 review r3693523855: `OutputSink.dump(notice)` bakes
+ * stub every other row uses. This is the seam that produces the bug:
+ * `OutputSink.dump(notice)` bakes
  * a kernel-timeout/stdin-requested annotation into the returned `output`
  * text but never calls `onChunk` with it, so a matrix confined to the JS
  * backend (which instead calls `push(annotation)` before `dump()`, streaming
@@ -595,8 +593,8 @@ async function runEvalImage(toolCallId: string): Promise<ProducerOutcome> {
  * `{type:"text"}` — no typed production entrypoint can combine an image
  * with a proxy-sourced notice, confirmed by `tsgo` rejecting the combined
  * shape outright. That combination is real and fixed (see the mapper-level
- * regression tests in `acp-event-mapper.test.ts` for
- * oh-my-pi/oh-my-pi#7078 review 4829715458), just not reachable through any
+ * regression tests in `acp-event-mapper.test.ts`), just not reachable
+ * through any
  * single typed producer this matrix can construct — this row instead
  * covers the `details.notice` axis on its own, honestly.
  */
@@ -649,8 +647,8 @@ async function runTimingOutBridgeBash(toolCallId: string): Promise<ProducerOutco
  * `onChunk` (`bash-executor.ts`). This is the row the matrix never had: the
  * bridge row above only ran in modes with a real terminal, so no bash timeout
  * ever reached the display-only meta-terminal path where the delta/watermark
- * classifier decides what a re-rendered final body still owes the client
- * (oh-my-pi/oh-my-pi#7078 review r3694816752). The command prints first so the
+ * classifier decides what a re-rendered final body still owes the client.
+ * The command prints first so the
  * watermark is non-empty when the annotation-prefixed final snapshot arrives —
  * an empty watermark takes the first-send path and proves nothing.
  */
@@ -826,7 +824,7 @@ const PRODUCER_CASES: readonly ProducerCase[] = [
 	},
 	{
 		name: "eval via python kernel, kernel timeout mid-stream",
-		// The seam behind oh-my-pi/oh-my-pi#7078 review r3693523855:
+		// The seam behind this row:
 		// `executeWithKernelBase`'s cancelled/timed-out branch calls
 		// `sink.dump(annotation)`, which bakes the annotation into `output`
 		// without ever streaming it through `onChunk` — unlike the JS backend
@@ -1257,8 +1255,8 @@ describe("ACP producer matrix", () => {
  * The failure mode this guards against: `producerFacts` declares three
  * axes (`details.notices`, `details.notice`, `details.meta`), but check #2
  * above is vacuous on any axis no row's *real* result populates — exactly
- * how `details.notice` shipped uncovered for the whole life of this matrix
- * (oh-my-pi/oh-my-pi#7078 review 4829715458): the axis was declared, the
+ * how `details.notice` shipped uncovered for the whole life of this matrix:
+ * the axis was declared, the
  * check read it, and nothing ever failed because no row's producer ever set
  * it. Asserting non-vacuity here, once, is cheaper than re-discovering it
  * from a missed bug every time a new axis is declared.
@@ -1299,9 +1297,8 @@ describe("ACP producer matrix vacuity guard", () => {
  * leaf field the validators inspect is a place a malformed or degenerate
  * value — from an extension, an MCP-proxied edit-shaped tool, or a
  * corrupted `session/load` replay record — can reach the mapper instead of
- * `EditToolPerFileResult`'s own type guarantees. The four review findings
- * this closed (oh-my-pi/oh-my-pi#7078 review 4823537229 and its
- * follow-ups) were each one specific mutation found by a reviewer; this
+ * `EditToolPerFileResult`'s own type guarantees. Several specific mutations
+ * found by review each closed one gap here; this
  * walks every leaf of a *real* producer's `details` and mutates it six
  * ways, so the next one is found here instead.
  */

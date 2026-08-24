@@ -50,7 +50,7 @@ export interface ExecutorBackendResult {
 	 * which every other chunk goes through. `eval.ts` mirrors it into
 	 * `EvalToolDetails.notices` so the ACP terminal path — which reads only
 	 * structured facts, never the model-facing text — doesn't silently drop the
-	 * reason a cell stopped (oh-my-pi/oh-my-pi#7078 review r3693523855).
+	 * reason a cell stopped.
 	 */
 	annotation?: string;
 }

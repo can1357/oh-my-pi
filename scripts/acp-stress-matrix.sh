@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Stress-tests the current omp branch's ACP mapper across the
-# tool x capability-channel x byte-size matrix that oh-my-pi/oh-my-pi#7078's
-# 6-round review exists to prevent regressing again. See
+# tool x capability-channel x byte-size matrix that this script
+# exists to prevent regressing again. See
 # docs/acp-development.md rules 7-9.
 #
 # Runs acp-probe's `stress-output` (byte-exactness on the meta-terminal path,
@@ -46,8 +46,7 @@ run_probe() {
 	#            suppression, exiting 0 with a warn log for the former) and the
 	#            append-only axis (any duplicate terminal delivery fails the run
 	#            unconditionally, `acp-probe.ts`'s post-switch check). Reading
-	#            only `delivered=` and ignoring `$code` (fixed after
-	#            oh-my-pi/oh-my-pi#7078 review r3693558608) let a duplicate-resend
+	#            only `delivered=` and ignoring `$code` (fixed once already)
 	#            regression report PASS here, since a re-sent body inflates
 	#            `delivered` rather than shrinking it — the floor is now a
 	#            belt-and-suspenders sanity check on top of the exit code, never

@@ -772,8 +772,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			// terminal and this annotation never did, and for a display-only
 			// meta terminal the mapper classifies an annotation-prefixed final
 			// body as a re-render and sends structured facts alone. Gating this
-			// push on the text branch is what hid the timeout reason from both
-			// (oh-my-pi/oh-my-pi#7078 review r3694816752).
+			// push on the text branch is what hid the timeout reason from both.
 			const annotation =
 				result.annotation ??
 				`[${timeoutSec === undefined ? "Command timed out" : `Command timed out after ${timeoutSec} seconds`}]`;

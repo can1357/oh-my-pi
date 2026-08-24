@@ -366,8 +366,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 					// notice, a framework-level `directText`) — the terminal item it just
 					// dropped was the only channel those facts could otherwise ride via
 					// `_meta.terminal_output`, and there is no such channel left once the
-					// image forces this fallback (oh-my-pi/oh-my-pi#7078 review
-					// 4829715458). `missingNoticeLines` skips whichever facts already
+					// image forces this fallback. `missingNoticeLines` skips whichever facts already
 					// landed verbatim in `finalOutput` (the `details.meta` notice rides
 					// there via `wrapToolWithMetaNotice`'s `appendOutputNotice`), so this
 					// never restates a fact the body already carries.
@@ -899,7 +898,7 @@ declare const metaTerminalOutputBrand: unique symbol;
  * carries a one-time source header that has nowhere else to render (see
  * `buildMetaTerminalOutput`). Both known losses of that header came from a
  * call site hand-rolling the literal — the `session/load` dangling-call
- * cleanup in `acp-agent.ts` (oh-my-pi/oh-my-pi#7078 review 4823843361) and,
+ * cleanup in `acp-agent.ts` and,
  * in a different channel, the image fallback below. `buildTerminalMeta`
  * (rule 9) already made an *ungated* `_meta.terminal_*` write unexpressible;
  * this makes an *uncomposed* one unexpressible too.
@@ -1105,7 +1104,7 @@ function buildMetaTerminalDelta(
  * output)` for an all-whitespace stream and *appends* a synthesized
  * `Command exited with code N` suffix after trimming — both grow the final
  * text past the raw watermark's length without adding a single genuine
- * process byte (oh-my-pi/oh-my-pi#7078 review 4823646245). So "final is
+ * process byte. So "final is
  * longer than the watermark" is not proof of genuine new output the way
  * "final is no longer than the watermark" is proof of a re-render — that
  * asymmetry is exactly the bug: the shrink case is unconditionally treated
@@ -1130,7 +1129,7 @@ function buildMetaTerminalDelta(
  * the elision marker and appended notices push it past the watermark's length
  * — the floor alone then classified a pure re-render as a rollover and
  * fabricated a discontinuity notice plus a second copy of the whole summary
- * (oh-my-pi/oh-my-pi#7078 review 4824091334: a `seq 1 20000` run delivered
+ * (a `seq 1 20000` run delivered
  * 127 KB for a 51 KB body, with the head shown twice). `isDisplayReRendered`
  * reads the producer's own `details.meta` markers, so it is a positive signal
  * where the length invariant above is a structural one — neither subsumes the
@@ -1220,8 +1219,7 @@ function buildFinalMetaTerminalDelta(
  * of them mean the body diverged wholesale: a middle-elided summary whose head
  * the producer's own tail window dropped long before the mapper saw it, or a
  * watermark that rolled past `MAX_WATERMARK_BYTES`. Re-sending *that* is the
- * duplicate-delivery bug this PR already fixed once (a 51 KB body shown twice,
- * oh-my-pi/oh-my-pi#7078 review 4824091334) — the terminal is append-only, so
+ * duplicate-delivery bug already fixed once (a 51 KB body shown twice) — the terminal is append-only, so
  * a client concatenates whatever arrives. Above the cap this reports nothing
  * and leaves the existing classification alone; the loss there is already
  * acknowledged by the producer's own elision notice, which rides in `facts`.
@@ -1579,7 +1577,7 @@ function extractToolLocations(args: unknown, cwd?: string): ToolCallLocation[] {
  * reject the whole result when malformed, a bad `meta` costs only its notice.
  * Rejecting the details for it would also disarm `isDisplayReRendered` — the
  * re-render classifier every producer's watermark goes through — and that is
- * the 51 KB duplicate-delivery bug (oh-my-pi/oh-my-pi#7078 review 4824091334)
+ * the 51 KB duplicate-delivery bug
  * re-armed by a validation failure.
  */
 type AcpEditFields = Pick<
@@ -2149,7 +2147,7 @@ function extractDetailsNotices(value: unknown): string | undefined {
  * `artifact://<id>` recovery pointer) a terminal-rendering client has no
  * other channel to see, since the terminal path never surfaces tool text.
  * A future `extractDetailsNotices`-only caller would silently repeat that
- * loss (oh-my-pi/oh-my-pi#7078 review 4821242767, finding 2).
+ * loss.
  */
 function extractTerminalNotices(value: unknown): string | undefined {
 	const notices = extractDetailsNotices(value);
@@ -2179,8 +2177,8 @@ function extractTerminalNotices(value: unknown): string | undefined {
  * whichever site remembered both: `buildLiveTerminalNoticeMeta` joined them by
  * hand, `buildFinalMetaTerminalDelta` read only the notices (so a display-only
  * meta terminal — every `eval`, `pty: true`, `session/load` replay — dropped
- * the framework note), and the eval-image content fallback read neither
- * (oh-my-pi/oh-my-pi#7078 review 4829715458). Every emit path that renders a
+ * the framework note), and the eval-image content fallback read neither.
+ * Every emit path that renders a
  * terminal, or replaces one, composes through this so a fact added to the
  * collection point reaches all of them at once instead of the one branch its
  * reporter happened to name.

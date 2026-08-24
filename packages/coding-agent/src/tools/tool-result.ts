@@ -112,8 +112,7 @@ export function toolResult<TDetails extends DetailsWithMeta>(details?: TDetails)
  * `mcp/tool-bridge.ts`'s own error path mirrors the server's flag into both.
  * Renderers that hand-rolled this fallback independently drifted apart — the
  * TUI honoured `details.isError` while the ACP mapper didn't, so a failed
- * `eval` showed a success card in Zed and an error card in the terminal UI
- * (oh-my-pi/oh-my-pi#7078 review 4823986869). Keep it here, not inlined at a
+ * `eval` showed a success card in Zed and an error card in the terminal UI. Keep it here, not inlined at a
  * call site, so a producer's failure signal reaches every renderer at once.
  */
 export function toolResultFailed(result: { isError?: boolean; details?: unknown }): boolean {

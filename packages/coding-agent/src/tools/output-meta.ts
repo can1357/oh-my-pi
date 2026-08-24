@@ -112,8 +112,7 @@ function isLineRange(value: unknown): boolean {
  * reads `meta.truncation`/`meta.limits.columnTruncated` as a producer's own
  * signal that a result is a display re-render (column truncation, head/tail
  * elision) rather than new output, and losing that signal to an unrelated
- * sibling's malformed shape re-enables a duplicate-delivery bug
- * (oh-my-pi/oh-my-pi#7078 review 4824091334): a re-rendered body gets diffed
+ * sibling's malformed shape re-enables a duplicate-delivery bug: a re-rendered body gets diffed
  * against the raw streamed watermark, finds no overlap, and both fires a
  * false "[terminal output discontinuity]" notice and resends the whole body
  * a second time.

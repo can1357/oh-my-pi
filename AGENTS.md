@@ -61,7 +61,7 @@ not just the file you happened to be in when you learned it. Fixing the reported
 instance and leaving a sibling instance for review to catch a second time is a
 process bug, not bad luck: the reviewer doing that grep for you isn't access to
 information you lacked, it's you skipping a step you already had everything
-needed to do yourself. Concrete case: PR #7078 documented "Zed's terminal
+needed to do yourself. Concrete case: a documented invariant that "Zed's terminal
 renderer drops every sibling `content` item" while adding two separate code
 paths (bash notices, eval images) that violated it — review caught the second
 path three rounds after the first was fixed, quoting the PR's own new doc back

@@ -16,7 +16,7 @@ A tool result is rendered twice, from two different sources:
 
 Zed renders a terminal-bearing tool call *exclusively* through the terminal
 (`has_terminals`, `thread_view.rs`), so for those calls the second list is the
-only channel that exists. Every ACP bug found in oh-my-pi/oh-my-pi#7078's
+only channel that exists. Every ACP bug found across producer/mapper
 review rounds was one cell of `producers × facts`: the producer recorded a fact
 in the body and not structurally, or structurally in a field the mapper did not
 read. Fixing them one producer at a time does not converge — the matrix keeps

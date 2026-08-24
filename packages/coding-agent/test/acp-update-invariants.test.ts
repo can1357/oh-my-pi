@@ -30,7 +30,7 @@ describe("checkAcpUpdateInvariants", () => {
 	});
 
 	it("exempts the sibling-content fallback for a client that hasn't negotiated terminal_output", () => {
-		// oh-my-pi/oh-my-pi#7078 review 4821242767: `acp-event-mapper.ts` keeps a
+		// `acp-event-mapper.ts` keeps a
 		// best-effort `[terminal, content]` sibling append for a real-terminal
 		// client that never negotiated Zed's `_meta.terminal_output` extension —
 		// `has_terminals` (Zed's exclusivity renderer quirk) doesn't apply to
@@ -88,7 +88,7 @@ describe("checkAcpUpdateInvariants", () => {
 	});
 
 	it("flags a nonzero terminal exit reported with a completed status (rule 14)", () => {
-		// oh-my-pi/oh-my-pi#7078 review 4823986869: the card's status and its
+		// The card's status and its
 		// terminal's exit line are two derivations of the same result; a user
 		// reads them together, so a success check above "exit code 1" is a
 		// self-contradicting frame.

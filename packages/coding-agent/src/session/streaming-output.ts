@@ -59,8 +59,7 @@ export interface OutputSummary {
 	 * model-facing text unless the caller mirrors it into a structural field
 	 * its renderers read (`BashToolDetails.notices`, `EvalToolDetails.notices`).
 	 * Every caller that used to re-derive or re-thread that string by hand got
-	 * it wrong at least once (oh-my-pi/oh-my-pi#7078 reviews r3693523855,
-	 * r3694816752), so the summary carries it: it travels with the text it was
+	 * it wrong at least once, so the summary carries it: it travels with the text it was
 	 * baked into, and a mirror site reads it instead of reconstructing it.
 	 */
 	annotation?: string;

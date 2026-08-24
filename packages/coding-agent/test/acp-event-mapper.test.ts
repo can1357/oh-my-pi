@@ -40,9 +40,8 @@ import { expectAcpStructure, expectAcpStructureRejects } from "./helpers/acp-sch
  * sits one layer above the mapper, so without this wrapper the bulk of ACP
  * frame coverage — every test that calls the mapper directly — validated only
  * against the ACP JSON schema, which by design says nothing about Zed's
- * renderer rules. That gap is how a `[terminal, text]` frame shipped while the
- * guard that rejects it was landing in the same PR
- * (oh-my-pi/oh-my-pi#7078 review 4821242767).
+ * renderer rules. That gap is how a `[terminal, text]` frame shipped before
+ * the guard that rejects it existed.
  *
  * The capability context is the mapper's own options, so a test can never
  * assert one negotiation state while the check assumes another.
@@ -50,9 +49,9 @@ import { expectAcpStructure, expectAcpStructureRejects } from "./helpers/acp-sch
  * Also runs `evalSourceAuditor` (rule 13) over the same frames: a per-frame
  * check has no notion of "the call this frame belongs to", so it cannot
  * catch a sequence that never once delivers an eval call's own source — the
- * bug class behind oh-my-pi/oh-my-pi#7078 review 4823843361 and its sibling
- * in the eval-image fallback. Reset per test in `beforeEach` below so ids
- * reused across tests (`"tc-1"`, etc.) never leak state between them.
+ * bug class — it has a sibling in the eval-image fallback. Reset per test
+ * in `beforeEach` below so ids reused across tests (`"tc-1"`, etc.) never
+ * leak state between them.
  */
 let evalSourceAuditor = new EvalSourceDeliveryAuditor();
 beforeEach(() => {
@@ -68,10 +67,10 @@ beforeEach(() => {
  * test suite builds, is what the matrix in `acp-producer-wire.test.ts`
  * cannot do by itself: that matrix's own fixtures are real producer results,
  * but no row produces both an image and a details-only fact, so the axis
- * this check exists for had zero coverage there (oh-my-pi/oh-my-pi#7078
- * review 4829715458). This suite's fixtures are hand-fabricated, so they
- * *can* combine any shape — the fact-delivery check is only meaningful when
- * a fixture actually declares a fact, which is why the new regression tests
+ * this check exists for had zero coverage there. This suite's fixtures are
+ * hand-fabricated, so they *can* combine any shape — the fact-delivery
+ * check is only meaningful when a fixture actually declares a fact, which
+ * is why the new regression tests
  * for this finding set `details.notice`/`errorMessage` explicitly instead of
  * relying on this generic check to invent one.
  */
@@ -622,7 +621,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("names successfully-edited files whose snapshot was pruned even on a partial failure", () => {
-		// Regression test (oh-my-pi/oh-my-pi#7078 review 4819042330): the fix
+		// Regression test: the fix
 		// above only reached the `!event.isError` success branch —
 		// `extractPrunedEditPathsText` was never called from the `event.isError`
 		// branch, so a successfully-edited-but-pruned file disappeared from the
@@ -666,7 +665,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("preserves LSP diagnostics alongside a successful edit's diff", () => {
-		// Regression test (oh-my-pi/oh-my-pi#7078 round-7 finding): edit tools
+		// Regression test: edit tools
 		// route through `wrapToolWithMetaNotice`, which appends a rendered
 		// "LSP Diagnostics (...)" notice onto the tool's own text content from
 		// `details.meta.diagnostics`. The diff-present success branch discarded
@@ -710,7 +709,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("preserves per-file LSP diagnostics for a multi-file edit with no top-level aggregate meta", () => {
-		// Regression test (oh-my-pi/oh-my-pi#7078 review 4820222626):
+		// Regression test:
 		// `executeApplyPatchPerFile`'s multi-file aggregate has no top-level
 		// `details.meta` at all — each file's own `meta` (with its own
 		// diagnostics) lives only in `details.perFileResults[].meta`
@@ -1506,7 +1505,7 @@ describe("ACP event mapper", () => {
 	// in once the terminal item is dropped, so it must surface visibly
 	// instead of via `buildLiveTerminalNoticeMeta` — writing it there too
 	// would be a second, invisible delivery into a buffer this frame no
-	// longer references (oh-my-pi/oh-my-pi#7078 follow-up).
+	// longer references.
 	it("recovers notices visibly, with no _meta.terminal_output, for a live-terminal binary-content result", () => {
 		const updates = mapUpdates(
 			{
@@ -1609,7 +1608,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("recovers a spilled artifact pointer into _meta.terminal_output when bash's own notices omit it", () => {
-		// Regression test (oh-my-pi/oh-my-pi#7078 review 4821242767, finding 2):
+		// Regression test:
 		// `bash.ts`'s `spilledArtifactId` is only populated inside
 		// `enforceInlineByteCap`'s own save callback, which no-ops once
 		// `OutputSink` already spilled the body under the inline cap — the
@@ -1622,8 +1621,8 @@ describe("ACP event mapper", () => {
 		// so without re-deriving the notice from `details.meta`, the
 		// recovery link and the "bytes were elided" acknowledgement vanish
 		// entirely for every large bash call. This is the same underlying gap
-		// as the "no acknowledgement when a producer silently drops bytes"
-		// follow-up flagged in oh-my-pi/oh-my-pi#7078's own PR thread.
+		// as the "no acknowledgement when a producer silently drops bytes" case
+		// elsewhere.
 		const updates = mapUpdates(
 			{
 				type: "tool_execution_end",
@@ -1715,8 +1714,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("delivers a framework-level directText note through _meta.terminal_output instead of dead sibling content", () => {
-		// Regression test (oh-my-pi/oh-my-pi#7078 review 4819042330 follow-up
-		// audit): `extractDirectText` (a top-level `errorMessage`/`message`/
+		// Regression test: `extractDirectText` (a top-level `errorMessage`/`message`/
 		// `text` framework note, e.g. "Permission request cancelled") was
 		// appended as sibling `content` in the live-terminal branch completely
 		// ungated — the same has_terminals class of bug already fixed for
@@ -1853,7 +1851,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("routes a pty bash call through the meta terminal even when the client is realTerminalCapable", () => {
-		// Regression test (oh-my-pi/oh-my-pi#7078 review 4820222626): BashTool
+		// Regression test: BashTool
 		// explicitly skips `clientBridge.createTerminal` whenever `pty: true` is
 		// requested (PTY output needs the local interactive terminal UI
 		// instead), so no real client-owned terminal is ever created for one of
@@ -1995,8 +1993,7 @@ describe("ACP event mapper", () => {
 		// `isError` is false even for a cell that exited nonzero — the failure
 		// lives in `details.isError` and the cell's own `exitCode`. Reading only
 		// the event flag reported `exit_code: 0` and `status: "completed"` for a
-		// terminal whose body says the command failed
-		// (oh-my-pi/oh-my-pi#7078 review 4823986869).
+		// terminal whose body says the command failed.
 		const endUpdates = mapUpdates(
 			{
 				type: "tool_execution_end",
@@ -2239,7 +2236,7 @@ describe("ACP event mapper", () => {
 		]);
 	});
 
-	it("delivers details.notice alongside an eval image in meta-capable mode (oh-my-pi/oh-my-pi#7078 review 4829715458)", () => {
+	it("delivers details.notice alongside an eval image in meta-capable mode", () => {
 		// The image fallback composes `content` by hand instead of going through
 		// `extractTerminalDeliverableFacts`'s other two call sites, so a
 		// details-only fact (here `details.notice`, eval's backend-fallback
@@ -2713,7 +2710,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("does not report a discontinuity when the final result merely re-normalizes whitespace it already streamed", () => {
-		// Regression test (oh-my-pi/oh-my-pi#7078 review 4820360199): the
+		// Regression test: the
 		// re-render markers (`limits.columnTruncated`, `truncation`) are not
 		// the only way a `tool_execution_end` result stops being a byte-wise
 		// continuation of the streamed watermark. `eval.ts` builds its final
@@ -2761,8 +2758,8 @@ describe("ACP event mapper", () => {
 	});
 
 	it("does not report a discontinuity when eval substitutes '(no output)' for an all-whitespace stream", () => {
-		// Regression test (oh-my-pi/oh-my-pi#7078 review 4823646245): the prior
-		// fix (review 4820360199) only handled the final result being no
+		// Regression test: the prior
+		// fix only handled the final result being no
 		// *longer* than the watermark. `eval.ts` also substitutes `(no
 		// output)` for a stream that was all whitespace — final.length (11)
 		// now *exceeds* the raw watermark's length (4, "   \n"), which the
@@ -3320,7 +3317,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("resyncs with a discontinuity notice on a non-overlapping tail rollover instead of freezing", () => {
-		// Regression test (oh-my-pi/oh-my-pi#7078 review 4819845316): no genuine
+		// Regression test: no genuine
 		// overlap exists between the delivered watermark and the new snapshot —
 		// a verbose command outrunning the producer's own tail-buffer window
 		// between two updates is a real, recoverable case, not corruption. The
@@ -3392,7 +3389,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("computes overlap correctly when both strings contain a literal NUL byte", () => {
-		// Regression test (oh-my-pi/oh-my-pi#7078 review 4819970644): the prior
+		// Regression test: the prior
 		// `deliveredOverlap` joined `sent`/`next` with an in-band `"\0"`
 		// separator. Terminal output can genuinely contain NUL bytes (binary
 		// commands, `find -print0`), so a real NUL in the input collided with
@@ -3978,7 +3975,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("does not crash on a malformed perFileResults entry from an arbitrary tool", () => {
-		// Regression test (oh-my-pi/oh-my-pi#7078 review 4823537229):
+		// Regression test:
 		// `asEditDetails` accepted any `details.perFileResults` array as long as
 		// it was an array, so an extension/custom/MCP tool result carrying
 		// `perFileResults: [{}]` or `[null]` — a shape no built-in edit tool
@@ -4058,7 +4055,7 @@ describe("ACP event mapper", () => {
 	// `oldText`/`newText`/`path` feed the `diff` frame and must reject the
 	// result when broken, but rejecting the details for a bad `meta` too would
 	// also disarm `isDisplayReRendered`'s re-render classifier, re-arming the
-	// 51 KB duplicate-delivery bug (oh-my-pi/oh-my-pi#7078 review 4824091334).
+	// 51 KB duplicate-delivery bug.
 	it("keeps a valid diff and drops only the notice for a malformed output meta", () => {
 		const updates = mapUpdates(
 			{

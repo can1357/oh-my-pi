@@ -1636,14 +1636,14 @@ describe("ACP agent", () => {
 		// never sent the matching `terminal_exit`, leaving the embedded terminal
 		// card permanently unterminated even though the call itself reads failed.
 		//
-		// Follow-up regression (oh-my-pi/oh-my-pi#7078 review 4819042330): Zed's
+		// Follow-up regression: Zed's
 		// `has_terminals` (`thread_view.rs`) routes a terminal-bearing tool call
 		// exclusively through the terminal card, so a sibling `content` text
 		// block explaining the interruption never renders — it must ride as
 		// `terminal_output` bytes on the same terminal id instead, and the
 		// sibling `content` block must not be sent at all for this case.
 		//
-		// Second follow-up (oh-my-pi/oh-my-pi#7078 review 4823843361): the
+		// Second follow-up: the
 		// original fixture used `input: { cells: [] }`, an empty eval with no
 		// source — `buildEvalCodeText` degenerates to `undefined` for it, so
 		// the eval-source-loss bug this test exists to catch (the cleanup wrote

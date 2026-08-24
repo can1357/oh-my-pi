@@ -16,8 +16,7 @@ function stringField(value: object, key: string): string | undefined {
  * axes the matrix already declared; the top-level `errorMessage`/`message`/
  * `text` framework note (mirroring the mapper's own `extractDirectText`) is
  * the axis that had none — the eval image fallback dropped it in
- * `terminalMetaCapable` mode with no test anywhere asking whether it survived
- * (oh-my-pi/oh-my-pi#7078 review 4829715458).
+ * `terminalMetaCapable` mode with no test anywhere asking whether it survived.
  */
 function artifactIds(text: string): string[] {
 	return [...text.matchAll(/artifact:\/\/(\w+)/g)].map(m => m[1] as string);
@@ -109,7 +108,7 @@ export function frameTexts(update: Record<string, unknown>): string[] {
  * `dump(notice)` annotation, `eval`'s synthesized `Command exited with code
  * N` suffix) without ever declaring it as a separate structural fact, so a
  * check confined to `producerFacts` is vacuous on exactly that class of bug
- * (oh-my-pi/oh-my-pi#7078 review r3693523855 — the producer's `details`
+ * (a producer's `details`
  * simply had no `notices` field at all pre-fix, so nothing was "missing"
  * from a check that only compares against what got declared).
  */

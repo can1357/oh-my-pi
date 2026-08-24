@@ -116,7 +116,7 @@ export function checkAcpUpdateInvariants(notification: SessionNotification, cont
 	// same result (`isFailedToolResult`/`extractExitCode` in
 	// `acp-event-mapper.ts`), so they can only disagree if one derivation is
 	// taught about a producer's failure signal and the other isn't — exactly
-	// how oh-my-pi/oh-my-pi#7078 review 4823986869 shipped (`eval` records a
+	// how that mismatch once shipped (`eval` records a
 	// nonzero exit only in `details`, so the frame claimed exit 0 and
 	// `completed` for a failed cell). The reverse pairing is not checked:
 	// `failed` with exit 0 is legitimate (a tool can fail for reasons the
@@ -175,8 +175,8 @@ export function assertAcpUpdateInvariants(notification: SessionNotification, con
  * same class of loss a human staring at Zed's rendered card would notice —
  * not just a malformed single frame.
  *
- * This is the guard that would have caught oh-my-pi/oh-my-pi#7078 review
- * 4823843361 (the `session/load` dangling-cleanup path) and its sibling in
+ * This is the guard that would have caught the `session/load` dangling-cleanup path
+ * (`acp-agent.ts`) and its sibling in
  * the eval-image fallback: both left `expected` non-empty with nothing ever
  * landing in `#delivered`/`#contentText`. The test fixture also has to be
  * capable of exercising it — `input: { cells: [] }` degenerates

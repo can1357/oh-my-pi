@@ -695,8 +695,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			// mirrored from `ExecutorBackendResult.annotation`: `dump(notice)`
 			// bakes them into the model-facing `output` text but never streams
 			// them through `onChunk`, so the ACP terminal path — which reads only
-			// structured facts — would otherwise lose the reason a cell stopped
-			// (oh-my-pi/oh-my-pi#7078 review r3693523855). Same convention as
+			// structured facts — would otherwise lose the reason a cell stopped. Same convention as
 			// `BashToolDetails.notices`.
 			const cellNotices: string[] = [];
 

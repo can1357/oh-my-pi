@@ -47,8 +47,7 @@ export interface KernelExecutorBaseOptions {
  * executor) streams its annotation live into whatever tail buffer `onChunk`
  * feeds, while a `sink.dump(notice)` producer (every kernel-backed language
  * here) does not — the annotation would otherwise only ever reach the
- * model-facing text, never a client's terminal watermark
- * (oh-my-pi/oh-my-pi#7078 review r3693523855). Carrying the sink's own string
+ * model-facing text, never a client's terminal watermark. Carrying the sink's own string
  * rather than re-deriving one keeps the mirrored copy spelled exactly like the
  * text copy, so a consumer diffing the two can't see a phantom difference.
  */
