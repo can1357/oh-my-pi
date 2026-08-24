@@ -33,14 +33,17 @@ async function loadAgentsApi(cwd: string): Promise<ExtensionAgentsApi> {
 		new ModelRegistry(authStorage),
 	);
 
-	await initializeExtensions({ extensionRunner: runner, discoverStartupSkillPaths: async () => {} } as AgentSession, {
-		reportSendError: (_action, error) => {
-			throw error;
+	await initializeExtensions(
+		{ extensionRunner: runner, discoverStartupSkillPaths: async () => {} } as unknown as AgentSession,
+		{
+			reportSendError: (_action, error) => {
+				throw error;
+			},
+			reportRuntimeError: error => {
+				throw error.error;
+			},
 		},
-		reportRuntimeError: error => {
-			throw error.error;
-		},
-	});
+	);
 	if (!agents) throw new Error("Extension factory did not receive api.agents");
 	return agents;
 }
