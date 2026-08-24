@@ -3060,17 +3060,19 @@ export class SessionManager {
 		// A divergent journal (rollback under lock contention deferred its
 		// full rewrite to "the next append") has no later append once close
 		// is reached: flush it HERE, or the process exits leaving the old
-		// branch on disk while the UI already reported the rollback.
+		// branch on disk while the UI already reported the rollback. A
+		// failed flush is NOT absorbed: the caller (dispose path) must see
+		// that the on-disk journal is stale, so the error is rethrown after
+		// the remaining close steps finish.
+		let closeFlushError: Error | undefined;
 		if (this.#rewriteRequired && !this.#fileIsCurrent && this.#sessionFile) {
 			try {
 				await this.rewriteEntries();
 			} catch (error) {
-				// Still contended at shutdown: surface it loudly — the
-				// journal on disk does NOT match the in-memory tree this
-				// process showed the operator.
+				closeFlushError = toError(error);
 				logger.error("Session journal divergent at close; on-disk history is stale", {
 					sessionFile: this.#sessionFile,
-					error: toError(error),
+					error: closeFlushError,
 				});
 			}
 		}
@@ -3087,6 +3089,7 @@ export class SessionManager {
 		await this.#scheduleDiskWork(async () => {
 			await this.#storage.drain();
 		});
+		if (closeFlushError) throw closeFlushError;
 		if (this.#diskFailure) throw this.#diskFailure;
 	}
 

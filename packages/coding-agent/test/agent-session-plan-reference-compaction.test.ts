@@ -335,7 +335,7 @@ describe("AgentSession approved-plan reference re-injection after compaction (is
 		session.markPlanReferenceSent();
 		await session.prompt("turn to undo");
 
-		const undo = session.userUndo(1);
+		const undo = await session.userUndo(1);
 		expect(undo.ok).toBe(true);
 		// The surviving reference must satisfy the delivered flag: the next
 		// prompt carries the in-context copy exactly once, never a second

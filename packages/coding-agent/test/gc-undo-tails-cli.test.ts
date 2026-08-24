@@ -1009,6 +1009,25 @@ describe("omp gc --undo-tails (CLI)", () => {
 		expect(fs.readFileSync(sessionFile, "utf8")).toContain("locked-out");
 	});
 
+	it("close rejects when contention persists through shutdown", async () => {
+		await buildSessionWithTwoUndoTails();
+		const manager = await SessionManager.open(sessionFile, sessionsDir, undefined, {
+			suppressBreadcrumb: true,
+		});
+
+		// Divergence while the competing writer keeps the journal lock for
+		// the entire shutdown: the close-time flush cannot publish, and the
+		// failure must reach the caller instead of being absorbed.
+		const lock = tryAcquireFileLock(sessionFile);
+		expect(lock?.acquired).toBe(true);
+		try {
+			expect(() => manager.appendMessage(userMessage("locked-out"))).toThrow(SessionFileLockError);
+			await expect(manager.close()).rejects.toThrow();
+		} finally {
+			lock?.release();
+		}
+	});
+
 	it("fork of a memory-backed session skips filesystem claims entirely", async () => {
 		const manager = SessionManager.create(sessionsDir, sessionsDir, new MemorySessionStorage());
 		manager.appendMessage(userMessage("u1"));

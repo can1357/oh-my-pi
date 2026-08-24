@@ -22,6 +22,7 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake, tryAcquireFileLock } from "@oh-my-pi/pi-utils";
 import { TtsrManager } from "../src/export/ttsr";
+import type { ExtensionRunner } from "../src/extensibility/extensions/runner";
 import { resolveLocalUrlToPath } from "../src/internal-urls";
 import { getLatestTodoPhasesFromEntries } from "../src/tools/todo";
 
@@ -208,7 +209,7 @@ describe("AgentSession user undo/redo", () => {
 		session.setPlanReferencePath(planUrl);
 		session.markPlanReferenceSent();
 
-		const result = session.userUndo();
+		const result = await session.userUndo();
 		expect(result.ok).toBe(true);
 		// The delivered reference left the branch with the turn.
 		expect(
@@ -243,7 +244,7 @@ describe("AgentSession user undo/redo", () => {
 		session = await makeSession();
 		await seedThreeTurns();
 
-		const result = session.userUndo();
+		const result = await session.userUndo();
 		expect(result.ok).toBe(true);
 		expect(result.droppedTurns).toBe(1);
 
@@ -268,7 +269,7 @@ describe("AgentSession user undo/redo", () => {
 		const lock = tryAcquireFileLock(sessionFile);
 		expect(lock?.acquired).toBe(true);
 		try {
-			const result = session.userUndo();
+			const result = await session.userUndo();
 			expect(result.ok).toBe(true);
 		} finally {
 			lock?.release();
@@ -289,13 +290,13 @@ describe("AgentSession user undo/redo", () => {
 		const sessionFile = path.join(tempDir, "contended-redo.jsonl");
 		await makeFileBackedSession("contended-redo.jsonl");
 		await seedThreeTurns();
-		expect(session.userUndo().ok).toBe(true);
+		expect((await session.userUndo()).ok).toBe(true);
 
 		await sessionManager.rewriteEntries();
 		const lock = tryAcquireFileLock(sessionFile);
 		expect(lock?.acquired).toBe(true);
 		try {
-			const result = session.userRedo();
+			const result = await session.userRedo();
 			expect(result.ok).toBe(true);
 		} finally {
 			lock?.release();
@@ -319,7 +320,7 @@ describe("AgentSession user undo/redo", () => {
 		const lock = tryAcquireFileLock(sessionFile);
 		expect(lock?.acquired).toBe(true);
 		try {
-			expect(session.userUndo().ok).toBe(true);
+			expect((await session.userUndo()).ok).toBe(true);
 		} finally {
 			lock?.release();
 		}
@@ -339,7 +340,7 @@ describe("AgentSession user undo/redo", () => {
 		session = await makeSession();
 		await seedThreeTurns();
 
-		const result = session.userUndo(2);
+		const result = await session.userUndo(2);
 		expect(result.ok).toBe(true);
 		expect(result.droppedTurns).toBe(2);
 
@@ -354,7 +355,7 @@ describe("AgentSession user undo/redo", () => {
 		await seedThreeTurns();
 		const preUndoEntries = sessionManager.getEntries().length;
 
-		session.userUndo();
+		await session.userUndo();
 
 		// Journal is append-only: the dropped entries still exist physically.
 		expect(sessionManager.getEntries().length).toBeGreaterThan(preUndoEntries);
@@ -371,7 +372,7 @@ describe("AgentSession user undo/redo", () => {
 		session = await makeSession();
 		await seedThreeTurns();
 
-		session.userUndo(3);
+		await session.userUndo(3);
 
 		const text = contextText(session);
 		expect(text).not.toContain(SECRET_A);
@@ -383,7 +384,7 @@ describe("AgentSession user undo/redo", () => {
 		session = await makeSession();
 		await seedThreeTurns();
 
-		session.userUndo(1);
+		await session.userUndo(1);
 
 		// No undo-report custom message on the branch — silent contract.
 		const reportEntries = sessionManager
@@ -411,8 +412,8 @@ describe("AgentSession user undo/redo", () => {
 		session = await makeSession();
 		await seedThreeTurns();
 
-		session.userUndo(1);
-		const redo = session.userRedo();
+		await session.userUndo(1);
+		const redo = await session.userRedo();
 		expect(redo.ok).toBe(true);
 
 		const text = contextText(session);
@@ -425,14 +426,14 @@ describe("AgentSession user undo/redo", () => {
 		session = await makeSession();
 		await seedThreeTurns();
 
-		session.userUndo(1);
+		await session.userUndo(1);
 		// Operator continues: plain appended turns create no branch summary,
 		// so the undo marker is still the last branch_summary on the path —
 		// redo must refuse instead of branching away the new conversation.
 		sessionManager.appendMessage(userMessage("Post-undo continuation"));
 		sessionManager.appendMessage(assistantMessage("Fresh answer"));
 
-		const redo = session.userRedo();
+		const redo = await session.userRedo();
 		expect(redo.ok).toBe(false);
 		expect(redo.error).toContain("appended after the /undo");
 
@@ -451,7 +452,7 @@ describe("AgentSession user undo/redo", () => {
 		sessionManager.appendMessage(userMessage(`One more ${SECRET_C}`));
 		sessionManager.appendMessage(assistantMessage("OK tail"));
 
-		const undo = session.userUndo(1);
+		const undo = await session.userUndo(1);
 		expect(undo.ok).toBe(true);
 
 		const branch = sessionManager.getBranch();
@@ -463,7 +464,7 @@ describe("AgentSession user undo/redo", () => {
 		expect(trailing.some(entry => entry.type === "model_change" && entry.model === "openai/gpt-dropped")).toBe(false);
 
 		// Control entries after the marker do not block /redo.
-		const redo = session.userRedo();
+		const redo = await session.userRedo();
 		expect(redo.ok).toBe(true);
 	});
 
@@ -476,7 +477,7 @@ describe("AgentSession user undo/redo", () => {
 		sessionManager.appendMessage(userMessage(`More ${SECRET_C}`));
 		sessionManager.appendMessage(assistantMessage("OK tail"));
 
-		const undo = session.userUndo(1);
+		const undo = await session.userUndo(1);
 		expect(undo.ok).toBe(true);
 
 		const branch = sessionManager.getBranch();
@@ -495,7 +496,7 @@ describe("AgentSession user undo/redo", () => {
 		const phases = [{ name: "work", tasks: [{ content: "one", status: "pending" as const }] }];
 		session.setTodoPhases(phases);
 
-		const undo = session.userUndo(1);
+		const undo = await session.userUndo(1);
 		expect(undo.ok).toBe(true);
 		// Live phases untouched...
 		expect(session.getTodoPhases()).toEqual(phases);
@@ -510,7 +511,7 @@ describe("AgentSession user undo/redo", () => {
 			| undefined;
 		expect(snapshot?.data?.phases).toEqual(phases);
 
-		const redo = session.userRedo();
+		const redo = await session.userRedo();
 		expect(redo.ok).toBe(true);
 		expect(session.getTodoPhases()).toEqual(phases);
 	});
@@ -525,7 +526,7 @@ describe("AgentSession user undo/redo", () => {
 		await seedThreeTurns();
 		session.setTodoPhases([]);
 
-		const undo = session.userUndo(1);
+		const undo = await session.userUndo(1);
 		expect(undo.ok).toBe(true);
 		expect(session.getTodoPhases()).toEqual([]);
 
@@ -550,7 +551,7 @@ describe("AgentSession user undo/redo", () => {
 		const smol = getBundledModel("anthropic", "claude-haiku-4-5")!;
 		await session.setModel(smol, "smol");
 
-		const undo = session.userUndo(1);
+		const undo = await session.userUndo(1);
 		expect(undo.ok).toBe(true);
 
 		expect(sessionManager.getLastModelChangeRole()).toBe("smol");
@@ -572,7 +573,7 @@ describe("AgentSession user undo/redo", () => {
 		// keeps running in the mode, so it must be re-recorded.
 		sessionManager.appendModeChange("plan", { planFilePath: "/tmp/plan.md" });
 
-		const undo = session.userUndo(1);
+		const undo = await session.userUndo(1);
 		expect(undo.ok).toBe(true);
 
 		const branch = sessionManager.getBranch();
@@ -585,7 +586,7 @@ describe("AgentSession user undo/redo", () => {
 		expect(sessionManager.buildSessionContext().mode).toBe("plan");
 
 		// The snapshot entry rides after the marker: redo still applies.
-		const redo = session.userRedo();
+		const redo = await session.userRedo();
 		expect(redo.ok).toBe(true);
 	});
 
@@ -600,7 +601,7 @@ describe("AgentSession user undo/redo", () => {
 		const same = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		await session.setModel(same, "smol");
 
-		const undo = session.userUndo(1);
+		const undo = await session.userUndo(1);
 		expect(undo.ok).toBe(true);
 
 		expect(sessionManager.getLastModelChangeRole()).toBe("smol");
@@ -621,8 +622,8 @@ describe("AgentSession user undo/redo", () => {
 		const smol = getBundledModel("anthropic", "claude-haiku-4-5")!;
 		await session.setModel(smol, "smol");
 
-		expect(session.userUndo(1).ok).toBe(true);
-		expect(session.userRedo().ok).toBe(true);
+		expect((await session.userUndo(1)).ok).toBe(true);
+		expect((await session.userRedo()).ok).toBe(true);
 
 		// The restored tail's role entry is the last one; redo must not
 		// re-journal the model under a default role.
@@ -637,7 +638,7 @@ describe("AgentSession user undo/redo", () => {
 		sessionManager.appendMessage(assistantMessage("OK tail"));
 		sessionManager.appendModeChange("plan", { planFilePath: "/tmp/plan-new.md" });
 
-		const undo = session.userUndo(1);
+		const undo = await session.userUndo(1);
 		expect(undo.ok).toBe(true);
 
 		const branch = sessionManager.getBranch();
@@ -655,12 +656,12 @@ describe("AgentSession user undo/redo", () => {
 		sessionManager.appendMessage(userMessage(`More ${SECRET_C}`));
 		sessionManager.appendMessage(assistantMessage("OK tail"));
 
-		expect(session.userUndo(1).ok).toBe(true);
+		expect((await session.userUndo(1)).ok).toBe(true);
 		// Operator enters a mode AFTER the undo; the trailing mode_change is
 		// tolerated, so redo proceeds — the live mode must come with it.
 		sessionManager.appendModeChange("vibe", { previousTools: [] });
 
-		expect(session.userRedo().ok).toBe(true);
+		expect((await session.userRedo()).ok).toBe(true);
 
 		const branch = sessionManager.getBranch();
 		const redoMarkerIdx = branch.findIndex(
@@ -686,13 +687,13 @@ describe("AgentSession user undo/redo", () => {
 		ttsrManager.markInjectedByNames(["kept-rule", "dropped-rule"]);
 		expect(ttsrManager.getInjectedRuleNames().sort()).toEqual(["dropped-rule", "kept-rule"]);
 
-		const undo = session.userUndo(1);
+		const undo = await session.userUndo(1);
 		expect(undo.ok).toBe(true);
 		// Records now mirror the rewound branch exactly: kept-rule survives,
 		// dropped-rule can trigger again (same as a reload of this branch).
 		expect(ttsrManager.getInjectedRuleNames()).toEqual(["kept-rule"]);
 
-		const redo = session.userRedo();
+		const redo = await session.userRedo();
 		expect(redo.ok).toBe(true);
 		expect(ttsrManager.getInjectedRuleNames().sort()).toEqual(["dropped-rule", "kept-rule"]);
 	});
@@ -720,7 +721,7 @@ describe("AgentSession user undo/redo", () => {
 			return original(names, pos);
 		};
 
-		const undo = session.userUndo(1);
+		const undo = await session.userUndo(1);
 		expect(undo.ok).toBe(true);
 		// One assistant turn precedes the injection on the rewound branch, and
 		// the live counter had already advanced past it: position 1, not the
@@ -741,7 +742,7 @@ describe("AgentSession user undo/redo", () => {
 		// since the injection, but most of them just got undone.
 		for (let i = 0; i < 20; i++) ttsrManager.incrementMessageCount();
 
-		const undo = session.userUndo(1);
+		const undo = await session.userUndo(1);
 		expect(undo.ok).toBe(true);
 		// Branch after undo keeps turn A's TWO model turns (a tool-using
 		// prompt produces several turn_end events) — the counter rewinds in
@@ -827,7 +828,7 @@ describe("AgentSession user undo/redo", () => {
 		session.setPlanReferencePath(planUrl);
 		session.markPlanReferenceSent();
 
-		const undo = session.userUndo(1);
+		const undo = await session.userUndo(1);
 		expect(undo.ok).toBe(true);
 		// The only reference predates the boundary and is excluded from the
 		// rebuilt context, so delivery is NOT marked and the next prompt
@@ -875,11 +876,11 @@ describe("AgentSession user undo/redo", () => {
 		sessionManager.appendTtsrInjection(["redo-rule"]);
 		sessionManager.appendMessage(assistantMessage("OK B"));
 
-		const undo = session.userUndo(1);
+		const undo = await session.userUndo(1);
 		expect(undo.ok).toBe(true);
 		expect(ttsrManager.getInjectedRuleNames()).toEqual([]);
 
-		const redo = session.userRedo();
+		const redo = await session.userRedo();
 		expect(redo.ok).toBe(true);
 		expect(ttsrManager.getInjectedRuleNames()).toEqual(["redo-rule"]);
 		// Restored branch has 2 model turns and the injection sits at
@@ -918,7 +919,7 @@ describe("AgentSession user undo/redo", () => {
 		sessionManager.appendMessage(userMessage("Remember B"));
 		sessionManager.appendMessage(assistantMessage("OK B"));
 
-		const undo = session.userUndo(1);
+		const undo = await session.userUndo(1);
 		expect(undo.ok).toBe(true);
 		expect(ttsrManager.getInjectedRuleNames()).toEqual(["per-tool-rule"]);
 		// Restored branch: 1 assistant message, injection entry after it →
@@ -959,14 +960,14 @@ describe("AgentSession user undo/redo", () => {
 		const { promise: pending, resolve: settle } = Promise.withResolvers<void>();
 		session.trackPostPromptTaskForTests(pending);
 
-		const undo = session.userUndo(1);
+		const undo = await session.userUndo(1);
 		expect(undo.ok).toBe(false);
 		expect(undo.error).toContain("post-prompt work");
 
 		settle();
 		// The tracked task removes itself in a .finally() microtask.
 		await Bun.sleep(1);
-		const after = session.userUndo(1);
+		const after = await session.userUndo(1);
 		expect(after.ok).toBe(true);
 	});
 
@@ -988,7 +989,7 @@ describe("AgentSession user undo/redo", () => {
 		expect(turns.length).toBe(2);
 		expect(turns[1]!.preview).toContain(SECRET_B);
 
-		const undo = session.userUndo(1);
+		const undo = await session.userUndo(1);
 		expect(undo.ok).toBe(true);
 		expect(undo.droppedTurns).toBe(1);
 		const text = contextText(session);
@@ -1021,7 +1022,7 @@ describe("AgentSession user undo/redo", () => {
 		expect(turns.length).toBe(2);
 		expect(turns[1]!.preview).toContain(SECRET_B);
 
-		const undo = session.userUndo(1);
+		const undo = await session.userUndo(1);
 		expect(undo.ok).toBe(true);
 		expect(undo.droppedTurns).toBe(1);
 		const text = contextText(session);
@@ -1036,14 +1037,14 @@ describe("AgentSession user undo/redo", () => {
 		const checkpointEntryId = droppedEntries[0]!.id;
 		session.setCheckpointState({ checkpointMessageCount: 6, checkpointEntryId, startedAt: new Date().toISOString() });
 
-		const undo = session.userUndo(1);
+		const undo = await session.userUndo(1);
 		expect(undo.ok).toBe(true);
 		// The kept branch carries no checkpoint entries, so rehydration from
 		// the new branch clears the stale state instead of leaving it aimed
 		// at an entry that just went off-branch.
 		expect(session.getCheckpointState()).toBeUndefined();
 
-		const redo = session.userRedo();
+		const redo = await session.userRedo();
 		expect(redo.ok).toBe(true);
 		expect(session.getCheckpointState()).toBeUndefined();
 	});
@@ -1062,11 +1063,11 @@ describe("AgentSession user undo/redo", () => {
 		session.setTodoPhases(phases);
 		await seedThreeTurns();
 
-		const undo = session.userUndo(1);
+		const undo = await session.userUndo(1);
 		expect(undo.ok).toBe(true);
 		expect(session.getTodoPhases()).toEqual(phases);
 
-		const redo = session.userRedo();
+		const redo = await session.userRedo();
 		expect(redo.ok).toBe(true);
 		expect(session.getTodoPhases()).toEqual(phases);
 	});
@@ -1075,9 +1076,62 @@ describe("AgentSession user undo/redo", () => {
 		session = await makeSession();
 		await seedThreeTurns();
 
-		const redo = session.userRedo();
+		const redo = await session.userRedo();
 		expect(redo.ok).toBe(false);
 		expect(redo.error).toBeDefined();
+	});
+
+	it("undo and redo emit session_tree so journal-derived extensions resync", async () => {
+		const treeEvents: Array<{ type: string; newLeafId?: string; oldLeafId?: string | null; summaryEntry?: unknown }> =
+			[];
+		const fakeRunner = {
+			hasHandlers: (type: string) => type === "session_tree",
+			emit: async (event: { type: string }) => {
+				treeEvents.push(event);
+				return {};
+			},
+		} as unknown as ExtensionRunner;
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		mockModel = mock;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(path.join(tempDir, "auth-tree-undo.db"));
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		sessionManager = SessionManager.create(tempDir, tempDir);
+		await sessionManager.setSessionFile(path.join(tempDir, "tree-undo.jsonl"));
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+			ttsrManager: new TtsrManager(),
+			extensionRunner: fakeRunner,
+		});
+		await seedThreeTurns();
+
+		const preUndoLeaf = sessionManager.getLeafId();
+		const undo = await session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		expect(treeEvents.length).toBe(1);
+		const undoEvent = treeEvents[0]!;
+		expect(undoEvent.type).toBe("session_tree");
+		expect(undoEvent.oldLeafId).toBe(preUndoLeaf);
+		expect(undoEvent.newLeafId).toBe(sessionManager.getLeafId() ?? undefined);
+		const undoSummary = undoEvent.summaryEntry as { details?: { kind?: string } };
+		expect(undoSummary.details?.kind).toBe("user-undo");
+
+		const redo = await session.userRedo();
+		expect(redo.ok).toBe(true);
+		expect(treeEvents.length).toBe(2);
+		const redoSummary = treeEvents[1]!.summaryEntry as { details?: { kind?: string } };
+		expect(redoSummary.details?.kind).toBe("user-redo");
 	});
 
 	it("revert-to-entry drops everything after the chosen turn (partial revert)", async () => {
@@ -1088,7 +1142,7 @@ describe("AgentSession user undo/redo", () => {
 		expect(turns.length).toBe(3);
 		expect(turns[0]!.preview).toContain(SECRET_A);
 
-		const result = session.userUndoTo(turns[1]!.entryId);
+		const result = await session.userUndoTo(turns[1]!.entryId);
 		expect(result.ok).toBe(true);
 		expect(result.droppedTurns).toBe(2);
 
@@ -1103,7 +1157,7 @@ describe("AgentSession user undo/redo", () => {
 		await seedThreeTurns();
 
 		const turns = session.getUserTurns();
-		const result = session.userUndoTo(turns[0]!.entryId);
+		const result = await session.userUndoTo(turns[0]!.entryId);
 		expect(result.ok).toBe(true);
 		expect(result.droppedTurns).toBe(3);
 
@@ -1117,14 +1171,14 @@ describe("AgentSession user undo/redo", () => {
 		session = await makeSession();
 		await seedThreeTurns();
 
-		const result = session.userUndoTo("does-not-exist");
+		const result = await session.userUndoTo("does-not-exist");
 		expect(result.ok).toBe(false);
 		expect(result.error).toBeDefined();
 	});
 
 	it("undo with no user turns reports unavailable", async () => {
 		session = await makeSession();
-		const result = session.userUndo();
+		const result = await session.userUndo();
 		expect(result.ok).toBe(false);
 		expect(result.error).toBeDefined();
 	});
@@ -1139,7 +1193,7 @@ describe("AgentSession user undo/redo", () => {
 		expect(turns[1]!.preview).toContain(SECRET_B);
 		expect(turns[2]!.preview).toContain(SECRET_C);
 
-		session.userUndo(1);
+		await session.userUndo(1);
 		const after = session.getUserTurns();
 		expect(after.length).toBe(2);
 		expect(after[1]!.preview).toContain(SECRET_B);
