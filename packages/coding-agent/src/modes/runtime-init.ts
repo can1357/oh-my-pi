@@ -8,9 +8,54 @@
  */
 import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
-import type { ExtensionError, ExtensionMode, ExtensionUIContext } from "../extensibility/extensions/types";
+import type {
+	ExtensionActions,
+	ExtensionAgentInfo,
+	ExtensionError,
+	ExtensionMode,
+	ExtensionUIContext,
+} from "../extensibility/extensions/types";
+import { AgentLifecycleManager } from "../registry/agent-lifecycle";
+import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
+import { registerPersistedSubagents } from "../registry/persisted-agents";
 import type { AgentSession } from "../session/agent-session";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
+
+function toExtensionAgentInfo(ref: AgentRef): ExtensionAgentInfo {
+	return {
+		id: ref.id,
+		status: ref.status,
+		kind: ref.kind,
+		...(ref.sessionFile === null ? {} : { sessionFile: ref.sessionFile }),
+	};
+}
+
+/** Actions shared by every extension host for process-global registry agents. */
+export function createExtensionAgentActions(): Required<
+	Pick<ExtensionActions, "agentsList" | "agentsGet" | "agentsEnsureLive" | "agentsPrompt">
+> {
+	return {
+		agentsList: () => AgentRegistry.global().list().map(toExtensionAgentInfo),
+		agentsGet: id => {
+			const ref = AgentRegistry.global().get(id);
+			return ref ? toExtensionAgentInfo(ref) : undefined;
+		},
+		agentsEnsureLive: async (id, agentOptions) => {
+			const registry = AgentRegistry.global();
+			if (!registry.get(id) && agentOptions?.parentSessionFile) {
+				await registerPersistedSubagents(registry, agentOptions.parentSessionFile);
+			}
+			await AgentLifecycleManager.global().ensureLive(id);
+			const ref = registry.get(id);
+			if (!ref) throw new Error(`agent ${id} not in registry after revive`);
+			return toExtensionAgentInfo(ref);
+		},
+		agentsPrompt: async (id, text, agentOptions) => {
+			const liveSession = await AgentLifecycleManager.global().ensureLive(id);
+			await liveSession.prompt(text, { streamingBehavior: agentOptions?.deliverAs ?? "steer" });
+		},
+	};
+}
 
 /** Action name for an extension-originated send failure. */
 export type ExtensionSendAction = "extension_send" | "extension_send_user";
@@ -93,6 +138,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			appendEntry: (customType, data) => {
 				session.sessionManager.appendCustomEntry(customType, data);
 			},
+			...createExtensionAgentActions(),
 			setLabel: (targetId, label) => {
 				session.sessionManager.appendLabelChange(targetId, label);
 			},
