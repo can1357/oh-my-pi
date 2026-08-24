@@ -743,14 +743,20 @@ export function shortenEmbeddedPaths(text: string, homeDir = os.homedir()): stri
 	const caseInsensitive = isWindowsPath;
 	const trailingBoundary =
 		"(?=$|[\\\\/]|\\s|\\x1b|&(?:quot|apos|gt);|[\"'`)\\]}>]|[\"'`()\\[\\]{}<>=:;,|&.!?]+(?=$|\\s))";
+	const uriPathContext = /[A-Za-z][A-Za-z\d+.-]*:\/\/[^\s"'`<>()[\]{}]*$/u;
 	for (const homePath of homePaths) {
+		const hasLeadingSeparator = /^[\\/]/.test(homePath);
+		const leadingBoundary = hasLeadingSeparator ? "" : "(?<![\\p{L}\\p{N}_-])";
 		const homePrefix = new RegExp(
-			`(?<![\\p{L}\\p{N}_-])${RegExp.escape(homePath)}${trailingBoundary}`,
+			`${leadingBoundary}${RegExp.escape(homePath)}${trailingBoundary}`,
 			caseInsensitive ? "giu" : "gu",
 		);
-		shortened = shortened.replace(homePrefix, (_home, offset: number) =>
-			shortened.startsWith("file://", offset - "file://".length) ? "/~" : "~",
-		);
+		shortened = shortened.replace(homePrefix, (matchedHome, offset: number) => {
+			const prefix = shortened.slice(0, offset);
+			const uriPath = hasLeadingSeparator && uriPathContext.test(prefix);
+			if (!uriPath && /[\p{L}\p{N}_-]$/u.test(prefix)) return matchedHome;
+			return uriPath ? `${matchedHome[0]}~` : "~";
+		});
 	}
 	return shortened;
 }
