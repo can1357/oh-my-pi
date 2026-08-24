@@ -901,6 +901,39 @@ describe("omp gc --undo-tails (CLI)", () => {
 		await reloaded.close();
 	});
 
+	it("a failing prune-marker cleanup preserves the original publication error", async () => {
+		await buildSessionWithTwoUndoTails();
+		const manager = await SessionManager.open(sessionFile, sessionsDir, undefined, {
+			suppressBreadcrumb: true,
+		});
+
+		// The journal lock makes the publish throw SessionFileLockError, and
+		// a transient rm failure makes the marker cleanup fail too. The
+		// rethrown error must be the ORIGINAL publication failure — a
+		// cleanup error replacing it would misdiagnose the failure, and the
+		// marker must still be cleared by the retry (best-effort ladder).
+		const realRm = fs.promises.rm.bind(fs.promises);
+		let rmFailedOnce = false;
+		const rmSpy = spyOn(fs.promises, "rm").mockImplementation((async (target: fs.PathLike) => {
+			if (!rmFailedOnce && String(target).endsWith(".owner.pruning")) {
+				rmFailedOnce = true;
+				throw Object.assign(new Error("transient rm failure"), { code: "EIO" });
+			}
+			return (await realRm(target as string)) as never;
+		}) as never);
+		const journalLock = tryAcquireFileLock(sessionFile);
+		expect(journalLock?.acquired).toBe(true);
+		try {
+			await expect(manager.pruneUserUndoTails(0, true)).rejects.toBeInstanceOf(SessionFileLockError);
+		} finally {
+			journalLock?.release();
+			rmSpy.mockRestore();
+		}
+		// Best-effort retry cleared the marker despite the transient failure.
+		expect(fs.existsSync(`${sessionFile}.owner.pruning`)).toBe(false);
+		await manager.close();
+	});
+
 	it("a locked-out append diverges the journal so the next append fully rewrites", async () => {
 		await buildSessionWithTwoUndoTails();
 		const manager = await SessionManager.open(sessionFile, sessionsDir, undefined, {

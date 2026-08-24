@@ -3640,7 +3640,22 @@ export class SessionManager {
 			for (const [marker, details] of detailsBeforeScrub) marker.details = details as typeof marker.details;
 			this.#entries = entriesBeforePrune;
 			this.#index.rebuild(this.#entries);
-			if (markerPlaced) await clearUndoTailPruneMarker(sessionFileForPrune);
+			if (markerPlaced) {
+				// Same retry ladder as the committed path: a transient cleanup
+				// failure must not REPLACE the publication error (and a
+				// surviving marker names this live pid, refusing opens for as
+				// long as it lives) — so retry once, then best-effort, and
+				// always rethrow the ORIGINAL failure.
+				try {
+					await clearUndoTailPruneMarker(sessionFileForPrune);
+				} catch (cleanupError) {
+					logger.warn("Undo-tail prune failed and its marker could not be cleared.", {
+						sessionFile: sessionFileForPrune,
+						error: toError(cleanupError),
+					});
+					await clearUndoTailPruneMarker(sessionFileForPrune).catch(() => undefined);
+				}
+			}
 			throw error;
 		} finally {
 			this.#undoTailPruneActive = false;

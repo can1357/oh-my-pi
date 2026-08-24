@@ -362,7 +362,12 @@ import {
 	SessionMaintenance,
 	type SessionMaintenanceHost,
 } from "./session-maintenance";
-import { cleanupEmptyMoveSession, copySessionArtifacts, type SessionManager } from "./session-manager";
+import {
+	cleanupEmptyMoveSession,
+	copySessionArtifacts,
+	SessionFileLockError,
+	type SessionManager,
+} from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
@@ -8462,20 +8467,29 @@ export class AgentSession {
 		// context from the dropped turns never having happened. No rendered
 		// summary, no undo-report message — the rewound context is
 		// self-coherent because /undo drops a TAIL (kept, earlier entries
-		// cannot reference dropped, later ones). Durability and /redo ride on
-		// the branch entry's details (kind/undoOf/droppedPrompts), which
-		// persist in the append-only journal but never render; the empty
-		// summary makes session-context.ts skip rendering (same pattern as
-		// DISCARDED_ENTRY_BRANCH_MARKER).
-		this.#bash.withBranchTransition(() => {
-			this.sessionManager.branchWithSummary(anchorId, "", {
-				kind: "user-undo",
-				undoOf: previousLeafId,
-				steps: n,
-				droppedPrompts,
-				rewoundAt: new Date().toISOString(),
+		try {
+			this.#bash.withBranchTransition(() => {
+				this.sessionManager.branchWithSummary(anchorId, "", {
+					kind: "user-undo",
+					undoOf: previousLeafId,
+					steps: n,
+					droppedPrompts,
+					rewoundAt: new Date().toISOString(),
+				});
 			});
-		});
+		} catch (error) {
+			if (!(error instanceof SessionFileLockError)) throw error;
+			// Contended append-writer lock: the branch switch and marker
+			// already applied in-memory and the journal is marked divergent
+			// (the next append publishes a full rewrite), so the rollback is
+			// durable-deferred, not lost. Complete the in-memory transition
+			// below — aborting halfway would run the next turn with the
+			// pre-undo agent messages while persisting beneath the undo
+			// branch that excludes them.
+			logger.warn("Undo branch persistence contended; deferred to full rewrite", {
+				error: String(error),
+			});
+		}
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#advisors.resetSessionState({ preserveCost: true });
@@ -8488,9 +8502,20 @@ export class AgentSession {
 		// tail would make #enforceRewindBeforeYield branch straight back to
 		// it, restoring what /undo just removed.
 		this.#rehydrateCheckpointRewindState();
-		this.#rejournalControlEntries(liveRole);
-		this.#recordTodoSnapshot();
-		this.#rejournalModeEntry(preRewindMode.mode, preRewindMode.modeData);
+		try {
+			this.#rejournalControlEntries(liveRole);
+			this.#recordTodoSnapshot();
+			this.#rejournalModeEntry(preRewindMode.mode, preRewindMode.modeData);
+		} catch (error) {
+			// The re-journal appends hit the same contention: they are pure
+			// persistence of live in-memory state, the journal is already
+			// marked divergent, and aborting now would leave a completed
+			// in-memory rollback reported as failed.
+			if (!(error instanceof SessionFileLockError)) throw error;
+			logger.warn("Undo control re-journal contended; deferred to full rewrite", {
+				error: String(error),
+			});
+		}
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		return { ok: true, droppedTurns: n, rewoundTo: target.timestamp };
 	}
@@ -8557,9 +8582,19 @@ export class AgentSession {
 		// Silent like /undo: the marker renders nothing, so context after
 		// /redo is simply the restored turns — no trace that an undo cycle
 		// happened.
-		this.#bash.withBranchTransition(() => {
-			this.sessionManager.branchWithSummary(tipId, "", { kind: "user-redo", redoOf: lastBranch!.id });
-		});
+		try {
+			this.#bash.withBranchTransition(() => {
+				this.sessionManager.branchWithSummary(tipId, "", { kind: "user-redo", redoOf: lastBranch!.id });
+			});
+		} catch (error) {
+			if (!(error instanceof SessionFileLockError)) throw error;
+			// Same deferred-persistence contract as /undo: the rebranch
+			// applied in-memory and the journal is marked divergent, so
+			// complete the in-memory restore rather than half-transition.
+			logger.warn("Redo branch persistence contended; deferred to full rewrite", {
+				error: String(error),
+			});
+		}
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#advisors.resetSessionState({ preserveCost: true });
@@ -8567,9 +8602,17 @@ export class AgentSession {
 		this.#reconcilePlanReference();
 		// Same as /undo: rebuild checkpoint state from the restored branch.
 		this.#rehydrateCheckpointRewindState();
-		this.#rejournalControlEntries(liveRole);
-		this.#recordTodoSnapshot();
-		this.#rejournalModeEntry(preRedoMode.mode, preRedoMode.modeData);
+		try {
+			this.#rejournalControlEntries(liveRole);
+			this.#recordTodoSnapshot();
+			this.#rejournalModeEntry(preRedoMode.mode, preRedoMode.modeData);
+		} catch (error) {
+			// Same deferred-persistence contract as the branch above.
+			if (!(error instanceof SessionFileLockError)) throw error;
+			logger.warn("Redo control re-journal contended; deferred to full rewrite", {
+				error: String(error),
+			});
+		}
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		return { ok: true };
 	}
