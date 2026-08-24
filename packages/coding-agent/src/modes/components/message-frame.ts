@@ -12,6 +12,7 @@ import type { TextContent } from "@oh-my-pi/pi-ai";
 import type { Box, Component } from "@oh-my-pi/pi-tui";
 import { Markdown, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { getMarkdownTheme, type Theme, type ThemeColor, theme } from "../../modes/theme/theme";
+import { replaceTabs } from "../../tools/render-utils";
 
 /** Message shape consumed by the shared frame. */
 export interface FramedMessage {
@@ -80,6 +81,7 @@ export function renderFramedMessage<M extends FramedMessage>(opts: RebuildFrameO
 			.map(c => c.text)
 			.join("\n");
 	}
+	text = replaceTabs(text);
 
 	if (!opts.expanded && opts.collapseAfterLines !== undefined) {
 		const lines = text.split("\n");

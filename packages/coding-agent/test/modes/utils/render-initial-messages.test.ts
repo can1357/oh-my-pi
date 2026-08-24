@@ -17,13 +17,22 @@ import type { AssistantMessage, ImageContent, Message, Usage } from "@oh-my-pi/p
 import { kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
+import { ChatTranscriptBuilder } from "@oh-my-pi/pi-coding-agent/modes/components/chat-transcript-builder";
 import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext, RenderSessionContextOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext, StrippedToolCallsMarker } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { type Component, Container, Image, ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
+import {
+	type Component,
+	Container,
+	Image,
+	ImageProtocol,
+	setTerminalImageProtocol,
+	TERMINAL,
+	type TUI,
+} from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 beforeAll(() => {
@@ -613,6 +622,16 @@ describe("UiHelpers.renderInitialMessages — hidden tool activity", () => {
 				display: true,
 				timestamp: 3,
 			},
+			{
+				role: "custom",
+				customType: "async-progress",
+				content: "",
+				display: true,
+				details: {
+					jobs: [{ jobId: "bg_hidden", type: "bash", elapsedMs: 1_000, text: "ASYNC_PROGRESS_MARKER" }],
+				},
+				timestamp: 4,
+			},
 		]);
 
 		const hidden = makeRenderCtx(transcript, true, true);
@@ -621,6 +640,7 @@ describe("UiHelpers.renderInitialMessages — hidden tool activity", () => {
 		expect(hiddenRender).not.toContain("ASYNC_JOB_MARKER");
 		expect(hiddenRender).not.toContain("LATE_DIAGNOSTIC_MARKER");
 		expect(hiddenRender).not.toContain("LAUNCH_COMPLETION_MARKER");
+		expect(hiddenRender).not.toContain("ASYNC_PROGRESS_MARKER");
 
 		const visible = makeRenderCtx(transcript, true, false);
 		await new UiHelpers(visible.ctx).renderInitialMessages();
@@ -628,6 +648,7 @@ describe("UiHelpers.renderInitialMessages — hidden tool activity", () => {
 		expect(visibleRender).toContain("ASYNC_JOB_MARKER");
 		expect(visibleRender).toContain("LATE_DIAGNOSTIC_MARKER");
 		expect(visibleRender).toContain("LAUNCH_COMPLETION_MARKER");
+		expect(visibleRender).toContain("ASYNC_PROGRESS_MARKER");
 	});
 
 	it("keeps normal warnings visible and hides warnings tied to tool activity", () => {
@@ -669,6 +690,78 @@ describe("UiHelpers.renderInitialMessages — hidden tool activity", () => {
 		expect(Bun.stripANSI(hidden.chatContainer.render(120).join("\n"))).toContain(
 			"2 tool calls elided — no result on this branch",
 		);
+	});
+});
+
+describe("async progress transcript rendering", () => {
+	it("uses the expandable informational block on live and reusable transcript paths", async () => {
+		const progressLines = [
+			"first hidden",
+			"second hidden",
+			...Array.from({ length: 10 }, (_, index) => `visible ${index + 1}`),
+		];
+		const progressText = progressLines.join("\n");
+		const progressMessage = {
+			role: "custom",
+			customType: "async-progress",
+			content: `<system-notice><job-progress id="job_42" type="process" elapsed="17m55s"><output>${progressText}</output></job-progress></system-notice>`,
+			display: true,
+			attribution: "agent",
+			details: {
+				jobs: [
+					{
+						jobId: "job_42",
+						type: "process",
+						elapsedMs: 1_075_000,
+						text: progressText,
+					},
+				],
+			},
+			timestamp: 1,
+		} as AgentMessage;
+
+		const live = makeRenderCtx(transcriptWith([progressMessage]));
+		await new UiHelpers(live.ctx).renderInitialMessages();
+		const liveRender = Bun.stripANSI(live.chatContainer.render(120).join("\n"));
+
+		const reusable = new ChatTranscriptBuilder({
+			ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
+			cwd: process.cwd(),
+			requestRender: () => {},
+		});
+		reusable.rebuild([
+			{
+				type: "message",
+				id: "m1",
+				parentId: null,
+				timestamp: new Date(0).toISOString(),
+				message: progressMessage,
+			},
+		]);
+		const reusableRender = Bun.stripANSI(reusable.container.render(120).join("\n"));
+
+		for (const rendered of [liveRender, reusableRender]) {
+			expect(rendered).toContain("Background process progress job_42 (17m55s)");
+			expect(rendered).not.toContain("first hidden");
+			expect(rendered).toContain("visible 10");
+			expect(rendered).toContain("… 3 earlier lines");
+			expect(rendered).toContain("Ctrl+O");
+			expect(rendered).not.toContain("<system-notice>");
+			expect(rendered).not.toContain("<job-progress");
+			expect(rendered).not.toContain("async-progress");
+		}
+
+		const expandedLive = makeRenderCtx(transcriptWith([progressMessage]));
+		expandedLive.ctx.toolOutputExpanded = true;
+		await new UiHelpers(expandedLive.ctx).renderInitialMessages();
+		const expandedLiveRender = Bun.stripANSI(expandedLive.chatContainer.render(120).join("\n"));
+		reusable.setExpanded(true);
+		const expandedReusableRender = Bun.stripANSI(reusable.container.render(120).join("\n"));
+		for (const rendered of [expandedLiveRender, expandedReusableRender]) {
+			expect(rendered).toContain("first hidden");
+			expect(rendered).not.toContain("earlier lines");
+			expect(rendered).not.toContain("Ctrl+O");
+		}
 	});
 });
 
