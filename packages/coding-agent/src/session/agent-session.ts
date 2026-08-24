@@ -8556,10 +8556,11 @@ export class AgentSession {
 		this.#advisors.resetSessionState({ preserveCost: true });
 		this.#reconcileTtsrInjections();
 		this.#reconcilePlanReference();
-		// The replaced branch's xdev mount notices no longer apply: forget the
-		// announced-mount baseline so the next notice re-seeds from the rewound
-		// transcript instead of treating a rolled-back unmount as delivered.
-		this.#tools.resetAnnouncedMounts();
+		// The replaced branch's xdev mount notices no longer apply: re-seed the
+		// announced-mount baseline from the rewound transcript and requeue the
+		// difference against the live mount set, so a rolled-back unmount (or
+		// mount) notice is re-delivered on the next prompt.
+		this.#tools.reconcileAnnouncedMounts();
 		// Todos are deliberately NOT rehydrated from the rewound branch: the
 		// rollback contract is context-only, so live todo state survives.
 		// Checkpoint/rewind runtime state IS rebuilt from the new branch (same
@@ -8677,8 +8678,8 @@ export class AgentSession {
 		this.#reconcileTtsrInjections();
 		this.#reconcilePlanReference();
 		// Same as /undo: the restored branch's xdev mount notices re-seed the
-		// announced-mount baseline.
-		this.#tools.resetAnnouncedMounts();
+		// announced-mount baseline and requeue the live-mount difference.
+		this.#tools.reconcileAnnouncedMounts();
 		// Same as /undo: rebuild checkpoint state from the restored branch.
 		this.#rehydrateCheckpointRewindState();
 		// Individual guards, same contract as the undo block above.
