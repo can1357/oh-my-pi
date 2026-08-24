@@ -150,6 +150,22 @@ describe("omp gc --undo-tails (CLI)", () => {
 		// target: suppressed breadcrumb means no terminal-sessions file at all.
 		expect(outcome.breadcrumb).toBe("ABSENT");
 		expect(fs.readFileSync(sessionFile, "utf8")).toBe(before);
+		// Claim-free load: a dry run must not even temporarily append an
+		// owner sidecar — the directory stays byte-identical, and read-only
+		// mounts work (a claim append would fail the gated load outright).
+		expect(fs.existsSync(`${sessionFile}.owner`)).toBe(false);
+	});
+
+	it("dry run works against a read-only sessions directory", async () => {
+		await buildSessionWithTwoUndoTails();
+		fs.chmodSync(sessionsDir, 0o500);
+		try {
+			const outcome = await runGcChild(agentDir, false);
+			expect(outcome.errors).toBe(0);
+			expect(outcome.markersPruned).toBe(1);
+		} finally {
+			fs.chmodSync(sessionsDir, 0o700);
+		}
 	});
 
 	it("apply with a live owner process skips the session", async () => {
@@ -816,6 +832,28 @@ describe("omp gc --undo-tails (CLI)", () => {
 		expect(manager.getBranch().map(entry => entry.id)).toEqual(entriesBefore);
 		await manager.close();
 	});
+
+	it("close resolves under sidecar lock contention and retains the claim for retry", async () => {
+		await buildSessionWithTwoUndoTails();
+		const manager = await SessionManager.open(sessionFile, sessionsDir, undefined, {
+			suppressBreadcrumb: true,
+		});
+		expect(fs.readFileSync(`${sessionFile}.owner`, "utf8")).toBe(`${process.pid}\n`);
+
+		// Hold the sidecar lock so the close-time claim removal cannot
+		// acquire it: the release tail must not reject (a rejected tail
+		// permanently disables this manager's register/remove bookkeeping)
+		// and close() must resolve, retaining the claim as a retry target.
+		const lock = tryAcquireFileLock(`${sessionFile}.owner`);
+		expect(lock?.acquired).toBe(true);
+		try {
+			await manager.close();
+		} finally {
+			lock?.release();
+		}
+		// The removal was retained, not dropped: the live-pid line survives.
+		expect(fs.readFileSync(`${sessionFile}.owner`, "utf8")).toBe(`${process.pid}\n`);
+	}, 30_000);
 
 	it("a locked-out append diverges the journal so the next append fully rewrites", async () => {
 		await buildSessionWithTwoUndoTails();
