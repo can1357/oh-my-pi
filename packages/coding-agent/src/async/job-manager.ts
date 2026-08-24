@@ -854,8 +854,8 @@ export class AsyncJobManager {
 		job.progressDelivery = delivery;
 		this.#resumeAgentProgress(job);
 		job.foregroundStreamProvenance = foregroundStreamProvenance;
+		job.progressDeliveryCoverage = "continuous";
 		if (foregroundStreamProvenance) {
-			job.progressDeliveryCoverage = "continuous";
 			job.progressDeliveredCount = Math.max(job.progressDeliveredCount ?? 0, 1);
 		}
 		return true;

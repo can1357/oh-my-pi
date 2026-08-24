@@ -261,6 +261,33 @@ describe("bash progress parameter", () => {
 		await manager.dispose();
 	}, 10_000);
 
+	test("keeps continuous coverage when all output arrives after auto-promotion", async () => {
+		const manager = new AsyncJobManager({});
+		const progress: string[] = [];
+		manager.registerProgressSink("Main", {
+			deliver: (_jobId, text) => {
+				progress.push(text);
+			},
+		});
+		manager.registerDeliverySink("Main", () => {});
+		const tool = new BashTool(makeSession(manager, { "bash.asyncAuto.inlineGraceMs": 100 }));
+
+		const result = await tool.execute("auto-promote-empty-foreground", {
+			command: "sleep 0.4; printf 'post-promotion-only\\n'",
+			async: "auto",
+			progress: "wake",
+		});
+
+		expect(result.details?.async?.state).toBe("running");
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 10 });
+
+		const completedJob = manager.getJob(result.details?.async?.jobId ?? "");
+		expect(completedJob?.terminalTextProvenance).toBe("progress");
+		expect(progress).toEqual(["post-promotion-only"]);
+		await manager.dispose();
+	}, 10_000);
+
 	test("records foreground-only output provenance when auto-promoted", async () => {
 		const manager = new AsyncJobManager({});
 		const progress: string[] = [];
