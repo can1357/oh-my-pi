@@ -12,7 +12,7 @@ import type { DaemonSnapshot } from "../tools/hub";
 import { type CustomMessage, type FileMentionMessage, resolveAbortLabel, shouldRenderAbortReason } from "./messages";
 import { createIrcMessageCard } from "../tools/hub";
 import { formatArtifactErrorNotice, type OutputMeta } from "../tools/output-meta";
-import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
+import { replaceTabs, shortenEmbeddedPaths, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
 import { canonicalizeMessage } from "./thinking-display";
 import { ToolActivityContainer } from "../chrome/tool-activity";
 import { type TranscriptBlock } from "../chrome/transcript-container";
@@ -20,6 +20,23 @@ import { TranscriptStatusBlock, type TranscriptStatusRow } from "../chrome/trans
 import { theme } from "../theme";
 
 type CustomOrHookMessage = Extract<AgentMessage, { role: "custom" | "hookMessage" }>;
+
+/**
+ * Build the display-only copy of an async progress message. The persisted/model
+ * payload remains byte-identical; both transcript surfaces pass this copy to the
+ * existing custom-message renderer.
+ */
+export function buildAsyncProgressDisplayMessage(message: CustomOrHookMessage): CustomOrHookMessage {
+	// Mirrors `ASYNC_PROGRESS_MESSAGE_TYPE` in @oh-my-pi/pi-coding-agent; pi-tui
+	// matches custom types by literal (see chat-transcript-builder's "async-result").
+	if (message.customType !== "async-progress" || typeof message.content !== "string") return message;
+	const content = shortenEmbeddedPaths(replaceTabs(message.content))
+		.split("\n")
+		.map(line => truncateToWidth(line, TRUNCATE_LENGTHS.LINE))
+		.join("\n");
+	return content === message.content ? message : { ...message, content };
+}
+
 type AssistantAgentMessage = Extract<AgentMessage, { role: "assistant" }>;
 
 /**
