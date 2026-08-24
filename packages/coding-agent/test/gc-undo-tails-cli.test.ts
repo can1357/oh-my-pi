@@ -63,7 +63,7 @@ interface GcChildOutcome {
 async function runGcChild(
 	agentDir: string,
 	apply: boolean,
-	extra?: { passes?: string[]; keep?: number; interpose?: "change" | "owner" },
+	extra?: { passes?: string[]; keep?: number; interpose?: "change" | "owner" | "preopen-change" },
 ): Promise<GcChildOutcome> {
 	// Static fixture module (test/fixtures/gc-undo-tails-child.ts): the
 	// spawn env carries the agent dir, so the child's top-level imports
@@ -697,6 +697,19 @@ describe("omp gc --undo-tails (CLI)", () => {
 		await manager.moveTo(path.join(agentDir, "project-locked"), destDir);
 		expect(manager.getSessionFile()).not.toBe(sessionFile);
 		await manager.close();
+	});
+
+	it("prune mtime restore skips a journal that updated before the gated load", async () => {
+		await buildSessionWithTwoUndoTails();
+		const old = new Date(Date.now() - 30 * 86_400_000);
+		fs.utimesSync(sessionFile, old, old);
+		const staleMtime = fs.statSync(sessionFile).mtimeMs;
+		// A concurrent update lands between the stat and the load gate: the
+		// journal is updated and closed, so restoring the stale mtime would
+		// regress it.
+		const outcome = await runGcChild(agentDir, true, { interpose: "preopen-change" });
+		expect(outcome.entriesRemoved).toBeGreaterThan(0);
+		expect(fs.statSync(sessionFile).mtimeMs).toBeGreaterThan(staleMtime);
 	});
 
 	it("prune mtime restore skips a journal that changed after the prune", async () => {
