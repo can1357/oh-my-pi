@@ -1568,6 +1568,15 @@ describe("AgentSession user undo/redo", () => {
 		const mountNotice = mounted.takePendingXdevMountNotice(true);
 		expect(mountNotice?.details?.added).toContain("demo");
 
+		// Same outcome when the transcript's last word was a removal notice:
+		// the baseline (no demo announced) differs from the live set the same
+		// way, so the requeue lands in pending.added rather than being treated
+		// as a delivered unmount.
+		const remounted = makeTools([notice({ added: [], removed: ["demo"] })], ["demo"]);
+		remounted.reconcileAnnouncedMounts();
+		const remountNotice = remounted.takePendingXdevMountNotice(true);
+		expect(remountNotice?.details?.added).toContain("demo");
+
 		// Consistent state: transcript matches live mounts — nothing requeued.
 		const consistent = makeTools([notice({ added: ["demo"], removed: [] })], ["demo"]);
 		consistent.reconcileAnnouncedMounts();
