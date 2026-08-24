@@ -1033,6 +1033,28 @@ export class SessionManager {
 		return this.#sidecarTail.then(() => written);
 	}
 
+	/**
+	 * Synchronous {@link #registerOwnerSidecar} for callers that expose a
+	 * manager (detached clones for in-flight bash) before any await can
+	 * drain the queued sidecar tail: the claim must be durable the moment
+	 * the clone exists, or a session switch that releases the SOURCE
+	 * manager's claim in the same turn leaves a window where gc sees the
+	 * session unowned and prunes undo tails beneath the clone — which its
+	 * close-time full rewrite would then resurrect. Returns false when the
+	 * claim could not be established synchronously (sidecar lock busy or
+	 * transient I/O); callers fall back to the queued async registration.
+	 */
+	#registerOwnerSidecarSync(): boolean {
+		if (!this.#persist) return true;
+		const sessionFile = this.#sessionFile;
+		if (!sessionFile || !(this.#storage instanceof FileSessionStorage)) return true;
+		if (this.#noOwnerClaim) return true;
+		if ((this.#ownerClaims.get(sessionFile) ?? 0) > 0) return true;
+		if (!writeOwnerSidecarSync(sessionFile)) return false;
+		this.#ownerClaims.set(sessionFile, (this.#ownerClaims.get(sessionFile) ?? 0) + 1);
+		return true;
+	}
+
 	#claimOwnerSidecarFor(sessionFile: string): Promise<boolean> {
 		return writeOwnerSidecar(sessionFile).then(written => {
 			if (written) this.#ownerClaims.set(sessionFile, (this.#ownerClaims.get(sessionFile) ?? 0) + 1);
@@ -1891,7 +1913,6 @@ export class SessionManager {
 		// switchSession's rollback lands here after a failed switch, and an
 		// unregister→re-register gap there lets gc publish beneath the
 		// restored in-memory snapshot. A different file keeps the old
-		// release-then-register behavior.
 		const targetSessionFile = snapshot.sessionFile ? path.resolve(snapshot.sessionFile) : undefined;
 		this.#unregisterOwnerSidecar(targetSessionFile);
 		this.#diskTail = Promise.resolve();
@@ -1900,7 +1921,17 @@ export class SessionManager {
 		this.#cwd = snapshot.cwd;
 		this.#sessionDir = snapshot.sessionDir;
 		this.#sessionFile = snapshot.sessionFile;
-		this.#registerOwnerSidecar();
+		if (this.#registerOwnerSidecarSync()) {
+			// Claim durable before restoreState returns: a detached clone is
+			// exposed to its caller immediately, with no later await that
+			// could drain a queued registration before the source manager's
+			// claim is released by a session switch.
+		} else {
+			logger.warn("Session owner sidecar claim not established synchronously; queued", {
+				sessionFile: this.#sessionFile,
+			});
+			this.#registerOwnerSidecar();
+		}
 		this.#fileIsCurrent = snapshot.onDisk;
 		this.#rewriteRequired = snapshot.needsRewrite;
 		this.#forceFileCreation = snapshot.onDisk;
