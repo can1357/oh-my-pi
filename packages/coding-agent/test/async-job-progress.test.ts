@@ -476,6 +476,62 @@ describe("AsyncJobManager model progress", () => {
 		expect(completions).toEqual([terminalText]);
 	});
 
+	test("keeps terminal text visible after a rejected progress delivery", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({});
+		const completions: string[] = [];
+		const delivered: string[] = [];
+		let deliveryAttempt = 0;
+		manager.registerProgressSink("Main", {
+			deliver: async (_jobId, text) => {
+				deliveryAttempt += 1;
+				if (deliveryAttempt === 1) throw new Error("synthetic progress delivery failure");
+				delivered.push(text);
+			},
+		});
+		manager.registerDeliverySink("Main", (_jobId, text) => {
+			completions.push(text);
+		});
+		const firstSource = "first\n";
+		const terminalSource = `${firstSource}second\n`;
+		const terminalText = `${terminalSource}\nWall time: 1.23 seconds`;
+		const gate = Promise.withResolvers<{ text: string; terminalTextSource: string }>();
+		const started = Promise.withResolvers<(text: string, info?: AsyncJobProgressInfo) => void>();
+		const jobId = manager.register(
+			"bash",
+			"rejected cumulative progress",
+			async ({ reportAgentProgress }) => {
+				started.resolve(reportAgentProgress);
+				return gate.promise;
+			},
+			{ ownerId: "Main", progressDelivery: "ambient" },
+		);
+		const report = await started.promise;
+
+		report("first", {
+			artifactId: "rejected-cumulative-artifact",
+			streamProvenance: progressStreamProvenanceForText(firstSource),
+		});
+		vi.advanceTimersByTime(200);
+		await Promise.resolve();
+		report("second", {
+			artifactId: "rejected-cumulative-artifact",
+			streamProvenance: progressStreamProvenanceForText(terminalSource),
+		});
+		vi.advanceTimersByTime(200);
+		await Promise.resolve();
+		expect(delivered).toEqual(["second"]);
+
+		gate.resolve({ text: terminalText, terminalTextSource: terminalSource });
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 2_000 });
+
+		const job = manager.getJob(jobId)!;
+		expect(job.progressDeliveredCount).toBe(1);
+		expect(job.terminalTextProvenance).toBe("terminal");
+		expect(completions).toEqual([terminalText]);
+	});
+
 	test("carries upstream suppression metadata into the delivered batch", async () => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({});
