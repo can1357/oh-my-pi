@@ -11,6 +11,7 @@ import {
 	getSessionsDir,
 	getStatsDbPath,
 	readLines,
+	tryAcquireFileLock,
 } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
@@ -1650,22 +1651,32 @@ async function runUndoTailGc(options: ResolvedGcOptions): Promise<UndoTailGcResu
 						// change the session's logical age, so the original
 						// mtime is restored — otherwise a later pass in this
 						// same run (archive's write grace) would skip the
-						// file as just-modified. Restore only when the
-						// journal is still the one the prune published and
-						// no third-party owner appeared: a concurrent
-						// update's fresh mtime must survive so the grace
-						// keeps protecting it.
-						if (
-							sameJournalIdentity(beforeIdentity, atLoad) &&
-							sameJournalIdentity(counts.published, await journalIdentity(session.path)) &&
-							// This gc manager contributes exactly one own-pid
-							// claim line; a second same-process line is a
-							// sibling manager that went live during the prune.
-							![...(await readOwnerClaimCounts(session.path))].some(([pid, count]) =>
-								pid === process.pid ? count > 1 : isProcessAlive(pid),
-							)
-						) {
-							await fs.utimes(session.path, before.atime, before.mtime);
+						// file as just-modified. The final validation AND the
+						// utimes run under the journal's exclusive lock: a
+						// manager appending between an unlocked check and
+						// the restore would have its fresh mtime clobbered,
+						// and the archive pass in this same run would then
+						// move a session that was just updated.
+						const restoreLock = tryAcquireFileLock(session.path);
+						try {
+							if (!restoreLock?.acquired) {
+								// Held by a live writer — its fresh mtime is
+								// exactly what must survive; skip the restore.
+								restoreLock?.release();
+							} else if (
+								sameJournalIdentity(beforeIdentity, atLoad) &&
+								sameJournalIdentity(counts.published, await journalIdentity(session.path)) &&
+								// This gc manager contributes exactly one own-pid
+								// claim line; a second same-process line is a
+								// sibling manager that went live during the prune.
+								![...(await readOwnerClaimCounts(session.path))].some(([pid, count]) =>
+									pid === process.pid ? count > 1 : isProcessAlive(pid),
+								)
+							) {
+								await fs.utimes(session.path, before.atime, before.mtime);
+							}
+						} finally {
+							if (restoreLock?.acquired) restoreLock.release();
 						}
 					}
 				}
