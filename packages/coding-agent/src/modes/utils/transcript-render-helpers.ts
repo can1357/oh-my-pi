@@ -9,6 +9,7 @@ import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { formatBytes, formatDuration } from "@oh-my-pi/pi-utils";
 import type { AsyncJobType } from "../../async";
 import type { DaemonSnapshot } from "../../launch/protocol";
+import { ASYNC_PROGRESS_MESSAGE_TYPE } from "../../session/async-job-delivery";
 import {
 	type CustomMessage,
 	type FileMentionMessage,
@@ -16,13 +17,28 @@ import {
 	shouldRenderAbortReason,
 } from "../../session/messages";
 import { createIrcMessageCard } from "../../tools/hub";
-import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
+import { replaceTabs, shortenEmbeddedPaths, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { ToolActivityContainer } from "../components/tool-activity";
 import { TranscriptBlock } from "../components/transcript-container";
 import { theme } from "../theme/theme";
 
 type CustomOrHookMessage = Extract<AgentMessage, { role: "custom" | "hookMessage" }>;
+
+/**
+ * Build the display-only copy of an async progress message. The persisted/model
+ * payload remains byte-identical; both transcript surfaces pass this copy to the
+ * existing custom-message renderer.
+ */
+export function buildAsyncProgressDisplayMessage(message: CustomOrHookMessage): CustomOrHookMessage {
+	if (message.customType !== ASYNC_PROGRESS_MESSAGE_TYPE || typeof message.content !== "string") return message;
+	const content = shortenEmbeddedPaths(replaceTabs(message.content))
+		.split("\n")
+		.map(line => truncateToWidth(line, TRUNCATE_LENGTHS.LINE))
+		.join("\n");
+	return content === message.content ? message : { ...message, content };
+}
+
 type AssistantAgentMessage = Extract<AgentMessage, { role: "assistant" }>;
 
 /**
