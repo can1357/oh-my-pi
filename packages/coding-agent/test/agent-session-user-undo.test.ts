@@ -19,7 +19,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionFileLockError, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake, tryAcquireFileLock } from "@oh-my-pi/pi-utils";
 import { TtsrManager } from "../src/export/ttsr";
 import type { ExtensionRunner } from "../src/extensibility/extensions/runner";
@@ -1197,5 +1197,29 @@ describe("AgentSession user undo/redo", () => {
 		const after = session.getUserTurns();
 		expect(after.length).toBe(2);
 		expect(after[1]!.preview).toContain(SECRET_B);
+	});
+
+	it("dispose flushes a divergent journal before sealing", async () => {
+		await makeFileBackedSession("dispose-flush.jsonl");
+		await seedThreeTurns();
+		const sessionFile = path.join(tempDir, "dispose-flush.jsonl");
+		// Close any open writer fd so the append actually contends with the
+		// journal lock instead of bypassing it.
+		await sessionManager.rewriteEntries();
+
+		const lock = tryAcquireFileLock(sessionFile);
+		expect(lock?.acquired).toBe(true);
+		try {
+			expect(() => sessionManager.appendMessage(userMessage("locked-out"))).toThrow(SessionFileLockError);
+		} finally {
+			lock?.release();
+		}
+		expect(fs.readFileSync(sessionFile, "utf8")).not.toContain("locked-out");
+
+		// Dispose seals the manager before close(); a sealed manager's atomic
+		// rewrite is fenced off, so the flush must run BEFORE the seal or the
+		// deferred entry never reaches disk.
+		await session.dispose();
+		expect(fs.readFileSync(sessionFile, "utf8")).toContain("locked-out");
 	});
 });
