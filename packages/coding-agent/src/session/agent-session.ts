@@ -5595,7 +5595,8 @@ export class AgentSession {
 				// /undo or /redo, making an after-gap rule repeat early.
 				lastMessageWasAssistant = false;
 				if (entry.customType === "ttsr-injection") {
-					const rules = (entry.details as { rules?: unknown } | undefined)?.rules;
+					const details = entry.details as { rules?: unknown } | undefined;
+					const rules = details?.rules;
 					if (Array.isArray(rules)) {
 						for (const name of rules) {
 							if (typeof name === "string") ruleNames.add(name);
