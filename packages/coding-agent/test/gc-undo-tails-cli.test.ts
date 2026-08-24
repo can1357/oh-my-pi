@@ -849,6 +849,40 @@ describe("omp gc --undo-tails (CLI)", () => {
 		expect(await readSessionOwnerPids(branchFile!)).toEqual([]);
 	});
 
+	it("a failed branch preclaim refuses the switch with the manager untouched", async () => {
+		await buildSessionWithTwoUndoTails();
+		const manager = SessionManager.create(sessionsDir, sessionsDir);
+		await manager.setSessionFile(sessionFile);
+		const beforeIds = manager.getBranch().map(entry => entry.id);
+		const fileBefore = fs.readFileSync(sessionFile, "utf-8");
+
+		// No sidecar can be created while the session dir is read-only, so
+		// the branch preclaim fails and the branch must be refused before
+		// any in-memory state switches (the file is minted inside
+		// createBranchedSession, so the dir is the only writable surface to
+		// deny).
+		fs.chmodSync(sessionsDir, 0o500);
+		try {
+			const anchorEntry = manager.getBranch().find(entry => entry.type === "message");
+			expect(() => manager.createBranchedSession(anchorEntry!.id)).toThrow(SessionFileLockError);
+		} finally {
+			fs.chmodSync(sessionsDir, 0o700);
+		}
+
+		// Nothing switched: same file, same tree — the manager did not end
+		// up half-branched with the old session file.
+		expect(manager.getSessionFile()).toBe(sessionFile);
+		expect(manager.getBranch().map(entry => entry.id)).toEqual(beforeIds);
+
+		// The manager stays usable: a later append still lands in the
+		// source journal, not in some unpublished branch file.
+		manager.appendMessage(userMessage("after refused branch"));
+		await manager.close();
+		const fileAfter = fs.readFileSync(sessionFile, "utf-8");
+		expect(fileAfter).not.toBe(fileBefore);
+		expect(fileAfter).toContain("after refused branch");
+	});
+
 	it("journal identity fails closed on unreadable stats", async () => {
 		// ENOENT reads as absent; every other stat failure propagates.
 		expect(await journalIdentity(path.join(agentDir, "missing.jsonl"))).toBeUndefined();
