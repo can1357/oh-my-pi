@@ -393,6 +393,39 @@ const CONTEXTUAL_NON_PRIMARY_HIDDEN_CUSTOM_TYPES: Record<string, true> = {
 	"image-attachment-description": true,
 };
 
+/** Bounded, actionable history summary built from persisted progress details, not model-facing XML. */
+function formatAsyncProgressHistory(details: Record<string, unknown>): string {
+	const jobs = Array.isArray(details.jobs) ? details.jobs : [];
+	const parts = jobs.map(job => {
+		const entry = (job ?? {}) as Record<string, unknown>;
+		const id = typeof entry.jobId === "string" ? entry.jobId : "job";
+		const head = typeof entry.head === "string" ? entry.head : undefined;
+		const tail = typeof entry.tail === "string" ? entry.tail : undefined;
+		let text = "";
+		if (entry.truncated === true && (head !== undefined || tail !== undefined)) {
+			if (head !== undefined && tail !== undefined) {
+				const partMax = Math.floor((PRIMARY_ARG_MAX - " … ".length) / 2);
+				text = `${oneLine(head, partMax)} … ${oneLine(tail, partMax)}`;
+			} else {
+				text = oneLine(head ?? tail ?? "");
+			}
+		} else if (typeof entry.text === "string") {
+			// Source-truncated output that still fits the preview budget has no
+			// head/tail gap. Keep its retained text without inventing an elision.
+			text = oneLine(entry.text);
+		}
+		const suppressedEvents =
+			typeof entry.suppressedEvents === "number" && entry.suppressedEvents > 0 ? entry.suppressedEvents : undefined;
+		const suppressed = suppressedEvents === undefined ? "" : ` [${suppressedEvents} progress events suppressed]`;
+		const artifact =
+			(entry.truncated === true || suppressedEvents !== undefined) && typeof entry.artifactId === "string"
+				? ` [full output: artifact://${entry.artifactId}]`
+				: "";
+		return text ? `${id}: ${text}${suppressed}${artifact}` : `${id}${suppressed}${artifact}`;
+	});
+	return parts.length > 0 ? `[async-progress] ${parts.join("; ")}` : "[async-progress]";
+}
+
 /** One-liner for custom/hook messages: `[irc] A → B: body…`. */
 function customOneLiner(msg: CustomMessage | HookMessage): string {
 	const details = (msg.details ?? {}) as Record<string, unknown>;
@@ -414,6 +447,8 @@ function customOneLiner(msg: CustomMessage | HookMessage): string {
 				.join(", ");
 			return `[async-result] ${oneLine(labels)}`;
 		}
+		case "async-progress":
+			return formatAsyncProgressHistory(details);
 		default:
 			return `[${msg.customType}] ${oneLine(contentToText(msg.content))}`;
 	}
