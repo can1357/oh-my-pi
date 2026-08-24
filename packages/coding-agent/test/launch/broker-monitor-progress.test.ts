@@ -1256,7 +1256,9 @@ process.stdout.write("GENERATION_STARTED\\n");
 			});
 			if (started.op !== "start") throw new Error("unexpected start result");
 			await waitForOutputCount(notifications, 1);
-			await client.request({ op: "restart", name: "restart" });
+			const restarted = await client.request({ op: "restart", name: "restart" });
+			if (restarted.op !== "restart") throw new Error("unexpected restart result");
+			expect(restarted.incarnation).toBe("continued");
 			await waitForOutputCount(notifications, 2);
 			expect(notifications.some(notification => notification.event === "daemon-monitor-completed")).toBe(false);
 
@@ -1327,6 +1329,7 @@ process.stdout.write("GENERATION_STARTED\\n");
 			const restarted = await client.request({ op: "restart", name: "failed-restart" });
 			if (restarted.op !== "restart") throw new Error("unexpected restart result");
 			expect(restarted.daemon.state).toBe("failed");
+			expect(restarted.incarnation).toBe("continued");
 			await completed.promise;
 			await client.request({ op: "ping" });
 
@@ -1334,6 +1337,10 @@ process.stdout.write("GENERATION_STARTED\\n");
 			expect(terminal).toHaveLength(1);
 			expect(terminal[0]?.daemon.state).toBe("failed");
 			expect(await Bun.file(artifactPath).text()).toBe("GENERATION_STARTED\n");
+			const replaced = await client.request({ op: "restart", name: "failed-restart" });
+			if (replaced.op !== "restart") throw new Error("unexpected replacement restart result");
+			expect(replaced.incarnation).toBe("replaced");
+			expect(replaced.daemon.id).not.toBe(restarted.daemon.id);
 		} finally {
 			unregister();
 			await client.request({ op: "stop", name: "failed-restart", timeoutMs: 2_000 }).catch(() => undefined);
