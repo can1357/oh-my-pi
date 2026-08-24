@@ -2,11 +2,15 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:
 import * as os from "node:os";
 import type { TUI } from "@oh-my-pi/pi-tui";
 import { resetSettingsForTest, Settings } from "../../../src/config/settings";
+import type { DaemonSnapshot } from "../../../src/launch/protocol";
 import { ChatTranscriptBuilder } from "../../../src/modes/components/chat-transcript-builder";
 import { TranscriptContainer } from "../../../src/modes/components/transcript-container";
 import { initTheme } from "../../../src/modes/theme/theme";
 import type { InteractiveModeContext } from "../../../src/modes/types";
-import { buildAsyncProgressDisplayMessage } from "../../../src/modes/utils/transcript-render-helpers";
+import {
+	buildAsyncProgressDisplayMessage,
+	buildLaunchCompletionBlock,
+} from "../../../src/modes/utils/transcript-render-helpers";
 import { UiHelpers } from "../../../src/modes/utils/ui-helpers";
 import {
 	type AsyncProgressDetails,
@@ -103,7 +107,6 @@ describe("async progress transcript display sanitization", () => {
 		expect(message.details?.jobs[0]?.text).toBe(RAW_PROGRESS);
 		expect(message.content).toBe(modelContent);
 	});
-
 	it("shortens home paths in file URLs without matching embedded path suffixes or mutating the source", () => {
 		const fileUrl = `file://${HOME_PATH}`;
 		const embeddedPath = `/mnt${HOME_PATH}`;
@@ -167,15 +170,93 @@ describe("async progress transcript display sanitization", () => {
 		expect(message.content).toContain(slashPath);
 	});
 
-	it("bounds every display-only progress line without truncating the model payload", () => {
-		const message = progressMessage(`${LONG_PROGRESS_LINE}\n${LONG_PROGRESS_LINE}`);
+	it("sanitizes tabs and home paths in a rebuilt transcript without changing the stored message", () => {
+		const message = progressMessage();
+		const modelContent = message.content;
+		const builder = new ChatTranscriptBuilder({
+			ui: {} as TUI,
+			cwd: "/workspace",
+			requestRender: () => {},
+		});
+		const entry: SessionMessageEntry = {
+			type: "message",
+			id: "entry-1",
+			parentId: null,
+			timestamp: "2026-08-22T00:00:00.000Z",
+			message,
+		};
+
+		builder.rebuild([entry]);
+		const rendered = Bun.stripANSI(builder.container.render(160).join("\n"));
+
+		expect(rendered).not.toContain("\t");
+		expect(rendered).toContain("stdout   value");
+		expect(rendered).toContain("Error:   failed");
+		expect(rendered).not.toContain(HOME_PATH);
+		expect(rendered).toContain(DISPLAY_PATH);
+		expect(entry.message).toBe(message);
+		expect(message.content).toContain(RAW_PROGRESS);
+		expect(message.details?.jobs[0]?.text).toBe(RAW_PROGRESS);
+		expect(message.content).toBe(modelContent);
+	});
+
+	it("preserves paths that only embed the home directory as a suffix", () => {
+		const embeddedHomePath = `/mnt${HOME_PATH}`;
+		const message = progressMessage(`embedded ${embeddedHomePath}\nrooted ${HOME_PATH}`);
 		const displayMessage = buildAsyncProgressDisplayMessage(message);
 		if (typeof displayMessage.content !== "string") throw new Error("Expected string display content");
-		const progressLines = displayMessage.content.split("\n").filter(line => line.startsWith("x"));
 
-		expect(progressLines).toHaveLength(2);
-		for (const line of progressLines) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(110);
+		expect(displayMessage.content).toContain(`embedded ${embeddedHomePath}`);
+		expect(displayMessage.content).toContain(`rooted ${DISPLAY_PATH}`);
+		expect(message.content).toContain(embeddedHomePath);
+		expect(message.content).toContain(HOME_PATH);
+	});
+
+	it("bounds every display-only progress line without truncating the model payload", () => {
+		const message = progressMessage(LONG_PROGRESS_LINE);
+		const displayMessage = buildAsyncProgressDisplayMessage(message);
+		if (typeof displayMessage.content !== "string") throw new Error("Expected string display content");
+		const progressLine = displayMessage.content.split("\n").find(line => line.startsWith("x"));
+
+		expect(progressLine).toBeDefined();
+		expect(Bun.stringWidth(progressLine!)).toBeLessThanOrEqual(110);
 		expect(displayMessage.content).not.toContain(LONG_PROGRESS_LINE);
-		expect(message.content).toContain(`${LONG_PROGRESS_LINE}\n${LONG_PROGRESS_LINE}`);
+		expect(message.content).toContain(LONG_PROGRESS_LINE);
+	});
+
+	it("sanitizes and bounds supervised-process names in completion rows", () => {
+		const longSuffix = "x".repeat(500);
+		const name = `web\t${HOME_PATH}\n${longSuffix}`;
+		const daemon: DaemonSnapshot = {
+			name,
+			id: "daemon-id",
+			state: "exited",
+			pid: 123,
+			createdAt: 1,
+			startedAt: 2,
+			exitedAt: 3,
+			exitCode: 0,
+			restartCount: 0,
+			outputBytes: 0,
+			owner: "owner-session",
+			persist: true,
+			detached: false,
+		};
+		const message = {
+			role: "custom",
+			customType: "launch-completion",
+			content: "",
+			display: true,
+			details: { daemons: [daemon] },
+			timestamp: Date.now(),
+		} satisfies CustomMessage<{ daemons: DaemonSnapshot[] }>;
+
+		const rendered = Bun.stripANSI(buildLaunchCompletionBlock(message).render(240).join("\n"));
+
+		expect(rendered).not.toContain("\t");
+		expect(rendered).not.toContain(HOME_PATH);
+		expect(rendered).toContain(DISPLAY_PATH);
+		expect(rendered).not.toContain(longSuffix);
+		expect(rendered).toContain("Supervised process completed");
 	});
 });

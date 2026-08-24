@@ -140,11 +140,11 @@ describe("bash progress parameter", () => {
 		using tempDir = TempDir.createSync("@omp-bash-progress-artifact-failure-");
 		const artifact = { id: "broken-progress", path: path.join(tempDir.path(), "missing", "output.txt") };
 		const manager = new AsyncJobManager({});
-		const progress: AsyncJobProgressInfo[] = [];
+		const progress: Array<{ text: string; info: AsyncJobProgressInfo }> = [];
 		const completions: Array<{ text: string; job?: AsyncJob }> = [];
 		manager.registerProgressSink("Main", {
-			deliver: (_jobId, _text, _job, _seq, info) => {
-				progress.push(info);
+			deliver: (_jobId, text, _job, _seq, info) => {
+				progress.push({ text, info });
 			},
 		});
 		manager.registerDeliverySink("Main", (_jobId, text, job) => {
@@ -162,7 +162,9 @@ describe("bash progress parameter", () => {
 		await manager.waitForAll();
 		await manager.drainDeliveries();
 
-		expect(progress).toEqual([]);
+		expect(progress).toHaveLength(1);
+		expect(progress[0]?.text).toBe("only-result");
+		expect(progress[0]?.info.artifactId).toBeUndefined();
 		expect(completions).toHaveLength(1);
 		expect(completions[0]?.text).toContain("only-result");
 		expect(completions[0]?.job?.progressArtifactId).toBeUndefined();
