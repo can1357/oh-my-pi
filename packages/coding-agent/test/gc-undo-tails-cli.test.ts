@@ -1028,6 +1028,29 @@ describe("omp gc --undo-tails (CLI)", () => {
 		}
 	});
 
+	it("a detached clone owns its session before it is exposed", async () => {
+		await buildSessionWithTwoUndoTails();
+		const manager = await SessionManager.open(sessionFile, sessionsDir, undefined, {
+			suppressBreadcrumb: true,
+		});
+
+		const clone = manager.cloneCurrentSession();
+		const sidecarLines = fs
+			.readFileSync(`${sessionFile}.owner`, "utf8")
+			.split("\n")
+			.filter(line => line.trim().length > 0);
+		// The source contributes one line; the clone's own claim must already
+		// be the second, durably, before cloneCurrentSession returns.
+		expect(sidecarLines.filter(line => line === `${process.pid}`).length).toBe(2);
+
+		// The source releasing its own claim must leave the clone's line
+		// behind: the session stays owned.
+		await manager.close();
+		const afterClose = fs.readFileSync(`${sessionFile}.owner`, "utf8");
+		expect(afterClose).toContain(`${process.pid}`);
+		await clone.close();
+	});
+
 	it("fork of a memory-backed session skips filesystem claims entirely", async () => {
 		const manager = SessionManager.create(sessionsDir, sessionsDir, new MemorySessionStorage());
 		manager.appendMessage(userMessage("u1"));
