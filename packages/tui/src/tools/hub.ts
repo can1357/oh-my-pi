@@ -45,7 +45,7 @@ export function isWaitingPollDetails(details: unknown): boolean {
 /**
  * Hub operations: messaging (`send`/`wait`/`inbox`/`list`), jobs
  * (`wait`/`cancel`/`jobs`), and process supervision (`start`/`ps`/`logs`/
- * `stop`/`restart`/`describe`, plus `send`/`wait` when they carry `name`).
+ * `monitor`/`stop`/`restart`/`describe`, plus `send`/`wait` when they carry `name`).
  */
 export type HubOp =
 	| "send"
@@ -55,6 +55,7 @@ export type HubOp =
 	| "jobs"
 	| "cancel"
 	| "start"
+	| "monitor"
 	| "ps"
 	| "logs"
 	| "stop"
@@ -269,7 +270,7 @@ export interface IrcDeliveryReceipt {
 }
 /** Broker-facing launch parameters; the hub adapts its `ps` op to `list` before calling in. */
 export interface LaunchParams {
-	op: "start" | "list" | "logs" | "wait" | "send" | "stop" | "restart" | "describe";
+	op: "start" | "list" | "logs" | "wait" | "send" | "stop" | "restart" | "describe" | "monitor";
 	name?: string;
 	application?: string;
 	args?: string[];
@@ -280,6 +281,8 @@ export interface LaunchParams {
 	restart?: "no" | "on-failure" | "always";
 	persist?: boolean;
 	detached?: boolean;
+	/** Mirrors `AsyncJobProgressDelivery | "off"` in @oh-my-pi/pi-coding-agent. */
+	progress?: "wake" | "ambient" | "off";
 	lines?: number;
 	head?: boolean;
 	grep?: string;
@@ -309,6 +312,10 @@ export interface LaunchToolDetails {
 	matched?: string;
 	/** describe: immutable launch spec backing the command/cwd detail lines. */
 	spec?: DaemonSpec;
+	/** monitor: progress delivery mode this call resulted in. */
+	monitoring?: "wake" | "ambient" | "off";
+	/** monitor off: whether an active monitor was actually detached. */
+	monitorDetached?: boolean;
 }
 
 /** Terminal daemon lifecycle states — the process is no longer running. */
@@ -899,6 +906,18 @@ export function launchRenderResult(
 				}
 				break;
 			}
+			case "monitor": {
+				// Surface the resulting delivery mode so wake/ambient/off/no-op are
+				// distinguishable at a glance; details carry the authoritative state.
+				const mode = details?.monitoring ?? params.progress;
+				if (mode === "off") {
+					meta.push(theme.fg("muted", details?.monitorDetached === false ? "no active monitor" : "monitor off"));
+				} else if (mode) {
+					meta.push(theme.fg("accent", `monitor ${mode}`));
+				}
+				if (daemon) meta.push(...daemonMeta(daemon, theme));
+				break;
+			}
 			case "describe": {
 				if (daemon) meta.push(...daemonMeta(daemon, theme));
 				const spec = details?.spec;
@@ -1379,6 +1398,7 @@ export function messagingRenderResult(
 
 const LAUNCH_OPS: Record<string, true> = {
 	start: true,
+	monitor: true,
 	ps: true,
 	logs: true,
 	stop: true,
