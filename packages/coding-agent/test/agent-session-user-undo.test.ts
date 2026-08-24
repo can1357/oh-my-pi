@@ -1420,7 +1420,7 @@ describe("AgentSession user undo/redo", () => {
 		// belongs to the turn that follows it and must be rewound together
 		// with that turn, even though its customType is not on the legacy
 		// whitelist.
-		sessionManager.appendCustomMessageEntry("plan-mode-context", "plan context A", false, {
+		sessionManager.appendCustomMessageEntry("plan-mode-context", "plan context A", false, undefined, "agent", {
 			promptPrelude: true,
 		});
 		sessionManager.appendMessage(userMessage("fourth"));
@@ -1498,11 +1498,14 @@ describe("AgentSession user undo/redo", () => {
 		// Journal an xdev mount notice on the branch being rolled back: after
 		// the branch switch, the announced-mount baseline must re-seed from
 		// the surviving transcript, not keep treating the notice as delivered.
-		sessionManager.appendCustomMessageEntry("xdev-mount-notice", "mounted xd://demo", false, {
-			added: ["demo"],
-			removed: [],
-			promptPrelude: true,
-		});
+		sessionManager.appendCustomMessageEntry(
+			"xdev-mount-notice",
+			"mounted xd://demo",
+			false,
+			{ added: ["demo"], removed: [] },
+			"agent",
+			{ promptPrelude: true },
+		);
 		sessionManager.appendMessage(userMessage("fourth"));
 		sessionManager.appendMessage(assistantMessage("OK fourth"));
 
@@ -1699,8 +1702,11 @@ describe("AgentSession user undo/redo", () => {
 		await makeFileBackedSession("ext-prompt-undo.jsonl");
 		// An extension sendMessage({ customType, attribution: "user",
 		// triggerTurn: true }) turn, persisted exactly as #promptWithMessage
-		// now stamps it: details.userTurn on a user-attributed custom_message.
-		sessionManager.appendCustomMessageEntry("my-prompt", "extension asks", true, { userTurn: true }, "user");
+		// now stamps it: the userTurn ownership marker on a user-attributed
+		// custom_message, beside an arbitrary primitive details payload.
+		sessionManager.appendCustomMessageEntry("my-prompt", "extension asks", true, "ext-meta", "user", {
+			userTurn: true,
+		});
 		sessionManager.appendMessage(assistantMessage("OK ext"));
 
 		const undo = await session.userUndo(1);
@@ -1726,54 +1732,29 @@ describe("AgentSession user undo/redo", () => {
 		expect(queued).not.toContain(SECRET_B);
 		expect(queued).toContain("queued note");
 	});
-	it("stampCustomMessageMarker preserves non-object details payloads", () => {
-		// CustomMessage<T = unknown> allows primitive/array details; the stamp
-		// must not coerce them into character-keyed records.
-		const primitive = {
-			role: "custom",
-			customType: "my-prompt",
-			content: "x",
-			display: true,
-			details: "foo",
-			attribution: "user",
-			timestamp: Date.now(),
-		} as unknown as import("@oh-my-pi/pi-coding-agent/session/messages").CustomMessage;
-		stampCustomMessageMarker(primitive, "userTurn");
-		expect(primitive.details).toBe("foo");
-
-		const array = {
-			role: "custom",
-			customType: "my-prompt",
-			content: "x",
-			display: true,
-			details: ["a", "b"],
-			attribution: "user",
-			timestamp: Date.now(),
-		} as unknown as import("@oh-my-pi/pi-coding-agent/session/messages").CustomMessage;
-		stampCustomMessageMarker(array, "userTurn");
-		expect(array.details).toEqual(["a", "b"]);
-
-		const record = {
-			role: "custom",
-			customType: "my-prompt",
-			content: "x",
-			display: true,
-			details: { ext: 1 },
-			attribution: "user",
-			timestamp: Date.now(),
-		} as unknown as import("@oh-my-pi/pi-coding-agent/session/messages").CustomMessage;
-		stampCustomMessageMarker(record, "userTurn");
-		expect(record.details).toEqual({ ext: 1, userTurn: true });
-
-		const absent = {
-			role: "custom",
-			customType: "my-prompt",
-			content: "x",
-			display: true,
-			attribution: "user",
-			timestamp: Date.now(),
-		} as unknown as import("@oh-my-pi/pi-coding-agent/session/messages").CustomMessage;
-		stampCustomMessageMarker(absent, "userTurn");
-		expect(absent.details).toEqual({ userTurn: true });
+	it("stampCustomMessageMarker preserves details payloads of any shape", () => {
+		// The marker is a sibling of details: primitives, arrays, and records
+		// all survive stamping untouched, and the marker itself is set.
+		const mk = (details: unknown) =>
+			({
+				role: "custom",
+				customType: "my-prompt",
+				content: "x",
+				display: true,
+				details,
+				attribution: "user",
+				timestamp: Date.now(),
+			}) as unknown as import("@oh-my-pi/pi-coding-agent/session/messages").CustomMessage;
+		for (const payload of ["foo", ["a", "b"], { ext: 1 }, undefined]) {
+			const message = mk(payload);
+			stampCustomMessageMarker(message, "userTurn");
+			expect(message.details).toBe(payload);
+			expect(message.userTurn).toBe(true);
+			expect(message.promptPrelude).toBeUndefined();
+		}
+		const prelude = mk({ ext: 1 });
+		stampCustomMessageMarker(prelude, "promptPrelude");
+		expect(prelude.details).toEqual({ ext: 1 });
+		expect(prelude.promptPrelude).toBe(true);
 	});
 });

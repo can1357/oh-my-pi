@@ -183,8 +183,6 @@ const XDEV_MOUNT_NOTICE_MESSAGE_TYPE = "xdev-mount-notice";
 export interface XdevMountNoticeDetails {
 	added: string[];
 	removed: string[];
-	/** Persisted prompt-prelude ownership stamp (see #promptWithMessage). */
-	promptPrelude?: boolean;
 }
 
 /** Owns tool registration, presentation, prompt rebuilding, skills, and permissions. */

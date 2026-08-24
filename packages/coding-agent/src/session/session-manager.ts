@@ -178,11 +178,16 @@ function pruneMarkerPath(sessionFile: string): string {
  * and reload — closing the load-vs-publish race without sharing the
  * session claim (which same-process siblings must never double-acquire).
  */
-async function readUndoTailPruneMarkerPid(sessionFile: string): Promise<number | undefined> {
+async function readUndoTailPruneMarker(
+	sessionFile: string,
+): Promise<{ pid: number; startToken: string | undefined } | undefined> {
 	try {
 		const content = await fs.promises.readFile(pruneMarkerPath(sessionFile), "utf-8");
-		const pid = Number.parseInt(content.trim(), 10);
-		return Number.isInteger(pid) ? pid : undefined;
+		const [pidRaw, tokenRaw] = content.trim().split(/\s+/);
+		const pid = Number.parseInt(pidRaw ?? "", 10);
+		if (!Number.isInteger(pid)) return undefined;
+		// Legacy markers recorded only a pid: no token, pid-only liveness.
+		return { pid, startToken: tokenRaw };
 	} catch (error) {
 		// Only a genuinely absent marker means "no prune in flight". Other
 		// read failures (permissions, transient I/O) fail closed: reporting
@@ -193,8 +198,12 @@ async function readUndoTailPruneMarkerPid(sessionFile: string): Promise<number |
 }
 
 async function markUndoTailPruneInProgress(sessionFile: string): Promise<void> {
+	// Record the process start identity beside the pid so a recycled pid is
+	// never mistaken for the still-running pruner.
+	const token = processStartToken(process.pid);
+	const payload = token === undefined ? `${process.pid}\n` : `${process.pid} ${token}\n`;
 	await withOwnerSidecarLock(sessionFile, () =>
-		fs.promises.writeFile(pruneMarkerPath(sessionFile), `${process.pid}\n`, { encoding: "utf-8", mode: 0o600 }),
+		fs.promises.writeFile(pruneMarkerPath(sessionFile), payload, { encoding: "utf-8", mode: 0o600 }),
 	);
 }
 
@@ -209,8 +218,8 @@ async function clearUndoTailPruneMarker(sessionFile: string): Promise<void> {
  */
 async function removeStaleUndoTailPruneMarker(sessionFile: string): Promise<void> {
 	await withOwnerSidecarLock(sessionFile, async () => {
-		const pid = await readUndoTailPruneMarkerPid(sessionFile);
-		if (pid === undefined || isProcessAlive(pid)) return;
+		const marker = await readUndoTailPruneMarker(sessionFile);
+		if (marker === undefined || isProcessInstanceAlive(marker.pid, marker.startToken)) return;
 		await fs.promises.rm(pruneMarkerPath(sessionFile), { force: true });
 	});
 }
@@ -224,9 +233,9 @@ async function removeStaleUndoTailPruneMarker(sessionFile: string): Promise<void
 async function waitClearUndoTailPruneMarker(sessionFile: string): Promise<void> {
 	const deadline = Date.now() + 30_000;
 	while (Date.now() < deadline) {
-		const pid = await readUndoTailPruneMarkerPid(sessionFile);
-		if (pid === undefined) return;
-		if (!isProcessAlive(pid)) {
+		const marker = await readUndoTailPruneMarker(sessionFile);
+		if (marker === undefined) return;
+		if (!isProcessInstanceAlive(marker.pid, marker.startToken)) {
 			await removeStaleUndoTailPruneMarker(sessionFile).catch(() => undefined);
 			return;
 		}
@@ -348,6 +357,43 @@ export function isProcessAlive(pid: number): boolean {
 		const code = (error as NodeJS.ErrnoException).code;
 		return !(code === "ESRCH" || code === "EINVAL");
 	}
+}
+
+/**
+ * Start-identity token for a pid (Linux /proc field 22, ticks since boot —
+ * unique per process launch). `undefined` where unavailable (non-Linux,
+ * process gone): callers fall back to pid-only liveness, matching the
+ * previous behavior.
+ */
+export function processStartToken(pid: number): string | undefined {
+	try {
+		const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf-8");
+		// The comm field can contain spaces and parens; fields resume after
+		// the final ')'.
+		const afterComm = stat.slice(stat.lastIndexOf(")") + 2);
+		const fields = afterComm.split(" ");
+		// field 22 (starttime) is index 19 after state (field 3).
+		const starttime = fields[19];
+		return starttime && /^\d+$/.test(starttime) ? starttime : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Liveness bound to a process instance: the pid is alive AND — when a start
+ * token was recorded — the process now occupying it is the same launch. This
+ * is what distinguishes a crashed pruner's leftover marker from pid reuse:
+ * a recycled pid is alive but carries a different starttime, so the marker
+ * is treated as stale instead of blocking opens for the full timeout.
+ */
+export function isProcessInstanceAlive(pid: number, startToken: string | undefined): boolean {
+	if (!isProcessAlive(pid)) return false;
+	if (startToken === undefined) return true;
+	const current = processStartToken(pid);
+	// Unreadable token (non-Linux, or a race with exit): fail closed — treat
+	// as the same instance so a possibly-live pruner is never declared dead.
+	return current === undefined || current === startToken;
 }
 
 import {
@@ -2098,11 +2144,11 @@ export class SessionManager {
 				if (!ownershipEstablished) {
 					throw new SessionFileLockError(resolvedSessionFile);
 				}
-				if ((await readUndoTailPruneMarkerPid(resolvedSessionFile)) !== undefined) {
+				if ((await readUndoTailPruneMarker(resolvedSessionFile)) !== undefined) {
 					await waitClearUndoTailPruneMarker(resolvedSessionFile);
 					// A marker that outlived the bounded wait means a live
 					// gc is still mid-publish; refuse rather than race it.
-					if ((await readUndoTailPruneMarkerPid(resolvedSessionFile)) !== undefined) {
+					if ((await readUndoTailPruneMarker(resolvedSessionFile)) !== undefined) {
 						throw new SessionFileLockError(resolvedSessionFile);
 					}
 					loaded = undefined; // the prune published; snapshot is stale
@@ -3352,6 +3398,9 @@ export class SessionManager {
 	 * @param display Whether to show in TUI (true = styled display, false = hidden)
 	 * @param details Optional extension-specific metadata (not sent to LLM)
 	 * @param attribution Who initiated this message for billing/attribution semantics
+	 * @param ownership Persisted rollback ownership (userTurn / promptPrelude)
+	 * forwarded from a stamped CustomMessage; kept beside `details` so
+	 * extension payloads of any shape are never merged into.
 	 */
 	appendCustomMessageEntry<T = unknown>(
 		customType: string | undefined,
@@ -3360,6 +3409,7 @@ export class SessionManager {
 		details?: T,
 		attribution: MessageAttribution | undefined = "agent",
 		timestamp?: number,
+		ownership?: Partial<Pick<CustomMessageEntry, "userTurn" | "promptPrelude">>,
 	): string {
 		const normalized = normalizeCustomMessagePayload<T>({ customType, content, display, details, attribution });
 		const fresh = this.#freshEntryFields();
@@ -3371,6 +3421,7 @@ export class SessionManager {
 			// Drop AgentSession-internal transient fields before disk persistence.
 			details: stripInternalDetailsFields(normalized.details),
 			attribution: normalized.attribution,
+			...ownership,
 			...fresh,
 			// Prefer the initiating message's own timestamp: without it the entry
 			// records the emission time, which on rebuild excludes provider
