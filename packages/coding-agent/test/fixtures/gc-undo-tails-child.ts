@@ -58,6 +58,29 @@ if (process.env.GC_TEST_INTERPOSE === "preopen-change") {
 	} as typeof original;
 }
 
+// Post-open probe failure: after SessionManager.open() succeeds, make the
+// next stat of the journal throw EACCES so the identity probe between open
+// and the guarded region fails. The manager must still be closed (claim
+// released) or the session stays pinned by a dead gc pid forever.
+if (process.env.GC_TEST_INTERPOSE === "probe-fail") {
+	const originalOpen = SessionManager.open;
+	SessionManager.open = async function (this: unknown, ...args) {
+		const manager = await originalOpen.apply(this, args);
+		const target = String(args[0]);
+		const originalStat = fs.promises.stat;
+		fs.promises.stat = (async (probePath: string, options?: unknown) => {
+			if (String(probePath) === target) {
+				fs.promises.stat = originalStat;
+				const failure = new Error("EACCES: permission denied (test interposition)") as NodeJS.ErrnoException;
+				failure.code = "EACCES";
+				throw failure;
+			}
+			return originalStat(probePath, options as undefined);
+		}) as typeof fs.promises.stat;
+		return manager;
+	} as typeof SessionManager.open;
+}
+
 const extra = (process.env.GC_TEST_EXTRA ?? "").split(",").filter(Boolean);
 // Hold-open mode with the append writer actually open: the child owns the
 // journal's file lock, so a moveTo in another process must refuse.

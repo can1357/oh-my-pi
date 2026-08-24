@@ -64,7 +64,7 @@ interface GcChildOutcome {
 async function runGcChild(
 	agentDir: string,
 	apply: boolean,
-	extra?: { passes?: string[]; keep?: number; interpose?: "change" | "owner" | "preopen-change" },
+	extra?: { passes?: string[]; keep?: number; interpose?: "change" | "owner" | "preopen-change" | "probe-fail" },
 ): Promise<GcChildOutcome> {
 	// Static fixture module (test/fixtures/gc-undo-tails-child.ts): the
 	// spawn env carries the agent dir, so the child's top-level imports
@@ -1077,6 +1077,44 @@ describe("omp gc --undo-tails (CLI)", () => {
 		expect(lines.filter(line => line === `${process.pid}`).length).toBe(2);
 		await clone.close();
 		await manager.close();
+	});
+
+	it("the divergent close-time flush runs while the owner claim is still held", async () => {
+		await buildSessionWithTwoUndoTails();
+		const manager = await SessionManager.open(sessionFile, sessionsDir, undefined, {
+			suppressBreadcrumb: true,
+		});
+
+		const lock = tryAcquireFileLock(sessionFile);
+		expect(lock?.acquired).toBe(true);
+		try {
+			expect(() => manager.appendMessage(userMessage("locked-out"))).toThrow(SessionFileLockError);
+		} finally {
+			lock?.release();
+		}
+
+		// Observe the sidecar DURING the close-time rewrite: a concurrent
+		// undo-tail gc that classifies the session unowned mid-flush can
+		// prune beneath this manager, and the rewrite would resurrect it.
+		const original = manager.rewriteEntries.bind(manager);
+		let claimHeldDuringFlush = false;
+		manager.rewriteEntries = async () => {
+			claimHeldDuringFlush = fs.readFileSync(`${sessionFile}.owner`, "utf8").split("\n").includes(`${process.pid}`);
+			return original();
+		};
+		await manager.close();
+		expect(claimHeldDuringFlush).toBe(true);
+		expect(fs.readFileSync(sessionFile, "utf8")).toContain("locked-out");
+	});
+
+	it("a failed post-open identity probe still closes the gc manager", async () => {
+		await buildSessionWithTwoUndoTails();
+		const outcome = await runGcChild(agentDir, true, { interpose: "probe-fail" });
+		// The probe failure surfaces as a per-session error...
+		expect(outcome.errors).toBeGreaterThan(0);
+		// ...and the manager's owner claim must NOT survive it: a leaked
+		// live-pid claim pins the session against every later scan.
+		expect(await readSessionOwnerPids(sessionFile)).toEqual([]);
 	});
 
 	it("fork of a memory-backed session skips filesystem claims entirely", async () => {
