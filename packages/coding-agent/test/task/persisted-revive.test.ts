@@ -475,6 +475,36 @@ describe("persisted subagent revival", () => {
 		expect(activeToolNames).toEqual([["read", "write", "yield"]]);
 	});
 
+	it("closes the reopened manager when the session factory rejects during revival", async () => {
+		const cwd = makeTempDir("@pi-revive-factory-reject-");
+		const sessionFile = await createPersistedSession(cwd);
+		// A real file-backed manager with a durable owner claim, handed to the
+		// reviver before the factory rejects.
+		const managerFile = path.join(cwd, "revive-reject.jsonl");
+		const manager = SessionManager.create(cwd, cwd);
+		await manager.setSessionFile(managerFile);
+		vi.spyOn(SessionManager, "open").mockImplementation(async () => manager);
+		// The factory fails before constructing an AgentSession (e.g. the
+		// expected registry generation is no longer available); its error path
+		// does not dispose the externally supplied manager.
+		vi.spyOn(sdkModule, "createAgentSession").mockRejectedValue(new Error("generation gone"));
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+
+		await expect(reviver(ref)).rejects.toThrow("generation gone");
+
+		// The owner sidecar claim must be released so undo-tail gc in the
+		// parent does not skip the session.
+		const sidecar = `${managerFile}.owner`;
+		await Bun.sleep(150);
+		if (fs.existsSync(sidecar)) {
+			const content = fs.readFileSync(sidecar, "utf-8");
+			expect(content.trim()).toBe("");
+		}
+	});
+
 	it("preserves normal revival capability wiring for contracts without the marker", async () => {
 		const cwd = makeTempDir("@pi-normal-revive-");
 		const sessionFile = await createPersistedSession(cwd);
