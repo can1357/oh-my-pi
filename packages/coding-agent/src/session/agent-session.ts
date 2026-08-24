@@ -6999,11 +6999,11 @@ export class AgentSession {
 		this.#queueHiddenNextTurnMessage(message, true);
 	}
 
-	queueLaunchCompletion(notification: DaemonCompletionNotification): Promise<void> {
+	queueLaunchCompletion(notification: DaemonCompletionNotification, epoch: number): Promise<void> {
 		if (this.#isDisposed) return Promise.reject(new Error("Session disposed before launch completion delivery"));
-		// A terminal event observed inside a reset/switch boundary belongs to the
-		// process incarnation that boundary is evicting.
-		if (this.#launchProgressBoundaryDepth > 0) return Promise.resolve();
+		// Completion ownership belongs to the accepted daemon incarnation, not
+		// whichever conversation epoch happens to be current when it exits.
+		if (this.#launchProgressBoundaryDepth > 0 || epoch !== this.#launchProgressEpoch) return Promise.resolve();
 		// Ambient monitor output queued while this owner sat idle would be
 		// skipped by the completion-triggered idle flush (its queue registers
 		// with `skipIdleFlush`) and would inject only on a later turn — after
@@ -7020,7 +7020,7 @@ export class AgentSession {
 		}
 		const delivered = this.yieldQueue.enqueueWithReceipt<SessionLaunchCompletionEntry>(
 			LAUNCH_COMPLETION_MESSAGE_TYPE,
-			{ ...notification, epoch: this.#launchProgressEpoch },
+			{ ...notification, epoch },
 		);
 		this.yieldQueue.requestIdleFlush();
 		return delivered;

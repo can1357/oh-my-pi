@@ -165,6 +165,8 @@ export type LaunchContextBoundary =
 	| "switch";
 
 /** Session context for tool factories */
+export type ProcessProgressMode = "session" | "unavailable";
+
 export interface ToolSession {
 	/** Current working directory */
 	cwd: string;
@@ -174,6 +176,13 @@ export interface ToolSession {
 	hasUI: boolean;
 	/** Whether `ask` can reach a human. Defaults to `hasUI`. */
 	canPromptUser?: boolean;
+	/**
+	 * Delivery surface for supervised-process progress. `session` routes monitor
+	 * events through this ToolSession's own queue; `unavailable` forbids monitored
+	 * start/monitor operations while leaving unmonitored process operations intact.
+	 * An omitted mode is treated as unavailable.
+	 */
+	processProgressMode?: ProcessProgressMode;
 	/** Whether this session has begun disposal. */
 	isDisposed?: () => boolean;
 	/**
@@ -442,9 +451,9 @@ export interface ToolSession {
 
 	/** Queue a hidden message to be injected at the next agent turn. */
 	queueDeferredMessage?(message: CustomMessage): void;
-	/** Queue a broker supervised-process completion for the owning session. */
-	queueLaunchCompletion?(notification: DaemonCompletionNotification): Promise<void>;
-	/** Capture the session generation that owns a supervised-process monitor. */
+	/** Queue a broker supervised-process completion for the owning session under its captured launch epoch. */
+	queueLaunchCompletion?(notification: DaemonCompletionNotification, epoch: number): Promise<void>;
+	/** Capture the session generation that owns a supervised-process incarnation. */
 	captureLaunchProgressEpoch?(): number;
 	/** Queue a live supervised-process output batch for the owning session. */
 	queueLaunchProgress?(

@@ -94,6 +94,9 @@ export interface DaemonOutputUnregister {
 	readonly republish: () => void;
 }
 
+/** Local request lifecycle boundary after socket.write accepts the broker frame. */
+export type DaemonRequestDispatchState = "written";
+
 /** Persistent per-process connection to one project or global daemon broker. */
 export interface DaemonBrokerClient {
 	onCompletion(
@@ -111,7 +114,11 @@ export interface DaemonBrokerClient {
 	): DaemonOutputUnregister;
 	/** Canonical project directory or synthetic directory identifying a global scope. */
 	readonly projectDir: string;
-	request(operation: DaemonOperation, signal?: AbortSignal): Promise<DaemonRpcResult>;
+	request(
+		operation: DaemonOperation,
+		signal?: AbortSignal,
+		onDispatch?: (state: DaemonRequestDispatchState) => void,
+	): Promise<DaemonRpcResult>;
 	close(): void;
 }
 
@@ -223,18 +230,24 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		this.#idleGraceMs = options.idleGraceMs;
 	}
 
-	request(operation: DaemonOperation, signal?: AbortSignal): Promise<DaemonRpcResult> {
-		return this.#request(operation, signal, false);
+	request(
+		operation: DaemonOperation,
+		signal?: AbortSignal,
+		onDispatch?: (state: DaemonRequestDispatchState) => void,
+	): Promise<DaemonRpcResult> {
+		return this.#request(operation, signal, false, onDispatch);
 	}
 
 	async #request(
 		operation: DaemonOperation,
 		signal: AbortSignal | undefined,
 		publishOutputSubscriptions: boolean,
+		onDispatch?: (state: DaemonRequestDispatchState) => void,
 	): Promise<DaemonRpcResult> {
 		if (this.#closed) throw new Error("Daemon broker client is closed");
 		if (signal?.aborted) throw new Error("Daemon broker request aborted");
 		await this.#connect();
+		if (signal?.aborted) throw new Error("Daemon broker request aborted");
 		const socket = this.#socket;
 		if (!socket || socket.destroyed) throw new Error("Daemon broker socket is unavailable");
 
@@ -250,35 +263,48 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			reject(new Error(`Daemon ${operation.op} request timed out`));
 		}, requestTimeoutMs(operation));
 		const pending: PendingRequest = { operation, resolve, reject, timer };
+		this.#pending.set(id, pending);
 		if (signal) {
 			const abort = (): void => {
 				if (!this.#pending.delete(id)) return;
 				clearTimeout(timer);
+				pending.removeAbort?.();
 				reject(new Error("Daemon broker request aborted"));
 			};
 			signal.addEventListener("abort", abort, { once: true });
 			pending.removeAbort = () => signal.removeEventListener("abort", abort);
+			if (signal.aborted) {
+				abort();
+				return promise;
+			}
 		}
-		this.#pending.set(id, pending);
-		socket.write(
-			`${JSON.stringify({
-				id,
-				token: this.#token,
-				owners: [...this.#completionSinks.keys()],
-				detachedOwners: [...this.#preservedCompletionOwners],
-				completionEvents: true,
-				completionUnsubscribes,
-				completionReplays,
-				completionSubscriptionId: this.#completionSubscriptionId,
-				...(publishOutputSubscriptions
-					? {
-							outputSubscriptions: this.#outputSubscriptionPayloads(),
-							outputSubscriptionId: this.#outputSubscriptionId,
-						}
-					: {}),
-				operation,
-			})}\n`,
-		);
+		try {
+			socket.write(
+				`${JSON.stringify({
+					id,
+					token: this.#token,
+					owners: [...this.#completionSinks.keys()],
+					detachedOwners: [...this.#preservedCompletionOwners],
+					completionEvents: true,
+					completionUnsubscribes,
+					completionReplays,
+					completionSubscriptionId: this.#completionSubscriptionId,
+					...(publishOutputSubscriptions
+						? {
+								outputSubscriptions: this.#outputSubscriptionPayloads(),
+								outputSubscriptionId: this.#outputSubscriptionId,
+							}
+						: {}),
+					operation,
+				})}\n`,
+			);
+			onDispatch?.("written");
+		} catch (error) {
+			this.#pending.delete(id);
+			clearTimeout(timer);
+			pending.removeAbort?.();
+			throw error;
+		}
 		const result = await promise;
 		if (result.op === "ping") this.#brokerCapabilities = result.capabilities ?? [];
 		for (const owner of completionUnsubscribes) {
