@@ -328,6 +328,40 @@ describe("bash progress parameter", () => {
 		await manager.dispose();
 	}, 10_000);
 
+	test("surfaces async-auto artifact allocation failures before the promotion grace", async () => {
+		const manager = new AsyncJobManager({});
+		manager.registerDeliverySink("Main", () => {});
+		const session = makeSession(manager, { "bash.asyncAuto.inlineGraceMs": 60_000 });
+		session.allocateOutputArtifact = async () => {
+			throw new Error("artifact allocation failed");
+		};
+		const tool = new BashTool(session);
+		const controller = new AbortController();
+		const execution = tool
+			.execute("allocation-failure", { command: "printf unreachable", async: "auto" }, controller.signal)
+			.then(
+				() => ({ kind: "resolved" as const }),
+				error => ({ kind: "failed" as const, error }),
+			);
+
+		const firstSettlement = await Promise.race([
+			execution,
+			manager.waitForAll().then(async () => {
+				await Bun.sleep(0);
+				return { kind: "manager-only" as const };
+			}),
+		]);
+		if (firstSettlement.kind === "manager-only") controller.abort();
+
+		expect(firstSettlement.kind).toBe("failed");
+		if (firstSettlement.kind === "failed") {
+			expect(firstSettlement.error).toBeInstanceOf(Error);
+			expect((firstSettlement.error as Error).message).toBe("artifact allocation failed");
+		}
+		await execution;
+		await manager.dispose();
+	});
+
 	test("promotes after a mirror artifact failure instead of waiting for command exit", async () => {
 		using tempDir = TempDir.createSync("@omp-bash-auto-artifact-failure-");
 		const releasePath = path.join(tempDir.path(), "release");
