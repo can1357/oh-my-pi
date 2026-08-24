@@ -8502,20 +8502,15 @@ export class AgentSession {
 		// tail would make #enforceRewindBeforeYield branch straight back to
 		// it, restoring what /undo just removed.
 		this.#rehydrateCheckpointRewindState();
-		try {
-			this.#rejournalControlEntries(liveRole);
-			this.#recordTodoSnapshot();
-			this.#rejournalModeEntry(preRewindMode.mode, preRewindMode.modeData);
-		} catch (error) {
-			// The re-journal appends hit the same contention: they are pure
-			// persistence of live in-memory state, the journal is already
-			// marked divergent, and aborting now would leave a completed
-			// in-memory rollback reported as failed.
-			if (!(error instanceof SessionFileLockError)) throw error;
-			logger.warn("Undo control re-journal contended; deferred to full rewrite", {
-				error: String(error),
-			});
-		}
+		// Each staging append is guarded INDIVIDUALLY: a contended append
+		// throws AFTER its entry landed in memory, but a shared try would skip
+		// the remaining calls entirely — their entries (live mode, todo
+		// state) would be missing even from the promised later full rewrite.
+		this.#stageDespiteContention("Undo control re-journal", () => this.#rejournalControlEntries(liveRole));
+		this.#stageDespiteContention("Undo todo snapshot", () => this.#recordTodoSnapshot());
+		this.#stageDespiteContention("Undo mode re-journal", () =>
+			this.#rejournalModeEntry(preRewindMode.mode, preRewindMode.modeData),
+		);
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		return { ok: true, droppedTurns: n, rewoundTo: target.timestamp };
 	}
@@ -8602,19 +8597,31 @@ export class AgentSession {
 		this.#reconcilePlanReference();
 		// Same as /undo: rebuild checkpoint state from the restored branch.
 		this.#rehydrateCheckpointRewindState();
+		// Individual guards, same contract as the undo block above.
+		this.#stageDespiteContention("Redo control re-journal", () => this.#rejournalControlEntries(liveRole));
+		this.#stageDespiteContention("Redo todo snapshot", () => this.#recordTodoSnapshot());
+		this.#stageDespiteContention("Redo mode re-journal", () =>
+			this.#rejournalModeEntry(preRedoMode.mode, preRedoMode.modeData),
+		);
+		this.#closeCodexProviderSessionsForHistoryRewrite();
+		return { ok: true };
+	}
+
+	/**
+	 * Run one rollback staging append, tolerating lock contention: the entry
+	 * has already landed in the in-memory tree when the append throws, and the
+	 * journal is marked divergent (the next append or close publishes the
+	 * full rewrite) — so only the warning is needed, never an abort.
+	 */
+	#stageDespiteContention(label: string, stage: () => void): void {
 		try {
-			this.#rejournalControlEntries(liveRole);
-			this.#recordTodoSnapshot();
-			this.#rejournalModeEntry(preRedoMode.mode, preRedoMode.modeData);
+			stage();
 		} catch (error) {
-			// Same deferred-persistence contract as the branch above.
 			if (!(error instanceof SessionFileLockError)) throw error;
-			logger.warn("Redo control re-journal contended; deferred to full rewrite", {
+			logger.warn(`${label} persistence contended; deferred to full rewrite`, {
 				error: String(error),
 			});
 		}
-		this.#closeCodexProviderSessionsForHistoryRewrite();
-		return { ok: true };
 	}
 
 	/** Plan-mode decision affordances: `ask`, or plan approval via `write xd://propose`. */

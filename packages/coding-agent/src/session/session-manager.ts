@@ -250,8 +250,19 @@ export async function removeOwnerSidecar(sessionFile: string): Promise<boolean> 
 				.filter(line => line !== "");
 			const own = lines.findIndex(line => Number(line) === process.pid);
 			if (own !== -1) lines.splice(own, 1);
-			if (lines.length === 0) await fs.promises.rm(file, { force: true });
-			else await fs.promises.writeFile(file, `${lines.join("\n")}\n`, { encoding: "utf-8", mode: 0o600 });
+			if (lines.length === 0) {
+				await fs.promises.rm(file, { force: true });
+			} else {
+				// Atomic replacement, never an in-place truncate-rewrite: a
+				// crash after truncation but before the surviving lines land
+				// would silently strip still-live managers of their ownership
+				// record, and a later gc could prune beneath them. A crash
+				// mid-sequence leaves the untouched original plus a tmp
+				// orphan (never parsed as a sidecar).
+				const tmp = `${file}.tmp-${process.pid}`;
+				await fs.promises.writeFile(tmp, `${lines.join("\n")}\n`, { encoding: "utf-8", mode: 0o600 });
+				await fs.promises.rename(tmp, file);
+			}
 			removed = true;
 		} catch (error) {
 			// Only genuine absence counts as removed (AGENTS.md L139-147):
@@ -2633,6 +2644,23 @@ export class SessionManager {
 				// durable, only the ownership hint survives. The dead-pid
 				// sweep sheds the stale line once this process exits.
 				logger.warn("Session owner sidecar claim survived close", { sessionFile: file, claims: count });
+			}
+		}
+		// A divergent journal (rollback under lock contention deferred its
+		// full rewrite to "the next append") has no later append once close
+		// is reached: flush it HERE, or the process exits leaving the old
+		// branch on disk while the UI already reported the rollback.
+		if (this.#rewriteRequired && !this.#fileIsCurrent && this.#sessionFile) {
+			try {
+				await this.rewriteEntries();
+			} catch (error) {
+				// Still contended at shutdown: surface it loudly — the
+				// journal on disk does NOT match the in-memory tree this
+				// process showed the operator.
+				logger.error("Session journal divergent at close; on-disk history is stale", {
+					sessionFile: this.#sessionFile,
+					error: toError(error),
+				});
 			}
 		}
 		await this.#scheduleDiskWork(async () => {
