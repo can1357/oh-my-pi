@@ -4628,8 +4628,12 @@ export class AgentSession {
 		// file after a revival reopens it. The seal also bumps the disk epoch,
 		// superseding queued tail work and fencing already-running atomic
 		// rewrites at their commit guard; hot-path appends drained above are
-		// already durable, and close() (scheduled post-seal) still flushes and
-		// closes the writer.
+		// already durable, and close() (scheduled post-seal) still closes the writer.
+		// A divergent journal (deferred rollback) must flush BEFORE the seal:
+		// a released manager's atomic rewrite is fenced off, so close()'s own
+		// flush would silently no-op and the pre-rollback branch would stay
+		// on disk across shutdown.
+		const preSealFlushError = await this.sessionManager.flushDivergentJournal();
 		this.sessionManager.seal();
 		// close() rethrows a failed close-time flush of a divergent journal;
 		// the remaining dispose steps (memory release) must still run, and
@@ -4665,6 +4669,7 @@ export class AgentSession {
 			})().catch(error => logger.warn("Deferred dispose finalization failed", { error: String(error) }));
 		}
 		if (closeError) throw closeError;
+		if (preSealFlushError) throw preSealFlushError;
 	}
 
 	/** Drop the in-memory conversation state after the terminal dispose flush. */

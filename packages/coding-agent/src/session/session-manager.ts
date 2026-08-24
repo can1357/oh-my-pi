@@ -1897,7 +1897,7 @@ export class SessionManager {
 		const persist = options?.persist ?? this.#persist;
 		const clone = new SessionManager(this.#cwd, this.#sessionDir, persist, this.#storage);
 		clone.#suppressBreadcrumb = true;
-		clone.restoreState(this.captureState());
+		clone.restoreState(this.captureState(), { requireDurableOwnership: true });
 		if (!persist) {
 			clone.#sessionFile = undefined;
 			clone.#fileIsCurrent = false;
@@ -1907,7 +1907,7 @@ export class SessionManager {
 		return clone;
 	}
 
-	restoreState(snapshot: SessionManagerStateSnapshot): void {
+	restoreState(snapshot: SessionManagerStateSnapshot, options?: { requireDurableOwnership?: boolean }): void {
 		this.#closeWriterEventually();
 		// Restoring the SAME session must not churn its ownership claim:
 		// switchSession's rollback lands here after a failed switch, and an
@@ -1926,6 +1926,21 @@ export class SessionManager {
 			// exposed to its caller immediately, with no later await that
 			// could drain a queued registration before the source manager's
 			// claim is released by a session switch.
+		} else if (options?.requireDurableOwnership) {
+			// The clone must not be exposed without a durable claim: retry
+			// the synchronous write briefly (sidecar lock contention is
+			// momentary), then fail creation rather than return a clone gc
+			// can prune beneath once the source's claim is released.
+			let registered = false;
+			for (let attempt = 0; attempt < 5 && !registered; attempt++) {
+				Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+				registered = this.#registerOwnerSidecarSync();
+			}
+			if (!registered) {
+				throw new Error(
+					`Failed to establish session ownership for detached clone (${this.#sessionFile}); refusing to expose it`,
+				);
+			}
 		} else {
 			logger.warn("Session owner sidecar claim not established synchronously; queued", {
 				sessionFile: this.#sessionFile,
@@ -2654,6 +2669,30 @@ export class SessionManager {
 		}
 	}
 
+	/**
+	 * Flush a divergent journal (rollback under lock contention deferred its
+	 * full rewrite to "the next append") that has no later append coming.
+	 * Shared by close() and the dispose path — the dispose MUST call this
+	 * BEFORE seal(), because a released manager's atomic rewrite is fenced
+	 * off and the deferred rollback would otherwise never publish.
+	 * Returns the flush error instead of throwing, so close() can finish its
+	 * remaining steps before rethrowing.
+	 */
+	async flushDivergentJournal(): Promise<Error | undefined> {
+		if (!(this.#rewriteRequired && !this.#fileIsCurrent && this.#sessionFile)) return undefined;
+		try {
+			await this.rewriteEntries();
+		} catch (error) {
+			const flushError = toError(error);
+			logger.error("Session journal divergent at close; on-disk history is stale", {
+				sessionFile: this.#sessionFile,
+				error: flushError,
+			});
+			return flushError;
+		}
+		return undefined;
+	}
+
 	/** Flush, then close the append writer. */
 	async close(): Promise<void> {
 		if (!this.#persist) return;
@@ -2677,25 +2716,7 @@ export class SessionManager {
 				logger.warn("Session owner sidecar claim survived close", { sessionFile: file, claims: count });
 			}
 		}
-		// A divergent journal (rollback under lock contention deferred its
-		// full rewrite to "the next append") has no later append once close
-		// is reached: flush it HERE, or the process exits leaving the old
-		// branch on disk while the UI already reported the rollback. A
-		// failed flush is NOT absorbed: the caller (dispose path) must see
-		// that the on-disk journal is stale, so the error is rethrown after
-		// the remaining close steps finish.
-		let closeFlushError: Error | undefined;
-		if (this.#rewriteRequired && !this.#fileIsCurrent && this.#sessionFile) {
-			try {
-				await this.rewriteEntries();
-			} catch (error) {
-				closeFlushError = toError(error);
-				logger.error("Session journal divergent at close; on-disk history is stale", {
-					sessionFile: this.#sessionFile,
-					error: closeFlushError,
-				});
-			}
-		}
+		const closeFlushError = await this.flushDivergentJournal();
 		await this.#scheduleDiskWork(async () => {
 			const hadWriter = this.#writer !== undefined;
 			await this.#closeWriterHandle();

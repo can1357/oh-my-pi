@@ -1051,6 +1051,34 @@ describe("omp gc --undo-tails (CLI)", () => {
 		await clone.close();
 	});
 
+	it("clone creation fails when ownership cannot be established durably", async () => {
+		await buildSessionWithTwoUndoTails();
+		const manager = await SessionManager.open(sessionFile, sessionsDir, undefined, {
+			suppressBreadcrumb: true,
+		});
+
+		// Hold the sidecar lock for the whole attempt: the synchronous claim
+		// cannot land, and the clone must fail creation rather than be
+		// exposed unowned (a queued registration could lose the race with
+		// the source's claim release and let gc prune beneath the clone).
+		const sidecarLock = tryAcquireFileLock(`${sessionFile}.owner`);
+		expect(sidecarLock?.acquired).toBe(true);
+		try {
+			expect(() => manager.cloneCurrentSession()).toThrow(/ownership/);
+		} finally {
+			sidecarLock?.release();
+		}
+		// With the lock free again, cloning succeeds and owns the session.
+		const clone = manager.cloneCurrentSession();
+		const lines = fs
+			.readFileSync(`${sessionFile}.owner`, "utf8")
+			.split("\n")
+			.filter(line => line.trim().length > 0);
+		expect(lines.filter(line => line === `${process.pid}`).length).toBe(2);
+		await clone.close();
+		await manager.close();
+	});
+
 	it("fork of a memory-backed session skips filesystem claims entirely", async () => {
 		const manager = SessionManager.create(sessionsDir, sessionsDir, new MemorySessionStorage());
 		manager.appendMessage(userMessage("u1"));
