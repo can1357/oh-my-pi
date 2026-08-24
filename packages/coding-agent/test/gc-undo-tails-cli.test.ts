@@ -726,6 +726,53 @@ describe("omp gc --undo-tails (CLI)", () => {
 		expect(fs.statSync(sessionFile).mtimeMs).toBeGreaterThan(staleMtime);
 	});
 
+	it("fork of a memory-backed session skips filesystem claims entirely", async () => {
+		const manager = SessionManager.create(sessionsDir, sessionsDir, new MemorySessionStorage());
+		manager.appendMessage(userMessage("u1"));
+		manager.appendMessage(assistantMessage("a1"));
+
+		// A virtual session path has no sidecar to claim; the fork must
+		// succeed and leave no .owner file anywhere in the tree.
+		await manager.fork();
+		expect(manager.getSessionFile()).toBeDefined();
+		const ownerFiles: string[] = [];
+		const walk = (dir: string): void => {
+			for (const name of fs.readdirSync(dir)) {
+				const full = path.join(dir, name);
+				if (fs.statSync(full).isDirectory()) walk(full);
+				else if (name.endsWith(".owner")) ownerFiles.push(full);
+			}
+		};
+		walk(agentDir);
+		expect(ownerFiles).toEqual([]);
+	});
+
+	it("publish refuses while a same-process sibling manager holds the journal", async () => {
+		await buildSessionWithTwoUndoTails();
+		const actor = await SessionManager.open(sessionFile, sessionsDir, undefined, {
+			suppressBreadcrumb: true,
+		});
+		// A sibling in THIS process loads the pre-prune tree and appends its
+		// own claim line — same pid, so pid-deduplicated checks cannot see it.
+		const sibling = await SessionManager.open(sessionFile, sessionsDir, undefined, {
+			suppressBreadcrumb: true,
+		});
+		const before = fs.readFileSync(sessionFile, "utf-8");
+
+		const counts = await actor.pruneUserUndoTails(0, true);
+		expect(counts.skippedLive).toBe(true);
+		expect(counts.removed).toBe(0);
+		expect(fs.readFileSync(sessionFile, "utf-8")).toBe(before);
+
+		// With the sibling gone the raw own-pid count is back to one and the
+		// same actor prunes successfully.
+		await sibling.close();
+		const counts2 = await actor.pruneUserUndoTails(0, true);
+		expect(counts2.skippedLive).toBeUndefined();
+		expect(counts2.removed).toBeGreaterThan(0);
+		await actor.close();
+	});
+
 	it("journal identity fails closed on unreadable stats", async () => {
 		// ENOENT reads as absent; every other stat failure propagates.
 		expect(await journalIdentity(path.join(agentDir, "missing.jsonl"))).toBeUndefined();

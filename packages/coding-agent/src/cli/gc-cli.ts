@@ -19,6 +19,7 @@ import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../s
 import {
 	isProcessAlive,
 	journalIdentity,
+	readOwnerClaimCounts,
 	readSessionOwnerPids,
 	SessionManager,
 	sameJournalIdentity,
@@ -1650,10 +1651,12 @@ async function runUndoTailGc(options: ResolvedGcOptions): Promise<UndoTailGcResu
 						// keeps protecting it.
 						if (
 							sameJournalIdentity(counts.published, await journalIdentity(session.path)) &&
-							// The gc process's own claim is expected here (its
-							// SessionManager.open registered it); only a
-							// third-party owner means someone else went live.
-							!(await readSessionOwnerPids(session.path)).some(pid => pid !== process.pid && isProcessAlive(pid))
+							// This gc manager contributes exactly one own-pid
+							// claim line; a second same-process line is a
+							// sibling manager that went live during the prune.
+							![...(await readOwnerClaimCounts(session.path))].some(([pid, count]) =>
+								pid === process.pid ? count > 1 : isProcessAlive(pid),
+							)
 						) {
 							await fs.utimes(session.path, before.atime, before.mtime);
 						}

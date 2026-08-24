@@ -253,6 +253,27 @@ export async function readSessionOwnerPids(sessionFile: string): Promise<number[
 }
 
 /**
+ * Per-pid claim-line counts, NOT deduplicated: two managers in one process
+ * each append an own-pid line, and deduplication would erase the sibling.
+ * Same fail-closed read contract as {@link readSessionOwnerPids}.
+ */
+export async function readOwnerClaimCounts(sessionFile: string): Promise<Map<number, number>> {
+	const counts = new Map<number, number>();
+	try {
+		const content = await fs.promises.readFile(ownerSidecarPath(sessionFile), "utf-8");
+		for (const line of content.split("\n")) {
+			const pid = Number.parseInt(line.trim(), 10);
+			if (!Number.isInteger(pid) || pid <= 0) continue;
+			counts.set(pid, (counts.get(pid) ?? 0) + 1);
+		}
+		return counts;
+	} catch (error) {
+		if (isEnoent(error)) return counts;
+		throw error;
+	}
+}
+
+/**
  * Raised when the session file's exclusive claim is held elsewhere (gc or
  * another writer). Callers surface this instead of queueing a rewrite: a
  * queued rewrite would interleave with the holder's replacement and tear the
@@ -1329,9 +1350,18 @@ export class SessionManager {
 					if (this.#undoTailPruneActive) {
 						// Unreadable sidecar (non-ENOENT) throws and aborts
 						// the publish rather than risk pruning under a live
-						// owner.
-						const foreignOwners = (await readSessionOwnerPids(sessionFile)).filter(pid => pid !== process.pid);
-						if (foreignOwners.some(pid => isProcessAlive(pid))) return false;
+						// owner. Raw claim counts, not deduplicated pids: this
+						// manager contributes exactly one own-pid line, so a
+						// second same-process line is a sibling manager
+						// holding the pre-prune in-memory tree.
+						const claimCounts = await readOwnerClaimCounts(sessionFile);
+						for (const [pid, count] of claimCounts) {
+							if (pid === process.pid) {
+								if (count > 1) return false;
+								continue;
+							}
+							if (isProcessAlive(pid)) return false;
+						}
 					}
 					await this.#storage.writeTextAtomic(sessionFile, this.#fileBody(), {
 						commitGuard: () => !this.#released && this.#diskEpoch === epoch,
@@ -2025,19 +2055,24 @@ export class SessionManager {
 		// idle fork with no durable claim and no later entry would never hit
 		// the registration backstop, and gc could prune its in-memory
 		// history. A failed claim refuses the fork with nothing changed —
-		// the old session stays claimed and active.
-		let forkClaimed = false;
-		this.#sidecarTail = this.#sidecarTail.then(async () => {
-			forkClaimed = await this.#claimOwnerSidecarFor(forkedSessionFile);
-		});
-		await this.#sidecarTail;
+		// the old session stays claimed and active. Filesystem claims only
+		// exist for file-backed storage; a virtual session path would fail
+		// the append and refuse every fork of a memory/indexed session.
+		const fileBacked = this.#storage instanceof FileSessionStorage;
+		let forkClaimed = !fileBacked;
+		if (fileBacked) {
+			this.#sidecarTail = this.#sidecarTail.then(async () => {
+				forkClaimed = await this.#claimOwnerSidecarFor(forkedSessionFile);
+			});
+			await this.#sidecarTail;
+		}
 		if (!forkClaimed) {
 			this.#sessionId = parentSessionId;
 			throw new SessionFileLockError(forkedSessionFile);
 		}
 		this.#unregisterOwnerSidecar();
 		this.#sessionFile = forkedSessionFile;
-		this.#ownerRegisteredFile = forkedSessionFile;
+		if (fileBacked) this.#ownerRegisteredFile = forkedSessionFile;
 		await this.#sidecarTail;
 		this.#header = {
 			type: "session",
@@ -2105,7 +2140,7 @@ export class SessionManager {
 		// a foreign append writer keyed to the source path would keep
 		// appending to the replaced-away inode while this manager rewrites
 		// the destination, losing those entries.
-		let sourceLock: ReturnType<typeof tryAcquireFileLock> | undefined;
+		let sourceLock: FileLockHandle | undefined;
 		try {
 			if (this.#persist && this.#sessionFile) {
 				this.#storage.ensureDirSync(nextSessionDir);
@@ -3420,8 +3455,15 @@ export class SessionManager {
 		// make an old tail live again).
 		if (!apply) return { markers: toScrub.length, removed: doomed.size };
 
+		// The publish can still abort (a live owner appeared under the
+		// exclusive claim). Everything mutated below must be restorable, or
+		// this manager would later rewrite its pruned in-memory tree over
+		// the untouched journal and silently publish the prune anyway.
+		const entriesBeforePrune = this.#entries;
+		const detailsBeforeScrub = new Map<BranchSummaryEntry, unknown>();
 		for (const marker of toScrub) {
 			const details = marker.details as { steps?: number; rewoundAt?: string } | undefined;
+			detailsBeforeScrub.set(marker, marker.details);
 			marker.details = {
 				kind: "user-undo",
 				steps: details?.steps,
@@ -3444,7 +3486,12 @@ export class SessionManager {
 			this.#undoTailPruneActive = false;
 			await clearUndoTailPruneMarker(sessionFileForPrune);
 		}
-		if (!published) return { markers: 0, removed: 0, skippedLive: true };
+		if (!published) {
+			for (const [marker, details] of detailsBeforeScrub) marker.details = details as typeof marker.details;
+			this.#entries = entriesBeforePrune;
+			this.#index.rebuild(this.#entries);
+			return { markers: 0, removed: 0, skippedLive: true };
+		}
 		const publishedIdentity = this.#sessionFile ? await journalIdentity(sessionFileForPrune) : undefined;
 		return { markers: toScrub.length, removed: doomed.size, published: publishedIdentity };
 	}
