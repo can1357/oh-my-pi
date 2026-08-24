@@ -188,6 +188,14 @@ describe("shortenPath", () => {
 		expect(shortenEmbeddedPaths(`{"cwd":"${home}","next":1}`, home)).toBe('{"cwd":"~","next":1}');
 		expect(shortenEmbeddedPaths(`{"cwd":"${home}.backup","next":1}`, home)).toBe(`{"cwd":"${home}.backup","next":1}`);
 	});
+
+	it("keeps shortened home paths inside file URLs syntactically valid", () => {
+		const home = "/home/alice";
+		const shortened = shortenEmbeddedPaths(`file://${home}/project/output.log`, home);
+
+		expect(shortened).toBe("file:///~/project/output.log");
+		expect(new URL(shortened).protocol).toBe("file:");
+	});
 });
 
 describe("formatDiagnostics", () => {
