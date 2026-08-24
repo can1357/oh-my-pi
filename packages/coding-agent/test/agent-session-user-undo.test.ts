@@ -1408,4 +1408,85 @@ describe("AgentSession user undo/redo", () => {
 		const summary = treeEvents[0]!.summaryEntry as { details?: { kind?: string } } | undefined;
 		expect(summary?.details?.kind).toBe("user-undo");
 	});
+
+	it("undo rewinds prelude entries carrying the persisted promptPrelude stamp", async () => {
+		await makeFileBackedSession("prelude-stamp-undo.jsonl");
+		await seedThreeTurns();
+
+		// A plan-mode-context prelude stamped with persisted ownership —
+		// exactly what #promptWithMessage now produces at persistence time —
+		// belongs to the turn that follows it and must be rewound together
+		// with that turn, even though its customType is not on the legacy
+		// whitelist.
+		sessionManager.appendCustomMessageEntry("plan-mode-context", "plan context A", false, {
+			promptPrelude: true,
+		});
+		sessionManager.appendMessage(userMessage("fourth"));
+		sessionManager.appendMessage(assistantMessage("OK fourth"));
+
+		const undo = await session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		const context = session.buildDisplaySessionContext();
+		const preludeInContext = context.messages.some(
+			message =>
+				message.role === "custom" && (message as { customType?: string }).customType === "plan-mode-context",
+		);
+		expect(preludeInContext).toBe(false);
+	});
+
+	it("a root rollback preparation includes the first entry in the abandoned delta", async () => {
+		const preparations: Array<{ targetId: string; commonAncestorId: string | null; entries: string[] }> = [];
+		const fakeRunner = {
+			hasHandlers: (type: string) => type === "session_before_tree",
+			emit: async (event: {
+				preparation?: { targetId: string; commonAncestorId: string | null; entriesToSummarize: { id: string }[] };
+			}) => {
+				if (event.preparation) {
+					preparations.push({
+						targetId: event.preparation.targetId,
+						commonAncestorId: event.preparation.commonAncestorId,
+						entries: event.preparation.entriesToSummarize.map(entry => entry.id),
+					});
+				}
+				return {};
+			},
+		} as unknown as ExtensionRunner;
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		mockModel = mock;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(path.join(tempDir, "auth-root-prep.db"));
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		sessionManager = SessionManager.create(tempDir, tempDir);
+		await sessionManager.setSessionFile(path.join(tempDir, "root-prep.jsonl"));
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+			ttsrManager: new TtsrManager(),
+			extensionRunner: fakeRunner,
+		});
+		// Journal whose very first entry is a user turn: reverting to it
+		// targets a point BEFORE that entry, so the anchor is null.
+		await seedThreeTurns();
+		const firstTurnId = sessionManager.getBranch()[0]!.id;
+		expect(sessionManager.getBranch()[0]!.type).toBe("message");
+
+		const revert = await session.userUndoTo(firstTurnId);
+		expect(revert.ok).toBe(true);
+		expect(preparations.length).toBe(1);
+		expect(preparations[0]!.targetId).toBe("");
+		// The whole old chain — first entry included — is abandoned, and
+		// there is no common ancestor on the target branch.
+		expect(preparations[0]!.commonAncestorId).toBeNull();
+		expect(preparations[0]!.entries).toContain(firstTurnId);
+	});
 });
