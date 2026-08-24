@@ -359,7 +359,9 @@ describe("bash progress parameter", () => {
 		const manager = new AsyncJobManager({});
 		manager.registerDeliverySink("Main", () => {});
 		const session = makeSession(manager, { "bash.asyncAuto.inlineGraceMs": 60_000 });
+		const allocationStarted = Promise.withResolvers<void>();
 		session.allocateOutputArtifact = async () => {
+			allocationStarted.resolve();
 			throw new Error("artifact allocation failed");
 		};
 		const tool = new BashTool(session);
@@ -370,6 +372,7 @@ describe("bash progress parameter", () => {
 				() => ({ kind: "resolved" as const }),
 				error => ({ kind: "failed" as const, error }),
 			);
+		await allocationStarted.promise;
 
 		const firstSettlement = await Promise.race([
 			execution,

@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
-import * as fs from "node:fs/promises";
-import * as nodeFs from "node:fs";
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { OutputSink } from "@oh-my-pi/pi-coding-agent/session/streaming-output";
@@ -9,7 +8,7 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 const createdTempDirs: string[] = [];
 
 async function createTempDir(): Promise<string> {
-	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "output-sink-fd-"));
+	const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "output-sink-fd-"));
 	createdTempDirs.push(dir);
 	return dir;
 }
@@ -27,6 +26,20 @@ afterEach(async () => {
 // observe the fd being opened and then closed.
 function spill(sink: OutputSink): void {
 	sink.push(`${"x".repeat(64)}\n`);
+}
+
+function installArtifactSink(artifactPath: string, sink: Bun.FileSink): void {
+	const fd = fs.openSync(artifactPath, "w", 0o600);
+	vi.spyOn(fs, "openSync").mockImplementation(((source: fs.PathLike) => {
+		if (source !== artifactPath) throw new Error(`Unexpected artifact path: ${String(source)}`);
+		return fd;
+	}) as typeof fs.openSync);
+	const fakeFile = { writer: () => sink } as unknown as Bun.BunFile;
+	const realFile = Bun.file.bind(Bun);
+	vi.spyOn(Bun, "file").mockImplementation((source, options) => {
+		if (source === fd) return fakeFile;
+		return realFile(source as string, options);
+	});
 }
 
 describe("OutputSink fd lifecycle", () => {
@@ -121,13 +134,7 @@ describe("OutputSink fd lifecycle", () => {
 				return Promise.resolve(0);
 			},
 		} as unknown as Bun.FileSink;
-		const fakeFile = { writer: () => fakeSink } as unknown as Bun.BunFile;
-
-		const realFile = Bun.file.bind(Bun);
-		vi.spyOn(Bun, "file").mockImplementation((source, options) => {
-			if (source === artifactPath) return fakeFile;
-			return realFile(source as string, options);
-		});
+		installArtifactSink(artifactPath, fakeSink);
 
 		// Small on-disk cap so head fills, the rest overflows into the tail ring,
 		// and #flushArtifactTailIfCapped replays a truncation notice on close.
@@ -187,12 +194,7 @@ describe("OutputSink fd lifecycle", () => {
 				return Promise.resolve(0);
 			},
 		} as unknown as Bun.FileSink;
-		const fakeFile = { writer: () => fakeSink } as unknown as Bun.BunFile;
-		const realFile = Bun.file.bind(Bun);
-		vi.spyOn(Bun, "file").mockImplementation((source, options) => {
-			if (source === artifactPath) return fakeFile;
-			return realFile(source as string, options);
-		});
+		installArtifactSink(artifactPath, fakeSink);
 
 		const sink = new OutputSink({
 			artifactPath,
@@ -222,12 +224,7 @@ describe("OutputSink fd lifecycle", () => {
 				return Promise.resolve(0);
 			},
 		} as unknown as Bun.FileSink;
-		const fakeFile = { writer: () => fakeSink } as unknown as Bun.BunFile;
-		const realFile = Bun.file.bind(Bun);
-		vi.spyOn(Bun, "file").mockImplementation((source, options) => {
-			if (source === artifactPath) return fakeFile;
-			return realFile(source as string, options);
-		});
+		installArtifactSink(artifactPath, fakeSink);
 
 		const sink = new OutputSink({
 			artifactPath,
@@ -248,8 +245,8 @@ describe("OutputSink fd lifecycle", () => {
 	// that dispose() resolved.
 	function captureAppendFd(): { fd: () => number } {
 		let opened: number | undefined;
-		const realOpenSync = nodeFs.openSync;
-		vi.spyOn(nodeFs, "openSync").mockImplementation((...args: Parameters<typeof nodeFs.openSync>) => {
+		const realOpenSync = fs.openSync;
+		vi.spyOn(fs, "openSync").mockImplementation((...args: Parameters<typeof fs.openSync>) => {
 			const fd = realOpenSync(...args);
 			if (args[1] === "a") opened = fd;
 			return fd;
@@ -265,7 +262,7 @@ describe("OutputSink fd lifecycle", () => {
 	function expectClosed(fd: number): void {
 		let code: string | undefined;
 		try {
-			nodeFs.fstatSync(fd);
+			fs.fstatSync(fd);
 		} catch (error) {
 			code = (error as NodeJS.ErrnoException).code;
 		}
@@ -286,7 +283,7 @@ describe("OutputSink fd lifecycle", () => {
 		sink.push("later\n");
 		await sink.flushArtifact();
 		expect(sink.artifactBytes).toBe("later\n".length);
-		expect(nodeFs.fstatSync(opened.fd()).isFile()).toBeTrue();
+		expect(fs.fstatSync(opened.fd()).isFile()).toBeTrue();
 
 		await sink.dispose();
 		expectClosed(opened.fd());
