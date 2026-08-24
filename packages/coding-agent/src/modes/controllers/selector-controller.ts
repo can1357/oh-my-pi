@@ -401,9 +401,9 @@ export class SelectorController {
 		this.showSelector(done => {
 			const selector = new RevertTurnSelectorComponent(
 				turns,
-				entryId => {
+				async entryId => {
 					done();
-					const result = this.ctx.session.userUndoTo(entryId);
+					const result = await this.ctx.session.userUndoTo(entryId);
 					if (result.ok) {
 						this.ctx.rebuildChatFromMessages();
 						this.ctx.showStatus(`Reverted — dropped ${result.droppedTurns} turn(s) (files untouched)`);

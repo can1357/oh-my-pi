@@ -96,6 +96,7 @@ import {
 	Snowflake,
 	sanitizeText,
 	stringProperty,
+	toError,
 	withTimeout,
 } from "@oh-my-pi/pi-utils";
 import { type AdvisorConfig, loadAdvisorTranscriptCosts } from "../advisor";
@@ -4630,7 +4631,15 @@ export class AgentSession {
 		// already durable, and close() (scheduled post-seal) still flushes and
 		// closes the writer.
 		this.sessionManager.seal();
-		await this.sessionManager.close();
+		// close() rethrows a failed close-time flush of a divergent journal;
+		// the remaining dispose steps (memory release) must still run, and
+		// the close error still propagates to the disposer.
+		let closeError: Error | undefined;
+		try {
+			await this.sessionManager.close();
+		} catch (error) {
+			closeError = toError(error);
+		}
 
 		// Release retained conversation memory. dispose() is terminal, and every
 		// revival path reopens the transcript from disk (AgentLifecycleManager
@@ -4655,6 +4664,7 @@ export class AgentSession {
 				this.#releaseRetainedSessionMemory();
 			})().catch(error => logger.warn("Deferred dispose finalization failed", { error: String(error) }));
 		}
+		if (closeError) throw closeError;
 	}
 
 	/** Drop the in-memory conversation state after the terminal dispose flush. */
@@ -8343,7 +8353,7 @@ export class AgentSession {
 		return undefined;
 	}
 
-	userUndo(steps = 1): { ok: boolean; error?: string; droppedTurns?: number; rewoundTo?: string } {
+	async userUndo(steps = 1): Promise<{ ok: boolean; error?: string; droppedTurns?: number; rewoundTo?: string }> {
 		const busy = this.#rollbackBlockReason();
 		if (busy) {
 			return { ok: false, error: `Cannot /undo while ${busy}.` };
@@ -8426,7 +8436,7 @@ export class AgentSession {
 	}
 
 	/** `/revert <entryId>`: rewind to before an arbitrary earlier user turn. */
-	userUndoTo(entryId: string): { ok: boolean; error?: string; droppedTurns?: number } {
+	async userUndoTo(entryId: string): Promise<{ ok: boolean; error?: string; droppedTurns?: number }> {
 		const busy = this.#rollbackBlockReason();
 		if (busy) {
 			return { ok: false, error: `Cannot /revert while ${busy}.` };
@@ -8444,11 +8454,11 @@ export class AgentSession {
 	}
 
 	/** Shared `/undo`|`/revert` core: branch off just before `entries[userTurnIdx]`. */
-	#rewindUserTurnsBefore(
+	async #rewindUserTurnsBefore(
 		entries: SessionEntry[],
 		userTurnIdx: number,
 		n: number,
-	): { ok: boolean; error?: string; droppedTurns?: number; rewoundTo?: string } {
+	): Promise<{ ok: boolean; error?: string; droppedTurns?: number; rewoundTo?: string }> {
 		const target = entries[userTurnIdx] as SessionMessageEntry;
 		const anchorId = entries[userTurnIdx - 1]?.id ?? null;
 		const previousLeafId = this.sessionManager.getLeafId();
@@ -8467,9 +8477,10 @@ export class AgentSession {
 		// context from the dropped turns never having happened. No rendered
 		// summary, no undo-report message — the rewound context is
 		// self-coherent because /undo drops a TAIL (kept, earlier entries
+		let markerId: string | undefined;
 		try {
 			this.#bash.withBranchTransition(() => {
-				this.sessionManager.branchWithSummary(anchorId, "", {
+				markerId = this.sessionManager.branchWithSummary(anchorId, "", {
 					kind: "user-undo",
 					undoOf: previousLeafId,
 					steps: n,
@@ -8512,6 +8523,11 @@ export class AgentSession {
 			this.#rejournalModeEntry(preRewindMode.mode, preRewindMode.modeData),
 		);
 		this.#closeCodexProviderSessionsForHistoryRewrite();
+		// The rollback is a branch the journal-derived extensions must see:
+		// emit session_tree (like every other branch move) so handlers that
+		// reconstruct state from journal entries — autoresearch controls,
+		// modes — resynchronize instead of keeping discarded-tail state.
+		await this.#emitHistoryTreeChange(previousLeafId, markerId);
 		return { ok: true, droppedTurns: n, rewoundTo: target.timestamp };
 	}
 
@@ -8520,7 +8536,7 @@ export class AgentSession {
 	 * valid while that undo marker is still the active leaf; once the operator
 	 * appends new turns, redo refuses rather than abandon them.
 	 */
-	userRedo(): { ok: boolean; error?: string } {
+	async userRedo(): Promise<{ ok: boolean; error?: string }> {
 		const busy = this.#rollbackBlockReason();
 		if (busy) {
 			return { ok: false, error: `Cannot /redo while ${busy}.` };
@@ -8577,9 +8593,11 @@ export class AgentSession {
 		// Silent like /undo: the marker renders nothing, so context after
 		// /redo is simply the restored turns — no trace that an undo cycle
 		// happened.
+		const previousLeafId = this.sessionManager.getLeafId();
+		let markerId: string | undefined;
 		try {
 			this.#bash.withBranchTransition(() => {
-				this.sessionManager.branchWithSummary(tipId, "", { kind: "user-redo", redoOf: lastBranch!.id });
+				markerId = this.sessionManager.branchWithSummary(tipId, "", { kind: "user-redo", redoOf: lastBranch!.id });
 			});
 		} catch (error) {
 			if (!(error instanceof SessionFileLockError)) throw error;
@@ -8604,6 +8622,9 @@ export class AgentSession {
 			this.#rejournalModeEntry(preRedoMode.mode, preRedoMode.modeData),
 		);
 		this.#closeCodexProviderSessionsForHistoryRewrite();
+		// Same as /undo: journal-derived extensions must see the restored
+		// branch so they resynchronize their state to it.
+		await this.#emitHistoryTreeChange(previousLeafId, markerId);
 		return { ok: true };
 	}
 
@@ -8622,6 +8643,29 @@ export class AgentSession {
 				error: String(error),
 			});
 		}
+	}
+
+	/**
+	 * Emit the `session_tree` history-change event for an operator rollback
+	 * (/undo, /revert, /redo), mirroring the regular branch paths: handlers
+	 * that reconstruct state from journal entries (autoresearch controls,
+	 * modes) resynchronize to the new branch instead of keeping state from
+	 * the discarded tail. Handlers can mutate entries, so the display
+	 * context is rebuilt afterwards.
+	 */
+	async #emitHistoryTreeChange(oldLeafId: string | null, markerId: string | undefined): Promise<void> {
+		if (!this.#extensionRunner?.hasHandlers("session_tree")) return;
+		const summaryEntry = markerId
+			? (this.sessionManager.getEntry(markerId) as BranchSummaryEntry | undefined)
+			: undefined;
+		await this.#extensionRunner.emit({
+			type: "session_tree",
+			newLeafId: this.sessionManager.getLeafId(),
+			oldLeafId,
+			summaryEntry,
+		});
+		const sessionContext = this.buildDisplaySessionContext();
+		this.agent.replaceMessages(sessionContext.messages);
 	}
 
 	/** Plan-mode decision affordances: `ask`, or plan approval via `write xd://propose`. */

@@ -214,7 +214,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				await runtime.output(parsed.error);
 				return commandConsumed();
 			}
-			const result = runtime.session.userUndo(parsed.steps);
+			const result = await runtime.session.userUndo(parsed.steps);
 			await runtime.output(result.ok ? `Undid ${result.droppedTurns} turn(s).` : (result.error ?? "Undo failed."));
 			return commandConsumed();
 		},
@@ -225,7 +225,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				runtime.ctx.showError(parsed.error);
 				return;
 			}
-			const result = runtime.ctx.session.userUndo(parsed.steps);
+			const result = await runtime.ctx.session.userUndo(parsed.steps);
 			if (result.ok) {
 				runtime.ctx.rebuildChatFromMessages();
 				runtime.ctx.showStatus(`Undid ${result.droppedTurns} turn(s) — context rewound (files untouched)`);
@@ -240,13 +240,13 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		getTuiAutocompleteDescription: runtime =>
 			runtime.ctx.session.isStreaming ? "Redo: unavailable while streaming" : "Redo: restore undone turns",
 		handle: async (_command, runtime) => {
-			const result = runtime.session.userRedo();
+			const result = await runtime.session.userRedo();
 			await runtime.output(result.ok ? "Redone — undone turns restored." : (result.error ?? "Redo failed."));
 			return commandConsumed();
 		},
 		handleTui: async (_command, runtime) => {
 			runtime.ctx.editor.setText("");
-			const result = runtime.ctx.session.userRedo();
+			const result = await runtime.ctx.session.userRedo();
 			if (result.ok) {
 				runtime.ctx.rebuildChatFromMessages();
 				runtime.ctx.showStatus("Redone — undone turns restored");
@@ -279,7 +279,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				await runtime.output(parsed.ok ? `Invalid turn number: ${arg}` : parsed.error);
 				return commandConsumed();
 			}
-			const result = runtime.session.userUndoTo(turns[parsed.index]!.entryId);
+			const result = await runtime.session.userUndoTo(turns[parsed.index]!.entryId);
 			await runtime.output(
 				result.ok ? `Reverted — dropped ${result.droppedTurns} turn(s).` : (result.error ?? "Revert failed."),
 			);
@@ -295,7 +295,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 					runtime.ctx.showError(parsed.ok ? `Invalid turn number: ${arg}` : parsed.error);
 					return;
 				}
-				const result = runtime.ctx.session.userUndoTo(turns[parsed.index]!.entryId);
+				const result = await runtime.ctx.session.userUndoTo(turns[parsed.index]!.entryId);
 				if (result.ok) {
 					runtime.ctx.rebuildChatFromMessages();
 					runtime.ctx.showStatus(`Reverted — dropped ${result.droppedTurns} turn(s) (files untouched)`);
