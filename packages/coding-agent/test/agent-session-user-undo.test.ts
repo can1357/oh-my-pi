@@ -22,6 +22,7 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionFileLockError, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { SessionTools } from "@oh-my-pi/pi-coding-agent/session/session-tools";
 import { removeSyncWithRetries, Snowflake, tryAcquireFileLock } from "@oh-my-pi/pi-utils";
+import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import { TtsrManager } from "../src/export/ttsr";
 import type { ExtensionRunner } from "../src/extensibility/extensions/runner";
 import { resolveLocalUrlToPath } from "../src/internal-urls";
@@ -1599,5 +1600,56 @@ describe("AgentSession user undo/redo", () => {
 		redoCase.reconcileAnnouncedMounts();
 		const removalNotice = redoCase.takePendingXdevMountNotice(true);
 		expect(removalNotice?.details?.removed).toContain("demo");
+	});
+
+	it("collaborative guest prompts count as user turns for undo", async () => {
+		await makeFileBackedSession("collab-guest-undo.jsonl");
+		await seedThreeTurns();
+		// Guest prompts persist as COLLAB_PROMPT_MESSAGE_TYPE custom_message
+		// entries with user attribution (collab/host.ts promptCustomMessage).
+		sessionManager.appendCustomMessageEntry(
+			COLLAB_PROMPT_MESSAGE_TYPE,
+			"guest asks a question",
+			true,
+			undefined,
+			"user",
+		);
+		sessionManager.appendMessage(assistantMessage("OK guest"));
+
+		const undo = await session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		// Exactly the guest turn is dropped; the last LOCAL turn survives —
+		// pre-fix the guest prompt was invisible to the turn walk, so the
+		// anchor moved before the local turn and dropped both.
+		const serialized = JSON.stringify(session.buildDisplaySessionContext().messages);
+		expect(serialized).toContain(SECRET_C);
+		expect(serialized).not.toContain("guest asks a question");
+	});
+
+	it("a guest-only journal still reports user turns", async () => {
+		await makeFileBackedSession("collab-only-undo.jsonl");
+		sessionManager.appendCustomMessageEntry(
+			COLLAB_PROMPT_MESSAGE_TYPE,
+			"first guest prompt",
+			true,
+			undefined,
+			"user",
+		);
+		sessionManager.appendMessage(assistantMessage("OK one"));
+		sessionManager.appendCustomMessageEntry(
+			COLLAB_PROMPT_MESSAGE_TYPE,
+			"second guest prompt",
+			true,
+			undefined,
+			"user",
+		);
+		sessionManager.appendMessage(assistantMessage("OK two"));
+
+		const undo = await session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		expect(undo.droppedTurns).toBe(1);
+		const serialized = JSON.stringify(session.buildDisplaySessionContext().messages);
+		expect(serialized).toContain("first guest prompt");
+		expect(serialized).not.toContain("second guest prompt");
 	});
 });
