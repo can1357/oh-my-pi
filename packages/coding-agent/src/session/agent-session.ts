@@ -7652,6 +7652,7 @@ export class AgentSession {
 				label: notification.name,
 				startedAt,
 			},
+			monitorId: notification.monitorId,
 			seq: notification.seq,
 			elapsedMs: Math.max(0, Date.now() - startedAt),
 			epoch,
@@ -7662,6 +7663,13 @@ export class AgentSession {
 			reminder: notification.reminder,
 		});
 		this.#signalLaunchMonitorChanged();
+	}
+
+	discardLaunchProgress(monitorId: string, epoch: number): void {
+		const matchesMonitor = (entry: AsyncProgressEntry): boolean =>
+			entry.epoch === epoch && entry.source?.type === "process" && entry.monitorId === monitorId;
+		this.yieldQueue.take<AsyncProgressEntry>(ASYNC_PROGRESS_MESSAGE_TYPE, matchesMonitor);
+		this.yieldQueue.take<AsyncProgressEntry>(ASYNC_PROGRESS_WAKE_QUEUE_KIND, matchesMonitor);
 	}
 
 	#signalLaunchMonitorChanged(): void {

@@ -59,6 +59,7 @@ interface MonitorHarness {
 	active: Array<{ monitorId: string; delivery: string; active: boolean }>;
 	completionPreservePending: boolean[];
 	epochs: number[];
+	discarded: Array<{ monitorId: string; epoch: number }>;
 	disposeCallbacks: Array<() => void>;
 	contextBoundaryCallbacks: Set<(boundary: LaunchContextBoundary) => void>;
 	getOutputSink(): ((notification: DaemonMonitorNotification) => void | Promise<void>) | undefined;
@@ -86,6 +87,7 @@ function createHarness(
 	const active: MonitorHarness["active"] = [];
 	const completionPreservePending: boolean[] = [];
 	const epochs: number[] = [];
+	const discarded: MonitorHarness["discarded"] = [];
 	const disposeCallbacks: Array<() => void> = [];
 	const contextBoundaryCallbacks = new Set<(boundary: LaunchContextBoundary) => void>();
 	let outputSink: ((notification: DaemonMonitorNotification) => void | Promise<void>) | undefined;
@@ -156,6 +158,9 @@ function createHarness(
 			epochs.push(epoch);
 			progress.push({ notification, delivery, artifactId });
 		},
+		discardLaunchProgress: (monitorId: string, epoch: number) => {
+			discarded.push({ monitorId, epoch });
+		},
 		queueLaunchCompletion: async (notification: DaemonCompletionNotification, epoch: number) => {
 			completions.push(notification);
 			completionEpochs.push(epoch);
@@ -181,6 +186,7 @@ function createHarness(
 		completionEpochs,
 		active,
 		completionPreservePending,
+		discarded,
 		disposeCallbacks,
 		contextBoundaryCallbacks,
 		epochs,
@@ -1001,13 +1007,25 @@ describe("hub process output monitoring", () => {
 		]);
 	});
 
-	it("detaches with progress off without stopping the process", async () => {
+	it("detaches with progress off and invalidates output queued by that monitor", async () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
 
 		await executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "wake" });
 		const subscription = harness.getSubscription();
 		if (!subscription) throw new Error("Expected output subscription");
+		const sink = harness.getOutputSink();
+		if (!sink) throw new Error("Expected output sink");
+		await sink({
+			event: "daemon-output",
+			monitorId: subscription.id,
+			name: daemon.name,
+			daemonId: daemon.id,
+			seq: 1,
+			text: "QUEUED BEFORE DETACH",
+			batchKind: "progress",
+			suppressedEvents: 0,
+		});
 		const detached = await executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "off" });
 		const alreadyDetached = await executeLaunch(harness.session, {
 			op: "monitor",
@@ -1019,6 +1037,7 @@ describe("hub process output monitoring", () => {
 		expect(harness.requests.map(operation => operation.op)).toEqual(["ping", "describe", "describe", "describe"]);
 		expect(harness.requests.some(operation => operation.op === "stop")).toBeFalse();
 		expect(harness.active.at(-1)).toEqual({ monitorId: subscription.id, delivery: "wake", active: false });
+		expect(harness.discarded).toEqual([{ monitorId: subscription.id, epoch: 17 }]);
 		expect(detached.content).toEqual([
 			expect.objectContaining({ type: "text", text: expect.stringContaining("Stopped monitoring web:") }),
 		]);
@@ -1038,6 +1057,7 @@ describe("hub process output monitoring", () => {
 		).rejects.toThrow("broker unavailable");
 
 		expect(harness.unregisterCount()).toBe(0);
+		expect(harness.discarded).toEqual([]);
 		expect(harness.getOutputSink()).toBeDefined();
 		expect(harness.active.at(-1)?.active).toBe(true);
 	});
