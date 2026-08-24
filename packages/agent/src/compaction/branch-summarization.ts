@@ -172,7 +172,10 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 			// Useless non-error tool results are dropped by serializeConversation()
 			// downstream. Skip them here so a large useless payload can't eat the
 			// branch-summary token budget and starve older useful entries.
-			if (entry.message.role === "toolResult" && entry.message.useless === true && entry.message.isError !== true) {
+			// `useless` never coexists with `isError` (agent-loop.ts's
+			// `coerceToolResult`/`emitToolResult` enforce it once at the boundary),
+			// so no separate `isError` check is needed here.
+			if (entry.message.role === "toolResult" && entry.message.useless === true) {
 				return undefined;
 			}
 			return entry.message;

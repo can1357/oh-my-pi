@@ -332,8 +332,11 @@ export function collectShakeRegions(entries: SessionEntry[], tokenizer: Tokenize
 		if (i < boundaryIndex) continue;
 		const toolResult = getToolResultMessage(entry);
 		// Useless-flagged results carry no information once consumed; they are
-		// eligible even inside the protect-recent window.
-		const uselessResult = toolResult !== undefined && toolResult.useless === true && toolResult.isError !== true;
+		// eligible even inside the protect-recent window. `useless` never
+		// coexists with `isError`, enforced once at the
+		// `coerceToolResult`/`emitToolResult` boundary, so no separate
+		// `isError` check is needed here.
+		const uselessResult = toolResult !== undefined && toolResult.useless === true;
 		if (!uselessResult && accumulatedAfter[i] < config.protectTokens) continue;
 		if (toolResult) {
 			if (toolResult.prunedAt !== undefined) continue;

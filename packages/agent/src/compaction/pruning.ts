@@ -229,7 +229,10 @@ function collectUselessResults(
 	for (let i = 0; i < entries.length; i++) {
 		const entry = entries[i];
 		const message = getToolResultMessage(entry);
-		if (message?.useless !== true || message.prunedAt !== undefined || message.isError === true) continue;
+		// `useless` never coexists with `isError`, enforced once at the
+		// `coerceToolResult`/`emitToolResult` boundary, so no
+		// separate `isError` check is needed here.
+		if (message?.useless !== true || message.prunedAt !== undefined) continue;
 		if (exclude.has(message)) continue;
 		if (isProtectedToolResult(message, toolCallsById.get(message.toolCallId), protectedTools)) continue;
 		const tokens = tokenizer.countMessage(message as AgentMessage);
