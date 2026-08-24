@@ -87,4 +87,10 @@ describe("progress preview line snapping", () => {
 		expect(preview.head!.startsWith("accumulated line 1\n")).toBe(true);
 		expect(preview.tail!.endsWith("accumulated line 400")).toBe(true);
 	});
+	test("empty previews merge into an explicit empty preview", () => {
+		expect(mergeProgressPreviews({ text: "", truncated: false }, { truncated: false })).toEqual({
+			text: "",
+			truncated: false,
+		});
+	});
 });

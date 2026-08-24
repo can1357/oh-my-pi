@@ -843,11 +843,16 @@ export function shortenEmbeddedPaths(text: string, homeDir = os.homedir()): stri
 	const windowsStyle = /^[A-Za-z]:[\\/]/.test(homeDir) || homeDir.startsWith("\\\\");
 	const escapedHome = homeDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 	const homePattern = new RegExp(
-		`(?<=^|[\\s("'\`\\[])${escapedHome}(?:[\\\\/]|(?=$|[\\s"'(),.;:\\[\\]]))`,
+		`(?<=^|file://|[\\s("'\`\\[])${escapedHome}(?:[\\\\/]|(?=$|[\\s"'(),.;:\\[\\]]))`,
 		windowsStyle ? "gi" : "g",
 	);
 	const textWithShortenedHome =
-		shortenedHome !== homeDir ? text.replace(homePattern, match => shortenPath(match, homeDir)) : text;
+		shortenedHome !== homeDir
+			? text.replace(homePattern, (match, offset: number) => {
+					const shortened = shortenPath(match, homeDir);
+					return text.startsWith("file://", offset - "file://".length) ? `/${shortened}` : shortened;
+				})
+			: text;
 	return textWithShortenedHome
 		.split(" ")
 		.map(segment => {

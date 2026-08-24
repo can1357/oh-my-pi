@@ -130,4 +130,100 @@ describe("OutputSink fd lifecycle", () => {
 		await expect(sink.dispose()).resolves.toBeUndefined();
 		expect(ended).toBe(true);
 	});
+
+	test("surfaces an artifact open failure without losing inline output or advertising the artifact", async () => {
+		const artifactPath = await createTempDir();
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "unavailable-open",
+			artifactWriteMode: "mirror",
+			artifactAppend: true,
+		});
+		sink.push("terminal output survives");
+
+		let openFailure: unknown;
+		try {
+			await sink.flushArtifact();
+		} catch (error) {
+			openFailure = error;
+		}
+		expect(openFailure).toBeDefined();
+		await expect(sink.flushArtifact()).rejects.toBe(openFailure);
+
+		const summary = await sink.dump();
+		expect(summary.output).toBe("terminal output survives");
+		expect(summary.artifactId).toBeUndefined();
+		await expect(sink.dispose()).resolves.toBeUndefined();
+	});
+
+	test("surfaces the first synchronous artifact write failure from flushArtifact", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "write-failure.txt");
+		const writeFailure = new Error("simulated artifact write failure");
+		const fakeSink = {
+			write(): number {
+				throw writeFailure;
+			},
+			flush(): Promise<number> {
+				throw new Error("later flush failure");
+			},
+			end(): Promise<number> {
+				return Promise.resolve(0);
+			},
+		} as unknown as Bun.FileSink;
+		const fakeFile = { writer: () => fakeSink } as unknown as Bun.BunFile;
+		const realFile = Bun.file.bind(Bun);
+		vi.spyOn(Bun, "file").mockImplementation((source, options) => {
+			if (source === artifactPath) return fakeFile;
+			return realFile(source as string, options);
+		});
+
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "unavailable-write",
+			artifactWriteMode: "mirror",
+		});
+		sink.push("raw output survives");
+
+		await expect(sink.flushArtifact()).rejects.toBe(writeFailure);
+		const summary = await sink.dump();
+		expect(summary.output).toBe("raw output survives");
+		expect(summary.artifactId).toBeUndefined();
+	});
+
+	test("surfaces an artifact flush failure and never advertises the failed capture", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "flush-failure.txt");
+		const flushFailure = new Error("simulated artifact flush failure");
+		const fakeSink = {
+			write(chunk: string): number {
+				return Buffer.byteLength(chunk, "utf-8");
+			},
+			flush(): Promise<number> {
+				return Promise.reject(flushFailure);
+			},
+			end(): Promise<number> {
+				return Promise.resolve(0);
+			},
+		} as unknown as Bun.FileSink;
+		const fakeFile = { writer: () => fakeSink } as unknown as Bun.BunFile;
+		const realFile = Bun.file.bind(Bun);
+		vi.spyOn(Bun, "file").mockImplementation((source, options) => {
+			if (source === artifactPath) return fakeFile;
+			return realFile(source as string, options);
+		});
+
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "unavailable-flush",
+			artifactWriteMode: "mirror",
+		});
+		sink.push("inline output survives");
+
+		await expect(sink.flushArtifact()).rejects.toBe(flushFailure);
+		const summary = await sink.dump();
+		expect(summary.output).toBe("inline output survives");
+		expect(summary.artifactId).toBeUndefined();
+		await expect(sink.dispose()).resolves.toBeUndefined();
+	});
 });
