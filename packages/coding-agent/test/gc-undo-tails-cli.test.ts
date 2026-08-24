@@ -739,6 +739,34 @@ describe("omp gc --undo-tails (CLI)", () => {
 		expect(fs.statSync(sessionFile).mtimeMs).toBeGreaterThan(staleMtime);
 	});
 
+	it("prune aborts when the journal changed after the gated load", async () => {
+		await buildSessionWithTwoUndoTails();
+		const actor = await SessionManager.open(sessionFile, sessionsDir, undefined, {
+			suppressBreadcrumb: true,
+		});
+		const before = fs.readFileSync(sessionFile, "utf-8");
+		// An out-of-band write that leaves no live owner: another manager
+		// loaded, appended, and closed after this one's gated load. Only the
+		// journal identity can distinguish the generation.
+		const bumped = new Date(Date.now() + 5000);
+		fs.utimesSync(sessionFile, bumped, bumped);
+
+		const counts = await actor.pruneUserUndoTails(0, true);
+		expect(counts.skippedLive).toBe(true);
+		expect(counts.removed).toBe(0);
+		expect(fs.readFileSync(sessionFile, "utf-8")).toBe(before);
+		await actor.close();
+
+		// A fresh load accepts the new generation and prunes normally.
+		const fresh = await SessionManager.open(sessionFile, sessionsDir, undefined, {
+			suppressBreadcrumb: true,
+		});
+		const counts2 = await fresh.pruneUserUndoTails(0, true);
+		expect(counts2.skippedLive).toBeUndefined();
+		expect(counts2.removed).toBeGreaterThan(0);
+		await fresh.close();
+	});
+
 	it("fork of a memory-backed session skips filesystem claims entirely", async () => {
 		const manager = SessionManager.create(sessionsDir, sessionsDir, new MemorySessionStorage());
 		manager.appendMessage(userMessage("u1"));
@@ -946,6 +974,29 @@ describe("omp gc --undo-tails (CLI)", () => {
 		expect(await readSessionOwnerPids(sessionFile)).toEqual([]);
 		await manager.close();
 		expect(await readSessionOwnerPids(forked!.newSessionFile)).toEqual([]);
+	});
+
+	it("a failed source-claim release during a switch is retried at close", async () => {
+		await buildSessionWithTwoUndoTails();
+		const firstSession = sessionFile;
+		await buildSessionWithTwoUndoTails();
+		const secondSession = sessionFile;
+		const manager = SessionManager.create(sessionsDir, sessionsDir);
+		await manager.setSessionFile(firstSession);
+		// Removal rewrites the sidecar in place; a read-only sidecar makes
+		// the source release fail after the switch commits.
+		fs.chmodSync(`${firstSession}.owner`, 0o444);
+		await manager.setSessionFile(secondSession);
+		expect(await readSessionOwnerPids(secondSession)).toContain(process.pid);
+		expect(await readSessionOwnerPids(firstSession)).toContain(process.pid);
+
+		fs.chmodSync(`${firstSession}.owner`, 0o600);
+		await manager.close();
+		// Per-file accounting kept the source claim as a retry target, so
+		// close sheds it too instead of orphaning the old session's pid
+		// line until process exit.
+		expect(await readSessionOwnerPids(firstSession)).toEqual([]);
+		expect(await readSessionOwnerPids(secondSession)).toEqual([]);
 	});
 
 	it("two managers on one session keep it owned until the last closes", async () => {
