@@ -1630,7 +1630,12 @@ async function runUndoTailGc(options: ResolvedGcOptions): Promise<UndoTailGcResu
 			// returns before any rewrite, so dry runs never write the file.
 			const before = await fs.stat(session.path);
 			const beforeIdentity = { dev: before.dev, ino: before.ino, size: before.size, mtimeMs: before.mtimeMs };
-			const manager = await SessionManager.open(session.path, undefined, undefined, { suppressBreadcrumb: true });
+			const manager = await SessionManager.open(session.path, undefined, undefined, {
+				suppressBreadcrumb: true,
+				// Dry runs are read-only end to end: a claim append would both
+				// mutate the directory and fail outright on a read-only mount.
+				noOwnerClaim: !options.apply,
+			});
 			// Identity of the generation the gated load actually accepted:
 			// if the journal was updated and closed between the `before`
 			// stat and the load, restoring `before`'s timestamp would let a

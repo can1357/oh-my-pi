@@ -812,6 +812,8 @@ export class SessionManager {
 	/** True only while a gc undo-tail prune is publishing; gates the owner recheck. */
 	#undoTailPruneActive = false;
 	#sidecarTail: Promise<void> = Promise.resolve();
+	/** Read-only inspection mode: never append owner sidecar claims (gc dry runs). */
+	#noOwnerClaim = false;
 	/** Sealed by {@link releaseRetainedEntries}: every later append/title/rewrite is a dropped no-op. */
 	#released = false;
 	/** Serializes async disk work (flush/close/atomic rewrite). Appends are synchronous and bypass it. */
@@ -998,6 +1000,7 @@ export class SessionManager {
 		if (!this.#persist) return Promise.resolve(true);
 		const sessionFile = this.#sessionFile;
 		if (!sessionFile || !(this.#storage instanceof FileSessionStorage)) return Promise.resolve(true);
+		if (this.#noOwnerClaim) return Promise.resolve(true);
 		if ((this.#ownerClaims.get(sessionFile) ?? 0) > 0) return Promise.resolve(true);
 		// Serialized against other processes' removals; chained on the
 		// sidecar tail so register/remove keep strict per-manager order.
@@ -1037,7 +1040,17 @@ export class SessionManager {
 			const count = this.#ownerClaims.get(sessionFile) ?? 0;
 			if (count <= 0) return;
 			this.#ownerClaims.set(sessionFile, count - 1);
-			if (await removeOwnerSidecar(sessionFile)) return;
+			let removed = false;
+			try {
+				removed = await removeOwnerSidecar(sessionFile);
+			} catch {
+				// Lock-acquisition contention or transient I/O: the tail must
+				// NEVER reject — a rejected tail silently skips every later
+				// chained register/release and permanently disables this
+				// manager's ownership bookkeeping. Fall through to the
+				// retain path below so a later release retries.
+			}
+			if (removed) return;
 			// Removal failed for a non-absence reason: retain the
 			// contribution so a later release from this still-alive manager
 			// retries instead of leaving a stale live-pid line nothing will
@@ -2595,8 +2608,23 @@ export class SessionManager {
 		this.#unregisterOwnerSidecar();
 		// Removal is fs-async now: make the sidecar claim release durable
 		// before close() returns, or a gc run right after close would still
-		// see this manager as a live owner.
+		// see this manager as a live owner. A release that failed for a
+		// non-absence reason retained its claim as a retry target, and this
+		// close is the last retry this manager will ever get — without it
+		// the session stays pinned by this live pid until process exit.
 		await this.#sidecarTail;
+		if ([...this.#ownerClaims.values()].some(count => count > 0)) {
+			this.#unregisterOwnerSidecar();
+			await this.#sidecarTail;
+		}
+		for (const [file, count] of this.#ownerClaims) {
+			if (count > 0) {
+				// Fail-open for close(): the session journal is already
+				// durable, only the ownership hint survives. The dead-pid
+				// sweep sheds the stale line once this process exits.
+				logger.warn("Session owner sidecar claim survived close", { sessionFile: file, claims: count });
+			}
+		}
 		await this.#scheduleDiskWork(async () => {
 			const hadWriter = this.#writer !== undefined;
 			await this.#closeWriterHandle();
@@ -3882,7 +3910,7 @@ export class SessionManager {
 		filePath: string,
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
-		options?: { initialCwd?: string; suppressBreadcrumb?: boolean },
+		options?: { initialCwd?: string; suppressBreadcrumb?: boolean; noOwnerClaim?: boolean },
 	): Promise<SessionManager> {
 		// Identity strictly before the read: a publish landing between the
 		// two would pair pre-prune content with a post-prune identity, and
@@ -3906,6 +3934,9 @@ export class SessionManager {
 				: path.dirname(path.resolve(filePath)));
 		const manager = new SessionManager(cwd, dir, true, storage);
 		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
+		// Read-only inspection (gc dry runs): never claim ownership, so a
+		// sessions directory stays byte-identical and read-only mounts work.
+		manager.#noOwnerClaim = options?.noOwnerClaim === true;
 		await manager.#setSessionFile(filePath, loaded, loadedIdentity);
 		return manager;
 	}
