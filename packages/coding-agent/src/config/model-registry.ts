@@ -1117,7 +1117,7 @@ export class ModelRegistry {
 
 	#configuredDiscoveryHeaderFallback(providerId: string): Record<string, string> | undefined {
 		const override = this.#providerOverrides.get(providerId);
-		if (override?.authHeader !== true || !override.apiKey) return undefined;
+		if (override?.authHeader !== true) return undefined;
 		const headers = mergeAuthHeaderSources([override.headers], override.authHeader, override.apiKey, () =>
 			this.authStorage.getRuntimeApiKey(providerId),
 		);

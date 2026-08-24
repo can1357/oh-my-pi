@@ -152,7 +152,8 @@ export function createLiveConfigHeaders(
 	options?: HeaderResolutionOptions,
 ): Record<string, string> | undefined {
 	const liveSources = sources.filter((source): source is Record<string, string> => source !== undefined);
-	if (liveSources.length === 0 && (!options?.authHeader || !options.apiKeyConfig)) return undefined;
+	if (liveSources.length === 0 && (!options?.authHeader || !(options.apiKeyConfig || options.apiKeyOverride)))
+		return undefined;
 
 	const localHeaders: Record<string, string> = {};
 	const allSources = [...liveSources, localHeaders];

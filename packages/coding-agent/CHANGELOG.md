@@ -7,6 +7,14 @@
 - Report oversized selected lines that cannot fit after read context, with a working raw recovery selector instead of a looping continuation hint ([#10775](https://github.com/can1357/oh-my-pi/issues/10775)).
 
 ## [18.1.10] - 2026-09-04
+### Added
+
+- Added side-by-side image and SVG previews to `omp git`, including local Git LFS object resolution and explicit placeholders for unavailable or unsupported binary content.
+- Added the `omp if-bench` command: a zero-tool instruction-following and working-memory benchmark that drives one cached conversation per model, adding one more glyph array action every turn while a `nya{1,N}` directive moves through the prompt, with a live turn-ladder board and a ranked scoreboard
+- Added `q` shortcut to exit the git TUI
+- Added a third state to the git TUI whitespace toggle (`b`): beyond ignoring whitespace-only line changes, it hides formatting-only changes (indentation, line splits/joins, blank lines) and import-only changes in TypeScript/JavaScript, Rust, and Go
+- Compressed single-child directory chains in the sidebar tree view
+- Added `--provider-api-keys` for loading a named provider-key bundle and `--provider-api-keys-fd` for consuming an exact launcher descriptor, both process-local and never persisted ([#8286](https://github.com/can1357/oh-my-pi/pull/8286) by [@ghosty-11](https://github.com/ghosty-11))
 
 ### Changed
 
@@ -632,7 +640,6 @@
 - Fixed Linux startup event loop delays caused by legacy extension cache fsync churn.
 - Fixed subagent advisors abandoning reviews on the final yield turn during session teardown.
 - Fixed `/todo` expand/collapse commands and corrected `/shake thinking` reporting.
-- Added `--provider-api-keys` for loading a named provider-key bundle and `--provider-api-keys-fd` for consuming an exact launcher descriptor, both process-local and never persisted ([#8286](https://github.com/can1357/oh-my-pi/pull/8286) by [@ghosty-11](https://github.com/ghosty-11))
 
 ## [18.0.3] - 2026-08-23
 

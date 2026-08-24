@@ -10,6 +10,7 @@ import {
 	readProviderApiKeyBundle,
 	readProviderApiKeyBundleFd,
 } from "@oh-my-pi/pi-coding-agent/cli/provider-api-keys";
+import { mergeAuthHeaderSources } from "@oh-my-pi/pi-coding-agent/config/custom-models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as helpers from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { getPreloadedPluginRoots } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
@@ -642,5 +643,13 @@ console.log(JSON.stringify({ before, after: { cwd: process.cwd(), projectDir: ge
 			stderr.mockRestore();
 			injectSpy.mockRestore();
 		}
+	});
+
+	it("materializes runtime-only auth headers for authHeader providers without a configured key", () => {
+		// authHeader: true with no apiKey and no static headers is valid when the
+		// credential comes exclusively from the runtime bundle; the resolver must
+		// consult the override instead of returning no headers at all.
+		const headers = mergeAuthHeaderSources([], true, undefined, () => "runtime-key");
+		expect(headers?.Authorization).toBe("Bearer runtime-key");
 	});
 });

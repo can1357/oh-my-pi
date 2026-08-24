@@ -136,4 +136,52 @@ describe("startup model cache header restoration (#5780)", () => {
 		});
 		expect(nextRestartRegistry.find("probe", "probe-model")?.headers?.Authorization).toBe("Bearer test-key");
 	});
+
+	test("cached configured-discovery models regain runtime-bundle auth headers on registry startup", async () => {
+		// The provider intentionally configures no apiKey: its credential comes
+		// exclusively from the runtime key bundle (--provider-api-keys).
+		const modelsPath = path.join(tempDir, "models.json");
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					probe: {
+						baseUrl: "https://example.invalid/v1/",
+						api: "openai-completions",
+						authHeader: true,
+						discovery: { type: "openai-models-list" },
+					},
+				},
+			}),
+		);
+		authStorage.setRuntimeApiKey("probe", "runtime-key");
+
+		const primedRegistry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: async (input, init) => {
+				expect(String(input)).toBe("https://example.invalid/v1/models");
+				expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer runtime-key");
+				return Response.json({ data: [{ id: "probe-model" }] });
+			},
+		});
+		await primedRegistry.refreshProvider("probe", "online");
+		expect(primedRegistry.find("probe", "probe-model")?.headers?.Authorization).toBe("Bearer runtime-key");
+
+		const cacheDbPath = path.join(tempDir, "models.db");
+		const restartedRegistry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: () => Promise.reject(new Error("offline")),
+		});
+		const cached = restartedRegistry.find("probe", "probe-model");
+		expect(cached).toBeDefined();
+		expect(cached?.headers?.Authorization).toBe("Bearer runtime-key");
+
+		// Legacy rows written before the fallback knew about runtime keys must
+		// also restore instead of being dropped as unrestorable.
+		const oldCacheDb = new Database(cacheDbPath);
+		oldCacheDb.run("UPDATE model_cache SET unrestorable_header_model_ids = ?", [JSON.stringify(["probe-model"])]);
+		oldCacheDb.close();
+		const upgradedRegistry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: () => Promise.reject(new Error("offline")),
+		});
+		expect(upgradedRegistry.find("probe", "probe-model")?.headers?.Authorization).toBe("Bearer runtime-key");
+	});
 });
