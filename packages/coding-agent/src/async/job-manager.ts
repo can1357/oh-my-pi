@@ -131,7 +131,7 @@ export interface AsyncJob {
 	retainedArtifactsCleanup?: () => Promise<void>;
 	/** How intentional progress reaches the owning agent; undefined keeps the channel off. */
 	progressDelivery?: AsyncJobProgressDelivery;
-	/** Progress batches actually handed to the owner sink; >0 means the agent has seen live output. */
+	/** Raw-stream deliveries the agent saw through progress or a caller-managed foreground result. */
 	progressDeliveredCount?: number;
 	/** Undelivered progress captured at settlement, folded into the completion delivery. */
 	completionLeftover?: AsyncJobCompletionLeftover;
@@ -151,6 +151,8 @@ interface ManagedAsyncJob extends AsyncJob {
 	progressKey: string;
 	/** Whether delivered progress still continuously covers the job's raw stream. */
 	progressDeliveryCoverage: ProgressDeliveryCoverage;
+	/** Cumulative raw output already returned by a caller-managed foreground phase. */
+	foregroundStreamProvenance?: ProgressStreamProvenance;
 }
 
 /** Progress content that never reached the agent before the job settled. */
@@ -837,12 +839,33 @@ export class AsyncJobManager {
 		};
 	}
 
-	/** Enable model-facing progress for a running job after a caller-managed foreground phase. */
-	activateProgressDelivery(jobId: string, delivery: AsyncJobProgressDelivery): boolean {
+	/**
+	 * Enable model-facing progress for a running job after a caller-managed
+	 * foreground phase. `foregroundStreamProvenance` records raw output already
+	 * returned inline so terminal settlement does not deliver it again.
+	 */
+	activateProgressDelivery(
+		jobId: string,
+		delivery: AsyncJobProgressDelivery,
+		foregroundStreamProvenance?: ProgressStreamProvenance,
+	): boolean {
 		const job = this.#jobs.get(jobId);
 		if (job?.status !== "running") return false;
 		job.progressDelivery = delivery;
 		this.#resumeAgentProgress(job);
+		job.foregroundStreamProvenance = foregroundStreamProvenance;
+		if (foregroundStreamProvenance) {
+			job.progressDeliveryCoverage = "continuous";
+			job.progressDeliveredCount = Math.max(job.progressDeliveredCount ?? 0, 1);
+		}
+		return true;
+	}
+
+	/** Replace the provisional progress artifact with the producer's settlement-time result. */
+	setProgressArtifact(jobId: string, artifactId: string | undefined): boolean {
+		const job = this.#jobs.get(jobId);
+		if (job?.status !== "running") return false;
+		job.progressArtifactId = artifactId;
 		return true;
 	}
 
@@ -984,12 +1007,14 @@ export class AsyncJobManager {
 			job.terminalTextProvenance =
 				job.progressDeliveryCoverage === "continuous" &&
 				(pendingCoversTerminal ||
+					streamProvenanceMatchesText(job.foregroundStreamProvenance, terminalTextSource) ||
 					streamProvenanceMatchesText(delivered?.streamProvenance, terminalTextSource) ||
 					delivered?.text === terminalText)
 					? "progress"
 					: "terminal";
 		}
 		this.#lastDeliveredAgentProgress.delete(job.progressKey);
+		job.foregroundStreamProvenance = undefined;
 	}
 
 	#resumeAgentProgress(job: ManagedAsyncJob): void {

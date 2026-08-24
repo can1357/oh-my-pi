@@ -17,7 +17,7 @@ import {
 	truncateTailBytes,
 } from "@oh-my-pi/pi-coding-agent/session/streaming-output";
 import { formatOutputNotice, outputMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { logger, removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const createdTempDirs: string[] = [];
 const originalForceProtocol = Bun.env.PI_FORCE_IMAGE_PROTOCOL;
@@ -513,6 +513,35 @@ describe("OutputSink", () => {
 		]);
 	});
 
+	test("makes mirrored bytes readable before each onChunk notification", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "mirrored-output.log");
+		const artifactFile = Bun.file(artifactPath);
+		const observations: Array<Promise<{ notified: string; mirrored: string }>> = [];
+		let notified = "";
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "mirror-readable-onchunk",
+			artifactWriteMode: "mirror",
+			chunkThrottleMs: 60_000,
+			onChunk: chunk => {
+				notified += chunk;
+				const notifiedAtCallback = notified;
+				observations.push(artifactFile.text().then(mirrored => ({ notified: notifiedAtCallback, mirrored })));
+			},
+		});
+
+		sink.push("first\n");
+		sink.push("second\n");
+		const dumped = await sink.dump();
+		for (const observation of await Promise.all(observations)) {
+			expect(observation.mirrored).toContain(observation.notified);
+		}
+		expect(notified).toBe("first\nsecond\n");
+		expect(notified).toBe(dumped.output);
+		expect(await artifactFile.text()).toBe(notified);
+	});
+
 	test("mirror mode delivers a queued chunk with the stamp captured at entry", async () => {
 		const dir = await createTempDir();
 		let epoch = 0;
@@ -537,6 +566,34 @@ describe("OutputSink", () => {
 			{ chunk: "post-boundary\n", stamp: 1 },
 		]);
 	});
+
+	test("settles a sampled mirror delivery when artifact persistence fails", async () => {
+		const dir = await createTempDir();
+		const settled: number[] = [];
+		const deliveries: string[] = [];
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const sink = new OutputSink({
+				artifactPath: path.join(dir, "missing", "output.log"),
+				artifactId: "unavailable-artifact",
+				artifactWriteMode: "mirror",
+				chunkStamp: () => 7,
+				onChunk: chunk => deliveries.push(chunk),
+				onChunkSettled: stamp => settled.push(stamp),
+			});
+
+			sink.push("cannot persist");
+			const dumped = await sink.dump();
+
+			expect(deliveries).toEqual([]);
+			expect(settled).toEqual([7]);
+			expect(dumped.output).toBe("cannot persist");
+			expect(dumped.artifactId).toBeUndefined();
+		} finally {
+			warnSpy.mockRestore();
+		}
+	});
+
 	test("throttled onChunk coalesces held-back chunks instead of dropping them", async () => {
 		const chunks: string[] = [];
 		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk), chunkThrottleMs: 60_000 });
@@ -638,15 +695,24 @@ describe("OutputSink", () => {
 
 	test("replace cancels a throttled tail and discards its pending preview", () => {
 		vi.useFakeTimers();
+		let stamp = 1;
+		const settled: number[] = [];
 		const chunks: string[] = [];
-		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk), chunkThrottleMs: 20 });
+		const sink = new OutputSink({
+			onChunk: chunk => chunks.push(chunk),
+			chunkStamp: () => stamp,
+			onChunkSettled: settledStamp => settled.push(settledStamp),
+			chunkThrottleMs: 20,
+		});
 
 		sink.push("a");
+		stamp = 2;
 		sink.push("superseded");
 		sink.replace("replacement");
 		vi.advanceTimersByTime(20);
 
 		expect(chunks).toEqual(["a"]);
+		expect(settled).toEqual([1, 2]);
 	});
 
 	test("caps artifact-on-disk size: head + notice + tail when stream exceeds cap", async () => {

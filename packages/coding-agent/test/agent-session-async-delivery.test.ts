@@ -12,6 +12,11 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import type { AsyncJob } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import {
+	type ProgressLine,
+	ProgressLines,
+	progressStreamProvenanceForText,
+} from "@oh-my-pi/pi-coding-agent/async/progress-lines";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
@@ -2151,9 +2156,9 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(vi.getTimerCount()).toBe(baselineTimers + 1);
 	});
 
-	it("summarizes artifact-backed progress without replaying byte-identical terminal text", async () => {
+	it("suppresses terminal output when streamed provenance ends with a blank record", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
-		const progressObserved = Promise.withResolvers<void>();
+		const firstProgressObserved = Promise.withResolvers<void>();
 		const completionObserved = Promise.withResolvers<string>();
 		const mock = createMockModel({
 			handler: context => {
@@ -2164,7 +2169,7 @@ describe("AgentSession owner-routed async delivery", () => {
 							: message.content.flatMap(content => (content.type === "text" ? [content.text] : [])),
 					)
 					.join("\n");
-				if (text.includes("FULL RESULT BODY MUST NOT REAPPEAR")) progressObserved.resolve();
+				if (text.includes("FIRST STREAMED LINE")) firstProgressObserved.resolve();
 				if (text.includes("Resume your work using the result below")) completionObserved.resolve(text);
 				return { content: ["Done"] };
 			},
@@ -2191,32 +2196,48 @@ describe("AgentSession owner-routed async delivery", () => {
 		});
 		await session.sendUserMessage("initialize then wait");
 
-		const gate = Promise.withResolvers<string>();
-		const reporter = Promise.withResolvers<(text: string, info?: { artifactId?: string }) => void>();
+		const terminalSource = "FIRST STREAMED LINE\nSECOND STREAMED LINE\n\n";
+		const terminalText = `${terminalSource}\nWall time: 1.23 seconds`;
+		const gate = Promise.withResolvers<{ text: string; terminalTextSource: string }>();
+		const reportedProgressLines: ProgressLine[] = [];
+		const samplerReady = Promise.withResolvers<ProgressLines>();
 		manager.register(
 			"bash",
-			"summarized job",
+			"multi-batch streamed job",
 			async ({ reportAgentProgress }) => {
-				reporter.resolve(reportAgentProgress);
+				const sampler = new ProgressLines(line => {
+					reportedProgressLines.push(line);
+					reportAgentProgress(line.text, {
+						artifactId: "77",
+						streamProvenance: line.streamProvenance,
+					});
+				});
+				samplerReady.resolve(sampler);
 				return gate.promise;
 			},
 			{ ownerId: "Main", progressDelivery: "wake" },
 		);
-		const report = await reporter.promise;
-		report("FULL RESULT BODY MUST NOT REAPPEAR", { artifactId: "77" });
-		await progressObserved.promise;
+		const sampler = await samplerReady.promise;
+		sampler.append("FIRST STREAMED LINE\n");
+		await firstProgressObserved.promise;
 
-		report("LEFTOVER LINE", { artifactId: "77" });
-		gate.resolve("FULL RESULT BODY MUST NOT REAPPEAR");
+		// The first sink delivery has completed, so this line belongs to a
+		// distinct batch. Its cumulative provenance still includes batch one
+		// and the following blank record, which remains absent from display.
+		sampler.append("SECOND STREAMED LINE\n\n");
+		gate.resolve({ text: terminalText, terminalTextSource: terminalSource });
 		await manager.waitForAll();
+		expect(reportedProgressLines.map(line => line.text)).toEqual(["FIRST STREAMED LINE", "SECOND STREAMED LINE"]);
+		expect(reportedProgressLines.at(-1)?.streamProvenance).toEqual(progressStreamProvenanceForText(terminalSource));
 
 		const completion = await completionObserved.promise;
 		expect(completion).toContain("artifact://77");
-		expect(completion).toContain("LEFTOVER LINE");
-		// The terminal result is identical to the already-delivered cumulative
-		// progress and therefore appears only in progress history, not again in
-		// the completion's <result> block.
-		expect(completion.split("FULL RESULT BODY MUST NOT REAPPEAR")).toHaveLength(2);
+		expect(completion).toContain("SECOND STREAMED LINE");
+		// Each raw line appears once in conversation history, not again in the
+		// completion's <result>; completion-only formatting is suppressed with it.
+		expect(completion.split("FIRST STREAMED LINE")).toHaveLength(2);
+		expect(completion.split("SECOND STREAMED LINE")).toHaveLength(2);
+		expect(completion).not.toContain("Wall time: 1.23 seconds");
 	}, 10_000);
 
 	it("preserves a successful post-processed terminal result beside its progress artifact", async () => {
@@ -2260,18 +2281,24 @@ describe("AgentSession owner-routed async delivery", () => {
 		await session.sendUserMessage("initialize then wait");
 
 		const gate = Promise.withResolvers<string>();
-		const reporter = Promise.withResolvers<(text: string, info?: { artifactId?: string }) => void>();
+		const samplerReady = Promise.withResolvers<ProgressLines>();
 		manager.register(
 			"bash",
 			"post-processed successful job",
 			async ({ reportAgentProgress }) => {
-				reporter.resolve(reportAgentProgress);
+				const sampler = new ProgressLines(line =>
+					reportAgentProgress(line.text, {
+						artifactId: "78",
+						streamProvenance: line.streamProvenance,
+					}),
+				);
+				samplerReady.resolve(sampler);
 				return gate.promise;
 			},
 			{ ownerId: "Main", progressDelivery: "wake" },
 		);
-		const report = await reporter.promise;
-		report("RAW STREAMED OUTPUT", { artifactId: "78" });
+		const sampler = await samplerReady.promise;
+		sampler.append("RAW STREAMED OUTPUT\n");
 		await progressObserved.promise;
 
 		// This successful terminal text was synthesized after streaming (the

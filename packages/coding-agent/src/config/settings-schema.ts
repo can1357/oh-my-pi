@@ -4863,6 +4863,11 @@ export const SETTINGS_SCHEMA = {
 		default: 60_000,
 	},
 
+	"bash.asyncAuto.inlineGraceMs": {
+		type: "number",
+		default: 1_000,
+	},
+
 	"tools.xdev": {
 		type: "boolean",
 		default: true,
