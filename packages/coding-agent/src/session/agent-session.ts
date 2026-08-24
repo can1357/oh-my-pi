@@ -338,6 +338,7 @@ import {
 import { ModelControls, type ModelControlsHost } from "./model-controls";
 import { isPrewalkPlanNudge, PrewalkCoordinator, type PrewalkCoordinatorHost } from "./prewalk";
 import {
+	IMAGE_ATTACHMENT_DESCRIPTION_TYPE,
 	isAdvisorCard,
 	isDisplayableQueuedMessage,
 	isHiddenUserCompanion,
@@ -8489,7 +8490,7 @@ export class AgentSession {
 		// Cancellable pre-tree hook, same contract as ordinary tree
 		// navigation: extensions that guard tree mutation get a say before
 		// the rollback commits.
-		const cancelledByHook = await this.#beforeRollbackTreeChange(anchorId, droppedEntries);
+		const cancelledByHook = await this.#beforeRollbackTreeChange(anchorId);
 		if (cancelledByHook) {
 			return { ok: false, error: cancelledByHook };
 		}
@@ -8510,6 +8511,10 @@ export class AgentSession {
 			});
 		} catch (error) {
 			if (!(error instanceof SessionFileLockError)) throw error;
+			// branchWithSummary threw AFTER inserting the marker in memory:
+			// recover its id from the new leaf so the session_tree event still
+			// carries the summaryEntry extensions identify rollbacks by.
+			markerId ??= this.sessionManager.getLeafId() ?? undefined;
 			// Contended append-writer lock: the branch switch and marker
 			// already applied in-memory and the journal is marked divergent
 			// (the next append publishes a full rewrite), so the rollback is
@@ -8615,7 +8620,7 @@ export class AgentSession {
 		// happened.
 		// Cancellable pre-tree hook before the restore commits, mirroring
 		// the /undo path and ordinary tree navigation.
-		const cancelledByHook = await this.#beforeRollbackTreeChange(tipId, []);
+		const cancelledByHook = await this.#beforeRollbackTreeChange(tipId);
 		if (cancelledByHook) {
 			return { ok: false, error: cancelledByHook };
 		}
@@ -8627,6 +8632,9 @@ export class AgentSession {
 			});
 		} catch (error) {
 			if (!(error instanceof SessionFileLockError)) throw error;
+			// Same recovery as /undo: the marker landed in memory before the
+			// persistence throw.
+			markerId ??= this.sessionManager.getLeafId() ?? undefined;
 			// Same deferred-persistence contract as /undo: the rebranch
 			// applied in-memory and the journal is marked divergent, so
 			// complete the in-memory restore rather than half-transition.
@@ -8672,36 +8680,52 @@ export class AgentSession {
 	}
 
 	/**
-	 * Prompt-owned prelude entries: `custom_message` entries persisted
-	 * immediately before a user turn (magic-keyword notices, eager todo/task
-	 * guidance, image-description notices). They belong to the turn that
-	 * follows them, so a rollback anchor must precede the whole batch.
-	 * Skill prompts are user turns themselves and stop the walk.
+	 * Prompt-owned prelude entries: the custom_message types #promptWithMessage
+	 * inserts immediately before a user turn (magic-keyword notices, eager
+	 * todo/task guidance, image-description notices). They belong to the turn
+	 * that follows them, so a rollback anchor must precede the whole batch.
+	 * Deliberately a whitelist: an extension's independent
+	 * sendCustomMessage({ triggerTurn: false }) is also a contiguous
+	 * custom_message but predates the turn boundary and must survive.
 	 */
 	#isPromptPreludeEntry(entry: SessionEntry): boolean {
-		return entry.type === "custom_message" && !this.#isUserTurnEntry(entry);
+		if (entry.type !== "custom_message") return false;
+		const customType = entry.customType;
+		return (
+			customType === "ultrathink-notice" ||
+			customType === "orchestrate-notice" ||
+			customType === "workflow-notice" ||
+			customType === IMAGE_ATTACHMENT_DESCRIPTION_TYPE ||
+			customType === "eager-todo-prelude" ||
+			customType === "eager-task-prelude"
+		);
 	}
 
 	/**
 	 * Emit the cancellable `session_before_tree` event for an operator
 	 * rollback (/undo, /revert, /redo) BEFORE the branch switch commits —
-	 * same contract as ordinary tree navigation. Returns an error message
-	 * when a handler cancelled, undefined to proceed.
+	 * same contract as ordinary tree navigation: the preparation is computed
+	 * from the current leaf and the rollback target, so commonAncestorId and
+	 * entriesToSummarize reflect the actual branch delta. Returns an error
+	 * message when a handler cancelled, undefined to proceed.
 	 */
-	async #beforeRollbackTreeChange(
-		anchorId: string | null,
-		droppedEntries: SessionEntry[],
-	): Promise<string | undefined> {
+	async #beforeRollbackTreeChange(anchorId: string | null): Promise<string | undefined> {
 		if (!this.#extensionRunner?.hasHandlers("session_before_tree")) return undefined;
+		const oldLeafId = this.sessionManager.getLeafId();
+		const anchor = anchorId ?? this.sessionManager.getBranch()[0]?.id;
+		const collected = anchor
+			? collectEntriesForBranchSummary(this.sessionManager, oldLeafId, anchor)
+			: { entries: [] as SessionEntry[], commonAncestorId: null as string | null };
+		const entriesToSummarize = collected.entries;
 		const result = (await this.#extensionRunner.emit({
 			type: "session_before_tree",
 			preparation: {
 				// Empty targetId means "before the first entry" (rewind to
 				// the session root), mirroring the null-leaf tree semantics.
 				targetId: anchorId ?? "",
-				oldLeafId: this.sessionManager.getLeafId(),
-				commonAncestorId: anchorId,
-				entriesToSummarize: droppedEntries,
+				oldLeafId,
+				commonAncestorId: collected.commonAncestorId,
+				entriesToSummarize,
 				userWantsSummary: false,
 			},
 			signal: new AbortController().signal,
