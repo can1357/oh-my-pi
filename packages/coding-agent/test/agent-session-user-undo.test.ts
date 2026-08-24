@@ -1525,7 +1525,7 @@ describe("AgentSession user undo/redo", () => {
 	});
 
 	it("reconcileAnnouncedMounts requeues rolled-back mount deltas", () => {
-		const makeTools = (messages: unknown[], mountedNames: string[]) => {
+		const makeTools = (messages: unknown[], mountedNames: Iterable<string>) => {
 			const toolRegistry = new Map();
 			return new SessionTools(
 				{
@@ -1537,7 +1537,7 @@ describe("AgentSession user undo/redo", () => {
 					toolRegistry,
 					xdev: {
 						tools: toolRegistry,
-						mountedNames: new Set(mountedNames),
+						mountedNames: mountedNames instanceof Set ? mountedNames : new Set(mountedNames),
 						builtInNames: new Set(),
 					},
 				} as unknown as ConstructorParameters<typeof SessionTools>[1],
@@ -1581,5 +1581,23 @@ describe("AgentSession user undo/redo", () => {
 		const consistent = makeTools([notice({ added: ["demo"], removed: [] })], ["demo"]);
 		consistent.reconcileAnnouncedMounts();
 		expect(consistent.takePendingXdevMountNotice(true)).toBeUndefined();
+		// Redo after undo: the undo requeued a mount for demo (the rewound
+		// transcript lost the notice), then redo restored the notice — the
+		// queued addition is now satisfied by the restored transcript and must
+		// be cleared. Left in place it would later swallow a REAL removal: the
+		// diff coalescing treats the queued add as an undelivered mount and
+		// cancels the unmount the model should hear about.
+		const redoMessages: unknown[] = [];
+		const liveMounts = new Set(["demo"]);
+		const redoCase = makeTools(redoMessages, liveMounts);
+		redoCase.reconcileAnnouncedMounts();
+		redoMessages.push(notice({ added: ["demo"], removed: [] }));
+		redoCase.reconcileAnnouncedMounts();
+		// The device later leaves: the restored transcript announced it, so a
+		// removal notice must be delivered.
+		liveMounts.delete("demo");
+		redoCase.reconcileAnnouncedMounts();
+		const removalNotice = redoCase.takePendingXdevMountNotice(true);
+		expect(removalNotice?.details?.removed).toContain("demo");
 	});
 });

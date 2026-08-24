@@ -2710,12 +2710,27 @@ export class SessionManager {
 		// fails its prune against the still-held journal lock — an otherwise
 		// routine gc run reports an error and exits nonzero. Queued disk work
 		// can make that window much longer than the immediate close path.
-		await this.#scheduleDiskWork(async () => {
-			const hadWriter = this.#writer !== undefined;
-			await this.#closeWriterHandle();
-			if (hadWriter || (this.#sessionFile && this.#storage.existsSync(this.#sessionFile)))
-				this.#fileIsCurrent = true;
-		});
+		// A latched #diskFailure must NOT skip this cleanup: rejecting before
+		// the writer close would leave the journal lock held and the owner
+		// sidecar claiming a live pid, pinning the session against undo-tail
+		// gc until process exit. Run the close despite prior failures, then
+		// rethrow the stored persistence error at the end of close().
+		let closeWorkError: Error | undefined;
+		try {
+			await this.#scheduleDiskWork(
+				async () => {
+					const hadWriter = this.#writer !== undefined;
+					await this.#closeWriterHandle();
+					if (hadWriter || (this.#sessionFile && this.#storage.existsSync(this.#sessionFile)))
+						this.#fileIsCurrent = true;
+				},
+				{ ignorePriorError: true },
+			);
+		} catch (error) {
+			// Non-lock errors already latched #diskFailure (rethrown below);
+			// a raw SessionFileLockError is rethrown after the claim release.
+			closeWorkError = toError(error);
+		}
 		this.#unregisterOwnerSidecar();
 		// Removal is fs-async now: make the sidecar claim release durable
 		// before close() returns, or a gc run right after close would still
@@ -2743,6 +2758,7 @@ export class SessionManager {
 		await this.#storage.drain();
 		if (closeFlushError) throw closeFlushError;
 		if (this.#diskFailure) throw this.#diskFailure;
+		if (closeWorkError) throw closeWorkError;
 	}
 
 	/**

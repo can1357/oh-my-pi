@@ -1160,6 +1160,17 @@ export class SessionTools {
 		const current = this.#xdev?.mountedNames;
 		if (!current) return;
 		const pending = this.#pendingXdevMountDelta ?? { added: new Set<string>(), removed: new Set<string>() };
+		// First drop pending entries the restored branch already satisfies: a
+		// queued mount (rolled back by /undo) whose notice /redo then restores
+		// is known to the transcript again, and delivering it would duplicate
+		// the notice; symmetrically a queued removal for a device the restored
+		// transcript no longer announces is moot.
+		for (const name of [...pending.added]) {
+			if (this.#announcedMounts.has(name)) pending.added.delete(name);
+		}
+		for (const name of [...pending.removed]) {
+			if (!this.#announcedMounts.has(name)) pending.removed.delete(name);
+		}
 		// Live but not announced by the surviving transcript: requeue a mount
 		// notice; announced by the transcript but not live: requeue a removal.
 		// Coalesce against any surviving pending delta exactly like
