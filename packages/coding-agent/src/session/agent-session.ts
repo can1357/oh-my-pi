@@ -5586,6 +5586,22 @@ export class AgentSession {
 						}
 					}
 				}
+			} else if (entry.type === "custom_message") {
+				// The steering text ahead of a ttsr_injection persists here as
+				// well, and interrupt-mode delivery lands AFTER the assistant
+				// turn ended (the live counter already advanced): reset the
+				// per-tool adjustment, or the injection that follows would be
+				// classified pre-turn-end and restore one turn too low after
+				// /undo or /redo, making an after-gap rule repeat early.
+				lastMessageWasAssistant = false;
+				if (entry.customType === "ttsr-injection") {
+					const rules = (entry.details as { rules?: unknown } | undefined)?.rules;
+					if (Array.isArray(rules)) {
+						for (const name of rules) {
+							if (typeof name === "string") ruleNames.add(name);
+						}
+					}
+				}
 			} else if (entry.type === "ttsr_injection") {
 				for (const name of entry.injectedRules) {
 					ruleNames.add(name);

@@ -3575,16 +3575,34 @@ export class SessionManager {
 			published = await this.rewriteEntries();
 		} finally {
 			this.#undoTailPruneActive = false;
-			await clearUndoTailPruneMarker(sessionFileForPrune);
 		}
-		if (!published) {
-			for (const [marker, details] of detailsBeforeScrub) marker.details = details as typeof marker.details;
-			this.#entries = entriesBeforePrune;
-			this.#index.rebuild(this.#entries);
-			return { markers: 0, removed: 0, skippedLive: true };
+		if (published) {
+			// The prune is COMMITTED: a marker-cleanup failure must not
+			// misreport it as an error. Retry once; if the marker still
+			// cannot be cleared it names this live pid, so other opens stay
+			// refused (fail-closed) until the dead-pid sweep can remove it.
+			try {
+				await clearUndoTailPruneMarker(sessionFileForPrune);
+			} catch (error) {
+				logger.warn("Undo-tail prune published but its marker could not be cleared.", {
+					sessionFile: sessionFileForPrune,
+					error: toError(error),
+				});
+				await clearUndoTailPruneMarker(sessionFileForPrune).catch(() => undefined);
+			}
+			const publishedIdentity = this.#sessionFile ? await journalIdentity(sessionFileForPrune) : undefined;
+			return { markers: toScrub.length, removed: doomed.size, published: publishedIdentity };
 		}
-		const publishedIdentity = this.#sessionFile ? await journalIdentity(sessionFileForPrune) : undefined;
-		return { markers: toScrub.length, removed: doomed.size, published: publishedIdentity };
+		// Aborted publish: restore the in-memory tree FIRST (nothing landed
+		// on disk, but a cleanup failure thrown from a finally would
+		// otherwise skip this and let a later rewrite resurrect the prune),
+		// then clear the marker — and let that failure propagate, since the
+		// surviving marker must fail opens closed until it is gone.
+		for (const [marker, details] of detailsBeforeScrub) marker.details = details as typeof marker.details;
+		this.#entries = entriesBeforePrune;
+		this.#index.rebuild(this.#entries);
+		await clearUndoTailPruneMarker(sessionFileForPrune);
+		return { markers: 0, removed: 0, skippedLive: true };
 	}
 
 	/**
