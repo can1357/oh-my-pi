@@ -1453,7 +1453,17 @@ export class SessionManager {
 						commitGuard: () => !this.#released && this.#diskEpoch === epoch,
 					});
 					if (this.#storage instanceof FileSessionStorage) {
-						this.#loadedJournalIdentity = await journalIdentity(sessionFile);
+						// The atomic rename already landed: a failing identity
+						// probe must not escape as a publish failure — the prune
+						// recovery path would restore the pre-prune tree and a
+						// later rewrite would resurrect the tails that just
+						// published away. Clear the cached identity instead:
+						// identity-gated callers fail closed on the mismatch.
+						try {
+							this.#loadedJournalIdentity = await journalIdentity(sessionFile);
+						} catch {
+							this.#loadedJournalIdentity = undefined;
+						}
 					}
 				} finally {
 					publishLock?.release();
