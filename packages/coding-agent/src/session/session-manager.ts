@@ -2704,6 +2704,18 @@ export class SessionManager {
 		// (which does not revalidate the prune marker) would then resurrect
 		// the just-pruned tail.
 		const closeFlushError = await this.flushDivergentJournal();
+		// Close the append writer (releasing the journal lock) while the
+		// owner claim is STILL held: unregistering first opens a window where
+		// a concurrent undo-tail gc sees the session as unowned, opens it, and
+		// fails its prune against the still-held journal lock — an otherwise
+		// routine gc run reports an error and exits nonzero. Queued disk work
+		// can make that window much longer than the immediate close path.
+		await this.#scheduleDiskWork(async () => {
+			const hadWriter = this.#writer !== undefined;
+			await this.#closeWriterHandle();
+			if (hadWriter || (this.#sessionFile && this.#storage.existsSync(this.#sessionFile)))
+				this.#fileIsCurrent = true;
+		});
 		this.#unregisterOwnerSidecar();
 		// Removal is fs-async now: make the sidecar claim release durable
 		// before close() returns, or a gc run right after close would still
@@ -2724,12 +2736,6 @@ export class SessionManager {
 				logger.warn("Session owner sidecar claim survived close", { sessionFile: file, claims: count });
 			}
 		}
-		await this.#scheduleDiskWork(async () => {
-			const hadWriter = this.#writer !== undefined;
-			await this.#closeWriterHandle();
-			if (hadWriter || (this.#sessionFile && this.#storage.existsSync(this.#sessionFile)))
-				this.#fileIsCurrent = true;
-		});
 		await this.#dropIfEmptyAndNoDraft();
 		// Wait for any queued backing writes (IndexedSessionStorage per-path
 		// tail) to become durable so a graceful shutdown does not exit while
