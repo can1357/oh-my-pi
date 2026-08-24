@@ -20,8 +20,8 @@ import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../s
 import {
 	isProcessAlive,
 	journalIdentity,
-	readOwnerClaimCounts,
-	readSessionOwnerPids,
+	ownerClaimIsLive,
+	readOwnerClaims,
 	SessionManager,
 	sameJournalIdentity,
 } from "../session/session-manager";
@@ -1608,9 +1608,12 @@ async function runUndoTailGc(options: ResolvedGcOptions): Promise<UndoTailGcResu
 		// in-memory tree. SessionStatus is journal-tail state ("complete"
 		// means the last turn yielded, not that nobody has it open), so it is
 		// deliberately not used here.
-		let ownerPids: number[];
+		let liveOwner: boolean;
 		try {
-			ownerPids = await readSessionOwnerPids(session.path);
+			// Instance-aware liveness: a recycled pid holding a stale claim
+			// line must not pin the session against collection forever.
+			const claims = await readOwnerClaims(session.path);
+			liveOwner = [...claims.values()].some(ownerClaimIsLive);
 		} catch (error) {
 			// Unreadable sidecar fails closed: skip the session as an error
 			// rather than treating it as unowned and pruning beneath a
@@ -1618,7 +1621,7 @@ async function runUndoTailGc(options: ResolvedGcOptions): Promise<UndoTailGcResu
 			result.errors.push(`${session.path}: owner sidecar unreadable: ${errorMessage(error)}`);
 			continue;
 		}
-		if (ownerPids.some(pid => isProcessAlive(pid))) {
+		if (liveOwner) {
 			result.skippedLive++;
 			continue;
 		}
@@ -1677,8 +1680,8 @@ async function runUndoTailGc(options: ResolvedGcOptions): Promise<UndoTailGcResu
 								// This gc manager contributes exactly one own-pid
 								// claim line; a second same-process line is a
 								// sibling manager that went live during the prune.
-								![...(await readOwnerClaimCounts(session.path))].some(([pid, count]) =>
-									pid === process.pid ? count > 1 : isProcessAlive(pid),
+								![...(await readOwnerClaims(session.path))].some(([pid, entry]) =>
+									pid === process.pid ? entry.count > 1 : ownerClaimIsLive(entry),
 								)
 							) {
 								await fs.utimes(session.path, before.atime, before.mtime);

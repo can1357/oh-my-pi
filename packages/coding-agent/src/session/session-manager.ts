@@ -111,6 +111,44 @@ function ownerSidecarPath(sessionFile: string): string {
 	return `${sessionFile}.owner`;
 }
 
+/** One claim line for THIS manager: `pid startToken` when the process start
+ * identity is available, bare `pid` otherwise. The token lets readers
+ * distinguish a recycled pid from the manager that actually claimed. */
+function ownerClaimLine(pid: number = process.pid): string {
+	const token = processStartToken(pid);
+	return token === undefined ? `${pid}\n` : `${pid} ${token}\n`;
+}
+
+/** Parse one sidecar claim line into pid + optional start token. */
+function parseOwnerClaimLine(line: string): { pid: number; startToken: string | undefined } | undefined {
+	const [pidRaw, tokenRaw] = line.trim().split(/\s+/);
+	const pid = Number.parseInt(pidRaw ?? "", 10);
+	if (!Number.isInteger(pid) || pid <= 0) return undefined;
+	return { pid, startToken: tokenRaw };
+}
+
+export interface OwnerClaimsEntry {
+	pid: number;
+	/** Claim lines for this pid (one per manager instance). */
+	count: number;
+	/** Start tokens recorded on this pid's lines (legacy lines contribute
+	 * none and force conservative pid-only liveness for the whole pid). */
+	startTokens: string[];
+	/** Lines recorded before start tokens existed. */
+	legacyCount: number;
+}
+
+/**
+ * True when an owner-claims entry represents a still-live manager process:
+ * the pid is alive AND — for token-carrying lines — the process occupying it
+ * is the same launch. Legacy pid-only lines stay conservative (pid-only
+ * liveness), matching the pre-token behavior.
+ */
+export function ownerClaimIsLive(entry: OwnerClaimsEntry): boolean {
+	if (entry.legacyCount > 0) return isProcessAlive(entry.pid);
+	return isProcessAlive(entry.pid) && entry.startTokens.some(token => isProcessInstanceAlive(entry.pid, token));
+}
+
 async function withOwnerSidecarLock<T>(sessionFile: string, fn: () => Promise<T>): Promise<T> {
 	// withFileLock derives `<sidecar>.lock` for the sidecar file itself —
 	// distinct from the session file's own lock, which this process may
@@ -128,7 +166,7 @@ async function writeOwnerSidecar(sessionFile: string): Promise<boolean> {
 	// pid line must not mask this manager's failed registration.
 	try {
 		await withOwnerSidecarLock(sessionFile, () =>
-			fs.promises.appendFile(ownerSidecarPath(sessionFile), `${process.pid}\n`, {
+			fs.promises.appendFile(ownerSidecarPath(sessionFile), ownerClaimLine(), {
 				encoding: "utf-8",
 				mode: 0o600,
 			}),
@@ -154,7 +192,7 @@ function writeOwnerSidecarSync(sessionFile: string): boolean {
 		return false;
 	}
 	try {
-		fs.appendFileSync(ownerSidecarPath(sessionFile), `${process.pid}\n`, {
+		fs.appendFileSync(ownerSidecarPath(sessionFile), ownerClaimLine(), {
 			encoding: "utf-8",
 			mode: 0o600,
 		});
@@ -257,7 +295,16 @@ export async function removeOwnerSidecar(sessionFile: string): Promise<boolean> 
 				.split("\n")
 				.map(line => line.trim())
 				.filter(line => line !== "");
-			const own = lines.findIndex(line => Number(line) === process.pid);
+			// Remove exactly ONE own claim: pid matches AND the line is either
+			// tokenless (legacy / token-unavailable host) or carries this
+			// process's current start token. A same-pid line with a different
+			// token is a recycled pid's unrelated claim — never ours to remove.
+			const ownToken = processStartToken(process.pid);
+			const own = lines.findIndex(line => {
+				const claim = parseOwnerClaimLine(line);
+				if (!claim || claim.pid !== process.pid) return false;
+				return claim.startToken === undefined || claim.startToken === ownToken;
+			});
 			if (own !== -1) lines.splice(own, 1);
 			if (lines.length === 0) {
 				await fs.promises.rm(file, { force: true });
@@ -286,48 +333,41 @@ export async function removeOwnerSidecar(sessionFile: string): Promise<boolean> 
 
 /** Recorded owner pids for a session file (stale/dead pids included). */
 export async function readSessionOwnerPids(sessionFile: string): Promise<number[]> {
-	try {
-		const content = await fs.promises.readFile(ownerSidecarPath(sessionFile), "utf-8");
-		return [
-			...new Set(
-				content
-					.split("\n")
-					.map(line => Number.parseInt(line.trim(), 10))
-					.filter(pid => Number.isInteger(pid) && pid > 0),
-			),
-		];
-	} catch (error) {
-		// Only a genuinely absent sidecar means "no owners". Any other read
-		// failure (permissions, transient I/O) must fail closed — reporting
-		// no owners would let gc prune beneath a live manager.
-		if (isEnoent(error)) return [];
-		throw error;
-	}
+	const claims = await readOwnerClaims(sessionFile);
+	return [...claims.keys()];
 }
 
 /**
- * Per-pid claim-line counts, NOT deduplicated: two managers in one process
- * each append an own-pid line, and deduplication would erase the sibling.
- * Same fail-closed read contract as {@link readSessionOwnerPids}.
+ * Per-pid claim entries with process-start identity, NOT deduplicated by
+ * line: two managers in one process each append an own claim line, and
+ * losing either would erase the sibling. Same fail-closed read contract as
+ * {@link readSessionOwnerPids}.
  */
-export async function readOwnerClaimCounts(sessionFile: string): Promise<Map<number, number>> {
-	const counts = new Map<number, number>();
+export async function readOwnerClaims(sessionFile: string): Promise<Map<number, OwnerClaimsEntry>> {
+	const claims = new Map<number, OwnerClaimsEntry>();
 	// Under the same lock registration and removal hold: removal rewrites
 	// the sidecar with a truncating writeFile, so an unlocked read can
 	// observe a partially-written file, miss a remaining live owner, and
 	// let gc publish a prune beneath it.
 	const content = await withOwnerSidecarLock(sessionFile, async () =>
 		fs.promises.readFile(ownerSidecarPath(sessionFile), "utf-8"),
-	).catch(error => {
+	).catch((error: unknown) => {
+		// Only a genuinely absent sidecar means "no owners". Any other read
+		// failure (permissions, transient I/O) must fail closed — reporting
+		// no owners would let gc prune beneath a live manager.
 		if (isEnoent(error)) return "";
 		throw error;
 	});
 	for (const line of content.split("\n")) {
-		const pid = Number.parseInt(line.trim(), 10);
-		if (!Number.isInteger(pid) || pid <= 0) continue;
-		counts.set(pid, (counts.get(pid) ?? 0) + 1);
+		const claim = parseOwnerClaimLine(line);
+		if (!claim) continue;
+		const entry = claims.get(claim.pid) ?? { pid: claim.pid, count: 0, startTokens: [], legacyCount: 0 };
+		entry.count++;
+		if (claim.startToken === undefined) entry.legacyCount++;
+		else entry.startTokens.push(claim.startToken);
+		claims.set(claim.pid, entry);
 	}
-	return counts;
+	return claims;
 }
 
 /**
@@ -1519,13 +1559,13 @@ export class SessionManager {
 						// manager contributes exactly one own-pid line, so a
 						// second same-process line is a sibling manager
 						// holding the pre-prune in-memory tree.
-						const claimCounts = await readOwnerClaimCounts(sessionFile);
-						for (const [pid, count] of claimCounts) {
+						const claims = await readOwnerClaims(sessionFile);
+						for (const [pid, entry] of claims) {
 							if (pid === process.pid) {
-								if (count > 1) return false;
+								if (entry.count > 1) return false;
 								continue;
 							}
-							if (isProcessAlive(pid)) return false;
+							if (ownerClaimIsLive(entry)) return false;
 						}
 					}
 					await this.#storage.writeTextAtomic(sessionFile, this.#fileBody(), {
@@ -1691,11 +1731,24 @@ export class SessionManager {
 					await this.#storage.updateSessionTitle(sessionFile, update);
 					if (this.#diskEpoch === epoch) this.#fileIsCurrent = true;
 				} catch {
-					if (!(await this.#runFencedAtomicRewrite(epoch))) return;
-					this.#clearDiskError();
-					this.#fileIsCurrent = true;
-					this.#rewriteRequired = false;
-					this.#hasTitleSlot = true;
+					try {
+						if (!(await this.#runFencedAtomicRewrite(epoch))) return;
+						this.#clearDiskError();
+						this.#fileIsCurrent = true;
+						this.#rewriteRequired = false;
+						this.#hasTitleSlot = true;
+					} catch (fallbackError) {
+						// The full-rewrite fallback failed too (journal lock
+						// held by another manager): the title entry is already
+						// in the in-memory tree but not on disk. Diverge the
+						// journal BEFORE propagating — exactly like the append
+						// path's lock-contention handling — so the next append
+						// performs a full rewrite instead of appending a line
+						// whose parentId references the missing title entry.
+						this.#fileIsCurrent = false;
+						this.#rewriteRequired = true;
+						throw fallbackError;
+					}
 				}
 			},
 			{ epoch },

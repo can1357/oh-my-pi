@@ -19,7 +19,9 @@ import type { Message } from "@oh-my-pi/pi-ai";
 import { exportFromFile } from "@oh-my-pi/pi-coding-agent/export/html/index";
 import {
 	isProcessInstanceAlive,
+	ownerClaimIsLive,
 	processStartToken,
+	readOwnerClaims,
 	readSessionOwnerPids,
 	SessionManager,
 } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -381,5 +383,90 @@ describe("SessionManager.pruneUserUndoTails", () => {
 		const dead = Bun.spawnSync(["/usr/bin/env", "true"]);
 		expect(dead.pid).toBeGreaterThan(0);
 		expect(isProcessInstanceAlive(dead.pid, token)).toBe(false);
+	});
+	it("title-entry fallback failure diverges the journal so the next append rewrites fully", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-title-contention-"));
+		// Failable storage: after the journal is durable, the title
+		// side-write and the fenced full-rewrite fallback both fail — the
+		// same catch path lock contention takes (SessionFileLockError from
+		// the publish claim).
+		let failing = false;
+		class FailingTitleStorage extends FileSessionStorage {
+			override async updateSessionTitle(fpath: string, update: never): Promise<void> {
+				if (failing) throw new Error("title side-write contention");
+				await super.updateSessionTitle(fpath, update);
+			}
+			override async writeTextAtomic(fpath: string, content: string): Promise<void> {
+				if (failing) throw new Error("publish contention");
+				await super.writeTextAtomic(fpath, content);
+			}
+		}
+		try {
+			const manager = SessionManager.create(dir, dir, new FailingTitleStorage());
+			await manager.setSessionFile(path.join(dir, "title-contention.jsonl"));
+			manager.appendMessage(userMessage("u1"));
+			manager.appendMessage(assistantMessage("a1"));
+			await manager.ensureOnDisk();
+			const sessionFile = path.join(dir, "title-contention.jsonl");
+
+			failing = true;
+			let titleError: unknown;
+			try {
+				await manager.setSessionName("contended-title");
+			} catch (error) {
+				titleError = error;
+			}
+			expect(titleError).toBeInstanceOf(Error);
+			failing = false;
+
+			// The title entry IS in memory; the durable journal lacks it.
+			// The next append must notice the divergence and rewrite the
+			// whole file instead of appending one line whose parentId
+			// references the missing title entry.
+			manager.appendMessage(userMessage("u2"));
+			manager.appendMessage(assistantMessage("a2"));
+			const lines = fs
+				.readFileSync(sessionFile, "utf-8")
+				.split("\n")
+				.filter(line => line.trim().length > 0);
+			const entries = lines.map(
+				line => JSON.parse(line) as { id?: string; parentId?: string | null; type?: string; title?: string },
+			);
+			expect(entries.some(entry => entry.type === "title_change" && entry.title === "contended-title")).toBe(true);
+			const ids = new Set(entries.map(entry => entry.id).filter(Boolean));
+			for (const entry of entries) {
+				if (entry.parentId != null) expect(ids.has(entry.parentId)).toBe(true);
+			}
+			await manager.close();
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("owner claims bind to the process start identity", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-owner-token-"));
+		try {
+			const sidecar = path.join(dir, "claims.jsonl.owner");
+			const token = processStartToken(process.pid);
+			expect(token).toBeDefined();
+			// A recycled pid: live process, wrong launch.
+			fs.writeFileSync(sidecar, `${process.pid} 0\n`, { mode: 0o600 });
+			const recycled = await readOwnerClaims(path.join(dir, "claims.jsonl"));
+			const recycledEntry = recycled.get(process.pid);
+			expect(recycledEntry?.count).toBe(1);
+			expect(ownerClaimIsLive(recycledEntry!)).toBe(false);
+			// The actual launch: alive.
+			fs.writeFileSync(sidecar, `${process.pid} ${token}\n`, { mode: 0o600 });
+			const live = await readOwnerClaims(path.join(dir, "claims.jsonl"));
+			expect(ownerClaimIsLive(live.get(process.pid)!)).toBe(true);
+			// Legacy pid-only rows stay conservative.
+			fs.writeFileSync(sidecar, `${process.pid}\n`, { mode: 0o600 });
+			const legacy = await readOwnerClaims(path.join(dir, "claims.jsonl"));
+			const legacyEntry = legacy.get(process.pid);
+			expect(legacyEntry?.legacyCount).toBe(1);
+			expect(ownerClaimIsLive(legacyEntry!)).toBe(true);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

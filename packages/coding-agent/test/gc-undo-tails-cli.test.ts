@@ -20,6 +20,7 @@ import { collectGcErrors, type GcResult } from "../src/cli/gc-cli";
 import {
 	isProcessAlive,
 	journalIdentity,
+	processStartToken,
 	readSessionOwnerPids,
 	removeOwnerSidecar,
 	SessionFileLockError,
@@ -650,7 +651,12 @@ describe("omp gc --undo-tails (CLI)", () => {
 				// its destination, the destination sidecar already carries
 				// this manager's pid.
 				const sidecar = fs.readFileSync(`${dest}.owner`, "utf-8");
-				expect(sidecar.trim().split("\n")).toContain(String(process.pid));
+				expect(
+					sidecar
+						.trim()
+						.split("\n")
+						.some(line => line.split(/\s+/)[0] === String(process.pid)),
+				).toBe(true);
 				journalRenameSeen = true;
 			}
 			return originalRename(from, to);
@@ -839,7 +845,9 @@ describe("omp gc --undo-tails (CLI)", () => {
 		const manager = await SessionManager.open(sessionFile, sessionsDir, undefined, {
 			suppressBreadcrumb: true,
 		});
-		expect(fs.readFileSync(`${sessionFile}.owner`, "utf8")).toBe(`${process.pid}\n`);
+		expect(fs.readFileSync(`${sessionFile}.owner`, "utf8")).toBe(
+			`${process.pid} ${processStartToken(process.pid)}\n`,
+		);
 
 		// Hold the sidecar lock so the close-time claim removal cannot
 		// acquire it: the release tail must not reject (a rejected tail
@@ -853,7 +861,9 @@ describe("omp gc --undo-tails (CLI)", () => {
 			lock?.release();
 		}
 		// The removal was retained, not dropped: the live-pid line survives.
-		expect(fs.readFileSync(`${sessionFile}.owner`, "utf8")).toBe(`${process.pid}\n`);
+		expect(fs.readFileSync(`${sessionFile}.owner`, "utf8")).toBe(
+			`${process.pid} ${processStartToken(process.pid)}\n`,
+		);
 	}, 30_000);
 
 	it("a post-publish identity failure is treated as committed", async () => {
@@ -1041,13 +1051,13 @@ describe("omp gc --undo-tails (CLI)", () => {
 			.filter(line => line.trim().length > 0);
 		// The source contributes one line; the clone's own claim must already
 		// be the second, durably, before cloneCurrentSession returns.
-		expect(sidecarLines.filter(line => line === `${process.pid}`).length).toBe(2);
+		expect(sidecarLines.filter(line => line.split(/\s+/)[0] === String(process.pid)).length).toBe(2);
 
 		// The source releasing its own claim must leave the clone's line
 		// behind: the session stays owned.
 		await manager.close();
-		const afterClose = fs.readFileSync(`${sessionFile}.owner`, "utf8");
-		expect(afterClose).toContain(`${process.pid}`);
+		const afterClose = fs.readFileSync(`${sessionFile}.owner`, "utf8").split("\n");
+		expect(afterClose.some(line => line.split(/\s+/)[0] === String(process.pid))).toBe(true);
 		await clone.close();
 	});
 
@@ -1074,7 +1084,7 @@ describe("omp gc --undo-tails (CLI)", () => {
 			.readFileSync(`${sessionFile}.owner`, "utf8")
 			.split("\n")
 			.filter(line => line.trim().length > 0);
-		expect(lines.filter(line => line === `${process.pid}`).length).toBe(2);
+		expect(lines.filter(line => line.split(/\s+/)[0] === String(process.pid)).length).toBe(2);
 		await clone.close();
 		await manager.close();
 	});
@@ -1099,7 +1109,10 @@ describe("omp gc --undo-tails (CLI)", () => {
 		const original = manager.rewriteEntries.bind(manager);
 		let claimHeldDuringFlush = false;
 		manager.rewriteEntries = async () => {
-			claimHeldDuringFlush = fs.readFileSync(`${sessionFile}.owner`, "utf8").split("\n").includes(`${process.pid}`);
+			claimHeldDuringFlush = fs
+				.readFileSync(`${sessionFile}.owner`, "utf8")
+				.split("\n")
+				.some(line => line.split(/\s+/)[0] === String(process.pid));
 			return original();
 		};
 		await manager.close();
@@ -1333,7 +1346,9 @@ describe("omp gc --undo-tails (CLI)", () => {
 		// claim line for the old session — the retained one, not a second.
 		manager.restoreState(snapshot);
 		const sidecarFile = `${sessionFile}.owner`;
-		expect(fs.readFileSync(sidecarFile, "utf-8").trim().split("\n")).toEqual([String(process.pid)]);
+		const rollbackLines = fs.readFileSync(sidecarFile, "utf-8").trim().split("\n");
+		expect(rollbackLines.length).toBe(1);
+		expect(rollbackLines[0]?.split(/\s+/)[0]).toBe(String(process.pid));
 		await manager.close();
 		expect(fs.existsSync(sidecarFile)).toBe(false);
 	});
