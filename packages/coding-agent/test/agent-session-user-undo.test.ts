@@ -308,6 +308,33 @@ describe("AgentSession user undo/redo", () => {
 		expect(onDisk).toContain("after-contention");
 	});
 
+	it("a contended undo still stages every re-journal entry in memory", async () => {
+		const sessionFile = path.join(tempDir, "contended-staging.jsonl");
+		await makeFileBackedSession("contended-staging.jsonl");
+		await seedThreeTurns();
+		const phases = [{ name: "work", tasks: [{ content: "one", status: "pending" as const }] }];
+		session.setTodoPhases(phases);
+
+		await sessionManager.rewriteEntries();
+		const lock = tryAcquireFileLock(sessionFile);
+		expect(lock?.acquired).toBe(true);
+		try {
+			expect(session.userUndo().ok).toBe(true);
+		} finally {
+			lock?.release();
+		}
+		// Per-call staging guards: under FULL contention every staging append
+		// threw, yet each entry still landed in memory (the throw happens
+		// after the in-memory insert) — a shared try would have stopped at
+		// the first throw and dropped the todo snapshot from the promised
+		// full rewrite entirely.
+		sessionManager.appendMessage(userMessage("post"));
+		const onDisk = fs.readFileSync(sessionFile, "utf8");
+		const markerIdx = onDisk.indexOf("user-undo");
+		expect(markerIdx).toBeGreaterThanOrEqual(0);
+		expect(onDisk.indexOf("user_todo_edit", markerIdx)).toBeGreaterThan(markerIdx);
+	});
+
 	it("undo N drops the last N turns", async () => {
 		session = await makeSession();
 		await seedThreeTurns();

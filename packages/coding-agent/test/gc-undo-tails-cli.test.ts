@@ -21,6 +21,7 @@ import {
 	isProcessAlive,
 	journalIdentity,
 	readSessionOwnerPids,
+	removeOwnerSidecar,
 	SessionFileLockError,
 	SessionManager,
 } from "../src/session/session-manager";
@@ -934,6 +935,21 @@ describe("omp gc --undo-tails (CLI)", () => {
 		await manager.close();
 	});
 
+	it("removeOwnerSidecar preserves surviving pids via atomic replacement", async () => {
+		await buildSessionWithTwoUndoTails();
+		fs.writeFileSync(`${sessionFile}.owner`, `${process.pid}\n111111\n222222\n`, {
+			encoding: "utf-8",
+			mode: 0o600,
+		});
+
+		const removed = await removeOwnerSidecar(sessionFile);
+		expect(removed).toBe(true);
+		// The surviving owners keep their claims with no truncation window,
+		// and no tmp orphan is left behind.
+		expect(fs.readFileSync(`${sessionFile}.owner`, "utf8")).toBe("111111\n222222\n");
+		expect(fs.readdirSync(sessionsDir).some(name => name.includes(".owner.tmp-"))).toBe(false);
+	});
+
 	it("a locked-out append diverges the journal so the next append fully rewrites", async () => {
 		await buildSessionWithTwoUndoTails();
 		const manager = await SessionManager.open(sessionFile, sessionsDir, undefined, {
@@ -967,6 +983,30 @@ describe("omp gc --undo-tails (CLI)", () => {
 		});
 		expect(reloaded.getBranch().map(entry => entry.id)).toEqual(expectedIds);
 		await reloaded.close();
+	});
+
+	it("close flushes a divergent journal once contention clears", async () => {
+		await buildSessionWithTwoUndoTails();
+		const manager = await SessionManager.open(sessionFile, sessionsDir, undefined, {
+			suppressBreadcrumb: true,
+		});
+
+		// A locked-out append (proven divergence path): the entry landed in
+		// memory only, with the journal marked for a full rewrite.
+		const lock = tryAcquireFileLock(sessionFile);
+		expect(lock?.acquired).toBe(true);
+		try {
+			expect(() => manager.appendMessage(userMessage("locked-out"))).toThrow(SessionFileLockError);
+		} finally {
+			lock?.release();
+		}
+		expect(fs.readFileSync(sessionFile, "utf8")).not.toContain("locked-out");
+
+		// No further append happens: close() itself must publish the
+		// deferred full rewrite, or the process exits silently dropping the
+		// in-memory entry the caller believes is durable.
+		await manager.close();
+		expect(fs.readFileSync(sessionFile, "utf8")).toContain("locked-out");
 	});
 
 	it("fork of a memory-backed session skips filesystem claims entirely", async () => {
