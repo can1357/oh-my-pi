@@ -827,7 +827,7 @@ function homePatternFor(homeDir: string, windowsStyle: boolean): RegExp {
 	if (pattern === undefined) {
 		const escapedHome = homeDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 		pattern = new RegExp(
-			`(?<=^|[\\s("'\`\\[])${escapedHome}(?:[\\\\/]|(?=$|[\\s"'(),.;:\\[\\]]))`,
+			`(?<=^|file://|[\\s("'\`\\[])${escapedHome}(?:[\\\\/]|(?=$|[\\s"'(),.;:\\[\\]]))`,
 			windowsStyle ? "gi" : "g",
 		);
 		if (homePatternCache.size >= 16) homePatternCache.clear();
@@ -862,7 +862,12 @@ export function shortenEmbeddedPaths(text: string, homeDir?: string): string {
 	const windowsStyle = /^[A-Za-z]:[\\/]/.test(resolvedHome) || resolvedHome.startsWith("\\\\");
 	const homePattern = homePatternFor(resolvedHome, windowsStyle);
 	const textWithShortenedHome =
-		shortenedHome !== resolvedHome ? text.replace(homePattern, match => shortenPath(match, resolvedHome)) : text;
+		shortenedHome !== resolvedHome
+			? text.replace(homePattern, (match, offset: number) => {
+					const shortened = shortenPath(match, resolvedHome);
+					return text.startsWith("file://", offset - "file://".length) ? `/${shortened}` : shortened;
+				})
+			: text;
 	return textWithShortenedHome
 		.split(" ")
 		.map(segment => {
