@@ -632,6 +632,7 @@
 - Fixed Linux startup event loop delays caused by legacy extension cache fsync churn.
 - Fixed subagent advisors abandoning reviews on the final yield turn during session teardown.
 - Fixed `/todo` expand/collapse commands and corrected `/shake thinking` reporting.
+- Added `--provider-api-keys` for loading a named provider-key bundle and `--provider-api-keys-fd` for consuming an exact launcher descriptor, both process-local and never persisted ([#8286](https://github.com/can1357/oh-my-pi/pull/8286) by [@ghosty-11](https://github.com/ghosty-11))
 
 ## [18.0.3] - 2026-08-23
 
@@ -672,7 +673,6 @@
 
 ### Added
 
-- Added `--provider-api-keys` for loading a named provider-key bundle and `--provider-api-keys-fd` for consuming an exact launcher descriptor, both process-local and never persisted.
 - Plan review can save a plan to a chosen path and start a new session.
 - Edit results now warn when an edit leaves a previously parsing file unparseable, independent of the `edit.blackbox.enabled` recorder.
 - Added provider-wide Amazon Bedrock guardrail settings to models configuration, including custom models.
