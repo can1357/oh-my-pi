@@ -12,8 +12,13 @@
  * keep the m2 tail redoable, and never touch the active path.
  */
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { Message } from "@oh-my-pi/pi-ai";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { readSessionOwnerPids, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { FileSessionStorage, type WriteTextAtomicOptions } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { tryAcquireFileLock } from "@oh-my-pi/pi-utils";
 
 const SECRET_TAIL_1 = "MARKER-TAIL-ONE-5";
 const SECRET_TAIL_2 = "MARKER-TAIL-TWO-8";
@@ -215,5 +220,79 @@ describe("SessionManager.pruneUserUndoTails", () => {
 		expect(scrubbed).toBeDefined();
 		expect((scrubbed as { details?: { undoOf?: string | null; prunedAt?: string } }).details?.undoOf).toBeFalsy();
 		expect((scrubbed as { details?: { prunedAt?: string } }).details?.prunedAt).toBeTruthy();
+	});
+	it("close() releases the journal lock before the owner sidecar claim", async () => {
+		// Pre-fix ordering: close() unregistered the owner sidecar and awaited
+		// the sidecar tail BEFORE scheduling #closeWriterHandle on the disk
+		// chain. With the disk chain busy, a concurrent `omp gc
+		// --undo-tails --apply` in that window saw the session as unowned,
+		// opened it, and failed its prune against the still-held journal
+		// lock. The claim must not disappear until the lock is free.
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-close-order-"));
+		const gate = Promise.withResolvers<void>();
+		let parked = false;
+		class GatedStorage extends FileSessionStorage {
+			override async writeTextAtomic(
+				fpath: string,
+				content: string,
+				options?: WriteTextAtomicOptions,
+			): Promise<void> {
+				if (parked && fpath.endsWith(".jsonl")) await gate.promise;
+				return super.writeTextAtomic(fpath, content, options);
+			}
+		}
+		try {
+			const sessionFile = path.join(tempDir, "close-order.jsonl");
+			const manager = SessionManager.create(tempDir, tempDir, new GatedStorage());
+			await manager.setSessionFile(sessionFile);
+			manager.appendMessage(userMessage("u1"));
+
+			// Occupy the disk chain with a parked rewrite, then start close().
+			parked = true;
+			const rewrite = manager.rewriteEntries();
+			{
+				const { promise, resolve } = Promise.withResolvers<void>();
+				setTimeout(resolve, 25);
+				await promise;
+			}
+			const closing = manager.close();
+
+			// If the claim vanishes while the parked rewrite still holds the
+			// journal lock, the lock must ALREADY be free — pre-fix it is not.
+			let sawClaimDrop = false;
+			for (let i = 0; i < 60; i++) {
+				const { promise, resolve } = Promise.withResolvers<void>();
+				setTimeout(resolve, 5);
+				await promise;
+				const pids = await readSessionOwnerPids(sessionFile);
+				if (!pids.includes(process.pid)) {
+					sawClaimDrop = true;
+					const lock = tryAcquireFileLock(sessionFile);
+					expect(lock?.acquired).toBe(true);
+					lock?.release();
+					break;
+				}
+			}
+			// Post-fix the claim CANNOT drop while the disk chain is parked
+			// (close() awaits the writer close before unregistering), so
+			// seeing it drop here is itself the bug being guarded against.
+			gate.resolve();
+			await rewrite.catch(() => undefined);
+			await closing;
+
+			const finalPids = await readSessionOwnerPids(sessionFile);
+			expect(finalPids.includes(process.pid)).toBe(false);
+			const finalLock = tryAcquireFileLock(sessionFile);
+			expect(finalLock?.acquired).toBe(true);
+			finalLock?.release();
+			// Post-fix the claim cannot drop while the disk chain is parked.
+			expect(sawClaimDrop).toBe(false);
+		} finally {
+			// A failed expect above throws before the gate opens; resolve it
+			// here so the parked rewrite/close fail fast instead of hanging on
+			// the suite timeout.
+			gate.resolve();
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 });
