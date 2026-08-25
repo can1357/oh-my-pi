@@ -343,6 +343,54 @@ describe("AnySearch provider", () => {
 		expect(callCount).toBe(1);
 	});
 
+	it("keeps registration polling within one provider deadline", async () => {
+		const { authStorage } = createAuthStorage();
+		let callCount = 0;
+		const fetchMock: FetchImpl = async () => {
+			callCount++;
+			return registrationResponse(REGISTRATION_PENDING_MESSAGE);
+		};
+
+		await expect(
+			searchAnySearch({
+				query: "query",
+				authStorage,
+				provisionGeneratedCredential: true,
+				registrationPollDelaysMs: [200],
+				timeoutMs: 20,
+				fetch: fetchMock,
+			}),
+		).rejects.toMatchObject({ name: "TimeoutError" });
+		expect(callCount).toBe(1);
+	});
+
+	it("keeps generated-key activation retries within the same provider deadline", async () => {
+		const { authStorage, getStoredKey } = createAuthStorage();
+		const secretKey = "as_sk_77777777777777777777777777777777";
+		let callCount = 0;
+		const fetchMock: FetchImpl = async () => {
+			callCount++;
+			if (callCount === 1) return registrationResponse(createdRegistrationMessage(secretKey));
+			return Response.json(
+				{ code: -1, message: "The API key does not exist.", request_id: "req-key-propagation" },
+				{ status: 401 },
+			);
+		};
+
+		await expect(
+			searchAnySearch({
+				query: "query",
+				authStorage,
+				provisionGeneratedCredential: true,
+				credentialActivationRetryDelaysMs: [200],
+				timeoutMs: 20,
+				fetch: fetchMock,
+			}),
+		).rejects.toMatchObject({ name: "TimeoutError" });
+		expect(callCount).toBe(2);
+		expect(getStoredKey()).toBe(secretKey);
+	});
+
 	it("does not overwrite an existing key or expose credentials from an authenticated 402", async () => {
 		const { authStorage, getStoredKey } = createAuthStorage("existing-key");
 		const leakedKey = "must-not-replace-existing-key";

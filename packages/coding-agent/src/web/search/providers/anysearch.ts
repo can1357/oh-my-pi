@@ -12,7 +12,7 @@ import { SearchProviderError } from "../../../web/search/types";
 import { clampNumResults } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
-import { classifyProviderHttpError, withHardTimeout } from "./utils";
+import { abortableSleep, classifyProviderHttpError, withHardTimeout } from "./utils";
 
 const ANYSEARCH_SEARCH_URL = "https://api.anysearch.com/v1/search";
 const DEFAULT_NUM_RESULTS = 10;
@@ -50,6 +50,10 @@ interface AnySearchHttpResult {
 	registrationMessage?: string;
 }
 
+interface AnySearchOperationParams extends AnySearchParams {
+	signal: AbortSignal;
+}
+
 interface AnySearchErrorEnvelope {
 	message?: string;
 	requestId?: string;
@@ -69,36 +73,6 @@ class AnySearchHttpError extends SearchProviderError {
 interface LimitedResponseTextOptions {
 	truncate?: boolean;
 	onTooLarge?: () => Error;
-}
-
-function sleepWithAbort(ms: number, signal: AbortSignal | undefined): Promise<void> {
-	if (ms <= 0) return Promise.resolve();
-	signal?.throwIfAborted();
-	const { promise, resolve, reject } = Promise.withResolvers<void>();
-	let timer: NodeJS.Timeout | undefined;
-	const cleanup = (): void => {
-		if (timer) {
-			clearTimeout(timer);
-			timer = undefined;
-		}
-		signal?.removeEventListener("abort", onAbort);
-	};
-	const onAbort = (): void => {
-		cleanup();
-		try {
-			signal?.throwIfAborted();
-			reject(new DOMException("The operation was aborted.", "AbortError"));
-		} catch (error) {
-			reject(error);
-		}
-	};
-	timer = setTimeout(() => {
-		cleanup();
-		resolve();
-	}, ms);
-	signal?.addEventListener("abort", onAbort, { once: true });
-	if (signal?.aborted) onAbort();
-	return promise;
 }
 
 async function readLimitedResponseText(
@@ -288,7 +262,10 @@ function parseSuccessfulResponse(raw: string, numResults: number, fallbackReques
 	};
 }
 
-async function callAnySearch(params: AnySearchParams, apiKey: string | undefined): Promise<AnySearchHttpResult> {
+async function callAnySearch(
+	params: AnySearchOperationParams,
+	apiKey: string | undefined,
+): Promise<AnySearchHttpResult> {
 	const numResults = Math.floor(clampNumResults(params.num_results, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS));
 	const headers: Record<string, string> = {
 		Accept: "application/json",
@@ -300,7 +277,7 @@ async function callAnySearch(params: AnySearchParams, apiKey: string | undefined
 		method: "POST",
 		headers,
 		body: JSON.stringify({ query: params.query, max_results: numResults }),
-		signal: withHardTimeout(params.signal, params.timeoutMs),
+		signal: params.signal,
 	});
 	const headerRequestId = normalizeRequestId(
 		response.headers.get("x-request-id") ?? response.headers.get("request-id"),
@@ -347,7 +324,7 @@ async function persistGeneratedCredential(authStorage: AuthStorage, credential: 
 }
 
 async function searchWithGeneratedCredential(
-	params: AnySearchParams,
+	params: AnySearchOperationParams,
 	credential: AnySearchCredential,
 ): Promise<SearchResponse> {
 	let lastRequestId: string | undefined;
@@ -370,20 +347,20 @@ async function searchWithGeneratedCredential(
 					503,
 				);
 			}
-			await sleepWithAbort(delayMs, params.signal);
+			await abortableSleep(delayMs, params.signal);
 		}
 	}
 }
 
 async function persistAndUseGeneratedCredential(
-	params: AnySearchParams,
+	params: AnySearchOperationParams,
 	credential: AnySearchCredential,
 ): Promise<SearchResponse> {
 	await persistGeneratedCredential(params.authStorage, credential);
 	return searchWithGeneratedCredential(params, credential);
 }
 
-async function completeAnonymousRegistration(params: AnySearchParams): Promise<SearchResponse> {
+async function completeAnonymousRegistration(params: AnySearchOperationParams): Promise<SearchResponse> {
 	let result = await callAnySearch(params, undefined);
 	if (!result.registrationRequired) return result.response;
 	let message = result.registrationMessage;
@@ -395,7 +372,7 @@ async function completeAnonymousRegistration(params: AnySearchParams): Promise<S
 			return persistAndUseGeneratedCredential(params, credential);
 		}
 		if (registrationState(message) !== "pending") break;
-		await sleepWithAbort(delayMs, params.signal);
+		await abortableSleep(delayMs, params.signal);
 		result = await callAnySearch(params, undefined);
 		if (!result.registrationRequired) return result.response;
 		message = result.registrationMessage;
@@ -412,22 +389,32 @@ async function completeAnonymousRegistration(params: AnySearchParams): Promise<S
 
 /** Execute AnySearch web search. */
 export async function searchAnySearch(params: AnySearchParams): Promise<SearchResponse> {
-	const initialKey = await params.authStorage.getApiKey("anysearch", params.sessionId, { signal: params.signal });
+	const operationParams: AnySearchOperationParams = {
+		...params,
+		signal: withHardTimeout(params.signal, params.timeoutMs),
+	};
+	const initialKey = await operationParams.authStorage.getApiKey("anysearch", operationParams.sessionId, {
+		signal: operationParams.signal,
+	});
 	if (initialKey) {
-		const keyOrResolver: ApiKey = params.authStorage.resolver("anysearch", { sessionId: params.sessionId });
-		const result = await withAuth(keyOrResolver, key => callAnySearch(params, key), { signal: params.signal });
+		const keyOrResolver: ApiKey = operationParams.authStorage.resolver("anysearch", {
+			sessionId: operationParams.sessionId,
+		});
+		const result = await withAuth(keyOrResolver, key => callAnySearch(operationParams, key), {
+			signal: operationParams.signal,
+		});
 		return result.response;
 	}
 
-	if (!params.provisionGeneratedCredential) {
-		const result = await callAnySearch(params, undefined);
+	if (!operationParams.provisionGeneratedCredential) {
+		const result = await callAnySearch(operationParams, undefined);
 		if (result.registrationRequired) {
 			throw anonymousQuotaError(result.registrationMessage, result.response.requestId);
 		}
 		return result.response;
 	}
 
-	return completeAnonymousRegistration(params);
+	return completeAnonymousRegistration(operationParams);
 }
 
 /** Search provider for AnySearch. */
