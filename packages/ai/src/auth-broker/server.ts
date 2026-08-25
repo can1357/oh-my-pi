@@ -854,21 +854,38 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 				if (req.method === "POST" && pathname === "/v1/credential") {
 					const parsed = await parseBody(req, credentialUploadRequestSchema);
 					if (!parsed.ok) return parsed.response;
-					const { provider, credential } = parsed.data;
+					const { provider, credential, ifProviderAbsent } = parsed.data;
 					try {
-						const entries = opts.storage.upsertCredential(provider, credential);
+						let inserted: boolean | undefined;
+						let entries: CredentialUploadResponse["entries"];
+						if (ifProviderAbsent) {
+							if (credential.type !== "api_key" || credential.source !== undefined) {
+								return json(400, { error: "Conditional credential uploads require a generated API key" });
+							}
+							inserted = await opts.storage.addGeneratedApiKeyIfAbsent(provider, credential.key);
+							entries = opts.storage.exportSnapshot().credentials.filter(entry => entry.provider === provider);
+						} else {
+							entries = opts.storage.upsertCredential(provider, credential);
+						}
 						const identity =
 							credential.type === "oauth"
 								? (credential.email ?? credential.accountId ?? credential.projectId ?? "(no identity)")
 								: "(api key)";
-						logger.info("auth-broker credential upserted", {
-							provider,
-							type: credential.type,
-							identity,
-							peer,
-							providerTotal: entries.length,
-						});
-						const response: CredentialUploadResponse = { entries };
+						logger.info(
+							ifProviderAbsent ? "auth-broker conditional credential upload" : "auth-broker credential upserted",
+							{
+								provider,
+								type: credential.type,
+								identity,
+								peer,
+								providerTotal: entries.length,
+								...(inserted === undefined ? {} : { inserted }),
+							},
+						);
+						const response: CredentialUploadResponse = {
+							entries,
+							...(inserted === undefined ? {} : { inserted }),
+						};
 						return json(200, response);
 					} catch (error) {
 						const message = error instanceof Error ? error.message : String(error);

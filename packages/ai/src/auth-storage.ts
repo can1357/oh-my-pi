@@ -170,6 +170,12 @@ export interface StoredAuthCredential {
 	disabledCause: string | null;
 }
 
+/** Result of atomically inserting one credential only while a provider has no active rows. */
+export interface ConditionalAuthCredentialInsertResult {
+	inserted: boolean;
+	credentials: StoredAuthCredential[];
+}
+
 /** One persisted rate-limit block: credential row id + provider-type key + optional scope. */
 export interface StoredCredentialBlock {
 	/** SQLite row id of the credential (auth_credentials.id). */
@@ -427,6 +433,10 @@ export interface AuthCredentialStore {
 	): boolean;
 	replaceAuthCredentialsForProvider(provider: string, credentials: AuthCredential[]): StoredAuthCredential[];
 	upsertAuthCredentialForProvider(provider: string, credential: AuthCredential): StoredAuthCredential[];
+	insertAuthCredentialIfProviderAbsent?(
+		provider: string,
+		credential: AuthCredential,
+	): ConditionalAuthCredentialInsertResult;
 	deleteAuthCredentialsForProvider(provider: string, disabledCause: string): void;
 	getCache(key: string, options?: { includeExpired?: boolean }): string | null;
 	setCache(key: string, value: string, expiresAtSec: number): void;
@@ -546,6 +556,11 @@ export interface AuthCredentialStore {
 	 * post-write read path is consistent.
 	 */
 	upsertAuthCredentialRemote?(provider: string, credential: AuthCredential): Promise<StoredAuthCredential[]>;
+	/** Remote equivalent of {@link insertAuthCredentialIfProviderAbsent}. */
+	insertAuthCredentialIfProviderAbsentRemote?(
+		provider: string,
+		credential: AuthCredential,
+	): Promise<ConditionalAuthCredentialInsertResult>;
 	/**
 	 * Optional async write hook for replace-all semantics (e.g. API-key login
 	 * overwriting any previous keys for the same provider). When present,
@@ -2623,6 +2638,34 @@ export class AuthStorage {
 			})),
 		);
 		this.#resetProviderAssignments(provider);
+	}
+
+	/**
+	 * Persist a provider-generated API key only if no active credential exists at commit time.
+	 *
+	 * Generated keys deliberately omit `source: "login"`: an explicit environment key
+	 * must continue to outrank this fallback if it appears later. The store-level
+	 * conditional insert closes the gap between a caller's initial no-key read and
+	 * persistence, so a concurrent login or broker write wins without being replaced.
+	 */
+	async addGeneratedApiKeyIfAbsent(provider: string, apiKey: string): Promise<boolean> {
+		const credential: ApiKeyCredential = { type: "api_key", key: apiKey };
+		const insertRemote = this.#store.insertAuthCredentialIfProviderAbsentRemote?.bind(this.#store);
+		const insertLocal = this.#store.insertAuthCredentialIfProviderAbsent?.bind(this.#store);
+		let result: ConditionalAuthCredentialInsertResult;
+		if (insertRemote) {
+			result = await insertRemote(provider, credential);
+		} else if (insertLocal) {
+			result = insertLocal(provider, credential);
+		} else {
+			throw new AIError.ConfigurationError("Credential store does not support conditional generated-key writes");
+		}
+		this.#setStoredCredentials(
+			provider,
+			result.credentials.map(record => ({ id: record.id, credential: record.credential })),
+		);
+		this.#resetProviderAssignments(provider);
+		return result.inserted;
 	}
 
 	/**
