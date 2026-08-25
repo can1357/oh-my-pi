@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type {
@@ -400,12 +401,18 @@ export function isProcessAlive(pid: number): boolean {
 }
 
 /**
- * Start-identity token for a pid (Linux /proc field 22, ticks since boot —
- * unique per process launch). `undefined` where unavailable (non-Linux,
- * process gone): callers fall back to pid-only liveness, matching the
- * previous behavior.
+ * Start-identity token for a pid, unique per process launch. Linux reads
+ * /proc field 22 (starttime, ticks since boot); other POSIX platforms fall
+ * back to `ps -o lstart=` (the process's local start timestamp, parsed as a
+ * normalized string); Windows has no portable equivalent and returns
+ * `undefined`, where callers fall back to pid-only liveness. `undefined`
+ * anywhere else means "unavailable": callers treat it conservatively.
  */
 export function processStartToken(pid: number): string | undefined {
+	return linuxProcStartToken(pid) ?? psStartToken(pid);
+}
+
+function linuxProcStartToken(pid: number): string | undefined {
 	try {
 		const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf-8");
 		// The comm field can contain spaces and parens; fields resume after
@@ -418,6 +425,30 @@ export function processStartToken(pid: number): string | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * `ps -o lstart=` for the pid — the kernel-reported start time, formatted by
+ * ps. Two launches can only collide if the pid was recycled within the same
+ * second, a strictly tighter guarantee than pid-only liveness.
+ */
+function psStartToken(pid: number): string | undefined {
+	if (process.platform === "win32") return undefined;
+	try {
+		const out = execSync(`ps -o lstart= -p ${pid}`, {
+			encoding: "utf-8",
+			stdio: ["ignore", "pipe", "ignore"],
+		});
+		return parsePsLstart(out);
+	} catch {
+		return undefined;
+	}
+}
+
+/** Normalize `ps -o lstart=` output into a comparable token. */
+export function parsePsLstart(output: string): string | undefined {
+	const token = output.replace(/\s+/g, " ").trim();
+	return token.length > 0 ? token : undefined;
 }
 
 /**

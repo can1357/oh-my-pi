@@ -11,8 +11,11 @@
  * dropped-prompts list is the last surviving copy of retracted content),
  * keep the m2 tail redoable, and never touch the active path.
  */
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
+
+const realReadFileSync = fs.readFileSync;
+
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@oh-my-pi/pi-ai";
@@ -20,6 +23,7 @@ import { exportFromFile } from "@oh-my-pi/pi-coding-agent/export/html/index";
 import {
 	isProcessInstanceAlive,
 	ownerClaimIsLive,
+	parsePsLstart,
 	processStartToken,
 	readOwnerClaims,
 	readSessionOwnerPids,
@@ -384,6 +388,27 @@ describe("SessionManager.pruneUserUndoTails", () => {
 		expect(dead.pid).toBeGreaterThan(0);
 		expect(isProcessInstanceAlive(dead.pid, token)).toBe(false);
 	});
+
+	it("start identity falls back to ps lstart when /proc is unavailable", () => {
+		// Non-Linux POSIX hosts have no /proc/<pid>/stat; the token must
+		// still bind claims to the process launch (ps-reported start time)
+		// instead of degrading to pid-only liveness, where a recycled pid
+		// blocks undo-tail gc indefinitely.
+		const readSpy = vi.spyOn(fs, "readFileSync").mockImplementation(((p: fs.PathOrFileDescriptor, ...rest: []) => {
+			if (typeof p === "string" && p.startsWith("/proc/")) throw new Error("ENOENT: no procfs");
+			return realReadFileSync(p, ...rest);
+		}) as typeof fs.readFileSync);
+		const token = processStartToken(process.pid);
+		expect(token).toBeDefined();
+		expect(token).toMatch(/\d{4}/); // ps lstart carries the year
+		expect(isProcessInstanceAlive(process.pid, token)).toBe(true);
+		expect(isProcessInstanceAlive(process.pid, "Wed Apr  1 00:00:00 1970")).toBe(false);
+		readSpy.mockRestore();
+		// parsePsLstart normalizes ps whitespace padding into a stable token.
+		expect(parsePsLstart("  Tue Aug  25 08:00:00 2026\n")).toBe("Tue Aug 25 08:00:00 2026");
+		expect(parsePsLstart("   \n")).toBeUndefined();
+	});
+
 	it("title-entry fallback failure diverges the journal so the next append rewrites fully", async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-title-contention-"));
 		// Failable storage: after the journal is durable, the title
