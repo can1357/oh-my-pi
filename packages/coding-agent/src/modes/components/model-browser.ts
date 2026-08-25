@@ -8,7 +8,7 @@
  * model" list.
  */
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Model } from "@oh-my-pi/pi-ai";
+import type { FactoryDroidCredits, Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import {
@@ -277,13 +277,37 @@ export function formatRoleChip(role: string, assignment: RoleAssignment, setting
 	return theme.fg(info.color ?? "muted", `${theme.status.enabled} ${label}`) + suffix;
 }
 
+/** Suffix on a Standard Credits badge whose rate is a live promo, not the list rate. */
+const PROMO_MARK = "*";
+
+/**
+ * The promo-discounted Standard Credits input rate, or undefined when the
+ * model has no promo or its promo has lapsed.
+ *
+ * The registry mirrors Factory's catalog verbatim, expired promos included
+ * (kimi-k3's 50% off ran out on 2026-08-10 and the entry still carries it), so
+ * expiry is decided here at render time against the same clock the user reads
+ * the badge with. A promo with no expiry date never applies — the CLI gates on
+ * `promoExpiresAt > now`, which is false when the field is absent.
+ */
+function promoCreditRate(credits: FactoryDroidCredits, now: number): number | undefined {
+	const discount = credits.promoDiscount;
+	if (discount == null || discount <= 0) return undefined;
+	const expiresAt = credits.promoExpiresAt;
+	if (expiresAt === undefined) return undefined;
+	const expiry = Date.parse(expiresAt);
+	if (Number.isNaN(expiry) || expiry <= now) return undefined;
+	return credits.input * (1 - discount);
+}
+
 /**
  * `$in/out` per-million cost pair; `free` when both legs are zero. Factory
  * Droid models also carry an `N×` Standard Credits badge (effective per-token
  * input rate) — the $ pair is the upstream-list counterfactual, the badge is
- * what the subscription actually burns.
+ * what the subscription actually burns. A live promo rate is marked `N×*` so
+ * the discounted figure cannot be mistaken for the standing list rate.
  */
-function formatCostPair(model: Model): string {
+export function formatCostPair(model: Model, now: number = Date.now()): string {
 	const cost = model.cost;
 	const fmt = (n: number): string => {
 		if (n <= 0) return "0";
@@ -292,7 +316,9 @@ function formatCostPair(model: Model): string {
 	};
 	const base = !cost || (cost.input <= 0 && cost.output <= 0) ? "free" : `$${fmt(cost.input)}/${fmt(cost.output)}`;
 	const credits = model.factoryDroidCredits;
-	return credits ? `${base} ${fmt(credits.input)}×` : base;
+	if (!credits) return base;
+	const promo = promoCreditRate(credits, now);
+	return promo === undefined ? `${base} ${fmt(credits.input)}×` : `${base} ${fmt(promo)}×${PROMO_MARK}`;
 }
 
 /** Provider-supplied blurb, flattened to a single renderable detail-line cell. */
