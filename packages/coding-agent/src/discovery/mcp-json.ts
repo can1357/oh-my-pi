@@ -25,6 +25,7 @@ interface MCPConfigFile {
 		string,
 		{
 			enabled?: boolean;
+			lazy?: boolean;
 			timeout?: number;
 			requestIdFormat?: "string" | "number";
 			command?: string;
@@ -71,6 +72,15 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 				}
 			}
 
+			let lazy: boolean | undefined;
+			if (serverConfig.lazy !== undefined) {
+				if (typeof serverConfig.lazy === "boolean") {
+					lazy = serverConfig.lazy;
+				} else {
+					logger.warn("MCP server has invalid 'lazy' value, ignoring", { name, value: serverConfig.lazy });
+				}
+			}
+
 			let timeout: number | undefined;
 			if (serverConfig.timeout !== undefined) {
 				if (
@@ -95,6 +105,7 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 			const server: MCPServer = {
 				name,
 				enabled,
+				lazy,
 				timeout,
 				requestIdFormat,
 				command: serverConfig.command,
