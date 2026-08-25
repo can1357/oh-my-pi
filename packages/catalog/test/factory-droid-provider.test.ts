@@ -11,7 +11,9 @@ import {
 	FACTORY_DROID_MODEL_META,
 	FACTORY_DROID_MODELS,
 	FACTORY_DROID_RESPONSES_BASE_URL,
+	FACTORY_DROID_WIRE_BASE_URLS,
 	factoryDroidEdgeRegion,
+	factoryDroidWireBaseUrl,
 	resolveFactoryDroidRotation,
 } from "../src/discovery/factory-droid-models";
 import {
@@ -108,6 +110,9 @@ describe("Factory Droid catalog", () => {
 			expect(FACTORY_DROID_MODEL_META[model.id]).toBeDefined();
 		}
 		expect(models.find(model => model.id === "kimi-k3")).toBeDefined();
+		// Factory retired Inkling in 0.203.0; advertising a model the proxy no
+		// longer serves would fail at request time, not at selection time.
+		expect(models.find(model => model.id === "inkling")).toBeUndefined();
 	});
 
 	it("filters the static registry by feature flags and org model policy", async () => {
@@ -128,6 +133,40 @@ describe("Factory Droid catalog", () => {
 		};
 		const models = await fetchFactoryDroidModels({ apiKey: "token", fetch: fetchImpl });
 		expect(models?.map(model => model.id)).toEqual(["kimi-k2.6"]);
+	});
+
+	it("withdraws fast tiers only when the org explicitly disallows them", async () => {
+		const flags = Object.fromEntries(
+			FACTORY_DROID_MODELS.flatMap(m => (m.featureFlag ? [[m.featureFlag, true]] : [])),
+		);
+		const discover = async (modelPolicy: Record<string, unknown>): Promise<string[]> => {
+			const fetchImpl: FetchImpl = async url =>
+				new Response(
+					JSON.stringify(String(url).includes("feature-flags") ? { flags } : { settings: { modelPolicy } }),
+					{ status: 200 },
+				);
+			const models = await fetchFactoryDroidModels({ apiKey: "token", fetch: fetchImpl });
+			return models?.map(model => model.id) ?? [];
+		};
+		// `baseVariant` is what marks an entry as a fast tier; the gate is a
+		// class switch, not a per-id policy.
+		const fastIds = FACTORY_DROID_MODELS.filter(m => m.baseVariant !== undefined).map(m => m.id);
+		expect(fastIds.length).toBeGreaterThan(0);
+
+		// Allow-all is the CLI's default kind, and older servers omit the
+		// field entirely: neither may withdraw a fast tier.
+		const allowed = await discover({ allowAllFactoryModels: true, isFastModelsAllowed: true });
+		const silent = await discover({ allowAllFactoryModels: true });
+		for (const id of fastIds) {
+			expect(allowed).toContain(id);
+			expect(silent).toContain(id);
+		}
+
+		// Only an explicit false hides them, and it hides nothing else.
+		const denied = await discover({ allowAllFactoryModels: true, isFastModelsAllowed: false });
+		for (const id of fastIds) expect(denied).not.toContain(id);
+		expect(denied).toContain("gpt-5.4");
+		expect(denied.length).toBe(allowed.length - fastIds.length);
 	});
 
 	it("applies the live provider_routing config to the model spec", async () => {
@@ -192,7 +231,6 @@ describe("Factory Droid catalog", () => {
 			"glm-5.1",
 			"glm-5.2",
 			"glm-5.2-fast",
-			"inkling",
 			"nemotron-3-ultra",
 		];
 		const noneLadders = ["gpt-5.6-sol", "gpt-5.6-sol-fast", "gpt-5.6-terra", "gpt-5.6-luna"];
@@ -243,15 +281,21 @@ describe("Factory Droid catalog", () => {
 			const model = buildFactoryDroidModel({ id: `m-${label}`, name: label, wire, ...base });
 			expect(model.baseUrl).toBe(expected);
 		}
+		// The WebSocket Responses transport is a resolved wire the provider
+		// dispatches on, never a registry entry's, and shares the Responses
+		// namespace on both hosts.
+		expect(FACTORY_DROID_WIRE_BASE_URLS["openai-responses-ws"]).toBe(FACTORY_DROID_RESPONSES_BASE_URL);
+		expect(factoryDroidWireBaseUrl("openai-responses-ws", "eu")).toBe("https://api.eu.factory.ai/api/llm/o/v1");
+		expect(FACTORY_DROID_MODELS.some(model => model.wire === "openai-responses-ws")).toBe(false);
 	});
 
 	it("classifies reasoning replay per completions model family", () => {
 		// capture-only: Kimi families replay only what was captured.
 		expect(FACTORY_DROID_MODEL_META["kimi-k3"].reasoningReplay).toBe("capture-only");
 		expect(FACTORY_DROID_MODEL_META["kimi-k2.5"].reasoningReplay).toBe("capture-only");
-		// standard: GLM-5.1/5.2, Inkling, Nemotron mirror the captured content.
+		// standard: GLM-5.1/5.2 and Nemotron mirror the captured content.
 		expect(FACTORY_DROID_MODEL_META["glm-5.2"].reasoningReplay).toBe("standard");
-		expect(FACTORY_DROID_MODEL_META.inkling.reasoningReplay).toBe("standard");
+		expect(FACTORY_DROID_MODEL_META["nemotron-3-ultra"].reasoningReplay).toBe("standard");
 		// placeholder: DeepSeek V4 forces a synthetic placeholder on tool calls.
 		expect(FACTORY_DROID_MODEL_META["deepseek-v4-flash-0731"].reasoningReplay).toBe("placeholder");
 		expect(FACTORY_DROID_MODEL_META["deepseek-v4-pro"].reasoningReplay).toBe("placeholder");
@@ -273,9 +317,9 @@ describe("Factory Droid catalog", () => {
 
 	it("wires upstream list prices and effective credit rates from the registry", () => {
 		// Cost is inherited from the referenced bundled catalog entry, not inlined.
-		const kimi = buildFactoryDroidModel(FACTORY_DROID_MODEL_META["kimi-k3"]);
-		expect(kimi.cost).toEqual(getBundledModel("fireworks", "kimi-k3").cost);
-		expect(kimi.factoryDroidCredits).toEqual({ input: 1.2, output: 6 });
+		const kimi = buildFactoryDroidModel(FACTORY_DROID_MODEL_META["kimi-k2.7-code"]);
+		expect(kimi.cost).toEqual(getBundledModel("fireworks", "kimi-k2.7-code").cost);
+		expect(kimi.factoryDroidCredits).toEqual({ input: 0.38, output: 1.5998 });
 
 		// Cache-read-metered models project the relative multiplier through the input rate.
 		const grok = buildFactoryDroidModel(FACTORY_DROID_MODEL_META["grok-4.5"]);
@@ -286,6 +330,10 @@ describe("Factory Droid catalog", () => {
 		const opus = buildFactoryDroidModel(FACTORY_DROID_MODEL_META["claude-opus-5"]);
 		expect(opus.factoryDroidCredits).toEqual({ input: 2, output: 2 });
 		expect(opus.cost).toEqual(getBundledModel("anthropic", "claude-opus-5").cost);
+
+		// 0.203.0 repriced GLM-5.2 to 0.56 in / 3.15x out.
+		const glm = buildFactoryDroidModel(FACTORY_DROID_MODEL_META["glm-5.2"]);
+		expect(glm.factoryDroidCredits).toEqual({ input: 0.56, output: 1.764 });
 	});
 
 	it("keeps Factory-only SKUs at zero cost with the credit badge only", () => {
@@ -298,6 +346,77 @@ describe("Factory Droid catalog", () => {
 		const atlas = buildFactoryDroidModel(FACTORY_DROID_MODEL_META["atlas-07-21"]);
 		expect(atlas.cost).toEqual(zeroCost);
 		expect(atlas.factoryDroidCredits).toEqual({ input: 2, output: 2 });
+	});
+
+	it("mirrors promo credit terms verbatim, expired ones included", () => {
+		// The registry is a snapshot of Factory's table, not a live price
+		// oracle: an elapsed promoExpiresAt stays recorded and the display
+		// layer decides whether the promo still applies.
+		expect(FACTORY_DROID_MODEL_META["gpt-5.6-sol"].credits).toEqual({
+			input: 2,
+			output: 5,
+			promoDiscount: 0.2,
+			promoExpiresAt: "2026-11-22T00:00:00Z",
+			promoLabel: ", Promo Pricing",
+		});
+		expect(FACTORY_DROID_MODEL_META["gpt-5.6-sol-fast"].credits).toEqual({
+			input: 4,
+			output: 5,
+			promoDiscount: 0.2,
+			promoExpiresAt: "2026-11-22T00:00:00Z",
+			promoLabel: ", Promo Pricing",
+		});
+		expect(FACTORY_DROID_MODEL_META["kimi-k3"].credits).toEqual({
+			input: 1.2,
+			output: 5,
+			promoDiscount: 0.5,
+			promoExpiresAt: "2026-08-10T00:00:00Z",
+			promoLabel: ", 50% Off",
+		});
+		// The projection turns multipliers into rates but leaves promo terms
+		// untouched and unfiltered — the badge needs the raw terms to decide.
+		expect(buildFactoryDroidModel(FACTORY_DROID_MODEL_META["kimi-k3"]).factoryDroidCredits).toEqual({
+			input: 1.2,
+			output: 6,
+			promoDiscount: 0.5,
+			promoExpiresAt: "2026-08-10T00:00:00Z",
+			promoLabel: ", 50% Off",
+		});
+		// A model with no promo carries no promo fields at all.
+		expect(buildFactoryDroidModel(FACTORY_DROID_MODEL_META["kimi-k2.6"]).factoryDroidCredits).toEqual({
+			input: 0.4,
+			output: 1.6,
+		});
+	});
+
+	it("ships gemini-3.7-flash on the google ladder with no upstream list price yet", () => {
+		const meta = FACTORY_DROID_MODEL_META["gemini-3.7-flash"];
+		expect(meta.wire).toBe("google-generate");
+		expect(meta.apiProviders).toEqual(["google"]);
+		expect(meta.contextWindow).toBe(1_000_000);
+		expect(meta.maxTokens).toBe(65_536);
+		expect(meta.featureFlag).toBe("gemini_3_7_flash");
+		// Not in the bundled catalog: cost degrades to zero, credits carry it.
+		expect(meta.priceRef).toBeUndefined();
+
+		const model = buildFactoryDroidModel(meta);
+		expect(model.baseUrl).toBe(FACTORY_DROID_GOOGLE_BASE_URL);
+		expect(model.cost).toEqual(zeroCost);
+		expect(model.thinking).toMatchObject({
+			mode: "google-level",
+			efforts: [Effort.Low, Effort.Medium, Effort.High],
+			defaultLevel: Effort.High,
+			requiresEffort: true,
+		});
+		expect(model.factoryDroidCredits).toEqual({
+			input: 0.6,
+			output: 3,
+			promoDiscount: 0.5,
+			promoExpiresAt: "2027-01-01T00:00:00Z",
+			promoLabel: ", 50% Off",
+		});
+		// 3.6 lost its minimal rung in the same release; 3.7 never had one.
+		expect(FACTORY_DROID_MODEL_META["gemini-3.6-flash"].supportedReasoningEfforts).toEqual(["low", "medium", "high"]);
 	});
 
 	it("resolves every registry priceRef in the bundled catalog", () => {
@@ -338,6 +457,24 @@ describe("Factory Droid EU region", () => {
 		expect(resolveFactoryDroidRotation(opus5, undefined)).toEqual(opus5.apiProviders);
 		expect(resolveFactoryDroidRotation(opus5, "global")).toEqual(opus5.apiProviders);
 		expect(resolveFactoryDroidRotation(kimi, "global")).toEqual(["fireworks", "baseten"]);
+	});
+
+	it("keeps the 0.203.0 azure and mistral additions out of EU rotations", () => {
+		const gpt52 = FACTORY_DROID_MODELS.find(m => m.id === "gpt-5.2")!;
+		const gpt54 = FACTORY_DROID_MODELS.find(m => m.id === "gpt-5.4")!;
+		const glm52 = FACTORY_DROID_MODELS.find(m => m.id === "glm-5.2")!;
+
+		// azure_openai joined the GPT rotations in second position...
+		expect(gpt52.apiProviders).toEqual(["openai", "azure_openai"]);
+		expect(resolveFactoryDroidRotation(gpt52, "global")).toEqual(["openai", "azure_openai"]);
+		// ...but serves the global region only, so EU accounts never route to it.
+		expect(resolveFactoryDroidRotation(gpt52, "eu")).toEqual(["openai"]);
+		// An explicit EU override still wins verbatim over that filter.
+		expect(gpt54.apiProviders).toEqual(["openai", "azure_openai", "bedrock_openai"]);
+		expect(resolveFactoryDroidRotation(gpt54, "eu")).toEqual(["openai"]);
+		// mistral is global-only too, so GLM-5.2 stays EU-unavailable.
+		expect(glm52.apiProviders).toEqual(["fireworks", "baseten", "mistral"]);
+		expect(resolveFactoryDroidRotation(glm52, "eu")).toEqual([]);
 	});
 
 	it("queries the EU host and hides models with no EU-serving upstream", async () => {
