@@ -403,6 +403,9 @@ describe("SessionManager.pruneUserUndoTails", () => {
 		expect(token).toMatch(/\d{4}/); // ps lstart carries the year
 		expect(isProcessInstanceAlive(process.pid, token)).toBe(true);
 		expect(isProcessInstanceAlive(process.pid, "Wed Apr  1 00:00:00 1970")).toBe(false);
+		// Provider mismatch (ps claim vs /proc ticks or vice versa) fails
+		// closed: the encodings are incomparable, never "different launch".
+		expect(isProcessInstanceAlive(process.pid, "12345")).toBe(true);
 		readSpy.mockRestore();
 		// parsePsLstart normalizes ps whitespace padding into a stable token.
 		expect(parsePsLstart("  Tue Aug  25 08:00:00 2026\n")).toBe("Tue Aug 25 08:00:00 2026");

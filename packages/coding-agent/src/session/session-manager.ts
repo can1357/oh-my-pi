@@ -462,9 +462,15 @@ export function isProcessInstanceAlive(pid: number, startToken: string | undefin
 	if (!isProcessAlive(pid)) return false;
 	if (startToken === undefined) return true;
 	const current = processStartToken(pid);
-	// Unreadable token (non-Linux, or a race with exit): fail closed — treat
-	// as the same instance so a possibly-live pruner is never declared dead.
-	return current === undefined || current === startToken;
+	// Unreadable token (no provider, or a race with exit): fail closed —
+	// treat as the same instance so a possibly-live pruner is never declared
+	// dead. Provider mismatch (claim recorded from /proc ticks, current read
+	// via ps — e.g. a procfs mount disappeared) also fails closed: the two
+	// token encodings are incomparable strings, and a spurious mismatch would
+	// release a live owner's claim.
+	if (current === undefined) return true;
+	if (/^\d+$/.test(current) !== /^\d+$/.test(startToken)) return true;
+	return current === startToken;
 }
 
 import {
