@@ -389,6 +389,41 @@ describe("SessionManager.pruneUserUndoTails", () => {
 		expect(isProcessInstanceAlive(dead.pid, token)).toBe(false);
 	});
 
+	it("releases the owner claim when the gated load exhausts its retries", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-claim-exhaust-"));
+		try {
+			const sessionFile = path.join(dir, "churn.jsonl");
+			fs.writeFileSync(sessionFile, JSON.stringify({ type: "session", id: "s", cwd: dir }) + "\n");
+			// Force the identity gate to mismatch on every attempt: each stat
+			// mutates the journal underneath the load, so the gated loop
+			// exhausts its five retries and throws SessionFileLockError.
+			class ChurningStorage extends FileSessionStorage {
+				override statSync(p: string) {
+					const stats = super.statSync(p);
+					if (p === sessionFile) fs.appendFileSync(sessionFile, " ");
+					return stats;
+				}
+			}
+			let threw = false;
+			try {
+				await SessionManager.open(sessionFile, undefined, new ChurningStorage());
+			} catch {
+				threw = true;
+			}
+			expect(threw).toBe(true);
+			// open() rejected: no manager reference exists to close, so the
+			// claim it registered must already be gone — otherwise gc in this
+			// long-lived process skips the session until exit.
+			await Bun.sleep(100);
+			const sidecar = `${sessionFile}.owner`;
+			if (fs.existsSync(sidecar)) {
+				expect(fs.readFileSync(sidecar, "utf-8").trim()).toBe("");
+			}
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("start identity falls back to ps lstart when /proc is unavailable", () => {
 		// Non-Linux POSIX hosts have no /proc/<pid>/stat; the token must
 		// still bind claims to the process launch (ps-reported start time)
