@@ -40,6 +40,12 @@ interface FactoryModelPolicy {
 	allowAllFactoryModels?: boolean;
 	allowedModelIds?: string[];
 	blockedModelIds?: string[];
+	/**
+	 * Org switch for the paid fast tiers. Absent means allow: the CLI's
+	 * default policy kind is allow-all, and self-hosted/legacy servers omit
+	 * the field entirely, so only an explicit `false` withdraws them.
+	 */
+	isFastModelsAllowed?: boolean;
 }
 
 function readModelPolicy(body: unknown): FactoryModelPolicy | null {
@@ -55,6 +61,7 @@ function readModelPolicy(body: unknown): FactoryModelPolicy | null {
 			typeof policy.allowAllFactoryModels === "boolean" ? policy.allowAllFactoryModels : undefined,
 		allowedModelIds: ids("allowedModelIds"),
 		blockedModelIds: ids("blockedModelIds"),
+		isFastModelsAllowed: typeof policy.isFastModelsAllowed === "boolean" ? policy.isFastModelsAllowed : undefined,
 	};
 }
 
@@ -94,6 +101,9 @@ function isModelAvailable(
 	if (resolveFactoryDroidRotation(model, region).length === 0) return false;
 	if (model.featureFlag !== undefined && flags[model.featureFlag] !== true) return false;
 	if (model.deprecationFlag !== undefined && flags[model.deprecationFlag] === true) return false;
+	// Fast tiers are withdrawn as a class, not by id: `baseVariant` is what
+	// marks an entry as one, and only an explicit `false` hides it.
+	if (model.baseVariant !== undefined && policy?.isFastModelsAllowed === false) return false;
 	if (policy?.blockedModelIds?.includes(model.id)) return false;
 	if (
 		policy?.allowAllFactoryModels === false &&
@@ -244,6 +254,11 @@ export function projectFactoryDroidCredits(
 		input: rate(credits.input),
 		output: rate(credits.input * (credits.output ?? 1)),
 		...(credits.cacheRead != null ? { cacheRead: rate(credits.input * credits.cacheRead) } : {}),
+		// Promo terms ride through untouched: they are display metadata, and
+		// whether one still applies is a clock question the badge layer owns.
+		...(credits.promoDiscount != null ? { promoDiscount: credits.promoDiscount } : {}),
+		...(credits.promoExpiresAt != null ? { promoExpiresAt: credits.promoExpiresAt } : {}),
+		...(credits.promoLabel != null ? { promoLabel: credits.promoLabel } : {}),
 	};
 }
 

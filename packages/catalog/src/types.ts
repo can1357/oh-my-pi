@@ -1057,6 +1057,16 @@ export interface FactoryDroidCredits {
 	input: number;
 	output: number;
 	cacheRead?: number;
+	/** Fraction off the list rate while the promo runs, e.g. 0.5 for half price. */
+	promoDiscount?: number;
+	/**
+	 * ISO 8601 instant the promo lapses. Mirrored verbatim from the registry
+	 * and may already be in the past: consumers compare it against the clock,
+	 * because a lapsed promo stays in Factory's table until the entry changes.
+	 */
+	promoExpiresAt?: string;
+	/** Suffix Factory appends to the display name while the promo applies. */
+	promoLabel?: string;
 }
 
 export interface Model<TApi extends Api = Api> {

@@ -16,21 +16,29 @@ export const FACTORY_DROID_ANTHROPIC_BASE_URL = "https://api.factory.ai/api/llm/
 export const FACTORY_DROID_GOOGLE_BASE_URL = "https://api.factory.ai/api/llm/g/v1";
 
 /** Client version reported to Factory's API. */
-export const FACTORY_DROID_CLIENT_VERSION = "0.196.0";
+export const FACTORY_DROID_CLIENT_VERSION = "0.203.0";
 
 /**
  * Wire protocol the proxy expects for a model:
  * - `openai-completions`: `/api/llm/o/v1/chat/completions` (Droid Core)
  * - `openai-responses`: `/api/llm/o/v1/responses` (GPT series + Grok)
+ * - `openai-responses-ws`: `/api/llm/o/v1/responses/ws` (same Responses body
+ *   over a WebSocket; a resolved transport, never a registry entry's wire)
  * - `anthropic-messages`: `/api/llm/a/v1/messages` (Claude + MiniMax)
  * - `google-generate`: `/api/llm/g/v1/generate` (Gemini, native generateContent SSE)
  */
-export type FactoryDroidWire = "openai-completions" | "openai-responses" | "anthropic-messages" | "google-generate";
+export type FactoryDroidWire =
+	| "openai-completions"
+	| "openai-responses"
+	| "openai-responses-ws"
+	| "anthropic-messages"
+	| "google-generate";
 
 /** Upstream router the proxy dispatches to; sent as the `x-api-provider` header. */
 export type FactoryDroidUpstream =
 	| "fireworks"
 	| "baseten"
+	| "mistral"
 	| "anthropic"
 	| "vertex_anthropic"
 	| "bedrock_anthropic"
@@ -57,6 +65,7 @@ export type FactoryDroidRegion = "global" | "eu";
 export const FACTORY_DROID_UPSTREAM_REGIONS: Readonly<Record<FactoryDroidUpstream, readonly FactoryDroidRegion[]>> = {
 	fireworks: ["global"],
 	baseten: ["global"],
+	mistral: ["global"],
 	anthropic: ["global"],
 	vertex_anthropic: ["global", "eu"],
 	bedrock_anthropic: ["global", "eu"],
@@ -117,6 +126,7 @@ export function factoryDroidWireBaseUrl(wire: FactoryDroidWire, region: string |
 	switch (wire) {
 		case "openai-completions":
 		case "openai-responses":
+		case "openai-responses-ws":
 			return `${host}/api/llm/o/v1`;
 		case "anthropic-messages":
 			return `${host}/api/llm/a`;
@@ -173,10 +183,22 @@ export interface FactoryDroidModelInput {
 	 * output and cache-read tokens (`outputTokenMultiplier`,
 	 * `cacheReadTokenMultiplier`). Absent `output` defaults to 1 (output
 	 * billed at the input rate); absent `cacheRead` means cache reads are
-	 * not separately metered. The CLI's promo fields are intentionally not
-	 * mirrored — every promo to date expired before this integration shipped.
+	 * not separately metered. Promo fields are mirrored verbatim, expired ones
+	 * included: the CLI keeps a promo in the table past `promoExpiresAt` and
+	 * resolves expiry at display time, so the registry stays a faithful
+	 * snapshot and the badge layer owns the "is it still live" decision.
+	 * `promoDiscount` is the fraction off the list rate; `promoLabel` is the
+	 * suffix the CLI appends to the model's display name while it applies.
 	 */
-	credits?: { input: number; output?: number; cacheRead?: number };
+	credits?: {
+		input: number;
+		output?: number;
+		cacheRead?: number;
+		promoDiscount?: number;
+		/** ISO 8601 instant; may already be in the past. */
+		promoExpiresAt?: string;
+		promoLabel?: string;
+	};
 	/**
 	 * Upstream catalog entry providing the raw-API list price for this model
 	 * (the "$ what it would cost" counterfactual). Absent for Factory-only
@@ -200,6 +222,19 @@ export interface FactoryDroidModelInput {
 	 * hide the model in favor of its fallback. Evaluated after `featureFlag`.
 	 */
 	deprecationFlag?: string;
+	/**
+	 * Replacement the CLI routes to once `deprecationFlag` fires (its
+	 * `deprecation.hard.fallbackModelId`). Recorded for parity: OMP hides the
+	 * deprecated entry rather than rerouting, so this documents the successor.
+	 */
+	fallbackModelId?: string;
+	/**
+	 * Base model this entry is the fast tier of (the CLI's `baseVariant`).
+	 * Org policy can withdraw fast tiers wholesale via managed settings'
+	 * `isFastModelsAllowed`, and the presence of this field is what that gate
+	 * keys off.
+	 */
+	baseVariant?: string;
 	thinkingStyle?: FactoryDroidAnthropicThinking;
 	/** Gemini `thinkingConfig` supports MEDIUM in addition to LOW/HIGH. */
 	geminiMedium?: boolean;
@@ -216,7 +251,7 @@ export interface FactoryDroidModelInput {
 	 * How the completions transport replays reasoning content on assistant
 	 * turns, matching the provider's per-model families: "capture-only"
 	 * (Kimi) replays only what was captured, "standard" (GLM-5.1/5.2,
-	 * Inkling, Nemotron 3 Ultra) mirrors the captured content, and
+	 * Nemotron 3 Ultra) mirrors the captured content, and
 	 * "placeholder" (DeepSeek V4) emits a synthetic placeholder on tool calls.
 	 */
 	reasoningReplay?: "capture-only" | "standard" | "placeholder";
@@ -229,6 +264,7 @@ export const FACTORY_DROID_WIRE_BASE_URLS: Readonly<Record<FactoryDroidWire, str
 	"openai-responses": FACTORY_DROID_RESPONSES_BASE_URL,
 	"anthropic-messages": FACTORY_DROID_ANTHROPIC_BASE_URL,
 	"google-generate": FACTORY_DROID_GOOGLE_BASE_URL,
+	"openai-responses-ws": FACTORY_DROID_RESPONSES_BASE_URL,
 };
 export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 	{
@@ -311,6 +347,8 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		supportedReasoningEfforts: ["off", "low", "medium", "high", "max"],
 		defaultReasoningEffort: "high",
 		deprecationFlag: "deprecate_claude_opus_4_6_fast",
+		fallbackModelId: "claude-opus-4-6",
+		baseVariant: "claude-opus-4-6",
 		thinkingStyle: "adaptive",
 		noImageSupport: true,
 		fastMode: true,
@@ -323,7 +361,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		maxTokens: 128000,
 		apiProviders: ["anthropic", "vertex_anthropic", "bedrock_anthropic"],
 		euApiProviders: ["bedrock_anthropic"],
-		credits: { input: 2 },
+		credits: { input: 2, promoDiscount: 0.5, promoExpiresAt: "2026-05-01T00:00:00Z", promoLabel: ", 50% Off" },
 		priceRef: { provider: "anthropic", modelId: "claude-opus-4-7" },
 		supportedReasoningEfforts: ["off", "low", "medium", "high", "xhigh", "max"],
 		defaultReasoningEffort: "high",
@@ -342,6 +380,8 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		defaultReasoningEffort: "high",
 		thinkingStyle: "adaptive-summarized",
 		deprecationFlag: "deprecate_claude_opus_4_7_fast",
+		fallbackModelId: "claude-opus-4-7",
+		baseVariant: "claude-opus-4-7",
 		noImageSupport: true,
 		fastMode: true,
 	},
@@ -372,6 +412,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		supportedReasoningEfforts: ["off", "low", "medium", "high", "xhigh", "max"],
 		defaultReasoningEffort: "high",
 		featureFlag: "claude_opus_4_8_fast",
+		baseVariant: "claude-opus-4-8",
 		thinkingStyle: "adaptive-summarized",
 		noImageSupport: true,
 		fastMode: true,
@@ -403,6 +444,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		supportedReasoningEfforts: ["off", "low", "medium", "high", "xhigh", "max"],
 		defaultReasoningEffort: "high",
 		featureFlag: "claude_opus_5_fast",
+		baseVariant: "claude-opus-5",
 		thinkingStyle: "adaptive-summarized",
 		noImageSupport: true,
 		fastMode: true,
@@ -504,6 +546,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
 		defaultReasoningEffort: "medium",
 		deprecationFlag: "deprecate_gpt_5_1_codex_max",
+		fallbackModelId: "gpt-5.5",
 		responsesConfig: { parallelToolCalls: false, extendedCache: true },
 		noImageSupport: true,
 	},
@@ -513,7 +556,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		wire: "openai-responses",
 		contextWindow: 272000,
 		maxTokens: 128000,
-		apiProviders: ["openai"],
+		apiProviders: ["openai", "azure_openai"],
 		credits: { input: 0.7 },
 		priceRef: { provider: "openai", modelId: "gpt-5.2" },
 		supportedReasoningEfforts: ["off", "low", "medium", "high", "xhigh"],
@@ -533,6 +576,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
 		defaultReasoningEffort: "medium",
 		deprecationFlag: "deprecate_gpt_5_2_codex",
+		fallbackModelId: "gpt-5.5",
 		responsesConfig: { parallelToolCalls: true, extendedCache: true, safetyId: true },
 		noImageSupport: true,
 	},
@@ -542,7 +586,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		wire: "openai-responses",
 		contextWindow: 272000,
 		maxTokens: 128000,
-		apiProviders: ["openai"],
+		apiProviders: ["openai", "azure_openai"],
 		credits: { input: 0.7 },
 		priceRef: { provider: "openai", modelId: "gpt-5.3-codex" },
 		supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
@@ -560,6 +604,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		credits: { input: 1.4, output: 8 },
 		supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
 		defaultReasoningEffort: "medium",
+		baseVariant: "gpt-5.3-codex",
 		responsesConfig: {
 			verbosity: "low",
 			serviceTier: "priority",
@@ -575,7 +620,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		wire: "openai-responses",
 		contextWindow: 922000,
 		maxTokens: 128000,
-		apiProviders: ["openai", "bedrock_openai"],
+		apiProviders: ["openai", "azure_openai", "bedrock_openai"],
 		euApiProviders: ["openai"],
 		credits: { input: 1, output: 6 },
 		priceRef: { provider: "openai", modelId: "gpt-5.4" },
@@ -590,10 +635,11 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		wire: "openai-responses",
 		contextWindow: 922000,
 		maxTokens: 128000,
-		apiProviders: ["openai"],
+		apiProviders: ["openai", "azure_openai"],
 		credits: { input: 2, output: 6 },
 		supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
 		defaultReasoningEffort: "medium",
+		baseVariant: "gpt-5.4",
 		responsesConfig: {
 			verbosity: "low",
 			serviceTier: "priority",
@@ -609,7 +655,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		wire: "openai-responses",
 		contextWindow: 272000,
 		maxTokens: 128000,
-		apiProviders: ["openai"],
+		apiProviders: ["openai", "azure_openai"],
 		credits: { input: 0.3, output: 6 },
 		priceRef: { provider: "openai", modelId: "gpt-5.4-mini" },
 		supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
@@ -623,10 +669,11 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		wire: "openai-responses",
 		contextWindow: 272000,
 		maxTokens: 128000,
-		apiProviders: ["openai"],
+		apiProviders: ["openai", "azure_openai"],
 		credits: { input: 0.6, output: 6 },
 		supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
 		defaultReasoningEffort: "high",
+		baseVariant: "gpt-5.4-mini",
 		responsesConfig: {
 			verbosity: "low",
 			serviceTier: "priority",
@@ -642,7 +689,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		wire: "openai-responses",
 		contextWindow: 922000,
 		maxTokens: 128000,
-		apiProviders: ["openai", "bedrock_openai"],
+		apiProviders: ["openai", "azure_openai", "bedrock_openai"],
 		euApiProviders: ["openai"],
 		credits: { input: 2, output: 6 },
 		priceRef: { provider: "openai", modelId: "gpt-5.5" },
@@ -657,10 +704,11 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		wire: "openai-responses",
 		contextWindow: 922000,
 		maxTokens: 128000,
-		apiProviders: ["openai"],
+		apiProviders: ["openai", "azure_openai"],
 		credits: { input: 5, output: 6 },
 		supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
 		defaultReasoningEffort: "medium",
+		baseVariant: "gpt-5.5",
 		responsesConfig: {
 			verbosity: "low",
 			serviceTier: "priority",
@@ -690,8 +738,14 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		wire: "openai-responses",
 		contextWindow: 922000,
 		maxTokens: 128000,
-		apiProviders: ["openai"],
-		credits: { input: 2, output: 6 },
+		apiProviders: ["openai", "azure_openai"],
+		credits: {
+			input: 2,
+			output: 5,
+			promoDiscount: 0.2,
+			promoExpiresAt: "2026-11-22T00:00:00Z",
+			promoLabel: ", Promo Pricing",
+		},
 		priceRef: { provider: "openai", modelId: "gpt-5.6-sol" },
 		supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
 		defaultReasoningEffort: "medium",
@@ -705,11 +759,18 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		wire: "openai-responses",
 		contextWindow: 922000,
 		maxTokens: 128000,
-		apiProviders: ["openai"],
-		credits: { input: 4, output: 6 },
+		apiProviders: ["openai", "azure_openai"],
+		credits: {
+			input: 4,
+			output: 5,
+			promoDiscount: 0.2,
+			promoExpiresAt: "2026-11-22T00:00:00Z",
+			promoLabel: ", Promo Pricing",
+		},
 		supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
 		defaultReasoningEffort: "medium",
 		featureFlag: "gpt_5_6_sol_fast",
+		baseVariant: "gpt-5.6-sol",
 		responsesConfig: {
 			verbosity: "low",
 			serviceTier: "priority",
@@ -725,7 +786,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		wire: "openai-responses",
 		contextWindow: 922000,
 		maxTokens: 128000,
-		apiProviders: ["openai"],
+		apiProviders: ["openai", "azure_openai"],
 		credits: { input: 0.8, output: 6 },
 		priceRef: { provider: "openai", modelId: "gpt-5.6-terra" },
 		supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
@@ -740,7 +801,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		wire: "openai-responses",
 		contextWindow: 922000,
 		maxTokens: 128000,
-		apiProviders: ["openai"],
+		apiProviders: ["openai", "azure_openai"],
 		credits: { input: 0.08, output: 6 },
 		priceRef: { provider: "openai", modelId: "gpt-5.6-luna" },
 		supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
@@ -799,9 +860,29 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		apiProviders: ["google"],
 		credits: { input: 0.6, output: 5 },
 		priceRef: { provider: "google", modelId: "gemini-3.6-flash" },
-		supportedReasoningEfforts: ["minimal", "low", "medium", "high"],
+		supportedReasoningEfforts: ["low", "medium", "high"],
 		defaultReasoningEffort: "high",
 		featureFlag: "gemini_3_6_flash",
+		noImageSupport: true,
+	},
+	{
+		id: "gemini-3.7-flash",
+		name: "Gemini 3.7 Flash",
+		wire: "google-generate",
+		contextWindow: 1_000_000,
+		maxTokens: 65_536,
+		apiProviders: ["google"],
+		credits: {
+			input: 0.6,
+			output: 5,
+			promoDiscount: 0.5,
+			promoExpiresAt: "2027-01-01T00:00:00Z",
+			promoLabel: ", 50% Off",
+		},
+		// No priceRef: google/gemini-3.7-flash is not in the bundled catalog yet.
+		supportedReasoningEfforts: ["low", "medium", "high"],
+		defaultReasoningEffort: "high",
+		featureFlag: "gemini_3_7_flash",
 		noImageSupport: true,
 	},
 	{
@@ -854,6 +935,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		priceRef: { provider: "baseten", modelId: "zai-org/GLM-4.7" },
 		supportedReasoningEfforts: ["none"],
 		deprecationFlag: "deprecate_glm_4_7",
+		fallbackModelId: "glm-5.2",
 		noImageSupport: true,
 	},
 	{
@@ -868,6 +950,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		supportedReasoningEfforts: ["off", "high"],
 		defaultReasoningEffort: "high",
 		deprecationFlag: "deprecate_kimi_k2_5",
+		fallbackModelId: "kimi-k2.6",
 		completionsReasoning: { fireworks: { history: "preserved" }, baseten: { mode: "opt-in" } },
 		reasoningReplay: "capture-only",
 	},
@@ -907,7 +990,13 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		contextWindow: 262144,
 		maxTokens: 65536,
 		apiProviders: ["fireworks", "baseten"],
-		credits: { input: 1.2, output: 5 },
+		credits: {
+			input: 1.2,
+			output: 5,
+			promoDiscount: 0.5,
+			promoExpiresAt: "2026-08-10T00:00:00Z",
+			promoLabel: ", 50% Off",
+		},
 		priceRef: { provider: "fireworks", modelId: "kimi-k3" },
 		toolMessageIncludesName: true,
 		supportedReasoningEfforts: ["off", "low", "high", "max"],
@@ -972,6 +1061,8 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		priceRef: { provider: "fireworks", modelId: "minimax-m2.7" },
 		supportedReasoningEfforts: ["high"],
 		defaultReasoningEffort: "high",
+		deprecationFlag: "deprecate_minimax_m2_7",
+		fallbackModelId: "minimax-m3",
 		thinkingStyle: "budget-effort",
 		noImageSupport: true,
 	},
@@ -1000,6 +1091,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		priceRef: { provider: "fireworks", modelId: "glm-5" },
 		supportedReasoningEfforts: ["none"],
 		deprecationFlag: "deprecate_glm_5",
+		fallbackModelId: "glm-5.2",
 		noImageSupport: true,
 	},
 	{
@@ -1014,6 +1106,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		supportedReasoningEfforts: ["off", "high"],
 		defaultReasoningEffort: "high",
 		deprecationFlag: "deprecate_glm_5_1",
+		fallbackModelId: "glm-5.2",
 		completionsReasoning: { fireworks: { history: "preserved" }, baseten: { mode: "opt-in" } },
 		reasoningReplay: "standard",
 		noImageSupport: true,
@@ -1024,8 +1117,8 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		wire: "openai-completions",
 		contextWindow: 908928,
 		maxTokens: 131072,
-		apiProviders: ["fireworks", "baseten"],
-		credits: { input: 0.55, output: 3.2 },
+		apiProviders: ["fireworks", "baseten", "mistral"],
+		credits: { input: 0.56, output: 3.15 },
 		priceRef: { provider: "fireworks", modelId: "glm-5.2" },
 		supportedReasoningEfforts: ["off", "high", "max"],
 		defaultReasoningEffort: "high",
@@ -1045,24 +1138,10 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		supportedReasoningEfforts: ["off", "high", "max"],
 		defaultReasoningEffort: "high",
 		featureFlag: "glm_5_2_fast",
+		baseVariant: "glm-5.2",
 		completionsReasoning: { fireworks: { history: "preserved" }, baseten: { mode: "reasoning-effort" } },
 		reasoningReplay: "standard",
 		noImageSupport: true,
-	},
-	{
-		id: "inkling",
-		name: "Inkling (Droid Core)",
-		wire: "openai-completions",
-		contextWindow: 1007232,
-		maxTokens: 32768,
-		apiProviders: ["fireworks", "baseten"],
-		credits: { input: 0.4, output: 4.05, cacheRead: 0.17 },
-		priceRef: { provider: "fireworks", modelId: "inkling" },
-		supportedReasoningEfforts: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
-		defaultReasoningEffort: "high",
-		featureFlag: "inkling",
-		completionsReasoning: { fireworks: { history: "preserved" }, baseten: { mode: "reasoning-effort" } },
-		reasoningReplay: "standard",
 	},
 	{
 		id: "nemotron-3-ultra",
