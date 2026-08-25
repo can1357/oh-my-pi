@@ -60,6 +60,12 @@ describe("Factory Droid completions wire (Droid Core)", () => {
 		expect(request.headers["user-agent"]).toMatch(/^factory-cli\//);
 		expect(request.headers["x-factory-org-id"]).toBe("org-1");
 		expect(request.headers["x-stainless-lang"]).toBe("js");
+		// droid always walks its configured rotation, so every inference call
+		// declares the routing source to the proxy.
+		expect(request.headers["x-provider-routing-source"]).toBe("configured_order");
+		// The Stainless runtime version is pinned to droid's packaged Node build
+		// rather than read off the host runtime.
+		expect(request.headers["x-stainless-runtime-version"]).toBe("v24.3.0");
 		// droid sends random v4 UUIDs; the OMP session id must not leak its v7 shape.
 		expect(request.headers["x-session-id"]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 		expect(request.headers["x-session-id"]).not.toContain("019fd");
@@ -70,8 +76,8 @@ describe("Factory Droid completions wire (Droid Core)", () => {
 		// The proxy accepts each model's advertised output cap — no 64k clamp here.
 		expect(request.body.max_tokens).toBe(65_536);
 
-		// Temperature is caller-driven; omitted when unset (probe-verified).
-		expect(request.body.temperature).toBeUndefined();
+		// droid pins temperature on every completions body.
+		expect(request.body.temperature).toBe(1);
 		expect(request.body.store).toBeUndefined();
 		const messages = request.body.messages as Array<{ role: string; content: unknown }>;
 		expect(messages[0].role).toBe("system");

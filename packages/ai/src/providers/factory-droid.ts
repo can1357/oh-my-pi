@@ -30,6 +30,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { hasNonThinkingTurnAfterLastUser, hasThinkinglessAssistantHistory } from "./anthropic";
 import { createProviderErrorMessage } from "./error-message";
 import { streamFactoryDroidGemini } from "./factory-droid/gemini";
+import { createFactoryDroidResponsesWsFetch, shouldUseFactoryDroidResponsesWs } from "./factory-droid/responses-ws";
 import { streamAnthropic, streamOpenAICompletions, streamOpenAIResponses } from "./register-builtins";
 
 /**
@@ -61,6 +62,20 @@ import { streamAnthropic, streamOpenAICompletions, streamOpenAIResponses } from 
 
 /** Droid identity sentence; the proxy rejects requests whose system prompt lacks this prefix. */
 export const DROID_SYSTEM_PREFIX = "You are Droid, an AI software engineering agent built by Factory.";
+
+/**
+ * Node build the CLI's packaged runtime reports. The Stainless fingerprint is
+ * a client-identity signal, so it is pinned to droid's own runtime rather than
+ * leaking whichever Node/Bun build happens to host OMP.
+ */
+const FACTORY_DROID_RUNTIME_VERSION = "v24.3.0";
+
+/**
+ * The CLI's chat-completions request builder pins `temperature: 1` on every
+ * body before per-model shaping runs, so the field is unconditional on this
+ * wire; only an explicit caller temperature displaces it.
+ */
+const FACTORY_DROID_COMPLETIONS_TEMPERATURE = 1;
 
 export interface FactoryDroidOptions extends StreamOptions {
 	/** Accepted for interface compatibility; the direct transport does not spawn processes. */
@@ -94,14 +109,21 @@ function resolveUpstream(model: Model<"factory-droid-agent">, meta: FactoryDroid
 /**
  * Identity headers every wire sends, plus the wire-specific extras observed
  * on the live traffic from the CLI's underlying SDKs:
+ * - every inference call declares `x-provider-routing-source:
+ *   configured_order`: droid always walks the model's registry rotation in
+ *   order, so the proxy is told the upstream choice was configuration-driven
+ *   rather than server-routed.
  * - completions/responses add `Accept` and the `OpenAI-Platform` org hint
  *   (openai/azure upstreams only).
- * - completions adds the OpenAI SDK's X-Stainless fingerprint. The Responses
- *   route 431s once total header size crosses its WAF budget (verified
- *   live), so it goes without the telemetry set.
- * - anthropic adds the Anthropic SDK's X-Stainless fingerprint (no
- *   timeout/helper entries) and the `x-api-key` placeholder the SDK
- *   contract requires.
+ * - completions adds the OpenAI SDK's X-Stainless fingerprint minus the
+ *   timeout/helper entries: droid builds its chat client without a request
+ *   timeout and streams through `create({ stream: true })` rather than the
+ *   `.stream()` helper, so neither header rides the wire. The Responses route
+ *   431s once total header size crosses its WAF budget (verified live), so it
+ *   goes without the telemetry set entirely.
+ * - anthropic adds the Anthropic SDK's X-Stainless fingerprint including that
+ *   client's 600s timeout, plus the `x-api-key` placeholder the SDK contract
+ *   requires.
  * - google adds nothing beyond the shared identity set.
  */
 function buildIdentityHeaders(input: {
@@ -116,6 +138,7 @@ function buildIdentityHeaders(input: {
 		"X-Client-Version": FACTORY_DROID_CLIENT_VERSION,
 		"X-Factory-Client": "cli",
 		"x-api-provider": input.upstream,
+		"x-provider-routing-source": "configured_order",
 		"x-session-id": input.sessionUuid,
 		"x-assistant-message-id": input.requestId,
 	};
@@ -129,18 +152,17 @@ function buildIdentityHeaders(input: {
 		headers["X-Stainless-Lang"] = "js";
 		headers["X-Stainless-Package-Version"] = input.wire === "openai-completions" ? "6.25.0" : "0.70.1";
 		headers["X-Stainless-Runtime"] = "node";
-		headers["X-Stainless-Runtime-Version"] = process.version;
+		headers["X-Stainless-Runtime-Version"] = FACTORY_DROID_RUNTIME_VERSION;
 		headers["X-Stainless-Arch"] = process.arch;
 		headers["X-Stainless-OS"] =
 			process.platform === "darwin" ? "MacOS" : process.platform === "win32" ? "Windows" : "Linux";
 		headers["X-Stainless-Retry-Count"] = "0";
-		if (input.wire === "openai-completions") {
-			// The CLI's chat-completions client configures a 300s timeout and
-			// marks the helper method when streaming (both present in the
-			// SDK's request headers and captured on the live wire).
-			headers["X-Stainless-Timeout"] = "300";
-			headers["X-Stainless-Helper-Method"] = "stream";
-		} else {
+		if (input.wire === "anthropic-messages") {
+			// droid constructs its Anthropic client with a 600s request timeout;
+			// the SDK renders that as the seconds-valued telemetry header. The
+			// chat-completions client is built without one, so that wire carries
+			// no timeout header at all.
+			headers["X-Stainless-Timeout"] = "600";
 			headers["x-api-key"] = "placeholder";
 		}
 	}
@@ -166,6 +188,12 @@ function buildIdentityHeaders(input: {
  *   `reasoning_effort: "none"` (emitNone).
  * - Baseten forced-on (deepseek-v4-pro) coerces off/disabled to
  *   `reasoning_effort: "low"` — thinking can never be switched off there.
+ *   (The upstream table's `reasoningEffort.coercions` entry maps off/none to
+ *   low, and the CLI applies it only while the resolved thinking mode is
+ *   forced-on; opt-in and reasoning-effort Baseten families are untouched.)
+ * - Mistral advertises no thinking config and `supports.reasoningHistory:
+ *   false`, so effort rides the wire the way Fireworks takes it but
+ *   `reasoning_history` never does.
  *
  * Models without a registry `completionsReasoning` entry (glm-4.7, glm-5,
  * custom ids) keep the legacy upstream-only shape.
@@ -202,6 +230,10 @@ function buildCompletionsReasoningBody(
 			return { chat_template_args: { enable_thinking: true } };
 		}
 		return undefined;
+	}
+
+	if (upstream === "mistral") {
+		return disabled ? { reasoning_effort: "none" } : undefined;
 	}
 
 	// Fireworks (and any other upstream for unregistered models).
@@ -335,7 +367,31 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 				systemPrompt: [DROID_SYSTEM_PREFIX, ...(context.systemPrompt ?? [])],
 			};
 
-			const wire = meta?.wire ?? "openai-completions";
+			const registryWire = meta?.wire ?? "openai-completions";
+			// Discovery stamps the region-resolved wire URL; the constant is the
+			// global default for hand-registered custom models.
+			const responsesBaseUrl = model.baseUrl ?? FACTORY_DROID_RESPONSES_BASE_URL;
+			// `openai-responses-ws` is a transport, not a registry value: no model
+			// entry carries it. The CLI upgrades a Responses turn to its WebSocket
+			// surface when the turn rides a registry model on the openai upstream
+			// and the account's `openai_responses_websocket_mode` gate is on. The
+			// request body, headers, and event stream are the HTTPS ones either
+			// way, so the branch below only swaps what carries them.
+			const wire: FactoryDroidWire =
+				registryWire === "openai-responses" &&
+				(await shouldUseFactoryDroidResponsesWs({
+					accessToken: harnessToken,
+					responsesUrl: `${responsesBaseUrl}/responses`,
+					upstream,
+					registered: meta !== undefined,
+					orgId,
+					fetchImpl: options?.fetch ?? fetch,
+					clientVersion: FACTORY_DROID_CLIENT_VERSION,
+					providerSessionState: options?.providerSessionState,
+					signal: options?.signal,
+				}))
+					? "openai-responses-ws"
+					: registryWire;
 			const baseOptions = {
 				apiKey: harnessToken,
 				signal: options?.signal,
@@ -439,7 +495,7 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 						...options?.headers,
 					},
 				});
-			} else if (wire === "openai-responses") {
+			} else if (wire === "openai-responses" || wire === "openai-responses-ws") {
 				const cfg = meta?.responsesConfig;
 				// The model's registry provider ("openai" for GPT-5.x, "xai" for
 				// grok) gates the openai-family shaping — tool_choice stays "auto"
@@ -452,7 +508,7 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 				const responsesModel = buildModel({
 					...model,
 					api: "openai-responses",
-					baseUrl: model.baseUrl ?? FACTORY_DROID_RESPONSES_BASE_URL,
+					baseUrl: responsesBaseUrl,
 					// The CLI never sends max_output_tokens for openai-provider
 					// models; only xai (grok) carries one (63356). The shared
 					// transport honors `omitMaxOutputTokens` by dropping the field.
@@ -464,8 +520,25 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 					: options?.reasoning === "max"
 						? "xhigh"
 						: options?.reasoning;
+				const wsSessionState = wire === "openai-responses-ws" ? options?.providerSessionState : undefined;
 				innerStream = streamOpenAIResponses(responsesModel, proxiedContext, {
 					...baseOptions,
+					// The WebSocket transport is a fetch shim in front of this very
+					// POST: it replays the body over a socket and hands back an
+					// SSE-framed response, and performs the POST itself on any
+					// failure before the first frame. Everything downstream — event
+					// decoding, usage, the watchdogs — stays on the HTTPS path.
+					...(wsSessionState
+						? {
+								fetch: createFactoryDroidResponsesWsFetch({
+									baseFetch: options?.fetch ?? fetch,
+									provider: model.provider,
+									modelId: model.requestModelId ?? model.id,
+									assistantMessageId: requestId,
+									providerSessionState: wsSessionState,
+								}),
+							}
+						: {}),
 					reasoning: effort as "minimal" | "low" | "medium" | "high" | "xhigh" | undefined,
 					// The CLI omits reasoning.summary for xai-routed models (grok);
 					// null suppresses the shared transport's "auto" default.
@@ -566,7 +639,9 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 				} as ModelSpec<"openai-completions">);
 				innerStream = streamOpenAICompletions(openaiModel, proxiedContext, {
 					...baseOptions,
-					temperature: options?.temperature,
+					// droid pins temperature on every completions body; a caller
+					// override still wins.
+					temperature: options?.temperature ?? FACTORY_DROID_COMPLETIONS_TEMPERATURE,
 					topP: options?.topP,
 					topK: options?.topK,
 					minP: options?.minP,

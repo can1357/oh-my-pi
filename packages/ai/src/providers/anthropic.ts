@@ -297,7 +297,7 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 		for (const key in headerSource) {
 			const value = headerSource[key];
 			const lowerKey = key.toLowerCase();
-			if (enforcedHeaderKeys.has(lowerKey)) {
+			if (enforcedHeaderKeys.has(lowerKey) && (oauthToken || !coworkHeaderKeys.has(lowerKey))) {
 				if (allowAnthropicHeaderOverrides && overridableAnthropicHeaderKeys.has(lowerKey)) {
 					anthropicHeaderOverrides[key] = value;
 					continue;
@@ -628,6 +628,15 @@ export const claudeCodeHeaders = {
 	"X-Stainless-Runtime-Version": "v26.3.0",
 	"X-Stainless-Timeout": "600",
 };
+
+/**
+ * Cowork's fingerprint keys. Only the OAuth branch re-emits them, so only that
+ * branch may enforce them: everywhere else nothing would fill the gap and
+ * filtering would silently delete a client identity the caller built on
+ * purpose (Factory Droid mirrors droid's Anthropic SDK fingerprint on this
+ * wire, right down to the 600s client timeout).
+ */
+const coworkHeaderKeys = new Set(Object.keys(claudeCodeHeaders).map(key => key.toLowerCase()));
 
 const enforcedHeaderKeys = new Set(
 	[
@@ -4412,7 +4421,12 @@ export function convertAnthropicMessages(
 						});
 					}
 				} else if (block.type === "redactedThinking") {
-					if (opts?.stripThinkingBlocks || opts?.dropAllThinking || opts?.droppedThinkingBlocks?.has(`redacted:${block.data}`)) continue;
+					if (
+						opts?.stripThinkingBlocks ||
+						opts?.dropAllThinking ||
+						opts?.droppedThinkingBlocks?.has(`redacted:${block.data}`)
+					)
+						continue;
 					if (block.data.trim().length === 0) continue;
 					blocks.push({
 						type: "redacted_thinking",
