@@ -116,6 +116,10 @@
           "type": "boolean",
           "description": "Whether OMP should try to connect this server."
         },
+        "lazy": {
+          "type": "boolean",
+          "description": "Connect on first use instead of at startup. Startup serves the tool definitions cached from the last successful connect; the first tool invocation (or /mcp reconnect) establishes the connection."
+        },
         "timeout": {
           "type": "number",
           "minimum": 0,
