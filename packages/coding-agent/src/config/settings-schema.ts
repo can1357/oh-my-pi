@@ -4560,18 +4560,18 @@ export const SETTINGS_SCHEMA = {
 			group: "Execution",
 			label: "Experimental Speculative Execution",
 			description:
-				"Start discard-safe local reads and isolated staged write/edit transactions before the model finishes streaming, including reads projected from retained JavaScript and Python eval cells. Writes commit only after source revalidation; Eval Auto-Background must be disabled for shadow execution, and nested completion spend has a separate opt-in.",
+				"Master switch for experimental speculative execution. Enabling this alone starts nothing: tools.speculativeExecution.allowedOperations is empty by default, and every operation must be granted explicitly. Speculation is not a sandbox or rollback guarantee; discarded work can still consume local resources, spend provider tokens, or cause externally visible network and filesystem activity.",
 		},
 	},
-	"tools.speculativeExecution.evalCompletions.enabled": {
-		type: "boolean",
-		default: false,
+	"tools.speculativeExecution.allowedOperations": {
+		type: "array",
+		default: EMPTY_STRING_ARRAY,
 		ui: {
 			tab: "tools",
 			group: "Execution",
-			label: "Speculative Eval Completions",
+			label: "Speculative Operation Allowlist",
 			description:
-				"Allow projected eval completion() calls to spend provider tokens after the outer eval call is final but before its cell starts.",
+				"Exact operations permitted to start early: direct.read, direct.write, direct.edit, eval.read, and eval.completion. Reads can perform stale or expensive I/O; staged writes can race concurrent changes or escape isolation through bugs and observers; completions can irreversibly spend tokens, consume rate limits, and send data even when discarded. Unknown entries and wildcards grant nothing.",
 		},
 	},
 

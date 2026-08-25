@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added opt-in speculative execution for host-authorized local reads and nested JavaScript or Python eval reads, with a separate opt-in for nested completion calls.
+- Added default-off speculative execution for explicitly allowlisted local reads, isolated write/edit transactions, and nested JavaScript or Python eval reads or completions.
 
 ## [18.0.6] - 2026-08-26
 

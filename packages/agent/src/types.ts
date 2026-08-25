@@ -577,6 +577,10 @@ export interface SpeculativeResourceAccess {
 	access: "read" | "write";
 }
 
+/**
+ * Describes data crossing an authority boundary. This metadata lets a host make
+ * an informed authorization decision; it does not make egress reversible.
+ */
 export interface SpeculativeEgress {
 	authority: string;
 	origins: readonly SpeculativeInformationOrigin[];
@@ -589,6 +593,14 @@ export type SpeculativeInformationOrigin =
 	| { kind: "remote_read"; authority: string }
 	| { kind: "model_completion"; provider: string; authority: string };
 
+/**
+ * Constrained transport for hosts that deliberately allow speculative GETs.
+ *
+ * GET is not intrinsically harmless: URLs and explicit headers can contain
+ * secrets, and a request can consume quotas, create audit events, trigger work,
+ * or mutate a broken endpoint. `credentials: "omit"` only excludes ambient
+ * credentials. It cannot retract a request or sanitize user-supplied data.
+ */
 export interface HttpsGetSpeculationTransport {
 	url: string;
 	headers: Readonly<Record<string, string>>;
@@ -597,6 +609,15 @@ export interface HttpsGetSpeculationTransport {
 	redirect: "error";
 }
 
+/**
+ * Declares the externally relevant effect of starting a tool before normal
+ * dispatch. Hosts MUST treat this as an authorization input, not a safety
+ * guarantee. In particular, PAL writes can still consume resources, race
+ * concurrent changes, or become observable outside the intended isolation;
+ * remote reads can leak data and trigger server-side effects; model completions
+ * irreversibly spend tokens, consume rate limits, and send their input even
+ * when the speculative result is later discarded.
+ */
 export type ToolSpeculationEffect =
 	| { kind: "pure" }
 	| { kind: "local_read"; resources: readonly SpeculativeResourceAccess[] }

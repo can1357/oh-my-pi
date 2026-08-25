@@ -24,7 +24,12 @@ function createSession(cwd: string): ToolSession {
 		hasUI: false,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
-		settings: Settings.isolated({ "images.autoResize": false, "inspect_image.enabled": false }),
+		settings: Settings.isolated({
+			"images.autoResize": false,
+			"inspect_image.enabled": false,
+			"tools.speculativeExecution.enabled": true,
+			"tools.speculativeExecution.allowedOperations": ["direct.read"],
+		}),
 	};
 }
 

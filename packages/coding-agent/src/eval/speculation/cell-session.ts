@@ -163,9 +163,13 @@ export class EvalShadowCellSession implements ToolSpeculationStreamSession {
 		this.#options = options;
 	}
 
-	update(_toolCall: AgentToolCall, partialJson?: string): void {
+	async update(_toolCall: AgentToolCall, partialJson?: string): Promise<void> {
 		if (this.#closed || partialJson === undefined) return;
 		const decoded = this.#decoder.update(partialJson);
+		if (decoded.kind === "snapshot" ? decoded.snapshot.restart : decoded.restart) {
+			await this.discard("streamed eval argument buffer restarted");
+			return;
+		}
 		if (decoded.kind !== "snapshot") return;
 		this.#language = decoded.snapshot.language ?? "js";
 		this.#updates = this.#updates
@@ -214,7 +218,6 @@ export class EvalShadowCellSession implements ToolSpeculationStreamSession {
 			remainingTimeoutMs,
 		);
 		if (!outcome) return undefined;
-		if (outcome.kind === "error") throw outcome.error;
 		return await outcome.value.handle.commit(outcome.value.args);
 	}
 
@@ -309,7 +312,6 @@ export class EvalShadowCellSession implements ToolSpeculationStreamSession {
 				if (!executionArgs) return;
 				tool = this.#options.session.getToolForEvalBridge?.("read");
 			} else {
-				if (!this.#options.session.settings.get("tools.speculativeExecution.evalCompletions.enabled")) return;
 				try {
 					prepared = await prepareEvalCompletion(runtimeArgs, { session: this.#options.session });
 					const authority = new URL(prepared.model.baseUrl).origin;
@@ -349,24 +351,28 @@ export class EvalShadowCellSession implements ToolSpeculationStreamSession {
 				const outcome = await handle.outcome;
 				if (outcome.kind !== "result") {
 					this.#claims.miss(key);
+					await handle.discard("speculative child did not produce a reusable result").catch(() => undefined);
 					return;
 				}
 				const virtualDurationMs = performance.now() - startedAt;
 				if (outcome.isError) {
-					this.#claims.add(key, { kind: "error", error: outcome.result, virtualDurationMs });
+					this.#claims.miss(key);
+					await handle.discard("speculative child returned an error").catch(() => undefined);
 					return;
 				}
+				const value = bridgeValueFromToolResult(operation.call.name, runtimeArgs, outcome.result);
+				this.#results.set(operation.call.id, {
+					value,
+					origins: [childOrigin(operation.call.name, executionArgs, prepared)],
+				});
 				this.#claims.add(key, {
 					kind: "result",
 					value: { handle, args: executionArgs, name: operation.call.name },
 					virtualDurationMs,
 				});
-				this.#results.set(operation.call.id, {
-					value: bridgeValueFromToolResult(operation.call.name, runtimeArgs, outcome.result),
-					origins: [childOrigin(operation.call.name, executionArgs, prepared)],
-				});
-			} catch (error) {
-				this.#claims.add(key, { kind: "error", error, virtualDurationMs: performance.now() - startedAt });
+			} catch {
+				this.#claims.miss(key);
+				await handle.discard("speculative child execution failed").catch(() => undefined);
 			}
 		} finally {
 			release();

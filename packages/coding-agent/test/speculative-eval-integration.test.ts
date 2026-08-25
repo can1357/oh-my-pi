@@ -74,6 +74,8 @@ describe("streamed eval speculation", () => {
 			"eval.autoBackground.enabled": false,
 			"images.autoResize": false,
 			"inspect_image.enabled": false,
+			"tools.speculativeExecution.enabled": true,
+			"tools.speculativeExecution.allowedOperations": ["eval.read"],
 		});
 		const session: ToolSession = {
 			cwd: directory,
@@ -330,6 +332,166 @@ describe("streamed eval speculation", () => {
 		).resolves.toBe("done");
 		expect(discarded).toBe(true);
 	});
+
+	it("discards admissions projected from a replaced provider argument buffer", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-eval-restart-"));
+		temporaryDirectories.push(directory);
+		await fs.writeFile(path.join(directory, "note.txt"), "content");
+		const settings = Settings.isolated({
+			"eval.autoBackground.enabled": false,
+			"images.autoResize": false,
+			"inspect_image.enabled": false,
+		});
+		const session: ToolSession = {
+			cwd: directory,
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			getEvalSessionId: () => "speculative-eval-restart-test",
+			getToolForEvalBridge: name => (name === "read" ? eraseToolSchema(read) : undefined),
+			getEvalBridgeToolNames: () => ["read"],
+			settings,
+		};
+		const read = new ReadTool(session);
+		const evalTool = new EvalTool(session);
+		await evalTool.execute("warm-restart", { language: "js", code: "globalThis.shadowWarm = true" });
+		const outcome = Promise.withResolvers<SpeculativePhysicalOutcome>();
+		const admitted = Promise.withResolvers<void>();
+		const closeReasons: string[] = [];
+		let admissionCount = 0;
+		let committed = false;
+		const shadow = new EvalShadowCellSession({
+			coordinator: {
+				maxInFlight: 2,
+				async admit(definition) {
+					admissionCount++;
+					admitted.resolve();
+					return {
+						candidateId: definition.candidateId,
+						fingerprint: "test",
+						effect: { kind: "pure" },
+						outcome: outcome.promise,
+						async commit() {
+							committed = true;
+							return undefined;
+						},
+						async discard() {},
+					};
+				},
+				close(reason) {
+					closeReasons.push(reason);
+					outcome.resolve({
+						kind: "result",
+						result: { content: [{ type: "text", text: "discarded" }] },
+						isError: false,
+					});
+				},
+			},
+			parentToolCallId: "eval-restart",
+			session,
+			cwd: directory,
+			sessionId: "speculative-eval-restart-test",
+		});
+		const initialArgs = { language: "js", code: 'tool.read({ path: "note.txt" })' };
+		const initialCall = {
+			type: "toolCall" as const,
+			id: "eval-restart",
+			name: "eval",
+			arguments: initialArgs,
+		};
+
+		await shadow.update(initialCall, JSON.stringify(initialArgs));
+		await admitted.promise;
+		const replacementArgs = { language: "js", code: "42" };
+		await shadow.update({ ...initialCall, arguments: replacementArgs }, JSON.stringify(replacementArgs));
+
+		expect(closeReasons).toEqual(["streamed eval argument buffer restarted"]);
+		expect(admissionCount).toBe(1);
+		expect(committed).toBe(false);
+	});
+
+	it("falls back when a speculative child returns or throws an error", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-eval-failure-"));
+		temporaryDirectories.push(directory);
+		await fs.writeFile(path.join(directory, "note.txt"), "content");
+		const settings = Settings.isolated({
+			"eval.autoBackground.enabled": false,
+			"images.autoResize": false,
+			"inspect_image.enabled": false,
+		});
+		const session: ToolSession = {
+			cwd: directory,
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			getEvalSessionId: () => "speculative-eval-failure-test",
+			getToolForEvalBridge: name => (name === "read" ? eraseToolSchema(read) : undefined),
+			getEvalBridgeToolNames: () => ["read"],
+			settings,
+		};
+		const read = new ReadTool(session);
+		const evalTool = new EvalTool(session);
+		await evalTool.execute("warm-failure", { language: "js", code: "globalThis.shadowWarm = true" });
+
+		for (const failure of ["error-result", "rejection"] as const) {
+			const outcome = Promise.withResolvers<SpeculativePhysicalOutcome>();
+			const admitted = Promise.withResolvers<void>();
+			const discardReasons: string[] = [];
+			const shadow = new EvalShadowCellSession({
+				coordinator: {
+					maxInFlight: 2,
+					async admit(definition) {
+						admitted.resolve();
+						return {
+							candidateId: definition.candidateId,
+							fingerprint: "test",
+							effect: { kind: "pure" },
+							outcome: outcome.promise,
+							async commit() {
+								throw new Error("failed speculative children must never commit");
+							},
+							async discard(reason) {
+								discardReasons.push(reason);
+							},
+						};
+					},
+					close() {},
+				},
+				parentToolCallId: `eval-failure-${failure}`,
+				session,
+				cwd: directory,
+				sessionId: "speculative-eval-failure-test",
+			});
+			const args = { language: "js", code: 'tool.read({ path: "note.txt" })' };
+			const toolCall = {
+				type: "toolCall" as const,
+				id: `eval-failure-${failure}`,
+				name: "eval",
+				arguments: args,
+			};
+
+			await shadow.update(toolCall, JSON.stringify(args));
+			await admitted.promise;
+			if (failure === "error-result") {
+				outcome.resolve({
+					kind: "result",
+					result: { content: [{ type: "text", text: "temporary failure" }], isError: true },
+					isError: true,
+				});
+			} else {
+				outcome.reject(new Error("temporary failure"));
+			}
+			await shadow.finalize({ args });
+
+			await expect(
+				shadow.claim("read", { path: "note.txt" }, { siteId: "js:0", occurrence: 0 }, Number.MAX_SAFE_INTEGER),
+			).resolves.toBeUndefined();
+			expect(discardReasons).toEqual([
+				failure === "error-result" ? "speculative child returned an error" : "speculative child execution failed",
+			]);
+			await shadow.discard("test complete");
+		}
+	});
 });
 
 pythonIt("claims a Python read started before the outer eval call finishes streaming", async () => {
@@ -340,6 +502,8 @@ pythonIt("claims a Python read started before the outer eval call finishes strea
 		"eval.autoBackground.enabled": false,
 		"images.autoResize": false,
 		"inspect_image.enabled": false,
+		"tools.speculativeExecution.enabled": true,
+		"tools.speculativeExecution.allowedOperations": ["eval.read"],
 	});
 	const session: ToolSession = {
 		cwd: directory,
@@ -428,7 +592,8 @@ it("gates a JavaScript completion until final-call reconciliation and claims its
 		"images.autoResize": false,
 		"inspect_image.enabled": false,
 		"tools.approvalMode": "yolo",
-		"tools.speculativeExecution.evalCompletions.enabled": true,
+		"tools.speculativeExecution.enabled": true,
+		"tools.speculativeExecution.allowedOperations": ["eval.completion"],
 	});
 	const model = {
 		id: "nested",

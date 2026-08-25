@@ -6,9 +6,11 @@ export interface ShadowClaimKey {
 	occurrence: number;
 }
 
-export type ShadowClaimOutcome<T> =
-	| { kind: "result"; value: T; virtualDurationMs: number }
-	| { kind: "error"; error: unknown; virtualDurationMs: number };
+export interface ShadowClaimOutcome<T> {
+	kind: "result";
+	value: T;
+	virtualDurationMs: number;
+}
 
 function keyOf(key: ShadowClaimKey): string {
 	return `${key.siteId}\0${key.dynamicPath}\0${key.name}\0${key.fingerprint}\0${key.occurrence}`;

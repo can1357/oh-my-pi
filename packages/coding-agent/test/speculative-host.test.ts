@@ -17,7 +17,10 @@ afterEach(async () => {
 	await Promise.all(temporaryDirectories.splice(0).map(directory => removeWithRetries(directory)));
 });
 
-function createSession(cwd: string): ToolSession {
+function createSession(
+	cwd: string,
+	allowedOperations: string[] | null = ["direct.read", "direct.write", "direct.edit"],
+): ToolSession {
 	return {
 		cwd,
 		hasUI: false,
@@ -27,9 +30,42 @@ function createSession(cwd: string): ToolSession {
 			"images.autoResize": false,
 			"inspect_image.enabled": false,
 			"tools.approvalMode": "yolo",
+			"tools.speculativeExecution.enabled": true,
+			...(allowedOperations === null ? {} : { "tools.speculativeExecution.allowedOperations": allowedOperations }),
 		}),
 	};
 }
+
+it("starts no operation when the explicit allowlist is left at its empty default", async () => {
+	const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-host-"));
+	temporaryDirectories.push(directory);
+	await fs.writeFile(path.join(directory, "note.txt"), "content");
+	const session = createSession(directory, null);
+	const tool = new ReadTool(session);
+	const assessment = await tool.speculation.finalized?.assess({ args: { path: "note.txt" } });
+	if (!assessment?.eligible) throw new Error("expected local read assessment to succeed");
+	const host = new CodingAgentSpeculativeExecutionHost(session.settings, session, { hasHandlers: () => false });
+
+	expect(
+		await host.authorize({
+			candidateId: "read-disabled",
+			source: "direct",
+			dependencies: [],
+			tool,
+			toolCall: {
+				type: "toolCall",
+				id: "read-disabled",
+				name: "read",
+				arguments: { path: "note.txt" },
+			},
+			args: { path: "note.txt" },
+			effect: assessment.effect,
+		}),
+	).toEqual({
+		allowed: false,
+		reason: 'speculative operation "direct.read" is not allowlisted',
+	});
+});
 
 describe("CodingAgentSpeculativeExecutionHost", () => {
 	it("rejects a read candidate whose source resource changed before claim", async () => {
