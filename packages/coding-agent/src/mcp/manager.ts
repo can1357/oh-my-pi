@@ -510,6 +510,7 @@ export class MCPManager {
 
 		// Prepare connection tasks
 		const connectionTasks: ConnectionTask[] = [];
+		const lazyServers: Array<{ name: string; config: MCPServerConfig }> = [];
 
 		for (const [name, config] of Object.entries(configs)) {
 			if (sources[name]) {
@@ -531,6 +532,27 @@ export class MCPManager {
 				this.#pendingToolLoads.has(name) ||
 				this.#pendingReconnections.has(name)
 			) {
+				continue;
+			}
+
+			// Lazy servers never connect at startup: validate, remember the
+			// config, and (below) serve the tool definitions cached from the
+			// last successful connect. The first real demand establishes the
+			// connection — a tool invocation's reconnect fallback in
+			// `DeferredMCPTool.execute`, or an explicit `/mcp reconnect`. This
+			// keeps servers whose spawn has boot-hostile side effects
+			// (credential prompts, approval flows) dormant until actually used.
+			if (config.lazy) {
+				const validationErrors = validateServerConfig(name, config);
+				if (validationErrors.length > 0) {
+					const message = validationErrors.join("; ");
+					errors.set(name, message);
+					validationFailures.push({ name, message });
+					reportedErrors.add(name);
+					continue;
+				}
+				this.#serverConfigs.set(name, config);
+				lazyServers.push({ name, config });
 				continue;
 			}
 
@@ -678,9 +700,35 @@ export class MCPManager {
 		// Notify about servers we're connecting to, including configs that fail fast.
 		if (statusServerNames.length > 0) {
 			notify({ type: "connecting", serverNames: statusServerNames });
-			for (const { name, message } of validationFailures) {
-				notify(createMcpStartupFailure(name, message, sources[name]));
-			}
+		}
+		for (const { name, message } of validationFailures) {
+			notify(createMcpStartupFailure(name, message, sources[name]));
+		}
+
+		// Register lazy servers' cached tools as deferred: `waitForConnection`
+		// throws while nothing is in flight, which routes the first invocation
+		// through the tool's reconnect fallback and connects on demand. A lazy
+		// server with no cache yet stays tool-less until `/mcp reconnect <name>`
+		// seeds it.
+		if (lazyServers.length > 0 && this.toolCache) {
+			await Promise.all(
+				lazyServers.map(async ({ name, config }) => {
+					const cached = await this.toolCache?.get(name, config);
+					if (!cached) return;
+					const reconnect = (options?: { authChallenge?: MCPAuthChallenge }) =>
+						this.reconnectServer(name, options);
+					this.#replaceServerTools(
+						name,
+						DeferredMCPTool.fromTools(
+							name,
+							cached,
+							() => this.waitForConnection(name),
+							this.#sources.get(name),
+							reconnect,
+						),
+					);
+				}),
+			);
 		}
 
 		if (connectionTasks.length > 0) {

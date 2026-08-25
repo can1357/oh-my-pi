@@ -17,6 +17,12 @@ export interface MCPServer {
 	name: string;
 	/** Whether this server is enabled (default: true) */
 	enabled?: boolean;
+	/**
+	 * Connect on first use instead of at startup. Startup serves the tool
+	 * definitions cached from the last successful connect; the first tool
+	 * invocation (or `/mcp reconnect`) establishes the real connection.
+	 */
+	lazy?: boolean;
 	/** Connection timeout in milliseconds */
 	timeout?: number;
 	/** Encoding for outgoing JSON-RPC request ids (default: `"number"`) */
