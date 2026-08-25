@@ -329,7 +329,7 @@ const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const FIVE_MIN_MS = 5 * 60 * 1000;
 
-type TimeRange = "1h" | "24h" | "7d" | "30d" | "90d" | "all";
+type TimeRange = "today" | "1h" | "24h" | "7d" | "30d" | "90d" | "all";
 
 interface TimeRangeConfig {
 	timeSeriesHours: number;
@@ -345,6 +345,17 @@ interface TimeRangeConfig {
 const DEFAULT_TIME_RANGE: TimeRange = "24h";
 
 const TIME_RANGE_TO_CONFIG: Record<TimeRange, Omit<TimeRangeConfig, "cutoff">> = {
+	// Midnight-anchored window: same hourly bucketing as "24h", but the cutoff
+	// is local midnight rather than a rolling 24h (resolved below).
+	today: {
+		timeSeriesHours: 24,
+		timeSeriesBucketMs: HOUR_MS,
+		modelSeriesDays: 1,
+		modelSeriesBucketMs: HOUR_MS,
+		modelPerformanceDays: 1,
+		modelPerformanceBucketMs: HOUR_MS,
+		costSeriesDays: 1,
+	},
 	"1h": {
 		timeSeriesHours: 1,
 		timeSeriesBucketMs: FIVE_MIN_MS,
@@ -403,6 +414,12 @@ const TIME_RANGE_TO_CONFIG: Record<TimeRange, Omit<TimeRangeConfig, "cutoff">> =
 
 export function getTimeRangeConfig(range?: string | null): TimeRangeConfig {
 	const normalized = range?.trim().toLowerCase() ?? DEFAULT_TIME_RANGE;
+	if (normalized === "today") {
+		const config = TIME_RANGE_TO_CONFIG.today;
+		const midnight = new Date();
+		midnight.setHours(0, 0, 0, 0);
+		return { ...config, cutoff: midnight.getTime() };
+	}
 	const config = TIME_RANGE_TO_CONFIG[normalized as TimeRange];
 	if (config) {
 		const cutoff = normalized === "all" ? null : Date.now() - Math.max(1, config.timeSeriesHours * 60 * 60 * 1000);

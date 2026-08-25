@@ -7,6 +7,7 @@ export interface RangeControlProps {
 }
 
 const RANGE_OPTIONS: { value: TimeRange; label: string }[] = [
+	{ value: "today", label: "Today" },
 	{ value: "1h", label: "1h" },
 	{ value: "24h", label: "24h" },
 	{ value: "7d", label: "7d" },
@@ -27,6 +28,7 @@ export function RangeControl({ value, onChange, className = "" }: RangeControlPr
 						role="radio"
 						aria-checked={isActive}
 						data-active={isActive ? "true" : "false"}
+						data-value={opt.value}
 						className="stats-range-control-btn"
 						onClick={() => onChange(opt.value)}
 					>
