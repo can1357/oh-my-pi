@@ -4,6 +4,8 @@
  * Handles `omp stats` subcommand for viewing AI usage statistics.
  */
 
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { truncateToWidth } from "@oh-my-pi/pi-tui/utils";
 import { formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -60,6 +62,8 @@ export interface StatsCommandArgs {
 	host: string;
 	json: boolean;
 	summary: boolean;
+	action?: string;
+	name?: string;
 }
 
 function formatCost(n: number): string {
@@ -72,6 +76,149 @@ function normalizePremiumRequests(n: number): number {
 	return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 
+/**
+ * Scaffold a blank starter site for the OMP Stats v1 API.
+ * Creates a minimal package.json, index.ts, and README.md in the target directory.
+ */
+async function createSite(name: string): Promise<void> {
+	// Validate: must be a simple relative name, no path traversal
+	if (!name || name === '.' || name === '..' || path.isAbsolute(name) || name.includes('..')) {
+		console.error(chalk.red('Invalid site name. Use a simple directory name (e.g. "my-dashboard").'));
+		process.exit(1);
+	}
+
+	const targetDir = path.resolve(process.cwd(), name);
+
+	// Fail if target already exists
+	try {
+		await fs.access(targetDir);
+		console.error(chalk.red(`Directory already exists: ${targetDir}`));
+		console.error(chalk.dim('Remove it first or choose a different name.'));
+		process.exit(1);
+	} catch {
+		// ENOENT — proceed
+	}
+
+	await fs.mkdir(path.join(targetDir, 'src'), { recursive: true });
+
+	// package.json
+	const packageJson = {
+		name,
+		version: '0.1.0',
+		private: true,
+		type: 'module',
+		scripts: {
+			dev: 'bun run src/server.ts',
+		},
+		dependencies: {
+			'@oh-my-pi/omp-stats': 'latest',
+		},
+	};
+	await fs.writeFile(path.join(targetDir, 'package.json'), JSON.stringify(packageJson, null, 2) + '\n');
+
+	// Dev server: serves static files, proxies /api/* to stats server.
+	const serverCode = [
+		'import * as http from "node:http";',
+		'import * as fs from "node:fs";',
+		'import * as path from "node:path";',
+		'',
+		'const PORT = 3000;',
+		'const STATS_URL = "http://127.0.0.1:3847";',
+		'',
+		'const MIME = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css" };',
+		'',
+		'const server = http.createServer(async (req, res) => {',
+		'	const url = new URL(req.url ?? "/", "http://localhost:" + PORT);',
+		'',
+		'	if (url.pathname.startsWith("/api/")) {',
+		'		const upstream = new URL(url.pathname + url.search, STATS_URL);',
+		'		const resp = await fetch(upstream, { method: req.method });',
+		'		resp.headers.forEach((v, k) => res.setHeader(k, v));',
+		'		res.writeHead(resp.status);',
+		'		res.end(await resp.arrayBuffer());',
+		'		return;',
+		'	}',
+		'',
+		'	const filePath = url.pathname === "/" ? "./index.html" : "." + url.pathname;',
+		'	try {',
+		'		const content = fs.readFileSync(path.resolve(filePath));',
+		'		const ext = path.extname(filePath);',
+		'		res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream" });',
+		'		res.end(content);',
+		'	} catch {',
+		'		res.writeHead(404);',
+		'		res.end("Not Found");',
+		'	}',
+		'});',
+		'',
+		'server.listen(PORT, "127.0.0.1", () => {',
+		'	console.log("Dev server: http://127.0.0.1:" + PORT);',
+		'});',
+		'',
+	].join('\n');
+	await fs.writeFile(path.join(targetDir, 'src', 'server.ts'), serverCode);
+
+	// index.html — neutral unbranded page, fetches and renders one metric
+	const indexHtml = [
+		'<!DOCTYPE html>',
+		'<html lang="en">',
+		'<head>',
+		'  <meta charset="UTF-8">',
+		'  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
+		`  <title>${name}</title>`,
+		'</head>',
+		'<body>',
+		'  <h1 id="title"></h1>',
+		'  <p id="value"></p>',
+		'  <script>',
+		'    (async function () {',
+		'      var res = await fetch("/api/v1/overview?range=7d");',
+		'      if (!res.ok) throw new Error("API " + res.status);',
+		'      var data = await res.json();',
+		'      document.getElementById("title").textContent = "Total requests in 7d";',
+		'      document.getElementById("value").textContent = data.overall.totalRequests;',
+		'    })().catch(function (err) {',
+		'      document.getElementById("value").textContent = "Error: " + err.message;',
+		'    });',
+		'  </script>',
+		'</body>',
+		'</html>',
+		'',
+	].join('\n');
+	await fs.writeFile(path.join(targetDir, 'index.html'), indexHtml);
+
+	const readme = `# ${name}
+
+A custom OMP Stats frontend using the v1 API.
+
+## Quick Start
+
+\`\`\`bash
+bun install
+bun run dev
+\`\`\`
+
+The dev server runs on port 3000 and proxies \`/api/*\` to the
+OMP Stats server on port 3847.
+
+## API
+
+See \`@oh-my-pi/omp-stats/client-sdk\` for the typed SDK, or
+fetch \`/api/v1/overview\`, \`/api/v1/models\`, etc. directly.
+`;
+	await fs.writeFile(path.join(targetDir, 'README.md'), readme);
+
+	console.log(chalk.green(`Created site: ${targetDir}`));
+	console.log(chalk.dim('  package.json'));
+	console.log(chalk.dim('  index.html'));
+	console.log(chalk.dim('  src/server.ts'));
+	console.log(chalk.dim('  README.md'));
+	console.log();
+	console.log(`  cd ${name} && bun install && bun run dev`);
+}
+
+
+
 // =============================================================================
 // Command Handler
 // =============================================================================
@@ -80,6 +227,18 @@ export async function runStatsCommand(cmd: StatsCommandArgs): Promise<void> {
 	// Lazy import to avoid loading stats module when not needed
 	const { closeDb, formatStatsDashboardUrl, getDashboardStats, getTotalMessageCount, startServer, syncAllSessions } =
 		await import("@oh-my-pi/omp-stats");
+
+
+	// Handle create-site action before syncing (no DB needed)
+	if (cmd.action === "create-site") {
+		const name = cmd.name?.trim();
+		if (!name) {
+			console.error(chalk.red("Site name is required. Usage: omp stats create-site <name>"));
+			process.exit(1);
+		}
+		await createSite(name);
+		return;
+	}
 
 	// Sync session files first
 	const progress = createSyncProgressReporter();

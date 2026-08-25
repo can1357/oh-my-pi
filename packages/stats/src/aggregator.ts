@@ -581,11 +581,11 @@ export async function getTotalMessageCount(): Promise<number> {
 
 export async function getBehaviorDashboardStats(range?: string | null): Promise<BehaviorDashboardStats> {
 	await initDb();
-	const { cutoff } = getTimeRangeConfig(range);
+	const { cutoff, bucketOrigin } = getTimeRangeConfig(range);
 	return {
 		overall: getBehaviorOverall(cutoff),
 		byModel: getBehaviorByModel(cutoff),
-		behaviorSeries: getBehaviorTimeSeries(cutoff),
+		behaviorSeries: getBehaviorTimeSeries(cutoff, bucketOrigin),
 	};
 }
 

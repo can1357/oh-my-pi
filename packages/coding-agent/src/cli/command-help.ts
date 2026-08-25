@@ -50,10 +50,6 @@ export const galleryHelp = {
 } satisfies CommandMetadata;
 
 export const gcHelp = { description: "Run storage garbage collection" } satisfies CommandMetadata;
-export const ifBenchHelp = {
-	description:
-		"Benchmark instruction following and working memory: one cached thread of glyph array actions with a moving cat-sound directive",
-} satisfies CommandMetadata;
 export const gitHelp = {
 	description: "Interactive fullscreen git UI: split diff viewer, staging sidebar, and commit composer",
 } satisfies CommandMetadata;

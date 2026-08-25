@@ -1771,16 +1771,16 @@ interface BehaviorSeriesRow {
 	blame: number | null;
 	chars: number | null;
 }
-
 /**
  * Daily behavioral time series, grouped by responding model+provider.
+ * @param origin - Bucket anchor (ms); 0 keeps Unix-epoch day alignment.
  */
-export function getBehaviorTimeSeries(cutoff?: number | null): BehaviorTimeSeriesPoint[] {
+export function getBehaviorTimeSeries(cutoff?: number | null, origin = 0): BehaviorTimeSeriesPoint[] {
 	if (!db) return [];
 	const hasCutoff = cutoff !== null && cutoff !== undefined && cutoff > 0;
 	const stmt = db.prepare(`
 		SELECT
-			(timestamp / 86400000) * 86400000 as bucket,
+			((timestamp - ?) / 86400000) * 86400000 + ? as bucket,
 			COALESCE(model, ?) as model,
 			COALESCE(provider, ?) as provider,
 			COUNT(*) as messages,
@@ -1797,7 +1797,9 @@ export function getBehaviorTimeSeries(cutoff?: number | null): BehaviorTimeSerie
 		ORDER BY bucket ASC
 	`);
 	const rows = (
-		hasCutoff ? stmt.all(UNKNOWN_MODEL, UNKNOWN_MODEL, cutoff) : stmt.all(UNKNOWN_MODEL, UNKNOWN_MODEL)
+		hasCutoff
+			? stmt.all(origin, origin, UNKNOWN_MODEL, UNKNOWN_MODEL, cutoff)
+			: stmt.all(origin, origin, UNKNOWN_MODEL, UNKNOWN_MODEL)
 	) as BehaviorSeriesRow[];
 	return rows.map(row => ({
 		timestamp: row.bucket,

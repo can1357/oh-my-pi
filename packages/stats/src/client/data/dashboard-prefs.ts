@@ -200,7 +200,7 @@ function persist(prefs: StatsDashboardPrefs): void {
 
 let current: StatsDashboardPrefs = readStored();
 const listeners = new Set<() => void>();
-let persistTimer: ReturnType<typeof setTimeout> | null = null;
+let persistTimer: Timer | null = null;
 
 function emit(): void {
 	for (const listener of listeners) listener();

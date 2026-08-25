@@ -114,7 +114,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 		enabled: active,
 		pollMs: 30000,
 	});
-	const recentRes = useResource(["recent-requests", refreshTrigger], s => getRecentRequests(12, s), {
+	const recentRes = useResource(["recent-requests", range, refreshTrigger], s => getRecentRequests(12, range, s), {
 		enabled: active,
 		pollMs: 30000,
 	});
@@ -438,7 +438,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 						/>
 						Elevated error rate — {formatPercent(overview!.overall.errorRate)} ·{" "}
 						{formatInteger(overview!.overall.failedRequests)} failures in this window.{" "}
-						<a href="#/errors?range=today" style={{ color: "var(--danger)", textDecoration: "underline" }}>
+						<a href={`#/errors?range=${range}`} style={{ color: "var(--danger)", textDecoration: "underline" }}>
 							Inspect errors
 						</a>
 					</div>
@@ -923,9 +923,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 								{providerRes.data && (
 									<ProvidersMini
 										providers={providerRes.data.providers.slice(0, 4)}
-										totalTokens={providerRes.data.providers
-											.slice(0, 4)
-											.reduce((sum, pr) => sum + pr.totalTokens, 0)}
+										totalTokens={providerRes.data.providers.reduce((sum, pr) => sum + pr.totalTokens, 0)}
 									/>
 								)}
 							</AsyncBoundary>

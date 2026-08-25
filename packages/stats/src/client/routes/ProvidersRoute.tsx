@@ -1,12 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { getProviderDashboardStats } from "../api";
-import { CHART_THEMES } from "../components/chart-shared";
 import { formatCompact, formatEstimatedCost, formatInteger, formatPercent } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import { type ProviderSortKey, providerFailureTone, type SortDir, sortProviderRows } from "../data/view-models";
 import type { ProviderAggregate, TimeRange } from "../types";
 import { AsyncBoundary } from "../ui";
-import { useSystemTheme } from "../useSystemTheme";
 
 export interface ProvidersRouteProps {
 	active: boolean;
@@ -316,8 +314,6 @@ function ProviderRanked({ providers, range }: { providers: ProviderAggregate[]; 
 }
 
 function ProviderMiniTrend({ provider, range }: { provider: string; range: TimeRange }) {
-	const theme = useSystemTheme();
-	const chartTheme = CHART_THEMES[theme];
 	// We don't have per-provider series loaded here; show placeholder that this would be per-provider trend if needed.
 	// To keep data honest, we show a compact note instead of invented data.
 	return (

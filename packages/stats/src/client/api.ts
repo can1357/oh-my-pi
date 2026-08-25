@@ -82,11 +82,16 @@ export async function getCostDashboardStats(
 	);
 }
 
-export async function getRecentRequests(limit = 50, signal?: AbortSignal): Promise<MessageStats[]> {
+export async function getRecentRequests(
+	limit = 50,
+	range: TimeRange = "24h",
+	signal?: AbortSignal,
+): Promise<MessageStats[]> {
 	try {
-		const res = await fetchJson<{ requests: MessageStats[]; total: number }>(`${V1_BASE}/requests?limit=${limit}`, {
-			signal,
-		});
+		const res = await fetchJson<{ requests: MessageStats[]; total: number }>(
+			`${V1_BASE}/requests?range=${encodeURIComponent(range)}&limit=${limit}`,
+			{ signal },
+		);
 		if (Array.isArray(res as unknown as MessageStats[])) return res as unknown as MessageStats[];
 		if (res && Array.isArray(res.requests)) return res.requests;
 		return [];
