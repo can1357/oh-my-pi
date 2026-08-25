@@ -5,6 +5,7 @@ import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import {
 	getRecentErrors as dbGetRecentErrors,
 	getRecentRequests as dbGetRecentRequests,
+	getRequestsPaginated as dbGetRequestsPaginated,
 	getBehaviorByModel,
 	getBehaviorOverall,
 	getBehaviorTimeSeries,
@@ -506,6 +507,18 @@ export async function getFolderStats(range?: string | null): Promise<FolderStats
 export async function getRecentRequests(limit?: number): Promise<MessageStats[]> {
 	await initDb();
 	return dbGetRecentRequests(limit);
+}
+
+/**
+ * Paginated requests with real total count.
+ * Returns the actual total number of rows (not min(total, limit+offset)).
+ */
+export async function getRequestsPaginated(
+	limit: number,
+	offset: number,
+): Promise<{ items: MessageStats[]; total: number }> {
+	await initDb();
+	return dbGetRequestsPaginated(limit, offset);
 }
 
 export async function getRecentErrors(range?: string | null, limit?: number): Promise<MessageStats[]> {

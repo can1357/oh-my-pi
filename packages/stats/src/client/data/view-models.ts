@@ -6,7 +6,10 @@ import type {
 	BehaviorTimeSeriesPoint,
 	CostTimeSeriesPoint,
 	FolderStats,
+	MessageStats,
 	ModelPerformancePoint,
+	ModelStats,
+	ProviderAggregate,
 	TimeRange,
 	ToolUsageStats,
 } from "../types";
@@ -259,4 +262,211 @@ export function buildToolRows(tools: ToolUsageStats[]): ToolRowView[] {
 		errorRate: t.calls > 0 ? t.errors / t.calls : 0,
 		callsPercentage: maxCalls > 0 ? (t.calls / maxCalls) * 100 : 0,
 	}));
+}
+// ---------------------------------------------------------------------------
+// Model rows — share bars + sorting (client-side view-model, no server change)
+// ---------------------------------------------------------------------------
+
+export type ModelSortKey = "requests" | "tokens" | "cost" | "cache" | "errorRate" | "model";
+export type SortDir = "asc" | "desc";
+
+export interface ModelRowView extends ModelStats {
+	/** Share of total requests, 0-1. */
+	share: number;
+	/** Total tokens (input+output+cache). */
+	totalTokens: number;
+}
+
+export function buildModelRows(models: ModelStats[]): ModelRowView[] {
+	const totalRequests = models.reduce((sum, m) => sum + m.totalRequests, 0);
+	return models.map(m => ({
+		...m,
+		share: totalRequests > 0 ? m.totalRequests / totalRequests : 0,
+		totalTokens: m.totalInputTokens + m.totalOutputTokens + m.totalCacheReadTokens + m.totalCacheWriteTokens,
+	}));
+}
+
+export function sortModelRows(rows: ModelRowView[], key: ModelSortKey, dir: SortDir): ModelRowView[] {
+	const mul = dir === "asc" ? 1 : -1;
+	return [...rows].sort((a, b) => {
+		let cmp = 0;
+		switch (key) {
+			case "requests":
+				cmp = a.totalRequests - b.totalRequests;
+				break;
+			case "tokens":
+				cmp = a.totalTokens - b.totalTokens;
+				break;
+			case "cost":
+				cmp = a.totalCost - b.totalCost;
+				break;
+			case "cache":
+				cmp = a.cacheRate - b.cacheRate;
+				break;
+			case "errorRate":
+				cmp = a.errorRate - b.errorRate;
+				break;
+			case "model":
+				cmp = a.model.localeCompare(b.model);
+				break;
+		}
+		if (cmp !== 0) return cmp * mul;
+		return b.totalRequests - a.totalRequests;
+	});
+}
+
+// ---------------------------------------------------------------------------
+// Provider rows — sorting + elevated failure flag
+// ---------------------------------------------------------------------------
+
+export type ProviderSortKey = "requests" | "cost" | "failure" | "cache" | "provider";
+export type ProviderFailureTone = "ok" | "warning" | "danger";
+
+export function providerFailureTone(errorRate: number): ProviderFailureTone {
+	if (errorRate >= 0.08) return "danger";
+	if (errorRate >= 0.03) return "warning";
+	return "ok";
+}
+
+export function sortProviderRows(rows: ProviderAggregate[], key: ProviderSortKey, dir: SortDir): ProviderAggregate[] {
+	const mul = dir === "asc" ? 1 : -1;
+	return [...rows].sort((a, b) => {
+		let cmp = 0;
+		switch (key) {
+			case "requests":
+				cmp = a.totalRequests - b.totalRequests;
+				break;
+			case "cost":
+				cmp = a.totalCost - b.totalCost;
+				break;
+			case "failure": {
+				const ar = a.totalRequests > 0 ? a.failedRequests / a.totalRequests : 0;
+				const br = b.totalRequests > 0 ? b.failedRequests / b.totalRequests : 0;
+				cmp = ar - br;
+				break;
+			}
+			case "cache": {
+				const ar = a.totalTokens > 0 ? a.totalCacheReadTokens / a.totalTokens : 0;
+				const br = b.totalTokens > 0 ? b.totalCacheReadTokens / b.totalTokens : 0;
+				cmp = ar - br;
+				break;
+			}
+			case "provider":
+				cmp = a.provider.localeCompare(b.provider);
+				break;
+		}
+		if (cmp !== 0) return cmp * mul;
+		return b.totalRequests - a.totalRequests;
+	});
+}
+
+// ---------------------------------------------------------------------------
+// Errors — normalize + group (client-side view-model for the explorer)
+// ---------------------------------------------------------------------------
+
+export type ErrorGroupBy = "error" | "provider" | "model";
+
+export function normalizeErrorMessage(msg: string | null): string {
+	if (!msg) return "Unknown error";
+	let s = msg.trim();
+	// Collapse whitespace and take first line only (often stack follows).
+	s = s.split("\n")[0] ?? s;
+	s = s.replace(/\s+/g, " ").trim();
+	// Strip leading status codes in brackets like [403] or "Error:" prefix noise? Keep as part of signature
+	// Normalize: lower doesn't — keep case for display but key is lowercased.
+	// For key purposes we lowercase and strip trailing punctuation.
+	// Also truncate very long messages to 160 chars for grouping stability.
+	if (s.length > 160) s = s.slice(0, 160);
+	return s || "Unknown error";
+}
+
+export function errorGroupKey(msg: string | null, provider: string, model: string, groupBy: ErrorGroupBy): string {
+	const norm = normalizeErrorMessage(msg).toLowerCase();
+	switch (groupBy) {
+		case "provider":
+			return provider || "unknown";
+		case "model":
+			return model || "unknown";
+		default:
+			return `${provider}::${norm}`;
+	}
+}
+
+export interface ErrorGroup {
+	key: string;
+	signature: string;
+	provider: string;
+	model: string;
+	count: number;
+	items: MessageStats[];
+	latestTimestamp: number;
+	representativeMessage: string;
+}
+
+export function groupErrors(messages: MessageStats[], groupBy: ErrorGroupBy = "error"): ErrorGroup[] {
+	const map = new Map<string, ErrorGroup>();
+	for (const m of messages) {
+		if (!m.errorMessage) continue;
+		const key = errorGroupKey(m.errorMessage, m.provider, m.model, groupBy);
+		const sig =
+			groupBy === "provider" ? m.provider : groupBy === "model" ? m.model : normalizeErrorMessage(m.errorMessage);
+		const existing = map.get(key);
+		if (existing) {
+			existing.count += 1;
+			existing.items.push(m);
+			if (m.timestamp > existing.latestTimestamp) existing.latestTimestamp = m.timestamp;
+		} else {
+			map.set(key, {
+				key,
+				signature: sig,
+				provider: m.provider,
+				model: m.model,
+				count: 1,
+				items: [m],
+				latestTimestamp: m.timestamp,
+				representativeMessage: normalizeErrorMessage(m.errorMessage),
+			});
+		}
+	}
+	const groups = [...map.values()];
+	// Most frequent / most recent first: sort by count desc then latest desc.
+	groups.sort((a, b) => {
+		if (b.count !== a.count) return b.count - a.count;
+		return b.latestTimestamp - a.latestTimestamp;
+	});
+	// Within each group sort occurrences newest first for detail list.
+	for (const g of groups) g.items.sort((a, b) => b.timestamp - a.timestamp);
+	return groups;
+}
+
+// ---------------------------------------------------------------------------
+// Requests — sort helpers (re-used for the explorer table)
+// ---------------------------------------------------------------------------
+
+export type RequestSortKey = "timestamp" | "tokens" | "cost" | "duration" | "model";
+
+export function sortRequests(rows: MessageStats[], key: RequestSortKey, dir: SortDir): MessageStats[] {
+	const mul = dir === "asc" ? 1 : -1;
+	return [...rows].sort((a, b) => {
+		let cmp = 0;
+		switch (key) {
+			case "timestamp":
+				cmp = a.timestamp - b.timestamp;
+				break;
+			case "tokens":
+				cmp = a.usage.totalTokens - b.usage.totalTokens;
+				break;
+			case "cost":
+				cmp = a.usage.cost.total - b.usage.cost.total;
+				break;
+			case "duration":
+				cmp = (a.duration ?? 0) - (b.duration ?? 0);
+				break;
+			case "model":
+				cmp = a.model.localeCompare(b.model);
+				break;
+		}
+		if (cmp !== 0) return cmp * mul;
+		return b.timestamp - a.timestamp;
+	});
 }

@@ -1,5 +1,5 @@
 import { format } from "@oh-my-pi/pi-utils/dates";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Line } from "react-chartjs-2";
 import {
 	getFolderStats,
@@ -16,16 +16,22 @@ import { formatRangeTick } from "../components/range-meta";
 import { formatCompact, formatDurationMs, formatEstimatedCost, formatInteger, formatPercent } from "../data/formatters";
 import {
 	activeDaysFromSeries,
-	loadPrefs,
-	nextPrefsOnToggle,
+	createDashboard,
+	DASHBOARD_STORAGE_KEY,
+	type Dashboard,
+	type DashboardState,
+	deleteDashboard,
+	duplicateDashboard,
+	loadDashboardState,
 	type OverviewSectionKey,
-	PRESET_DEFS,
-	type PrefsState,
-	type PresetId,
-	prefsForPreset,
+	renameDashboard,
+	resetAllDashboards,
+	resetDashboard,
 	SECTION_LABELS,
 	SECTION_ORDER,
-	STORAGE_KEY,
+	saveDashboardState,
+	setActiveDashboard,
+	updateDashboardVisible,
 } from "../data/overview-prefs";
 import { useResource } from "../data/useResource";
 import type {
@@ -37,21 +43,18 @@ import type {
 	TimeRange,
 	ToolUsageStats,
 } from "../types";
-import { AsyncBoundary, DataTable, Panel, Skeleton, StatusPill } from "../ui";
+import { AsyncBoundary, DataTable, Skeleton, StatusPill } from "../ui";
 import { useSystemTheme } from "../useSystemTheme";
 
-function useOverviewPrefs() {
-	const [prefs, setPrefs] = useState<PrefsState>(() => loadPrefs());
+function useDashboardPrefs() {
+	const [state, setState] = useState(() => loadDashboardState());
 	useEffect(() => {
 		try {
-			localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
-		} catch {
-			// ignore quota
-		}
-	}, [prefs]);
-	const setPreset = (id: PresetId) => setPrefs(prefsForPreset(id));
-	const toggle = (key: OverviewSectionKey) => setPrefs(prev => nextPrefsOnToggle(prev, key));
-	return { prefs, setPreset, toggle };
+			localStorage.setItem(DASHBOARD_STORAGE_KEY, JSON.stringify(state));
+		} catch {}
+		saveDashboardState(state);
+	}, [state]);
+	return { state, setState } as const;
 }
 
 // ---------------------------------------------------------------------------
@@ -66,7 +69,15 @@ export interface OverviewRouteProps {
 }
 
 export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }: OverviewRouteProps) {
-	const { prefs, setPreset, toggle } = useOverviewPrefs();
+	const { state: dashState, setState: setDashState } = useDashboardPrefs();
+	const activeDash = useMemo(
+		() => dashState.dashboards.find(d => d.id === dashState.activeId) ?? dashState.dashboards[0],
+		[dashState],
+	);
+	const v = activeDash.visible;
+	const [newName, setNewName] = useState("");
+	const [renaming, setRenaming] = useState(false);
+	const [renameValue, setRenameValue] = useState("");
 
 	const overviewRes = useResource(["overview", range, refreshTrigger], s => getOverviewStats(range, s), {
 		enabled: active,
@@ -109,7 +120,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 	const chartColors = useMemo(() => {
 		const style =
 			typeof document !== "undefined" ? getComputedStyle(document.body) : (null as unknown as CSSStyleDeclaration);
-		const req = style?.getPropertyValue("--chart-req").trim() || "oklch(0.817 0.112 205)";
+		const req = style?.getPropertyValue("--chart-req").trim() || "oklch(0.68 0.015 307)";
 		const err = style?.getPropertyValue("--chart-err").trim() || "oklch(0.66 0.19 25)";
 		return { req, err };
 	}, [theme]);
@@ -125,7 +136,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 				borderColor: chartColors.req,
 				backgroundColor: `color-mix(in oklab, ${chartColors.req} 8%, transparent)`,
 				tension: 0.32,
-				borderWidth: 1.5,
+				borderWidth: 1.6,
 				pointRadius,
 				pointHoverRadius: 4,
 				fill: true,
@@ -146,6 +157,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 		}
 		return { labels, datasets };
 	}, [timeSeries, range, chartColors, hasChartErrors]);
+
 	const chartOptions = useMemo(
 		() => ({
 			responsive: true,
@@ -172,7 +184,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 					grid: { color: chartTheme.grid, drawBorder: false },
 					ticks: {
 						color: chartTheme.tick,
-						font: { size: 10, family: "ui-monospace" },
+						font: { size: 10, family: "var(--font-mono)" },
 						maxRotation: 0,
 						autoSkip: true,
 						maxTicksLimit: 8,
@@ -181,7 +193,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 				},
 				y: {
 					grid: { color: chartTheme.grid, drawBorder: false },
-					ticks: { color: chartTheme.tick, font: { size: 10 } },
+					ticks: { color: chartTheme.tick, font: { size: 10, family: "var(--font-mono)" } },
 					min: 0,
 					border: { display: false },
 				},
@@ -306,133 +318,38 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 	);
 
 	const previewRequests = useMemo(() => recentRes.data?.slice(0, 8) ?? [], [recentRes.data]);
-
-	const v = prefs.visible;
+	const showHealthBanner = (overview?.overall.errorRate ?? 0) > 0.05;
+	const toggle = (key: OverviewSectionKey) => setDashState(s => updateDashboardVisible(s, activeDash.id, key));
 
 	return (
-		<div className="stats-route-container space-y-4">
-			{/* Range-aware subtitle + preset bar */}
-			<div className="stats-overview-toolbar">
-				<div className="flex items-center gap-2 flex-wrap">
-					<span className="stats-panel-eyebrow" style={{ margin: 0 }}>
-						Overview
+		<div className="stats-route-container">
+			<div className="omp-hero">
+				<div className="omp-hero-head">
+					<h2 className="omp-hero-title">
+						Overview <span>{range === "today" ? "today · since midnight" : range}</span>
+					</h2>
+					<span className="omp-hero-range">
+						{overview?.overall
+							? `${formatInteger(overview.overall.totalRequests)} req · ${activeDays} active day${activeDays === 1 ? "" : "s"} · ${overview.timeSeries.length} buckets`
+							: `${range} · loading`}
 					</span>
-					<span
-						style={{
-							fontFamily: "var(--font-mono)",
-							fontSize: 11,
-							color: "var(--muted)",
-							background: "var(--surface)",
-							border: "1px solid var(--border)",
-							borderRadius: 2,
-							padding: "3px 8px",
-						}}
-					>
-						{range === "today" ? "today · since 00:00" : range}
-					</span>
-					{overview?.overall && (
-						<span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--dim)" }}>
-							· {formatInteger(overview.overall.totalRequests)} req
-							{activeDays > 0 ? ` · ${activeDays} active day${activeDays === 1 ? "" : "s"}` : ""}
-						</span>
-					)}
 				</div>
 
-				<div className="flex items-center gap-2 flex-wrap">
-					<div className="stats-preset-group" role="group" aria-label="Overview preset">
-						{(Object.keys(PRESET_DEFS) as PresetId[]).map(pid => (
-							<button
-								key={pid}
-								type="button"
-								className="stats-preset-btn"
-								data-active={prefs.preset === pid ? "true" : "false"}
-								onClick={() => setPreset(pid)}
-							>
-								{PRESET_DEFS[pid].label}
-							</button>
-						))}
-					</div>
-					<details className="group" style={{ position: "relative" }}>
-						<summary
-							className="stats-button stats-button-ghost"
-							style={{
-								listStyle: "none",
-								cursor: "pointer",
-								fontFamily: "var(--font-mono)",
-								fontSize: 11,
-								padding: "5px 10px",
-							}}
-						>
-							Customize ▾
-						</summary>
-						<div
-							className="stats-panel"
-							style={{
-								position: "absolute",
-								right: 0,
-								top: "calc(100% + 8px)",
-								width: 260,
-								zIndex: 5,
-								boxShadow: "0 12px 32px rgba(0,0,0,0.28)",
-							}}
-						>
-							<div className="stats-panel-header" style={{ padding: "10px 12px" }}>
-								<span
-									className="stats-panel-title"
-									style={{
-										fontSize: 11,
-										fontFamily: "var(--font-mono)",
-										letterSpacing: "0.06em",
-										textTransform: "uppercase",
-									}}
-								>
-									Visible sections
-								</span>
-							</div>
-							<div style={{ padding: 10, display: "flex", flexDirection: "column", gap: 6 }}>
-								{SECTION_ORDER.map(key => (
-									<label
-										key={key}
-										className="stats-customize-chip"
-										data-on={v[key] ? "true" : "false"}
-										style={{ justifyContent: "space-between", cursor: "pointer" }}
-									>
-										<span>{SECTION_LABELS[key]}</span>
-										<input
-											type="checkbox"
-											checked={v[key]}
-											onChange={() => toggle(key)}
-											style={{ width: 14, height: 14 }}
-										/>
-									</label>
-								))}
-								<div
-									style={{ fontSize: 11, color: "var(--dim)", fontFamily: "var(--font-mono)", marginTop: 4 }}
-								>
-									Persisted in localStorage · {STORAGE_KEY}
-								</div>
-							</div>
-						</div>
-					</details>
-				</div>
-			</div>
-
-			{/* KPI Tape */}
-			{v.tape && (
 				<AsyncBoundary loading={overviewRes.loading} error={overviewRes.error} data={overview}>
 					{overview && (
-						<div className="stats-overview-tape" role="region" aria-label="Key metrics">
-							<div className="stats-tape-cell" style={{ ["--tape-accent" as string]: "var(--accent)" }}>
-								<div className="stats-tape-label">Requests</div>
-								<div className="stats-tape-value">{formatInteger(overview.overall.totalRequests)}</div>
-								<div className="stats-tape-sub">
+						<div className="omp-metrics-herd" role="region" aria-label="Key metrics">
+							<div className="omp-kpi">
+								<div className="omp-kpi-label">Requests</div>
+								<div className="omp-kpi-value">{formatInteger(overview.overall.totalRequests)}</div>
+								<div className="omp-kpi-sub">
 									{formatInteger(overview.overall.successfulRequests)} ok ·{" "}
 									{formatInteger(overview.overall.failedRequests)} fail
 								</div>
+								<div className="omp-kpi-accent" />
 							</div>
-							<div className="stats-tape-cell" style={{ ["--tape-accent" as string]: "var(--link)" }}>
-								<div className="stats-tape-label">Conversation tokens</div>
-								<div className="stats-tape-value">
+							<div className="omp-kpi">
+								<div className="omp-kpi-label">Conversation tokens</div>
+								<div className="omp-kpi-value" data-mono="true">
 									{formatCompact(
 										overview.overall.totalInputTokens +
 											overview.overall.totalOutputTokens +
@@ -440,82 +357,134 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 											overview.overall.totalCacheWriteTokens,
 									)}
 								</div>
-								<div className="stats-tape-sub">
+								<div className="omp-kpi-sub">
 									in {formatCompact(overview.overall.totalInputTokens)} · out{" "}
 									{formatCompact(overview.overall.totalOutputTokens)}
 								</div>
+								<div className="omp-kpi-accent" />
 							</div>
-							<div className="stats-tape-cell" style={{ ["--tape-accent" as string]: "var(--amber)" }}>
-								<div className="stats-tape-label">Est. cost</div>
-								<div className="stats-tape-value" style={{ color: "var(--amber)" }}>
+							<div className="omp-kpi">
+								<div className="omp-kpi-label">Est. cost</div>
+								<div className="omp-kpi-value" data-mono="true" style={{ color: "var(--amber)" }}>
 									{formatEstimatedCost(
 										overview.overall.totalCost,
 										overview.overall.unpricedRequests,
 										overview.overall.totalCost > 0 && overview.overall.totalCost < 0.01 ? 4 : 2,
 									)}
 								</div>
-								<div className="stats-tape-sub">
+								<div className="omp-kpi-sub">
 									{overview.overall.unpricedRequests > 0
 										? `${overview.overall.unpricedRequests} unpriced`
 										: "API-equivalent"}
 								</div>
+								<div className="omp-kpi-accent" />
 							</div>
-							<div
-								className="stats-tape-cell"
-								style={{
-									["--tape-accent" as string]:
-										overview.overall.errorRate > 0.05 ? "var(--danger)" : "var(--success)",
-								}}
-							>
-								<div className="stats-tape-label">Error rate</div>
-								<div className="stats-tape-value">{formatPercent(overview.overall.errorRate)}</div>
-								<div className="stats-tape-sub">
-									<span
-										className="stats-tape-badge"
-										data-tone={overview.overall.errorRate > 0.05 ? "danger" : "success"}
-									>
-										{overview.overall.failedRequests} errors
-									</span>
+							<div className="omp-kpi" data-tone={overview.overall.errorRate > 0.05 ? "danger" : "success"}>
+								<div className="omp-kpi-label">Error rate</div>
+								<div className="omp-kpi-value" data-mono="true">
+									{formatPercent(overview.overall.errorRate)}
 								</div>
-							</div>
-							<div className="stats-tape-cell" style={{ ["--tape-accent" as string]: "var(--success)" }}>
-								<div className="stats-tape-label">Cache rate</div>
-								<div className="stats-tape-value">{formatPercent(overview.overall.cacheRate)}</div>
-								<div className="stats-tape-sub">savings {formatPercent(overview.overall.cacheSavings)}</div>
-							</div>
-							<div className="stats-tape-cell" style={{ ["--tape-accent" as string]: "var(--dim)" }}>
-								<div className="stats-tape-label">Active days</div>
-								<div className="stats-tape-value">{activeDays}</div>
-								<div className="stats-tape-sub">
-									{overview.timeSeries.length} buckets · {range === "today" ? "since midnight" : range}
+								<div className="omp-kpi-sub">
+									{formatInteger(overview.overall.failedRequests)} errors ·{" "}
+									{formatPercent(1 - overview.overall.errorRate)} ok
 								</div>
+								<div className="omp-kpi-accent" />
+							</div>
+							<div className="omp-kpi" data-tone="success">
+								<div className="omp-kpi-label">Cache efficiency</div>
+								<div className="omp-kpi-value" data-mono="true">
+									{formatPercent(overview.overall.cacheRate)}
+								</div>
+								<div className="omp-kpi-sub">savings {formatPercent(overview.overall.cacheSavings)}</div>
+								<div className="omp-kpi-accent" />
 							</div>
 						</div>
 					)}
 				</AsyncBoundary>
-			)}
 
-			{/* Scope row: oscilloscope chart + errors/feed */}
-			<div className="stats-overview-grid">
-				{v.scope && (
-					<div className="stats-scope-wrap">
-						<div className="stats-scope-grid" aria-hidden />
-						<div className="stats-scope-header">
-							<div className="stats-scope-title">
-								<span className="stats-scope-dot" aria-hidden />
-								Usage over time
+				{showHealthBanner && (
+					<div
+						style={{
+							display: "flex",
+							gap: 10,
+							alignItems: "center",
+							padding: "9px 12px",
+							background: "color-mix(in oklch, var(--danger) 10%, var(--surface))",
+							border: "1px solid color-mix(in oklch, var(--danger) 18%, transparent)",
+							borderRadius: "var(--radius-md)",
+							fontFamily: "var(--font-sans)",
+							fontSize: 12,
+							color: "var(--danger)",
+						}}
+					>
+						<span
+							style={{
+								width: 7,
+								height: 7,
+								borderRadius: 999,
+								background: "var(--danger)",
+								display: "inline-block",
+							}}
+						/>
+						Elevated error rate — {formatPercent(overview!.overall.errorRate)} ·{" "}
+						{formatInteger(overview!.overall.failedRequests)} failures in this window.{" "}
+						<a href="#/errors?range=today" style={{ color: "var(--danger)", textDecoration: "underline" }}>
+							Inspect errors
+						</a>
+					</div>
+				)}
+			</div>
+
+			<div className="omp-dashboard-bar" style={{ position: "relative" }}>
+				<div className="omp-dashboard-tabs" role="tablist" aria-label="Dashboards">
+					{dashState.dashboards.map(d => (
+						<button
+							key={d.id}
+							type="button"
+							role="tab"
+							aria-selected={d.id === activeDash.id}
+							className="omp-dashboard-tab"
+							data-active={d.id === activeDash.id ? "true" : "false"}
+							onClick={() => setDashState(s => setActiveDashboard(s, d.id))}
+						>
+							{d.name}
+						</button>
+					))}
+				</div>
+				<ManageDisclosure
+					newName={newName}
+					setNewName={setNewName}
+					renaming={renaming}
+					renameValue={renameValue}
+					setRenameValue={setRenameValue}
+					setRenaming={setRenaming}
+					activeDash={activeDash}
+					dashState={dashState}
+					setDashState={setDashState}
+					v={v}
+					toggle={toggle}
+				/>
+			</div>
+
+			{v.scope && (
+				<div className="omp-scope-wrap">
+					<div className="omp-scope-main">
+						<div className="omp-scope-header">
+							<div className="omp-scope-title">
+								<span className="omp-scope-dot" aria-hidden />
+								Usage over time{" "}
 								<span
 									style={{
 										fontFamily: "var(--font-mono)",
 										fontSize: 11,
 										color: "var(--muted)",
-										fontWeight: 500,
+										fontWeight: 400,
 									}}
 								>
 									{range === "today" ? "today" : range} · {timeSeries?.length ?? 0} buckets
 								</span>
 							</div>
-							<div className="stats-scope-legend" aria-hidden>
+							<div className="omp-scope-legend" aria-hidden>
 								<span>
 									<i style={{ background: "var(--chart-req)" }} /> req
 								</span>
@@ -526,262 +495,307 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 								)}
 							</div>
 						</div>
-						<div
-							className="stats-scope-body"
-							style={{
-								flex: 1,
-								minHeight: 272,
-								maxHeight: 480,
-								display: "flex",
-								flexDirection: "column",
-							}}
-						>
+						<div className="omp-scope-body">
 							<AsyncBoundary loading={overviewRes.loading} error={overviewRes.error} data={overview}>
 								{timeSeries && timeSeries.length > 0 ? (
 									<Line data={chartData as never} options={chartOptions as never} />
 								) : (
 									<div
-										className="h-full flex items-center justify-center"
-										style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 12 }}
+										style={{
+											height: 220,
+											display: "grid",
+											placeItems: "center",
+											color: "var(--muted)",
+											fontFamily: "var(--font-mono)",
+											fontSize: 12,
+											border: "1px dashed var(--border)",
+											borderRadius: "var(--radius-md)",
+											background: "var(--surface-2)",
+										}}
 									>
-										No usage in selected period.
+										<div style={{ textAlign: "center" }}>
+											<div
+												style={{
+													fontFamily: "var(--font-sans)",
+													fontSize: 12,
+													fontWeight: 600,
+													color: "var(--text)",
+												}}
+											>
+												No usage in this window
+											</div>
+											<div style={{ fontSize: 11, marginTop: 4 }}>
+												Try a broader range or sync — this chart answers “when was OMP most active?”
+											</div>
+										</div>
 									</div>
 								)}
 							</AsyncBoundary>
 						</div>
 					</div>
-				)}
-
-				<div className="stats-overview-stack">
-					{v.errors && (
-						<Panel
-							title="Recent errors"
-							subtitle="Latest failures in this window"
-							actions={
-								<a
-									href={`#/errors?range=${range}`}
-									className="stats-button stats-button-secondary"
-									style={{ fontSize: 11, padding: "5px 9px" }}
-								>
-									View all →
-								</a>
-							}
-						>
-							<AsyncBoundary
-								loading={errorsRes.loading}
-								error={errorsRes.error}
-								data={errorsRes.data}
-								emptyText="No usage in selected period."
+					<div className="omp-scope-side">
+						{v.errors && (
+							<div
+								className="omp-section"
+								style={{
+									background: "var(--surface)",
+									border: "1px solid var(--border)",
+									borderRadius: "var(--radius-lg)",
+									padding: 12,
+								}}
 							>
-								{errorsRes.data && errorsRes.data.length > 0 ? (
-									<div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-										{errorsRes.data.slice(0, 5).map(err => (
-											<div
-												key={err.id ?? `${err.sessionFile}-${err.entryId}`}
-												onClick={() => err.id && onRequestClick(err.id)}
-												style={{
-													display: "flex",
-													gap: 10,
-													padding: "9px 10px",
-													border: "1px solid var(--border)",
-													borderRadius: "var(--radius-md)",
-													background: "var(--surface-2)",
-													cursor: err.id ? "pointer" : undefined,
-												}}
-											>
-												<span
-													style={{
-														width: 7,
-														height: 7,
-														borderRadius: 999,
-														background: "var(--danger)",
-														marginTop: 6,
-														flexShrink: 0,
-													}}
-												/>
-												<div style={{ minWidth: 0, flex: 1 }}>
+								<div className="omp-section-head">
+									<div>
+										<div className="omp-section-title">Health · Recent errors</div>
+										<p className="omp-section-desc">Latest failures — only prominent when unhealthy</p>
+									</div>
+									<a
+										href={`#/errors?range=${range}`}
+										className="stats-button stats-button-secondary"
+										style={{ fontSize: 11, padding: "5px 9px" }}
+									>
+										View all →
+									</a>
+								</div>
+								<div className="omp-section-rule" />
+								<div className="omp-section-body">
+									<AsyncBoundary
+										loading={errorsRes.loading}
+										error={errorsRes.error}
+										data={errorsRes.data}
+										emptyText="No usage in selected period."
+									>
+										{errorsRes.data && errorsRes.data.length > 0 ? (
+											<div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+												{errorsRes.data.slice(0, 5).map(err => (
 													<div
+														key={err.id ?? `${err.sessionFile}-${err.entryId}`}
+														onClick={() => err.id && onRequestClick(err.id)}
 														style={{
-															fontSize: 12,
-															fontWeight: 600,
-															color: "var(--text)",
-															whiteSpace: "nowrap",
-															overflow: "hidden",
-															textOverflow: "ellipsis",
+															display: "flex",
+															gap: 10,
+															padding: "8px 10px",
+															border: "1px solid var(--border)",
+															borderRadius: "var(--radius-md)",
+															background: "var(--surface-2)",
+															cursor: err.id ? "pointer" : undefined,
 														}}
 													>
-														{err.model}
 														<span
 															style={{
-																fontWeight: 400,
-																color: "var(--dim)",
-																fontFamily: "var(--font-mono)",
-																fontSize: 11,
-																marginLeft: 6,
+																width: 7,
+																height: 7,
+																borderRadius: 999,
+																background: "var(--danger)",
+																marginTop: 6,
+																flexShrink: 0,
 															}}
-														>
-															{err.provider}
-														</span>
+														/>
+														<div style={{ minWidth: 0, flex: 1 }}>
+															<div
+																style={{
+																	fontSize: 12,
+																	fontWeight: 600,
+																	color: "var(--text)",
+																	whiteSpace: "nowrap",
+																	overflow: "hidden",
+																	textOverflow: "ellipsis",
+																}}
+															>
+																{err.model}
+																<span
+																	style={{
+																		fontWeight: 400,
+																		color: "var(--dim)",
+																		fontFamily: "var(--font-mono)",
+																		fontSize: 11,
+																		marginLeft: 6,
+																	}}
+																>
+																	{err.provider}
+																</span>
+															</div>
+															<div
+																style={{
+																	fontSize: 11,
+																	color: "var(--danger)",
+																	fontFamily: "var(--font-mono)",
+																	whiteSpace: "nowrap",
+																	overflow: "hidden",
+																	textOverflow: "ellipsis",
+																	marginTop: 2,
+																}}
+																title={err.errorMessage ?? ""}
+															>
+																{err.errorMessage ?? "Unknown error"}
+															</div>
+															<div
+																style={{
+																	fontSize: 11,
+																	color: "var(--dim)",
+																	fontFamily: "var(--font-mono)",
+																	marginTop: 2,
+																}}
+															>
+																{format(new Date(err.timestamp), "MMM d, HH:mm")} ·{" "}
+																{formatDurationMs(err.duration)}
+															</div>
+														</div>
 													</div>
-													<div
-														style={{
-															fontSize: 11,
-															color: "var(--danger)",
-															fontFamily: "var(--font-mono)",
-															whiteSpace: "nowrap",
-															overflow: "hidden",
-															textOverflow: "ellipsis",
-															marginTop: 2,
-														}}
-														title={err.errorMessage ?? ""}
-													>
-														{err.errorMessage ?? "Unknown error"}
-													</div>
-													<div
-														style={{
-															fontSize: 11,
-															color: "var(--dim)",
-															fontFamily: "var(--font-mono)",
-															marginTop: 2,
-														}}
-													>
-														{format(new Date(err.timestamp), "MMM d, HH:mm")} ·{" "}
-														{formatDurationMs(err.duration)}
-													</div>
-												</div>
+												))}
 											</div>
-										))}
-									</div>
-								) : (
-									<div className="stats-empty-state-message">No usage in selected period.</div>
-								)}
-							</AsyncBoundary>
-						</Panel>
-					)}
-
-					{/* Operational feed compact */}
-					<Panel title="Live feed" subtitle="Newest requests">
-						<AsyncBoundary
-							loading={recentRes.loading}
-							error={recentRes.error}
-							data={recentRes.data}
-							fallback={
-								<div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-									{Array.from({ length: 4 }).map((_, i) => (
-										<div key={i} style={{ display: "flex", gap: 10, alignItems: "center" }}>
-											<Skeleton variant="circle" width={8} height={8} />
-											<div style={{ flex: 1 }}>
-												<Skeleton variant="text" width="60%" height={14} />
-												<Skeleton variant="text" width="40%" height={10} />
+										) : (
+											<div className="stats-empty-state-message">
+												No failures — system healthy in this window.
 											</div>
-										</div>
-									))}
+										)}
+									</AsyncBoundary>
 								</div>
-							}
+							</div>
+						)}
+						<div
+							className="omp-section"
+							style={{
+								background: "var(--surface)",
+								border: "1px solid var(--border)",
+								borderRadius: "var(--radius-lg)",
+								padding: 12,
+							}}
 						>
-							<div style={{ display: "flex", flexDirection: "column" }}>
-								{previewRequests.map(req => {
-									const isError = !!req.errorMessage;
-									return (
-										<div
-											key={req.id ?? `${req.sessionFile}-${req.entryId}`}
-											onClick={() => req.id && onRequestClick(req.id)}
-											style={{
-												display: "flex",
-												gap: 10,
-												padding: "8px 2px",
-												borderBottom: "1px solid var(--border)",
-												cursor: req.id ? "pointer" : undefined,
-											}}
-										>
-											<span
-												style={{
-													width: 6,
-													height: 6,
-													borderRadius: 999,
-													background: isError ? "var(--danger)" : "var(--success)",
-													marginTop: 7,
-													flexShrink: 0,
-												}}
-											/>
-											<div style={{ minWidth: 0, flex: 1 }}>
-												<div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-													<span
-														style={{
-															fontSize: 12,
-															fontWeight: 600,
-															color: "var(--text)",
-															whiteSpace: "nowrap",
-															overflow: "hidden",
-															textOverflow: "ellipsis",
-														}}
-													>
-														{req.model}
-													</span>
-													<span
-														style={{
-															fontFamily: "var(--font-mono)",
-															fontSize: 11,
-															color: "var(--dim)",
-															flexShrink: 0,
-														}}
-													>
-														{format(new Date(req.timestamp), "HH:mm:ss")}
-													</span>
+							<div className="omp-section-head">
+								<div>
+									<div className="omp-section-title">Live feed</div>
+									<p className="omp-section-desc">Newest requests</p>
+								</div>
+							</div>
+							<div className="omp-section-rule" />
+							<div className="omp-section-body">
+								<AsyncBoundary
+									loading={recentRes.loading}
+									error={recentRes.error}
+									data={recentRes.data}
+									fallback={
+										<div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+											{Array.from({ length: 4 }).map((_, i) => (
+												<div key={i} style={{ display: "flex", gap: 10, alignItems: "center" }}>
+													<Skeleton variant="circle" width={8} height={8} />
+													<div style={{ flex: 1 }}>
+														<Skeleton variant="text" width="60%" height={14} />
+														<Skeleton variant="text" width="40%" height={10} />
+													</div>
 												</div>
+											))}
+										</div>
+									}
+								>
+									<div style={{ display: "flex", flexDirection: "column" }}>
+										{previewRequests.map(req => {
+											const isError = !!req.errorMessage;
+											return (
 												<div
+													key={req.id ?? `${req.sessionFile}-${req.entryId}`}
+													onClick={() => req.id && onRequestClick(req.id)}
 													style={{
 														display: "flex",
-														justifyContent: "space-between",
-														gap: 8,
-														fontSize: 11,
-														color: "var(--muted)",
+														gap: 10,
+														padding: "8px 2px",
+														borderBottom: "1px solid var(--border)",
+														cursor: req.id ? "pointer" : undefined,
 													}}
 												>
 													<span
 														style={{
-															fontFamily: "var(--font-mono)",
-															whiteSpace: "nowrap",
-															overflow: "hidden",
-															textOverflow: "ellipsis",
+															width: 6,
+															height: 6,
+															borderRadius: 999,
+															background: isError ? "var(--danger)" : "var(--success)",
+															marginTop: 7,
+															flexShrink: 0,
 														}}
-													>
-														{req.provider}
-													</span>
-													<span
-														style={{
-															fontFamily: "var(--font-mono)",
-															fontVariantNumeric: "tabular-nums",
-															whiteSpace: "nowrap",
-														}}
-													>
-														{req.usage.totalTokens > 0
-															? `${formatCompact(req.usage.totalTokens)} tok`
-															: ""}{" "}
-														{req.usage.cost.total > 0
-															? `· ${formatEstimatedCost(req.usage.cost.total, 0, 2)}`
-															: ""}
-													</span>
+													/>
+													<div style={{ minWidth: 0, flex: 1 }}>
+														<div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+															<span
+																style={{
+																	fontSize: 12,
+																	fontWeight: 600,
+																	color: "var(--text)",
+																	whiteSpace: "nowrap",
+																	overflow: "hidden",
+																	textOverflow: "ellipsis",
+																}}
+															>
+																{req.model}
+															</span>
+															<span
+																style={{
+																	fontFamily: "var(--font-mono)",
+																	fontSize: 11,
+																	color: "var(--dim)",
+																	flexShrink: 0,
+																}}
+															>
+																{format(new Date(req.timestamp), "HH:mm:ss")}
+															</span>
+														</div>
+														<div
+															style={{
+																display: "flex",
+																justifyContent: "space-between",
+																gap: 8,
+																fontSize: 11,
+																color: "var(--muted)",
+															}}
+														>
+															<span
+																style={{
+																	fontFamily: "var(--font-mono)",
+																	whiteSpace: "nowrap",
+																	overflow: "hidden",
+																	textOverflow: "ellipsis",
+																}}
+															>
+																{req.provider}
+															</span>
+															<span
+																style={{
+																	fontFamily: "var(--font-mono)",
+																	fontVariantNumeric: "tabular-nums",
+																	whiteSpace: "nowrap",
+																}}
+															>
+																{req.usage.totalTokens > 0
+																	? `${formatCompact(req.usage.totalTokens)} tok`
+																	: ""}{" "}
+																{req.usage.cost.total > 0
+																	? `· ${formatEstimatedCost(req.usage.cost.total, 0, 2)}`
+																	: ""}
+															</span>
+														</div>
+													</div>
 												</div>
-											</div>
-										</div>
-									);
-								})}
-								{previewRequests.length === 0 && (
-									<div className="stats-empty-state-message">No recent requests.</div>
-								)}
+											);
+										})}
+										{previewRequests.length === 0 && (
+											<div className="stats-empty-state-message">No recent requests.</div>
+										)}
+									</div>
+								</AsyncBoundary>
 							</div>
-						</AsyncBoundary>
-					</Panel>
+						</div>
+					</div>
 				</div>
-			</div>
+			)}
 
-			{/* Token breakdown (4-way) */}
 			{v.tokens && (
-				<Panel
-					title="Token breakdown"
-					subtitle="Input · output · cache read · cache write — the conversation total"
-					actions={
+				<div className="omp-section">
+					<div className="omp-section-head">
+						<div>
+							<div className="omp-section-title">Token breakdown</div>
+							<p className="omp-section-desc">
+								Input · output · cache read · cache write — the conversation total
+							</p>
+						</div>
 						<a
 							href={`#/costs?range=${range}`}
 							className="stats-button stats-button-ghost"
@@ -789,24 +803,29 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 						>
 							Costs →
 						</a>
-					}
-				>
-					<AsyncBoundary loading={overviewRes.loading} error={overviewRes.error} data={overview}>
-						{overview ? (
-							<TokenBreakdownPanel stats={overview.overall} />
-						) : (
-							<div className="stats-empty-state-message">No usage in selected period.</div>
-						)}
-					</AsyncBoundary>
-				</Panel>
+					</div>
+					<div className="omp-section-rule" />
+					<div className="omp-section-body">
+						<AsyncBoundary loading={overviewRes.loading} error={overviewRes.error} data={overview}>
+							{overview ? (
+								<TokenBreakdownPanel stats={overview.overall} />
+							) : (
+								<div className="stats-empty-state-message">No usage in selected period.</div>
+							)}
+						</AsyncBoundary>
+					</div>
+				</div>
 			)}
 
-			{/* Agents */}
 			{v.agents && (
-				<Panel
-					title="Token usage by agent"
-					subtitle="Main · subagents · advisor — share of the displayed conversation total"
-					actions={
+				<div className="omp-section">
+					<div className="omp-section-head">
+						<div>
+							<div className="omp-section-title">Token usage by agent</div>
+							<p className="omp-section-desc">
+								Main · subagents · advisor — share of the displayed conversation total
+							</p>
+						</div>
 						<a
 							href={`#/models?range=${range}`}
 							className="stats-button stats-button-ghost"
@@ -814,20 +833,25 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 						>
 							Models →
 						</a>
-					}
-				>
-					<AsyncBoundary loading={overviewRes.loading} error={overviewRes.error} data={overview}>
-						{overview && <AgentTokenShare stats={overview.byAgentType} />}
-					</AsyncBoundary>
-				</Panel>
+					</div>
+					<div className="omp-section-rule" />
+					<div className="omp-section-body">
+						<AsyncBoundary loading={overviewRes.loading} error={overviewRes.error} data={overview}>
+							{overview && <AgentTokenShare stats={overview.byAgentType} />}
+						</AsyncBoundary>
+					</div>
+				</div>
 			)}
 
-			{/* Models — share bars + input/output splits */}
 			{v.models && (
-				<Panel
-					title="Models"
-					subtitle="Share of requests + token mix per model · click through for detail"
-					actions={
+				<div className="omp-section">
+					<div className="omp-section-head">
+						<div>
+							<div className="omp-section-title">Models — share of requests</div>
+							<p className="omp-section-desc">
+								Ranked by volume · input/output split · click through for detail
+							</p>
+						</div>
 						<a
 							href={`#/models?range=${range}`}
 							className="stats-button stats-button-secondary"
@@ -835,28 +859,39 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 						>
 							Open Models →
 						</a>
-					}
-				>
-					<AsyncBoundary loading={modelRes.loading} error={modelRes.error} data={modelRes.data}>
-						{modelRes.data && modelRes.data.byModel.length > 0 ? (
-							<ModelsMini
-								models={modelRes.data.byModel.slice(0, 6)}
-								totalRequests={overview?.overall.totalRequests ?? 0}
-							/>
-						) : (
-							<div className="stats-empty-state-message">No usage in selected period.</div>
-						)}
-					</AsyncBoundary>
-				</Panel>
+					</div>
+					<div className="omp-section-rule" />
+					<div className="omp-section-body">
+						<AsyncBoundary loading={modelRes.loading} error={modelRes.error} data={modelRes.data}>
+							{modelRes.data && modelRes.data.byModel.length > 0 ? (
+								<ModelsMini
+									models={modelRes.data.byModel.slice(0, 6)}
+									totalRequests={overview?.overall.totalRequests ?? 0}
+								/>
+							) : (
+								<div className="stats-empty-state-message">No usage in selected period.</div>
+							)}
+						</AsyncBoundary>
+					</div>
+				</div>
 			)}
 
-			{/* Providers + Tools side-by-side */}
-			<div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+			<div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
 				{v.providers && (
-					<Panel
-						title="Providers"
-						subtitle="Cost and token share by provider"
-						actions={
+					<div
+						className="omp-section"
+						style={{
+							background: "var(--surface)",
+							border: "1px solid var(--border)",
+							borderRadius: "var(--radius-lg)",
+							padding: 14,
+						}}
+					>
+						<div className="omp-section-head">
+							<div>
+								<div className="omp-section-title">Providers</div>
+								<p className="omp-section-desc">Cost and token share</p>
+							</div>
 							<a
 								href={`#/providers?range=${range}`}
 								className="stats-button stats-button-ghost"
@@ -864,22 +899,34 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 							>
 								Providers →
 							</a>
-						}
-					>
-						<AsyncBoundary loading={providerRes.loading} error={providerRes.error} data={providerRes.data}>
-							{providerRes.data && providerRes.data.providers.length > 0 ? (
-								<ProvidersMini providers={providerRes.data.providers.slice(0, 4)} />
-							) : (
-								<div className="stats-empty-state-message">No usage in selected period.</div>
-							)}
-						</AsyncBoundary>
-					</Panel>
+						</div>
+						<div className="omp-section-rule" />
+						<div className="omp-section-body">
+							<AsyncBoundary loading={providerRes.loading} error={providerRes.error} data={providerRes.data}>
+								{providerRes.data && providerRes.data.providers.length > 0 ? (
+									<ProvidersMini providers={providerRes.data.providers.slice(0, 4)} />
+								) : (
+									<div className="stats-empty-state-message">No usage in selected period.</div>
+								)}
+							</AsyncBoundary>
+						</div>
+					</div>
 				)}
 				{v.tools && (
-					<Panel
-						title="Tools"
-						subtitle="Calls and error share · subagent + advisor attributed to caller"
-						actions={
+					<div
+						className="omp-section"
+						style={{
+							background: "var(--surface)",
+							border: "1px solid var(--border)",
+							borderRadius: "var(--radius-lg)",
+							padding: 14,
+						}}
+					>
+						<div className="omp-section-head">
+							<div>
+								<div className="omp-section-title">Tools</div>
+								<p className="omp-section-desc">Calls and error share</p>
+							</div>
 							<a
 								href={`#/tools?range=${range}`}
 								className="stats-button stats-button-ghost"
@@ -887,28 +934,31 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 							>
 								Tools →
 							</a>
-						}
-					>
-						<AsyncBoundary loading={toolRes.loading} error={toolRes.error} data={toolRes.data}>
-							{toolRes.data && toolRes.data.byTool.length > 0 ? (
-								<ToolsMini
-									tools={toolRes.data.byTool.slice(0, 5)}
-									totalCalls={toolRes.data.byTool.reduce((s, t) => s + t.calls, 0)}
-								/>
-							) : (
-								<div className="stats-empty-state-message">No usage in selected period.</div>
-							)}
-						</AsyncBoundary>
-					</Panel>
+						</div>
+						<div className="omp-section-rule" />
+						<div className="omp-section-body">
+							<AsyncBoundary loading={toolRes.loading} error={toolRes.error} data={toolRes.data}>
+								{toolRes.data && toolRes.data.byTool.length > 0 ? (
+									<ToolsMini
+										tools={toolRes.data.byTool.slice(0, 5)}
+										totalCalls={toolRes.data.byTool.reduce((s, t) => s + t.calls, 0)}
+									/>
+								) : (
+									<div className="stats-empty-state-message">No usage in selected period.</div>
+								)}
+							</AsyncBoundary>
+						</div>
+					</div>
 				)}
 			</div>
 
-			{/* Projects */}
 			{v.projects && (
-				<Panel
-					title="Projects"
-					subtitle="Requests per folder — where the agent spent its time"
-					actions={
+				<div className="omp-section">
+					<div className="omp-section-head">
+						<div>
+							<div className="omp-section-title">Projects</div>
+							<p className="omp-section-desc">Requests per folder — where the agent spent its time</p>
+						</div>
 						<a
 							href={`#/projects?range=${range}`}
 							className="stats-button stats-button-ghost"
@@ -916,26 +966,37 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 						>
 							Projects →
 						</a>
-					}
-				>
-					<AsyncBoundary loading={folderRes.loading} error={folderRes.error} data={folderRes.data}>
-						{folderRes.data && folderRes.data.length > 0 ? (
-							<ProjectsMini
-								folders={folderRes.data.slice(0, 6)}
-								totalRequests={overview?.overall.totalRequests ?? 0}
-							/>
-						) : (
-							<div className="stats-empty-state-message">No usage in selected period.</div>
-						)}
-					</AsyncBoundary>
-				</Panel>
+					</div>
+					<div className="omp-section-rule" />
+					<div className="omp-section-body">
+						<AsyncBoundary loading={folderRes.loading} error={folderRes.error} data={folderRes.data}>
+							{folderRes.data && folderRes.data.length > 0 ? (
+								<ProjectsMini
+									folders={folderRes.data.slice(0, 6)}
+									totalRequests={overview?.overall.totalRequests ?? 0}
+								/>
+							) : (
+								<div className="stats-empty-state-message">No usage in selected period.</div>
+							)}
+						</AsyncBoundary>
+					</div>
+				</div>
 			)}
 
-			{/* Recent requests preview — tabular drilldown */}
-			<Panel
-				title="Recent requests"
-				subtitle="Latest transactions · tap a row for detail"
-				actions={
+			<div
+				className="omp-section"
+				style={{
+					background: "var(--surface)",
+					border: "1px solid var(--border)",
+					borderRadius: "var(--radius-lg)",
+					padding: 14,
+				}}
+			>
+				<div className="omp-section-head">
+					<div>
+						<div className="omp-section-title">Recent requests</div>
+						<p className="omp-section-desc">Latest transactions · tap a row for detail</p>
+					</div>
 					<a
 						href={`#/requests?range=${range}`}
 						className="stats-button stats-button-secondary"
@@ -943,25 +1004,252 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 					>
 						View all
 					</a>
-				}
+				</div>
+				<div className="omp-section-rule" />
+				<div className="omp-section-body">
+					<AsyncBoundary loading={recentRes.loading} error={recentRes.error} data={recentRes.data}>
+						<DataTable
+							columns={columns as never}
+							data={previewRequests}
+							keyExtractor={item => String(item.id ?? `${item.sessionFile}-${item.entryId}`)}
+							onRowClick={item => item.id && onRequestClick(item.id)}
+							renderMobileCard={renderMobileCard as never}
+							emptyText="No usage in selected period."
+						/>
+					</AsyncBoundary>
+				</div>
+			</div>
+		</div>
+	);
+}
+
+function ManageDisclosure({
+	newName,
+	setNewName,
+	renaming,
+	renameValue,
+	setRenameValue,
+	setRenaming,
+	activeDash,
+	dashState,
+	setDashState,
+	v,
+	toggle,
+}: {
+	newName: string;
+	setNewName: (v: string) => void;
+	renaming: boolean;
+	renameValue: string;
+	setRenameValue: (v: string) => void;
+	setRenaming: (v: boolean) => void;
+	activeDash: Dashboard;
+	dashState: DashboardState;
+	setDashState: React.Dispatch<React.SetStateAction<DashboardState>>;
+	v: Record<OverviewSectionKey, boolean>;
+	toggle: (k: OverviewSectionKey) => void;
+}) {
+	const [open, setOpen] = useState(false);
+	const panelRef = useRef<HTMLDivElement>(null);
+	useEffect(() => {
+		if (!open) return;
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key === "Escape") setOpen(false);
+		};
+		const onClick = (e: MouseEvent) => {
+			if (panelRef.current && !panelRef.current.contains(e.target as Node)) setOpen(false);
+		};
+		window.addEventListener("keydown", onKey);
+		window.addEventListener("mousedown", onClick);
+		return () => {
+			window.removeEventListener("keydown", onKey);
+			window.removeEventListener("mousedown", onClick);
+		};
+	}, [open]);
+	return (
+		<div style={{ position: "relative" }} ref={panelRef}>
+			<button
+				type="button"
+				className="stats-button stats-button-ghost"
+				style={{ fontSize: 11, padding: "5px 9px", fontFamily: "var(--font-sans)" }}
+				aria-expanded={open}
+				aria-haspopup="dialog"
+				onClick={() => setOpen(o => !o)}
 			>
-				<AsyncBoundary loading={recentRes.loading} error={recentRes.error} data={recentRes.data}>
-					<DataTable
-						columns={columns as never}
-						data={previewRequests}
-						keyExtractor={item => String(item.id ?? `${item.sessionFile}-${item.entryId}`)}
-						onRowClick={item => item.id && onRequestClick(item.id)}
-						renderMobileCard={renderMobileCard as never}
-						emptyText="No usage in selected period."
-					/>
-				</AsyncBoundary>
-			</Panel>
+				Manage ▾
+			</button>
+			{open && (
+				<div
+					role="dialog"
+					aria-label="Manage dashboards"
+					style={{
+						position: "absolute",
+						right: 0,
+						top: "calc(100% + 8px)",
+						width: 300,
+						background: "var(--surface)",
+						border: "1px solid var(--border-strong)",
+						borderRadius: "var(--radius-md)",
+						boxShadow: "0 16px 36px rgba(0,0,0,0.18)",
+						zIndex: 10,
+						padding: 10,
+						display: "flex",
+						flexDirection: "column",
+						gap: 10,
+					}}
+				>
+					<div style={{ display: "flex", gap: 6 }}>
+						<input
+							className="omp-dashboard-input"
+							placeholder="New dashboard name"
+							value={newName}
+							onChange={e => setNewName(e.target.value)}
+							onKeyDown={e => {
+								if (e.key === "Enter" && newName.trim()) {
+									setDashState(s => createDashboard(s, newName.trim()));
+									setNewName("");
+								}
+							}}
+							style={{ flex: 1 }}
+						/>
+						<button
+							type="button"
+							className="stats-button stats-button-secondary"
+							style={{ fontSize: 11, padding: "5px 8px" }}
+							disabled={!newName.trim()}
+							onClick={() => {
+								if (newName.trim()) {
+									setDashState(s => createDashboard(s, newName.trim()));
+									setNewName("");
+								}
+							}}
+						>
+							Create
+						</button>
+					</div>
+					<div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+						<button
+							type="button"
+							className="stats-button stats-button-ghost"
+							style={{ fontSize: 11, padding: "5px 8px" }}
+							onClick={() => setDashState(s => duplicateDashboard(s, activeDash.id))}
+						>
+							Duplicate
+						</button>
+						{renaming ? (
+							<>
+								<input
+									className="omp-dashboard-input"
+									value={renameValue}
+									onChange={e => setRenameValue(e.target.value)}
+									style={{ minWidth: 0, flex: 1 }}
+								/>
+								<button
+									type="button"
+									className="stats-button stats-button-secondary"
+									style={{ fontSize: 11, padding: "5px 8px" }}
+									onClick={() => {
+										if (renameValue.trim())
+											setDashState(s => renameDashboard(s, activeDash.id, renameValue.trim()));
+										setRenaming(false);
+									}}
+								>
+									Save
+								</button>
+								<button
+									type="button"
+									className="stats-button stats-button-ghost"
+									style={{ fontSize: 11, padding: "5px 8px" }}
+									onClick={() => setRenaming(false)}
+								>
+									Cancel
+								</button>
+							</>
+						) : (
+							<button
+								type="button"
+								className="stats-button stats-button-ghost"
+								style={{ fontSize: 11, padding: "5px 8px" }}
+								onClick={() => {
+									setRenameValue(activeDash.name);
+									setRenaming(true);
+								}}
+							>
+								Rename
+							</button>
+						)}
+						<button
+							type="button"
+							className="stats-button stats-button-ghost"
+							style={{ fontSize: 11, padding: "5px 8px" }}
+							onClick={() => setDashState(s => resetDashboard(s, activeDash.id, "default"))}
+						>
+							Reset
+						</button>
+						<button
+							type="button"
+							className="stats-button stats-button-ghost"
+							style={{ fontSize: 11, padding: "5px 8px" }}
+							onClick={() => setDashState(() => resetAllDashboards())}
+						>
+							Reset all
+						</button>
+						{dashState.dashboards.length > 1 && (
+							<button
+								type="button"
+								className="stats-button stats-button-ghost"
+								style={{ fontSize: 11, padding: "5px 8px", color: "var(--danger)" }}
+								onClick={() => setDashState(s => deleteDashboard(s, activeDash.id))}
+							>
+								Delete
+							</button>
+						)}
+					</div>
+					<div style={{ height: 1, background: "var(--border)" }} />
+					<div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+						<div
+							style={{
+								fontFamily: "var(--font-sans)",
+								fontSize: 11,
+								fontWeight: 600,
+								color: "var(--dim)",
+								letterSpacing: "0.04em",
+								textTransform: "uppercase",
+							}}
+						>
+							Visible sections
+						</div>
+						{SECTION_ORDER.map(key => (
+							<label
+								key={key}
+								style={{
+									display: "flex",
+									alignItems: "center",
+									justifyContent: "space-between",
+									gap: 8,
+									fontFamily: "var(--font-sans)",
+									fontSize: 12,
+									color: "var(--text)",
+									cursor: "pointer",
+								}}
+							>
+								<span>{SECTION_LABELS[key]}</span>
+								<input
+									type="checkbox"
+									checked={!!v[key]}
+									onChange={() => toggle(key as OverviewSectionKey)}
+									style={{ accentColor: "var(--text)" }}
+								/>
+							</label>
+						))}
+					</div>
+				</div>
+			)}
 		</div>
 	);
 }
 
 // ---------------------------------------------------------------------------
-// Sub-panels (pure, per-widget)
+// Sub-panels
 // ---------------------------------------------------------------------------
 
 function TokenBreakdownPanel({ stats }: { stats: AggregatedStats }) {
@@ -994,19 +1282,28 @@ function TokenBreakdownPanel({ stats }: { stats: AggregatedStats }) {
 		},
 	];
 	return (
-		<div className="stats-token-grid">
+		<div className="omp-token-grid">
 			{items.map(it => (
-				<div key={it.label} className="stats-token-card">
-					<div className="stats-token-card-label">{it.label}</div>
-					<div className="stats-token-card-value">{formatCompact(it.value)}</div>
-					<div className="stats-token-card-share">
-						<div className="stats-token-bar">
+				<div key={it.label} className="omp-token-item">
+					<div className="omp-token-label">{it.label}</div>
+					<div className="omp-token-value">{formatCompact(it.value)}</div>
+					<div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+						<div className="omp-token-bar" style={{ flex: 1 }}>
 							<div
-								className="stats-token-bar-fill"
+								className="omp-token-bar-fill"
 								style={{ width: `${it.share * 100}%`, background: it.color }}
 							/>
 						</div>
-						<span className="stats-token-share-label">{formatPercent(it.share)}</span>
+						<span
+							style={{
+								fontFamily: "var(--font-mono)",
+								fontSize: 11,
+								color: "var(--muted)",
+								fontVariantNumeric: "tabular-nums",
+							}}
+						>
+							{formatPercent(it.share)}
+						</span>
 					</div>
 				</div>
 			))}
@@ -1016,34 +1313,26 @@ function TokenBreakdownPanel({ stats }: { stats: AggregatedStats }) {
 
 function ModelsMini({ models, totalRequests }: { models: ModelStats[]; totalRequests: number }) {
 	return (
-		<div style={{ display: "flex", flexDirection: "column" }}>
+		<div className="omp-list">
 			{models.map((m, idx) => {
 				const share = totalRequests > 0 ? m.totalRequests / totalRequests : 0;
-				const tokens = m.totalInputTokens + m.totalOutputTokens + m.totalCacheReadTokens + m.totalCacheWriteTokens;
 				return (
-					<div key={`${m.model}-${m.provider}`} className="stats-model-row">
-						<span className="stats-model-rank">{String(idx + 1).padStart(2, "0")}</span>
-						<div className="stats-model-name">
-							<div className="stats-model-title">{m.model}</div>
-							<div className="stats-model-sub">{m.provider}</div>
+					<div key={`${m.model}-${m.provider}`} className="omp-row">
+						<span className="omp-row-rank">{String(idx + 1).padStart(2, "0")}</span>
+						<div className="omp-row-main">
+							<div className="omp-row-title">{m.model}</div>
+							<div className="omp-row-sub">{m.provider}</div>
 						</div>
-						<div className="stats-model-bar" title={`${formatPercent(share)} of requests`}>
-							<div className="stats-model-bar-fill" style={{ width: `${share * 100}%` }} />
+						<div className="omp-row-bar" title={`${formatPercent(share)} of requests`}>
+							<div className="omp-row-bar-fill" style={{ width: `${share * 100}%` }} />
 						</div>
-						<span className="stats-model-metric">{formatPercent(share)}</span>
-						<span className="stats-model-metric" title="Input · Output + cache">
+						<span className="omp-row-metric">{formatPercent(share)}</span>
+						<span className="omp-row-metric" title="Input · Output">
 							<span style={{ color: "var(--dim)" }}>{formatCompact(m.totalInputTokens)}</span>
 							<span style={{ color: "var(--text)", marginLeft: 6 }}>{formatCompact(m.totalOutputTokens)}</span>
 						</span>
-						<span className="stats-model-metric" style={{ color: "var(--amber)", minWidth: 72 }}>
+						<span className="omp-row-metric" style={{ color: "var(--amber)", minWidth: 72 }}>
 							{formatEstimatedCost(m.totalCost, m.unpricedRequests, 2)}
-						</span>
-						<span
-							className="stats-model-metric"
-							style={{ color: "var(--dim)", minWidth: 48 }}
-							title="Conversation tokens"
-						>
-							{formatCompact(tokens)}
 						</span>
 					</div>
 				);
@@ -1054,14 +1343,13 @@ function ModelsMini({ models, totalRequests }: { models: ModelStats[]; totalRequ
 
 function ProvidersMini({ providers }: { providers: ProviderAggregate[] }) {
 	return (
-		<div className="stats-provider-grid">
+		<div className="omp-provider-grid">
 			{providers.map(p => {
-				const tokens = p.totalTokens;
 				const errorRate = p.totalRequests > 0 ? p.failedRequests / p.totalRequests : 0;
 				return (
-					<div key={p.provider} className="stats-provider-card">
-						<div className="stats-provider-head">
-							<span className="stats-provider-name">{p.provider}</span>
+					<div key={p.provider} className="omp-provider-item">
+						<div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+							<span className="omp-provider-name">{p.provider}</span>
 							<span
 								className="stats-status-pill"
 								data-variant={errorRate > 0.05 ? "danger" : "success"}
@@ -1081,9 +1369,9 @@ function ProvidersMini({ providers }: { providers: ProviderAggregate[] }) {
 							}}
 						>
 							<span>{formatInteger(p.totalRequests)} req</span>
-							<span>{formatCompact(tokens)} tok</span>
+							<span>{formatCompact(p.totalTokens)} tok</span>
 						</div>
-						<div style={{ height: 4, borderRadius: 999, background: "var(--surface-3)", overflow: "hidden" }}>
+						<div style={{ height: 3, borderRadius: 999, background: "var(--surface-3)", overflow: "hidden" }}>
 							<div style={{ width: "100%", height: "100%", background: "var(--link)", opacity: 0.9 }} />
 						</div>
 						<div
@@ -1111,21 +1399,12 @@ function ProvidersMini({ providers }: { providers: ProviderAggregate[] }) {
 
 function ToolsMini({ tools, totalCalls }: { tools: ToolUsageStats[]; totalCalls: number }) {
 	return (
-		<div style={{ display: "flex", flexDirection: "column" }}>
+		<div className="omp-list">
 			{tools.map(t => {
 				const share = totalCalls > 0 ? t.calls / totalCalls : 0;
 				const errorRate = t.calls > 0 ? t.errors / t.calls : 0;
 				return (
-					<div
-						key={t.tool}
-						style={{
-							display: "flex",
-							alignItems: "center",
-							gap: 10,
-							padding: "9px 0",
-							borderBottom: "1px solid var(--border)",
-						}}
-					>
+					<div key={t.tool} className="omp-row">
 						<span
 							style={{
 								fontSize: 12,
@@ -1165,7 +1444,7 @@ function ToolsMini({ tools, totalCalls }: { tools: ToolUsageStats[]; totalCalls:
 						<div
 							style={{
 								width: 64,
-								height: 4,
+								height: 3,
 								borderRadius: 999,
 								background: "var(--surface-3)",
 								overflow: "hidden",
@@ -1202,21 +1481,12 @@ function ToolsMini({ tools, totalCalls }: { tools: ToolUsageStats[]; totalCalls:
 
 function ProjectsMini({ folders, totalRequests }: { folders: FolderStats[]; totalRequests: number }) {
 	return (
-		<div style={{ display: "flex", flexDirection: "column" }}>
+		<div className="omp-list">
 			{folders.map(f => {
 				const share = totalRequests > 0 ? f.totalRequests / totalRequests : 0;
 				const short = f.folder.split("/").pop() || f.folder;
 				return (
-					<div
-						key={f.folder}
-						style={{
-							display: "flex",
-							alignItems: "center",
-							gap: 10,
-							padding: "8px 0",
-							borderBottom: "1px solid var(--border)",
-						}}
-					>
+					<div key={f.folder} className="omp-row">
 						<span
 							style={{
 								fontFamily: "var(--font-mono)",
@@ -1231,7 +1501,7 @@ function ProjectsMini({ folders, totalRequests }: { folders: FolderStats[]; tota
 						<div
 							style={{
 								width: 72,
-								height: 4,
+								height: 3,
 								borderRadius: 999,
 								background: "var(--surface-3)",
 								overflow: "hidden",

@@ -1,10 +1,13 @@
 import { X } from "lucide-react";
 import type React from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { applyDensity, DENSITY_STORAGE_KEY, type Density, loadDensity } from "../data/density";
 import type { TimeRange } from "../types";
 import { NavRail } from "./NavRail";
 import type { DashboardSection } from "./routes";
 import { TopBar } from "./TopBar";
+
+const NAV_COLLAPSED_KEY = "omp-stats:nav-collapsed";
 
 export interface AppLayoutProps {
 	activeSection: DashboardSection;
@@ -28,6 +31,28 @@ export function AppLayout({
 	children,
 }: AppLayoutProps) {
 	const [menuOpen, setMenuOpen] = useState(false);
+	const [collapsed, setCollapsed] = useState(() => {
+		try {
+			return localStorage.getItem(NAV_COLLAPSED_KEY) === "1";
+		} catch {
+			return false;
+		}
+	});
+	const [density, setDensity] = useState<Density>(() => loadDensity());
+	useEffect(() => {
+		try {
+			localStorage.setItem(NAV_COLLAPSED_KEY, collapsed ? "1" : "0");
+		} catch {}
+	}, [collapsed]);
+	useEffect(() => {
+		applyDensity(density);
+		try {
+			localStorage.setItem(DENSITY_STORAGE_KEY, density);
+		} catch {}
+	}, [density]);
+	useEffect(() => {
+		applyDensity(loadDensity());
+	}, []);
 
 	const handleSectionChange = (section: DashboardSection) => {
 		onSectionChange(section);
@@ -36,10 +61,14 @@ export function AppLayout({
 
 	return (
 		<div className="stats-app-container">
-			{/* Desktop Rail */}
-			<NavRail activeSection={activeSection} onSectionChange={handleSectionChange} className="stats-desktop-nav" />
+			<NavRail
+				activeSection={activeSection}
+				onSectionChange={handleSectionChange}
+				collapsed={collapsed}
+				onCollapsedChange={setCollapsed}
+				className="stats-desktop-nav"
+			/>
 
-			{/* Mobile Nav Drawer */}
 			{menuOpen && (
 				<div className="stats-mobile-drawer-overlay" onClick={() => setMenuOpen(false)} role="presentation">
 					<div
@@ -50,9 +79,14 @@ export function AppLayout({
 						aria-label="Navigation menu"
 					>
 						<div className="stats-mobile-drawer-header">
-							<div className="stats-logo-container">
-								<span className="stats-logo-text">OH MY PI</span>
-								<span className="stats-logo-subtext">Observability</span>
+							<div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+								<div className="stats-logo-mark" aria-hidden>
+									π
+								</div>
+								<div className="stats-logo-container">
+									<span className="stats-logo-text">OH MY PI</span>
+									<span className="stats-logo-subtext">Observability</span>
+								</div>
 							</div>
 							<button
 								type="button"
@@ -72,7 +106,6 @@ export function AppLayout({
 				</div>
 			)}
 
-			{/* Main Layout Pane */}
 			<div className="stats-main-pane">
 				<TopBar
 					activeSection={activeSection}
@@ -82,6 +115,8 @@ export function AppLayout({
 					onSyncStart={onSyncStart}
 					onSyncComplete={onSyncComplete}
 					onMenuToggle={() => setMenuOpen(true)}
+					density={density}
+					onDensityChange={setDensity}
 				/>
 
 				<main className="stats-content-area">

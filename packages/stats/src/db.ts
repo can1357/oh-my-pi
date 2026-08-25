@@ -1303,6 +1303,17 @@ export function getToolCallCountsBySession(): Map<string, number> {
 		counts.set(row.sessionFile, row.calls);
 	}
 	return counts;
+export function getRequestsPaginated(limit: number, offset: number): { items: MessageStats[]; total: number } {
+	if (!db) return { items: [], total: 0 };
+	const countRow = db.prepare("SELECT COUNT(*) as total FROM messages").get() as { total: number };
+	const total = countRow?.total ?? 0;
+	const stmt = db.prepare(`
+		SELECT * FROM messages
+		ORDER BY timestamp DESC
+		LIMIT ? OFFSET ?
+	`);
+	const items = (stmt.all(limit, offset) as any[]).map(rowToMessageStats);
+	return { items, total };
 }
 
 /**
