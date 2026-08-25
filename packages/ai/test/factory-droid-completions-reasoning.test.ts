@@ -57,31 +57,6 @@ function glm52(): Model<"factory-droid-agent"> {
 	);
 }
 
-function inkling(): Model<"factory-droid-agent"> {
-	return buildModel(
-		buildFactoryDroidModel(
-			{
-				id: "inkling",
-				name: "Inkling (Droid Core)",
-				wire: "openai-completions",
-				contextWindow: 1_007_232,
-				maxTokens: 32_768,
-				apiProviders: ["fireworks", "baseten"],
-				supportedReasoningEfforts: [
-					Effort.Minimal,
-					Effort.Low,
-					Effort.Medium,
-					Effort.High,
-					Effort.XHigh,
-					Effort.Max,
-				],
-				defaultReasoningEffort: Effort.High,
-			},
-			["baseten"],
-		),
-	);
-}
-
 /** Assistant tool-call turn plus its tool result, as stored by a prior turn. */
 function toolTurn(key: string): Message[] {
 	return [
@@ -118,7 +93,7 @@ afterEach(() => {
 });
 
 describe("Factory Droid completions reasoning matrix", () => {
-	it("sends the stainless timeout and helper-method headers on completions", async () => {
+	it("omits the stainless helper-method header and lets the watchdog own the timeout", async () => {
 		const captured: CapturedRequest[] = [];
 		await streamFactoryDroid(
 			kimiK3(),
@@ -126,8 +101,34 @@ describe("Factory Droid completions reasoning matrix", () => {
 			{ apiKey: "workos-token", fetch: captureFetch(captured, completionsChunks("OK", "kimi-k3")) },
 		).result();
 
+		// droid streams through `create({ stream: true })`, not the SDK's
+		// `.stream()` helper, so no helper-method header rides the wire.
+		expect(captured[0].headers["x-stainless-helper-method"]).toBeUndefined();
+		// The timeout header is the transport's real first-event budget rather
+		// than a provider-invented constant, so it tracks the watchdog default.
 		expect(captured[0].headers["x-stainless-timeout"]).toBe("300");
-		expect(captured[0].headers["x-stainless-helper-method"]).toBe("stream");
+		expect(captured[0].headers["x-provider-routing-source"]).toBe("configured_order");
+	});
+
+	it("pins temperature to 1 on the completions body and lets a caller override it", async () => {
+		const captured: CapturedRequest[] = [];
+		await streamFactoryDroid(
+			kimiK3(),
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{ apiKey: "workos-token", fetch: captureFetch(captured, completionsChunks("OK", "kimi-k3")) },
+		).result();
+		expect(captured[0].body.temperature).toBe(1);
+
+		await streamFactoryDroid(
+			kimiK3(),
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: "workos-token",
+				fetch: captureFetch(captured, completionsChunks("OK", "kimi-k3")),
+				temperature: 0.2,
+			},
+		).result();
+		expect(captured[1].body.temperature).toBe(0.2);
 	});
 
 	it("forwards the caller's first-event timeout to X-Stainless-Timeout", async () => {
@@ -144,8 +145,8 @@ describe("Factory Droid completions reasoning matrix", () => {
 			},
 		).result();
 
-		// The forwarded 90s first-event budget must surface as "90" instead of
-		// the 300s default.
+		// OMP's watchdog is honest about its own budget: the forwarded 90s
+		// first-event deadline surfaces as "90" where droid sends nothing.
 		expect(captured[0].headers["x-stainless-timeout"]).toBe("90");
 	});
 
@@ -240,11 +241,11 @@ describe("Factory Droid completions reasoning matrix", () => {
 	it("emits reasoning_effort none when disabled on Baseten reasoning-effort models", async () => {
 		const captured: CapturedRequest[] = [];
 		await streamFactoryDroid(
-			inkling(),
+			glm52(),
 			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
 			{
 				apiKey: "workos-token",
-				fetch: captureFetch(captured, completionsChunks("OK", "inkling")),
+				fetch: captureFetch(captured, completionsChunks("OK", "glm-5.2")),
 				disableReasoning: true,
 			},
 		).result();
@@ -252,6 +253,28 @@ describe("Factory Droid completions reasoning matrix", () => {
 		expect(captured[0].body.reasoning_effort).toBe("none");
 		expect(captured[0].body.chat_template_args).toBeUndefined();
 		expect(captured[0].body.reasoning_history).toBeUndefined();
+	});
+
+	it("never sends reasoning_history on the mistral upstream", async () => {
+		const captured: CapturedRequest[] = [];
+		const routed = glm52();
+		routed.factoryDroidApiProviders = ["mistral"];
+		await streamFactoryDroid(
+			routed,
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: "workos-token",
+				fetch: captureFetch(captured, completionsChunks("OK", "glm-5.2")),
+				reasoning: Effort.Max,
+			},
+		).result();
+
+		expect(captured[0].headers["x-api-provider"]).toBe("mistral");
+		// Mistral takes the effort verbatim but advertises no reasoning-history
+		// support, so the field the Fireworks rotation would carry is dropped.
+		expect(captured[0].body.reasoning_effort).toBe("max");
+		expect(captured[0].body.reasoning_history).toBeUndefined();
+		expect(captured[0].body.chat_template_args).toBeUndefined();
 	});
 
 	it("coerces disabled Baseten thinking to low for forced-on deepseek", async () => {

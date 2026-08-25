@@ -133,6 +133,48 @@ describe("Factory Droid anthropic wire (Claude + MiniMax)", () => {
 		expect(request.headers["anthropic-beta"]).not.toContain("effort-2025-11-24");
 	});
 
+	it("sends summarized adaptive thinking and the anthropic SDK fingerprint", async () => {
+		const captured: CapturedRequest[] = [];
+		await streamFactoryDroid(
+			opus48(),
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: captureFetch(captured, anthropicChunks("OK"), ANTHROPIC_EVENTS),
+				reasoning: Effort.High,
+			},
+		).result();
+
+		const request = captured[0];
+		// Summarized-adaptive models opt into readable thinking deltas; the
+		// field order matches the CLI's own body.
+		expect(request.body.thinking).toEqual({ type: "adaptive", display: "summarized" });
+		// The Anthropic SDK renders its client's 600s timeout as a header; the
+		// runtime version is droid's, not the host's.
+		expect(request.headers["x-stainless-timeout"]).toBe("600");
+		expect(request.headers["x-stainless-runtime-version"]).toBe("v24.3.0");
+		expect(request.headers["x-stainless-package-version"]).toBe("0.70.1");
+		expect(request.headers["x-stainless-helper-method"]).toBeUndefined();
+		expect(request.headers["x-provider-routing-source"]).toBe("configured_order");
+		expect(request.headers["x-api-key"]).toBe("placeholder");
+	});
+
+	it("omits the adaptive display field on models that reject it", async () => {
+		const captured: CapturedRequest[] = [];
+		await streamFactoryDroid(
+			opus46(),
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: captureFetch(captured, anthropicChunks("OK"), ANTHROPIC_EVENTS),
+				reasoning: Effort.High,
+			},
+		).result();
+
+		// Opus 4.6 predates `thinking.display` and 400s on it.
+		expect(captured[0].body.thinking).toEqual({ type: "adaptive" });
+	});
+
 	it("defaults adaptive effort to high when no reasoning is specified", async () => {
 		const captured: CapturedRequest[] = [];
 		await streamFactoryDroid(
