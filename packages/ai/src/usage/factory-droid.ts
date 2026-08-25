@@ -54,19 +54,28 @@ export function parseFactoryDroidUsage(payload: unknown, fetchedAt = Date.now())
 			const usedPercent = toNumber(windowValue.usedPercent);
 			if (usedPercent === undefined) continue;
 
+			// Factory freezes a window at its last-used state when it lapses
+			// instead of rolling it forward: an idle pool keeps reporting its
+			// final usedPercent (e.g. 100) with a past windowEnd indefinitely,
+			// and the next window starts lazily on the next request. The droid
+			// CLI treats windowEnd >= now as "active" and filters everything
+			// else out of the display ("Use Droid to start"); mirror that —
+			// an inactive window reads as 0% used with no reset countdown.
 			const windowEnd = typeof windowValue.windowEnd === "string" ? Date.parse(windowValue.windowEnd) : undefined;
+			const active = windowEnd !== undefined && Number.isFinite(windowEnd) && windowEnd >= fetchedAt;
 			const window: UsageWindow = {
 				id: `${pool.key}-${windowDef.id}`,
 				label: `${pool.label} ${windowDef.label}`,
 				durationMs: windowDef.durationMs,
-				...(windowEnd !== undefined && Number.isFinite(windowEnd) ? { resetsAt: windowEnd } : {}),
+				...(active ? { resetsAt: windowEnd } : {}),
 			};
 
-			const usedFraction = Math.min(1, Math.max(0, usedPercent / 100));
+			const effectiveUsedPercent = active ? usedPercent : 0;
+			const usedFraction = Math.min(1, Math.max(0, effectiveUsedPercent / 100));
 			const amount: UsageAmount = {
-				used: usedPercent,
+				used: effectiveUsedPercent,
 				limit: 100,
-				remaining: Math.max(0, 100 - usedPercent),
+				remaining: Math.max(0, 100 - effectiveUsedPercent),
 				usedFraction,
 				remainingFraction: Math.max(0, 1 - usedFraction),
 				unit: "percent",

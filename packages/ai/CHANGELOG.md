@@ -112,6 +112,10 @@
 - Ported the `factory-droid` provider's client identity and wire behavior to Droid CLI 0.203.0: version markers bumped to 0.203.0, `x-provider-routing-source: configured_order` on every inference call, 600s `X-Stainless-Timeout` and pinned `X-Stainless-Runtime-Version: v24.3.0` on the Anthropic wire, explicit `temperature: 1` on the completions wire (caller-set values still win), and the mistral upstream now omits `reasoning_history` ([#8577](https://github.com/can1357/oh-my-pi/pull/8577) by [@will-bogusz](https://github.com/will-bogusz)).
 - Fixed the shared Anthropic header builder dropping all caller `X-Stainless-*` fingerprint headers on non-OAuth paths by scoping cowork-key enforcement to the branch that re-emits those keys ([#8577](https://github.com/can1357/oh-my-pi/pull/8577) by [@will-bogusz](https://github.com/will-bogusz)).
 
+### Fixed
+
+- Fixed `factory-droid` usage windows reading lapsed quota windows as exhausted: Factory's `/api/billing/limits` freezes an idle pool's window at its final `usedPercent` (100% with a past `windowEnd`) instead of rolling it forward, and the droid CLI treats only `windowEnd >= now` windows as active — lapsed windows now read as fresh (0% used, no reset countdown), which also stops the 403 classifier from blaming a pool whose window already reset ([#8577](https://github.com/can1357/oh-my-pi/pull/8577) by [@will-bogusz](https://github.com/will-bogusz)).
+
 ## [18.0.5] - 2026-08-25
 
 ### Breaking Changes
