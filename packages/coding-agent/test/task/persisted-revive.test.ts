@@ -211,48 +211,78 @@ describe("persisted subagent revival", () => {
 		expect(activeToolNames).toEqual([["read", "yield"]]);
 	});
 
-	it("strips synthetic write from legacy read-only cold revival", async () => {
-		const cwd = makeTempDir("@pi-read-only-revive-");
-		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
-			tools: ["read", "write", "yield"],
-			readOnly: true,
-		});
-		const activeToolNames: string[][] = [];
-		let capturedOptions: CreateAgentSessionOptions | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			capturedOptions = options;
-			return { session: createRevivedSession(activeToolNames).session } as CreateAgentSessionResult;
-		});
+    it("strips synthetic write from legacy read-only cold revival", async () => {
+        const cwd = makeTempDir("@pi-read-only-revive-");
+        const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+            tools: ["read", "write", "yield"],
+            readOnly: true,
+        });
+        const activeToolNames: string[][] = [];
+        let capturedOptions: CreateAgentSessionOptions | undefined;
+        vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+            capturedOptions = options;
+            return { session: createRevivedSession(activeToolNames).session } as CreateAgentSessionResult;
+        });
 
-		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
-		await reviver(ref);
+        const ref = createRef(sessionFile);
+        const reviver = await createFactory(cwd)(ref);
+        if (!reviver) throw new Error("Expected a persisted reviver");
+        await reviver(ref);
 
-		expect(capturedOptions?.toolNames).toEqual(["read", "yield"]);
-		expect(activeToolNames).toEqual([["read", "yield"]]);
-	});
+        expect(capturedOptions?.toolNames).toEqual(["read", "yield"]);
+        expect(activeToolNames).toEqual([["read", "yield"]]);
+    });
 
-	it("preserves explicitly writable cold-revival contracts", async () => {
-		const cwd = makeTempDir("@pi-write-revive-");
-		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
-			tools: ["read", "write", "yield"],
-			readOnly: false,
-		});
-		const activeToolNames: string[][] = [];
-		let capturedOptions: CreateAgentSessionOptions | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			capturedOptions = options;
-			return { session: createRevivedSession(activeToolNames).session } as CreateAgentSessionResult;
-		});
+    it("preserves explicitly writable cold-revival contracts", async () => {
+        const cwd = makeTempDir("@pi-write-revive-");
+        const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+            tools: ["read", "write", "yield"],
+            readOnly: false,
+        });
+        const activeToolNames: string[][] = [];
+        let capturedOptions: CreateAgentSessionOptions | undefined;
+        vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+            capturedOptions = options;
+            return { session: createRevivedSession(activeToolNames).session } as CreateAgentSessionResult;
+        });
 
-		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
-		await reviver(ref);
+        const ref = createRef(sessionFile);
+        const reviver = await createFactory(cwd)(ref);
+        if (!reviver) throw new Error("Expected a persisted reviver");
+        await reviver(ref);
 
-		expect(capturedOptions?.toolNames).toEqual(["read", "write", "yield"]);
-		expect(activeToolNames).toEqual([["read", "write", "yield"]]);
+        expect(capturedOptions?.toolNames).toEqual(["read", "write", "yield"]);
+        expect(activeToolNames).toEqual([["read", "write", "yield"]]);
+    });
+
+    it("disposes the constructed session when post-factory revival setup fails", async () => {
+        const cwd = makeTempDir("@pi-revive-setup-fail-");
+        const sessionFile = await createPersistedSession(cwd);
+        const managerFile = path.join(cwd, "revive-setup-fail.jsonl");
+        const manager = SessionManager.create(cwd, cwd);
+        await manager.setSessionFile(managerFile);
+        vi.spyOn(SessionManager, "open").mockImplementation(async () => manager);
+        const dispose = vi.fn(async () => undefined);
+        vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+            const session = {
+                getMountedXdevToolNames: () => [],
+                setActiveToolsByName: async () => {
+                    throw new Error("active-tool clamp failed");
+                },
+                dispose,
+            };
+            return { session } as unknown as CreateAgentSessionResult;
+        });
+
+        const ref = createRef(sessionFile);
+        const reviver = await createFactory(cwd)(ref);
+        if (!reviver) throw new Error("Expected a persisted reviver");
+        await expect(reviver(ref)).rejects.toThrow("active-tool clamp failed");
+        // The caller never received the session, so the reviver must dispose
+        // it (which also closes the reopened manager) rather than leak both.
+        expect(dispose).toHaveBeenCalledTimes(1);
+    });
+
 	});
 
 	it("closes the reopened manager when the session factory rejects during revival", async () => {

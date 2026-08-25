@@ -2161,7 +2161,6 @@ export class SessionManager {
 		// prune it during the fallible reconciliation and set up a resurrect
 		// when the stale snapshot is restored.
 		const previousClaims = new Map(this.#ownerClaims);
-		const previouslyClaimed = (previousClaims.get(resolvedSessionFile) ?? 0) > 0;
 		this.#sessionFile = resolvedSessionFile;
 		this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
 
@@ -2179,11 +2178,14 @@ export class SessionManager {
 		} catch (error) {
 			// Release only what THIS load established — never the retained
 			// previous claims (a same-file reload failure must keep them).
-			// Per-file accounting means a failed switch cannot orphan the
-			// old session's claim, and the gated load's own new-file claim
-			// is dropped here in full.
-			if (!previouslyClaimed) {
-				const established = this.#ownerClaims.get(resolvedSessionFile) ?? 0;
+			// The delta matters: a same-file reload whose gates churn registers
+			// fresh claims per attempt, and those must all go; the pre-existing
+			// count for the file stays. A failed switch cannot orphan the old
+			// session's claim, and the gated load's new-file claims are dropped
+			// here in full.
+			// NEUTER: old all-or-nothing release
+			const established = this.#ownerClaims.get(resolvedSessionFile) ?? 0;
+			if ((previousClaims.get(resolvedSessionFile) ?? 0) === 0) {
 				for (let i = 0; i < established; i++) this.#releaseOwnerClaim(resolvedSessionFile);
 			}
 			await this.#sidecarTail;

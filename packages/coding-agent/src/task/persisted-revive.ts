@@ -191,24 +191,38 @@ export function createPersistedSubagentReviverFactory(
 							}),
 				}));
 			} catch (err) {
+				// Factory rejected before constructing a session: nothing will
+				// dispose the externally supplied manager — close it so its
+				// live-pid owner claim does not pin the session against
+				// undo-tail gc in the parent.
 				void reopened.close().catch(() => {});
 				throw err;
 			}
-			// Clamp the active set to the persisted list: createAgentSession's
-			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
-			// the original run didn't carry. Unknown/missing names are ignored.
-			await session.setActiveToolsByName([...revivedToolNames, ...session.getMountedXdevToolNames()]);
-			// Wire the extension runtime exactly as the live executor does. Without
-			// this the runner stays pre-init, every action method throws
-			// `ExtensionRuntimeNotInitializedError`, and a `tool_call` handler that
-			// touches a runtime action trips the fail-closed gate in `emitToolCall`,
-			// blocking every tool — including the hidden `yield` — in the revived
-			// agent. `session_start` also re-runs so extensions restore per-session
-			// state (issue #8824).
-			await initializeExtensions(session, {
-				reportSendError: (action, err) => logger.error("Extension send failed", { action, error: err.message }),
-				reportRuntimeError: err => logger.error("Extension error", { path: err.extensionPath, error: err.error }),
-			});
+			// Post-factory setup can still reject before the caller receives
+			// the session; on failure nobody disposes it, so guard the whole
+			// revival setup interval and dispose the constructed session (its
+			// dispose closes the reopened manager) rather than leaking both.
+			try {
+				// Clamp the active set to the persisted list: createAgentSession's
+				// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
+				// the original run didn't carry. Unknown/missing names are ignored.
+				await session.setActiveToolsByName([...revivedToolNames, ...session.getMountedXdevToolNames()]);
+				// Wire the extension runtime exactly as the live executor does. Without
+				// this the runner stays pre-init, every action method throws
+				// `ExtensionRuntimeNotInitializedError`, and a `tool_call` handler that
+				// touches a runtime action trips the fail-closed gate in `emitToolCall`,
+				// blocking every tool — including the hidden `yield` — in the revived
+				// agent. `session_start` also re-runs so extensions restore per-session
+				// state (issue #8824).
+				await initializeExtensions(session, {
+					reportSendError: (action, err) => logger.error("Extension send failed", { action, error: err.message }),
+					reportRuntimeError: err =>
+						logger.error("Extension error", { path: err.extensionPath, error: err.error }),
+				});
+			} catch (err) {
+				void session.dispose().catch(() => {});
+				throw err;
+			}
 			// Cold revives must drive registry status themselves — createAgentSession
 			// doesn't wire this generically (the live path does it in the executor).
 			// The internal run-state signal precedes deferrable public `agent_end`,

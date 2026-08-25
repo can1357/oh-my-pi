@@ -3520,16 +3520,25 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						void reopened.close().catch(() => {});
 						throw err;
 					}
-					// Re-run the executor's extension wiring on the rebuilt session.
-					// Skipping it leaves the runner pre-init, so a `tool_call` handler
-					// touching a runtime action trips the fail-closed gate and blocks
-					// every tool (including `yield`) in the session agent (issue #8824).
-					await initializeExtensions(session, {
-						reportSendError: (action, err) =>
-							logger.error("Extension send failed", { action, error: err.message }),
-						reportRuntimeError: err =>
-							logger.error("Extension error", { path: err.extensionPath, error: err.error }),
-					});
+					// Post-factory wiring can still reject before the caller
+					// receives the session; on failure nobody disposes it, so
+					// guard the setup interval and dispose the constructed
+					// session (dispose closes the reopened manager).
+					try {
+						// Re-run the executor's extension wiring on the rebuilt session.
+						// Skipping it leaves the runner pre-init, so a `tool_call` handler
+						// touching a runtime action trips the fail-closed gate and blocks
+						// every tool (including `yield`) in the revived agent (issue #8824).
+						await initializeExtensions(session, {
+							reportSendError: (action, err) =>
+								logger.error("Extension send failed", { action, error: err.message }),
+							reportRuntimeError: err =>
+								logger.error("Extension error", { path: err.extensionPath, error: err.error }),
+						});
+					} catch (err) {
+						void session.dispose().catch(() => {});
+						throw err;
+					}
 					AgentRegistry.global().syncSessionStatus(id, session);
 					installIrcWakeTurnMonitor(session);
 					return session;
