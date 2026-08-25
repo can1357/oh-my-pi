@@ -18,6 +18,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession, stampCustomMessageMarker } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionFileLockError, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { SessionTools } from "@oh-my-pi/pi-coding-agent/session/session-tools";
@@ -698,6 +699,56 @@ describe("AgentSession user undo/redo", () => {
 		const redo = await session.userRedo();
 		expect(redo.ok).toBe(true);
 		expect(ttsrManager.getInjectedRuleNames().sort()).toEqual(["dropped-rule", "kept-rule"]);
+	});
+
+	it("undo times a repeat-injected rule from its surviving injection, not the dropped reinjection", async () => {
+		session = await makeSession();
+		// Repeatable rule injected early on the surviving branch...
+		sessionManager.appendTtsrInjection(["repeat-rule"]);
+		ttsrManager.markInjectedByNames(["repeat-rule"]);
+		await seedThreeTurns();
+		// ...and again inside the turn being undone: the live record now
+		// tracks the DROPPED reinjection (journal coordinates), while the
+		// branch's latest surviving injection is the early one.
+		sessionManager.appendMessage(userMessage(`More ${SECRET_C}`));
+		sessionManager.appendMessage(assistantMessage("OK tail"));
+		sessionManager.appendTtsrInjection(["repeat-rule"]);
+		ttsrManager.markInjectedByNames(["repeat-rule"]);
+		ttsrManager.incrementMessageCount();
+
+		const positions = new Map<string, number>();
+		const original = ttsrManager.restoreInjected.bind(ttsrManager);
+		ttsrManager.restoreInjected = (names: string[], pos?: ReadonlyMap<string, number>) => {
+			if (pos) for (const [name, value] of pos) positions.set(name, value);
+			return original(names, pos);
+		};
+
+		const undo = await session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		// The surviving injection precedes all three assistant turns: its
+		// branch position is 0. Substituting the live gap would place the
+		// (gone) reinjection instead and delay the next after-gap trigger.
+		expect(positions.get("repeat-rule")).toBe(0);
+
+		// Redo restores the reinjection entry: its journal position wins
+		// over the stale pre-undo live record.
+		positions.clear();
+		const redo = await session.userRedo();
+		expect(redo.ok).toBe(true);
+		expect(positions.get("repeat-rule")).toBe(3);
+	});
+
+	it("redo tolerates custom state entries appended after the undo marker", async () => {
+		session = await makeSession();
+		await seedThreeTurns();
+		const undo = await session.userUndo(1);
+		expect(undo.ok).toBe(true);
+		// /undo emits session_tree: a journal-derived handler may reconcile
+		// by appending custom state right after the marker. Redo re-emits
+		// the tree event, so this non-conversational entry is replaceable.
+		sessionManager.appendCustomEntry("extension-state", { reconstructed: true });
+		const redo = await session.userRedo();
+		expect(redo.ok).toBe(true);
 	});
 
 	it("undo classifies a post-turn injection after its custom_message as post-turn", async () => {
@@ -1744,7 +1795,7 @@ describe("AgentSession user undo/redo", () => {
 				details,
 				attribution: "user",
 				timestamp: Date.now(),
-			}) as unknown as import("@oh-my-pi/pi-coding-agent/session/messages").CustomMessage;
+			}) as unknown as CustomMessage;
 		for (const payload of ["foo", ["a", "b"], { ext: 1 }, undefined]) {
 			const message = mk(payload);
 			stampCustomMessageMarker(message, "userTurn");

@@ -400,7 +400,7 @@ describe("SessionManager.pruneUserUndoTails", () => {
 		}) as typeof fs.readFileSync);
 		const token = processStartToken(process.pid);
 		expect(token).toBeDefined();
-		expect(token).toMatch(/\d{4}/); // ps lstart carries the year
+		expect(token).toMatch(/^\w{3}\w{3}\d+\d{2}:\d{2}:\d{2}\d{4}$/); // whitespace-free lstart
 		expect(isProcessInstanceAlive(process.pid, token)).toBe(true);
 		expect(isProcessInstanceAlive(process.pid, "Wed Apr  1 00:00:00 1970")).toBe(false);
 		// Provider mismatch (ps claim vs /proc ticks or vice versa) fails
@@ -408,7 +408,10 @@ describe("SessionManager.pruneUserUndoTails", () => {
 		expect(isProcessInstanceAlive(process.pid, "12345")).toBe(true);
 		readSpy.mockRestore();
 		// parsePsLstart normalizes ps whitespace padding into a stable token.
-		expect(parsePsLstart("  Tue Aug  25 08:00:00 2026\n")).toBe("Tue Aug 25 08:00:00 2026");
+		expect(parsePsLstart("  Tue Aug  25 08:00:00 2026\n")).toBe("TueAug2508:00:002026");
+		// Whitespace-free: serialized claim lines split on whitespace, so a
+		// multiword lstart must survive one field.
+		expect(parsePsLstart("Tue Aug 25 08:00:00 2026")).not.toMatch(/\s/);
 		expect(parsePsLstart("   \n")).toBeUndefined();
 	});
 
