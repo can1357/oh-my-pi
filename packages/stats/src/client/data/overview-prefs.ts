@@ -7,7 +7,9 @@ export type OverviewSectionKey =
 	| "agents"
 	| "tools"
 	| "projects"
-	| "errors";
+	| "errors"
+	| "liveFeed"
+	| "recentRequests";
 
 export const SECTION_ORDER: OverviewSectionKey[] = [
 	"tape",
@@ -19,6 +21,8 @@ export const SECTION_ORDER: OverviewSectionKey[] = [
 	"tools",
 	"projects",
 	"errors",
+	"liveFeed",
+	"recentRequests",
 ];
 
 export const SECTION_LABELS: Record<OverviewSectionKey, string> = {
@@ -31,6 +35,8 @@ export const SECTION_LABELS: Record<OverviewSectionKey, string> = {
 	tools: "Tools",
 	projects: "Projects",
 	errors: "Recent errors",
+	liveFeed: "Live feed",
+	recentRequests: "Recent requests",
 };
 
 export type PresetId = "default" | "tokens" | "models";
@@ -48,6 +54,8 @@ export const PRESET_DEFS: Record<PresetId, { label: string; visible: Record<Over
 			tools: true,
 			projects: true,
 			errors: true,
+			liveFeed: true,
+			recentRequests: true,
 		},
 	},
 	tokens: {
@@ -62,6 +70,8 @@ export const PRESET_DEFS: Record<PresetId, { label: string; visible: Record<Over
 			tools: true,
 			projects: false,
 			errors: false,
+			liveFeed: false,
+			recentRequests: false,
 		},
 	},
 	models: {
@@ -76,6 +86,8 @@ export const PRESET_DEFS: Record<PresetId, { label: string; visible: Record<Over
 			tools: false,
 			projects: false,
 			errors: true,
+			liveFeed: true,
+			recentRequests: true,
 		},
 	},
 };
@@ -182,15 +194,30 @@ export function defaultDashboards(): Dashboard[] {
 				tools: false,
 				projects: false,
 				errors: true,
+				liveFeed: false,
+				recentRequests: false,
 			},
 			createdAt: 4,
 		},
 	];
 }
 
-function isValidVisible(v: unknown): v is Record<OverviewSectionKey, boolean> {
+function isValidVisible(v: unknown): v is Record<string, boolean> {
 	if (!v || typeof v !== "object") return false;
-	return SECTION_ORDER.every(k => typeof (v as Record<string, unknown>)[k] === "boolean");
+	return Object.values(v).every(val => typeof val === "boolean");
+}
+
+/**
+ * Fill every known section key from a stored visibility record. Records saved
+ * by older builds lack `liveFeed`/`recentRequests`; those default to visible
+ * so legacy dashboards survive the migration instead of being discarded.
+ */
+function completeVisible(v: Record<string, boolean>): Record<OverviewSectionKey, boolean> {
+	const visible = { ...PRESET_DEFS.default.visible } as Record<OverviewSectionKey, boolean>;
+	for (const k of SECTION_ORDER) {
+		if (typeof v[k] === "boolean") visible[k] = v[k];
+	}
+	return visible;
 }
 
 export function loadDashboardState(storage: Pick<Storage, "getItem"> = globalThis.localStorage): DashboardState {
@@ -203,11 +230,13 @@ export function loadDashboardState(storage: Pick<Storage, "getItem"> = globalThi
 				for (const d of parsed.dashboards as unknown[]) {
 					if (!d || typeof d !== "object") continue;
 					const rec = d as Record<string, unknown>;
-					if (typeof rec.id !== "string" || typeof rec.name !== "string" || !isValidVisible(rec.visible)) continue;
+					if (typeof rec.id !== "string" || typeof rec.name !== "string" || !isValidVisible(rec.visible)) {
+						continue;
+					}
 					cleaned.push({
 						id: rec.id,
 						name: rec.name,
-						visible: rec.visible as Record<OverviewSectionKey, boolean>,
+						visible: completeVisible(rec.visible as Record<string, boolean>),
 						createdAt: typeof rec.createdAt === "number" ? rec.createdAt : Date.now(),
 					});
 				}
@@ -222,7 +251,7 @@ export function loadDashboardState(storage: Pick<Storage, "getItem"> = globalThi
 			try {
 				const legacy = JSON.parse(legacyRaw) as Partial<PrefsState>;
 				if (legacy.visible && isValidVisible(legacy.visible)) {
-					const visible = legacy.visible as Record<OverviewSectionKey, boolean>;
+					const visible = completeVisible(legacy.visible as Record<string, boolean>);
 					return {
 						activeId: "custom",
 						dashboards: [

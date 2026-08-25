@@ -43,7 +43,9 @@ export function CostsRoute({ active, range, refreshTrigger }: CostsRouteProps) {
 						Costs <span>{range} · api-equivalent</span>
 					</h2>
 					<span className="omp-hero-range">
-						{costStats ? `${costStats.costSeries.length} days · rate-card value` : "loading"}
+						{costStats
+							? `${new Set(costStats.costSeries.map(pt => pt.timestamp)).size} days · rate-card value`
+							: "loading"}
 					</span>
 				</div>
 				<p
@@ -103,7 +105,7 @@ function CostSummaryPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] })
 							{formatEstimatedCost(summary.avgDailyCost, summary.unpricedRequests)}
 						</div>
 						<div style={{ fontFamily: "var(--font-sans)", fontSize: 11, color: "var(--muted)" }}>
-							{costSeries.length} buckets
+							{new Set(costSeries.map(p => p.timestamp)).size} days
 						</div>
 					</div>
 					<div className="omp-token-item">
@@ -117,7 +119,7 @@ function CostSummaryPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] })
 					</div>
 					<div className="omp-token-item">
 						<div className="omp-token-label">Days</div>
-						<div className="omp-token-value">{costSeries.length}</div>
+						<div className="omp-token-value">{new Set(costSeries.map(p => p.timestamp)).size}</div>
 						<div style={{ fontFamily: "var(--font-sans)", fontSize: 11, color: "var(--muted)" }}>in window</div>
 					</div>
 				</div>

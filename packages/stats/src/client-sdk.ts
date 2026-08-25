@@ -10,10 +10,13 @@
  */
 
 import type {
+	AgentTypeStats,
 	BehaviorDashboardStats,
 	CostTimeSeriesPoint,
 	GainDashboardStats,
+	ModelPerformancePoint,
 	ModelStats,
+	ModelTimeSeriesPoint,
 	ProviderDashboardStats,
 	TimeSeriesPoint,
 	ToolDashboardStats,
@@ -67,22 +70,22 @@ export interface MetaResponse {
 	ranges: string[];
 	endpoints: string[];
 	serverTime: number;
-	supportedParams: Record<string, string>;
+	supportedParams: Record<string, string[] | string>;
 	unsupportedParams: Record<string, string>;
 }
 
 /** Overview response shape (same as existing /api/stats/overview). */
 export interface OverviewResponse {
 	overall: AggregatedStats;
-	byAgentType: import("./shared-types").AgentTypeStats[];
+	byAgentType: AgentTypeStats[];
 	timeSeries: TimeSeriesPoint[];
 }
 
 /** Models response shape (same as existing /api/stats/model-dashboard). */
 export interface ModelsResponse {
 	byModel: ModelStats[];
-	modelSeries: import("./shared-types").ModelTimeSeriesPoint[];
-	modelPerformanceSeries: import("./shared-types").ModelPerformancePoint[];
+	modelSeries: ModelTimeSeriesPoint[];
+	modelPerformanceSeries: ModelPerformancePoint[];
 }
 
 /** Providers response shape (same as existing /api/stats/providers). */

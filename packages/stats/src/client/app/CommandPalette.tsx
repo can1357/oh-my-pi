@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { toggleDensity } from "../data/density";
 import type { TimeRange } from "../types";
 import { routes } from "./routes";
 
@@ -22,14 +23,7 @@ export function CommandPalette({ open, onClose, onNavigate }: CommandPaletteProp
 		base.push({
 			label: "Toggle density",
 			hint: "view",
-			action: () => {
-				const cur = document.documentElement.dataset.density;
-				const next = cur === "compact" ? "comfortable" : "compact";
-				document.documentElement.dataset.density = next;
-				try {
-					localStorage.setItem("omp-stats:density", next);
-				} catch {}
-			},
+			action: () => toggleDensity(),
 		});
 		if (!q) return base.slice(0, 8);
 		return base.filter(it => it.label.toLowerCase().includes(q) || it.hint?.includes(q)).slice(0, 8);

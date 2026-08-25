@@ -341,11 +341,13 @@ interface TimeRangeConfig {
 	modelPerformanceBucketMs: number;
 	costSeriesDays: number;
 	cutoff: number | null;
+	/** Bucket origin (ms) for today-aligned series; 0 keeps Unix-epoch alignment. */
+	bucketOrigin: number;
 }
 
 const DEFAULT_TIME_RANGE: TimeRange = "24h";
 
-const TIME_RANGE_TO_CONFIG: Record<TimeRange, Omit<TimeRangeConfig, "cutoff">> = {
+const TIME_RANGE_TO_CONFIG: Record<TimeRange, Omit<TimeRangeConfig, "cutoff" | "bucketOrigin">> = {
 	// Midnight-anchored window: same hourly bucketing as "24h", but the cutoff
 	// is local midnight rather than a rolling 24h (resolved below).
 	today: {
@@ -419,18 +421,22 @@ export function getTimeRangeConfig(range?: string | null): TimeRangeConfig {
 		const config = TIME_RANGE_TO_CONFIG.today;
 		const midnight = new Date();
 		midnight.setHours(0, 0, 0, 0);
-		return { ...config, cutoff: midnight.getTime() };
+		const cutoff = midnight.getTime();
+		// Align today's buckets to local midnight so fractional-UTC zones
+		// (e.g. Asia/Kolkata +05:30) label the first bucket at local midnight.
+		return { ...config, cutoff, bucketOrigin: cutoff };
 	}
 	const config = TIME_RANGE_TO_CONFIG[normalized as TimeRange];
 	if (config) {
 		const cutoff = normalized === "all" ? null : Date.now() - Math.max(1, config.timeSeriesHours * 60 * 60 * 1000);
-		return { ...config, cutoff };
+		return { ...config, cutoff, bucketOrigin: 0 };
 	}
 
 	const fallbackConfig = TIME_RANGE_TO_CONFIG[DEFAULT_TIME_RANGE];
 	return {
 		...fallbackConfig,
 		cutoff: Date.now() - fallbackConfig.timeSeriesHours * 60 * 60 * 1000,
+		bucketOrigin: 0,
 	};
 }
 
@@ -448,6 +454,7 @@ export async function getDashboardStats(range?: string | null): Promise<Dashboar
 		modelPerformanceBucketMs,
 		costSeriesDays,
 		cutoff,
+		bucketOrigin,
 	} = getTimeRangeConfig(range);
 
 	return {
@@ -455,10 +462,15 @@ export async function getDashboardStats(range?: string | null): Promise<Dashboar
 		byModel: getStatsByModel(cutoff ?? undefined),
 		byFolder: getStatsByFolder(cutoff ?? undefined),
 		byAgentType: getStatsByAgentType(cutoff ?? undefined),
-		timeSeries: getTimeSeries(timeSeriesHours, cutoff, timeSeriesBucketMs),
-		modelSeries: getModelTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs),
-		modelPerformanceSeries: getModelPerformanceSeries(modelPerformanceDays, cutoff, modelPerformanceBucketMs),
-		costSeries: getCostTimeSeries(costSeriesDays, cutoff),
+		timeSeries: getTimeSeries(timeSeriesHours, cutoff, timeSeriesBucketMs, bucketOrigin),
+		modelSeries: getModelTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs, bucketOrigin),
+		modelPerformanceSeries: getModelPerformanceSeries(
+			modelPerformanceDays,
+			cutoff,
+			modelPerformanceBucketMs,
+			bucketOrigin,
+		),
+		costSeries: getCostTimeSeries(costSeriesDays, cutoff, bucketOrigin),
 	};
 }
 
@@ -466,12 +478,12 @@ export async function getOverviewStats(
 	range?: string | null,
 ): Promise<Pick<DashboardStats, "overall" | "byAgentType" | "timeSeries">> {
 	await initDb();
-	const { timeSeriesHours, timeSeriesBucketMs, cutoff } = getTimeRangeConfig(range);
+	const { timeSeriesHours, timeSeriesBucketMs, cutoff, bucketOrigin } = getTimeRangeConfig(range);
 
 	return {
 		overall: getOverallStats(cutoff ?? undefined),
 		byAgentType: getStatsByAgentType(cutoff ?? undefined),
-		timeSeries: getTimeSeries(timeSeriesHours, cutoff, timeSeriesBucketMs),
+		timeSeries: getTimeSeries(timeSeriesHours, cutoff, timeSeriesBucketMs, bucketOrigin),
 	};
 }
 
@@ -479,22 +491,33 @@ export async function getModelDashboardStats(
 	range?: string | null,
 ): Promise<Pick<DashboardStats, "byModel" | "modelSeries" | "modelPerformanceSeries">> {
 	await initDb();
-	const { modelSeriesDays, modelSeriesBucketMs, modelPerformanceDays, modelPerformanceBucketMs, cutoff } =
-		getTimeRangeConfig(range);
+	const {
+		modelSeriesDays,
+		modelSeriesBucketMs,
+		modelPerformanceDays,
+		modelPerformanceBucketMs,
+		cutoff,
+		bucketOrigin,
+	} = getTimeRangeConfig(range);
 
 	return {
 		byModel: getStatsByModel(cutoff ?? undefined),
-		modelSeries: getModelTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs),
-		modelPerformanceSeries: getModelPerformanceSeries(modelPerformanceDays, cutoff, modelPerformanceBucketMs),
+		modelSeries: getModelTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs, bucketOrigin),
+		modelPerformanceSeries: getModelPerformanceSeries(
+			modelPerformanceDays,
+			cutoff,
+			modelPerformanceBucketMs,
+			bucketOrigin,
+		),
 	};
 }
 
 export async function getCostDashboardStats(range?: string | null): Promise<Pick<DashboardStats, "costSeries">> {
 	await initDb();
-	const { costSeriesDays, cutoff } = getTimeRangeConfig(range);
+	const { costSeriesDays, cutoff, bucketOrigin } = getTimeRangeConfig(range);
 
 	return {
-		costSeries: getCostTimeSeries(costSeriesDays, cutoff),
+		costSeries: getCostTimeSeries(costSeriesDays, cutoff, bucketOrigin),
 	};
 }
 
@@ -512,13 +535,15 @@ export async function getRecentRequests(limit?: number): Promise<MessageStats[]>
 /**
  * Paginated requests with real total count.
  * Returns the actual total number of rows (not min(total, limit+offset)).
+ * @param cutoff - Range cutoff (ms); null returns all rows.
  */
 export async function getRequestsPaginated(
 	limit: number,
 	offset: number,
+	cutoff?: number | null,
 ): Promise<{ items: MessageStats[]; total: number }> {
 	await initDb();
-	return dbGetRequestsPaginated(limit, offset);
+	return dbGetRequestsPaginated(limit, offset, cutoff);
 }
 
 export async function getRecentErrors(range?: string | null, limit?: number): Promise<MessageStats[]> {
@@ -570,11 +595,11 @@ export async function getBehaviorDashboardStats(range?: string | null): Promise<
  */
 export async function getToolDashboardStats(range?: string | null): Promise<ToolDashboardStats> {
 	await initDb();
-	const { modelSeriesDays, modelSeriesBucketMs, cutoff } = getTimeRangeConfig(range);
+	const { modelSeriesDays, modelSeriesBucketMs, cutoff, bucketOrigin } = getTimeRangeConfig(range);
 	return {
 		byTool: getToolStats(cutoff ?? undefined),
 		byToolModel: getToolStatsByModel(cutoff ?? undefined),
-		series: getToolTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs),
+		series: getToolTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs, bucketOrigin),
 	};
 }
 
@@ -589,7 +614,7 @@ export async function getToolDashboardStats(range?: string | null): Promise<Tool
  */
 export async function getProviderDashboardStats(range?: string | null): Promise<ProviderDashboardStats> {
 	await initDb();
-	const { modelSeriesDays, modelSeriesBucketMs, cutoff } = getTimeRangeConfig(range);
+	const { modelSeriesDays, modelSeriesBucketMs, cutoff, bucketOrigin } = getTimeRangeConfig(range);
 	const providers = getStatsByProvider(cutoff ?? undefined);
 	const usage = await fetchUsageData(cutoff ?? 0);
 	const tokensByProvider = usage.fleetTokensByProvider ?? new Map(providers.map(p => [p.provider, p.totalTokens]));
@@ -597,7 +622,7 @@ export async function getProviderDashboardStats(range?: string | null): Promise<
 	return {
 		providers,
 		hourly: getProviderHourlyBurn(cutoff ?? undefined),
-		series: getProviderTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs),
+		series: getProviderTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs, bucketOrigin),
 		usageSeries,
 		windowInsights,
 	};

@@ -1,4 +1,5 @@
 import { format } from "@oh-my-pi/pi-utils/dates";
+import type { ChartData, ChartDataset, ChartOptions } from "chart.js";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Line } from "react-chartjs-2";
 import {
@@ -13,7 +14,14 @@ import {
 import { AgentTokenShare } from "../components/AgentTokenShare";
 import { CHART_THEMES } from "../components/chart-shared";
 import { formatRangeTick } from "../components/range-meta";
-import { formatCompact, formatDurationMs, formatEstimatedCost, formatInteger, formatPercent } from "../data/formatters";
+import {
+	formatCompact,
+	formatDurationMs,
+	formatEstimatedCost,
+	formatInteger,
+	formatMessageCost,
+	formatPercent,
+} from "../data/formatters";
 import {
 	activeDaysFromSeries,
 	createDashboard,
@@ -34,6 +42,7 @@ import {
 	updateDashboardVisible,
 } from "../data/overview-prefs";
 import { useResource } from "../data/useResource";
+import { sumConversationTokens } from "../data/view-models";
 import type {
 	AggregatedStats,
 	FolderStats,
@@ -44,6 +53,7 @@ import type {
 	ToolUsageStats,
 } from "../types";
 import { AsyncBoundary, DataTable, Skeleton, StatusPill } from "../ui";
+import type { DataTableColumn } from "../ui/DataTable";
 import { useSystemTheme } from "../useSystemTheme";
 
 function useDashboardPrefs() {
@@ -125,11 +135,11 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 		return { req, err };
 	}, [theme]);
 
-	const chartData = useMemo(() => {
-		if (!timeSeries) return { labels: [], datasets: [] as unknown[] };
+	const chartData = useMemo<ChartData<"line">>(() => {
+		if (!timeSeries) return { labels: [], datasets: [] };
 		const labels = timeSeries.map(pt => formatRangeTick(pt.timestamp, range));
 		const pointRadius = timeSeries.length <= 2 ? 3 : 0;
-		const datasets: unknown[] = [
+		const datasets: ChartDataset<"line", number[]>[] = [
 			{
 				label: "Requests",
 				data: timeSeries.map(pt => pt.requests),
@@ -158,7 +168,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 		return { labels, datasets };
 	}, [timeSeries, range, chartColors, hasChartErrors]);
 
-	const chartOptions = useMemo(
+	const chartOptions = useMemo<ChartOptions<"line">>(
 		() => ({
 			responsive: true,
 			maintainAspectRatio: false,
@@ -202,7 +212,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 		[chartTheme],
 	);
 
-	const columns = useMemo(
+	const columns = useMemo<DataTableColumn<MessageStats>[]>(
 		() => [
 			{
 				key: "model",
@@ -301,7 +311,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 				<div>
 					<div className="stats-mobile-card-label">Cost</div>
 					<div className="stats-mobile-card-value" style={{ color: "var(--amber)" }}>
-						{formatEstimatedCost(item.usage.cost.total, 0, 4)}
+						{formatMessageCost(item, 4)}
 					</div>
 				</div>
 				<div>
@@ -498,7 +508,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 						<div className="omp-scope-body">
 							<AsyncBoundary loading={overviewRes.loading} error={overviewRes.error} data={overview}>
 								{timeSeries && timeSeries.length > 0 ? (
-									<Line data={chartData as never} options={chartOptions as never} />
+									<Line data={chartData} options={chartOptions} />
 								) : (
 									<div
 										style={{
@@ -534,7 +544,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 						</div>
 					</div>
 					<div className="omp-scope-side">
-						{v.errors && (
+						{v.errors && !(errorsRes.data && errorsRes.data.length === 0) && (
 							<div
 								className="omp-section"
 								style={{
@@ -559,18 +569,25 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 								</div>
 								<div className="omp-section-rule" />
 								<div className="omp-section-body">
-									<AsyncBoundary
-										loading={errorsRes.loading}
-										error={errorsRes.error}
-										data={errorsRes.data}
-										emptyText="No usage in selected period."
-									>
-										{errorsRes.data && errorsRes.data.length > 0 ? (
+									<AsyncBoundary loading={errorsRes.loading} error={errorsRes.error} data={errorsRes.data}>
+										{errorsRes.data && (
 											<div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
 												{errorsRes.data.slice(0, 5).map(err => (
 													<div
 														key={err.id ?? `${err.sessionFile}-${err.entryId}`}
+														role={err.id ? "button" : undefined}
+														tabIndex={err.id ? 0 : undefined}
 														onClick={() => err.id && onRequestClick(err.id)}
+														onKeyDown={
+															err.id
+																? e => {
+																		if (e.key === "Enter" || e.key === " ") {
+																			e.preventDefault();
+																			err.id && onRequestClick(err.id);
+																		}
+																	}
+																: undefined
+														}
 														style={{
 															display: "flex",
 															gap: 10,
@@ -644,150 +661,156 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 													</div>
 												))}
 											</div>
-										) : (
-											<div className="stats-empty-state-message">
-												No failures — system healthy in this window.
-											</div>
 										)}
 									</AsyncBoundary>
 								</div>
 							</div>
 						)}
-						<div
-							className="omp-section"
-							style={{
-								background: "var(--surface)",
-								border: "1px solid var(--border)",
-								borderRadius: "var(--radius-lg)",
-								padding: 12,
-							}}
-						>
-							<div className="omp-section-head">
-								<div>
-									<div className="omp-section-title">Live feed</div>
-									<p className="omp-section-desc">Newest requests</p>
+						{v.liveFeed && !(recentRes.data && recentRes.data.length === 0) && (
+							<div
+								className="omp-section"
+								style={{
+									background: "var(--surface)",
+									border: "1px solid var(--border)",
+									borderRadius: "var(--radius-lg)",
+									padding: 12,
+								}}
+							>
+								<div className="omp-section-head">
+									<div>
+										<div className="omp-section-title">Live feed</div>
+										<p className="omp-section-desc">Newest requests</p>
+									</div>
+								</div>
+								<div className="omp-section-rule" />
+								<div className="omp-section-body">
+									<AsyncBoundary
+										loading={recentRes.loading}
+										error={recentRes.error}
+										data={recentRes.data}
+										fallback={
+											<div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+												{Array.from({ length: 4 }).map((_, i) => (
+													<div key={i} style={{ display: "flex", gap: 10, alignItems: "center" }}>
+														<Skeleton variant="circle" width={8} height={8} />
+														<div style={{ flex: 1 }}>
+															<Skeleton variant="text" width="60%" height={14} />
+															<Skeleton variant="text" width="40%" height={10} />
+														</div>
+													</div>
+												))}
+											</div>
+										}
+									>
+										<div style={{ display: "flex", flexDirection: "column" }}>
+											{previewRequests.map(req => {
+												const isError = !!req.errorMessage;
+												const openDetails = () => req.id && onRequestClick(req.id);
+												return (
+													<div
+														key={req.id ?? `${req.sessionFile}-${req.entryId}`}
+														role={req.id ? "button" : undefined}
+														tabIndex={req.id ? 0 : undefined}
+														onClick={openDetails}
+														onKeyDown={
+															req.id
+																? e => {
+																		if (e.key === "Enter" || e.key === " ") {
+																			e.preventDefault();
+																			openDetails();
+																		}
+																	}
+																: undefined
+														}
+														style={{
+															display: "flex",
+															gap: 10,
+															padding: "8px 2px",
+															borderBottom: "1px solid var(--border)",
+															cursor: req.id ? "pointer" : undefined,
+														}}
+													>
+														<span
+															style={{
+																width: 6,
+																height: 6,
+																borderRadius: 999,
+																background: isError ? "var(--danger)" : "var(--success)",
+																marginTop: 7,
+																flexShrink: 0,
+															}}
+														/>
+														<div style={{ minWidth: 0, flex: 1 }}>
+															<div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+																<span
+																	style={{
+																		fontSize: 12,
+																		fontWeight: 600,
+																		color: "var(--text)",
+																		whiteSpace: "nowrap",
+																		overflow: "hidden",
+																		textOverflow: "ellipsis",
+																	}}
+																>
+																	{req.model}
+																</span>
+																<span
+																	style={{
+																		fontFamily: "var(--font-mono)",
+																		fontSize: 11,
+																		color: "var(--dim)",
+																		flexShrink: 0,
+																	}}
+																>
+																	{format(new Date(req.timestamp), "HH:mm:ss")}
+																</span>
+															</div>
+															<div
+																style={{
+																	display: "flex",
+																	justifyContent: "space-between",
+																	gap: 8,
+																	fontSize: 11,
+																	color: "var(--muted)",
+																}}
+															>
+																<span
+																	style={{
+																		fontFamily: "var(--font-mono)",
+																		whiteSpace: "nowrap",
+																		overflow: "hidden",
+																		textOverflow: "ellipsis",
+																	}}
+																>
+																	{req.provider}
+																</span>
+																<span
+																	style={{
+																		fontFamily: "var(--font-mono)",
+																		fontVariantNumeric: "tabular-nums",
+																		whiteSpace: "nowrap",
+																	}}
+																>
+																	{req.usage.totalTokens > 0
+																		? `${formatCompact(req.usage.totalTokens)} tok`
+																		: ""}{" "}
+																	{req.usage.totalTokens > 0 ? `· ${formatMessageCost(req, 2)}` : ""}
+																</span>
+															</div>
+														</div>
+													</div>
+												);
+											})}
+										</div>
+									</AsyncBoundary>
 								</div>
 							</div>
-							<div className="omp-section-rule" />
-							<div className="omp-section-body">
-								<AsyncBoundary
-									loading={recentRes.loading}
-									error={recentRes.error}
-									data={recentRes.data}
-									fallback={
-										<div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-											{Array.from({ length: 4 }).map((_, i) => (
-												<div key={i} style={{ display: "flex", gap: 10, alignItems: "center" }}>
-													<Skeleton variant="circle" width={8} height={8} />
-													<div style={{ flex: 1 }}>
-														<Skeleton variant="text" width="60%" height={14} />
-														<Skeleton variant="text" width="40%" height={10} />
-													</div>
-												</div>
-											))}
-										</div>
-									}
-								>
-									<div style={{ display: "flex", flexDirection: "column" }}>
-										{previewRequests.map(req => {
-											const isError = !!req.errorMessage;
-											return (
-												<div
-													key={req.id ?? `${req.sessionFile}-${req.entryId}`}
-													onClick={() => req.id && onRequestClick(req.id)}
-													style={{
-														display: "flex",
-														gap: 10,
-														padding: "8px 2px",
-														borderBottom: "1px solid var(--border)",
-														cursor: req.id ? "pointer" : undefined,
-													}}
-												>
-													<span
-														style={{
-															width: 6,
-															height: 6,
-															borderRadius: 999,
-															background: isError ? "var(--danger)" : "var(--success)",
-															marginTop: 7,
-															flexShrink: 0,
-														}}
-													/>
-													<div style={{ minWidth: 0, flex: 1 }}>
-														<div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-															<span
-																style={{
-																	fontSize: 12,
-																	fontWeight: 600,
-																	color: "var(--text)",
-																	whiteSpace: "nowrap",
-																	overflow: "hidden",
-																	textOverflow: "ellipsis",
-																}}
-															>
-																{req.model}
-															</span>
-															<span
-																style={{
-																	fontFamily: "var(--font-mono)",
-																	fontSize: 11,
-																	color: "var(--dim)",
-																	flexShrink: 0,
-																}}
-															>
-																{format(new Date(req.timestamp), "HH:mm:ss")}
-															</span>
-														</div>
-														<div
-															style={{
-																display: "flex",
-																justifyContent: "space-between",
-																gap: 8,
-																fontSize: 11,
-																color: "var(--muted)",
-															}}
-														>
-															<span
-																style={{
-																	fontFamily: "var(--font-mono)",
-																	whiteSpace: "nowrap",
-																	overflow: "hidden",
-																	textOverflow: "ellipsis",
-																}}
-															>
-																{req.provider}
-															</span>
-															<span
-																style={{
-																	fontFamily: "var(--font-mono)",
-																	fontVariantNumeric: "tabular-nums",
-																	whiteSpace: "nowrap",
-																}}
-															>
-																{req.usage.totalTokens > 0
-																	? `${formatCompact(req.usage.totalTokens)} tok`
-																	: ""}{" "}
-																{req.usage.cost.total > 0
-																	? `· ${formatEstimatedCost(req.usage.cost.total, 0, 2)}`
-																	: ""}
-															</span>
-														</div>
-													</div>
-												</div>
-											);
-										})}
-										{previewRequests.length === 0 && (
-											<div className="stats-empty-state-message">No recent requests.</div>
-										)}
-									</div>
-								</AsyncBoundary>
-							</div>
-						</div>
+						)}
 					</div>
 				</div>
 			)}
 
-			{v.tokens && (
+			{v.tokens && !(overview && sumConversationTokens(overview.overall) === 0) && (
 				<div className="omp-section">
 					<div className="omp-section-head">
 						<div>
@@ -807,17 +830,13 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 					<div className="omp-section-rule" />
 					<div className="omp-section-body">
 						<AsyncBoundary loading={overviewRes.loading} error={overviewRes.error} data={overview}>
-							{overview ? (
-								<TokenBreakdownPanel stats={overview.overall} />
-							) : (
-								<div className="stats-empty-state-message">No usage in selected period.</div>
-							)}
+							{overview && <TokenBreakdownPanel stats={overview.overall} />}
 						</AsyncBoundary>
 					</div>
 				</div>
 			)}
 
-			{v.agents && (
+			{v.agents && !(overview && overview.byAgentType.length === 0) && (
 				<div className="omp-section">
 					<div className="omp-section-head">
 						<div>
@@ -843,7 +862,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 				</div>
 			)}
 
-			{v.models && (
+			{v.models && !(modelRes.data && modelRes.data.byModel.length === 0) && (
 				<div className="omp-section">
 					<div className="omp-section-head">
 						<div>
@@ -863,13 +882,11 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 					<div className="omp-section-rule" />
 					<div className="omp-section-body">
 						<AsyncBoundary loading={modelRes.loading} error={modelRes.error} data={modelRes.data}>
-							{modelRes.data && modelRes.data.byModel.length > 0 ? (
+							{modelRes.data && (
 								<ModelsMini
 									models={modelRes.data.byModel.slice(0, 6)}
 									totalRequests={overview?.overall.totalRequests ?? 0}
 								/>
-							) : (
-								<div className="stats-empty-state-message">No usage in selected period.</div>
 							)}
 						</AsyncBoundary>
 					</div>
@@ -877,7 +894,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 			)}
 
 			<div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-				{v.providers && (
+				{v.providers && !(providerRes.data && providerRes.data.providers.length === 0) && (
 					<div
 						className="omp-section"
 						style={{
@@ -903,16 +920,19 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 						<div className="omp-section-rule" />
 						<div className="omp-section-body">
 							<AsyncBoundary loading={providerRes.loading} error={providerRes.error} data={providerRes.data}>
-								{providerRes.data && providerRes.data.providers.length > 0 ? (
-									<ProvidersMini providers={providerRes.data.providers.slice(0, 4)} />
-								) : (
-									<div className="stats-empty-state-message">No usage in selected period.</div>
+								{providerRes.data && (
+									<ProvidersMini
+										providers={providerRes.data.providers.slice(0, 4)}
+										totalTokens={providerRes.data.providers
+											.slice(0, 4)
+											.reduce((sum, pr) => sum + pr.totalTokens, 0)}
+									/>
 								)}
 							</AsyncBoundary>
 						</div>
 					</div>
 				)}
-				{v.tools && (
+				{v.tools && !(toolRes.data && toolRes.data.byTool.length === 0) && (
 					<div
 						className="omp-section"
 						style={{
@@ -938,13 +958,11 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 						<div className="omp-section-rule" />
 						<div className="omp-section-body">
 							<AsyncBoundary loading={toolRes.loading} error={toolRes.error} data={toolRes.data}>
-								{toolRes.data && toolRes.data.byTool.length > 0 ? (
+								{toolRes.data && (
 									<ToolsMini
 										tools={toolRes.data.byTool.slice(0, 5)}
 										totalCalls={toolRes.data.byTool.reduce((s, t) => s + t.calls, 0)}
 									/>
-								) : (
-									<div className="stats-empty-state-message">No usage in selected period.</div>
 								)}
 							</AsyncBoundary>
 						</div>
@@ -952,7 +970,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 				)}
 			</div>
 
-			{v.projects && (
+			{v.projects && !(folderRes.data && folderRes.data.length === 0) && (
 				<div className="omp-section">
 					<div className="omp-section-head">
 						<div>
@@ -970,55 +988,55 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 					<div className="omp-section-rule" />
 					<div className="omp-section-body">
 						<AsyncBoundary loading={folderRes.loading} error={folderRes.error} data={folderRes.data}>
-							{folderRes.data && folderRes.data.length > 0 ? (
+							{folderRes.data && (
 								<ProjectsMini
 									folders={folderRes.data.slice(0, 6)}
 									totalRequests={overview?.overall.totalRequests ?? 0}
 								/>
-							) : (
-								<div className="stats-empty-state-message">No usage in selected period.</div>
 							)}
 						</AsyncBoundary>
 					</div>
 				</div>
 			)}
 
-			<div
-				className="omp-section"
-				style={{
-					background: "var(--surface)",
-					border: "1px solid var(--border)",
-					borderRadius: "var(--radius-lg)",
-					padding: 14,
-				}}
-			>
-				<div className="omp-section-head">
-					<div>
-						<div className="omp-section-title">Recent requests</div>
-						<p className="omp-section-desc">Latest transactions · tap a row for detail</p>
+			{v.recentRequests && !(recentRes.data && recentRes.data.length === 0) && (
+				<div
+					className="omp-section"
+					style={{
+						background: "var(--surface)",
+						border: "1px solid var(--border)",
+						borderRadius: "var(--radius-lg)",
+						padding: 14,
+					}}
+				>
+					<div className="omp-section-head">
+						<div>
+							<div className="omp-section-title">Recent requests</div>
+							<p className="omp-section-desc">Latest transactions · tap a row for detail</p>
+						</div>
+						<a
+							href={`#/requests?range=${range}`}
+							className="stats-button stats-button-secondary"
+							style={{ fontSize: 11, padding: "5px 9px" }}
+						>
+							View all
+						</a>
 					</div>
-					<a
-						href={`#/requests?range=${range}`}
-						className="stats-button stats-button-secondary"
-						style={{ fontSize: 11, padding: "5px 9px" }}
-					>
-						View all
-					</a>
+					<div className="omp-section-rule" />
+					<div className="omp-section-body">
+						<AsyncBoundary loading={recentRes.loading} error={recentRes.error} data={recentRes.data}>
+							<DataTable
+								columns={columns}
+								data={previewRequests}
+								keyExtractor={item => String(item.id ?? `${item.sessionFile}-${item.entryId}`)}
+								onRowClick={item => item.id && onRequestClick(item.id)}
+								renderMobileCard={renderMobileCard}
+								emptyText="No usage in selected period."
+							/>
+						</AsyncBoundary>
+					</div>
 				</div>
-				<div className="omp-section-rule" />
-				<div className="omp-section-body">
-					<AsyncBoundary loading={recentRes.loading} error={recentRes.error} data={recentRes.data}>
-						<DataTable
-							columns={columns as never}
-							data={previewRequests}
-							keyExtractor={item => String(item.id ?? `${item.sessionFile}-${item.entryId}`)}
-							onRowClick={item => item.id && onRequestClick(item.id)}
-							renderMobileCard={renderMobileCard as never}
-							emptyText="No usage in selected period."
-						/>
-					</AsyncBoundary>
-				</div>
-			</div>
+			)}
 		</div>
 	);
 }
@@ -1236,7 +1254,7 @@ function ManageDisclosure({
 								<input
 									type="checkbox"
 									checked={!!v[key]}
-									onChange={() => toggle(key as OverviewSectionKey)}
+									onChange={() => toggle(key)}
 									style={{ accentColor: "var(--text)" }}
 								/>
 							</label>
@@ -1341,11 +1359,12 @@ function ModelsMini({ models, totalRequests }: { models: ModelStats[]; totalRequ
 	);
 }
 
-function ProvidersMini({ providers }: { providers: ProviderAggregate[] }) {
+function ProvidersMini({ providers, totalTokens }: { providers: ProviderAggregate[]; totalTokens: number }) {
 	return (
 		<div className="omp-provider-grid">
 			{providers.map(p => {
 				const errorRate = p.totalRequests > 0 ? p.failedRequests / p.totalRequests : 0;
+				const tokenShare = totalTokens > 0 ? p.totalTokens / totalTokens : 0;
 				return (
 					<div key={p.provider} className="omp-provider-item">
 						<div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
@@ -1371,8 +1390,18 @@ function ProvidersMini({ providers }: { providers: ProviderAggregate[] }) {
 							<span>{formatInteger(p.totalRequests)} req</span>
 							<span>{formatCompact(p.totalTokens)} tok</span>
 						</div>
-						<div style={{ height: 3, borderRadius: 999, background: "var(--surface-3)", overflow: "hidden" }}>
-							<div style={{ width: "100%", height: "100%", background: "var(--link)", opacity: 0.9 }} />
+						<div
+							title={`${formatPercent(tokenShare)} of provider tokens`}
+							style={{ height: 3, borderRadius: 999, background: "var(--surface-3)", overflow: "hidden" }}
+						>
+							<div
+								style={{
+									width: `${tokenShare * 100}%`,
+									height: "100%",
+									background: "var(--link)",
+									opacity: 0.9,
+								}}
+							/>
 						</div>
 						<div
 							style={{
@@ -1470,7 +1499,7 @@ function ToolsMini({ tools, totalCalls }: { tools: ToolUsageStats[]; totalCalls:
 								fontVariantNumeric: "tabular-nums",
 							}}
 						>
-							{formatEstimatedCost(t.costShare, 0, 2)}
+							{formatEstimatedCost(t.costShare, t.unpricedRequestsShare, 2)}
 						</span>
 					</div>
 				);

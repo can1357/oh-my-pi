@@ -22,6 +22,7 @@ import {
 	getProviderDashboardStats,
 	getRecentErrors,
 	getRequestsPaginated,
+	getTimeRangeConfig,
 	getToolDashboardStats,
 } from "./aggregator";
 import { getGainDashboardStats } from "./gain-aggregator";
@@ -152,7 +153,8 @@ export async function handleApiV1(req: Request): Promise<Response> {
 			const offset = offsetRaw ? Number.parseInt(offsetRaw, 10) : 0;
 			const effectiveLimit = Number.isFinite(limit) && limit >= 0 ? limit : 20;
 			const effectiveOffset = Number.isFinite(offset) && offset >= 0 ? offset : 0;
-			const { items, total } = await getRequestsPaginated(effectiveLimit, effectiveOffset);
+			const { cutoff } = getTimeRangeConfig(range);
+			const { items, total } = await getRequestsPaginated(effectiveLimit, effectiveOffset, cutoff);
 			return Response.json({ requests: items, total }, { headers: CORS_HEADERS });
 		}
 

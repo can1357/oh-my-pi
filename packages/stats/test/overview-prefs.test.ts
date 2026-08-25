@@ -1,6 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import {
 	activeDaysFromSeries,
+	DASHBOARD_STORAGE_KEY,
+	defaultDashboards,
+	loadDashboardState,
 	loadPrefs,
 	nextPrefsOnToggle,
 	PRESET_DEFS,
@@ -96,5 +99,62 @@ describe("overview prefs persistence", () => {
 		expect((prefs.visible as Record<string, unknown>).bogus).toBeUndefined();
 		// other keys fall back to default
 		for (const k of SECTION_ORDER) if (k !== "tape") expect(prefs.visible[k]).toBe(true);
+	});
+
+	it("defaults live feed and recent requests to visible in every section", () => {
+		for (const key of ["liveFeed", "recentRequests"]) {
+			expect(SECTION_ORDER).toContain(key);
+			expect(PRESET_DEFS.default.visible[key as keyof typeof PRESET_DEFS.default.visible]).toBe(true);
+		}
+		// Focus presets intentionally hide the unconditional request panels.
+		expect(PRESET_DEFS.tokens.visible.liveFeed).toBe(false);
+		expect(PRESET_DEFS.tokens.visible.recentRequests).toBe(false);
+	});
+
+	it("migrates legacy prefs missing the new sections to visible", () => {
+		// A record saved before liveFeed/recentRequests existed: only old keys.
+		const legacyVisible: Record<string, boolean> = {};
+		for (const k of SECTION_ORDER) {
+			if (k === "liveFeed" || k === "recentRequests") continue;
+			legacyVisible[k] = k !== "tape";
+		}
+		const storage = fakeStorage({ [STORAGE_KEY]: JSON.stringify({ preset: "custom", visible: legacyVisible }) });
+		const prefs = loadPrefs(storage as never);
+		expect(prefs.visible.tape).toBe(false);
+		expect(prefs.visible.liveFeed).toBe(true);
+		expect(prefs.visible.recentRequests).toBe(true);
+	});
+
+	it("migrates legacy dashboard records missing the new sections to visible", () => {
+		const legacyDash = {
+			id: "custom",
+			name: "My Dashboard",
+			visible: {
+				tape: false,
+				scope: true,
+				models: true,
+				providers: true,
+				tokens: true,
+				agents: true,
+				tools: true,
+				projects: true,
+				errors: true,
+			},
+			createdAt: 42,
+		};
+		const storage = fakeStorage({
+			[DASHBOARD_STORAGE_KEY]: JSON.stringify({ activeId: "custom", dashboards: [legacyDash] }),
+		});
+		const state = loadDashboardState(storage as never);
+		expect(state.dashboards[0].visible.tape).toBe(false);
+		expect(state.dashboards[0].visible.liveFeed).toBe(true);
+		expect(state.dashboards[0].visible.recentRequests).toBe(true);
+	});
+
+	it("default dashboards carry the new sections", () => {
+		for (const dash of defaultDashboards()) {
+			expect(dash.visible.liveFeed).toBeTypeOf("boolean");
+			expect(dash.visible.recentRequests).toBeTypeOf("boolean");
+		}
 	});
 });

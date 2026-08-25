@@ -123,6 +123,27 @@ describe("API v1 requests endpoint with real pagination", () => {
 		expect(body2.total).toBe(10);
 		expect(body2.requests[0].entryId).toBe("v1-req-3");
 	});
+
+	it("filters requests by range for both total and page", async () => {
+		await initDb();
+		const now = Date.now();
+		insertMessageStats([
+			makeMessage(now, "v1-range-recent"),
+			makeMessage(now - 48 * 60 * 60 * 1000, "v1-range-2d-old"),
+		]);
+
+		const res = await handleApi(new Request("http://stats.test/api/v1/requests?range=24h&limit=10&offset=0"));
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { requests: MessageStats[]; total: number };
+		expect(body.total).toBe(1);
+		expect(body.requests).toHaveLength(1);
+		expect(body.requests[0].entryId).toBe("v1-range-recent");
+
+		const all = await handleApi(new Request("http://stats.test/api/v1/requests?range=all&limit=10&offset=0"));
+		const bodyAll = (await all.json()) as { requests: MessageStats[]; total: number };
+		expect(bodyAll.total).toBe(2);
+		expect(bodyAll.requests).toHaveLength(2);
+	});
 });
 
 describe("API v1 404 for unknown endpoint", () => {

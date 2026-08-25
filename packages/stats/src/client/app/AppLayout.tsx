@@ -1,7 +1,7 @@
 import { X } from "lucide-react";
 import type React from "react";
 import { useEffect, useState } from "react";
-import { applyDensity, DENSITY_STORAGE_KEY, type Density, loadDensity } from "../data/density";
+import { setDensity, useDensity } from "../data/density";
 import type { TimeRange } from "../types";
 import { NavRail } from "./NavRail";
 import type { DashboardSection } from "./routes";
@@ -38,21 +38,12 @@ export function AppLayout({
 			return false;
 		}
 	});
-	const [density, setDensity] = useState<Density>(() => loadDensity());
+	const density = useDensity();
 	useEffect(() => {
 		try {
 			localStorage.setItem(NAV_COLLAPSED_KEY, collapsed ? "1" : "0");
 		} catch {}
 	}, [collapsed]);
-	useEffect(() => {
-		applyDensity(density);
-		try {
-			localStorage.setItem(DENSITY_STORAGE_KEY, density);
-		} catch {}
-	}, [density]);
-	useEffect(() => {
-		applyDensity(loadDensity());
-	}, []);
 
 	const handleSectionChange = (section: DashboardSection) => {
 		onSectionChange(section);
