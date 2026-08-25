@@ -58,37 +58,6 @@ export function findCredential(
  */
 export const SEARCH_HARD_TIMEOUT_MS = DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS * 1_000;
 
-/** Sleep until the delay elapses or the caller aborts, whichever happens first. */
-export function abortableSleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
-	if (ms <= 0) return Promise.resolve();
-	signal?.throwIfAborted();
-	const { promise, resolve, reject } = Promise.withResolvers<void>();
-	let timer: NodeJS.Timeout | undefined;
-	const cleanup = (): void => {
-		if (timer) {
-			clearTimeout(timer);
-			timer = undefined;
-		}
-		signal?.removeEventListener("abort", onAbort);
-	};
-	const onAbort = (): void => {
-		cleanup();
-		try {
-			signal?.throwIfAborted();
-			reject(new DOMException("The operation was aborted.", "AbortError"));
-		} catch (error) {
-			reject(error);
-		}
-	};
-	timer = setTimeout(() => {
-		cleanup();
-		resolve();
-	}, ms);
-	signal?.addEventListener("abort", onAbort, { once: true });
-	if (signal?.aborted) onAbort();
-	return promise;
-}
-
 /**
  * Compose a caller-supplied {@link AbortSignal} with a hard timeout so an
  * outbound `fetch()` is guaranteed to settle within `ms` even when the

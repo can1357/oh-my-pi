@@ -308,6 +308,10 @@
 
 - Added `/login anysearch` and `ANYSEARCH_API_KEY` credential discovery.
 
+### Fixed
+
+- Prevented provider-generated API keys from replacing credentials added concurrently or outranking a later environment key.
+
 ## [18.0.4] - 2026-08-24
 
 ### Fixed

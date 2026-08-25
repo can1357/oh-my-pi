@@ -190,8 +190,8 @@ const validSamples: Record<SchemaName, unknown> = {
 	credentialBlockResponseSchema: { ok: true },
 	credentialBlocksDeleteResponseSchema: { ok: true },
 	usageStaleResponseSchema: { ok: true },
-	credentialUploadRequestSchema: { provider: "anthropic", credential: REAL_OAUTH },
-	credentialUploadResponseSchema: { entries: [CREDENTIAL_ENTRY] },
+	credentialUploadRequestSchema: { provider: "anthropic", credential: REAL_OAUTH, ifProviderAbsent: true },
+	credentialUploadResponseSchema: { entries: [CREDENTIAL_ENTRY], inserted: false },
 };
 
 function run(schema: unknown, input: unknown): unknown {
@@ -229,6 +229,11 @@ describe("auth-broker public wire schemas", () => {
 		reject(wireSchemas.apiKeyCredentialSchema, { ...API_KEY, extra: true });
 		reject(wireSchemas.apiKeyCredentialSchema, { ...API_KEY, source: "environment" });
 		reject(wireSchemas.credentialUploadRequestSchema, { provider: "", credential: REAL_OAUTH });
+		reject(wireSchemas.credentialUploadRequestSchema, {
+			provider: "anthropic",
+			credential: REAL_OAUTH,
+			ifProviderAbsent: "yes",
+		});
 	});
 
 	test("preserves fixed envelopes, integer fields, discriminators, and block alias identity", () => {

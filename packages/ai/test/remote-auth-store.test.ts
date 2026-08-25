@@ -1097,6 +1097,30 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		expect(clientStorage.get("kagi")).toEqual({ type: "api_key", key: "new-key" });
 		clientStorage.close();
 	});
+
+	test("conditional generated-key upload preserves a credential written concurrently on the broker", async () => {
+		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
+		const initialResult = await brokerClient.fetchSnapshot();
+		if (initialResult.status !== 200) throw new Error("expected snapshot");
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			initialSnapshot: initialResult.snapshot,
+		});
+		const clientStorage = new AuthStorage(remoteStore);
+		await clientStorage.reload();
+
+		await serverStorage!.set("anysearch", { type: "api_key", key: "broker-login-key", source: "login" });
+		const inserted = await clientStorage.addGeneratedApiKeyIfAbsent("anysearch", "generated-key");
+
+		expect(inserted).toBe(false);
+		expect(serverStore!.listAuthCredentials("anysearch").map(entry => entry.credential)).toEqual([
+			{ type: "api_key", key: "broker-login-key", source: "login" },
+		]);
+		expect(clientStorage.listStoredCredentials("anysearch").map(entry => entry.credential)).toEqual([
+			{ type: "api_key", key: "broker-login-key", source: "login" },
+		]);
+		clientStorage.close();
+	});
 	test("snapshot with a login-sourced api_key passes client wire validation", async () => {
 		// Regression: keys stored via the /login flow carry `source: "login"`.
 		// exportSnapshot() forwards them verbatim; the client wire schema used

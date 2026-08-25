@@ -1,11 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import type { AuthStorage } from "@oh-my-pi/pi-ai";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { AuthStorage } from "@oh-my-pi/pi-ai";
+import * as aiStream from "@oh-my-pi/pi-ai/stream";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { runSearchQuery } from "@oh-my-pi/pi-coding-agent/web/search";
 import * as providerRegistry from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import { searchAnySearch } from "@oh-my-pi/pi-coding-agent/web/search/providers/anysearch";
 import type { SearchProvider } from "@oh-my-pi/pi-coding-agent/web/search/providers/base";
 import { SEARCH_PROVIDER_OPTIONS, SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 interface FakeAuthStorage {
 	authStorage: AuthStorage;
@@ -18,18 +23,10 @@ function createAuthStorage(initialKey?: string): FakeAuthStorage {
 		hasAuth: () => storedKey !== undefined,
 		getApiKey: async () => storedKey,
 		resolver: () => async () => storedKey,
-		set: async (_provider: string, credential: unknown) => {
-			if (
-				typeof credential !== "object" ||
-				credential === null ||
-				!("type" in credential) ||
-				credential.type !== "api_key" ||
-				!("key" in credential) ||
-				typeof credential.key !== "string"
-			) {
-				throw new Error("Expected an API-key credential");
-			}
-			storedKey = credential.key;
+		addGeneratedApiKeyIfAbsent: async (_provider: string, apiKey: string) => {
+			if (storedKey !== undefined) return false;
+			storedKey = apiKey;
+			return true;
 		},
 	} as unknown as AuthStorage;
 	return { authStorage, getStoredKey: () => storedKey };
@@ -151,6 +148,47 @@ describe("AnySearch provider", () => {
 		expect(getStoredKey()).toBe(secretKey);
 		expect(JSON.stringify(response)).not.toContain(secretKey);
 		expect(JSON.stringify(response)).not.toContain(secretPassword);
+	});
+
+	it("preserves a login credential written while anonymous registration is in flight", async () => {
+		vi.spyOn(aiStream, "getEnvApiKey").mockReturnValue(undefined);
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-anysearch-auth-race-"));
+		const dbPath = path.join(tempDir, "agent.db");
+		let primaryStorage: AuthStorage | undefined;
+		let loginStorage: AuthStorage | undefined;
+		try {
+			primaryStorage = await AuthStorage.create(dbPath);
+			loginStorage = await AuthStorage.create(dbPath);
+			await Promise.all([primaryStorage.reload(), loginStorage.reload()]);
+			const generatedKey = "as_sk_88888888888888888888888888888888";
+			const loginKey = "user-login-key";
+			const authorizations: Array<string | null> = [];
+			const fetchMock: FetchImpl = async (_input, init) => {
+				authorizations.push(new Headers(init?.headers).get("Authorization"));
+				if (authorizations.length === 1) {
+					await loginStorage?.set("anysearch", { type: "api_key", key: loginKey, source: "login" });
+					return registrationResponse(createdRegistrationMessage(generatedKey));
+				}
+				return successfulResponse("req-login-won");
+			};
+
+			const response = await searchAnySearch({
+				query: "query",
+				authStorage: primaryStorage,
+				provisionGeneratedCredential: true,
+				fetch: fetchMock,
+			});
+
+			expect(authorizations).toEqual([null, `Bearer ${loginKey}`]);
+			expect(response.requestId).toBe("req-login-won");
+			expect(primaryStorage.listStoredCredentials("anysearch").map(entry => entry.credential)).toEqual([
+				{ type: "api_key", key: loginKey, source: "login" },
+			]);
+		} finally {
+			primaryStorage?.close();
+			loginStorage?.close();
+			await removeWithRetries(tempDir);
+		}
 	});
 
 	it("removes the legacy response period without changing the generated API key", async () => {

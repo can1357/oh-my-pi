@@ -12,7 +12,7 @@ import { SearchProviderError } from "../../../web/search/types";
 import { clampNumResults } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
-import { abortableSleep, classifyProviderHttpError, withHardTimeout } from "./utils";
+import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
 const ANYSEARCH_SEARCH_URL = "https://api.anysearch.com/v1/search";
 const DEFAULT_NUM_RESULTS = 10;
@@ -129,6 +129,36 @@ function normalizeUrl(value: unknown): string | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+function sleepWithAbort(ms: number, signal: AbortSignal | undefined): Promise<void> {
+	if (ms <= 0) return Promise.resolve();
+	signal?.throwIfAborted();
+	const { promise, resolve, reject } = Promise.withResolvers<void>();
+	let timer: NodeJS.Timeout | undefined;
+	const cleanup = (): void => {
+		if (timer) {
+			clearTimeout(timer);
+			timer = undefined;
+		}
+		signal?.removeEventListener("abort", onAbort);
+	};
+	const onAbort = (): void => {
+		cleanup();
+		try {
+			signal?.throwIfAborted();
+			reject(new DOMException("The operation was aborted.", "AbortError"));
+		} catch (error) {
+			reject(error);
+		}
+	};
+	timer = setTimeout(() => {
+		cleanup();
+		resolve();
+	}, ms);
+	signal?.addEventListener("abort", onAbort, { once: true });
+	if (signal?.aborted) onAbort();
+	return promise;
 }
 
 function parseJson(raw: string): unknown {
@@ -311,16 +341,24 @@ async function callAnySearch(
 	throw new AnySearchHttpError(`AnySearch API request failed (${response.status})`, response.status, requestId);
 }
 
-async function persistGeneratedCredential(authStorage: AuthStorage, credential: AnySearchCredential): Promise<void> {
+async function persistGeneratedCredential(
+	params: AnySearchOperationParams,
+	credential: AnySearchCredential,
+): Promise<string> {
 	try {
-		await authStorage.set("anysearch", { type: "api_key", key: credential.apiKey, source: "login" });
+		await params.authStorage.addGeneratedApiKeyIfAbsent("anysearch", credential.apiKey);
+		const selectedKey = await params.authStorage.getApiKey("anysearch", params.sessionId, { signal: params.signal });
+		if (selectedKey) return selectedKey;
 	} catch {
-		throw new SearchProviderError(
-			"anysearch",
-			"AnySearch generated an API key, but OMP could not save it. Select AnySearch and try again.",
-			500,
-		);
+		params.signal.throwIfAborted();
+		// Normalize persistence and re-resolution failures below.
 	}
+	params.signal.throwIfAborted();
+	throw new SearchProviderError(
+		"anysearch",
+		"AnySearch generated an API key, but OMP could not save it. Select AnySearch and try again.",
+		500,
+	);
 }
 
 async function searchWithGeneratedCredential(
@@ -347,7 +385,7 @@ async function searchWithGeneratedCredential(
 					503,
 				);
 			}
-			await abortableSleep(delayMs, params.signal);
+			await sleepWithAbort(delayMs, params.signal);
 		}
 	}
 }
@@ -356,7 +394,8 @@ async function persistAndUseGeneratedCredential(
 	params: AnySearchOperationParams,
 	credential: AnySearchCredential,
 ): Promise<SearchResponse> {
-	await persistGeneratedCredential(params.authStorage, credential);
+	const selectedKey = await persistGeneratedCredential(params, credential);
+	if (selectedKey !== credential.apiKey) return (await callAnySearch(params, selectedKey)).response;
 	return searchWithGeneratedCredential(params, credential);
 }
 
@@ -372,7 +411,7 @@ async function completeAnonymousRegistration(params: AnySearchOperationParams): 
 			return persistAndUseGeneratedCredential(params, credential);
 		}
 		if (registrationState(message) !== "pending") break;
-		await abortableSleep(delayMs, params.signal);
+		await sleepWithAbort(delayMs, params.signal);
 		result = await callAnySearch(params, undefined);
 		if (!result.registrationRequired) return result.response;
 		message = result.registrationMessage;
