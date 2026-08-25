@@ -1,4 +1,3 @@
-import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type {
@@ -435,19 +434,24 @@ function linuxProcStartToken(pid: number): string | undefined {
 function psStartToken(pid: number): string | undefined {
 	if (process.platform === "win32") return undefined;
 	try {
-		const out = execSync(`ps -o lstart= -p ${pid}`, {
-			encoding: "utf-8",
-			stdio: ["ignore", "pipe", "ignore"],
+		const proc = Bun.spawnSync(["ps", "-o", "lstart=", "-p", String(pid)], {
+			stdout: "pipe",
+			stderr: "ignore",
 		});
-		return parsePsLstart(out);
+		return parsePsLstart(proc.stdout.toString());
 	} catch {
 		return undefined;
 	}
 }
 
-/** Normalize `ps -o lstart=` output into a comparable token. */
+/**
+ * Normalize `ps -o lstart=` output into a comparable token. ALL whitespace is
+ * stripped: the token is serialized into whitespace-delimited claim lines and
+ * prune markers (`pid token`), so a multiword `lstart` must encode as a single
+ * field or readers would truncate it to the weekday.
+ */
 export function parsePsLstart(output: string): string | undefined {
-	const token = output.replace(/\s+/g, " ").trim();
+	const token = output.replace(/\s+/g, "");
 	return token.length > 0 ? token : undefined;
 }
 

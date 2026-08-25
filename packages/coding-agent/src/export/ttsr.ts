@@ -50,6 +50,16 @@ interface TtsrEntry {
 interface InjectionRecord {
 	/** Message count (turn index) when the rule was last injected. */
 	lastInjectedAt: number;
+	/**
+	 * True when `lastInjectedAt` is in journal (branch-lifetime turn)
+	 * coordinates — set by an in-process injection or an explicit branch
+	 * position restore. False when the record was seeded by a resume
+	 * restore without positions (process-local counter starting at 0):
+	 * those coordinates cannot be compared against branch positions, so
+	 * rollback reconciliation must preserve their elapsed gap instead of
+	 * substituting a branch position.
+	 */
+	journalCoords: boolean;
 }
 
 const DEFAULT_SETTINGS: Required<TtsrSettings> = {
@@ -527,9 +537,13 @@ export class TtsrManager {
 			}
 			const record = this.#injectionRecords.get(ruleName);
 			if (!record) {
-				this.#injectionRecords.set(ruleName, { lastInjectedAt: this.#messageCount });
+				this.#injectionRecords.set(ruleName, {
+					lastInjectedAt: this.#messageCount,
+					journalCoords: true,
+				});
 			} else {
 				record.lastInjectedAt = this.#messageCount;
+				record.journalCoords = true;
 			}
 			logger.debug("TTSR rule marked as injected", {
 				ruleName,
@@ -559,11 +573,16 @@ export class TtsrManager {
 		this.#injectionRecords.clear();
 		for (const name of ruleNames) {
 			const position = injectionPositions?.get(name);
-			const lastInjectedAt =
-				position !== undefined && Number.isInteger(position) && position >= 0
-					? position
-					: (previous.get(name)?.lastInjectedAt ?? 0);
-			this.#injectionRecords.set(name, { lastInjectedAt });
+			const prev = previous.get(name);
+			const hasPosition = position !== undefined && Number.isInteger(position) && position >= 0;
+			const lastInjectedAt = hasPosition ? position : (prev?.lastInjectedAt ?? 0);
+			// Explicit positions are branch turn indices (journal coords);
+			// otherwise the record inherits its coordinate system — a
+			// resume-seeded record stays process-local, an in-process
+			// injection's stays journal-aligned. Freshly-tracked rules
+			// (neither) start as resume-style process-local records.
+			const journalCoords = hasPosition ? true : (prev?.journalCoords ?? false);
+			this.#injectionRecords.set(name, { lastInjectedAt, journalCoords });
 		}
 		if (ruleNames.length > 0) {
 			logger.debug("TTSR injected state restored", { ruleNames });
@@ -617,10 +636,13 @@ export class TtsrManager {
 	 * and restored records at zero, so live records cannot be compared
 	 * against historical branch positions directly.
 	 */
-	getInjectionGaps(): Map<string, number> {
-		const gaps = new Map<string, number>();
+	getInjectionGaps(): Map<string, { gap: number; journalCoords: boolean }> {
+		const gaps = new Map<string, { gap: number; journalCoords: boolean }>();
 		for (const [name, record] of this.#injectionRecords) {
-			gaps.set(name, Math.max(0, this.#messageCount - record.lastInjectedAt));
+			gaps.set(name, {
+				gap: Math.max(0, this.#messageCount - record.lastInjectedAt),
+				journalCoords: record.journalCoords,
+			});
 		}
 		return gaps;
 	}

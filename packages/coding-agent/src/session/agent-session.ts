@@ -5649,16 +5649,19 @@ export class AgentSession {
 				}
 			}
 		}
-		// Rules with a live timing record keep their PROCESS-LOCAL gap, not
-		// their historical position: a resumed session restores injected
-		// rules at lastInjectedAt 0 with the counter also at 0, so the live
-		// gap is the real elapsed-since-injection distance in this process.
-		// Substituting the branch's lifetime assistant count for the counter
-		// would make an after-gap rule injected before resume instantly
-		// eligible merely because a rollback ran. Rules WITHOUT a live
-		// record (a redo reintroducing an off-branch injection) keep the
-		// branch position computed above.
-		for (const [name, gap] of liveGaps) {
+		// Rules whose live record is PROCESS-LOCAL (resume-seeded: counter and
+		// record both started at zero in this process) keep their elapsed gap —
+		// their coordinates cannot be compared against branch positions, and
+		// substituting the branch's lifetime turn count would make an after-gap
+		// rule injected before resume instantly eligible merely because a
+		// rollback ran. Records in JOURNAL coordinates are NOT substituted: the
+		// walk above already positioned the branch's latest SURVIVING injection,
+		// and a live record can describe an injection the rollback dropped (a
+		// repeatable rule re-injected inside the undone turn) or an older
+		// survivor that a redo's restored reinjection supersedes — overriding
+		// with either stale gap would mis-time the next trigger.
+		for (const [name, { gap, journalCoords }] of liveGaps) {
+			if (journalCoords) continue;
 			injectionPositions.set(name, Math.max(0, branchTurnCount - gap));
 		}
 		manager.restoreInjected([...ruleNames], injectionPositions);
@@ -8646,12 +8649,17 @@ export class AgentSession {
 		// Appending plain turns creates no branch summaries, so the marker can
 		// still be found after the operator continued. Redo is only safe while
 		// the marker is the active leaf: rebranching past newer turns would
-		// silently abandon them. Control entries (model/thinking/tier
-		// re-recorded by the rollback itself) are the one tolerated trailing
-		// kind: they carry no conversation.
+		// silently abandon them. Tolerated trailing kinds carry no conversation:
+		// control entries re-recorded by the rollback itself, and `custom`
+		// entries — the /undo emits session_tree, so a journal-derived handler
+		// may legitimately persist reconstructed state right after the marker
+		// (todo snapshots, mode state, extension reconciliation). Redo re-emits
+		// the corresponding tree event, letting those handlers rebuild their
+		// state on the restored branch, so replacing the entries is safe.
+		// Conversational `message` entries still block redo.
 		const branchEntries = this.sessionManager.getBranch();
 		const markerIdx = lastBranch ? branchEntries.findIndex(entry => entry.id === lastBranch!.id) : -1;
-		const onlyControlsTrailing =
+		const onlyNonConversationalTrailing =
 			markerIdx !== -1 &&
 			branchEntries
 				.slice(markerIdx + 1)
@@ -8661,9 +8669,9 @@ export class AgentSession {
 						entry.type === "thinking_level_change" ||
 						entry.type === "service_tier_change" ||
 						entry.type === "mode_change" ||
-						(entry.type === "custom" && entry.customType === USER_TODO_EDIT_CUSTOM_TYPE),
+						entry.type === "custom",
 				);
-		if (!lastBranch || (lastBranch.id !== this.sessionManager.getLeafId() && !onlyControlsTrailing)) {
+		if (!lastBranch || (lastBranch.id !== this.sessionManager.getLeafId() && !onlyNonConversationalTrailing)) {
 			return { ok: false, error: "Turns were appended after the /undo — redo is no longer possible." };
 		}
 		const tipId = details.undoOf;

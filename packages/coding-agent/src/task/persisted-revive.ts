@@ -128,7 +128,7 @@ export function createPersistedSubagentReviverFactory(
 			// externally supplied manager — close the reopened manager so its
 			// live-pid owner claim does not pin the session against undo-tail
 			// gc in the parent.
-			let session: Awaited<ReturnType<typeof createAgentSession>>["session"];
+			let session: AgentSession;
 			try {
 				({ session } = await createAgentSession({
 					cwd: ctx.session.sessionManager.getCwd(),
