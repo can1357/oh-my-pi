@@ -311,6 +311,36 @@ describe("openai-codex orphan tool-call repair", () => {
 		expect(note?.content).toMatch(/call_custom_orphan/);
 		expect(note?.content).toMatch(/Done!/);
 	});
+
+	it("keeps orphan text and image fallbacks outside a paired tool batch", async () => {
+		const imageUrl = `data:image/png;base64,${Buffer.from("orphan image").toString("base64")}`;
+		const body: RequestBody = {
+			model: "gpt-5.1-codex",
+			input: [
+				{ type: "function_call", call_id: "call_a", name: "read", arguments: "{}" },
+				{
+					type: "function_call_output",
+					call_id: "call_b",
+					output: [
+						{ type: "input_text", text: "orphan" },
+						{ type: "input_image", detail: "high", image_url: imageUrl },
+					],
+				},
+				{ type: "function_call_output", call_id: "call_a", output: "ok" },
+			],
+		};
+
+		const transformed = await transformRequestBody(body, createCodexModel(body.model), {});
+		const input = transformed.input || [];
+		expect(input.map(item => item.type)).toEqual(["message", "message", "function_call", "function_call_output"]);
+		const callIndex = input.findIndex(item => item.type === "function_call" && item.call_id === "call_a");
+		expect(input[callIndex + 1]).toMatchObject({ type: "function_call_output", call_id: "call_a" });
+		expect(input[1]).toMatchObject({
+			type: "message",
+			role: "user",
+			content: [{ type: "input_image", detail: "high", image_url: imageUrl }],
+		});
+	});
 });
 
 describe("openai-codex reasoning effort validation", () => {

@@ -85,6 +85,36 @@ describe("repairOrphanResponsesToolCalls", () => {
 });
 
 describe("repairOrphanResponsesToolOutputs", () => {
+	it("keeps orphan text and image fallbacks outside a paired tool batch", () => {
+		const imageUrl = `data:image/png;base64,${Buffer.from("orphan image").toString("base64")}`;
+		const repaired = repairOrphanResponsesToolOutputs([
+			{ type: "function_call", call_id: "call_a", name: "read", arguments: "{}" },
+			{
+				type: "function_call_output",
+				call_id: "call_b",
+				output: [
+					{ type: "input_text", text: "orphan" },
+					{ type: "input_image", detail: "high", image_url: imageUrl },
+				],
+			} as ResponseInput[number],
+			{ type: "function_call_output", call_id: "call_a", output: "ok" } as ResponseInput[number],
+		]);
+
+		expect(repaired.map(item => (item as { type?: string }).type)).toEqual([
+			"message",
+			"message",
+			"function_call",
+			"function_call_output",
+		]);
+		const callIndex = repaired.findIndex(item => (item as { call_id?: string }).call_id === "call_a");
+		expect(repaired[callIndex + 1]).toMatchObject({ type: "function_call_output", call_id: "call_a" });
+		expect(repaired[1]).toEqual({
+			type: "message",
+			role: "user",
+			content: [{ type: "input_image", detail: "high", image_url: imageUrl }],
+		});
+	});
+
 	it("preserves orphan images as user-message fallbacks", () => {
 		const imageData = Buffer.from("orphan image").toString("base64");
 		const imageUrl = `data:image/png;base64,${imageData}`;

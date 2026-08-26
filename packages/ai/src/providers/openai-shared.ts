@@ -1549,7 +1549,7 @@ export function repairOrphanResponsesToolOutputs(input: ResponseInput): Response
 		} as ResponseInput[number]);
 		appendResponsesOrphanImages(repaired, orphanOutput.images);
 	}
-	return repaired ?? input;
+	return repaired ? hoistInterleavedResponsesToolBatchMessages(repaired) : input;
 }
 
 /** Placeholder output for a tool call whose result is absent from the input. */
@@ -1612,7 +1612,7 @@ export function repairOrphanResponsesToolCalls(input: ResponseInput): ResponseIn
 			output: ORPHAN_TOOL_CALL_PLACEHOLDER,
 		} as ResponseInput[number]);
 	}
-	return repaired;
+	return hoistInterleavedResponsesToolBatchMessages(repaired);
 }
 
 type ResponsesBatchItemKind = "call" | "output" | "assistant-message" | "other";
@@ -1625,6 +1625,26 @@ function classifyResponsesBatchItem(item: object): ResponsesBatchItemKind {
 	const role = "role" in item ? item.role : undefined;
 	if (type === "message" && role === "assistant") return "assistant-message";
 	return "other";
+}
+
+function isResponsesOrphanAssistantMessage(item: object): boolean {
+	if (classifyResponsesBatchItem(item) !== "assistant-message") return false;
+	const content = "content" in item ? item.content : undefined;
+	return (
+		typeof content === "string" &&
+		(content.startsWith("[Orphan ") || content.startsWith("[Previous ")) &&
+		content.includes(" result; call_id=")
+	);
+}
+
+function isResponsesOrphanImageMessage(item: object): boolean {
+	if (!("role" in item) || item.role !== "user") return false;
+	const content = "content" in item ? item.content : undefined;
+	return (
+		Array.isArray(content) &&
+		content.length > 0 &&
+		content.every(part => isRecord(part) && part.type === "input_image")
+	);
 }
 
 /**
@@ -1658,6 +1678,14 @@ export function hoistInterleavedResponsesToolBatchMessages<T extends object>(ite
 			const kind = classifyResponsesBatchItem(items[start - 1]);
 			if (kind === "call") {
 				sawCall = true;
+			} else if (
+				start >= 2 &&
+				isResponsesOrphanAssistantMessage(items[start - 2]) &&
+				isResponsesOrphanImageMessage(items[start - 1])
+			) {
+				messageIndexes.push(start - 1, start - 2);
+				start -= 2;
+				continue;
 			} else if (kind === "assistant-message") {
 				messageIndexes.push(start - 1);
 			} else {
@@ -2130,7 +2158,9 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 	const hoisted = hoistInterleavedResponsesToolBatchMessages(messages);
 	const withRepairedOutputs = options.repairOrphanOutputs ? repairOrphanResponsesToolOutputs(hoisted) : hoisted;
 	const withRepairedCalls = repairOrphanResponsesToolCalls(withRepairedOutputs);
-	return stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay(withRepairedCalls);
+	return stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay(
+		hoistInterleavedResponsesToolBatchMessages(withRepairedCalls),
+	);
 }
 
 type ResponsesReplayAssistantMessage = Omit<ResponseOutputMessage, "id"> & { id?: string };

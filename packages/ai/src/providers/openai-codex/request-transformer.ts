@@ -3,7 +3,11 @@ import { supportsAllTurnsReasoningContext, supportsCodexReasoningSummary } from 
 import { requireSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { Model } from "../../types";
-import { mapOpenAIReasoningEffort, splitResponsesOrphanOutput } from "../openai-shared";
+import {
+	hoistInterleavedResponsesToolBatchMessages,
+	mapOpenAIReasoningEffort,
+	splitResponsesOrphanOutput,
+} from "../openai-shared";
 
 /** Reasoning replay scope for the Codex Responses API (`reasoning.context`). */
 export type CodexReasoningContext = "auto" | "current_turn" | "all_turns";
@@ -284,7 +288,7 @@ function repairToolCallPairs(input: InputItem[]): InputItem[] {
 		}
 		repaired.push(item);
 	}
-	return repaired;
+	return hoistInterleavedResponsesToolBatchMessages(repaired);
 }
 
 /**

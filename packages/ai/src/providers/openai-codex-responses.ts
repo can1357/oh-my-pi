@@ -117,6 +117,7 @@ import {
 	finalizeToolCallArgumentsDone,
 	getOpenAIPromptCacheKey,
 	hasExecutableIncompleteResponsesToolCalls,
+	hoistInterleavedResponsesToolBatchMessages,
 	isOpenAIResponsesProgressEvent,
 	mapOpenAIResponsesStopReason,
 	normalizeOpenAIPromptCacheKey,
@@ -4626,7 +4627,7 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 		msgIndex += 1;
 	}
 
-	return messages;
+	return hoistInterleavedResponsesToolBatchMessages(messages);
 }
 
 function normalizeInputMessageContent(
