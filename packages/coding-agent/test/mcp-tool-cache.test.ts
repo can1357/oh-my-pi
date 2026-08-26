@@ -1,12 +1,15 @@
 /**
  * Tests for `MCPToolCache` cache-identity hashing.
  *
- * Contract: `lazy` is a connection *policy* (when to connect), not part of a
- * server's identity. Flipping `lazy` on an already-cached server must still
- * hit the cache — otherwise every eager-to-lazy transition (the whole point
- * of adding the option to an existing server) orphans the cache and starts
- * the server tool-less until a manual `/mcp reconnect`. Changes to fields
- * that actually identify the connection (e.g. `command`) must still miss.
+ * Contract: `lazy` and `enabled` are connection *policy* (when to connect,
+ * whether to connect at all), not part of a server's identity. Flipping
+ * either on an already-cached server must still hit the cache — otherwise
+ * every eager-to-lazy transition (the whole point of adding the option to an
+ * existing server) orphans the cache and starts the server tool-less until a
+ * manual `/mcp reconnect`, and `/mcp enable` writing an explicit
+ * `enabled: true` over a previously-omitted key does the same to a
+ * re-enabled lazy server. Changes to fields that actually identify the
+ * connection (e.g. `command`) must still miss.
  */
 import { describe, expect, it } from "bun:test";
 import { MCPToolCache } from "../src/mcp/tool-cache";
@@ -56,6 +59,16 @@ describe("MCPToolCache", () => {
 		await cache.set("srv", lazyConfig, [TOOL_DEF]);
 
 		const cached = await cache.get("srv", { ...lazyConfig, lazy: false });
+
+		expect(cached).toEqual([TOOL_DEF]);
+	});
+
+	it("regression: re-enabling a lazy server whose config previously omitted `enabled` still hits the cache", async () => {
+		const cache = new MCPToolCache(fakeStorage());
+		const omittedConfig = config({ lazy: true });
+		await cache.set("srv", omittedConfig, [TOOL_DEF]);
+
+		const cached = await cache.get("srv", { ...omittedConfig, enabled: true });
 
 		expect(cached).toEqual([TOOL_DEF]);
 	});
