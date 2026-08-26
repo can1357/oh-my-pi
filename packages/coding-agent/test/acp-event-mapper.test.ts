@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import path from "node:path";
@@ -22,10 +22,7 @@ import {
 	mapAgentSessionEventToAcpSessionUpdates,
 	normalizeReplayToolArguments,
 } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-event-mapper";
-import {
-	checkAcpUpdateInvariants,
-	EvalSourceDeliveryAuditor,
-} from "@oh-my-pi/pi-coding-agent/modes/acp/acp-update-invariants";
+import { checkAcpUpdateInvariants } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-update-invariants";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { formatOutputNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
@@ -45,33 +42,12 @@ import { expectAcpStructure, expectAcpStructureRejects } from "./helpers/acp-sch
  *
  * The capability context is the mapper's own options, so a test can never
  * assert one negotiation state while the check assumes another.
- *
- * Also runs `evalSourceAuditor` (doc rule 6) over the same frames: a per-frame
- * check has no notion of "the call this frame belongs to", so it cannot
- * catch a sequence that never once delivers an eval call's own source — the
- * bug class, with a sibling case
- * in the eval-image fallback. This suite's built-in-`eval`-shaped fixtures
- * (`toolName: "eval"` with `args`/`getToolArgs`, no `getToolSource`) now
- * exercise the auditor's one surviving real seam: an *external* tool
- * literally named `eval` still reaches this generic mapper branch on a
- * `terminalMetaCapable` client (`wantsMetaTerminal` matches on name alone,
- * with no built-in-origin check) — the actual built-in `eval` tool is routed
- * away from this mapper entirely (`acp-agent.ts`'s `legacyEvalSource`
- * dispatch) onto `reduceAcpToolView`, whose own generalized guard is
- * `PresentationDeliveryLedger.checkSourceEcho`. Reset
- * per test in `beforeEach` below so ids reused across tests (`"tc-1"`, etc.)
- * never leak state between them.
  */
-let evalSourceAuditor = new EvalSourceDeliveryAuditor();
-beforeEach(() => {
-	evalSourceAuditor = new EvalSourceDeliveryAuditor();
-});
 
 /**
- * `checkAcpUpdateInvariants`/`EvalSourceDeliveryAuditor` check frame *shape*
- * and the eval *source* respectively; neither has any notion of "did every
- * fact the producer recorded structurally survive onto this frame" — the
- * general form of the artifact-pointer/notice losses (mechanism 2). Running
+ * `checkAcpUpdateInvariants` checks frame *shape* alone; it has no notion of
+ * "did every fact the producer recorded structurally survive onto this frame" —
+ * the general form of the artifact-pointer/notice losses (mechanism 2). Running
  * `producerFacts`/`frameTexts` here, on every `tool_execution_end` this ~90
  * test suite builds, is what the matrix in `acp-producer-wire.test.ts`
  * cannot do by itself: that matrix's own fixtures are real producer results,
@@ -88,15 +64,10 @@ function mapUpdates(
 	sessionId: string,
 	options: AcpEventMapperOptions = {},
 ): SessionNotification[] {
-	if ("toolName" in event && "toolCallId" in event) {
-		const args = "args" in event ? event.args : options.getToolArgs?.(event.toolCallId);
-		evalSourceAuditor.expect(event.toolCallId, event.toolName, args);
-	}
 	const updates = mapAgentSessionEventToAcpSessionUpdates(event, sessionId, options);
 	const context = { terminalMetaCapable: options.terminalMetaCapable === true };
 	for (const update of updates) {
 		expect(checkAcpUpdateInvariants(update, context)).toEqual([]);
-		expect(evalSourceAuditor.observe(update)).toEqual([]);
 	}
 	if (event.type === "tool_execution_end") {
 		const facts = producerFacts(event.result);

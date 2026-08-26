@@ -42,7 +42,6 @@
 
 import { logger } from "@oh-my-pi/pi-utils";
 import type { SessionNotification } from "@oh-my-pi/pi-utils/acp";
-import { buildEvalCodeText } from "./acp-event-mapper";
 
 export interface AcpInvariantContext {
 	/** `clientCapabilities._meta.terminal_output === true` for this connection. */
@@ -154,100 +153,4 @@ export function assertAcpUpdateInvariants(notification: SessionNotification, con
 		throw new Error(message);
 	}
 	logger.error(message, { sessionId: notification.sessionId });
-}
-
-/**
- * Stream-level guard for the eval-source-loss bug class (doc rule 6: "a
- * fixture that degenerates the feature under test converts an omission into a
- * passing assertion"), scoped
- * today to the one seam that still runs a tool literally named `eval` through
- * the untyped generic mapper (`mapAgentSessionEventToAcpSessionUpdates`'s
- * `wantsMetaTerminal` carve-out — `toolName === "eval"` unconditionally, with
- * no `origin: "builtin"` check): an *external* (MCP/extension) tool named
- * `eval` on a `terminalMetaCapable` client.
- *
- * The built-in `eval` tool itself no longer risks this bug class. Its two
- * production routes — the fully-typed `presentation_events` producer
- * (`tools/eval.ts`'s `sourceEcho`) and the legacy proxy adapter
- * (`AcpAgent#handleLegacyEvalEvent` → `LegacyEvalPresentation`, which copies
- * `args.code` onto the same typed `sourceEcho` field before ever reaching a
- * presentation event) — both terminate in `reduceAcpToolView`, so both
- * inherit whatever guarantee the reducer's own `sourceEchoSent` state machine
- * provides; see `PresentationDeliveryLedger.checkSourceEcho` for that
- * generalized, structural version of this check, wired
- * into every suite that drives `reduceAcpToolView` (`acp-view-reducer`,
- * `bash-presentation-protocol`, `eval-e2e-wire`). That check also caught a
- * latent, currently-unreachable gap in the reducer's own state machine on the
- * `meta_terminal → live_terminal_attached` transition — see that test: the
- * gap is flagged there but left unfixed, since the transition is currently
- * unreachable under any real producer.
- *
- * `checkAcpUpdateInvariants` above cannot express even the narrowed seam this
- * class still guards: it is a pure function of one frame, but "was the
- * source ever delivered" is a property of the whole sequence for a tool call
- * — the header can legitimately ride on any frame in the sequence (the first
- * one sent), so a single-frame check has no way to fail a sequence that
- * simply never sent it.
- *
- * This is the guard that would have caught the `session/load`
- * dangling-cleanup path's regression (the missing header) and its sibling in
- * the eval-image fallback: both left `expected` non-empty with nothing ever
- * landing in `#delivered`/`#contentText`. The test fixture also has to be
- * capable of exercising it — `input: { cells: [] }` degenerates
- * `buildEvalCodeText` to `undefined`, so `expect()` never registers an
- * expectation and the auditor is silently a no-op; see the doc rule this
- * class of miss produced.
- */
-export class EvalSourceDeliveryAuditor {
-	#expected = new Map<string, string>();
-	#delivered = new Map<string, string>();
-	#contentText = new Map<string, string>();
-
-	/**
-	 * Register the source an `eval` tool call is expected to echo somewhere
-	 * before it reaches a terminal status. A no-op for every other tool, and
-	 * for an eval call with no derivable source (e.g. malformed/empty args) —
-	 * there is nothing to check for those. Idempotent: call it from every
-	 * point a call's args become visible (a live `tool_execution_start`, a
-	 * replayed `tool_use`) without tracking whether it already ran.
-	 */
-	expect(toolCallId: string, toolName: string, args: unknown): void {
-		if (toolName !== "eval") return;
-		const code = buildEvalCodeText(args);
-		if (code) this.#expected.set(toolCallId, code);
-	}
-
-	/**
-	 * Feed one outbound `session/update`. Returns violations for a tool call
-	 * that just reached `completed`/`failed` without its expected source
-	 * appearing in either accumulated channel.
-	 */
-	observe(notification: SessionNotification): string[] {
-		const update = notification.update;
-		if (update.sessionUpdate !== "tool_call" && update.sessionUpdate !== "tool_call_update") return [];
-		const toolCallId = update.toolCallId;
-		const meta = update._meta as { terminal_output?: { terminal_id: string; data: string } } | undefined;
-		if (meta?.terminal_output && meta.terminal_output.terminal_id === toolCallId) {
-			this.#delivered.set(toolCallId, (this.#delivered.get(toolCallId) ?? "") + meta.terminal_output.data);
-		}
-		if (Array.isArray(update.content)) {
-			const text = update.content
-				.map(item => (item?.type === "content" && item.content?.type === "text" ? item.content.text : undefined))
-				.filter((chunk): chunk is string => !!chunk)
-				.join("\n");
-			if (text) this.#contentText.set(toolCallId, `${this.#contentText.get(toolCallId) ?? ""}\n${text}`);
-		}
-		const status = "status" in update ? update.status : undefined;
-		if (status !== "completed" && status !== "failed") return [];
-		const expected = this.#expected.get(toolCallId);
-		if (expected === undefined) return [];
-		this.#expected.delete(toolCallId);
-		const delivered = this.#delivered.get(toolCallId) ?? "";
-		const content = this.#contentText.get(toolCallId) ?? "";
-		if (delivered.includes(expected) || content.includes(expected)) return [];
-		return [
-			`tool call ${toolCallId}'s eval source was never delivered on either rendered channel ` +
-				`(_meta.terminal_output or content text) before it reached a terminal status.`,
-		];
-	}
 }

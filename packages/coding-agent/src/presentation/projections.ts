@@ -420,6 +420,14 @@ export function renderStreamBody(record: ToolPresentationRecord): string {
  * Only facts whose audience includes the model appear — truncation/artifact/limit do
  * not, because the retained body already carries the sink's own elision marker and
  * adding them would insert lines today's model content does not have.
+ *
+ * No production caller wires this into the agent loop yet: §3.3's "model
+ * sees only audience-eligible facts" projection guarantee is enforced by
+ * `test/presentation-model-goldens.test.ts` (byte-exact golden lock) and
+ * `test/presentation-model-parity.test.ts` (proves those goldens match what
+ * a real producer actually sends the model today), not by construction —
+ * see "Enforced invariants" in `docs/acp-development.md`. Phase 3 lands the
+ * atomic golden-locked cutover that wires a real caller; do not add one here.
  */
 export function renderModelContent(view: ToolPresentationView): readonly PresentationContentBlock[] {
 	const parts = partitionFacts(factsFor(view.presentation.facts, "model"));
