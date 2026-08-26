@@ -1410,4 +1410,50 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 			clearCustomApis();
 		}
 	});
+
+	it("rejects OpenAI file-id tool images before invoking a non-Responses provider", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-provider-file-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openai", "test-key");
+		const mock = createMockModel({ provider: "openai", id: "mock/provider-file" });
+		const gateway = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => mock.model,
+			version: "test",
+		});
+
+		try {
+			const response = await fetch(`${gateway.url}/v1/responses`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+				body: JSON.stringify({
+					model: "mock/provider-file",
+					input: [
+						{
+							type: "function_call",
+							call_id: "call_read",
+							name: "read",
+							arguments: '{"path":"image.png"}',
+						},
+						{
+							type: "function_call_output",
+							call_id: "call_read",
+							output: [{ type: "input_image", file_id: "file_image_123" }],
+						},
+					],
+				}),
+			});
+			expect(response.status).toBe(400);
+			expect(await response.text()).toContain("input_image.file_id cannot be forwarded to mock");
+			expect(mock.calls).toHaveLength(0);
+		} finally {
+			await gateway.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			clearCustomApis();
+		}
+	});
 });
