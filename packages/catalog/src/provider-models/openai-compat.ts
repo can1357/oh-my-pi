@@ -883,7 +883,7 @@ const EUROPEAN_GATEWAY_NON_CHAT_ID_SUBSTRINGS = [
 function hasOnlyNonTextOutput(entry: OpenAICompatibleModelRecord): boolean {
 	const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
 	const outputModalities = toStringArray(architecture?.output_modalities ?? entry.output_modalities).map(modality =>
-		modality.toLowerCase(),
+		modality.trim().toLowerCase(),
 	);
 	return (
 		(outputModalities.length > 0 && !outputModalities.includes("text")) ||

@@ -604,6 +604,24 @@ describe("European gateway provider catalog support", () => {
 		});
 	});
 
+	test("normalizes gateway output modality tokens before filtering", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			return Response.json({
+				data: [
+					{
+						id: "custom-chat-model",
+						name: "Custom Chat Model",
+						output_modalities: [" Text "],
+					},
+				],
+			});
+		});
+
+		const models = await eurouterModelManagerOptions({ fetch: fetchMock }).fetchDynamicModels?.();
+
+		expect(models?.map(model => model.id)).toEqual(["custom-chat-model"]);
+	});
+
 	test("filters modality-only image generation rows from European gateway discovery", async () => {
 		const fetchMock: FetchImpl = vi.fn(async () => {
 			return new Response(
