@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { convertCodexResponsesMessages } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { ResponseInput } from "@oh-my-pi/pi-ai/providers/openai-responses-wire";
-import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { buildResponsesInput, escapeReplayedControlTokens } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { AssistantMessage, Context, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai/types";
 import { createOpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai/utils";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -198,6 +198,15 @@ describe("issue #6913: Harmony control-token escaping at the request boundary", 
 
 		expect(wire).toContain(ESCAPED);
 		expect(wire).not.toContain(MARKER);
+	});
+
+	it("preserves native tool outputs when runtime history omits their output", () => {
+		const input: ResponseInput = [
+			{ type: "function_call_output", call_id: "call_missing" } as ResponseInput[number],
+			{ type: "custom_tool_call_output", call_id: "custom_missing" } as ResponseInput[number],
+		];
+
+		expect(escapeReplayedControlTokens(input)).toEqual(input);
 	});
 
 	it("escapes replayed EasyInputMessage items that omit the type field", () => {

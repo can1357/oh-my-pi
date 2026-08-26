@@ -22,6 +22,12 @@ const OPENAI_PROVIDER_FILE_APIS: Record<string, true> = {
 	"azure-openai-responses": true,
 };
 
+const COMPUTER_SCREENSHOT_APIS: ReadonlySet<string> = new Set([
+	"openai-responses",
+	"openai-codex-responses",
+	"azure-openai-responses",
+]);
+
 const GOOGLE_REMOTE_IMAGE_MIME_TYPES: Record<string, true> = {
 	"image/png": true,
 	"image/jpeg": true,
@@ -45,6 +51,10 @@ export function isRemoteImageUrl(value: string): boolean {
 	}
 }
 
+export function supportsComputerScreenshotReferences(model: Model): boolean {
+	return COMPUTER_SCREENSHOT_APIS.has(model.api);
+}
+
 /** Whether this model can replay a remote URL for an image with this media type. */
 export function supportsRemoteImageUrls(model: Model, image: Pick<ImageContent, "mimeType">): boolean {
 	if (!model.input.includes("image")) return false;
@@ -62,6 +72,7 @@ interface ProviderFileCandidate {
 	provider?: unknown;
 	id?: unknown;
 	uri?: unknown;
+	expiresAt?: unknown;
 }
 
 /** Whether this model can replay a provider-native image reference. */
@@ -70,6 +81,7 @@ export function supportsProviderFileReference(
 	reference: ProviderFileCandidate,
 	image: Pick<ImageContent, "mimeType">,
 ): boolean {
+	if (typeof reference.expiresAt === "number" && reference.expiresAt <= Date.now()) return false;
 	if (!model.input.includes("image")) return false;
 	if (reference.provider === "openai") {
 		return (

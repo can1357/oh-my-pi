@@ -1871,24 +1871,24 @@ export interface BuildResponsesInputOptions<TApi extends Api> {
 export function escapeReplayedControlTokens(items: ResponseInput): ResponseInput {
 	return items.map(item => {
 		if (item.type === "function_call_output") {
-			return typeof item.output === "string"
-				? { ...item, output: escapeHarmonyControlTokens(item.output) }
-				: {
-						...item,
-						output: item.output.map(part =>
-							part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
-						),
-					};
+			if (typeof item.output === "string") return { ...item, output: escapeHarmonyControlTokens(item.output) };
+			if (!Array.isArray(item.output)) return item;
+			return {
+				...item,
+				output: item.output.map(part =>
+					part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
+				),
+			};
 		}
 		if (item.type === "custom_tool_call_output") {
-			return typeof item.output === "string"
-				? { ...item, output: escapeHarmonyControlTokens(item.output) }
-				: {
-						...item,
-						output: item.output.map(part =>
-							part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
-						),
-					};
+			if (typeof item.output === "string") return { ...item, output: escapeHarmonyControlTokens(item.output) };
+			if (!Array.isArray(item.output)) return item;
+			return {
+				...item,
+				output: item.output.map(part =>
+					part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
+				),
+			};
 		}
 		if (item.type === "function_call") {
 			return typeof item.arguments === "string"

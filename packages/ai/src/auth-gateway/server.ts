@@ -31,6 +31,7 @@ import * as openaiResponses from "../providers/openai-responses-server";
 import * as piNative from "../providers/pi-native-server";
 import {
 	isRemoteImageUrl,
+	supportsComputerScreenshotReferences,
 	supportsProviderFileReference,
 	supportsRemoteImageUrls,
 } from "../providers/vision-guard";
@@ -81,10 +82,32 @@ const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
 	"/v1/responses": { module: openaiResponses, label: "openai-responses" },
 };
 
+function validateComputerScreenshotReference(message: Record<string, unknown>, model: Model): string | undefined {
+	if (message.role !== "toolResult") return undefined;
+	const metadata = message.providerMetadata;
+	if (!isRecord(metadata) || metadata.type !== "computer" || !isRecord(metadata.screenshot)) return undefined;
+	const screenshot = metadata.screenshot;
+
+	const fileId = screenshot.file_id;
+	const imageUrl = screenshot.image_url;
+	const hasFileId = fileId !== undefined;
+	const hasImageUrl = imageUrl !== undefined;
+	if (supportsComputerScreenshotReferences(model)) return undefined;
+	if (hasFileId) {
+		return `input_image.file_id cannot be forwarded to ${model.api}; target an OpenAI Responses model or use an inline data URL`;
+	}
+	if (hasImageUrl) {
+		return `input_image.image_url cannot be forwarded to ${model.api} without inline image data; use a data URL or target an API that supports remote image URLs`;
+	}
+	return undefined;
+}
+
 function validateAndNormalizeImageReferences(context: Context, model: Model): string | undefined {
 	const messages: unknown[] = context.messages;
 	for (const [messageIndex, message] of messages.entries()) {
 		if (!isRecord(message)) return `\`context.messages[${messageIndex}]\` must be an object`;
+		const computerScreenshotError = validateComputerScreenshotReference(message, model);
+		if (computerScreenshotError) return computerScreenshotError;
 		if (typeof message.content === "string") continue;
 		if (!Array.isArray(message.content)) {
 			return `\`context.messages[${messageIndex}].content\` must be a string or an array`;

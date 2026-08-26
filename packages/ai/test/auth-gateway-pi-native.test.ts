@@ -401,6 +401,27 @@ describe("pi-native gateway image reference validation", () => {
 					messages: [
 						{
 							role: "toolResult",
+							toolCallId: "call_computer_url",
+							toolName: "computer",
+							content: [],
+							providerMetadata: {
+								type: "computer",
+								screenshot: { type: "computer_screenshot", image_url: "https://images.example.invalid/screen.png" },
+								acknowledgedSafetyChecks: [],
+							},
+							isError: false,
+							timestamp: 0,
+						},
+					],
+				},
+				message:
+					"input_image.image_url cannot be forwarded to mock without inline image data; use a data URL or target an API that supports remote image URLs",
+			},
+			{
+				context: {
+					messages: [
+						{
+							role: "toolResult",
 							toolCallId: "call_read_url",
 							toolName: "read",
 							content: [
@@ -438,6 +459,27 @@ describe("pi-native gateway image reference validation", () => {
 				},
 				message:
 					"input_image.providerFile cannot be forwarded to mock; use inline image data or target the matching provider API",
+			},
+			{
+				context: {
+					messages: [
+						{
+							role: "toolResult",
+							toolCallId: "call_computer",
+							toolName: "computer",
+							content: [],
+							providerMetadata: {
+								type: "computer",
+								screenshot: { type: "computer_screenshot", file_id: "file_image_123" },
+								acknowledgedSafetyChecks: [],
+							},
+							isError: false,
+							timestamp: 0,
+						},
+					],
+				},
+				message:
+					"input_image.file_id cannot be forwarded to mock; target an OpenAI Responses model or use an inline data URL",
 			},
 			{
 				context: {
@@ -630,6 +672,45 @@ describe("pi-native gateway image reference validation", () => {
 					},
 				}),
 			);
+
+			const inlineData = Buffer.from("inline fallback").toString("base64");
+			const expiredResponse = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: googleModel.id,
+					context: {
+						messages: [
+							{
+								role: "user",
+								content: [
+									{
+										type: "image",
+										data: inlineData,
+										mimeType: "image/png",
+										providerFile: {
+											provider: "google",
+											uri: "https://generativelanguage.googleapis.com/v1beta/files/google-expired",
+											expiresAt: Date.now() - 1,
+										},
+									},
+								],
+								timestamp: 0,
+							},
+						],
+					},
+					stream: false,
+				}),
+			});
+			expect(expiredResponse.status).toBe(200);
+			await expiredResponse.json();
+			expect(upstreamRequests).toHaveLength(3);
+			const expiredGoogleContents = upstreamRequests[2]?.contents as Array<{ parts?: unknown }> | undefined;
+			const expiredGoogleParts = expiredGoogleContents?.[0]?.parts;
+			if (!Array.isArray(expiredGoogleParts)) throw new Error("expected Google content parts");
+			expect(expiredGoogleParts).toContainEqual({
+				inlineData: { mimeType: "image/png", data: inlineData },
+			});
 		} finally {
 			await handle.close();
 			storage.close();
