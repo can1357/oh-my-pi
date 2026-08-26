@@ -30,4 +30,5 @@ pub mod stats_db;
 /// Incremental background transcript statistics ingestion.
 pub mod stats_ingest;
 pub mod telemetry_index;
+pub mod testing;
 pub mod transcript;
