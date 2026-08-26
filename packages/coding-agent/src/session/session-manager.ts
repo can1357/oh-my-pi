@@ -2968,8 +2968,13 @@ export class SessionManager {
 			// output). Honor the boundary: start fresh rather than falling back to
 			// findMostRecentSession(), which would resurrect the pre-`/new`
 			// transcript. A materialized (or genuinely stale/deleted) crumb reports
-			// exists=false only when fresh, so this never masks a real stale crumb.
-			if (breadcrumb.fresh && !breadcrumb.exists) {
+			// exists=false only when fresh, so this never masks a real stale crumb. An
+			// explicit session directory must also fence recycled terminal breadcrumbs.
+			if (
+				breadcrumb.fresh &&
+				!breadcrumb.exists &&
+				(!sessionDir || pathIsWithin(dir, path.dirname(breadcrumb.sessionFile)))
+			) {
 				const manager = new SessionManager(cwd, dir, true, storage);
 				manager.#resetToNewSession();
 				return manager;

@@ -18,13 +18,13 @@ function getHeader(entries: unknown[]): SessionHeader | undefined {
 	);
 }
 
-function writeBreadcrumb(cwd: string, sessionFile: string): string {
+function writeBreadcrumb(cwd: string, sessionFile: string, fresh = false): string {
 	const terminalId = getTerminalId();
 	if (!terminalId) throw new Error("Expected a terminal id for breadcrumb test");
 	const dir = getTerminalSessionsDir();
 	fs.mkdirSync(dir, { recursive: true });
 	const file = path.join(dir, terminalId);
-	fs.writeFileSync(file, `${cwd}\n${sessionFile}\n`);
+	fs.writeFileSync(file, `${cwd}\n${sessionFile}\n${fresh ? "fresh\n" : ""}`);
 	return file;
 }
 
@@ -149,6 +149,51 @@ describe("SessionManager.continueRecent relocation", () => {
 		const resumed = await SessionManager.continueRecent(cwdB, explicitSessionDir);
 		try {
 			expect(resumed.getSessionFile()).toBe(intendedFile);
+		} finally {
+			await resumed.close();
+		}
+	});
+
+	it("ignores foreign fresh breadcrumbs with an explicit sessionDir", async () => {
+		const explicitSessionDir = path.join(testAgentDir, "intended-sessions");
+		const intended = SessionManager.create(cwdB, explicitSessionDir);
+		intended.appendMessage({ role: "user", content: "intended session", timestamp: 1 });
+		intended.appendMessage(makeAssistantMessage());
+		await intended.flush();
+		const intendedFile = intended.getSessionFile();
+		if (!intendedFile) throw new Error("Expected persisted intended session file");
+		await intended.close();
+
+		const foreignMissingFile = path.join(testAgentDir, "foreign-sessions", "missing.jsonl");
+		fs.mkdirSync(path.dirname(foreignMissingFile), { recursive: true });
+		writeBreadcrumb(cwdB, foreignMissingFile, true);
+
+		const resumed = await SessionManager.continueRecent(cwdB, explicitSessionDir);
+		try {
+			expect(resumed.getSessionFile()).toBe(intendedFile);
+		} finally {
+			await resumed.close();
+		}
+	});
+
+	it("honors in-directory fresh breadcrumbs with an explicit sessionDir", async () => {
+		const explicitSessionDir = path.join(testAgentDir, "intended-sessions");
+		const prior = SessionManager.create(cwdB, explicitSessionDir);
+		prior.appendMessage({ role: "user", content: "prior session", timestamp: 1 });
+		prior.appendMessage(makeAssistantMessage());
+		await prior.flush();
+		const priorFile = prior.getSessionFile();
+		if (!priorFile) throw new Error("Expected persisted prior session file");
+		await prior.close();
+
+		const freshMissingFile = path.join(explicitSessionDir, "missing.jsonl");
+		fs.mkdirSync(path.dirname(freshMissingFile), { recursive: true });
+		writeBreadcrumb(cwdB, freshMissingFile, true);
+
+		const resumed = await SessionManager.continueRecent(cwdB, explicitSessionDir);
+		try {
+			expect(resumed.getSessionFile()).not.toBe(priorFile);
+			expect(resumed.getEntries()).toHaveLength(0);
 		} finally {
 			await resumed.close();
 		}
