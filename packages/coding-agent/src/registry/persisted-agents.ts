@@ -14,8 +14,10 @@ import {
 	type AgentHistorySummary,
 	type AgentMetricsSummary,
 	type AgentRegistry,
+	collectAgentFamily,
 	getAgentTombstonePath,
 	MAIN_AGENT_ID,
+	qualifyPersistedAgentId,
 } from "./agent-registry";
 
 /** Maximum prefix entries inspected for task metadata. */
@@ -609,13 +611,24 @@ export async function ensurePersistedRoster(
 	return root;
 }
 
-/** Register persisted subagent and advisor transcripts as parked registry refs. */
+/**
+ * Register persisted subagent and advisor transcripts as parked registry refs.
+ *
+ * `rootParentId` attributes freshly-discovered DIRECT children of `sessionFile`'s
+ * own directory to that id instead of the {@link MAIN_AGENT_ID} default. A
+ * caller scanning under its own session file (e.g. an ACP extension rescanning
+ * `parentSessionFile`) should pass its own agent id so the scan cannot
+ * misattribute another session's children to `MAIN_AGENT_ID` in a process with
+ * several concurrent top-level sessions. Nested grandchildren are unaffected —
+ * they already inherit their direct parent's id from the recursive scan.
+ */
 export async function registerPersistedSubagents(
 	registry: AgentRegistry,
 	sessionFile: string | null | undefined,
 	options: {
 		shouldContinue?: () => boolean;
 		hydrateHistory?: boolean;
+		rootParentId?: string;
 		/**
 		 * When supplied, every (id → sessionFile) pair this scan restores or
 		 * confirms as this root's parked ref is recorded here: the narrowest
@@ -636,7 +649,7 @@ export async function registerPersistedSubagents(
 	await registerPersistedSubagentsFromDir(
 		registry,
 		root,
-		undefined,
+		options.rootParentId,
 		vibeOwnedIds,
 		transcripts,
 		shouldContinue,
@@ -740,9 +753,9 @@ async function registerPersistedSubagentsFromDir(
 			}
 			continue;
 		}
-		const id = entry.name.slice(0, -6);
-		const existing = registry.get(id);
-		if (vibeOwnedIds.has(id) && existing?.sessionFile !== sessionFile) continue;
+		const fsId = entry.name.slice(0, -6);
+		const existingBare = registry.get(fsId);
+		if (vibeOwnedIds.has(fsId) && existingBare?.sessionFile !== sessionFile) continue;
 		let tombstoned = false;
 		try {
 			await fs.promises.access(getAgentTombstonePath(sessionFile));
@@ -754,6 +767,19 @@ async function registerPersistedSubagentsFromDir(
 			if (isFilesystemError(error)) throw error;
 		}
 		if (!shouldContinue()) return;
+		const ownerId = parentId ?? MAIN_AGENT_ID;
+		// A bare filename-derived id can collide with an unrelated top-level
+		// session's identically-named agent: `AgentRegistry` is a flat,
+		// process-global map, but a subagent name is only unique within its own
+		// owning session's tree (`AgentOutputManager` allocates names
+		// per-session). Register under the disambiguated key instead of
+		// clobbering — or silently losing — a foreign entry that already holds
+		// the bare id.
+		const id =
+			existingBare && !collectAgentFamily(registry, ownerId).has(fsId)
+				? qualifyPersistedAgentId(ownerId, fsId)
+				: fsId;
+		const existing = id === fsId ? existingBare : registry.get(id);
 		const replaceable =
 			existing !== undefined &&
 			existing.kind === "sub" &&
@@ -788,9 +814,9 @@ async function registerPersistedSubagentsFromDir(
 			if ((stillUnclaimed || stillReplaceable) && !(metadata.incomplete && !tombstoned)) {
 				const input = {
 					id,
-					displayName: id,
+					displayName: fsId,
 					kind: "sub" as const,
-					parentId: parentId ?? MAIN_AGENT_ID,
+					parentId: ownerId,
 					session: null,
 					sessionFile,
 					activity: metadata.activity,
@@ -814,7 +840,7 @@ async function registerPersistedSubagentsFromDir(
 		}
 		await registerPersistedSubagentsFromDir(
 			registry,
-			path.join(dir, id),
+			path.join(dir, fsId),
 			id,
 			vibeOwnedIds,
 			transcripts,
