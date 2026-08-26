@@ -1302,6 +1302,11 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				throw new ToolError("Async job manager unavailable for this session.");
 			}
 			const ownerId = this.session.getAgentId?.() ?? undefined;
+			// Launch-and-return mirrors the auto-background hand-off: the launching
+			// call's producer never attaches to the job's OutputSink, so the settled
+			// launch card carries launch facts only. The manager solely owns execution
+			// and its owner-routed completion follow-up; aborting the launching call
+			// does not cancel an already-launched job.
 			const job = this.#startManagedBashJob({
 				command,
 				commandCwd,
@@ -1312,7 +1317,6 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 
 				resolvedEnv,
 				...(ownerId === undefined ? {} : { ownerId }),
-				...(presentation === undefined ? {} : { presentation }),
 				onUpdate,
 				forwardUpdates: false,
 			});
@@ -1320,50 +1324,18 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				requestedTimeoutSec,
 				notices: pendingNotices,
 			});
-			if (presentation === undefined) {
-				return started;
+			// A fast completion must stay suppressed until the loop settles the
+			// launch card (or a non-presenting caller takes the result) so the
+			// owner-routed follow-up cannot land mid-turn — same fencing as the
+			// auto-background hand-off.
+			manager.acknowledgeDeliveries([job.jobId]);
+			if (presentation !== undefined) {
+				publishBackgroundStartFacts(presentation, pendingNotices, job.jobId);
+				afterPresentationSettlement(presentation, () => manager.resumeDeliveries([job.jobId]));
+			} else {
+				manager.resumeDeliveries([job.jobId]);
 			}
-
-			// The launch message and the process stream are distinct typed events. The
-			// manager still owns execution and its owner-scoped follow-up delivery, but
-			// the presenting tool call remains open until the manager's run has really
-			// stopped; otherwise late chunks would race the loop's freeze barrier.
-			presentation.fact({ kind: "notice", text: formatBackgroundNotice(job.jobId) });
-			const abort = Promise.withResolvers<void>();
-			const cancelJob = () => manager.cancel(job.jobId, ownerId === undefined ? undefined : { ownerId });
-			const onAbort = () => {
-				cancelJob();
-				abort.resolve();
-			};
-			signal?.addEventListener("abort", onAbort, { once: true });
-			// Pre-job setup above awaits URL/cwd resolution. An abort may therefore
-			// already be latched before this listener exists; consume that state now
-			// through the same owner-scoped cancellation path.
-			if (signal?.aborted) onAbort();
-			try {
-				const completed = await Promise.race([
-					job.completion,
-					abort.promise.then(() => ({ kind: "aborted" as const })),
-				]);
-				if (completed.kind === "aborted") {
-					cancelJob();
-					await job.completion;
-					publishCancellationFacts(presentation, {
-						notices: pendingNotices,
-						stopAnnotation: "[Command aborted]",
-					});
-					throw new ToolAbortError(job.getLatestText() || "Command aborted");
-				}
-				if (completed.kind === "failed") {
-					throw completed.error;
-				}
-				// Keep the model-visible launch bytes stable. The manager's existing,
-				// owner-routed async-result follow-up remains the model's completion
-				// delivery; ACP receives the final process facts and settlement above.
-				return { ...completed.result, content: started.content };
-			} finally {
-				signal?.removeEventListener("abort", onAbort);
-			}
+			return started;
 		}
 
 		// The client-bridge terminal provides a live terminal card in the editor;

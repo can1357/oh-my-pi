@@ -383,6 +383,14 @@ async function runRoute(route: "bash" | "bash_async" | "bash_auto" | "eval"): Pr
 					: "";
 		const delivered = terminalBytes(updates);
 		const rawStart = sourcePrefix.length;
+		if (route === "bash_async") {
+			// Launch-and-return: the settled launch card carries the background
+			// notice fact only. Process bytes never ride this card's terminal
+			// stream — they reach the model later via the manager's owner-routed
+			// async-result follow-up.
+			expect(delivered).toBe(sourcePrefix);
+			return;
+		}
 		// Facts follow the process stream structurally (wall time/truncation), but
 		// the pre-retention process prefix must be byte-for-byte complete and unique.
 		expect(delivered.slice(0, rawStart)).toBe(sourcePrefix);

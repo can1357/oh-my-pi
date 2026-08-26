@@ -687,7 +687,7 @@ describe("bash presentation protocol — byte delivery", () => {
 		}
 	}, 20_000);
 
-	it("emits literal typed launch frames for an explicit async job without a legacy snapshot", async () => {
+	it("settles an explicit async launch card with launch facts only and no process bytes", async () => {
 		const manager = new AsyncJobManager({ retentionMs: 0 });
 		try {
 			const tool = new BashTool(makeSession({ asyncEnabled: true, asyncJobManager: manager }));
@@ -695,51 +695,77 @@ describe("bash presentation protocol — byte delivery", () => {
 
 			expect(run.legacyUpdates).toBe(0);
 			expect(run.events[0]?.type).toBe("started");
+			expect(run.events.filter(event => event.type === "settled")).toHaveLength(1);
 			expect(run.events.at(-1)?.type).toBe("settled");
 			const notice = "Backgrounded as job bg_1; result will be delivered automatically.";
-			expect(
-				appendEvents(run.events)
-					.map(event => event.data)
-					.join(""),
-			).toBe("ASYNC-BYTES-0001\n");
-			expect(deliveredBytes(run.updates)).toContain(`\n${notice}\nASYNC-BYTES-0001\n`);
+			// Launch-and-return mirrors auto-background: the launch card carries the
+			// background notice fact, never live process bytes — completion reaches
+			// the model later as the manager's owner-routed follow-up.
+			expect(appendEvents(run.events)).toEqual([]);
+			expect(deliveredBytes(run.updates)).not.toContain("ASYNC-BYTES-0001");
+			expect(deliveredBytes(run.updates)).toContain(`\n${notice}`);
 			expect(run.result.content).toEqual([{ type: "text", text: notice }]);
-			expect(run.events.at(-1)?.type).toBe("settled");
 			await manager.waitForAll();
 		} finally {
 			await manager.dispose();
 		}
 	});
 
-	it("waits for an explicit async job to stop before settling on cancellation", async () => {
+	it("resolves execute() while an explicit async job is still running", async () => {
+		const deliveries: string[] = [];
+		const manager = new AsyncJobManager({
+			retentionMs: 60_000,
+			onJobComplete: async (_jobId, text) => {
+				deliveries.push(text);
+			},
+		});
+		try {
+			const tool = new BashTool(makeSession({ asyncEnabled: true, asyncJobManager: manager }));
+			const run = await runSpike(tool, { command: "printf 'ASYNC-LIVE-0001\\n'; sleep 1", async: true });
+
+			// execute() returned while the process was still running.
+			expect(manager.getJob("bg_1")?.status).toBe("running");
+			// The settled launch card shows launch facts, not live bytes.
+			expect(appendEvents(run.events)).toEqual([]);
+			expect(deliveredBytes(run.updates)).not.toContain("ASYNC-LIVE-0001");
+			// The manager's owner-routed completion still delivers exactly once.
+			await manager.waitForAll();
+			await manager.drainDeliveries({ timeoutMs: 2_000 });
+			expect(deliveries).toHaveLength(1);
+			expect(deliveries[0]).toContain("ASYNC-LIVE-0001");
+		} finally {
+			await manager.dispose();
+		}
+	}, 20_000);
+
+	it("keeps an explicit async job running when the launching call aborts after launch", async () => {
 		const manager = new AsyncJobManager({ retentionMs: 60_000 });
 		const controller = new AbortController();
 		try {
 			const tool = new BashTool(
 				makeSession({ asyncEnabled: true, asyncJobManager: manager, agentId: "async-owner" }),
 			);
-			setTimeout(() => controller.abort(), 100);
+			// Launch-and-return: execute() settled the launch card before returning,
+			// so the abort lands strictly after launch — the manager solely owns
+			// execution and the launching call's signal must not cancel the job.
 			const run = await runSpike(
 				tool,
-				{ command: "printf 'ASYNC-CANCEL-0001\\n'; sleep 5", async: true },
+				{ command: "printf 'ASYNC-CANCEL-0001\\n'; sleep 0.2", async: true },
 				{ signal: controller.signal },
 			);
-
 			expect(run.legacyUpdates).toBe(0);
-			expect(
-				appendEvents(run.events)
-					.map(event => event.data)
-					.join(""),
-			).toContain("ASYNC-CANCEL-0001\n");
-			expect(manager.getJob("bg_1")?.status).toBe("cancelled");
-			const settledIndex = run.events.findIndex(event => event.type === "settled");
-			expect(settledIndex).toBeGreaterThan(run.events.findLastIndex(event => event.type === "terminal_append"));
+			expect(run.events.findIndex(event => event.type === "settled")).toBeGreaterThanOrEqual(0);
+			controller.abort();
+			// waitForAll resolves only when the job settles on its own; an early
+			// return with status "cancelled" would mean the abort leaked into the job.
+			await manager.waitForAll();
+			expect(manager.getJob("bg_1")?.status).toBe("completed");
 		} finally {
 			await manager.dispose();
 		}
 	}, 20_000);
 
-	it("cancels an explicit async job when abort landed during pre-job setup", async () => {
+	it("launches an explicit async job even when abort landed during pre-job setup", async () => {
 		const manager = new AsyncJobManager({ retentionMs: 60_000 });
 		const controller = new AbortController();
 		const originalStat = fs.promises.stat;
@@ -760,7 +786,7 @@ describe("bash presentation protocol — byte delivery", () => {
 			);
 			const runPromise = runSpike(
 				tool,
-				{ command: "printf 'ASYNC-EARLY-ABORT-0001\\n'; sleep 5", async: true },
+				{ command: "printf 'ASYNC-EARLY-ABORT-0001\\n'; sleep 1", async: true },
 				{ signal: controller.signal },
 			);
 
@@ -770,17 +796,16 @@ describe("bash presentation protocol — byte delivery", () => {
 			const run = await runPromise;
 
 			expect(run.legacyUpdates).toBe(0);
-			expect(manager.getJob("bg_1")?.status).toBe("cancelled");
-			expect(
-				run.events.some(
-					event =>
-						event.type === "fact" &&
-						event.fact.kind === "stop_annotation" &&
-						event.fact.text === "[Command aborted]",
-				),
-			).toBe(true);
+			// Launch-and-return: a pre-latched abort no longer cancels the job; the
+			// call still settles as a launch card and the manager owns execution.
+			const notice = "Backgrounded as job bg_1; result will be delivered automatically.";
+			expect(run.result.content).toEqual([{ type: "text", text: notice }]);
+			expect(manager.getJob("bg_1")?.status).toBe("running");
+			expect(run.events.some(event => event.type === "fact" && event.fact.kind === "stop_annotation")).toBe(false);
 			expect(run.events.filter(event => event.type === "settled")).toHaveLength(1);
 			expect(run.events.at(-1)?.type).toBe("settled");
+			manager.cancel("bg_1", { ownerId: "early-abort-owner" });
+			await manager.waitForAll();
 		} finally {
 			releaseStat.resolve();
 			await manager.dispose();
@@ -1009,12 +1034,13 @@ describe("bash presentation protocol — byte delivery", () => {
 });
 
 /**
- * P1 regression: `transformToolCallArguments` (the host hook `sdk.ts` uses to
- * deobfuscate secret placeholders before execution) runs before route/protocol
- * selection. `adapter.selects`/`execute` must see the transformed command;
- * `adapter.start()` — and therefore `title`/`rawInput` on the literal ACP wire —
- * must never see it. Uses the real {@link SecretObfuscator}, not a hand-rolled
- * placeholder string, so the fixture matches what `sdk.ts` actually produces.
+ * Regression coverage: `transformToolCallArguments` (the host hook `sdk.ts`
+ * uses to deobfuscate secret placeholders before execution) runs before
+ * route/protocol selection. `adapter.selects`/`execute` must see the
+ * transformed command; `adapter.start()` — and therefore `title`/`rawInput`
+ * on the literal ACP wire — must never see it. Uses the real
+ * {@link SecretObfuscator}, not a hand-rolled placeholder string, so the
+ * fixture matches what `sdk.ts` actually produces.
  */
 describe("bash presentation protocol — secret redaction at the adapter boundary", () => {
 	it("keeps the deobfuscated command out of the started call's title and rawInput", () => {
