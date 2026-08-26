@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Extension API: `api.agents` — list/get/ensureLive/prompt for named registry agents.
+
 ## [18.2.2] - 2026-09-16
 
 ### Added
