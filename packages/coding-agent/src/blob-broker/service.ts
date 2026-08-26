@@ -10,6 +10,7 @@
 
 import * as path from "node:path";
 import type { Context, ImageContent, Model } from "@oh-my-pi/pi-ai";
+import { supportsRemoteImageUrls } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { getBlobsDir, logger } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { Settings } from "../config/settings";
@@ -20,7 +21,6 @@ import {
 	contextHasProviderFiles,
 	decorateContextImages,
 	inlineContextImages,
-	supportsRemoteImageUrls,
 } from "./context-images";
 import { connectDaemonBlobBackend, type RenderCallbackHost } from "./daemon";
 import type { BlobBrokerWorkerConfig } from "./protocol";

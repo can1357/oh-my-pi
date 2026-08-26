@@ -29,6 +29,7 @@ import * as anthropicMessages from "../providers/anthropic-messages-server";
 import * as openaiChat from "../providers/openai-chat-server";
 import * as openaiResponses from "../providers/openai-responses-server";
 import * as piNative from "../providers/pi-native-server";
+import { supportsRemoteImageUrls } from "../providers/vision-guard";
 import { completeSimple, streamSimple } from "../stream";
 import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
@@ -78,20 +79,6 @@ const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
 
 function supportsOpenAIImageFileReferences(api: Api): boolean {
 	return api === "openai-responses" || api === "openai-codex-responses" || api === "azure-openai-responses";
-}
-
-function supportsRemoteImageReferences(api: Api): boolean {
-	return (
-		api === "openai-completions" ||
-		api === "openai-responses" ||
-		api === "openrouter" ||
-		api === "openai-codex-responses" ||
-		api === "azure-openai-responses" ||
-		api === "anthropic-messages" ||
-		api === "google-generative-ai" ||
-		api === "google-gemini-cli" ||
-		api === "google-vertex"
-	);
 }
 
 function hasOpenAIImageFileReference(context: Context): boolean {
@@ -438,7 +425,7 @@ async function handleFormatEndpoint(
 			`input_image.file_id cannot be forwarded to ${model.api}; target an OpenAI Responses model or use an inline data URL`,
 		);
 	}
-	if (!supportsRemoteImageReferences(model.api) && hasReferenceOnlyImageUrl(parsed.context)) {
+	if (!supportsRemoteImageUrls(model) && hasReferenceOnlyImageUrl(parsed.context)) {
 		return route.module.formatError(
 			400,
 			"invalid_request_error",

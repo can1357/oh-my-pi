@@ -82,6 +82,38 @@ function remoteToolImageRequest(model: string, imageUrl: string): unknown {
 	};
 }
 
+interface CapturedOpenAICompletionRequest {
+	messages?: Array<{ content?: unknown }>;
+}
+
+function startOpenAICompletionsUpstream(requests: CapturedOpenAICompletionRequest[]) {
+	return Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		async fetch(request) {
+			requests.push((await request.json()) as CapturedOpenAICompletionRequest);
+			const chunks = [
+				{
+					id: "chatcmpl-remote-image",
+					object: "chat.completion.chunk",
+					created: 0,
+					model: "vision-model",
+					choices: [{ index: 0, delta: { role: "assistant", content: "ok" }, finish_reason: null }],
+				},
+				{
+					id: "chatcmpl-remote-image",
+					object: "chat.completion.chunk",
+					created: 0,
+					model: "vision-model",
+					choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+				},
+			];
+			const sse = `${chunks.map(chunk => `data: ${JSON.stringify(chunk)}\n\n`).join("")}data: [DONE]\n\n`;
+			return new Response(sse, { headers: { "Content-Type": "text/event-stream" } });
+		},
+	});
+}
+
 describe("openai-responses parseRequest", () => {
 	it("parses an input array with mixed message + reasoning + function_call + function_call_output", () => {
 		const reasoningItem = {
@@ -1537,33 +1569,54 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 		}
 	});
 
-	it("forwards reference-only remote tool images to URL-capable APIs", async () => {
-		const upstreamRequests: Array<{ messages?: Array<{ content?: unknown }> }> = [];
-		const upstream = Bun.serve({
-			hostname: "127.0.0.1",
-			port: 0,
-			async fetch(request) {
-				upstreamRequests.push((await request.json()) as { messages?: Array<{ content?: unknown }> });
-				const chunks = [
-					{
-						id: "chatcmpl-remote-image",
-						object: "chat.completion.chunk",
-						created: 0,
-						model: "vision-model",
-						choices: [{ index: 0, delta: { role: "assistant", content: "ok" }, finish_reason: null }],
-					},
-					{
-						id: "chatcmpl-remote-image",
-						object: "chat.completion.chunk",
-						created: 0,
-						model: "vision-model",
-						choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-					},
-				];
-				const sse = `${chunks.map(chunk => `data: ${JSON.stringify(chunk)}\n\n`).join("")}data: [DONE]\n\n`;
-				return new Response(sse, { headers: { "Content-Type": "text/event-stream" } });
-			},
+	it("rejects reference-only remote tool images for URL-blind providers on shared APIs", async () => {
+		const upstreamRequests: CapturedOpenAICompletionRequest[] = [];
+		const upstream = startOpenAICompletionsUpstream(upstreamRequests);
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-remote-image-moonshot-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("moonshot", "test-key");
+		const model = buildModel({
+			id: "vision-model",
+			name: "Vision Model",
+			api: "openai-completions",
+			provider: "moonshot",
+			baseUrl: `${upstream.url.origin}/v1`,
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"openai-completions">);
+		const gateway = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => model,
+			version: "test",
 		});
+
+		try {
+			const response = await fetch(`${gateway.url}/v1/responses`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+				body: JSON.stringify(remoteToolImageRequest(model.id, "https://images.example.invalid/read.png")),
+			});
+			expect(response.status).toBe(400);
+			expect(await response.text()).toContain(
+				"input_image.image_url cannot be forwarded to openai-completions without inline image data",
+			);
+			expect(upstreamRequests).toHaveLength(0);
+		} finally {
+			await gateway.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			upstream.stop(true);
+		}
+	});
+
+	it("forwards reference-only remote tool images to URL-capable APIs", async () => {
+		const upstreamRequests: CapturedOpenAICompletionRequest[] = [];
+		const upstream = startOpenAICompletionsUpstream(upstreamRequests);
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-remote-image-openai-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
 		storage.setRuntimeApiKey("openai", "test-key");

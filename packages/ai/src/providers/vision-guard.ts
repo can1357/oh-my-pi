@@ -9,6 +9,24 @@ export const NON_VISION_IMAGE_PLACEHOLDER = "[image omitted: model does not supp
 // Inputs are lowercased before testing.
 const VISION_TOKEN = /(?<![a-z0-9])vision(?![a-z0-9])/;
 
+const URL_CAPABLE_OPENAI_APIS: Record<string, true> = {
+	"openai-responses": true,
+	"openai-codex-responses": true,
+	"azure-openai-responses": true,
+	"openai-completions": true,
+	openrouter: true,
+};
+
+/** Whether this model's provider fetches https image URLs server-side. */
+export function supportsRemoteImageUrls(model: Model): boolean {
+	if (!model.input.includes("image")) return false;
+	if (modelMatchesHost(model, "moonshotNative")) return false;
+	if (URL_CAPABLE_OPENAI_APIS[model.api]) return true;
+	if (model.api === "anthropic-messages") return model.provider === "anthropic";
+	if (model.api === "google-gemini-cli") return model.provider === "google-antigravity";
+	return model.api === "google-vertex";
+}
+
 export function partitionVisionContent(
 	content: ReadonlyArray<TextContent | ImageContent>,
 	supportsImages: boolean,
