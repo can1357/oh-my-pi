@@ -346,7 +346,7 @@ async function persistGeneratedCredential(
 	credential: AnySearchCredential,
 ): Promise<string> {
 	try {
-		await params.authStorage.addGeneratedApiKeyIfAbsent("anysearch", credential.apiKey);
+		await params.authStorage.addGeneratedApiKeyIfAbsent("anysearch", credential.apiKey, params.signal);
 		const selectedKey = await params.authStorage.getApiKey("anysearch", params.sessionId, { signal: params.signal });
 		if (selectedKey) return selectedKey;
 	} catch {

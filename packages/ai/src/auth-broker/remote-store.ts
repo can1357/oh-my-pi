@@ -815,8 +815,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	async insertAuthCredentialIfProviderAbsentRemote(
 		provider: string,
 		credential: AuthCredential,
+		signal?: AbortSignal,
 	): Promise<ConditionalAuthCredentialInsertResult> {
-		const { entries, inserted } = await this.#client.uploadCredential(provider, credential, undefined, {
+		const { entries, inserted } = await this.#client.uploadCredential(provider, credential, signal, {
 			ifProviderAbsent: true,
 		});
 		if (inserted === undefined) {

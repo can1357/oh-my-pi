@@ -884,6 +884,14 @@
 
 ### Added
 
+### Added
+
+- Added AnySearch as the first concrete web-search provider after Auto, with API-key login and safe explicit anonymous auto-registration ([#9726](https://github.com/can1357/oh-my-pi/pull/9726) by [@anysearch-ai](https://github.com/anysearch-ai)).
+
+## [18.0.5] - 2026-08-25
+
+### Added
+
 - Added append-only transcript declarations and stable-row APIs for components with immutable history prefixes.
 - Added the `:img` read selector to rasterize local SVG and SVGZ files for vision input.
 - Added side-by-side image and SVG previews to `omp git`, including Git LFS object resolution and clear placeholders for unavailable or unsupported binary content.

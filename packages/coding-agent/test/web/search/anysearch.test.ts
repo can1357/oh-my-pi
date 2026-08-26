@@ -429,6 +429,40 @@ describe("AnySearch provider", () => {
 		expect(getStoredKey()).toBe(secretKey);
 	});
 
+	it("keeps generated-credential persistence within the provider deadline", async () => {
+		const secretKey = "as_sk_88888888888888888888888888888888";
+		let persistenceSignal: AbortSignal | undefined;
+		const authStorage = {
+			hasAuth: () => false,
+			getApiKey: async () => undefined,
+			resolver: () => async () => undefined,
+			addGeneratedApiKeyIfAbsent: async (_provider: string, _apiKey: string, signal?: AbortSignal) => {
+				if (!signal) throw new Error("generated credential persistence requires a provider signal");
+				persistenceSignal = signal;
+				signal.throwIfAborted();
+				const aborted = Promise.withResolvers<boolean>();
+				const onAbort = (): void => aborted.reject(signal.reason);
+				signal.addEventListener("abort", onAbort, { once: true });
+				try {
+					return await aborted.promise;
+				} finally {
+					signal.removeEventListener("abort", onAbort);
+				}
+			},
+		} as unknown as AuthStorage;
+
+		await expect(
+			searchAnySearch({
+				query: "query",
+				authStorage,
+				provisionGeneratedCredential: true,
+				timeoutMs: 20,
+				fetch: async () => registrationResponse(createdRegistrationMessage(secretKey)),
+			}),
+		).rejects.toMatchObject({ name: "TimeoutError" });
+		expect(persistenceSignal?.aborted).toBe(true);
+	});
+
 	it("does not overwrite an existing key or expose credentials from an authenticated 402", async () => {
 		const { authStorage, getStoredKey } = createAuthStorage("existing-key");
 		const leakedKey = "must-not-replace-existing-key";

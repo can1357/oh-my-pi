@@ -558,6 +558,7 @@ export interface AuthCredentialStore {
 	insertAuthCredentialIfProviderAbsentRemote?(
 		provider: string,
 		credential: AuthCredential,
+		signal?: AbortSignal,
 	): Promise<ConditionalAuthCredentialInsertResult>;
 	/**
 	 * Optional async write hook for replace-all semantics (e.g. API-key login
@@ -2586,13 +2587,14 @@ export class AuthStorage {
 	 * conditional insert closes the gap between a caller's initial no-key read and
 	 * persistence, so a concurrent login or broker write wins without being replaced.
 	 */
-	async addGeneratedApiKeyIfAbsent(provider: string, apiKey: string): Promise<boolean> {
+	async addGeneratedApiKeyIfAbsent(provider: string, apiKey: string, signal?: AbortSignal): Promise<boolean> {
+		signal?.throwIfAborted();
 		const credential: ApiKeyCredential = { type: "api_key", key: apiKey };
 		const insertRemote = this.#store.insertAuthCredentialIfProviderAbsentRemote?.bind(this.#store);
 		const insertLocal = this.#store.insertAuthCredentialIfProviderAbsent?.bind(this.#store);
 		let result: ConditionalAuthCredentialInsertResult;
 		if (insertRemote) {
-			result = await insertRemote(provider, credential);
+			result = await insertRemote(provider, credential, signal);
 		} else if (insertLocal) {
 			result = insertLocal(provider, credential);
 		} else {
