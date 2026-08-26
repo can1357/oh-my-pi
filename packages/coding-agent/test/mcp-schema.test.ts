@@ -247,4 +247,39 @@ describe("mcp-schema.json", () => {
 			}),
 		).toBe(false);
 	});
+
+	// PR #9793 review: discovery coerces `lazy` string forms via
+	// `parseMcpBooleanField` (and ${ENV_VAR} substitution happens before the
+	// parse), so the schema must accept exactly those — and reject strings
+	// the parser would drop, which would silently start the server eagerly.
+	test("validates lazy string literals discovery can coerce", () => {
+		for (const lazy of ["true", "false", "1", "0", "${MCP_LAZY}", "${MCP_LAZY:-1}", "${MCP_LAZY:-false}"]) {
+			expect(
+				validate({
+					mcpServers: {
+						example: { command: "my-server", lazy },
+					},
+				}),
+			).toBe(true);
+		}
+	});
+
+	test("rejects a lazy string discovery cannot coerce", () => {
+		for (const lazy of [
+			"yes",
+			"junk${MCP_LAZY}",
+			"${MCP_LAZY}junk",
+			"${MCP_LAZY:yes}",
+			"${MCP_LAZY:-yes}",
+			"${MCP_LAZY:-}",
+		]) {
+			expect(
+				validate({
+					mcpServers: {
+						example: { command: "my-server", lazy },
+					},
+				}),
+			).toBe(false);
+		}
+	});
 });
