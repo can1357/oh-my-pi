@@ -2,11 +2,16 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { agentLoop } from "@oh-my-pi/pi-agent-core/agent-loop";
 import type { ToolPresentationEvent } from "@oh-my-pi/pi-agent-core/presentation";
+import { byteOffset } from "@oh-my-pi/pi-agent-core/presentation";
 import type { AgentContext, AgentEvent, AgentLoopConfig, ToolCallContext } from "@oh-my-pi/pi-agent-core/types";
 import type { Message } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import * as evalIndex from "@oh-my-pi/pi-coding-agent/eval";
 import type { ExecutorBackendExecOptions } from "@oh-my-pi/pi-coding-agent/eval/backend";
+import { hydrateReplayableToolExecution } from "@oh-my-pi/pi-coding-agent/presentation/hydrate";
+import type { ReplayableToolExecution } from "@oh-my-pi/pi-coding-agent/presentation/journal";
+import { MODEL_PROJECTION_VERSION, toolCallRecordOf } from "@oh-my-pi/pi-coding-agent/presentation/journal";
+import { LiveToolPresentationRecord } from "@oh-my-pi/pi-coding-agent/presentation/live-record";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import type { SessionUpdate } from "@oh-my-pi/pi-utils/acp";
@@ -163,6 +168,67 @@ function toolResultText(events: readonly AgentEvent[]): string {
 				? block.text
 				: "",
 		)
+		.join("\n");
+}
+
+function replayContext(): AcpRenderContext {
+	return { phase: "replay", terminal: { kind: "none" }, cwd: "/tmp", fence: true };
+}
+
+/**
+ * Fold a real call's own live `presEvents` into a persisted-safe
+ * `ToolPresentationRecord`, mirroring `AgentSession#trackToolPresentation`'s
+ * routing (`display_output` folds instead of being dropped).
+ */
+function replayableExecutionFromPresEvents(
+	presEvents: readonly ToolPresentationEvent[],
+): Extract<ReplayableToolExecution, { state: "settled" }> {
+	const started = presEvents.find(
+		(event): event is Extract<ToolPresentationEvent, { type: "started" }> => event.type === "started",
+	);
+	const settled = presEvents.find(
+		(event): event is Extract<ToolPresentationEvent, { type: "settled" }> => event.type === "settled",
+	);
+	if (!started || !settled) throw new Error("expected a started and settled presentation event");
+	const acc = new LiveToolPresentationRecord();
+	for (const event of presEvents) {
+		switch (event.type) {
+			case "terminal_append":
+			case "terminal_gap":
+			case "fact":
+			case "attachment":
+			case "display_output":
+				acc.fold(event);
+				break;
+			default:
+				break;
+		}
+	}
+	return {
+		state: "settled",
+		call: toolCallRecordOf(started.call),
+		outcome: settled.outcome,
+		presentation: acc.finish(),
+		modelProjection: { version: MODEL_PROJECTION_VERSION, content: settled.modelContent ?? [] },
+	};
+}
+
+/** Extract the settlement content text the plain (no-terminal) path composes, same shape as the plain-path test above. */
+function plainContentTexts(updates: readonly SessionUpdate[]): string {
+	return updates
+		.map(u => {
+			if (typeof u !== "object" || u === null || !("content" in u)) return "";
+			const content = u.content;
+			if (!Array.isArray(content)) return "";
+			for (const item of content) {
+				if (typeof item !== "object" || item === null || !("content" in item)) continue;
+				const inner = item.content;
+				if (typeof inner !== "object" || inner === null || !("text" in inner)) continue;
+				const text = inner.text;
+				if (typeof text === "string") return text;
+			}
+			return "";
+		})
 		.join("\n");
 }
 
@@ -415,5 +481,30 @@ describe("eval end-to-end through agentLoop: literal wire frames", () => {
 		// terminal-delivered byte exactly once alongside the typed image content.
 		expect((contentTexts.match(/"result": 42/g) ?? []).length).toBe(1);
 		expect(contentTexts).toContain("display({result: 42}); display(plot)");
+	});
+
+	it("replays the same display content persisted from a real display-output-producing eval call as the live plain-path delivery", async () => {
+		const { presEvents } = await runEvalLoop(
+			{ displayOutputs: [{ type: "json", data: { x: 1 } }] },
+			{ language: "js", code: "display({x: 1})" },
+		);
+		const display = presEvents.find(event => event.type === "display_output");
+		if (display?.type !== "display_output") throw new Error("expected a real display_output event");
+
+		const { updates: liveUpdates } = runEventsThroughReducer(presEvents, plainContext());
+		const liveTexts = plainContentTexts(liveUpdates);
+		expect(liveTexts).toContain('"x": 1');
+
+		// Fold the same real events into the persisted record path
+		// (`AgentSession#trackToolPresentation`'s own routing), hydrate them
+		// back, and drive the replayed sequence through the identical reducer.
+		const execution = replayableExecutionFromPresEvents(presEvents);
+		expect(execution.presentation.displays).toEqual([{ atByte: byteOffset(0), display: display.display }]);
+		const replayEvents = hydrateReplayableToolExecution(execution);
+		const { updates: replayUpdates } = runEventsThroughReducer(replayEvents, replayContext());
+		const replayTexts = plainContentTexts(replayUpdates);
+
+		expect(replayTexts).toBe(liveTexts);
+		expect((replayTexts.match(/"x": 1/g) ?? []).length).toBe(1);
 	});
 });

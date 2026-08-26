@@ -165,6 +165,39 @@ const retainedStreamViewSchema = z
 	.readonly();
 
 // ---------------------------------------------------------------------------
+// ToolDisplayOutput, RetainedDisplay
+// ---------------------------------------------------------------------------
+
+const toolDisplayItemSchema = z.union([
+	z.strictObject({ kind: z.literal("json"), value: jsonValueSchema }).readonly(),
+	z.strictObject({ kind: z.literal("invalid_json") }).readonly(),
+	z
+		.strictObject({
+			kind: z.literal("image_dimensions"),
+			originalWidth: z.number(),
+			originalHeight: z.number(),
+			width: z.number(),
+			height: z.number(),
+		})
+		.readonly(),
+]);
+
+const toolDisplayOutputSchema = z
+	.strictObject({
+		kind: z.literal("sequence"),
+		items: z.array(toolDisplayItemSchema).readonly(),
+	})
+	.readonly();
+
+/** The persisted-safe counterpart of `RetainedDisplay` (`../record.ts` in `packages/agent`). */
+const retainedDisplaySchema = z
+	.strictObject({
+		atByte: byteOffsetSchema,
+		display: toolDisplayOutputSchema,
+	})
+	.readonly();
+
+// ---------------------------------------------------------------------------
 // Presentation records: started / settled / interrupted
 // ---------------------------------------------------------------------------
 
@@ -183,6 +216,7 @@ export const toolPresentationRecordSchema = z
 		stream: retainedStreamViewSchema.optional(),
 		facts: z.array(toolFactSchema).readonly(),
 		attachments: z.array(toolAttachmentSchema).readonly(),
+		displays: z.array(retainedDisplaySchema).readonly().optional(),
 	})
 	.readonly();
 

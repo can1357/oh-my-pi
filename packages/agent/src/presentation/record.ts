@@ -14,7 +14,7 @@
  */
 
 import type { ByteOffset, PresentationVersion, StreamId } from "./brands";
-import type { ToolAttachment, ToolPresentationKind, ToolPresentationLocation } from "./events";
+import type { ToolAttachment, ToolDisplayOutput, ToolPresentationKind, ToolPresentationLocation } from "./events";
 import type { ToolFact } from "./facts";
 import type { JsonValue } from "./json";
 
@@ -22,6 +22,17 @@ import type { JsonValue } from "./json";
 export interface RetainedStreamGap {
 	readonly fromByte: ByteOffset;
 	readonly toByte: ByteOffset;
+}
+
+/**
+ * One display group folded from a live `display_output` event, plus the exact
+ * byte cursor at fold time. `atByte` is mandatory — never inferred — so a
+ * replay adapter can place it deterministically against the retained stream
+ * window rather than guessing where in the body it belonged.
+ */
+export interface RetainedDisplay {
+	readonly atByte: ByteOffset;
+	readonly display: ToolDisplayOutput;
 }
 
 /**
@@ -46,6 +57,7 @@ export interface ToolPresentationRecord {
 	readonly stream?: RetainedStreamView;
 	readonly facts: readonly ToolFact[];
 	readonly attachments: readonly ToolAttachment[];
+	readonly displays?: readonly RetainedDisplay[];
 }
 
 /** The presentation of a call that has started but not settled. */

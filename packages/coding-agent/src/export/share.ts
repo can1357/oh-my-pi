@@ -241,7 +241,7 @@ function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): 
 				// the presentation stream, facts, attachments, failure message, and
 				// frozen model projection. Skipping it would leak unredacted through
 				// the journal duplicate.
-				collectSettledEntryStrings(entry, add);
+				collectSettledEntryStrings(entry, add, addJsonStrings);
 				return;
 			default:
 				return;
@@ -266,12 +266,24 @@ function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): 
 }
 
 /** Scan the freeform strings one settled journal arm carries for regex secrets. */
-function collectSettledEntryStrings(entry: ToolExecutionSettledEntry, add: (value: string | undefined) => void): void {
+function collectSettledEntryStrings(
+	entry: ToolExecutionSettledEntry,
+	add: (value: string | undefined) => void,
+	addJsonStrings: (value: unknown) => void,
+): void {
 	if (entry.outcome.kind === "failed") add(entry.outcome.failure.message);
 	const presentation = entry.presentation;
 	add(presentation.stream?.text);
 	for (const fact of presentation.facts) collectToolFactStrings(fact, add);
 	for (const attachment of presentation.attachments) collectToolAttachmentStrings(attachment, add);
+	// `display()` values are model/user-authored JSON riding the same eval cell
+	// as the process bytes above — the same untyped-payload treatment
+	// `toolCall.arguments` gets, not the fixed-field `add` calls.
+	for (const retained of presentation.displays ?? []) {
+		for (const item of retained.display.items) {
+			if (item.kind === "json") addJsonStrings(item.value);
+		}
+	}
 	for (const block of entry.modelProjection.content) {
 		if (block.type === "text") add(block.text);
 	}
@@ -793,7 +805,7 @@ function stripImagePayloads(value: unknown): void {
  * with the blank-GIF payload so the attachments array stays schema-valid. The
  * declared mimeType matches the replacement bytes — keeping the original type
  * (e.g. `image/png`) over GIF bytes makes decoders that trust the declared type
- * fail on every stripped attachment (round-3 review P6).
+ * fail on every stripped attachment.
  */
 function strippedImagePlaceholder(item: unknown): Record<string, unknown> | null {
 	if (!isRecord(item) || typeof item.data !== "string" || item.data.length <= 1024) return null;

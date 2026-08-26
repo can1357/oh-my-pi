@@ -1,6 +1,8 @@
 import type {
+	RetainedDisplay,
 	RetainedStreamGap,
 	RetainedStreamView,
+	ToolDisplayOutput,
 	ToolPresentationEvent,
 } from "@oh-my-pi/pi-agent-core/presentation";
 import { byteLengthOf, byteOffset, sequence } from "@oh-my-pi/pi-agent-core/presentation";
@@ -23,24 +25,31 @@ import type { ReplayableToolExecution } from "./journal";
  * --------------------------------
  * `ToolPresentationRecord` is the *reduced* retention of a live run, never its
  * event log: one retained stream window, the ordered facts, the ordered
- * attachments. So chunk granularity is gone — a run that emitted 400 appends
- * retains one window, and this adapter replays it as one append (or one per
- * declared gap boundary, below). The reducer's rendered body is identical either
- * way, because a body is the concatenation of its chunks; only the *number* of
- * live progress frames differs, and a replayed call has no progress to stream.
- * Reconstructing synthetic chunk boundaries would be fabricating byte ranges
- * nothing recorded, which is the degraded-but-honest line this adapter draws for
- * legacy replay and which applies just as much here.
+ * attachments, the ordered displays. So chunk granularity is gone — a run that
+ * emitted 400 appends retains one window, and this adapter replays it as one
+ * append (or one per declared gap/display boundary, below). The reducer's
+ * rendered body is identical either way, because a body is the concatenation of
+ * its chunks; only the *number* of live progress frames differs, and a replayed
+ * call has no progress to stream. Reconstructing synthetic chunk boundaries
+ * would be fabricating byte ranges nothing recorded, which is the
+ * degraded-but-honest line this adapter draws for legacy replay and which
+ * applies just as much here.
  *
  * Gap placement, on the other hand, *is* recoverable exactly whenever the
  * retained window is complete: `RetainedStreamGap` carries absolute byte ranges,
  * so `retainedBytes + droppedBytes === endByte - startByte` proves the retained
  * text is precisely the delivered bytes of that window and each gap's offset
- * inside it is arithmetic, not inference. {@link splitRetainedRuns} does that
- * arithmetic and falls back to "body first, declared discontinuities after" when
- * the record cannot support it (retention elided a middle, so the record already
- * says so with a truncation fact). Neither branch diffs, reconciles, or scans
- * text: the only inputs are declared byte counts.
+ * inside it is arithmetic, not inference. The same proof extends to
+ * `RetainedDisplay.atByte`: a display's cursor snapshot at
+ * fold time is itself a point in that same byte accounting, so
+ * {@link splitRetainedTimeline} places gaps and displays together and falls
+ * back to "body first, declared discontinuities, then displays in declaration
+ * order" only when the record cannot support exact placement (retention elided
+ * a middle, so the record already says so with a truncation fact). Neither
+ * branch diffs, reconciles, or scans text: the only inputs are declared byte
+ * counts. Displays never lose *items* to a degraded placement, only position —
+ * a truncated retained window still replays every display it folded, exactly
+ * as the truncation fact never drops bytes it can otherwise account for.
  *
  * Coordinates are rebased to 0. The reducer asserts `startByte === cursor` from
  * an initial cursor of 0, so a window that starts mid-stream (`startByte > 0`, a
@@ -48,11 +57,9 @@ import type { ReplayableToolExecution } from "./journal";
  * window does start at 0 and is complete, the rebased offsets are byte-identical
  * to the live ones. Stream *identity* is preserved verbatim either way.
  *
- * Two live-only event kinds are absent by construction and not by omission:
- * `live_terminal_attached` (a `LiveTerminalBinding` has no serializer, so no
- * record can carry one) and `display_output` (the record retains no display
- * sequence — the same thing `renderModelContent` already loses on a persisted
- * record, so replay is no worse than the model history beside it).
+ * One live-only event kind is absent by construction and not by omission:
+ * `live_terminal_attached` — a `LiveTerminalBinding` has no serializer, so no
+ * record can carry one.
  *
  * Record versioning is enforced at the parse boundary, not here:
  * `validateToolJournalEntry` (`../session/session-loader.ts`) safeParses every
@@ -84,8 +91,16 @@ export function hydrateReplayableToolExecution(execution: ReplayableToolExecutio
 		return events;
 	}
 
-	const { stream, facts, attachments } = execution.presentation;
-	if (stream !== undefined) events.push(...hydrateRetainedStream(stream));
+	const { stream, facts, attachments, displays = [] } = execution.presentation;
+	if (stream !== undefined) {
+		events.push(...hydrateRetainedStream(stream, displays));
+	} else {
+		// No stream ever opened (a display-only call, e.g. an eval run whose first
+		// cell produced no process bytes before its first `display()`): every
+		// display's `atByte` is necessarily 0, so declaration order alone places
+		// them correctly — there is no byte range to rebase against.
+		for (const retained of displays) events.push({ type: "display_output", display: retained.display });
+	}
 	// Facts follow the stream because that is where a live run declares them:
 	// `OutputSink.dump()` annotations, truncation windows and wall time are all known
 	// only once the bytes stopped. The record keeps no fact-to-offset correlation, so
@@ -98,87 +113,129 @@ export function hydrateReplayableToolExecution(execution: ReplayableToolExecutio
 	return events;
 }
 
-/** One delivered text run and the declared discontinuity that follows it. */
-interface RetainedRun {
-	readonly text: string;
-	readonly droppedBytes: number;
-}
+/** One placed item in the replayed retained-window timeline. */
+type RetainedSegment =
+	| { readonly kind: "text"; readonly text: string }
+	| { readonly kind: "gap"; readonly droppedBytes: number }
+	| { readonly kind: "display"; readonly display: ToolDisplayOutput };
 
 /**
- * Replay a retained window as appends and declared gaps over a dense stream that
- * starts at byte 0, keeping the record's own stream identity.
+ * Replay a retained window and its displays as appends, declared gaps, and
+ * `display_output` events over a dense stream that starts at byte 0, keeping
+ * the record's own stream identity.
  */
-function hydrateRetainedStream(stream: RetainedStreamView): readonly ToolPresentationEvent[] {
+function hydrateRetainedStream(
+	stream: RetainedStreamView,
+	displays: readonly RetainedDisplay[],
+): readonly ToolPresentationEvent[] {
 	const events: ToolPresentationEvent[] = [];
 	let cursor = 0;
 	let nextSequence = 0;
-	for (const run of splitRetainedRuns(stream)) {
-		if (run.text.length > 0) {
-			events.push({
-				type: "terminal_append",
-				streamId: stream.streamId,
-				sequence: sequence(nextSequence++),
-				startByte: byteOffset(cursor),
-				data: run.text,
-			});
-			cursor += byteLengthOf(run.text);
-		}
-		if (run.droppedBytes > 0) {
-			const fromByte = byteOffset(cursor);
-			cursor += run.droppedBytes;
-			events.push({
-				type: "terminal_gap",
-				streamId: stream.streamId,
-				sequence: sequence(nextSequence++),
-				fromByte,
-				toByte: byteOffset(cursor),
-			});
+	for (const segment of splitRetainedTimeline(stream, displays) ?? degradedSegments(stream, displays)) {
+		switch (segment.kind) {
+			case "text": {
+				if (segment.text.length === 0) break;
+				events.push({
+					type: "terminal_append",
+					streamId: stream.streamId,
+					sequence: sequence(nextSequence++),
+					startByte: byteOffset(cursor),
+					data: segment.text,
+				});
+				cursor += byteLengthOf(segment.text);
+				break;
+			}
+			case "gap": {
+				const fromByte = byteOffset(cursor);
+				cursor += segment.droppedBytes;
+				events.push({
+					type: "terminal_gap",
+					streamId: stream.streamId,
+					sequence: sequence(nextSequence++),
+					fromByte,
+					toByte: byteOffset(cursor),
+				});
+				break;
+			}
+			case "display":
+				events.push({ type: "display_output", display: segment.display });
+				break;
+			default: {
+				const exhaustive: never = segment;
+				throw new Error(`Unhandled retained segment: ${JSON.stringify(exhaustive)}`);
+			}
 		}
 	}
 	return events;
 }
 
 /**
- * Cut the retained text at the declared gap boundaries, when the record proves
- * where they are.
+ * Cut the retained text at the declared gap boundaries and each display's
+ * `atByte`, when the record proves where they all are — the same proof
+ * `splitRetainedRuns` used before displays existed, extended to a second kind
+ * of declared offset.
  *
- * The proof is `byteLength(text) + Σ dropped === endByte - startByte`: the window
- * accounts for every one of its bytes as either retained or explicitly dropped,
- * so the retained text *is* the delivered bytes in order and each gap sits at a
- * computable offset in it. Anything else — a middle-elided window, an out-of-
- * order or non-positive range, a boundary that would split a UTF-8 sequence —
- * yields the degraded shape: the whole body, then each declared discontinuity in
- * order. Their byte counts stay exact (that is what the notice reports); only
- * their position is lost, on a record that already declares itself incomplete.
+ * The proof is `byteLength(text) + Σ dropped === endByte - startByte`: the
+ * window accounts for every one of its bytes as either retained or explicitly
+ * dropped, so the retained text *is* the delivered bytes in order and each
+ * declared offset inside it is arithmetic. A display's `atByte` is always a
+ * cursor snapshot the live fold took — 0, an append's post-cursor, or a gap's
+ * `toByte` — never a point strictly inside an append run or a gap's dropped
+ * range; failing to land on a computable cut (out of bounds, or inside a
+ * drop) means the same thing an inconsistent gap does: the window cannot
+ * honestly place it, and the caller degrades everything. A middle-elided
+ * window, an out-of-order or non-positive gap range, or a boundary that would
+ * split a UTF-8 sequence all yield `undefined` for the same reason.
+ *
+ * Ties between a display and a gap that start at the same absolute byte sort
+ * the display first: the live fold captured the display's cursor snapshot
+ * strictly before whatever event next advanced the cursor to that value.
  */
-function splitRetainedRuns(stream: RetainedStreamView): readonly RetainedRun[] {
+function splitRetainedTimeline(
+	stream: RetainedStreamView,
+	displays: readonly RetainedDisplay[],
+): readonly RetainedSegment[] | undefined {
 	const gaps = [...stream.gaps].sort((left, right) => left.fromByte - right.fromByte);
-	if (gaps.length === 0) return [{ text: stream.text, droppedBytes: 0 }];
-
 	const bytes = Buffer.from(stream.text, "utf-8");
-	if (bytes.length + totalDropped(gaps) !== stream.endByte - stream.startByte) return degradedRuns(stream.text, gaps);
+	if (bytes.length + totalDropped(gaps) !== stream.endByte - stream.startByte) return undefined;
 
-	const runs: RetainedRun[] = [];
+	type Marker =
+		| { readonly at: number; readonly kind: "gap"; readonly gap: RetainedStreamGap }
+		| { readonly at: number; readonly kind: "display"; readonly display: ToolDisplayOutput };
+	// Displays first in the unsorted array: `Array.prototype.sort` is stable, so an
+	// exact tie on `at` keeps the display ahead of the gap (see the doc comment).
+	const markers: Marker[] = [
+		...displays.map((retained): Marker => ({ at: retained.atByte, kind: "display", display: retained.display })),
+		...gaps.map((gap): Marker => ({ at: gap.fromByte, kind: "gap", gap })),
+	];
+	markers.sort((left, right) => left.at - right.at);
+
+	const segments: RetainedSegment[] = [];
 	let cut = 0;
 	let droppedSoFar = 0;
-	for (const gap of gaps) {
-		const droppedBytes = gap.toByte - gap.fromByte;
-		if (droppedBytes <= 0) return degradedRuns(stream.text, gaps);
-		const boundary = gap.fromByte - stream.startByte - droppedSoFar;
-		if (boundary < cut || boundary > bytes.length) return degradedRuns(stream.text, gaps);
+	for (const marker of markers) {
+		const boundary = marker.at - stream.startByte - droppedSoFar;
+		if (boundary < cut || boundary > bytes.length) return undefined;
 		const text = bytes.subarray(cut, boundary).toString("utf-8");
 		// A cut through a multi-byte sequence decodes to U+FFFD and changes length.
 		// Refusing it keeps replay from inventing replacement characters the live
 		// stream never carried.
-		if (byteLengthOf(text) !== boundary - cut) return degradedRuns(stream.text, gaps);
-		runs.push({ text, droppedBytes });
+		if (byteLengthOf(text) !== boundary - cut) return undefined;
+		if (text.length > 0) segments.push({ kind: "text", text });
+		if (marker.kind === "gap") {
+			const droppedBytes = marker.gap.toByte - marker.gap.fromByte;
+			if (droppedBytes <= 0) return undefined;
+			segments.push({ kind: "gap", droppedBytes });
+			droppedSoFar += droppedBytes;
+		} else {
+			segments.push({ kind: "display", display: marker.display });
+		}
 		cut = boundary;
-		droppedSoFar += droppedBytes;
 	}
 	const tail = bytes.subarray(cut).toString("utf-8");
-	if (byteLengthOf(tail) !== bytes.length - cut) return degradedRuns(stream.text, gaps);
-	if (tail.length > 0) runs.push({ text: tail, droppedBytes: 0 });
-	return runs;
+	if (byteLengthOf(tail) !== bytes.length - cut) return undefined;
+	if (tail.length > 0) segments.push({ kind: "text", text: tail });
+	return segments;
 }
 
 /** Total bytes the record says were produced but never delivered. */
@@ -189,12 +246,23 @@ function totalDropped(gaps: readonly RetainedStreamGap[]): number {
 }
 
 /**
- * The body, then each declared discontinuity, positions unrecoverable.
+ * The body, then each declared discontinuity, then every display in
+ * declaration order — positions unrecoverable, but no display is ever
+ * dropped: displays are items, not bytes, so a window that cannot prove
+ * where they went still replays every one it folded.
  *
- * Each gap stays its own run rather than being summed: the record declares *k*
- * discontinuities of known size, and collapsing them into one would assert a
- * single larger drop that never happened.
+ * Each gap stays its own segment rather than being summed: the record
+ * declares *k* discontinuities of known size, and collapsing them into one
+ * would assert a single larger drop that never happened.
  */
-function degradedRuns(text: string, gaps: readonly RetainedStreamGap[]): readonly RetainedRun[] {
-	return [{ text, droppedBytes: 0 }, ...gaps.map(gap => ({ text: "", droppedBytes: gap.toByte - gap.fromByte }))];
+function degradedSegments(
+	stream: RetainedStreamView,
+	displays: readonly RetainedDisplay[],
+): readonly RetainedSegment[] {
+	const segments: RetainedSegment[] = [{ kind: "text", text: stream.text }];
+	for (const gap of [...stream.gaps].sort((left, right) => left.fromByte - right.fromByte)) {
+		segments.push({ kind: "gap", droppedBytes: gap.toByte - gap.fromByte });
+	}
+	for (const retained of displays) segments.push({ kind: "display", display: retained.display });
+	return segments;
 }

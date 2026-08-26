@@ -1,5 +1,6 @@
 import type {
 	ByteOffset,
+	RetainedDisplay,
 	RetainedStreamGap,
 	Sequence,
 	StreamId,
@@ -36,12 +37,17 @@ import { byteLengthOf, byteOffset, factId, PRESENTATION_VERSION } from "@oh-my-p
  * - `started`/`settled`. The agent loop alone owns the lifecycle; this
  *   accumulator holds no lifecycle state of its own, so its owner's decision to
  *   create it and to take its {@link finish} snapshot *is* the lifecycle.
- * - `live_terminal_attached` and `display_output`, which no
- *   {@link ToolPresentationRecord} can represent — a `LiveTerminalBinding` has
- *   no serializer and the record retains no display sequence. `hydrate.ts`
- *   documents both losses on the replay side; this is the same two losses on the
- *   write side, and they are absent by construction rather than by omission.
- * - Nothing else. Retention *is* bounded here (final-review-7 P4): `fold`
+ * - `live_terminal_attached`, which no {@link ToolPresentationRecord} can
+ *   represent — a `LiveTerminalBinding` has no serializer and the record
+ *   retains no live-terminal identity. `hydrate.ts` documents the same loss
+ *   on the replay side; this is the write-side half, absent by construction
+ *   rather than by omission.
+ * - Nothing else. `display_output` is folded, not dropped (final-review-7
+ *   P2): each one retains the byte cursor at fold time alongside the
+ *   declared display, so `hydrate.ts` can place it back against the
+ *   retained stream window deterministically instead of guessing — see
+ *   {@link RetainedDisplay}.
+ * - Retention *is* bounded here (final-review-7 P4): `fold`
  *   asserts continuity over every byte the producer declares — `cursor`
  *   always advances by a `terminal_append`/`terminal_gap`'s full length,
  *   whatever this class chooses to keep — but copies at most
@@ -50,6 +56,9 @@ import { byteLengthOf, byteOffset, factId, PRESENTATION_VERSION } from "@oh-my-p
  *   full extent seen, capped or not) and, once the window has filled,
  *   appends a freshly computed `truncation` fact (`direction: "head"`) to
  *   the snapshot's `facts` — rollover is a truncation fact, never a gap.
+ *   Displays are never subject to this cap: they are items, not bytes, and
+ *   `finish()` retains every one folded regardless of how much of
+ *   `stream.text` the head window kept.
  */
 
 /**
@@ -84,6 +93,7 @@ export class LiveToolPresentationRecord {
 	#lastSequence: number | undefined;
 	readonly #facts: ToolFact[] = [];
 	readonly #attachments: ToolAttachment[] = [];
+	readonly #displays: RetainedDisplay[] = [];
 	/** Bytes already copied into `stream.text`'s retained head window. */
 	#retainedTextBytes = 0;
 	/**
@@ -136,9 +146,16 @@ export class LiveToolPresentationRecord {
 			case "attachment":
 				this.#attachments.push(deepFreeze(event.attachment));
 				return;
+			case "display_output":
+				// `atByte` is the byte cursor at fold time — 0 when no stream has
+				// opened yet (a display-only call with no terminal output before
+				// it), otherwise the running cursor `#advanceStream` maintains.
+				// Never subject to the head-window cap: displays are items, not
+				// bytes, so every one folded here survives to `finish()`.
+				this.#displays.push(deepFreeze({ atByte: byteOffset(this.#stream?.cursor ?? 0), display: event.display }));
+				return;
 			// Representable live, unrepresentable in the record (see the class doc).
 			case "live_terminal_attached":
-			case "display_output":
 				return;
 			case "started":
 			case "settled":
@@ -194,6 +211,7 @@ export class LiveToolPresentationRecord {
 					}),
 			facts: Object.freeze(truncationFact === undefined ? [...this.#facts] : [...this.#facts, truncationFact]),
 			attachments: Object.freeze([...this.#attachments]),
+			...(this.#displays.length === 0 ? {} : { displays: Object.freeze([...this.#displays]) }),
 		});
 	}
 

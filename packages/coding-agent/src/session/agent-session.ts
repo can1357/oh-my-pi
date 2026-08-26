@@ -2136,8 +2136,8 @@ export class AgentSession {
 	 * Route one `tool_presentation` event: append the `started` arm of the v4
 	 * persisted tool journal and open this call's live
 	 * {@link LiveToolPresentationRecord} fold, fold `terminal_append`/
-	 * `terminal_gap`/`fact`/`attachment` into it, or take its `finish()`
-	 * snapshot and append the `settled` arm on `settled`.
+	 * `terminal_gap`/`fact`/`attachment`/`display_output` into it, or take its
+	 * `finish()` snapshot and append the `settled` arm on `settled`.
 	 *
 	 * Fired from the `tool_presentation` event carrying `{ type: "started",
 	 * call }` — the same `ToolCallPresentation` `reduceAcpToolView` announces
@@ -2182,7 +2182,8 @@ export class AgentSession {
 			case "terminal_append":
 			case "terminal_gap":
 			case "fact":
-			case "attachment": {
+			case "attachment":
+			case "display_output": {
 				const pending = this.#pendingToolPresentations.get(toolCallId);
 				if (!pending) {
 					// Should never happen: every presentation-protocol call opens its fold
@@ -2256,7 +2257,6 @@ export class AgentSession {
 				return;
 			}
 			case "live_terminal_attached":
-			case "display_output":
 				return;
 			default: {
 				const exhaustive: never = event.event;

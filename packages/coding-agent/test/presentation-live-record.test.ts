@@ -1,6 +1,13 @@
 import { describe, expect, it } from "bun:test";
-import type { ToolFactBody, ToolPresentationEvent } from "@oh-my-pi/pi-agent-core/presentation";
-import { byteOffset, factId, sequence, streamId, ToolPresentationStream } from "@oh-my-pi/pi-agent-core/presentation";
+import type { ToolDisplayOutput, ToolFactBody, ToolPresentationEvent } from "@oh-my-pi/pi-agent-core/presentation";
+import {
+	byteOffset,
+	createLiveTerminalBinding,
+	factId,
+	sequence,
+	streamId,
+	ToolPresentationStream,
+} from "@oh-my-pi/pi-agent-core/presentation";
 import { LiveToolPresentationRecord, ToolPresentationRecordContinuityError } from "../src/presentation/live-record";
 
 /**
@@ -191,10 +198,48 @@ describe("LiveToolPresentationRecord", () => {
 		expect(() => acc.fold(settled)).toThrow(ToolPresentationRecordContinuityError);
 	});
 
-	it("silently drops live-only events the record cannot represent", () => {
+	it("silently drops live_terminal_attached — the record cannot represent a live terminal binding", () => {
 		const acc = new LiveToolPresentationRecord();
-		acc.fold({ type: "display_output", display: { kind: "sequence", items: [{ kind: "invalid_json" }] } });
+		acc.fold({ type: "live_terminal_attached", binding: createLiveTerminalBinding("live-record-terminal-test") });
 		expect(acc.finish()).toEqual({ version: 1, facts: [], attachments: [] });
+	});
+
+	it("folds display_output into displays, capturing the byte cursor at fold time", () => {
+		const id = streamId("live-record-display-test");
+		const acc = new LiveToolPresentationRecord();
+		const displayA: ToolDisplayOutput = { kind: "sequence", items: [{ kind: "invalid_json" }] };
+		const displayB: ToolDisplayOutput = { kind: "sequence", items: [{ kind: "json", value: { x: 1 } }] };
+
+		// Before any stream opens: atByte is 0.
+		acc.fold({ type: "display_output", display: displayA });
+		acc.fold({
+			type: "terminal_append",
+			streamId: id,
+			sequence: sequence(0),
+			startByte: byteOffset(0),
+			data: LINE_A,
+		});
+		// After 20 bytes of terminal output: atByte is 20.
+		acc.fold({ type: "display_output", display: displayB });
+
+		const record = acc.finish();
+		expect(record.displays).toEqual([
+			{ atByte: byteOffset(0), display: displayA },
+			{ atByte: byteOffset(20), display: displayB },
+		]);
+	});
+
+	it("omits displays entirely when none were folded — mirrors the omitted stream field", () => {
+		const acc = new LiveToolPresentationRecord();
+		acc.fold({
+			type: "terminal_append",
+			streamId: streamId("live-record-no-display-test"),
+			sequence: sequence(0),
+			startByte: byteOffset(0),
+			data: LINE_A,
+		});
+		const record = acc.finish();
+		expect("displays" in record).toBe(false);
 	});
 
 	it("returns an empty record with no stream field when nothing was folded", () => {
