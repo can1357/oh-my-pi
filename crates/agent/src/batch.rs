@@ -5,7 +5,7 @@ use std::{
 	future,
 	sync::{
 		Arc, OnceLock,
-		atomic::{AtomicBool, AtomicU128, Ordering},
+		atomic::{AtomicBool, AtomicU64, Ordering},
 	},
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -119,8 +119,8 @@ impl From<ClientError> for BatchError {
 	}
 }
 /// Returns the subscription-mask bit for one stable hook event id.
-pub const fn hook_event_mask(event: HookEventId) -> u128 {
-	1_u128 << event as u32
+pub const fn hook_event_mask(event: HookEventId) -> u64 {
+	1_u64 << event as u32
 }
 
 /// One hook-composed admission answer and its narrowed authority envelope.
@@ -160,7 +160,7 @@ pub enum InvocationHookRequest {
 /// Atomic union-mask and hook request sender shared by invocation pumps.
 #[derive(Clone, Debug)]
 pub struct InvocationHookBus {
-	union: Arc<AtomicU128>,
+	union: Arc<AtomicU64>,
 	tx:    flume::Sender<InvocationHookRequest>,
 }
 
@@ -168,16 +168,16 @@ impl InvocationHookBus {
 	/// Creates a hook bus and its single CONTROL-side request receiver.
 	pub fn channel() -> (Self, Receiver<InvocationHookRequest>) {
 		let (tx, rx) = flume::unbounded();
-		(Self { union: Arc::new(AtomicU128::new(0)), tx }, rx)
+		(Self { union: Arc::new(AtomicU64::new(0)), tx }, rx)
 	}
 
 	/// Replaces the registered union mask in one atomic publication.
-	pub fn replace_union_mask(&self, mask: u128) {
+	pub fn replace_union_mask(&self, mask: u64) {
 		self.union.store(mask, Ordering::Release);
 	}
 
 	/// Returns the currently published union mask.
-	pub fn union_mask(&self) -> u128 {
+	pub fn union_mask(&self) -> u64 {
 		self.union.load(Ordering::Acquire)
 	}
 
