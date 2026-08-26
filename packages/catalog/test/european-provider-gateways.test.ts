@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
+import * as os from "node:os";
+import * as path from "node:path";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
 import { createModelManager } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
@@ -204,7 +206,7 @@ describe("European gateway provider catalog support", () => {
 		});
 		const manager = createModelManager({
 			...nebiusModelManagerOptions({ apiKey: "nebius-test-key", fetch: fetchMock }),
-			cacheDbPath: `/private/tmp/omp-nebius-snapshot-${Date.now()}-${Math.random()}.sqlite`,
+			cacheDbPath: path.join(os.tmpdir(), `omp-nebius-snapshot-${Date.now()}-${Math.random()}.sqlite`),
 		});
 
 		const result = await manager.refresh("online");
@@ -785,7 +787,7 @@ describe("European gateway provider catalog support", () => {
 		});
 		const manager = createModelManager({
 			...eurouterModelManagerOptions({ fetch: fetchMock }),
-			cacheDbPath: `/private/tmp/omp-european-provider-gateways-${Date.now()}-${Math.random()}.sqlite`,
+			cacheDbPath: path.join(os.tmpdir(), `omp-european-provider-gateways-${Date.now()}-${Math.random()}.sqlite`),
 		});
 
 		const result = await manager.refresh("online");
