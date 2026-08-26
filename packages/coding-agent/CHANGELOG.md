@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `/goal budget` now accepts `K`/`M` suffixes (e.g. `300K`, `1.5M`), in addition to plain integers.
+
 ## [18.0.8] - 2026-08-27
 
 ### Added
