@@ -901,6 +901,16 @@ export function transformMessages<TApi extends Api>(
 	// Track which tool calls already have an emitted result so delayed/duplicate
 	// toolResult messages cannot create a second provider-visible result.
 	const toolCallStatus = new Map<string, ToolCallStatus>();
+	const deferredOrphanToolResults: ToolResultMessage[] = [];
+
+	const hasPendingToolResultWindow = (): boolean =>
+		pendingToolCalls.some(tc => !toolCallStatus.has(tc.id)) || pendingAbortedToolCalls.size > 0;
+
+	const flushDeferredOrphanToolResults = (): void => {
+		if (deferredOrphanToolResults.length === 0) return;
+		result.push(...deferredOrphanToolResults);
+		deferredOrphanToolResults.length = 0;
+	};
 
 	const flushPendingToolCalls = (timestamp: number): void => {
 		if (pendingToolCalls.length === 0) return;
@@ -956,6 +966,7 @@ export function transformMessages<TApi extends Api>(
 		if (msg.role === "assistant") {
 			flushPendingToolCalls(messageTimestamp);
 			flushPendingAbortedToolCalls();
+			flushDeferredOrphanToolResults();
 
 			const assistantMsg = msg as AssistantMessage;
 
@@ -1002,12 +1013,14 @@ export function transformMessages<TApi extends Api>(
 				pendingAbortedToolCalls.delete(msg.toolCallId);
 				toolCallStatus.set(msg.toolCallId, ToolCallStatus.Resolved);
 				result.push(msg);
+				if (!hasPendingToolResultWindow()) flushDeferredOrphanToolResults();
 				continue;
 			}
 
 			if (pendingToolCalls.some(tc => tc.id === msg.toolCallId)) {
 				toolCallStatus.set(msg.toolCallId, ToolCallStatus.Resolved);
 				result.push(msg);
+				if (!hasPendingToolResultWindow()) flushDeferredOrphanToolResults();
 				continue;
 			}
 
@@ -1028,9 +1041,10 @@ export function transformMessages<TApi extends Api>(
 				//   between the assistant turn and a real result that may still arrive
 				//   inside the current contiguous result window.
 				//
-				// Drop the orphan silently in that case; the pending calls will be
-				// resolved in their own contiguous result window or at the next boundary.
-				if (pendingToolCalls.some(tc => !toolCallStatus.has(tc.id)) || pendingAbortedToolCalls.size > 0) {
+				if (hasPendingToolResultWindow()) {
+					if (options?.preserveOrphanToolResultImages && msg.content.some(part => part.type === "image")) {
+						deferredOrphanToolResults.push(msg);
+					}
 					continue;
 				}
 				// No pending tool-call window: safe to preserve the text payload so the
@@ -1074,16 +1088,19 @@ export function transformMessages<TApi extends Api>(
 		} else if (msg.role === "user" || msg.role === "developer") {
 			flushPendingToolCalls(messageTimestamp);
 			flushPendingAbortedToolCalls();
+			flushDeferredOrphanToolResults();
 			result.push(msg);
 		} else {
 			flushPendingToolCalls(messageTimestamp);
 			flushPendingAbortedToolCalls();
+			flushDeferredOrphanToolResults();
 			result.push(msg);
 		}
 	}
 
 	flushPendingToolCalls(Date.now());
 	flushPendingAbortedToolCalls();
+	flushDeferredOrphanToolResults();
 
 	return result;
 }

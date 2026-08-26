@@ -447,6 +447,38 @@ describe("buildOpenAiNativeHistory interleaved assistant message (#8789)", () =>
 		]);
 		expect(JSON.stringify(items[0]?.content)).toContain("</thinking");
 	});
+
+	test("defers an interleaved orphan image until the paired result closes", () => {
+		const imageData = Buffer.from("interleaved orphan image").toString("base64");
+		const orphan: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_b|fc_call_b",
+			toolName: "read",
+			content: [{ type: "image", data: imageData, mimeType: "image/png" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		const items = buildOpenAiNativeHistory(
+			[codexAssistant([{ callId: "call_a" }], true), orphan, toolResultFor("call_a")],
+			makeOpenAiModel({ provider: "openai-codex", input: ["text", "image"] }),
+		);
+
+		const callIndex = items.findIndex(item => item.type === "function_call" && item.call_id === "call_a");
+		const pairedOutputIndex = items.findIndex(item => item.type === "function_call_output" && item.call_id === "call_a");
+		const orphanNoteIndex = items.findIndex(
+			item => item.type === "message" && item.role === "assistant" && String(item.content).includes("call_b"),
+		);
+		const orphanImageIndex = items.findIndex(
+			item =>
+				item.type === "message" &&
+				item.role === "user" &&
+				JSON.stringify(item.content).includes(`data:image/png;base64,${imageData}`),
+		);
+
+		expect(pairedOutputIndex).toBe(callIndex + 1);
+		expect(orphanNoteIndex).toBeGreaterThan(pairedOutputIndex);
+		expect(orphanImageIndex).toBe(orphanNoteIndex + 1);
+	});
 });
 
 describe("buildOpenAiNativeHistory call-id tracking", () => {
