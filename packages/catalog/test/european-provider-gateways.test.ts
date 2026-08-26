@@ -582,6 +582,28 @@ describe("European gateway provider catalog support", () => {
 		});
 	});
 
+	test("normalizes gateway input modality tokens before matching", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			return Response.json({
+				data: [
+					{
+						id: "custom-vision-model",
+						name: "Custom Vision Model",
+						input_modalities: [" Image "],
+					},
+				],
+			});
+		});
+
+		const models = await eurouterModelManagerOptions({ fetch: fetchMock }).fetchDynamicModels?.();
+
+		expect(models?.[0]).toMatchObject({
+			id: "custom-vision-model",
+			provider: "eurouter",
+			input: ["text", "image"],
+		});
+	});
+
 	test("filters modality-only image generation rows from European gateway discovery", async () => {
 		const fetchMock: FetchImpl = vi.fn(async () => {
 			return new Response(
