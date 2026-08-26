@@ -57,7 +57,6 @@ import {
 	zPromptResponse,
 	zSessionNotification,
 } from "@oh-my-pi/pi-utils/acp";
-import type { z } from "zod/v4";
 import {
 	checkedNotificationPayload,
 	encodeToolFrames,
@@ -705,6 +704,14 @@ async function createHarness(
 async function advanceBootstrapGuard(): Promise<void> {
 	vi.advanceTimersByTime(ACP_BOOTSTRAP_RACE_GUARD_MS);
 	await Promise.resolve();
+}
+/**
+ * Wait until `#scheduleBootstrapUpdates`'s timer has fired and the
+ * session-lifetime subscription is installed. 30 ms of slack absorbs
+ * `setTimeout` drift without slowing tests meaningfully.
+ */
+async function waitForBootstrapGuard(): Promise<void> {
+	await Bun.sleep(ACP_BOOTSTRAP_RACE_GUARD_MS + 150);
 }
 
 describe("ACP agent", () => {
@@ -2506,7 +2513,7 @@ describe("ACP agent", () => {
 		await stored.sessionManager.ensureOnDisk();
 		await stored.sessionManager.flush();
 
-		// The load itself must resolve -- a rejection here is exactly the P1 bug.
+		// The load itself must resolve -- a rejection here is exactly the regression this guards.
 		await harness.agent.loadSession({ sessionId: stored.sessionId, cwd: harness.cwdA, mcpServers: [] });
 
 		const toolUpdates = harness.updates
@@ -2647,8 +2654,8 @@ describe("ACP agent", () => {
 				content: [{ type: "content", content: { type: "text", text: secondJournaledOutput } }],
 			}),
 		]);
-		// The earlier occurrence's real body must survive intact -- P2 erased it
-		// by attaching the later record to the earlier position instead.
+		// The earlier occurrence's real body must survive intact -- a regression
+		// once erased it by attaching the later record to the earlier position instead.
 		expect(JSON.stringify(toolUpdates)).toContain(firstLegacyBody);
 		// Neither occurrence is fenced (the hydration adapter's markdown-fence
 		// signature) -- proves neither took the hydrated path.

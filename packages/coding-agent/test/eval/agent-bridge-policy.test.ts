@@ -1092,7 +1092,7 @@ describe("agent() through eval runtimes", () => {
 		const result = await cell;
 
 		expect(order).toEqual(["agent-saw-abort", "agent-returned", "cell-settled"]);
-		expect(result.cancelled).toBe(true);
+		expect(result.termination?.kind).toBe("interrupted");
 	}, 30_000);
 });
 

@@ -13,7 +13,7 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type { ToolFactBody, TruncationFactMeta } from "@oh-my-pi/pi-agent-core/presentation";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { isRecord, logger } from "@oh-my-pi/pi-utils";
+import { logger } from "@oh-my-pi/pi-utils";
 import { getDefault, type Settings } from "../config/settings";
 import { formatGroupedDiagnosticMessages } from "../lsp/utils";
 import type { Theme } from "../modes/theme/theme";

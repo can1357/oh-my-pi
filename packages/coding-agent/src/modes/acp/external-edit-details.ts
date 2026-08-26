@@ -26,7 +26,7 @@
  * the end-frame branch parses once instead of five times.
  */
 
-import type { ToolCallContent } from "@agentclientprotocol/sdk";
+import type { ToolCallContent } from "@oh-my-pi/pi-utils/acp";
 import type { EditToolDetails, EditToolPerFileResult } from "../../edit";
 import { type PresentationOutputMeta, salvageOutputMeta } from "../../presentation/schemas/output-meta";
 import { formatOutputNotice, isRecord } from "../../tools/output-meta";

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import { agentLoop } from "@oh-my-pi/pi-agent-core/agent-loop";
 import type {
 	AgentContext,
@@ -11,7 +12,6 @@ import type {
 } from "@oh-my-pi/pi-agent-core/types";
 import type { Message } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
-import { type } from "arktype";
 import type { ToolPresentationProducer } from "../src/presentation";
 import { createLiveTerminalBinding } from "../src/presentation";
 import type { ToolPresentationAdapter } from "../src/types";

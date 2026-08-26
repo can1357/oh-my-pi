@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import type { AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { ToolCallPresentation, ToolPresentationEvent } from "@oh-my-pi/pi-agent-core/presentation";
 import {
@@ -12,7 +11,8 @@ import {
 	ToolPresentationStream,
 } from "@oh-my-pi/pi-agent-core/presentation";
 import type { PtyRunResult, PtyStartOptions } from "@oh-my-pi/pi-natives";
-import { Terminal as XtermTerminal } from "@xterm/headless";
+import type { SessionUpdate } from "@oh-my-pi/pi-utils/acp";
+import { Terminal as XtermTerminal } from "@oh-my-pi/pi-utils/vterm";
 import { AsyncJobManager } from "../src/async/job-manager";
 import { Settings } from "../src/config/settings";
 import { checkedNotificationPayload, encodeToolFrames } from "../src/modes/acp/view/encoder";
@@ -20,7 +20,8 @@ import { negotiateTerminalMetaCap } from "../src/modes/acp/view/frames";
 import type { AcpRenderContext, DeliveryReceipt } from "../src/modes/acp/view/reducer";
 import { INITIAL_ACP_TOOL_VIEW, reduceAcpToolView } from "../src/modes/acp/view/reducer";
 import { getThemeByName } from "../src/modes/theme/theme";
-import { deobfuscateToolArguments, SecretObfuscator } from "../src/secrets/obfuscator";
+import { deobfuscateToolArguments } from "../src/secrets/message-transform";
+import { SecretObfuscator } from "../src/secrets/obfuscator";
 import type { ClientBridge, ClientBridgeTerminalHandle } from "../src/session/client-bridge";
 import { OutputSink } from "../src/session/streaming-output";
 import type { ToolSession } from "../src/tools";

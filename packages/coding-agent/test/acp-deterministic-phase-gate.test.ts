@@ -2,12 +2,12 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentSideConnection, SessionNotification, SessionUpdate } from "@agentclientprotocol/sdk";
+import { z } from "@oh-my-pi/omptype/zod";
 import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import { agentLoop } from "@oh-my-pi/pi-agent-core/agent-loop";
 import { ToolPresentationStream } from "@oh-my-pi/pi-agent-core/presentation";
 import type { AgentContext, AgentEvent, AgentLoopConfig, ToolCallContext } from "@oh-my-pi/pi-agent-core/types";
-import { type Message, type Model, z } from "@oh-my-pi/pi-ai";
+import type { Message, Model } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
@@ -37,6 +37,7 @@ import { correlateReplayableToolExecution } from "@oh-my-pi/pi-coding-agent/sess
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
+import type { AgentSideConnection, SessionNotification, SessionUpdate } from "@oh-my-pi/pi-utils/acp";
 import { captureKillMidToolJournal } from "./helpers/kill-mid-tool-capture";
 
 const LINE_COUNT = 3000;

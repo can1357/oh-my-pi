@@ -34,7 +34,7 @@ import { describe, expect, it } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { z } from "@oh-my-pi/pi-ai";
+import { z } from "@oh-my-pi/omptype/zod";
 import { classifyLiveSmoke } from "../../../scripts/acp-live-smoke-classifier";
 
 const codingAgentDir = path.resolve(import.meta.dir, "..");
@@ -92,8 +92,8 @@ const FrameUpdate = z
 			)
 			.optional(),
 	})
-	.loose();
-const FrameEnvelope = z.object({ params: z.object({ update: FrameUpdate.optional() }).optional() }).loose();
+	.passthrough();
+const FrameEnvelope = z.object({ params: z.object({ update: FrameUpdate.optional() }).optional() }).passthrough();
 
 interface Frame {
 	rawInput?: z.infer<typeof FrameUpdate>["rawInput"];

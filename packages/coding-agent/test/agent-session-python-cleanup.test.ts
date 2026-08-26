@@ -498,8 +498,7 @@ describe("AgentSession python cleanup", () => {
 		// to completion. Detachment is proven below: the kernel survives, is not
 		// restarted, and keeps serving the surviving session.
 		await expect(firstExecution).resolves.toMatchObject({
-			cancelled: true,
-			timedOut: true,
+			termination: { kind: "interrupted" },
 			stdinRequested: false,
 		});
 		await secondSession.executePython("print('owner-b after detach')");

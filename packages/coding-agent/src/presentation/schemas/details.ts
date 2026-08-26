@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "@oh-my-pi/omptype/zod";
 import { imageContentSchema } from "./content";
 import { presentationFactsSchema } from "./facts";
 import { outputMetaSchema } from "./output-meta";

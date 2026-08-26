@@ -1,8 +1,6 @@
 {
 	"extends": "../../tsconfig.base.json",
 	"compilerOptions": {
-		"exactOptionalPropertyTypes": true,
-		"noUncheckedIndexedAccess": true,
 		"paths": {
 			"@oh-my-pi/pi-agent-core/presentation": [
 				"../agent/src/presentation.ts"

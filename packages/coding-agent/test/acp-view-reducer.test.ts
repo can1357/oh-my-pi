@@ -1,5 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import type { ToolCallPresentation, ToolPresentationEvent } from "@oh-my-pi/pi-agent-core/presentation";
 import {
 	createLiveTerminalBinding,
@@ -7,6 +6,7 @@ import {
 	streamId,
 	ToolPresentationStream,
 } from "@oh-my-pi/pi-agent-core/presentation";
+import type { SessionUpdate } from "@oh-my-pi/pi-utils/acp";
 import { checkedNotificationPayload, encodeToolFrames } from "../src/modes/acp/view/encoder";
 import { type AcpToolFrame, negotiateTerminalMetaCap } from "../src/modes/acp/view/frames";
 import type { AcpRenderContext, AcpToolViewState, DeliveryReceipt } from "../src/modes/acp/view/reducer";

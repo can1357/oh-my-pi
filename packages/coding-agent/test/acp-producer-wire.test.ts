@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { SessionNotification } from "@agentclientprotocol/sdk";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { ToolCallPresentation, ToolPresentationEvent } from "@oh-my-pi/pi-agent-core/presentation";
 import {
@@ -31,6 +30,7 @@ import { BashTool, type BashToolDetails, bashOutcome } from "@oh-my-pi/pi-coding
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { executeLaunch } from "@oh-my-pi/pi-coding-agent/tools/hub/launch";
 import { formatOutputNotice, wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import type { SessionNotification } from "@oh-my-pi/pi-utils/acp";
 import { formatLegacyOutputNotice } from "../src/modes/acp/legacy-output-meta";
 import { checkedNotificationPayload, encodeToolFrames } from "../src/modes/acp/view/encoder";
 import { negotiateTerminalMetaCap } from "../src/modes/acp/view/frames";
@@ -750,6 +750,9 @@ async function runLaunch(op: "start" | "describe", state: string): Promise<Produ
 		projectDir,
 		request: async () => rpcResult,
 		close() {},
+		onCompletion() {
+			return () => {};
+		},
 	} as DaemonBrokerClient);
 	const args = op === "start" ? { op, name: "web", application: "bun", args: ["run", "dev"] } : { op, name: "web" };
 	const result = await executeLaunch({ cwd: projectDir } as ToolSession, args as never);

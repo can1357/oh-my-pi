@@ -57,9 +57,9 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { ReadUrlToolDetails } from "@oh-my-pi/pi-coding-agent/tools/fetch";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool, type ReadToolDetails } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { writeArchive } from "@oh-my-pi/pi-coding-agent/utils/zip";
 import * as scrapers from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { writeArchive } from "@oh-my-pi/pi-utils/ar";
 
 const COLUMN_CAP = 64;
 
@@ -122,7 +122,7 @@ describe("read head/tail truncation notice (composed via the fact/projection mac
 		await fs.writeFile(path.join(tmpDir, "f.txt"), fixture(60, 20));
 		const result = await readFile("head_lines", 20, "f.txt");
 
-		expect(modelText(result)).toEndWith("\n\n[Showing lines 1-20 of 61. Use :21 to continue]");
+		expect(modelText(result)).toEndWith("\n\n[Showing lines 1-20 of 60. Use :21 to continue]");
 		// The fact body is threaded through unchanged, not re-serialized into a
 		// bare string — `details.meta.truncation` still carries the same
 		// shape every other consumer (mapper/spill/TUI-fallback) has always read.
@@ -145,7 +145,7 @@ describe("read head/tail truncation notice (composed via the fact/projection mac
 		// 30 — one line of leading context before the requested line 31 — not
 		// 1), proving the selector actually drove a different window rather
 		// than being ignored.
-		expect(text).toEndWith("\n\n[Showing lines 30-50 of 61. Use :51 to continue]");
+		expect(text).toEndWith("\n\n[Showing lines 30-50 of 60. Use :51 to continue]");
 		expect(text).not.toContain("[Showing lines 1-20");
 		const facts = result.details?.presentationFacts;
 		expect(facts?.[0]?.kind === "truncation" && facts[0].meta.shownLineRange).toEqual({ start: 30, end: 50 });
@@ -156,7 +156,7 @@ describe("read head/tail truncation notice (composed via the fact/projection mac
 		const result = await readFile("head_bytes", 20, "wide.txt");
 
 		expect(modelText(result)).toEndWith(
-			"\n\n[Showing lines 1-12 of 61 (48.0KB limit). Use :13 to continue. Some lines truncated to 64 chars]",
+			"\n\n[Showing lines 1-12 of 60 (48.0KB limit). Use :13 to continue. Some lines truncated to 64 chars]",
 		);
 	});
 
@@ -165,7 +165,7 @@ describe("read head/tail truncation notice (composed via the fact/projection mac
 		const result = await readFile("head_lines_plus_column", 20, "long.txt");
 
 		const text = modelText(result);
-		expect(text).toEndWith("\n\n[Showing lines 1-20 of 61. Use :21 to continue. Some lines truncated to 64 chars]");
+		expect(text).toEndWith("\n\n[Showing lines 1-20 of 60. Use :21 to continue. Some lines truncated to 64 chars]");
 		// Exactly one bracket — not the notice duplicated by both the builder's
 		// projection and the wrapper's default `appendOutputNotice` fallback.
 		expect(text.match(/\[Showing lines/g)).toHaveLength(1);

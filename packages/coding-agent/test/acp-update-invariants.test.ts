@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import type { SessionNotification } from "@agentclientprotocol/sdk";
 import { checkAcpUpdateInvariants } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-update-invariants";
+import type { SessionNotification } from "@oh-my-pi/pi-utils/acp";
 
 function toolCallUpdate(fields: Partial<SessionNotification["update"]>): SessionNotification {
 	return {

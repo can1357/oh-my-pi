@@ -40,8 +40,8 @@
  * live connection.
  */
 
-import type { SessionNotification } from "@agentclientprotocol/sdk";
 import { logger } from "@oh-my-pi/pi-utils";
+import type { SessionNotification } from "@oh-my-pi/pi-utils/acp";
 import { buildEvalCodeText } from "./acp-event-mapper";
 
 export interface AcpInvariantContext {

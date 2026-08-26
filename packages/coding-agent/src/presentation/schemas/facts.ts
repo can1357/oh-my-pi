@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "@oh-my-pi/omptype/zod";
 
 /**
  * `ToolFactBody` and its nested metas as zod schemas.

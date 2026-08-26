@@ -153,8 +153,12 @@ describe("read → edit round-trip for out-of-cwd files", () => {
 				run: async (tool, fileName) => {
 					await tool.execute("edit-workspace-suffix-replace", {
 						path: fileName,
-						old_string: "alpha",
-						new_string: "ALPHA",
+						edits: [
+							{
+								old_text: "alpha",
+								new_text: "ALPHA",
+							},
+						],
 					});
 				},
 			},

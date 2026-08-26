@@ -9,11 +9,11 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
+import { Type } from "@oh-my-pi/omptype/typebox";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { HookRunner, type LoadedHook } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 import { HookToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/hooks/tool-wrapper";
-import { Type } from "@oh-my-pi/pi-coding-agent/extensibility/typebox";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";

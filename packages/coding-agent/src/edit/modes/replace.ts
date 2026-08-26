@@ -4,8 +4,9 @@
  * Provides both character-level and line-level fuzzy matching with progressive
  * fallback strategies for finding text in files.
  */
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+
 import { type } from "@oh-my-pi/omptype";
+import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { FileDiagnosticsResult, WritethroughCallback, WritethroughDeferredHandle } from "../../lsp";
 import type { ToolSession } from "../../tools";
 import { routeWriteThroughBridge } from "../../tools/acp-bridge";
@@ -26,6 +27,7 @@ import {
 } from "../normalize";
 import { readEditFileText, serializeEditFileText } from "../read-file";
 import type { LspBatchRequest } from "../renderer";
+import { formatEditResultText } from "../result";
 import { pruneEditFileSnapshots } from "../snapshot-details";
 import { type AppliedEditFile, aggregateEditOutcome, type EditToolDetails, normalizedPath } from "../types";
 
@@ -1191,10 +1193,7 @@ export async function executeReplaceSingleProduction(
 
 	const diffResult = generateDiffString(normalizedContent, result.content, undefined, { path });
 	await onApplied?.({ path: absolutePath, prev: rawContent, next: finalContent });
-	const resultText =
-		result.count > 1
-			? `Successfully replaced ${result.count} occurrences in ${path}.`
-			: `Successfully replaced text in ${path}.`;
+	const resultText = formatEditResultText({ displayPath: path, diff: diffResult.diff });
 
 	const meta = outputMeta()
 		.diagnostics(diagnostics?.summary ?? "", diagnostics?.messages ?? [])

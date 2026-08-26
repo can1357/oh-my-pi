@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import type { FactAudience, ToolFactKind, ToolPresentationEvent } from "@oh-my-pi/pi-agent-core/presentation";
 import { createLiveTerminalBinding, factId } from "@oh-my-pi/pi-agent-core/presentation";
+import type { SessionUpdate } from "@oh-my-pi/pi-utils/acp";
 import { negotiateTerminalMetaCap } from "../src/modes/acp/view/frames";
 import type { AcpRenderContext, DeliveryReceipt } from "../src/modes/acp/view/reducer";
 import { checkFactDelivery, factDeliveryExpectation, PresentationDeliveryLedger } from "./helpers/acp-delivery-ledger";

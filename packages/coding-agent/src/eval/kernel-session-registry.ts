@@ -1,6 +1,7 @@
 import * as path from "node:path";
 
 import { logger } from "@oh-my-pi/pi-utils";
+import type { ExecutorTermination } from "./backend";
 import {
 	attachSessionOwner,
 	type CancelledErrorClass,
@@ -127,7 +128,7 @@ export function formatSessionKernelTimeoutAnnotation(timeoutMs: number | undefin
 export function createKernelSessionRegistry<
 	TKernel extends RegistryKernel,
 	TOptions extends KernelSessionRegistryOptions,
-	TResult extends { cancelled: boolean },
+	TResult extends { termination: ExecutorTermination | undefined },
 	TSession extends KernelSession<TKernel>,
 >(
 	descriptor: KernelSessionRegistryDescriptor<TKernel, TOptions, TResult, TSession>,
@@ -473,7 +474,7 @@ export function createKernelSessionRegistry<
 			return await descriptor.executeWithKernel(retryKernel, code, runOptions);
 		}
 		if (
-			!result.cancelled ||
+			result.termination?.kind !== "interrupted" ||
 			options.signal?.aborted ||
 			(options.deadlineMs !== undefined && options.deadlineMs <= Date.now()) ||
 			kernel.isAlive()
@@ -491,7 +492,11 @@ export function createKernelSessionRegistry<
 		}
 		throwIfCallerCancelled(options);
 		const retryResult = await descriptor.executeWithKernel(retryKernel, code, runOptions);
-		if (retryResult.cancelled && options.deadlineMs !== undefined && options.deadlineMs <= Date.now()) {
+		if (
+			retryResult.termination?.kind === "interrupted" &&
+			options.deadlineMs !== undefined &&
+			options.deadlineMs <= Date.now()
+		) {
 			return result;
 		}
 		return retryResult;

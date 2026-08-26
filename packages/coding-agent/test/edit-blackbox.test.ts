@@ -72,8 +72,12 @@ describe("edit parse-regression blackbox", () => {
 
 		const result = await new EditTool(disabledSession, "replace").execute("disabled", {
 			path: "disabled.ts",
-			old_string: "return 1;",
-			new_string: "return (;",
+			edits: [
+				{
+					old_text: "return 1;",
+					new_text: "return (;",
+				},
+			],
 		});
 
 		expect(await Bun.file(filePath).text()).toContain("return (;");
@@ -87,8 +91,12 @@ describe("edit parse-regression blackbox", () => {
 
 		const result = await new EditTool(session, "replace").execute("clean", {
 			path: "clean.ts",
-			old_string: "return 1;",
-			new_string: "return 2;",
+			edits: [
+				{
+					old_text: "return 1;",
+					new_text: "return 2;",
+				},
+			],
 		});
 
 		const text = result.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
@@ -106,7 +114,7 @@ describe("edit parse-regression blackbox", () => {
 		}> = [];
 
 		const replacePath = await writeFixture("replace.ts");
-		const replaceArg = { path: "replace.ts", old_string: "return 1;", new_string: "return (;" };
+		const replaceArg = { path: "replace.ts", edits: [{ old_text: "return 1;", new_text: "return (;" }] };
 		await new EditTool(session, "replace").execute("replace", replaceArg);
 		expected.push({
 			prev: SOURCE,
@@ -185,15 +193,23 @@ describe("edit parse-regression blackbox", () => {
 		await writeFixture("valid.ts");
 		await new EditTool(session, "replace").execute("valid", {
 			path: "valid.ts",
-			old_string: "return 1;",
-			new_string: "return 2;",
+			edits: [
+				{
+					old_text: "return 1;",
+					new_text: "return 2;",
+				},
+			],
 		});
 
 		await Bun.write(path.join(tempDir, "invalid.ts"), "export const value = (;\n");
 		await new EditTool(session, "replace").execute("already-invalid", {
 			path: "invalid.ts",
-			old_string: "value",
-			new_string: "next",
+			edits: [
+				{
+					old_text: "value",
+					new_text: "next",
+				},
+			],
 		});
 
 		expect(await Bun.file(logPath).exists()).toBe(false);
@@ -203,8 +219,12 @@ describe("edit parse-regression blackbox", () => {
 		await writeFixture("empty.ts");
 		await new EditTool(session, "replace").execute("empty", {
 			path: "empty.ts",
-			old_string: SOURCE,
-			new_string: "",
+			edits: [
+				{
+					old_text: SOURCE,
+					new_text: "",
+				},
+			],
 		});
 
 		expect(await Bun.file(path.join(tempDir, "empty.ts")).text()).toBe("");

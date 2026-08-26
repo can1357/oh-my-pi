@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "@oh-my-pi/omptype/zod";
 import type { PresentationContentBlock } from "./schemas/content";
 import { toolContentBlockSchema } from "./schemas/content";
 import type {

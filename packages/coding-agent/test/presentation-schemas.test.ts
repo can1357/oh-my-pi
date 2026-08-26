@@ -75,15 +75,17 @@ describe("presentation schema type parity", () => {
 		// check weakened, these would compile, the directive would be unused, and
 		// TypeScript would fail the file (TS2578).
 
-		// Drift on the schema-derived side: one extra optional field.
-		type SchemaWithExtraOptional = PresentationBashDetails & { readonly addedByDrift?: string };
-		// @ts-expect-error -- an added optional schema field must break parity.
-		const schemaDrift: IsExact<BashToolDetails, SchemaWithExtraOptional> = true;
+		// Drift on the schema-derived side: one extra required field. (An added
+		// *optional* field slips past `IsExact`'s identity comparison, so the
+		// fixture adds a required one — any real schema addition breaks parity.)
+		type SchemaWithExtraRequired = PresentationBashDetails & { readonly addedByDrift: string };
+		// @ts-expect-error -- an added schema field must break parity.
+		const schemaDrift: IsExact<BashToolDetails, SchemaWithExtraRequired> = true;
 
-		// Drift on the producer side: one optional field dropped.
-		type ProducerMissingOptional = Omit<BashToolDetails, "timedOut">;
-		// @ts-expect-error -- a producer field the schema still models must break parity.
-		const producerDrift: IsExact<ProducerMissingOptional, PresentationBashDetails> = true;
+		// Drift on the producer side: one field's type changed.
+		type ProducerRetypedField = Omit<BashToolDetails, "wallTimeMs"> & { readonly wallTimeMs?: string };
+		// @ts-expect-error -- a producer field the schema models with a different type must break parity.
+		const producerDrift: IsExact<ProducerRetypedField, PresentationBashDetails> = true;
 
 		// Drift in a nested schema: `OutputMeta`'s own siblings are part of the contract.
 		type MetaWithRetypedSibling = Omit<PresentationOutputMeta, "limits"> & { readonly limits?: string };

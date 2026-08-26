@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { agentLoop } from "@oh-my-pi/pi-agent-core/agent-loop";
 import type { ToolPresentationEvent } from "@oh-my-pi/pi-agent-core/presentation";
@@ -10,6 +9,7 @@ import * as evalIndex from "@oh-my-pi/pi-coding-agent/eval";
 import type { ExecutorBackendExecOptions } from "@oh-my-pi/pi-coding-agent/eval/backend";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
+import type { SessionUpdate } from "@oh-my-pi/pi-utils/acp";
 import { negotiateTerminalMetaCap } from "../src/modes/acp/view/frames";
 import type { AcpRenderContext, DeliveryReceipt } from "../src/modes/acp/view/reducer";
 import { driveAcpToolView } from "./helpers/acp-tool-view-driver";

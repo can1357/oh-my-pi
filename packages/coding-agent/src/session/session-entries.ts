@@ -311,7 +311,6 @@ export type SessionEntry =
 	| SessionInitEntry
 	| ModeChangeEntry
 	| CredentialPinEntry
-1:
 	| ResetBoundaryEntry
 	| ToolExecutionStartedEntry
 	| ToolExecutionSettledEntry;

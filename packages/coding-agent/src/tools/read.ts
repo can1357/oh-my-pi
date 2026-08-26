@@ -911,7 +911,6 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		}
 	}
 
-
 	/**
 	 * Render multiple non-contiguous ranges of a local file. ACP bridge takes
 	 * priority when present (editor buffer is source of truth); otherwise ranges
@@ -2417,4 +2416,3 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		return resultBuilder.done();
 	}
 }
-

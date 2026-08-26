@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "@oh-my-pi/omptype/zod";
 
 /**
  * Runtime schemas for the two content-block shapes a tool result may carry.

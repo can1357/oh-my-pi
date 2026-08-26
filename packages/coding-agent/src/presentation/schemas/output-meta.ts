@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "@oh-my-pi/omptype/zod";
 
 /**
  * `OutputMeta` and friends as zod schemas — the only validators for the shape.

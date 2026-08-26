@@ -40,7 +40,7 @@ describe("SessionManager.createEmptySessionFile", () => {
 		expect(entries.length).toBe(1);
 		const header = entries[0] as SessionHeader;
 		expect(header.type).toBe("session");
-		expect(header.version).toBe(3);
+		expect(header.version).toBe(4);
 		expect(header.id).toBeTruthy();
 		expect(header.cwd).toBe(path.resolve(cwd));
 	});

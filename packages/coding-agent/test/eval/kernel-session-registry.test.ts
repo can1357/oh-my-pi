@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "bun:test";
+import type { ExecutorTermination } from "../../src/eval/backend";
 import { createKernelSessionRegistry, type KernelSession } from "../../src/eval/kernel-session-registry";
 
 interface TestOptions {
@@ -11,7 +12,7 @@ interface TestOptions {
 }
 
 interface TestResult {
-	cancelled: boolean;
+	termination: ExecutorTermination | undefined;
 	value: string;
 }
 
@@ -68,15 +69,15 @@ describe("kernel session recovery", () => {
 			executions.push(kernel.index);
 			if (kernel.index === 0) {
 				kernel.alive = false;
-				return { cancelled: true, value: "kernel died" };
+				return { termination: { kind: "interrupted" }, value: "kernel died" };
 			}
-			return { cancelled: false, value: "recovered" };
+			return { termination: undefined, value: "recovered" };
 		});
 
 		try {
 			const result = await registry.executeOnSession("code", "/tmp", { sessionId: "recovery" });
 
-			expect(result).toEqual({ cancelled: false, value: "recovered" });
+			expect(result).toEqual({ termination: undefined, value: "recovered" });
 			expect(executions).toEqual([0, 1]);
 			expect(kernels).toHaveLength(2);
 			expect(kernels[0]?.shutdowns).toBe(1);
@@ -100,9 +101,9 @@ describe("kernel session recovery", () => {
 					if (deadExecutions === 2) bothDeadExecutionsStarted.resolve();
 					await releaseDeadResults.promise;
 					kernel.alive = false;
-					return { cancelled: true, value: "kernel died" };
+					return { termination: { kind: "interrupted" }, value: "kernel died" };
 				}
-				return { cancelled: false, value: `recovered ${code}` };
+				return { termination: undefined, value: `recovered ${code}` };
 			},
 			async kernel => {
 				if (kernel.index !== 1) return;
@@ -123,8 +124,8 @@ describe("kernel session recovery", () => {
 			const results = await Promise.all([first, second]);
 
 			expect(results).toEqual([
-				{ cancelled: false, value: "recovered first" },
-				{ cancelled: false, value: "recovered second" },
+				{ termination: undefined, value: "recovered first" },
+				{ termination: undefined, value: "recovered second" },
 			]);
 			expect(
 				executions
@@ -159,13 +160,13 @@ describe("kernel session recovery", () => {
 				await bothOldExecutionsStarted.promise;
 				if (code === "second") await releaseSecondOldResult.promise;
 				kernel.alive = false;
-				return { cancelled: true, value: "old kernel died" };
+				return { termination: { kind: "interrupted" }, value: "old kernel died" };
 			}
 			if (kernel.index === 1) {
 				kernel.alive = false;
-				return { cancelled: true, value: "first replacement died" };
+				return { termination: { kind: "interrupted" }, value: "first replacement died" };
 			}
-			return { cancelled: false, value: `recovered ${code}` };
+			return { termination: undefined, value: `recovered ${code}` };
 		});
 
 		try {
@@ -173,9 +174,9 @@ describe("kernel session recovery", () => {
 			const second = registry.executeOnSession("second", "/tmp", { sessionId: "stale-caller" });
 			await bothOldExecutionsStarted.promise;
 
-			expect(await first).toEqual({ cancelled: true, value: "first replacement died" });
+			expect(await first).toEqual({ termination: { kind: "interrupted" }, value: "first replacement died" });
 			releaseSecondOldResult.resolve();
-			expect(await second).toEqual({ cancelled: false, value: "recovered second" });
+			expect(await second).toEqual({ termination: undefined, value: "recovered second" });
 			expect(executions).toEqual([
 				{ code: "first", kernel: 0 },
 				{ code: "second", kernel: 0 },
@@ -202,9 +203,9 @@ describe("kernel session recovery", () => {
 				executions.push({ code, kernel: kernel.index });
 				if (kernel.index === 0) {
 					kernel.alive = false;
-					return { cancelled: true, value: "kernel died" };
+					return { termination: { kind: "interrupted" }, value: "kernel died" };
 				}
-				return { cancelled: false, value: `recovered ${code}` };
+				return { termination: undefined, value: `recovered ${code}` };
 			},
 			async (kernel, options) => {
 				if (kernel.index !== 1) return;
@@ -237,7 +238,7 @@ describe("kernel session recovery", () => {
 			expect(replacementOptions?.deadlineMs).toBeUndefined();
 
 			releaseReplacement.resolve();
-			expect(await second).toEqual({ cancelled: false, value: "recovered second" });
+			expect(await second).toEqual({ termination: undefined, value: "recovered second" });
 			expect(executions).toEqual([
 				{ code: "first", kernel: 0 },
 				{ code: "second", kernel: 1 },
@@ -259,7 +260,7 @@ describe("kernel session recovery", () => {
 			async kernel => {
 				executions.push(kernel.index);
 				if (kernel.index === 0) kernel.alive = false;
-				return { cancelled: true, value: "cancelled" };
+				return { termination: { kind: "interrupted" }, value: "cancelled" };
 			},
 			async kernel => {
 				if (kernel.index !== 1) return;
@@ -298,13 +299,16 @@ describe("kernel session recovery", () => {
 		const { kernels, registry } = createFakeRegistry(async kernel => {
 			executions.push(kernel.index);
 			if (kernel.index === 0) kernel.alive = false;
-			return { cancelled: true, value: kernel.index === 0 ? "kernel died" : "replacement cancelled" };
+			return {
+				termination: { kind: "interrupted" },
+				value: kernel.index === 0 ? "kernel died" : "replacement cancelled",
+			};
 		});
 
 		try {
 			const result = await registry.executeOnSession("code", "/tmp", { sessionId: "cancelled-retry" });
 
-			expect(result).toEqual({ cancelled: true, value: "replacement cancelled" });
+			expect(result).toEqual({ termination: { kind: "interrupted" }, value: "replacement cancelled" });
 			expect(executions).toEqual([0, 1]);
 			expect(kernels).toHaveLength(2);
 		} finally {
@@ -319,7 +323,7 @@ describe("kernel session recovery", () => {
 			executions.push(kernel.index);
 			kernel.alive = false;
 			controller.abort(new Error("cancelled by caller"));
-			return { cancelled: true, value: "cancelled" };
+			return { termination: { kind: "interrupted" }, value: "cancelled" };
 		});
 
 		try {
@@ -328,7 +332,7 @@ describe("kernel session recovery", () => {
 				signal: controller.signal,
 			});
 
-			expect(result).toEqual({ cancelled: true, value: "cancelled" });
+			expect(result).toEqual({ termination: { kind: "interrupted" }, value: "cancelled" });
 			expect(executions).toEqual([0]);
 			expect(kernels).toHaveLength(1);
 		} finally {
@@ -341,7 +345,7 @@ describe("kernel session recovery", () => {
 		const { kernels, registry } = createFakeRegistry(async kernel => {
 			executions.push(kernel.index);
 			kernel.alive = false;
-			return { cancelled: true, value: "partial output and timeout annotation" };
+			return { termination: { kind: "interrupted" }, value: "partial output and timeout annotation" };
 		});
 
 		try {
@@ -350,7 +354,10 @@ describe("kernel session recovery", () => {
 				deadlineMs: Date.now() - 1,
 			});
 
-			expect(result).toEqual({ cancelled: true, value: "partial output and timeout annotation" });
+			expect(result).toEqual({
+				termination: { kind: "interrupted" },
+				value: "partial output and timeout annotation",
+			});
 			expect(executions).toEqual([0]);
 			expect(kernels).toHaveLength(1);
 		} finally {
@@ -367,7 +374,7 @@ describe("kernel session recovery", () => {
 			async kernel => {
 				executions.push(kernel.index);
 				kernel.alive = false;
-				return { cancelled: true, value: "partial output before replacement timeout" };
+				return { termination: { kind: "interrupted" }, value: "partial output before replacement timeout" };
 			},
 			async kernel => {
 				if (kernel.index !== 1) return;
@@ -385,7 +392,7 @@ describe("kernel session recovery", () => {
 			vi.advanceTimersByTime(60_000);
 
 			expect(await execution).toEqual({
-				cancelled: true,
+				termination: { kind: "interrupted" },
 				value: "partial output before replacement timeout",
 			});
 			expect(executions).toEqual([0]);
@@ -406,11 +413,11 @@ describe("kernel session recovery", () => {
 			executions.push(kernel.index);
 			if (kernel.index === 0) {
 				kernel.alive = false;
-				return { cancelled: true, value: "original partial output" };
+				return { termination: { kind: "interrupted" }, value: "original partial output" };
 			}
 			retryStarted.resolve();
 			await releaseRetry.promise;
-			return { cancelled: true, value: "replacement timeout without original output" };
+			return { termination: { kind: "interrupted" }, value: "replacement timeout without original output" };
 		});
 
 		try {
@@ -422,7 +429,7 @@ describe("kernel session recovery", () => {
 			vi.advanceTimersByTime(60_000);
 			releaseRetry.resolve();
 
-			expect(await execution).toEqual({ cancelled: true, value: "original partial output" });
+			expect(await execution).toEqual({ termination: { kind: "interrupted" }, value: "original partial output" });
 			expect(executions).toEqual([0, 1]);
 			expect(kernels).toHaveLength(2);
 		} finally {
@@ -440,13 +447,13 @@ describe("kernel session recovery", () => {
 				kernel.alive = false;
 				throw new Error("transport closed");
 			}
-			return { cancelled: false, value: "recovered" };
+			return { termination: undefined, value: "recovered" };
 		});
 
 		try {
 			const result = await registry.executeOnSession("code", "/tmp", { sessionId: "throw" });
 
-			expect(result).toEqual({ cancelled: false, value: "recovered" });
+			expect(result).toEqual({ termination: undefined, value: "recovered" });
 			expect(executions).toEqual([0, 1]);
 			expect(kernels).toHaveLength(2);
 		} finally {
@@ -461,7 +468,7 @@ describe("kernel session recovery", () => {
 		const { kernels, registry } = createFakeRegistry(
 			async kernel => {
 				if (kernel.index === 0) kernel.alive = false;
-				return { cancelled: true, value: "kernel died" };
+				return { termination: { kind: "interrupted" }, value: "kernel died" };
 			},
 			async kernel => {
 				if (kernel.index !== 1) return;
@@ -512,7 +519,7 @@ describe("kernel session recovery", () => {
 		const { kernels, registry } = createFakeRegistry(
 			async kernel => {
 				if (kernel.index === 0 || kernel.index === 2) kernel.alive = false;
-				return { cancelled: true, value: "kernel died" };
+				return { termination: { kind: "interrupted" }, value: "kernel died" };
 			},
 			async kernel => {
 				if (kernel.index === 1) {

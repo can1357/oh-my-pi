@@ -7,9 +7,9 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import { type } from "@oh-my-pi/omptype";
 import {
 	type FileDiagnosticsResult,
 	flushLspWritethroughBatch,
@@ -21,6 +21,12 @@ import type { ToolSession } from "../../tools";
 import { routeWriteThroughBridge } from "../../tools/acp-bridge";
 import { assertEditableFile } from "../../tools/auto-generated-guard";
 import {
+	deleteFileWithFallback,
+	hasFileWriteFallback,
+	isPermissionDeniedError,
+	writeFileWithFallback,
+} from "../../tools/file-write-fallback";
+import {
 	invalidateFsScanAfterDelete,
 	invalidateFsScanAfterRename,
 	invalidateFsScanAfterWrite,
@@ -28,12 +34,6 @@ import {
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd } from "../../tools/path-utils";
 import { enforcePlanModeWrite, resolvePlanPath } from "../../tools/plan-mode-guard";
-import {
-	deleteFileWithFallback,
-	hasFileWriteFallback,
-	isPermissionDeniedError,
-	writeFileWithFallback,
-} from "../../tools/file-write-fallback";
 import { ToolError } from "../../tools/tool-errors";
 import type { AppliedEditObserver } from "../blackbox";
 import {
@@ -57,6 +57,7 @@ import {
 } from "../normalize";
 import { readEditFileText, serializeEditFileText } from "../read-file";
 import type { LspBatchRequest } from "../renderer";
+import { type EditPreviewSource, formatEditResultText } from "../result";
 import { pruneEditFileSnapshots } from "../snapshot-details";
 import {
 	type AppliedEditFile,
@@ -1838,6 +1839,7 @@ export async function executePatchSingleProduction(options: ExecutePatchSingleOp
 		signal,
 		batchRequest,
 		allowFuzzy,
+		fuzzyThreshold,
 		beginDeferredDiagnosticsForPath,
 		onApplied,
 		allowCreateOverwrite,
@@ -1928,6 +1930,7 @@ export async function executePatchSingleProduction(options: ExecutePatchSingleOp
 		diff: "",
 		firstChangedLine: undefined,
 	};
+	let previewSource: EditPreviewSource | undefined;
 	if (
 		result.change.type === "update" &&
 		result.change.oldContent !== undefined &&
@@ -1938,24 +1941,17 @@ export async function executePatchSingleProduction(options: ExecutePatchSingleOp
 		diffResult = generateUnifiedDiffString(normalizedOld, normalizedNew, undefined, {
 			path: result.change.newPath ?? result.change.path,
 		});
+		previewSource = {
+			before: normalizedOld,
+			after: normalizedNew,
+			path: result.change.newPath ?? result.change.path,
+		};
 	} else if (result.change.type === "create" && result.change.newContent !== undefined) {
 		// The result is authoritative for rendering, so emit the added-content
 		// diff here rather than relying on the call-phase streaming preview.
 		const normalizedNew = normalizeToLF(stripBom(result.change.newContent).text);
 		diffResult = generateUnifiedDiffString("", normalizedNew, undefined, { path: result.change.path });
-	}
-
-	let resultText: string;
-	switch (result.change.type) {
-		case "create":
-			resultText = `Created ${path}`;
-			break;
-		case "delete":
-			resultText = `Deleted ${path}`;
-			break;
-		case "update":
-			resultText = effectiveRename ? `Updated and moved ${path} to ${effectiveRename}` : `Updated ${path}`;
-			break;
+		previewSource = { before: "", after: normalizedNew, path: result.change.path };
 	}
 
 	let diagnostics = patchFileSystem.getDiagnostics();
@@ -1964,6 +1960,16 @@ export async function executePatchSingleProduction(options: ExecutePatchSingleOp
 		diagnostics ??= flushedDiagnostics;
 	}
 	const mergedDiagnostics = mergeDiagnosticsWithWarnings(diagnostics, result.warnings ?? []);
+	const resultText = formatEditResultText({
+		displayPath: path,
+		diff: diffResult.diff,
+		firstChangedLine: diffResult.firstChangedLine,
+		diagnostics: mergedDiagnostics,
+		op,
+		move: effectiveRename,
+		warnings: result.warnings,
+		previewSource,
+	});
 	const meta = outputMeta()
 		.diagnostics(mergedDiagnostics?.summary ?? "", mergedDiagnostics?.messages ?? [])
 		.get();

@@ -261,7 +261,7 @@ it("hands the tool bridge the unshielded signal so a deferred phase still cancel
 
 	release.resolve();
 	const result = await resultPromise;
-	expect(result.cancelled).toBe(true);
+	expect(result.termination?.kind).toBe("interrupted");
 });
 
 it("holds the cell open through a deferred phase while still aborting the tool at once", async () => {
@@ -341,7 +341,7 @@ it("holds the cell open through a deferred phase while still aborting the tool a
 	// The host waited out the critical phase instead of bailing on the cancel.
 	expect(reply).toEqual({ ok: true, value: "merged" });
 	// ...and the turn is still reported as cancelled.
-	expect(result.cancelled).toBe(true);
+	expect(result.termination?.kind).toBe("interrupted");
 });
 it("expires the wall-clock timeout through the shield so blocked bridge calls unwind instead of the kernel dying", async () => {
 	// Regression: the cell timeout used to arm only a kernel-internal timer.
@@ -405,6 +405,6 @@ it("expires the wall-clock timeout through the shield so blocked bridge calls un
 	expect(kernelAbortReason).toBeInstanceOf(DOMException);
 	expect((kernelAbortReason as DOMException).name).toBe("TimeoutError");
 	// ...the cell settled as a timed-out cancellation with the kernel alive.
-	expect(result.cancelled).toBe(true);
+	expect(result.termination?.kind).toBe("timed_out");
 	expect(result.output).toContain("kernel timed out");
 });

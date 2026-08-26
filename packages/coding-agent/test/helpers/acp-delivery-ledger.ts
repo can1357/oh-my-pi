@@ -1,4 +1,3 @@
-import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import type {
 	FactAudience,
 	FactId,
@@ -15,6 +14,7 @@ import type {
 	FactSuppressionReason,
 } from "@oh-my-pi/pi-coding-agent/modes/acp/view/reducer";
 import { selectAcpToolRenderMode, terminalMetaCapOf } from "@oh-my-pi/pi-coding-agent/modes/acp/view/reducer";
+import type { SessionUpdate } from "@oh-my-pi/pi-utils/acp";
 import { frameTexts } from "./acp-producer-facts";
 
 /**

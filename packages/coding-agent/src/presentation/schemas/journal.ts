@@ -1,5 +1,5 @@
+import { z } from "@oh-my-pi/omptype/zod";
 import type { ToolFact } from "@oh-my-pi/pi-agent-core/presentation";
-import { z } from "zod";
 import { byteOffsetSchema, factIdSchema, nonZeroExitCodeSchema, streamIdSchema, toolExecutionIdSchema } from "./brands";
 import { toolContentBlockSchema } from "./content";
 import { diagnosticFactEntrySchema, limitFactMetaSchema, truncationFactMetaSchema } from "./facts";

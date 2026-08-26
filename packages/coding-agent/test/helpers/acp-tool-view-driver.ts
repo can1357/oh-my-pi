@@ -1,4 +1,3 @@
-import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import type { ToolPresentationEvent } from "@oh-my-pi/pi-agent-core/presentation";
 import { checkedNotificationPayload, encodeToolFrames } from "@oh-my-pi/pi-coding-agent/modes/acp/view/encoder";
 import type {
@@ -7,6 +6,7 @@ import type {
 	DeliveryReceipt,
 } from "@oh-my-pi/pi-coding-agent/modes/acp/view/reducer";
 import { INITIAL_ACP_TOOL_VIEW, reduceAcpToolView } from "@oh-my-pi/pi-coding-agent/modes/acp/view/reducer";
+import type { SessionUpdate } from "@oh-my-pi/pi-utils/acp";
 import { PresentationDeliveryLedger } from "./acp-delivery-ledger";
 
 /**

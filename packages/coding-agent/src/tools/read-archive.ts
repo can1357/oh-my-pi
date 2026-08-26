@@ -110,10 +110,10 @@ async function readArchiveDirectory(
 	const truncation = truncateHead(text, { maxLines: Number.MAX_SAFE_INTEGER });
 	const directoryDetails: ReadToolDetails = { ...details, isDirectory: true };
 	const resultBuilder = toolResult<ReadToolDetails>(directoryDetails).text(truncation.content);
-	resultBuilder.sourcePath(archivePath).limits({ resultLimit: limitMeta.resultLimit?.reached });
+	resultBuilder.sourcePath(archivePath).resultLimitFact(limitMeta.resultLimit?.reached);
 	if (truncation.truncated) {
 		directoryDetails.truncation = truncation;
-		resultBuilder.truncation(truncation, { direction: "head" });
+		resultBuilder.truncationFact(truncation, { direction: "head" });
 	}
 	return resultBuilder.done();
 }

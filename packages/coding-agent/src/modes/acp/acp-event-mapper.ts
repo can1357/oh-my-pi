@@ -1,3 +1,4 @@
+import type { ToolCallPresentation } from "@oh-my-pi/pi-agent-core/presentation";
 import type {
 	SessionNotification,
 	SessionUpdate,
@@ -5,10 +6,7 @@ import type {
 	ToolCallContent,
 	ToolCallLocation,
 	ToolKind,
-3:
 } from "@oh-my-pi/pi-utils/acp";
-import type { ToolCallPresentation } from "@oh-my-pi/pi-agent-core/presentation";
-import { logger } from "@oh-my-pi/pi-utils";
 import { parseEditTargetPath } from "../../edit";
 import { parseXdUrl } from "../../internal-urls/xd-protocol";
 import { fenceBlock } from "../../presentation/projections";
@@ -292,22 +290,30 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 		case "tool_execution_update": {
 			if (isInternalHubMessageTool(event.toolName, event.args)) return [];
 			const metaTerminal = wantsMetaTerminal(event.toolName, event.args, options);
-			if (!metaTerminal) {
+			// `hub` has no presentation producer of its own, and its `wait`/`list`
+			// progress payload is a small structured job-state snapshot
+			// (`{op, jobs}`) with no display text — `buildGenericUpdateFrame` would
+			// therefore emit a bare content-less status ping and silently drop the
+			// job list a client polling `rawOutput` (hub.md) depends on. Route hub
+			// straight to the legacy arm below, which still builds the same
+			// `content` this frame path would have, plus the `rawOutput` echo.
+			if (!metaTerminal && event.toolName !== "hub") {
 				const frame = buildGenericUpdateFrame(event, options);
 				if (frame !== undefined) {
 					return [checkedNotificationPayload(encodeToolFrame(sessionId, frame))];
 				}
 			}
-			// Permanently-legacy arm (plan §8, 2026-08-24 amendment): the
+			// Permanently-legacy arm: the
 			// verbatim `rawOutput` passthrough survives here indefinitely as
 			// wire compatibility for clients that read `raw_output` (Zed).
 			// Reached only by external/MCP tools matching this mapper's two
 			// accepted carve-outs (command-named, or a result carrying a live
-			// terminal / rich resource_link shape) — never by a built-in, and
-			// never by replay, whose dedicated builders send status + content
-			// only. The encoder-scoped "never a raw pass-through" guarantee is
-			// therefore not violated: it holds for every frame encoded through
-			// `encodeToolFrame`, which this hand-built update bypasses.
+			// terminal / rich resource_link shape), plus `hub` (see above) —
+			// never by any other built-in, and never by replay, whose dedicated
+			// builders send status + content only. The encoder-scoped "never a
+			// raw pass-through" guarantee is therefore not violated: it holds
+			// for every frame encoded through `encodeToolFrame`, which this
+			// hand-built update bypasses.
 			const update: SessionUpdate = {
 				sessionUpdate: "tool_call_update",
 				toolCallId: event.toolCallId,
@@ -360,7 +366,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 					return notifications;
 				}
 			}
-			// Permanently-legacy arm (plan §8, 2026-08-24 amendment): same
+			// Permanently-legacy arm: same
 			// verbatim `rawOutput` passthrough as the generic-fallback update
 			// above — reached only by external/MCP tools matching this mapper's
 			// two carve-outs (command-named, or a live-terminal/rich
@@ -595,8 +601,10 @@ function toFrameContent(item: ToolCallContent): NonTerminalContent | undefined {
 					return { type: "image", data: item.content.data, mimeType: item.content.mimeType };
 				case "audio":
 					return { type: "audio", data: item.content.data, mimeType: item.content.mimeType };
-				case "resource_link":
+				case "resource_link": {
+					const name = item.content.name;
 					if (
+						name == null ||
 						(item.content.title ?? undefined) !== undefined ||
 						(item.content.description ?? undefined) !== undefined ||
 						(item.content.size ?? undefined) !== undefined
@@ -606,9 +614,10 @@ function toFrameContent(item: ToolCallContent): NonTerminalContent | undefined {
 					return {
 						type: "resource_link",
 						uri: item.content.uri,
-						name: item.content.name,
+						name,
 						...(item.content.mimeType == null ? {} : { mimeType: item.content.mimeType }),
 					};
+				}
 				case "resource": {
 					const resource = item.content.resource;
 					return {
@@ -1289,20 +1298,18 @@ export function buildMetaTerminalOutput(
 /**
  * `notices` lines absent from `text`, joined; `""` when it already has them all.
  *
- * Permanent compatibility mechanism (plan §8, 2026-08-24 amendment,
- * broadened at fix pass 3), in the same register as this mapper's other
- * defensive walkers over untyped input. It reconciles rendered notice text
- * against the already-rendered body — the exact class §4 scheduled for
- * deletion "once facts are structural" — and its live callers are:
- * external/MCP tools matching this mapper's carve-outs, AND legacy built-ins
- * without a presentation adapter (e.g. `read`/`grep`/`glob`/`fetch` — common
- * instances, not exhaustive) whose spilled
+ * Permanent compatibility mechanism, in the same register as this mapper's
+ * other defensive walkers over untyped input. It reconciles rendered notice
+ * text against the already-rendered body — the class scheduled for deletion
+ * "once facts are structural" — and its live callers are: external/MCP tools
+ * matching this mapper's carve-outs, AND legacy built-ins without a
+ * presentation adapter (e.g. `read`/`grep`/`glob`/`fetch` — common instances,
+ * not exhaustive) whose spilled
  * results re-attach their notice here via `recoverTruncatedNoticeContent`.
  * The adapter-bearing built-ins (bash/eval/edit) never reach it — they are
  * intercepted upstream in `acp-agent.ts` or emit typed facts — and replay's
  * dedicated builders never route through this mapper. No future phase
- * deletes this by migrating those producers away; the plan's own amendment
- * supersedes the ledger line for exactly these arms.
+ * deletes this by migrating those producers away for exactly these arms.
  */
 function missingNoticeLines(text: string, notices: string | undefined): string {
 	if (!notices) return "";

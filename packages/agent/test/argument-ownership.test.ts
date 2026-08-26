@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import type { Message } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
-import { type } from "arktype";
 import { agentLoop } from "../src/agent-loop";
 import type {
 	AgentContext,

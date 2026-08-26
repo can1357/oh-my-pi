@@ -601,7 +601,7 @@ describe("Cursor MCP StrReplace fallback", () => {
 	it("projects CLI and Pi replacement fields onto replace kwargs", () => {
 		expect(
 			normalizeCursorReplaceArgs({ path: "/tmp/n.txt", old_text: "a", new_text: "b", replaceAll: true }),
-		).toEqual({ path: "/tmp/n.txt", old_string: "a", new_string: "b", replace_all: true });
+		).toEqual({ path: "/tmp/n.txt", edits: [{ old_text: "a", new_text: "b", all: true }] });
 		expect(normalizeCursorReplaceArgs({ path: "/tmp/n.txt", input: "[n]" })).toEqual({
 			path: "/tmp/n.txt",
 			input: "[n]",
@@ -1905,7 +1905,7 @@ describe("CursorExecHandlers Pi frame translation", () => {
 			args: { path: "a.ts", edits: [{ oldText: "before", newText: "after" }] },
 		} as never);
 
-		expect(calls[0]).toEqual({ path: "a.ts", old_string: "before", new_string: "after" });
+		expect(calls[0]).toEqual({ path: "a.ts", edits: [{ old_text: "before", new_text: "after" }] });
 	});
 
 	it("sends a multi-replacement pi_edit frame as one batched tool call", async () => {
@@ -1930,8 +1930,8 @@ describe("CursorExecHandlers Pi frame translation", () => {
 			{
 				path: "a.ts",
 				edits: [
-					{ old_string: "one", new_string: "ONE" },
-					{ old_string: "two", new_string: "TWO" },
+					{ old_text: "one", new_text: "ONE" },
+					{ old_text: "two", new_text: "TWO" },
 				],
 			},
 		]);

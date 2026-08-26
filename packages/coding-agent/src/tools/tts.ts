@@ -227,7 +227,7 @@ async function synthesizeDeepInfra(
 	displayPath: string,
 	codec: TtsCodec,
 	signal: AbortSignal | undefined,
-): Promise<AgentToolResult<TtsToolDetails, TtsSchemaType>> {
+): Promise<AgentToolResult<TtsToolDetails>> {
 	const sessionId = ctx.sessionManager.getSessionId();
 	const storedKey = await ctx.modelRegistry.getApiKeyForProvider("deepinfra", sessionId);
 	if (!storedKey) {

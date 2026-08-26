@@ -41,16 +41,16 @@ import {
 	replaceEditSchema,
 } from "./modes/replace";
 import { getLspBatchRequest, type LspBatchRequest } from "./renderer";
-import { pruneEditFileSnapshots, pruneOversizedEditSnapshots } from "./snapshot-details";
+import { joinEditResultText } from "./result";
 import {
 	executeSloppy,
 	type SloppyParams,
 	type SloppySection,
 	sloppyEditSchema,
-	sloppyGrammar,
 	sloppyVariant,
 	splitSloppySections,
 } from "./sloppy";
+import { pruneEditFileSnapshots, pruneOversizedEditSnapshots } from "./snapshot-details";
 import { EDIT_MODE_STRATEGIES } from "./streaming";
 import type { EditFileOutcome, EditToolDetails, EditToolPerFileResult } from "./types";
 import { aggregateEditOutcome } from "./types";
@@ -270,7 +270,7 @@ async function executeApplyPatchPerFile(
 				)
 				.filter((entry): entry is EditToolPerFileResult => entry !== undefined);
 			onUpdate({
-				content: [{ type: "text", text: contentTexts.join("\n") }],
+				content: [{ type: "text", text: joinEditResultText(contentTexts) }],
 				details: {
 					diff: partialResults
 						.map(r => r.diff)
@@ -294,7 +294,7 @@ async function executeApplyPatchPerFile(
 		.filter((entry): entry is EditToolPerFileResult => entry !== undefined);
 
 	return {
-		content: [{ type: "text", text: contentTexts.join("\n") }],
+		content: [{ type: "text", text: joinEditResultText(contentTexts) }],
 		details: {
 			diff: perFileResults
 				.map(r => r.diff)
@@ -405,7 +405,7 @@ async function executeSinglePathEntries(
 
 		if (!isLast && onUpdate) {
 			onUpdate({
-				content: [{ type: "text", text: contentTexts.join("\n") }],
+				content: [{ type: "text", text: joinEditResultText(contentTexts) }],
 				details: {
 					diff: diffTexts.join("\n"),
 					firstChangedLine,
@@ -417,7 +417,7 @@ async function executeSinglePathEntries(
 
 	const { outcome, isError } = aggregateEditOutcome(outcomes);
 	return {
-		content: [{ type: "text", text: contentTexts.join("\n") }],
+		content: [{ type: "text", text: joinEditResultText(contentTexts) }],
 		details: pruneOversizedEditSnapshots({
 			diff: diffTexts.join("\n"),
 			firstChangedLine,

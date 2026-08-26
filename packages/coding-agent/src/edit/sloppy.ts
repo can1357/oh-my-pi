@@ -7,12 +7,12 @@ import type { ToolSession } from "../tools";
 import { routeWriteThroughBridge } from "../tools/acp-bridge";
 import { invalidateFsScanAfterWrite } from "../tools/fs-cache-invalidation";
 import { enforcePlanModeWrite, resolvePlanPath } from "../tools/plan-mode-guard";
+import type { LspBatchRequest } from "../tools/render-utils";
 import type { AppliedEditObserver } from "./blackbox";
 import { type DiffError, type DiffResult, generateDiffString } from "./diff";
 import { levenshteinDistance } from "./modes/replace";
 import { detectLineEnding, normalizeToLF, normalizeUnicode, restoreLineEndings, stripBom } from "./normalize";
 import { readEditFileText, serializeEditFileText } from "./read-file";
-import type { EditToolDetails, EditToolPerFileResult, LspBatchRequest } from "./renderer";
 import {
 	createAggregateEditDetails,
 	createAggregateEditToolResult,
@@ -23,6 +23,7 @@ import {
 } from "./result";
 import sloppyGrammarSource from "./sloppy.lark" with { type: "text" };
 import description from "./sloppy.md" with { type: "text" };
+import type { EditToolDetails, EditToolPerFileResult } from "./types";
 
 /** Context handed to a {@link SloppyVariant} apply call. */
 export interface SloppyApplyContext {
@@ -3858,9 +3859,7 @@ interface PreparedSloppySection {
  * lifecycle (plan-mode guard, BOM/EOL preservation, LSP writethrough, diff
  * details); {@link sloppyVariant} owns payload parsing and matching.
  */
-export async function executeSloppy(
-	options: ExecuteSloppyOptions,
-): Promise<AgentToolResult<EditToolDetails, SloppyParams>> {
+export async function executeSloppy(options: ExecuteSloppyOptions): Promise<AgentToolResult<EditToolDetails>> {
 	const { session, sections, signal, batchRequest, writethrough, beginDeferredDiagnosticsForPath, onApplied } =
 		options;
 	const multiFile = sections.length > 1;

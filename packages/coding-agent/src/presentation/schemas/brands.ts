@@ -1,3 +1,4 @@
+import { z } from "@oh-my-pi/omptype/zod";
 import {
 	type ByteOffset,
 	byteOffset,
@@ -10,7 +11,6 @@ import {
 	type ToolExecutionId,
 	toolExecutionId,
 } from "@oh-my-pi/pi-agent-core/presentation";
-import { z } from "zod";
 
 /**
  * Zod schemas that mint the branded identities in

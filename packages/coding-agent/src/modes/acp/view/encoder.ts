@@ -1,4 +1,4 @@
-import type { SessionNotification, SessionUpdate, ToolCallContent, ToolCallLocation } from "@agentclientprotocol/sdk";
+import type { SessionNotification, SessionUpdate, ToolCallContent, ToolCallLocation } from "@oh-my-pi/pi-utils/acp";
 import type {
 	AcpStatusChange,
 	AcpToolDiagnostic,
@@ -36,9 +36,8 @@ import type {
  * verbatim `rawOutput` through the generic `#sendUpdate` fallback. These are
  * reached only by external/MCP tools — command-named `bash`/`shell`/`exec`/
  * `eval`, or a result whose content carries a live terminal/rich resource_link
- * shape the frame union does not model (see the 2026-08-23 plan amendment).
- * Pre-v4 replay never reaches them: its dedicated builders send status and
- * content only (reachability corrected 2026-08-24). The "never a raw
+ * shape the frame union does not model. Pre-v4 replay never reaches them: its
+ * dedicated builders send status and content only. The "never a raw
  * pass-through" guarantee holds for every reduced/migrated frame, i.e. anything
  * encoded here; it does not hold on those legacy arms.
  */
