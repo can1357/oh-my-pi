@@ -78,6 +78,24 @@ function makeOpenAiModel(overrides: Partial<ModelSpec<"openai-responses">> = {})
 	});
 }
 
+function makeOpenAiCodexModel(
+	overrides: Partial<ModelSpec<"openai-codex-responses">> = {},
+): Model<"openai-codex-responses"> {
+	return buildModel({
+		id: "gpt-5-codex",
+		name: "GPT-5 Codex",
+		api: "openai-codex-responses",
+		provider: "openai-codex",
+		baseUrl: "https://chatgpt.com/backend-api/codex/responses",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 400000,
+		maxTokens: 128000,
+		...overrides,
+	});
+}
+
 function makeAzureModel(overrides: Partial<ModelSpec<"azure-openai-responses">> = {}): Model<"azure-openai-responses"> {
 	return buildModel({
 		id: "gpt-5",
@@ -407,6 +425,64 @@ describe("buildOpenAiNativeHistory multimodal tool results", () => {
 			},
 		]);
 		expect(items.some(item => item.type === "message" && item.role === "user")).toBe(false);
+	});
+
+	test("falls back to inline data for a foreign OpenAI provider file", () => {
+		const imageData = Buffer.from("foreign provider file").toString("base64");
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_foreign|fc_call_foreign",
+			toolName: "read",
+			content: [
+				{
+					type: "image",
+					data: imageData,
+					mimeType: "image/png",
+					providerFile: { provider: "openai", id: "file_foreign" },
+				},
+			],
+			isError: false,
+			timestamp: Date.now(),
+		};
+
+		const items = buildOpenAiNativeHistory(
+			[codexAssistant([{ callId: "call_foreign" }], true), result],
+			makeOpenAiCodexModel(),
+		);
+		const output = items.find(item => item.type === "function_call_output");
+
+		expect(output?.output).toEqual([
+			{ type: "input_image", detail: "auto", image_url: `data:image/png;base64,${imageData}` },
+		]);
+	});
+
+	test("falls back to inline data for an expired OpenAI provider file", () => {
+		const imageData = Buffer.from("expired provider file").toString("base64");
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_expired|fc_call_expired",
+			toolName: "read",
+			content: [
+				{
+					type: "image",
+					data: imageData,
+					mimeType: "image/png",
+					providerFile: { provider: "openai", id: "file_expired", expiresAt: Date.now() - 1 },
+				},
+			],
+			isError: false,
+			timestamp: Date.now(),
+		};
+
+		const items = buildOpenAiNativeHistory(
+			[codexAssistant([{ callId: "call_expired" }], true), result],
+			makeOpenAiModel({ input: ["text", "image"] }),
+		);
+		const output = items.find(item => item.type === "function_call_output");
+
+		expect(output?.output).toEqual([
+			{ type: "input_image", detail: "auto", image_url: `data:image/png;base64,${imageData}` },
+		]);
 	});
 });
 

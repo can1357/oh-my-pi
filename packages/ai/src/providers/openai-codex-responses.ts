@@ -4660,6 +4660,7 @@ function normalizeInputMessageContent(
 			model.input.includes("image"),
 			model.compat.supportsImageDetailOriginal,
 			escapeControlTokens,
+			model,
 		) ?? []
 	);
 }

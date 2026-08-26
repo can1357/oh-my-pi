@@ -115,7 +115,12 @@ import type {
 	ResponseStreamEvent,
 } from "./openai-responses-wire";
 import { transformMessages } from "./transform-messages";
-import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
+import {
+	joinTextWithImagePlaceholder,
+	NON_VISION_IMAGE_PLACEHOLDER,
+	partitionVisionContent,
+	supportsProviderFileReference,
+} from "./vision-guard";
 
 /**
  * Keyless-provider sentinel. Custom providers configured with `auth: none`
@@ -1728,9 +1733,17 @@ function clampResponsesImageDetail(
 	return resolved === "original" && !supportsImageDetailOriginal ? "auto" : resolved;
 }
 
-function convertResponsesInputImage(image: ImageContent, supportsImageDetailOriginal: boolean): ResponseInputImage {
+function convertResponsesInputImage(
+	image: ImageContent,
+	supportsImageDetailOriginal: boolean,
+	model?: Model,
+): ResponseInputImage {
 	const detail = clampResponsesImageDetail(image.detail, supportsImageDetailOriginal);
-	if (image.providerFile?.provider === "openai" && image.providerFile.id) {
+	if (
+		image.providerFile?.provider === "openai" &&
+		image.providerFile.id &&
+		(model === undefined || supportsProviderFileReference(model, image.providerFile, image))
+	) {
 		return { type: "input_image", detail, file_id: image.providerFile.id };
 	}
 	return {
@@ -1745,6 +1758,7 @@ export function convertResponsesInputContent(
 	supportsImages: boolean,
 	supportsImageDetailOriginal: boolean,
 	escapeControlTokens = false,
+	model?: Model,
 ): ResponseInputContent[] | undefined {
 	if (typeof content === "string") {
 		if (content.trim().length === 0) return undefined;
@@ -1769,7 +1783,7 @@ export function convertResponsesInputContent(
 		} satisfies ResponseInputText);
 	}
 	for (const item of imageBlocks) {
-		normalizedContent.push(convertResponsesInputImage(item, supportsImageDetailOriginal));
+		normalizedContent.push(convertResponsesInputImage(item, supportsImageDetailOriginal, model));
 	}
 	if (omittedImages) {
 		normalizedContent.push({
@@ -2053,6 +2067,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				options.model.input.includes("image"),
 				supportsImageDetailOriginal,
 				escapeControlTokens,
+				options.model,
 			);
 			if (!content) continue;
 			const developerText =
@@ -2406,7 +2421,7 @@ export function encodeResponsesToolResultOutput<TApi extends Api>(
 	const output: string | ResponseInputContent[] =
 		hasImages && supportsImages
 			? toolResult.content.map((block): ResponseInputContent => {
-					if (block.type === "image") return convertResponsesInputImage(block, supportsImageDetailOriginal);
+					if (block.type === "image") return convertResponsesInputImage(block, supportsImageDetailOriginal, model);
 					const text = block.text.toWellFormed();
 					return {
 						type: "input_text",

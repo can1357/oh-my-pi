@@ -89,18 +89,19 @@ function validateComputerScreenshotReference(
 ): string | undefined {
 	if (message.role !== "toolResult") return undefined;
 	const metadata = message.providerMetadata;
-	if (!isRecord(metadata) || metadata.type !== "computer" || !isRecord(metadata.screenshot)) return undefined;
+	if (!isRecord(metadata) || metadata.type !== "computer") return undefined;
+	if (supportsComputerScreenshotReferences(model)) return undefined;
+	if (hasInlineImageData) {
+		delete metadata.type;
+		delete metadata.screenshot;
+		return undefined;
+	}
+	if (!isRecord(metadata.screenshot)) return undefined;
 	const screenshot = metadata.screenshot;
-
 	const fileId = screenshot.file_id;
 	const imageUrl = screenshot.image_url;
 	const hasFileId = fileId !== undefined;
 	const hasImageUrl = imageUrl !== undefined;
-	if (supportsComputerScreenshotReferences(model)) return undefined;
-	if (hasInlineImageData) {
-		delete metadata.screenshot;
-		return undefined;
-	}
 	if (hasFileId) {
 		return `input_image.file_id cannot be forwarded to ${model.api}; target an OpenAI Responses model or use an inline data URL`;
 	}

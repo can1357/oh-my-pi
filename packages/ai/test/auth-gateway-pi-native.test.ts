@@ -814,7 +814,7 @@ describe("pi-native gateway image reference validation", () => {
 			const message = fixture.mock.calls[0]?.context.messages[0];
 			if (message?.role !== "toolResult") throw new Error("expected tool result");
 			expect(message.content).toEqual([{ type: "image", data: imageData, mimeType: "image/png" }]);
-			expect(message.providerMetadata?.type).toBe("computer");
+			expect(message.providerMetadata?.type).toBeUndefined();
 			expect(message.providerMetadata?.acknowledgedSafetyChecks).toEqual([]);
 			expect("screenshot" in (message.providerMetadata ?? {})).toBe(false);
 		} finally {

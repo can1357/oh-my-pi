@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { supportsProviderFileReference } from "@oh-my-pi/pi-ai/providers/vision-guard";
+import {
+	supportsComputerScreenshotReferences,
+	supportsProviderFileReference,
+} from "@oh-my-pi/pi-ai/providers/vision-guard";
 import type { ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
@@ -38,6 +41,26 @@ function makeResponsesTargetModel<TApi extends "openai-responses" | "openai-code
 }
 
 describe("OpenAI provider-file capability", () => {
+	it("requires effective computer-use support for screenshot metadata", () => {
+		const unsupported = makeResponsesModel("openai", "https://api.openai.com/v1");
+		expect(supportsComputerScreenshotReferences(unsupported)).toBe(false);
+
+		const supported = buildModel({
+			id: "gpt-5.4",
+			name: "GPT-5.4",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: false,
+			input: ["text", "image"],
+			supportsComputerUse: true,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"openai-responses">);
+		expect(supportsComputerScreenshotReferences(supported)).toBe(true);
+	});
+
 	it("requires the official OpenAI provider and endpoint", () => {
 		const reference = { provider: "openai", id: "file_image_123" };
 		const image = { mimeType: "image/png" };

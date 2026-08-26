@@ -113,7 +113,7 @@ export function isRemoteImageUrl(value: string): boolean {
 }
 
 export function supportsComputerScreenshotReferences(model: Model): boolean {
-	return COMPUTER_SCREENSHOT_APIS.has(model.api);
+	return COMPUTER_SCREENSHOT_APIS.has(model.api) && model.supportsComputerUse === true;
 }
 
 /** Whether this model can replay a remote URL for an image with this media type. */
