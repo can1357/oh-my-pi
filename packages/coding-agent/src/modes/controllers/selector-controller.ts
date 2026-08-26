@@ -32,6 +32,7 @@ import {
 	getPluginsCacheDir,
 	MarketplaceManager,
 } from "../../extensibility/plugins/marketplace";
+import { SessionsManagerComponent } from "../../modes/components/sessions-manager";
 import {
 	getAvailableThemes,
 	getSymbolTheme,
@@ -507,6 +508,32 @@ export class SelectorController {
 			{ onCancel: () => done() },
 		);
 		const overlayHandle = this.#showFullscreenMenu(hub);
+	}
+	/**
+	 * Fullscreen session manager on the alternate screen: list, open, archive,
+	 * pause, kill, and resume sessions. Resolves focus back to the editor when
+	 * the user closes it.
+	 */
+	async showSessionsDashboard(): Promise<void> {
+		let overlayHandle: OverlayHandle | undefined;
+		let manager: SessionsManagerComponent | undefined;
+		let closed = false;
+		const done = () => {
+			if (closed) return;
+			closed = true;
+			manager?.dispose();
+			overlayHandle?.hide();
+			this.focusActiveEditorArea();
+			this.ctx.ui.requestRender();
+		};
+		manager = new SessionsManagerComponent({
+			ctx: this.ctx,
+			ui: this.ctx.ui,
+			requestRender: () => this.ctx.ui.requestRender(),
+			onClose: done,
+			cwd: getProjectDir(),
+		});
+		overlayHandle = this.#showFullscreenMenu(manager);
 	}
 
 	/**
