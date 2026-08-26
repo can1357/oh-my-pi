@@ -5523,6 +5523,7 @@ where
 				let live_tools = extension_live_tools(self.registry);
 				let snapshot = self.agent_state.snapshot();
 				let status = commands::utility::render_tools(
+					self.registry,
 					&live_tools,
 					&snapshot.enabled_tools,
 					&self.state.settings.tools,

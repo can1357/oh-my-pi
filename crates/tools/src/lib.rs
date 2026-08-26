@@ -9,54 +9,6 @@
 // to itself so expansions inside this crate resolve identically.
 extern crate self as omp_tools;
 
-/// Stable identity of one production native tool family.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct BuiltinToolIdentity {
-	/// Model-facing family name.
-	pub name:   &'static str,
-	/// Whether the family is omitted from ordinary user-facing lists.
-	pub hidden: bool,
-}
-
-const BUILTIN_TOOL_IDENTITIES: &[BuiltinToolIdentity] = &[
-	BuiltinToolIdentity { name: "read", hidden: false },
-	BuiltinToolIdentity { name: "fetch", hidden: false },
-	BuiltinToolIdentity { name: "web_search", hidden: false },
-	BuiltinToolIdentity { name: "recall", hidden: false },
-	BuiltinToolIdentity { name: "reflect", hidden: false },
-	BuiltinToolIdentity { name: "retain", hidden: false },
-	BuiltinToolIdentity { name: "memory_edit", hidden: false },
-	BuiltinToolIdentity { name: "edit", hidden: false },
-	BuiltinToolIdentity { name: "write", hidden: false },
-	BuiltinToolIdentity { name: "grep", hidden: false },
-	BuiltinToolIdentity { name: "glob", hidden: false },
-	BuiltinToolIdentity { name: "bash", hidden: false },
-	BuiltinToolIdentity { name: "eval", hidden: false },
-	BuiltinToolIdentity { name: "todo", hidden: false },
-	BuiltinToolIdentity { name: "ask", hidden: false },
-	BuiltinToolIdentity { name: "hub", hidden: false },
-	BuiltinToolIdentity { name: "github", hidden: false },
-	BuiltinToolIdentity { name: "debug", hidden: false },
-	BuiltinToolIdentity { name: "checkpoint", hidden: false },
-	BuiltinToolIdentity { name: "ast_grep", hidden: false },
-	BuiltinToolIdentity { name: "ast_edit", hidden: false },
-	BuiltinToolIdentity { name: "rewind", hidden: false },
-	BuiltinToolIdentity { name: "think", hidden: true },
-	BuiltinToolIdentity { name: "goal", hidden: true },
-	BuiltinToolIdentity { name: "yield", hidden: true },
-	BuiltinToolIdentity { name: "image_gen", hidden: false },
-	BuiltinToolIdentity { name: "tts", hidden: false },
-	BuiltinToolIdentity { name: "report_issue", hidden: true },
-	BuiltinToolIdentity { name: "vibe", hidden: true },
-	BuiltinToolIdentity { name: "learn", hidden: true },
-	BuiltinToolIdentity { name: "manage_skill", hidden: true },
-	BuiltinToolIdentity { name: "computer", hidden: false },
-];
-
-/// Returns the stable native builtin and hidden identity set.
-pub const fn builtin_tool_identities() -> &'static [BuiltinToolIdentity] {
-	BUILTIN_TOOL_IDENTITIES
-}
 
 /// Shared foreground-wait and managed-job transfer helpers.
 pub mod auto_background;

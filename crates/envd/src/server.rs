@@ -319,9 +319,6 @@ pub enum EnvdError {
 	/// The selected edit dialect was not a registered built-in revision.
 	#[error("invalid edit dialect: {0}")]
 	EditDialect(Str),
-	/// Production assembly encountered a second live declaration for one name.
-	#[error("duplicate production tool name: {0}")]
-	DuplicateToolName(Str),
 	/// The environment client could not complete its protocol handshake.
 	#[error(transparent)]
 	Client(#[from] omp_env::ClientError),

@@ -1741,6 +1741,17 @@ impl Registry {
 			.extend(names.into_iter().map(Into::into));
 	}
 
+	/// Iterates the policy-resolved tool roster in stable name order.
+	pub fn roster(&self) -> impl Iterator<Item = (&Str, Presentation)> + '_ {
+		self.live.iter().filter_map(|(name, claim)| {
+			self
+				.versions
+				.get(name)?
+				.get(&claim.rev)
+				.map(|entry| (name, entry.presentation))
+		})
+	}
+
 	/// Computes the exact live slot names for one frozen session policy.
 	///
 	/// Checkpoint/rewind pairing is a safety invariant and therefore applies to

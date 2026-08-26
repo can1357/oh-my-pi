@@ -746,6 +746,37 @@ fn core_precedence_band_rejects_devices_and_overrides() {
 }
 
 #[test]
+fn roster_exposes_registered_non_hidden_tools_and_hides_hidden_ones() {
+	let mut registry = Registry::new();
+	for (name, presentation) in [
+		("alpha", Presentation::Slot),
+		("beta", Presentation::Device),
+		("gamma", Presentation::Hidden),
+	] {
+		let claims = if presentation == Presentation::Device {
+			claims("omp/core", Precedence::ENHANCEMENT)
+		} else {
+			claims("omp/core", Precedence::CORE)
+		};
+		registry
+			.register(
+				fake_tool(1, name, Arc::new(AtomicUsize::new(0))).named(name),
+				presentation,
+				claims,
+			)
+			.expect("unique roster fixture");
+	}
+	let visible = registry
+		.roster()
+		.filter(|(_, presentation)| *presentation != Presentation::Hidden)
+		.map(|(name, _)| name.as_str())
+		.collect::<Vec<_>>();
+	assert!(visible.contains(&"alpha"));
+	assert!(visible.contains(&"beta"));
+	assert!(!visible.contains(&"gamma"));
+}
+
+#[test]
 fn protected_core_claim_rejects_demoting_or_foreign_replacement() {
 	let mut registry = Registry::new();
 	registry.protect_core_claims(["read"]);

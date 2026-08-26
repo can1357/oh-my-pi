@@ -8,7 +8,6 @@ use omp_inference::call::{
 };
 use omp_proto::thread::v1::{Item, item, part};
 use omp_tool::{Claims, Constraint, GrammarSyntax, Presentation, Registry, RegistryError, Tool};
-pub use omp_tools::{BuiltinToolIdentity, builtin_tool_identities};
 use thiserror::Error;
 use tokio::{task, time};
 
