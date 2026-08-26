@@ -14,6 +14,7 @@ import { LiveToolPresentationRecord, ToolPresentationRecordContinuityError } fro
 
 const LINE_A = "LINE-0001..........\n"; // 20 bytes, all ASCII
 const LINE_B = "LINE-0002..........\n"; // 20 bytes, all ASCII
+const LINE_C = "LINE-0003..........\n"; // 20 bytes, all ASCII
 
 function factBody(): ToolFactBody {
 	return { kind: "wall_time", ms: 42 };
@@ -257,5 +258,185 @@ describe("LiveToolPresentationRecord", () => {
 		const secondEntry = acc.finish().facts[0];
 		if (secondEntry?.kind !== "diagnostics") throw new Error("expected the diagnostics fact to still be present");
 		expect(secondEntry.entries[0]?.message).toBe("boom");
+	});
+
+	it("bounds retained text at a custom head window while keeping full byte continuity", () => {
+		const id = streamId("live-record-head-window-test");
+		const acc = new LiveToolPresentationRecord(25);
+
+		acc.fold({
+			type: "terminal_append",
+			streamId: id,
+			sequence: sequence(0),
+			startByte: byteOffset(0),
+			data: LINE_A,
+		});
+		acc.fold({
+			type: "terminal_append",
+			streamId: id,
+			sequence: sequence(1),
+			startByte: byteOffset(20),
+			data: LINE_B,
+		});
+		// Past the window: continuity is still asserted over the full byte range
+		// (this must not throw), but nothing further joins the retained text.
+		acc.fold({
+			type: "terminal_append",
+			streamId: id,
+			sequence: sequence(2),
+			startByte: byteOffset(40),
+			data: LINE_C,
+		});
+
+		const record = acc.finish();
+		expect(record.stream?.startByte).toBe(byteOffset(0));
+		expect(record.stream?.endByte).toBe(byteOffset(60));
+		expect(record.stream?.text).toBe(`${LINE_A}LINE-`); // LINE_A (20) + first 5 bytes of LINE_B
+		expect(record.stream?.gaps).toEqual([]);
+		expect(record.facts).toEqual([
+			{
+				id: factId(`${id}:retention-truncation`),
+				kind: "truncation",
+				meta: { direction: "head", totalBytes: 60, retainedBytes: 25, truncatedBy: "bytes", maxBytes: 25 },
+			},
+		]);
+	});
+
+	it("a stream ending exactly at the head window declares no truncation fact", () => {
+		const id = streamId("live-record-head-window-exact-test");
+		const acc = new LiveToolPresentationRecord(40);
+
+		acc.fold({
+			type: "terminal_append",
+			streamId: id,
+			sequence: sequence(0),
+			startByte: byteOffset(0),
+			data: LINE_A,
+		});
+		acc.fold({
+			type: "terminal_append",
+			streamId: id,
+			sequence: sequence(1),
+			startByte: byteOffset(20),
+			data: LINE_B,
+		});
+
+		const record = acc.finish();
+		expect(record.stream?.text).toBe(LINE_A + LINE_B);
+		expect(record.stream?.endByte).toBe(byteOffset(40));
+		expect(record.facts).toEqual([]);
+	});
+
+	it("recomputes the truncation fact fresh on every finish() instead of freezing it at the moment the window filled", () => {
+		const id = streamId("live-record-head-window-fresh-test");
+		const acc = new LiveToolPresentationRecord(20);
+
+		acc.fold({
+			type: "terminal_append",
+			streamId: id,
+			sequence: sequence(0),
+			startByte: byteOffset(0),
+			data: LINE_A,
+		});
+		acc.fold({
+			type: "terminal_append",
+			streamId: id,
+			sequence: sequence(1),
+			startByte: byteOffset(20),
+			data: LINE_B,
+		});
+		const midFlight = acc.finish();
+
+		acc.fold({
+			type: "terminal_append",
+			streamId: id,
+			sequence: sequence(2),
+			startByte: byteOffset(40),
+			data: LINE_C,
+		});
+		const final = acc.finish();
+
+		expect(midFlight.stream?.endByte).toBe(byteOffset(40));
+		expect(final.stream?.endByte).toBe(byteOffset(60));
+		// Both retained the same 20-byte head window...
+		expect(midFlight.stream?.text).toBe(LINE_A);
+		expect(final.stream?.text).toBe(LINE_A);
+		// ...but the fact's `totalBytes` reflects each snapshot's own live total,
+		// not whatever it was the first time the window filled.
+		expect(midFlight.facts[0]).toMatchObject({ kind: "truncation", meta: { totalBytes: 40, retainedBytes: 20 } });
+		expect(final.facts[0]).toMatchObject({ kind: "truncation", meta: { totalBytes: 60, retainedBytes: 20 } });
+		// Earlier snapshot is untouched by the later fold — still frozen and independent.
+		expect(Object.isFrozen(midFlight)).toBe(true);
+		expect(midFlight.stream?.endByte).toBe(byteOffset(40));
+	});
+
+	it("latches on the first dropped byte so a later chunk cannot fill a boundary back-off's residual budget", () => {
+		// Regression: a multibyte code point straddling the exact window makes
+		// `utf8PrefixWithin` back off, landing retained bytes one short of the
+		// cap. Without the latch, a later small chunk would slip through the
+		// `remaining` check and append after the dropped tail — punching a hole
+		// in the pure head-prefix the `truncation` fact declares.
+		const id = streamId("live-record-head-window-latch-test");
+		const acc = new LiveToolPresentationRecord(21);
+
+		acc.fold({
+			type: "terminal_append",
+			streamId: id,
+			sequence: sequence(0),
+			startByte: byteOffset(0),
+			data: "x".repeat(20),
+		});
+		acc.fold({ type: "terminal_append", streamId: id, sequence: sequence(1), startByte: byteOffset(20), data: "é" }); // 2-byte code point; prefix within 1 byte backs off to ""
+		acc.fold({ type: "terminal_append", streamId: id, sequence: sequence(2), startByte: byteOffset(22), data: "z" }); // must be rejected by the latch, not appended at byte 20
+
+		const record = acc.finish();
+		expect(record.stream?.text).toBe("x".repeat(20));
+		expect(record.stream?.endByte).toBe(byteOffset(23));
+		expect(record.facts).toEqual([
+			{
+				id: factId(`${id}:retention-truncation`),
+				kind: "truncation",
+				meta: { direction: "head", totalBytes: 23, retainedBytes: 20, truncatedBy: "bytes", maxBytes: 21 },
+			},
+		]);
+	});
+
+	it("a declared gap after the window filled still advances the cursor without joining the retained text", () => {
+		const id = streamId("live-record-head-window-gap-test");
+		const acc = new LiveToolPresentationRecord(20);
+
+		acc.fold({
+			type: "terminal_append",
+			streamId: id,
+			sequence: sequence(0),
+			startByte: byteOffset(0),
+			data: LINE_A,
+		});
+		acc.fold({
+			type: "terminal_append",
+			streamId: id,
+			sequence: sequence(1),
+			startByte: byteOffset(20),
+			data: LINE_B,
+		});
+		acc.fold({
+			type: "terminal_gap",
+			streamId: id,
+			sequence: sequence(2),
+			fromByte: byteOffset(40),
+			toByte: byteOffset(50),
+		});
+
+		const record = acc.finish();
+		expect(record.stream?.text).toBe(LINE_A);
+		expect(record.stream?.endByte).toBe(byteOffset(50));
+		expect(record.stream?.gaps).toEqual([{ fromByte: byteOffset(40), toByte: byteOffset(50) }]);
+		expect(record.facts).toEqual([
+			{
+				id: factId(`${id}:retention-truncation`),
+				kind: "truncation",
+				meta: { direction: "head", totalBytes: 50, retainedBytes: 20, truncatedBy: "bytes", maxBytes: 20 },
+			},
+		]);
 	});
 });

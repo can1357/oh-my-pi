@@ -28,15 +28,17 @@ import {
  * Explicit head-window cap on folded process text, per final-review-7 P8
  * change 2: carried here from day one so the display fold can never grow with
  * an unbounded stream (P4 removes the incidental feed-side cap separately).
- * Matches the presentation retention budget in `streaming-output.ts`.
+ * Matches the retention budget `presentation/live-record.ts`'s
+ * `LiveToolPresentationRecord` bounds its own retained head window to (P4).
  */
 export const PRESENTATION_FOLD_HEAD_WINDOW_BYTES = 1024 * 1024;
 
 /**
  * Longest prefix of `chunk` that fits in `maxBytes` without splitting a UTF-8
- * code point. Module-local copy of `streaming-output.ts`'s private helper:
- * the fold lives beside the display consumers, and the presentation project's
- * boundary rules out importing it from session code.
+ * code point. Module-local copy of the same helper `presentation/live-record.ts`
+ * and the ACP reducer each keep privately: the fold lives beside the display
+ * consumers, and the presentation project's boundary rules out importing it
+ * from session code.
  */
 function utf8PrefixWithin(chunk: string, maxBytes: number): string {
 	if (maxBytes <= 0) return "";

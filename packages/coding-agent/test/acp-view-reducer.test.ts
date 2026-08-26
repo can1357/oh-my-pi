@@ -13,6 +13,7 @@ import type { AcpRenderContext, AcpToolViewState, DeliveryReceipt } from "../src
 import {
 	AcpPresentationContinuityError,
 	INITIAL_ACP_TOOL_VIEW,
+	PROCESS_TEXT_HEAD_WINDOW_BYTES,
 	reduceAcpToolView,
 } from "../src/modes/acp/view/reducer";
 import { driveAcpToolView } from "./helpers/acp-tool-view-driver";
@@ -455,6 +456,105 @@ it("projects typed image dimensions without producer-authored display text", () 
 	);
 });
 
+describe("ACP tool view reducer — process text retention bound", () => {
+	it("bounds the plain-mode settlement content to the process-text head window without throwing on later appends", () => {
+		const { events, producer } = record();
+		const head = "h".repeat(PROCESS_TEXT_HEAD_WINDOW_BYTES);
+		producer.appendTerminal(head);
+		producer.appendTerminal("overflow-tail");
+
+		const settlement = run(
+			[{ type: "started", call: bashCall() }, ...events, { type: "settled", outcome: { kind: "succeeded" } }],
+			{ phase: "live", terminal: { kind: "none" }, fence: false },
+		).updates.at(-1) as unknown as { content: { content: { text: string } }[] };
+
+		expect(settlement.content[0]?.content.text).toBe(head);
+	});
+
+	it("keeps every byte on the meta-terminal wire even past the retained head window (wire delivery stays uncapped)", () => {
+		const { events, producer } = record();
+		const chunkA = "a".repeat(PROCESS_TEXT_HEAD_WINDOW_BYTES);
+		const chunkB = "b".repeat(4096); // arrives entirely after the window filled
+		producer.appendTerminal(chunkA);
+		producer.appendTerminal(chunkB);
+
+		const { updates } = run([{ type: "started", call: bashCall() }, ...events]);
+		// Every live terminal_control frame carries the event's own bytes in full,
+		// regardless of what the reducer's own `segments` accumulator retained.
+		expect(terminalOutputs(updates).join("")).toBe(chunkA + chunkB);
+	});
+
+	it("keeps byte offsets continuous across the window boundary and into settlement", () => {
+		const { events, producer } = record();
+		producer.appendTerminal("x".repeat(PROCESS_TEXT_HEAD_WINDOW_BYTES));
+		producer.appendTerminal("y".repeat(10));
+
+		const { receipts } = run(
+			[{ type: "started", call: bashCall() }, ...events, { type: "settled", outcome: { kind: "succeeded" } }],
+			{ phase: "live", terminal: { kind: "none" }, fence: false },
+		);
+		const streamReceipts = receipts.filter(receipt => receipt.kind === "stream");
+		expect(streamReceipts.map(receipt => (receipt.kind === "stream" ? plain(receipt.toByte) : undefined))).toEqual([
+			PROCESS_TEXT_HEAD_WINDOW_BYTES,
+			PROCESS_TEXT_HEAD_WINDOW_BYTES + 10,
+		]);
+	});
+
+	it("carries the full plain-era process bytes at live_terminal_attached even past the retained head window", () => {
+		// Round-1 review P4-followup: `reduceLiveTerminalAttached`'s plain catch-up
+		// frame is the ONLY delivery path for bytes buffered while a plain-routed
+		// call had no live wire — `reduceAppend`'s plain arm emits no frame.
+		// Capping `segments` for the settlement-snapshot replay must not truncate
+		// what this one-shot catch-up frame puts on the wire.
+		//
+		// `awaitsLiveTerminal: true` (bash's client_terminal route) is the only
+		// route `selectAcpToolRenderMode` ever sends a `live_terminal_attached`
+		// event to — see the round-2 regression test below for the (far more
+		// common) plain routes that never receive that event and must not build
+		// this mirror at all.
+		const cap = negotiateTerminalMetaCap(true);
+		if (!cap) throw new Error("expected a capability witness");
+		const { events, producer } = record();
+		const head = "h".repeat(PROCESS_TEXT_HEAD_WINDOW_BYTES);
+		const tail = "t".repeat(5000);
+		producer.appendTerminal(head);
+		producer.appendTerminal(tail);
+		events.push({ type: "live_terminal_attached", binding: createLiveTerminalBinding("term-16") });
+
+		const { updates } = run([{ type: "started", call: bashCall({ awaitsLiveTerminal: true }) }, ...events], {
+			phase: "live",
+			terminal: { kind: "real", metaCap: cap },
+			fence: true,
+		});
+
+		expect(terminalOutputs(updates).join("")).toBe(head + tail);
+	});
+
+	it("never accumulates an unbounded raw mirror for a plain call that cannot receive live_terminal_attached", () => {
+		// Round-2 review P4-followup 2b: `awaitsLiveTerminal` is the only route
+		// `selectAcpToolRenderMode` ever sends a `live_terminal_attached` event to
+		// (bash's client_terminal route). A `read`-kind call — like any other plain
+		// call with `awaitsLiveTerminal` unset — stays `plain` for its ENTIRE
+		// lifetime and never reaches that catch-up frame, so the uncapped
+		// `rawSegments` mirror must never be built for it: it would otherwise grow
+		// unboundedly with nothing ever reading it.
+		const { events, producer } = record();
+		producer.appendTerminal("x".repeat(PROCESS_TEXT_HEAD_WINDOW_BYTES + 5000));
+		producer.declareDisplay({ kind: "sequence", items: [{ kind: "json", value: { x: 1 } }] });
+
+		const { state } = run([{ type: "started", call: bashCall({ kind: "read" }) }, ...events], {
+			phase: "live",
+			terminal: { kind: "none" },
+			fence: true,
+		});
+
+		if (state.state !== "plain") throw new Error(`expected the view to stay plain, got ${state.state}`);
+		expect(state.rawSegments).toEqual([]);
+		expect(state.rawProcessTextBytes).toBe(0);
+		expect(state.rawNextSegmentId).toBe(1);
+	});
+});
+
 describe("ACP tool view reducer — announcement rawInput", () => {
 	it("carries rawInput onto the literal tool_call wire frame", () => {
 		const { updates } = run([
@@ -575,6 +675,11 @@ describe("ACP tool view reducer — fact delivery by audience", () => {
 			// attachment. The carry now resolves at the transition, where the
 			// pre-attach bytes precede post-attach live bytes in the client's
 			// terminal buffer; settlement touches only correlated status/exit state.
+			//
+			// `awaitsLiveTerminal: true` is load-bearing (round-2 P4-followup 2b): it
+			// is the only route `selectAcpToolRenderMode` ever sends a
+			// `live_terminal_attached` event to, and now the only route whose plain
+			// state builds the uncapped `rawSegments` mirror this carry reads from.
 			const cap = negotiateTerminalMetaCap(true);
 			if (!cap) throw new Error("expected a capability witness");
 			const { events, producer } = record();
@@ -585,7 +690,7 @@ describe("ACP tool view reducer — fact delivery by audience", () => {
 
 			const { updates, receipts } = run(
 				[
-					{ type: "started", call: bashCall({ kind: "read" }) },
+					{ type: "started", call: bashCall({ awaitsLiveTerminal: true }) },
 					...events,
 					{ type: "settled", outcome: { kind: "succeeded" } },
 				],
@@ -760,6 +865,11 @@ describe("ACP tool view reducer — fact delivery by audience", () => {
 			// Round-3 review P5: the transition used to claim the whole [0, cursor)
 			// range as delivered, including gap bytes whose own stream_gap receipts
 			// already record them as never received.
+			//
+			// `awaitsLiveTerminal: true` is load-bearing (round-2 P4-followup 2b): see
+			// the matching note on the earlier "delivers carried plain-era output"
+			// test — `carriedData` (and so these "stream" receipts) comes from the
+			// `rawSegments` mirror, which only this route ever populates.
 			const cap = negotiateTerminalMetaCap(true);
 			if (!cap) throw new Error("expected a capability witness");
 			const { events, producer } = record();
@@ -768,7 +878,7 @@ describe("ACP tool view reducer — fact delivery by audience", () => {
 			producer.appendTerminal("tail\n"); // [1029, 1034)
 			events.push({ type: "live_terminal_attached", binding: createLiveTerminalBinding("term-14") });
 
-			const { receipts } = run([{ type: "started", call: bashCall({ kind: "read" }) }, ...events], {
+			const { receipts } = run([{ type: "started", call: bashCall({ awaitsLiveTerminal: true }) }, ...events], {
 				phase: "live",
 				terminal: { kind: "real", metaCap: cap },
 				fence: true,

@@ -9,7 +9,7 @@ import type {
 	ToolPresentationEvent,
 	ToolPresentationRecord,
 } from "@oh-my-pi/pi-agent-core/presentation";
-import { byteLengthOf, byteOffset, PRESENTATION_VERSION } from "@oh-my-pi/pi-agent-core/presentation";
+import { byteLengthOf, byteOffset, factId, PRESENTATION_VERSION } from "@oh-my-pi/pi-agent-core/presentation";
 
 /**
  * The live fold of a call's presentation events into its retained
@@ -41,16 +41,65 @@ import { byteLengthOf, byteOffset, PRESENTATION_VERSION } from "@oh-my-pi/pi-age
  *   no serializer and the record retains no display sequence. `hydrate.ts`
  *   documents both losses on the replay side; this is the same two losses on the
  *   write side, and they are absent by construction rather than by omission.
- * - Retention. The record keeps every delivered byte of the window it saw. A
- *   *bounded* retained window is a different feature that owes its reader a
- *   `truncation` fact (rollover is a truncation fact, never a gap),
- *   so it belongs to whoever introduces the bound, not to this fold.
+ * - Nothing else. Retention *is* bounded here (final-review-7 P4): `fold`
+ *   asserts continuity over every byte the producer declares — `cursor`
+ *   always advances by a `terminal_append`/`terminal_gap`'s full length,
+ *   whatever this class chooses to keep — but copies at most
+ *   {@link LIVE_RECORD_HEAD_WINDOW_BYTES} of `stream.text` into the retained
+ *   timeline. `finish()` always reports `endByte` as the live cursor (the
+ *   full extent seen, capped or not) and, once the window has filled,
+ *   appends a freshly computed `truncation` fact (`direction: "head"`) to
+ *   the snapshot's `facts` — rollover is a truncation fact, never a gap.
  */
+
+/**
+ * Bound on the bytes {@link LiveToolPresentationRecord} copies into its
+ * retained `stream.text` head window.
+ *
+ * Continuity is asserted over every byte the producer declares regardless of
+ * this bound — `stream.cursor` always advances by the full length of each
+ * event — so a capped window can never desync the continuity invariants
+ * `fold` enforces on every subsequent event. Only what gets copied into
+ * `text` (and therefore persisted/replayed) is capped.
+ */
+export const LIVE_RECORD_HEAD_WINDOW_BYTES = 1024 * 1024; // 1 MiB
+
+/**
+ * Longest prefix of `chunk` that fits in `maxBytes` without splitting a UTF-8
+ * code point. Module-local copy: the presentation-boundary layering rules out
+ * importing this from session code (`streaming-output.ts`'s helper of the
+ * same name — unused there since P4 moved feed retention here).
+ */
+function utf8PrefixWithin(chunk: string, maxBytes: number): string {
+	if (maxBytes <= 0) return "";
+	const buf = Buffer.from(chunk, "utf8");
+	if (buf.length <= maxBytes) return chunk;
+	let end = maxBytes;
+	while (end > 0 && (buf[end] & 0xc0) === 0x80) end--;
+	return buf.subarray(0, end).toString("utf8");
+}
+
 export class LiveToolPresentationRecord {
 	#stream: AccumulatingStream | undefined;
 	#lastSequence: number | undefined;
 	readonly #facts: ToolFact[] = [];
 	readonly #attachments: ToolAttachment[] = [];
+	/** Bytes already copied into `stream.text`'s retained head window. */
+	#retainedTextBytes = 0;
+	/**
+	 * Latched the first time a `terminal_append` chunk is cut at the head
+	 * window. Once set, no further bytes join `stream.text` — a UTF-8
+	 * boundary back-off can leave `#retainedTextBytes` just under the cap,
+	 * and copying a later chunk's head after an earlier chunk's dropped tail
+	 * would break the pure-head-prefix invariant the `truncation` fact
+	 * declares.
+	 */
+	#headWindowExhausted = false;
+	readonly #headWindowBytes: number;
+
+	constructor(headWindowBytes: number = LIVE_RECORD_HEAD_WINDOW_BYTES) {
+		this.#headWindowBytes = headWindowBytes;
+	}
 
 	/**
 	 * Fold one event. Total over {@link ToolPresentationEvent} so a future member
@@ -61,7 +110,7 @@ export class LiveToolPresentationRecord {
 		switch (event.type) {
 			case "terminal_append": {
 				const stream = this.#advanceStream(event.streamId, event.sequence, event.startByte);
-				stream.text += event.data;
+				this.#appendRetainedText(stream, event.data);
 				stream.cursor = event.startByte + byteLengthOf(event.data);
 				return;
 			}
@@ -116,9 +165,20 @@ export class LiveToolPresentationRecord {
 	 * `Object.assign(snapshot.facts[0], {...})` or an array push into a
 	 * `diagnostics` fact's `entries` — and mutate the live accumulator's own
 	 * state through it.
+	 *
+	 * `stream.endByte` is always the live cursor — the full extent of bytes the
+	 * producer has declared, whether or not `stream.text` retained them — so a
+	 * mid-flight snapshot's byte range is never narrower than what actually
+	 * streamed. When the head window has filled, one fact beyond `#facts` is
+	 * appended here: a freshly computed `truncation` fact (`direction:
+	 * "head"`), recomputed from the live totals on every call rather than
+	 * folded once and left to go stale, so every snapshot — mid-flight or
+	 * final — reports the truest totals known at the moment it was taken,
+	 * exactly like `endByte` above.
 	 */
 	finish(): ToolPresentationRecord {
 		const stream = this.#stream;
+		const truncationFact = this.#retentionTruncationFact(stream);
 		return Object.freeze<ToolPresentationRecord>({
 			version: PRESENTATION_VERSION,
 			...(stream === undefined
@@ -132,9 +192,55 @@ export class LiveToolPresentationRecord {
 							gaps: Object.freeze([...stream.gaps]),
 						}),
 					}),
-			facts: Object.freeze([...this.#facts]),
+			facts: Object.freeze(truncationFact === undefined ? [...this.#facts] : [...this.#facts, truncationFact]),
 			attachments: Object.freeze([...this.#attachments]),
 		});
+	}
+
+	/**
+	 * Copy `data` into `stream.text`'s retained head window, up to
+	 * `#headWindowBytes`. Byte continuity never depends on this — `fold`'s
+	 * `terminal_append` arm always advances `stream.cursor` by `data`'s full
+	 * length regardless of what this method retains — so a capped window can
+	 * never desync the continuity invariants `#advanceStream` enforces on
+	 * every subsequent event.
+	 */
+	#appendRetainedText(stream: AccumulatingStream, data: string): void {
+		if (this.#headWindowExhausted) return;
+		const dataBytes = byteLengthOf(data);
+		const remaining = this.#headWindowBytes - this.#retainedTextBytes;
+		if (dataBytes <= remaining) {
+			stream.text += data;
+			this.#retainedTextBytes += dataBytes;
+			return;
+		}
+		const piece = utf8PrefixWithin(data, remaining);
+		stream.text += piece;
+		this.#retainedTextBytes += byteLengthOf(piece);
+		this.#headWindowExhausted = true;
+	}
+
+	/**
+	 * The retention-truncation fact for the current head-window cut, or
+	 * `undefined` while the window has never filled. Recomputed from the live
+	 * `stream.cursor`/`#retainedTextBytes` totals on every call — see
+	 * {@link finish}'s doc comment for why this must stay fresh rather than be
+	 * folded into `#facts` once.
+	 */
+	#retentionTruncationFact(stream: AccumulatingStream | undefined): ToolFact | undefined {
+		if (stream === undefined || !this.#headWindowExhausted) return undefined;
+		const fact: ToolFact = {
+			id: factId(`${stream.streamId}:retention-truncation`),
+			kind: "truncation",
+			meta: {
+				direction: "head",
+				totalBytes: stream.cursor,
+				retainedBytes: this.#retainedTextBytes,
+				truncatedBy: "bytes",
+				maxBytes: this.#headWindowBytes,
+			},
+		};
+		return deepFreeze(fact);
 	}
 
 	/**

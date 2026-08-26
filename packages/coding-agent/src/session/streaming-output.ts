@@ -21,36 +21,6 @@ export const ARTIFACT_DEFAULT_MAX_BYTES = 0;
 /** Default head budget; the remainder becomes the rolling tail window. */
 export const ARTIFACT_DEFAULT_HEAD_BYTES = 3 * 1024 * 1024; // 3 MiB
 
-/**
- * Cap on the bytes {@link OutputSink} forwards into the presentation stream.
- *
- * The live presentation fold and the persisted v4 journal retain every byte
- * they are handed, so an uncapped feed would hold a whole process's output in
- * memory and serialize it into session JSONL beside the already-bounded model
- * projection. The bound is enforced per-append: once {@linkcode utf8PrefixWithin}
- * has filled the remaining budget, further chunks are dropped from the
- * presentation feed (the model-facing body and artifact capture are
- * unaffected). A single `truncation` fact is declared at `dump()` finalization
- * when bytes were actually dropped — rollover is a truncation fact, never a
- * gap: nothing after the retained head was delivered.
- */
-export const PRESENTATION_MAX_RETAINED_BYTES = 1024 * 1024; // 1 MiB
-
-/**
- * Longest prefix of `chunk` that fits in `maxBytes` without splitting a UTF-8
- * code point. Backing off over continuation bytes cannot split a surrogate
- * pair — UTF-8 encodes astral characters atomically — so a producer's
- * `endsOnStringBoundary` guard stays satisfied.
- */
-function utf8PrefixWithin(chunk: string, maxBytes: number): string {
-	if (maxBytes <= 0) return "";
-	const buf = Buffer.from(chunk, "utf8");
-	if (buf.length <= maxBytes) return chunk;
-	let end = maxBytes;
-	while (end > 0 && (buf[end] & 0xc0) === 0x80) end--;
-	return buf.subarray(0, end).toString("utf8");
-}
-
 const NL = "\n";
 const CR = "\r";
 const ELLIPSIS = "…";
@@ -866,21 +836,6 @@ export class OutputSink {
 	#artifactTailRing = "";
 	#artifactTailRingBytes = 0;
 	#artifactTailIncomingBytes = 0;
-	/** Bytes actually appended to the presentation stream (the retained head window). */
-	#presentationRetainedBytes = 0;
-	/** Every byte the sink tried to hand the presentation stream, appended or not. */
-	#presentationTotalBytes = 0;
-	/** Set when the single cap-truncation fact has been declared (at `dump()` finalization). */
-	#presentationRolloverDeclared = false;
-	/**
-	 * Latched the first time any presentation chunk is truncated at the cap.
-	 * Once set, every later chunk is dropped from the retained transcript (its
-	 * bytes still count toward the total): a UTF-8 boundary back-off can leave
-	 * the counter just under the cap, and appending a later chunk's head after
-	 * an earlier chunk's dropped tail would break the pure-head-prefix
-	 * invariant the truncation fact declares.
-	 */
-	#presentationOverflowed = false;
 
 	constructor(options?: OutputSinkOptions) {
 		const {
@@ -1322,21 +1277,13 @@ export class OutputSink {
 	 * but it is still *only* the new bytes, never a cumulative snapshot, which is
 	 * what lets the consumer treat the stream as append-only without any diffing.
 	 *
-	 * The feed is hard-bounded at {@link PRESENTATION_MAX_RETAINED_BYTES},
-	 * enforced on every append: a chunk larger than the remaining budget
-	 * contributes only a UTF-8-code-point-safe prefix, and once the budget is
-	 * exhausted further chunks are dropped entirely. Bytes past the prefix count
-	 * toward `#presentationTotalBytes` but never toward the
-	 * retained window (the model-facing body and artifact capture keep every
-	 * byte — only the live/replayable presentation transcript is bounded).
-	 * Dropped bytes are tail bytes after everything delivered, so no gap is
-	 * declared: nothing after the retained head was ever appended.
-	 *
-	 * This method never declares anything. The single `truncation` fact is
-	 * declared once, from `dump()` finalization via
-	 * `#declarePresentationRollover`, when the final totals
-	 * are known — so the notice reads truthfully instead of freezing
-	 * `totalBytes === retainedBytes` at the moment the cap was first crossed.
+	 * The feed itself is unbounded: every byte handed to `push()` reaches the
+	 * live presentation stream (a local
+	 * bash/eval terminal card streams the whole process, not just the first
+	 * megabyte). The model-facing body and artifact capture already retained
+	 * every byte; this closes the one channel that didn't. Bounding what a
+	 * *retained* record keeps for replay is `LiveToolPresentationRecord`'s
+	 * job, not this feed's — see its class doc.
 	 *
 	 * `scope` is set only when this call originated from the registered flusher
 	 * (the freeze barrier handed it a {@link PresentationFlusherScope} for exactly
@@ -1347,24 +1294,8 @@ export class OutputSink {
 	#appendToPresentation(chunk: string, scope?: PresentationFlusherScope): void {
 		const producer = this.#presentation;
 		if (!producer || chunk.length === 0) return;
-		const chunkBytes = Buffer.byteLength(chunk, "utf-8");
-		this.#presentationTotalBytes += chunkBytes;
-		const retained = this.#presentationRetainedBytes;
-		if (retained >= PRESENTATION_MAX_RETAINED_BYTES || this.#presentationOverflowed) return;
-		let piece = chunk;
-		let truncated = false;
-		if (retained + chunkBytes > PRESENTATION_MAX_RETAINED_BYTES) {
-			piece = utf8PrefixWithin(chunk, PRESENTATION_MAX_RETAINED_BYTES - retained);
-			// Latch on the FIRST dropped byte. A code-point back-off can finish the
-			// prefix just under the cap; appending a later chunk's head after this
-			// chunk's dropped tail would punch a hole in what the truncation fact
-			// declares as a pure retained head window.
-			truncated = Buffer.byteLength(piece, "utf-8") < chunkBytes;
-			this.#presentationOverflowed ||= truncated;
-		}
 		if (scope) {
-			scope.appendTerminal(piece);
-			this.#presentationRetainedBytes = retained + Buffer.byteLength(piece, "utf-8");
+			scope.appendTerminal(chunk);
 			return;
 		}
 		// Gate on the barrier's own lifecycle *before* calling the mutator, rather than
@@ -1383,36 +1314,7 @@ export class OutputSink {
 			});
 			return;
 		}
-		producer.appendTerminal(piece);
-		this.#presentationRetainedBytes = retained + Buffer.byteLength(piece, "utf-8");
-	}
-
-	/**
-	 * Declare the single `truncation` fact that records bytes dropped from the
-	 * retained-transcript cap. Called from the two pre-freeze finalization
-	 * points — `dump()` after its final pending-chunk flush, and `dispose()`
-	 * for the throw/abort paths that skip `dump()` — by then the counters are
-	 * the stream's final totals, so the notice reports truthfully ("first
-	 * 1.0 MiB of 3.2 MiB"). No-op when nothing was dropped, already declared,
-	 * or the producer can no longer accept facts (a stream already mid-freeze
-	 * keeps its residue undisclosed rather than throwing).
-	 */
-	#declarePresentationRollover(): void {
-		const producer = this.#presentation;
-		if (!producer || this.#presentationRolloverDeclared) return;
-		if (producer.phase !== "open") return;
-		if (this.#presentationTotalBytes <= this.#presentationRetainedBytes) return;
-		this.#presentationRolloverDeclared = true;
-		producer.fact({
-			kind: "truncation",
-			meta: {
-				direction: "head",
-				totalBytes: this.#presentationTotalBytes,
-				retainedBytes: this.#presentationRetainedBytes,
-				truncatedBy: "bytes",
-				maxBytes: PRESENTATION_MAX_RETAINED_BYTES,
-			},
-		});
+		producer.appendTerminal(chunk);
 	}
 
 	#flushPendingChunk(scope?: PresentationFlusherScope): void {
@@ -1481,9 +1383,6 @@ export class OutputSink {
 		// Flush any chunk still held back by the throttle so the live preview
 		// ends with the complete stream.
 		this.#flushPendingChunk();
-		// Final totals are known here: declare the presentation-cap truncation
-		// fact (no-op unless bytes were actually dropped).
-		this.#declarePresentationRollover();
 		const totalLines = this.#sawData ? this.#totalLines + 1 : 0;
 
 		await this.#finalizeFile();
@@ -1588,12 +1487,9 @@ export class OutputSink {
 	 * Release the artifact spill descriptor on an exit path that skips
 	 * {@link dump} — a thrown error or abort. Idempotent and safe in a
 	 * `finally`: if {@link dump} already ran this is a no-op, otherwise it
-	 * declares the presentation-cap truncation fact (round-3 review P7: the
-	 * executor's catch rethrows without dumping, and this runs before the
-	 * agent loop's freeze, so a command that streamed past the cap and then
-	 * threw still gets its disclosure), flushes the capped tail, and closes
-	 * the sink so the descriptor is not leaked until a later unrelated read
-	 * hits `EMFILE` (issue #6463).
+	 * flushes any still-pending throttled chunk, flushes the capped artifact
+	 * tail, and closes the sink so the descriptor is not leaked until a later
+	 * unrelated read hits `EMFILE` (issue #6463).
 	 */
 	async dispose(): Promise<void> {
 		// Deliberately does NOT unregister the presentation flusher. `dispose()` runs
@@ -1602,48 +1498,16 @@ export class OutputSink {
 		// is exactly how those bytes would go missing. `#pendingChunk` survives
 		// disposal, so the barrier can still flush it.
 		this.#clearPendingChunkTimer();
-		let presentationFlushFailed = false;
-		// Declare only after the throttled pending bytes are in the counters.
-		// Declaring first made the fact's totals stale by whatever was still
-		// coalescing (bash's live path always throttles at 50 ms) — and, when
-		// the cap crossing fell entirely inside the pending window, skipped
-		// the disclosure entirely. Mid-freeze callers keep the barrier-flush
-		// fallback (`#pendingChunk` survives disposal) instead of appending
-		// unscoped while the stream is closing.
 		if (this.#presentation?.phase === "open") {
 			try {
 				this.#flushPendingChunk();
 			} catch (err) {
-				presentationFlushFailed = true;
-				// The thrown append already incremented `#presentationTotalBytes`
-				// without touching `#presentationRetainedBytes`, so the counters are
-				// permanently diverged. Poison the rollover latch: nothing derived
-				// from these counters is trustworthy, including in a later dump() —
-				// the dispose-then-dump sequence is a supported, suite-pinned
-				// lifecycle, and a recovered emitter there would otherwise publish
-				// exactly the fabricated truncation fact this guard exists to prevent.
-				this.#presentationRolloverDeclared = true;
 				// Masking defense, same rationale as `#finalizeFile`: dispose() runs
 				// in the executors' `finally`, where a throw here would replace the
 				// original tool error that put us on this path. Nothing is lost by
 				// swallowing — `#emitPendingChunkWith` clears `#pendingChunk` before
 				// invoking the sinks.
 				logger.warn("OutputSink dispose failed to flush the pending chunk", { err });
-			}
-		}
-		// A failed flush leaves diverged counters (`totalBytes` counts the thrown
-		// append, retained bytes do not), so deriving rollover state from them
-		// could publish a fabricated truncation fact — or rethrow through the
-		// same failing emitter and mask the tool error. Skip it; the latch makes
-		// a later dump() re-attempt harmless either way.
-		if (!presentationFlushFailed) {
-			// Still pre-freeze on every caller at HEAD: the executor's own
-			// `finally` runs before the loop's freeze barrier, so a fact declared
-			// here is legal.
-			try {
-				this.#declarePresentationRollover();
-			} catch (err) {
-				logger.warn("OutputSink dispose failed to declare presentation rollover", { err });
 			}
 		}
 		await this.#finalizeFile();

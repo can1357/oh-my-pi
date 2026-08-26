@@ -171,22 +171,79 @@ export type FactSuppressionReason =
 	/** The client negotiated no channel that can carry it (no terminal, no content). */
 	| "no_capable_channel";
 
+/**
+ * Head-window cap on the cumulative "process" (raw stream) text this reducer
+ * retains in `segments` for the `plain`/`meta_terminal` states' eventual
+ * settlement content — final-review-7 P4 change 3: `OutputSink`'s shared
+ * feed is unbounded now (every `terminal_append` reaches the wire live, in
+ * full — see `streaming-output.ts#appendToPresentation`), but this reducer
+ * still accumulates process text for later replay (a `plain` call's one
+ * settlement content snapshot, a `meta_terminal` call's rare
+ * attachment-transition snapshot — see `buildReplacementSnapshotContent`),
+ * and an unbounded accumulation there would just relocate the memory hazard
+ * P4 removes from the feed. Bytes past the window are dropped from what's
+ * retained; the live per-event frames this reducer emits (`reduceAppend`'s
+ * `meta_terminal` arm) carry `event.data` directly, never `segments` — so
+ * wire delivery itself stays uncapped.
+ */
+export const PROCESS_TEXT_HEAD_WINDOW_BYTES = 1024 * 1024; // 1 MiB
+
+/**
+ * Longest prefix of `chunk` that fits in `maxBytes` without splitting a UTF-8
+ * code point. Module-local copy: the presentation-boundary layering rules out
+ * importing this from session code or from `presentation/live-record.ts`'s
+ * own private copy of the same helper.
+ */
+function utf8PrefixWithin(chunk: string, maxBytes: number): string {
+	if (maxBytes <= 0) return "";
+	const buf = Buffer.from(chunk, "utf8");
+	if (buf.length <= maxBytes) return chunk;
+	let end = maxBytes;
+	while (end > 0 && (buf[end] & 0xc0) === 0x80) end--;
+	return buf.subarray(0, end).toString("utf8");
+}
+
 type RenderSegment = ToolOutputSegment & {
 	readonly id: number;
 	readonly delivery: "pending" | "terminal_output";
 };
 
+/** Result of one bounded {@link appendProcessSegment} call. */
+interface ProcessSegmentAppendResult {
+	readonly segments: readonly RenderSegment[];
+	readonly bytes: number;
+	readonly capped: boolean;
+}
+
+/**
+ * Append `text` to the ordered segment timeline's retained process bytes, up
+ * to {@link PROCESS_TEXT_HEAD_WINDOW_BYTES}. `bytes`/`capped` thread the
+ * running retained-byte count and the once-latched head-window cut through
+ * the reducer's otherwise-plain state — see the constant's own doc comment
+ * for why this exists and what stays uncapped.
+ */
 function appendProcessSegment(
 	segments: readonly RenderSegment[],
 	nextId: number,
+	bytes: number,
+	capped: boolean,
 	text: string,
 	delivery: RenderSegment["delivery"],
-): readonly RenderSegment[] {
+	maxBytes: number = PROCESS_TEXT_HEAD_WINDOW_BYTES,
+): ProcessSegmentAppendResult {
+	if (capped) return { segments, bytes, capped };
+	const remaining = maxBytes - bytes;
+	const textBytes = byteLengthOf(text);
+	const piece = textBytes <= remaining ? text : utf8PrefixWithin(text, remaining);
+	const nextCapped = capped || textBytes > remaining;
+	if (piece.length === 0) return { segments, bytes, capped: nextCapped };
+	const pieceBytes = byteLengthOf(piece);
 	const last = segments.at(-1);
-	if (last?.kind === "process" && last.delivery === delivery) {
-		return [...segments.slice(0, -1), { ...last, text: last.text + text }];
-	}
-	return [...segments, { id: nextId, kind: "process", text, delivery }];
+	const nextSegments =
+		last?.kind === "process" && last.delivery === delivery
+			? [...segments.slice(0, -1), { ...last, text: last.text + piece }]
+			: [...segments, { id: nextId, kind: "process" as const, text: piece, delivery }];
+	return { segments: nextSegments, bytes: bytes + pieceBytes, capped: nextCapped };
 }
 
 function renderSegments(segments: readonly RenderSegment[]): string {
@@ -209,6 +266,33 @@ export type AcpToolViewState =
 			readonly lastSequence: Sequence | undefined;
 			readonly segments: readonly RenderSegment[];
 			readonly nextSegmentId: number;
+			/** Cumulative bytes retained across `segments`' "process" entries, up to {@link PROCESS_TEXT_HEAD_WINDOW_BYTES}. */
+			readonly processTextBytes: number;
+			/** Latched once the process-text head window fills; see {@link appendProcessSegment}. */
+			readonly processTextCapped: boolean;
+			/**
+			 * Uncapped mirror of `segments`/`processTextBytes`/`nextSegmentId`.
+			 * `reduceLiveTerminalAttached`'s one-shot catch-up frame is the ONLY
+			 * delivery path for bytes buffered while a `plain` call had no live
+			 * wire (`reduceAppend`'s `plain` arm emits no frame), so it must not
+			 * read the capped `segments` above — that cap exists only to bound the
+			 * settlement-snapshot replay in `buildReplacementSnapshotContent`
+			 * (final-review-7 P4), which stays capped by design and is the only
+			 * other reader of `segments`.
+			 *
+			 * Only ever populated for `call.awaitsLiveTerminal === true` calls —
+			 * the sole route `selectAcpToolRenderMode` ever sends a
+			 * `live_terminal_attached` event to (bash's `client_terminal` route;
+			 * see its own doc comment). Every other `plain` call (no negotiated
+			 * terminal capability, or `kind !== "execute"`) stays `plain` for its
+			 * entire lifetime and never reaches that catch-up frame, so
+			 * `reduceAppend`/`reduceGap`/`reduceDisplayOutput` leave these three
+			 * fields untouched for it — an unconditional mirror would grow
+			 * unboundedly with nothing ever reading it.
+			 */
+			readonly rawSegments: readonly RenderSegment[];
+			readonly rawNextSegmentId: number;
+			readonly rawProcessTextBytes: number;
 			readonly facts: readonly ToolFact[];
 			readonly attachments: readonly ToolAttachment[];
 			/**
@@ -229,6 +313,10 @@ export type AcpToolViewState =
 			readonly startedProgress: boolean;
 			readonly segments: readonly RenderSegment[];
 			readonly nextSegmentId: number;
+			/** Cumulative bytes retained across `segments`' "process" entries, up to {@link PROCESS_TEXT_HEAD_WINDOW_BYTES}. */
+			readonly processTextBytes: number;
+			/** Latched once the process-text head window fills; see {@link appendProcessSegment}. */
+			readonly processTextCapped: boolean;
 			readonly facts: readonly ToolFact[];
 			readonly attachments: readonly ToolAttachment[];
 	  }
@@ -338,6 +426,8 @@ function reduceStarted(
 				startedProgress: false,
 				segments: [],
 				nextSegmentId: 1,
+				processTextBytes: 0,
+				processTextCapped: false,
 				facts: [],
 				attachments: [],
 			},
@@ -376,6 +466,11 @@ function reduceStarted(
 			lastSequence: undefined,
 			segments: [],
 			nextSegmentId: 1,
+			processTextBytes: 0,
+			processTextCapped: false,
+			rawSegments: [],
+			rawNextSegmentId: 1,
+			rawProcessTextBytes: 0,
 			facts: [],
 			attachments: [],
 			gaps: [],
@@ -422,6 +517,14 @@ function reduceAppend(
 				? `${state.call.sourceEcho}\n${TERMINAL_SEPARATOR}\n${processPrefix}${event.data}`
 				: `${processPrefix}${event.data}`;
 			const changes = state.startedProgress ? undefined : statusChanges([{ kind: "status", value: "in_progress" }]);
+			const appended = appendProcessSegment(
+				state.segments,
+				state.nextSegmentId,
+				state.processTextBytes,
+				state.processTextCapped,
+				event.data,
+				"terminal_output",
+			);
 			return {
 				state: {
 					...state,
@@ -429,8 +532,11 @@ function reduceAppend(
 					lastSequence: event.sequence,
 					sourceEchoSent: true,
 					startedProgress: true,
-					segments: appendProcessSegment(state.segments, state.nextSegmentId, event.data, "terminal_output"),
-					nextSegmentId: state.segments.at(-1)?.kind === "process" ? state.nextSegmentId : state.nextSegmentId + 1,
+					segments: appended.segments,
+					processTextBytes: appended.bytes,
+					processTextCapped: appended.capped,
+					nextSegmentId:
+						appended.segments.length > state.segments.length ? state.nextSegmentId + 1 : state.nextSegmentId,
 				},
 				frames: [
 					{
@@ -460,13 +566,52 @@ function reduceAppend(
 			// No terminal channel exists, so ordered segments accumulate and go out at
 			// settlement. Adjacent process chunks coalesce without crossing a display.
 			void context;
+			const appended = appendProcessSegment(
+				state.segments,
+				state.nextSegmentId,
+				state.processTextBytes,
+				state.processTextCapped,
+				event.data,
+				"pending",
+			);
+			// Uncapped mirror — see the `rawSegments` field doc on the `plain` state.
+			// Only worth building for a call that can actually reach
+			// `reduceLiveTerminalAttached`'s catch-up frame (`awaitsLiveTerminal`);
+			// every other plain-routed call (no negotiated terminal, or `kind !==
+			// "execute"`) never receives that event and stays `plain` for its whole
+			// lifetime, so an unconditional mirror would just grow unbounded with
+			// nothing ever reading it.
+			const rawAppended = state.call.awaitsLiveTerminal
+				? appendProcessSegment(
+						state.rawSegments,
+						state.rawNextSegmentId,
+						state.rawProcessTextBytes,
+						false,
+						event.data,
+						"pending",
+						Number.POSITIVE_INFINITY,
+					)
+				: undefined;
 			return {
 				state: {
 					...state,
 					cursor: nextByte,
 					lastSequence: event.sequence,
-					segments: appendProcessSegment(state.segments, state.nextSegmentId, event.data, "pending"),
-					nextSegmentId: state.segments.at(-1)?.kind === "process" ? state.nextSegmentId : state.nextSegmentId + 1,
+					segments: appended.segments,
+					processTextBytes: appended.bytes,
+					processTextCapped: appended.capped,
+					nextSegmentId:
+						appended.segments.length > state.segments.length ? state.nextSegmentId + 1 : state.nextSegmentId,
+					...(rawAppended === undefined
+						? {}
+						: {
+								rawSegments: rawAppended.segments,
+								rawProcessTextBytes: rawAppended.bytes,
+								rawNextSegmentId:
+									rawAppended.segments.length > state.rawSegments.length
+										? state.rawNextSegmentId + 1
+										: state.rawNextSegmentId,
+							}),
 				},
 				frames: [],
 				receipts: [{ kind: "stream", fromByte: event.startByte, toByte: nextByte, channel: "content" }],
@@ -500,13 +645,24 @@ function reduceGap(
 		{ kind: "stream_gap", fromByte: event.fromByte, toByte: event.toByte },
 	];
 	if (state.state === "meta_terminal") {
+		const appended = appendProcessSegment(
+			state.segments,
+			state.nextSegmentId,
+			state.processTextBytes,
+			state.processTextCapped,
+			notice,
+			"terminal_output",
+		);
 		return {
 			state: {
 				...state,
 				cursor: event.toByte,
 				lastSequence: event.sequence,
-				segments: appendProcessSegment(state.segments, state.nextSegmentId, notice, "terminal_output"),
-				nextSegmentId: state.segments.at(-1)?.kind === "process" ? state.nextSegmentId : state.nextSegmentId + 1,
+				segments: appended.segments,
+				processTextBytes: appended.bytes,
+				processTextCapped: appended.capped,
+				nextSegmentId:
+					appended.segments.length > state.segments.length ? state.nextSegmentId + 1 : state.nextSegmentId,
 			},
 			frames: [
 				{
@@ -522,13 +678,48 @@ function reduceGap(
 		};
 	}
 	if (state.state === "plain") {
+		const appended = appendProcessSegment(
+			state.segments,
+			state.nextSegmentId,
+			state.processTextBytes,
+			state.processTextCapped,
+			notice,
+			"pending",
+		);
+		// Uncapped mirror — see the `rawSegments` field doc on the `plain` state.
+		// See `reduceAppend`'s matching guard: only a call that can actually reach
+		// `reduceLiveTerminalAttached`'s catch-up frame needs this mirror built.
+		const rawAppended = state.call.awaitsLiveTerminal
+			? appendProcessSegment(
+					state.rawSegments,
+					state.rawNextSegmentId,
+					state.rawProcessTextBytes,
+					false,
+					notice,
+					"pending",
+					Number.POSITIVE_INFINITY,
+				)
+			: undefined;
 		return {
 			state: {
 				...state,
 				cursor: event.toByte,
 				lastSequence: event.sequence,
-				segments: appendProcessSegment(state.segments, state.nextSegmentId, notice, "pending"),
-				nextSegmentId: state.segments.at(-1)?.kind === "process" ? state.nextSegmentId : state.nextSegmentId + 1,
+				segments: appended.segments,
+				processTextBytes: appended.bytes,
+				processTextCapped: appended.capped,
+				nextSegmentId:
+					appended.segments.length > state.segments.length ? state.nextSegmentId + 1 : state.nextSegmentId,
+				...(rawAppended === undefined
+					? {}
+					: {
+							rawSegments: rawAppended.segments,
+							rawProcessTextBytes: rawAppended.bytes,
+							rawNextSegmentId:
+								rawAppended.segments.length > state.rawSegments.length
+									? state.rawNextSegmentId + 1
+									: state.rawNextSegmentId,
+						}),
 				gaps: [...state.gaps, [event.fromByte, event.toByte] as const],
 			},
 			frames: [],
@@ -582,8 +773,12 @@ function reduceLiveTerminalAttached(
 		// transition. `call.sourceEcho` is NOT replayed — the plain `started` frame
 		// already delivered it as start content.
 		const humanFacts = factsFor(state.facts, "human");
+		// `rawSegments` is the uncapped mirror of `segments` — see its field doc.
+		// This one-shot frame is the ONLY delivery path for bytes buffered while
+		// plain (`reduceAppend`'s plain arm emits no frame), so it must read the
+		// uncapped accumulator, never the settlement-bounded `segments`.
 		const carriedData =
-			renderSegments(state.segments) + humanFacts.map(fact => `\n${renderFact(fact).text}\n`).join("");
+			renderSegments(state.rawSegments) + humanFacts.map(fact => `\n${renderFact(fact).text}\n`).join("");
 		const frames: AcpToolFrame[] = [
 			{
 				channel: "terminal",
@@ -883,6 +1078,21 @@ function reduceDisplayOutput(state: AcpToolViewState, display: ToolDisplayOutput
 						{ id: state.nextSegmentId, kind: "display", display, delivery: "pending" },
 					],
 					nextSegmentId: state.nextSegmentId + 1,
+					// Display output was never subject to P4's process-text cap, so
+					// this mirrors verbatim into the uncapped `rawSegments` too — see
+					// its field doc on the `plain` state. Only worth building for a
+					// call that can actually reach `reduceLiveTerminalAttached`'s
+					// catch-up frame (`awaitsLiveTerminal`) — see `reduceAppend`'s
+					// matching guard.
+					...(state.call.awaitsLiveTerminal
+						? {
+								rawSegments: [
+									...state.rawSegments,
+									{ id: state.rawNextSegmentId, kind: "display", display, delivery: "pending" },
+								],
+								rawNextSegmentId: state.rawNextSegmentId + 1,
+							}
+						: {}),
 				},
 				frames: [],
 				receipts: [],
