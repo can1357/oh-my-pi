@@ -343,6 +343,13 @@ export class EvalSpeculationStore {
 		if (list) list.push(entry);
 		else this.#entries.set(key, [entry]);
 		this.#launched++;
+		// The whole feature degrades to a silent no-op if the streaming hook stops
+		// firing or the store is never injected, and a speedup is too noisy to read
+		// as confirmation. These three lines are how an operator verifies from
+		// ~/.omp/logs that enabling it did anything. Prompt text is deliberately
+		// omitted: only the tool and counts are needed, and the prompt may be
+		// sensitive.
+		logger.debug("eval speculation launched", { tool: call.name, launched: this.#launched });
 	}
 
 	/**
@@ -355,16 +362,23 @@ export class EvalSpeculationStore {
 		const entry = this.#entries.get(speculationKey(name, args))?.find(candidate => !candidate.claimed);
 		if (!entry) return undefined;
 		entry.claimed = true;
+		logger.debug("eval speculation claimed", { tool: name });
 		return entry.promise;
 	}
 
 	/** Abort every unclaimed speculation and drop the turn's state. */
 	reset(): void {
+		let aborted = 0;
 		for (const list of this.#entries.values()) {
 			for (const entry of list) {
-				if (!entry.claimed) entry.controller.abort();
+				if (entry.claimed) continue;
+				entry.controller.abort();
+				aborted++;
 			}
 		}
+		// Unclaimed launches are the cost of being wrong. Surfacing the count makes
+		// the speculation ceiling tunable against real waste instead of guesswork.
+		if (aborted > 0) logger.debug("eval speculations abandoned unclaimed", { aborted });
 		this.#entries = new Map();
 		this.#launched = 0;
 	}
