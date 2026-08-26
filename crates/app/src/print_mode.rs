@@ -242,6 +242,9 @@ async fn run_inner(args: PrintArgs) -> miette::Result<()> {
 	)
 	.await
 	.into_diagnostic()?;
+	for notice in session.take_notices() {
+		eprintln!("{notice}");
+	}
 	let advisor_runtime = if args.advisor {
 		let (runtime, _notices) = AppAdvisorRuntime::compose(
 			session.advisor_parent(),

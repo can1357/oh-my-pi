@@ -1420,6 +1420,9 @@ impl Runtime {
 		)
 		.await
 		.into_diagnostic()?;
+		for notice in headless.take_notices() {
+			eprintln!("{notice}");
+		}
 		if mode == "plan" {
 			headless.publish(AgentEvent::PlanStateChanged {
 				from:               PlanState::Inactive,

@@ -2,11 +2,17 @@
 
 pub mod finalize;
 
-use std::{collections::BTreeSet, env, io, mem, path::PathBuf, sync::Arc};
+use std::{
+	collections::BTreeSet,
+	env, fmt, io, mem,
+	path::{Path, PathBuf},
+	sync::Arc,
+};
 
 use omp_agent::{
-	Agent, AgentEvent, AgentKind, AgentRunSummary, AgentState, AgentStatus, AgentTree, ApprovalBook,
-	ApprovalInbox, ApprovalRoute, Budget, EventSubscription, InProcTurnClient, TurnId,
+	Agent, AgentEvent, AgentKind, AgentRunSummary, AgentSnapshot, AgentState, AgentStatus,
+	AgentTree, ApprovalBook, ApprovalInbox, ApprovalRoute, Budget, EventSubscription,
+	InProcTurnClient, TurnId,
 };
 use omp_catalog::{ModelKey, ProviderId, snapshot};
 use omp_core::{SecretString, Str, sf};
@@ -148,6 +154,32 @@ const _: () = assert!(
 	"HeadlessError must stay at the natural ChatError-derived size; slim \
 	 ChatError/SettingsManagerError to shrink this"
 );
+
+/// Operator-relevant notices produced while composing a headless session.
+///
+/// Driver composition publishes these so app adapters decide presentation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HeadlessNotice {
+	/// The journaled session model is unavailable; resume used the catalog
+	/// fallback without changing the session pin.
+	SessionModelUnavailable {
+		/// Journaled or launch selector that could not be selected.
+		saved:    Str,
+		/// Deterministic catalog fallback used for this process.
+		fallback: Str,
+	},
+}
+
+impl fmt::Display for HeadlessNotice {
+	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Self::SessionModelUnavailable { saved, fallback } => {
+				write!(formatter, "Session model `{saved}` is unavailable; ")?;
+				write!(formatter, "resumed with `{fallback}` without changing the session pin.")
+			},
+		}
+	}
+}
 
 use omp_envd::exthost::lifecycle::{HeadlessLifecycleSink, HeadlessLifecycleSubscription};
 use omp_proto::inference::{v1, v1::response_format};
@@ -337,6 +369,7 @@ pub struct HeadlessSession {
 	_goal_binding:       AgentGoalBinding,
 	session_id:          Str,
 	initial_items:       Vec<Item>,
+	notices:             Vec<HeadlessNotice>,
 	_inference_registry: InferenceRegistry,
 	_catalog:            Arc<snapshot::Catalog>,
 	_memory_extraction:  Option<ExtractionWorker>,
@@ -598,6 +631,7 @@ impl HeadlessSession {
 		.map_err(HeadlessError::SessionBlueprint)?;
 		let mut snapshot =
 			chat::agent_snapshot(&blueprint, catalog, None).map_err(HeadlessError::AgentSnapshot)?;
+		let mut notices = Vec::new();
 		if matches!(
 			policy.session,
 			HeadlessSessionOpen::Resume(_)
@@ -607,25 +641,18 @@ impl HeadlessSession {
 			let journal_path = sessions_dir.join(format!("{}.jsonl", session.id.as_str()));
 			let revived = omp_agent::revive_existing(&journal_path, session.journal, snapshot)?;
 			session.journal = revived.journal;
+
 			snapshot = revived.snapshot;
-			if let Some(model) = revived.model_override
-				&& !model.fallback
-			{
-				snapshot.turn.params.model =
-					format!("{}/{}", model.model.provider.0, model.model.model.0);
+			if let Some(notice) = apply_revived_session_model(
+				&mut snapshot,
+				catalog,
+				revived.model_override.as_ref(),
+				&root,
+				&options.additional_roots,
+				chat::fallback_model_selector,
+			)? {
+				notices.push(notice);
 			}
-			if !chat::model_selector_is_selectable(catalog, &snapshot.turn.params.model) {
-				let saved = snapshot.turn.params.model.clone();
-				let fallback =
-					chat::fallback_model_selector(catalog).ok_or(HeadlessError::NoSelectableModel)?;
-				snapshot.turn.params.model = fallback.as_str().to_owned();
-				eprintln!(
-					"Session model `{saved}` is unavailable; resumed with `{fallback}` without \
-					 changing the session pin."
-				);
-			}
-			snapshot.reasoning_dialect =
-				chat::interrupted_reasoning_dialect(catalog, &snapshot.turn.params.model);
 		}
 		apply_tool_policy(&mut snapshot, &policy.tools, policy.lsp_enabled);
 		let content = prompt_discovery.content;
@@ -877,6 +904,7 @@ impl HeadlessSession {
 			_goal_binding: goal_binding,
 			session_id: session.id,
 			initial_items: session.initial_items,
+			notices,
 			_inference_registry: inference_registry,
 			_catalog: catalog_owner,
 			_memory_extraction: memory_extraction,
@@ -1098,6 +1126,11 @@ impl HeadlessSession {
 	/// Returns the canonical replay projection loaded before the first turn.
 	pub fn initial_items(&self) -> &[Item] {
 		&self.initial_items
+	}
+
+	/// Takes composition notices so an app adapter can present them.
+	pub fn take_notices(&mut self) -> Vec<HeadlessNotice> {
+		mem::take(&mut self.notices)
 	}
 
 	/// Returns the Environment client owned alongside the agent.
@@ -1322,8 +1355,60 @@ impl HeadlessSession {
 	}
 }
 
+/// Applies a journaled model override, substitutes a catalog fallback when the
+/// pinned selector is unselectable, and reprojects model-derived snapshot
+/// fields through `session_blueprint`/`agent_snapshot`.
+fn apply_revived_session_model(
+	snapshot: &mut AgentSnapshot,
+	catalog: &snapshot::Catalog,
+	model_override: Option<&JournalModelChange>,
+	root: &Path,
+	additional_roots: &[PathBuf],
+	fallback_selector: fn(&snapshot::Catalog) -> Option<Str>,
+) -> Result<Option<HeadlessNotice>, HeadlessError> {
+	let launch = snapshot.turn.params.model.clone();
+	if let Some(model) = model_override
+		&& !model.fallback
+	{
+		snapshot.turn.params.model = format!("{}/{}", model.model.provider.0, model.model.model.0);
+	}
+	let mut notice = None;
+	if !chat::model_selector_is_selectable(catalog, &snapshot.turn.params.model) {
+		let saved = Str::new(snapshot.turn.params.model.as_str());
+		let fallback = fallback_selector(catalog).ok_or(HeadlessError::NoSelectableModel)?;
+		snapshot.turn.params.model = fallback.as_str().to_owned();
+		notice = Some(HeadlessNotice::SessionModelUnavailable { saved, fallback });
+	}
+	if snapshot.turn.params.model != launch {
+		let session_id = snapshot
+			.turn
+			.context_id
+			.clone()
+			.unwrap_or_else(|| sf!("session"));
+		let blueprint = chat::session_blueprint(
+			snapshot.turn.params.model.as_str(),
+			catalog,
+			root,
+			additional_roots,
+			&session_id,
+			Arc::clone(&snapshot.registry),
+		)
+		.map_err(HeadlessError::SessionBlueprint)?;
+		let projected =
+			chat::agent_snapshot(&blueprint, catalog, None).map_err(HeadlessError::AgentSnapshot)?;
+		snapshot.turn = projected.turn;
+		snapshot.reasoning_dialect = projected.reasoning_dialect;
+	}
+	Ok(notice)
+}
+
 #[cfg(test)]
 mod tests {
+	use omp_agent::Journal;
+	use omp_proto::thread::v1::{Message, Part, Role, item, part};
+	use omp_storage::transcript::{Event, Header, ItemRecord, Kind, Patch, SessionId, Writer};
+	use omp_tool::Registry;
+
 	use super::*;
 
 	#[test]
@@ -1343,6 +1428,130 @@ mod tests {
 		let first = omp_envd::worker::HostKey::new("project", "trusted", "example/one");
 		let second = omp_envd::worker::HostKey::new("user", "trusted", "example/one");
 		validate_extension_host_keys([&first, &second]).expect("distinct scoped keys");
+	}
+
+	fn launch_snapshot(catalog: &snapshot::Catalog, root: &Path, model: &str) -> AgentSnapshot {
+		let registry = Arc::new(Registry::new());
+		let session_id = sf!("test-session");
+		let blueprint = chat::session_blueprint(model, catalog, root, &[], &session_id, registry)
+			.expect("blueprint");
+		chat::agent_snapshot(&blueprint, catalog, None).expect("snapshot")
+	}
+
+	fn write_unavailable_model_journal(root: &Path) -> std::path::PathBuf {
+		let sessions = root.join("sessions");
+		std::fs::create_dir_all(&sessions).expect("sessions dir");
+		let id = Str::from(omp_core::Ulid::generate().to_string());
+		let path = sessions.join(format!("{id}.jsonl"));
+		let mut writer = Writer::create(&path, &Header {
+			v:       4,
+			id:      SessionId(id.clone()),
+			created: 1,
+			cwd:     root.to_owned(),
+		})
+		.expect("create transcript");
+		writer
+			.append(&Event {
+				ts:   2,
+				kind: Kind::Item(ItemRecord {
+					item:        Item {
+						seq:           0,
+						created_at_ms: 2,
+						kind:          Some(item::Kind::Message(Message {
+							role:  i32::from(Role::User),
+							parts: vec![Part { kind: Some(part::Kind::Text("hello".to_owned())) }],
+						})),
+						props:         None,
+					},
+					turn_id:     None,
+					prompt_hash: None,
+				}),
+			})
+			.expect("append prompt");
+		writer
+			.append(&Event {
+				ts:   3,
+				kind: Kind::Infer {
+					thinking: Patch::Unchanged,
+					model:    Patch::Set(JournalModelChange {
+						role:     sf!("temporary"),
+						model:    JournalModelRef {
+							provider: JournalProviderId(sf!("gone")),
+							api:      sf!("openai"),
+							model:    JournalModelId(sf!("gone")),
+						},
+						fallback: false,
+					}),
+					tier:     Patch::Unchanged,
+					cred_pin: Patch::Unchanged,
+				},
+			})
+			.expect("append model override");
+		drop(writer);
+		path
+	}
+
+	#[test]
+	fn revived_journal_falls_back_from_unavailable_pinned_model() {
+		let catalog = snapshot::Catalog::try_embedded().expect("embedded catalog");
+		let scratch = tempfile::tempdir().expect("scratch");
+		let root = scratch.path().join("project");
+		std::fs::create_dir_all(&root).expect("project");
+		let launch = "apple-intelligence/apple-intelligence";
+		let path = write_unavailable_model_journal(&root);
+		let journal = Journal::open(&path).expect("open journal");
+		let mut snapshot = launch_snapshot(catalog, &root, launch);
+		let revived = omp_agent::revive_existing(&path, journal, snapshot).expect("revive");
+		snapshot = revived.snapshot;
+		let notice = apply_revived_session_model(
+			&mut snapshot,
+			catalog,
+			revived.model_override.as_ref(),
+			&root,
+			&[],
+			chat::fallback_model_selector,
+		)
+		.expect("fallback applies");
+		let expected = chat::fallback_model_selector(catalog).expect("catalog fallback");
+		assert_eq!(snapshot.turn.params.model, expected.as_str());
+		assert_eq!(
+			notice,
+			Some(HeadlessNotice::SessionModelUnavailable {
+				saved:    Str::from("gone/gone"),
+				fallback: expected.clone(),
+			})
+		);
+		assert_eq!(
+			snapshot.reasoning_dialect,
+			chat::interrupted_reasoning_dialect(catalog, expected.as_str())
+		);
+		assert_eq!(
+			snapshot.turn.stream_watchdog,
+			crate::chat::model_stream_watchdog(catalog, expected.as_str())
+		);
+	}
+
+	#[test]
+	fn revived_journal_errors_when_catalog_has_no_selectable_model() {
+		let catalog = snapshot::Catalog::try_embedded().expect("embedded catalog");
+		let scratch = tempfile::tempdir().expect("scratch");
+		let root = scratch.path().join("project");
+		std::fs::create_dir_all(&root).expect("project");
+		let path = write_unavailable_model_journal(&root);
+		let journal = Journal::open(&path).expect("open journal");
+		let mut snapshot = launch_snapshot(catalog, &root, "apple-intelligence/apple-intelligence");
+		let revived = omp_agent::revive_existing(&path, journal, snapshot).expect("revive");
+		snapshot = revived.snapshot;
+		let error = apply_revived_session_model(
+			&mut snapshot,
+			catalog,
+			revived.model_override.as_ref(),
+			&root,
+			&[],
+			|_| None,
+		)
+		.expect_err("empty catalog fallback");
+		assert!(matches!(error, HeadlessError::NoSelectableModel));
 	}
 
 	#[tokio::test]
