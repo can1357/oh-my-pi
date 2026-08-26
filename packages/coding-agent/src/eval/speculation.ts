@@ -64,19 +64,32 @@ export function speculationKey(name: string, args: Record<string, unknown>): str
 }
 
 interface StringLiteral {
-	/** Decoded value. Only produced when the literal needs no unescaping. */
-	value: string;
 	/** Index just past the closing quote. */
 	end: number;
+	/**
+	 * Literal text, present only when the source needs no unescaping. Absent
+	 * means the terminator was located but the value is not reproducible, so the
+	 * span may be skipped and must not be speculated on.
+	 */
+	value?: string;
 }
 
 /**
- * Read a string literal starting at `start`, or `undefined` when it is
- * unterminated, interpolated, or contains an escape.
+ * Read a string literal starting at `start`.
  *
- * Escapes are refused rather than decoded: a decoder that disagrees with the
- * runtime by one character would key the speculation differently from the real
- * call, wasting it silently. Refusing is free and cannot be wrong.
+ * Three outcomes, and the distinction is load-bearing:
+ *
+ * - a literal with `value`: safe to speculate on.
+ * - a literal without `value`: terminator found, contents not reproducible
+ *   without an escape decoder. The caller skips the span.
+ * - `undefined`: the terminator could not be located at all, because the string
+ *   is still streaming or because a template interpolation can nest quotes,
+ *   braces, and further templates. The caller MUST stop scanning rather than
+ *   walk into the body, which would read string contents as code.
+ *
+ * Escapes are never decoded: a decoder that disagreed with the runtime by one
+ * character would key the speculation differently from the real call, wasting it
+ * silently. They are consumed only to keep the terminator search aligned.
  */
 function readStringLiteral(code: string, start: number, language: SpeculationLanguage): StringLiteral | undefined {
 	const quote = code[start];
@@ -86,13 +99,19 @@ function readStringLiteral(code: string, start: number, language: SpeculationLan
 	const triple = language === "py" && (quote === '"' || quote === "'") && code.startsWith(quote.repeat(3), start);
 	const terminator = triple ? quote.repeat(3) : quote;
 	let index = start + terminator.length;
+	let reproducible = true;
 	while (index < code.length) {
 		const ch = code[index];
-		if (ch === "\\") return undefined;
+		if (ch === "\\") {
+			reproducible = false;
+			index += 2;
+			continue;
+		}
 		if (language === "js" && quote === "`" && ch === "$" && code[index + 1] === "{") return undefined;
-		if (!triple && (ch === "\n" || ch === "\r") && quote !== "`") return undefined;
+		if (!triple && quote !== "`" && (ch === "\n" || ch === "\r")) return undefined;
 		if (code.startsWith(terminator, index)) {
-			return { value: code.slice(start + terminator.length, index), end: index + terminator.length };
+			const body = code.slice(start + terminator.length, index);
+			return { end: index + terminator.length, value: reproducible ? body : undefined };
 		}
 		index++;
 	}
@@ -140,7 +159,7 @@ function readLiteralCall(code: string, afterIdent: number, language: Speculation
 	if (code[index] !== "(") return undefined;
 	index = skipWhitespace(code, index + 1);
 	const literal = readStringLiteral(code, index, language);
-	if (!literal) return undefined;
+	if (literal?.value === undefined) return undefined;
 	index = skipWhitespace(code, literal.end);
 	if (code[index] !== ")") return undefined;
 	return { prompt: literal.value, end: index + 1 };
@@ -148,8 +167,15 @@ function readLiteralCall(code: string, afterIdent: number, language: Speculation
 
 /**
  * Scan cell source for complete, fully-literal speculatable calls, in source
- * order. Safe on a truncated prefix: an unterminated string or an unclosed
- * argument list simply yields nothing for that call site.
+ * order.
+ *
+ * Safe on a truncated prefix. An unclosed argument list yields nothing for that
+ * call site, and a string whose terminator cannot be located stops the scan
+ * outright rather than walking into its body: a cell that builds a meta-prompt
+ * containing `completion('...')` would otherwise phantom-launch a billable call
+ * for text the runtime never runs. Stopping costs nothing, because `observe`
+ * re-scans the whole prefix on the next delta, by which point the string has
+ * usually closed.
  */
 export function findSpeculatableCalls(code: string, language: SpeculationLanguage): SpeculatableCall[] {
 	const found: SpeculatableCall[] = [];
@@ -170,9 +196,11 @@ export function findSpeculatableCalls(code: string, language: SpeculationLanguag
 		}
 		if (ch === '"' || ch === "'" || (language === "js" && ch === "`")) {
 			const literal = readStringLiteral(code, index, language);
-			// An unreadable literal still consumed its opening quote as far as the
-			// scanner is concerned; step one char so a refused escape cannot loop.
-			index = literal ? literal.end : index + 1;
+			// No locatable terminator: stop. Scanning onward would read the string's
+			// contents as code, and a missed speculation is free while a phantom one
+			// is billed.
+			if (!literal) return found;
+			index = literal.end;
 			continue;
 		}
 		if (IDENT_CHAR.test(ch)) {
