@@ -944,7 +944,7 @@ fn handle_command(
 		},
 		ControlCommand::WorkspaceRoots { reply } => {
 			let result = journal.load().and_then(|view| {
-				let primary = view.header().cwd.clone();
+				let primary = view.log().header().cwd.clone();
 				drop(view);
 				journal.workspace_roots(&primary)
 			});

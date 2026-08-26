@@ -587,8 +587,8 @@ pub(crate) mod context {
 		}
 		let log = journal.load()?;
 		let mut state = CheckpointState::default();
-		for index in log.as_ref().iter() {
-			let Some(Entry::Ok(event)) = log.get(index) else {
+		for index in log.live().iter() {
+			let Some(Entry::Ok(event)) = log.log().get(index) else {
 				continue;
 			};
 			let Kind::Custom(custom) = &event.kind else {

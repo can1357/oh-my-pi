@@ -177,7 +177,7 @@ mod tests {
 
 		let revived = revive(&path, AgentSnapshot::default()).expect("revive compacted journal");
 		let log = revived.journal.load().expect("load revived journal");
-		let thread = project_journal(&log, log.as_ref(), &Registry::new(), &CapsBase {
+		let thread = project_journal(&log, &Registry::new(), &CapsBase {
 			maximum_parts:      8,
 			maximum_text_bytes: 4096,
 			media:              true,

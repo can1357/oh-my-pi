@@ -187,6 +187,28 @@ pub struct Log {
 	diagnostics: Vec<ReadDiagnostic>,
 }
 
+/// A transcript log paired with the live chain folded from it.
+///
+/// The pairing is constructed once, so a caller cannot present a live chain
+/// that belongs to a different log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveLog {
+	log:  Log,
+	live: LiveSet,
+}
+
+impl LiveLog {
+	/// Returns the physical event log.
+	pub const fn log(&self) -> &Log {
+		&self.log
+	}
+
+	/// Returns the live chain folded from the log.
+	pub const fn live(&self) -> &LiveSet {
+		&self.live
+	}
+}
+
 impl Log {
 	/// Returns the line-zero identity header.
 	pub const fn header(&self) -> &Header {
@@ -457,8 +479,7 @@ pub struct Reader {
 	header_terminated: bool,
 	tail_bytes:        u64,
 	tail_diagnostic:   Option<ReadDiagnostic>,
-	log:               Log,
-	live:              LiveSet,
+	view:              LiveLog,
 }
 
 impl Reader {
@@ -537,8 +558,7 @@ impl Reader {
 			header_terminated,
 			tail_bytes,
 			tail_diagnostic,
-			log,
-			live,
+			view: LiveLog { log, live },
 		})
 	}
 
@@ -554,8 +574,10 @@ impl Reader {
 			header_terminated: false,
 			tail_bytes:        0,
 			tail_diagnostic:   None,
-			log:               Log { header, events: Vec::new(), diagnostics: Vec::new() },
-			live:              LiveSet::new(),
+			view:              LiveLog {
+				log:  Log { header, events: Vec::new(), diagnostics: Vec::new() },
+				live: LiveSet::new(),
+			},
 		}
 	}
 
@@ -571,7 +593,7 @@ impl Reader {
 				},
 				Err(error) => return Err(error),
 			};
-			if opened.log.header != self.log.header {
+			if opened.view.log.header != self.view.log.header {
 				return Err(changed_file("materialized transcript header changed"));
 			}
 			let records = opened.next_index();
@@ -676,10 +698,10 @@ impl Reader {
 		if Some(file_identity(&path_metadata)) != self.identity {
 			return Err(changed_file("transcript path was replaced during refresh"));
 		}
-		let first_new = self.log.events.len();
-		self.log.events.extend(entries);
-		self.log.diagnostics.extend(diagnostics);
-		self.log.fold_from(first_new, &mut self.live);
+		let first_new = self.view.log.events.len();
+		self.view.log.events.extend(entries);
+		self.view.log.diagnostics.extend(diagnostics);
+		self.view.log.fold_from(first_new, &mut self.view.live);
 		self.watermark = self.watermark.saturating_add(consumed);
 		self.header_terminated = header_terminated;
 		let state = if self.tail_bytes != 0 {
@@ -690,20 +712,26 @@ impl Reader {
 		Ok(self.report(state))
 	}
 
+	/// Returns the decoded transcript and its live-chain projection.
+	pub const fn live_log(&self) -> &LiveLog {
+		&self.view
+	}
+
 	/// Returns the decoded transcript prefix.
 	pub const fn log(&self) -> &Log {
-		&self.log
+		self.view.log()
 	}
 
 	/// Returns the live-chain projection for the decoded prefix.
 	pub const fn live(&self) -> &LiveSet {
-		&self.live
+		self.view.live()
 	}
 
 	/// Iterates permanent malformed diagnostics followed by the current torn
 	/// tail diagnostic, when present.
 	pub fn diagnostics(&self) -> impl Iterator<Item = ReadDiagnostic> + '_ {
 		self
+			.view
 			.log
 			.diagnostics
 			.iter()
@@ -713,7 +741,7 @@ impl Reader {
 
 	/// Returns damage counters for the decoded prefix and current tail.
 	pub fn counters(&self) -> ReadCounters {
-		let mut counters = self.log.counters();
+		let mut counters = self.view.log.counters();
 		if self.tail_diagnostic.is_some() {
 			counters.truncated = counters.truncated.saturating_add(1);
 		}
@@ -722,7 +750,7 @@ impl Reader {
 
 	/// Returns the durable index assigned to the next committed event.
 	pub fn next_index(&self) -> u64 {
-		u64::try_from(self.log.len()).expect("event indexes fit in u64")
+		u64::try_from(self.view.log.len()).expect("event indexes fit in u64")
 	}
 
 	/// Returns the complete-line byte watermark.
@@ -810,6 +838,14 @@ pub fn load(path: &Path) -> Result<Log, Error> {
 		|| {},
 	)?;
 	Ok(Log { header: report.header, events, diagnostics: report.diagnostics })
+}
+
+/// Loads a transcript and folds its live chain in one pass.
+pub fn load_live(path: &Path) -> Result<LiveLog, Error> {
+	let log = load(path)?;
+	let mut live = LiveSet::new();
+	log.live_into(&mut live);
+	Ok(LiveLog { log, live })
 }
 
 /// Visits physical event records using bounded `BufRead` scratch.
@@ -941,4 +977,72 @@ fn push_tombstone(
 	let source = String::from_utf8_lossy(line);
 	let raw = to_raw_value(source.as_ref()).expect("a JSON string is always serializable");
 	events.push(Entry::Tombstone(raw));
+}
+
+#[cfg(test)]
+mod tests {
+	use std::path::PathBuf;
+
+	use omp_core::{Hash32, Str, sf};
+	use omp_proto::inference::v1 as pb;
+	use tempfile::tempdir;
+
+	use super::{Reader, load_live};
+	use crate::transcript::{Event, Header, Kind, SessionId, TitleSource, TurnReceipt, Writer};
+
+	fn header() -> Header {
+		Header {
+			v:       4,
+			id:      SessionId(sf!("session")),
+			created: 1,
+			cwd:     PathBuf::from("/tmp/work"),
+		}
+	}
+
+	fn title(ts: u64, value: &str) -> Event {
+		Event { ts, kind: Kind::Title { title: Str::new(value), source: TitleSource::User } }
+	}
+
+	#[test]
+	fn load_live_matches_reader_live_set_with_rewind_and_incomplete_receipt() {
+		let directory = tempdir().expect("temporary directory");
+		let path = directory.path().join("session.jsonl");
+		let mut writer = Writer::create(&path, &header()).expect("create transcript");
+		writer.append(&title(1, "kept")).expect("event zero");
+		writer.append(&title(2, "discarded")).expect("event one");
+		writer
+			.append(&Event { ts: 3, kind: Kind::Rewind { to: Some(0) } })
+			.expect("rewind");
+		writer
+			.append(&title(4, "after-rewind"))
+			.expect("event three");
+		writer
+			.append(&Event {
+				ts:   5,
+				kind: Kind::TurnReceipt(TurnReceipt {
+					turn_id:            sf!("turn"),
+					prompt_hash:        Hash32::new([9; 32]),
+					prompt_head_events: Vec::new(),
+					// Incomplete: claimed item indexes without matching outcome output.
+					item_events:        vec![0],
+					outcome:            pb::Outcome { output: Vec::new(), ..Default::default() },
+				}),
+			})
+			.expect("incomplete receipt");
+		drop(writer);
+
+		let loaded = load_live(&path).expect("load_live pairs the fold");
+		// Reader is the producer Journal::load refreshes under its lock guard.
+		let reader = Reader::open(&path).expect("open incremental reader");
+		assert_eq!(
+			loaded.live(),
+			reader.live_log().live(),
+			"path load_live and the journal reader guard must agree on LiveSet"
+		);
+		assert_eq!(
+			loaded.live().iter().collect::<Vec<_>>(),
+			vec![0, 3],
+			"rewind must drop the discarded title while the incomplete receipt stays inert"
+		);
+	}
 }
