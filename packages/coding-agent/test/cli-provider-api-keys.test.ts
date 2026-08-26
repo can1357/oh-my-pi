@@ -100,32 +100,96 @@ describe("--provider-api-keys", () => {
 		roots.push(root);
 		const bundlePath = path.join(root, "bundle.json");
 		fs.writeFileSync(bundlePath, JSON.stringify({ anthropic: "descriptor-token" }), { mode: 0o600 });
-		const fd = fs.openSync(bundlePath, "r");
-		const parsed = parseArgs(["--provider-api-keys", bundlePath, "--provider-api-keys-fd", String(fd)]);
-		parsed.mode = "acp";
-		parsed.noExtensions = true;
-		let discovered = false;
-		const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-		const exitCode = process.exitCode;
-		process.exitCode = 0;
-		try {
-			await expect(
-				runRootCommand(parsed, ["--provider-api-keys", bundlePath, "--provider-api-keys-fd", String(fd)], {
-					discoverAuthStorage: async () => {
-						discovered = true;
-						return { close: () => {} } as unknown as AuthStorage;
-					},
-				}),
-			).resolves.toBeUndefined();
-			expect(process.exitCode).toBe(2);
-			expect(discovered).toBe(false);
-			expect(stderr).toHaveBeenCalledWith(expect.stringContaining("mutually exclusive"));
-			expect(fdIsOpen(fd)).toBe(false);
-		} finally {
-			if (fdIsOpen(fd)) fs.closeSync(fd);
-			process.exitCode = exitCode ?? 0;
-			stderr.mockRestore();
-		}
+		const script = `
+import * as fs from "node:fs";
+import { parseArgs } from ${JSON.stringify(argsModuleUrl)};
+import { runRootCommand } from ${JSON.stringify(mainModuleUrl)};
+const bundlePath = ${JSON.stringify(bundlePath)};
+const fd = fs.openSync(bundlePath, "r");
+const argv = ["--provider-api-keys", bundlePath, "--provider-api-keys-fd", String(fd)];
+const parsed = parseArgs(argv);
+parsed.mode = "acp";
+parsed.noExtensions = true;
+let discovered = false;
+process.exitCode = 0;
+await runRootCommand(parsed, argv, {
+  discoverAuthStorage: async () => {
+    discovered = true;
+    return { close() {} };
+  },
+});
+const observedExitCode = process.exitCode;
+process.exitCode = 0;
+let fdOpenAfter = true;
+try {
+  fs.fstatSync(fd);
+} catch {
+  fdOpenAfter = false;
+}
+console.log(JSON.stringify({ observedExitCode, discovered, fdOpenAfter }));`;
+		const proc = Bun.spawn({
+			cmd: [process.execPath, "--eval", script],
+			cwd: process.cwd(),
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [exitCode, stdout, stderr] = await Promise.all([
+			proc.exited,
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+		]);
+		expect(exitCode, stderr).toBe(0);
+		expect(stderr).toContain("mutually exclusive");
+		const result = JSON.parse(stdout.trim().split("\n").at(-1) ?? "{}");
+		expect(result).toEqual({ observedExitCode: 2, discovered: false, fdOpenAfter: false });
+	});
+
+	it("consumes and closes the descriptor before --cwd validation can fail", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-provider-api-keys-fd-cwd-"));
+		roots.push(root);
+		const bundlePath = path.join(root, "bundle.json");
+		fs.writeFileSync(bundlePath, JSON.stringify({ anthropic: "descriptor-token" }), { mode: 0o600 });
+		const missingCwd = path.join(root, "missing-target");
+		const script = `
+import * as fs from "node:fs";
+import { parseArgs } from ${JSON.stringify(argsModuleUrl)};
+import { runRootCommand } from ${JSON.stringify(mainModuleUrl)};
+const bundlePath = ${JSON.stringify(bundlePath)};
+const fd = fs.openSync(bundlePath, "r");
+const argv = ["--cwd", ${JSON.stringify(missingCwd)}, "--provider-api-keys-fd", String(fd)];
+const parsed = parseArgs(argv);
+parsed.mode = "acp";
+parsed.noExtensions = true;
+let threw = false;
+try {
+  await runRootCommand(parsed, argv, {
+    discoverAuthStorage: async () => ({ close() {} }),
+  });
+} catch {
+  threw = true;
+}
+let fdOpenAfter = true;
+try {
+  fs.fstatSync(fd);
+} catch {
+  fdOpenAfter = false;
+}
+console.log(JSON.stringify({ threw, fdOpenAfter }));
+process.exitCode = 0;`;
+		const proc = Bun.spawn({
+			cmd: [process.execPath, "--eval", script],
+			cwd: process.cwd(),
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [exitCode, stdout, stderr] = await Promise.all([
+			proc.exited,
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+		]);
+		expect(exitCode, stderr).toBe(0);
+		const result = JSON.parse(stdout.trim().split("\n").at(-1) ?? "{}");
+		expect(result).toEqual({ threw: true, fdOpenAfter: false });
 	});
 
 	it("rejects an explicitly empty credential-file path, disarms the watchdog and releases stdin", async () => {

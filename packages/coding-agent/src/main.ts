@@ -1412,6 +1412,39 @@ export async function runRootCommand(
 	logger.startTiming();
 	startStartupWatchdog();
 	try {
+		const parsedArgs = parsed;
+		// Relative named bundle paths resolve from the launch directory, before
+		// automatic home relocation or explicit --cwd handling.
+		const launchCwd = process.cwd();
+		const providerApiKeysPath =
+			parsedArgs.providerApiKeys && !nodePath.isAbsolute(parsedArgs.providerApiKeys)
+				? nodePath.resolve(launchCwd, parsedArgs.providerApiKeys)
+				: parsedArgs.providerApiKeys;
+		// Consume the credential bundle before any other fallible startup work. A
+		// launcher-supplied descriptor stays inheritable until it is closed; if
+		// theme init or applyStartupCwd threw first, the outer catch would leave
+		// the descriptor open to every later child (discoverAuthStorage resolves
+		// `!command` broker URL/token values through a shell).
+		let providerApiKeys: ProviderApiKeyEntries | undefined;
+		if (parsedArgs.providerApiKeys !== undefined || parsedArgs.providerApiKeysFd !== undefined) {
+			try {
+				if (parsedArgs.providerApiKeys !== undefined && parsedArgs.providerApiKeysFd !== undefined) {
+					await closeProviderApiKeyBundleFd(parsedArgs.providerApiKeysFd);
+					throw new CliUsageError("--provider-api-keys and --provider-api-keys-fd are mutually exclusive");
+				}
+				if (parsedArgs.providerApiKeysFd !== undefined) {
+					providerApiKeys = await readProviderApiKeyBundleFd(parsedArgs.providerApiKeysFd);
+				} else if (parsedArgs.providerApiKeys !== undefined) {
+					providerApiKeys = await readProviderApiKeyBundle(providerApiKeysPath ?? parsedArgs.providerApiKeys);
+				}
+			} catch (error) {
+				stopStartupWatchdog();
+				if (!reportCliUsageError(error)) throw error;
+				process.exitCode = 2;
+				return;
+			}
+		}
+
 		// Non-prepaint commands still need a default theme; an existing Composer
 		// already initialized its cached theme synchronously for the first frame.
 		await logger.time("initTheme:initial", ensureTheme);
@@ -1459,32 +1492,6 @@ export async function runRootCommand(
 		if ((parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui") && parsedArgs.fileArgs.length > 0) {
 			process.stderr.write(`${chalk.red("Error: @file arguments are not supported in RPC mode")}\n`);
 			process.exit(1);
-		}
-		// Consume the credential bundle before startup can spawn a child or claim
-		// stdin. A launcher-supplied descriptor stays inheritable until it is closed,
-		// and discoverAuthStorage below resolves `!command` broker URL/token values
-		// through a shell, so a later read would expose the bundle to that child.
-		let providerApiKeys: ProviderApiKeyEntries | undefined;
-		if (parsedArgs.providerApiKeys !== undefined || parsedArgs.providerApiKeysFd !== undefined) {
-			try {
-				if (parsedArgs.providerApiKeys !== undefined && parsedArgs.providerApiKeysFd !== undefined) {
-					await closeProviderApiKeyBundleFd(parsedArgs.providerApiKeysFd);
-					throw new CliUsageError("--provider-api-keys and --provider-api-keys-fd are mutually exclusive");
-				}
-				if (parsedArgs.providerApiKeysFd !== undefined) {
-					providerApiKeys = await readProviderApiKeyBundleFd(parsedArgs.providerApiKeysFd);
-				} else if (parsedArgs.providerApiKeys !== undefined) {
-					providerApiKeys = await readProviderApiKeyBundle(providerApiKeysPath ?? parsedArgs.providerApiKeys);
-				}
-			} catch (error) {
-				parsedArgs.cwd = startupDirectoryState.parsedCwd;
-				setProjectDir(startupDirectoryState.projectDir);
-				if (process.cwd() !== startupDirectoryState.cwd) process.chdir(startupDirectoryState.cwd);
-				stopStartupWatchdog();
-				if (!reportCliUsageError(error)) throw error;
-				process.exitCode = 2;
-				return;
-			}
 		}
 
 		const mode = parsedArgs.mode || "text";
