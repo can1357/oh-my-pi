@@ -953,7 +953,7 @@ pub(crate) async fn run(
 		snapshot.turn.params.thinking =
 			Some(inference_pb::Reasoning { effort: effort as i32, ..Default::default() });
 	}
-	if resume.is_some() {
+	if resume.is_some() || fork.is_some() {
 		let path = sessions_dir.join(format!("{}.jsonl", session.id.as_str()));
 		let Session { id, journal, initial_items } = session;
 		let revived = omp_agent::revive_existing(&path, journal, snapshot)

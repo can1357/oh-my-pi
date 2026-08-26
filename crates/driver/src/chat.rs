@@ -6490,6 +6490,7 @@ mod tests {
 	use omp_storage::transcript::{Event, ItemRecord, TitleSource, Writer};
 
 	use super::*;
+	use crate::headless::{HeadlessSession, HeadlessSessionOptions};
 
 	#[test]
 	fn auto_thinking_installs_a_clamped_provisional_effort() {
@@ -7323,6 +7324,51 @@ mod tests {
 		assert_eq!(queued.len(), 1);
 		assert_eq!(queued[0].note, "verify the failing build before merging");
 		assert_eq!(queued[0].severity, omp_agent::advisor::AdviceSeverity::Concern);
+	}
+
+	#[tokio::test]
+	async fn forked_headless_session_projects_non_empty_initial_items() {
+		let scratch = tempfile::tempdir().expect("scratch directory");
+		let data_dir = scratch.path().join("data");
+		let root = scratch.path().join("project");
+		fs::create_dir_all(&root).expect("project root");
+		let state_dir = omp_env::project_state::directory(&data_dir, &root).expect("state dir");
+		let sessions_dir = state_dir.join("sessions");
+		ensure_state_directory(&sessions_dir).expect("sessions dir");
+		let parent_id = write_session(&sessions_dir, &root, "parent fork prompt", None);
+		let catalog =
+			crate::registry::production_catalog(&data_dir).expect("production catalog");
+		let model = fallback_model_selector(&catalog).expect("selectable fallback model");
+
+		let mut session = HeadlessSession::open(data_dir, HeadlessSessionOptions {
+			project:               root,
+			settings_overlays:     Box::new([]),
+			additional_roots:      Box::new([]),
+			model,
+			initial_regime:        None,
+			initial_prompt_slot:   None,
+			plan_handoff:          None,
+			resume:                None,
+			fork:                  Some(parent_id),
+			py_eval:               false,
+			approval_mode:         None,
+			pty_denied:            false,
+			credential_provider:   None,
+			api_key:               None,
+			prompt_cache_affinity: None,
+			session_generation:    1,
+		})
+		.await
+		.expect("forked session opens");
+		assert!(!session.initial_items().is_empty(), "fork must project the parent's live items");
+		let _ = session
+			.finalize(
+				&mut tokio::io::sink(),
+				crate::headless::finalize::FinalizerBudget::success(std::time::Duration::from_millis(
+					1,
+				)),
+			)
+			.await;
 	}
 }
 #[cfg(test)]

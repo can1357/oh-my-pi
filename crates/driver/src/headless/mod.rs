@@ -30,6 +30,9 @@ pub enum HeadlessError {
 	/// A typed authority used by headless composition failed.
 	#[error("headless session composition failed")]
 	Composition(#[source] Box<dyn error::Error + Send + Sync + 'static>),
+	/// No model in the embedded catalog can be selected for a revived session.
+	#[error("no selectable model is available to resume")]
+	NoSelectableModel,
 	/// The requested model selector was not present in the embedded catalog.
 	#[error("unknown model `{0}`")]
 	UnknownModel(Str),
@@ -504,6 +507,18 @@ impl HeadlessSession {
 				snapshot.turn.params.model =
 					format!("{}/{}", model.model.provider.0, model.model.model.0);
 			}
+			if !chat::model_selector_is_selectable(catalog, &snapshot.turn.params.model) {
+				let saved = snapshot.turn.params.model.clone();
+				let fallback =
+					chat::fallback_model_selector(catalog).ok_or(HeadlessError::NoSelectableModel)?;
+				snapshot.turn.params.model = fallback.as_str().to_owned();
+				eprintln!(
+					"Session model `{saved}` is unavailable; resumed with `{fallback}` without \
+					 changing the session pin."
+				);
+			}
+			snapshot.reasoning_dialect =
+				chat::interrupted_reasoning_dialect(catalog, &snapshot.turn.params.model);
 		}
 		apply_tool_policy(&mut snapshot, &policy.tools, policy.lsp_enabled);
 		let content = prompt_discovery.content;
