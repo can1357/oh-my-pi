@@ -12,7 +12,7 @@ const SECOND: &[u8] = b"ok\n";
 /// Covers append ordering with resulting byte lengths, exact byte round-trip,
 /// and rollback via [`ByteJournalStore::truncate`] to an earlier length
 /// snapshot.
-pub async fn assert_byte_journal_contract<S: ByteJournalStore>(mut store: S) {
+pub fn assert_byte_journal_contract<S: ByteJournalStore>(mut store: S) {
 	let watermark = expect(store.append(FIRST), "append first byte group");
 	assert_eq!(watermark, FIRST.len() as u64, "append returns resulting byte length");
 

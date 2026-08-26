@@ -2,7 +2,6 @@ use std::{
 	collections::VecDeque,
 	future,
 	future::Future,
-	io,
 	pin::Pin,
 	sync::{
 		Arc,
@@ -18,6 +17,29 @@ use parking_lot::Mutex;
 use tokio::{sync::Notify, time};
 
 use crate::{Error, InvokeFrame, TurnClient, TurnId, TurnInput, TurnOptions, TurnSession};
+
+/// Failure waiting on a [`Gate`] rendezvous within its bound.
+#[derive(Debug, thiserror::Error)]
+pub enum GateError {
+	/// Arrival was not observed before the bound elapsed.
+	#[error("timed out waiting for gate arrival after {limit:?}")]
+	ArrivalTimeout {
+		/// Bound applied to the wait.
+		limit:  Duration,
+		/// Timeout observed by the Tokio timer.
+		#[source]
+		source: time::error::Elapsed,
+	},
+	/// Release was not observed before the bound elapsed.
+	#[error("timed out waiting for gate release after {limit:?}")]
+	GateTimeout {
+		/// Bound applied to the wait.
+		limit:  Duration,
+		/// Timeout observed by the Tokio timer.
+		#[source]
+		source: time::error::Elapsed,
+	},
+}
 
 /// One deterministic test rendezvous with separately observable arrival and
 /// release.
@@ -40,7 +62,7 @@ impl Gate {
 	}
 
 	/// Waits with a bound until the operation reaches this gate.
-	pub async fn wait_arrived(&self, limit: Duration) -> Result<(), io::Error> {
+	pub async fn wait_arrived(&self, limit: Duration) -> Result<(), GateError> {
 		time::timeout(limit, async {
 			loop {
 				let notified = self.0.arrival.notified();
@@ -51,7 +73,7 @@ impl Gate {
 			}
 		})
 		.await
-		.map_err(|_| io::Error::other(format!("timed out waiting for gate arrival after {limit:?}")))
+		.map_err(|source| GateError::ArrivalTimeout { limit, source })
 	}
 
 	/// Releases every waiter parked at this gate.
@@ -61,11 +83,11 @@ impl Gate {
 	}
 
 	/// Marks arrival and waits with a bound for release.
-	pub async fn arrive_and_wait(&self, limit: Duration) -> Result<(), io::Error> {
+	pub async fn arrive_and_wait(&self, limit: Duration) -> Result<(), GateError> {
 		self.arrive();
-		time::timeout(limit, self.released()).await.map_err(|_| {
-			io::Error::other(format!("timed out waiting for gate release after {limit:?}"))
-		})
+		time::timeout(limit, self.released())
+			.await
+			.map_err(|source| GateError::GateTimeout { limit, source })
 	}
 
 	pub async fn released(&self) {
@@ -186,21 +208,21 @@ impl TurnClient for ScriptedTurnClient {
 				options,
 				submitted: Arc::clone(&submitted),
 			});
-			Ok(ScriptedTurnSession { steps: script.steps, submitted })
+			Ok(ScriptedTurnSession { steps: script.steps, submitted, waiting: None })
 		}
 	}
 }
 
 /// One live scripted turn session.
-#[derive(Debug)]
 pub struct ScriptedTurnSession {
 	steps:     VecDeque<ScriptedStep>,
 	submitted: Arc<Mutex<Vec<InvokeFrame>>>,
+	waiting:   Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
 }
 
 impl TurnSession for ScriptedTurnSession {
 	fn events(&mut self) -> impl Stream<Item = Result<TurnEvent, Error>> + Send + Unpin + '_ {
-		ScriptedEventStream { steps: &mut self.steps, waiting: None }
+		ScriptedEventStream { steps: &mut self.steps, waiting: &mut self.waiting }
 	}
 
 	fn submit(&mut self, frame: InvokeFrame) -> impl Future<Output = Result<(), Error>> + Send + '_ {
@@ -211,7 +233,7 @@ impl TurnSession for ScriptedTurnSession {
 
 struct ScriptedEventStream<'session> {
 	steps:   &'session mut VecDeque<ScriptedStep>,
-	waiting: Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
+	waiting: &'session mut Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
 }
 
 impl Unpin for ScriptedEventStream<'_> {}
@@ -221,22 +243,67 @@ impl Stream for ScriptedEventStream<'_> {
 
 	fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
 		loop {
-			if let Some(waiting) = &mut self.waiting {
-				if waiting.as_mut().poll(context).is_pending() {
-					return Poll::Pending;
-				}
-				self.waiting = None;
+			if self
+				.waiting
+				.as_mut()
+				.is_some_and(|waiting| waiting.as_mut().poll(context).is_pending())
+			{
+				return Poll::Pending;
 			}
-			match self.steps.pop_front() {
-				Some(ScriptedStep::Event(event)) => {
+			if self.waiting.is_some() {
+				*self.waiting = None;
+				let _ = self.steps.pop_front();
+				continue;
+			}
+			match self.steps.front() {
+				Some(ScriptedStep::Event(_)) => {
+					let Some(ScriptedStep::Event(event)) = self.steps.pop_front() else {
+						return Poll::Ready(None);
+					};
 					return Poll::Ready(Some(event.map(|event| *event)));
 				},
 				Some(ScriptedStep::Wait(gate)) => {
+					let gate = gate.clone();
 					gate.arrive();
-					self.waiting = Some(Box::pin(async move { gate.released().await }));
+					*self.waiting = Some(Box::pin(async move { gate.released().await }));
 				},
 				None => return Poll::Ready(None),
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::{error::Error as _, time::Duration};
+
+	use super::{Gate, GateError};
+
+	#[tokio::test]
+	async fn wait_arrived_times_out_with_named_limit() {
+		let gate = Gate::default();
+		let limit = Duration::from_millis(5);
+		let error = gate
+			.wait_arrived(limit)
+			.await
+			.expect_err("unarrived gate times out");
+		assert!(
+			matches!(error, GateError::ArrivalTimeout { limit: observed, source: _ } if observed == limit)
+		);
+		assert!(error.source().is_some(), "preserves Tokio Elapsed");
+	}
+
+	#[tokio::test]
+	async fn arrive_and_wait_times_out_with_named_limit() {
+		let gate = Gate::default();
+		let limit = Duration::from_millis(5);
+		let error = gate
+			.arrive_and_wait(limit)
+			.await
+			.expect_err("unreleased gate times out");
+		assert!(
+			matches!(error, GateError::GateTimeout { limit: observed, source: _ } if observed == limit)
+		);
+		assert!(error.source().is_some(), "preserves Tokio Elapsed");
 	}
 }

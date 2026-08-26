@@ -1,11 +1,6 @@
 //! Byte-target protocol tests without live Redis or SQL servers.
 
-use std::{
-	collections::VecDeque,
-	convert::Infallible,
-	future::Future,
-	task::{Context, Poll, Waker},
-};
+use std::{collections::VecDeque, convert::Infallible};
 
 use omp_storage::{
 	backend::{
@@ -22,17 +17,6 @@ use omp_storage::{
 	testing::assert_byte_journal_contract,
 };
 use tempfile::tempdir;
-
-fn block_on<T>(future: impl Future<Output = T>) -> T {
-	let mut future = std::pin::pin!(future);
-	match future
-		.as_mut()
-		.poll(&mut Context::from_waker(Waker::noop()))
-	{
-		Poll::Ready(value) => value,
-		Poll::Pending => panic!("byte journal contract future parked"),
-	}
-}
 
 #[derive(Default)]
 struct RedisFake {
@@ -152,22 +136,19 @@ impl SqlTransport for SqlFake {
 
 #[test]
 fn memory_store_satisfies_byte_journal_contract() {
-	block_on(assert_byte_journal_contract(MemoryStore::new()));
+	assert_byte_journal_contract(MemoryStore::new());
 }
 
 #[test]
 fn file_store_satisfies_byte_journal_contract() {
 	let directory = tempdir().expect("temporary directory");
 	let store = FileStore::open(directory.path().join("journal.bin")).expect("open file store");
-	block_on(assert_byte_journal_contract(store));
+	assert_byte_journal_contract(store);
 }
 
 #[test]
 fn redis_store_satisfies_byte_journal_contract() {
-	block_on(assert_byte_journal_contract(RedisStore::new(
-		RedisFake::default(),
-		"omp:sessions:test",
-	)));
+	assert_byte_journal_contract(RedisStore::new(RedisFake::default(), "omp:sessions:test"));
 	assert!(RedisStore::<RedisFake>::append_script().contains("STRLEN"));
 	assert!(RedisStore::<RedisFake>::truncate_script().contains("GETRANGE"));
 
@@ -186,7 +167,7 @@ fn redis_store_satisfies_byte_journal_contract() {
 fn sql_store_satisfies_byte_journal_contract() {
 	let store = SqlStore::open(SqlFake::default(), SqlDialect::Sqlite, "session")
 		.expect("initialize dialect");
-	block_on(assert_byte_journal_contract(store));
+	assert_byte_journal_contract(store);
 
 	let fake = SqlFake {
 		bytes:          b"v4\n".to_vec(),
