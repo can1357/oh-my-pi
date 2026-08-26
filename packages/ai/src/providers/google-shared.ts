@@ -40,7 +40,7 @@ import type {
 	ThinkingLevel,
 } from "./google-types";
 import { transformMessages } from "./transform-messages";
-import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
+import { NON_VISION_IMAGE_PLACEHOLDER, supportsProviderFileReference } from "./vision-guard";
 
 export type {
 	Content,
@@ -53,8 +53,12 @@ export { normalizeSchemaForGoogle };
 
 type GoogleApiType = "google-generative-ai" | "google-gemini-cli" | "google-vertex";
 
-function convertGoogleImagePart(image: ImageContent): Part {
-	if (image.providerFile?.provider === "google" && image.providerFile.uri) {
+function convertGoogleImagePart<T extends GoogleApiType>(image: ImageContent, model: Model<T>): Part {
+	if (
+		image.providerFile?.provider === "google" &&
+		image.providerFile.uri &&
+		supportsProviderFileReference(model, image.providerFile, image)
+	) {
 		return { fileData: { fileUri: image.providerFile.uri, mimeType: image.mimeType } };
 	}
 	return image.url
@@ -220,7 +224,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 						if (text.trim().length === 0) continue;
 						parts.push({ text });
 					} else if (supportsImages) {
-						parts.push(convertGoogleImagePart(item));
+						parts.push(convertGoogleImagePart(item, model));
 					} else {
 						omittedImages = true;
 					}
@@ -319,7 +323,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 						? "(see attached image)"
 						: "";
 
-			const imageParts = imageContent.map(convertGoogleImagePart);
+			const imageParts = imageContent.map(image => convertGoogleImagePart(image, model));
 
 			const includeId = supportsFunctionPartId(model);
 			const emittedName = emittedToolCallNames.get(msg.toolCallId);

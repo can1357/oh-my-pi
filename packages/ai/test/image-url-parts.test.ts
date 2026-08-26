@@ -6,7 +6,16 @@ import { convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { convertMessages as convertGoogleMessages } from "@oh-my-pi/pi-ai/providers/google-shared";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { convertResponsesInputContent } from "@oh-my-pi/pi-ai/providers/openai-shared";
-import type { Context, FetchImpl, Message, Model, ProviderFileReference, UserMessage } from "@oh-my-pi/pi-ai/types";
+import type {
+	Context,
+	FetchImpl,
+	Message,
+	Model,
+	ModelSpec,
+	ProviderFileReference,
+	UserMessage,
+} from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 const PNG_B64 = Buffer.from("not-actually-a-png, but bytes are opaque here").toString("base64");
@@ -61,6 +70,38 @@ describe("image url parts", () => {
 			detail: "auto",
 			file_id: "file_openai_123",
 		});
+	});
+
+	it("rejects an unsupported provider file when no replayable image source remains", () => {
+		const model = buildModel({
+			id: "vision-model",
+			name: "Vision Model",
+			api: "openai-responses",
+			provider: "xai",
+			baseUrl: "https://api.x.ai/v1",
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"openai-responses">);
+
+		expect(() =>
+			convertResponsesInputContent(
+				[
+					{
+						type: "image",
+						data: "",
+						mimeType: "image/png",
+						providerFile: { provider: "openai", id: "file_openai_123" },
+					},
+				],
+				true,
+				true,
+				false,
+				model,
+			),
+		).toThrow("without non-empty image data or a supported reference");
 	});
 
 	it("google prefers its provider file over the url and base64 payload", () => {
@@ -155,6 +196,54 @@ describe("image url parts", () => {
 		// User turn + tool result each carry the decorated block as fileData.
 		expect(fileDataParts).toHaveLength(2);
 		expect(fileDataParts[1].fileData).toEqual({ fileUri: BLOB_URL, mimeType: "image/png" });
+	});
+
+	it("google falls back to inline data when a provider file is expired or has unknown media", () => {
+		const model = getBundledModel("google", "gemini-2.5-flash") as Model<"google-generative-ai">;
+		const expired = convertGoogleMessages(model, {
+			messages: [
+				{
+					role: "user",
+					content: [
+						{
+							type: "image",
+							data: PNG_B64,
+							mimeType: "image/png",
+							providerFile: {
+								provider: "google",
+								uri: "https://generativelanguage.googleapis.com/v1/files/expired",
+								expiresAt: 0,
+							},
+						},
+					],
+					timestamp: 0,
+				},
+			],
+		});
+		const unknownMime = convertGoogleMessages(model, {
+			messages: [
+				{
+					role: "user",
+					content: [
+						{
+							type: "image",
+							data: PNG_B64,
+							mimeType: "application/octet-stream",
+							providerFile: {
+								provider: "google",
+								uri: "https://generativelanguage.googleapis.com/v1/files/unknown",
+							},
+						},
+					],
+					timestamp: 0,
+				},
+			],
+		});
+
+		expect(expired[0]?.parts).toContainEqual({ inlineData: { mimeType: "image/png", data: PNG_B64 } });
+		expect(unknownMime[0]?.parts).toContainEqual({
+			inlineData: { mimeType: "application/octet-stream", data: PNG_B64 },
+		});
 	});
 
 	it("completions sends the url in image_url content parts", async () => {

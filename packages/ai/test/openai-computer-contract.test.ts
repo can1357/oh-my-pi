@@ -11,7 +11,7 @@ import {
 	convertTools,
 	mapOpenAIResponsesToolChoiceForTools,
 } from "@oh-my-pi/pi-ai/providers/openai-responses";
-import type { ResponseStreamEvent } from "@oh-my-pi/pi-ai/providers/openai-responses-wire";
+import type { ResponseInput, ResponseStreamEvent } from "@oh-my-pi/pi-ai/providers/openai-responses-wire";
 import {
 	appendResponsesToolResultMessages,
 	buildResponsesInput,
@@ -399,6 +399,44 @@ describe("OpenAI GA computer contract", () => {
 			expect(sanitized[0]).toMatchObject({ id: "item_123", type: "computer_call" });
 			expect(sanitized[1]).toMatchObject({ output: screenshot });
 		}
+	});
+
+	test("keeps inline screenshot data when stale computer metadata targets an unsupported model", () => {
+		const calls: ResponseInput = [];
+		const unsupported = model("openai-responses", "gpt-5.3");
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_inline",
+			toolName: "computer",
+			content: [{ type: "image", data: "AAEC", mimeType: "image/png" }],
+			isError: false,
+			timestamp: 2,
+			providerMetadata: {
+				type: "computer",
+				screenshot: { type: "computer_screenshot", image_url: "data:image/png;base64,AAEC" },
+				acknowledgedSafetyChecks: [],
+			},
+		};
+
+		appendResponsesToolResultMessages(
+			calls,
+			result,
+			unsupported,
+			false,
+			true,
+			new Set(["call_inline"]),
+			undefined,
+			true,
+			new Set(["call_inline"]),
+		);
+
+		expect(calls).toEqual([
+			{
+				type: "function_call_output",
+				call_id: "call_inline",
+				output: [{ type: "input_image", detail: "auto", image_url: "data:image/png;base64,AAEC" }],
+			},
+		]);
 	});
 
 	test("clears reasoning candidates at every client continuation boundary", () => {

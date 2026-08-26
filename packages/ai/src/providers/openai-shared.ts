@@ -119,7 +119,9 @@ import {
 	joinTextWithImagePlaceholder,
 	NON_VISION_IMAGE_PLACEHOLDER,
 	partitionVisionContent,
+	supportsComputerScreenshotReferences,
 	supportsProviderFileReference,
+	supportsRemoteImageUrls,
 } from "./vision-guard";
 
 /**
@@ -1739,12 +1741,28 @@ function convertResponsesInputImage(
 	model?: Model,
 ): ResponseInputImage {
 	const detail = clampResponsesImageDetail(image.detail, supportsImageDetailOriginal);
+	const providerFile = image.providerFile;
+	const supportsFile =
+		providerFile !== undefined &&
+		(model === undefined || supportsProviderFileReference(model, providerFile, image));
 	if (
-		image.providerFile?.provider === "openai" &&
-		image.providerFile.id &&
-		(model === undefined || supportsProviderFileReference(model, image.providerFile, image))
+		providerFile?.provider === "openai" &&
+		providerFile.id &&
+		supportsFile
 	) {
-		return { type: "input_image", detail, file_id: image.providerFile.id };
+		return { type: "input_image", detail, file_id: providerFile.id };
+	}
+	const url = image.url;
+	const remoteUrl =
+		typeof url === "string" && url.length > 0 && (model === undefined || supportsRemoteImageUrls(model, image));
+	if (remoteUrl) return { type: "input_image", detail, image_url: url };
+	if (image.data.length > 0) {
+		return { type: "input_image", detail, image_url: `data:${image.mimeType};base64,${image.data}` };
+	}
+	if (model !== undefined) {
+		throw new AIError.ValidationError(
+			`input_image cannot be forwarded to ${model.api} without non-empty image data or a supported reference`,
+		);
 	}
 	return {
 		type: "input_image",
@@ -2446,7 +2464,12 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 ): void {
 	const { output, outputText } = encodeResponsesToolResultOutput(toolResult, model, supportsImageDetailOriginal);
 	const normalized = normalizeResponsesToolCallId(toolResult.toolCallId);
-	if (toolResult.providerMetadata?.type === "computer" && model.supportsComputerUse !== true) {
+	const hasInlineImageData = toolResult.content.some(
+		(block): block is ImageContent => block.type === "image" && block.data.length > 0,
+	);
+	const unsupportedComputerMetadata =
+		toolResult.providerMetadata?.type === "computer" && !supportsComputerScreenshotReferences(model);
+	if (unsupportedComputerMetadata && !hasInlineImageData) {
 		messages.push({
 			type: "message",
 			role: "assistant",
@@ -2454,7 +2477,7 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		} as ResponseInput[number]);
 		return;
 	}
-	if (computerCallIds?.has(normalized.callId)) {
+	if (computerCallIds?.has(normalized.callId) && !(unsupportedComputerMetadata && hasInlineImageData)) {
 		if (toolResult.providerMetadata?.type !== "computer") {
 			const limit = 16_000;
 			const noteText = outputText.length > limit ? `${outputText.slice(0, limit)}\n...[truncated]` : outputText;

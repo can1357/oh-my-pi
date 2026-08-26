@@ -19,13 +19,13 @@ const PNG_B64 = Buffer.from("blob-broker-test-bytes-1").toString("base64");
 const OTHER_B64 = Buffer.from("blob-broker-test-bytes-2").toString("base64");
 const KNOWN_IMAGE_REFERENCE = { mimeType: "image/png" };
 
-function makeModel(api: string, provider: string): Model {
+function makeModel(api: string, provider: string, baseUrl = "https://example.invalid"): Model {
 	return buildModel({
 		id: "test-model",
 		name: "Test Model",
 		api,
 		provider,
-		baseUrl: "https://example.invalid",
+		baseUrl,
 		reasoning: false,
 		input: ["text", "image"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -329,6 +329,14 @@ describe("supportsRemoteImageUrls", () => {
 		).toBe(true);
 		expect(supportsRemoteImageUrls(makeModel("openai-responses", "xai"), KNOWN_IMAGE_REFERENCE)).toBe(true);
 		expect(supportsRemoteImageUrls(makeModel("openai-completions", "openai"), KNOWN_IMAGE_REFERENCE)).toBe(true);
+		expect(supportsRemoteImageUrls(makeModel("openai-responses", "ollama"), KNOWN_IMAGE_REFERENCE)).toBe(false);
+		expect(supportsRemoteImageUrls(makeModel("openai-completions", "ollama"), KNOWN_IMAGE_REFERENCE)).toBe(false);
+		expect(
+			supportsRemoteImageUrls(
+				makeModel("openai-responses", "custom", "http://127.0.0.1:11434/v1"),
+				KNOWN_IMAGE_REFERENCE,
+			),
+		).toBe(false);
 		expect(
 			supportsRemoteImageUrls(makeModel("google-gemini-cli", "google-antigravity"), KNOWN_IMAGE_REFERENCE),
 		).toBe(true);

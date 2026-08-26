@@ -39,6 +39,17 @@ function isOpenAICompletionsModel(model: Model): model is Model<"openai-completi
 	return model.api === "openai-completions";
 }
 
+function isOllamaModel(model: Model): boolean {
+	if (model.provider === "ollama" || model.provider === "ollama-cloud") return true;
+	try {
+		const url = new URL(model.baseUrl);
+		const hostname = url.hostname.toLowerCase();
+		return url.port === "11434" || hostname === "ollama.com" || hostname.endsWith(".ollama.com");
+	} catch {
+		return false;
+	}
+}
+
 function hasReplayableGoogleImageMimeType(image: Pick<ImageContent, "mimeType">): boolean {
 	return GOOGLE_REMOTE_IMAGE_MIME_TYPES[image.mimeType.toLowerCase()] === true;
 }
@@ -118,6 +129,7 @@ export function supportsComputerScreenshotReferences(model: Model): boolean {
 
 /** Whether this model can replay a remote URL for an image with this media type. */
 export function supportsRemoteImageUrls(model: Model, image: Pick<ImageContent, "mimeType">): boolean {
+	if (isOllamaModel(model)) return false;
 	if (!model.input.includes("image")) return false;
 	if (modelMatchesHost(model, "moonshotNative")) return false;
 	if (isOpenAICompletionsModel(model)) return isOpenAICompletionsVisionSupported(model);
