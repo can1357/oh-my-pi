@@ -36,6 +36,15 @@ function hasReplayableGoogleImageMimeType(image: Pick<ImageContent, "mimeType">)
 	return GOOGLE_REMOTE_IMAGE_MIME_TYPES[image.mimeType.toLowerCase()] === true;
 }
 
+export function isRemoteImageUrl(value: string): boolean {
+	try {
+		const url = new URL(value);
+		return url.protocol === "http:" || url.protocol === "https:";
+	} catch {
+		return false;
+	}
+}
+
 /** Whether this model can replay a remote URL for an image with this media type. */
 export function supportsRemoteImageUrls(model: Model, image: Pick<ImageContent, "mimeType">): boolean {
 	if (!model.input.includes("image")) return false;
@@ -56,7 +65,11 @@ interface ProviderFileCandidate {
 }
 
 /** Whether this model can replay a provider-native image reference. */
-export function supportsProviderFileReference(model: Model, reference: ProviderFileCandidate): boolean {
+export function supportsProviderFileReference(
+	model: Model,
+	reference: ProviderFileCandidate,
+	image: Pick<ImageContent, "mimeType">,
+): boolean {
 	if (!model.input.includes("image")) return false;
 	if (reference.provider === "openai") {
 		return (
@@ -78,7 +91,8 @@ export function supportsProviderFileReference(model: Model, reference: ProviderF
 		typeof reference.uri === "string" &&
 		reference.uri.length > 0 &&
 		model.api === "google-generative-ai" &&
-		model.provider === "google"
+		model.provider === "google" &&
+		hasReplayableGoogleImageMimeType(image)
 	);
 }
 

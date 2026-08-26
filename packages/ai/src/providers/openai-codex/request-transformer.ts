@@ -3,7 +3,7 @@ import { supportsAllTurnsReasoningContext, supportsCodexReasoningSummary } from 
 import { requireSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { Model } from "../../types";
-import { mapOpenAIReasoningEffort } from "../openai-shared";
+import { mapOpenAIReasoningEffort, splitResponsesOrphanOutput } from "../openai-shared";
 
 /** Reasoning replay scope for the Codex Responses API (`reasoning.context`). */
 export type CodexReasoningContext = "auto" | "current_turn" | "all_turns";
@@ -195,24 +195,23 @@ const CODEX_ORPHAN_OUTPUT_LIMIT = 16_000;
 const CODEX_INTERRUPTED_TOOL_OUTPUT =
 	"[No tool output recorded: the tool call was interrupted before it produced a result.]";
 
-function orphanFunctionOutputToMessage(item: InputItem, callId: string): InputItem {
+function orphanFunctionOutputItems(item: InputItem, callId: string): InputItem[] {
 	const itemRecord = item as unknown as Record<string, unknown>;
 	const toolName = typeof itemRecord.name === "string" ? itemRecord.name : "tool";
-	let text = "";
-	try {
-		const output = itemRecord.output;
-		text = typeof output === "string" ? output : JSON.stringify(output);
-	} catch {
-		text = String(itemRecord.output ?? "");
-	}
+	const orphanOutput = splitResponsesOrphanOutput(itemRecord.output);
+	let text = orphanOutput.text;
 	if (text.length > CODEX_ORPHAN_OUTPUT_LIMIT) {
 		text = `${text.slice(0, CODEX_ORPHAN_OUTPUT_LIMIT)}\n...[truncated]`;
 	}
-	return {
+	const items: InputItem[] = [{
 		type: "message",
 		role: "assistant",
 		content: `[Previous ${toolName} result; call_id=${callId}]: ${text}`,
-	} as InputItem;
+	}];
+	if (orphanOutput.images.length > 0) {
+		items.push({ type: "message", role: "user", content: orphanOutput.images });
+	}
+	return items;
 }
 
 type ToolCallKind = "function" | "custom" | "computer";
@@ -264,7 +263,7 @@ function repairToolCallPairs(input: InputItem[]): InputItem[] {
 		const outputKind = toolOutputKind(item.type);
 
 		if (outputKind && callId !== undefined && callKinds.get(callId) !== outputKind) {
-			repaired.push(orphanFunctionOutputToMessage(item, callId));
+			repaired.push(...orphanFunctionOutputItems(item, callId));
 			continue;
 		}
 		if (callKind && callId !== undefined && outputKinds.get(callId) !== callKind) {

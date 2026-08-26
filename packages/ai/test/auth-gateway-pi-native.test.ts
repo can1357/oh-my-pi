@@ -531,6 +531,43 @@ describe("pi-native gateway image reference validation", () => {
 		});
 
 		try {
+			const unknownMimeResponse = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: googleModel.id,
+					context: {
+						messages: [
+							{
+								role: "user",
+								content: [
+									{
+										type: "image",
+										data: "",
+										mimeType: "application/octet-stream",
+										providerFile: {
+											provider: "google",
+											uri: "https://generativelanguage.googleapis.com/v1beta/files/google-unknown",
+										},
+									},
+								],
+								timestamp: 0,
+							},
+						],
+					},
+					stream: false,
+				}),
+			});
+			expect(unknownMimeResponse.status).toBe(400);
+			expect(await unknownMimeResponse.json()).toEqual({
+				error: {
+					type: "invalid_request_error",
+					message:
+						"input_image.providerFile cannot be forwarded to google-generative-ai; use inline image data or target the matching provider API",
+				},
+			});
+			expect(upstreamRequests).toHaveLength(0);
+
 			const cases = [
 				{
 					model: anthropicModel,
@@ -683,6 +720,41 @@ describe("pi-native gateway image reference validation", () => {
 		const imageUrl = "https://images.example.invalid/read.png";
 
 		try {
+			const invalidResponse = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: model.id,
+					context: {
+						messages: [
+							{
+								role: "user",
+								content: [
+									{
+										type: "image",
+										data: "",
+										mimeType: "image/png",
+										providerFile: { provider: "openai", id: "file_image_123" },
+										url: "not-a-url",
+									},
+								],
+								timestamp: 0,
+							},
+						],
+					},
+					stream: false,
+				}),
+			});
+			expect(invalidResponse.status).toBe(400);
+			expect(await invalidResponse.json()).toEqual({
+				error: {
+					type: "invalid_request_error",
+					message:
+						"input_image.file_id cannot be forwarded to openai-completions; target an OpenAI Responses model or use an inline data URL",
+				},
+			});
+			expect(upstreamRequests).toHaveLength(0);
+
 			const response = await fetch(`${handle.url}/v1/pi/stream`, {
 				method: "POST",
 				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },

@@ -44,6 +44,7 @@ import {
 	openaiResponsesRequestSchema,
 } from "./openai-responses-server-schema";
 import { encodeTextSignatureV1, parseTextSignature } from "./openai-shared";
+import { isRemoteImageUrl } from "./vision-guard";
 
 export type { ParsedRequest };
 
@@ -330,6 +331,7 @@ function functionOutputContent(output: string | readonly unknown[] | undefined):
 			const imageUrl = asString(raw.image_url) || undefined;
 			const fileId = asString(raw.file_id) || undefined;
 			const hasDataScheme = imageUrl ? isDataUri(imageUrl) : false;
+			const remoteImageUrl = imageUrl && !hasDataScheme && isRemoteImageUrl(imageUrl) ? imageUrl : undefined;
 			const decoded = imageUrl ? decodeDataUri(imageUrl) : undefined;
 			const detail =
 				raw.detail === "auto" || raw.detail === "low" || raw.detail === "high" || raw.detail === "original"
@@ -348,9 +350,14 @@ function functionOutputContent(output: string | readonly unknown[] | undefined):
 					content.push(
 						fileId ? { ...referenceImage, providerFile: { provider: "openai", id: fileId } } : referenceImage,
 					);
-				} else if (imageUrl) {
-					content.push({ ...referenceImage, url: imageUrl });
+				} else if (remoteImageUrl) {
+					content.push({
+						...referenceImage,
+						url: remoteImageUrl,
+						...(fileId ? { providerFile: { provider: "openai" as const, id: fileId } } : {}),
+					});
 				} else if (fileId) content.push({ ...referenceImage, providerFile: { provider: "openai", id: fileId } });
+				else content.push(referenceImage);
 			}
 		}
 	}

@@ -1451,6 +1451,52 @@ export function collectComputerCallIds(messages: ResponseInput): Set<string> {
 	return computerCallIds;
 }
 
+export function splitResponsesOrphanOutput(output: unknown): { text: string; images: ResponseInputImage[] } {
+	const images: ResponseInputImage[] = [];
+	let noteOutput = output;
+	if (Array.isArray(output)) {
+		const remaining: unknown[] = [];
+		for (const block of output) {
+			if (
+				isRecord(block) &&
+				block.type === "input_image" &&
+				((typeof block.image_url === "string" && block.image_url.length > 0) ||
+					(typeof block.file_id === "string" && block.file_id.length > 0))
+			) {
+				const detail =
+					block.detail === "low" ||
+					block.detail === "high" ||
+					block.detail === "auto" ||
+					block.detail === "original"
+						? block.detail
+						: "auto";
+				images.push({ ...block, type: "input_image", detail } as ResponseInputImage);
+				continue;
+			}
+			remaining.push(block);
+		}
+		noteOutput = remaining;
+	}
+
+	let text: string;
+	if (typeof noteOutput === "string") text = noteOutput;
+	else if (noteOutput == null) text = "";
+	else if (Array.isArray(noteOutput) && noteOutput.length === 0 && images.length > 0) text = "(see attached image)";
+	else {
+		try {
+			text = JSON.stringify(noteOutput) ?? "";
+		} catch {
+			text = String(noteOutput);
+		}
+	}
+	return { text, images };
+}
+
+function appendResponsesOrphanImages(messages: ResponseInput, images: ResponseInputImage[]): void {
+	if (images.length === 0) return;
+	messages.push({ type: "message", role: "user", content: images } as ResponseInput[number]);
+}
+
 /**
  * Convert orphan `function_call_output` / `custom_tool_call_output` items —
  * those whose `call_id` has no matching preceding `function_call` /
@@ -1492,16 +1538,8 @@ export function repairOrphanResponsesToolOutputs(input: ResponseInput): Response
 		if (!repaired) repaired = input.slice(0, index);
 		const toolName = outputKind === "computer" ? "computer" : "tool";
 		const rawOutput = "output" in item ? item.output : undefined;
-		let text: string;
-		if (typeof rawOutput === "string") text = rawOutput;
-		else if (rawOutput == null) text = "";
-		else {
-			try {
-				text = JSON.stringify(rawOutput);
-			} catch {
-				text = String(rawOutput);
-			}
-		}
+		const orphanOutput = splitResponsesOrphanOutput(rawOutput);
+		let text = orphanOutput.text;
 		const ORPHAN_OUTPUT_LIMIT = 16_000;
 		if (text.length > ORPHAN_OUTPUT_LIMIT) text = `${text.slice(0, ORPHAN_OUTPUT_LIMIT)}\n...[truncated]`;
 		repaired.push({
@@ -1509,6 +1547,7 @@ export function repairOrphanResponsesToolOutputs(input: ResponseInput): Response
 			role: "assistant",
 			content: `[Orphan ${toolName} result; call_id=${callId}]: ${text}`,
 		} as ResponseInput[number]);
+		appendResponsesOrphanImages(repaired, orphanOutput.images);
 	}
 	return repaired ?? input;
 }
@@ -2389,6 +2428,7 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 			role: "assistant",
 			content: `[Orphan ${toolResult.toolName || "tool"} result; call_id=${normalized.callId}]: ${noteText}`,
 		} as ResponseInput[number]);
+		appendResponsesOrphanImages(messages, splitResponsesOrphanOutput(output).images);
 		return;
 	}
 	if (supportsCustomToolCalls && customCallIds?.has(normalized.callId)) {

@@ -1,9 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import type { ResponseInput } from "@oh-my-pi/pi-ai/providers/openai-responses-wire";
 import {
+	appendResponsesToolResultMessages,
 	repairOrphanResponsesToolCalls,
 	repairOrphanResponsesToolOutputs,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 describe("repairOrphanResponsesToolCalls", () => {
 	it("appends a synthetic function_call_output after a call with no result", () => {
@@ -83,6 +85,64 @@ describe("repairOrphanResponsesToolCalls", () => {
 });
 
 describe("repairOrphanResponsesToolOutputs", () => {
+	it("preserves orphan images as user-message fallbacks", () => {
+		const imageData = Buffer.from("orphan image").toString("base64");
+		const imageUrl = `data:image/png;base64,${imageData}`;
+		const output = [
+			{ type: "input_text", text: "rendered image" },
+			{ type: "input_image", detail: "high", image_url: imageUrl },
+		];
+		const repaired = repairOrphanResponsesToolOutputs([
+			{ type: "function_call_output", call_id: "call_orphan", output } as ResponseInput[number],
+		]);
+
+		expect(repaired).toEqual([
+			{
+				type: "message",
+				role: "assistant",
+				content: expect.stringContaining("rendered image"),
+			},
+			{
+				type: "message",
+				role: "user",
+				content: [{ type: "input_image", detail: "high", image_url: imageUrl }],
+			},
+		]);
+		expect((repaired[0] as { content: string }).content).not.toContain(imageData);
+
+		const strictMessages: ResponseInput = [];
+		appendResponsesToolResultMessages(
+			strictMessages,
+			{
+				role: "toolResult",
+				toolCallId: "call_strict_orphan",
+				toolName: "read",
+				content: [
+					{ type: "text", text: "rendered image" },
+					{ type: "image", data: imageData, mimeType: "image/png", detail: "high" },
+				],
+				isError: false,
+				timestamp: 0,
+			},
+			getBundledModel<"openai-responses">("openai", "gpt-5-mini"),
+			true,
+			true,
+			new Set(),
+		);
+		expect(strictMessages).toEqual([
+			{
+				type: "message",
+				role: "assistant",
+				content: expect.stringContaining("rendered image"),
+			},
+			{
+				type: "message",
+				role: "user",
+				content: [{ type: "input_image", detail: "high", image_url: imageUrl }],
+			},
+		]);
+	});
+
 	it("does not pair an output with a call that appears later in replay order", () => {
 		const input: ResponseInput = [
 			{ type: "function_call_output", call_id: "call_a", output: "stale" } as ResponseInput[number],

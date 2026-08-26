@@ -1752,6 +1752,16 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 		const imageUrl = "https://images.example.invalid/read.png";
 
 		try {
+			const invalidUrlResponse = await fetch(`${gateway.url}/v1/responses`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+				body: JSON.stringify(toolImageRequest(model.id, "not-a-url", "file_image_123")),
+			});
+			expect(invalidUrlResponse.status).toBe(400);
+			expect(await invalidUrlResponse.text()).toContain(
+				"input_image.file_id cannot be forwarded to openai-completions",
+			);
+			expect(upstreamRequests).toHaveLength(0);
 			for (const malformedDataUri of [
 				"data:image/png;base64",
 				"data:image/png#preview,SGk=",
@@ -1819,7 +1829,7 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 			const response = await fetch(`${gateway.url}/v1/responses`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-				body: JSON.stringify(toolImageRequest(model.id, imageUrl)),
+				body: JSON.stringify(toolImageRequest(model.id, imageUrl, "file_image_123")),
 			});
 			expect(response.status).toBe(200);
 			await response.text();

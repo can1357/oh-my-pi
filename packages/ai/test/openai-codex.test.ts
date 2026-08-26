@@ -179,6 +179,7 @@ describe("openai-codex tool schemas", () => {
 
 describe("openai-codex request transformer", () => {
 	it("filters item_reference and strips ids", async () => {
+		const imageUrl = `data:image/png;base64,${Buffer.from("orphan image").toString("base64")}`;
 		const body: RequestBody = {
 			model: "gpt-5.1-codex",
 			input: [
@@ -195,7 +196,15 @@ describe("openai-codex request transformer", () => {
 					content: [{ type: "input_text", text: "hello" }],
 				},
 				{ type: "item_reference", id: "ref-1" },
-				{ type: "function_call_output", call_id: "missing", name: "tool", output: "result" },
+				{
+					type: "function_call_output",
+					call_id: "missing",
+					name: "tool",
+					output: [
+						{ type: "input_text", text: "result" },
+						{ type: "input_image", detail: "auto", image_url: imageUrl },
+					],
+				},
 			],
 			tools: [{ type: "function", name: "tool", description: "", parameters: {} }],
 		};
@@ -216,6 +225,17 @@ describe("openai-codex request transformer", () => {
 
 		const orphaned = input.find(item => item.type === "message" && item.role === "assistant");
 		expect(orphaned?.content).toMatch(/Previous tool result/);
+		expect(orphaned?.content).not.toContain(imageUrl);
+		const imageFallback = input.find(
+			item =>
+				item.type === "message" &&
+				item.role === "user" &&
+				Array.isArray(item.content) &&
+				item.content.some(
+					part => part !== null && typeof part === "object" && "type" in part && part.type === "input_image",
+				),
+		);
+		expect(imageFallback?.content).toEqual([{ type: "input_image", detail: "auto", image_url: imageUrl }]);
 	});
 });
 

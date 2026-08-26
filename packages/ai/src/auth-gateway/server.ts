@@ -29,7 +29,11 @@ import * as anthropicMessages from "../providers/anthropic-messages-server";
 import * as openaiChat from "../providers/openai-chat-server";
 import * as openaiResponses from "../providers/openai-responses-server";
 import * as piNative from "../providers/pi-native-server";
-import { supportsProviderFileReference, supportsRemoteImageUrls } from "../providers/vision-guard";
+import {
+	isRemoteImageUrl,
+	supportsProviderFileReference,
+	supportsRemoteImageUrls,
+} from "../providers/vision-guard";
 import { completeSimple, streamSimple } from "../stream";
 import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
@@ -102,14 +106,15 @@ function validateAndNormalizeImageReferences(context: Context, model: Model): st
 			const hasProviderFileReference = block.providerFile !== undefined;
 			const providerFile = isRecord(block.providerFile) ? block.providerFile : undefined;
 			const hasSupportedProviderFileReference =
-				providerFile !== undefined && supportsProviderFileReference(model, providerFile);
+				providerFile !== undefined &&
+				supportsProviderFileReference(model, providerFile, { mimeType: block.mimeType });
 			const hasUrlReference = block.url !== undefined;
 			if (hasUrlReference && typeof block.url !== "string") {
 				return `\`context.messages[${messageIndex}].content[${blockIndex}].url\` must be a string`;
 			}
 			const hasSupportedUrlReference =
 				typeof block.url === "string" &&
-				block.url.length > 0 &&
+				isRemoteImageUrl(block.url) &&
 				supportsRemoteImageUrls(model, { mimeType: block.mimeType });
 
 			if (hasProviderFileReference && !hasSupportedProviderFileReference) delete block.providerFile;
