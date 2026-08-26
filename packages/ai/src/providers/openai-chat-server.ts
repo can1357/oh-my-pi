@@ -29,7 +29,7 @@ import {
 	type OpenAIChatToolChoice,
 	openaiChatRequestSchema,
 } from "./openai-chat-server-schema";
-import { decodeDataUri } from "./openai-data-uri";
+import { type DecodedDataUri, decodeDataUri, isDataUri } from "./openai-data-uri";
 
 export type { ParsedRequest };
 
@@ -52,6 +52,7 @@ function isServiceTier(value: unknown): value is ServiceTier {
 
 const UNSUPPORTED_EXPLICIT_PROMPT_CACHE_MESSAGE =
 	"openai-chat: prompt_cache_options and prompt_cache_breakpoint are unsupported by this auth-gateway route; use /v1/pi/stream with options.promptCache instead";
+const MALFORMED_IMAGE_DATA_URI_MESSAGE = "openai-chat: image_url contains a malformed data URI";
 
 function hasUnsupportedExplicitPromptCacheFields(body: unknown): boolean {
 	if (typeof body !== "object" || body === null || Array.isArray(body)) return false;
@@ -225,6 +226,12 @@ function stringifyContent(content: string | OpenAIChatContentPart[] | undefined)
 	return out.join("");
 }
 
+function decodeImageData(url: string): DecodedDataUri | undefined {
+	const decoded = decodeDataUri(url);
+	if (!decoded && isDataUri(url)) throw new AIError.ValidationError(MALFORMED_IMAGE_DATA_URI_MESSAGE);
+	return decoded;
+}
+
 function parseUserLikeContent(
 	content: string | OpenAIChatContentPart[] | undefined,
 ): string | (TextContent | ImageContent)[] {
@@ -241,7 +248,7 @@ function parseUserLikeContent(
 		// schema for forward-compat but dropped here — pi-ai's canonical user
 		// content only models text and image today.
 		const url = typeof part.image_url === "string" ? part.image_url : part.image_url.url;
-		const decoded = decodeDataUri(url);
+		const decoded = decodeImageData(url);
 		if (decoded) {
 			parts.push({ type: "image", data: decoded.data, mimeType: decoded.mimeType });
 		} else {
@@ -337,7 +344,7 @@ function pushToolResultMessages(
 			}
 			if (part.type !== "image_url") continue;
 			const url = typeof part.image_url === "string" ? part.image_url : part.image_url.url;
-			const decoded = decodeDataUri(url);
+			const decoded = decodeImageData(url);
 			if (decoded) {
 				imageParts.push({ type: "image", data: decoded.data, mimeType: decoded.mimeType });
 			} else {

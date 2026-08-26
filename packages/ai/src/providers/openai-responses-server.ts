@@ -28,7 +28,7 @@ import type {
 	Tool,
 	ToolCall,
 } from "../types";
-import { decodeDataUri } from "./openai-data-uri";
+import { decodeDataUri, isDataUri } from "./openai-data-uri";
 import {
 	type OpenAIResponsesComputerCallItem,
 	type OpenAIResponsesComputerCallOutputItem,
@@ -329,7 +329,7 @@ function functionOutputContent(output: string | readonly unknown[] | undefined):
 			flushLegacyText();
 			const imageUrl = asString(raw.image_url) || undefined;
 			const fileId = asString(raw.file_id) || undefined;
-			const hasDataScheme = imageUrl?.slice(0, 5).toLowerCase() === "data:";
+			const hasDataScheme = imageUrl ? isDataUri(imageUrl) : false;
 			const decoded = imageUrl ? decodeDataUri(imageUrl) : undefined;
 			const detail =
 				raw.detail === "auto" || raw.detail === "low" || raw.detail === "high" || raw.detail === "original"

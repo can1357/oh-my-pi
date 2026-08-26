@@ -257,6 +257,17 @@ describe("openai-responses parseRequest", () => {
 		).toThrow(/at least one of `image_url` or `file_id`/);
 	});
 
+	it("decodes large percent-encoded tool images to exact bytes", () => {
+		const byteCount = 128 * 1024;
+		const parsed = parseRequest(toolImageRequest("gpt-5.6-sol", `data:image/png,${"%ff".repeat(byteCount)}`));
+		const result = parsed.context.messages[1];
+		if (result?.role !== "toolResult") throw new Error("expected tool result");
+		const image = result.content[0];
+		if (image?.type !== "image") throw new Error("expected image content");
+		expect(image.mimeType).toBe("image/png");
+		expect(Buffer.from(image.data, "base64")).toEqual(Buffer.alloc(byteCount, 0xff));
+	});
+
 	it("rejects file blocks in tool outputs instead of flattening their content", () => {
 		expect(() =>
 			parseRequest({
@@ -1743,6 +1754,7 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 		try {
 			for (const malformedDataUri of [
 				"data:image/png;base64",
+				"data:image/png#preview,SGk=",
 				"data:image/png,%",
 				"data:image/png;base64,",
 				"data:image/png;base64,!!!!",
@@ -1789,6 +1801,21 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 				type: "image_url",
 				image_url: { url: normalizedMixedCaseImageUrl },
 			});
+			const fragmentInlineResponse = await fetch(`${gateway.url}/v1/responses`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+				body: JSON.stringify(toolImageRequest(model.id, "data:image/png;base64,SGk=#preview", "file_image_123")),
+			});
+			expect(fragmentInlineResponse.status).toBe(200);
+			await fragmentInlineResponse.text();
+			expect(upstreamRequests).toHaveLength(3);
+			const fragmentInlineContentParts = (upstreamRequests[2]?.messages ?? []).flatMap(message =>
+				Array.isArray(message.content) ? message.content : [],
+			);
+			expect(fragmentInlineContentParts).toContainEqual({
+				type: "image_url",
+				image_url: { url: normalizedMixedCaseImageUrl },
+			});
 			const response = await fetch(`${gateway.url}/v1/responses`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
@@ -1796,8 +1823,8 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 			});
 			expect(response.status).toBe(200);
 			await response.text();
-			expect(upstreamRequests).toHaveLength(3);
-			const contentParts = (upstreamRequests[2]?.messages ?? []).flatMap(message =>
+			expect(upstreamRequests).toHaveLength(4);
+			const contentParts = (upstreamRequests[3]?.messages ?? []).flatMap(message =>
 				Array.isArray(message.content) ? message.content : [],
 			);
 			expect(contentParts).toContainEqual({ type: "image_url", image_url: { url: imageUrl } });
