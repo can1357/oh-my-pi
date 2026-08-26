@@ -64,7 +64,7 @@ function parseSse(raw: string): SseFrame[] {
 	return frames;
 }
 
-function remoteToolImageRequest(model: string, imageUrl: string): unknown {
+function toolImageRequest(model: string, imageUrl: string, fileId?: string): unknown {
 	return {
 		model,
 		input: [
@@ -77,7 +77,7 @@ function remoteToolImageRequest(model: string, imageUrl: string): unknown {
 			{
 				type: "function_call_output",
 				call_id: "call_read",
-				output: [{ type: "input_image", image_url: imageUrl }],
+				output: [{ type: "input_image", image_url: imageUrl, ...(fileId ? { file_id: fileId } : {}) }],
 			},
 		],
 	};
@@ -1543,7 +1543,7 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 			const response = await fetch(`${gateway.url}/v1/responses`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-				body: JSON.stringify(remoteToolImageRequest(model.id, "https://images.example.invalid/read.png")),
+				body: JSON.stringify(toolImageRequest(model.id, "https://images.example.invalid/read.png")),
 			});
 			expect(response.status).toBe(400);
 			expect(await response.text()).toContain(
@@ -1588,7 +1588,7 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 			const response = await fetch(`${gateway.url}/v1/responses`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-				body: JSON.stringify(remoteToolImageRequest(model.id, "https://images.example.invalid/read.png")),
+				body: JSON.stringify(toolImageRequest(model.id, "https://images.example.invalid/read.png")),
 			});
 			expect(response.status).toBe(400);
 			expect(await response.text()).toContain(
@@ -1633,7 +1633,7 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 			const response = await fetch(`${gateway.url}/v1/responses`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-				body: JSON.stringify(remoteToolImageRequest(model.id, "https://images.example.invalid/read.png")),
+				body: JSON.stringify(toolImageRequest(model.id, "https://images.example.invalid/read.png")),
 			});
 			expect(response.status).toBe(400);
 			expect(await response.text()).toContain(
@@ -1698,7 +1698,7 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 			const response = await fetch(`${gateway.url}/v1/responses`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-				body: JSON.stringify(remoteToolImageRequest(model.id, "https://images.example.invalid/read.png")),
+				body: JSON.stringify(toolImageRequest(model.id, "https://images.example.invalid/read.png")),
 			});
 			expect(response.status).toBe(400);
 			expect(await response.text()).toContain(
@@ -1713,7 +1713,7 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 		}
 	});
 
-	it("forwards reference-only remote tool images to URL-capable APIs", async () => {
+	it("rejects malformed data URIs but forwards remote tool images to URL-capable APIs", async () => {
 		const upstreamRequests: CapturedOpenAICompletionRequest[] = [];
 		const upstream = startOpenAICompletionsUpstream(upstreamRequests);
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-remote-image-openai-"));
@@ -1741,10 +1741,22 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 		const imageUrl = "https://images.example.invalid/read.png";
 
 		try {
+			for (const malformedDataUri of ["data:image/png;base64", "data:image/png,%"]) {
+				const malformedResponse = await fetch(`${gateway.url}/v1/responses`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+					body: JSON.stringify(toolImageRequest(model.id, malformedDataUri, "file_image_123")),
+				});
+				expect(malformedResponse.status).toBe(400);
+				expect(await malformedResponse.text()).toContain(
+					"input_image.file_id cannot be forwarded to openai-completions",
+				);
+				expect(upstreamRequests).toHaveLength(0);
+			}
 			const response = await fetch(`${gateway.url}/v1/responses`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-				body: JSON.stringify(remoteToolImageRequest(model.id, imageUrl)),
+				body: JSON.stringify(toolImageRequest(model.id, imageUrl)),
 			});
 			expect(response.status).toBe(200);
 			await response.text();

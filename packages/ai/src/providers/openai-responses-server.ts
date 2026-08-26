@@ -329,6 +329,7 @@ function functionOutputContent(output: string | readonly unknown[] | undefined):
 			flushLegacyText();
 			const imageUrl = asString(raw.image_url) || undefined;
 			const fileId = asString(raw.file_id) || undefined;
+			const hasDataScheme = imageUrl?.slice(0, 5).toLowerCase() === "data:";
 			const decoded = imageUrl ? decodeDataUri(imageUrl) : undefined;
 			const detail =
 				raw.detail === "auto" || raw.detail === "low" || raw.detail === "high" || raw.detail === "original"
@@ -343,7 +344,7 @@ function functionOutputContent(output: string | readonly unknown[] | undefined):
 					mimeType: "application/octet-stream",
 					...(detail ? { detail } : {}),
 				};
-				if (decoded) {
+				if (hasDataScheme) {
 					content.push(
 						fileId ? { ...referenceImage, providerFile: { provider: "openai", id: fileId } } : referenceImage,
 					);

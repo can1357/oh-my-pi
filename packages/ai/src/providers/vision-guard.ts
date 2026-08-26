@@ -16,6 +16,12 @@ const URL_CAPABLE_OPENAI_APIS: Record<string, true> = {
 	openrouter: true,
 };
 
+const OPENAI_PROVIDER_FILE_APIS: Record<string, true> = {
+	"openai-responses": true,
+	"openai-codex-responses": true,
+	"azure-openai-responses": true,
+};
+
 const GOOGLE_REMOTE_IMAGE_MIME_TYPES: Record<string, true> = {
 	"image/png": true,
 	"image/jpeg": true,
@@ -41,6 +47,39 @@ export function supportsRemoteImageUrls(model: Model, image: Pick<ImageContent, 
 		return model.provider === "google-antigravity" && hasReplayableGoogleImageMimeType(image);
 	}
 	return model.api === "google-vertex" && hasReplayableGoogleImageMimeType(image);
+}
+
+interface ProviderFileCandidate {
+	provider?: unknown;
+	id?: unknown;
+	uri?: unknown;
+}
+
+/** Whether this model can replay a provider-native image reference. */
+export function supportsProviderFileReference(model: Model, reference: ProviderFileCandidate): boolean {
+	if (!model.input.includes("image")) return false;
+	if (reference.provider === "openai") {
+		return (
+			typeof reference.id === "string" &&
+			reference.id.length > 0 &&
+			OPENAI_PROVIDER_FILE_APIS[model.api] === true
+		);
+	}
+	if (reference.provider === "anthropic") {
+		return (
+			typeof reference.id === "string" &&
+			reference.id.length > 0 &&
+			model.api === "anthropic-messages" &&
+			model.provider === "anthropic"
+		);
+	}
+	return (
+		reference.provider === "google" &&
+		typeof reference.uri === "string" &&
+		reference.uri.length > 0 &&
+		model.api === "google-generative-ai" &&
+		model.provider === "google"
+	);
 }
 
 export function partitionVisionContent(

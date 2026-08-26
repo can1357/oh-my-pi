@@ -29,7 +29,7 @@ import * as anthropicMessages from "../providers/anthropic-messages-server";
 import * as openaiChat from "../providers/openai-chat-server";
 import * as openaiResponses from "../providers/openai-responses-server";
 import * as piNative from "../providers/pi-native-server";
-import { supportsRemoteImageUrls } from "../providers/vision-guard";
+import { supportsProviderFileReference, supportsRemoteImageUrls } from "../providers/vision-guard";
 import { completeSimple, streamSimple } from "../stream";
 import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
@@ -77,10 +77,6 @@ const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
 	"/v1/responses": { module: openaiResponses, label: "openai-responses" },
 };
 
-function supportsOpenAIImageFileReferences(api: Api): boolean {
-	return api === "openai-responses" || api === "openai-codex-responses" || api === "azure-openai-responses";
-}
-
 function validateAndNormalizeImageReferences(context: Context, model: Model): string | undefined {
 	const messages: unknown[] = context.messages;
 	for (const [messageIndex, message] of messages.entries()) {
@@ -103,13 +99,10 @@ function validateAndNormalizeImageReferences(context: Context, model: Model): st
 			}
 
 			const hasInlineData = block.data.length > 0;
+			const hasProviderFileReference = block.providerFile !== undefined;
 			const providerFile = isRecord(block.providerFile) ? block.providerFile : undefined;
-			const hasOpenAIFileReference = providerFile?.provider === "openai";
-			const hasSupportedOpenAIFileReference =
-				providerFile?.provider === "openai" &&
-				typeof providerFile.id === "string" &&
-				providerFile.id.length > 0 &&
-				supportsOpenAIImageFileReferences(model.api);
+			const hasSupportedProviderFileReference =
+				providerFile !== undefined && supportsProviderFileReference(model, providerFile);
 			const hasUrlReference = block.url !== undefined;
 			if (hasUrlReference && typeof block.url !== "string") {
 				return `\`context.messages[${messageIndex}].content[${blockIndex}].url\` must be a string`;
@@ -119,19 +112,20 @@ function validateAndNormalizeImageReferences(context: Context, model: Model): st
 				block.url.length > 0 &&
 				supportsRemoteImageUrls(model, { mimeType: block.mimeType });
 
-			if (hasOpenAIFileReference && !hasSupportedOpenAIFileReference) delete block.providerFile;
+			if (hasProviderFileReference && !hasSupportedProviderFileReference) delete block.providerFile;
 			if (hasUrlReference && !hasSupportedUrlReference) delete block.url;
-			if (hasInlineData || hasSupportedOpenAIFileReference || hasSupportedUrlReference) continue;
+			if (hasInlineData || hasSupportedProviderFileReference || hasSupportedUrlReference) continue;
 
-			if (hasOpenAIFileReference) {
+			if (providerFile?.provider === "openai") {
 				return `input_image.file_id cannot be forwarded to ${model.api}; target an OpenAI Responses model or use an inline data URL`;
 			}
 			if (hasUrlReference) {
 				return `input_image.image_url cannot be forwarded to ${model.api} without inline image data; use a data URL or target an API that supports remote image URLs`;
 			}
-			if (providerFile === undefined) {
-				return `input_image cannot be forwarded to ${model.api} without non-empty image data or a supported reference`;
+			if (hasProviderFileReference) {
+				return `input_image.providerFile cannot be forwarded to ${model.api}; use inline image data or target the matching provider API`;
 			}
+			return `input_image cannot be forwarded to ${model.api} without non-empty image data or a supported reference`;
 		}
 	}
 	return undefined;

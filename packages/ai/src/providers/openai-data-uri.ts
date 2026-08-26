@@ -7,7 +7,7 @@ export interface DecodedDataUri {
 /**
  * Decodes base64 and percent-encoded `data:` URIs.
  *
- * Returns `undefined` for non-data URLs and data URIs without a comma separator.
+ * Returns `undefined` for non-data URLs and malformed data URIs.
  */
 export function decodeDataUri(url: string): DecodedDataUri | undefined {
 	if (!url.startsWith("data:")) return undefined;
@@ -17,6 +17,10 @@ export function decodeDataUri(url: string): DecodedDataUri | undefined {
 	const payload = url.slice(comma + 1);
 	const isBase64 = header.endsWith(";base64");
 	const mimeType = (isBase64 ? header.slice(0, -";base64".length) : header) || "application/octet-stream";
-	const data = isBase64 ? payload : Buffer.from(decodeURIComponent(payload), "utf8").toString("base64");
-	return { data, mimeType };
+	try {
+		const data = isBase64 ? payload : Buffer.from(decodeURIComponent(payload), "utf8").toString("base64");
+		return { data, mimeType };
+	} catch {
+		return undefined;
+	}
 }

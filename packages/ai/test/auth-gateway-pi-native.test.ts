@@ -100,6 +100,54 @@ async function createPiNativeImageGatewayFixture() {
 	};
 }
 
+function startProviderFileUpstream(requests: Array<Record<string, unknown>>) {
+	return Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		async fetch(request) {
+			const body = (await request.json()) as Record<string, unknown>;
+			requests.push(body);
+			if ("messages" in body) {
+				const events = [
+					{
+						type: "message_start",
+						message: {
+							id: "msg_provider_file",
+							type: "message",
+							role: "assistant",
+							model: "claude-provider-file",
+							content: [],
+							stop_reason: null,
+							stop_sequence: null,
+							usage: { input_tokens: 1, output_tokens: 0 },
+						},
+					},
+					{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+					{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
+					{ type: "content_block_stop", index: 0 },
+					{
+						type: "message_delta",
+						delta: { stop_reason: "end_turn", stop_sequence: null },
+						usage: { input_tokens: 1, output_tokens: 1 },
+					},
+					{ type: "message_stop" },
+				];
+				return new Response(
+					events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+					{ headers: { "Content-Type": "text/event-stream" } },
+				);
+			}
+			return new Response(
+				`data: ${JSON.stringify({
+					candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+					usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1, totalTokenCount: 2 },
+				})}\n\n`,
+				{ headers: { "Content-Type": "text/event-stream" } },
+			);
+		},
+	});
+}
+
 describe("pi-native parseRequest", () => {
 	it("accepts modelId + context and returns canonical shape", () => {
 		const parsed = parseRequest({
@@ -371,6 +419,49 @@ describe("pi-native gateway image reference validation", () => {
 				message:
 					"input_image.image_url cannot be forwarded to mock without inline image data; use a data URL or target an API that supports remote image URLs",
 			},
+			{
+				context: {
+					messages: [
+						{
+							role: "user",
+							content: [
+								{
+									type: "image",
+									data: "",
+									mimeType: "image/png",
+									providerFile: { provider: "anthropic", id: "file_anthropic_123" },
+								},
+							],
+							timestamp: 0,
+						},
+					],
+				},
+				message:
+					"input_image.providerFile cannot be forwarded to mock; use inline image data or target the matching provider API",
+			},
+			{
+				context: {
+					messages: [
+						{
+							role: "user",
+							content: [
+								{
+									type: "image",
+									data: "",
+									mimeType: "image/png",
+									providerFile: {
+										provider: "google",
+										uri: "https://generativelanguage.googleapis.com/v1beta/files/google-123",
+									},
+								},
+							],
+							timestamp: 0,
+						},
+					],
+				},
+				message:
+					"input_image.providerFile cannot be forwarded to mock; use inline image data or target the matching provider API",
+			},
 		];
 
 		try {
@@ -393,6 +484,120 @@ describe("pi-native gateway image reference validation", () => {
 			}
 		} finally {
 			await fixture.close();
+		}
+	});
+
+	it("forwards matching Anthropic and Google provider file references", async () => {
+		const upstreamRequests: Array<Record<string, unknown>> = [];
+		const upstream = startProviderFileUpstream(upstreamRequests);
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-provider-files-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("anthropic", "test-key");
+		storage.setRuntimeApiKey("google", "test-key");
+		const anthropicModel = buildModel({
+			id: "claude-provider-file",
+			name: "Claude Provider File",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: upstream.url.origin,
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"anthropic-messages">);
+		const googleModel = buildModel({
+			id: "gemini-provider-file",
+			name: "Gemini Provider File",
+			api: "google-generative-ai",
+			provider: "google",
+			baseUrl: `${upstream.url.origin}/v1beta`,
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"google-generative-ai">);
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: modelId => {
+				if (modelId === anthropicModel.id) return anthropicModel;
+				if (modelId === googleModel.id) return googleModel;
+				return undefined;
+			},
+			version: "test",
+		});
+
+		try {
+			const cases = [
+				{
+					model: anthropicModel,
+					providerFile: { provider: "anthropic", id: "file_anthropic_123" },
+				},
+				{
+					model: googleModel,
+					providerFile: {
+						provider: "google",
+						uri: "https://generativelanguage.googleapis.com/v1beta/files/google-123",
+					},
+				},
+			] as const;
+			for (const testCase of cases) {
+				const response = await fetch(`${handle.url}/v1/pi/stream`, {
+					method: "POST",
+					headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+					body: JSON.stringify({
+						modelId: testCase.model.id,
+						context: {
+							messages: [
+								{
+									role: "user",
+									content: [
+										{
+											type: "image",
+											data: "",
+											mimeType: "image/png",
+											providerFile: testCase.providerFile,
+										},
+									],
+									timestamp: 0,
+								},
+							],
+						},
+						stream: false,
+					}),
+				});
+				expect(response.status).toBe(200);
+				await response.json();
+			}
+			expect(upstreamRequests).toHaveLength(2);
+			const anthropicMessages = upstreamRequests[0]?.messages as Array<{ content?: unknown }> | undefined;
+			const anthropicContent = anthropicMessages?.[0]?.content;
+			if (!Array.isArray(anthropicContent)) throw new Error("expected Anthropic message content");
+			expect(anthropicContent).toContainEqual(
+				expect.objectContaining({
+					type: "image",
+					source: { type: "file", file_id: "file_anthropic_123" },
+				}),
+			);
+			const googleContents = upstreamRequests[1]?.contents as Array<{ parts?: unknown }> | undefined;
+			const googleParts = googleContents?.[0]?.parts;
+			if (!Array.isArray(googleParts)) throw new Error("expected Google content parts");
+			expect(googleParts).toContainEqual(
+				expect.objectContaining({
+					fileData: {
+						fileUri: "https://generativelanguage.googleapis.com/v1beta/files/google-123",
+						mimeType: "image/png",
+					},
+				}),
+			);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			upstream.stop(true);
 		}
 	});
 
