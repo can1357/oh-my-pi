@@ -1773,6 +1773,22 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 				Array.isArray(message.content) ? message.content : [],
 			);
 			expect(inlineContentParts).toContainEqual({ type: "image_url", image_url: { url: inlineImageUrl } });
+			const normalizedMixedCaseImageUrl = "data:image/png;base64,SGk=";
+			const mixedCaseInlineResponse = await fetch(`${gateway.url}/v1/responses`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+				body: JSON.stringify(toolImageRequest(model.id, "DATA:image/png;BASE64,SGk%3D", "file_image_123")),
+			});
+			expect(mixedCaseInlineResponse.status).toBe(200);
+			await mixedCaseInlineResponse.text();
+			expect(upstreamRequests).toHaveLength(2);
+			const mixedCaseInlineContentParts = (upstreamRequests[1]?.messages ?? []).flatMap(message =>
+				Array.isArray(message.content) ? message.content : [],
+			);
+			expect(mixedCaseInlineContentParts).toContainEqual({
+				type: "image_url",
+				image_url: { url: normalizedMixedCaseImageUrl },
+			});
 			const response = await fetch(`${gateway.url}/v1/responses`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
@@ -1780,8 +1796,8 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 			});
 			expect(response.status).toBe(200);
 			await response.text();
-			expect(upstreamRequests).toHaveLength(2);
-			const contentParts = (upstreamRequests[1]?.messages ?? []).flatMap(message =>
+			expect(upstreamRequests).toHaveLength(3);
+			const contentParts = (upstreamRequests[2]?.messages ?? []).flatMap(message =>
 				Array.isArray(message.content) ? message.content : [],
 			);
 			expect(contentParts).toContainEqual({ type: "image_url", image_url: { url: imageUrl } });
