@@ -9,7 +9,7 @@ import { registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
 import type { LoadContext, LoadResult } from "../capability/types";
-import { createSourceMeta, expandEnvVarsDeep, getProjectPath } from "./helpers";
+import { createSourceMeta, expandEnvVarsDeep, getProjectPath, parseMcpBooleanField } from "./helpers";
 
 const PROVIDER_ID = "vscode";
 const DISPLAY_NAME = "VS Code";
@@ -84,6 +84,7 @@ async function loadMCPConfig(
 		const server: MCPServer = {
 			name,
 			enabled: typeof expanded.enabled === "boolean" ? expanded.enabled : undefined,
+			lazy: parseMcpBooleanField(expanded.lazy),
 			command: typeof expanded.command === "string" ? expanded.command : undefined,
 			args: Array.isArray(expanded.args) ? (expanded.args as string[]) : undefined,
 			env: expanded.env && typeof expanded.env === "object" ? (expanded.env as Record<string, string>) : undefined,

@@ -129,6 +129,26 @@ export async function applyMcpToggleRuntime(options: ApplyMcpToggleRuntimeOption
 	await session?.refreshMCPTools(manager.getTools());
 }
 
+/**
+ * Whether a provider-level disable must tear down `name`'s live MCP state.
+ *
+ * `getConnectionStatus` intentionally reports `"disconnected"` for a dormant
+ * lazy server whose tools were installed from a cache hit at startup (it has
+ * never actually connected), so connection status alone is not a valid
+ * ownership test — a bulk provider disable that gates on it skips those
+ * servers entirely, leaving their cached tools registered and able to
+ * reconnect on invocation despite the provider being disabled. A server with
+ * any tools currently registered under its name needs teardown regardless of
+ * connection status.
+ */
+export function mcpServerNeedsProviderTeardown(manager: MCPToggleManager | undefined, name: string): boolean {
+	if (!manager) return true;
+	return (
+		manager.getConnectionStatus(name) !== "disconnected" ||
+		manager.getTools().some(tool => tool.mcpServerName === name)
+	);
+}
+
 const DEFAULT_VISIBLE_TOOLS = PREVIEW_LIMITS.COLLAPSED_ITEMS;
 
 export function isDiscoveredMcpServer(raw: unknown): raw is MCPServer {

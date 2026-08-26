@@ -714,7 +714,23 @@ export class MCPManager {
 			await Promise.all(
 				lazyServers.map(async ({ name, config }) => {
 					const cached = await this.toolCache?.get(name, config);
-					if (!cached) return;
+					if (!cached) {
+						// Cache miss with tools still registered under this name means
+						// the server's connection identity changed (edited command/URL)
+						// while it sat dormant: the old catalog belongs to the previous
+						// identity, and leaving it registered would keep serving stale
+						// tool names — and make `/mcp test`'s seeding path believe the
+						// server is already mounted. Drop it; the server is tool-less
+						// until seeded, exactly like any first-time lazy server.
+						if (
+							this.#serverConfigs.get(name) === config &&
+							this.#tools.some(tool => tool.mcpServerName === name)
+						) {
+							this.#replaceServerTools(name, []);
+							void this.#onToolsChanged?.(this.#tools);
+						}
+						return;
+					}
 					// `/mcp disable`, `disconnectServer`, or `disconnectAll` may have run
 					// while the cache lookup above was in flight, clearing `#serverConfigs`
 					// (or replacing it with a fresh config). Installing the deferred tools
