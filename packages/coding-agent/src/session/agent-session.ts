@@ -1111,8 +1111,8 @@ export class AgentSession implements SettingsScope {
 
 	readonly #streamingEditGuard: StreamingEditGuard;
 	readonly #loopGuards: LoopGuards;
-	/** Speculations launched from partial eval source; created on first streamed eval call. */
-	#evalSpeculation: EvalSpeculationStore | undefined;
+	/** Speculations launched from partial eval source. Injected; undefined leaves speculation off. */
+	readonly #evalSpeculation: EvalSpeculationStore | undefined;
 	#promptInFlightCount = 0;
 	/** Dialogs open and waiting for the user's answer; while any is, the computer turn is ended. */
 	#userWaitCount = 0;
