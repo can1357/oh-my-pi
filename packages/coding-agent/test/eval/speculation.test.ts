@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { AgentEvent } from "@oh-my-pi/pi-agent-core";
 import { callSessionTool } from "../../src/eval/js/tool-bridge";
 import {
 	EvalSpeculationStore,
@@ -6,6 +7,7 @@ import {
 	registerEvalSpeculation,
 	SPECULATED_BRIDGE_TOOL,
 	speculationKey,
+	streamedEvalCell,
 } from "../../src/eval/speculation";
 import type { ToolSession } from "../../src/tools";
 
@@ -252,5 +254,63 @@ describe("eval bridge integration", () => {
 		// against the stub session. The specific rejection is incidental; that it
 		// reaches the real path at all is the contract.
 		await expect(callSessionTool("__completion__", { prompt: "uncached" }, { session })).rejects.toThrow();
+	});
+});
+
+/** Minimal streamed assistant event carrying one tool call. */
+function streamEvent(toolCall: unknown, options: { eventType?: string; contentIndex?: number } = {}): AgentEvent {
+	return {
+		type: "message_update",
+		message: { role: "assistant", content: [toolCall] },
+		assistantMessageEvent: {
+			type: options.eventType ?? "toolcall_delta",
+			contentIndex: options.contentIndex ?? 0,
+		},
+	} as unknown as AgentEvent;
+}
+
+describe("streamed eval cell extraction", () => {
+	// This is the shape contract against the provider's progressive arg parsing.
+	// If it silently stopped matching, speculation would become a no-op with no
+	// failing test anywhere else.
+	test("recovers code and language from a partially written eval call", () => {
+		const event = streamEvent({ name: "eval", arguments: { language: "js", code: 'completion("p")' } });
+		expect(streamedEvalCell(event)).toEqual({ code: 'completion("p")', language: "js" });
+	});
+
+	test("accepts every streamed tool-call phase", () => {
+		for (const eventType of ["toolcall_start", "toolcall_delta", "toolcall_end"]) {
+			const event = streamEvent({ name: "eval", arguments: { language: "py", code: "x = 1" } }, { eventType });
+			expect(streamedEvalCell(event)).toEqual({ code: "x = 1", language: "py" });
+		}
+	});
+
+	test("ignores other tools and other event types", () => {
+		expect(streamedEvalCell(streamEvent({ name: "bash", arguments: { command: "ls" } }))).toBeUndefined();
+		expect(
+			streamedEvalCell(
+				streamEvent({ name: "eval", arguments: { language: "js", code: "x" } }, { eventType: "text_delta" }),
+			),
+		).toBeUndefined();
+	});
+
+	// The scanner models JS and Python comment and string syntax only; handing it
+	// Ruby or Julia source would mis-tokenize rather than fail loudly.
+	test("ignores runtimes the scanner does not model", () => {
+		for (const language of ["rb", "jl"]) {
+			expect(streamedEvalCell(streamEvent({ name: "eval", arguments: { language, code: "x" } }))).toBeUndefined();
+		}
+	});
+
+	test("ignores a call whose args have not reached code yet", () => {
+		expect(streamedEvalCell(streamEvent({ name: "eval", arguments: { language: "js" } }))).toBeUndefined();
+		expect(streamedEvalCell(streamEvent({ name: "eval", arguments: {} }))).toBeUndefined();
+		expect(streamedEvalCell(streamEvent({ name: "eval" }))).toBeUndefined();
+	});
+
+	test("ignores a content index outside the message", () => {
+		const call = { name: "eval", arguments: { language: "js", code: "x" } };
+		expect(streamedEvalCell(streamEvent(call, { contentIndex: 3 }))).toBeUndefined();
+		expect(streamedEvalCell(streamEvent(call, { contentIndex: -1 }))).toBeUndefined();
 	});
 });
