@@ -862,7 +862,7 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 							if (credential.type !== "api_key" || credential.source !== undefined) {
 								return json(400, { error: "Conditional credential uploads require a generated API key" });
 							}
-							inserted = await opts.storage.addGeneratedApiKeyIfAbsent(provider, credential.key);
+							inserted = await opts.storage.addGeneratedApiKeyIfAbsent(provider, credential.key, req.signal);
 							entries = opts.storage.exportSnapshot().credentials.filter(entry => entry.provider === provider);
 						} else {
 							entries = opts.storage.upsertCredential(provider, credential);

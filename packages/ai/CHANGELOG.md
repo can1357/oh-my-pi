@@ -343,6 +343,11 @@
 ### Fixed
 
 - Fixed auth-broker background activity keeping processes alive unnecessarily, so unused broker-backed auth storage now parks automatically and no longer prevents CLI exit.
+- Added `/login anysearch` and `ANYSEARCH_API_KEY` credential discovery ([#9726](https://github.com/can1357/oh-my-pi/pull/9726) by [@anysearch-ai](https://github.com/anysearch-ai)).
+
+### Fixed
+
+- Prevented provider-generated API keys from replacing credentials added concurrently or outranking a later environment key ([#9726](https://github.com/can1357/oh-my-pi/pull/9726) by [@anysearch-ai](https://github.com/anysearch-ai)).
 
 ## [18.0.5] - 2026-08-25
 
