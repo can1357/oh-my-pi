@@ -173,6 +173,23 @@ export function parseRequestIdFormat(value: unknown): MCPRequestIdFormat | undef
 }
 
 /**
+ * Parse an MCP server boolean field (`enabled`, `lazy`). Accepts real
+ * booleans and the string forms "true"/"false"/"1"/"0" so hand-edited JSON
+ * (env expansion, shell-generated configs) round-trips the same across every
+ * discovery provider; anything else is dropped so a typo falls back to the
+ * default rather than silently taking on the wrong value.
+ */
+export function parseMcpBooleanField(value: unknown): boolean | undefined {
+	if (typeof value === "boolean") return value;
+	if (typeof value === "string") {
+		const normalized = value.trim().toLowerCase();
+		if (normalized === "true" || normalized === "1") return true;
+		if (normalized === "false" || normalized === "0") return false;
+	}
+	return undefined;
+}
+
+/**
  * Parse a comma-separated string into an array of trimmed, non-empty strings.
  */
 export function parseCSV(value: string): string[] {

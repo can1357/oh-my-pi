@@ -26,8 +26,15 @@ function toHex(buffer: ArrayBuffer): string {
 	return output;
 }
 
+/**
+ * Hash a server config for cache-identity purposes. `lazy` is a connection
+ * *policy* (when to connect), not part of the server's identity — flipping it
+ * on an already-cached eager server must still hit the cache, or every
+ * eager-to-lazy transition orphans the cache and starts the server tool-less.
+ */
 async function hashConfig(config: MCPServerConfig): Promise<string> {
-	const stable = stableStringifyJson(config);
+	const { lazy: _lazy, ...identity } = config;
+	const stable = stableStringifyJson(identity);
 	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(stable));
 	return toHex(digest);
 }
