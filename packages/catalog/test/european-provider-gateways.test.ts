@@ -591,17 +591,21 @@ describe("European gateway provider catalog support", () => {
 						name: "Custom Vision Model",
 						input_modalities: [" Image "],
 					},
+					{
+						id: "tagged-vision-model",
+						name: "Tagged Vision Model",
+						tags: [" Vision "],
+					},
 				],
 			});
 		});
 
 		const models = await eurouterModelManagerOptions({ fetch: fetchMock }).fetchDynamicModels?.();
 
-		expect(models?.[0]).toMatchObject({
-			id: "custom-vision-model",
-			provider: "eurouter",
-			input: ["text", "image"],
-		});
+		expect(models?.map(model => ({ id: model.id, input: model.input }))).toEqual([
+			{ id: "custom-vision-model", input: ["text", "image"] },
+			{ id: "tagged-vision-model", input: ["text", "image"] },
+		]);
 	});
 
 	test("normalizes gateway output modality tokens before filtering", async () => {

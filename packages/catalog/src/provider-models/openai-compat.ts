@@ -858,7 +858,7 @@ function toGatewayInputCapabilities(
 	if (typeof rawModality === "string" && rawModality.trim().length > 0) {
 		return hasGatewayImageInputModality(rawModality) ? ["text", "image"] : ["text"];
 	}
-	const tags = toStringArray(entry.tags).map(tag => tag.toLowerCase());
+	const tags = toStringArray(entry.tags).map(tag => tag.trim().toLowerCase());
 	if (tags.includes("image") || tags.includes("vision")) {
 		return ["text", "image"];
 	}
