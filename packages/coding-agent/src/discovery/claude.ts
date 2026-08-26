@@ -29,6 +29,7 @@ import {
 	expandEnvVarsDeep,
 	getExtensionNameFromPath,
 	loadFilesFromDir,
+	parseMcpBooleanField,
 	scanSkillsFromDir,
 } from "./helpers";
 
@@ -111,6 +112,9 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			return {
 				name,
 				enabled: typeof serverConfig.enabled === "boolean" ? serverConfig.enabled : undefined,
+				// Same coercion as the omp mcp.json provider (mcp-json.ts): string
+				// forms arrive both verbatim and via ${ENV_VAR} expansion above.
+				lazy: parseMcpBooleanField(serverConfig.lazy),
 				timeout: typeof serverConfig.timeout === "number" ? serverConfig.timeout : undefined,
 				command: serverConfig.command as string | undefined,
 				args: serverConfig.args as string[] | undefined,
