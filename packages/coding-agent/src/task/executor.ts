@@ -3501,7 +3501,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						},
 						...createExtensionAgentActions({
 							scopeAgentId: session.getAgentId() ?? MAIN_AGENT_ID,
-							scopeSessionFile: session.sessionManager?.getSessionFile?.() ?? null,
+							getScopeSessionFile: () => session.sessionManager?.getSessionFile?.() ?? null,
 						}),
 						setLabel: (targetId, label) => {
 							session.sessionManager.appendLabelChange(targetId, label);

@@ -20,9 +20,9 @@ import { AgentLifecycleManager, type PersistedSubagentReviverFactory } from "../
 import {
 	type AgentRef,
 	AgentRegistry,
+	bareAgentId,
 	collectAgentFamily,
 	MAIN_AGENT_ID,
-	qualifyPersistedAgentId,
 } from "../registry/agent-registry";
 import { registerPersistedSubagents } from "../registry/persisted-agents";
 import type { AgentSession } from "../session/agent-session";
@@ -57,8 +57,15 @@ export interface ExtensionAgentActionsScope {
 	 * session's transcript (or a stale path left over from a session
 	 * transition) and graft that session's persisted children into its own
 	 * family, defeating the isolation {@link scopeAgentId} exists to enforce.
+	 *
+	 * Resolved on every call rather than captured once: a caller's session
+	 * survives `/new`, `ctx.newSession()`, and `ctx.switchSession()` without
+	 * this scope being rebuilt, so a snapshotted path would keep comparing
+	 * against the transcript that was current when the scope was created —
+	 * rejecting rescans of the session's actual current transcript while
+	 * still trusting the stale one.
 	 */
-	scopeSessionFile?: string | null;
+	getScopeSessionFile?: () => string | null;
 	/**
 	 * Session-scoped cold-revive support for a host that cannot install one
 	 * process-global {@link PersistedSubagentReviverFactory} (ACP: concurrent
@@ -76,7 +83,7 @@ export function createExtensionAgentActions(
 	scope: ExtensionAgentActionsScope = {},
 ): Required<Pick<ExtensionActions, "agentsList" | "agentsGet" | "agentsEnsureLive" | "agentsPrompt">> {
 	const registry = AgentRegistry.global();
-	const { scopeAgentId, scopeSessionFile, reviverFactory, idleTtlMs } = scope;
+	const { scopeAgentId, getScopeSessionFile, reviverFactory, idleTtlMs } = scope;
 	const inScope = (id: string): boolean =>
 		scopeAgentId === undefined || collectAgentFamily(registry, scopeAgentId).has(id);
 	/**
@@ -84,14 +91,20 @@ export function createExtensionAgentActions(
 	 * session's identically-named agent: `AgentRegistry` is a flat,
 	 * process-global map, but a subagent id is only unique within its owning
 	 * session's own tree. `registerPersistedSubagentsFromDir` registers such a
-	 * collision under the disambiguated {@link qualifyPersistedAgentId} key
-	 * instead of the bare one — fall back to that key when the bare id isn't
-	 * (or isn't yet) this session's own.
+	 * collision under a disambiguated key qualified against its (possibly
+	 * itself already-qualified) parent — nesting a second collision one or
+	 * more levels deep, e.g. `owner/Parent/Child` when `Parent` collided too.
+	 * Rather than probing only the single-level `${scopeAgentId}/${id}` form,
+	 * walk this session's own family for the member whose bare, unqualified
+	 * leaf name (peeling off exactly one `${itsOwnParentId}/` prefix, however
+	 * qualified that parent id itself is) equals `id`.
 	 */
 	const resolveInScope = (id: string): string => {
 		if (scopeAgentId === undefined || inScope(id)) return id;
-		const qualified = qualifyPersistedAgentId(scopeAgentId, id);
-		return inScope(qualified) ? qualified : id;
+		for (const memberId of collectAgentFamily(registry, scopeAgentId)) {
+			if (bareAgentId(memberId, registry.get(memberId)?.parentId) === id) return memberId;
+		}
+		return id;
 	};
 	/**
 	 * Whether `file` is the transcript this scope is bound to — the only
@@ -101,8 +114,11 @@ export function createExtensionAgentActions(
 	 * transcript of its own can never satisfy this, so the rescan is refused
 	 * rather than trusting an unverifiable caller-supplied path.
 	 */
-	const isOwnSessionFile = (file: string): boolean =>
-		scopeAgentId === undefined || (scopeSessionFile != null && path.resolve(file) === path.resolve(scopeSessionFile));
+	const isOwnSessionFile = (file: string): boolean => {
+		if (scopeAgentId === undefined) return true;
+		const own = getScopeSessionFile?.() ?? null;
+		return own != null && path.resolve(file) === path.resolve(own);
+	};
 	const coldRevive = reviverFactory ? { reviverFactory, idleTtlMs } : undefined;
 	return {
 		agentsList: () => {
@@ -238,7 +254,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			},
 			...createExtensionAgentActions({
 				scopeAgentId: session.getAgentId() ?? MAIN_AGENT_ID,
-				scopeSessionFile: session.sessionManager?.getSessionFile?.() ?? null,
+				getScopeSessionFile: () => session.sessionManager?.getSessionFile?.() ?? null,
 				...agentActionsScope,
 			}),
 			setLabel: (targetId, label) => {

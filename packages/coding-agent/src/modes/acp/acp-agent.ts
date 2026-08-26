@@ -2572,7 +2572,7 @@ export class AcpAgent implements Agent {
 				},
 				...createExtensionAgentActions({
 					scopeAgentId,
-					scopeSessionFile: record.session.sessionManager?.getSessionFile?.() ?? null,
+					getScopeSessionFile: () => record.session.sessionManager?.getSessionFile?.() ?? null,
 					reviverFactory,
 					idleTtlMs: agentIdleTtlMs,
 				}),
