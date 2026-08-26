@@ -88,7 +88,7 @@ describe("MCP lazy connect", () => {
 			expect((tools[0] as DeferredMCPTool).mcpToolName).toBe(TOOL_NAME);
 
 			// The whole point: nothing spawned, nothing connecting.
-			expect(fs.existsSync(marker)).toBe(false);
+			expect(await Bun.file(marker).exists()).toBe(false);
 			expect(manager.getConnectionStatus("lazyfixture")).toBe("disconnected");
 		} finally {
 			await manager.disconnectAll();
@@ -116,7 +116,7 @@ describe("MCP lazy connect", () => {
 			);
 
 			expect(JSON.stringify(outcome)).toContain(TOOL_RESULT);
-			expect(fs.existsSync(marker)).toBe(true);
+			expect(await Bun.file(marker).exists()).toBe(true);
 			expect(manager.getConnectionStatus("lazyfixture")).toBe("connected");
 		} finally {
 			await manager.disconnectAll();
@@ -133,7 +133,7 @@ describe("MCP lazy connect", () => {
 
 			expect(result.errors.size).toBe(0);
 			expect(result.tools.filter(tool => tool.mcpServerName === "lazyfixture")).toHaveLength(0);
-			expect(fs.existsSync(marker)).toBe(false);
+			expect(await Bun.file(marker).exists()).toBe(false);
 			expect(manager.getConnectionStatus("lazyfixture")).toBe("disconnected");
 		} finally {
 			await manager.disconnectAll();
@@ -179,11 +179,11 @@ describe("lazy survives config discovery", () => {
 		setAgentDir(userAgentDir);
 		clearFsCache();
 		await fs.promises.mkdir(path.join(projectDir, ".omp"), { recursive: true });
-		await fs.promises.writeFile(
+		await Bun.write(
 			path.join(projectDir, ".omp", "mcp.json"),
 			JSON.stringify({ mcpServers: { projlazy: { command: "proj-lazy-cmd", lazy: true } } }),
 		);
-		await fs.promises.writeFile(
+		await Bun.write(
 			path.join(userAgentDir, "mcp.json"),
 			JSON.stringify({
 				mcpServers: {

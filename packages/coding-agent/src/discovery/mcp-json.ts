@@ -12,7 +12,7 @@ import { registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
-import { createSourceMeta, expandEnvVarsDeep, parseRequestIdFormat } from "./helpers";
+import { createSourceMeta, expandEnvVarsDeep, parseMcpBooleanField, parseRequestIdFormat } from "./helpers";
 
 const PROVIDER_ID = "mcp-json";
 const DISPLAY_NAME = "MCP Config";
@@ -24,8 +24,8 @@ interface MCPConfigFile {
 	mcpServers?: Record<
 		string,
 		{
-			enabled?: boolean;
-			lazy?: boolean;
+			enabled?: boolean | string;
+			lazy?: boolean | string;
 			timeout?: number;
 			requestIdFormat?: "string" | "number";
 			command?: string;
@@ -65,18 +65,16 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 			// Runtime type validation for user-controlled JSON values
 			let enabled: boolean | undefined;
 			if (serverConfig.enabled !== undefined) {
-				if (typeof serverConfig.enabled === "boolean") {
-					enabled = serverConfig.enabled;
-				} else {
+				enabled = parseMcpBooleanField(serverConfig.enabled);
+				if (enabled === undefined) {
 					logger.warn("MCP server has invalid 'enabled' value, ignoring", { name, value: serverConfig.enabled });
 				}
 			}
 
 			let lazy: boolean | undefined;
 			if (serverConfig.lazy !== undefined) {
-				if (typeof serverConfig.lazy === "boolean") {
-					lazy = serverConfig.lazy;
-				} else {
+				lazy = parseMcpBooleanField(serverConfig.lazy);
+				if (lazy === undefined) {
 					logger.warn("MCP server has invalid 'lazy' value, ignoring", { name, value: serverConfig.lazy });
 				}
 			}
