@@ -122,6 +122,13 @@ impl From<ClientError> for BatchError {
 pub const fn hook_event_mask(event: HookEventId) -> u64 {
 	1_u64 << event as u32
 }
+/// Compile-time ceiling: the highest `HookEventId` must stay below `u64::BITS`
+/// so `hook_event_mask`'s `1_u64 << event` never overflows. Adding a 64th
+/// variant fails the build instead of silently corrupting every mask.
+const _: () = assert!(
+	(HookEventId::HookEventFallbackSucceeded as u32) < u64::BITS,
+	"hook_event_mask is u64: a 64th HookEventId needs a wider mask"
+);
 
 /// One hook-composed admission answer and its narrowed authority envelope.
 #[derive(Clone, Debug)]
