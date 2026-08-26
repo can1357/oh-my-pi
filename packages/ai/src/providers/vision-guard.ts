@@ -174,7 +174,10 @@ export function supportsProviderFileReference(
 	reference: ProviderFileCandidate,
 	image: Pick<ImageContent, "mimeType">,
 ): boolean {
-	if (typeof reference.expiresAt === "number" && reference.expiresAt <= Date.now()) return false;
+	if (reference.expiresAt !== undefined) {
+		if (typeof reference.expiresAt !== "number" || !Number.isFinite(reference.expiresAt)) return false;
+		if (reference.expiresAt <= Date.now()) return false;
+	}
 	if (!model.input.includes("image")) return false;
 	if (reference.provider === "openai") {
 		return (

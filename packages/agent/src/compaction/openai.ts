@@ -730,7 +730,7 @@ export function buildOpenAiNativeHistory(
 			}
 			if (!knownCallIds.has(normalized.callId)) {
 				if (!staleCallIds.has(normalized.callId)) {
-					const orphanOutput = splitResponsesOrphanOutput(output, model);
+					const orphanOutput = splitResponsesOrphanOutput(output, model, supportsImageDetailOriginal);
 					const limit = 16_000;
 					const noteText =
 						outputText.length > limit ? `${outputText.slice(0, limit)}\n...[truncated]` : outputText;

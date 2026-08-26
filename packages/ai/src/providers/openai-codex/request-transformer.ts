@@ -206,7 +206,7 @@ function orphanFunctionOutputItems(
 ): InputItem[] {
 	const itemRecord = item as unknown as Record<string, unknown>;
 	const toolName = typeof itemRecord.name === "string" ? itemRecord.name : "tool";
-	const orphanOutput = splitResponsesOrphanOutput(itemRecord.output, model);
+	const orphanOutput = splitResponsesOrphanOutput(itemRecord.output, model, model.compat.supportsImageDetailOriginal);
 	let text = orphanOutput.text;
 	if (text.length > CODEX_ORPHAN_OUTPUT_LIMIT) {
 		text = `${text.slice(0, CODEX_ORPHAN_OUTPUT_LIMIT)}\n...[truncated]`;

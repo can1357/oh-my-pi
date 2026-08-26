@@ -21,11 +21,9 @@ function makeResponsesModel(provider: string, baseUrl: string) {
 	} satisfies ModelSpec<"openai-responses">);
 }
 
-function makeResponsesTargetModel<TApi extends "openai-responses" | "openai-codex-responses" | "azure-openai-responses">(
-	api: TApi,
-	provider: string,
-	baseUrl: string,
-) {
+function makeResponsesTargetModel<
+	TApi extends "openai-responses" | "openai-codex-responses" | "azure-openai-responses",
+>(api: TApi, provider: string, baseUrl: string) {
 	return buildModel({
 		id: "vision-model",
 		name: "Vision Model",
@@ -38,6 +36,21 @@ function makeResponsesTargetModel<TApi extends "openai-responses" | "openai-code
 		contextWindow: 32_768,
 		maxTokens: 4_096,
 	} satisfies ModelSpec<TApi>);
+}
+
+function makeGoogleModel() {
+	return buildModel({
+		id: "vision-model",
+		name: "Vision Model",
+		api: "google-generative-ai",
+		provider: "google",
+		baseUrl: "https://generativelanguage.googleapis.com",
+		reasoning: false,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 32_768,
+		maxTokens: 4_096,
+	} satisfies ModelSpec<"google-generative-ai">);
 }
 
 describe("OpenAI provider-file capability", () => {
@@ -120,5 +133,16 @@ describe("OpenAI provider-file capability", () => {
 				image,
 			),
 		).toBe(false);
+	});
+
+	it("rejects malformed and non-finite provider-file expirations", () => {
+		const model = makeGoogleModel();
+		const image = { mimeType: "image/png" };
+		const reference = { provider: "google", uri: "https://generativelanguage.googleapis.com/v1/files/vision" };
+
+		for (const expiresAt of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, "invalid", null]) {
+			expect(supportsProviderFileReference(model, { ...reference, expiresAt }, image)).toBe(false);
+		}
+		expect(supportsProviderFileReference(model, { ...reference, expiresAt: Date.now() + 60_000 }, image)).toBe(true);
 	});
 });

@@ -1465,6 +1465,7 @@ function normalizeResponsesOrphanImage(
 	block: Record<string, unknown>,
 	detail: ResponseInputImage["detail"],
 	model: Model,
+	supportsImageDetailOriginal: boolean,
 ): ResponseInputImage | undefined {
 	if (!model.input.includes("image")) return undefined;
 	const imageUrl = typeof block.image_url === "string" && block.image_url.length > 0 ? block.image_url : undefined;
@@ -1489,15 +1490,21 @@ function normalizeResponsesOrphanImage(
 	}
 	if (image.data.length === 0 && image.url === undefined && image.providerFile === undefined) return undefined;
 	try {
-		return convertResponsesInputImage(image, false, model);
+		return convertResponsesInputImage(image, supportsImageDetailOriginal, model);
 	} catch {
 		return undefined;
 	}
 }
 
+function modelSupportsImageDetailOriginal(model: Model | undefined): boolean {
+	const compat = model?.compat;
+	return !!compat && "supportsImageDetailOriginal" in compat && compat.supportsImageDetailOriginal === true;
+}
+
 export function splitResponsesOrphanOutput(
 	output: unknown,
 	model?: Model,
+	supportsImageDetailOriginal = modelSupportsImageDetailOriginal(model),
 ): { text: string; images: ResponseInputImage[] } {
 	const images: ResponseInputImage[] = [];
 	let noteOutput = output;
@@ -1518,7 +1525,7 @@ export function splitResponsesOrphanOutput(
 						? block.detail
 						: "auto";
 				const image = model
-					? normalizeResponsesOrphanImage(block, detail, model)
+					? normalizeResponsesOrphanImage(block, detail, model, supportsImageDetailOriginal)
 					: ({
 							...block,
 							type: "input_image",
@@ -1576,7 +1583,11 @@ function appendResponsesOrphanImages(messages: ResponseInput, images: ResponseIn
  * input grammar. Matches the behavior of {@link transformRequestBody} in the
  * codex provider — issue #1351 / regression of #472.
  */
-export function repairOrphanResponsesToolOutputs(input: ResponseInput, model?: Model): ResponseInput {
+export function repairOrphanResponsesToolOutputs(
+	input: ResponseInput,
+	model?: Model,
+	supportsImageDetailOriginal = modelSupportsImageDetailOriginal(model),
+): ResponseInput {
 	const precedingCalls = new Set<string>();
 	let repaired: ResponseInput | undefined;
 	for (let index = 0; index < input.length; index++) {
@@ -1594,7 +1605,7 @@ export function repairOrphanResponsesToolOutputs(input: ResponseInput, model?: M
 		if (!repaired) repaired = input.slice(0, index);
 		const toolName = outputKind === "computer" ? "computer" : "tool";
 		const rawOutput = "output" in item ? item.output : undefined;
-		const orphanOutput = splitResponsesOrphanOutput(rawOutput, model);
+		const orphanOutput = splitResponsesOrphanOutput(rawOutput, model, supportsImageDetailOriginal);
 		let text = orphanOutput.text;
 		const ORPHAN_OUTPUT_LIMIT = 16_000;
 		if (text.length > ORPHAN_OUTPUT_LIMIT) text = `${text.slice(0, ORPHAN_OUTPUT_LIMIT)}\n...[truncated]`;
@@ -2233,7 +2244,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 
 	const hoisted = hoistInterleavedResponsesToolBatchMessages(messages);
 	const withRepairedOutputs = options.repairOrphanOutputs
-		? repairOrphanResponsesToolOutputs(hoisted, options.model)
+		? repairOrphanResponsesToolOutputs(hoisted, options.model, supportsImageDetailOriginal)
 		: hoisted;
 	const withRepairedCalls = repairOrphanResponsesToolCalls(withRepairedOutputs);
 	return stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay(
@@ -2556,7 +2567,10 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 			role: "assistant",
 			content: `[Orphan ${toolResult.toolName || "tool"} result; call_id=${normalized.callId}]: ${noteText}`,
 		} as ResponseInput[number]);
-		appendResponsesOrphanImages(messages, splitResponsesOrphanOutput(output, model).images);
+		appendResponsesOrphanImages(
+			messages,
+			splitResponsesOrphanOutput(output, model, supportsImageDetailOriginal).images,
+		);
 		return;
 	}
 	if (supportsCustomToolCalls && customCallIds?.has(normalized.callId)) {

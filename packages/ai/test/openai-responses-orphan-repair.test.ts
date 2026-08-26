@@ -193,6 +193,29 @@ describe("repairOrphanResponsesToolOutputs", () => {
 		expect(repaired.some(item => item.type === "message" && item.role === "user")).toBe(false);
 	});
 
+	it("preserves original image detail for supporting orphan replay", () => {
+		const model = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
+		if (!model) throw new Error("expected the bundled Codex model");
+		const imageData = Buffer.from("original orphan image").toString("base64");
+		const imageUrl = `data:image/png;base64,${imageData}`;
+		const repaired = repairOrphanResponsesToolOutputs(
+			[
+				{
+					type: "function_call_output",
+					call_id: "call_original_detail",
+					output: [{ type: "input_image", detail: "original", image_url: imageUrl }],
+				} as ResponseInput[number],
+			],
+			model,
+		);
+
+		expect(repaired).toContainEqual({
+			type: "message",
+			role: "user",
+			content: [{ type: "input_image", detail: "original", image_url: imageUrl }],
+		});
+	});
+
 	it("does not pair an output with a call that appears later in replay order", () => {
 		const input: ResponseInput = [
 			{ type: "function_call_output", call_id: "call_a", output: "stale" } as ResponseInput[number],
