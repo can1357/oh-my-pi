@@ -72,6 +72,31 @@ const baseContext: Context = {
 	messages: [{ role: "user", content: "hi", timestamp: 0 }],
 };
 
+async function createPiNativeImageGatewayFixture() {
+	registerMockApi();
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-image-references-"));
+	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+	storage.setRuntimeApiKey("openai", "test-key");
+	const mock = createMockModel({ provider: "openai", id: "pi-native-image-references" });
+	const handle = startAuthGateway({
+		bind: "127.0.0.1:0",
+		bearerTokens: ["test-token"],
+		storage,
+		resolveModel: () => mock,
+		version: "test",
+	});
+	return {
+		handle,
+		mock,
+		async close() {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			clearCustomApis();
+		},
+	};
+}
+
 describe("pi-native parseRequest", () => {
 	it("accepts modelId + context and returns canonical shape", () => {
 		const parsed = parseRequest({
@@ -295,18 +320,7 @@ describe("pi-native gateway cache controls", () => {
 
 describe("pi-native gateway image reference validation", () => {
 	it("rejects unsupported image references without invoking the provider", async () => {
-		registerMockApi();
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-image-references-"));
-		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openai", "test-key");
-		const mock = createMockModel({ provider: "openai", id: "pi-native-image-references" });
-		const handle = startAuthGateway({
-			bind: "127.0.0.1:0",
-			bearerTokens: ["test-token"],
-			storage,
-			resolveModel: () => mock,
-			version: "test",
-		});
+		const fixture = await createPiNativeImageGatewayFixture();
 		const cases: Array<{ context: Context; message: string }> = [
 			{
 				context: {
@@ -358,11 +372,11 @@ describe("pi-native gateway image reference validation", () => {
 
 		try {
 			for (const testCase of cases) {
-				const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				const response = await fetch(`${fixture.handle.url}/v1/pi/stream`, {
 					method: "POST",
 					headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
 					body: JSON.stringify({
-						modelId: mock.id,
+						modelId: fixture.mock.id,
 						context: testCase.context,
 						stream: false,
 					}),
@@ -372,13 +386,88 @@ describe("pi-native gateway image reference validation", () => {
 				expect(await response.json()).toEqual({
 					error: { type: "invalid_request_error", message: testCase.message },
 				});
-				expect(mock.calls).toHaveLength(0);
+				expect(fixture.mock.calls).toHaveLength(0);
 			}
 		} finally {
-			await handle.close();
-			storage.close();
-			await fs.rm(dir, { recursive: true, force: true });
-			clearCustomApis();
+			await fixture.close();
+		}
+	});
+
+	it("uses inline image data after removing unsupported references", async () => {
+		const fixture = await createPiNativeImageGatewayFixture();
+		const imageData = Buffer.from("inline image").toString("base64");
+		fixture.mock.push({ content: ["ok"] });
+
+		try {
+			const response = await fetch(`${fixture.handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: fixture.mock.id,
+					context: {
+						messages: [
+							{
+								role: "toolResult",
+								toolCallId: "call_read",
+								toolName: "read",
+								content: [
+									{
+										type: "image",
+										data: imageData,
+										mimeType: "image/png",
+										providerFile: { provider: "openai", id: "file_image_123" },
+									},
+									{
+										type: "image",
+										data: imageData,
+										mimeType: "image/png",
+										url: "https://images.example.invalid/read.png",
+									},
+								],
+								isError: false,
+								timestamp: 0,
+							},
+						],
+					},
+					stream: false,
+				}),
+			});
+
+			expect(response.status).toBe(200);
+			await response.json();
+			expect(fixture.mock.calls).toHaveLength(1);
+			const result = fixture.mock.calls[0]?.context.messages[0];
+			if (result?.role !== "toolResult") throw new Error("expected tool result");
+			expect(result.content).toEqual([
+				{ type: "image", data: imageData, mimeType: "image/png" },
+				{ type: "image", data: imageData, mimeType: "image/png" },
+			]);
+		} finally {
+			await fixture.close();
+		}
+	});
+
+	it("returns a structured validation error for malformed canonical messages", async () => {
+		const fixture = await createPiNativeImageGatewayFixture();
+
+		try {
+			const response = await fetch(`${fixture.handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: fixture.mock.id,
+					context: { messages: [null] },
+					stream: false,
+				}),
+			});
+
+			expect(response.status).toBe(400);
+			expect(await response.json()).toEqual({
+				error: { type: "invalid_request_error", message: "`context.messages[0]` must be an object" },
+			});
+			expect(fixture.mock.calls).toHaveLength(0);
+		} finally {
+			await fixture.close();
 		}
 	});
 });

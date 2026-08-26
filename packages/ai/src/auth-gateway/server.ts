@@ -19,7 +19,7 @@
  */
 
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { extractHttpStatusFromError, extractRetryHint, logger } from "@oh-my-pi/pi-utils";
+import { extractHttpStatusFromError, extractRetryHint, isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { ApiKeyResolver } from "../auth-retry";
 import type { AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
@@ -81,39 +81,51 @@ function supportsOpenAIImageFileReferences(api: Api): boolean {
 	return api === "openai-responses" || api === "openai-codex-responses" || api === "azure-openai-responses";
 }
 
-function hasOpenAIImageFileReference(context: Context): boolean {
-	for (const message of context.messages) {
-		if (message.role !== "toolResult") continue;
-		for (const block of message.content) {
-			if (block.type === "image" && block.providerFile?.provider === "openai") return true;
+function validateAndNormalizeImageReferences(context: Context, model: Model): string | undefined {
+	const messages: unknown[] = context.messages;
+	for (const [messageIndex, message] of messages.entries()) {
+		if (!isRecord(message)) return `\`context.messages[${messageIndex}]\` must be an object`;
+		if (typeof message.content === "string") continue;
+		if (!Array.isArray(message.content)) {
+			return `\`context.messages[${messageIndex}].content\` must be a string or an array`;
 		}
-	}
-	return false;
-}
+		const blocks: unknown[] = message.content;
+		for (const [blockIndex, block] of blocks.entries()) {
+			if (!isRecord(block)) {
+				return `\`context.messages[${messageIndex}].content[${blockIndex}]\` must be an object`;
+			}
+			if (block.type !== "image") continue;
+			if (typeof block.data !== "string") {
+				return `\`context.messages[${messageIndex}].content[${blockIndex}].data\` must be a string`;
+			}
+			if (typeof block.mimeType !== "string") {
+				return `\`context.messages[${messageIndex}].content[${blockIndex}].mimeType\` must be a string`;
+			}
 
-function hasUnsupportedReferenceOnlyImageUrl(context: Context, model: Model): boolean {
-	for (const message of context.messages) {
-		if (message.role !== "toolResult") continue;
-		for (const block of message.content) {
+			const hasInlineData = block.data.length > 0;
 			if (
-				block.type === "image" &&
-				block.url &&
-				block.data.length === 0 &&
-				!supportsRemoteImageUrls(model, block)
+				isRecord(block.providerFile) &&
+				block.providerFile.provider === "openai" &&
+				!supportsOpenAIImageFileReferences(model.api)
 			) {
-				return true;
+				if (!hasInlineData) {
+					return `input_image.file_id cannot be forwarded to ${model.api}; target an OpenAI Responses model or use an inline data URL`;
+				}
+				delete block.providerFile;
+			}
+
+			if (block.url !== undefined) {
+				if (typeof block.url !== "string") {
+					return `\`context.messages[${messageIndex}].content[${blockIndex}].url\` must be a string`;
+				}
+				if (block.url.length === 0 || !supportsRemoteImageUrls(model, { mimeType: block.mimeType })) {
+					if (!hasInlineData) {
+						return `input_image.image_url cannot be forwarded to ${model.api} without inline image data; use a data URL or target an API that supports remote image URLs`;
+					}
+					delete block.url;
+				}
 			}
 		}
-	}
-	return false;
-}
-
-function validateImageReferences(context: Context, model: Model): string | undefined {
-	if (!supportsOpenAIImageFileReferences(model.api) && hasOpenAIImageFileReference(context)) {
-		return `input_image.file_id cannot be forwarded to ${model.api}; target an OpenAI Responses model or use an inline data URL`;
-	}
-	if (hasUnsupportedReferenceOnlyImageUrl(context, model)) {
-		return `input_image.image_url cannot be forwarded to ${model.api} without inline image data; use a data URL or target an API that supports remote image URLs`;
 	}
 	return undefined;
 }
@@ -435,7 +447,7 @@ async function handleFormatEndpoint(
 		const message = error instanceof Error ? error.message : String(error);
 		return route.module.formatError(400, "invalid_request_error", message);
 	}
-	const imageReferenceError = validateImageReferences(parsed.context, model);
+	const imageReferenceError = validateAndNormalizeImageReferences(parsed.context, model);
 	if (imageReferenceError) {
 		return route.module.formatError(400, "invalid_request_error", imageReferenceError);
 	}
@@ -616,7 +628,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	if (!model) {
 		return piNative.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
-	const imageReferenceError = validateImageReferences(parsed.context, model);
+	const imageReferenceError = validateAndNormalizeImageReferences(parsed.context, model);
 	if (imageReferenceError) {
 		return piNative.formatError(400, "invalid_request_error", imageReferenceError);
 	}
