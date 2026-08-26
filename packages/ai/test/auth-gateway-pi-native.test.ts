@@ -406,7 +406,10 @@ describe("pi-native gateway image reference validation", () => {
 							content: [],
 							providerMetadata: {
 								type: "computer",
-								screenshot: { type: "computer_screenshot", image_url: "https://images.example.invalid/screen.png" },
+								screenshot: {
+									type: "computer_screenshot",
+									image_url: "https://images.example.invalid/screen.png",
+								},
 								acknowledgedSafetyChecks: [],
 							},
 							isError: false,
@@ -768,6 +771,52 @@ describe("pi-native gateway image reference validation", () => {
 				{ type: "image", data: imageData, mimeType: "image/png" },
 				{ type: "image", data: imageData, mimeType: "image/png" },
 			]);
+		} finally {
+			await fixture.close();
+		}
+	});
+
+	it("prefers inline screenshots over unsupported screenshot metadata", async () => {
+		const fixture = await createPiNativeImageGatewayFixture();
+		const imageData = Buffer.from("inline screenshot").toString("base64");
+		fixture.mock.push({ content: ["ok"] });
+
+		try {
+			const response = await fetch(`${fixture.handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: fixture.mock.id,
+					context: {
+						messages: [
+							{
+								role: "toolResult",
+								toolCallId: "call_computer_inline",
+								toolName: "computer",
+								content: [{ type: "image", data: imageData, mimeType: "image/png" }],
+								providerMetadata: {
+									type: "computer",
+									screenshot: { type: "computer_screenshot", file_id: "file_stale_screen" },
+									acknowledgedSafetyChecks: [],
+								},
+								isError: false,
+								timestamp: 0,
+							},
+						],
+					},
+					stream: false,
+				}),
+			});
+
+			expect(response.status).toBe(200);
+			await response.json();
+			expect(fixture.mock.calls).toHaveLength(1);
+			const message = fixture.mock.calls[0]?.context.messages[0];
+			if (message?.role !== "toolResult") throw new Error("expected tool result");
+			expect(message.content).toEqual([{ type: "image", data: imageData, mimeType: "image/png" }]);
+			expect(message.providerMetadata?.type).toBe("computer");
+			expect(message.providerMetadata?.acknowledgedSafetyChecks).toEqual([]);
+			expect("screenshot" in (message.providerMetadata ?? {})).toBe(false);
 		} finally {
 			await fixture.close();
 		}

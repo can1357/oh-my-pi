@@ -480,6 +480,7 @@ export function transformMessages<TApi extends Api>(
 	maxNormalizedToolCallIdLength = MAX_TOOL_CALL_ID_LENGTH,
 	duplicateToolCallIdSuffixPrefix = "_dup",
 	targetCompat: Model<TApi>["compat"] = model.compat,
+	options?: { preserveOrphanToolResultImages?: boolean },
 ): Message[] {
 	// Redact sensitive credential-like patterns from all outbound messages when
 	// the host opted in via `configureCredentialRedaction` — prevents security
@@ -1047,6 +1048,11 @@ export function transformMessages<TApi extends Api>(
 				// `user` role is mapped to plain user content by every provider, so the
 				// content survives without ever being treated as an instruction the
 				// model should obey.
+				const hasImageParts = msg.content.some(part => part.type === "image");
+				if (options?.preserveOrphanToolResultImages && hasImageParts) {
+					result.push(msg);
+					continue;
+				}
 				const textParts: string[] = [];
 				for (const part of msg.content) {
 					if (part.type === "text" && part.text.trim() !== "") textParts.push(part.text);

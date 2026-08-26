@@ -1,5 +1,6 @@
 import { isDashscopeCompatibleModeUrl, modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import { isDeepseekModelIdOrName, isQwenModelId } from "@oh-my-pi/pi-catalog/identity";
+import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
 
 import type { ImageContent, Model, TextContent } from "../types";
 
@@ -40,6 +41,56 @@ function isOpenAICompletionsModel(model: Model): model is Model<"openai-completi
 
 function hasReplayableGoogleImageMimeType(image: Pick<ImageContent, "mimeType">): boolean {
 	return GOOGLE_REMOTE_IMAGE_MIME_TYPES[image.mimeType.toLowerCase()] === true;
+}
+
+function isOfficialHttpsHost(baseUrl: string | undefined, hostname: string): boolean {
+	const value = baseUrl?.trim() ?? "";
+	if (value.length === 0) return true;
+	try {
+		const url = new URL(value);
+		return url.protocol === "https:" && url.hostname.toLowerCase() === hostname;
+	} catch {
+		return false;
+	}
+}
+
+function isOfficialAzureOpenAIEndpoint(baseUrl: string | undefined): boolean {
+	const value = baseUrl?.trim() ?? "";
+	if (value.length === 0) return true;
+	try {
+		const url = new URL(value);
+		return (
+			url.protocol === "https:" &&
+			(url.hostname.toLowerCase().endsWith(".openai.azure.com") ||
+				url.hostname.toLowerCase() === "models.inference.ai.azure.com")
+		);
+	} catch {
+		return false;
+	}
+}
+
+function isOfficialCodexEndpoint(baseUrl: string | undefined): boolean {
+	const value = baseUrl?.trim() ?? "";
+	if (value.length === 0) return true;
+	const normalized = value.toLowerCase().replace(/\/+$/, "");
+	const codexBaseUrl = CODEX_BASE_URL.toLowerCase().replace(/\/+$/, "");
+	return normalized === codexBaseUrl || normalized.startsWith(`${codexBaseUrl}/`);
+}
+
+function supportsOfficialOpenAIProviderFileEndpoint(model: Model): boolean {
+	switch (model.api) {
+		case "openai-responses":
+			return model.provider === "openai" && isOfficialHttpsHost(model.baseUrl, "api.openai.com");
+		case "openai-codex-responses":
+			return model.provider === "openai-codex" && isOfficialCodexEndpoint(model.baseUrl);
+		case "azure-openai-responses":
+			return (
+				(model.provider === "azure" || model.provider === "azure-openai") &&
+				isOfficialAzureOpenAIEndpoint(model.baseUrl)
+			);
+		default:
+			return false;
+	}
 }
 
 export function isRemoteImageUrl(value: string): boolean {
@@ -87,7 +138,8 @@ export function supportsProviderFileReference(
 		return (
 			typeof reference.id === "string" &&
 			reference.id.length > 0 &&
-			OPENAI_PROVIDER_FILE_APIS[model.api] === true
+			OPENAI_PROVIDER_FILE_APIS[model.api] === true &&
+			supportsOfficialOpenAIProviderFileEndpoint(model)
 		);
 	}
 	if (reference.provider === "anthropic") {

@@ -64,7 +64,9 @@ export function decodeDataUri(url: string): DecodedDataUri | undefined {
 	const dataUrl = fragmentIndex < 0 ? url : url.slice(0, fragmentIndex);
 	const comma = dataUrl.indexOf(",");
 	if (comma < 0) return undefined;
-	const metadata = dataUrl.slice(5, comma).replace(/^ +| +$/g, "");
+	const metadataBytes = percentDecode(dataUrl.slice(5, comma));
+	if (!metadataBytes) return undefined;
+	const metadata = metadataBytes.toString("utf8").replace(/^ +| +$/g, "");
 	const base64Marker = /; *base64$/i.exec(metadata);
 	const mimeType = (base64Marker ? metadata.slice(0, base64Marker.index) : metadata) || "application/octet-stream";
 	const body = percentDecode(dataUrl.slice(comma + 1));

@@ -27,6 +27,7 @@ import {
 	hoistInterleavedResponsesToolBatchMessages,
 	parseAzureDeploymentNameMap,
 	parseTextSignature,
+	splitResponsesOrphanOutput,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import type {
@@ -425,17 +426,21 @@ function addOpenAiCallIds(
 	knownCallIds: Set<string>,
 	customCallIds: Set<string>,
 	computerCallIds: Set<string>,
+	staleCallIds?: Set<string>,
 ): void {
 	for (const item of items) {
 		if (typeof item.call_id !== "string") continue;
 		if (item.type === "function_call") {
 			knownCallIds.add(item.call_id);
+			staleCallIds?.delete(item.call_id);
 		} else if (item.type === "custom_tool_call") {
 			knownCallIds.add(item.call_id);
 			customCallIds.add(item.call_id);
+			staleCallIds?.delete(item.call_id);
 		} else if (item.type === "computer_call") {
 			knownCallIds.add(item.call_id);
 			computerCallIds.add(item.call_id);
+			staleCallIds?.delete(item.call_id);
 		}
 	}
 }
@@ -509,14 +514,23 @@ export function buildOpenAiNativeHistory(
 	const input: Array<Record<string, unknown>> = previousReplacementHistory
 		? adaptComputerHistoryForCompaction([...previousReplacementHistory], model.supportsComputerUse === true)
 		: [];
-	const transformedMessages = transformMessages(messages, model, id => normalizeOpenAiCompactionToolCallId(id));
+	const transformedMessages = transformMessages(
+		messages,
+		model,
+		id => normalizeOpenAiCompactionToolCallId(id),
+		undefined,
+		undefined,
+		undefined,
+		{ preserveOrphanToolResultImages: true },
+	);
 
 	let msgIndex = 0;
 	const knownCallIds = new Set<string>();
 	const customCallIds = new Set<string>();
 	const computerCallIds = new Set<string>();
 	const demotedComputerCallIds = new Set<string>();
-	addOpenAiCallIds(input, knownCallIds, customCallIds, computerCallIds);
+	const staleCallIds = new Set<string>();
+	addOpenAiCallIds(input, knownCallIds, customCallIds, computerCallIds, staleCallIds);
 	for (const message of transformedMessages) {
 		if (message.role === "user" || message.role === "developer") {
 			const providerPayload = (message as { providerPayload?: AssistantMessage["providerPayload"] }).providerPayload;
@@ -531,7 +545,7 @@ export function buildOpenAiNativeHistory(
 				}
 				const historyItems = adaptComputerHistoryForCompaction(rawHistoryItems, model.supportsComputerUse === true);
 				input.push(...historyItems);
-				addOpenAiCallIds(historyItems, knownCallIds, customCallIds, computerCallIds);
+				addOpenAiCallIds(historyItems, knownCallIds, customCallIds, computerCallIds, staleCallIds);
 				msgIndex++;
 				continue;
 			}
@@ -586,13 +600,14 @@ export function buildOpenAiNativeHistory(
 				);
 				if (providerPayload.dt) {
 					input.push(...historyItems);
-					addOpenAiCallIds(historyItems, knownCallIds, customCallIds, computerCallIds);
+					addOpenAiCallIds(historyItems, knownCallIds, customCallIds, computerCallIds, staleCallIds);
 				} else {
+					for (const callId of knownCallIds) staleCallIds.add(callId);
 					input.splice(0, input.length, ...historyItems);
 					knownCallIds.clear();
 					customCallIds.clear();
 					computerCallIds.clear();
-					addOpenAiCallIds(input, knownCallIds, customCallIds, computerCallIds);
+					addOpenAiCallIds(input, knownCallIds, customCallIds, computerCallIds, staleCallIds);
 				}
 				msgIndex++;
 				continue;
@@ -653,6 +668,7 @@ export function buildOpenAiNativeHistory(
 							continue;
 						}
 						knownCallIds.add(normalized.callId);
+						staleCallIds.delete(normalized.callId);
 						computerCallIds.add(normalized.callId);
 						input.push(computerCall);
 						continue;
@@ -665,6 +681,7 @@ export function buildOpenAiNativeHistory(
 						itemId = undefined;
 					}
 					knownCallIds.add(normalized.callId);
+					staleCallIds.delete(normalized.callId);
 					if (block.customWireName) {
 						const rawInput = typeof block.arguments?.input === "string" ? block.arguments.input : "";
 						customCallIds.add(normalized.callId);
@@ -712,6 +729,20 @@ export function buildOpenAiNativeHistory(
 				continue;
 			}
 			if (!knownCallIds.has(normalized.callId)) {
+				if (!staleCallIds.has(normalized.callId)) {
+					const orphanOutput = splitResponsesOrphanOutput(output);
+					const limit = 16_000;
+					const noteText =
+						outputText.length > limit ? `${outputText.slice(0, limit)}\n...[truncated]` : outputText;
+					input.push({
+						type: "message",
+						role: "assistant",
+						content: `[Orphan ${message.toolName || "tool"} result; call_id=${normalized.callId}]: ${noteText}`,
+					});
+					if (orphanOutput.images.length > 0) {
+						input.push({ type: "message", role: "user", content: orphanOutput.images });
+					}
+				}
 				msgIndex++;
 				continue;
 			}

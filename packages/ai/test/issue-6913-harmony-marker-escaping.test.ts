@@ -209,6 +209,27 @@ describe("issue #6913: Harmony control-token escaping at the request boundary", 
 		expect(escapeReplayedControlTokens(input)).toEqual(input);
 	});
 
+	it("escapes every textual block type in replayed native tool outputs", () => {
+		const input: ResponseInput = [
+			{
+				type: "function_call_output",
+				call_id: "call_textual_blocks",
+				output: [
+					{ type: "text", text: MARKER },
+					{ type: "output_text", text: MARKER },
+					{ type: "refusal", refusal: MARKER },
+				],
+			} as unknown as ResponseInput[number],
+		];
+
+		const output = (escapeReplayedControlTokens(input)[0] as { output: unknown }).output;
+		expect(output).toEqual([
+			{ type: "text", text: ESCAPED },
+			{ type: "output_text", text: ESCAPED },
+			{ type: "refusal", refusal: ESCAPED },
+		]);
+	});
+
 	it("escapes replayed EasyInputMessage items that omit the type field", () => {
 		const model = buildModel({
 			id: "gpt-5.6",

@@ -486,6 +486,58 @@ describe("buildOpenAiNativeHistory call-id tracking", () => {
 		expect(items.some(item => item.type === "function_call_output" && item.call_id === "call_old")).toBe(false);
 		expect(items.some(item => item.type === "function_call_output" && item.call_id === "call_new")).toBe(true);
 	});
+
+	test("preserves orphan tool images while filtering stale snapshot outputs", () => {
+		const imageData = Buffer.from("orphan image").toString("base64");
+		const orphan: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_orphan|fc_call_orphan",
+			toolName: "read",
+			content: [{ type: "image", data: imageData, mimeType: "image/png" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		const orphanItems = buildOpenAiNativeHistory(
+			[orphan],
+			makeOpenAiModel({ provider: "openai-codex", input: ["text", "image"] }),
+		);
+		expect(orphanItems).toContainEqual({
+			type: "message",
+			role: "assistant",
+			content: expect.stringContaining("Orphan read result; call_id=call_orphan"),
+		});
+		expect(orphanItems).toContainEqual({
+			type: "message",
+			role: "user",
+			content: [{ type: "input_image", detail: "auto", image_url: `data:image/png;base64,${imageData}` }],
+		});
+
+		const stale: ToolResultMessage = {
+			...orphan,
+			toolCallId: "call_old|fc_call_old",
+			content: [{ type: "image", data: imageData, mimeType: "image/png" }],
+		};
+		const snapshotItems = buildOpenAiNativeHistory(
+			[
+				codexAssistant([{ callId: "call_old" }], true),
+				codexAssistant([{ callId: "call_new" }], false),
+				stale,
+				toolResultFor("call_new"),
+			],
+			makeOpenAiModel({ provider: "openai-codex", input: ["text", "image"] }),
+		);
+		expect(snapshotItems.some(item => item.type === "function_call_output" && item.call_id === "call_old")).toBe(
+			false,
+		);
+		expect(
+			snapshotItems.some(
+				item => item.type === "message" && item.role === "user" && JSON.stringify(item.content).includes(imageData),
+			),
+		).toBe(false);
+		expect(snapshotItems.some(item => item.type === "function_call_output" && item.call_id === "call_new")).toBe(
+			true,
+		);
+	});
 });
 
 describe("buildOpenAiNativeHistory computer calls", () => {

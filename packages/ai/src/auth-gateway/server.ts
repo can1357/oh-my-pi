@@ -82,7 +82,11 @@ const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
 	"/v1/responses": { module: openaiResponses, label: "openai-responses" },
 };
 
-function validateComputerScreenshotReference(message: Record<string, unknown>, model: Model): string | undefined {
+function validateComputerScreenshotReference(
+	message: Record<string, unknown>,
+	model: Model,
+	hasInlineImageData: boolean,
+): string | undefined {
 	if (message.role !== "toolResult") return undefined;
 	const metadata = message.providerMetadata;
 	if (!isRecord(metadata) || metadata.type !== "computer" || !isRecord(metadata.screenshot)) return undefined;
@@ -93,6 +97,10 @@ function validateComputerScreenshotReference(message: Record<string, unknown>, m
 	const hasFileId = fileId !== undefined;
 	const hasImageUrl = imageUrl !== undefined;
 	if (supportsComputerScreenshotReferences(model)) return undefined;
+	if (hasInlineImageData) {
+		delete metadata.screenshot;
+		return undefined;
+	}
 	if (hasFileId) {
 		return `input_image.file_id cannot be forwarded to ${model.api}; target an OpenAI Responses model or use an inline data URL`;
 	}
@@ -106,13 +114,16 @@ function validateAndNormalizeImageReferences(context: Context, model: Model): st
 	const messages: unknown[] = context.messages;
 	for (const [messageIndex, message] of messages.entries()) {
 		if (!isRecord(message)) return `\`context.messages[${messageIndex}]\` must be an object`;
-		const computerScreenshotError = validateComputerScreenshotReference(message, model);
-		if (computerScreenshotError) return computerScreenshotError;
-		if (typeof message.content === "string") continue;
+		if (typeof message.content === "string") {
+			const computerScreenshotError = validateComputerScreenshotReference(message, model, false);
+			if (computerScreenshotError) return computerScreenshotError;
+			continue;
+		}
 		if (!Array.isArray(message.content)) {
 			return `\`context.messages[${messageIndex}].content\` must be a string or an array`;
 		}
 		const blocks: unknown[] = message.content;
+		let hasInlineImageData = false;
 		for (const [blockIndex, block] of blocks.entries()) {
 			if (!isRecord(block)) {
 				return `\`context.messages[${messageIndex}].content[${blockIndex}]\` must be an object`;
@@ -126,6 +137,7 @@ function validateAndNormalizeImageReferences(context: Context, model: Model): st
 			}
 
 			const hasInlineData = block.data.length > 0;
+			if (hasInlineData) hasInlineImageData = true;
 			const hasProviderFileReference = block.providerFile !== undefined;
 			const providerFile = isRecord(block.providerFile) ? block.providerFile : undefined;
 			const hasSupportedProviderFileReference =
@@ -155,6 +167,8 @@ function validateAndNormalizeImageReferences(context: Context, model: Model): st
 			}
 			return `input_image cannot be forwarded to ${model.api} without non-empty image data or a supported reference`;
 		}
+		const computerScreenshotError = validateComputerScreenshotReference(message, model, hasInlineImageData);
+		if (computerScreenshotError) return computerScreenshotError;
 	}
 	return undefined;
 }

@@ -1869,15 +1869,32 @@ export interface BuildResponsesInputOptions<TApi extends Api> {
  * Callers gate on {@link isHarmonyDialectModel}. Items are copied, not mutated.
  */
 export function escapeReplayedControlTokens(items: ResponseInput): ResponseInput {
+	const escapeToolOutputPart = (part: unknown): unknown => {
+		if (!isRecord(part)) return part;
+		if (part.type === "input_text") {
+			return typeof part.text === "string" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part;
+		}
+		const runtimePart = part as { type?: unknown; text?: unknown; refusal?: unknown };
+		if ((runtimePart.type === "text" || runtimePart.type === "output_text") && typeof runtimePart.text === "string") {
+			return { ...part, text: escapeHarmonyControlTokens(runtimePart.text) };
+		}
+		if (runtimePart.type === "refusal" && typeof runtimePart.refusal === "string") {
+			return {
+				...part,
+				refusal: escapeHarmonyControlTokens(runtimePart.refusal),
+			};
+		}
+		return part;
+	};
+	const escapeToolOutputParts = <T>(parts: T[]): T[] => parts.map(part => escapeToolOutputPart(part) as T);
+
 	return items.map(item => {
 		if (item.type === "function_call_output") {
 			if (typeof item.output === "string") return { ...item, output: escapeHarmonyControlTokens(item.output) };
 			if (!Array.isArray(item.output)) return item;
 			return {
 				...item,
-				output: item.output.map(part =>
-					part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
-				),
+				output: escapeToolOutputParts(item.output),
 			};
 		}
 		if (item.type === "custom_tool_call_output") {
@@ -1885,9 +1902,7 @@ export function escapeReplayedControlTokens(items: ResponseInput): ResponseInput
 			if (!Array.isArray(item.output)) return item;
 			return {
 				...item,
-				output: item.output.map(part =>
-					part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
-				),
+				output: escapeToolOutputParts(item.output),
 			};
 		}
 		if (item.type === "function_call") {
