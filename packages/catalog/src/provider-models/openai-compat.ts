@@ -711,7 +711,7 @@ export const EUROPEAN_GATEWAY_STATIC_MODELS: readonly ModelSpec<"openai-completi
 		reasoning: false,
 		input: ["text", "image"],
 		cost: EUROPEAN_GATEWAY_ZERO_COST,
-		contextWindow: null,
+		contextWindow: 262_144,
 		maxTokens: null,
 	},
 	{

@@ -230,6 +230,16 @@ describe("European gateway provider catalog support", () => {
 		);
 	});
 
+	test("advertises the EURouter fallback context limit", () => {
+		expect(EUROPEAN_GATEWAY_STATIC_MODELS).toContainEqual(
+			expect.objectContaining({
+				id: "mistral-large-3",
+				provider: "eurouter",
+				contextWindow: 262_144,
+			}),
+		);
+	});
+
 	test("applies configured base URLs to European gateway fallback seeds", () => {
 		const baseUrl = "https://gateway.internal.example/v1";
 		const options = eurouterModelManagerOptions({ baseUrl });
