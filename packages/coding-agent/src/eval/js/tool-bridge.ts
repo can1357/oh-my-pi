@@ -37,6 +37,7 @@ import {
 import type { EvalShadowCellSession } from "../speculation/cell-session";
 import { getActiveEvalShadowCell } from "../speculation/runtime-context";
 import { isEvalBridgeToolCallable, withEvalBridgeToolCall } from "../tool-bridge-policy";
+import { evalSpeculationFor } from "../speculation";
 import { EVAL_WORKPOOL_BRIDGE_NAME, type EvalWorkpoolResult, runEvalWorkpool } from "../workpool-bridge";
 import {
 	EVAL_MCP_BRIDGE_NAME,
@@ -234,6 +235,26 @@ function waitForSpeculativeClaim<T>(claim: Promise<T>, signal?: AbortSignal): Pr
 	return promise;
 }
 
+/**
+ * Claim a speculation launched from this cell's partial source while the model
+ * was still streaming it.
+ *
+ * A miss, a rejected speculation, an aborted one, or a disabled store all yield
+ * `undefined`, so the caller runs the call for real with its own signal. The
+ * speculation is an optimization and is never allowed to become the failure.
+ */
+async function claimSpeculation(
+	name: string,
+	args: unknown,
+	options: ToolBridgeOptions,
+): Promise<{ value: unknown } | undefined> {
+	if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
+	const claim = evalSpeculationFor(options.session)?.claim(name, args as Record<string, unknown>);
+	if (!claim) return undefined;
+	const settled = await claim;
+	return settled.ok ? { value: settled.value } : undefined;
+}
+
 export function callSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
 	return withEvalBridgeToolCall(options.session.xdev, () => dispatchSessionTool(name, args, options));
 }
@@ -272,6 +293,8 @@ async function dispatchSessionTool(name: string, args: unknown, options: ToolBri
 		}
 	}
 	if (name === EVAL_COMPLETION_BRIDGE_NAME) {
+		const speculated = await claimSpeculation(name, args, options);
+		if (speculated) return speculated.value as ToolValue;
 		return await runEvalCompletion(args, options);
 	}
 	if (name === EVAL_JUDGMENT_BRIDGE_NAME) {

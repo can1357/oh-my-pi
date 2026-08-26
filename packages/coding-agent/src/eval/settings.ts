@@ -88,6 +88,31 @@ export const cfgEvalAutoBackgroundThresholdMs = register({
 	default: 60_000,
 });
 
+export const cfgEvalSpeculationEnabled = register({
+	id: "eval.speculation.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "shell",
+		group: "Eval & Runtimes",
+		label: "Speculative Tool Calls",
+		description:
+			"Launch fully-literal completion() calls from an eval cell while the model is still streaming it, so the cell resolves against work already in flight. Speculations that the cell never runs are billed, so this is off by default.",
+	},
+});
+
+export const cfgEvalSpeculationMaxPerTurn = register({
+	id: "eval.speculation.maxPerTurn",
+	type: "number",
+	default: 4,
+	ui: {
+		tab: "shell",
+		group: "Eval & Runtimes",
+		label: "Speculation Ceiling",
+		description: "Most speculative calls launched per turn. Each one is a billable model request.",
+	},
+});
+
 // Runtime knobs (consumed by eval backends and the /python slash command)
 export const cfgPythonKernelMode = register({
 	id: "python.kernelMode",
