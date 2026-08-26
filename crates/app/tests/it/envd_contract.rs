@@ -1219,6 +1219,37 @@ async fn production_registry_roster_exposes_browser_and_lsp() {
 }
 
 #[tokio::test]
+async fn production_registry_omits_internal_tools_from_user_roster() {
+	let harness = Harness::start(Registry::new()).await;
+	let registry = harness.server.registry();
+	let visible = registry
+		.roster()
+		.filter(|(_, presentation)| *presentation != Presentation::Hidden)
+		.map(|(name, _)| name.as_str())
+		.collect::<Vec<_>>();
+	for name in ["think", "report_issue", "learn", "manage_skill"] {
+		assert!(!visible.contains(&name), "{name} must be omitted from the /tools roster");
+	}
+	for name in ["think", "report_issue"] {
+		assert!(registry.live_identity(name).is_some(), "{name} stays registered");
+		assert_ne!(
+			registry.presentation(name).expect("live presentation"),
+			Presentation::Hidden,
+			"{name} stays model-visible"
+		);
+	}
+	for name in ["learn", "manage_skill"] {
+		if registry.live_identity(name).is_some() {
+			assert_ne!(
+				registry.presentation(name).expect("live presentation"),
+				Presentation::Hidden,
+				"{name} stays model-visible when registered"
+			);
+		}
+	}
+}
+
+#[tokio::test]
 async fn special_writes_round_trip_through_production_read_backends() {
 	let harness = Harness::start(Registry::new()).await;
 	fs::write(

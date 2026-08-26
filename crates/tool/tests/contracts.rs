@@ -777,6 +777,52 @@ fn roster_exposes_registered_non_hidden_tools_and_hides_hidden_ones() {
 }
 
 #[test]
+fn unlist_from_roster_omits_user_roster_and_keeps_model_presentation() {
+	let mut registry = Registry::new();
+	for name in ["think", "report_issue", "learn", "manage_skill"] {
+		let presentation = if name == "think" {
+			Presentation::Slot
+		} else {
+			Presentation::Device
+		};
+		let claims = if presentation == Presentation::Device {
+			claims("omp/core", Precedence::ENHANCEMENT)
+		} else {
+			claims("omp/core", Precedence::CORE)
+		};
+		registry
+			.register(
+				fake_tool(1, name, Arc::new(AtomicUsize::new(0))).named(name),
+				presentation,
+				claims,
+			)
+			.expect("internal tool fixture");
+		registry
+			.unlist_from_roster(name)
+			.expect("live claim can be unlisted");
+	}
+	let unknown = registry
+		.unlist_from_roster("missing")
+		.expect_err("unlisting an unregistered name is an error");
+	assert!(matches!(unknown, RegistryError::UnlistUnknown(name) if name == "missing"));
+
+	let visible = registry
+		.roster()
+		.filter(|(_, presentation)| *presentation != Presentation::Hidden)
+		.map(|(name, _)| name.as_str())
+		.collect::<Vec<_>>();
+	for name in ["think", "report_issue", "learn", "manage_skill"] {
+		assert!(!visible.contains(&name), "{name} must be omitted from the user-facing roster");
+		assert!(registry.live_identity(name).is_some(), "{name} stays registered");
+		assert_ne!(
+			registry.presentation(name).expect("live presentation"),
+			Presentation::Hidden,
+			"{name} stays model-visible"
+		);
+	}
+}
+
+#[test]
 fn protected_core_claim_rejects_demoting_or_foreign_replacement() {
 	let mut registry = Registry::new();
 	registry.protect_core_claims(["read"]);
@@ -817,6 +863,59 @@ fn protected_core_claim_rejects_demoting_or_foreign_replacement() {
 			.claimant,
 		"omp/core"
 	);
+}
+
+#[test]
+fn protect_live_claims_reserves_slot_and_device_names() {
+	let mut registry = Registry::new();
+	registry
+		.register(
+			fake_tool(1, "slot", Arc::new(AtomicUsize::new(0))).named("read"),
+			Presentation::Slot,
+			claims("omp/core", Precedence::CORE),
+		)
+		.expect("core slot");
+	registry
+		.register(
+			fake_tool(1, "device", Arc::new(AtomicUsize::new(0))).named("browser"),
+			Presentation::Device,
+			claims("omp/core", Precedence::ENHANCEMENT),
+		)
+		.expect("core device");
+	registry.protect_live_claims();
+	for name in ["read", "browser"] {
+		let error = registry
+			.register_worker(
+				worker_spec(name, [7; 32]),
+				Presentation::Device,
+				claims("publisher/extension", Precedence::DEFAULT),
+			)
+			.expect_err("live core names stay reserved");
+		assert!(matches!(
+			error,
+			RegistryError::CoreNameClaim { name: claimed, claimant, .. }
+				if claimed == name && claimant == "publisher/extension"
+		));
+	}
+}
+
+#[test]
+fn disabled_builtin_name_cannot_be_claimed_by_extension() {
+	let mut registry = Registry::new();
+	registry.protect_core_claims(["shell"]);
+	assert!(registry.live_identity("shell").is_none());
+	let error = registry
+		.register_worker(
+			worker_spec("shell", [9; 32]),
+			Presentation::Slot,
+			claims("publisher/extension", Precedence::DEFAULT),
+		)
+		.expect_err("disabled built-in names stay reserved");
+	assert!(matches!(
+		error,
+		RegistryError::CoreNameClaim { name, claimant, .. }
+			if name == "shell" && claimant == "publisher/extension"
+	));
 }
 
 #[test]
