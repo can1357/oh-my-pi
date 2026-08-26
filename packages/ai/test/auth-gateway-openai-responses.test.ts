@@ -1431,7 +1431,7 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 		}
 	});
 
-	it("rejects OpenAI file-id tool images before invoking a non-Responses provider", async () => {
+	it("rejects unusable tool image sources before invoking a non-Responses provider", async () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-provider-file-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
@@ -1446,29 +1446,49 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 		});
 
 		try {
-			const response = await fetch(`${gateway.url}/v1/responses`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-				body: JSON.stringify({
-					model: "mock/provider-file",
-					input: [
-						{
-							type: "function_call",
-							call_id: "call_read",
-							name: "read",
-							arguments: '{"path":"image.png"}',
-						},
-						{
-							type: "function_call_output",
-							call_id: "call_read",
-							output: [{ type: "input_image", file_id: "file_image_123" }],
-						},
-					],
-				}),
-			});
-			expect(response.status).toBe(400);
-			expect(await response.text()).toContain("input_image.file_id cannot be forwarded to mock");
-			expect(mock.calls).toHaveLength(0);
+			const cases = [
+				{
+					image: { type: "input_image", file_id: "file_image_123" },
+					error: "input_image.file_id cannot be forwarded to mock",
+				},
+				{
+					image: {
+						type: "input_image",
+						image_url: "data:image/png;base64,",
+						file_id: "file_image_123",
+					},
+					error: "input_image.file_id cannot be forwarded to mock",
+				},
+				{
+					image: { type: "input_image", image_url: "data:image/png;base64," },
+					error: "input_image cannot be forwarded to mock without non-empty image data or a supported reference",
+				},
+			];
+			for (const testCase of cases) {
+				const response = await fetch(`${gateway.url}/v1/responses`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+					body: JSON.stringify({
+						model: "mock/provider-file",
+						input: [
+							{
+								type: "function_call",
+								call_id: "call_read",
+								name: "read",
+								arguments: '{"path":"image.png"}',
+							},
+							{
+								type: "function_call_output",
+								call_id: "call_read",
+								output: [testCase.image],
+							},
+						],
+					}),
+				});
+				expect(response.status).toBe(400);
+				expect(await response.text()).toContain(testCase.error);
+				expect(mock.calls).toHaveLength(0);
+			}
 		} finally {
 			await gateway.close();
 			storage.close();

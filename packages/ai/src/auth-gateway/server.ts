@@ -129,6 +129,9 @@ function validateAndNormalizeImageReferences(context: Context, model: Model): st
 			if (hasUrlReference) {
 				return `input_image.image_url cannot be forwarded to ${model.api} without inline image data; use a data URL or target an API that supports remote image URLs`;
 			}
+			if (providerFile === undefined) {
+				return `input_image cannot be forwarded to ${model.api} without non-empty image data or a supported reference`;
+			}
 		}
 	}
 	return undefined;

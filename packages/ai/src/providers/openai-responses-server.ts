@@ -328,12 +328,13 @@ function functionOutputContent(output: string | readonly unknown[] | undefined):
 		if (blockType === "input_image") {
 			flushLegacyText();
 			const imageUrl = asString(raw.image_url) || undefined;
+			const fileId = asString(raw.file_id) || undefined;
 			const decoded = imageUrl ? decodeDataUri(imageUrl) : undefined;
 			const detail =
 				raw.detail === "auto" || raw.detail === "low" || raw.detail === "high" || raw.detail === "original"
 					? raw.detail
 					: undefined;
-			if (decoded) {
+			if (decoded && decoded.data.length > 0) {
 				content.push({ type: "image", ...decoded, ...(detail ? { detail } : {}) });
 			} else {
 				const referenceImage: ImageContent = {
@@ -342,12 +343,13 @@ function functionOutputContent(output: string | readonly unknown[] | undefined):
 					mimeType: "application/octet-stream",
 					...(detail ? { detail } : {}),
 				};
-				if (imageUrl) {
+				if (decoded) {
+					content.push(
+						fileId ? { ...referenceImage, providerFile: { provider: "openai", id: fileId } } : referenceImage,
+					);
+				} else if (imageUrl) {
 					content.push({ ...referenceImage, url: imageUrl });
-				} else {
-					const fileId = asString(raw.file_id) || undefined;
-					if (fileId) content.push({ ...referenceImage, providerFile: { provider: "openai", id: fileId } });
-				}
+				} else if (fileId) content.push({ ...referenceImage, providerFile: { provider: "openai", id: fileId } });
 			}
 		}
 	}
