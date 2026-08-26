@@ -20,10 +20,10 @@ describe("ssh file-transfer POSIX guard", () => {
 		});
 		const target: SSHConnectionTarget = { name: "winbox", host: "winbox" };
 		await expect(readRemoteFile(target, "C:/x.txt", { maxBytes: 1024 })).rejects.toThrow(
-			/Windows host.*use `bash` with a remote SSH command/,
+			/Windows host.*powershell\/pwsh.*remote SSH command/s,
 		);
 		await expect(writeRemoteFile(target, "C:/x.txt", new Uint8Array([1]), {})).rejects.toThrow(
-			/Windows host.*use `bash` with a remote SSH command/,
+			/Windows host.*powershell\/pwsh.*remote SSH command/s,
 		);
 		// Prove the guard ran through the stubbed transport rather than failing early
 		// for an unrelated reason (e.g. a future import refactor bypassing the mocks).

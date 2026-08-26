@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { ptree } from "@oh-my-pi/pi-utils";
 import * as capability from "../../src/capability";
 import type { SSHHost } from "../../src/capability/ssh";
 import type { CapabilityResult, SourceMeta } from "../../src/capability/types";
 import { parseInternalUrl } from "../../src/internal-urls/parse";
-import { SshProtocolHandler } from "../../src/internal-urls/ssh-protocol";
+import { SSH_TEXT_MAX_BYTES, SshProtocolHandler } from "../../src/internal-urls/ssh-protocol";
+import * as connectionManager from "../../src/ssh/connection-manager";
 import * as fileTransfer from "../../src/ssh/file-transfer";
 
 const SOURCE: SourceMeta = {
@@ -21,6 +23,17 @@ function mockHosts(hosts: SSHHost[] = []): void {
 		providers: hosts.length ? ["ssh-json"] : [],
 	};
 	vi.spyOn(capability, "loadCapability").mockResolvedValue(result as CapabilityResult<unknown>);
+	// Default the host-info to a POSIX transfer channel so `resolveWindowsResource`
+	// short-circuits (undefined) and the classic stat/read path is exercised;
+	// windows cases call mockWindowsHost() AFTER mockHosts() to override.
+	vi.spyOn(connectionManager, "ensureConnection").mockResolvedValue(undefined);
+	vi.spyOn(connectionManager, "ensureHostInfo").mockResolvedValue({
+		version: 5,
+		os: "linux",
+		shell: "bash",
+		transferShell: "bash",
+		compatEnabled: false,
+	});
 }
 
 function mockReadBytes(text: string, truncated = false) {
@@ -28,6 +41,31 @@ function mockReadBytes(text: string, truncated = false) {
 	return vi
 		.spyOn(fileTransfer, "readRemoteFile")
 		.mockResolvedValue({ bytes: new TextEncoder().encode(text), truncated });
+}
+
+/** Mock a Windows remote whose verified transfer channel is PowerShell. */
+function mockWindowsHost() {
+	vi.spyOn(connectionManager, "ensureConnection").mockResolvedValue(undefined);
+	vi.spyOn(connectionManager, "ensureHostInfo").mockResolvedValue({
+		version: 5,
+		os: "windows",
+		shell: "powershell",
+		transferShell: "powershell",
+		compatEnabled: false,
+	});
+}
+
+/** Fake `ptree.spawn` returning scripted stdout bytes per call, in order. */
+function mockScriptedSpawn(outputs: Uint8Array[]) {
+	let call = 0;
+	return vi.spyOn(ptree, "spawn").mockImplementation((() => {
+		const bytes = outputs[call++] ?? outputs.at(-1) ?? new Uint8Array();
+		return {
+			bytes: async () => bytes,
+			exitedCleanly: Promise.resolve(),
+			[Symbol.dispose]: () => {},
+		};
+	}) as unknown as typeof ptree.spawn);
 }
 
 describe("SshProtocolHandler", () => {
@@ -175,6 +213,128 @@ describe("SshProtocolHandler", () => {
 		);
 		vi.spyOn(fileTransfer, "statRemotePath").mockResolvedValue("missing");
 		await expect(handler.resolve(parseInternalUrl("ssh://icaro/nope"))).rejects.toThrow(/No such file or directory/);
+	});
+
+	it("rethrows a Windows STAT protocol error instead of degrading into the read's file content", async () => {
+		mockHosts(); // unconfigured `winbox` → opaque OpenSSH target
+		mockWindowsHost();
+		const spawnSpy = mockScriptedSpawn([
+			// Malformed STAT frame (body out of enum)…
+			new TextEncoder().encode("PI_XFER_BEGIN|STAT|0\r\nflying\r\nPI_XFER_END|STAT\r\n"),
+			// …followed by a perfectly valid B64 read frame — it must never be returned.
+			new TextEncoder().encode(
+				`PI_XFER_BEGIN|B64|c\r\n${Buffer.from("file content").toString("base64")}\r\nPI_XFER_END|B64\r\n`,
+			),
+		]);
+		const resolved = handler.resolve(parseInternalUrl("ssh://winbox/C:/x"));
+		await expect(resolved).rejects.toBeInstanceOf(fileTransfer.WindowsTransferProtocolError);
+		await expect(resolved).rejects.toThrow(/Windows transfer protocol error.*STAT/s);
+		// The malformed frame must not degrade into a read result: exactly one
+		// spawn (the stat), never the scripted read.
+		expect(spawnSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("windows hosts resolve a directory in ONE ssh spawn (merged stat+list roundtrip)", async () => {
+		mockHosts(); // unconfigured `winbox` → opaque OpenSSH target
+		mockWindowsHost();
+		const spawnSpy = mockScriptedSpawn([
+			new TextEncoder().encode(
+				[
+					"PI_XFER_BEGIN|LIST|2",
+					Buffer.from("sub/").toString("base64"),
+					Buffer.from("a.txt").toString("base64"),
+					"PI_XFER_END|LIST",
+					"",
+				].join("\r\n"),
+			),
+		]);
+		const resource = await handler.resolve(parseInternalUrl("ssh://winbox/C:/dir"));
+		expect(resource.isDirectory).toBe(true);
+		// The listing is returned by the same single spawn — no second roundtrip.
+		expect(spawnSpy).toHaveBeenCalledTimes(1);
+		const decoded = Buffer.from(
+			String(spawnSpy.mock.calls[0]?.[0]?.at(-1)).split(" ").at(-1) ?? "",
+			"base64",
+		).toString("utf16le");
+		expect(decoded).toContain("'C:\\dir'");
+	});
+
+	it("windows hosts resolve a file in ONE ssh spawn (merged stat+read roundtrip)", async () => {
+		mockHosts();
+		mockWindowsHost();
+		const payload = "file bytes here";
+		const spawnSpy = mockScriptedSpawn([
+			new TextEncoder().encode(
+				`PI_XFER_BEGIN|B64|${payload.length.toString(16)}\r\n${Buffer.from(payload).toString("base64")}\r\nPI_XFER_END|B64\r\n`,
+			),
+		]);
+		const resource = await handler.resolve(parseInternalUrl("ssh://winbox/C:/dir/a.txt"));
+		expect(resource.content).toBe(payload);
+		expect(spawnSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("windows merged roundtrip reports a missing path without a second spawn", async () => {
+		mockHosts();
+		mockWindowsHost();
+		const spawnSpy = mockScriptedSpawn([
+			new TextEncoder().encode("PI_XFER_BEGIN|STAT|0\r\nmissing\r\nPI_XFER_END|STAT\r\n"),
+		]);
+		await expect(handler.resolve(parseInternalUrl("ssh://winbox/C:/nope"))).rejects.toThrow(/No such file|missing/i);
+		expect(spawnSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("windows merged roundtrip rejects an over-limit file with the 1 MiB error", async () => {
+		mockHosts();
+		mockWindowsHost();
+		// 1 MiB + 1 bytes: the script's read window (maxBytes + 1) detects it.
+		const big = Buffer.alloc(SSH_TEXT_MAX_BYTES + 1, 0x61);
+		mockScriptedSpawn([
+			new TextEncoder().encode(
+				`PI_XFER_BEGIN|B64|${big.length.toString(16)}\r\n${big.toString("base64")}\r\nPI_XFER_END|B64\r\n`,
+			),
+		]);
+		await expect(handler.resolve(parseInternalUrl("ssh://winbox/C:/big.txt"))).rejects.toThrow(
+			/exceeds the 1 MiB limit/,
+		);
+	});
+
+	it("windows merged roundtrip rejects a STAT frame claiming file/directory (frame corruption)", async () => {
+		mockHosts();
+		mockWindowsHost();
+		mockScriptedSpawn([new TextEncoder().encode("PI_XFER_BEGIN|STAT|0\r\nfile\r\nPI_XFER_END|STAT\r\n")]);
+		await expect(handler.resolve(parseInternalUrl("ssh://winbox/C:/x"))).rejects.toThrow(
+			/protocol error.*STAT frame reports file/is,
+		);
+	});
+
+	it("a cached POSIX host skips the merged Windows resolver entirely", async () => {
+		// The merged attempt is gated on cached host info: a known-POSIX host
+		// must not pay an extra resolveTransfer/ensureConnection roundtrip
+		// (an extra `ssh -O check` spawn on ControlMaster-capable clients)
+		// just to learn the resolver would return undefined.
+		mockHosts();
+		vi.spyOn(connectionManager, "getCachedHostInfoSync").mockReturnValue({
+			version: 5,
+			os: "linux",
+			shell: "bash",
+			transferShell: "bash",
+			compatEnabled: false,
+		});
+		const mergedSpy = vi.spyOn(fileTransfer, "resolveWindowsResource").mockResolvedValue(undefined);
+		mockReadBytes("posix bytes\n");
+		const resource = await handler.resolve(parseInternalUrl("ssh://icaro/etc/hosts"));
+		expect(resource.content).toBe("posix bytes\n");
+		expect(mergedSpy).not.toHaveBeenCalled();
+	});
+
+	it("falls through a transport stat failure so the read surfaces its remote stderr", async () => {
+		mockHosts();
+		vi.spyOn(fileTransfer, "statRemotePath").mockRejectedValue(new Error("ssh: connect to host icaro: timed out"));
+		const readSpy = vi
+			.spyOn(fileTransfer, "readRemoteFile")
+			.mockRejectedValue(new Error("head: cannot open '/x': No such file or directory"));
+		await expect(handler.resolve(parseInternalUrl("ssh://icaro/x"))).rejects.toThrow(/No such file or directory/);
+		expect(readSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("rejects a remote special file (FIFO/device) without reading it", async () => {

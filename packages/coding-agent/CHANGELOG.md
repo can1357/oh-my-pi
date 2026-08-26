@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `ssh://` read/write support for Windows hosts: layered host classification that recognizes PowerShell and cmd default shells, and byte-exact PowerShell-based transfers that mirror the POSIX write contract (in-place overwrite preserving ACLs and hardlinks, symlink replacement, directory listing, path classification).
+
 ## [18.0.7] - 2026-08-26
 
 ### Added

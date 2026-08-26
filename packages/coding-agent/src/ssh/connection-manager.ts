@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { $which, getRemoteHostDir, getSshControlDir, isEnoent, logger, postmortem, ptree } from "@oh-my-pi/pi-utils";
-import { buildSshTarget, sanitizeHostName } from "./utils";
+import { buildPowerShellCommand, buildSshTarget, type PowerShellShell, sanitizeHostName } from "./utils";
 
 export interface SSHConnectionTarget {
 	name: string;
@@ -25,14 +25,16 @@ export interface SSHHostInfo {
 	os: SSHHostOs;
 	shell: SSHHostShell;
 	/**
-	 * Shell name OMP verified can execute the POSIX transfer snippets
-	 * (`head`/`cat`/`mv`/`test`/`ls`) `ssh://` uses. Probed by running
-	 * `sh -lc` / `bash -lc` / `zsh -lc` against the remote and keeping the
-	 * first one that round-trips a known marker. Independent of `shell`
-	 * (the self-reported login shell), which may be noisy, exotic, or simply
-	 * mis-classified — only `transferShell` gates ssh:// transfers.
+	 * Shell OMP verified can execute the `ssh://` transfer snippets — a POSIX
+	 * shell (`head`/`cat`/`mv`/`test`/`ls`) via `sh`/`bash`/`zsh` on POSIX
+	 * remotes, or PowerShell (`-EncodedCommand` channel) on Windows remotes.
+	 * Probed by round-tripping a known marker under each candidate; the first
+	 * hit wins (`sh`→`bash`→`zsh` for POSIX, `powershell`→`pwsh` for Windows).
+	 * Independent of `shell` (the self-reported login shell), which may be
+	 * noisy, exotic, or simply mis-classified — only `transferShell` gates
+	 * ssh:// transfers (#3719).
 	 */
-	transferShell?: "sh" | "bash" | "zsh";
+	transferShell?: "sh" | "bash" | "zsh" | PowerShellShell;
 	compatShell?: "bash" | "sh";
 	compatEnabled: boolean;
 }
@@ -138,7 +140,7 @@ const { dir: CONTROL_DIR, shared: CONTROL_DIR_SHARED } = resolveSshControlDir({
 });
 const CONTROL_PATH = path.join(CONTROL_DIR, CONTROL_SOCKET_BASENAME);
 const HOST_INFO_DIR = getRemoteHostDir();
-const HOST_INFO_VERSION = 4;
+const HOST_INFO_VERSION = 5;
 
 const activeHosts = new Map<string, SSHConnectionTarget>();
 const pendingConnections = new Map<string, Promise<void>>();
@@ -374,7 +376,9 @@ function parseCompatShell(value: unknown): "bash" | "sh" | undefined {
 }
 
 function parseTransferShell(value: unknown): SSHHostInfo["transferShell"] {
-	if (value === "sh" || value === "bash" || value === "zsh") return value;
+	if (value === "sh" || value === "bash" || value === "zsh" || value === "powershell" || value === "pwsh") {
+		return value;
+	}
 	return undefined;
 }
 
@@ -428,6 +432,10 @@ function shouldRefreshHostInfo(host: SSHConnectionTarget, info: SSHHostInfo): bo
 	if (info.os === "windows" && info.compatEnabled && !info.compatShell) return true;
 	if (info.os === "windows" && info.compatShell === "bash" && info.shell === "unknown") return true;
 	if (host.compat === true && info.os === "windows" && !info.compatShell) return true;
+	// A Windows host with no PowerShell-family transfer shell is the same
+	// ambiguity as the POSIX case below: re-probe rather than refuse forever
+	// (pwsh may have been installed since the last attempt).
+	if (info.os === "windows" && !info.transferShell) return true;
 	// A non-Windows host with no verified POSIX transfer shell is ambiguous —
 	// either the probe never ran capability checks, or every candidate failed.
 	// Re-probe rather than letting the ssh:// transfer guard reject it on a
@@ -558,6 +566,23 @@ async function probeTransferShell(
 	return { shell: undefined, uname: "" };
 }
 
+/** Marker round-tripped by the Windows PowerShell transfer-shell probe. */
+export const POWERSHELL_PROBE_MARKER = "PI_PS_OK";
+
+/** powershell.exe ships with every Windows; pwsh covers PS7-only machines. */
+const WINDOWS_TRANSFER_CANDIDATES: readonly PowerShellShell[] = ["powershell", "pwsh"];
+
+async function probePowershellTransferShell(host: SSHConnectionTarget): Promise<SSHHostInfo["transferShell"]> {
+	for (const candidate of WINDOWS_TRANSFER_CANDIDATES) {
+		const remote = buildPowerShellCommand(candidate, `Write-Output '${POWERSHELL_PROBE_MARKER}'`);
+		const probe = await runSshCaptureSync(await buildRemoteCommand(host, remote));
+		if (probe.exitCode !== 0) continue;
+		if (findProbeMarker(probe.stdout, probe.stderr, POWERSHELL_PROBE_MARKER) === null) continue;
+		return candidate;
+	}
+	return undefined;
+}
+
 async function probeHostInfo(host: SSHConnectionTarget): Promise<SSHHostInfo> {
 	const command = `echo "${HOST_PROBE_MARKER}$OSTYPE|$SHELL|$BASH_VERSION" 2>/dev/null || echo "${HOST_PROBE_MARKER}%OS%|%COMSPEC%|"`;
 	const result = await runSshCaptureSync(await buildRemoteCommand(host, command));
@@ -565,15 +590,37 @@ async function probeHostInfo(host: SSHConnectionTarget): Promise<SSHHostInfo> {
 	if (payload === null) {
 		logger.debug("SSH host probe failed", { host: host.name, error: result.stderr });
 		const transferProbe = await probeTransferShell(host);
+		let fallbackOs: SSHHostOs = "unknown";
+		let transferShell: SSHHostInfo["transferShell"];
+		if (transferProbe.shell) {
+			const probed = osFromUname(transferProbe.uname);
+			if (probed === "windows") {
+				// msys/cygwin sh answered the classification probe, but transfer
+				// never rides an msys sh (its /g/ ↔ G:\ path translation is
+				// unreliable and it is not a stock component) — route through
+				// PowerShell like every other Windows host.
+				fallbackOs = "windows";
+				transferShell = await probePowershellTransferShell(host);
+			} else {
+				fallbackOs = probed ?? "unknown";
+				transferShell = transferProbe.shell;
+			}
+		} else {
+			// No POSIX shell answered. Windows hosts whose default shell is
+			// cmd, or whose SSH session PATH lacks every sh, land here — probe
+			// PowerShell before giving up (powershell.exe is a stock component).
+			transferShell = await probePowershellTransferShell(host);
+			if (transferShell) fallbackOs = "windows";
+		}
 		const fallback: SSHHostInfo = {
 			version: HOST_INFO_VERSION,
-			os: transferProbe.shell ? (osFromUname(transferProbe.uname) ?? "unknown") : "unknown",
+			os: fallbackOs,
 			shell: "unknown",
-			transferShell: transferProbe.shell,
+			transferShell,
 			compatShell: undefined,
 			compatEnabled: false,
 		};
-		hostInfoCache.set(host.name, fallback);
+		await persistHostInfo(host, fallback);
 		return fallback;
 	}
 
@@ -626,7 +673,25 @@ async function probeHostInfo(host: SSHConnectionTarget): Promise<SSHHostInfo> {
 		// probe couldn't classify it (e.g. the remote silently nuked `$OSTYPE`).
 		if (transferShell && os === "unknown") {
 			os = osFromUname(probe.uname) ?? os;
+			if (os === "windows") {
+				// The shell that answered was an msys/cygwin sh: it recovered
+				// the OS as windows, but transfer never rides an msys sh (its
+				// /g/ ↔ G:\ path translation is unreliable and it is not a
+				// stock component) — discard it and re-probe through
+				// PowerShell like every other Windows host.
+				transferShell = await probePowershellTransferShell(host);
+			}
+		} else if (!transferShell && os === "unknown") {
+			// No POSIX shell answered and the compound probe left the OS
+			// unclassifiable. A Windows host whose default shell is cmd and
+			// whose session PATH lacks every sh lands here — probe PowerShell
+			// before leaving the host unknown forever (mirrors the
+			// payload-null fallback's else-arm).
+			transferShell = await probePowershellTransferShell(host);
+			if (transferShell) os = "windows";
 		}
+	} else {
+		transferShell = await probePowershellTransferShell(host);
 	}
 
 	const hasBash = !unexpandedPosixVars && (Boolean(bashVersion) || shell === "bash");

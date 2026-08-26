@@ -49,3 +49,28 @@ export function quotePosixPath(value: string): string {
 export function wrapInPosixShell(shell: "sh" | "bash" | "zsh", command: string): string {
 	return `${shell} -c ${quotePosixPath(command)}`;
 }
+/** Windows shells OMP can drive for `ssh://` transfers, probe order first-wins. */
+export type PowerShellShell = "powershell" | "pwsh";
+
+/**
+ * Quote a value as a single-quoted PowerShell string literal: PS single-quoted
+ * strings interpolate nothing, and `''` is the only escape for a literal `'`.
+ */
+export function quotePowerShellLiteral(value: string): string {
+	return `'${value.replace(/'/g, "''")}'`;
+}
+
+/**
+ * Wrap a PowerShell script for remote execution via `-EncodedCommand`
+ * (base64 of UTF-16LE, exactly what PowerShell decodes). The base64 alphabet
+ * survives cmd and PowerShell default shells with no argument escaping, so
+ * this is the single render chokepoint for the Windows transfer channel —
+ * the counterpart of {@link wrapInPosixShell} for POSIX remotes.
+ *
+ * `-NoProfile -NonInteractive`: profile noise must not corrupt transfer
+ * output and the script must never sit at a prompt.
+ */
+export function buildPowerShellCommand(shell: PowerShellShell, script: string): string {
+	const encoded = Buffer.from(script, "utf16le").toString("base64");
+	return `${shell} -NoProfile -NonInteractive -EncodedCommand ${encoded}`;
+}
