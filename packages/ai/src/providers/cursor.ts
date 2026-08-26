@@ -821,10 +821,21 @@ function streamCursorWithWireMode(
 					const status = trailers["grpc-status"];
 					const msg = trailers["grpc-message"];
 					if (status && status !== "0" && !endStreamError) {
-						endStreamError = new AIError.ProviderResponseError(
-							`gRPC error ${status}: ${decodeURIComponent(String(msg || ""))}`,
-							{ kind: "envelope" },
-						);
+						const rawMessage = String(msg || "");
+						let messageText: string;
+						try {
+							messageText = decodeURIComponent(rawMessage);
+						} catch {
+							// A malformed percent-encoded message (e.g. a bare `%`)
+							// must never mask the nonzero status: this handler's
+							// rejection would be swallowed below, leaving a turn
+							// that already saw turnEnded reported successful. Keep
+							// the raw wire value so the failure is recorded.
+							messageText = rawMessage;
+						}
+						endStreamError = new AIError.ProviderResponseError(`gRPC error ${status}: ${messageText}`, {
+							kind: "envelope",
+						});
 					}
 				})
 				.catch(() => {});

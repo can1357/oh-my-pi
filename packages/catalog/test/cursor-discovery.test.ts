@@ -10,6 +10,7 @@ import {
 	__cursorDiscoveryHttp2Snapshot,
 	__cursorH2ConnectingSize,
 	__setCursorDiscoveryHttp2EstablishBodyGate,
+	__setCursorDiscoveryHttp2IdleEvictMs,
 	disposeCursorDiscoveryHttp2Pool,
 	fetchCursorUsableModels,
 } from "../src/discovery/cursor";
@@ -74,15 +75,16 @@ beforeAll(async () => {
 afterAll(() => {
 	server?.close();
 });
-
 beforeEach(() => {
 	disposeCursorDiscoveryHttp2Pool();
 	__setCursorDiscoveryHttp2EstablishBodyGate(undefined);
+	__setCursorDiscoveryHttp2IdleEvictMs(undefined);
 });
 
 afterEach(() => {
 	disposeCursorDiscoveryHttp2Pool();
 	__setCursorDiscoveryHttp2EstablishBodyGate(undefined);
+	__setCursorDiscoveryHttp2IdleEvictMs(undefined);
 });
 
 async function discover(): Promise<Map<string, ModelSpec<"cursor-agent">>> {
@@ -496,6 +498,45 @@ describe("fetchCursorUsableModels", () => {
 		// cancelled reservation.
 		const models = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 1_000 });
 		expect(models).toEqual([expect.objectContaining({ id: "composer-3" })]);
+	});
+
+	it("evicts an idle pooled session on a later acquisition instead of retaining it forever", async () => {
+		const response = create(GetUsableModelsResponseSchema, {
+			models: [create(ModelDetailsSchema, { modelId: "composer-3" })],
+		});
+		const body = toBinary(GetUsableModelsResponseSchema, response);
+		const { promise, resolve, reject } = Promise.withResolvers<string>();
+		const srv = http2.createServer();
+		servers.add(srv);
+		let sessions = 0;
+		srv.once("error", reject);
+		srv.on("session", () => {
+			sessions++;
+		});
+		srv.on("stream", (stream: http2.ServerHttp2Stream) => {
+			stream.respond({ ":status": 200, "content-type": "application/proto" });
+			stream.end(Buffer.from(body));
+		});
+		srv.listen(0, "127.0.0.1", () => {
+			resolve(`http://127.0.0.1:${requireTcpAddress(srv.address()).port}`);
+		});
+		const url = await promise;
+
+		const first = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 1_000 });
+		expect(first).toEqual([expect.objectContaining({ id: "composer-3" })]);
+		expect(__cursorDiscoveryHttp2Snapshot()).toHaveLength(1);
+
+		// Real platform clock: eviction is gated on Date.now() deltas and has
+		// no deterministic seam — faking timers would break the real http2
+		// fixture stack — so age the entry past a shrunken window instead.
+		__setCursorDiscoveryHttp2IdleEvictMs(20);
+		await Bun.sleep(40);
+		const second = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 1_000 });
+
+		expect(second).toEqual(first);
+		// The idle entry was destroyed before the pool was consulted, so this
+		// discovery opened a fresh session rather than reusing the stale one.
+		expect(sessions).toBe(2);
 	});
 
 	it("maps request failures to null", async () => {

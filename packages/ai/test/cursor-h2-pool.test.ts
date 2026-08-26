@@ -1,15 +1,26 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as http2 from "node:http2";
 import * as net from "node:net";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import {
+	AgentServerMessageSchema,
+	InteractionUpdateSchema,
+	TextDeltaUpdateSchema,
+	TurnEndedUpdateSchema,
+} from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
+import { create, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
+import { streamCursor } from "../src/providers/cursor";
 import type { CursorH2AcquireOptions, CursorH2Acquisition } from "../src/providers/cursor/h2-pool";
 import {
 	__cursorH2ConnectingSnapshot,
 	__cursorH2PoolSnapshot,
 	__setCursorH2EstablishBodyGate,
 	__setCursorH2FreshSessionHook,
+	__setCursorH2HandshakeTimeoutMs,
 	acquireCursorH2,
 	disposeCursorH2Pool,
 } from "../src/providers/cursor/h2-pool";
+import type { Context, Model } from "../src/types";
 import { __resetProxyCache } from "../src/utils/proxy";
 
 /**
@@ -110,6 +121,7 @@ beforeEach(async () => {
 afterEach(async () => {
 	await stopServer();
 	await disposeCursorH2Pool();
+	__setCursorH2HandshakeTimeoutMs(undefined);
 });
 
 describe("cursor HTTP/2 session pool", () => {
@@ -751,5 +763,142 @@ describe("cursor HTTP/2 session pool", () => {
 		} finally {
 			__setCursorH2EstablishBodyGate(undefined);
 		}
+	});
+});
+
+describe("direct HTTP/2 handshake deadline", () => {
+	// Real platform timers: the deadline under test is a wall-clock socket
+	// deadline inside the real http2 stack, which fake timers cannot drive.
+	// The explicit test timeout turns a regression (no deadline at all) into
+	// a fast failure instead of a hang.
+	it("rejects a stalled handshake, releases its reservation, and lets a later acquire reconnect", async () => {
+		__setCursorH2HandshakeTimeoutMs(60);
+		const accepted: net.Socket[] = [];
+		const srv = net.createServer(socket => {
+			// Accept TCP but never answer the TLS ClientHello: the h2 session's
+			// handshake never completes, so only the deadline can settle this
+			// establishment — the shape an SDK caller with no AbortSignal hits
+			// against a stalled gateway. (Plain-HTTP prior-knowledge connects
+			// emit `connect` on socket open, so the stall needs TLS.) The
+			// teardown follows the pool's cancel path; Bun's http2 cannot
+			// close this peer socket itself (ERR_HTTP2_NO_SOCKET_MANIPULATION),
+			// so the test asserts settlement, reservation release, and a fresh
+			// reconnect rather than server-side socket death.
+			accepted.push(socket);
+		});
+		const listening = Promise.withResolvers<void>();
+		srv.once("error", listening.reject);
+		srv.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
+		const address = srv.address();
+		if (!address || typeof address === "string") {
+			throw new Error("expected silent fixture to bind a tcp port");
+		}
+		const baseUrl = `https://127.0.0.1:${address.port}`;
+
+		const acquireExpectingTimeout = async (): Promise<unknown> => {
+			try {
+				const acquisition = await acquireCursorH2(runArgs(baseUrl));
+				return acquisition.ok ? new Error("expected rejection, got a lease") : acquisition.unavailable;
+			} catch (error) {
+				return error;
+			}
+		};
+
+		try {
+			const first = await acquireExpectingTimeout();
+			expect(String(first)).toContain("handshake timed out");
+			// The stalled establishment must not keep its shared reservation.
+			await waitFor(() => __cursorH2ConnectingSnapshot().length === 0);
+			// A later acquisition connects afresh instead of joining the
+			// stalled one: the silent server accepts a second connection.
+			const second = await acquireExpectingTimeout();
+			expect(String(second)).toContain("handshake timed out");
+			expect(accepted.length).toBe(2);
+		} finally {
+			__setCursorH2HandshakeTimeoutMs(undefined);
+			for (const socket of accepted) socket.destroy();
+			await new Promise<void>(resolve => srv.close(() => resolve()));
+		}
+	}, 2_000);
+});
+
+describe("cursor transport gRPC trailer decoding", () => {
+	function frameConnectMessage(data: Uint8Array, flags = 0): Buffer {
+		const frame = Buffer.alloc(5 + data.length);
+		frame[0] = flags;
+		frame.writeUInt32BE(data.length, 1);
+		frame.set(data, 5);
+		return frame;
+	}
+
+	function textDeltaFrame(text: string): Buffer {
+		const message = create(AgentServerMessageSchema, {
+			message: {
+				case: "interactionUpdate",
+				value: create(InteractionUpdateSchema, {
+					message: { case: "textDelta", value: create(TextDeltaUpdateSchema, { text }) },
+				}),
+			},
+		});
+		return frameConnectMessage(toBinary(AgentServerMessageSchema, message));
+	}
+
+	function turnEndedFrame(): Buffer {
+		const message = create(AgentServerMessageSchema, {
+			message: {
+				case: "interactionUpdate",
+				value: create(InteractionUpdateSchema, {
+					message: { case: "turnEnded", value: create(TurnEndedUpdateSchema, {}) },
+				}),
+			},
+		});
+		return frameConnectMessage(toBinary(AgentServerMessageSchema, message));
+	}
+
+	function makeModel(baseUrl: string): Model<"cursor-agent"> {
+		return buildModel({
+			id: "cursor-trailer-fixture",
+			name: "Cursor trailer fixture",
+			api: "cursor-agent",
+			provider: "cursor",
+			baseUrl,
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1,
+			maxTokens: 1,
+		});
+	}
+
+	const context: Context = {
+		messages: [{ role: "user", content: "trailer decoding", timestamp: 1 }],
+	};
+
+	it("records a nonzero grpc-status even when grpc-message is malformed percent-encoding", async () => {
+		const baseUrl = await startServer();
+		serveStream = stream => {
+			stream.respond({ ":status": 200, "content-type": "application/connect+proto" }, { waitForTrailers: true });
+			stream.on("wantTrailers", () => {
+				// "50% o..." is not valid percent-encoding: a naive
+				// decodeURIComponent throws on it inside the trailers
+				// fulfillment handler.
+				stream.sendTrailers({ "grpc-status": "13", "grpc-message": "50% of quota exhausted" });
+			});
+			stream.write(textDeltaFrame("hello"));
+			stream.write(turnEndedFrame());
+			stream.end();
+		};
+
+		const events: string[] = [];
+		const stream = streamCursor(makeModel(baseUrl), context, { apiKey: "test-token" });
+		for await (const event of stream) events.push(event.type);
+		const result = await stream.result();
+
+		expect(events.at(-1)).toBe("error");
+		expect(events).not.toContain("done");
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("gRPC error 13");
+		expect(result.errorMessage).toContain("50% of quota exhausted");
 	});
 });

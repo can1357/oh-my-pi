@@ -22,6 +22,14 @@ import { connectProxiedSocket, getProxyForUrl } from "../../utils/proxy";
 
 /** Client wall-clock budget for establishing a proxy CONNECT tunnel + TLS. */
 const PROXY_TUNNEL_TIMEOUT_MS = 30_000;
+/**
+ * Wall-clock budget for the direct h2 handshake — session creation through
+ * the first `connect`/`error`. Independent of the optional caller
+ * `AbortSignal`: an SDK caller that supplies none must never wait forever on
+ * a peer that accepted TCP but never completes the handshake, and the shared
+ * `connecting` reservation must be released so a later acquire reconnects.
+ */
+const HANDSHAKE_TIMEOUT_MS = 30_000;
 
 /** An h1-only peer answered the h2 handshake (typically an ALPN-stripping proxy). */
 const H2_NOT_SUPPORTED = /h2 is not supported/i;
@@ -124,6 +132,12 @@ let __freshSessionHook: ((key: string, entry: PoolEntry | undefined) => void) | 
  * done-teardown (see {@link __setCursorH2EstablishBodyGate}).
  */
 let __establishBodyGate: ((key: string) => Promise<void>) | undefined;
+/**
+ * Test-only handshake-deadline override (undefined = the production budget),
+ * so the stalled-peer path is drivable in milliseconds; see
+ * {@link __setCursorH2HandshakeTimeoutMs}.
+ */
+let __handshakeTimeoutMs: number | undefined;
 
 function poolKey(baseUrl: string, proxyUrl: string | undefined): string {
 	return `${baseUrl}|${proxyUrl ?? ""}`;
@@ -489,17 +503,50 @@ function establishSession(options: CursorH2AcquireOptions, key: string): CursorE
 		if (controller.signal.aborted) onCancelHandshake();
 		else controller.signal.addEventListener("abort", onCancelHandshake, { once: true });
 
+		// Bound the handshake independently of the optional caller signal: a
+		// peer that accepts TCP but never completes the h2 handshake would
+		// otherwise leave this await — and the `connecting` reservation every
+		// later acquisition for the key joins — pending forever. The teardown
+		// reuses the establishment's single destructive owner: aborting the
+		// controller destroys the raw socket, and the session is destroyed
+		// directly. `onCancelHandshake` no-ops (handshakeDone is already set),
+		// so the deadline-specific rejection below is what surfaces.
+		const handshakeTimeoutMs = __handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
+		const onHandshakeTimeout = (): void => {
+			if (handshakeDone) return;
+			handshakeDone = true;
+			logger.warn("cursor h2 handshake timed out", {
+				baseUrl: options.baseUrl,
+				timeoutMs: handshakeTimeoutMs,
+			});
+			controller.abort();
+			try {
+				connect.destroy();
+			} catch {
+				/* already closed */
+			}
+			try {
+				connect.socket?.destroy();
+			} catch {
+				/* already closed */
+			}
+			handshake.reject(new Error(`HTTP/2 handshake timed out after ${handshakeTimeoutMs}ms`));
+		};
+		const handshakeTimer = setTimeout(onHandshakeTimeout, handshakeTimeoutMs);
+		handshakeTimer.unref();
 		let result!: HandshakeResult;
 		try {
 			result = await handshake.promise;
 		} catch (error) {
+			clearTimeout(handshakeTimer);
 			controller.signal.removeEventListener("abort", onCancelHandshake);
-			// The connect failed or was cancelled mid-flight; onError has already
-			// destroyed the socket. If cancellation already settled the
-			// establishment, `fail` is a no-op.
+			// The connect failed, was cancelled, or missed the deadline; the
+			// failing path has already destroyed the socket. If cancellation
+			// already settled the establishment, `fail` is a no-op.
 			fail(error);
 			return;
 		}
+		clearTimeout(handshakeTimer);
 		controller.signal.removeEventListener("abort", onCancelHandshake);
 
 		if (result.kind === "unavailable") {
@@ -801,4 +848,12 @@ export function __setCursorH2FreshSessionHook(
  */
 export function __setCursorH2EstablishBodyGate(fn: ((key: string) => Promise<void>) | undefined): void {
 	__establishBodyGate = fn;
+}
+/**
+ * Test seam: override (or restore) the direct-handshake deadline so the
+ * stalled-peer path can be driven deterministically instead of waiting out
+ * the production budget.
+ */
+export function __setCursorH2HandshakeTimeoutMs(ms: number | undefined): void {
+	__handshakeTimeoutMs = ms;
 }

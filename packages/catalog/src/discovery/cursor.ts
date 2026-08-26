@@ -149,9 +149,11 @@ function buildCursorUnaryHeaders(apiKey: string, clientVersion: string | undefin
  * forms a `pi-catalog` ⇄ `pi-ai` cycle and can break standalone `pi-catalog`
  * module resolution — so discovery owns this tiny pool. It reuses one live
  * session per normalized base URL, shares an in-flight connect, drains on
- * GOAWAY/error, and unrefs an idle session so a short-lived catalog consumer is
- * never pinned open. No proxy tunneling: catalog has no sanctioned lower-level
- * proxy helper and adding one is outside this fix.
+ * GOAWAY/error, unrefs an idle session so a short-lived catalog consumer is
+ * never pinned open, and evicts entries idle beyond a bounded window so
+ * rotating origins cannot accumulate open sockets. No proxy tunneling:
+ * catalog has no sanctioned lower-level proxy helper and adding one is
+ * outside this fix.
  */
 interface CursorH2Lease {
 	readonly request: http2.ClientHttp2Stream;
@@ -163,10 +165,20 @@ interface CursorH2PoolEntry {
 	outstanding: number;
 	draining: boolean;
 	referenced: boolean;
+	/**
+	 * Wall-clock timestamp stamped when the entry last dropped to zero
+	 * outstanding leases (or at publish), used by opportunistic idle
+	 * eviction. Undefined while at least one lease is outstanding.
+	 */
+	idleSince: number | undefined;
 }
 
 /** Normalized origin → live (non-draining) session with its lease count. */
 const cursorH2Pool = new Map<string, CursorH2PoolEntry>();
+/** Idle eviction window: a pooled session unused for this long is evicted. */
+const CURSOR_H2_IDLE_EVICT_MS = 60_000;
+/** Test-only idle-eviction window override; undefined = production window. */
+let cursorH2IdleEvictMsOverride: number | undefined;
 /**
  * An in-flight connect alongside the handle that can terminate it. `cancel()`
  * is destructive: it destroys the underlying session and socket and settles
@@ -226,9 +238,11 @@ function releaseCursorH2Entry(key: string, entry: CursorH2PoolEntry): void {
 		destroyCursorH2Session(entry.session);
 		return;
 	}
-	// Idle: unref so the pooled session never pins a short-lived consumer.
+	// Idle: unref so the pooled session never pins a short-lived consumer,
+	// and stamp the idle clock the bounded eviction consults.
 	entry.session.unref();
 	entry.referenced = false;
+	entry.idleSince = Date.now();
 }
 
 function issueCursorH2Lease(
@@ -242,6 +256,7 @@ function issueCursorH2Lease(
 	if (!entry.referenced) {
 		entry.session.ref();
 		entry.referenced = true;
+		entry.idleSince = undefined;
 	}
 	entry.outstanding++;
 	let request: http2.ClientHttp2Stream;
@@ -347,7 +362,13 @@ function establishCursorH2Session(key: string, origin: string): CursorH2ConnectH
 			destroyConnect();
 			return;
 		}
-		const entry: CursorH2PoolEntry = { session: connected, outstanding: 0, draining: false, referenced: false };
+		const entry: CursorH2PoolEntry = {
+			session: connected,
+			outstanding: 0,
+			draining: false,
+			referenced: false,
+			idleSince: undefined,
+		};
 		connected.on("goaway", () => drainCursorH2Entry(key, entry));
 		connected.on("error", () => {
 			if (settled) {
@@ -369,6 +390,7 @@ function establishCursorH2Session(key: string, origin: string): CursorH2ConnectH
 			}
 			connected.unref();
 			entry.referenced = false;
+			entry.idleSince = Date.now();
 			cursorH2Pool.set(key, entry);
 			settle(entry);
 		};
@@ -377,6 +399,29 @@ function establishCursorH2Session(key: string, origin: string): CursorH2ConnectH
 	};
 	void run();
 	return { promise, cancel, waiters: 0, finished: false };
+}
+
+/**
+ * Opportunistic idle eviction, mirroring the bounded AI package pool:
+ * destroys pooled entries that have had zero outstanding leases for longer
+ * than the window. Called on each acquisition so a consumer discovering
+ * models across rotating origins does not accumulate open sessions and file
+ * descriptors. Never evicts an entry with live leases or one that is
+ * draining; a waiter joins a `connecting` reservation, not a pooled entry.
+ */
+function evictIdleCursorH2Entries(): void {
+	const windowMs = cursorH2IdleEvictMsOverride ?? CURSOR_H2_IDLE_EVICT_MS;
+	const now = Date.now();
+	for (const [key, entry] of cursorH2Pool) {
+		if (
+			entry.outstanding === 0 &&
+			!entry.draining &&
+			entry.idleSince !== undefined &&
+			now - entry.idleSince >= windowMs
+		) {
+			drainCursorH2Entry(key, entry);
+		}
+	}
 }
 
 async function acquireCursorH2(
@@ -391,6 +436,10 @@ async function acquireCursorH2(
 		return null;
 	}
 	if (signal.aborted) return null;
+	// Opportunistic idle eviction: drop entries idle beyond the window before
+	// consulting the pool, so a consumer that rotates origins does not
+	// accumulate retained sockets indefinitely.
+	evictIdleCursorH2Entries();
 	const existing = cursorH2Pool.get(key);
 	if (existing && !existing.draining && !existing.session.destroyed) {
 		return issueCursorH2Lease(key, existing, headers, signal);
@@ -456,6 +505,14 @@ export function disposeCursorDiscoveryHttp2Pool(): void {
 		destroyCursorH2Session(entry.session);
 	}
 	cursorH2Pool.clear();
+}
+
+/**
+ * Test seam: override (or restore) the idle-eviction window so eviction is
+ * drivable in milliseconds instead of the production 60s.
+ */
+export function __setCursorDiscoveryHttp2IdleEvictMs(ms: number | undefined): void {
+	cursorH2IdleEvictMsOverride = ms;
 }
 
 /**
