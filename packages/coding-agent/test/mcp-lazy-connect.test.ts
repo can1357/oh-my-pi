@@ -140,6 +140,38 @@ describe("MCP lazy connect", () => {
 		}
 	});
 
+	it("regression: an identity edit on a dormant lazy server drops its stale deferred tools (PR #9793 round-5 review)", async () => {
+		const marker = path.join(workDir, "spawned.marker");
+		const config = lazyConfig(marker);
+		const cache = new MCPToolCache(fakeStorage());
+		await cache.set("lazyfixture", config, [TOOL_DEF]);
+		const manager = new MCPManager(workDir, cache);
+
+		try {
+			// First connect: cache hit installs the deferred catalog.
+			await manager.connectServers({ lazyfixture: config }, {});
+			expect(manager.getTools().filter(tool => tool.mcpServerName === "lazyfixture")).toHaveLength(1);
+
+			// The user edits the server's connection identity (different args);
+			// the cache no longer matches, so the old catalog belongs to the
+			// previous identity and must not stay registered — otherwise
+			// `/mcp test`'s seeding path sees "tools exist" and never seeds,
+			// and invoking the stale name connects the new server just to fail.
+			const editedConfig: MCPStdioServerConfig = {
+				...config,
+				args: [FIXTURE_PATH, "--edited"],
+			};
+			await manager.connectServers({ lazyfixture: editedConfig }, {});
+
+			expect(manager.getTools().filter(tool => tool.mcpServerName === "lazyfixture")).toHaveLength(0);
+			// Still lazy: nothing spawned throughout.
+			expect(await Bun.file(marker).exists()).toBe(false);
+			expect(manager.getConnectionStatus("lazyfixture")).toBe("disconnected");
+		} finally {
+			await manager.disconnectAll();
+		}
+	});
+
 	it("regression: /mcp disable racing the lazy cache lookup does not resurrect the server's tools", async () => {
 		const marker = path.join(workDir, "spawned.marker");
 		const config = lazyConfig(marker);
