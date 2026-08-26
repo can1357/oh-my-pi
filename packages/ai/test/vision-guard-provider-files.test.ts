@@ -36,5 +36,19 @@ describe("OpenAI provider-file capability", () => {
 				image,
 			),
 		).toBe(false);
+
+		for (const baseUrl of [
+			"https://api.openai.com/proxy",
+			"https://api.openai.com:8443/v1",
+			"https://user:pass@api.openai.com/v1",
+			"https://api.openai.com/v1?proxy=1",
+			"https://api.openai.com/v1#fragment",
+		]) {
+			expect(supportsProviderFileReference(makeResponsesModel("openai", baseUrl), reference, image)).toBe(false);
+		}
+
+		expect(
+			supportsProviderFileReference(makeResponsesModel("openai", "https://api.openai.com/v1/"), reference, image),
+		).toBe(true);
 	});
 });

@@ -309,6 +309,31 @@ describe("openai-responses parseRequest", () => {
 		]);
 	});
 
+	it("preserves legacy text encounter order around input text blocks", () => {
+		const parsed = parseRequest({
+			model: "gpt-5.6-sol",
+			input: [
+				{
+					type: "function_call_output",
+					call_id: "call_order",
+					output: [
+						{ type: "output_text", text: "before" },
+						{ type: "input_text", text: "middle" },
+						{ type: "output_text", text: "after" },
+					],
+				},
+			],
+		});
+
+		const result = parsed.context.messages[0];
+		if (result?.role !== "toolResult") throw new Error("expected tool result");
+		expect(result.content).toEqual([
+			{ type: "text", text: "before" },
+			{ type: "text", text: "middle" },
+			{ type: "text", text: "after" },
+		]);
+	});
+
 	it("round-trips Pi image-read image forms as native function output blocks", () => {
 		const imageData = Buffer.from("read tool image").toString("base64");
 		const imageUrl = "https://blob.example.invalid/read-image.png";

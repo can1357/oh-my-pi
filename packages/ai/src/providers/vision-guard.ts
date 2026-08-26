@@ -43,12 +43,22 @@ function hasReplayableGoogleImageMimeType(image: Pick<ImageContent, "mimeType">)
 	return GOOGLE_REMOTE_IMAGE_MIME_TYPES[image.mimeType.toLowerCase()] === true;
 }
 
-function isOfficialHttpsHost(baseUrl: string | undefined, hostname: string): boolean {
+function isExactOfficialOpenAIEndpoint(baseUrl: string | undefined): boolean {
 	const value = baseUrl?.trim() ?? "";
 	if (value.length === 0) return true;
 	try {
 		const url = new URL(value);
-		return url.protocol === "https:" && url.hostname.toLowerCase() === hostname;
+		const pathname = url.pathname.replace(/\/+$/, "");
+		return (
+			url.protocol === "https:" &&
+			url.hostname.toLowerCase() === "api.openai.com" &&
+			url.username.length === 0 &&
+			url.password.length === 0 &&
+			url.search.length === 0 &&
+			url.hash.length === 0 &&
+			url.port.length === 0 &&
+			pathname === "/v1"
+		);
 	} catch {
 		return false;
 	}
@@ -80,7 +90,7 @@ function isOfficialCodexEndpoint(baseUrl: string | undefined): boolean {
 function supportsOfficialOpenAIProviderFileEndpoint(model: Model): boolean {
 	switch (model.api) {
 		case "openai-responses":
-			return model.provider === "openai" && isOfficialHttpsHost(model.baseUrl, "api.openai.com");
+			return model.provider === "openai" && isExactOfficialOpenAIEndpoint(model.baseUrl);
 		case "openai-codex-responses":
 			return model.provider === "openai-codex" && isOfficialCodexEndpoint(model.baseUrl);
 		case "azure-openai-responses":
