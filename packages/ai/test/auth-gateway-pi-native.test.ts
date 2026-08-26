@@ -14,7 +14,10 @@ import type {
 	Context,
 	Usage,
 } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import { type CapturedOpenAICompletionRequest, startOpenAICompletionsUpstream } from "./helpers";
 
 function makeEventStream(events: AssistantMessageEvent[], final: AssistantMessage): AssistantMessageEventStream {
 	async function* iter() {
@@ -444,6 +447,75 @@ describe("pi-native gateway image reference validation", () => {
 			]);
 		} finally {
 			await fixture.close();
+		}
+	});
+
+	it("preserves a supported URL when the file reference is unsupported", async () => {
+		const upstreamRequests: CapturedOpenAICompletionRequest[] = [];
+		const upstream = startOpenAICompletionsUpstream(upstreamRequests);
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-image-alternate-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openai", "test-key");
+		const model = buildModel({
+			id: "pi-native-image-alternate",
+			name: "Pi Native Image Alternate",
+			api: "openai-completions",
+			provider: "openai",
+			baseUrl: `${upstream.url.origin}/v1`,
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"openai-completions">);
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => model,
+			version: "test",
+		});
+		const imageUrl = "https://images.example.invalid/read.png";
+
+		try {
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: model.id,
+					context: {
+						messages: [
+							{
+								role: "user",
+								content: [
+									{
+										type: "image",
+										data: "",
+										mimeType: "image/png",
+										providerFile: { provider: "openai", id: "file_image_123" },
+										url: imageUrl,
+									},
+								],
+								timestamp: 0,
+							},
+						],
+					},
+					stream: false,
+				}),
+			});
+
+			expect(response.status).toBe(200);
+			await response.json();
+			expect(upstreamRequests).toHaveLength(1);
+			const contentParts = (upstreamRequests[0]?.messages ?? []).flatMap(message =>
+				Array.isArray(message.content) ? message.content : [],
+			);
+			expect(contentParts).toContainEqual({ type: "image_url", image_url: { url: imageUrl } });
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			upstream.stop(true);
 		}
 	});
 

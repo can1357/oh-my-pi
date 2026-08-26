@@ -6,6 +6,8 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 
+export * from "./openai-completions-upstream";
+
 export async function withEnv(
 	overrides: Record<string, string | undefined>,
 	fn: () => void | Promise<void>,

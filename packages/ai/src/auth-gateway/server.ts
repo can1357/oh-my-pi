@@ -103,27 +103,31 @@ function validateAndNormalizeImageReferences(context: Context, model: Model): st
 			}
 
 			const hasInlineData = block.data.length > 0;
-			if (
-				isRecord(block.providerFile) &&
-				block.providerFile.provider === "openai" &&
-				!supportsOpenAIImageFileReferences(model.api)
-			) {
-				if (!hasInlineData) {
-					return `input_image.file_id cannot be forwarded to ${model.api}; target an OpenAI Responses model or use an inline data URL`;
-				}
-				delete block.providerFile;
+			const providerFile = isRecord(block.providerFile) ? block.providerFile : undefined;
+			const hasOpenAIFileReference = providerFile?.provider === "openai";
+			const hasSupportedOpenAIFileReference =
+				providerFile?.provider === "openai" &&
+				typeof providerFile.id === "string" &&
+				providerFile.id.length > 0 &&
+				supportsOpenAIImageFileReferences(model.api);
+			const hasUrlReference = block.url !== undefined;
+			if (hasUrlReference && typeof block.url !== "string") {
+				return `\`context.messages[${messageIndex}].content[${blockIndex}].url\` must be a string`;
 			}
+			const hasSupportedUrlReference =
+				typeof block.url === "string" &&
+				block.url.length > 0 &&
+				supportsRemoteImageUrls(model, { mimeType: block.mimeType });
 
-			if (block.url !== undefined) {
-				if (typeof block.url !== "string") {
-					return `\`context.messages[${messageIndex}].content[${blockIndex}].url\` must be a string`;
-				}
-				if (block.url.length === 0 || !supportsRemoteImageUrls(model, { mimeType: block.mimeType })) {
-					if (!hasInlineData) {
-						return `input_image.image_url cannot be forwarded to ${model.api} without inline image data; use a data URL or target an API that supports remote image URLs`;
-					}
-					delete block.url;
-				}
+			if (hasOpenAIFileReference && !hasSupportedOpenAIFileReference) delete block.providerFile;
+			if (hasUrlReference && !hasSupportedUrlReference) delete block.url;
+			if (hasInlineData || hasSupportedOpenAIFileReference || hasSupportedUrlReference) continue;
+
+			if (hasOpenAIFileReference) {
+				return `input_image.file_id cannot be forwarded to ${model.api}; target an OpenAI Responses model or use an inline data URL`;
+			}
+			if (hasUrlReference) {
+				return `input_image.image_url cannot be forwarded to ${model.api} without inline image data; use a data URL or target an API that supports remote image URLs`;
 			}
 		}
 	}

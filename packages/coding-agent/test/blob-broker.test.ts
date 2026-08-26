@@ -349,6 +349,10 @@ describe("supportsRemoteImageUrls", () => {
 			supportsRemoteImageUrls(makeModel("bedrock-converse-stream", "amazon-bedrock"), KNOWN_IMAGE_REFERENCE),
 		).toBe(false);
 	});
+
+	it("rejects inherited property names used as custom API identifiers", () => {
+		expect(supportsRemoteImageUrls(makeModel("toString", "custom"), KNOWN_IMAGE_REFERENCE)).toBe(false);
+	});
 });
 
 describe("uploaders", () => {

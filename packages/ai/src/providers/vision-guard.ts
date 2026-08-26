@@ -35,7 +35,7 @@ export function supportsRemoteImageUrls(model: Model, image: Pick<ImageContent, 
 	if (!model.input.includes("image")) return false;
 	if (modelMatchesHost(model, "moonshotNative")) return false;
 	if (isOpenAICompletionsModel(model)) return isOpenAICompletionsVisionSupported(model);
-	if (URL_CAPABLE_OPENAI_APIS[model.api]) return true;
+	if (URL_CAPABLE_OPENAI_APIS[model.api] === true) return true;
 	if (model.api === "anthropic-messages") return model.provider === "anthropic";
 	if (model.api === "google-gemini-cli") {
 		return model.provider === "google-antigravity" && hasReplayableGoogleImageMimeType(image);
