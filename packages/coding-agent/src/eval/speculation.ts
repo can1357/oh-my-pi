@@ -33,6 +33,8 @@
  * outcome is wasted tokens rather than a wrong or failed cell.
  */
 
+import type { AgentEvent } from "@oh-my-pi/pi-agent-core";
+import type { ToolCall } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 
 /** Cell languages whose source this scanner understands. */
@@ -40,6 +42,44 @@ export type SpeculationLanguage = "js" | "py";
 
 /** The single bridge tool speculated today. See the module docstring. */
 export const SPECULATED_BRIDGE_TOOL = "__completion__";
+
+/** A streamed eval cell worth scanning. */
+export interface StreamedEvalCell {
+	code: string;
+	language: SpeculationLanguage;
+}
+
+/**
+ * Recover the in-progress eval cell from a streamed assistant event, or
+ * `undefined` when the event is not a partially-written eval call.
+ *
+ * Mirrors `StreamingEditGuard`'s access pattern: the provider fills
+ * `toolCall.arguments` progressively as the JSON arrives, so a half-written cell
+ * is readable here well before the tool runs. Split out from the session so the
+ * event-shape handling is directly testable, leaving only the call site untested.
+ */
+export function streamedEvalCell(event: AgentEvent): StreamedEvalCell | undefined {
+	if (event.type !== "message_update" || event.message.role !== "assistant") return undefined;
+	const assistantEvent = event.assistantMessageEvent;
+	if (
+		assistantEvent.type !== "toolcall_start" &&
+		assistantEvent.type !== "toolcall_delta" &&
+		assistantEvent.type !== "toolcall_end"
+	) {
+		return undefined;
+	}
+	const contentIndex = assistantEvent.contentIndex ?? 0;
+	const content = event.message.content;
+	if (!Array.isArray(content) || contentIndex < 0 || contentIndex >= content.length) return undefined;
+	const toolCall = content[contentIndex] as ToolCall;
+	if (toolCall?.name !== "eval") return undefined;
+	const args = toolCall.arguments;
+	if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
+	const { language, code } = args as { language?: unknown; code?: unknown };
+	// Only the two runtimes whose comment and string syntax the scanner models.
+	if ((language !== "js" && language !== "py") || typeof code !== "string") return undefined;
+	return { code, language };
+}
 
 /** A complete, fully-literal bridge call recovered from partial cell source. */
 export interface SpeculatableCall {
