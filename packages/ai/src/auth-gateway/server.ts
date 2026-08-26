@@ -108,6 +108,16 @@ function hasUnsupportedReferenceOnlyImageUrl(context: Context, model: Model): bo
 	return false;
 }
 
+function validateImageReferences(context: Context, model: Model): string | undefined {
+	if (!supportsOpenAIImageFileReferences(model.api) && hasOpenAIImageFileReference(context)) {
+		return `input_image.file_id cannot be forwarded to ${model.api}; target an OpenAI Responses model or use an inline data URL`;
+	}
+	if (hasUnsupportedReferenceOnlyImageUrl(context, model)) {
+		return `input_image.image_url cannot be forwarded to ${model.api} without inline image data; use a data URL or target an API that supports remote image URLs`;
+	}
+	return undefined;
+}
+
 // (passthrough fast-path removed — it bypassed pi-ai provider logic, in
 // particular the Anthropic Claude-Code OAuth system-prompt prefix injection.
 // Every request now takes the translate path so credential-specific request
@@ -425,19 +435,9 @@ async function handleFormatEndpoint(
 		const message = error instanceof Error ? error.message : String(error);
 		return route.module.formatError(400, "invalid_request_error", message);
 	}
-	if (!supportsOpenAIImageFileReferences(model.api) && hasOpenAIImageFileReference(parsed.context)) {
-		return route.module.formatError(
-			400,
-			"invalid_request_error",
-			`input_image.file_id cannot be forwarded to ${model.api}; target an OpenAI Responses model or use an inline data URL`,
-		);
-	}
-	if (hasUnsupportedReferenceOnlyImageUrl(parsed.context, model)) {
-		return route.module.formatError(
-			400,
-			"invalid_request_error",
-			`input_image.image_url cannot be forwarded to ${model.api} without inline image data; use a data URL or target an API that supports remote image URLs`,
-		);
+	const imageReferenceError = validateImageReferences(parsed.context, model);
+	if (imageReferenceError) {
+		return route.module.formatError(400, "invalid_request_error", imageReferenceError);
 	}
 	// Merge gateway-captured passthrough headers under the parser's own
 	// captures. Parsers that set `options.headers` themselves win (they may
@@ -615,6 +615,10 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	const model = bootOpts.resolveModel(parsed.modelId);
 	if (!model) {
 		return piNative.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
+	}
+	const imageReferenceError = validateImageReferences(parsed.context, model);
+	if (imageReferenceError) {
+		return piNative.formatError(400, "invalid_request_error", imageReferenceError);
 	}
 	// Pi-native already parsed `streamOpts.sessionId` (when set by the
 	// client); fall back to the derived key so credential-stickiness lines

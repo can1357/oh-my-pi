@@ -292,6 +292,97 @@ describe("pi-native gateway cache controls", () => {
 		}
 	});
 });
+
+describe("pi-native gateway image reference validation", () => {
+	it("rejects unsupported image references without invoking the provider", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-image-references-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openai", "test-key");
+		const mock = createMockModel({ provider: "openai", id: "pi-native-image-references" });
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => mock,
+			version: "test",
+		});
+		const cases: Array<{ context: Context; message: string }> = [
+			{
+				context: {
+					messages: [
+						{
+							role: "toolResult",
+							toolCallId: "call_read_file",
+							toolName: "read",
+							content: [
+								{
+									type: "image",
+									data: "",
+									mimeType: "application/octet-stream",
+									providerFile: { provider: "openai", id: "file_image_123" },
+								},
+							],
+							isError: false,
+							timestamp: 0,
+						},
+					],
+				},
+				message:
+					"input_image.file_id cannot be forwarded to mock; target an OpenAI Responses model or use an inline data URL",
+			},
+			{
+				context: {
+					messages: [
+						{
+							role: "toolResult",
+							toolCallId: "call_read_url",
+							toolName: "read",
+							content: [
+								{
+									type: "image",
+									data: "",
+									mimeType: "application/octet-stream",
+									url: "https://images.example.invalid/read.png",
+								},
+							],
+							isError: false,
+							timestamp: 0,
+						},
+					],
+				},
+				message:
+					"input_image.image_url cannot be forwarded to mock without inline image data; use a data URL or target an API that supports remote image URLs",
+			},
+		];
+
+		try {
+			for (const testCase of cases) {
+				const response = await fetch(`${handle.url}/v1/pi/stream`, {
+					method: "POST",
+					headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+					body: JSON.stringify({
+						modelId: mock.id,
+						context: testCase.context,
+						stream: false,
+					}),
+				});
+
+				expect(response.status).toBe(400);
+				expect(await response.json()).toEqual({
+					error: { type: "invalid_request_error", message: testCase.message },
+				});
+				expect(mock.calls).toHaveLength(0);
+			}
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			clearCustomApis();
+		}
+	});
+});
+
 describe("pi-native encodeStream", () => {
 	it("ships every AssistantMessageEvent verbatim, terminated by [DONE]", async () => {
 		// Pi-native is omp-talks-to-omp: the client feeds parsed events directly
