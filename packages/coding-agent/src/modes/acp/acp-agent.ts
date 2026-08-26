@@ -61,6 +61,7 @@ import { loadAllExtensions } from "../../modes/components/extensions/state-manag
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { normalizePlanTitle, type PlanApprovalDetails, resolveApprovedPlan } from "../../plan-mode/approved-plan";
 import { autosaveApprovedPlan } from "../../plan-mode/plan-autosave";
+import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
 import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
 import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
@@ -71,6 +72,8 @@ import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins
 import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash-commands/available-commands";
 import { DEFAULT_STT_MODEL_KEY, STT_MODELS } from "../../stt/models";
 import { refreshAgentDiscovery } from "../../task";
+import { createPersistedSubagentReviverFactory } from "../../task/persisted-revive";
+import { cfgTaskAgentIdleTtlMs, cfgTaskEnableLsp } from "../../task/settings";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { OTHER_OPTION } from "../../tools/ask";
 import { resolvePlanFilePath } from "../../plan-mode/plan-files";
@@ -2566,6 +2569,24 @@ export class AcpAgent implements Agent {
 			return;
 		}
 
+		// ACP hosts several concurrent top-level sessions in one process, so it
+		// never installs one process-global persisted-subagent reviver factory
+		// (see main.ts's non-ACP bootstrap comment) — a single factory bound to
+		// one session's auth/model/settings would clobber every other session's
+		// cold revives. Build a reviver scoped to just this session instead, and
+		// require the agents actions to resolve through this session's own
+		// registry family so one ACP connection's sessions can never inspect,
+		// revive, or message another's agent.
+		const scopeAgentId = record.session.getAgentId() ?? MAIN_AGENT_ID;
+		const reviverFactory = createPersistedSubagentReviverFactory({
+			session: record.session,
+			authStorage: record.session.modelRegistry.authStorage,
+			modelRegistry: record.session.modelRegistry,
+			settings: record.session.settings,
+			enableLsp: cfgTaskEnableLsp.get(record.session.settings) !== false,
+		});
+		const agentIdleTtlMs = Math.trunc(Number(cfgTaskAgentIdleTtlMs.get(record.session.settings)) || 0);
+
 		extensionRunner.initialize(
 			{
 				sendMessage: (message, options) => {
@@ -2579,7 +2600,7 @@ export class AcpAgent implements Agent {
 				appendEntry: (customType, data) => {
 					record.session.sessionManager.appendCustomEntry(customType, data);
 				},
-				...createExtensionAgentActions(),
+				...createExtensionAgentActions({ scopeAgentId, reviverFactory, idleTtlMs: agentIdleTtlMs }),
 				setLabel: (targetId, label) => {
 					record.session.sessionManager.appendLabelChange(targetId, label);
 				},

@@ -31,6 +31,7 @@ import { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
 import { HookSelectorComponent, type HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
+import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { disambiguateDisplayLabels, sanitizeCarriageReturns } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
@@ -198,7 +199,7 @@ export class ExtensionUiController {
 			appendEntry: (customType, data) => {
 				this.ctx.sessionManager.appendCustomEntry(customType, data);
 			},
-			...createExtensionAgentActions(),
+			...createExtensionAgentActions({ scopeAgentId: this.ctx.session.getAgentId() ?? MAIN_AGENT_ID }),
 			setLabel: (targetId, label) => {
 				this.ctx.sessionManager.appendLabelChange(targetId, label);
 			},
@@ -431,7 +432,7 @@ export class ExtensionUiController {
 			appendEntry: (customType, data) => {
 				this.ctx.sessionManager.appendCustomEntry(customType, data);
 			},
-			...createExtensionAgentActions(),
+			...createExtensionAgentActions({ scopeAgentId: this.ctx.session.getAgentId() ?? MAIN_AGENT_ID }),
 			setLabel: (targetId, label) => {
 				this.ctx.sessionManager.appendLabelChange(targetId, label);
 			},
