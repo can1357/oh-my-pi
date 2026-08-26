@@ -220,4 +220,33 @@ describe("speculative tool calling through a real session", () => {
 		// Both were speculated; the unreachable one is abandoned at the turn end.
 		expect(speculated.map(args => args.prompt).sort()).toEqual(["actually called", "never called"]);
 	});
+
+	// The mirror of the claim path: a call the scanner cannot speculate must reach
+	// the real bridge. If `claimSpeculation` ever answered on a loose match, or the
+	// store handed back some unrelated parked entry, this is where it would show.
+	it("lets a non-speculatable call fall through to the real bridge", async () => {
+		await build(true);
+		// A concatenation is not a single literal, so the scanner skips it while the
+		// parked literal above stays unclaimed.
+		const code = [
+			'if (false) { await completion("parked but unused"); }',
+			'const a = await completion("con" + "catenated").catch(e => "ERR:" + e);',
+			"display(a);",
+		].join("\n");
+		scriptedResponses = [evalCall(code, "call_spec_4"), stopReply("ok")];
+
+		await session.prompt("run a cell");
+
+		const resultText = getToolResultText(session.agent.state.messages, "call_spec_4");
+		// The `ERR:` prefix is only reachable through the cell's own catch, so it
+		// proves the call really dispatched and rejected downstream rather than the
+		// cell dying earlier. Without it, `not.toContain` below would pass vacuously
+		// for any cell that never reached its completion() call at all.
+		expect(resultText, `expected a real dispatch attempt, saw: ${JSON.stringify(resultText)}`).toContain("ERR:");
+		expect(resultText, `no speculated value may satisfy this call: ${JSON.stringify(resultText)}`).not.toContain(
+			SPECULATED_PREFIX,
+		);
+		// Only the literal was speculated. The executed call never entered the store.
+		expect(speculated.map(args => args.prompt)).toEqual(["parked but unused"]);
+	});
 });
