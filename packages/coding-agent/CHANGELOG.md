@@ -861,6 +861,7 @@
 - Removed the `PI_SUBPROCESS_CMD` environment variable; subagents run in-process and never read it ([#14632](https://github.com/can1357/oh-my-pi/pull/14632) by [@jorgoose](https://github.com/jorgoose))
 
 ## [18.8.4] - 2026-10-08
+- Added opt-in `eval.speculation.enabled` to start literal `completion()` calls while eval cells stream, with `eval.speculation.maxPerTurn` limiting speculative requests.
 
 ### Changed
 
