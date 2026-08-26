@@ -6,6 +6,7 @@
  * behavior, and UI context differ between callers — those stay as
  * caller-supplied hooks.
  */
+import * as path from "node:path";
 import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
 import type {
@@ -49,6 +50,16 @@ export interface ExtensionAgentActionsScope {
 	 */
 	scopeAgentId?: string;
 	/**
+	 * This session's own persisted transcript path, when known — the only
+	 * lineage `ensureLive`'s `parentSessionFile` rescan is trusted to
+	 * attribute discovered children to {@link scopeAgentId} under. Without
+	 * this binding, a scoped caller could point the rescan at another loaded
+	 * session's transcript (or a stale path left over from a session
+	 * transition) and graft that session's persisted children into its own
+	 * family, defeating the isolation {@link scopeAgentId} exists to enforce.
+	 */
+	scopeSessionFile?: string | null;
+	/**
 	 * Session-scoped cold-revive support for a host that cannot install one
 	 * process-global {@link PersistedSubagentReviverFactory} (ACP: concurrent
 	 * top-level sessions each need their own ambient auth/model/settings).
@@ -65,7 +76,7 @@ export function createExtensionAgentActions(
 	scope: ExtensionAgentActionsScope = {},
 ): Required<Pick<ExtensionActions, "agentsList" | "agentsGet" | "agentsEnsureLive" | "agentsPrompt">> {
 	const registry = AgentRegistry.global();
-	const { scopeAgentId, reviverFactory, idleTtlMs } = scope;
+	const { scopeAgentId, scopeSessionFile, reviverFactory, idleTtlMs } = scope;
 	const inScope = (id: string): boolean =>
 		scopeAgentId === undefined || collectAgentFamily(registry, scopeAgentId).has(id);
 	/**
@@ -82,6 +93,16 @@ export function createExtensionAgentActions(
 		const qualified = qualifyPersistedAgentId(scopeAgentId, id);
 		return inScope(qualified) ? qualified : id;
 	};
+	/**
+	 * Whether `file` is the transcript this scope is bound to — the only
+	 * lineage `ensureLive` may attribute a rescan's discovered children to
+	 * `scopeAgentId` under. An unscoped caller has no lineage to bind (it
+	 * already sees the whole flat registry); a scoped caller with no known
+	 * transcript of its own can never satisfy this, so the rescan is refused
+	 * rather than trusting an unverifiable caller-supplied path.
+	 */
+	const isOwnSessionFile = (file: string): boolean =>
+		scopeAgentId === undefined || (scopeSessionFile != null && path.resolve(file) === path.resolve(scopeSessionFile));
 	const coldRevive = reviverFactory ? { reviverFactory, idleTtlMs } : undefined;
 	return {
 		agentsList: () => {
@@ -102,8 +123,9 @@ export function createExtensionAgentActions(
 			// Scan (not just a bare registry miss) whenever `id` isn't yet ours:
 			// a foreign session can already hold the bare id, in which case the
 			// scan must still run so this session's own persisted child can be
-			// registered under its disambiguated key.
-			if (!inScope(id) && agentOptions?.parentSessionFile) {
+			// registered under its disambiguated key. Only ever scan under a
+			// transcript verified to be this scope's own — see `isOwnSessionFile`.
+			if (!inScope(id) && agentOptions?.parentSessionFile && isOwnSessionFile(agentOptions.parentSessionFile)) {
 				await registerPersistedSubagents(registry, agentOptions.parentSessionFile, { rootParentId: scopeAgentId });
 			}
 			const resolvedId = resolveInScope(id);
@@ -214,7 +236,11 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			appendEntry: (customType, data) => {
 				session.sessionManager.appendCustomEntry(customType, data);
 			},
-			...createExtensionAgentActions({ scopeAgentId: session.getAgentId() ?? MAIN_AGENT_ID, ...agentActionsScope }),
+			...createExtensionAgentActions({
+				scopeAgentId: session.getAgentId() ?? MAIN_AGENT_ID,
+				scopeSessionFile: session.sessionManager?.getSessionFile?.() ?? null,
+				...agentActionsScope,
+			}),
 			setLabel: (targetId, label) => {
 				session.sessionManager.appendLabelChange(targetId, label);
 			},
