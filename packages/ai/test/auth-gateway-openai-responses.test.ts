@@ -1741,7 +1741,14 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 		const imageUrl = "https://images.example.invalid/read.png";
 
 		try {
-			for (const malformedDataUri of ["data:image/png;base64", "data:image/png,%"]) {
+			for (const malformedDataUri of [
+				"data:image/png;base64",
+				"data:image/png,%",
+				"data:image/png;base64,",
+				"data:image/png;base64,!!!!",
+				"data:image/png;base64,A===",
+				"data:image/png;base64,AB==",
+			]) {
 				const malformedResponse = await fetch(`${gateway.url}/v1/responses`, {
 					method: "POST",
 					headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
@@ -1753,6 +1760,19 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 				);
 				expect(upstreamRequests).toHaveLength(0);
 			}
+			const inlineImageUrl = `data:image/png;base64,${Buffer.from("valid image").toString("base64")}`;
+			const inlineResponse = await fetch(`${gateway.url}/v1/responses`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+				body: JSON.stringify(toolImageRequest(model.id, inlineImageUrl, "file_image_123")),
+			});
+			expect(inlineResponse.status).toBe(200);
+			await inlineResponse.text();
+			expect(upstreamRequests).toHaveLength(1);
+			const inlineContentParts = (upstreamRequests[0]?.messages ?? []).flatMap(message =>
+				Array.isArray(message.content) ? message.content : [],
+			);
+			expect(inlineContentParts).toContainEqual({ type: "image_url", image_url: { url: inlineImageUrl } });
 			const response = await fetch(`${gateway.url}/v1/responses`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
@@ -1760,8 +1780,8 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 			});
 			expect(response.status).toBe(200);
 			await response.text();
-			expect(upstreamRequests).toHaveLength(1);
-			const contentParts = (upstreamRequests[0]?.messages ?? []).flatMap(message =>
+			expect(upstreamRequests).toHaveLength(2);
+			const contentParts = (upstreamRequests[1]?.messages ?? []).flatMap(message =>
 				Array.isArray(message.content) ? message.content : [],
 			);
 			expect(contentParts).toContainEqual({ type: "image_url", image_url: { url: imageUrl } });

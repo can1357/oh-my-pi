@@ -18,7 +18,10 @@ export function decodeDataUri(url: string): DecodedDataUri | undefined {
 	const isBase64 = header.endsWith(";base64");
 	const mimeType = (isBase64 ? header.slice(0, -";base64".length) : header) || "application/octet-stream";
 	try {
-		const data = isBase64 ? payload : Buffer.from(decodeURIComponent(payload), "utf8").toString("base64");
+		const bytes = isBase64 ? Buffer.from(payload, "base64") : Buffer.from(decodeURIComponent(payload), "utf8");
+		if (bytes.length === 0) return undefined;
+		const data = bytes.toString("base64");
+		if (isBase64 && data !== payload) return undefined;
 		return { data, mimeType };
 	} catch {
 		return undefined;
