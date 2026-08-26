@@ -15,8 +15,14 @@ import type {
 	ExtensionMode,
 	ExtensionUIContext,
 } from "../extensibility/extensions/types";
-import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
+import { AgentLifecycleManager, type PersistedSubagentReviverFactory } from "../registry/agent-lifecycle";
+import {
+	type AgentRef,
+	AgentRegistry,
+	collectAgentFamily,
+	MAIN_AGENT_ID,
+	qualifyPersistedAgentId,
+} from "../registry/agent-registry";
 import { registerPersistedSubagents } from "../registry/persisted-agents";
 import type { AgentSession } from "../session/agent-session";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
@@ -30,28 +36,87 @@ function toExtensionAgentInfo(ref: AgentRef): ExtensionAgentInfo {
 	};
 }
 
-/** Actions shared by every extension host for process-global registry agents. */
-export function createExtensionAgentActions(): Required<
-	Pick<ExtensionActions, "agentsList" | "agentsGet" | "agentsEnsureLive" | "agentsPrompt">
-> {
+export interface ExtensionAgentActionsScope {
+	/**
+	 * Restrict `list`/`get`/`ensureLive`/`prompt` to this session's own id and
+	 * its registry descendants — a subagent id is only unique within its owning
+	 * top-level session's tree, so an unscoped view would let one session's
+	 * extension inspect, revive, or message another session's agent in a host
+	 * (ACP) that runs several concurrent top-level sessions in one process.
+	 * Also attributes rescanned persisted children (`ensureLive`'s
+	 * `parentSessionFile`) to this id instead of the {@link MAIN_AGENT_ID}
+	 * default.
+	 */
+	scopeAgentId?: string;
+	/**
+	 * Session-scoped cold-revive support for a host that cannot install one
+	 * process-global {@link PersistedSubagentReviverFactory} (ACP: concurrent
+	 * top-level sessions each need their own ambient auth/model/settings).
+	 * Overrides the global factory for revives triggered through these actions
+	 * only; never touches process-global lifecycle state.
+	 */
+	reviverFactory?: PersistedSubagentReviverFactory;
+	/** TTL applied when {@link reviverFactory} cold-revives a ref. Ignored without a reviverFactory; defaults to 0 (immediately re-parkable). */
+	idleTtlMs?: number;
+}
+
+/** Actions shared by every extension host for process-global registry agents, optionally scoped to one session's own family. */
+export function createExtensionAgentActions(
+	scope: ExtensionAgentActionsScope = {},
+): Required<Pick<ExtensionActions, "agentsList" | "agentsGet" | "agentsEnsureLive" | "agentsPrompt">> {
+	const registry = AgentRegistry.global();
+	const { scopeAgentId, reviverFactory, idleTtlMs } = scope;
+	const inScope = (id: string): boolean =>
+		scopeAgentId === undefined || collectAgentFamily(registry, scopeAgentId).has(id);
+	/**
+	 * A caller's own scoped view of a bare id can be shadowed by an unrelated
+	 * session's identically-named agent: `AgentRegistry` is a flat,
+	 * process-global map, but a subagent id is only unique within its owning
+	 * session's own tree. `registerPersistedSubagentsFromDir` registers such a
+	 * collision under the disambiguated {@link qualifyPersistedAgentId} key
+	 * instead of the bare one — fall back to that key when the bare id isn't
+	 * (or isn't yet) this session's own.
+	 */
+	const resolveInScope = (id: string): string => {
+		if (scopeAgentId === undefined || inScope(id)) return id;
+		const qualified = qualifyPersistedAgentId(scopeAgentId, id);
+		return inScope(qualified) ? qualified : id;
+	};
+	const coldRevive = reviverFactory ? { reviverFactory, idleTtlMs } : undefined;
 	return {
-		agentsList: () => AgentRegistry.global().list().map(toExtensionAgentInfo),
+		agentsList: () => {
+			if (scopeAgentId === undefined) return registry.list().map(toExtensionAgentInfo);
+			const family = collectAgentFamily(registry, scopeAgentId);
+			return registry
+				.list()
+				.filter(ref => family.has(ref.id))
+				.map(toExtensionAgentInfo);
+		},
 		agentsGet: id => {
-			const ref = AgentRegistry.global().get(id);
+			const resolvedId = resolveInScope(id);
+			if (!inScope(resolvedId)) return undefined;
+			const ref = registry.get(resolvedId);
 			return ref ? toExtensionAgentInfo(ref) : undefined;
 		},
 		agentsEnsureLive: async (id, agentOptions) => {
-			const registry = AgentRegistry.global();
-			if (!registry.get(id) && agentOptions?.parentSessionFile) {
-				await registerPersistedSubagents(registry, agentOptions.parentSessionFile);
+			// Scan (not just a bare registry miss) whenever `id` isn't yet ours:
+			// a foreign session can already hold the bare id, in which case the
+			// scan must still run so this session's own persisted child can be
+			// registered under its disambiguated key.
+			if (!inScope(id) && agentOptions?.parentSessionFile) {
+				await registerPersistedSubagents(registry, agentOptions.parentSessionFile, { rootParentId: scopeAgentId });
 			}
-			await AgentLifecycleManager.global().ensureLive(id);
-			const ref = registry.get(id);
+			const resolvedId = resolveInScope(id);
+			if (!inScope(resolvedId)) throw new Error(`Agent "${id}" is not visible to this session.`);
+			await AgentLifecycleManager.global().ensureLive(resolvedId, coldRevive);
+			const ref = registry.get(resolvedId);
 			if (!ref) throw new Error(`agent ${id} not in registry after revive`);
 			return toExtensionAgentInfo(ref);
 		},
 		agentsPrompt: async (id, text, agentOptions) => {
-			const liveSession = await AgentLifecycleManager.global().ensureLive(id);
+			const resolvedId = resolveInScope(id);
+			if (!inScope(resolvedId)) throw new Error(`Agent "${id}" is not visible to this session.`);
+			const liveSession = await AgentLifecycleManager.global().ensureLive(resolvedId, coldRevive);
 			await liveSession.prompt(text, { streamingBehavior: agentOptions?.deliverAs ?? "steer" });
 		},
 	};
@@ -75,6 +140,16 @@ export interface InitializeExtensionsOptions {
 	markAgentInvokingMessage?: () => void;
 	/** Optional lifecycle hook for extension-originated sends whose success/failure determines turn ownership. */
 	trackAgentInvokingMessage?: (task: Promise<unknown>) => void;
+	/**
+	 * Overrides the cold-revive support passed to {@link createExtensionAgentActions}.
+	 * A host with no process-global {@link PersistedSubagentReviverFactory} (ACP)
+	 * must carry its session-scoped reviver into every subsequent
+	 * `initializeExtensions` call for the SAME session lineage — persisted-revive
+	 * cold revival of a subagent, or a warm re-init after `/new`/reload — or that
+	 * call's own `api.agents.ensureLive` for ITS persisted children fails with
+	 * "no reviver registered".
+	 */
+	agentActionsScope?: Pick<ExtensionAgentActionsScope, "reviverFactory" | "idleTtlMs">;
 }
 
 /**
@@ -95,6 +170,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 		uiContext,
 		markAgentInvokingMessage,
 		trackAgentInvokingMessage,
+		agentActionsScope,
 	} = options;
 	const shutdown = onShutdown ?? (() => {});
 
@@ -138,7 +214,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			appendEntry: (customType, data) => {
 				session.sessionManager.appendCustomEntry(customType, data);
 			},
-			...createExtensionAgentActions(),
+			...createExtensionAgentActions({ scopeAgentId: session.getAgentId() ?? MAIN_AGENT_ID, ...agentActionsScope }),
 			setLabel: (targetId, label) => {
 				session.sessionManager.appendLabelChange(targetId, label);
 			},

@@ -59,7 +59,15 @@ export function createPersistedSubagentReviverFactory(
 	ctx: PersistedSubagentReviveContext,
 ): PersistedSubagentReviverFactory {
 	const registry = AgentRegistry.global();
-	return async ref => {
+	// ACP hosts several concurrent top-level sessions in one process, so it
+	// never installs one process-global `PersistedSubagentReviverFactory`
+	// (see main.ts's non-ACP bootstrap comment) — a cold-revived subagent's
+	// own `api.agents` actions would otherwise have no reviver for ITS OWN
+	// persisted children. Reuse this exact factory (anchored to the same
+	// ambient top-level `ctx` for every generation) so the whole persisted
+	// subtree stays cold-revivable, however deep.
+	const idleTtlMs = Math.trunc(Number(ctx.settings.get("task.agentIdleTtlMs") ?? 420_000) || 0);
+	const factory: PersistedSubagentReviverFactory = async ref => {
 		const sessionFile = ref.sessionFile;
 		if (!sessionFile) return undefined;
 		const peek = await SessionManager.peekSessionInit(sessionFile);
@@ -197,6 +205,7 @@ export function createPersistedSubagentReviverFactory(
 			await initializeExtensions(session, {
 				reportSendError: (action, err) => logger.error("Extension send failed", { action, error: err.message }),
 				reportRuntimeError: err => logger.error("Extension error", { path: err.extensionPath, error: err.error }),
+				agentActionsScope: { reviverFactory: factory, idleTtlMs },
 			});
 			// Cold revives must drive registry status themselves — createAgentSession
 			// doesn't wire this generically (the live path does it in the executor).
@@ -224,4 +233,5 @@ export function createPersistedSubagentReviverFactory(
 			return session;
 		};
 	};
+	return factory;
 }

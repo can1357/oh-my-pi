@@ -3499,7 +3499,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						appendEntry: (customType, data) => {
 							session.sessionManager.appendCustomEntry(customType, data);
 						},
-						...createExtensionAgentActions(),
+						...createExtensionAgentActions({ scopeAgentId: session.getAgentId() ?? MAIN_AGENT_ID }),
 						setLabel: (targetId, label) => {
 							session.sessionManager.appendLabelChange(targetId, label);
 						},
