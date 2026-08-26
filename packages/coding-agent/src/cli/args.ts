@@ -208,9 +208,13 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 		} else if (STRING_VALUE_FLAGS.has(arg)) {
 			if (arg === "--trusted-extension") trustedFlagCount++;
 			const next = args[i + 1];
+			// The next token has not been through the `--flag=value` split yet, so
+			// compare its flag name with any `=value` suffix stripped: the equals
+			// spelling of a credential flag must be as unconsumable as the bare one.
+			const nextFlagName = next?.startsWith("--") && next.includes("=") ? next.slice(0, next.indexOf("=")) : next;
 			const nextIsProviderBundleFlag =
 				(arg === "--provider-api-keys" || arg === "--provider-api-keys-fd") &&
-				(next === "--provider-api-keys" || next === "--provider-api-keys-fd");
+				(nextFlagName === "--provider-api-keys" || nextFlagName === "--provider-api-keys-fd");
 			// Built-in string flags normally consume a flag-looking value. Credential
 			// bundle flags must not consume each other: a missing named path must leave
 			// the descriptor flag recognizable so its transferred fd can be closed.

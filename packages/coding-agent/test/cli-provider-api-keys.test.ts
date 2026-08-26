@@ -88,6 +88,13 @@ describe("--provider-api-keys", () => {
 		expect(parsed.messages).toEqual([]);
 	});
 
+	it("recognizes the equals-form descriptor flag after a missing credential-file value", () => {
+		const parsed = parseArgs(["--provider-api-keys", "--provider-api-keys-fd=7"]);
+		expect(parsed.providerApiKeys).toBe("");
+		expect(parsed.providerApiKeysFd).toBe("7");
+		expect(parsed.messages).toEqual([]);
+	});
+
 	it("rejects simultaneous named and descriptor bundle sources before auth discovery and closes the descriptor", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-provider-api-keys-mixed-"));
 		roots.push(root);

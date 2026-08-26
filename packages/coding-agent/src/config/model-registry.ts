@@ -2129,8 +2129,26 @@ export class ModelRegistry {
 			if (!providerOverrides) return model;
 			const override = resolveModelOverrideWithAliases(providerOverrides, model, hasLiveModel);
 			if (!override) return model;
-			return applyModelOverride(model, override);
+			return this.#restoreRuntimeAuthPrecedence(model.provider, override, applyModelOverride(model, override));
 		});
+	}
+
+	/** `applyModelOverride` merges per-model `headers` with a plain spread, which
+	 *  snapshots the base model's live header proxy and lets a configured
+	 *  `modelOverrides.<id>.headers.Authorization` outrank the process-local
+	 *  runtime key installed by `--provider-api-keys`. When the provider uses
+	 *  authHeader semantics and the override supplied an Authorization variant,
+	 *  rebuild the merged headers as a live source so every read re-checks the
+	 *  runtime key first and falls back to the configured value without one. */
+	#restoreRuntimeAuthPrecedence(provider: string, override: ModelOverride, patched: Model<Api>): Model<Api> {
+		if (!override.headers || !patched.headers) return patched;
+		if (this.#providerOverrides.get(provider)?.authHeader !== true) return patched;
+		if (!Object.keys(override.headers).some(header => header.toLowerCase() === "authorization")) return patched;
+		const headers = createLiveConfigHeaders([{ ...patched.headers }], {
+			authHeader: true,
+			apiKeyOverride: () => this.authStorage.getRuntimeApiKey(provider),
+		});
+		return buildModel({ ...toModelSpec(patched), headers });
 	}
 	#applyHardcodedModelPolicies(models: Model<Api>[]): Model<Api>[] {
 		const extendedContext = isExtendedContextEnabledFromSettings(this.#settings);
