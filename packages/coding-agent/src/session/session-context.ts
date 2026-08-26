@@ -171,6 +171,61 @@ export interface InterruptedToolCallsMarker {
 }
 
 /**
+ * Chronological key for one `toolCall` block occurrence: the index of the
+ * assistant message that carries it plus the block's index within that
+ * message's content. A provider-recycled `toolCallId` produces several
+ * occurrences sharing one id, so pairing/counting must key off transcript
+ * position, never the id alone.
+ */
+function toolCallOccurrenceKey(messageIndex: number, blockIndex: number): string {
+	return `${messageIndex}:${blockIndex}`;
+}
+
+/**
+ * Chronologically pair each `toolResult` message with the `toolCall`
+ * occurrence it settles, returning the set of paired occurrence keys (see
+ * {@link toolCallOccurrenceKey}) — an occurrence absent from the set is
+ * dangling.
+ *
+ * A provider can recycle a `toolCallId` across multiple calls in one
+ * transcript, so pairing cannot key on the id alone: a global "this id has a
+ * result somewhere" set marks every occurrence of a recycled id as settled
+ * the moment *any* of them gets a result, which hides a later dangling
+ * occurrence's interruption behind an earlier occurrence's settlement.
+ *
+ * Each `toolCallId` keeps a stack of its still-unpaired occurrences in
+ * transcript order; a `toolResult` pops (and pairs) the *latest*
+ * still-unpaired occurrence. This deliberately mispairs the pathological
+ * shape of a dangling first occurrence followed by a second occurrence of
+ * the same id that does settle — the result pairs the second occurrence, not
+ * the first, which a FIFO/queue scheme would get wrong instead. Under a
+ * well-formed transcript (an occurrence settles, if at all, before the same
+ * id is called again) both schemes agree, and duplicate ids within a single
+ * message are handled the same way as duplicates spread across messages.
+ */
+function pairToolCallOccurrences(messages: readonly AgentMessage[]): ReadonlySet<string> {
+	const unpaired = new Map<string, string[]>();
+	const paired = new Set<string>();
+	for (let i = 0; i < messages.length; i++) {
+		const message = messages[i];
+		if (message.role === "assistant") {
+			for (let b = 0; b < message.content.length; b++) {
+				const block = message.content[b];
+				if (block === undefined || block.type !== "toolCall") continue;
+				const key = toolCallOccurrenceKey(i, b);
+				const stack = unpaired.get(block.id);
+				if (stack === undefined) unpaired.set(block.id, [key]);
+				else stack.push(key);
+			}
+		} else if (message.role === "toolResult") {
+			const key = unpaired.get(message.toolCallId)?.pop();
+			if (key !== undefined) paired.add(key);
+		}
+	}
+	return paired;
+}
+
+/**
  * Resolve every dangling `toolCall` occurrence the v4 tool journal can
  * unambiguously account for, keyed by the index of the assistant message that
  * carried it.
@@ -212,7 +267,7 @@ export interface InterruptedToolCallsMarker {
  */
 function resolveInterruptedDanglingToolCalls(
 	messages: readonly AgentMessage[],
-	pairedToolResultIds: ReadonlySet<string>,
+	pairedOccurrences: ReadonlySet<string>,
 	path: readonly SessionEntry[],
 	windowStart: number,
 ): Map<number, InterruptedToolCallReplay[]> | undefined {
@@ -232,10 +287,15 @@ function resolveInterruptedDanglingToolCalls(
 	for (let i = 0; i < messages.length; i++) {
 		const message = messages[i];
 		if (message.role !== "assistant") continue;
-		for (const block of message.content) {
-			if (block.type !== "toolCall") continue;
+		for (let b = 0; b < message.content.length; b++) {
+			const block = message.content[b];
+			if (block === undefined || block.type !== "toolCall") continue;
+			// Cursor consumed for every encounter regardless of pairing — a
+			// paired occurrence still advances the k-th-encounter walk, or a
+			// later dangling occurrence of the same recycled id would be handed
+			// the wrong start record.
 			const execution = nextReplayableToolExecution(cursor, block.id);
-			if (pairedToolResultIds.has(block.id) || execution?.state !== "interrupted") continue;
+			if (pairedOccurrences.has(toolCallOccurrenceKey(i, b)) || execution?.state !== "interrupted") continue;
 			const existing = interrupted.get(i);
 			if (existing === undefined) interrupted.set(i, [execution]);
 			else existing.push(execution);
@@ -626,10 +686,7 @@ export function buildSessionContext(
 	// a pending block instead of vanishing from the chat.)
 	const keepDangling = options?.transcript === true && options.keepDanglingToolCalls === true;
 	if (!keepDangling) {
-		const pairedToolResultIds = new Set<string>();
-		for (const message of messages) {
-			if (message.role === "toolResult") pairedToolResultIds.add(message.toolCallId);
-		}
+		const pairedOccurrences = pairToolCallOccurrences(messages);
 		// Display transcript only: a dangling call that ran on the presentation
 		// protocol left a journal record that still describes it, so it renders as
 		// real interrupted history instead of being counted away. The LLM context
@@ -637,21 +694,28 @@ export function buildSessionContext(
 		// for the walk.
 		const interruptedByMessage =
 			options?.transcript === true
-				? resolveInterruptedDanglingToolCalls(messages, pairedToolResultIds, path, messageWindowStart)
+				? resolveInterruptedDanglingToolCalls(messages, pairedOccurrences, path, messageWindowStart)
 				: undefined;
 		for (let i = messages.length - 1; i >= 0; i--) {
 			const message = messages[i];
 			if (message.role !== "assistant") continue;
 			let danglingToolCalls = 0;
-			for (const block of message.content) {
-				if (block.type === "toolCall" && !pairedToolResultIds.has(block.id)) danglingToolCalls++;
+			for (let b = 0; b < message.content.length; b++) {
+				const block = message.content[b];
+				if (
+					block !== undefined &&
+					block.type === "toolCall" &&
+					!pairedOccurrences.has(toolCallOccurrenceKey(i, b))
+				) {
+					danglingToolCalls++;
+				}
 			}
 			if (danglingToolCalls === 0) continue;
 			const interruptedToolCalls = interruptedByMessage?.get(i);
 			const normalized = message.content
 				.filter(
-					block =>
-						!(block.type === "toolCall" && !pairedToolResultIds.has(block.id)) &&
+					(block, b) =>
+						!(block.type === "toolCall" && !pairedOccurrences.has(toolCallOccurrenceKey(i, b))) &&
 						block.type !== "redactedThinking",
 				)
 				.map(block =>

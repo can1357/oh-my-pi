@@ -222,6 +222,159 @@ describe("buildSessionContext dangling toolCalls with a v4 tool journal", () => 
 		expect((assistant as AgentMessage & InterruptedToolCallsMarker).interruptedToolCalls).toBeUndefined();
 	});
 
+	it("shows the settled first occurrence as normal and the journaled second occurrence as interrupted with zero elision (recycled id, settled-then-dangling)", () => {
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "m1",
+				parentId: null,
+				timestamp,
+				message: { role: "user", content: [{ type: "text", text: "run it twice" }], timestamp: 1 },
+			},
+			toolCallAssistantEntry("m2", "m1", "toolUse", "call-1", 2),
+			{
+				type: "tool_execution_started",
+				id: "j1",
+				parentId: "m2",
+				timestamp,
+				recordVersion: 1,
+				executionId: toolExecutionId("exec-SCTX0006"),
+				call: { toolCallId: "call-1", toolName: "write", title: "first occurrence", kind: "execute" },
+				presentation: { version: 1, facts: [] },
+			},
+			{
+				type: "tool_execution_settled",
+				id: "j1s",
+				parentId: "j1",
+				timestamp,
+				recordVersion: 1,
+				executionId: toolExecutionId("exec-SCTX0006"),
+				outcome: { kind: "succeeded" },
+				presentation: { version: 1, facts: [], attachments: [] },
+				modelProjection: { version: 1, content: [] },
+			},
+			syntheticToolResultEntry("m3", "j1s", "call-1", 3),
+			// Same toolCallId recycled by the provider for a second call, still
+			// dangling — the global "this id has a result somewhere" set the
+			// pre-fix code used would wrongly treat this occurrence as paired too.
+			toolCallAssistantEntry("m4", "m3", "toolUse", "call-1", 4),
+			{
+				type: "tool_execution_started",
+				id: "j2",
+				parentId: "m4",
+				timestamp,
+				recordVersion: 1,
+				executionId: toolExecutionId("exec-SCTX0007"),
+				call: { toolCallId: "call-1", toolName: "write", title: "second occurrence", kind: "execute" },
+				presentation: { version: 1, facts: [] },
+			},
+		];
+
+		const context = buildSessionContext(entries, undefined, undefined, { transcript: true });
+		const assistants = context.messages.filter(message => message.role === "assistant");
+		expect(assistants).toHaveLength(2);
+
+		// First occurrence: paired with a real toolResult, so it is left
+		// untouched — no stripping, no interrupted marker.
+		expect(
+			(assistants[0] as AssistantMessage).content.some(block => block.type === "toolCall" && block.id === "call-1"),
+		).toBe(true);
+		expect((assistants[0] as AgentMessage & StrippedToolCallsMarker).strippedToolCalls).toBeUndefined();
+		expect((assistants[0] as AgentMessage & InterruptedToolCallsMarker).interruptedToolCalls).toBeUndefined();
+
+		// Second occurrence: no result anywhere, and its own journal record
+		// proves no settlement landed — stripped, but the interrupted card
+		// fully accounts for it (elision count zero).
+		expect((assistants[1] as AssistantMessage).content.some(block => block.type === "toolCall")).toBe(false);
+		expect((assistants[1] as AgentMessage & StrippedToolCallsMarker).strippedToolCalls).toBeUndefined();
+		expect((assistants[1] as AgentMessage & InterruptedToolCallsMarker).interruptedToolCalls).toEqual([
+			{
+				state: "interrupted",
+				call: { toolCallId: "call-1", toolName: "write", title: "second occurrence", kind: "execute" },
+				reason: expect.stringContaining("Interrupted"),
+				presentation: { version: 1, facts: [] },
+			},
+		]);
+	});
+
+	it("pairs a toolResult with the latest unpaired occurrence, not FIFO, when a dangling first occurrence precedes a settled second occurrence of a recycled id", () => {
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "m1",
+				parentId: null,
+				timestamp,
+				message: { role: "user", content: [{ type: "text", text: "run it twice" }], timestamp: 1 },
+			},
+			// Occurrence 1: dangling — no journaled settlement ever lands for it.
+			toolCallAssistantEntry("m2", "m1", "toolUse", "call-1", 2),
+			{
+				type: "tool_execution_started",
+				id: "j1",
+				parentId: "m2",
+				timestamp,
+				recordVersion: 1,
+				executionId: toolExecutionId("exec-SCTX0008"),
+				call: { toolCallId: "call-1", toolName: "write", title: "first occurrence", kind: "execute" },
+				presentation: { version: 1, facts: [] },
+			},
+			// Occurrence 2: the provider recycles the id again BEFORE any result
+			// for occurrence 1 arrives — the FIFO-breaking shape. A naive
+			// first-unpaired-wins (FIFO) scheme would attribute the toolResult
+			// below to occurrence 1 instead.
+			toolCallAssistantEntry("m3", "j1", "toolUse", "call-1", 3),
+			{
+				type: "tool_execution_started",
+				id: "j2",
+				parentId: "m3",
+				timestamp,
+				recordVersion: 1,
+				executionId: toolExecutionId("exec-SCTX0009"),
+				call: { toolCallId: "call-1", toolName: "write", title: "second occurrence", kind: "execute" },
+				presentation: { version: 1, facts: [] },
+			},
+			{
+				type: "tool_execution_settled",
+				id: "j2s",
+				parentId: "j2",
+				timestamp,
+				recordVersion: 1,
+				executionId: toolExecutionId("exec-SCTX0009"),
+				outcome: { kind: "succeeded" },
+				presentation: { version: 1, facts: [], attachments: [] },
+				modelProjection: { version: 1, content: [] },
+			},
+			syntheticToolResultEntry("m4", "j2s", "call-1", 4),
+		];
+
+		const context = buildSessionContext(entries, undefined, undefined, { transcript: true });
+		const assistants = context.messages.filter(message => message.role === "assistant");
+		expect(assistants).toHaveLength(2);
+
+		// First occurrence (never paired): its own journal record proves no
+		// settlement landed, so it renders its own interrupted card — never
+		// swapped with the second occurrence's settlement.
+		expect((assistants[0] as AssistantMessage).content.some(block => block.type === "toolCall")).toBe(false);
+		expect((assistants[0] as AgentMessage & StrippedToolCallsMarker).strippedToolCalls).toBeUndefined();
+		expect((assistants[0] as AgentMessage & InterruptedToolCallsMarker).interruptedToolCalls).toEqual([
+			{
+				state: "interrupted",
+				call: { toolCallId: "call-1", toolName: "write", title: "first occurrence", kind: "execute" },
+				reason: expect.stringContaining("Interrupted"),
+				presentation: { version: 1, facts: [] },
+			},
+		]);
+
+		// Second occurrence: the LIFO pairing hands the toolResult to the
+		// latest still-unpaired occurrence — this one — so it is left
+		// untouched despite sharing the recycled id with the dangling first.
+		expect(
+			(assistants[1] as AssistantMessage).content.some(block => block.type === "toolCall" && block.id === "call-1"),
+		).toBe(true);
+		expect((assistants[1] as AgentMessage & StrippedToolCallsMarker).strippedToolCalls).toBeUndefined();
+		expect((assistants[1] as AgentMessage & InterruptedToolCallsMarker).interruptedToolCalls).toBeUndefined();
+	});
+
 	it("disqualifies a recycled toolCallId with partial journal coverage and falls back to elision for both occurrences", () => {
 		const entries: SessionEntry[] = [
 			...danglingToolCallEntries,
