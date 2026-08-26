@@ -5,6 +5,7 @@
 ### Added
 
 - Added `tui.titleSpinner` (`braille` | `dots` | `line`, default `braille`) to pick the terminal-title working-state spinner glyphs alongside the existing `tui.titleState` on/off toggle.
+- Extension API: `api.agents` — list/get/ensureLive/prompt for named registry agents.
 
 ## [18.2.1] - 2026-09-15
 
