@@ -13,18 +13,34 @@ const URL_CAPABLE_OPENAI_APIS: Record<string, true> = {
 	"openai-responses": true,
 	"openai-codex-responses": true,
 	"azure-openai-responses": true,
-	"openai-completions": true,
 	openrouter: true,
 };
 
-/** Whether this model's provider fetches https image URLs server-side. */
-export function supportsRemoteImageUrls(model: Model): boolean {
+const GOOGLE_REMOTE_IMAGE_MIME_TYPES: Record<string, true> = {
+	"image/png": true,
+	"image/jpeg": true,
+	"image/webp": true,
+};
+
+function isOpenAICompletionsModel(model: Model): model is Model<"openai-completions"> {
+	return model.api === "openai-completions";
+}
+
+function hasReplayableGoogleImageMimeType(image: Pick<ImageContent, "mimeType">): boolean {
+	return GOOGLE_REMOTE_IMAGE_MIME_TYPES[image.mimeType.toLowerCase()] === true;
+}
+
+/** Whether this model can replay a remote URL for an image with this media type. */
+export function supportsRemoteImageUrls(model: Model, image: Pick<ImageContent, "mimeType">): boolean {
 	if (!model.input.includes("image")) return false;
 	if (modelMatchesHost(model, "moonshotNative")) return false;
+	if (isOpenAICompletionsModel(model)) return isOpenAICompletionsVisionSupported(model);
 	if (URL_CAPABLE_OPENAI_APIS[model.api]) return true;
 	if (model.api === "anthropic-messages") return model.provider === "anthropic";
-	if (model.api === "google-gemini-cli") return model.provider === "google-antigravity";
-	return model.api === "google-vertex";
+	if (model.api === "google-gemini-cli") {
+		return model.provider === "google-antigravity" && hasReplayableGoogleImageMimeType(image);
+	}
+	return model.api === "google-vertex" && hasReplayableGoogleImageMimeType(image);
 }
 
 export function partitionVisionContent(

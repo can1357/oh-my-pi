@@ -333,18 +333,24 @@ export class ImageUrlService {
 		configs: readonly BlobBrokerWorkerConfig[],
 		backendKey: string,
 	): Promise<Context> {
-		if (configs.length === 0 || this.#quarantined.has(model.provider) || !supportsRemoteImageUrls(model)) {
+		if (configs.length === 0 || this.#quarantined.has(model.provider)) {
 			return context;
 		}
-		const backend = await this.#ensureBackend(configs, backendKey);
-		if (!backend) return context;
 
 		const byHash = new Map<string, ImageContent[]>();
 		for (const message of context.messages) {
 			if (message.role !== "user" && message.role !== "developer" && message.role !== "toolResult") continue;
 			if (!Array.isArray(message.content)) continue;
 			for (const block of message.content) {
-				if (block.type !== "image" || block.url || block.providerFile || block.data.length === 0) continue;
+				if (
+					block.type !== "image" ||
+					block.url ||
+					block.providerFile ||
+					block.data.length === 0 ||
+					!supportsRemoteImageUrls(model, block)
+				) {
+					continue;
+				}
 				const hash = contentHash(block.data, block.mimeType);
 				const group = byHash.get(hash);
 				if (group) group.push(block);
@@ -352,6 +358,8 @@ export class ImageUrlService {
 			}
 		}
 		if (byHash.size === 0) return context;
+		const backend = await this.#ensureBackend(configs, backendKey);
+		if (!backend) return context;
 
 		const urlByBlock = new Map<ImageContent, string>();
 		await Promise.all(

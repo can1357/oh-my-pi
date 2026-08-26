@@ -1614,6 +1614,116 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 		}
 	});
 
+	it("rejects remote tool images blocked by effective OpenAI vision guards", async () => {
+		const upstreamRequests: CapturedOpenAICompletionRequest[] = [];
+		const upstream = startOpenAICompletionsUpstream(upstreamRequests);
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-remote-image-dashscope-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("alibaba-coding-plan", "test-key");
+		const model = buildModel({
+			id: "qwen3-coder",
+			name: "Qwen 3 Coder",
+			api: "openai-completions",
+			provider: "alibaba-coding-plan",
+			baseUrl: `${upstream.url.origin}/dashscope.aliyuncs.com/compatible-mode/v1`,
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"openai-completions">);
+		const gateway = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => model,
+			version: "test",
+		});
+
+		try {
+			const response = await fetch(`${gateway.url}/v1/responses`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+				body: JSON.stringify(remoteToolImageRequest(model.id, "https://images.example.invalid/read.png")),
+			});
+			expect(response.status).toBe(400);
+			expect(await response.text()).toContain(
+				"input_image.image_url cannot be forwarded to openai-completions without inline image data",
+			);
+			expect(upstreamRequests).toHaveLength(0);
+		} finally {
+			await gateway.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			upstream.stop(true);
+		}
+	});
+
+	it("rejects Google remote tool images without a known media type", async () => {
+		const upstreamRequests: unknown[] = [];
+		const upstream = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				upstreamRequests.push(await request.json());
+				return new Response(
+					`data: ${JSON.stringify({
+						response: {
+							candidates: [
+								{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" },
+							],
+							usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1, totalTokenCount: 2 },
+						},
+					})}\n\n`,
+					{ headers: { "Content-Type": "text/event-stream" } },
+				);
+			},
+		});
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-remote-image-google-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey(
+			"google-antigravity",
+			JSON.stringify({ token: "test-token", projectId: "test-project" }),
+		);
+		const model = buildModel({
+			id: "gemini-3-flash",
+			name: "Gemini 3 Flash",
+			api: "google-gemini-cli",
+			provider: "google-antigravity",
+			baseUrl: upstream.url.origin,
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"google-gemini-cli">);
+		const gateway = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => model,
+			version: "test",
+		});
+
+		try {
+			const response = await fetch(`${gateway.url}/v1/responses`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+				body: JSON.stringify(remoteToolImageRequest(model.id, "https://images.example.invalid/read.png")),
+			});
+			expect(response.status).toBe(400);
+			expect(await response.text()).toContain(
+				"input_image.image_url cannot be forwarded to google-gemini-cli without inline image data",
+			);
+			expect(upstreamRequests).toHaveLength(0);
+		} finally {
+			await gateway.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			upstream.stop(true);
+		}
+	});
+
 	it("forwards reference-only remote tool images to URL-capable APIs", async () => {
 		const upstreamRequests: CapturedOpenAICompletionRequest[] = [];
 		const upstream = startOpenAICompletionsUpstream(upstreamRequests);

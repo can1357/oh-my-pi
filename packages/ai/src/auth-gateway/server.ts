@@ -91,11 +91,18 @@ function hasOpenAIImageFileReference(context: Context): boolean {
 	return false;
 }
 
-function hasReferenceOnlyImageUrl(context: Context): boolean {
+function hasUnsupportedReferenceOnlyImageUrl(context: Context, model: Model): boolean {
 	for (const message of context.messages) {
 		if (message.role !== "toolResult") continue;
 		for (const block of message.content) {
-			if (block.type === "image" && block.url && block.data.length === 0) return true;
+			if (
+				block.type === "image" &&
+				block.url &&
+				block.data.length === 0 &&
+				!supportsRemoteImageUrls(model, block)
+			) {
+				return true;
+			}
 		}
 	}
 	return false;
@@ -425,7 +432,7 @@ async function handleFormatEndpoint(
 			`input_image.file_id cannot be forwarded to ${model.api}; target an OpenAI Responses model or use an inline data URL`,
 		);
 	}
-	if (!supportsRemoteImageUrls(model) && hasReferenceOnlyImageUrl(parsed.context)) {
+	if (hasUnsupportedReferenceOnlyImageUrl(parsed.context, model)) {
 		return route.module.formatError(
 			400,
 			"invalid_request_error",
