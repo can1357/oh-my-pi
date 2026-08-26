@@ -2,17 +2,82 @@ use std::{
 	collections::VecDeque,
 	future,
 	future::Future,
+	io,
 	pin::Pin,
-	sync::Arc,
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering},
+	},
 	task::{Context, Poll},
+	time::Duration,
 };
 
 use futures::Stream;
-use omp_agent::{Error, InvokeFrame, TurnClient, TurnId, TurnInput, TurnOptions, TurnSession};
 use omp_proto::inference::v1::TurnEvent;
 use parking_lot::Mutex;
+use tokio::{sync::Notify, time};
 
-use super::Gate;
+use crate::{Error, InvokeFrame, TurnClient, TurnId, TurnInput, TurnOptions, TurnSession};
+
+/// One deterministic test rendezvous with separately observable arrival and
+/// release.
+#[derive(Clone, Debug, Default)]
+pub struct Gate(Arc<GateInner>);
+
+#[derive(Debug, Default)]
+struct GateInner {
+	arrived:  AtomicBool,
+	released: AtomicBool,
+	arrival:  Notify,
+	release:  Notify,
+}
+
+impl Gate {
+	/// Marks the interesting operation as having reached this gate.
+	pub fn arrive(&self) {
+		self.0.arrived.store(true, Ordering::Release);
+		self.0.arrival.notify_waiters();
+	}
+
+	/// Waits with a bound until the operation reaches this gate.
+	pub async fn wait_arrived(&self, limit: Duration) -> Result<(), io::Error> {
+		time::timeout(limit, async {
+			loop {
+				let notified = self.0.arrival.notified();
+				if self.0.arrived.load(Ordering::Acquire) {
+					break;
+				}
+				notified.await;
+			}
+		})
+		.await
+		.map_err(|_| io::Error::other(format!("timed out waiting for gate arrival after {limit:?}")))
+	}
+
+	/// Releases every waiter parked at this gate.
+	pub fn release(&self) {
+		self.0.released.store(true, Ordering::Release);
+		self.0.release.notify_waiters();
+	}
+
+	/// Marks arrival and waits with a bound for release.
+	pub async fn arrive_and_wait(&self, limit: Duration) -> Result<(), io::Error> {
+		self.arrive();
+		time::timeout(limit, self.released()).await.map_err(|_| {
+			io::Error::other(format!("timed out waiting for gate release after {limit:?}"))
+		})
+	}
+
+	pub async fn released(&self) {
+		loop {
+			let notified = self.0.release.notified();
+			if self.0.released.load(Ordering::Acquire) {
+				break;
+			}
+			notified.await;
+		}
+	}
+}
 
 /// One ordered action in a deterministic turn script.
 #[derive(Debug)]

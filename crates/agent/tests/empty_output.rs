@@ -19,6 +19,7 @@ use omp_agent::{
 	AbortDisposition, Agent, AgentError, AgentPhase, AgentSnapshot, AgentState, Error, InvokeFrame,
 	Journal, RetryPolicy, TurnClient, TurnId, TurnInput, TurnInputRecord, TurnOptions,
 	TurnOptionsRecord, TurnSession, TurnStart,
+	testing::{ScriptedTurn, ScriptedTurnClient},
 };
 use omp_core::{Hash32, Str, sf};
 use omp_env::EnvClient;
@@ -38,17 +39,11 @@ const CAP_DETAIL: &str = "Assistant returned no final output after retry cap; tr
 type ScriptOutcome = Result<pb::Outcome, Box<pb::TurnError>>;
 type ScriptQueue = Arc<Mutex<VecDeque<ScriptOutcome>>>;
 
-#[derive(Clone)]
-struct ScriptedClient {
-	script: ScriptQueue,
-	opened: Arc<Mutex<Vec<TurnInput>>>,
-}
-
-struct ScriptedSession {
+struct OutcomeSession {
 	events: Vec<Result<pb::TurnEvent, Error>>,
 }
 
-impl TurnSession for ScriptedSession {
+impl TurnSession for OutcomeSession {
 	fn events(
 		&mut self,
 	) -> impl futures::Stream<Item = Result<pb::TurnEvent, Error>> + Send + Unpin + '_ {
@@ -63,28 +58,7 @@ impl TurnSession for ScriptedSession {
 	}
 }
 
-impl TurnClient for ScriptedClient {
-	type Session<'client> = ScriptedSession;
-
-	fn turn<'client>(
-		&'client self,
-		_turn_id: TurnId,
-		input: TurnInput,
-		_options: &'client TurnOptions,
-	) -> impl Future<Output = Result<Self::Session<'client>, Error>> + Send + 'client {
-		self.opened.lock().push(input);
-		let outcome = self
-			.script
-			.lock()
-			.pop_front()
-			.expect("one script entry per turn");
-		let event = match outcome {
-			Ok(outcome) => Ok(pb::TurnEvent { event: Some(turn_event::Event::Outcome(outcome)) }),
-			Err(error) => Err(Error::Terminal(error)),
-		};
-		ready(Ok(ScriptedSession { events: vec![event] }))
-	}
-}
+/// Exists because scripting cannot express per-turn timing capture needed here.
 #[derive(Clone)]
 struct RecoveryClient {
 	script: ScriptQueue,
@@ -92,7 +66,7 @@ struct RecoveryClient {
 }
 
 impl TurnClient for RecoveryClient {
-	type Session<'client> = ScriptedSession;
+	type Session<'client> = OutcomeSession;
 
 	fn turn<'client>(
 		&'client self,
@@ -110,9 +84,11 @@ impl TurnClient for RecoveryClient {
 			Ok(outcome) => Ok(pb::TurnEvent { event: Some(turn_event::Event::Outcome(outcome)) }),
 			Err(error) => Err(Error::Terminal(error)),
 		};
-		ready(Ok(ScriptedSession { events: vec![event] }))
+		ready(Ok(OutcomeSession { events: vec![event] }))
 	}
 }
+/// Exists because scripting cannot express a first-turn crash then hang
+/// forever.
 #[derive(Clone)]
 struct CrashClient {
 	opened: flume::Sender<TurnInput>,
@@ -120,7 +96,7 @@ struct CrashClient {
 }
 
 impl TurnClient for CrashClient {
-	type Session<'client> = ScriptedSession;
+	type Session<'client> = OutcomeSession;
 
 	fn turn<'client>(
 		&'client self,
@@ -133,7 +109,7 @@ impl TurnClient for CrashClient {
 		async move {
 			opened.send_async(input).await.map_err(|_| Error::Closed)?;
 			if call == 0 {
-				return Ok(ScriptedSession {
+				return Ok(OutcomeSession {
 					events: vec![Err(Error::Terminal(Box::new(pb::TurnError {
 						kind: turn_error::Kind::EmptyOutput as i32,
 						detail: "provider detail".to_owned(),
@@ -213,13 +189,24 @@ fn input_texts(input: &TurnInput) -> Vec<&str> {
 		})
 		.collect()
 }
+fn scripted_turns(script: Vec<ScriptOutcome>) -> Vec<ScriptedTurn> {
+	script
+		.into_iter()
+		.map(|outcome| match outcome {
+			Ok(outcome) => ScriptedTurn::events([pb::TurnEvent {
+				event: Some(turn_event::Event::Outcome(outcome)),
+			}]),
+			Err(error) => ScriptedTurn::results([Err(Error::Terminal(error))]),
+		})
+		.collect()
+}
+
 fn build_agent(
 	journal: Journal,
 	script: Vec<ScriptOutcome>,
-) -> (Agent<ScriptedClient>, Arc<Mutex<Vec<TurnInput>>>) {
-	let opened = Arc::new(Mutex::new(Vec::new()));
-	let client =
-		ScriptedClient { script: Arc::new(Mutex::new(script.into())), opened: Arc::clone(&opened) };
+) -> (Agent<ScriptedTurnClient>, ScriptedTurnClient) {
+	let client = ScriptedTurnClient::new(scripted_turns(script));
+	let opened = client.clone();
 	let (env, _transport) = EnvClient::in_process(1);
 	let agent =
 		Agent::new(client, env, AgentState::new(AgentSnapshot::default()), journal, CapsBase {
@@ -293,9 +280,7 @@ fn exhausted_journal(path: &Path) -> Journal {
 	journal
 }
 
-fn agent(
-	script: Vec<ScriptOutcome>,
-) -> (Agent<ScriptedClient>, Arc<Mutex<Vec<TurnInput>>>, PathBuf) {
+fn agent(script: Vec<ScriptOutcome>) -> (Agent<ScriptedTurnClient>, ScriptedTurnClient, PathBuf) {
 	let path = env::temp_dir().join(format!(
 		"omp-agent-empty-output-{}-{}.jsonl",
 		std::process::id(),
@@ -321,7 +306,11 @@ async fn empty_output_continues_with_numbered_user_reminder() {
 		.await
 		.expect("recovered submission");
 	assert_eq!(result.committed_turns, 1);
-	let opened = opened.lock();
+	let opened: Vec<_> = opened
+		.captures()
+		.into_iter()
+		.map(|capture| capture.input)
+		.collect();
 	assert_eq!(opened.len(), 2);
 	assert!(input_texts(&opened[1]).contains(&RETRY_TEXT));
 	assert!(matches!(&opened[1], TurnInput::Full(_)));
@@ -361,7 +350,11 @@ async fn fourth_empty_output_hits_cap_after_exactly_three_reminders() {
 	assert_eq!(failed_turn.as_ref().map(|id| id.as_str().to_owned()), Some("root".to_owned()));
 	assert!(failed_message.contains("terminal turn error"), "{failed_message}");
 	{
-		let inputs = opened.lock();
+		let inputs: Vec<_> = opened
+			.captures()
+			.into_iter()
+			.map(|capture| capture.input)
+			.collect();
 		assert_eq!(inputs.len(), 4);
 		let reminders: Vec<_> = inputs
 			.iter()
@@ -386,7 +379,7 @@ async fn fourth_empty_output_hits_cap_after_exactly_three_reminders() {
 		.await
 		.expect("fresh prompt succeeds after terminal cap");
 	assert_eq!(agent.events().phase(), AgentPhase::Idle);
-	assert_eq!(opened.lock().len(), 5);
+	assert_eq!(opened.captures().len(), 5);
 	drop(agent);
 	fs::remove_file(path).expect("remove journal");
 }
@@ -447,7 +440,11 @@ async fn retry_count_survives_journal_reopen() {
 		panic!("expected terminal turn error")
 	};
 	assert_eq!(error.detail, CAP_DETAIL);
-	let opened = opened.lock();
+	let opened: Vec<_> = opened
+		.captures()
+		.into_iter()
+		.map(|capture| capture.input)
+		.collect();
 	assert_eq!(opened.len(), 2);
 	assert!(
 		input_texts(&opened[1])
@@ -530,7 +527,11 @@ async fn crash_after_abort_reclaims_input_under_fresh_full_reseed() {
 		.submit([], TurnId::new("restart"))
 		.await
 		.expect("fresh reclaimed submission succeeds");
-	let opened = opened.lock();
+	let opened: Vec<_> = opened
+		.captures()
+		.into_iter()
+		.map(|capture| capture.input)
+		.collect();
 	assert_eq!(opened.len(), 2);
 	assert!(matches!(&opened[0], TurnInput::Full(_)));
 
@@ -568,7 +569,11 @@ async fn exhausted_chain_is_not_released_and_fresh_user_prompt_resets_cap() {
 		.submit([user_text("fresh task")], TurnId::new("fresh"))
 		.await
 		.expect("fresh user task recovers after exhausted chain");
-	let opened = opened.lock();
+	let opened: Vec<_> = opened
+		.captures()
+		.into_iter()
+		.map(|capture| capture.input)
+		.collect();
 	assert_eq!(opened.len(), 2);
 	let first_texts = input_texts(&opened[0]);
 	assert!(first_texts.contains(&"fresh task"));
@@ -631,7 +636,11 @@ async fn fresh_epoch_abort_releases_only_fresh_inputs_after_reopen() {
 		.submit([], TurnId::new("restart"))
 		.await
 		.expect("fresh epoch resumes through second reminder");
-	let opened = opened.lock();
+	let opened: Vec<_> = opened
+		.captures()
+		.into_iter()
+		.map(|capture| capture.input)
+		.collect();
 	assert_eq!(opened.len(), 2);
 	assert!(matches!(&opened[0], TurnInput::Full(_)));
 	assert!(input_texts(&opened[0]).contains(&"fresh crash task"));
@@ -712,7 +721,11 @@ async fn crash_replay_reseeds_original_input_and_preserves_retry_count() {
 		panic!("expected terminal turn error")
 	};
 	assert_eq!(error.detail, CAP_DETAIL);
-	let opened = opened.lock();
+	let opened: Vec<_> = opened
+		.captures()
+		.into_iter()
+		.map(|capture| capture.input)
+		.collect();
 	assert_eq!(opened.len(), 3);
 	assert!(matches!(&opened[0], TurnInput::Full(_)));
 	let first_texts = input_texts(&opened[0]);

@@ -6477,14 +6477,11 @@ fn validate_session_file(path: &Path) -> io::Result<()> {
 #[cfg(all(test, unix))]
 mod tests {
 	use std::{
-		collections::VecDeque,
 		fs::{self, OpenOptions},
-		future,
 		io::Write as _,
 	};
 
-	use futures::Stream;
-	use omp_agent::{InvokeFrame, TurnSession};
+	use omp_agent::testing::{ScriptedTurn, ScriptedTurnClient};
 	use omp_env::EnvClient;
 	use omp_proto::thread::v1::{Item, Message, Part};
 	use omp_storage::transcript::{Event, ItemRecord, TitleSource, Writer};
@@ -6629,60 +6626,10 @@ mod tests {
 		}
 	}
 
-	#[derive(Clone)]
-	struct ScriptedParentClient {
-		scripts: Arc<Mutex<VecDeque<Vec<inference_pb::TurnEvent>>>>,
-		inputs:  Arc<Mutex<Vec<TurnInput>>>,
-		options: Arc<Mutex<Vec<TurnOptions>>>,
-	}
-
-	struct ScriptedParentSession {
-		events: VecDeque<Result<inference_pb::TurnEvent, omp_agent::Error>>,
-	}
-
-	impl TurnSession for ScriptedParentSession {
-		fn events(
-			&mut self,
-		) -> impl Stream<Item = Result<inference_pb::TurnEvent, omp_agent::Error>> + Send + Unpin + '_
-		{
-			// Survive stream re-acquisition: yield each remaining scripted
-			// event exactly once across repeated `events()` calls.
-			futures::stream::poll_fn(|_| std::task::Poll::Ready(self.events.pop_front()))
-		}
-
-		fn submit(
-			&mut self,
-			_frame: InvokeFrame,
-		) -> impl Future<Output = Result<(), omp_agent::Error>> + Send + '_ {
-			future::ready(Ok(()))
-		}
-	}
-
-	impl TurnClient for ScriptedParentClient {
-		type Session<'client> = ScriptedParentSession;
-
-		fn turn<'client>(
-			&'client self,
-			_turn_id: TurnId,
-			input: TurnInput,
-			options: &'client TurnOptions,
-		) -> impl Future<Output = Result<Self::Session<'client>, omp_agent::Error>> + Send + 'client
-		{
-			self.inputs.lock().push(input);
-			self.options.lock().push(options.clone());
-			let script = self
-				.scripts
-				.lock()
-				.pop_front()
-				.expect("one scripted parent turn");
-			future::ready(Ok(ScriptedParentSession {
-				events: script.into_iter().map(Ok).collect::<VecDeque<_>>(),
-			}))
-		}
-	}
-
-	fn outcome_script(outcome: inference_pb::Outcome) -> Vec<inference_pb::TurnEvent> {
-		vec![inference_pb::TurnEvent { event: Some(turn_event::Event::Outcome(outcome)) }]
+	fn outcome_script(outcome: inference_pb::Outcome) -> ScriptedTurn {
+		ScriptedTurn::events([inference_pb::TurnEvent {
+			event: Some(turn_event::Event::Outcome(outcome)),
+		}])
 	}
 
 	fn parent_outcome(text: &str) -> inference_pb::Outcome {
@@ -6993,17 +6940,12 @@ mod tests {
 		let root = scratch.path().join("project");
 		let sessions_dir = root.join("sessions");
 		fs::create_dir_all(&sessions_dir).expect("session directory");
-		let inputs = Arc::new(Mutex::new(Vec::new()));
-		let options = Arc::new(Mutex::new(Vec::new()));
-		let client = ScriptedParentClient {
-			scripts: Arc::new(Mutex::new(VecDeque::from([
-				outcome_script(parent_outcome("completion answer")),
-				outcome_script(parent_outcome("agent answer")),
-				outcome_script(parent_outcome("follow-up answer")),
-			]))),
-			inputs:  Arc::clone(&inputs),
-			options: Arc::clone(&options),
-		};
+		let client = ScriptedTurnClient::new([
+			outcome_script(parent_outcome("completion answer")),
+			outcome_script(parent_outcome("agent answer")),
+			outcome_script(parent_outcome("follow-up answer")),
+		]);
+		let capture = client.clone();
 		let registry = Arc::new(Registry::new());
 		let mut snapshot = AgentSnapshot::new(
 			TurnOptions::default(),
@@ -7081,18 +7023,18 @@ mod tests {
 		assert_eq!(follow_up["details"]["id"], stable_id);
 		assert_eq!(follow_up["details"]["followUp"], true);
 
-		let options = options.lock();
-		assert_eq!(options.len(), 3);
+		let captures = capture.captures();
+		assert_eq!(captures.len(), 3);
 		assert!(
-			options[1]
+			captures[1]
+				.options
 				.params
 				.tools
 				.iter()
 				.all(|tool| tool.name != "eval"),
 			"child agent must not advertise the parent's occupied eval kernel"
 		);
-		drop(options);
-		let inputs = inputs.lock();
+		let inputs: Vec<_> = captures.into_iter().map(|capture| capture.input).collect();
 		assert_eq!(inputs.len(), 3);
 		assert!(matches!(&inputs[0], TurnInput::Full(thread)
 			if bridge_outcome_text(&inference_pb::Outcome {
@@ -7188,15 +7130,10 @@ mod tests {
 		final_outcome.output[0].seq = 5;
 		final_outcome.revision =
 			Some(omp_proto::thread::v1::Revision { head: 5, token: vec![5; 32].into() });
-		let inputs = Arc::new(Mutex::new(Vec::new()));
-		let client = ScriptedParentClient {
-			scripts: Arc::new(Mutex::new(VecDeque::from([
-				advise_script,
-				outcome_script(final_outcome),
-			]))),
-			inputs:  Arc::clone(&inputs),
-			options: Arc::new(Mutex::new(Vec::new())),
-		};
+		let client = ScriptedTurnClient::new([
+			ScriptedTurn::events(advise_script),
+			outcome_script(final_outcome),
+		]);
 		let queue = omp_agent::advisor::AdvisorAdviceQueue::default();
 		let mut advisor_registry = Registry::new();
 		advisor_registry

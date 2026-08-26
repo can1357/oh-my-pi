@@ -181,7 +181,8 @@ impl ScriptedGateway {
 			.response_gate
 			.as_ref()
 			.context("scripted gateway was not started with a response gate")?;
-		gate.wait_arrived(limit).await
+		gate.wait_arrived(limit).await?;
+		Ok(())
 	}
 
 	/// Releases the first provider response held by [`Self::spawn_gated`].

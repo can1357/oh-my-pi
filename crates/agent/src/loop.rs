@@ -4867,14 +4867,12 @@ pub fn now_ms() -> u64 {
 mod tests {
 	use std::{
 		collections::{BTreeMap, VecDeque},
-		env, fs, future,
+		env, fs,
 		path::PathBuf,
 		sync::Arc,
-		task,
 	};
 
 	use bytes::Bytes;
-	use futures::stream;
 	use omp_secrets::rule::{SecretKind, SecretMode, SecretRule};
 	use omp_storage::transcript::{Entry, Header, Kind, SessionId};
 	use omp_tool::{
@@ -4885,9 +4883,10 @@ mod tests {
 	use parking_lot::Mutex;
 
 	use super::*;
-	use crate::{ContextPatchSet, InheritPosition, InvokeFrame, PatchOp};
-
-	type Script = Vec<Result<pb::TurnEvent, TurnError>>;
+	use crate::{
+		ContextPatchSet, InheritPosition, InvokeFrame, PatchOp,
+		testing::{Gate, ScriptedStep, ScriptedTurn, ScriptedTurnClient},
+	};
 
 	struct DynamicHostExecutor;
 
@@ -5004,8 +5003,6 @@ mod tests {
 			assert_eq!(message_text(&unchanged.items[0]), Some("unchanged"));
 		}
 	}
-	type OpenedTurn = (TurnId, TurnInput, TurnOptions);
-	type OpenedTurns = Vec<OpenedTurn>;
 	#[test]
 	fn stream_watchdog_classifies_and_queues_recovery_guidance() {
 		let mut mailbox = Mailbox::new();
@@ -5030,9 +5027,8 @@ mod tests {
 	#[tokio::test]
 	async fn observable_rpc_retry_terminates_attempt_before_replay() {
 		let (journal, path) = test_journal("observable-retry");
-		let opened = Arc::new(Mutex::new(Vec::new()));
-		let failed_attempt = vec![
-			Ok(pb::TurnEvent {
+		let failed_attempt = ScriptedTurn::steps([
+			ScriptedStep::from(pb::TurnEvent {
 				event: Some(turn_event::Event::PartStart(pb::PartStart {
 					index:        0,
 					kind:         part_start::Kind::Text as i32,
@@ -5040,21 +5036,17 @@ mod tests {
 					tool_name:    String::new(),
 				})),
 			}),
-			Ok(pb::TurnEvent {
+			ScriptedStep::from(pb::TurnEvent {
 				event: Some(turn_event::Event::PartDelta(pb::PartDelta {
 					index: 0,
 					chunk: Bytes::from_static(b"partial"),
 				})),
 			}),
-			Err(TurnError::Rpc(tonic::Status::unavailable("stream lost"))),
-		];
-		let client = ScriptedClient {
-			scripts: Arc::new(Mutex::new(VecDeque::from([
-				failed_attempt,
-				outcome_script(end_outcome("recovered")),
-			]))),
-			opened:  Arc::clone(&opened),
-		};
+			ScriptedStep::Event(Err(TurnError::Rpc(tonic::Status::unavailable("stream lost")))),
+		]);
+		let client =
+			ScriptedTurnClient::new([failed_attempt, outcome_script(end_outcome("recovered"))]);
+		let opened = client.clone();
 		let (env, _transport) = EnvClient::in_process(1);
 		let mut agent =
 			Agent::new(client, env, AgentState::new(AgentSnapshot::default()), journal, test_caps());
@@ -5064,7 +5056,7 @@ mod tests {
 			.await
 			.expect("retry succeeds");
 		assert_eq!(summary.committed_turns, 1);
-		assert_eq!(opened.lock().len(), 2);
+		assert_eq!(opened.captures().len(), 2);
 		let observed = (0..events.len())
 			.filter_map(|_| events.try_recv().ok())
 			.filter_map(|event| match event.as_ref() {
@@ -5092,60 +5084,13 @@ mod tests {
 		fs::remove_file(path).expect("remove journal");
 	}
 
-	#[derive(Clone)]
-	struct ScriptedClient {
-		scripts: Arc<Mutex<VecDeque<Script>>>,
-		opened:  Arc<Mutex<OpenedTurns>>,
+	fn outcome_script(outcome: Outcome) -> ScriptedTurn {
+		ScriptedTurn::events([pb::TurnEvent { event: Some(turn_event::Event::Outcome(outcome)) }])
 	}
 
-	struct ScriptedSession {
-		events: VecDeque<Result<pb::TurnEvent, TurnError>>,
-	}
-
-	impl TurnSession for ScriptedSession {
-		fn events(
-			&mut self,
-		) -> impl futures::Stream<Item = Result<pb::TurnEvent, TurnError>> + Send + Unpin + '_ {
-			stream::poll_fn(move |_| match self.events.pop_front() {
-				Some(event) => task::Poll::Ready(Some(event)),
-				None => task::Poll::Pending,
-			})
-		}
-
-		fn submit(
-			&mut self,
-			_frame: InvokeFrame,
-		) -> impl Future<Output = Result<(), TurnError>> + Send + '_ {
-			future::ready(Ok(()))
-		}
-	}
-
-	impl TurnClient for ScriptedClient {
-		type Session<'client> = ScriptedSession;
-
-		fn turn<'client>(
-			&'client self,
-			turn_id: TurnId,
-			input: TurnInput,
-			options: &'client TurnOptions,
-		) -> impl Future<Output = Result<Self::Session<'client>, TurnError>> + Send + 'client {
-			self.opened.lock().push((turn_id, input, options.clone()));
-			let events = self
-				.scripts
-				.lock()
-				.pop_front()
-				.expect("one script per turn");
-			future::ready(Ok(ScriptedSession { events: events.into() }))
-		}
-	}
-
-	fn outcome_script(outcome: Outcome) -> Vec<Result<pb::TurnEvent, TurnError>> {
-		vec![Ok(pb::TurnEvent { event: Some(turn_event::Event::Outcome(outcome)) })]
-	}
-
-	fn pending_text_script() -> Vec<Result<pb::TurnEvent, TurnError>> {
-		vec![
-			Ok(pb::TurnEvent {
+	fn pending_text_script() -> ScriptedTurn {
+		ScriptedTurn::steps([
+			ScriptedStep::from(pb::TurnEvent {
 				event: Some(turn_event::Event::PartStart(pb::PartStart {
 					index:        0,
 					kind:         part_start::Kind::Text as i32,
@@ -5153,15 +5098,17 @@ mod tests {
 					tool_name:    String::new(),
 				})),
 			}),
-			Ok(pb::TurnEvent {
+			ScriptedStep::from(pb::TurnEvent {
 				event: Some(turn_event::Event::PartDelta(pb::PartDelta {
 					index: 0,
 					chunk: Bytes::from_static(b"partial"),
 				})),
 			}),
-		]
+			// Keep the stream open the way the old pending fake did.
+			ScriptedStep::Wait(Gate::default()),
+		])
 	}
-	fn pending_tool_script(identity: &ToolIdentity) -> Vec<Result<pb::TurnEvent, TurnError>> {
+	fn pending_tool_script(identity: &ToolIdentity) -> ScriptedTurn {
 		let call_id = "pending-call";
 		let call = thread::ToolCall {
 			id: call_id.to_owned(),
@@ -5178,35 +5125,35 @@ mod tests {
 			}),
 			..Item::default()
 		};
-		vec![
-			Ok(pb::TurnEvent {
+		ScriptedTurn::events([
+			pb::TurnEvent {
 				event: Some(turn_event::Event::PartStart(pb::PartStart {
 					index:        0,
 					kind:         part_start::Kind::ToolCall as i32,
 					tool_call_id: call_id.to_owned(),
 					tool_name:    identity.name.to_string(),
 				})),
-			}),
-			Ok(pb::TurnEvent {
+			},
+			pb::TurnEvent {
 				event: Some(turn_event::Event::PartDelta(pb::PartDelta {
 					index: 0,
 					chunk: Bytes::from_static(b"{}"),
 				})),
-			}),
-			Ok(pb::TurnEvent {
+			},
+			pb::TurnEvent {
 				event: Some(turn_event::Event::PartEnd(pb::PartEnd {
 					index:     0,
 					signature: Bytes::new(),
 				})),
-			}),
-			Ok(pb::TurnEvent {
+			},
+			pb::TurnEvent {
 				event: Some(turn_event::Event::Outcome(Outcome {
 					output: vec![item],
 					stop: pb::StopReason::StopToolUse as i32,
 					..Outcome::default()
 				})),
-			}),
-		]
+			},
+		])
 	}
 
 	fn message(role: thread::Role, text: &str) -> Item {
@@ -5252,9 +5199,9 @@ mod tests {
 		}
 	}
 
-	async fn wait_for_opened(opened: &Arc<Mutex<OpenedTurns>>, count: usize) {
+	async fn wait_for_opened(client: &ScriptedTurnClient, count: usize) {
 		for _ in 0..100 {
-			if opened.lock().len() >= count {
+			if client.captures().len() >= count {
 				return;
 			}
 			yield_now().await;
@@ -5351,20 +5298,11 @@ mod tests {
 			})
 			.expect("persist durable start");
 
-		let opened = Arc::new(Mutex::new(Vec::new()));
-		let client = ScriptedClient {
-			scripts: Arc::new(Mutex::new(VecDeque::from([
-				outcome_script(Outcome {
-					stop: pb::StopReason::StopEndTurn as i32,
-					..Outcome::default()
-				}),
-				outcome_script(Outcome {
-					stop: pb::StopReason::StopEndTurn as i32,
-					..Outcome::default()
-				}),
-			]))),
-			opened:  Arc::clone(&opened),
-		};
+		let client = ScriptedTurnClient::new([
+			outcome_script(Outcome { stop: pb::StopReason::StopEndTurn as i32, ..Outcome::default() }),
+			outcome_script(Outcome { stop: pb::StopReason::StopEndTurn as i32, ..Outcome::default() }),
+		]);
+		let opened = client.clone();
 		let (env, _transport) = EnvClient::in_process(1);
 		let mut agent = Agent::new(client, env, state, journal, test_caps());
 
@@ -5385,13 +5323,13 @@ mod tests {
 
 		assert_eq!(resumed_tools.as_ref(), &[sf!("old")]);
 		assert_eq!(fresh_tools.as_ref(), &[sf!("new")]);
-		let opened = opened.lock();
+		let opened = opened.captures();
 		assert_eq!(opened.len(), 2);
-		assert_eq!(opened[0].0.as_str(), "durable-turn");
-		assert!(matches!(&opened[0].1, TurnInput::Full(thread) if thread == &durable_input));
-		assert_eq!(opened[0].2.params, old_options.params);
-		assert_eq!(opened[1].0.as_str(), "fresh-turn");
-		assert_eq!(opened[1].2.params, new_options.params);
+		assert_eq!(opened[0].turn_id.as_str(), "durable-turn");
+		assert!(matches!(&opened[0].input, TurnInput::Full(thread) if thread == &durable_input));
+		assert_eq!(opened[0].options.params, old_options.params);
+		assert_eq!(opened[1].turn_id.as_str(), "fresh-turn");
+		assert_eq!(opened[1].options.params, new_options.params);
 		assert_eq!(
 			agent
 				.journal()
@@ -5417,14 +5355,11 @@ mod tests {
 				.append_optimistic(ts, message(role, text), None)
 				.expect("append compact source");
 		}
-		let opened = Arc::new(Mutex::new(Vec::new()));
-		let client = ScriptedClient {
-			scripts: Arc::new(Mutex::new(VecDeque::from([
-				pending_text_script(),
-				outcome_script(end_outcome("replacement answer")),
-			]))),
-			opened:  Arc::clone(&opened),
-		};
+		let client = ScriptedTurnClient::new([
+			pending_text_script(),
+			outcome_script(end_outcome("replacement answer")),
+		]);
+		let opened = client.clone();
 		let (env, _transport) = EnvClient::in_process(1);
 		let mut agent =
 			Agent::new(client, env, AgentState::new(AgentSnapshot::default()), journal, test_caps());
@@ -5453,7 +5388,7 @@ mod tests {
 			.await
 			.expect("replacement waits for cancellation cleanup and runs");
 		assert!(!follow_up.interrupted);
-		assert_eq!(opened.lock().len(), 2);
+		assert_eq!(opened.captures().len(), 2);
 		drop(agent);
 		fs::remove_file(path).expect("remove journal");
 	}
@@ -5491,10 +5426,8 @@ mod tests {
 		journal
 			.append_optimistic(2, assistant, Some(prompt_hash))
 			.expect("append assistant answer");
-		let client = ScriptedClient {
-			scripts: Arc::new(Mutex::new(VecDeque::new())),
-			opened:  Arc::new(Mutex::new(Vec::new())),
-		};
+		let client = ScriptedTurnClient::new([]);
+		let opened = client.clone();
 		let (env, _transport) = EnvClient::in_process(1);
 		let mut agent =
 			Agent::new(client, env, AgentState::new(AgentSnapshot::default()), journal, test_caps());
@@ -5523,14 +5456,11 @@ mod tests {
 	#[tokio::test]
 	async fn caller_abort_settles_pending_stream_and_allows_follow_up() {
 		let (journal, path) = test_journal("stream-abort");
-		let opened = Arc::new(Mutex::new(Vec::new()));
-		let client = ScriptedClient {
-			scripts: Arc::new(Mutex::new(VecDeque::from([
-				pending_text_script(),
-				outcome_script(end_outcome("after abort")),
-			]))),
-			opened:  Arc::clone(&opened),
-		};
+		let client = ScriptedTurnClient::new([
+			pending_text_script(),
+			outcome_script(end_outcome("after abort")),
+		]);
+		let opened = client.clone();
 		let (env, _transport) = EnvClient::in_process(1);
 		let mut agent =
 			Agent::new(client, env, AgentState::new(AgentSnapshot::default()), journal, test_caps());
@@ -5586,14 +5516,11 @@ mod tests {
 	#[tokio::test]
 	async fn caller_abort_continues_into_queued_producer_input() {
 		let (journal, path) = test_journal("abort-and-send");
-		let opened = Arc::new(Mutex::new(Vec::new()));
-		let client = ScriptedClient {
-			scripts: Arc::new(Mutex::new(VecDeque::from([
-				pending_text_script(),
-				outcome_script(end_outcome("queued answer")),
-			]))),
-			opened:  Arc::clone(&opened),
-		};
+		let client = ScriptedTurnClient::new([
+			pending_text_script(),
+			outcome_script(end_outcome("queued answer")),
+		]);
+		let opened = client.clone();
 		let (env, _transport) = EnvClient::in_process(1);
 		let mut agent =
 			Agent::new(client, env, AgentState::new(AgentSnapshot::default()), journal, test_caps());
@@ -5622,9 +5549,9 @@ mod tests {
 		assert!(!summary.interrupted);
 		assert_eq!(summary.committed_turns, 1);
 		assert!(summary.outcome.is_some());
-		let opened = opened.lock();
+		let opened = opened.captures();
 		assert_eq!(opened.len(), 2);
-		assert!(input_contains_text(&opened[1].1, "queued user input"));
+		assert!(input_contains_text(&opened[1].input, "queued user input"));
 		drop(opened);
 		drop(agent);
 		fs::remove_file(path).expect("remove journal");
@@ -5632,11 +5559,8 @@ mod tests {
 	#[tokio::test]
 	async fn plan_regime_exit_mid_turn_is_a_caller_abort() {
 		let (journal, path) = test_journal("plan-exit-abort");
-		let opened = Arc::new(Mutex::new(Vec::new()));
-		let client = ScriptedClient {
-			scripts: Arc::new(Mutex::new(VecDeque::from([pending_text_script()]))),
-			opened:  Arc::clone(&opened),
-		};
+		let client = ScriptedTurnClient::new([pending_text_script()]);
+		let opened = client.clone();
 		let (env, _transport) = EnvClient::in_process(1);
 		let mut agent =
 			Agent::new(client, env, AgentState::new(AgentSnapshot::default()), journal, test_caps());
@@ -5685,11 +5609,8 @@ mod tests {
 			registry,
 			..AgentSnapshot::default()
 		});
-		let opened = Arc::new(Mutex::new(Vec::new()));
-		let client = ScriptedClient {
-			scripts: Arc::new(Mutex::new(VecDeque::from([pending_tool_script(&identity)]))),
-			opened,
-		};
+		let client = ScriptedTurnClient::new([pending_tool_script(&identity)]);
+		let opened = client.clone();
 		let (env, transport) = EnvClient::in_process(1);
 		let (requests, responses) = transport.into_parts();
 		let env_task = tokio::spawn(async move {
@@ -5742,14 +5663,11 @@ mod tests {
 			registry: Arc::new(registry),
 			..AgentSnapshot::default()
 		});
-		let opened = Arc::new(Mutex::new(Vec::new()));
-		let client = ScriptedClient {
-			scripts: Arc::new(Mutex::new(VecDeque::from([
-				pending_tool_script(&identity),
-				outcome_script(end_outcome("steered answer")),
-			]))),
-			opened:  Arc::clone(&opened),
-		};
+		let client = ScriptedTurnClient::new([
+			pending_tool_script(&identity),
+			outcome_script(end_outcome("steered answer")),
+		]);
+		let opened = client.clone();
 		let (env, transport) = EnvClient::in_process(1);
 		let (requests, responses) = transport.into_parts();
 		let env_task = tokio::spawn(async move {
@@ -5780,9 +5698,9 @@ mod tests {
 		);
 		let summary = summary.expect("steered tool turn succeeds");
 		assert_eq!(summary.committed_turns, 2);
-		let opened = opened.lock();
+		let opened = opened.captures();
 		assert_eq!(opened.len(), 2);
-		assert!(input_contains_text(&opened[1].1, "preserved steering"));
+		assert!(input_contains_text(&opened[1].input, "preserved steering"));
 		drop(opened);
 		drop(agent);
 		env_task.abort();
@@ -5792,15 +5710,12 @@ mod tests {
 	#[tokio::test]
 	async fn rewind_truncates_projection_and_forces_full_post_rewind_turn() {
 		let (journal, path) = test_journal("rewind");
-		let opened = Arc::new(Mutex::new(Vec::new()));
-		let client = ScriptedClient {
-			scripts: Arc::new(Mutex::new(VecDeque::from([
-				outcome_script(end_outcome("answer one")),
-				outcome_script(end_outcome("answer two")),
-				outcome_script(end_outcome("replacement answer")),
-			]))),
-			opened:  Arc::clone(&opened),
-		};
+		let client = ScriptedTurnClient::new([
+			outcome_script(end_outcome("answer one")),
+			outcome_script(end_outcome("answer two")),
+			outcome_script(end_outcome("replacement answer")),
+		]);
+		let opened = client.clone();
 		let (env, _transport) = EnvClient::in_process(1);
 		let mut agent =
 			Agent::new(client, env, AgentState::new(AgentSnapshot::default()), journal, test_caps());
@@ -5851,11 +5766,11 @@ mod tests {
 			.await
 			.expect("post-rewind turn");
 		assert!(agent.prompt_hash.is_some(), "post-rewind turn re-rendered prompt head");
-		let opened = opened.lock();
+		let opened = opened.captures();
 		assert_eq!(opened.len(), 3);
-		assert!(matches!(&opened[2].1, TurnInput::Full(_)));
-		assert!(input_contains_text(&opened[2].1, "turn one"));
-		assert!(input_contains_text(&opened[2].1, "replacement"));
+		assert!(matches!(&opened[2].input, TurnInput::Full(_)));
+		assert!(input_contains_text(&opened[2].input, "turn one"));
+		assert!(input_contains_text(&opened[2].input, "replacement"));
 		drop(opened);
 
 		let cleared = agent.rewind(None).expect("rewind to root");
@@ -5867,13 +5782,8 @@ mod tests {
 	#[tokio::test]
 	async fn rewind_discards_queued_user_steering_before_next_submission() {
 		let (journal, path) = test_journal("rewind-steering");
-		let opened = Arc::new(Mutex::new(Vec::new()));
-		let client = ScriptedClient {
-			scripts: Arc::new(Mutex::new(VecDeque::from([outcome_script(end_outcome(
-				"replacement answer",
-			))]))),
-			opened:  Arc::clone(&opened),
-		};
+		let client = ScriptedTurnClient::new([outcome_script(end_outcome("replacement answer"))]);
+		let opened = client.clone();
 		let (env, _transport) = EnvClient::in_process(1);
 		let mut agent =
 			Agent::new(client, env, AgentState::new(AgentSnapshot::default()), journal, test_caps());
@@ -5892,10 +5802,10 @@ mod tests {
 			.await
 			.expect("replacement turn");
 
-		let opened = opened.lock();
+		let opened = opened.captures();
 		assert_eq!(opened.len(), 1);
-		assert!(input_contains_text(&opened[0].1, "replacement"));
-		assert!(!input_contains_text(&opened[0].1, "stale steering"));
+		assert!(input_contains_text(&opened[0].input, "replacement"));
+		assert!(!input_contains_text(&opened[0].input, "stale steering"));
 		drop(opened);
 		drop(agent);
 		fs::remove_file(path).expect("remove journal");
@@ -5904,14 +5814,11 @@ mod tests {
 	#[tokio::test]
 	async fn control_requests_complete_at_idle_and_active_turn_points() {
 		let (journal, path) = test_journal("control-mailbox");
-		let opened = Arc::new(Mutex::new(Vec::new()));
-		let client = ScriptedClient {
-			scripts: Arc::new(Mutex::new(VecDeque::from([
-				outcome_script(end_outcome("idle drained")),
-				pending_text_script(),
-			]))),
-			opened:  Arc::clone(&opened),
-		};
+		let client = ScriptedTurnClient::new([
+			outcome_script(end_outcome("idle drained")),
+			pending_text_script(),
+		]);
+		let opened = client.clone();
 		let (env, _transport) = EnvClient::in_process(1);
 		let mut agent =
 			Agent::new(client, env, AgentState::new(AgentSnapshot::default()), journal, test_caps());
@@ -5968,10 +5875,8 @@ mod tests {
 			registry: Arc::new(registry),
 			..AgentSnapshot::default()
 		});
-		let client = ScriptedClient {
-			scripts: Arc::new(Mutex::new(VecDeque::from([pending_tool_script(&identity)]))),
-			opened:  Arc::new(Mutex::new(Vec::new())),
-		};
+		let client = ScriptedTurnClient::new([pending_tool_script(&identity)]);
+		let opened = client.clone();
 		let (env, transport) = EnvClient::in_process(1);
 		let (requests, responses) = transport.into_parts();
 		let env_task = tokio::spawn(async move {
@@ -6064,10 +5969,8 @@ mod tests {
 	#[test]
 	fn advisor_tool_loop_abort_settles_without_terminal_failure() {
 		let (journal, path) = test_journal("advisor-tool-loop-abort");
-		let client = ScriptedClient {
-			scripts: Arc::new(Mutex::new(VecDeque::new())),
-			opened:  Arc::new(Mutex::new(Vec::new())),
-		};
+		let client = ScriptedTurnClient::new([]);
+		let opened = client.clone();
 		let (env, _transport) = EnvClient::in_process(1);
 		let mut agent =
 			Agent::new(client, env, AgentState::new(AgentSnapshot::default()), journal, test_caps());
@@ -6126,8 +6029,8 @@ mod tests {
 	#[tokio::test]
 	async fn stream_rule_cancel_recovers_with_reminder_turn() {
 		let (journal, path) = test_journal("ttsr-cancel");
-		let interrupting = vec![
-			Ok(pb::TurnEvent {
+		let interrupting = ScriptedTurn::steps([
+			ScriptedStep::from(pb::TurnEvent {
 				event: Some(turn_event::Event::PartStart(pb::PartStart {
 					index:        0,
 					kind:         part_start::Kind::Text as i32,
@@ -6135,17 +6038,15 @@ mod tests {
 					tool_name:    String::new(),
 				})),
 			}),
-			Ok(pb::TurnEvent {
+			ScriptedStep::from(pb::TurnEvent {
 				event: Some(turn_event::Event::PartDelta(pb::PartDelta {
 					index: 0,
 					chunk: Bytes::from_static(b"let value = FORBIDDEN_TOKEN;"),
 				})),
 			}),
-		];
-		let scripts = VecDeque::from([interrupting, outcome_script(end_outcome("clean"))]);
-		let opened = Arc::new(Mutex::new(Vec::new()));
-		let client =
-			ScriptedClient { scripts: Arc::new(Mutex::new(scripts)), opened: Arc::clone(&opened) };
+		]);
+		let client = ScriptedTurnClient::new([interrupting, outcome_script(end_outcome("clean"))]);
+		let opened = client.clone();
 		let (env, _transport) = EnvClient::in_process(1);
 		let mut agent =
 			Agent::new(client, env, AgentState::new(AgentSnapshot::default()), journal, test_caps());
@@ -6171,9 +6072,9 @@ mod tests {
 		assert_eq!(summary.settlement, RunSettlement::Success);
 		assert_eq!(summary.committed_turns, 1);
 		assert_eq!(summary.final_assistant(), Some("clean"));
-		let opened = opened.lock();
+		let opened = opened.captures();
 		assert_eq!(opened.len(), 2, "cancelled turn is replayed with the reminder");
-		let TurnInput::Full(thread) = &opened[1].1 else {
+		let TurnInput::Full(thread) = &opened[1].input else {
 			panic!("recovery turn reseeds a full thread");
 		};
 		let reminder = thread.items.iter().any(|item| {
@@ -6213,10 +6114,7 @@ mod tests {
 	#[test]
 	fn context_promotion_runs_once_before_compaction() {
 		let (journal, path) = test_journal("context-promotion");
-		let client = ScriptedClient {
-			scripts: Arc::new(Mutex::new(VecDeque::new())),
-			opened:  Arc::new(Mutex::new(Vec::new())),
-		};
+		let client = ScriptedTurnClient::new([]);
 		let (env, _transport) = EnvClient::in_process(1);
 		let mut snapshot = AgentSnapshot::default();
 		snapshot.turn.params.model = "provider/small".to_owned();
@@ -6346,17 +6244,14 @@ mod tests {
 	#[tokio::test]
 	async fn payload_rejection_is_terminal_once_but_remains_display_durable() {
 		let (journal, path) = test_journal("payload-terminal");
-		let opened = Arc::new(Mutex::new(Vec::new()));
-		let client = ScriptedClient {
-			scripts: Arc::new(Mutex::new(VecDeque::from([vec![Ok(pb::TurnEvent {
-				event: Some(turn_event::Event::Error(pb::TurnError {
-					kind: turn_error::Kind::PayloadRejected as i32,
-					detail: "request bytes rejected".to_owned(),
-					..pb::TurnError::default()
-				})),
-			})]]))),
-			opened:  Arc::clone(&opened),
-		};
+		let client = ScriptedTurnClient::new([ScriptedTurn::events([pb::TurnEvent {
+			event: Some(turn_event::Event::Error(pb::TurnError {
+				kind: turn_error::Kind::PayloadRejected as i32,
+				detail: "request bytes rejected".to_owned(),
+				..pb::TurnError::default()
+			})),
+		}])]);
+		let opened = client.clone();
 		let (env, _transport) = EnvClient::in_process(1);
 		let state = AgentState::new(AgentSnapshot::default());
 		let mut agent = Agent::new(client, env, state.clone(), journal, test_caps());
@@ -6369,7 +6264,7 @@ mod tests {
 			Err(AgentError::Turn(TurnError::Terminal(error)))
 				if error.kind == turn_error::Kind::PayloadRejected as i32
 		));
-		assert_eq!(opened.lock().len(), 1, "same-model retries are forbidden");
+		assert_eq!(opened.captures().len(), 1, "same-model retries are forbidden");
 
 		let live = agent
 			.journal()
@@ -6415,14 +6310,11 @@ mod tests {
 	#[tokio::test]
 	async fn smart_unexpected_stop_classifies_visible_text() {
 		let (journal, path) = test_journal("smart-unexpected-stop");
-		let opened = Arc::new(Mutex::new(Vec::new()));
-		let client = ScriptedClient {
-			scripts: Arc::new(Mutex::new(VecDeque::from([
-				outcome_script(end_outcome("I will make that change now.")),
-				outcome_script(end_outcome("Done.")),
-			]))),
-			opened:  Arc::clone(&opened),
-		};
+		let client = ScriptedTurnClient::new([
+			outcome_script(end_outcome("I will make that change now.")),
+			outcome_script(end_outcome("Done.")),
+		]);
+		let opened = client.clone();
 		let (env, _transport) = EnvClient::in_process(1);
 		let mut snapshot = AgentSnapshot::default();
 		snapshot.unexpected_stop = UnexpectedStopMode::Smart;
@@ -6436,7 +6328,7 @@ mod tests {
 			.await
 			.expect("smart continuation succeeds");
 		assert_eq!(summary.committed_turns, 2);
-		assert_eq!(opened.lock().len(), 2);
+		assert_eq!(opened.captures().len(), 2);
 		fs::remove_file(path).expect("remove journal");
 	}
 

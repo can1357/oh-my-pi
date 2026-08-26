@@ -16,13 +16,16 @@ use std::{
 };
 
 use bytes::Bytes;
-use omp_agent::{Agent, AgentEvent, AgentSnapshot, AgentState, EventSubscription, Journal, TurnId};
+use omp_agent::{
+	Agent, AgentEvent, AgentSnapshot, AgentState, EventSubscription, Journal, TurnId,
+	testing::{ScriptedStep, ScriptedTurn, ScriptedTurnClient},
+};
 use omp_core::{Str, sf};
 use omp_e2e::{
 	Context as _, Error, Result, error,
 	support::{
-		DocServerTask, EnvHarness, Gate, Scratch, ScriptedStep, ScriptedTurn, ScriptedTurnClient,
-		accepted_event, outcome_event, tool_call_item, turn_event, user_item, within,
+		DocServerTask, EnvHarness, Gate, Scratch, accepted_event, outcome_event, tool_call_item,
+		turn_event, user_item, within,
 	},
 };
 use omp_env::{EnvClient, InvocationEvent};
