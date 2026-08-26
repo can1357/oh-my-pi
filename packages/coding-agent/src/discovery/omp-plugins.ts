@@ -34,6 +34,7 @@ import {
 	createSourceMeta,
 	expandEnvVarsDeep,
 	loadFilesFromDir,
+	parseMcpBooleanField,
 	parseRequestIdFormat,
 	scanSkillsFromDir,
 } from "./helpers";
@@ -275,7 +276,8 @@ async function loadTools(ctx: LoadContext): Promise<LoadResult<CustomTool>> {
 const MCP_FILENAMES = [".mcp.json", "mcp.json"] as const;
 
 interface RawMcpServer {
-	enabled?: boolean;
+	enabled?: boolean | string;
+	lazy?: boolean | string;
 	timeout?: number;
 	requestIdFormat?: unknown;
 	instructions?: unknown;
@@ -345,9 +347,26 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 					`[omp-plugins] MCP server "${serverName}" in ${mcpPath}: invalid instructions ${JSON.stringify(cfg.instructions)}, ignoring`,
 				);
 			}
+			let enabled: boolean | undefined;
+			if (cfg.enabled !== undefined) {
+				enabled = parseMcpBooleanField(cfg.enabled);
+				if (enabled === undefined) {
+					warnings.push(
+						`[omp-plugins] MCP server "${serverName}" in ${mcpPath}: invalid 'enabled' value, ignoring`,
+					);
+				}
+			}
+			let lazy: boolean | undefined;
+			if (cfg.lazy !== undefined) {
+				lazy = parseMcpBooleanField(cfg.lazy);
+				if (lazy === undefined) {
+					warnings.push(`[omp-plugins] MCP server "${serverName}" in ${mcpPath}: invalid 'lazy' value, ignoring`);
+				}
+			}
 			items.push({
 				name: serverName,
-				...(cfg.enabled !== undefined && { enabled: cfg.enabled }),
+				...(enabled !== undefined && { enabled }),
+				...(lazy !== undefined && { lazy }),
 				...(cfg.timeout !== undefined && { timeout: cfg.timeout }),
 				...(requestIdFormat !== undefined && { requestIdFormat }),
 				...(instructions !== undefined && { instructions }),
