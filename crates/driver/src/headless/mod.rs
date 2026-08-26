@@ -2,7 +2,7 @@
 
 pub mod finalize;
 
-use std::{collections::BTreeSet, env, error, path::PathBuf, sync::Arc};
+use std::{collections::BTreeSet, env, io, mem, path::PathBuf, sync::Arc};
 
 use omp_agent::{
 	Agent, AgentEvent, AgentKind, AgentRunSummary, AgentState, AgentStatus, AgentTree, ApprovalBook,
@@ -12,8 +12,8 @@ use omp_catalog::{ModelKey, ProviderId, snapshot};
 use omp_core::{SecretString, Str, sf};
 use omp_inference::Registry as InferenceRegistry;
 use omp_proto::thread::v1::Item;
-use omp_sdk::{SessionHandle, SessionIdentity, SessionRuntime};
-use omp_settings::manager::{MutationScope, SettingsManager, SettingsPaths};
+use omp_sdk::{ProductionSessionError, SessionHandle, SessionIdentity, SessionRuntime};
+use omp_settings::manager::{MutationScope, SettingsManager, SettingsManagerError, SettingsPaths};
 use omp_storage::{
 	index::SessionFilter,
 	transcript::{
@@ -25,11 +25,113 @@ use parking_lot::Mutex;
 
 use self::finalize::{FinalizerBudget, FinalizerReport, HeadlessFinalizerHandle};
 /// Typed failure while composing or mutating a headless session.
+///
+/// Every variant names the composition step that failed and carries the
+/// step's own error typed as its source. Sources stay inline (never boxed),
+/// so `chat::ChatError` at 120 bytes is the floor-setter of the enum's size:
+/// slimming `ChatError`/`SettingsManagerError` shrinks the pinned bound below.
 #[derive(Debug, thiserror::Error)]
 pub enum HeadlessError {
-	/// A typed authority used by headless composition failed.
-	#[error("headless session composition failed")]
-	Composition(#[source] Box<dyn error::Error + Send + Sync + 'static>),
+	/// The project root could not be canonicalized.
+	#[error("could not canonicalize the project root")]
+	CanonicalProject(#[source] chat::ChatError),
+	/// The production model catalog could not be assembled.
+	#[error("could not build the production model catalog")]
+	ProductionCatalog(#[source] RegistryError),
+	/// A typed settings domain could not be projected from the snapshot.
+	#[error("could not project settings")]
+	SettingsProjection(#[source] omp_settings::SnapshotError),
+	/// The Environment client could not be bound to the session principal.
+	#[error("could not bind the session principal")]
+	EnvPrincipal(#[source] omp_env::ClientError),
+	/// An ephemeral session was asked to use a durable sessions directory.
+	#[error("ephemeral headless sessions cannot use a durable sessions directory")]
+	EphemeralSessionsDirectory,
+	/// The ephemeral sessions directory could not be created.
+	#[error("could not create an ephemeral sessions directory")]
+	EphemeralSessions(#[source] chat::ChatError),
+	/// The requested model selector could not be resolved against the catalog.
+	#[error("could not resolve model selector")]
+	ResolveModelSelector(#[source] chat::ChatError),
+	/// Session settings could not be loaded.
+	#[error(transparent)]
+	Settings(#[from] SettingsManagerError),
+	/// The project state directory path could not be derived.
+	#[error("could not derive the project state directory")]
+	ProjectStateDirectory(#[source] io::Error),
+	/// A session state directory could not be created.
+	#[error("could not create session state directory")]
+	EnsureStateDirectory(#[source] chat::ChatError),
+	/// The project environment authority failed to start or connect.
+	#[error(transparent)]
+	Environment(#[from] omp_envd::EnvdError),
+	/// The durable session could not be opened, resumed, or forked.
+	#[error("could not open session")]
+	OpenSession(#[source] chat::ChatError),
+	/// The shared SDK session blueprint could not be planned.
+	#[error("could not plan the session blueprint")]
+	SessionBlueprint(#[source] chat::ChatError),
+	/// The initial agent snapshot could not be projected.
+	#[error("could not project the agent snapshot")]
+	AgentSnapshot(#[source] chat::ChatError),
+	/// Cross-process loop revival failed.
+	#[error(transparent)]
+	Revival(#[from] omp_agent::RevivalError),
+	/// The production inference stack could not be assembled.
+	#[error(transparent)]
+	ProductionInference(#[from] RegistryError),
+	/// The in-process turn authority could not be constructed.
+	#[error(transparent)]
+	TurnClient(#[from] omp_agent::Error),
+	/// Two extension hosts declared the same layer, tier, and extension.
+	#[error("duplicate extension host identity: {}/{}/{}", .0.layer(), .0.tier(), .0.extension())]
+	DuplicateExtensionHost(omp_envd::worker::HostKey),
+	/// The sessions index could not be listed for the latest durable session.
+	#[error("could not list the sessions index")]
+	SessionsIndex(#[source] omp_storage::index::Error),
+	/// No durable headless session exists for the project to continue.
+	#[error("no durable headless session exists for this project")]
+	NoDurableSession,
+	/// Prompt customization inputs could not be resolved from files or inline
+	/// text.
+	#[error("could not resolve prompt inputs")]
+	PromptInputs(#[source] crate::prompt_input::PromptInputError),
+	/// The prompt property bag could not be projected from the frozen facts.
+	#[error("could not project the prompt properties")]
+	PromptProperties(#[source] omp_agent::PromptError),
+	/// The memory reflection bridge could not be bound to the extraction lane.
+	#[error("could not bind the reflection bridge")]
+	ReflectionBridge(#[source] omp_envd::memory::ReflectionBindingError),
+	/// The requested tool is not enabled for the next submitted turn.
+	#[error("tool `{0}` is not enabled")]
+	DisabledTool(Str),
+	/// One attached host's model-visible tool roster could not be replaced.
+	#[error("could not replace the host tools")]
+	ReplaceHostTools(#[source] omp_tool::RegistryError),
+	/// The replacement generation could not be advertised to the model.
+	#[error("could not advertise the host tools")]
+	AdvertiseTools(#[source] omp_tool::RegistryError),
+	/// A lowered tool definition could not be converted for the protocol.
+	#[error("could not lower the protocol tool definition")]
+	ProtocolToolDefinition(#[source] chat::ChatError),
+	/// Durable regime activations could not be recovered.
+	#[error("could not recover regimes")]
+	RecoverRegimes(#[source] omp_agent::AgentError),
+	/// The initial regime could not be started.
+	#[error("could not start regime")]
+	StartRegime(#[source] omp_agent::AgentError),
+	/// The main agent node could not be registered in the tree.
+	#[error(transparent)]
+	RegisterAgent(#[from] omp_agent::SpawnRefusal),
+	/// The durable session handle could not be launched.
+	#[error("could not launch the session")]
+	LaunchSession(#[source] ProductionSessionError),
+	/// A validated session model override could not be journaled.
+	#[error("could not journal the model override")]
+	ModelOverride(#[source] omp_agent::ControlError),
+	/// The session title could not be journaled.
+	#[error("could not journal the session title")]
+	SetTitle(#[source] omp_agent::ControlError),
 	/// No model in the embedded catalog can be selected for a revived session.
 	#[error("no selectable model is available to resume")]
 	NoSelectableModel,
@@ -41,15 +143,15 @@ pub enum HeadlessError {
 	MissingRoute(Str),
 }
 
-fn composition(error: impl error::Error + Send + Sync + 'static) -> HeadlessError {
-	HeadlessError::Composition(Box::new(error))
-}
-
-use std::mem;
+const _: () = assert!(
+	mem::size_of::<HeadlessError>() <= 128,
+	"HeadlessError must stay at the natural ChatError-derived size; slim \
+	 ChatError/SettingsManagerError to shrink this"
+);
 
 use omp_envd::exthost::lifecycle::{HeadlessLifecycleSink, HeadlessLifecycleSubscription};
 use omp_proto::inference::{v1, v1::response_format};
-use tokio::io;
+use tokio::io::AsyncWrite;
 
 use crate::{
 	bridges::{AgentGoalBinding, AgentGoalControl, InferenceBridge, builtin_with_content},
@@ -60,8 +162,8 @@ use crate::{
 	modes::RegimeHandle,
 	prompt_prep::{PromptSnapshot, settings::PromptSettings},
 	registry::{
-		InferenceSessionOverrides, ProductionInference, production_inference_for_session,
-		production_redemption_authority,
+		InferenceSessionOverrides, ProductionInference, RegistryError,
+		production_inference_for_session, production_redemption_authority,
 	},
 	rulebook,
 	settings::Settings,
@@ -207,10 +309,7 @@ fn validate_extension_host_keys<'a>(
 	let mut seen = BTreeSet::new();
 	for key in keys {
 		if !seen.insert(key.clone()) {
-			return Err(composition(io::Error::new(
-				io::ErrorKind::InvalidInput,
-				format!("duplicate extension host identity: {key:?}"),
-			)));
+			return Err(HeadlessError::DuplicateExtensionHost(key.clone()));
 		}
 	}
 	Ok(())
@@ -314,49 +413,53 @@ impl HeadlessSession {
 		policy: HeadlessLaunchPolicy,
 		registry_override: Option<Arc<omp_tool::Registry>>,
 	) -> Result<Self, HeadlessError> {
-		let root = chat::canonical_project(&options.project).map_err(composition)?;
+		let root =
+			chat::canonical_project(&options.project).map_err(HeadlessError::CanonicalProject)?;
 		let home = env::var_os("HOME").map_or_else(|| root.clone(), PathBuf::from);
-		let catalog_owner = crate::registry::production_catalog(&data_dir).map_err(composition)?;
+		let catalog_owner = crate::registry::production_catalog(&data_dir)
+			.map_err(HeadlessError::ProductionCatalog)?;
 		let catalog = catalog_owner.as_ref();
-		let model =
-			chat::resolve_model_selector(catalog, options.model.as_str()).map_err(composition)?;
+		let model = chat::resolve_model_selector(catalog, options.model.as_str())
+			.map_err(HeadlessError::ResolveModelSelector)?;
 		let mut settings_paths = SettingsPaths::discover(&data_dir, Some(&root));
 		settings_paths
 			.overlays
 			.extend(options.settings_overlays.iter().cloned());
-		let settings_manager = SettingsManager::open(settings_paths).map_err(composition)?;
+		let settings_manager = SettingsManager::open(settings_paths)?;
 		if let Some(approval_mode) = options.approval_mode {
-			settings_manager
-				.set_sync(MutationScope::Runtime, "tools.approval_mode", &approval_mode.to_string())
-				.map_err(composition)?;
+			settings_manager.set_sync(
+				MutationScope::Runtime,
+				"tools.approval_mode",
+				&approval_mode.to_string(),
+			)?;
 		}
 		let settings_snapshot = settings_manager.snapshot();
 		let mut settings = settings_snapshot
 			.project::<Settings>()
-			.map_err(composition)?
+			.map_err(HeadlessError::SettingsProjection)?
 			.get()
 			.clone();
 		settings.mnemopi = settings.mnemopi.normalize();
 		let model_settings = settings_snapshot
 			.project::<omp_catalog::settings::ModelSettings>()
-			.map_err(composition)?
+			.map_err(HeadlessError::SettingsProjection)?
 			.get()
 			.resolve_path_scopes(&root, &home);
 		let prompt_discovery_settings = discovery::PromptDiscoverySettings {
 			model:   model_settings.clone(),
 			skills:  settings_snapshot
 				.project::<discovery::skills::SkillDiscoverySettings>()
-				.map_err(composition)?
+				.map_err(HeadlessError::SettingsProjection)?
 				.get()
 				.clone(),
 			foreign: settings_snapshot
 				.project::<discovery::foreign::ForeignContentSettings>()
-				.map_err(composition)?
+				.map_err(HeadlessError::SettingsProjection)?
 				.get()
 				.clone(),
 			rules:   settings_snapshot
 				.project::<crate::rulebook::RulebookSettings>()
-				.map_err(composition)?
+				.map_err(HeadlessError::SettingsProjection)?
 				.get()
 				.clone(),
 			native:  policy.native_discovery.clone(),
@@ -371,17 +474,16 @@ impl HeadlessSession {
 		{
 			return Err(HeadlessError::MissingRoute(model));
 		}
-		let state_dir = omp_env::project_state::directory(&data_dir, &root).map_err(composition)?;
+		let state_dir = omp_env::project_state::directory(&data_dir, &root)
+			.map_err(HeadlessError::ProjectStateDirectory)?;
 		let mut ephemeral_sessions = None;
 		let sessions_dir = match (&policy.session, policy.sessions_dir.as_ref()) {
 			(HeadlessSessionOpen::Ephemeral, Some(_)) => {
-				return Err(composition(io::Error::new(
-					io::ErrorKind::InvalidInput,
-					"ephemeral headless sessions cannot use a durable sessions directory",
-				)));
+				return Err(HeadlessError::EphemeralSessionsDirectory);
 			},
 			(HeadlessSessionOpen::Ephemeral, None) => {
-				let owner = chat::EphemeralSessions::create().map_err(composition)?;
+				let owner =
+					chat::EphemeralSessions::create().map_err(HeadlessError::EphemeralSessions)?;
 				let path = owner.path().to_owned();
 				ephemeral_sessions = Some(owner);
 				path
@@ -389,8 +491,8 @@ impl HeadlessSession {
 			(_, Some(directory)) => directory.clone(),
 			(_, None) => state_dir.join("sessions"),
 		};
-		chat::ensure_state_directory(&state_dir).map_err(composition)?;
-		chat::ensure_state_directory(&sessions_dir).map_err(composition)?;
+		chat::ensure_state_directory(&state_dir).map_err(HeadlessError::EnsureStateDirectory)?;
+		chat::ensure_state_directory(&sessions_dir).map_err(HeadlessError::EnsureStateDirectory)?;
 		let search = Arc::new(InferenceBridge::default());
 		let goal_control = AgentGoalControl::default();
 		let advise_queue = omp_agent::advisor::AdvisorAdviceQueue::default();
@@ -424,8 +526,7 @@ impl HeadlessSession {
 			Arc::clone(&settings_snapshot),
 			bridges,
 		)
-		.await
-		.map_err(composition)?;
+		.await?;
 		let grant = omp_env::InvocationGrant::unrestricted();
 		let grant = if options.pty_denied {
 			grant.deny_pty()
@@ -442,18 +543,13 @@ impl HeadlessSession {
 					limit: 1,
 					..SessionFilter::default()
 				})
-				.map_err(composition)?;
+				.map_err(HeadlessError::SessionsIndex)?;
 			Some(
 				page
 					.sessions
 					.first()
 					.map(|session| session.id.0.clone())
-					.ok_or_else(|| {
-						composition(io::Error::new(
-							io::ErrorKind::NotFound,
-							"no durable headless session exists for this project",
-						))
-					})?,
+					.ok_or(HeadlessError::NoDurableSession)?,
 			)
 		} else {
 			None
@@ -476,10 +572,10 @@ impl HeadlessSession {
 			registry.as_ref(),
 			(policy.session != HeadlessSessionOpen::Ephemeral).then(|| environment.sessions_index()),
 		)
-		.map_err(composition)?;
+		.map_err(HeadlessError::OpenSession)?;
 		let env = env
 			.with_principal(session.id.clone(), session.id.clone())
-			.map_err(composition)?;
+			.map_err(HeadlessError::EnvPrincipal)?;
 		let blueprint = chat::session_blueprint(
 			model.as_str(),
 			catalog,
@@ -488,8 +584,9 @@ impl HeadlessSession {
 			&session.id,
 			Arc::clone(&registry),
 		)
-		.map_err(composition)?;
-		let mut snapshot = chat::agent_snapshot(&blueprint, catalog, None).map_err(composition)?;
+		.map_err(HeadlessError::SessionBlueprint)?;
+		let mut snapshot =
+			chat::agent_snapshot(&blueprint, catalog, None).map_err(HeadlessError::AgentSnapshot)?;
 		if matches!(
 			policy.session,
 			HeadlessSessionOpen::Resume(_)
@@ -497,8 +594,7 @@ impl HeadlessSession {
 				| HeadlessSessionOpen::ContinueLatest
 		) {
 			let journal_path = sessions_dir.join(format!("{}.jsonl", session.id.as_str()));
-			let revived = omp_agent::revive_existing(&journal_path, session.journal, snapshot)
-				.map_err(composition)?;
+			let revived = omp_agent::revive_existing(&journal_path, session.journal, snapshot)?;
 			session.journal = revived.journal;
 			snapshot = revived.snapshot;
 			if let Some(model) = revived.model_override
@@ -530,11 +626,11 @@ impl HeadlessSession {
 		}
 		let prompt_settings = settings_snapshot
 			.project::<PromptSettings>()
-			.map_err(composition)?
+			.map_err(HeadlessError::SettingsProjection)?
 			.get()
 			.clone()
 			.resolve_inputs(&root, &home)
-			.map_err(composition)?;
+			.map_err(HeadlessError::PromptInputs)?;
 		let mut prompt_facts = blueprint.prompt_facts().clone();
 		prompt_facts.settings = prompt_settings.clone().into();
 		prompt_facts.model = omp_agent::ModelPromptInput {
@@ -568,7 +664,9 @@ impl HeadlessSession {
 				.await;
 		prompt_facts.host = prepared.host;
 		prompt_facts.roots = prepared.roots;
-		snapshot.props = prompt_facts.props().map_err(composition)?;
+		snapshot.props = prompt_facts
+			.props()
+			.map_err(HeadlessError::PromptProperties)?;
 		let selected_model = catalog
 			.model(omp_catalog::ModelKey::from_ref(&snapshot.turn.params.model))
 			.or_else(|| catalog.resolve_alias(&snapshot.turn.params.model));
@@ -608,17 +706,13 @@ impl HeadlessSession {
 				settings:              Some(Arc::clone(&settings_snapshot)),
 			},
 		)
-		.await
-		.map_err(composition)?;
+		.await?;
 		let _ = search.bind(inference.clone());
 		let _ = environment.github_credentials().bind(credential_authority);
 		environment
 			.bind_mcp_oauth(mcp_authority, mcp_oauth, auth_control)
-			.await
-			.map_err(composition)?;
-		let client = InProcTurnClient::new(inference)
-			.await
-			.map_err(composition)?;
+			.await?;
+		let client = InProcTurnClient::new(inference).await?;
 		let tree = Arc::new(AgentTree::standard(8));
 		let advisor_parent = Arc::new(chat::ChatParentHost::new_with_tree(
 			client.clone(),
@@ -653,7 +747,7 @@ impl HeadlessSession {
 			environment
 				.reflection_bridge()
 				.bind(Arc::new(lane.clone()))
-				.map_err(composition)?;
+				.map_err(HeadlessError::ReflectionBridge)?;
 		}
 		let memory_extraction = memory_lane.map(|lane| {
 			ExtractionWorker::start(
@@ -700,7 +794,7 @@ impl HeadlessSession {
 		let control = agent.control();
 		agent
 			.recover_regimes(omp_agent::core_regime, now_ms())
-			.map_err(composition)?;
+			.map_err(HeadlessError::RecoverRegimes)?;
 		if let Some(spec_id) = options.initial_regime
 			&& agent
 				.arbiter()
@@ -720,7 +814,7 @@ impl HeadlessSession {
 			}
 			let _ = agent
 				.start_regime(spec, regime, omp_agent::StartOptions { now_ms: now_ms(), queue: false })
-				.map_err(composition)?;
+				.map_err(HeadlessError::StartRegime)?;
 		}
 		let modes = Arc::new(RegimeHandle::new());
 		let goal_binding = goal_control.bind(Arc::clone(&modes), control.clone());
@@ -733,16 +827,14 @@ impl HeadlessSession {
 			snapshot.prompt_source = modes.prompt_source(Arc::clone(&snapshot.prompt_source));
 		});
 		agent.set_continuation_source(modes.clone());
-		let node = tree
-			.register(
-				session.id.clone(),
-				sf!("Main"),
-				AgentKind::Main,
-				None,
-				session.id.clone(),
-				Budget::default(),
-			)
-			.map_err(composition)?;
+		let node = tree.register(
+			session.id.clone(),
+			sf!("Main"),
+			AgentKind::Main,
+			None,
+			session.id.clone(),
+			Budget::default(),
+		)?;
 		node.set_status(AgentStatus::Running);
 		let session_handle = blueprint
 			.launch(
@@ -751,7 +843,7 @@ impl HeadlessSession {
 				None,
 				None,
 			)
-			.map_err(composition)?;
+			.map_err(HeadlessError::LaunchSession)?;
 		let events = session_handle.subscribe_lossless();
 		let (lifecycle, lifecycle_events) = HeadlessLifecycleSink::new(options.session_generation);
 		let approval_book = Arc::new(ApprovalBook::new());
@@ -823,10 +915,7 @@ impl HeadlessSession {
 	/// Forces one exact registered tool for the next submitted turn only.
 	pub fn force_tool_once(&self, name: Str) -> Result<(), HeadlessError> {
 		if !self.state.snapshot().enabled_tools.contains(&name) {
-			return Err(composition(io::Error::new(
-				io::ErrorKind::NotFound,
-				format!("tool `{name}` is not enabled"),
-			)));
+			return Err(HeadlessError::DisabledTool(name));
 		}
 		*self._forced_tool.lock() = Some(name);
 		Ok(())
@@ -935,7 +1024,7 @@ impl HeadlessSession {
 		let registry = self._environment.registry();
 		registry
 			.replace_host_tools(claimant, roster_revision, specs, executor)
-			.map_err(composition)?;
+			.map_err(HeadlessError::ReplaceHostTools)?;
 		let advertised = if chat::model_rejects_tools(
 			self._catalog.as_ref(),
 			self.state.snapshot().turn.params.model.as_str(),
@@ -949,7 +1038,7 @@ impl HeadlessSession {
 					maximum_tools:  None,
 					maximum_strict: None,
 				})
-				.map_err(composition)?
+				.map_err(HeadlessError::AdvertiseTools)?
 		};
 		let mut names = Vec::new();
 		let mut tools = Vec::new();
@@ -964,7 +1053,10 @@ impl HeadlessSession {
 				};
 			if selected {
 				names.push(name.clone());
-				tools.push(chat::protocol_tool_definition(tool.definition).map_err(composition)?);
+				tools.push(
+					chat::protocol_tool_definition(tool.definition)
+						.map_err(HeadlessError::ProtocolToolDefinition)?,
+				);
 			}
 		}
 		self.state.update(|snapshot| {
@@ -1029,7 +1121,8 @@ impl HeadlessSession {
 	/// owning v4 journal before changing the live snapshot.
 	pub async fn set_model(&self, selector: &str) -> Result<(), HeadlessError> {
 		let catalog = self._catalog.as_ref();
-		let model = chat::resolve_model_selector(catalog, selector).map_err(composition)?;
+		let model = chat::resolve_model_selector(catalog, selector)
+			.map_err(HeadlessError::ResolveModelSelector)?;
 		let spec = catalog
 			.model(ModelKey::from_ref(model.as_str()))
 			.ok_or_else(|| HeadlessError::UnknownModel(Str::new(selector)))?;
@@ -1050,7 +1143,7 @@ impl HeadlessSession {
 				fallback: false,
 			})
 			.await
-			.map_err(composition)?;
+			.map_err(HeadlessError::ModelOverride)?;
 		self
 			.state
 			.update(|snapshot| snapshot.turn.params.model = model.to_string());
@@ -1104,7 +1197,7 @@ impl HeadlessSession {
 			.control
 			.set_title(now_ms(), title)
 			.await
-			.map_err(composition)?;
+			.map_err(HeadlessError::SetTitle)?;
 		Ok(())
 	}
 
@@ -1188,7 +1281,7 @@ impl HeadlessSession {
 	/// disposes the agent and Environment last.
 	pub async fn finalize<W>(&mut self, stdout: &mut W, budget: FinalizerBudget) -> FinalizerReport
 	where
-		W: io::AsyncWrite + Unpin,
+		W: AsyncWrite + Unpin,
 	{
 		let report = mem::take(&mut self.finalizer)
 			.finalize(stdout, budget)
@@ -1215,15 +1308,12 @@ mod tests {
 	fn duplicate_extension_host_keys_fail_before_environment_freeze() {
 		let key = omp_envd::worker::HostKey::new("project", "trusted", "example/tool");
 		let error = validate_extension_host_keys([&key, &key]).expect_err("duplicate rejected");
-		assert_eq!(error.to_string(), "headless session composition failed");
-		let HeadlessError::Composition(source) = error else {
-			panic!("duplicate key must be a composition error");
+		let HeadlessError::DuplicateExtensionHost(duplicate) = error else {
+			panic!("duplicate key must be a duplicate extension host error");
 		};
-		assert_eq!(
-			source.to_string(),
-			"duplicate extension host identity: HostKey { layer: \"project\", tier: \"trusted\", \
-			 extension: \"example/tool\" }",
-		);
+		assert_eq!(duplicate.layer().as_str(), "project");
+		assert_eq!(duplicate.tier().as_str(), "trusted");
+		assert_eq!(duplicate.extension().as_str(), "example/tool");
 	}
 
 	#[test]
