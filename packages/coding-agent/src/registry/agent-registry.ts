@@ -344,3 +344,20 @@ export function collectAgentFamily(registry: AgentRegistry, rootId: string): Rea
 export function qualifyPersistedAgentId(ownerId: string, bareId: string): string {
 	return `${ownerId}/${bareId}`;
 }
+
+/**
+ * Inverse of {@link qualifyPersistedAgentId}: recovers the bare, path-safe id
+ * an owner-qualified registry key was built from. Consumers that hand a
+ * revived ref's id onward as a naming basis for FUTURE ids — `parentTaskPrefix`
+ * → `AgentOutputManager` → `runSubprocess`'s `path.join(artifactsDir,
+ * \`${id}.jsonl\`)` — must use this instead of the raw registry key, or a
+ * disambiguated `owner/bareId` id writes its descendants below an unexpected
+ * intermediate directory that the persisted-agent scan never looks inside.
+ * Returns `id` unchanged when it was never qualified against `ownerId` (the
+ * common case, and every case where `ownerId` is undefined).
+ */
+export function bareAgentId(id: string, ownerId: string | undefined): string {
+	if (ownerId === undefined) return id;
+	const prefix = `${ownerId}/`;
+	return id.startsWith(prefix) ? id.slice(prefix.length) : id;
+}

@@ -2570,7 +2570,12 @@ export class AcpAgent implements Agent {
 				appendEntry: (customType, data) => {
 					record.session.sessionManager.appendCustomEntry(customType, data);
 				},
-				...createExtensionAgentActions({ scopeAgentId, reviverFactory, idleTtlMs: agentIdleTtlMs }),
+				...createExtensionAgentActions({
+					scopeAgentId,
+					scopeSessionFile: record.session.sessionManager?.getSessionFile?.() ?? null,
+					reviverFactory,
+					idleTtlMs: agentIdleTtlMs,
+				}),
 				setLabel: (targetId, label) => {
 					record.session.sessionManager.appendLabelChange(targetId, label);
 				},

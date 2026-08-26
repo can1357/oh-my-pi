@@ -7,7 +7,7 @@ import type { Settings } from "../config/settings";
 import { MCPManager } from "../mcp/manager";
 import { initializeExtensions } from "../modes/runtime-init";
 import type { PersistedSubagentReviverFactory } from "../registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { AgentRegistry, bareAgentId, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
@@ -83,14 +83,26 @@ export function createPersistedSubagentReviverFactory(
 		const init = peek.init;
 		// taskDepth drives real capability gating (task-spawn allowance, memory
 		// startup, …); derive it from the persisted parent chain rather than
-		// assuming a fixed level.
+		// assuming a fixed level. The chain's root is either the literal
+		// MAIN_AGENT_ID or (ACP) an unregistered top-level session id such as
+		// `acp:<session-id>` — ACP hosts several concurrent top-level sessions,
+		// none of which is ever itself an AgentRef (only subagents/advisors are
+		// registered) — so neither root is itself a subagent generation. Stop at
+		// the owning session's own root (MAIN_AGENT_ID, this ctx's own agent id,
+		// or any id with no registered ref at all) rather than only the literal
+		// "Main" id, or an ACP-rooted direct child is counted at depth 2 instead
+		// of 1 and every subsequent child spawn is rejected by the default
+		// `task.maxRecursionDepth`.
+		const rootAgentId = ctx.session.getAgentId?.() ?? MAIN_AGENT_ID;
 		let taskDepth = 1;
 		let parentId = ref.parentId;
 		const seen = new Set<string>();
-		while (parentId && parentId !== MAIN_AGENT_ID && !seen.has(parentId)) {
+		while (parentId && parentId !== MAIN_AGENT_ID && parentId !== rootAgentId && !seen.has(parentId)) {
+			const parentRef = registry.get(parentId);
+			if (!parentRef) break;
 			seen.add(parentId);
 			taskDepth++;
-			parentId = registry.get(parentId)?.parentId;
+			parentId = parentRef.parentId;
 		}
 		// Rebuild the same advisor opt-in the original spawn resolved: `"on"` =
 		// advisor-role model, anything else = the explicit pattern stamped onto
@@ -162,7 +174,16 @@ export function createPersistedSubagentReviverFactory(
 					init.agent.trim().toLowerCase() !== SUB_AGENT_RULE_NAME
 						? init.agent
 						: ref.displayName,
-				parentTaskPrefix: ref.id,
+				// `ref.id` is the AgentRegistry key, which may be a
+				// `qualifyPersistedAgentId`-disambiguated `owner/bareId` string when
+				// this id collided with an unrelated session's identically-named
+				// agent — never propagate that qualifier into descendant naming:
+				// `AgentOutputManager` nests child ids under this prefix and
+				// `runSubprocess` writes them to `path.join(artifactsDir,
+				// \`${id}.jsonl\`)`, so a slash here would write descendants below an
+				// unexpected intermediate directory that the persisted-agent scan
+				// never looks inside.
+				parentTaskPrefix: bareAgentId(ref.id, ref.parentId),
 				parentAgentId: ref.parentId,
 				expectedAgentRef: expectedRef,
 				taskDepth,
