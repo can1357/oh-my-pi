@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added the `/sessions` session manager: a fullscreen TUI to list, open, archive, pause, kill, delete, rename, and inspect sessions with best-effort per-session metrics (cost/tokens from the omp-stats DB, git branch/dirty state); text/ACP mode prints a top-20 table.
+- Added git-backed workspace checkpoints and rollback (`/checkpoint`, `/rollback`): content-addressed working-tree snapshots under `refs/omp/checkpoints/<sessionId>/<id>` with a journaled, always-reversible rollback transaction (a `pre-rollback` safety checkpoint is captured first). Off by default (`checkpoints.enabled`); auto-checkpoint triggers (`checkpoints.auto.*`) are also off by default.
 
 ## [18.1.19] - 2026-09-12
 

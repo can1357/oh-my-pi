@@ -91,6 +91,7 @@ Top-level entry modules: `cli.ts`, `main.ts`, `sdk.ts`, `index.ts` (SDK barrel),
 - [ttsr-injection-lifecycle.md](../../docs/ttsr-injection-lifecycle.md)
 - [non-compaction-retry-policy.md](../../docs/non-compaction-retry-policy.md)
 - [handoff-generation-pipeline.md](../../docs/handoff-generation-pipeline.md)
+- [sessions-manager.md](../../docs/sessions-manager.md) — `/sessions` manager: query, archive, pause, kill, delete, rename, metrics
 
 ### Configuration, models, providers, auth
 - [settings.md](../../docs/settings.md), [config-usage.md](../../docs/config-usage.md)
@@ -108,6 +109,7 @@ Top-level entry modules: `cli.ts`, `main.ts`, `sdk.ts`, `index.ts` (SDK barrel),
 - Output/artifacts: [blob-artifact-architecture.md](../../docs/blob-artifact-architecture.md)
 - Gating/approval: [approval-mode.md](../../docs/approval-mode.md), [resolve-tool-runtime.md](../../docs/resolve-tool-runtime.md)
 - Per-tool reference: [`docs/tools/`](../../docs/tools/) — `read`, `write`, `edit`, `ast-edit`, `ast-grep`, `grep`, `glob`, `bash`, `eval`, `hub`, `lsp`, `debug`, `task`, `web_search`, `browser`, `github`, `ask`, `todo`, `recall`, `retain`, `reflect`, `checkpoint`, `rewind`
+- Workspace checkpoints: [workspace-checkpoints.md](../../docs/workspace-checkpoints.md) — `/checkpoint` and `/rollback` (git-backed workspace snapshots)
 
 ### Execution backends
 - [bash-tool-runtime.md](../../docs/bash-tool-runtime.md), [tools/bash.md](../../docs/tools/bash.md)
