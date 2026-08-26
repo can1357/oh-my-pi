@@ -27,13 +27,17 @@ function toHex(buffer: ArrayBuffer): string {
 }
 
 /**
- * Hash a server config for cache-identity purposes. `lazy` is a connection
- * *policy* (when to connect), not part of the server's identity — flipping it
- * on an already-cached eager server must still hit the cache, or every
- * eager-to-lazy transition orphans the cache and starts the server tool-less.
+ * Hash a server config for cache-identity purposes. `lazy` and `enabled` are
+ * connection *policy* (when to connect, whether to connect at all), not part
+ * of the server's identity — flipping either on an already-cached server
+ * must still hit the cache. Otherwise every eager-to-lazy transition orphans
+ * the cache and starts the server tool-less, and `/mcp enable` writing an
+ * explicit `enabled: true` over a config that previously omitted the key
+ * (`enabled: undefined`) does the same to a lazy server re-enabled after
+ * `/mcp disable`.
  */
 async function hashConfig(config: MCPServerConfig): Promise<string> {
-	const { lazy: _lazy, ...identity } = config;
+	const { lazy: _lazy, enabled: _enabled, ...identity } = config;
 	const stable = stableStringifyJson(identity);
 	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(stable));
 	return toHex(digest);

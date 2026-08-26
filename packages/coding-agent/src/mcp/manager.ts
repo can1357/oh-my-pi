@@ -715,6 +715,11 @@ export class MCPManager {
 				lazyServers.map(async ({ name, config }) => {
 					const cached = await this.toolCache?.get(name, config);
 					if (!cached) return;
+					// `/mcp disable`, `disconnectServer`, or `disconnectAll` may have run
+					// while the cache lookup above was in flight, clearing `#serverConfigs`
+					// (or replacing it with a fresh config). Installing the deferred tools
+					// anyway would resurrect a torn-down server's tools into the live set.
+					if (this.#serverConfigs.get(name) !== config) return;
 					const reconnect = (options?: { authChallenge?: MCPAuthChallenge }) =>
 						this.reconnectServer(name, options);
 					this.#replaceServerTools(
