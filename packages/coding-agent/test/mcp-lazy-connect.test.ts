@@ -140,6 +140,36 @@ describe("MCP lazy connect", () => {
 		}
 	});
 
+	it("regression: /mcp disable racing the lazy cache lookup does not resurrect the server's tools", async () => {
+		const marker = path.join(workDir, "spawned.marker");
+		const config = lazyConfig(marker);
+		const cache = new MCPToolCache(fakeStorage());
+		await cache.set("lazyfixture", config, [TOOL_DEF]);
+		const manager = new MCPManager(workDir, cache);
+
+		const { promise: gate, resolve: releaseGate } = Promise.withResolvers<void>();
+		const originalGet = cache.get.bind(cache);
+		const getSpy = vi.spyOn(cache, "get").mockImplementation(async (name, cfg) => {
+			await gate;
+			return originalGet(name, cfg);
+		});
+
+		try {
+			const connectPromise = manager.connectServers({ lazyfixture: config }, {});
+			// `connectServers` runs synchronously up through the pending cache
+			// lookup mocked above; disable the server while that lookup is still
+			// in flight, then let the lookup resolve.
+			await manager.disconnectServer("lazyfixture");
+			releaseGate();
+			const result = await connectPromise;
+
+			expect(result.tools.filter(tool => tool.mcpServerName === "lazyfixture")).toHaveLength(0);
+		} finally {
+			getSpy.mockRestore();
+			await manager.disconnectAll();
+		}
+	});
+
 	it("reports a startup failure for an invalid lazy config even with no eager servers", async () => {
 		const config: MCPStdioServerConfig = { type: "stdio", command: "", lazy: true };
 		const manager = new MCPManager(workDir, new MCPToolCache(fakeStorage()));
