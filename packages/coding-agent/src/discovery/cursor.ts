@@ -30,6 +30,7 @@ import {
 	getProjectPath,
 	getUserPath,
 	loadFilesFromDir,
+	parseMcpBooleanField,
 } from "./helpers";
 
 const PROVIDER_ID = "cursor";
@@ -58,6 +59,7 @@ function parseMCPServers(
 		items.push({
 			name,
 			enabled: typeof serverConfig.enabled === "boolean" ? serverConfig.enabled : undefined,
+			lazy: parseMcpBooleanField(serverConfig.lazy),
 			command: serverConfig.command as string | undefined,
 			args: serverConfig.args as string[] | undefined,
 			env: serverConfig.env as Record<string, string> | undefined,
