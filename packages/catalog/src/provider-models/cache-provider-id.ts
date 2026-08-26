@@ -6,9 +6,17 @@ export interface ModelCacheProviderIdOptions {
 }
 
 const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = {
+	"aki-io": true,
+	cortecs: true,
+	eurouter: true,
+	melious: true,
+	nebius: true,
+	opper: true,
+	ovhcloud: true,
 	"opencode-go": true,
 	"opencode-zen": true,
 	"github-copilot": true,
+	scaleway: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -76,7 +84,8 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		case "ovhcloud":
 		case "scaleway": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
-			return `${providerId}:${Bun.hash(baseUrl).toString(36)}`;
+			const scope = options.apiKey ? `${options.apiKey}\u0000${baseUrl}` : baseUrl;
+			return `${providerId}:${Bun.hash(scope).toString(36)}`;
 		}
 		case "ollama":
 			return resolveOllamaModelCacheProviderId(providerId, options.baseUrl);

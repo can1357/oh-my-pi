@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { PROVIDER_DESCRIPTORS, resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
+import {
+	isCredentialScopedModelCacheProvider,
+	PROVIDER_DESCRIPTORS,
+	resolveModelCacheProviderId,
+} from "@oh-my-pi/pi-catalog/provider-models";
 
 test("lightweight cache resolver matches every descriptor default", () => {
 	for (const descriptor of PROVIDER_DESCRIPTORS) {
@@ -38,4 +42,20 @@ test("ollama cache scope preserves reverse-proxy path prefixes", () => {
 	expect(teamA).toBe(resolveModelCacheProviderId("ollama", { baseUrl: "https://proxy.example/team-a" }));
 	expect(teamA).toBe(resolveModelCacheProviderId("ollama", { baseUrl: "https://proxy.example/team-a/" }));
 	expect(teamA).not.toBe(resolveModelCacheProviderId("ollama", { baseUrl: "https://proxy.example/team-b/v1" }));
+});
+
+test("European gateway caches are scoped by credential and endpoint", () => {
+	for (const providerId of ["aki-io", "cortecs", "eurouter", "melious", "nebius", "opper", "ovhcloud", "scaleway"]) {
+		const accountA = resolveModelCacheProviderId(providerId, {
+			apiKey: "account-a-key",
+			baseUrl: "https://gateway.example/v1",
+		});
+		const accountB = resolveModelCacheProviderId(providerId, {
+			apiKey: "account-b-key",
+			baseUrl: "https://gateway.example/v1",
+		});
+
+		expect(isCredentialScopedModelCacheProvider(providerId)).toBe(true);
+		expect(accountA).not.toBe(accountB);
+	}
 });

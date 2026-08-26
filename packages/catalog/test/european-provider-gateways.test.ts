@@ -395,6 +395,23 @@ describe("European gateway provider catalog support", () => {
 		);
 	});
 
+	test("preserves known limits for sparse European gateway refreshes", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			return Response.json({
+				data: [{ id: "claude-sonnet-5", name: "Claude Sonnet 5" }],
+			});
+		});
+
+		const models = await eurouterModelManagerOptions({ fetch: fetchMock }).fetchDynamicModels?.();
+
+		expect(models?.[0]).toMatchObject({
+			id: "claude-sonnet-5",
+			provider: "eurouter",
+			contextWindow: 1_000_000,
+			maxTokens: 128_000,
+		});
+	});
+
 	test("preserves known reasoning capability for reordered Claude gateway ids", async () => {
 		const fetchMock: FetchImpl = vi.fn(async () => {
 			return new Response(
