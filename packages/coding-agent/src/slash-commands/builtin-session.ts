@@ -189,6 +189,11 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				description: "Pin the current provider to a stored OAuth account",
 				usage: "[account]",
 			},
+			{
+				name: "rename",
+				description: "Rename the current session",
+				usage: "<name>",
+			},
 		],
 		allowArgs: true,
 		handle: async (command, runtime) => {
@@ -226,7 +231,20 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				await handleSessionPinCommand(rest, runtime.session, runtime.output);
 				return commandConsumed();
 			}
-			return usage("Usage: /session [info|delete|pin [account]]", runtime);
+			if (verb === "rename") {
+				const name = rest.trim();
+				if (!name) return usage("Usage: /session rename <name>", runtime);
+				let ok = false;
+				try {
+					ok = await runtime.sessionManager.setSessionName(name, "user");
+				} catch (err) {
+					return usage(`Failed to rename session: ${errorMessage(err)}`, runtime);
+				}
+				if (!ok) return usage("Failed to rename session.", runtime);
+				await runtime.output(`Session renamed to "${name}".`);
+				return commandConsumed();
+			}
+			return usage("Usage: /session [info|delete|pin [account]|rename <name>]", runtime);
 		},
 		handleTui: async (command, runtime) => {
 			const { verb, rest } = parseSubcommand(command.args);
@@ -245,10 +263,21 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.editor.setText("");
 				return;
 			}
+			if (verb === "rename") {
+				const name = rest.trim();
+				if (!name) {
+					runtime.ctx.showStatus("Usage: /session rename <name>");
+				} else {
+					await runtime.ctx.sessionManager.setSessionName(name, "user");
+					runtime.ctx.showStatus(`Session renamed to "${name}".`);
+				}
+				runtime.ctx.editor.setText("");
+				return;
+			}
 			if (!verb || (verb === "info" && !rest)) {
 				await runtime.ctx.handleSessionCommand();
 			} else {
-				runtime.ctx.showStatus("Usage: /session [info|delete|pin [account]]");
+				runtime.ctx.showStatus("Usage: /session [info|delete|pin [account]|rename <name>]");
 			}
 			runtime.ctx.editor.setText("");
 		},

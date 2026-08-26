@@ -8,6 +8,8 @@ import { formatStatsDashboardUrl, startServer } from "./server";
 
 export {
 	getDashboardStats,
+	getSessionSummaries,
+	getRequestsPaginated,
 	getToolDashboardStats,
 	getTotalMessageCount,
 	type SyncOptions,
@@ -15,6 +17,7 @@ export {
 	smokeTestSyncWorker,
 	syncAllSessions,
 } from "./aggregator";
+export type { SessionSummary } from "./aggregator";
 export { closeDb } from "./db";
 export { getGainDashboardStats } from "./gain-aggregator";
 export { formatStatsDashboardUrl, startServer } from "./server";

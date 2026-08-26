@@ -879,6 +879,65 @@ export function getStatsByFolder(cutoff?: number): FolderStats[] {
 		...buildAggregatedStats([row]),
 	}));
 }
+/**
+ * Per-session usage aggregate, grouped by `session_file`.
+ *
+ * Consumed by the session-control layer to attach best-effort cost/token
+ * totals to individual sessions without re-deriving dashboard aggregates.
+ * Mirrors the column semantics of {@link getOverallStats}: `cost` is
+ * `SUM(cost_total)` and the token columns are the raw `messages` sums. A
+ * `null`/`0` cutoff returns every stored session; a positive cutoff restricts
+ * to rows whose `timestamp >= cutoff`.
+ */
+export interface SessionSummary {
+	sessionFile: string;
+	requests: number;
+	inputTokens: number;
+	outputTokens: number;
+	cacheRead: number;
+	cacheWrite: number;
+	cost: number;
+}
+
+export function getSessionSummaries(sinceCutoff?: number): SessionSummary[] {
+	if (!db) return [];
+
+	const hasCutoff = sinceCutoff !== undefined && sinceCutoff > 0;
+	const stmt = db.prepare(`
+		SELECT
+			session_file AS sessionFile,
+			COUNT(*) AS requests,
+			SUM(input_tokens) AS inputTokens,
+			SUM(output_tokens) AS outputTokens,
+			SUM(cache_read_tokens) AS cacheRead,
+			SUM(cache_write_tokens) AS cacheWrite,
+			SUM(cost_total) AS cost
+		FROM messages
+		${hasCutoff ? "WHERE timestamp >= ?" : ""}
+		GROUP BY session_file
+		ORDER BY cost DESC
+	`);
+
+	const rows = (hasCutoff ? stmt.all(sinceCutoff) : stmt.all()) as Array<{
+		sessionFile: string;
+		requests: number;
+		inputTokens: number | null;
+		outputTokens: number | null;
+		cacheRead: number | null;
+		cacheWrite: number | null;
+		cost: number | null;
+	}>;
+
+	return rows.map(row => ({
+		sessionFile: row.sessionFile,
+		requests: row.requests ?? 0,
+		inputTokens: row.inputTokens ?? 0,
+		outputTokens: row.outputTokens ?? 0,
+		cacheRead: row.cacheRead ?? 0,
+		cacheWrite: row.cacheWrite ?? 0,
+		cost: row.cost ?? 0,
+	}));
+}
 
 /**
  * Get token usage grouped by agent type (main agent, task subagents, advisor).

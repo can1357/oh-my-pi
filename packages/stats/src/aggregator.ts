@@ -17,6 +17,7 @@ import {
 	getOverallStats,
 	getProviderHourlyBurn,
 	getProviderTimeSeries,
+	getSessionSummaries as getSessionSummariesFromDb,
 	getStatsByAgentType,
 	getStatsByFolder,
 	getStatsByModel,
@@ -33,6 +34,7 @@ import {
 	setFileOffset,
 	updateToolResults,
 	updateUserMessageLinks,
+	type SessionSummary,
 } from "./db";
 import { getSessionEntry, listAllSessionFiles, type ParseSessionResult, parseSessionFile } from "./parser";
 import type { SyncWorkerRequest, SyncWorkerResponse } from "./sync-worker";
@@ -567,8 +569,18 @@ export async function getProviderDashboardStats(range?: string | null): Promise<
 	return {
 		providers,
 		hourly: getProviderHourlyBurn(cutoff ?? undefined),
-		series: getProviderTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs),
+		series: getProviderTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs, bucketOrigin),
 		usageSeries,
 		windowInsights,
 	};
+}
+/**
+ * Per-session usage summaries (requests, tokens, cost), grouped by session
+ * file. Consistent with the other aggregator wrappers: resolves `range` to a
+ * cutoff via {@link getTimeRangeConfig} and delegates to the db query.
+ */
+export async function getSessionSummaries(range?: string | null): Promise<SessionSummary[]> {
+	await initDb();
+	const { cutoff } = getTimeRangeConfig(range);
+	return getSessionSummariesFromDb(cutoff ?? undefined);
 }
