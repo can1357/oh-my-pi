@@ -119,6 +119,21 @@ export function createExtensionAgentActions(
 		const own = getScopeSessionFile?.() ?? null;
 		return own != null && path.resolve(file) === path.resolve(own);
 	};
+	/**
+	 * Whether `ref`'s backing transcript is still reachable under
+	 * `parentSessionFile`'s own directory tree (`<parentSessionFile without
+	 * .jsonl>/**`). A ref with no persisted transcript yet (a live agent
+	 * spawned this run, never scanned from disk) always passes — it has no
+	 * stale generation to compare against. A ref whose transcript sits
+	 * outside that tree is a same-family sibling kept alive only because it
+	 * shares `scopeAgentId` across a `/new` or `ctx.switchSession()`
+	 * transition, not an actual child of the CURRENT transcript.
+	 */
+	const isCurrentTranscriptRef = (ref: AgentRef, parentSessionFile: string): boolean => {
+		if (ref.sessionFile === null) return true;
+		const root = parentSessionFile.endsWith(".jsonl") ? parentSessionFile.slice(0, -6) : parentSessionFile;
+		return path.resolve(ref.sessionFile).startsWith(`${path.resolve(root)}${path.sep}`);
+	};
 	const coldRevive = reviverFactory ? { reviverFactory, idleTtlMs } : undefined;
 	return {
 		agentsList: () => {
@@ -136,15 +151,51 @@ export function createExtensionAgentActions(
 			return ref ? toExtensionAgentInfo(ref) : undefined;
 		},
 		agentsEnsureLive: async (id, agentOptions) => {
-			// Scan (not just a bare registry miss) whenever `id` isn't yet ours:
-			// a foreign session can already hold the bare id, in which case the
-			// scan must still run so this session's own persisted child can be
-			// registered under its disambiguated key. Only ever scan under a
-			// transcript verified to be this scope's own — see `isOwnSessionFile`.
-			if (!inScope(id) && agentOptions?.parentSessionFile && isOwnSessionFile(agentOptions.parentSessionFile)) {
-				await registerPersistedSubagents(registry, agentOptions.parentSessionFile, { rootParentId: scopeAgentId });
+			const parentSessionFile = agentOptions?.parentSessionFile;
+			const scanEligible = parentSessionFile !== undefined && isOwnSessionFile(parentSessionFile);
+			// `scopeAgentId` stays the same across a `/new` or
+			// `ctx.switchSession()` transition, so a persisted child registered
+			// from an OLD transcript remains this scope's descendant forever —
+			// `inScope` alone can't tell it apart from a genuine current child.
+			// Compare the resolved match's own lineage against the CURRENT
+			// `parentSessionFile` instead of trusting any in-scope id as already
+			// registered for the current transcript.
+			const priorMatch = resolveInScope(id);
+			const priorRef = inScope(priorMatch) ? registry.get(priorMatch) : undefined;
+			const stale =
+				scopeAgentId !== undefined &&
+				scanEligible &&
+				priorRef !== undefined &&
+				!isCurrentTranscriptRef(priorRef, parentSessionFile);
+			// Scan (not just a bare registry miss) whenever `id` isn't yet ours,
+			// or its only in-scope match is stale: a foreign session can already
+			// hold the bare id, or a same-family sibling from a superseded
+			// transcript can, in which case the scan must still run so this
+			// session's own CURRENT-transcript child can be registered under its
+			// disambiguated key. Only ever scan under a transcript verified to be
+			// this scope's own — see `isOwnSessionFile`.
+			if (scanEligible && (!inScope(id) || stale)) {
+				await registerPersistedSubagents(registry, parentSessionFile, { rootParentId: scopeAgentId });
 			}
-			const resolvedId = resolveInScope(id);
+			// Re-resolve preferring a match still backed by the CURRENT transcript
+			// over a stale same-family sibling; fall back to the prior resolution
+			// (possibly still that stale ref, e.g. when the current transcript has
+			// no same-named child at all) so an id unique to this session keeps
+			// resolving exactly as before.
+			let resolvedId = priorMatch;
+			if (scopeAgentId !== undefined && scanEligible) {
+				for (const memberId of collectAgentFamily(registry, scopeAgentId)) {
+					const ref = registry.get(memberId);
+					if (
+						ref &&
+						bareAgentId(memberId, ref.parentId) === id &&
+						isCurrentTranscriptRef(ref, parentSessionFile)
+					) {
+						resolvedId = memberId;
+						break;
+					}
+				}
+			}
 			if (!inScope(resolvedId)) throw new Error(`Agent "${id}" is not visible to this session.`);
 			await AgentLifecycleManager.global().ensureLive(resolvedId, coldRevive);
 			const ref = registry.get(resolvedId);
