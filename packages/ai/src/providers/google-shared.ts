@@ -40,7 +40,13 @@ import type {
 	ThinkingLevel,
 } from "./google-types";
 import { transformMessages } from "./transform-messages";
-import { NON_VISION_IMAGE_PLACEHOLDER, supportsProviderFileReference } from "./vision-guard";
+import {
+	isRemoteImageUrl,
+	isUsableInlineImageData,
+	NON_VISION_IMAGE_PLACEHOLDER,
+	supportsProviderFileReference,
+	supportsRemoteImageUrls,
+} from "./vision-guard";
 
 export type {
 	Content,
@@ -56,14 +62,20 @@ type GoogleApiType = "google-generative-ai" | "google-gemini-cli" | "google-vert
 function convertGoogleImagePart<T extends GoogleApiType>(image: ImageContent, model: Model<T>): Part {
 	if (
 		image.providerFile?.provider === "google" &&
-		image.providerFile.uri &&
+		typeof image.providerFile.uri === "string" &&
 		supportsProviderFileReference(model, image.providerFile, image)
 	) {
 		return { fileData: { fileUri: image.providerFile.uri, mimeType: image.mimeType } };
 	}
-	return image.url
-		? { fileData: { fileUri: image.url, mimeType: image.mimeType } }
-		: { inlineData: { mimeType: image.mimeType, data: image.data } };
+	if (typeof image.url === "string" && isRemoteImageUrl(image.url) && supportsRemoteImageUrls(model, image)) {
+		return { fileData: { fileUri: image.url, mimeType: image.mimeType } };
+	}
+	if (isUsableInlineImageData(image.data)) {
+		return { inlineData: { mimeType: image.mimeType, data: image.data } };
+	}
+	throw new AIError.ValidationError(
+		`input_image cannot be forwarded to ${model.api} without non-empty image data or a supported reference`,
+	);
 }
 
 /**

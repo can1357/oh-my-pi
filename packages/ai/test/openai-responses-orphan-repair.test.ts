@@ -173,6 +173,26 @@ describe("repairOrphanResponsesToolOutputs", () => {
 		]);
 	});
 
+	it("does not replay a foreign provider file from an orphan output", () => {
+		const model = getBundledModel("openai-codex", "gpt-5.5");
+		if (!model) throw new Error("expected the bundled Codex model");
+		const repaired = repairOrphanResponsesToolOutputs(
+			[
+				{
+					type: "function_call_output",
+					call_id: "call_foreign_file",
+					output: [{ type: "input_image", detail: "auto", file_id: "file_openai_123" }],
+				} as ResponseInput[number],
+			],
+			model,
+		);
+
+		expect(repaired).toHaveLength(1);
+		expect(repaired[0]).toMatchObject({ type: "message", role: "assistant" });
+		expect(JSON.stringify(repaired[0])).toContain("file_openai_123");
+		expect(repaired.some(item => item.type === "message" && item.role === "user")).toBe(false);
+	});
+
 	it("does not pair an output with a call that appears later in replay order", () => {
 		const input: ResponseInput = [
 			{ type: "function_call_output", call_id: "call_a", output: "stale" } as ResponseInput[number],

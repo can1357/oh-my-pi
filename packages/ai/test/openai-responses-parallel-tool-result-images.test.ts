@@ -160,7 +160,14 @@ function makeInterleavedOrphanContext(model: Model): Context {
 	};
 }
 
-function expectInterleavedOrphanFallback(items: ResponseInput): void {
+type ReplayItem = {
+	type?: string | null;
+	call_id?: string | null;
+	role?: string;
+	content?: unknown;
+};
+
+function expectInterleavedOrphanFallback(items: ReadonlyArray<ReplayItem>): void {
 	const callIndex = items.findIndex(item => item.type === "function_call" && item.call_id === "call_a");
 	expect(callIndex).toBeGreaterThanOrEqual(0);
 	expect(items[callIndex + 1]).toMatchObject({ type: "function_call_output", call_id: "call_a" });
@@ -172,11 +179,7 @@ function expectInterleavedOrphanFallback(items: ResponseInput): void {
 			item.role === "user" &&
 			Array.isArray(item.content) &&
 			item.content.some(
-				part =>
-					part !== null &&
-					typeof part === "object" &&
-					"type" in part &&
-					part.type === "input_image",
+				part => part !== null && typeof part === "object" && "type" in part && part.type === "input_image",
 			),
 	);
 	expect(imageFallback).toMatchObject({
@@ -216,7 +219,11 @@ describe("parallel Responses tool-result images", () => {
 	});
 
 	it("keeps an interleaved orphan image after the paired Codex batch", async () => {
-		const body = await buildTransformedCodexRequestBody(codexModel, makeInterleavedOrphanContext(codexModel), undefined);
+		const body = await buildTransformedCodexRequestBody(
+			codexModel,
+			makeInterleavedOrphanContext(codexModel),
+			undefined,
+		);
 
 		expectInterleavedOrphanFallback(body.input ?? []);
 	});

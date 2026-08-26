@@ -96,6 +96,7 @@ import {
 } from "./github-copilot-headers";
 import type { ChatCompletionCreateParamsStreaming } from "./openai-chat-wire";
 import type { InputItem } from "./openai-codex/request-transformer";
+import { decodeDataUri, isDataUri } from "./openai-data-uri";
 import type {
 	Response as OpenAIResponse,
 	ResponseComputerToolCall,
@@ -116,6 +117,8 @@ import type {
 } from "./openai-responses-wire";
 import { transformMessages } from "./transform-messages";
 import {
+	isRemoteImageUrl,
+	isUsableInlineImageData,
 	joinTextWithImagePlaceholder,
 	NON_VISION_IMAGE_PLACEHOLDER,
 	partitionVisionContent,
@@ -1458,7 +1461,44 @@ export function collectComputerCallIds(messages: ResponseInput): Set<string> {
 	return computerCallIds;
 }
 
-export function splitResponsesOrphanOutput(output: unknown): { text: string; images: ResponseInputImage[] } {
+function normalizeResponsesOrphanImage(
+	block: Record<string, unknown>,
+	detail: ResponseInputImage["detail"],
+	model: Model,
+): ResponseInputImage | undefined {
+	if (!model.input.includes("image")) return undefined;
+	const imageUrl = typeof block.image_url === "string" && block.image_url.length > 0 ? block.image_url : undefined;
+	const fileId = typeof block.file_id === "string" && block.file_id.length > 0 ? block.file_id : undefined;
+	const image: ImageContent = {
+		type: "image",
+		data: "",
+		mimeType: "application/octet-stream",
+		detail,
+	};
+	if (fileId !== undefined) image.providerFile = { provider: "openai", id: fileId };
+	if (imageUrl !== undefined) {
+		if (isDataUri(imageUrl)) {
+			const decoded = decodeDataUri(imageUrl);
+			if (decoded) {
+				image.data = decoded.data;
+				image.mimeType = decoded.mimeType;
+			}
+		} else {
+			image.url = imageUrl;
+		}
+	}
+	if (image.data.length === 0 && image.url === undefined && image.providerFile === undefined) return undefined;
+	try {
+		return convertResponsesInputImage(image, false, model);
+	} catch {
+		return undefined;
+	}
+}
+
+export function splitResponsesOrphanOutput(
+	output: unknown,
+	model?: Model,
+): { text: string; images: ResponseInputImage[] } {
 	const images: ResponseInputImage[] = [];
 	let noteOutput = output;
 	if (Array.isArray(output)) {
@@ -1477,8 +1517,17 @@ export function splitResponsesOrphanOutput(output: unknown): { text: string; ima
 					block.detail === "original"
 						? block.detail
 						: "auto";
-				images.push({ ...block, type: "input_image", detail } as ResponseInputImage);
-				continue;
+				const image = model
+					? normalizeResponsesOrphanImage(block, detail, model)
+					: ({
+							...block,
+							type: "input_image",
+							detail,
+						} as ResponseInputImage);
+				if (image) {
+					images.push(image);
+					continue;
+				}
 			}
 			remaining.push(block);
 		}
@@ -1527,7 +1576,7 @@ function appendResponsesOrphanImages(messages: ResponseInput, images: ResponseIn
  * input grammar. Matches the behavior of {@link transformRequestBody} in the
  * codex provider — issue #1351 / regression of #472.
  */
-export function repairOrphanResponsesToolOutputs(input: ResponseInput): ResponseInput {
+export function repairOrphanResponsesToolOutputs(input: ResponseInput, model?: Model): ResponseInput {
 	const precedingCalls = new Set<string>();
 	let repaired: ResponseInput | undefined;
 	for (let index = 0; index < input.length; index++) {
@@ -1545,7 +1594,7 @@ export function repairOrphanResponsesToolOutputs(input: ResponseInput): Response
 		if (!repaired) repaired = input.slice(0, index);
 		const toolName = outputKind === "computer" ? "computer" : "tool";
 		const rawOutput = "output" in item ? item.output : undefined;
-		const orphanOutput = splitResponsesOrphanOutput(rawOutput);
+		const orphanOutput = splitResponsesOrphanOutput(rawOutput, model);
 		let text = orphanOutput.text;
 		const ORPHAN_OUTPUT_LIMIT = 16_000;
 		if (text.length > ORPHAN_OUTPUT_LIMIT) text = `${text.slice(0, ORPHAN_OUTPUT_LIMIT)}\n...[truncated]`;
@@ -1743,32 +1792,22 @@ function convertResponsesInputImage(
 	const detail = clampResponsesImageDetail(image.detail, supportsImageDetailOriginal);
 	const providerFile = image.providerFile;
 	const supportsFile =
-		providerFile !== undefined &&
-		(model === undefined || supportsProviderFileReference(model, providerFile, image));
-	if (
-		providerFile?.provider === "openai" &&
-		providerFile.id &&
-		supportsFile
-	) {
+		providerFile !== undefined && (model === undefined || supportsProviderFileReference(model, providerFile, image));
+	if (providerFile?.provider === "openai" && typeof providerFile.id === "string" && supportsFile) {
 		return { type: "input_image", detail, file_id: providerFile.id };
 	}
 	const url = image.url;
 	const remoteUrl =
-		typeof url === "string" && url.length > 0 && (model === undefined || supportsRemoteImageUrls(model, image));
+		typeof url === "string" &&
+		isRemoteImageUrl(url) &&
+		(model === undefined || supportsRemoteImageUrls(model, image));
 	if (remoteUrl) return { type: "input_image", detail, image_url: url };
-	if (image.data.length > 0) {
+	if (isUsableInlineImageData(image.data)) {
 		return { type: "input_image", detail, image_url: `data:${image.mimeType};base64,${image.data}` };
 	}
-	if (model !== undefined) {
-		throw new AIError.ValidationError(
-			`input_image cannot be forwarded to ${model.api} without non-empty image data or a supported reference`,
-		);
-	}
-	return {
-		type: "input_image",
-		detail,
-		image_url: image.url ?? `data:${image.mimeType};base64,${image.data}`,
-	};
+	throw new AIError.ValidationError(
+		`input_image cannot be forwarded to ${model?.api ?? "openai-responses"} without non-empty image data or a supported reference`,
+	);
 }
 
 export function convertResponsesInputContent(
@@ -2193,7 +2232,9 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 	}
 
 	const hoisted = hoistInterleavedResponsesToolBatchMessages(messages);
-	const withRepairedOutputs = options.repairOrphanOutputs ? repairOrphanResponsesToolOutputs(hoisted) : hoisted;
+	const withRepairedOutputs = options.repairOrphanOutputs
+		? repairOrphanResponsesToolOutputs(hoisted, options.model)
+		: hoisted;
 	const withRepairedCalls = repairOrphanResponsesToolCalls(withRepairedOutputs);
 	return stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay(
 		hoistInterleavedResponsesToolBatchMessages(withRepairedCalls),
@@ -2465,7 +2506,7 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 	const { output, outputText } = encodeResponsesToolResultOutput(toolResult, model, supportsImageDetailOriginal);
 	const normalized = normalizeResponsesToolCallId(toolResult.toolCallId);
 	const hasInlineImageData = toolResult.content.some(
-		(block): block is ImageContent => block.type === "image" && block.data.length > 0,
+		(block): block is ImageContent => block.type === "image" && isUsableInlineImageData(block.data),
 	);
 	const unsupportedComputerMetadata =
 		toolResult.providerMetadata?.type === "computer" && !supportsComputerScreenshotReferences(model);
@@ -2473,7 +2514,7 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		messages.push({
 			type: "message",
 			role: "assistant",
-			content: `[Previous computer result; call_id=${normalized.callId}]: ${stringifyJson(toolResult.providerMetadata.screenshot) ?? ""}`,
+			content: `[Previous computer result; call_id=${normalized.callId}]: ${stringifyJson(toolResult.providerMetadata?.screenshot) ?? ""}`,
 		} as ResponseInput[number]);
 		return;
 	}
@@ -2515,7 +2556,7 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 			role: "assistant",
 			content: `[Orphan ${toolResult.toolName || "tool"} result; call_id=${normalized.callId}]: ${noteText}`,
 		} as ResponseInput[number]);
-		appendResponsesOrphanImages(messages, splitResponsesOrphanOutput(output).images);
+		appendResponsesOrphanImages(messages, splitResponsesOrphanOutput(output, model).images);
 		return;
 	}
 	if (supportsCustomToolCalls && customCallIds?.has(normalized.callId)) {

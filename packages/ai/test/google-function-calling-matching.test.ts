@@ -11,6 +11,7 @@ const ZERO_USAGE: Usage = {
 	totalTokens: 0,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
+const IMAGE_DATA = Buffer.from("base64-image-data").toString("base64");
 
 function createGoogleModel(
 	id: string,
@@ -115,7 +116,7 @@ describe("Google GenerateContent function response matching", () => {
 		toolResult.content.push({
 			type: "image",
 			mimeType: "image/png",
-			data: "base64-image-data",
+			data: IMAGE_DATA,
 		});
 
 		const model = createGoogleModel("gemini-3.5-flash");
@@ -125,7 +126,7 @@ describe("Google GenerateContent function response matching", () => {
 			{
 				inlineData: {
 					mimeType: "image/png",
-					data: "base64-image-data",
+					data: IMAGE_DATA,
 				},
 			},
 		]);

@@ -157,7 +157,22 @@ describe("image url parts", () => {
 		expect(images[1].image_url).toBe(`data:image/png;base64,${PNG_B64}`);
 	});
 
-	it("google emits fileData for decorated blocks in user turns and tool results", () => {
+	it("responses falls back to inline data when the image URL is malformed", () => {
+		const model = getBundledModel("openai", "gpt-5-mini") as Model<"openai-responses">;
+		const converted = convertResponsesInputContent(
+			[{ type: "image", data: PNG_B64, mimeType: "image/png", url: "not-a-url" }],
+			true,
+			model.compat.supportsImageDetailOriginal,
+			false,
+			model,
+		);
+
+		expect(converted).toEqual([
+			{ type: "input_image", detail: "auto", image_url: `data:image/png;base64,${PNG_B64}` },
+		]);
+	});
+
+	it("google keeps inline data when remote URLs are unsupported", () => {
 		const model = getBundledModel("google", "gemini-2.5-flash") as Model<"google-generative-ai">;
 		const toolCallMessage: Message = {
 			role: "assistant",
@@ -188,14 +203,27 @@ describe("image url parts", () => {
 		const contents = convertGoogleMessages(model, { messages: [userMessage, toolCallMessage, toolResultMessage] });
 
 		const userParts = contents[0].parts ?? [];
-		expect(userParts).toContainEqual({ fileData: { fileUri: BLOB_URL, mimeType: "image/png" } });
 		expect(userParts).toContainEqual({ inlineData: { mimeType: "image/png", data: PNG_B64 } });
 
 		const trailingParts = contents.flatMap(content => content.parts ?? []);
 		const fileDataParts = trailingParts.filter(part => part.fileData !== undefined);
-		// User turn + tool result each carry the decorated block as fileData.
-		expect(fileDataParts).toHaveLength(2);
-		expect(fileDataParts[1].fileData).toEqual({ fileUri: BLOB_URL, mimeType: "image/png" });
+		expect(fileDataParts).toHaveLength(0);
+		expect(trailingParts.filter(part => part.inlineData !== undefined)).toHaveLength(3);
+	});
+
+	it("google rejects a reference-only image when its URL is not replayable", () => {
+		const model = getBundledModel("google", "gemini-2.5-flash") as Model<"google-generative-ai">;
+		expect(() =>
+			convertGoogleMessages(model, {
+				messages: [
+					{
+						role: "user",
+						content: [{ type: "image", data: "", mimeType: "image/png", url: BLOB_URL }],
+						timestamp: 0,
+					},
+				],
+			}),
+		).toThrow("without non-empty image data or a supported reference");
 	});
 
 	it("google falls back to inline data when a provider file is expired or has unknown media", () => {

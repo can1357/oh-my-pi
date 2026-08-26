@@ -199,19 +199,25 @@ const CODEX_ORPHAN_OUTPUT_LIMIT = 16_000;
 const CODEX_INTERRUPTED_TOOL_OUTPUT =
 	"[No tool output recorded: the tool call was interrupted before it produced a result.]";
 
-function orphanFunctionOutputItems(item: InputItem, callId: string): InputItem[] {
+function orphanFunctionOutputItems(
+	item: InputItem,
+	callId: string,
+	model: Model<"openai-codex-responses">,
+): InputItem[] {
 	const itemRecord = item as unknown as Record<string, unknown>;
 	const toolName = typeof itemRecord.name === "string" ? itemRecord.name : "tool";
-	const orphanOutput = splitResponsesOrphanOutput(itemRecord.output);
+	const orphanOutput = splitResponsesOrphanOutput(itemRecord.output, model);
 	let text = orphanOutput.text;
 	if (text.length > CODEX_ORPHAN_OUTPUT_LIMIT) {
 		text = `${text.slice(0, CODEX_ORPHAN_OUTPUT_LIMIT)}\n...[truncated]`;
 	}
-	const items: InputItem[] = [{
-		type: "message",
-		role: "assistant",
-		content: `[Previous ${toolName} result; call_id=${callId}]: ${text}`,
-	}];
+	const items: InputItem[] = [
+		{
+			type: "message",
+			role: "assistant",
+			content: `[Previous ${toolName} result; call_id=${callId}]: ${text}`,
+		},
+	];
 	if (orphanOutput.images.length > 0) {
 		items.push({ type: "message", role: "user", content: orphanOutput.images });
 	}
@@ -248,7 +254,7 @@ function toolOutputKind(type: unknown): ToolCallKind | undefined {
  *   tool-result child is dropped from the reconstructed history) or when a turn
  *   is aborted/crashes after the call streamed but before its result persisted.
  */
-function repairToolCallPairs(input: InputItem[]): InputItem[] {
+function repairToolCallPairs(input: InputItem[], model: Model<"openai-codex-responses">): InputItem[] {
 	const callKinds = new Map<string, ToolCallKind>();
 	const outputKinds = new Map<string, ToolCallKind>();
 	for (const item of input) {
@@ -267,7 +273,7 @@ function repairToolCallPairs(input: InputItem[]): InputItem[] {
 		const outputKind = toolOutputKind(item.type);
 
 		if (outputKind && callId !== undefined && callKinds.get(callId) !== outputKind) {
-			repaired.push(...orphanFunctionOutputItems(item, callId));
+			repaired.push(...orphanFunctionOutputItems(item, callId, model));
 			continue;
 		}
 		if (callKind && callId !== undefined && outputKinds.get(callId) !== callKind) {
@@ -393,7 +399,7 @@ export async function transformRequestBody(
 	if (body.input && Array.isArray(body.input)) {
 		body.input = filterInput(body.input);
 		if (body.input) {
-			body.input = repairToolCallPairs(body.input);
+			body.input = repairToolCallPairs(body.input, model);
 		}
 	}
 

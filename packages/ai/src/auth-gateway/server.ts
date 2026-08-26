@@ -31,6 +31,7 @@ import * as openaiResponses from "../providers/openai-responses-server";
 import * as piNative from "../providers/pi-native-server";
 import {
 	isRemoteImageUrl,
+	isUsableInlineImageData,
 	supportsComputerScreenshotReferences,
 	supportsProviderFileReference,
 	supportsRemoteImageUrls,
@@ -137,7 +138,7 @@ function validateAndNormalizeImageReferences(context: Context, model: Model): st
 				return `\`context.messages[${messageIndex}].content[${blockIndex}].mimeType\` must be a string`;
 			}
 
-			const hasInlineData = block.data.length > 0;
+			const hasInlineData = isUsableInlineImageData(block.data);
 			if (hasInlineData) hasInlineImageData = true;
 			const hasProviderFileReference = block.providerFile !== undefined;
 			const providerFile = isRecord(block.providerFile) ? block.providerFile : undefined;

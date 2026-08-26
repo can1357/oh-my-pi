@@ -50,6 +50,26 @@ function isOllamaModel(model: Model): boolean {
 	}
 }
 
+function isBedrockModel(model: Model): boolean {
+	if (model.provider === "amazon-bedrock" || model.provider === "bedrock-mantle") return true;
+	try {
+		const hostname = new URL(model.baseUrl).hostname.toLowerCase();
+		return hostname.startsWith("bedrock-mantle.") && hostname.endsWith(".api.aws");
+	} catch {
+		return false;
+	}
+}
+
+export function isUsableInlineImageData(data: string): boolean {
+	if (data.length === 0) return false;
+	try {
+		const bytes = Buffer.from(data, "base64");
+		return bytes.length > 0 && bytes.toString("base64") === data;
+	} catch {
+		return false;
+	}
+}
+
 function hasReplayableGoogleImageMimeType(image: Pick<ImageContent, "mimeType">): boolean {
 	return GOOGLE_REMOTE_IMAGE_MIME_TYPES[image.mimeType.toLowerCase()] === true;
 }
@@ -129,7 +149,7 @@ export function supportsComputerScreenshotReferences(model: Model): boolean {
 
 /** Whether this model can replay a remote URL for an image with this media type. */
 export function supportsRemoteImageUrls(model: Model, image: Pick<ImageContent, "mimeType">): boolean {
-	if (isOllamaModel(model)) return false;
+	if (isOllamaModel(model) || isBedrockModel(model)) return false;
 	if (!model.input.includes("image")) return false;
 	if (modelMatchesHost(model, "moonshotNative")) return false;
 	if (isOpenAICompletionsModel(model)) return isOpenAICompletionsVisionSupported(model);

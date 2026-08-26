@@ -324,9 +324,9 @@ describe("ImageUrlService", () => {
 describe("supportsRemoteImageUrls", () => {
 	it("admits verified url-fetching surfaces and refuses shared-API lookalikes", () => {
 		expect(supportsRemoteImageUrls(anthropicModel, KNOWN_IMAGE_REFERENCE)).toBe(true);
-		expect(
-			supportsRemoteImageUrls(makeModel("openai-codex-responses", "openai-codex"), KNOWN_IMAGE_REFERENCE),
-		).toBe(true);
+		expect(supportsRemoteImageUrls(makeModel("openai-codex-responses", "openai-codex"), KNOWN_IMAGE_REFERENCE)).toBe(
+			true,
+		);
 		expect(supportsRemoteImageUrls(makeModel("openai-responses", "xai"), KNOWN_IMAGE_REFERENCE)).toBe(true);
 		expect(supportsRemoteImageUrls(makeModel("openai-completions", "openai"), KNOWN_IMAGE_REFERENCE)).toBe(true);
 		expect(supportsRemoteImageUrls(makeModel("openai-responses", "ollama"), KNOWN_IMAGE_REFERENCE)).toBe(false);
@@ -337,24 +337,28 @@ describe("supportsRemoteImageUrls", () => {
 				KNOWN_IMAGE_REFERENCE,
 			),
 		).toBe(false);
-		expect(
-			supportsRemoteImageUrls(makeModel("google-gemini-cli", "google-antigravity"), KNOWN_IMAGE_REFERENCE),
-		).toBe(true);
+		expect(supportsRemoteImageUrls(makeModel("google-gemini-cli", "google-antigravity"), KNOWN_IMAGE_REFERENCE)).toBe(
+			true,
+		);
 		// Same API shape, backend that cannot fetch arbitrary URLs.
 		expect(supportsRemoteImageUrls(makeModel("anthropic-messages", "opencode"), KNOWN_IMAGE_REFERENCE)).toBe(false);
 		// Moonshot-native hosts reject remote image URLs on both transports
 		// ("unsupported image url" 400) despite the openai-completions catalog api.
-		expect(supportsRemoteImageUrls(makeModel("openai-completions", "kimi-code"), KNOWN_IMAGE_REFERENCE)).toBe(
-			false,
-		);
+		expect(supportsRemoteImageUrls(makeModel("openai-completions", "kimi-code"), KNOWN_IMAGE_REFERENCE)).toBe(false);
 		expect(supportsRemoteImageUrls(makeModel("anthropic-messages", "kimi-code"), KNOWN_IMAGE_REFERENCE)).toBe(false);
 		expect(supportsRemoteImageUrls(makeModel("openai-completions", "moonshot"), KNOWN_IMAGE_REFERENCE)).toBe(false);
 		expect(supportsRemoteImageUrls(makeModel("google-generative-ai", "google"), KNOWN_IMAGE_REFERENCE)).toBe(false);
-		expect(
-			supportsRemoteImageUrls(makeModel("google-gemini-cli", "google-gemini-cli"), KNOWN_IMAGE_REFERENCE),
-		).toBe(false);
+		expect(supportsRemoteImageUrls(makeModel("google-gemini-cli", "google-gemini-cli"), KNOWN_IMAGE_REFERENCE)).toBe(
+			false,
+		);
 		expect(
 			supportsRemoteImageUrls(makeModel("bedrock-converse-stream", "amazon-bedrock"), KNOWN_IMAGE_REFERENCE),
+		).toBe(false);
+		expect(
+			supportsRemoteImageUrls(
+				makeModel("openai-responses", "bedrock-mantle", "https://bedrock-mantle.us-east-1.api.aws/openai/v1"),
+				KNOWN_IMAGE_REFERENCE,
+			),
 		).toBe(false);
 	});
 

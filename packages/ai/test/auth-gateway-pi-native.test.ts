@@ -401,6 +401,29 @@ describe("pi-native gateway image reference validation", () => {
 					messages: [
 						{
 							role: "toolResult",
+							toolCallId: "call_invalid_inline",
+							toolName: "read",
+							content: [
+								{
+									type: "image",
+									data: "=",
+									mimeType: "image/png",
+									providerFile: { provider: "openai", id: "file_image_123" },
+								},
+							],
+							isError: false,
+							timestamp: 0,
+						},
+					],
+				},
+				message:
+					"input_image.file_id cannot be forwarded to mock; target an OpenAI Responses model or use an inline data URL",
+			},
+			{
+				context: {
+					messages: [
+						{
+							role: "toolResult",
 							toolCallId: "call_computer_url",
 							toolName: "computer",
 							content: [],
