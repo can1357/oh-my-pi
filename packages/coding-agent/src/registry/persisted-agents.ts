@@ -757,10 +757,20 @@ async function registerPersistedSubagentsFromDir(
 		// per-session). Register under the disambiguated key instead of
 		// clobbering — or silently losing — a foreign entry that already holds
 		// the bare id.
-		const id =
-			existingBare && !collectAgentFamily(registry, ownerId).has(fsId)
-				? qualifyPersistedAgentId(ownerId, fsId)
-				: fsId;
+		//
+		// A same-family match (the bare id is already this owner's own
+		// descendant) is normally the very entry this scan is re-confirming —
+		// but only when it is still backed by THIS `sessionFile`. A same-family
+		// match backed by a *different*, already-persisted transcript is a
+		// sibling kept alive only because it shares `ownerId` across a `/new`
+		// or `ctx.switchSession()` transition (the owning top-level session id
+		// is stable across those transitions); it must be qualified too, or the
+		// current transcript's own same-named child can never be registered —
+		// the bare id stays permanently claimed by the superseded generation.
+		const sameFamily = existingBare !== undefined && collectAgentFamily(registry, ownerId).has(fsId);
+		const staleSameFamily =
+			sameFamily && existingBare?.sessionFile !== null && existingBare?.sessionFile !== sessionFile;
+		const id = existingBare && (!sameFamily || staleSameFamily) ? qualifyPersistedAgentId(ownerId, fsId) : fsId;
 		const existing = id === fsId ? existingBare : registry.get(id);
 		const replaceable =
 			existing !== undefined &&
