@@ -42,6 +42,23 @@ describe("speculatable call scanner", () => {
 		expect(prompts('s = """completion("tripled")"""', "py")).toEqual([]);
 	});
 
+	// Regression: a string whose terminator could not be located used to fall
+	// through to scanning its own body, so a cell composing a meta-prompt that
+	// mentions completion('...') phantom-launched a billable call for text the
+	// runtime never runs. Mid-stream truncation is the common way in.
+	test("never reads a string body as code", () => {
+		expect(prompts(`const p = "wrap completion('go') end`)).toEqual([]);
+		// biome-ignore lint/suspicious/noTemplateCurlyInString: an interpolation is what makes the terminator unfindable
+		expect(prompts("const p = `x ${y} completion('go')`;")).toEqual([]);
+	});
+
+	// The other half of that fix: a terminator that IS findable must be skipped
+	// past, not treated as end-of-scan, or one escaped string would blind the
+	// scanner to the rest of the cell.
+	test("skips an unreproducible string and keeps scanning after it", () => {
+		expect(prompts(`const p = "a\\\\b completion('skipped')"; completion("real");`)).toEqual(["real"]);
+	});
+
 	test("ignores a same-named method on another object", () => {
 		expect(prompts('client.completion("not ours")')).toEqual([]);
 		expect(prompts('precompletion("not ours")')).toEqual([]);
