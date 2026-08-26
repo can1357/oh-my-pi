@@ -160,9 +160,15 @@ describe("European gateway provider catalog support", () => {
 		});
 	}
 
-	test("ships curated fallback model seeds for keyless catalog regeneration", () => {
+	test("serves curated fallback models through offline model managers", async () => {
 		for (const provider of providerCases) {
-			expect(EUROPEAN_GATEWAY_STATIC_MODELS).toContainEqual(
+			const manager = createModelManager({
+				...provider.manager(),
+				cacheDbPath: ":memory:",
+			});
+			const result = await manager.refresh("offline");
+
+			expect(result.models).toContainEqual(
 				expect.objectContaining({
 					id: provider.defaultModel,
 					provider: provider.id,
@@ -618,7 +624,6 @@ describe("European gateway provider catalog support", () => {
 						{
 							id: "llama-4-maverick",
 							name: "Llama 4 Maverick",
-							input_modalities: ["text"],
 							supported_parameters: ["tools"],
 						},
 					],
@@ -644,7 +649,6 @@ describe("European gateway provider catalog support", () => {
 						{
 							id: "minicpm-v-4.5",
 							name: "MiniCPM-V 4.5",
-							input_modalities: ["text"],
 							supported_parameters: ["tools"],
 						},
 					],
@@ -660,6 +664,32 @@ describe("European gateway provider catalog support", () => {
 			provider: "cortecs",
 			input: ["text", "image"],
 		});
+	});
+
+	test("honors explicit text-only input metadata for otherwise vision-capable models", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			return Response.json({
+				data: [
+					{
+						id: "llama-4-maverick",
+						name: "Llama 4 Maverick",
+						input_modalities: ["text"],
+					},
+					{
+						id: "minicpm-v-4.5",
+						name: "MiniCPM-V 4.5",
+						architecture: { modality: "text->text" },
+					},
+				],
+			});
+		});
+
+		const models = await cortecsModelManagerOptions({ fetch: fetchMock }).fetchDynamicModels?.();
+
+		expect(models?.map(model => ({ id: model.id, input: model.input }))).toEqual([
+			{ id: "llama-4-maverick", input: ["text"] },
+			{ id: "minicpm-v-4.5", input: ["text"] },
+		]);
 	});
 
 	test("does not inherit unrelated provider transport metadata for common gateway model ids", async () => {

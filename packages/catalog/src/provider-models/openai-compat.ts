@@ -852,11 +852,11 @@ function toGatewayInputCapabilities(
 	const rawInputModalities = architecture?.input_modalities ?? entry.input_modalities;
 	const inputModalities = toStringArray(rawInputModalities).map(modality => modality.toLowerCase());
 	const rawModality = architecture?.modality ?? entry.modality;
-	if (inputModalities.includes("image")) {
-		return ["text", "image"];
+	if (inputModalities.length > 0) {
+		return inputModalities.includes("image") ? ["text", "image"] : ["text"];
 	}
-	if (hasGatewayImageInputModality(rawModality)) {
-		return ["text", "image"];
+	if (typeof rawModality === "string" && rawModality.trim().length > 0) {
+		return hasGatewayImageInputModality(rawModality) ? ["text", "image"] : ["text"];
 	}
 	const tags = toStringArray(entry.tags).map(tag => tag.toLowerCase());
 	if (tags.includes("image") || tags.includes("vision")) {
