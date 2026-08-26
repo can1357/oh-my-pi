@@ -313,6 +313,81 @@ describe("ExtensionAPI agents", () => {
 		expect(agentsA.list()).toEqual([]);
 	});
 
+	it("ensureLive's rescan follows a session transition to the new transcript, refusing the stale one", async () => {
+		using tempDir = TempDir.createSync("@omp-extension-agents-transition-");
+		const cwd = tempDir.path();
+		const oldSessionFile = path.join(cwd, "before.jsonl");
+		const oldChildFile = path.join(cwd, "before", "OldChild.jsonl");
+		const newSessionFile = path.join(cwd, "after.jsonl");
+		const newChildFile = path.join(cwd, "after", "NewChild.jsonl");
+		await Bun.write(oldSessionFile, "");
+		await Bun.write(oldChildFile, `${persistedWorkerTranscript()}\n`);
+		await Bun.write(newSessionFile, "");
+		await Bun.write(newChildFile, `${persistedWorkerTranscript()}\n`);
+		AgentLifecycleManager.global().setPersistedSubagentReviverFactory(async () => async () => sessionStub(), 0);
+
+		// A mutable accessor, exactly like a real `SessionManager.getSessionFile()`
+		// whose return value changes after `/new` / `ctx.newSession()` /
+		// `ctx.switchSession()` — unlike `loadAgentsApi`'s fixed `sessionFile`
+		// parameter, this models the SAME actions object staying installed
+		// across a transition instead of being rebuilt.
+		let currentSessionFile = oldSessionFile;
+		let agents: ExtensionAgentsApi | undefined;
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			api => {
+				agents = api.agents;
+			},
+			cwd,
+			new EventBus(),
+			runtime,
+		);
+		const authStorage = await AuthStorage.create(":memory:");
+		const runner = new ExtensionRunner(
+			[extension],
+			runtime,
+			cwd,
+			SessionManager.inMemory(cwd),
+			new ModelRegistry(authStorage),
+		);
+		await initializeExtensions(
+			{
+				extensionRunner: runner,
+				discoverStartupSkillPaths: async () => {},
+				getAgentId: () => MAIN_AGENT_ID,
+				sessionManager: { getSessionFile: () => currentSessionFile },
+			} as unknown as AgentSession,
+			{
+				reportSendError: (_action, error) => {
+					throw error;
+				},
+				reportRuntimeError: error => {
+					throw error.error;
+				},
+			},
+		);
+		if (!agents) throw new Error("Extension factory did not receive api.agents");
+
+		// Simulate `/new` / `ctx.switchSession()`: the underlying session's
+		// current transcript moves on without the extension actions being
+		// rebuilt (no second `initializeExtensions` call).
+		currentSessionFile = newSessionFile;
+
+		// A rescan against the NEW current session file succeeds ...
+		expect(await agents.ensureLive("NewChild", { parentSessionFile: newSessionFile })).toMatchObject({
+			id: "NewChild",
+			status: "idle",
+			sessionFile: newChildFile,
+		});
+
+		// ... while one against the now-stale OLD transcript is refused, not
+		// silently accepted and grafted into the current scope.
+		await expect(agents.ensureLive("OldChild", { parentSessionFile: oldSessionFile })).rejects.toThrow(
+			/not visible to this session/,
+		);
+		expect(AgentRegistry.global().get("OldChild")).toBeUndefined();
+	});
+
 	it("ACP-safe reviver cold-revives a genuinely parked agent through a session-scoped persisted reviver", async () => {
 		using tempDir = TempDir.createSync("@omp-extension-agents-cold-");
 		const cwd = tempDir.path();
@@ -385,7 +460,7 @@ describe("ExtensionAPI agents", () => {
 		// reviver scoped to just this call.
 		const agents = await loadAgentsApiAcpStyle(cwd, {
 			scopeAgentId: "AcpSessionA",
-			scopeSessionFile: parentFile,
+			getScopeSessionFile: () => parentFile,
 			reviverFactory,
 			idleTtlMs: 0,
 		});
@@ -435,6 +510,46 @@ describe("ExtensionAPI agents", () => {
 		expect(agentsA.list().map(ref => ref.sessionFile)).toEqual([childFileA]);
 		expect(agentsB.list().map(ref => ref.sessionFile)).toEqual([childFileB]);
 		expect(AgentRegistry.global().get("Worker")?.sessionFile).toBe(childFileA);
+	});
+
+	it("resolves a nested persisted id through a collision-qualified parent chain", async () => {
+		using tempDir = TempDir.createSync("@omp-extension-agents-nested-collision-");
+		const cwd = tempDir.path();
+		const parentFileA = path.join(cwd, "mainA.jsonl");
+		const parentAgentFileA = path.join(cwd, "mainA", "Parent.jsonl");
+		const childFileA = path.join(cwd, "mainA", "Parent", "Child.jsonl");
+		const parentFileB = path.join(cwd, "mainB.jsonl");
+		const parentAgentFileB = path.join(cwd, "mainB", "Parent.jsonl");
+		const childFileB = path.join(cwd, "mainB", "Parent", "Child.jsonl");
+		await Bun.write(parentFileA, "");
+		await Bun.write(parentAgentFileA, `${persistedWorkerTranscript()}\n`);
+		await Bun.write(childFileA, `${persistedWorkerTranscript()}\n`);
+		await Bun.write(parentFileB, "");
+		await Bun.write(parentAgentFileB, `${persistedWorkerTranscript()}\n`);
+		await Bun.write(childFileB, `${persistedWorkerTranscript()}\n`);
+		const agentsA = await loadAgentsApi(cwd, "AcpSessionA", parentFileA);
+		const agentsB = await loadAgentsApi(cwd, "AcpSessionB", parentFileB);
+		AgentLifecycleManager.global().setPersistedSubagentReviverFactory(async () => async () => sessionStub(), 0);
+
+		// A scans first: its whole "Parent" -> "Child" tree registers under the
+		// bare filenames, so B's identically-named tree collides at BOTH levels.
+		const revivedParentA = await agentsA.ensureLive("Parent", { parentSessionFile: parentFileA });
+		expect(revivedParentA).toMatchObject({ id: "Parent", sessionFile: parentAgentFileA });
+
+		// B's "Parent" collides -> qualified against B's own session id
+		// ("AcpSessionB/Parent"). B's nested "Child" collides too, but is
+		// qualified against its ALREADY-qualified parent ("AcpSessionB/Parent"),
+		// producing "AcpSessionB/Parent/Child" — not the single-level
+		// "AcpSessionB/Child" the round-4 resolver used to probe. Before the
+		// fix this scan completed (registering the child) but the resolver
+		// still rejected the caller's own agent as invisible.
+		const revivedChildB = await agentsB.ensureLive("Child", { parentSessionFile: parentFileB });
+		expect(revivedChildB.sessionFile).toBe(childFileB);
+		expect(revivedChildB.status).toBe("idle");
+
+		// Each session resolves its own "Child" distinctly; neither sees the other's.
+		expect(agentsA.get("Child")).toMatchObject({ sessionFile: childFileA });
+		expect(agentsB.get("Child")).toMatchObject({ sessionFile: childFileB });
 	});
 
 	it("propagates the ACP-safe reviver into a cold-revived subagent's own extension runtime so its persisted children stay cold-revivable", async () => {
@@ -553,7 +668,7 @@ describe("ExtensionAPI agents", () => {
 		// only cold-revive through the reviver scoped to `topAgents`.
 		const topAgents = await loadAgentsApiAcpStyle(cwd, {
 			scopeAgentId: "AcpTop",
-			scopeSessionFile: topFile,
+			getScopeSessionFile: () => topFile,
 			reviverFactory,
 			idleTtlMs: 0,
 		});
