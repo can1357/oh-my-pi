@@ -2001,6 +2001,10 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 		options.context.messages,
 		options.model,
 		normalizeResponsesToolCallIdForTransform,
+		undefined,
+		undefined,
+		undefined,
+		{ preserveOrphanToolResultImages: true },
 	);
 	const filterReasoning = <T extends { type?: string }>(items: T[]): T[] =>
 		options.nativeHistory?.filterReasoning ? items.filter(item => item?.type !== "reasoning") : items;

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { convertCodexResponsesMessages } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import {
+	buildTransformedCodexRequestBody,
+	convertCodexResponsesMessages,
+} from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { ResponseInput } from "@oh-my-pi/pi-ai/providers/openai-responses-wire";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
@@ -121,6 +124,68 @@ function expectOrderedToolResults(items: ResponseInput): void {
 	]);
 }
 
+function makeInterleavedOrphanContext(model: Model): Context {
+	return {
+		messages: [
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "call_a", name: "read", arguments: { path: "a" } }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: zeroUsage,
+				stopReason: "toolUse",
+				timestamp: 1,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "call_b",
+				toolName: "read",
+				content: [
+					{ type: "text", text: "orphan" },
+					{ type: "image", mimeType: "image/png", data: "b3JwaGFu", detail: "high" },
+				],
+				isError: false,
+				timestamp: 2,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "call_a",
+				toolName: "read",
+				content: [{ type: "text", text: "paired" }],
+				isError: false,
+				timestamp: 3,
+			},
+		],
+	};
+}
+
+function expectInterleavedOrphanFallback(items: ResponseInput): void {
+	const callIndex = items.findIndex(item => item.type === "function_call" && item.call_id === "call_a");
+	expect(callIndex).toBeGreaterThanOrEqual(0);
+	expect(items[callIndex + 1]).toMatchObject({ type: "function_call_output", call_id: "call_a" });
+	expect(items.some(item => item.type === "function_call_output" && item.call_id === "call_b")).toBe(false);
+
+	const imageFallback = items.find(
+		item =>
+			item.type === "message" &&
+			item.role === "user" &&
+			Array.isArray(item.content) &&
+			item.content.some(
+				part =>
+					part !== null &&
+					typeof part === "object" &&
+					"type" in part &&
+					part.type === "input_image",
+			),
+	);
+	expect(imageFallback).toMatchObject({
+		type: "message",
+		role: "user",
+		content: [{ type: "input_image", detail: "high", image_url: "data:image/png;base64,b3JwaGFu" }],
+	});
+}
+
 describe("parallel Responses tool-result images", () => {
 	it("encodes generic Responses images inside their tool outputs", () => {
 		const items = buildResponsesInput({
@@ -137,5 +202,22 @@ describe("parallel Responses tool-result images", () => {
 		const items = convertCodexResponsesMessages(codexModel, makeContext(codexModel));
 
 		expectOrderedToolResults(items);
+	});
+
+	it("keeps an interleaved orphan image after the paired Responses batch", () => {
+		const items = buildResponsesInput({
+			model: genericModel,
+			context: makeInterleavedOrphanContext(genericModel),
+			strictResponsesPairing: true,
+			supportsImageDetailOriginal: true,
+		});
+
+		expectInterleavedOrphanFallback(items);
+	});
+
+	it("keeps an interleaved orphan image after the paired Codex batch", async () => {
+		const body = await buildTransformedCodexRequestBody(codexModel, makeInterleavedOrphanContext(codexModel), undefined);
+
+		expectInterleavedOrphanFallback(body.input ?? []);
 	});
 });

@@ -18,6 +18,25 @@ function makeResponsesModel(provider: string, baseUrl: string) {
 	} satisfies ModelSpec<"openai-responses">);
 }
 
+function makeResponsesTargetModel<TApi extends "openai-responses" | "openai-codex-responses" | "azure-openai-responses">(
+	api: TApi,
+	provider: string,
+	baseUrl: string,
+) {
+	return buildModel({
+		id: "vision-model",
+		name: "Vision Model",
+		api,
+		provider,
+		baseUrl,
+		reasoning: false,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 32_768,
+		maxTokens: 4_096,
+	} satisfies ModelSpec<TApi>);
+}
+
 describe("OpenAI provider-file capability", () => {
 	it("requires the official OpenAI provider and endpoint", () => {
 		const reference = { provider: "openai", id: "file_image_123" };
@@ -50,5 +69,33 @@ describe("OpenAI provider-file capability", () => {
 		expect(
 			supportsProviderFileReference(makeResponsesModel("openai", "https://api.openai.com/v1/"), reference, image),
 		).toBe(true);
+	});
+
+	it("does not reuse OpenAI handles across Responses providers", () => {
+		const reference = { provider: "openai", id: "file_image_123" };
+		const image = { mimeType: "image/png" };
+
+		expect(
+			supportsProviderFileReference(
+				makeResponsesTargetModel(
+					"openai-codex-responses",
+					"openai-codex",
+					"https://chatgpt.com/backend-api/codex/responses",
+				),
+				reference,
+				image,
+			),
+		).toBe(false);
+		expect(
+			supportsProviderFileReference(
+				makeResponsesTargetModel(
+					"azure-openai-responses",
+					"azure",
+					"https://resource.openai.azure.com/openai/deployments/vision",
+				),
+				reference,
+				image,
+			),
+		).toBe(false);
 	});
 });

@@ -4503,7 +4503,15 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 		return `${normalizedCallId}|${normalizedItemId}`;
 	};
 
-	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
+	const transformedMessages = transformMessages(
+		context.messages,
+		model,
+		normalizeToolCallId,
+		undefined,
+		undefined,
+		undefined,
+		{ preserveOrphanToolResultImages: true },
+	);
 	// gpt-5.x reject raw Harmony control-token spellings anywhere in replayed
 	// input, including the model's own tool-call arguments (#6913).
 	const escapeControlTokens = isHarmonyDialectModel(model);

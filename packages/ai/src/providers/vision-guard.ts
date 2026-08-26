@@ -148,6 +148,7 @@ export function supportsProviderFileReference(
 		return (
 			typeof reference.id === "string" &&
 			reference.id.length > 0 &&
+			model.provider === "openai" &&
 			OPENAI_PROVIDER_FILE_APIS[model.api] === true &&
 			supportsOfficialOpenAIProviderFileEndpoint(model)
 		);
