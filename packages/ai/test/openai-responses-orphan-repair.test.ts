@@ -115,6 +115,35 @@ describe("repairOrphanResponsesToolOutputs", () => {
 		});
 	});
 
+	it("defers an orphan fallback until every paired output in the batch closes", () => {
+		const imageUrl = `data:image/png;base64,${Buffer.from("interleaved orphan").toString("base64")}`;
+		const repaired = repairOrphanResponsesToolOutputs([
+			{ type: "function_call", call_id: "call_a", name: "read", arguments: "{}" },
+			{ type: "function_call", call_id: "call_c", name: "read", arguments: "{}" },
+			{ type: "function_call_output", call_id: "call_a", output: "ok" } as ResponseInput[number],
+			{
+				type: "function_call_output",
+				call_id: "call_b",
+				output: [{ type: "input_image", detail: "auto", image_url: imageUrl }],
+			} as ResponseInput[number],
+			{ type: "function_call_output", call_id: "call_c", output: "ok" } as ResponseInput[number],
+		]);
+
+		expect(repaired.slice(0, 4).map(item => (item as { type?: string }).type)).toEqual([
+			"function_call",
+			"function_call",
+			"function_call_output",
+			"function_call_output",
+		]);
+		expect(repaired[2]).toMatchObject({ type: "function_call_output", call_id: "call_a" });
+		expect(repaired[3]).toMatchObject({ type: "function_call_output", call_id: "call_c" });
+		expect(repaired).toContainEqual({
+			type: "message",
+			role: "user",
+			content: [{ type: "input_image", detail: "auto", image_url: imageUrl }],
+		});
+	});
+
 	it("preserves orphan images as user-message fallbacks", () => {
 		const imageData = Buffer.from("orphan image").toString("base64");
 		const imageUrl = `data:image/png;base64,${imageData}`;

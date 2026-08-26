@@ -86,13 +86,13 @@ const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
 function validateComputerScreenshotReference(
 	message: Record<string, unknown>,
 	model: Model,
-	hasInlineImageData: boolean,
+	hasSupportedSource: boolean,
 ): string | undefined {
 	if (message.role !== "toolResult") return undefined;
 	const metadata = message.providerMetadata;
 	if (!isRecord(metadata) || metadata.type !== "computer") return undefined;
 	if (supportsComputerScreenshotReferences(model)) return undefined;
-	if (hasInlineImageData) {
+	if (hasSupportedSource) {
 		delete metadata.type;
 		delete metadata.screenshot;
 		return undefined;
@@ -116,6 +116,7 @@ function validateAndNormalizeImageReferences(context: Context, model: Model): st
 	const messages: unknown[] = context.messages;
 	for (const [messageIndex, message] of messages.entries()) {
 		if (!isRecord(message)) return `\`context.messages[${messageIndex}]\` must be an object`;
+		if (message.role === "assistant") continue;
 		if (typeof message.content === "string") {
 			const computerScreenshotError = validateComputerScreenshotReference(message, model, false);
 			if (computerScreenshotError) return computerScreenshotError;
@@ -125,7 +126,7 @@ function validateAndNormalizeImageReferences(context: Context, model: Model): st
 			return `\`context.messages[${messageIndex}].content\` must be a string or an array`;
 		}
 		const blocks: unknown[] = message.content;
-		let hasInlineImageData = false;
+		let hasSupportedImageSourceInMessage = false;
 		for (const [blockIndex, block] of blocks.entries()) {
 			if (!isRecord(block)) {
 				return `\`context.messages[${messageIndex}].content[${blockIndex}]\` must be an object`;
@@ -139,7 +140,6 @@ function validateAndNormalizeImageReferences(context: Context, model: Model): st
 			}
 
 			const hasInlineData = isUsableInlineImageData(block.data);
-			if (hasInlineData) hasInlineImageData = true;
 			const hasProviderFileReference = block.providerFile !== undefined;
 			const providerFile = isRecord(block.providerFile) ? block.providerFile : undefined;
 			const hasSupportedProviderFileReference =
@@ -153,6 +153,9 @@ function validateAndNormalizeImageReferences(context: Context, model: Model): st
 				typeof block.url === "string" &&
 				isRemoteImageUrl(block.url) &&
 				supportsRemoteImageUrls(model, { mimeType: block.mimeType });
+			if (hasInlineData || hasSupportedProviderFileReference || hasSupportedUrlReference) {
+				hasSupportedImageSourceInMessage = true;
+			}
 
 			if (hasProviderFileReference && !hasSupportedProviderFileReference) delete block.providerFile;
 			if (hasUrlReference && !hasSupportedUrlReference) delete block.url;
@@ -169,7 +172,11 @@ function validateAndNormalizeImageReferences(context: Context, model: Model): st
 			}
 			return `input_image cannot be forwarded to ${model.api} without non-empty image data or a supported reference`;
 		}
-		const computerScreenshotError = validateComputerScreenshotReference(message, model, hasInlineImageData);
+		const computerScreenshotError = validateComputerScreenshotReference(
+			message,
+			model,
+			hasSupportedImageSourceInMessage,
+		);
 		if (computerScreenshotError) return computerScreenshotError;
 	}
 	return undefined;

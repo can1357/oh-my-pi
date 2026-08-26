@@ -145,6 +145,52 @@ describe("image url parts", () => {
 		expect(JSON.stringify(images[0])).not.toContain(PNG_B64);
 	});
 
+	it("anthropic falls back to inline data for unsupported URL and expired file references", () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5") as Model<"anthropic-messages">;
+		const expired = convertAnthropicMessages(
+			[
+				{
+					role: "user",
+					content: [
+						{
+							type: "image",
+							data: PNG_B64,
+							mimeType: "image/png",
+							providerFile: { provider: "anthropic", id: "file_expired", expiresAt: Date.now() - 1 },
+						},
+					],
+					timestamp: 0,
+				},
+			],
+			model,
+			false,
+		);
+		const nonOfficial = buildModel({
+			id: "custom-claude",
+			name: "Custom Claude",
+			api: "anthropic-messages",
+			provider: "custom",
+			baseUrl: "https://proxy.example/v1",
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"anthropic-messages">);
+		const unsupportedUrl = convertAnthropicMessages([userMessage], nonOfficial, false);
+
+		expect(
+			(expired[0]?.content as Array<{ type: string; source?: Record<string, unknown> }> | undefined)?.find(
+				block => block.type === "image",
+			)?.source,
+		).toEqual({ type: "base64", media_type: "image/png", data: PNG_B64 });
+		expect(
+			(unsupportedUrl[0]?.content as Array<{ type: string; source?: Record<string, unknown> }> | undefined)?.find(
+				block => block.type === "image",
+			)?.source,
+		).toEqual({ type: "base64", media_type: "image/png", data: PNG_B64 });
+	});
+
 	it("responses input uses the url as image_url and a data URI otherwise", () => {
 		const converted = convertResponsesInputContent(
 			userMessage.content as Exclude<typeof userMessage.content, string>,
@@ -296,5 +342,35 @@ describe("image url parts", () => {
 		const images = parts.filter(part => part.type === "image_url");
 		expect(images[0].image_url?.url).toBe(BLOB_URL);
 		expect(images[1].image_url?.url).toBe(`data:image/png;base64,${PNG_B64}`);
+	});
+
+	it("completions falls back to inline data when a native URL is unsupported", async () => {
+		const model = buildModel({
+			id: "kimi-k2.5",
+			name: "Kimi K2.5",
+			api: "openai-completions",
+			provider: "moonshot",
+			baseUrl: "https://api.moonshot.ai/v1",
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"openai-completions">);
+		let captured: { messages?: Array<{ content: unknown }> } | undefined;
+		const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
+			captured = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+			const sse =
+				`data: ${JSON.stringify({ id: "c", object: "chat.completion.chunk", created: 0, model: model.id, choices: [{ index: 0, delta: { role: "assistant", content: "ok" } }] })}\n\n` +
+				`data: ${JSON.stringify({ id: "c", object: "chat.completion.chunk", created: 0, model: model.id, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n` +
+				"data: [DONE]\n\n";
+			return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+		}) as FetchImpl;
+
+		await streamOpenAICompletions(model, { messages: [userMessage] }, { apiKey: "test", fetch: fetchImpl }).result();
+
+		const parts = captured?.messages?.[0]?.content as Array<{ type: string; image_url?: { url: string } }>;
+		const images = parts.filter(part => part.type === "image_url");
+		expect(images[0].image_url?.url).toBe(`data:image/png;base64,${PNG_B64}`);
 	});
 });

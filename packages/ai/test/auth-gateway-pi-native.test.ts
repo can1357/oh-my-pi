@@ -799,6 +799,45 @@ describe("pi-native gateway image reference validation", () => {
 		}
 	});
 
+	it("keeps assistant image artifacts out of input validation", async () => {
+		const fixture = await createPiNativeImageGatewayFixture();
+		fixture.mock.push({ content: ["ok"] });
+
+		try {
+			const response = await fetch(`${fixture.handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: fixture.mock.id,
+					context: {
+						messages: [
+							baseAssistant({
+								api: fixture.mock.api,
+								provider: fixture.mock.provider,
+								model: fixture.mock.id,
+								content: [
+									{
+										type: "image",
+										data: "",
+										mimeType: "image/png",
+										providerFile: { provider: "openai", id: "file_display_only" },
+									},
+								],
+							}),
+						],
+					},
+					stream: false,
+				}),
+			});
+
+			expect(response.status).toBe(200);
+			await response.json();
+			expect(fixture.mock.calls).toHaveLength(1);
+		} finally {
+			await fixture.close();
+		}
+	});
+
 	it("prefers inline screenshots over unsupported screenshot metadata", async () => {
 		const fixture = await createPiNativeImageGatewayFixture();
 		const imageData = Buffer.from("inline screenshot").toString("base64");
@@ -842,6 +881,84 @@ describe("pi-native gateway image reference validation", () => {
 			expect("screenshot" in (message.providerMetadata ?? {})).toBe(false);
 		} finally {
 			await fixture.close();
+		}
+	});
+
+	it("preserves a supported canonical image source beside stale computer metadata", async () => {
+		const upstreamRequests: CapturedOpenAICompletionRequest[] = [];
+		const upstream = startOpenAICompletionsUpstream(upstreamRequests);
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-computer-alternate-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openai", "test-key");
+		const model = buildModel({
+			id: "pi-native-computer-alternate",
+			name: "Pi Native Computer Alternate",
+			api: "openai-completions",
+			provider: "openai",
+			baseUrl: `${upstream.url.origin}/v1`,
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"openai-completions">);
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => model,
+			version: "test",
+		});
+		const imageUrl = "https://images.example.invalid/computer.png";
+
+		try {
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: model.id,
+					context: {
+						messages: [
+							{
+								role: "assistant",
+								content: [{ type: "toolCall", id: "call_computer_alt", name: "computer", arguments: {} }],
+								api: model.api,
+								provider: model.provider,
+								model: model.id,
+								usage: ZERO_USAGE,
+								stopReason: "toolUse",
+								timestamp: 0,
+							},
+							{
+								role: "toolResult",
+								toolCallId: "call_computer_alt",
+								toolName: "computer",
+								content: [{ type: "image", data: "", mimeType: "image/png", url: imageUrl }],
+								providerMetadata: {
+									type: "computer",
+									screenshot: { type: "computer_screenshot", file_id: "file_stale_screen" },
+									acknowledgedSafetyChecks: [],
+								},
+								isError: false,
+								timestamp: 0,
+							},
+						],
+					},
+					stream: false,
+				}),
+			});
+
+			expect(response.status).toBe(200);
+			await response.json();
+			const imageParts = (upstreamRequests[0]?.messages ?? []).flatMap(message =>
+				Array.isArray(message.content) ? message.content : [],
+			);
+			expect(imageParts).toContainEqual({ type: "image_url", image_url: { url: imageUrl } });
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			upstream.stop(true);
 		}
 	});
 

@@ -11,6 +11,7 @@ import { getEnvApiKey } from "../stream";
 import type {
 	AssistantMessage,
 	Context,
+	ImageContent,
 	Message,
 	MessageAttribution,
 	Model,
@@ -112,13 +113,26 @@ import {
 import { transformMessages } from "./transform-messages";
 import {
 	isOpenAICompletionsVisionSupported,
+	isRemoteImageUrl,
+	isUsableInlineImageData,
 	joinTextWithImagePlaceholder,
 	NON_VISION_IMAGE_PLACEHOLDER,
+	supportsRemoteImageUrls,
 } from "./vision-guard";
 
 export { applyOpenRouterRoutingVariant } from "./openai-shared";
 
 type OpenAICompletionsReasoningField = NonNullable<ResolvedOpenAICompat["reasoningContentField"]>;
+
+function resolveOpenAICompletionsImageUrl(image: ImageContent, model: Model<"openai-completions">): string {
+	if (typeof image.url === "string" && isRemoteImageUrl(image.url) && supportsRemoteImageUrls(model, image)) {
+		return image.url;
+	}
+	if (isUsableInlineImageData(image.data)) return `data:${image.mimeType};base64,${image.data}`;
+	throw new AIError.ValidationError(
+		`input_image cannot be forwarded to ${model.api} without non-empty image data or a supported reference`,
+	);
+}
 
 type ProviderAttributedChatCompletionChunk = ChatCompletionChunk & {
 	provider?: unknown;
@@ -1975,7 +1989,7 @@ export function convertMessages(
 						content.push({
 							type: "image_url",
 							image_url: {
-								url: item.url ?? `data:${item.mimeType};base64,${item.data}`,
+								url: resolveOpenAICompletionsImageUrl(item, model),
 								// Chat Completions has no "original"; omit it (provider default).
 								...(item.detail && item.detail !== "original" ? { detail: item.detail } : {}),
 							},
@@ -2282,7 +2296,7 @@ export function convertMessages(
 							imageBlocks.push({
 								type: "image_url",
 								image_url: {
-									url: block.url ?? `data:${block.mimeType};base64,${block.data}`,
+									url: resolveOpenAICompletionsImageUrl(block, model),
 								},
 							});
 						}

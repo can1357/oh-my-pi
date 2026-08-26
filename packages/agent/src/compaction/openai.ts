@@ -531,7 +531,58 @@ export function buildOpenAiNativeHistory(
 	const demotedComputerCallIds = new Set<string>();
 	const staleCallIds = new Set<string>();
 	addOpenAiCallIds(input, knownCallIds, customCallIds, computerCallIds, staleCallIds);
-	for (const message of transformedMessages) {
+	const staleSnapshotIndices = new Map<string, number[]>();
+	const snapshotCallIds = new Set<string>(knownCallIds);
+	const addSnapshotContentCallIds = (message: Message): void => {
+		if (message.role !== "assistant") return;
+		for (const block of message.content) {
+			if (block.type !== "toolCall") continue;
+			snapshotCallIds.add(normalizeResponsesToolCallId(block.id, block.customWireName ? "ctc" : "fc").callId);
+		}
+	};
+	const snapshotIdsFromItems = (items: Array<Record<string, unknown>>): Set<string> => {
+		const ids = new Set<string>();
+		for (const item of items) {
+			if (
+				(item.type === "function_call" || item.type === "custom_tool_call" || item.type === "computer_call") &&
+				typeof item.call_id === "string"
+			) {
+				ids.add(item.call_id);
+			}
+		}
+		return ids;
+	};
+	for (let transformedIndex = 0; transformedIndex < transformedMessages.length; transformedIndex++) {
+		const message = transformedMessages[transformedIndex];
+		if (message.role !== "user" && message.role !== "developer" && message.role !== "assistant") continue;
+		const providerPayload = (message as { providerPayload?: AssistantMessage["providerPayload"] }).providerPayload;
+		if (message.role !== "assistant") {
+			const rawHistoryItems = getOpenAIResponsesHistoryItems(providerPayload, model.provider);
+			if (rawHistoryItems) {
+				for (const callId of snapshotIdsFromItems(rawHistoryItems)) snapshotCallIds.add(callId);
+			}
+			continue;
+		}
+		const rawHistoryItems = getOpenAIResponsesHistoryPayload(providerPayload, model.provider, message.provider);
+		if (!rawHistoryItems) {
+			addSnapshotContentCallIds(message);
+			continue;
+		}
+		const currentCallIds = snapshotIdsFromItems(rawHistoryItems.items);
+		if (!rawHistoryItems.dt) {
+			for (const callId of snapshotCallIds) {
+				if (currentCallIds.has(callId)) continue;
+				const indices = staleSnapshotIndices.get(callId);
+				if (indices) indices.push(transformedIndex);
+				else staleSnapshotIndices.set(callId, [transformedIndex]);
+			}
+			snapshotCallIds.clear();
+		}
+		for (const callId of currentCallIds) snapshotCallIds.add(callId);
+	}
+
+	for (let transformedIndex = 0; transformedIndex < transformedMessages.length; transformedIndex++) {
+		const message = transformedMessages[transformedIndex];
 		if (message.role === "user" || message.role === "developer") {
 			const providerPayload = (message as { providerPayload?: AssistantMessage["providerPayload"] }).providerPayload;
 			const rawHistoryItems = getOpenAIResponsesHistoryItems(providerPayload, model.provider);
@@ -710,6 +761,16 @@ export function buildOpenAiNativeHistory(
 
 		if (message.role === "toolResult") {
 			const normalized = normalizeResponsesToolCallId(message.toolCallId);
+			const invalidatedByFutureSnapshot = staleSnapshotIndices
+				.get(normalized.callId)
+				?.some(snapshotIndex => snapshotIndex > transformedIndex);
+			if (
+				invalidatedByFutureSnapshot ||
+				(!knownCallIds.has(normalized.callId) && staleCallIds.has(normalized.callId))
+			) {
+				msgIndex++;
+				continue;
+			}
 			const { output, outputText } = encodeResponsesToolResultOutput(message, model, supportsImageDetailOriginal);
 			if (demotedComputerCallIds.has(normalized.callId)) {
 				const resultItem =

@@ -100,7 +100,12 @@ import {
 } from "./github-copilot-headers";
 import { getOpenAIPromptCacheKey } from "./openai-shared";
 import { transformMessages } from "./transform-messages";
-import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
+import {
+	isRemoteImageUrl,
+	NON_VISION_IMAGE_PLACEHOLDER,
+	supportsProviderFileReference,
+	supportsRemoteImageUrls,
+} from "./vision-guard";
 
 export type AnthropicHeaderOptions = {
 	apiKey: string;
@@ -993,7 +998,8 @@ type AnthropicToolResultContent =
  */
 function convertContentBlocks(
 	content: (TextContent | ImageContent)[],
-	supportsImages = true,
+	supportsImages: boolean,
+	model: Model<"anthropic-messages">,
 ): AnthropicToolResultContent {
 	const blocks: Array<{ type: "text"; text: string } | { type: "image"; source: AnthropicImageSource }> = [];
 	let sawText = false;
@@ -1014,9 +1020,13 @@ function convertContentBlocks(
 		}
 
 		let source: AnthropicImageSource;
-		if (block.providerFile?.provider === "anthropic" && block.providerFile.id) {
+		if (
+			block.providerFile?.provider === "anthropic" &&
+			block.providerFile.id &&
+			supportsProviderFileReference(model, block.providerFile, block)
+		) {
 			source = { type: "file", file_id: block.providerFile.id };
-		} else if (block.url) {
+		} else if (block.url && isRemoteImageUrl(block.url) && supportsRemoteImageUrls(model, block)) {
 			source = { type: "url", url: block.url };
 		} else {
 			const mediaType = normalizeAnthropicImageMediaType(block.mimeType);
@@ -3533,7 +3543,7 @@ function buildToolResultBlock(
 	msg: ToolResultMessage,
 	hoistedImages: ContentBlockParam[],
 ): ContentBlockParam {
-	let content = convertContentBlocks(msg.content, model.input.includes("image"));
+	let content = convertContentBlocks(msg.content, model.input.includes("image"), model);
 	// Anthropic rejects images inside error tool results ("all content must be
 	// type `text` if `is_error` is true") — keep the text in the block and
 	// hoist the images after the message's tool_result run.
@@ -3634,7 +3644,7 @@ export function convertAnthropicMessages(
 				if (msg.content.trim().length === 0) continue;
 				content = msg.content.toWellFormed();
 			} else {
-				const contentBlocks = convertContentBlocks(msg.content, model.input.includes("image"));
+				const contentBlocks = convertContentBlocks(msg.content, model.input.includes("image"), model);
 				if (typeof contentBlocks === "string") {
 					if (contentBlocks.trim().length === 0) continue;
 					content = contentBlocks;

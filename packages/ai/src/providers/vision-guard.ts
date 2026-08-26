@@ -206,6 +206,12 @@ export function supportsProviderFileReference(
 	);
 }
 
+export function hasSupportedImageSource(model: Model, image: ImageContent): boolean {
+	if (isUsableInlineImageData(image.data)) return true;
+	if (image.providerFile !== undefined && supportsProviderFileReference(model, image.providerFile, image)) return true;
+	return typeof image.url === "string" && isRemoteImageUrl(image.url) && supportsRemoteImageUrls(model, image);
+}
+
 export function partitionVisionContent(
 	content: ReadonlyArray<TextContent | ImageContent>,
 	supportsImages: boolean,

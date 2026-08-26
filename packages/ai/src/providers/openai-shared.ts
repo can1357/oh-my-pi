@@ -117,6 +117,7 @@ import type {
 } from "./openai-responses-wire";
 import { transformMessages } from "./transform-messages";
 import {
+	hasSupportedImageSource,
 	isRemoteImageUrl,
 	isUsableInlineImageData,
 	joinTextWithImagePlaceholder,
@@ -1590,6 +1591,9 @@ export function repairOrphanResponsesToolOutputs(
 ): ResponseInput {
 	const precedingCalls = new Set<string>();
 	let repaired: ResponseInput | undefined;
+	const deferredFallbacks: ResponseInput[number][] = [];
+	let activeBatchHasCall = false;
+	let activeBatchHasOutput = false;
 	for (let index = 0; index < input.length; index++) {
 		const item = input[index];
 		const callKind = responsesToolCallKind(item.type);
@@ -1598,6 +1602,17 @@ export function repairOrphanResponsesToolOutputs(
 
 		const outputKind = responsesToolOutputKind(item.type);
 		if (!outputKind || !callId || precedingCalls.has(`${outputKind}\0${callId}`)) {
+			const itemKind = classifyResponsesBatchItem(item);
+			if (deferredFallbacks.length > 0 && itemKind !== "call" && itemKind !== "output") {
+				repaired?.push(...deferredFallbacks);
+				deferredFallbacks.length = 0;
+			}
+			if (itemKind === "call") activeBatchHasCall = true;
+			else if (itemKind === "output") activeBatchHasOutput = true;
+			else {
+				activeBatchHasCall = false;
+				activeBatchHasOutput = false;
+			}
 			repaired?.push(item);
 			continue;
 		}
@@ -1609,13 +1624,18 @@ export function repairOrphanResponsesToolOutputs(
 		let text = orphanOutput.text;
 		const ORPHAN_OUTPUT_LIMIT = 16_000;
 		if (text.length > ORPHAN_OUTPUT_LIMIT) text = `${text.slice(0, ORPHAN_OUTPUT_LIMIT)}\n...[truncated]`;
-		repaired.push({
-			type: "message",
-			role: "assistant",
-			content: `[Orphan ${toolName} result; call_id=${callId}]: ${text}`,
-		} as ResponseInput[number]);
-		appendResponsesOrphanImages(repaired, orphanOutput.images);
+		const fallback: ResponseInput = [
+			{
+				type: "message",
+				role: "assistant",
+				content: `[Orphan ${toolName} result; call_id=${callId}]: ${text}`,
+			} as ResponseInput[number],
+		];
+		appendResponsesOrphanImages(fallback, orphanOutput.images);
+		if (activeBatchHasCall && activeBatchHasOutput) deferredFallbacks.push(...fallback);
+		else repaired.push(...fallback);
 	}
+	if (deferredFallbacks.length > 0) repaired?.push(...deferredFallbacks);
 	return repaired ? hoistInterleavedResponsesToolBatchMessages(repaired) : input;
 }
 
@@ -2516,12 +2536,12 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 ): void {
 	const { output, outputText } = encodeResponsesToolResultOutput(toolResult, model, supportsImageDetailOriginal);
 	const normalized = normalizeResponsesToolCallId(toolResult.toolCallId);
-	const hasInlineImageData = toolResult.content.some(
-		(block): block is ImageContent => block.type === "image" && isUsableInlineImageData(block.data),
+	const hasSupportedImageSourceInResult = toolResult.content.some(
+		(block): block is ImageContent => block.type === "image" && hasSupportedImageSource(model, block),
 	);
 	const unsupportedComputerMetadata =
 		toolResult.providerMetadata?.type === "computer" && !supportsComputerScreenshotReferences(model);
-	if (unsupportedComputerMetadata && !hasInlineImageData) {
+	if (unsupportedComputerMetadata && !hasSupportedImageSourceInResult) {
 		messages.push({
 			type: "message",
 			role: "assistant",
@@ -2529,7 +2549,7 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		} as ResponseInput[number]);
 		return;
 	}
-	if (computerCallIds?.has(normalized.callId) && !(unsupportedComputerMetadata && hasInlineImageData)) {
+	if (computerCallIds?.has(normalized.callId) && !(unsupportedComputerMetadata && hasSupportedImageSourceInResult)) {
 		if (toolResult.providerMetadata?.type !== "computer") {
 			const limit = 16_000;
 			const noteText = outputText.length > limit ? `${outputText.slice(0, limit)}\n...[truncated]` : outputText;

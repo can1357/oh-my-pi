@@ -540,7 +540,9 @@ describe("buildOpenAiNativeHistory interleaved assistant message (#8789)", () =>
 		);
 
 		const callIndex = items.findIndex(item => item.type === "function_call" && item.call_id === "call_a");
-		const pairedOutputIndex = items.findIndex(item => item.type === "function_call_output" && item.call_id === "call_a");
+		const pairedOutputIndex = items.findIndex(
+			item => item.type === "function_call_output" && item.call_id === "call_a",
+		);
 		const orphanNoteIndex = items.findIndex(
 			item => item.type === "message" && item.role === "assistant" && String(item.content).includes("call_b"),
 		);
@@ -591,6 +593,36 @@ describe("buildOpenAiNativeHistory call-id tracking", () => {
 			],
 			CODEX_MODEL,
 		);
+		expect(items.some(item => item.type === "function_call_output" && item.call_id === "call_old")).toBe(false);
+		expect(items.some(item => item.type === "function_call_output" && item.call_id === "call_new")).toBe(true);
+	});
+
+	test("drops stale provider-file images before encoding them", () => {
+		const stale: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_old|fc_call_old",
+			toolName: "read",
+			content: [
+				{
+					type: "image",
+					data: "",
+					mimeType: "image/png",
+					providerFile: { provider: "openai", id: "file_stale" },
+				},
+			],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		const items = buildOpenAiNativeHistory(
+			[
+				codexAssistant([{ callId: "call_old" }], true),
+				codexAssistant([{ callId: "call_new" }], false),
+				stale,
+				toolResultFor("call_new"),
+			],
+			makeOpenAiCodexModel(),
+		);
+
 		expect(items.some(item => item.type === "function_call_output" && item.call_id === "call_old")).toBe(false);
 		expect(items.some(item => item.type === "function_call_output" && item.call_id === "call_new")).toBe(true);
 	});
