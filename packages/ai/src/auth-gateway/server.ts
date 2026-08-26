@@ -80,11 +80,35 @@ function supportsOpenAIImageFileReferences(api: Api): boolean {
 	return api === "openai-responses" || api === "openai-codex-responses" || api === "azure-openai-responses";
 }
 
+function supportsRemoteImageReferences(api: Api): boolean {
+	return (
+		api === "openai-completions" ||
+		api === "openai-responses" ||
+		api === "openrouter" ||
+		api === "openai-codex-responses" ||
+		api === "azure-openai-responses" ||
+		api === "anthropic-messages" ||
+		api === "google-generative-ai" ||
+		api === "google-gemini-cli" ||
+		api === "google-vertex"
+	);
+}
+
 function hasOpenAIImageFileReference(context: Context): boolean {
 	for (const message of context.messages) {
 		if (message.role !== "toolResult") continue;
 		for (const block of message.content) {
 			if (block.type === "image" && block.providerFile?.provider === "openai") return true;
+		}
+	}
+	return false;
+}
+
+function hasReferenceOnlyImageUrl(context: Context): boolean {
+	for (const message of context.messages) {
+		if (message.role !== "toolResult") continue;
+		for (const block of message.content) {
+			if (block.type === "image" && block.url && block.data.length === 0) return true;
 		}
 	}
 	return false;
@@ -411,7 +435,14 @@ async function handleFormatEndpoint(
 		return route.module.formatError(
 			400,
 			"invalid_request_error",
-			`input_image.file_id cannot be forwarded to ${model.api}; target an OpenAI Responses model or use image_url`,
+			`input_image.file_id cannot be forwarded to ${model.api}; target an OpenAI Responses model or use an inline data URL`,
+		);
+	}
+	if (!supportsRemoteImageReferences(model.api) && hasReferenceOnlyImageUrl(parsed.context)) {
+		return route.module.formatError(
+			400,
+			"invalid_request_error",
+			`input_image.image_url cannot be forwarded to ${model.api} without inline image data; use a data URL or target an API that supports remote image URLs`,
 		);
 	}
 	// Merge gateway-captured passthrough headers under the parser's own

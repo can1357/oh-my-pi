@@ -63,6 +63,25 @@ function parseSse(raw: string): SseFrame[] {
 	return frames;
 }
 
+function remoteToolImageRequest(model: string, imageUrl: string): unknown {
+	return {
+		model,
+		input: [
+			{
+				type: "function_call",
+				call_id: "call_read",
+				name: "read",
+				arguments: '{"path":"image.png"}',
+			},
+			{
+				type: "function_call_output",
+				call_id: "call_read",
+				output: [{ type: "input_image", image_url: imageUrl }],
+			},
+		],
+	};
+}
+
 describe("openai-responses parseRequest", () => {
 	it("parses an input array with mixed message + reasoning + function_call + function_call_output", () => {
 		const reasoningItem = {
@@ -1454,6 +1473,139 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 			storage.close();
 			await fs.rm(dir, { recursive: true, force: true });
 			clearCustomApis();
+		}
+	});
+
+	it("rejects reference-only remote tool images before invoking Ollama", async () => {
+		const upstreamRequests: unknown[] = [];
+		const upstream = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				upstreamRequests.push(await request.json());
+				return new Response(
+					`${JSON.stringify({
+						message: { role: "assistant", content: "ok" },
+						done: true,
+						done_reason: "stop",
+						prompt_eval_count: 1,
+						eval_count: 1,
+					})}\n`,
+					{ headers: { "Content-Type": "application/x-ndjson" } },
+				);
+			},
+		});
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-remote-image-ollama-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("ollama", "test-key");
+		const model = buildModel({
+			id: "vision-model",
+			name: "Vision Model",
+			api: "ollama-chat",
+			provider: "ollama",
+			baseUrl: upstream.url.origin,
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"ollama-chat">);
+		const gateway = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => model,
+			version: "test",
+		});
+
+		try {
+			const response = await fetch(`${gateway.url}/v1/responses`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+				body: JSON.stringify(remoteToolImageRequest(model.id, "https://images.example.invalid/read.png")),
+			});
+			expect(response.status).toBe(400);
+			expect(await response.text()).toContain(
+				"input_image.image_url cannot be forwarded to ollama-chat without inline image data",
+			);
+			expect(upstreamRequests).toHaveLength(0);
+		} finally {
+			await gateway.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			upstream.stop(true);
+		}
+	});
+
+	it("forwards reference-only remote tool images to URL-capable APIs", async () => {
+		const upstreamRequests: Array<{ messages?: Array<{ content?: unknown }> }> = [];
+		const upstream = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				upstreamRequests.push((await request.json()) as { messages?: Array<{ content?: unknown }> });
+				const chunks = [
+					{
+						id: "chatcmpl-remote-image",
+						object: "chat.completion.chunk",
+						created: 0,
+						model: "vision-model",
+						choices: [{ index: 0, delta: { role: "assistant", content: "ok" }, finish_reason: null }],
+					},
+					{
+						id: "chatcmpl-remote-image",
+						object: "chat.completion.chunk",
+						created: 0,
+						model: "vision-model",
+						choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+					},
+				];
+				const sse = `${chunks.map(chunk => `data: ${JSON.stringify(chunk)}\n\n`).join("")}data: [DONE]\n\n`;
+				return new Response(sse, { headers: { "Content-Type": "text/event-stream" } });
+			},
+		});
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-remote-image-openai-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openai", "test-key");
+		const model = buildModel({
+			id: "vision-model",
+			name: "Vision Model",
+			api: "openai-completions",
+			provider: "openai",
+			baseUrl: `${upstream.url.origin}/v1`,
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"openai-completions">);
+		const gateway = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => model,
+			version: "test",
+		});
+		const imageUrl = "https://images.example.invalid/read.png";
+
+		try {
+			const response = await fetch(`${gateway.url}/v1/responses`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+				body: JSON.stringify(remoteToolImageRequest(model.id, imageUrl)),
+			});
+			expect(response.status).toBe(200);
+			await response.text();
+			expect(upstreamRequests).toHaveLength(1);
+			const contentParts = (upstreamRequests[0]?.messages ?? []).flatMap(message =>
+				Array.isArray(message.content) ? message.content : [],
+			);
+			expect(contentParts).toContainEqual({ type: "image_url", image_url: { url: imageUrl } });
+		} finally {
+			await gateway.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			upstream.stop(true);
 		}
 	});
 });
