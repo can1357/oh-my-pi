@@ -1,5 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import type { AgentEvent } from "@oh-my-pi/pi-agent-core";
+import { logger } from "@oh-my-pi/pi-utils";
 import { callSessionTool } from "../../src/eval/js/tool-bridge";
 import {
 	EvalSpeculationStore,
@@ -312,5 +313,94 @@ describe("streamed eval cell extraction", () => {
 		const call = { name: "eval", arguments: { language: "js", code: "x" } };
 		expect(streamedEvalCell(streamEvent(call, { contentIndex: 3 }))).toBeUndefined();
 		expect(streamedEvalCell(streamEvent(call, { contentIndex: -1 }))).toBeUndefined();
+	});
+});
+
+describe("claim accounting", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	/** Store whose single speculation settles only when the test says so. */
+	function deferredStore(): {
+		store: EvalSpeculationStore;
+		settle: (value: unknown) => void;
+		fail: (error: Error) => void;
+		claims: () => Record<string, unknown>[];
+	} {
+		const gate = Promise.withResolvers<unknown>();
+		const debugSpy = vi.spyOn(logger, "debug").mockImplementation(() => {});
+		const store = new EvalSpeculationStore({
+			isEnabled: () => true,
+			maxPerTurn: () => 4,
+			run: () => gate.promise,
+		});
+		return {
+			store,
+			settle: value => gate.resolve(value),
+			fail: error => gate.reject(error),
+			claims: () =>
+				debugSpy.mock.calls
+					.filter(call => call[0] === "eval speculation claimed")
+					.map(call => call[1] as Record<string, unknown>),
+		};
+	}
+
+	test("caps a successful claim's savings at the call, not at how early it started", async () => {
+		const { store, settle, claims } = deferredStore();
+		store.observe('const a = await completion("p");', "js");
+		settle({ text: "ok" });
+		// Claim well after the call already resolved, so lead time far exceeds it.
+		await Bun.sleep(60);
+		const claimed = store.claim(SPECULATED_BRIDGE_TOOL, { prompt: "p" });
+		expect(claimed).toBeDefined();
+		await claimed;
+		await Bun.sleep(5);
+
+		const [entry] = claims();
+		expect(entry?.ok).toBe(true);
+		expect(entry?.addedWaitMs).toBe(0);
+		expect(entry?.claimWaitMs).toBe(0);
+		expect(entry?.savedMs).toBe(entry?.resolveMs);
+		expect(entry?.savedMs as number).toBeLessThan(entry?.leadMs as number);
+	});
+
+	test("credits a successful claim with only the wait it actually removed", async () => {
+		const { store, settle, claims } = deferredStore();
+		store.observe('const a = await completion("p");', "js");
+		await Bun.sleep(40);
+		const claimed = store.claim(SPECULATED_BRIDGE_TOOL, { prompt: "p" });
+		expect(claimed).toBeDefined();
+		await Bun.sleep(40);
+		settle({ text: "ok" });
+		await claimed;
+		await Bun.sleep(5);
+
+		const [entry] = claims();
+		expect(entry?.ok).toBe(true);
+		// Half the call overlapped the stream, so the cell still waited for the rest.
+		expect(entry?.claimWaitMs as number).toBeGreaterThan(0);
+		expect(entry?.savedMs).toBe((entry?.resolveMs as number) - (entry?.claimWaitMs as number));
+		expect(entry?.savedMs as number).toBeGreaterThan(0);
+	});
+
+	test("credits a failed claim with nothing and charges the wait it added", async () => {
+		const { store, fail, claims } = deferredStore();
+		store.observe('const a = await completion("p");', "js");
+		// Lead time before the claim, so a savings figure that ignored the outcome
+		// would be positive here rather than coincidentally zero.
+		await Bun.sleep(40);
+		const claimed = store.claim(SPECULATED_BRIDGE_TOOL, { prompt: "p" });
+		expect(claimed).toBeDefined();
+		await Bun.sleep(40);
+		fail(new Error("upstream 503"));
+		await claimed;
+		await Bun.sleep(5);
+
+		const [entry] = claims();
+		expect(entry?.ok).toBe(false);
+		// The caller waited, got nothing, and still has to dispatch the real call.
+		expect(entry?.savedMs).toBe(0);
+		expect(entry?.addedWaitMs as number).toBeGreaterThan(0);
 	});
 });
