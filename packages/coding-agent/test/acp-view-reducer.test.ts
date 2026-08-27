@@ -1198,3 +1198,94 @@ describe("ACP tool view encoder — settlement diagnostic (rawOutput)", () => {
 		expect(JSON.stringify(update.rawOutput)).not.toContain("fixture-leaked-result-dd6-should-be-stripped");
 	});
 });
+
+describe("ACP tool view reducer — settlement failure reasons", () => {
+	it("surfaces the outcome's failure message on a meta terminal that never streamed a byte", () => {
+		const { updates } = run([
+			{ type: "started", call: bashCall() },
+			{
+				type: "settled",
+				outcome: {
+					kind: "failed",
+					failure: { reason: "thrown", message: "Eval backend unavailable: no js runtime" },
+				},
+			},
+		]);
+		expect(terminalOutputs(updates)).toEqual(["\nEval backend unavailable: no js runtime\n"]);
+	});
+
+	it("surfaces an interruption reason on a meta terminal that never streamed a byte", () => {
+		const { updates } = run([
+			{ type: "started", call: bashCall() },
+			{
+				type: "settled",
+				outcome: {
+					kind: "interrupted",
+					reason: "Interrupted: no settlement record was persisted before the process ended.",
+				},
+			},
+		]);
+		expect(terminalOutputs(updates)).toEqual([
+			"\nInterrupted: no settlement record was persisted before the process ended.\n",
+		]);
+	});
+
+	it("keeps streamed bytes as the failure explanation instead of duplicating the message", () => {
+		const { events, producer } = record();
+		producer.appendTerminal("error: something exploded\n");
+
+		const { updates } = run([
+			{ type: "started", call: bashCall() },
+			...events,
+			{
+				type: "settled",
+				outcome: { kind: "failed", failure: { reason: "tool_reported", message: "error: something exploded" } },
+			},
+		]);
+		expect(terminalOutputs(updates)).toEqual(["error: something exploded\n"]);
+	});
+
+	it("prefers the byte-locked exit notice over the failure message when a code exists", () => {
+		const { updates } = run([
+			{ type: "started", call: bashCall() },
+			{
+				type: "settled",
+				outcome: {
+					kind: "failed",
+					failure: { reason: "process", message: "boom" },
+					process: { kind: "exited", code: nonZeroExitCode(2) },
+				},
+			},
+		]);
+		expect(terminalOutputs(updates)).toEqual(["\nCommand exited with code 2\n"]);
+	});
+
+	it("bounds an oversized failure message and marks the cut", () => {
+		const { updates } = run([
+			{ type: "started", call: bashCall() },
+			{
+				type: "settled",
+				outcome: { kind: "failed", failure: { reason: "thrown", message: "x".repeat(5000) } },
+			},
+		]);
+		const [data] = terminalOutputs(updates);
+		expect(data?.startsWith("\nxxx")).toBe(true);
+		expect(data?.endsWith("…\n")).toBe(true);
+		// "\n" + 2000 chars + "…" + "\n"
+		expect(data?.length).toBe(2003);
+	});
+
+	it("renders the failure reason in the plain replacement snapshot when nothing streamed", () => {
+		const settlement = run(
+			[
+				{ type: "started", call: bashCall() },
+				{
+					type: "settled",
+					outcome: { kind: "failed", failure: { reason: "thrown", message: "spawn /missing ENOENT" } },
+				},
+			],
+			{ phase: "live", terminal: { kind: "none" }, fence: true },
+		).updates.at(-1) as unknown as { content?: { content: { text: string } }[] };
+		expect(settlement.content?.[0]?.content.text).toBe("spawn /missing ENOENT");
+	});
+});

@@ -10,7 +10,12 @@ import type {
 	ToolPresentationRecord,
 	TruncationFactMeta,
 } from "@oh-my-pi/pi-agent-core/presentation";
-import { factAudience, outcomeExitCode, presentationSeverity } from "@oh-my-pi/pi-agent-core/presentation";
+import {
+	endsOnStringBoundary,
+	factAudience,
+	outcomeExitCode,
+	presentationSeverity,
+} from "@oh-my-pi/pi-agent-core/presentation";
 import { formatBytes } from "@oh-my-pi/pi-utils/format";
 import type { PresentationContentBlock } from "./schemas/content";
 
@@ -361,6 +366,30 @@ export function renderExitNotice(outcome: ToolOutcome): string | undefined {
 	if (outcome.kind === "succeeded") return undefined;
 	const code = outcomeExitCode(outcome);
 	return code === undefined ? undefined : `Command exited with code ${code}`;
+}
+
+/** Bound on {@link renderSettlementReason}'s text — failure messages can embed whole tool outputs. */
+const SETTLEMENT_REASON_MAX_CHARS = 2000;
+
+/**
+ * Bounded failure/interruption reason for a settlement that carries no exit
+ * code. A presentation call that dies before emitting output (missing cwd,
+ * unavailable backend, terminal creation failure) has its only explanation in
+ * `outcome.failure.message` / `outcome.reason` — the legacy
+ * `tool_execution_end` text is suppressed for presentation calls, so a
+ * settlement surface with no other visible body renders this or nothing.
+ * Exit-code failures keep the byte-locked {@link renderExitNotice} wording;
+ * callers gate on "no visible body" so a tool-reported failure whose message
+ * IS the streamed body is never duplicated.
+ */
+export function renderSettlementReason(outcome: ToolOutcome): string | undefined {
+	if (outcome.kind === "succeeded" || outcomeExitCode(outcome) !== undefined) return undefined;
+	const text = (outcome.kind === "failed" ? outcome.failure.message : outcome.reason).trim();
+	if (text.length === 0) return undefined;
+	if (text.length <= SETTLEMENT_REASON_MAX_CHARS) return text;
+	let cut = text.slice(0, SETTLEMENT_REASON_MAX_CHARS);
+	if (!endsOnStringBoundary(cut)) cut = cut.slice(0, -1);
+	return `${cut}…`;
 }
 
 /** Facts split by their pinned placement, with `trail` in its contractual order. */

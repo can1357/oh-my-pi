@@ -19,6 +19,7 @@ import {
 	renderExitNotice,
 	renderFact,
 	renderFactText,
+	renderSettlementReason,
 	renderToolOutputSegments,
 	type ToolOutputSegment,
 } from "../../../presentation/projections";
@@ -1180,11 +1181,19 @@ function reduceSettled(state: AcpToolViewState, outcome: ToolOutcome, context: A
 			// data as the exit notice, in the same frame as the exit, preserving the
 			// one-terminal-item invariant.
 			const exitNotice = renderExitNotice(outcome);
+			// A call that failed before delivering a single byte has no body that
+			// explains its failed status (the legacy tool_execution_end text is
+			// suppressed for presentation calls): surface the bounded outcome
+			// reason on the same settlement frame. A call that DID stream keeps
+			// its own bytes as the explanation — a tool-reported failure's
+			// message often is that body, and appending it again would duplicate it.
+			const settlementNotice =
+				exitNotice !== undefined ? exitNotice : state.cursor === 0 ? renderSettlementReason(outcome) : undefined;
 			const echoPrefix =
 				!state.sourceEchoSent && state.call.sourceEcho !== undefined
 					? `${state.call.sourceEcho}\n${TERMINAL_SEPARATOR}\n`
 					: "";
-			const exitData = exitNotice === undefined ? "" : `\n${exitNotice}\n`;
+			const exitData = settlementNotice === undefined ? "" : `\n${settlementNotice}\n`;
 			const settlementData = `${echoPrefix}${exitData}`;
 			const output =
 				settlementData.length === 0
@@ -1314,7 +1323,14 @@ function buildReplacementSnapshotContent(
 	const factText = factLines.join("\n");
 	if (factText.length > 0) sections.push(factText);
 	const exitNotice = renderExitNotice(outcome);
-	if (exitNotice !== undefined) sections.push(exitNotice);
+	if (exitNotice !== undefined) {
+		sections.push(exitNotice);
+	} else if (body.length === 0) {
+		// No streamed body to explain a failed status — see reduceSettled's
+		// meta-terminal settlement notice for the rationale and the duplication guard.
+		const reason = renderSettlementReason(outcome);
+		if (reason !== undefined) sections.push(reason);
+	}
 
 	const items: NonTerminalContent[] = [];
 	if (sections.length > 0) items.push({ type: "text", text: sections.join("\n\n") });
