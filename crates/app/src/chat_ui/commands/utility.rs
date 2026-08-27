@@ -89,6 +89,7 @@ pub(crate) fn render_tools(
 			.filter(|(_, presentation)| *presentation != Presentation::Hidden)
 			.map(|(name, _)| name.as_str()),
 	);
+	all.extend(registry.disabled_roster().map(Str::as_str));
 	all.extend(active.iter().copied());
 	all.extend(settings.enabled.keys().map(Str::as_str));
 	all.extend(declarations.iter().filter_map(|declaration| {
@@ -260,13 +261,12 @@ mod tests {
 	use omp_tool::{Claims, Constraint, Effects, Precedence, Rev, ToolSpec};
 
 	use super::*;
-
 	fn core_claims() -> Claims {
-		Claims { precedence: Precedence::CORE, claimant: sf!("omp/core"), replaces: None }
+		Claims { precedence: Precedence::CORE, claimant: sf!("test/core"), replaces: None }
 	}
 
 	fn device_claims() -> Claims {
-		Claims { precedence: Precedence::ENHANCEMENT, claimant: sf!("omp/core"), replaces: None }
+		Claims { precedence: Precedence::ENHANCEMENT, claimant: sf!("test/core"), replaces: None }
 	}
 
 	fn stub_spec(name: &str) -> ToolSpec {

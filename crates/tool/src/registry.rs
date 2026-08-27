@@ -1138,6 +1138,13 @@ pub enum RegistryError {
 		/// Rejected precedence value.
 		precedence: Precedence,
 	},
+	/// A worker or external claimant attempted to use the reserved `omp/core`
+	/// namespace.
+	#[error("tool {name} cannot use reserved 'omp/core' claimant namespace")]
+	ReservedClaimant {
+		/// Rejected tool name.
+		name: Str,
+	},
 	/// Operation requires a native pure or execution surface unavailable for a
 	/// worker declaration.
 	#[error("tool {name}@{rev} is worker-routed and cannot perform registry operation {operation}")]
@@ -1186,8 +1193,11 @@ pub enum RegistryError {
 		feature: &'static str,
 	},
 	/// Roster unlisting named a tool with no live claim.
-	#[error("cannot unlist unknown tool from roster: {0}")]
-	UnlistUnknown(Str),
+	#[error("cannot unlist unknown tool from roster: {name}")]
+	UnlistUnknown {
+		/// Requested tool name.
+		name: Str,
+	},
 }
 
 trait ErasedTool: Send + Sync {
@@ -1580,14 +1590,17 @@ struct RegistryEntry {
 /// revision per stable name.
 #[derive(Default)]
 pub struct Registry {
-	versions:         BTreeMap<Str, BTreeMap<Rev, RegistryEntry>>,
-	live:             BTreeMap<Str, Claim>,
-	unlisted:         BTreeSet<Str>,
-	protected_core:   BTreeSet<Str>,
-	unmounted:        RwLock<BTreeMap<Str, Option<Str>>>,
-	arg_specs:        ArgSpecRegistry,
-	projection_cache: Arc<ProjectionCache>,
-	host_tools:       RwLock<HostToolState>,
+	versions:              BTreeMap<Str, BTreeMap<Rev, RegistryEntry>>,
+	live:                  BTreeMap<Str, Claim>,
+	unlisted:              BTreeSet<Str>,
+	protected_core:        BTreeSet<Str>,
+	/// Core-family names that should still appear in the user-facing roster
+	/// when they are unavailable for runtime or policy reasons.
+	user_visible_reserved: BTreeSet<Str>,
+	unmounted:             RwLock<BTreeMap<Str, Option<Str>>>,
+	arg_specs:             ArgSpecRegistry,
+	projection_cache:      Arc<ProjectionCache>,
+	host_tools:            RwLock<HostToolState>,
 }
 
 impl Registry {
@@ -1745,6 +1758,20 @@ impl Registry {
 			.extend(names.into_iter().map(Into::into));
 	}
 
+	/// Reserves essential built-in names that the user-facing roster should
+	/// still advertise as disabled when the implementation is unavailable.
+	pub fn protect_user_visible_core<I, S>(&mut self, names: I)
+	where
+		I: IntoIterator<Item = S>,
+		S: Into<Str>,
+	{
+		for name in names {
+			let name = name.into();
+			self.protected_core.insert(name.clone());
+			self.user_visible_reserved.insert(name);
+		}
+	}
+
 	/// Reserves every currently-live claim name as a protected core claim.
 	pub fn protect_live_claims(&mut self) {
 		self.protected_core.extend(self.live.keys().cloned());
@@ -1756,7 +1783,7 @@ impl Registry {
 	/// Returns [`RegistryError::UnlistUnknown`] if `name` has no live claim.
 	pub fn unlist_from_roster(&mut self, name: &str) -> Result<(), RegistryError> {
 		if !self.live.contains_key(name) {
-			return Err(RegistryError::UnlistUnknown(Str::new(name)));
+			return Err(RegistryError::UnlistUnknown { name: Str::new(name) });
 		}
 		self.unlisted.insert(Str::new(name));
 		Ok(())
@@ -1777,6 +1804,16 @@ impl Registry {
 				.get(&claim.rev)
 				.map(|entry| (name, entry.presentation))
 		})
+	}
+
+	/// Iterates the reserved user-visible built-in names that are not live.
+	pub fn disabled_roster(
+		&self,
+	) -> impl Iterator<Item = &Str> + Clone + DoubleEndedIterator + FusedIterator + '_ {
+		self
+			.user_visible_reserved
+			.iter()
+			.filter(|name| !self.live.contains_key(*name))
 	}
 
 	/// Computes the exact live slot names for one frozen session policy.
@@ -1980,6 +2017,9 @@ impl Registry {
 		worker_name: Str,
 	) -> Result<(), RegistryError> {
 		let name = spec.name.clone();
+		if claims.claimant == "omp/core" {
+			return Err(RegistryError::ReservedClaimant { name });
+		}
 		let rev = spec.rev.clone();
 		let value = serde_json::from_slice(&spec.schema).map_err(|source| {
 			RegistryError::InvalidSchema { name: name.clone(), rev: rev.clone(), source }

@@ -1823,13 +1823,8 @@ pub(crate) fn production_registry<
 		ask_presenter.unwrap_or_else(|| Arc::new(omp_tools::ask::HeadlessPresenter)),
 	);
 
-	for dynamic in dynamic_tools {
-		dynamic.register(&mut registry)?;
-	}
-	for factory in dynamic_tool_factories {
-		factory.register(&mut registry)?;
-	}
 	let search_bridge = Arc::new(SearchBridgeHost::new(search));
+	registry.protect_user_visible_core(["browser"]);
 	if browser_settings.enabled && tool_settings.enabled("browser") {
 		let browser_daemon = BrowserDaemon::start(blobs.clone(), *browser_settings);
 		registry.register(
@@ -1837,8 +1832,6 @@ pub(crate) fn production_registry<
 			Presentation::Device,
 			builtin_device_claims(),
 		)?;
-	} else {
-		registry.protect_core_claims(["browser"]);
 	}
 	let computer = ComputerSessionHost::new(blobs.clone());
 	registry.register(
@@ -1864,6 +1857,7 @@ pub(crate) fn production_registry<
 	registry.unlist_from_roster("report_issue")?;
 	let reflection_bridge = Arc::new(ReflectionBridgeHost::new());
 	let memory_capabilities = memory.capabilities();
+	registry.protect_user_visible_core(["retain"]);
 	if memory_capabilities.writable {
 		registry.register(
 			omp_tools::memory::retain_tool(Arc::clone(memory)),
@@ -1871,6 +1865,7 @@ pub(crate) fn production_registry<
 			builtin_device_claims(),
 		)?;
 	}
+	registry.protect_user_visible_core(["recall", "reflect"]);
 	if memory_capabilities.searchable {
 		registry.register(
 			omp_tools::memory::recall_tool(Arc::clone(memory)),
@@ -1883,6 +1878,7 @@ pub(crate) fn production_registry<
 			builtin_device_claims(),
 		)?;
 	}
+	registry.protect_user_visible_core(["memory_edit"]);
 	if memory_capabilities.editable {
 		registry.register(
 			omp_tools::memory_edit::tool(Arc::clone(memory)),
@@ -1890,6 +1886,7 @@ pub(crate) fn production_registry<
 			builtin_device_claims(),
 		)?;
 	}
+	registry.protect_core_claims(["manage_skill", "learn"]);
 	if autolearn_settings.enabled {
 		if let Some(managed_skills_root) = content.managed_skills_root {
 			let authority = Arc::new(ManagedSkills::new(managed_skills_root, content.authored_skills));
@@ -1980,24 +1977,20 @@ pub(crate) fn production_registry<
 			hashline_headers:   tool_settings.enabled("edit") && selected_edit.family.as_str() == "hl",
 		},
 	);
+	registry.protect_user_visible_core(["read"]);
 	if tool_settings.enabled("read") {
 		registry.register(read, Presentation::Slot, core_claims())?;
-	} else {
-		registry.protect_core_claims(["read"]);
 	}
 	let fetch = omp_tools::fetch::tool(read_sources.clone());
+	registry.protect_user_visible_core(["fetch"]);
 	if tool_settings.enabled("fetch") && tool_settings.fetch_enabled {
 		registry.register(fetch, Presentation::Slot, core_claims())?;
-	} else {
-		registry.protect_core_claims(["fetch"]);
 	}
+	registry.protect_user_visible_core(["web_search"]);
 	if tool_settings.enabled("web_search") {
 		let web_search = omp_tools::web_search::tool(Arc::clone(&search_bridge));
 		registry.register(web_search, Presentation::Slot, core_claims())?;
-	} else {
-		registry.protect_core_claims(["web_search"]);
 	}
-
 	let edit_observer = omp_tools::edit::observer::EditObserver::new(
 		omp_tools::edit::observer::EditBlackboxConfig {
 			path: tool_settings.edit_blackbox_path.as_ref().map(|path| {
@@ -2048,6 +2041,7 @@ pub(crate) fn production_registry<
 		edit_observer,
 		tool_settings.edit_guard_generated,
 	));
+	registry.protect_user_visible_core(["edit"]);
 	if tool_settings.enabled("edit") {
 		let mut edits = [
 			(
@@ -2108,8 +2102,6 @@ pub(crate) fn production_registry<
 				_ => unreachable!(),
 			}
 		}
-	} else {
-		registry.protect_core_claims(["edit"]);
 	}
 	let write = omp_tools::write::tool_with_policy_and_conflicts(
 		documents.clone(),
@@ -2117,11 +2109,11 @@ pub(crate) fn production_registry<
 		tool_settings.format_policy,
 		tool_settings.edit_guard_generated,
 	);
+	registry.protect_user_visible_core(["write"]);
 	if tool_settings.enabled("write") {
 		registry.register(write, Presentation::Slot, core_claims())?;
-	} else {
-		registry.protect_core_claims(["write"]);
 	}
+	registry.protect_user_visible_core(["lsp"]);
 	if tool_settings.enabled("lsp") {
 		let maximum = tool_settings
 			.max_timeout
@@ -2132,9 +2124,8 @@ pub(crate) fn production_registry<
 			Presentation::Slot,
 			core_claims(),
 		)?;
-	} else {
-		registry.protect_core_claims(["lsp"]);
 	}
+	registry.protect_user_visible_core(["debug"]);
 	if tool_settings.enabled("debug") {
 		let maximum = tool_settings
 			.max_timeout
@@ -2145,8 +2136,6 @@ pub(crate) fn production_registry<
 			Presentation::Slot,
 			core_claims(),
 		)?;
-	} else {
-		registry.protect_core_claims(["debug"]);
 	}
 	let search = WorkspaceSearchAdapter::new(
 		workspace.clone(),
@@ -2155,34 +2144,30 @@ pub(crate) fn production_registry<
 		Arc::clone(&resolvers),
 	);
 	let grep = omp_tools::grep::tool(search.clone(), read_blobs.clone());
+	registry.protect_user_visible_core(["grep"]);
 	if tool_settings.enabled("grep") {
 		registry.register(grep, Presentation::Slot, core_claims())?;
-	} else {
-		registry.protect_core_claims(["grep"]);
 	}
 	let glob = omp_tools::glob::tool(search, read_blobs);
+	registry.protect_user_visible_core(["glob"]);
 	if tool_settings.enabled("glob") {
 		registry.register(glob, Presentation::Slot, core_claims())?;
-	} else {
-		registry.protect_core_claims(["glob"]);
 	}
+	registry.protect_user_visible_core(["ast_grep"]);
 	if tool_settings.enabled("ast_grep") {
 		registry.register(
 			omp_tools::ast_grep::tool(workspace.root().to_path_buf()),
 			Presentation::Slot,
 			core_claims(),
 		)?;
-	} else {
-		registry.protect_core_claims(["ast_grep"]);
 	}
+	registry.protect_user_visible_core(["ast_edit"]);
 	if tool_settings.enabled("ast_edit") {
 		registry.register(
 			omp_tools::ast_edit::tool(workspace.root().to_path_buf(), previews.clone()),
 			Presentation::Slot,
 			core_claims(),
 		)?;
-	} else {
-		registry.protect_core_claims(["ast_edit"]);
 	}
 	let prelude = Arc::new(build_prelude_table(workers)?);
 	let helper_docs = prelude
@@ -2194,6 +2179,7 @@ pub(crate) fn production_registry<
 		.collect::<Vec<_>>();
 	let eval_host = Arc::new(SessionBridgeHost::new());
 	let mut eval_control = EvalSessionControl::default();
+	registry.protect_user_visible_core(["eval"]);
 	if tool_settings.enabled("eval") {
 		match preflight_python_eval(
 			Arc::clone(&eval_host),
@@ -2224,14 +2210,12 @@ pub(crate) fn production_registry<
 				);
 			},
 		}
-	} else {
-		registry.protect_core_claims(["eval"]);
 	}
+	registry.protect_user_visible_core(["todo"]);
 	if tool_settings.enabled("todo") {
 		registry.register(omp_tools::todo::tool(), Presentation::Slot, core_claims())?;
-	} else {
-		registry.protect_core_claims(["todo"]);
 	}
+	registry.protect_user_visible_core(["ask"]);
 	if tool_settings.enabled("ask") {
 		registry.register(
 			omp_tools::ask::tool_with_vocalizer(
@@ -2241,15 +2225,13 @@ pub(crate) fn production_registry<
 			Presentation::Slot,
 			core_claims(),
 		)?;
-	} else {
-		registry.protect_core_claims(["ask"]);
 	}
+	registry.protect_core_claims(["think"]);
 	if tool_settings.enabled("think") {
 		registry.register(omp_tools::think::tool(), Presentation::Slot, core_claims())?;
 		registry.unlist_from_roster("think")?;
-	} else {
-		registry.protect_core_claims(["think"]);
 	}
+	registry.protect_core_claims(["goal"]);
 	if let Some(goal_control) = goal_control {
 		registry.register(
 			omp_tools::goal::tool(GoalControlAdapter(goal_control)),
@@ -2257,24 +2239,21 @@ pub(crate) fn production_registry<
 			core_claims(),
 		)?;
 	}
+	registry.protect_core_claims(["yield"]);
 	if tool_settings.enabled("yield") {
 		// Children finalize through `yield`; the top-level agent never
 		// advertises it, so registration is selection-only (`Hidden`).
 		registry.register(omp_tools::yield_tool::tool(), Presentation::Hidden, core_claims())?;
-	} else {
-		registry.protect_core_claims(["yield"]);
 	}
 	let checkpoint_control = AgentCheckpointControl::default();
 	let (checkpoint, rewind) = omp_tools::checkpoint::tools(checkpoint_control.clone());
+	registry.protect_user_visible_core(["checkpoint"]);
 	if tool_settings.enabled("checkpoint") {
 		registry.register(checkpoint, Presentation::Slot, core_claims())?;
-	} else {
-		registry.protect_core_claims(["checkpoint"]);
 	}
+	registry.protect_user_visible_core(["rewind"]);
 	if tool_settings.enabled("rewind") {
 		registry.register(rewind, Presentation::Slot, core_claims())?;
-	} else {
-		registry.protect_core_claims(["rewind"]);
 	}
 	let catalog = DeviceCatalog::default();
 	let xd_installed = tool_settings.enabled("xd") && xd_enabled(policy);
@@ -2285,6 +2264,7 @@ pub(crate) fn production_registry<
 			previews.clone(),
 		)));
 	}
+	registry.protect_user_visible_core(["bash"]);
 	if tool_settings.enabled("bash") && shell_settings.enabled {
 		let sibling_tools = registry
 			.live_identities()
@@ -2342,8 +2322,12 @@ pub(crate) fn production_registry<
 			time::Duration::from_millis(shell_settings.auto_background.threshold_ms),
 		);
 		registry.register(shell, Presentation::Slot, core_claims())?;
-	} else {
-		registry.protect_core_claims(["bash"]);
+	}
+	for dynamic in dynamic_tools {
+		dynamic.register(&mut registry)?;
+	}
+	for factory in dynamic_tool_factories {
+		factory.register(&mut registry)?;
 	}
 	registry.protect_live_claims();
 	let flattened_slots = if policy == ToolsPolicy::ToolOnly {

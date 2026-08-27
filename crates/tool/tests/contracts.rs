@@ -804,7 +804,7 @@ fn unlist_from_roster_omits_user_roster_and_keeps_model_presentation() {
 	let unknown = registry
 		.unlist_from_roster("missing")
 		.expect_err("unlisting an unregistered name is an error");
-	assert!(matches!(unknown, RegistryError::UnlistUnknown(name) if name == "missing"));
+	assert!(matches!(unknown, RegistryError::UnlistUnknown { name } if name == "missing"));
 
 	let visible = registry
 		.roster()
@@ -916,6 +916,40 @@ fn disabled_builtin_name_cannot_be_claimed_by_extension() {
 		RegistryError::CoreNameClaim { name, claimant, .. }
 			if name == "shell" && claimant == "publisher/extension"
 	));
+}
+
+#[test]
+fn worker_cannot_impersonate_core_claimant_namespace() {
+	let mut registry = Registry::new();
+	let error = registry
+		.register_worker(worker_spec("reserved", [4; 32]), Presentation::Slot, Claims {
+			precedence: Precedence::CORE,
+			claimant:   sf!("omp/core"),
+			replaces:   None,
+		})
+		.expect_err("worker must not use the harness-only 'omp/core' namespace");
+	assert!(matches!(error, RegistryError::ReservedClaimant { name } if name == "reserved"));
+}
+
+#[test]
+fn disabled_roster_lists_user_visible_reserved_names() {
+	let mut registry = Registry::new();
+	registry.protect_user_visible_core(["read", "browser"]);
+	registry.protect_core_claims(["think", "yield"]);
+	let disabled = registry.disabled_roster().collect::<Vec<_>>();
+	assert!(disabled.contains(&&Str::new("read")));
+	assert!(disabled.contains(&&Str::new("browser")));
+	assert!(!disabled.contains(&&Str::new("think")));
+	assert!(!disabled.contains(&&Str::new("yield")));
+
+	registry
+		.register(
+			fake_tool(1, "read", Arc::new(AtomicUsize::new(0))).named("read"),
+			Presentation::Slot,
+			claims("omp/core", Precedence::CORE),
+		)
+		.expect("read live claim removes it from disabled roster");
+	assert!(!registry.disabled_roster().any(|name| name == "read"));
 }
 
 #[test]

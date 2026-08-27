@@ -6202,6 +6202,7 @@ impl TryFrom<ToolComplete> for WorkerCompletion {
 
 fn validate_registrations(tools: &[ToolDecl]) -> Result<(), WorkerError> {
 	let mut names = HashSet::with_capacity(tools.len());
+	let mut roots = HashSet::with_capacity(tools.len());
 	for tool in tools {
 		let Some(definition) = &tool.definition else {
 			return Err(WorkerError::Protocol(sf!("registered tool has no definition")));
@@ -6209,6 +6210,11 @@ fn validate_registrations(tools: &[ToolDecl]) -> Result<(), WorkerError> {
 		if definition.name.is_empty() || tool.rev.is_empty() {
 			return Err(WorkerError::Protocol(sf!(
 				"registered tool name and revision must be nonempty",
+			)));
+		}
+		if tool.extension_id == "omp/core" {
+			return Err(WorkerError::Protocol(sf!(
+				"worker extension id 'omp/core' is reserved for harness core tools"
 			)));
 		}
 		let Some(tool_def::Input::JsonSchema(json_schema)) = definition.input.as_ref() else {
@@ -6226,6 +6232,12 @@ fn validate_registrations(tools: &[ToolDecl]) -> Result<(), WorkerError> {
 			return Err(WorkerError::Protocol(Str::from(format!(
 				"worker registered duplicate tool identity: {}@{}",
 				definition.name, tool.rev
+			))));
+		}
+		if !roots.insert((tool.extension_id.as_str(), definition.name.as_str())) {
+			return Err(WorkerError::Protocol(Str::from(format!(
+				"worker registered more than one revision of the same tool root: {} (extension {})",
+				definition.name, tool.extension_id
 			))));
 		}
 	}
@@ -8147,6 +8159,56 @@ async def worker_prelude_round_trip(patches, *, strategy: str = "sequential"):
 				"patches": ["first", "second"],
 				"strategy": "parallel",
 			})
+		);
+	}
+
+	#[test]
+	fn validate_registrations_rejects_reserved_and_ambiguous_declarations() {
+		let reserved = ToolDecl {
+			extension_id: "omp/core".to_owned(),
+			definition: Some(ToolDef {
+				name:        "reserved".to_owned(),
+				description: "reserved".to_owned(),
+				input:       Some(tool_def::Input::JsonSchema(tool_def::JsonSchema {
+					schema_json: Bytes::from_static(br#"{"type":"object"}"#),
+					strict:      None,
+				})),
+			}),
+			rev: "1".to_owned(),
+			constraint: None,
+			summary: String::new(),
+			docs: String::new(),
+			..ToolDecl::default()
+		};
+		let error = validate_registrations(&[reserved])
+			.expect_err("reserved extension id 'omp/core' is rejected");
+		assert!(
+			matches!(error, WorkerError::Protocol(message) if message == "worker extension id 'omp/core' is reserved for harness core tools")
+		);
+
+		let ambiguous_base = ToolDecl {
+			extension_id: "extension/example".to_owned(),
+			definition: Some(ToolDef {
+				name:        "ambiguous".to_owned(),
+				description: "ambiguous".to_owned(),
+				input:       Some(tool_def::Input::JsonSchema(tool_def::JsonSchema {
+					schema_json: Bytes::from_static(br#"{"type":"object"}"#),
+					strict:      None,
+				})),
+			}),
+			constraint: None,
+			summary: String::new(),
+			docs: String::new(),
+			..ToolDecl::default()
+		};
+		let mut first = ambiguous_base.clone();
+		first.rev = "1".to_owned();
+		let mut second = ambiguous_base;
+		second.rev = "2".to_owned();
+		let error = validate_registrations(&[first, second])
+			.expect_err("multiple revisions of the same root from one claimant are rejected");
+		assert!(
+			matches!(error, WorkerError::Protocol(message) if message.contains("more than one revision of the same tool root"))
 		);
 	}
 }
