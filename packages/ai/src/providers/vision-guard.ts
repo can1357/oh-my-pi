@@ -300,22 +300,45 @@ export function supportsComputerScreenshotReferences(model: Model, screenshot?: 
 }
 
 /**
+ * Endpoint that actually serves an `anthropic` provider model, mirroring
+ * `resolveAnthropicBaseUrl`: Foundry redirects requests away from an empty
+ * `baseUrl`, an explicitly configured non-official `baseUrl` wins over the
+ * gateway fallback, and `ANTHROPIC_BASE_URL` routes through an enterprise
+ * gateway ahead of the official default. `undefined` means the first-party
+ * default, which both Anthropic endpoint predicates already treat as official.
+ */
+function resolveEffectiveAnthropicBaseUrl(model: Model): string | undefined {
+	if (isFoundryEnabled()) {
+		const foundryBaseUrl = $env.FOUNDRY_BASE_URL?.trim();
+		if (foundryBaseUrl) return foundryBaseUrl;
+	}
+	const configured = model.baseUrl?.trim() || undefined;
+	if (configured && !isOfficialAnthropicApiUrl(configured)) return configured;
+	return $env.ANTHROPIC_BASE_URL?.trim() || configured;
+}
+
+/**
  * Whether an `anthropic-messages` model actually dispatches to the first-party
- * Claude API, mirroring `resolveAnthropicBaseUrl`: Foundry redirects requests
- * away from an empty `baseUrl`, an explicitly configured non-official `baseUrl`
- * wins over the gateway fallback, and `ANTHROPIC_BASE_URL` routes through an
- * enterprise gateway ahead of the official default. Only the first-party API
- * fetches image URLs; proxies and Foundry ignore them, so they must keep the
- * inline bytes.
+ * Claude API. Only that API fetches image URLs; proxies and Foundry ignore
+ * them, so they must keep the inline bytes.
  */
 function servesOfficialAnthropicApi(model: Model): boolean {
 	if (model.provider !== "anthropic") return false;
-	if (isFoundryEnabled()) {
-		const foundryBaseUrl = $env.FOUNDRY_BASE_URL?.trim();
-		if (foundryBaseUrl) return isOfficialAnthropicApiUrl(foundryBaseUrl);
-	}
-	if (model.baseUrl && !isOfficialAnthropicApiUrl(model.baseUrl)) return false;
-	return isOfficialAnthropicApiUrl($env.ANTHROPIC_BASE_URL?.trim() || model.baseUrl);
+	return isOfficialAnthropicApiUrl(resolveEffectiveAnthropicBaseUrl(model));
+}
+
+/**
+ * Whether Anthropic file handles are usable for this model. The Files API lives
+ * on the first-party endpoint only, so a runtime `ANTHROPIC_BASE_URL` gateway or
+ * Foundry redirect makes an official `file_id` unresolvable at the endpoint that
+ * receives the request; the inline bytes have to be replayed instead.
+ */
+export function supportsAnthropicProviderFileEndpoint(model: Model): boolean {
+	return (
+		model.provider === "anthropic" &&
+		model.api === "anthropic-messages" &&
+		isOfficialAnthropicFilesApiBaseUrl(resolveEffectiveAnthropicBaseUrl(model))
+	);
 }
 
 /** Whether this model can replay a remote URL for an image with this media type. */
@@ -361,11 +384,7 @@ export function supportsProviderFileReference(
 	}
 	if (reference.provider === "anthropic") {
 		return (
-			typeof reference.id === "string" &&
-			reference.id.length > 0 &&
-			model.api === "anthropic-messages" &&
-			model.provider === "anthropic" &&
-			isOfficialAnthropicFilesApiBaseUrl(model.baseUrl)
+			typeof reference.id === "string" && reference.id.length > 0 && supportsAnthropicProviderFileEndpoint(model)
 		);
 	}
 	return (

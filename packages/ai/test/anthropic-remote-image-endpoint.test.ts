@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
-import { supportsRemoteImageUrls } from "@oh-my-pi/pi-ai/providers/vision-guard";
+import { supportsProviderFileReference, supportsRemoteImageUrls } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import type { Model, ModelSpec, UserMessage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { withEnv } from "./helpers";
@@ -42,8 +42,24 @@ const userWithReferencedImage: UserMessage = {
 	timestamp: 0,
 };
 
-function serializedImageSource(model: Model<"anthropic-messages">): Record<string, unknown> {
-	const params = convertAnthropicMessages([userWithReferencedImage], model, false);
+const ANTHROPIC_FILE_ID = "file_011CNha8iCJcU1wXNR6q4V8w";
+
+const anthropicFileReference = { provider: "anthropic" as const, id: ANTHROPIC_FILE_ID };
+
+const userWithProviderFileImage: UserMessage = {
+	role: "user",
+	content: [
+		{ type: "text", text: "describe" },
+		{ type: "image", data: PNG_B64, mimeType: "image/png", providerFile: anthropicFileReference },
+	],
+	timestamp: 0,
+};
+
+function serializedImageSource(
+	model: Model<"anthropic-messages">,
+	message: UserMessage = userWithReferencedImage,
+): Record<string, unknown> {
+	const params = convertAnthropicMessages([message], model, false);
 	const blocks = params.at(-1)?.content as unknown as Array<Record<string, unknown>>;
 	expect(Array.isArray(blocks)).toBe(true);
 	const image = blocks.find(block => block.type === "image");
@@ -91,6 +107,50 @@ describe("Anthropic remote image URL capability", () => {
 				const model = makeAnthropicModel("https://api.anthropic.com");
 				expect(supportsRemoteImageUrls(model, { mimeType: "image/png" })).toBe(false);
 				expect(serializedImageSource(model)).toEqual({
+					type: "base64",
+					media_type: "image/png",
+					data: PNG_B64,
+				});
+			},
+		);
+	});
+});
+
+describe("Anthropic provider-file endpoint capability", () => {
+	it("replays a file ID on the official API", async () => {
+		await withEnv(DEFAULT_ANTHROPIC_ENV, () => {
+			const official = makeAnthropicModel("https://api.anthropic.com");
+			expect(supportsProviderFileReference(official, anthropicFileReference, { mimeType: "image/png" })).toBe(true);
+			expect(serializedImageSource(official, userWithProviderFileImage)).toEqual({
+				type: "file",
+				file_id: ANTHROPIC_FILE_ID,
+			});
+		});
+	});
+
+	it("keeps inline bytes when an enterprise gateway reroutes the request", async () => {
+		await withEnv({ ...DEFAULT_ANTHROPIC_ENV, ANTHROPIC_BASE_URL: "https://gateway.example.invalid" }, () => {
+			const model = makeAnthropicModel("https://api.anthropic.com");
+			expect(supportsProviderFileReference(model, anthropicFileReference, { mimeType: "image/png" })).toBe(false);
+			expect(serializedImageSource(model, userWithProviderFileImage)).toEqual({
+				type: "base64",
+				media_type: "image/png",
+				data: PNG_B64,
+			});
+		});
+	});
+
+	it("keeps inline bytes when Foundry redirects the request", async () => {
+		await withEnv(
+			{
+				...DEFAULT_ANTHROPIC_ENV,
+				CLAUDE_CODE_USE_FOUNDRY: "true",
+				FOUNDRY_BASE_URL: "https://resource.services.ai.azure.com/anthropic",
+			},
+			() => {
+				const model = makeAnthropicModel("https://api.anthropic.com");
+				expect(supportsProviderFileReference(model, anthropicFileReference, { mimeType: "image/png" })).toBe(false);
+				expect(serializedImageSource(model, userWithProviderFileImage)).toEqual({
 					type: "base64",
 					media_type: "image/png",
 					data: PNG_B64,
