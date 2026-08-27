@@ -207,7 +207,9 @@ export function supportsComputerScreenshotReferences(
 		);
 	}
 	if (typeof screenshot?.image_url !== "string") return false;
-	if (isRemoteImageUrl(screenshot.image_url)) return true;
+	if (isRemoteImageUrl(screenshot.image_url)) {
+		return supportsRemoteImageUrls(model, { mimeType: "image/png" });
+	}
 	const inlineImage = decodeDataUri(screenshot.image_url);
 	return inlineImage !== undefined && getUsableInlineImageMimeType(inlineImage) !== undefined;
 }

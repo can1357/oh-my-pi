@@ -27,6 +27,7 @@ import {
 	encodeResponsesToolResultOutput,
 	hoistInterleavedResponsesToolBatchMessages,
 	parseTextSignature,
+	resolveResponsesComputerScreenshot,
 	splitResponsesOrphanOutput,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
@@ -917,18 +918,27 @@ export function buildOpenAiNativeHistory(
 				continue;
 			}
 			if (computerCallIds.has(normalized.callId)) {
-				if (message.providerMetadata?.type === "computer") {
+				const computerScreenshot = resolveResponsesComputerScreenshot(
+					message,
+					referenceModel,
+					supportsImageDetailOriginal,
+				);
+				if (computerScreenshot) {
 					input.push({
 						type: "computer_call_output",
 						call_id: normalized.callId,
-						output: structuredCloneJSON(message.providerMetadata.screenshot),
-						acknowledged_safety_checks: structuredCloneJSON(message.providerMetadata.acknowledgedSafetyChecks),
+						output: structuredCloneJSON(computerScreenshot),
+						acknowledged_safety_checks: structuredCloneJSON(
+							message.providerMetadata?.type === "computer"
+								? message.providerMetadata.acknowledgedSafetyChecks
+								: undefined,
+						),
 					});
 					msgIndex++;
 					continue;
 				}
 
-				const { outputText } = encodeResponsesToolResultOutput(
+				const { outputText } = encodeResponsesOrphanToolResultOutput(
 					message,
 					referenceModel,
 					supportsImageDetailOriginal,

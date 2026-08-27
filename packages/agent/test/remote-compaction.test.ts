@@ -926,7 +926,7 @@ describe("buildOpenAiNativeHistory call-id tracking", () => {
 });
 
 describe("buildOpenAiNativeHistory computer calls", () => {
-	const computerModel = makeOpenAiModel({ supportsComputerUse: true });
+	const computerModel = makeOpenAiModel({ input: ["text", "image"], supportsComputerUse: true });
 	const pendingSafetyChecks = [{ id: "safe_1", code: "confirm", message: "Confirm click" }];
 	const acknowledgedSafetyChecks = [{ id: "safe_1", code: "confirm", message: "Confirm click" }];
 
@@ -1022,6 +1022,66 @@ describe("buildOpenAiNativeHistory computer calls", () => {
 		expect(JSON.stringify(items)).not.toContain("file_unusable_fallback");
 	});
 
+	test("falls back to canonical images for unsupported compaction screenshot references", () => {
+		const compactionModel = makeOpenAiModel({
+			input: ["text", "image"],
+			supportsComputerUse: true,
+			remoteCompaction: {
+				enabled: true,
+				api: "openai-responses",
+				endpoint: "https://proxy.example.invalid/v1/responses/compact",
+			},
+		});
+		for (const screenshot of [
+			{ type: "computer_screenshot" as const, file_id: "file_foreign_screen" },
+			{ type: "computer_screenshot" as const, image_url: "not-a-url" },
+		]) {
+			const result: ToolResultMessage = {
+				role: "toolResult",
+				toolCallId: "call_computer_1|item_computer_1",
+				toolName: "computer",
+				content: [{ type: "image", data: PNG_B64, mimeType: "image/png" }],
+				isError: false,
+				timestamp: Date.now(),
+				providerMetadata: { type: "computer", screenshot, acknowledgedSafetyChecks },
+			};
+
+			const items = buildOpenAiNativeHistory([computerAssistant(), result], compactionModel);
+
+			expect(items.at(-1)).toEqual({
+				type: "computer_call_output",
+				call_id: "call_computer_1",
+				output: { type: "computer_screenshot", image_url: `data:image/png;base64,${PNG_B64}` },
+				acknowledged_safety_checks: acknowledgedSafetyChecks,
+			});
+			expect(JSON.stringify(items)).not.toContain("file_foreign_screen");
+			expect(JSON.stringify(items)).not.toContain("not-a-url");
+		}
+	});
+
+	test("demotes computer exchanges without a replayable screenshot", () => {
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_computer_1|item_computer_1",
+			toolName: "computer",
+			content: [],
+			isError: false,
+			timestamp: Date.now(),
+			providerMetadata: {
+				type: "computer",
+				screenshot: { type: "computer_screenshot", image_url: "not-a-url" },
+				acknowledgedSafetyChecks,
+			},
+		};
+
+		const items = buildOpenAiNativeHistory([computerAssistant(), result], computerModel);
+
+		expect(items).toHaveLength(1);
+		expect(items[0]).toMatchObject({ type: "message", role: "assistant" });
+		expect(items.some(item => item.type === "computer_call" || item.type === "computer_call_output")).toBe(false);
+		expect(JSON.stringify(items)).not.toContain("not-a-url");
+	});
+
 	test("registers native provider-payload computer calls for exact output pairing", () => {
 		const assistant = computerAssistant();
 		assistant.providerPayload = {
@@ -1048,7 +1108,7 @@ describe("buildOpenAiNativeHistory computer calls", () => {
 			timestamp: Date.now(),
 			providerMetadata: {
 				type: "computer",
-				screenshot: { type: "computer_screenshot", image_url: "data:image/png;base64,AAEC" },
+				screenshot: { type: "computer_screenshot", image_url: `data:image/png;base64,${PNG_B64}` },
 				acknowledgedSafetyChecks: [],
 			},
 		};
@@ -1057,7 +1117,7 @@ describe("buildOpenAiNativeHistory computer calls", () => {
 		expect(items[1]).toEqual({
 			type: "computer_call_output",
 			call_id: "call_computer_1",
-			output: { type: "computer_screenshot", image_url: "data:image/png;base64,AAEC" },
+			output: { type: "computer_screenshot", image_url: `data:image/png;base64,${PNG_B64}` },
 			acknowledged_safety_checks: [],
 		});
 	});

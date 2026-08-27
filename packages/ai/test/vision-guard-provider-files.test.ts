@@ -152,6 +152,35 @@ describe("OpenAI provider-file capability", () => {
 		);
 	});
 
+	it("applies provider URL replay policy to computer screenshots", () => {
+		const screenshot = {
+			type: "computer_screenshot" as const,
+			image_url: "https://images.example.invalid/screenshot.png",
+		};
+		expect(
+			supportsComputerScreenshotReferences(
+				makeResponsesTargetModel("openai-responses", "openai", "https://api.openai.com/v1"),
+				screenshot,
+			),
+		).toBe(true);
+		expect(
+			supportsComputerScreenshotReferences(
+				makeResponsesTargetModel("openai-responses", "ollama", "http://localhost:11434/v1"),
+				screenshot,
+			),
+		).toBe(false);
+		expect(
+			supportsComputerScreenshotReferences(
+				makeResponsesTargetModel(
+					"openai-responses",
+					"bedrock-mantle",
+					"https://bedrock-mantle.us-east-1.api.aws/v1",
+				),
+				screenshot,
+			),
+		).toBe(false);
+	});
+
 	it("requires the official OpenAI provider and endpoint", () => {
 		const reference = { provider: "openai", id: "file_image_123" };
 		const image = { mimeType: "image/png" };

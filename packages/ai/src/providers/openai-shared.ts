@@ -40,6 +40,7 @@ import {
 	type AssistantMessage,
 	type CacheRetention,
 	type ComputerAction,
+	type ComputerScreenshotRef,
 	type ComputerToolCallMetadata,
 	type Context,
 	type ImageContent,
@@ -2570,18 +2571,30 @@ function computerScreenshotFromContent<TApi extends Api>(
 	toolResult: ToolResultMessage,
 	model: Model<TApi>,
 	supportsImageDetailOriginal: boolean,
-): { type: "computer_screenshot"; file_id?: string; image_url?: string } | undefined {
+): ComputerScreenshotRef | undefined {
 	for (const block of toolResult.content) {
 		if (block.type !== "image" || !hasSupportedImageSource(model, block)) continue;
 		const image = convertResponsesInputImage(block, supportsImageDetailOriginal, model);
-		const screenshot = image.file_id
-			? { type: "computer_screenshot" as const, file_id: image.file_id }
-			: image.image_url
-				? { type: "computer_screenshot" as const, image_url: image.image_url }
-				: undefined;
-		if (screenshot && supportsComputerScreenshotReferences(model, screenshot)) return screenshot;
+		if (image.file_id) {
+			const screenshot: ComputerScreenshotRef = { type: "computer_screenshot", file_id: image.file_id };
+			if (supportsComputerScreenshotReferences(model, screenshot)) return screenshot;
+		}
+		if (image.image_url) {
+			const screenshot: ComputerScreenshotRef = { type: "computer_screenshot", image_url: image.image_url };
+			if (supportsComputerScreenshotReferences(model, screenshot)) return screenshot;
+		}
 	}
 	return undefined;
+}
+
+export function resolveResponsesComputerScreenshot<TApi extends Api>(
+	toolResult: ToolResultMessage,
+	model: Model<TApi>,
+	supportsImageDetailOriginal: boolean,
+): ComputerScreenshotRef | undefined {
+	const metadata = toolResult.providerMetadata?.type === "computer" ? toolResult.providerMetadata : undefined;
+	if (metadata && supportsComputerScreenshotReferences(model, metadata.screenshot)) return metadata.screenshot;
+	return computerScreenshotFromContent(toolResult, model, supportsImageDetailOriginal);
 }
 
 /** Appends one Responses tool result. */
@@ -2601,16 +2614,12 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 	const hasSupportedImageSourceInResult = toolResult.content.some(
 		(block): block is ImageContent => block.type === "image" && hasSupportedImageSource(model, block),
 	);
-	const contentScreenshot = isComputerCall
-		? computerScreenshotFromContent(toolResult, model, supportsImageDetailOriginal)
-		: undefined;
 	const computerMetadata = toolResult.providerMetadata?.type === "computer" ? toolResult.providerMetadata : undefined;
-	const metadataScreenshot =
-		computerMetadata && supportsComputerScreenshotReferences(model, computerMetadata.screenshot)
-			? computerMetadata.screenshot
-			: undefined;
+	const computerScreenshot = isComputerCall
+		? resolveResponsesComputerScreenshot(toolResult, model, supportsImageDetailOriginal)
+		: undefined;
 	const unsupportedComputerMetadata =
-		computerMetadata !== undefined && metadataScreenshot === undefined;
+		computerMetadata !== undefined && !supportsComputerScreenshotReferences(model, computerMetadata.screenshot);
 	if (unsupportedComputerMetadata && !hasSupportedImageSourceInResult) {
 		messages.push({
 			type: "message",
@@ -2619,7 +2628,6 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		} as ResponseInput[number]);
 		return;
 	}
-	const computerScreenshot = metadataScreenshot ?? contentScreenshot;
 	if (isComputerCall && computerScreenshot) {
 		if (strictResponsesPairing && !knownCallIds.has(normalized.callId)) {
 			messages.push({
