@@ -10,8 +10,8 @@ use std::{
 };
 
 use omp_agent::{
-	Agent, AgentEvent, AgentKind, AgentRunSummary, AgentSnapshot, AgentState, AgentStatus,
-	AgentTree, ApprovalBook, ApprovalInbox, ApprovalRoute, Budget, EventSubscription,
+	AbortDisposition, Agent, AgentEvent, AgentKind, AgentRunSummary, AgentSnapshot, AgentState,
+	AgentStatus, AgentTree, ApprovalBook, ApprovalInbox, ApprovalRoute, Budget, EventSubscription,
 	InProcTurnClient, TurnId,
 };
 use omp_catalog::{ModelKey, ProviderId, snapshot};
@@ -62,9 +62,15 @@ pub enum HeadlessError {
 	/// Session settings could not be loaded.
 	#[error(transparent)]
 	Settings(#[from] SettingsManagerError),
-	/// The project state directory path could not be derived.
-	#[error("could not derive the project state directory")]
-	ProjectStateDirectory(#[source] io::Error),
+	/// The project state directory could not be derived.
+	#[error("could not derive the project state directory {path:?}")]
+	ProjectStateDirectory {
+		/// Project root whose state directory was being opened.
+		path:   PathBuf,
+		/// Underlying state-directory error.
+		#[source]
+		source: io::Error,
+	},
 	/// A session state directory could not be created.
 	#[error("could not create session state directory")]
 	EnsureStateDirectory(#[source] chat::ChatError),
@@ -109,8 +115,11 @@ pub enum HeadlessError {
 	#[error("could not bind the reflection bridge")]
 	ReflectionBridge(#[source] omp_envd::memory::ReflectionBindingError),
 	/// The requested tool is not enabled for the next submitted turn.
-	#[error("tool `{0}` is not enabled")]
-	DisabledTool(Str),
+	#[error("tool `{name}` is not enabled")]
+	DisabledTool {
+		/// Disabled tool name.
+		name: Str,
+	},
 	/// One attached host's model-visible tool roster could not be replaced.
 	#[error("could not replace the host tools")]
 	ReplaceHostTools(#[source] omp_tool::RegistryError),
@@ -159,25 +168,20 @@ const _: () = assert!(
 ///
 /// Driver composition publishes these so app adapters decide presentation.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum HeadlessNotice {
-	/// The journaled session model is unavailable; resume used the catalog
-	/// fallback without changing the session pin.
-	SessionModelUnavailable {
-		/// Journaled or launch selector that could not be selected.
-		saved:    Str,
-		/// Deterministic catalog fallback used for this process.
-		fallback: Str,
-	},
+pub struct HeadlessNotice {
+	/// Journaled or launch selector that could not be selected.
+	pub saved:    Str,
+	/// Deterministic catalog fallback used for this process.
+	pub fallback: Str,
 }
 
 impl fmt::Display for HeadlessNotice {
 	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::SessionModelUnavailable { saved, fallback } => {
-				write!(formatter, "Session model `{saved}` is unavailable; ")?;
-				write!(formatter, "resumed with `{fallback}` without changing the session pin.")
-			},
-		}
+		write!(
+			formatter,
+			"Session model `{}` is unavailable; resumed with `{}` without changing the session pin.",
+			self.saved, self.fallback
+		)
 	}
 }
 
@@ -352,7 +356,9 @@ fn validate_extension_host_keys<'a>(
 /// The project Environment must outlive every authority that borrows it, so
 /// those owners are grouped in one `EnvironmentBound` field declared before
 /// `_environment`; Rust drops fields in declaration order, which keeps the
-/// Environment — still declared last — the final drop.
+/// Environment — still declared last — the final drop. `environment_bound`
+/// drops before `_ephemeral_sessions` so live session resources do not borrow
+/// the temporary directory after it has been removed.
 pub struct HeadlessSession {
 	advise_queue:        omp_agent::advisor::AdvisorAdviceQueue,
 	state:               AgentState,
@@ -373,7 +379,6 @@ pub struct HeadlessSession {
 	_inference_registry: InferenceRegistry,
 	_catalog:            Arc<snapshot::Catalog>,
 	_memory_extraction:  Option<ExtractionWorker>,
-	_ephemeral_sessions: Option<chat::EphemeralSessions>,
 	_tool_policy:        HeadlessToolPolicy,
 	_lsp_enabled:        bool,
 	_compaction_methods: omp_agent::CompactionMethodOrder,
@@ -381,6 +386,7 @@ pub struct HeadlessSession {
 	_retry_policy:       omp_agent::RetryPolicy,
 	_forced_tool:        Mutex<Option<Str>>,
 	environment_bound:   EnvironmentBound,
+	_ephemeral_sessions: Option<chat::EphemeralSessions>,
 	_environment:        omp_envd::ProjectEnvironment,
 }
 
@@ -514,12 +520,9 @@ impl HeadlessSession {
 			&home,
 			&prompt_discovery_settings,
 		);
-		if !crate::discovery::roles::model_selector_allowed(catalog, &model_settings, model.as_str())
-		{
-			return Err(HeadlessError::MissingRoute(model));
-		}
+		let content = &prompt_discovery.content;
 		let state_dir = omp_env::project_state::directory(&data_dir, &root)
-			.map_err(HeadlessError::ProjectStateDirectory)?;
+			.map_err(|source| HeadlessError::ProjectStateDirectory { path: root.clone(), source })?;
 		let mut ephemeral_sessions = None;
 		let sessions_dir = match (&policy.session, policy.sessions_dir.as_ref()) {
 			(HeadlessSessionOpen::Ephemeral, Some(_)) => {
@@ -639,9 +642,14 @@ impl HeadlessSession {
 				| HeadlessSessionOpen::ContinueLatest
 		) {
 			let journal_path = sessions_dir.join(format!("{}.jsonl", session.id.as_str()));
-			let revived = omp_agent::revive_existing(&journal_path, session.journal, snapshot)?;
+			let mut revived = omp_agent::revive_existing(&journal_path, session.journal, snapshot)?;
+			if let Some(pending) = revived.journal.pending_turn().cloned() {
+				revived
+					.journal
+					.abort_turn(now_ms(), pending.turn_id.as_str(), AbortDisposition::Continue)
+					.map_err(|error| HeadlessError::Revival(error.into()))?;
+			}
 			session.journal = revived.journal;
-
 			snapshot = revived.snapshot;
 			if let Some(notice) = apply_revived_session_model(
 				&mut snapshot,
@@ -649,13 +657,13 @@ impl HeadlessSession {
 				revived.model_override.as_ref(),
 				&root,
 				&options.additional_roots,
-				chat::fallback_model_selector,
+				&model_settings,
+				options.credential_provider.as_ref(),
 			)? {
 				notices.push(notice);
 			}
 		}
 		apply_tool_policy(&mut snapshot, &policy.tools, policy.lsp_enabled);
-		let content = prompt_discovery.content;
 		for warning in content.warnings.iter() {
 			tracing::warn!(%warning, "headless content discovery warning");
 		}
@@ -956,7 +964,7 @@ impl HeadlessSession {
 	/// Forces one exact registered tool for the next submitted turn only.
 	pub fn force_tool_once(&self, name: Str) -> Result<(), HeadlessError> {
 		if !self.state.snapshot().enabled_tools.contains(&name) {
-			return Err(HeadlessError::DisabledTool(name));
+			return Err(HeadlessError::DisabledTool { name });
 		}
 		*self._forced_tool.lock() = Some(name);
 		Ok(())
@@ -1364,20 +1372,36 @@ fn apply_revived_session_model(
 	model_override: Option<&JournalModelChange>,
 	root: &Path,
 	additional_roots: &[PathBuf],
-	fallback_selector: fn(&snapshot::Catalog) -> Option<Str>,
+	model_settings: &omp_catalog::settings::ModelSettings,
+	credential_provider: Option<&ProviderId>,
 ) -> Result<Option<HeadlessNotice>, HeadlessError> {
 	let launch = snapshot.turn.params.model.clone();
 	if let Some(model) = model_override
 		&& !model.fallback
 	{
-		snapshot.turn.params.model = format!("{}/{}", model.model.provider.0, model.model.model.0);
+		snapshot.turn.params.model = model.model.model.0.to_string();
 	}
 	let mut notice = None;
-	if !chat::model_selector_is_selectable(catalog, &snapshot.turn.params.model) {
+	if !chat::model_selector_is_selectable(catalog, &snapshot.turn.params.model)
+		|| !crate::discovery::roles::model_selector_allowed(
+			catalog,
+			model_settings,
+			&snapshot.turn.params.model,
+		) || credential_provider.is_some_and(|provider| {
+		chat::resolve_model_provider(catalog, &snapshot.turn.params.model, Some(provider.as_str()))
+			.is_err()
+	}) {
 		let saved = Str::new(snapshot.turn.params.model.as_str());
-		let fallback = fallback_selector(catalog).ok_or(HeadlessError::NoSelectableModel)?;
+		let fallback = crate::discovery::roles::fallback_model_selector(catalog, model_settings)
+			.filter(|candidate| {
+				credential_provider.is_none_or(|provider| {
+					chat::resolve_model_provider(catalog, candidate.as_str(), Some(provider.as_str()))
+						.is_ok()
+				})
+			})
+			.ok_or(HeadlessError::NoSelectableModel)?;
 		snapshot.turn.params.model = fallback.as_str().to_owned();
-		notice = Some(HeadlessNotice::SessionModelUnavailable { saved, fallback });
+		notice = Some(HeadlessNotice { saved, fallback });
 	}
 	if snapshot.turn.params.model != launch {
 		let session_id = snapshot
@@ -1397,6 +1421,7 @@ fn apply_revived_session_model(
 		let projected =
 			chat::agent_snapshot(&blueprint, catalog, None).map_err(HeadlessError::AgentSnapshot)?;
 		snapshot.turn = projected.turn;
+		snapshot.enabled_tools = projected.enabled_tools;
 		snapshot.reasoning_dialect = projected.reasoning_dialect;
 	}
 	Ok(notice)
@@ -1478,7 +1503,7 @@ mod tests {
 						model:    JournalModelRef {
 							provider: JournalProviderId(sf!("gone")),
 							api:      sf!("openai"),
-							model:    JournalModelId(sf!("gone")),
+							model:    JournalModelId(sf!("gone/gone")),
 						},
 						fallback: false,
 					}),
@@ -1501,6 +1526,7 @@ mod tests {
 		let path = write_unavailable_model_journal(&root);
 		let journal = Journal::open(&path).expect("open journal");
 		let mut snapshot = launch_snapshot(catalog, &root, launch);
+		let model_settings = omp_catalog::settings::ModelSettings::default();
 		let revived = omp_agent::revive_existing(&path, journal, snapshot).expect("revive");
 		snapshot = revived.snapshot;
 		let notice = apply_revived_session_model(
@@ -1509,22 +1535,36 @@ mod tests {
 			revived.model_override.as_ref(),
 			&root,
 			&[],
-			chat::fallback_model_selector,
+			&model_settings,
+			None,
 		)
 		.expect("fallback applies");
-		let expected = chat::fallback_model_selector(catalog).expect("catalog fallback");
+		let expected = crate::discovery::roles::fallback_model_selector(catalog, &model_settings)
+			.expect("catalog fallback");
 		assert_eq!(snapshot.turn.params.model, expected.as_str());
 		assert_eq!(
 			notice,
-			Some(HeadlessNotice::SessionModelUnavailable {
-				saved:    Str::from("gone/gone"),
-				fallback: expected.clone(),
-			})
+			Some(HeadlessNotice { saved: Str::from("gone/gone"), fallback: expected.clone() })
 		);
 		assert_eq!(
 			snapshot.reasoning_dialect,
 			chat::interrupted_reasoning_dialect(catalog, expected.as_str())
 		);
+		let fallback_snapshot = chat::agent_snapshot(
+			&chat::session_blueprint(
+				expected.as_str(),
+				catalog,
+				&root,
+				&[],
+				&sf!("test-session"),
+				Arc::clone(&snapshot.registry),
+			)
+			.expect("fallback blueprint"),
+			catalog,
+			None,
+		)
+		.expect("fallback snapshot");
+		assert_eq!(snapshot.enabled_tools, fallback_snapshot.enabled_tools);
 		assert_eq!(
 			snapshot.turn.stream_watchdog,
 			crate::chat::model_stream_watchdog(catalog, expected.as_str())
@@ -1540,6 +1580,9 @@ mod tests {
 		let path = write_unavailable_model_journal(&root);
 		let journal = Journal::open(&path).expect("open journal");
 		let mut snapshot = launch_snapshot(catalog, &root, "apple-intelligence/apple-intelligence");
+		let mut model_settings = omp_catalog::settings::ModelSettings::default();
+		model_settings.enabled_models =
+			Box::new([omp_catalog::settings::PathScopedStringEntry::Bare(Str::new("no/such"))]);
 		let revived = omp_agent::revive_existing(&path, journal, snapshot).expect("revive");
 		snapshot = revived.snapshot;
 		let error = apply_revived_session_model(
@@ -1548,7 +1591,8 @@ mod tests {
 			revived.model_override.as_ref(),
 			&root,
 			&[],
-			|_| None,
+			&model_settings,
+			None,
 		)
 		.expect_err("empty catalog fallback");
 		assert!(matches!(error, HeadlessError::NoSelectableModel));

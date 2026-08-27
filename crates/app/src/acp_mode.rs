@@ -1388,7 +1388,6 @@ impl Runtime {
 			.get("thinking")
 			.and_then(Value::as_str)
 			.unwrap_or(&default_thinking);
-		let thinking = clamp_thinking_level(model, requested)?.to_owned();
 		launch_policy.session = if let Some(source) = fork {
 			HeadlessSessionOpen::Fork(source)
 		} else if let Some(source) = resume {
@@ -1430,6 +1429,8 @@ impl Runtime {
 				session_generation: generation,
 			});
 		}
+		let effective_model = headless.model().as_str().to_owned();
+		let thinking = clamp_thinking_level(&effective_model, requested)?.to_owned();
 		headless.set_thinking(reasoning_for(&thinking));
 		let session_id = Str::from(headless.session_id());
 		if capabilities.elicitation {
@@ -1476,7 +1477,7 @@ impl Runtime {
 			events,
 			meta: Mutex::new(AcpSessionMeta {
 				title: None,
-				model: model.to_owned(),
+				model: effective_model,
 				mode: mode.to_owned(),
 				thinking,
 				replay,
