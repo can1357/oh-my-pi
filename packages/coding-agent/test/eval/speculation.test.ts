@@ -45,19 +45,15 @@ describe("speculatable call scanner", () => {
 		expect(prompts('s = """completion("tripled")"""', "py")).toEqual([]);
 	});
 
-	// Regression: a string whose terminator could not be located used to fall
-	// through to scanning its own body, so a cell composing a meta-prompt that
-	// mentions completion('...') phantom-launched a billable call for text the
-	// runtime never runs. Mid-stream truncation is the common way in.
+	// Regression: an unlocatable terminator used to fall through to scanning the
+	// string's own body, phantom-launching a billable call.
 	test("never reads a string body as code", () => {
 		expect(prompts(`const p = "wrap completion('go') end`)).toEqual([]);
 		// biome-ignore lint/suspicious/noTemplateCurlyInString: an interpolation is what makes the terminator unfindable
 		expect(prompts("const p = `x ${y} completion('go')`;")).toEqual([]);
 	});
 
-	// The other half of that fix: a terminator that IS findable must be skipped
-	// past, not treated as end-of-scan, or one escaped string would blind the
-	// scanner to the rest of the cell.
+	// A findable terminator must be skipped past, not treated as end-of-scan.
 	test("skips an unreproducible string and keeps scanning after it", () => {
 		expect(prompts(`const p = "a\\\\b completion('skipped')"; completion("real");`)).toEqual(["real"]);
 	});
@@ -91,10 +87,8 @@ describe("speculatable call scanner", () => {
 });
 
 describe("speculation key", () => {
-	// Load-bearing: the launch side derives the key from source, the claim side
-	// derives it from the args the prelude actually sends. `completion("x")` with
-	// no options resolves to exactly `{ prompt: "x" }`, so these must agree or
-	// every speculation misses.
+	// The launch side keys off source, the claim side off the prelude's args; they
+	// must agree or every speculation misses.
 	test("matches between a scanned call and the prelude's bridge args", () => {
 		const [scanned] = findSpeculatableCalls('completion("do the thing")', "js");
 		expect(scanned).toBeDefined();
@@ -216,10 +210,8 @@ describe("speculation store", () => {
 });
 
 describe("eval bridge integration", () => {
-	// The seam that carries the whole feature: a parked result must satisfy the
-	// real call without the bridge dispatching a second completion. The stub
-	// session has no model registry, so a miss would surface as a thrown error
-	// rather than a silent second request.
+	// A parked result must satisfy the real call without a second dispatch. The stub
+	// session has no model registry, so a miss throws rather than silently re-requesting.
 	test("returns a parked speculation instead of dispatching the completion", async () => {
 		const session = { cwd: "/tmp" } as unknown as ToolSession;
 		let dispatched = 0;
@@ -251,9 +243,7 @@ describe("eval bridge integration", () => {
 		registerEvalSpeculation(session, speculation);
 		speculation.observe('completion("a different prompt")', "js");
 
-		// No parked entry for this prompt, so the bridge runs for real and fails
-		// against the stub session. The specific rejection is incidental; that it
-		// reaches the real path at all is the contract.
+		// The specific rejection is incidental; reaching the real path is the contract.
 		await expect(callSessionTool("__completion__", { prompt: "uncached" }, { session })).rejects.toThrow();
 	});
 });
@@ -271,9 +261,8 @@ function streamEvent(toolCall: unknown, options: { eventType?: string; contentIn
 }
 
 describe("streamed eval cell extraction", () => {
-	// This is the shape contract against the provider's progressive arg parsing.
-	// If it silently stopped matching, speculation would become a no-op with no
-	// failing test anywhere else.
+	// Shape contract against the provider's progressive arg parsing; if it stopped
+	// matching, speculation would become a no-op with nothing else failing.
 	test("recovers code and language from a partially written eval call", () => {
 		const event = streamEvent({ name: "eval", arguments: { language: "js", code: 'completion("p")' } });
 		expect(streamedEvalCell(event)).toEqual({ code: 'completion("p")', language: "js" });
