@@ -11,6 +11,7 @@ import {
 	__cursorH2ConnectingSize,
 	__setCursorDiscoveryHttp2EstablishBodyGate,
 	__setCursorDiscoveryHttp2IdleEvictMs,
+	__setCursorDiscoveryTimeoutSignal,
 	disposeCursorDiscoveryHttp2Pool,
 	fetchCursorUsableModels,
 } from "../src/discovery/cursor";
@@ -82,12 +83,14 @@ beforeEach(() => {
 	disposeCursorDiscoveryHttp2Pool();
 	__setCursorDiscoveryHttp2EstablishBodyGate(undefined);
 	__setCursorDiscoveryHttp2IdleEvictMs(undefined);
+	__setCursorDiscoveryTimeoutSignal(undefined);
 });
 
 afterEach(() => {
 	disposeCursorDiscoveryHttp2Pool();
 	__setCursorDiscoveryHttp2EstablishBodyGate(undefined);
 	__setCursorDiscoveryHttp2IdleEvictMs(undefined);
+	__setCursorDiscoveryTimeoutSignal(undefined);
 });
 
 async function discover(): Promise<Map<string, ModelSpec<"cursor-agent">>> {
@@ -474,11 +477,11 @@ describe("fetchCursorUsableModels", () => {
 			models: [create(ModelDetailsSchema, { modelId: "composer-3" })],
 		});
 		const url = await startCursorDiscoveryServer(toBinary(GetUsableModelsResponseSchema, response));
-		// A long `timeoutMs` arms a signal that never fires: swap it for a
-		// counting wrapper so the test can see the listener bookkeeping. The
-		// abort listener `readUnaryResponse` installs must come off when the
-		// read settles, or it retains `finish` — and through it the request,
-		// the lease, and every buffered chunk — until the timer's own GC.
+		// A long `timeoutMs` arms a signal that never fires: swap the module-local
+		// factory for a counting wrapper so the test can see the listener
+		// bookkeeping. The abort listener `readUnaryResponse` installs must come
+		// off when the read settles, or it retains `finish` — and through it the
+		// request, the lease, and every buffered chunk — until the timer's own GC.
 		const inner = new AbortController().signal;
 		let listeners = 0;
 		const counted = new Proxy(inner, {
@@ -499,16 +502,20 @@ describe("fetchCursorUsableModels", () => {
 				return typeof value === "function" ? value.bind(target) : value;
 			},
 		}) as AbortSignal;
-		const originalTimeout = AbortSignal.timeout;
-		AbortSignal.timeout = () => counted;
+		let timeoutFactoryCalls = 0;
+		__setCursorDiscoveryTimeoutSignal(() => {
+			timeoutFactoryCalls++;
+			return counted;
+		});
 		try {
 			const models = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 60_000 });
+			expect(timeoutFactoryCalls).toBe(1);
 			expect(models).toEqual([expect.objectContaining({ id: "composer-3" })]);
 			// Every listener taken on the timeout signal (the read's own plus
 			// the pool's connect-wait and lease guards) was removed on settle.
 			expect(listeners).toBe(0);
 		} finally {
-			AbortSignal.timeout = originalTimeout;
+			__setCursorDiscoveryTimeoutSignal(undefined);
 		}
 	});
 

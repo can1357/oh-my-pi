@@ -208,6 +208,8 @@ const cursorH2Connecting = new Map<string, CursorH2ConnectHandle>();
 let cursorH2Generation = 0;
 /** One-shot test gate awaited immediately before `http2.connect`. */
 let cursorH2EstablishBodyGate: ((key: string) => Promise<void>) | undefined;
+/** Test-only timeout-signal factory; undefined = AbortSignal.timeout. */
+let cursorDiscoveryTimeoutSignal: ((ms: number) => AbortSignal) | undefined;
 
 function destroyCursorH2Session(session: http2.ClientHttp2Session): void {
 	try {
@@ -542,6 +544,15 @@ export function __setCursorDiscoveryHttp2EstablishBodyGate(fn: ((key: string) =>
 	cursorH2EstablishBodyGate = fn;
 }
 
+/**
+ * Test seam: override (or restore) the timeout-signal factory used by
+ * {@link fetchViaHttp2} so listener bookkeeping can be observed without
+ * mutating the global `AbortSignal.timeout`.
+ */
+export function __setCursorDiscoveryTimeoutSignal(fn: ((ms: number) => AbortSignal) | undefined): void {
+	cursorDiscoveryTimeoutSignal = fn;
+}
+
 /** HTTP/2 transport required by Cursor API (HTTP/1.1 is rejected with 464). */
 async function fetchViaHttp2(
 	baseUrl: string,
@@ -549,7 +560,7 @@ async function fetchViaHttp2(
 	options: CursorModelDiscoveryOptions,
 	timeoutMs: number,
 ): Promise<Uint8Array | null> {
-	const timeout = AbortSignal.timeout(timeoutMs);
+	const timeout = (cursorDiscoveryTimeoutSignal ?? AbortSignal.timeout)(timeoutMs);
 	try {
 		const headers = buildCursorUnaryHeaders(options.apiKey, options.clientVersion);
 		const lease = await acquireCursorH2(baseUrl, headers, timeout);

@@ -803,6 +803,119 @@ describe("cursor HTTP/2 session pool", () => {
 			__setCursorH2EstablishBodyGate(undefined);
 		}
 	});
+
+	it("retries from an abort handler while the canceled establishment is still settling", async () => {
+		const baseUrl = await startServer();
+		serveStream = respondOk;
+		const bodyAtGate = Promise.withResolvers<void>();
+		let releaseBody: (() => void) | undefined;
+		__setCursorH2EstablishBodyGate(() => {
+			bodyAtGate.resolve();
+			const { promise, resolve } = Promise.withResolvers<void>();
+			releaseBody = resolve;
+			return promise;
+		});
+		try {
+			const controller = new AbortController();
+			const first = acquireCursorH2({ ...runArgs(baseUrl), signal: controller.signal });
+			await bodyAtGate.promise;
+			await waitFor(() => __cursorH2ConnectingSnapshot().some(entry => entry.waiters >= 1), 2000);
+
+			let retry: Promise<CursorH2Acquisition> | undefined;
+			controller.signal.addEventListener(
+				"abort",
+				() => {
+					retry = acquireCursorH2(runArgs(baseUrl));
+				},
+				{ once: true },
+			);
+			controller.abort(new Error("last-waiter-retried"));
+			await expect(first).rejects.toMatchObject({ message: "last-waiter-retried" });
+			expect(retry).toBeDefined();
+			// The first establishment is still gated, so this retry cannot have
+			// joined its rejected reservation; it must lease a replacement session.
+			const result = await retry;
+			expect(result?.ok).toBe(true);
+			if (!result?.ok) return;
+			expect(result.lease.request.destroyed).toBe(false);
+			expect(result.lease.request.writable).toBe(true);
+			expect(result.lease.request.write(Buffer.from("retry-after-cancel"))).toBe(true);
+			await waitFor(() => streamCount >= 1);
+			result.lease.release();
+			expect(poolOutstanding()).toBe(0);
+		} finally {
+			releaseBody?.();
+			__setCursorH2EstablishBodyGate(undefined);
+		}
+	});
+
+	it("issues exactly one Run stream for a live joiner after the reservation owner aborts", async () => {
+		const baseUrl = await startServer();
+		const received: Buffer[] = [];
+		serveStream = stream => {
+			stream.on("data", (chunk: Buffer) => received.push(chunk));
+			respondOk(stream);
+		};
+		const bodyAtGate = Promise.withResolvers<void>();
+		let releaseBody: (() => void) | undefined;
+		__setCursorH2EstablishBodyGate(() => {
+			bodyAtGate.resolve();
+			const { promise, resolve } = Promise.withResolvers<void>();
+			releaseBody = resolve;
+			return promise;
+		});
+		try {
+			const ownerController = new AbortController();
+			const owner = acquireCursorH2({ ...runArgs(baseUrl), signal: ownerController.signal });
+			await bodyAtGate.promise;
+			await waitFor(() => __cursorH2ConnectingSnapshot().some(entry => entry.waiters >= 1), 2000);
+
+			const joiner = acquireCursorH2(runArgs(baseUrl));
+			await waitFor(() => __cursorH2ConnectingSnapshot().some(entry => entry.waiters === 2), 2000);
+
+			ownerController.abort(new Error("owner-aborted-during-establish"));
+			await expect(owner).rejects.toMatchObject({ message: "owner-aborted-during-establish" });
+			expect(__cursorH2ConnectingSnapshot().some(entry => entry.waiters === 1)).toBe(true);
+			expect(streamCount).toBe(0);
+
+			releaseBody?.();
+			const result = await joiner;
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			expect(result.lease.request.destroyed).toBe(false);
+			expect(result.lease.request.writable).toBe(true);
+			expect(result.lease.request.write(Buffer.from("joiner-only"))).toBe(true);
+			await waitFor(() => streamCount === 1);
+			await waitFor(() => Buffer.concat(received).toString().includes("joiner-only"));
+			expect(streamCount).toBe(1);
+			result.lease.release();
+			expect(poolOutstanding()).toBe(0);
+		} finally {
+			releaseBody?.();
+			__setCursorH2EstablishBodyGate(undefined);
+		}
+	});
+
+	it("does not reconnect a pre-disposal acquisition after readiness", async () => {
+		const baseUrl = await startServer();
+		serveStream = respondOk;
+		const disposal = Promise.withResolvers<void>();
+		__setCursorH2FreshSessionHook(() => {
+			queueMicrotask(() => {
+				void disposeCursorH2Pool().then(disposal.resolve, disposal.reject);
+			});
+		});
+		try {
+			const acquisition = acquireCursorH2(runArgs(baseUrl));
+			await expect(acquisition).rejects.toThrow("HTTP/2 pool disposed during acquire");
+			await disposal.promise;
+			expect(__cursorH2ConnectingSnapshot()).toEqual([]);
+			expect(__cursorH2PoolSnapshot()).toEqual([]);
+			expect(totalSessions).toBe(1);
+		} finally {
+			__setCursorH2FreshSessionHook(undefined);
+		}
+	});
 });
 
 describe("direct HTTP/2 handshake deadline", () => {
