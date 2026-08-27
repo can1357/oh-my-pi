@@ -15,7 +15,7 @@ import { HL_FILE_HASH_EXAMPLES, HL_FILE_HASH_LENGTH, HL_FILE_HASH_SEP, HL_FILE_P
 import { CLIPBOARD_INTERLEAVED_SECTIONS } from "./messages";
 import { parsePatch, parsePatchStreaming } from "./parser";
 import { Tokenizer } from "./tokenizer";
-import type { ApplyResult, BlockResolver, Clipboard, Edit, FileOp, SplitOptions } from "./types";
+import type { ApplyResult, BlockResolver, Clipboard, Edit, FileOp, ParsedRange, SplitOptions } from "./types";
 
 // Pure classification — single shared tokenizer is safe.
 const TOKENIZER = new Tokenizer();
@@ -247,7 +247,7 @@ export class PatchSection {
 	readonly path: string;
 	readonly fileHash: string | undefined;
 	readonly diff: string;
-	#parsed: { edits: Edit[]; fileOp?: FileOp; warnings: string[] } | undefined;
+	#parsed: { edits: Edit[]; fileOp?: FileOp; warnings: string[]; replacements: ParsedRange[] } | undefined;
 
 	#interleavedMerge: boolean;
 
@@ -263,7 +263,12 @@ export class PatchSection {
 	 * same `{ edits, fileOp?, warnings }` object so callers can safely call this from
 	 * multiple paths (preflight, apply, diff-preview).
 	 */
-	parse(): { edits: Edit[]; fileOp?: FileOp; warnings: readonly string[] } {
+	parse(): {
+		edits: Edit[];
+		fileOp?: FileOp;
+		warnings: readonly string[];
+		replacements: readonly ParsedRange[];
+	} {
 		this.#parsed ??= parsePatch(this.diff);
 		const parsed = this.#parsed;
 		// Same-path sections merge into their first occurrence; when that merge
@@ -280,7 +285,12 @@ export class PatchSection {
 					: parsed.fileOp;
 		return fileOp === parsed.fileOp
 			? parsed
-			: { edits: parsed.edits, ...(fileOp === undefined ? {} : { fileOp }), warnings: parsed.warnings };
+			: {
+					edits: parsed.edits,
+					...(fileOp === undefined ? {} : { fileOp }),
+					warnings: parsed.warnings,
+					replacements: parsed.replacements,
+				};
 	}
 
 	/** Parsed edits for this section. */
@@ -291,6 +301,11 @@ export class PatchSection {
 	/** Optional whole-file operation (`REM` / `MV`). */
 	get fileOp(): FileOp | undefined {
 		return this.parse().fileOp;
+	}
+
+	/** Concrete replacement ranges (`PUT N.=M`-shaped hunks) in authored order. */
+	get replacements(): readonly ParsedRange[] {
+		return this.parse().replacements;
 	}
 
 	/** Warnings emitted during parsing of this section. */

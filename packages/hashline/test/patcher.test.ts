@@ -531,3 +531,64 @@ describe("Patcher tag-based path recovery", () => {
 		await expect(patcher.apply(Patch.parse(`[file.ts#ABCD]\nPUT 1-1:\n+X`))).rejects.toThrow(/write gate/);
 	});
 });
+
+describe("Patcher replacement boundary echoes", () => {
+	const CONTENT = ["l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9", "l10"].join("\n") + "\n";
+
+	async function applyPatch(input: string, blockResolver?: ConstructorParameters<typeof Patcher>[0]["blockResolver"]) {
+		const fs = new InMemoryFilesystem([[PATH, CONTENT]]);
+		const snapshots = new InMemorySnapshotStore();
+		const tag = snapshots.record(PATH, CONTENT);
+		const patcher = new Patcher({ fs, snapshots, ...(blockResolver ? { blockResolver } : {}) });
+		return { result: await patcher.apply(Patch.parse(input.replace("#TAG", `#${tag}`))), fs };
+	}
+
+	it("echoes the original first/last line of each concrete replacement range", async () => {
+		const { result } = await applyPatch(`[${PATH}#TAG]\nPUT 2-4:\n+X\n+Y\nPUT 7-8:\n+Z`);
+
+		expect(result.sections[0]?.replacementEchoes).toEqual([
+			{ start: 2, end: 4, first: "l2", last: "l4" },
+			{ start: 7, end: 8, first: "l7", last: "l8" },
+		]);
+	});
+
+	it("echoes a single-line replacement once with the same first/last content", async () => {
+		const { result } = await applyPatch(`[${PATH}#TAG]\nPUT 3-3:\n+L3`);
+
+		expect(result.sections[0]?.replacementEchoes).toEqual([{ start: 3, end: 3, first: "l3", last: "l3" }]);
+	});
+
+	it("emits no echo for a CUT-only edit", async () => {
+		const { result } = await applyPatch(`[${PATH}#TAG]\nCUT 5-6`);
+
+		expect(result.sections[0]?.replacementEchoes).toBeUndefined();
+	});
+
+	it("emits no echo for a pure insertion", async () => {
+		const { result } = await applyPatch(`[${PATH}#TAG]\nPUT >2:\n+inserted`);
+
+		expect(result.sections[0]?.replacementEchoes).toBeUndefined();
+	});
+
+	it("emits no echo for block ops (block resolutions cover them)", async () => {
+		const stub = () => ({ start: 2, end: 4 });
+		const { result } = await applyPatch(`[${PATH}#TAG]\nPUT 2*:\n+B1\n+B2`, stub);
+
+		expect(result.sections[0]?.replacementEchoes).toBeUndefined();
+		expect(result.sections[0]?.blockResolutions?.[0]).toMatchObject({ start: 2, end: 4 });
+	});
+	it("echoes a register span paste over a concrete range", async () => {
+		const { result } = await applyPatch(`[${PATH}#TAG]\nCUT 8-9 @reg\nPUT 2-3 @reg`);
+
+		// The span paste replaces lines 2-3 with the captured register content;
+		// the echo names what the target range covered.
+		expect(result.sections[0]?.replacementEchoes).toEqual([{ start: 2, end: 3, first: "l2", last: "l3" }]);
+	});
+
+	it("drops the echo of a coalesced duplicate range hunk", async () => {
+		const { result, fs } = await applyPatch(`[${PATH}#TAG]\nPUT 2-2:\n+first\nPUT 2-2:\n+second`);
+
+		expect(result.sections[0]?.replacementEchoes).toEqual([{ start: 2, end: 2, first: "l2", last: "l2" }]);
+		expect(fs.get(PATH)).toBe(["l1", "second", "l3", "l4", "l5", "l6", "l7", "l8", "l9", "l10"].join("\n") + "\n");
+	});
+});

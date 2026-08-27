@@ -114,6 +114,13 @@ export interface ApplyResult {
 	 * what the caller read. Absent when there were no block ops.
 	 */
 	blockResolutions?: BlockResolution[];
+	/**
+	 * Boundary echoes for each concrete replacement range in this apply, in
+	 * patch order. Present only when the apply matched the tagged content,
+	 * so the echoed lines match what the caller read. Absent when there were
+	 * no concrete replacements.
+	 */
+	replacementEchoes?: ReplacementEcho[];
 }
 
 /** A parsed `A-B` inclusive line range. */
@@ -144,11 +151,33 @@ export interface StreamOptions {
 	maxChunkBytes?: number;
 }
 
+/**
+ * One hunk's line-count shift, keyed to ORIGINAL (pre-edit) numbering: every
+ * original line beyond `fromLine` now sits `delta` lines away from where it
+ * was. Surfaced on {@link CompactDiffPreview} so the edit response can back
+ * the "take next numbers from the edit response" promise for lines below the
+ * edited window.
+ *
+ * Composition rule: hunks are reported top-down and each `fromLine`/`delta`
+ * pair is expressed against the ORIGINAL file, so the deltas are independent
+ * — a consumer editing below every hunk applies the SUM of the deltas, while
+ * a consumer editing between two hunks applies only the deltas of hunks
+ * strictly above its anchor. Only non-zero deltas are reported.
+ */
+export interface RenumberDelta {
+	/** Last original (pre-edit) line the hunk touched or preceded: original lines `> fromLine` shifted. */
+	fromLine: number;
+	/** `added - removed` within the hunk; never `0`. */
+	delta: number;
+}
+
 /** Result of {@link buildCompactDiffPreview}. */
 export interface CompactDiffPreview {
 	preview: string;
 	addedLines: number;
 	removedLines: number;
+	/** Per-hunk line-shift info in patch order; empty when no hunk changed the line count. */
+	renumbers: RenumberDelta[];
 }
 
 /** Optional knobs for {@link buildCompactDiffPreview}. */
@@ -157,6 +186,25 @@ export interface CompactDiffOptions {
 	maxAddedRunContext?: number;
 	/** Back-compat alias for {@link maxAddedRunContext}. */
 	maxUnchangedRun?: number;
+}
+
+/**
+ * Boundary echo of one concrete replacement range (`PUT N.=M:` or
+ * `PUT N.=M @reg`): the first and last ORIGINAL line the range actually
+ * covered, so the model can catch a mis-scoped range before anything else
+ * does. Surfaced on {@link ApplyResult} alongside {@link BlockResolution};
+ * like block resolutions, dropped on drift-recovery paths where line numbers
+ * were remapped.
+ */
+export interface ReplacementEcho {
+	/** First line of the replaced range (1-indexed, inclusive, original numbering). */
+	start: number;
+	/** Last line of the replaced range (1-indexed, inclusive, original numbering). */
+	end: number;
+	/** Original content of line {@link start} (untruncated). */
+	first: string;
+	/** Original content of line {@link end} (untruncated). */
+	last: string;
 }
 
 /** Resolved 1-indexed inclusive line span of a block target. */

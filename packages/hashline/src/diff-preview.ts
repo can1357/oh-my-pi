@@ -10,7 +10,7 @@
  * This is intentionally decoupled from the diff producer: anything that
  * emits the `<sign><lineNum>|<content>` shape works.
  */
-import type { CompactDiffOptions, CompactDiffPreview } from "./types";
+import type { CompactDiffOptions, CompactDiffPreview, RenumberDelta } from "./types";
 
 const DEFAULT_ADDED_RUN_CONTEXT_LINES = 2;
 
@@ -86,6 +86,38 @@ export function buildCompactDiffPreview(diff: string, options: CompactDiffOption
 		addedRun.length = 0;
 	};
 
+	// Per-hunk renumber tracking (issue #8603): a "hunk" is a maximal
+	// contiguous run of `+`/`-` rows; context rows separate hunks. Each hunk
+	// reports one delta keyed to ORIGINAL numbering so the entries are
+	// independent and composable (see RenumberDelta): a consumer below every
+	// hunk sums them, a consumer between two hunks applies only the deltas
+	// above its anchor.
+	//
+	// Anchor resolution for a hunk's `fromLine` (the last original line after
+	// which nothing in that hunk sits): the last `-` row's pre-edit number
+	// when the hunk removes anything; otherwise (pure insertion) the
+	// pre-edit number of the context row immediately BEFORE the run, or the
+	// row immediately AFTER minus 1, whichever the diff exposes. A pure-add
+	// run with neither (diff produced no context at all) has no original
+	// anchor and is skipped — its shift still counts toward `addedLines -
+	// removedLines`, and the renderer's `net` line fires whenever that total
+	// disagrees with the sum of the emitted per-hunk deltas.
+	const renumbers: RenumberDelta[] = [];
+	let runAdded = 0;
+	let runRemoved = 0;
+	let runLastRemovedLine: number | undefined;
+	let contextBeforeRun: number | undefined;
+	const flushRenumberRun = (contextAfterRun: number | undefined): void => {
+		if (runAdded === 0 && runRemoved === 0) return;
+		const delta = runAdded - runRemoved;
+		const fromLine =
+			runLastRemovedLine ?? contextBeforeRun ?? (contextAfterRun !== undefined ? contextAfterRun - 1 : undefined);
+		if (delta !== 0 && fromLine !== undefined) renumbers.push({ fromLine, delta });
+		runAdded = 0;
+		runRemoved = 0;
+		runLastRemovedLine = undefined;
+	};
+
 	// External diff producers number `+` lines with the post-edit line number,
 	// `-` lines with the pre-edit line number, and context lines with the
 	// pre-edit line number. To emit fresh line numbers usable for follow-up
@@ -95,6 +127,11 @@ export function buildCompactDiffPreview(diff: string, options: CompactDiffOption
 		const parsed = parseNumberedDiffLine(line);
 		if (!parsed) {
 			flushAddedRun();
+			// Unparsed rows (elision markers, gap rows) break contiguity and
+			// carry no original line number, so they also break hunk runs
+			// without contributing an anchor.
+			flushRenumberRun(undefined);
+			contextBeforeRun = undefined;
 			appendPreviewLine(formatted, line);
 			continue;
 		}
@@ -102,15 +139,20 @@ export function buildCompactDiffPreview(diff: string, options: CompactDiffOption
 		switch (parsed.kind) {
 			case "+": {
 				addedLines++;
+				runAdded++;
 				addedRun.push(`${parsed.lineNumber}:${parsed.content}`);
 				break;
 			}
 			case "-":
 				flushAddedRun();
 				removedLines++;
+				runRemoved++;
+				runLastRemovedLine = parsed.lineNumber;
 				break;
 			default: {
 				flushAddedRun();
+				flushRenumberRun(parsed.lineNumber);
+				contextBeforeRun = parsed.lineNumber;
 				const newLineNumber = parsed.lineNumber + addedLines - removedLines;
 				appendPreviewLine(formatted, `${newLineNumber}:${parsed.content}`);
 				break;
@@ -118,7 +160,8 @@ export function buildCompactDiffPreview(diff: string, options: CompactDiffOption
 		}
 	}
 	flushAddedRun();
+	flushRenumberRun(undefined);
 	while (formatted.length > 0 && isPreviewSeparator(formatted[formatted.length - 1])) formatted.pop();
 
-	return { preview: formatted.join("\n"), addedLines, removedLines };
+	return { preview: formatted.join("\n"), addedLines, removedLines, renumbers };
 }

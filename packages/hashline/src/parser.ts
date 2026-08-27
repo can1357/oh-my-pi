@@ -211,9 +211,18 @@ export class Executor {
 	#pending: Pending | undefined;
 	#fileOp: FileOp | undefined;
 	#terminated = false;
-	#skippableComments: PendingComment[] = [];
 	/** Source lines already recovered from top-level `N:TEXT` rows in this section. */
 	#recoveredSnapshotLines = new Set<number>();
+	#skippableComments: PendingComment[] = [];
+	/**
+	 * Concrete replacement ranges (`PUT N.=M:` bodies and `PUT N.=M @reg`
+	 * span pastes) in hunk order, keyed by hunk header line so
+	 * `#normalizeOverlappingRanges` can drop coalesced duplicates. Feeds the
+	 * response-side boundary echo (issue #8603); block ops, gap inserts, and
+	 * `CUT`s are excluded — they have no authored concrete range (or none
+	 * worth echoing).
+	 */
+	#replacements: { lineNum: number; range: ParsedRange }[] = [];
 
 	#discardPendingSkippableComments(): void {
 		this.#skippableComments = [];
@@ -300,7 +309,7 @@ export class Executor {
 		}
 	}
 
-	end(): { edits: Edit[]; fileOp?: FileOp; warnings: string[] } {
+	end(): { edits: Edit[]; fileOp?: FileOp; warnings: string[]; replacements: ParsedRange[] } {
 		this.#consumePendingSkippableComments();
 		this.#flushPending();
 		this.#validateFileOp();
@@ -309,10 +318,11 @@ export class Executor {
 			edits: this.#edits,
 			...(this.#fileOp === undefined ? {} : { fileOp: this.#fileOp }),
 			warnings: this.#warnings,
+			replacements: this.#replacements.map(replacement => replacement.range),
 		};
 	}
 
-	endStreaming(): { edits: Edit[]; fileOp?: FileOp; warnings: string[] } {
+	endStreaming(): { edits: Edit[]; fileOp?: FileOp; warnings: string[]; replacements: ParsedRange[] } {
 		this.#consumePendingSkippableComments();
 		const pending = this.#pending;
 		if (pending && (pending.payloads.length > 0 || this.#isCompleteBodylessOp(pending))) this.#flushPending();
@@ -323,6 +333,7 @@ export class Executor {
 			edits: this.#edits,
 			...(this.#fileOp === undefined ? {} : { fileOp: this.#fileOp }),
 			warnings: this.#warnings,
+			replacements: this.#replacements.map(replacement => replacement.range),
 		};
 	}
 
@@ -354,6 +365,7 @@ export class Executor {
 		this.#pending = undefined;
 		this.#fileOp = undefined;
 		this.#skippableComments = [];
+		this.#replacements = [];
 		this.#terminated = false;
 	}
 
@@ -447,7 +459,10 @@ export class Executor {
 					"Issue ONE hunk per range; payload is only the final desired content, never a before/after pair.",
 			);
 		}
-		if (dropped.size > 0) this.#edits = this.#edits.filter(edit => !dropped.has(edit.lineNum));
+		if (dropped.size > 0) {
+			this.#edits = this.#edits.filter(edit => !dropped.has(edit.lineNum));
+			this.#replacements = this.#replacements.filter(replacement => !dropped.has(replacement.lineNum));
+		}
 	}
 
 	#handleLiteralPayload(text: string, lineNum: number): void {
@@ -538,6 +553,7 @@ export class Executor {
 				"replacement",
 			);
 			this.#pushDeleteRange(range, lineNum);
+			this.#replacements.push({ lineNum, range });
 			if (!this.#warnings.includes(SNAPSHOT_ROWS_AUTO_PUT_WARNING)) {
 				this.#warnings.push(SNAPSHOT_ROWS_AUTO_PUT_WARNING);
 			}
@@ -728,6 +744,7 @@ export class Executor {
 					target.register,
 					lineNum,
 				);
+				this.#replacements.push({ lineNum, range: target.range });
 				return;
 			}
 			if (payloads.length === 0) {
@@ -741,6 +758,7 @@ export class Executor {
 			const cursor: Cursor = { kind: "before_anchor", anchor: { ...target.range.start } };
 			this.#emitPayloadRows(cursor, payloads, lineNum, "replacement");
 			this.#pushDeleteRange(target.range, lineNum);
+			this.#replacements.push({ lineNum, range: target.range });
 			return;
 		}
 		if (target.kind === "block") {
@@ -787,19 +805,32 @@ export class Executor {
 	}
 }
 
-function drain(executor: Executor, tokenizer: Tokenizer): { edits: Edit[]; fileOp?: FileOp; warnings: string[] } {
+function drain(
+	executor: Executor,
+	tokenizer: Tokenizer,
+): { edits: Edit[]; fileOp?: FileOp; warnings: string[]; replacements: ParsedRange[] } {
 	for (const token of tokenizer.end()) executor.feed(token);
 	return executor.end();
 }
 
-export function parsePatch(diff: string): { edits: Edit[]; fileOp?: FileOp; warnings: string[] } {
+export function parsePatch(diff: string): {
+	edits: Edit[];
+	fileOp?: FileOp;
+	warnings: string[];
+	replacements: ParsedRange[];
+} {
 	const tokenizer = new Tokenizer();
 	const executor = new Executor();
 	for (const token of tokenizer.feed(diff)) executor.feed(token);
 	return drain(executor, tokenizer);
 }
 
-export function parsePatchStreaming(diff: string): { edits: Edit[]; fileOp?: FileOp; warnings: string[] } {
+export function parsePatchStreaming(diff: string): {
+	edits: Edit[];
+	fileOp?: FileOp;
+	warnings: string[];
+	replacements: ParsedRange[];
+} {
 	const tokenizer = new Tokenizer();
 	const executor = new Executor();
 	for (const token of tokenizer.feed(diff)) executor.feed(token);
