@@ -348,6 +348,43 @@ describe("azure openai responses streaming", () => {
 		}
 	});
 
+	it("fails closed when Azure request overrides strand opaque compaction history", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () => new Response("unexpected dispatch", { status: 500 }));
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					content: "Remote compaction preserved provider-native history for this session.",
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: azureModel.provider,
+						referenceTarget: getOpenAIResponsesReferenceTarget(azureModel),
+						items: [{ type: "compaction_summary", summary: "opaque" }],
+					},
+					timestamp: Date.now(),
+				},
+			],
+		};
+
+		for (const options of [
+			{ azureBaseUrl: "https://other.openai.azure.com/openai/v1" },
+			{ azureBaseUrl: undefined, azureResourceName: "other" },
+			{ azureDeploymentName: "other-deployment" },
+		]) {
+			const result = await streamAzureOpenAIResponses(azureModel, context, {
+				apiKey: "test-key",
+				azureApiVersion: "v1",
+				fetch: fetchMock,
+				...options,
+			}).result();
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toContain(
+				"Target-bound remote compaction history is incompatible with the active Responses target",
+			);
+		}
+		expect(fetchMock).toHaveBeenCalledTimes(0);
+	});
+
 	it("surfaces nested response.failed provider errors", async () => {
 		const fetchMock: FetchImpl = vi.fn(async () =>
 			createSseResponse([

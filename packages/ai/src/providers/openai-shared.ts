@@ -1896,6 +1896,24 @@ function resolveReplayCustomToolName(wireName: string, wireNameMap: ReadonlyMap<
 	return wireNameMap?.get(wireName) ?? (wireName === "apply_patch" ? "edit" : wireName);
 }
 
+function assertCompatibleCompactionHistory(
+	providerPayload: AssistantMessage["providerPayload"],
+	provider: string,
+	referenceTarget: string,
+): void {
+	if (
+		providerPayload?.type !== "openaiResponsesHistory" ||
+		providerPayload.referenceTarget === undefined ||
+		(providerPayload.provider ?? provider) === provider && providerPayload.referenceTarget === referenceTarget
+	) {
+		return;
+	}
+	if (!providerPayload.items.some(item => item.type === "compaction" || item.type === "compaction_summary")) return;
+	throw new AIError.ValidationError(
+		"Target-bound remote compaction history is incompatible with the active Responses target; rebuild the session context for the effective target before retrying",
+	);
+}
+
 /**
  * Downgrade OpenAI-only custom tool items when the target model does not
  * advertise freeform custom tools (`applyPatchToolType === "freeform"`).
@@ -2119,6 +2137,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 	for (const msg of transformedMessages) {
 		if (msg.role === "user" || msg.role === "developer") {
 			const providerPayload = (msg as { providerPayload?: AssistantMessage["providerPayload"] }).providerPayload;
+			assertCompatibleCompactionHistory(providerPayload, options.model.provider, referenceTarget);
 			const historyItems = options.nativeHistory
 				? getOpenAIResponsesHistoryItems(providerPayload, options.model.provider, undefined, referenceTarget)
 				: undefined;
