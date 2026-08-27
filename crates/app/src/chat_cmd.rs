@@ -782,6 +782,7 @@ pub(crate) async fn run(
 	} else {
 		None
 	};
+	let edit_model = omp_tools::edit::observer::EditBlackboxModel::new(model.clone());
 	let bridges = omp_driver::bridges::builtin_with_content(
 		&root,
 		Arc::clone(&search_bridge),
@@ -792,7 +793,7 @@ pub(crate) async fn run(
 	);
 	let bridges = omp_envd::RegistryBridges {
 		ask_presenter: Some(omp_chat_ui::ask::presenter()),
-		edit_model: Some(model.clone()),
+		edit_model: Some(edit_model.clone()),
 		edit_repair,
 		// A remote gateway serves search/media itself; leave the host
 		// bridge unbound so `bind_remote` can install the gateway client
@@ -983,6 +984,7 @@ pub(crate) async fn run(
 			);
 		}
 	}
+	edit_model.set(Str::new(&snapshot.turn.params.model));
 	snapshot.compaction = settings.compaction.method_order();
 	snapshot.unexpected_stop = settings.interaction.unexpected_stop_detection;
 	snapshot.reasoning_dialect = interrupted_reasoning_dialect(catalog, &snapshot.turn.params.model);

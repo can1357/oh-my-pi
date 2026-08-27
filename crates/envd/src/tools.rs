@@ -132,8 +132,8 @@ pub struct RegistryBridges {
 	pub goal_control:           Option<Arc<dyn GoalAuthority>>,
 	/// Auxiliary inference used by workspace search and media tools.
 	pub search:                 Option<Arc<dyn SearchInference>>,
-	/// Active model identity captured by edit regression observation.
-	pub edit_model:             Option<Str>,
+	/// Shared active model identity captured by edit regression observation.
+	pub edit_model:             Option<omp_tools::edit::observer::EditBlackboxModel>,
 	/// Typed small-model completion bridge for validated edit auto-repair.
 	pub edit_repair:            Option<omp_tools::edit::observer::EditRepairClient>,
 	/// Host-resource broker used by composition-owned internal resource URLs.
@@ -2038,6 +2038,12 @@ pub(crate) fn production_registry<
 		registry.register(web_search, Presentation::Slot, core_claims())?;
 	}
 
+	let edit_model = match edit_model {
+		Some(model) => model,
+		None => omp_tools::edit::observer::EditBlackboxModel::new(
+			configured_model_identity(state_dir, workspace.root())?.unwrap_or_else(|| sf!("unknown")),
+		),
+	};
 	let edit_observer = omp_tools::edit::observer::EditObserver::new(
 		omp_tools::edit::observer::EditBlackboxConfig {
 			path: tool_settings.edit_blackbox_path.as_ref().map(|path| {
@@ -2047,11 +2053,9 @@ pub(crate) fn production_registry<
 					workspace.root().join(path)
 				}
 			}),
-			model: edit_model
-				.or(configured_model_identity(state_dir, workspace.root())?)
-				.unwrap_or_else(|| sf!("unknown")),
 			..omp_tools::edit::observer::EditBlackboxConfig::default()
 		},
+		edit_model,
 		tool_settings
 			.edit_auto_repair
 			.then_some(edit_repair)

@@ -685,6 +685,7 @@ impl HeadlessSession {
 			.cloned()
 			.collect::<Vec<_>>();
 		validate_extension_host_keys(extension_specs.iter().map(|extension| &extension.key))?;
+		let edit_model = omp_tools::edit::observer::EditBlackboxModel::new(model.clone());
 		let mut bridges = builtin_with_content(
 			&root,
 			Arc::clone(&search),
@@ -693,7 +694,7 @@ impl HeadlessSession {
 			advise_queue.clone(),
 			&prompt_discovery.content,
 		);
-		bridges.edit_model = Some(model.clone());
+		bridges.edit_model = Some(edit_model.clone());
 		bridges.edit_repair = settings.tools.edit_auto_repair.then_some(edit_repair);
 		let environment = omp_envd::ProjectEnvironment::start_with_settings_snapshot(
 			&root,
@@ -799,6 +800,7 @@ impl HeadlessSession {
 				}
 			}
 		}
+		edit_model.set(Str::new(&snapshot.turn.params.model));
 		apply_tool_policy(&mut snapshot, &policy.tools, policy.lsp_enabled);
 		for warning in content.warnings.iter() {
 			tracing::warn!(%warning, "headless content discovery warning");
