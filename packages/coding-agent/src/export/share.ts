@@ -395,7 +395,9 @@ function redactShareToolDisplay(
 				item.kind === "json"
 					? {
 							...item,
-							value: mapJsonStrings(item.value, s => o.obfuscate(s, sharedRegexSecretValues)) as typeof item.value,
+							value: mapJsonStrings(item.value, s =>
+								o.obfuscate(s, sharedRegexSecretValues),
+							) as typeof item.value,
 						}
 					: item,
 			),
