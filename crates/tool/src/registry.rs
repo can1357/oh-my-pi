@@ -2175,9 +2175,12 @@ impl Registry {
 			});
 		}
 		if self
-			.versions
-			.get(&name)
-			.is_some_and(|versions| versions.contains_key(&rev))
+			.retired
+			.contains_key(&ToolIdentity { name: name.clone(), rev: rev.clone() })
+			|| self
+				.versions
+				.get(&name)
+				.is_some_and(|versions| versions.contains_key(&rev))
 		{
 			return Err(RegistryError::Duplicate(name, rev));
 		}
@@ -3644,10 +3647,9 @@ mod tests {
 			.projection_tool(&foreign_identity)
 			.expect("retired foreign entry remains projectable");
 		assert_eq!(retired.spec().projection_code, [1; 32]);
-
-		// A core registration of the same name — even at the same exact
-		// revision — succeeds after eviction.
-		registry
+		// A later core claim may occupy the name, but not the retired
+		// identity: historical transcript calls keep the original decoder.
+		let err = registry
 			.register(
 				LiftTool {
 					spec: ToolSpec {
@@ -3663,13 +3665,40 @@ mod tests {
 				Presentation::Slot,
 				Claims { precedence: Precedence::CORE, claimant: sf!("omp/core"), replaces: None },
 			)
-			.expect("core registration succeeds after eviction");
-		assert!(registry.live_identity("guarded").is_some());
-
-		// Active versions win over retired history on an exact-identity
-		// collision: the core entry, not the retired foreign one, is returned.
-		let active = registry
+			.expect_err("retired identity stays unique");
+		assert!(
+			matches!(&err, RegistryError::Duplicate(name, rev) if name == "guarded" && *rev == foreign_rev)
+		);
+		let still_retired = registry
 			.projection_tool(&foreign_identity)
+			.expect("retired foreign entry remains projectable");
+		assert_eq!(still_retired.spec().projection_code, [1; 32]);
+
+		let core_rev = Rev { family: sf!("core"), n: 1 };
+		registry
+			.register(
+				LiftTool {
+					spec: ToolSpec {
+						name:            sf!("guarded"),
+						rev:             core_rev.clone(),
+						description:     sf!("core"),
+						schema:          Bytes::from_static(b"{}"),
+						constraint:      Constraint::None,
+						effects:         Effects::empty(),
+						projection_code: [2; 32],
+					},
+				},
+				Presentation::Slot,
+				Claims { precedence: Precedence::CORE, claimant: sf!("omp/core"), replaces: None },
+			)
+			.expect("core registration uses a distinct revision");
+		assert!(registry.live_identity("guarded").is_some());
+		let historical = registry
+			.projection_tool(&foreign_identity)
+			.expect("historical identity still projects the retired decoder");
+		assert_eq!(historical.spec().projection_code, [1; 32]);
+		let active = registry
+			.projection_tool(&ToolIdentity { name: sf!("guarded"), rev: core_rev })
 			.expect("active core entry is projectable");
 		assert_eq!(active.spec().projection_code, [2; 32]);
 	}
