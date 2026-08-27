@@ -67,7 +67,7 @@ export class UserMessageComponent extends Container {
 					return kind === "image" ? imageReferenceHyperlink(label, index, imageLinks, () => styled) : styled;
 				},
 			});
-		const md = new Markdown(text, 1, 1, getMarkdownTheme(), {
+		const md = new Markdown(text, 3, 1, getMarkdownTheme(), {
 			bgColor,
 			color,
 		});
@@ -83,7 +83,28 @@ export class UserMessageComponent extends Container {
 		if (this.#zoneSource === lines && this.#zoneLines !== undefined) {
 			return this.#zoneLines;
 		}
-		const wrapped = lines.slice();
+		// Inject accent marker on every bg line except the first and last
+		// (paddingY blank lines — they form the bubble's top/bottom border).
+		// Fence lines (```) get bg stripped to keep native codeBlockBorder styling.
+		const bgPrefix = theme.getBgAnsi("userMessageBg");
+		const markerAnsi = theme.fg("accent", "▌");
+		const bgReset = "\x1b[49m";
+		const bgLineIndices: number[] = [];
+		for (let j = 0; j < lines.length; j++) {
+			if (lines[j]!.startsWith(bgPrefix)) bgLineIndices.push(j);
+		}
+		const firstBg = bgLineIndices[0] ?? -1;
+		const lastBg = bgLineIndices[bgLineIndices.length - 1] ?? -1;
+		const processed = lines.map((line, idx) => {
+			if (!bgPrefix || !line.startsWith(bgPrefix)) return line;
+			const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
+			if (stripped.includes("```")) {
+				return line.replace(bgPrefix, "").replace(bgReset, "");
+			}
+			if (idx === firstBg || idx === lastBg) return line;
+			return `${bgPrefix} ${markerAnsi} ${line.slice(bgPrefix.length + 3)}`;
+		});
+		const wrapped = processed.slice();
 		wrapped[0] = OSC133_ZONE_START + wrapped[0];
 		wrapped[wrapped.length - 1] = wrapped[wrapped.length - 1] + OSC133_ZONE_CLOSE;
 		this.#zoneSource = lines;

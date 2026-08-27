@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Final assistant replies now render with a distinct themeable background (`finalAnswerBg`/`finalAnswerText`, defaulting to the user-message colors) and an accent gutter marker, applied only on successful completion once the block leaves the live transcript (#8155).
+
 ## [18.0.7] - 2026-08-26
 
 ### Added

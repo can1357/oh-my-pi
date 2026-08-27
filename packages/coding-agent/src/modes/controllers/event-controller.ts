@@ -492,10 +492,12 @@ export class EventController {
 		if (!segment || !assistantHasVisibleContent(segment)) return undefined;
 		const existing = this.#postToolAssistantComponents.get(toolCallId);
 		if (existing) {
+			existing.setHasToolTimeline(true);
 			existing.updateContent(segment);
 			return existing;
 		}
 		const component = createAssistantMessageComponent(this.ctx);
+		component.setHasToolTimeline(true);
 		component.updateContent(segment);
 		this.#postToolAssistantComponents.set(toolCallId, component);
 		if (!this.#insertAfterTranscriptComponent(this.#toolTimelineComponents.get(toolCallId), component)) {
@@ -1277,6 +1279,7 @@ export class EventController {
 					}
 				: this.ctx.streamingMessage;
 			const displayTimeline = splitAssistantMessageToolTimeline(displayMessage);
+			this.ctx.streamingComponent.setHasToolTimeline(displayTimeline.hasToolCalls);
 			this.ctx.streamingComponent.updateContent(displayTimeline.beforeTools);
 
 			if (this.ctx.streamingMessage.stopReason !== "aborted" && this.ctx.streamingMessage.stopReason !== "error") {

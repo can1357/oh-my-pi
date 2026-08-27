@@ -75,6 +75,8 @@ const themeColorsSchema = type({
 	statusLineOutput: "string | number",
 	statusLineCost: "string | number",
 	statusLineSubagents: "string | number",
+	"finalAnswerBg?": "string | number",
+	"finalAnswerText?": "string | number",
 });
 const spinnerFramesSchema = type("unknown").narrow((value): value is SpinnerFramesOverride => {
 	if (Array.isArray(value)) {
@@ -178,7 +180,8 @@ export type ThemeColor =
 	| "statusLineUntracked"
 	| "statusLineOutput"
 	| "statusLineCost"
-	| "statusLineSubagents";
+	| "statusLineSubagents"
+	| "finalAnswerText";
 
 /** Set of all valid ThemeColor string values for runtime validation */
 const THEME_COLOR_RECORD = {
@@ -242,6 +245,7 @@ const THEME_COLOR_RECORD = {
 	statusLineOutput: true,
 	statusLineCost: true,
 	statusLineSubagents: true,
+	finalAnswerText: true,
 } satisfies Record<ThemeColor, true>;
 
 const VALID_THEME_COLORS: ReadonlySet<string> = new Set(Object.keys(THEME_COLOR_RECORD));
@@ -258,6 +262,7 @@ export type ThemeBg =
 	| "toolPendingBg"
 	| "toolSuccessBg"
 	| "toolErrorBg"
-	| "statusLineBg";
+	| "statusLineBg"
+	| "finalAnswerBg";
 
 export type ColorMode = "truecolor" | "256color";

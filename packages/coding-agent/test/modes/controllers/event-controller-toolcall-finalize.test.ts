@@ -49,6 +49,7 @@ function createFixture(streamingMessage: AssistantMessage) {
 	const streamingComponent = {
 		updateContent: vi.fn(),
 		markTranscriptBlockFinalized,
+		setHasToolTimeline: vi.fn(),
 	};
 	const ctx = {
 		isInitialized: true,
