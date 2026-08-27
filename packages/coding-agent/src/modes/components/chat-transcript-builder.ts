@@ -326,6 +326,7 @@ export class ChatTranscriptBuilder {
 			this.deps.ui.imageBudget,
 			proseOnlyThinking,
 		);
+		assistantComponent.setHasToolTimeline(timeline.hasToolCalls);
 		assistantComponent.setImagesVisible(settings.get("terminal.showImages"));
 		assistantComponent.setToolResultImagesVisible(!settings.get("display.hideToolActivity"));
 		this.#trackExpandable(assistantComponent);
@@ -359,6 +360,7 @@ export class ChatTranscriptBuilder {
 				undefined,
 				proseOnlyThinking,
 			);
+			component.setHasToolTimeline(true);
 			component.setImagesVisible(settings.get("terminal.showImages"));
 			component.setToolResultImagesVisible(!settings.get("display.hideToolActivity"));
 			this.#trackExpandable(component);

@@ -58,6 +58,7 @@ function createFixture(streamingMessage?: AssistantMessage) {
 		updateContent: vi.fn(() => componentCalls.push("update")),
 		setComplete: vi.fn(),
 		markTranscriptBlockFinalized: vi.fn(),
+		setHasToolTimeline: vi.fn(),
 		setErrorPinned: vi.fn(),
 		setHideThinkingBlock: vi.fn((hide: boolean) => componentCalls.push(`hide:${hide}`)),
 		messagePersistenceKey: vi.fn(() => "test-persistence-key"),

@@ -370,6 +370,14 @@
 				"statusLineSubagents": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Status line subagents segment"
+				},
+				"finalAnswerBg": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Background color for final assistant reply bubble (optional, defaults to userMessageBg)"
+				},
+				"finalAnswerText": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Text color for final assistant reply (optional, defaults to text color)"
 				}
 			},
 			"additionalProperties": false

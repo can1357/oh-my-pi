@@ -370,7 +370,9 @@ describe("TranscriptContainer", () => {
 		expect(transcript.peekFinalizedBatch(80, 3)).toBeUndefined();
 		const rows = transcript.renderViewport(80, 3, frame);
 		expect(rows[0]).toBe("2 more transcript blocks active");
-		expect(Bun.stripANSI(rows[1] ?? "").trim()).toBe("Implemented");
+		// Final-answer rows carry the accent gutter marker (#8155); the answer
+		// text itself must stay visible under pressure.
+		expect(Bun.stripANSI(rows[1] ?? "").trim()).toContain("Implemented");
 		expect(rows[2]).toBe("task running");
 	});
 

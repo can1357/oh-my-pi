@@ -56,7 +56,7 @@ function createFixture(streamingMessage: AssistantMessage) {
 		settings,
 		statusLine: { invalidate: vi.fn() },
 		updateEditorTopBorder: vi.fn(),
-		streamingComponent: { updateContent: vi.fn(), markTranscriptBlockFinalized: vi.fn() },
+		streamingComponent: { updateContent: vi.fn(), setHasToolTimeline: vi.fn(), markTranscriptBlockFinalized: vi.fn() },
 		streamingMessage,
 		transcriptMessageComponents: new WeakMap(),
 		pendingTools,

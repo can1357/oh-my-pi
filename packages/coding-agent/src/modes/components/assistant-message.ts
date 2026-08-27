@@ -188,6 +188,13 @@ export class AssistantMessageComponent extends Container {
 	#showToolResultImages = true;
 	#kittyConversionsInFlight = new Set<string>();
 	#transcriptBlockFinalized: boolean;
+	#hasToolTimeline = false;
+	/**
+	 * Rows of this block's latest render already committed to native scrollback
+	 * (fed by the transcript container). Finalize restyling consults it: rows on
+	 * the tape are immutable, so only SGR-equivalent changes are safe there.
+	 */
+	#blockCommittedRows = 0;
 	/**
 	 * When true, the turn-ending `Error: …` line for `stopReason === "error"` is
 	 * suppressed because the same error is currently shown in the pinned banner
@@ -317,6 +324,24 @@ export class AssistantMessageComponent extends Container {
 
 	setProseOnlyThinking(proseOnly: boolean): void {
 		this.proseOnlyThinking = proseOnly;
+	}
+
+	setHasToolTimeline(has: boolean): void {
+		if (this.#hasToolTimeline === has) return;
+		this.#hasToolTimeline = has;
+		if (this.#lastMessage) {
+			this.#fastPathKey = undefined;
+			this.#fastPathItems = undefined;
+			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+		}
+	}
+
+	noteTranscriptRowsOnTape(rows: number): void {
+		// Monotonic: a commit ack reports stableRows.length that can be lower
+		// than a prior append ack's emitted count only after a replay retracted
+		// rows — the tape never shrinks, so never lower the watermark.
+		const next = Number.isFinite(rows) ? Math.max(0, Math.trunc(rows)) : 0;
+		this.#blockCommittedRows = Math.max(this.#blockCommittedRows, next);
 	}
 
 	override dispose(): void {
@@ -564,7 +589,14 @@ export class AssistantMessageComponent extends Container {
 	/** Render completed prose rather than an earlier thinking row under emergency viewport pressure. */
 	renderTranscriptBlockEmergencyRow(width: number): string | undefined {
 		if (!this.#transcriptBlockFinalized) return undefined;
-		return this.#emergencyText?.render(width)[0];
+		const rendered = this.#emergencyText?.render(width) ?? [];
+		// The final-answer bubble pads its first row with a blank edge row; the
+		// emergency row must be a representative content row, so skip leading
+		// padding-only rows instead of surfacing a blank under pressure.
+		for (const line of rendered) {
+			if (/\S/.test(line.replace(/\x1b\[[0-9;]*m/g, ""))) return line;
+		}
+		return rendered[0];
 	}
 
 	getTranscriptBlockVersion(): number {
@@ -572,11 +604,22 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	markTranscriptBlockFinalized(): void {
+		const alreadyFinalized = this.#transcriptBlockFinalized;
 		this.#transcriptBlockFinalized = true;
 		this.#stopThinkingAnimation();
-		// If the live pulse was on screen when the block sealed, drop the fast path
-		// and rebuild so the placeholder is removed — finalized blocks never animate.
-		if (this.#thinkingDots) {
+		// Rebuild only on the transition into finalized (to apply the verb visual
+		// marker or drop the live thinking pulse). #handleMessageUpdate re-invokes
+		// this on every tool-arg delta once the message carries a toolCall, and
+		// repeated rebuilds of the already-sealed preamble would tear down the
+		// fast path and bump the block version on every delta.
+		if (alreadyFinalized) return;
+		const hasText = this.#lastMessage?.content.some(c => c.type === "text" && canonicalizeMessage(c.text));
+		// A rebuild re-renders the markdown from scratch, which re-lays-out rows
+		// the engine already committed to native scrollback (streamed renders are
+		// incremental; GFM column widths can grow) — the committed-prefix audit
+		// then re-anchors and duplicates history. Once any row of this block is
+		// on the tape, keep the streamed render and skip the marker restyle.
+		if (this.#thinkingDots || (hasText && this.#blockCommittedRows === 0)) {
 			this.#fastPathKey = undefined;
 			this.#fastPathItems = undefined;
 			if (this.#lastMessage) this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
@@ -931,13 +974,81 @@ export class AssistantMessageComponent extends Container {
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
 			if (content.type === "text" && canonicalizeMessage(content.text)) {
-				// Set paddingY=0 to avoid extra spacing before tool executions
 				const trimmed = content.text.trim();
-				const mdOptions = this.#textColorTransform ? { color: this.#textColorTransform } : undefined;
-				const md = new Markdown(trimmed, 1, 0, getMarkdownTheme(), mdOptions, 0);
-				this.#contentContainer.addChild(md);
-				this.#emergencyText = md;
-				captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: trimmed });
+				// Visual marker applies only to successfully completed text
+				// without a caller-supplied text transform (e.g. /live).
+				// Error/aborted turns keep the ordinary assistant style.
+				const isVerbReply =
+					!this.#textColorTransform &&
+					this.#transcriptBlockFinalized &&
+					(this.#lastMessage?.stopReason === "stop" || this.#lastMessage?.stopReason === undefined);
+				// Rows already committed to native scrollback are immutable: the
+				// streamed markdown renders incrementally, so a finalize-time rebuild
+				// re-lays-out the full text from scratch (GFM column widths, bg
+				// padding, marker glyphs) and diverges the committed prefix — the
+				// engine then re-commits and duplicates history. Only restyle blocks
+				// whose rows have not entered scrollback yet.
+				if (isVerbReply && this.#blockCommittedRows === 0) {
+					const isFinal = !this.#hasToolTimeline && !message.content.some(c => c.type === "toolCall");
+					const md = new Markdown(
+						trimmed,
+						3,
+						1,
+						getMarkdownTheme(),
+						{
+							bgColor: (value: string) => theme.bg("finalAnswerBg", value),
+							color: (value: string) => theme.fg("finalAnswerText", value),
+						},
+						0,
+					);
+					md.setIgnoreTight(true);
+					const origRender = md.render.bind(md);
+					const bgPrefix = theme.getBgAnsi("finalAnswerBg");
+					const markerText = isFinal ? "▌" : "▏";
+					const markerAnsi = theme.fg("accent", markerText);
+					let cachedSource: readonly string[] | undefined;
+					let cachedResult: readonly string[] = [];
+					md.render = (width: number): readonly string[] => {
+						const lines = origRender(width);
+						if (lines === cachedSource) return cachedResult;
+						cachedSource = lines;
+						const bgReset = "\x1b[49m";
+						const bgLineIndices: number[] = [];
+						for (let j = 0; j < lines.length; j++) {
+							if (lines[j]!.startsWith(bgPrefix)) bgLineIndices.push(j);
+						}
+						const firstBg = bgLineIndices[0] ?? -1;
+						const lastBg = bgLineIndices[bgLineIndices.length - 1] ?? -1;
+						cachedResult = lines.map((line, idx) => {
+							if (!bgPrefix || !line.startsWith(bgPrefix)) return line;
+							const stripped = line.replace(/\x1b[[0-9;]*m/g, "");
+							if (stripped.includes("```")) {
+								return line.replace(bgPrefix, "").replace(bgReset, "");
+							}
+							if (idx === firstBg || idx === lastBg) {
+							// Padding-only edge rows emit as true blanks: they keep the
+							// bubble's breathing room at full height, but stay droppable
+							// as blank padding under viewport pressure so the answer's
+							// first text row stays visible (issue: transcript squeeze).
+							const edge = line.replace(/\x1b\[[0-9;]*m/g, "");
+							return /^\s*$/.test(edge) ? "" : line;
+						}
+							return `${bgPrefix} ${markerAnsi} ${line.slice(bgPrefix.length + 3)}`;
+						});
+						return cachedResult;
+					};
+					this.#contentContainer.addChild(md);
+					this.#emergencyText = md;
+					captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: trimmed });
+				} else {
+					// Streaming / error / aborted: same paddingX so layout doesn't
+					// shift when the block finalizes (avoids scrollback mismatch).
+					const mdOptions = this.#textColorTransform ? { color: this.#textColorTransform } : undefined;
+					const md = new Markdown(trimmed, 3, 0, getMarkdownTheme(), mdOptions, 0);
+					this.#contentContainer.addChild(md);
+					this.#emergencyText = md;
+					captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: trimmed });
+				}
 				hasRenderedContent = true;
 			} else if (content.type === "thinking" && resolveThinkingDisplay(content, this.proseOnlyThinking).visible) {
 				const thinkingText = resolveThinkingDisplay(content, this.proseOnlyThinking).text;

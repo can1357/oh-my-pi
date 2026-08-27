@@ -55,6 +55,7 @@ function createStreamingFixture() {
 			setHideThinkingBlock: vi.fn(),
 			markTranscriptBlockFinalized: vi.fn(),
 			updateContent: vi.fn(),
+			setHasToolTimeline: vi.fn(),
 		},
 		noteDisplayableThinkingContent: vi.fn(() => false),
 		ensureLoadingAnimation: vi.fn(),
