@@ -17,7 +17,7 @@ use futures::Stream;
 use omp_proto::inference::v1::TurnEvent;
 use parking_lot::Mutex;
 use tokio::{
-	sync::{futures::OwnedNotified, Notify},
+	sync::{Notify, futures::OwnedNotified},
 	time,
 };
 
@@ -207,11 +207,14 @@ impl TurnClient for ScriptedTurnClient {
 		input: TurnInput,
 		options: &'client TurnOptions,
 	) -> impl Future<Output = Result<Self::Session<'client>, Error>> + Send + 'client {
-		let script = self.scripts.lock().pop_front();
+		let scripts = Arc::clone(&self.scripts);
 		let captured = Arc::clone(&self.captured);
 		let options = options.clone();
 		async move {
-			let script = script.ok_or(Error::Invalid("scripted turn queue exhausted"))?;
+			let script = scripts
+				.lock()
+				.pop_front()
+				.ok_or(Error::Invalid("scripted turn queue exhausted"))?;
 			let submitted = Arc::new(Mutex::new(Vec::new()));
 			captured.lock().push(CapturedTurn {
 				turn_id,
@@ -275,8 +278,13 @@ impl Stream for ScriptedEventStream<'_> {
 				},
 				Some(ScriptedStep::Wait(gate)) => {
 					let gate = gate.clone();
+					let waiting = Box::pin(gate.0.release.clone().notified_owned());
 					gate.arrive();
-					*self.waiting = Some(Box::pin(gate.0.release.clone().notified_owned()));
+					if gate.0.released.load(Ordering::Acquire) {
+						let _ = self.steps.pop_front();
+						continue;
+					}
+					*self.waiting = Some(waiting);
 				},
 				None => return Poll::Ready(None),
 			}
@@ -288,7 +296,13 @@ impl Stream for ScriptedEventStream<'_> {
 mod tests {
 	use std::{error::Error as _, time::Duration};
 
-	use super::{Gate, GateError};
+	use futures::StreamExt;
+	use omp_proto::thread::v1::Thread;
+
+	use super::{
+		Error, Gate, GateError, ScriptedStep, ScriptedTurn, ScriptedTurnClient, TurnClient as _,
+		TurnId, TurnInput, TurnOptions, TurnSession as _,
+	};
 
 	#[tokio::test]
 	async fn wait_arrived_times_out_with_named_limit() {
@@ -316,5 +330,58 @@ mod tests {
 			matches!(error, GateError::GateTimeout { limit: observed, source: _ } if observed == limit)
 		);
 		assert!(error.source().is_some(), "preserves Tokio Elapsed");
+	}
+
+	#[tokio::test]
+	async fn pre_released_wait_step_completes() {
+		let gate = Gate::default();
+		let options = TurnOptions::default();
+		let client = ScriptedTurnClient::new([ScriptedTurn::steps([
+			ScriptedStep::Wait(gate.clone()),
+			ScriptedStep::from(super::TurnEvent::default()),
+		])]);
+
+		let mut session = client
+			.turn(TurnId::new("pre-released"), TurnInput::Full(Thread::default()), &options)
+			.await
+			.expect("script queue consumed on poll");
+
+		gate.release();
+		let mut events = session.events();
+		let event = events
+			.next()
+			.await
+			.expect("event stream yields")
+			.expect("turn event");
+		assert!(matches!(event, super::TurnEvent { .. }));
+		assert!(events.next().await.is_none(), "script exhausted after stored event");
+	}
+
+	#[tokio::test]
+	async fn dropping_unpolled_turn_future_does_not_consume_script() {
+		let options = TurnOptions::default();
+		let client = ScriptedTurnClient::new([ScriptedTurn::events([super::TurnEvent::default()])]);
+
+		let pending =
+			client.turn(TurnId::new("dropped"), TurnInput::Full(Thread::default()), &options);
+		drop(pending);
+		assert_eq!(client.remaining(), 1);
+		assert!(client.captures().is_empty());
+
+		let session = client
+			.turn(TurnId::new("opened"), TurnInput::Full(Thread::default()), &options)
+			.await
+			.expect("script still available for polled turn");
+		assert_eq!(client.remaining(), 0);
+		assert_eq!(client.captures().len(), 1);
+		drop(session);
+
+		let exhausted = client
+			.turn(TurnId::new("exhausted"), TurnInput::Full(Thread::default()), &options)
+			.await;
+		assert!(
+			matches!(exhausted, Err(Error::Invalid(message)) if message == "scripted turn queue exhausted"),
+			"exhaustion surfaced on polled future"
+		);
 	}
 }
