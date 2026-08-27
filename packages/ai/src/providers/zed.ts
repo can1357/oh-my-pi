@@ -1,4 +1,5 @@
 import * as crypto from "node:crypto";
+import { mapEffortToGoogleThinkingLevel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { parseZedCredentials, ZED_APP_VERSION, ZED_CLOUD_URL, ZED_HEADERS } from "@oh-my-pi/pi-catalog/wire/zed";
 import { ProviderHttpError, ProviderResponseError } from "../../src/error";
@@ -296,6 +297,7 @@ function mapContextToGoogle(context: Context, model: Model<"zed-agent">, options
 							name: block.name,
 							args: block.arguments,
 						},
+						...(block.thoughtSignature ? { thoughtSignature: block.thoughtSignature } : {}),
 					});
 				}
 			}
@@ -359,7 +361,10 @@ function mapContextToGoogle(context: Context, model: Model<"zed-agent">, options
 		} else {
 			body.generationConfig = {
 				thinkingConfig: {
-					thinkingLevel: options?.reasoning ?? "medium",
+					thinkingLevel:
+						options?.reasoning === undefined
+							? "MEDIUM"
+							: mapEffortToGoogleThinkingLevel(options.reasoning, model),
 				},
 			};
 		}
@@ -895,6 +900,7 @@ export function streamZed(
 							content?: {
 								parts?: Array<{
 									text?: string;
+									thoughtSignature?: string;
 									functionCall?: { name?: string; args?: Record<string, unknown> };
 								}>;
 							};
@@ -933,6 +939,7 @@ export function streamZed(
 									id: crypto.randomUUID(),
 									name: part.functionCall.name,
 									arguments: part.functionCall.args ?? {},
+									...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
 								};
 								outputMessage.content.push(toolCall);
 								stream.push({

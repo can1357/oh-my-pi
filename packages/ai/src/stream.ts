@@ -2392,7 +2392,7 @@ function mapOptionsForApi<TApi extends Api>(
 			return castApi<"zed-agent">({
 				...base,
 				reasoning: effort,
-				disableReasoning: options?.disableReasoning,
+				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
 			});
 		}
 		default:

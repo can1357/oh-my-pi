@@ -1,7 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { buildZedProviderRequest, resolveProviderKind } from "../src/providers/zed";
-import type { Context, Model } from "../src/types";
+import { invalidateZedLlmToken } from "../src/registry/oauth/zed-token-pool";
+import { streamSimple } from "../src/stream";
+import type { AssistantMessage, Context, FetchImpl, Model } from "../src/types";
+import { mockFetch } from "./helpers/fetch-mock";
 
 describe("Zed Provider Payload Construction", () => {
 	it("resolves exact provider kinds matching Zed serde conventions", () => {
@@ -158,8 +161,136 @@ describe("Zed Provider Payload Construction", () => {
 		const tools = payload.tools as Array<{
 			functionDeclarations: Array<{ name: string; parameters: Record<string, unknown> }>;
 		}>;
-		const params = tools[0].functionDeclarations[0].parameters as { properties: { limit: Record<string, unknown> } };
+		const params = tools[0].functionDeclarations[0].parameters as {
+			properties: { limit: Record<string, unknown> };
+		};
 		expect(params.properties.limit.exclusiveMinimum).toBeUndefined();
-		expect(payload.generationConfig).toEqual({ thinkingConfig: { thinkingLevel: "medium" } });
+		expect(payload.generationConfig).toEqual({ thinkingConfig: { thinkingLevel: "MEDIUM" } });
+	});
+	it("replays Gemini assistant tool-call thought signatures in the functionCall payload", () => {
+		const thoughtSignature = "gemini-thought-signature";
+		const mockModel: Model<"zed-agent"> = {
+			id: "gemini-3-flash",
+			name: "Gemini 3 Flash",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: "https://cloud.zed.dev",
+			reasoning: true,
+			contextWindow: 1_000_000,
+			maxTokens: 66_000,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			compat: undefined,
+		};
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id: "call_search",
+					name: "search_tool",
+					arguments: { query: "weather in Paris" },
+					thoughtSignature,
+				},
+			],
+			api: "zed-agent",
+			provider: "zed-agent",
+			model: mockModel.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 2,
+		};
+
+		const payload = buildZedProviderRequest("google", { messages: [assistant] }, mockModel) as Record<
+			string,
+			unknown
+		>;
+		const contents = payload.contents as Array<{
+			role: string;
+			parts: Array<Record<string, unknown>>;
+		}>;
+
+		expect(contents).toEqual([
+			{
+				role: "model",
+				parts: [
+					{
+						functionCall: {
+							name: "search_tool",
+							args: { query: "weather in Paris" },
+						},
+						thoughtSignature,
+					},
+				],
+			},
+		]);
+	});
+
+	it("propagates forceReasoningOff to Zed provider options and disables Gemini thinking", async () => {
+		const userId = "user_force_reasoning_off";
+		const accessToken = "access-token-force-reasoning-off";
+		const mockModel: Model<"zed-agent"> = {
+			id: "gemini-3-flash",
+			name: "Gemini 3 Flash",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: "https://cloud.zed.dev",
+			reasoning: true,
+			contextWindow: 1_000_000,
+			maxTokens: 66_000,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			compat: undefined,
+		};
+		const context: Context = {
+			messages: [{ role: "user", content: "hello", timestamp: 1 }],
+		};
+		let completionPayload: Record<string, unknown> | undefined;
+		const fetchMock: FetchImpl = mockFetch(async (_input, init) => {
+			const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
+			if (body?.organization_id === null) {
+				return new Response(JSON.stringify({ token: "llm-token-force-reasoning-off" }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			completionPayload = body;
+			return new Response(
+				[
+					JSON.stringify({ event: { type: "content_block_start", content_block: { type: "text" } } }),
+					JSON.stringify({ event: { type: "content_block_delta", delta: { type: "text_delta", text: "ok" } } }),
+					JSON.stringify({ event: { type: "content_block_stop" } }),
+					JSON.stringify({ status: "stream_ended" }),
+				].join("\n"),
+				{
+					status: 200,
+					headers: { "content-type": "application/x-ndjson" },
+				},
+			);
+		});
+
+		try {
+			await streamSimple(mockModel, context, {
+				apiKey: `${userId} ${accessToken}`,
+				reasoning: Effort.High,
+				forceReasoningOff: true,
+				fetch: fetchMock,
+			}).result();
+		} finally {
+			invalidateZedLlmToken(userId, accessToken);
+		}
+
+		if (!completionPayload) throw new Error("Zed completion request was not captured");
+		const providerRequest = completionPayload.provider_request as Record<string, unknown>;
+		expect(providerRequest.generationConfig).toEqual({
+			thinkingConfig: { thinkingBudget: 0 },
+		});
 	});
 });

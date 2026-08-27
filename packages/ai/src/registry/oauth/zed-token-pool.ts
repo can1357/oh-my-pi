@@ -1,4 +1,5 @@
 import { ZED_APP_VERSION, ZED_CLOUD_URL, ZED_HEADERS } from "@oh-my-pi/pi-catalog/wire/zed";
+import { AbortError } from "../../error/abort";
 import { ProviderHttpError } from "../../error/classes";
 import { OAuthError } from "../../error/oauth";
 import { ProviderResponseError } from "../../error/provider";
@@ -20,6 +21,22 @@ function getCacheKey(userId: string, masterAccessToken: string): string {
 }
 
 /**
+ * Race one caller's wait against its signal without cancelling the shared mint.
+ */
+function raceZedLlmTokenWithSignal(promise: Promise<string>, signal?: AbortSignal): Promise<string> {
+	if (!signal) return promise;
+	if (signal.aborted) return Promise.reject(new AbortError("Zed LLM token request aborted"));
+
+	const abort = Promise.withResolvers<never>();
+	const onAbort = (): void => abort.reject(new AbortError("Zed LLM token request aborted"));
+	signal.addEventListener("abort", onAbort, { once: true });
+
+	return Promise.race([promise, abort.promise]).finally(() => {
+		signal.removeEventListener("abort", onAbort);
+	});
+}
+
+/**
  * Mint or retrieve a cached short-lived LLM API token from Zed Cloud.
  * Uses a single-flight mutex per credential pair to prevent redundant concurrent token minting.
  */
@@ -38,7 +55,7 @@ export async function getOrMintZedLlmToken(
 
 	const inFlight = inFlightRequests.get(key);
 	if (inFlight) {
-		return inFlight;
+		return raceZedLlmTokenWithSignal(inFlight, signal);
 	}
 
 	const fetcher = fetchImpl ?? fetch;
@@ -52,7 +69,6 @@ export async function getOrMintZedLlmToken(
 					[ZED_HEADERS.VERSION]: ZED_APP_VERSION,
 				},
 				body: JSON.stringify({ organization_id: null }),
-				signal,
 			});
 
 			if (!response.ok) {
@@ -92,9 +108,8 @@ export async function getOrMintZedLlmToken(
 			inFlightRequests.delete(key);
 		}
 	})();
-
 	inFlightRequests.set(key, mintPromise);
-	return mintPromise;
+	return raceZedLlmTokenWithSignal(mintPromise, signal);
 }
 
 /**

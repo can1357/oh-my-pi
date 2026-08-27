@@ -40,4 +40,57 @@ describe("Zed Token Pool", () => {
 		invalidateZedLlmToken("user_402", "access_tok_402");
 		expect(getOrMintZedLlmToken("user_402", "access_tok_402", undefined, mockFetcher)).rejects.toThrow();
 	});
+	it("does not cancel a shared mint when the first concurrent waiter aborts", async () => {
+		const userId = "user_concurrent_abort_isolation";
+		const masterAccessToken = "access-token-concurrent-abort-isolation";
+		const caller = new AbortController();
+		const fetchStarted = Promise.withResolvers<void>();
+		const fetchResponse = Promise.withResolvers<Response>();
+		let fetchCalls = 0;
+		let sharedFetchAborted = false;
+
+		invalidateZedLlmToken(userId, masterAccessToken);
+		const mockFetcher: FetchImpl = async (_input, init) => {
+			fetchCalls++;
+			if (init?.signal) {
+				const onAbort = () => {
+					sharedFetchAborted = true;
+					fetchResponse.reject(new Error("shared fetch aborted"));
+				};
+				if (init.signal.aborted) onAbort();
+				else init.signal.addEventListener("abort", onAbort, { once: true });
+			}
+			fetchStarted.resolve();
+			return fetchResponse.promise;
+		};
+
+		try {
+			const firstWaiter = getOrMintZedLlmToken(userId, masterAccessToken, caller.signal, mockFetcher);
+			await fetchStarted.promise;
+			const secondWaiter = getOrMintZedLlmToken(userId, masterAccessToken, undefined, mockFetcher);
+			const firstOutcome = firstWaiter.then(
+				() => undefined,
+				error => error,
+			);
+
+			caller.abort();
+			fetchResponse.resolve(
+				new Response(JSON.stringify({ token: "llm-token-shared" }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}),
+			);
+
+			const firstError = await firstOutcome;
+			expect(firstError).toMatchObject({
+				name: "AbortError",
+				message: "Zed LLM token request aborted",
+			});
+			await expect(secondWaiter).resolves.toBe("llm-token-shared");
+			expect(fetchCalls).toBe(1);
+			expect(sharedFetchAborted).toBe(false);
+		} finally {
+			invalidateZedLlmToken(userId, masterAccessToken);
+		}
+	});
 });
