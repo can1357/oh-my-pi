@@ -5,6 +5,8 @@
 ### Added
 
 - Added Merge Gateway as a dynamically discovered provider with separate native capability declarations and OMP compatibility policy for pricing, limits, vision, reasoning, tools, structured output, streaming, zero-data retention, and DeepSeek DSML recovery.
+## [18.0.8] - 2026-08-27
+
 ### Fixed
 
 - Fixed the thinking control mode for OpenAI models served over Bedrock Converse (`global.openai.gpt-5.6-luna`, `-sol`, `-terra`), which are now classified as `effort` rather than `budget` so requests use OpenAI's reasoning schema.

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.0.8] - 2026-08-27
+
 ### Added
 
 - `ProcessTerminal` accepts a `conpty` option to force ConPTY-hosted behavior on or off, keeping terminal tests hermetic on WSL where live env detection would otherwise flip kitty-keyboard flags and write chunking ([#9887](https://github.com/can1357/oh-my-pi/issues/9887)).
