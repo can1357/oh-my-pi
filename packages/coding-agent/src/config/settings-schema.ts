@@ -5583,17 +5583,6 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
-	"features.silentEmptyStopFallback": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "interaction",
-			group: "Agent",
-			label: "Silent empty-stop fallback",
-			description:
-				"When an empty stop with all-zero usage exhausts the retry cap, promote it to a retriable error and consult modelFallback/fallbackChains instead of surfacing the retry-cap error.",
-		},
-	},
 	"features.unexpectedStopDetection": {
 		type: "enum",
 		values: ["none", "mechanical", "smart"] as const,

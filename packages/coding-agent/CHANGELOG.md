@@ -1,9 +1,9 @@
 # Changelog
 
 ## [Unreleased]
-### Added
+### Fixed
 
-- New opt-in `features.silentEmptyStopFallback` setting: when an assistant turn exhausts the empty-stop retry cap with the zero-billed dispatch-failure signature (no content, no usage in any bucket), it is promoted once to a retriable error so `retry.modelFallback` / `retry.fallbackChains` can continue the session on a healthy provider silently instead of surfacing the retry-cap error.
+- Zero-billed empty stops that exhaust the retry cap now consult `retry.modelFallback` / `retry.fallbackChains` instead of surfacing a retry-cap error. Turns that billed any usage bucket, including provider-side orchestration tokens, still settle terminal ([#9480](https://github.com/can1357/oh-my-pi/issues/9480)).
 
 ### Added
 

@@ -770,6 +770,7 @@ export class TurnRecovery {
 				finalError =
 					"Assistant returned empty stop after retry cap; try switching models or `/shake images` to remove archived frames";
 			}
+			const orchestration = assistantMessage.usage.orchestration;
 			const zeroBilled =
 				!providerEmptyOutput &&
 				assistantMessage.content.length === 0 &&
@@ -777,24 +778,23 @@ export class TurnRecovery {
 				assistantMessage.usage.output === 0 &&
 				assistantMessage.usage.cacheRead === 0 &&
 				assistantMessage.usage.cacheWrite === 0 &&
+				assistantMessage.usage.totalTokens === 0 &&
+				(orchestration?.input ?? 0) === 0 &&
+				(orchestration?.output ?? 0) === 0 &&
+				(orchestration?.cacheRead ?? 0) === 0 &&
 				outputTokensExcludingKnownReasoning === 0;
 
 			// Zero-billed empty stops are upstream dispatch failures laundered into a
 			// clean HTTP-200 stop (#9415): nothing was ever dispatched, so no usage
-			// bucket is nonzero. Promote ONCE per run, BEFORE the terminal
-			// `auto_retry_end` emission, so the user never sees the retry-cap banner:
-			// the synthetic retriable error flows through handleRetryableError where
-			// retry.modelFallback / fallbackChains pick a healthy provider silently.
-			// The synthetic object keeps the original turn untouched — the original is
-			// dropped durably either way, and pending-error bookkeeping references the
-			// object that handleRetryableError persists.
-			if (
-				zeroBilled &&
-				!this.#silentEmptyStopFallbackArmed &&
-				this.#host.settings.get("features.silentEmptyStopFallback")
-			) {
+			// bucket is nonzero. Consult modelFallback/fallbackChains ONCE per run,
+			// BEFORE the terminal `auto_retry_end` emission, so a configured chain can
+			// continue on a healthy provider instead of surfacing the retry-cap banner.
+			// hardErrorFallback skips same-model retry: no usable candidate means the
+			// existing terminal settle. The synthetic object keeps the original turn
+			// untouched — the original is dropped durably either way.
+			if (zeroBilled && !this.#silentEmptyStopFallbackArmed) {
 				this.#silentEmptyStopFallbackArmed = true;
-				logger.warn("Promoting zero-billed empty stop to retriable error for silent model fallback", {
+				logger.warn("Promoting zero-billed empty stop to retriable error for model fallback", {
 					attempts,
 					model: assistantMessage.model,
 					provider: assistantMessage.provider,
@@ -806,13 +806,16 @@ export class TurnRecovery {
 					errorId: AIError.create(AIError.Flag.EmptyResponse | AIError.Flag.Transient),
 				};
 				await this.#dropAssistantTurnDurably(assistantMessage);
-				const didRetry = await this.handleRetryableError(synthetic, { allowModelFallback: true });
+				const didRetry = await this.handleRetryableError(synthetic, {
+					allowModelFallback: true,
+					hardErrorFallback: true,
+				});
 				if (didRetry) {
 					this.#emptyStopRetryCount = 0;
 					return "continue";
 				}
-				// No chain or budget could take over: fall through to the visible
-				// terminal settle below rather than looping against the same pipe.
+				// No chain could take over: fall through to the visible terminal settle
+				// rather than granting the same dead pipe another empty-stop cycle.
 				this.#silentEmptyStopFallbackArmed = false;
 			}
 
@@ -2306,14 +2309,14 @@ export class TurnRecovery {
 			return false;
 		}
 		// A fallback switch was the whole reason we entered (Fast→base degrade or
-		// a hard-error chain consult) but it could not happen (e.g. no candidate
-		// has a credential). Don't fall through to backing-off and retrying the
-		// failing model for an error the generic classifier wouldn't retry —
-		// surface it instead.
+		// a hard-error / fallback-only chain consult) but it could not happen
+		// (e.g. no candidate has a credential). Don't fall through to backing-off
+		// and retrying the failing model. Fireworks Fast still same-model-retries
+		// when the error is otherwise retryable; hardErrorFallback always surfaces.
 		if (
-			(options?.fireworksFastFallback || options?.hardErrorFallback) &&
 			!switchedModel &&
-			!this.isRetryableError(message)
+			!switchedCredential &&
+			(options?.hardErrorFallback || (options?.fireworksFastFallback && !this.isRetryableError(message)))
 		) {
 			// Same auto_retry_end backstop as the classifier-refusal branch above.
 			if (this.#retryAttempt > 1) {
