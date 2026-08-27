@@ -10,6 +10,7 @@ import {
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
 import type { ExtensionAskDialogQuestion } from "../../extensibility/extensions";
+import { PREVIEW_LIMITS } from "../../tools/render-utils";
 import { type Theme, theme } from "../theme/theme";
 
 /** Width of the leading prefix column shared by every ask row (the focus
@@ -48,7 +49,8 @@ export interface AskRowRenderContext {
 	/** "1".."9" when a jump digit is rendered for this row, else undefined. */
 	jumpDigit: string | undefined;
 	/** When true, an option description renders every wrapped line; otherwise it
-	 *  collapses to the first two and the surplus is a counted cue. */
+	 *  collapses to the first {@link PREVIEW_LIMITS.COLLAPSED_LINES} lines and
+	 *  the surplus is a counted cue. */
 	expanded: boolean;
 	note: string | undefined;
 	/** Echoed under an `other` row when the user is typing a custom answer. */
@@ -105,16 +107,36 @@ export function renderAskRow(row: AskQuestionRow, ctx: AskRowRenderContext): Ask
 	const contentWidth = Math.max(1, ctx.width - prefixColumns);
 	const noteMarker = ctx.note !== undefined ? theme.fg("success", "  ✎ note") : "";
 	const noteWidth = noteMarker ? visibleWidth(noteMarker) : 0;
-	// Reserve the trailing note marker on the first label line so fit() cannot
-	// clip it when the label fills contentWidth.
-	const wrapBudget = Math.max(1, contentWidth - noteWidth);
-	const wrappedLabel = wrapTextWithAnsi(label, wrapBudget);
-
-	const lines = [`${prefix}${marker} ${wrappedLabel[0] ?? ""}${noteMarker}`];
+	// Wrap the label at its full content width. The note marker appears once
+	// — on the final label row when it fits, otherwise on its own bounded
+	// indented row — so continuation lines are not narrowed by the marker's
+	// width and the marker stays visible without exceeding ctx.width.
+	const wrappedLabel = wrapTextWithAnsi(label, contentWidth);
 	const indent = padding(prefixColumns);
 
-	for (let i = 1; i < wrappedLabel.length; i++) {
-		lines.push(`${indent}${wrappedLabel[i] ?? ""}`);
+	const lines: string[] = [];
+	if (wrappedLabel.length === 0) {
+		lines.push(`${prefix}${marker} `);
+	} else {
+		lines.push(`${prefix}${marker} ${wrappedLabel[0] ?? ""}`);
+		for (let i = 1; i < wrappedLabel.length; i++) {
+			lines.push(`${indent}${wrappedLabel[i] ?? ""}`);
+		}
+	}
+
+	if (noteMarker) {
+		const lastIdx = lines.length - 1;
+		const lastLine = lines[lastIdx] ?? "";
+		// Both the first line (prefix + marker + spacer) and continuation
+		// lines (indent) occupy exactly prefixColumns before the content, so
+		// the content used on the last line is the visible width minus the
+		// prefix columns.
+		const contentUsed = Math.max(0, visibleWidth(lastLine) - prefixColumns);
+		if (contentUsed + noteWidth <= contentWidth) {
+			lines[lastIdx] = `${lastLine}${noteMarker}`;
+		} else {
+			lines.push(`${indent}${truncateToWidth(noteMarker, contentWidth, Ellipsis.Unicode)}`);
+		}
 	}
 
 	let hiddenDescriptionLines = 0;
@@ -122,16 +144,17 @@ export function renderAskRow(row: AskQuestionRow, ctx: AskRowRenderContext): Ask
 		// The description belongs to the focused row only. Unfocused rows carry
 		// the prefix, label, and note marker and nothing else, so the collapse
 		// cue can never light up (hiddenDescriptionLines stays 0 below) for a
-		// row the user is not looking at. Collapsed: the first two wrapped
-		// lines, then a counted cue when more remain. Expanded: every line, no
-		// cap. A focused description is never truncated without a visible
-		// escape.
+		// row the user is not looking at. Collapsed: the first
+		// PREVIEW_LIMITS.COLLAPSED_LINES wrapped lines, then a counted cue
+		// when more remain. Expanded: every line, no cap. A focused
+		// description is never truncated without a visible escape.
 		const description = renderInlineMarkdown(replaceTabs(option.description.trim()), ctx.mdTheme, t =>
 			theme.fg("muted", t),
 		);
 		const wrapped = wrapTextWithAnsi(description, contentWidth);
-		hiddenDescriptionLines = ctx.expanded ? 0 : Math.max(0, wrapped.length - 2);
-		for (const line of ctx.expanded ? wrapped : wrapped.slice(0, 2)) {
+		const collapsedLines = PREVIEW_LIMITS.COLLAPSED_LINES;
+		hiddenDescriptionLines = ctx.expanded ? 0 : Math.max(0, wrapped.length - collapsedLines);
+		for (const line of ctx.expanded ? wrapped : wrapped.slice(0, collapsedLines)) {
 			lines.push(`${indent}${truncateToWidth(line, contentWidth, Ellipsis.Unicode)}`);
 		}
 		if (!ctx.expanded && hiddenDescriptionLines > 0) {

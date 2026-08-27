@@ -1222,7 +1222,11 @@ export class AskDialogComponent implements Component, Focusable {
 		// cursorIndex keys the focused row's own render: a long focused
 		// description overflows where a short option fits, so one row's
 		// overflow verdict must not be carried onto another by the cache.
-		const layoutKey = `${listWidth}:${listRows}:${this.#filterQuery}:${state.cursorIndex}:${state.expandedRowKey ?? ""}:${state.customInput === undefined ? 0 : 1}`;
+		// noteRowKey keys the note-bearing row's render: a note marker adds a
+		// line to the noted row, so moving a note away from a long row must
+		// not reuse the stale one-column-narrow overflow verdict the note
+		// caused there.
+		const layoutKey = `${listWidth}:${listRows}:${this.#filterQuery}:${state.cursorIndex}:${state.expandedRowKey ?? ""}:${state.customInput === undefined ? 0 : 1}:${state.noteRowKey ?? ""}`;
 		let overflowLayouts = this.#overflowLayouts.get(question);
 		const knownOverflow = overflowLayouts?.has(layoutKey) ?? false;
 		let renderedRows = renderRows(knownOverflow && listWidth > 1 ? listWidth - 1 : listWidth);

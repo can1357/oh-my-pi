@@ -2083,7 +2083,7 @@ describe("AskDialogComponent", () => {
 			// moving the query caret, with the filter bar still open.
 			const collapsed = stripVTControlCharacters(component.render(80).join("\n"));
 			expect(collapsed).toContain("/ match");
-			expect(collapsed).toContain("3 more");
+			expect(collapsed).toContain("2 more");
 			expect(collapsed).not.toContain("DESC-LINE-4");
 			component.handleInput(RIGHT);
 			const expanded = stripVTControlCharacters(component.render(80).join("\n"));
@@ -2334,7 +2334,8 @@ describe("AskDialogComponent", () => {
 			const overflowing = stripVTControlCharacters(component.render(80).join("\n"));
 			// The focused four-line description overflows the body, so the
 			// list renders one column narrower with the tail behind a cue.
-			expect(overflowing).toContain("2 more");
+			// PREVIEW_LIMITS.COLLAPSED_LINES = 3, so one line is hidden.
+			expect(overflowing).toContain("1 more");
 			component.handleInput(DOWN);
 			const refocused = stripVTControlCharacters(component.render(80).join("\n")).replaceAll(CURSOR_MARKER, "");
 			// The list now fits: the exact-fit label must stay whole on one
@@ -2380,6 +2381,60 @@ describe("AskDialogComponent", () => {
 			// frozen panel must absorb it by yielding a body row, not by
 			// growing past the height measured at spawn.
 			expect(after.length).toBe(before.length);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("renders a noted long row full-width after the note moves to a short row, with no stale filter cue", async () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 40 });
+		try {
+			// Exactly 70 columns: one line at the width-80 list's content
+			// budget, two lines once the list renders one column narrower.
+			const exactFitLabel = `X${"k".repeat(68)}Z`;
+			const options = [
+				{ label: exactFitLabel },
+				{ label: "Short" },
+				...Array.from({ length: 4 }, (_, index) => ({ label: `Fill ${index}` })),
+			];
+			const onPrompt = vi.fn();
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick?", options }], {
+				onSubmit: vi.fn(),
+				onCancel: vi.fn(),
+				onPrompt,
+			});
+			component.focused = true;
+
+			// Add a note to the long exact-fit row (cursor starts on it).
+			// The note marker adds a line, causing overflow and a one-column
+			// narrower list render.
+			onPrompt.mockReturnValueOnce(Promise.resolve("note on long"));
+			component.handleInput("n");
+			await Promise.resolve();
+			await Promise.resolve();
+			const noted = stripVTControlCharacters(component.render(80).join("\n")).replaceAll(CURSOR_MARKER, "");
+			expect(noted).toContain("✎ note");
+
+			// Move to the short row and add a note there, moving the note
+			// away from the long row.
+			component.handleInput(DOWN);
+			onPrompt.mockReturnValueOnce(Promise.resolve("note on short"));
+			component.handleInput("n");
+			await Promise.resolve();
+			await Promise.resolve();
+			const shortNoted = stripVTControlCharacters(component.render(80).join("\n")).replaceAll(CURSOR_MARKER, "");
+			expect(shortNoted).toContain("✎ note");
+
+			// Move back to the long row. The note is now on the short row,
+			// so the long row must render full-width — the exact-fit label
+			// stays whole on one line, no stale one-column-narrow overflow
+			// verdict is reused, and no filter cue persists.
+			component.handleInput(UP);
+			const refocused = stripVTControlCharacters(component.render(80).join("\n")).replaceAll(CURSOR_MARKER, "");
+			expect(refocused).toContain(exactFitLabel);
+			expect(refocused).not.toContain("filter");
 		} finally {
 			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
 			else Reflect.deleteProperty(process.stdout, "rows");

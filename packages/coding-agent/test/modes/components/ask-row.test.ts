@@ -116,20 +116,21 @@ describe("askRow", () => {
 		expect(styledMarker(focused, glyph)).toBe(theme.fg("success", glyph));
 	});
 
-	it("collapsed description shows two lines plus a counted cue; expanded shows every line", () => {
+	it("collapsed description shows PREVIEW_LIMITS.COLLAPSED_LINES lines plus a counted cue; expanded shows every line", () => {
 		// A 120-char description wraps to 5 lines at contentWidth = width - 6 = 24.
+		// PREVIEW_LIMITS.COLLAPSED_LINES = 3, so collapsed shows 3 + cue.
 		const description = "abc ".repeat(30).trim();
 		const q = question(undefined, description);
 
 		const collapsed = renderAskRow(row(), makeCtx({ question: q, focused: true, expanded: false, width: 30 }));
 		const expanded = renderAskRow(row(), makeCtx({ question: q, focused: true, expanded: true, width: 30 }));
 
-		// Collapsed: label (1) + first two description lines + cue (1).
-		expect(collapsed.lines).toHaveLength(4);
+		// Collapsed: label (1) + first three description lines + cue (1).
+		expect(collapsed.lines).toHaveLength(5);
 		const cue = collapsed.lines.find(line => strip(line).includes("more lines"));
 		expect(cue).toBeDefined();
-		expect(strip(cue!)).toContain("3 more lines");
-		expect(collapsed.hiddenDescriptionLines).toBe(3);
+		expect(strip(cue ?? "")).toContain("2 more lines");
+		expect(collapsed.hiddenDescriptionLines).toBe(2);
 
 		// Expanded: label (1) + all five description lines, no cue.
 		expect(expanded.lines).toHaveLength(6);
@@ -193,13 +194,47 @@ describe("askRow", () => {
 		expect(joined.split(CURSOR_MARKER).length - 1).toBe(1);
 		expect(focusedDeclared[0].indexOf(CURSOR_MARKER)).toBeGreaterThan(0);
 	});
-
-	it("keeps the trailing note marker when the label fills the row width", () => {
+	it("keeps the note marker visible without exceeding row width when the label fills the row", () => {
 		const r: AskQuestionRow = { kind: "option", key: "opt:0", label: "X".repeat(80), optionIndex: 0 };
 		const { lines } = renderAskRow(r, makeCtx({ note: "saved", width: 30 }));
-		const first = strip(lines[0]);
-		expect(first).toContain("✎ note");
-		expect(visibleWidth(first)).toBeLessThanOrEqual(30);
+		// The note marker appears once across all lines, and no line exceeds
+		// the row width.
+		const noteLines = lines.filter(line => strip(line).includes("✎ note"));
+		expect(noteLines).toHaveLength(1);
+		for (const line of lines) {
+			expect(visibleWidth(strip(line))).toBeLessThanOrEqual(30);
+		}
+	});
+
+	it("a noted long label uses full content width for continuations and no line exceeds row width", () => {
+		// contentWidth = width - 6 = 24. A 72-char label wraps to 3 full
+		// lines (24+24+24). The note marker must not narrow the wrap budget:
+		// continuation lines fill the full 24-column content width, the note
+		// marker lands on the final row (which has room), and no rendered
+		// line exceeds the row width.
+		const r: AskQuestionRow = { kind: "option", key: "opt:0", label: "Z".repeat(72), optionIndex: 0 };
+		const { lines } = renderAskRow(r, makeCtx({ note: "saved", width: 30 }));
+
+		expect(lines.length).toBeGreaterThanOrEqual(3);
+
+		// Every line stays within the row width.
+		for (const line of lines) {
+			expect(visibleWidth(strip(line))).toBeLessThanOrEqual(30);
+		}
+
+		// Continuation lines (lines[1] and lines[2]) must use the full
+		// content width — 6 prefix + 24 content = 30 — proving the note
+		// marker did not steal columns from the wrap budget.
+		const continuation1 = strip(lines[1] ?? "");
+		const continuation2 = strip(lines[2] ?? "");
+		expect(visibleWidth(continuation1)).toBe(30);
+		expect(visibleWidth(continuation2)).toBe(30);
+
+		// The note marker appears exactly once, on the last label line.
+		const noteLines = lines.filter(line => strip(line).includes("✎ note"));
+		expect(noteLines).toHaveLength(1);
+		const lastLabelLine = lines[lines.length - 1] ?? "";
+		expect(strip(lastLabelLine)).toContain("✎ note");
 	});
 
 	it("replaces tabs in the label and description before rendering", () => {
