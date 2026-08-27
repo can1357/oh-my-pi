@@ -2275,6 +2275,143 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	};
 
+	it("aborts a running side-effect sibling after an invalid yield locks the active batch", async () => {
+		const tempDir = makeTempDir();
+		let sideEffectExecutions = 0;
+		const sideEffectTool = {
+			name: "sdk_side_effect",
+			label: "SDK Side Effect",
+			description: "Records a side effect",
+			parameters: type({}),
+			async execute(_toolCallId, _params, _onUpdate, _ctx, signal) {
+				const aborted = Promise.withResolvers<void>();
+				signal?.addEventListener("abort", () => aborted.reject(signal.reason), { once: true });
+				await aborted.promise;
+				sideEffectExecutions++;
+				return { content: [{ type: "text" as const, text: "unexpected" }], details: {} };
+			},
+		} satisfies CustomTool;
+		await withProviderAuth(["openai"], async () => {
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				toolNames: ["yield", sideEffectTool.name],
+				restrictToolNames: true,
+				allowRestrictedCustomTools: true,
+				customTools: [sideEffectTool],
+				outputSchema: {
+					type: "object",
+					properties: { token: { type: "string", minLength: 3 } },
+					required: ["token"],
+				},
+				outputSchemaFailureToolNames: ["yield"],
+				requireYieldTool: true,
+			});
+			const mock = createMockModel({
+				responses: [
+					{
+						content: [
+							{
+								type: "toolCall",
+								id: "yield-invalid",
+								name: "yield",
+								arguments: { result: { data: { token: "x" } } },
+							},
+							{
+								type: "toolCall",
+								id: "side-effect-queued",
+								name: sideEffectTool.name,
+								arguments: {},
+							},
+						],
+					},
+					{ content: ["done"] },
+				],
+			});
+			vi.spyOn(session.agent, "streamFn").mockImplementation(mock.stream);
+			try {
+				await session.prompt("return structured output");
+				expect(sideEffectExecutions).toBe(0);
+				const sideEffectResult = session.messages.find(
+					message => message.role === "toolResult" && message.toolCallId === "side-effect-queued",
+				) as ToolResultMessage | undefined;
+				expect(sideEffectResult?.isError).toBe(true);
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
+	it("keeps a same-batch sibling that remains in the correction allowlist", async () => {
+		const tempDir = makeTempDir();
+		let allowedExecutions = 0;
+		const lockReached = Promise.withResolvers<void>();
+		const allowedTool = {
+			name: "sdk_allowed_correction",
+			label: "SDK Allowed Correction",
+			description: "Completes an allowed correction",
+			parameters: type({}),
+			async execute(_toolCallId, _params, _onUpdate, _ctx, signal) {
+				await lockReached.promise;
+				signal?.throwIfAborted();
+				allowedExecutions++;
+				return { content: [{ type: "text" as const, text: "allowed" }], details: {} };
+			},
+		} satisfies CustomTool;
+		await withProviderAuth(["openai"], async () => {
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				toolNames: ["yield", allowedTool.name],
+				restrictToolNames: true,
+				allowRestrictedCustomTools: true,
+				customTools: [allowedTool],
+				outputSchema: {
+					type: "object",
+					properties: { token: { type: "string", minLength: 3 } },
+					required: ["token"],
+				},
+				outputSchemaFailureToolNames: ["yield", allowedTool.name],
+				requireYieldTool: true,
+			});
+			const setActiveToolCeiling = session.setActiveToolCeiling.bind(session);
+			vi.spyOn(session, "setActiveToolCeiling").mockImplementation(async names => {
+				await setActiveToolCeiling(names);
+				lockReached.resolve();
+			});
+			const mock = createMockModel({
+				responses: [
+					{
+						content: [
+							{
+								type: "toolCall",
+								id: "yield-invalid-allowed",
+								name: "yield",
+								arguments: { result: { data: { token: "x" } } },
+							},
+							{
+								type: "toolCall",
+								id: "allowed-correction",
+								name: allowedTool.name,
+								arguments: {},
+							},
+						],
+					},
+					{ content: ["done"] },
+				],
+			});
+			vi.spyOn(session.agent, "streamFn").mockImplementation(mock.stream);
+			try {
+				await session.prompt("return structured output");
+				expect(allowedExecutions).toBe(1);
+				const allowedResult = session.messages.find(
+					message => message.role === "toolResult" && message.toolCallId === "allowed-correction",
+				) as ToolResultMessage | undefined;
+				expect(allowedResult?.isError).toBeFalsy();
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
 	it("answers a native pi_edit after a session switches onto Cursor", async () => {
 		const tempDir = makeTempDir();
 		const cursorModel = getBundledModel("cursor", "composer-1.5");

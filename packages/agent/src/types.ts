@@ -140,6 +140,12 @@ export interface SteeringQueueState {
 	/** Best-effort origin used only to word synthetic skipped-tool results. */
 	source?: SteeringInterruptSource;
 }
+/** Per-tool-batch cancellation policy supplied by a host. */
+export interface ToolBatchAbortScope {
+	signal: AbortSignal;
+	/** Whether this tool should observe the batch cancellation signal. */
+	shouldAbort(toolName: string): boolean;
+}
 
 /**
  * Configuration for the agent loop.
@@ -467,6 +473,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * remote, so a stale value would strand discovery on the original repo.
 	 */
 	getCwd?: () => string | undefined;
+
+	/**
+	 * Creates an optional host-owned abort scope for one tool-call batch.
+	 * The loop combines its signal into matching tools before scheduling.
+	 */
+	createToolBatchAbortScope?: () => ToolBatchAbortScope | undefined;
 
 	/**
 	 * Called once per tool call after argument validation, in call order, before

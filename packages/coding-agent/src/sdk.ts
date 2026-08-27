@@ -1747,8 +1747,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const outputSchemaFailureToolNames = options.outputSchemaFailureToolNames
 			? [...options.outputSchemaFailureToolNames]
 			: undefined;
+		const outputSchemaFailureToolNameSet = outputSchemaFailureToolNames
+			? new Set(outputSchemaFailureToolNames)
+			: undefined;
+		let activeToolBatchAbortController: AbortController | undefined;
+		const createToolBatchAbortScope = outputSchemaFailureToolNames
+			? () => {
+					const controller = new AbortController();
+					activeToolBatchAbortController = controller;
+					return {
+						signal: controller.signal,
+						shouldAbort: (toolName: string) => outputSchemaFailureToolNameSet?.has(toolName) !== true,
+					};
+				}
+			: undefined;
 		const lockOutputSchemaCorrectionTools = outputSchemaFailureToolNames
 			? async (): Promise<void> => {
+					activeToolBatchAbortController?.abort(
+						new DOMException("Structured-output correction locked this batch to allowed tools", "AbortError"),
+					);
 					await session.setActiveToolCeiling(outputSchemaFailureToolNames);
 					const init = sessionManager.getBranch().findLast(entry => entry.type === "session_init");
 					if (init?.type !== "session_init") return;
@@ -3514,6 +3531,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			pruneToolDescriptions: inlineToolDescriptors,
 			dialect: resolveDialect(settings.get("tools.format"), model),
 			abortOnFabricatedToolResult: settings.get("tools.abortOnFabricatedResult"),
+			createToolBatchAbortScope,
 			getToolChoice: () => session?.nextToolChoiceDirective(),
 			onToolChoiceUnavailable: () => session?.toolChoiceQueue.reject("unavailable"),
 			telemetry: options.telemetry,
