@@ -643,6 +643,20 @@ async function streamDiff(
 	await Bun.sleep(0);
 }
 
+// Polls the guard's timer-sliced verdict bounded by wall time, not tick count:
+// a zero-delay setImmediate spin can burn a fixed tick budget in under a
+// millisecond on a loaded runner without firing a single timer or letting the
+// target's disk read settle. Fake timers cannot drive this — the verdict waits
+// on real file I/O, and the guard exposes no promise for it — so this awaits
+// the real condition with a 1ms poll, deadline-bounded only against hangs.
+async function drainUntilAbort(guard: StreamingEditGuard, timeoutMs = 15_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!guard.abortTriggered && Date.now() < deadline) {
+		await drainMacrotasks(1);
+		if (!guard.abortTriggered) await Bun.sleep(1);
+	}
+}
+
 it(
 	"keeps the event loop responsive while prechecking a large-target edit",
 	async () => {
@@ -688,9 +702,7 @@ it(
 
 			// Draining the remaining slices completes the scan and surfaces the abort
 			// the absent tail line must trigger.
-			for (let i = 0; i < 400 && !guard.abortTriggered; i += 1) {
-				await drainMacrotasks(1);
-			}
+			await drainUntilAbort(guard);
 			expect(guard.abortTriggered).toBe(true);
 			expect(abortCalls.count).toBe(1);
 		} finally {
@@ -720,11 +732,8 @@ it(
 
 		await streamDiff(guard, makeEvent, diff);
 		// The time-sliced scan may need more ticks than the stream provided on a
-		// slow machine; drain until the verdict lands (bounded, like the
-		// responsiveness test above).
-		for (let i = 0; i < 400 && !guard.abortTriggered; i += 1) {
-			await drainMacrotasks(1);
-		}
+		// slow machine; drain until the verdict lands.
+		await drainUntilAbort(guard);
 
 		expect(guard.abortTriggered).toBe(true);
 		expect(abortCalls.count).toBe(1);

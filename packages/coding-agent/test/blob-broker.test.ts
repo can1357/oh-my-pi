@@ -1,10 +1,11 @@
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AssistantMessage, AssistantMessageEvent, Context, Model } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getProjectDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { LocalBlobBackend } from "../src/blob-broker/broker";
 import { contextHasImageUrls, supportsRemoteImageUrls } from "../src/blob-broker/context-images";
@@ -363,6 +364,31 @@ describe("uploaders", () => {
 			destination: "command",
 			bytes: 7,
 		});
+	});
+
+	it("rejects command uploads when the project directory becomes inaccessible", async () => {
+		const projectDir = getProjectDir();
+		const accessSync = fs.accessSync;
+		const access = vi.spyOn(fs, "accessSync").mockImplementation((target, mode) => {
+			if (target === projectDir) {
+				throw Object.assign(new Error("operation not permitted"), { code: "EACCES" });
+			}
+			return accessSync(target, mode);
+		});
+		const uploader = createCommandUploader(
+			`${process.execPath} -e "console.log('https://files.example/' + process.cwd())" {file}`,
+		);
+		try {
+			await expect(
+				uploader.upload({
+					bytes: new Uint8Array(Buffer.from("payload")),
+					mimeType: "image/png",
+					extension: "png",
+				}),
+			).rejects.toThrow(`Project directory is not accessible: ${projectDir}`);
+		} finally {
+			access.mockRestore();
+		}
 	});
 });
 

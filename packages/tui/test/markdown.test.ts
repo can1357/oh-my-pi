@@ -4,7 +4,6 @@ import {
 	autolinkSchemeScanIndex,
 	clearRenderCache,
 	Markdown,
-	mathStartIndex,
 	renderInlineMarkdown,
 	urlTokenPossible,
 } from "@oh-my-pi/pi-tui/components/markdown";
@@ -12,6 +11,7 @@ import { setTerminalTextSizing, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capab
 import { type Component, TUI } from "@oh-my-pi/pi-tui/tui";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 import { Chalk } from "@oh-my-pi/pi-utils/chalk";
+import { mathStartIndex } from "@oh-my-pi/pi-utils/math-delimiters";
 import { defaultMarkdownTheme } from "./test-themes.js";
 import { VirtualTerminal } from "./virtual-terminal.js";
 

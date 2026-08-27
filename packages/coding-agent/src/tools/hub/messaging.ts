@@ -14,7 +14,7 @@ import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { formatAge, formatDuration } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../config/settings";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
-import { IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../../irc/bus";
+import { IrcAwaitTargetStopped, IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../../irc/bus";
 import type { Theme } from "../../modes/theme/theme";
 import { type AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../../registry/persisted-agents";
@@ -272,6 +272,7 @@ export async function executeSend(
 		? bus
 				.wait(senderId, { from: to }, timeoutMs ?? DEFAULT_IRC_TIMEOUT_MS, awaitAbort?.signal, {
 					drainPending: false,
+					awaitTarget: { registry, target: to },
 				})
 				.then(
 					message => ({ message, error: null as Error | null }),
@@ -336,11 +337,19 @@ export async function executeSend(
 			if (delivered.length > 0) {
 				const reply = await waiting;
 				if (reply.error) {
-					// The send already succeeded; if the wait was interrupted by our
-					// caller signal (steering / messaging), preserve the delivery receipt
-					// so the agent loop keeps this tool as "sent" instead of marking it
-					// skipped, which would prompt a duplicate resend on the next turn.
-					if (signal?.aborted) {
+					if (reply.error instanceof IrcAwaitTargetStopped) {
+						// The awaited peer ran and stopped without replying: the send
+						// still succeeded, so surface a clean note instead of erroring
+						// out — and settle now rather than blocking the full timeout.
+						lines.push(
+							`${to} stopped without replying. ` +
+								`Check \`inbox\` or their transcript (history://${to}) for a later answer.`,
+						);
+					} else if (signal?.aborted) {
+						// The send already succeeded; if the wait was interrupted by our
+						// caller signal (steering / messaging), preserve the delivery receipt
+						// so the agent loop keeps this tool as "sent" instead of marking it
+						// skipped, which would prompt a duplicate resend on the next turn.
 						lines.push(
 							`Send delivered but the reply wait was interrupted before ${to} answered. ` +
 								"Check `inbox` or `wait` again after handling the interrupt.",
@@ -363,7 +372,7 @@ export async function executeSend(
 			} else {
 				awaitAbort?.abort(awaitCancelled);
 				const reply = await waiting;
-				if (reply.error) throw reply.error;
+				if (reply.error && !(reply.error instanceof IrcAwaitTargetStopped)) throw reply.error;
 			}
 		}
 
