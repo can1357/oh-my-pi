@@ -2102,7 +2102,7 @@ export class StatusLineComponent implements Component {
 				? `ctx:${formatCompactContextPercent(percentOverflow ? pct : clampedPct)}`
 				: formatEmbeddedContextPercent(percentOverflow ? pct : clampedPct);
 			const candidateWindow = embedCompactContext ? "" : formatNumber(ctx.contextWindow);
-			const labelPadding = embedCompactContext ? 1 : candidateWindow.length + 4;
+			const labelPadding = embedCompactContext ? 0 : candidateWindow.length + 4;
 			if (gapWidth >= candidatePercent.length + labelPadding) {
 				percentLabel = candidatePercent;
 				if (embedCompactContext) {
@@ -2143,15 +2143,16 @@ export class StatusLineComponent implements Component {
 		}
 
 		if (percentLabel && percentStart < 0) {
+			const minStart = embedCompactContext ? 0 : 1;
 			const maxStart = embedCompactContext ? scaleWidth - percentLabel.length : scaleWidth - percentLabel.length - 1;
-			const preferredStart = Math.min(maxStart, Math.max(1, usedCount));
+			const preferredStart = Math.min(maxStart, Math.max(minStart, usedCount));
 			const overlapsBoundary = (start: number): boolean => {
 				const end = start + percentLabel.length;
 				return (speculationIdx >= start && speculationIdx < end) || (thresholdIdx >= start && thresholdIdx < end);
 			};
 			for (let distance = 0; distance <= maxStart; distance++) {
 				const left = preferredStart - distance;
-				if (left >= 1 && !overlapsBoundary(left)) {
+				if (left >= minStart && !overlapsBoundary(left)) {
 					percentStart = left;
 					break;
 				}
@@ -2167,7 +2168,7 @@ export class StatusLineComponent implements Component {
 			// primary readout, so keep it visible and let it overwrite the marker
 			// cell — the render loop already draws the percent label ahead of the
 			// speculation/threshold glyphs — rather than showing no percentage.
-			if (percentStart < 0 && maxStart >= 1) {
+			if (percentStart < 0 && maxStart >= minStart) {
 				percentStart = preferredStart;
 			}
 		}
