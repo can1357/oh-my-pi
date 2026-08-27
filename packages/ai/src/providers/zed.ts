@@ -1,9 +1,11 @@
 import * as crypto from "node:crypto";
+import { hasOpus47ApiRestrictions } from "@oh-my-pi/pi-catalog/identity";
 import { mapEffortToGoogleThinkingLevel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { parseZedCredentials, ZED_APP_VERSION, ZED_CLOUD_URL, ZED_HEADERS } from "@oh-my-pi/pi-catalog/wire/zed";
 import { AbortError, finalize, ProviderHttpError, ProviderResponseError } from "../../src/error";
 import { OAuthError } from "../../src/error/oauth";
+import { renderDemotedThinking } from "../dialect/demotion";
 import { getOrMintZedLlmToken, invalidateZedLlmToken } from "../registry/oauth/zed-token-pool";
 import type {
 	AssistantMessage,
@@ -93,18 +95,24 @@ function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, opti
 			}
 		} else if (msg.role === "assistant") {
 			const contentBlocks: unknown[] = [];
+			const isSameModel = msg.provider === model.provider && msg.api === model.api && msg.model === model.id;
+
 			for (const block of msg.content) {
 				if (block.type === "text") {
 					contentBlocks.push({ type: "text", text: block.text });
 				} else if (block.type === "thinking") {
-					const thinkingBlock: Record<string, unknown> = {
-						type: "thinking",
-						thinking: block.thinking,
-					};
-					if (block.thinkingSignature) {
-						thinkingBlock.signature = block.thinkingSignature;
+					if (isSameModel && block.thinkingSignature && block.thinkingSignature.trim().length > 0) {
+						contentBlocks.push({
+							type: "thinking",
+							thinking: block.thinking,
+							signature: block.thinkingSignature,
+						});
+					} else if (block.thinking && block.thinking.trim().length > 0) {
+						contentBlocks.push({
+							type: "text",
+							text: renderDemotedThinking(model.id, block.thinking),
+						});
 					}
-					contentBlocks.push(thinkingBlock);
 				} else if (block.type === "toolCall") {
 					contentBlocks.push({
 						type: "tool_use",
@@ -202,6 +210,20 @@ function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, opti
 				effort: options?.reasoning ?? "medium",
 			};
 		}
+	}
+
+	const allowSamplingParams = !isReasoning && !hasOpus47ApiRestrictions(model.id);
+	if (allowSamplingParams) {
+		if (options?.temperature !== undefined) {
+			body.temperature = options.temperature;
+		}
+		if (options?.topP !== undefined) {
+			body.top_p = options.topP;
+		}
+	}
+
+	if (options?.stopSequences && options.stopSequences.length > 0) {
+		body.stop_sequences = options.stopSequences.slice(0, 4);
 	}
 
 	return body;
@@ -1296,15 +1318,28 @@ export function streamZed(
 									input_tokens?: number;
 									input?: number;
 									cached_tokens?: number;
+									input_tokens_details?: {
+										cached_tokens?: number;
+									};
 									cache_creation_input_tokens?: number;
 									cache_read_input_tokens?: number;
 							  }
 							| undefined;
 						if (usage && outputMessage.usage) {
 							outputMessage.usage.output = usage.output_tokens ?? usage.output ?? outputMessage.usage.output;
-							outputMessage.usage.input = usage.input_tokens ?? usage.input ?? outputMessage.usage.input;
-							outputMessage.usage.cacheRead =
-								usage.cache_read_input_tokens ?? usage.cached_tokens ?? outputMessage.usage.cacheRead;
+							const cachedTokens =
+								usage.cache_read_input_tokens ??
+								usage.input_tokens_details?.cached_tokens ??
+								usage.cached_tokens ??
+								outputMessage.usage.cacheRead;
+							outputMessage.usage.cacheRead = cachedTokens;
+							const rawInput = usage.input_tokens ?? usage.input;
+							if (rawInput !== undefined) {
+								outputMessage.usage.input = Math.max(
+									0,
+									rawInput - (usage.input_tokens_details?.cached_tokens ?? 0),
+								);
+							}
 							outputMessage.usage.cacheWrite =
 								usage.cache_creation_input_tokens ?? outputMessage.usage.cacheWrite;
 						}

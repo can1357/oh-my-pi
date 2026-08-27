@@ -3,11 +3,18 @@ import { OAuthCallbackFlow } from "@oh-my-pi/pi-ai/registry/oauth/callback-serve
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 
 class TestCallbackFlow extends OAuthCallbackFlow {
+	exchangedState = "";
+
+	override generateState(): string {
+		return "generated-state";
+	}
+
 	async generateAuthUrl(_state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
 		return { url: `${redirectUri}?start=1` };
 	}
 
-	async exchangeToken(code: string, _state: string, _redirectUri: string): Promise<OAuthCredentials> {
+	async exchangeToken(code: string, state: string, _redirectUri: string): Promise<OAuthCredentials> {
+		this.exchangedState = state;
 		return {
 			access: `access-${code}`,
 			refresh: "refresh-token",
@@ -41,6 +48,22 @@ describe("OAuthCallbackFlow manual input retries", () => {
 
 		expect(promptCount).toBe(2);
 		expect(credentials.access).toBe("access-valid-code");
+	});
+
+	it("passes the generated state when a raw manual code omits state", async () => {
+		const flow = new TestCallbackFlow(
+			{
+				onAuth: () => {},
+				onManualCodeInput: async () => "raw-code",
+				signal: AbortSignal.timeout(1_000),
+			},
+			{ preferredPort: 14557, manualInputOnly: true },
+		);
+
+		const credentials = await flow.login();
+
+		expect(credentials.access).toBe("access-raw-code");
+		expect(flow.exchangedState).toBe("generated-state");
 	});
 
 	it("retries when manual callback state does not match", async () => {

@@ -230,6 +230,131 @@ describe("Zed Provider Payload Construction", () => {
 		expect(messages[0].content).toBe("Hello world");
 	});
 
+	it("demotes foreign and unsigned thinking when switching Zed models to Claude", () => {
+		const model: Model<"zed-agent"> = {
+			id: "claude-sonnet-5",
+			name: "Claude Sonnet 5",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: "https://cloud.zed.dev",
+			reasoning: true,
+			contextWindow: 1_000_000,
+			maxTokens: 128_000,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			compat: undefined,
+		};
+		const cases = [
+			{
+				sourceModel: "gemini-3-flash",
+				thinking: "Gemini's foreign reasoning",
+				thinkingSignature: "google-signature",
+			},
+			{
+				sourceModel: "gpt-5.6-luna",
+				thinking: "OpenAI's unsigned reasoning",
+			},
+		] as const;
+
+		for (const testCase of cases) {
+			const assistant: AssistantMessage = {
+				role: "assistant",
+				content: [
+					{
+						type: "thinking",
+						thinking: testCase.thinking,
+						...("thinkingSignature" in testCase && testCase.thinkingSignature
+							? { thinkingSignature: testCase.thinkingSignature }
+							: {}),
+					},
+					{ type: "text", text: "The answer." },
+				],
+				api: "zed-agent",
+				provider: "zed-agent",
+				model: testCase.sourceModel,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: 1,
+			};
+			const payload = buildZedProviderRequest("anthropic", { messages: [assistant] }, model) as {
+				messages: Array<{ role: string; content: unknown }>;
+			};
+
+			expect(payload.messages).toEqual([
+				{
+					role: "assistant",
+					content: [
+						{ type: "text", text: testCase.thinking },
+						{ type: "text", text: "The answer." },
+					],
+				},
+			]);
+		}
+	});
+
+	it("forwards mixed Anthropic sampling controls only when thinking is inactive", () => {
+		const model: Model<"zed-agent"> = {
+			id: "claude-sonnet-4-6",
+			name: "Claude Sonnet 4.6",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: "https://cloud.zed.dev",
+			reasoning: true,
+			contextWindow: 1_000_000,
+			maxTokens: 128_000,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			compat: undefined,
+		};
+		const sampling = {
+			temperature: 0.25,
+			topP: 0.75,
+			stopSequences: ["<END>", "<STOP>", "<DONE>", "<HALT>", "<EXTRA>"],
+		};
+		const disabledThinking = buildZedProviderRequest(
+			"anthropic",
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			model,
+			{ ...sampling, disableReasoning: true },
+		) as Record<string, unknown>;
+
+		expect(disabledThinking).toMatchObject({
+			temperature: 0.25,
+			top_p: 0.75,
+			stop_sequences: ["<END>", "<STOP>", "<DONE>", "<HALT>"],
+		});
+		expect(disabledThinking.thinking).toBeUndefined();
+
+		const enabledThinking = buildZedProviderRequest(
+			"anthropic",
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			model,
+			{ ...sampling, reasoning: Effort.Medium },
+		) as Record<string, unknown>;
+
+		expect(enabledThinking.temperature).toBeUndefined();
+		expect(enabledThinking.top_p).toBeUndefined();
+		expect(enabledThinking.stop_sequences).toEqual(["<END>", "<STOP>", "<DONE>", "<HALT>"]);
+
+		const restrictedDisabledThinking = buildZedProviderRequest(
+			"anthropic",
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{ ...model, id: "claude-sonnet-5", name: "Claude Sonnet 5" },
+			{ ...sampling, disableReasoning: true },
+		) as Record<string, unknown>;
+
+		expect(restrictedDisabledThinking.temperature).toBeUndefined();
+		expect(restrictedDisabledThinking.top_p).toBeUndefined();
+		expect(restrictedDisabledThinking.stop_sequences).toEqual(["<END>", "<STOP>", "<DONE>", "<HALT>"]);
+	});
+
 	it("formats Google AI GenerateContentRequest payload for google provider models", () => {
 		const mockModel: Model<"zed-agent"> = {
 			id: "gemini-3-flash",

@@ -275,6 +275,39 @@ describe("Zed provider protocol regressions", () => {
 		expect(run.events.some(event => event.type === "done")).toBe(false);
 	});
 
+	it("reads nested OpenAI cached-token usage before completing the stream", async () => {
+		const model: Model<"zed-agent"> = {
+			...makeModel("gpt-5.6-luna"),
+			cost: { input: 1, output: 2, cacheRead: 0.25, cacheWrite: 0 },
+		};
+		const run = await runZedStream(model, [
+			{
+				event: {
+					type: "response.completed",
+					response: {
+						usage: {
+							input_tokens: 120,
+							output_tokens: 8,
+							input_tokens_details: { cached_tokens: 75 },
+						},
+					},
+				},
+			},
+			{ status: "stream_ended" },
+		]);
+
+		expect(run.result.stopReason).toBe("stop");
+		expect(run.result.usage).toMatchObject({
+			input: 45,
+			output: 8,
+			cacheRead: 75,
+			cacheWrite: 0,
+			totalTokens: 128,
+		});
+		expect(run.result.usage.cost.input).toBeCloseTo(45 / 1_000_000, 12);
+		expect(run.result.usage.cost.cacheRead).toBeCloseTo((75 * 0.25) / 1_000_000, 12);
+	});
+
 	it("uses a direct bearer token without minting an LLM token", async () => {
 		const requests: Array<{ input: string; init?: RequestInit }> = [];
 		const fetchMock: FetchImpl = mockFetch(async (input, init) => {
