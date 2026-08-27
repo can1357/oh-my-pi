@@ -528,8 +528,51 @@ function formatCommandFailure(
 	return `git ${args.join(" ")} failed with exit code ${result.exitCode}`;
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// Concurrency limiter
+// ════════════════════════════════════════════════════════════════════════════
+//
+// A burst of parallel `git` launches — one per concurrent subagent plus any
+// always-on status pollers — can saturate CPU and filesystem I/O on
+// constrained or thermally-limited hosts. When `OMP_GIT_MAX_CONCURRENCY` is a
+// positive integer, git subprocess launches are queued so at most N run at
+// once; excess callers wait FIFO for a slot. Unset or non-positive => 0 =>
+// unlimited, preserving the previous behavior exactly.
+const GIT_MAX_CONCURRENCY_RAW = Number.parseInt(process.env.OMP_GIT_MAX_CONCURRENCY ?? "", 10);
+const GIT_MAX_CONCURRENCY = Number.isFinite(GIT_MAX_CONCURRENCY_RAW) && GIT_MAX_CONCURRENCY_RAW > 0 ? GIT_MAX_CONCURRENCY_RAW : 0;
+let gitActiveCount = 0;
+const gitSlotWaiters: Array<() => void> = [];
+
+/**
+ * Reserve a git-launch slot. Resolves with a release callback that MUST be
+ * invoked once (idempotent) after the child exits. A no-op when the limiter is
+ * disabled (`GIT_MAX_CONCURRENCY === 0`).
+ */
+function acquireGitSlot(): Promise<() => void> {
+	if (GIT_MAX_CONCURRENCY === 0) return Promise.resolve(() => {});
+	let released = false;
+	const release = (): void => {
+		if (released) return;
+		released = true;
+		gitActiveCount -= 1;
+		const next = gitSlotWaiters.shift();
+		if (next !== undefined) next();
+	};
+	if (gitActiveCount < GIT_MAX_CONCURRENCY) {
+		gitActiveCount += 1;
+		return Promise.resolve(release);
+	}
+	return new Promise<() => void>((resolve) => {
+		gitSlotWaiters.push(() => {
+			gitActiveCount += 1;
+			resolve(release);
+		});
+	});
+}
+
 async function git(cwd: string, args: readonly string[], options: CommandOptions = {}): Promise<GitCommandResult> {
 	const commandArgs = withShortLivedGitConfig(options.readOnly ? withNoOptionalLocks(args) : [...args]);
+	const releaseGitSlot = await acquireGitSlot();
 	let child: Subprocess;
 	try {
 		child = Bun.spawn(["git", ...commandArgs], {
@@ -542,6 +585,7 @@ async function git(cwd: string, args: readonly string[], options: CommandOptions
 			windowsHide: true,
 		});
 	} catch (err) {
+		releaseGitSlot();
 		if (isEnoent(err)) {
 			// A deleted/nonexistent cwd also surfaces as a spawn ENOENT; only blame
 			// the binary when the working directory actually exists.
@@ -551,7 +595,11 @@ async function git(cwd: string, args: readonly string[], options: CommandOptions
 		throw err;
 	}
 
-	return await collectSubprocessResult("git", commandArgs, child, options);
+	try {
+		return await collectSubprocessResult("git", commandArgs, child, options);
+	} finally {
+		releaseGitSlot();
+	}
 }
 
 function withNoOptionalLocks(args: readonly string[]): string[] {
