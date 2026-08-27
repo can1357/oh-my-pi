@@ -580,7 +580,7 @@ describe("pi-native gateway image reference validation", () => {
 		}
 	});
 
-	it("forwards matching Anthropic and Google provider file references", async () => {
+	it("rejects matching provider file references on custom endpoints", async () => {
 		const upstreamRequests: Array<Record<string, unknown>> = [];
 		const upstream = startProviderFileUpstream(upstreamRequests);
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-provider-files-"));
@@ -624,47 +624,12 @@ describe("pi-native gateway image reference validation", () => {
 		});
 
 		try {
-			const unknownMimeResponse = await fetch(`${handle.url}/v1/pi/stream`, {
-				method: "POST",
-				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
-				body: JSON.stringify({
-					modelId: googleModel.id,
-					context: {
-						messages: [
-							{
-								role: "user",
-								content: [
-									{
-										type: "image",
-										data: "",
-										mimeType: "application/octet-stream",
-										providerFile: {
-											provider: "google",
-											uri: "https://generativelanguage.googleapis.com/v1beta/files/google-unknown",
-										},
-									},
-								],
-								timestamp: 0,
-							},
-						],
-					},
-					stream: false,
-				}),
-			});
-			expect(unknownMimeResponse.status).toBe(400);
-			expect(await unknownMimeResponse.json()).toEqual({
-				error: {
-					type: "invalid_request_error",
-					message:
-						"input_image.providerFile cannot be forwarded to google-generative-ai; use inline image data or target the matching provider API",
-				},
-			});
-			expect(upstreamRequests).toHaveLength(0);
-
 			const cases = [
 				{
 					model: anthropicModel,
 					providerFile: { provider: "anthropic", id: "file_anthropic_123" },
+					message:
+						"input_image.providerFile cannot be forwarded to anthropic-messages; use inline image data or target the matching provider API",
 				},
 				{
 					model: googleModel,
@@ -672,6 +637,8 @@ describe("pi-native gateway image reference validation", () => {
 						provider: "google",
 						uri: "https://generativelanguage.googleapis.com/v1beta/files/google-123",
 					},
+					message:
+						"input_image.providerFile cannot be forwarded to google-generative-ai; use inline image data or target the matching provider API",
 				},
 			] as const;
 			for (const testCase of cases) {
@@ -699,69 +666,12 @@ describe("pi-native gateway image reference validation", () => {
 						stream: false,
 					}),
 				});
-				expect(response.status).toBe(200);
-				await response.json();
+				expect(response.status).toBe(400);
+				expect(await response.json()).toEqual({
+					error: { type: "invalid_request_error", message: testCase.message },
+				});
 			}
-			expect(upstreamRequests).toHaveLength(2);
-			const anthropicMessages = upstreamRequests[0]?.messages as Array<{ content?: unknown }> | undefined;
-			const anthropicContent = anthropicMessages?.[0]?.content;
-			if (!Array.isArray(anthropicContent)) throw new Error("expected Anthropic message content");
-			expect(anthropicContent).toContainEqual(
-				expect.objectContaining({
-					type: "image",
-					source: { type: "file", file_id: "file_anthropic_123" },
-				}),
-			);
-			const googleContents = upstreamRequests[1]?.contents as Array<{ parts?: unknown }> | undefined;
-			const googleParts = googleContents?.[0]?.parts;
-			if (!Array.isArray(googleParts)) throw new Error("expected Google content parts");
-			expect(googleParts).toContainEqual(
-				expect.objectContaining({
-					fileData: {
-						fileUri: "https://generativelanguage.googleapis.com/v1beta/files/google-123",
-						mimeType: "image/png",
-					},
-				}),
-			);
-
-			const inlineData = PNG_B64;
-			const expiredResponse = await fetch(`${handle.url}/v1/pi/stream`, {
-				method: "POST",
-				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
-				body: JSON.stringify({
-					modelId: googleModel.id,
-					context: {
-						messages: [
-							{
-								role: "user",
-								content: [
-									{
-										type: "image",
-										data: inlineData,
-										mimeType: "image/png",
-										providerFile: {
-											provider: "google",
-											uri: "https://generativelanguage.googleapis.com/v1beta/files/google-expired",
-											expiresAt: Date.now() - 1,
-										},
-									},
-								],
-								timestamp: 0,
-							},
-						],
-					},
-					stream: false,
-				}),
-			});
-			expect(expiredResponse.status).toBe(200);
-			await expiredResponse.json();
-			expect(upstreamRequests).toHaveLength(3);
-			const expiredGoogleContents = upstreamRequests[2]?.contents as Array<{ parts?: unknown }> | undefined;
-			const expiredGoogleParts = expiredGoogleContents?.[0]?.parts;
-			if (!Array.isArray(expiredGoogleParts)) throw new Error("expected Google content parts");
-			expect(expiredGoogleParts).toContainEqual({
-				inlineData: { mimeType: "image/png", data: inlineData },
-			});
+			expect(upstreamRequests).toHaveLength(0);
 		} finally {
 			await handle.close();
 			storage.close();

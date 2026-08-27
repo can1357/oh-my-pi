@@ -8,6 +8,9 @@ import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
+const PNG_B64 =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
 const genericModel = buildModel({
 	id: "moonshotai/kimi-k3",
 	name: "Kimi K3",
@@ -143,7 +146,7 @@ function makeInterleavedOrphanContext(model: Model): Context {
 				toolName: "read",
 				content: [
 					{ type: "text", text: "orphan" },
-					{ type: "image", mimeType: "image/png", data: "b3JwaGFu", detail: "high" },
+					{ type: "image", mimeType: "image/png", data: PNG_B64, detail: "high" },
 				],
 				isError: false,
 				timestamp: 2,
@@ -185,7 +188,7 @@ function expectInterleavedOrphanFallback(items: ReadonlyArray<ReplayItem>): void
 	expect(imageFallback).toMatchObject({
 		type: "message",
 		role: "user",
-		content: [{ type: "input_image", detail: "high", image_url: "data:image/png;base64,b3JwaGFu" }],
+		content: [{ type: "input_image", detail: "high", image_url: `data:image/png;base64,${PNG_B64}` }],
 	});
 }
 

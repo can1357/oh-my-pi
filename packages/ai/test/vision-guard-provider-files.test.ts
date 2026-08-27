@@ -46,7 +46,7 @@ function makeGoogleModel() {
 		name: "Vision Model",
 		api: "google-generative-ai",
 		provider: "google",
-		baseUrl: "https://generativelanguage.googleapis.com",
+		baseUrl: "https://generativelanguage.googleapis.com/v1beta",
 		reasoning: false,
 		input: ["text", "image"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },

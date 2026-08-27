@@ -39,6 +39,8 @@ import * as piUtils from "@oh-my-pi/pi-utils";
 
 const { isRecord } = piUtils;
 const TEST_INSTALLATION_ID = "00000000-0000-4000-8000-000000000001";
+const PNG_B64 =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 const TEST_CODEX_COMPACTION: CodexCompactionContext = {
 	operationId: "compaction-operation-1",
 	trigger: "auto",
@@ -618,7 +620,7 @@ describe("buildOpenAiNativeHistory interleaved assistant message (#8789)", () =>
 	});
 
 	test("defers an interleaved orphan image until the paired result closes", () => {
-		const imageData = Buffer.from("interleaved orphan image").toString("base64");
+		const imageData = PNG_B64;
 		const orphan: ToolResultMessage = {
 			role: "toolResult",
 			toolCallId: "call_b|fc_call_b",
@@ -721,7 +723,7 @@ describe("buildOpenAiNativeHistory call-id tracking", () => {
 	});
 
 	test("preserves orphan tool images while filtering stale snapshot outputs", () => {
-		const imageData = Buffer.from("orphan image").toString("base64");
+		const imageData = PNG_B64;
 		const orphan: ToolResultMessage = {
 			role: "toolResult",
 			toolCallId: "call_orphan|fc_call_orphan",
