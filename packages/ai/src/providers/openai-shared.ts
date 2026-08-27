@@ -119,6 +119,7 @@ import { transformMessages } from "./transform-messages";
 import {
 	hasSupportedImageSource,
 	isRemoteImageUrl,
+	isUsableInlineImage,
 	isUsableInlineImageData,
 	joinTextWithImagePlaceholder,
 	NON_VISION_IMAGE_PLACEHOLDER,
@@ -1482,7 +1483,7 @@ function normalizeResponsesOrphanImage(
 	if (imageUrl !== undefined) {
 		if (isDataUri(imageUrl)) {
 			const decoded = decodeDataUri(imageUrl);
-			if (decoded) {
+			if (decoded && isUsableInlineImage(decoded)) {
 				image.data = decoded.data;
 				image.mimeType = decoded.mimeType;
 			}

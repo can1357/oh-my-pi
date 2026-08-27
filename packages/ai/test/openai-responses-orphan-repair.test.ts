@@ -7,6 +7,9 @@ import {
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
+const PNG_B64 =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
 describe("repairOrphanResponsesToolCalls", () => {
 	it("appends a synthetic function_call_output after a call with no result", () => {
 		const input: ResponseInput = [
@@ -145,7 +148,7 @@ describe("repairOrphanResponsesToolOutputs", () => {
 	});
 
 	it("preserves orphan images as user-message fallbacks", () => {
-		const imageData = Buffer.from("orphan image").toString("base64");
+		const imageData = PNG_B64;
 		const imageUrl = `data:image/png;base64,${imageData}`;
 		const output = [
 			{ type: "input_text", text: "rendered image" },
@@ -301,7 +304,7 @@ describe("repairOrphanResponsesToolOutputs", () => {
 	it("preserves original image detail for supporting orphan replay", () => {
 		const model = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
 		if (!model) throw new Error("expected the bundled Codex model");
-		const imageData = Buffer.from("original orphan image").toString("base64");
+		const imageData = PNG_B64;
 		const imageUrl = `data:image/png;base64,${imageData}`;
 		const repaired = repairOrphanResponsesToolOutputs(
 			[

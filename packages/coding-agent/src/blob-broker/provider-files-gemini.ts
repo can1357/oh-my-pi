@@ -1,4 +1,5 @@
 import type { Model } from "@oh-my-pi/pi-ai";
+import { isOfficialGoogleProviderFileEndpoint } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import type { ProviderFileClient, ProviderFileHandle, ProviderFileUploadRequest } from "./provider-file-types";
 import type { FetchImpl } from "./uploader-runtime";
 
@@ -55,25 +56,6 @@ function parseFinalizedFile(payload: Record<string, unknown>): GeminiFileResourc
 	return { name, uri, mimeType, expiresAt };
 }
 
-function isOfficialGeminiModel(model: Model): boolean {
-	if (model.provider !== "google" || model.api !== "google-generative-ai") return false;
-	try {
-		const baseUrl = new URL(model.baseUrl);
-		return (
-			baseUrl.protocol === "https:" &&
-			baseUrl.hostname === "generativelanguage.googleapis.com" &&
-			baseUrl.port === "" &&
-			baseUrl.username === "" &&
-			baseUrl.password === "" &&
-			baseUrl.pathname.replace(/\/+$/, "") === "/v1beta" &&
-			baseUrl.search === "" &&
-			baseUrl.hash === ""
-		);
-	} catch {
-		return false;
-	}
-}
-
 /**
  * Create a native Gemini Files API client for a direct Google Generative AI model.
  * Unsupported model transports return `null` without issuing a network request.
@@ -83,7 +65,7 @@ export function createGeminiProviderFileClient(
 	credential: string,
 	fetchImpl: FetchImpl = globalThis.fetch,
 ): ProviderFileClient | null {
-	if (!isOfficialGeminiModel(model)) return null;
+	if (!isOfficialGoogleProviderFileEndpoint(model)) return null;
 	if (credential.trim().length === 0) throw new Error("Gemini Files API credential is required");
 
 	return {

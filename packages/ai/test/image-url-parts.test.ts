@@ -160,6 +160,43 @@ describe("image url parts", () => {
 		});
 	});
 
+	it("google custom endpoints fall back from provider files to inline data", () => {
+		const model = buildModel({
+			id: "custom-gemini",
+			name: "Custom Gemini",
+			api: "google-generative-ai",
+			provider: "google",
+			baseUrl: "https://gateway.example.invalid/v1beta",
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"google-generative-ai">);
+		const contents = convertGoogleMessages(model, {
+			messages: [
+				{
+					role: "user",
+					content: [
+						{
+							type: "image",
+							data: PNG_B64,
+							mimeType: "image/png",
+							providerFile: {
+								provider: "google",
+								uri: "https://generativelanguage.googleapis.com/v1/files/abc",
+							},
+						},
+					],
+					timestamp: 0,
+				},
+			],
+		});
+
+		expect(contents[0]?.parts).toContainEqual({ inlineData: { mimeType: "image/png", data: PNG_B64 } });
+		expect(contents.flatMap(content => content.parts ?? []).some(part => part.fileData !== undefined)).toBe(false);
+	});
+
 	it("ignores a provider file for a different provider and falls back to the url", () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5") as Model<"anthropic-messages">;
 		const params = convertAnthropicMessages(

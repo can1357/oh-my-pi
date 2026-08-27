@@ -267,33 +267,57 @@ function repairToolCallPairs(input: InputItem[], model: Model<"openai-codex-resp
 	}
 
 	const repaired: InputItem[] = [];
+	const deferredFallbacks: InputItem[] = [];
+	let activeBatchHasCall = false;
+	let activeBatchHasOutput = false;
+	const appendBatchItem = (item: InputItem): void => {
+		const callKind = toolCallKind(item.type);
+		const outputKind = toolOutputKind(item.type);
+		if (callKind) {
+			activeBatchHasCall = true;
+		} else if (outputKind) {
+			activeBatchHasOutput = true;
+		} else {
+			if (deferredFallbacks.length > 0) {
+				repaired.push(...deferredFallbacks);
+				deferredFallbacks.length = 0;
+			}
+			activeBatchHasCall = false;
+			activeBatchHasOutput = false;
+		}
+		repaired.push(item);
+	};
 	for (const item of input) {
 		const callId = typeof item.call_id === "string" ? item.call_id : undefined;
 		const callKind = toolCallKind(item.type);
 		const outputKind = toolOutputKind(item.type);
 
 		if (outputKind && callId !== undefined && callKinds.get(callId) !== outputKind) {
-			repaired.push(...orphanFunctionOutputItems(item, callId, model));
+			const fallback = orphanFunctionOutputItems(item, callId, model);
+			if (activeBatchHasCall && activeBatchHasOutput) deferredFallbacks.push(...fallback);
+			else repaired.push(...fallback);
 			continue;
 		}
 		if (callKind && callId !== undefined && outputKinds.get(callId) !== callKind) {
 			if (callKind === "computer") {
-				repaired.push({
+				appendBatchItem({
 					type: "message",
 					role: "assistant",
 					content: `[Computer call interrupted before a screenshot was recorded; call_id=${callId}]`,
 				});
 				continue;
 			}
-			repaired.push(item, {
+			appendBatchItem(item);
+			appendBatchItem({
 				type: callKind === "custom" ? "custom_tool_call_output" : "function_call_output",
 				call_id: callId,
 				output: CODEX_INTERRUPTED_TOOL_OUTPUT,
 			});
 			continue;
 		}
-		repaired.push(item);
+		appendBatchItem(item);
 	}
+	if (deferredFallbacks.length > 0) repaired.push(...deferredFallbacks);
 	return hoistInterleavedResponsesToolBatchMessages(repaired);
 }
 

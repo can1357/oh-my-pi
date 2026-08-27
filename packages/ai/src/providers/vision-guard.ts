@@ -138,6 +138,27 @@ function isExactOfficialAnthropicEndpoint(baseUrl: string | undefined): boolean 
 	}
 }
 
+export function isOfficialGoogleProviderFileEndpoint(model: Model): boolean {
+	if (model.provider !== "google" || model.api !== "google-generative-ai") return false;
+	const value = model.baseUrl?.trim() ?? "";
+	if (value.length === 0) return false;
+	try {
+		const url = new URL(value);
+		return (
+			url.protocol === "https:" &&
+			url.hostname.toLowerCase() === "generativelanguage.googleapis.com" &&
+			url.username.length === 0 &&
+			url.password.length === 0 &&
+			url.search.length === 0 &&
+			url.hash.length === 0 &&
+			url.port.length === 0 &&
+			url.pathname.replace(/\/+$/, "") === "/v1beta"
+		);
+	} catch {
+		return false;
+	}
+}
+
 function isOfficialAzureOpenAIEndpoint(baseUrl: string | undefined): boolean {
 	const value = baseUrl?.trim() ?? "";
 	if (value.length === 0) return true;
@@ -244,8 +265,7 @@ export function supportsProviderFileReference(
 		reference.provider === "google" &&
 		typeof reference.uri === "string" &&
 		reference.uri.length > 0 &&
-		model.api === "google-generative-ai" &&
-		model.provider === "google" &&
+		isOfficialGoogleProviderFileEndpoint(model) &&
 		hasReplayableGoogleImageMimeType(image)
 	);
 }
