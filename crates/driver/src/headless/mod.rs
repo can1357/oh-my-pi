@@ -12,7 +12,7 @@ use std::{
 use omp_agent::{
 	AbortDisposition, Agent, AgentEvent, AgentKind, AgentRunSummary, AgentSnapshot, AgentState,
 	AgentStatus, AgentTree, ApprovalBook, ApprovalInbox, ApprovalRoute, Budget, EventSubscription,
-	InProcTurnClient, Journal, TurnId,
+	InProcTurnClient, TurnId,
 };
 use omp_catalog::{ModelKey, ProviderId, snapshot};
 use omp_core::{SecretString, Str, sf};
@@ -21,7 +21,7 @@ use omp_proto::thread::v1::Item;
 use omp_sdk::{ProductionSessionError, SessionHandle, SessionIdentity, SessionRuntime};
 use omp_settings::manager::{MutationScope, SettingsManager, SettingsManagerError, SettingsPaths};
 use omp_storage::{
-	index::SessionFilter,
+	index::{SessionFilter, SessionIndex},
 	transcript::{
 		ModelChange as JournalModelChange, ModelId as JournalModelId, ModelRef as JournalModelRef,
 		ProviderId as JournalProviderId,
@@ -347,6 +347,38 @@ fn apply_tool_policy(
 		.retain(|tool| selected.iter().any(|name| name.as_str() == tool.name));
 	snapshot.enabled_tools = selected.into();
 }
+
+fn session_index_for(
+	policy: &HeadlessLaunchPolicy,
+	sessions_dir: &Path,
+	environment_index: Option<Arc<SessionIndex>>,
+) -> Result<Option<Arc<SessionIndex>>, HeadlessError> {
+	if policy.session == HeadlessSessionOpen::Ephemeral {
+		return Ok(None);
+	}
+	if policy.sessions_dir.is_some() {
+		return Ok(Some(Arc::new(
+			SessionIndex::open(sessions_dir.join("sessions.sqlite3"))
+				.map_err(HeadlessError::SessionsIndex)?,
+		)));
+	}
+	Ok(Some(environment_index.expect("durable launch has an environment session index")))
+}
+
+fn continue_latest_session(index: &SessionIndex, root: &Path) -> Result<Str, HeadlessError> {
+	let page = index
+		.list(&SessionFilter {
+			project: Some(Str::from(root.to_string_lossy().as_ref())),
+			limit: 1,
+			..SessionFilter::default()
+		})
+		.map_err(HeadlessError::SessionsIndex)?;
+	page
+		.sessions
+		.first()
+		.map(|session| session.id.0.clone())
+		.ok_or(HeadlessError::NoDurableSession)
+}
 fn validate_extension_host_keys<'a>(
 	keys: impl IntoIterator<Item = &'a omp_envd::worker::HostKey>,
 ) -> Result<(), HeadlessError> {
@@ -671,6 +703,16 @@ impl HeadlessSession {
 		};
 		chat::ensure_state_directory(&state_dir).map_err(HeadlessError::EnsureStateDirectory)?;
 		chat::ensure_state_directory(&sessions_dir).map_err(HeadlessError::EnsureStateDirectory)?;
+		let composition_model = if matches!(
+			policy.session,
+			HeadlessSessionOpen::Resume(_)
+				| HeadlessSessionOpen::Fork(_)
+				| HeadlessSessionOpen::ContinueLatest
+		) {
+			Self::preview_effective_model(&data_dir, &options, &policy)?
+		} else {
+			model.clone()
+		};
 		let search = Arc::new(InferenceBridge::default());
 		let goal_control = AgentGoalControl::default();
 		let advise_queue = omp_agent::advisor::AdvisorAdviceQueue::default();
@@ -684,7 +726,7 @@ impl HeadlessSession {
 			.cloned()
 			.collect::<Vec<_>>();
 		validate_extension_host_keys(extension_specs.iter().map(|extension| &extension.key))?;
-		let edit_model = omp_tools::edit::observer::EditBlackboxModel::new(model.clone());
+		let edit_model = omp_tools::edit::observer::EditBlackboxModel::new(composition_model.clone());
 		let mut bridges = builtin_with_content(
 			&root,
 			Arc::clone(&search),
@@ -714,22 +756,18 @@ impl HeadlessSession {
 		};
 		let env = environment.client().with_invocation_grant(grant);
 		let registry = registry_override.unwrap_or_else(|| environment.registry());
+		let session_index = session_index_for(
+			&policy,
+			&sessions_dir,
+			(policy.session != HeadlessSessionOpen::Ephemeral).then(|| environment.sessions_index()),
+		)?;
 		let continue_latest = if policy.session == HeadlessSessionOpen::ContinueLatest {
-			let page = environment
-				.sessions_index()
-				.list(&SessionFilter {
-					project: Some(Str::from(root.to_string_lossy().as_ref())),
-					limit: 1,
-					..SessionFilter::default()
-				})
-				.map_err(HeadlessError::SessionsIndex)?;
-			Some(
-				page
-					.sessions
-					.first()
-					.map(|session| session.id.0.clone())
-					.ok_or(HeadlessError::NoDurableSession)?,
-			)
+			Some(continue_latest_session(
+				session_index
+					.as_deref()
+					.expect("durable continue has an index"),
+				&root,
+			)?)
 		} else {
 			None
 		};
@@ -744,19 +782,14 @@ impl HeadlessSession {
 			),
 			HeadlessSessionOpen::Ephemeral => chat::SessionOpen::Ephemeral,
 		};
-		let mut session = chat::open_session(
-			&root,
-			&sessions_dir,
-			open,
-			registry.as_ref(),
-			(policy.session != HeadlessSessionOpen::Ephemeral).then(|| environment.sessions_index()),
-		)
-		.map_err(HeadlessError::OpenSession)?;
+		let mut session =
+			chat::open_session(&root, &sessions_dir, open, registry.as_ref(), session_index)
+				.map_err(HeadlessError::OpenSession)?;
 		let env = env
 			.with_principal(session.id.clone(), session.id.clone())
 			.map_err(HeadlessError::EnvPrincipal)?;
 		let blueprint = chat::session_blueprint(
-			model.as_str(),
+			composition_model.as_str(),
 			catalog,
 			&root,
 			&options.additional_roots,
@@ -774,7 +807,7 @@ impl HeadlessSession {
 				| HeadlessSessionOpen::ContinueLatest
 		) {
 			let journal_path = sessions_dir.join(format!("{}.jsonl", session.id.as_str()));
-			let mut revived = omp_agent::revive_existing(&journal_path, session.journal, snapshot)?;
+			let revived = omp_agent::revive_existing(&journal_path, session.journal, snapshot)?;
 			session.journal = revived.journal;
 			snapshot = revived.snapshot;
 			let revived_model = apply_revived_session_model(
@@ -1550,47 +1583,17 @@ fn apply_revived_session_model(
 		substituted = true;
 	}
 	if model_applied || substituted {
-		let session_id = snapshot
-			.turn
-			.context_id
-			.clone()
-			.unwrap_or_else(|| sf!("session"));
-		let blueprint = chat::session_blueprint(
-			snapshot.turn.params.model.as_str(),
+		chat::reproject_model_derived_snapshot(
+			snapshot,
 			catalog,
 			root,
 			additional_roots,
-			&session_id,
-			Arc::clone(&snapshot.registry),
+			has_durable_tool_restriction,
+			// Headless launches expose no explicit thinking override, and revival
+			// projects no durable thinking override.
+			false,
 		)
-		.map_err(HeadlessError::SessionBlueprint)?;
-		let projected =
-			chat::agent_snapshot(&blueprint, catalog, None).map_err(HeadlessError::AgentSnapshot)?;
-		let mut turn = projected.turn;
-		if has_durable_tool_restriction {
-			let retained: Arc<[Str]> = snapshot
-				.enabled_tools
-				.iter()
-				.filter(|name| {
-					projected
-						.enabled_tools
-						.iter()
-						.any(|available| available == *name)
-				})
-				.cloned()
-				.collect::<Vec<_>>()
-				.into();
-			let retained_set: BTreeSet<&str> = retained.iter().map(Str::as_str).collect();
-			turn
-				.params
-				.tools
-				.retain(|tool| retained_set.contains(tool.name.as_str()));
-			snapshot.enabled_tools = retained;
-		} else {
-			snapshot.enabled_tools = projected.enabled_tools;
-		}
-		snapshot.turn = turn;
-		snapshot.reasoning_dialect = projected.reasoning_dialect;
+		.map_err(HeadlessError::AgentSnapshot)?;
 	}
 	Ok(RevivedModelResult { notice, substituted })
 }
@@ -1935,6 +1938,79 @@ mod tests {
 		assert_eq!(snapshot.turn.params.tools.len(), 2);
 	}
 
+	#[test]
+	fn reproject_preserves_explicit_thinking_and_non_model_turn_state() {
+		let catalog = snapshot::Catalog::try_embedded().expect("embedded catalog");
+		let scratch = tempfile::tempdir().expect("scratch");
+		let root = scratch.path().join("project");
+		std::fs::create_dir_all(&root).expect("project");
+		let launch = catalog
+			.models()
+			.iter()
+			.find(|model| chat::model_rejects_tools(catalog, model.key.as_str()))
+			.expect("embedded catalog includes a tool-rejecting model");
+		let mut snapshot =
+			launch_snapshot_with_registry(catalog, &root, launch.key.as_str(), native_tool_registry());
+		snapshot.turn.params.thinking = Some(omp_proto::inference::v1::Reasoning {
+			effort: omp_proto::inference::v1::Effort::High as i32,
+			..Default::default()
+		});
+		snapshot.turn.context_id = Some(sf!("kept-context"));
+		snapshot.turn.provider_reset = true;
+		let executor = snapshot.turn.executor.clone();
+		let fallback = crate::discovery::roles::fallback_model_selector(
+			catalog,
+			&omp_catalog::settings::ModelSettings::default(),
+			None,
+		)
+		.expect("catalog fallback");
+		snapshot.turn.params.model = fallback.as_str().to_owned();
+		chat::reproject_model_derived_snapshot(&mut snapshot, catalog, &root, &[], false, true)
+			.expect("reproject");
+		assert_eq!(
+			snapshot
+				.turn
+				.params
+				.thinking
+				.as_ref()
+				.map(|thinking| thinking.effort),
+			Some(omp_proto::inference::v1::Effort::High as i32)
+		);
+		assert_eq!(snapshot.turn.context_id.as_deref(), Some("kept-context"));
+		assert!(snapshot.turn.provider_reset);
+		assert_eq!(snapshot.turn.executor, executor);
+		assert_eq!(
+			snapshot.turn.stream_watchdog,
+			chat::model_stream_watchdog(catalog, fallback.as_str())
+		);
+		assert_eq!(
+			snapshot.reasoning_dialect,
+			chat::interrupted_reasoning_dialect(catalog, fallback.as_str())
+		);
+		assert!(!snapshot.enabled_tools.is_empty());
+
+		let expected_thinking =
+			launch_snapshot_with_registry(catalog, &root, fallback.as_str(), native_tool_registry())
+				.turn
+				.params
+				.thinking;
+		let mut default_thinking =
+			launch_snapshot_with_registry(catalog, &root, launch.key.as_str(), native_tool_registry());
+		default_thinking.turn.params.thinking =
+			Some(omp_proto::inference::v1::Reasoning { effort: i32::MAX, ..Default::default() });
+		default_thinking.turn.params.model = fallback.as_str().to_owned();
+		chat::reproject_model_derived_snapshot(
+			&mut default_thinking,
+			catalog,
+			&root,
+			&[],
+			false,
+			false,
+		)
+		.expect("reproject model default");
+		assert_eq!(default_thinking.turn.params.thinking, expected_thinking);
+	}
+
 	#[tokio::test]
 	async fn dropped_session_without_finalize_leaves_environment_reopenable() {
 		let scratch = tempfile::tempdir().expect("scratch directory");
@@ -2075,6 +2151,183 @@ mod tests {
 		let error = HeadlessSession::preview_effective_model(&data_dir, &options, &policy)
 			.expect_err("noncanonical session id rejected before journal open");
 		assert!(matches!(error, HeadlessError::OpenSession(_)));
+	}
+
+	fn jsonl_names(dir: &Path) -> Vec<String> {
+		let mut names = std::fs::read_dir(dir)
+			.map(|entries| {
+				entries
+					.filter_map(|entry| {
+						let entry = entry.ok()?;
+						let path = entry.path();
+						if path.extension()? != "jsonl" {
+							return None;
+						}
+						Some(path.file_name()?.to_str()?.to_owned())
+					})
+					.collect::<Vec<_>>()
+			})
+			.unwrap_or_default();
+		names.sort();
+		names
+	}
+
+	fn write_indexed_prompt(sessions_dir: &Path, root: &Path, prompt: &str) -> Str {
+		std::fs::create_dir_all(sessions_dir).expect("sessions dir");
+		let index = omp_storage::index::SessionIndex::open(sessions_dir.join("sessions.sqlite3"))
+			.expect("index");
+		let id = Str::from(omp_core::Ulid::generate().to_string());
+		let path = sessions_dir.join(format!("{id}.jsonl"));
+		let session_id = SessionId(id.clone());
+		let cwd = root.to_string_lossy();
+		let request = omp_storage::index::NewSession {
+			id:         &session_id,
+			cwd:        cwd.as_ref(),
+			project:    cwd.as_ref(),
+			created_ms: 1,
+			kind:       omp_storage::index::SessionKind::Interactive,
+			parent:     None,
+			remote:     false,
+		};
+		index
+			.create_session(&request, || {
+				let mut writer = Writer::create(&path, &Header {
+					v:       4,
+					id:      session_id.clone(),
+					created: 1,
+					cwd:     root.to_owned(),
+				})?;
+				writer.append(&Event {
+					ts:   2,
+					kind: Kind::Item(ItemRecord {
+						item:        Item {
+							seq:           0,
+							created_at_ms: 2,
+							kind:          Some(item::Kind::Message(Message {
+								role:  i32::from(Role::User),
+								parts: vec![Part { kind: Some(part::Kind::Text(prompt.to_owned())) }],
+							})),
+							props:         None,
+						},
+						turn_id:     None,
+						prompt_hash: None,
+					}),
+				})?;
+				drop(writer);
+				Ok::<_, omp_storage::transcript::Error>(((), 0))
+			})
+			.unwrap_or_else(|_| panic!("index session"));
+		id
+	}
+
+	#[tokio::test]
+	async fn no_selectable_headless_fork_leaves_no_durable_child() {
+		let catalog = snapshot::Catalog::try_embedded().expect("embedded catalog");
+		let scratch = tempfile::tempdir().expect("scratch");
+		let data_dir = scratch.path().join("data");
+		std::fs::create_dir_all(&data_dir).expect("data dir");
+		let root = scratch.path().join("project");
+		std::fs::create_dir_all(&root).expect("project");
+		let journal_path = write_unavailable_model_journal(&root);
+		let source = Str::new(journal_path.file_stem().unwrap().to_str().unwrap());
+		let state_dir = omp_env::project_state::directory(&data_dir, &root).expect("state dir");
+		let sessions_dir = state_dir.join("sessions");
+		std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+		std::fs::copy(&journal_path, sessions_dir.join(journal_path.file_name().unwrap()))
+			.expect("copy journal");
+		let before = jsonl_names(&sessions_dir);
+		let overlay = scratch.path().join("overlay.toml");
+		std::fs::write(&overlay, "[model]\nenabled_models = [\"no/such\"]\n").expect("overlay");
+		let launch = crate::discovery::roles::fallback_model_selector(
+			catalog,
+			&omp_catalog::settings::ModelSettings::default(),
+			None,
+		)
+		.expect("fallback");
+		let mut options = preview_options(root, launch);
+		options.settings_overlays = Box::new([overlay]);
+		let error = match HeadlessSession::open_with_policy(data_dir, options, HeadlessLaunchPolicy {
+			session: HeadlessSessionOpen::Fork(source),
+			..HeadlessLaunchPolicy::default()
+		})
+		.await
+		{
+			Ok(_) => panic!("no selectable model must reject before creating a child"),
+			Err(error) => error,
+		};
+		assert!(matches!(error, HeadlessError::NoSelectableModel));
+		assert_eq!(jsonl_names(&sessions_dir), before);
+		let index_path = sessions_dir.join("sessions.sqlite3");
+		if index_path.is_file() {
+			let index = omp_storage::index::SessionIndex::open_authoritative_reader(&index_path)
+				.expect("index");
+			let page = index.list(&SessionFilter::default()).expect("list");
+			assert!(page.sessions.is_empty(), "failed fork must not index a child");
+		}
+	}
+
+	#[test]
+	fn custom_sessions_dir_continue_latest_uses_that_directory_index() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let root = scratch.path().join("project");
+		std::fs::create_dir_all(&root).expect("project");
+		let root = std::fs::canonicalize(&root).expect("canonical project");
+		let custom = scratch.path().join("custom-sessions");
+		let custom_id = write_indexed_prompt(&custom, &root, "custom latest");
+		let default = scratch.path().join("default-sessions");
+		let default_id = write_indexed_prompt(&default, &root, "default latest");
+		let default_index =
+			Arc::new(SessionIndex::open(default.join("sessions.sqlite3")).expect("default index"));
+		let policy = HeadlessLaunchPolicy {
+			session: HeadlessSessionOpen::ContinueLatest,
+			sessions_dir: Some(custom.clone()),
+			..HeadlessLaunchPolicy::default()
+		};
+
+		let selected = session_index_for(&policy, &custom, Some(default_index))
+			.expect("select index")
+			.expect("durable continue has an index");
+		assert_eq!(continue_latest_session(&selected, &root).expect("custom latest"), custom_id);
+		assert_ne!(custom_id, default_id);
+	}
+
+	#[tokio::test]
+	async fn custom_sessions_dir_continue_latest_opens_selected_session() {
+		let catalog = snapshot::Catalog::try_embedded().expect("embedded catalog");
+		let scratch = tempfile::tempdir().expect("scratch");
+		let data_dir = scratch.path().join("data");
+		std::fs::create_dir_all(&data_dir).expect("data dir");
+		let root = scratch.path().join("project");
+		std::fs::create_dir_all(&root).expect("project");
+		let root = std::fs::canonicalize(&root).expect("canonical project");
+		let custom = scratch.path().join("custom-sessions");
+		let custom_id = write_indexed_prompt(&custom, &root, "custom latest");
+		let launch = crate::discovery::roles::fallback_model_selector(
+			catalog,
+			&omp_catalog::settings::ModelSettings::default(),
+			None,
+		)
+		.expect("fallback");
+		let default_session =
+			HeadlessSession::open(data_dir.clone(), preview_options(root.clone(), launch.clone()))
+				.await
+				.expect("default session");
+		let default_id = default_session.session_id().to_owned();
+		drop(default_session);
+		assert_ne!(custom_id.as_str(), default_id.as_str());
+		let continued = HeadlessSession::open_with_policy(
+			data_dir,
+			preview_options(root, launch),
+			HeadlessLaunchPolicy {
+				session: HeadlessSessionOpen::ContinueLatest,
+				sessions_dir: Some(custom),
+				..HeadlessLaunchPolicy::default()
+			},
+		)
+		.await
+		.expect("continue latest");
+		assert_eq!(continued.session_id(), custom_id.as_str());
+		assert_ne!(continued.session_id(), default_id.as_str());
 	}
 }
 
