@@ -335,6 +335,8 @@ async function buildHello(): Promise<Extract<ExtToRelayMessage, { t: "hello" }>>
 			attachedTabIds.push(target.tabId);
 		}
 	}
+	const recoverableSnapshot = new Set(recoverableTabIds);
+	for (const tabId of attachedTabIds) recoverableSnapshot.add(tabId);
 	const versionMatch = /Chrome\/[\d.]+/.exec(navigator.userAgent);
 	return {
 		t: "hello",
@@ -342,7 +344,7 @@ async function buildHello(): Promise<Extract<ExtToRelayMessage, { t: "hello" }>>
 		browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
 		tabs: snapshots,
 		attachedTabIds,
-		recoverableTabIds: [...recoverableTabIds],
+		recoverableTabIds: [...recoverableSnapshot],
 	};
 }
 

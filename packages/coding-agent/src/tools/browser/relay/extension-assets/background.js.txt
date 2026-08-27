@@ -110,8 +110,10 @@ function updateRecoverable(update) {
   });
   return recoverableUpdates;
 }
-function rememberRecoverable(tabIds) {
+function rememberRecoverable(tabIds, isFresh = () => true) {
   return updateRecoverable(() => {
+    if (!isFresh())
+      return;
     for (const tabId of tabIds)
       recoverableTabIds.add(tabId);
   });
@@ -138,10 +140,12 @@ var attachmentGuard = new AttachmentGuard({
     }
   }
 });
-async function trackAttachments(tabIds) {
+async function trackAttachments(tabIds, isFresh = () => true) {
   if (tabIds.length === 0)
     return;
-  await rememberRecoverable(tabIds);
+  await rememberRecoverable(tabIds, isFresh);
+  if (!isFresh())
+    return;
   for (const tabId of tabIds)
     attachmentGuard.track(tabId);
 }
@@ -249,7 +253,10 @@ function refreshHello() {
       dirty: false,
       done: Promise.resolve()
     };
-    entry.done = buildHello().then((hello) => {
+    entry.done = buildHello().then(async (hello) => {
+      if (entry.dirty)
+        return;
+      await trackAttachments(hello.attachedTabIds, () => helloRefresh === entry && !entry.dirty && ws === socket && socket.readyState === WebSocket.OPEN);
       if (entry.dirty)
         return;
       if (ws === socket && socket.readyState === WebSocket.OPEN)
@@ -282,7 +289,9 @@ async function buildHello() {
       attachedTabIds.push(target.tabId);
     }
   }
-  await trackAttachments(attachedTabIds);
+  const recoverableSnapshot = new Set(recoverableTabIds);
+  for (const tabId of attachedTabIds)
+    recoverableSnapshot.add(tabId);
   const versionMatch = /Chrome\/[\d.]+/.exec(navigator.userAgent);
   return {
     t: "hello",
@@ -290,7 +299,7 @@ async function buildHello() {
     browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
     tabs: snapshots,
     attachedTabIds,
-    recoverableTabIds: [...recoverableTabIds]
+    recoverableTabIds: [...recoverableSnapshot]
   };
 }
 async function attachTab(tabId, socket) {
