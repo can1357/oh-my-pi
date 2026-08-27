@@ -37,8 +37,8 @@ use omp_driver::{
 		SessionOpen, agent_snapshot, apply_launch_tool_selection, canonical_project,
 		ensure_state_directory, interrupted_reasoning_dialect, model_context_window,
 		model_selector_is_selectable, model_usable_context_window, now_ms, open_session,
-		resolve_model_provider, resolve_model_selector, resume_choices, session_blueprint,
-		strict_session_id, thinking_effort,
+		reproject_model_derived_snapshot, resolve_model_provider, resolve_model_selector,
+		resume_choices, session_blueprint, strict_session_id, thinking_effort,
 	},
 	collab::session::{self, CollabSessionAuthority},
 	discovery::{context, roles, runtime},
@@ -946,14 +946,17 @@ pub(crate) async fn run(
 		identifier:        model.clone(),
 		codex_task_policy: prompt_policy::uses_codex_task_prompt(model.as_str()),
 	};
-	if let Some(level) = args.thinking
+	let preserve_thinking = if let Some(level) = args.thinking
 		&& level != crate::cli::ThinkingLevel::Auto
 		&& !args.external_thinking
 	{
 		let effort = thinking_effort(level.into(), auto_thinking);
 		snapshot.turn.params.thinking =
 			Some(inference_pb::Reasoning { effort: effort as i32, ..Default::default() });
-	}
+		true
+	} else {
+		false
+	};
 	if resume.is_some() || fork.is_some() {
 		let path = sessions_dir.join(format!("{}.jsonl", session.id.as_str()));
 		let Session { id, journal, initial_items } = session;
@@ -961,11 +964,14 @@ pub(crate) async fn run(
 			.map_err(|error| miette::miette!(error))?;
 		session = Session { id, journal: revived.journal, initial_items };
 		snapshot = revived.snapshot;
+		let mut model_applied = false;
 		if let Some(model) = revived.model_override
 			&& !model.fallback
 		{
 			snapshot.turn.params.model = model.model.model.0.to_string();
+			model_applied = true;
 		}
+		let mut substituted = false;
 		if !model_selector_is_selectable(catalog, &snapshot.turn.params.model)
 			|| !roles::model_selector_allowed_for_provider(
 				catalog,
@@ -978,10 +984,22 @@ pub(crate) async fn run(
 				roles::fallback_model_selector(catalog, &model_settings, credential_provider.as_ref())
 					.ok_or_else(|| miette!("no selectable model is available to resume"))?;
 			snapshot.turn.params.model = fallback.as_str().to_owned();
+			substituted = true;
 			eprintln!(
 				"Session model `{saved}` is unavailable; resumed with `{fallback}` without changing \
 				 the session pin."
 			);
+		}
+		if model_applied || substituted {
+			reproject_model_derived_snapshot(
+				&mut snapshot,
+				catalog,
+				&root,
+				&args.add_dir,
+				revived.has_durable_tool_restriction,
+				preserve_thinking,
+			)
+			.map_err(|error| miette::miette!(error))?;
 		}
 	}
 	edit_model.set(Str::new(&snapshot.turn.params.model));

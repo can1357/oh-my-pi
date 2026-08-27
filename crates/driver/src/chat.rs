@@ -6372,6 +6372,72 @@ pub fn agent_snapshot(
 	Ok(snapshot)
 }
 
+/// Reprojects model-derived snapshot fields without replacing non-model turn
+/// state.
+///
+/// Explicit thinking, context identity, executor, turn props, and
+/// provider-reset stay on the live turn. A durable restricted tool subset is
+/// retained rather than widened to the new model's advertised roster.
+pub fn reproject_model_derived_snapshot(
+	snapshot: &mut AgentSnapshot,
+	catalog: &snapshot::Catalog,
+	root: &Path,
+	additional_roots: &[PathBuf],
+	has_durable_tool_restriction: bool,
+	preserve_thinking: bool,
+) -> Result<(), ChatError> {
+	let session_id = snapshot
+		.turn
+		.context_id
+		.clone()
+		.unwrap_or_else(|| sf!("session"));
+	let blueprint = session_blueprint(
+		snapshot.turn.params.model.as_str(),
+		catalog,
+		root,
+		additional_roots,
+		&session_id,
+		Arc::clone(&snapshot.registry),
+	)?;
+	let projected = agent_snapshot(&blueprint, catalog, None)?;
+	let explicit_thinking = preserve_thinking
+		.then(|| snapshot.turn.params.thinking.clone())
+		.flatten();
+	if has_durable_tool_restriction {
+		let retained: Arc<[Str]> = snapshot
+			.enabled_tools
+			.iter()
+			.filter(|name| {
+				projected
+					.enabled_tools
+					.iter()
+					.any(|available| available == *name)
+			})
+			.cloned()
+			.collect::<Vec<_>>()
+			.into();
+		let retained_set: BTreeSet<&str> = retained.iter().map(Str::as_str).collect();
+		snapshot
+			.turn
+			.params
+			.tools
+			.clone_from(&projected.turn.params.tools);
+		snapshot
+			.turn
+			.params
+			.tools
+			.retain(|tool| retained_set.contains(tool.name.as_str()));
+		snapshot.enabled_tools = retained;
+	} else {
+		snapshot.turn.params.tools = projected.turn.params.tools;
+		snapshot.enabled_tools = projected.enabled_tools;
+	}
+	snapshot.turn.stream_watchdog = projected.turn.stream_watchdog;
+	snapshot.turn.params.thinking = explicit_thinking.or(projected.turn.params.thinking);
+	snapshot.reasoning_dialect = projected.reasoning_dialect;
+	Ok(())
+}
+
 /// Applies launch-time tool filtering and returns the corresponding environment
 /// grant.
 ///
@@ -7336,27 +7402,26 @@ mod tests {
 		let sessions_dir = state_dir.join("sessions");
 		ensure_state_directory(&sessions_dir).expect("sessions dir");
 		let parent_id = write_session(&sessions_dir, &root, "parent fork prompt", None);
-		let catalog =
-			crate::registry::production_catalog(&data_dir).expect("production catalog");
+		let catalog = crate::registry::production_catalog(&data_dir).expect("production catalog");
 		let model = fallback_model_selector(&catalog).expect("selectable fallback model");
 
 		let mut session = HeadlessSession::open(data_dir, HeadlessSessionOptions {
-			project:               root,
-			settings_overlays:     Box::new([]),
-			additional_roots:      Box::new([]),
+			project: root,
+			settings_overlays: Box::new([]),
+			additional_roots: Box::new([]),
 			model,
-			initial_regime:        None,
-			initial_prompt_slot:   None,
-			plan_handoff:          None,
-			resume:                None,
-			fork:                  Some(parent_id),
-			py_eval:               false,
-			approval_mode:         None,
-			pty_denied:            false,
-			credential_provider:   None,
-			api_key:               None,
+			initial_regime: None,
+			initial_prompt_slot: None,
+			plan_handoff: None,
+			resume: None,
+			fork: Some(parent_id),
+			py_eval: false,
+			approval_mode: None,
+			pty_denied: false,
+			credential_provider: None,
+			api_key: None,
 			prompt_cache_affinity: None,
-			session_generation:    1,
+			session_generation: 1,
 		})
 		.await
 		.expect("forked session opens");
