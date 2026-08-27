@@ -19,6 +19,10 @@
 - Fixed Cursor Connect streams mis-parsing compressed or end-of-stream frames, which previously surfaced as protobuf errors mid-stream.
 - Fixed long-lived Cursor sessions retaining conversation state without bound; cached conversations are now capped and rotation depth is limited.
 - Recorded the selected Cursor transport in `PI_REQ_DEBUG` dumps so HTTP/1 bridge sessions are not labeled `http2`.
+- Stopped a reset Cursor server-config probe from republishing into the cache.
+- Paired Cursor tool results only after the result sink succeeded.
+- Encoded Cursor interaction replies with the shared Connect frame helper.
+
 ## [18.0.8] - 2026-08-27
 
 ### Added

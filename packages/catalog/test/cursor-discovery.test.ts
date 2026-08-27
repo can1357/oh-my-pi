@@ -471,6 +471,21 @@ describe("fetchCursorUsableModels", () => {
 			expect.objectContaining({ outstanding: 0, draining: false, referenced: false }),
 		]);
 	});
+	it("discards the pooled session when GetUsableModels times out", async () => {
+		const { promise, resolve, reject } = Promise.withResolvers<string>();
+		const srv = http2.createServer();
+		servers.add(srv);
+		srv.once("error", reject);
+		srv.on("stream", (stream: http2.ServerHttp2Stream) => {
+			stream.on("data", () => {});
+		});
+		srv.listen(0, "127.0.0.1", () => {
+			resolve(`http://127.0.0.1:${requireTcpAddress(srv.address()).port}`);
+		});
+		const url = await promise;
+		expect(await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 50 })).toBeNull();
+		expect(__cursorDiscoveryHttp2Snapshot()).toEqual([]);
+	});
 
 	it("removes the timeout signal's abort listener after a successful discovery", async () => {
 		const response = create(GetUsableModelsResponseSchema, {

@@ -198,6 +198,15 @@ function isRawUnaryRequest(body: Buffer): boolean {
 	}
 }
 
+/** Polls a real HTTP/2 stream arrival. Fake timers cannot advance the server. */
+async function waitFor(predicate: () => boolean): Promise<void> {
+	for (let i = 0; i < 50; i++) {
+		if (predicate()) return;
+		await Bun.sleep(10);
+	}
+	throw new Error("timed out waiting for condition");
+}
+
 async function stopServer(): Promise<void> {
 	for (const session of sessions) {
 		session.destroy();
@@ -441,9 +450,22 @@ describe("fetchCursorBidiAvailability concurrent miss coalescing", () => {
 		expect(await abandoned).toBe("unspecified");
 		expect(await survivor).toBe("bidi-disabled");
 		expect(invocations).toBe(1);
-		// The shared result — not the abort — is what was published and cached.
 		expect(await fetchFor(baseUrl)).toBe("bidi-disabled");
 		expect(invocations).toBe(1);
+	});
+	it("does not republish a reset in-flight probe into the cache", async () => {
+		const gate = Promise.withResolvers<void>();
+		scenario = { kind: "gated", released: gate.promise };
+		const baseUrl = await startServer();
+		const stale = fetchFor(baseUrl);
+		await waitFor(() => invocations === 1);
+		resetCursorServerConfigCache();
+		scenario = { kind: "all-disabled" };
+		expect(await fetchFor(baseUrl)).toBe("all-disabled");
+		gate.resolve();
+		expect(await stale).toBe("bidi-disabled");
+		expect(await fetchFor(baseUrl)).toBe("all-disabled");
+		expect(invocations).toBe(2);
 	});
 });
 

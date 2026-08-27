@@ -502,9 +502,10 @@ function streamCursorWithWireMode(
 		// the deferred drain-timeout pairing below would then read every id as
 		// unpaired and layer a synthetic failure over results that did land.
 		const upstreamOnToolResult = options?.onToolResult;
-		const resultSink: CursorToolResultHandler = result => {
+		const resultSink: CursorToolResultHandler = async result => {
+			const out = upstreamOnToolResult ? await upstreamOnToolResult(result) : result;
 			pairedToolCallIds.add(result.toolCallId);
-			return upstreamOnToolResult ? upstreamOnToolResult(result) : result;
+			return out;
 		};
 		// A dispatch can spawn another (a handler that decodes a nested frame), so
 		// re-check rather than awaiting one snapshot. Each dispatch already

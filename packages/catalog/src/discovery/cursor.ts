@@ -158,6 +158,7 @@ function buildCursorUnaryHeaders(apiKey: string, clientVersion: string | undefin
 interface CursorH2Lease {
 	readonly request: http2.ClientHttp2Stream;
 	release(): void;
+	discard(): void;
 }
 
 interface CursorH2PoolEntry {
@@ -272,11 +273,11 @@ function issueCursorH2Lease(
 	}
 
 	let released = false;
-	const onAbort = (): void => release();
-	function release(): void {
+	function finish(drain: boolean): void {
 		if (released) return;
 		released = true;
 		signal.removeEventListener("abort", onAbort);
+		if (drain) drainCursorH2Entry(key, entry);
 		releaseCursorH2Entry(key, entry);
 		try {
 			request.destroy();
@@ -284,10 +285,13 @@ function issueCursorH2Lease(
 			/* already closed */
 		}
 	}
+	const onAbort = (): void => finish(true);
+	const release = (): void => finish(false);
+	const discard = (): void => finish(true);
 	signal.addEventListener("abort", onAbort, { once: true });
 	// Aborted in the window between request creation and listener install.
-	if (signal.aborted) release();
-	return { request, release };
+	if (signal.aborted) discard();
+	return { request, release, discard };
 }
 
 function establishCursorH2Session(key: string, origin: string): CursorH2ConnectHandle {

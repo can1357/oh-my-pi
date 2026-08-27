@@ -63,6 +63,7 @@ const cache = new Map<string, { value: CursorBidiAvailability; expiresAt: number
  * later callers retry instead of awaiting a dead promise.
  */
 const inflight = new Map<string, Promise<CursorBidiAvailability>>();
+let serverConfigGeneration = 0;
 
 /** Removes entries whose TTL has elapsed. Called on every cache write. */
 function pruneExpiredCache(): void {
@@ -81,6 +82,7 @@ function evictOverflowCache(): void {
 	}
 }
 export function resetCursorServerConfigCache(): void {
+	serverConfigGeneration++;
 	cache.clear();
 	inflight.clear();
 }
@@ -163,7 +165,9 @@ function beginSharedServerConfigFetch(
 	baseUrl: string,
 	callerHeaders: Record<string, string> | undefined,
 ): Promise<CursorBidiAvailability> {
+	const generation = serverConfigGeneration;
 	const shared = fetchServerConfig(apiKey, baseUrl, callerHeaders).then(value => {
+		if (generation !== serverConfigGeneration) return value;
 		pruneExpiredCache();
 		cache.set(key, { value, expiresAt: Date.now() + CURSOR_SERVER_CONFIG_TTL_MS });
 		evictOverflowCache();
