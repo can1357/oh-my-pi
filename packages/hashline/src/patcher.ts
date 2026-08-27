@@ -43,7 +43,17 @@ import { detectLineEnding, type LineEnding, normalizeToLF, restoreLineEndings, s
 import { InvalidAbsoluteRangeError } from "./parser";
 import { Recovery, type RecoveryResult } from "./recovery";
 import type { Snapshot, SnapshotStore } from "./snapshots";
-import type { ApplyResult, BlockResolution, BlockResolver, BlockSpan, Clipboard, Edit, FileOp } from "./types";
+import type {
+	ApplyResult,
+	BlockResolution,
+	BlockResolver,
+	BlockSpan,
+	Clipboard,
+	Edit,
+	FileOp,
+	ParsedRange,
+	ReplacementEcho,
+} from "./types";
 
 /**
  * Upper bound on the number of unseen anchor lines whose actual file content
@@ -127,6 +137,13 @@ export interface PatchSectionResult {
 	 * content. Undefined for patches with no block ops and for drift recovery.
 	 */
 	blockResolutions?: BlockResolution[];
+	/**
+	 * Boundary echoes (original first/last line) for each concrete
+	 * `PUT N.=M` replacement, in patch order. Present only when the apply
+	 * matched the tagged content; undefined for drift recovery and for
+	 * patches with no concrete replacements.
+	 */
+	replacementEchoes?: ReplacementEcho[];
 }
 
 export interface PatcherApplyResult {
@@ -181,6 +198,22 @@ function recoveryToApplyResult(result: RecoveryResult): ApplyResult {
 		firstChangedLine: result.firstChangedLine,
 		warnings: result.warnings,
 	};
+}
+
+/**
+ * Materialize {@link ReplacementEcho} entries for a section's concrete
+ * replacement ranges against the text the edits were validated to apply on.
+ * Out-of-range boundary lines (a phantom trailing line, say) echo as empty
+ * strings rather than throwing — the echo is advisory.
+ */
+function buildReplacementEchoes(replacements: readonly ParsedRange[], text: string): ReplacementEcho[] {
+	const lines = text.split("\n");
+	return replacements.map(({ start, end }) => ({
+		start: start.line,
+		end: end.line,
+		first: lines[start.line - 1] ?? "",
+		last: lines[end.line - 1] ?? "",
+	}));
 }
 function mergeWarnings(...sources: ReadonlyArray<readonly string[] | undefined>): string[] {
 	const out: string[] = [];
@@ -403,6 +436,7 @@ export class Patcher {
 						exists: read.exists,
 						normalized,
 						edits: [],
+						replacements: [],
 						clipboard: register,
 					})
 				: this.#applyWithRecovery({
@@ -411,6 +445,7 @@ export class Patcher {
 						exists: read.exists,
 						normalized,
 						edits: parsed.edits,
+						replacements: parsed.replacements,
 						clipboard: register,
 					});
 
@@ -526,6 +561,7 @@ export class Patcher {
 				header: formatHashlineHeader(moveDest, fileHash),
 				firstChangedLine: applyResult.firstChangedLine,
 				blockResolutions: applyResult.blockResolutions,
+				replacementEchoes: applyResult.replacementEchoes,
 				moveDest,
 				warnings,
 			};
@@ -570,6 +606,7 @@ export class Patcher {
 			header: formatHashlineHeader(section.path, fileHash),
 			firstChangedLine: applyResult.firstChangedLine,
 			blockResolutions: applyResult.blockResolutions,
+			replacementEchoes: applyResult.replacementEchoes,
 			warnings: allWarnings,
 		};
 	}
@@ -676,9 +713,11 @@ export class Patcher {
 		exists: boolean;
 		normalized: string;
 		edits: readonly Edit[];
+		/** Concrete replacement ranges from the section parse, for boundary echoes. */
+		replacements: readonly ParsedRange[];
 		clipboard: Clipboard;
 	}): ApplyResult {
-		const { section, canonicalPath, exists, normalized, edits, clipboard } = args;
+		const { section, canonicalPath, exists, normalized, edits, replacements, clipboard } = args;
 		const expected = exists ? section.fileHash : undefined;
 		// The 4-hex tag is content-derived: when the live text hashes to it,
 		// trust the match and apply directly. `storedSnapshotForTag` feeds the
@@ -733,7 +772,14 @@ export class Patcher {
 				this.#assertSeenLines(section, expected, matchedSnapshot);
 			}
 			const result = applyEdits(normalized, resolved, { clipboard, path: canonicalPath });
-			return withResolveWarnings(blockResolutions.length > 0 ? { ...result, blockResolutions } : result);
+			// Concrete replacement ranges echo the original boundary lines so
+			// the model can catch a mis-scoped range; keyed to the matched
+			// content, so (like block resolutions) they are dropped on drift.
+			const withEchoes =
+				replacements.length > 0
+					? { ...result, replacementEchoes: buildReplacementEchoes(replacements, normalized) }
+					: result;
+			return withResolveWarnings(blockResolutions.length > 0 ? { ...withEchoes, blockResolutions } : withEchoes);
 		}
 		// Head/tail-only inserts are position-stable: "start"/"end" cannot move
 		// with content drift, so a stale tag is non-fatal. Apply onto the live

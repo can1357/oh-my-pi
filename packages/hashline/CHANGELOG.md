@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- `buildCompactDiffPreview` now reports per-hunk `renumbers` (original-line anchors + deltas) alongside the existing preview text (#8603).
+- Patcher results carry `replacementEchoes` (first/last original line of each `PUT N.=M` range) for response-side boundary confirmation (#8603).
+
 ## [18.0.4] - 2026-08-24
 
 ### Changed

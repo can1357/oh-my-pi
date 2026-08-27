@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Hashline edit responses now surface per-hunk `Renumber:` line-shift deltas and first/last-line boundary echoes for every `PUT N.=M` replacement, so models can re-anchor subsequent edits without re-reading the file (#8603).
+
 ## [18.0.7] - 2026-08-26
 
 ### Added
