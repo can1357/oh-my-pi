@@ -20,6 +20,7 @@ import { generateEnumExports } from "./gen-enums";
 // pcre2-sys prefers a system libpcre2 when pkg-config finds one. Keep the
 // static build so the local addon never retains host Homebrew paths.
 process.env.PCRE2_SYS_STATIC ??= "1";
+process.env.RUSTC_BOOTSTRAP ??= "1";
 
 // Windows: cc-rs and rustc auto-locate cl.exe/link.exe through the VS
 // registry, but the cmake crate (audiopus_sys' bundled opus) needs cmake —

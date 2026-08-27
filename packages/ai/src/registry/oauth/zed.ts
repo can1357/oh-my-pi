@@ -88,13 +88,19 @@ export async function tryImportLocalZedKeychain(): Promise<OAuthCredentials | nu
  * Run interactive Zed OAuth sign-in flow via browser and RSA key exchange.
  */
 export async function loginZed(ctrl: OAuthController): Promise<OAuthCredentials> {
+	if (ctrl.signal?.aborted) {
+		throw new AIError.AbortError("Zed authentication was aborted.");
+	}
+
 	// 1. Try local keychain import first if available
 	const localCreds = await tryImportLocalZedKeychain();
+	if (ctrl.signal?.aborted) {
+		throw new AIError.AbortError("Zed authentication was aborted.");
+	}
 	if (localCreds) {
 		ctrl.onProgress?.("Imported existing Zed credentials from local system keychain.");
 		return localCreds;
 	}
-
 	// 2. Browser sign-in flow with RSA-2048 key exchange
 	const { publicKeyDerBase64Url, privateKeyPem } = generateZedAuthKeypair();
 	const { promise, resolve, reject } = Promise.withResolvers<OAuthCredentials>();
@@ -176,14 +182,25 @@ export async function loginZed(ctrl: OAuthController): Promise<OAuthCredentials>
 
 	server.listen(DEFAULT_CALLBACK_PORT, "127.0.0.1");
 
-	ctrl.signal?.addEventListener("abort", () => {
-		if (!isResolved) {
-			isResolved = true;
-			clearTimeout(timeoutId);
-			server.close();
-			reject(new AIError.AbortError("Zed authentication was aborted."));
-		}
-	});
+	ctrl.signal?.addEventListener(
+		"abort",
+		() => {
+			if (!isResolved) {
+				isResolved = true;
+				clearTimeout(timeoutId);
+				server.close();
+				reject(new AIError.AbortError("Zed authentication was aborted."));
+			}
+		},
+		{ once: true },
+	);
+
+	if (ctrl.signal?.aborted && !isResolved) {
+		isResolved = true;
+		clearTimeout(timeoutId);
+		server.close();
+		reject(new AIError.AbortError("Zed authentication was aborted."));
+	}
 
 	return promise;
 }

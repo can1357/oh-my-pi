@@ -165,7 +165,10 @@ describe("Zed Provider Payload Construction", () => {
 			properties: { limit: Record<string, unknown> };
 		};
 		expect(params.properties.limit.exclusiveMinimum).toBeUndefined();
-		expect(payload.generationConfig).toEqual({ thinkingConfig: { thinkingLevel: "MEDIUM" } });
+		expect(payload.generationConfig).toMatchObject({
+			maxOutputTokens: 66000,
+			thinkingConfig: { thinkingLevel: "MEDIUM" },
+		});
 	});
 	it("replays Gemini assistant tool-call thought signatures in the functionCall payload", () => {
 		const thoughtSignature = "gemini-thought-signature";
@@ -289,7 +292,8 @@ describe("Zed Provider Payload Construction", () => {
 
 		if (!completionPayload) throw new Error("Zed completion request was not captured");
 		const providerRequest = completionPayload.provider_request as Record<string, unknown>;
-		expect(providerRequest.generationConfig).toEqual({
+		expect(providerRequest.generationConfig).toMatchObject({
+			maxOutputTokens: 66_000,
 			thinkingConfig: { thinkingBudget: 0 },
 		});
 	});

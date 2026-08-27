@@ -144,7 +144,7 @@ function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, opti
 	const body: Record<string, unknown> = {
 		model: model.id,
 		messages,
-		max_tokens: model.maxTokens || 8192,
+		max_tokens: options?.maxTokens ?? model.maxTokens ?? 8192,
 	};
 
 	if (context.systemPrompt && context.systemPrompt.length > 0) {
@@ -244,6 +244,7 @@ function mapContextToOpenAiResponses(context: Context, model: Model<"zed-agent">
 		model: model.id,
 		input,
 		stream: true,
+		max_output_tokens: options?.maxTokens ?? model.maxTokens ?? 8192,
 	};
 
 	if (context.systemPrompt && context.systemPrompt.length > 0) {
@@ -329,10 +330,13 @@ function mapContextToGoogle(context: Context, model: Model<"zed-agent">, options
 		}
 	}
 
+	const generationConfig: Record<string, unknown> = {
+		maxOutputTokens: options?.maxTokens ?? model.maxTokens ?? 8192,
+	};
 	const body: Record<string, unknown> = {
 		contents,
+		generationConfig,
 	};
-
 	if (context.systemPrompt && context.systemPrompt.length > 0) {
 		body.systemInstruction = {
 			parts: [{ text: context.systemPrompt.join("\n\n") }],
@@ -353,19 +357,13 @@ function mapContextToGoogle(context: Context, model: Model<"zed-agent">, options
 
 	if (model.reasoning) {
 		if (options?.disableReasoning) {
-			body.generationConfig = {
-				thinkingConfig: {
-					thinkingBudget: 0,
-				},
+			generationConfig.thinkingConfig = {
+				thinkingBudget: 0,
 			};
 		} else {
-			body.generationConfig = {
-				thinkingConfig: {
-					thinkingLevel:
-						options?.reasoning === undefined
-							? "MEDIUM"
-							: mapEffortToGoogleThinkingLevel(options.reasoning, model),
-				},
+			generationConfig.thinkingConfig = {
+				thinkingLevel:
+					options?.reasoning === undefined ? "MEDIUM" : mapEffortToGoogleThinkingLevel(options.reasoning, model),
 			};
 		}
 	}
@@ -427,6 +425,7 @@ function mapContextToOpenAiChat(context: Context, model: Model<"zed-agent">, opt
 		model: model.id,
 		messages,
 		stream: true,
+		max_completion_tokens: options?.maxTokens ?? model.maxTokens ?? 8192,
 	};
 
 	if (context.tools && context.tools.length > 0) {
@@ -567,16 +566,14 @@ export function streamZed(
 		let currentContentIndex = -1;
 		let currentToolCall: ToolCall | null = null;
 		let currentToolArgsJson = "";
+		let sawStreamEnded = false;
 
 		try {
 			while (true) {
 				const { done, value } = await reader.read();
-				if (done) break;
-
-				buffer += decoder.decode(value, { stream: true });
+				buffer += decoder.decode(value, { stream: !done });
 				const lines = buffer.split("\n");
-				buffer = lines.pop() ?? "";
-
+				buffer = done ? "" : (lines.pop() ?? "");
 				for (const line of lines) {
 					const trimmed = line.trim();
 					if (!trimmed) continue;
@@ -590,6 +587,7 @@ export function streamZed(
 
 					if (chunk.status) {
 						if (chunk.status === "stream_ended") {
+							sawStreamEnded = true;
 							break;
 						}
 						if (typeof chunk.status === "object" && chunk.status !== null) {
@@ -1004,6 +1002,12 @@ export function streamZed(
 								outputMessage.usage.cacheWrite = message.usage.cache_creation_input_tokens;
 						}
 					}
+				}
+				if (sawStreamEnded) break;
+				if (done) {
+					throw new ProviderResponseError("Zed stream closed before stream_ended status was received", {
+						kind: "incomplete-stream",
+					});
 				}
 			}
 
