@@ -1,4 +1,3 @@
-#![feature(integer_atomics)]
 //! Transport-neutral foundations for durable, interruptible OMP agent loops.
 //!
 //! The crate composes immutable configuration snapshots, deterministic system
@@ -51,6 +50,8 @@ pub mod scheduler;
 mod state;
 pub mod streaming_edit_guard;
 mod subagent;
+/// Deterministic public integration-test turn transports and gates.
+pub mod testing;
 pub mod tool_choice;
 mod tree;
 pub mod ttsr;

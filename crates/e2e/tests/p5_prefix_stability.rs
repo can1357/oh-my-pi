@@ -64,6 +64,8 @@ fn canonical_turn_id() -> TurnId {
 	TurnId::new(Ulid::generate().to_string())
 }
 
+/// Exists because scripting cannot express request capture wrapping an
+/// arbitrary inner turn client.
 #[derive(Clone)]
 struct Instrumented<C> {
 	inner: C,

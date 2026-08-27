@@ -1,0 +1,387 @@
+//! Deterministic turn transports, gates, and capture fixtures for public
+//! integration tests.
+use std::{
+	collections::VecDeque,
+	future,
+	future::Future,
+	pin::Pin,
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering},
+	},
+	task::{Context, Poll},
+	time::Duration,
+};
+
+use futures::Stream;
+use omp_proto::inference::v1::TurnEvent;
+use parking_lot::Mutex;
+use tokio::{
+	sync::{Notify, futures::OwnedNotified},
+	time,
+};
+
+use crate::{Error, InvokeFrame, TurnClient, TurnId, TurnInput, TurnOptions, TurnSession};
+
+/// Failure waiting on a [`Gate`] rendezvous within its bound.
+#[derive(Debug, thiserror::Error)]
+pub enum GateError {
+	/// Arrival was not observed before the bound elapsed.
+	#[error("timed out waiting for gate arrival after {limit:?}")]
+	ArrivalTimeout {
+		/// Bound applied to the wait.
+		limit:  Duration,
+		/// Timeout observed by the Tokio timer.
+		#[source]
+		source: time::error::Elapsed,
+	},
+	/// Release was not observed before the bound elapsed.
+	#[error("timed out waiting for gate release after {limit:?}")]
+	GateTimeout {
+		/// Bound applied to the wait.
+		limit:  Duration,
+		/// Timeout observed by the Tokio timer.
+		#[source]
+		source: time::error::Elapsed,
+	},
+}
+
+/// One deterministic test rendezvous with separately observable arrival and
+/// release.
+#[derive(Clone, Debug, Default)]
+pub struct Gate(Arc<GateInner>);
+
+#[derive(Debug, Default)]
+struct GateInner {
+	arrived:  AtomicBool,
+	released: AtomicBool,
+	arrival:  Arc<Notify>,
+	release:  Arc<Notify>,
+}
+
+impl Gate {
+	/// Marks the interesting operation as having reached this gate.
+	pub fn arrive(&self) {
+		self.0.arrived.store(true, Ordering::Release);
+		self.0.arrival.notify_waiters();
+	}
+
+	/// Waits with a bound until the operation reaches this gate.
+	pub async fn wait_arrived(&self, limit: Duration) -> Result<(), GateError> {
+		time::timeout(limit, async {
+			loop {
+				let notified = self.0.arrival.notified();
+				if self.0.arrived.load(Ordering::Acquire) {
+					break;
+				}
+				notified.await;
+			}
+		})
+		.await
+		.map_err(|source| GateError::ArrivalTimeout { limit, source })
+	}
+
+	/// Releases every waiter parked at this gate.
+	pub fn release(&self) {
+		self.0.released.store(true, Ordering::Release);
+		self.0.release.notify_waiters();
+	}
+
+	/// Marks arrival and waits with a bound for release.
+	pub async fn arrive_and_wait(&self, limit: Duration) -> Result<(), GateError> {
+		self.arrive();
+		time::timeout(limit, self.released())
+			.await
+			.map_err(|source| GateError::GateTimeout { limit, source })
+	}
+
+	/// Returns a future that resolves once this gate has been released.
+	///
+	/// Release is one-shot: once [`release`](Self::release) is called, every
+	/// waiter parked at this gate is unblocked and the gate remains released.
+	/// Waiters created before or during the release complete; waiters created
+	/// after release resolve immediately.
+	pub async fn released(&self) {
+		loop {
+			let notified = self.0.release.notified();
+			if self.0.released.load(Ordering::Acquire) {
+				break;
+			}
+			notified.await;
+		}
+	}
+}
+
+/// One ordered action in a deterministic turn script.
+#[derive(Debug)]
+pub enum ScriptedStep {
+	/// Emits one canonical event or typed turn failure.
+	Event(Result<Box<TurnEvent>, Error>),
+	/// Marks arrival, then pauses the stream until the test releases the gate.
+	Wait(Gate),
+}
+
+impl From<TurnEvent> for ScriptedStep {
+	fn from(event: TurnEvent) -> Self {
+		Self::Event(Ok(Box::new(event)))
+	}
+}
+
+impl From<Result<TurnEvent, Error>> for ScriptedStep {
+	fn from(event: Result<TurnEvent, Error>) -> Self {
+		Self::Event(event.map(Box::new))
+	}
+}
+
+/// One deterministic turn event stream consumed by [`ScriptedTurnClient`].
+#[derive(Debug)]
+pub struct ScriptedTurn {
+	steps: VecDeque<ScriptedStep>,
+}
+
+impl ScriptedTurn {
+	/// Scripts an ordered successful event stream.
+	pub fn events(events: impl IntoIterator<Item = TurnEvent>) -> Self {
+		Self { steps: events.into_iter().map(ScriptedStep::from).collect() }
+	}
+
+	/// Scripts an ordered stream that may terminate with a typed turn error.
+	pub fn results(events: impl IntoIterator<Item = Result<TurnEvent, Error>>) -> Self {
+		Self { steps: events.into_iter().map(ScriptedStep::from).collect() }
+	}
+
+	/// Scripts events interleaved with externally released deterministic gates.
+	pub fn steps(steps: impl IntoIterator<Item = ScriptedStep>) -> Self {
+		Self { steps: steps.into_iter().collect() }
+	}
+}
+
+/// Exact request observed at the scripted turn seam.
+#[derive(Clone, Debug)]
+pub struct CapturedTurn {
+	/// Stable logical turn identity.
+	pub turn_id:   TurnId,
+	/// Full or incremental canonical input.
+	pub input:     TurnInput,
+	/// Per-turn options seen by the transport.
+	pub options:   TurnOptions,
+	/// Duplex frames submitted in response to server invocations.
+	pub submitted: Arc<Mutex<Vec<InvokeFrame>>>,
+}
+
+/// Queue-backed deterministic [`TurnClient`] that records every request and
+/// duplex response.
+#[derive(Clone, Debug)]
+pub struct ScriptedTurnClient {
+	scripts:  Arc<Mutex<VecDeque<ScriptedTurn>>>,
+	captured: Arc<Mutex<Vec<CapturedTurn>>>,
+}
+
+impl ScriptedTurnClient {
+	/// Creates a client that consumes exactly one script per opened turn.
+	pub fn new(scripts: impl IntoIterator<Item = ScriptedTurn>) -> Self {
+		Self {
+			scripts:  Arc::new(Mutex::new(scripts.into_iter().collect())),
+			captured: Arc::new(Mutex::new(Vec::new())),
+		}
+	}
+
+	/// Returns a stable snapshot of all opened turns and submitted invocation
+	/// frames.
+	pub fn captures(&self) -> Vec<CapturedTurn> {
+		self.captured.lock().clone()
+	}
+
+	/// Returns the number of scripts not yet consumed.
+	pub fn remaining(&self) -> usize {
+		self.scripts.lock().len()
+	}
+}
+
+impl TurnClient for ScriptedTurnClient {
+	type Session<'client> = ScriptedTurnSession;
+
+	fn turn<'client>(
+		&'client self,
+		turn_id: TurnId,
+		input: TurnInput,
+		options: &'client TurnOptions,
+	) -> impl Future<Output = Result<Self::Session<'client>, Error>> + Send + 'client {
+		let scripts = Arc::clone(&self.scripts);
+		let captured = Arc::clone(&self.captured);
+		let options = options.clone();
+		async move {
+			let script = scripts
+				.lock()
+				.pop_front()
+				.ok_or(Error::Invalid("scripted turn queue exhausted"))?;
+			let submitted = Arc::new(Mutex::new(Vec::new()));
+			captured.lock().push(CapturedTurn {
+				turn_id,
+				input,
+				options,
+				submitted: Arc::clone(&submitted),
+			});
+			Ok(ScriptedTurnSession { steps: script.steps, submitted, waiting: None })
+		}
+	}
+}
+
+/// One live scripted turn session.
+pub struct ScriptedTurnSession {
+	steps:     VecDeque<ScriptedStep>,
+	submitted: Arc<Mutex<Vec<InvokeFrame>>>,
+	waiting:   Option<Pin<Box<OwnedNotified>>>,
+}
+
+impl TurnSession for ScriptedTurnSession {
+	fn events(&mut self) -> impl Stream<Item = Result<TurnEvent, Error>> + Send + Unpin + '_ {
+		ScriptedEventStream { steps: &mut self.steps, waiting: &mut self.waiting }
+	}
+
+	fn submit(&mut self, frame: InvokeFrame) -> impl Future<Output = Result<(), Error>> + Send + '_ {
+		self.submitted.lock().push(frame);
+		future::ready(Ok(()))
+	}
+}
+
+struct ScriptedEventStream<'session> {
+	steps:   &'session mut VecDeque<ScriptedStep>,
+	waiting: &'session mut Option<Pin<Box<OwnedNotified>>>,
+}
+
+impl Unpin for ScriptedEventStream<'_> {}
+
+impl Stream for ScriptedEventStream<'_> {
+	type Item = Result<TurnEvent, Error>;
+
+	fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+		loop {
+			if self
+				.waiting
+				.as_mut()
+				.is_some_and(|waiting| waiting.as_mut().poll(context).is_pending())
+			{
+				return Poll::Pending;
+			}
+			if self.waiting.is_some() {
+				*self.waiting = None;
+				let _ = self.steps.pop_front();
+				continue;
+			}
+			match self.steps.front() {
+				Some(ScriptedStep::Event(_)) => {
+					let Some(ScriptedStep::Event(event)) = self.steps.pop_front() else {
+						return Poll::Ready(None);
+					};
+					return Poll::Ready(Some(event.map(|event| *event)));
+				},
+				Some(ScriptedStep::Wait(gate)) => {
+					let gate = gate.clone();
+					let waiting = Box::pin(gate.0.release.clone().notified_owned());
+					gate.arrive();
+					if gate.0.released.load(Ordering::Acquire) {
+						let _ = self.steps.pop_front();
+						continue;
+					}
+					*self.waiting = Some(waiting);
+				},
+				None => return Poll::Ready(None),
+			}
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::{error::Error as _, time::Duration};
+
+	use futures::StreamExt;
+	use omp_proto::thread::v1::Thread;
+
+	use super::{
+		Error, Gate, GateError, ScriptedStep, ScriptedTurn, ScriptedTurnClient, TurnClient as _,
+		TurnId, TurnInput, TurnOptions, TurnSession as _,
+	};
+
+	#[tokio::test]
+	async fn wait_arrived_times_out_with_named_limit() {
+		let gate = Gate::default();
+		let limit = Duration::from_millis(5);
+		let error = gate
+			.wait_arrived(limit)
+			.await
+			.expect_err("unarrived gate times out");
+		assert!(
+			matches!(error, GateError::ArrivalTimeout { limit: observed, source: _ } if observed == limit)
+		);
+		assert!(error.source().is_some(), "preserves Tokio Elapsed");
+	}
+
+	#[tokio::test]
+	async fn arrive_and_wait_times_out_with_named_limit() {
+		let gate = Gate::default();
+		let limit = Duration::from_millis(5);
+		let error = gate
+			.arrive_and_wait(limit)
+			.await
+			.expect_err("unreleased gate times out");
+		assert!(
+			matches!(error, GateError::GateTimeout { limit: observed, source: _ } if observed == limit)
+		);
+		assert!(error.source().is_some(), "preserves Tokio Elapsed");
+	}
+
+	#[tokio::test]
+	async fn pre_released_wait_step_completes() {
+		let gate = Gate::default();
+		let options = TurnOptions::default();
+		let client = ScriptedTurnClient::new([ScriptedTurn::steps([
+			ScriptedStep::Wait(gate.clone()),
+			ScriptedStep::from(super::TurnEvent::default()),
+		])]);
+
+		let mut session = client
+			.turn(TurnId::new("pre-released"), TurnInput::Full(Thread::default()), &options)
+			.await
+			.expect("script queue consumed on poll");
+
+		gate.release();
+		let mut events = session.events();
+		let event = events
+			.next()
+			.await
+			.expect("event stream yields")
+			.expect("turn event");
+		assert!(matches!(event, super::TurnEvent { .. }));
+		assert!(events.next().await.is_none(), "script exhausted after stored event");
+	}
+
+	#[tokio::test]
+	async fn dropping_unpolled_turn_future_does_not_consume_script() {
+		let options = TurnOptions::default();
+		let client = ScriptedTurnClient::new([ScriptedTurn::events([super::TurnEvent::default()])]);
+
+		let pending =
+			client.turn(TurnId::new("dropped"), TurnInput::Full(Thread::default()), &options);
+		drop(pending);
+		assert_eq!(client.remaining(), 1);
+		assert!(client.captures().is_empty());
+
+		let session = client
+			.turn(TurnId::new("opened"), TurnInput::Full(Thread::default()), &options)
+			.await
+			.expect("script still available for polled turn");
+		assert_eq!(client.remaining(), 0);
+		assert_eq!(client.captures().len(), 1);
+		drop(session);
+
+		let exhausted = client
+			.turn(TurnId::new("exhausted"), TurnInput::Full(Thread::default()), &options)
+			.await;
+		assert!(
+			matches!(exhausted, Err(Error::Invalid(message)) if message == "scripted turn queue exhausted"),
+			"exhaustion surfaced on polled future"
+		);
+	}
+}

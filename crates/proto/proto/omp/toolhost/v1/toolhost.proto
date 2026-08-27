@@ -536,6 +536,7 @@ enum HookEventId {
   HOOK_EVENT_RETRY_END = 61;
   HOOK_EVENT_FALLBACK_APPLIED = 62;
   HOOK_EVENT_FALLBACK_SUCCEEDED = 63;
+  reserved 64 to max;
 }
 
 // Revision 1 payloads for authoritative observational lifecycle events.

@@ -15,12 +15,12 @@ use nix::{sys::stat::Mode, unistd::mkfifo};
 use omp_agent::{
 	Agent, AgentEvent, AgentSnapshot, AgentState, EventSubscription, Journal, PromptFacts,
 	TurnClient, TurnId, TurnInput, TurnOptions, TurnSession,
+	testing::{Gate, ScriptedStep, ScriptedTurn, ScriptedTurnClient},
 };
 use omp_core::{Str, sf};
 use omp_e2e::support::{
-	AllowAdmission, Gate, Scratch, ScriptedGateway, ScriptedStep, ScriptedTurn, ScriptedTurnClient,
-	accepted_event, install_omp_binary_env, omp_binary, outcome_event, tool_call_item,
-	turn_event as scripted_turn_event, user_item,
+	AllowAdmission, Scratch, ScriptedGateway, accepted_event, install_omp_binary_env, omp_binary,
+	outcome_event, tool_call_item, turn_event as scripted_turn_event, user_item,
 };
 use omp_env::{BlobDownloadEvent, EnvClient, ProcessAttachmentEvent};
 use omp_envd::{EnvServer, RegistryBridges, worker::ExtHostConfig};

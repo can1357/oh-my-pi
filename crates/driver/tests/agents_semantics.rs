@@ -21,6 +21,8 @@ use omp_driver::subagent::supervisor::{
 use omp_inference::TurnId;
 use tokio::task;
 
+/// Exists because scripting cannot express a turn client that always fails
+/// closed before opening a session.
 #[derive(Clone)]
 struct NeverTurnClient;
 

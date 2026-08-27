@@ -11,7 +11,6 @@ mod extension;
 mod gateway;
 mod process;
 mod scratch;
-mod scripted;
 mod storage;
 mod time;
 
@@ -33,8 +32,5 @@ pub use process::{OwnedProcess, install_omp_binary_env, omp_binary};
 #[cfg(unix)]
 pub use process::{process_group_alive, wait_process_group_dead};
 pub use scratch::Scratch;
-pub use scripted::{
-	CapturedTurn, ScriptedStep, ScriptedTurn, ScriptedTurnClient, ScriptedTurnSession,
-};
 pub use storage::{reopen_journal, reopen_transcript};
 pub use time::{DEFAULT_TIMEOUT, DeterministicBarrier, Gate, within};
