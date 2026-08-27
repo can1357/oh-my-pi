@@ -7,6 +7,7 @@ import {
 	agentLoopDetailed,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
 } from "@oh-my-pi/pi-agent-core/agent-loop";
+import type { JsonValue } from "@oh-my-pi/pi-agent-core/presentation";
 import { mintToolOutcome } from "@oh-my-pi/pi-agent-core/presentation";
 import type {
 	AgentContext,
@@ -4285,6 +4286,96 @@ describe("agentLoopContinue with AgentMessage", () => {
 			model: mock.model,
 			convertToLlm: identityConverter,
 			beforeToolCall: async () => ({ args: { bogus: 42 } }),
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("echo something")], context, config, undefined, mock.stream);
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		expect(executed).toEqual([]);
+		const toolEnd = events.find(e => e.type === "tool_execution_end");
+		expect(toolEnd?.type === "tool_execution_end" && toolEnd.isError).toBe(true);
+	});
+
+	it("accepts beforeToolCall args that alias one subobject at two properties (DAG, not a cycle)", async () => {
+		const toolSchema = type({ first: { n: "number" }, second: { n: "number" } });
+		const executed: unknown[] = [];
+		const tool: AgentTool<typeof toolSchema, undefined> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params);
+				return { content: [{ type: "text", text: "ok" }], details: undefined };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "tool-1", name: "echo", arguments: { first: { n: 0 }, second: { n: 0 } } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const shared = { n: 1 };
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			// Both JSON serialization and structuredClone accept this graph; the
+			// normalizer must not mistake the second reference for a cycle.
+			beforeToolCall: async () => ({ args: { first: shared, second: shared } }),
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("echo something")], context, config, undefined, mock.stream);
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		expect(executed).toEqual([{ first: { n: 1 }, second: { n: 1 } }]);
+		const toolEnd = events.find(e => e.type === "tool_execution_end");
+		expect(toolEnd?.type === "tool_execution_end" && toolEnd.isError).toBe(false);
+	});
+
+	it("still rejects a beforeToolCall args replacement containing a genuine cycle", async () => {
+		const toolSchema = type({ value: "string" });
+		const executed: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params.value);
+				return { content: [{ type: "text", text: `echoed: ${params.value}` }], details: { value: params.value } };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }] },
+				{ content: ["done"] },
+			],
+		});
+		// Typed as the hook contract's own arg record; the cycle is a runtime
+		// property the type system cannot see, which is exactly the boundary
+		// normalizeJsonValue guards.
+		const cyclic: Record<string, JsonValue> = { value: "hello" };
+		cyclic.self = cyclic;
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			beforeToolCall: async () => ({ args: cyclic }),
 		};
 
 		const events: AgentEvent[] = [];

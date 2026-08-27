@@ -2204,7 +2204,10 @@ function resolveToolForCall(
  *
  * Bounded to prevent stack overflow on cyclic extension-provided objects: the
  * depth limit is generous (128 — far beyond any legitimate tool argument) and
- * a cycle or pathologically deep structure is rejected, not crashed on.
+ * a cycle or pathologically deep structure is rejected, not crashed on. Only
+ * true cycles reject — an ordinary object aliased at two properties (a DAG,
+ * which both JSON serialization and `structuredClone` accept) normalizes into
+ * independent duplicate subtrees, exactly as `JSON.stringify` would encode it.
  * Rejects `NaN`/`Infinity` (not representable in JSON) and symbol-keyed
  * properties (which `JSON.stringify` drops silently but `structuredClone`
  * preserves — a divergence from the `JsonValue` contract). Rejects `undefined`
@@ -2218,14 +2221,17 @@ const JSON_MAX_DEPTH = 128;
  * proxy/reflection failure into a deterministic validation failure.
  */
 function normalizeJsonValue(value: unknown): JsonValue | undefined {
-	const seen = new WeakSet<object>();
+	// Objects on the CURRENT recursion path only — membership is released once a
+	// subtree completes, so a shared (aliased) subobject re-visits cleanly while
+	// a genuine cycle still trips the guard.
+	const visiting = new WeakSet<object>();
 	const visit = (current: unknown, depth: number): JsonValue | undefined => {
 		if (depth > JSON_MAX_DEPTH || current === null) return current === null ? null : undefined;
 		if (typeof current === "string" || typeof current === "boolean") return current;
 		if (typeof current === "number") return Number.isFinite(current) ? current : undefined;
 		if (typeof current !== "object") return undefined;
-		if (seen.has(current)) return undefined;
-		seen.add(current);
+		if (visiting.has(current)) return undefined;
+		visiting.add(current);
 		if (Array.isArray(current)) {
 			const descriptors = Object.getOwnPropertyDescriptors(current);
 			const normalized: JsonValue[] = [];
@@ -2236,6 +2242,7 @@ function normalizeJsonValue(value: unknown): JsonValue | undefined {
 				if (item === undefined) return undefined;
 				normalized.push(item);
 			}
+			visiting.delete(current);
 			return normalized;
 		}
 		if (Object.getPrototypeOf(current) !== Object.prototype || Object.getOwnPropertySymbols(current).length > 0)
@@ -2248,6 +2255,7 @@ function normalizeJsonValue(value: unknown): JsonValue | undefined {
 			if (item === undefined) return undefined;
 			normalized[key] = item;
 		}
+		visiting.delete(current);
 		return normalized;
 	};
 	try {
