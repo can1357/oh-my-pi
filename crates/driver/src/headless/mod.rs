@@ -365,6 +365,19 @@ fn session_index_for(
 	Ok(Some(environment_index.expect("durable launch has an environment session index")))
 }
 
+fn pin_continue_latest(
+	session: HeadlessSessionOpen,
+	sessions_dir: &Path,
+	root: &Path,
+) -> Result<HeadlessSessionOpen, HeadlessError> {
+	if session != HeadlessSessionOpen::ContinueLatest {
+		return Ok(session);
+	}
+	let index = SessionIndex::open(sessions_dir.join("sessions.sqlite3"))
+		.map_err(HeadlessError::SessionsIndex)?;
+	Ok(HeadlessSessionOpen::Resume(continue_latest_session(&index, root)?))
+}
+
 fn continue_latest_session(index: &SessionIndex, root: &Path) -> Result<Str, HeadlessError> {
 	let page = index
 		.list(&SessionFilter {
@@ -615,7 +628,7 @@ impl HeadlessSession {
 	async fn open_inner(
 		data_dir: PathBuf,
 		options: HeadlessSessionOptions,
-		policy: HeadlessLaunchPolicy,
+		mut policy: HeadlessLaunchPolicy,
 		registry_override: Option<Arc<omp_tool::Registry>>,
 	) -> Result<Self, HeadlessError> {
 		let root =
@@ -703,6 +716,7 @@ impl HeadlessSession {
 		};
 		chat::ensure_state_directory(&state_dir).map_err(HeadlessError::EnsureStateDirectory)?;
 		chat::ensure_state_directory(&sessions_dir).map_err(HeadlessError::EnsureStateDirectory)?;
+		policy.session = pin_continue_latest(policy.session, &sessions_dir, &root)?;
 		let composition_model = if matches!(
 			policy.session,
 			HeadlessSessionOpen::Resume(_)
@@ -761,27 +775,16 @@ impl HeadlessSession {
 			&sessions_dir,
 			(policy.session != HeadlessSessionOpen::Ephemeral).then(|| environment.sessions_index()),
 		)?;
-		let continue_latest = if policy.session == HeadlessSessionOpen::ContinueLatest {
-			Some(continue_latest_session(
-				session_index
-					.as_deref()
-					.expect("durable continue has an index"),
-				&root,
-			)?)
-		} else {
-			None
-		};
 		let open = match &policy.session {
 			HeadlessSessionOpen::New => chat::SessionOpen::New,
 			HeadlessSessionOpen::Resume(source) => chat::SessionOpen::Resume(source),
 			HeadlessSessionOpen::Fork(source) => chat::SessionOpen::Fork(source),
-			HeadlessSessionOpen::ContinueLatest => chat::SessionOpen::Resume(
-				continue_latest
-					.as_ref()
-					.expect("latest session resolved above"),
-			),
+			HeadlessSessionOpen::ContinueLatest => {
+				unreachable!("continue-latest is pinned before preview")
+			},
 			HeadlessSessionOpen::Ephemeral => chat::SessionOpen::Ephemeral,
 		};
+		let advisor_index = session_index.clone();
 		let mut session =
 			chat::open_session(&root, &sessions_dir, open, registry.as_ref(), session_index)
 				.map_err(HeadlessError::OpenSession)?;
@@ -937,7 +940,7 @@ impl HeadlessSession {
 			session.id.clone(),
 			sessions_dir.clone(),
 			root.clone(),
-			environment.sessions_index(),
+			advisor_index.unwrap_or_else(|| environment.sessions_index()),
 			settings.security.enabled,
 			Arc::clone(&tree),
 		));
@@ -2181,6 +2184,15 @@ mod tests {
 	}
 
 	fn write_indexed_prompt(sessions_dir: &Path, root: &Path, prompt: &str) -> Str {
+		write_indexed_prompt_at(sessions_dir, root, prompt, 1)
+	}
+
+	fn write_indexed_prompt_at(
+		sessions_dir: &Path,
+		root: &Path,
+		prompt: &str,
+		created_ms: u64,
+	) -> Str {
 		std::fs::create_dir_all(sessions_dir).expect("sessions dir");
 		let index = omp_storage::index::SessionIndex::open(sessions_dir.join("sessions.sqlite3"))
 			.expect("index");
@@ -2189,13 +2201,13 @@ mod tests {
 		let session_id = SessionId(id.clone());
 		let cwd = root.to_string_lossy();
 		let request = omp_storage::index::NewSession {
-			id:         &session_id,
-			cwd:        cwd.as_ref(),
-			project:    cwd.as_ref(),
-			created_ms: 1,
-			kind:       omp_storage::index::SessionKind::Interactive,
-			parent:     None,
-			remote:     false,
+			id: &session_id,
+			cwd: cwd.as_ref(),
+			project: cwd.as_ref(),
+			created_ms,
+			kind: omp_storage::index::SessionKind::Interactive,
+			parent: None,
+			remote: false,
 		};
 		index
 			.create_session(&request, || {
@@ -2297,6 +2309,25 @@ mod tests {
 			.expect("durable continue has an index");
 		assert_eq!(continue_latest_session(&selected, &root).expect("custom latest"), custom_id);
 		assert_ne!(custom_id, default_id);
+	}
+
+	#[test]
+	fn pin_continue_latest_freezes_the_selected_session_id() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let root = scratch.path().join("project");
+		std::fs::create_dir_all(&root).expect("project");
+		let root = std::fs::canonicalize(&root).expect("canonical project");
+		let custom = scratch.path().join("custom-sessions");
+		let custom_id = write_indexed_prompt_at(&custom, &root, "custom latest", 10);
+		let pinned = pin_continue_latest(HeadlessSessionOpen::ContinueLatest, &custom, &root)
+			.expect("pin continue");
+		assert_eq!(pinned, HeadlessSessionOpen::Resume(custom_id.clone()));
+		let newer = write_indexed_prompt_at(&custom, &root, "newer latest", 20);
+		assert_ne!(newer, custom_id);
+		assert_eq!(
+			pin_continue_latest(pinned, &custom, &root).expect("already pinned"),
+			HeadlessSessionOpen::Resume(custom_id)
+		);
 	}
 
 	#[tokio::test]
