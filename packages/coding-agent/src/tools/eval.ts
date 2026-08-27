@@ -18,7 +18,7 @@ import type { EvalCellResult, EvalDisplayOutput, EvalLanguage, EvalStatusEvent, 
 import evalDescription from "../prompts/tools/eval.md" with { type: "text" };
 import evalCodeModeDescription from "../prompts/tools/eval-code-mode.md" with { type: "text" };
 import { DEFAULT_MAX_BYTES, OutputSink, type OutputSummary, TailBuffer } from "../session/streaming-output";
-import { resolveSpawnPolicy } from "../task/spawn-policy";
+import { isIsolationAvailable, resolveSpawnPolicy } from "../task/spawn-policy";
 import { webpExclusionForModel } from "../utils/image-loading";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import type { ToolSession } from ".";
@@ -339,9 +339,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				rb: backends.ruby,
 				jl: backends.julia,
 				spawns: sessionSpawns,
-				isolationEnabled:
-					this.session.settings.get("task.isolation.mode") !== "none" &&
-					(this.session.settings.get("task.isolation.allowNested") || !this.session.isIsolated),
+				isolationEnabled: isIsolationAvailable(this.session, this.session.getPlanModeState?.()?.enabled === true),
 				autoBackgroundEnabled: this.session.settings.get("eval.autoBackground.enabled"),
 			});
 		}

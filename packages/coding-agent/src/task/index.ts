@@ -29,7 +29,7 @@ import { truncateForPrompt } from "../tools/approval";
 import { isIrcEnabled } from "../tools/hub";
 import { formatBytes, formatDuration } from "../tools/render-utils";
 import { isReadOnlyAgent } from "./read-only-policy";
-import { isScoutSpawnable, resolveSpawnPolicy } from "./spawn-policy";
+import { isScoutSpawnable, isIsolationAvailable, resolveSpawnPolicy } from "./spawn-policy";
 import {
 	type AgentDefinition,
 	type AgentProgress,
@@ -598,10 +598,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 	get parameters(): TaskToolSchemaInstance {
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
-		const isolationEnabled =
-			!planMode &&
-			this.session.settings.get("task.isolation.mode") !== "none" &&
-			(this.session.settings.get("task.isolation.allowNested") || !this.session.isIsolated);
+		const isolationEnabled = isIsolationAvailable(this.session, planMode);
 		const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
 		return getTaskSchema({
 			isolationEnabled,
@@ -624,10 +621,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			agents:
 				discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
 				this.#discoveredAgents,
-			isolationEnabled:
-				!planMode &&
-				isolationMode !== "none" &&
-				(this.session.settings.get("task.isolation.allowNested") || !this.session.isIsolated),
+			isolationEnabled: isIsolationAvailable(this.session, planMode),
 			applyIsolatedChanges: this.session.settings.get("task.isolation.apply"),
 			disabledAgents,
 			batchEnabled: this.#isBatchEnabled(),
