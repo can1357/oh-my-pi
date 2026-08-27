@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import { ProviderHttpError } from "../src/error/classes";
 import { getOrMintZedLlmToken, invalidateZedLlmToken } from "../src/registry/oauth/zed-token-pool";
 import type { FetchImpl } from "../src/types";
@@ -101,6 +101,54 @@ describe("Zed Token Pool", () => {
 			expect(sharedFetchAborted).toBe(false);
 		} finally {
 			invalidateZedLlmToken(userId, masterAccessToken);
+		}
+	});
+
+	it("times out a detached token mint and retries with a fresh request", async () => {
+		vi.useFakeTimers();
+		const userId = "user_detached_mint_timeout";
+		const accessToken = "access-token-detached-mint-timeout";
+		let fetchCalls = 0;
+		const firstResponse = Promise.withResolvers<Response>();
+
+		const mockFetcher: FetchImpl = async (_input, init) => {
+			fetchCalls++;
+			if (fetchCalls === 1) {
+				const signal = init?.signal;
+				if (signal) {
+					const rejectOnAbort = () => {
+						const reason = signal.reason;
+						firstResponse.reject(reason);
+					};
+					if (signal.aborted) rejectOnAbort();
+					else signal.addEventListener("abort", rejectOnAbort, { once: true });
+				}
+				return firstResponse.promise;
+			}
+			return new Response(JSON.stringify({ token: "llm-token-after-timeout" }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		};
+
+		invalidateZedLlmToken(userId, accessToken);
+		try {
+			const firstAttempt = getOrMintZedLlmToken(userId, accessToken, undefined, mockFetcher);
+			expect(fetchCalls).toBe(1);
+
+			vi.advanceTimersByTime(30_001);
+			const firstError = await firstAttempt.catch(error => error);
+			const firstErrorName = firstError instanceof Error ? firstError.name : "";
+			const firstErrorMessage = firstError instanceof Error ? firstError.message : String(firstError);
+			expect(firstErrorName === "TimeoutError" || /timeout|aborted/i.test(firstErrorMessage)).toBe(true);
+
+			await expect(getOrMintZedLlmToken(userId, accessToken, undefined, mockFetcher)).resolves.toBe(
+				"llm-token-after-timeout",
+			);
+			expect(fetchCalls).toBe(2);
+		} finally {
+			invalidateZedLlmToken(userId, accessToken);
+			vi.useRealTimers();
 		}
 	});
 });

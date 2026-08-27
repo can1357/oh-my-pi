@@ -24,7 +24,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { normalizeSchemaForCCA } from "../utils/schema";
 import { mapToOpenAICompletionsToolChoice, mapToOpenAIResponsesToolChoice } from "../utils/tool-choice";
-import { isThinkingPart, resolveThoughtSignature, retainThoughtSignature } from "./google-shared";
+import { isThinkingPart, mapStopReasonString, resolveThoughtSignature, retainThoughtSignature } from "./google-shared";
 import { encodeResponsesToolResultOutput, parseResponseReasoningReplayItem } from "./openai-shared";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 
@@ -272,22 +272,29 @@ function mapContextToOpenAiResponses(context: Context, model: Model<"zed-agent">
 				}
 				assistantMessage = undefined;
 			};
+			const isSameOpenAiResponsesModel =
+				msg.provider === model.provider &&
+				msg.api === model.api &&
+				msg.model === model.id &&
+				resolveProviderKind(msg.model) === "open_ai";
 
 			for (const block of msg.content) {
 				if (block.type === "text") {
 					assistantMessage ??= { type: "message", role: "assistant", content: [] };
 					assistantMessage.content.push({ type: "output_text", text: block.text });
 				} else if (block.type === "thinking") {
-					flushAssistantMessage();
-					const replayItem = parseResponseReasoningReplayItem(block.thinkingSignature);
+					const replayItem = isSameOpenAiResponsesModel
+						? parseResponseReasoningReplayItem(block.thinkingSignature)
+						: undefined;
 					if (replayItem) {
-						const replayInputItem: Record<string, unknown> = { ...replayItem };
-						input.push(replayInputItem);
+						flushAssistantMessage();
+						input.push({ ...replayItem });
 					} else if (block.thinking) {
-						input.push({
-							type: "reasoning",
-							summary: [{ type: "summary_text", text: block.thinking }],
-						});
+						const demotedThinking = renderDemotedThinking(model.id, block.thinking);
+						if (demotedThinking) {
+							assistantMessage ??= { type: "message", role: "assistant", content: [] };
+							assistantMessage.content.push({ type: "output_text", text: demotedThinking });
+						}
 					}
 				} else if (block.type === "toolCall") {
 					flushAssistantMessage();
@@ -774,6 +781,7 @@ export function streamZed(
 		const decoder = new TextDecoder();
 		let buffer = "";
 		let sawStreamEnded = false;
+		let responsesStreamIncomplete = false;
 
 		// Stream block state tracking
 		let activeTextBlock: TextContent | null = null;
@@ -1062,20 +1070,44 @@ export function streamZed(
 		const finishResponsesToolCall = (state: ResponsesToolCallState, doneItem?: Record<string, unknown>) => {
 			if (state.ended) return;
 			state.ended = true;
-			try {
-				const rawArgs = typeof doneItem?.arguments === "string" ? doneItem.arguments : state.rawArgs;
-				state.toolCall.arguments = JSON.parse(rawArgs || "{}");
-			} catch {
-				state.toolCall.arguments = {};
-			}
 			const idx = openResponsesToolCalls.indexOf(state);
 			if (idx >= 0) openResponsesToolCalls.splice(idx, 1);
-			stream.push({
-				type: "toolcall_end",
-				contentIndex: state.contentIndex,
-				toolCall: state.toolCall,
-				partial: outputMessage,
-			});
+			if (
+				!doneItem &&
+				(responsesStreamIncomplete || outputMessage.stopReason === "length" || outputMessage.stopReason === "error")
+			) {
+				const contentIdx = outputMessage.content.indexOf(state.toolCall);
+				if (contentIdx >= 0) {
+					outputMessage.content.splice(contentIdx, 1);
+				}
+				return;
+			}
+			const rawArgs = typeof doneItem?.arguments === "string" ? doneItem.arguments : state.rawArgs;
+			let parsedArgs: Record<string, unknown> | null = null;
+			if (rawArgs && rawArgs.trim().length > 0) {
+				try {
+					parsedArgs = JSON.parse(rawArgs);
+				} catch {
+					parsedArgs = null;
+				}
+			} else if (doneItem) {
+				parsedArgs = {};
+			}
+
+			if (parsedArgs !== null && typeof parsedArgs === "object") {
+				state.toolCall.arguments = parsedArgs;
+				stream.push({
+					type: "toolcall_end",
+					contentIndex: state.contentIndex,
+					toolCall: state.toolCall,
+					partial: outputMessage,
+				});
+			} else {
+				const contentIdx = outputMessage.content.indexOf(state.toolCall);
+				if (contentIdx >= 0) {
+					outputMessage.content.splice(contentIdx, 1);
+				}
+			}
 		};
 
 		// OpenAI Chat / xAI tool-call tracking (keyed by delta index)
@@ -1090,26 +1122,66 @@ export function streamZed(
 		let lastChatToolCall: ChatToolCallState | null = null;
 
 		const finishChatToolCall = (state: ChatToolCallState) => {
-			try {
-				state.toolCall.arguments = JSON.parse(state.rawArgs || "{}");
-			} catch {
-				state.toolCall.arguments = {};
-			}
 			if (state.index !== undefined) chatToolCallsByIndex.delete(state.index);
 			const idx = pendingChatToolCalls.indexOf(state);
 			if (idx >= 0) pendingChatToolCalls.splice(idx, 1);
 			if (lastChatToolCall === state) lastChatToolCall = null;
-			stream.push({
-				type: "toolcall_end",
-				contentIndex: state.contentIndex,
-				toolCall: state.toolCall,
-				partial: outputMessage,
-			});
+			if (outputMessage.stopReason === "length" || outputMessage.stopReason === "error") {
+				const contentIdx = outputMessage.content.indexOf(state.toolCall);
+				if (contentIdx >= 0) {
+					outputMessage.content.splice(contentIdx, 1);
+				}
+				return;
+			}
+			let parsedArgs: Record<string, unknown> | null = null;
+			if (state.rawArgs && state.rawArgs.trim().length > 0) {
+				try {
+					parsedArgs = JSON.parse(state.rawArgs);
+				} catch {
+					parsedArgs = null;
+				}
+			}
+			if (parsedArgs !== null && typeof parsedArgs === "object") {
+				state.toolCall.arguments = parsedArgs;
+				stream.push({
+					type: "toolcall_end",
+					contentIndex: state.contentIndex,
+					toolCall: state.toolCall,
+					partial: outputMessage,
+				});
+			} else {
+				const contentIdx = outputMessage.content.indexOf(state.toolCall);
+				if (contentIdx >= 0) {
+					outputMessage.content.splice(contentIdx, 1);
+				}
+			}
+		};
+
+		const discardOpenResponsesToolCalls = () => {
+			for (const state of [...openResponsesToolCalls]) {
+				state.ended = true;
+				const contentIdx = outputMessage.content.indexOf(state.toolCall);
+				if (contentIdx >= 0) {
+					outputMessage.content.splice(contentIdx, 1);
+				}
+			}
+			openResponsesToolCalls.length = 0;
+			openResponsesToolCallsByItemId.clear();
+			openResponsesToolCallsByOutputIndex.clear();
+			lastAddedResponsesToolCall = null;
 		};
 
 		const finishAllPendingToolCalls = () => {
-			for (const state of [...openResponsesToolCalls]) {
-				finishResponsesToolCall(state);
+			if (
+				responsesStreamIncomplete ||
+				outputMessage.stopReason === "length" ||
+				outputMessage.stopReason === "error"
+			) {
+				discardOpenResponsesToolCalls();
+			} else {
+				for (const state of [...openResponsesToolCalls]) {
+					finishResponsesToolCall(state);
+				}
 			}
 			for (const state of [...pendingChatToolCalls]) {
 				finishChatToolCall(state);
@@ -1144,16 +1216,23 @@ export function streamZed(
 							break;
 						}
 						if (typeof chunk.status === "object" && chunk.status !== null) {
-							const failedObj = (chunk.status as Record<string, unknown>).failed as
-								| { message?: string }
-								| undefined;
+							const statusObj = chunk.status as Record<string, unknown>;
+							const failedObj = statusObj.failed as { message?: string } | undefined;
 							if (failedObj?.message) {
 								throw new ProviderResponseError(failedObj.message, { kind: "envelope" });
+							}
+							const incompleteObj = statusObj.incomplete as { reason?: string; message?: string } | undefined;
+							if (incompleteObj) {
+								responsesStreamIncomplete = true;
+								const reason = incompleteObj.reason ?? incompleteObj.message;
+								if (reason === "content_filter") {
+									throw new ProviderResponseError("incomplete: content_filter", { kind: "content-blocked" });
+								}
+								outputMessage.stopReason = "length";
 							}
 						}
 						continue;
 					}
-
 					const event = (typeof chunk.event === "object" && chunk.event !== null ? chunk.event : chunk) as Record<
 						string,
 						unknown
@@ -1268,17 +1347,30 @@ export function streamZed(
 								partial: outputMessage,
 							});
 						} else if (anthropicToolCall) {
-							try {
-								anthropicToolCall.arguments = JSON.parse(anthropicToolArgsJson || "{}");
-							} catch {
-								anthropicToolCall.arguments = {};
+							let parsedArgs: Record<string, unknown> | null = null;
+							if (anthropicToolArgsJson && anthropicToolArgsJson.trim().length > 0) {
+								try {
+									parsedArgs = JSON.parse(anthropicToolArgsJson);
+								} catch {
+									parsedArgs = null;
+								}
+							} else {
+								parsedArgs = {};
 							}
-							stream.push({
-								type: "toolcall_end",
-								contentIndex: anthropicCurrentIndex,
-								toolCall: anthropicToolCall,
-								partial: outputMessage,
-							});
+							if (parsedArgs !== null && typeof parsedArgs === "object") {
+								anthropicToolCall.arguments = parsedArgs;
+								stream.push({
+									type: "toolcall_end",
+									contentIndex: anthropicCurrentIndex,
+									toolCall: anthropicToolCall,
+									partial: outputMessage,
+								});
+							} else {
+								const contentIdx = outputMessage.content.indexOf(anthropicToolCall);
+								if (contentIdx >= 0) {
+									outputMessage.content.splice(contentIdx, 1);
+								}
+							}
 							anthropicToolCall = null;
 						}
 					} else if (eventType === "message_delta") {
@@ -1373,7 +1465,9 @@ export function streamZed(
 							});
 						}
 					} else if (
-						(eventType === "response.output_text.delta" || eventType === "response.text.delta") &&
+						(eventType === "response.output_text.delta" ||
+							eventType === "response.text.delta" ||
+							eventType === "response.refusal.delta") &&
 						typeof event.delta === "string"
 					) {
 						startOrAppendText(event.delta);
@@ -1429,11 +1523,19 @@ export function streamZed(
 									item ?? (typeof event.arguments === "string" ? event : undefined),
 								);
 							}
-						} else if (item?.type === "message" || eventType === "response.output_item.done") {
+						} else if (
+							item?.type === "message" ||
+							item?.type === "refusal" ||
+							eventType === "response.output_item.done"
+						) {
 							closeActiveText();
 							closeActiveThinking();
 						}
-					} else if (eventType === "response.output_text.done" || eventType === "response.text.done") {
+					} else if (
+						eventType === "response.output_text.done" ||
+						eventType === "response.text.done" ||
+						eventType === "response.refusal.done"
+					) {
 						closeActiveText();
 					} else if (
 						eventType === "response.reasoning_summary_text.done" ||
@@ -1445,6 +1547,25 @@ export function streamZed(
 						} else {
 							closeActiveThinking();
 						}
+					}
+
+					// ─── OPENAI RESPONSES TERMINAL EVENT FLAVOR ───
+					else if (eventType === "response.incomplete") {
+						responsesStreamIncomplete = true;
+						const responseObj = (event.response ?? event) as {
+							id?: string;
+							status?: string;
+							incomplete_details?: { reason?: string };
+							error?: { code?: string; message?: string };
+						};
+						if (responseObj.id) {
+							outputMessage.responseId = responseObj.id;
+						}
+						const reason = responseObj.incomplete_details?.reason;
+						if (reason === "content_filter") {
+							throw new ProviderResponseError("incomplete: content_filter", { kind: "content-blocked" });
+						}
+						outputMessage.stopReason = "length";
 					}
 
 					// ─── OPENAI CHAT & GOOGLE GEMINI EVENT FLAVORS ───
@@ -1548,9 +1669,16 @@ export function streamZed(
 							};
 						};
 						const gfr = candidate.finish_reason ?? candidate.finishReason;
+						let candidateHasError = false;
 						if (gfr) {
-							if (gfr === "MAX_TOKENS") outputMessage.stopReason = "length";
-							else outputMessage.stopReason = "stop";
+							const mapped = mapStopReasonString(gfr);
+							if (mapped === "stop" || mapped === "length") {
+								outputMessage.stopReason = mapped;
+							} else {
+								candidateHasError = true;
+								outputMessage.stopReason = "error";
+								outputMessage.errorMessage = `Generation failed with finish reason: ${gfr}`;
+							}
 						}
 						const parts = candidate.content?.parts ?? [];
 						for (const part of parts) {
@@ -1569,7 +1697,7 @@ export function streamZed(
 									break;
 								}
 							}
-							if (part.functionCall?.name) {
+							if (part.functionCall?.name && !candidateHasError) {
 								closeActiveText();
 								closeActiveThinking();
 								const toolCall: ToolCall = {
@@ -1597,7 +1725,38 @@ export function streamZed(
 					}
 
 					// ─── USAGE METRICS ───
-					if (eventType === "message_delta" || eventType === "response.completed") {
+					if (
+						eventType === "message_delta" ||
+						eventType === "response.completed" ||
+						eventType === "response.incomplete" ||
+						eventType === "response.done"
+					) {
+						const responseObj = (event.response ?? event) as {
+							id?: string;
+							status?: string;
+							incomplete_details?: { reason?: string };
+							error?: { code?: string; message?: string };
+						};
+						if (responseObj.id) {
+							outputMessage.responseId = responseObj.id;
+						}
+						if (responseObj.status === "incomplete") {
+							responsesStreamIncomplete = true;
+							const reason = responseObj.incomplete_details?.reason;
+							if (reason === "content_filter") {
+								throw new ProviderResponseError("incomplete: content_filter", { kind: "content-blocked" });
+							}
+							outputMessage.stopReason = "length";
+						} else if (responseObj.status === "failed" || responseObj.status === "cancelled") {
+							const error = responseObj.error;
+							throw new ProviderResponseError(
+								error
+									? `${error.code || "unknown"}: ${error.message || "no message"}`
+									: `Response ${responseObj.status}`,
+								{ kind: "output" },
+							);
+						}
+
 						const usage = (event.usage ?? (event.response as { usage?: unknown })?.usage) as
 							| {
 									output_tokens?: number;
@@ -1607,6 +1766,9 @@ export function streamZed(
 									cached_tokens?: number;
 									input_tokens_details?: {
 										cached_tokens?: number;
+									};
+									output_tokens_details?: {
+										reasoning_tokens?: number;
 									};
 									cache_creation_input_tokens?: number;
 									cache_read_input_tokens?: number;
@@ -1634,16 +1796,24 @@ export function streamZed(
 						const um = event.usageMetadata as {
 							promptTokenCount?: number;
 							candidatesTokenCount?: number;
+							thoughtsTokenCount?: number;
 							cachedContentTokenCount?: number;
+							totalTokenCount?: number;
 						};
+						const cached = um.cachedContentTokenCount || 0;
+						const thinkingTokens = um.thoughtsTokenCount || 0;
 						if (um.promptTokenCount !== undefined) {
-							const cached = um.cachedContentTokenCount || 0;
-							outputMessage.usage.input = um.promptTokenCount - cached;
+							outputMessage.usage.input = Math.max(0, um.promptTokenCount - cached);
 							outputMessage.usage.cacheRead = cached;
 						} else if (um.cachedContentTokenCount !== undefined) {
-							outputMessage.usage.cacheRead = um.cachedContentTokenCount;
+							outputMessage.usage.cacheRead = cached;
 						}
-						if (um.candidatesTokenCount !== undefined) outputMessage.usage.output = um.candidatesTokenCount;
+						if (um.candidatesTokenCount !== undefined || um.thoughtsTokenCount !== undefined) {
+							outputMessage.usage.output = (um.candidatesTokenCount || 0) + thinkingTokens;
+						}
+						if (thinkingTokens > 0) {
+							outputMessage.usage.reasoningTokens = thinkingTokens;
+						}
 					} else if (event.usage && typeof event.usage === "object" && outputMessage.usage) {
 						const u = event.usage as { prompt_tokens?: number; completion_tokens?: number };
 						if (u.prompt_tokens) outputMessage.usage.input = u.prompt_tokens;
@@ -1677,10 +1847,27 @@ export function streamZed(
 
 			closeActiveText();
 			closeActiveThinking();
+			if (anthropicToolCall && (outputMessage.stopReason === "length" || outputMessage.stopReason === "error")) {
+				const contentIdx = outputMessage.content.indexOf(anthropicToolCall);
+				if (contentIdx >= 0) {
+					outputMessage.content.splice(contentIdx, 1);
+				}
+				anthropicToolCall = null;
+			}
 			finishAllPendingReasonings();
 			finishAllPendingToolCalls();
 
-			if (outputMessage.content.some(b => b.type === "toolCall") && outputMessage.stopReason === "stop") {
+			if (outputMessage.stopReason === "error") {
+				throw new ProviderResponseError(outputMessage.errorMessage ?? "Generation failed with provider error", {
+					kind: "output",
+				});
+			}
+
+			if (
+				!responsesStreamIncomplete &&
+				outputMessage.content.some(b => b.type === "toolCall") &&
+				outputMessage.stopReason === "stop"
+			) {
 				outputMessage.stopReason = "toolUse";
 			}
 

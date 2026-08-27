@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { renderDemotedThinking } from "../src/dialect/demotion";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "../src/providers/vision-guard";
 import { buildZedProviderRequest, resolveProviderKind } from "../src/providers/zed";
 import { invalidateZedLlmToken } from "../src/registry/oauth/zed-token-pool";
@@ -326,6 +327,69 @@ describe("Zed Provider Payload Construction", () => {
 		expect(input[0].role).toBe("user");
 		expect(input[0].content[0].type).toBe("input_text");
 		expect(input[0].content[0].text).toBe("Hello world");
+	});
+
+	it("demotes cross-model OpenAI reasoning instead of replaying it as a Responses item", () => {
+		const model: Model<"zed-agent"> = {
+			id: "gpt-5.6-luna",
+			name: "GPT-5.6 Luna",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: "https://cloud.zed.dev",
+			reasoning: true,
+			contextWindow: 400_000,
+			maxTokens: 128_000,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			compat: undefined,
+		};
+		const thinkingText = "Reasoning from the previous GPT model.";
+		const foreignReasoningItem = {
+			type: "reasoning",
+			id: "rs_foreign_gpt_reasoning",
+			status: "completed",
+			summary: [{ type: "summary_text", text: thinkingText }],
+		};
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{
+					type: "thinking",
+					thinking: thinkingText,
+					thinkingSignature: JSON.stringify(foreignReasoningItem),
+				},
+				{ type: "text", text: "The answer." },
+			],
+			api: "zed-agent",
+			provider: "zed-agent",
+			model: "gpt-5.6-sol",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 1,
+		};
+
+		const payload = buildZedProviderRequest("open_ai", { messages: [assistant] }, model) as {
+			input: Array<{ type: string; role?: string; content?: Array<Record<string, unknown>> }>;
+		};
+
+		expect(payload.input).toEqual([
+			{
+				type: "message",
+				role: "assistant",
+				content: [
+					{ type: "output_text", text: renderDemotedThinking(model.id, thinkingText) },
+					{ type: "output_text", text: "The answer." },
+				],
+			},
+		]);
+		expect(payload.input.some(item => item.type === "reasoning")).toBe(false);
 	});
 
 	it("formats Anthropic Messages API payload for anthropic provider models", () => {

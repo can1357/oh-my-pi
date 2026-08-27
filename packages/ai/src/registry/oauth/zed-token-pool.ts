@@ -4,6 +4,7 @@ import { ProviderHttpError } from "../../error/classes";
 import { OAuthError } from "../../error/oauth";
 import { ProviderResponseError } from "../../error/provider";
 import type { FetchImpl } from "../../types";
+import { raceWithSignal } from "../../utils/abort";
 
 interface CachedLlmToken {
 	token: string;
@@ -15,6 +16,7 @@ const inFlightRequests = new Map<string, Promise<string>>();
 
 const TOKEN_SAFETY_WINDOW_MS = 10 * 60 * 1000; // 10 minutes safety margin
 const DEFAULT_TTL_MS = 60 * 60 * 1000; // 1 hour token lifetime
+const SHARED_MINT_TIMEOUT_MS = 30_000;
 
 function getCacheKey(userId: string, masterAccessToken: string): string {
 	return `${userId}:${masterAccessToken}`;
@@ -59,55 +61,58 @@ export async function getOrMintZedLlmToken(
 	}
 
 	const fetcher = fetchImpl ?? fetch;
-	const mintPromise = (async () => {
-		try {
-			const response = await fetcher(`${ZED_CLOUD_URL}/client/llm_tokens`, {
-				method: "POST",
-				headers: {
-					Authorization: `${userId} ${masterAccessToken}`,
-					"Content-Type": "application/json",
-					[ZED_HEADERS.VERSION]: ZED_APP_VERSION,
-				},
-				body: JSON.stringify({ organization_id: null }),
-			});
+	const timeoutSignal = AbortSignal.timeout(SHARED_MINT_TIMEOUT_MS);
+	const mintOperation = (async () => {
+		const response = await fetcher(`${ZED_CLOUD_URL}/client/llm_tokens`, {
+			method: "POST",
+			headers: {
+				Authorization: `${userId} ${masterAccessToken}`,
+				"Content-Type": "application/json",
+				[ZED_HEADERS.VERSION]: ZED_APP_VERSION,
+			},
+			body: JSON.stringify({ organization_id: null }),
+			signal: timeoutSignal,
+		});
 
-			if (!response.ok) {
-				const body = await response.text().catch(() => "");
-				if (response.status === 401) {
-					throw new OAuthError(`Zed Cloud authentication failed (HTTP 401): invalid master credentials. ${body}`, {
-						kind: "configuration",
-						provider: "zed-agent",
-					});
-				}
-				if (response.status === 402) {
-					throw new ProviderHttpError(
-						`Zed Pro subscription required or monthly quota exhausted (HTTP 402). ${body}`,
-						402,
-					);
-				}
-				throw new ProviderHttpError(
-					`Failed to mint Zed LLM token: HTTP ${response.status} ${body}`,
-					response.status,
-				);
-			}
-
-			const data = (await response.json()) as { token?: string };
-			if (!data?.token) {
-				throw new ProviderResponseError("Zed Cloud returned missing or empty LLM token.", {
-					kind: "envelope",
+		if (!response.ok) {
+			const body = await response.text().catch(() => "");
+			if (response.status === 401) {
+				throw new OAuthError(`Zed Cloud authentication failed (HTTP 401): invalid master credentials. ${body}`, {
+					kind: "configuration",
+					provider: "zed-agent",
 				});
 			}
+			if (response.status === 402) {
+				throw new ProviderHttpError(
+					`Zed Pro subscription required or monthly quota exhausted (HTTP 402). ${body}`,
+					402,
+				);
+			}
+			throw new ProviderHttpError(`Failed to mint Zed LLM token: HTTP ${response.status} ${body}`, response.status);
+		}
 
+		const data = (await response.json()) as { token?: string };
+		if (!data?.token) {
+			throw new ProviderResponseError("Zed Cloud returned missing or empty LLM token.", {
+				kind: "envelope",
+			});
+		}
+
+		return data.token;
+	})();
+	const mintPromise = raceWithSignal(mintOperation, timeoutSignal)
+		.then(token => {
 			tokenCache.set(key, {
-				token: data.token,
+				token,
 				expiresAt: Date.now() + DEFAULT_TTL_MS,
 			});
-
-			return data.token;
-		} finally {
-			inFlightRequests.delete(key);
-		}
-	})();
+			return token;
+		})
+		.finally(() => {
+			if (inFlightRequests.get(key) === mintPromise) {
+				inFlightRequests.delete(key);
+			}
+		});
 	inFlightRequests.set(key, mintPromise);
 	return raceZedLlmTokenWithSignal(mintPromise, signal);
 }

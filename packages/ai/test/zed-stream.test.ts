@@ -283,6 +283,22 @@ describe("Zed provider protocol regressions", () => {
 		});
 	});
 
+	it("emits OpenAI Responses refusal deltas as visible assistant text", async () => {
+		const refusalText = "I can't help with that request.";
+		const run = await runZedStream(makeModel("gpt-5.6-luna"), [
+			{ event: { type: "response.refusal.delta", delta: "I can't help " } },
+			{ event: { type: "response.refusal.delta", delta: "with that request." } },
+			{ status: "stream_ended" },
+		]);
+
+		expect(run.result.stopReason).toBe("stop");
+		expect(run.result.content).toEqual([{ type: "text", text: refusalText }]);
+		const textDeltas = run.events.filter(
+			(event): event is Extract<AssistantMessageEvent, { type: "text_delta" }> => event.type === "text_delta",
+		);
+		expect(textDeltas.map(event => event.delta)).toEqual(["I can't help ", "with that request."]);
+	});
+
 	it("assembles fragmented xAI streamed tool_calls by delta index", async () => {
 		const run = await runZedStream(makeModel("grok-4.6"), [
 			{
@@ -440,6 +456,87 @@ describe("Zed provider protocol regressions", () => {
 		expect(run.events.at(-1)?.type).toBe("error");
 	});
 
+	it("maps OpenAI Responses incomplete reasons and never promotes a truncated tool call", async () => {
+		const cases = [
+			{ reason: "max_output_tokens", stopReason: "length" },
+			{ reason: "content_filter", stopReason: "error" },
+		] as const;
+
+		for (const testCase of cases) {
+			const run = await runZedStream(makeModel("gpt-5.6-luna"), [
+				{
+					event: {
+						type: "response.output_item.added",
+						output_index: 0,
+						item: {
+							type: "function_call",
+							id: "fc_truncated",
+							call_id: "call_truncated",
+							name: "write_file",
+							arguments: "",
+						},
+					},
+				},
+				{
+					event: {
+						type: "response.function_call_arguments.delta",
+						item_id: "fc_truncated",
+						output_index: 0,
+						delta: '{"path":"README.md"',
+					},
+				},
+				{
+					event: {
+						type: "response.incomplete",
+						response: {
+							status: "incomplete",
+							incomplete_details: { reason: testCase.reason },
+						},
+					},
+				},
+				{ status: "stream_ended" },
+			]);
+
+			expect(run.result.stopReason).toBe(testCase.stopReason);
+			expect(run.result.stopReason).not.toBe("toolUse");
+			expect(run.events.filter(event => event.type === "toolcall_end")).toHaveLength(0);
+			if (testCase.stopReason === "error") {
+				expect(run.result.errorMessage).toContain("content_filter");
+				expect(run.events.at(-1)?.type).toBe("error");
+			} else {
+				expect(run.events.at(-1)?.type).toBe("done");
+			}
+		}
+	});
+
+	it("surfaces blocked Gemini finish reasons as errors without promoting tool calls", async () => {
+		const finishReasons = ["SAFETY", "RECITATION", "MALFORMED_FUNCTION_CALL"] as const;
+		for (const finishReason of finishReasons) {
+			const run = await runZedStream(makeModel("gemini-3-flash", true), [
+				{
+					event: {
+						candidates: [
+							{
+								content: {
+									role: "model",
+									parts: [{ functionCall: { name: "write_file", args: { path: "README.md" } } }],
+								},
+								finishReason,
+							},
+						],
+					},
+				},
+				{ status: "stream_ended" },
+			]);
+
+			expect(run.result.stopReason).toBe("error");
+			expect(run.result.stopReason).not.toBe("toolUse");
+			expect(run.result.errorMessage).toContain(`finish reason: ${finishReason}`);
+			expect(run.events.some(event => event.type === "done")).toBe(false);
+			expect(run.events.at(-1)?.type).toBe("error");
+		}
+	});
+
 	it("fails instead of completing when EOF arrives before stream_ended", async () => {
 		const run = await runZedStream(makeModel("gpt-5.6-luna"), [
 			{ event: { type: "response.output_text.delta", delta: "partial" } },
@@ -482,6 +579,39 @@ describe("Zed provider protocol regressions", () => {
 		});
 		expect(run.result.usage.cost.input).toBeCloseTo(45 / 1_000_000, 12);
 		expect(run.result.usage.cost.cacheRead).toBeCloseTo((75 * 0.25) / 1_000_000, 12);
+	});
+
+	it("includes Gemini thought tokens in output usage and reasoning accounting", async () => {
+		const run = await runZedStream(makeModel("gemini-3-flash", true), [
+			{
+				event: {
+					candidates: [
+						{
+							content: { role: "model", parts: [{ text: "answer" }] },
+							finishReason: "STOP",
+						},
+					],
+					usageMetadata: {
+						promptTokenCount: 120,
+						cachedContentTokenCount: 20,
+						candidatesTokenCount: 8,
+						thoughtsTokenCount: 5,
+						totalTokenCount: 133,
+					},
+				},
+			},
+			{ status: "stream_ended" },
+		]);
+
+		expect(run.result.stopReason).toBe("stop");
+		expect(run.result.usage).toMatchObject({
+			input: 100,
+			output: 13,
+			cacheRead: 20,
+			cacheWrite: 0,
+			totalTokens: 133,
+			reasoningTokens: 5,
+		});
 	});
 
 	it("uses a direct bearer token without minting an LLM token", async () => {
