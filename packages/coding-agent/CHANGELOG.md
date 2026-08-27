@@ -2,11 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Tavily can now be selected without an API key through its rate-limited keyless access mode.
+
 ## [18.0.8] - 2026-08-27
 
 ### Added
 
-- Tavily can now be selected without an API key through its rate-limited keyless access mode.
 - Transcript usage rows now show the total prompt-to-yield time (Δ + clock, including tool calls) after the turn timestamp, opt-in via `display.showTurnTime` (off by default).
 - `omp usage` now shows Z.AI GLM Coding Plan credit quotas (5h + weekly) with the subscribed plan tier.
 - The usage status line now labels untiered quota windows with the report's plan tier, surfacing Z.AI Coding Plan (`pro`) and Codex plan names next to the 5h/7d percentages.
