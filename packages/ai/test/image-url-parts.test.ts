@@ -191,6 +191,35 @@ describe("image url parts", () => {
 		).toEqual({ type: "base64", media_type: "image/png", data: PNG_B64 });
 	});
 
+	it("anthropic rejects an unsupported reference without usable inline data", () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5") as Model<"anthropic-messages">;
+
+		expect(() =>
+			convertAnthropicMessages(
+				[
+					{
+						role: "user",
+						content: [
+							{
+								type: "image",
+								data: "",
+								mimeType: "image/png",
+								providerFile: {
+									provider: "anthropic",
+									id: "file_expired",
+									expiresAt: Date.now() - 1,
+								},
+							},
+						],
+						timestamp: 0,
+					},
+				],
+				model,
+				false,
+			),
+		).toThrow("input_image cannot be forwarded to anthropic-messages without non-empty image data");
+	});
+
 	it("responses input uses the url as image_url and a data URI otherwise", () => {
 		const converted = convertResponsesInputContent(
 			userMessage.content as Exclude<typeof userMessage.content, string>,

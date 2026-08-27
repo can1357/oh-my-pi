@@ -102,6 +102,7 @@ import { getOpenAIPromptCacheKey } from "./openai-shared";
 import { transformMessages } from "./transform-messages";
 import {
 	isRemoteImageUrl,
+	isUsableInlineImageData,
 	NON_VISION_IMAGE_PLACEHOLDER,
 	supportsProviderFileReference,
 	supportsRemoteImageUrls,
@@ -1029,6 +1030,11 @@ function convertContentBlocks(
 		} else if (block.url && isRemoteImageUrl(block.url) && supportsRemoteImageUrls(model, block)) {
 			source = { type: "url", url: block.url };
 		} else {
+			if (!isUsableInlineImageData(block.data)) {
+				throw new AIError.ValidationError(
+					`input_image cannot be forwarded to ${model.api} without non-empty image data or a supported reference`,
+				);
+			}
 			const mediaType = normalizeAnthropicImageMediaType(block.mimeType);
 			if (!mediaType) {
 				blocks.push({ type: "text", text: `[unsupported image: ${block.mimeType}]` });

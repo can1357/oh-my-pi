@@ -547,15 +547,21 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 			}
 			if (effectiveType === "computer_call_output") {
 				const output = item as OpenAIResponsesComputerCallOutputItem;
+				const screenshot = output.output as ComputerScreenshotRef;
+				const decodedScreenshot =
+					typeof screenshot.image_url === "string" ? decodeDataUri(screenshot.image_url) : undefined;
 				messages.push({
 					role: "toolResult",
 					toolCallId: output.call_id,
 					toolName: findToolNameById(messages, output.call_id) || "computer",
-					content: [],
+					content:
+						decodedScreenshot && decodedScreenshot.data.length > 0
+							? [{ type: "image", ...decodedScreenshot }]
+							: [],
 					isError: output.status === "failed",
 					providerMetadata: {
 						type: "computer",
-						screenshot: output.output as ComputerScreenshotRef,
+						screenshot,
 						acknowledgedSafetyChecks: (output.acknowledged_safety_checks ?? []) as ComputerSafetyCheck[],
 					},
 					timestamp: now,

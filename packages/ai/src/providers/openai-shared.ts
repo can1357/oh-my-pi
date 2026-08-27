@@ -126,6 +126,7 @@ import {
 	supportsComputerScreenshotReferences,
 	supportsProviderFileReference,
 	supportsRemoteImageUrls,
+	UNREPLAYABLE_IMAGE_PLACEHOLDER,
 } from "./vision-guard";
 
 /**
@@ -2536,10 +2537,15 @@ export function encodeResponsesOrphanToolResultOutput<TApi extends Api>(
 	model: Model<TApi>,
 	supportsImageDetailOriginal: boolean,
 ): ResponsesToolResultOutputEncoding {
-	const outputText = encodeResponsesToolResultOutputText(toolResult, model);
 	const content = toolResult.content.filter(block => block.type !== "image" || hasSupportedImageSource(model, block));
-	if (content.length === 0 && toolResult.content.length > 0) return { output: outputText, outputText };
-	const { output } = encodeResponsesToolResultOutput({ ...toolResult, content }, model, supportsImageDetailOriginal);
+	const omittedImages = content.length < toolResult.content.length;
+	const replayableToolResult = { ...toolResult, content };
+	const replayableOutputText = encodeResponsesToolResultOutputText(replayableToolResult, model);
+	const outputText = omittedImages
+		? [replayableOutputText, UNREPLAYABLE_IMAGE_PLACEHOLDER].filter(Boolean).join("\n")
+		: replayableOutputText;
+	if (omittedImages && !content.some(block => block.type === "image")) return { output: outputText, outputText };
+	const { output } = encodeResponsesToolResultOutput(replayableToolResult, model, supportsImageDetailOriginal);
 	return { output, outputText };
 }
 

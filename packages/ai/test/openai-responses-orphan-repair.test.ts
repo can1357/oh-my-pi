@@ -260,6 +260,43 @@ describe("repairOrphanResponsesToolOutputs", () => {
 		expect(JSON.stringify(messages)).not.toContain("file_foreign");
 	});
 
+	it("marks an unsupported orphan image as omitted instead of attached", () => {
+		const model = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
+		if (!model) throw new Error("expected the bundled Codex model");
+		const messages: ResponseInput = [];
+		appendResponsesToolResultMessages(
+			messages,
+			{
+				role: "toolResult",
+				toolCallId: "call_unsupported_image",
+				toolName: "read",
+				content: [
+					{
+						type: "image",
+						data: "",
+						mimeType: "image/png",
+						providerFile: { provider: "openai", id: "file_foreign" },
+					},
+				],
+				isError: false,
+				timestamp: 0,
+			},
+			model,
+			true,
+			model.compat.supportsImageDetailOriginal,
+			new Set(),
+		);
+
+		expect(messages).toEqual([
+			{
+				type: "message",
+				role: "assistant",
+				content: expect.stringContaining("[image omitted: source cannot be replayed]"),
+			},
+		]);
+		expect(JSON.stringify(messages)).not.toContain("see attached image");
+	});
+
 	it("preserves original image detail for supporting orphan replay", () => {
 		const model = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
 		if (!model) throw new Error("expected the bundled Codex model");

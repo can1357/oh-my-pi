@@ -1467,6 +1467,53 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 		}
 	});
 
+	it("replays an inline computer screenshot through a non-Responses provider", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-computer-inline-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openai", "test-key");
+		const mock = createMockModel({ provider: "openai", id: "mock/computer-inline" });
+		mock.push({ content: ["ok"] });
+		const gateway = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => mock.model,
+			version: "test",
+		});
+		const imageData = Buffer.from("computer screenshot").toString("base64");
+
+		try {
+			const response = await fetch(`${gateway.url}/v1/responses`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+				body: JSON.stringify({
+					model: "mock/computer-inline",
+					input: [
+						{
+							type: "computer_call_output",
+							call_id: "call_computer_inline",
+							output: {
+								type: "computer_screenshot",
+								image_url: `data:image/png;base64,${imageData}`,
+							},
+						},
+					],
+				}),
+			});
+			expect(response.status).toBe(200);
+			await response.text();
+			expect(mock.calls).toHaveLength(1);
+			const toolResult = mock.calls[0]!.context.messages.find(message => message.role === "toolResult");
+			expect(toolResult?.content).toEqual([{ type: "image", data: imageData, mimeType: "image/png" }]);
+		} finally {
+			await gateway.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			clearCustomApis();
+		}
+	});
+
 	it("rejects unusable tool image sources before invoking a non-Responses provider", async () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-provider-file-"));
@@ -1694,9 +1741,7 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 				return new Response(
 					`data: ${JSON.stringify({
 						response: {
-							candidates: [
-								{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" },
-							],
+							candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
 							usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1, totalTokenCount: 2 },
 						},
 					})}\n\n`,

@@ -5,6 +5,7 @@ import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
 import type { ImageContent, Model, TextContent } from "../types";
 
 export const NON_VISION_IMAGE_PLACEHOLDER = "[image omitted: model does not support vision]";
+export const UNREPLAYABLE_IMAGE_PLACEHOLDER = "[image omitted: source cannot be replayed]";
 // `vision` delimited by non-alphanumerics, so `deepseek-v4-flash-vision-exp`
 // and `deepseek_vision` match but `deepseek-r1-revision-0528` does not.
 // Inputs are lowercased before testing.
