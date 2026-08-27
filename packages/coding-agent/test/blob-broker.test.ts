@@ -15,8 +15,11 @@ import { wrapStreamFnWithBlobUrlFallback } from "../src/blob-broker/stream-fallb
 import { createCommandUploader, extractUploadUrl, splitCommandTemplate } from "../src/blob-broker/uploaders";
 import { BlobStore as SessionBlobStore } from "../src/session/blob-store";
 
-const PNG_B64 = Buffer.from("blob-broker-test-bytes-1").toString("base64");
-const OTHER_B64 = Buffer.from("blob-broker-test-bytes-2").toString("base64");
+const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+const OTHER_B64 =
+	"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==";
+const MISLABELLED_B64 = Buffer.from("blob-broker-test-not-an-image").toString("base64");
+const BMP_B64 = Buffer.from("424d1e00000000000000001a0000000c000000010001000100180000000000", "hex").toString("base64");
 const KNOWN_IMAGE_REFERENCE = { mimeType: "image/png" };
 
 function makeModel(api: string, provider: string, baseUrl = "https://example.invalid"): Model {
@@ -318,6 +321,36 @@ describe("ImageUrlService", () => {
 		const service = makeService();
 		const decorated = await service.decorateContext(makeContext(), makeModel("google-vertex", "google-vertex"));
 		expect(contextHasImageUrls(decorated)).toBe(true);
+	});
+
+	it("publishes only bytes that pass inline-image validation", async () => {
+		const service = makeService();
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					content: [
+						{ type: "image", data: PNG_B64, mimeType: "image/png" },
+						{ type: "image", data: MISLABELLED_B64, mimeType: "image/png" },
+						{ type: "image", data: BMP_B64, mimeType: "image/bmp" },
+					],
+					timestamp: 0,
+				},
+			],
+		};
+
+		const decorated = await service.decorateContext(context, anthropicModel);
+		const user = decorated.messages[0];
+		if (user.role !== "user" || typeof user.content === "string") throw new Error("unexpected shape");
+		const [verified, mislabelled, placeholderSafe] = user.content;
+		if (verified.type !== "image" || mislabelled.type !== "image" || placeholderSafe.type !== "image") {
+			throw new Error("unexpected block");
+		}
+		// A published url becomes the serializer's preferred source, so bytes that
+		// fail validation must keep their fail-closed / placeholder handling.
+		expect(verified.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\//);
+		expect(mislabelled.url).toBeUndefined();
+		expect(placeholderSafe.url).toBeUndefined();
 	});
 });
 

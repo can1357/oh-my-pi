@@ -2179,6 +2179,10 @@ export class TurnRecovery {
 			return false;
 		}
 
+		if (switchedCredential) {
+			await this.#host.resyncActiveRequestTarget();
+		}
+
 		await this.#recordPendingRetryError(message, id, { switchedCredential, switchedModel, delayMs });
 
 		await this.#host.emitSessionEvent({

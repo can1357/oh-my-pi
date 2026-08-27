@@ -150,6 +150,40 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		expect(continued).toBe(1);
 	});
 
+	it("rebuilds the resolved request target when an account-policy denial rotates the credential", async () => {
+		const rotatingAuth = await AuthStorage.create(":memory:");
+		rotatingAuth.setRuntimeApiKey("anthropic", "test-key");
+		rotatingAuth.rotateSessionCredential = async () => true;
+		const rotatingRegistry = new ModelRegistry(rotatingAuth, tempDir.join("models-rotation.yml"));
+		try {
+			const failed: AssistantMessage = {
+				...makeMessage([], model),
+				errorMessage: "403 cyber_policy: trusted access for cyber is required",
+			};
+			const host = createHost(model, rotatingRegistry, { messages: [], textOutputCommitted: false });
+			host.sessionManager = {
+				getBranch: () => [],
+				getSessionId: () => "credential-rotation-session",
+			} as never;
+			const order: string[] = [];
+			host.resyncActiveRequestTarget = async () => {
+				order.push("resync");
+				return true;
+			};
+			host.scheduleAgentContinue = () => {
+				order.push("continue");
+			};
+			const recovery = new TurnRecovery(host);
+
+			// Rotation can land on a sibling credential whose endpoint differs, so
+			// target-bound history must be rebuilt before the replay is queued.
+			expect(await recovery.handleRetryableError(failed)).toBe(true);
+			expect(order).toEqual(["resync", "continue"]);
+		} finally {
+			rotatingAuth.close();
+		}
+	});
+
 	it("rolls back a usage fallback cancelled during model reconciliation", async () => {
 		const fallback = getBundledModel("openai", "gpt-4o-mini");
 		if (!fallback) throw new Error("Expected bundled fallback model");
