@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [18.0.7] - 2026-08-26
+
+### Fixed
+
+- Fixed image previews displaying as garbled characters in Paseo terminals.
+- Fixed terminal resizing from duplicating committed history in native scrollback.
+- Fixed autocomplete suggestions for bare-name skills such as `/batch` when no command matches the prefix more strongly.
+
 ## [18.0.6] - 2026-08-26
 
 ### Added

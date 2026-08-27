@@ -63,6 +63,7 @@ export async function createDefaultBenchRuntime(): Promise<BenchRuntime> {
 		const cwd = getProjectDir();
 		const settings = await Settings.init({ cwd });
 		const modelRegistry = new ModelRegistry(authStorage);
+		await modelRegistry.hydrateCredentialScopedModelCaches();
 		await loadCliExtensionProviders(modelRegistry, settings, cwd);
 		return {
 			modelRegistry,

@@ -2218,6 +2218,14 @@ export class TUI extends Container {
 	 * Append mode leaves the terminal's prior copy in place and writes a
 	 * current-width copy below it. Rebuild mode routes through the destructive
 	 * reset latch so ED3 removes stale history before the same replay.
+	 *
+	 * The append replay only exists to refresh width-shredded scrollback: a
+	 * width change leaves the terminal's committed history wrapped at the old
+	 * width, so the copy below it is the intended fresh current-width render. A
+	 * height-only change reflows nothing (the terminal merely pulls rows back
+	 * out of scrollback), so replaying would write an identical duplicate — the
+	 * editor/status chrome included — below the retained copy. Skip it, matching
+	 * the `widthChanged`-gated commit-ledger logic in {@link #doRender}.
 	 */
 	#prepareResizeReplay(width: number, height: number): void {
 		const size = `${width}x${height}`;
@@ -2240,6 +2248,7 @@ export class TUI extends Container {
 			this.#prepareForcedRender(true);
 			return;
 		}
+		if (width === this.#previousWidth) return;
 		provider.beginHistoryReplay();
 		this.#forceViewportRepaintOnNextRender = true;
 	}
@@ -2471,10 +2480,16 @@ export class TUI extends Container {
 			this.#altActive = false;
 			this.#altMouseTrackingActive = false;
 			this.#altPreviousLines = [];
-			// The alt buffer restore put the pre-overlay normal screen back; a
-			// geometry change while covered invalidates the diff baseline and the
-			// writer's dimension check forces the full anchored rewrite.
+			// The alt-buffer restore put the pre-overlay normal screen back. If
+			// that buffer resized while covered, its cursor moved with width
+			// rewrap or a height-grow scrollback pull, while our viewport anchor
+			// stayed frozen. Recover the restored cursor position before any
+			// provider repaint can overwrite history at the stale row.
 			if (width !== this.#altEnterWidth || height !== this.#altEnterHeight) {
+				if (this.#frameProvider !== undefined) {
+					this.#beginResizeAnchorProbe();
+					return;
+				}
 				this.#forceViewportRepaintOnNextRender = true;
 			}
 		} else if (wantMouseTracking !== this.#altMouseTrackingActive) {

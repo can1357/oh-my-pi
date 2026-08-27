@@ -504,6 +504,14 @@ export class CollabGuestLink {
 				this.#ctx.sessionManager.ingestReplicatedEntry(frame.entry);
 				if (frame.entry.type === "message") {
 					this.#ctx.session.agent.replaceMessages([...this.#ctx.session.messages, frame.entry.message]);
+				} else if (frame.entry.type === "compaction" || frame.entry.type === "branch_summary") {
+					// Compaction/branch entries rewrite the host's model context: the
+					// pre-boundary transcript collapses behind a summary. Appending
+					// the entry alone leaves the replica holding the stale full
+					// history, so rebuild the message array from the ingested entries
+					// exactly as the host does after appendCompaction/branchWithSummary
+					// (session-maintenance.ts, agent-session.ts).
+					this.#ctx.session.agent.replaceMessages(this.#ctx.session.buildDisplaySessionContext().messages);
 				}
 				break;
 			}

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { type TerminalFramePlan, type TerminalFrameProvider, TUI, type ViewportSize } from "@oh-my-pi/pi-tui";
+import {
+	type Component,
+	type TerminalFramePlan,
+	type TerminalFrameProvider,
+	TUI,
+	type ViewportSize,
+} from "@oh-my-pi/pi-tui";
 import { VirtualRenderScheduler } from "./virtual-render-scheduler";
 import { VirtualTerminal } from "./virtual-terminal";
 
@@ -22,6 +28,12 @@ class Provider implements TerminalFrameProvider {
 	acknowledgeHistory(id: number): void {
 		this.acknowledged.push(id);
 		this.plan = { viewport: this.plan.viewport };
+	}
+}
+
+class FullscreenOverlay implements Component {
+	render(): string[] {
+		return ["fullscreen overlay"];
 	}
 }
 
@@ -72,14 +84,19 @@ class ResizeScheduler {
 class WidthReplayProvider implements TerminalFrameProvider {
 	#nextHistoryId = 1;
 	#retired = false;
+	readonly #historyRows: readonly string[];
 	resetCount = 0;
+
+	constructor(historyRows: readonly string[] = ["history-one", "history-two"]) {
+		this.#historyRows = historyRows;
+	}
 
 	renderFrame(viewport: ViewportSize): TerminalFramePlan {
 		const width = viewport.columns;
 		return {
 			history: this.#retired
 				? undefined
-				: { id: this.#nextHistoryId, rows: [`history-one@${width}`, `history-two@${width}`] },
+				: { id: this.#nextHistoryId, rows: this.#historyRows.map(row => `${row}@${width}`) },
 			viewport: [`editor@${width}`],
 		};
 	}
@@ -334,6 +351,53 @@ describe("terminal frame plans", () => {
 		expect(resized).toContain("history-one@20");
 		expect(resized).toContain("history-one@30");
 		expect(resized.slice(-2)).toEqual(["history-two@30", "editor@30"]);
+		tui.stop();
+	});
+
+	it("does not duplicate current-width history on a height-only grow", async () => {
+		const terminal = new VirtualTerminal(20, 2);
+		const provider = new WidthReplayProvider();
+		const renderScheduler = new VirtualRenderScheduler();
+		const tui = new TUI(terminal, undefined, { renderScheduler });
+		tui.setResizeScrollback("append");
+		tui.setFrameProvider(provider);
+		tui.start();
+		await renderScheduler.settle(terminal);
+
+		expect(plainBuffer(terminal)).toContain("history-one@20");
+
+		terminal.resize(20, 6); // height-only grow: width unchanged, nothing rewraps
+		await renderScheduler.advance(terminal, 160);
+
+		const resized = plainBuffer(terminal);
+		expect(provider.resetCount).toBe(0);
+		expect(resized.filter(row => row === "history-one@20")).toEqual(["history-one@20"]);
+		tui.stop();
+	});
+
+	it("re-anchors retained history after a height grow behind a fullscreen overlay", async () => {
+		const history = Array.from({ length: 20 }, (_value, index) => `history-${index}`);
+		const terminal = new CountingTerminal(20, 4);
+		const provider = new WidthReplayProvider(history);
+		const renderScheduler = new VirtualRenderScheduler();
+		const tui = new TUI(terminal, undefined, { renderScheduler });
+		tui.setResizeScrollback("append");
+		tui.setFrameProvider(provider);
+		tui.start();
+		await renderScheduler.settle(terminal);
+
+		const overlay = tui.showOverlay(new FullscreenOverlay(), { fullscreen: true });
+		await renderScheduler.settle(terminal);
+		terminal.resize(20, 12);
+		await renderScheduler.settle(terminal);
+		terminal.writes.length = 0;
+		overlay.hide();
+		await renderScheduler.settle(terminal);
+
+		expect(terminal.writes.join("")).toContain("\x1b[6n");
+
+		expect(provider.resetCount).toBe(0);
+		expect(plainBuffer(terminal).filter(Boolean)).toEqual([...history.map(row => `${row}@20`), "editor@20"]);
 		tui.stop();
 	});
 

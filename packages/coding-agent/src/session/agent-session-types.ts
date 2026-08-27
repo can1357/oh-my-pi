@@ -21,6 +21,7 @@ import type {
 import type { postmortem } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "../advisor";
 import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager } from "../async";
+import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings, SkillsSettings } from "../config/settings";
@@ -125,6 +126,16 @@ export interface AgentSessionConfig {
 	codeModeState?: { namespacesInfo?: unknown };
 	sessionManager: SessionManager;
 	settings: Settings;
+	/**
+	 * Live extension-root policy inherited from the owning session. Subagents use
+	 * this provider so explicit roots, discovery mode, configured roots, and
+	 * provenance survive recursive task discovery.
+	 */
+	extensionRoots?: () => EffectiveExtensionRoots;
+	/** Raw SDK `additionalExtensionPaths`; used when no inherited root provider exists. */
+	additionalExtensionPaths?: readonly string[];
+	/** Mirror of `disableExtensionDiscovery`; used when no inherited root provider exists. */
+	disableExtensionDiscovery?: boolean;
 	/** Whether the session spawn policy permits the read-only `scout` subagent. Defaults to true. */
 	scoutAllowedBySpawnPolicy?: boolean;
 	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
@@ -182,8 +193,14 @@ export interface AgentSessionConfig {
 	mcpManagerToolNames?: Iterable<string>;
 	/** Updates tool-session predicates from the live active tool set. */
 	setActiveToolNames?: (names: Iterable<string>) => void;
-	/** Registers the write transport when runtime xdev mounts first need it. */
+	/** Registers the built-in write transport when it is needed at runtime. */
 	ensureWriteRegistered?: () => Promise<boolean>;
+	/** Reports whether the registered write tool is currently transport-only. */
+	isDeviceOnlyWrite?: () => boolean;
+	/** Switches the registered write tool between transport-only and full access. */
+	setDeviceOnlyWrite?: (enabled: boolean) => void;
+	/** Previews the full-write description without changing execution access. */
+	setPendingFullWriteDescription?: (enabled: boolean) => void;
 	/** Registers the hidden `goal` tool when goal mode is enabled at runtime. */
 	ensureGoalRegistered?: () => Promise<boolean>;
 	/** Current session pre-LLM message transform pipeline. */

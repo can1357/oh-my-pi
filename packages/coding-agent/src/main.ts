@@ -36,6 +36,7 @@ import { ModelRegistry } from "./config/model-registry";
 import {
 	DEFAULT_PREWALK_TARGET,
 	expandRoleAlias,
+	formatModelSelectorValue,
 	getModelMatchPreferences,
 	resolveCliModel,
 	resolveModelRoleValue,
@@ -1120,8 +1121,13 @@ export async function buildSessionOptions(
 			}
 		} else if (resolved.model) {
 			options.model = resolved.model;
+			// The recorded role must carry the effort the session actually starts
+			// at, or the first cycle back into `default` overrides it.
 			activeSettings.overrideModelRoles({
-				default: resolved.selector ?? `${resolved.model.provider}/${resolved.model.id}`,
+				default: formatModelSelectorValue(
+					resolved.selector ?? `${resolved.model.provider}/${resolved.model.id}`,
+					parsed.thinking ?? resolved.thinkingLevel,
+				),
 			});
 			if (!parsed.thinking && resolved.thinkingLevel) {
 				options.thinkingLevel = resolved.thinkingLevel;

@@ -374,6 +374,42 @@ function toolResultFor(callId: string, custom = false): ToolResultMessage {
 	};
 }
 
+describe("buildOpenAiNativeHistory multimodal tool results", () => {
+	test("encodes ReadTool images inside the native function output", () => {
+		const imageData = Buffer.from("read image").toString("base64");
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_image|fc_call_image",
+			toolName: "read",
+			content: [
+				{ type: "text", text: "Read image file [image/png]" },
+				{ type: "image", data: imageData, mimeType: "image/png", detail: "original" },
+			],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		const model = makeOpenAiModel({ provider: "openai-codex", input: ["text", "image"] });
+
+		const items = buildOpenAiNativeHistory(
+			[codexAssistant([{ callId: "call_image" }], true), result],
+			model,
+			undefined,
+			true,
+		);
+
+		const output = items.find(item => item.type === "function_call_output");
+		expect(output?.output).toEqual([
+			{ type: "input_text", text: "Read image file [image/png]" },
+			{
+				type: "input_image",
+				detail: "original",
+				image_url: `data:image/png;base64,${imageData}`,
+			},
+		]);
+		expect(items.some(item => item.type === "message" && item.role === "user")).toBe(false);
+	});
+});
+
 describe("buildOpenAiNativeHistory interleaved assistant message (#8789)", () => {
 	test("hoists a trailing text block before its tool-call batch", () => {
 		// deepseek-v4-flash on opencode-go streamed [thinking, 2 tool calls,
@@ -734,6 +770,25 @@ describe("remote compaction input forwarding", () => {
 		expect(result.rewrittenOutputs).toBe(1);
 		expect(result.input[0].output).toBe(CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE);
 		expect(result.input[1]).toEqual(attachment);
+		expect(result.estimatedTokensAfter).toBeLessThanOrEqual(15_000);
+	});
+
+	test("rewrites a native multimodal tool output atomically", () => {
+		const input = [
+			{
+				type: "function_call_output",
+				call_id: "call_1",
+				output: [
+					{ type: "input_text", text: "large tool output".repeat(1_000) },
+					{ type: "input_image", detail: "auto", image_url: "data:image/png;base64,AAAA" },
+				],
+			},
+		];
+
+		const result = trimRemoteCompactionInputToContextWindow(input, new Tokenizer(), 15_000, "compact");
+
+		expect(result.rewrittenOutputs).toBe(1);
+		expect(result.input[0].output).toBe(CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE);
 		expect(result.estimatedTokensAfter).toBeLessThanOrEqual(15_000);
 	});
 

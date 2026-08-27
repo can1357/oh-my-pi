@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getAgentDir } from "@oh-my-pi/pi-utils/dirs";
+import "@oh-my-pi/pi-utils/env";
+import { getComposerCacheDir } from "@oh-my-pi/pi-utils/dirs";
 import type { LspServerInfo, RecentSession } from "./components/welcome";
 import type { ComposerPreferences } from "./composer";
 import type { SymbolPreset } from "./theme/theme";
@@ -31,7 +32,7 @@ export interface ComposerStartupCache {
 
 function projectCacheDir(cwd: string): string {
 	const key = Bun.hash.wyhash(path.resolve(cwd)).toString(16).padStart(16, "0");
-	return path.join(getAgentDir(), "cache", "composer", key);
+	return path.join(getComposerCacheDir(), key);
 }
 
 function readFile(file: string): string | undefined {
