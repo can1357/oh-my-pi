@@ -219,12 +219,12 @@ export abstract class OAuthCallbackFlow {
 					: "Waiting for browser authentication...",
 			);
 
-			const { code } = await this.#waitForCallback(state);
+			const { code, state: callbackState } = await this.#waitForCallback(state);
 			this.#throwIfCancelled();
 
 			this.ctrl.onProgress?.("Exchanging authorization code for tokens...");
 
-			return await this.exchangeToken(code, state, redirectUri);
+			return await this.exchangeToken(code, callbackState, redirectUri);
 		} finally {
 			this.#pendingAuthUrl = undefined;
 			server?.stop();

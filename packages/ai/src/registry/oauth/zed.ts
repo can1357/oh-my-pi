@@ -11,6 +11,7 @@ import {
 	ZED_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/zed";
 import * as AIError from "../../error";
+import type { FetchImpl } from "../../types";
 import { type CallbackResult, OAuthCallbackFlow } from "./callback-server";
 import type { OAuthController, OAuthCredentials } from "./types";
 
@@ -23,20 +24,27 @@ const DEFAULT_CALLBACK_PORT = 48921;
 async function validateZedUser(
 	userId: string,
 	accessToken: string,
+	fetchOverride?: FetchImpl,
+	signal?: AbortSignal,
 ): Promise<{ id: number; github_login?: string; email?: string } | null> {
+	if (signal?.aborted) return null;
+	const fetchImpl = fetchOverride ?? fetch;
+	const timeoutSignal = AbortSignal.timeout(10_000);
+	const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 	try {
-		const response = await fetch(`${ZED_CLOUD_URL}/client/users/me`, {
+		const response = await fetchImpl(`${ZED_CLOUD_URL}/client/users/me`, {
 			method: "GET",
 			headers: {
 				Authorization: `${userId} ${accessToken}`,
 				"Content-Type": "application/json",
 				[ZED_HEADERS.VERSION]: ZED_APP_VERSION,
 			},
-			signal: AbortSignal.timeout(10_000),
+			signal: requestSignal,
 		});
 
 		if (!response.ok) return null;
 		const data = (await response.json()) as { id?: number; github_login?: string; email?: string };
+		if (signal?.aborted) return null;
 		if (data?.id) {
 			return { id: data.id, github_login: data.github_login, email: data.email };
 		}
@@ -49,18 +57,23 @@ async function validateZedUser(
 /**
  * Attempt to auto-import existing Zed Editor credentials from the system keyring.
  */
-export async function tryImportLocalZedKeychain(): Promise<OAuthCredentials | null> {
+export async function tryImportLocalZedKeychain(
+	ctrl?: Pick<OAuthController, "fetch" | "signal">,
+): Promise<OAuthCredentials | null> {
+	if (ctrl?.signal?.aborted) return null;
 	try {
 		if (process.platform === "linux") {
 			const { stdout } = await execFileAsync("secret-tool", ["lookup", "url", "https://zed.dev"], {
 				timeout: 3000,
+				signal: ctrl?.signal,
 			});
 			const secret = stdout.trim();
 			if (secret) {
 				// Secret tool returns either "userId accessToken" or just accessToken
 				const parsed = parseZedCredentials(secret);
 				if (parsed.userId && parsed.accessToken) {
-					const user = await validateZedUser(parsed.userId, parsed.accessToken);
+					const user = await validateZedUser(parsed.userId, parsed.accessToken, ctrl?.fetch, ctrl?.signal);
+					if (ctrl?.signal?.aborted) return null;
 					if (user) {
 						return {
 							access: `${user.id} ${parsed.accessToken}`,
@@ -113,6 +126,12 @@ export class ZedOAuthFlow extends OAuthCallbackFlow {
 		url: URL,
 		_expectedState: string,
 	): { ok: true; result: CallbackResult } | { ok: false; error: string } | null {
+		const error = url.searchParams.get("error");
+		if (error) {
+			const errorDescription = url.searchParams.get("error_description") || error;
+			return { ok: false, error: `Authorization failed: ${errorDescription}` };
+		}
+
 		const userId = url.searchParams.get("user_id");
 		const encryptedToken = url.searchParams.get("access_token");
 		if (!userId || !encryptedToken) {
@@ -135,11 +154,22 @@ export class ZedOAuthFlow extends OAuthCallbackFlow {
 		}
 	}
 
-	async exchangeToken(accessToken: string, userId: string): Promise<OAuthCredentials> {
+	override async exchangeToken(accessToken: string, userId: string): Promise<OAuthCredentials> {
+		if (this.ctrl.signal?.aborted) {
+			throw new AIError.LoginCancelledError(`OAuth callback cancelled: ${this.ctrl.signal.reason}`);
+		}
+
+		const user = await validateZedUser(userId, accessToken, this.ctrl.fetch, this.ctrl.signal);
+		if (this.ctrl.signal?.aborted) {
+			throw new AIError.LoginCancelledError(`OAuth callback cancelled: ${this.ctrl.signal.reason}`);
+		}
+
+		const accountId = user ? String(user.id) : userId;
 		return {
-			access: `${userId} ${accessToken}`,
-			refresh: `${userId} ${accessToken}`,
-			accountId: userId,
+			access: `${accountId} ${accessToken}`,
+			refresh: `${accountId} ${accessToken}`,
+			accountId,
+			email: user?.github_login ?? user?.email,
 			expires: Date.now() + 30 * 24 * 3600 * 1000,
 		};
 	}
@@ -154,7 +184,7 @@ export async function loginZed(ctrl: OAuthController): Promise<OAuthCredentials>
 	}
 
 	// 1. Try local keychain import first if available
-	const localCreds = await tryImportLocalZedKeychain();
+	const localCreds = await tryImportLocalZedKeychain(ctrl);
 	if (ctrl.signal?.aborted) {
 		throw new AIError.AbortError("Zed authentication was aborted.");
 	}

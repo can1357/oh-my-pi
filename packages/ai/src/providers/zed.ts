@@ -197,11 +197,22 @@ function mapContextToOpenAiResponses(context: Context, model: Model<"zed-agent">
 			}
 			input.push({ type: "message", role: "user", content: parts });
 		} else if (msg.role === "assistant") {
-			const parts: Array<Record<string, unknown>> = [];
+			let assistantMessage:
+				| { type: "message"; role: "assistant"; content: Array<Record<string, unknown>> }
+				| undefined;
+			const flushAssistantMessage = () => {
+				if (assistantMessage && assistantMessage.content.length > 0) {
+					input.push(assistantMessage);
+				}
+				assistantMessage = undefined;
+			};
+
 			for (const block of msg.content) {
 				if (block.type === "text") {
-					parts.push({ type: "output_text", text: block.text });
+					assistantMessage ??= { type: "message", role: "assistant", content: [] };
+					assistantMessage.content.push({ type: "output_text", text: block.text });
 				} else if (block.type === "thinking") {
+					flushAssistantMessage();
 					if (block.thinking) {
 						input.push({
 							type: "reasoning",
@@ -209,6 +220,7 @@ function mapContextToOpenAiResponses(context: Context, model: Model<"zed-agent">
 						});
 					}
 				} else if (block.type === "toolCall") {
+					flushAssistantMessage();
 					input.push({
 						type: "function_call",
 						call_id: block.id,
@@ -217,9 +229,7 @@ function mapContextToOpenAiResponses(context: Context, model: Model<"zed-agent">
 					});
 				}
 			}
-			if (parts.length > 0) {
-				input.push({ type: "message", role: "assistant", content: parts });
-			}
+			flushAssistantMessage();
 		} else if (msg.role === "toolResult") {
 			const textResult = msg.content
 				.filter(b => b.type === "text")
@@ -267,8 +277,39 @@ function mapContextToOpenAiResponses(context: Context, model: Model<"zed-agent">
 }
 function mapContextToGoogle(context: Context, model: Model<"zed-agent">, options?: ZedOptions) {
 	const contents: Array<{ role: string; parts: Array<Record<string, unknown>> }> = [];
+	let pendingFunctionResponses: Array<Record<string, unknown>> = [];
+	const flushFunctionResponses = () => {
+		if (pendingFunctionResponses.length === 0) return;
+		contents.push({ role: "user", parts: pendingFunctionResponses });
+		pendingFunctionResponses = [];
+	};
 
 	for (const msg of context.messages) {
+		if (msg.role === "toolResult") {
+			const textResult = msg.content
+				.filter(b => b.type === "text")
+				.map(b => (b as TextContent).text)
+				.join("\n");
+			pendingFunctionResponses.push({
+				functionResponse: {
+					name: msg.toolName,
+					response: msg.isError ? { error: textResult } : { output: textResult },
+				},
+			});
+			for (const block of msg.content) {
+				if (block.type === "image") {
+					pendingFunctionResponses.push({
+						inlineData: {
+							mimeType: block.mimeType,
+							data: block.data,
+						},
+					});
+				}
+			}
+			continue;
+		}
+
+		flushFunctionResponses();
 		if (msg.role === "user" || msg.role === "developer") {
 			const parts: Array<Record<string, unknown>> = [];
 			if (typeof msg.content === "string") {
@@ -312,32 +353,9 @@ function mapContextToGoogle(context: Context, model: Model<"zed-agent">, options
 				}
 			}
 			contents.push({ role: "model", parts });
-		} else if (msg.role === "toolResult") {
-			const textResult = msg.content
-				.filter(b => b.type === "text")
-				.map(b => (b as TextContent).text)
-				.join("\n");
-			const parts: Array<Record<string, unknown>> = [
-				{
-					functionResponse: {
-						name: msg.toolName,
-						response: { content: textResult },
-					},
-				},
-			];
-			for (const block of msg.content) {
-				if (block.type === "image") {
-					parts.push({
-						inlineData: {
-							mimeType: block.mimeType,
-							data: block.data,
-						},
-					});
-				}
-			}
-			contents.push({ role: "user", parts });
 		}
 	}
+	flushFunctionResponses();
 
 	const generationConfig: Record<string, unknown> = {
 		maxOutputTokens: options?.maxTokens ?? model.maxTokens ?? 8192,
@@ -575,10 +593,212 @@ export function streamZed(
 		const reader = response.body.getReader();
 		const decoder = new TextDecoder();
 		let buffer = "";
-		let currentContentIndex = -1;
-		let currentToolCall: ToolCall | null = null;
-		let currentToolArgsJson = "";
 		let sawStreamEnded = false;
+
+		// Stream block state tracking
+		let activeTextBlock: TextContent | null = null;
+		let activeThinkingBlock: ThinkingContent | null = null;
+
+		const closeActiveText = () => {
+			if (!activeTextBlock) return;
+			const contentIndex = outputMessage.content.indexOf(activeTextBlock);
+			if (contentIndex >= 0) {
+				stream.push({
+					type: "text_end",
+					contentIndex,
+					content: activeTextBlock.text,
+					partial: outputMessage,
+				});
+			}
+			activeTextBlock = null;
+		};
+
+		const closeActiveThinking = () => {
+			if (!activeThinkingBlock) return;
+			const contentIndex = outputMessage.content.indexOf(activeThinkingBlock);
+			if (contentIndex >= 0) {
+				stream.push({
+					type: "thinking_end",
+					contentIndex,
+					content: activeThinkingBlock.thinking,
+					partial: outputMessage,
+				});
+			}
+			activeThinkingBlock = null;
+		};
+
+		const startOrAppendText = (delta: string) => {
+			closeActiveThinking();
+			if (!activeTextBlock) {
+				activeTextBlock = { type: "text", text: "" };
+				outputMessage.content.push(activeTextBlock);
+				const contentIndex = outputMessage.content.length - 1;
+				stream.push({ type: "text_start", contentIndex, partial: outputMessage });
+			}
+			activeTextBlock.text += delta;
+			const contentIndex = outputMessage.content.indexOf(activeTextBlock);
+			stream.push({
+				type: "text_delta",
+				contentIndex,
+				delta,
+				partial: outputMessage,
+			});
+		};
+
+		const startOrAppendThinking = (delta: string, signature?: string) => {
+			closeActiveText();
+			if (!activeThinkingBlock) {
+				activeThinkingBlock = { type: "thinking", thinking: "" };
+				if (signature) activeThinkingBlock.thinkingSignature = signature;
+				outputMessage.content.push(activeThinkingBlock);
+				const contentIndex = outputMessage.content.length - 1;
+				stream.push({ type: "thinking_start", contentIndex, partial: outputMessage });
+			}
+			if (signature) {
+				activeThinkingBlock.thinkingSignature = retainThoughtSignature(
+					activeThinkingBlock.thinkingSignature,
+					signature,
+				);
+			}
+			if (delta.length > 0) {
+				activeThinkingBlock.thinking += delta;
+				const contentIndex = outputMessage.content.indexOf(activeThinkingBlock);
+				stream.push({
+					type: "thinking_delta",
+					contentIndex,
+					delta,
+					partial: outputMessage,
+				});
+			}
+		};
+
+		// OpenAI Responses tool-call tracking (keyed by item_id / output_index)
+		type ResponsesToolCallState = {
+			toolCall: ToolCall;
+			rawArgs: string;
+			contentIndex: number;
+			itemId?: string;
+			callId?: string;
+			outputIndex?: number;
+			ended?: boolean;
+		};
+		const openResponsesToolCallsByItemId = new Map<string, ResponsesToolCallState>();
+		const openResponsesToolCallsByOutputIndex = new Map<number, ResponsesToolCallState>();
+		const openResponsesToolCalls: ResponsesToolCallState[] = [];
+		let lastAddedResponsesToolCall: ResponsesToolCallState | null = null;
+
+		const getResponsesToolCallIdentity = (rawEvent: Record<string, unknown>) => {
+			const item =
+				typeof rawEvent.item === "object" && rawEvent.item !== null
+					? (rawEvent.item as Record<string, unknown>)
+					: typeof rawEvent.output_item === "object" && rawEvent.output_item !== null
+						? (rawEvent.output_item as Record<string, unknown>)
+						: undefined;
+			const itemId =
+				typeof rawEvent.item_id === "string"
+					? rawEvent.item_id
+					: typeof item?.id === "string"
+						? item.id
+						: undefined;
+			const callId =
+				typeof rawEvent.call_id === "string"
+					? rawEvent.call_id
+					: typeof item?.call_id === "string"
+						? item.call_id
+						: undefined;
+			const outputIndex =
+				typeof rawEvent.output_index === "number" && Number.isFinite(rawEvent.output_index)
+					? Math.trunc(rawEvent.output_index)
+					: typeof item?.output_index === "number" && Number.isFinite(item.output_index)
+						? Math.trunc(item.output_index)
+						: undefined;
+			return {
+				item,
+				itemId,
+				callId,
+				outputIndex,
+				hasExplicitKey: itemId !== undefined || callId !== undefined || outputIndex !== undefined,
+			};
+		};
+
+		const findResponsesToolCall = (rawEvent: Record<string, unknown>): ResponsesToolCallState | null => {
+			const { itemId, callId, outputIndex, hasExplicitKey } = getResponsesToolCallIdentity(rawEvent);
+			if (itemId) {
+				const found = openResponsesToolCallsByItemId.get(itemId);
+				if (found) return found;
+			}
+			if (callId) {
+				const found = openResponsesToolCallsByItemId.get(callId);
+				if (found) return found;
+			}
+			if (outputIndex !== undefined) {
+				const found = openResponsesToolCallsByOutputIndex.get(outputIndex);
+				if (found) return found;
+			}
+			if (hasExplicitKey) return null;
+			return lastAddedResponsesToolCall ?? openResponsesToolCalls[openResponsesToolCalls.length - 1] ?? null;
+		};
+
+		const finishResponsesToolCall = (state: ResponsesToolCallState) => {
+			if (state.ended) return;
+			state.ended = true;
+			try {
+				state.toolCall.arguments = JSON.parse(state.rawArgs || "{}");
+			} catch {
+				state.toolCall.arguments = {};
+			}
+			const idx = openResponsesToolCalls.indexOf(state);
+			if (idx >= 0) openResponsesToolCalls.splice(idx, 1);
+			stream.push({
+				type: "toolcall_end",
+				contentIndex: state.contentIndex,
+				toolCall: state.toolCall,
+				partial: outputMessage,
+			});
+		};
+
+		// OpenAI Chat / xAI tool-call tracking (keyed by delta index)
+		type ChatToolCallState = {
+			toolCall: ToolCall;
+			rawArgs: string;
+			contentIndex: number;
+			index?: number;
+		};
+		const chatToolCallsByIndex = new Map<number, ChatToolCallState>();
+		const pendingChatToolCalls: ChatToolCallState[] = [];
+		let lastChatToolCall: ChatToolCallState | null = null;
+
+		const finishChatToolCall = (state: ChatToolCallState) => {
+			try {
+				state.toolCall.arguments = JSON.parse(state.rawArgs || "{}");
+			} catch {
+				state.toolCall.arguments = {};
+			}
+			if (state.index !== undefined) chatToolCallsByIndex.delete(state.index);
+			const idx = pendingChatToolCalls.indexOf(state);
+			if (idx >= 0) pendingChatToolCalls.splice(idx, 1);
+			if (lastChatToolCall === state) lastChatToolCall = null;
+			stream.push({
+				type: "toolcall_end",
+				contentIndex: state.contentIndex,
+				toolCall: state.toolCall,
+				partial: outputMessage,
+			});
+		};
+
+		const finishAllPendingToolCalls = () => {
+			for (const state of [...openResponsesToolCalls]) {
+				finishResponsesToolCall(state);
+			}
+			for (const state of [...pendingChatToolCalls]) {
+				finishChatToolCall(state);
+			}
+		};
+
+		// Anthropic singleton block tracking
+		let anthropicCurrentIndex = -1;
+		let anthropicToolCall: ToolCall | null = null;
+		let anthropicToolArgsJson = "";
 
 		try {
 			while (true) {
@@ -627,32 +847,36 @@ export function streamZed(
 							const blockType = contentBlock.type;
 
 							if (blockType === "text") {
-								currentContentIndex++;
+								anthropicCurrentIndex++;
 								const block: TextContent = { type: "text", text: "" };
 								outputMessage.content.push(block);
-								stream.push({ type: "text_start", contentIndex: currentContentIndex, partial: outputMessage });
+								stream.push({
+									type: "text_start",
+									contentIndex: anthropicCurrentIndex,
+									partial: outputMessage,
+								});
 							} else if (blockType === "thinking") {
-								currentContentIndex++;
+								anthropicCurrentIndex++;
 								const block: ThinkingContent = { type: "thinking", thinking: "" };
 								outputMessage.content.push(block);
 								stream.push({
 									type: "thinking_start",
-									contentIndex: currentContentIndex,
+									contentIndex: anthropicCurrentIndex,
 									partial: outputMessage,
 								});
 							} else if (blockType === "tool_use") {
-								currentContentIndex++;
-								currentToolArgsJson = "";
-								currentToolCall = {
+								anthropicCurrentIndex++;
+								anthropicToolArgsJson = "";
+								anthropicToolCall = {
 									type: "toolCall",
 									id: typeof contentBlock.id === "string" ? contentBlock.id : crypto.randomUUID(),
 									name: typeof contentBlock.name === "string" ? contentBlock.name : "",
 									arguments: {},
 								};
-								outputMessage.content.push(currentToolCall);
+								outputMessage.content.push(anthropicToolCall);
 								stream.push({
 									type: "toolcall_start",
-									contentIndex: currentContentIndex,
+									contentIndex: anthropicCurrentIndex,
 									partial: outputMessage,
 								});
 							}
@@ -663,71 +887,71 @@ export function streamZed(
 							const deltaType = delta.type;
 
 							if (deltaType === "text_delta" && typeof delta.text === "string") {
-								const textBlock = outputMessage.content[currentContentIndex] as TextContent | undefined;
+								const textBlock = outputMessage.content[anthropicCurrentIndex] as TextContent | undefined;
 								if (textBlock && textBlock.type === "text") {
 									textBlock.text += delta.text;
 								}
 								stream.push({
 									type: "text_delta",
-									contentIndex: currentContentIndex,
+									contentIndex: anthropicCurrentIndex,
 									delta: delta.text,
 									partial: outputMessage,
 								});
 							} else if (deltaType === "thinking_delta" && typeof delta.thinking === "string") {
-								const thinkBlock = outputMessage.content[currentContentIndex] as ThinkingContent | undefined;
+								const thinkBlock = outputMessage.content[anthropicCurrentIndex] as ThinkingContent | undefined;
 								if (thinkBlock && thinkBlock.type === "thinking") {
 									thinkBlock.thinking += delta.thinking;
 								}
 								stream.push({
 									type: "thinking_delta",
-									contentIndex: currentContentIndex,
+									contentIndex: anthropicCurrentIndex,
 									delta: delta.thinking,
 									partial: outputMessage,
 								});
 							} else if (deltaType === "signature_delta" && typeof delta.signature === "string") {
-								const thinkBlock = outputMessage.content[currentContentIndex] as ThinkingContent | undefined;
+								const thinkBlock = outputMessage.content[anthropicCurrentIndex] as ThinkingContent | undefined;
 								if (thinkBlock && thinkBlock.type === "thinking") {
 									thinkBlock.thinkingSignature = (thinkBlock.thinkingSignature ?? "") + delta.signature;
 								}
 							} else if (deltaType === "input_json_delta" && typeof delta.partial_json === "string") {
-								currentToolArgsJson += delta.partial_json;
+								anthropicToolArgsJson += delta.partial_json;
 								stream.push({
 									type: "toolcall_delta",
-									contentIndex: currentContentIndex,
+									contentIndex: anthropicCurrentIndex,
 									delta: delta.partial_json,
 									partial: outputMessage,
 								});
 							}
 						}
 					} else if (eventType === "content_block_stop") {
-						const currentBlock = outputMessage.content[currentContentIndex];
+						const currentBlock = outputMessage.content[anthropicCurrentIndex];
 						if (currentBlock?.type === "text") {
 							stream.push({
 								type: "text_end",
-								contentIndex: currentContentIndex,
+								contentIndex: anthropicCurrentIndex,
 								content: currentBlock.text,
 								partial: outputMessage,
 							});
 						} else if (currentBlock?.type === "thinking") {
 							stream.push({
 								type: "thinking_end",
-								contentIndex: currentContentIndex,
+								contentIndex: anthropicCurrentIndex,
 								content: currentBlock.thinking,
 								partial: outputMessage,
 							});
-						} else if (currentToolCall) {
+						} else if (anthropicToolCall) {
 							try {
-								currentToolCall.arguments = JSON.parse(currentToolArgsJson || "{}");
+								anthropicToolCall.arguments = JSON.parse(anthropicToolArgsJson || "{}");
 							} catch {
-								currentToolCall.arguments = {};
+								anthropicToolCall.arguments = {};
 							}
 							stream.push({
 								type: "toolcall_end",
-								contentIndex: currentContentIndex,
-								toolCall: currentToolCall,
+								contentIndex: anthropicCurrentIndex,
+								toolCall: anthropicToolCall,
 								partial: outputMessage,
 							});
-							currentToolCall = null;
+							anthropicToolCall = null;
 						}
 					} else if (eventType === "message_delta") {
 						const delta = event.delta as Record<string, unknown> | undefined;
@@ -747,18 +971,42 @@ export function streamZed(
 					else if (eventType === "response.output_item.added") {
 						const item = (event.item ?? event.output_item) as Record<string, unknown> | undefined;
 						if (item?.type === "function_call") {
-							currentContentIndex++;
-							currentToolArgsJson = "";
-							currentToolCall = {
+							closeActiveText();
+							closeActiveThinking();
+							const itemId = typeof item.id === "string" ? item.id : undefined;
+							const callId = typeof item.call_id === "string" ? item.call_id : undefined;
+							const wireItemId = typeof event.item_id === "string" ? event.item_id : undefined;
+							const wireCallId = typeof event.call_id === "string" ? event.call_id : undefined;
+							const effectiveItemId = itemId ?? wireItemId;
+							const effectiveCallId = callId ?? wireCallId;
+							const outputIndex =
+								typeof event.output_index === "number" && Number.isFinite(event.output_index)
+									? Math.trunc(event.output_index)
+									: undefined;
+							const toolCall: ToolCall = {
 								type: "toolCall",
-								id: (item.call_id as string) || (item.id as string) || crypto.randomUUID(),
+								id: effectiveCallId || effectiveItemId || crypto.randomUUID(),
 								name: (item.name as string) || "",
 								arguments: {},
 							};
-							outputMessage.content.push(currentToolCall);
+							outputMessage.content.push(toolCall);
+							const contentIndex = outputMessage.content.length - 1;
+							const state: ResponsesToolCallState = {
+								toolCall,
+								rawArgs: (typeof item.arguments === "string" ? item.arguments : "") || "",
+								contentIndex,
+								itemId: effectiveItemId,
+								callId: effectiveCallId,
+								outputIndex,
+							};
+							if (effectiveItemId) openResponsesToolCallsByItemId.set(effectiveItemId, state);
+							if (effectiveCallId) openResponsesToolCallsByItemId.set(effectiveCallId, state);
+							if (outputIndex !== undefined) openResponsesToolCallsByOutputIndex.set(outputIndex, state);
+							openResponsesToolCalls.push(state);
+							lastAddedResponsesToolCall = state;
 							stream.push({
 								type: "toolcall_start",
-								contentIndex: currentContentIndex,
+								contentIndex,
 								partial: outputMessage,
 							});
 						}
@@ -766,94 +1014,63 @@ export function streamZed(
 						(eventType === "response.output_text.delta" || eventType === "response.text.delta") &&
 						typeof event.delta === "string"
 					) {
-						if (currentContentIndex === -1 || outputMessage.content[currentContentIndex]?.type !== "text") {
-							currentContentIndex++;
-							const block: TextContent = { type: "text", text: "" };
-							outputMessage.content.push(block);
-							stream.push({ type: "text_start", contentIndex: currentContentIndex, partial: outputMessage });
-						}
-						const textBlock = outputMessage.content[currentContentIndex] as TextContent;
-						textBlock.text += event.delta;
-						stream.push({
-							type: "text_delta",
-							contentIndex: currentContentIndex,
-							delta: event.delta,
-							partial: outputMessage,
-						});
+						startOrAppendText(event.delta);
 					} else if (
 						(eventType === "response.reasoning_summary_text.delta" ||
 							eventType === "response.reasoning.delta" ||
 							eventType === "response.reasoning_text.delta") &&
 						typeof event.delta === "string"
 					) {
-						if (currentContentIndex === -1 || outputMessage.content[currentContentIndex]?.type !== "thinking") {
-							currentContentIndex++;
-							const block: ThinkingContent = { type: "thinking", thinking: "" };
-							outputMessage.content.push(block);
-							stream.push({ type: "thinking_start", contentIndex: currentContentIndex, partial: outputMessage });
-						}
-						const thinkBlock = outputMessage.content[currentContentIndex] as ThinkingContent;
-						thinkBlock.thinking += event.delta;
-						stream.push({
-							type: "thinking_delta",
-							contentIndex: currentContentIndex,
-							delta: event.delta,
-							partial: outputMessage,
-						});
+						startOrAppendThinking(event.delta);
 					} else if (eventType === "response.function_call_arguments.delta" && typeof event.delta === "string") {
-						currentToolArgsJson += event.delta;
-						stream.push({
-							type: "toolcall_delta",
-							contentIndex: currentContentIndex,
-							delta: event.delta,
-							partial: outputMessage,
-						});
+						closeActiveText();
+						closeActiveThinking();
+						const target = findResponsesToolCall(event);
+						if (target) {
+							target.rawArgs += event.delta;
+							stream.push({
+								type: "toolcall_delta",
+								contentIndex: target.contentIndex,
+								delta: event.delta,
+								partial: outputMessage,
+							});
+						}
 					} else if (
 						eventType === "response.output_item.done" ||
 						eventType === "response.function_call_arguments.done"
 					) {
-						if (currentToolCall) {
-							try {
-								currentToolCall.arguments = JSON.parse(currentToolArgsJson || "{}");
-							} catch {
-								currentToolCall.arguments = {};
+						const item = (event.item ?? event.output_item) as Record<string, unknown> | undefined;
+						if (item?.type === "function_call" || eventType === "response.function_call_arguments.done") {
+							const target = findResponsesToolCall(event);
+							if (target) {
+								finishResponsesToolCall(target);
 							}
-							stream.push({
-								type: "toolcall_end",
-								contentIndex: currentContentIndex,
-								toolCall: currentToolCall,
-								partial: outputMessage,
-							});
-							currentToolCall = null;
+						} else if (item?.type === "message" || eventType === "response.output_item.done") {
+							closeActiveText();
+							closeActiveThinking();
 						}
+					} else if (eventType === "response.output_text.done" || eventType === "response.text.done") {
+						closeActiveText();
 					} else if (
-						eventType === "response.output_text.done" ||
-						eventType === "response.text.done" ||
 						eventType === "response.reasoning_summary_text.done" ||
 						eventType === "response.reasoning.done"
 					) {
-						const currentBlock = outputMessage.content[currentContentIndex];
-						if (currentBlock?.type === "text") {
-							stream.push({
-								type: "text_end",
-								contentIndex: currentContentIndex,
-								content: currentBlock.text,
-								partial: outputMessage,
-							});
-						} else if (currentBlock?.type === "thinking") {
-							stream.push({
-								type: "thinking_end",
-								contentIndex: currentContentIndex,
-								content: currentBlock.thinking,
-								partial: outputMessage,
-							});
-						}
+						closeActiveThinking();
 					}
 
 					// ─── OPENAI CHAT & GOOGLE GEMINI EVENT FLAVORS ───
 					else if (Array.isArray(event.choices) && event.choices.length > 0) {
 						const choice = event.choices[0] as {
-							delta?: { content?: string; reasoning_content?: string };
+							delta?: {
+								content?: string;
+								reasoning_content?: string;
+								tool_calls?: Array<{
+									index?: number;
+									id?: string;
+									type?: string;
+									function?: { name?: string; arguments?: string };
+								}>;
+							};
 							finish_reason?: string;
 						};
 						if (choice.finish_reason) {
@@ -861,47 +1078,72 @@ export function streamZed(
 							else if (choice.finish_reason === "tool_calls" || choice.finish_reason === "function_call")
 								outputMessage.stopReason = "toolUse";
 						}
-						if (typeof choice.delta?.content === "string" && choice.delta.content.length > 0) {
-							if (currentContentIndex === -1 || outputMessage.content[currentContentIndex]?.type !== "text") {
-								currentContentIndex++;
-								const block: TextContent = { type: "text", text: "" };
-								outputMessage.content.push(block);
-								stream.push({ type: "text_start", contentIndex: currentContentIndex, partial: outputMessage });
-							}
-							const textBlock = outputMessage.content[currentContentIndex] as TextContent;
-							textBlock.text += choice.delta.content;
-							stream.push({
-								type: "text_delta",
-								contentIndex: currentContentIndex,
-								delta: choice.delta.content,
-								partial: outputMessage,
-							});
-						}
 						if (
 							typeof choice.delta?.reasoning_content === "string" &&
 							choice.delta.reasoning_content.length > 0
 						) {
-							if (
-								currentContentIndex === -1 ||
-								outputMessage.content[currentContentIndex]?.type !== "thinking"
-							) {
-								currentContentIndex++;
-								const block: ThinkingContent = { type: "thinking", thinking: "" };
-								outputMessage.content.push(block);
-								stream.push({
-									type: "thinking_start",
-									contentIndex: currentContentIndex,
-									partial: outputMessage,
-								});
+							startOrAppendThinking(choice.delta.reasoning_content);
+						}
+						if (typeof choice.delta?.content === "string" && choice.delta.content.length > 0) {
+							startOrAppendText(choice.delta.content);
+						}
+						if (Array.isArray(choice.delta?.tool_calls) && choice.delta.tool_calls.length > 0) {
+							closeActiveText();
+							closeActiveThinking();
+							for (const tcDelta of choice.delta.tool_calls) {
+								const streamIndex = typeof tcDelta.index === "number" ? tcDelta.index : undefined;
+								let state = streamIndex !== undefined ? chatToolCallsByIndex.get(streamIndex) : undefined;
+								if (!state && tcDelta.id) {
+									state = pendingChatToolCalls.find(c => c.toolCall.id === tcDelta.id);
+								}
+								if (!state && !tcDelta.id && streamIndex === undefined) {
+									state = lastChatToolCall ?? undefined;
+								}
+
+								if (!state) {
+									const toolCall: ToolCall = {
+										type: "toolCall",
+										id: tcDelta.id || crypto.randomUUID(),
+										name: tcDelta.function?.name || "",
+										arguments: {},
+									};
+									outputMessage.content.push(toolCall);
+									const contentIndex = outputMessage.content.length - 1;
+									state = {
+										toolCall,
+										rawArgs: "",
+										contentIndex,
+										index: streamIndex,
+									};
+									if (streamIndex !== undefined) chatToolCallsByIndex.set(streamIndex, state);
+									pendingChatToolCalls.push(state);
+									lastChatToolCall = state;
+									stream.push({
+										type: "toolcall_start",
+										contentIndex,
+										partial: outputMessage,
+									});
+								} else {
+									if (tcDelta.id) state.toolCall.id = tcDelta.id;
+									if (tcDelta.function?.name && !state.toolCall.name)
+										state.toolCall.name = tcDelta.function.name;
+									if (streamIndex !== undefined && state.index === undefined) {
+										state.index = streamIndex;
+										chatToolCallsByIndex.set(streamIndex, state);
+									}
+									lastChatToolCall = state;
+								}
+
+								if (tcDelta.function?.arguments) {
+									state.rawArgs += tcDelta.function.arguments;
+									stream.push({
+										type: "toolcall_delta",
+										contentIndex: state.contentIndex,
+										delta: tcDelta.function.arguments,
+										partial: outputMessage,
+									});
+								}
 							}
-							const thinkBlock = outputMessage.content[currentContentIndex] as ThinkingContent;
-							thinkBlock.thinking += choice.delta.reasoning_content;
-							stream.push({
-								type: "thinking_delta",
-								contentIndex: currentContentIndex,
-								delta: choice.delta.reasoning_content,
-								partial: outputMessage,
-							});
 						}
 					} else if (Array.isArray(event.candidates) && event.candidates.length > 0) {
 						const candidate = event.candidates[0] as {
@@ -924,63 +1166,23 @@ export function streamZed(
 						const parts = candidate.content?.parts ?? [];
 						for (const part of parts) {
 							if (isThinkingPart(part)) {
-								if (
-									currentContentIndex === -1 ||
-									outputMessage.content[currentContentIndex]?.type !== "thinking"
-								) {
-									currentContentIndex++;
-									const block: ThinkingContent = { type: "thinking", thinking: "" };
-									outputMessage.content.push(block);
-									stream.push({
-										type: "thinking_start",
-										contentIndex: currentContentIndex,
-										partial: outputMessage,
-									});
-								}
-								const thinkBlock = outputMessage.content[currentContentIndex] as ThinkingContent;
-								if (typeof part.text === "string" && part.text.length > 0) {
-									thinkBlock.thinking += part.text;
-									stream.push({
-										type: "thinking_delta",
-										contentIndex: currentContentIndex,
-										delta: part.text,
-										partial: outputMessage,
-									});
-								}
-								thinkBlock.thinkingSignature = retainThoughtSignature(
-									thinkBlock.thinkingSignature,
-									part.thoughtSignature,
-								);
+								startOrAppendThinking(part.text ?? "", part.thoughtSignature);
 							} else if (typeof part.text === "string" && part.text.length > 0) {
-								if (currentContentIndex === -1 || outputMessage.content[currentContentIndex]?.type !== "text") {
-									currentContentIndex++;
-									const block: TextContent = { type: "text", text: "" };
-									outputMessage.content.push(block);
-									stream.push({
-										type: "text_start",
-										contentIndex: currentContentIndex,
-										partial: outputMessage,
-									});
-								}
-								const textBlock = outputMessage.content[currentContentIndex] as TextContent;
-								textBlock.text += part.text;
-								stream.push({
-									type: "text_delta",
-									contentIndex: currentContentIndex,
-									delta: part.text,
-									partial: outputMessage,
-								});
-							} else if (part.thoughtSignature && !part.functionCall && currentContentIndex >= 0) {
-								const currentBlock = outputMessage.content[currentContentIndex];
-								if (currentBlock?.type === "thinking") {
-									currentBlock.thinkingSignature = retainThoughtSignature(
-										currentBlock.thinkingSignature,
+								startOrAppendText(part.text);
+							} else if (part.thoughtSignature && !part.functionCall) {
+								for (let i = outputMessage.content.length - 1; i >= 0; i--) {
+									const thinkBlock = outputMessage.content[i];
+									if (thinkBlock?.type !== "thinking") continue;
+									thinkBlock.thinkingSignature = retainThoughtSignature(
+										thinkBlock.thinkingSignature,
 										part.thoughtSignature,
 									);
+									break;
 								}
 							}
 							if (part.functionCall?.name) {
-								currentContentIndex++;
+								closeActiveText();
+								closeActiveThinking();
 								const toolCall: ToolCall = {
 									type: "toolCall",
 									id: crypto.randomUUID(),
@@ -989,14 +1191,15 @@ export function streamZed(
 									...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
 								};
 								outputMessage.content.push(toolCall);
+								const contentIndex = outputMessage.content.length - 1;
 								stream.push({
 									type: "toolcall_start",
-									contentIndex: currentContentIndex,
+									contentIndex,
 									partial: outputMessage,
 								});
 								stream.push({
 									type: "toolcall_end",
-									contentIndex: currentContentIndex,
+									contentIndex,
 									toolCall,
 									partial: outputMessage,
 								});
@@ -1026,9 +1229,19 @@ export function streamZed(
 								usage.cache_creation_input_tokens ?? outputMessage.usage.cacheWrite;
 						}
 					} else if (event.usageMetadata && typeof event.usageMetadata === "object" && outputMessage.usage) {
-						const um = event.usageMetadata as { promptTokenCount?: number; candidatesTokenCount?: number };
-						if (um.promptTokenCount) outputMessage.usage.input = um.promptTokenCount;
-						if (um.candidatesTokenCount) outputMessage.usage.output = um.candidatesTokenCount;
+						const um = event.usageMetadata as {
+							promptTokenCount?: number;
+							candidatesTokenCount?: number;
+							cachedContentTokenCount?: number;
+						};
+						if (um.promptTokenCount !== undefined) {
+							const cached = um.cachedContentTokenCount || 0;
+							outputMessage.usage.input = um.promptTokenCount - cached;
+							outputMessage.usage.cacheRead = cached;
+						} else if (um.cachedContentTokenCount !== undefined) {
+							outputMessage.usage.cacheRead = um.cachedContentTokenCount;
+						}
+						if (um.candidatesTokenCount !== undefined) outputMessage.usage.output = um.candidatesTokenCount;
 					} else if (event.usage && typeof event.usage === "object" && outputMessage.usage) {
 						const u = event.usage as { prompt_tokens?: number; completion_tokens?: number };
 						if (u.prompt_tokens) outputMessage.usage.input = u.prompt_tokens;
@@ -1060,8 +1273,20 @@ export function streamZed(
 				}
 			}
 
+			closeActiveText();
+			closeActiveThinking();
+			finishAllPendingToolCalls();
+
+			if (outputMessage.content.some(b => b.type === "toolCall") && outputMessage.stopReason === "stop") {
+				outputMessage.stopReason = "toolUse";
+			}
+
 			if (outputMessage.usage) {
-				outputMessage.usage.totalTokens = outputMessage.usage.input + outputMessage.usage.output;
+				outputMessage.usage.totalTokens =
+					outputMessage.usage.input +
+					outputMessage.usage.output +
+					outputMessage.usage.cacheRead +
+					outputMessage.usage.cacheWrite;
 				calculateCost(model, outputMessage.usage);
 			}
 
