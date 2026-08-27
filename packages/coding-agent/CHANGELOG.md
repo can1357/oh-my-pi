@@ -13,6 +13,8 @@
 - The status line now displays the thinking level as a compact icon alongside the model name by default; set `statusLine.compactThinkingLevel` to `false` to restore the previous display.
 
 ### Fixed
+### Added
+- Added native TypeScript 7 LSP autodetection via `tsc --lsp --stdio`, preferred over `typescript-language-server` when both are available.
 
 - Fixed MCP OAuth discovery for shared API gateways and authorization servers with nested paths, including Keycloak realms, so authentication targets the correct resource issuer and supports endpoint and dynamic client-registration discovery.
 - Fixed credential rotation for HTTP 402 payment-required responses so sibling credentials are tried before model fallback without misclassifying informative non-quota errors.

@@ -52,6 +52,12 @@
 			}
 		}
 	},
+	"tsc": {
+		"command": "tsc",
+		"args": ["--lsp", "--stdio"],
+		"fileTypes": [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"],
+		"rootMarkers": ["package.json", "tsconfig.json", "jsconfig.json"]
+	},
 	"typescript-language-server": {
 		"command": "typescript-language-server",
 		"args": ["--stdio"],

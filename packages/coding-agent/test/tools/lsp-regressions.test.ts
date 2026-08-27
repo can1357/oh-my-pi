@@ -10,8 +10,12 @@ import { preloadPluginRoots } from "@oh-my-pi/pi-coding-agent/discovery/helpers"
 import { LspTool } from "@oh-my-pi/pi-coding-agent/lsp";
 import * as lspClient from "@oh-my-pi/pi-coding-agent/lsp/client";
 import * as lspConfig from "@oh-my-pi/pi-coding-agent/lsp/config";
+<<<<<<< HEAD
 import { getServersForFile, type LspConfig, loadConfig } from "@oh-my-pi/pi-coding-agent/lsp/config";
 import { waitForDiagnostics } from "@oh-my-pi/pi-coding-agent/lsp/diagnostics";
+=======
+import { getServerForFile, getServersForFile, type LspConfig, loadConfig } from "@oh-my-pi/pi-coding-agent/lsp/config";
+>>>>>>> 88ddc93035 (feat(lsp): Add native TypeScript 7 server)
 import {
 	applyTextEditsToString,
 	applyWorkspaceEdit,
@@ -5031,6 +5035,91 @@ describe("ty python lsp", () => {
 			expect(config.servers.ty?.resolvedCommand).toBe(resolvedTy);
 			expect(config.servers.ty?.command).toBe("ty");
 			expect(config.servers.ty?.args).toEqual(["server"]);
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+});
+describe("native tsc lsp", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("routes TypeScript files to tsc before typescript-language-server", () => {
+		const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+		const names = getServersForFile(config, "app.ts").map(([name]) => name);
+		expect(names).toContain("tsc");
+		expect(names).toContain("typescript-language-server");
+		expect(names.indexOf("tsc")).toBeLessThan(names.indexOf("typescript-language-server"));
+		expect(getServerForFile(config, "app.ts")?.[0]).toBe("tsc");
+	});
+
+	it("defines tsc with the native LSP command and all supported TypeScript extensions", () => {
+		const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+		expect(config.servers.tsc).toMatchObject({
+			command: "tsc",
+			args: ["--lsp", "--stdio"],
+			fileTypes: [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"],
+			rootMarkers: ["package.json", "tsconfig.json", "jsconfig.json"],
+		});
+		for (const extension of [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"]) {
+			expect(getServersForFile(config, `app${extension}`).map(([name]) => name)).toContain("tsc");
+		}
+	});
+
+	it("auto-detects tsc when a TypeScript project marker and binary are present", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-tsc-detect-");
+		const resolvedTsc = path.join(tempDir.path(), "bin", "tsc");
+		const whichSpy = vi
+			.spyOn(piUtils, "$which")
+			.mockImplementation(command => (command === "tsc" ? resolvedTsc : null));
+		try {
+			await Bun.write(path.join(tempDir.path(), "package.json"), "{}\n");
+			const config = loadConfig(tempDir.path());
+			expect(config.servers.tsc?.resolvedCommand).toBe(resolvedTsc);
+			expect(config.servers.tsc?.command).toBe("tsc");
+			expect(config.servers.tsc?.args).toEqual(["--lsp", "--stdio"]);
+			expect(whichSpy).toHaveBeenCalledWith("tsc");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("falls back to typescript-language-server when tsc is unavailable", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-tsc-fallback-");
+		const resolvedClassic = path.join(tempDir.path(), "bin", "typescript-language-server");
+		vi.spyOn(piUtils, "$which").mockImplementation(command =>
+			command === "typescript-language-server" ? resolvedClassic : null,
+		);
+		try {
+			await Bun.write(path.join(tempDir.path(), "package.json"), "{}\n");
+			const config = loadConfig(tempDir.path());
+			expect(config.servers.tsc).toBeUndefined();
+			expect(config.servers["typescript-language-server"]?.resolvedCommand).toBe(resolvedClassic);
+			expect(getServersForFile(config, path.join(tempDir.path(), "app.ts")).map(([name]) => name)).toEqual([
+				"typescript-language-server",
+			]);
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("prefers tsc while retaining typescript-language-server when both are available", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-tsc-both-");
+		const resolvedTsc = path.join(tempDir.path(), "bin", "tsc");
+		const resolvedClassic = path.join(tempDir.path(), "bin", "typescript-language-server");
+		vi.spyOn(piUtils, "$which").mockImplementation(command =>
+			command === "tsc" ? resolvedTsc : command === "typescript-language-server" ? resolvedClassic : null,
+		);
+		try {
+			await Bun.write(path.join(tempDir.path(), "package.json"), "{}\n");
+			const config = loadConfig(tempDir.path());
+			expect(config.servers.tsc?.resolvedCommand).toBe(resolvedTsc);
+			expect(config.servers["typescript-language-server"]?.resolvedCommand).toBe(resolvedClassic);
+			expect(getServersForFile(config, path.join(tempDir.path(), "app.ts")).map(([name]) => name)).toEqual([
+				"tsc",
+				"typescript-language-server",
+			]);
 		} finally {
 			tempDir.removeSync();
 		}
