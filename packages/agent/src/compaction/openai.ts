@@ -23,6 +23,7 @@ import {
 	getCodexAttestationHeader,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import {
+	encodeResponsesToolResultOutput,
 	hoistInterleavedResponsesToolBatchMessages,
 	parseAzureDeploymentNameMap,
 	parseTextSignature,
@@ -45,6 +46,7 @@ import {
 } from "@oh-my-pi/pi-ai/utils";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
 import {
+	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
 	getCodexAccountId,
 	OPENAI_HEADER_VALUES,
@@ -502,6 +504,7 @@ export function buildOpenAiNativeHistory(
 	messages: Message[],
 	model: Model,
 	previousReplacementHistory?: Array<Record<string, unknown>>,
+	supportsImageDetailOriginal = false,
 ): Array<Record<string, unknown>> {
 	const input: Array<Record<string, unknown>> = previousReplacementHistory
 		? adaptComputerHistoryForCompaction([...previousReplacementHistory], model.supportsComputerUse === true)
@@ -690,12 +693,7 @@ export function buildOpenAiNativeHistory(
 
 		if (message.role === "toolResult") {
 			const normalized = normalizeResponsesToolCallId(message.toolCallId);
-			const textOutput = message.content
-				.filter(block => block.type === "text")
-				.map(block => block.text)
-				.join("\n");
-			const hasImages = message.content.some(block => block.type === "image");
-			const outputText = textOutput.length > 0 ? textOutput : hasImages ? "(see attached image)" : "";
+			const { output, outputText } = encodeResponsesToolResultOutput(message, model, supportsImageDetailOriginal);
 			if (demotedComputerCallIds.has(normalized.callId)) {
 				const resultItem =
 					message.providerMetadata?.type === "computer"
@@ -745,23 +743,8 @@ export function buildOpenAiNativeHistory(
 			input.push({
 				type: customCallIds.has(normalized.callId) ? "custom_tool_call_output" : "function_call_output",
 				call_id: normalized.callId,
-				output: outputText.toWellFormed(),
+				output,
 			});
-
-			if (hasImages && model.input.includes("image")) {
-				const contentBlocks: Array<Record<string, unknown>> = [
-					{ type: "input_text", text: TOOL_RESULT_IMAGE_ATTACHMENT_TEXT },
-				];
-				for (const block of message.content) {
-					if (block.type !== "image") continue;
-					contentBlocks.push({
-						type: "input_image",
-						detail: "auto",
-						image_url: `data:${block.mimeType};base64,${block.data}`,
-					});
-				}
-				input.push({ type: "message", role: "user", content: contentBlocks });
-			}
 		}
 
 		msgIndex++;
@@ -834,6 +817,7 @@ export async function requestOpenAiRemoteCompaction(
 		if (accountId) {
 			headers[OPENAI_HEADERS.ACCOUNT_ID] = accountId;
 		}
+		applyCodexResidencyHeader(headers, apiKey);
 		const attestation = await getCodexAttestationHeader(accountId);
 		if (attestation) {
 			headers[OPENAI_HEADERS.ATTESTATION] = attestation;

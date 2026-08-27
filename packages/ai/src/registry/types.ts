@@ -74,7 +74,8 @@ export interface ProviderDefinition {
 	readonly prepareModelDiscovery?: ProviderModelDiscoveryPreparer;
 	// --- interactive login (OAuthProviderInterface-compatible) ---
 	readonly login?: (callbacks: OAuthLoginCallbacks) => Promise<OAuthCredentials | string>;
-	readonly refreshToken?: (credentials: OAuthCredentials) => Promise<OAuthCredentials>;
+	/** Refresh a stored grant; the signal bounds provider network work to refresh ownership. */
+	readonly refreshToken?: (credentials: OAuthCredentials, signal?: AbortSignal) => Promise<OAuthCredentials>;
 	readonly getApiKey?: (credentials: OAuthCredentials) => string;
 	/** Store OAuth credentials under a different provider id (e.g. `openai-codex-device` ⇒ `openai-codex`). */
 	readonly storeCredentialsAs?: string;

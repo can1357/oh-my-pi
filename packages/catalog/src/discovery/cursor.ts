@@ -1,12 +1,12 @@
 import * as http2 from "node:http2";
-import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import { type } from "@oh-my-pi/omptype";
 import { isKimiK3ModelId } from "../identity";
 import { bareModelId, parseGlmModel, semverGte } from "../identity/classify";
 import { getBundledModels } from "../models";
 import { toModelSpec } from "../provider-models/bundled-references";
 import type { Model, ModelSpec } from "../types";
-import { GetUsableModelsRequestSchema, GetUsableModelsResponseSchema } from "./cursor-gen/agent_pb";
+import { GetUsableModelsRequestSchema, GetUsableModelsResponseSchema } from "./cursor-proto";
+import { create, fromBinary, toBinary } from "./protobuf";
 
 const CURSOR_DEFAULT_BASE_URL = "https://api2.cursor.sh";
 const CURSOR_DEFAULT_CLIENT_VERSION = "cli-2026.02.13-41ac335";

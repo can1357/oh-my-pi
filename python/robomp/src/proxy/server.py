@@ -46,6 +46,9 @@ from robomp.git_ops import (
 from robomp.git_ops import (
     push as git_push,
 )
+from robomp.git_ops import (
+    push_release as git_push_release,
+)
 from robomp.github_client import GitHubClient, GitHubError
 from robomp.proxy_hmac import HEADER_SIGNATURE, HEADER_TIMESTAMP, verify
 from robomp.sandbox import _safe_directory_env, _slot_subprocess_kwargs
@@ -82,7 +85,12 @@ def _gh_error_response(exc: GitHubError) -> JSONResponse:
     )
 
 
-def _git_error_response(exc: GitCommandError, *, head_drift: bool = False) -> JSONResponse:
+def _git_error_response(
+    exc: GitCommandError,
+    *,
+    head_drift: bool = False,
+    client_error: bool = False,
+) -> JSONResponse:
     payload: dict[str, Any] = {
         "error": {
             "kind": "head_drift" if head_drift else "git",
@@ -92,8 +100,8 @@ def _git_error_response(exc: GitCommandError, *, head_drift: bool = False) -> JS
             "stderr": exc.stderr,
         }
     }
-    # 409 for head drift (concurrent commit detected); 502 for everything else.
-    return JSONResponse(payload, status_code=409 if head_drift else 502)
+    status_code = 409 if head_drift else 400 if client_error else 502
+    return JSONResponse(payload, status_code=status_code)
 
 
 def _require_str(value: Any, field: str) -> str:
@@ -136,6 +144,21 @@ def _require_fetch_ref(value: Any) -> str:
     ):
         raise HTTPException(400, "invalid ref")
     return ref
+
+
+def _require_branch(value: Any) -> str:
+    branch = _require_fetch_ref(value)
+    return branch.removeprefix("refs/heads/")
+
+
+_RELEASE_TAG_RE = re.compile(r"v[0-9][A-Za-z0-9._-]*")
+
+
+def _require_release_tag(value: Any) -> str:
+    tag = _require_str(value, "tag")
+    if not _RELEASE_TAG_RE.fullmatch(tag):
+        raise HTTPException(400, "invalid tag")
+    return tag
 
 
 def _optional_slot_uid(value: Any) -> int | None:
@@ -462,6 +485,61 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         except GitHubError as exc:
             return _gh_error_response(exc)
         return JSONResponse(_serialize(info))
+
+    @app.get("/gh/v1/workflow_runs")
+    async def list_workflow_runs(request: Request, repo: str, head_sha: str) -> JSONResponse:
+        await _authenticate(request)
+        _validate_repo_name(repo)
+        github: GitHubClient = request.app.state.github
+        try:
+            items = await github.list_workflow_runs(repo, head_sha=head_sha)
+        except GitHubError as exc:
+            return _gh_error_response(exc)
+        return JSONResponse({"items": [_serialize(item) for item in items]})
+
+    @app.get("/gh/v1/workflow_jobs")
+    async def list_workflow_jobs(request: Request, repo: str, run_id: int) -> JSONResponse:
+        await _authenticate(request)
+        _validate_repo_name(repo)
+        github: GitHubClient = request.app.state.github
+        try:
+            items = await github.list_workflow_jobs(repo, run_id)
+        except GitHubError as exc:
+            return _gh_error_response(exc)
+        return JSONResponse({"items": [_serialize(item) for item in items]})
+
+    @app.get("/gh/v1/job_log_tail")
+    async def get_job_log_tail(request: Request, repo: str, job_id: int, tail: int = 200) -> JSONResponse:
+        await _authenticate(request)
+        _validate_repo_name(repo)
+        github: GitHubClient = request.app.state.github
+        try:
+            text = await github.get_job_log_tail(repo, job_id, tail_lines=max(1, min(tail, 1000)))
+        except GitHubError as exc:
+            return _gh_error_response(exc)
+        return JSONResponse({"text": text})
+
+    @app.get("/gh/v1/tag_ref")
+    async def get_tag_ref(request: Request, repo: str, tag: str) -> JSONResponse:
+        await _authenticate(request)
+        _validate_repo_name(repo)
+        github: GitHubClient = request.app.state.github
+        try:
+            sha = await github.get_tag_sha(repo, tag)
+        except GitHubError as exc:
+            return _gh_error_response(exc)
+        return JSONResponse({"sha": sha})
+
+    @app.get("/gh/v1/release_by_tag")
+    async def get_release_by_tag(request: Request, repo: str, tag: str) -> JSONResponse:
+        await _authenticate(request)
+        _validate_repo_name(repo)
+        github: GitHubClient = request.app.state.github
+        try:
+            release = await github.get_release_by_tag(repo, tag)
+        except GitHubError as exc:
+            return _gh_error_response(exc)
+        return JSONResponse(_serialize(release))
 
     @app.get("/gh/v1/issue")
     async def get_issue(request: Request, repo: str, number: int) -> JSONResponse:
@@ -830,7 +908,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         data = await _json_body(request)
         repo = _require_str(data.get("repo"), "repo")
         workspace_key = _require_str(data.get("workspace_key"), "workspace_key")
-        branch = _require_str(data.get("branch"), "branch")
+        branch = _require_branch(data.get("branch"))
         expected_head = _require_str(data.get("expected_head"), "expected_head")
         slot_uid = _optional_slot_uid(data.get("slot_uid"))
         # Sanity-check workspace_key matches the repo claim.
@@ -864,6 +942,48 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         except GitCommandError as exc:
             return _git_error_response(exc)
         return JSONResponse({"head": result.head, "branch": result.branch})
+
+    @app.post("/gh/v1/git/push_release")
+    async def git_push_release_endpoint(request: Request) -> JSONResponse:
+        data = await _json_body(request)
+        repo = _require_str(data.get("repo"), "repo")
+        _validate_repo_name(repo)
+        workspace_key = _require_str(data.get("workspace_key"), "workspace_key")
+        branch = _require_branch(data.get("branch"))
+        tag = _require_release_tag(data.get("tag"))
+        expected_head = _require_str(data.get("expected_head"), "expected_head")
+        slot_uid = _optional_slot_uid(data.get("slot_uid"))
+        expected_prefix = repo.replace("/", "__") + "__"
+        if not workspace_key.startswith(expected_prefix):
+            raise HTTPException(400, "workspace_key does not match repo")
+        repo_dir = _workspace_repo_dir(settings, workspace_key)
+        if not repo_dir.is_dir():
+            raise HTTPException(404, f"workspace not found: {workspace_key}")
+        remote = await asyncio.to_thread(
+            _origin_remote_auth,
+            repo_dir,
+            repo,
+            _resolve_token(settings),
+            push=True,
+            slot_uid=slot_uid,
+        )
+        try:
+            result = await _run_git_op(
+                git_push_release,
+                repo_dir,
+                branch=branch,
+                tag=tag,
+                expected_head=expected_head,
+                token=remote.token,
+                remote_url=remote.url,
+                auth_url=remote.auth_url,
+                slot_uid=slot_uid,
+            )
+        except HeadDriftError as exc:
+            return _git_error_response(exc, head_drift=True)
+        except GitCommandError as exc:
+            return _git_error_response(exc, client_error=True)
+        return JSONResponse({"head": result.head, "branch": result.branch, "tag": tag})
 
     # Expose for tests
     app.state.workspace_key_fn = compute_workspace_key  # type: ignore[attr-defined]

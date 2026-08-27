@@ -20,6 +20,10 @@ import {
 	TERMINAL,
 	wrapTmuxPassthrough,
 } from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
+
+withoutTerminalMultiplexer();
+
 import { VirtualTerminal } from "./virtual-terminal";
 
 type MutableTerminalInfo = { id: string; imageProtocol: ImageProtocol | null };
@@ -679,93 +683,6 @@ describe("TUI inline-image budget", () => {
 		}
 	});
 
-	it("reuses a visible Kitty placement across zero-commit width-epoch repaints", async () => {
-		const originalGraphics = { ...getKittyGraphics() };
-		const originalResizeMode = Bun.env.PI_TUI_RESIZE_IN_PLACE;
-		const originalZellij = Bun.env.ZELLIJ;
-		const term = new VirtualTerminal(20, 8);
-		const writes: string[] = [];
-		const realWrite = term.write.bind(term);
-		vi.spyOn(term, "write").mockImplementation((data: string) => {
-			writes.push(data);
-			realWrite(data);
-		});
-
-		setKittyGraphics({ unicodePlaceholders: false });
-		Bun.env.PI_TUI_RESIZE_IN_PLACE = "1";
-		const tui = new TUI(term);
-		const imageKey = "width-epoch-direct";
-		const imageId = tui.imageBudget.acquireId(imageKey);
-		tui.addChild(new Text("P".repeat(120), 0, 0));
-		tui.addChild(
-			new Image(
-				BASE64_ONE_PIXEL_PNG,
-				"image/png",
-				{ fallbackColor: t => t },
-				{ maxWidthCells: 4, maxHeightCells: 4, budget: tui.imageBudget, imageKey },
-				{ widthPx: 40, heightPx: 40 },
-			),
-		);
-		tui.addChild(new Text("tail-0\ntail-1\ntail-2", 0, 0));
-
-		const expectStablePlacement = (output: string): void => {
-			const placementIds = [...output.matchAll(new RegExp(`i=${imageId},p=(\\d+),`, "g"))].map(match =>
-				Number(match[1]),
-			);
-			expect(placementIds.length).toBeGreaterThan(0);
-			expect(placementIds).toEqual(placementIds.map(() => 1));
-		};
-
-		try {
-			tui.start();
-			await settle(term);
-			writes.length = 0;
-			term.resize(40, 8);
-			await settle(term);
-			expectStablePlacement(writes.join(""));
-
-			writes.length = 0;
-			const overlay = tui.showOverlay(new Text("overlay", 0, 0), { anchor: "top-left", row: 0, col: 0 });
-			await settle(term);
-			const shown = writes.join("");
-			expect(shown).not.toContain("\r\n");
-			expectStablePlacement(shown);
-
-			writes.length = 0;
-			overlay.hide();
-			await settle(term);
-			const hidden = writes.join("");
-			expect(hidden).not.toContain("\r\n");
-			expectStablePlacement(hidden);
-
-			writes.length = 0;
-			term.resize(30, 8);
-			await settle(term);
-			expectStablePlacement(writes.join(""));
-
-			// A forced, non-destructive paint coalesced with another mux width
-			// reset also uses the previous width epoch's seam, not the newly
-			// reflowed frame's chunk target.
-			Bun.env.HERDR_ENV = "1";
-			Bun.env.ZELLIJ = "1";
-			writes.length = 0;
-			term.resize(20, 8);
-			tui.requestRender(true, { clearScrollback: true });
-			await settle(term);
-			const forced = writes.join("");
-			expect(forced).toContain("\x1b[2J");
-			expect(forced).not.toContain("\x1b[3J");
-			expectStablePlacement(forced);
-		} finally {
-			tui.stop();
-			setKittyGraphics(originalGraphics);
-			if (originalResizeMode === undefined) delete Bun.env.PI_TUI_RESIZE_IN_PLACE;
-			else Bun.env.PI_TUI_RESIZE_IN_PLACE = originalResizeMode;
-			if (originalZellij === undefined) delete Bun.env.ZELLIJ;
-			else Bun.env.ZELLIJ = originalZellij;
-		}
-	});
-
 	it("purges demoted image graphics and repaints the fallback without a destructive replay", async () => {
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];
@@ -836,6 +753,28 @@ describe("TUI inline-image budget", () => {
 			tui.stop();
 		}
 	});
+	it("leaves transmitted images in the terminal store on stop so scrollback keeps them", async () => {
+		const term = new VirtualTerminal(40, 12);
+		const writes: string[] = [];
+		const realWrite = term.write.bind(term);
+		vi.spyOn(term, "write").mockImplementation((data: string) => {
+			writes.push(data);
+			realWrite(data);
+		});
+
+		const tui = new TUI(term);
+		tui.addChild(makeImage(tui.imageBudget, "persist"));
+		tui.start();
+		await settle(term);
+		writes.length = 0;
+
+		tui.stop();
+
+		// Regression: stop() used to delete every transmitted image (`a=d,d=I`),
+		// blanking placeholder cells already committed to native scrollback the
+		// moment the session exited.
+		expect(writes.join("")).not.toContain("a=d,d=I");
+	});
 
 	it("lets a full-width non-fullscreen overlay replace Unicode image placeholder rows", async () => {
 		const originalGraphics = { ...getKittyGraphics() };
@@ -879,7 +818,7 @@ describe("TUI inline-image budget", () => {
 		}
 	});
 
-	it("transmits image data only once; a later full redraw re-emits just the placement", async () => {
+	it("retransmits current images after a destructive redraw", async () => {
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];
 		const realWrite = term.write.bind(term);
@@ -905,12 +844,50 @@ describe("TUI inline-image budget", () => {
 			tui.requestRender(true, { clearScrollback: true });
 			await settle(term);
 
-			// The repaint re-emits the placement but never re-sends the base64.
+			// The repaint re-sends the base64.
 			const repaint = writes.join("");
 			expect(repaint).toContain("\x1b_Ga=p");
-			expect(repaint).not.toContain(BASE64_ONE_PIXEL_PNG);
+			expect(repaint).toContain(BASE64_ONE_PIXEL_PNG);
 		} finally {
 			tui.stop();
+		}
+	});
+	it("deletes every kitty image on a destructive display reset", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const writes: string[] = [];
+		const realWrite = term.write.bind(term);
+		vi.spyOn(term, "write").mockImplementation((data: string) => {
+			writes.push(data);
+			realWrite(data);
+		});
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(3);
+		tui.addChild(makeImage(tui.imageBudget, "only"));
+
+		try {
+			tui.start();
+			await settle(term);
+			writes.length = 0;
+
+			tui.resetDisplay();
+			await settle(term);
+
+			// ED2/ED3 erase text but leave graphics untouched. d=A also removes
+			// untracked placements; current images must be re-sent and re-placed.
+			const repaint = writes.join("");
+			const deleteIndex = repaint.indexOf("\x1b_Ga=d,d=A,q=2\x1b\\");
+			expect(deleteIndex).toBeGreaterThanOrEqual(0);
+			const transmitIndex = repaint.indexOf("\x1b_Ga=t", deleteIndex);
+			const placeIndex = repaint.indexOf("\x1b_Ga=p", transmitIndex);
+			expect(transmitIndex).toBeGreaterThan(deleteIndex);
+			expect(placeIndex).toBeGreaterThan(transmitIndex);
+			expect(repaint).toContain(BASE64_ONE_PIXEL_PNG);
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
 		}
 	});
 
@@ -960,71 +937,6 @@ describe("TUI inline-image budget", () => {
 			const output = writes.join("");
 			expect(output).toContain("\x1b_Ga=t");
 			expect(output).toContain(BASE64_ONE_PIXEL_PNG);
-		} finally {
-			tui.stop();
-			terminal.id = originalId;
-			setKittyGraphics(originalGraphics);
-		}
-	});
-
-	it("keeps a deferred fullscreen exit until a Ghostty image repaint can emit it", () => {
-		const originalId = terminal.id;
-		const originalGraphics = { ...getKittyGraphics() };
-		const term = new VirtualTerminal(40, 12);
-		const writes: string[] = [];
-		const realWrite = term.write.bind(term);
-		vi.spyOn(term, "write").mockImplementation((data: string) => {
-			writes.push(data);
-			realWrite(data);
-		});
-		let now = 0;
-		const scheduled: Array<{ delayMs: number; callback: () => void; canceled: boolean }> = [];
-		const renderScheduler = {
-			now: () => now,
-			scheduleImmediate: (callback: () => void) => callback(),
-			scheduleRender: (callback: () => void, delayMs: number) => {
-				const entry = { delayMs, callback, canceled: false };
-				scheduled.push(entry);
-				return {
-					cancel: () => {
-						entry.canceled = true;
-					},
-				};
-			},
-		};
-
-		terminal.id = "ghostty";
-		terminal.imageProtocol = ImageProtocol.Kitty;
-		setKittyGraphics({ unicodePlaceholders: true });
-		const tui = new TUI(term, undefined, { renderScheduler });
-		tui.addChild(new Text("old session", 0, 0));
-
-		try {
-			tui.start();
-			const overlay = tui.showOverlay(new Text("session selector", 0, 0), {
-				width: "100%",
-				maxHeight: "100%",
-				fullscreen: true,
-			});
-			tui.addChild(makeImage(tui.imageBudget, "resumed-image"));
-			tui.requestRender(true, { clearScrollback: true });
-			overlay.hide();
-
-			const queued = scheduled.find(entry => !entry.canceled);
-			expect(queued).toBeDefined();
-			now = 40;
-			queued!.canceled = true;
-			queued!.callback();
-
-			const delayed = scheduled.find(entry => !entry.canceled);
-			expect(delayed).toBeDefined();
-			now = 100;
-			delayed!.canceled = true;
-			delayed!.callback();
-
-			const exitPaint = writes.find(write => write.includes("\x1b[?1049l"));
-			expect(exitPaint).toContain("\x1b[3J");
-			expect(exitPaint).toContain(BASE64_ONE_PIXEL_PNG);
 		} finally {
 			tui.stop();
 			terminal.id = originalId;

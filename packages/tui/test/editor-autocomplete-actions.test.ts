@@ -21,6 +21,56 @@ function onceAutocompleteUpdate(editor: Editor): Promise<void> {
 	};
 	return promise;
 }
+/** Resolve once the popup is open, driven by autocomplete update events (no wall-clock waits). */
+async function untilAutocompleteShown(editor: Editor): Promise<void> {
+	while (!editor.isShowingAutocomplete()) {
+		await onceAutocompleteUpdate(editor);
+	}
+}
+describe("Editor async autocomplete scheduling", () => {
+	it("keeps only the latest request queued while the provider is busy", async () => {
+		const requests: Array<{
+			text: string;
+			signal: AbortSignal | undefined;
+			result: PromiseWithResolvers<{ items: AutocompleteItem[]; prefix: string } | null>;
+		}> = [];
+		const secondStarted = Promise.withResolvers<void>();
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider({
+			getSuggestions(lines, cursorLine, cursorCol, signal) {
+				const result = Promise.withResolvers<{ items: AutocompleteItem[]; prefix: string } | null>();
+				requests.push({
+					text: (lines[cursorLine] ?? "").slice(0, cursorCol),
+					signal,
+					result,
+				});
+				if (requests.length === 2) secondStarted.resolve();
+				return result.promise;
+			},
+			applyCompletion(lines, cursorLine, cursorCol) {
+				return { lines, cursorLine, cursorCol };
+			},
+		});
+
+		for (const char of "@abcd") editor.handleInput(char);
+
+		expect(requests).toHaveLength(1);
+		expect(requests[0]?.signal?.aborted).toBeTrue();
+		requests[0]?.result.resolve(null);
+		await secondStarted.promise;
+		expect(requests).toHaveLength(2);
+		expect(requests[1]?.text).toBe("@abcd");
+		expect(requests[1]?.signal?.aborted).toBeFalse();
+
+		const updated = onceAutocompleteUpdate(editor);
+		requests[1]?.result.resolve({
+			items: [{ label: "abcde.ts", value: "abcde.ts" }],
+			prefix: "@abcd",
+		});
+		await updated;
+		expect(editor.isShowingAutocomplete()).toBeTrue();
+	});
+});
 
 class HashActionProvider implements AutocompleteProvider {
 	async getSuggestions(
@@ -275,6 +325,46 @@ describe("Editor Enter handler sync slash completion", () => {
 		expect(editor.isShowingAutocomplete()).toBe(true);
 	}
 
+	it("expands the /skill: namespace row with Tab and chains into the skill list", async () => {
+		const editor = createSkillEditor();
+
+		editor.handleInput("/");
+		await Promise.resolve();
+		expect(editor.isShowingAutocomplete()).toBe(true);
+
+		// The collapsed namespace row is the top selection on a bare "/".
+		editor.handleInput("\t");
+		expect(editor.getText()).toBe("/skill:");
+
+		// The chained re-trigger reopens the popup with the individual skills.
+		await untilAutocompleteShown(editor);
+
+		editor.handleInput("\t");
+		expect(editor.getText()).toBe("/skill:security-scan ");
+	});
+
+	it("expands the /skill: namespace row on Enter instead of submitting", async () => {
+		const editor = createSkillEditor();
+		let submitted: string | undefined;
+		editor.onSubmit = text => {
+			submitted = text;
+		};
+
+		editor.handleInput("/");
+		await Promise.resolve();
+		expect(editor.isShowingAutocomplete()).toBe(true);
+
+		editor.handleInput("\r");
+
+		expect(submitted).toBeUndefined();
+		expect(editor.getText()).toBe("/skill:");
+
+		await untilAutocompleteShown(editor);
+
+		editor.handleInput("\r");
+		expect(submitted?.trimEnd()).toBe("/skill:security-scan");
+	});
+
 	it("accepts a bare mid-prompt skill slash with Tab without replacing prose", async () => {
 		const editor = createSkillEditor();
 
@@ -526,10 +616,7 @@ describe("Editor Enter handler sync slash completion", () => {
 
 		editor.setText("see /tmp");
 		editor.handleInput("\t");
-		await Promise.resolve();
-		await Promise.resolve();
-		await Promise.resolve();
-		await Promise.resolve();
+		await untilAutocompleteShown(editor);
 
 		expect(forceFileCalls).toBe(1);
 		expect(editor.isShowingAutocomplete()).toBe(true);

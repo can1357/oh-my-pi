@@ -137,6 +137,8 @@ export interface MockModelOptions {
 	id?: string;
 	/** Provider string used in the returned AssistantMessage. Defaults to `"mock"`. */
 	provider?: string;
+	/** Base URL reported by the model. Defaults to `"mock://"`. */
+	baseUrl?: string;
 	/** A sequence of responses, one per call. Accepts arrays, generators, or any iterable. */
 	responses?: MockResponseSource;
 	/** Fallback handler used when `responses` is exhausted. */
@@ -168,7 +170,7 @@ export class MockModel implements Model<MockApi> {
 	readonly name: string;
 	readonly api: MockApi = MOCK_API;
 	readonly provider: string;
-	readonly baseUrl = "mock://";
+	readonly baseUrl: string;
 	readonly reasoning: boolean;
 	readonly input: ("text" | "image")[] = ["text"];
 	readonly cost: Model["cost"];
@@ -189,6 +191,7 @@ export class MockModel implements Model<MockApi> {
 		this.id = options.id ?? "mock-model";
 		this.name = options.id ?? "mock-model";
 		this.provider = options.provider ?? "mock";
+		this.baseUrl = options.baseUrl ?? "mock://";
 		this.reasoning = options.reasoning ?? false;
 		this.cost = options.cost ?? ZERO_COST;
 		this.contextWindow = options.contextWindow ?? 200_000;

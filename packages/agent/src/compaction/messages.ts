@@ -10,8 +10,10 @@ import { prompt } from "@oh-my-pi/pi-utils";
 import type { AgentMessage } from "../types";
 import branchSummaryContextPrompt from "./prompts/branch-summary-context.md" with { type: "text" };
 import compactionSummaryContextPrompt from "./prompts/compaction-summary-context.md" with { type: "text" };
+import handoffSummaryContextPrompt from "./prompts/handoff-summary-context.md" with { type: "text" };
 
 const COMPACTION_SUMMARY_TEMPLATE = compactionSummaryContextPrompt;
+const HANDOFF_SUMMARY_TEMPLATE = handoffSummaryContextPrompt;
 const BRANCH_SUMMARY_TEMPLATE = branchSummaryContextPrompt;
 
 export interface CustomMessage<T = unknown> {
@@ -49,6 +51,10 @@ export interface CompactionSummaryMessage {
 	summary: string;
 	shortSummary?: string;
 	tokensBefore: number;
+	/** Estimated context tokens after the rewrite (display metadata). */
+	tokensAfter?: number;
+	/** Harness compaction method that produced this summary (display metadata). */
+	method?: string;
 	providerPayload?: ProviderPayload;
 	/** Runtime-only ordered archive blocks for snapcompact: old text region,
 	 *  imaged middle, then new text region. When present, `summary` is already
@@ -89,6 +95,16 @@ export function renderBranchSummaryContext(summary: string): string {
 export function renderCompactionSummaryContext(summary: string): string {
 	return prompt.render(COMPACTION_SUMMARY_TEMPLATE, { summary });
 }
+/**
+ * Wrap a handoff document for injection into the successor context. Unlike the
+ * generic compaction wrapper, this names the mechanism and pins authorship —
+ * the document was written by a prior instance in its own voice, so without
+ * this framing the successor misreads first-person "Next Steps" as fresh user
+ * instructions (or tries to write the handoff again).
+ */
+export function renderHandoffSummaryContext(summary: string): string {
+	return prompt.render(HANDOFF_SUMMARY_TEMPLATE, { summary });
+}
 
 export function createBranchSummaryMessage(summary: string, fromId: string, timestamp: string): BranchSummaryMessage {
 	return {
@@ -99,16 +115,26 @@ export function createBranchSummaryMessage(summary: string, fromId: string, time
 	};
 }
 
+/** Optional metadata for {@link createCompactionSummaryMessage}. */
+export interface CompactionSummaryMessageOptions {
+	shortSummary?: string;
+	providerPayload?: ProviderPayload;
+	images?: ImageContent[];
+	blocks?: (TextContent | ImageContent)[];
+	warning?: string;
+	/** Harness compaction method that produced this summary (e.g. "remote", "soft", "handoff"). */
+	method?: string;
+	/** Estimated context tokens after the rewrite, for display alongside `tokensBefore`. */
+	tokensAfter?: number;
+}
+
 export function createCompactionSummaryMessage(
 	summary: string,
 	tokensBefore: number,
 	timestamp: string,
-	shortSummary?: string,
-	providerPayload?: ProviderPayload,
-	images?: ImageContent[],
-	blocks?: (TextContent | ImageContent)[],
-	warning?: string,
+	options: CompactionSummaryMessageOptions = {},
 ): CompactionSummaryMessage {
+	const { shortSummary, providerPayload, images, blocks, warning, method, tokensAfter } = options;
 	const imageBlocks =
 		blocks?.filter((block): block is ImageContent => block.type === "image") ??
 		(images && images.length > 0 ? images : undefined);
@@ -117,6 +143,8 @@ export function createCompactionSummaryMessage(
 		summary,
 		shortSummary,
 		tokensBefore,
+		tokensAfter,
+		method,
 		providerPayload,
 		blocks: blocks && blocks.length > 0 ? blocks : undefined,
 		images: imageBlocks && imageBlocks.length > 0 ? imageBlocks : undefined,
@@ -200,7 +228,10 @@ export function convertMessageToLlm(message: AgentMessage): Message | undefined 
 							: [
 									{
 										type: "text" as const,
-										text: renderCompactionSummaryContext(message.summary),
+										text:
+											message.method === "handoff"
+												? renderHandoffSummaryContext(message.summary)
+												: renderCompactionSummaryContext(message.summary),
 									},
 									...(message.images ?? []),
 								],

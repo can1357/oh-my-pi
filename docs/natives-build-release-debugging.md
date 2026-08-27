@@ -88,8 +88,10 @@ The root module intentionally omits `crate_universe`'s optional rendering lock. 
 ### Building addons
 
 ```bash
-# Addon for the current host (x64 hosts pick modern vs baseline via AVX2 detection),
-# installed into packages/natives/native/:
+# Addon for the current host (x64 hosts pick modern vs baseline via AVX2
+# detection), installed into packages/natives/native/. The host target builds
+# through the local cargo/napi-rs backend by default; set
+# OMP_NATIVE_BUILD_BACKEND=bazel (or pass bazel args after `--`) for bazel:
 bun --cwd=packages/natives run build          # = bun ../../scripts/bazel-natives.ts host --dest native
 # same, from the repo root:
 bun run build:native
@@ -105,7 +107,7 @@ bazelisk build //:natives-darwin-arm64
 bazelisk build //:natives-linux-all
 ```
 
-The driver runs one `bazel build` for all requested targets, locates outputs via `bazel cquery --output=files` (falling back to the `bazel-bin/natives-<t>/<canonical>.node` path convention), and copies them dereferenced into `--dest` (default `packages/natives/native`). Extra args after `--` go to bazel verbatim. It resolves `bazelisk` (or `bazel`) from `PATH` and honors an `OMP_BAZEL_RC` env var as a `--bazelrc=` startup option (that's how CI injects cache wiring).
+The driver builds `host` through the local cargo/napi-rs path (`packages/natives/scripts/build-bindings.ts`) unless bazel is requested via `OMP_NATIVE_BUILD_BACKEND=bazel` or extra bazel args. For explicit targets it runs one `bazel build` for all requested targets, locates outputs via `bazel cquery --output=files` (falling back to the `bazel-bin/natives-<t>/<canonical>.node` path convention), and copies them dereferenced into `--dest` (default `packages/natives/native`). Extra args after `--` go to bazel verbatim. It resolves `bazelisk` (or `bazel`) from `PATH` and honors an `OMP_BAZEL_RC` env var as a `--bazelrc=` startup option (that's how CI injects cache wiring).
 
 Building `linux-all` into one dest would clobber gnu addons with musl ones (shared basenames) — the driver refuses; use separate invocations with separate `--dest` dirs.
 

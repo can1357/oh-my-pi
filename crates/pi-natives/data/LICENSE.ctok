@@ -4,6 +4,7 @@ Copyright (c) 2026 Sander Land
   (measured tokenizer vocabulary data, reconstruction model, and reference
   implementation: https://github.com/sanderland/ctok)
 Copyright (c) 2026 Can Bölük and the Oh My Pi contributors
+Copyright (c) 2026 Stencil Labs, Inc.
   (Rust implementation and the compact binary vocabulary encoding in
   crates/pi-natives/src/utok/claude)
 

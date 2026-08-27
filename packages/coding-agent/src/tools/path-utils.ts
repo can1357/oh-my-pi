@@ -3,26 +3,31 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import { glob } from "@oh-my-pi/pi-natives";
-import { hasFsCode, isEnoent, isEnotdir, stripWindowsExtendedLengthPathPrefix, untilAborted } from "@oh-my-pi/pi-utils";
+import { hasFsCode, isEnoent, isEnotdir, stripWindowsExtendedLengthPathPrefix } from "@oh-my-pi/pi-utils";
 import type { Skill } from "../extensibility/skills";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
 import { ToolAbortError, ToolError } from "./tool-errors";
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+
+/** POSIX absolute, Windows drive, or UNC (`\\server\share` / `//server/share`). */
+export function isFilesystemSourcePath(value: string): boolean {
+	return path.posix.isAbsolute(value) || path.win32.isAbsolute(value);
+}
 // A single line-range chunk: `N`, `N-M`, `N+K`, or open-ended `N-`. `..` is
 // accepted everywhere `-` is, as a forgiving alias for Rust/Python-style ranges
 // (e.g. `2724..2727` == `2724-2727`, `2724..` == `2724-`); it is normalized to
 // `-` in parseLineRangeChunk. Keep this fragment and LINE_RANGE_CHUNK_RE in sync.
 const RANGE_CHUNK_SRC = String.raw`L?\d+(?:(?:[-+]|\.\.)L?\d+|-|\.\.)?`;
 const RANGE_LIST_SRC = `${RANGE_CHUNK_SRC}(?:,${RANGE_CHUNK_SRC})*`;
-const FILE_LINE_RANGE_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|raw|conflicts)$`, "i");
+const FILE_LINE_RANGE_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|raw|conflicts|img)$`, "i");
 const FILE_LINE_RANGE_ONLY_RE = new RegExp(`^${RANGE_LIST_SRC}$`, "i");
 const FILE_RAW_ONLY_RE = /^raw$/i;
 // Permissive selector chunk for internal URLs — accepts well-formed selectors
 // plus common malformed shapes (e.g. `:-N`) so the read tool peels the entire
 // selector chain off before dispatching to a protocol handler.
 const INTERNAL_URL_SELECTOR_PART_RE = new RegExp(
-	String.raw`^(?:raw|conflicts|${RANGE_LIST_SRC}|-\d+(?:[-+]\d+)?)$`,
+	String.raw`^(?:raw|conflicts|img|${RANGE_LIST_SRC}|-\d+(?:[-+]\d+)?)$`,
 	"i",
 );
 // Schemes whose host grammar is identifier-shaped, so any trailing
@@ -470,6 +475,19 @@ export function isInternalUrlPath(filePath: string): boolean {
 		if (expandedAndNormalized.startsWith(prefix)) return true;
 	}
 	return false;
+}
+
+/**
+ * Approval tier for a path that will be written through the file/internal-URL
+ * routing layer. Internal resources are read-tier only when their handler is
+ * read-only; writable handlers such as vault:// must retain write approval.
+ */
+export function resolveFileWriteApprovalTier(filePath: string): "read" | "write" {
+	const normalized = normalizeLocalScheme(expandPath(normalizeLocalScheme(filePath)));
+	if (!TOP_LEVEL_INTERNAL_URL_PREFIXES.some(prefix => normalized.startsWith(prefix))) return "write";
+	const scheme = INTERNAL_URL_SCHEME_RE.exec(normalized)?.[1]?.toLowerCase();
+	const handler = scheme ? InternalUrlRouter.instance().getHandler(scheme) : undefined;
+	return handler?.write ? "write" : "read";
 }
 
 /**
@@ -1326,14 +1344,11 @@ function escapeGlobMetachars(value: string): string {
 	return value.replace(/[*?[{]/g, "[$&]");
 }
 
-/**
- * Find a unique workspace entry whose trailing path matches a missing authored path.
- * Returns `null` for no match, ambiguity, timeout, or scan failure.
- */
-export async function findUniqueWorkspaceSuffix(
+async function findUniqueWorkspaceSuffixWithGlob(
 	rawPath: string,
 	cwd: string,
-	signal?: AbortSignal,
+	signal: AbortSignal | undefined,
+	globImpl: typeof glob,
 ): Promise<{ absolutePath: string; displayPath: string } | null> {
 	const normalized = rawPath.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
 	if (!normalized) return null;
@@ -1343,19 +1358,17 @@ export async function findUniqueWorkspaceSuffix(
 
 	let matches: string[];
 	try {
-		const result = await untilAborted(combinedSignal, () =>
-			glob({
-				pattern: `**/${escapeGlobMetachars(normalized)}`,
-				path: cwd,
-				hidden: true,
-			}),
-		);
+		const result = await globImpl({
+			pattern: `**/${escapeGlobMetachars(normalized)}`,
+			path: cwd,
+			hidden: true,
+			signal: combinedSignal,
+			timeoutMs: WORKSPACE_SUFFIX_TIMEOUT_MS,
+		});
+		if (signal?.aborted) throw new ToolAbortError();
 		matches = result.matches.map(match => match.path);
-	} catch (error) {
-		if (error instanceof Error && error.name === "AbortError") {
-			if (!signal?.aborted) return null;
-			throw new ToolAbortError();
-		}
+	} catch {
+		if (signal?.aborted) throw new ToolAbortError();
 		return null;
 	}
 
@@ -1364,6 +1377,28 @@ export async function findUniqueWorkspaceSuffix(
 		absolutePath: path.resolve(cwd, matches[0]),
 		displayPath: matches[0],
 	};
+}
+
+/**
+ * Find a unique workspace entry whose trailing path matches a missing authored path.
+ * Returns `null` for no match, ambiguity, timeout, or scan failure.
+ */
+export async function findUniqueWorkspaceSuffix(
+	rawPath: string,
+	cwd: string,
+	signal?: AbortSignal,
+): Promise<{ absolutePath: string; displayPath: string } | null> {
+	return findUniqueWorkspaceSuffixWithGlob(rawPath, cwd, signal, glob);
+}
+
+/** Exercise the post-native cancellation boundary without a real filesystem walk. */
+export async function findUniqueWorkspaceSuffixWithGlobForTest(
+	rawPath: string,
+	cwd: string,
+	signal: AbortSignal | undefined,
+	globImpl: typeof glob,
+): Promise<{ absolutePath: string; displayPath: string } | null> {
+	return findUniqueWorkspaceSuffixWithGlob(rawPath, cwd, signal, globImpl);
 }
 
 // =============================================================================
@@ -1401,6 +1436,8 @@ export interface ToolScopeOptions {
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Calling session's loaded skills — lets skill:// resolve without process-global state. */
 	skills?: readonly Skill[];
+	/** Calling session's session file — lets history:///agent:// resolve against the caller's root. */
+	sessionFile?: string;
 	/** Materialize readable external URLs to local text files before scope derivation. */
 	resolveExternalUrl?: (rawPath: string) => Promise<ResolvedExternalSearchUrl | undefined>;
 }
@@ -1478,7 +1515,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 		}
 		if (isSshUrl(rawPath)) {
 			throw new ToolError(
-				`Cannot ${internalUrlAction} a remote ssh:// path (no local file): ${rawPath}. Use \`read ${rawPath}\` to view it, or the \`search\` tool to grep remote files.`,
+				`Cannot ${internalUrlAction} a remote ssh:// path (no local file): ${rawPath}. Use \`read ${rawPath}\` to view it, or use \`grep\` on a specific remote file.`,
 			);
 		}
 		if (hasGlobPathChars(rawPath)) {
@@ -1488,6 +1525,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 			cwd,
 			settings: opts.settings,
 			signal: opts.signal,
+			sessionFile: opts.sessionFile,
 			localProtocolOptions: opts.localProtocolOptions,
 			skills: opts.skills,
 			// Tool-scope resolution only needs `sourcePath`; skip content

@@ -1,8 +1,15 @@
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
-import { type Component, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
-import { getProjectDir } from "@oh-my-pi/pi-utils";
+import {
+	type Component,
+	type ComposerStyle,
+	claudeComposerStyle,
+	padding,
+	truncateToWidth,
+	visibleWidth,
+} from "@oh-my-pi/pi-tui";
+import { adjustHsv, formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
 import { settings } from "../../../config/settings";
 import type { AgentSession } from "../../../session/agent-session";
 import type { OAuthAccountIdentity } from "../../../session/auth-storage";
@@ -14,6 +21,7 @@ import { getSessionAccentAnsi, getSessionAccentHex } from "../../../utils/sessio
 import { calculateTokensPerSecond } from "../../../utils/token-rate";
 import { sanitizeStatusText } from "../../shared";
 import { theme } from "../../theme/theme";
+import { type CompactionBoundaries, computeCompactionBoundaries } from "../../utils/context-usage";
 import {
 	type CodexResetFireworksEvent,
 	type CodexResetUsageSnapshot,
@@ -34,7 +42,22 @@ import type {
 const JJ_REFRESH_TTL_MS = 5000;
 const WATCHER_FAILURE_POLL_TTL_MS = 5000;
 
-function normalizeCodexIdentityValue(value: unknown): string | undefined {
+/** A displayable limit after provider, account, model, and window filtering. */
+interface UsageWindowCandidate {
+	id?: string;
+	windowClass: "5h" | "7d" | "monthly";
+	fraction: number;
+	resetsAt?: number;
+}
+
+/** Limits sharing one model/tier scope, ranked as an indivisible display unit. */
+interface UsageScopeGroup {
+	priority: number;
+	tier?: string;
+	candidates: UsageWindowCandidate[];
+}
+
+function normalizeUsageScopeValue(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim().toLowerCase() : undefined;
 }
 
@@ -46,21 +69,21 @@ function normalizeCodexIdentityValue(value: unknown): string | undefined {
  */
 function codexReportMatchesExactIdentity(report: UsageReport, identity: OAuthAccountIdentity | undefined): boolean {
 	if (!identity) return false;
-	const accountId = normalizeCodexIdentityValue(identity.accountId);
-	const email = normalizeCodexIdentityValue(identity.email);
-	const projectId = normalizeCodexIdentityValue(identity.projectId);
-	const orgId = normalizeCodexIdentityValue(identity.orgId);
+	const accountId = normalizeUsageScopeValue(identity.accountId);
+	const email = normalizeUsageScopeValue(identity.email);
+	const projectId = normalizeUsageScopeValue(identity.projectId);
+	const orgId = normalizeUsageScopeValue(identity.orgId);
 	if (!accountId && !email && !projectId && !orgId) return false;
 
 	const metadata = report.metadata ?? {};
 	const reportAccountId =
-		normalizeCodexIdentityValue(metadata.accountId) ?? normalizeCodexIdentityValue(metadata.account_id);
+		normalizeUsageScopeValue(metadata.accountId) ?? normalizeUsageScopeValue(metadata.account_id);
 	const reportProjectId =
-		normalizeCodexIdentityValue(metadata.projectId) ?? normalizeCodexIdentityValue(metadata.project_id);
+		normalizeUsageScopeValue(metadata.projectId) ?? normalizeUsageScopeValue(metadata.project_id);
 	if (accountId && reportAccountId !== accountId) return false;
-	if (email && normalizeCodexIdentityValue(metadata.email) !== email) return false;
+	if (email && normalizeUsageScopeValue(metadata.email) !== email) return false;
 	if (projectId && reportProjectId !== projectId) return false;
-	if (orgId && normalizeCodexIdentityValue(metadata.orgId) !== orgId) return false;
+	if (orgId && normalizeUsageScopeValue(metadata.orgId) !== orgId) return false;
 	return true;
 }
 
@@ -268,8 +291,36 @@ const EMPTY_MESSAGES: readonly AgentMessage[] = [];
 const STATUS_USAGE_START_DELAY_MS = 0;
 const STATUS_USAGE_REFRESH_TIMEOUT_MS = 2_000;
 
+function isContextSegment(segment: StatusLineSegmentId): boolean {
+	return segment === "context_pct" || segment === "context_total";
+}
+
 function hasContextSegment(segments: readonly StatusLineSegmentId[]): boolean {
 	return segments.includes("context_pct") || segments.includes("context_total");
+}
+
+function hasNonContextSegment(segments: readonly StatusLineSegmentId[]): boolean {
+	for (const segment of segments) {
+		if (!isContextSegment(segment)) return true;
+	}
+	return false;
+}
+
+function removeContextSegments(parts: string[], segments: StatusLineSegmentId[]): void {
+	let writeIndex = 0;
+	for (let readIndex = 0; readIndex < segments.length; readIndex++) {
+		const segment = segments[readIndex];
+		if (isContextSegment(segment)) continue;
+		parts[writeIndex] = parts[readIndex];
+		segments[writeIndex] = segment;
+		writeIndex++;
+	}
+	parts.length = writeIndex;
+	segments.length = writeIndex;
+}
+
+function formatEmbeddedContextPercent(percent: number): string {
+	return `${percent > 0 && percent < 1 ? percent.toFixed(1) : Math.round(percent)}%`;
 }
 function hasGitSegment(segments: readonly StatusLineSegmentId[]): boolean {
 	return segments.includes("git");
@@ -291,7 +342,10 @@ function hasGitBackedSegment(segments: readonly StatusLineSegmentId[]): boolean 
 // ═══════════════════════════════════════════════════════════════════════════
 
 export class StatusLineComponent implements Component {
-	#widthEpochRevision = 0;
+	#standalone: false | "full" | "left-only" = false;
+	#standaloneGap = false;
+	#autocompleteActiveProbe: (() => boolean) | undefined;
+	#renderRevision = 0;
 	#settings: StatusLineSettings = {};
 	#effectiveSettings: EffectiveStatusLineSettings | undefined;
 	#cachedBranch: string | null | undefined = undefined;
@@ -429,8 +483,10 @@ export class StatusLineComponent implements Component {
 			sessionAccent: settings.get("statusLine.sessionAccent"),
 			transparent: settings.get("statusLine.transparent"),
 			compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
+			contextLine: settings.get("statusLine.contextLine"),
 		};
 	}
+
 	#gitEnabled(): boolean {
 		return settings.get("git.enabled");
 	}
@@ -736,7 +792,7 @@ export class StatusLineComponent implements Component {
 	}
 
 	invalidate(): void {
-		this.#widthEpochRevision++;
+		this.#renderRevision++;
 		// Generic repaint invalidation (theme change, message event, model
 		// switch, …). Must NOT abort or restart a live reftable HEAD/PR resolve:
 		// the render path self-invalidates via cwd/context cache-miss checks, so
@@ -1211,7 +1267,12 @@ export class StatusLineComponent implements Component {
 		const identity = activeProvider
 			? session.modelRegistry?.authStorage?.getOAuthAccountIdentity(activeProvider, session.sessionId)
 			: undefined;
-		return this.#formatUsageContextKey(activeProvider, identity);
+		// Model id is part of the invalidation key (but not the account-scoped
+		// fireworks key): normalized usage now selects a model-scoped window group,
+		// so switching models must drop the previous model's cached scope instead
+		// of showing it for the rest of the TTL.
+		const activeModelId = session.state.model?.id ?? session.model?.id ?? "";
+		return `${this.#formatUsageContextKey(activeProvider, identity)}\0${activeModelId}`;
 	}
 
 	/**
@@ -1270,11 +1331,16 @@ export class StatusLineComponent implements Component {
 		}
 		this.#latestAppliedUsageRefreshSequence = sequence;
 		const activeProvider = session.state.model?.provider ?? session.model?.provider;
+		const activeModelId = session.state.model?.id ?? session.model?.id;
 		const activeIdentity =
 			activeProvider && session.modelRegistry?.authStorage
 				? session.modelRegistry.authStorage.getOAuthAccountIdentity(activeProvider, session.sessionId)
 				: undefined;
-		const normalized = this.#normalizeUsageReports(reports, activeProvider, activeIdentity);
+		const normalized = this.#normalizeUsageReports(reports, {
+			provider: activeProvider,
+			modelId: activeModelId,
+			identity: activeIdentity,
+		});
 		const resetSnapshot =
 			activeProvider === "openai-codex" ? this.#normalizeCodexResetSnapshot(reports, activeIdentity) : null;
 		const usageChanged = this.#cachedUsage !== normalized;
@@ -1385,8 +1451,7 @@ export class StatusLineComponent implements Component {
 
 	#normalizeUsageReports(
 		reports: unknown,
-		activeProvider?: string,
-		activeIdentity?: OAuthAccountIdentity,
+		context: { provider?: string; modelId?: string; identity?: OAuthAccountIdentity },
 	): {
 		tier?: string;
 		fiveHour?: { percent: number; resetMinutes?: number };
@@ -1394,14 +1459,97 @@ export class StatusLineComponent implements Component {
 		monthly?: { percent: number; resetHours?: number };
 	} | null {
 		if (!Array.isArray(reports)) return null;
+		const now = Date.now();
+		const activeModelId = normalizeUsageScopeValue(context.modelId);
+		const scopeGroups = new Map<string, UsageScopeGroup>();
+		for (const report of reports) {
+			if (!report || typeof report !== "object") continue;
+			const provider = "provider" in report ? report.provider : undefined;
+			if (context.provider && provider !== context.provider) continue;
+			const limits = "limits" in report ? report.limits : undefined;
+			if (!Array.isArray(limits)) continue;
+			// fetchUsageReports supplies normalized rows; the guards above protect
+			// the unknown session boundary before the account matcher reads metadata.
+			const usageReport = report as UsageReport;
+			for (const limit of limits) {
+				if (
+					!limit ||
+					typeof limit !== "object" ||
+					!("scope" in limit) ||
+					!limit.scope ||
+					typeof limit.scope !== "object" ||
+					!("amount" in limit) ||
+					!limit.amount ||
+					typeof limit.amount !== "object"
+				) {
+					continue;
+				}
+				const scope = limit.scope;
+				const amount = limit.amount;
+				// The matcher only reads scope identity fields, whose object boundary
+				// is validated above; other required UsageLimit fields are irrelevant.
+				const usageLimit = limit as UsageLimit;
+				if (context.identity && !limitMatchesActiveAccount(usageReport, usageLimit, context.identity)) continue;
+
+				const fraction = "usedFraction" in amount ? amount.usedFraction : undefined;
+				if (typeof fraction !== "number") continue;
+				const window =
+					"window" in limit && limit.window && typeof limit.window === "object" ? limit.window : undefined;
+				const windowId = "windowId" in scope ? scope.windowId : undefined;
+				const durationValue = window && "durationMs" in window ? window.durationMs : undefined;
+				const durationMs = typeof durationValue === "number" ? durationValue : undefined;
+				const subscriptionWindow =
+					windowId === "5h" || windowId === "7d"
+						? windowId
+						: durationMs !== undefined && Math.abs(durationMs - 5 * 3_600_000) <= 60_000
+							? "5h"
+							: durationMs !== undefined && Math.abs(durationMs - 7 * 86_400_000) <= 60_000
+								? "7d"
+								: undefined;
+				const windowClass =
+					subscriptionWindow ??
+					((context.provider === "cursor" || context.provider === "opencode-go") &&
+					(windowId === "monthly" || windowId === "30d")
+						? "monthly"
+						: undefined);
+				if (!windowClass) continue;
+
+				const modelId = normalizeUsageScopeValue("modelId" in scope ? scope.modelId : undefined);
+				if (modelId && modelId !== activeModelId) continue;
+				const rawTier = "tier" in scope ? scope.tier : undefined;
+				const tier = typeof rawTier === "string" && rawTier.trim() ? rawTier.trim() : undefined;
+				const normalizedTier = normalizeUsageScopeValue(tier);
+				const scopeKey = `${modelId ?? ""}\0${normalizedTier ?? ""}`;
+				// Exact-model groups outrank provider-wide groups; within either
+				// specificity, untiered limits preserve the historical preference.
+				const priority = modelId ? (normalizedTier ? 1 : 0) : normalizedTier ? 3 : 2;
+				const id = "id" in limit && typeof limit.id === "string" ? limit.id : undefined;
+				const resetValue = window && "resetsAt" in window ? window.resetsAt : undefined;
+				const displayCandidate: UsageWindowCandidate = {
+					id,
+					windowClass,
+					fraction,
+					resetsAt: typeof resetValue === "number" ? resetValue : undefined,
+				};
+				const group = scopeGroups.get(scopeKey);
+				if (group) {
+					group.candidates.push(displayCandidate);
+				} else {
+					scopeGroups.set(scopeKey, { priority, tier, candidates: [displayCandidate] });
+				}
+			}
+		}
+
+		let selectedGroup: UsageScopeGroup | undefined;
+		for (const group of scopeGroups.values()) {
+			if (!selectedGroup || group.priority < selectedGroup.priority) selectedGroup = group;
+		}
+		if (!selectedGroup) return null;
+
 		let fiveHour: { percent: number; resetMinutes?: number } | undefined;
 		let sevenDay: { percent: number; resetHours?: number } | undefined;
 		let monthly: { percent: number; resetHours?: number } | undefined;
-		let fiveHourTier: string | undefined;
-		let sevenDayTier: string | undefined;
-		let monthlyTier: string | undefined;
 		let monthlyPriority = Number.POSITIVE_INFINITY;
-		const now = Date.now();
 		const cursorMonthlyPriority = (limitId: unknown): number => {
 			// When /auth/usage and /api/usage-summary are merged, prefer the personal
 			// dashboard rails over legacy per-model request fractions.
@@ -1410,92 +1558,41 @@ export class StatusLineComponent implements Component {
 			if (typeof limitId === "string" && limitId.startsWith("cursor:usd:individual-")) return 2;
 			return 3;
 		};
-		for (const report of reports) {
-			if (!report || typeof report !== "object") continue;
-			const provider = (report as { provider?: unknown }).provider;
-			if (activeProvider && provider !== activeProvider) continue;
-			const limits = (report as { limits?: unknown }).limits;
-			if (!Array.isArray(limits)) continue;
-			const usageReport = report as UsageReport;
-			for (const limit of limits) {
-				if (!limit || typeof limit !== "object") continue;
-				if (activeIdentity && !limitMatchesActiveAccount(usageReport, limit as UsageLimit, activeIdentity)) {
-					continue;
-				}
-				const l = limit as {
-					id?: string;
-					scope?: { windowId?: string; tier?: string };
-					window?: { resetsAt?: number; durationMs?: number };
-					amount?: { usedFraction?: number };
+		for (const candidate of selectedGroup.candidates) {
+			if (candidate.windowClass === "5h" && !fiveHour) {
+				fiveHour = {
+					percent: candidate.fraction * 100,
+					resetMinutes:
+						typeof candidate.resetsAt === "number"
+							? Math.max(0, Math.round((candidate.resetsAt - now) / 60_000))
+							: undefined,
 				};
-				const fraction = l.amount?.usedFraction;
-				if (typeof fraction !== "number") continue;
-				const windowId = l.scope?.windowId;
-				const tier = l.scope?.tier;
-				const resetsAt = l.window?.resetsAt;
-				// Canonical window ids win. Fall back to the reported span (same
-				// tolerance as the 5h priority-boost check) so providers that emit
-				// non-canonical ids, and cache rows written before a provider was
-				// canonicalized, still map onto the two subscription windows.
-				const durationMs = l.window?.durationMs;
-				const windowClass =
-					windowId === "5h" || windowId === "7d"
-						? windowId
-						: durationMs !== undefined && Math.abs(durationMs - 5 * 3_600_000) <= 60_000
-							? "5h"
-							: durationMs !== undefined && Math.abs(durationMs - 7 * 86_400_000) <= 60_000
-								? "7d"
-								: undefined;
-				// Accept tiered limits, but prefer untiered (backward compat with Anthropic).
-				// An untiered limit always replaces a tiered one; among same-tieredness, first wins.
-				if (windowClass === "5h" && (!fiveHour || (fiveHourTier !== undefined && !tier))) {
-					fiveHour = {
-						percent: fraction * 100,
-						resetMinutes:
-							typeof resetsAt === "number" ? Math.max(0, Math.round((resetsAt - now) / 60_000)) : undefined,
-					};
-					fiveHourTier = tier || undefined;
-				}
-				if (windowClass === "7d" && (!sevenDay || (sevenDayTier !== undefined && !tier))) {
-					sevenDay = {
-						percent: fraction * 100,
+			}
+			if (candidate.windowClass === "7d" && !sevenDay) {
+				sevenDay = {
+					percent: candidate.fraction * 100,
+					resetHours:
+						typeof candidate.resetsAt === "number"
+							? Math.max(0, Math.round((candidate.resetsAt - now) / 3_600_000))
+							: undefined,
+				};
+			}
+			if (candidate.windowClass === "monthly") {
+				const priority = cursorMonthlyPriority(candidate.id);
+				if (priority < monthlyPriority) {
+					monthly = {
+						percent: candidate.fraction * 100,
 						resetHours:
-							typeof resetsAt === "number" ? Math.max(0, Math.round((resetsAt - now) / 3_600_000)) : undefined,
+							typeof candidate.resetsAt === "number"
+								? Math.max(0, Math.round((candidate.resetsAt - now) / 3_600_000))
+								: undefined,
 					};
-					sevenDayTier = tier || undefined;
-				}
-				// Monthly rendering is gated to providers with a single monthly
-				// bucket (Cursor's priority selector picks its personal rail;
-				// OpenCode Go emits exactly one). Copilot also emits monthly
-				// windows, but its multi-bucket shape needs a dedicated selector
-				// before we surface `mo N%` for it.
-				if (
-					(activeProvider === "cursor" || activeProvider === "opencode-go") &&
-					(windowId === "monthly" || windowId === "30d")
-				) {
-					const priority = cursorMonthlyPriority(l.id);
-					const shouldReplace =
-						!monthly ||
-						priority < monthlyPriority ||
-						(priority === monthlyPriority && monthlyTier !== undefined && !tier);
-					if (shouldReplace) {
-						monthly = {
-							percent: fraction * 100,
-							resetHours:
-								typeof resetsAt === "number"
-									? Math.max(0, Math.round((resetsAt - now) / 3_600_000))
-									: undefined,
-						};
-						monthlyTier = tier || undefined;
-						monthlyPriority = priority;
-					}
+					monthlyPriority = priority;
 				}
 			}
 		}
 		if (!fiveHour && !sevenDay && !monthly) return null;
-		// Single compact label; prefer the five-hour tier if displayed windows ever disagree.
-		const effectiveTier = fiveHourTier ?? sevenDayTier ?? monthlyTier;
-		return { tier: effectiveTier, fiveHour, sevenDay, monthly };
+		return { tier: selectedGroup.tier, fiveHour, sevenDay, monthly };
 	}
 
 	/**
@@ -1537,7 +1634,7 @@ export class StatusLineComponent implements Component {
 			return { usedTokens: cache.usedTokens, contextWindow: cache.contextWindow };
 		}
 
-		const usage = this.session.getContextUsage();
+		const usage = typeof this.session.getContextUsage === "function" ? this.session.getContextUsage() : undefined;
 		const usedTokens = usage?.tokens ?? 0;
 		const contextWindow = usage?.contextWindow ?? modelContextWindow;
 		this.#contextUsageCache = {
@@ -1559,9 +1656,9 @@ export class StatusLineComponent implements Component {
 		width: number,
 		segmentOptions: StatusLineSettings["segmentOptions"],
 		includePath: boolean,
-		includeContext: boolean,
 		includeGit: boolean,
 		includePr: boolean,
+		previewTitle?: string,
 	): SegmentContext {
 		const state = this.session.state;
 
@@ -1587,15 +1684,10 @@ export class StatusLineComponent implements Component {
 		};
 
 		let contextWindow = state.model?.contextWindow ?? this.session.model?.contextWindow ?? 0;
-		let contextPercent: number | null = 0;
-		let contextTokens = 0;
-		if (includeContext) {
-			const breakdown = this.getCachedContextBreakdown();
-			contextTokens = breakdown.usedTokens;
-			contextWindow = breakdown.contextWindow || contextWindow;
-			contextPercent = contextWindow > 0 ? (breakdown.usedTokens / contextWindow) * 100 : null;
-		}
-
+		const breakdown = this.getCachedContextBreakdown();
+		let contextTokens = breakdown.usedTokens;
+		contextWindow = breakdown.contextWindow || contextWindow;
+		let contextPercent: number | null = contextWindow > 0 ? (breakdown.usedTokens / contextWindow) * 100 : null;
 		// Collab guest: context comes from the host's state frames — the local
 		// replica does no accounting of its own.
 		const collabState = this.#collabStatus?.stateOverride;
@@ -1634,6 +1726,7 @@ export class StatusLineComponent implements Component {
 			session: this.session,
 			focusedAgentId: this.#focusedAgentId,
 			sessionAccent: this.#resolveSettings().sessionAccent !== false,
+			previewTitle,
 			activeRepo: activeRepoCache.activeRepo,
 			width,
 			options: segmentOptions ?? {},
@@ -1713,12 +1806,28 @@ export class StatusLineComponent implements Component {
 		return theme.fg("statusLineSubagents", `${theme.icon.agents} ${this.#subagentCount} ${noun}`);
 	}
 
-	#buildStatusLine(width: number): string {
+	/**
+	 * Build the status bar for one of four layouts:
+	 * - `box`: powerline groups joined by the context-reactive gauge line
+	 *   (embedded in the editor's top border).
+	 * - `plain-full`: no background, no powerline caps, dot separators, gap is
+	 *   plain spaces — the standalone bottom bar for pi/borderless composers.
+	 * - `plain-left`: left segments only (claude composer; the right group
+	 *   lives in the editor's top rule).
+	 * - `plain-right`: right segments only (claude composer's top rule).
+	 *
+	 * `previewTitle` is a stand-in session title for composer previews; the
+	 * `session_name` segment renders it when the session is unnamed.
+	 */
+	#buildStatusLine(
+		width: number,
+		layout: "box" | "plain-full" | "plain-left" | "plain-right" = "box",
+		previewTitle?: string,
+	): string {
 		const effectiveSettings = this.#resolveSettings();
+		const plain = layout !== "box";
 		const includePath =
 			hasPathSegment(effectiveSettings.leftSegments) || hasPathSegment(effectiveSettings.rightSegments);
-		const includeContext =
-			hasContextSegment(effectiveSettings.leftSegments) || hasContextSegment(effectiveSettings.rightSegments);
 		const gitEnabled = this.#gitEnabled();
 		const includeGit =
 			gitEnabled &&
@@ -1729,11 +1838,13 @@ export class StatusLineComponent implements Component {
 			width,
 			effectiveSettings.segmentOptions,
 			includePath,
-			includeContext,
 			includeGit,
 			includePr,
+			previewTitle,
 		);
-		const separatorDef = getSeparator(effectiveSettings.separator ?? "powerline-thin", theme);
+		const separatorDef = plain
+			? { left: "·", right: "·" }
+			: getSeparator(effectiveSettings.separator ?? "powerline-thin", theme);
 
 		// `transparent` reuses the empty-string sentinel (`\x1b[49m`) so the bar
 		// inherits the terminal's default background, matching custom themes that
@@ -1742,7 +1853,10 @@ export class StatusLineComponent implements Component {
 		// stray glyphs, so the cap renderer drops them when the fill is empty.
 		const TRANSPARENT_BG_ANSI = "\x1b[49m";
 		const themeBgAnsi = theme.getBgAnsi("statusLineBg");
-		const bgAnsi = effectiveSettings.transparent ? TRANSPARENT_BG_ANSI : themeBgAnsi;
+		// Plain bottom bars drop the background entirely; the claude top-rule
+		// chip (`plain-right`) keeps it so the group reads as a chip on the rule.
+		const transparentLayout = layout === "plain-full" || layout === "plain-left";
+		const bgAnsi = transparentLayout || effectiveSettings.transparent ? TRANSPARENT_BG_ANSI : themeBgAnsi;
 		const transparentBg = bgAnsi === TRANSPARENT_BG_ANSI;
 		const fgAnsi = theme.getFgAnsi("text");
 		const sepAnsi = theme.getFgAnsi("statusLineSep");
@@ -1751,7 +1865,8 @@ export class StatusLineComponent implements Component {
 		// Collect visible segment contents
 		const leftParts: string[] = [];
 		const leftSegIds: StatusLineSegmentId[] = [];
-		for (const segId of effectiveSettings.leftSegments) {
+		const leftSegmentIds = layout === "plain-right" ? [] : effectiveSettings.leftSegments;
+		for (const segId of leftSegmentIds) {
 			if (subagentBadge && segId === "subagents") continue;
 			const rendered = renderSegment(segId, ctx);
 			if (rendered.visible && rendered.content) {
@@ -1761,20 +1876,38 @@ export class StatusLineComponent implements Component {
 		}
 
 		const rightParts: string[] = [];
-		for (const segId of effectiveSettings.rightSegments) {
+		const rightSegIds: StatusLineSegmentId[] = [];
+		const rightSegmentIds = layout === "plain-left" ? [] : effectiveSettings.rightSegments;
+		for (const segId of rightSegmentIds) {
 			if (subagentBadge && segId === "subagents") continue;
 			const rendered = renderSegment(segId, ctx);
 			if (rendered.visible && rendered.content) {
 				rightParts.push(rendered.content);
+				rightSegIds.push(segId);
 			}
 		}
 
-		const runningBackgroundJobs = this.session.getAsyncJobSnapshot()?.running.length ?? 0;
-		if (runningBackgroundJobs > 0) {
-			rightParts.unshift(theme.fg("statusLineSubagents", `${theme.icon.job} ${runningBackgroundJobs}`));
+		const embedContext =
+			!plain &&
+			effectiveSettings.contextLine === "embedded" &&
+			ctx.contextPercent !== null &&
+			ctx.contextPercent !== undefined &&
+			ctx.contextWindow > 0 &&
+			(hasContextSegment(leftSegIds) || hasContextSegment(rightSegIds)) &&
+			(hasNonContextSegment(leftSegIds) || hasNonContextSegment(rightSegIds));
+		if (embedContext) {
+			removeContextSegments(leftParts, leftSegIds);
+			removeContextSegments(rightParts, rightSegIds);
 		}
-		if (subagentBadge) {
-			rightParts.unshift(subagentBadge);
+
+		if (layout !== "plain-left") {
+			const runningBackgroundJobs = this.session.getAsyncJobSnapshot()?.running.length ?? 0;
+			if (runningBackgroundJobs > 0) {
+				rightParts.unshift(theme.fg("statusLineSubagents", `${theme.icon.job} ${runningBackgroundJobs}`));
+			}
+			if (subagentBadge) {
+				rightParts.unshift(subagentBadge);
+			}
 		}
 		const topFillWidth = Math.max(0, width);
 		const left = [...leftParts];
@@ -1799,6 +1932,22 @@ export class StatusLineComponent implements Component {
 		const totalWidth = () => leftWidth + rightWidth + (left.length > 0 && right.length > 0 ? 1 : 0);
 
 		if (topFillWidth > 0) {
+			// Truncate the session-name segment before dropping right segments —
+			// the title is the only elastic one on the right, and dropping it
+			// wholesale left narrow bars (and the ≤76-col composer previews)
+			// without any title.
+			const nameSegIdx = rightSegIds.indexOf("session_name");
+			if (nameSegIdx >= 0 && totalWidth() > topFillWidth) {
+				// Badge/job parts were unshifted ahead of the tracked segment ids.
+				const nameIdx = nameSegIdx + (right.length - rightSegIds.length);
+				const currentNameVW = visibleWidth(right[nameIdx]);
+				const minNameVW = 8;
+				const shrinkBy = Math.min(Math.max(0, currentNameVW - minNameVW), totalWidth() - topFillWidth);
+				if (shrinkBy > 0) {
+					right[nameIdx] = truncateToWidth(right[nameIdx], currentNameVW - shrinkBy);
+					rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
+				}
+			}
 			while (totalWidth() > topFillWidth && right.length > 0) {
 				right.pop();
 				rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
@@ -1881,23 +2030,173 @@ export class StatusLineComponent implements Component {
 		const rightGroup = renderGroup(right, "right");
 		if (!leftGroup && !rightGroup) return "";
 
-		if (topFillWidth === 0 || left.length === 0 || right.length === 0) {
+		if (topFillWidth === 0 || (plain && (left.length === 0 || right.length === 0))) {
 			return leftGroup + (leftGroup && rightGroup ? " " : "") + rightGroup;
 		}
 
 		const gapWidth = Math.max(1, topFillWidth - leftWidth - rightWidth);
+		if (plain) {
+			// Standalone composers: no gauge line between the groups, just air.
+			return leftGroup + padding(gapWidth) + rightGroup;
+		}
+		// Box layout: with one group absent (an unnamed session hides
+		// `session_name`, emptying the default preset's right group) the gauge
+		// runs to the border edge instead of disappearing, so embedded context
+		// labels don't fall back to a context chip until the session is titled.
+		return leftGroup + this.#buildContextGaugeFill(gapWidth, ctx, effectiveSettings, embedContext) + rightGroup;
+	}
+
+	/**
+	 * The gauge line bridging the left and right groups in box layout. Driven
+	 * by `statusLine.contextLine`:
+	 * - `off`: solid accent line (no context feedback).
+	 * - `percentage`: used portion in accent, remainder in the border color.
+	 * - `annotated` : percentage plus preset-aware markers where
+	 *   speculative compaction starts and where auto-compaction fires.
+	 * - `embedded` (default): annotated markers plus percentage/window labels absorbed
+	 *   from configured context segments.
+	 */
+	#buildContextGaugeFill(
+		gapWidth: number,
+		ctx: SegmentContext,
+		effectiveSettings: EffectiveStatusLineSettings,
+		embedContext: boolean,
+	): string {
 		const sessionName =
 			effectiveSettings.sessionAccent !== false ? this.session.sessionManager?.getSessionName() : undefined;
 		const accentHex = sessionName
 			? getSessionAccentHex(sessionName, theme.getMajorThemeColorHexes(), theme.accentSurfaceLuminance)
 			: undefined;
-		const gapColor = getSessionAccentAnsi(accentHex) ?? theme.getFgAnsi("border");
-		const gapFill = `${gapColor}${theme.boxRound.horizontal.repeat(gapWidth)}\x1b[39m`;
-		return leftGroup + gapFill + rightGroup;
+		const usedColor = getSessionAccentAnsi(accentHex) ?? theme.getFgAnsi("borderAccent");
+		const horizontal = theme.boxRound.horizontal;
+		const mode = effectiveSettings.contextLine ?? "embedded";
+		const pct = ctx.contextPercent;
+		if (mode === "off" || pct === null || pct === undefined) {
+			return `\x1b[49m${usedColor}${horizontal.repeat(gapWidth)}\x1b[39m`;
+		}
+
+		const clampedPct = Math.min(100, Math.max(0, pct));
+		let percentLabel = "";
+		let windowLabel = "";
+		let percentStart = -1;
+		let windowStart = -1;
+		let scaleWidth = gapWidth;
+		// >100%: usage anchored past the active window (e.g. model switch to a
+		// smaller window). The bar clamps full, but the embedded label breaks
+		// past the window label — `──200K─120%` with the percent in error color.
+		const percentOverflow = pct > 100;
+		if (embedContext) {
+			const candidatePercent = formatEmbeddedContextPercent(percentOverflow ? pct : clampedPct);
+			const candidateWindow = formatNumber(ctx.contextWindow);
+			if (gapWidth >= candidatePercent.length + candidateWindow.length + 4) {
+				percentLabel = candidatePercent;
+				windowLabel = candidateWindow;
+				if (percentOverflow) {
+					percentStart = gapWidth - percentLabel.length;
+					windowStart = percentStart - 1 - windowLabel.length;
+				} else {
+					windowStart = gapWidth - windowLabel.length - 1;
+				}
+				scaleWidth = windowStart;
+			}
+		}
+
+		// At least one accent cell: a fresh session still shows the session-accent
+		// line starting at the left instead of a fully dim bar.
+		const usedCount = Math.min(scaleWidth, Math.max(1, Math.round((clampedPct / 100) * scaleWidth)));
+		const unusedColor = theme.getFgAnsi("border");
+
+		// Boundary markers are only meaningful when auto-compaction can fire and
+		// the line is long enough for the markers to read as positions.
+		let speculationIdx = -1;
+		let thresholdIdx = -1;
+		if ((mode === "annotated" || mode === "embedded") && ctx.autoCompactEnabled && gapWidth >= 8) {
+			const boundaries = this.#compactionBoundaries(ctx.contextWindow);
+			if (boundaries) {
+				const cellFor = (percent: number) =>
+					Math.min(scaleWidth - 1, Math.max(0, Math.round((percent / 100) * scaleWidth)));
+				thresholdIdx = cellFor(boundaries.thresholdPercent);
+				// null = no background speculation will run (async disabled or the
+				// first available method is local/instant) — no tick to show.
+				if (boundaries.speculationPercent !== null) speculationIdx = cellFor(boundaries.speculationPercent);
+				if (speculationIdx === thresholdIdx) speculationIdx = -1; // threshold wins the cell
+			}
+		}
+
+		if (percentLabel && percentStart < 0) {
+			const maxStart = scaleWidth - percentLabel.length - 1;
+			const preferredStart = Math.min(maxStart, Math.max(1, usedCount));
+			const overlapsBoundary = (start: number): boolean => {
+				const end = start + percentLabel.length;
+				return (speculationIdx >= start && speculationIdx < end) || (thresholdIdx >= start && thresholdIdx < end);
+			};
+			for (let distance = 0; distance <= maxStart; distance++) {
+				const left = preferredStart - distance;
+				if (left >= 1 && !overlapsBoundary(left)) {
+					percentStart = left;
+					break;
+				}
+				if (distance === 0) continue;
+				const right = preferredStart + distance;
+				if (right <= maxStart && !overlapsBoundary(right)) {
+					percentStart = right;
+					break;
+				}
+			}
+		}
+
+		const speculationGlyph = theme.symbol("context.speculation");
+		const thresholdGlyph = theme.symbol("context.compaction");
+		const speculationColor = theme.getFgAnsi("muted");
+		const overflowColor = theme.getFgAnsi("error");
+		const rawAccentHex = accentHex ?? theme.getColorHex("borderAccent");
+		const dimmedAccentHex = adjustHsv(rawAccentHex, { s: 0.7, v: 0.75 });
+		const thresholdColor = getSessionAccentAnsi(dimmedAccentHex) ?? usedColor;
+
+		let out = "\x1b[49m";
+		let activeColor = "";
+		for (let i = 0; i < gapWidth; i++) {
+			let color = i < usedCount ? usedColor : unusedColor;
+			let glyph = horizontal;
+			if (percentStart >= 0 && i >= percentStart && i < percentStart + percentLabel.length) {
+				color = percentOverflow ? overflowColor : usedColor;
+				glyph = percentLabel.charAt(i - percentStart);
+			} else if (i === thresholdIdx) {
+				color = thresholdColor;
+				glyph = thresholdGlyph;
+			} else if (i === speculationIdx) {
+				color = speculationColor;
+				glyph = speculationGlyph;
+			} else if (windowStart >= 0 && i >= windowStart && i < windowStart + windowLabel.length) {
+				color = thresholdColor;
+				glyph = windowLabel.charAt(i - windowStart);
+			}
+			if (color !== activeColor) {
+				out += color;
+				activeColor = color;
+			}
+			out += glyph;
+		}
+		return `${out}\x1b[39m`;
 	}
 
-	getTopBorder(width: number): { content: string; width: number; revision: number } {
-		let content = this.#buildStatusLine(width);
+	/** Auto-compaction boundary percents, or null when unavailable (disabled, no window). */
+	#compactionBoundaries(contextWindow: number): CompactionBoundaries | null {
+		// Collab-guest replicas and test mocks have no session-scoped settings;
+		// the global store carries the same compaction knobs.
+		const source = typeof this.session.settings?.getGroup === "function" ? this.session.settings : settings;
+		// The active model gates which compaction method a real pass would run
+		// (and therefore whether a speculation tick is meaningful).
+		const model = this.session.state?.model ?? this.session.model;
+		try {
+			return computeCompactionBoundaries(source, contextWindow, model);
+		} catch {
+			return null;
+		}
+	}
+
+	getTopBorder(width: number, previewTitle?: string): { content: string; width: number; revision: number } {
+		let content = this.#buildStatusLine(width, "box", previewTitle);
 		if (this.#focusedAgentId && content) {
 			// Dim the whole bar while focus-proxied. Group/cap terminators emit full
 			// `\x1b[0m` resets that would cancel faint mid-bar, so re-open it after each.
@@ -1906,19 +2205,107 @@ export class StatusLineComponent implements Component {
 		return {
 			content,
 			width: visibleWidth(content),
-			revision: this.#widthEpochRevision,
+			revision: this.#renderRevision,
+		};
+	}
+	/**
+	 * Standalone bar placement derived from the composer style. `bottomBar`
+	 * `"full"` renders both groups on the bottom bar (pi/borderless/field/rail);
+	 * `"left"` renders just the left group there — the right group attaches to
+	 * the editor's top rule via {@link getStandaloneTopBorder} (claude/rule);
+	 * `"none"` returns the bar to the box composer's embedded top border.
+	 * `bottomBarGap` inserts a blank spacer row above the bar for styles whose
+	 * editor has no bottom chrome.
+	 */
+	setComposerStyle(style: Pick<ComposerStyle, "bottomBar" | "bottomBarGap">): void {
+		this.#standalone = style.bottomBar === "none" ? false : style.bottomBar === "left" ? "left-only" : "full";
+		this.#standaloneGap = style.bottomBarGap;
+	}
+
+	/** While true, the standalone bar yields its row to the editor's autocomplete menu. */
+	setAutocompleteActiveProbe(probe: (() => boolean) | undefined): void {
+		this.#autocompleteActiveProbe = probe;
+	}
+
+	/** Plain right-group content for the claude composer's top rule. */
+	getStandaloneTopBorder(width: number, previewTitle?: string): { content: string; width: number; revision: number } {
+		let content = this.#buildStatusLine(width, "plain-right", previewTitle);
+		if (this.#focusedAgentId && content) {
+			content = `\x1b[2m${content.replaceAll("\x1b[0m", "\x1b[0m\x1b[2m")}\x1b[22m`;
+		}
+		return {
+			content,
+			width: visibleWidth(content),
+			revision: this.#renderRevision,
 		};
 	}
 
-	render(width: number): readonly string[] {
-		// Only render hook statuses - main status is in editor's top border
-		const showHooks = this.#settings.showHookStatus ?? true;
-		if (!showHooks || this.#hookStatuses.size === 0) {
-			return [];
+	/**
+	 * The plain standalone bottom bar through the real segment/gauge pipeline —
+	 * `groups` picks which segment groups it carries. Used by the live render
+	 * loop and by composer previews (which inject a candidate layout instead of
+	 * the active one).
+	 */
+	renderBottomBar(width: number, groups: "left" | "full", previewTitle?: string): string {
+		let content = this.#buildStatusLine(width, groups === "left" ? "plain-left" : "plain-full", previewTitle);
+		if (this.#focusedAgentId && content) {
+			content = `\x1b[2m${content.replaceAll("\x1b[0m", "\x1b[0m\x1b[2m")}\x1b[22m`;
 		}
+		return content;
+	}
+	/**
+	 * Status bar lines for a composer layout, rendered through the real
+	 * pipeline — the single source for the /settings appearance preview.
+	 * `style` overrides the layout (candidate composer shape); omitted, the
+	 * active layout is used. Ignores the autocomplete probe: previews always
+	 * render.
+	 */
+	getPreviewLines(width: number, style?: Pick<ComposerStyle, "statusAttachment" | "bottomBar">): string[] {
+		const attachment =
+			style?.statusAttachment ??
+			(this.#standalone === false ? "top-border" : this.#standalone === "left-only" ? "top-rule-chip" : "none");
+		const bottomBar =
+			style?.bottomBar ?? (this.#standalone === false ? "none" : this.#standalone === "left-only" ? "left" : "full");
+		const lines: string[] = [];
+		if (attachment === "top-border") {
+			const border = this.getTopBorder(width);
+			if (border.content) lines.push(border.content);
+		} else if (attachment === "top-rule-chip") {
+			// Render the chip on its rule exactly as the claude composer does.
+			const rule = claudeComposerStyle.renderTop({
+				width,
+				paddingX: 0,
+				borderColor: str => theme.fg("border", str),
+				accentColor: str => theme.fg("accent", str),
+				surfaceColor: str => theme.bgFill("userMessageBg", str),
+				box: theme.boxRound,
+				topBorder: this.getStandaloneTopBorder(width),
+			});
+			if (rule !== undefined) lines.push(rule);
+		}
+		if (bottomBar !== "none") {
+			const main = this.renderBottomBar(width, bottomBar);
+			if (main) lines.push(main);
+		}
+		return lines;
+	}
 
-		return Array.from(this.#hookStatuses.entries())
-			.sort(([a], [b]) => a.localeCompare(b))
-			.map(([, text]) => truncateToWidth(sanitizeStatusText(text), width));
+	render(width: number): readonly string[] {
+		const lines: string[] = [];
+		if (this.#standalone && !this.#autocompleteActiveProbe?.()) {
+			const content = this.renderBottomBar(width, this.#standalone === "left-only" ? "left" : "full");
+			if (content) {
+				if (this.#standaloneGap) lines.push("");
+				lines.push(content);
+			}
+		}
+		const showHooks = this.#settings.showHookStatus ?? true;
+		if (showHooks && this.#hookStatuses.size > 0) {
+			const hookLines = Array.from(this.#hookStatuses.entries())
+				.sort(([a], [b]) => a.localeCompare(b))
+				.map(([, text]) => truncateToWidth(sanitizeStatusText(text), width));
+			lines.push(...hookLines);
+		}
+		return lines;
 	}
 }

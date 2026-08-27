@@ -5,6 +5,7 @@ export * from "./autocomplete";
 // Components
 export * from "./components/box";
 export * from "./components/cancellable-loader";
+export * from "./components/composer";
 export * from "./components/editor";
 export * from "./components/image";
 export * from "./components/input";

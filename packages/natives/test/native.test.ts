@@ -17,11 +17,14 @@ import {
 	getSupportedLanguages,
 	glob,
 	grep,
+	HighlightStream,
 	highlightCode,
 	htmlToMarkdown,
 	invalidateFsScanCache,
 	listWorkspace,
 	MacOSPowerAssertion,
+	macOSCheckSpelling,
+	macOSSpellCheckerAvailable,
 	matchesKey,
 	PtySession,
 	parseKey,
@@ -34,6 +37,28 @@ import {
 } from "../native/index.js";
 
 const addonUrl = new URL("../native/index.js", import.meta.url).href;
+
+describe("macOS spelling", () => {
+	it("reports platform capability and uses UTF-16 ranges", async () => {
+		const nonsense = "qzxvplmokn";
+		if (process.platform !== "darwin") {
+			expect(macOSSpellCheckerAvailable()).toBeFalse();
+			expect(await macOSCheckSpelling(nonsense)).toEqual([]);
+			return;
+		}
+
+		expect(macOSSpellCheckerAvailable()).toBeTrue();
+		expect(await macOSCheckSpelling(nonsense)).toContainEqual({ start: 0, length: nonsense.length });
+	});
+	it("returns only word spans, never the whole-string orthography result", async () => {
+		if (process.platform !== "darwin") return;
+		// With automatic language identification, checkString: also yields an
+		// orthography result spanning the entire string; leaking it as a typo
+		// range doubled editor text under the undercurl renderer.
+		const text = "hello qzxvplmokn world ";
+		expect(await macOSCheckSpelling(text)).toEqual([{ start: 6, length: 10 }]);
+	});
+});
 
 let testDir: string;
 
@@ -261,6 +286,41 @@ describe("pi-natives", () => {
 			expect(out).toContain("<k>function");
 			expect(out).toContain("<n>1");
 			expect(out).toContain("<c> add");
+		});
+	});
+
+	describe("HighlightStream", () => {
+		const colors = {
+			comment: "<c>",
+			keyword: "<k>",
+			function: "<f>",
+			variable: "<v>",
+			string: "<s>",
+			number: "<n>",
+			type: "<t>",
+			operator: "<o>",
+			punctuation: "<p>",
+		};
+
+		it("chunked pushes are byte-identical to one-shot highlighting across multi-line state", () => {
+			// The streaming Markdown renderer commits chunk-highlighted rows to
+			// native scrollback and later repaints the block via highlightCode;
+			// any divergence shows as a visible seam. The docstring spans the
+			// chunk boundary, so this fails if parser state is not carried.
+			const code = 'def f():\n    """doc\n    string"""\n    return 1\n';
+			const whole = highlightCode(code, "python", colors);
+
+			const stream = new HighlightStream("python", colors);
+			expect(stream.supported).toBe(true);
+			const chunked =
+				stream.push("def f():\n") + stream.push('    """doc\n    string"""\n') + stream.push("    return 1\n");
+			expect(chunked).toBe(whole);
+		});
+
+		it("echoes input unchanged for an unresolved language", () => {
+			const stream = new HighlightStream("no-such-lang", colors);
+			expect(stream.supported).toBe(false);
+			expect(stream.push("plain text\n")).toBe("plain text\n");
 		});
 	});
 

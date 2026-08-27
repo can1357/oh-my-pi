@@ -695,7 +695,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		session.settings.set("compaction.thresholdPercent", -1);
 		session.settings.set("compaction.autoContinue", true);
 		session.settings.set("contextPromotion.enabled", false);
-		session.settings.set("features.unexpectedStopDetection", true);
+		session.settings.set("features.unexpectedStopDetection", "smart");
 		session.settings.set("providers.unexpectedStopModel", "online");
 
 		vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(true);

@@ -677,6 +677,20 @@ export function getGithubCacheDbPath(): string {
 	if (override) return override;
 	return dirs.rootSubdir(path.join("cache", "github-cache.db"), "cache");
 }
+/**
+ * Get the conventional commit inference cache database path (~/.omp/cache/commit-inference.db).
+ * Honors `OMP_COMMIT_CACHE_DB` so tests and operators can isolate the cache.
+ */
+export function getCommitCacheDbPath(): string {
+	const override = process.env.OMP_COMMIT_CACHE_DB;
+	if (override) return override;
+	return dirs.rootSubdir(path.join("cache", "commit-inference.db"), "cache");
+}
+
+/** Get the legacy Pi extension parse cache database path. */
+export function getLegacyPiExtensionCacheDbPath(): string {
+	return dirs.rootSubdir(path.join("cache", "legacy-pi-extension-cache.db"), "cache");
+}
 
 /**
  * Get the encrypted auth-broker snapshot cache path (~/.omp/cache/auth-broker-snapshot.enc).
@@ -687,6 +701,11 @@ export function getAuthBrokerSnapshotCachePath(): string {
 	const override = process.env.OMP_AUTH_BROKER_SNAPSHOT_CACHE;
 	if (override) return override;
 	return dirs.rootSubdir(path.join("cache", "auth-broker-snapshot.enc"), "cache");
+}
+
+/** Get the commit-author avatar cache directory (~/.omp/cache/avatars). */
+export function getAvatarCacheDir(): string {
+	return dirs.rootSubdir(path.join("cache", "avatars"), "cache");
 }
 
 /** Get the local FastEmbed model cache directory (~/.omp/cache/fastembed). */
@@ -772,6 +791,10 @@ export function getTinyModelsCacheDir(agentDir?: string): string {
 export function getDocumentConversionCacheDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, path.join("cache", "document-conversions"), "cache");
 }
+/** Get the per-project composer speculative cache directory (~/.omp/agent/cache/composer; XDG default: $XDG_CACHE_HOME/omp/cache/composer). */
+export function getComposerCacheDir(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, path.join("cache", "composer"), "cache");
+}
 
 /** Get the sessions directory (~/.omp/agent/sessions). */
 export function getSessionsDir(agentDir?: string): string {
@@ -854,10 +877,20 @@ export function getSecretPlaceholderKeyPath(): string {
 	return keyPath;
 }
 
+/** Root directory containing every per-project daemon runtime scope (~/.omp/run/daemons; XDG default: $XDG_STATE_HOME/omp/run/daemons). */
+export function getDaemonRuntimeRoot(): string {
+	return dirs.rootSubdir(path.join("run", "daemons"), "state");
+}
+
 /** Get the daemon runtime directory for a project (~/.omp/run/daemons/<hash>; XDG default: $XDG_STATE_HOME/omp/run/daemons/<hash>). */
 export function getDaemonRuntimeDir(projectDir: string): string {
 	const key = Bun.hash.wyhash(path.resolve(projectDir)).toString(16).padStart(16, "0");
-	return dirs.rootSubdir(path.join("run", "daemons", key), "state");
+	return path.join(getDaemonRuntimeRoot(), key);
+}
+
+/** Root directory containing every machine-global daemon service scope. */
+export function getGlobalDaemonRuntimeRoot(): string {
+	return path.join(getBaseConfigRoot(), "run", "daemons", "global");
 }
 
 /** Get a profile-independent runtime directory for a machine-global daemon service. */
@@ -865,7 +898,7 @@ export function getGlobalDaemonRuntimeDir(service: string): string {
 	if (!/^[a-z0-9][a-z0-9._-]*$/i.test(service)) {
 		throw new Error(`Invalid global daemon service name: ${JSON.stringify(service)}`);
 	}
-	return path.join(getBaseConfigRoot(), "run", "daemons", "global", service);
+	return path.join(getGlobalDaemonRuntimeRoot(), service);
 }
 
 /** Get the provider in-flight root directory (~/.omp/run/provider-inflight; XDG default: $XDG_STATE_HOME/omp/run/provider-inflight). */
@@ -926,6 +959,17 @@ export function getSSHConfigPath(scope: "user" | "project", cwd: string = getPro
 let cachedInstallId: string | null = null;
 
 const INSTALL_ID_FILE = "install-id";
+/**
+ * Application label for usage attribution (`OMP_APP_NAME`), defaulting to
+ * `omp`. Embedders that drive omp programmatically (robomp, CI bots, …) set
+ * the env var so broker-side per-client burn tracking can answer "what did
+ * app X use" instead of folding everything into one install-wide bucket.
+ */
+export function getAppName(): string {
+	const value = process.env.OMP_APP_NAME?.trim();
+	return value ? value : "omp";
+}
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**

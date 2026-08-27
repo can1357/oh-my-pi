@@ -349,6 +349,39 @@ describe("normalizeSchemaForGoogle", () => {
 		});
 	});
 
+	it("strips the MCP x-mcp-header transport annotation on the Google wire (issue #9016)", () => {
+		// `x-mcp-header` (MCP 2026-07-28) mirrors a param into an `Mcp-Param-*`
+		// HTTP header on the Streamable HTTP transport; it is not a JSON Schema
+		// keyword and Google Cloud Code Assist 400s on the unknown field name.
+		const input = {
+			type: "object",
+			properties: {
+				owner: { type: "string", "x-mcp-header": "owner" },
+				repo: { type: "string", "x-mcp-header": "repo" },
+			},
+			required: ["owner", "repo"],
+		};
+		const stripped = {
+			type: "object",
+			properties: { owner: { type: "string" }, repo: { type: "string" } },
+			required: ["owner", "repo"],
+		};
+
+		expect(normalizeSchemaForGoogle(input)).toEqual({ ...stripped, propertyOrdering: ["owner", "repo"] });
+		expect(normalizeSchemaForCCA(input)).toEqual(stripped);
+
+		// A property literally named `x-mcp-header` is a schema-map entry, not the
+		// annotation, and must survive on every wire.
+		expect(normalizeSchemaForGoogle({ type: "object", properties: { "x-mcp-header": { type: "string" } } })).toEqual({
+			type: "object",
+			properties: { "x-mcp-header": { type: "string" } },
+		});
+
+		// MCP transport/execution reads the annotation from the raw schema, so the
+		// MCP normalizer must leave it intact.
+		expect(normalizeSchemaForMCP(input)).toEqual(input);
+	});
+
 	it("strips draft-2019 conditional keywords the OpenAPI-style wire cannot model", () => {
 		// `dependentSchemas`/`dependencies`/`dependentRequired` have no Google
 		// OpenAPI Schema representation and are not caught by residual checks, so
@@ -925,6 +958,31 @@ describe("normalizeSchemaForCCA", () => {
 				},
 			},
 			required: ["config", "name"],
+		});
+	});
+
+	it("strips annotation keywords (deprecated, readOnly, writeOnly, $comment) that Cloud Code Assist rejects", () => {
+		// MCP servers (e.g. Stitch's screen tools) annotate parameters with
+		// `deprecated: true`; CCA's protojson has no such Schema field and
+		// rejects the whole request with 400 "Cannot find field".
+		const sanitized = normalizeSchemaForCCA({
+			type: "object",
+			properties: {
+				projectId: { type: "string", deprecated: true, readOnly: true },
+				screenId: { type: "string", writeOnly: true, $comment: "internal id" },
+				name: { type: "string" },
+			},
+			required: ["name"],
+		});
+
+		expect(sanitized).toEqual({
+			type: "object",
+			properties: {
+				projectId: { type: "string" },
+				screenId: { type: "string" },
+				name: { type: "string" },
+			},
+			required: ["name"],
 		});
 	});
 

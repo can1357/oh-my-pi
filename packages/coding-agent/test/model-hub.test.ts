@@ -15,7 +15,7 @@ import {
 	type ModelHubOptions,
 	resetProviderAutoRefreshGuard,
 } from "@oh-my-pi/pi-coding-agent/modes/components/model-hub";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
@@ -281,9 +281,68 @@ describe("ModelHub", () => {
 			installTestTheme();
 
 			for (const ch of "target") hub.handleInput(ch);
+			hub.handleInput(LEFT); // switch focus to sidebar
 			hub.handleInput(UP); // skips Roles → wraps to prov-a
 			expect(normalize(hub.render(220))).toContain("prov-a ·");
 			expect(footerLine(hub.render(220))).not.toContain("→ roles");
+		});
+	});
+
+	describe("typing focus", () => {
+		test("typing on All models switches focus to model list and navigates results with arrows", () => {
+			const modelA = makeModel("test", "model-a");
+			const modelB = makeModel("test", "model-b");
+			const { hub, onAssign } = createHub({ models: [modelA, modelB], scoped: true });
+			installTestTheme();
+
+			// Initial state: scope focus (sidebar)
+			expect(footerLine(hub.render(220))).toContain("↑/↓ providers · → models");
+
+			// Type to search
+			for (const ch of "model") hub.handleInput(ch);
+
+			// Focus is now on the model list
+			expect(footerLine(hub.render(220))).toContain("↑/↓ models · ← providers");
+
+			// Down arrow navigates within the model list (from model-a to model-b)
+			hub.handleInput(DOWN);
+			hub.handleInput("\n"); // open role strip for model-b
+			expect(footerLine(hub.render(220))).toContain("model-b →");
+
+			hub.handleInput("\n"); // assign to default
+			expect(onAssign.mock.calls[0]?.[0]).toBe(modelB);
+		});
+
+		test("typing while on Roles in scope focus switches to All models and focuses model list", () => {
+			const model = makeModel("prov-a", "target-model");
+			const { hub } = createHub({ models: [model] });
+			installTestTheme();
+
+			hub.handleInput(UP); // All models → Roles (scope focus)
+			expect(footerLine(hub.render(220))).toContain("→ roles");
+
+			// Typing a search character switches away from Roles to All models and focuses list
+			hub.handleInput("t");
+			expect(normalize(hub.render(220))).toContain("All available models");
+			expect(footerLine(hub.render(220))).toContain("↑/↓ models · ← providers");
+		});
+
+		test("typing while on a locked provider in scope focus switches to All models and focuses model list", () => {
+			const model = makeModel("anthropic", "claude-locked-test");
+			const { hub } = createHub({
+				models: [model],
+				registry: { getAvailable: () => [] },
+			});
+			installTestTheme();
+
+			hub.handleInput(DOWN); // All models → locked anthropic
+			expect(normalize(hub.render(220))).toContain("anthropic has no credentials configured");
+			expect(footerLine(hub.render(220))).toContain("Enter log in");
+
+			// Typing a search character switches to All models and focuses list
+			hub.handleInput("t");
+			expect(normalize(hub.render(220))).toContain("All available models");
+			expect(footerLine(hub.render(220))).toContain("↑/↓ models · ← providers");
 		});
 	});
 
@@ -328,6 +387,23 @@ describe("ModelHub", () => {
 			expect(previewText.indexOf("smol")).toBeGreaterThan(-1);
 			expect(previewText.indexOf("smol")).toBeLessThan(previewText.indexOf("default"));
 			expect(previewText.indexOf("default")).toBeLessThan(previewText.indexOf("slow"));
+		});
+
+		test("separates the quick-cycle icon from its ordinal", () => {
+			const model = makeModel("test", "cycle-model");
+			const settings = Settings.isolated({
+				cycleOrder: ["default"],
+				modelRoles: { default: `${model.provider}/${model.id}` },
+			});
+			const { hub } = createHub({ models: [model], scoped: true, settings });
+
+			hub.handleInput(UP); // All models → Roles.
+			const defaultRow = hub
+				.render(220)
+				.map(line => stripVTControlCharacters(line))
+				.find(line => line.includes("DEFAULT"));
+
+			expect(defaultRow).toContain(`${theme.icon.loop} 1`);
 		});
 
 		test("the + New role row names a custom role and jumps into assigning it", () => {
@@ -981,10 +1057,10 @@ describe("ModelHub", () => {
 			installTestTheme();
 
 			for (const ch of "z-ai") hub.handleInput(ch);
+			hub.handleInput(LEFT); // switch focus to sidebar
 			hub.handleInput(DOWN); // skips custom-provider (0 matches), lands on openrouter
 			expect(normalize(hub.render(220))).toContain("openrouter ·");
 		});
-
 		test("providers with matches float to the top of the sidebar while searching", () => {
 			const noMatch = makeModel("aaa-provider", "different-model");
 			const withMatch = makeModel("zzz-provider", "target-model");

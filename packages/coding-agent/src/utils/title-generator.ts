@@ -6,7 +6,7 @@ import * as path from "node:path";
 
 import { type Api, type AssistantMessage, completeSimple, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
-import { isConPTYHosted } from "@oh-my-pi/pi-tui";
+import { isConPTYHosted, writeThroughActiveTerminal } from "@oh-my-pi/pi-tui";
 import { isTerminalHeadless, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 
@@ -24,6 +24,16 @@ const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
 
 const DEFAULT_TERMINAL_TITLE = "π";
 const TERMINAL_TITLE_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
+/**
+ * Emit a raw title escape sequence. While the TUI owns stdout its frames are
+ * written by an off-thread pump, and a direct `process.stdout.write` can land
+ * mid-frame — inside a torn escape sequence — making the terminal print the
+ * title payload as text into the viewport. Route through the active terminal's
+ * write path; fall back to stdout only when no TUI has the terminal.
+ */
+function writeTitleSequence(seq: string): void {
+	if (!writeThroughActiveTerminal(seq)) process.stdout.write(seq);
+}
 
 interface WindowsConsoleTitleApi {
 	set(title: string): boolean;
@@ -451,7 +461,7 @@ export function setTerminalTitle(title: string): void {
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
 	const next = sanitizeTerminalTitlePart(title) ?? DEFAULT_TERMINAL_TITLE;
 	if (next === lastTerminalTitle) return;
-	if (!setWindowsConsoleTitle(next)) process.stdout.write(`\x1b]0;${next}\x07`);
+	if (!setWindowsConsoleTitle(next)) writeTitleSequence(`\x1b]0;${next}\x07`);
 	lastTerminalTitle = next;
 }
 
@@ -596,7 +606,7 @@ export function disposeTerminalTitleState(): void {
  */
 export function pushTerminalTitle(): void {
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
-	process.stdout.write("\x1b[22;2t");
+	writeTitleSequence("\x1b[22;2t");
 }
 
 /**
@@ -604,5 +614,5 @@ export function pushTerminalTitle(): void {
  */
 export function popTerminalTitle(): void {
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
-	process.stdout.write("\x1b[23;2t");
+	writeTitleSequence("\x1b[23;2t");
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "bun:test";
 import type { MCPReconnect } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import {
+	createMCPToolName,
 	DeferredMCPTool,
 	deduplicateMCPToolsByName,
 	isRetriableConnectionError,
@@ -67,6 +68,36 @@ describe("deduplicateMCPToolsByName", () => {
 		} finally {
 			warn.mockRestore();
 		}
+	});
+});
+
+// ---------------------------------------------------------------------------
+// createMCPToolName
+// ---------------------------------------------------------------------------
+
+describe("createMCPToolName", () => {
+	it("caps overlong names at 64 chars so strict validators accept them (#9130)", () => {
+		// chrome-devtools-mcp's performance_analyze_insight minted to 68 chars,
+		// which Meta/OpenAI Responses reject with HTTP 400 "name must be at most
+		// 64 characters".
+		const name = createMCPToolName("chrome-devtools-mcp", "chrome_devtools_performance_analyze_insight");
+		expect(name.length).toBeLessThanOrEqual(64);
+		expect(name).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
+		// A readable prefix survives the cap.
+		expect(name.startsWith("mcp__chrome_devtools_mcp_")).toBe(true);
+	});
+
+	it("leaves names within the limit untouched", () => {
+		expect(createMCPToolName("puppeteer", "puppeteer_screenshot")).toBe("mcp__puppeteer_screenshot");
+	});
+
+	it("is deterministic and keeps distinct overlong names distinct", () => {
+		const a = createMCPToolName("chrome-devtools-mcp", "chrome_devtools_performance_analyze_insight");
+		const b = createMCPToolName("chrome-devtools-mcp", "chrome_devtools_performance_analyze_insight");
+		const c = createMCPToolName("chrome-devtools-mcp", "chrome_devtools_performance_analyze_something_else_entirely");
+		expect(a).toBe(b);
+		expect(a).not.toBe(c);
+		expect(c.length).toBeLessThanOrEqual(64);
 	});
 });
 

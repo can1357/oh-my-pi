@@ -17,6 +17,7 @@
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { Context, ImageContent, Model, TextContent, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import type { SnapcompactFrameSink } from "../blob-broker/service";
 import contextFramesNote from "../prompts/system/snapcompact-context-frames-note.md" with { type: "text" };
 import contextStub from "../prompts/system/snapcompact-context-stub.md" with { type: "text" };
 import systemFramesNote from "../prompts/system/snapcompact-system-frames-note.md" with { type: "text" };
@@ -413,6 +414,7 @@ export class SnapcompactInlineTransformer {
 	constructor(
 		private readonly options: SnapcompactInlineOptions,
 		private readonly onToolResultSavings?: SnapcompactSavingsSink,
+		private readonly frameSink?: SnapcompactFrameSink,
 	) {}
 
 	async transform(context: Context, model: Model): Promise<Context> {
@@ -508,10 +510,12 @@ export class SnapcompactInlineTransformer {
 			if (!cached || cached.hash !== hash) {
 				cached = {
 					hash,
-					frames: await snapcompact.renderMany(systemPromptTarget.text, {
-						shape,
-						maxFrames: MAX_SYSTEM_PROMPT_FRAMES,
-					}),
+					frames:
+						(await this.frameSink?.framesFor(systemPromptTarget.text, shape, MAX_SYSTEM_PROMPT_FRAMES)) ??
+						(await snapcompact.renderMany(systemPromptTarget.text, {
+							shape,
+							maxFrames: MAX_SYSTEM_PROMPT_FRAMES,
+						})),
 				};
 				this.#systemCache = cached;
 			}
@@ -540,7 +544,9 @@ export class SnapcompactInlineTransformer {
 		const hash = Bun.hash(text);
 		const cached = cache.get(key);
 		if (cached && cached.hash === hash) return cached.frames;
-		const frames = await snapcompact.renderMany(text, { shape });
+		// A frame sink defers rasterization until a provider actually fetches
+		// the frame URL — the cache then holds tiny placeholders, not pixels.
+		const frames = (await this.frameSink?.framesFor(text, shape)) ?? (await snapcompact.renderMany(text, { shape }));
 		cache.set(key, { hash, frames });
 		return frames;
 	}

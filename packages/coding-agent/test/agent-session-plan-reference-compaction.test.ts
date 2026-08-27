@@ -157,6 +157,9 @@ describe("AgentSession approved-plan reference re-injection after compaction (is
 
 		const settings = Settings.isolated({
 			"compaction.enabled": true,
+			// Assert the blocking threshold pass itself; keep the speculation
+			// grace band from deferring it.
+			"compaction.asyncEnabled": false,
 			"compaction.autoContinue": true,
 			"compaction.methodOrder": method === "snapcompact" ? ["snapcompact", "soft"] : ["soft"],
 			"task.eager": "default",

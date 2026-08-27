@@ -5,6 +5,7 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { bgAnsi, colorToAnsi, fgAnsi, resolveToHex } from "./color";
 import type { ColorMode, ThemeBg, ThemeColor } from "./schema";
 import {
+	type SlashCommandIconName,
 	SPINNER_FRAMES,
 	type SpinnerType,
 	SYMBOL_PRESETS,
@@ -128,6 +129,8 @@ const LANG_BRAND_COLORS: Partial<Record<SymbolKey, string>> = {
 	"lang.julia": "#9558b2",
 };
 
+const BACKGROUND_RESET_PATTERN = /\x1b\[(?:0|49)m/g;
+
 export class Theme {
 	#fgColors: Record<ThemeColor, string>;
 	#bgColors: Record<ThemeBg, string>;
@@ -205,6 +208,14 @@ export class Theme {
 		if (hex === undefined) throw new Error(`Unknown theme color: ${color}`);
 		return hex || (this.isLight ? "#000000" : "#e5e5e7");
 	}
+	/**
+	 * Get the resolved CSS hex string for a background theme color.
+	 */
+	getBgHex(color: ThemeBg): string {
+		const hex = this.#hexBgColors[color];
+		if (hex === undefined) throw new Error(`Unknown theme background color: ${color}`);
+		return hex || (this.isLight ? "#ffffff" : "#000000");
+	}
 
 	/**
 	 * Get all foreground and background theme colors as CSS hex strings.
@@ -271,6 +282,18 @@ export class Theme {
 		const ansi = this.#bgColors[color];
 		if (!ansi) throw new Error(`Unknown theme background color: ${color}`);
 		return `${ansi}${text}\x1b[49m`; // Reset only background color
+	}
+
+	/**
+	 * Apply a background fill that resumes after nested full/background resets.
+	 *
+	 * Composer rows contain styled text and cursor escapes; a normal background
+	 * wrapper would otherwise stop at the first nested reset.
+	 */
+	bgFill(color: ThemeBg, text: string): string {
+		const ansi = this.#bgColors[color];
+		if (!ansi) throw new Error(`Unknown theme background color: ${color}`);
+		return `${ansi}${text.replace(BACKGROUND_RESET_PATTERN, `$&${ansi}`)}\x1b[49m`;
 	}
 
 	bold(text: string): string {
@@ -498,9 +521,12 @@ export class Theme {
 			git: this.#symbols["icon.git"],
 			branch: this.#symbols["icon.branch"],
 			pr: this.#symbols["icon.pr"],
+			pin: this.#symbols["icon.pin"],
 			tokens: this.#symbols["icon.tokens"],
 			context: this.#symbols["icon.context"],
 			cost: this.#symbols["icon.cost"],
+			subscription: this.#symbols["icon.subscription"],
+			advisor: this.#symbols["icon.advisor"],
 			time: this.#symbols["icon.time"],
 			pi: this.#symbols["icon.pi"],
 			ghost: this.#symbols["icon.ghost"],
@@ -529,6 +555,81 @@ export class Theme {
 			extensionInstruction: this.#symbols["icon.extensionInstruction"],
 			mic: this.#symbols["icon.mic"],
 			camera: this.#symbols["icon.camera"],
+		};
+	}
+
+	/** Slash-command type-indicator glyphs for the autocomplete icon column. */
+	get cmd(): Record<SlashCommandIconName, string> {
+		return {
+			action: this.#symbols["cmd.action"],
+			prompt: this.#symbols["cmd.prompt"],
+			extension: this.#symbols["cmd.extension"],
+			settings: this.#symbols["cmd.settings"],
+			gear: this.#symbols["cmd.gear"],
+			shield: this.#symbols["cmd.shield"],
+			wave: this.#symbols["cmd.wave"],
+			compass: this.#symbols["cmd.compass"],
+			inbox: this.#symbols["cmd.inbox"],
+			swap: this.#symbols["cmd.swap"],
+			expand: this.#symbols["cmd.expand"],
+			computer: this.#symbols["cmd.computer"],
+			eye: this.#symbols["cmd.eye"],
+			todo: this.#symbols["cmd.todo"],
+			stats: this.#symbols["cmd.stats"],
+			news: this.#symbols["cmd.news"],
+			keyboard: this.#symbols["cmd.keyboard"],
+			export: this.#symbols["cmd.export"],
+			clipboard: this.#symbols["cmd.clipboard"],
+			share: this.#symbols["cmd.share"],
+			broadcast: this.#symbols["cmd.broadcast"],
+			globe: this.#symbols["cmd.globe"],
+			copy: this.#symbols["cmd.copy"],
+			plus: this.#symbols["cmd.plus"],
+			restart: this.#symbols["cmd.restart"],
+			eraser: this.#symbols["cmd.eraser"],
+			trash: this.#symbols["cmd.trash"],
+			compress: this.#symbols["cmd.compress"],
+			vibrate: this.#symbols["cmd.vibrate"],
+			handoff: this.#symbols["cmd.handoff"],
+			history: this.#symbols["cmd.history"],
+			question: this.#symbols["cmd.question"],
+			rocket: this.#symbols["cmd.rocket"],
+			stethoscope: this.#symbols["cmd.stethoscope"],
+			redo: this.#symbols["cmd.redo"],
+			bug: this.#symbols["cmd.bug"],
+			memory: this.#symbols["cmd.memory"],
+			pencil: this.#symbols["cmd.pencil"],
+			folderMove: this.#symbols["cmd.folderMove"],
+			folderPlus: this.#symbols["cmd.folderPlus"],
+			folderMinus: this.#symbols["cmd.folderMinus"],
+			hammer: this.#symbols["cmd.hammer"],
+			power: this.#symbols["cmd.power"],
+			cart: this.#symbols["cmd.cart"],
+			model: this.#symbols["icon.model"],
+			plan: this.#symbols["icon.plan"],
+			prewalk: this.#symbols["icon.prewalk"],
+			goal: this.#symbols["icon.goal"],
+			pause: this.#symbols["icon.pause"],
+			loop: this.#symbols["icon.loop"],
+			session: this.#symbols["icon.session"],
+			jobs: this.#symbols["icon.job"],
+			gauge: this.#symbols["icon.throughput"],
+			context: this.#symbols["icon.context"],
+			agents: this.#symbols["icon.agents"],
+			branch: this.#symbols["icon.branch"],
+			tree: this.#symbols["icon.worktree"],
+			signIn: this.#symbols["icon.input"],
+			signOut: this.#symbols["icon.output"],
+			advisor: this.#symbols["icon.advisor"],
+			host: this.#symbols["icon.host"],
+			package: this.#symbols["icon.package"],
+			fast: this.#symbols["icon.fast"],
+			voice: this.#symbols["icon.mic"],
+			tools: this.#symbols["icon.extensionTool"],
+			rule: this.#symbols["icon.extensionRule"],
+			skill: this.#symbols["icon.extensionSkill"],
+			mcp: this.#symbols["icon.extensionMcp"],
+			pin: this.#symbols["icon.pin"],
 		};
 	}
 

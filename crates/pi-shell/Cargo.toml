@@ -2,7 +2,7 @@
 name = "pi-shell"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "MIT"
 authors.workspace = true
 repository.workspace = true
 # Portions of the minimizer adapt MIT-licensed algorithms from rtk-ai/rtk.

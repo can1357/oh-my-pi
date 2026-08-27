@@ -189,6 +189,20 @@ it("allow_once: calls bridge once and executes the underlying tool", async () =>
 	expect(bashTool.executeCalls).toBe(1);
 });
 
+it("eval bridge dispatch uses the same ACP gate as a direct tool call", async () => {
+	const bashTool = makeFakeTool("bash");
+	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	session = await createSession([bashTool], bridge);
+
+	await session.setActiveToolsByName(["bash"]);
+	const bridgedBash = session.getToolForEvalBridge("bash");
+	await bridgedBash!.execute("call-bridge", { command: "echo hi" }, undefined, undefined as never, undefined as never);
+
+	expect(permissionSpy).toHaveBeenCalledTimes(1);
+	expect(bashTool.executeCalls).toBe(1);
+});
+
 it("explicit yolo approval mode skips the ACP permission gate", async () => {
 	const bashTool = makeFakeTool("bash");
 	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });

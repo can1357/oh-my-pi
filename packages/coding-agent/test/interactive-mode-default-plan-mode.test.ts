@@ -29,8 +29,12 @@ function makeTool(name: string): AgentTool {
 interface HarnessOptions {
 	extraRegistryTools?: readonly AgentTool[];
 	builtInToolNames?: Iterable<string>;
+	/** Registry tools active from the first turn, alongside the built-in `read`. */
+	initialActiveTools?: readonly AgentTool[];
 	rebuildGate?: { fail: boolean; calls?: number };
 	xdev?: XdevState;
+	/** Provider/id of the initial model; defaults to `anthropic/claude-sonnet-4-5`. */
+	initialModel?: { provider: string; id: string };
 }
 
 describe("InteractiveMode plan.defaultOnStartup", () => {
@@ -78,7 +82,13 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 	 *  entries still have built-in provenance after extension shadowing. */
 	function createHarness(settings: Settings, options: HarnessOptions = {}): InteractiveMode {
 		const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), `models-${Bun.nanoseconds()}.yml`));
-		const initialModel = modelOrThrow(registry, "claude-sonnet-4-5");
+		const requested = options.initialModel;
+		const initialModel = requested
+			? (registry.find(requested.provider, requested.id) ??
+				(() => {
+					throw new Error(`Expected ${requested.provider}/${requested.id} to exist`);
+				})())
+			: modelOrThrow(registry, "claude-sonnet-4-5");
 		const readTool = makeTool("read");
 		// AgentSession requires a Map-typed tool registry; `read` is the initial
 		// active tool. Plan approval is a `write` to xd://propose, so plan-mode
@@ -95,7 +105,7 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 				initialState: {
 					model: initialModel,
 					systemPrompt: ["Test"],
-					tools: [readTool],
+					tools: [readTool, ...(options.initialActiveTools ?? [])],
 					messages: [],
 					thinkingLevel: Effort.Medium,
 				},
@@ -187,6 +197,36 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 
 		expect(created.planModeEnabled).toBe(true);
 		expect(session?.getActiveToolNames()).toContain("write");
+	});
+
+	it("keeps write on the direct surface when plan mode starts under Code Mode", async () => {
+		// Plan approval is a top-level `write` to `xd://propose`. Code Mode demotes
+		// every non-direct tool behind `eval`, and the partition only keeps `write`
+		// direct while a transport needs it — so plan mode state must be visible
+		// before the entry partition runs, or approval strands inside an eval result.
+		const evalTool = { ...makeTool("eval"), supportsCodeModeTransport: () => true };
+		const created = createHarness(
+			Settings.isolated({
+				"plan.defaultOnStartup": true,
+				"compaction.enabled": false,
+				"providers.openai-codex.codeMode": "auto",
+			}),
+			{
+				extraRegistryTools: [makeTool("write"), evalTool],
+				builtInToolNames: ["read", "write"],
+				initialActiveTools: [evalTool],
+				initialModel: { provider: "openai-codex", id: "gpt-5.6-sol" },
+			},
+		);
+
+		await created.init({ suppressWelcomeIntro: true });
+
+		expect(created.planModeEnabled).toBe(true);
+		expect(session?.getActiveToolNames()).toContain("write");
+		// The eval tool advertises the bridge from this set, so a direct `write`
+		// must never appear as `tool.write()`.
+		expect(session?.getCodeModeDirectToolNames()).toContain("write");
+		expect(session?.getActiveToolNames()).toContain("eval");
 	});
 
 	it("does not activate an extension-shadowed write tool in plan mode", async () => {

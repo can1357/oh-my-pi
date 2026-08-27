@@ -1,5 +1,6 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as fs from "node:fs";
+import { TtyWriter } from "@oh-my-pi/pi-natives";
 import {
 	$env,
 	isBunTestRuntime,
@@ -230,6 +231,20 @@ function registerPostmortemTerminalRestore(): void {
 export function setAltScreenActive(active: boolean): void {
 	altScreenActive = active;
 }
+/**
+ * Route an out-of-band escape sequence (e.g. an OSC title update) through the
+ * active terminal's output path. While a TUI owns stdout, frame paints go
+ * through the off-thread write pump and can split across multiple write(2)
+ * calls; a direct main-thread `process.stdout.write` can land between two of
+ * them — mid escape sequence — and the host terminal then prints the payload
+ * as literal text at the cursor position. Returns false when no terminal has
+ * started, in which case the caller owns stdout and may write directly.
+ */
+export function writeThroughActiveTerminal(data: string): boolean {
+	if (!activeTerminal) return false;
+	activeTerminal.write(data);
+	return true;
+}
 
 const stdoutErrorHandlers = new Set<(err: Error) => void>();
 let stdoutErrorListenerInstalled = false;
@@ -377,11 +392,37 @@ export function emergencyTerminalRestore(): void {
 }
 /** Terminal-reported appearance (dark/light mode). */
 export type TerminalAppearance = "dark" | "light";
+/** Options for {@link Terminal.start}. */
+export interface TerminalStartOptions {
+	/**
+	 * Paint-only start: skip raw mode, stdin ownership, and every probe that
+	 * elicits a response on stdin. The host tty keeps cooked-mode line editing
+	 * (kernel echo lands at the hardware cursor), and typed bytes stay queued
+	 * in the kernel until {@link Terminal.enableInput} takes ownership and
+	 * replays them through `onInput`. Used for the startup prepaint so typing
+	 * echoes even while module loading blocks the event loop.
+	 */
+	deferInput?: boolean;
+}
 /** Identity of an accepted explicit terminal appearance refresh request. */
 export type TerminalAppearanceRequestToken = number;
 export interface Terminal {
 	// Start the terminal with input, resize, and host-disconnect handlers.
-	start(onInput: (data: string) => void, onResize: () => void, onDisconnect?: () => void): void;
+	start(
+		onInput: (data: string) => void,
+		onResize: () => void,
+		onDisconnect?: () => void,
+		options?: TerminalStartOptions,
+	): void;
+
+	/**
+	 * Take ownership of stdin after a `deferInput` start: enable raw mode,
+	 * attach input handlers, and run the capability probes start() skipped.
+	 * Bytes the user typed in cooked mode meanwhile are replayed through
+	 * `onInput`. No-op when input was never deferred. Optional so custom
+	 * Terminals built against older pi-tui versions keep working.
+	 */
+	enableInput?(): void;
 
 	// Stop the terminal and restore state
 	stop(): void;
@@ -400,6 +441,14 @@ export interface Terminal {
 	// Get terminal dimensions
 	get columns(): number;
 	get rows(): number;
+	/**
+	 * Output bytes accepted but not yet delivered to the terminal, when the
+	 * implementation can report it. The renderer skips composing new frames
+	 * while this backlog is deep, so a slow terminal receives only fresh
+	 * frames instead of a queue of stale ones. Optional so custom Terminals
+	 * built against older pi-tui versions keep working.
+	 */
+	readonly pendingOutputBytes?: number;
 
 	// Whether Kitty keyboard protocol is active
 	get kittyProtocolActive(): boolean;
@@ -539,6 +588,8 @@ export class ProcessTerminal implements Terminal {
 	#wasRaw = false;
 	#inputHandler?: (data: string) => void;
 	#resizeHandler?: () => void;
+	/** True between a `deferInput` start() and enableInput(). */
+	#inputDeferred = false;
 	#stdoutResizeListener?: () => void;
 	#kittyProtocolActive = false;
 	#kittyEnableSeq: string | null = null;
@@ -578,6 +629,12 @@ export class ProcessTerminal implements Terminal {
 	// and the writable buffer grows without bound as cosmetic frames pile up.
 	// See OutputBacklogGuard and #6854.
 	#stdoutBacklog = new OutputBacklogGuard();
+	// Off-thread output pump (unix TTYs): Bun's `process.stdout.write` blocks
+	// the event loop until the terminal drains, so a slow/occluded emulator
+	// froze the whole TUI for the duration of a multi-MB repaint. The pump
+	// enqueues frames and performs the blocking write(2) on its own thread;
+	// `pendingOutputBytes` exposes the backlog for render-side frame skipping.
+	#outputPump?: TtyWriter;
 	#stdoutDrainArmed = false;
 	#stdoutDrainHandler = () => {
 		this.#stdoutDrainArmed = false;
@@ -697,7 +754,12 @@ export class ProcessTerminal implements Terminal {
 		this.#privateModeCallbacks.push(callback);
 	}
 
-	start(onInput: (data: string) => void, onResize: () => void, onDisconnect?: () => void): void {
+	start(
+		onInput: (data: string) => void,
+		onResize: () => void,
+		onDisconnect?: () => void,
+		options?: TerminalStartOptions,
+	): void {
 		this.#inputHandler = onInput;
 		this.#resizeHandler = onResize;
 		this.#disconnectHandler = onDisconnect;
@@ -715,12 +777,65 @@ export class ProcessTerminal implements Terminal {
 		// Register for emergency cleanup
 		activeTerminal = this;
 		terminalEverStarted = true;
+		// Own the blocking write(2) on a pump thread (unix TTYs only). A stale
+		// prebuilt natives module without the export falls back to direct writes.
+		// Test suites spy on `process.stdout.write` with a faked isTTY, so the
+		// pump stays off under `bun test` — same philosophy as isTerminalHeadless.
+		if (process.platform !== "win32" && process.stdout.isTTY && !isBunTestRuntime() && !this.#outputPump) {
+			try {
+				this.#outputPump = new TtyWriter(1);
+			} catch (err) {
+				logger.debug("tty output pump unavailable; using direct stdout writes", { err: String(err) });
+			}
+		}
 
 		// Keep unmanaged fd-2 writes (macOS libmalloc/framework diagnostics) off
 		// the viewport while we own the terminal; released in stop(). See
 		// stderr-guard in pi-utils (mirrors openai/codex#24459).
 		suppressTerminalStderr();
 
+		// Set up resize handler immediately. The OS refreshes process.stdout
+		// dimensions before firing `resize`, so it is authoritative for geometry:
+		// reconcile any stale cached DEC 2048 report before notifying the renderer.
+		this.#stdoutResizeListener = () => {
+			// Conservative: some hosts reset modes across a resize/reattach, so
+			// re-establish cursor visibility on the next explicit call.
+			this.#cursorVisible = undefined;
+			this.#reconcileInBandGeometryOnResize();
+			this.#resizeHandler?.();
+		};
+		process.stdout.on("resize", this.#stdoutResizeListener);
+
+		// Refresh terminal dimensions - they may be stale after suspend/resume
+		// (SIGWINCH is lost while process is stopped). Unix only.
+		if (process.platform !== "win32") {
+			process.kill(process.pid, "SIGWINCH");
+		}
+
+		setHangulCompatibilityJamoWidth(TERMINAL.hangulJamoWidth);
+
+		if (options?.deferInput) {
+			this.#inputDeferred = true;
+			return;
+		}
+		this.#attachInput();
+	}
+
+	enableInput(): void {
+		if (!this.#inputDeferred) return;
+		this.#inputDeferred = false;
+		if (this.#headless || this.#dead) return;
+		this.#attachInput();
+	}
+
+	/**
+	 * Own stdin: raw mode, input listeners, and the capability probes that
+	 * elicit stdin responses. Split from start() so a `deferInput` prepaint can
+	 * leave the tty in cooked mode (kernel echo + line editing) while startup
+	 * module loading blocks the event loop, then adopt the kernel-buffered
+	 * keystrokes here once the app can process them.
+	 */
+	#attachInput(): void {
 		// A multiplexer or SSH disconnect can leave isTTY true after its pty has
 		// been revoked. Raw mode is then impossible, so take the normal terminal
 		// disconnect path rather than letting Bun abort startup with EIO.
@@ -751,24 +866,6 @@ export class ProcessTerminal implements Terminal {
 		// See #6374.
 		this.#safeWrite("\x1b[?1l\x1b>");
 
-		// Set up resize handler immediately. The OS refreshes process.stdout
-		// dimensions before firing `resize`, so it is authoritative for geometry:
-		// reconcile any stale cached DEC 2048 report before notifying the renderer.
-		this.#stdoutResizeListener = () => {
-			// Conservative: some hosts reset modes across a resize/reattach, so
-			// re-establish cursor visibility on the next explicit call.
-			this.#cursorVisible = undefined;
-			this.#reconcileInBandGeometryOnResize();
-			this.#resizeHandler?.();
-		};
-		process.stdout.on("resize", this.#stdoutResizeListener);
-
-		// Refresh terminal dimensions - they may be stale after suspend/resume
-		// (SIGWINCH is lost while process is stopped). Unix only.
-		if (process.platform !== "win32") {
-			process.kill(process.pid, "SIGWINCH");
-		}
-
 		// On Windows, enable ENABLE_VIRTUAL_TERMINAL_INPUT so the console sends
 		// VT escape sequences (e.g. \x1b[Z for Shift+Tab) instead of raw console
 		// events that lose modifier information. Must run after setRawMode(true)
@@ -781,8 +878,6 @@ export class ProcessTerminal implements Terminal {
 		// Explicit probes are safe only after their response parser and stdin
 		// data handler are installed. Keep this false throughout temporary stops.
 		this.#active = true;
-		setHangulCompatibilityJamoWidth(TERMINAL.hangulJamoWidth);
-
 		// Query terminal background color via OSC 11 for dark/light detection.
 		// Uses DA1 (Primary Device Attributes) as a sentinel: terminals process
 		// sequences in order, so if DA1 arrives before OSC 11 response,
@@ -1530,6 +1625,7 @@ export class ProcessTerminal implements Terminal {
 	stop(): void {
 		// Suppress observer/timer callbacks before any teardown can yield or throw.
 		this.#active = false;
+		this.#inputDeferred = false;
 		if (this.#headless) return;
 		// Unregister from emergency cleanup
 		if (activeTerminal === this) {
@@ -1649,6 +1745,13 @@ export class ProcessTerminal implements Terminal {
 		}
 		this.#stdoutBacklog.reset();
 		this.#resizeHandler = undefined;
+		// Flush the restore sequences enqueued above (bounded — a stalled PTY
+		// must not wedge exit), then retire the pump. Later writes (emergency
+		// restore's showCursor) fall back to direct stdout writes.
+		if (this.#outputPump) {
+			this.#outputPump.stop(1000);
+			this.#outputPump = undefined;
+		}
 
 		// Pause stdin to prevent any buffered input (e.g., Ctrl+D) from being
 		// re-interpreted after raw mode is disabled. This fixes a race condition
@@ -1724,6 +1827,23 @@ export class ProcessTerminal implements Terminal {
 		if (!process.stdout.isTTY) return;
 		this.#ensureStdoutErrorHandler();
 		this.#trackCursorVisibility(data);
+		const pump = this.#outputPump;
+		if (pump) {
+			if (pump.dead) {
+				this.#markTerminalDisconnected("stdout failed; output pump died");
+				return;
+			}
+			try {
+				// Same stalled-consumer bound as the stream path (#6854): a PTY reader
+				// that never drains must tear the terminal down, not grow the queue.
+				if (pump.write(data) > MAX_STDOUT_BACKLOG_BYTES) {
+					this.#markTerminalDisconnected("stdout backlog exceeded cap; PTY consumer stalled");
+				}
+			} catch (err) {
+				this.#markTerminalDisconnected("stdout failed", err);
+			}
+			return;
+		}
 		// A console-sharing child process may have flipped the console codepage
 		// away from UTF-8; repair it before any bytes hit WriteFile so no frame
 		// is ever translated through an OEM codepage. See ensureWindowsConsoleUtf8.
@@ -1770,6 +1890,11 @@ export class ProcessTerminal implements Terminal {
 	get columns(): number {
 		if (this.#inBandResizeActive && this.#reportedColumns) return this.#reportedColumns;
 		return process.stdout.columns || Number(Bun.env.COLUMNS) || 80;
+	}
+	get pendingOutputBytes(): number {
+		if (this.#outputPump) return this.#outputPump.pending();
+		// Stream fallback: bytes queued past the high-water mark by refused writes.
+		return process.stdout.writableLength ?? 0;
 	}
 
 	get rows(): number {

@@ -9,6 +9,7 @@ const PATH_DELIMITERS = new Set([" ", "\t", '"', "'", "="]);
 function buildAutocompleteFuzzyDiscoveryProfile(
 	query: string,
 	basePath: string,
+	signal?: AbortSignal,
 ): {
 	query: string;
 	path: string;
@@ -16,6 +17,7 @@ function buildAutocompleteFuzzyDiscoveryProfile(
 	hidden: boolean;
 	gitignore: boolean;
 	cache: boolean;
+	signal?: AbortSignal;
 } {
 	return {
 		query,
@@ -24,6 +26,7 @@ function buildAutocompleteFuzzyDiscoveryProfile(
 		hidden: true,
 		gitignore: true,
 		cache: true,
+		...(signal ? { signal } : {}),
 	};
 }
 
@@ -171,6 +174,8 @@ export interface AutocompleteItem {
 	value: string;
 	label: string;
 	description?: string;
+	/** Optional type-indicator glyph rendered in an aligned column before the label */
+	icon?: string;
 	/** Dim hint text shown inline after cursor when this item is selected */
 	hint?: string;
 }
@@ -181,6 +186,8 @@ export interface SlashCommand {
 	name: string;
 	aliases?: string[];
 	description?: string;
+	/** Optional type-indicator glyph shown before the command name in autocomplete */
+	icon?: string;
 	argumentHint?: string;
 	/** Whether the command consumes argument text after the command name. False means the full input stays normal prompt text once args are present. */
 	allowArgs?: boolean;
@@ -194,11 +201,12 @@ export interface SlashCommand {
 }
 
 export interface AutocompleteProvider {
-	/** Get autocomplete suggestions for current text/cursor position */
+	/** Get autocomplete suggestions for current text/cursor position. Expensive providers SHOULD stop when `signal` aborts. */
 	getSuggestions(
 		lines: string[],
 		cursorLine: number,
 		cursorCol: number,
+		signal?: AbortSignal,
 	): Promise<{
 		items: AutocompleteItem[];
 		prefix: string; // What we're matching against (e.g., "/" or "src/")
@@ -237,11 +245,13 @@ export interface AutocompleteProvider {
 	 * Force file-path completion (called on Tab). Returns matched items plus the
 	 * full prefix, or null when no path token sits before the cursor. Present on
 	 * file-aware providers; absent on slash-only ones.
+	 * Expensive providers SHOULD stop when `signal` aborts.
 	 */
 	getForceFileSuggestions?(
 		lines: string[],
 		cursorLine: number,
 		cursorCol: number,
+		signal?: AbortSignal,
 	): Promise<{ items: AutocompleteItem[]; prefix: string } | null>;
 
 	/** Whether a Tab press should attempt file completion at the cursor. */
@@ -249,6 +259,11 @@ export interface AutocompleteProvider {
 }
 
 type CommandEntry = SlashCommand | AutocompleteItem;
+/** Optional behaviors for {@link CombinedAutocompleteProvider}. */
+export interface CombinedAutocompleteOptions {
+	/** Usage count per command name; higher counts rank earlier among equal text-match scores. */
+	commandUsage?: (name: string) => number;
+}
 
 function getCommandName(cmd: CommandEntry): string | undefined {
 	return "name" in cmd ? cmd.name : cmd.value;
@@ -287,64 +302,88 @@ export function scoreCommandTextMatch(lowerPrefix: string, lowerTarget: string):
 	return fuzzyMatch(lowerPrefix, lowerTarget) ? fuzzyScore(lowerPrefix, lowerTarget) : 0;
 }
 
-function buildSlashCommandCompletions(commands: CommandEntry[], lowerPrefix: string): AutocompleteItem[] {
-	return commands
-		.flatMap(cmd => {
-			const name = getCommandName(cmd);
-			if (!name) return [];
-			const hint = "argumentHint" in cmd && cmd.argumentHint ? cmd.argumentHint : undefined;
-			const staticDesc = getStaticCommandDescription(cmd);
-			let fullDescMemo: string | undefined;
-			let fullDescComputed = false;
-			// Resolve the (possibly live) display description lazily, only once a
-			// candidate actually matches — getAutocompleteDescription reads live
-			// session state and must not run for every command on each keystroke.
-			const resolveFullDesc = (): string | undefined => {
-				if (!fullDescComputed) {
-					const displayDesc = getAutocompleteCommandDescription(cmd);
-					fullDescMemo = hint ? (displayDesc ? `${hint} - ${displayDesc}` : hint) : displayDesc;
-					fullDescComputed = true;
-				}
-				return fullDescMemo;
-			};
-			let best: (AutocompleteItem & { score: number }) | undefined;
-
-			const isSkillCommand = name.startsWith("skill:");
-			const nameScore =
-				lowerPrefix.length === 0 && isSkillCommand ? 950 : scoreCommandTextMatch(lowerPrefix, name.toLowerCase());
-			const lowerDesc = staticDesc.toLowerCase();
-			const descScore =
-				lowerDesc && fuzzyMatch(lowerPrefix, lowerDesc) ? fuzzyScore(lowerPrefix, lowerDesc) * 0.5 : 0;
-			const primaryScore = Math.max(nameScore, descScore);
-			if (primaryScore > 0) {
-				const fullDesc = resolveFullDesc();
-				best = {
-					value: name,
-					label: "name" in cmd ? cmd.name : cmd.label,
-					score: primaryScore,
-					...(fullDesc && { description: fullDesc }),
+function buildSlashCommandCompletions(
+	commands: CommandEntry[],
+	lowerPrefix: string,
+	commandUsage?: (name: string) => number,
+): AutocompleteItem[] {
+	return (
+		commands
+			.flatMap(cmd => {
+				const name = getCommandName(cmd);
+				if (!name) return [];
+				const usage = commandUsage?.(name) ?? 0;
+				const hint = "argumentHint" in cmd && cmd.argumentHint ? cmd.argumentHint : undefined;
+				const staticDesc = getStaticCommandDescription(cmd);
+				let fullDescMemo: string | undefined;
+				let fullDescComputed = false;
+				// Resolve the (possibly live) display description lazily, only once a
+				// candidate actually matches — getAutocompleteDescription reads live
+				// session state and must not run for every command on each keystroke.
+				const resolveFullDesc = (): string | undefined => {
+					if (!fullDescComputed) {
+						const displayDesc = getAutocompleteCommandDescription(cmd);
+						fullDescMemo = hint ? (displayDesc ? `${hint} - ${displayDesc}` : hint) : displayDesc;
+						fullDescComputed = true;
+					}
+					return fullDescMemo;
 				};
-			}
+				let best: (AutocompleteItem & { score: number; usage: number }) | undefined;
 
-			if (lowerPrefix.length > 0) {
-				for (const alias of getCommandAliases(cmd)) {
-					if (alias === name) continue;
-					const aliasScore = scoreCommandTextMatch(lowerPrefix, alias.toLowerCase());
-					if (aliasScore === 0 || (best && aliasScore <= best.score)) continue;
+				const isSkillCommand = name.startsWith(SKILL_NAMESPACE);
+				// Skills are matched by their bare name as well as the full
+				// `skill:` name so a broken-out or mid-prompt skill ranks at
+				// prefix strength (`/batch` → `skill:batch`) instead of a weak
+				// full-name fuzzy hit.
+				const nameScore =
+					lowerPrefix.length === 0 && isSkillCommand
+						? 950
+						: isSkillCommand
+							? Math.max(
+									scoreCommandTextMatch(lowerPrefix, name.toLowerCase()),
+									scoreCommandTextMatch(lowerPrefix, name.slice(SKILL_NAMESPACE.length).toLowerCase()),
+								)
+							: scoreCommandTextMatch(lowerPrefix, name.toLowerCase());
+				const lowerDesc = staticDesc.toLowerCase();
+				const descScore =
+					lowerDesc && fuzzyMatch(lowerPrefix, lowerDesc) ? fuzzyScore(lowerPrefix, lowerDesc) * 0.5 : 0;
+				const primaryScore = Math.max(nameScore, descScore);
+				if (primaryScore > 0) {
 					const fullDesc = resolveFullDesc();
 					best = {
-						value: alias,
-						label: alias,
-						score: aliasScore,
+						value: name,
+						label: "name" in cmd ? cmd.name : cmd.label,
+						score: primaryScore,
+						usage,
+						...(cmd.icon && { icon: cmd.icon }),
 						...(fullDesc && { description: fullDesc }),
 					};
 				}
-			}
 
-			return best ? [best] : [];
-		})
-		.sort((a, b) => b.score - a.score)
-		.map(({ score: _, ...rest }) => rest);
+				if (lowerPrefix.length > 0) {
+					for (const alias of getCommandAliases(cmd)) {
+						if (alias === name) continue;
+						const aliasScore = scoreCommandTextMatch(lowerPrefix, alias.toLowerCase());
+						if (aliasScore === 0 || (best && aliasScore <= best.score)) continue;
+						const fullDesc = resolveFullDesc();
+						best = {
+							value: alias,
+							label: alias,
+							score: aliasScore,
+							usage,
+							...(cmd.icon && { icon: cmd.icon }),
+							...(fullDesc && { description: fullDesc }),
+						};
+					}
+				}
+
+				return best ? [best] : [];
+			})
+			// Equal text-match scores fall back to usage frequency, then to the
+			// stable registry order.
+			.sort((a, b) => b.score - a.score || b.usage - a.usage)
+			.map(({ score: _, usage: _usage, ...rest }) => rest)
+	);
 }
 
 function hasPromptTextBeforeSlash(
@@ -359,7 +398,68 @@ function hasPromptTextBeforeSlash(
 	return textBeforeCursor.slice(0, slashStart).trim() !== "";
 }
 
-const SKILL_NAMESPACE = "skill:";
+export const SKILL_NAMESPACE = "skill:";
+
+/**
+ * Match tier used to compare a skill's bare name against non-skill command
+ * names when deciding whether the skill may break out of the collapsed
+ * `skill:` group: exact (1000) > prefix (900) > anything weaker (0). Fuzzy
+ * hits deliberately map to 0 — a fuzzy skill match is never strong enough to
+ * mix skills into the command popup.
+ */
+function skillBreakoutTier(lowerPrefix: string, lowerTarget: string): number {
+	if (lowerPrefix === lowerTarget) return 1000;
+	if (lowerTarget.startsWith(lowerPrefix)) return 900;
+	return 0;
+}
+
+/**
+ * Collapse `skill:*` commands into a single `/skill:` namespace row while the
+ * typed prefix has not committed to the namespace. A lone group entry (shown
+ * only while the prefix is still a prefix of `skill:`) keeps the `/` popup
+ * readable. A skill breaks out of the group only when its bare name matches
+ * the prefix at a strictly stronger tier than every non-skill command name
+ * and alias (`/batch` → `skill:batch` while no command prefix-matches
+ * `batch`); a tie keeps the popup command-only, and fuzzy-only skill hits
+ * never surface. Accepting the group inserts `/skill:` without a trailing
+ * space so the reopened popup expands to the individual skills.
+ */
+function collapseSkillNamespace(commands: CommandEntry[], lowerPrefix: string): CommandEntry[] {
+	if (lowerPrefix.startsWith(SKILL_NAMESPACE)) return commands;
+	const approachesNamespace = SKILL_NAMESPACE.startsWith(lowerPrefix);
+	let commandTier = 0;
+	if (!approachesNamespace) {
+		for (const cmd of commands) {
+			const name = getCommandName(cmd);
+			if (!name || name.startsWith(SKILL_NAMESPACE)) continue;
+			commandTier = Math.max(commandTier, skillBreakoutTier(lowerPrefix, name.toLowerCase()));
+			for (const alias of getCommandAliases(cmd)) {
+				commandTier = Math.max(commandTier, skillBreakoutTier(lowerPrefix, alias.toLowerCase()));
+			}
+			if (commandTier === 1000) break;
+		}
+	}
+	let skillCount = 0;
+	let skillIcon: string | undefined;
+	const rest = commands.filter(cmd => {
+		const name = getCommandName(cmd);
+		if (!name?.startsWith(SKILL_NAMESPACE)) return true;
+		skillCount += 1;
+		skillIcon ??= cmd.icon;
+		return (
+			!approachesNamespace &&
+			skillBreakoutTier(lowerPrefix, name.slice(SKILL_NAMESPACE.length).toLowerCase()) > commandTier
+		);
+	});
+	if (skillCount === 0) return commands;
+	if (!SKILL_NAMESPACE.startsWith(lowerPrefix)) return rest;
+	rest.push({
+		name: SKILL_NAMESPACE,
+		description: `${skillCount} skill${skillCount === 1 ? "" : "s"}`,
+		...(skillIcon && { icon: skillIcon }),
+	});
+	return rest;
+}
 
 /**
  * Whether a mid-prompt slash token (`prose … /tok`) is skill-shaped enough to
@@ -401,22 +501,30 @@ function buildMidPromptSkillCompletions(commands: CommandEntry[], lowerPrefix: s
 export class CombinedAutocompleteProvider implements AutocompleteProvider {
 	#commands: CommandEntry[];
 	#basePath: string;
+	#commandUsage?: (name: string) => number;
 	// Intentionally separate from pi-natives cache: this cache is a local,
 	// per-directory readdir fast-path for prefix completions. Global fuzzy
 	// discovery continues to use native fuzzyFind + shared scan cache.
 	#dirCache: Map<string, { entries: fs.Dirent[]; timestamp: number }> = new Map();
 	readonly #DIR_CACHE_TTL = 2000; // 2 seconds
 
-	constructor(commands: CommandEntry[] = [], basePath: string = getProjectDir()) {
+	constructor(
+		commands: CommandEntry[] = [],
+		basePath: string = getProjectDir(),
+		options?: CombinedAutocompleteOptions,
+	) {
 		this.#commands = commands;
 		this.#basePath = basePath;
+		this.#commandUsage = options?.commandUsage;
 	}
 
 	async getSuggestions(
 		lines: string[],
 		cursorLine: number,
 		cursorCol: number,
+		signal?: AbortSignal,
 	): Promise<{ items: AutocompleteItem[]; prefix: string } | null> {
+		if (signal?.aborted) return null;
 		const currentLine = lines[cursorLine] || "";
 		const textBeforeCursor = currentLine.slice(0, cursorCol);
 
@@ -444,7 +552,11 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 
 				const matches = isMidPromptSkillLookup
 					? buildMidPromptSkillCompletions(this.#commands, lowerPrefix)
-					: buildSlashCommandCompletions(this.#commands, lowerPrefix);
+					: buildSlashCommandCompletions(
+							collapseSkillNamespace(this.#commands, lowerPrefix),
+							lowerPrefix,
+							this.#commandUsage,
+						);
 
 				if (matches.length > 0) {
 					return {
@@ -508,7 +620,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			}
 			const suggestions =
 				rawPrefix.length > 0
-					? await this.#getFuzzyFileSuggestions(rawPrefix, { isQuotedPrefix })
+					? await this.#getFuzzyFileSuggestions(rawPrefix, { isQuotedPrefix, signal })
 					: await this.#getFileSuggestions("@");
 			if (suggestions.length === 0 && rawPrefix.length > 0) {
 				const fallback = await this.#getFileSuggestions(atPrefix);
@@ -601,14 +713,18 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			const slashPrefix = textBeforeCursor.slice(leadingSlashStart);
 			if (!slashPrefix.includes(" ") && !slashPrefix.slice(1).includes("/")) {
 				const beforeSlash = currentLine.slice(0, leadingSlashStart);
-				const newLine = `${beforeSlash}/${item.value} ${afterCursor}`;
+				// The collapsed `/skill:` namespace row completes to the namespace
+				// itself: no trailing space, so completion continues with the
+				// individual skills instead of finishing a command token.
+				const insert = item.value === SKILL_NAMESPACE ? `/${item.value}` : `/${item.value} `;
+				const newLine = `${beforeSlash}${insert}${afterCursor}`;
 				const newLines = [...lines];
 				newLines[cursorLine] = newLine;
 
 				return {
 					lines: newLines,
 					cursorLine,
-					cursorCol: beforeSlash.length + item.value.length + 2, // +2 for "/" and space
+					cursorCol: beforeSlash.length + insert.length,
 				};
 			}
 		}
@@ -951,12 +1067,16 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		}
 	}
 
-	async #getFuzzyFileSuggestions(query: string, options: { isQuotedPrefix: boolean }): Promise<AutocompleteItem[]> {
+	async #getFuzzyFileSuggestions(
+		query: string,
+		options: { isQuotedPrefix: boolean; signal?: AbortSignal },
+	): Promise<AutocompleteItem[]> {
 		try {
 			const scopedQuery = await this.#resolveScopedFuzzyQuery(query);
+			if (options.signal?.aborted) return [];
 			const searchPath = scopedQuery?.baseDir ?? this.#basePath;
 			const fuzzyQuery = scopedQuery?.query ?? query;
-			const result = await fuzzyFind(buildAutocompleteFuzzyDiscoveryProfile(fuzzyQuery, searchPath));
+			const result = await fuzzyFind(buildAutocompleteFuzzyDiscoveryProfile(fuzzyQuery, searchPath, options.signal));
 			const lowerQuery = fuzzyQuery.toLowerCase();
 			const filteredMatches = result.matches.filter(entry => {
 				const p = entry.path.endsWith("/") ? entry.path.slice(0, -1) : entry.path;
@@ -999,7 +1119,9 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		lines: string[],
 		cursorLine: number,
 		cursorCol: number,
+		signal?: AbortSignal,
 	): Promise<{ items: AutocompleteItem[]; prefix: string } | null> {
+		if (signal?.aborted) return null;
 		const currentLine = lines[cursorLine] || "";
 		const textBeforeCursor = currentLine.slice(0, cursorCol);
 
@@ -1069,7 +1191,13 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		const prefix = commandText.slice(1);
 		const lowerPrefix = prefix.toLowerCase();
 
-		const matches = buildSlashCommandCompletions(this.#commands, lowerPrefix);
+		// The `/skill:` namespace row is excluded here: the sync path submits
+		// immediately after applying, and the bare namespace is not a command.
+		const matches = buildSlashCommandCompletions(
+			collapseSkillNamespace(this.#commands, lowerPrefix),
+			lowerPrefix,
+			this.#commandUsage,
+		).filter(item => item.value !== SKILL_NAMESPACE);
 
 		if (matches.length === 0) return null;
 		// Mirror `getSuggestions`: preserve leading whitespace so the editor's

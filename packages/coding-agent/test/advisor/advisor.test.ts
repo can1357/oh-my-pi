@@ -440,23 +440,61 @@ describe("advisor", () => {
 			expect(onAdvice).toHaveBeenNthCalledWith(3, note, "blocker");
 		});
 
-		it("withholds non-blockers for in-progress updates without consuming dedupe state", async () => {
+		it("defers non-blockers during in-progress updates and flushes them on the next completed update", async () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);
 			const note = "The result still needs a focused regression test.";
 
 			tool.beginUpdate(true);
-			await tool.execute("tc-1", { note, severity: "concern" });
+			const deferred = await tool.execute("tc-1", { note, severity: "concern" });
 			await tool.execute("tc-2", { note: "Minor naming cleanup.", severity: "nit" });
 			await tool.execute("tc-3", { note: "A destructive command is running.", severity: "blocker" });
 
+			// Deferred notes are NOT delivered mid-turn; blocker still goes through.
 			expect(onAdvice).toHaveBeenCalledTimes(1);
 			expect(onAdvice).toHaveBeenCalledWith("A destructive command is running.", "blocker");
+			// The tool tells the advisor the note is deferred, not silently "Recorded.".
+			expect(JSON.stringify(deferred.content)).toContain("Deferred");
+
+			// Completing the turn deterministically flushes both withheld notes,
+			// oldest first — no reliance on the advisor model re-raising them.
+			tool.beginUpdate(false);
+			expect(onAdvice).toHaveBeenCalledTimes(3);
+			expect(onAdvice).toHaveBeenNthCalledWith(2, note, "concern");
+			expect(onAdvice).toHaveBeenNthCalledWith(3, "Minor naming cleanup.", "nit");
+
+			// A later explicit re-raise of the same note is deduped (already delivered).
+			await tool.execute("tc-4", { note, severity: "concern" });
+			expect(onAdvice).toHaveBeenCalledTimes(3);
+		});
+
+		it("does not pile up duplicate deferred notes during a long mid-turn", async () => {
+			const onAdvice = vi.fn();
+			const tool = new AdviseTool(onAdvice);
+			const note = "Same point raised repeatedly.";
+
+			tool.beginUpdate(true);
+			await tool.execute("tc-1", { note, severity: "concern" });
+			await tool.execute("tc-2", { note, severity: "concern" });
+			await tool.execute("tc-3", { note, severity: "concern" });
 
 			tool.beginUpdate(false);
-			await tool.execute("tc-4", { note, severity: "concern" });
-			expect(onAdvice).toHaveBeenCalledTimes(2);
-			expect(onAdvice).toHaveBeenLastCalledWith(note, "concern");
+			// Identical note queued once, flushed once.
+			expect(onAdvice).toHaveBeenCalledTimes(1);
+			expect(onAdvice).toHaveBeenCalledWith(note, "concern");
+		});
+
+		it("retains the highest severity when duplicate deferred advice escalates", async () => {
+			const onAdvice = vi.fn();
+			const tool = new AdviseTool(onAdvice);
+
+			tool.beginUpdate(true);
+			await tool.execute("tc-1", { note: "Same point raised repeatedly.", severity: "nit" });
+			await tool.execute("tc-2", { note: "Same   point raised repeatedly.", severity: "concern" });
+
+			tool.beginUpdate(false);
+			expect(onAdvice).toHaveBeenCalledTimes(1);
+			expect(onAdvice).toHaveBeenCalledWith("Same point raised repeatedly.", "concern");
 		});
 
 		it("validates parameters using ArkType", () => {
@@ -4401,6 +4439,7 @@ describe("advisor", () => {
 			const state: { messages: AgentMessage[]; error?: string } = { messages: [] };
 			const rollbackCalls: number[] = [];
 			const lengthsBeforePrompt: number[] = [];
+			let abandonedTurns = 0;
 			let shouldFail = true;
 			const agent: AdvisorAgent = {
 				prompt: async input => {
@@ -4441,6 +4480,9 @@ describe("advisor", () => {
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
 				enqueueAdvice: () => {},
+				onTurnAbandoned: () => {
+					abandonedTurns++;
+				},
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
 
@@ -4453,6 +4495,7 @@ describe("advisor", () => {
 			// saw a clean state.messages instead of stacked failed turns.
 			expect(lengthsBeforePrompt).toEqual([0, 0, 0]);
 			expect(rollbackCalls).toEqual([0, 0, 0]);
+			expect(abandonedTurns).toBe(1);
 			// The drop-after-3 path also left state.messages empty — no orphan failed
 			// turns leak into the next successful run's context.
 			expect(state.messages).toHaveLength(0);
@@ -4467,6 +4510,7 @@ describe("advisor", () => {
 
 			expect(lengthsBeforePrompt[lengthsBeforePrompt.length - 1]).toBe(0);
 			expect(rollbackCalls).toHaveLength(3);
+			expect(abandonedTurns).toBe(1);
 
 			expect(state.messages).toHaveLength(2);
 		});

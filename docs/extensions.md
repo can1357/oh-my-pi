@@ -115,6 +115,7 @@ Core methods:
 - `on(event, handler)`
 - `registerTool`, `registerCommand`, `registerShortcut`, `registerFlag`
 - `registerMessageRenderer`, `registerAssistantThinkingRenderer`
+- `registerComposerShape`
 - `setLabel`, `getFlag`
 - `sendMessage`, `sendUserMessage`, `appendEntry`, `exec`
 - `getActiveTools`, `getAllTools`, `setActiveTools`
@@ -127,6 +128,48 @@ Core methods:
 - `events` (shared event bus)
 
 `getServiceTiers()` returns a detached snapshot of the session's live per-family tier map. `setServiceTier(family, tier)` changes one family for subsequent requests; pass `undefined` to clear that session override. OpenAI accepts `auto`, `default`, `flex`, `scale`, or `priority`; Anthropic accepts `priority`; Google accepts `flex` or `priority`. Changes made while a response is streaming do not alter that in-flight request.
+
+### Provider registration
+
+`pi.registerProvider(name, config)` can include an optional `usage` field containing a
+`UsageProvider` imported from `@oh-my-pi/pi-ai`. Its `fetchUsage` implementation receives the
+normalized credential and returns a normalized `UsageReport`; the result is then handled
+by the host's AuthStorage cache, history, and usage displays just like built-in provider
+usage.
+
+```ts
+pi.registerProvider("my-provider", {
+  baseUrl: "https://api.example.com/v1",
+  api: "openai-completions",
+  usage: {
+    id: "my-provider",
+    async fetchUsage(params, { fetch }) {
+      const response = await fetch("https://api.example.com/usage", {
+        headers: { Authorization: `Bearer ${params.credential.apiKey}` },
+      });
+      if (!response.ok) return null;
+      const payload = (await response.json()) as { used: number; limit: number };
+      return {
+        provider: "my-provider",
+        fetchedAt: Date.now(),
+        limits: [
+          {
+            id: "requests",
+            label: "Requests",
+            scope: { provider: "my-provider" },
+            amount: { used: payload.used, limit: payload.limit, unit: "requests" },
+          },
+        ],
+      };
+    },
+  },
+});
+```
+
+An extension usage provider overrides a built-in provider with the same name for as
+long as that extension registration is active. `pi.unregisterProvider(name)` (and
+extension source cleanup) removes only that runtime override, restoring the built-in
+or configured usage resolver.
 
 In interactive mode, `input` handlers run before the built-in first-message auto-title check. Extensions that call `await pi.setSessionName(...)` from `input` can set the persisted session name and prevent the default auto-generated title from running for that session.
 
@@ -575,6 +618,81 @@ pi.on("session_start", async (_event, ctx) => {
 ```
 
 ## Rendering extension points
+
+## Composer shape renderer
+
+`registerComposerShape` adds an extension-owned input-editor layout to **Appearance → Composer Shape**. Register it from the extension factory; the renderer is used by the live editor and its settings preview.
+
+```ts
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { ComposerStyle } from "@oh-my-pi/pi-tui";
+
+const dockStyle: ComposerStyle = {
+  id: "acme-dock",
+  sideBorders: false,
+  verticalChrome: 1,
+  statusAttachment: "none",
+  bottomBar: "full",
+  bottomBarGap: true,
+  defaultPromptGutter: "❯ ",
+
+  defaultPaddingX: () => 0,
+  sideChromeWidth: () => 0,
+  renderTop: ({ box, width, borderColor }) =>
+    borderColor(box.horizontal.repeat(width)),
+  renderRow: ({ gutter, text, pad }) => [gutter + text + pad],
+  renderBottom: () => undefined,
+};
+
+export default function (pi: ExtensionAPI) {
+  pi.registerComposerShape({
+    label: "Acme Dock",
+    description: "Prompt below a single rule",
+    style: dockStyle,
+  });
+}
+```
+
+`ComposerShapeDefinition` contains:
+
+- `label`: required selector label.
+- `description`: optional selector detail.
+- `style`: the complete `ComposerStyle` rendering contract. `style.id` is also the persisted `composer.shape` value.
+
+Use a package-qualified, non-empty, trimmed `style.id`. Built-in ids (`box`, `claude`, `pi`, `borderless`, `rule`, `field`, and `rail`) cannot be replaced. If the extension is unavailable while its id remains configured, the editor falls back to `box`.
+
+### `ComposerStyle` layout metadata
+
+- `sideBorders`: whether content rows own side chrome. This controls cursor reserve, IME layout, and scrollbar behavior; it is not merely descriptive.
+- `verticalChrome`: exact number of fixed top/bottom chrome rows (`0`, `1`, or `2`) used for editor height budgeting.
+- `statusAttachment`: `"top-border"` receives the embedded status gauge, `"top-rule-chip"` receives the right status group for docking on a rule, and `"none"` detaches status from the editor chrome.
+- `bottomBar`: standalone status content below the editor: `"none"`, `"left"`, or `"full"`.
+- `bottomBarGap`: whether a blank row separates the editor from a standalone bottom status bar.
+- `defaultPromptGutter`: prompt text used when the host supplies no override.
+- `defaultPaddingX(themePaddingX)`: horizontal padding selected for this style.
+- `sideChromeWidth(paddingX)`: visible cells consumed on **each** side of a content row, including padding and border/rail glyphs.
+
+`renderTop` and `renderBottom` return one styled terminal row or `undefined`. `renderRow` returns one or more styled rows. Every normal rendered row must occupy exactly `ctx.width` visible cells; ANSI escape sequences have zero width. Preserve the supplied `gutter`, `text`, and `pad` instead of reflowing or truncating them.
+
+### Renderer context
+
+All render methods receive `width`, `paddingX`, the theme's `box` glyphs, and three styling functions:
+
+- `borderColor(text)`: ordinary frame/rule color.
+- `accentColor(text)`: stable accent for shape-defining rails or caps.
+- `surfaceColor(text)`: composer background fill that survives nested SGR resets in decorated input.
+
+`topBorder`, when present, is already-styled status content with its visible `width`. A top renderer owns its placement and must leave the final line at `ctx.width`.
+
+`renderRow` additionally receives:
+
+- `gutter`, `text`, and `pad`: pre-rendered content pieces.
+- `isLastRow`: last visible input row.
+- `cursorOverflow`: cells consumed from the right chrome by an end-of-line cursor.
+- `imeSafeCursorTail`: omit right-side cells after the cursor so terminal-local IME preedit cannot shift the chrome.
+- `scrollbarThumb`: this row intersects the editor scrollbar thumb.
+
+The built-in implementations in `packages/tui/src/components/composer/` are the reference for framed, rule, filled-surface, and IME-safe layouts.
 
 ## Custom message renderer
 

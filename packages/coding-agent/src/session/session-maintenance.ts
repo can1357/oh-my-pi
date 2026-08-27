@@ -26,6 +26,7 @@ import {
 	DEFAULT_SHAKE_CONFIG,
 	type CompactionSettings as EngineCompactionSettings,
 	effectiveReserveTokens,
+	invalidateMessageCache,
 	isTranscriptUsageAnchor,
 	NativeCompactionError,
 	prepareCompaction,
@@ -70,8 +71,11 @@ import type { ContextUsageBreakdown, HandoffResult, SessionHandoffOptions } from
 import { findCompactMode } from "./compact-modes";
 import {
 	type CompactionMethod,
+	canUseRemoteCompaction,
 	DEFAULT_COMPACTION_METHOD_ORDER,
 	resolveCompactionMethodOrder,
+	resolveMethodSettings,
+	resolveSpeculationMethod,
 } from "./compaction-methods";
 import { convertToLlm, stripImagesFromMessage } from "./messages";
 import { isTerminalTextAssistantAnswer } from "./queued-messages";
@@ -85,6 +89,7 @@ import { getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./se
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 import type { ShakeMode, ShakeResult } from "./shake-types";
+import { resolveSpeculationLeadTokens, SPECULATION_LEAD_MIN_TOKENS } from "./speculation-lead";
 
 export type CompactionCheckResult = Readonly<{
 	deferredHandoff: boolean;
@@ -112,38 +117,6 @@ const COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION: CompactionCheckResult = {
 	automaticContinuationBlocked: true,
 };
 
-const STRATEGY_BY_COMPACTION_METHOD: Record<CompactionMethod, "context-full" | "handoff" | "shake" | "snapcompact"> = {
-	remote: "context-full",
-	snapcompact: "snapcompact",
-	handoff: "handoff",
-	soft: "context-full",
-	shake: "shake",
-};
-
-/**
- * Convert the selected preference into the engine's compact operation flags.
- * The engine intentionally remains usable by SDK consumers that do not expose
- * the coding agent's preference list.
- */
-function resolveMethodSettings(
-	settings: ConfiguredCompactionSettings,
-	method: CompactionMethod,
-): EngineCompactionSettings {
-	return {
-		...settings,
-		strategy: STRATEGY_BY_COMPACTION_METHOD[method],
-		remoteEnabled: method === "remote",
-	};
-}
-
-/** Whether server compaction has either a configured endpoint or an active native route. */
-function canUseRemoteCompaction(model: Model | null | undefined, settings: EngineCompactionSettings): boolean {
-	return (
-		(typeof settings.remoteEndpoint === "string" && settings.remoteEndpoint.length > 0) ||
-		(model !== null && model !== undefined && shouldUseProviderNativeCompaction(model, settings))
-	);
-}
-
 /** Whether a configured preference list contains at least one automatic method. */
 function hasConfiguredCompactionMethod(settings: ConfiguredCompactionSettings): boolean {
 	return resolveCompactionMethodOrder(settings.methodOrder).length > 0;
@@ -159,6 +132,26 @@ function compactionDeadEndWarning(remedies: string): string {
 	return (
 		"Compaction freed too little context to make progress — pausing automatic maintenance to avoid a compaction loop. " +
 		`The most recent turn alone is too large to reduce further; ${remedies} or switch to a larger-context model.`
+	);
+}
+
+/** Honest-skip notice for a payload-shaped HTTP 413 where compaction was correctly withheld (#9235). */
+function payloadRejectionNotice(storedTokens: number, contextWindow: number): string {
+	const remedies =
+		"Token compaction cannot shrink bytes or image budgets; reduce or remove archived image frames (e.g. switch compaction.methodOrder away from snapcompact) or raise the server/proxy body limit.";
+	if (contextWindow <= 0) {
+		return `The provider rejected the request size or media budget (HTTP 413), and this model has no known context window to compare against — this is NOT a token-context problem. ${remedies}`;
+	}
+	const headroom = Math.max(0, Math.floor(contextWindow - storedTokens));
+	return `The provider rejected the request size or media budget (HTTP 413), but ~${headroom.toLocaleString("en-US")} tokens of headroom remain locally — this is NOT a token-context problem. ${remedies}`;
+}
+
+/** Dead-end notice when provider-reported usage proves context overflow but no recovery exists (#9235). */
+function usageOverflowDeadEndNotice(reportedInputTokens: number, contextWindow: number): string {
+	const windowLabel = contextWindow > 0 ? contextWindow.toLocaleString("en-US") : "unknown";
+	return (
+		`The provider reports ~${reportedInputTokens.toLocaleString("en-US")} input tokens against a ${windowLabel}-token context window — this IS a token-context problem, but automatic compaction is unavailable to shrink it. ` +
+		"Enable a compaction method (compaction.enabled with a configured methodOrder), reduce the conversation's token usage, or switch to a larger-context model."
 	);
 }
 
@@ -207,26 +200,9 @@ const PRUNE_IDLE_FLUSH_MS = 90 * 60_000;
  */
 const COMPACTION_RECOVERY_BAND = 0.8;
 
-/**
- * Speculative-compaction lead: how far below the compaction threshold the
- * background summarizer starts. Derived from the threshold instead of a second
- * user-facing knob so the band scales with the window — a fixed percentage gap
- * would be 200k tokens on a 1M model and useless on a 32k one. The floor keeps
- * tiny windows from speculating every turn; the cap bounds how much history the
- * armed summary misses (the kept tail grows by at most ~lead tokens between
- * compute and apply).
- */
-const SPECULATION_LEAD_FRACTION = 0.125;
-const SPECULATION_LEAD_MIN_TOKENS = 8_192;
-const SPECULATION_LEAD_MAX_TOKENS = 32_000;
-
-/** Tokens the threshold band spans: speculation fires inside `[threshold − lead, threshold)`. */
-function resolveSpeculationLeadTokens(thresholdTokens: number): number {
-	return Math.min(
-		SPECULATION_LEAD_MAX_TOKENS,
-		Math.max(SPECULATION_LEAD_MIN_TOKENS, Math.floor(thresholdTokens * SPECULATION_LEAD_FRACTION)),
-	);
-}
+/** Payload-shaped 413s share text patterns with overflow; trust the payload classification when local
+ *  occupancy stays under this ceiling (≥10% headroom) and reported usage stays within the window (#9235). */
+const PAYLOAD_REJECTION_OCCUPANCY_CEILING = 0.9;
 
 /** A speculation-produced compaction result, ready to commit at threshold. */
 interface ArmedSpeculation {
@@ -369,6 +345,8 @@ export interface SessionMaintenanceHost {
 /** Owns compaction, pruning, shake, promotion, and automatic context maintenance. */
 export class SessionMaintenance {
 	#compactionAbortController: AbortController | undefined;
+	/** Resolves after an active manual compaction has reconnected the agent subscription. */
+	#manualCompactionCleanup: Promise<void> | undefined;
 	#autoCompactionAbortController: AbortController | undefined;
 	/**
 	 * Live tool-loop contexts parked after mid-turn maintenance hit a no-progress
@@ -414,6 +392,11 @@ export class SessionMaintenance {
 		const run = this.#speculation;
 		if (!run) return "idle";
 		return run.armed ? "armed" : "running";
+	}
+
+	/** Completion of the current speculative pass, used to resume maintenance skipped during its handoff. */
+	get speculationCompletion(): Promise<void> | undefined {
+		return this.#speculation?.promise;
 	}
 
 	/** Abort and discard any in-flight or armed speculative compaction. */
@@ -578,6 +561,7 @@ export class SessionMaintenance {
 	 * Surgically reduce context by dropping heavy content ("shake").
 	 *
 	 * - `images` delegates to {@link dropImages}.
+	 * - `thinking` removes assistant reasoning blocks without replacement text.
 	 * - `elide` replaces whole tool-call results and large fenced/XML blocks
 	 *   with short placeholders that embed an `artifact://` recovery link.
 	 *
@@ -591,6 +575,33 @@ export class SessionMaintenance {
 		if (mode === "images") {
 			const { removed } = await this.#host.dropImages();
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, imagesDropped: removed, tokensFreed: 0 };
+		}
+
+		if (mode === "thinking") {
+			const branchEntries = this.#host.sessionManager.getBranch();
+			let removed = 0;
+			for (const entry of branchEntries) {
+				if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+				const message = entry.message;
+				const kept = message.content.filter(
+					block => block.type !== "thinking" && block.type !== "redactedThinking",
+				);
+				const dropped = message.content.length - kept.length;
+				if (dropped === 0) continue;
+				// Provider serializers omit empty assistant turns, so don't invent model-authored text.
+				message.content = kept;
+				invalidateMessageCache(message);
+				removed += dropped;
+			}
+			if (removed === 0) {
+				return { mode, toolResultsDropped: 0, blocksDropped: 0, thinkingBlocksDropped: 0, tokensFreed: 0 };
+			}
+			await this.#host.sessionManager.rewriteEntries();
+			const sessionContext = this.#host.buildDisplaySessionContext();
+			this.#host.agent.replaceMessages(sessionContext.messages);
+			this.#host.resetAdvisorRuntimes("shake");
+			this.#host.closeCodexProviderSessionsForHistoryRewrite();
+			return { mode, toolResultsDropped: 0, blocksDropped: 0, thinkingBlocksDropped: removed, tokensFreed: 0 };
 		}
 
 		const branchEntries = this.#host.sessionManager.getBranch();
@@ -723,8 +734,10 @@ export class SessionMaintenance {
 		let compactionCommitted = false;
 		let methodAttempted = false;
 		const compactionAbortController = retryController ?? new AbortController();
+		const manualCompactionCleanup = ownsCompactionController ? Promise.withResolvers<void>() : undefined;
 		if (ownsCompactionController) {
 			this.#compactionAbortController = compactionAbortController;
+			this.#manualCompactionCleanup = manualCompactionCleanup?.promise;
 		}
 		// A manual pass supersedes any background speculation; running both would
 		// double-bill the summarizer and race the commit.
@@ -998,17 +1011,24 @@ export class SessionMaintenance {
 					preserveData = mergeLlmCompactionPreserveData(compactionPrep.preserveData, result.preserveData);
 				} catch (err) {
 					if (err instanceof CompactionCancelledError) {
-						throw err;
+						if (!compactionAbortController.signal.aborted || err.cause !== undefined) throw err;
+						throw new CompactionCancelledError(err.message, {
+							cause: compactionAbortController.signal.reason,
+						});
 					}
 					if (compactionAbortController.signal.aborted && err instanceof Error && err.name === "AbortError") {
-						throw new CompactionCancelledError();
+						throw new CompactionCancelledError(undefined, {
+							cause: compactionAbortController.signal.reason,
+						});
 					}
 					throw err;
 				}
 			}
 
 			if (compactionAbortController.signal.aborted) {
-				throw new CompactionCancelledError();
+				throw new CompactionCancelledError(undefined, {
+					cause: compactionAbortController.signal.reason,
+				});
 			}
 
 			compactionCommitted = true;
@@ -1020,6 +1040,7 @@ export class SessionMaintenance {
 				details,
 				fromExtension,
 				preserveData,
+				method: fromExtension ? undefined : selectedMethod,
 				codexCompaction,
 				advisorResetReason: "compact",
 			});
@@ -1066,6 +1087,10 @@ export class SessionMaintenance {
 				// queues, so nothing else resumes them: re-drain now that the listener is back
 				// and `isCompacting` is false, or the queued turn hangs until the next prompt.
 				this.#host.drainStrandedQueuedMessages();
+				if (this.#manualCompactionCleanup === manualCompactionCleanup?.promise) {
+					this.#manualCompactionCleanup = undefined;
+				}
+				manualCompactionCleanup?.resolve();
 			}
 		}
 	}
@@ -1097,12 +1122,25 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * Cancel in-progress context maintenance (manual compaction, auto-compaction, or auto-handoff).
+	 * Cancel in-progress context maintenance and return the active manual pass's
+	 * cleanup barrier. The barrier resolves only after its agent subscription reconnects.
 	 */
-	abortCompaction(): void {
-		this.#compactionAbortController?.abort();
-		this.#autoCompactionAbortController?.abort();
+	abortCompaction(reason?: unknown): Promise<void> | undefined {
+		const manualCompactionCleanup = this.#manualCompactionCleanup;
+		this.#compactionAbortController?.abort(reason);
+		this.#autoCompactionAbortController?.abort(reason);
 		this.#host.abortHandoff();
+		return manualCompactionCleanup;
+	}
+
+	/**
+	 * Resolves once an in-flight manual compaction has reconnected the agent
+	 * subscription and re-drained its preserved queues; `undefined` when no manual
+	 * compaction is active. Callers that must not start a turn against the
+	 * disconnected session (e.g. ordinary prompts) await this first.
+	 */
+	get manualCompactionCleanup(): Promise<void> | undefined {
+		return this.#manualCompactionCleanup;
 	}
 
 	/** Cancel only automatic maintenance while preserving a manual compaction. */
@@ -1150,6 +1188,7 @@ export class SessionMaintenance {
 			details,
 			fromExtension: false,
 			preserveData: undefined,
+			method: "handoff",
 			codexCompaction: undefined,
 			advisorResetReason: "handoff",
 		});
@@ -1164,6 +1203,8 @@ export class SessionMaintenance {
 	 * (remote/handoff/soft) are speculated — shake and snapcompact are local
 	 * and effectively instant. Never rewrites history itself; stale results are
 	 * discarded by apply-time branch validation in {@link #claimArmedSpeculation}.
+	 * A turn that jumps past the threshold before a run armed is handled by
+	 * {@link deferThresholdCompactionToSpeculation}'s grace band instead.
 	 */
 	maybeStartSpeculativeCompaction(contextTokens: number, contextWindow: number): void {
 		if (contextWindow <= 0 || this.#host.isDisposed()) return;
@@ -1189,8 +1230,13 @@ export class SessionMaintenance {
 		}
 		const model = this.#model;
 		if (!model) return;
-		const method = this.#resolveSpeculationMethod(model, settings);
+		const method = resolveSpeculationMethod(model, settings);
 		if (!method) return;
+		this.#startSpeculationRun(contextTokens, method);
+	}
+
+	/** Install and launch one background speculation run for `method`. */
+	#startSpeculationRun(contextTokens: number, method: "remote" | "handoff" | "soft"): void {
 		const controller = new AbortController();
 		const run: SpeculationRun = { controller, promise: Promise.resolve(), contextTokensAtStart: contextTokens };
 		this.#speculation = run;
@@ -1203,22 +1249,47 @@ export class SessionMaintenance {
 		});
 	}
 
-	/** First configured method a threshold pass would run, or undefined when it is local (nothing to speculate). */
-	#resolveSpeculationMethod(
-		model: Model,
-		settings: ConfiguredCompactionSettings,
-	): "remote" | "handoff" | "soft" | undefined {
-		for (const candidate of resolveCompactionMethodOrder(settings.methodOrder)) {
-			const available =
-				candidate === "remote"
-					? canUseRemoteCompaction(model, resolveMethodSettings(settings, candidate))
-					: candidate === "snapcompact"
-						? model.input.includes("image")
-						: true;
-			if (!available) continue;
-			return candidate === "remote" || candidate === "handoff" || candidate === "soft" ? candidate : undefined;
+	/**
+	 * Grace band above the compaction threshold: when a single turn jumps past
+	 * the threshold before the background speculation armed (or even started),
+	 * the threshold pass keeps serving the user instead of blocking on a
+	 * synchronous summarization — the speculation finishes in the background
+	 * and the next maintenance boundary splices it in for free. Returns true
+	 * while deferral is in effect (a run was live, or one was started here);
+	 * the caller MUST skip its blocking compaction then.
+	 *
+	 * Deferral ends — and the blocking pass resumes — once context grows past
+	 * `threshold + lead`, clamped to keep {@link SPECULATION_LEAD_MIN_TOKENS}
+	 * of headroom below the window. A provider overflow inside the band is
+	 * recovered by the existing overflow path (compact + retry). Never defers
+	 * for local-first method orders (shake/snapcompact are instant), when
+	 * async compaction is disabled, or when a `session_before_compact`
+	 * extension must keep exact blocking semantics.
+	 */
+	deferThresholdCompactionToSpeculation(contextTokens: number, contextWindow: number): boolean {
+		if (contextWindow <= 0 || this.#host.isDisposed()) return false;
+		const settings = this.#host.settings.getGroup("compaction");
+		if (!settings.enabled || settings.asyncEnabled === false || !hasConfiguredCompactionMethod(settings))
+			return false;
+		if (this.isCompacting || this.#host.isGeneratingHandoff()) return false;
+		if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) return false;
+		const model = this.#model;
+		if (!model) return false;
+		const method = resolveSpeculationMethod(model, settings);
+		if (!method) return false;
+		const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
+		const graceCapTokens = Math.min(
+			thresholdTokens + resolveSpeculationLeadTokens(thresholdTokens),
+			contextWindow - SPECULATION_LEAD_MIN_TOKENS,
+		);
+		if (contextTokens >= graceCapTokens) return false;
+		const run = this.#speculation;
+		if (run) {
+			if (run.armed) return false; // ready — the real pass splices it in now
+			return true; // still summarizing in the background
 		}
-		return undefined;
+		this.#startSpeculationRun(contextTokens, method);
+		return true;
 	}
 
 	/** Produce and arm one speculative compaction result off a branch snapshot. */
@@ -1377,7 +1448,9 @@ export class SessionMaintenance {
 		details: unknown;
 		fromExtension: boolean;
 		preserveData: Record<string, unknown> | undefined;
+		method: CompactionMethod | undefined;
 		codexCompaction: CodexCompactionContext | undefined;
+		providerReplayThroughEntryId?: string;
 		advisorResetReason: string;
 		detachExtensionEmit?: boolean;
 	}): Promise<CompactionEntry | undefined> {
@@ -1386,9 +1459,14 @@ export class SessionMaintenance {
 			args.shortSummary,
 			args.firstKeptEntryId,
 			args.tokensBefore,
-			args.details,
-			args.fromExtension,
-			args.preserveData,
+			{
+				details: args.details,
+				fromExtension: args.fromExtension,
+				preserveData: args.preserveData,
+				method: args.method,
+				providerReplayThroughEntryId: args.providerReplayThroughEntryId,
+				tokensAfter: this.#projectCompactedContextTokens(args),
+			},
 		);
 		const newEntries = this.#host.sessionManager.getEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
@@ -1485,6 +1563,16 @@ export class SessionMaintenance {
 			// pre-prompt retry useful; the new agent loop may warn for its own turn.
 			return;
 		}
+		// Grace band: a live (or just-started) background speculation absorbs the
+		// blocking summarization; the user's prompt goes out immediately and the
+		// armed result is spliced in at the next boundary.
+		if (this.deferThresholdCompactionToSpeculation(contextTokens, contextWindow)) {
+			logger.debug("Pre-prompt threshold deferred to speculative compaction", {
+				contextTokens,
+				contextWindow,
+			});
+			return;
+		}
 
 		// Auto-promote first: switching to a larger-context model avoids compacting
 		// the history at all. The post-turn threshold path already promotes before
@@ -1562,6 +1650,16 @@ export class SessionMaintenance {
 		const contextTokens = compactionContextTokens(billedContextTokens, storedContextTokens);
 		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) {
 			this.maybeStartSpeculativeCompaction(contextTokens, contextWindow);
+			return;
+		}
+		// Grace band: keep the tool loop moving while a background speculation
+		// (live or started here) produces the summary; checked before the
+		// persistence barrier so deferred boundaries never await the journal.
+		if (this.deferThresholdCompactionToSpeculation(contextTokens, contextWindow)) {
+			logger.debug("Mid-run threshold deferred to speculative compaction", {
+				contextTokens,
+				contextWindow,
+			});
 			return;
 		}
 
@@ -1678,13 +1776,33 @@ export class SessionMaintenance {
 		const compactionEntry = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
 		const errorIsFromBeforeCompaction =
 			compactionEntry !== null && assistantMessage.timestamp < new Date(compactionEntry.timestamp).getTime();
-		if (sameModel && !errorIsFromBeforeCompaction && AIError.isContextOverflow(assistantMessage, contextWindow)) {
-			// Clear the failed turn from active context so the retry (or the next
-			// user prompt) does not replay it. The persisted branch entry stays
-			// for now: when no recovery path runs, the user-facing transcript
-			// MUST keep the only assistant message explaining why the turn
-			// stopped. The branch entry is dropped further down, but only on the
-			// paths that actually schedule a retry/compaction.
+		const payloadRejection =
+			sameModel && !errorIsFromBeforeCompaction && AIError.isPayloadRejection(assistantMessage);
+		const ambiguousPayloadRejection =
+			payloadRejection && AIError.is(assistantMessage.errorId, AIError.Flag.ContextOverflow);
+		const storedTokens = payloadRejection && contextWindow > 0 ? this.#estimateStoredContextTokens() : 0;
+		const reportedInputTokens =
+			assistantMessage.usage.input + assistantMessage.usage.cacheRead + assistantMessage.usage.cacheWrite;
+		const trustedPayloadRejection =
+			payloadRejection &&
+			contextWindow > 0 &&
+			reportedInputTokens <= contextWindow &&
+			storedTokens < contextWindow * PAYLOAD_REJECTION_OCCUPANCY_CEILING;
+		if ((payloadRejection && !ambiguousPayloadRejection && contextWindow <= 0) || trustedPayloadRejection) {
+			this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
+			this.#host.emitNotice("warning", payloadRejectionNotice(storedTokens, contextWindow), "compaction");
+			logger.debug("Payload-shaped 413 withheld from token compaction", {
+				provider: assistantMessage.provider,
+				model: assistantMessage.model,
+				message: assistantMessage.errorMessage,
+				storedTokens,
+				contextWindow,
+			});
+			return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+		}
+		const overflowEvidence =
+			sameModel && !errorIsFromBeforeCompaction && AIError.isContextOverflow(assistantMessage, contextWindow);
+		if (overflowEvidence || (payloadRejection && !trustedPayloadRejection)) {
 			this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
 
 			// Try context promotion first - switch to a larger model and retry without compacting
@@ -1702,6 +1820,24 @@ export class SessionMaintenance {
 				return await this.#host.runRecoveryCompactionWithRollback("overflow", assistantMessage, allowDefer, {
 					autoContinue,
 				});
+			}
+			if (payloadRejection) {
+				const usageBackedOverflow = AIError.isUsageBackedContextOverflow(assistantMessage, contextWindow);
+				this.#host.emitNotice(
+					"warning",
+					usageBackedOverflow
+						? usageOverflowDeadEndNotice(reportedInputTokens, contextWindow)
+						: payloadRejectionNotice(storedTokens, contextWindow),
+					"compaction",
+				);
+				logger.debug("Payload-shaped 413 has no runnable recovery; blocking automatic continuation", {
+					provider: assistantMessage.provider,
+					model: assistantMessage.model,
+					message: assistantMessage.errorMessage,
+					storedTokens,
+					contextWindow,
+				});
+				return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
 			}
 			return COMPACTION_CHECK_NONE;
 		}
@@ -1854,6 +1990,17 @@ export class SessionMaintenance {
 			contextPromotionEnabled: this.#host.settings.get("contextPromotion.enabled") === true,
 		});
 		if (shouldThresholdCompact) {
+			// Grace band: a live (or just-started) background speculation absorbs
+			// the blocking summarization; the session stays responsive and the
+			// armed result lands at the next boundary. Deferral delays promotion
+			// by at most the band — the eventual real pass still promotes first.
+			if (this.deferThresholdCompactionToSpeculation(postMaintenanceContextTokens, contextWindow)) {
+				logger.debug("Post-turn threshold deferred to speculative compaction", {
+					postMaintenanceContextTokens,
+					contextWindow,
+				});
+				return COMPACTION_CHECK_NONE;
+			}
 			// Try promotion first — if a larger model is available, switch instead of compacting
 			const promoted = await this.#tryContextPromotion(assistantMessage);
 			if (!promoted) {
@@ -2165,7 +2312,13 @@ export class SessionMaintenance {
 	 */
 	#computeSnapcompactMaxFrames(preparation: CompactionPreparation, settings: EngineCompactionSettings): number {
 		const ctxWindow = this.#model?.contextWindow ?? 0;
-		if (ctxWindow <= 0) return Math.min(snapcompact.MAX_FRAMES_DEFAULT, snapcompact.maxFramesForDataBudget());
+		if (ctxWindow <= 0) {
+			return Math.min(
+				snapcompact.MAX_FRAMES_DEFAULT,
+				snapcompact.maxFramesForDataBudget(),
+				snapcompact.providerFrameBudget(this.#model?.provider),
+			);
+		}
 		const reserve = effectiveReserveTokens(ctxWindow, settings);
 		let baseTokens = computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer);
 		baseTokens += this.#tokenizer.countMessages(preparation.recentMessages);
@@ -2206,12 +2359,18 @@ export class SessionMaintenance {
 			Math.floor(frameBudget / snapcompact.FRAME_TOKEN_ESTIMATE),
 			snapcompact.MAX_FRAMES_DEFAULT,
 			snapcompact.maxFramesForDataBudget(),
+			snapcompact.providerFrameBudget(this.#model?.provider),
 		);
 	}
 
 	#snapcompactFramePayloadBytes(result: snapcompact.CompactionResult): number {
 		const archive = snapcompact.getPreservedArchive(result.preserveData);
 		return archive ? snapcompact.frameDataBytes(archive.frames) : 0;
+	}
+
+	#deadEndRemedies(defaultRemedies: string, implicatedFrames: number): string {
+		if (implicatedFrames <= 0) return defaultRemedies;
+		return `reduce archived image frames (${implicatedFrames} held) — providers often bill vision media separately from tokens; ${defaultRemedies}`;
 	}
 
 	/**
@@ -2231,15 +2390,49 @@ export class SessionMaintenance {
 			result.summary,
 			result.tokensBefore,
 			new Date().toISOString(),
-			result.shortSummary,
-			undefined,
-			undefined,
-			blocks,
+			{
+				shortSummary: result.shortSummary,
+				blocks,
+			},
 		);
 		let tokens =
 			computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer) +
 			this.#tokenizer.countMessage(summaryMessage);
 		tokens += this.#tokenizer.countMessages(preparation.recentMessages);
+		return tokens;
+	}
+
+	/**
+	 * Estimated context tokens after a compaction commit: fixed non-message
+	 * overhead + the summary message (with any snapcompact frames re-attached)
+	 * + every message from `firstKeptEntryId` to the branch leaf. Mirrors the
+	 * post-commit context rebuild; persisted as `tokensAfter` on the entry so
+	 * the transcript divider can show the before → after amounts.
+	 */
+	#projectCompactedContextTokens(args: {
+		summary: string;
+		shortSummary: string | undefined;
+		tokensBefore: number;
+		firstKeptEntryId: string;
+		preserveData: Record<string, unknown> | undefined;
+	}): number {
+		const archive = snapcompact.getPreservedArchive(args.preserveData);
+		const blocks = archive
+			? snapcompact.historyBlocks(archive, { maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET })
+			: undefined;
+		const summaryMessage = createCompactionSummaryMessage(args.summary, args.tokensBefore, new Date().toISOString(), {
+			shortSummary: args.shortSummary,
+			blocks,
+		});
+		let tokens =
+			computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer) +
+			this.#tokenizer.countMessage(summaryMessage);
+		let inKeptRegion = false;
+		for (const entry of this.#host.sessionManager.getBranch()) {
+			if (entry.id === args.firstKeptEntryId) inKeptRegion = true;
+			if (!inKeptRegion) continue;
+			if (entry.type === "message") tokens += this.#tokenizer.countMessage(entry.message);
+		}
 		return tokens;
 	}
 
@@ -2443,7 +2636,13 @@ export class SessionMaintenance {
 	 */
 	#computeSnapcompactRescueMaxFrames(settings: EngineCompactionSettings, keptTailTokens: number): number {
 		const ctxWindow = this.#model?.contextWindow ?? 0;
-		if (ctxWindow <= 0) return Math.min(snapcompact.MAX_FRAMES_DEFAULT, snapcompact.maxFramesForDataBudget());
+		if (ctxWindow <= 0) {
+			return Math.min(
+				snapcompact.MAX_FRAMES_DEFAULT,
+				snapcompact.maxFramesForDataBudget(),
+				snapcompact.providerFrameBudget(this.#model?.provider),
+			);
+		}
 		const thresholdTokens = resolveThresholdTokens(ctxWindow, settings);
 		const recoveryBandTokens = Math.floor(thresholdTokens * COMPACTION_RECOVERY_BAND);
 		const baseTokens = computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer);
@@ -2454,12 +2653,14 @@ export class SessionMaintenance {
 		const frameBudget = recoveryBandTokens - baseTokens - keptTailTokens - textEdgeTokens - SUMMARY_TEMPLATE_TOKENS;
 		if (frameBudget < snapcompact.FRAME_TOKEN_ESTIMATE) return 0;
 		// Same hard caps as #computeSnapcompactMaxFrames: a threshold-derived
-		// count above the per-request payload budget would "shrink" a huge
-		// archive to a frame count the rebuilt prompt can never attach anyway.
+		// count above the per-request payload or provider image budget would
+		// "shrink" a huge archive to a frame count the rebuilt prompt can never
+		// attach anyway.
 		return Math.min(
 			Math.floor(frameBudget / snapcompact.FRAME_TOKEN_ESTIMATE),
 			snapcompact.MAX_FRAMES_DEFAULT,
 			snapcompact.maxFramesForDataBudget(),
+			snapcompact.providerFrameBudget(this.#model?.provider),
 		);
 	}
 
@@ -2566,9 +2767,18 @@ export class SessionMaintenance {
 			result.shortSummary,
 			result.firstKeptEntryId,
 			result.tokensBefore,
-			result.details,
-			false,
-			result.preserveData,
+			{
+				details: result.details,
+				preserveData: result.preserveData,
+				method: "snapcompact",
+				tokensAfter: this.#projectCompactedContextTokens({
+					summary: result.summary,
+					shortSummary: result.shortSummary,
+					tokensBefore: result.tokensBefore,
+					firstKeptEntryId: result.firstKeptEntryId,
+					preserveData: result.preserveData,
+				}),
+			},
 		);
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
@@ -2664,7 +2874,10 @@ export class SessionMaintenance {
 		// in the background. Claiming consumes the slot either way: an in-flight
 		// run is aborted (this real pass supersedes it) and an armed result is
 		// returned only when still valid for the current branch/model/settings.
-		const armedSpec = this.#claimArmedSpeculation();
+		// Snapcompact is local and instant, so an armed LLM summary (possible
+		// only when settings/model changed since arming) never overrides it.
+		const claimedSpec = this.#claimArmedSpeculation();
+		const armedSpec = method === "snapcompact" ? undefined : claimedSpec;
 
 		const effectiveSettings = resolveMethodSettings(compactionSettings, method);
 		const fallbackFromShake = options.fallbackFromShake === true;
@@ -2762,6 +2975,10 @@ export class SessionMaintenance {
 					preserveData: armedSpec.result.preserveData,
 					fromExtension: false,
 					codexCompaction: armedSpec.codexCompaction,
+					method: armedSpec.method,
+					providerReplayThroughEntryId: armedSpec.result.preserveData?.openaiRemoteCompaction
+						? armedSpec.snapshotLeafId
+						: undefined,
 					action,
 					reason,
 					willRetry,
@@ -2875,8 +3092,14 @@ export class SessionMaintenance {
 				}
 				if (!preparation) {
 					const noProgressDeadEnd = reason !== "idle" && !frameRescueCreatedHeadroom;
+					const implicatedFrames =
+						frameRescueResult && !frameRescueCreatedHeadroom
+							? (snapcompact.getPreservedArchive(frameRescueResult.preserveData)?.frames.length ?? 0)
+							: 0;
 					const deadEndWarning = noProgressDeadEnd
-						? compactionDeadEndWarning("shrink it (e.g. clear large tool output)")
+						? compactionDeadEndWarning(
+								this.#deadEndRemedies("shrink it (e.g. clear large tool output)", implicatedFrames),
+							)
 						: undefined;
 					// A rescue that appended a rebuilt archive without creating
 					// headroom must carry the dead-end badge on the entry the
@@ -3348,6 +3571,7 @@ export class SessionMaintenance {
 				preserveData,
 				fromExtension,
 				codexCompaction,
+				method: fromExtension ? undefined : method,
 				action,
 				reason,
 				willRetry,
@@ -3439,6 +3663,8 @@ export class SessionMaintenance {
 		preserveData: Record<string, unknown> | undefined;
 		fromExtension: boolean;
 		codexCompaction: CodexCompactionContext | undefined;
+		method: CompactionMethod | undefined;
+		providerReplayThroughEntryId?: string;
 		action: "context-full" | "handoff" | "snapcompact" | "remote";
 		reason: "overflow" | "threshold" | "idle" | "incomplete";
 		willRetry: boolean;
@@ -3476,6 +3702,8 @@ export class SessionMaintenance {
 			fromExtension: args.fromExtension,
 			preserveData: args.preserveData,
 			codexCompaction: args.codexCompaction,
+			method: args.method,
+			providerReplayThroughEntryId: args.providerReplayThroughEntryId,
 			advisorResetReason: "auto-compaction",
 			detachExtensionEmit: detachPostCommit,
 		});

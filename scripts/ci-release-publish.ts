@@ -74,12 +74,49 @@ interface PackageManifest {
 	name?: string;
 	version?: string;
 	private?: boolean;
+	license?: string;
 	files?: JsonValue[];
 	optionalDependencies?: JsonObject;
 }
 
 const repoRoot = path.join(import.meta.dir, "..");
 const isDryRun = process.argv.includes("--dry-run");
+const MIT_LICENSE = "LICENSE";
+const THIRD_PARTY_NOTICES = "THIRD-PARTY-NOTICES.txt";
+
+/** Selects the legal payload contract for a publishable first-party package. */
+export function legalPayloadFiles(license: string | undefined): string[] {
+	switch (license) {
+		case "MIT":
+			return [MIT_LICENSE, THIRD_PARTY_NOTICES];
+		default:
+			throw new Error(`Unsupported package license: ${license ?? "<missing>"}`);
+	}
+}
+
+/**
+ * Materialize the legal payload beside a package manifest before packing.
+ * Package-local license/notice files win; missing files fall back to the
+ * repository payload so generated and source packages follow one contract.
+ */
+export async function stageLegalPayloads(
+	pkgDir: string,
+	license: string | undefined,
+	write: boolean,
+	sourceRoot = repoRoot,
+): Promise<string[]> {
+	const files = legalPayloadFiles(license);
+	for (const file of files) {
+		const destination = path.join(pkgDir, file);
+		if (await Bun.file(destination).exists()) continue;
+		const source = path.join(sourceRoot, file);
+		if (!(await Bun.file(source).exists())) {
+			throw new Error(`Missing legal payload ${file} for ${path.relative(repoRoot, pkgDir)}`);
+		}
+		if (write) await fs.copyFile(source, destination);
+	}
+	return files;
+}
 
 function nativeLeafTagFromArgs(argv: readonly string[]): string | null {
 	for (let i = 0; i < argv.length; i++) {
@@ -95,6 +132,18 @@ function nativeLeafTagFromArgs(argv: readonly string[]): string | null {
 }
 
 const nativeLeafTag = nativeLeafTagFromArgs(process.argv.slice(2));
+/**
+ * Choose npm's dist-tag from a package manifest version. Unknown prereleases
+ * are rejected rather than accidentally publishing them on the stable channel.
+ */
+export function npmDistTag(version: string): string {
+	if (/^\d+\.\d+\.\d+-canary\./.test(version)) return "canary";
+	if (/^\d+\.\d+\.\d+-/.test(version)) {
+		throw new Error(`Unsupported prerelease version for npm publish: ${version}`);
+	}
+	return "latest";
+}
+
 export const packages: PublishPackage[] = [
 	{ dir: "packages/utils", kind: "typescript" },
 	{ dir: "packages/wire", kind: "typescript" },
@@ -178,6 +227,9 @@ export async function rewriteManifest(pkg: PublishPackage, write: boolean): Prom
 	}
 	if (manifest.exports !== undefined) manifest.exports = rewriteExports(manifest.exports, pkg.publishJs === true);
 	const files = Array.isArray(manifest.files) ? [...manifest.files] : [];
+	for (const legalFile of legalPayloadFiles(manifest.license)) {
+		if (!files.includes(legalFile)) files.push(legalFile);
+	}
 	const hasDist = files.includes("dist");
 	if (!hasDist && !files.includes("dist/types")) files.push("dist/types");
 	if (pkg.publishJs && !hasDist && !files.includes("dist/js")) files.push("dist/js");
@@ -201,6 +253,8 @@ async function preparePackage(pkg: PublishPackage): Promise<PackageManifest> {
 	if (pkg.publishJs) {
 		await $`bun x tsgo -p tsconfig.publish.js.json`.cwd(pkgDir);
 	}
+	const sourceManifest = (await Bun.file(path.join(pkgDir, "package.json")).json()) as PackageManifest;
+	await stageLegalPayloads(pkgDir, sourceManifest.license, !isDryRun);
 	// Both emits run under `moduleResolution: "Bundler"`, so relative
 	// specifiers land extensionless — unresolvable for a `nodenext` consumer
 	// (types) and for Node ESM at runtime (js). Rewrite them to explicit `.js`.
@@ -235,10 +289,12 @@ function buildNativeOptionalDependencies(version: string): JsonObject {
 	return optionalDependencies;
 }
 
+/** Prepares the native core manifest and legal payloads for publication. */
 export async function prepareNativeCorePackage(pkgDir: string, write: boolean): Promise<PackageManifest> {
 	const manifestPath = path.join(pkgDir, "package.json");
 	const manifest = (await Bun.file(manifestPath).json()) as PackageManifest;
 	if (typeof manifest.version !== "string") throw new Error(`Missing version in ${manifestPath}`);
+	const legalFiles = await stageLegalPayloads(pkgDir, manifest.license, write);
 	manifest.optionalDependencies = buildNativeOptionalDependencies(manifest.version);
 	manifest.files = [
 		"native/index.js",
@@ -247,10 +303,13 @@ export async function prepareNativeCorePackage(pkgDir: string, write: boolean): 
 		"native/clipboard.d.ts",
 		"native/desktop.js",
 		"native/desktop.d.ts",
+		"native/desktop-adapter.js",
+		"native/desktop-adapter.d.ts",
 		"native/loader-state.js",
 		"native/loader-state.d.ts",
 		"native/embedded-addon.js",
 		"README.md",
+		...legalFiles,
 	];
 	if (write) await Bun.write(manifestPath, `${JSON.stringify(manifest, null, "\t")}\n`);
 	return manifest;
@@ -292,9 +351,11 @@ export async function inspectPackedTarball(tarballPath: string): Promise<PackedT
 	return { name: manifest.name, version: manifest.version, path: tarballPath };
 }
 
-async function packAndPublish(dir: string, name: string): Promise<void> {
+async function packAndPublish(dir: string, name: string, version: string): Promise<void> {
 	if (isDryRun) {
-		console.log(`DRY RUN bun pm pack && npm publish --access public (${path.relative(repoRoot, dir)})`);
+		console.log(
+			`DRY RUN bun pm pack && npm publish --access public --tag ${npmDistTag(version)} (${path.relative(repoRoot, dir)})`,
+		);
 		return;
 	}
 	console.log(`Publishing ${name}…`);
@@ -309,6 +370,7 @@ async function packAndPublish(dir: string, name: string): Promise<void> {
 		const tarball = (await fs.readdir(packDir)).find(entry => entry.endsWith(".tgz"));
 		if (!tarball) throw new Error(`bun pm pack produced no tarball for ${name} (${path.relative(repoRoot, dir)})`);
 		const packedTarball = await inspectPackedTarball(path.join(packDir, tarball));
+		const tag = npmDistTag(packedTarball.version);
 		// Preflight the exact packed version so reruns skip deterministically.
 		// Fail open on lookup errors; only a confirmed published version may skip publishing.
 		const preflight = await $`npm view ${`${packedTarball.name}@${packedTarball.version}`} version`.quiet().nothrow();
@@ -316,7 +378,7 @@ async function packAndPublish(dir: string, name: string): Promise<void> {
 			console.log(`Skipping ${packedTarball.name} (version already published)`);
 			return;
 		}
-		const result = await $`npm publish ${packedTarball.path} --access public`.quiet().nothrow();
+		const result = await $`npm publish ${packedTarball.path} --access public --tag ${tag}`.quiet().nothrow();
 		const output = `${result.stdout.toString()}${result.stderr.toString()}`.trim();
 		if (output) console.log(output);
 		if (result.exitCode !== 0) {
@@ -344,7 +406,7 @@ export function isVersionAlreadyPublished(output: string): boolean {
 }
 
 async function publishGeneratedLeafPackage(leaf: GeneratedLeafPackage): Promise<void> {
-	await packAndPublish(leaf.dir, leaf.manifest.name);
+	await packAndPublish(leaf.dir, leaf.manifest.name, leaf.manifest.version);
 }
 
 async function publishNativeLeafPackage(tag: string): Promise<void> {
@@ -353,6 +415,7 @@ async function publishNativeLeafPackage(tag: string): Promise<void> {
 	const pkgDir = path.join(repoRoot, pkg.dir);
 	const coreManifest = (await Bun.file(path.join(pkgDir, "package.json")).json()) as PackageManifest;
 	if (typeof coreManifest.version !== "string") throw new Error(`Missing version in ${pkg.dir}/package.json`);
+	await stageLegalPayloads(pkgDir, coreManifest.license ?? "MIT", !isDryRun);
 	const leaves = await generateNpmPackages({
 		packageDir: pkgDir,
 		dryRun: isDryRun,
@@ -368,13 +431,15 @@ async function publishNativePackage(pkg: PublishPackage): Promise<void> {
 	const pkgDir = path.join(repoRoot, pkg.dir);
 	const manifest = await prepareNativeCorePackage(pkgDir, !isDryRun);
 	const name = manifest.name ?? path.basename(pkg.dir);
+	const version = manifest.version;
+	if (typeof version !== "string") throw new Error(`Missing version in ${pkg.dir}/package.json`);
 	if (isDryRun) {
 		console.log(`DRY RUN native core manifest rewrite (${pkg.dir})`);
 		console.log(
 			JSON.stringify({ optionalDependencies: manifest.optionalDependencies, files: manifest.files }, null, "\t"),
 		);
 	}
-	await packAndPublish(pkgDir, name);
+	await packAndPublish(pkgDir, name, version);
 }
 
 async function publishPackage(pkg: PublishPackage): Promise<void> {
@@ -385,11 +450,13 @@ async function publishPackage(pkg: PublishPackage): Promise<void> {
 	const pkgDir = path.join(repoRoot, pkg.dir);
 	const manifest = await preparePackage(pkg);
 	const name = manifest.name ?? path.basename(pkg.dir);
+	const version = manifest.version;
+	if (typeof version !== "string") throw new Error(`Missing version in ${pkg.dir}/package.json`);
 	if (manifest.private) {
 		console.log(`Skipping ${name} (private)`);
 		return;
 	}
-	await packAndPublish(pkgDir, name);
+	await packAndPublish(pkgDir, name, version);
 }
 
 if (import.meta.main) {

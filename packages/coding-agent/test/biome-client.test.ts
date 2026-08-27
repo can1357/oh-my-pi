@@ -132,6 +132,25 @@ describe("BiomeClient format", () => {
 });
 
 describe("BiomeClient lint", () => {
+	test("cancels a hung Biome process when diagnostics are aborted", async () => {
+		const tempDir = await makeTempDir();
+		const command = path.join(tempDir, "biome-hang");
+		await Bun.write(command, "#!/bin/sh\nwhile :; do :; done\n");
+		await fs.chmod(command, 0o755);
+		const targetFile = path.join(tempDir, "example.ts");
+		const started = Date.now();
+
+		let rejected = false;
+		try {
+			await new BiomeClient(biomeConfig(command), tempDir).lint(targetFile, AbortSignal.timeout(50));
+		} catch {
+			rejected = true;
+		}
+
+		expect(rejected).toBe(true);
+		expect(Date.now() - started).toBeLessThan(2_000);
+	}, 5_000);
+
 	test("surfaces Biome 2.x --reporter=json diagnostics", async () => {
 		const tempDir = await makeTempDir();
 		await Bun.write(

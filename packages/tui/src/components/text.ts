@@ -25,14 +25,11 @@ export class Text implements Component {
 	#paddingY: number; // Top/bottom padding
 	#customBgFn?: (text: string) => string;
 	#styleFn?: (text: string) => string;
-	#widthEpochRevision = 0;
-
 	#ignoreTight = false;
 
 	setIgnoreTight(ignore: boolean): this {
 		if (this.#ignoreTight === ignore) return this;
 		this.#ignoreTight = ignore;
-		this.#widthEpochRevision++;
 		this.invalidate();
 		return this;
 	}
@@ -40,7 +37,7 @@ export class Text implements Component {
 	// Cache for rendered output
 	#cachedText?: string;
 	#cachedWidth?: number;
-	#cachedWidthEpoch?: number;
+	#cachedWidthConfigEpoch?: number;
 	#cachedLines?: string[];
 
 	constructor(text: string = "", paddingX: number = 1, paddingY: number = 1, customBgFn?: (text: string) => string) {
@@ -61,23 +58,17 @@ export class Text implements Component {
 		this.#text = text;
 		this.#cachedText = undefined;
 		this.#cachedWidth = undefined;
-		this.#cachedWidthEpoch = undefined;
+		this.#cachedWidthConfigEpoch = undefined;
 		this.#cachedLines = undefined;
-		this.#widthEpochRevision++;
 		return true;
-	}
-
-	getNativeScrollbackWidthEpochRevision(): number {
-		return this.#widthEpochRevision;
 	}
 
 	setCustomBgFn(customBgFn?: (text: string) => string): void {
 		this.#customBgFn = customBgFn;
 		this.#cachedText = undefined;
 		this.#cachedWidth = undefined;
-		this.#cachedWidthEpoch = undefined;
+		this.#cachedWidthConfigEpoch = undefined;
 		this.#cachedLines = undefined;
-		this.#widthEpochRevision++;
 	}
 
 	/**
@@ -90,16 +81,15 @@ export class Text implements Component {
 		this.#styleFn = styleFn;
 		this.#cachedText = undefined;
 		this.#cachedWidth = undefined;
-		this.#cachedWidthEpoch = undefined;
+		this.#cachedWidthConfigEpoch = undefined;
 		this.#cachedLines = undefined;
-		this.#widthEpochRevision++;
 		return this;
 	}
 
 	invalidate(): void {
 		this.#cachedText = undefined;
 		this.#cachedWidth = undefined;
-		this.#cachedWidthEpoch = undefined;
+		this.#cachedWidthConfigEpoch = undefined;
 		this.#cachedLines = undefined;
 	}
 
@@ -109,7 +99,7 @@ export class Text implements Component {
 			this.#cachedLines &&
 			this.#cachedText === this.#text &&
 			this.#cachedWidth === width &&
-			this.#cachedWidthEpoch === getWidthConfigEpoch()
+			this.#cachedWidthConfigEpoch === getWidthConfigEpoch()
 		) {
 			return this.#cachedLines;
 		}
@@ -119,7 +109,7 @@ export class Text implements Component {
 			const result: string[] = [];
 			this.#cachedText = this.#text;
 			this.#cachedWidth = width;
-			this.#cachedWidthEpoch = getWidthConfigEpoch();
+			this.#cachedWidthConfigEpoch = getWidthConfigEpoch();
 			this.#cachedLines = result;
 			return result;
 		}
@@ -175,7 +165,7 @@ export class Text implements Component {
 		// Update cache
 		this.#cachedText = this.#text;
 		this.#cachedWidth = width;
-		this.#cachedWidthEpoch = getWidthConfigEpoch();
+		this.#cachedWidthConfigEpoch = getWidthConfigEpoch();
 		this.#cachedLines = result;
 
 		return result.length > 0 ? result : [""];

@@ -53,6 +53,15 @@ export { normalizeSchemaForGoogle };
 
 type GoogleApiType = "google-generative-ai" | "google-gemini-cli" | "google-vertex";
 
+function convertGoogleImagePart(image: ImageContent): Part {
+	if (image.providerFile?.provider === "google" && image.providerFile.uri) {
+		return { fileData: { fileUri: image.providerFile.uri, mimeType: image.mimeType } };
+	}
+	return image.url
+		? { fileData: { fileUri: image.url, mimeType: image.mimeType } }
+		: { inlineData: { mimeType: image.mimeType, data: image.data } };
+}
+
 /**
  * Thinking level for Gemini 3 models. Mirrors Google's `ThinkingLevel` enum values.
  * Defined here (not in any specific provider) so all Google providers can reference it
@@ -211,12 +220,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 						if (text.trim().length === 0) continue;
 						parts.push({ text });
 					} else if (supportsImages) {
-						parts.push({
-							inlineData: {
-								mimeType: item.mimeType,
-								data: item.data,
-							},
-						});
+						parts.push(convertGoogleImagePart(item));
 					} else {
 						omittedImages = true;
 					}
@@ -315,12 +319,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 						? "(see attached image)"
 						: "";
 
-			const imageParts: Part[] = imageContent.map(imageBlock => ({
-				inlineData: {
-					mimeType: imageBlock.mimeType,
-					data: imageBlock.data,
-				},
-			}));
+			const imageParts = imageContent.map(convertGoogleImagePart);
 
 			const includeId = supportsFunctionPartId(model);
 			const emittedName = emittedToolCallNames.get(msg.toolCallId);

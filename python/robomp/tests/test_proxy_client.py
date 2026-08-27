@@ -745,6 +745,40 @@ def test_proxy_git_transport_push_slot_uid_body() -> None:
     assert "slot_uid" not in captured[1]
 
 
+def test_proxy_git_transport_push_release_body() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"head": "abc123", "branch": "main", "tag": "v1.2.3"})
+
+    transport = ProxyGitTransport(
+        base_url="http://proxy.test",
+        hmac_key=_HMAC,
+        transport=httpx.MockTransport(handler),
+    )
+    result = transport.push_release(
+        repo="octo/widget",
+        workspace_key="octo__widget__release",
+        repo_dir=Path("/unused"),
+        branch="main",
+        tag="v1.2.3",
+        expected_head="abc123",
+        slot_uid=2001,
+    )
+
+    assert result.head == "abc123"
+    assert captured[0].url.path == "/gh/v1/git/push_release"
+    assert json.loads(captured[0].content) == {
+        "repo": "octo/widget",
+        "workspace_key": "octo__widget__release",
+        "branch": "main",
+        "tag": "v1.2.3",
+        "expected_head": "abc123",
+        "slot_uid": 2001,
+    }
+
+
 # Sanity: signed POST headers from ProxyGitTransport._post verify cleanly.
 def test_proxy_git_transport_post_headers_verify() -> None:
     captured: list[httpx.Request] = []
@@ -779,3 +813,76 @@ def test_proxy_git_transport_post_headers_verify() -> None:
     )
     assert result.ok, result.reason
     assert json.loads(req.content)["repo"] == "octo/widget"
+
+
+async def test_release_read_payloads_deserialize() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/gh/v1/workflow_runs":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": 1,
+                            "name": "CI",
+                            "event": "push",
+                            "status": "completed",
+                            "conclusion": "failure",
+                            "head_branch": "main",
+                            "head_sha": "abc",
+                            "html_url": "https://example/run",
+                            "run_attempt": 1,
+                        }
+                    ]
+                },
+            )
+        if path == "/gh/v1/workflow_jobs":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": 2,
+                            "run_id": 1,
+                            "name": "test",
+                            "status": "completed",
+                            "conclusion": "failure",
+                            "html_url": "https://example/job",
+                            "failed_steps": ["tests"],
+                        }
+                    ]
+                },
+            )
+        if path == "/gh/v1/job_log_tail":
+            return httpx.Response(200, json={"text": "failure"})
+        if path == "/gh/v1/tag_ref":
+            return httpx.Response(200, json={"sha": "abc"})
+        assert path == "/gh/v1/release_by_tag"
+        return httpx.Response(
+            200,
+            json={
+                "tag": "v1.2.3",
+                "name": "1.2.3",
+                "draft": False,
+                "prerelease": False,
+                "html_url": "https://example/release",
+                "asset_names": ["omp.tar.gz"],
+            },
+        )
+
+    client = GitHubProxyClient(
+        base_url="http://proxy.test",
+        hmac_key=_HMAC,
+        transport=httpx.MockTransport(handler),
+    )
+    runs = await client.list_workflow_runs("octo/widget", head_sha="abc")
+    jobs = await client.list_workflow_jobs("octo/widget", 1)
+    log_tail = await client.get_job_log_tail("octo/widget", 2, tail_lines=120)
+    tag_sha = await client.get_tag_sha("octo/widget", "v1.2.3")
+    release = await client.get_release_by_tag("octo/widget", "v1.2.3")
+    assert runs[0].head_sha == "abc"
+    assert jobs[0].failed_steps == ("tests",)
+    assert log_tail == "failure"
+    assert tag_sha == "abc"
+    assert release is not None and release.asset_names == ("omp.tar.gz",)

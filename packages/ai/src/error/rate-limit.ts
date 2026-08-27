@@ -1,4 +1,4 @@
-import { extractRetryHint } from "@oh-my-pi/pi-utils";
+import { extractRetryHint } from "@oh-my-pi/pi-utils/fetch-retry";
 
 /**
  * Rate limit reason classification and backoff calculation utilities.

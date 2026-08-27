@@ -50,6 +50,7 @@ function makeHarness() {
 			uiContext = context;
 		},
 		addAutocompleteProvider,
+		syncComposerShape: vi.fn(),
 	} as unknown as InteractiveModeContext;
 
 	const controller = new ExtensionUiController(ctx);

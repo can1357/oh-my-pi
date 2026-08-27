@@ -7,6 +7,7 @@ import {
 	AuthStorage,
 	type CredentialDisabledEvent,
 	SqliteAuthCredentialStore,
+	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import { removeWithRetries } from "../../utils/src/temp";
@@ -236,6 +237,111 @@ describe("AuthStorage OAuth refresh race", () => {
 		expect(stored).toHaveLength(2);
 		const oauth = stored.map(entry => entry.credential).filter(credential => credential.type === "oauth");
 		expect(oauth.map(credential => credential.refresh).sort()).toEqual(["refresh-a-rotated", "refresh-b-rotated"]);
+	});
+
+	test("preflight retries a peer-rotated credential instead of stranding it", async () => {
+		const staleExpires = Date.now() - 60_000;
+		const freshExpires = Date.now() + 60 * 60_000;
+
+		// A store WITHOUT durable-lease support: the lease path in
+		// #refreshOAuthCredentialUnshared wraps refresh in refreshStoredOAuthCredential,
+		// which absorbs a peer rotation itself. We want the definitive failure to reach
+		// #resolveOAuthSelection's own preflight catch so the "peer-rotated" outcome of
+		// #disableDefinitiveOAuthFailure is what's actually exercised.
+		const rows: StoredAuthCredential[] = [
+			{
+				id: 1,
+				provider: "unit-oauth-preflight-rotate",
+				credential: { type: "oauth", access: "stale-access", refresh: "stale-refresh", expires: staleExpires },
+				disabledCause: null,
+			},
+		];
+		const cache = new Map<string, { value: string; expiresAtSec: number }>();
+		const noLeaseStore: AuthCredentialStore = {
+			close() {},
+			listAuthCredentials(provider) {
+				return provider ? rows.filter(row => row.provider === provider) : rows;
+			},
+			updateAuthCredential(id, credential) {
+				const row = rows.find(entry => entry.id === id);
+				if (row) row.credential = credential;
+			},
+			deleteAuthCredential() {},
+			tryDisableAuthCredentialIfMatches() {
+				return false;
+			},
+			replaceAuthCredentialsForProvider() {
+				return rows;
+			},
+			upsertAuthCredentialForProvider() {
+				return rows;
+			},
+			deleteAuthCredentialsForProvider() {},
+			getCache(key) {
+				const entry = cache.get(key);
+				if (!entry) return null;
+				if (entry.expiresAtSec * 1000 <= Date.now()) return null;
+				return entry.value;
+			},
+			setCache(key, value, expiresAtSec) {
+				cache.set(key, { value, expiresAtSec });
+			},
+			cleanExpiredCache() {},
+		};
+
+		let refreshCalls = 0;
+		oauthUtils.registerOAuthProvider({
+			id: "unit-oauth-preflight-rotate",
+			name: "Unit OAuth Preflight Rotate",
+			sourceId: "auth-storage-oauth-refresh-race-test",
+			async login() {
+				return { access: "unused", refresh: "unused", expires: freshExpires };
+			},
+			async refreshToken(credentials) {
+				refreshCalls += 1;
+				if (credentials.refresh === "stale-refresh") {
+					// A peer completed its own refresh mid-flight and rotated the shared row;
+					// our stale refresh token is now dead (invalid_grant), but the persisted
+					// row holds the peer's freshly rotated credential.
+					rows[0]!.credential = {
+						type: "oauth",
+						access: "fresh-access-from-peer",
+						refresh: "fresh-refresh-from-peer",
+						expires: freshExpires,
+					};
+					throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}');
+				}
+				return credentials;
+			},
+			getApiKey(credentials) {
+				return credentials.access;
+			},
+		});
+
+		const events: CredentialDisabledEvent[] = [];
+		const storage = new AuthStorage(noLeaseStore, {
+			onCredentialDisabled: event => {
+				events.push(event);
+			},
+		});
+		await storage.reload();
+
+		const apiKey = await storage.getApiKey("unit-oauth-preflight-rotate", "session-preflight-rotate");
+
+		// The single stored credential was peer-rotated during preflight refresh. The
+		// resolve pass must pick up the reloaded fresh credential instead of adding the
+		// candidate to preflightFailures and returning undefined.
+		expect(apiKey).toBe("fresh-access-from-peer");
+		expect(events).toHaveLength(0);
+		// Preflight refreshed once and threw; the final pass reuses the fresh token
+		// synced from the reloaded row rather than replaying a second refresh.
+		expect(refreshCalls).toBe(1);
+		const stored = noLeaseStore.listAuthCredentials("unit-oauth-preflight-rotate");
+		expect(stored).toHaveLength(1);
+		expect(stored[0]?.credential.type).toBe("oauth");
+		if (stored[0]?.credential.type === "oauth") {
+			expect(stored[0].credential.refresh).toBe("fresh-refresh-from-peer");
+		}
 	});
 
 	test("coalesces concurrent refreshes for the same credential", async () => {
@@ -848,5 +954,44 @@ describe("AuthStorage OAuth refresh race", () => {
 		expect(refreshCalled).toBe(false);
 		expect(result).toMatchObject({ refreshed: false, removed: false });
 		expect(result.credential).toMatchObject({ type: "oauth", access: "peer-rotated-access" });
+	});
+
+	test("stops after a definitive refresh failure loses its disable CAS", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+
+		await authStorage.set("unit-oauth-definitive-cas-loss", [
+			{
+				type: "oauth",
+				access: "access-old",
+				refresh: "refresh-old",
+				expires: Date.now() - 60_000,
+			},
+		]);
+		const controller = new AbortController();
+		let refreshCalls = 0;
+		oauthUtils.registerOAuthProvider({
+			id: "unit-oauth-definitive-cas-loss",
+			name: "Unit OAuth Definitive CAS Loss",
+			sourceId: "auth-storage-oauth-refresh-race-test",
+			async login() {
+				return { access: "unused", refresh: "unused", expires: Date.now() + 60 * 60_000 };
+			},
+			async refreshToken() {
+				refreshCalls += 1;
+				if (refreshCalls > 1) controller.abort(new Error("unexpected retry"));
+				throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}');
+			},
+			getApiKey(credentials) {
+				return credentials.access;
+			},
+		});
+		vi.spyOn(store, "tryDisableAuthCredentialIfMatches").mockReturnValue(false);
+
+		await expect(
+			authStorage.getApiKey("unit-oauth-definitive-cas-loss", "session-cas-loss", {
+				signal: controller.signal,
+			}),
+		).resolves.toBeUndefined();
+		expect(refreshCalls).toBe(1);
 	});
 });

@@ -1,8 +1,8 @@
 import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isEisdir, isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
-import { daemonRuntimeDir } from "./paths";
+import { isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
+import { canonicalProjectDir, daemonRuntimeDir } from "./paths";
 
 const CLIENTS_DIR = "clients";
 const BROKER_PID_FILE = "broker.pid";
@@ -30,16 +30,6 @@ const DAEMON_RUNTIME_STALE_GRACE_MS = 5 * 60_000;
 /** Handle keeping one omp process registered in a project daemon scope. */
 export interface DaemonProjectPresence {
 	close(): Promise<void>;
-}
-
-async function canonicalProjectDir(projectDir: string): Promise<string> {
-	const resolved = path.resolve(projectDir);
-	try {
-		return await fs.realpath(resolved);
-	} catch (error) {
-		if (isEnoent(error) || isEisdir(error)) return resolved;
-		throw error;
-	}
 }
 
 /** Register this omp process so project daemons survive while it remains alive. */
@@ -103,22 +93,22 @@ export async function hasLiveDaemonProjectPresence(runtimeDir: string): Promise<
 	return live;
 }
 
-/** Whether a runtime dir's recorded broker PID is still alive. */
-async function hasLiveDaemonBroker(runtimeDir: string): Promise<boolean> {
+/** PID recorded in the runtime dir's broker lease when that broker process is still alive; undefined otherwise. */
+export async function readLiveDaemonBrokerPid(runtimeDir: string): Promise<number | undefined> {
 	let raw: unknown;
 	try {
 		raw = await Bun.file(path.join(runtimeDir, BROKER_PID_FILE)).json();
 	} catch {
-		return false; // Missing or malformed broker.pid => no owning broker.
+		return undefined; // Missing or malformed broker.pid => no owning broker.
 	}
 	if (typeof raw !== "object" || raw === null || !("pid" in raw) || typeof raw.pid !== "number") {
-		return false;
+		return undefined;
 	}
 	try {
 		process.kill(raw.pid, 0);
-		return true;
+		return raw.pid;
 	} catch {
-		return false;
+		return undefined;
 	}
 }
 
@@ -159,7 +149,7 @@ export async function pruneDeadDaemonRuntimeDirs(currentRuntimeDir: string): Pro
 		try {
 			const stat = await fs.stat(dir);
 			if (now - stat.mtimeMs < DAEMON_RUNTIME_STALE_GRACE_MS) continue;
-			if (await hasLiveDaemonBroker(dir)) continue;
+			if ((await readLiveDaemonBrokerPid(dir)) !== undefined) continue;
 			if (await hasLiveDaemonProjectPresence(dir)) continue;
 			await fs.rm(dir, { recursive: true, force: true });
 		} catch (error) {

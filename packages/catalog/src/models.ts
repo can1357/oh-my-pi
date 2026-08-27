@@ -1,6 +1,5 @@
-import { buildModel } from "./build";
 import MODELS from "./models.json" with { type: "json" };
-import type { Api, KnownProvider, Model, ModelSpec, TokenCost, Usage } from "./types";
+import type { Api, KnownProvider, Model, ModelCost, TokenCost, Usage } from "./types";
 
 /**
  * Static bundled model registry loaded from `models.json`.
@@ -12,7 +11,7 @@ import type { Api, KnownProvider, Model, ModelSpec, TokenCost, Usage } from "./t
  */
 const modelRegistry = new Map<string, Map<string, Model<Api>>>();
 
-/** Build (once) and return one provider's enriched bundled models. */
+/** Return one provider's bundled models, materialized by the generator. */
 function getProviderModels(provider: string): Map<string, Model<Api>> | undefined {
 	const cachedModels = modelRegistry.get(provider);
 	if (cachedModels !== undefined) return cachedModels;
@@ -20,8 +19,10 @@ function getProviderModels(provider: string): Map<string, Model<Api>> | undefine
 
 	const providerModels = new Map<string, Model<Api>>();
 	const rawModels = MODELS[provider as keyof typeof MODELS];
-	for (const [id, model] of Object.entries(rawModels)) {
-		providerModels.set(id, buildModel(model as ModelSpec<Api>));
+	for (const id in rawModels) {
+		// models.json rows are complete Models emitted by generate-models.ts;
+		// consuming them verbatim keeps startup allocation-free.
+		providerModels.set(id, rawModels[id as keyof typeof rawModels] as unknown as Model<Api>);
 	}
 	modelRegistry.set(provider, providerModels);
 	return providerModels;
@@ -42,29 +43,38 @@ export function getBundledModels(provider: GeneratedProvider): Model<Api>[] {
 	const models = getProviderModels(provider);
 	return models ? (Array.from(models.values()) as Model<Api>[]) : [];
 }
-function resolveTokenCost(cost: Model["cost"], promptInputTokens: number): TokenCost {
+function resolveTokenCost(cost: ModelCost, promptInputTokens: number): TokenCost {
 	const longContext = cost.longContext;
 	if (!longContext) return cost;
-	return promptInputTokens > longContext.inputThreshold ? longContext : cost;
+	const reachesThreshold =
+		promptInputTokens > longContext.inputThreshold ||
+		(longContext.inputThresholdInclusive === true && promptInputTokens === longContext.inputThreshold);
+	return reachesThreshold ? longContext : cost;
 }
 
 /** Price a prompt as fully uncached input under its active context-length tier. */
-export function calculateUncachedInputCost(cost: Model["cost"], promptInputTokens: number): number {
+export function calculateUncachedInputCost(cost: ModelCost, promptInputTokens: number): number {
 	const rates = resolveTokenCost(cost, promptInputTokens);
 	return (rates.input / 1_000_000) * promptInputTokens;
 }
 
-export function calculateCost<TApi extends Api>(model: Model<TApi>, usage: Usage): Usage["cost"] {
+/** Price one usage record from a token rate card, including active context tiers. */
+export function calculateUsageCost(cost: ModelCost, usage: Usage): Usage["cost"] {
 	const orchestration = usage.orchestration;
 	const promptInputTokens =
 		usage.input + usage.cacheRead + usage.cacheWrite + (orchestration?.input ?? 0) + (orchestration?.cacheRead ?? 0);
-	const rates = resolveTokenCost(model.cost, promptInputTokens);
+	const rates = resolveTokenCost(cost, promptInputTokens);
 	usage.cost.input = (rates.input / 1000000) * (usage.input + (orchestration?.input ?? 0));
 	usage.cost.output = (rates.output / 1000000) * (usage.output + (orchestration?.output ?? 0));
 	usage.cost.cacheRead = (rates.cacheRead / 1000000) * (usage.cacheRead + (orchestration?.cacheRead ?? 0));
 	usage.cost.cacheWrite = cacheWriteCost(rates, usage);
 	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 	return usage.cost;
+}
+
+/** Price one usage record from its model's token rate card. */
+export function calculateCost<TApi extends Api>(model: Model<TApi>, usage: Usage): Usage["cost"] {
+	return calculateUsageCost(model.cost, usage);
 }
 
 /**

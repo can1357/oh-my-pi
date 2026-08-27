@@ -62,11 +62,24 @@ const BEDROCK_RESERVED_HEADERS = new Set(["content-type", "accept", "authorizati
 
 export type BedrockThinkingDisplay = "summarized" | "omitted";
 
+/** Bedrock guardrail trace verbosity, mirrors the Converse `guardrailConfig.trace` values. */
+export type BedrockGuardrailTrace = "enabled" | "disabled" | "enabled_full";
+
 export interface BedrockOptions extends StreamOptions {
 	region?: string;
 	profile?: string;
 	/** Amazon Bedrock API key sent as `Authorization: Bearer`, ahead of SigV4 credential resolution. */
 	bearerToken?: string;
+	/**
+	 * Amazon Bedrock Guardrail id or ARN. When set, the Converse request carries a
+	 * `guardrailConfig` so accounts that gate `bedrock:InvokeModel*` on the
+	 * `bedrock:GuardrailIdentifier` condition key stop returning an explicit deny.
+	 */
+	guardrailIdentifier?: string;
+	/** Guardrail version to apply. Defaults to `"DRAFT"` when a guardrail is set. */
+	guardrailVersion?: string;
+	/** Guardrail trace verbosity. Left unset (Bedrock default) unless provided. */
+	guardrailTrace?: BedrockGuardrailTrace;
 	toolChoice?: "auto" | "any" | "none" | { type: "tool"; name: string };
 	/* See https://docs.aws.amazon.com/bedrock/latest/userguide/inference-reasoning.html for supported models. */
 	reasoning?: Effort;
@@ -151,24 +164,27 @@ function regionServesGeo(region: string, geo: string): boolean {
 
 /**
  * Resolve the Bedrock runtime region for a request. An explicit per-request
- * region and an ARN-embedded region win outright. Otherwise, for a geo-prefixed
- * cross-region inference profile (`us.`/`eu.`/`apac.`/`au.`/`jp.`/`us-gov.`), an
- * ambient region (`AWS_REGION` / `AWS_DEFAULT_REGION`) is honored only when it
- * can serve the profile's geo; a mismatched or absent ambient region is
- * corrected to the geo default so an `eu.`/`apac.` profile never POSTs to a `us`
- * endpoint (and vice versa). `global.` profiles have no geo entry, so the
- * ambient region (or `us-east-1`) is used unchanged.
+ * region and an ARN-embedded model region win outright. Otherwise, for a
+ * geo-prefixed cross-region inference profile (`us.`/`eu.`/`apac.`/`au.`/`jp.`/
+ * `us-gov.`), an ambient region (`AWS_REGION` / `AWS_DEFAULT_REGION`) is
+ * honored only when it can serve the profile's geo. If the ambient region is
+ * absent or mismatched, a same-geo guardrail ARN region is used when available;
+ * otherwise the geo default is used. `global.` profiles have no geo entry, so
+ * the ambient region (or, when absent, a guardrail ARN's region or
+ * `us-east-1`) is used unchanged.
  */
 function resolveBedrockRegion(modelId: string, options: BedrockOptions): string {
 	const explicit = options.region || inferRegionFromBedrockArn(modelId);
 	if (explicit) return explicit;
 	const ambient = resolveAwsAmbientRegion(options.profile);
+	const guardrailRegion = inferRegionFromBedrockArn(options.guardrailIdentifier ?? "");
 	const geo = inferenceProfileGeo(modelId);
 	if (geo) {
 		if (ambient && regionServesGeo(ambient, geo)) return ambient;
+		if (guardrailRegion && regionServesGeo(guardrailRegion, geo)) return guardrailRegion;
 		return INFERENCE_PROFILE_GEO_DEFAULT_REGION[geo];
 	}
-	return ambient || "us-east-1";
+	return ambient || guardrailRegion || "us-east-1";
 }
 
 type Block = (TextContent | ThinkingContent | ToolCall) & {
@@ -253,11 +269,18 @@ interface BedrockToolPlan {
 	sentinelInjected: boolean;
 }
 
+interface WireGuardrailConfig {
+	guardrailIdentifier: string;
+	guardrailVersion: string;
+	trace?: BedrockGuardrailTrace;
+}
+
 interface ConverseStreamRequest {
 	messages: WireMessage[];
 	system?: SystemContent[];
 	inferenceConfig?: { maxTokens?: number; temperature?: number; topP?: number };
 	toolConfig?: WireToolConfig;
+	guardrailConfig?: WireGuardrailConfig;
 	additionalModelRequestFields?: Record<string, unknown>;
 }
 
@@ -351,6 +374,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					topP: options.topP,
 				},
 				toolConfig,
+				guardrailConfig: buildGuardrailConfig(options),
 				additionalModelRequestFields,
 			};
 			const replacementInput = await options?.onPayload?.(commandInput, model);
@@ -527,7 +551,14 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 						output.stopReason =
 							sentinelInjected && ev.stopReason === "tool_use" ? "stop" : mapStopReason(ev.stopReason);
 						if (output.stopReason === "error") {
-							output.errorMessage = `Generation failed with stop reason: ${ev.stopReason ?? "unknown"}`;
+							// A guardrail block ends the turn with `guardrail_intervened` and often no
+							// content — surface it explicitly so it never reads as an empty completion.
+							output.errorMessage =
+								ev.stopReason === "guardrail_intervened"
+									? `Response blocked by Amazon Bedrock guardrail (stop reason: ${ev.stopReason}).`
+									: ev.stopReason === "content_filtered"
+										? `Response filtered by Amazon Bedrock content filters (stop reason: ${ev.stopReason}).`
+										: `Generation failed with stop reason: ${ev.stopReason ?? "unknown"}`;
 						}
 						break;
 					}
@@ -779,17 +810,6 @@ function takeCachePoint(policy: BedrockPromptCachePolicy): CachePoint | undefine
 	return { cachePoint: { type: "default", ...(policy.ttl ? { ttl: policy.ttl } : {}) } };
 }
 
-/**
- * Check if the model supports thinking signatures in reasoningContent.
- * Only Anthropic Claude models support the signature field.
- * Other models (Nova, Titan, Mistral, Llama, etc.) reject it with:
- * "This model doesn't support the reasoningContent.reasoningText.signature field"
- */
-function supportsThinkingSignature(model: Model<"bedrock-converse-stream">): boolean {
-	const id = model.id.toLowerCase();
-	return id.includes("anthropic.claude") || id.includes("anthropic/claude");
-}
-
 function buildSystemPrompt(
 	systemPrompt: readonly string[] | string | undefined,
 	promptCachePolicy: BedrockPromptCachePolicy,
@@ -869,21 +889,25 @@ function convertMessages(
 						case "thinking":
 							// Skip empty thinking blocks
 							if (c.thinking.trim().length === 0) continue;
-							// A captured signature is authoritative even when the model id is an opaque ARN.
-							// Without one, known non-Claude families use unsigned reasoning; known Claude ids demote to text.
+							// A captured signature is authoritative even when the model id is an opaque ARN:
+							// only a model that itself streamed a signature (Claude) can have one, so replay
+							// it as signed reasoningContent regardless of how the id is spelled.
 							if (c.thinkingSignature) {
 								contentBlocks.push({
 									reasoningContent: {
 										reasoningText: { text: c.thinking.toWellFormed(), signature: c.thinkingSignature },
 									},
 								});
-							} else if (!supportsThinkingSignature(model)) {
-								// Model doesn't support signatures at all — send as unsigned reasoning
-								contentBlocks.push({
-									reasoningContent: { reasoningText: { text: c.thinking.toWellFormed() } },
-								});
 							} else {
-								// Model requires signature but we don't have one — demote to text
+								// No signature was captured. Do NOT fall back to unsigned reasoningContent here:
+								// a model streaming reasoningContent does not imply it accepts reasoningContent
+								// echoed back in a request. Amazon Nova streams unsigned reasoning just fine but
+								// rejects it on replay with HTTP 400 "User messages cannot contain reasoning
+								// content. Please remove the reasoning content and try again.", which wedges the
+								// agent loop on every turn after the first. Demote to plain text instead — the
+								// content survives, just no longer typed as a reasoning block. This matches how
+								// every other provider (Anthropic, Google, OpenAI-completions) handles thinking
+								// blocks it can't safely replay.
 								contentBlocks.push({ text: renderDemotedThinking(model.id, c.thinking) });
 							}
 							break;
@@ -1023,6 +1047,21 @@ function mapStopReason(reason: string | undefined): StopReason {
 		default:
 			return "error";
 	}
+}
+
+/**
+ * Build the Converse `guardrailConfig` block when a guardrail identifier is set.
+ * The version defaults to `"DRAFT"` (Bedrock's editable working draft) and the
+ * trace is passed through untouched — leaving it undefined keeps Bedrock's own
+ * default rather than forcing a value.
+ */
+function buildGuardrailConfig(options: BedrockOptions): WireGuardrailConfig | undefined {
+	if (!options.guardrailIdentifier) return undefined;
+	return {
+		guardrailIdentifier: options.guardrailIdentifier,
+		guardrailVersion: options.guardrailVersion ?? "DRAFT",
+		...(options.guardrailTrace === undefined ? {} : { trace: options.guardrailTrace }),
+	};
 }
 
 function buildAdditionalModelRequestFields(

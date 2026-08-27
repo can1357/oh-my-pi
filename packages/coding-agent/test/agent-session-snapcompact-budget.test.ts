@@ -262,6 +262,31 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		expect(compactSpy.mock.calls[0]?.[1]?.maxFrames).toBe(snapcompact.maxFramesForDataBudget());
 	});
 
+	it("caps maxFrames at the provider image budget so unknown gateways do not archive frames the send path will drop", async () => {
+		const model = session.model;
+		if (!model) throw new Error("Expected model");
+		session.agent.setModel({ ...model, provider: "ramp", contextWindow: 500_000 });
+
+		const branchEntries = sessionManager.getBranch();
+		const lastEntry = branchEntries[branchEntries.length - 1];
+		if (!lastEntry?.id) throw new Error("Expected branch entry with id");
+		const compactSpy = vi.spyOn(snapcompact, "compact").mockResolvedValue({
+			summary: "stubbed snapcompact",
+			shortSummary: "stub",
+			firstKeptEntryId: lastEntry.id,
+			tokensBefore: 100_000,
+			details: { readFiles: [], modifiedFiles: [] },
+			preserveData: {
+				snapcompact: { frames: [], totalChars: 0, truncatedChars: 0 },
+			},
+		});
+
+		await session.compact(undefined, { mode: "snapcompact" });
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(compactSpy.mock.calls[0]?.[1]?.maxFrames).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
+	});
+
 	it("keeps the frame archive out of the RPC result after persisting it", async () => {
 		const branchEntries = sessionManager.getBranch();
 		const lastEntry = branchEntries[branchEntries.length - 1];

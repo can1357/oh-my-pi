@@ -197,6 +197,21 @@ describe("readImageFromClipboard dispatch", () => {
 		expect(nativeSpy).toHaveBeenCalledTimes(1);
 	});
 
+	it("treats a throwing native image read as no image on linux with a display", async () => {
+		// Regression: an xclip-written text-only selection makes arboard's
+		// image read throw ("Unknown error ... incorrect type received from
+		// clipboard") instead of reporting no image. readImageFromClipboard
+		// must not propagate that — the smart-paste text fallback depends on
+		// a null return.
+		setPlatform("linux");
+		process.env.DISPLAY = ":0";
+		vi.spyOn(native, "readImageFromClipboard").mockRejectedValue(
+			new Error("Unknown error while interacting with the clipboard: incorrect type received from clipboard"),
+		);
+
+		expect(await readImageFromClipboard()).toBeNull();
+	});
+
 	it.each(["image/png", "image/jpeg", "image/gif", "image/webp"] as const)(
 		"reads %s bytes through wl-paste before the native bridge on Wayland-only Linux",
 		async mimeType => {

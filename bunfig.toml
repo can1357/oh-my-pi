@@ -2,7 +2,7 @@ telemetry = false
 
 [install]
 minimumReleaseAge = 259200 # 3 days in seconds
-minimumReleaseAgeExcludes = ["@types/bun", "bun-types"]
+minimumReleaseAgeExcludes = ["@types/bun", "bun-types", "kitty-vt-wasm"]
 linker = "hoisted"
 exact = true
 saveTextLockfile = true

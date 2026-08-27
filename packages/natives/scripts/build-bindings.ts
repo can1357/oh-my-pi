@@ -1,9 +1,9 @@
 /**
  * Local napi build: regenerates the TypeScript bindings (native/index.d.ts)
- * and the runtime enum exports, then installs the host addon. Release addons
- * come from Bazel (`bun run build` → scripts/bazel-natives.ts); this path also
- * serves hosts Bazel cannot run on (Windows, the Docker image) via
- * `OMP_NATIVE_BUILD_BACKEND=cargo`. Host target only — no cross-compilation.
+ * and the runtime enum exports, then installs the host addon. This is the
+ * default backend for the `host` target (`bun run build` →
+ * scripts/bazel-natives.ts); release addons build through Bazel with explicit
+ * //:natives-* targets. Host target only — no cross-compilation.
  *
  * `OMP_NATIVE_CARGO_PROFILE` selects the cargo profile (default `local`:
  * incremental, unstripped). Image builds set `ci` for a stripped addon.

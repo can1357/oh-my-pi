@@ -28,8 +28,8 @@ export class FooterComponent implements Component {
 
 	/**
 	 * Set extension status text to display in the footer.
-	 * Text is sanitized (newlines/tabs replaced with spaces) and truncated to terminal width.
-	 * ANSI escape codes for styling are preserved.
+	 * ANSI/VT escape sequences and most control characters are stripped; tabs and newlines become spaces.
+	 * The combined status line is trimmed and truncated to terminal width.
 	 * @param key - Unique key to identify this status
 	 * @param text - Status text, or undefined to clear
 	 */
@@ -157,18 +157,30 @@ export class FooterComponent implements Component {
 
 		// Show billing summary with subscription and premium-request indicators
 		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
+		const { auto: autoIcon, subscription: subscriptionIcon } = theme.icon;
 		const normalizedPremiumRequests = Math.round((totalPremiumRequests + Number.EPSILON) * 100) / 100;
 		if (totalCost || usingSubscription || normalizedPremiumRequests) {
 			const billingParts: string[] = [];
-			if (totalCost) billingParts.push(`$${totalCost.toFixed(3)}`);
+			if (totalCost) {
+				const formatted = totalCost.toFixed(3);
+				if (usingSubscription) {
+					const spend =
+						theme.getSymbolPreset() === "nerd" && subscriptionIcon
+							? `${subscriptionIcon} ${formatted}`
+							: `S${formatted}`;
+					billingParts.push(spend);
+				} else {
+					billingParts.push(`$${formatted}`);
+				}
+			} else if (usingSubscription) {
+				billingParts.push(theme.getSymbolPreset() === "nerd" && subscriptionIcon ? subscriptionIcon : "(sub)");
+			}
 			if (normalizedPremiumRequests) billingParts.push(`★ ${formatNumber(normalizedPremiumRequests)}`);
-			if (usingSubscription) billingParts.push("(sub)");
 			if (billingParts.length > 0) statsParts.push(billingParts.join(" "));
 		}
-
 		// Colorize context percentage based on usage
 		let contextPercentStr: string;
-		const autoIndicator = this.#autoCompactEnabled ? " (auto)" : "";
+		const autoIndicator = this.#autoCompactEnabled && autoIcon ? ` ${autoIcon}` : "";
 		const contextPercentDisplay = `${formatContextUsage(contextPercentValue, contextWindow, contextTokens)}${autoIndicator}`;
 		if (contextUsage && contextPercentValue !== null) {
 			const color = getContextUsageThemeColor(getContextUsageLevel(contextPercentValue, contextWindow));

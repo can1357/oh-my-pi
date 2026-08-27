@@ -2,13 +2,28 @@
 
 ## [Unreleased]
 
-### Changed
-
-- Window token estimates now use broker-held fleet token burn (per-client observed-usage reports) when an auth broker is configured, matching the fleet-wide window fractions instead of undercounting with local-only message stats.
+## [18.0.4] - 2026-08-24
 
 ### Fixed
 
-- Fixed subscription-window insights merging distinct limits that share a duration label (Anthropic's overall vs model-scoped 7-day windows, Codex base vs Spark weeklies); interleaved fractions inflated window-equivalents consumed by orders of magnitude and broke tokens-per-window estimates. Windows now group by provider limit id.
+- Fixed SuperGrok usage appearing as free by applying matching public xAI API pricing (including 200K-token rates), labeling costs as API-equivalent estimates, backfilling existing usage records, and displaying subscription-only models as N/A ([#9512](https://github.com/can1357/oh-my-pi/issues/9512)).
+
+## [18.0.1] - 2026-08-23
+
+### Fixed
+
+- Fixed the Projects dashboard folder endpoint running unrelated dashboard aggregations when loading folder statistics.
+- Fixed stats sync crashing with a NOT NULL constraint error when legacy session files carry a partially-populated usage cost.
+
+## [17.4.0] - 2026-08-20
+
+### Changed
+
+- Window token estimates now incorporate broker-reported fleet token burn when an auth broker is configured, accurately tracking fleet-wide usage instead of undercounting with local-only statistics.
+
+### Fixed
+
+- Fixed an issue in subscription-window insights where distinct limits sharing a duration label (such as Anthropic overall vs. model-scoped 7-day windows) were incorrectly merged, which inflated window-equivalents and skewed tokens-per-window estimates. Windows are now grouped by provider limit ID.
 
 ## [17.3.6] - 2026-08-17
 

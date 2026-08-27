@@ -96,6 +96,7 @@ export type SettingDef =
 // ═══════════════════════════════════════════════════════════════════════════
 
 const CONDITIONS: Record<string, () => boolean> = {
+	macOS: () => process.platform === "darwin",
 	hasImageProtocol: () => !!TERMINAL.imageProtocol,
 	advisorEnabled: () => {
 		try {
@@ -142,6 +143,13 @@ const CONDITIONS: Record<string, () => boolean> = {
 	planModeEnabled: () => {
 		try {
 			return Settings.instance.get("plan.enabled");
+		} catch {
+			return false;
+		}
+	},
+	unexpectedStopSmart: () => {
+		try {
+			return Settings.instance.get("features.unexpectedStopDetection") === "smart";
 		} catch {
 			return false;
 		}

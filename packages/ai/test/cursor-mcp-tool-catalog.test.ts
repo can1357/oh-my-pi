@@ -56,4 +56,15 @@ describe("cursor buildMcpToolDefinitions", () => {
 		expect(lspDef?.providerIdentifier).toBe("pi-agent");
 		expect(lspDef?.toolName).toBe("lsp");
 	});
+
+	it("advertises hashline edit, which Cursor has no native equivalent for", () => {
+		// Native StrReplace is `editToolCall`, not hashline. Filtering `edit`
+		// would leave the model with no way to apply a tagged section rewrite.
+		const defs = buildMcpToolDefinitions([tool("read"), tool("bash"), tool("edit")]);
+		const editDef = defs.find(def => def.name === "edit");
+		expect(editDef).toBeDefined();
+		expect(editDef?.providerIdentifier).toBe("pi-agent");
+		expect(editDef?.toolName).toBe("edit");
+		expect(defs.map(def => def.name)).not.toContain("read");
+	});
 });

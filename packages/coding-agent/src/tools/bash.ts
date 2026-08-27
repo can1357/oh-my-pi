@@ -10,6 +10,12 @@ import type {
 import type { Component } from "@oh-my-pi/pi-tui";
 import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 import { getProjectDir, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
+import {
+	DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS,
+	formatBackgroundNotice,
+	raceJobSettlement,
+	resolveAutoBackgroundWaitMs,
+} from "../async";
 import type { Settings } from "../config/settings";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
@@ -57,7 +63,6 @@ import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
 export const BASH_DEFAULT_PREVIEW_LINES = DEFAULT_TERMINAL_PREVIEW_LINES;
 
 const BASH_ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS = 60_000;
 const BASH_APPROVAL_SHELL_CONTROL_CHARS: Record<string, true> = {
 	"\n": true,
 	"\r": true,
@@ -505,10 +510,6 @@ function formatExitCodeNotice(exitCode: number): string {
 	return `Command exited with code ${exitCode}`;
 }
 
-function formatBackgroundNotice(jobId: string): string {
-	return `Backgrounded as job ${jobId}; result will be delivered automatically.`;
-}
-
 /**
  * Strip the trailing occurrence of `notice` (plus a single surrounding newline
  * on each side) so the TUI can echo the value via a styled footer label
@@ -894,60 +895,6 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		};
 	}
 
-	async #waitForManagedBashJob(
-		job: ManagedBashJobHandle,
-		thresholdMs: number,
-		signal?: AbortSignal,
-		steeringSignal?: AbortSignal,
-	): Promise<ManagedBashJobCompletion | { kind: "running" } | { kind: "steer" } | { kind: "aborted" }> {
-		if (signal?.aborted) {
-			return { kind: "aborted" };
-		}
-		if (steeringSignal?.aborted) {
-			return { kind: "steer" };
-		}
-
-		// Cancellable threshold: a bare Bun.sleep(thresholdMs) leaves a live, ref'd
-		// timer for the full threshold after the command finishes (or abort/steer)
-		// wins the race first — delaying SDK/headless shutdown and accumulating
-		// timers under fast command rates. Settle a withResolvers promise from
-		// setTimeout so the finally can clear it regardless of which waiter wins.
-		const { promise: thresholdPromise, resolve: resolveThreshold } = Promise.withResolvers<{
-			kind: "running";
-		}>();
-		const thresholdTimer = setTimeout(() => resolveThreshold({ kind: "running" }), thresholdMs);
-		const waiters: Array<
-			Promise<ManagedBashJobCompletion | { kind: "running" } | { kind: "steer" } | { kind: "aborted" }>
-		> = [job.completion, thresholdPromise];
-
-		const { promise: abortedPromise, resolve: resolveAborted } = Promise.withResolvers<{ kind: "aborted" }>();
-		const onAbort = () => resolveAborted({ kind: "aborted" });
-		const { promise: steerPromise, resolve: resolveSteer } = Promise.withResolvers<{ kind: "steer" }>();
-		const onSteer = () => resolveSteer({ kind: "steer" });
-		if (signal) {
-			signal.addEventListener("abort", onAbort, { once: true });
-			waiters.push(abortedPromise);
-		}
-		if (steeringSignal) {
-			steeringSignal.addEventListener("abort", onSteer, { once: true });
-			waiters.push(steerPromise);
-		}
-		try {
-			return await Promise.race(waiters);
-		} finally {
-			clearTimeout(thresholdTimer);
-			signal?.removeEventListener("abort", onAbort);
-			steeringSignal?.removeEventListener("abort", onSteer);
-		}
-	}
-
-	#resolveAutoBackgroundWaitMs(timeoutMs: number | undefined): number {
-		if (this.#autoBackgroundThresholdMs <= 0) return 0;
-		if (timeoutMs === undefined) return this.#autoBackgroundThresholdMs;
-		const timeoutBufferMs = 1_000;
-		return Math.max(0, Math.min(this.#autoBackgroundThresholdMs, timeoutMs - timeoutBufferMs));
-	}
-
 	async execute(
 		_toolCallId: string,
 		{
@@ -998,8 +945,10 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 
 		const internalUrlOptions: InternalUrlExpansionOptions = {
 			skills: this.session.skills ?? [],
+			attachments: this.session.getImageAttachments?.() ?? [],
 			internalRouter: InternalUrlRouter.instance(),
 			cwd: this.session.cwd,
+			sessionFile: this.session.getSessionFile() ?? undefined,
 			localOptions: {
 				getArtifactsDir: this.session.getArtifactsDir,
 				getSessionId: this.session.getSessionId,
@@ -1099,7 +1048,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			autoBgManager &&
 			!autoBgManager.atCapacity
 		) {
-			const autoBackgroundWaitMs = this.#resolveAutoBackgroundWaitMs(timeoutMs);
+			const autoBackgroundWaitMs = resolveAutoBackgroundWaitMs(this.#autoBackgroundThresholdMs, timeoutMs);
 			const startBackgrounded = autoBackgroundWaitMs === 0;
 			const job = this.#startManagedBashJob({
 				command,
@@ -1123,8 +1072,8 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			// foreground-wait cannot also be injected by the delivery loop. Lifted
 			// via resumeDeliveries() if we end up backgrounding after all.
 			autoBgManager.acknowledgeDeliveries([job.jobId]);
-			const waitResult = await this.#waitForManagedBashJob(
-				job,
+			const waitResult = await raceJobSettlement(
+				job.completion,
 				autoBackgroundWaitMs,
 				signal,
 				ctx?.toolCall?.steeringSignal,

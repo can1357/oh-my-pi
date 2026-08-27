@@ -183,6 +183,12 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 	 *  by retagging the same text at a lower or equal severity. */
 	#deliveredNoteSeverities = new Map<string, number>();
 	#inProgressUpdate = false;
+	/** Notes withheld while the primary was mid-turn, in arrival order. Flushed
+	 *  deterministically on the first `beginUpdate(false)` so delivery does not
+	 *  depend on the advisor model choosing to re-raise (it may not, since the
+	 *  tool previously returned "Recorded." for a note that was never routed).
+	 *  Cleared on `resetDeliveredNotes` alongside the delivered-rank map. */
+	#deferredNotes: { key: string; note: string; severity?: AdviseDetails["severity"] }[] = [];
 
 	constructor(private readonly onAdvice: (note: string, severity?: AdviseDetails["severity"]) => void) {}
 
@@ -192,13 +198,24 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 	 * not interrupt the primary before it can finish its planned steps.
 	 */
 	beginUpdate(inProgress: boolean): void {
+		const wasInProgress = this.#inProgressUpdate;
 		this.#inProgressUpdate = inProgress;
+		// Turn just completed: flush everything withheld mid-turn, oldest first.
+		// Each flush re-enters the normal dedupe path (escalation rank > delivered
+		// rank), so a note the advisor already got through at a higher severity
+		// stays suppressed while a genuinely-new deferred note is delivered once.
+		if (wasInProgress && !inProgress && this.#deferredNotes.length > 0) {
+			const pending = this.#deferredNotes;
+			this.#deferredNotes = [];
+			for (const { note, severity } of pending) this.#deliver(note, severity);
+		}
 	}
 
 	/** Clear delivered-note memory when the advisor starts a fresh conversation. */
 	resetDeliveredNotes(): void {
 		this.#deliveredNoteSeverities.clear();
 		this.#inProgressUpdate = false;
+		this.#deferredNotes = [];
 	}
 
 	async execute(
@@ -209,28 +226,47 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<AdviseDetails>> {
 		if (this.#inProgressUpdate && args.severity !== "blocker") {
+			// Withheld, not delivered: queue for the deterministic flush on the next
+			// completed update. Skip if an identical note is already pending so a
+			// long mid-turn can't pile up 20 copies of the same advice. Tell the
+			// advisor the truth — the previous "Recorded." made it believe the note
+			// reached the primary, so it never re-raised and the advice was lost.
+			const key = advisorNoteDedupeKey(args.note);
+			const pending = this.#deferredNotes.find(item => item.key === key);
+			if (!pending) {
+				this.#deferredNotes.push({ key, note: args.note, severity: args.severity });
+			} else if (advisorSeverityRank(args.severity) > advisorSeverityRank(pending.severity)) {
+				pending.severity = args.severity;
+			}
 			return {
-				content: [{ type: "text", text: "Recorded." }],
+				content: [
+					{
+						type: "text",
+						text: "Deferred — primary is mid-turn; this note will be delivered automatically when the turn completes. Do not re-raise the same point.",
+					},
+				],
 				details: { note: args.note, severity: args.severity },
 				useless: true,
 			};
 		}
-		const key = advisorNoteDedupeKey(args.note);
-		const rank = advisorSeverityRank(args.severity);
-		const previousRank = this.#deliveredNoteSeverities.get(key) ?? 0;
-		if (rank <= previousRank) {
-			return {
-				content: [{ type: "text", text: "Duplicate advice ignored." }],
-				details: { note: args.note, severity: args.severity },
-				useless: true,
-			};
-		}
-		this.#deliveredNoteSeverities.set(key, rank);
-		this.onAdvice(args.note, args.severity);
+		const delivered = this.#deliver(args.note, args.severity);
 		return {
-			content: [{ type: "text", text: "Recorded." }],
+			content: [{ type: "text", text: delivered ? "Recorded." : "Duplicate advice ignored." }],
 			details: { note: args.note, severity: args.severity },
 			useless: true,
 		};
+	}
+
+	/** Run one note through the escalation-rank dedupe and, if it passes, route it
+	 *  to the primary. Returns true when the note was actually delivered. Shared by
+	 *  the live path (`execute`) and the deferred flush (`beginUpdate(false)`). */
+	#deliver(note: string, severity?: AdviseDetails["severity"]): boolean {
+		const key = advisorNoteDedupeKey(note);
+		const rank = advisorSeverityRank(severity);
+		const previousRank = this.#deliveredNoteSeverities.get(key) ?? 0;
+		if (rank <= previousRank) return false;
+		this.#deliveredNoteSeverities.set(key, rank);
+		this.onAdvice(note, severity);
+		return true;
 	}
 }

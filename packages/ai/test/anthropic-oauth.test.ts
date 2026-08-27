@@ -125,7 +125,7 @@ describe("anthropic oauth alignment", () => {
 			expect(init?.method).toBe("POST");
 			const headers = init?.headers as Record<string, string> | undefined;
 			expect(headers?.["anthropic-beta"]).toBe("oauth-2025-04-20");
-			expect(headers?.["User-Agent"]).toBe("anthropic-sdk-typescript/0.94.0 userOAuthProvider");
+			expect(headers?.["User-Agent"]).toBe("anthropic-sdk-typescript/0.112.1 userOAuthProvider");
 			return new Response(
 				JSON.stringify({
 					access_token: "new-access-token",

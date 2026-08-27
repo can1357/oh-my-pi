@@ -41,6 +41,9 @@ async function createHarness(modelRegistry: ModelRegistry, options: HarnessOptio
 
 	const methodOrder = options.methodOrder ?? ["snapcompact", "soft"];
 	const settings = Settings.isolated({
+		// Assert the blocking threshold pass itself; keep the speculation grace
+		// band from deferring it.
+		"compaction.asyncEnabled": false,
 		...(options.methodOrder === null ? {} : { "compaction.methodOrder": [...methodOrder] }),
 		// Force a 1-token recent window so the post-turn cut always splits off the
 		// last turn and summarizes the seeded unrenderable history. With the default

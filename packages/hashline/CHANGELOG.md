@@ -2,14 +2,22 @@
 
 ## [Unreleased]
 
+## [18.0.4] - 2026-08-24
+
+### Changed
+
+- Improved line-ending normalization performance by avoiding full scan-and-copy operations on files without carriage returns, eliminating stalls on large LF-only files.
+
+## [17.4.0] - 2026-08-20
+
 ### Added
 
-- Added an opener-escape landing correction: a plain `PUT >N:` anchored on a construct's opening line (per tree-sitter) with a body that parses as one self-contained construct claiming a strictly shallower column depth (tab bodies in space files included) is landed after the innermost enclosing construct whose own depth admits the body as a sibling, verified by the syntax probe. Previously such an insert silently split the opener from its body — and could still parse (items are legal inside Rust fn bodies), so no advisory fired.
+- Added an opener-escape landing correction for insertions anchored on a construct's opening line to place shallower sibling constructs after the enclosing block rather than splitting the opener from its body.
 
 ### Fixed
 
-- Dropped one-sided boundary echoes on single-line replacement ranges when every echoed row is an attribute/decorator/annotation node per the tree-sitter grammar (`#[napi]`, `@Injectable()`): the authored result parses, so the syntax probe never fired and the attribute was silently duplicated. Under-filled annotation echoes are now rejected instead of applied.
-- Raised the default snapshot-store path capacity from 30 to 256 so tags minted early in a wide session no longer age out of the LRU and degrade a recoverable stale-tag mismatch into the misleading "hash is not from this session" rejection.
+- Fixed an issue where single-line replacements echoing attributes or decorators (such as `#[napi]` or `@Injectable()`) could lead to silently duplicated annotations.
+- Increased the default snapshot-store path capacity from 30 to 256 to prevent early tags in wide sessions from aging out and triggering misleading "hash is not from this session" errors.
 
 ## [17.3.3] - 2026-08-14
 

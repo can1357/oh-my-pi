@@ -223,7 +223,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
   - passes `immutable` through to `resolveFileDisplayMode()` so anchors are suppressed for immutable resources such as artifacts, skills, memory, and agent outputs
   - sets `ignoreResultLimits: true` for `skill://` so the full skill text is paginated only by explicit selectors, not by the normal default line limit
 - `conflict://` is handled separately from the router. `<path>:conflicts` registers blocks; `conflict://<N>` reads one registered marker block, and `/ours`, `/theirs`, `/base`, or `/both` selects a side. `conflict://*` is write-only.
-- `issue://<N>` / `pr://<N>` (and the long form `issue://<owner>/<repo>/<N>` / `pr://<owner>/<repo>/<N>`) route through the same SQLite cache the `github` tool writes to; `?comments=0` selects the no-comments rendering. Bare `issue://` / `pr://` (and repository-qualified variants) browse live lists with `?state=`, `?limit=`, `?author=`, and `?label=`. PR diffs use `pr://<N>/diff`, `/diff/<i>`, and `/diff/all`.
+- `issue://<N>` / `pr://<N>` (and the long form `issue://<owner>/<repo>/<N>` / `pr://<owner>/<repo>/<N>`) route through the same SQLite cache the `github` tool writes to; `?comments=0` selects the no-comments rendering. Bare `issue://` / `pr://` (and repository-qualified variants) browse live lists with `?state=`, `?limit=`, `?author=`, and `?label=`. PR diffs use `pr://<N>/diff`, `/diff/<i>`, and `/diff/all`. Every repository-qualified form also accepts a GitHub Enterprise host prefix (`pr://ghe.example.com/<owner>/<repo>/<N>`), and a host with no dot (`pr://ghe/<owner>/<repo>/<N>`) is recognized in the numbered form. Short forms resolve the host from the session checkout, so an enterprise repo needs no prefix.
 
 ### Web URLs
 - `parseReadUrlTarget()` accepts `http://`, `https://`, or `www.` targets.
@@ -297,7 +297,7 @@ Notes: ...
   - source bytes cap `20 MiB`
   - post-resize inline output cap `300 KiB`
 - Unique suffix auto-resolution glob timeout: `5000` ms.
-- File snapshot store holds `30` paths with up to `4` versions each (`DEFAULT_MAX_PATHS` / `DEFAULT_MAX_VERSIONS_PER_PATH` in `packages/hashline/src/snapshots.ts`); files over `4 MiB` (`SNAPSHOT_MAX_BYTES`) are not snapshotted.
+- File snapshot store holds `256` paths with up to `4` versions each (`DEFAULT_MAX_PATHS` / `DEFAULT_MAX_VERSIONS_PER_PATH` in `packages/hashline/src/snapshots.ts`); files over `4 MiB` (`SNAPSHOT_MAX_BYTES`) are not snapshotted.
 - An unbounded `artifact://<id>:raw` read is refused when the artifact exceeds `50 KiB`; use a bounded `:raw:N-M` range.
 
 ## Errors

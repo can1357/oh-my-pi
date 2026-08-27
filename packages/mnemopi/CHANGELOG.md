@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [18.0.0] - 2026-08-22
+
+### Fixed
+
+- Fixed false-positive location extraction in episodic gists by properly enforcing capitalization constraints for proper nouns.
+- Improved episodic gist participant extraction with Unicode support to properly capture names in non-Latin scripts (e.g., Cyrillic, Greek).
+
 ## [17.3.8] - 2026-08-19
 
 ### Added

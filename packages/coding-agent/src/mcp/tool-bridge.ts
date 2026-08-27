@@ -358,6 +358,29 @@ function sanitizeMCPToolNamePart(value: string, fallback: string): string {
 	return sanitized.length > 0 ? sanitized : fallback;
 }
 
+/**
+ * Longest tool name strict validators accept. OpenAI Responses/Completions and
+ * Meta Responses enforce `^[a-zA-Z0-9_-]{1,64}$`; names over 64 chars are
+ * rejected with HTTP 400 `name must be at most 64 characters` (#9130).
+ */
+const MAX_MCP_TOOL_NAME_LENGTH = 64;
+/** Length of the deterministic hash suffix appended when a minted name overflows. */
+const MCP_TOOL_NAME_HASH_LENGTH = 8;
+
+/**
+ * Cap a minted MCP tool name at {@link MAX_MCP_TOOL_NAME_LENGTH}. An overlong
+ * name keeps a readable prefix and gains a deterministic base-36 hash suffix of
+ * the full name, so distinct long names stay unique and the same name is stable
+ * across turns — the model must call the exact registry key, and the hash is
+ * seed-fixed so it never shifts between processes.
+ */
+function capMCPToolNameLength(name: string): string {
+	if (name.length <= MAX_MCP_TOOL_NAME_LENGTH) return name;
+	const hash = Bun.hash(name).toString(36).slice(0, MCP_TOOL_NAME_HASH_LENGTH);
+	const keep = MAX_MCP_TOOL_NAME_LENGTH - hash.length - 1;
+	return `${name.slice(0, keep)}_${hash}`;
+}
+
 export function createMCPToolName(serverName: string, toolName: string): string {
 	const sanitizedServerName = sanitizeMCPToolNamePart(serverName, "server");
 	const sanitizedToolName = sanitizeMCPToolNamePart(toolName, "tool");
@@ -370,7 +393,7 @@ export function createMCPToolName(serverName: string, toolName: string): string 
 		normalizedToolName = sanitizedToolName.slice(prefixWithUnderscore.length);
 	}
 
-	return `mcp__${sanitizedServerName}_${normalizedToolName}`;
+	return capMCPToolNameLength(`mcp__${sanitizedServerName}_${normalizedToolName}`);
 }
 
 export interface MCPToolOriginSource {

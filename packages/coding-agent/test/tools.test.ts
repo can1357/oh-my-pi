@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import * as zlib from "node:zlib";
-import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { DEFAULT_BASH_INTERCEPTOR_RULES, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
@@ -15,8 +15,8 @@ import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-m
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import * as toolTimeouts from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
-import { openArchive, readArchiveEntries, unzip } from "@oh-my-pi/pi-coding-agent/utils/zip";
 import { $which, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { openArchive, readArchiveEntries } from "@oh-my-pi/pi-utils/ar";
 import { GlobTool } from "../src/tools/glob";
 import { DEFAULT_FILE_LIMIT, GrepTool, MULTI_FILE_PER_FILE_MATCHES } from "../src/tools/grep";
 import { HubTool } from "../src/tools/hub";
@@ -67,6 +67,7 @@ interface ArchiveFixtureEntry {
 	prefix?: string;
 	typeFlag?: "0" | "1" | "2";
 	linkName?: string;
+	unpacked?: boolean;
 }
 
 function writeTarString(buffer: Buffer, offset: number, length: number, value: string): void {
@@ -398,6 +399,62 @@ function createZipArchive(entries: ArchiveFixtureEntry[]): Buffer {
 	endOfCentralDirectory.writeUInt32LE(localOffset, 16);
 
 	return Buffer.concat([...localParts, centralDirectory, endOfCentralDirectory]);
+}
+
+interface AsarFixtureDirectory {
+	files: Record<string, AsarFixtureNode>;
+}
+
+interface AsarFixtureFile {
+	offset?: string;
+	size: number;
+	unpacked?: true;
+}
+
+type AsarFixtureNode = AsarFixtureDirectory | AsarFixtureFile;
+
+function createAsarArchive(entries: ArchiveFixtureEntry[]): Buffer {
+	const root: AsarFixtureDirectory = { files: {} };
+	const packed: Buffer[] = [];
+	let offset = 0;
+
+	for (const entry of entries) {
+		const segments = entry.path.replace(/\\/g, "/").split("/");
+		const fileName = segments.pop();
+		if (!fileName) throw new Error("ASAR fixture paths must name a file");
+
+		let directory = root;
+		for (const segment of segments) {
+			let child = directory.files[segment];
+			if (!child) {
+				child = { files: {} };
+				directory.files[segment] = child;
+			}
+			if (!("files" in child)) throw new Error(`ASAR fixture path crosses file '${segment}'`);
+			directory = child;
+		}
+
+		const content = Buffer.from(entry.content, "utf-8");
+		if (entry.unpacked) {
+			directory.files[fileName] = { size: content.length, unpacked: true };
+		} else {
+			directory.files[fileName] = { size: content.length, offset: String(offset) };
+			packed.push(content);
+			offset += content.length;
+		}
+	}
+
+	const json = Buffer.from(JSON.stringify(root), "utf-8");
+	const alignedJsonSize = json.length + ((4 - (json.length % 4)) % 4);
+	const header = Buffer.alloc(8 + alignedJsonSize);
+	header.writeUInt32LE(4 + alignedJsonSize, 0);
+	header.writeUInt32LE(json.length, 4);
+	json.copy(header, 8);
+
+	const sizePickle = Buffer.alloc(8);
+	sizePickle.writeUInt32LE(4, 0);
+	sizePickle.writeUInt32LE(header.length, 4);
+	return Buffer.concat([sizePickle, header, ...packed]);
 }
 
 function createZipArchiveWithRawDeflateEntry(entry: {
@@ -913,6 +970,132 @@ describe("Coding Agent Tools", () => {
 			}
 		});
 
+		it("should strip payloads duplicated by structured MCP blocks (#9687)", async () => {
+			// MCP results carry a second copy of the payload under `details.rawContent`.
+			// Everything already stored elsewhere must be pruned so it cannot re-inflate
+			// on-disk size: text and `resource.text` land in the spill artifact, image
+			// data survives on the result content. Only resource URI/MIME/blob metadata,
+			// which has no other home, is retained.
+			const spillSettings = Settings.isolated({
+				"tools.artifactSpillThreshold": 20,
+				"tools.artifactTailBytes": 64,
+				"tools.artifactTailLines": 10,
+				"tools.artifactHeadBytes": 64,
+			});
+			const spillManager = SessionManager.create(testDir, path.join(testDir, "mcp-spill-sessions"));
+			await spillManager.ensureOnDisk();
+			const context = {
+				...createTestToolContext(["mcp__server__tool"]),
+				settings: spillSettings,
+				sessionManager: spillManager,
+			};
+
+			const payload = "SEARCH RESULT LINE\n".repeat(4000);
+			const resourceMeta = {
+				uri: "file:///workspace/result.bin",
+				mimeType: "application/octet-stream",
+				blob: "AAECAw==",
+			};
+			const resource = {
+				type: "resource" as const,
+				resource: { ...resourceMeta, text: "duplicated resource body\n".repeat(200) },
+			};
+			const image = { type: "image" as const, data: "iVBORw0KGgo=", mimeType: "image/png" };
+			const mcpTool = {
+				name: "mcp__server__tool",
+				description: "fake mcp tool returning a large structured payload",
+				async execute() {
+					return {
+						content: [
+							{ type: "text" as const, text: payload },
+							{ type: "image" as const, data: image.data, mimeType: image.mimeType },
+						],
+						details: {
+							serverName: "server",
+							mcpToolName: "tool",
+							rawContent: [{ type: "text", text: payload }, resource, image],
+						},
+					};
+				},
+			};
+
+			try {
+				const wrapped = wrapToolWithMetaNotice(mcpTool as unknown as AgentTool);
+				const result = await wrapped.execute("mcp-call", {}, undefined, undefined, context);
+
+				const truncation = result.details?.meta?.truncation;
+				expect(truncation?.artifactId).toBeDefined();
+				expect(Buffer.byteLength(getTextOutput(result), "utf-8")).toBeLessThan(Buffer.byteLength(payload, "utf-8"));
+
+				// Text and image are represented elsewhere; only resource metadata
+				// (without the artifact-stored text) survives on details.rawContent.
+				expect(result.details?.rawContent).toEqual([{ type: "resource", resource: resourceMeta }]);
+				// The image block is preserved on the result content.
+				expect(result.content).toContainEqual({
+					type: "image",
+					data: image.data,
+					mimeType: image.mimeType,
+				});
+
+				const artifactPath = path.join(
+					spillManager.getArtifactsDir()!,
+					`${truncation.artifactId}.mcp__server__tool.log`,
+				);
+				expect(await Bun.file(artifactPath).text()).toBe(payload);
+			} finally {
+				await spillManager.close();
+			}
+		});
+
+		it("should not prune details.rawContent for non-MCP tool results (#9689)", async () => {
+			// SDK/extension tools share this spill wrapper and their `details` payload
+			// is unconstrained. A tool that happens to name a field `rawContent` must
+			// keep it verbatim: only the MCP bridge (serverName + mcpToolName) mirrors
+			// its content there, so a bare property-name collision must not lose data.
+			const spillSettings = Settings.isolated({
+				"tools.artifactSpillThreshold": 20,
+				"tools.artifactTailBytes": 64,
+				"tools.artifactTailLines": 10,
+				"tools.artifactHeadBytes": 64,
+			});
+			const spillManager = SessionManager.create(testDir, path.join(testDir, "sdk-spill-sessions"));
+			await spillManager.ensureOnDisk();
+			const context = {
+				...createTestToolContext(["custom_sdk_tool"]),
+				settings: spillSettings,
+				sessionManager: spillManager,
+			};
+
+			const payload = "SDK OUTPUT LINE\n".repeat(4000);
+			// No serverName/mcpToolName markers → not an MCP result.
+			const rawContent = [
+				{ type: "text", text: "extension-owned text that must survive" },
+				{ type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+			];
+			const sdkTool = {
+				name: "custom_sdk_tool",
+				description: "fake sdk tool that uses details.rawContent for its own data",
+				async execute() {
+					return {
+						content: [{ type: "text" as const, text: payload }],
+						details: { rawContent },
+					};
+				},
+			};
+
+			try {
+				const wrapped = wrapToolWithMetaNotice(sdkTool as unknown as AgentTool);
+				const result = await wrapped.execute("sdk-call", {}, undefined, undefined, context);
+
+				// Spill still fired on the oversized content.
+				expect(result.details?.meta?.truncation?.artifactId).toBeDefined();
+				// The tool's own rawContent is left untouched.
+				expect(result.details?.rawContent).toEqual(rawContent);
+			} finally {
+				await spillManager.close();
+			}
+		});
+
 		it("should render directories as a two-level tree without capping root entries", async () => {
 			const childDir = path.join(testDir, "child");
 			const base = Date.now() - 60_000;
@@ -1067,7 +1250,10 @@ describe("Coding Agent Tools", () => {
 			});
 			expect(getTextOutput(directoryResult)).toContain("extra.js");
 
-			await expect(readArchiveEntries(archivePath)).rejects.toThrow(/cannot be materialized/);
+			// Whole-archive materialization flattens files and skips directory
+			// aliases without inflating the map through them (no N×M subtrees).
+			const entries = await readArchiveEntries(archivePath);
+			expect([...entries.keys()].sort()).toEqual(["pkg/lib/extra.js", "pkg/lib/tool.js"]);
 		});
 
 		it("should resolve file symlinks routed through directory symlinks", async () => {
@@ -1346,16 +1532,21 @@ describe("Coding Agent Tools", () => {
 			);
 		});
 
-		it("should reject a gzip payload that is not a tar archive", async () => {
-			// `sniffArchiveFormat` classifies any gzip magic as tar.gz, so a plain
-			// `.txt.gz` (decompressed payload shorter than one 512-byte tar block)
-			// must raise a catchable error instead of listing an empty directory.
-			const archivePath = path.join(testDir, "note.tar.gz");
+		it("should expose a non-tar gzip payload as a single stem-named member", async () => {
+			// `sniffArchiveFormat` classifies any gzip magic as tar.gz; when the
+			// decompressed stream is not a tar it must surface as a one-member
+			// pseudo-archive named after the file stem, not an error or an
+			// empty directory.
+			const archivePath = path.join(testDir, "note.txt.gz");
 			fs.writeFileSync(archivePath, zlib.gzipSync(Buffer.from("hello world\n")));
 
-			await expect(readTool.execute("test-call-gzip-non-tar", { path: archivePath })).rejects.toThrow(
-				/not a valid tar archive/i,
-			);
+			const listing = await readTool.execute("test-call-gzip-non-tar", { path: archivePath });
+			expect(getTextOutput(listing)).toContain("note.txt");
+
+			const member = await readTool.execute("test-call-gzip-non-tar-member", {
+				path: `${archivePath}:note.txt`,
+			});
+			expect(getTextOutput(member)).toContain("hello world");
 		});
 
 		it("should list archive subdirectories", async () => {
@@ -1417,6 +1608,11 @@ describe("Coding Agent Tools", () => {
 				create: (entries: ArchiveFixtureEntry[]) => createZipArchive(entries),
 			},
 			{
+				label: ".asar",
+				path: "fixture-subpath.asar",
+				create: (entries: ArchiveFixtureEntry[]) => createAsarArchive(entries),
+			},
+			{
 				// `.jar`/`.war` are ZIP containers under a different extension.
 				// Regression: archiveFormatFromPath / parseArchivePathCandidates
 				// previously excluded them, so `read lib.jar:member` failed with
@@ -1452,6 +1648,22 @@ describe("Coding Agent Tools", () => {
 				expect(output).toContain("Line 3");
 			});
 		}
+
+		it("should read unpacked .asar members", async () => {
+			const archivePath = path.join(testDir, "fixture-unpacked.asar");
+			const memberPath = "native/config.txt";
+			const content = "unpacked ASAR content\n";
+			fs.writeFileSync(archivePath, createAsarArchive([{ path: memberPath, content, unpacked: true }]));
+			const unpackedPath = path.join(`${archivePath}.unpacked`, memberPath);
+			fs.mkdirSync(path.dirname(unpackedPath), { recursive: true });
+			fs.writeFileSync(unpackedPath, content);
+
+			const result = await readTool.execute("test-call-asar-unpacked", {
+				path: `${archivePath}:${memberPath}`,
+			});
+
+			expect(getTextOutput(result)).toContain("unpacked ASAR content");
+		});
 
 		it("should treat a selector-shaped archive subpath as a root listing selector", async () => {
 			const archivePath = path.join(testDir, "root-selector.tar");
@@ -1656,9 +1868,12 @@ describe("Coding Agent Tools", () => {
 				`Successfully wrote ${content.length} bytes to ${path.basename(archivePath)}:pkg/README.md`,
 			);
 
-			const unzipped = unzip(new Uint8Array(fs.readFileSync(archivePath)));
-			expect(new TextDecoder().decode(unzipped["pkg/README.md"])).toBe(content);
-			expect(new TextDecoder().decode(unzipped["pkg/src/index.ts"])).toBe("export const archiveValue = 1;\n");
+			const unzipped = await readArchiveEntries({
+				bytes: new Uint8Array(fs.readFileSync(archivePath)),
+				format: "zip",
+			});
+			expect(new TextDecoder().decode(unzipped.get("pkg/README.md"))).toBe(content);
+			expect(new TextDecoder().decode(unzipped.get("pkg/src/index.ts"))).toBe("export const archiveValue = 1;\n");
 		});
 
 		it("should create a new archive when writing to an archive subpath", async () => {
@@ -1781,7 +1996,7 @@ describe("Coding Agent Tools", () => {
 				replace_all: true,
 			});
 
-			expect(getTextOutput(result)).toContain("Successfully replaced 3 occurrences");
+			expect(getTextOutput(result)).toContain("qux bar qux baz qux");
 			const content = await Bun.file(testFile).text();
 			expect(content).toBe("qux bar qux baz qux");
 		});
@@ -1840,7 +2055,7 @@ function b() {
 				replace_all: true,
 			});
 
-			expect(getTextOutput(result)).toContain("Successfully replaced 2 occurrences");
+			expect(getTextOutput(result)).toContain("replaced");
 			const content = await Bun.file(testFile).text();
 			expect(content).toBe("start\nreplaced\nend\nstart\nreplaced\nend");
 		});
@@ -1856,7 +2071,7 @@ function b() {
 				replace_all: true,
 			});
 
-			expect(getTextOutput(result)).toContain("Successfully replaced text");
+			expect(getTextOutput(result)).toContain("hello universe");
 			const content = await Bun.file(testFile).text();
 			expect(content).toBe("hello universe");
 		});
@@ -2114,7 +2329,7 @@ function b() {
 			await asyncJobManager.dispose();
 		});
 
-		it("should auto-background long-running commands when enabled", async () => {
+		it("should auto-background at the threshold even with a longer timeout", async () => {
 			const deliveries: Array<{ jobId: string; text: string }> = [];
 			const updates: string[] = [];
 			const asyncJobManager = new AsyncJobManager({
@@ -2142,6 +2357,7 @@ function b() {
 				"test-call-9-auto-running",
 				{
 					command: "printf 'start\\n'; sleep 0.03; printf 'done\\n'",
+					timeout: 3_600,
 				},
 				undefined,
 				update => {
@@ -2984,7 +3200,7 @@ describe("edit tool CRLF handling", () => {
 			new_string: "replaced line\n",
 		});
 
-		expect(getTextOutput(result)).toContain("Successfully replaced");
+		expect(getTextOutput(result)).toContain("replaced line");
 	});
 
 	it("should preserve CRLF line endings after edit", async () => {
