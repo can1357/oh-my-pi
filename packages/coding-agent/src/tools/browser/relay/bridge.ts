@@ -956,18 +956,42 @@ export class RelayBridge {
 	#nextPreservedSubscription(
 		tab: TabState,
 		conns: CdpConnection[],
-		replayed: Map<string, number>,
+		replayed: Map<string, SessionRootSubscription>,
 	): { key: string; subscription: SessionRootSubscription } | undefined {
 		const subscriptions: Array<{ key: string; subscription: SessionRootSubscription }> = [];
 		for (const key of tab.subscriptions.keys()) {
 			const subscription = this.#latestSubscriptionForKey(tab, key);
 			if (!subscription) continue;
-			if (replayed.get(key) === subscription.sequence) continue;
+			if (replayed.get(key) === subscription) continue;
 			if (!conns.some(conn => this.#sessionOwnsTab(conn, tab.tabId, subscription.ownerSessionId))) continue;
 			subscriptions.push({ key, subscription });
 		}
 		subscriptions.sort((a, b) => a.subscription.sequence - b.subscription.sequence);
 		return subscriptions[0];
+	}
+
+	async #cleanupReplayedPreservedSubscriptions(
+		tab: TabState,
+		conns: CdpConnection[],
+		expectedExt: RelaySocket | null,
+		replayed: Map<string, SessionRootSubscription>,
+	): Promise<void> {
+		const stale = [...replayed.entries()]
+			.filter(([key, subscription]) => !this.#isCurrentPreservedSubscription(tab, key, subscription, conns))
+			.sort((a, b) => a[1].sequence - b[1].sequence);
+		for (const [key, subscription] of stale) {
+			replayed.delete(key);
+			const disable = this.#subscriptionDisableCommand(subscription);
+			if (!disable) continue;
+			this.#assertExtensionCurrent(expectedExt);
+			await this.#rpc({
+				op: "send",
+				tabId: tab.tabId,
+				method: disable.method,
+				params: disable.params,
+			});
+			this.#assertExtensionCurrent(expectedExt);
+		}
 	}
 
 	#subscriptionDisableCommand(
@@ -1516,8 +1540,9 @@ export class RelayBridge {
 			tab.rootRuntimeEnabled = true;
 		}
 		tab.restoreRootRuntime = false;
-		const replayed = new Map<string, number>();
+		const replayed = new Map<string, SessionRootSubscription>();
 		while (true) {
+			await this.#cleanupReplayedPreservedSubscriptions(tab, conns, expectedExt, replayed);
 			const next = this.#nextPreservedSubscription(tab, conns, replayed);
 			if (!next) break;
 			const { key, subscription } = next;
@@ -1530,7 +1555,7 @@ export class RelayBridge {
 			});
 			this.#assertExtensionCurrent(expectedExt);
 			if (this.#isCurrentPreservedSubscription(tab, key, subscription, conns)) {
-				replayed.set(key, subscription.sequence);
+				replayed.set(key, subscription);
 				continue;
 			}
 			const disable = this.#subscriptionDisableCommand(subscription);
@@ -1544,6 +1569,7 @@ export class RelayBridge {
 			});
 			this.#assertExtensionCurrent(expectedExt);
 		}
+		await this.#cleanupReplayedPreservedSubscriptions(tab, conns, expectedExt, replayed);
 	}
 
 	#assertExtensionCurrent(expected: RelaySocket | null): void {

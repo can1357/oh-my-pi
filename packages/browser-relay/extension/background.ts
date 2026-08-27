@@ -69,8 +69,9 @@ function updateRecoverable(update: () => void): Promise<void> {
 	return recoverableUpdates;
 }
 
-function rememberRecoverable(tabIds: number[]): Promise<void> {
+function rememberRecoverable(tabIds: number[], isFresh: () => boolean = () => true): Promise<void> {
 	return updateRecoverable(() => {
+		if (!isFresh()) return;
 		for (const tabId of tabIds) recoverableTabIds.add(tabId);
 	});
 }
@@ -117,9 +118,10 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 });
 
 /** Persist recovery authorization before a tab becomes eligible for a sweep. */
-async function trackAttachments(tabIds: number[]): Promise<void> {
+async function trackAttachments(tabIds: number[], isFresh: () => boolean = () => true): Promise<void> {
 	if (tabIds.length === 0) return;
-	await rememberRecoverable(tabIds);
+	await rememberRecoverable(tabIds, isFresh);
+	if (!isFresh()) return;
 	for (const tabId of tabIds) attachmentGuard.track(tabId);
 }
 
@@ -272,8 +274,8 @@ function refreshHello(): void {
 			dirty: false,
 			done: Promise.resolve(),
 		};
-		entry.done = buildHello()
-			.then(hello => {
+			entry.done = buildHello()
+				.then(async hello => {
 				// Suppress a hello whose snapshot was invalidated before it could be
 				// sent. A guard detach that marks this refresh `dirty` in flight means
 				// `getTargets()` may predate the detach, so this hello can report a
@@ -283,6 +285,16 @@ function refreshHello(): void {
 				// attach. Skip the stale send and let the dirty rebuild below emit the
 				// single authoritative hello.
 				if (entry.dirty) return;
+					// Persist recovery markers only for the hello that is still current.
+					// A detach can invalidate this refresh after `buildHello()` snapshots
+					// targets but before the queued storage write runs; gating the write on
+					// the live refresh prevents a stale hello from re-adding a just-forgotten
+					// recoverable tab after `forgetRecoverable()` already queued the fix.
+					await trackAttachments(
+						hello.attachedTabIds,
+						() => helloRefresh === entry && !entry.dirty && ws === socket && socket.readyState === WebSocket.OPEN,
+					);
+					if (entry.dirty) return;
 				if (ws === socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(hello));
 			})
 			.finally(() => {
@@ -300,7 +312,7 @@ function refreshHello(): void {
 	startRefresh();
 }
 
-async function buildHello(): Promise<ExtToRelayMessage> {
+async function buildHello(): Promise<Extract<ExtToRelayMessage, { t: "hello" }>> {
 	// An attach requested by the previous socket can finish during a fast
 	// reconnect. Guard/internal detaches can be in flight for the same window,
 	// too. Wait until the pending attach/detach set stays stable through the
@@ -323,12 +335,6 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 			attachedTabIds.push(target.tabId);
 		}
 	}
-	// Re-seed ownership after an MV3 worker restart. Persist the recovery marker
-	// before exposing the attachment to onSuspend's immediate sweep; otherwise
-	// Chrome can complete detach while the worker is reaped before the queued
-	// storage write, and the replacement worker misclassifies recovery as a user
-	// cancellation.
-	await trackAttachments(attachedTabIds);
 	const versionMatch = /Chrome\/[\d.]+/.exec(navigator.userAgent);
 	return {
 		t: "hello",

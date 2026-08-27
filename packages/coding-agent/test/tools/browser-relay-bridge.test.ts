@@ -1126,6 +1126,83 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable", "Fetch.disable", "Network.getCookies"]);
 	});
 
+	it("cleans up an earlier replayed subscription when its owner disconnects during a later replay await", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const firstOwner = new FakeCdpSocket();
+		const firstOwnerConn = bridge.cdpConnected(firstOwner);
+		const firstOwnerSession = await attachPage(bridge, ext, firstOwner, firstOwnerConn, 1);
+		const secondOwner = new FakeCdpSocket();
+		const secondOwnerConn = bridge.cdpConnected(secondOwner);
+		const secondOwnerSession = await attachPage(bridge, ext, secondOwner, secondOwnerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
+
+		bridge.cdpMessage(
+			firstOwnerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: firstOwnerSession,
+				method: "Fetch.enable",
+				params: { patterns: [{ urlPattern: "https://first.example/*" }] },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+		bridge.cdpMessage(
+			secondOwnerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: secondOwnerSession,
+				method: "Network.enable",
+				params: { maxTotalBufferSize: 4096 },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.rpcs("send").length === 1, "first replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable"]);
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.rpcs("send").length === 2, "second replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable", "Network.enable"]);
+
+		// The first replay already succeeded, but its owner disconnects while the
+		// second replay RPC is still in flight. Recovery must revisit earlier
+		// replayed entries and clear the now-orphaned Fetch interception.
+		bridge.cdpClosed(firstOwnerConn);
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.rpcs("send").length === 3, "cleanup of earlier replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable", "Network.enable", "Fetch.disable"]);
+		ack(bridge, ext2, "send");
+		await flush();
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			holderConn,
+			JSON.stringify({ id: commandId, sessionId: holderSession, method: "Network.getCookies" }),
+		);
+		await flush();
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Fetch.enable",
+			"Network.enable",
+			"Fetch.disable",
+			"Network.getCookies",
+		]);
+		ack(bridge, ext2, "send", { cookies: [] });
+		await flush();
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+	});
+
 	it("restores the browser user agent when a replayed override loses its owner during recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
