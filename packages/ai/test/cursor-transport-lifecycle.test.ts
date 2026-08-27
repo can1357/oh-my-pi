@@ -691,9 +691,18 @@ describe("cursor heartbeat and outbound write lifecycle", () => {
 				/* drain */
 			}
 			const entries = await fs.readdir(tempDir);
+			const jsonFiles = entries.filter(name => /^rr-session-\d+\.json$/.test(name));
+			const requestDumpName = jsonFiles[0];
+			if (!requestDumpName) throw new Error("expected request dump");
+			const dump = JSON.parse(await fs.readFile(path.join(tempDir, requestDumpName), "utf8")) as {
+				protocol?: string;
+			};
+			expect(dump.protocol).toBe("http2");
 			const resLogs = entries.filter(name => /^rr-session-\d+\.res\.log$/.test(name));
 			expect(resLogs.length).toBeGreaterThan(0);
-			const bytes = await fs.readFile(path.join(tempDir, resLogs[0]!));
+			const responseLogName = resLogs[0];
+			if (!responseLogName) throw new Error("expected response log");
+			const bytes = await fs.readFile(path.join(tempDir, responseLogName));
 			const separator = Buffer.from("\r\n\r\n");
 			const separatorIndex = bytes.indexOf(separator);
 			expect(separatorIndex).toBeGreaterThanOrEqual(0);
@@ -744,9 +753,18 @@ describe("cursor heartbeat and outbound write lifecycle", () => {
 				/* drain */
 			}
 			const entries = await fs.readdir(tempDir);
+			const jsonFiles = entries.filter(name => /^rr-session-\d+\.json$/.test(name));
+			const requestDumpName = jsonFiles[0];
+			if (!requestDumpName) throw new Error("expected request dump");
+			const dump = JSON.parse(await fs.readFile(path.join(tempDir, requestDumpName), "utf8")) as {
+				protocol?: string;
+			};
+			expect(dump.protocol).toBe("http");
 			const resLogs = entries.filter(name => /^rr-session-\d+\.res\.log$/.test(name));
 			if (resLogs.length === 0) throw new Error("expected at least one response log");
-			const bytes = await fs.readFile(path.join(tempDir, resLogs[0]));
+			const responseLogName = resLogs[0];
+			if (!responseLogName) throw new Error("expected response log");
+			const bytes = await fs.readFile(path.join(tempDir, responseLogName));
 			const separator = Buffer.from("\r\n\r\n");
 			const separatorIndex = bytes.indexOf(separator);
 			expect(separatorIndex).toBeGreaterThanOrEqual(0);

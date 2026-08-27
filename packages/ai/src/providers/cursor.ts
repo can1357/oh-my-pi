@@ -706,16 +706,6 @@ function streamCursorWithWireMode(
 				callerHeaders: options?.headers,
 				gzipRequest: true,
 			});
-			const debugSession = isRequestDebugEnabled()
-				? await createRequestDebugSession({
-						protocol: "http2",
-						method: "POST",
-						url: new URL(requestPath, baseUrl).toString(),
-						headers: requestHeaders,
-						bodyBase64: Buffer.from(requestBytes).toString("base64"),
-					})
-				: undefined;
-
 			stream.push({ type: "start", partial: output });
 
 			attempt = await openCursorTransport({
@@ -728,6 +718,15 @@ function streamCursorWithWireMode(
 				provider: model.provider,
 			});
 			const transport = attempt;
+			const debugSession = isRequestDebugEnabled()
+				? await createRequestDebugSession({
+						protocol: attempt.responseHeaders ? "http2" : "http",
+						method: "POST",
+						url: new URL(requestPath, baseUrl).toString(),
+						headers: requestHeaders,
+						bodyBase64: Buffer.from(requestBytes).toString("base64"),
+					})
+				: undefined;
 
 			let currentTextBlock: (TextContent & { [kStreamingBlockIndex]: number }) | null = null;
 			let currentThinkingBlock: (ThinkingContent & { [kStreamingBlockIndex]: number }) | null = null;
