@@ -1873,6 +1873,85 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("detects a Dart project from pubspec.yaml for workspace diagnostics", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-dart-workspace-");
+		const spawnCalls: BunSpawnCall[] = [];
+		recordBunSpawn(spawnCalls);
+
+		try {
+			// Detection only tests for the marker's existence; the manifest is never parsed.
+			await Bun.write(path.join(tempDir.path(), "pubspec.yaml"), "name: demo\n");
+
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const result = await tool.execute("dart-workspace-diagnostics", {
+				action: "diagnostics",
+				file: "*",
+			});
+
+			expect(spawnCalls).toHaveLength(1);
+			expect(spawnCalls[0]?.cmd).toEqual(["dart", "analyze"]);
+			expect(spawnCalls[0]?.options?.cwd).toBe(tempDir.path());
+			const output = textResult(result);
+			expect(output).toContain("Workspace diagnostics (");
+			expect(output).toContain("Dart (dart analyze)");
+			expect(output).toContain("No issues found");
+			expect(output).not.toContain("Cannot detect project type");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("runs every detected checker when Dart and another marker are both present for workspace diagnostics", async () => {
+		// A polyglot root collects every marker instead of stopping at the first
+		// one, so both `cargo check` and `dart analyze` run and their output is
+		// combined rather than one language silently going unchecked.
+		const tempDir = TempDir.createSync("@omp-lsp-dart-polyglot-workspace-");
+		const spawnCalls: BunSpawnCall[] = [];
+		recordBunSpawn(spawnCalls);
+
+		try {
+			await Bun.write(path.join(tempDir.path(), "pubspec.yaml"), "name: demo\n");
+			await Bun.write(path.join(tempDir.path(), "Cargo.toml"), '[package]\nname = "demo"\nversion = "0.0.0"\n');
+
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const result = await tool.execute("dart-polyglot-workspace-diagnostics", {
+				action: "diagnostics",
+				file: "*",
+			});
+
+			expect(spawnCalls).toHaveLength(2);
+			expect(spawnCalls.map(call => call.cmd)).toEqual(
+				expect.arrayContaining([["cargo", "check", "--message-format=short"], ["dart", "analyze"]]),
+			);
+			const output = textResult(result);
+			expect(output).toContain("Rust (cargo check)");
+			expect(output).toContain("Dart (dart analyze)");
+			expect(output).toContain("=== Rust (cargo check) ===");
+			expect(output).toContain("=== Dart (dart analyze) ===");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("reports an unknown project type when no workspace diagnostics marker is present", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-unknown-workspace-");
+		const spawnCalls: BunSpawnCall[] = [];
+		recordBunSpawn(spawnCalls);
+
+		try {
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const result = await tool.execute("unknown-workspace-diagnostics", {
+				action: "diagnostics",
+				file: "*",
+			});
+
+			expect(spawnCalls).toHaveLength(0);
+			expect(textResult(result)).toContain("Cannot detect project type");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
 	it("detects Windows local .exe LSP shims in node_modules/.bin", async () => {
 		if (process.platform !== "win32") {
 			return;

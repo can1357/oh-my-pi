@@ -32,6 +32,7 @@ const langMap: Record<string, SymbolKey> = {
 	rust: "lang.rust",
 	rs: "lang.rust",
 	go: "lang.go",
+	dart: "lang.dart",
 	java: "lang.java",
 	c: "lang.c",
 	cpp: "lang.cpp",
@@ -127,6 +128,7 @@ const LANG_BRAND_COLORS: Partial<Record<SymbolKey, string>> = {
 	"lang.python": "#3776ab",
 	"lang.ruby": "#cc342d",
 	"lang.julia": "#9558b2",
+	"lang.dart": "#0175c2",
 };
 
 const BACKGROUND_RESET_PATTERN = /\x1b\[(?:0|49)m/g;

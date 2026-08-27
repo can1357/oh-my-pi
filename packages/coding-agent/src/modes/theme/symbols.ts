@@ -201,6 +201,7 @@ export type SymbolKey =
 	| "lang.python"
 	| "lang.rust"
 	| "lang.go"
+	| "lang.dart"
 	| "lang.java"
 	| "lang.c"
 	| "lang.cpp"
@@ -545,6 +546,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"lang.python": "🐍",
 	"lang.rust": "🦀",
 	"lang.go": "🐹",
+	"lang.dart": "🎯",
 	"lang.java": "☕",
 	"lang.c": "Ⓒ",
 	"lang.cpp": "➕",
@@ -962,6 +964,7 @@ const NERD_SYMBOLS: SymbolMap = {
 	"lang.python": "\u{E606}",
 	"lang.rust": "\u{E7A8}",
 	"lang.go": "\u{E627}",
+	"lang.dart": "\u{E64C}",
 	"lang.java": "\u{E738}",
 	"lang.c": "\u{E61E}",
 	"lang.cpp": "\u{E61D}",
@@ -1227,6 +1230,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"lang.python": "py",
 	"lang.rust": "rs",
 	"lang.go": "go",
+	"lang.dart": "dart",
 	"lang.java": "java",
 	"lang.c": "c",
 	"lang.cpp": "cpp",

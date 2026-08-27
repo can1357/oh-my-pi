@@ -4,7 +4,7 @@ import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 
 /** Project type detection result */
 export interface ProjectType {
-	type: "rust" | "typescript" | "go" | "python" | "unknown";
+	type: "rust" | "typescript" | "go" | "python" | "dart" | "unknown";
 	command?: string[];
 	description: string;
 }
@@ -132,6 +132,12 @@ export async function detectProjectTypes(cwd: string, signal?: AbortSignal): Pro
 		detected.push({ type: "python", command: ["pyright"], description: "Python (pyright)" });
 	}
 
+	// Dart/Flutter (pubspec.yaml). `dart analyze` covers Flutter packages too,
+	// so there is no need to branch on whether this is a Flutter project.
+	if (marker("pubspec.yaml")) {
+		detected.push({ type: "dart", command: ["dart", "analyze"], description: "Dart (dart analyze)" });
+	}
+
 	if (detected.length === 0) {
 		return [{ type: "unknown", description: "Unknown project type" }];
 	}
@@ -191,7 +197,7 @@ async function mapWithConcurrency<T, R>(
 async function runProjectDiagnostics(cwd: string, projectType: ProjectType, signal?: AbortSignal): Promise<string> {
 	const command = projectType.command;
 	if (!command) {
-		return "Cannot detect project type. Supported: Rust (Cargo.toml), TypeScript (tsconfig.json), Go (go.work/go.mod), Python (pyproject.toml)";
+		return "Cannot detect project type. Supported: Rust (Cargo.toml), TypeScript (tsconfig.json), Go (go.work/go.mod), Python (pyproject.toml), Dart (pubspec.yaml)";
 	}
 	try {
 		const proc = Bun.spawn(command, {

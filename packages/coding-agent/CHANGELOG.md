@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `lsp diagnostics file: "*"` now covers Dart and Flutter projects via `dart analyze`.
+
 ## [18.0.7] - 2026-08-26
 
 ### Added
