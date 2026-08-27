@@ -149,7 +149,10 @@ function isValidThoughtSignature(signature: string | undefined): boolean {
 /**
  * Only keep signatures from the same provider/model and with valid base64.
  */
-function resolveThoughtSignature(isSameProviderAndModel: boolean, signature: string | undefined): string | undefined {
+export function resolveThoughtSignature(
+	isSameProviderAndModel: boolean,
+	signature: string | undefined,
+): string | undefined {
 	return isSameProviderAndModel && isValidThoughtSignature(signature) ? signature : undefined;
 }
 

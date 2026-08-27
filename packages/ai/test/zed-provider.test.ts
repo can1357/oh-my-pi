@@ -355,7 +355,7 @@ describe("Zed Provider Payload Construction", () => {
 		expect(restrictedDisabledThinking.stop_sequences).toEqual(["<END>", "<STOP>", "<DONE>", "<HALT>"]);
 	});
 
-	it("formats Google AI GenerateContentRequest payload for google provider models", () => {
+	it("formats Google AI GenerateContentRequest payload and forwards all Gemini sampling controls", () => {
 		const mockModel: Model<"zed-agent"> = {
 			id: "gemini-3-flash",
 			name: "Gemini 3 Flash",
@@ -396,6 +396,12 @@ describe("Zed Provider Payload Construction", () => {
 
 		const payload = buildZedProviderRequest("google", mockContext, mockModel, {
 			reasoning: Effort.Medium,
+			temperature: 0,
+			topP: 0.75,
+			topK: 32,
+			minP: 0.05,
+			presencePenalty: -0.25,
+			repetitionPenalty: 1.1,
 		}) as Record<string, unknown>;
 
 		expect(payload.contents).toBeArray();
@@ -414,11 +420,17 @@ describe("Zed Provider Payload Construction", () => {
 		expect(params.properties.limit.exclusiveMinimum).toBeUndefined();
 		expect(payload.generationConfig).toMatchObject({
 			maxOutputTokens: 66000,
+			temperature: 0,
+			topP: 0.75,
+			topK: 32,
+			minP: 0.05,
+			presencePenalty: -0.25,
+			repetitionPenalty: 1.1,
 			thinkingConfig: { thinkingLevel: "MEDIUM" },
 		});
 	});
-	it("replays Gemini assistant tool-call thought signatures in the functionCall payload", () => {
-		const thoughtSignature = "gemini-thought-signature";
+
+	it("replays only valid same-model Gemini thought signatures", () => {
 		const mockModel: Model<"zed-agent"> = {
 			id: "gemini-3-flash",
 			name: "Gemini 3 Flash",
@@ -432,55 +444,97 @@ describe("Zed Provider Payload Construction", () => {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			compat: undefined,
 		};
-		const assistant: AssistantMessage = {
-			role: "assistant",
-			content: [
-				{
-					type: "toolCall",
-					id: "call_search",
-					name: "search_tool",
-					arguments: { query: "weather in Paris" },
-					thoughtSignature,
-				},
-			],
-			api: "zed-agent",
-			provider: "zed-agent",
-			model: mockModel.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "toolUse",
-			timestamp: 2,
-		};
-
-		const payload = buildZedProviderRequest("google", { messages: [assistant] }, mockModel) as Record<
-			string,
-			unknown
-		>;
-		const contents = payload.contents as Array<{
-			role: string;
-			parts: Array<Record<string, unknown>>;
-		}>;
-
-		expect(contents).toEqual([
+		const cases = [
 			{
-				role: "model",
-				parts: [
+				sourceModel: mockModel.id,
+				thinking: "same-model reasoning",
+				thinkingSignature: "QUJDRA==",
+				toolSignature: "RUZHSA==",
+				retained: true,
+			},
+			{
+				sourceModel: "gemini-3.1-pro-preview",
+				thinking: "foreign-model reasoning",
+				thinkingSignature: "QUJDRA==",
+				toolSignature: "RUZHSA==",
+				retained: false,
+			},
+			{
+				sourceModel: mockModel.id,
+				thinking: "invalid-signature reasoning",
+				thinkingSignature: "not base64!",
+				toolSignature: "also not base64!",
+				retained: false,
+			},
+		] as const;
+
+		for (const testCase of cases) {
+			const assistant: AssistantMessage = {
+				role: "assistant",
+				content: [
+					{
+						type: "thinking",
+						thinking: testCase.thinking,
+						thinkingSignature: testCase.thinkingSignature,
+					},
+					{
+						type: "toolCall",
+						id: "call_search",
+						name: "search_tool",
+						arguments: { query: "weather in Paris" },
+						thoughtSignature: testCase.toolSignature,
+					},
+				],
+				api: "zed-agent",
+				provider: "zed-agent",
+				model: testCase.sourceModel,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: 2,
+			};
+
+			const payload = buildZedProviderRequest("google", { messages: [assistant] }, mockModel) as {
+				contents: Array<{ role: string; parts: Array<Record<string, unknown>> }>;
+			};
+			const parts = payload.contents[0]?.parts;
+			if (!parts) throw new Error(`Gemini parts were not emitted for ${testCase.sourceModel}`);
+
+			if (testCase.retained) {
+				expect(parts).toEqual([
+					{
+						thought: true,
+						text: testCase.thinking,
+						thoughtSignature: testCase.thinkingSignature,
+					},
 					{
 						functionCall: {
 							name: "search_tool",
 							args: { query: "weather in Paris" },
 						},
-						thoughtSignature,
+						thoughtSignature: testCase.toolSignature,
 					},
-				],
-			},
-		]);
+				]);
+				continue;
+			}
+
+			expect(parts).toHaveLength(2);
+			expect(String(parts[0]?.text)).toContain(testCase.thinking);
+			expect(parts[0]?.thought).toBeUndefined();
+			expect(parts[0]?.thoughtSignature).toBeUndefined();
+			expect(parts[1]).toEqual({
+				functionCall: {
+					name: "search_tool",
+					args: { query: "weather in Paris" },
+				},
+			});
+		}
 	});
 
 	it("propagates forceReasoningOff to Zed provider options and disables Gemini thinking", async () => {

@@ -1,11 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import { buildZedProviderRequest, streamZed } from "../src/providers/zed";
+import { invalidateZedLlmToken } from "../src/registry/oauth/zed-token-pool";
 import type {
 	AssistantMessage,
 	AssistantMessageEvent,
 	Context,
 	FetchImpl,
 	Model,
+	ProviderResponseMetadata,
 	ToolChoice,
 	ToolResultMessage,
 } from "../src/types";
@@ -29,10 +31,10 @@ function makeModel(id: string, reasoning = false): Model<"zed-agent"> {
 	};
 }
 
-function ndjsonResponse(frames: unknown[]): Response {
+function ndjsonResponse(frames: unknown[], init: { status?: number; headers?: Record<string, string> } = {}): Response {
 	return new Response(`${frames.map(frame => JSON.stringify(frame)).join("\n")}\n`, {
-		status: 200,
-		headers: { "content-type": "application/x-ndjson" },
+		status: init.status ?? 200,
+		headers: { "content-type": "application/x-ndjson", ...init.headers },
 	});
 }
 
@@ -325,6 +327,126 @@ describe("Zed provider protocol regressions", () => {
 		expect(requests).toHaveLength(1);
 		expect(requests[0]?.input).toBe("https://cloud.zed.dev/completions");
 		expect(requests[0]?.init?.headers).toMatchObject({ Authorization: "Bearer raw-access-token" });
+	});
+
+	it("notifies onResponse when a completion response succeeds", async () => {
+		const model = makeModel("gpt-5.6-luna");
+		const responses: ProviderResponseMetadata[] = [];
+		const responseModelIds: Array<string | undefined> = [];
+		const fetchMock: FetchImpl = mockFetch(async () =>
+			ndjsonResponse([{ status: "stream_ended" }], {
+				headers: {
+					"x-test-response": "success",
+					"x-zed-request-id": "req_success",
+				},
+			}),
+		);
+
+		const stream = streamZed(model, userContext(), {
+			apiKey: "raw-zed-token",
+			fetch: fetchMock,
+			onResponse: (response, responseModel) => {
+				responses.push(response);
+				responseModelIds.push(responseModel?.id);
+			},
+		});
+		const result = await stream.result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(responses).toHaveLength(1);
+		expect(responses[0]).toMatchObject({
+			status: 200,
+			headers: {
+				"x-test-response": "success",
+				"x-zed-request-id": "req_success",
+			},
+		});
+		expect(responseModelIds).toEqual([model.id]);
+	});
+
+	it("notifies onResponse for each initial 401 or expired-token response and its successful retry", async () => {
+		const cases: Array<{
+			name: string;
+			status: number;
+			headers: Record<string, string>;
+		}> = [
+			{
+				name: "401",
+				status: 401,
+				headers: { "x-test-attempt": "initial-401" },
+			},
+			{
+				name: "expired-token",
+				status: 200,
+				headers: {
+					"x-zed-expired-token": "true",
+					"x-test-attempt": "initial-expired-token",
+				},
+			},
+		];
+
+		for (const [caseIndex, testCase] of cases.entries()) {
+			const userId = `user_on_response_retry_${caseIndex}`;
+			const accessToken = `access-token-on-response-retry-${caseIndex}`;
+			const model = makeModel("gpt-5.6-luna");
+			const responses: ProviderResponseMetadata[] = [];
+			const responseModelIds: Array<string | undefined> = [];
+			let mintCount = 0;
+			let completionCount = 0;
+			invalidateZedLlmToken(userId, accessToken);
+
+			const fetchMock: FetchImpl = mockFetch(async input => {
+				const url = String(input);
+				if (url.endsWith("/client/llm_tokens")) {
+					mintCount++;
+					return new Response(JSON.stringify({ token: `llm-token-${caseIndex}-${mintCount}` }), {
+						status: 200,
+						headers: { "content-type": "application/json" },
+					});
+				}
+				if (!url.endsWith("/completions")) {
+					throw new Error(`Unexpected Zed request in ${testCase.name} case: ${url}`);
+				}
+
+				completionCount++;
+				if (completionCount === 1) {
+					return ndjsonResponse([{ status: "stream_ended" }], {
+						status: testCase.status,
+						headers: testCase.headers,
+					});
+				}
+				if (completionCount === 2) {
+					return ndjsonResponse([{ status: "stream_ended" }], {
+						headers: { "x-test-attempt": `retry-after-${testCase.name}` },
+					});
+				}
+				throw new Error(`Unexpected extra completion request in ${testCase.name} case`);
+			});
+
+			try {
+				const stream = streamZed(model, userContext(), {
+					apiKey: `${userId} ${accessToken}`,
+					fetch: fetchMock,
+					onResponse: (response, responseModel) => {
+						responses.push(response);
+						responseModelIds.push(responseModel?.id);
+					},
+				});
+				const result = await stream.result();
+
+				expect(result.stopReason).toBe("stop");
+				expect(mintCount).toBe(2);
+				expect(completionCount).toBe(2);
+				expect(responses.map(response => response.status)).toEqual([testCase.status, 200]);
+				expect(responses.map(response => response.headers["x-test-attempt"])).toEqual([
+					testCase.headers["x-test-attempt"],
+					`retry-after-${testCase.name}`,
+				]);
+				expect(responseModelIds).toEqual([model.id, model.id]);
+			} finally {
+				invalidateZedLlmToken(userId, accessToken);
+			}
+		}
 	});
 
 	it("sends an asynchronous onPayload replacement in the outgoing completion request", async () => {

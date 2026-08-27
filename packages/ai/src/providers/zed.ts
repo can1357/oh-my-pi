@@ -19,9 +19,10 @@ import type {
 	ToolChoice,
 } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { notifyProviderResponse } from "../utils/provider-response";
 import { normalizeSchemaForCCA } from "../utils/schema";
 import { mapToOpenAICompletionsToolChoice, mapToOpenAIResponsesToolChoice } from "../utils/tool-choice";
-import { isThinkingPart, retainThoughtSignature } from "./google-shared";
+import { isThinkingPart, resolveThoughtSignature, retainThoughtSignature } from "./google-shared";
 
 export interface ZedOptions extends StreamOptions {
 	threadId?: string;
@@ -395,24 +396,34 @@ function mapContextToGoogle(context: Context, model: Model<"zed-agent">, options
 			contents.push({ role: "user", parts });
 		} else if (msg.role === "assistant") {
 			const parts: Array<Record<string, unknown>> = [];
+			const isSameProviderAndModel =
+				msg.provider === model.provider && msg.api === model.api && msg.model === model.id;
 			for (const block of msg.content) {
 				if (block.type === "text") {
 					parts.push({ text: block.text });
 				} else if (block.type === "thinking") {
 					if (block.thinking && block.thinking.trim().length > 0) {
-						parts.push({
-							thought: true,
-							text: block.thinking,
-							...(block.thinkingSignature ? { thoughtSignature: block.thinkingSignature } : {}),
-						});
+						const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thinkingSignature);
+						if (thoughtSignature) {
+							parts.push({
+								thought: true,
+								text: block.thinking,
+								thoughtSignature,
+							});
+						} else {
+							parts.push({
+								text: renderDemotedThinking(model.id, block.thinking),
+							});
+						}
 					}
 				} else if (block.type === "toolCall") {
+					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thoughtSignature);
 					parts.push({
 						functionCall: {
 							name: block.name,
 							args: block.arguments,
 						},
-						...(block.thoughtSignature ? { thoughtSignature: block.thoughtSignature } : {}),
+						...(thoughtSignature ? { thoughtSignature } : {}),
 					});
 				}
 			}
@@ -473,6 +484,25 @@ function mapContextToGoogle(context: Context, model: Model<"zed-agent">, options
 		}
 	}
 
+	if (options?.temperature !== undefined) {
+		generationConfig.temperature = options.temperature;
+	}
+	if (options?.topP !== undefined) {
+		generationConfig.topP = options.topP;
+	}
+	if (options?.topK !== undefined) {
+		generationConfig.topK = options.topK;
+	}
+	if (options?.minP !== undefined) {
+		generationConfig.minP = options.minP;
+	}
+	if (options?.presencePenalty !== undefined) {
+		generationConfig.presencePenalty = options.presencePenalty;
+	}
+	if (options?.repetitionPenalty !== undefined) {
+		generationConfig.repetitionPenalty = options.repetitionPenalty;
+	}
+
 	if (model.reasoning) {
 		if (options?.disableReasoning) {
 			generationConfig.thinkingConfig = {
@@ -488,7 +518,6 @@ function mapContextToGoogle(context: Context, model: Model<"zed-agent">, options
 
 	return body;
 }
-
 function mapContextToOpenAiChat(context: Context, model: Model<"zed-agent">, options?: ZedOptions) {
 	const messages: Array<{ role: string; content?: unknown; tool_calls?: unknown; tool_call_id?: string }> = [];
 
@@ -628,9 +657,8 @@ export function streamZed(
 		}
 
 		const fetcher = options.fetch ?? fetch;
-
 		const sendRequest = async (token: string) => {
-			return fetcher(`${ZED_CLOUD_URL}/completions`, {
+			const response = await fetcher(`${ZED_CLOUD_URL}/completions`, {
 				method: "POST",
 				headers: {
 					Authorization: `Bearer ${token}`,
@@ -642,6 +670,13 @@ export function streamZed(
 				body: JSON.stringify(completionBody),
 				signal: options.signal,
 			});
+			await notifyProviderResponse(
+				options,
+				response,
+				model,
+				response.headers.get("x-request-id") ?? response.headers.get("request-id"),
+			);
+			return response;
 		};
 
 		let response = await sendRequest(llmToken);
