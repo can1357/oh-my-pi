@@ -1,6 +1,6 @@
 //! Byte-target protocol tests without live Redis or SQL servers.
 
-use std::{collections::VecDeque, convert::Infallible};
+use std::{convert::Infallible, sync::Arc};
 
 use omp_storage::{
 	backend::{
@@ -16,59 +16,72 @@ use omp_storage::{
 	},
 	testing::assert_byte_journal_contract,
 };
+use parking_lot::Mutex;
 use tempfile::tempdir;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RedisOp {
+	Length,
+	Range,
+	Append,
+	Truncate,
+}
+
+impl From<&RedisCommand<'_>> for RedisOp {
+	fn from(command: &RedisCommand<'_>) -> Self {
+		match *command {
+			RedisCommand::Length { .. } => Self::Length,
+			RedisCommand::Range { .. } => Self::Range,
+			RedisCommand::Append { .. } => Self::Append,
+			RedisCommand::Truncate { .. } => Self::Truncate,
+		}
+	}
+}
 
 #[derive(Default)]
 struct RedisFake {
-	bytes:          Vec<u8>,
-	forced_replies: VecDeque<RedisReply>,
+	bytes: Arc<Mutex<Vec<u8>>>,
+	ops:   Arc<Mutex<Vec<RedisOp>>>,
 }
 
 impl RedisTransport for RedisFake {
 	type Error = Infallible;
 
 	fn execute(&mut self, command: RedisCommand<'_>) -> Result<RedisReply, Self::Error> {
-		if matches!(command, RedisCommand::Append { .. })
-			&& let Some(reply) = self.forced_replies.pop_front()
-		{
-			return Ok(reply);
-		}
+		self.ops.lock().push(RedisOp::from(&command));
+		let mut bytes = self.bytes.lock();
 		Ok(match command {
-			RedisCommand::Length { .. } => {
-				RedisReply::Integer(i64::try_from(self.bytes.len()).expect("length fits in i64"))
-			},
+			RedisCommand::Length { .. } => RedisReply::Integer(
+				i64::try_from(bytes.len()).expect("memory journal length fits in i64"),
+			),
 			RedisCommand::Range { start, end, .. } => {
 				let start = usize::try_from(start)
 					.unwrap_or(usize::MAX)
-					.min(self.bytes.len());
+					.min(bytes.len());
 				let end_exclusive = usize::try_from(end.saturating_add(1))
 					.unwrap_or(usize::MAX)
-					.min(self.bytes.len())
+					.min(bytes.len())
 					.max(start);
-				RedisReply::Bytes(self.bytes[start..end_exclusive].to_vec())
+				RedisReply::Bytes(bytes[start..end_exclusive].to_vec())
 			},
-			RedisCommand::Append { expected, bytes, .. } => {
-				let observed =
-					u64::try_from(self.bytes.len()).expect("memory journal length fits in u64");
+			RedisCommand::Append { expected, bytes: data, .. } => {
+				let observed = u64::try_from(bytes.len()).expect("memory journal length fits in u64");
 				if observed != expected {
 					RedisReply::Fenced { resulting: -1, observed }
 				} else {
-					self.bytes.extend_from_slice(bytes);
+					bytes.extend_from_slice(data);
 					RedisReply::Fenced {
-						resulting: i64::try_from(self.bytes.len()).expect("length fits in i64"),
+						resulting: i64::try_from(bytes.len()).expect("length fits in i64"),
 						observed,
 					}
 				}
 			},
 			RedisCommand::Truncate { len, .. } => {
-				let observed =
-					u64::try_from(self.bytes.len()).expect("memory journal length fits in u64");
+				let observed = u64::try_from(bytes.len()).expect("memory journal length fits in u64");
 				if len > observed {
 					RedisReply::Fenced { resulting: -1, observed }
 				} else {
-					self
-						.bytes
-						.truncate(usize::try_from(len).unwrap_or(usize::MAX));
+					bytes.truncate(usize::try_from(len).unwrap_or(usize::MAX));
 					RedisReply::Fenced {
 						resulting: i64::try_from(len).expect("length fits in i64"),
 						observed,
@@ -81,52 +94,43 @@ impl RedisTransport for RedisFake {
 
 #[derive(Default)]
 struct SqlFake {
-	bytes:          Vec<u8>,
-	forced_replies: VecDeque<SqlReply>,
+	bytes: Arc<Mutex<Vec<u8>>>,
 }
 
 impl SqlTransport for SqlFake {
 	type Error = Infallible;
 
 	fn execute(&mut self, command: SqlCommand<'_>) -> Result<SqlReply, Self::Error> {
-		if matches!(command, SqlCommand::Append { .. })
-			&& let Some(reply) = self.forced_replies.pop_front()
-		{
-			return Ok(reply);
-		}
+		let mut bytes = self.bytes.lock();
 		Ok(match command {
 			SqlCommand::Initialize { .. } => SqlReply::Done,
-			SqlCommand::Length { .. } => SqlReply::Length(
-				u64::try_from(self.bytes.len()).expect("memory journal length fits in u64"),
-			),
+			SqlCommand::Length { .. } => {
+				SqlReply::Length(u64::try_from(bytes.len()).expect("memory journal length fits in u64"))
+			},
 			SqlCommand::Range { offset, maximum, .. } => {
 				let start = usize::try_from(offset)
 					.unwrap_or(usize::MAX)
-					.min(self.bytes.len());
-				let end = start.saturating_add(maximum).min(self.bytes.len());
-				SqlReply::Bytes(self.bytes[start..end].to_vec())
+					.min(bytes.len());
+				let end = start.saturating_add(maximum).min(bytes.len());
+				SqlReply::Bytes(bytes[start..end].to_vec())
 			},
-			SqlCommand::Append { expected, bytes, .. } => {
-				let observed =
-					u64::try_from(self.bytes.len()).expect("memory journal length fits in u64");
+			SqlCommand::Append { expected, bytes: data, .. } => {
+				let observed = u64::try_from(bytes.len()).expect("memory journal length fits in u64");
 				if observed != expected {
 					SqlReply::Fenced { applied: false, resulting: observed, observed }
 				} else {
-					self.bytes.extend_from_slice(bytes);
+					bytes.extend_from_slice(data);
 					let resulting =
-						u64::try_from(self.bytes.len()).expect("memory journal length fits in u64");
+						u64::try_from(bytes.len()).expect("memory journal length fits in u64");
 					SqlReply::Fenced { applied: true, resulting, observed }
 				}
 			},
 			SqlCommand::Truncate { len, .. } => {
-				let observed =
-					u64::try_from(self.bytes.len()).expect("memory journal length fits in u64");
+				let observed = u64::try_from(bytes.len()).expect("memory journal length fits in u64");
 				if len > observed {
 					SqlReply::Fenced { applied: false, resulting: observed, observed }
 				} else {
-					self
-						.bytes
-						.truncate(usize::try_from(len).unwrap_or(usize::MAX));
+					bytes.truncate(usize::try_from(len).unwrap_or(usize::MAX));
 					SqlReply::Fenced { applied: true, resulting: len, observed }
 				}
 			},
@@ -148,19 +152,37 @@ fn file_store_satisfies_byte_journal_contract() {
 
 #[test]
 fn redis_store_satisfies_byte_journal_contract() {
-	assert_byte_journal_contract(RedisStore::new(RedisFake::default(), "omp:sessions:test"));
+	let shared_ops = Arc::new(Mutex::new(Vec::new()));
+	let fake = RedisFake { bytes: Arc::new(Mutex::new(Vec::new())), ops: Arc::clone(&shared_ops) };
+	assert_byte_journal_contract(RedisStore::new(fake, "omp:sessions:test"));
 	assert!(RedisStore::<RedisFake>::append_script().contains("STRLEN"));
 	assert!(RedisStore::<RedisFake>::truncate_script().contains("GETRANGE"));
+	assert_eq!(
+		*shared_ops.lock(),
+		vec![
+			RedisOp::Length,
+			RedisOp::Append,
+			RedisOp::Append,
+			RedisOp::Range,
+			RedisOp::Truncate,
+			RedisOp::Range,
+		],
+		"Redis cached length avoids redundant remote length calls"
+	);
 
-	let fake = RedisFake {
-		bytes:          b"v4\n".to_vec(),
-		forced_replies: VecDeque::from([RedisReply::Fenced { resulting: -1, observed: 9 }]),
-	};
+	let shared_bytes = Arc::new(Mutex::new(b"v4\n".to_vec()));
+	let fake =
+		RedisFake { bytes: Arc::clone(&shared_bytes), ops: Arc::new(Mutex::new(Vec::new())) };
 	let mut store = RedisStore::new(fake, "omp:sessions:conflict");
+	assert_eq!(store.len().expect("initial length"), 3, "store caches the pre-race length");
+
+	*shared_bytes.lock() = b"v4\nremote".to_vec();
 	assert!(matches!(store.append(b"more"), Err(RedisError::Conflict { expected: 3, observed: 9 })));
-	let fake = store.into_transport();
-	assert_eq!(fake.bytes, b"v4\n", "conflict leaves bytes unchanged");
-	assert!(fake.forced_replies.is_empty());
+	assert_eq!(
+		*store.into_transport().bytes.lock(),
+		b"v4\nremote",
+		"conflict leaves remote bytes unchanged"
+	);
 }
 
 #[test]
@@ -169,21 +191,18 @@ fn sql_store_satisfies_byte_journal_contract() {
 		.expect("initialize dialect");
 	assert_byte_journal_contract(store);
 
-	let fake = SqlFake {
-		bytes:          b"v4\n".to_vec(),
-		forced_replies: VecDeque::from([SqlReply::Fenced {
-			applied:   false,
-			resulting: 9,
-			observed:  9,
-		}]),
-	};
+	let shared_bytes = Arc::new(Mutex::new(b"v4\n".to_vec()));
+	let fake = SqlFake { bytes: Arc::clone(&shared_bytes) };
 	let mut store =
 		SqlStore::open(fake, SqlDialect::Sqlite, "conflict").expect("initialize conflict store");
+	assert_eq!(store.len().expect("initial length"), 3, "store caches the pre-race length");
+
+	*shared_bytes.lock() = b"v4\nremote".to_vec();
 	assert!(matches!(store.append(b"more"), Err(SqlError::Conflict { expected: 3, observed: 9 })));
 	assert_eq!(
 		store.read(0, 9).expect("read after conflict"),
-		b"v4\n",
-		"conflict leaves bytes unchanged"
+		b"v4\nremote",
+		"conflict leaves remote bytes unchanged"
 	);
 }
 

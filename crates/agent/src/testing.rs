@@ -1,3 +1,5 @@
+//! Deterministic turn transports, gates, and capture fixtures for public
+//! integration tests.
 use std::{
 	collections::VecDeque,
 	future,
@@ -14,7 +16,10 @@ use std::{
 use futures::Stream;
 use omp_proto::inference::v1::TurnEvent;
 use parking_lot::Mutex;
-use tokio::{sync::Notify, time};
+use tokio::{
+	sync::{futures::OwnedNotified, Notify},
+	time,
+};
 
 use crate::{Error, InvokeFrame, TurnClient, TurnId, TurnInput, TurnOptions, TurnSession};
 
@@ -50,8 +55,8 @@ pub struct Gate(Arc<GateInner>);
 struct GateInner {
 	arrived:  AtomicBool,
 	released: AtomicBool,
-	arrival:  Notify,
-	release:  Notify,
+	arrival:  Arc<Notify>,
+	release:  Arc<Notify>,
 }
 
 impl Gate {
@@ -90,6 +95,12 @@ impl Gate {
 			.map_err(|source| GateError::GateTimeout { limit, source })
 	}
 
+	/// Returns a future that resolves once this gate has been released.
+	///
+	/// Release is one-shot: once [`release`](Self::release) is called, every
+	/// waiter parked at this gate is unblocked and the gate remains released.
+	/// Waiters created before or during the release complete; waiters created
+	/// after release resolve immediately.
 	pub async fn released(&self) {
 		loop {
 			let notified = self.0.release.notified();
@@ -217,7 +228,7 @@ impl TurnClient for ScriptedTurnClient {
 pub struct ScriptedTurnSession {
 	steps:     VecDeque<ScriptedStep>,
 	submitted: Arc<Mutex<Vec<InvokeFrame>>>,
-	waiting:   Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
+	waiting:   Option<Pin<Box<OwnedNotified>>>,
 }
 
 impl TurnSession for ScriptedTurnSession {
@@ -233,7 +244,7 @@ impl TurnSession for ScriptedTurnSession {
 
 struct ScriptedEventStream<'session> {
 	steps:   &'session mut VecDeque<ScriptedStep>,
-	waiting: &'session mut Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
+	waiting: &'session mut Option<Pin<Box<OwnedNotified>>>,
 }
 
 impl Unpin for ScriptedEventStream<'_> {}
@@ -265,7 +276,7 @@ impl Stream for ScriptedEventStream<'_> {
 				Some(ScriptedStep::Wait(gate)) => {
 					let gate = gate.clone();
 					gate.arrive();
-					*self.waiting = Some(Box::pin(async move { gate.released().await }));
+					*self.waiting = Some(Box::pin(gate.0.release.clone().notified_owned()));
 				},
 				None => return Poll::Ready(None),
 			}
