@@ -141,6 +141,16 @@ pub fn fallback_model_selector(
 		.map(|selected| Str::new(selected.model.as_str()))
 }
 
+fn credential_route_allowed(
+	settings: &ModelSettings,
+	route_provider: &omp_catalog::ProviderId,
+	model_id: &str,
+	credential_provider: Option<&omp_catalog::ProviderId>,
+) -> bool {
+	settings.model_allowed(route_provider.as_str(), model_id)
+		&& credential_provider.is_none_or(|provider| route_provider == provider)
+}
+
 fn eligible_models(
 	catalog: &Catalog,
 	settings: &ModelSettings,
@@ -157,15 +167,7 @@ fn eligible_models(
 						.as_str()
 						.split_once('/')
 						.map_or(model.key.as_str(), |(_, model)| model);
-					settings.model_allowed(route.provider.as_str(), model_id)
-						&& credential_provider.is_none_or(|provider| {
-							crate::chat::resolve_model_provider(
-								catalog,
-								model.key.as_str(),
-								Some(provider.as_str()),
-							)
-							.is_ok()
-						})
+					credential_route_allowed(settings, &route.provider, model_id, credential_provider)
 				})
 			})
 		})
@@ -206,6 +208,35 @@ mod tests {
 		settings.disabled_providers =
 			[omp_catalog::settings::PathScopedStringEntry::Bare(Str::new(provider.as_str()))].into();
 		assert!(resolve_launch_roles(catalog, &settings, None, None, None, None).is_err(),);
+	}
+
+	#[test]
+	fn credential_pinned_eligibility_requires_an_allowed_provider_route() {
+		let allowed_provider = omp_catalog::ProviderId::new("allowed");
+		let denied_provider = omp_catalog::ProviderId::new("denied");
+		let mut settings = ModelSettings::default();
+		settings.enabled_models =
+			[omp_catalog::settings::PathScopedStringEntry::Bare(Str::new_static("allowed/example"))]
+				.into();
+
+		assert!(credential_route_allowed(
+			&settings,
+			&allowed_provider,
+			"example",
+			Some(&allowed_provider),
+		));
+		assert!(!credential_route_allowed(
+			&settings,
+			&denied_provider,
+			"example",
+			Some(&denied_provider),
+		));
+		assert!(!credential_route_allowed(
+			&settings,
+			&allowed_provider,
+			"example",
+			Some(&denied_provider),
+		));
 	}
 
 	#[test]
