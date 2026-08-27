@@ -79,9 +79,26 @@ export type XdevDocsMode = "inline" | "builtins" | "catalog";
  * are pinned top-level by {@link XDEV_KEEP_TOP_LEVEL} or carry the transport
  * itself ({@link XDEV_TRANSPORT_TOOLS}); essential tools never do. The caller
  * gates this on the transport being active.
+ *
+ * `forceMountGlobs` (`tools.xdevForceMount`) is an opt-in escape hatch for
+ * small-context local models, where tool schemas dominate the request: a
+ * matching tool mounts even when it declares `loadMode: "essential"` or sits
+ * in {@link XDEV_KEEP_TOP_LEVEL}. {@link XDEV_TRANSPORT_TOOLS} still cannot be
+ * demoted — without `read`/`write` every mounted device is unreachable
+ * (issue #5764). Forcing a {@link XDEV_KEEP_TOP_LEVEL} name re-opens the
+ * problem that pinned it: most models have no notion of `xd://`, so hiding
+ * `web_search` behind dispatch makes it unreachable in practice (issue #5973),
+ * `grep` is the bash interceptor's redirect target, `todo` feeds the
+ * todo/prewalk machinery, and `ask` is the model's user-interaction
+ * affordance. Off by default for that reason.
  */
-export function isMountableUnderXdev(tool: { name: string; loadMode?: ToolLoadMode }): boolean {
-	if (tool.name in XDEV_TRANSPORT_TOOLS || tool.name in XDEV_KEEP_TOP_LEVEL) return false;
+export function isMountableUnderXdev(
+	tool: { name: string; loadMode?: ToolLoadMode },
+	forceMountGlobs: readonly Bun.Glob[] = [],
+): boolean {
+	if (tool.name in XDEV_TRANSPORT_TOOLS) return false;
+	if (forceMountGlobs.some(glob => glob.match(tool.name))) return true;
+	if (tool.name in XDEV_KEEP_TOP_LEVEL) return false;
 	return tool.loadMode === "discoverable";
 }
 
@@ -219,9 +236,10 @@ function promptCatalogSummary(inst: Tool, maxBytes?: number): string {
 	return sanitizeCatalogSummary(summary, maxBytes) || inst.name;
 }
 
-/** Compile the `tools.xdevInlineDevices` allowlist once per render, dropping
- *  non-string entries so malformed user config cannot break prompt builds. */
-function compileInlineGlobs(patterns: readonly string[]): Bun.Glob[] {
+/** Compile a tool-name glob list (`tools.xdevInlineDevices`,
+ *  `tools.xdevForceMount`) once per use, dropping non-string entries so
+ *  malformed user config cannot break prompt builds or tool presentation. */
+export function compileToolNameGlobs(patterns: readonly string[]): Bun.Glob[] {
 	if (!Array.isArray(patterns)) return [];
 	const globs: Bun.Glob[] = [];
 	for (const pattern of patterns) {
@@ -327,7 +345,7 @@ export function xdevDocsAll(
 ): string {
 	const sections: string[] = [];
 	const overflow: Tool[] = [];
-	const inlineGlobs = compileInlineGlobs(inlinePatterns);
+	const inlineGlobs = compileToolNameGlobs(inlinePatterns);
 	let used = 0;
 	for (const tool of listXdevTools(state)) {
 		if (!shouldInlineXdevTool(state, tool, mode, inlineGlobs)) {
@@ -367,7 +385,7 @@ export function xdevDocsFor(
 	inlinePatterns: readonly string[] = [],
 ): string {
 	const sections: string[] = [];
-	const inlineGlobs = compileInlineGlobs(inlinePatterns);
+	const inlineGlobs = compileToolNameGlobs(inlinePatterns);
 	let used = 0;
 	for (const name of names) {
 		const tool = resolveMountedXdevTool(state, name);

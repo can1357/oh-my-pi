@@ -211,6 +211,7 @@ import {
 	GrepTool,
 	getSearchTools,
 	HIDDEN_TOOLS,
+	compileToolNameGlobs,
 	isMountableUnderXdev,
 	type LspStartupServerInfo,
 	listXdevTools,
@@ -3270,10 +3271,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (toolSession.xdev) {
 			const topLevelToolNames: string[] = [];
 			const mountedNames: string[] = [];
+			const forceMountGlobs = compileToolNameGlobs(settings.get("tools.xdevForceMount"));
 			for (const name of initialToolNames) {
 				const tool = toolRegistry.get(name);
 				const explicitlyRequested = explicitlyRequestedToolNameSet?.has(name) === true;
-				if (tool && xdevReadAvailable && xdevWriteAvailable && !explicitlyRequested && isMountableUnderXdev(tool))
+				if (
+					tool &&
+					xdevReadAvailable &&
+					xdevWriteAvailable &&
+					!explicitlyRequested &&
+					isMountableUnderXdev(tool, forceMountGlobs)
+				)
 					mountedNames.push(name);
 				else topLevelToolNames.push(name);
 			}
@@ -3811,7 +3819,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						builtInRegistryToolNames.has("write") &&
 						enabled.includes("read") &&
 						(enabled.includes("write") || toolSession.deviceOnlyWrite === true) &&
-						isMountableUnderXdev(liveTool);
+						isMountableUnderXdev(liveTool, compileToolNameGlobs(settings.get("tools.xdevForceMount")));
 					const nextMounted = shouldMount
 						? mounted.includes(name)
 							? mounted
