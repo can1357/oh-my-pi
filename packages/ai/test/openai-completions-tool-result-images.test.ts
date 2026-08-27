@@ -71,7 +71,7 @@ function buildToolResult(toolCallId: string, timestamp: number): ToolResultMessa
 		toolName: "read",
 		content: [
 			{ type: "text", text: "Read image file [image/png]" },
-			{ type: "image", data: "ZmFrZQ==", mimeType: "image/png", detail: "original" },
+			{ type: "image", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", mimeType: "image/png", detail: "original" },
 		],
 		isError: false,
 		timestamp,
@@ -98,7 +98,7 @@ describe("openai-completions convertMessages", () => {
 					role: "user",
 					content: [
 						{ type: "text", text: "Identify the shapes and colors. Return JSON only." },
-						{ type: "image", mimeType: "image/png", data: "ZmFrZQ==" },
+						{ type: "image", mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" },
 					],
 					timestamp: 1,
 				},
@@ -114,7 +114,7 @@ describe("openai-completions convertMessages", () => {
 					{ type: "text", text: "Identify the shapes and colors. Return JSON only." },
 					{
 						type: "image_url",
-						image_url: { url: "data:image/png;base64,ZmFrZQ==" },
+						image_url: { url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" },
 					},
 				],
 			},
@@ -165,8 +165,8 @@ describe("openai-completions convertMessages", () => {
 			imageMessage.content as Array<{ type?: string; image_url?: { url: string; detail?: string } }>
 		).filter(part => part?.type === "image_url");
 		expect(imageParts).toEqual([
-			{ type: "image_url", image_url: { url: "data:image/png;base64,ZmFrZQ==" } },
-			{ type: "image_url", image_url: { url: "data:image/png;base64,ZmFrZQ==" } },
+			{ type: "image_url", image_url: { url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" } },
+			{ type: "image_url", image_url: { url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" } },
 		]);
 	});
 	it("serializes assistant tool-call turns with string content for strict OpenAI-compatible backends", () => {
@@ -348,7 +348,7 @@ describe("openai-completions convertMessages", () => {
 					role: "user",
 					content: [
 						{ type: "text", text: "Take a screenshot" },
-						{ type: "image", data: "ZmFrZQ==", mimeType: "image/webp" },
+						{ type: "image", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", mimeType: "image/png" },
 					],
 					timestamp: now - 2,
 				},
@@ -487,7 +487,7 @@ describe("openai-completions convertMessages", () => {
 						role: "user",
 						content: [
 							{ type: "text", text: "Take a screenshot" },
-							{ type: "image", data: "ZmFrZQ==", mimeType: "image/webp" },
+							{ type: "image", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", mimeType: "image/png" },
 						],
 						timestamp: now - 2,
 					},
@@ -533,7 +533,7 @@ describe("openai-completions convertMessages", () => {
 					role: "user",
 					content: [
 						{ type: "text", text: "Read this document" },
-						{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" },
+						{ type: "image", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", mimeType: "image/png" },
 					],
 					timestamp: Date.now(),
 				},
@@ -547,7 +547,7 @@ describe("openai-completions convertMessages", () => {
 			{ type: "text", text: "Read this document" },
 			{
 				type: "image_url",
-				image_url: { url: "data:image/png;base64,ZmFrZQ==" },
+				image_url: { url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" },
 			},
 		]);
 	});
@@ -561,7 +561,7 @@ describe("openai-completions convertMessages", () => {
 					role: "user",
 					content: [
 						{ type: "text", text: "Describe this image" },
-						{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" },
+						{ type: "image", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", mimeType: "image/png" },
 					],
 					timestamp: Date.now(),
 				},
@@ -575,7 +575,7 @@ describe("openai-completions convertMessages", () => {
 			{ type: "text", text: "Describe this image" },
 			{
 				type: "image_url",
-				image_url: { url: "data:image/png;base64,ZmFrZQ==" },
+				image_url: { url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" },
 			},
 		]);
 	});

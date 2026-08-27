@@ -187,6 +187,7 @@ type ManagedSessionRecord = {
 type ReplayableMessage = {
 	role: string;
 	content?: unknown;
+	summary?: string;
 	errorMessage?: string;
 	toolCallId?: string;
 	toolName?: string;
@@ -2286,14 +2287,18 @@ export class AcpAgent implements Agent {
 				},
 			);
 		}
-		if (
-			message.role === "bashExecution" ||
-			message.role === "pythonExecution" ||
-			message.role === "compactionSummary"
-		) {
+		if (message.role === "bashExecution" || message.role === "pythonExecution") {
 			return this.#wrapReplayContent(
 				sessionId,
 				this.#extractReplayContent(message.content, undefined),
+				"user_message_chunk",
+				crypto.randomUUID(),
+			);
+		}
+		if (message.role === "compactionSummary" && typeof message.summary === "string") {
+			return this.#wrapReplayContent(
+				sessionId,
+				message.summary.length > 0 ? [{ type: "text", text: message.summary }] : [],
 				"user_message_chunk",
 				crypto.randomUUID(),
 			);

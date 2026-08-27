@@ -8,6 +8,8 @@ import {
 import type { ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
+const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
 function makeResponsesModel(provider: string, baseUrl: string) {
 	return buildModel({
 		id: "vision-model",
@@ -104,7 +106,50 @@ describe("OpenAI provider-file capability", () => {
 			contextWindow: 32_768,
 			maxTokens: 4_096,
 		} satisfies ModelSpec<"openai-responses">);
-		expect(supportsComputerScreenshotReferences(supported)).toBe(true);
+		expect(
+			supportsComputerScreenshotReferences(supported, {
+				type: "computer_screenshot",
+				image_url: "https://images.example.invalid/screenshot.png",
+			}),
+		).toBe(true);
+	});
+
+	it("requires replayable computer screenshot image URLs", () => {
+		const supported = buildModel({
+			id: "gpt-5.4",
+			name: "GPT-5.4",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: false,
+			input: ["text", "image"],
+			supportsComputerUse: true,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"openai-responses">);
+
+		expect(
+			supportsComputerScreenshotReferences(supported, {
+				type: "computer_screenshot",
+				image_url: `data:image/png;base64,${PNG_B64}`,
+			}),
+		).toBe(true);
+		expect(
+			supportsComputerScreenshotReferences(supported, {
+				type: "computer_screenshot",
+				image_url: "not-a-url",
+			}),
+		).toBe(false);
+		expect(
+			supportsComputerScreenshotReferences(supported, {
+				type: "computer_screenshot",
+				image_url: "data:image/png;base64,ZmFrZQ==",
+			}),
+		).toBe(false);
+		expect(supportsComputerScreenshotReferences(supported, { type: "computer_screenshot", image_url: "" })).toBe(
+			false,
+		);
 	});
 
 	it("requires the official OpenAI provider and endpoint", () => {

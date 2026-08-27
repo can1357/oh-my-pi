@@ -1200,7 +1200,7 @@ describe("ACP agent", () => {
 					? [update.update.content.text]
 					: [],
 			);
-		expect(replayedText).toEqual(["recent context"]);
+		expect(replayedText).toEqual(["opaque remote summary", "recent context"]);
 		expectAcpNotifications(harness.updates);
 
 		harness.abortController.abort();

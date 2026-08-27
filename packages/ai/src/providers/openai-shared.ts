@@ -1896,7 +1896,7 @@ function resolveReplayCustomToolName(wireName: string, wireNameMap: ReadonlyMap<
 	return wireNameMap?.get(wireName) ?? (wireName === "apply_patch" ? "edit" : wireName);
 }
 
-function assertCompatibleCompactionHistory(
+export function assertCompatibleCompactionHistory(
 	providerPayload: AssistantMessage["providerPayload"],
 	provider: string,
 	referenceTarget: string,
@@ -2566,6 +2566,24 @@ export function encodeResponsesOrphanToolResultOutput<TApi extends Api>(
 	return { output, outputText };
 }
 
+function computerScreenshotFromContent<TApi extends Api>(
+	toolResult: ToolResultMessage,
+	model: Model<TApi>,
+	supportsImageDetailOriginal: boolean,
+): { type: "computer_screenshot"; file_id?: string; image_url?: string } | undefined {
+	for (const block of toolResult.content) {
+		if (block.type !== "image" || !hasSupportedImageSource(model, block)) continue;
+		const image = convertResponsesInputImage(block, supportsImageDetailOriginal, model);
+		const screenshot = image.file_id
+			? { type: "computer_screenshot" as const, file_id: image.file_id }
+			: image.image_url
+				? { type: "computer_screenshot" as const, image_url: image.image_url }
+				: undefined;
+		if (screenshot && supportsComputerScreenshotReferences(model, screenshot)) return screenshot;
+	}
+	return undefined;
+}
+
 /** Appends one Responses tool result. */
 export function appendResponsesToolResultMessages<TApi extends Api>(
 	messages: ResponseInput,
@@ -2579,22 +2597,30 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 	computerCallIds?: ReadonlySet<string>,
 ): void {
 	const normalized = normalizeResponsesToolCallId(toolResult.toolCallId);
+	const isComputerCall = computerCallIds?.has(normalized.callId) === true;
 	const hasSupportedImageSourceInResult = toolResult.content.some(
 		(block): block is ImageContent => block.type === "image" && hasSupportedImageSource(model, block),
 	);
+	const contentScreenshot = isComputerCall
+		? computerScreenshotFromContent(toolResult, model, supportsImageDetailOriginal)
+		: undefined;
+	const computerMetadata = toolResult.providerMetadata?.type === "computer" ? toolResult.providerMetadata : undefined;
+	const metadataScreenshot =
+		computerMetadata && supportsComputerScreenshotReferences(model, computerMetadata.screenshot)
+			? computerMetadata.screenshot
+			: undefined;
 	const unsupportedComputerMetadata =
-		toolResult.providerMetadata?.type === "computer" &&
-		!supportsComputerScreenshotReferences(model, toolResult.providerMetadata.screenshot);
+		computerMetadata !== undefined && metadataScreenshot === undefined;
 	if (unsupportedComputerMetadata && !hasSupportedImageSourceInResult) {
 		messages.push({
 			type: "message",
 			role: "assistant",
-			content: `[Previous computer result; call_id=${normalized.callId}]: ${stringifyJson(toolResult.providerMetadata?.screenshot) ?? ""}`,
+			content: `[Previous computer result; call_id=${normalized.callId}]: ${stringifyJson(computerMetadata.screenshot) ?? ""}`,
 		} as ResponseInput[number]);
 		return;
 	}
-	const isComputerCall = computerCallIds?.has(normalized.callId) === true;
-	if (isComputerCall && toolResult.providerMetadata?.type === "computer" && !unsupportedComputerMetadata) {
+	const computerScreenshot = metadataScreenshot ?? contentScreenshot;
+	if (isComputerCall && computerScreenshot) {
 		if (strictResponsesPairing && !knownCallIds.has(normalized.callId)) {
 			messages.push({
 				type: "message",
@@ -2606,8 +2632,8 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		messages.push({
 			type: "computer_call_output",
 			call_id: normalized.callId,
-			output: structuredCloneJSON(toolResult.providerMetadata.screenshot),
-			acknowledged_safety_checks: structuredCloneJSON(toolResult.providerMetadata.acknowledgedSafetyChecks),
+			output: structuredCloneJSON(computerScreenshot),
+			acknowledged_safety_checks: structuredCloneJSON(computerMetadata?.acknowledgedSafetyChecks),
 		} as ResponseInput[number]);
 		return;
 	}

@@ -17,6 +17,8 @@ import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/mo
 import * as piUtils from "@oh-my-pi/pi-utils";
 
 const TEST_INSTALLATION_ID = "00000000-0000-4000-8000-000000000001";
+const PNG_B64 =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 beforeEach(() => {
 	vi.spyOn(piUtils, "getInstallId").mockReturnValue(TEST_INSTALLATION_ID);
@@ -378,6 +380,29 @@ function containsUserInputText(input: unknown[] | undefined, text: string): bool
 }
 
 describe("OpenAI responses history payload", () => {
+	it("fails closed when Codex compaction history targets another endpoint", () => {
+		const model = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					content: "Remote compaction preserved provider-native history for this session.",
+					providerPayload: createOpenAIResponsesHistoryPayload(
+						model.provider,
+						[{ type: "compaction", encrypted_content: "opaque" }],
+						false,
+						"incompatible-target",
+					),
+					timestamp: Date.now(),
+				},
+			],
+		};
+
+		expect(() => convertCodexResponsesMessages(model, context)).toThrow(
+			"Target-bound remote compaction history is incompatible with the active Responses target",
+		);
+	});
+
 	it("falls back to portable content when replacement history targets another endpoint", () => {
 		const sourceModel = getOpenAIReasoningModel("openai", "gpt-5-mini");
 		const targetModel = buildModel({
@@ -484,7 +509,7 @@ describe("OpenAI responses history payload", () => {
 					role: "user",
 					content: [
 						{ type: "text", text: "previous frame" },
-						{ type: "image", mimeType: "image/png", data: "ZmFrZQ==", detail: "original" },
+						{ type: "image", mimeType: "image/png", data: PNG_B64, detail: "original" },
 					],
 					timestamp: Date.now(),
 				},
@@ -568,7 +593,7 @@ describe("OpenAI responses history payload", () => {
 				role: "user",
 				content: [
 					{ type: "input_text", text: "previous native frame" },
-					{ type: "input_image", detail: "original", image_url: "data:image/png;base64,ZmFrZQ==" },
+					{ type: "input_image", detail: "original", image_url: `data:image/png;base64,${PNG_B64}` },
 				],
 			},
 			{ type: "custom_tool_call", call_id: "call_native_apply", name: "apply_patch", input: ISSUE_5002_PATCH },
@@ -1389,7 +1414,7 @@ describe("OpenAI responses history payload", () => {
 			{
 				type: "computer_call_output",
 				call_id: "call_interrupted_computer_turn",
-				output: { type: "computer_screenshot", image_url: "data:image/png;base64,AAEC" },
+				output: { type: "computer_screenshot", image_url: `data:image/png;base64,${PNG_B64}` },
 			},
 		];
 		const context: Context = {
@@ -1420,7 +1445,7 @@ describe("OpenAI responses history payload", () => {
 			{
 				type: "computer_call_output",
 				call_id: "call_interrupted_computer_turn",
-				output: { type: "computer_screenshot", image_url: "data:image/png;base64,AAEC" },
+				output: { type: "computer_screenshot", image_url: `data:image/png;base64,${PNG_B64}` },
 			},
 			{ role: "user", content: [{ type: "input_text", text: "continue after interrupt" }] },
 		]);
@@ -1471,12 +1496,12 @@ describe("OpenAI responses history payload", () => {
 					role: "toolResult",
 					toolCallId: "call_split_computer_turn|cu_split_computer_turn",
 					toolName: "computer",
-					content: [{ type: "image", data: "AAEC", mimeType: "image/png" }],
+					content: [{ type: "image", data: PNG_B64, mimeType: "image/png" }],
 					isError: false,
 					timestamp: Date.now(),
 					providerMetadata: {
 						type: "computer",
-						screenshot: { type: "computer_screenshot", image_url: "data:image/png;base64,AAEC" },
+						screenshot: { type: "computer_screenshot", image_url: `data:image/png;base64,${PNG_B64}` },
 						acknowledgedSafetyChecks: [],
 					},
 				},

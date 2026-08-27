@@ -94,6 +94,7 @@ import type {
 import {
 	accumulateCustomToolCallInputDelta,
 	accumulateToolCallArgumentsDelta,
+	assertCompatibleCompactionHistory,
 	appendMessageContentPart,
 	appendMessageTextDelta,
 	appendReasoningSummaryPart,
@@ -4537,6 +4538,7 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 	for (const msg of transformedMessages) {
 		if (msg.role === "user" || msg.role === "developer") {
 			const providerPayload = (msg as { providerPayload?: AssistantMessage["providerPayload"] }).providerPayload;
+			assertCompatibleCompactionHistory(providerPayload, model.provider, referenceTarget);
 			const historyItems = getOpenAIResponsesHistoryItems(
 				providerPayload,
 				model.provider,

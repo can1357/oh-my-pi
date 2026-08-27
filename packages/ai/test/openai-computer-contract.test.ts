@@ -22,6 +22,8 @@ import type { AssistantMessage, Context, Model, ModelSpec, Tool, ToolResultMessa
 import { sanitizeOpenAIResponsesHistoryItemsForReplay } from "@oh-my-pi/pi-ai/utils";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
+const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
 function model<TApi extends "openai-responses" | "openai-codex-responses">(
 	api: TApi,
 	id = "gpt-5.4",
@@ -243,12 +245,12 @@ describe("OpenAI GA computer contract", () => {
 			role: "toolResult",
 			toolCallId: "call_native_codex|item_native_codex",
 			toolName: "computer",
-			content: [{ type: "image", data: "cG5n", mimeType: "image/png", detail: "original" }],
+			content: [{ type: "image", data: PNG_B64, mimeType: "image/png", detail: "original" }],
 			isError: false,
 			timestamp: 2,
 			providerMetadata: {
 				type: "computer",
-				screenshot: { type: "computer_screenshot", image_url: "data:image/png;base64,cG5n" },
+				screenshot: { type: "computer_screenshot", image_url: `data:image/png;base64,${PNG_B64}` },
 				acknowledgedSafetyChecks: [],
 			},
 		};
@@ -331,7 +333,7 @@ describe("OpenAI GA computer contract", () => {
 
 	test("replays image_url and file_id screenshots losslessly with acknowledgements", () => {
 		for (const screenshot of [
-			{ type: "computer_screenshot" as const, image_url: "data:image/png;base64,AAEC" },
+			{ type: "computer_screenshot" as const, image_url: `data:image/png;base64,${PNG_B64}` },
 			{ type: "computer_screenshot" as const, file_id: "file_screen_123" },
 		]) {
 			const known = new Set<string>();
@@ -408,6 +410,77 @@ describe("OpenAI GA computer contract", () => {
 		}
 	});
 
+	test("preserves computer pairing with an inline screenshot fallback", () => {
+		for (const providerMetadata of [
+			undefined,
+			{
+				type: "computer" as const,
+				screenshot: { type: "computer_screenshot" as const, file_id: "" },
+				acknowledgedSafetyChecks: [],
+			},
+		]) {
+			const known = new Set<string>();
+			const computer = new Set<string>();
+			const calls = convertResponsesAssistantMessage(
+				assistant([
+					{
+						type: "toolCall",
+						id: "call_inline_fallback|item_inline_fallback",
+						name: "computer",
+						arguments: {},
+						providerMetadata: {
+							type: "computer",
+							providerItemId: "item_inline_fallback",
+							actions: [{ type: "screenshot" }],
+							pendingSafetyChecks: [],
+						},
+					},
+				]),
+				model("openai-responses"),
+				0,
+				known,
+				true,
+				undefined,
+				false,
+				true,
+				undefined,
+				computer,
+			);
+			appendResponsesToolResultMessages(
+				calls,
+				{
+					role: "toolResult",
+					toolCallId: "call_inline_fallback|item_inline_fallback",
+					toolName: "computer",
+					content: [{ type: "image", data: PNG_B64, mimeType: "image/png", detail: "original" }],
+					isError: false,
+					timestamp: 2,
+					providerMetadata,
+				},
+				model("openai-responses"),
+				false,
+				true,
+				known,
+				undefined,
+				true,
+				computer,
+			);
+
+			expect(calls).toEqual([
+				expect.objectContaining({ type: "computer_call", call_id: "call_inline_fallback" }),
+				{
+					type: "computer_call_output",
+					call_id: "call_inline_fallback",
+					output: {
+						type: "computer_screenshot",
+						image_url: `data:image/png;base64,${PNG_B64}`,
+					},
+					acknowledged_safety_checks: providerMetadata?.acknowledgedSafetyChecks,
+				},
+			]);
+		}
+	});
+
 	test("routes unsupported computer screenshot references before image encoding", () => {
 		const calls: ResponseInput = [];
 		const unsupported = model("openai-responses", "gpt-5.3");
@@ -458,12 +531,12 @@ describe("OpenAI GA computer contract", () => {
 			role: "toolResult",
 			toolCallId: "call_inline",
 			toolName: "computer",
-			content: [{ type: "image", data: "AAEC", mimeType: "image/png" }],
+			content: [{ type: "image", data: PNG_B64, mimeType: "image/png" }],
 			isError: false,
 			timestamp: 2,
 			providerMetadata: {
 				type: "computer",
-				screenshot: { type: "computer_screenshot", image_url: "data:image/png;base64,AAEC" },
+				screenshot: { type: "computer_screenshot", image_url: `data:image/png;base64,${PNG_B64}` },
 				acknowledgedSafetyChecks: [],
 			},
 		};
@@ -484,7 +557,7 @@ describe("OpenAI GA computer contract", () => {
 			{
 				type: "function_call_output",
 				call_id: "call_inline",
-				output: [{ type: "input_image", detail: "auto", image_url: "data:image/png;base64,AAEC" }],
+				output: [{ type: "input_image", detail: "auto", image_url: `data:image/png;base64,${PNG_B64}` }],
 			},
 		]);
 	});
@@ -894,12 +967,12 @@ describe("OpenAI GA computer contract", () => {
 			role: "toolResult",
 			toolCallId: "call_internal_computer|item_internal_computer",
 			toolName: "computer",
-			content: [{ type: "image", data: "cG5n", mimeType: "image/png", detail: "original" }],
+			content: [{ type: "image", data: PNG_B64, mimeType: "image/png", detail: "original" }],
 			isError: false,
 			timestamp: 2,
 			providerMetadata: {
 				type: "computer",
-				screenshot: { type: "computer_screenshot", image_url: "data:image/png;base64,cG5n" },
+				screenshot: { type: "computer_screenshot", image_url: `data:image/png;base64,${PNG_B64}` },
 				acknowledgedSafetyChecks: [],
 			},
 		};
@@ -914,7 +987,7 @@ describe("OpenAI GA computer contract", () => {
 		expect(
 			replay.some(item => item.type === "function_call_output" && item.call_id === "call_internal_computer"),
 		).toBe(true);
-		expect(JSON.stringify(replay)).toContain("data:image/png;base64,cG5n");
+		expect(JSON.stringify(replay)).toContain(`data:image/png;base64,${PNG_B64}`);
 	});
 
 	test("unrolls direct API computer history after switching to a subscription model", async () => {
@@ -937,12 +1010,12 @@ describe("OpenAI GA computer contract", () => {
 			role: "toolResult",
 			toolCallId: "call_direct_computer|item_direct_computer",
 			toolName: "computer",
-			content: [{ type: "image", data: "cG5n", mimeType: "image/png", detail: "original" }],
+			content: [{ type: "image", data: PNG_B64, mimeType: "image/png", detail: "original" }],
 			isError: false,
 			timestamp: 2,
 			providerMetadata: {
 				type: "computer",
-				screenshot: { type: "computer_screenshot", image_url: "data:image/png;base64,cG5n" },
+				screenshot: { type: "computer_screenshot", image_url: `data:image/png;base64,${PNG_B64}` },
 				acknowledgedSafetyChecks: [],
 			},
 		};

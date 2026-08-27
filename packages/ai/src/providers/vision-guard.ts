@@ -5,6 +5,7 @@ import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
 import { parseImageMetadata } from "@oh-my-pi/pi-utils";
 
 import type { ImageContent, Model, TextContent } from "../types";
+import { decodeDataUri } from "./openai-data-uri";
 
 export const NON_VISION_IMAGE_PLACEHOLDER = "[image omitted: model does not support vision]";
 export const UNREPLAYABLE_IMAGE_PLACEHOLDER = "[image omitted: source cannot be replayed]";
@@ -205,7 +206,10 @@ export function supportsComputerScreenshotReferences(
 			{ mimeType: "image/png" },
 		);
 	}
-	return true;
+	if (typeof screenshot?.image_url !== "string") return false;
+	if (isRemoteImageUrl(screenshot.image_url)) return true;
+	const inlineImage = decodeDataUri(screenshot.image_url);
+	return inlineImage !== undefined && getUsableInlineImageMimeType(inlineImage) !== undefined;
 }
 
 /** Whether this model can replay a remote URL for an image with this media type. */
