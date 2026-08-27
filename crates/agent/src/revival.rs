@@ -40,6 +40,20 @@ pub struct RevivedSession {
 	pub original_root: PathBuf,
 }
 
+/// Read-only durable facts derived without opening an append-owning journal.
+pub struct RevivedPreview {
+	/// Reconstructed loop snapshot, including workspace and tool manifest.
+	pub snapshot:                     AgentSnapshot,
+	/// Most recent live temporary model selection.
+	pub model_override:               Option<ModelChange>,
+	/// Whether inference must discard provider-native session affinity.
+	pub provider_reset:               bool,
+	/// Whether the journal contains an explicit per-turn tool restriction.
+	pub has_durable_tool_restriction: bool,
+	/// Original immutable workspace root recorded by the journal header.
+	pub original_root:                PathBuf,
+}
+
 /// Cold-loads the journal and applies its durable projections on the supplied
 /// current policy/grants/tool registry snapshot.
 ///
@@ -57,9 +71,26 @@ pub fn revive(path: &Path, snapshot: AgentSnapshot) -> Result<RevivedSession, Re
 pub fn revive_existing(
 	path: &Path,
 	journal: Journal,
-	mut snapshot: AgentSnapshot,
+	snapshot: AgentSnapshot,
 ) -> Result<RevivedSession, RevivalError> {
+	let preview = revive_preview(path, snapshot)?;
+	Ok(RevivedSession {
+		journal,
+		snapshot: preview.snapshot,
+		model_override: preview.model_override,
+		provider_reset: preview.provider_reset,
+		has_durable_tool_restriction: preview.has_durable_tool_restriction,
+		original_root: preview.original_root,
+	})
+}
+
+/// Reconstructs durable intent without opening the append-owning journal.
+pub fn revive_preview(
+	path: &Path,
+	mut snapshot: AgentSnapshot,
+) -> Result<RevivedPreview, RevivalError> {
 	let log = transcript::load(path)?;
+	let event_count = u64::try_from(log.len()).expect("transcript length fits u64");
 	let mut model_override = None;
 	let mut provider_reset = false;
 	for index in log.live() {
@@ -76,7 +107,13 @@ pub fn revive_existing(
 			_ => {},
 		}
 	}
-	let roots = journal.workspace_roots(&log.header().cwd)?;
+	let roots = crate::journal::fold_workspace_roots(
+		&log.header().cwd,
+		(0..event_count).filter_map(|index| match log.get(index) {
+			Some(transcript::Entry::Ok(event)) => Some(&event.kind),
+			Some(transcript::Entry::Tombstone(_)) | None => None,
+		}),
+	);
 	let primary_uri = roots.primary().to_string_lossy().into_owned();
 	snapshot.props.set(prompt_keys::CWD, primary_uri.clone());
 	let primary = map! { "canonical_uri" => primary_uri };
@@ -94,7 +131,15 @@ pub fn revive_existing(
 	snapshot
 		.props
 		.set(prompt_keys::ADDITIONAL_ROOTS, additional);
-	let latest_turn_start = journal.latest_turn_start();
+	let latest_turn_start = (0..event_count)
+		.rev()
+		.find_map(|index| match log.get(index) {
+			Some(transcript::Entry::Ok(event)) => match &event.kind {
+				Kind::TurnStart(start) => Some(start),
+				_ => None,
+			},
+			Some(transcript::Entry::Tombstone(_)) | None => None,
+		});
 	let has_durable_tool_restriction = latest_turn_start.is_some();
 	if let Some(start) = latest_turn_start {
 		let mounted = &snapshot.registry;
@@ -106,8 +151,7 @@ pub fn revive_existing(
 			.collect::<Vec<Str>>()
 			.into();
 	}
-	Ok(RevivedSession {
-		journal,
+	Ok(RevivedPreview {
 		snapshot,
 		model_override,
 		provider_reset,
@@ -121,7 +165,9 @@ mod tests {
 	use omp_proto::thread::v1::{self as thread_pb, item, part};
 	use omp_storage::{
 		blob::BlobRef,
-		transcript::{Header, SessionId, SnapcompactArchive},
+		transcript::{
+			Event, Header, Kind, PromptRewriteIntent, SessionId, SnapcompactArchive, Writer,
+		},
 	};
 	use omp_tool::{CapsBase, ModelClass, Registry};
 	use tempfile::tempdir;
@@ -204,5 +250,47 @@ mod tests {
 				&& blob.size == frame.size
 		));
 		assert_eq!(thread.items[1], message("kept"));
+	}
+
+	#[test]
+	fn revival_preview_does_not_recover_incomplete_prompt_rewrite() {
+		let scratch = tempdir().expect("temporary directory");
+		let path = scratch.path().join("session.jsonl");
+		let header = Header {
+			v:       4,
+			id:      SessionId(Str::new_static("revival-preview")),
+			created: 1,
+			cwd:     scratch.path().to_owned(),
+		};
+		let mut journal = Journal::create(&path, &header).expect("create journal");
+		journal
+			.append_optimistic(2, message("old-head"), None)
+			.expect("append old head");
+		let tail = journal
+			.append_optimistic(3, message("tail"), None)
+			.expect("append tail");
+		drop(journal);
+		let mut writer = Writer::open_append(&path).expect("open raw writer");
+		writer
+			.append(&Event {
+				ts:   4,
+				kind: Kind::PromptRewriteIntent(PromptRewriteIntent {
+					prompt_hash:    Hash32::new([2; 32]),
+					head:           vec![message("new-head")],
+					preserved_tail: vec![tail],
+				}),
+			})
+			.expect("append incomplete rewrite");
+		drop(writer);
+		let before = std::fs::read(&path).expect("read pending journal");
+
+		let preview = revive_preview(&path, AgentSnapshot::default()).expect("preview revival");
+
+		assert!(!preview.has_durable_tool_restriction);
+		assert_eq!(
+			std::fs::read(&path).expect("read previewed journal"),
+			before,
+			"preview must not repair or append source journal bytes"
+		);
 	}
 }

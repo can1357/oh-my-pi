@@ -136,7 +136,7 @@ impl WorkspaceRoots {
 	}
 }
 
-fn fold_workspace_roots<'a>(
+pub(crate) fn fold_workspace_roots<'a>(
 	primary: &Path,
 	events: impl IntoIterator<Item = &'a Kind>,
 ) -> WorkspaceRoots {

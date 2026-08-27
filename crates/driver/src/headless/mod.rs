@@ -528,8 +528,6 @@ impl HeadlessSession {
 		};
 		let source = source.expect("resume/fork/continue have a source");
 		let journal_path = sessions_dir.join(format!("{}.jsonl", source.as_str()));
-		let journal =
-			Journal::open(&journal_path).map_err(|error| HeadlessError::Revival(error.into()))?;
 		let registry = Arc::new(omp_tool::Registry::new());
 		let session_id = sf!("preview");
 		let blueprint = chat::session_blueprint(
@@ -543,8 +541,8 @@ impl HeadlessSession {
 		.map_err(HeadlessError::SessionBlueprint)?;
 		let snapshot =
 			chat::agent_snapshot(&blueprint, catalog, None).map_err(HeadlessError::AgentSnapshot)?;
-		let revived = omp_agent::revive_existing(&journal_path, journal, snapshot)
-			.map_err(HeadlessError::Revival)?;
+		let revived =
+			omp_agent::revive_preview(&journal_path, snapshot).map_err(HeadlessError::Revival)?;
 		let mut snapshot = revived.snapshot;
 		apply_revived_session_model(
 			&mut snapshot,
