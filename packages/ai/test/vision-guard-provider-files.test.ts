@@ -1,7 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import {
+	normalizeImageMimeType,
 	supportsComputerScreenshotReferences,
 	supportsProviderFileReference,
+	supportsRemoteImageUrls,
 } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import type { ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -51,6 +53,21 @@ function makeGoogleModel() {
 		contextWindow: 32_768,
 		maxTokens: 4_096,
 	} satisfies ModelSpec<"google-generative-ai">);
+}
+
+function makeGoogleVertexModel() {
+	return buildModel({
+		id: "vision-model",
+		name: "Vision Model",
+		api: "google-vertex",
+		provider: "google-vertex",
+		baseUrl: "https://us-central1-aiplatform.googleapis.com",
+		reasoning: false,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 32_768,
+		maxTokens: 4_096,
+	} satisfies ModelSpec<"google-vertex">);
 }
 
 describe("OpenAI provider-file capability", () => {
@@ -144,5 +161,18 @@ describe("OpenAI provider-file capability", () => {
 			expect(supportsProviderFileReference(model, { ...reference, expiresAt }, image)).toBe(false);
 		}
 		expect(supportsProviderFileReference(model, { ...reference, expiresAt: Date.now() + 60_000 }, image)).toBe(true);
+	});
+
+	it("accepts parameterized MIME types for replayable Google references", () => {
+		const image = { mimeType: "image/png;charset=binary" };
+		expect(normalizeImageMimeType(image.mimeType)).toBe("image/png");
+		expect(
+			supportsProviderFileReference(
+				makeGoogleModel(),
+				{ provider: "google", uri: "https://generativelanguage.googleapis.com/v1/files/vision" },
+				image,
+			),
+		).toBe(true);
+		expect(supportsRemoteImageUrls(makeGoogleVertexModel(), image)).toBe(true);
 	});
 });

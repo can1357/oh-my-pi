@@ -76,12 +76,16 @@ export function isUsableInlineImageData(data: string): boolean {
 	return decodeUsableInlineImageData(data) !== undefined;
 }
 
+export function normalizeImageMimeType(mimeType: string): string {
+	const essence = mimeType.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+	return essence === "image/jpg" ? "image/jpeg" : essence;
+}
+
 export function getUsableInlineImageMimeType(image: Pick<ImageContent, "data" | "mimeType">): string | undefined {
 	const bytes = decodeUsableInlineImageData(image.data);
 	if (!bytes) return undefined;
 	const detectedMimeType = parseImageMetadata(bytes)?.mimeType;
-	const mimeEssence = image.mimeType.split(";", 1)[0]?.trim().toLowerCase();
-	const declaredMimeType = mimeEssence === "image/jpg" ? "image/jpeg" : mimeEssence;
+	const declaredMimeType = normalizeImageMimeType(image.mimeType);
 	return detectedMimeType !== undefined && detectedMimeType === declaredMimeType ? detectedMimeType : undefined;
 }
 
@@ -90,7 +94,7 @@ export function isUsableInlineImage(image: Pick<ImageContent, "data" | "mimeType
 }
 
 function hasReplayableGoogleImageMimeType(image: Pick<ImageContent, "mimeType">): boolean {
-	return GOOGLE_REMOTE_IMAGE_MIME_TYPES[image.mimeType.toLowerCase()] === true;
+	return GOOGLE_REMOTE_IMAGE_MIME_TYPES[normalizeImageMimeType(image.mimeType)] === true;
 }
 
 function isExactOfficialOpenAIEndpoint(baseUrl: string | undefined): boolean {

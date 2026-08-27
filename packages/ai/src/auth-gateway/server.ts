@@ -32,6 +32,7 @@ import * as piNative from "../providers/pi-native-server";
 import {
 	getUsableInlineImageMimeType,
 	isRemoteImageUrl,
+	normalizeImageMimeType,
 	supportsComputerScreenshotReferences,
 	supportsProviderFileReference,
 	supportsRemoteImageUrls,
@@ -144,7 +145,7 @@ function validateAndNormalizeImageReferences(context: Context, model: Model): st
 			const inlineMimeType = getUsableInlineImageMimeType({ data, mimeType });
 			const hasInlineData = inlineMimeType !== undefined;
 			if (inlineMimeType) block.mimeType = inlineMimeType;
-			const normalizedMimeType = inlineMimeType ?? mimeType;
+			const normalizedMimeType = inlineMimeType ?? normalizeImageMimeType(mimeType);
 			const hasProviderFileReference = block.providerFile !== undefined;
 			const providerFile = isRecord(block.providerFile) ? block.providerFile : undefined;
 			const hasSupportedProviderFileReference =
@@ -159,6 +160,7 @@ function validateAndNormalizeImageReferences(context: Context, model: Model): st
 				isRemoteImageUrl(block.url) &&
 				supportsRemoteImageUrls(model, { mimeType: normalizedMimeType });
 			if (hasInlineData || hasSupportedProviderFileReference || hasSupportedUrlReference) {
+				block.mimeType = normalizedMimeType;
 				hasSupportedImageSourceInMessage = true;
 			}
 

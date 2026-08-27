@@ -804,11 +804,16 @@ function approxTokenCount(text: string): number {
 // ============================================================================
 
 /** Store V2 replacement history in the OpenAI remote-compaction preserve slot. */
-export function storeCompactionV2PreserveData(response: CompactionV2Response, model: Model): Record<string, unknown> {
+export function storeCompactionV2PreserveData(
+	response: CompactionV2Response,
+	model: Model,
+	referenceTarget?: string,
+): Record<string, unknown> {
 	return {
 		[OPENAI_REMOTE_COMPACTION_PRESERVE_KEY]: {
 			version: "v2",
 			provider: model.provider,
+			...(referenceTarget ? { referenceTarget } : {}),
 			replacementHistory: response.replacementHistory,
 			usedTokens: response.usedTokens,
 			usage: response.usage,
@@ -818,9 +823,14 @@ export function storeCompactionV2PreserveData(response: CompactionV2Response, mo
 }
 
 /** Retrieve preserved OpenAI replacement history that V2 can extend. */
-export function getCompactionV2PreserveData(
-	preserveData: Record<string, unknown> | undefined,
-): { provider: string; replacementHistory: Array<Record<string, unknown>>; usedTokens: number } | undefined {
+export function getCompactionV2PreserveData(preserveData: Record<string, unknown> | undefined):
+	| {
+			provider: string;
+			referenceTarget?: string;
+			replacementHistory: Array<Record<string, unknown>>;
+			usedTokens: number;
+	  }
+	| undefined {
 	const candidate = preserveData?.[OPENAI_REMOTE_COMPACTION_PRESERVE_KEY];
 	if (!isRecord(candidate)) return undefined;
 	const provider = stringField(candidate, "provider");
@@ -829,6 +839,7 @@ export function getCompactionV2PreserveData(
 
 	return {
 		provider,
+		referenceTarget: stringField(candidate, "referenceTarget"),
 		replacementHistory: candidate.replacementHistory as Array<Record<string, unknown>>,
 		usedTokens: numberField(candidate, "usedTokens") ?? 0,
 	};

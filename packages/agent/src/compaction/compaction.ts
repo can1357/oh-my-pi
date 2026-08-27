@@ -54,6 +54,8 @@ import { NativeCompactionError } from "./errors";
 import { type ConvertToLlm, createBranchSummaryMessage, createCustomMessage, defaultConvertToLlm } from "./messages";
 import {
 	buildOpenAiNativeHistory,
+	canReuseOpenAiCompactionHistory,
+	getOpenAiCompactionReferenceTarget,
 	getPreservedOpenAiRemoteCompactionData,
 	requestOpenAiRemoteCompaction,
 	requestRemoteCompaction,
@@ -1599,7 +1601,7 @@ export async function compact(
 	) {
 		const previousRemoteCompaction = getCompactionV2PreserveData(previousPreserveData);
 		const previousReplacementHistory =
-			previousRemoteCompaction?.provider === model.provider
+			previousRemoteCompaction && canReuseOpenAiCompactionHistory(previousRemoteCompaction, model, true)
 				? previousRemoteCompaction.replacementHistory
 				: undefined;
 		const referenceModel = resolveOpenAiCompactionReferenceModel(model, true) as Model<
@@ -1651,7 +1653,10 @@ export async function compact(
 						}),
 					{ signal },
 				);
-				preserveData = { ...(preserveData ?? {}), ...storeCompactionV2PreserveData(remote, model) };
+				preserveData = {
+					...(preserveData ?? {}),
+					...storeCompactionV2PreserveData(remote, model, getOpenAiCompactionReferenceTarget(model, true)),
+				};
 				usedRemoteCompaction = true;
 			} catch (err) {
 				// A user/session abort is a cancellation, not a remote failure —
@@ -1672,9 +1677,9 @@ export async function compact(
 		const previousRemoteCompaction = getPreservedOpenAiRemoteCompactionData(previousPreserveData);
 		const previousV2Compaction = getCompactionV2PreserveData(previousPreserveData);
 		const previousReplacementHistory =
-			previousRemoteCompaction?.provider === model.provider
+			previousRemoteCompaction && canReuseOpenAiCompactionHistory(previousRemoteCompaction, model, false)
 				? previousRemoteCompaction.replacementHistory
-				: previousV2Compaction?.provider === model.provider
+				: previousV2Compaction && canReuseOpenAiCompactionHistory(previousV2Compaction, model, false)
 					? previousV2Compaction.replacementHistory
 					: undefined;
 		const remoteHistory = buildOpenAiNativeHistory(

@@ -14,6 +14,7 @@ import {
 	buildOpenAiNativeHistory,
 	CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE,
 	getCompactionV2PreserveData,
+	getOpenAiCompactionReferenceTarget,
 	requestCompactionV2Streaming,
 	requestOpenAiRemoteCompaction,
 	requestRemoteCompaction,
@@ -516,6 +517,36 @@ describe("buildOpenAiNativeHistory multimodal tool results", () => {
 		expect(output?.output).toEqual([
 			{ type: "input_image", detail: "auto", image_url: `data:image/png;base64,${imageData}` },
 		]);
+	});
+
+	test("preserves provider files for the configured official compact endpoint", () => {
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_official|fc_call_official",
+			toolName: "read",
+			content: [
+				{
+					type: "image",
+					data: "",
+					mimeType: "image/png",
+					providerFile: { provider: "openai", id: "file_official" },
+				},
+			],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		const model = makeOpenAiModel({
+			input: ["text", "image"],
+			remoteCompaction: {
+				enabled: true,
+				endpoint: "https://api.openai.com/v1/responses/compact",
+			},
+		});
+
+		const items = buildOpenAiNativeHistory([codexAssistant([{ callId: "call_official" }], true), result], model);
+		const output = items.find(item => item.type === "function_call_output");
+
+		expect(output?.output).toEqual([{ type: "input_image", detail: "auto", file_id: "file_official" }]);
 	});
 
 	test("preserves orphan text while discarding an unsupported provider file", () => {
@@ -2235,6 +2266,7 @@ describe("compact() remote compaction failure handling", () => {
 		expect(requestBody?.reasoning).toMatchObject({ effort: "high", summary: "auto" });
 		const remote = getCompactionV2PreserveData(result.preserveData);
 		expect(remote?.usedTokens).toBe(55);
+		expect(remote?.referenceTarget).toBe(getOpenAiCompactionReferenceTarget(model, true));
 		expect(remote?.replacementHistory.at(-1)).toEqual(compactionItem);
 		expect(result.summary).toBe(
 			"Remote compaction preserved provider-native history for this session. Compaction processed 55 input tokens.",
@@ -2308,6 +2340,48 @@ describe("compact() remote compaction failure handling", () => {
 		const serializedInput = JSON.stringify(requestInput);
 		expect(serializedInput).toContain(`data:image/png;base64,${imageData}`);
 		expect(serializedInput).not.toContain("file_v2_compaction");
+	});
+
+	test("does not replay provider files after the compaction target changes", async () => {
+		const preparation = makePreparation();
+		const officialModel = makeOpenAiModel({ input: ["text", "image"] });
+		preparation.previousPreserveData = {
+			openaiRemoteCompaction: {
+				provider: "openai",
+				referenceTarget: getOpenAiCompactionReferenceTarget(officialModel, false),
+				replacementHistory: [
+					{
+						type: "message",
+						role: "user",
+						content: [{ type: "input_image", file_id: "file_previous_target" }],
+					},
+					{ type: "compaction", encrypted_content: "enc_previous" },
+				],
+				compactionItem: { type: "compaction", encrypted_content: "enc_previous" },
+			},
+		};
+		const model = makeOpenAiModel({
+			input: ["text", "image"],
+			remoteCompaction: {
+				enabled: true,
+				endpoint: "https://compact.example/v1/responses/compact",
+			},
+		});
+		let requestInput: Array<Record<string, unknown>> = [];
+		const fetchMock: FetchImpl = async (_input, init) => {
+			const body: unknown = JSON.parse(String(init?.body));
+			if (!isRecord(body) || !Array.isArray(body.input) || !body.input.every(isRecord)) {
+				throw new Error("expected V1 compaction input");
+			}
+			requestInput = body.input;
+			return Response.json({ output: [{ type: "compaction", encrypted_content: "enc_new" }] });
+		};
+
+		await compact(preparation, model, "test-key", undefined, undefined, { fetch: fetchMock });
+
+		const serializedInput = JSON.stringify(requestInput);
+		expect(serializedInput).not.toContain("file_previous_target");
+		expect(serializedInput).not.toContain("enc_previous");
 	});
 
 	test("rewrites an oversized trailing tool output before V2 streaming compaction", async () => {

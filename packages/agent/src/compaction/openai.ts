@@ -251,6 +251,7 @@ export type OpenAiRemoteCompactionItem = {
 
 export interface OpenAiRemoteCompactionPreserveData {
 	provider?: string;
+	referenceTarget?: string;
 	replacementHistory: Array<Record<string, unknown>>;
 	compactionItem: OpenAiRemoteCompactionItem;
 }
@@ -299,8 +300,70 @@ export function resolveOpenAiCompactionReferenceModel(model: Model, streamingV2:
 	const configuredEndpoint = streamingV2
 		? (model.remoteCompaction?.v2Endpoint ?? model.remoteCompaction?.streamingEndpoint)
 		: model.remoteCompaction?.endpoint;
-	if (api === model.api && configuredEndpoint === undefined) return model;
-	return { ...model, api, baseUrl: configuredEndpoint ?? model.baseUrl } as Model;
+	const rawBaseUrl = configuredEndpoint ?? model.baseUrl;
+	const baseUrl = rawBaseUrl ? canonicalizeCompactionReferenceBaseUrl(rawBaseUrl) : rawBaseUrl;
+	if (api === model.api && baseUrl === model.baseUrl) return model;
+	return {
+		...model,
+		api,
+		baseUrl,
+	} as Model;
+}
+
+function canonicalizeCompactionReferenceBaseUrl(endpoint: string): string {
+	const value = endpoint.trim();
+	try {
+		const url = new URL(value);
+		const pathname = url.pathname.replace(/\/+$/, "");
+		for (const suffix of ["/responses/compact", "/responses"]) {
+			if (pathname.endsWith(suffix)) {
+				url.pathname = pathname.slice(0, -suffix.length) || "/";
+				url.search = "";
+				url.hash = "";
+				return url.toString().replace(/\/$/, "");
+			}
+		}
+		url.pathname = pathname || "/";
+		return url.toString().replace(/\/$/, "");
+	} catch {
+		return value;
+	}
+}
+
+export function getOpenAiCompactionReferenceTarget(model: Model, streamingV2: boolean): string {
+	const referenceModel = resolveOpenAiCompactionReferenceModel(model, streamingV2);
+	return JSON.stringify({
+		api: referenceModel.api,
+		provider: referenceModel.provider,
+		baseUrl: referenceModel.baseUrl ? canonicalizeCompactionReferenceBaseUrl(referenceModel.baseUrl) : "",
+	});
+}
+
+function replacementHistoryContainsProviderFile(history: Array<Record<string, unknown>>): boolean {
+	const pending: unknown[] = [...history];
+	while (pending.length > 0) {
+		const value = pending.pop();
+		if (Array.isArray(value)) {
+			pending.push(...value);
+			continue;
+		}
+		if (!isRecord(value)) continue;
+		if (typeof value.file_id === "string" && value.file_id.length > 0) return true;
+		pending.push(...Object.values(value));
+	}
+	return false;
+}
+
+export function canReuseOpenAiCompactionHistory(
+	preserved: Pick<OpenAiRemoteCompactionPreserveData, "provider" | "referenceTarget" | "replacementHistory">,
+	model: Model,
+	streamingV2: boolean,
+): boolean {
+	if (preserved.provider !== model.provider) return false;
+	if (preserved.referenceTarget !== undefined) {
+		return preserved.referenceTarget === getOpenAiCompactionReferenceTarget(model, streamingV2);
+	}
+	return !replacementHistoryContainsProviderFile(preserved.replacementHistory);
 }
 
 function resolveOpenAiCompactEndpoint(model: Model): string {
@@ -377,7 +440,12 @@ export function getPreservedOpenAiRemoteCompactionData(
 ): OpenAiRemoteCompactionPreserveData | undefined {
 	const candidate = preserveData?.[OPENAI_REMOTE_COMPACTION_PRESERVE_KEY];
 	if (!candidate || typeof candidate !== "object") return undefined;
-	const maybeData = candidate as { provider?: unknown; replacementHistory?: unknown; compactionItem?: unknown };
+	const maybeData = candidate as {
+		provider?: unknown;
+		referenceTarget?: unknown;
+		replacementHistory?: unknown;
+		compactionItem?: unknown;
+	};
 	if (!Array.isArray(maybeData.replacementHistory)) return undefined;
 	const maybeItem = maybeData.compactionItem;
 	if (!maybeItem || typeof maybeItem !== "object") return undefined;
@@ -390,6 +458,7 @@ export function getPreservedOpenAiRemoteCompactionData(
 	}
 	return {
 		provider: typeof maybeData.provider === "string" ? maybeData.provider : undefined,
+		referenceTarget: typeof maybeData.referenceTarget === "string" ? maybeData.referenceTarget : undefined,
 		replacementHistory: maybeData.replacementHistory as Array<Record<string, unknown>>,
 		compactionItem: compactionItem as unknown as OpenAiRemoteCompactionItem,
 	};
@@ -1006,7 +1075,12 @@ export async function requestOpenAiRemoteCompaction(
 		});
 		throw new Error("Remote compaction response missing compaction item");
 	}
-	return { provider: model.provider, replacementHistory, compactionItem };
+	return {
+		provider: model.provider,
+		referenceTarget: getOpenAiCompactionReferenceTarget(model, false),
+		replacementHistory,
+		compactionItem,
+	};
 }
 
 /**
