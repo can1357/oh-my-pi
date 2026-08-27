@@ -191,8 +191,15 @@ describe("zod-like parsing", () => {
 		expect(termination.safeParse({}).success).toBe(false);
 		expect(termination.safeParse("str").success).toBe(false);
 
-		const frozen = z.strictObject({ tags: z.array(z.string()) }).readonly();
-		expect(frozen.parse({ tags: ["a"] })).toEqual({ tags: ["a"] });
+		const parsedFrozen = z
+			.strictObject({ tags: z.array(z.string()) })
+			.readonly()
+			.parse({ tags: ["a"] });
+		expect(parsedFrozen).toEqual({ tags: ["a"] });
+		expect(Object.isFrozen(parsedFrozen)).toBe(true);
+		// Shallow, matching Zod's own contract: a nested value is left mutable.
+		expect(Object.isFrozen(parsedFrozen.tags)).toBe(false);
+		expect(Reflect.set(parsedFrozen, "tags", [])).toBe(false);
 		expect(z.array(z.string()).readonly().optional().parse(undefined)).toBeUndefined();
 
 		type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import type { ToolDisplayOutput, ToolFactBody, ToolPresentationEvent } from "@oh-my-pi/pi-agent-core/presentation";
+import type {
+	ToolDisplayOutput,
+	ToolFact,
+	ToolFactBody,
+	ToolPresentationEvent,
+} from "@oh-my-pi/pi-agent-core/presentation";
 import {
 	byteLengthOf,
 	byteOffset,
@@ -9,7 +14,11 @@ import {
 	streamId,
 	ToolPresentationStream,
 } from "@oh-my-pi/pi-agent-core/presentation";
-import { LIVE_RECORD_HEAD_WINDOW_BYTES, LiveToolPresentationRecord, ToolPresentationRecordContinuityError } from "../src/presentation/live-record";
+import {
+	LIVE_RECORD_HEAD_WINDOW_BYTES,
+	LiveToolPresentationRecord,
+	ToolPresentationRecordContinuityError,
+} from "../src/presentation/live-record";
 
 /**
  * {@link LiveToolPresentationRecord} in isolation — the accumulator
@@ -279,7 +288,10 @@ describe("LiveToolPresentationRecord", () => {
 	it("records both display_count and display_bytes limit facts when a run trips each budget independently", () => {
 		const tiny: ToolDisplayOutput = { kind: "sequence", items: [{ kind: "json", value: { n: 1 } }] };
 		const tinyBytes = byteLengthOf(JSON.stringify(tiny));
-		const huge: ToolDisplayOutput = { kind: "sequence", items: [{ kind: "json", value: { blob: "x".repeat(1000) } }] };
+		const huge: ToolDisplayOutput = {
+			kind: "sequence",
+			items: [{ kind: "json", value: { blob: "x".repeat(1000) } }],
+		};
 		// Item cap exhausted by the two `tiny` folds; byte cap too small for `huge` alone.
 		const acc = new LiveToolPresentationRecord(LIVE_RECORD_HEAD_WINDOW_BYTES, {
 			itemLimit: 2,
@@ -296,7 +308,7 @@ describe("LiveToolPresentationRecord", () => {
 			{ atByte: byteOffset(0), display: tiny },
 		]);
 		const limitKinds = record.facts
-			.filter((fact): fact is ToolFactBody & { kind: "limit" } => fact.kind === "limit")
+			.filter((fact): fact is ToolFact & { kind: "limit" } => fact.kind === "limit")
 			.map(fact => fact.meta.limit);
 		expect(limitKinds).toContain("display_count");
 		expect(limitKinds).toContain("display_bytes");

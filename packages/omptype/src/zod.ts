@@ -315,8 +315,15 @@ function decorate<Out>(schema: Decoratable<Out>, optional = false): ZodLikeSchem
 				? ZodLikeSchema<Partial<Out>>
 				: ZodLikeSchema<Out>;
 		},
+		/**
+		 * Matches Zod's runtime contract: `.readonly()` is not merely a type
+		 * cast, it shallow-freezes successful parse output (`Object.freeze`,
+		 * one level deep — a nested object is left mutable, exactly like Zod).
+		 * `Object.freeze` on a non-object `Out` (string/number/etc.) is a safe
+		 * no-op, so this applies uniformly across every schema kind.
+		 */
 		readonly(): ZodLikeSchema<Readonly<Out>> {
-			return next(restrictBase(schema, schema.ir)) as ZodLikeSchema<Readonly<Out>>;
+			return next(schema.pipe(value => Object.freeze(value) as Out)) as ZodLikeSchema<Readonly<Out>>;
 		},
 	}) as unknown as ZodLikeSchema<Out>;
 }
