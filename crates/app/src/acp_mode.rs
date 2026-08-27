@@ -156,9 +156,9 @@ async fn run_inner(args: AcpArgs) -> miette::Result<()> {
 		&prompt_discovery_settings,
 	)
 	.content;
-	let catalog = snapshot::Catalog::try_embedded().into_diagnostic()?;
+	let catalog = omp_driver::registry::production_catalog(&data_dir).into_diagnostic()?;
 	let roles = omp_driver::discovery::roles::resolve_launch_roles(
-		catalog,
+		catalog.as_ref(),
 		&model_settings,
 		args.model.as_deref(),
 		args.smol.as_deref(),
@@ -169,25 +169,7 @@ async fn run_inner(args: AcpArgs) -> miette::Result<()> {
 	let model = roles
 		.primary
 		.ok_or_else(|| miette!("acp mode requires a configured default model role"))?;
-	let mut models = catalog
-		.models()
-		.iter()
-		.filter_map(|entry| {
-			let (provider, model) = entry.key.as_str().split_once('/')?;
-			model_settings
-				.model_allowed(provider, model)
-				.then(|| entry.key.as_str().to_owned())
-		})
-		.collect::<Vec<_>>();
-	models.sort_by_key(|selector| {
-		let (provider, model) = selector.split_once('/').unwrap_or(("", selector.as_str()));
-		(
-			model_settings
-				.model_rank(provider, model)
-				.unwrap_or(usize::MAX),
-			selector.clone(),
-		)
-	});
+	let models = admitted_models(catalog.as_ref(), &model_settings);
 	let cycle_selectors = args.models.as_ref().map_or_else(
 		|| {
 			model_settings
@@ -201,9 +183,13 @@ async fn run_inner(args: AcpArgs) -> miette::Result<()> {
 	let mut cycle_models = cycle_selectors
 		.iter()
 		.filter_map(|selector| {
-			omp_driver::discovery::roles::resolve_role_selector(catalog, &model_settings, selector)
-				.ok()
-				.map(|selected| selected.model.as_str().to_owned())
+			omp_driver::discovery::roles::resolve_role_selector(
+				catalog.as_ref(),
+				&model_settings,
+				selector,
+			)
+			.ok()
+			.map(|selected| selected.model.as_str().to_owned())
 		})
 		.collect::<Vec<_>>();
 	cycle_models.extend(models);
@@ -1361,9 +1347,9 @@ impl Runtime {
 			.into_diagnostic()?
 			.get()
 			.resolve_path_scopes(&root, &home);
-		let catalog = snapshot::Catalog::try_embedded().into_diagnostic()?;
+		let catalog = omp_driver::registry::production_catalog(&data_dir).into_diagnostic()?;
 		let resolved = omp_driver::discovery::roles::resolve_launch_roles(
-			catalog,
+			catalog.as_ref(),
 			&model_settings,
 			explicit_model.as_deref(),
 			None,
@@ -1375,16 +1361,7 @@ impl Runtime {
 			.primary
 			.map(|model| model.as_str().to_owned())
 			.unwrap_or(default_model);
-		let models = catalog
-			.models()
-			.iter()
-			.filter_map(|entry| {
-				let (provider, model) = entry.key.as_str().split_once('/')?;
-				model_settings
-					.model_allowed(provider, model)
-					.then(|| entry.key.as_str().to_owned())
-			})
-			.collect::<Vec<_>>();
+		let models = admitted_models(catalog.as_ref(), &model_settings);
 		let mode = params
 			.get("modeId")
 			.and_then(Value::as_str)
@@ -1426,7 +1403,7 @@ impl Runtime {
 				.into_diagnostic()?
 				.as_str()
 				.to_owned();
-		validate_thinking_for_model(&effective_model, requested)?;
+		validate_thinking_for_model(catalog.as_ref(), &effective_model, requested)?;
 		let mut headless = HeadlessSession::open_with_policy(data_dir, options, launch_policy)
 			.await
 			.into_diagnostic()?;
@@ -1441,7 +1418,8 @@ impl Runtime {
 			});
 		}
 		let effective_model = headless.model().as_str().to_owned();
-		let thinking = clamp_thinking_level(&effective_model, requested)?.to_owned();
+		let thinking =
+			clamp_thinking_level(catalog.as_ref(), &effective_model, requested)?.to_owned();
 		headless.set_thinking(reasoning_for(&thinking));
 		let session_id = Str::from(headless.session_id());
 		if capabilities.elicitation {
@@ -2080,8 +2058,10 @@ impl Runtime {
 		let requested = required_text(params, "thinking")?;
 		let session_id = Str::from(required_text(params, "sessionId")?);
 		let session = self.session(&session_id)?;
+		let data_dir = self.state.lock().data_dir.clone();
+		let catalog = omp_driver::registry::production_catalog(&data_dir).into_diagnostic()?;
 		let model = session.meta.lock().model.clone();
-		let thinking = clamp_thinking_level(&model, requested)?.to_owned();
+		let thinking = clamp_thinking_level(catalog.as_ref(), &model, requested)?.to_owned();
 		session
 			.asynchronous
 			.headless
@@ -3316,6 +3296,27 @@ fn session_config_response(
 	})
 }
 
+fn admitted_models(
+	catalog: &snapshot::Catalog,
+	settings: &omp_catalog::settings::ModelSettings,
+) -> Vec<String> {
+	let mut models = catalog
+		.models()
+		.iter()
+		.filter_map(|entry| {
+			let (provider, model) = entry.key.as_str().split_once('/')?;
+			settings
+				.model_allowed(provider, model)
+				.then(|| entry.key.as_str().to_owned())
+		})
+		.collect::<Vec<_>>();
+	models.sort_by_key(|selector| {
+		let (provider, model) = selector.split_once('/').unwrap_or(("", selector.as_str()));
+		(settings.model_rank(provider, model).unwrap_or(usize::MAX), selector.clone())
+	});
+	models
+}
+
 fn config_options(session: &AcpSessionMeta, models: &[String]) -> Vec<Value> {
 	vec![
 		json!({"id":"mode","name":"Mode","type":"select","currentValue":session.mode,"options":["default","plan"]}),
@@ -3324,29 +3325,40 @@ fn config_options(session: &AcpSessionMeta, models: &[String]) -> Vec<Value> {
 	]
 }
 
-fn validate_thinking_for_model(model: &str, requested: &str) -> miette::Result<()> {
+fn validate_thinking_for_model(
+	catalog: &snapshot::Catalog,
+	model: &str,
+	requested: &str,
+) -> miette::Result<()> {
 	if matches!(requested, "auto" | "none") {
 		// Auto and none are syntactically valid and will be clamped against the
 		// effective model after the session opens.
 		return Ok(());
 	}
-	let _ = resolve_thinking_effort(model, requested)?;
+	let _ = resolve_thinking_effort(catalog, model, requested)?;
 	Ok(())
 }
 
-fn clamp_thinking_level(model: &str, requested: &str) -> miette::Result<&'static str> {
+fn clamp_thinking_level(
+	catalog: &snapshot::Catalog,
+	model: &str,
+	requested: &str,
+) -> miette::Result<&'static str> {
 	if matches!(requested, "auto" | "none") {
 		return Ok(if requested == "none" { "none" } else { "auto" });
 	}
-	let effort = resolve_thinking_effort(model, requested)?;
+	let effort = resolve_thinking_effort(catalog, model, requested)?;
 	Ok(<&'static str>::from(effort))
 }
 
-fn resolve_thinking_effort(model: &str, requested: &str) -> miette::Result<ThinkingEffort> {
+fn resolve_thinking_effort(
+	catalog: &snapshot::Catalog,
+	model: &str,
+	requested: &str,
+) -> miette::Result<ThinkingEffort> {
 	let requested = requested
 		.parse::<ThinkingEffort>()
 		.map_err(|_| miette!("unknown thinking level `{requested}`"))?;
-	let catalog = snapshot::Catalog::try_embedded().into_diagnostic()?;
 	let model = catalog
 		.model(ModelKey::from_ref(model))
 		.ok_or_else(|| miette!("unknown model `{model}`"))?;
@@ -3915,27 +3927,31 @@ mod tests {
 
 	#[test]
 	fn acp_pre_open_thinking_validation_rejects_unknown_level() {
-		let error = validate_thinking_for_model("apple-intelligence/apple-intelligence", "bogus")
-			.expect_err("unknown level rejected");
+		let catalog = snapshot::Catalog::try_embedded().expect("catalog");
+		let error =
+			validate_thinking_for_model(catalog, "apple-intelligence/apple-intelligence", "bogus")
+				.expect_err("unknown level rejected");
 		assert!(error.to_string().contains("unknown thinking level"));
 	}
 
 	#[test]
 	fn acp_pre_open_thinking_validation_accepts_auto_and_none() {
-		validate_thinking_for_model("apple-intelligence/apple-intelligence", "auto")
+		let catalog = snapshot::Catalog::try_embedded().expect("catalog");
+		validate_thinking_for_model(catalog, "apple-intelligence/apple-intelligence", "auto")
 			.expect("auto valid");
-		validate_thinking_for_model("apple-intelligence/apple-intelligence", "none")
+		validate_thinking_for_model(catalog, "apple-intelligence/apple-intelligence", "none")
 			.expect("none valid");
 	}
 
 	#[test]
 	fn acp_thinking_clamp_preserves_auto_and_none() {
+		let catalog = snapshot::Catalog::try_embedded().expect("catalog");
 		assert_eq!(
-			clamp_thinking_level("apple-intelligence/apple-intelligence", "auto").unwrap(),
+			clamp_thinking_level(catalog, "apple-intelligence/apple-intelligence", "auto").unwrap(),
 			"auto"
 		);
 		assert_eq!(
-			clamp_thinking_level("apple-intelligence/apple-intelligence", "none").unwrap(),
+			clamp_thinking_level(catalog, "apple-intelligence/apple-intelligence", "none").unwrap(),
 			"none"
 		);
 	}
