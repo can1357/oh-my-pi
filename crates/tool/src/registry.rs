@@ -1827,6 +1827,7 @@ impl Registry {
 			}
 			if foreign_winner {
 				self.unlisted.remove(name);
+				self.unmounted.write().remove(name);
 			}
 			if let Some(versions) = self.versions.get_mut(name) {
 				let retired_name = Str::new(name);

@@ -21,16 +21,16 @@ use omp_inference::{Adjustment, ToolGrammarSyntax};
 use omp_proto::policy::v1;
 use omp_tool::{
 	Abort, AbortKind, ArgIssue, ArgIssueKind, ArgPath, ArgSpec, ArgSpecRegistry,
-	ArgSpecRegistryError, ArtifactLifetime, BlobRef, CallOutcome, CallOutcomeDetails,
-	CallOutcomeDetailsError, CallOutcomeSpill, CapsBase, Claims, Coerce, CommitError, Constraint,
-	ConstraintDisposition, DesktopEffects, DocEffects, Effects, ErasedEv, ErasedOutcome, Ev,
-	ExecEffects, ExpectedArtifact, Fallback, GoalToolState, GrammarSyntax, InclusionPolicy,
-	IncomingParams, InferenceEffects, Interrupt, InterruptWaitError, JobKind, JobMetadata, JobOwner,
-	JobRef, JobStatus, LeafOwner, LeafReplacementError, LeafReplacementRegistry, LeafVersion,
-	LiftedCall, LoweringCaps, MemoryToolState, ModelClass, ParamError, Part, PolicyDenied,
-	Precedence, Presentation, ProjectedCall, PromptCaps, PullMode, PulledKind, RecordedCall,
-	RecordedCallOwned, Registry, RegistryError, RegistryLeaf, RepairKind, Rev, Tool, ToolIdentity,
-	ToolSpec, ToolTerminal, Usd, call_outcome_details,
+	ArgSpecRegistryError, ArtifactLifetime, AvailabilityDelta, BlobRef, CallOutcome,
+	CallOutcomeDetails, CallOutcomeDetailsError, CallOutcomeSpill, CapsBase, Claims, Coerce,
+	CommitError, Constraint, ConstraintDisposition, DesktopEffects, DocEffects, Effects, ErasedEv,
+	ErasedOutcome, Ev, ExecEffects, ExpectedArtifact, Fallback, GoalToolState, GrammarSyntax,
+	InclusionPolicy, IncomingParams, InferenceEffects, Interrupt, InterruptWaitError, JobKind,
+	JobMetadata, JobOwner, JobRef, JobStatus, LeafOwner, LeafReplacementError,
+	LeafReplacementRegistry, LeafVersion, LiftedCall, LoweringCaps, MemoryToolState, ModelClass,
+	ParamError, Part, PolicyDenied, Precedence, Presentation, ProjectedCall, PromptCaps, PullMode,
+	PulledKind, RecordedCall, RecordedCallOwned, Registry, RegistryError, RegistryLeaf, RepairKind,
+	Rev, Tool, ToolIdentity, ToolSpec, ToolTerminal, Usd, call_outcome_details,
 	render::{RenderFold, RenderRegistry, RenderRegistryError, ViewState},
 };
 use serde::{Deserialize, Serialize, ser};
@@ -1008,6 +1008,42 @@ fn protect_user_visible_core_evicts_preexisting_non_core_claim() {
 		RegistryError::CoreNameClaim { name, claimant, .. }
 			if name == "read" && claimant == "publisher/extension"
 	));
+}
+
+#[test]
+fn protecting_a_name_clears_stale_unmount_before_core_device_registration() {
+	let mut registry = Registry::new();
+	registry
+		.register(
+			fake_tool(1, "foreign", Arc::new(AtomicUsize::new(0))).named("browser"),
+			Presentation::Device,
+			claims("publisher/extension", Precedence::DEFAULT),
+		)
+		.expect("foreign device");
+	assert_eq!(
+		registry
+			.apply_availability(&[AvailabilityDelta {
+				name:    sf!("browser"),
+				mounted: false,
+				reason:  Some(sf!("worker gone")),
+			}])
+			.len(),
+		1
+	);
+	assert!(registry.devices().next().is_none(), "unmounted foreign device is absent");
+
+	registry.protect_user_visible_core(["browser"]);
+	registry
+		.register(
+			fake_tool(2, "core", Arc::new(AtomicUsize::new(0))).named("browser"),
+			Presentation::Device,
+			claims("omp/core", Precedence::ENHANCEMENT),
+		)
+		.expect("core device");
+	assert!(
+		registry.devices().any(|device| device.name == "browser"),
+		"core device must not inherit the foreign unmount tombstone"
+	);
 }
 
 #[test]
