@@ -2209,12 +2209,18 @@ function resolveToolForCall(
  * true cycles reject — an ordinary object aliased at two properties (a DAG,
  * which both JSON serialization and `structuredClone` accept) normalizes into
  * independent duplicate subtrees, exactly as `JSON.stringify` would encode it.
+ * Because aliases re-visit, depth alone cannot bound total work: a chain of
+ * ~50 objects each aliasing one shared child at two properties stays within
+ * the depth cap while expanding 2^depth duplicate subtrees. The node budget
+ * caps total visits so such a graph rejects deterministically instead of
+ * hanging the loop inside argument normalization.
  * Rejects `NaN`/`Infinity` (not representable in JSON) and symbol-keyed
  * properties (which `JSON.stringify` drops silently but `structuredClone`
  * preserves — a divergence from the `JsonValue` contract). Rejects `undefined`
  * and sparse arrays (holes serialize differently from the execution clone).
  */
 const JSON_MAX_DEPTH = 128;
+const JSON_MAX_NODES = 100_000;
 
 /**
  * Produces a fresh, plain JSON tree at the untyped hook boundary. Descriptor
@@ -2226,7 +2232,9 @@ function normalizeJsonValue(value: unknown): JsonValue | undefined {
 	// subtree completes, so a shared (aliased) subobject re-visits cleanly while
 	// a genuine cycle still trips the guard.
 	const visiting = new WeakSet<object>();
+	let visited = 0;
 	const visit = (current: unknown, depth: number): JsonValue | undefined => {
+		if (++visited > JSON_MAX_NODES) return undefined;
 		if (depth > JSON_MAX_DEPTH || current === null) return current === null ? null : undefined;
 		if (typeof current === "string" || typeof current === "boolean") return current;
 		if (typeof current === "number") return Number.isFinite(current) ? current : undefined;

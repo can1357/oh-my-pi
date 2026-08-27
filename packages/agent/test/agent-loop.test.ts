@@ -4393,6 +4393,53 @@ describe("agentLoopContinue with AgentMessage", () => {
 		expect(toolEnd?.type === "tool_execution_end" && toolEnd.isError).toBe(false);
 	});
 
+	it("rejects a beforeToolCall args DAG whose aliasing expands past the node budget instead of hanging", async () => {
+		const toolSchema = type({ value: "string" });
+		const executed: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params.value);
+				return { content: [{ type: "text", text: `echoed: ${params.value}` }], details: { value: params.value } };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }] },
+				{ content: ["done"] },
+			],
+		});
+		// A 40-level chain where every level aliases the SAME child at two
+		// properties: well within the depth cap, but expanding every alias into
+		// an independent subtree walks 2^40 paths. The node budget must reject
+		// this deterministically instead of hanging the loop synchronously.
+		let shared: Record<string, JsonValue> = { leaf: true };
+		for (let level = 0; level < 40; level++) {
+			shared = { a: shared, b: shared };
+		}
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			beforeToolCall: async () => ({ args: { value: "hello", payload: shared } }),
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("echo something")], context, config, undefined, mock.stream);
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		expect(executed).toEqual([]);
+		const toolEnd = events.find(e => e.type === "tool_execution_end");
+		expect(toolEnd?.type === "tool_execution_end" && toolEnd.isError).toBe(true);
+	});
+
 	it("still rejects a beforeToolCall args replacement containing a genuine cycle", async () => {
 		const toolSchema = type({ value: "string" });
 		const executed: string[] = [];
