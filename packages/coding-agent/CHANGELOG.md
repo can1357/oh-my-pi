@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an ask dialog preview side panel, expandable option descriptions (`→`/`←`), number-key jumps to options, and `/` filtering for long option lists.
+
+### Changed
+
+- Unified ask option markers across the dialog, transcript, and legacy prompts, with a visible count whenever option text is clipped.
+
+### Fixed
+
+- Kept the ask filter available after a query that fits the viewport so `/` can reopen it.
+- Rechecked ask list overflow when the focused row changes so a short option is not rendered one column narrower.
+- Reserved the filter count suffix when measuring ask dialog height so opening the filter cannot grow the frozen panel.
+
 ## [18.0.7] - 2026-08-26
 
 ### Added
@@ -71,13 +85,6 @@
 - Accelerated SHA-2 and SHA-3 checksum builtins on supported ARM64 hardware.
 - Fixed joined collaboration guests becoming inconsistent with the host after host-side compaction.
 - Fixed `hub list` and child peer rosters counting parked agents from stale root sessions; the persisted roster now scopes to the current root, retries transient filesystem faults, and renders live rows through the production subagent prompt template with a truthful omitted count.
-### Added
-
-- Added an ask dialog preview side panel, expandable option descriptions (`→`/`←`), number-key jumps to options, and `/` filtering for long option lists.
-
-### Changed
-
-- Unified ask option markers across the dialog, transcript, and legacy prompts, with a visible count whenever option text is clipped.
 
 ## [18.0.6] - 2026-08-26
 

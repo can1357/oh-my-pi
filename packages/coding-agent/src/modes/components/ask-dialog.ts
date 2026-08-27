@@ -665,8 +665,15 @@ export class AskDialogComponent implements Component, Focusable {
 			const state = this.#states[index];
 			if (!question || !state) continue;
 			const titleRows = this.#expanded ? Number.POSITIVE_INFINITY : MAX_HEADER_ROWS;
-			const headerRows = tabBarRows + renderQuestionTitle(question, width, titleRows).length;
 			const rowItems = this.#questionRows(question);
+			// Reserve the widest filter-count suffix ("M/M" over all rows) before
+			// wrapping the title: with filtering on, #renderHeader wraps at
+			// width - suffixWidth, and an extra title line there must already be
+			// inside the frozen height or the rendered panel outgrows it — the
+			// body cannot shrink past MIN_BODY_ROWS to absorb a late wrap.
+			const suffixWidth = 2 + visibleWidth(`${rowItems.length}/${rowItems.length}`);
+			const headerRows =
+				tabBarRows + renderQuestionTitle(question, Math.max(1, width - suffixWidth), titleRows).length;
 			const { listWidth } = previewFacetWidths(width, questionHasPreviewContent(question));
 			let body = 0;
 			for (const rowItem of rowItems) {
@@ -1186,7 +1193,10 @@ export class AskDialogComponent implements Component, Focusable {
 			return { allLines, lineStartByRow, hidden };
 		};
 
-		const layoutKey = `${listWidth}:${listRows}:${this.#filterQuery}:${state.expandedRowKey ?? ""}:${state.customInput === undefined ? 0 : 1}`;
+		// cursorIndex keys the focused row's own render: a long focused
+		// description overflows where a short option fits, so one row's
+		// overflow verdict must not be carried onto another by the cache.
+		const layoutKey = `${listWidth}:${listRows}:${this.#filterQuery}:${state.cursorIndex}:${state.expandedRowKey ?? ""}:${state.customInput === undefined ? 0 : 1}`;
 		let overflowLayouts = this.#overflowLayouts.get(question);
 		const knownOverflow = overflowLayouts?.has(layoutKey) ?? false;
 		let renderedRows = renderRows(knownOverflow && listWidth > 1 ? listWidth - 1 : listWidth);
@@ -1205,8 +1215,12 @@ export class AskDialogComponent implements Component, Focusable {
 		// while the count still fits, and every overflowing list must be
 		// filterable. Set here — after the overflow-aware re-render settles
 		// the final line set — so the footer hint and the "/"-opens check
-		// read the same flag in the same frame.
-		this.#filterAvailable = allLines.length > listRows;
+		// read the same flag in the same frame. While a query is retained
+		// (editor open, or kept after closing it with the filter key) the
+		// filtered render can fit even though the unfiltered list overflows;
+		// availability must survive that fit or the editor could never be
+		// reopened to refine the query — only Escape, which discards it.
+		this.#filterAvailable = this.#filterOpen || this.#filterQuery.length > 0 || allLines.length > listRows;
 		const cursorStart = lineStartByRow[state.cursorIndex] ?? 0;
 		const cursorEnd = lineStartByRow[state.cursorIndex + 1] ?? allLines.length;
 		this.#questionCanPage = cursorEnd - cursorStart > listRows;

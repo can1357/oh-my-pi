@@ -2230,4 +2230,119 @@ describe("AskDialogComponent", () => {
 			else Reflect.deleteProperty(process.stdout, "rows");
 		}
 	});
+
+	it("reopens the filter editor after `/` closes it with a query whose matches fit the viewport", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const options = [
+				{ label: "Zebra match one" },
+				{ label: "Zebra match two" },
+				...Array.from({ length: 20 }, (_, index) => ({ label: `Filler ${index}` })),
+			];
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick?", options }], {
+				onSubmit: vi.fn(),
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+			});
+			component.focused = true;
+			expect(stripVTControlCharacters(component.render(80).join("\n"))).toContain("filter");
+			component.handleInput("/");
+			for (const ch of "zebra") component.handleInput(ch);
+			const narrowed = stripVTControlCharacters(component.render(80).join("\n"));
+			expect(narrowed).toContain("/ zebra");
+			// The retained query leaves two matches plus Other, which fits the
+			// viewport — the very state where a rendered-height-only flag
+			// would stop advertising the filter.
+			component.handleInput("/");
+			const kept = stripVTControlCharacters(component.render(80).join("\n"));
+			expect(kept).not.toContain("/ zebra");
+			expect(kept).toContain("3/23");
+			expect(kept).toContain("filter");
+			// `/` must reopen the editor on the retained query; Escape (which
+			// discards it) must not be the only way back.
+			component.handleInput("/");
+			const reopened = stripVTControlCharacters(component.render(80).join("\n"));
+			expect(reopened).toContain("/ zebra");
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("renders short options at full width once focus leaves an overflowing description", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 40 });
+		try {
+			// Exactly 70 columns: one line at the width-80 list's content
+			// budget, two lines once the list renders one column narrower.
+			const exactFitLabel = `X${"k".repeat(68)}Z`;
+			const options = [
+				{
+					label: "Described",
+					description: Array.from({ length: 4 }, (_, index) => `DESC-LINE-${index + 1}`).join("\n"),
+				},
+				{ label: exactFitLabel },
+				...Array.from({ length: 4 }, (_, index) => ({ label: `Short ${index}` })),
+			];
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick?", options }], {
+				onSubmit: vi.fn(),
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+			});
+			component.focused = true;
+			const overflowing = stripVTControlCharacters(component.render(80).join("\n"));
+			// The focused four-line description overflows the body, so the
+			// list renders one column narrower with the tail behind a cue.
+			expect(overflowing).toContain("2 more");
+			component.handleInput(DOWN);
+			const refocused = stripVTControlCharacters(component.render(80).join("\n")).replaceAll(CURSOR_MARKER, "");
+			// The list now fits: the exact-fit label must stay whole on one
+			// full-width line instead of inheriting the previous focus's
+			// narrower overflow layout, and the filter hint must drop with
+			// the overflow.
+			expect(refocused).toContain(exactFitLabel);
+			expect(refocused).not.toContain("filter");
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("keeps the panel height frozen when the filter count suffix wraps the question title", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 24 });
+		try {
+			// 72 columns: one title line at full width, two once the "  5/5"
+			// count suffix reserves its columns.
+			const title = `${"t".repeat(70)} x`;
+			const options = [
+				{ label: "Alpha", description: Array.from({ length: 4 }, (_, index) => `D${index + 1}`).join("\n") },
+				{ label: "Bravo" },
+				{ label: "Charlie" },
+				{ label: "Delta" },
+			];
+			const component = new AskDialogComponent([{ id: "q1", question: title, options, multi: true }], {
+				onSubmit: vi.fn(),
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+			});
+			component.focused = true;
+			const before = component.render(80);
+			// The focused description overflows the min-height body, so `/`
+			// opens the filter and the header appends the "  5/5" count.
+			component.handleInput("/");
+			const after = component.render(80);
+			const stripped = stripVTControlCharacters(after.join("\n"));
+			expect(stripped).toContain("5/5");
+			expect(stripped).toContain("/ ");
+			// The suffix wraps the title onto a second header line; the
+			// frozen panel must absorb it by yielding a body row, not by
+			// growing past the height measured at spawn.
+			expect(after.length).toBe(before.length);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
 });
