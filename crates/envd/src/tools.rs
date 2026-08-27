@@ -1912,9 +1912,6 @@ pub(crate) fn production_registry<
 		state_dir,
 		Arc::clone(&github_credentials),
 	);
-	if let Some(upload) = telemetry_upload {
-		upload.start(Arc::clone(telemetry), Arc::clone(&github_credentials));
-	}
 	registry.register(
 		omp_tools::github::tool(github),
 		Presentation::Device,
@@ -2180,6 +2177,7 @@ pub(crate) fn production_registry<
 	let eval_host = Arc::new(SessionBridgeHost::new());
 	let mut eval_control = EvalSessionControl::default();
 	registry.protect_user_visible_core(["eval"]);
+	registry.protect_core_claims(["task"]);
 	if tool_settings.enabled("eval") {
 		match preflight_python_eval(
 			Arc::clone(&eval_host),
@@ -2264,7 +2262,17 @@ pub(crate) fn production_registry<
 			previews.clone(),
 		)));
 	}
+
 	registry.protect_user_visible_core(["bash"]);
+	for dynamic in dynamic_tools {
+		dynamic.register(&mut registry)?;
+	}
+	for factory in dynamic_tool_factories {
+		factory.register(&mut registry)?;
+	}
+	if let Some(upload) = telemetry_upload {
+		upload.start(Arc::clone(telemetry), Arc::clone(&github_credentials));
+	}
 	if tool_settings.enabled("bash") && shell_settings.enabled {
 		let sibling_tools = registry
 			.live_identities()
@@ -2322,12 +2330,6 @@ pub(crate) fn production_registry<
 			time::Duration::from_millis(shell_settings.auto_background.threshold_ms),
 		);
 		registry.register(shell, Presentation::Slot, core_claims())?;
-	}
-	for dynamic in dynamic_tools {
-		dynamic.register(&mut registry)?;
-	}
-	for factory in dynamic_tool_factories {
-		factory.register(&mut registry)?;
 	}
 	registry.protect_live_claims();
 	let flattened_slots = if policy == ToolsPolicy::ToolOnly {
