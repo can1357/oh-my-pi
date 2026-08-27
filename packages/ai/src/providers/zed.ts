@@ -15,6 +15,7 @@ import type {
 	ToolCall,
 } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { normalizeSchemaForCCA } from "../utils/schema";
 
 export interface ZedOptions extends StreamOptions {
 	threadId?: string;
@@ -330,7 +331,7 @@ function mapContextToGoogle(context: Context, _model: Model<"zed-agent">) {
 				functionDeclarations: context.tools.map(t => ({
 					name: t.name,
 					description: t.description,
-					parameters: t.parameters ?? { type: "object", properties: {} },
+					parameters: normalizeSchemaForCCA(t.parameters ?? { type: "object", properties: {} }),
 				})),
 			},
 		];

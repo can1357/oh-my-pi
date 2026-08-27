@@ -133,7 +133,13 @@ describe("Zed Provider Payload Construction", () => {
 				{
 					name: "search_tool",
 					description: "Search web",
-					parameters: { type: "object", properties: { query: { type: "string" } } },
+					parameters: {
+						type: "object",
+						properties: {
+							query: { type: "string" },
+							limit: { type: "number", exclusiveMinimum: 0 },
+						},
+					},
 				},
 			],
 		};
@@ -147,5 +153,10 @@ describe("Zed Provider Payload Construction", () => {
 		expect(contents[0].parts[0].text).toBe("Hello Gemini");
 		expect(payload.systemInstruction).toEqual({ parts: [{ text: "You are a Google assistant." }] });
 		expect(payload.tools).toBeArray();
+		const tools = payload.tools as Array<{
+			functionDeclarations: Array<{ name: string; parameters: Record<string, unknown> }>;
+		}>;
+		const params = tools[0].functionDeclarations[0].parameters as { properties: { limit: Record<string, unknown> } };
+		expect(params.properties.limit.exclusiveMinimum).toBeUndefined();
 	});
 });
