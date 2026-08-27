@@ -485,6 +485,39 @@ describe("buildOpenAiNativeHistory multimodal tool results", () => {
 		]);
 	});
 
+	test("falls back to inline data for a configured compaction endpoint", () => {
+		const imageData = Buffer.from("custom compaction endpoint").toString("base64");
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_compaction|fc_call_compaction",
+			toolName: "read",
+			content: [
+				{
+					type: "image",
+					data: imageData,
+					mimeType: "image/png",
+					providerFile: { provider: "openai", id: "file_compaction" },
+				},
+			],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		const model = makeOpenAiModel({
+			input: ["text", "image"],
+			remoteCompaction: {
+				enabled: true,
+				endpoint: "https://compact.example/v1/responses/compact",
+			},
+		});
+
+		const items = buildOpenAiNativeHistory([codexAssistant([{ callId: "call_compaction" }], true), result], model);
+		const output = items.find(item => item.type === "function_call_output");
+
+		expect(output?.output).toEqual([
+			{ type: "input_image", detail: "auto", image_url: `data:image/png;base64,${imageData}` },
+		]);
+	});
+
 	test("preserves orphan text while discarding an unsupported provider file", () => {
 		const result: ToolResultMessage = {
 			role: "toolResult",
@@ -2207,6 +2240,74 @@ describe("compact() remote compaction failure handling", () => {
 			"Remote compaction preserved provider-native history for this session. Compaction processed 55 input tokens.",
 		);
 		expect(completeSpy).not.toHaveBeenCalled();
+	});
+
+	test("uses inline image fallbacks for a configured V2 compaction endpoint", async () => {
+		const preparation = makePreparation();
+		preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: true };
+		const imageData = Buffer.from("custom V2 compaction endpoint").toString("base64");
+		preparation.messagesToSummarize = [
+			{ role: "user", content: "inspect image", timestamp: 1 },
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "call_image|fc_image", name: "read", arguments: {} }],
+				timestamp: 2,
+				provider: "openai",
+				model: "gpt-5",
+				api: "openai-responses",
+				usage: ZERO_USAGE,
+				stopReason: "toolUse",
+			},
+			{
+				role: "toolResult",
+				toolCallId: "call_image|fc_image",
+				toolName: "read",
+				content: [
+					{
+						type: "image",
+						data: imageData,
+						mimeType: "image/png",
+						providerFile: { provider: "openai", id: "file_v2_compaction" },
+					},
+				],
+				isError: false,
+				timestamp: 3,
+			},
+		];
+		preparation.recentMessages = [];
+		const model = makeOpenAiModel({
+			input: ["text", "image"],
+			remoteCompaction: {
+				enabled: true,
+				v2StreamingEnabled: true,
+				v2Endpoint: "https://compact.example/v1/responses",
+			},
+		});
+		let requestInput: Array<Record<string, unknown>> = [];
+		const fetchMock: FetchImpl = async (_input, init) => {
+			const body: unknown = JSON.parse(String(init?.body));
+			if (!isRecord(body) || !Array.isArray(body.input) || !body.input.every(isRecord)) {
+				throw new Error("expected V2 compaction input");
+			}
+			requestInput = body.input;
+			return sseResponse([
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { type: "compaction", encrypted_content: "enc_image" },
+				},
+				{
+					type: "response.completed",
+					response: { usage: { input_tokens: 10, output_tokens: 1, total_tokens: 11 } },
+				},
+			]);
+		};
+
+		await compact(preparation, model, "test-key", undefined, undefined, { fetch: fetchMock });
+
+		const serializedInput = JSON.stringify(requestInput);
+		expect(serializedInput).toContain(`data:image/png;base64,${imageData}`);
+		expect(serializedInput).not.toContain("file_v2_compaction");
 	});
 
 	test("rewrites an oversized trailing tool output before V2 streaming compaction", async () => {

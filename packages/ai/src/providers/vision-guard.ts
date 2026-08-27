@@ -76,15 +76,17 @@ export function isUsableInlineImageData(data: string): boolean {
 	return decodeUsableInlineImageData(data) !== undefined;
 }
 
-export function isUsableInlineImage(image: Pick<ImageContent, "data" | "mimeType">): boolean {
+export function getUsableInlineImageMimeType(image: Pick<ImageContent, "data" | "mimeType">): string | undefined {
 	const bytes = decodeUsableInlineImageData(image.data);
-	if (!bytes) return false;
+	if (!bytes) return undefined;
 	const detectedMimeType = parseImageMetadata(bytes)?.mimeType;
-	const declaredMimeType = image.mimeType.trim().toLowerCase();
-	return (
-		detectedMimeType !== undefined &&
-		detectedMimeType === (declaredMimeType === "image/jpg" ? "image/jpeg" : declaredMimeType)
-	);
+	const mimeEssence = image.mimeType.split(";", 1)[0]?.trim().toLowerCase();
+	const declaredMimeType = mimeEssence === "image/jpg" ? "image/jpeg" : mimeEssence;
+	return detectedMimeType !== undefined && detectedMimeType === declaredMimeType ? detectedMimeType : undefined;
+}
+
+export function isUsableInlineImage(image: Pick<ImageContent, "data" | "mimeType">): boolean {
+	return getUsableInlineImageMimeType(image) !== undefined;
 }
 
 function hasReplayableGoogleImageMimeType(image: Pick<ImageContent, "mimeType">): boolean {

@@ -828,6 +828,28 @@ function decodeAnthropicToolName(name: string, isOAuthToken: boolean, escapeBuil
 const ANTHROPIC_MANY_IMAGE_THRESHOLD = 20;
 const ANTHROPIC_MANY_IMAGE_MAX_DIMENSION = 2000;
 
+type AnthropicImageSource =
+	| { type: "base64"; media_type: AnthropicImageMediaType; data: string }
+	| { type: "url"; url: string }
+	| { type: "file"; file_id: string };
+
+function getAnthropicImageReferenceSource(
+	block: ImageContent,
+	model: Model<"anthropic-messages">,
+): AnthropicImageSource | undefined {
+	if (
+		block.providerFile?.provider === "anthropic" &&
+		block.providerFile.id &&
+		supportsProviderFileReference(model, block.providerFile, block)
+	) {
+		return { type: "file", file_id: block.providerFile.id };
+	}
+	if (block.url && isRemoteImageUrl(block.url) && supportsRemoteImageUrls(model, block)) {
+		return { type: "url", url: block.url };
+	}
+	return undefined;
+}
+
 function countAnthropicImageBlocks(messages: Message[]): number {
 	let count = 0;
 	for (const message of messages) {
@@ -916,6 +938,7 @@ async function resizeAnthropicManyImageContent(
 	content: (TextContent | ImageContent)[],
 	state: { resized: number },
 	limit: ResizeLimiter,
+	model: Model<"anthropic-messages">,
 ): Promise<(TextContent | ImageContent)[]> {
 	let changed = false;
 	const next = await Promise.all(
@@ -923,12 +946,7 @@ async function resizeAnthropicManyImageContent(
 			// Remotely referenced blocks never put base64 on the wire, so their size
 			// cannot violate the many-image request budget — and resizing would
 			// desync fallback bytes from the advertised remote image.
-			if (
-				block.type !== "image" ||
-				block.url ||
-				(block.providerFile?.provider === "anthropic" && block.providerFile.id)
-			)
-				return block;
+			if (block.type !== "image" || getAnthropicImageReferenceSource(block, model)) return block;
 			let resized = anthropicManyImageResizeCache.get(block);
 			if (resized === undefined) {
 				resized = await limit(() => resizeAnthropicManyImageBlock(block));
@@ -948,21 +966,25 @@ async function resizeAnthropicManyImageMessage(
 	message: Message,
 	state: { resized: number },
 	limit: ResizeLimiter,
+	model: Model<"anthropic-messages">,
 ): Promise<Message> {
 	if (message.role === "user" || message.role === "developer") {
 		if (!Array.isArray(message.content)) return message;
-		const content = await resizeAnthropicManyImageContent(message.content, state, limit);
+		const content = await resizeAnthropicManyImageContent(message.content, state, limit, model);
 		return content === message.content ? message : { ...message, content };
 	}
 	if (message.role === "toolResult") {
-		const content = await resizeAnthropicManyImageContent(message.content, state, limit);
+		const content = await resizeAnthropicManyImageContent(message.content, state, limit, model);
 		return content === message.content ? message : { ...message, content };
 	}
 	return message;
 }
 
-async function prepareAnthropicManyImageContext(context: Context, supportsImages: boolean): Promise<Context> {
-	if (!supportsImages) return context;
+async function prepareAnthropicManyImageContext(
+	context: Context,
+	model: Model<"anthropic-messages">,
+): Promise<Context> {
+	if (!model.input.includes("image")) return context;
 	const imageCount = countAnthropicImageBlocks(context.messages);
 	if (imageCount <= ANTHROPIC_MANY_IMAGE_THRESHOLD) return context;
 
@@ -971,7 +993,7 @@ async function prepareAnthropicManyImageContext(context: Context, supportsImages
 	const limit = createResizeLimiter(ANTHROPIC_IMAGE_RESIZE_CONCURRENCY);
 	const messages = await Promise.all(
 		context.messages.map(async message => {
-			const next = await resizeAnthropicManyImageMessage(message, state, limit);
+			const next = await resizeAnthropicManyImageMessage(message, state, limit, model);
 			if (next !== message) changed = true;
 			return next;
 		}),
@@ -984,11 +1006,6 @@ async function prepareAnthropicManyImageContext(context: Context, supportsImages
 	});
 	return { ...context, messages };
 }
-
-type AnthropicImageSource =
-	| { type: "base64"; media_type: AnthropicImageMediaType; data: string }
-	| { type: "url"; url: string }
-	| { type: "file"; file_id: string };
 
 type AnthropicToolResultContent =
 	| string
@@ -1020,16 +1037,8 @@ function convertContentBlocks(
 			continue;
 		}
 
-		let source: AnthropicImageSource;
-		if (
-			block.providerFile?.provider === "anthropic" &&
-			block.providerFile.id &&
-			supportsProviderFileReference(model, block.providerFile, block)
-		) {
-			source = { type: "file", file_id: block.providerFile.id };
-		} else if (block.url && isRemoteImageUrl(block.url) && supportsRemoteImageUrls(model, block)) {
-			source = { type: "url", url: block.url };
-		} else {
+		let source = getAnthropicImageReferenceSource(block, model);
+		if (!source) {
 			if (!isUsableInlineImageData(block.data)) {
 				throw new AIError.ValidationError(
 					`input_image cannot be forwarded to ${model.api} without non-empty image data or a supported reference`,
@@ -2005,7 +2014,7 @@ const streamAnthropicOnce = (
 				client = created.client;
 				isOAuthToken = created.isOAuthToken;
 			}
-			const preparedContext = await prepareAnthropicManyImageContext(context, model.input.includes("image"));
+			const preparedContext = await prepareAnthropicManyImageContext(context, model);
 			const prepareParams = async (): Promise<MessageCreateParamsStreaming> => {
 				let nextParams = buildParams(model, preparedContext, isOAuthToken, options, {
 					disableStrictTools,

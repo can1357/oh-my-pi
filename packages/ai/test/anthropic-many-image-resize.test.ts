@@ -156,4 +156,37 @@ describe("Anthropic many-image payload resizing", () => {
 		expect(images).toHaveLength(20);
 		expect(images[0].source.data).toBe(largeData);
 	});
+
+	it("resizes inline fallbacks when optional references cannot be replayed", async () => {
+		const largeData = await makeRedPng(2400, 1200);
+		const expiredFileImage: ImageContent = {
+			type: "image",
+			data: largeData,
+			mimeType: "image/png",
+			providerFile: { provider: "anthropic", id: "file_expired", expiresAt: Date.now() - 1 },
+		};
+		const malformedUrlImage: ImageContent = {
+			type: "image",
+			data: largeData,
+			mimeType: "image/png",
+			url: "not-a-url",
+		};
+		const smallImage: ImageContent = { type: "image", data: RED_1X1_PNG_BASE64, mimeType: "image/png" };
+		const context = makeToolResultContext([
+			expiredFileImage,
+			malformedUrlImage,
+			...Array.from({ length: 19 }, () => smallImage),
+		]);
+
+		const payload = await capturePayload(context);
+
+		const images = extractToolResultImages(payload);
+		expect(images).toHaveLength(21);
+		for (const image of images.slice(0, 2)) {
+			expect(image.source.data).not.toBe(largeData);
+			const { width, height } = await new Bun.Image(Buffer.from(image.source.data, "base64")).metadata();
+			expect(width).toBeLessThanOrEqual(2000);
+			expect(height).toBeLessThanOrEqual(2000);
+		}
+	});
 });

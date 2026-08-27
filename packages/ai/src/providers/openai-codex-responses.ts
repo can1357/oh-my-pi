@@ -4522,6 +4522,15 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 	const customCallIds = new Set<string>();
 	const knownCallIds = new Set<string>();
 	const computerCallIds = new Set<string>();
+	const addCallIds = (items: ResponseInput): void => {
+		for (const item of items) {
+			if (item.type === "custom_tool_call") customCallIds.add(item.call_id);
+			if (item.type === "computer_call") computerCallIds.add(item.call_id);
+			if ((item.type === "function_call" || item.type === "custom_tool_call") && item.call_id) {
+				knownCallIds.add(item.call_id);
+			}
+		}
+	};
 
 	for (const msg of transformedMessages) {
 		if (msg.role === "user" || msg.role === "developer") {
@@ -4535,15 +4544,7 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 					model.supportsComputerUse === true
 						? redactedHistoryItems
 						: unrollCodexComputerItems(redactedHistoryItems, model.compat.supportsImageDetailOriginal);
-				for (const item of replayItems) {
-					if (item.type === "custom_tool_call") {
-						customCallIds.add(item.call_id);
-					}
-					if (item.type === "computer_call") computerCallIds.add(item.call_id);
-					if ((item.type === "function_call" || item.type === "custom_tool_call") && item.call_id) {
-						knownCallIds.add(item.call_id);
-					}
-				}
+				addCallIds(replayItems);
 				messages.push(...(escapeControlTokens ? escapeReplayedControlTokens(replayItems) : replayItems));
 				msgIndex += 1;
 				continue;
@@ -4575,20 +4576,15 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 							? sanitizedHistoryItems
 							: unrollCodexComputerItems(sanitizedHistoryItems, model.compat.supportsImageDetailOriginal);
 					const replayItems = escapeControlTokens ? escapeReplayedControlTokens(rawReplayItems) : rawReplayItems;
-					for (const item of replayItems) {
-						if (item.type === "custom_tool_call") {
-							customCallIds.add(item.call_id);
-						}
-						if (item.type === "computer_call") computerCallIds.add(item.call_id);
-						if ((item.type === "function_call" || item.type === "custom_tool_call") && item.call_id) {
-							knownCallIds.add(item.call_id);
-						}
-					}
 					if (providerPayload?.dt) {
+						addCallIds(replayItems);
 						messages.push(...replayItems);
 					} else {
 						messages.splice(0, messages.length, ...replayItems);
-						// Keep customCallIds from the pre-splice state since historyItems may re-introduce them.
+						knownCallIds.clear();
+						customCallIds.clear();
+						computerCallIds.clear();
+						addCallIds(replayItems);
 					}
 					msgIndex += 1;
 					continue;

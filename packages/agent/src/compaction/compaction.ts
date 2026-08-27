@@ -57,6 +57,7 @@ import {
 	getPreservedOpenAiRemoteCompactionData,
 	requestOpenAiRemoteCompaction,
 	requestRemoteCompaction,
+	resolveOpenAiCompactionReferenceModel,
 	shouldUseOpenAiRemoteCompaction,
 	trimRemoteCompactionInputToContextWindow,
 	withOpenAiRemoteCompactionPreserveData,
@@ -1601,9 +1602,12 @@ export async function compact(
 			previousRemoteCompaction?.provider === model.provider
 				? previousRemoteCompaction.replacementHistory
 				: undefined;
+		const referenceModel = resolveOpenAiCompactionReferenceModel(model, true) as Model<
+			"openai-responses" | "azure-openai-responses" | "openai-codex-responses"
+		>;
 		const remoteHistory = buildOpenAiResponsesCompactionInput(
 			(summaryOptions.convertToLlm ?? defaultConvertToLlm)(remoteMessages),
-			model,
+			referenceModel,
 			previousReplacementHistory,
 		);
 		if (remoteHistory.length > 0) {

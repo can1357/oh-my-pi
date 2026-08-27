@@ -44,7 +44,7 @@ import {
 	openaiResponsesRequestSchema,
 } from "./openai-responses-server-schema";
 import { encodeTextSignatureV1, parseTextSignature } from "./openai-shared";
-import { isRemoteImageUrl, isUsableInlineImage } from "./vision-guard";
+import { getUsableInlineImageMimeType, isRemoteImageUrl } from "./vision-guard";
 
 export type { ParsedRequest };
 
@@ -333,12 +333,13 @@ function functionOutputContent(output: string | readonly unknown[] | undefined):
 			const hasDataScheme = imageUrl ? isDataUri(imageUrl) : false;
 			const remoteImageUrl = imageUrl && !hasDataScheme && isRemoteImageUrl(imageUrl) ? imageUrl : undefined;
 			const decoded = imageUrl ? decodeDataUri(imageUrl) : undefined;
+			const decodedMimeType = decoded ? getUsableInlineImageMimeType(decoded) : undefined;
 			const detail =
 				raw.detail === "auto" || raw.detail === "low" || raw.detail === "high" || raw.detail === "original"
 					? raw.detail
 					: undefined;
-			if (decoded && isUsableInlineImage(decoded)) {
-				content.push({ type: "image", ...decoded, ...(detail ? { detail } : {}) });
+			if (decoded && decodedMimeType) {
+				content.push({ type: "image", ...decoded, mimeType: decodedMimeType, ...(detail ? { detail } : {}) });
 			} else {
 				const referenceImage: ImageContent = {
 					type: "image",
@@ -550,14 +551,31 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 				const screenshot = output.output as ComputerScreenshotRef;
 				const decodedScreenshot =
 					typeof screenshot.image_url === "string" ? decodeDataUri(screenshot.image_url) : undefined;
+				const decodedScreenshotMimeType = decodedScreenshot
+					? getUsableInlineImageMimeType(decodedScreenshot)
+					: undefined;
+				const remoteScreenshotUrl =
+					typeof screenshot.image_url === "string" && isRemoteImageUrl(screenshot.image_url)
+						? screenshot.image_url
+						: undefined;
+				const screenshotContent: ImageContent[] =
+					decodedScreenshot && decodedScreenshotMimeType
+						? [{ type: "image", ...decodedScreenshot, mimeType: decodedScreenshotMimeType }]
+						: remoteScreenshotUrl
+							? [
+									{
+										type: "image",
+										data: "",
+										mimeType: "application/octet-stream",
+										url: remoteScreenshotUrl,
+									},
+								]
+							: [];
 				messages.push({
 					role: "toolResult",
 					toolCallId: output.call_id,
 					toolName: findToolNameById(messages, output.call_id) || "computer",
-					content:
-						decodedScreenshot && isUsableInlineImage(decodedScreenshot)
-							? [{ type: "image", ...decodedScreenshot }]
-							: [],
+					content: screenshotContent,
 					isError: output.status === "failed",
 					providerMetadata: {
 						type: "computer",

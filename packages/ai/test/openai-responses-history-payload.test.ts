@@ -660,6 +660,54 @@ describe("OpenAI responses history payload", () => {
 		});
 	});
 
+	it("rebuilds Codex call tracking after a replacement snapshot", () => {
+		const codexModel = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
+		const oldCall = {
+			type: "function_call",
+			id: "fc_old",
+			call_id: "call_old",
+			name: "read",
+			arguments: "{}",
+			status: "completed",
+		};
+		const replacement = {
+			type: "message",
+			role: "assistant",
+			content: [{ type: "output_text", text: "replacement", annotations: [] }],
+			status: "completed",
+		};
+		const context: Context = {
+			messages: [
+				makeAssistantMessage([oldCall], true, "openai-codex", codexModel.id),
+				makeAssistantMessage([replacement], false, "openai-codex", codexModel.id),
+				{
+					role: "toolResult",
+					toolCallId: "call_old|fc_old",
+					toolName: "read",
+					content: [
+						{
+							type: "image",
+							data: "",
+							mimeType: "image/png",
+							providerFile: { provider: "openai", id: "file_old" },
+						},
+					],
+					isError: false,
+					timestamp: Date.now(),
+				},
+			],
+		};
+
+		const input = convertCodexResponsesMessages(codexModel, context);
+
+		expect(input).toContainEqual({
+			type: "function_call_output",
+			call_id: "call_old",
+			output: "[image omitted: source cannot be replayed]",
+		});
+		expect(JSON.stringify(input)).not.toContain("file_old");
+	});
+
 	it("prepends multiple OpenAI developer instructions in order without changing prompt cache key routing", async () => {
 		const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
 		const payload = (await captureResponsesPayload(

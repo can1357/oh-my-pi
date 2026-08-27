@@ -294,6 +294,15 @@ export function shouldUseOpenAiRemoteCompaction(model: Model): boolean {
 	return isOpenAiRemoteCompactionApi(model.remoteCompaction.api ?? model.api);
 }
 
+export function resolveOpenAiCompactionReferenceModel(model: Model, streamingV2: boolean): Model {
+	const api = model.remoteCompaction?.api ?? model.api;
+	const configuredEndpoint = streamingV2
+		? (model.remoteCompaction?.v2Endpoint ?? model.remoteCompaction?.streamingEndpoint)
+		: model.remoteCompaction?.endpoint;
+	if (api === model.api && configuredEndpoint === undefined) return model;
+	return { ...model, api, baseUrl: configuredEndpoint ?? model.baseUrl } as Model;
+}
+
 function resolveOpenAiCompactEndpoint(model: Model): string {
 	const configuredEndpoint = model.remoteCompaction?.endpoint;
 	const compactionApi = model.remoteCompaction?.api ?? model.api;
@@ -512,6 +521,7 @@ export function buildOpenAiNativeHistory(
 	previousReplacementHistory?: Array<Record<string, unknown>>,
 	supportsImageDetailOriginal = false,
 ): Array<Record<string, unknown>> {
+	const referenceModel = resolveOpenAiCompactionReferenceModel(model, false);
 	const input: Array<Record<string, unknown>> = previousReplacementHistory
 		? adaptComputerHistoryForCompaction([...previousReplacementHistory], model.supportsComputerUse === true)
 		: [];
@@ -773,8 +783,8 @@ export function buildOpenAiNativeHistory(
 				continue;
 			}
 			const { output, outputText } = knownCallIds.has(normalized.callId)
-				? encodeResponsesToolResultOutput(message, model, supportsImageDetailOriginal)
-				: encodeResponsesOrphanToolResultOutput(message, model, supportsImageDetailOriginal);
+				? encodeResponsesToolResultOutput(message, referenceModel, supportsImageDetailOriginal)
+				: encodeResponsesOrphanToolResultOutput(message, referenceModel, supportsImageDetailOriginal);
 			if (demotedComputerCallIds.has(normalized.callId)) {
 				const resultItem =
 					message.providerMetadata?.type === "computer"
@@ -794,7 +804,7 @@ export function buildOpenAiNativeHistory(
 			}
 			if (!knownCallIds.has(normalized.callId)) {
 				if (!staleCallIds.has(normalized.callId)) {
-					const orphanOutput = splitResponsesOrphanOutput(output, model, supportsImageDetailOriginal);
+					const orphanOutput = splitResponsesOrphanOutput(output, referenceModel, supportsImageDetailOriginal);
 					const limit = 16_000;
 					const noteText =
 						outputText.length > limit ? `${outputText.slice(0, limit)}\n...[truncated]` : outputText;

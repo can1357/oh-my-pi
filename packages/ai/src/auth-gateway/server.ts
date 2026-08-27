@@ -30,8 +30,8 @@ import * as openaiChat from "../providers/openai-chat-server";
 import * as openaiResponses from "../providers/openai-responses-server";
 import * as piNative from "../providers/pi-native-server";
 import {
+	getUsableInlineImageMimeType,
 	isRemoteImageUrl,
-	isUsableInlineImage,
 	supportsComputerScreenshotReferences,
 	supportsProviderFileReference,
 	supportsRemoteImageUrls,
@@ -139,12 +139,17 @@ function validateAndNormalizeImageReferences(context: Context, model: Model): st
 				return `\`context.messages[${messageIndex}].content[${blockIndex}].mimeType\` must be a string`;
 			}
 
-			const hasInlineData = isUsableInlineImage({ data: block.data, mimeType: block.mimeType });
+			const data = block.data;
+			const mimeType = block.mimeType;
+			const inlineMimeType = getUsableInlineImageMimeType({ data, mimeType });
+			const hasInlineData = inlineMimeType !== undefined;
+			if (inlineMimeType) block.mimeType = inlineMimeType;
+			const normalizedMimeType = inlineMimeType ?? mimeType;
 			const hasProviderFileReference = block.providerFile !== undefined;
 			const providerFile = isRecord(block.providerFile) ? block.providerFile : undefined;
 			const hasSupportedProviderFileReference =
 				providerFile !== undefined &&
-				supportsProviderFileReference(model, providerFile, { mimeType: block.mimeType });
+				supportsProviderFileReference(model, providerFile, { mimeType: normalizedMimeType });
 			const hasUrlReference = block.url !== undefined;
 			if (hasUrlReference && typeof block.url !== "string") {
 				return `\`context.messages[${messageIndex}].content[${blockIndex}].url\` must be a string`;
@@ -152,7 +157,7 @@ function validateAndNormalizeImageReferences(context: Context, model: Model): st
 			const hasSupportedUrlReference =
 				typeof block.url === "string" &&
 				isRemoteImageUrl(block.url) &&
-				supportsRemoteImageUrls(model, { mimeType: block.mimeType });
+				supportsRemoteImageUrls(model, { mimeType: normalizedMimeType });
 			if (hasInlineData || hasSupportedProviderFileReference || hasSupportedUrlReference) {
 				hasSupportedImageSourceInMessage = true;
 			}

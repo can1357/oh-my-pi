@@ -671,7 +671,14 @@ describe("openai-responses parseRequest", () => {
 				pendingSafetyChecks: [],
 			},
 		});
-		expect(urlResult.content).toEqual([]);
+		expect(urlResult.content).toEqual([
+			{
+				type: "image",
+				data: "",
+				mimeType: "application/octet-stream",
+				url: imageUrl,
+			},
+		]);
 		expect(urlResult.providerMetadata).toEqual({
 			type: "computer",
 			screenshot: { type: "computer_screenshot", image_url: imageUrl },
@@ -1878,6 +1885,23 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 				Array.isArray(message.content) ? message.content : [],
 			);
 			expect(inlineContentParts).toContainEqual({ type: "image_url", image_url: { url: inlineImageUrl } });
+			const parameterizedInlineResponse = await fetch(`${gateway.url}/v1/responses`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+				body: JSON.stringify(
+					toolImageRequest(model.id, `data:image/png;charset=binary;base64,${PNG_B64}`, "file_image_123"),
+				),
+			});
+			expect(parameterizedInlineResponse.status).toBe(200);
+			await parameterizedInlineResponse.text();
+			expect(upstreamRequests).toHaveLength(2);
+			const parameterizedInlineContentParts = (upstreamRequests[1]?.messages ?? []).flatMap(message =>
+				Array.isArray(message.content) ? message.content : [],
+			);
+			expect(parameterizedInlineContentParts).toContainEqual({
+				type: "image_url",
+				image_url: { url: inlineImageUrl },
+			});
 			const normalizedMixedCaseImageUrl = `data:image/png;base64,${PNG_B64}`;
 			const mixedCaseInlineResponse = await fetch(`${gateway.url}/v1/responses`, {
 				method: "POST",
@@ -1888,8 +1912,8 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 			});
 			expect(mixedCaseInlineResponse.status).toBe(200);
 			await mixedCaseInlineResponse.text();
-			expect(upstreamRequests).toHaveLength(2);
-			const mixedCaseInlineContentParts = (upstreamRequests[1]?.messages ?? []).flatMap(message =>
+			expect(upstreamRequests).toHaveLength(3);
+			const mixedCaseInlineContentParts = (upstreamRequests[2]?.messages ?? []).flatMap(message =>
 				Array.isArray(message.content) ? message.content : [],
 			);
 			expect(mixedCaseInlineContentParts).toContainEqual({
@@ -1905,8 +1929,8 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 			});
 			expect(fragmentInlineResponse.status).toBe(200);
 			await fragmentInlineResponse.text();
-			expect(upstreamRequests).toHaveLength(3);
-			const fragmentInlineContentParts = (upstreamRequests[2]?.messages ?? []).flatMap(message =>
+			expect(upstreamRequests).toHaveLength(4);
+			const fragmentInlineContentParts = (upstreamRequests[3]?.messages ?? []).flatMap(message =>
 				Array.isArray(message.content) ? message.content : [],
 			);
 			expect(fragmentInlineContentParts).toContainEqual({
@@ -1920,11 +1944,39 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 			});
 			expect(response.status).toBe(200);
 			await response.text();
-			expect(upstreamRequests).toHaveLength(4);
-			const contentParts = (upstreamRequests[3]?.messages ?? []).flatMap(message =>
+			expect(upstreamRequests).toHaveLength(5);
+			const contentParts = (upstreamRequests[4]?.messages ?? []).flatMap(message =>
 				Array.isArray(message.content) ? message.content : [],
 			);
 			expect(contentParts).toContainEqual({ type: "image_url", image_url: { url: imageUrl } });
+
+			const computerResponse = await fetch(`${gateway.url}/v1/responses`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+				body: JSON.stringify({
+					model: model.id,
+					input: [
+						{
+							type: "function_call",
+							call_id: "call_remote_screenshot",
+							name: "computer",
+							arguments: "{}",
+						},
+						{
+							type: "computer_call_output",
+							call_id: "call_remote_screenshot",
+							output: { type: "computer_screenshot", image_url: imageUrl },
+						},
+					],
+				}),
+			});
+			expect(computerResponse.status).toBe(200);
+			await computerResponse.text();
+			expect(upstreamRequests).toHaveLength(6);
+			const computerContentParts = (upstreamRequests[5]?.messages ?? []).flatMap(message =>
+				Array.isArray(message.content) ? message.content : [],
+			);
+			expect(computerContentParts).toContainEqual({ type: "image_url", image_url: { url: imageUrl } });
 		} finally {
 			await gateway.close();
 			storage.close();
