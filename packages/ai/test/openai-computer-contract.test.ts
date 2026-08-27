@@ -19,7 +19,7 @@ import {
 	processResponsesStream,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { AssistantMessage, Context, Model, ModelSpec, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
-import { sanitizeOpenAIResponsesHistoryItemsForReplay } from "@oh-my-pi/pi-ai/utils";
+import { getOpenAIResponsesReferenceTarget, sanitizeOpenAIResponsesHistoryItemsForReplay } from "@oh-my-pi/pi-ai/utils";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
@@ -651,6 +651,7 @@ describe("OpenAI GA computer contract", () => {
 			providerPayload: {
 				type: "openaiResponsesHistory" as const,
 				provider: "openai" as const,
+				referenceTarget: getOpenAIResponsesReferenceTarget(supported),
 				dt: true,
 				items: [
 					{
@@ -748,6 +749,7 @@ describe("OpenAI GA computer contract", () => {
 			providerPayload: {
 				type: "openaiResponsesHistory" as const,
 				provider: "openai" as const,
+				referenceTarget: getOpenAIResponsesReferenceTarget(unsupported),
 				dt: true,
 				items: [reasoning, call, output],
 			},
@@ -780,6 +782,7 @@ describe("OpenAI GA computer contract", () => {
 			providerPayload: {
 				type: "openaiResponsesHistory" as const,
 				provider: "openai" as const,
+				referenceTarget: getOpenAIResponsesReferenceTarget(supported),
 				dt: true,
 				items: [oldCall],
 			},
@@ -789,6 +792,7 @@ describe("OpenAI GA computer contract", () => {
 			providerPayload: {
 				type: "openaiResponsesHistory" as const,
 				provider: "openai" as const,
+				referenceTarget: getOpenAIResponsesReferenceTarget(supported),
 				items: [
 					{
 						type: "function_call",
@@ -847,6 +851,7 @@ describe("OpenAI GA computer contract", () => {
 			providerPayload: {
 				type: "openaiResponsesHistory" as const,
 				provider: "openai-codex",
+				referenceTarget: getOpenAIResponsesReferenceTarget(codex),
 				dt: true,
 				items: [
 					{

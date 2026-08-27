@@ -301,6 +301,7 @@ describe("buildSessionContext", () => {
 				preserveData: {
 					openaiRemoteCompaction: {
 						provider: "openai",
+						replayTarget: getOpenAIResponsesReferenceTarget(activeModel),
 						replacementHistory: [
 							{ type: "message", role: "user", content: [{ type: "input_text", text: "Preserved user" }] },
 							{ type: "compaction", encrypted_content: "enc_123" },
@@ -322,6 +323,7 @@ describe("buildSessionContext", () => {
 			expect(ctx.messages[0].providerPayload).toEqual({
 				type: "openaiResponsesHistory",
 				provider: "openai",
+				referenceTarget: getOpenAIResponsesReferenceTarget(activeModel),
 				items: [
 					{ type: "message", role: "user", content: [{ type: "input_text", text: "Preserved user" }] },
 					{ type: "compaction", encrypted_content: "enc_123" },

@@ -49,6 +49,7 @@ import {
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	getOpenAIResponsesReferenceTarget,
+	isOpenAIResponsesAssistantHistoryTargetOwned,
 	normalizeSystemPrompts,
 	sanitizeOpenAIResponsesAssistantFallbackItemsForReplay,
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
@@ -4588,19 +4589,19 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 							referenceTarget,
 						)
 					: undefined;
-			const stampedPayload = assistantMsg.providerPayload;
-			// A stamped payload that fails the target check is endpoint-owned: its
-			// reasoning ids, encrypted content, and item ids belong to the endpoint
-			// that minted them and must not leak through the canonical fallback.
-			const targetOwnedHistoryRejected =
-				stampedPayload?.type === "openaiResponsesHistory" &&
-				stampedPayload.referenceTarget !== undefined &&
-				stampedPayload.referenceTarget !== referenceTarget;
+			// A payload that fails the target check is endpoint-owned: its reasoning
+			// ids, encrypted content, and item ids belong to the endpoint that minted
+			// them and must not leak through the canonical fallback. Legacy history
+			// carries no stamp, so its own endpoint-owned state marks it foreign.
+			const targetOwnedHistoryRejected = isOpenAIResponsesAssistantHistoryTargetOwned(
+				assistantMsg.providerPayload,
+				referenceTarget,
+			);
 			const historyItems = providerPayload?.items as Array<Record<string, unknown>> | undefined;
 			let suppressHiddenEmptyFallback = false;
 			if (historyItems) {
 				const sanitizedHistoryItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(historyItems);
-				if (sanitizedHistoryItems) {
+				if (sanitizedHistoryItems && !targetOwnedHistoryRejected) {
 					const rawReplayItems =
 						model.supportsComputerUse === true
 							? sanitizedHistoryItems
@@ -4619,7 +4620,7 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 					msgIndex += 1;
 					continue;
 				}
-				suppressHiddenEmptyFallback = true;
+				if (!sanitizedHistoryItems) suppressHiddenEmptyFallback = true;
 			}
 
 			const convertedOutputItems = convertResponsesAssistantMessage(

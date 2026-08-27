@@ -69,6 +69,7 @@ import {
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	getOpenAIResponsesReferenceTarget,
+	isOpenAIResponsesAssistantHistoryTargetOwned,
 	normalizeResponsesToolCallId,
 	normalizeSystemPrompts,
 	resolveCacheRetention,
@@ -2355,15 +2356,15 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 							referenceTarget,
 						)
 					: undefined;
-			const stampedPayload = assistantMsg.providerPayload;
-			// A stamped payload that fails the target check is endpoint-owned; its
-			// reasoning ids, encrypted content, and item ids belong to the endpoint
-			// that produced them and must not be replayed through the canonical
-			// fallback either.
-			const targetOwnedHistoryRejected =
-				stampedPayload?.type === "openaiResponsesHistory" &&
-				stampedPayload.referenceTarget !== undefined &&
-				stampedPayload.referenceTarget !== referenceTarget;
+			// A payload that fails the target check is endpoint-owned; its reasoning
+			// ids, encrypted content, and item ids belong to the endpoint that
+			// produced them and must not be replayed through the canonical fallback
+			// either. Legacy history carries no stamp, so its own endpoint-owned
+			// state is what marks it foreign.
+			const targetOwnedHistoryRejected = isOpenAIResponsesAssistantHistoryTargetOwned(
+				assistantMsg.providerPayload,
+				referenceTarget,
+			);
 			const nativeReplayEnabled = options.nativeHistory?.replay === true;
 			const historyItems = providerPayload?.items;
 			let suppressHiddenEmptyFallback = false;
@@ -2383,7 +2384,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 							options.model.supportsComputerUse === true,
 						)
 					: undefined;
-				if (nativeReplayEnabled && sanitizedHistoryItems) {
+				if (nativeReplayEnabled && sanitizedHistoryItems && !targetOwnedHistoryRejected) {
 					// Model-owned replay items can carry reserved control-token
 					// spellings as data (the model writing *about* Harmony); escape the
 					// transport copy just like client turns.

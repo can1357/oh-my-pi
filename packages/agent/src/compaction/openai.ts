@@ -45,6 +45,7 @@ import {
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	getOpenAIResponsesReferenceTarget,
+	isOpenAIResponsesAssistantHistoryTargetOwned,
 	normalizeResponsesToolCallId,
 	resolveAzureOpenAIBaseUrl,
 	resolveOpenAIResponsesRequestModel,
@@ -336,6 +337,29 @@ export function resolveOpenAiCompactionReferenceModel(model: Model, streamingV2:
 export function getOpenAiCompactionReferenceTarget(model: Model, streamingV2: boolean): string {
 	const referenceModel = resolveOpenAiCompactionReferenceModel(model, streamingV2);
 	return getOpenAIResponsesReferenceTarget(referenceModel, resolveOpenAiCompactModel(model), referenceModel.baseUrl);
+}
+
+/**
+ * Whether compaction running on `compactionModel` mints replacement history that
+ * `runtimeModel` can still read. Native compaction items are opaque outside the
+ * endpoint that produced them, so a compaction override may swap the request
+ * model or the compaction path on the same endpoint, but a side model resolving
+ * a different provider, api, or endpoint produces history the active model can
+ * never decrypt — persisting the active target on it would relabel foreign state
+ * as its own.
+ */
+export function producesRuntimeReplayableCompactionHistory(compactionModel: Model, runtimeModel: Model): boolean {
+	if (compactionModel === runtimeModel) return true;
+	return (
+		compactionModel.provider === runtimeModel.provider &&
+		compactionModel.api === runtimeModel.api &&
+		resolveResponsesRuntimeEndpoint(compactionModel) === resolveResponsesRuntimeEndpoint(runtimeModel)
+	);
+}
+
+function resolveResponsesRuntimeEndpoint(model: Model): string {
+	const baseUrl = model.api === "azure-openai-responses" ? resolveAzureOpenAIBaseUrl(model) : model.baseUrl;
+	return baseUrl ? canonicalizeOpenAIResponsesReferenceBaseUrl(baseUrl) : "";
 }
 
 /**
@@ -852,11 +876,10 @@ export function buildOpenAiNativeHistory(
 			}
 			const isDifferentModel =
 				assistant.model !== model.id && assistant.provider === model.provider && assistant.api === model.api;
-			const stampedPayload = assistant.providerPayload;
-			const targetOwnedHistoryRejected =
-				stampedPayload?.type === "openaiResponsesHistory" &&
-				stampedPayload.referenceTarget !== undefined &&
-				stampedPayload.referenceTarget !== referenceTarget;
+			const targetOwnedHistoryRejected = isOpenAIResponsesAssistantHistoryTargetOwned(
+				assistant.providerPayload,
+				referenceTarget,
+			);
 
 			for (const block of assistant.content) {
 				if (

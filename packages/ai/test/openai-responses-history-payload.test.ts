@@ -26,8 +26,7 @@ import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/mo
 import * as piUtils from "@oh-my-pi/pi-utils";
 
 const TEST_INSTALLATION_ID = "00000000-0000-4000-8000-000000000001";
-const PNG_B64 =
-	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 beforeEach(() => {
 	vi.spyOn(piUtils, "getInstallId").mockReturnValue(TEST_INSTALLATION_ID);
@@ -299,7 +298,14 @@ function makeAssistantMessage(
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
 		stopReason: "stop" as const,
-		providerPayload: createOpenAIResponsesHistoryPayload(provider, items, incremental),
+		// Stamp the producing endpoint the way the providers do; unstamped native
+		// history carrying endpoint-owned state is no longer replayed anywhere.
+		providerPayload: createOpenAIResponsesHistoryPayload(
+			provider,
+			items,
+			incremental,
+			getOpenAIResponsesReferenceTarget(getBundledModel(provider, model)),
+		),
 		timestamp: Date.now(),
 	};
 }
@@ -1197,7 +1203,12 @@ describe("OpenAI responses history payload", () => {
 					model: codexModel.id,
 					usage: issue5002ZeroUsage,
 					stopReason: "stop",
-					providerPayload: createOpenAIResponsesHistoryPayload("openai-codex", nativeItems),
+					providerPayload: createOpenAIResponsesHistoryPayload(
+						"openai-codex",
+						nativeItems,
+						true,
+						getOpenAIResponsesReferenceTarget(codexModel),
+					),
 					timestamp: Date.now(),
 				},
 				{ role: "user", content: "continue", timestamp: Date.now() },

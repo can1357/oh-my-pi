@@ -63,6 +63,7 @@ import {
 	getOpenAiCompactionReferenceTarget,
 	getPreservedOpenAiRemoteCompactionData,
 	isOpenAiCompactionHistoryTargetIndependent,
+	producesRuntimeReplayableCompactionHistory,
 	requestOpenAiRemoteCompaction,
 	requestRemoteCompaction,
 	resolveOpenAiCompactionReferenceModel,
@@ -1676,6 +1677,16 @@ export async function compact(
 	];
 	let usedRemoteCompaction = false;
 	let nativeCompactionError: unknown;
+	// Compaction may run on a side model. Its native result is only the ACTIVE
+	// model's to replay when the side model resolves the same endpoint and replay
+	// capabilities; otherwise the produced history stays stamped with the target
+	// that minted it, so the next turn re-expands the originals instead of
+	// shipping opaque foreign state to the active endpoint.
+	const runtimeReplayModel = summaryOptions.runtimeModel ?? model;
+	const compactionReplayModel = producesRuntimeReplayableCompactionHistory(model, runtimeReplayModel)
+		? runtimeReplayModel
+		: model;
+	const compactionReplayIsActive = compactionReplayModel === runtimeReplayModel;
 	if (
 		settings.remoteEnabled !== false &&
 		settings.remoteStreamingV2Enabled !== false &&
@@ -1729,8 +1740,8 @@ export async function compact(
 					apiKey,
 					key => {
 						v2RequestTarget =
-							summaryOptions.activeRequestTarget ??
-							getOpenAIResponsesRequestTarget(summaryOptions.runtimeModel ?? model, key, {
+							(compactionReplayIsActive ? summaryOptions.activeRequestTarget : undefined) ??
+							getOpenAIResponsesRequestTarget(compactionReplayModel, key, {
 								openrouterVariant: summaryOptions.openrouterVariant,
 							});
 						return requestCompactionV2Streaming(model, key, request, signal, {
@@ -1748,7 +1759,7 @@ export async function compact(
 						remote,
 						model,
 						getOpenAiCompactionReferenceTarget(model, true),
-						getOpenAIResponsesReferenceTarget(summaryOptions.runtimeModel ?? model),
+						getOpenAIResponsesReferenceTarget(compactionReplayModel),
 						v2RequestTarget,
 					),
 				};
@@ -1799,10 +1810,10 @@ export async function compact(
 								sessionId: summaryOptions.sessionId,
 								providerSessionState: summaryOptions.providerSessionState,
 								codexCompaction: summaryOptions.codexCompaction,
-								replayTarget: getOpenAIResponsesReferenceTarget(summaryOptions.runtimeModel ?? model),
+								replayTarget: getOpenAIResponsesReferenceTarget(compactionReplayModel),
 								requestTarget:
-									summaryOptions.activeRequestTarget ??
-									getOpenAIResponsesRequestTarget(summaryOptions.runtimeModel ?? model, key, {
+									(compactionReplayIsActive ? summaryOptions.activeRequestTarget : undefined) ??
+									getOpenAIResponsesRequestTarget(compactionReplayModel, key, {
 										openrouterVariant: summaryOptions.openrouterVariant,
 									}),
 							},

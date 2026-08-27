@@ -512,10 +512,7 @@ export interface AzureOpenAIEndpointOverrides {
 	azureResourceName?: string;
 }
 
-export function resolveAzureOpenAIBaseUrl(
-	model: Model,
-	overrides?: AzureOpenAIEndpointOverrides,
-): string | undefined {
+export function resolveAzureOpenAIBaseUrl(model: Model, overrides?: AzureOpenAIEndpointOverrides): string | undefined {
 	const baseUrl = overrides?.azureBaseUrl?.trim() || $env.AZURE_OPENAI_BASE_URL?.trim() || undefined;
 	const resourceName = overrides?.azureResourceName || $env.AZURE_OPENAI_RESOURCE_NAME;
 	const resolvedBaseUrl =
@@ -645,6 +642,74 @@ export function getOpenAIResponsesHistoryPayload(
 		return undefined;
 	}
 	return { ...providerPayload, provider: payloadProvider };
+}
+
+/** Assistant output items whose `id` is minted by the endpoint that served the turn. */
+const ENDPOINT_OWNED_RESPONSES_ITEM_TYPES = new Set([
+	"reasoning",
+	"message",
+	"function_call",
+	"custom_tool_call",
+	"computer_call",
+]);
+
+function containsEncryptedResponsesState(value: unknown): boolean {
+	const pending: unknown[] = [value];
+	while (pending.length > 0) {
+		const current = pending.pop();
+		if (Array.isArray(current)) {
+			pending.push(...current);
+			continue;
+		}
+		if (!current || typeof current !== "object") continue;
+		const record = current as Record<string, unknown>;
+		if (typeof record.encrypted_content === "string" && record.encrypted_content.length > 0) return true;
+		pending.push(...Object.values(record));
+	}
+	return false;
+}
+
+/**
+ * Whether assistant native history can only be resolved by the endpoint that
+ * produced it. Reasoning items, encrypted reasoning state, and endpoint-minted
+ * output-item ids are all opaque elsewhere, so history carrying any of them is
+ * bound to its producing endpoint even when no `referenceTarget` stamp records
+ * which endpoint that was.
+ */
+export function openAIResponsesHistoryItemsAreEndpointOwned(items: readonly unknown[]): boolean {
+	for (const item of items) {
+		if (!item || typeof item !== "object") continue;
+		const record = item as Record<string, unknown>;
+		if (record.type === "reasoning") return true;
+		if (
+			typeof record.type === "string" &&
+			ENDPOINT_OWNED_RESPONSES_ITEM_TYPES.has(record.type) &&
+			typeof record.id === "string" &&
+			record.id.length > 0
+		) {
+			return true;
+		}
+		if (containsEncryptedResponsesState(record)) return true;
+	}
+	return false;
+}
+
+/**
+ * Whether a stamped or legacy assistant payload belongs to an endpoint other
+ * than the one about to be dispatched to. History persisted before reference
+ * stamping existed carries no target at all, so a reroute cannot be detected by
+ * comparing fingerprints; treat unstamped history that carries endpoint-owned
+ * state as foreign instead of replaying it blind.
+ */
+export function isOpenAIResponsesAssistantHistoryTargetOwned(
+	providerPayload: ProviderPayload | undefined,
+	currentReferenceTarget?: string,
+): boolean {
+	if (providerPayload?.type !== "openaiResponsesHistory" || !Array.isArray(providerPayload.items)) return false;
+	if (providerPayload.referenceTarget !== undefined) {
+		return providerPayload.referenceTarget !== currentReferenceTarget;
+	}
+	return openAIResponsesHistoryItemsAreEndpointOwned(providerPayload.items);
 }
 
 export function getOpenAIResponsesHistoryItems(
