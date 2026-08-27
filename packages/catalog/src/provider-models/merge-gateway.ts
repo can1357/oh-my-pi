@@ -98,7 +98,13 @@ function mapRoute(value: unknown): MergeGatewayRoute | null {
 	const capabilities = value.capabilities;
 	const input = stringArray(capabilities.input);
 	const output = stringArray(capabilities.output);
-	if (!input.includes("text") || !output.includes("text") || capabilities.supports_tool_calling !== true) return null;
+	if (
+		!input.includes("text") ||
+		!output.includes("text") ||
+		capabilities.supports_tool_calling !== true ||
+		capabilities.streaming !== true
+	)
+		return null;
 	if (!stringArray(value.service_tiers).includes("standard")) return null;
 	const pricing = isRecord(value.pricing) ? value.pricing : {};
 	const reasoning = reasoningMetadata(capabilities.reasoning);

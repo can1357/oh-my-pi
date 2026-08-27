@@ -51,6 +51,7 @@ import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
 import {
+	findRetryFallbackCandidates,
 	getRetryFallbackChains,
 	parseRetryFallbackSelector,
 	resolveRetryFallbackChainKey,
@@ -333,8 +334,21 @@ export function retryFallbackMayReachProvider(args: {
 }): boolean {
 	const { settings, modelRegistry, initialSelector, roleHint, targetProvider } = args;
 	if (!initialSelector) return false;
+	const chains = getRetryFallbackChains(settings);
+	if (typeof modelRegistry.find !== "function" || typeof modelRegistry.hasProvider !== "function") {
+		return (
+			modelPatternTargetsProvider(initialSelector, targetProvider) ||
+			Object.values(chains).some(
+				chain =>
+					Array.isArray(chain) &&
+					chain.some(
+						selector => typeof selector === "string" && modelPatternTargetsProvider(selector, targetProvider),
+					),
+			)
+		);
+	}
 	const context = {
-		chains: getRetryFallbackChains(settings),
+		chains,
 		getModelRole: (role: string) => settings.getModelRole(role),
 		modelLookup: modelRegistry,
 	};
@@ -350,11 +364,12 @@ export function retryFallbackMayReachProvider(args: {
 		const currentModel = parsed ? modelRegistry.find(parsed.provider, parsed.id) : undefined;
 		if (currentModel?.provider === targetProvider) return true;
 		const chainKey = resolveRetryFallbackChainKey(context, current.selector, currentModel, current.roleHint);
-		const chain = chainKey ? context.chains[chainKey] : undefined;
-		if (!Array.isArray(chain)) continue;
-		for (const selector of chain) {
-			if (typeof selector === "string") queue.push({ selector });
-		}
+		const candidates = chainKey
+			? findRetryFallbackCandidates(context, chainKey, current.selector, currentModel, {
+					allowMissingPrimary: true,
+				})
+			: [];
+		for (const candidate of candidates) queue.push({ selector: candidate.raw });
 	}
 	return false;
 }

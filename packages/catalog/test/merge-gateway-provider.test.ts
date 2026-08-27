@@ -212,6 +212,7 @@ describe("Merge Gateway provider", () => {
 						supports_tool_choice: false,
 						supports_structured_outputs: false,
 						supports_reasoning: false,
+						streaming: true,
 					},
 					pricing: { input_per_million: 2, output_per_million: 8 },
 				}),
@@ -232,7 +233,7 @@ describe("Merge Gateway provider", () => {
 				nativeToolCalling: true,
 				nativeToolChoice: false,
 				nativeStructuredOutputs: false,
-				streaming: false,
+				streaming: true,
 				zeroDataRetention: true,
 			},
 			maxTokens: 32_000,
@@ -348,6 +349,7 @@ describe("Merge Gateway provider", () => {
 				supports_tool_choice: true,
 				supports_structured_outputs: false,
 				supports_reasoning: false,
+				streaming: true,
 			},
 		});
 		const noTools = route({
@@ -358,6 +360,18 @@ describe("Merge Gateway provider", () => {
 				supports_tool_choice: false,
 				supports_structured_outputs: true,
 				supports_reasoning: false,
+				streaming: true,
+			},
+		});
+		const noStreaming = route({
+			capabilities: {
+				input: ["text"],
+				output: ["text", "tool_use"],
+				supports_tool_calling: true,
+				supports_tool_choice: true,
+				supports_structured_outputs: true,
+				supports_reasoning: false,
+				streaming: false,
 			},
 		});
 		expect(
@@ -365,6 +379,9 @@ describe("Merge Gateway provider", () => {
 		).not.toBeNull();
 		expect(
 			mapMergeGatewayModel(model("example/no-tools", { vendor: noTools }), "https://gateway/v1/openai"),
+		).toBeNull();
+		expect(
+			mapMergeGatewayModel(model("example/no-stream", { vendor: noStreaming }), "https://gateway/v1/openai"),
 		).toBeNull();
 	});
 

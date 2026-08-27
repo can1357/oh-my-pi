@@ -197,6 +197,51 @@ describe("structured subagent primitive", () => {
 		).toBe(true);
 	});
 
+	it("expands provider wildcards before following nested model-key chains", () => {
+		const models = new Map([
+			["anthropic/a", { provider: "anthropic", id: "a" }],
+			["openrouter/a", { provider: "openrouter", id: "a" }],
+			["merge-gateway/a", { provider: "merge-gateway", id: "a" }],
+		]);
+		const modelRegistry = {
+			find: (provider: string, id: string) => models.get(`${provider}/${id}`),
+			hasProvider: (provider: string) => [...models.values()].some(model => model.provider === provider),
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			"retry.fallbackChains": {
+				"anthropic/a": ["openrouter/*"],
+				"openrouter/a": ["merge-gateway/a"],
+			},
+		});
+		expect(
+			executorModule.retryFallbackMayReachProvider({
+				settings,
+				modelRegistry,
+				initialSelector: "anthropic/a",
+				roleHint: undefined,
+				targetProvider: "merge-gateway",
+			}),
+		).toBe(true);
+	});
+
+	it("tolerates malformed fallback chains with an incomplete model-registry test double", () => {
+		const settings = Settings.isolated({
+			"retry.fallbackChains": {
+				default: [123],
+				broken: "not-an-array",
+			} as never,
+		});
+		expect(
+			executorModule.retryFallbackMayReachProvider({
+				settings,
+				modelRegistry: {} as ModelRegistry,
+				initialSelector: "anthropic/a",
+				roleHint: undefined,
+				targetProvider: "merge-gateway",
+			}),
+		).toBe(false);
+	});
+
 	it("gives task and eval invocations identical blocked-agent preflight errors", async () => {
 		const previous = Bun.env.PI_BLOCKED_AGENT;
 		Bun.env.PI_BLOCKED_AGENT = "worker";
