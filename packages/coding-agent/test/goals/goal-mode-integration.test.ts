@@ -570,6 +570,26 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(harness.session.getGoalModeState()?.goal.tokensUsed).toBe(42);
 	});
 
+	it("accepts K/M suffixes for /goal budget, case-insensitively", async () => {
+		await harness.mode.handleGoalModeCommand("Ship the release");
+
+		const cases: Array<[string, number]> = [
+			["300K", 300_000],
+			["800.5K", 800_500],
+			["1.5M", 1_500_000],
+			["3M", 3_000_000],
+			["300k", 300_000],
+			["800.5k", 800_500],
+			["1.5m", 1_500_000],
+			["3m", 3_000_000],
+		];
+
+		for (const [input, expected] of cases) {
+			await harness.mode.handleGoalModeCommand(`budget ${input}`);
+			expect(harness.session.getGoalModeState()?.goal.tokenBudget).toBe(expected);
+		}
+	});
+
 	it("refuses /goal budget while only a paused goal exists (fix #5)", async () => {
 		await harness.mode.handleGoalModeCommand("Ship the release");
 		vi.spyOn(harness.mode, "showHookSelector").mockResolvedValue("Pause");

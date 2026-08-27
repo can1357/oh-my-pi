@@ -4062,9 +4062,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		const trimmed = rawBudget.trim().toLowerCase();
 		let nextBudget: number | undefined;
 		if (trimmed !== "off") {
-			const parsed = Number.parseInt(trimmed, 10);
+			const match = /^(\d+(?:\.\d+)?)([km])?$/.exec(trimmed);
+			const multiplier = match?.[2] === "k" ? 1_000 : match?.[2] === "m" ? 1_000_000 : 1;
+			const parsed = match ? Math.round(Number.parseFloat(match[1]) * multiplier) : Number.NaN;
 			if (!Number.isInteger(parsed) || parsed <= 0) {
-				this.showError("Goal budget must be a positive integer or `off`.");
+				this.showError("Goal budget must be a positive integer (optionally with a K or M suffix) or `off`.");
 				return;
 			}
 			nextBudget = parsed;
