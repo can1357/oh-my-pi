@@ -584,6 +584,19 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					onUpdate({ content: [{ type: "text", text }], details });
 				}
 			: undefined;
+		// Presentation ownership for auto-backgrounding, mirroring bash's managed
+		// route: the foreground call owns the producer only while it is waiting.
+		// Backgrounding (threshold, steer, immediate) or aborting detaches the
+		// scoped producer BEFORE the foreground returns and the agent loop
+		// freezes it, so the continuing background cell can never write to a
+		// settled call (a post-freeze fact/display/attachment throws and would
+		// fail the whole job; late terminal chunks would be dropped).
+		let foregroundPresentation = presentation;
+		let cellsOutputSink: OutputSink | undefined;
+		const stopForegroundDelivery = (): void => {
+			cellsOutputSink?.detachPresentation();
+			foregroundPresentation = undefined;
+		};
 		const run = (
 			runSignal: AbortSignal | undefined,
 			emitUpdate: ((text: string, details: EvalToolDetails) => void) | undefined,
@@ -597,7 +610,15 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				signal: runSignal,
 				sessionAbortController,
 				emitUpdate,
-				presentation,
+				presentation: foregroundPresentation,
+				presentationActive: () => foregroundPresentation !== undefined,
+				onOutputSink: sink => {
+					cellsOutputSink = sink;
+					// Job start can race the detach decision: a sink created after
+					// stopForegroundDelivery() must not stay attached to a producer
+					// the loop is about to freeze.
+					if (foregroundPresentation === undefined) sink.detachPresentation();
+				},
 			});
 			return session.trackEvalExecution?.(execution, sessionAbortController) ?? execution;
 		};
@@ -668,6 +689,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		);
 
 		if (startBackgrounded) {
+			stopForegroundDelivery();
 			return this.#buildBackgroundStartResult(jobId, cells, languages, notice, latestText, latestDetails);
 		}
 		// Suppress the completion delivery up front so a job finishing while we
@@ -687,9 +709,11 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			throw waitResult.error;
 		}
 		if (waitResult.kind === "aborted") {
+			stopForegroundDelivery();
 			autoBgManager.cancel(jobId);
 			throw new ToolAbortError(latestText || "Eval cell aborted");
 		}
+		stopForegroundDelivery();
 		forwardUpdates = false;
 		autoBgManager.resumeDeliveries([jobId]);
 		// "steer": a queued user/peer message arrived mid-wait — background the
@@ -758,6 +782,10 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		sessionAbortController: AbortController;
 		emitUpdate?: (text: string, details: EvalToolDetails) => void;
 		presentation: ToolPresentationProducer | undefined;
+		/** Re-check whether the caller still owns its presentation stream before any late write. */
+		presentationActive?: () => boolean;
+		/** Receives the live sink once it exists so a caller can detach presentation safely. */
+		onOutputSink?: (sink: OutputSink) => void;
 	}): Promise<AgentToolResult<EvalToolDetails | undefined>> {
 		const {
 			session,
@@ -769,7 +797,15 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			sessionAbortController,
 			emitUpdate,
 			presentation,
+			presentationActive,
+			onOutputSink,
 		} = options;
+		// The producer handle, revalidated on EVERY use: an auto-backgrounded
+		// call detaches ownership when its foreground waiter returns, and any
+		// write after the agent loop freezes the settled producer throws. The
+		// construction-time `presentation` const alone cannot observe that.
+		const livePresentation = (): ToolPresentationProducer | undefined =>
+			presentation !== undefined && (presentationActive?.() ?? true) ? presentation : undefined;
 		let outputSink: OutputSink | undefined;
 		let outputSummary: OutputSummary | undefined;
 		let outputDumped = false;
@@ -858,7 +894,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			};
 
 			const pushUpdate = () => {
-				if (presentation) return;
+				if (livePresentation()) return;
 				emitUpdate?.(tailBuffer.text(), buildUpdateDetails());
 			};
 
@@ -871,7 +907,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				artifactId,
 				headBytes: resolveOutputSinkHeadBytes(session.settings),
 				maxColumns: resolveOutputMaxColumns(session.settings),
-				...(presentation === undefined ? {} : { presentation }),
+				...(livePresentation() === undefined ? {} : { presentation }),
 				onChunk: chunk => {
 					appendTail(chunk);
 					if (activeLiveCell) {
@@ -881,6 +917,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					pushUpdate();
 				},
 			});
+			onOutputSink?.(outputSink);
 			const sessionId = session.getEvalSessionId?.() ?? defaultEvalSessionId(session);
 
 			// Declare truncation and artifact facts from the result's OutputMeta on
@@ -889,10 +926,11 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			// retained bytes and nothing else. Called after each return path builds its
 			// result so the meta is available.
 			const publishEvalTruncationFacts = (meta: OutputMeta | undefined): void => {
-				if (!presentation || !meta) return;
+				const producer = livePresentation();
+				if (!producer || !meta) return;
 				const truncation = meta.truncation;
 				if (truncation) {
-					presentation.fact({
+					producer.fact({
 						kind: "truncation",
 						meta: {
 							direction: truncation.direction,
@@ -905,12 +943,12 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						},
 					});
 					if (truncation.artifactId !== undefined) {
-						presentation.fact({ kind: "artifact", artifactId: truncation.artifactId });
+						producer.fact({ kind: "artifact", artifactId: truncation.artifactId });
 					}
 				}
 				const columnTruncated = meta.limits?.columnTruncated;
 				if (columnTruncated) {
-					presentation.fact({ kind: "limit", meta: { limit: "column", value: columnTruncated.maxColumn } });
+					producer.fact({ kind: "limit", meta: { limit: "column", value: columnTruncated.maxColumn } });
 				}
 			};
 
@@ -985,7 +1023,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				// protocol. `dump(notice)` bakes it into the model-facing text but
 				// never streams it through `onChunk`, so the ACP terminal path
 				// would otherwise lose the reason a cell stopped.
-				if (result.annotation) presentation?.fact({ kind: "stop_annotation", text: result.annotation });
+				if (result.annotation) livePresentation()?.fact({ kind: "stop_annotation", text: result.annotation });
 
 				const cellStatusEvents: EvalStatusEvent[] = [];
 				const cellDisplayItems: ToolDisplayItem[] = [];
@@ -1003,7 +1041,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						);
 						const image: ImageContent = { type: "image", data: resized.data, mimeType: resized.mimeType };
 						images.push(image);
-						presentation?.attachment({ kind: "image", data: resized.data, mimeType: resized.mimeType });
+						livePresentation()?.attachment({ kind: "image", data: resized.data, mimeType: resized.mimeType });
 						if (
 							resized.wasResized &&
 							resized.originalWidth !== undefined &&
@@ -1047,8 +1085,9 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				if (cellOutput) {
 					cellOutputs.push(cellOutput);
 					if (display !== undefined) {
-						presentation?.declareDisplay(display);
-						if (!presentation) {
+						const displayProducer = livePresentation();
+						displayProducer?.declareDisplay(display);
+						if (!displayProducer) {
 							appendTail(
 								modelProcessText.length > 0
 									? `${outputSegmentSeparator(modelProcessText)}${visibleDisplayText}`
