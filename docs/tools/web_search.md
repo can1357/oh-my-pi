@@ -175,7 +175,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
   - **Tavily** — `packages/coding-agent/src/web/search/providers/tavily.ts`
     - Availability: API key from env or `agent.db` admits Tavily to the automatic chain. Explicit selection works without credentials through Tavily's rate-limited keyless access mode.
     - Querying: POST `https://api.tavily.com/search`.
-    - Authentication: keyed requests send bearer auth; keyless requests identify the client with `X-Client-Name: oh-my-pi` and `X-Tavily-Access-Mode: keyless` without an authorization header.
+    - Authentication: keyed requests send bearer auth; keyless requests identify the integration with `X-Client-Name: oh-my-pi`, `X-Client-Source: oh-my-pi-keyless`, and `X-Tavily-Access-Mode: keyless` without an authorization header.
     - `recency` maps to Tavily `time_range`; code explicitly keeps `topic` at default general scope instead of narrowing to news.
     - `limit` / `num_search_results`: adapter uses `params.numSearchResults ?? params.limit`, clamped to `5..20` with default `5`.
     - Output: `answer`, `sources`, `requestId`, `authMode: "api_key" | "keyless"`.

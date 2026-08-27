@@ -23,6 +23,7 @@ import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
 const TAVILY_SEARCH_URL = "https://api.tavily.com/search";
 const TAVILY_KEYLESS_CLIENT_NAME = "oh-my-pi";
+const TAVILY_KEYLESS_CLIENT_SOURCE = "oh-my-pi-keyless";
 const DEFAULT_NUM_RESULTS = 5;
 const MAX_NUM_RESULTS = 20;
 
@@ -123,6 +124,7 @@ async function callTavilySearch(apiKey: string | undefined, params: TavilySearch
 		headers.Authorization = `Bearer ${apiKey}`;
 	} else {
 		headers["X-Client-Name"] = TAVILY_KEYLESS_CLIENT_NAME;
+		headers["X-Client-Source"] = TAVILY_KEYLESS_CLIENT_SOURCE;
 		headers["X-Tavily-Access-Mode"] = "keyless";
 	}
 	const response = await (params.fetch ?? fetch)(TAVILY_SEARCH_URL, {
