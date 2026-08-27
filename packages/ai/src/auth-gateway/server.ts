@@ -27,6 +27,7 @@ import { classifyGatewayError } from "../error/gateway";
 import { isUsageLimitOutcome } from "../error/rate-limit";
 import * as anthropicMessages from "../providers/anthropic-messages-server";
 import * as openaiChat from "../providers/openai-chat-server";
+import { decodeDataUri } from "../providers/openai-data-uri";
 import * as openaiResponses from "../providers/openai-responses-server";
 import * as piNative from "../providers/pi-native-server";
 import {
@@ -84,6 +85,29 @@ const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
 	"/v1/responses": { module: openaiResponses, label: "openai-responses" },
 };
 
+function promoteComputerScreenshotImage(
+	message: Record<string, unknown>,
+	model: Model,
+	imageUrl: string,
+): boolean {
+	const decoded = decodeDataUri(imageUrl);
+	const decodedMimeType = decoded ? getUsableInlineImageMimeType(decoded) : undefined;
+	const image = decodedMimeType
+		? { type: "image", ...decoded, mimeType: decodedMimeType }
+		: isRemoteImageUrl(imageUrl) && supportsRemoteImageUrls(model, { mimeType: "application/octet-stream" })
+			? { type: "image", data: "", mimeType: "application/octet-stream", url: imageUrl }
+			: undefined;
+	if (!image) return false;
+	if (Array.isArray(message.content)) {
+		message.content.push(image);
+	} else if (typeof message.content === "string") {
+		message.content = message.content.length > 0 ? [{ type: "text", text: message.content }, image] : [image];
+	} else {
+		return false;
+	}
+	return true;
+}
+
 function validateComputerScreenshotReference(
 	message: Record<string, unknown>,
 	model: Model,
@@ -104,6 +128,11 @@ function validateComputerScreenshotReference(
 	const imageUrl = screenshot.image_url;
 	const hasFileId = fileId !== undefined;
 	const hasImageUrl = imageUrl !== undefined;
+	if (typeof imageUrl === "string" && promoteComputerScreenshotImage(message, model, imageUrl)) {
+		delete metadata.type;
+		delete metadata.screenshot;
+		return undefined;
+	}
 	if (hasFileId) {
 		return `input_image.file_id cannot be forwarded to ${model.api}; target an OpenAI Responses model or use an inline data URL`;
 	}
