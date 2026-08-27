@@ -652,6 +652,93 @@ describe("cursor heartbeat and outbound write lifecycle", () => {
 		}
 	}, 15_000);
 
+	it("synthesizes a drain-timeout pair when onToolResult rejects", async () => {
+		const sessions = new Set<http2.Http2Session>();
+		const server = http2.createServer();
+		server.on("session", session => {
+			sessions.add(session);
+			session.on("close", () => sessions.delete(session));
+		});
+		server.on("stream", (stream: http2.ServerHttp2Stream, headers: http2.IncomingHttpHeaders) => {
+			stream.on("data", () => {});
+			stream.on("error", () => {});
+			if (headers[":path"] !== RUN_PATH) {
+				stream.respond({ ":status": 404 });
+				stream.end();
+				return;
+			}
+			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+			stream.write(
+				Buffer.concat([
+					frameConnectMessage(execReadPayload("call-fail", "/tmp/fail")),
+					frameConnectMessage(execReadPayload("call-never", "/tmp/hang")),
+					frameConnectMessage(turnEndedPayload()),
+				]),
+			);
+			stream.end();
+		});
+		const listening = Promise.withResolvers<void>();
+		server.once("error", listening.reject);
+		server.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
+		const address = server.address();
+		if (!address || typeof address === "string") throw new Error("expected h2 run fixture to bind a tcp port");
+		const baseUrl = `http://127.0.0.1:${address.port}`;
+
+		const paired: ToolResultMessage[] = [];
+		const rejectFirstSink = Promise.withResolvers<void>();
+		const sawSynthetic = Promise.withResolvers<void>();
+		try {
+			const stream = streamCursor(makeModel(baseUrl), streamContext, {
+				apiKey: API_KEY,
+				execHandlers: {
+					read(args) {
+						if (args.toolCallId === "call-fail") {
+							return Promise.resolve({
+								role: "toolResult" as const,
+								toolCallId: "call-fail",
+								toolName: "read",
+								content: [{ type: "text" as const, text: "fail-body" }],
+								isError: false,
+								timestamp: 1,
+							});
+						}
+						return new Promise(() => {});
+					},
+				},
+				onToolResult: result => {
+					if (
+						result.toolCallId === "call-fail" &&
+						!result.content.some(part => part.type === "text" && part.text === "Tool not available")
+					) {
+						return rejectFirstSink.promise.then(() => {
+							throw new Error("sink-fail");
+						});
+					}
+					paired.push(result);
+					if (result.toolCallId === "call-fail") sawSynthetic.resolve();
+					return result;
+				},
+			});
+			for await (const event of stream) {
+				if (event.type === "done") rejectFirstSink.resolve();
+			}
+			await sawSynthetic.promise;
+			expect(
+				paired.filter(
+					entry =>
+						entry.toolCallId === "call-fail" &&
+						entry.content.some(part => part.type === "text" && part.text === "Tool not available"),
+				),
+			).toHaveLength(1);
+		} finally {
+			for (const session of sessions) session.destroy();
+			const closed = Promise.withResolvers<void>();
+			server.close(error => (error ? closed.reject(error) : closed.resolve()));
+			await closed.promise;
+		}
+	}, 15_000);
+
 	it("writes Connect data-frame payloads into the PI_REQ_DEBUG response log", async () => {
 		const previousDebugFlag = Bun.env.PI_REQ_DEBUG;
 		const previousCwd = process.cwd();
