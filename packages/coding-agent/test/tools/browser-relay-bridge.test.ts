@@ -1107,6 +1107,110 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send")).toHaveLength(2);
 	});
 
+	it("replays non-UA persistent root setters for a preserved session across recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		const sendRootCommand = async (method: string, params?: Record<string, unknown>): Promise<void> => {
+			const id = ++msgSeq;
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId: pageSession, method, params }));
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+			expect(cdp.messages.filter(message => message.id === id && "result" in message)).toHaveLength(1);
+		};
+
+		const staleHeaders = { headers: { "x-stale": "1" } };
+		const finalHeaders = { headers: { "x-omp-session": "alive" } };
+		const metrics = { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false };
+		await sendRootCommand("Network.setExtraHTTPHeaders", staleHeaders);
+		await sendRootCommand("Network.setExtraHTTPHeaders", finalHeaders);
+		await sendRootCommand("Emulation.setDeviceMetricsOverride", metrics);
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
+		ack(bridge, ext2, "attach");
+
+		await waitFor(() => ext2.rpcs("send").length === 1, "header replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.setExtraHTTPHeaders"]);
+		expect(ext2.rpcs("send")[0]!.params).toEqual(finalHeaders);
+		ack(bridge, ext2, "send");
+
+		await waitFor(() => ext2.rpcs("send").length === 2, "device metrics replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Network.setExtraHTTPHeaders",
+			"Emulation.setDeviceMetricsOverride",
+		]);
+		expect(ext2.rpcs("send")[1]!.params).toEqual(metrics);
+		ack(bridge, ext2, "send");
+		await flush();
+
+		expect(ext2.rpcs("send")).toHaveLength(2);
+	});
+
+	it("clears replayed extra headers when the replay owner disconnects during recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Network.setExtraHTTPHeaders",
+				params: { headers: { "x-omp-session": "alive" } },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.rpcs("send").length === 1, "owner header replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.setExtraHTTPHeaders"]);
+		expect(ext2.rpcs("send")[0]!.params).toEqual({ headers: { "x-omp-session": "alive" } });
+
+		bridge.cdpClosed(ownerConn);
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.rpcs("send").length === 2, "orphaned header cleanup");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Network.setExtraHTTPHeaders",
+			"Network.setExtraHTTPHeaders",
+		]);
+		expect(ext2.rpcs("send")[1]!.params).toEqual({ headers: {} });
+		ack(bridge, ext2, "send");
+		await flush();
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			holderConn,
+			JSON.stringify({ id: commandId, sessionId: holderSession, method: "Network.getCookies" }),
+		);
+		await flush();
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Network.setExtraHTTPHeaders",
+			"Network.setExtraHTTPHeaders",
+			"Network.getCookies",
+		]);
+	});
+
 	it("restarts subscription replay when the extension socket is replaced mid-restore", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

@@ -185,6 +185,10 @@ function platformFromUserAgent(userAgent: string): string | undefined {
 	return undefined;
 }
 
+function hasObjectKeys(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value) && Object.keys(value).length > 0;
+}
+
 function tabTargetId(tabId: number): string {
 	return `TAB${tabId}`;
 }
@@ -770,13 +774,65 @@ export class RelayBridge {
 			case "Page.setLifecycleEventsEnabled":
 				enabled = msg.params?.enabled === true;
 				break;
+			case "Network.setCacheDisabled":
+				enabled = msg.params?.cacheDisabled === true;
+				break;
+			case "Page.setBypassCSP":
+			case "Emulation.setTouchEmulationEnabled":
+			case "Page.setTouchEmulationEnabled":
+				enabled = msg.params?.enabled === true;
+				break;
+			case "Network.setExtraHTTPHeaders": {
+				const headers = msg.params?.headers;
+				if (!hasObjectKeys(headers)) {
+					this.#forgetSessionSubscription(tab, msg.method, ownerSessionId);
+					return;
+				}
+				this.#rememberSessionSubscription(tab, msg.method, ownerSessionId, {
+					method: msg.method,
+					params: msg.params,
+					ownerSessionId,
+					sequence: ++this.#subscriptionSeq,
+				});
+				return;
+			}
+			case "Network.setBlockedURLs": {
+				const urls = msg.params?.urls;
+				if (!Array.isArray(urls) || urls.length === 0) {
+					this.#forgetSessionSubscription(tab, msg.method, ownerSessionId);
+					return;
+				}
+				this.#rememberSessionSubscription(tab, msg.method, ownerSessionId, {
+					method: msg.method,
+					params: msg.params,
+					ownerSessionId,
+					sequence: ++this.#subscriptionSeq,
+				});
+				return;
+			}
+			case "Emulation.setEmulatedMedia":
+			case "Emulation.setLocaleOverride":
+				if (!hasObjectKeys(msg.params)) {
+					this.#forgetSessionSubscription(tab, msg.method, ownerSessionId);
+					return;
+				}
+				this.#rememberSessionSubscription(tab, msg.method, ownerSessionId, {
+					method: msg.method,
+					params: msg.params,
+					ownerSessionId,
+					sequence: ++this.#subscriptionSeq,
+				});
+				return;
+			case "Emulation.setDeviceMetricsOverride":
+			case "Page.setDeviceMetricsOverride":
+			case "Emulation.setGeolocationOverride":
+			case "Page.setGeolocationOverride":
 			case "Network.setUserAgentOverride":
 			case "Emulation.setUserAgentOverride":
-				// Persistent state setters with no disable counterpart: the browser
-				// tool applies the stealth UA to preserved page sessions, and Chrome's
-				// fresh root after a guard-authorized swap no longer carries it. Record
-				// latest-wins so recovery replays the current override rather than
-				// letting the fingerprint change mid-session.
+				// Persistent root setters survive as long as the shared debugger root.
+				// When a guard-authorized detach swaps that root, replay the latest
+				// winning command for each setter so preserved pseudo-sessions keep the
+				// state they previously established.
 				this.#rememberSessionSubscription(tab, msg.method, ownerSessionId, {
 					method: msg.method,
 					params: msg.params,
@@ -919,6 +975,27 @@ export class RelayBridge {
 					},
 				};
 			}
+			case "Network.setExtraHTTPHeaders":
+				return { method: subscription.method, params: { headers: {} } };
+			case "Network.setBlockedURLs":
+				return { method: subscription.method, params: { urls: [] } };
+			case "Network.setCacheDisabled":
+				return { method: subscription.method, params: { cacheDisabled: false } };
+			case "Page.setBypassCSP":
+			case "Emulation.setTouchEmulationEnabled":
+			case "Page.setTouchEmulationEnabled":
+				return { method: subscription.method, params: { enabled: false } };
+			case "Emulation.setEmulatedMedia":
+			case "Emulation.setLocaleOverride":
+				return { method: subscription.method, params: {} };
+			case "Emulation.setDeviceMetricsOverride":
+				return { method: "Emulation.clearDeviceMetricsOverride" };
+			case "Page.setDeviceMetricsOverride":
+				return { method: "Page.clearDeviceMetricsOverride" };
+			case "Emulation.setGeolocationOverride":
+				return { method: "Emulation.clearGeolocationOverride" };
+			case "Page.setGeolocationOverride":
+				return { method: "Page.clearGeolocationOverride" };
 			default:
 				return null;
 		}
