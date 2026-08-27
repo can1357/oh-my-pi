@@ -1155,7 +1155,7 @@ impl Journal {
 		ts: u64,
 		kind: ChildKind,
 	) -> Result<Self, JournalError> {
-		let (at, seed) = {
+		let (at, seed, model_override) = {
 			let log = self.load()?;
 			match kind {
 				ChildKind::Branch { checkpoint } => {
@@ -1163,9 +1163,17 @@ impl Journal {
 					if !log.live_through_into(checkpoint, &mut live) {
 						return Err(JournalError::InvalidEventIndex { index: checkpoint });
 					}
-					(Some(checkpoint), project::project_journal_items(&log, &live)?)
+					(
+						Some(checkpoint),
+						project::project_journal_items(&log, &live)?,
+						Self::model_override_in(&*log, &live),
+					)
 				},
-				ChildKind::Fork => (None, project::project_journal_items(&log, log.as_ref())?),
+				ChildKind::Fork => (
+					None,
+					project::project_journal_items(&log, log.as_ref())?,
+					Self::model_override_in(&*log, log.as_ref()),
+				),
 			}
 		};
 		let mut child = Self::create(path, header)?;
@@ -1173,6 +1181,9 @@ impl Journal {
 			child.attach_session_index(Arc::clone(index), header.id.clone());
 		}
 		child.append_forked_from(ts, &self.session_id, at)?;
+		if let Some(model_override) = model_override {
+			child.model_override(ts, model_override)?;
+		}
 		for item in seed {
 			child.append_optimistic(ts, item, None)?;
 		}
@@ -2894,22 +2905,24 @@ impl Journal {
 		})
 	}
 
-	/// Restores the latest live session-only model override.
-	pub fn effective_model_override(&self) -> Result<Option<ModelChange>, JournalError> {
-		let mut reader = self.reader.lock();
-		reader.refresh_projection()?;
-		Ok(reader
-			.transcript
-			.live()
+	fn model_override_in(log: &Log, live: &transcript::LiveSet) -> Option<ModelChange> {
+		live
 			.iter()
-			.fold(None, |current, index| match reader.transcript.log().get(index) {
+			.fold(None, |current, index| match log.get(index) {
 				Some(transcript::Entry::Ok(event)) => match &event.kind {
 					Kind::Infer { model: Patch::Set(model), .. } => Some(model.clone()),
 					Kind::Infer { model: Patch::Clear, .. } => None,
 					_ => current,
 				},
 				_ => current,
-			}))
+			})
+	}
+
+	/// Restores the latest live session-only model override.
+	pub fn effective_model_override(&self) -> Result<Option<ModelChange>, JournalError> {
+		let mut reader = self.reader.lock();
+		reader.refresh_projection()?;
+		Ok(Self::model_override_in(reader.transcript.log(), reader.transcript.live()))
 	}
 
 	/// Restores the latest live opaque credential affinity.
@@ -4166,6 +4179,64 @@ mod tests {
 		let log = transcript::load(&parent_path).expect("reload parent");
 		assert!(matches!(log.get(1), Some(Entry::Ok(event)) if event.kind == Kind::ProviderReset));
 		assert!(matches!(log.get(2), Some(Entry::Ok(event)) if event.kind == Kind::Reset));
+		for path in [parent_path, branch_path, fork_path] {
+			fs::remove_file(path).expect("remove journal");
+		}
+	}
+
+	#[test]
+	fn child_inherits_model_override_from_its_exact_source_projection() {
+		fn model_change(model: &str) -> ModelChange {
+			ModelChange {
+				role:     sf!("temporary"),
+				model:    transcript::ModelRef {
+					provider: transcript::ProviderId(sf!("test")),
+					api:      sf!("openai"),
+					model:    transcript::ModelId(Str::new(model)),
+				},
+				fallback: false,
+			}
+		}
+
+		let parent_path = path("model-lineage-parent");
+		let mut parent = Journal::create(&parent_path, &header()).expect("create parent");
+		let checkpoint_model = model_change("test/checkpoint");
+		parent
+			.model_override(2, checkpoint_model.clone())
+			.expect("checkpoint model");
+		let checkpoint = parent
+			.append_optimistic(3, message("checkpoint"), None)
+			.expect("checkpoint item");
+		let current_model = model_change("test/current");
+		parent
+			.model_override(4, current_model.clone())
+			.expect("current model");
+
+		let branch_path = path("model-lineage-branch");
+		let mut branch_header = header();
+		branch_header.id = SessionId(sf!("model-lineage-branch"));
+		let branch = parent
+			.create_child(&branch_path, &branch_header, 5, ChildKind::Branch { checkpoint })
+			.expect("create branch");
+		assert_eq!(
+			branch.effective_model_override().expect("branch override"),
+			Some(checkpoint_model),
+			"later parent selection must not leak into a historical branch"
+		);
+
+		let fork_path = path("model-lineage-fork");
+		let mut fork_header = header();
+		fork_header.id = SessionId(sf!("model-lineage-fork"));
+		let fork = parent
+			.create_child(&fork_path, &fork_header, 6, ChildKind::Fork)
+			.expect("create fork");
+		assert_eq!(
+			fork.effective_model_override().expect("fork override"),
+			Some(current_model),
+			"fork must preserve its source effective override"
+		);
+
+		drop((parent, branch, fork));
 		for path in [parent_path, branch_path, fork_path] {
 			fs::remove_file(path).expect("remove journal");
 		}
