@@ -17,6 +17,7 @@ import type {
 } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { normalizeSchemaForCCA } from "../utils/schema";
+import { isThinkingPart, retainThoughtSignature } from "./google-shared";
 
 export interface ZedOptions extends StreamOptions {
 	threadId?: string;
@@ -292,6 +293,14 @@ function mapContextToGoogle(context: Context, model: Model<"zed-agent">, options
 			for (const block of msg.content) {
 				if (block.type === "text") {
 					parts.push({ text: block.text });
+				} else if (block.type === "thinking") {
+					if (block.thinking && block.thinking.trim().length > 0) {
+						parts.push({
+							thought: true,
+							text: block.thinking,
+							...(block.thinkingSignature ? { thoughtSignature: block.thinkingSignature } : {}),
+						});
+					}
 				} else if (block.type === "toolCall") {
 					parts.push({
 						functionCall: {
@@ -476,14 +485,16 @@ export function streamZed(
 		const userId = parsed.userId;
 		const accessToken = parsed.accessToken;
 
-		if (!userId || !accessToken) {
+		if (!accessToken) {
 			throw new OAuthError("Missing Zed credentials. Run /login zed-agent to authenticate your Zed account.", {
 				kind: "configuration",
 				provider: "zed-agent",
 			});
 		}
 
-		let llmToken = await getOrMintZedLlmToken(userId, accessToken, options.signal, options.fetch);
+		let llmToken = userId
+			? await getOrMintZedLlmToken(userId, accessToken, options.signal, options.fetch)
+			: accessToken;
 		const providerKind = resolveProviderKind(model.id);
 		const providerRequest = buildZedProviderRequest(providerKind, context, model, options);
 
@@ -516,9 +527,10 @@ export function streamZed(
 
 		// Handle expired/outdated token auto-refresh & retry
 		if (
-			response.status === 401 ||
-			response.headers.has(ZED_HEADERS.EXPIRED_TOKEN) ||
-			response.headers.has(ZED_HEADERS.OUTDATED_TOKEN)
+			userId &&
+			(response.status === 401 ||
+				response.headers.has(ZED_HEADERS.EXPIRED_TOKEN) ||
+				response.headers.has(ZED_HEADERS.OUTDATED_TOKEN))
 		) {
 			invalidateZedLlmToken(userId, accessToken);
 			llmToken = await getOrMintZedLlmToken(userId, accessToken, options.signal, options.fetch);
@@ -898,6 +910,7 @@ export function streamZed(
 							content?: {
 								parts?: Array<{
 									text?: string;
+									thought?: boolean;
 									thoughtSignature?: string;
 									functionCall?: { name?: string; args?: Record<string, unknown> };
 								}>;
@@ -910,7 +923,35 @@ export function streamZed(
 						}
 						const parts = candidate.content?.parts ?? [];
 						for (const part of parts) {
-							if (typeof part.text === "string" && part.text.length > 0) {
+							if (isThinkingPart(part)) {
+								if (
+									currentContentIndex === -1 ||
+									outputMessage.content[currentContentIndex]?.type !== "thinking"
+								) {
+									currentContentIndex++;
+									const block: ThinkingContent = { type: "thinking", thinking: "" };
+									outputMessage.content.push(block);
+									stream.push({
+										type: "thinking_start",
+										contentIndex: currentContentIndex,
+										partial: outputMessage,
+									});
+								}
+								const thinkBlock = outputMessage.content[currentContentIndex] as ThinkingContent;
+								if (typeof part.text === "string" && part.text.length > 0) {
+									thinkBlock.thinking += part.text;
+									stream.push({
+										type: "thinking_delta",
+										contentIndex: currentContentIndex,
+										delta: part.text,
+										partial: outputMessage,
+									});
+								}
+								thinkBlock.thinkingSignature = retainThoughtSignature(
+									thinkBlock.thinkingSignature,
+									part.thoughtSignature,
+								);
+							} else if (typeof part.text === "string" && part.text.length > 0) {
 								if (currentContentIndex === -1 || outputMessage.content[currentContentIndex]?.type !== "text") {
 									currentContentIndex++;
 									const block: TextContent = { type: "text", text: "" };
@@ -929,6 +970,14 @@ export function streamZed(
 									delta: part.text,
 									partial: outputMessage,
 								});
+							} else if (part.thoughtSignature && !part.functionCall && currentContentIndex >= 0) {
+								const currentBlock = outputMessage.content[currentContentIndex];
+								if (currentBlock?.type === "thinking") {
+									currentBlock.thinkingSignature = retainThoughtSignature(
+										currentBlock.thinkingSignature,
+										part.thoughtSignature,
+									);
+								}
 							}
 							if (part.functionCall?.name) {
 								currentContentIndex++;

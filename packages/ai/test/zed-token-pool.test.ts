@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { ProviderHttpError } from "../src/error/classes";
 import { getOrMintZedLlmToken, invalidateZedLlmToken } from "../src/registry/oauth/zed-token-pool";
 import type { FetchImpl } from "../src/types";
 
@@ -29,7 +30,7 @@ describe("Zed Token Pool", () => {
 		expect(callCount).toBe(2);
 	});
 
-	it("throws QuotaExceededError on HTTP 402", async () => {
+	it("throws ProviderHttpError with status 402 on HTTP 402", async () => {
 		const mockFetcher: FetchImpl = async () => {
 			return new Response("Payment required", {
 				status: 402,
@@ -37,8 +38,17 @@ describe("Zed Token Pool", () => {
 			});
 		};
 
-		invalidateZedLlmToken("user_402", "access_tok_402");
-		expect(getOrMintZedLlmToken("user_402", "access_tok_402", undefined, mockFetcher)).rejects.toThrow();
+		let error: unknown;
+		try {
+			await getOrMintZedLlmToken("user_402", "access_tok_402", undefined, mockFetcher);
+		} catch (caught) {
+			error = caught;
+		} finally {
+			invalidateZedLlmToken("user_402", "access_tok_402");
+		}
+
+		expect(error).toBeInstanceOf(ProviderHttpError);
+		expect((error as ProviderHttpError).status).toBe(402);
 	});
 	it("does not cancel a shared mint when the first concurrent waiter aborts", async () => {
 		const userId = "user_concurrent_abort_isolation";
