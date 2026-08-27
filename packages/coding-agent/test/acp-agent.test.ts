@@ -3229,15 +3229,12 @@ describe("ACP agent", () => {
 		const session = harness.findSession(created.sessionId)!;
 
 		// Block abort() until released so we can assert the second prompt waits
-		let releaseAbort!: () => void;
 		const abortStarted = Promise.withResolvers<void>();
-		const abortRelease = new Promise<void>(resolve => {
-			releaseAbort = resolve;
-		});
+		const abortRelease = Promise.withResolvers<void>();
 		session.abort = async () => {
 			session.isStreaming = false;
 			abortStarted.resolve();
-			await abortRelease;
+			await abortRelease.promise;
 		};
 
 		const blockers: Array<() => void> = [];
@@ -3283,7 +3280,7 @@ describe("ACP agent", () => {
 		expect(session.promptCalls).toEqual(["long running"]);
 
 		// Release abort — second session.prompt should now start
-		releaseAbort();
+		abortRelease.resolve();
 		await Bun.sleep(0);
 		expect(session.promptCalls).toEqual(["long running", "overlap"]);
 
@@ -3507,17 +3504,14 @@ describe("ACP agent", () => {
 		const harness = await createHarness();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
-		let releaseDelivery!: () => void;
 		let drainCalls = 0;
 		const deliveryBlocked = Promise.withResolvers<void>();
-		const deliveryRelease = new Promise<void>(resolve => {
-			releaseDelivery = resolve;
-		});
+		const deliveryRelease = Promise.withResolvers<void>();
 		session.asyncJobDrain = async () => {
 			drainCalls++;
 			if (drainCalls > 1) return false;
 			deliveryBlocked.resolve();
-			await deliveryRelease;
+			await deliveryRelease.promise;
 			return true;
 		};
 
@@ -3532,12 +3526,12 @@ describe("ACP agent", () => {
 			expect(returnedBeforeDelivery).toBe(false);
 			expect(session.waitForIdleCalls).toBe(1);
 
-			releaseDelivery();
+			deliveryRelease.resolve();
 			await prompt;
 			expect(session.waitForIdleCalls).toBe(2);
 			expect(drainCalls).toBe(2);
 		} finally {
-			releaseDelivery();
+			deliveryRelease.resolve();
 			harness.abortController.abort();
 			await Bun.sleep(0);
 		}
@@ -3665,15 +3659,12 @@ describe("ACP agent", () => {
 		const harness = await createHarness();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
-		let releaseAbort!: () => void;
 		const abortBlocked = Promise.withResolvers<void>();
-		const releaseAbortPromise = new Promise<void>(resolve => {
-			releaseAbort = resolve;
-		});
+		const releaseAbortPromise = Promise.withResolvers<void>();
 		session.abort = async () => {
 			session.isStreaming = false;
 			abortBlocked.resolve();
-			await releaseAbortPromise;
+			await releaseAbortPromise.promise;
 		};
 		const finishPrompt = holdPromptStreaming(session);
 
@@ -3709,7 +3700,7 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 		expect(session.promptCalls).toEqual(["cancel me"]);
 
-		releaseAbort();
+		releaseAbortPromise.resolve();
 		await cancelPrompt;
 		finishPrompt();
 		await secondPrompt;
@@ -5696,15 +5687,12 @@ describe("ACP agent", () => {
 		const harness = await createHarness({ terminalMeta: true });
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
-		let releaseAbort!: () => void;
 		const abortBlocked = Promise.withResolvers<void>();
-		const abortReleased = new Promise<void>(resolve => {
-			releaseAbort = resolve;
-		});
+		const abortReleased = Promise.withResolvers<void>();
 		session.abort = async () => {
 			session.isStreaming = false;
 			abortBlocked.resolve();
-			await abortReleased;
+			await abortReleased.promise;
 		};
 		const finishPrompt = holdPromptStreaming(session);
 
@@ -5769,7 +5757,7 @@ describe("ACP agent", () => {
 			signal: null,
 		});
 
-		releaseAbort();
+		abortReleased.resolve();
 		await cancelPrompt;
 		finishPrompt();
 		harness.abortController.abort();
@@ -5876,15 +5864,12 @@ describe("ACP agent", () => {
 		const harness = await createHarness();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
-		let releaseAbort!: () => void;
 		const abortBlocked = Promise.withResolvers<void>();
-		const releaseAbortPromise = new Promise<void>(resolve => {
-			releaseAbort = resolve;
-		});
+		const releaseAbortPromise = Promise.withResolvers<void>();
 		session.abort = async () => {
 			session.isStreaming = false;
 			abortBlocked.resolve();
-			await releaseAbortPromise;
+			await releaseAbortPromise.promise;
 		};
 		const finishPrompt = holdPromptStreaming(session);
 
@@ -5903,7 +5888,7 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 		expect(session.disposed).toBe(false);
 
-		releaseAbort();
+		releaseAbortPromise.resolve();
 		await cancelPrompt;
 		await closePrompt;
 		expect(session.disposed).toBe(true);
@@ -5917,15 +5902,12 @@ describe("ACP agent", () => {
 		const harness = await createHarness();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
-		let releaseAbort!: () => void;
 		const abortBlocked = Promise.withResolvers<void>();
-		const releaseAbortPromise = new Promise<void>(resolve => {
-			releaseAbort = resolve;
-		});
+		const releaseAbortPromise = Promise.withResolvers<void>();
 		session.abort = async () => {
 			session.isStreaming = false;
 			abortBlocked.resolve();
-			await releaseAbortPromise;
+			await releaseAbortPromise.promise;
 		};
 		const finishPrompt = holdPromptStreaming(session);
 
@@ -5948,7 +5930,7 @@ describe("ACP agent", () => {
 			}),
 		).rejects.toThrow("ACP session fork is unavailable while a prompt is in progress");
 
-		releaseAbort();
+		releaseAbortPromise.resolve();
 		await cancelPrompt;
 		finishPrompt();
 		harness.abortController.abort();
