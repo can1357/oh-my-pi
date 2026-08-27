@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { $envExact } from "@oh-my-pi/pi-utils";
+import { $envExact, directoryIsEnterableSync, getProjectDir, logger } from "@oh-my-pi/pi-utils";
 
 const commandValueCache = new Map<string, string>();
 // Failed `!command` resolutions (non-zero exit, empty stdout) are negative-cached
@@ -43,7 +43,17 @@ function resolveCommandConfig(command: string, options?: ResolveConfigValueOptio
 	const retryAt = commandFailureRetryAt.get(command);
 	if (retryAt !== undefined && Date.now() < retryAt) return undefined;
 	try {
-		const stdout = execSync(command, { encoding: "utf8", timeout: 10_000, windowsHide: true });
+		const cwd = getProjectDir();
+		if (!directoryIsEnterableSync(cwd)) {
+			commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
+			return undefined;
+		}
+		const stdout = execSync(command, {
+			cwd,
+			encoding: "utf8",
+			timeout: 10_000,
+			windowsHide: true,
+		});
 		const trimmed = stdout.trim();
 		if (trimmed.length === 0) {
 			commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
@@ -52,7 +62,14 @@ function resolveCommandConfig(command: string, options?: ResolveConfigValueOptio
 		commandFailureRetryAt.delete(command);
 		commandValueCache.set(command, trimmed);
 		return trimmed;
-	} catch {
+	} catch (err) {
+		// The command may embed credentials inline, and execSync's message can
+		// echo the invocation and its output. Log only non-sensitive metadata.
+		const code =
+			typeof (err as NodeJS.ErrnoException | null)?.code === "string"
+				? (err as NodeJS.ErrnoException).code
+				: "unknown";
+		logger.warn("model-config: !command value resolution failed", { code });
 		commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
 		return undefined;
 	}

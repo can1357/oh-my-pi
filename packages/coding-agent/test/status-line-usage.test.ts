@@ -156,6 +156,41 @@ describe("usage status-line segment", () => {
 		expect(sparkContent).not.toContain("8%");
 	});
 
+	it("labels untiered windows with the report's plan tier (Z.AI planType)", async () => {
+		const now = Date.now();
+		const component = makeComponent(
+			[
+				{
+					provider: "zai",
+					metadata: { planType: "pro" },
+					limits: [
+						{
+							scope: { provider: "zai", windowId: "5h" },
+							window: { resetsAt: now + 30 * 60_000 },
+							amount: { usedFraction: 0.21 },
+						},
+						{
+							scope: { provider: "zai", windowId: "7d" },
+							window: { resetsAt: now + 141 * 3_600_000 },
+							amount: { usedFraction: 0.05 },
+						},
+					],
+				},
+			],
+			{ provider: "zai" },
+		);
+
+		component.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const content = stripVTControlCharacters(component.getTopBorder(200).content);
+
+		expect(content).toContain("pro");
+		expect(content).toContain("5h");
+		expect(content).toContain("21%");
+		expect(content).toContain("7d");
+		expect(content).toContain("5%");
+	});
+
 	it("keeps windows within the preferred untiered scope", async () => {
 		const component = makeComponent([
 			{

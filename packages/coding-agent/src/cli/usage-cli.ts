@@ -214,6 +214,7 @@ function formatUnitValue(value: number, unit: UsageUnit): string {
 const UNIT_SUFFIX: Record<UsageUnit, string> = {
 	tokens: " tokens",
 	requests: " requests",
+	credits: " credits",
 	minutes: " min",
 	bytes: " bytes",
 	percent: "",

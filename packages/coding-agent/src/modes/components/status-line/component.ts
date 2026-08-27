@@ -1517,7 +1517,12 @@ export class StatusLineComponent implements Component {
 				const modelId = normalizeUsageScopeValue("modelId" in scope ? scope.modelId : undefined);
 				if (modelId && modelId !== activeModelId) continue;
 				const rawTier = "tier" in scope ? scope.tier : undefined;
-				const tier = typeof rawTier === "string" && rawTier.trim() ? rawTier.trim() : undefined;
+				const rawPlanType = usageReport.metadata?.planType;
+				// Scoped tiers (Claude Fable, Codex Spark) win; plan-wide tiers
+				// (Z.AI `pro`, Codex `pro`) label otherwise-untiered windows.
+				const tier =
+					(typeof rawTier === "string" && rawTier.trim() ? rawTier.trim() : undefined) ??
+					(typeof rawPlanType === "string" && rawPlanType.trim() ? rawPlanType.trim() : undefined);
 				const normalizedTier = normalizeUsageScopeValue(tier);
 				const scopeKey = `${modelId ?? ""}\0${normalizedTier ?? ""}`;
 				// Exact-model groups outrank provider-wide groups; within either
