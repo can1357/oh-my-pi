@@ -2604,6 +2604,65 @@ describe("compact() remote compaction failure handling", () => {
 		expect(remote.requestTarget).not.toBe(remote.replayTarget);
 	});
 
+	test("persists the host-resolved active request target instead of the side-model derivation", async () => {
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
+		const activeModel = makeOpenAiModel({
+			id: "gpt-5.4-copilot",
+			provider: "github-copilot",
+			baseUrl: "https://api.githubcopilot.com",
+		});
+		// The active Copilot credential routes at an enterprise endpoint the
+		// separate OpenAI compaction key cannot resolve.
+		const hostTarget = getOpenAIResponsesReferenceTarget(
+			activeModel,
+			undefined,
+			"https://api.enterprise.githubcopilot.com",
+		);
+		const sideKeyTarget = getOpenAIResponsesReferenceTarget(activeModel);
+		expect(hostTarget).not.toBe(sideKeyTarget);
+		const compactionModel = makeOpenAiModel({ id: "gpt-5-mini", remoteCompaction: { enabled: true } });
+		const fetchMock: FetchImpl = async () =>
+			Response.json({ output: [{ type: "compaction_summary", summary: "compact" }] });
+
+		const v1 = await compact(makePreparation(), compactionModel, "sk-openai-side-key", undefined, undefined, {
+			fetch: fetchMock,
+			runtimeModel: activeModel,
+			activeRequestTarget: hostTarget,
+		});
+		const preserved = getPreservedOpenAiRemoteCompactionData(v1.preserveData);
+		if (!preserved) throw new Error("expected preserved remote compaction data");
+		expect(preserved.requestTarget).toBe(hostTarget);
+
+		const v2Preparation = makePreparation();
+		v2Preparation.settings = { ...v2Preparation.settings, remoteStreamingV2Enabled: true };
+		const v2Model = makeOpenAiModel({
+			remoteCompaction: {
+				enabled: true,
+				v2StreamingEnabled: true,
+				v2Endpoint: "https://compact.example/v1/responses",
+			},
+		});
+		const v2 = await compact(v2Preparation, v2Model, "sk-openai-side-key", undefined, undefined, {
+			fetch: async () =>
+				sseResponse([
+					{
+						type: "response.output_item.done",
+						output_index: 0,
+						item: { type: "compaction", encrypted_content: "enc_v2_host_target" },
+					},
+					{
+						type: "response.completed",
+						response: { usage: { input_tokens: 55, output_tokens: 3, total_tokens: 58 } },
+					},
+				]),
+			runtimeModel: activeModel,
+			activeRequestTarget: hostTarget,
+		});
+		const remote = getCompactionV2PreserveData(v2.preserveData);
+		if (!remote) throw new Error("expected preserved V2 compaction data");
+		expect(remote.requestTarget).toBe(hostTarget);
+	});
+
 	test("streams V2 compaction before V1 when both settings and model opt in", async () => {
 		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
 		const compactionItem = { type: "compaction", encrypted_content: "enc_v2" };

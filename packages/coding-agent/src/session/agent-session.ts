@@ -1150,6 +1150,7 @@ export class AgentSession {
 			sessionMessageAlreadyPersisted: message => this.#sessionMessageAlreadyPersisted(message),
 			setModelWithProviderSessionReset: model => this.#setModelWithProviderSessionReset(model),
 			resetCurrentResponsesProviderSession: reason => this.#resetCurrentResponsesProviderSession(reason),
+			resyncActiveRequestTarget: () => this.#resyncActiveRequestTarget(),
 			maybeAutoRedeemCodexReset: activeBlockUnblockAtMs => this.#maybeAutoRedeemCodexReset(activeBlockUnblockAtMs),
 			runAutoCompaction: (reason, willRetry, deferred, allowDefer, options) =>
 				this.#maintenance.runAutoCompaction(reason, willRetry, deferred, allowDefer, options),
@@ -7594,13 +7595,34 @@ export class AgentSession {
 	 * initial resolved endpoint is the first chance to re-expand history bound to
 	 * a different one.
 	 */
-	#syncActiveRequestTarget(model: Model, apiKey: string | undefined): void {
+	#syncActiveRequestTarget(model: Model, apiKey: string | undefined): boolean {
 		const requestTarget = getOpenAIResponsesRequestTarget(model, apiKey, {
 			openrouterVariant: resolveSettingsOpenrouterVariant(this.settings),
 		});
-		if (this.#activeRequestTarget === requestTarget) return;
+		if (this.#activeRequestTarget === requestTarget) return false;
 		this.#activeRequestTarget = requestTarget;
 		this.agent.replaceMessages(this.buildDisplaySessionContext().messages);
+		return true;
+	}
+
+	/**
+	 * Re-resolve the request target between turns. The stream's resolver rotates
+	 * to a sibling credential on an auth or quota failure, and providers that
+	 * derive their endpoint from the credential land somewhere the preflight
+	 * fingerprint never described, so the retry must replay history rebuilt for
+	 * the endpoint it will actually reach.
+	 */
+	async #resyncActiveRequestTarget(): Promise<boolean> {
+		const model = this.model;
+		if (!model) return false;
+		let apiKey: string | undefined;
+		try {
+			apiKey = await this.#modelRegistry.getApiKey(model, this.sessionId);
+		} catch {
+			return false;
+		}
+		if (!apiKey) return false;
+		return this.#syncActiveRequestTarget(model, apiKey);
 	}
 
 	async #setModelWithProviderSessionReset(model: Model): Promise<void> {

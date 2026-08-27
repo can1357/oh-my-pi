@@ -150,6 +150,14 @@ export interface TurnRecoveryHost {
 	setModelWithProviderSessionReset(model: Model): Promise<void>;
 	resetCurrentResponsesProviderSession(reason: string): void;
 	/**
+	 * Re-resolve the credential-resolved request target and, when it moved,
+	 * rebuild the in-memory context from persisted history. Returns whether the
+	 * target changed. An auth or quota rotation can land on a sibling credential
+	 * whose endpoint differs, so history bound to the previous one must be
+	 * re-expanded before the retry is issued.
+	 */
+	resyncActiveRequestTarget(): Promise<boolean>;
+	/**
 	 * Spend a saved Codex reset for the blocked pool, if eligible.
 	 * `activeBlockUnblockAtMs` is the absolute unblock time parsed from the
 	 * live usage-limit error — authoritative for the active account when the
@@ -1989,6 +1997,7 @@ export class TurnRecovery {
 
 		if (staleOpenAIResponsesReplayError) {
 			this.#host.resetCurrentResponsesProviderSession("stale replay error");
+			await this.#host.resyncActiveRequestTarget();
 		}
 
 		if (!retryBudgetExhausted && !staleOpenAIResponsesReplayError && recordedUsageLimitOutcome) {

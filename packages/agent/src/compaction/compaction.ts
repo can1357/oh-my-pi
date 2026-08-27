@@ -719,6 +719,13 @@ export interface SummaryOptions {
 	 * exactly as the live stream does or replay fails closed on the next turn.
 	 */
 	openrouterVariant?: string;
+	/**
+	 * Fingerprint of the endpoint the ACTIVE session model resolved to. Compaction
+	 * may run through a side model whose credential cannot resolve the active
+	 * provider's endpoint at all, so the host supplies the target it already
+	 * resolved instead of letting the side key derive a wrong one.
+	 */
+	activeRequestTarget?: string;
 	/** Optional fetch implementation threaded into remote compaction calls. */
 	fetch?: FetchImpl;
 	/**
@@ -1642,6 +1649,8 @@ export async function compact(
 		codexCompaction: options?.codexCompaction,
 		tools: options?.tools,
 		runtimeModel: options?.runtimeModel,
+		openrouterVariant: options?.openrouterVariant,
+		activeRequestTarget: options?.activeRequestTarget,
 		fetch: options?.fetch,
 		completeImpl: options?.completeImpl,
 	};
@@ -1719,9 +1728,11 @@ export async function compact(
 				const remote = await withAuth(
 					apiKey,
 					key => {
-						v2RequestTarget = getOpenAIResponsesRequestTarget(summaryOptions.runtimeModel ?? model, key, {
-							openrouterVariant: summaryOptions.openrouterVariant,
-						});
+						v2RequestTarget =
+							summaryOptions.activeRequestTarget ??
+							getOpenAIResponsesRequestTarget(summaryOptions.runtimeModel ?? model, key, {
+								openrouterVariant: summaryOptions.openrouterVariant,
+							});
 						return requestCompactionV2Streaming(model, key, request, signal, {
 							fetch: summaryOptions.fetch,
 							providerSessionState: summaryOptions.providerSessionState,
@@ -1789,9 +1800,11 @@ export async function compact(
 								providerSessionState: summaryOptions.providerSessionState,
 								codexCompaction: summaryOptions.codexCompaction,
 								replayTarget: getOpenAIResponsesReferenceTarget(summaryOptions.runtimeModel ?? model),
-								requestTarget: getOpenAIResponsesRequestTarget(summaryOptions.runtimeModel ?? model, key, {
-									openrouterVariant: summaryOptions.openrouterVariant,
-								}),
+								requestTarget:
+									summaryOptions.activeRequestTarget ??
+									getOpenAIResponsesRequestTarget(summaryOptions.runtimeModel ?? model, key, {
+										openrouterVariant: summaryOptions.openrouterVariant,
+									}),
 							},
 						),
 					{ signal },

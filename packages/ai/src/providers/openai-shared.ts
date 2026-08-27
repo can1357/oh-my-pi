@@ -2063,9 +2063,7 @@ export function assertCompatibleCompactionHistory(
 		return;
 	}
 	if (!providerPayload.items.some(item => item.type === "compaction" || item.type === "compaction_summary")) return;
-	throw new AIError.ValidationError(
-		"Target-bound remote compaction history is incompatible with the active Responses target; rebuild the session context for the effective target before retrying",
-	);
+	throw new AIError.ValidationError(AIError.INCOMPATIBLE_COMPACTION_TARGET_MESSAGE);
 }
 
 /**
