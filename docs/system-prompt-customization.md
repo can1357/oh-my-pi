@@ -135,6 +135,28 @@ quotes, `<title>...</title>` markers, and terminal punctuation, and treats
 12 words is rejected rather than truncated. Empty, deferred, or rejected output
 leaves the session unnamed, so a later eligible title attempt can name it.
 
+## Compact profile
+
+`promptProfile: compact` renders a second bundled instruction template instead of
+the default one. Unlike `SYSTEM.md`, it is maintained in the repository, so a
+session using it keeps receiving prompt improvements rather than freezing a copy.
+
+It keeps the parts a model cannot infer: the authority and safety contract, the
+specialized-tool mapping, the stop/ask/verify rules, the edit-and-test loop, and
+the `xd://` protocol explanation. It drops the personality block, the examples,
+the internal-URL catalog, and the long workflow and delegation prose. Every
+generated surface is unchanged: skills, rules, context files, tool inventory,
+`xd://` devices, and the project/environment footer all render exactly as they do
+under `full`.
+
+The profile targets local and small-context models, where the fixed prompt and
+the tool schemas can leave little room for the conversation. Pair it with
+`tools.xdevDocs: catalog` and `tools.xdevForceMount` to move tool schemas out of
+the request as well.
+
+`SYSTEM.md` and `--system-prompt` take precedence: they replace the instruction
+template outright, so the profile has nothing left to choose.
+
 ## Full provider-facing replacement (SDK only)
 
 `CreateAgentSessionOptions.systemPrompt` is a different, lower-level API. A string or array replaces the fully rendered default blocks; a callback receives the rendered block array and returns its replacement. This can omit all generated context and safety blocks.
@@ -146,6 +168,7 @@ The CLI flags and files do **not** set this property: they set `customSystemProm
 | Goal                                                                                   | Use                                                                      |
 | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
 | Add instructions while keeping the complete default prompt                             | `APPEND_SYSTEM.md` or `--append-system-prompt`                           |
+| Shorten the default instruction template but keep receiving its updates                | `promptProfile: compact`                                                 |
 | Replace the default instruction template but keep generated context, skills, and rules | `SYSTEM.md` or `--system-prompt`                                         |
 | Replace every provider-facing system block                                             | SDK `CreateAgentSessionOptions.systemPrompt`                             |
 | Customize automatic session titles                                                     | `TITLE_SYSTEM.md`                                                        |

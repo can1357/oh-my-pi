@@ -1498,6 +1498,23 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	promptProfile: {
+		type: "enum",
+		values: ["full", "compact"] as const,
+		default: "full",
+		ui: {
+			tab: "model",
+			group: "Prompt",
+			label: "Prompt Profile",
+			description:
+				"Which bundled instruction template to render. Compact drops the examples, the internal-URL catalog, and the long workflow and delegation prose for a short contract, and keeps every generated surface: skills, rules, context files, tool inventory, and the xd:// protocol. For local models where the prompt competes with the conversation for a small context window. A custom SYSTEM.md replaces the template outright and ignores this.",
+			options: [
+				{ value: "full", label: "Full", description: "The default instruction template." },
+				{ value: "compact", label: "Compact", description: "Short contract; same generated surfaces." },
+			],
+		},
+	},
+
 	includeModelInPrompt: {
 		type: "boolean",
 		default: true,
@@ -6088,6 +6105,7 @@ export type TreeFilterMode = SettingValue<"treeFilterMode">;
 
 /** Personality preset - derived from schema */
 export type Personality = SettingValue<"personality">;
+export type PromptProfile = SettingValue<"promptProfile">;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Typed Group Definitions
