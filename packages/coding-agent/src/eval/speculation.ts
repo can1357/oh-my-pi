@@ -1,36 +1,6 @@
 /**
- * Speculative programmatic tool calling (sPTC) for eval cells.
- *
- * While the model is still streaming an `eval` tool call, the partially
- * generated cell source already contains complete, fully-literal calls to
- * high-latency bridge tools. This launches those early and parks the promise so
- * the real call inside the cell resolves against work that started seconds
- * before the cell existed. After Zhang, "Speculative Programmatic Tool Calling"
- * (2026), https://alexzhang13.github.io/blog/2026/spec-ptc/
- *
- * Scope is deliberately narrower than the paper's, because our bridge surface is
- * not the paper's pure `llm_query`:
- *
- * - `completion()` IS speculated. It is a stateless one-shot with no tools and
- *   no history, so an unclaimed speculation costs tokens and nothing else.
- * - `agent()` is NOT, despite being the higher-latency call. A subagent can edit
- *   files, so launching one for a branch the cell never takes would mutate the
- *   repository. Read-only agents could be added once the target agent is
- *   resolvable from the call site and checkable against the roster.
- * - Every other bridge tool (`write`, `edit`, `bash`, ...) is side-effecting by
- *   definition and is never a candidate.
- *
- * Only calls whose arguments are literals are considered, "Case 1" in the paper.
- * Variable dependencies would need a shadow REPL, which the JS kernel cannot
- * cheaply provide: cell state lives on a Worker's `globalThis` (see
- * `eval/js/shared/rewrite-imports.ts`, which demotes `const`/`let` to `var` for
- * exactly that reason), and `node:vm` is off the table under Bun because
- * `Worker.terminate()` mid-`runInContext` crashes the parent
- * (`eval/js/shared/indirect-eval.ts`).
- *
- * A speculation is never load-bearing. Every failure mode (miss, reject, abort,
- * budget exhaustion) falls back to running the real call normally, so the worst
- * outcome is wasted tokens rather than a wrong or failed cell.
+ * Speculative programmatic tool calling: launch fully-literal `completion()` calls found
+ * in a still-streaming eval cell. Never load-bearing; every failure runs the real call.
  */
 
 import type { AgentEvent } from "@oh-my-pi/pi-agent-core";
@@ -40,7 +10,10 @@ import { logger } from "@oh-my-pi/pi-utils";
 /** Cell languages whose source this scanner understands. */
 export type SpeculationLanguage = "js" | "py";
 
-/** The single bridge tool speculated today. See the module docstring. */
+/**
+ * The only speculated bridge tool: stateless, so an unclaimed launch wastes only tokens.
+ * Never add `agent()` or a writing tool; they mutate the repo on untaken branches.
+ */
 export const SPECULATED_BRIDGE_TOOL = "__completion__";
 
 /** A streamed eval cell worth scanning. */
@@ -49,15 +22,7 @@ export interface StreamedEvalCell {
 	language: SpeculationLanguage;
 }
 
-/**
- * Recover the in-progress eval cell from a streamed assistant event, or
- * `undefined` when the event is not a partially-written eval call.
- *
- * Mirrors `StreamingEditGuard`'s access pattern: the provider fills
- * `toolCall.arguments` progressively as the JSON arrives, so a half-written cell
- * is readable here well before the tool runs. Split out from the session so the
- * event-shape handling is directly testable, leaving only the call site untested.
- */
+/** Recover the in-progress eval cell from a streamed assistant event, if it is one. */
 export function streamedEvalCell(event: AgentEvent): StreamedEvalCell | undefined {
 	if (event.type !== "message_update" || event.message.role !== "assistant") return undefined;
 	const assistantEvent = event.assistantMessageEvent;
@@ -92,10 +57,8 @@ export interface SpeculatableCall {
 const IDENT_CHAR = /[A-Za-z0-9_$]/;
 
 /**
- * Stable identity for a speculated call. Two textually different call sites with
- * identical arguments share a key; the store distinguishes them by occurrence,
- * because a completion is non-deterministic and one speculated result must not
- * satisfy two calls.
+ * Stable identity for a speculated call. Equal-argument call sites share a key and the
+ * store separates them by occurrence, so one result never satisfies two calls.
  */
 export function speculationKey(name: string, args: Record<string, unknown>): string {
 	const keys = Object.keys(args).sort();
@@ -106,30 +69,13 @@ export function speculationKey(name: string, args: Record<string, unknown>): str
 interface StringLiteral {
 	/** Index just past the closing quote. */
 	end: number;
-	/**
-	 * Literal text, present only when the source needs no unescaping. Absent
-	 * means the terminator was located but the value is not reproducible, so the
-	 * span may be skipped and must not be speculated on.
-	 */
+	/** Literal text, present only when the source needs no unescaping. */
 	value?: string;
 }
 
 /**
- * Read a string literal starting at `start`.
- *
- * Three outcomes, and the distinction is load-bearing:
- *
- * - a literal with `value`: safe to speculate on.
- * - a literal without `value`: terminator found, contents not reproducible
- *   without an escape decoder. The caller skips the span.
- * - `undefined`: the terminator could not be located at all, because the string
- *   is still streaming or because a template interpolation can nest quotes,
- *   braces, and further templates. The caller MUST stop scanning rather than
- *   walk into the body, which would read string contents as code.
- *
- * Escapes are never decoded: a decoder that disagreed with the runtime by one
- * character would key the speculation differently from the real call, wasting it
- * silently. They are consumed only to keep the terminator search aligned.
+ * Read a string literal at `start`. With `value` it is safe to speculate on; without,
+ * the terminator was found but needs decoding; `undefined` means the caller must stop.
  */
 function readStringLiteral(code: string, start: number, language: SpeculationLanguage): StringLiteral | undefined {
 	const quote = code[start];
@@ -183,16 +129,8 @@ interface LiteralCall {
 }
 
 /**
- * Parse `("literal")` starting at `afterIdent`, the index just past the callee
- * name. Anything else, including a second argument, yields `undefined`.
- *
- * The single-argument restriction keeps the reconstructed bridge args provably
- * identical to the prelude's. `completion(prompt)` with no options resolves to
- * exactly `{ prompt }` (`optionsArg` returns `{}` for a nil options value, see
- * `eval/js/shared/prelude.txt`), so the key computed here matches the key
- * computed at dispatch. Supporting an options object means mirroring
- * `optionsArg` normalization, and a mismatch there is a silent waste rather
- * than a visible error.
+ * Parse `("literal")` starting at `afterIdent`. A second argument yields `undefined`:
+ * only a lone prompt provably reconstructs the prelude's bridge args.
  */
 function readLiteralCall(code: string, afterIdent: number, language: SpeculationLanguage): LiteralCall | undefined {
 	let index = skipWhitespace(code, afterIdent);
@@ -206,16 +144,8 @@ function readLiteralCall(code: string, afterIdent: number, language: Speculation
 }
 
 /**
- * Scan cell source for complete, fully-literal speculatable calls, in source
- * order.
- *
- * Safe on a truncated prefix. An unclosed argument list yields nothing for that
- * call site, and a string whose terminator cannot be located stops the scan
- * outright rather than walking into its body: a cell that builds a meta-prompt
- * containing `completion('...')` would otherwise phantom-launch a billable call
- * for text the runtime never runs. Stopping costs nothing, because `observe`
- * re-scans the whole prefix on the next delta, by which point the string has
- * usually closed.
+ * Scan cell source for complete, fully-literal speculatable calls, in source order.
+ * Safe on a truncated prefix; `observe` re-scans the whole prefix on the next delta.
  */
 export function findSpeculatableCalls(code: string, language: SpeculationLanguage): SpeculatableCall[] {
 	const found: SpeculatableCall[] = [];
@@ -287,14 +217,7 @@ export interface EvalSpeculationOptions {
 	maxPerTurn: () => number;
 }
 
-/**
- * Per-session store of in-flight speculations, keyed by call identity and
- * claimed in occurrence order.
- *
- * Lifetime is one turn: {@link reset} aborts everything still unclaimed, so a
- * cell that never ran the speculated call stops paying for it as soon as the
- * turn settles.
- */
+/** Per-session store of in-flight speculations. Lifetime is one turn; {@link reset} aborts unclaimed ones. */
 export class EvalSpeculationStore {
 	readonly #run: SpeculationRunner;
 	readonly #isEnabled: () => boolean;
@@ -314,11 +237,8 @@ export class EvalSpeculationStore {
 	}
 
 	/**
-	 * Scan a partial cell and launch any call that is newly complete.
-	 *
-	 * Called once per streamed delta, so it must be idempotent: a key already
-	 * launched as many times as it appears in the source is skipped, and the
-	 * count grows only as the model writes more call sites.
+	 * Scan a partial cell and launch any newly complete call. Runs once per delta, so
+	 * a key already launched as often as it appears in the source is skipped.
 	 */
 	observe(code: string, language: SpeculationLanguage): void {
 		if (!this.#isEnabled()) return;
@@ -358,9 +278,8 @@ export class EvalSpeculationStore {
 	}
 
 	/**
-	 * Claim a speculated result for a real call, or `undefined` when none is
-	 * parked. Each entry is claimable once: completions are non-deterministic, so
-	 * two identical call sites must not collapse onto one result.
+	 * Claim a parked result, or `undefined` when none matches. Each entry is claimable
+	 * once: completions are non-deterministic, so two call sites must not share a result.
 	 */
 	claim(name: string, args: Record<string, unknown>): Promise<SpeculationClaim> | undefined {
 		if (!this.#isEnabled()) return undefined;
@@ -405,13 +324,8 @@ export class EvalSpeculationStore {
 }
 
 /**
- * Store lookup keyed by the `ToolSession` a speculation dispatches through.
- *
- * Deliberately a side table rather than a `ToolSession` member. That interface
- * is shared by every tool, and widening it shifted type instantiation elsewhere
- * in the package badly enough to break inference in an unrelated test's
- * heterogeneous `new Map([...])`. Keeping the coupling here confines it to the
- * eval bridge, and a weak key means the entry dies with the session.
+ * Store lookup keyed by the `ToolSession` a speculation dispatches through. A side
+ * table, not a `ToolSession` member, to keep that shared interface unwidened.
  */
 const STORES_BY_SESSION = new WeakMap<object, EvalSpeculationStore>();
 
