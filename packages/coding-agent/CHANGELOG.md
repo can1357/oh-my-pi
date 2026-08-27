@@ -5,6 +5,7 @@
 ### Added
 
 - Merge Gateway can now be connected with `/login merge-gateway` or `MERGE_GATEWAY_API_KEY`, exposing its coding-agent-compatible catalog; schema-bound Merge subagents fail closed and use yield-only correction after invalid results.
+- Transcript usage rows now show the total prompt-to-yield time (Δ + clock, including tool calls) after the turn timestamp, opt-in via `display.showTurnTime` (off by default).
 - `omp usage` now shows Z.AI GLM Coding Plan credit quotas (5h + weekly) with the subscribed plan tier.
 - The usage status line now labels untiered quota windows with the report's plan tier, surfacing Z.AI Coding Plan (`pro`) and Codex plan names next to the 5h/7d percentages.
 
