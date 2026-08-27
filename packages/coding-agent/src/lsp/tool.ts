@@ -992,6 +992,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			}
 			const aggregatedSymbols: SymbolInformation[] = [];
 			const respondingServers = new Set<string>();
+			const serverFailures: string[] = [];
 			for (const [workspaceServerName, workspaceServerConfig] of servers) {
 				throwIfAborted(signal);
 				try {
@@ -1007,21 +1008,40 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						{ query: normalizedQuery },
 						signal,
 					)) as SymbolInformation[] | null;
-					if (!workspaceResult || workspaceResult.length === 0) {
-						continue;
-					}
 					respondingServers.add(workspaceServerName);
-					aggregatedSymbols.push(...filterWorkspaceSymbols(workspaceResult, normalizedQuery));
+					if (workspaceResult && workspaceResult.length > 0) {
+						aggregatedSymbols.push(...filterWorkspaceSymbols(workspaceResult, normalizedQuery));
+					}
 				} catch (err) {
 					if (err instanceof ToolAbortError || signal?.aborted) {
 						throw err;
 					}
+					const message = replaceTabs(err instanceof Error ? err.message : String(err));
+					serverFailures.push(`  ${workspaceServerName}: ${message}`);
 				}
+			}
+			const serverFailureSection =
+				serverFailures.length > 0 ? `\nServer failures:\n${serverFailures.join("\n")}` : "";
+			if (respondingServers.size === 0) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Workspace symbol search failed: all language servers failed${serverFailureSection}`,
+						},
+					],
+					details: { action, serverName: "", success: false, request: params },
+				};
 			}
 			const dedupedSymbols = dedupeWorkspaceSymbols(aggregatedSymbols);
 			if (dedupedSymbols.length === 0) {
 				return {
-					content: [{ type: "text", text: `No symbols matching "${normalizedQuery}"` }],
+					content: [
+						{
+							type: "text",
+							text: `No symbols matching "${normalizedQuery}"${serverFailureSection}`,
+						},
+					],
 					details: {
 						action,
 						serverName: Array.from(respondingServers).join(", "),
@@ -1040,7 +1060,15 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				content: [
 					{
 						type: "text",
-						text: `Found ${dedupedSymbols.length} symbol(s) matching "${normalizedQuery}":\n${lines.map(l => `  ${l}`).join("\n")}${truncationLine}`,
+						text:
+							"Found " +
+							dedupedSymbols.length +
+							' symbol(s) matching "' +
+							normalizedQuery +
+							'":\n' +
+							lines.map(line => `  ${line}`).join("\n") +
+							truncationLine +
+							serverFailureSection,
 					},
 				],
 				details: {
