@@ -101,14 +101,14 @@ describe("selector setting side effects", () => {
 				const setShowImages = vi.fn();
 				const setImagesVisible = vi.fn();
 				const clearInlineImages = vi.fn();
-				const resetDisplay = vi.fn();
+				const requestRender = vi.fn();
 				const tool = Object.create(ToolExecutionComponent.prototype) as ToolExecutionComponent;
 				tool.setShowImages = setShowImages;
 				const assistant = Object.create(AssistantMessageComponent.prototype) as AssistantMessageComponent;
 				assistant.setImagesVisible = setImagesVisible;
 				const controller = new SelectorController({
 					chatContainer: { children: [tool, assistant] },
-					ui: { clearInlineImages, resetDisplay },
+					ui: { clearInlineImages, requestRender },
 				} as unknown as InteractiveModeContext);
 
 				controller.handleSettingChange(id, visible);
@@ -116,10 +116,10 @@ describe("selector setting side effects", () => {
 				expect(setShowImages).toHaveBeenCalledWith(visible);
 				expect(setImagesVisible).toHaveBeenCalledWith(visible);
 				expect(clearInlineImages).toHaveBeenCalledTimes(visible ? 0 : 1);
-				expect(resetDisplay).toHaveBeenCalledTimes(1);
+				expect(requestRender).toHaveBeenCalledTimes(1);
 				if (!visible) {
 					expect(clearInlineImages.mock.invocationCallOrder[0]).toBeLessThan(
-						resetDisplay.mock.invocationCallOrder[0],
+						requestRender.mock.invocationCallOrder[0],
 					);
 				}
 			});
@@ -139,12 +139,12 @@ describe("selector setting side effects", () => {
 			const assistant = Object.create(AssistantMessageComponent.prototype) as AssistantMessageComponent;
 			assistant.setToolResultImagesVisible = setToolResultImagesVisible;
 			const clearInlineImages = vi.fn();
-			const resetDisplay = vi.fn();
+			const requestRender = vi.fn();
 			const ctx = {
 				hideToolActivity: !hidden,
 				toolOutputExpanded: true,
 				chatContainer: { children: [tool, readGroup, assistant], setToolActivityVisible },
-				ui: { clearInlineImages, resetDisplay },
+				ui: { clearInlineImages, requestRender },
 			};
 			const controller = new SelectorController(ctx as unknown as InteractiveModeContext);
 
@@ -157,10 +157,10 @@ describe("selector setting side effects", () => {
 			expect(setReadExpanded).toHaveBeenCalledTimes(hidden ? 0 : 1);
 			expect(ctx.toolOutputExpanded).toBe(hidden);
 			expect(clearInlineImages).toHaveBeenCalledTimes(hidden ? 1 : 0);
-			expect(resetDisplay).toHaveBeenCalledTimes(1);
+			expect(requestRender).toHaveBeenCalledTimes(1);
 			if (hidden) {
 				expect(clearInlineImages.mock.invocationCallOrder[0]).toBeLessThan(
-					resetDisplay.mock.invocationCallOrder[0],
+					requestRender.mock.invocationCallOrder[0],
 				);
 			}
 		});

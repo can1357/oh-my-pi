@@ -779,6 +779,13 @@ describe("wave 3 commands", () => {
 		expect(output[0]).toContain("TUI editor");
 	});
 
+	it("/todo expand: returns HUD-only usage message in ACP mode", async () => {
+		const { output, runtime } = createRuntime();
+		const result = await executeAcpBuiltinSlashCommand("/todo expand", runtime);
+		expect(result).toEqual({ consumed: true });
+		expect(output[0]).toContain("interactive HUD");
+	});
+
 	it("/todo unknown: returns usage message", async () => {
 		const { output, runtime } = createRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/todo foobar", runtime);

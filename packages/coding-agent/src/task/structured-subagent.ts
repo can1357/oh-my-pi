@@ -252,7 +252,7 @@ export async function resolveEffectiveSubagentPolicy(
 	assertPlanControlsAllowed(request, planMode);
 	assertDepthAndSpawnAllowed(request, agentName);
 
-	const discovery = await discoverAgents(request.session.cwd);
+	const discovery = await discoverAgents(request.session.cwd, undefined, request.session.effectiveExtensionRoots?.());
 	const agent = getAgent(discovery.agents, agentName);
 	if (!agent) {
 		const available = discovery.agents.map(candidate => candidate.name).join(", ") || "none";
@@ -439,7 +439,12 @@ function buildExecutorOptions(
 		workspaceTree: session.workspaceTree,
 		promptTemplates: session.promptTemplates,
 		rules: session.rules,
+		// Root policy and module paths have separate jobs: the live policy drives
+		// recursive sub-discovery; preloaded paths only avoid re-scanning/reusing
+		// parent-bound extension instances while constructing the child.
+		extensionRoots: session.effectiveExtensionRoots?.bind(session),
 		preloadedExtensionPaths: restrictToolNames ? [] : session.extensionPaths,
+		preloadedPreparedExtensions: restrictToolNames ? [] : session.preparedExtensions,
 		preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
 		localProtocolOptions,
 		parentArtifactManager: session.getArtifactManager?.() ?? undefined,
@@ -555,6 +560,10 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 	let requiresRecoveryArtifacts = false;
 	let completedSuccessfully = false;
 	let deferredCleanup: Promise<void> | undefined;
+	const onSubprocessResult =
+		request.invocationKind === "eval"
+			? (result: SingleResult) => request.session.recordEvalSubagentUsage?.(result.usage?.output ?? 0)
+			: undefined;
 	try {
 		const id = await reserveStructuredSubagentId(request.session, {
 			...request.identity,
@@ -578,19 +587,24 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				);
 			}
 		}
-		const result = !isolationContext
-			? await runSubprocess(baseOptions)
-			: await runIsolatedSubprocess({
-					baseOptions,
-					context: isolationContext,
-					preferredBackend: parseIsolationMode(request.session.settings.get("task.isolation.mode")),
-					agentId: id,
-					mergeMode: policy.mergeMode,
-					artifactsDir: lease.artifactsDir,
-					description: trimToUndefined(request.identity?.label),
-					buildCommitMessage: makeIsolationCommitMessage(request.session),
-					buildFailureResult: buildFailureResult(request, policy, id, Date.now()),
-				});
+		let result: SingleResult;
+		if (!isolationContext) {
+			result = await runSubprocess(baseOptions);
+			onSubprocessResult?.(result);
+		} else {
+			result = await runIsolatedSubprocess({
+				baseOptions,
+				context: isolationContext,
+				preferredBackend: parseIsolationMode(request.session.settings.get("task.isolation.mode")),
+				agentId: id,
+				mergeMode: policy.mergeMode,
+				artifactsDir: lease.artifactsDir,
+				description: trimToUndefined(request.identity?.label),
+				buildCommitMessage: makeIsolationCommitMessage(request.session),
+				buildFailureResult: buildFailureResult(request, policy, id, Date.now()),
+				onSubprocessResult,
+			});
+		}
 		attachStructuredOutputMetadata(result, policy.schema);
 		requiresRecoveryArtifacts =
 			policy.isIsolated &&

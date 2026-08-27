@@ -194,11 +194,27 @@ export interface ClientUsageReport {
 	installId: string;
 	/** Human-readable machine name for display surfaces. */
 	hostname?: string;
+	/** Application label for the process that burned the tokens (e.g. `omp`, `robomp`). */
+	app?: string;
 	entries: ObservedUsageEntry[];
+}
+
+/**
+ * Identity a client presents for usage attribution. Defaults to this
+ * process's install id / hostname / app label; the auth-gateway overrides it
+ * with the identity its caller sent so token burn lands on the originating
+ * machine and application instead of the gateway host.
+ */
+export interface ClientUsageIdentity {
+	installId: string;
+	hostname?: string;
+	app?: string;
 }
 
 /** Per-provider aggregate of one client's recorded usage. */
 export interface ClientProviderUsage {
+	/** Application label the usage was reported under; absent for legacy rows. */
+	app?: string;
 	provider: string;
 	requests: number;
 	inputTokens: number;

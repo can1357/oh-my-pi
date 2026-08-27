@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { encodeArchive } from "../src/ar";
 import {
 	Browser,
 	BrowserPlatform,
@@ -128,6 +129,28 @@ test("install streams and extracts stored, deflated, nested, executable, and sym
 		expect(progress.length).toBeGreaterThan(0);
 		expect(progress.at(-1)?.downloadedBytes).toBe(fixture.size);
 		expect(progress.at(-1)?.totalBytes).toBe(fixture.size);
+	} finally {
+		server.stop(true);
+	}
+});
+
+test("install extracts a member larger than the default 64 MiB archive cap", async () => {
+	// Regression for #9534: the managed Chrome-for-Testing binary (~269 MB)
+	// exceeds DEFAULT_ARCHIVE_LIMITS.maxMemberSize (64 MiB), so install() must
+	// extract with a ceiling sized for the trusted download.
+	const root = await makeRoot();
+	const bigSize = 65 * 1024 * 1024; // > 64 MiB default member cap
+	const zip = await encodeArchive("zip", [["chrome-linux64/chrome", new Uint8Array(bigSize)]]);
+	const server = Bun.serve({ port: 0, fetch: () => new Response(new Blob([zip])) });
+	try {
+		const installed = await install({
+			browser: Browser.CHROME,
+			platform: BrowserPlatform.LINUX,
+			buildId: BUILD_ID,
+			cacheDir: root,
+			baseUrl: String(server.url),
+		});
+		expect((await fs.stat(installed.executablePath)).size).toBe(bigSize);
 	} finally {
 		server.stop(true);
 	}

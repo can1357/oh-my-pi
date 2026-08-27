@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.4.1] - 2026-08-21
+
 ### Added
 
 - Restored `providerFrameBudget()` to allow callers to size archives according to the maximum frame budget the provider will send.

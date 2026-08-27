@@ -418,7 +418,7 @@ export const supportsMidConversationSystemMessages = memo((modelId: string): boo
  * Models that reliably follow the hashline line-anchored edit dialect
  * (`[path#TAG]` headers plus 1-indexed anchors). Kimi, MiMo, DeepSeek V4
  * Flash, and Step 3.7 Flash miscount anchors or drop the tag header often
- * enough that hosts fall back to a literal search-replace edit format for
+ * enough that hosts fall back to the sloppy edit format for
  * them.
  */
 export const supportsHashlineEdits = memo((modelId: string): boolean => {

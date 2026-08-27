@@ -162,6 +162,7 @@ export async function renderGalleryState(
 
 	if (state !== "streaming") {
 		component.setArgsComplete();
+		component.setExecutionStarted();
 	}
 	if (state === "success") {
 		component.updateResult(fixture.result, false);

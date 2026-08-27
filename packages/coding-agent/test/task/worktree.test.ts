@@ -667,6 +667,28 @@ describe("detachGitDir", () => {
 		expect(await runGit(wt, ["rev-parse", "omp-fetched"])).toBe(taskCommit);
 	});
 
+	it("keeps shared git metadata intact when the index cannot be read", async () => {
+		const { wt, commonDir } = await makeLinkedWorktree();
+		const iso = await copyTree(wt);
+		const gitEntry = path.join(iso, ".git");
+		const pointerBefore = await fs.readFile(gitEntry, "utf8");
+		const indexPath = await runGit(iso, ["rev-parse", "--path-format=absolute", "--git-path", "index"]);
+		const bunFile = Bun.file;
+		vi.spyOn(Bun, "file").mockImplementation(((file: string | URL, options?: BlobPropertyBag) => {
+			const handle = bunFile(file, options);
+			if (file.toString() === indexPath) {
+				vi.spyOn(handle, "bytes").mockRejectedValue(
+					Object.assign(new Error("permission denied"), { code: "EACCES" }),
+				);
+			}
+			return handle;
+		}) as typeof Bun.file);
+
+		await expect(git.detachGitDir(iso, commonDir)).rejects.toMatchObject({ code: "EACCES" });
+		expect(await fs.readFile(gitEntry, "utf8")).toBe(pointerBefore);
+		expect(await runGit(iso, ["status", "--porcelain=v1"])).toBe("");
+	});
+
 	it("leaves an already-independent full-copy checkout untouched", async () => {
 		const src = await fs.mkdtemp(path.join(os.tmpdir(), "omp-detach-src-"));
 		tempDirs.push(src);

@@ -147,6 +147,93 @@ export function isIpcSendEpipe(err: Error): boolean {
 }
 
 /**
+ * Whether an uncaught error is Bun's asynchronous `ERR_SOCKET_CLOSED` thrown
+ * from inside `node:net` internals with no application frames on the stack.
+ *
+ * Bun ≥1.4 can fire the close callback of an already-closed `node:net` socket
+ * on a fresh stack; the throw bypasses every callsite try/catch and surfaces
+ * here as a process-level uncaughtException. Closing an already-closed socket
+ * is inherently a no-op — the socket owner's own `error`/`close` handlers
+ * still drive recovery — so tearing the session down for it is pure loss.
+ * Only frameless internal stacks qualify: an `ERR_SOCKET_CLOSED` raised
+ * through application code keeps the fatal path.
+ */
+export function isInternalSocketClosedError(err: unknown): boolean {
+	if (!(err instanceof Error) || !("code" in err) || err.code !== "ERR_SOCKET_CLOSED") return false;
+	const frames = (err.stack ?? "").split("\n").slice(1);
+	if (frames.length === 0) return false;
+	let hasNetFrame = false;
+	const internal = frames.every(frame => {
+		const trimmed = frame.trim();
+		if (trimmed === "" || trimmed === "at unknown" || trimmed === "at native") return true;
+		if (!/\(node:[^)]*\)$/.test(trimmed) && !/^at node:/.test(trimmed)) return false;
+		hasNetFrame ||= trimmed.includes("node:net:");
+		return true;
+	});
+	return internal && hasNetFrame;
+}
+
+/**
+ * Detect Bun's advanced-serialization (structured-clone) IPC decode failure.
+ *
+ * When a worker subprocess spawned with `serialization: "advanced"` sends a
+ * malformed or truncated frame, Bun raises the decode failure as a
+ * process-level `uncaughtException` in the *parent* rather than routing it to
+ * the channel's `ipc()` callback (oven-sh/bun#37287). The error is a bare
+ * `TypeError: Unable to deserialize data.` whose only own property is `message`
+ * — it carries no `code`, no `syscall`, and no `stack`. Matching all four traits
+ * keeps unrelated application `TypeError`s (which always carry a populated
+ * multi-frame stack) on the fatal path, so a genuine bug is never silently
+ * swallowed.
+ *
+ * Every advanced-serialization channel in this process is an optional worker
+ * subsystem (TTS, STT, tiny-title, mnemopi embeddings, JS eval), so one
+ * worker's bad frame must fault only that worker — via its own `onExit`/error
+ * path — never tear down the whole session. Callers log-and-continue instead of
+ * taking the fatal path. Mirrors {@link classifyBrokenPipe} for the send side
+ * (#2997, #9158).
+ */
+export function isWorkerIpcDeserializeError(err: unknown): boolean {
+	return (
+		err instanceof TypeError &&
+		err.message === "Unable to deserialize data." &&
+		!err.stack &&
+		!("code" in err) &&
+		!("syscall" in err)
+	);
+}
+
+/** Recycle callbacks for the active advanced-serialization worker IPC channels. */
+const workerIpcFaultHandlers = new Set<(err: Error) => void>();
+
+/**
+ * Register a fault/recycle callback for an active advanced-serialization worker
+ * IPC channel.
+ *
+ * Bun surfaces a malformed frame as a process-global `uncaughtException`
+ * ({@link isWorkerIpcDeserializeError}) with no way to attribute it to a
+ * specific channel, so when one fires every registered handler is invoked to
+ * conservatively fault its worker — reject in-flight requests and recycle the
+ * subprocess — instead of leaving pending work to await forever. Returns an
+ * unregister function; callers MUST unregister when the worker exits.
+ */
+export function registerWorkerIpcFaultHandler(handler: (err: Error) => void): () => void {
+	workerIpcFaultHandlers.add(handler);
+	return () => workerIpcFaultHandlers.delete(handler);
+}
+
+/** Invoke every registered worker IPC fault handler, isolating handler throws. */
+function faultWorkerIpcChannels(err: Error): void {
+	for (const handler of workerIpcFaultHandlers) {
+		try {
+			handler(err);
+		} catch (handlerErr) {
+			logger.warn("Worker IPC fault handler threw", { err: handlerErr });
+		}
+	}
+}
+
+/**
  * Treat unhandled stdout EPIPE rejections as a graceful peer disconnect.
  *
  * Stdio protocol servers call this for their process lifetime so a closed
@@ -278,9 +365,37 @@ if (isMainThread) {
 			const url = inspector.url();
 			process.stderr.write(`Inspector opened: ${url}\n`);
 		})
-		.on("uncaughtException", async err => {
-			if (isExpectedCleanupError(err)) {
-				logger.warn("Ignoring expected cleanup exception", { err });
+		.on("uncaughtException", async thrown => {
+			if (isExpectedCleanupError(thrown)) {
+				logger.warn("Ignoring expected cleanup exception", { err: thrown });
+				return;
+			}
+			const err = thrown instanceof Error ? thrown : new Error(String(thrown));
+			// Bun can surface a worker IPC send race through uncaughtException
+			// instead of unhandledRejection. Apply the same optional-worker
+			// containment in either global error channel.
+			if (isIpcSendEpipe(err)) {
+				logger.warn("Ignoring EPIPE from worker IPC send; optional subsystem will self-recover", { err });
+				return;
+			}
+			// A malformed advanced-serialization frame from a worker subprocess
+			// surfaces here as a process-level uncaughtException (oven-sh/bun#37287)
+			// rather than in the channel's ipc() callback, and Bun gives no way to
+			// tell which channel produced it. Contain it to the worker layer: keep
+			// the session alive and conservatively fault every active advanced-IPC
+			// worker so its owning client rejects in-flight requests and recycles
+			// the subprocess — a worker that sent a bad frame but stays alive would
+			// otherwise never fire onExit and leave callers awaiting forever.
+			// Mirrors the ipc-send EPIPE containment below (#9158, #2997).
+			if (isWorkerIpcDeserializeError(err)) {
+				logger.warn("Malformed worker IPC frame; faulting active worker subsystems", { err });
+				faultWorkerIpcChannels(err);
+				return;
+			}
+			if (isInternalSocketClosedError(err)) {
+				logger.warn("Ignoring async ERR_SOCKET_CLOSED from node:net internals; socket owner recovers itself", {
+					err,
+				});
 				return;
 			}
 			await exitAfterFatal("Uncaught Exception", "Uncaught exception", err, Reason.UNCAUGHT_EXCEPTION);

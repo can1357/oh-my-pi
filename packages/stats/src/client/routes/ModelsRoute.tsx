@@ -18,6 +18,7 @@ import {
 	TrendEmpty,
 } from "../components/models-table-shared";
 import { formatRangeTick, rangeMeta } from "../components/range-meta";
+import { formatEstimatedCost } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import { buildModelPerformanceLookup } from "../data/view-models";
 import type { ModelPerformancePoint, ModelStats, ModelTimeSeriesPoint, TimeRange } from "../types";
@@ -266,7 +267,7 @@ function ModelsTable({
 				columns={[
 					{ label: "Model" },
 					{ label: "Requests", align: "right" },
-					{ label: "Cost", align: "right" },
+					{ label: "API-equivalent estimate", align: "right" },
 					{ label: "Tokens", align: "right" },
 					{ label: "Tokens/s", align: "right" },
 					{ label: "TTFT", align: "right" },
@@ -295,7 +296,7 @@ function ModelsTable({
 									{model.totalRequests.toLocaleString()}
 								</div>,
 								<div key="cost" className="text-right text-[var(--text-secondary)] font-mono text-sm">
-									${model.totalCost.toFixed(2)}
+									{formatEstimatedCost(model.totalCost, model.unpricedRequests)}
 								</div>,
 								<div key="tokens" className="text-right text-[var(--text-secondary)] font-mono text-sm">
 									{(model.totalInputTokens + model.totalOutputTokens).toLocaleString()}

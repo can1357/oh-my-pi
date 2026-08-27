@@ -482,7 +482,19 @@ export async function getDiagnosticsForFile(
 export enum FileFormatResult {
 	UNCHANGED = "unchanged",
 	FORMATTED = "formatted",
+	FAILED = "failed",
+	UNSUPPORTED = "unsupported",
 }
+
+/**
+ * Result from formatContent, distinguishing successful formatting
+ * (formatted or unchanged) from a failure or unsupported file type.
+ */
+export type FormatContentResult = {
+	content: string;
+	failed: boolean;
+	unsupported: boolean;
+};
 
 /**
  * Format content using LSP or custom linter client.
@@ -499,12 +511,14 @@ export async function formatContent(
 	cwd: string,
 	servers: Array<[string, ServerConfig]>,
 	signal?: AbortSignal,
-): Promise<string> {
+): Promise<FormatContentResult> {
 	if (servers.length === 0) {
-		return content;
+		// No formatters configured at all
+		return { content, failed: false, unsupported: true };
 	}
 
 	const uri = fileToUri(absolutePath);
+	let hadFailure = false;
 
 	for (const [serverName, serverConfig] of servers) {
 		try {
@@ -512,15 +526,18 @@ export async function formatContent(
 			// Use custom linter client if configured
 			if (serverConfig.createClient) {
 				const linterClient = getLinterClient(serverName, serverConfig, cwd);
-				return await linterClient.format(absolutePath, content);
+				const formattedContent = await linterClient.format(absolutePath, content);
+				return { content: formattedContent, failed: false, unsupported: false };
 			}
 
-			// Default: use LSP
+			// Default: use LSP. Initialization failures are formatter failures;
+			// a successfully initialized server without formatting support is unsupported.
 			const client = await getOrCreateClient(serverConfig, cwd, undefined, signal);
 			throwIfAborted(signal);
 
 			const caps = client.serverCapabilities;
 			if (!caps?.documentFormattingProvider) {
+				// Server exists but doesn't support formatting; not a failure
 				continue;
 			}
 
@@ -536,13 +553,23 @@ export async function formatContent(
 			)) as TextEdit[] | null;
 
 			if (!edits || edits.length === 0) {
-				return content;
+				return { content, failed: false, unsupported: false };
 			}
 
 			// Apply edits in-memory and return
-			return applyTextEditsToString(content, edits);
-		} catch {}
+			return { content: applyTextEditsToString(content, edits), failed: false, unsupported: false };
+		} catch {
+			// A formatter was available but the request failed;
+			// record the failure and try the next server
+			hadFailure = true;
+		}
 	}
 
-	return content;
+	// A failure from any applicable server takes precedence over unsupported
+	// servers when no later formatter succeeds.
+	return {
+		content,
+		failed: hadFailure,
+		unsupported: !hadFailure,
+	};
 }

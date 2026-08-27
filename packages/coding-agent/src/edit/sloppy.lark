@@ -1,32 +1,31 @@
 // Canonical grammar for the sloppy edit payload (constrained decoding).
 //
 // Shape:
-//   [path]            file header
-//   « / «*            start MATCH (one/every match)
+//   *** Begin Patch   envelope sentinel (stripped by the runtime)
+//   §relative/path    start an operation in that file (§*path: every match)
+//   §                 start another operation in the same file (§*: every match)
 //   <match lines>     current-text pattern with … gaps and selections
 //                      Preferred selection: ⟪old│new⟫; no » follows.
+//                      ＋text lines insert `text` as a new line in place.
 //                      Legacy selection: ⟪old⟫; a » starts whole REWRITE.
-//   »                 optional legacy REWRITE separator
-//   <rewrite lines>   final text; »N re-emits earlier deleted text
-//
-// A »N line is accepted in MATCH for an inline desired side; runtime checks
-// its placement and rejects legacy MATCH references.
-start: section+
-section: header op+
-header: "[" PATH "]" LF
-PATH: /[^\]\n]+/
-op: match_header match_line+ rewrite?
+//   »                 optional REWRITE separator
+//   <rewrite lines>   final text
+//   *** End Patch     envelope sentinel (stripped by the runtime)
+start: begin_patch op+ end_patch
+begin_patch: "*** Begin Patch" LF
+end_patch:   "*** End Patch" LF?
 
-match_header: "«" ALL? LF
+op: op_header match_line+ rewrite?
+op_header: "§" ALL? PATH? LF
 ALL: "*"
+PATH: /[^*§«»\n][^\n]*/
 
 rewrite: rewrite_sep rewrite_line*
 rewrite_sep: "»" LF
-rewrite_line: reemit_line | content_line | blank_line
+rewrite_line: content_line | blank_line
 
-match_line: reemit_line | content_line | blank_line
-content_line: /[^«»\n][^\n]*/ LF
-reemit_line: "»" /[1-9][0-9]*/ LF
+match_line: content_line | blank_line
+content_line: /[^§«»\n][^\n]*/ LF
 blank_line: LF
 
 %import common.LF

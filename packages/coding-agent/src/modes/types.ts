@@ -38,6 +38,7 @@ import type { HookSelectorComponent, HookSelectorOptions } from "./components/ho
 import type { StatusLineComponent } from "./components/status-line";
 import type { ToolExecutionHandle } from "./components/tool-execution";
 import type { TranscriptContainer } from "./components/transcript-container";
+import type { RecentSession } from "./components/welcome";
 import type { EventController } from "./controllers/event-controller";
 import type { LoopLimitRuntime } from "./loop-limit";
 import type { OAuthManualInputManager } from "./oauth-manual-input";
@@ -90,13 +91,14 @@ export type TodoPhase = {
 export interface InteractiveModeInitOptions {
 	suppressWelcomeIntro?: boolean;
 	clearInitialTerminalHistory?: boolean;
+	/** Recent-session rows loaded by the prepaint composer while runtime modules initialized. */
+	recentSessions?: Promise<RecentSession[] | undefined>;
 }
 
 export type InteractiveSelectorDialogOptions = ExtensionUIDialogOptions & Pick<HookSelectorOptions, "disabledIndices">;
 
 export interface RenderSessionContextOptions {
 	updateFooter?: boolean;
-	populateHistory?: boolean;
 	reuseSettledComponents?: boolean;
 	/** Tool calls whose existing live component remains the sole render owner across a rebuild. */
 	preservedLiveToolCallIds?: ReadonlySet<string>;
@@ -122,6 +124,7 @@ export interface InteractiveModeContext {
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
 	syncComposerShape(): void;
+	syncEditorSpelling(): void;
 
 	// Session access
 	session: AgentSession;
@@ -215,6 +218,8 @@ export interface InteractiveModeContext {
 	locallySubmittedUserSignatures: Set<string>;
 	lastSigintTime: number;
 	lastEscapeTime: number;
+	/** Owns Esc for every `/mcp test` that is active or whose cancellation hint may still be visible. */
+	mcpTestEscapeHandlers: Set<() => void>;
 	lastLeftTapTime: number;
 	shutdownRequested: boolean;
 	/** True once `shutdown()` has started. Read-only from the context;
@@ -330,7 +335,6 @@ export interface InteractiveModeContext {
 	addMessageToChat(
 		message: AgentMessage,
 		options?: {
-			populateHistory?: boolean;
 			imageLinks?: readonly (string | undefined)[];
 			reuseSettledComponent?: boolean;
 		},
@@ -343,6 +347,13 @@ export interface InteractiveModeContext {
 		renderChunk?: () => void,
 	): Promise<void>;
 	renderInitialMessages(options?: { preserveExistingChat?: boolean; clearTerminalHistory?: boolean }): Promise<void>;
+	/**
+	 * In-place transcript rewind: drop the rendered components at/after
+	 * `message` when none of their rows reached native scrollback. Returns
+	 * false when the caller must fall back to a destructive
+	 * `renderInitialMessages({ clearTerminalHistory: true })` replay.
+	 */
+	truncateTranscriptFromMessage(message: AgentMessage): boolean;
 	getUserMessageText(message: Message): string;
 	findLastAssistantMessage(): AssistantMessage | undefined;
 	extractAssistantText(message: AssistantMessage): string;
@@ -351,7 +362,7 @@ export interface InteractiveModeContext {
 	updateEditorBorderColor(): void;
 	rebuildChatFromMessages(options?: { reuseSettledComponents?: boolean }): void;
 	setTodos(todos: TodoItem[] | TodoPhase[]): void;
-	reloadTodos(): Promise<void>;
+	reloadTodos(source?: AgentSession): Promise<void>;
 	toggleTodoExpansion(): void;
 
 	// Command handling
@@ -407,6 +418,8 @@ export interface InteractiveModeContext {
 	showHistorySearch(): void;
 	showExtensionsDashboard(): void;
 	showAgentsDashboard(): void;
+	/** Open the fullscreen git UI, optionally pinned to a revision (`/git <rev>`). */
+	showGitUi(revision?: string): void;
 	showModelSelector(options?: { temporaryOnly?: boolean }): void;
 	showPluginSelector(mode?: "install" | "uninstall"): void;
 	showUserMessageSelector(): void;

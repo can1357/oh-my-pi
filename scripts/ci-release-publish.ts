@@ -132,6 +132,18 @@ function nativeLeafTagFromArgs(argv: readonly string[]): string | null {
 }
 
 const nativeLeafTag = nativeLeafTagFromArgs(process.argv.slice(2));
+/**
+ * Choose npm's dist-tag from a package manifest version. Unknown prereleases
+ * are rejected rather than accidentally publishing them on the stable channel.
+ */
+export function npmDistTag(version: string): string {
+	if (/^\d+\.\d+\.\d+-canary\./.test(version)) return "canary";
+	if (/^\d+\.\d+\.\d+-/.test(version)) {
+		throw new Error(`Unsupported prerelease version for npm publish: ${version}`);
+	}
+	return "latest";
+}
+
 export const packages: PublishPackage[] = [
 	{ dir: "packages/utils", kind: "typescript" },
 	{ dir: "packages/wire", kind: "typescript" },
@@ -291,6 +303,8 @@ export async function prepareNativeCorePackage(pkgDir: string, write: boolean): 
 		"native/clipboard.d.ts",
 		"native/desktop.js",
 		"native/desktop.d.ts",
+		"native/desktop-adapter.js",
+		"native/desktop-adapter.d.ts",
 		"native/loader-state.js",
 		"native/loader-state.d.ts",
 		"native/embedded-addon.js",
@@ -337,9 +351,11 @@ export async function inspectPackedTarball(tarballPath: string): Promise<PackedT
 	return { name: manifest.name, version: manifest.version, path: tarballPath };
 }
 
-async function packAndPublish(dir: string, name: string): Promise<void> {
+async function packAndPublish(dir: string, name: string, version: string): Promise<void> {
 	if (isDryRun) {
-		console.log(`DRY RUN bun pm pack && npm publish --access public (${path.relative(repoRoot, dir)})`);
+		console.log(
+			`DRY RUN bun pm pack && npm publish --access public --tag ${npmDistTag(version)} (${path.relative(repoRoot, dir)})`,
+		);
 		return;
 	}
 	console.log(`Publishing ${name}…`);
@@ -354,6 +370,7 @@ async function packAndPublish(dir: string, name: string): Promise<void> {
 		const tarball = (await fs.readdir(packDir)).find(entry => entry.endsWith(".tgz"));
 		if (!tarball) throw new Error(`bun pm pack produced no tarball for ${name} (${path.relative(repoRoot, dir)})`);
 		const packedTarball = await inspectPackedTarball(path.join(packDir, tarball));
+		const tag = npmDistTag(packedTarball.version);
 		// Preflight the exact packed version so reruns skip deterministically.
 		// Fail open on lookup errors; only a confirmed published version may skip publishing.
 		const preflight = await $`npm view ${`${packedTarball.name}@${packedTarball.version}`} version`.quiet().nothrow();
@@ -361,7 +378,7 @@ async function packAndPublish(dir: string, name: string): Promise<void> {
 			console.log(`Skipping ${packedTarball.name} (version already published)`);
 			return;
 		}
-		const result = await $`npm publish ${packedTarball.path} --access public`.quiet().nothrow();
+		const result = await $`npm publish ${packedTarball.path} --access public --tag ${tag}`.quiet().nothrow();
 		const output = `${result.stdout.toString()}${result.stderr.toString()}`.trim();
 		if (output) console.log(output);
 		if (result.exitCode !== 0) {
@@ -389,7 +406,7 @@ export function isVersionAlreadyPublished(output: string): boolean {
 }
 
 async function publishGeneratedLeafPackage(leaf: GeneratedLeafPackage): Promise<void> {
-	await packAndPublish(leaf.dir, leaf.manifest.name);
+	await packAndPublish(leaf.dir, leaf.manifest.name, leaf.manifest.version);
 }
 
 async function publishNativeLeafPackage(tag: string): Promise<void> {
@@ -414,13 +431,15 @@ async function publishNativePackage(pkg: PublishPackage): Promise<void> {
 	const pkgDir = path.join(repoRoot, pkg.dir);
 	const manifest = await prepareNativeCorePackage(pkgDir, !isDryRun);
 	const name = manifest.name ?? path.basename(pkg.dir);
+	const version = manifest.version;
+	if (typeof version !== "string") throw new Error(`Missing version in ${pkg.dir}/package.json`);
 	if (isDryRun) {
 		console.log(`DRY RUN native core manifest rewrite (${pkg.dir})`);
 		console.log(
 			JSON.stringify({ optionalDependencies: manifest.optionalDependencies, files: manifest.files }, null, "\t"),
 		);
 	}
-	await packAndPublish(pkgDir, name);
+	await packAndPublish(pkgDir, name, version);
 }
 
 async function publishPackage(pkg: PublishPackage): Promise<void> {
@@ -431,11 +450,13 @@ async function publishPackage(pkg: PublishPackage): Promise<void> {
 	const pkgDir = path.join(repoRoot, pkg.dir);
 	const manifest = await preparePackage(pkg);
 	const name = manifest.name ?? path.basename(pkg.dir);
+	const version = manifest.version;
+	if (typeof version !== "string") throw new Error(`Missing version in ${pkg.dir}/package.json`);
 	if (manifest.private) {
 		console.log(`Skipping ${name} (private)`);
 		return;
 	}
-	await packAndPublish(pkgDir, name);
+	await packAndPublish(pkgDir, name, version);
 }
 
 if (import.meta.main) {

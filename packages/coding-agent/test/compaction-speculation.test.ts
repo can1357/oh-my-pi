@@ -43,8 +43,10 @@ describe("async speculative compaction", () => {
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	let model: Model;
+	let defaultModel: Model;
 	let sessionManager: SessionManager;
 	let maintenance: SessionMaintenance;
+	let agent: Agent;
 	let events: string[];
 
 	function appendSummarizableConversation(): void {
@@ -60,7 +62,7 @@ describe("async speculative compaction", () => {
 	function createMaintenance(
 		options: { asyncEnabled?: boolean; methodOrder?: CompactionMethod[] } = {},
 	): SessionMaintenance {
-		const agent = new Agent({
+		agent = new Agent({
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 		});
 		const settings = Settings.isolated({
@@ -108,7 +110,7 @@ describe("async speculative compaction", () => {
 			disconnectFromAgent: () => {},
 			reconnectToAgent: () => {},
 			drainStrandedQueuedMessages: () => {},
-			buildDisplaySessionContext: () => ({ messages: [] }),
+			buildDisplaySessionContext: () => sessionManager.buildSessionContext(),
 			convertToLlmForSideRequest: (messages: AgentMessage[]) => messages as never,
 			obfuscateTextForProvider: (text: string | undefined) => text,
 			obfuscatePreparationForProvider: <T>(preparation: T) => preparation,
@@ -150,10 +152,12 @@ describe("async speculative compaction", () => {
 		modelRegistry = new ModelRegistry(authStorage);
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!bundled) throw new Error("Expected built-in model");
-		model = { ...bundled, contextWindow: CONTEXT_WINDOW };
+		defaultModel = { ...bundled, contextWindow: CONTEXT_WINDOW };
+		model = defaultModel;
 	});
 
 	beforeEach(() => {
+		model = defaultModel;
 		sessionManager = SessionManager.inMemory();
 		events = [];
 		appendSummarizableConversation();
@@ -202,6 +206,68 @@ describe("async speculative compaction", () => {
 		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("armed summary");
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 		expect(events).toEqual(expect.arrayContaining(["auto_compaction_start", "auto_compaction_end"]));
+	});
+
+	it("replays a user turn appended while remote compaction is in flight", async () => {
+		const bundled = getBundledModel("openai", "gpt-5");
+		if (!bundled) throw new Error("Expected built-in OpenAI model");
+		model = { ...bundled, contextWindow: CONTEXT_WINDOW };
+		authStorage.setRuntimeApiKey("openai", "test-key");
+		maintenance = createMaintenance({ methodOrder: ["remote"] });
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			started.resolve();
+			await release.promise;
+			return {
+				summary: "remote speculative summary",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+				preserveData: {
+					openaiRemoteCompaction: {
+						version: "v2",
+						provider: model.provider,
+						replacementHistory: [{ type: "compaction_summary", summary: "snapshot" }],
+						usedTokens: 1_000,
+					},
+				},
+			};
+		});
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await started.promise;
+		sessionManager.appendMessage(userMessage("post-snapshot request"));
+		sessionManager.appendMessage({
+			...assistantMessage("", model),
+			content: [{ type: "toolCall", id: "call-after-snapshot", name: "read", arguments: { path: "src/index.ts" } }],
+			stopReason: "toolUse",
+		});
+		sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "call-after-snapshot",
+			toolName: "read",
+			content: [{ type: "text", text: "file contents" }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+		release.resolve();
+		await waitForState("armed");
+
+		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+
+		expect(agent.state.messages.map(message => message.role)).toEqual([
+			"compactionSummary",
+			"user",
+			"assistant",
+			"toolResult",
+		]);
+		expect(agent.state.messages[1]).toEqual(
+			expect.objectContaining({
+				role: "user",
+				content: [{ type: "text", text: "post-snapshot request" }],
+			}),
+		);
 	});
 
 	it("discards an armed summary after a reset boundary and re-summarizes the new branch", async () => {

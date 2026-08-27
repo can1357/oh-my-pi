@@ -4,7 +4,6 @@ import {
 	autolinkSchemeScanIndex,
 	clearRenderCache,
 	Markdown,
-	mathStartIndex,
 	renderInlineMarkdown,
 	urlTokenPossible,
 } from "@oh-my-pi/pi-tui/components/markdown";
@@ -12,6 +11,7 @@ import { setTerminalTextSizing, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capab
 import { type Component, TUI } from "@oh-my-pi/pi-tui/tui";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 import { Chalk } from "@oh-my-pi/pi-utils/chalk";
+import { mathStartIndex } from "@oh-my-pi/pi-utils/math-delimiters";
 import { defaultMarkdownTheme } from "./test-themes.js";
 import { VirtualTerminal } from "./virtual-terminal.js";
 
@@ -638,233 +638,6 @@ Average Latency: 1,240 ms
 
 			const dataLine = plainLines.find(line => line.includes("1") && line.includes("2"));
 			expect(dataLine, "Should have data row").toBeTruthy();
-		});
-
-		it("locks streamed table widths only after the table enters native scrollback", () => {
-			const initial = `| Entry | Value |
-| --- | --- |
-| short-entry | R000 |`;
-			const beforeCommit = `${initial}
-| medium-width-entry | R001 |`;
-			const afterCommit = `${beforeCommit}
-| much-longer-entry-that-arrives-after-commit | R002 |`;
-			const markdown = new Markdown(initial, 0, 0, defaultMarkdownTheme);
-			markdown.transientRenderCache = true;
-
-			const topBorder = (lines: readonly string[]): string => {
-				const plain = lines.map(line => stripVTControlCharacters(line).trimEnd());
-				const border = plain.find(line => line.startsWith("+"));
-				expect(border).toBeDefined();
-				return border!;
-			};
-
-			const initialBorder = topBorder(markdown.render(80));
-			markdown.setText(beforeCommit);
-			const growingLines = markdown.render(80);
-			const growingBorder = topBorder(growingLines);
-			// Wholly-live tables retain today's natural-width behavior.
-			expect(growingBorder).not.toBe(initialBorder);
-
-			const tableStart = growingLines.findIndex(line => stripVTControlCharacters(line).trimStart().startsWith("+"));
-			markdown.setNativeScrollbackCommittedRows(tableStart + 1);
-			markdown.setText(afterCommit);
-			const lockedLines = markdown.render(80);
-			expect(topBorder(lockedLines)).toBe(growingBorder);
-			expect(lockedLines.some(line => stripVTControlCharacters(line).includes("R002"))).toBe(true);
-
-			// Finalization must not swap in a canonical full-content layout from L2.
-			markdown.transientRenderCache = false;
-			expect(topBorder(markdown.render(80))).toBe(growingBorder);
-
-			// A destructive replay has no immutable old tape to protect and may
-			// recompute the natural width from the complete table.
-			markdown.prepareNativeScrollbackReplay();
-			expect(topBorder(markdown.render(80))).not.toBe(growingBorder);
-		});
-
-		it("keeps layout locks independent across streamed tables", () => {
-			const first = `| First table column | Value |
-| --- | --- |
-| medium-width-entry | A |`;
-			const second = `${first}
-
-| Entry | Value |
-| --- | --- |
-| short | R000 |`;
-			const widenedSecond = `${second}
-| much-longer-entry-that-arrives-after-commit | R001 |`;
-			const markdown = new Markdown(first, 0, 0, defaultMarkdownTheme);
-			markdown.transientRenderCache = true;
-			markdown.render(80);
-			markdown.setNativeScrollbackCommittedRows(1);
-
-			markdown.setText(second);
-			const secondLines = markdown.render(80);
-			const borders = secondLines
-				.map(line => stripVTControlCharacters(line).trimEnd())
-				.filter(line => line.startsWith("+"));
-			expect(borders).toHaveLength(6);
-			const secondTop = secondLines.findIndex(
-				(line, index) => index > 0 && stripVTControlCharacters(line).trimEnd() === borders[3],
-			);
-			expect(secondTop).toBeGreaterThan(0);
-			expect(borders[3]).not.toBe(borders[0]);
-
-			markdown.setNativeScrollbackCommittedRows(secondTop + 1);
-			markdown.setText(widenedSecond);
-			const widenedBorders = markdown
-				.render(80)
-				.map(line => stripVTControlCharacters(line).trimEnd())
-				.filter(line => line.startsWith("+"));
-			expect(widenedBorders[0]).toBe(borders[0]);
-			expect(widenedBorders[3]).toBe(borders[3]);
-		});
-
-		it("does not lock a quoted table until the table itself enters native scrollback", () => {
-			const initial = `> > Intro sentence deliberately long enough to wrap across several physical quote rows before the table.
-> >
-> > | Entry | Value |
-> > | --- | --- |
-> > | short | R000 |`;
-			const beforeCommit = `${initial}
-> > | medium-width-entry | R001 |`;
-			const afterCommit = `${beforeCommit}
-> > | entry-that-is-even-wider-than-the-locked-layout | R002 |`;
-			const markdown = new Markdown(initial, 0, 0, defaultMarkdownTheme);
-			markdown.transientRenderCache = true;
-
-			const tableGeometry = (lines: readonly string[]): { start: number; border: string } => {
-				const plain = lines.map(line => stripVTControlCharacters(line).trimEnd());
-				const header = plain.findIndex(line => line.includes("Entry") && line.includes("Value"));
-				expect(header).toBeGreaterThan(0);
-				return { start: header - 1, border: plain[header - 1]! };
-			};
-
-			const initialLines = markdown.render(48);
-			const initialTable = tableGeometry(initialLines);
-			expect(initialTable.start).toBeGreaterThan(2);
-			// Commit only the quote prose; the nested table remains wholly live.
-			markdown.setNativeScrollbackCommittedRows(initialTable.start);
-
-			markdown.setText(beforeCommit);
-			const growingLines = markdown.render(48);
-			const growingTable = tableGeometry(growingLines);
-			expect(growingTable.border).not.toBe(initialTable.border);
-
-			markdown.setNativeScrollbackCommittedRows(growingTable.start + 1);
-			markdown.setText(afterCommit);
-			const lockedLines = markdown.render(48);
-			expect(tableGeometry(lockedLines).border).toBe(growingTable.border);
-			expect(lockedLines.some(line => stripVTControlCharacters(line).includes("R002"))).toBe(true);
-		});
-
-		it("recomputes a locked streamed table after resize or non-append replacement", () => {
-			const short = `| Entry | Value |
-| --- | --- |
-| short | R000 |`;
-			const wide = `${short}
-| much-longer-entry-that-arrives-after-commit | R001 |`;
-			const topBorder = (lines: readonly string[]): string => {
-				const border = lines
-					.map(line => stripVTControlCharacters(line).trimEnd())
-					.find(line => line.startsWith("+"));
-				expect(border).toBeDefined();
-				return border!;
-			};
-			const markdown = new Markdown(short, 0, 0, defaultMarkdownTheme);
-			markdown.transientRenderCache = true;
-			const shortBorder = topBorder(markdown.render(80));
-			markdown.setNativeScrollbackCommittedRows(1);
-			markdown.setText(wide);
-			expect(topBorder(markdown.render(80))).toBe(shortBorder);
-
-			// A width change starts fresh geometry; the complete source can widen.
-			expect(topBorder(markdown.render(100))).not.toBe(shortBorder);
-
-			const replacement = `| New | Value |
-| --- | --- |
-| x | R100 |`;
-			const expandedReplacement = `${replacement}
-| replacement-column-can-grow | R101 |`;
-			markdown.setText(replacement);
-			const replacementBorder = topBorder(markdown.render(80));
-			markdown.setText(expandedReplacement);
-			expect(topBorder(markdown.render(80))).not.toBe(replacementBorder);
-		});
-
-		it("does not lock a table when earlier code prints an identical border", () => {
-			const table = `| Entry | Value |
-| --- | --- |
-| short | R000 |`;
-			const probe = new Markdown(table, 0, 0, defaultMarkdownTheme);
-			const narrowBorder = probe
-				.render(80)
-				.map(line => stripVTControlCharacters(line).trimEnd())
-				.find(line => line.startsWith("+"));
-			expect(narrowBorder).toBeDefined();
-
-			const source = `\`\`\`
-${narrowBorder}
-\`\`\`
-
-${table}`;
-			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
-			markdown.transientRenderCache = true;
-			const initialLines = markdown.render(80);
-			const plainInitialLines = initialLines.map(line => stripVTControlCharacters(line).trimEnd());
-			const codeBorderRow = plainInitialLines.indexOf(narrowBorder!);
-			const tableHeaderRow = plainInitialLines.findIndex(line => line.includes("Entry") && line.includes("Value"));
-			expect(codeBorderRow).toBeGreaterThanOrEqual(0);
-			expect(tableHeaderRow).toBeGreaterThan(codeBorderRow);
-			const actualTableStart = tableHeaderRow - 1;
-			expect(plainInitialLines[actualTableStart]!).toBe(narrowBorder!);
-
-			// Commit through the code block, but stop immediately before the real
-			// table. Textual border scanning used to mistake the code row for it.
-			markdown.setNativeScrollbackCommittedRows(actualTableStart);
-			markdown.setText(`${source}
-| much-longer-entry-that-arrives-after-commit | R001 |`);
-			const widenedBorder = markdown
-				.render(80)
-				.map(line => stripVTControlCharacters(line).trimEnd())
-				.filter(line => line.startsWith("+"))
-				.at(-1);
-			expect(widenedBorder).toBeDefined();
-			expect(widenedBorder).not.toBe(narrowBorder);
-		});
-
-		it("restores table layout metadata when finalization hits the shared render cache", () => {
-			clearRenderCache();
-			const short = `| Entry | Value |
-| --- | --- |
-| short | R000 |`;
-			const wide = `${short}
-| much-longer-entry-that-arrives-after-commit | R001 |`;
-			const topBorder = (lines: readonly string[]): string => {
-				const border = lines
-					.map(line => stripVTControlCharacters(line).trimEnd())
-					.find(line => line.startsWith("+"));
-				expect(border).toBeDefined();
-				return border!;
-			};
-
-			const markdown = new Markdown(short, 0, 0, defaultMarkdownTheme);
-			markdown.transientRenderCache = true;
-			const narrowBorder = topBorder(markdown.render(80));
-
-			// Pre-warm the canonical final render after this instance has retained
-			// metadata from its narrower transient frame.
-			const cachedWideBorder = topBorder(new Markdown(wide, 0, 0, defaultMarkdownTheme).render(80));
-			markdown.setText(wide);
-			markdown.transientRenderCache = false;
-			expect(topBorder(markdown.render(80))).toBe(cachedWideBorder);
-
-			// The frame served by L2 is now in native scrollback. Locking it must
-			// preserve the wide cached geometry, not the earlier transient geometry.
-			markdown.setNativeScrollbackCommittedRows(1);
-			expect(topBorder(markdown.render(80))).toBe(cachedWideBorder);
-			expect(cachedWideBorder).not.toBe(narrowBorder);
-			clearRenderCache();
 		});
 
 		it("should respect paddingX when calculating table width", () => {
@@ -2017,7 +1790,7 @@ describe("Module-level LRU render cache", () => {
 		expect(l2Markdown.render(width)).toBe(first);
 	});
 
-	it("skips code-block highlighting for transient streaming renders", () => {
+	it("keeps an open non-diff fence plain during transient renders without a highlight stream", () => {
 		clearRenderCache();
 		let highlightCallCount = 0;
 		const themeWithSpy = {
@@ -2028,7 +1801,7 @@ describe("Module-level LRU render cache", () => {
 			},
 		};
 
-		const markdown = new Markdown("```ts\nconst streamed = true;\n```", 0, 0, themeWithSpy);
+		const markdown = new Markdown("```ts\nconst streamed = true;\n", 0, 0, themeWithSpy);
 		markdown.transientRenderCache = true;
 		const plain = stripVTControlCharacters(markdown.render(80).join("\n"));
 
@@ -2037,7 +1810,9 @@ describe("Module-level LRU render cache", () => {
 		expect(plain).not.toContain("HIGHLIGHTED");
 	});
 
-	it("re-renders code-block highlighting when a transient instance becomes stable", () => {
+	it("highlights a fence whole-block once it closes, even during transient renders", () => {
+		// Rows of a closed fence can enter native scrollback before the token
+		// freezes; they must carry the same bytes the finalized render emits.
 		clearRenderCache();
 		let highlightCallCount = 0;
 		const themeWithSpy = {
@@ -2050,34 +1825,92 @@ describe("Module-level LRU render cache", () => {
 
 		const markdown = new Markdown("```ts\nconst streamed = true;\n```", 0, 0, themeWithSpy);
 		markdown.transientRenderCache = true;
-		const plain = stripVTControlCharacters(markdown.render(80).join("\n"));
-		expect(highlightCallCount).toBe(0);
-		expect(plain).toContain("const streamed = true;");
+		const transient = stripVTControlCharacters(markdown.render(80).join("\n"));
+		expect(highlightCallCount).toBe(1);
+		expect(transient).toContain("HIGHLIGHTED");
 
 		markdown.transientRenderCache = false;
 		const highlighted = stripVTControlCharacters(markdown.render(80).join("\n"));
-		expect(highlightCallCount).toBe(1);
 		expect(highlighted).toContain("HIGHLIGHTED");
 	});
 
-	it("skips nested list code-block highlighting for transient streaming renders", () => {
+	it("streams completed-line highlighting through the theme's highlight stream", () => {
 		clearRenderCache();
-		let highlightCallCount = 0;
-		const themeWithSpy = {
+		const pushes: string[] = [];
+		const themeWithStream = {
 			...defaultMarkdownTheme,
-			highlightCode: (_code: string, _lang?: string): string[] => {
-				highlightCallCount++;
-				return ["HIGHLIGHTED"];
+			highlightCode: (code: string, _lang?: string): string[] => code.split("\n").map(line => `F<${line}>`),
+			createHighlightStream: (lang?: string) => {
+				if (lang !== "python") return null;
+				return {
+					push: (chunk: string): string => {
+						pushes.push(chunk);
+						return chunk
+							.split("\n")
+							.map((line, i, arr) => (i === arr.length - 1 ? line : `S<${line}>`))
+							.join("\n");
+					},
+				};
 			},
 		};
 
-		const markdown = new Markdown("- item\n\n  ```ts\n  const streamed = true;\n  ```", 0, 0, themeWithSpy);
+		const markdown = new Markdown("```python\ndef f():\n    x = 1", 0, 0, themeWithStream);
+		markdown.transientRenderCache = true;
+		const first = stripVTControlCharacters(markdown.render(80).join("\n"));
+		// Completed line highlighted through the stream; partial tail stays plain.
+		expect(first).toContain("S<def f():>");
+		expect(first).toContain("    x = 1");
+		expect(first).not.toContain("S<    x = 1");
+		expect(pushes).toEqual(["def f():\n"]);
+
+		// Append-only growth pushes only the newly completed lines — parser
+		// state carries across renders instead of re-feeding the fence.
+		markdown.setText("```python\ndef f():\n    x = 1\n    return x");
+		const second = stripVTControlCharacters(markdown.render(80).join("\n"));
+		expect(second).toContain("S<def f():>");
+		expect(second).toContain("S<    x = 1>");
+		expect(second).toContain("    return x");
+		expect(pushes).toEqual(["def f():\n", "    x = 1\n"]);
+
+		// Closing the fence switches to the whole-block highlightCode call the
+		// finalized render uses.
+		markdown.setText("```python\ndef f():\n    x = 1\n    return x\n```");
+		const closed = stripVTControlCharacters(markdown.render(80).join("\n"));
+		expect(closed).toContain("F<def f():>");
+		expect(pushes).toEqual(["def f():\n", "    x = 1\n"]);
+	});
+
+	it("keeps an open fence plain when the highlight stream factory rejects the language", () => {
+		clearRenderCache();
+		const themeWithStream = {
+			...defaultMarkdownTheme,
+			highlightCode: (code: string, _lang?: string): string[] => [`F<${code}>`],
+			createHighlightStream: (_lang?: string) => null,
+		};
+
+		const markdown = new Markdown("```someunknownlang\nplain text line\nmore", 0, 0, themeWithStream);
 		markdown.transientRenderCache = true;
 		const plain = stripVTControlCharacters(markdown.render(80).join("\n"));
+		expect(plain).toContain("plain text line");
+		expect(plain).not.toContain("S<");
+		expect(plain).not.toContain("F<");
+	});
 
-		expect(highlightCallCount).toBe(0);
-		expect(plain).toContain("const streamed = true;");
-		expect(plain).not.toContain("HIGHLIGHTED");
+	it("keeps an open fence plain when the highlight stream factory throws", () => {
+		clearRenderCache();
+		const themeWithStream = {
+			...defaultMarkdownTheme,
+			highlightCode: (code: string, _lang?: string): string[] => [`F<${code}>`],
+			createHighlightStream: (_lang?: string) => {
+				throw new TypeError("undefined is not a constructor");
+			},
+		};
+
+		const markdown = new Markdown("```lua\nlocal x = 1\nmore", 0, 0, themeWithStream);
+		markdown.transientRenderCache = true;
+		const plain = stripVTControlCharacters(markdown.render(80).join("\n"));
+		expect(plain).toContain("local x = 1");
+		expect(plain).not.toContain("F<");
 	});
 });
 

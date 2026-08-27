@@ -47,6 +47,8 @@ function makeSession(opts: {
 	contextWindow?: number;
 	usage?: ContextUsage | undefined;
 	settings?: AgentSession["settings"];
+	/** Session title; `null` models a fresh, not-yet-titled session. */
+	sessionName?: string | null;
 	/** Model input modalities; gates snapcompact availability in boundary math. */
 	modelInput?: string[];
 }): Fake {
@@ -79,7 +81,7 @@ function makeSession(opts: {
 				premiumRequests: 0,
 				cost: 0,
 			}),
-			getSessionName: () => "test",
+			getSessionName: () => (opts.sessionName === null ? undefined : (opts.sessionName ?? "test")),
 		},
 		getAsyncJobSnapshot: () => ({ running: [] }),
 		isFastModeActive: () => false,
@@ -357,6 +359,36 @@ describe("StatusLineComponent context breakdown", () => {
 			expect(compactionIndex).toBeGreaterThan(speculationIndex);
 			expect(windowIndex).toBeGreaterThan(compactionIndex);
 			expect(plain.indexOf("1M", windowIndex + 1)).toBe(-1);
+		} finally {
+			settings.clearOverride("statusLine.contextLine");
+			settings.clearOverride("statusLine.rightSegments");
+			settings.clearOverride("statusLine.leftSegments");
+			settings.clearOverride("statusLine.preset");
+		}
+	});
+	it("keeps embedded context on the gauge while the session is unnamed", () => {
+		// Regression: a fresh session has no title, so `session_name` is
+		// invisible and the right group is empty. The gauge must still bridge to
+		// the border edge and absorb the context segment — not fall back to a
+		// context chip that vanishes once the session gets auto-titled.
+		const { session } = makeSession({
+			messages: [userMessage("hi"), assistantMessage("done")],
+			usage: { tokens: 80_000, contextWindow: 1_000_000, percent: 8 },
+			sessionName: null,
+		});
+		settings.override("statusLine.preset", "custom");
+		settings.override("statusLine.leftSegments", ["pi", "context_pct"]);
+		settings.override("statusLine.rightSegments", ["session_name"]);
+		settings.override("statusLine.contextLine", "embedded");
+
+		try {
+			const comp = new StatusLineComponent(session);
+			const border = comp.getTopBorder(120);
+			const plain = border.content.replaceAll(/\x1b\[[0-9;]*m/g, "");
+			expect(border.width).toBe(120);
+			expect(plain).not.toContain("8.0%/1M");
+			expect(plain).toContain("8%");
+			expect(plain).toContain("1M");
 		} finally {
 			settings.clearOverride("statusLine.contextLine");
 			settings.clearOverride("statusLine.rightSegments");

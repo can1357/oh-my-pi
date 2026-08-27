@@ -1,12 +1,15 @@
 import {
 	type HighlightColors as NativeHighlightColors,
+	HighlightStream as NativeHighlightStream,
 	highlightCode as nativeHighlightCode,
 	supportsLanguage as nativeSupportsLanguage,
+	warmHighlighter as nativeWarmHighlighter,
 } from "@oh-my-pi/pi-natives";
 import type { EditorTheme, MarkdownTheme, SelectListTheme, SettingsListTheme, SymbolTheme } from "@oh-my-pi/pi-tui";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { resolveMermaidAscii } from "./mermaid-cache";
+import type { SlashCommandIconName } from "./symbols";
 import { theme } from "./theme";
 import type { Theme } from "./theme-class";
 
@@ -56,6 +59,7 @@ const highlightCache = new LRUCache<string, string>({ max: HIGHLIGHT_CACHE_MAX }
 let highlightCacheTheme: Theme | undefined;
 
 function highlightCached(code: string, validLang: string | undefined, highlightTheme: Theme): string | null {
+	if (validLang === undefined) return code;
 	if (highlightCacheTheme !== highlightTheme) {
 		highlightCache.clear();
 		highlightCacheTheme = highlightTheme;
@@ -85,6 +89,34 @@ export function highlightCode(code: string, lang?: string, highlightTheme: Theme
 	// Always return a fresh array: callers (e.g. renderCodeCell) push extra lines
 	// onto the result, which would corrupt the cached string otherwise.
 	return (highlighted ?? code).split("\n");
+}
+
+/** Create a stateful highlighter for progressive terminal rendering. */
+export function createHighlightStream(lang?: string, highlightTheme: Theme = theme): NativeHighlightStream | null {
+	const validLang = lang && nativeSupportsLanguage(lang) ? lang : undefined;
+	if (!validLang) return null;
+	// Workspace loads skip the natives version sentinel, so a stale local
+	// `.node` can omit `HighlightStream` after a pull. Napi constructors can
+	// also throw; callers degrade to plain text instead of aborting a render.
+	try {
+		if (typeof NativeHighlightStream !== "function") return null;
+		return new NativeHighlightStream(validLang, getHighlightColors(highlightTheme));
+	} catch {
+		return null;
+	}
+}
+
+let highlighterWarmup: Promise<void> | undefined;
+
+/** Warm native syntax grammars off-thread once per process. */
+export function warmHighlighter(): Promise<void> {
+	if (!highlighterWarmup) {
+		highlighterWarmup =
+			typeof nativeWarmHighlighter === "function"
+				? nativeWarmHighlighter().catch(() => undefined)
+				: Promise.resolve();
+	}
+	return highlighterWarmup;
 }
 
 export function getSymbolTheme(): SymbolTheme {
@@ -193,6 +225,7 @@ export function getMarkdownTheme(): MarkdownTheme {
 			if (highlighted !== null) return highlighted.split("\n");
 			return code.split("\n").map(line => theme.fg("mdCodeBlock", line));
 		},
+		createHighlightStream: lang => createHighlightStream(lang, theme),
 	};
 	cachedMarkdownTheme = markdownTheme;
 	cachedMarkdownThemeRef = theme;
@@ -210,6 +243,7 @@ export function getSelectListTheme(): SelectListTheme {
 			scrollInfo: (text: string) => text,
 			noMatch: (text: string) => text,
 			symbols: getSymbolTheme(),
+			icon: (text: string) => text,
 			hovered: (text: string) => text,
 		};
 	}
@@ -220,8 +254,20 @@ export function getSelectListTheme(): SelectListTheme {
 		scrollInfo: (text: string) => theme.fg("muted", text),
 		noMatch: (text: string) => theme.fg("muted", text),
 		symbols: getSymbolTheme(),
+		icon: (text: string) => theme.fg("muted", text),
 		hovered: (text: string) => theme.bg("selectedBg", text),
 	};
+}
+/**
+ * Resolve the autocomplete type-indicator glyph for a slash command.
+ * Returns `undefined` when no theme is initialized or the active preset is
+ * ASCII (shared `icon.*` glyphs have ASCII forms, but a partially lettered
+ * icon column reads as noise), which collapses the column entirely.
+ */
+export function getSlashCommandTypeIcon(name: SlashCommandIconName): string | undefined {
+	if (typeof theme === "undefined" || theme.getSymbolPreset() === "ascii") return undefined;
+	const icon = theme.cmd[name];
+	return icon.length > 0 ? icon : undefined;
 }
 
 export function getEditorTheme(): EditorTheme {

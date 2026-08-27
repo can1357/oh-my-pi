@@ -165,7 +165,7 @@ export class ChatTranscriptBuilder {
 		const previous = this.#waitingPoll;
 		if (!previous) return;
 		this.#waitingPoll = null;
-		if (nextToolName === "hub" && previous.isDisplaceableBlock() && this.container.isBlockUncommitted(previous)) {
+		if (nextToolName === "hub" && previous.isDisplaceableBlock() && this.container.canRemoveBlock(previous)) {
 			this.container.removeChild(previous);
 		}
 		previous.seal();
@@ -180,7 +180,7 @@ export class ChatTranscriptBuilder {
 		}
 		if (previous.canBeDisplacedBy(nextToolName)) {
 			this.#todoSnapshot = null;
-			if (this.container.isBlockUncommitted(previous)) {
+			if (this.container.canRemoveBlock(previous)) {
 				this.container.removeChild(previous);
 			}
 			previous.seal();
@@ -403,7 +403,6 @@ export class ChatTranscriptBuilder {
 					showImages: settings.get("terminal.showImages"),
 					editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
 					editAllowFuzzy: settings.get("edit.fuzzyMatch"),
-					liveRegion: this.container,
 				},
 				this.deps.getTool?.(content.name),
 				this.deps.ui,

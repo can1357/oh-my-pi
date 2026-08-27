@@ -237,6 +237,21 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 						const trailerBytes = flag & CONNECT_COMPRESSED_FLAG ? gunzipSync(payload) : payload;
 						const trailerError = readConnectTrailerError(trailerBytes.toString("utf8").trim());
 						if (trailerError) {
+							// #4218: these rejections carry no HTTP error body, so the raw
+							// trailer is the only server-side evidence. Log it with the
+							// request shape before classification discards it.
+							logger.warn("devin: stream rejected via Connect trailer", {
+								model: model.id,
+								code: trailerError.code,
+								message: trailerError.message,
+								...(trailerError.detail ? { detail: trailerError.detail } : {}),
+								rawTrailer: trailerError.raw,
+								requestBytes: reqBytes.byteLength,
+								compressedBytes: gz.byteLength,
+								tools: context.tools?.length ?? 0,
+								messages: context.messages.length,
+								hadOutput: firstTokenTime !== undefined,
+							});
 							const error = new AIError.ValidationError(trailerError.formatted);
 							if (
 								firstTokenTime === undefined &&
@@ -644,6 +659,10 @@ interface ConnectTrailerError {
 	code: string;
 	message: string;
 	formatted: string;
+	/** Summarized Connect error details entries, when the trailer carried any. */
+	detail?: string;
+	/** Raw trailer JSON (truncated) retained for evidence logging; see #4218. */
+	raw: string;
 }
 
 /**
@@ -665,9 +684,59 @@ function readConnectTrailerError(text: string): ConnectTrailerError | null {
 	const code = "code" in err && typeof err.code === "string" ? err.code : "";
 	const message = "message" in err && typeof err.message === "string" ? err.message : "";
 	if (!code && !message) return null;
-	return {
+	const trailer: ConnectTrailerError = {
 		code,
 		message,
 		formatted: `Devin stream error${code ? ` ${code}` : ""}: ${message}`,
+		raw: truncateTrailerEvidence(text),
 	};
+	const detail = "details" in err ? summarizeTrailerDetails(err.details) : undefined;
+	if (detail) {
+		trailer.detail = detail;
+		trailer.formatted += ` [details: ${detail}]`;
+	}
+	return trailer;
+}
+
+/** Upper bound on retained raw-trailer evidence so log entries stay bounded. */
+const MAX_TRAILER_EVIDENCE_CHARS = 2000;
+
+function truncateTrailerEvidence(text: string): string {
+	return text.length > MAX_TRAILER_EVIDENCE_CHARS ? `${text.slice(0, MAX_TRAILER_EVIDENCE_CHARS)}…` : text;
+}
+
+/**
+ * Summarize Connect error `details` entries (loosely `{ type, value, debug }`
+ * records). #4218's intermittent `invalid_argument` rejections arrive as
+ * end-of-stream trailers with no HTTP error body, so any detail payload here
+ * is the only server-side evidence available; previously it was discarded.
+ */
+function summarizeTrailerDetails(details: unknown): string | undefined {
+	if (!Array.isArray(details) || details.length === 0) return undefined;
+	let summary = "";
+	for (const entry of details) {
+		if (!entry || typeof entry !== "object") continue;
+		const record = entry as Record<string, unknown>;
+		const type = typeof record.type === "string" && record.type ? record.type : undefined;
+		const value = typeof record.value === "string" && record.value ? record.value : undefined;
+		let debug: string | undefined;
+		if (record.debug !== undefined) {
+			try {
+				debug = typeof record.debug === "string" ? record.debug : JSON.stringify(record.debug);
+			} catch {
+				debug = undefined;
+			}
+		}
+		const boundedType = type ? truncateTrailerEvidence(type) : undefined;
+		const evidence = debug ?? value;
+		const boundedEvidence = evidence ? truncateTrailerEvidence(evidence) : undefined;
+		let part: string | undefined;
+		if (boundedType && boundedEvidence) part = `${boundedType}: ${boundedEvidence}`;
+		else part = boundedType ?? boundedEvidence;
+		if (!part) continue;
+		const next = summary ? `${summary}; ${part}` : part;
+		if (next.length > MAX_TRAILER_EVIDENCE_CHARS) return truncateTrailerEvidence(next);
+		summary = next;
+	}
+	return summary || undefined;
 }

@@ -178,7 +178,12 @@ describe("AgentSession message pipeline", () => {
 			isError: false,
 		});
 
-		expect(session.getImageAttachments()).toEqual([{ label: "Image #1", uri: "attachment://1", image: userImage }]);
+		const attachments = session.getImageAttachments();
+		const sourcePath = attachments[0]?.sourcePath;
+		if (!sourcePath) {
+			throw new Error("Expected attachment sourcePath to be populated");
+		}
+		expect(attachments).toEqual([{ label: "Image #1", uri: "attachment://1", image: userImage, sourcePath }]);
 	});
 
 	it("normalizes historical WebP on the main provider request path", async () => {

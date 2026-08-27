@@ -20,6 +20,13 @@ function createSkill(name: string, baseDir: string): Skill {
 	};
 }
 
+const imageAttachment = {
+	label: "Image #1",
+	uri: "attachment://1",
+	sourcePath: "/tmp/session blobs/image 1.png",
+	image: { type: "image", data: "image-bytes", mimeType: "image/png" },
+} as const;
+
 function createInternalRouter(resources: Record<string, { sourcePath?: string; error?: string }>): {
 	canHandle: (input: string) => boolean;
 	resolve: (
@@ -204,6 +211,29 @@ describe("expandInternalUrls", () => {
 		await expect(expandInternalUrls('cat "artifact://7"', { skills: [], internalRouter: router })).resolves.toBe(
 			`cat ${shellEscape("/tmp/artifacts/with'quote.log")}`,
 		);
+	});
+
+	it("expands attachment URLs and shell-escapes source paths with spaces", async () => {
+		await expect(
+			expandInternalUrls("cp attachment://1 saved.png", { skills: [], attachments: [imageAttachment] }),
+		).resolves.toBe(`cp ${shellEscape(imageAttachment.sourcePath)} saved.png`);
+	});
+
+	it("expands attachment URLs used as quoted command arguments", async () => {
+		const command = `cmp "attachment://1" 'attachment://1'`;
+		await expect(expandInternalUrls(command, { skills: [], attachments: [imageAttachment] })).resolves.toBe(
+			`cmp ${shellEscape(imageAttachment.sourcePath)} ${shellEscape(imageAttachment.sourcePath)}`,
+		);
+	});
+
+	it("leaves unknown attachment references unchanged", async () => {
+		const command = "cp attachment://2 saved.png";
+		await expect(expandInternalUrls(command, { skills: [], attachments: [imageAttachment] })).resolves.toBe(command);
+	});
+
+	it("preserves attachment mentions embedded in quoted text", async () => {
+		const command = `printf '%s\\n' 'copy attachment://1 to save the original'`;
+		await expect(expandInternalUrls(command, { skills: [], attachments: [imageAttachment] })).resolves.toBe(command);
 	});
 
 	it("expands an unquoted URL inside a double-quoted command substitution", async () => {

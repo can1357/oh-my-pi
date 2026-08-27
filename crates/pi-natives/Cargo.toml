@@ -39,6 +39,7 @@ html-to-markdown-rs.workspace = true
 icy_sixel.workspace = true
 ignore.workspace = true
 image = { workspace = true, features = ["bmp"] }
+resvg.workspace = true
 # Feature activation only (see workspace manifest): zune-jpeg needs `log` to compile.
 zune-jpeg.workspace = true
 inferno.workspace = true
@@ -85,6 +86,7 @@ tempfile = "=3.27.0"
 core-graphics = "0.25"
 foreign-types = "=0.5.0"
 objc2-app-kit = "=0.3.2"
+objc2 = "=0.6.4"
 objc2-core-graphics = "=0.3.2"
 objc2-foundation = "=0.3.2"
 objc2-application-services = { version = "=0.3.2", default-features = true }

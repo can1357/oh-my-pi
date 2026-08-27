@@ -12,11 +12,11 @@ import { jsBackend, juliaBackend, pythonBackend, rubyBackend } from "../eval";
 import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
 import { IdleTimeout } from "../eval/idle-timeout";
+import type { BackendProbeOptions } from "../eval/probe";
 import { defaultEvalSessionId } from "../eval/session-id";
 import type { EvalCellResult, EvalDisplayOutput, EvalLanguage, EvalStatusEvent, EvalToolDetails } from "../eval/types";
 import evalDescription from "../prompts/tools/eval.md" with { type: "text" };
 import evalCodeModeDescription from "../prompts/tools/eval-code-mode.md" with { type: "text" };
-import { resolveCodeMode } from "../session/code-mode";
 import { DEFAULT_MAX_BYTES, OutputSink, type OutputSummary, TailBuffer } from "../session/streaming-output";
 import { resolveSpawnPolicy } from "../task/spawn-policy";
 import { webpExclusionForModel } from "../utils/image-loading";
@@ -27,7 +27,7 @@ import { type EvalBackendsAllowance, resolveEvalBackends } from "./eval-backends
 import { generateCodeModeDeclarations } from "./eval-format/code-mode-declarations";
 import { upsertStatusEvent } from "./eval-render";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "./output-meta";
-import { ToolAbortError, ToolError } from "./tool-errors";
+import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
@@ -234,7 +234,11 @@ function detailsNotice(cells: ResolvedEvalCell[]): string | undefined {
 	return notices.length > 0 ? notices.join(" ") : undefined;
 }
 
-async function resolveBackend(session: ToolSession, language: EvalLanguage): Promise<ResolvedBackend> {
+async function resolveBackend(
+	session: ToolSession,
+	language: EvalLanguage,
+	probeOpts?: BackendProbeOptions,
+): Promise<ResolvedBackend> {
 	const backends = resolveEvalBackends(session);
 	const allowPy = backends.python;
 	const allowJs = backends.js;
@@ -243,7 +247,9 @@ async function resolveBackend(session: ToolSession, language: EvalLanguage): Pro
 
 	if (language === "python") {
 		if (!allowPy) throw new ToolError("Python backend is disabled (PI_PY=0 or eval.py = false).");
-		if (!(await pythonBackend.isAvailable(session))) {
+		const available = await pythonBackend.isAvailable(session, probeOpts);
+		throwIfAborted(probeOpts?.signal);
+		if (!available) {
 			const alternatives = [allowJs ? '"js"' : null, allowRb ? '"rb"' : null, allowJl ? '"jl"' : null].filter(
 				Boolean,
 			);
@@ -257,7 +263,9 @@ async function resolveBackend(session: ToolSession, language: EvalLanguage): Pro
 	}
 	if (language === "ruby") {
 		if (!allowRb) throw new ToolError("Ruby backend is disabled (PI_RB=0 or eval.rb = false).");
-		if (!(await rubyBackend.isAvailable(session))) {
+		const available = await rubyBackend.isAvailable(session, probeOpts);
+		throwIfAborted(probeOpts?.signal);
+		if (!available) {
 			const alternatives = [allowJs ? '"js"' : null, allowPy ? '"py"' : null, allowJl ? '"jl"' : null].filter(
 				Boolean,
 			);
@@ -271,7 +279,9 @@ async function resolveBackend(session: ToolSession, language: EvalLanguage): Pro
 	}
 	if (language === "julia") {
 		if (!allowJl) throw new ToolError("Julia backend is disabled (PI_JL=0 or eval.jl = false).");
-		if (!(await juliaBackend.isAvailable(session))) {
+		const available = await juliaBackend.isAvailable(session, probeOpts);
+		throwIfAborted(probeOpts?.signal);
+		if (!available) {
 			const alternatives = [allowJs ? '"js"' : null, allowPy ? '"py"' : null, allowRb ? '"rb"' : null].filter(
 				Boolean,
 			);
@@ -333,26 +343,19 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 	}
 
 	/**
-	 * Codex Code Mode advertisement, pulled from the session on every read so
-	 * the description can never drift from the active model or tool registry.
+	 * Codex Code Mode advertisement, pulled from the session's applied direct
+	 * partition on every read so the declarations can never advertise a tool the
+	 * model can already call directly (a plan-mode transport `write`), nor drift
+	 * from the active model or tool registry.
 	 */
 	#codeModeDescription(baseDescription: string): string | undefined {
 		const session = this.session;
-		if (!session) return undefined;
-		const model = session.getActiveModel?.();
-		const enabledToolNames = session.getEvalBridgeToolNames?.() ?? [...(session.toolRegistry?.keys() ?? [])];
-		const codeMode = resolveCodeMode({
-			provider: model?.provider ?? "",
-			toolMode: model?.toolMode,
-			setting: session.settings.get("providers.openai-codex.codeMode"),
-			extraDirectTools: session.settings.get("providers.openai-codex.codeModeDirectTools"),
-			enabledToolNames,
-			evalTransportAvailable: this.supportsCodeModeTransport(),
-		});
-		if (!codeMode.active) return undefined;
+		const directToolNames = session?.getCodeModeDirectToolNames?.();
+		if (!session || !directToolNames) return undefined;
+		const direct = new Set(directToolNames);
 		const declarations = generateCodeModeDeclarations(
-			enabledToolNames.flatMap(name => {
-				if (codeMode.directToolNames.has(name)) return [];
+			(session.getEvalBridgeToolNames?.() ?? [...(session.toolRegistry?.keys() ?? [])]).flatMap(name => {
+				if (direct.has(name)) return [];
 				const tool = session.toolRegistry?.get(name);
 				return tool ? [{ name, parameters: (tool as { parameters?: unknown }).parameters }] : [];
 			}),
@@ -469,13 +472,20 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					: params.language === "jl"
 						? "julia"
 						: "js";
-		const resolved = await resolveBackend(session, cellLanguage);
+		// Bound backend discovery by the eval cell's own timeout and abort signal:
+		// the cell IdleTimeout is armed only later in #runCells, so a hung runtime
+		// probe would otherwise wedge the whole turn (issue #9466).
+		const cellTimeoutMs =
+			params.timeout === 0
+				? 0
+				: clampTimeout("eval", params.timeout, session.settings.get("tools.maxTimeout")) * 1000;
+		const resolved = await resolveBackend(session, cellLanguage, { signal, timeoutMs: cellTimeoutMs });
 		const cells: ResolvedEvalCell[] = [
 			{
 				index: 0,
 				title: params.title,
 				code: params.code,
-				timeoutMs: (params.timeout ?? 30) * 1000,
+				timeoutMs: cellTimeoutMs,
 				reset: params.reset ?? false,
 				resolved,
 			},
@@ -520,11 +530,11 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		// is runtime work (it pauses across agent()/tool bridge calls), so a cell
 		// can legitimately outlive it in wall time — exactly the case
 		// backgrounding exists for.
-		const cellTimeoutMs =
+		const clampedCellTimeoutMs =
 			cells[0].timeoutMs === 0
 				? undefined
 				: clampTimeout("eval", cells[0].timeoutMs / 1000, session.settings.get("tools.maxTimeout")) * 1000;
-		const autoBackgroundWaitMs = resolveAutoBackgroundWaitMs(thresholdMs, cellTimeoutMs);
+		const autoBackgroundWaitMs = resolveAutoBackgroundWaitMs(thresholdMs, clampedCellTimeoutMs);
 		const startBackgrounded = autoBackgroundWaitMs === 0;
 
 		const rawLabel = params.title?.trim() || params.code.trim().split("\n", 1)[0] || "eval cell";

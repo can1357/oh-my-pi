@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -40,6 +41,7 @@ import type {
 	Validator,
 } from "@oh-my-pi/pi-utils/acp";
 import {
+	RequestError,
 	zForkSessionResponse,
 	zLoadSessionResponse,
 	zNewSessionResponse,
@@ -2461,6 +2463,33 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("maps agent-busy rejections to a typed session_busy error instead of internalError", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		// Autonomous turns stream without an owning ACP promptTurn, so prompt()'s
+		// implicit-cancel guard never fires. Mirror AgentSession's contract: a
+		// bare prompt while streaming throws AgentBusyError.
+		session.isStreaming = true;
+		session.prompt = async (): Promise<boolean> => {
+			if (session.isStreaming) throw new AgentBusyError();
+			return true;
+		};
+
+		const error = await harness.agent
+			.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "ping during autonomous turn" }],
+			} as PromptRequest)
+			.catch((reason: unknown) => reason);
+
+		expect(error).toBeInstanceOf(RequestError);
+		const requestError = error as RequestError;
+		expect(requestError.code).toBe(-32003);
+		expect(requestError.message).toContain("already processing");
+		expect(requestError.data).toEqual({ reason: "session_busy", hint: "steer|followUp|wait" });
+	});
+
 	it("keeps closeSession gated while cancel cleanup is pending", async () => {
 		const harness = await createHarness();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
@@ -2584,6 +2613,35 @@ describe("ACP agent", () => {
 
 		expect(session.forcedToolChoice).toBe("read");
 		expect(session.promptCalls).toEqual(["inspect package.json"]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("settles the prompt turn when a force residual prompt resolves locally (#9206)", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+
+		// The residual prompt (e.g. an extension/custom-TS command) is handled
+		// locally: no agent turn starts, so `prompt()` returns false and no
+		// `agent_end` ever fires. The ACP turn must be settled by the trailing
+		// `#finishPrompt`, or the `session/prompt` request never resolves.
+		session.prompt = async (text: string): Promise<boolean> => {
+			session.promptCalls.push(text);
+			return false;
+		};
+
+		const response = await harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000009",
+			prompt: [{ type: "text", text: "/force bash /local-command" }],
+		} as PromptRequest);
+
+		expectAcpStructure(zPromptResponse, response);
+		expect(response.stopReason).toBe("end_turn");
+		expect(session.forcedToolChoice).toBe("bash");
+		expect(session.promptCalls).toEqual(["/local-command"]);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);

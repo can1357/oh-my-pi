@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
-import { Agent, type AgentMessage, RESCUE_SHAKE_CONFIG } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage, RESCUE_SHAKE_CONFIG, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -278,6 +278,65 @@ describe("AgentSession shake", () => {
 			const userMsg = branch.find(e => e.type === "message" && (e.message as { role?: string }).role === "user");
 			const content = (userMsg as { message: { content: unknown } }).message.content as Array<{ type: string }>;
 			expect(content.some(b => b.type === "image")).toBe(false);
+		});
+	});
+
+	describe("thinking", () => {
+		it("drops both thinking variants, keeps empty turns empty, and refreshes persisted and runtime state", async () => {
+			const mixed: AssistantMessage = {
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "reasoning ".repeat(1_000) },
+					{ type: "redactedThinking", data: "opaque-reasoning" },
+					{ type: "text", text: "visible answer" },
+				],
+				...apiInfo,
+				stopReason: "stop",
+				usage,
+				timestamp: Date.now(),
+			};
+			const thinkingOnly: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "thinking", thinking: "private reasoning" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage,
+				timestamp: Date.now() + 1,
+			};
+			sessionManager.appendMessage(mixed);
+			sessionManager.appendMessage(thinkingOnly);
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+			const tokenizer = new Tokenizer();
+			const tokensBefore = tokenizer.countMessage(mixed);
+
+			const result = await session.shake("thinking");
+
+			expect(result.thinkingBlocksDropped).toBe(3);
+			expect(mixed.content).toEqual([{ type: "text", text: "visible answer" }]);
+			expect(thinkingOnly.content).toEqual([]);
+			expect(tokenizer.countMessage(mixed)).toBeLessThan(tokensBefore);
+
+			const runtimeAssistants = session.agent.state.messages.filter(
+				(message): message is AssistantMessage => message.role === "assistant",
+			);
+			expect(runtimeAssistants.flatMap(message => message.content.map(block => block.type))).toEqual(["text"]);
+			expect(runtimeAssistants.some(message => message.content.length === 0)).toBe(true);
+
+			const sessionFile = sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected persisted shake session");
+			const persisted = await SessionManager.open(sessionFile, tempDir.path());
+			try {
+				const persistedAssistants = persisted
+					.getBranch()
+					.flatMap(entry =>
+						entry.type === "message" && entry.message.role === "assistant" ? [entry.message] : [],
+					);
+				expect(persistedAssistants.flatMap(message => message.content.map(block => block.type))).toEqual(["text"]);
+				expect(persistedAssistants.some(message => message.content.length === 0)).toBe(true);
+			} finally {
+				await persisted.close();
+			}
 		});
 	});
 

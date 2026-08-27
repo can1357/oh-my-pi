@@ -6,6 +6,7 @@ import {
 	isBunTestRuntime,
 	isCompiledBinary,
 	logger,
+	postmortem,
 	stripWindowsExtendedLengthPathPrefix,
 	workerHostEntry,
 } from "@oh-my-pi/pi-utils";
@@ -208,6 +209,9 @@ export function createWorkerSubprocess<Outbound>(options: {
 	const stderrDrained = Promise.withResolvers<void>();
 	const stderrCapture = createStderrCapture(options.exitLabel);
 	let stderrDrainStarted = false;
+	// Reassigned once the worker IPC fault handler is registered (after spawn);
+	// invoked from onExit to drop the registration.
+	let unregisterFault: () => void = () => {};
 	const startStderrDrain = (): void => {
 		if (stderrDrainStarted) return;
 		stderrDrainStarted = true;
@@ -227,6 +231,7 @@ export function createWorkerSubprocess<Outbound>(options: {
 			for (const handler of inbound) handler(message as Outbound);
 		},
 		onExit(_proc, exitCode, signalCode) {
+			unregisterFault();
 			startStderrDrain();
 			if (exitCode === 0 && !options.reportCleanExit) return;
 			// Swallow only the expected SIGKILL from `terminate()`; every other
@@ -244,6 +249,26 @@ export function createWorkerSubprocess<Outbound>(options: {
 				for (const handler of errors) handler(err);
 			});
 		},
+	});
+	// Bun raises a malformed advanced-serialization frame as a process-global
+	// uncaughtException with no channel attribution (oven-sh/bun#37287). Register
+	// a fault handler so that failure rejects this worker's in-flight requests and
+	// recycles it — a worker that sent a bad frame but stays alive never fires
+	// onExit, so callers would otherwise await forever. Unregistered in onExit.
+	let faulted = false;
+	unregisterFault = postmortem.registerWorkerIpcFaultHandler(cause => {
+		if (faulted) return;
+		faulted = true;
+		const err = new Error(`${options.exitLabel}: worker sent a malformed IPC frame; recycling worker`, { cause });
+		for (const handler of errors) handler(err);
+		// Recycle the (possibly still-alive) worker; mark the exit intentional so
+		// the SIGKILL's onExit does not surface a duplicate error.
+		intentionalExit.value = true;
+		try {
+			proc.kill("SIGKILL");
+		} catch {
+			// Already gone.
+		}
 	});
 	// Don't keep the parent event loop alive on an idle worker; the dispose
 	// path calls `terminate()` explicitly. Bun's test runner starves IPC for

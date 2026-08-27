@@ -623,6 +623,15 @@ function buildAgentEndEvent(
  * Push a `turn_end` event and run the awaited per-turn hook when the run is
  * still healthy. The hook is skipped for externally aborted or errored turns so
  * a user interrupt does not hang on a background backlog wait.
+ *
+ * A {@link TERMINAL_TOOL_RESULT_ABORT_REASON} abort is the exception: it is a
+ * graceful yield (e.g. a subagent's final `yield` tool), not a user interrupt.
+ * The completed tool batch is persisted and the turn must still reach
+ * `onTurnEnd` so per-turn bookkeeping — notably advisor review of the yield
+ * delta (#9505) — runs exactly as it does for a plain end-of-turn message. The
+ * hook receives no signal in that case so downstream waits (advisor catch-up)
+ * behave identically to a normal final turn instead of short-circuiting on the
+ * spent abort.
  */
 async function emitTurnEnd(
 	stream: EventStream<AgentEvent, AgentMessage[]>,
@@ -635,10 +644,16 @@ async function emitTurnEnd(
 	runHookOnAbortedMessage = false,
 ): Promise<void> {
 	stream.push({ type: "turn_end", message, toolResults });
+	const terminalYield = signal?.reason === TERMINAL_TOOL_RESULT_ABORT_REASON;
 	const isAbortedOrError =
 		message.role === "assistant" && (message.stopReason === "aborted" || message.stopReason === "error");
-	if (signal?.aborted || (isAbortedOrError && !runHookOnAbortedMessage)) return;
-	await config.onTurnEnd?.(currentContext.messages, signal, { message, toolResults, willContinue: false, ...context });
+	if ((signal?.aborted && !terminalYield) || (isAbortedOrError && !runHookOnAbortedMessage)) return;
+	await config.onTurnEnd?.(currentContext.messages, terminalYield ? undefined : signal, {
+		message,
+		toolResults,
+		willContinue: false,
+		...context,
+	});
 }
 
 function createGateStopMessage(model: Model, reason: string | undefined): AssistantMessage {

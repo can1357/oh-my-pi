@@ -16,128 +16,6 @@ describe("Editor component", () => {
 		setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
 	});
 
-	it("advances its width-epoch revision for text changes but not cursor movement", () => {
-		const editor = new Editor(defaultEditorTheme);
-		const initial = editor.getNativeScrollbackWidthEpochRevision();
-		editor.setText("draft");
-		const changed = editor.getNativeScrollbackWidthEpochRevision();
-		expect(changed).toBeGreaterThan(initial);
-		editor.moveToLineStart();
-		expect(editor.getNativeScrollbackWidthEpochRevision()).toBe(changed);
-	});
-
-	it("advances its width-epoch revision when max height exposes more draft rows", () => {
-		const editor = new Editor(defaultEditorTheme);
-		editor.setText("draft-0\ndraft-1\ndraft-2\ndraft-3");
-		editor.setMaxHeight(3);
-		const clippedRows = editor.render(40).length;
-		const clippedRevision = editor.getNativeScrollbackWidthEpochRevision();
-
-		editor.setMaxHeight(6);
-
-		expect(editor.render(40).length).toBeGreaterThan(clippedRows);
-		expect(editor.getNativeScrollbackWidthEpochRevision()).toBeGreaterThan(clippedRevision);
-	});
-
-	it("advances its width-epoch revision when terminal-cursor layout adds a row", () => {
-		const editor = new Editor(defaultEditorTheme);
-		editor.focused = true;
-		editor.setText("draft");
-		editor.setImeSafeCursorLayout(true);
-		const inlineRows = editor.render(40).length;
-		const inlineRevision = editor.getNativeScrollbackWidthEpochRevision();
-
-		editor.setUseTerminalCursor(true);
-
-		expect(editor.render(40).length).toBeGreaterThan(inlineRows);
-		const terminalCursorRevision = editor.getNativeScrollbackWidthEpochRevision();
-		expect(terminalCursorRevision).toBeGreaterThan(inlineRevision);
-		editor.setUseTerminalCursor(true);
-		expect(editor.getNativeScrollbackWidthEpochRevision()).toBe(terminalCursorRevision);
-	});
-
-	it("advances its width-epoch revision when border visibility adds rows", () => {
-		const editor = new Editor(defaultEditorTheme);
-		editor.setText("draft");
-		editor.setBorderVisible(false);
-		const borderlessRows = editor.render(40).length;
-		const borderlessRevision = editor.getNativeScrollbackWidthEpochRevision();
-
-		editor.setBorderVisible(true);
-
-		expect(editor.render(40).length).toBeGreaterThan(borderlessRows);
-		const borderedRevision = editor.getNativeScrollbackWidthEpochRevision();
-		expect(borderedRevision).toBeGreaterThan(borderlessRevision);
-		editor.setBorderVisible(true);
-		expect(editor.getNativeScrollbackWidthEpochRevision()).toBe(borderedRevision);
-	});
-
-	it("tracks lazy top-border changes independently of width reflow", () => {
-		const editor = new Editor(defaultEditorTheme);
-		let status = "idle";
-		let revision = 0;
-		editor.setTopBorderProvider(availableWidth => {
-			const content = `${status}:${availableWidth}`;
-			return { content, width: visibleWidth(content), revision };
-		});
-		editor.render(40);
-		const idleRevision = editor.getNativeScrollbackWidthEpochRevision();
-
-		status = "streaming";
-		revision++;
-		editor.render(30);
-		const streamingRevision = editor.getNativeScrollbackWidthEpochRevision();
-		expect(streamingRevision).toBeGreaterThan(idleRevision);
-
-		editor.render(50);
-		expect(editor.getNativeScrollbackWidthEpochRevision()).toBe(streamingRevision);
-	});
-
-	it("advances its width-epoch revision when autocomplete changes without changing text", async () => {
-		const editor = new Editor(defaultEditorTheme);
-		const { promise: autocompleteUpdated, resolve: resolveAutocompleteUpdated } = Promise.withResolvers<void>();
-		editor.setAutocompleteProvider({
-			async getSuggestions() {
-				return {
-					items: Array.from({ length: 8 }, (_value, index) => ({
-						label: `/item-${index}`,
-						value: `/item-${index}`,
-						description:
-							index === 1
-								? "A deliberately long description that wraps across several narrow popup rows."
-								: "Short",
-					})),
-					prefix: "/",
-				};
-			},
-			applyCompletion(lines, cursorLine, cursorCol) {
-				return { lines, cursorLine, cursorCol };
-			},
-		});
-		editor.onAutocompleteUpdate = resolveAutocompleteUpdated;
-		editor.handleInput("/");
-		const textRevision = editor.getNativeScrollbackWidthEpochRevision();
-
-		await autocompleteUpdated;
-		const popupRevision = editor.getNativeScrollbackWidthEpochRevision();
-		expect(editor.getText()).toBe("/");
-		expect(popupRevision).toBeGreaterThan(textRevision);
-		const initialPopupRows = editor.render(30).length;
-
-		editor.handleInput("\x1b[B");
-		const selectedRevision = editor.getNativeScrollbackWidthEpochRevision();
-		expect(selectedRevision).toBeGreaterThan(popupRevision);
-
-		editor.setAutocompleteMaxVisible(8);
-		const resizedRevision = editor.getNativeScrollbackWidthEpochRevision();
-		expect(resizedRevision).toBeGreaterThan(selectedRevision);
-		expect(editor.render(30).length).toBeGreaterThan(initialPopupRows);
-
-		editor.handleInput("\x1b");
-		expect(editor.isShowingAutocomplete()).toBe(false);
-		expect(editor.getNativeScrollbackWidthEpochRevision()).toBeGreaterThan(resizedRevision);
-	});
-
 	describe("Word delete keybindings", () => {
 		it("honors a keybindings.yml remap of deleteWordBackward in the multi-line editor", () => {
 			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS, { "tui.editor.deleteWordBackward": "alt+g" }));
@@ -160,6 +38,20 @@ describe("Editor component", () => {
 			editor.setText("alfa beta gamma");
 			editor.handleInput("\x1b[127;5u"); // kitty CSI-u ctrl+backspace
 			expect(editor.getText()).toBe("alfa beta ");
+		});
+
+		it("deletes the next word for Ghostty's physical Option+Forward-Delete wire", () => {
+			setKittyProtocolActive(true);
+			try {
+				const editor = new Editor(defaultEditorTheme);
+				editor.setText("foo bar baz");
+				editor.handleInput("\x01"); // Ctrl+A
+				for (let i = 0; i < 3; i++) editor.handleInput("\x1b[C"); // After "foo"
+				editor.handleInput("\x1b[3;11~"); // Ghostty Option+Forward-Delete
+				expect(editor.getText()).toBe("foo baz");
+			} finally {
+				setKittyProtocolActive(false);
+			}
 		});
 	});
 
@@ -336,6 +228,21 @@ describe("Editor component", () => {
 			editor.handleInput("\x1b[A"); // stays at "same" (only one entry)
 			expect(editor.getText()).toBe("same");
 		});
+		it("persists a consecutive duplicate so storage can refresh its project metadata", () => {
+			const persisted: string[] = [];
+			const editor = new Editor(defaultEditorTheme);
+			editor.setHistoryStorage({
+				add: prompt => {
+					persisted.push(prompt);
+					return Promise.resolve();
+				},
+				getRecent: () => [{ prompt: "same" }],
+			});
+
+			editor.addToHistory("same");
+
+			expect(persisted).toEqual(["same"]);
+		});
 
 		it("allows non-consecutive duplicates in history", () => {
 			const editor = new Editor(defaultEditorTheme);
@@ -498,10 +405,10 @@ describe("Editor component", () => {
 			expect(editor.render(80).some(line => line.includes(CURSOR_MARKER))).toBe(true);
 		});
 
-		it("wraps long slash-command descriptions instead of dropping the tail", async () => {
+		it("caps wrapped slash-command descriptions at two rows with an ellipsis", async () => {
 			const editor = new Editor(defaultEditorTheme);
 			const longDescription =
-				"Plan and execute non-trivial architectural improvements to the codebase. Use this skill when you need to refactor existing systems.";
+				"Plan and execute non-trivial architectural improvements to the codebase. Use this skill when you need to refactor existing systems and it keeps rambling on far past what two popup rows can hold.";
 			editor.setAutocompleteProvider(
 				new CombinedAutocompleteProvider(
 					[{ name: "improve-codebase-architecture", description: longDescription }],
@@ -516,8 +423,13 @@ describe("Editor component", () => {
 			await autocompleteUpdated;
 
 			const rendered = editor.render(80).map(line => stripVTControlCharacters(line));
-			expect(rendered.some(line => line.includes("improve-codebase-architecture"))).toBe(true);
-			expect(rendered.join("\n")).toContain("refactor existing systems.");
+			const commandRowIndex = rendered.findIndex(line => line.includes("improve-codebase-architecture"));
+			expect(commandRowIndex).not.toBe(-1);
+			// Wrapped continuation is capped at one extra row ending in an ellipsis.
+			const popupRows = rendered.slice(commandRowIndex);
+			expect(popupRows.length).toBe(2);
+			expect(popupRows[1]).toContain("…");
+			expect(rendered.join("\n")).not.toContain("rambling");
 		});
 
 		it("triggers file-reference autocomplete when typing at-sign", async () => {

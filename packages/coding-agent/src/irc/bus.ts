@@ -300,6 +300,18 @@ export class IrcBus {
 		return mailbox;
 	}
 
+	/**
+	 * Consume the OLDEST pending message for `agentId` (optionally restricted
+	 * to `from`), leaving the rest of the mailbox intact. This is the exact
+	 * atomic step `wait` performs on entry, exposed for callers that must not
+	 * block: peeking with `inbox` and consuming afterwards would open a window
+	 * for a concurrent consumer of the same mailbox to take the message in
+	 * between, and a plain `inbox` drain would swallow the whole backlog.
+	 */
+	take(agentId: string, from?: string): IrcMessage | undefined {
+		return this.#takeFromMailbox(agentId, from);
+	}
+
 	unreadCount(agentId: string): number {
 		return this.#mailboxes.get(agentId)?.length ?? 0;
 	}

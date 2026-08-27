@@ -57,6 +57,7 @@ export async function runCleanse(
 	const model = options.model?.trim() || DEFAULT_MODEL;
 	const cwd = getProjectDir();
 	let runtime: CleanseAgentRuntime | undefined;
+	let runtimePromise: Promise<CleanseAgentRuntime> | undefined;
 	let loopResult: CleanseLoopResult | undefined;
 	const board = ui.board;
 	const hooks: CleanseAgentHooks = {
@@ -69,16 +70,18 @@ export async function runCleanse(
 		onCheckerEnd: (check, durationMs) => board.checkerFinished(check, durationMs),
 	};
 	const ensureRuntime = async (): Promise<CleanseAgentRuntime> => {
-		if (runtime) return runtime;
-		board.phase(`Resolving model ${model}...`);
-		try {
-			runtime = await createCleanseAgentRuntime({ cwd, model, hooks });
-		} finally {
-			board.phase(undefined);
-		}
-		board.log(`Model: ${runtime.model}`);
-		board.log(`Session: ${shortenPath(runtime.sessionFile)}`);
-		return runtime;
+		runtimePromise ??= (async () => {
+			board.phase(`Resolving model ${model}...`);
+			try {
+				runtime = await createCleanseAgentRuntime({ cwd, model, hooks });
+			} finally {
+				board.phase(undefined);
+			}
+			board.log(`Model: ${runtime.model}`);
+			board.log(`Session: ${shortenPath(runtime.sessionFile)}`);
+			return runtime;
+		})();
+		return runtimePromise;
 	};
 
 	try {
@@ -144,35 +147,47 @@ export async function runCleanse(
 			);
 			return { exitCode: 1, status: "unsupported", report, sessionFile: runtime?.sessionFile };
 		}
-		const initialReport = await suite.run(signal, checkerEvents);
-		if (board.interactive) printSkippedChecks(ui, initialReport);
-		else printCheckReport(ui, initialReport);
-		if (initialReport.diagnostics.length === 0) {
-			ui.print(
-				`Clean: ${initialReport.checks.length} checker${initialReport.checks.length === 1 ? "" : "s"} passed.`,
-			);
-			return { exitCode: 0, status: "clean", report: initialReport, sessionFile: runtime?.sessionFile };
-		}
-
-		const assignments = groupDiagnosticsByFile(initialReport.diagnostics);
-		const agentCount = Math.min(maxAgents, assignments.length);
-		const fileCount = assignments.filter(group => group.file !== undefined).length;
-		board.log(
-			`Found ${initialReport.diagnostics.length} diagnostic${initialReport.diagnostics.length === 1 ? "" : "s"} across ${fileCount} file${fileCount === 1 ? "" : "s"}; launching ${agentCount} subagent${agentCount === 1 ? "" : "s"}.`,
-		);
-		const activeRuntime = await ensureRuntime();
+		printSkippedChecks(ui, { checks: [], diagnostics: [], skipped: [...suite.skipped] });
 		const activeSuite = suite;
 		loopResult = await runCleanseLoop(
-			{ maxAgents, initialReport, signal },
+			{ maxAgents, signal },
 			{
-				collect: loopSignal => activeSuite.run(loopSignal, checkerEvents),
-				dispatch: (batch, wave, report, loopSignal) => activeRuntime.dispatch(batch, wave, report, loopSignal),
-				onWave(_wave, batch) {
-					board.log(`Dispatching ${batch.length} weighted assignment${batch.length === 1 ? "" : "s"}...`);
-					board.waveStarted(batch.length);
+				collect: (onDiagnostics, loopSignal) =>
+					activeSuite.run({
+						signal: loopSignal,
+						events: {
+							...checkerEvents,
+							onDiagnostics: (_checker, diagnostics) => onDiagnostics(diagnostics),
+						},
+					}),
+				verify: loopSignal => activeSuite.run({ signal: loopSignal, events: checkerEvents }),
+				dispatch: async (assignment, worker, peers, loopSignal) => {
+					const activeRuntime = await ensureRuntime();
+					return activeRuntime.dispatchWorker(
+						assignment,
+						{ worker, peers, checkers: activeSuite.selected },
+						loopSignal,
+					);
 				},
-				onReport(_wave, report) {
-					board.waveFinished();
+				followUp: async (worker, diagnostics) => {
+					const delivered = (await runtime?.followUp(worker, diagnostics)) ?? false;
+					if (delivered) {
+						board.log(
+							`CleanseA${worker} ← ${diagnostics.length} follow-up diagnostic${diagnostics.length === 1 ? "" : "s"}`,
+						);
+					}
+					return delivered;
+				},
+				onCollected(report) {
+					if (report.diagnostics.length === 0) return;
+					const groups = groupDiagnosticsByFile(report.diagnostics);
+					const fileCount = groups.filter(group => group.file !== undefined).length;
+					board.log(
+						`Checkers done: ${report.diagnostics.length} diagnostic${report.diagnostics.length === 1 ? "" : "s"} across ${fileCount} file${fileCount === 1 ? "" : "s"}.`,
+					);
+				},
+				onVerified(report) {
+					board.repairFinished();
 					board.log(
 						`Verification: ${report.diagnostics.length} diagnostic${report.diagnostics.length === 1 ? "" : "s"} remaining.`,
 					);
@@ -180,22 +195,26 @@ export async function runCleanse(
 			},
 		);
 		board.close();
-		await activeRuntime.close(loopResult);
+		await runtime?.close(loopResult);
 		if (loopResult.status === "cancelled") {
 			ui.printError("Cleanse cancelled.");
 			return {
 				exitCode: 130,
 				status: "cancelled",
 				report: loopResult.report,
-				sessionFile: activeRuntime.sessionFile,
+				sessionFile: runtime?.sessionFile,
 			};
 		}
 		if (loopResult.status === "clean") {
-			ui.print("Clean: all detected diagnostics are resolved.");
-			return { exitCode: 0, status: "clean", report: loopResult.report, sessionFile: activeRuntime.sessionFile };
+			ui.print(
+				loopResult.workers === 0
+					? `Clean: ${loopResult.report.checks.length} checker${loopResult.report.checks.length === 1 ? "" : "s"} passed.`
+					: "Clean: all detected diagnostics are resolved.",
+			);
+			return { exitCode: 0, status: "clean", report: loopResult.report, sessionFile: runtime?.sessionFile };
 		}
 		printRemaining(ui, loopResult.report);
-		return { exitCode: 1, status: "unresolved", report: loopResult.report, sessionFile: activeRuntime.sessionFile };
+		return { exitCode: 1, status: "unresolved", report: loopResult.report, sessionFile: runtime?.sessionFile };
 	} catch (error) {
 		if (!signal.aborted) throw error;
 		const report: CleanseDiagnosticReport = loopResult?.report ?? { checks: [], diagnostics: [], skipped: [] };
@@ -228,14 +247,6 @@ export async function runCleanseCommand(options: CleanseCommandOptions = {}): Pr
 		process.off("SIGINT", abort);
 		process.off("SIGTERM", abort);
 	}
-}
-
-function printCheckReport(ui: CleanseRunUi, report: CleanseDiagnosticReport): void {
-	for (const check of report.checks) {
-		const count = check.diagnostics.length;
-		ui.print(`- ${check.label}: ${count === 0 ? "clean" : `${count} issue${count === 1 ? "" : "s"}`}`);
-	}
-	printSkippedChecks(ui, report);
 }
 
 function printSkippedChecks(ui: CleanseRunUi, report: CleanseDiagnosticReport): void {

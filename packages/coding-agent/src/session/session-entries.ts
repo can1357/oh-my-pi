@@ -104,6 +104,8 @@ export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	tokensAfter?: number;
 	/** Method that produced this entry; absent on legacy sessions and extension-provided compactions. */
 	method?: CompactionMethod;
+	/** Last branch entry represented by provider-native replay history; later entries replay normally. */
+	providerReplayThroughEntryId?: string;
 	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
 	details?: T;
 	/** Hook-provided data to persist across compaction */

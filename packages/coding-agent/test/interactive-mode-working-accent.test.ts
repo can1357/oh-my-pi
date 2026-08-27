@@ -5,7 +5,6 @@ import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as sessionColor from "@oh-my-pi/pi-coding-agent/utils/session-color";
-import type { Container, NativeScrollbackLiveRegion } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 type Harness = {
@@ -87,19 +86,6 @@ afterAll(() => {
 });
 
 describe("InteractiveMode working-message session accent cache", () => {
-	it("reports a live seam only while status content is mounted", async () => {
-		const { mode } = await createHarness("Live status");
-		const statusContainer = mode.statusContainer as Container & NativeScrollbackLiveRegion;
-
-		// Empty: no seam — the engine may commit freely past the container.
-		expect(statusContainer.getNativeScrollbackLiveRegionStart()).toBeUndefined();
-		// Loader mounted: every row is live, so the seam sits at 0 and keeps
-		// the animating loader out of immutable native scrollback.
-		startStableLoader(mode);
-		expect(statusContainer.getNativeScrollbackLiveRegionStart()).toBe(0);
-		expect(statusContainer.isNativeScrollbackLiveRegionPinned?.()).toBe(true);
-	});
-
 	it("reuses one computed accent across loader spinner and message colorizers", async () => {
 		const { mode } = await createHarness("Cached session");
 		const getHex = vi.spyOn(sessionColor, "getSessionAccentHex");

@@ -4,31 +4,29 @@ import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/inp
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
 describe("InputController tool output expansion", () => {
-	it("expands children and forces a full display reset to bypass frozen snapshots", () => {
+	it("expands children and forces a full repaint so every live block re-renders", () => {
 		const expandable = { setExpanded: vi.fn() };
 		const inert = { render: vi.fn(() => []) };
 		const requestRender = vi.fn();
-		const resetDisplay = vi.fn();
 		const ctx = {
 			toolOutputExpanded: false,
 			chatContainer: { children: [expandable, inert] },
-			ui: { requestRender, resetDisplay },
+			ui: { requestRender },
 		} as unknown as InteractiveModeContext;
 
 		new InputController(ctx).toggleToolOutputExpansion();
 
 		expect(ctx.toolOutputExpanded).toBe(true);
 		expect(expandable.setExpanded).toHaveBeenCalledWith(true);
-		// resetDisplay() is the only path that retires the transcript's frozen
-		// block snapshots and re-emits the whole transcript at its new heights.
-		// A plain requestRender would replay the stale (collapsed) snapshots.
-		expect(resetDisplay).toHaveBeenCalledTimes(1);
-		expect(requestRender).not.toHaveBeenCalled();
+		// Expansion mutates every live block; the forced repaint re-renders them
+		// at their new heights in the same frame.
+		expect(requestRender).toHaveBeenCalledTimes(1);
+		expect(requestRender).toHaveBeenCalledWith(true);
 	});
 
 	it("does not expand hidden tool activity and explains why", () => {
 		const expandable = { setExpanded: vi.fn() };
-		const resetDisplay = vi.fn();
+		const requestRender = vi.fn();
 		const showStatus = vi.fn();
 		const ctx = {
 			hideToolActivity: true,
@@ -36,14 +34,14 @@ describe("InputController tool output expansion", () => {
 			chatContainer: { children: [expandable] },
 			keybindings: { getDisplayString: vi.fn(() => "Alt+H") },
 			showStatus,
-			ui: { resetDisplay },
+			ui: { requestRender },
 		} as unknown as InteractiveModeContext;
 
 		new InputController(ctx).toggleToolOutputExpansion();
 
 		expect(ctx.toolOutputExpanded).toBe(false);
 		expect(expandable.setExpanded).not.toHaveBeenCalled();
-		expect(resetDisplay).not.toHaveBeenCalled();
+		expect(requestRender).not.toHaveBeenCalled();
 		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("Alt+H"));
 		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("/settings"));
 	});
@@ -61,7 +59,7 @@ describe("InputController tool activity visibility", () => {
 		const rebuildChatFromMessages = vi.fn();
 		const set = vi.fn();
 		const clearInlineImages = vi.fn();
-		const resetDisplay = vi.fn();
+		const requestRender = vi.fn();
 		const showStatus = vi.fn();
 		const setToolActivityVisible = vi.fn();
 		const ctx = {
@@ -71,7 +69,7 @@ describe("InputController tool activity visibility", () => {
 			chatContainer: { children, clear, addChild, setToolActivityVisible },
 			rebuildChatFromMessages,
 			showStatus,
-			ui: { clearInlineImages, resetDisplay },
+			ui: { clearInlineImages, requestRender },
 		};
 		const controller = new InputController(ctx as unknown as InteractiveModeContext) as unknown as InputController & {
 			toggleToolActivityVisibility(): void;
@@ -86,8 +84,8 @@ describe("InputController tool activity visibility", () => {
 		expect(addChild).not.toHaveBeenCalled();
 		expect(rebuildChatFromMessages).not.toHaveBeenCalled();
 		expect(clearInlineImages).toHaveBeenCalledTimes(1);
-		expect(resetDisplay).toHaveBeenCalledTimes(1);
-		expect(clearInlineImages.mock.invocationCallOrder[0]).toBeLessThan(resetDisplay.mock.invocationCallOrder[0]);
+		expect(requestRender).toHaveBeenCalledTimes(1);
+		expect(clearInlineImages.mock.invocationCallOrder[0]).toBeLessThan(requestRender.mock.invocationCallOrder[0]);
 		expect(showStatus).toHaveBeenLastCalledWith("Tool activity: hidden");
 		expect(setToolResultImagesVisible).toHaveBeenLastCalledWith(false);
 		expect(setToolActivityVisible).toHaveBeenLastCalledWith(false);
@@ -102,7 +100,7 @@ describe("InputController tool activity visibility", () => {
 		expect(addChild).not.toHaveBeenCalled();
 		expect(rebuildChatFromMessages).not.toHaveBeenCalled();
 		expect(clearInlineImages).toHaveBeenCalledTimes(1);
-		expect(resetDisplay).toHaveBeenCalledTimes(2);
+		expect(requestRender).toHaveBeenCalledTimes(2);
 		expect(showStatus).toHaveBeenLastCalledWith("Tool activity: visible");
 		expect(setToolResultImagesVisible).toHaveBeenLastCalledWith(true);
 		expect(setToolActivityVisible).toHaveBeenLastCalledWith(true);

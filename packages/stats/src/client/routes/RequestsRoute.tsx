@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { getRecentRequests } from "../api";
-import { formatCost, formatDurationMs, formatInteger, formatRelativeTime } from "../data/formatters";
+import { formatDurationMs, formatInteger, formatMessageCost, formatRelativeTime } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import type { MessageStats, TimeRange } from "../types";
 import { AsyncBoundary, DataTable, Panel, StatusPill } from "../ui";
@@ -47,9 +47,9 @@ export function RequestsRoute({ active, refreshTrigger, onRequestClick }: Reques
 			},
 			{
 				key: "cost",
-				header: "Cost",
+				header: "API-equivalent estimate",
 				numeric: true,
-				render: (item: MessageStats) => formatCost(item.usage.cost.total, 4),
+				render: (item: MessageStats) => formatMessageCost(item, 4),
 			},
 			{
 				key: "duration",
@@ -88,8 +88,8 @@ export function RequestsRoute({ active, refreshTrigger, onRequestClick }: Reques
 					<div className="stats-mobile-card-value">{formatRelativeTime(item.timestamp)}</div>
 				</div>
 				<div>
-					<div className="stats-mobile-card-label">Cost</div>
-					<div className="stats-mobile-card-value">{formatCost(item.usage.cost.total, 4)}</div>
+					<div className="stats-mobile-card-label">API-equivalent estimate</div>
+					<div className="stats-mobile-card-value">{formatMessageCost(item, 4)}</div>
 				</div>
 				<div>
 					<div className="stats-mobile-card-label">Tokens</div>

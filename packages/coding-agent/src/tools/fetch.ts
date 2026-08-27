@@ -1,9 +1,9 @@
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { FetchImpl, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import { type FetchImpl, getEnvApiKey, type ImageContent, type TextContent } from "@oh-my-pi/pi-ai";
 import { htmlToMarkdown } from "@oh-my-pi/pi-natives";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { $which, ptree, truncate } from "@oh-my-pi/pi-utils";
@@ -25,11 +25,12 @@ import { extractWithParallel, findParallelApiKey, getParallelExtractContent } fr
 import type { RenderResult, SpecialHandler } from "../web/scrapers/types";
 import { finalizeOutput, loadPage, looksLikeHtml, MAX_BYTES, MAX_OUTPUT_CHARS } from "../web/scrapers/types";
 import { convertWithMarkit, fetchBinary } from "../web/scrapers/utils";
+import { findCredential } from "../web/search/providers/utils";
 import { applyListLimit } from "./list-limit";
 import { formatStyledArtifactReference, type OutputMeta } from "./output-meta";
 import { isReadableUrlPath, type LineRange, parseLineRanges } from "./path-utils";
 import { formatBytes, formatExpandHint, getDomain, replaceTabs } from "./render-utils";
-import { listTables, looksLikeSqlite, renderTableList } from "./sqlite-reader";
+import { listTables, looksLikeSqlite, openSqliteReadConnection, renderTableList } from "./sqlite-reader";
 import { ToolAbortError, ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
@@ -665,11 +666,14 @@ export async function renderHtmlToText(
 			return firstDocument ? getParallelExtractContent(firstDocument) : null;
 		},
 		jina: async () => {
+			const apiKey = findCredential(storage, getEnvApiKey("jina"), "jina");
+			const headers: Record<string, string> = {
+				Accept: "text/markdown",
+				"X-No-Cache": "true",
+			};
+			if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
 			const response = await fetchImpl(`https://r.jina.ai/${url}`, {
-				headers: {
-					Accept: "text/markdown",
-					"X-No-Cache": "true",
-				},
+				headers,
 				signal: remoteSignal(),
 			});
 			if (!response.ok) return null;
@@ -886,8 +890,7 @@ async function renderSqlitePayload(bytes: Uint8Array): Promise<string> {
 	return withTempBinaryFile("omp-url-sqlite-", ".sqlite", bytes, async tempPath => {
 		let db: Database | null = null;
 		try {
-			db = new Database(tempPath, { readonly: true, strict: true });
-			db.run("PRAGMA busy_timeout = 3000");
+			db = await openSqliteReadConnection(tempPath);
 			const listLimit = applyListLimit(listTables(db), { limit: URL_SQLITE_LIST_LIMIT });
 			return renderTableList(listLimit.items);
 		} finally {

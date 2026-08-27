@@ -1,7 +1,8 @@
 import { type Component, Container, Markdown } from "@oh-my-pi/pi-tui";
 import { formatBytes } from "@oh-my-pi/pi-utils";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
-import { imageReferenceHyperlink, renderPlaceholders } from "../image-references";
+import { attachmentSgr, collapseImageMarkers, renderPlaceholders } from "../composer-attachments";
+import { imageReferenceHyperlink } from "../image-references";
 import { highlightMagicKeywords } from "../magic-keywords";
 
 // OSC 133 shell integration: marks prompt zones for terminal multiplexers.
@@ -39,6 +40,10 @@ export class UserMessageComponent extends Container {
 
 	constructor(text: string, synthetic = false, imageLinks?: readonly (string | undefined)[]) {
 		super();
+		// Display-only collapse: the stored/wire text carries bracketed `[Image #N, WxH]` markers,
+		// but the transcript shows the same compact `<icon> #N` chip the composer used. Runs before
+		// Markdown layout so wrapping and bubble padding are computed on the visible text.
+		text = collapseImageMarkers(text, Number.POSITIVE_INFINITY, () => {});
 		const bgColor = (value: string) => theme.bg("userMessageBg", value);
 		// Paint the magic keywords ("ultrathink"/"orchestrate"/"workflowz") inside the rendered
 		// bubble too — matching the live editor glow. The Markdown component routes code spans and
@@ -49,14 +54,18 @@ export class UserMessageComponent extends Container {
 		const baseText = synthetic
 			? (value: string) => theme.fg("dim", value)
 			: (value: string) => theme.fg("userMessageText", highlightMagicKeywords(value, keywordReset));
-		const imageLabel = (value: string) => theme.fg("accent", `\x1b[1m\x1b[4m${value}\x1b[24m\x1b[22m`);
 		const color = (value: string) =>
 			renderPlaceholders(value, {
 				renderText: baseText,
-				renderReference: (label, kind, index) =>
-					kind === "image"
-						? imageReferenceHyperlink(label, index, imageLinks, imageLabel)
-						: theme.fg("accent", `\x1b[1m${label}\x1b[22m`),
+				renderReference: (label, kind, index, form) => {
+					// Chip tokens keep their composer identity color; the bubble's own
+					// foreground resumes after the token (same pattern as keywords).
+					const styled =
+						form === "chip"
+							? `${attachmentSgr(kind, index)}\x1b[1m${label}\x1b[22m${keywordReset}`
+							: theme.fg("accent", `\x1b[1m${label}\x1b[22m`);
+					return kind === "image" ? imageReferenceHyperlink(label, index, imageLinks, () => styled) : styled;
+				},
 			});
 		const md = new Markdown(text, 1, 1, getMarkdownTheme(), {
 			bgColor,

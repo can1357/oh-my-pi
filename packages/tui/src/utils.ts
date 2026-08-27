@@ -225,6 +225,13 @@ export function getSegmenter(): Intl.Segmenter {
 // added back so width matches the native truncate/slice/wrap helpers.
 const OSC66_SPAN_REGEX = /\x1b\]66;([^;]*);([\s\S]*?)(?:\x07|\x1b\\)/g;
 const OSC66_PREFIX = "\x1b]66;";
+// APC sequences (`ESC _ ... ST|BEL`) — Kitty graphics commands such as the
+// virtual-placement prefix on Unicode-placeholder image lines, or the TUI's
+// BEL-terminated cursor marker. `Bun.stringWidth` strips CSI/OSC but counts APC
+// payloads as printable text, so they are removed before measuring (they occupy
+// zero cells — matching the native width engine in pi-natives/text.rs).
+const APC_SPAN_REGEX = /\x1b_[\s\S]*?(?:\x07|\x1b\\)/g;
+const APC_PREFIX = "\x1b_";
 const PRINTABLE_ASCII_REGEX = /^[\u0020-\u007e]*$/;
 
 // Pin Bun.stringWidth semantics to the native width engine and guard against Bun
@@ -296,8 +303,9 @@ let visibleWidthCacheEpoch = widthConfigEpoch;
  * Visible width of a string in terminal columns, excluding ANSI/OSC escapes.
  *
  * `Bun.stringWidth` does the heavy lifting (UAX#11 width tables + ANSI/OSC
- * stripping); this adds the two corrections it omits — tabs (expanded to
- * `tabWidth` cells) and OSC 66 text-sizing payloads (scaled by `s=`).
+ * stripping); this adds the corrections it omits — tabs (expanded to
+ * `tabWidth` cells), OSC 66 text-sizing payloads (scaled by `s=`), and APC
+ * sequences (counted as printable by Bun, actually zero cells).
  */
 export function visibleWidth(str: string): number {
 	if (!str) return 0;
@@ -337,7 +345,8 @@ export function visibleWidth(str: string): number {
 		}
 	}
 
-	let width = Bun.stringWidth(str, STRING_WIDTH_OPTS);
+	const measurable = hasEsc && str.includes(APC_PREFIX) ? str.replace(APC_SPAN_REGEX, "") : str;
+	let width = Bun.stringWidth(measurable, STRING_WIDTH_OPTS);
 	if (tabCount > 0) width += tabCount * DEFAULT_TAB_WIDTH;
 
 	if (hasEsc && str.includes(OSC66_PREFIX)) {
