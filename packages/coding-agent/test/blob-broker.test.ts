@@ -37,7 +37,7 @@ function makeModel(api: string, provider: string, baseUrl = "https://example.inv
 	});
 }
 
-const anthropicModel = makeModel("anthropic-messages", "anthropic");
+const anthropicModel = makeModel("anthropic-messages", "anthropic", "https://api.anthropic.com");
 
 function makeContext(): Context {
 	return {
@@ -375,6 +375,13 @@ describe("supportsRemoteImageUrls", () => {
 		);
 		// Same API shape, backend that cannot fetch arbitrary URLs.
 		expect(supportsRemoteImageUrls(makeModel("anthropic-messages", "opencode"), KNOWN_IMAGE_REFERENCE)).toBe(false);
+		// Same provider id, endpoint that is not the first-party Claude API.
+		expect(
+			supportsRemoteImageUrls(
+				makeModel("anthropic-messages", "anthropic", "https://claude-proxy.example.invalid/v1"),
+				KNOWN_IMAGE_REFERENCE,
+			),
+		).toBe(false);
 		// Moonshot-native hosts reject remote image URLs on both transports
 		// ("unsupported image url" 400) despite the openai-completions catalog api.
 		expect(supportsRemoteImageUrls(makeModel("openai-completions", "kimi-code"), KNOWN_IMAGE_REFERENCE)).toBe(false);

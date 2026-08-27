@@ -54,6 +54,15 @@ export function isDataUri(url: string): boolean {
 }
 
 /**
+ * Transports that line-wrap base64 (MCP servers, ACP resource attachments,
+ * percent-encoded data URLs) still carry a well-formed payload; canonical
+ * validation and the wire copy both use the unwrapped form.
+ */
+export function normalizeBase64Payload(data: string): string {
+	return /\s/.test(data) ? data.replace(/\s+/g, "") : data;
+}
+
+/**
  * Decodes base64 and percent-encoded `data:` URIs.
  *
  * Returns `undefined` for non-data URLs and malformed data URIs.
@@ -72,7 +81,7 @@ export function decodeDataUri(url: string): DecodedDataUri | undefined {
 	const body = percentDecode(dataUrl.slice(comma + 1));
 	if (!body || body.length === 0) return undefined;
 	if (!base64Marker) return { data: body.toString("base64"), mimeType };
-	const payload = body.toString("latin1");
+	const payload = normalizeBase64Payload(body.toString("latin1"));
 	const bytes = Buffer.from(payload, "base64");
 	const data = bytes.toString("base64");
 	if (bytes.length === 0 || data !== payload) return undefined;

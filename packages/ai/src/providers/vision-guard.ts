@@ -1,11 +1,12 @@
-import { isOfficialAnthropicFilesApiBaseUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
+import { isOfficialAnthropicApiUrl, isOfficialAnthropicFilesApiBaseUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import { isDashscopeCompatibleModeUrl, modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import { isDeepseekModelIdOrName, isQwenModelId } from "@oh-my-pi/pi-catalog/identity";
 import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
-import { parseImageMetadata } from "@oh-my-pi/pi-utils";
+import { $env, parseImageMetadata } from "@oh-my-pi/pi-utils";
 
 import type { ImageContent, Model, TextContent } from "../types";
-import { decodeDataUri } from "./openai-data-uri";
+import { isFoundryEnabled } from "../utils/foundry";
+import { decodeDataUri, normalizeBase64Payload } from "./openai-data-uri";
 
 export const NON_VISION_IMAGE_PLACEHOLDER = "[image omitted: model does not support vision]";
 export const UNREPLAYABLE_IMAGE_PLACEHOLDER = "[image omitted: source cannot be replayed]";
@@ -93,12 +94,6 @@ function decodeCanonicalBase64(data: string): Buffer | undefined {
 	} catch {
 		return undefined;
 	}
-}
-
-// Transports that line-wrap base64 (MCP servers, ACP resource attachments) still
-// carry a well-formed payload; the wire copy must use the unwrapped form.
-function normalizeBase64Payload(data: string): string {
-	return /\s/.test(data) ? data.replace(/\s+/g, "") : data;
 }
 
 function decodeUsableInlineImageData(data: string): Buffer | undefined {
@@ -304,6 +299,25 @@ export function supportsComputerScreenshotReferences(model: Model, screenshot?: 
 	return inlineImage !== undefined && getUsableInlineImageMimeType(inlineImage) !== undefined;
 }
 
+/**
+ * Whether an `anthropic-messages` model actually dispatches to the first-party
+ * Claude API, mirroring `resolveAnthropicBaseUrl`: Foundry redirects requests
+ * away from an empty `baseUrl`, an explicitly configured non-official `baseUrl`
+ * wins over the gateway fallback, and `ANTHROPIC_BASE_URL` routes through an
+ * enterprise gateway ahead of the official default. Only the first-party API
+ * fetches image URLs; proxies and Foundry ignore them, so they must keep the
+ * inline bytes.
+ */
+function servesOfficialAnthropicApi(model: Model): boolean {
+	if (model.provider !== "anthropic") return false;
+	if (isFoundryEnabled()) {
+		const foundryBaseUrl = $env.FOUNDRY_BASE_URL?.trim();
+		if (foundryBaseUrl) return isOfficialAnthropicApiUrl(foundryBaseUrl);
+	}
+	if (model.baseUrl && !isOfficialAnthropicApiUrl(model.baseUrl)) return false;
+	return isOfficialAnthropicApiUrl($env.ANTHROPIC_BASE_URL?.trim() || model.baseUrl);
+}
+
 /** Whether this model can replay a remote URL for an image with this media type. */
 export function supportsRemoteImageUrls(model: Model, image: Pick<ImageContent, "mimeType">): boolean {
 	if (isOllamaModel(model) || isBedrockModel(model)) return false;
@@ -311,7 +325,7 @@ export function supportsRemoteImageUrls(model: Model, image: Pick<ImageContent, 
 	if (modelMatchesHost(model, "moonshotNative")) return false;
 	if (isOpenAICompletionsModel(model)) return isOpenAICompletionsVisionSupported(model);
 	if (URL_CAPABLE_OPENAI_APIS[model.api] === true) return true;
-	if (model.api === "anthropic-messages") return model.provider === "anthropic";
+	if (model.api === "anthropic-messages") return servesOfficialAnthropicApi(model);
 	if (model.api === "google-gemini-cli") {
 		return model.provider === "google-antigravity" && hasReplayableGoogleImageMimeType(image);
 	}
