@@ -226,27 +226,54 @@ function mapContextToGoogle(context: Context, _model: Model<"zed-agent">) {
 	const contents: Array<{ role: string; parts: Array<Record<string, unknown>> }> = [];
 
 	for (const msg of context.messages) {
-		const parts: Array<Record<string, unknown>> = [];
-		if (typeof msg.content === "string") {
-			parts.push({ text: msg.content });
-		} else {
+		if (msg.role === "user" || msg.role === "developer") {
+			const parts: Array<Record<string, unknown>> = [];
+			if (typeof msg.content === "string") {
+				parts.push({ text: msg.content });
+			} else {
+				for (const block of msg.content) {
+					if (block.type === "text") {
+						parts.push({ text: block.text });
+					} else if (block.type === "image") {
+						parts.push({
+							inlineData: {
+								mimeType: block.mimeType,
+								data: block.data,
+							},
+						});
+					}
+				}
+			}
+			contents.push({ role: "user", parts });
+		} else if (msg.role === "assistant") {
+			const parts: Array<Record<string, unknown>> = [];
 			for (const block of msg.content) {
 				if (block.type === "text") {
 					parts.push({ text: block.text });
-				} else if (block.type === "image") {
+				} else if (block.type === "toolCall") {
 					parts.push({
-						inlineData: {
-							mimeType: block.mimeType,
-							data: block.data,
+						functionCall: {
+							name: block.name,
+							args: block.arguments,
 						},
 					});
 				}
 			}
+			contents.push({ role: "model", parts });
+		} else if (msg.role === "toolResult") {
+			const textResult = msg.content.map(b => (b.type === "text" ? b.text : "")).join("\n");
+			contents.push({
+				role: "user",
+				parts: [
+					{
+						functionResponse: {
+							name: msg.toolCallId,
+							response: { content: textResult },
+						},
+					},
+				],
+			});
 		}
-		contents.push({
-			role: msg.role === "assistant" ? "model" : "user",
-			parts,
-		});
 	}
 
 	const body: Record<string, unknown> = {
@@ -259,11 +286,23 @@ function mapContextToGoogle(context: Context, _model: Model<"zed-agent">) {
 		};
 	}
 
+	if (context.tools && context.tools.length > 0) {
+		body.tools = [
+			{
+				functionDeclarations: context.tools.map(t => ({
+					name: t.name,
+					description: t.description,
+					parameters: t.parameters ?? { type: "object", properties: {} },
+				})),
+			},
+		];
+	}
+
 	return body;
 }
 
 function mapContextToOpenAiChat(context: Context, model: Model<"zed-agent">, options?: ZedOptions) {
-	const messages: Array<{ role: string; content: unknown }> = [];
+	const messages: Array<{ role: string; content?: unknown; tool_calls?: unknown; tool_call_id?: string }> = [];
 
 	if (context.systemPrompt && context.systemPrompt.length > 0) {
 		messages.push({ role: "system", content: context.systemPrompt.join("\n\n") });
@@ -286,10 +325,26 @@ function mapContextToOpenAiChat(context: Context, model: Model<"zed-agent">, opt
 				.filter(b => b.type === "text")
 				.map(b => (b as TextContent).text)
 				.join("\n");
-			messages.push({ role: "assistant", content: text });
+			const toolCalls = msg.content
+				.filter(b => b.type === "toolCall")
+				.map(b => {
+					const tc = b as ToolCall;
+					return {
+						id: tc.id,
+						type: "function",
+						function: {
+							name: tc.name,
+							arguments: JSON.stringify(tc.arguments),
+						},
+					};
+				});
+			const assistantMsg: { role: string; content?: string; tool_calls?: unknown } = { role: "assistant" };
+			if (text) assistantMsg.content = text;
+			if (toolCalls.length > 0) assistantMsg.tool_calls = toolCalls;
+			messages.push(assistantMsg);
 		} else if (msg.role === "toolResult") {
 			const textResult = msg.content.map(b => (b.type === "text" ? b.text : "")).join("\n");
-			messages.push({ role: "tool", content: textResult });
+			messages.push({ role: "tool", tool_call_id: msg.toolCallId, content: textResult });
 		}
 	}
 
@@ -298,6 +353,17 @@ function mapContextToOpenAiChat(context: Context, model: Model<"zed-agent">, opt
 		messages,
 		stream: true,
 	};
+
+	if (context.tools && context.tools.length > 0) {
+		body.tools = context.tools.map(t => ({
+			type: "function",
+			function: {
+				name: t.name,
+				description: t.description,
+				parameters: t.parameters ?? { type: "object", properties: {} },
+			},
+		}));
+	}
 
 	if (model.reasoning && !options?.disableReasoning) {
 		body.reasoning_effort = options?.reasoning ?? "medium";
@@ -733,23 +799,57 @@ export function streamZed(
 							});
 						}
 					} else if (Array.isArray(event.candidates) && event.candidates.length > 0) {
-						const candidate = event.candidates[0] as { content?: { parts?: Array<{ text?: string }> } };
-						const textPart = candidate.content?.parts?.[0]?.text;
-						if (typeof textPart === "string" && textPart.length > 0) {
-							if (currentContentIndex === -1 || outputMessage.content[currentContentIndex]?.type !== "text") {
-								currentContentIndex++;
-								const block: TextContent = { type: "text", text: "" };
-								outputMessage.content.push(block);
-								stream.push({ type: "text_start", contentIndex: currentContentIndex, partial: outputMessage });
+						const candidate = event.candidates[0] as {
+							content?: {
+								parts?: Array<{
+									text?: string;
+									functionCall?: { name?: string; args?: Record<string, unknown> };
+								}>;
+							};
+						};
+						const parts = candidate.content?.parts ?? [];
+						for (const part of parts) {
+							if (typeof part.text === "string" && part.text.length > 0) {
+								if (currentContentIndex === -1 || outputMessage.content[currentContentIndex]?.type !== "text") {
+									currentContentIndex++;
+									const block: TextContent = { type: "text", text: "" };
+									outputMessage.content.push(block);
+									stream.push({
+										type: "text_start",
+										contentIndex: currentContentIndex,
+										partial: outputMessage,
+									});
+								}
+								const textBlock = outputMessage.content[currentContentIndex] as TextContent;
+								textBlock.text += part.text;
+								stream.push({
+									type: "text_delta",
+									contentIndex: currentContentIndex,
+									delta: part.text,
+									partial: outputMessage,
+								});
 							}
-							const textBlock = outputMessage.content[currentContentIndex] as TextContent;
-							textBlock.text += textPart;
-							stream.push({
-								type: "text_delta",
-								contentIndex: currentContentIndex,
-								delta: textPart,
-								partial: outputMessage,
-							});
+							if (part.functionCall?.name) {
+								currentContentIndex++;
+								const toolCall: ToolCall = {
+									type: "toolCall",
+									id: crypto.randomUUID(),
+									name: part.functionCall.name,
+									arguments: part.functionCall.args ?? {},
+								};
+								outputMessage.content.push(toolCall);
+								stream.push({
+									type: "toolcall_start",
+									contentIndex: currentContentIndex,
+									partial: outputMessage,
+								});
+								stream.push({
+									type: "toolcall_end",
+									contentIndex: currentContentIndex,
+									toolCall,
+									partial: outputMessage,
+								});
+							}
 						}
 					}
 

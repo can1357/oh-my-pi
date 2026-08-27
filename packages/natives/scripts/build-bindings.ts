@@ -239,12 +239,6 @@ function tailSection(label: string, text: string): string {
 	const shown = capped ? lines.slice(-BUILD_LOG_TAIL_LINES) : lines;
 	return `\n--- ${label}${capped ? ` (last ${BUILD_LOG_TAIL_LINES} lines)` : ""} ---\n${shown.join("\n")}`;
 }
-if (fsSync.existsSync(canonicalAddonPath) && process.env.OMP_REBUILD_NATIVES !== "1") {
-	console.log(`Using existing native addon at ${canonicalAddonPath}`);
-	await generateEnumExports();
-	console.log("Bindings build complete.");
-	process.exit(0);
-}
 
 try {
 	// The package declares Bun as its build runtime. Invoke napi's JavaScript
