@@ -422,6 +422,30 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext.rpcs("detach").map(rpc => rpc.tabId)).toEqual([1]);
 	});
 
+	it("detaches a legacy inherited debugger attachment with no downstream holders", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+
+		// A newer relay can reconnect to an older extension that reports an
+		// already-attached tab but has no orphan-guard metadata. The legacy hello
+		// still needs cleanup when this relay process has zero downstream holders.
+		bridge.extConnected(ext);
+		bridge.extMessage(
+			ext,
+			JSON.stringify({
+				t: "hello",
+				userAgent: "test",
+				browserVersion: "Chrome/120.0.0.0",
+				tabs: [tab({ tabId: 1 })],
+				attachedTabIds: [1],
+				// no recoverableTabIds field
+			}),
+		);
+		await flush();
+
+		expect(ext.rpcs("detach").map(rpc => rpc.tabId)).toEqual([1]);
+	});
+
 	it("retries inherited debugger attachment cleanup after detach RPC failure", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

@@ -409,7 +409,7 @@ export class RelayBridge {
 			const holders = this.#sessionHolders(tab.tabId);
 			const preserve = holders.filter(conn => !conn.autoAttach && conn.sessionsForTab(tab.tabId).length > 0);
 			if (tab.attached) {
-				if (holders.length === 0 && recoverableNow.has(tab.tabId)) {
+				if (holders.length === 0 && (!hasRecoveryMetadata || recoverableNow.has(tab.tabId))) {
 					this.#detachIfUnheld(tab.tabId);
 					continue;
 				}

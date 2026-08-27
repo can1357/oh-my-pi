@@ -64,6 +64,7 @@ var ws = null;
 var reconnectDelay = RECONNECT_MIN_MS;
 var pingTimer = null;
 var pendingAttaches = new Set;
+var pendingDetaches = new Set;
 var pendingAttachTabs = new Set;
 var canceledPendingAttachTabs = new Set;
 var guardDetachments = new Set;
@@ -80,6 +81,13 @@ var recoverableReady = chrome.storage.session.get({ [RECOVERABLE_TAB_IDS_KEY]: [
   }
 }).catch(() => {});
 var recoverableUpdates = recoverableReady;
+function trackPendingDetach(promise) {
+  const tracked = promise.finally(() => {
+    pendingDetaches.delete(tracked);
+  });
+  pendingDetaches.add(tracked);
+  return tracked;
+}
 function updateRecoverable(update) {
   recoverableUpdates = recoverableUpdates.then(async () => {
     update();
@@ -105,13 +113,13 @@ var attachmentGuard = new AttachmentGuard({
   detachAll: (tabIds) => {
     for (const tabId of tabIds) {
       guardDetachments.add(tabId);
-      chrome.debugger.detach({ tabId }).catch(async () => {
+      trackPendingDetach(chrome.debugger.detach({ tabId }).catch(async () => {
         guardDetachments.delete(tabId);
         const targets = await chrome.debugger.getTargets().catch(() => []);
         if (targets.some((target) => target.tabId === tabId && target.attached)) {
           trackAttachments([tabId]);
         }
-      });
+      }));
     }
   }
 });
@@ -245,7 +253,7 @@ function refreshHello() {
   startRefresh();
 }
 async function buildHello() {
-  await Promise.allSettled([...pendingAttaches]);
+  await Promise.allSettled([...pendingAttaches, ...pendingDetaches]);
   await recoverableUpdates;
   const [tabs, targets] = await Promise.all([chrome.tabs.query({}), chrome.debugger.getTargets()]);
   const snapshots = [];
@@ -287,13 +295,13 @@ async function attachTabOperation(tabId, socket) {
   await chrome.debugger.attach({ tabId }, "1.3");
   if (ws !== socket) {
     guardDetachments.add(tabId);
-    await chrome.debugger.detach({ tabId }).catch(async () => {
+    await trackPendingDetach(chrome.debugger.detach({ tabId }).catch(async () => {
       guardDetachments.delete(tabId);
       const targets = await chrome.debugger.getTargets().catch(() => []);
       if (targets.some((target) => target.tabId === tabId && target.attached)) {
         trackAttachments([tabId]);
       }
-    });
+    }));
     return;
   }
   await trackAttachments([tabId]);
@@ -311,7 +319,7 @@ async function runRpc(msg, socket) {
     case "detach":
       relayInitiatedDetachTabs.add(msg.tabId);
       try {
-        await chrome.debugger.detach({ tabId: msg.tabId });
+        await trackPendingDetach(chrome.debugger.detach({ tabId: msg.tabId }));
         attachmentGuard.untrack(msg.tabId);
         await forgetRecoverable(msg.tabId);
         return {};
