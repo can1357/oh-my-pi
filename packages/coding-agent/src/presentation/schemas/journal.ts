@@ -260,27 +260,26 @@ export const frozenModelProjectionSchema = z
 
 const toolJournalRecordVersionSchema = z.literal(1);
 
-export const persistedToolJournalSchema = z.union([
-	z
-		.strictObject({
-			type: z.literal("tool_execution_started"),
-			recordVersion: toolJournalRecordVersionSchema,
-			executionId: toolExecutionIdSchema,
-			call: toolCallRecordSchema,
-			presentation: startedPresentationRecordSchema,
-		})
-		.readonly(),
-	z
-		.strictObject({
-			type: z.literal("tool_execution_settled"),
-			recordVersion: toolJournalRecordVersionSchema,
-			executionId: toolExecutionIdSchema,
-			outcome: toolOutcomeSchema,
-			presentation: toolPresentationRecordSchema,
-			modelProjection: frozenModelProjectionSchema,
-		})
-		.readonly(),
-]);
+export const startedToolJournalSchema = z
+	.strictObject({
+		type: z.literal("tool_execution_started"),
+		recordVersion: toolJournalRecordVersionSchema,
+		executionId: toolExecutionIdSchema,
+		call: toolCallRecordSchema,
+		presentation: startedPresentationRecordSchema,
+	})
+	.readonly();
+export const settledToolJournalSchema = z
+	.strictObject({
+		type: z.literal("tool_execution_settled"),
+		recordVersion: toolJournalRecordVersionSchema,
+		executionId: toolExecutionIdSchema,
+		outcome: toolOutcomeSchema,
+		presentation: toolPresentationRecordSchema,
+		modelProjection: frozenModelProjectionSchema,
+	})
+	.readonly();
+export const persistedToolJournalSchema = z.union([startedToolJournalSchema, settledToolJournalSchema]);
 
 export const replayableToolExecutionSchema = z.union([
 	z

@@ -55,10 +55,14 @@ import type { ReplayableToolExecution } from "./journal";
  * record, so replay is no worse than the model history beside it).
  *
  * Record versioning is enforced at the parse boundary, not here:
- * `toolPresentationRecordSchema` pins `version` to the current
- * `PresentationVersion` literal, so a future v2 record fails validation instead
- * of reaching this function and being silently misread. When a second version
- * exists, this adapter gains an explicit arm per version.
+ * `validateToolJournalEntry` (`../session/session-loader.ts`) safeParses every
+ * `tool_execution_started`/`tool_execution_settled` raw entry against
+ * `persistedToolJournalSchema` before it becomes a `SessionEntry`, on both
+ * loader paths. A future v2 record (top-level `recordVersion` or a nested
+ * `presentation`/`modelProjection` version) throws `SessionJournalTooNewError`
+ * instead of reaching this function silently misread; a malformed
+ * current-version record throws `JournalRecordValidationError`. When a second
+ * version exists, this adapter gains an explicit arm per version.
  */
 export function hydrateReplayableToolExecution(execution: ReplayableToolExecution): readonly ToolPresentationEvent[] {
 	// `started` is first and unconditional: the agent loop alone emits it live, and

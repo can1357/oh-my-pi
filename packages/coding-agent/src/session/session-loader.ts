@@ -1,9 +1,22 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { getBlobsDir, isEnoent, parseJsonlLenient } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import { TOOL_JOURNAL_RECORD_VERSION } from "../presentation/journal";
+import {
+	persistedToolJournalSchema,
+	settledToolJournalSchema,
+	startedToolJournalSchema,
+} from "../presentation/schemas/journal";
 import { BlobStore, isBlobRef, resolveImageData, resolveImageDataUrl } from "./blob-store";
 import { buildSessionContext } from "./session-context";
-import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./session-entries";
+import type {
+	FileEntry,
+	RawFileEntry,
+	SessionEntry,
+	SessionHeader,
+	ToolExecutionSettledEntry,
+	ToolExecutionStartedEntry,
+} from "./session-entries";
 import { migrateToCurrentVersion } from "./session-migrations";
 import { isExternalizableImagePosition, isPersistenceTruncatedString } from "./session-persistence";
 import { FileSessionStorage, type SessionStorage } from "./session-storage";
@@ -13,6 +26,97 @@ import {
 	type SessionTitleUpdate,
 	titleUpdateFromSlot,
 } from "./session-title-slot";
+
+/** A persisted tool-journal record (`recordVersion`, or a nested `presentation`/`modelProjection` version) newer than this build understands. Modeled on `SessionVersionTooNewError` (`./session-migrations.ts`). */
+export class SessionJournalTooNewError extends Error {
+	constructor(
+		readonly version: number,
+		readonly supported: number,
+	) {
+		super(
+			`Session journal record is version ${version}, but this build only supports up to version ${supported}. ` +
+				"Update to a newer version to open it.",
+		);
+		this.name = "SessionJournalTooNewError";
+	}
+}
+
+/** A current-version `tool_execution_started`/`tool_execution_settled` record that fails `persistedToolJournalSchema`. */
+export class JournalRecordValidationError extends Error {
+	constructor(
+		readonly executionId: string,
+		readonly issuePaths: readonly string[],
+	) {
+		super(`Tool journal record for execution "${executionId}" failed validation at: ${issuePaths.join(", ")}`);
+		this.name = "JournalRecordValidationError";
+	}
+}
+
+/** Numeric version-like fields present on a raw tool-journal entry, wherever this record shape carries one. */
+function toolJournalCandidateVersions(entry: Record<string, unknown>): number[] {
+	const versions: number[] = [];
+	if (typeof entry.recordVersion === "number") versions.push(entry.recordVersion);
+	for (const key of ["presentation", "modelProjection"]) {
+		const nested = entry[key];
+		if (nested && typeof nested === "object" && typeof (nested as Record<string, unknown>).version === "number") {
+			versions.push((nested as Record<string, unknown>).version as number);
+		}
+	}
+	return versions;
+}
+
+/** Destructure only the keys `persistedToolJournalSchema` knows — `SessionEntryBase` fields (`id`, `parentId`, `timestamp`) trip its strictObject arms. */
+function projectToolJournalPayload(entry: ToolExecutionStartedEntry | ToolExecutionSettledEntry): unknown {
+	if (entry.type === "tool_execution_started") {
+		const { type, recordVersion, executionId, call, presentation } = entry;
+		return { type, recordVersion, executionId, call, presentation };
+	}
+	const { type, recordVersion, executionId, outcome, presentation, modelProjection } = entry;
+	return { type, recordVersion, executionId, outcome, presentation, modelProjection };
+}
+
+/**
+ * The load-boundary enforcement point. Both loader paths below call this
+ * for every raw entry before it becomes a trusted `SessionEntry`: a
+ * `tool_execution_started`/`tool_execution_settled` entry is projected to the
+ * keys `persistedToolJournalSchema` knows and safeParsed against it. An
+ * unknown/future version (top-level `recordVersion` or a nested
+ * `presentation`/`modelProjection` version) fails closed with
+ * `SessionJournalTooNewError`; a malformed current-version record fails
+ * closed with `JournalRecordValidationError` naming the offending
+ * `executionId` and zod issue paths. Neither error is ever swallowed to skip
+ * the record — dropping it here would sever the `parentId` chain
+ * `getBranch()` walks and fabricate an interruption/legacy fallback, which
+ * this boundary prohibits. Any future journal-shape evolution (a new record
+ * field, a new arm) MUST bump `CURRENT_SESSION_VERSION` alongside its schema
+ * change — this function does not accept a shape mismatch for the version
+ * it already trusts.
+ */
+function validateToolJournalEntry(entry: FileEntry): void {
+	if (typeof entry !== "object" || entry === null) return;
+	if (entry.type !== "tool_execution_started" && entry.type !== "tool_execution_settled") return;
+	const record = entry as unknown as Record<string, unknown>;
+	const tooNew = toolJournalCandidateVersions(record).find(version => version > TOOL_JOURNAL_RECORD_VERSION);
+	if (tooNew !== undefined) throw new SessionJournalTooNewError(tooNew, TOOL_JOURNAL_RECORD_VERSION);
+
+	const payload = projectToolJournalPayload(entry);
+	const result = persistedToolJournalSchema.safeParse(payload);
+	if (!result.success) {
+		const executionId = typeof record.executionId === "string" ? record.executionId : "unknown";
+		// `persistedToolJournalSchema`'s `z.union` (the zod-compat shim's ordered
+		// first-match dispatcher — see its own doc comment) collapses any failure
+		// to one flat root-path error; re-parsing against the single arm the
+		// record's own `type` names recovers the real field-level zod issue paths
+		// (e.g. `call.toolCallId`) the caller needs to debug a corrupt session file.
+		const arm = entry.type === "tool_execution_started" ? startedToolJournalSchema : settledToolJournalSchema;
+		const armResult = arm.safeParse(payload);
+		const issues = armResult.success ? result.error.issues : armResult.error.issues;
+		throw new JournalRecordValidationError(
+			executionId,
+			issues.map(issue => issue.path.join(".") || "(root)"),
+		);
+	}
+}
 
 const STREAM_LOAD_THRESHOLD_BYTES = 8 * 1024 * 1024;
 const STREAM_YIELD_BYTES = 1 * 1024 * 1024;
@@ -76,6 +180,7 @@ export function parseSessionContent(content: string): SessionLoadResult {
 			malformedRecords++;
 		},
 	}) as FileEntry[];
+	for (const entry of entries) validateToolJournalEntry(entry);
 	applyTitleSlot(entries[0], slot);
 	return {
 		entries,
@@ -145,6 +250,7 @@ export async function visitEntriesFromFileStream(
 					applyTitleSlot(entry, titleSlot);
 				}
 				try {
+					validateToolJournalEntry(entry);
 					if (visit(entry) === false) {
 						stopped = true;
 						break;
