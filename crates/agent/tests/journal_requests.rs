@@ -118,7 +118,8 @@ fn atomic_replay_returns_recorded_indexes_and_core_stamps_authorship() {
 	);
 	let view = reopened.load().expect("load journal");
 	let customs = view
-		.custom(view.as_ref(), "dev.example.fact")
+		.log()
+		.custom(view.live(), "dev.example.fact")
 		.collect::<Vec<_>>();
 	assert_eq!(customs.len(), 2);
 	let Kind::Custom(first) = &customs[0].1.kind else {

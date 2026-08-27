@@ -753,15 +753,15 @@ fn assert_binary_resume_journal(path: &Path, turn_id: &str) {
 	assert_eq!(receipt.turn_id.as_str(), turn_id);
 	let log = journal.load().expect("load CLI-resumed journal");
 	assert_eq!(
-		event_count(&log, |kind| matches!(
+		event_count(log.log(), |kind| matches!(
 			kind,
 			Kind::TurnReceipt(receipt) if receipt.turn_id.as_str() == turn_id
 		)),
 		1,
 		"CLI resume duplicated its terminal receipt",
 	);
-	let projected = project_journal(&log, log.as_ref(), &Registry::new(), &caps())
-		.expect("project CLI-resumed journal");
+	let projected =
+		project_journal(&log, &Registry::new(), &caps()).expect("project CLI-resumed journal");
 	let outputs = projected
 		.items
 		.iter()
@@ -1300,14 +1300,14 @@ fn assert_single_receipt(path: &Path, turn_id: &str) {
 	let journal = Journal::open(path).expect("open completed replay journal");
 	let log = journal.load().expect("load completed replay journal");
 	let receipts = event_count(
-		&log,
+		log.log(),
 		|kind| matches!(kind, Kind::TurnReceipt(receipt) if receipt.turn_id == turn_id),
 	);
 	assert_eq!(receipts, 1, "terminal receipt duplicated");
 	let receipt = journal.receipt(turn_id).expect("root turn receipt");
 	assert_eq!(receipt.outcome.output.len(), 1);
-	let projected = project_journal(&log, log.as_ref(), &Registry::new(), &caps())
-		.expect("project replay journal");
+	let projected =
+		project_journal(&log, &Registry::new(), &caps()).expect("project replay journal");
 	assert_eq!(projected.items.len(), 3, "replay duplicated or omitted canonical items");
 	assert_eq!(
 		projected
@@ -1338,11 +1338,12 @@ fn assert_single_receipt(path: &Path, turn_id: &str) {
 fn assert_recovered_sequences(path: &Path) {
 	let journal = Journal::open(path).expect("open sequence-recovered journal");
 	let log = journal.load().expect("load sequence-recovered journal");
-	let amendments =
-		event_count(&log, |kind| matches!(kind, Kind::Amend { patch: AmendPatch::Seq { .. }, .. }));
+	let amendments = event_count(log.log(), |kind| {
+		matches!(kind, Kind::Amend { patch: AmendPatch::Seq { .. }, .. })
+	});
 	assert_eq!(amendments, 2, "sequence recovery duplicated or omitted amendments");
-	let projected = project_journal(&log, log.as_ref(), &Registry::new(), &caps())
-		.expect("project recovered journal");
+	let projected =
+		project_journal(&log, &Registry::new(), &caps()).expect("project recovered journal");
 	let seqs: Vec<_> = projected.items.iter().map(|item| item.seq).collect();
 	assert_eq!(seqs, vec![1, 2, 3], "recovered sequence assignment drifted");
 }
@@ -1376,8 +1377,7 @@ fn assert_batch_recovery(journal_path: &Path, gateway_path: &Path) {
 			core_claims(),
 		)
 		.expect("register projection tool");
-	let projected =
-		project_journal(&log, log.as_ref(), &registry, &caps()).expect("project interrupted batch");
+	let projected = project_journal(&log, &registry, &caps()).expect("project interrupted batch");
 	let mut result_ids = Vec::new();
 	for item in &projected.items {
 		if let Some(item::Kind::ToolResult(result)) = &item.kind {

@@ -94,8 +94,8 @@ async fn p10_edit_lift_is_idempotent_across_journal_projections() -> Result<()> 
 	let journal = Journal::open(&transcript)?;
 	let log = journal.load()?;
 
-	let first = project_journal(&log, log.as_ref(), registry.as_ref(), &CAPS)?;
-	let second = project_journal(&log, log.as_ref(), registry.as_ref(), &CAPS)?;
+	let first = project_journal(&log, registry.as_ref(), &CAPS)?;
+	let second = project_journal(&log, registry.as_ref(), &CAPS)?;
 	let (first_call, first_result) = projected_pair(&first);
 	let (second_call, second_result) = projected_pair(&second);
 

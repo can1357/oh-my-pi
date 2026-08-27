@@ -46,8 +46,8 @@ pub use msg::{
 };
 pub use patch::Patch;
 pub use reader::{
-	DiagnosticKind, Entry, LiveSet, Log, ReadCounters, ReadDiagnostic, Reader, RefreshReport,
-	RefreshState, VisitReport, load, visit_batched,
+	DiagnosticKind, Entry, LiveLog, LiveSet, Log, ReadCounters, ReadDiagnostic, Reader,
+	RefreshReport, RefreshState, VisitReport, load, load_live, visit_batched,
 };
 pub use types::*;
 pub use writer::Writer;

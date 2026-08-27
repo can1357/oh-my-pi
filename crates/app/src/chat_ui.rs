@@ -1542,10 +1542,8 @@ fn subscribe_chat_events(bus: &omp_agent::EventBus) -> omp_agent::EventSubscript
 }
 
 fn replica_items(path: &Path, registry: &Registry) -> miette::Result<Vec<Item>> {
-	let log = omp_storage::transcript::load(path).into_diagnostic()?;
-	let mut live = transcript::LiveSet::new();
-	log.live_into(&mut live);
-	Ok(omp_agent::project_journal(&log, &live, registry, &omp_driver::chat::CHAT_CAPS_BASE)
+	let view = omp_storage::transcript::load_live(path).into_diagnostic()?;
+	Ok(omp_agent::project_journal(&view, registry, &omp_driver::chat::CHAT_CAPS_BASE)
 		.into_diagnostic()?
 		.items)
 }
@@ -1932,7 +1930,6 @@ where
 						let journal = agent.journal().load()?;
 						let projected = omp_agent::project_journal(
 							&journal,
-							journal.as_ref(),
 							maintenance_registry.as_ref(),
 							&omp_driver::chat::CHAT_CAPS_BASE,
 						)?;
@@ -1963,7 +1960,7 @@ where
 						let parent_id = agent.journal().session_id().clone();
 						let root = {
 							let journal = agent.journal().load().map_err(|error| error.to_string())?;
-							journal.header().cwd.clone()
+							journal.log().header().cwd.clone()
 						};
 						let _sessions_dir = child_path
 							.parent()

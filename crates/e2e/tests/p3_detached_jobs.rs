@@ -472,8 +472,8 @@ fn job_event_counts(journal: &Journal, job_id: &str) -> (usize, usize) {
 	let log = journal.load().expect("load durable transcript");
 	let mut registered = 0;
 	let mut settled = 0;
-	for index in 0..u64::try_from(log.len()).expect("log length fits u64") {
-		let Some(Entry::Ok(event)) = log.get(index) else {
+	for index in 0..u64::try_from(log.log().len()).expect("log length fits u64") {
+		let Some(Entry::Ok(event)) = log.log().get(index) else {
 			continue;
 		};
 		match &event.kind {

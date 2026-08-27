@@ -88,15 +88,10 @@ impl CachedReader {
 struct JournalLog<'a>(MutexGuard<'a, CachedReader>);
 
 impl Deref for JournalLog<'_> {
-	type Target = Log;
+	type Target = transcript::LiveLog;
 
 	fn deref(&self) -> &Self::Target {
-		self.0.transcript.log()
-	}
-}
-impl AsRef<transcript::LiveSet> for JournalLog<'_> {
-	fn as_ref(&self) -> &transcript::LiveSet {
-		self.0.transcript.live()
+		self.0.transcript.live_log()
 	}
 }
 
@@ -1022,9 +1017,7 @@ impl Journal {
 	///
 	/// The returned value holds the journal's reader lock. Callers must drop it
 	/// before mutating or otherwise reading this journal again.
-	pub fn load(
-		&self,
-	) -> Result<impl Deref<Target = Log> + AsRef<transcript::LiveSet> + '_, JournalError> {
+	pub fn load(&self) -> Result<impl Deref<Target = transcript::LiveLog> + '_, JournalError> {
 		if self.halted {
 			return Err(JournalError::Halted);
 		}
@@ -1128,7 +1121,7 @@ impl Journal {
 		output_schema: Option<Box<RawValue>>,
 		revival: ChildSessionInit,
 	) -> Result<u64, JournalError> {
-		if !self.load()?.is_empty() {
+		if !self.load()?.log().is_empty() {
 			return Err(JournalError::ChildInitNotFirst);
 		}
 		let agent = Some(revival.parent_id.clone());
@@ -1160,12 +1153,12 @@ impl Journal {
 			match kind {
 				ChildKind::Branch { checkpoint } => {
 					let mut live = transcript::LiveSet::new();
-					if !log.live_through_into(checkpoint, &mut live) {
+					if !log.log().live_through_into(checkpoint, &mut live) {
 						return Err(JournalError::InvalidEventIndex { index: checkpoint });
 					}
-					(Some(checkpoint), project::project_journal_items(&log, &live)?)
+					(Some(checkpoint), project::project_journal_items(log.log(), &live)?)
 				},
-				ChildKind::Fork => (None, project::project_journal_items(&log, log.as_ref())?),
+				ChildKind::Fork => (None, project::project_journal_items(log.log(), log.live())?),
 			}
 		};
 		let mut child = Self::create(path, header)?;
@@ -1182,7 +1175,7 @@ impl Journal {
 	/// Appends a branch summary only while its source checkpoint still exists.
 	pub fn branch_summary(&mut self, ts: u64, from: u64, summary: Str) -> Result<u64, JournalError> {
 		let log = self.load()?;
-		if log.get(from).is_none() {
+		if log.log().get(from).is_none() {
 			return Err(JournalError::InvalidEventIndex { index: from });
 		}
 		drop(log);
@@ -1204,7 +1197,7 @@ impl Journal {
 		mut compact: Compact,
 	) -> Result<Self, JournalError> {
 		let log = self.load()?;
-		if log.get(checkpoint).is_none() {
+		if log.log().get(checkpoint).is_none() {
 			return Err(JournalError::InvalidEventIndex { index: checkpoint });
 		}
 		drop(log);
@@ -1306,10 +1299,11 @@ impl Journal {
 		}
 		let (catch_up, host_revision) = {
 			let log = self.load()?;
-			let host_revision = u64::try_from(log.len()).expect("transcript event count fits in u64");
-			let mut catch_up = VecDeque::with_capacity(log.len());
+			let host_revision =
+				u64::try_from(log.log().len()).expect("transcript event count fits in u64");
+			let mut catch_up = VecDeque::with_capacity(log.log().len());
 			for index in 0..host_revision {
-				let record = match log.get(index) {
+				let record = match log.log().get(index) {
 					Some(transcript::Entry::Ok(event)) => {
 						replication_record(index, Some(event)).map_err(|source| {
 							JournalError::ReplicationAfterJournal { event_index: index, source }
@@ -1503,12 +1497,12 @@ impl Journal {
 		let log = self.load()?;
 		Ok(fold_workspace_roots(
 			primary,
-			(0..u64::try_from(log.len()).expect("journal length fits u64")).filter_map(|index| {
-				match log.get(index) {
+			(0..u64::try_from(log.log().len()).expect("journal length fits u64")).filter_map(
+				|index| match log.log().get(index) {
 					Some(transcript::Entry::Ok(event)) => Some(&event.kind),
 					Some(transcript::Entry::Tombstone(_)) | None => None,
-				}
-			}),
+				},
+			),
 		))
 	}
 
@@ -1723,14 +1717,14 @@ impl Journal {
 		}
 		let log = self.load()?;
 		let mut entries = Vec::new();
-		for index in 0..u64::try_from(log.len()).expect("journal length fits in u64") {
-			if query.live && !log.as_ref().contains(index) {
+		for index in 0..u64::try_from(log.log().len()).expect("journal length fits in u64") {
+			if query.live && !log.live().contains(index) {
 				continue;
 			}
 			if query.since.is_some_and(|since| index <= since) {
 				continue;
 			}
-			let Some(transcript::Entry::Ok(event)) = log.get(index) else {
+			let Some(transcript::Entry::Ok(event)) = log.log().get(index) else {
 				continue;
 			};
 			let Kind::Custom(custom) = &event.kind else {
@@ -1805,7 +1799,7 @@ impl Journal {
 		self.ensure_extension_write_allowed()?;
 		{
 			let log = self.load()?;
-			if target >= u64::try_from(log.len()).expect("journal length fits in u64") {
+			if target >= u64::try_from(log.log().len()).expect("journal length fits in u64") {
 				return Err(JournalError::InvalidTarget(target));
 			}
 		}
@@ -2064,7 +2058,7 @@ impl Journal {
 		key: &str,
 	) -> Result<Option<SessionStateValue>, JournalError> {
 		let log = self.load()?;
-		for (index, event) in log.custom(log.as_ref(), "omp.state.session.cas").rev() {
+		for (index, event) in log.log().custom(log.live(), "omp.state.session.cas").rev() {
 			let Kind::Custom(custom) = &event.kind else {
 				continue;
 			};
@@ -2153,7 +2147,11 @@ impl Journal {
 			return Err(state::Error::NamespaceDenied.into());
 		}
 		let log = self.load()?;
-		for (index, event) in log.custom(log.as_ref(), "omp.state.session.content").rev() {
+		for (index, event) in log
+			.log()
+			.custom(log.live(), "omp.state.session.content")
+			.rev()
+		{
 			let Kind::Custom(custom) = &event.kind else {
 				continue;
 			};
@@ -2365,7 +2363,7 @@ impl Journal {
 		let log = self.load()?;
 		let mut recorded = Vec::with_capacity(indexes.len());
 		for (index, expected) in indexes.iter().zip(events) {
-			let Some(transcript::Entry::Ok(actual)) = log.get(*index) else {
+			let Some(transcript::Entry::Ok(actual)) = log.log().get(*index) else {
 				return Err(JournalError::IdempotencyConflict(stamp.idempotency_key.clone()));
 			};
 			if actual.kind != expected.kind {
@@ -2632,7 +2630,7 @@ impl Journal {
 				.chain(&start.prompt_head_events)
 				.chain(&start.sequence_targets)
 			{
-				if !matches!(log.get(*target), Some(omp_storage::transcript::Entry::Ok(event)) if event_item(&event.kind).is_some())
+				if !matches!(log.log().get(*target), Some(omp_storage::transcript::Entry::Ok(event)) if event_item(&event.kind).is_some())
 				{
 					return Err(JournalError::InvalidTurnInput(*target));
 				}
@@ -3009,7 +3007,7 @@ impl Journal {
 		let log = self.load()?;
 		targets
 			.iter()
-			.map(|target| match log.get(*target) {
+			.map(|target| match log.log().get(*target) {
 				Some(transcript::Entry::Ok(event)) => event_item(&event.kind)
 					.cloned()
 					.ok_or(JournalError::InvalidTurnInput(*target)),
@@ -3031,7 +3029,7 @@ impl Journal {
 		let mut text = String::with_capacity(max_chars.min(4096));
 		let mut chars = 0_usize;
 		for target in targets {
-			let item = match log.get(*target) {
+			let item = match log.log().get(*target) {
 				Some(transcript::Entry::Ok(event)) => {
 					event_item(&event.kind).ok_or(JournalError::InvalidTurnInput(*target))?
 				},
@@ -3238,8 +3236,8 @@ impl Journal {
 	pub fn recover_regime_records(&self) -> Result<Vec<RegimeRecord>, JournalError> {
 		let log = self.load()?;
 		let mut latest = BTreeMap::<Str, RegimeRecord>::new();
-		for index in log.as_ref().iter() {
-			let Some(transcript::Entry::Ok(event)) = log.get(index) else {
+		for index in log.live().iter() {
+			let Some(transcript::Entry::Ok(event)) = log.log().get(index) else {
 				continue;
 			};
 			let Kind::Custom(custom) = &event.kind else {
@@ -3263,8 +3261,8 @@ impl Journal {
 	pub fn settle_rejections(&self, turn_id: &str) -> Result<Vec<RegimeFact>, JournalError> {
 		let log = self.load()?;
 		let mut facts = Vec::new();
-		for index in log.as_ref().iter() {
-			let Some(transcript::Entry::Ok(event)) = log.get(index) else {
+		for index in log.live().iter() {
+			let Some(transcript::Entry::Ok(event)) = log.log().get(index) else {
 				continue;
 			};
 			let Kind::Custom(custom) = &event.kind else {
@@ -3548,7 +3546,7 @@ impl Journal {
 		}
 		{
 			let log = self.load()?;
-			if !matches!(log.get(target), Some(omp_storage::transcript::Entry::Ok(event)) if event_item(&event.kind).is_some())
+			if !matches!(log.log().get(target), Some(omp_storage::transcript::Entry::Ok(event)) if event_item(&event.kind).is_some())
 			{
 				return Err(JournalError::InvalidItemTarget(target));
 			}
@@ -4397,7 +4395,7 @@ mod tests {
 		omp_core::Ulid::from_string(recovery_turn.as_str()).expect("recovery turn id is a ULID");
 		assert_eq!(indexes.len(), 1);
 		let log = reopened.load().expect("load recovery");
-		let Some(Entry::Ok(event)) = log.get(indexes[0]) else {
+		let Some(Entry::Ok(event)) = log.log().get(indexes[0]) else {
 			panic!("recovered input missing");
 		};
 		let Kind::TurnInput(input) = &event.kind else {
@@ -4593,9 +4591,9 @@ mod tests {
 
 		let reopened = Journal::open(&path).expect("recover second occurrence");
 		let log = reopened.load().expect("load recovery");
-		let results = (0..u64::try_from(log.len()).expect("journal length"))
+		let results = (0..u64::try_from(log.log().len()).expect("journal length"))
 			.filter_map(|index| {
-				let Entry::Ok(event) = log.get(index)? else {
+				let Entry::Ok(event) = log.log().get(index)? else {
 					return None;
 				};
 				let item = event_item(&event.kind)?;
@@ -4776,8 +4774,8 @@ mod tests {
 		assert_eq!(reopened.receipt("turn"), Some(&receipt));
 		assert!(reopened.pending_turn().is_none());
 		let view = reopened.load().expect("load recovered");
-		let projected = project_journal(&view, view.as_ref(), &omp_tool::Registry::new(), &caps())
-			.expect("project recovered");
+		let projected =
+			project_journal(&view, &omp_tool::Registry::new(), &caps()).expect("project recovered");
 		assert_eq!(projected.items[1].seq, 2, "reopen must recover the missing sequence patch");
 		fs::remove_file(path).expect("remove journal");
 	}
@@ -4829,8 +4827,8 @@ mod tests {
 		let reopened = Journal::open(&path).expect("reopen partial turn");
 		assert_eq!(reopened.pending_turn(), Some(&start));
 		let view = reopened.load().expect("load partial");
-		let projected = project_journal(&view, view.as_ref(), &omp_tool::Registry::new(), &caps())
-			.expect("project partial");
+		let projected =
+			project_journal(&view, &omp_tool::Registry::new(), &caps()).expect("project partial");
 		assert_eq!(projected.items, vec![message("system"), message("input")]);
 		fs::remove_file(path).expect("remove journal");
 	}
@@ -4904,15 +4902,15 @@ mod tests {
 			.amend_seq(3, target, 9)
 			.expect("append sequence amendment");
 		let log = journal.load().expect("load journal");
-		let Some(Entry::Ok(event)) = log.get(target) else {
+		let Some(Entry::Ok(event)) = log.log().get(target) else {
 			panic!("item event missing")
 		};
 		let Kind::Item(record) = &event.kind else {
 			panic!("target is not an item")
 		};
 		assert_eq!(record.item.seq, 0);
-		let projected = project_journal(&log, log.as_ref(), &omp_tool::Registry::new(), &caps())
-			.expect("project journal");
+		let projected =
+			project_journal(&log, &omp_tool::Registry::new(), &caps()).expect("project journal");
 		assert_eq!(projected.items[0].seq, 9);
 		drop(log);
 		drop(journal);
@@ -4958,13 +4956,10 @@ mod tests {
 			}
 			drop(writer);
 
-			let pending = transcript::load(&path).expect("load incomplete rewrite");
-			let mut pending_live = transcript::LiveSet::new();
-			pending.live_into(&mut pending_live);
-			assert!(pending_live.iter().eq([old_head, tail]));
-			let pending_thread =
-				project_journal(&pending, &pending_live, &omp_tool::Registry::new(), &caps())
-					.expect("project old live chain");
+			let pending_view = transcript::load_live(&path).expect("load incomplete rewrite");
+			assert!(pending_view.live().iter().eq([old_head, tail]));
+			let pending_thread = project_journal(&pending_view, &omp_tool::Registry::new(), &caps())
+				.expect("project old live chain");
 			assert_eq!(pending_thread.items, vec![message("old-head"), message("tail")]);
 
 			let recovered = Journal::open(&path).expect("recover rewrite");
@@ -4984,7 +4979,7 @@ mod tests {
 				message("tail")
 			]);
 			let view = recovered.load().expect("load recovered journal");
-			let projected = project_journal(&view, view.as_ref(), &omp_tool::Registry::new(), &caps())
+			let projected = project_journal(&view, &omp_tool::Registry::new(), &caps())
 				.expect("project recovered rewrite");
 			drop(view);
 			let projected_bytes = projected.encode_to_vec();
@@ -4999,9 +4994,8 @@ mod tests {
 				live
 			);
 			let view = reopened.load().expect("reload journal");
-			let reprojection =
-				project_journal(&view, view.as_ref(), &omp_tool::Registry::new(), &caps())
-					.expect("reproject completed rewrite");
+			let reprojection = project_journal(&view, &omp_tool::Registry::new(), &caps())
+				.expect("reproject completed rewrite");
 			drop(view);
 			assert_eq!(reprojection.encode_to_vec(), projected_bytes);
 			drop(reopened);
@@ -5083,7 +5077,7 @@ mod tests {
 			assert_eq!(live.as_slice(), indexes.as_slice());
 			assert_eq!(journal.items_at(&live).expect("project item values").len(), live.len());
 		}
-		assert_eq!(journal.load().expect("borrow final journal").len(), 128);
+		assert_eq!(journal.load().expect("borrow final journal").log().len(), 128);
 		drop(journal);
 		fs::remove_file(path).expect("remove journal");
 	}

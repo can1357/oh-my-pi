@@ -1498,8 +1498,8 @@ impl<C: TurnClient + Clone + Send + 'static> ChatParentHost<C> {
 			tracing::warn!(agent = %record.id, %error, "recovered child journal read failed");
 			SupervisorError::RevivalFailed { id: record.id.clone() }
 		})?;
-		let revival = (0..log.len() as u64)
-			.filter_map(|index| log.get(index))
+		let revival = (0..log.log().len() as u64)
+			.filter_map(|index| log.log().get(index))
 			.find_map(|entry| match entry {
 				transcript::Entry::Ok(event) => match &event.kind {
 					Kind::Init { revival: Some(revival), .. } => Some(revival.clone()),
@@ -5841,10 +5841,10 @@ pub fn open_session(
 			})?;
 			let mut journal = Journal::open(&path)?;
 			let view = journal.load()?;
-			if view.header().id.0 != id {
+			if view.log().header().id.0 != id {
 				return Err(ChatError::SessionMismatch(id));
 			}
-			let recorded_root = view.header().cwd.clone();
+			let recorded_root = view.log().header().cwd.clone();
 			drop(view);
 			let current_root = journal.workspace_roots(&recorded_root)?;
 			if current_root.primary() != root && !matches!(open, SessionOpen::ResumeMoved(_)) {
@@ -5886,7 +5886,7 @@ pub fn open_session(
 		})?,
 	};
 	let view = journal.load()?;
-	let initial_items = project_journal(&view, view.as_ref(), registry, &CHAT_CAPS_BASE)?.items;
+	let initial_items = project_journal(&view, registry, &CHAT_CAPS_BASE)?.items;
 	drop(view);
 	Ok(Session { id, journal, initial_items })
 }
@@ -6002,10 +6002,10 @@ fn create_indexed_fork(
 ) -> Result<Journal, ChatError> {
 	let source = Journal::open(source_path)?;
 	let source_view = source.load()?;
-	if source_view.header().id.0 != *source_id {
+	if source_view.log().header().id.0 != *source_id {
 		return Err(ChatError::SessionMismatch(source_id.clone()));
 	}
-	let recorded_root = source_view.header().cwd.clone();
+	let recorded_root = source_view.log().header().cwd.clone();
 	drop(source_view);
 	if source.workspace_roots(&recorded_root)?.primary() != root {
 		return Err(ChatError::SessionProjectMismatch { session: source_id.clone() });
@@ -6994,7 +6994,7 @@ mod tests {
 		.expect("torn session resumes");
 		assert_eq!(session.id, id);
 		let log = session.journal.load().expect("repaired journal loads");
-		assert_eq!(log.len(), 1, "the torn fragment is truncated, intact events remain");
+		assert_eq!(log.log().len(), 1, "the torn fragment is truncated, intact events remain");
 	}
 
 	#[tokio::test]
