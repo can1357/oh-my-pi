@@ -118,8 +118,13 @@ test.skipIf(process.platform === "win32")(
 			// The intermediate shell exits immediately after backgrounding the
 			// worker. Waiting for its pid file proves the worker started before
 			// the resolver timeout, but PID-tree traversal can no longer find it.
+			// The timeout budget races the worker SPAWN, not just the busy-wait:
+			// on a loaded CI runner, spawning the intermediate + worker can take
+			// well over 150ms, and the timeout then kills the tree before the
+			// pid file ever exists (observed as ENOENT below). 3s is spawn-safe
+			// under load and changes nothing about the kill contract.
 			const command = `sh -c '"${worker}" &' & while [ ! -s "${pidFile}" ]; do :; done; sleep 10`;
-			const result = await runShellCommand(command, 150);
+			const result = await runShellCommand(command, 3000);
 			expect(result).toBeUndefined();
 
 			const pid = Number.parseInt((await Bun.file(pidFile).text()).trim(), 10);
@@ -129,6 +134,10 @@ test.skipIf(process.platform === "win32")(
 			escaped?.killTree(9);
 		}
 	},
+	// Explicit budget: the 3s resolver timeout gives these tests a
+	// deterministic ≥3s floor, too close to bun's 5s default in direct
+	// `bun test` runs (the CI harness overrides to 30s).
+	15_000,
 );
 
 test.skipIf(process.platform !== "linux")(
@@ -145,8 +154,9 @@ test.skipIf(process.platform !== "linux")(
 			// `setsid` moves the intermediate into a new session, then that
 			// intermediate backgrounds the worker and exits. The worker is no
 			// longer in the resolver shell's PID tree or original process group.
+			// Same spawn-safe timeout rationale as the reparented case above.
 			const command = `setsid sh -c '"${worker}" &' </dev/null >/dev/null 2>&1 & while [ ! -s "${pidFile}" ]; do :; done; sleep 10`;
-			const result = await runShellCommand(command, 150);
+			const result = await runShellCommand(command, 3000);
 			expect(result).toBeUndefined();
 
 			const pid = Number.parseInt((await Bun.file(pidFile).text()).trim(), 10);
@@ -158,6 +168,8 @@ test.skipIf(process.platform !== "linux")(
 			escaped?.killTree(9);
 		}
 	},
+	// Same explicit-budget rationale as the reparented case above.
+	15_000,
 );
 
 test.skipIf(process.platform === "win32")(
