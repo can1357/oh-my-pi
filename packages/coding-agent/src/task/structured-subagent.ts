@@ -252,7 +252,7 @@ export async function resolveEffectiveSubagentPolicy(
 	assertPlanControlsAllowed(request, planMode);
 	assertDepthAndSpawnAllowed(request, rawAgentName);
 
-	const discovery = await discoverAgents(request.session.cwd);
+	const discovery = await discoverAgents(request.session.cwd, undefined, request.session.effectiveExtensionRoots?.());
 	// The raw policy default comes from the parent's `spawns` frontmatter and
 	// may name an agent that cannot actually be spawned (primary/unavailable,
 	// disabled, or not in the allowed list). Callers that bypass the task
@@ -461,7 +461,12 @@ function buildExecutorOptions(
 		workspaceTree: session.workspaceTree,
 		promptTemplates: session.promptTemplates,
 		rules: session.rules,
+		// Root policy and module paths have separate jobs: the live policy drives
+		// recursive sub-discovery; preloaded paths only avoid re-scanning/reusing
+		// parent-bound extension instances while constructing the child.
+		extensionRoots: session.effectiveExtensionRoots?.bind(session),
 		preloadedExtensionPaths: restrictToolNames ? [] : session.extensionPaths,
+		preloadedPreparedExtensions: restrictToolNames ? [] : session.preparedExtensions,
 		preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
 		localProtocolOptions,
 		parentArtifactManager: session.getArtifactManager?.() ?? undefined,

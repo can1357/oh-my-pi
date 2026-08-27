@@ -4,8 +4,8 @@
  * Every action is generated from its absolute index, so a run is fully
  * reproducible: turn N of a run with array length L always issues the same
  * tokens, and the expected result is computed locally by {@link applyActions}
- * rather than trusted from the model. Actions are encoded as single-glyph
- * opcodes ({@link encodeAction}) whose meaning lives only in the system prompt,
+ * rather than trusted from the model. Actions are encoded as single glyphs
+ * ({@link encodeAction}) whose meaning lives only in the system prompt,
  * so the model cannot lean on natural-language paraphrase.
  */
 

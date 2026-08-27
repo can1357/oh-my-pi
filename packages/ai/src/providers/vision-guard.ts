@@ -4,6 +4,10 @@ import { isDeepseekModelIdOrName, isQwenModelId } from "@oh-my-pi/pi-catalog/ide
 import type { ImageContent, Model, TextContent } from "../types";
 
 export const NON_VISION_IMAGE_PLACEHOLDER = "[image omitted: model does not support vision]";
+// `vision` delimited by non-alphanumerics, so `deepseek-v4-flash-vision-exp`
+// and `deepseek_vision` match but `deepseek-r1-revision-0528` does not.
+// Inputs are lowercased before testing.
+const VISION_TOKEN = /(?<![a-z0-9])vision(?![a-z0-9])/;
 
 export function partitionVisionContent(
 	content: ReadonlyArray<TextContent | ImageContent>,
@@ -77,8 +81,12 @@ export function isDashscopeCompatibleModeTextOnlyQwen(model: Model<"openai-compl
 export function isTextOnlyDeepSeek(model: Model<"openai-completions">): boolean {
 	const id = model.id.toLowerCase();
 	const name = (model.name ?? "").toLowerCase();
-	// DeepSeek OCR is a genuinely multimodal model served by Novita.
+	// DeepSeek OCR and the multimodal vision SKUs (deepseek-v4-flash-vision-exp,
+	// future -vision- ids) genuinely accept image_url parts; same marker as the
+	// catalog's deepseek mapModel heuristic. `vision` must be a bounded token:
+	// `revision` contains it as a substring and must stay guarded.
 	if (id.includes("deepseek-ocr") || name.includes("deepseek-ocr")) return false;
+	if (VISION_TOKEN.test(id) || VISION_TOKEN.test(name)) return false;
 	return (
 		modelMatchesHost(model, "deepseekFamily") ||
 		isDeepseekModelIdOrName(model.id) ||

@@ -14,6 +14,7 @@ import { type } from "@oh-my-pi/omptype";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { saveLearnedLesson } from "@oh-my-pi/pi-coding-agent/memories";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { type CreateAgentSessionOptions, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -1661,4 +1662,80 @@ describe("launch persona first system prompt", () => {
 		expect(baseline).toContain("ext_tool");
 		expect(baseline).toContain("other_tool");
 	});
+
+	it("restores memory/autolearn prompt affordances after leaving a launch persona", async () => {
+		// P2 (codex #3845551582): `applyAgentPersonaOptions` sets the
+		// creation-time `restrictToolNames` flag for a launch `--agent` persona
+		// with a `tools:` list. `promptRestricted` folded that flag in
+		// unconditionally, so after leaving the persona (`restoreBaselineTools`
+		// restored the unrestricted tool set and cleared the live restriction)
+		// every later prompt rebuild STILL omitted the memory guidance, the
+		// auto-learn guidance, AutoQA, and IRC affordances. A launch persona
+		// without an explicit `--tools` override must lift the suppression
+		// with the restriction; an explicit `--tools` launch keeps it.
+		await fs.writeFile(
+			path.join(agentsDir, "affordance-persona.md"),
+			agentMd("affordance-persona", ["tools: [read]"]),
+		);
+
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled anthropic/claude-sonnet-4-5 to exist");
+
+		const personaSettings = Settings.isolated({
+			"compaction.enabled": false,
+			"autolearn.enabled": true,
+			"memory.backend": "local",
+		});
+		// The local backend's read-path instructions render only when memory
+		// content exists; seed a lesson so the restored prompt can carry them.
+		await saveLearnedLesson(tempHome, personaSettings.getCwd(), {
+			content: "T11 memory affordances restored.",
+		});
+
+		const sessionManager = SessionManager.inMemory(projectDir);
+		const options: Parameters<typeof createAgentSession>[0] = {
+			cwd: projectDir,
+			agentDir: tempHome,
+			authStorage,
+			modelRegistry,
+			sessionManager,
+			settings: personaSettings,
+			model,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			toolNames: ["read", "write"],
+		};
+		const { agents } = await discovery.discoverAgents(projectDir, tempHome);
+		const agent = agents.find(candidate => candidate.name === "affordance-persona");
+		expect(agent).toBeDefined();
+		applyAgentPersonaOptions(options, agent!, { modelSet: false, thinkingSet: false, toolsSet: false });
+		options.personaName = "affordance-persona";
+
+		const result = await createAgentSession(options);
+		session = result.session;
+
+		// While the persona is active the affordances are suppressed: the
+		// memory backend resolved, but `promptRestricted` withheld the memory
+		// and auto-learn guidance from the prompt.
+		const restrictedPrompt = session.systemPrompt.join("\n");
+		expect(restrictedPrompt).not.toContain("Auto-Learn (experimental)");
+		expect(restrictedPrompt).not.toContain("memory://root/memory_summary.md");
+
+		// Leaving the persona restores the unrestricted tool set AND the
+		// affordances: the rebuilt prompt must carry the auto-learn guidance
+		// (manage_skill/learn are in the registry via autolearn+local backend)
+		// and the memory read-path instructions.
+		await session.restoreBaselineTools();
+		await session.refreshBaseSystemPrompt();
+		const restoredPrompt = session.systemPrompt.join("\n");
+		expect(session.getActiveToolNames()).toContain("manage_skill");
+		expect(restoredPrompt).toContain("Auto-Learn (experimental)");
+		expect(restoredPrompt).toContain("memory://root/memory_summary.md");
+	}, 20000);
 });

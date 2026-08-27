@@ -1382,6 +1382,107 @@ describe("ToolSession spawns after persona clear", () => {
 	});
 });
 
+describe("Residual CLI restriction after leaving a launch persona", () => {
+	let tempHome: string;
+	let projectDir: string;
+	let authStorage: AuthStorage;
+
+	beforeEach(async () => {
+		resetSettingsForTest();
+		tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-persona-residual-"));
+		projectDir = path.join(tempHome, "project");
+		await fs.mkdir(projectDir, { recursive: true });
+		await Settings.init({ inMemory: true, cwd: projectDir });
+		Settings.instance.set("startup.quiet", true);
+		authStorage = await AuthStorage.create(path.join(tempHome, "testauth.db"));
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		authStorage?.close();
+		await fs.rm(tempHome, { recursive: true, force: true });
+		resetSettingsForTest();
+	});
+
+	it("keeps the explicit CLI grant enforced on MCP refresh after leaving the persona", async () => {
+		// P1 (codex #3845551575): a launch `--agent` persona combined with an
+		// explicit `--tools read` made `restoreBaselineTools` unconditionally
+		// clear the ONLY durable restriction when the persona was left. Persona
+		// sessions load extensions and MCP/RPC tools, so a later refresh saw no
+		// restriction and auto-activated newly registered tools — mutating ones
+		// included — past the explicit CLI grant. The residual CLI restriction
+		// (the grant MINUS tools the persona itself granted) must survive the
+		// persona exit and keep filtering late refreshes.
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled anthropic/claude-sonnet-4-5 to exist");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempHome, "models.yml"));
+		const sessionManager = SessionManager.inMemory(projectDir);
+		const { session } = await createAgentSession({
+			cwd: projectDir,
+			agentDir: tempHome,
+			modelRegistry,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			model,
+			personaName: "launch-persona",
+			personaCliToolOverride: true,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			toolNames: ["read"],
+		});
+		try {
+			// Launch state: only the CLI grant is active.
+			expect(session.getEnabledToolNames()).toEqual(["read"]);
+
+			// Leaving the persona: the baseline (the CLI list) is restored and
+			// the persona restriction drops — but the RESIDUAL CLI restriction
+			// must stay in force.
+			await session.restoreBaselineTools();
+			expect(session.getEnabledToolNames()).toEqual(["read"]);
+
+			// A later MCP-style refresh (delayed server connection) must NOT
+			// auto-activate the connected tool past the CLI grant.
+			const mcpTool: CustomTool = {
+				name: "mcp__db_query",
+				label: "db/query",
+				description: "Query the database",
+				parameters: type({}),
+				mcpServerName: "db",
+				mcpToolName: "query",
+				async execute() {
+					return { content: [{ type: "text", text: "ok" }] };
+				},
+			};
+			await session.refreshMCPTools([mcpTool]);
+			expect(session.getEnabledToolNames()).toEqual(["read"]);
+			// The tool is registered for a later persona that grants it.
+			expect(session.getAllToolNames()).toContain("mcp__db_query");
+
+			// A persona switch whose `tools:` list grants the tool activates it
+			// (the live persona grant supersedes the residual while active).
+			await session.applyPersonaTools(["read", "mcp__db_query"]);
+			expect(session.getEnabledToolNames()).toEqual(["read", "mcp__db_query"]);
+
+			// Leaving again restores the CLI-list baseline — the persona grant
+			// was LIVE (frontmatter applied over the session, not the CLI
+			// baseline), so the residual keeps constraining: a later refresh
+			// must NOT re-activate the tool past the CLI grant.
+			await session.restoreBaselineTools();
+			await session.refreshMCPTools([mcpTool]);
+			expect(session.getEnabledToolNames()).toEqual(["read"]);
+		} finally {
+			await session.dispose();
+		}
+	});
+});
+
 describe("Persona tools on a restricted-tools session", () => {
 	let tempHome: string;
 	let projectDir: string;

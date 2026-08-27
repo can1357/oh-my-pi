@@ -6,6 +6,7 @@ export type ParsedSelector =
 	| { kind: "none" }
 	| { kind: "raw" }
 	| { kind: "conflicts" }
+	| { kind: "image" }
 	| { kind: "lines"; ranges: [LineRange, ...LineRange[]]; raw?: boolean };
 
 /** Returns true when the selector requested verbatim/raw output (alone or combined with a range). */
@@ -21,13 +22,17 @@ export function isMultiRange(parsed: ParsedSelector): boolean {
 function selectorChunkLooksReadLike(chunk: string): boolean {
 	const lower = chunk.toLowerCase();
 	return (
-		lower === "raw" || lower === "conflicts" || /^-\d+(?:[-+]\d+)?$/.test(chunk) || parseLineRanges(chunk) !== null
+		lower === "raw" ||
+		lower === "conflicts" ||
+		lower === "img" ||
+		/^-\d+(?:[-+]\d+)?$/.test(chunk) ||
+		parseLineRanges(chunk) !== null
 	);
 }
 
 function invalidSelector(sel: string): ToolError {
 	return new ToolError(
-		`Invalid selector ':${sel}'. Use :N, :N-M, :N+K, :N- (open-ended), a comma-separated list of ranges, :raw, or a range combined with raw (e.g. :raw:50-100).`,
+		`Invalid selector ':${sel}'. Use :N, :N-M, :N+K, :N- (open-ended), a comma-separated list of ranges, :raw, :img for SVG rendering, or a range combined with raw (e.g. :raw:50-100).`,
 	);
 }
 
@@ -61,6 +66,7 @@ export function parseSel(sel: string | undefined): ParsedSelector {
 
 	if (sel.toLowerCase() === "raw") return { kind: "raw" };
 	if (sel.toLowerCase() === "conflicts") return { kind: "conflicts" };
+	if (sel.toLowerCase() === "img") return { kind: "image" };
 	const ranges = parseLineRanges(sel);
 	if (ranges) {
 		return { kind: "lines", ranges };

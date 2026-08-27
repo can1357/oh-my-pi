@@ -103,14 +103,13 @@ interface CursorExecBridgeOptions {
 	 *
 	 * This is a grant, not a policy: it answers "did the session hand this
 	 * channel a file-writing tool", which callers derive from their own roster
-	 * before any bridge-specific rewriting. Defaults to allowed to preserve the
-	 * primary agent's behavior; callers with a restricted tool set (advisors)
-	 * opt out. The user's approval policy is resolved separately, per call.
-	 *
-	 * A function form is evaluated at FRAME time, so a live grant (the primary
-	 * session's active tool set) revokes the mutation permission the moment a
-	 * `/agent` switch drops write/edit — a launch-time capture would stay true
-	 * for the rest of the session (codex #3761853483).
+	 * before any bridge-specific rewriting. A resolver keeps that answer current
+	 * when runtime tool selection upgrades a restricted transport. The primary
+	 * Cursor session moves `edit` out of {@link tools} and serves it through
+	 * {@link getEditReplaceTool}, so reading the map here would deny an edit-only
+	 * session. Defaults to allowed to preserve the primary agent's behavior;
+	 * callers with a restricted tool set (advisors) opt out. The user's approval
+	 * policy is resolved separately, per call.
 	 */
 	allowDirectFileMutation?: boolean | (() => boolean);
 	/**
@@ -328,6 +327,11 @@ async function executeTool(
 	return createToolResultMessage(toolCallId, toolName, result, isError);
 }
 
+function allowsDirectFileMutation(options: CursorExecBridgeOptions): boolean {
+	const grant = options.allowDirectFileMutation;
+	return typeof grant === "function" ? grant() : grant !== false;
+}
+
 /**
  * Resolve the user's policy for a frame that mutates the filesystem directly.
  *
@@ -356,14 +360,7 @@ function refuseByWritePolicy(options: CursorExecBridgeOptions, toolName: string,
 async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, toolCallId: string) {
 	const toolName = "delete";
 
-	// The grant may be a live function (the primary session's active tool set):
-	// evaluate it at frame time so a `/agent` switch to a read-only persona
-	// revokes the mutation permission immediately (codex #3761853483).
-	const canMutateFiles =
-		typeof options.allowDirectFileMutation === "function"
-			? options.allowDirectFileMutation()
-			: options.allowDirectFileMutation !== false;
-	if (!canMutateFiles) {
+	if (!allowsDirectFileMutation(options)) {
 		const result = buildToolErrorResult(`Tool "${toolName}" not available`);
 		return createToolResultMessage(toolCallId, toolName, result, true);
 	}
@@ -832,14 +829,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		downloadPath?: string;
 	}): Promise<CursorMcpResourceContent | null> {
 		if (downloadPath) {
-			// Same live grant as the native `delete` frame: a function form is
-			// evaluated at frame time so a `/agent` switch to a read-only persona
-			// revokes the download permission immediately (codex #3761853483).
-			const canMutateFiles =
-				typeof this.options.allowDirectFileMutation === "function"
-					? this.options.allowDirectFileMutation()
-					: this.options.allowDirectFileMutation !== false;
-			if (!canMutateFiles) {
+			if (!allowsDirectFileMutation(this.options)) {
 				throw new Error('Tool "write" not available: this session cannot download resources to disk.');
 			}
 			const refusal = refuseByWritePolicy(this.options, "write", downloadPath);

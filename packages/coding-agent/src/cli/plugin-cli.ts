@@ -476,9 +476,32 @@ async function handleUninstall(
 	// For uninstall, check the installed plugins registry directly.
 	// This works even if the marketplace entry was later removed from marketplaces.json.
 	const mktMgr = await makeMarketplaceManager();
-	const installedPlugins = new Set((await mktMgr.listInstalledPlugins()).map(p => p.id));
+	const installedIds = (await mktMgr.listInstalledPlugins()).map(p => p.id);
+	const installedPlugins = new Set(installedIds);
 
-	for (const name of packages) {
+	// Installed marketplace IDs are `name@marketplace`, so a bare name never matches one
+	// exactly. Resolve it when exactly one marketplace supplies that name: without this the
+	// bare form falls through to the npm path, where `bun uninstall` exits 0 for a package
+	// that was never a dependency and the command reports a removal that did not happen.
+	const marketplaceIdsFor = (name: string): string[] =>
+		installedIds.filter(id => id.slice(0, id.lastIndexOf("@")) === name);
+
+	for (const rawName of packages) {
+		let name = rawName;
+		if (!installedPlugins.has(name)) {
+			const candidates = marketplaceIdsFor(name);
+			if (candidates.length === 1) {
+				name = candidates[0] as string;
+			} else if (candidates.length > 1) {
+				console.error(
+					chalk.red(
+						`${theme.status.error} ${rawName} is installed from ${candidates.length} marketplaces. Qualify it: ${candidates.join(", ")}`,
+					),
+				);
+				process.exit(1);
+			}
+		}
+
 		const viaMarketplace = installedPlugins.has(name);
 
 		if (flags.dryRun) {
@@ -519,7 +542,14 @@ async function handleUninstall(
 			continue;
 		}
 
-		// npm path
+		// npm path. `bun uninstall` exits 0 for a package that is not a dependency, so an
+		// unknown name would otherwise print a success line having removed nothing.
+		const npmPlugins = await manager.list();
+		if (!npmPlugins.some(p => p.name === name)) {
+			console.error(chalk.red(`${theme.status.error} ${rawName} is not installed`));
+			process.exit(1);
+		}
+
 		try {
 			await manager.uninstall(name);
 			if (flags.json) {

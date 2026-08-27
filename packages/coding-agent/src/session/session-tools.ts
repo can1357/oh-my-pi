@@ -3,6 +3,7 @@ import type { Agent, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { isRecord, logger, prompt, stringProperty, untilAborted } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../capability";
+import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelString } from "../config/model-resolver";
 import type { Settings, SkillsSettings } from "../config/settings";
@@ -44,6 +45,8 @@ export interface SessionToolsHost {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
+	/** Session-local extension roots (explicit + mode + configured) for post-startup reloads. */
+	effectiveExtensionRoots(): EffectiveExtensionRoots;
 	modelRegistry: ModelRegistry;
 	extensionRunner(): ExtensionRunner | undefined;
 	clientBridge(): ClientBridge | undefined;
@@ -81,6 +84,9 @@ interface SessionToolsOptions {
 	/** MCP tool names whose current registry entries came from the manager snapshot. */
 	mcpManagerToolNames?: Iterable<string>;
 	ensureWriteRegistered?: () => Promise<boolean>;
+	isDeviceOnlyWrite?: () => boolean;
+	setDeviceOnlyWrite?: (enabled: boolean) => void;
+	setPendingFullWriteDescription?: (enabled: boolean) => void;
 	/** Registers the hidden `goal` tool when goal mode is enabled at runtime. */
 	ensureGoalRegistered?: () => Promise<boolean>;
 	/** Registers built-in tools missing from the registry on demand (live persona switch). */
@@ -107,6 +113,12 @@ interface SessionToolsOptions {
 	baselineHubEnabled?: boolean;
 	/** Launch `--agent` persona's exact `tools:` grant (see AgentSessionConfig). */
 	personaToolRestriction?: Set<string>;
+	/**
+	 * The CLI grant that survives leaving the launch persona (see
+	 * AgentSessionConfig.residualCliToolRestriction): the explicit
+	 * `--tools`/`--no-tools` list MINUS any tools the persona itself granted.
+	 */
+	residualCliToolRestriction?: Set<string>;
 	rebuildSystemPrompt?: (
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
@@ -278,6 +290,14 @@ export class SessionTools {
 	#getMcpServerInstructions: SessionToolsOptions["getMcpServerInstructions"];
 	#setActiveToolNames: SessionToolsOptions["setActiveToolNames"];
 	#ensureWriteRegistered: SessionToolsOptions["ensureWriteRegistered"];
+	#isDeviceOnlyWrite: SessionToolsOptions["isDeviceOnlyWrite"];
+	#setDeviceOnlyWrite: SessionToolsOptions["setDeviceOnlyWrite"];
+	#setPendingFullWriteDescription: SessionToolsOptions["setPendingFullWriteDescription"];
+	/**
+	 * The session originated with an xd:// transport grant. Unlike the live
+	 * device-only flag, this survives temporary full-write upgrades.
+	 */
+	readonly #deviceOnlyWriteTransportAvailable: boolean;
 	#ensureGoalRegistered: SessionToolsOptions["ensureGoalRegistered"];
 	#registerBuiltInTools: SessionToolsOptions["registerBuiltInTools"];
 	#baselineLspEnabled: boolean;
@@ -302,6 +322,16 @@ export class SessionTools {
 	 * `--agent` would (codex #3763426057).
 	 */
 	#personaActiveToolRestriction: Set<string> | undefined;
+	/**
+	 * The CLI grant that survives leaving the launch persona (launch
+	 * `--agent` + explicit `--tools`/`--no-tools`): the CLI list MINUS any
+	 * tools the persona itself granted. {@link restoreBaselineTools} installs
+	 * it as the restriction when the persona is left, so a later MCP / RPC /
+	 * memory refresh cannot auto-activate tools past the explicit CLI grant
+	 * (codex #3845551575). `undefined` = nothing survives (persona-supplied
+	 * restrictions lift completely).
+	 */
+	#residualCliToolRestriction: Set<string> | undefined;
 
 	constructor(host: SessionToolsHost, options: SessionToolsOptions) {
 		this.#host = host;
@@ -325,12 +355,19 @@ export class SessionTools {
 		}
 		this.#presentationPinnedToolNames = options.presentationPinnedToolNames;
 		this.#ensureWriteRegistered = options.ensureWriteRegistered;
+		this.#isDeviceOnlyWrite = options.isDeviceOnlyWrite;
+		this.#deviceOnlyWriteTransportAvailable = this.#isDeviceOnlyWrite?.() === true;
+		this.#setDeviceOnlyWrite = options.setDeviceOnlyWrite;
+		this.#setPendingFullWriteDescription = options.setPendingFullWriteDescription;
 		this.#ensureGoalRegistered = options.ensureGoalRegistered;
 		this.#registerBuiltInTools = options.registerBuiltInTools;
 		this.#baselineLspEnabled = options.baselineLspEnabled === true;
 		this.#baselineHubEnabled = options.baselineHubEnabled === true;
 		this.#personaActiveToolRestriction = options.personaToolRestriction
 			? new Set(options.personaToolRestriction)
+			: undefined;
+		this.#residualCliToolRestriction = options.residualCliToolRestriction
+			? new Set(options.residualCliToolRestriction)
 			: undefined;
 		this.#rebuildSystemPrompt = options.rebuildSystemPrompt;
 		this.#getMcpServerInstructions = options.getMcpServerInstructions;
@@ -966,11 +1003,23 @@ export class SessionTools {
 			evalTransportAvailable: this.#hasCodeModeEvalTransport(),
 		});
 		let builtInWriteAvailable = this.#builtInToolNames.has("write");
-		if (toolNames.includes("write") && !builtInWriteAvailable) {
+		const fullWriteSelected =
+			toolNames.includes("write") &&
+			(this.#presentationPinnedToolNames?.has("write") === true ||
+				this.#runtimeSelectedToolNames?.has("write") === true);
+		if (fullWriteSelected) {
 			const writeRegistration = this.#ensureWriteRegistered?.();
-			builtInWriteAvailable = writeRegistration ? (await untilAborted(signal, writeRegistration)) === true : false;
-			if (builtInWriteAvailable) this.#builtInToolNames.add("write");
+			if (writeRegistration) {
+				builtInWriteAvailable = (await untilAborted(signal, writeRegistration)) === true;
+				if (builtInWriteAvailable) this.#builtInToolNames.add("write");
+			}
 		}
+		const upgradeDeviceOnlyWrite =
+			fullWriteSelected &&
+			builtInWriteAvailable &&
+			this.#isDeviceOnlyWrite?.() === true &&
+			this.#setDeviceOnlyWrite !== undefined &&
+			this.#setPendingFullWriteDescription !== undefined;
 		// Goal mode may have been enabled after session creation, leaving the
 		// registry without `goal`. Register it before resolving the selection so
 		// `#enterGoalMode`'s `[...tools, "goal"]` request is honored instead of
@@ -984,7 +1033,9 @@ export class SessionTools {
 			return tool ? [{ name, tool }] : [];
 		});
 		const xdevReadAvailable = this.#builtInToolNames.has("read") && selectedTools.some(({ name }) => name === "read");
-		const xdevWriteAvailable = builtInWriteAvailable && selectedTools.some(({ name }) => name === "write");
+		const xdevWriteAvailable =
+			builtInWriteAvailable &&
+			(selectedTools.some(({ name }) => name === "write") || this.#deviceOnlyWriteTransportAvailable);
 		const isPresentationPinned = (name: string): boolean =>
 			this.#presentationPinnedToolNames?.has(name) === true || this.#runtimeSelectedToolNames?.has(name) === true;
 		const mountCandidates = selectedTools.filter(
@@ -1059,6 +1110,23 @@ export class SessionTools {
 				directToolNames: codeMode.directToolNames,
 			});
 		}
+		const restrictDeviceOnlyWrite =
+			validToolNames.includes("write") &&
+			!fullWriteSelected &&
+			(this.#presentationPinnedToolNames !== undefined || this.#runtimeSelectedToolNames !== undefined) &&
+			builtInWriteAvailable &&
+			this.#isDeviceOnlyWrite?.() !== true &&
+			this.#setDeviceOnlyWrite !== undefined;
+		const restoreDormantDeviceOnlyWrite =
+			!validToolNames.includes("write") &&
+			this.#deviceOnlyWriteTransportAvailable &&
+			this.#isDeviceOnlyWrite?.() !== true &&
+			this.#setDeviceOnlyWrite !== undefined;
+		const deactivateDeviceOnlyWrite =
+			!validToolNames.includes("write") &&
+			!this.#deviceOnlyWriteTransportAvailable &&
+			this.#isDeviceOnlyWrite?.() === true &&
+			this.#setDeviceOnlyWrite !== undefined;
 		const previousMounted = new Set(this.#xdev?.mountedNames ?? []);
 		const previousActiveToolNames = this.getActiveToolNames();
 		const previousPersonaDroppedMutation = this.#lastPersonaDroppedMutation;
@@ -1099,6 +1167,8 @@ export class SessionTools {
 		let rebuiltSignature: string | undefined;
 		let rebuiltXdevCatalogNames: readonly string[] | undefined;
 		try {
+			if (restrictDeviceOnlyWrite) this.#setDeviceOnlyWrite?.(true);
+			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(true);
 			if (this.#rebuildSystemPrompt) {
 				// The provider receives only `appliedNames`, but prompt capability and
 				// safety gates must see every enabled tool that remains callable via
@@ -1126,6 +1196,8 @@ export class SessionTools {
 			}
 			signal?.throwIfAborted();
 		} catch (error) {
+			if (restrictDeviceOnlyWrite) this.#setDeviceOnlyWrite?.(false);
+			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(false);
 			this.#setMountedNames(previousMounted);
 			this.#toolPredicateNames = previousToolPredicateNames;
 			this.#setActiveToolNames?.(
@@ -1141,6 +1213,8 @@ export class SessionTools {
 		}
 
 		if (this.#host.isDisposed()) {
+			if (restrictDeviceOnlyWrite) this.#setDeviceOnlyWrite?.(false);
+			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(false);
 			this.#setMountedNames(previousMounted);
 			this.#toolPredicateNames = previousToolPredicateNames;
 			this.#setActiveToolNames?.(
@@ -1155,20 +1229,29 @@ export class SessionTools {
 			return;
 		}
 
-		this.#notifyXdevMountDelta(previousMounted);
-		this.#host.agent.setTools(appliedTools);
-		this.#host.setCodeModeNamespacesInfo?.(nextCodeModeNamespacesInfo);
-		this.#codeModeDirectWireSignature = codeMode.active
-			? this.#computeCodeModeDirectWireSignature(appliedNames)
-			: undefined;
-		if (rebuiltSystemPrompt && rebuiltSignature) {
-			if (this.#lastAppliedToolSignature !== undefined) this.#host.clearInheritedProviderPromptCacheKey();
-			this.#baseSystemPrompt = rebuiltSystemPrompt;
-			this.#host.clearMemoryPromotionSnapshot();
-			this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
-			this.#lastAppliedToolSignature = rebuiltSignature;
-			this.#promptModelKey = this.#currentPromptModelKey();
-			this.#basePromptXdevNames = new Set(rebuiltXdevCatalogNames);
+		try {
+			this.#notifyXdevMountDelta(previousMounted);
+			this.#host.agent.setTools(appliedTools);
+			this.#host.setCodeModeNamespacesInfo?.(nextCodeModeNamespacesInfo);
+			this.#codeModeDirectWireSignature = codeMode.active
+				? this.#computeCodeModeDirectWireSignature(appliedNames)
+				: undefined;
+			if (rebuiltSystemPrompt && rebuiltSignature) {
+				if (this.#lastAppliedToolSignature !== undefined) this.#host.clearInheritedProviderPromptCacheKey();
+				this.#baseSystemPrompt = rebuiltSystemPrompt;
+				this.#host.clearMemoryPromotionSnapshot();
+				this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
+				this.#lastAppliedToolSignature = rebuiltSignature;
+				this.#promptModelKey = this.#currentPromptModelKey();
+				this.#basePromptXdevNames = new Set(rebuiltXdevCatalogNames);
+			}
+			if (restoreDormantDeviceOnlyWrite) {
+				this.#setDeviceOnlyWrite?.(true);
+			} else if (upgradeDeviceOnlyWrite || deactivateDeviceOnlyWrite) {
+				this.#setDeviceOnlyWrite?.(false);
+			}
+		} finally {
+			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(false);
 		}
 	}
 
@@ -1344,6 +1427,7 @@ export class SessionTools {
 				...skillsSettings,
 				cwd: this.#host.sessionManager.getCwd(),
 				disabledExtensions: this.#host.settings.get("disabledExtensions") ?? [],
+				extensionRoots: this.#host.effectiveExtensionRoots(),
 			});
 			this.#skills = discovered.skills;
 			this.#skillWarnings = discovered.warnings;
@@ -1409,7 +1493,10 @@ export class SessionTools {
 		// `applyPersonaTools` is only called with an explicit `tools:` list, so
 		// every live `/agent` switch with a tool restriction activates this; an
 		// unrestricted persona (no `tools:`) never calls it and leaves the field
-		// unset.
+		// unset. The live grant SUPERSEDES the residual CLI restriction while
+		// the persona is active (the persona grant is the effective gate);
+		// `restoreBaselineTools` recomposes the residual when the persona is
+		// left (codex #3845551575).
 		this.#personaActiveToolRestriction = new Set(normalized);
 		// The persona-switch signal: a persona whose tools list omits BOTH
 		// mutating built-ins revokes the Cursor `editWasGranted` floor (codex
@@ -1558,9 +1645,12 @@ export class SessionTools {
 	async restoreBaselineTools(toolNames: string[], mountedToolNames: string[]): Promise<void> {
 		// Leaving agent mode drops the persona restriction so a later MCP refresh
 		// can activate connected manager tools again (codex #3819553918) and the
-		// rebuilt prompt restores the unrestricted affordances (codex #3763426057).
+		// rebuilt prompt restores the unrestricted affordances (codex #3763426057)
+		// — EXCEPT the residual CLI restriction (see #residualCliToolRestriction):
+		// a launch `--agent` + explicit `--tools` keeps constraining refreshes
+		// after the persona is left (codex #3845551575).
 		// A persona→persona switch calls this before `applyPersonaTools` re-sets
-		// the field, so the interim `undefined` is never observable.
+		// the field, so the interim value is never observable.
 		//
 		// The restriction is cleared only AFTER the on-demand registrations and
 		// the presentation apply succeed: a failed restore (e.g. an LSP/hub
@@ -1582,7 +1672,14 @@ export class SessionTools {
 			this.#personaActiveToolRestriction = previousRestriction;
 			throw error;
 		}
-		this.#personaActiveToolRestriction = undefined;
+		// Leaving the persona keeps the residual CLI restriction when the
+		// launch combined `--agent` with an explicit `--tools`/`--no-tools`:
+		// a later MCP / RPC / memory refresh must not widen the active set
+		// past the explicit CLI grant (codex #3845551575). A persona-supplied
+		// restriction has no residual and lifts completely.
+		this.#personaActiveToolRestriction = this.#residualCliToolRestriction
+			? new Set(this.#residualCliToolRestriction)
+			: undefined;
 	}
 
 	/**
@@ -1599,12 +1696,16 @@ export class SessionTools {
 		signal?: AbortSignal,
 		personaDroppedEdit?: boolean,
 	): Promise<void> {
+		const retainedMountedDevice = [...mounted].some(name => normalized.includes(name));
+		const retainedDeferrableTool = normalized.some(name => this.#toolRegistry.get(name)?.deferrable === true);
+		const deviceOnlyWriteActive = this.#isDeviceOnlyWrite?.() === true;
 		const transportWriteActive =
-			writeSelected &&
+			normalized.includes("write") &&
 			this.#builtInToolNames.has("write") &&
 			this.#presentationPinnedToolNames?.has("write") !== true &&
 			this.#runtimeSelectedToolNames?.has("write") !== true &&
-			(mounted.size > 0 || this.#host.planModeEnabled());
+			((this.#host.planModeEnabled() && (!writeSelected || deviceOnlyWriteActive)) ||
+				(writeSelected && deviceOnlyWriteActive && (retainedMountedDevice || retainedDeferrableTool)));
 		const previousRuntimeSelectedToolNames = this.#runtimeSelectedToolNames;
 		this.#runtimeSelectedToolNames = new Set(
 			normalized.filter(name => !mounted.has(name) && !(name === "write" && transportWriteActive)),

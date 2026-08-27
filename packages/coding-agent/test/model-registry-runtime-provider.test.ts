@@ -301,6 +301,30 @@ describe("ModelRegistry runtime provider registration", () => {
 			model: "model-compact",
 		});
 	});
+	test("combines static fallback models with dynamic provider discovery", async () => {
+		const providerName = "combined-runtime-provider";
+		let dynamicFetches = 0;
+		registry.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				models: [{ ...baseModel, id: "fallback-model" }],
+				fetchDynamicModels: async () => {
+					dynamicFetches++;
+					return [{ ...baseModel, id: "dynamic-model" }];
+				},
+			},
+			"ext://runtime",
+		);
+
+		await registry.refreshRuntimeProviders("online");
+
+		expect(dynamicFetches).toBe(1);
+		expect(registry.find(providerName, "dynamic-model")).toBeDefined();
+		expect(registry.find(providerName, "fallback-model")).toBeDefined();
+	});
 
 	test("configured discovery suppresses extension fetchDynamicModels for the same provider", async () => {
 		const providerName = "runtime-configured-provider";
@@ -416,6 +440,34 @@ describe("ModelRegistry runtime provider registration", () => {
 			// requiresEffort is backfilled from identity.
 			requiresEffort: true,
 		});
+	});
+
+	test("registerProvider preserves a standalone Codex WebSocket opt-out across refresh", async () => {
+		const config: ProviderConfigInput = {
+			baseUrl: "https://chatgpt.com/backend-api/codex",
+			apiKey: "RUNTIME_KEY",
+			api: "openai-codex-responses",
+			models: [{ ...baseModel, id: "gpt-5.6-sol", preferWebsockets: false }],
+		};
+
+		registry.registerProvider("runtime-codex", config, "ext://runtime");
+		expect(registry.find("runtime-codex", "gpt-5.6-sol")?.preferWebsockets).toBe(false);
+
+		await registry.refresh("offline");
+		expect(registry.find("runtime-codex", "gpt-5.6-sol")?.preferWebsockets).toBe(false);
+	});
+
+	test("registerProvider lets an extension disable WebSockets on a bundled Codex model", () => {
+		const config: ProviderConfigInput = {
+			baseUrl: "https://chatgpt.com/backend-api/codex",
+			apiKey: "RUNTIME_KEY",
+			api: "openai-codex-responses",
+			models: [{ ...baseModel, id: "gpt-5.4", preferWebsockets: false }],
+		};
+
+		registry.registerProvider("openai-codex", config, "ext://runtime");
+
+		expect(registry.find("openai-codex", "gpt-5.4")?.preferWebsockets).toBe(false);
 	});
 
 	test("extension-registered models survive refresh('offline') cycle", async () => {

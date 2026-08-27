@@ -46,7 +46,6 @@ import {
 	discoverWatchdogFiles,
 	formatActiveRepoWatchdogPrompt,
 	formatAdvisorContextPrompt,
-	loadAdvisorTranscriptCosts,
 } from "./advisor";
 import { AsyncJobManager } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
@@ -54,6 +53,7 @@ import { createAutoresearchExtension } from "./autoresearch";
 import { loadCapability } from "./capability";
 import { type Rule, ruleCapability, setActiveRules } from "./capability/rule";
 import { bucketRules } from "./capability/rule-buckets";
+import type { EffectiveExtensionRoots } from "./capability/types";
 import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode";
 import { shouldInlineToolDescriptors } from "./config/inline-tool-descriptors-mode";
 import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
@@ -80,7 +80,7 @@ import "./discovery";
 import { createImageUrlServiceFromSettings } from "./blob-broker/service";
 import { wrapStreamFnWithBlobUrlFallback } from "./blob-broker/stream-fallback";
 import { initializeWithSettings } from "./discovery";
-import { withOmpExtensionRootScope } from "./discovery/omp-extension-roots";
+import { setInvocationConfiguredExtensions, withOmpExtensionRootScope } from "./discovery/omp-extension-roots";
 import { disposeAllJuliaKernelSessions, disposeJuliaKernelSessionsByOwner } from "./eval/jl/executor";
 import { disposeVmContextsByOwner } from "./eval/js/context-manager";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "./eval/py/executor";
@@ -94,6 +94,7 @@ import {
 import { discoverCustomToolPaths, loadCustomTools, type ToolPathWithSource } from "./extensibility/custom-tools";
 import type { CustomTool, CustomToolContext, CustomToolSessionEvent } from "./extensibility/custom-tools/types";
 import {
+	bindPreparedExtensions,
 	discoverAndLoadExtensions,
 	discoverExtensionPaths,
 	EXTENSION_HANDLER_TIMEOUT_MS,
@@ -105,6 +106,7 @@ import {
 	type LoadExtensionsResult,
 	loadExtensionFromFactory,
 	loadExtensions,
+	type PreparedExtension,
 	type RegisteredTool,
 	type ToolDefinition,
 	wrapRegisteredTools,
@@ -464,6 +466,14 @@ export interface CreateAgentSessionOptions {
 	/** Disable extension discovery (explicit paths still load). */
 	disableExtensionDiscovery?: boolean;
 	/**
+	 * Live extension-root policy inherited by a child session. Keeps recursive
+	 * sub-discovery aligned with the parent while `preloadedExtensionPaths` only
+	 * optimizes extension-module loading.
+	 *
+	 * @internal
+	 */
+	extensionRoots?: () => EffectiveExtensionRoots;
+	/**
 	 * Pre-loaded extensions (skips file discovery and the per-session factory
 	 * call). Used by the CLI when extensions are loaded early to parse custom
 	 * flags — the same process owns the returned instances, so reusing them is
@@ -473,7 +483,7 @@ export interface CreateAgentSessionOptions {
 	 * `Extension` instances close over a parent-bound `ExtensionAPI` (cwd,
 	 * eventBus, runtime), and reusing them would route tools/handlers/commands
 	 * back through the parent. For subagents, forward
-	 * {@link preloadedExtensionPaths} instead.
+	 * {@link preloadedPreparedExtensions} instead.
 	 *
 	 * @internal
 	 */
@@ -484,9 +494,15 @@ export interface CreateAgentSessionOptions {
 	 * `loadExtensions()` itself so each `Extension` is bound to THIS session's
 	 * `ExtensionAPI` (cwd, eventBus, runtime).
 	 *
-	 * This is the safe pass-through for parent → subagent forwarding.
+	 * Compatibility pass-through for callers that do not have prepared factories.
 	 */
 	preloadedExtensionPaths?: string[];
+	/**
+	 * Session-independent imported extension factories. Child sessions rebind
+	 * these to their own ExtensionAPI without re-evaluating the module graph.
+	 * @internal
+	 */
+	preloadedPreparedExtensions?: readonly PreparedExtension[];
 	/**
 	 * Pre-discovered custom-tool source paths from `.omp/tools/`, `.claude/tools/`,
 	 * plugins, etc. When provided, the filesystem-scan inside
@@ -1298,10 +1314,10 @@ export function createAutoLearnCaptureRunner(
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
-	const rootMode = options.disableExtensionDiscovery ? "explicit-only" : "merge";
-	return await withOmpExtensionRootScope(options.additionalExtensionPaths ?? [], rootMode, () =>
-		createAgentSessionScoped(options),
-	);
+	const extensionRoots = options.extensionRoots?.();
+	const explicit = extensionRoots?.explicit ?? options.additionalExtensionPaths ?? [];
+	const mode = extensionRoots?.mode ?? (options.disableExtensionDiscovery ? "explicit-only" : "merge");
+	return await withOmpExtensionRootScope(explicit, mode, () => createAgentSessionScoped(options));
 }
 
 async function createAgentSessionScoped(options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> {
@@ -1316,6 +1332,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		options.settingsManager ??
 		logger.time("settings", Settings.init, { cwd, agentDir }));
 	logger.time("initializeWithSettings", initializeWithSettings, settings);
+	// Snapshot this session's effective configured lane onto its invocation scope
+	// so startup sub-discovery sees the same complete policy that post-startup
+	// reloads and recursively spawned children consume.
+	const extensionRoots = options.extensionRoots?.();
+	setInvocationConfiguredExtensions(
+		extensionRoots?.configured ?? settings.get("extensions") ?? [],
+		extensionRoots?.configuredLevel ?? settings.extensionsSourceLevel(),
+	);
 
 	// Pin authStorage to modelRegistry.authStorage: ModelRegistry.getApiKey() routes refresh
 	// failures through that instance, so any divergent storage handed to the bridge / mcpManager
@@ -2053,6 +2077,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (event.type === "connecting" && event.serverNames.length === 0) return;
 			eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, event);
 		};
+		// Provider, never a stored value: inherited child policy remains linked to
+		// the owning session, while top-level sessions materialize their own live
+		// settings on every discovery call.
+		const buildSessionExtensionRoots =
+			options.extensionRoots ??
+			((): EffectiveExtensionRoots => ({
+				explicit: options.additionalExtensionPaths ?? [],
+				mode: options.disableExtensionDiscovery ? "explicit-only" : "merge",
+				configured: settings.get("extensions") ?? [],
+				configuredLevel: settings.extensionsSourceLevel(),
+			}));
 		const mcpDiscoverOptions = {
 			onStatus: onMCPStatus,
 			enableProjectConfig: settings.get("mcp.enableProjectConfig") ?? true,
@@ -2060,6 +2095,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			filterExa: true,
 			// Filter browser MCP servers when builtin browser tool is active
 			filterBrowser: settings.get("browser.enabled") ?? false,
+			extensionRoots: buildSessionExtensionRoots(),
 		};
 		if (enableMCP && !mcpManager) {
 			if (deferMCPDiscoveryForUI) {
@@ -2202,11 +2238,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		//      Extension instances. Shallow-clone `extensions` so the inline
 		//      push below cannot mutate the caller's array. `runtime` is shared
 		//      so flag values set pre-creation flow into the live session.
-		//   2. `preloadedExtensionPaths` (subagent): caller resolved paths;
-		//      skip the FS scan but always re-call `loadExtensions` here so
-		//      each `Extension` binds to THIS session's `ExtensionAPI`
-		//      (cwd, eventBus, runtime).
-		//   3. No preload: run the full session discovery.
+		//   2. `preloadedPreparedExtensions` (subagent): caller imported modules;
+		//      re-bind their factories to THIS session's ExtensionAPI without
+		//      evaluating the same module graph again.
+		//   3. `preloadedExtensionPaths`: compatibility fallback for callers that
+		//      only have paths; imports and binds them for this session.
+		//   4. No preload: run the full session discovery.
 		// `disableExtensionDiscovery` is honored implicitly: a caller that set
 		// the flag and pre-resolved the result already reflects that choice.
 		let extensionPaths: string[];
@@ -2226,6 +2263,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			extensionPaths = extensionsResult.extensions
 				.map(ext => ext.resolvedPath)
 				.filter(p => !p.startsWith("<inline"));
+		} else if (options.preloadedPreparedExtensions) {
+			extensionPaths = options.preloadedPreparedExtensions.map(prepared => prepared.path);
+			extensionsResult = await logger.time(
+				"bindPreparedExtensions",
+				bindPreparedExtensions,
+				options.preloadedPreparedExtensions,
+				cwd,
+				eventBus,
+			);
+			for (const { path, error } of extensionsResult.errors) {
+				logger.error("Failed to bind extension", { path, error });
+			}
 		} else if (options.preloadedExtensionPaths) {
 			extensionPaths = options.preloadedExtensionPaths;
 			extensionsResult = await logger.time("loadExtensions", loadExtensions, extensionPaths, cwd, eventBus);
@@ -2244,6 +2293,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Forward the source-path list (NOT the loaded instances) so subagents
 		// rebuild their own session-scoped extensions.
 		toolSession.extensionPaths = extensionPaths;
+		toolSession.effectiveExtensionRoots = buildSessionExtensionRoots;
+		toolSession.preparedExtensions = extensionsResult.preparedExtensions;
 
 		// Load inline extensions from factories
 		if (inlineExtensions.length > 0) {
@@ -3040,36 +3091,38 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// LIVE: a `/agent` switch to a read-only persona drops write/edit from
 		// the active set, and a launch-time capture would keep the mutation
 		// permission true for the rest of the session (codex #3761853483). The
-		// function reads the SAME live enabled set `isToolGranted` uses — active
-		// top-level ∪ xd://-mounted — which every active-set mutation
-		// (createTools, applyActiveToolsByName, MCP refresh, plan/vibe/goal
-		// modes) funnels through the `setActiveToolNames` closure. Hashline
+		// function reads the live transactional active set through
+		// `isToolActive`, which every active-set mutation (createTools,
+		// applyActiveToolsByName, MCP refresh, plan/vibe/goal modes) funnels
+		// through the `setActiveToolNames` closure; `write` mounted only as
+		// the xd:// transport does not count (the deviceOnlyWrite check).
+		// Hashline
 		// `edit` stays advertised on Cursor (called as MCP; native StrReplace
 		// arrives as `editToolCall`), so the live checks cover both names; a
 		// read-only persona switch still denies on both because the persona's
 		// restricted list drops `edit` from the active set. The launch-requested
 		// list still decides the initial set.
 		//
-		// `editWasGranted` is the FLOOR: a Cursor-created session that granted
-		// `edit` at launch (but not `write`) keeps the mutation permission even
-		// if a persona restriction drops `edit` from the active set — the
-		// launch-requested list still recorded the grant, so the live set alone
-		// would drop it below what the session was given at launch (internal
-		// review, wave-22 P2). The floor is REVOCABLE: a persona switch that
-		// applies a tools list omitting both `write` and `edit` sets
-		// `personaDroppedMutation` (via the same `setActiveToolNames` closure
-		// that updates the live set), so a read-only persona takes the Cursor
-		// delete/download grant away even though the launch grant never entered
-		// the active set (codex #3762233472). Switching back to a persona with
-		// either mutating tool clears the flag and restores the floor. The
-		// floor does not weaken live revocation: a write-only session still
-		// loses the permission when `write` leaves the active set, because
-		// `editWasGranted` is false for it.
+		// `editWasGranted` lifts the edit predicate above the launched set: a
+		// Cursor-created session that granted `edit` at launch (but not `write`)
+		// answers mutation frames as long as `edit` is still active — but the
+		// grant is both ACTIVITY-GATED (a live switch that drops `edit` revokes
+		// it: `isToolActive("edit")` turns false) and REVOCABLE (a persona
+		// switch to a tools list omitting both `write` and `edit` sets
+		// `personaDroppedMutation` via the same `setActiveToolNames` closure
+		// that updates the live set), so it never pins the launch grant beyond
+		// the session's current capabilities (codex #3761853483,
+		// #3762233472). The transport-only `deviceOnlyWrite` state denies
+		// unconditionally: a mounted `write` used only to execute `xd://<tool>`
+		// calls must not license direct file deletion. The predicates are
+		// transactional and current: `Agent.state.tools` only commits after the
+		// prompt rebuild completes, and this closure revokes before the await,
+		// rolling back on failure.
 		const cursorCanMutateFiles = (): boolean =>
-			(editWasGranted && !personaDroppedMutation) ||
-			activeToolNames.has("write") ||
-			activeToolNames.has("edit") ||
-			toolSession.xdev?.mountedNames.has("write") === true;
+			(editWasGranted && !personaDroppedMutation && toolSession.isToolActive?.("edit") === true) ||
+			(toolSession.isToolActive?.("write") === true &&
+				(toolRegistry.has("write") || toolSession.xdev?.mountedNames.has("write") === true) &&
+				toolSession.deviceOnlyWrite !== true);
 
 		let writeRegistration: Promise<boolean> | undefined;
 		const ensureWriteRegistered = (): Promise<boolean> => {
@@ -3196,8 +3249,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		// Existing staged/device paths need write registered before active-set assembly.
 		// Deferred MCP also registers it now, but refresh activates it only after a server connects.
-		// xd:// mounts never register write: xdev state only exists when the session
-		// already granted a write tool (see createTools), so mounting rides that grant.
+		// xd:// mounts ride the session's write grant: createTools either saw a
+		// granted write tool or registered a device-only transport one for an
+		// explicit-list session that omitted it, so xdev state always implies one.
 		const hasDeferrableTools = Array.from(toolRegistry.values()).some(tool => tool.deferrable === true);
 		const planModeAvailable = settings.get("plan.enabled");
 		if (!restrictToolNames && (hasDeferrableTools || planModeAvailable || deferMCPDiscoveryForUI)) {
@@ -3322,8 +3376,31 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// affordances a launch `--agent` does (memory/auto-learn, AutoQA,
 			// Hub/IRC, MCP server guidance), so consult the session's live persona
 			// restriction in addition to the creation-time flag (codex #3763426057).
+			// The creation-time `restrictToolNames` flag must NOT suppress the
+			// affordances forever on its own: `applyAgentPersonaOptions` sets it
+			// for a launch `--agent` persona (its `tools:` list becomes the
+			// session policy), and leaving that persona (`restoreBaselineTools`
+			// clearing the live restriction) restores the unrestricted tool set —
+			// the rebuilt prompt must restore the affordances too (codex
+			// #3845551582). Decompose:
+			//   - `livePersonaRestricted` covers every post-construction build:
+			//     a live `/agent` switch's grant AND the launch persona's seeded
+			//     `personaToolRestriction` while it is active; leaving the
+			//     persona clears it and lifts the suppression.
+			//   - The FIRST build runs before `session` exists, so the seeded
+			//     restriction is not yet readable: a launch persona WITH its own
+			//     `tools:` list and NO CLI override (`personaCliToolOverride`)
+			//     will seed one, so keep the creation-time suppression for that
+			//     pre-construction window only.
+			//   - An explicit `--tools`/`--no-tools` (with or without `--agent`)
+			//     or a plain restricted session has no liftable persona grant:
+			//     the creation-time flag suppresses for the session's lifetime.
+			const launchPersonaLifts = options.personaName !== undefined && options.personaCliToolOverride !== true;
+			const launchPersonaSeedsRestriction = launchPersonaLifts && explicitlyRequestedToolNames !== undefined;
 			const livePersonaRestricted = session?.getPersonaToolRestriction?.() !== undefined;
-			const promptRestricted = restrictToolNames || livePersonaRestricted;
+			const promptRestricted =
+				livePersonaRestricted ||
+				(restrictToolNames && (!launchPersonaLifts || (launchPersonaSeedsRestriction && !hasSession)));
 			const memoryBackend = promptRestricted ? undefined : await resolveMemoryBackend(settings);
 			const memoryInstructions = memoryBackend
 				? await memoryBackend.buildDeveloperInstructions(agentDir, settings, session)
@@ -3438,6 +3515,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				),
 				taskIrcEnabled: !promptRestricted && isIrcEnabled(settings, options.taskDepth ?? 0),
 				autoQaEnabled: !promptRestricted && isAutoQaEnabled(settings),
+				writeTransportOnly:
+					toolSession.deviceOnlyWrite === true && toolSession.pendingFullWriteDescription !== true,
 				secretsEnabled,
 				workspaceTree: workspaceTreePromise,
 				includeWorkspaceTree,
@@ -3530,7 +3609,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			(explicitlyRequestedToolNameSet === undefined || explicitlyRequestedToolNameSet.has("read"));
 		const xdevWriteAvailable =
 			builtInRegistryToolNames.has("write") &&
-			(explicitlyRequestedToolNameSet === undefined || explicitlyRequestedToolNameSet.has("write"));
+			(explicitlyRequestedToolNameSet === undefined ||
+				explicitlyRequestedToolNameSet.has("write") ||
+				toolSession.deviceOnlyWrite === true);
 		const initialRequestedActiveToolNames = options.toolNames
 			? requestedActiveToolNames
 			: requestedActiveToolNames.filter(name => !defaultInactiveToolNames.has(name));
@@ -3610,8 +3691,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Partition the initial enabled set for the xd:// transport. Tool instances
 		// remain in the canonical map; only presentation names move between layers.
 		// Mounting requires both transport halves in the granted set (`read xd://`
-		// discovers, `write xd://<tool>` executes); a session without either keeps
-		// every tool top-level instead of auto-granting the missing transport.
+		// discovers, `write xd://<tool>` executes); explicit-list sessions granted
+		// `read` without `write` can use the device-only transport registered by
+		// createTools without surfacing it when no device needs it.
 		let baselineMountedToolNames: string[] | undefined;
 		if (toolSession.xdev) {
 			const topLevelToolNames: string[] = [];
@@ -3647,6 +3729,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						tool !== undefined && baselineReadAvailable && baselineWriteAvailable && isMountableUnderXdev(tool)
 					);
 				});
+			}
+			const deviceTransportNeeded =
+				initialToolNames.some(name => toolRegistry.get(name)?.deferrable === true) ||
+				toolSession.getPlanModeState?.()?.enabled === true;
+			if (deviceTransportNeeded && xdevWriteAvailable && !initialToolNames.includes("write")) {
+				initialToolNames.push("write");
 			}
 		}
 
@@ -3916,6 +4004,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// (defaulting to read/grep/glob).
 		const advisorToolSession: ToolSession = {
 			...toolSession,
+			// The primary may carry a dormant xd:// write transport. Advisors use
+			// their own configured tool slate, so a selected write is always full.
+			deviceOnlyWrite: undefined,
+			pendingFullWriteDescription: undefined,
 			get cwd() {
 				return sessionManager.getCwd();
 			},
@@ -3964,9 +4056,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Owned only when this session created the manager; subagents receive a
 		// parent's manager via `options.mcpManager` and MUST NOT disconnect it.
 		const ownedMcpManager = options.mcpManager ? undefined : mcpManager;
-		// A resumed session already has advisor turns on disk; without this its
-		// status-line cost total would restart at zero for the rest of the session.
-		const initialAdvisorCosts = await loadAdvisorTranscriptCosts(sessionManager.getSessionFile());
+		// Advisor spend recorded before this resume is restored off the critical
+		// path below (issue #9553): a large advisor transcript would otherwise
+		// block createAgentSession for tens of seconds while the whole file is
+		// streamed and parsed on the main thread.
 		session = new AgentSession({
 			codeModeState,
 			advisorWatchdogPrompt,
@@ -3982,8 +4075,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			planYolo: options.planYolo,
 			serviceTierByFamily: initialServiceTierByFamily,
 			sessionManager,
-			initialAdvisorCosts,
 			settings,
+			additionalExtensionPaths: options.additionalExtensionPaths,
+			extensionRoots: buildSessionExtensionRoots,
+			disableExtensionDiscovery: options.disableExtensionDiscovery,
 			autoApprove: options.autoApprove,
 			scoutAllowedBySpawnPolicy: isScoutSpawnable(
 				undefined,
@@ -4015,6 +4110,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					? new Set(explicitlyRequestedToolNames)
 					: undefined
 				: undefined,
+			// Residual CLI restriction for when the persona is LEFT: with an
+			// explicit `--tools`/`--no-tools` the baseline IS the CLI list (the
+			// persona frontmatter was NOT applied), so the restored active set is
+			// exactly the CLI grant — and late MCP/RPC/memory refreshes must not
+			// widen past it either (codex #3845551575). The residual therefore
+			// equals the CLI baseline. A persona-supplied restriction has no CLI
+			// grant behind it and lifts completely (undefined), restoring the
+			// pre-persona refresh behavior (codex #3819553918). Empty baseline
+			// (`--no-tools` with no allowed tools) = nothing can survive —
+			// undefined, since an empty set would filter EVERY late registration.
+			residualCliToolRestriction:
+				options.personaName && options.personaCliToolOverride && personaBaselineToolNames.length > 0
+					? new Set(personaBaselineToolNames)
+					: undefined,
 			baselineToolNames: options.personaName ? personaBaselineToolNames : undefined,
 			baselineMountedToolNames: options.personaName ? baselineMountedToolNames : undefined,
 			baselineLspEnabled: options.personaName ? baselineLspEnabled : undefined,
@@ -4073,6 +4182,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			presentationPinnedToolNames: explicitlyRequestedToolNameSet,
 			setActiveToolNames: setSessionActiveToolNames,
 			ensureWriteRegistered,
+			isDeviceOnlyWrite: () => toolSession.deviceOnlyWrite === true,
+			setDeviceOnlyWrite: enabled => {
+				toolSession.deviceOnlyWrite = enabled ? true : undefined;
+			},
+			setPendingFullWriteDescription: enabled => {
+				toolSession.pendingFullWriteDescription = enabled ? true : undefined;
+			},
 			ensureGoalRegistered,
 			registerBuiltInTools,
 			getMcpServerInstructions: mcpManager
@@ -4115,6 +4231,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			titleSystemPrompt: options.titleSystemPrompt,
 		});
 		hasSession = true;
+		// Backfill the resumed advisor spend without blocking startup: the scan
+		// runs after the session is live, so `--resume` no longer scales with the
+		// advisor transcript size (issue #9553).
+		session.beginInitialAdvisorCostRestore();
 		// Extension factories normally register tools before session construction,
 		// but Pi-compatible extensions may discover them asynchronously from a
 		// session_start handler. Install those late registrations into the live
@@ -4190,7 +4310,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						builtInRegistryToolNames.has("read") &&
 						builtInRegistryToolNames.has("write") &&
 						enabled.includes("read") &&
-						enabled.includes("write") &&
+						(enabled.includes("write") || toolSession.deviceOnlyWrite === true) &&
 						isMountableUnderXdev(liveTool);
 					const nextMounted = shouldMount
 						? mounted.includes(name)

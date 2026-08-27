@@ -21,6 +21,7 @@ import type {
 import type { postmortem } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "../advisor";
 import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager } from "../async";
+import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings, SkillsSettings } from "../config/settings";
@@ -125,6 +126,16 @@ export interface AgentSessionConfig {
 	codeModeState?: { namespacesInfo?: unknown };
 	sessionManager: SessionManager;
 	settings: Settings;
+	/**
+	 * Live extension-root policy inherited from the owning session. Subagents use
+	 * this provider so explicit roots, discovery mode, configured roots, and
+	 * provenance survive recursive task discovery.
+	 */
+	extensionRoots?: () => EffectiveExtensionRoots;
+	/** Raw SDK `additionalExtensionPaths`; used when no inherited root provider exists. */
+	additionalExtensionPaths?: readonly string[];
+	/** Mirror of `disableExtensionDiscovery`; used when no inherited root provider exists. */
+	disableExtensionDiscovery?: boolean;
 	/** Whether the session spawn policy permits the read-only `scout` subagent. Defaults to true. */
 	scoutAllowedBySpawnPolicy?: boolean;
 	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
@@ -155,6 +166,17 @@ export interface AgentSessionConfig {
 	 * extension loading for personas — codex #3821198710).
 	 */
 	personaToolRestriction?: Set<string>;
+	/**
+	 * Residual CLI tool restriction that survives leaving the launch persona:
+	 * when the launch combined `--agent` with an explicit `--tools`/
+	 * `--no-tools` (the `personaCliToolOverride` baseline), the CLI grant —
+	 * minus any tools the persona itself granted — must stay enforced after
+	 * `restoreBaselineTools` drops the persona restriction, or a later MCP /
+	 * RPC / memory refresh could auto-activate tools past the explicit CLI
+	 * grant (codex #3845551575). `undefined` = no residual restriction (a
+	 * persona-supplied restriction lifts completely when the persona is left).
+	 */
+	residualCliToolRestriction?: Set<string>;
 	/** Baseline tool set captured at creation (without the persona's `tools:` restriction). */
 	baselineToolNames?: string[];
 	/**
@@ -244,6 +266,12 @@ export interface AgentSessionConfig {
 	setActiveToolNames?: (names: Iterable<string>, droppedMutation?: boolean, droppedEdit?: boolean) => void;
 	/** Registers the write transport when runtime xdev mounts first need it. */
 	ensureWriteRegistered?: () => Promise<boolean>;
+	/** Reports whether the registered write tool is currently transport-only. */
+	isDeviceOnlyWrite?: () => boolean;
+	/** Switches the registered write tool between transport-only and full access. */
+	setDeviceOnlyWrite?: (enabled: boolean) => void;
+	/** Previews the full-write description without changing execution access. */
+	setPendingFullWriteDescription?: (enabled: boolean) => void;
 	/** Registers the hidden `goal` tool when goal mode is enabled at runtime. */
 	ensureGoalRegistered?: () => Promise<boolean>;
 	/**
@@ -274,8 +302,6 @@ export interface AgentSessionConfig {
 	sideStreamFn?: StreamFn;
 	/** Stream wrapper for advisor requests. */
 	advisorStreamFn?: StreamFn;
-	/** Advisor spend already recorded for the session being opened, restored on resume. */
-	initialAdvisorCosts?: ReadonlyMap<string, number>;
 	/** Prefer websocket transport for OpenAI Codex requests when supported. */
 	preferWebsockets?: boolean;
 	/** Codex saved-reset coordinator; defaults to the process-wide singleton so concurrent sessions can't double-spend. Inject a fresh one in tests. */

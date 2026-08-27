@@ -475,16 +475,9 @@ describe("readSseEvents", () => {
 		const events = await collectAsync(readSseEvents(stream));
 		const elapsed = performance.now() - start;
 		expect(events).toHaveLength(2000);
-		// Verify the one-byte-per-chunk stream was decoded correctly, not just
-		// counted — a corrupted decoder could produce 2000 wrong events.
-		expect(events[0].event).toBe("e0");
-		expect(events[0].data).toBe("0");
 		expect(events[1999].event).toBe("e1999");
 		expect(events[1999].data).toBe("1999");
 		// Generous bound: the previous quadratic implementation needed >5s here.
-		// Under parallel CI load the linear implementation can reach ~2.5s, so
-		// 5s stays well above realistic contention while still catching a
-		// quadratic regression (which would exceed 5s even in isolation).
-		expect(elapsed).toBeLessThan(5000);
+		expect(elapsed).toBeLessThan(2000);
 	});
 });

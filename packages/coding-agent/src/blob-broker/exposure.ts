@@ -248,6 +248,10 @@ async function spawnUrlTunnel(
 	let scanned = 0;
 	let baseUrl: string | undefined;
 	while (Date.now() < deadline) {
+		// Capture exit before reading: a process observed dead here cannot write
+		// after the read below, so that read sees its final output. Checking exit
+		// after the read races a fast tunnel that prints its URL and then exits.
+		const exitCode = proc.exitCode;
 		let text = "";
 		try {
 			text = await Bun.file(logPath).text();
@@ -271,8 +275,8 @@ async function spawnUrlTunnel(
 				return { proc, baseUrl };
 			}
 		}
-		if (proc.exitCode !== null) {
-			throw new Error(`${argv[0]} exited with code ${proc.exitCode} before reporting a tunnel URL`);
+		if (exitCode !== null) {
+			throw new Error(`${argv[0]} exited with code ${exitCode} before reporting a tunnel URL`);
 		}
 		await Bun.sleep(150);
 	}

@@ -202,7 +202,7 @@ All providers start from the same neutral wire schema — `toolWireSchema(tool)`
 
 - **Schemas**: `sanitizeSchemaForOpenAIResponses` + `adaptSchemaForStrict`. Supports function tools, freeform **custom tools**, and native **computer tools** (`model.supportsComputerUse`). Wire: flat `{ type: "function", name, description, parameters, strict? }`.
 - **Streaming**: `response.output_item.added` → `response.function_call_arguments.delta` / `response.custom_tool_call_input.delta` → `response.output_item.done`. Tool call ids are composite `callId|itemId` (`normalizeResponsesToolCallId`).
-- **Results**: input items of `type: "function_call_output"` with `call_id` (the `callId` half of the composite). Stateful `previous_response_id` chaining across turns.
+- **Results**: `function_call_output` and `custom_tool_call_output` items pair with calls by `call_id` (the `callId` half of the composite). Their `output` is either a string or an array of canonical `input_text` and `input_image` blocks. Vision-capable models keep tool-result images inside that array instead of creating synthetic user messages; models without image input receive a text placeholder. Auth-gateway parsing also accepts legacy `output_text`, `text`, and `refusal` blocks, decodes inline data-image URLs into image content, and retains remote image URLs or OpenAI image file IDs as references. File IDs require a Responses-compatible upstream because other provider transports cannot resolve them. `input_file` remains supported for request messages but is rejected in tool outputs until canonical tool results can replay its bytes and references losslessly. Stateful `previous_response_id` chaining works across turns.
 
 ### Google Gemini / Vertex (`providers/google-shared.ts`, `google.ts`)
 
@@ -225,8 +225,8 @@ All providers start from the same neutral wire schema — `toolWireSchema(tool)`
 | Schema normalizer | strict allowlist + budgets | `adaptSchemaForStrict` | `sanitizeSchemaForOpenAIResponses` | `normalizeSchemaForGoogle` / CCA | raw JSON schema |
 | Args streaming | JSON string fragments | JSON string fragments (MiniMax: objects) | JSON string fragments | complete object, no fragments | JSON string fragments |
 | Call ids | native | native (+Mistral 9-char, OpenAI 40-char rules) | composite `callId\|itemId` | synthesized; Vertex strips | native |
-| Result encoding | `user` + `tool_result` blocks | `role: "tool"` messages | `function_call_output` items | `user` + `functionResponse` parts, single message | `user` + grouped `toolResult` array |
-| Images in results | embedded; hoisted on error | placeholder partition | embedded or partitioned | Gemini 3+ embedded, else trailing user turn | embedded |
+| Result encoding | `user` + `tool_result` blocks | `role: "tool"` messages | function/custom output items | `user` + `functionResponse` parts, single message | `user` + grouped `toolResult` array |
+| Images in results | embedded; hoisted on error | placeholder partition | inside output arrays; placeholder without image input | Gemini 3+ embedded, else trailing user turn | embedded |
 | Parallel calls | native | native | native | native | native |
 
 ### Strict tools lifecycle

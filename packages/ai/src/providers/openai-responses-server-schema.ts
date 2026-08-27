@@ -34,23 +34,24 @@ const plainTextSchema = type({
 
 const inputImageBlockSchema = type({
 	type: "'input_image'",
-	"detail?": "'auto' | 'low' | 'high' | 'original'",
-	"image_url?": "string",
-	"file_id?": "string",
+	"detail?": "'auto' | 'low' | 'high' | 'original' | null",
+	"image_url?": "string | null",
+	"file_id?": "string | null",
 }).narrow((v, ctx) => {
 	return (
-		typeof v.image_url === "string" ||
-		typeof v.file_id === "string" ||
+		(typeof v.image_url === "string" && v.image_url.length > 0) ||
+		(typeof v.file_id === "string" && v.file_id.length > 0) ||
 		ctx.mustBe("at least one of `image_url` or `file_id` for input_image")
 	);
 });
 
 const inputFileBlockSchema = type({
 	type: "'input_file'",
-	"file_id?": "string",
-	"filename?": "string",
-	"file_data?": "string",
-	"file_url?": "string",
+	"detail?": "'low' | 'high'",
+	"file_id?": "string | null",
+	"filename?": "string | null",
+	"file_data?": "string | null",
+	"file_url?": "string | null",
 });
 
 const outputTextSchema = type({
@@ -76,6 +77,15 @@ const reasoningTextSchema = type({
 const inputContentBlockSchema = inputTextSchema.or(plainTextSchema).or(inputImageBlockSchema).or(inputFileBlockSchema);
 
 const outputContentBlockSchema = outputTextSchema.or(plainTextSchema).or(outputRefusalSchema);
+
+// The Responses API defines multimodal function output arrays in terms of
+// input text and image content. Keep output text/refusal blocks for
+// compatibility with older Codex clients.
+const functionCallOutputContentBlockSchema = inputTextSchema
+	.or(plainTextSchema)
+	.or(inputImageBlockSchema)
+	.or(outputTextSchema)
+	.or(outputRefusalSchema);
 
 // ─── Input items ────────────────────────────────────────────────────────────
 
@@ -118,8 +128,8 @@ const functionCallItemSchema = type({
 const functionCallOutputItemSchema = type({
 	type: "'function_call_output'",
 	call_id: "string >= 1",
-	// Codex CLI replays multimodal tool results in array form (text + refusal).
-	"output?": type("string").or(outputContentBlockSchema.array()),
+	// Function outputs may carry text or image input blocks.
+	"output?": type("string").or(functionCallOutputContentBlockSchema.array()),
 });
 
 const customToolCallItemSchema = type({
@@ -135,7 +145,7 @@ const customToolCallItemSchema = type({
 const customToolCallOutputItemSchema = type({
 	type: "'custom_tool_call_output'",
 	call_id: "string >= 1",
-	output: "string",
+	output: type("string").or(functionCallOutputContentBlockSchema.array()),
 });
 
 const computerSafetyCheckSchema = type({
