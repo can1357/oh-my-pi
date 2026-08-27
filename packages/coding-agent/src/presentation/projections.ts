@@ -170,6 +170,10 @@ function limitFactText(meta: LimitFactMeta): string {
 			return `[Inline output capped at ${formatBytes(meta.value)}]`;
 		case "result_count":
 			return `[${meta.value} results limit reached. Use limit=${meta.suggestedValue} for more]`;
+		case "display_count":
+			return `[${meta.droppedItems} display${meta.droppedItems === 1 ? "" : "s"} dropped: item limit of ${meta.value} reached]`;
+		case "display_bytes":
+			return `[Display output dropped: ${formatBytes(meta.droppedBytes)} over the ${formatBytes(meta.value)} budget]`;
 	}
 }
 

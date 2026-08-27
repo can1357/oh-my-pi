@@ -106,7 +106,22 @@ export type LimitFactMeta =
 	 * cannot disagree with the budget the producer would actually honour if the
 	 * caller took the hint.
 	 */
-	| { readonly limit: "result_count"; readonly value: number; readonly suggestedValue: number };
+	| { readonly limit: "result_count"; readonly value: number; readonly suggestedValue: number }
+	/**
+	 * A retained-record display-item budget (`LiveToolPresentationRecord`'s
+	 * item-count cap on `ToolPresentationRecord.displays`) that dropped one or
+	 * more `display_output` items entirely — unlike stream `truncation`, a
+	 * dropped display has no partial/head-window form to keep, so this is the
+	 * only structural signal that the item existed at all.
+	 */
+	| { readonly limit: "display_count"; readonly value: number; readonly droppedItems: number }
+	/**
+	 * The same retained-record budget's serialized-byte cap. Reported
+	 * separately from `display_count` (mirroring `column`/`inline_bytes`'s own
+	 * split) because either cap can trip independently — a single oversized
+	 * display trips only this one, many small displays trip only the count.
+	 */
+	| { readonly limit: "display_bytes"; readonly value: number; readonly droppedBytes: number };
 
 /** One diagnostic attributed to a path. */
 export interface DiagnosticFactEntry {

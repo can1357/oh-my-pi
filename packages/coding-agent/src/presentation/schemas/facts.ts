@@ -69,6 +69,20 @@ export const limitFactMetaSchema = z.union([
 			suggestedValue: z.number(),
 		})
 		.readonly(),
+	z
+		.strictObject({
+			limit: z.literal("display_count"),
+			value: z.number(),
+			droppedItems: z.number(),
+		})
+		.readonly(),
+	z
+		.strictObject({
+			limit: z.literal("display_bytes"),
+			value: z.number(),
+			droppedBytes: z.number(),
+		})
+		.readonly(),
 ]);
 
 export const diagnosticFactEntrySchema = z

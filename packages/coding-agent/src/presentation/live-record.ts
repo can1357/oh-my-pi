@@ -74,6 +74,20 @@ import { utf8PrefixWithin } from "./utf8";
  */
 export const LIVE_RECORD_HEAD_WINDOW_BYTES = 1024 * 1024; // 1 MiB
 
+/**
+ * Bound on how many {@link RetainedDisplay} items {@link LiveToolPresentationRecord}
+ * retains for one call, and on their combined serialized-byte size.
+ *
+ * Unlike the stream head window, a display has no partial/windowed form: a
+ * `ToolDisplayItem.value` is an arbitrary JSON tree, so a dropped display is
+ * dropped whole, never head-cut. Either cap tripping independently — many
+ * small displays exhausting the count, or one oversized display alone
+ * exhausting the bytes — drops that display and records a `limit` fact
+ * (`display_count`/`display_bytes`) so the omission is structural, not silent.
+ */
+export const LIVE_RECORD_DISPLAY_ITEM_LIMIT = 256;
+export const LIVE_RECORD_DISPLAY_BUDGET_BYTES = 1024 * 1024; // 1 MiB
+
 export class LiveToolPresentationRecord {
 	#stream: AccumulatingStream | undefined;
 	#lastSequence: number | undefined;
@@ -92,9 +106,20 @@ export class LiveToolPresentationRecord {
 	 */
 	#headWindowExhausted = false;
 	readonly #headWindowBytes: number;
+	readonly #displayItemLimit: number;
+	readonly #displayBudgetBytes: number;
+	/** Serialized bytes of every display retained so far, against `#displayBudgetBytes`. */
+	#retainedDisplayBytes = 0;
+	#droppedDisplayItems = 0;
+	#droppedDisplayBytes = 0;
 
-	constructor(headWindowBytes: number = LIVE_RECORD_HEAD_WINDOW_BYTES) {
+	constructor(
+		headWindowBytes: number = LIVE_RECORD_HEAD_WINDOW_BYTES,
+		displayBudget?: { readonly itemLimit?: number; readonly maxBytes?: number },
+	) {
 		this.#headWindowBytes = headWindowBytes;
+		this.#displayItemLimit = displayBudget?.itemLimit ?? LIVE_RECORD_DISPLAY_ITEM_LIMIT;
+		this.#displayBudgetBytes = displayBudget?.maxBytes ?? LIVE_RECORD_DISPLAY_BUDGET_BYTES;
 	}
 
 	/**
@@ -132,14 +157,27 @@ export class LiveToolPresentationRecord {
 			case "attachment":
 				this.#attachments.push(deepFreeze(event.attachment));
 				return;
-			case "display_output":
+			case "display_output": {
 				// `atByte` is the byte cursor at fold time — 0 when no stream has
 				// opened yet (a display-only call with no terminal output before
 				// it), otherwise the running cursor `#advanceStream` maintains.
-				// Never subject to the head-window cap: displays are items, not
-				// bytes, so every one folded here survives to `finish()`.
+				// Not subject to the head-window byte cap (displays are items, not
+				// stream bytes) but bounded by its own item-count/serialized-byte
+				// budget below: unlike the stream, a display has no partial form,
+				// so a budget hit drops it whole and is surfaced via `finish()`'s
+				// `limit` fact rather than silently retaining an unbounded tree.
+				const displayBytes = byteLengthOf(JSON.stringify(event.display));
+				const overCount = this.#displays.length >= this.#displayItemLimit;
+				const overBytes = this.#retainedDisplayBytes + displayBytes > this.#displayBudgetBytes;
+				if (overCount || overBytes) {
+					this.#droppedDisplayItems++;
+					this.#droppedDisplayBytes += displayBytes;
+					return;
+				}
+				this.#retainedDisplayBytes += displayBytes;
 				this.#displays.push(deepFreeze({ atByte: byteOffset(this.#stream?.cursor ?? 0), display: event.display }));
 				return;
+			}
 			// Representable live, unrepresentable in the record (see the class doc).
 			case "live_terminal_attached":
 				return;
@@ -177,11 +215,13 @@ export class LiveToolPresentationRecord {
 	 * "head"`), recomputed from the live totals on every call rather than
 	 * folded once and left to go stale, so every snapshot — mid-flight or
 	 * final — reports the truest totals known at the moment it was taken,
-	 * exactly like `endByte` above.
+	 * exactly like `endByte` above. The same recomputation applies to the
+	 * display-budget `limit` facts `#displayLimitFacts` appends.
 	 */
 	finish(): ToolPresentationRecord {
 		const stream = this.#stream;
 		const truncationFact = this.#retentionTruncationFact(stream);
+		const limitFacts = this.#displayLimitFacts();
 		return Object.freeze<ToolPresentationRecord>({
 			version: PRESENTATION_VERSION,
 			...(stream === undefined
@@ -195,7 +235,11 @@ export class LiveToolPresentationRecord {
 							gaps: Object.freeze([...stream.gaps]),
 						}),
 					}),
-			facts: Object.freeze(truncationFact === undefined ? [...this.#facts] : [...this.#facts, truncationFact]),
+			facts: Object.freeze([
+				...this.#facts,
+				...(truncationFact === undefined ? [] : [truncationFact]),
+				...limitFacts,
+			]),
 			attachments: Object.freeze([...this.#attachments]),
 			...(this.#displays.length === 0 ? {} : { displays: Object.freeze([...this.#displays]) }),
 		});
@@ -245,6 +289,42 @@ export class LiveToolPresentationRecord {
 			},
 		};
 		return deepFreeze(fact);
+	}
+
+	/**
+	 * The display-budget `limit` facts for whichever caps actually dropped a
+	 * display, or `[]` when neither has tripped. Recomputed from the live
+	 * `#droppedDisplayItems`/`#droppedDisplayBytes` totals on every call — see
+	 * {@link finish}'s doc comment for why this must stay fresh rather than be
+	 * folded into `#facts` once. Both facts can be present at once (a mixed
+	 * run of small drops eventually followed by one oversized drop).
+	 */
+	#displayLimitFacts(): readonly ToolFact[] {
+		if (this.#droppedDisplayItems === 0) return [];
+		const facts: ToolFact[] = [];
+		if (this.#displays.length >= this.#displayItemLimit) {
+			facts.push(
+				deepFreeze({
+					id: factId("live-record:display-count-limit"),
+					kind: "limit",
+					meta: { limit: "display_count", value: this.#displayItemLimit, droppedItems: this.#droppedDisplayItems },
+				}),
+			);
+		}
+		if (this.#retainedDisplayBytes + this.#droppedDisplayBytes > this.#displayBudgetBytes) {
+			facts.push(
+				deepFreeze({
+					id: factId("live-record:display-bytes-limit"),
+					kind: "limit",
+					meta: {
+						limit: "display_bytes",
+						value: this.#displayBudgetBytes,
+						droppedBytes: this.#droppedDisplayBytes,
+					},
+				}),
+			);
+		}
+		return facts;
 	}
 
 	/**

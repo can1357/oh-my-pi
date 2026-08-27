@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { ToolDisplayOutput, ToolFactBody, ToolPresentationEvent } from "@oh-my-pi/pi-agent-core/presentation";
 import {
+	byteLengthOf,
 	byteOffset,
 	createLiveTerminalBinding,
 	factId,
@@ -8,7 +9,7 @@ import {
 	streamId,
 	ToolPresentationStream,
 } from "@oh-my-pi/pi-agent-core/presentation";
-import { LiveToolPresentationRecord, ToolPresentationRecordContinuityError } from "../src/presentation/live-record";
+import { LIVE_RECORD_HEAD_WINDOW_BYTES, LiveToolPresentationRecord, ToolPresentationRecordContinuityError } from "../src/presentation/live-record";
 
 /**
  * {@link LiveToolPresentationRecord} in isolation — the accumulator
@@ -227,6 +228,78 @@ describe("LiveToolPresentationRecord", () => {
 			{ atByte: byteOffset(0), display: displayA },
 			{ atByte: byteOffset(20), display: displayB },
 		]);
+	});
+
+	it("drops a display once the item-count budget is exhausted, recording a structural display_count limit fact", () => {
+		const acc = new LiveToolPresentationRecord(LIVE_RECORD_HEAD_WINDOW_BYTES, { itemLimit: 2 });
+		const displayA: ToolDisplayOutput = { kind: "sequence", items: [{ kind: "json", value: { n: 1 } }] };
+		const displayB: ToolDisplayOutput = { kind: "sequence", items: [{ kind: "json", value: { n: 2 } }] };
+		const displayC: ToolDisplayOutput = { kind: "sequence", items: [{ kind: "json", value: { n: 3 } }] };
+
+		acc.fold({ type: "display_output", display: displayA });
+		acc.fold({ type: "display_output", display: displayB });
+		acc.fold({ type: "display_output", display: displayC });
+
+		const record = acc.finish();
+		expect(record.displays).toEqual([
+			{ atByte: byteOffset(0), display: displayA },
+			{ atByte: byteOffset(0), display: displayB },
+		]);
+		expect(record.facts).toEqual([
+			{
+				id: factId("live-record:display-count-limit"),
+				kind: "limit",
+				meta: { limit: "display_count", value: 2, droppedItems: 1 },
+			},
+		]);
+	});
+
+	it("drops an oversized display once the byte budget is exhausted, recording a structural display_bytes limit fact", () => {
+		const smallDisplay: ToolDisplayOutput = { kind: "sequence", items: [{ kind: "json", value: { n: 1 } }] };
+		const smallBytes = byteLengthOf(JSON.stringify(smallDisplay));
+		const secondDisplay: ToolDisplayOutput = { kind: "sequence", items: [{ kind: "json", value: { n: 2 } }] };
+		const secondBytes = byteLengthOf(JSON.stringify(secondDisplay));
+		// Budget fits exactly the first display and nothing more.
+		const acc = new LiveToolPresentationRecord(LIVE_RECORD_HEAD_WINDOW_BYTES, { maxBytes: smallBytes });
+
+		acc.fold({ type: "display_output", display: smallDisplay });
+		acc.fold({ type: "display_output", display: secondDisplay });
+
+		const record = acc.finish();
+		expect(record.displays).toEqual([{ atByte: byteOffset(0), display: smallDisplay }]);
+		expect(record.facts).toEqual([
+			{
+				id: factId("live-record:display-bytes-limit"),
+				kind: "limit",
+				meta: { limit: "display_bytes", value: smallBytes, droppedBytes: secondBytes },
+			},
+		]);
+	});
+
+	it("records both display_count and display_bytes limit facts when a run trips each budget independently", () => {
+		const tiny: ToolDisplayOutput = { kind: "sequence", items: [{ kind: "json", value: { n: 1 } }] };
+		const tinyBytes = byteLengthOf(JSON.stringify(tiny));
+		const huge: ToolDisplayOutput = { kind: "sequence", items: [{ kind: "json", value: { blob: "x".repeat(1000) } }] };
+		// Item cap exhausted by the two `tiny` folds; byte cap too small for `huge` alone.
+		const acc = new LiveToolPresentationRecord(LIVE_RECORD_HEAD_WINDOW_BYTES, {
+			itemLimit: 2,
+			maxBytes: tinyBytes * 2 + 10,
+		});
+
+		acc.fold({ type: "display_output", display: tiny });
+		acc.fold({ type: "display_output", display: tiny });
+		acc.fold({ type: "display_output", display: huge });
+
+		const record = acc.finish();
+		expect(record.displays).toEqual([
+			{ atByte: byteOffset(0), display: tiny },
+			{ atByte: byteOffset(0), display: tiny },
+		]);
+		const limitKinds = record.facts
+			.filter((fact): fact is ToolFactBody & { kind: "limit" } => fact.kind === "limit")
+			.map(fact => fact.meta.limit);
+		expect(limitKinds).toContain("display_count");
+		expect(limitKinds).toContain("display_bytes");
 	});
 
 	it("omits displays entirely when none were folded — mirrors the omitted stream field", () => {
