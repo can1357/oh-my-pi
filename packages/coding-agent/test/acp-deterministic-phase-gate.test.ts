@@ -8,7 +8,7 @@ import { agentLoop } from "@oh-my-pi/pi-agent-core/agent-loop";
 import { ToolPresentationStream } from "@oh-my-pi/pi-agent-core/presentation";
 import type { AgentContext, AgentEvent, AgentLoopConfig, ToolCallContext } from "@oh-my-pi/pi-agent-core/types";
 import type { Message, Model } from "@oh-my-pi/pi-ai";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -133,7 +133,7 @@ class LoopBackedAcpSession {
 	constructor(
 		cwd: string,
 		private readonly tools: AgentTool[],
-		private readonly mock: ReturnType<typeof createMockModel>,
+		private readonly mock: MockModel,
 	) {
 		this.sessionManager = SessionManager.inMemory(cwd);
 		this.sessionId = this.sessionManager.getSessionId();
