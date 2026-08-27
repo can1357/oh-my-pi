@@ -8,21 +8,17 @@
  * ACP path may touch this module.
  *
  * Each call gets one accumulator: process text under an explicit head-window
- * cap, declared displays in arrival order, and human-audience facts.
+ * cap, displays pre-rendered at fold time in arrival order under the journal's
+ * centralized item/byte budgets, and human-audience facts.
  * `snapshotText()` composes `[stream.text, …displays, …facts]`, approximating
  * `renderTuiPresentation`'s body-then-facts ordering; outcome/status rendering
  * deliberately stays with each consumer's end-of-call path (`settled` events
  * are not folded).
  */
-import type { ToolDisplayOutput, ToolFact, ToolPresentationEvent } from "@oh-my-pi/pi-agent-core/presentation";
+import type { ToolFact, ToolPresentationEvent } from "@oh-my-pi/pi-agent-core/presentation";
 import { byteLengthOf } from "@oh-my-pi/pi-agent-core/presentation";
-import {
-	factsFor,
-	outputSegmentSeparator,
-	renderFact,
-	renderToolOutputSegments,
-	type ToolOutputSegment,
-} from "../presentation/projections";
+import { LIVE_RECORD_DISPLAY_BUDGET_BYTES, LIVE_RECORD_DISPLAY_ITEM_LIMIT } from "../presentation/live-record";
+import { factsFor, outputSegmentSeparator, renderDisplayOutput, renderFact } from "../presentation/projections";
 import { utf8PrefixWithin } from "../presentation/utf8";
 
 /**
@@ -43,11 +39,25 @@ export class ToolPresentationDisplayFold {
 	// Bytes dropped once the head window filled; latched on the FIRST dropped
 	// byte so the retained head stays a contiguous prefix of the stream.
 	#elidedBytes = 0;
-	readonly #displays: ToolDisplayOutput[] = [];
+	// Displays are pre-rendered at fold time and bounded by the journal's
+	// centralized display budgets: the projection caps each JSON value, and
+	// the item/byte budgets cap the call. Retaining raw `ToolDisplayOutput`
+	// trees instead would grow without bound on a runaway eval `display()`
+	// and make every later snapshotText() re-serialize all of them again.
+	readonly #displayTexts: string[] = [];
+	#displayTextBytes = 0;
+	#droppedDisplays = 0;
+	readonly #displayItemLimit: number;
+	readonly #displayBudgetBytes: number;
 	readonly #facts: ToolFact[] = [];
 
-	constructor(headWindowBytes = PRESENTATION_FOLD_HEAD_WINDOW_BYTES) {
+	constructor(
+		headWindowBytes = PRESENTATION_FOLD_HEAD_WINDOW_BYTES,
+		displayBudget?: { readonly itemLimit?: number; readonly maxBytes?: number },
+	) {
 		this.#headWindowBytes = headWindowBytes;
+		this.#displayItemLimit = displayBudget?.itemLimit ?? LIVE_RECORD_DISPLAY_ITEM_LIMIT;
+		this.#displayBudgetBytes = displayBudget?.maxBytes ?? LIVE_RECORD_DISPLAY_BUDGET_BYTES;
 	}
 
 	/** Fold one presentation delta. Lifecycle/attachment arms are deliberate no-ops. */
@@ -62,9 +72,19 @@ export class ToolPresentationDisplayFold {
 			case "fact":
 				this.#facts.push(event.fact);
 				break;
-			case "display_output":
-				this.#displays.push(event.display);
+			case "display_output": {
+				const text = renderDisplayOutput(event.display);
+				const textBytes = byteLengthOf(text);
+				const overCount = this.#displayTexts.length >= this.#displayItemLimit;
+				const overBytes = this.#displayTextBytes + textBytes > this.#displayBudgetBytes;
+				if (overCount || overBytes) {
+					this.#droppedDisplays++;
+					break;
+				}
+				this.#displayTexts.push(text);
+				this.#displayTextBytes += textBytes;
 				break;
+			}
 			case "started":
 			case "settled":
 			case "attachment":
@@ -78,7 +98,11 @@ export class ToolPresentationDisplayFold {
 	/** Whether nothing observable has been folded yet (no snapshot worth pushing). */
 	isEmpty(): boolean {
 		return (
-			this.#text.length === 0 && this.#elidedBytes === 0 && this.#displays.length === 0 && this.#facts.length === 0
+			this.#text.length === 0 &&
+			this.#elidedBytes === 0 &&
+			this.#displayTexts.length === 0 &&
+			this.#droppedDisplays === 0 &&
+			this.#facts.length === 0
 		);
 	}
 
@@ -87,16 +111,25 @@ export class ToolPresentationDisplayFold {
 	 * …facts]`, human-audience facts only — mirroring `renderTuiPresentation`.
 	 */
 	snapshotText(): string {
-		const segments: ToolOutputSegment[] = [];
-		if (this.#text.length > 0) segments.push({ kind: "process", text: this.#text });
-		for (const display of this.#displays) segments.push({ kind: "display", display });
-		let rendered = renderToolOutputSegments(segments);
+		let rendered = "";
+		const pushSegment = (text: string): void => {
+			if (text.length === 0) return;
+			if (rendered.length > 0) rendered += outputSegmentSeparator(rendered);
+			rendered += text;
+		};
+		pushSegment(this.#text);
+		for (const text of this.#displayTexts) pushSegment(text);
 		const factLines = factsFor(this.#facts, "human")
 			.map(fact => renderFact(fact).text)
 			.filter(text => text.length > 0);
 		if (this.#elidedBytes > 0) {
 			factLines.push(
 				`[…output truncated at the ${this.#headWindowBytes}-byte head window: ${this.#elidedBytes} bytes not shown…]`,
+			);
+		}
+		if (this.#droppedDisplays > 0) {
+			factLines.push(
+				`[…${this.#droppedDisplays} display output${this.#droppedDisplays === 1 ? "" : "s"} over the display budget not shown…]`,
 			);
 		}
 		if (factLines.length > 0) {

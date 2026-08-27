@@ -27,6 +27,7 @@ import {
 	ToolPresentationDisplayFold,
 } from "@oh-my-pi/pi-coding-agent/modes/tool-presentation-fold";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { renderDisplayOutput } from "@oh-my-pi/pi-coding-agent/presentation/projections";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 
 /** Card result shape accepted by ToolExecutionComponent.updateResult. */
@@ -226,6 +227,38 @@ describe("ToolPresentationDisplayFold head-window cap", () => {
 		// Latched: later chunks keep counting as elided, never re-enter the head.
 		producer.appendTerminal("more");
 		expect(foldEvents(events, 16)).toContain("8 bytes not shown");
+	});
+
+	it("drops displays over the item budget and marks the omission in the snapshot", () => {
+		const fold = new ToolPresentationDisplayFold(PRESENTATION_FOLD_HEAD_WINDOW_BYTES, { itemLimit: 1 });
+		const events: ToolPresentationEvent[] = [];
+		const producer = new ToolPresentationStream(streamId("display-count"), event => events.push(event));
+		producer.declareDisplay({ kind: "sequence", items: [{ kind: "json", value: { kept: 1 } }] });
+		producer.declareDisplay({ kind: "sequence", items: [{ kind: "json", value: { dropped: 2 } }] });
+		producer.declareDisplay({ kind: "sequence", items: [{ kind: "json", value: { dropped: 3 } }] });
+		for (const event of events) fold.append(event);
+
+		const text = fold.snapshotText();
+		expect(text).toContain('"kept": 1');
+		expect(text).not.toContain("dropped");
+		expect(text).toContain("2 display outputs over the display budget not shown");
+	});
+
+	it("drops displays over the rendered-byte budget instead of retaining them", () => {
+		const kept = { kind: "sequence", items: [{ kind: "json", value: { kept: 1 } }] } as const;
+		const keptBytes = Buffer.byteLength(renderDisplayOutput(kept), "utf-8");
+		// Budget fits exactly the first display and nothing more.
+		const fold = new ToolPresentationDisplayFold(PRESENTATION_FOLD_HEAD_WINDOW_BYTES, { maxBytes: keptBytes });
+		const events: ToolPresentationEvent[] = [];
+		const producer = new ToolPresentationStream(streamId("display-bytes"), event => events.push(event));
+		producer.declareDisplay(kept);
+		producer.declareDisplay({ kind: "sequence", items: [{ kind: "json", value: { oversized: "x".repeat(64) } }] });
+		for (const event of events) fold.append(event);
+
+		const text = fold.snapshotText();
+		expect(text).toContain('"kept": 1');
+		expect(text).not.toContain("oversized");
+		expect(text).toContain("1 display output over the display budget not shown");
 	});
 
 	it("defaults to the 1 MiB live-display head window", () => {
