@@ -33,6 +33,7 @@ import type {
 	ProviderSessionState,
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai/types";
+import { getOpenAIResponsesReferenceTarget } from "@oh-my-pi/pi-ai/utils";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import * as piUtils from "@oh-my-pi/pi-utils";
@@ -97,6 +98,23 @@ function makeOpenAiCodexModel(
 		...overrides,
 	});
 }
+
+test("uses the runtime Codex target for configured compaction routes", () => {
+	const model = makeOpenAiCodexModel({
+		baseUrl: "https://chatgpt.com/backend-api",
+		remoteCompaction: {
+			enabled: true,
+			api: "openai-codex-responses",
+			endpoint: "https://chatgpt.com/backend-api/codex/responses/compact",
+			v2StreamingEnabled: true,
+			v2Endpoint: "https://chatgpt.com/backend-api/codex/responses",
+		},
+	});
+	const runtimeTarget = getOpenAIResponsesReferenceTarget(model);
+
+	expect(getOpenAiCompactionReferenceTarget(model, false)).toBe(runtimeTarget);
+	expect(getOpenAiCompactionReferenceTarget(model, true)).toBe(runtimeTarget);
+});
 
 function makeAzureModel(overrides: Partial<ModelSpec<"azure-openai-responses">> = {}): Model<"azure-openai-responses"> {
 	return buildModel({

@@ -2644,6 +2644,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					deobfuscateSessionContext(sessionManager.buildSessionContext(), obfuscator),
 				);
 			}
+			if (hasExistingSession) {
+				existingSession = logger.time("loadModelScopedSessionContext", () =>
+					deobfuscateSessionContext(
+						sessionManager.buildSessionContext({
+							activeModel: model,
+							compactionSettings: settings.getGroup("compaction"),
+						}),
+						obfuscator,
+					),
+				);
+			}
 		}
 
 		// Discovery started with the other cwd/agentDir-only scans, before model

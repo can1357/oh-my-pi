@@ -462,7 +462,7 @@ export function canonicalizeOpenAIResponsesReferenceBaseUrl(endpoint: string): s
 	try {
 		const url = new URL(value);
 		const pathname = url.pathname.replace(/\/+$/, "");
-		for (const suffix of ["/responses/compact", "/responses"]) {
+		for (const suffix of ["/codex/responses/compact", "/codex/responses", "/responses/compact", "/responses"]) {
 			if (pathname.endsWith(suffix)) {
 				url.pathname = pathname.slice(0, -suffix.length) || "/";
 				url.search = "";
