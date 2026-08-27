@@ -382,6 +382,7 @@ export class TurnRecovery {
 		});
 		this.#clearPendingRetryErrors();
 		this.#retryAttempt = 0;
+		this.resolveRetry();
 	}
 
 	/** Closes a failed retry saga when no compaction continuation took ownership. */

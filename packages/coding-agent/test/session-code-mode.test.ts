@@ -373,6 +373,18 @@ describe("Code Mode session reconciliation", () => {
 		expect(session.codeModeNamespacesInfo).toBeUndefined();
 	});
 
+	test("startup reconcile survives a transiently narrow live tool set", async () => {
+		const { session } = createSession(Settings.isolated({ "providers.openai-codex.codeMode": "auto" }));
+		// Before the first apply, a startup-time mutation can shrink the live
+		// agent tools. A reconcile landing in that window must reapply the
+		// construction slate, not commit the shrunken set as sticky.
+		session.agent.setTools([]);
+		await session.initializeCodeMode();
+
+		expect(session.getEnabledToolNames()).toEqual(["eval", "read"]);
+		expect(session.getActiveToolNames()).toEqual(["eval"]);
+	});
+
 	test("an eval replacement that cannot state transport support keeps the direct surface", async () => {
 		const { session } = createSession(
 			Settings.isolated({ "providers.openai-codex.codeMode": "auto" }),
