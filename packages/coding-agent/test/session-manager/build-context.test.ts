@@ -1,6 +1,7 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import type { AssistantMessage, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { INTERRUPTED_THINKING_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type {
 	BranchSummaryEntry,
@@ -725,6 +726,51 @@ describe("buildSessionContext", () => {
 	});
 
 	describe("edge cases", () => {
+		it("keeps an aborted turn preserved by its interrupted-thinking marker", () => {
+			const entries: SessionEntry[] = [
+				{
+					type: "message",
+					id: "a1",
+					parentId: null,
+					timestamp: "2025-01-01T00:00:00Z",
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "partial answer" }],
+						api: "anthropic-messages",
+						provider: "anthropic",
+						model: "claude-test",
+						usage: {
+							input: 1,
+							output: 1,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 2,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "aborted",
+						timestamp: 1,
+					},
+				},
+				{
+					type: "custom_message",
+					id: "c1",
+					parentId: "a1",
+					timestamp: "2025-01-01T00:00:01Z",
+					customType: INTERRUPTED_THINKING_MESSAGE_TYPE,
+					content: "resume where you left off",
+					display: false,
+				},
+			];
+
+			const full = buildSessionContext(entries);
+			expect(full.messages.map(message => message.role)).toEqual(["assistant", "custom"]);
+			expect(full.hasMessages).toBe(true);
+
+			const metadata = buildSessionContext(entries, undefined, undefined, { metadataOnly: true });
+			expect(metadata.messages).toEqual([]);
+			expect(metadata.hasMessages).toBe(true);
+		});
+
 		it("reports no messages when cleanup empties the model context", () => {
 			const abortedTurn: SessionMessageEntry = {
 				type: "message",

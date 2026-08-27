@@ -16,6 +16,7 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { type CapturedOpenAICompletionRequest, startOpenAICompletionsUpstream } from "./helpers";
 
 const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+const BMP_B64 = "Qk06AAAAAAAAADYAAAAoAAAAAQAAAAEAAAABABgAAAAAAAQAAAATCwAAEwsAAAAAAAAAAAAAAAD/AA==";
 
 function zeroUsage(): AssistantMessage["usage"] {
 	return {
@@ -1556,6 +1557,56 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 			expect(mock.calls).toHaveLength(1);
 			const toolResult = mock.calls[0]!.context.messages.find(message => message.role === "toolResult");
 			expect(toolResult?.content).toEqual([{ type: "image", data: imageData, mimeType: "image/png" }]);
+		} finally {
+			await gateway.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			clearCustomApis();
+		}
+	});
+
+	it("preserves a well-formed unverifiable tool image data URI for placeholder replay", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-tool-placeholder-image-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openai", "test-key");
+		const mock = createMockModel({ provider: "openai", id: "mock/tool-placeholder-image" });
+		mock.push({ content: ["ok"] });
+		const gateway = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => mock.model,
+			version: "test",
+		});
+
+		try {
+			const response = await fetch(`${gateway.url}/v1/responses`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+				body: JSON.stringify({
+					model: "mock/tool-placeholder-image",
+					input: [
+						{
+							type: "function_call",
+							call_id: "call_read",
+							name: "read",
+							arguments: '{"path":"image.bmp"}',
+						},
+						{
+							type: "function_call_output",
+							call_id: "call_read",
+							output: [{ type: "input_image", image_url: `data:image/bmp;base64,${BMP_B64}` }],
+						},
+					],
+				}),
+			});
+
+			expect(response.status).toBe(200);
+			await response.text();
+			expect(mock.calls).toHaveLength(1);
+			const toolResult = mock.calls[0]!.context.messages.find(message => message.role === "toolResult");
+			expect(toolResult?.content).toEqual([{ type: "image", data: BMP_B64, mimeType: "image/bmp" }]);
 		} finally {
 			await gateway.close();
 			storage.close();

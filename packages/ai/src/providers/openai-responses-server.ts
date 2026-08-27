@@ -44,7 +44,12 @@ import {
 	openaiResponsesRequestSchema,
 } from "./openai-responses-server-schema";
 import { encodeTextSignatureV1, parseTextSignature } from "./openai-shared";
-import { getUsableInlineImageMimeType, isRemoteImageUrl, REMOTE_COMPUTER_SCREENSHOT_MIME_TYPE } from "./vision-guard";
+import {
+	getUnreplayableInlineImageMimeType,
+	getUsableInlineImageMimeType,
+	isRemoteImageUrl,
+	REMOTE_COMPUTER_SCREENSHOT_MIME_TYPE,
+} from "./vision-guard";
 
 export type { ParsedRequest };
 
@@ -338,8 +343,17 @@ function functionOutputContent(output: string | readonly unknown[] | undefined):
 				raw.detail === "auto" || raw.detail === "low" || raw.detail === "high" || raw.detail === "original"
 					? raw.detail
 					: undefined;
+			const placeholderSafeMimeType =
+				decoded && !decodedMimeType ? getUnreplayableInlineImageMimeType(decoded) : undefined;
 			if (decoded && decodedMimeType) {
 				content.push({ type: "image", ...decoded, mimeType: decodedMimeType, ...(detail ? { detail } : {}) });
+			} else if (decoded && placeholderSafeMimeType) {
+				content.push({
+					type: "image",
+					...decoded,
+					mimeType: placeholderSafeMimeType,
+					...(detail ? { detail } : {}),
+				});
 			} else {
 				const referenceImage: ImageContent = {
 					type: "image",

@@ -234,6 +234,10 @@ export function validateAndNormalizeImageReferences(context: Context, model: Mod
 			if (hasUrlReference && !hasSupportedUrlReference) delete block.url;
 			if (hasInlineData || hasSupportedProviderFileReference || hasSupportedUrlReference) continue;
 
+			if (getUnreplayableInlineImageMimeType({ data, mimeType }) !== undefined) {
+				block.mimeType = normalizedMimeType;
+				continue;
+			}
 			if (providerFile?.provider === "openai") {
 				return `input_image.file_id cannot be forwarded to ${model.api}; target an OpenAI Responses model or use an inline data URL`;
 			}
@@ -242,10 +246,6 @@ export function validateAndNormalizeImageReferences(context: Context, model: Mod
 			}
 			if (hasProviderFileReference) {
 				return `input_image.providerFile cannot be forwarded to ${model.api}; use inline image data or target the matching provider API`;
-			}
-			if (getUnreplayableInlineImageMimeType({ data, mimeType }) !== undefined) {
-				block.mimeType = normalizedMimeType;
-				continue;
 			}
 			return `input_image cannot be forwarded to ${model.api} without non-empty image data or a supported reference`;
 		}

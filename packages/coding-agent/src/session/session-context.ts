@@ -330,6 +330,7 @@ export function buildSessionContext(
 	// 2. Emit kept messages (from firstKeptEntryId up to compaction)
 	// 3. Emit messages after compaction
 	const metadataOnly = options?.metadataOnly === true;
+	let survivingMessageEmitted = false;
 	const messages: AgentMessage[] = [];
 	const cacheMissExplainedAt: boolean[] = [];
 	let pendingReset = false;
@@ -351,6 +352,19 @@ export function buildSessionContext(
 	};
 
 	const pushMessage = (msg: AgentMessage) => {
+		if (metadataOnly) {
+			// Only `assistant` and `toolResult` turns can be removed by the cleanup
+			// passes below, so any other role settles presence for good: drop the
+			// retained candidates and stop accumulating the rest of the path.
+			if (survivingMessageEmitted) return;
+			if (msg.role !== "assistant" && msg.role !== "toolResult") {
+				survivingMessageEmitted = true;
+				messages.length = 0;
+				return;
+			}
+			messages.push(msg);
+			return;
+		}
 		messages.push(msg);
 		if (!options?.transcript) return;
 		if (msg.role === "assistant") {
@@ -544,7 +558,8 @@ export function buildSessionContext(
 	// Those callers pass `keepDanglingToolCalls` so the in-flight call stays visible as
 	// a pending block instead of vanishing from the chat.)
 	const keepDangling = options?.transcript === true && options.keepDanglingToolCalls === true;
-	if (!keepDangling) {
+	const presenceAlreadySettled = metadataOnly && survivingMessageEmitted;
+	if (!keepDangling && !presenceAlreadySettled) {
 		const pairedToolResultIds = new Set<string>();
 		for (const message of messages) {
 			if (message.role === "toolResult") pairedToolResultIds.add(message.toolCallId);
@@ -591,7 +606,7 @@ export function buildSessionContext(
 	// Keep the interrupted-thinking continuity pair: convertToLlm strips the
 	// unsafe trailing thinking from that assistant and sends the hidden
 	// continuity note instead.
-	if (!options?.transcript) {
+	if (!options?.transcript && !presenceAlreadySettled) {
 		for (let i = messages.length - 1; i >= 0; i--) {
 			const message = messages[i];
 			if (message?.role !== "assistant") continue;
@@ -620,7 +635,7 @@ export function buildSessionContext(
 
 	return {
 		messages: metadataOnly ? [] : messages,
-		hasMessages: messages.length > 0,
+		hasMessages: survivingMessageEmitted || messages.length > 0,
 		cacheMissExplainedAt: options?.transcript ? cacheMissExplainedAt : undefined,
 		thinkingLevel,
 		configuredThinkingLevel,

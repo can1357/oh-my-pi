@@ -1064,6 +1064,74 @@ describe("pi-native gateway image reference validation", () => {
 		}
 	});
 
+	it("degrades a well-formed unverifiable image carrying an unsupported provider file", async () => {
+		const upstreamRequests: CapturedOpenAICompletionRequest[] = [];
+		const upstream = startOpenAICompletionsUpstream(upstreamRequests);
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-placeholder-ref-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openai", "test-key");
+		const model = buildModel({
+			id: "pi-native-placeholder-ref",
+			name: "Pi Native Placeholder Reference",
+			api: "openai-completions",
+			provider: "openai",
+			baseUrl: `${upstream.url.origin}/v1`,
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"openai-completions">);
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => model,
+			version: "test",
+		});
+
+		try {
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: model.id,
+					context: {
+						messages: [
+							{
+								role: "user",
+								content: [
+									{
+										type: "image",
+										data: BMP_B64,
+										mimeType: "image/bmp",
+										providerFile: { provider: "openai", id: "file_stale_bmp" },
+									},
+								],
+								timestamp: 0,
+							},
+						],
+					},
+					stream: false,
+				}),
+			});
+
+			expect(response.status).toBe(200);
+			await response.json();
+			expect(upstreamRequests).toHaveLength(1);
+			const parts = (upstreamRequests[0]?.messages ?? []).flatMap(message =>
+				Array.isArray(message.content) ? message.content : [],
+			);
+			expect(parts).toContainEqual({ type: "text", text: "[unsupported image: image/bmp]" });
+			expect(JSON.stringify(upstreamRequests[0])).not.toContain("file_stale_bmp");
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			upstream.stop(true);
+		}
+	});
+
 	it("degrades a well-formed unverifiable image instead of rejecting the request", async () => {
 		const upstreamRequests: CapturedOpenAICompletionRequest[] = [];
 		const upstream = startOpenAICompletionsUpstream(upstreamRequests);
