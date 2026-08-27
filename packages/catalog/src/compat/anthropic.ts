@@ -29,6 +29,27 @@ export function isOfficialAnthropicApiUrl(baseUrl?: string): boolean {
 	return lower === OFFICIAL_ANTHROPIC_URL || lower.startsWith(`${OFFICIAL_ANTHROPIC_URL}/`);
 }
 
+export function isOfficialAnthropicFilesApiBaseUrl(baseUrl?: string): boolean {
+	const value = baseUrl?.trim();
+	if (!value) return true;
+	try {
+		const url = new URL(value);
+		const pathname = url.pathname.replace(/\/+$/, "");
+		return (
+			url.protocol === "https:" &&
+			url.hostname.toLowerCase() === "api.anthropic.com" &&
+			url.username.length === 0 &&
+			url.password.length === 0 &&
+			url.search.length === 0 &&
+			url.hash.length === 0 &&
+			url.port.length === 0 &&
+			(pathname === "" || pathname === "/v1")
+		);
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Kimi models whose native endpoints (api.kimi.com, api.moonshot.ai) keep
  * thinking enabled server-side no matter what the request carries: they

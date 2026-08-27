@@ -1,3 +1,4 @@
+import { isOfficialAnthropicFilesApiBaseUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import { isDashscopeCompatibleModeUrl, modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import { isDeepseekModelIdOrName, isQwenModelId } from "@oh-my-pi/pi-catalog/identity";
 import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
@@ -112,26 +113,6 @@ function isExactOfficialOpenAIEndpoint(baseUrl: string | undefined): boolean {
 			url.hash.length === 0 &&
 			url.port.length === 0 &&
 			pathname === "/v1"
-		);
-	} catch {
-		return false;
-	}
-}
-
-function isExactOfficialAnthropicEndpoint(baseUrl: string | undefined): boolean {
-	const value = baseUrl?.trim() ?? "";
-	if (value.length === 0) return false;
-	try {
-		const url = new URL(value);
-		return (
-			url.protocol === "https:" &&
-			url.hostname.toLowerCase() === "api.anthropic.com" &&
-			url.username.length === 0 &&
-			url.password.length === 0 &&
-			url.search.length === 0 &&
-			url.hash.length === 0 &&
-			url.port.length === 0 &&
-			(url.pathname === "" || url.pathname === "/")
 		);
 	} catch {
 		return false;
@@ -258,7 +239,7 @@ export function supportsProviderFileReference(
 			reference.id.length > 0 &&
 			model.api === "anthropic-messages" &&
 			model.provider === "anthropic" &&
-			isExactOfficialAnthropicEndpoint(model.baseUrl)
+			isOfficialAnthropicFilesApiBaseUrl(model.baseUrl)
 		);
 	}
 	return (

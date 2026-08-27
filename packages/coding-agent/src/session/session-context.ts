@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { remotePreserveReusable, type CompactionSettings } from "@oh-my-pi/pi-agent-core/compaction";
+import { remotePreserveReplayable, type CompactionSettings } from "@oh-my-pi/pi-agent-core/compaction";
 import { coerceServiceTierByFamily, type Model, type ProviderPayload, type ServiceTierByFamily } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import {
@@ -281,8 +281,7 @@ export function buildSessionContext(
 				options?.transcript === true ||
 				!requiresTargetValidation ||
 				(options?.activeModel !== undefined &&
-					options.compactionSettings !== undefined &&
-					remotePreserveReusable(entry.preserveData, options.activeModel, options.compactionSettings));
+					remotePreserveReplayable(entry.preserveData, options.activeModel));
 			if (canReplay) compaction = entry;
 		} else if (entry.type === "ttsr_injection") {
 			// Collect injected TTSR rule names

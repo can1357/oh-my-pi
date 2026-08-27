@@ -38,7 +38,7 @@ function testModel<TApi extends Api>(api: TApi, provider: string, baseUrl: strin
 }
 
 const openAIModel = testModel("openai-responses", "openai", "https://api.openai.com/v1");
-const anthropicModel = testModel("anthropic-messages", "anthropic", "https://api.anthropic.com");
+const anthropicModel = testModel("anthropic-messages", "anthropic", "https://api.anthropic.com/v1");
 const geminiModel = testModel("google-generative-ai", "google", "https://generativelanguage.googleapis.com/v1beta");
 const unsupportedModel = testModel("openai-responses", "openrouter", "https://openrouter.ai/api/v1");
 

@@ -70,6 +70,21 @@ function makeGoogleVertexModel() {
 	} satisfies ModelSpec<"google-vertex">);
 }
 
+function makeAnthropicModel(baseUrl: string) {
+	return buildModel({
+		id: "claude-vision",
+		name: "Claude Vision",
+		api: "anthropic-messages",
+		provider: "anthropic",
+		baseUrl,
+		reasoning: false,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 32_768,
+		maxTokens: 4_096,
+	} satisfies ModelSpec<"anthropic-messages">);
+}
+
 describe("OpenAI provider-file capability", () => {
 	it("requires effective computer-use support for screenshot metadata", () => {
 		const unsupported = makeResponsesModel("openai", "https://api.openai.com/v1");
@@ -146,6 +161,27 @@ describe("OpenAI provider-file capability", () => {
 					"azure",
 					"https://resource.openai.azure.com/openai/deployments/vision",
 				),
+				reference,
+				image,
+			),
+		).toBe(false);
+	});
+
+	it("accepts Anthropic handles on canonical official API bases", () => {
+		const reference = { provider: "anthropic", id: "file_anthropic_123" };
+		const image = { mimeType: "image/png" };
+
+		for (const baseUrl of [
+			"https://api.anthropic.com",
+			"https://api.anthropic.com/",
+			"https://api.anthropic.com/v1",
+			"https://api.anthropic.com/v1/",
+		]) {
+			expect(supportsProviderFileReference(makeAnthropicModel(baseUrl), reference, image)).toBe(true);
+		}
+		expect(
+			supportsProviderFileReference(
+				makeAnthropicModel("https://api.anthropic.com/v1/proxy"),
 				reference,
 				image,
 			),

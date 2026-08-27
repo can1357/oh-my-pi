@@ -1,4 +1,5 @@
 import type { Model } from "@oh-my-pi/pi-ai";
+import { isOfficialAnthropicFilesApiBaseUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import type { ProviderFileClient, ProviderFileHandle, ProviderFileUploadRequest } from "./provider-file-types";
 import type { FetchImpl } from "./uploader-runtime";
@@ -12,24 +13,6 @@ interface AnthropicFileMetadata {
 	mime_type: string;
 	size_bytes: number;
 	expires_at?: string | null;
-}
-
-function isOfficialAnthropicBaseUrl(baseUrl: string): boolean {
-	try {
-		const url = new URL(baseUrl);
-		return (
-			url.protocol === "https:" &&
-			url.hostname === "api.anthropic.com" &&
-			url.port === "" &&
-			(url.pathname === "" || url.pathname === "/") &&
-			url.search === "" &&
-			url.hash === "" &&
-			url.username === "" &&
-			url.password === ""
-		);
-	} catch {
-		return false;
-	}
 }
 
 function authHeaders(credential: string): Readonly<Record<string, string>> {
@@ -98,7 +81,7 @@ export function createAnthropicFileClient(
 	if (
 		model.provider !== "anthropic" ||
 		model.api !== "anthropic-messages" ||
-		!isOfficialAnthropicBaseUrl(model.baseUrl)
+		!isOfficialAnthropicFilesApiBaseUrl(model.baseUrl)
 	) {
 		return null;
 	}

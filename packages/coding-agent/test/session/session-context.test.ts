@@ -117,6 +117,17 @@ describe("buildSessionContext snapcompact archives", () => {
 			activeModel: sourceModel,
 			compactionSettings: DEFAULT_COMPACTION_SETTINGS,
 		});
+		const changedCompactionTargetContext = buildSessionContext(entries, undefined, undefined, {
+			activeModel: buildModel({
+				...sourceModel,
+				remoteCompaction: {
+					enabled: true,
+					model: "gpt-5-nano",
+					endpoint: "https://compact.example/v1/responses/compact",
+				},
+			}),
+			compactionSettings: DEFAULT_COMPACTION_SETTINGS,
+		});
 		const transcriptContext = buildSessionContext(entries, undefined, undefined, {
 			transcript: true,
 			collapseCompactedHistory: true,
@@ -128,6 +139,9 @@ describe("buildSessionContext snapcompact archives", () => {
 		expect(unscopedContext.messages.map(message => message.role)).toEqual(["user", "user"]);
 		expect(JSON.stringify(unscopedContext.messages)).toContain("original durable context");
 		expect(compactionSummary(compatibleContext.messages).providerPayload?.referenceTarget).toBe(
+			getOpenAIResponsesReferenceTarget(sourceModel),
+		);
+		expect(compactionSummary(changedCompactionTargetContext.messages).providerPayload?.referenceTarget).toBe(
 			getOpenAIResponsesReferenceTarget(sourceModel),
 		);
 		expect(compactionSummary(transcriptContext.messages).summary).toBe("opaque remote summary");

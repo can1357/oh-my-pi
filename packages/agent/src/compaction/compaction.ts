@@ -1283,8 +1283,7 @@ export function remotePreserveReusable(
 	const v1Preserve = getPreservedOpenAiRemoteCompactionData(preserveData);
 	if (!v2Preserve && !v1Preserve) return true;
 	if (settings.remoteEnabled === false) return false;
-	const runtimePreserve = v2Preserve ?? v1Preserve;
-	if (!runtimePreserve || !canReplayOpenAiCompactionHistory(runtimePreserve, activeModel)) return false;
+	if (!remotePreserveReplayable(preserveData, activeModel)) return false;
 	const reusableByModel = (model: Model): boolean => {
 		if (settings.remoteStreamingV2Enabled !== false && shouldUseCompactionV2Streaming(model)) {
 			return !!v2Preserve && canReuseOpenAiCompactionHistory(v2Preserve, model, true);
@@ -1295,6 +1294,17 @@ export function remotePreserveReusable(
 	};
 	const extensionModels = compactionModels.length > 0 ? compactionModels : [activeModel];
 	return extensionModels.every(reusableByModel);
+}
+
+export function remotePreserveReplayable(
+	preserveData: Record<string, unknown> | undefined,
+	activeModel: Model,
+): boolean {
+	const v2Preserve = getCompactionV2PreserveData(preserveData);
+	const v1Preserve = getPreservedOpenAiRemoteCompactionData(preserveData);
+	if (!v2Preserve && !v1Preserve) return true;
+	const runtimePreserve = v2Preserve ?? v1Preserve;
+	return runtimePreserve !== undefined && canReplayOpenAiCompactionHistory(runtimePreserve, activeModel);
 }
 
 /**
