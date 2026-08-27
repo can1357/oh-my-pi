@@ -369,10 +369,6 @@ function isEndpointOwnedImageReference(value: Record<string, unknown>): boolean 
 	);
 }
 
-function replacementHistoryContainsTargetDependentImage(history: Array<Record<string, unknown>>): boolean {
-	return replacementHistoryContains(history, isEndpointOwnedImageReference);
-}
-
 /**
  * Encrypted state — the payload of a native compaction or reasoning item — is
  * issued by one endpoint and opaque everywhere else, so it binds history just as
@@ -396,7 +392,7 @@ export function canReuseOpenAiCompactionHistory(
 	if (preserved.referenceTarget !== undefined) {
 		return preserved.referenceTarget === getOpenAiCompactionReferenceTarget(model, streamingV2);
 	}
-	return !replacementHistoryContainsTargetDependentImage(preserved.replacementHistory);
+	return !replacementHistoryContainsEndpointOwnedState(preserved.replacementHistory);
 }
 
 export function getOpenAiCompactionRuntimeReplayTarget(
@@ -439,7 +435,7 @@ export function canReplayOpenAiCompactionHistory(
 	if (boundTarget !== undefined) {
 		return boundTarget === (resolvedRequestTarget ?? getOpenAIResponsesReferenceTarget(model));
 	}
-	return !replacementHistoryContainsTargetDependentImage(preserved.replacementHistory);
+	return !replacementHistoryContainsEndpointOwnedState(preserved.replacementHistory);
 }
 
 /**

@@ -285,27 +285,28 @@ describe("CodexSessionStore", () => {
 				compactionItem: replacementHistory[1],
 			},
 		});
-		// The imported compaction item carries encrypted Codex state, so it stays
-		// unreadable until an active model of the issuing provider is known.
+		// The imported compaction item carries encrypted Codex state that only the
+		// issuing endpoint can decrypt, and the import records no target, so it is
+		// never replayed as native history: the originals stay expanded instead.
 		expect(buildSessionContext(entries).messages.some(message => message.role === "compactionSummary")).toBe(false);
 		const activeContext = buildSessionContext(entries, undefined, undefined, { activeModel: codexActiveModel() });
 		expect(activeContext.messages.map(message => message.role)).toEqual([
-			"compactionSummary",
+			"user",
+			"assistant",
+			"assistant",
+			"toolResult",
 			"user",
 			"assistant",
 			"toolResult",
 			"assistant",
 		]);
-		expect(activeContext.messages[1]).toMatchObject({
+		expect(activeContext.messages[0]).toMatchObject({
+			role: "user",
+			content: [{ type: "text", text: "Inspect" }],
+		});
+		expect(activeContext.messages[4]).toMatchObject({
 			role: "user",
 			content: [{ type: "text", text: "Continue" }],
-		});
-		const activeSummary = activeContext.messages[0];
-		if (activeSummary?.role !== "compactionSummary") throw new Error("Missing active Codex compaction context");
-		expect(activeSummary.providerPayload).toEqual({
-			type: "openaiResponsesHistory",
-			provider: "openai-codex",
-			items: replacementHistory,
 		});
 		const transcript = buildSessionContext(entries, undefined, undefined, { transcript: true });
 		expect(transcript.messages.map(message => message.role)).toEqual([

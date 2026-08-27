@@ -154,6 +154,31 @@ test("keeps compaction history replayable when a compaction model override is co
 	expect(canReplayOpenAiCompactionHistory(preserved, makeOpenAiModel({ id: "gpt-5.4" }))).toBe(false);
 });
 
+test("rejects unstamped legacy compaction history that carries encrypted native state", () => {
+	const model = makeOpenAiModel();
+	const encryptedLegacy = {
+		provider: model.provider,
+		replacementHistory: [
+			{ type: "message", role: "user", content: [{ type: "input_text", text: "kept" }] },
+			{ type: "compaction", encrypted_content: "enc_A" },
+		],
+	};
+	const portableLegacy = {
+		provider: model.provider,
+		replacementHistory: [{ type: "message", role: "user", content: [{ type: "input_text", text: "kept" }] }],
+	};
+
+	expect(canReplayOpenAiCompactionHistory(encryptedLegacy, model)).toBe(false);
+	expect(canReplayOpenAiCompactionHistory(encryptedLegacy, makeOpenAiModel({ id: "gpt-5.4" }))).toBe(false);
+	expect(canReplayOpenAiCompactionHistory(encryptedLegacy, model, getOpenAIResponsesReferenceTarget(model))).toBe(
+		false,
+	);
+	expect(canReuseOpenAiCompactionHistory(encryptedLegacy, model, false)).toBe(false);
+	expect(canReuseOpenAiCompactionHistory(encryptedLegacy, model, true)).toBe(false);
+	expect(canReplayOpenAiCompactionHistory(portableLegacy, model)).toBe(true);
+	expect(canReuseOpenAiCompactionHistory(portableLegacy, model, false)).toBe(true);
+});
+
 test("replays Azure compaction with its mapped deployment identity", () => {
 	const previousDeploymentMap = Bun.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP;
 	try {
