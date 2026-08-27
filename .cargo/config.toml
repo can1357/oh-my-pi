@@ -9,6 +9,17 @@
 # annotation in MODULE.bazel); mirror it here so the cargo path works too.
 [env]
 CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+# The Makefile generator can wedge cargo forever on macOS: the `cmake` crate
+# forwards cargo's jobserver via MAKEFLAGS, and Xcode's GNU make 3.81 blocks
+# reading a jobserver pipe whose write end doesn't survive `cmake -E env`
+# (observed in omp with whisper-rs-sys; audiopus_sys uses the same crate).
+# Ninja schedules itself and ignores make's jobserver protocol entirely.
+# CI needs no setup: the only cargo invocations there (cargo-deny/fetch) never
+# build cmake crates, workspace Rust compiles via Bazel (which ignores this
+# file, opus pinned in MODULE.bazel), and nix builds already carry ninja in
+# nativeBuildInputs. Dev hosts need ninja (nix dev-shell provides it; macOS:
+# `brew install ninja`).
+CMAKE_GENERATOR = "Ninja"
 # Store each crate's metadata only in its .rmeta instead of duplicating it into
 # every rlib. Measured on a reqwest-sized graph: 196 MB -> 130 MB target dir at
 # identical build times. Requires the pinned nightly (rust-toolchain.toml).

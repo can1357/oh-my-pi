@@ -621,7 +621,7 @@ describe("IRC", () => {
 			expect(tool.interruptible({ op: "send", await: true })).toBe(false);
 		});
 
-		it("op=list includes parked peers, unread counts, and parent ids", async () => {
+		it("op=list defaults to live peers and reports parked counts without parked names", async () => {
 			const sub = makeFakeSession();
 			registry.register({
 				id: "0-AuthLoader",
@@ -642,10 +642,18 @@ describe("IRC", () => {
 			expect(details?.op).toBe("list");
 			expect(details?.peers).toMatchObject([
 				{ id: "0-AuthLoader", status: "running", parentId: "0-Main", unread: 1 },
-				{ id: "0-Parked", status: "parked", unread: 0 },
 			]);
+			expect(details?.peers?.some(peer => peer.id === "0-Parked")).toBe(false);
+			expect(details?.counts).toEqual({
+				running: 1,
+				idle: 0,
+				parked: 1,
+				shown: 1,
+				truncated: 0,
+			});
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-			expect(text).toContain("Parked agents are revived automatically");
+			expect(text).toContain('status="parked"');
+			expect(text).not.toContain("0-Parked");
 		});
 
 		it("op=list hides advisor-kind refs from the peer roster", async () => {

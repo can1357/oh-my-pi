@@ -1,8 +1,8 @@
 /**
  * MCP (Model Context Protocol) type definitions.
  *
- * Based on MCP specification 2025-03-26:
- * https://modelcontextprotocol.io/specification/2025-03-26/
+ * Based on MCP specification 2025-11-25:
+ * https://modelcontextprotocol.io/specification/2025-11-25/
  */
 
 // =============================================================================
@@ -164,10 +164,22 @@ export interface MCPConfigFile {
  */
 export const MCP_PROTOCOL_VERSION = "2025-11-25";
 
-/** MCP implementation info */
+/** Optionally-sized icon for MCP UI metadata (implementation, tools, resources). */
+export interface MCPIcon {
+	src: string;
+	mimeType?: string;
+	sizes?: string[];
+	theme?: "light" | "dark";
+}
+
+/** MCP implementation info (`InitializeRequest.params.clientInfo` / `InitializeResult.serverInfo`). */
 export interface MCPImplementation {
 	name: string;
+	title?: string;
 	version: string;
+	description?: string;
+	websiteUrl?: string;
+	icons?: MCPIcon[];
 }
 
 /** MCP client capabilities */
@@ -201,16 +213,36 @@ export interface MCPInitializeResult {
 	instructions?: string;
 }
 
+/** Tool annotations from the 2025-11-25 tools spec. */
+export interface MCPToolAnnotations {
+	title?: string;
+	readOnlyHint?: boolean;
+	destructiveHint?: boolean;
+	idempotentHint?: boolean;
+	openWorldHint?: boolean;
+}
+
+/** Execution metadata from the 2025-11-25 tools spec. */
+export interface MCPToolExecution {
+	taskSupport?: "forbidden" | "optional" | "required";
+}
+
 /** MCP tool definition */
 export interface MCPToolDefinition {
 	name: string;
+	title?: string;
 	description?: string;
+	icons?: MCPIcon[];
 	inputSchema: {
 		type: "object";
 		properties?: Record<string, unknown>;
 		required?: string[];
 		[key: string]: unknown;
 	};
+	outputSchema?: Record<string, unknown>;
+	execution?: MCPToolExecution;
+	annotations?: MCPToolAnnotations;
+	_meta?: Record<string, unknown>;
 }
 
 /** tools/list response */

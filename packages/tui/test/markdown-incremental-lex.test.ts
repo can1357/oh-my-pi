@@ -22,6 +22,15 @@ function renderCold(text: string, width: number): readonly string[] {
 	clearRenderCache();
 	return out;
 }
+/** Cold render in transient mode — same masking-safe pattern as renderCold. */
+function renderColdTransient(text: string, width: number): readonly string[] {
+	clearRenderCache();
+	const out = new Markdown(text, 0, 0, THEME);
+	out.transientRenderCache = true;
+	const lines = out.render(width);
+	clearRenderCache();
+	return lines;
+}
 
 /** Reveal `full` in `step`-char increments through ONE reused (streaming) instance
  *  and assert each step matches a cold full-lex render of the same prefix. */
@@ -95,6 +104,18 @@ const MIXED = (() => {
 	return out;
 })();
 
+const TABLE = (() => {
+	// Table rows stream in as the tail grows: a growing table in the unfrozen
+	// tail must render byte-identically (the tail row cache excludes `table`
+	// tokens, so these frames exercise the exclusion path under
+	// assertIdenticalGrowthTransient).
+	const para = "Intro paragraph before the table streams in, with a `code span` and **bold** for flavor. ";
+	let out = `${para}\n\n| col_a | col_b |\n| ----- | ----- |\n`;
+	for (let i = 1; i <= 4; i++) out += `| row_${i}_a | row_${i}_b |\n`;
+	out += "\n\nTrailing prose after the table keeps growing with more sentences.";
+	return out;
+})();
+
 describe("Markdown incremental streaming lex (E2)", () => {
 	it("prose growth is byte-identical to full lex", () => {
 		assertIdenticalGrowth(PROSE);
@@ -126,6 +147,10 @@ describe("Markdown incremental streaming lex (E2)", () => {
 
 	it("transient render-prefix cache: mixed multi-section split render is byte-identical", () => {
 		assertIdenticalGrowthTransient(MIXED, 80, 29);
+	});
+
+	it("transient render-prefix cache: table growing in the tail is byte-identical", () => {
+		assertIdenticalGrowthTransient(TABLE, 60, 7);
 	});
 
 	it("a width change mid-stream still matches a cold render at the new width", () => {
@@ -310,6 +335,27 @@ describe("Markdown incremental streaming lex (E2)", () => {
 		expect(streamLines).toEqual(renderCold(doc, 60));
 	});
 
+	it("orphan-fence repair starting mid-stream keeps growth byte-identical", () => {
+		// Final-mode repairOrphanClosingFence deletes an unmatched bare fence
+		// once both a heading and a GFM table delimiter follow it. The raw text
+		// grows append-only across the transition while the NORMALIZED text
+		// (with the fence deleted) is no longer an append-extension of the
+		// previous frame's, so the guard-scan memo's byte alignment is put to
+		// the test: the trigger either brings "\n" into the delta (suspicious
+		// path re-scans) or shortens the text (length gate re-derives). The
+		// cold-render oracle must match at every step.
+		const doc =
+			"Intro paragraph before the stray fence lands in the stream.\n\n" +
+			"```\n" +
+			"# Heading after the orphan fence\n\n" +
+			"| col a | col b |\n" +
+			"| --- | --- |\n\n" +
+			"Trailing paragraph that keeps streaming after the table ends.";
+		assertIdenticalGrowth(doc, 60, 1);
+		assertIdenticalGrowth(doc, 60, 3);
+		assertIdenticalGrowth(doc, 60, 13);
+	});
+
 	it("a document that is one still-growing list never freezes mid-list", () => {
 		// No (b)-style intra-list freezing shipped: loose/tight and ordered
 		// renumbering are whole-list properties, so no prefix of an open list
@@ -323,5 +369,90 @@ describe("Markdown incremental streaming lex (E2)", () => {
 			const streamLines = streaming.render(60);
 			expect(streamLines).toEqual(renderCold(doc.slice(0, len), 60));
 		}
+	});
+
+	it("flipping transientRenderCache re-derives the guard memo", () => {
+		// Regression: final mode normalized this document through
+		// repairOrphanClosingFence, which deleted the bare fence line carrying
+		// the text's only "\r". Memoized in final mode the verdict is
+		// canStream=true (no CR, no ref defs) with #lastScanLength taken from
+		// the REPAIRED buffer. Flipping to transient mode re-introduces the
+		// raw "\r" (transient skips repair); if the memo survived the flip, a
+		// clean-suffix append would reuse canStream=true and stream the
+		// CR-containing tail. The mode flip must invalidate the memo so the
+		// next frame re-derives and falls back to the full lex.
+		const crlfFence =
+			"Intro paragraph before the stray fence with a CRLF line end.\n\n" +
+			"```\r\n" +
+			"# Heading after the fence\n\n" +
+			"| a | b |\n" +
+			"| --- | --- |\n\n" +
+			"Tail prose that only streams in after the table.";
+		const streaming = new Markdown("", 0, 0, THEME);
+		clearRenderCache();
+		streaming.setText(crlfFence);
+		streaming.render(60); // final mode: repair deletes the fence + its CR
+		// Switch to transient streaming on the same instance and append only
+		// CLEAN suffixes (no newline/bracket/colon): a stale memo would be
+		// reused on each of these and stream the CR-containing tail against
+		// the repaired-buffer prefix, diverging from the cold render.
+		streaming.transientRenderCache = true;
+		let grown = crlfFence;
+		for (const suffix of [" tail-a", " tail-b", " tail-c"]) {
+			grown += suffix;
+			clearRenderCache();
+			streaming.setText(grown);
+			const streamLines = streaming.render(60);
+			expect(streamLines).toEqual(renderColdTransient(grown, 60));
+		}
+	});
+});
+
+describe("Markdown OSC 8 tail normalization across streaming appends", () => {
+	const ST = "\x1b\\";
+	const LINK = "\x1b]8;;https://example.com";
+
+	/** Append `chunks` one by one through a single streaming instance and
+	 *  assert each step's render is byte-identical to a cold full-lex render. */
+	function assertChunkedGrowth(chunks: string[], width = 60): void {
+		const streaming = new Markdown("", 0, 0, THEME);
+		let text = "";
+		for (const chunk of chunks) {
+			text += chunk;
+			clearRenderCache();
+			streaming.setText(text);
+			expect(streaming.render(width)).toEqual(renderCold(text, width));
+		}
+	}
+
+	it("normalizes an OSC 8 escape split across appends like a cold render", () => {
+		// The escape prefix, its body, and the ST terminator arrive in separate
+		// setText calls: the crossing match (started in the memoized pending
+		// suffix, completed in the delta) must be rewritten (ST → BEL) exactly
+		// like the full-document pass, and the following appends (now desynced
+		// from the caller's raw text) must fall back to the cold path and stay
+		// byte-identical.
+		assertChunkedGrowth(["\x1b]8;;", "https://example.com", ST, "`example.ts`", `\x1b]8;;${ST}`]);
+	});
+
+	it("keeps a BEL-terminated escape and an invalid ESC tail byte-identical", () => {
+		// A BEL closes the escape early (nothing to carry), and `\x1bX` is not a
+		// completable ST — neither may hold stale pending-suffix state across
+		// the following append.
+		assertChunkedGrowth([`${LINK}\x07`, "more", "\x1b]8;;https://example.com\x1bX", "tail"]);
+	});
+
+	it("falls back to the full-document pass on a truncating edit and stays correct", () => {
+		const full = `${LINK}${ST}link${"\x1b]8;;"}${ST}`;
+		const streaming = new Markdown(full, 0, 0, THEME);
+		// Non-append (shorter) edit: full pass re-normalizes and re-memoizes.
+		const truncated = full.slice(0, 12);
+		clearRenderCache();
+		streaming.setText(truncated);
+		expect(streaming.render(60)).toEqual(renderCold(truncated, 60));
+		// Subsequent append re-enters the fast path against the NEW memo.
+		clearRenderCache();
+		streaming.setText(`${truncated}|${ST}`);
+		expect(streaming.render(60)).toEqual(renderCold(`${truncated}|${ST}`, 60));
 	});
 });

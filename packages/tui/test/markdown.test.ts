@@ -1895,6 +1895,23 @@ describe("Module-level LRU render cache", () => {
 		expect(plain).not.toContain("S<");
 		expect(plain).not.toContain("F<");
 	});
+
+	it("keeps an open fence plain when the highlight stream factory throws", () => {
+		clearRenderCache();
+		const themeWithStream = {
+			...defaultMarkdownTheme,
+			highlightCode: (code: string, _lang?: string): string[] => [`F<${code}>`],
+			createHighlightStream: (_lang?: string) => {
+				throw new TypeError("undefined is not a constructor");
+			},
+		};
+
+		const markdown = new Markdown("```lua\nlocal x = 1\nmore", 0, 0, themeWithStream);
+		markdown.transientRenderCache = true;
+		const plain = stripVTControlCharacters(markdown.render(80).join("\n"));
+		expect(plain).toContain("local x = 1");
+		expect(plain).not.toContain("F<");
+	});
 });
 
 describe("OSC 66 text-sizing headings", () => {

@@ -362,7 +362,7 @@ export interface InteractiveModeContext {
 	updateEditorBorderColor(): void;
 	rebuildChatFromMessages(options?: { reuseSettledComponents?: boolean }): void;
 	setTodos(todos: TodoItem[] | TodoPhase[]): void;
-	reloadTodos(): Promise<void>;
+	reloadTodos(source?: AgentSession): Promise<void>;
 	toggleTodoExpansion(): void;
 
 	// Command handling
@@ -418,6 +418,8 @@ export interface InteractiveModeContext {
 	showHistorySearch(): void;
 	showExtensionsDashboard(): void;
 	showAgentsDashboard(): void;
+	/** Open the fullscreen git UI, optionally pinned to a revision (`/git <rev>`). */
+	showGitUi(revision?: string): void;
 	showModelSelector(options?: { temporaryOnly?: boolean }): void;
 	showPluginSelector(mode?: "install" | "uninstall"): void;
 	showUserMessageSelector(): void;

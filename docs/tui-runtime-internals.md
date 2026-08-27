@@ -21,6 +21,9 @@ Each normal frame:
 4. Ask `TranscriptContainer` for the live rows within the exact remainder.
 5. Return one bounded `TerminalFramePlan`.
 
+Graceful shutdown switches the provider to Flush policy and synchronously drains
+every currently eligible finalized prefix before terminal handoff.
+
 The welcome header follows the same ordered retirement model but is composer-owned: it stays live viewport chrome while its intro animates and while the screen has room, then retires once — before any transcript batch — when content first overflows.
 
 ## Input and focus
@@ -43,7 +46,11 @@ Optimistic user submissions call `renderNow()` before agent dispatch so synchron
 - **settled** — finalized but still live: it re-renders at the current width every frame (so resizes reflow it) until capacity pressure retires it;
 - **committed** — acknowledged by the terminal writer and released from render caches.
 
-Finalizing a later block never bypasses an active predecessor. `peekFinalizedBatch(width, capacity)` retires the shortest settled prefix that lets the remaining live tail fit `capacity`, stops at the first active block, and reoffers the same id until `acknowledgeFinalizedBatch()` succeeds. While the screen has room nothing retires, so a submitted message is visible immediately and recent blocks keep reflowing on resize.
+Finalizing a later block never bypasses an active predecessor. `peekFinalizedBatch(width, capacity)` retires the shortest settled prefix that lets the remaining live tail fit `capacity`, stops at the first active block, and reoffers the same id until `acknowledgeFinalizedBatch()` succeeds. `peekFlushBatch(width)` takes the whole eligible prefix during graceful shutdown. While the screen has room nothing retires during ordinary operation, so a submitted message is visible immediately and recent blocks keep reflowing on resize.
+
+Display replay has an independent cursor over committed entries. It never changes
+`committed` states or the logical frontier, and an offered replay never removes
+the active tail from the projected viewport.
 
 Every emitted transcript block owns one trailing separator row. This preserves spacing between a finalized user/tool block and the next active assistant/tool row without duplicating separators across batches.
 
@@ -86,7 +93,7 @@ Viewport-only frames cannot create history. Theme changes leave native history t
 
 During resize, TUI borrows the alternate buffer. The frame provider supplies a full semantic viewport tail for that transient buffer; history offers are never acknowledged there. After a short quiet window TUI restores the normal buffer — which the terminal has reflowed — and recovers the viewport anchor with a DSR (CSI 6n) round trip: every normal paint parks the hardware cursor at a known viewport offset, terminals keep that cursor attached to its logical line through width rewrap, and the settled anchor is `min(reported − parkOffset, height − staleReflowedRows)`. The second bound reconstructs height-shrink scrollback pushes that clamp the cursor instead of scrolling it (bottom-preserving resize guarantees the stale viewport ends on the last screen row whenever a push happened); multiplexers clip instead of rewrapping, so the stale-row measure counts one row per row there. The repaint waits for the CPR reply (200 ms timeout falls back to the bounded retained anchor); `packages/tui/test/resize-anchor-recovery.test.ts` validates the formula against kitty's real core.
 
-A settled resize then applies `ResizeScrollbackMode`. `rebuild` clears native history with ED3 and asks the provider to re-offer the complete finalized transcript under fresh monotonic ids. `append` performs the same replay below retained history. `preserve` skips replay and only repaints the anchored viewport. The raw TUI default is `preserve`; the coding agent sets `rebuild`.
+A settled resize then applies `ResizeScrollbackMode`. `rebuild` clears native history with ED3 and asks the provider to replay the complete committed transcript under fresh monotonic ids. `append` performs the same independent replay below retained history. `preserve` skips replay and only repaints the anchored viewport. The raw TUI default is `preserve`; the coding agent sets `rebuild`.
 
 A shrink can make the terminal itself push live viewport rows into scrollback before the app hears about the resize; those rows are unreachable to an inline app and may remain above the repainted frame at their old width. The screen itself always converges to exactly one copy. Likewise, when a history append overflows the screen, the writer first erases the old live viewport region so a scroll can only push committed rows and blanks into scrollback, never an unfinished frame.
 
@@ -104,4 +111,4 @@ Inline image data and purge commands are emitted before row placements. Active i
 
 ## Shutdown
 
-Interactive shutdown disposes session-owned work, drains terminal input, restores title/protocol state, and calls `TUI.stop()`. TUI exits any alternate buffer, cancels render/resize timers, purges image state, places the shell cursor directly after visible TUI content, restores cursor visibility, then delegates terminal-mode restoration to `ProcessTerminal.stop()`.
+Interactive shutdown disposes session-owned work, drains terminal input, restores title/protocol state, and calls `TUI.stop()`. TUI exits any alternate buffer, asks the provider to Flush all eligible finalized history, cancels render/resize timers, preserves terminal-owned image state, places the shell cursor directly after visible TUI content, restores cursor visibility, then delegates terminal-mode restoration to `ProcessTerminal.stop()`.

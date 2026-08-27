@@ -20,7 +20,8 @@ export interface AppliedEditSnapshot {
 /** Observes a committed edit before its full-file snapshots are pruned. */
 export type AppliedEditObserver = (snapshot: AppliedEditSnapshot) => Promise<void>;
 
-function parses(code: string, filePath: string): boolean {
+/** True when tree-sitter parses `code` (selected by `filePath`) without errors. */
+export function sourceParses(code: string, filePath: string): boolean {
 	// The structural summarizer treats an empty source as "not summarized",
 	// while an empty source is valid in every supported tree-sitter language.
 	const parseSource = code.length === 0 ? "\n" : code;
@@ -35,7 +36,7 @@ function parses(code: string, filePath: string): boolean {
 export function introducedParseFailure({ path: filePath, prev, next }: AppliedEditSnapshot): boolean {
 	// New content normally parses, so test it first and avoid re-parsing the
 	// pre-image on the overwhelmingly common successful-edit path.
-	return !parses(next, filePath) && parses(prev, filePath);
+	return !sourceParses(next, filePath) && sourceParses(prev, filePath);
 }
 
 /**

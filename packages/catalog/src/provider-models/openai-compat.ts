@@ -1306,6 +1306,181 @@ export function novitaModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 5.6 DeepInfra
+// ---------------------------------------------------------------------------
+
+export const DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai";
+/**
+ * `filter=with_meta` attaches per-model `metadata` (limits, pricing, tags);
+ * `sort_by=omp` asks DeepInfra to return models in omp-priority order
+ * (earlier = better). The mapper does not stamp `priority` yet — see
+ * `mapDeepinfraModel` — but the params are sent so discovery picks the
+ * ordering up as soon as the server honors it.
+ */
+const DEEPINFRA_MODELS_QUERY = "?filter=with_meta&sort_by=omp";
+const DEEPINFRA_EFFORTS = [Effort.Low, Effort.Medium, Effort.High] as const;
+
+/** DeepInfra OpenAI-compatible discovery configuration. */
+export interface DeepinfraModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+interface DeepinfraModelEntry {
+	id?: unknown;
+	metadata?: unknown;
+}
+
+function deepinfraTags(metadata: Record<string, unknown>): readonly string[] {
+	const tags = metadata.tags;
+	return Array.isArray(tags) ? tags.filter((tag): tag is string => typeof tag === "string") : [];
+}
+
+/**
+ * Map one DeepInfra catalog entry to a chat model spec. Non-`chat` entries
+ * (`tts`, `stt`, `embed`, `image-gen`, `video-gen`) are dropped — those
+ * surfaces are served by dedicated tool backends, not the chat catalog.
+ * DeepInfra reports token prices in USD per 1M tokens — omp's `ModelCost`
+ * unit, used verbatim. A bundled reference (when the generated catalog has
+ * one) is spread first so compat/tooling metadata can contribute, but the
+ * live metadata always wins for limits, pricing, and modalities.
+ */
+function mapDeepinfraModel(
+	entry: DeepinfraModelEntry,
+	baseUrl: string,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> | null {
+	const id = typeof entry.id === "string" ? entry.id.trim() : "";
+	if (!id) {
+		return null;
+	}
+	const metadata = isRecord(entry.metadata) ? entry.metadata : {};
+	const tags = deepinfraTags(metadata);
+	if (!tags.includes("chat")) {
+		return null;
+	}
+	const pricing = isRecord(metadata.pricing) ? metadata.pricing : {};
+	// `reasoning_effort` marks models whose effort dial is advertised. The
+	// parameter itself is validated and accepted platform-wide on DeepInfra
+	// (verified: 200 on effort-tagged, reasoning-only, and plain-chat models;
+	// 422 only for out-of-enum values), so a bundled reference's effort ladder
+	// surviving the `...reference` spread after a tag disappears is harmless —
+	// the host ignores the dial rather than rejecting the request.
+	const thinking: ThinkingConfig | undefined = tags.includes("reasoning_effort")
+		? { mode: "effort", efforts: [...DEEPINFRA_EFFORTS] }
+		: undefined;
+	const contextWindow = toPositiveNumber(metadata.context_length, reference?.contextWindow ?? null);
+	// `metadata.max_tokens` mirrors `context_length` on every live row today —
+	// it is the total token ceiling, not an output cap (the catalog exposes no
+	// output-specific field). Stamping it into `maxTokens` would advertise
+	// `output === context` for every model and default oversized `max_tokens`
+	// onto models with smaller real output limits. Trust it only when it is
+	// strictly below the context window (i.e. the API starts publishing a real
+	// output cap); otherwise keep the bundled reference's cap (stencil.so fill
+	// during generation) or leave the limit unknown so requests defer to the
+	// server-side cap.
+	const liveMaxTokens = toPositiveNumber(metadata.max_tokens, 0);
+	const hasLiveOutputCap = contextWindow !== null && liveMaxTokens > 0 && liveMaxTokens < contextWindow;
+	// A same-id reference carries the canonical deployment's output cap, which
+	// can exceed the (smaller) window DeepInfra serves — e.g. a 500K cap against
+	// a 256K context. An output cap above the context ceiling is meaningless, so
+	// keep the fallback inside the window.
+	const referenceMaxTokens = reference?.maxTokens ?? null;
+	const maxTokens = hasLiveOutputCap
+		? liveMaxTokens
+		: referenceMaxTokens !== null && contextWindow !== null
+			? Math.min(referenceMaxTokens, contextWindow)
+			: referenceMaxTokens;
+	return {
+		...reference,
+		id,
+		name: reference?.name ?? id,
+		api: "openai-completions",
+		provider: "deepinfra",
+		baseUrl,
+		reasoning: tags.includes("reasoning") || tags.includes("reasoning_effort"),
+		...(thinking ? { thinking } : {}),
+		input: tags.includes("vision") || tags.includes("vlm") ? ["text", "image"] : ["text"],
+		cost: {
+			input: toPositiveNumber(pricing.input_tokens, 0),
+			output: toPositiveNumber(pricing.output_tokens, 0),
+			cacheRead: toPositiveNumber(pricing.cache_read_tokens, 0),
+			cacheWrite: 0,
+		},
+		contextWindow,
+		maxTokens,
+	};
+}
+
+/**
+ * Bespoke fetch instead of `fetchOpenAICompatibleModels`: the shared helper
+ * cannot carry the `filter`/`sort_by` query params and re-sorts results by id,
+ * which would destroy DeepInfra's priority ordering once the server honors
+ * `sort_by=omp`. Response order is preserved (dedupe keeps the first, i.e.
+ * highest-priority, occurrence).
+ */
+async function fetchDeepinfraModels(options: {
+	baseUrl: string;
+	apiKey?: string;
+	fetch?: FetchImpl;
+	references: Map<string, ModelSpec<"openai-completions">>;
+}): Promise<ModelSpec<"openai-completions">[] | null> {
+	const headers: Record<string, string> = { Accept: "application/json" };
+	if (options.apiKey) {
+		headers.Authorization = `Bearer ${options.apiKey}`;
+	}
+	const fetchImpl = discoveryFetch(options.fetch);
+	let payload: unknown;
+	try {
+		const response = await withCatalogDiscoveryTimeout(DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS, signal =>
+			fetchImpl(`${options.baseUrl}/models${DEEPINFRA_MODELS_QUERY}`, { method: "GET", headers, signal }),
+		);
+		if (!response.ok) {
+			return null;
+		}
+		payload = await response.json();
+	} catch {
+		return null;
+	}
+	if (!isRecord(payload) || !Array.isArray(payload.data)) {
+		return null;
+	}
+	const models: ModelSpec<"openai-completions">[] = [];
+	const seen = new Set<string>();
+	for (const entry of payload.data) {
+		if (!isRecord(entry)) {
+			continue;
+		}
+		const reference = typeof entry.id === "string" ? options.references.get(entry.id) : undefined;
+		const mapped = mapDeepinfraModel(entry as DeepinfraModelEntry, options.baseUrl, reference);
+		if (mapped && !seen.has(mapped.id)) {
+			seen.add(mapped.id);
+			models.push(mapped);
+		}
+	}
+	return models;
+}
+
+/**
+ * Builds DeepInfra's model-discovery manager. The catalog endpoint is public,
+ * so discovery (and keyless `gen:models` generation) works without an API key;
+ * model availability at runtime is still gated on credentials by the registry.
+ */
+export function deepinfraModelManagerOptions(
+	config?: DeepinfraModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = (config?.baseUrl ?? DEEPINFRA_BASE_URL).replace(/\/$/, "");
+	const references = createBundledReferenceMap<"openai-completions">("deepinfra");
+	return {
+		providerId: "deepinfra",
+		dynamicModelsAuthoritative: true,
+		fetchDynamicModels: () => fetchDeepinfraModels({ baseUrl, apiKey, fetch: config?.fetch, references }),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 6. xAI
 // ---------------------------------------------------------------------------
 
@@ -1313,6 +1488,68 @@ export interface XaiModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
 	fetch?: FetchImpl;
+}
+
+// xAI bills the whole request at 2x the base rates once the prompt reaches
+// 200K tokens, for every current Grok SKU that carries the two-tier card
+// (grok-4.3/4.5/4.6, every grok-4.20 variant, grok-build-0.1). Source:
+// docs.x.ai/developers/models. Computing the tier from the base keeps it in
+// lockstep with stencil.so price updates instead of a hand-maintained table.
+const XAI_LONG_CONTEXT_THRESHOLD = 200_000;
+const XAI_LONG_CONTEXT_MULTIPLIER = 2;
+
+// SuperGrok surfaces a few models under IDs that differ from their public
+// `xai` catalog equivalent, so the exact-ID price fallback misses them. Map
+// the OAuth ID to the paid ID it mirrors.
+const XAI_OAUTH_PRICE_ALIASES: Record<string, string> = {
+	"grok-4.20-multi-agent-0309": "grok-4.20-multi-agent-beta-latest",
+};
+
+function xaiHasLongContextTier(modelId: string): boolean {
+	return (
+		modelId === "grok-4.3" ||
+		modelId === "grok-4.5" ||
+		modelId === "grok-4.6" ||
+		modelId === "grok-build-0.1" ||
+		modelId.startsWith("grok-4.20")
+	);
+}
+
+function hasTokenPrice(cost: ModelSpec["cost"]): boolean {
+	return cost.input !== 0 || cost.output !== 0 || cost.cacheRead !== 0 || cost.cacheWrite !== 0;
+}
+
+function withXaiLongContextTier(model: ModelSpec): ModelSpec {
+	if (!xaiHasLongContextTier(model.id) || !hasTokenPrice(model.cost)) return model;
+	const longContext: LongContextTokenCost = {
+		inputThreshold: XAI_LONG_CONTEXT_THRESHOLD,
+		inputThresholdInclusive: true,
+		input: model.cost.input * XAI_LONG_CONTEXT_MULTIPLIER,
+		output: model.cost.output * XAI_LONG_CONTEXT_MULTIPLIER,
+		cacheRead: model.cost.cacheRead * XAI_LONG_CONTEXT_MULTIPLIER,
+		cacheWrite: model.cost.cacheWrite * XAI_LONG_CONTEXT_MULTIPLIER,
+	};
+	return { ...model, cost: { ...model.cost, longContext } };
+}
+
+/**
+ * Applies xAI's long-context rate card and mirrors exact public-model prices
+ * onto matching SuperGrok catalog rows.
+ */
+export function applyXaiCatalogPricing(models: readonly ModelSpec[]): ModelSpec[] {
+	const pricedModels = models.map(model => (model.provider === "xai" ? withXaiLongContextTier(model) : model));
+	const publicCosts = new Map(
+		pricedModels
+			.filter(model => model.provider === "xai" && hasTokenPrice(model.cost))
+			.map(model => [model.id, model.cost]),
+	);
+
+	return pricedModels.map(model => {
+		if (model.provider !== "xai-oauth" || hasTokenPrice(model.cost)) return model;
+		const alias = XAI_OAUTH_PRICE_ALIASES[model.id];
+		const publicCost = publicCosts.get(model.id) ?? (alias ? publicCosts.get(alias) : undefined);
+		return publicCost ? { ...model, cost: { ...publicCost } } : model;
+	});
 }
 
 export function xaiModelManagerOptions(config?: XaiModelManagerConfig): ModelManagerOptions<"openai-responses"> {
@@ -4524,6 +4761,133 @@ export function aiandModelManagerOptions(config?: AiandModelManagerConfig): Mode
 }
 
 // ---------------------------------------------------------------------------
+// 16.7 Yolo-Auto (yolo-auto.com)
+// ---------------------------------------------------------------------------
+
+const YOLO_AUTO_BASE_URL = "https://yolo-auto.com/v1";
+
+/**
+ * Documented Yolo-Auto catalog (yolo-auto.com/docs, 2026-08) bundled so the
+ * provider is usable when generation and first boot have no live key. The
+ * flat-rate `/v1/models` response is authoritative once discovery runs.
+ * The compat block mirrors the provider's documented wire surface: the API
+ * speaks the generic chat template with `reasoning_effort` support and rejects
+ * the `developer` role and `store` param.
+ */
+export const YOLO_AUTO_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: "deepseek-flash-v4",
+		name: "DeepSeek Flash V4",
+		api: "openai-completions",
+		provider: "yolo-auto",
+		baseUrl: YOLO_AUTO_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		thinking: {
+			mode: "effort",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+			effortMap: {
+				[Effort.Minimal]: "low",
+				[Effort.Low]: "low",
+				[Effort.Medium]: "high",
+				[Effort.High]: "high",
+				[Effort.XHigh]: "max",
+				[Effort.Max]: "max",
+			},
+		},
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 131_072,
+		maxTokens: null,
+		compat: {
+			supportsDeveloperRole: false,
+			supportsStore: false,
+			supportsReasoningEffort: true,
+			thinkingFormat: "chat-template",
+		},
+	},
+];
+
+export interface YoloAutoModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Map a discovered entry onto its reference, then re-apply Yolo-Auto's
+ * provider-wide wire constraints. A model that only exists in another
+ * provider's bundle (e.g. `gpt-4o` served via the global reference index)
+ * would otherwise inherit that provider's token pricing and `store`-capable
+ * surface, which the flat-rate Yolo endpoint neither charges nor accepts.
+ */
+function mapYoloAutoModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> {
+	const model = mapWithBundledReference(entry, defaults, reference);
+	return {
+		...model,
+		// Flat-rate and no-store are provider-wide: they must win whether the
+		// reference came from the yolo bundle, the global index, or nowhere.
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		compat: {
+			...model.compat,
+			supportsStore: false,
+			supportsDeveloperRole: false,
+		},
+	};
+}
+/**
+ * Yolo-Auto model manager: OpenAI-compatible chat completions at the
+ * flat-rate `deepseek-flash-v4` endpoint. Live `/v1/models` discovery replaces the
+ * bundled seed once a key is stored or present in `YOLO_AUTO_API_KEY`. Models
+ * the provider adds later inherit metadata (reasoning, thinking, context)
+ * from the global bundled reference index, so new ids work without a per-id
+ * code change.
+ */
+export function yoloAutoModelManagerOptions(
+	config?: YoloAutoModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	// Curated static models take precedence over the previously generated
+	// bundle so later corrections to the curated metadata are honored; bundle
+	// rows keep ids that earlier credentialed runs discovered, and the global
+	// index covers everything else.
+	const references = new Map<string, ModelSpec<"openai-completions">>();
+	const bundled = createBundledReferenceMap<"openai-completions">("yolo-auto");
+	for (const model of bundled.values()) {
+		references.set(model.id, model);
+	}
+	for (const model of YOLO_AUTO_STATIC_MODELS) {
+		const previous = references.get(model.id);
+		references.set(model.id, {
+			...previous,
+			...model,
+			// Generation-filled fields the curated seed leaves null: keep the
+			// canonical values baked by the previous regen (max-output cap,
+			// derived thinking) instead of dropping them.
+			maxTokens: model.maxTokens ?? previous?.maxTokens ?? null,
+			thinking: model.thinking ?? previous?.thinking,
+		});
+	}
+	const resolveReference = createReferenceResolver(() => references);
+	return {
+		...createOpenAICompatibleModelManagerOptions({
+			api: "openai-completions",
+			providerId: "yolo-auto",
+			defaultBaseUrl: YOLO_AUTO_BASE_URL,
+			config,
+			requireApiKey: true,
+			mapModel: (entry, defaults, reference) =>
+				mapYoloAutoModel(entry, defaults, resolveReference(defaults.id) ?? reference),
+			dynamicModelsAuthoritative: true,
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
 // 17. Qwen Portal
 // ---------------------------------------------------------------------------
 
@@ -4690,6 +5054,7 @@ type LiteLLMRichEndpointModel<TApi extends Api> = {
 	hasToolMetadata: boolean;
 	hasSupportedOpenAIParams: boolean;
 	hasCost: boolean;
+	reportedCost: Partial<ModelSpec<Api>["cost"]>;
 };
 type LiteLLMRichEndpointFailure = {
 	endpoint: string;
@@ -4814,30 +5179,36 @@ function getLiteLLMParams(entry: LiteLLMRichModelEntry): LiteLLMRichModelEntry |
 function getLiteLLMMetadataValue(entry: LiteLLMRichModelEntry, key: string): unknown {
 	return entry[key] ?? getLiteLLMModelInfo(entry)?.[key];
 }
-
-/** Per-million USD cost from a `*_per_token` LiteLLM field, or `undefined` when absent/non-positive. */
+/** Per-million USD cost from a positive `*_per_token` LiteLLM field. */
 function getLiteLLMPerMillionCost(entry: LiteLLMRichModelEntry, key: string): number | undefined {
 	const perToken = toNumber(getLiteLLMMetadataValue(entry, key));
 	return perToken !== undefined && perToken > 0 ? perToken * 1_000_000 : undefined;
 }
 
-/**
- * Map LiteLLM's per-token pricing (`input_cost_per_token`, `output_cost_per_token`,
- * cache costs) onto {@link ModelSpec.cost} in $/million tokens. Returns `undefined`
- * when LiteLLM reports neither an input nor an output price so callers keep the
- * bundled reference cost.
- */
-function getLiteLLMCost(entry: LiteLLMRichModelEntry): ModelSpec<Api>["cost"] | undefined {
+/** Map positive LiteLLM per-token prices onto their per-million cost fields. */
+function getLiteLLMReportedCost(entry: LiteLLMRichModelEntry): Partial<ModelSpec<Api>["cost"]> {
 	const input = getLiteLLMPerMillionCost(entry, "input_cost_per_token");
 	const output = getLiteLLMPerMillionCost(entry, "output_cost_per_token");
-	if (input === undefined && output === undefined) {
+	const cacheRead = getLiteLLMPerMillionCost(entry, "cache_read_input_token_cost");
+	const cacheWrite = getLiteLLMPerMillionCost(entry, "cache_creation_input_token_cost");
+	return {
+		...(input !== undefined ? { input } : {}),
+		...(output !== undefined ? { output } : {}),
+		...(cacheRead !== undefined ? { cacheRead } : {}),
+		...(cacheWrite !== undefined ? { cacheWrite } : {}),
+	};
+}
+
+function getLiteLLMCost(entry: LiteLLMRichModelEntry): ModelSpec<Api>["cost"] | undefined {
+	const cost = getLiteLLMReportedCost(entry);
+	if (cost.input === undefined && cost.output === undefined) {
 		return undefined;
 	}
 	return {
-		input: input ?? 0,
-		output: output ?? 0,
-		cacheRead: getLiteLLMPerMillionCost(entry, "cache_read_input_token_cost") ?? 0,
-		cacheWrite: getLiteLLMPerMillionCost(entry, "cache_creation_input_token_cost") ?? 0,
+		input: cost.input ?? 0,
+		output: cost.output ?? 0,
+		cacheRead: cost.cacheRead ?? 0,
+		cacheWrite: cost.cacheWrite ?? 0,
 	};
 }
 
@@ -5037,13 +5408,23 @@ function mergeLiteLLMRichEndpointModels<TApi extends Api>(
 		maxTokens: next.hasMaxTokens ? next.model.maxTokens : existing.model.maxTokens,
 		input: next.supportsVision === true || next.supportsVision === false ? next.model.input : existing.model.input,
 		reasoning: typeof next.supportsReasoning === "boolean" ? next.model.reasoning : existing.model.reasoning,
-		cost: next.hasCost ? next.model.cost : existing.model.cost,
+		cost: { ...existing.model.cost, ...existing.reportedCost, ...next.reportedCost },
 		compat: next.hasSupportedOpenAIParams ? next.model.compat : existing.model.compat,
 	};
 	if (next.hasToolMetadata) {
 		model.supportsTools = next.model.supportsTools;
 	}
-	return { ...next, apiRoute, model };
+	return {
+		...next,
+		apiRoute,
+		model,
+		reportedCost: { ...existing.reportedCost, ...next.reportedCost },
+		hasContextWindow: existing.hasContextWindow || next.hasContextWindow,
+		hasMaxTokens: existing.hasMaxTokens || next.hasMaxTokens,
+		hasToolMetadata: existing.hasToolMetadata || next.hasToolMetadata,
+		hasSupportedOpenAIParams: existing.hasSupportedOpenAIParams || next.hasSupportedOpenAIParams,
+		hasCost: existing.hasCost || next.hasCost,
+	};
 }
 
 async function fetchLiteLLMRichEndpoint<TApi extends Api>(
@@ -5105,6 +5486,7 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 					supportedOpenAIParams !== undefined,
 				hasSupportedOpenAIParams: supportedOpenAIParams !== undefined,
 				hasCost: getLiteLLMCost(entry) !== undefined,
+				reportedCost: getLiteLLMReportedCost(entry),
 			};
 			const existing = deduped.get(model.id);
 			deduped.set(model.id, existing ? mergeLiteLLMRichEndpointModels(existing, next) : next);
@@ -5166,7 +5548,12 @@ async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 			for (const entry of deduped.values()) {
 				if (
 					(entry.supportsVision !== true && entry.supportsVision !== false) ||
-					(options.resolveApi !== undefined && entry.apiRoute === "unknown")
+					(options.resolveApi !== undefined && entry.apiRoute === "unknown") ||
+					(Object.keys(entry.reportedCost).length > 0 &&
+						(entry.reportedCost.input === undefined ||
+							entry.reportedCost.output === undefined ||
+							entry.reportedCost.cacheRead === undefined ||
+							entry.reportedCost.cacheWrite === undefined))
 				) {
 					needsMoreMetadata = true;
 					break;
@@ -5203,12 +5590,12 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("litellm")!;
 	return {
 		providerId: "litellm",
-		// rich-v6 invalidates rows cached before OpenAI models moved to Responses.
-		// Earlier versions added bundled reference fallback, continued discovery
-		// past incomplete `/model_group/info`, stripped reseller usage suffixes,
-		// filtered placeholder-only `all-team-models` rows, and mapped rich pricing.
-		// Bump the version whenever the mappers below change, or warm authoritative
-		// caches keep serving pre-change rows for the full TTL.
+		// rich-v7 invalidates rows cached before discovery continued past endpoints
+		// that omitted cache pricing. Earlier versions added bundled reference fallback,
+		// moved OpenAI models to Responses, continued past incomplete vision and API
+		// metadata, stripped reseller usage suffixes, filtered placeholder rows, and
+		// mapped rich pricing. Bump the version whenever these mappers change, or warm
+		// authoritative caches keep serving pre-change rows for the full TTL.
 		cacheProviderId: resolveModelCacheProviderId("litellm", { baseUrl }),
 		// litellm is a local-only proxy and is never bundled in models.json (that
 		// would leak the machine's localhost catalog). Prefer the proxy's richer

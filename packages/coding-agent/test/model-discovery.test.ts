@@ -208,6 +208,92 @@ describe("ModelRegistry runtime discovery", () => {
 		};
 	}
 
+	test("scoped discovery coalesces with an in-flight background refresh", async () => {
+		writeRawModelsJson({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9992",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const { promise, resolve } = Promise.withResolvers<Response>();
+		const started = Promise.withResolvers<void>();
+		let modelListCalls = 0;
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9992/v1/models") {
+				modelListCalls++;
+				started.resolve();
+				return promise;
+			}
+			return new Response("", { status: 404 });
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+		registry.refreshInBackground();
+		await started.promise;
+		expect(modelListCalls).toBe(1);
+
+		const scopedRefresh = registry.refreshDiscoverableProviders(["gateway"], "online-if-uncached");
+		expect(modelListCalls).toBe(1);
+
+		resolve(Response.json({ data: [{ id: "dynamic-model", context_length: 65_536 }] }));
+		await Promise.all([scopedRefresh, registry.awaitBackgroundRefresh()]);
+
+		expect(modelListCalls).toBe(1);
+		expect(registry.find("gateway", "dynamic-model")).toBeDefined();
+	});
+
+	test("does not coalesce or apply discovery across provider config changes", async () => {
+		writeRawModelsJson({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9992",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const oldResponse = Promise.withResolvers<Response>();
+		const oldStarted = Promise.withResolvers<void>();
+		let newModelListCalls = 0;
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9992/v1/models") {
+				oldStarted.resolve();
+				return oldResponse.promise;
+			}
+			if (url === "http://127.0.0.1:9991/v1/models") {
+				newModelListCalls++;
+				return Response.json({ data: [{ id: "new-model", context_length: 65_536 }] });
+			}
+			return new Response("", { status: 404 });
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+		registry.refreshInBackground();
+		await oldStarted.promise;
+
+		const previousMtime = fs.statSync(modelsJsonPath).mtimeMs;
+		writeRawModelsJson({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9991",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const changedTime = new Date(previousMtime + 1_000);
+		fs.utimesSync(modelsJsonPath, changedTime, changedTime);
+		const refreshed = registry.refresh("online-if-uncached");
+		oldResponse.resolve(Response.json({ data: [{ id: "old-model", context_length: 65_536 }] }));
+		await Promise.all([refreshed, registry.awaitBackgroundRefresh()]);
+
+		expect(newModelListCalls).toBe(1);
+		expect(registry.find("gateway", "new-model")).toBeDefined();
+		expect(registry.find("gateway", "old-model")).toBeUndefined();
+	});
+
 	test("refreshProvider online refreshes expired anthropic OAuth before model discovery", async () => {
 		const { refreshCalls } = await useAuthStorageWithRefreshTracker();
 		await authStorage.set("anthropic", {

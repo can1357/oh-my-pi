@@ -402,9 +402,18 @@ describe("runEvalAgent", () => {
 	it("unregisters eval subagents through the bridge cleanup path", async () => {
 		AgentRegistry.resetGlobalForTests();
 		mockAgents();
+		const order: string[] = [];
 		let disposed = false;
 		const cleanupSession = {
+			prepareForHeadlessAdvisorDrain: () => {
+				order.push("prepare");
+			},
+			waitForAdvisorCatchup: async () => {
+				order.push("catchup");
+				return true;
+			},
 			dispose: async () => {
+				order.push("dispose");
 				disposed = true;
 			},
 		} as unknown as AgentSession;
@@ -431,6 +440,9 @@ describe("runEvalAgent", () => {
 		await runEvalAgent({ prompt: "hello", label: "Cleanup" }, { session: makeSession() });
 
 		expect(disposed).toBe(true);
+		// The advisor's final-turn review is drained before the runtime is torn
+		// down (#9505): a graceful subagent finish must not abandon the yield.
+		expect(order).toEqual(["prepare", "catchup", "dispose"]);
 		expect(AgentRegistry.global().get("Cleanup")).toBeUndefined();
 		expect(
 			AgentRegistry.global()

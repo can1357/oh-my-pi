@@ -4,7 +4,7 @@ import hashlineGrammar from "@oh-my-pi/hashline/grammar.lark" with { type: "text
 import hashlineDescription from "@oh-my-pi/hashline/prompt.md" with { type: "text" };
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
-import { isEnoent, isEnotdir, prompt } from "@oh-my-pi/pi-utils";
+import { isEnoent, isEnotdir, logger, prompt } from "@oh-my-pi/pi-utils";
 import { createLspWritethrough, flushLspWritethroughBatch, type WritethroughCallback, writethroughNoop } from "../lsp";
 import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
 import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
@@ -16,13 +16,27 @@ import { truncateForPrompt } from "../tools/approval";
 import { findUniqueWorkspaceSuffix, isInternalUrlPath, resolveFileWriteApprovalTier } from "../tools/path-utils";
 import { resolvePlanPath } from "../tools/plan-mode-guard";
 import { type EditMode, normalizeEditMode, resolveEditMode } from "../utils/edit-mode";
-import { type AppliedEditObserver, createEditBlackboxRecorder, introducedParseFailure } from "./blackbox";
+import { attemptEditAutoRepair, type EditAutoRepairOutcome } from "./auto-repair";
+import {
+	type AppliedEditObserver,
+	type AppliedEditSnapshot,
+	createEditBlackboxRecorder,
+	introducedParseFailure,
+} from "./blackbox";
 import { executeHashlineSingle, hashlineEditParamsSchema } from "./hashline";
 import { type ApplyPatchParams, applyPatchSchema, expandApplyPatchToEntries } from "./modes/apply-patch";
 import applyPatchGrammar from "./modes/apply-patch.lark" with { type: "text" };
 import { executePatchSingle, type PatchEditEntry, type PatchParams, patchEditSchema } from "./modes/patch";
 import { executeReplace, type ReplaceBatchParams, type ReplaceParams, replaceEditSchema } from "./modes/replace";
 import { type EditToolDetails, type EditToolPerFileResult, getLspBatchRequest, type LspBatchRequest } from "./renderer";
+import {
+	createAggregateEditDetails,
+	createAggregateEditToolResult,
+	createFailedEditResult,
+	getEditResultText,
+	joinEditResultText,
+	toEditPerFileResult,
+} from "./result";
 import {
 	executeSloppy,
 	type SloppyParams,
@@ -32,7 +46,6 @@ import {
 	sloppyVariant,
 	splitSloppySections,
 } from "./sloppy";
-import { pruneOversizedEditSnapshots } from "./snapshot-details";
 import { EDIT_MODE_STRATEGIES } from "./streaming";
 
 export * from "@oh-my-pi/hashline";
@@ -46,6 +59,7 @@ export * from "./modes/patch";
 export * from "./modes/replace";
 export * from "./normalize";
 export * from "./renderer";
+export * from "./result";
 export * from "./sloppy";
 export * from "./snapshot-details";
 export * from "./streaming";
@@ -183,26 +197,13 @@ async function executeApplyPatchPerFile(
 
 		try {
 			const result = await run(batchRequest);
-			const details = result.details;
-			perFileResults.push({
-				path: details?.path ?? path,
-				diff: details?.diff ?? "",
-				firstChangedLine: details?.firstChangedLine,
-				diagnostics: details?.diagnostics,
-				op: details?.op,
-				move: details?.move,
-				sourcePath: details?.sourcePath,
-				meta: details?.meta,
-				oldText: details?.oldText,
-				newText: details?.newText,
-				snapshotsPruned: details?.snapshotsPruned,
-			});
-			const text = result.content?.find(c => c.type === "text")?.text ?? "";
+			perFileResults.push(toEditPerFileResult(result.details, path));
+			const text = getEditResultText(result);
 			if (text) contentTexts.push(text);
 		} catch (err) {
 			const errorText = err instanceof Error ? err.message : String(err);
 			const displayErrorText = err instanceof HashlineMismatchError ? err.displayMessage : undefined;
-			perFileResults.push({ path, diff: "", isError: true, errorText, displayErrorText });
+			perFileResults.push(createFailedEditResult(path, errorText, displayErrorText));
 			contentTexts.push(`Error editing ${path}: ${errorText}`);
 			hasError = true;
 			// Later entries were authored assuming this file's post-state; a
@@ -238,35 +239,23 @@ async function executeApplyPatchPerFile(
 
 		// Emit partial result after each file so UI shows progressive completion
 		if (!isLast && onUpdate) {
-			onUpdate({
-				content: [{ type: "text", text: contentTexts.join("\n") }],
-				details: {
-					diff: perFileResults
-						.map(r => r.diff)
-						.filter(Boolean)
-						.join("\n"),
-					firstChangedLine: perFileResults.find(r => r.firstChangedLine)?.firstChangedLine,
-					perFileResults: [...perFileResults],
-				},
-			});
+			onUpdate(
+				createAggregateEditToolResult(
+					joinEditResultText(contentTexts),
+					createAggregateEditDetails({ perFileResults }),
+				),
+			);
 		}
 	}
 
-	return {
-		content: [{ type: "text", text: contentTexts.join("\n") }],
-		details: pruneOversizedEditSnapshots({
-			diff: perFileResults
-				.map(r => r.diff)
-				.filter(Boolean)
-				.join("\n"),
-			firstChangedLine: perFileResults.find(r => r.firstChangedLine)?.firstChangedLine,
-			perFileResults,
-		}),
-		// Any per-file failure marks the aggregate result as an error so the
-		// agent loop and renderer take the error branch instead of treating
-		// a mixed partial application as a successful edit.
-		...(hasError ? { isError: true } : {}),
-	};
+	// Any per-file failure marks the aggregate result as an error so the agent
+	// loop and renderer take the error branch instead of treating a mixed
+	// partial application as a successful edit.
+	return createAggregateEditToolResult(
+		joinEditResultText(contentTexts),
+		createAggregateEditDetails({ perFileResults }),
+		hasError,
+	);
 }
 
 async function executeSinglePathEntries(
@@ -319,7 +308,7 @@ async function executeSinglePathEntries(
 				hasLastNewText = true;
 			}
 			if (details?.snapshotsPruned) snapshotsPruned = true;
-			const text = result.content?.find(c => c.type === "text")?.text ?? "";
+			const text = getEditResultText(result);
 			if (text) contentTexts.push(text);
 		} catch (err) {
 			const errorText = err instanceof Error ? err.message : String(err);
@@ -346,36 +335,38 @@ async function executeSinglePathEntries(
 		}
 
 		if (!isLast && onUpdate) {
-			onUpdate({
-				content: [{ type: "text", text: contentTexts.join("\n") }],
-				details: {
-					diff: diffTexts.join("\n"),
-					firstChangedLine,
-				},
-				...(hasError ? { isError: true } : {}),
-			});
+			onUpdate(
+				createAggregateEditToolResult(
+					joinEditResultText(contentTexts),
+					createAggregateEditDetails({
+						diff: diffTexts.join("\n"),
+						firstChangedLine,
+					}),
+					hasError,
+				),
+			);
 		}
 	}
 
-	return {
-		content: [{ type: "text", text: contentTexts.join("\n") }],
-		details: pruneOversizedEditSnapshots({
+	// Any per-entry failure marks the aggregate result as an error so the
+	// renderer takes the error branch instead of falling through to the
+	// streaming-edit preview (which displays the *proposed* diff and looks
+	// indistinguishable from success).
+	return createAggregateEditToolResult(
+		joinEditResultText(contentTexts),
+		createAggregateEditDetails({
 			diff: diffTexts.join("\n"),
 			firstChangedLine,
 			path: metadataPath ?? path,
 			...(snapshotsPruned
-				? { snapshotsPruned: true as const }
+				? { snapshotsPruned: true }
 				: {
 						...(hasFirstOldText ? { oldText: firstOldText } : {}),
 						...(hasLastNewText ? { newText: lastNewText } : {}),
 					}),
 		}),
-		// Any per-entry failure marks the aggregate result as an error so the
-		// renderer takes the error branch instead of falling through to the
-		// streaming-edit preview (which displays the *proposed* diff and looks
-		// indistinguishable from success).
-		...(hasError ? { isError: true } : {}),
-	};
+		hasError,
+	);
 }
 
 /**
@@ -545,13 +536,17 @@ export class EditTool implements AgentTool<TInput> {
 	): Promise<AgentToolResult<EditToolDetails, TInput>> {
 		const modeDefinition = this.#getModeDefinition();
 		const record = createEditBlackboxRecorder(this.session, this.mode, params);
-		const brokenPaths: string[] = [];
+		const parseFailures = new Map<string, AppliedEditSnapshot>();
 		const onApplied: AppliedEditObserver = async snapshot => {
 			// Diagnostic only: the edit has already committed, so a guard failure
 			// must never turn it into a reported edit failure.
 			try {
-				if (!introducedParseFailure(snapshot)) return;
-				brokenPaths.push(nodePath.relative(this.session.cwd, snapshot.path) || snapshot.path);
+				if (!introducedParseFailure(snapshot)) {
+					// A later operation in the same call restored the parse.
+					parseFailures.delete(snapshot.path);
+					return;
+				}
+				parseFailures.set(snapshot.path, snapshot);
 				await record?.(snapshot);
 			} catch {
 				// Parse probing is best-effort; skip the warning rather than fail.
@@ -565,14 +560,31 @@ export class EditTool implements AgentTool<TInput> {
 			onApplied,
 			onUpdate,
 		);
-		if (brokenPaths.length > 0) {
-			result.content = [
-				...result.content,
-				{
-					type: "text",
-					text: `Warning: ${brokenPaths.join(", ")} no longer parses after this edit. The change was applied; re-read the edited region and fix the syntax, or revert if unintended.`,
-				},
-			];
+		if (parseFailures.size > 0) {
+			const notes: string[] = [];
+			for (const snapshot of parseFailures.values()) {
+				const display = nodePath.relative(this.session.cwd, snapshot.path) || snapshot.path;
+				let repaired: EditAutoRepairOutcome | undefined;
+				try {
+					repaired = await attemptEditAutoRepair({
+						session: this.session,
+						snapshot,
+						writethrough: this.#writethrough,
+						signal,
+					});
+				} catch (error) {
+					logger.warn("Edit auto-repair failed", {
+						path: snapshot.path,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+				notes.push(
+					repaired
+						? `Note: ${display} stopped parsing after this edit; an automatic syntax repair (${repaired.model}) was applied on top:\n${repaired.diff}\nReview the repaired region; adjust it if the repair guessed wrong.`
+						: `Warning: ${display} no longer parses after this edit. The change was applied; re-read the edited region and fix the syntax, or revert if unintended.`,
+				);
+			}
+			result.content = [...result.content, { type: "text", text: notes.join("\n\n") }];
 		}
 		return result;
 	}

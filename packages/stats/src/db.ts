@@ -1,8 +1,13 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import type { Usage } from "@oh-my-pi/pi-ai";
-import type { GeneratedProvider } from "@oh-my-pi/pi-catalog/models";
-import { calculateUncachedInputCost, getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import {
+	calculateUncachedInputCost,
+	calculateUsageCost,
+	type GeneratedProvider,
+	getBundledModel,
+} from "@oh-my-pi/pi-catalog/models";
+import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
 import { getConfigRootDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
 import { classifyAgentType } from "./parser";
 import type {
@@ -31,9 +36,8 @@ import type {
 	UserMessageStats,
 } from "./types";
 
-type ModelCost = { input: number; output: number; cacheRead: number; cacheWrite: number };
 type UsageCost = Usage["cost"];
-type CostTokens = Pick<Usage, "input" | "output" | "cacheRead" | "cacheWrite" | "orchestration">;
+type CostTokens = Pick<Usage, "input" | "output" | "cacheRead" | "cacheWrite" | "orchestration" | "cttl">;
 
 const ZERO_USAGE_COST: UsageCost = {
 	input: 0,
@@ -42,6 +46,9 @@ const ZERO_USAGE_COST: UsageCost = {
 	cacheWrite: 0,
 	total: 0,
 };
+
+const UNPRICED_XAI_OAUTH_SQL =
+	"CASE WHEN provider = 'xai-oauth' AND total_tokens > 0 AND cost_total = 0 THEN 1 ELSE 0 END";
 
 interface CostBackfillRow {
 	id: number;
@@ -71,6 +78,7 @@ interface AggregatedStatsRow {
 	total_cache_write_tokens: number | null;
 	total_premium_requests: number | null;
 	total_cost: number | null;
+	unpriced_requests: number | null;
 	total_cached_prompt_cost: number | null;
 	total_no_cache_input_cost: number | null;
 	avg_duration: number | null;
@@ -89,6 +97,19 @@ interface FolderStatsRow extends AggregatedStatsRow {
 	folder: string;
 }
 
+interface CostTimeSeriesRow {
+	bucket: number;
+	model: string;
+	provider: string;
+	cost: number | null;
+	unpriced_requests: number | null;
+	cost_input: number | null;
+	cost_output: number | null;
+	cost_cache_read: number | null;
+	cost_cache_write: number | null;
+	requests: number;
+}
+
 let db: Database | null = null;
 
 const BACKFILL_COMPLETE = "complete";
@@ -99,6 +120,12 @@ const PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY = "premium_requests_priority_v1";
 const AGENT_TYPE_BACKFILL_KEY = "agent_type_v1";
 const FORK_DEDUPE_KEY = "fork_dedupe_v1";
 const TOOL_CALLS_BACKFILL_KEY = "tool_calls_v1";
+// Older ingests dropped `Usage.orchestration` (never a stored column) when
+// pricing, so subscription models billed on orchestration tokens — multi-agent
+// Grok most notably — were priced from conversation buckets alone and could not
+// reach the inclusive 200K tier. A one-time full re-parse repairs them through
+// the cost-refreshing UPSERT in `insertMessageStats`.
+const COST_REINGEST_BACKFILL_KEY = "messages_cost_reingest_v1";
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
@@ -301,6 +328,7 @@ export async function initDb(): Promise<Database> {
 	}
 	backfillUserMessages(db);
 	backfillToolCalls(db);
+	backfillReingestCosts(db);
 	repairUserMessageLinks(db);
 	backfillPriorityPremiumRequests(db);
 	backfillAgentType(db);
@@ -325,10 +353,11 @@ function getCatalogCost(provider: string, modelId: string): ModelCost | null {
 		return primaryCost;
 	}
 
-	if (provider === "openai-codex") {
-		const openAICost = getBundledModelCost("openai", modelId);
-		if (openAICost && hasBillableCost(openAICost)) {
-			return openAICost;
+	const fallbackProvider = provider === "openai-codex" ? "openai" : provider === "xai-oauth" ? "xai" : null;
+	if (fallbackProvider) {
+		const fallbackCost = getBundledModelCost(fallbackProvider, modelId);
+		if (fallbackCost && hasBillableCost(fallbackCost)) {
+			return fallbackCost;
 		}
 	}
 
@@ -339,18 +368,20 @@ function calculateCatalogCost(provider: string, modelId: string, tokens: CostTok
 	const cost = getCatalogCost(provider, modelId);
 	if (!cost) return null;
 
-	const input = (cost.input / 1_000_000) * tokens.input;
-	const output = (cost.output / 1_000_000) * tokens.output;
-	const cacheRead = (cost.cacheRead / 1_000_000) * tokens.cacheRead;
-	const cacheWrite = (cost.cacheWrite / 1_000_000) * tokens.cacheWrite;
-
-	return {
-		input,
-		output,
-		cacheRead,
-		cacheWrite,
-		total: input + output + cacheRead + cacheWrite,
+	const orchestration = tokens.orchestration;
+	const usage: Usage = {
+		...tokens,
+		totalTokens:
+			tokens.input +
+			tokens.output +
+			tokens.cacheRead +
+			tokens.cacheWrite +
+			(orchestration?.input ?? 0) +
+			(orchestration?.output ?? 0) +
+			(orchestration?.cacheRead ?? 0),
+		cost: { ...ZERO_USAGE_COST },
 	};
+	return calculateUsageCost(cost, usage);
 }
 
 function normalizeUsageCost(cost: UsageCost): UsageCost {
@@ -486,8 +517,9 @@ export function setFileOffset(sessionFile: string, offset: number, lastModified:
  * aggregate. The `WHERE NOT EXISTS` clause skips inserts whose
  * `(entry_id, timestamp)` already exists under a different `session_file` —
  * first-write-wins across the lineage. Same-file re-syncs still hit the
- * `ON CONFLICT(session_file, entry_id)` upsert below so historical
- * `premium_requests` fix-ups continue to work.
+ * `ON CONFLICT(session_file, entry_id)` upsert below, which re-derives the
+ * stored cost (orchestration-aware) and keeps `premium_requests` monotonic, so
+ * a forced re-parse repairs historical `premium_requests` and cost fix-ups.
  */
 export function insertMessageStats(stats: MessageStats[]): number {
 	if (!db || stats.length === 0) return 0;
@@ -505,8 +537,13 @@ export function insertMessageStats(stats: MessageStats[]): number {
 			WHERE entry_id = ? AND timestamp = ? AND session_file <> ?
 		)
 		ON CONFLICT(session_file, entry_id) DO UPDATE SET
-			premium_requests = excluded.premium_requests
-		WHERE messages.premium_requests < excluded.premium_requests
+			premium_requests = MAX(messages.premium_requests, excluded.premium_requests),
+			cost_input = excluded.cost_input,
+			cost_output = excluded.cost_output,
+			cost_cache_read = excluded.cost_cache_read,
+			cost_cache_write = excluded.cost_cache_write,
+			cost_total = excluded.cost_total,
+			cost_no_cache_input = excluded.cost_no_cache_input
 	`);
 
 	let inserted = 0;
@@ -570,6 +607,7 @@ function buildAggregatedStats(rows: AggregatedStatsRow[]): AggregatedStats {
 			cacheRate: 0,
 			cacheSavings: 0,
 			totalCost: 0,
+			unpricedRequests: 0,
 			totalPremiumRequests: 0,
 			avgDuration: null,
 			avgTtft: null,
@@ -604,6 +642,7 @@ function buildAggregatedStats(rows: AggregatedStatsRow[]): AggregatedStats {
 				: 0,
 		cacheSavings: noCacheInputCost > 0 ? (noCacheInputCost - cachedPromptCost) / noCacheInputCost : 0,
 		totalCost: row.total_cost || 0,
+		unpricedRequests: row.unpriced_requests || 0,
 		totalPremiumRequests,
 		avgDuration: row.avg_duration,
 		avgTtft: row.avg_ttft,
@@ -630,6 +669,7 @@ export function getOverallStats(cutoff?: number): AggregatedStats {
 			SUM(cache_write_tokens) as total_cache_write_tokens,
 			SUM(premium_requests) as total_premium_requests,
 			SUM(cost_total) as total_cost,
+			SUM(${UNPRICED_XAI_OAUTH_SQL}) as unpriced_requests,
 			SUM(CASE WHEN cost_no_cache_input > 0
 				THEN cost_input + cost_cache_read + cost_cache_write
 				ELSE 0 END) as total_cached_prompt_cost,
@@ -665,6 +705,7 @@ export function getStatsByModel(cutoff?: number): ModelStats[] {
 			SUM(cache_write_tokens) as total_cache_write_tokens,
 			SUM(premium_requests) as total_premium_requests,
 			SUM(cost_total) as total_cost,
+			SUM(${UNPRICED_XAI_OAUTH_SQL}) as unpriced_requests,
 			SUM(CASE WHEN cost_no_cache_input > 0
 				THEN cost_input + cost_cache_read + cost_cache_write
 				ELSE 0 END) as total_cached_prompt_cost,
@@ -706,6 +747,7 @@ export function getStatsByFolder(cutoff?: number): FolderStats[] {
 			SUM(cache_write_tokens) as total_cache_write_tokens,
 			SUM(premium_requests) as total_premium_requests,
 			SUM(cost_total) as total_cost,
+			SUM(${UNPRICED_XAI_OAUTH_SQL}) as unpriced_requests,
 			SUM(CASE WHEN cost_no_cache_input > 0
 				THEN cost_input + cost_cache_read + cost_cache_write
 				ELSE 0 END) as total_cached_prompt_cost,
@@ -854,6 +896,7 @@ export function getStatsByProvider(cutoff?: number | null): ProviderAggregate[] 
 			SUM(cache_write_tokens) as total_cache_write_tokens,
 			SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) as total_tokens,
 			SUM(cost_total) as total_cost,
+			SUM(${UNPRICED_XAI_OAUTH_SQL}) as unpriced_requests,
 			SUM(premium_requests) as total_premium_requests,
 			AVG(CASE WHEN duration > 0 THEN output_tokens * 1000.0 / duration ELSE NULL END) as avg_tokens_per_second
 		FROM messages
@@ -873,6 +916,7 @@ export function getStatsByProvider(cutoff?: number | null): ProviderAggregate[] 
 		total_cache_write_tokens: number | null;
 		total_tokens: number | null;
 		total_cost: number | null;
+		unpriced_requests: number | null;
 		total_premium_requests: number | null;
 		avg_tokens_per_second: number | null;
 	}>;
@@ -887,6 +931,7 @@ export function getStatsByProvider(cutoff?: number | null): ProviderAggregate[] 
 		totalCacheWriteTokens: row.total_cache_write_tokens ?? 0,
 		totalTokens: row.total_tokens ?? 0,
 		totalCost: row.total_cost ?? 0,
+		unpricedRequests: row.unpriced_requests ?? 0,
 		totalPremiumRequests: row.total_premium_requests ?? 0,
 		avgTokensPerSecond: row.avg_tokens_per_second,
 	}));
@@ -949,6 +994,7 @@ export function getProviderTimeSeries(
 			provider,
 			SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) as total_tokens,
 			SUM(cost_total) as cost,
+			SUM(${UNPRICED_XAI_OAUTH_SQL}) as unpriced_requests,
 			COUNT(*) as requests
 		FROM messages
 		${hasCutoff ? "WHERE timestamp >= ?" : ""}
@@ -962,6 +1008,7 @@ export function getProviderTimeSeries(
 		provider: string;
 		total_tokens: number | null;
 		cost: number | null;
+		unpriced_requests: number | null;
 		requests: number;
 	}>;
 	return rows.map(row => ({
@@ -969,6 +1016,7 @@ export function getProviderTimeSeries(
 		provider: row.provider,
 		totalTokens: row.total_tokens ?? 0,
 		cost: row.cost ?? 0,
+		unpricedRequests: row.unpriced_requests ?? 0,
 		requests: row.requests,
 	}));
 }
@@ -1118,6 +1166,7 @@ export function getCostTimeSeries(days = 90, cutoff?: number | null): CostTimeSe
 			model,
 			provider,
 			SUM(cost_total) as cost,
+			SUM(${UNPRICED_XAI_OAUTH_SQL}) as unpriced_requests,
 			SUM(cost_input) as cost_input,
 			SUM(cost_output) as cost_output,
 			SUM(cost_cache_read) as cost_cache_read,
@@ -1129,16 +1178,17 @@ export function getCostTimeSeries(days = 90, cutoff?: number | null): CostTimeSe
 		ORDER BY bucket ASC
 	`);
 
-	const rows = hasCutoff ? (stmt.all(seriesCutoff) as any[]) : (stmt.all() as any[]);
+	const rows = (hasCutoff ? stmt.all(seriesCutoff) : stmt.all()) as CostTimeSeriesRow[];
 	return rows.map(row => ({
 		timestamp: row.bucket,
 		model: row.model,
 		provider: row.provider,
-		cost: row.cost,
-		costInput: row.cost_input,
-		costOutput: row.cost_output,
-		costCacheRead: row.cost_cache_read,
-		costCacheWrite: row.cost_cache_write,
+		cost: row.cost ?? 0,
+		unpricedRequests: row.unpriced_requests ?? 0,
+		costInput: row.cost_input ?? 0,
+		costOutput: row.cost_output ?? 0,
+		costCacheRead: row.cost_cache_read ?? 0,
+		costCacheWrite: row.cost_cache_write ?? 0,
 		requests: row.requests,
 	}));
 }
@@ -1214,6 +1264,29 @@ function backfillToolCalls(database: Database): void {
 	database
 		.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
 		.run(TOOL_CALLS_BACKFILL_KEY, BACKFILL_PENDING);
+}
+
+/**
+ * One-shot `file_offsets` wipe so the next sync re-parses every session and
+ * re-prices `messages` from source. Pre-fix ingests priced subscription rows
+ * from the four stored token buckets only, dropping `Usage.orchestration`
+ * (never a stored column), so multi-agent Grok and any other orchestration-
+ * billed model were understated and could not reach the inclusive 200K tier.
+ * The re-parse reruns the orchestration-aware pricing in `resolveStoredCost`
+ * and the cost-refreshing UPSERT in {@link insertMessageStats} writes it back.
+ * `messages`/`user_messages`/`tool_calls` re-inserts are idempotent, so the
+ * offset reset is safe. Same sentinel protocol as {@link backfillToolCalls}.
+ */
+function backfillReingestCosts(database: Database): void {
+	const row = database.prepare("SELECT value FROM meta WHERE key = ?").get(COST_REINGEST_BACKFILL_KEY) as
+		| { value: string }
+		| undefined;
+	if (!shouldResetBackfill(row?.value)) return;
+
+	database.run("DELETE FROM file_offsets");
+	database
+		.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+		.run(COST_REINGEST_BACKFILL_KEY, BACKFILL_PENDING);
 }
 
 /**
@@ -1341,6 +1414,7 @@ export function markSessionBackfillsComplete(): void {
 			TOOL_CALLS_BACKFILL_KEY,
 			USER_MESSAGE_LINKS_REPAIR_KEY,
 			PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY,
+			COST_REINGEST_BACKFILL_KEY,
 		]) {
 			markComplete.run(key, BACKFILL_COMPLETE);
 		}
@@ -1700,6 +1774,8 @@ const TOOL_AGGREGATE_COLUMNS = `
 	SUM(COALESCE(m.total_tokens, 0) * 1.0 / t.calls_in_turn) as total_tokens_share,
 	SUM(COALESCE(m.output_tokens, 0) * 1.0 / t.calls_in_turn) as output_tokens_share,
 	SUM(COALESCE(m.cost_total, 0) / t.calls_in_turn) as cost_share,
+	SUM(CASE WHEN t.provider = 'xai-oauth' AND COALESCE(m.total_tokens, 0) > 0 AND COALESCE(m.cost_total, 0) = 0
+		THEN 1.0 / t.calls_in_turn ELSE 0 END) as unpriced_requests_share,
 	MAX(t.timestamp) as last_used
 `;
 
@@ -1714,6 +1790,7 @@ interface ToolAggregateRow {
 	total_tokens_share: number | null;
 	output_tokens_share: number | null;
 	cost_share: number | null;
+	unpriced_requests_share: number | null;
 	last_used: number;
 }
 
@@ -1727,6 +1804,7 @@ function rowToToolUsage(row: ToolAggregateRow): ToolUsageStats {
 		totalTokensShare: row.total_tokens_share ?? 0,
 		outputTokensShare: row.output_tokens_share ?? 0,
 		costShare: row.cost_share ?? 0,
+		unpricedRequestsShare: row.unpriced_requests_share ?? 0,
 		lastUsed: row.last_used,
 	};
 }

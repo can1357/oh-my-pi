@@ -4,43 +4,33 @@ import type {
 	ApiKeyResolver,
 	AssistantMessage,
 	AssistantMessageEvent,
-	AssistantMessageEventStream,
 	Context,
 	Effort,
 	Model,
 	ProviderSessionState,
 	ServiceTier,
 	ServiceTierByFamily,
-	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
 import { resolveModelServiceTier, streamSimple } from "@oh-my-pi/pi-ai";
-import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
 import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
-import { formatDuration, formatNumber, getProjectDir, prompt } from "@oh-my-pi/pi-utils";
+import { formatDuration, formatNumber, prompt } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import type { ApiKeyResolverModel } from "../config/api-key-resolver";
-import { ModelRegistry } from "../config/model-registry";
-import {
-	formatModelSelectorValue,
-	formatModelString,
-	getModelMatchPreferences,
-	resolveCliModel,
-} from "../config/model-resolver";
+import { formatModelSelectorValue, formatModelString } from "../config/model-resolver";
 import { buildServiceTierByFamily, serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/service-tier";
-import { Settings } from "../config/settings";
 import cachePrefixTemplate from "../prompts/bench/cache-prefix.md" with { type: "text" };
 import cachePrefixChunk from "../prompts/bench/cache-prefix-chunk.md" with { type: "text" };
 import cacheSuffixTemplate from "../prompts/bench/cache-suffix.md" with { type: "text" };
 import chatTemplate from "../prompts/bench/chat.md" with { type: "text" };
 import generationTemplate from "../prompts/bench/generation.md" with { type: "text" };
 import prefillInstruction from "../prompts/bench/prefill-instruction.md" with { type: "text" };
-import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
+import { shouldDisableReasoning, toReasoningEffort } from "../thinking";
 import {
-	concreteThinkingLevel,
-	resolveThinkingLevelForModel,
-	shouldDisableReasoning,
-	toReasoningEffort,
-} from "../thinking";
+	type BenchRuntime,
+	type BenchTarget,
+	createDefaultBenchRuntime,
+	resolveBenchTargets,
+	type StreamSimpleFn,
+} from "./bench-runtime";
 import { createLiveBoard, type LiveBoardOutput } from "./live-board";
 
 const DEFAULT_PAR = 4;
@@ -124,20 +114,6 @@ export interface BenchCommandArgs {
 		cachePairs?: number;
 		cacheConcurrency?: number;
 	};
-}
-
-export interface BenchModelRegistry {
-	getAll(): Model<Api>[];
-	getAvailable(): Model<Api>[];
-	getApiKey(model: Model<Api>, sessionId?: string): Promise<string | undefined>;
-	resolver(model: ApiKeyResolverModel, sessionId?: string): ApiKeyResolver;
-	hasConfiguredAuth?(model: Model<Api>): boolean;
-}
-
-export interface BenchRuntime {
-	modelRegistry: BenchModelRegistry;
-	settings?: Settings;
-	close?: () => void;
 }
 
 export interface BenchRunSuccess {
@@ -270,19 +246,13 @@ export interface BenchSummary {
 	};
 }
 
-type BenchStreamSimple = (
-	model: Model<Api>,
-	context: Context,
-	options?: SimpleStreamOptions,
-) => AssistantMessageEventStream;
-
 export interface BenchDependencies {
 	createRuntime?: () => Promise<BenchRuntime>;
 	randomSessionId?: () => string;
 	writeStdout?: (text: string) => void;
 	writeStderr?: (text: string) => void;
 	setExitCode?: (code: number) => void;
-	streamSimple?: BenchStreamSimple;
+	streamSimple?: StreamSimpleFn;
 	now?: () => number;
 	/** Uniform [0,1) source for challenge randomization; default `Math.random`. */
 	random?: () => number;
@@ -597,7 +567,7 @@ interface BenchRequestOptions {
 async function runBenchRequest(
 	model: Model<Api>,
 	options: BenchRequestOptions,
-	streamFn: BenchStreamSimple,
+	streamFn: StreamSimpleFn,
 	now: () => number,
 ): Promise<BenchRunResult> {
 	const startedAt = now();
@@ -871,131 +841,6 @@ export function formatBenchTable(summary: BenchSummary): string {
 	return `${lines.join("\n")}\n`;
 }
 
-async function createDefaultRuntime(): Promise<BenchRuntime> {
-	const authStorage = await discoverAuthStorage();
-	try {
-		const cwd = getProjectDir();
-		const settings = await Settings.init({ cwd });
-		const modelRegistry = new ModelRegistry(authStorage);
-		await loadCliExtensionProviders(modelRegistry, settings, cwd);
-		return {
-			modelRegistry,
-			settings,
-			close: () => authStorage.close(),
-		};
-	} catch (error) {
-		authStorage.close();
-		throw error;
-	}
-}
-
-interface BenchTarget {
-	selector: string;
-	model: Model<Api>;
-	thinking: ResolvedThinkingLevel | undefined;
-}
-
-/** Highest-priority provider variant: native/OAuth transports outrank mirrors. */
-function pickHighestPriorityProvider(models: Model<Api>[], providerOrder?: readonly string[]): Model<Api> | undefined {
-	if (models.length <= 1) return models[0];
-	const priority = buildModelProviderPriorityRank(providerOrder);
-	return [...models].sort((a, b) => {
-		const aRank = priority.get(a.provider.toLowerCase()) ?? Number.POSITIVE_INFINITY;
-		const bRank = priority.get(b.provider.toLowerCase()) ?? Number.POSITIVE_INFINITY;
-		return aRank - bRank;
-	})[0];
-}
-
-/**
- * Bench resolves selectors against the entire catalog (credentials are ignored),
- * so an ambiguous id shared by several providers can land on one the user never
- * authenticated. For non-pinned selectors, redirect to an equivalent model under
- * a provider with configured auth. An explicit `provider/id` selector is honored
- * verbatim — even unauthenticated — so forced benchmarking keeps working.
- */
-function resolveAuthenticatedAlternative(
-	selector: string,
-	model: Model<Api>,
-	modelRegistry: BenchModelRegistry,
-	providerOrder?: readonly string[],
-): Model<Api> | undefined {
-	if (!modelRegistry.hasConfiguredAuth) return undefined;
-	// A pinned `provider/...` selector is authoritative; never redirect off it.
-	if (selector.trim().toLowerCase().startsWith(`${model.provider.toLowerCase()}/`)) return undefined;
-	if (modelRegistry.hasConfiguredAuth(model)) return undefined;
-
-	const seen = new Set<string>();
-	const authenticated: Model<Api>[] = [];
-	const consider = (candidate: Model<Api>): void => {
-		const key = `${candidate.provider}/${candidate.id}`;
-		if (seen.has(key)) return;
-		seen.add(key);
-		if (modelRegistry.hasConfiguredAuth?.(candidate)) authenticated.push(candidate);
-	};
-	// Same-id fallback for equivalent entries under providers with configured auth.
-	for (const candidate of modelRegistry.getAll()) {
-		if (candidate.id === model.id) consider(candidate);
-	}
-	return pickHighestPriorityProvider(authenticated, providerOrder);
-}
-
-function resolveBenchModels(
-	selectors: string[],
-	modelRegistry: BenchModelRegistry,
-	settings: Settings | undefined,
-	writeStderr: (text: string) => void,
-): BenchTarget[] {
-	const preferences = getModelMatchPreferences(settings);
-	const resolved: BenchTarget[] = [];
-	const errors: string[] = [];
-	for (const selector of selectors) {
-		// Bench intentionally resolves against the full catalog first, then applies
-		// its own exact-id credential fallback below. Using the CLI resolver's
-		// authenticated default here would silently redirect non-equivalent bare
-		// ids and suppress the warning for equivalent cross-provider models.
-		const result = resolveCliModel({
-			cliModel: selector,
-			modelRegistry,
-			availableModels: modelRegistry.getAll(),
-			settings,
-			preferences,
-		});
-		if (result.error) {
-			errors.push(`${selector}: ${result.error}`);
-			continue;
-		}
-		if (!result.model) {
-			errors.push(`${selector}: model not found`);
-			continue;
-		}
-		if (result.warning) writeStderr(`${chalk.yellow(`Warning: ${result.warning}`)}\n`);
-		let model = result.model;
-		const authSelector = result.configuredPatterns?.[result.configuredPatternIndex ?? 0] ?? selector;
-		const authenticated = resolveAuthenticatedAlternative(
-			authSelector,
-			model,
-			modelRegistry,
-			preferences.providerOrder,
-		);
-		if (authenticated) {
-			writeStderr(
-				`${chalk.yellow(
-					`Warning: no credentials for "${model.provider}"; benchmarking ${formatModelString(authenticated)} instead. Pin "${formatModelString(model)}" to force it.`,
-				)}\n`,
-			);
-			model = authenticated;
-		}
-		resolved.push({
-			selector,
-			model,
-			thinking: resolveThinkingLevelForModel(model, concreteThinkingLevel(result.thinkingLevel)),
-		});
-	}
-	if (errors.length > 0) {
-		throw new Error(`Could not resolve ${errors.length === 1 ? "model" : "models"}:\n${errors.join("\n")}`);
-	}
-	return resolved;
-}
 function assertCacheModeSupported(targets: BenchTarget[]): void {
 	if (targets.some(({ model }) => model.api === "openai-codex-responses")) {
 		throw new Error(
@@ -1095,9 +940,9 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 		else writeStdout(`${text}\n`);
 	};
 
-	const runtime = await (deps.createRuntime ?? createDefaultRuntime)();
+	const runtime = await (deps.createRuntime ?? createDefaultBenchRuntime)();
 	try {
-		const targets = resolveBenchModels(command.models, runtime.modelRegistry, runtime.settings, writeStderr);
+		const targets = resolveBenchTargets(command.models, runtime.modelRegistry, runtime.settings, writeStderr);
 		if (cacheMode) assertCacheModeSupported(targets);
 		// Explicit `--service-tier` (a single value broadcast across families) wins;
 		// otherwise fall back to the configured per-family `tier.*` settings. Each

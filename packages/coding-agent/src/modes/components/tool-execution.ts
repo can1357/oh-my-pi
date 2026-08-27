@@ -35,7 +35,7 @@ import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, Wid
 import { convertImageToPng } from "../../utils/image-loading";
 import { sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
 import { renderDiff } from "./diff";
-import type { AnimationFrame } from "./transcript-container";
+import { type AnimationFrame, trimBlankEdges } from "./transcript-container";
 
 /**
  * Drop trailing removal/hunk-header lines that appear in a streaming diff
@@ -907,6 +907,17 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	/**
+	 * A live block torn down through the generic Container path (transcript
+	 * clear, session switch mid-run) must not leak its shared-ticker
+	 * registration: the dead component would keep the process-wide 80ms
+	 * interval alive and keep being repainted.
+	 */
+	override dispose(): void {
+		this.stopAnimation();
+		super.dispose();
+	}
+
+	/**
 	 * Stop spinner animation and cleanup resources.
 	 */
 	stopAnimation(): void {
@@ -1000,8 +1011,17 @@ export class ToolExecutionComponent extends Container {
 
 	override render(width: number): readonly string[] {
 		if (!this.#toolActivityVisible || this.#allocation === 0) return [];
-		if (this.#allocation < 3) return this.#renderCompact(width);
-		const lines = super.render(width);
+		let lines = super.render(width);
+		if (this.#allocation < 3) {
+			// A squeezed allocation degrades only blocks that genuinely overflow it.
+			// The allocator measures blocks by trimmed height and never squeezes one
+			// below that, so inline tools whose real content is 1-2 rows (hub
+			// receipts, one-line results) keep that content instead of an equally
+			// tall but contentless frame.
+			const trimmed = trimBlankEdges(lines);
+			if (trimmed.length > this.#allocation) return this.#renderCompact(width);
+			lines = trimmed;
+		}
 		this.#firstResultViewportRepaintShapePainted = this.#needsFirstResultViewportRepaintAtRender();
 		this.#partialResultShapePainted = this.#result !== undefined && this.#isPartial;
 		return lines;
@@ -1009,19 +1029,26 @@ export class ToolExecutionComponent extends Container {
 
 	#renderCompact(width: number): readonly string[] {
 		const summary = this.#activitySummary();
-		const detail = summary.detail ? ` · ${summary.detail.replace(/\s+/g, " ")}` : "";
+		const detail = summary.detail ? theme.fg("muted", ` · ${summary.detail.replace(/\s+/g, " ")}`) : "";
 		// Elapsed ticks only while the call is genuinely running; a settled
 		// placeholder row must not read as live ("Todo · running 0s").
 		const elapsed =
 			this.#isRunning() && this.#executionStartedAtNow !== undefined
-				? ` ${Math.max(0, Math.floor((this.#presentationFrame.now - this.#executionStartedAtNow) / 1000))}s`
+				? theme.fg(
+						"dim",
+						` ${Math.max(0, Math.floor((this.#presentationFrame.now - this.#executionStartedAtNow) / 1000))}s`,
+					)
 				: "";
-		const text = truncateToWidth(`${summary.label}${detail}${elapsed}`, Math.max(1, width - 4));
+		const text = truncateToWidth(
+			`${theme.fg("toolTitle", theme.bold(summary.label))}${detail}${elapsed}`,
+			Math.max(1, width - 4),
+		);
 		if (this.#allocation === 1) {
 			const glyph = this.#spinnerFrame === undefined ? "•" : (theme.spinnerFrames[this.#spinnerFrame] ?? "•");
-			return [truncateToWidth(`${glyph} ${text}`, width)];
+			const styledGlyph = theme.fg(this.#spinnerFrame === undefined ? "dim" : "muted", glyph);
+			return [truncateToWidth(`${styledGlyph} ${text}`, width)];
 		}
-		return [truncateToWidth(`╭─ ${text}`, width), truncateToWidth("╰", width)];
+		return [truncateToWidth(`${theme.fg("dim", "╭─")} ${text}`, width), theme.fg("dim", "╰")];
 	}
 
 	#activitySummary(): ToolActivitySummary {
@@ -1032,7 +1059,13 @@ export class ToolExecutionComponent extends Container {
 			spinnerFrame: this.#spinnerFrame,
 			renderContext: this.#renderState.renderContext,
 		});
-		if (summary !== undefined) return summary;
+		if (summary !== undefined) {
+			if (summary.detail) return summary;
+			// A detail-less custom summary (e.g. hub before its streamed args
+			// parse) must not fold to a bare `╭─ Label` frame under viewport
+			// pressure — keep the generic liveness hint for in-flight calls.
+			return this.#isRunning() ? { ...summary, detail: "running" } : summary;
+		}
 		if (isRecord(this.#args)) {
 			for (const key of ["command", "path", "input"] as const) {
 				const value = this.#args[key];

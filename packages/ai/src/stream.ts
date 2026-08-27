@@ -7,9 +7,9 @@ import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { isVertexExpressOpenAIUrl, isVertexRawPredictUrl, resolveVertexEndpointHost } from "@oh-my-pi/pi-catalog/hosts";
 import {
+	defaultSupportedEffort,
 	mapEffortToAnthropicAdaptiveEffort,
 	mapEffortToGoogleThinkingLevel,
-	minimumSupportedEffort,
 	requireSupportedEffort,
 	resolveWireModelId,
 } from "@oh-my-pi/pi-catalog/model-thinking";
@@ -1890,7 +1890,7 @@ function normalizeMandatoryReasoningOptions<TApi extends Api>(
 	) {
 		return options;
 	}
-	const floor = minimumSupportedEffort(model);
+	const floor = defaultSupportedEffort(model);
 	if (floor === undefined) return options;
 	return { ...options, reasoning: floor, disableReasoning: undefined, forceReasoningOff: undefined };
 }

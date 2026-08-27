@@ -753,6 +753,28 @@ describe("TUI inline-image budget", () => {
 			tui.stop();
 		}
 	});
+	it("leaves transmitted images in the terminal store on stop so scrollback keeps them", async () => {
+		const term = new VirtualTerminal(40, 12);
+		const writes: string[] = [];
+		const realWrite = term.write.bind(term);
+		vi.spyOn(term, "write").mockImplementation((data: string) => {
+			writes.push(data);
+			realWrite(data);
+		});
+
+		const tui = new TUI(term);
+		tui.addChild(makeImage(tui.imageBudget, "persist"));
+		tui.start();
+		await settle(term);
+		writes.length = 0;
+
+		tui.stop();
+
+		// Regression: stop() used to delete every transmitted image (`a=d,d=I`),
+		// blanking placeholder cells already committed to native scrollback the
+		// moment the session exited.
+		expect(writes.join("")).not.toContain("a=d,d=I");
+	});
 
 	it("lets a full-width non-fullscreen overlay replace Unicode image placeholder rows", async () => {
 		const originalGraphics = { ...getKittyGraphics() };

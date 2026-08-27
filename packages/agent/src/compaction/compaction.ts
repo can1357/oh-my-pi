@@ -1498,6 +1498,21 @@ function selectNativeCompactionError(previousError: unknown, nextError: unknown)
 }
 
 /**
+ * User-facing placeholder summary for a provider-native remote compaction.
+ *
+ * `inputTokens` is the compaction request's provider-reported input usage
+ * (persisted as `openaiRemoteCompaction.usedTokens`), NOT the size of the
+ * retained replacement history — so the wording describes processed input, not
+ * retained context, to avoid implying the number is the post-compaction size.
+ */
+function formatRemoteCompactionSummary(inputTokens: number): string {
+	return (
+		"Remote compaction preserved provider-native history for this session." +
+		(inputTokens > 0 ? ` Compaction processed ${inputTokens} input tokens.` : "")
+	);
+}
+
+/**
  * Generate summaries for compaction using prepared data.
  * Returns CompactionResult - SessionManager adds id/parentId when saving.
  *
@@ -1659,6 +1674,7 @@ export async function compact(
 			(summaryOptions.convertToLlm ?? defaultConvertToLlm)(remoteMessages),
 			model,
 			previousReplacementHistory,
+			openAiCompatSupportsImageDetailOriginal(model),
 		);
 		if (remoteHistory.length > 0) {
 			try {
@@ -1711,10 +1727,8 @@ export async function compact(
 		// redundant LLM round. If a LATER compaction cannot reuse this payload,
 		// prepareCompaction re-expands the original messages and summarizes them
 		// locally then (see remotePreserveReusable).
-		const usedTokens = getCompactionV2PreserveData(preserveData)?.usedTokens ?? 0;
-		summary =
-			"Remote compaction preserved provider-native history for this session." +
-			(usedTokens > 0 ? ` Retained ${usedTokens} tokens in the provider replay payload.` : "");
+		const inputTokens = getCompactionV2PreserveData(preserveData)?.usedTokens ?? 0;
+		summary = formatRemoteCompactionSummary(inputTokens);
 	} else if (isSplitTurn && turnPrefixMessages.length > 0) {
 		// Generate both summaries in parallel
 		const [historyResult, turnPrefixResult] = await Promise.all([

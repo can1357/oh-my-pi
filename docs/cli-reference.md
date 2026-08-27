@@ -223,6 +223,7 @@ Run `omp <command> --help` for each command's own flags and examples.
 | `grep` | Test the grep tool from the CLI. (The [`grep` tool](./tools/grep.md) is a separate agent tool.) | |
 | `gallery` | Preview tool renderers across streaming, in-progress, success, and failure states. | |
 | `grievances` | View, clean, or push reported tool issues (auto-QA grievances). | |
+| `if-bench` | Benchmark instruction following and working memory: one cached thread of glyph array actions with a cat-sound directive that moves through the prompt. | |
 | `install` | Install or link an extension package (alias of `plugin install` / `plugin link`). | [extensions](./extensions.md) |
 | `join` | Join a shared collab session (same as `/join`). | [collab](./collab.md) |
 | `models` | List, search, and refresh available models. | [models](./models.md) |

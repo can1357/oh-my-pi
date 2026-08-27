@@ -23,6 +23,7 @@ type SettingsOverrides = Partial<Record<SettingPath, unknown>>;
 const activeHarnesses: Harness[] = [];
 const sharedAuthStorage = createInMemoryAuthStorage();
 sharedAuthStorage.setRuntimeApiKey("mock", "test-key");
+sharedAuthStorage.setRuntimeApiKey("anthropic", "test-key");
 const sharedModelRegistry = new ModelRegistry(sharedAuthStorage);
 
 afterAll(() => {

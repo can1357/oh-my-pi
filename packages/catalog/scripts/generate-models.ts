@@ -34,6 +34,7 @@ import {
 	AIAND_STATIC_MODELS,
 	ALIBABA_TOKEN_PLAN_STATIC_MODELS,
 	ANTHROPIC_CURATED_FALLBACK_MODELS,
+	applyXaiCatalogPricing,
 	BEDROCK_MANTLE_STATIC_MODELS,
 	buildFireworksFastSeed,
 	buildXaiOAuthStaticSeed,
@@ -51,6 +52,7 @@ import {
 	projectOpenAIProReasoningAliases,
 	SAKANA_FUGU_STATIC_MODELS,
 	stripFireworksDeepSeekThinkingToggle,
+	YOLO_AUTO_STATIC_MODELS,
 } from "../src/provider-models/openai-compat";
 import { type OpenAICodexAccount, openaiCodexModelManagerOptions } from "../src/provider-models/special";
 import type { Api, Model, ModelSpec } from "../src/types";
@@ -593,6 +595,12 @@ async function generateModels() {
 	if (!authoritativeCatalogProviders.has("aiand")) {
 		allModels.push(...AIAND_STATIC_MODELS);
 	}
+	// Seed Yolo-Auto's documented catalog so the provider is usable when
+	// generation has no YOLO_AUTO_API_KEY. A live `/v1/models` snapshot is
+	// authoritative and replaces the seed.
+	if (!authoritativeCatalogProviders.has("yolo-auto")) {
+		allModels.push(...YOLO_AUTO_STATIC_MODELS);
+	}
 	// Seed the GMI Cloud default model so a fresh install (and a regen without a
 	// `GMI_API_KEY`) still resolves the descriptor's `defaultModel` synchronously
 	// at boot. If live `/v1/models` discovery succeeds, it is authoritative.
@@ -664,6 +672,9 @@ async function generateModels() {
 			if (
 				!fetchedKeys.has(`${model.provider}/${model.id}`) &&
 				!DISCOVERY_ONLY_PROVIDERS.has(model.provider) &&
+				// Yolo-Auto's documented static seed is the complete fallback
+				// catalog; never resurrect retired ids from the previous snapshot.
+				model.provider !== "yolo-auto" &&
 				!RETIRED_PROVIDERS.has(model.provider) &&
 				!authoritativeCatalogProviders.has(model.provider) &&
 				!authoritativeSpecialDiscoveryProviders.has(model.provider) &&
@@ -685,6 +696,7 @@ async function generateModels() {
 	}
 	allModels = applyUmansPricingFallback(allModels, modelsDevModels);
 	allModels = applyPremiumMultiplierOverrides(allModels);
+	allModels = applyXaiCatalogPricing(allModels);
 	allModels = applyCodexPricingFallback(allModels);
 	allModels = applyAntigravityPricingFallback(allModels);
 	allModels = applyKimiMaxTokensCap(allModels);

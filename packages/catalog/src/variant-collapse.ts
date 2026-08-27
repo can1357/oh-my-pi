@@ -58,6 +58,15 @@ export interface EffortVariantFamily {
 	 */
 	members: readonly string[];
 	/**
+	 * Preferred default wire id: overrides the member-order default for the
+	 * collapsed spec's `requestModelId` when this member is live. Lets a
+	 * mandatory-reasoning family advertise a canonical tier that is not its
+	 * numeric floor (Cursor Grok 4.5/4.6 default to `-medium`, the only tier the
+	 * Start plan serves; the `-low` floor is refused). Ignored when absent from
+	 * the input or retired.
+	 */
+	defaultMember?: string;
+	/**
 	 * Wire ids upstream no longer serves (e.g. a deployment killed while
 	 * discovery still advertises it). Fresh collapsing never routes to them,
 	 * and stale collapsed snapshots (bundled catalog, cache rows,
@@ -124,7 +133,13 @@ const DEVIN_FOUR_TIER_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, E
  * `mode: "effort"` (mandatory when the family has no `off` route). Shared by the
  * Devin and Cursor tables, whose per-effort siblings follow the same shape.
  */
-function tierFamily(id: string, name: string, routes: TierRoutes, efforts: readonly Effort[]): EffortVariantFamily {
+function tierFamily(
+	id: string,
+	name: string,
+	routes: TierRoutes,
+	efforts: readonly Effort[],
+	defaultMember?: string,
+): EffortVariantFamily {
 	const routing: Partial<Record<Effort | "off", string>> = {};
 	if (routes.off) routing.off = routes.off;
 	for (const effort of efforts) {
@@ -168,6 +183,7 @@ function tierFamily(id: string, name: string, routes: TierRoutes, efforts: reado
 			efforts,
 			...(routes.off ? undefined : { requiresEffort: true }),
 		},
+		...(defaultMember !== undefined ? { defaultMember } : undefined),
 	};
 }
 
@@ -719,7 +735,9 @@ const CURSOR_GPT_56_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Eff
  * (`cursor-grok-4.6-low|-medium|-high|-xhigh`) alongside a parallel `-fast`
  * service-tier lane (`-low-fast`, …). Each lane collapses into its own logical
  * model — the `-fast` axis is a sibling family, never a second routing
- * dimension — with effort routing onto the live sibling wire ids.
+ * dimension — with effort routing onto the live sibling wire ids. The mandatory
+ * `-medium` default is the tier Cursor's Start plan serves at fixed settings;
+ * the `-low` floor is refused there (issue #9478).
  */
 function cursorGrokFamilies(version: "4.5" | "4.6", efforts: readonly Effort[]): readonly EffortVariantFamily[] {
 	const build = (fast: boolean): EffortVariantFamily => {
@@ -728,7 +746,13 @@ function cursorGrokFamilies(version: "4.5" | "4.6", efforts: readonly Effort[]):
 		for (const effort of efforts) {
 			routes[effort] = `cursor-grok-${version}-${effort}${suffix}`;
 		}
-		return tierFamily(`cursor-grok-${version}${suffix}`, `Grok ${version}${fast ? " Fast" : ""}`, routes, efforts);
+		return tierFamily(
+			`cursor-grok-${version}${suffix}`,
+			`Grok ${version}${fast ? " Fast" : ""}`,
+			routes,
+			efforts,
+			`cursor-grok-${version}-${Effort.Medium}${suffix}`,
+		);
 	};
 	return [build(false), build(true)];
 }
@@ -1143,6 +1167,37 @@ function refreshCollapsedThinking<TSpec extends VariantSpecLike>(
 }
 
 /**
+ * Re-point a collapsed snapshot's default wire id to the family's declared
+ * {@link EffortVariantFamily.defaultMember} when the snapshot still advertises a
+ * different default. Bundled catalog and cache rows freeze `requestModelId` from
+ * before a family gained a preferred default (Cursor Grok 4.5/4.6 → `-medium`),
+ * and neither the existing-collapsed pass-through nor `refreshCollapsedThinking`
+ * (scoped to `effortBudgets` families) would otherwise correct them — leaving an
+ * effort-less request clamped to the refused `-low` tier (issue #9478). Only
+ * re-points when the target is a live route in the snapshot's own
+ * `effortRouting`. Returns `spec` by reference when unchanged.
+ */
+function reconcileDefaultMember<TSpec extends VariantSpecLike>(
+	spec: TSpec,
+	family: EffortVariantFamily,
+	presentMembers?: ReadonlySet<string>,
+): TSpec {
+	const defaultMember = family.defaultMember;
+	if (defaultMember === undefined || defaultMember === spec.id) return spec;
+	const target =
+		presentMembers === undefined || presentMembers.has(defaultMember)
+			? defaultMember
+			: family.members.find(id => presentMembers.has(id));
+	if (target === undefined || spec.requestModelId === target) return spec;
+	const routing = spec.thinking?.effortRouting;
+	if (routing === undefined) return spec;
+	for (const key in routing) {
+		if (routing[key as Effort | "off"] === target) return { ...spec, requestModelId: target };
+	}
+	return spec;
+}
+
+/**
  * Collapse every family in `table` found in `specs`. Non-member specs pass
  * through verbatim (by reference), order preserved; the collapsed spec
  * replaces the first occurrence of its family.
@@ -1182,7 +1237,7 @@ export function collapseEffortVariants<TSpec extends VariantSpecLike>(
 			// Recycled extraAliases rows are healed in a later pass.
 			const refreshed =
 				existing !== undefined && existingCollapsed
-					? refreshCollapsedThinking(reconciled ?? existing, family, retired)
+					? reconcileDefaultMember(refreshCollapsedThinking(reconciled ?? existing, family, retired), family)
 					: reconciled;
 			if (refreshed !== undefined && refreshed !== existing) {
 				familyIdBySpecId.set(family.id, family.id);
@@ -1195,9 +1250,11 @@ export function collapseEffortVariants<TSpec extends VariantSpecLike>(
 		if (existing) familyIdBySpecId.set(family.id, family.id);
 
 		if (existingCollapsed) {
-			// Mixed input: the collapsed entry (live truth) wins; stale raw
-			// members are deduped away. Retired targets are re-pointed first.
-			replacement.set(family.id, reconciled as TSpec);
+			// Mixed input: the collapsed entry wins; stale raw members are deduped
+			// away. Retired targets are re-pointed first, then the default wire id
+			// prefers the family's declared member when live and otherwise falls
+			// back to the first member the account actually advertised.
+			replacement.set(family.id, reconcileDefaultMember(reconciled as TSpec, family, new Set(rawPresent)));
 			continue;
 		}
 
@@ -1241,10 +1298,17 @@ export function collapseEffortVariants<TSpec extends VariantSpecLike>(
 			contextWindow: maxOrNull(memberSpecs.map(spec => spec.contextWindow)),
 			maxTokens: maxOrNull(memberSpecs.map(spec => spec.maxTokens)),
 		};
-		// The default wire id is the highest-priority live member; omit when it
-		// equals the logical id (bare/thinking pairs) — `resolveWireModelId`
-		// falls back. Retired members never become the default.
-		const defaultWireId = rawPresent.find(id => !retired?.has(id)) ?? rawPresent[0];
+		// The default wire id is the family's declared `defaultMember` when live,
+		// else the highest-priority live member. Omitted when it equals the
+		// logical id (bare/thinking pairs) — `resolveWireModelId` falls back.
+		// Retired members never become the default.
+		const preferredDefault =
+			family.defaultMember !== undefined &&
+			presentSet.has(family.defaultMember) &&
+			!retired?.has(family.defaultMember)
+				? family.defaultMember
+				: undefined;
+		const defaultWireId = preferredDefault ?? rawPresent.find(id => !retired?.has(id)) ?? rawPresent[0];
 		if (defaultWireId === family.id) {
 			if (usedAbsentEffortRoute) {
 				collapsed.requestModelId = defaultWireId as string;

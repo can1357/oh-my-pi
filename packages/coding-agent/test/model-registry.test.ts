@@ -1664,7 +1664,7 @@ describe("ModelRegistry", () => {
 		});
 	});
 	describe("extended context", () => {
-		test("off caps premium long-context models at the standard-pricing threshold", async () => {
+		test("off caps billable premium models without shrinking subscription estimates", async () => {
 			await Settings.init({ inMemory: true, overrides: { extendedContext: false } });
 			const registry = new ModelRegistry(authStorage, modelsJsonPath);
 
@@ -1673,6 +1673,8 @@ describe("ModelRegistry", () => {
 			expect(registry.find("openai-codex", "gpt-5.6-sol")?.contextWindow).toBe(272_000);
 			// Standard-priced 1M models (no long-context tier) keep their window.
 			expect(registry.find("anthropic", "claude-opus-4-8")?.contextWindow).toBe(1_000_000);
+			// SuperGrok carries public xAI tiers for stats estimates, not billing.
+			expect(registry.find("xai-oauth", "grok-4.20-0309-reasoning")?.contextWindow).toBe(2_000_000);
 		});
 
 		test("reapplyModelPolicies re-clamps and restores premium windows on toggle", async () => {

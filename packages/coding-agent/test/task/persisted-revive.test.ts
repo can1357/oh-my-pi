@@ -69,6 +69,7 @@ async function createPersistedSession(
 	restrictToolNames?: boolean,
 	modelRole?: string,
 	advisor?: string,
+	contract?: { tools?: string[]; readOnly?: boolean },
 ): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 	const sessionFile = manager.getSessionFile();
@@ -76,11 +77,12 @@ async function createPersistedSession(
 	manager.appendSessionInit({
 		systemPrompt: "persisted prompt",
 		task: "persisted task",
-		tools: ["read", "yield"],
+		tools: contract?.tools ?? ["read", "yield"],
 		restrictToolNames,
 		modelRole,
 		resolvedModel: modelRole ? "anthropic/claude-sonnet-4-5" : undefined,
 		advisor,
+		readOnly: contract?.readOnly,
 	});
 	manager.appendMessage({
 		role: "assistant",
@@ -185,6 +187,50 @@ describe("persisted subagent revival", () => {
 		expect(hostileMcpGetTools).not.toHaveBeenCalled();
 		expect(attemptedDiscovery).toEqual([]);
 		expect(activeToolNames).toEqual([["read", "yield"]]);
+	});
+
+	it("strips synthetic write from legacy read-only cold revival", async () => {
+		const cwd = makeTempDir("@pi-read-only-revive-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+			tools: ["read", "write", "yield"],
+			readOnly: true,
+		});
+		const activeToolNames: string[][] = [];
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession(activeToolNames).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.toolNames).toEqual(["read", "yield"]);
+		expect(activeToolNames).toEqual([["read", "yield"]]);
+	});
+
+	it("preserves explicitly writable cold-revival contracts", async () => {
+		const cwd = makeTempDir("@pi-write-revive-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+			tools: ["read", "write", "yield"],
+			readOnly: false,
+		});
+		const activeToolNames: string[][] = [];
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession(activeToolNames).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.toolNames).toEqual(["read", "write", "yield"]);
+		expect(activeToolNames).toEqual([["read", "write", "yield"]]);
 	});
 
 	it("preserves normal revival capability wiring for contracts without the marker", async () => {
@@ -330,6 +376,58 @@ describe("persisted subagent revival", () => {
 		expect(last.payload.id).toBe(ref.id);
 		expect(last.payload.status).not.toBe("started");
 		rpcRegistry.dispose();
+		AgentLifecycleManager.resetGlobalForTests();
+		AgentRegistry.resetGlobalForTests();
+	});
+
+	it("preserves the completed output artifact when a revived subagent answers a hub message without yielding", async () => {
+		AgentRegistry.resetGlobalForTests();
+		AgentLifecycleManager.resetGlobalForTests();
+		const cwd = makeTempDir("@pi-revive-artifact-");
+		const sessionFile = await createPersistedSession(cwd);
+		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+		let handle: RevivedSessionHandle | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			handle = createRevivedSession([]);
+			return { session: handle.session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		AgentRegistry.global().register({
+			id: ref.id,
+			displayName: ref.displayName,
+			kind: "sub",
+			session: null,
+			sessionFile,
+			status: "parked",
+		});
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		// The completed first run already wrote its report to <artifactsDir>/<id>.md
+		// (artifactsDir = parent sessionFile sans ".jsonl"; see createFactory).
+		const artifactPath = path.join(cwd, "parent", `${ref.id}.md`);
+		const completedReport = "# Completed report\n\nfull multi-paragraph body\n\nZZEND";
+		await Bun.write(artifactPath, completedReport);
+
+		const observer = handle?.observer();
+		expect(observer).toBeDefined();
+		const record: CustomMessage = {
+			role: "custom",
+			customType: "irc:incoming",
+			content: "thanks",
+			display: true,
+			details: { id: "irc-1", from: "Main", message: "thanks" },
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+		// A wake turn answering a hub message never calls yield; finalization must
+		// not clobber the authoritative completion artifact with a warning body.
+		const finish = observer?.([record]);
+		await finish?.();
+
+		expect(await Bun.file(artifactPath).text()).toBe(completedReport);
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
 	});

@@ -31,6 +31,7 @@ import type {
 import { getEnvApiKey, getEnvApiKeyName } from "./stream";
 import type { Provider } from "./types";
 import type {
+	ClientUsageIdentity,
 	ClientUsageReport,
 	ClientUsageSummary,
 	CredentialRankingContext,
@@ -458,8 +459,10 @@ export interface AuthCredentialStore {
 	 * Client hook: forward locally observed request usage. Remote broker stores
 	 * batch these to the broker so it can attribute token burn per install;
 	 * local stores omit it and observation is skipped.
+	 * `client` overrides the reporting identity (gateway requests attribute to
+	 * the originating client, not the gateway host).
 	 */
-	recordObservedUsage?(entries: ObservedUsageEntry[]): void;
+	recordObservedUsage?(entries: ObservedUsageEntry[], client?: ClientUsageIdentity): void;
 	/** Broker host: persist one client's observed-usage report. */
 	recordClientUsage?(report: ClientUsageReport): void;
 	/** Broker host: aggregate recorded per-client usage since a timestamp. */
@@ -1028,9 +1031,13 @@ function resolveOpenAICodexPlanRequirement(provider: string, modelId: string | u
 }
 
 const MODEL_ACCOUNT_POLICY_BLOCK_SCOPE_PREFIX = "model-policy:";
+const MODEL_ACCOUNT_POLICY_PROVIDERS: Readonly<Record<string, true>> = {
+	"openai-codex": true,
+	cursor: true,
+};
 
 function modelAccountPolicyBlockScope(provider: string, modelId: string | undefined): string | undefined {
-	if (provider !== "openai-codex" || typeof modelId !== "string") return undefined;
+	if (!Object.hasOwn(MODEL_ACCOUNT_POLICY_PROVIDERS, provider) || typeof modelId !== "string") return undefined;
 	const separator = modelId.lastIndexOf("/");
 	const bareModelId = (separator === -1 ? modelId : modelId.slice(separator + 1)).trim().toLowerCase();
 	if (!bareModelId || bareModelId.includes("\0")) return undefined;
@@ -3457,23 +3464,29 @@ export class AuthStorage {
 		usage: { input: number; output: number; cacheRead: number; cacheWrite: number };
 		costUsd?: number;
 		at?: number;
+		/** Attribution override; defaults to this process's install identity. */
+		client?: ClientUsageIdentity;
 	}): void {
 		const record = this.#store.recordObservedUsage;
 		if (!record) return;
 		try {
-			record.call(this.#store, [
-				{
-					at: entry.at ?? Date.now(),
-					provider: entry.provider,
-					model: entry.model,
-					requests: 1,
-					inputTokens: entry.usage.input,
-					outputTokens: entry.usage.output,
-					cacheReadTokens: entry.usage.cacheRead,
-					cacheWriteTokens: entry.usage.cacheWrite,
-					costUsd: Number.isFinite(entry.costUsd) ? (entry.costUsd ?? 0) : 0,
-				},
-			]);
+			record.call(
+				this.#store,
+				[
+					{
+						at: entry.at ?? Date.now(),
+						provider: entry.provider,
+						model: entry.model,
+						requests: 1,
+						inputTokens: entry.usage.input,
+						outputTokens: entry.usage.output,
+						cacheReadTokens: entry.usage.cacheRead,
+						cacheWriteTokens: entry.usage.cacheWrite,
+						costUsd: Number.isFinite(entry.costUsd) ? (entry.costUsd ?? 0) : 0,
+					},
+				],
+				entry.client,
+			);
 		} catch (error) {
 			this.#usageLogger?.debug("observed usage record failed", {
 				provider: entry.provider,
@@ -6393,8 +6406,8 @@ export class AuthStorage {
 	 * - usage-limit / account-rate-limit error → {@link AuthStorage.markUsageLimitReached}
 	 *   (temporary block via its own backoff — default plus server usage-report
 	 *   reset; sticky left intact so the next resolve re-ranks around the block).
-	 * - exact Codex model-entitlement denial → temporarily block only that
-	 *   requested model after provider/model identity matches, then rotate.
+	 * - exact model-entitlement denial (Codex ChatGPT account or Cursor plan) →
+	 *   temporarily block only that requested model, then rotate.
 	 * - other account-scoped policy denial → temporarily block that account
 	 *   without marking its credential suspect, then rotate through siblings.
 	 * - otherwise (hard 401 / auth failure) → mark the credential suspect (or
@@ -6411,7 +6424,9 @@ export class AuthStorage {
 		const error = options?.error;
 		const status = AIError.status(error);
 		const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
-		if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) {
+		const exactCursorModelPolicy = AIError.isCursorPlanAccountPolicyError(error, provider);
+		const accountPolicy = exactCursorModelPolicy || AIError.isAccountPolicyError(error);
+		if (!accountPolicy && (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message))) {
 			// Thread the provider-specified reset window (e.g. Devin "Your limit
 			// will reset in 13 minutes") into the block duration so the credential
 			// is not reselected and hammered while the cap remains active.
@@ -6436,15 +6451,16 @@ export class AuthStorage {
 		const deniedModel = AIError.codexChatGPTAccountPolicyModel(error);
 		const exactCodexModelPolicy =
 			deniedModel !== undefined && AIError.isCodexChatGPTAccountPolicyError(error, provider, options?.modelId);
+		const exactModelPolicy = exactCodexModelPolicy || exactCursorModelPolicy;
 		// The exact sentence is provider-controlled input. A non-Codex provider,
 		// absent request model, or mismatched model must not turn it into either a
 		// global block or a hard-auth invalidation.
 		if (deniedModel !== undefined && !exactCodexModelPolicy) return false;
-		if (exactCodexModelPolicy || AIError.isAccountPolicyError(error)) {
-			const modelPolicyScope = exactCodexModelPolicy
+		if (exactModelPolicy || accountPolicy) {
+			const modelPolicyScope = exactModelPolicy
 				? modelAccountPolicyBlockScope(provider, options?.modelId)
 				: undefined;
-			if (exactCodexModelPolicy && modelPolicyScope === undefined) return false;
+			if (exactModelPolicy && modelPolicyScope === undefined) return false;
 			const routing = this.#credentialBlockRouting(
 				provider,
 				sessionCredential.type,

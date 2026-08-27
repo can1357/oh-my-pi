@@ -277,6 +277,10 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 		// creation, and navigation — not only `acquireTab`. Compose one deadline
 		// from the caller signal and `params.timeout` and thread it through both
 		// stages so a stalled acquisition rejects at the requested boundary.
+		// Capture the deadline start as well: `acquireTab` counts its
+		// worker-init time against this same budget via `deadlineStartMs`
+		// instead of restarting the clock after acquisition.
+		const deadlineStart = performance.now();
 		const timeoutSignal = AbortSignal.timeout(timeoutMs);
 		const openSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 		try {
@@ -319,13 +323,16 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 							: undefined,
 						target: params.app?.target,
 						timeoutMs,
+						deadlineStartMs: deadlineStart,
 						dialogs: params.dialogs,
 						signal: openSignal,
 						ownerSessionId: this.session.getSessionId?.() ?? undefined,
 					}),
 				);
 			} catch (error) {
-				await releaseBrowser(browser, { kill: false });
+				await releaseBrowser(browser, {
+					kill: "subprocess" in browser && browser.subprocess !== undefined,
+				});
 				throw error;
 			}
 			await releaseBrowser(browser, { kill: false });
