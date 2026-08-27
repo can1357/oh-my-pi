@@ -11,6 +11,7 @@ import type {
 } from "@oh-my-pi/pi-agent-core/presentation";
 import { byteLengthOf } from "@oh-my-pi/pi-agent-core/presentation";
 import type { NonEmptyArray } from "@oh-my-pi/pi-utils/types";
+import { LIVE_RECORD_DISPLAY_BUDGET_BYTES, LIVE_RECORD_DISPLAY_ITEM_LIMIT } from "../../../presentation/live-record";
 import {
 	factsFor,
 	fenceBlock,
@@ -20,8 +21,6 @@ import {
 	renderFact,
 	renderFactText,
 	renderSettlementReason,
-	renderToolOutputSegments,
-	type ToolOutputSegment,
 } from "../../../presentation/projections";
 import { utf8PrefixWithin } from "../../../presentation/utf8";
 import type {
@@ -191,8 +190,18 @@ export type FactSuppressionReason =
  */
 export const PROCESS_TEXT_HEAD_WINDOW_BYTES = 1024 * 1024; // 1 MiB
 
-type RenderSegment = ToolOutputSegment & {
+/**
+ * One retained position in the ordered process/display timeline. Displays are
+ * pre-rendered at fold time (the projection caps each JSON value) and retained
+ * under the journal's centralized item/byte budgets, so a display-heavy call
+ * can neither grow this state without bound nor force every later snapshot to
+ * re-serialize raw trees; process text is retained verbatim under its own
+ * head-window cap.
+ */
+type RenderSegment = {
 	readonly id: number;
+	readonly kind: "process" | "display";
+	readonly text: string;
 	readonly delivery: "pending" | "terminal_output";
 };
 
@@ -235,13 +244,38 @@ function appendProcessSegment(
 }
 
 function renderSegments(segments: readonly RenderSegment[]): string {
-	return renderToolOutputSegments(segments);
+	let rendered = "";
+	for (const segment of segments) {
+		if (segment.text.length === 0) continue;
+		if (rendered.length > 0) rendered += outputSegmentSeparator(rendered);
+		rendered += segment.text;
+	}
+	return rendered;
 }
 
-function terminalSegmentPrefix(segments: readonly RenderSegment[], kind: ToolOutputSegment["kind"]): string {
-	const previous = segments.at(-1);
-	if (previous === undefined || (previous.kind === "process" && kind === "process")) return "";
-	return outputSegmentSeparator(renderSegments(segments));
+/**
+ * The explicit omission marker for displays dropped by the retention budgets.
+ * Shared by the settlement snapshot and the live-terminal catch-up frame so
+ * the two renderings of the same omission cannot drift.
+ */
+function droppedDisplaysMarker(dropped: number): string {
+	return `[…${dropped} display output${dropped === 1 ? "" : "s"} over the display budget not shown…]`;
+}
+
+/**
+ * The separator before the next live meta-terminal delivery, computed from
+ * what was actually DELIVERED — never from the retained segment timeline,
+ * which drops over-budget displays and caps process text while the client's
+ * terminal keeps every byte. Two trailing characters suffice:
+ * `outputSegmentSeparator` inspects only `"\n"`/`"\n\n"` suffixes.
+ */
+function deliveredSegmentPrefix(
+	deliveredKind: RenderSegment["kind"] | undefined,
+	deliveredTail: string,
+	kind: RenderSegment["kind"],
+): string {
+	if (deliveredKind === undefined || (deliveredKind === "process" && kind === "process")) return "";
+	return outputSegmentSeparator(deliveredTail);
 }
 
 /** Reducer state. Channel is chosen at `started` and changed only by typed transitions. */
@@ -258,15 +292,21 @@ export type AcpToolViewState =
 			readonly processTextBytes: number;
 			/** Latched once the process-text head window fills; see {@link appendProcessSegment}. */
 			readonly processTextCapped: boolean;
+			/** Cumulative rendered bytes retained across `segments`' "display" entries, up to {@link LIVE_RECORD_DISPLAY_BUDGET_BYTES}. */
+			readonly displayTextBytes: number;
+			/** Displays dropped by the retention budgets; surfaced as a marker in the settlement snapshot. */
+			readonly droppedDisplays: number;
 			/**
-			 * Uncapped mirror of `segments`/`processTextBytes`/`nextSegmentId`.
+			 * Mirror of `segments`/`processTextBytes`/`nextSegmentId` for the
+			 * live-terminal catch-up frame. Process bytes mirror UNCAPPED
+			 * (`reduceAppend` passes `Number.POSITIVE_INFINITY` here):
 			 * `reduceLiveTerminalAttached`'s one-shot catch-up frame is the ONLY
 			 * delivery path for bytes buffered while a `plain` call had no live
-			 * wire (`reduceAppend`'s `plain` arm emits no frame), so it must not
-			 * read the capped `segments` above — that cap exists only to bound the
-			 * settlement-snapshot replay in `buildReplacementSnapshotContent`,
-			 * which stays capped by design and is the only
-			 * other reader of `segments`.
+			 * wire, so it must not read the head-window-capped `segments` above.
+			 * Display entries, by contrast, ARE subject to the shared display
+			 * retention budgets (a display dropped from `segments` is dropped
+			 * here too, tracked in `droppedDisplays` and surfaced as a marker on
+			 * both the settlement snapshot and the catch-up frame).
 			 *
 			 * Only ever populated for `call.awaitsLiveTerminal === true` calls —
 			 * the sole route `selectAcpToolRenderMode` ever sends a
@@ -305,6 +345,21 @@ export type AcpToolViewState =
 			readonly processTextBytes: number;
 			/** Latched once the process-text head window fills; see {@link appendProcessSegment}. */
 			readonly processTextCapped: boolean;
+			/** Cumulative rendered bytes retained across `segments`' "display" entries, up to {@link LIVE_RECORD_DISPLAY_BUDGET_BYTES}. */
+			readonly displayTextBytes: number;
+			/** Displays dropped by the retention budgets; surfaced as a marker in the settlement snapshot. */
+			readonly droppedDisplays: number;
+			/**
+			 * What the client's terminal actually received last: the kind of the
+			 * last delivered payload and the final two characters of everything
+			 * delivered. Live separator prefixes are computed from THESE — the
+			 * retained `segments` timeline drops over-budget displays (and caps
+			 * process text) while the terminal keeps every byte, so a
+			 * retention-derived prefix would desync from the real terminal
+			 * contents once a budget trips. See {@link deliveredSegmentPrefix}.
+			 */
+			readonly deliveredKind: RenderSegment["kind"] | undefined;
+			readonly deliveredTail: string;
 			readonly facts: readonly ToolFact[];
 			readonly attachments: readonly ToolAttachment[];
 	  }
@@ -416,6 +471,10 @@ function reduceStarted(
 				nextSegmentId: 1,
 				processTextBytes: 0,
 				processTextCapped: false,
+				displayTextBytes: 0,
+				droppedDisplays: 0,
+				deliveredKind: undefined,
+				deliveredTail: "",
 				facts: [],
 				attachments: [],
 			},
@@ -456,6 +515,8 @@ function reduceStarted(
 			nextSegmentId: 1,
 			processTextBytes: 0,
 			processTextCapped: false,
+			displayTextBytes: 0,
+			droppedDisplays: 0,
 			rawSegments: [],
 			rawNextSegmentId: 1,
 			rawProcessTextBytes: 0,
@@ -500,7 +561,7 @@ function reduceAppend(
 			// again — `eval`'s source has nowhere else to render once the frame carries
 			// a terminal item. `bash`'s title is the command, so it sets no echo.
 			const echo = !state.sourceEchoSent && state.call.sourceEcho !== undefined;
-			const processPrefix = terminalSegmentPrefix(state.segments, "process");
+			const processPrefix = deliveredSegmentPrefix(state.deliveredKind, state.deliveredTail, "process");
 			const data = echo
 				? `${state.call.sourceEcho}\n${TERMINAL_SEPARATOR}\n${processPrefix}${event.data}`
 				: `${processPrefix}${event.data}`;
@@ -520,6 +581,8 @@ function reduceAppend(
 					lastSequence: event.sequence,
 					sourceEchoSent: true,
 					startedProgress: true,
+					deliveredKind: "process" as const,
+					deliveredTail: (state.deliveredTail + data).slice(-2),
 					segments: appended.segments,
 					processTextBytes: appended.bytes,
 					processTextCapped: appended.capped,
@@ -761,12 +824,17 @@ function reduceLiveTerminalAttached(
 		// transition. `call.sourceEcho` is NOT replayed — the plain `started` frame
 		// already delivered it as start content.
 		const humanFacts = factsFor(state.facts, "human");
-		// `rawSegments` is the uncapped mirror of `segments` — see its field doc.
-		// This one-shot frame is the ONLY delivery path for bytes buffered while
-		// plain (`reduceAppend`'s plain arm emits no frame), so it must read the
-		// uncapped accumulator, never the settlement-bounded `segments`.
+		// `rawSegments` mirrors process bytes uncapped — see its field doc. This
+		// one-shot frame is the ONLY delivery path for bytes buffered while plain
+		// (`reduceAppend`'s plain arm emits no frame), so it must read that
+		// mirror, never the settlement-bounded `segments`. Displays ARE budgeted
+		// in the mirror too, so a drop is surfaced here exactly like the
+		// settlement snapshot surfaces it — carried text with no marker would
+		// silently violate the drops-are-explicit contract.
 		const carriedData =
-			renderSegments(state.rawSegments) + humanFacts.map(fact => `\n${renderFact(fact).text}\n`).join("");
+			renderSegments(state.rawSegments) +
+			(state.droppedDisplays > 0 ? `\n${droppedDisplaysMarker(state.droppedDisplays)}\n` : "") +
+			humanFacts.map(fact => `\n${renderFact(fact).text}\n`).join("");
 		const frames: AcpToolFrame[] = [
 			{
 				channel: "terminal",
@@ -1004,25 +1072,48 @@ function reduceDisplayOutput(state: AcpToolViewState, display: ToolDisplayOutput
 	if (text.length === 0) {
 		return { state, frames: [], receipts: [] };
 	}
+	// Retention shares the journal's centralized display budgets: live wire
+	// delivery below stays uncapped (exactly like process bytes, whose frames
+	// carry `event.data` directly), but the retained segment timeline — which
+	// every later prefix computation and the settlement snapshot re-read —
+	// drops over-budget displays whole and surfaces the omission as a marker
+	// in `buildReplacementSnapshotContent`.
+	const textBytes = byteLengthOf(text);
+	const retainDisplay = (retained: { segments: readonly RenderSegment[]; displayTextBytes: number }): boolean =>
+		retained.segments.reduce((count, segment) => (segment.kind === "display" ? count + 1 : count), 0) <
+			LIVE_RECORD_DISPLAY_ITEM_LIMIT && retained.displayTextBytes + textBytes <= LIVE_RECORD_DISPLAY_BUDGET_BYTES;
 	switch (state.state) {
 		case "meta_terminal": {
 			// Source echo rides the first terminal delivery (append or display).
 			// A display-only eval has no append, so the echo must precede the
 			// display text — same rule as reduceAppend.
 			const echo = !state.sourceEchoSent && state.call.sourceEcho !== undefined;
-			const displayPrefix = terminalSegmentPrefix(state.segments, "display");
+			const displayPrefix = deliveredSegmentPrefix(state.deliveredKind, state.deliveredTail, "display");
 			const data = echo
 				? `${state.call.sourceEcho}\n${TERMINAL_SEPARATOR}\n${displayPrefix}${text}`
 				: `${displayPrefix}${text}`;
+			const retained = retainDisplay(state);
 			return {
 				state: {
 					...state,
-					segments: [
-						...state.segments,
-						{ id: state.nextSegmentId, kind: "display", display, delivery: "terminal_output" },
-					],
-					nextSegmentId: state.nextSegmentId + 1,
+					...(retained
+						? {
+								segments: [
+									...state.segments,
+									{
+										id: state.nextSegmentId,
+										kind: "display" as const,
+										text,
+										delivery: "terminal_output" as const,
+									},
+								],
+								nextSegmentId: state.nextSegmentId + 1,
+								displayTextBytes: state.displayTextBytes + textBytes,
+							}
+						: { droppedDisplays: state.droppedDisplays + 1 }),
 					sourceEchoSent: true,
+					deliveredKind: "display" as const,
+					deliveredTail: (state.deliveredTail + data).slice(-2),
 				},
 				frames: [
 					{
@@ -1057,26 +1148,31 @@ function reduceDisplayOutput(state: AcpToolViewState, display: ToolDisplayOutput
 				receipts: [],
 			};
 		}
-		case "plain":
+		case "plain": {
+			const retained = retainDisplay(state);
+			if (!retained) {
+				return {
+					state: { ...state, droppedDisplays: state.droppedDisplays + 1 },
+					frames: [],
+					receipts: [],
+				};
+			}
 			return {
 				state: {
 					...state,
-					segments: [
-						...state.segments,
-						{ id: state.nextSegmentId, kind: "display", display, delivery: "pending" },
-					],
+					segments: [...state.segments, { id: state.nextSegmentId, kind: "display", text, delivery: "pending" }],
 					nextSegmentId: state.nextSegmentId + 1,
-					// Display output was never subject to the process-text cap, so
-					// this mirrors verbatim into the uncapped `rawSegments` too — see
-					// its field doc on the `plain` state. Only worth building for a
-					// call that can actually reach `reduceLiveTerminalAttached`'s
+					displayTextBytes: state.displayTextBytes + textBytes,
+					// The pre-rendered display text mirrors into `rawSegments` too —
+					// see its field doc on the `plain` state. Only worth building for
+					// a call that can actually reach `reduceLiveTerminalAttached`'s
 					// catch-up frame (`awaitsLiveTerminal`) — see `reduceAppend`'s
 					// matching guard.
 					...(state.call.awaitsLiveTerminal
 						? {
 								rawSegments: [
 									...state.rawSegments,
-									{ id: state.rawNextSegmentId, kind: "display", display, delivery: "pending" },
+									{ id: state.rawNextSegmentId, kind: "display" as const, text, delivery: "pending" as const },
 								],
 								rawNextSegmentId: state.rawNextSegmentId + 1,
 							}
@@ -1085,6 +1181,7 @@ function reduceDisplayOutput(state: AcpToolViewState, display: ToolDisplayOutput
 				frames: [],
 				receipts: [],
 			};
+		}
 		default: {
 			const exhaustive: never = state;
 			throw new Error(`Unhandled view state: ${JSON.stringify(exhaustive)}`);
@@ -1319,6 +1416,9 @@ function buildReplacementSnapshotContent(
 				},
 			}),
 		);
+	}
+	if (state.droppedDisplays > 0) {
+		factLines.push(droppedDisplaysMarker(state.droppedDisplays));
 	}
 	const factText = factLines.join("\n");
 	if (factText.length > 0) sections.push(factText);

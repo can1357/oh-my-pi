@@ -16,6 +16,7 @@ import {
 	PROCESS_TEXT_HEAD_WINDOW_BYTES,
 	reduceAcpToolView,
 } from "../src/modes/acp/view/reducer";
+import { LIVE_RECORD_DISPLAY_ITEM_LIMIT } from "../src/presentation/live-record";
 import { driveAcpToolView } from "./helpers/acp-tool-view-driver";
 
 const CALL_ID = "call-1";
@@ -1307,5 +1308,80 @@ describe("ACP tool view reducer — settlement failure reasons", () => {
 			{ phase: "live", terminal: { kind: "none" }, fence: true },
 		).updates.at(-1) as unknown as { content?: { content: { text: string } }[] };
 		expect(settlement.content?.[0]?.content.text).toBe("spawn /missing ENOENT");
+	});
+});
+
+describe("ACP tool view reducer — display retention budgets", () => {
+	it("drops over-budget displays from the plain settlement snapshot and marks the omission", () => {
+		const { events, producer } = record();
+		for (let index = 0; index <= LIVE_RECORD_DISPLAY_ITEM_LIMIT; index++) {
+			producer.declareDisplay({ kind: "sequence", items: [{ kind: "json", value: { index } }] });
+		}
+		const settlement = run(
+			[{ type: "started", call: bashCall() }, ...events, { type: "settled", outcome: { kind: "succeeded" } }],
+			{ phase: "live", terminal: { kind: "none" }, fence: false },
+		).updates.at(-1) as unknown as { content: { content: { text: string } }[] };
+		const text = settlement.content[0]?.content.text ?? "";
+		// The first display survived, the one past the item budget did not,
+		// and the omission is an explicit marker, not silence.
+		expect(text).toContain('"index": 0');
+		expect(text).not.toContain(`"index": ${LIVE_RECORD_DISPLAY_ITEM_LIMIT}`);
+		expect(text).toContain("1 display output over the display budget not shown");
+	});
+
+	it("keeps delivering over-budget displays on the live meta terminal while bounding retention", () => {
+		const { events, producer } = record();
+		for (let index = 0; index <= LIVE_RECORD_DISPLAY_ITEM_LIMIT; index++) {
+			producer.declareDisplay({ kind: "sequence", items: [{ kind: "json", value: { index } }] });
+		}
+		const { updates } = run([{ type: "started", call: bashCall() }, ...events]);
+		// Live wire delivery is uncapped — every display reached the terminal,
+		// including the one the retained timeline dropped.
+		const delivered = terminalOutputs(updates).join("");
+		expect(delivered).toContain(`"index": ${LIVE_RECORD_DISPLAY_ITEM_LIMIT}`);
+		expect(terminalOutputs(updates)).toHaveLength(LIVE_RECORD_DISPLAY_ITEM_LIMIT + 1);
+	});
+});
+
+describe("ACP tool view reducer — display budget edges", () => {
+	it("surfaces dropped displays on the live-terminal catch-up frame instead of losing them silently", () => {
+		const cap = negotiateTerminalMetaCap(true);
+		if (!cap) throw new Error("expected a capability witness");
+		const { events, producer } = record();
+		for (let index = 0; index <= LIVE_RECORD_DISPLAY_ITEM_LIMIT; index++) {
+			producer.declareDisplay({ kind: "sequence", items: [{ kind: "json", value: { index } }] });
+		}
+		events.push({ type: "live_terminal_attached", binding: createLiveTerminalBinding("term-20") });
+
+		const { updates } = run([{ type: "started", call: bashCall({ awaitsLiveTerminal: true }) }, ...events], {
+			phase: "live",
+			terminal: { kind: "real", metaCap: cap },
+			fence: true,
+		});
+		const carried = terminalOutputs(updates).join("");
+		// The retained displays ride the catch-up frame; the dropped one is an
+		// explicit marker, never silence — plain-arm displays have no live wire.
+		expect(carried).toContain('"index": 0');
+		expect(carried).not.toContain(`"index": ${LIVE_RECORD_DISPLAY_ITEM_LIMIT}`);
+		expect(carried).toContain("1 display output over the display budget not shown");
+	});
+
+	it("computes live separators from delivered content, not the drop-capped retained timeline", () => {
+		const { events, producer } = record();
+		// Exhaust the item budget so the NEXT display is delivered but dropped
+		// from retention.
+		for (let index = 0; index < LIVE_RECORD_DISPLAY_ITEM_LIMIT; index++) {
+			producer.declareDisplay({ kind: "sequence", items: [{ kind: "json", value: { index } }] });
+		}
+		producer.appendTerminal("A"); // retained tail is now process "A"
+		producer.declareDisplay({ kind: "sequence", items: [{ kind: "json", value: { dropped: true } }] });
+		producer.appendTerminal("B");
+
+		const { updates } = run([{ type: "started", call: bashCall() }, ...events]);
+		const delivered = terminalOutputs(updates);
+		// The terminal actually shows the dropped display between A and B, so B
+		// needs a display→process separator. A retention-derived prefix would
+		// see process "A" as the tail and glue B on with no separator.
+		expect(delivered.at(-1)).toBe("\n\nB");
 	});
 });
