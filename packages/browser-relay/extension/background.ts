@@ -11,6 +11,7 @@
  */
 import { AttachmentGuard } from "../../coding-agent/src/tools/browser/relay/attachment-guard";
 import type { ExtToRelayMessage, RelayToExtMessage, TabSnapshot } from "../../coding-agent/src/tools/browser/relay/protocol";
+import { snapshotAfterPendingOperationsSettle } from "./pending-ops";
 
 const DEFAULT_PORT = 9224;
 const PING_INTERVAL_MS = 20_000;
@@ -29,6 +30,7 @@ let reconnectDelay = RECONNECT_MIN_MS;
 let pingTimer: NodeJS.Timeout | null = null;
 const pendingAttaches = new Set<Promise<void>>();
 const pendingDetaches = new Set<Promise<void>>();
+let pendingOperationGeneration = 0;
 const pendingAttachTabs = new Set<number>();
 const canceledPendingAttachTabs = new Set<number>();
 const guardDetachments = new Set<number>();
@@ -51,6 +53,7 @@ const recoverableReady = chrome.storage.session
 let recoverableUpdates: Promise<void> = recoverableReady;
 
 function trackPendingDetach<T>(promise: Promise<T>): Promise<T> {
+	pendingOperationGeneration++;
 	const tracked = promise.finally(() => {
 		pendingDetaches.delete(tracked as Promise<void>);
 	});
@@ -299,14 +302,16 @@ function refreshHello(): void {
 
 async function buildHello(): Promise<ExtToRelayMessage> {
 	// An attach requested by the previous socket can finish during a fast
-	// reconnect. Wait for it before taking the hello snapshot so the replacement
-	// relay learns the real attachment state instead of stranding the tab.
-	// Guard/internal detaches can be in flight for the same reconnect window:
-	// if hello snapshots Chrome before those detaches resolve, the relay treats
-	// the soon-to-disappear root as ready and releases commands against it.
-	await Promise.allSettled([...pendingAttaches, ...pendingDetaches]);
+	// reconnect. Guard/internal detaches can be in flight for the same window,
+	// too. Wait until the pending attach/detach set stays stable through the
+	// target snapshot; otherwise a same-socket refresh can still capture stale
+	// attached state, clear `tab.attaching`, and trigger a second recovery attach.
 	await recoverableUpdates;
-	const [tabs, targets] = await Promise.all([chrome.tabs.query({}), chrome.debugger.getTargets()]);
+	const [tabs, targets] = await snapshotAfterPendingOperationsSettle(
+		() => pendingOperationGeneration,
+		() => [...pendingAttaches, ...pendingDetaches],
+		() => Promise.all([chrome.tabs.query({}), chrome.debugger.getTargets()]),
+	);
 	const snapshots: TabSnapshot[] = [];
 	for (const tab of tabs) {
 		const snap = snapshot(tab);
@@ -338,6 +343,7 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 async function attachTab(tabId: number, socket: WebSocket): Promise<void> {
 	pendingAttachTabs.add(tabId);
 	const pending = attachTabOperation(tabId, socket);
+	pendingOperationGeneration++;
 	pendingAttaches.add(pending);
 	try {
 		await pending;
