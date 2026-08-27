@@ -2313,6 +2313,9 @@ pub enum WorkerError {
 	/// The worker used an unexpected protocol sequence.
 	#[error("python tool worker protocol violation: {0}")]
 	Protocol(Str),
+	/// A worker declared tools under the harness-reserved `omp/core` id.
+	#[error("worker extension id 'omp/core' is reserved for harness core tools")]
+	ReservedExtensionId,
 	/// A worker claimed more than one revision of the same tool root.
 	#[error(
 		"worker registered more than one revision of the same tool root: {name} (extension \
@@ -6224,9 +6227,7 @@ fn validate_registrations(tools: &[ToolDecl]) -> Result<(), WorkerError> {
 			)));
 		}
 		if tool.extension_id == "omp/core" {
-			return Err(WorkerError::Protocol(sf!(
-				"worker extension id 'omp/core' is reserved for harness core tools"
-			)));
+			return Err(WorkerError::ReservedExtensionId);
 		}
 		let Some(tool_def::Input::JsonSchema(json_schema)) = definition.input.as_ref() else {
 			return Err(WorkerError::Protocol(sf!(
@@ -8193,9 +8194,7 @@ async def worker_prelude_round_trip(patches, *, strategy: str = "sequential"):
 		};
 		let error = validate_registrations(&[reserved])
 			.expect_err("reserved extension id 'omp/core' is rejected");
-		assert!(
-			matches!(error, WorkerError::Protocol(message) if message == "worker extension id 'omp/core' is reserved for harness core tools")
-		);
+		assert!(matches!(error, WorkerError::ReservedExtensionId));
 
 		let ambiguous_base = ToolDecl {
 			extension_id: "extension/example".to_owned(),
