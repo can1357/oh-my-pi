@@ -279,7 +279,7 @@
 
 			<h1 id="title">Authentication</h1>
 			<p id="message"></p>
-			<button onclick="window.close()" class="btn">Close Window</button>
+			<button id="close-btn" class="btn">Close Window</button>
 		</div>
 
 		<script id="server-state" type="application/json">
@@ -302,16 +302,30 @@
 			const title = document.getElementById("title");
 			const message = document.getElementById("message");
 
+			// window.close() is a no-op unless the tab was opened by script, and OAuth
+			// tabs are opened via the system browser. The message already tells the user
+			// they can close the tab, so on failure just hide the now-useless button.
+			function tryCloseTab(delay) {
+				setTimeout(() => {
+					window.close();
+					setTimeout(() => {
+						if (!window.closed) document.getElementById("close-btn").remove();
+					}, 150);
+				}, delay);
+			}
+
 			if (serverState.ok) {
 				app.classList.add("success", "countdown");
 				title.textContent = "Authentication Successful";
 				message.innerHTML = "You have successfully logged in.<br>You can now close this tab.";
-				setTimeout(() => window.close(), 3000);
+				tryCloseTab(3000);
 			} else {
 				app.classList.add("error");
 				title.textContent = "Authentication Failed";
 				message.textContent = serverState.error || "An error occurred";
 			}
+
+			document.getElementById("close-btn").addEventListener("click", () => tryCloseTab(0));
 		</script>
 	</body>
 </html>
