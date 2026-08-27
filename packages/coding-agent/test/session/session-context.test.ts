@@ -147,6 +147,75 @@ describe("buildSessionContext snapcompact archives", () => {
 		expect(compactionSummary(transcriptContext.messages).summary).toBe("opaque remote summary");
 	});
 
+	it("re-expands legacy remote image history for model context", () => {
+		const model = buildModel({
+			id: "gpt-5-mini",
+			name: "GPT-5 mini",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_000,
+		} satisfies ModelSpec<"openai-responses">);
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "before",
+				parentId: null,
+				timestamp,
+				message: { role: "user", content: "original durable context", timestamp: 1 },
+			},
+			{
+				type: "compaction",
+				id: "compact",
+				parentId: "before",
+				timestamp,
+				summary: "legacy opaque summary",
+				firstKeptEntryId: "before",
+				tokensBefore: 100,
+				preserveData: {
+					openaiRemoteCompaction: {
+						provider: "openai",
+						replacementHistory: [
+							{
+								type: "message",
+								role: "user",
+								content: [{ type: "input_image", file_id: "file_image_legacy" }],
+							},
+						],
+					},
+				},
+			},
+			{
+				type: "message",
+				id: "after",
+				parentId: "compact",
+				timestamp,
+				message: { role: "user", content: "recent context", timestamp: 2 },
+			},
+		];
+
+		const modelContext = buildSessionContext(entries, undefined, undefined, {
+			activeModel: model,
+			compactionSettings: DEFAULT_COMPACTION_SETTINGS,
+		});
+		const transcriptContext = buildSessionContext(entries, undefined, undefined, {
+			transcript: true,
+			collapseCompactedHistory: true,
+		});
+
+		expect(modelContext.messages.map(message => message.role)).toEqual(["user", "user"]);
+		expect(
+			modelContext.messages.some(
+				message => message.role === "user" && message.content === "original durable context",
+			),
+		).toBe(true);
+		expect(compactionSummary(transcriptContext.messages).summary).toBe("legacy opaque summary");
+	});
+
 	it("omits snapcompact archive blocks from collapsed transcript summaries", () => {
 		const context = buildSessionContext(compactedEntries, undefined, undefined, {
 			transcript: true,

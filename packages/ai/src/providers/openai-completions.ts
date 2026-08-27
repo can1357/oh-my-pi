@@ -112,9 +112,9 @@ import {
 } from "./openai-shared";
 import { transformMessages } from "./transform-messages";
 import {
+	getUsableInlineImageMimeType,
 	isOpenAICompletionsVisionSupported,
 	isRemoteImageUrl,
-	isUsableInlineImageData,
 	joinTextWithImagePlaceholder,
 	NON_VISION_IMAGE_PLACEHOLDER,
 	supportsRemoteImageUrls,
@@ -128,7 +128,8 @@ function resolveOpenAICompletionsImageUrl(image: ImageContent, model: Model<"ope
 	if (typeof image.url === "string" && isRemoteImageUrl(image.url) && supportsRemoteImageUrls(model, image)) {
 		return image.url;
 	}
-	if (isUsableInlineImageData(image.data)) return `data:${image.mimeType};base64,${image.data}`;
+	const inlineMimeType = getUsableInlineImageMimeType(image);
+	if (inlineMimeType) return `data:${inlineMimeType};base64,${image.data}`;
 	throw new AIError.ValidationError(
 		`input_image cannot be forwarded to ${model.api} without non-empty image data or a supported reference`,
 	);

@@ -101,8 +101,8 @@ import {
 import { getOpenAIPromptCacheKey } from "./openai-shared";
 import { transformMessages } from "./transform-messages";
 import {
+	getUsableInlineImageMimeType,
 	isRemoteImageUrl,
-	isUsableInlineImageData,
 	NON_VISION_IMAGE_PLACEHOLDER,
 	supportsProviderFileReference,
 	supportsRemoteImageUrls,
@@ -1039,12 +1039,13 @@ function convertContentBlocks(
 
 		let source = getAnthropicImageReferenceSource(block, model);
 		if (!source) {
-			if (!isUsableInlineImageData(block.data)) {
+			const inlineMimeType = getUsableInlineImageMimeType(block);
+			if (!inlineMimeType) {
 				throw new AIError.ValidationError(
 					`input_image cannot be forwarded to ${model.api} without non-empty image data or a supported reference`,
 				);
 			}
-			const mediaType = normalizeAnthropicImageMediaType(block.mimeType);
+			const mediaType = normalizeAnthropicImageMediaType(inlineMimeType);
 			if (!mediaType) {
 				blocks.push({ type: "text", text: `[unsupported image: ${block.mimeType}]` });
 				continue;

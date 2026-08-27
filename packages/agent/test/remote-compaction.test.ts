@@ -114,6 +114,21 @@ test("uses the runtime Codex target for configured compaction routes", () => {
 
 	expect(getOpenAiCompactionReferenceTarget(model, false)).toBe(runtimeTarget);
 	expect(getOpenAiCompactionReferenceTarget(model, true)).toBe(runtimeTarget);
+
+	const customModel = makeOpenAiCodexModel({
+		baseUrl: "https://proxy.example/api/codex",
+		remoteCompaction: {
+			enabled: true,
+			api: "openai-codex-responses",
+			endpoint: "https://proxy.example/api/codex/responses/compact",
+			v2StreamingEnabled: true,
+			v2Endpoint: "https://proxy.example/api/codex/responses",
+		},
+	});
+	const customRuntimeTarget = getOpenAIResponsesReferenceTarget(customModel);
+
+	expect(getOpenAiCompactionReferenceTarget(customModel, false)).toBe(customRuntimeTarget);
+	expect(getOpenAiCompactionReferenceTarget(customModel, true)).toBe(customRuntimeTarget);
 });
 
 function makeAzureModel(overrides: Partial<ModelSpec<"azure-openai-responses">> = {}): Model<"azure-openai-responses"> {
@@ -414,7 +429,7 @@ function toolResultFor(callId: string, custom = false): ToolResultMessage {
 
 describe("buildOpenAiNativeHistory multimodal tool results", () => {
 	test("encodes ReadTool images inside the native function output", () => {
-		const imageData = Buffer.from("read image").toString("base64");
+		const imageData = PNG_B64;
 		const result: ToolResultMessage = {
 			role: "toolResult",
 			toolCallId: "call_image|fc_call_image",
@@ -448,7 +463,7 @@ describe("buildOpenAiNativeHistory multimodal tool results", () => {
 	});
 
 	test("falls back to inline data for a foreign OpenAI provider file", () => {
-		const imageData = Buffer.from("foreign provider file").toString("base64");
+		const imageData = PNG_B64;
 		const result: ToolResultMessage = {
 			role: "toolResult",
 			toolCallId: "call_foreign|fc_call_foreign",
@@ -477,7 +492,7 @@ describe("buildOpenAiNativeHistory multimodal tool results", () => {
 	});
 
 	test("falls back to inline data for an expired OpenAI provider file", () => {
-		const imageData = Buffer.from("expired provider file").toString("base64");
+		const imageData = PNG_B64;
 		const result: ToolResultMessage = {
 			role: "toolResult",
 			toolCallId: "call_expired|fc_call_expired",
@@ -506,7 +521,7 @@ describe("buildOpenAiNativeHistory multimodal tool results", () => {
 	});
 
 	test("falls back to inline data for a configured compaction endpoint", () => {
-		const imageData = Buffer.from("custom compaction endpoint").toString("base64");
+		const imageData = PNG_B64;
 		const result: ToolResultMessage = {
 			role: "toolResult",
 			toolCallId: "call_compaction|fc_call_compaction",
@@ -2359,7 +2374,7 @@ describe("compact() remote compaction failure handling", () => {
 	test("uses inline image fallbacks for a configured V2 compaction endpoint", async () => {
 		const preparation = makePreparation();
 		preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: true };
-		const imageData = Buffer.from("custom V2 compaction endpoint").toString("base64");
+		const imageData = PNG_B64;
 		preparation.messagesToSummarize = [
 			{ role: "user", content: "inspect image", timestamp: 1 },
 			{

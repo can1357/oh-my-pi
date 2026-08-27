@@ -118,10 +118,10 @@ import type {
 } from "./openai-responses-wire";
 import { transformMessages } from "./transform-messages";
 import {
+	getUsableInlineImageMimeType,
 	hasSupportedImageSource,
 	isRemoteImageUrl,
 	isUsableInlineImage,
-	isUsableInlineImageData,
 	joinTextWithImagePlaceholder,
 	NON_VISION_IMAGE_PLACEHOLDER,
 	partitionVisionContent,
@@ -1840,8 +1840,9 @@ function convertResponsesInputImage(
 		isRemoteImageUrl(url) &&
 		(model === undefined || supportsRemoteImageUrls(model, image));
 	if (remoteUrl) return { type: "input_image", detail, image_url: url };
-	if (isUsableInlineImageData(image.data)) {
-		return { type: "input_image", detail, image_url: `data:${image.mimeType};base64,${image.data}` };
+	const inlineMimeType = getUsableInlineImageMimeType(image);
+	if (inlineMimeType) {
+		return { type: "input_image", detail, image_url: `data:${inlineMimeType};base64,${image.data}` };
 	}
 	throw new AIError.ValidationError(
 		`input_image cannot be forwarded to ${model?.api ?? "openai-responses"} without non-empty image data or a supported reference`,

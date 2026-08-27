@@ -26,7 +26,7 @@ const userMessage: Message = {
 	content: [
 		{ type: "text", text: "what is in these?" },
 		{ type: "image", data: PNG_B64, mimeType: "image/png", url: BLOB_URL },
-		{ type: "image", data: PNG_B64, mimeType: "image/png" },
+		{ type: "image", data: PNG_B64, mimeType: "IMAGE/PNG; charset=binary" },
 	],
 	timestamp: 0,
 };
@@ -472,5 +472,42 @@ describe("image url parts", () => {
 		const parts = captured?.messages?.[0]?.content as Array<{ type: string; image_url?: { url: string } }>;
 		const images = parts.filter(part => part.type === "image_url");
 		expect(images[0].image_url?.url).toBe(`data:image/png;base64,${PNG_B64}`);
+	});
+
+	it("rejects Base64 text mislabeled as an image across direct serializers", async () => {
+		const invalidImage = {
+			type: "image" as const,
+			data: Buffer.from("not an image").toString("base64"),
+			mimeType: "image/png",
+		};
+		const anthropicModel = getBundledModel("anthropic", "claude-sonnet-4-5") as Model<"anthropic-messages">;
+		const completionsModel = {
+			...(getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">),
+			api: "openai-completions",
+		} satisfies Model<"openai-completions">;
+		let providerCalls = 0;
+		const fetchImpl = (async () => {
+			providerCalls++;
+			return new Response(null, { status: 500 });
+		}) as FetchImpl;
+
+		expect(() => convertResponsesInputContent([invalidImage], true, true)).toThrow(
+			"without non-empty image data or a supported reference",
+		);
+		expect(() =>
+			convertAnthropicMessages(
+				[{ role: "user", content: [invalidImage], timestamp: 0 }],
+				anthropicModel,
+				false,
+			),
+		).toThrow("without non-empty image data or a supported reference");
+		const completionsResult = await streamOpenAICompletions(
+			completionsModel,
+			{ messages: [{ role: "user", content: [invalidImage], timestamp: 0 }] },
+			{ apiKey: "test", fetch: fetchImpl },
+		).result();
+		expect(completionsResult.stopReason).toBe("error");
+		expect(completionsResult.errorMessage).toContain("without non-empty image data or a supported reference");
+		expect(providerCalls).toBe(0);
 	});
 });

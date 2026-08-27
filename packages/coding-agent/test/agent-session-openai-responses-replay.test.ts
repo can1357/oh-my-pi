@@ -363,14 +363,14 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		expect(runtimeUser.providerPayload).toEqual(preservedUserPayload);
 	});
 
-	it("reuses compatible target-bound compaction history during startup resume", async () => {
+	it("reuses compatible target-bound compaction history during startup resume and tree navigation", async () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-compaction-resume-${Snowflake.next()}-`));
 		tempDirs.push(tempDir);
 		const model = getBundledModel("openai", "gpt-5-mini");
 		if (!model) throw new Error("Expected bundled OpenAI test model");
 		const referenceTarget = getOpenAIResponsesReferenceTarget(model);
 
-		const { sessionFile } = await createPersistedSession(tempDir, sessionManager => {
+		const { sessionFile, treeTargetId } = await createPersistedSession(tempDir, sessionManager => {
 			const compactedId = sessionManager.appendMessage({
 				role: "user",
 				content: "Original compacted context",
@@ -397,7 +397,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 				content: "Recent context",
 				timestamp: Date.now() - 1,
 			});
-			sessionManager.appendMessage({
+			const treeTargetId = sessionManager.appendMessage({
 				role: "assistant",
 				content: [{ type: "text", text: "Recent response" }],
 				api: model.api,
@@ -407,7 +407,9 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 				stopReason: "stop",
 				timestamp: Date.now(),
 			});
+			return { treeTargetId };
 		});
+		if (!treeTargetId) throw new Error("Expected compacted branch target");
 
 		const reloadedSessionManager = await SessionManager.open(sessionFile, tempDir);
 		const { session } = await createSessionHarness(tempDir, reloadedSessionManager, { model });
@@ -422,6 +424,19 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		expect(
 			session.messages.some(message => message.role === "user" && getTextContent(message) === "Recent context"),
 		).toBe(true);
+
+		const navigation = await session.navigateTree(treeTargetId, { summarize: false });
+		expect(navigation.cancelled).toBe(false);
+		const navigatedSummary = session.messages.find(message => message.role === "compactionSummary");
+		if (navigatedSummary?.role !== "compactionSummary") {
+			throw new Error("Expected compatible remote compaction summary after tree navigation");
+		}
+		expect(navigatedSummary.providerPayload?.referenceTarget).toBe(referenceTarget);
+		expect(
+			session.messages.some(
+				message => message.role === "user" && getTextContent(message) === "Original compacted context",
+			),
+		).toBe(false);
 	});
 
 	it("preserves codex assistant replay metadata for direct SessionManager.open consumers", async () => {

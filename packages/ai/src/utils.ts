@@ -462,7 +462,18 @@ export function canonicalizeOpenAIResponsesReferenceBaseUrl(endpoint: string): s
 	try {
 		const url = new URL(value);
 		const pathname = url.pathname.replace(/\/+$/, "");
-		for (const suffix of ["/codex/responses/compact", "/codex/responses", "/responses/compact", "/responses"]) {
+		const officialCodexHost =
+			url.protocol === "https:" && (url.hostname === "chatgpt.com" || url.hostname === "chat.openai.com");
+		if (
+			officialCodexHost &&
+			(pathname === "/backend-api/codex/responses" || pathname === "/backend-api/codex/responses/compact")
+		) {
+			url.pathname = "/backend-api";
+			url.search = "";
+			url.hash = "";
+			return url.toString().replace(/\/$/, "");
+		}
+		for (const suffix of ["/responses/compact", "/responses"]) {
 			if (pathname.endsWith(suffix)) {
 				url.pathname = pathname.slice(0, -suffix.length) || "/";
 				url.search = "";

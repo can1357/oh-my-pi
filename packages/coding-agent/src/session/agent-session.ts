@@ -8899,7 +8899,10 @@ export class AgentSession {
 		}
 
 		// Update agent state — build display context to populate agent messages.
-		const stateContext = this.sessionManager.buildSessionContext();
+		const stateContext = this.sessionManager.buildSessionContext({
+			activeModel: this.model,
+			compactionSettings: this.settings.getGroup("compaction"),
+		});
 		const displayContext = deobfuscateSessionContext(stateContext, this.#obfuscator);
 		this.agent.replaceMessages(displayContext.messages);
 		this.#rehydrateCheckpointRewindState();
@@ -8928,7 +8931,10 @@ export class AgentSession {
 				summaryEntry,
 				fromExtension: summaryText ? fromExtension : undefined,
 			});
-			const rawContext = this.sessionManager.buildSessionContext();
+			const rawContext = this.sessionManager.buildSessionContext({
+				activeModel: this.model,
+				compactionSettings: this.settings.getGroup("compaction"),
+			});
 			return {
 				editorText,
 				editorImages,

@@ -276,10 +276,10 @@ export function buildSessionContext(
 				models.default = `${entry.message.provider}/${entry.message.model}`;
 			}
 		} else if (entry.type === "compaction") {
-			const requiresTargetValidation = getOpenAiRemoteCompactionPayload(entry)?.referenceTarget !== undefined;
+			const remoteCompaction = getOpenAiRemoteCompactionPayload(entry);
 			const canReplay =
 				options?.transcript === true ||
-				!requiresTargetValidation ||
+				remoteCompaction === undefined ||
 				(options?.activeModel !== undefined &&
 					remotePreserveReplayable(entry.preserveData, options.activeModel));
 			if (canReplay) compaction = entry;
