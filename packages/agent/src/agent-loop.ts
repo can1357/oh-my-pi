@@ -65,6 +65,7 @@ import {
 	outcomeFailed,
 	presentationProducerOf,
 	publicToolArguments,
+	setOwnJsonProperty,
 	streamId,
 	ToolPresentationStream,
 } from "./presentation";
@@ -2253,7 +2254,7 @@ function normalizeJsonValue(value: unknown): JsonValue | undefined {
 			if (!descriptor.enumerable || !("value" in descriptor)) return undefined;
 			const item = visit(descriptor.value, depth + 1);
 			if (item === undefined) return undefined;
-			normalized[key] = item;
+			setOwnJsonProperty(normalized, key, item);
 		}
 		visiting.delete(current);
 		return normalized;

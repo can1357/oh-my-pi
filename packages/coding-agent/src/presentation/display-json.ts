@@ -1,4 +1,5 @@
 import type { JsonValue, ToolDisplayItem } from "@oh-my-pi/pi-agent-core/presentation";
+import { setOwnJsonProperty } from "@oh-my-pi/pi-agent-core/presentation";
 
 const MAX_JSON_DEPTH = 128;
 
@@ -79,7 +80,7 @@ function normalizeObject(value: object, seen: WeakSet<object>, depth: number): N
 		if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) return INVALID;
 		const item = normalizeValue(descriptor.value, seen, depth + 1);
 		if (!item.ok) return INVALID;
-		normalized[key] = item.value;
+		setOwnJsonProperty(normalized, key, item.value);
 	}
 	return valid(normalized);
 }

@@ -4345,6 +4345,54 @@ describe("agentLoopContinue with AgentMessage", () => {
 		expect(toolEnd?.type === "tool_execution_end" && toolEnd.isError).toBe(false);
 	});
 
+	it("preserves an own __proto__ key in hook-revised args without prototype pollution", async () => {
+		const toolSchema = type({ value: "string" });
+		const executed: Array<{ [key: string]: unknown }> = [];
+		const tool: AgentTool<typeof toolSchema, undefined> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params as { [key: string]: unknown });
+				return { content: [{ type: "text", text: "ok" }], details: undefined };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			// `JSON.parse` creates `__proto__` as an ordinary own data property;
+			// the normalizer must keep it an own key, never route it through the
+			// legacy prototype setter (which drops the key AND pollutes the
+			// normalized object's prototype baked into history).
+			beforeToolCall: async () => ({ args: JSON.parse('{"value":"revised","__proto__":{"polluted":true}}') }),
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("echo something")], context, config, undefined, mock.stream);
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		expect(executed).toHaveLength(1);
+		const params = executed[0]!;
+		expect(params.value).toBe("revised");
+		expect(Object.getPrototypeOf(params)).toBe(Object.prototype);
+		expect(Object.getOwnPropertyNames(params).sort()).toEqual(["__proto__", "value"]);
+		expect(Object.getOwnPropertyDescriptor(params, "__proto__")?.value).toEqual({ polluted: true });
+		const toolEnd = events.find(e => e.type === "tool_execution_end");
+		expect(toolEnd?.type === "tool_execution_end" && toolEnd.isError).toBe(false);
+	});
+
 	it("still rejects a beforeToolCall args replacement containing a genuine cycle", async () => {
 		const toolSchema = type({ value: "string" });
 		const executed: string[] = [];
