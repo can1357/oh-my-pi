@@ -14,26 +14,16 @@ import type {
 import { isRecord } from "../utils";
 import { DAY_MS, HOUR_MS, WEEK_MS } from "./shared";
 
-const DEFAULT_ENDPOINT = "https://api.z.ai";
 const QUOTA_PATH = "/api/monitor/usage/quota/limit";
 const MODEL_USAGE_PATH = "/api/monitor/usage/model-usage";
 const MONTH_MS = 30 * DAY_MS;
 
-interface ZaiUsageDetail {
+interface GlmCodingPlanUsageDetail {
 	modelCode?: string;
 	usage?: number;
 }
 
-function normalizeZaiBaseUrl(baseUrl?: string): string {
-	if (!baseUrl?.trim()) return DEFAULT_ENDPOINT;
-	try {
-		return new URL(baseUrl.trim()).origin;
-	} catch {
-		return DEFAULT_ENDPOINT;
-	}
-}
-
-interface ZaiUsageLimitItem {
+interface GlmCodingPlanUsageLimitItem {
 	type?: string;
 	usage?: number;
 	currentValue?: number;
@@ -42,16 +32,45 @@ interface ZaiUsageLimitItem {
 	nextResetTime?: number;
 	unit?: number;
 	number?: number;
-	usageDetails?: ZaiUsageDetail[];
+	usageDetails?: GlmCodingPlanUsageDetail[];
 }
 
-interface ZaiQuotaPayload {
+interface GlmCodingPlanQuotaPayload {
 	success?: boolean;
 	code?: number;
 	msg?: string;
 	data?: {
-		limits?: ZaiUsageLimitItem[];
+		limits?: GlmCodingPlanUsageLimitItem[];
+		/** Plan tier name (e.g. "lite", "pro"). */
+		level?: string;
 	};
+}
+
+/**
+ * Host-specific configuration for the GLM Coding Plan quota API. The
+ * international (Z.AI, `api.z.ai`) and domestic (Zhipu BigModel,
+ * `open.bigmodel.cn`) coding plans serve the same `/api/monitor/usage/*`
+ * wire format with the same `id.secret` auth; only host, provider id, and
+ * branding differ.
+ */
+export interface GlmCodingPlanUsageProviderConfig {
+	/** Provider id the report is attributed to (`"zai"` | `"zhipu-coding-plan"`). */
+	provider: string;
+	/** Host origin used when `params.baseUrl` is absent. */
+	defaultEndpoint: string;
+	/** Limit-id prefix, e.g. `"zai"` → `zai:requests:5h`. */
+	brandKey: string;
+	/** Display label prefix, e.g. `"ZAI"` → "ZAI Request Quota". */
+	brandLabel: string;
+}
+
+function normalizeBaseUrl(baseUrl: string | undefined, defaultEndpoint: string): string {
+	if (!baseUrl?.trim()) return defaultEndpoint;
+	try {
+		return new URL(baseUrl.trim()).origin;
+	} catch {
+		return defaultEndpoint;
+	}
 }
 
 function parseMillis(value: unknown): number | undefined {
@@ -60,9 +79,9 @@ function parseMillis(value: unknown): number | undefined {
 	return parsed > 1_000_000_000_000 ? parsed : parsed * 1000;
 }
 
-function parseUsageDetails(value: unknown): ZaiUsageDetail[] | undefined {
+function parseUsageDetails(value: unknown): GlmCodingPlanUsageDetail[] | undefined {
 	if (!Array.isArray(value)) return undefined;
-	const details: ZaiUsageDetail[] = [];
+	const details: GlmCodingPlanUsageDetail[] = [];
 	for (const item of value) {
 		if (!isRecord(item)) continue;
 		const modelCode = typeof item.modelCode === "string" && item.modelCode ? item.modelCode : undefined;
@@ -75,7 +94,7 @@ function parseUsageDetails(value: unknown): ZaiUsageDetail[] | undefined {
 	return details.length > 0 ? details : undefined;
 }
 
-function parseLimitItem(value: unknown): ZaiUsageLimitItem | null {
+function parseLimitItem(value: unknown): GlmCodingPlanUsageLimitItem | null {
 	if (!isRecord(value)) return null;
 	const type = typeof value.type === "string" ? value.type : undefined;
 	if (!type) return null;
@@ -135,7 +154,7 @@ function formatCountedUnit(count: number, singular: string): string {
 	return `${count} ${singular}${suffix}`;
 }
 
-function buildZaiWindow(parsed: ZaiUsageLimitItem): UsageWindow {
+function buildWindow(parsed: GlmCodingPlanUsageLimitItem): UsageWindow {
 	const count = parsed.number !== undefined && parsed.number > 0 ? parsed.number : 1;
 	let id: string;
 	let label: string;
@@ -174,15 +193,15 @@ function buildZaiWindow(parsed: ZaiUsageLimitItem): UsageWindow {
 	};
 }
 
-function isZaiFeatureRequestLimit(parsed: ZaiUsageLimitItem): boolean {
+function isFeatureRequestLimit(parsed: GlmCodingPlanUsageLimitItem): boolean {
 	const detailCodes =
 		parsed.usageDetails?.map(detail => detail.modelCode).filter((code): code is string => !!code) ?? [];
 	return detailCodes.includes("search-prime") && detailCodes.includes("web-reader") && detailCodes.includes("zread");
 }
 
-function requestQuotaLabel(parsed: ZaiUsageLimitItem): string {
-	if (isZaiFeatureRequestLimit(parsed)) return "ZAI Zread Quota";
-	return "ZAI Request Quota";
+function requestQuotaLabel(parsed: GlmCodingPlanUsageLimitItem, brandLabel: string): string {
+	if (isFeatureRequestLimit(parsed)) return `${brandLabel} Zread Quota`;
+	return `${brandLabel} Request Quota`;
 }
 
 function buildModelUsageUrl(baseUrl: string, now: Date): string {
@@ -192,68 +211,7 @@ function buildModelUsageUrl(baseUrl: string, now: Date): string {
 	return `${baseUrl}${MODEL_USAGE_PATH}?startTime=${encodeURIComponent(startTime)}&endTime=${encodeURIComponent(endTime)}`;
 }
 
-function getZaiCredentialLimits(report: UsageReport): UsageLimit[] {
-	const limits = report.limits.filter(
-		limit => limit.id.startsWith("zai:requests:") || limit.id.startsWith("zai:tokens:"),
-	);
-	return limits;
-}
-
-function rankZaiRequestLimits(report: UsageReport): UsageLimit[] {
-	const requestLimits = report.limits.filter(limit => limit.id.startsWith("zai:requests:"));
-	const credentialLimits = getZaiCredentialLimits(report);
-	const limits = requestLimits.length > 0 ? requestLimits : credentialLimits;
-	const ranked = [...limits];
-	ranked.sort((left, right) => {
-		const leftDuration = left.window?.durationMs ?? Number.POSITIVE_INFINITY;
-		const rightDuration = right.window?.durationMs ?? Number.POSITIVE_INFINITY;
-		if (leftDuration !== rightDuration) return leftDuration - rightDuration;
-		const leftReset = left.window?.resetsAt ?? Number.POSITIVE_INFINITY;
-		const rightReset = right.window?.resetsAt ?? Number.POSITIVE_INFINITY;
-		return leftReset - rightReset;
-	});
-	return ranked;
-}
-
-async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null> {
-	if (params.provider !== "zai") return null;
-	const credential = params.credential;
-	// Sign-in (oauth) stores the minted id.secret key in accessToken; the paste
-	// path stores it in apiKey. Both are the same raw key used verbatim as the
-	// Authorization header (no Bearer prefix).
-	const token = credential.type === "oauth" ? credential.accessToken : credential.apiKey;
-	if (!token) return null;
-
-	const baseUrl = normalizeZaiBaseUrl(params.baseUrl);
-	const url = `${baseUrl}${QUOTA_PATH}`;
-	const headers: Record<string, string> = {
-		Authorization: token,
-		"Content-Type": "application/json",
-		"User-Agent": USER_AGENT,
-	};
-
-	let payload: ZaiQuotaPayload | null = null;
-	try {
-		const response = await ctx.fetch(url, {
-			headers,
-			signal: params.signal,
-		});
-		if (!response.ok) {
-			ctx.logger?.warn("ZAI usage fetch failed", { status: response.status, statusText: response.statusText });
-			return null;
-		}
-		payload = (await response.json()) as ZaiQuotaPayload;
-	} catch (error) {
-		ctx.logger?.warn("ZAI usage fetch error", { error: String(error) });
-		return null;
-	}
-
-	if (!payload) return null;
-	if (payload.success !== true) {
-		ctx.logger?.warn("ZAI usage response invalid", { code: payload.code, message: payload.msg });
-		return null;
-	}
-
+function buildQuotaLimits(payload: GlmCodingPlanQuotaPayload, config: GlmCodingPlanUsageProviderConfig): UsageLimit[] {
 	const limitsPayload = Array.isArray(payload.data?.limits) ? payload.data?.limits : [];
 	const limits: UsageLimit[] = [];
 
@@ -268,12 +226,37 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 				percentage: parsed.percentage,
 				unit: "tokens",
 			});
-			const window = buildZaiWindow(parsed);
+			const window = buildWindow(parsed);
 			limits.push({
-				id: `zai:tokens:${window.id}`,
-				label: `ZAI ${window.label} Token Quota`,
+				id: `${config.brandKey}:tokens:${window.id}`,
+				label: `${config.brandLabel} ${window.label} Token Quota`,
 				scope: {
-					provider: params.provider,
+					provider: config.provider,
+					windowId: window.id,
+					shared: true,
+				},
+				window,
+				amount,
+				status: getUsageStatus(amount.usedFraction),
+			});
+		}
+		if (parsed.type === "CREDIT_LIMIT") {
+			// Domestic (open.bigmodel.cn) coding plans report credit-pool windows
+			// instead of token/request buckets — same unit/number window shape,
+			// but `usage`/`currentValue`/`remaining` count plan credits.
+			const amount = buildUsageAmount({
+				used: parsed.currentValue,
+				limit: parsed.usage,
+				remaining: parsed.remaining,
+				percentage: parsed.percentage,
+				unit: "unknown",
+			});
+			const window = buildWindow(parsed);
+			limits.push({
+				id: `${config.brandKey}:credits:${window.id}`,
+				label: `${config.brandLabel} ${window.label} Credit Quota`,
+				scope: {
+					provider: config.provider,
 					windowId: window.id,
 					shared: true,
 				},
@@ -283,7 +266,7 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 			});
 		}
 		if (parsed.type === "TIME_LIMIT") {
-			const window = buildZaiWindow(parsed);
+			const window = buildWindow(parsed);
 			const amount = buildUsageAmount({
 				used: parsed.currentValue,
 				limit: parsed.usage,
@@ -291,12 +274,14 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 				percentage: parsed.percentage,
 				unit: "requests",
 			});
-			const featureLimit = isZaiFeatureRequestLimit(parsed);
+			const featureLimit = isFeatureRequestLimit(parsed);
 			limits.push({
-				id: featureLimit ? `zai:features:zread:${window.id}` : `zai:requests:${window.id}`,
-				label: requestQuotaLabel(parsed),
+				id: featureLimit
+					? `${config.brandKey}:features:zread:${window.id}`
+					: `${config.brandKey}:requests:${window.id}`,
+				label: requestQuotaLabel(parsed, config.brandLabel),
 				scope: {
-					provider: params.provider,
+					provider: config.provider,
 					windowId: window.id,
 					shared: !featureLimit,
 					...(featureLimit ? { tier: "zread" } : {}),
@@ -307,7 +292,84 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 			});
 		}
 	}
+	return limits;
+}
 
+function credentialLimitsFor(brandKey: string): (report: UsageReport) => UsageLimit[] {
+	return (report: UsageReport): UsageLimit[] => {
+		const limits = report.limits.filter(
+			limit =>
+				limit.id.startsWith(`${brandKey}:requests:`) ||
+				limit.id.startsWith(`${brandKey}:tokens:`) ||
+				limit.id.startsWith(`${brandKey}:credits:`),
+		);
+		return limits;
+	};
+}
+
+function rankRequestLimits(report: UsageReport, brandKey: string): UsageLimit[] {
+	const requestLimits = report.limits.filter(limit => limit.id.startsWith(`${brandKey}:requests:`));
+	const credentialLimits = credentialLimitsFor(brandKey)(report);
+	const limits = requestLimits.length > 0 ? requestLimits : credentialLimits;
+	const ranked = [...limits];
+	ranked.sort((left, right) => {
+		const leftDuration = left.window?.durationMs ?? Number.POSITIVE_INFINITY;
+		const rightDuration = right.window?.durationMs ?? Number.POSITIVE_INFINITY;
+		if (leftDuration !== rightDuration) return leftDuration - rightDuration;
+		const leftReset = left.window?.resetsAt ?? Number.POSITIVE_INFINITY;
+		const rightReset = right.window?.resetsAt ?? Number.POSITIVE_INFINITY;
+		return leftReset - rightReset;
+	});
+	return ranked;
+}
+
+async function fetchGlmCodingPlanUsage(
+	params: UsageFetchParams,
+	ctx: UsageFetchContext,
+	config: GlmCodingPlanUsageProviderConfig,
+): Promise<UsageReport | null> {
+	if (params.provider !== config.provider) return null;
+	const credential = params.credential;
+	// Sign-in (oauth) stores the minted id.secret key in accessToken; the paste
+	// path stores it in apiKey. Both are the same raw key used verbatim as the
+	// Authorization header (no Bearer prefix).
+	const token = credential.type === "oauth" ? credential.accessToken : credential.apiKey;
+	if (!token) return null;
+
+	const baseUrl = normalizeBaseUrl(params.baseUrl, config.defaultEndpoint);
+	const url = `${baseUrl}${QUOTA_PATH}`;
+	const headers: Record<string, string> = {
+		Authorization: token,
+		"Content-Type": "application/json",
+		"User-Agent": USER_AGENT,
+	};
+
+	let payload: GlmCodingPlanQuotaPayload | null = null;
+	try {
+		const response = await ctx.fetch(url, {
+			headers,
+			signal: params.signal,
+		});
+		if (!response.ok) {
+			ctx.logger?.warn(`${config.brandLabel} usage fetch failed`, {
+				status: response.status,
+				statusText: response.statusText,
+			});
+			return null;
+		}
+		payload = (await response.json()) as GlmCodingPlanQuotaPayload;
+	} catch (error) {
+		ctx.logger?.warn(`${config.brandLabel} usage fetch error`, { error: String(error) });
+		return null;
+	}
+
+	if (!payload) return null;
+	if (payload.success !== true) {
+		ctx.logger?.warn(`${config.brandLabel} usage response invalid`, { code: payload.code, message: payload.msg });
+		return null;
+	}
+
+	const limits = buildQuotaLimits(payload, config);
 	if (limits.length === 0) return null;
 
 	const report: UsageReport = {
@@ -318,6 +380,7 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 			endpoint: url,
 			accountId: credential.accountId,
 			email: credential.email,
+			...(typeof payload.data?.level === "string" && payload.data.level ? { planType: payload.data.level } : {}),
 		},
 		raw: payload,
 	};
@@ -338,31 +401,53 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 			}
 		}
 	} catch (error) {
-		ctx.logger?.debug("ZAI model usage fetch failed", { error: String(error) });
+		ctx.logger?.debug(`${config.brandLabel} model usage fetch failed`, { error: String(error) });
 	}
 
 	return report;
 }
 
-export const zaiUsageProvider: UsageProvider = {
-	id: "zai",
-	fetchUsage: fetchZaiUsage,
-	supports: params =>
-		params.provider === "zai" &&
-		(params.credential.type === "oauth" ? Boolean(params.credential.accessToken) : Boolean(params.credential.apiKey)),
-};
+/**
+ * Build the usage provider + ranking strategy for one GLM Coding Plan host.
+ * Used by `zai` (international) and `zhipu-coding-plan` (domestic) — see
+ * {@link GlmCodingPlanUsageProviderConfig}.
+ */
+export function createGlmCodingPlanUsageProvider(config: GlmCodingPlanUsageProviderConfig): {
+	usageProvider: UsageProvider;
+	rankingStrategy: CredentialRankingStrategy;
+} {
+	return {
+		usageProvider: {
+			id: config.provider,
+			fetchUsage: (params, ctx) => fetchGlmCodingPlanUsage(params, ctx, config),
+			supports: params =>
+				params.provider === config.provider &&
+				(params.credential.type === "oauth"
+					? Boolean(params.credential.accessToken)
+					: Boolean(params.credential.apiKey)),
+		},
+		rankingStrategy: {
+			findWindowLimits(report) {
+				const ranked = rankRequestLimits(report, config.brandKey);
+				return { primary: ranked[0], secondary: ranked[1] };
+			},
+			scopeLimits(report) {
+				return credentialLimitsFor(config.brandKey)(report);
+			},
+			windowDefaults: {
+				primaryMs: 5 * HOUR_MS,
+				secondaryMs: WEEK_MS,
+			},
+		},
+	};
+}
 
-export const zaiRankingStrategy: CredentialRankingStrategy = {
-	findWindowLimits(report) {
-		const ranked = rankZaiRequestLimits(report);
-		return { primary: ranked[0], secondary: ranked[1] };
-	},
-	scopeLimits(report) {
-		const limits = getZaiCredentialLimits(report);
-		return limits;
-	},
-	windowDefaults: {
-		primaryMs: 5 * HOUR_MS,
-		secondaryMs: WEEK_MS,
-	},
-};
+const zai = createGlmCodingPlanUsageProvider({
+	provider: "zai",
+	defaultEndpoint: "https://api.z.ai",
+	brandKey: "zai",
+	brandLabel: "ZAI",
+});
+
+export const zaiUsageProvider = zai.usageProvider;
+export const zaiRankingStrategy = zai.rankingStrategy;
