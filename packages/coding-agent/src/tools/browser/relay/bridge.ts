@@ -176,6 +176,15 @@ const RPC_TIMEOUT_MS = 20_000;
 const CDP_ERROR_METHOD_NOT_FOUND = -32601;
 const CDP_ERROR_SERVER = -32000;
 
+function platformFromUserAgent(userAgent: string): string | undefined {
+	if (!userAgent) return undefined;
+	if (userAgent.includes("Android")) return "Android";
+	if (userAgent.includes("Mac OS X")) return "MacIntel";
+	if (userAgent.includes("Linux")) return "Linux";
+	if (userAgent.includes("Windows")) return "Win32";
+	return undefined;
+}
+
 function tabTargetId(tabId: number): string {
 	return `TAB${tabId}`;
 }
@@ -894,6 +903,22 @@ export class RelayBridge {
 				return { method: subscription.method, params: { discover: false } };
 			case "Page.setLifecycleEventsEnabled":
 				return { method: subscription.method, params: { enabled: false } };
+			case "Network.setUserAgentOverride":
+			case "Emulation.setUserAgentOverride": {
+				// These persistent setters have no disable counterpart. If the replay
+				// owner disappears after the override was re-applied to Chrome's fresh
+				// root, restore the browser's default UA so surviving holders do not
+				// inherit a stale stealth fingerprint with no owner left to manage it.
+				const userAgent = this.#extInfo?.userAgent ?? "";
+				const platform = platformFromUserAgent(userAgent);
+				return {
+					method: subscription.method,
+					params: {
+						userAgent,
+						...(platform ? { platform } : {}),
+					},
+				};
+			}
 			default:
 				return null;
 		}

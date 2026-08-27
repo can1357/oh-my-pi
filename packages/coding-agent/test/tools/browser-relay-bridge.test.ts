@@ -970,6 +970,67 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable", "Fetch.disable", "Network.getCookies"]);
 	});
 
+	it("restores the browser user agent when a replayed override loses its owner during recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Network.setUserAgentOverride",
+				params: { userAgent: "Mozilla/5.0 stealth", platform: "Win32" },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.rpcs("send").length === 1, "owner UA replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.setUserAgentOverride"]);
+		expect(ext2.rpcs("send")[0]!.params).toEqual({ userAgent: "Mozilla/5.0 stealth", platform: "Win32" });
+
+		// The owner disconnects after the override has been replayed to the fresh
+		// root but before replay observes completion. Another holder keeps the tab
+		// attached, so recovery must restore the browser's default UA instead of
+		// leaving the stealth override orphaned on the shared root.
+		bridge.cdpClosed(ownerConn);
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.rpcs("send").length === 2, "orphaned user-agent cleanup");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Network.setUserAgentOverride",
+			"Network.setUserAgentOverride",
+		]);
+		expect(ext2.rpcs("send")[1]!.params).toEqual({ userAgent: "test" });
+		ack(bridge, ext2, "send");
+		await flush();
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			holderConn,
+			JSON.stringify({ id: commandId, sessionId: holderSession, method: "Network.getCookies" }),
+		);
+		await flush();
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Network.setUserAgentOverride",
+			"Network.setUserAgentOverride",
+			"Network.getCookies",
+		]);
+	});
+
 	it("replays persistent user-agent overrides for a preserved session across recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
