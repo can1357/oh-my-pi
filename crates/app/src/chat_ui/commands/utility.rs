@@ -78,9 +78,21 @@ pub(crate) fn render_tools(
 	settings: &omp_envd::tool_settings::ToolSettings,
 	declarations: &[omp_driver::discovery::manifest::DiscoveredCapability],
 ) -> Str {
+	// The roster policy owns user visibility: live claims unlisted via
+	// `unlist_from_roster` must not re-enter the listing as active markers.
 	let mut active = BTreeSet::new();
-	active.extend(enabled_tools.iter().map(Str::as_str));
-	active.extend(live_tools.iter().map(|tool| tool.name.as_str()));
+	active.extend(
+		enabled_tools
+			.iter()
+			.filter(|name| registry.user_visible(name.as_str()))
+			.map(Str::as_str),
+	);
+	active.extend(
+		live_tools
+			.iter()
+			.filter(|tool| registry.user_visible(tool.name.as_str()))
+			.map(|tool| tool.name.as_str()),
+	);
 
 	let mut all = BTreeSet::new();
 	all.extend(
@@ -344,6 +356,38 @@ mod tests {
 			!rendered
 				.lines()
 				.any(|line| line == "* secret" || line == "- secret")
+		);
+	}
+
+	#[test]
+	fn tools_do_not_mark_unlisted_live_tools_active() {
+		let mut registry = roster_registry();
+		registry
+			.register_worker(stub_spec("report_issue"), Presentation::Device, device_claims())
+			.expect("report_issue");
+		registry
+			.unlist_from_roster("report_issue")
+			.expect("live claim can be unlisted");
+		let live_tools = [omp_chat_ui::LiveToolView {
+			name:         sf!("report_issue"),
+			label:        None,
+			description:  Some(sf!("report an issue")),
+			input_schema: serde_json::json!({"type": "object"}),
+			source_path:  None,
+			hidden:       false,
+			source:       Str::new_static("builtin"),
+		}];
+		let rendered = render_tools(
+			&registry,
+			&live_tools,
+			&[sf!("read"), sf!("report_issue")],
+			&omp_envd::tool_settings::ToolSettings::default(),
+			&[],
+		);
+		assert!(rendered.lines().any(|line| line == "* read"));
+		assert!(
+			!rendered.lines().any(|line| line.ends_with("report_issue")),
+			"unlisted live tool must not be rendered active: {rendered}"
 		);
 	}
 

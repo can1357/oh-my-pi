@@ -823,6 +823,36 @@ fn unlist_from_roster_omits_user_roster_and_keeps_model_presentation() {
 }
 
 #[test]
+fn user_visible_mirrors_roster_and_disabled_roster_membership() {
+	let mut registry = Registry::new();
+	for name in ["read", "secret", "think"] {
+		registry
+			.register(
+				fake_tool(1, name, Arc::new(AtomicUsize::new(0))).named(name),
+				if name == "think" {
+					Presentation::Slot
+				} else if name == "secret" {
+					Presentation::Hidden
+				} else {
+					Presentation::Slot
+				},
+				claims("omp/core", Precedence::CORE),
+			)
+			.expect("roster fixture");
+	}
+	registry
+		.unlist_from_roster("think")
+		.expect("live claim can be unlisted");
+	registry.protect_user_visible_core(["retain"]);
+
+	assert!(registry.user_visible("read"), "roster entry is user-visible");
+	assert!(!registry.user_visible("secret"), "hidden presentation is not user-visible");
+	assert!(!registry.user_visible("think"), "unlisted live claim is not user-visible");
+	assert!(registry.user_visible("retain"), "reserved disabled built-in is user-visible");
+	assert!(!registry.user_visible("missing"), "unknown name is not user-visible");
+}
+
+#[test]
 fn protected_core_claim_rejects_demoting_or_foreign_replacement() {
 	let mut registry = Registry::new();
 	registry.protect_core_claims(["read"]);

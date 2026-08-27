@@ -1816,6 +1816,34 @@ impl Registry {
 			.filter(|name| !self.live.contains_key(*name))
 	}
 
+	/// Returns whether `name` belongs on the user-facing tools roster.
+	///
+	/// Mirrors [`Self::roster`] after the UI's hidden-entry filter and joins the
+	/// reserved disabled built-ins of [`Self::disabled_roster`]. Live claims
+	/// omitted via [`Self::unlist_from_roster`] remain callable and
+	/// model-visible, but they do not appear in user-facing output.
+	pub fn user_visible(&self, name: &str) -> bool {
+		if self.unlisted.contains(name) {
+			return false;
+		}
+		if let Some(claim) = self.live.get(name) {
+			return self
+				.versions
+				.get(name)
+				.and_then(|versions| versions.get(&claim.rev))
+				.is_some_and(|entry| entry.presentation != Presentation::Hidden);
+		}
+		let host_tools = self.host_tools.read();
+		if let Some(claimant) = host_tools.live.get(name) {
+			return host_tools
+				.rosters
+				.get(claimant)
+				.and_then(|roster| roster.entries.get(name))
+				.is_some_and(|entry| entry.presentation != Presentation::Hidden);
+		}
+		self.user_visible_reserved.contains(name)
+	}
+
 	/// Computes the exact live slot names for one frozen session policy.
 	///
 	/// Checkpoint/rewind pairing is a safety invariant and therefore applies to
