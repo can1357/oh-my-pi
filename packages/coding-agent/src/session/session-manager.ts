@@ -18,9 +18,11 @@ import {
 	stringifyJson,
 	toError,
 } from "@oh-my-pi/pi-utils";
+import { resolveProject } from "../state-broker/project-scope";
+import { fetchRemoteSessionIfMissing } from "../state-broker/registry";
 import type { StructuredSubagentSchemaMode } from "../task/types";
 import { ArtifactManager } from "./artifacts";
-import { type BlobPutOptions, type BlobPutResult, BlobStore } from "./blob-store";
+import { type BlobPutOptions, type BlobPutResult, BlobStore, hasDefaultBlobObjectStore } from "./blob-store";
 import type { CompactionMethod } from "./compaction-methods";
 import {
 	type BashExecutionMessage,
@@ -561,6 +563,18 @@ export class SessionManager {
 		this.#persist = persist;
 		this.#storage = storage;
 		this.#blobs = new BlobStore(getBlobsDir());
+		// Blob bytes are session attachments (pasted screenshots and the like).
+		// The process-wide object store is attached download-only, so opt this
+		// session's blobs into UPLOAD only when its project has sync enabled —
+		// a sync-disabled project must not ship attachments off the machine.
+		//
+		// Guarded on a store actually being configured: the gate is meaningless
+		// without one, and `resolveProject` reads `projects.yml`, which must not
+		// become an unconditional read on every session construction for the
+		// overwhelmingly common case where replication is switched off.
+		if (hasDefaultBlobObjectStore()) {
+			this.#blobs.setUploadEnabled(resolveProject(cwd)?.project.sync === true);
+		}
 
 		if (persist && sessionDir) this.#storage.ensureDirSync(sessionDir);
 	}
@@ -2849,6 +2863,12 @@ export class SessionManager {
 		storage: SessionStorage = new FileSessionStorage(),
 		options?: { initialCwd?: string; suppressBreadcrumb?: boolean },
 	): Promise<SessionManager> {
+		// A session started on another machine has an index row here but no body
+		// until it is fetched. Doing this inside `open` — rather than in the
+		// picker — makes remote-only sessions resumable from every entry point
+		// (picker, `--resume`, ACP). No-op unless replication is running and the
+		// file is genuinely absent.
+		await fetchRemoteSessionIfMissing(filePath);
 		const loaded = await loadSessionFile(filePath, storage);
 		const header = loaded.entries.find(entry => entry.type === "session") as SessionHeader | undefined;
 		// Resume into the session's recorded cwd only when it is verifiably

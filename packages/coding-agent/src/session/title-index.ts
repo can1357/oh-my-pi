@@ -30,6 +30,12 @@ interface TitleIndexHandle {
 	db: Database;
 	upsert: Statement;
 	select: Statement;
+	// Replication statements, prepared lazily on first sync use so the ordinary
+	// record/lookup open path prepares nothing extra. See scanChangedSince/mergeRemote.
+	scan?: Statement;
+	// Project-scoped replication scan, prepared lazily on first scoped sync use.
+	scanScoped?: Statement;
+	merge?: Statement;
 }
 
 let handle: TitleIndexHandle | undefined;
@@ -41,6 +47,9 @@ function closeHandle(): void {
 	try {
 		handle.upsert.finalize();
 		handle.select.finalize();
+		handle.scan?.finalize();
+		handle.scanScoped?.finalize();
+		handle.merge?.finalize();
 		handle.db.close();
 	} catch {}
 	handle = undefined;
@@ -102,6 +111,120 @@ export function lookupSessionTitle(sessionId: string): string | undefined {
 	} catch (error) {
 		logger.debug("Session title index read failed", { sessionId, error: String(error) });
 		return undefined;
+	}
+}
+
+/** One replicated session-title row. `updatedAt` is epoch SECONDS (the table's clock). */
+export interface TitleRow {
+	sessionId: string;
+	title: string;
+	updatedAt: number;
+}
+
+/**
+ * Replication read path: session titles whose `updated_at` is strictly greater
+ * than `afterRev`, ordered ASCENDING so the sync engine can advance its
+ * watermark to the last row's clock without skipping entries. `afterRev` and
+ * the returned `updatedAt` are epoch SECONDS (the domain adapter converts to
+ * the wire's epoch-millis `rev`). Best-effort: swallows and logs failures.
+ */
+export function scanChangedSince(afterRev: number, limit: number): TitleRow[] {
+	const index = openTitleIndex();
+	if (!index) return [];
+	try {
+		index.scan ??= index.db.prepare(
+			"SELECT session_id, title, updated_at FROM session_titles WHERE updated_at > ? ORDER BY updated_at ASC, session_id ASC LIMIT ?",
+		);
+		const rows = index.scan.all(afterRev, limit) as Array<{
+			session_id: string;
+			title: string;
+			updated_at: number;
+		}>;
+		return rows.map(row => ({ sessionId: row.session_id, title: row.title, updatedAt: row.updated_at }));
+	} catch (error) {
+		logger.debug("Session title index scan failed", { error: String(error) });
+		return [];
+	}
+}
+
+/**
+ * Project-scoped replication read path: like {@link scanChangedSince}, but only
+ * returns titles whose `session_id` is in `sessionIds` (the ids belonging to
+ * sync-enabled projects). The intersection is applied BEFORE the page limit is
+ * satisfied: we page through candidate rows in ascending `updated_at` order via
+ * OFFSET, collecting matches until we have `limit` of them or rows are
+ * exhausted. This guarantees a full page never comes back empty while eligible
+ * rows remain beyond it — an all-filtered page would stall the sync watermark
+ * (the engine advances only to the last RETURNED row's clock). Because we stop
+ * the instant we hit `limit` matches, the last returned row is also the last
+ * one considered, so the watermark advances correctly past every skipped row.
+ * `afterRev`/`updatedAt` are epoch SECONDS. Best-effort.
+ */
+export function scanChangedSinceForSessionIds(
+	afterRev: number,
+	limit: number,
+	sessionIds: ReadonlySet<string>,
+): TitleRow[] {
+	if (sessionIds.size === 0 || limit <= 0) return [];
+	const index = openTitleIndex();
+	if (!index) return [];
+	try {
+		index.scanScoped ??= index.db.prepare(
+			"SELECT session_id, title, updated_at FROM session_titles WHERE updated_at > ? ORDER BY updated_at ASC, session_id ASC LIMIT ? OFFSET ?",
+		);
+		const stmt = index.scanScoped;
+		// Candidate batch size for OFFSET paging; unrelated to the caller's match
+		// budget. Large enough that a typical cycle needs one round trip.
+		const BATCH = 500;
+		const result: TitleRow[] = [];
+		let offset = 0;
+		for (;;) {
+			const batch = stmt.all(afterRev, BATCH, offset) as Array<{
+				session_id: string;
+				title: string;
+				updated_at: number;
+			}>;
+			for (const row of batch) {
+				if (!sessionIds.has(row.session_id)) continue;
+				result.push({ sessionId: row.session_id, title: row.title, updatedAt: row.updated_at });
+				if (result.length >= limit) return result;
+			}
+			if (batch.length < BATCH) break; // rows exhausted
+			offset += BATCH;
+		}
+		return result;
+	} catch (error) {
+		logger.debug("Session title index scoped scan failed", { error: String(error) });
+		return [];
+	}
+}
+
+/**
+ * Replication merge path: last-writer-wins upsert of remote titles, preserving
+ * the REMOTE `updated_at` so the clock stays comparable across machines. The
+ * `WHERE excluded.updated_at > session_titles.updated_at` guard means an older
+ * remote rename can never clobber a newer local one. Best-effort.
+ */
+export function mergeRemote(rows: Array<{ sessionId: string; title: string; updatedAt: number }>): void {
+	const index = openTitleIndex();
+	if (!index) return;
+	try {
+		index.merge ??= index.db.prepare(`
+INSERT INTO session_titles (session_id, title, updated_at)
+VALUES (?, ?, ?)
+ON CONFLICT(session_id) DO UPDATE SET
+	title = excluded.title,
+	updated_at = excluded.updated_at
+WHERE excluded.updated_at > session_titles.updated_at
+		`);
+		const merge = index.merge;
+		index.db.transaction((batch: typeof rows) => {
+			for (const row of batch) {
+				merge.run(row.sessionId, row.title, row.updatedAt);
+			}
+		})(rows);
+	} catch (error) {
+		logger.debug("Session title index merge failed", { error: String(error) });
 	}
 }
 

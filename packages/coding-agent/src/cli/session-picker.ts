@@ -1,10 +1,10 @@
 import { ProcessTerminal, TUI } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import { SessionSelectorComponent } from "../modes/components/session-selector";
+import { theme } from "../modes/theme/theme";
 import { HistoryStorage } from "../session/history-storage";
-import type { SessionInfo } from "../session/session-listing";
-import { SessionManager } from "../session/session-manager";
-import { loadPinnedSessionIds } from "../session/session-pins";
+import { listAllSessions, type SessionInfo } from "../session/session-listing";
+import { loadPinnedSessionIds, sortPinnedFirst } from "../session/session-pins";
 import { FileSessionStorage } from "../session/session-storage";
 
 /** Presentation and capability controls for the standalone session picker. */
@@ -82,7 +82,23 @@ export async function selectSession(
 								return true;
 							},
 				historyMatcher,
-				loadAllSessions: options.allowGlobalScope === false ? undefined : () => SessionManager.listAll(storage),
+				loadAllSessions:
+					options.allowGlobalScope === false
+						? undefined
+						: async () => {
+								// Remote-only stubs are folded in here (not into `SessionManager.listAll`,
+								// whose ACP consumers assume a readable local file). Pinned-first ordering
+								// mirrors `SessionManager.listAll`, using the pins already loaded above.
+								const all = await listAllSessions(storage, { includeRemoteOnly: true });
+								const ordered = sortPinnedFirst(all, pinnedIds);
+								// Surface a dim marker for sessions living on another machine. Their
+								// preview line is rendered dim by the selector, so plain marker text
+								// inherits the existing styling; the body downloads on open.
+								const marker = `${theme.icon.host} on another machine — downloads on open`;
+								return ordered.map(session =>
+									session.remoteOnly ? { ...session, firstMessage: marker } : session,
+								);
+							},
 				allSessions: options.allSessions,
 				getTerminalRows: () => ui.terminal.rows,
 				fillHeight: true,

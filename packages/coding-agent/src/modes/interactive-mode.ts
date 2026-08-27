@@ -58,6 +58,7 @@ import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "../config/keybindings";
 import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
+import { resolveConfigValue } from "../config/resolve-config-value";
 import {
 	isSettingsInitialized,
 	onModelRolesChanged,
@@ -117,6 +118,7 @@ import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { formatDuration } from "../slash-commands/helpers/format";
+import { createStateSyncRuntime, type StateSyncRuntime } from "../state-broker/registry";
 import { STTController, type SttState } from "../stt";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { labelEchoesHandle } from "../task/label";
@@ -239,6 +241,12 @@ import type {
 import { UiHelpers } from "./utils/ui-helpers";
 
 const STILL_CLOSING_DELAY_MS = 3_000;
+
+/**
+ * Ceiling on the shutdown state-sync flush. Replication is best-effort and
+ * resumable from the cursor, so exiting promptly beats a complete push.
+ */
+const STATE_SYNC_DRAIN_BUDGET_MS = 2_000;
 
 const HINT_SHIMMER_PALETTE: ShimmerPalette = {
 	low: "dim",
@@ -576,6 +584,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	keybindings: KeybindingsManager;
 	agent: Agent;
 	historyStorage?: HistoryStorage;
+	/** Shared-state replication runtime; undefined unless `state.sync.enabled`. */
+	#stateSync?: StateSyncRuntime;
 
 	/** Canonical composer shared by cold prepaint and the session-aware runtime. */
 	readonly composer: Composer;
@@ -957,6 +967,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		} catch (error) {
 			logger.warn("History storage unavailable", { error: String(error) });
 		}
+		// Shared-state replication. Started after history storage so the history
+		// domain binds the same singleton the editor uses. Resolves to undefined
+		// unless `state.sync.enabled` is on, and never throws — a broker that is
+		// down must not stop a session from starting.
+		void createStateSyncRuntime({ settings, resolveConfigValue })
+			.then(runtime => {
+				if (!runtime) return;
+				this.#stateSync = runtime;
+				runtime.start();
+			})
+			.catch(error => logger.warn("state sync unavailable", { error: String(error) }));
 		this.hookWidgetContainerAbove = new Container();
 		this.hookWidgetContainerAbove.addChild(new Spacer(1));
 		this.hookWidgetContainerBelow = new Container();
@@ -4744,6 +4765,17 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 		} finally {
 			clearTimeout(stillClosingTimer);
+		}
+
+		// Replicate the final turn now that the session JSONL is fully written.
+		// Bounded: a slow or dead broker must not hold the terminal hostage, and
+		// anything unflushed is picked up by the next run's first sync cycle.
+		if (this.#stateSync) {
+			const sync = this.#stateSync;
+			await Promise.race([sync.drain(), Bun.sleep(STATE_SYNC_DRAIN_BUDGET_MS)]).catch(error =>
+				logger.debug("state sync drain failed", { error: String(error) }),
+			);
+			await sync.stop().catch(() => {});
 		}
 
 		// Do not force a final render during teardown: disposed session/UI state can

@@ -755,6 +755,74 @@ searxng:
 
 Provider credentials and custom model definitions are configured separately — see [Providers](./providers.md) and [Models](./models.md).
 
+### Shared state and object store
+
+Replicate `~/.omp/agent/` state (prompt history, session titles, model/command usage ranking, agent config, and session bodies) across machines through the same `omp auth-broker serve` host that holds credentials. The local SQLite databases stay authoritative for reads; these keys only add a background push/pull loop and, for bulk content, an S3-compatible archive. See [Shared state broker](./shared-state.md) for the architecture, wire protocol, and setup example.
+
+`state.sync.enabled` is off by default — with it unset behavior is byte-identical to a build without the feature. `state.broker.*` falls back to `auth.broker.*` when unset, so a single broker URL/token pair configures both surfaces.
+
+```yaml
+state:
+  broker:
+    url: https://broker.tailnet:8765
+    token: BROKER_TOKEN
+  sync:
+    enabled: true
+    intervalMs: 30000
+
+objects:
+  backend: s3
+  s3:
+    bucket: omp-state
+    endpoint: https://minio.tailnet:9000
+    pathStyle: true
+```
+
+| Key                          | Type    | Default                                                          | Notes                                                                                                                                                          |
+| ---------------------------- | ------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `state.broker.url`           | string  | _(unset)_                                                        | State-broker base URL. Falls back to `auth.broker.url` when unset. Hidden from the UI; resolved as a literal, an env-var name, or `!<shell command>`.         |
+| `state.broker.token`         | string  | _(unset)_                                                        | State-broker bearer token. Falls back to `auth.broker.token` when unset. Resolved the same way; treated as a credential.                                      |
+| `state.sync.enabled`         | boolean | `false`                                                          | Master switch for background replication. When `false`, nothing replicates, no `state-sync.db` is opened, and behavior matches a build without the feature.   |
+| `state.sync.domains`         | array   | `["history","titles","model-usage","command-usage","config","sessions"]` | Which domains to replicate. Defaults to all replicated domains.                                                                                                |
+| `state.sync.intervalMs`      | number  | `30000`                                                          | Background push/pull cadence in milliseconds.                                                                                                                  |
+| `objects.backend`            | enum    | `off`                                                            | `off`, `s3`. Selects the object store for bulk session bodies and blobs. `off` disables body/blob replication regardless of `objects.sessions`/`objects.blobs`. |
+| `objects.s3.bucket`          | string  | _(unset)_                                                        | S3 bucket name. Required when `objects.backend: s3`.                                                                                                           |
+| `objects.s3.endpoint`        | string  | _(unset)_                                                        | S3 endpoint URL. Point at MinIO/Garage/R2 here; leave unset for AWS S3.                                                                                        |
+| `objects.s3.region`          | string  | `us-east-1`                                                      | S3 region.                                                                                                                                                     |
+| `objects.s3.pathStyle`       | boolean | `true`                                                           | Use path-style addressing. Required for MinIO and Garage.                                                                                                      |
+| `objects.s3.keyPrefix`       | string  | `omp`                                                            | Key prefix for every object: `<keyPrefix>/sessions/<projectObjectSlug>/<file>.jsonl` and `<keyPrefix>/blobs/<sha256>`.                                         |
+| `objects.s3.accessKeyId`     | string  | _(unset)_                                                        | S3 access key ID. Treated as a credential.                                                                                                                     |
+| `objects.s3.secretAccessKey` | string  | _(unset)_                                                        | S3 secret access key. Treated as a credential.                                                                                                                 |
+| `objects.sessions`           | boolean | `true`                                                           | Replicate session JSONL bodies to the object store. Requires `objects.backend: s3`.                                                                           |
+| `objects.blobs`              | boolean | `true`                                                           | Replicate content-addressed blobs (externalized images) to the object store. Requires `objects.backend: s3`.                                                  |
+
+### Per-project sync scoping (`omp project`)
+
+Shared-state replication is **per-project**. The `omp project` command manages `~/.omp/agent/projects.yml`, the machine-local registry that maps a logical project id to this machine's checkout path plus a sync toggle. Only projects registered here with `sync: true` replicate anything — an unregistered directory, or one toggled off, pushes and pulls nothing (fail closed). The registry itself is never replicated; each machine declares its own path mapping and only the shared id travels. See [Shared state broker → Project scoping](./shared-state.md#project-scoping) for the architecture and a two-machine walkthrough.
+
+A logical id is derived once, at registration: an explicit `--id` wins, otherwise the git origin remote is normalized (`git@github.com:o/r.git` and `https://github.com/o/r` both become `git:github.com/o/r`) and the **repository root** is registered. A repo with no usable remote and no `--id` is an error. Git is consulted only here, never on a sync path.
+
+```bash
+omp project                          # list registered projects (default action)
+omp project enable                   # register cwd's repo, sync on; prints the derived id
+omp project enable ~/dev/foo         # register a specific path
+omp project add --id git:github.com/octocat/foo ~/dev/foo  # declare a mapping without enabling
+omp project disable ~/dev/foo        # keep the mapping, stop replicating
+omp project rm --id git:github.com/octocat/foo             # forget a mapping
+omp project path --id git:github.com/octocat/foo ~/code/foo # repoint an id at a new local path
+```
+
+| Command                              | Effect                                                                                                                                                                                                                                                            |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `omp project` / `omp project list`   | Print a table of registered projects — id, local path, sync on/off, and whether the path exists on disk — marking the entry that contains the current directory. `--json` emits the same as an array. This is the default action.                                |
+| `omp project enable [path]`          | Register the project containing `path` (default: cwd) with `sync: true`. The id is chosen as `--id`, else an existing entry for that path, else the git origin remote (registering the repo root). No remote and no `--id` is an error. Prints the resolved id, which must be `enable`d with the same id on every other machine.                                                                                                                                     |
+| `omp project disable [path]`         | Flip the matching entry to `sync: false`, keeping the id → path mapping. Errors if the path is not registered.                                                                                                                                                  |
+| `omp project add --id <id> [path]`   | Register a mapping for `path` (default: cwd) **without** enabling it (`sync: false`). This is how a second machine declares that its local checkout maps to an id chosen on the first machine, before turning sync on.                                            |
+| `omp project rm [path]`              | Remove an entry, addressed by `path` (default: cwd) or `--id <id>`.                                                                                                                                                                                              |
+| `omp project path --id <id> <newPath>` | Repoint an existing id at a different local path — for when you move a checkout.                                                                                                                                                                                |
+
+Flags: `--id <id>` and `--json`. Paths are stored as absolute, resolved paths. Registration rejects reusing an id for a different path, or mapping one path under two ids. When `state.sync.enabled` is `false`, the commands still update the registry but warn that nothing will replicate until you turn sync on.
+
 ### Other groups
 
 Every schema path not individually tabulated in this catalog is explicitly deferred to `omp config list`. Additional groups include:

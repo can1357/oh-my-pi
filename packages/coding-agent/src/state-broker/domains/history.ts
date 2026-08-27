@@ -1,0 +1,154 @@
+/**
+ * `history` replicated domain — adapts the local prompt-history table
+ * ({@link HistoryStorage}) to the broker's replication contract.
+ *
+ * Merge key is the prompt text (the table's UNIQUE column). The logical clock
+ * (`rev`) is the prompt's `created_at`, but the table stores that in epoch
+ * SECONDS while the wire's `rev` is epoch MILLIS. We convert at this boundary in
+ * BOTH directions (`rev = created_at * 1000` on read; `value.createdAt` carries
+ * the seconds back through to {@link HistoryStorage.mergeRemote} on write).
+ * Getting the unit wrong here would make history's revs incomparable with every
+ * other domain's (already millis) and with the broker, silently breaking LWW.
+ */
+
+import * as path from "node:path";
+import { logger } from "@oh-my-pi/pi-utils";
+import { HistoryStorage } from "../../session/history-storage";
+import { listSyncedProjects, projectById, resolveProject } from "../project-scope";
+import type { ReplicatedDomain } from "../replica";
+import type { StateEntry } from "../wire";
+
+/** In-project location of a prompt on the wire (absolute cwds never leave). */
+interface WireProject {
+	id: string;
+	/** POSIX path from the project root to the prompt's cwd; `""` at the root. */
+	rel: string;
+}
+
+/** Payload shape carried in {@link StateEntry.value} for the history domain. */
+interface HistoryValue {
+	prompt: string;
+	/** Epoch SECONDS, matching the table column (NOT the millis `rev`). */
+	createdAt: number;
+	/** Path-translated project reference; replaces the raw absolute `cwd`. */
+	project?: WireProject;
+	/**
+	 * Legacy pre-scoping field. A mixed-version fleet may still send a bare
+	 * absolute `cwd`; we tolerate it on INBOUND (dropping the value) but never
+	 * emit it. See {@link isHistoryValue} and the applyRemote fallback.
+	 */
+	cwd?: string;
+	sessionId?: string;
+}
+
+/** `stateEntrySchema` caps `key` at 4096 chars; longer prompts are skipped, not truncated. */
+const MAX_KEY_LENGTH = 4096;
+
+function isWireProject(value: unknown): value is WireProject {
+	if (typeof value !== "object" || value === null) return false;
+	const v = value as Record<string, unknown>;
+	return typeof v.id === "string" && typeof v.rel === "string";
+}
+
+function isHistoryValue(value: unknown): value is HistoryValue {
+	if (typeof value !== "object" || value === null) return false;
+	const v = value as Record<string, unknown>;
+	if (typeof v.prompt !== "string" || typeof v.createdAt !== "number") return false;
+	if (v.project !== undefined && !isWireProject(v.project)) return false;
+	if (v.cwd !== undefined && typeof v.cwd !== "string") return false;
+	if (v.sessionId !== undefined && typeof v.sessionId !== "string") return false;
+	return true;
+}
+
+/** Build the history {@link ReplicatedDomain}; defaults to the process-wide history store. */
+export function createHistoryDomain(storage: HistoryStorage = HistoryStorage.open()): ReplicatedDomain {
+	return {
+		id: "history",
+
+		changedSince(afterRev: number, limit: number): StateEntry[] {
+			// `afterRev` is epoch millis; the column is epoch seconds. Our revs are
+			// always `created_at * 1000` (a multiple of 1000), so flooring the
+			// millis watermark recovers the exact second to compare strictly after.
+			const afterSeconds = Math.floor(afterRev / 1000);
+			// FAIL CLOSED: only prompts under a sync-enabled project are read.
+			const synced = listSyncedProjects();
+			if (synced.length === 0) return [];
+			// Stored cwds may be the raw localPath or its canonical (symlink-
+			// resolved) form, so match against both when they differ.
+			const prefixes: string[] = [];
+			for (const project of synced) {
+				prefixes.push(project.localPath);
+				if (project.canonicalPath !== project.localPath) prefixes.push(project.canonicalPath);
+			}
+			const entries: StateEntry[] = [];
+			// Prefix-filtered IN SQL (before the limit) so a page never comes back
+			// empty while eligible rows remain, which would stall the watermark.
+			for (const row of storage.scanChangedSinceForPaths(afterSeconds, limit, prefixes)) {
+				const key = row.prompt;
+				if (key.length > MAX_KEY_LENGTH) {
+					// Truncating would alias two distinct prompts under one key, so skip.
+					logger.debug("history domain skipping oversized prompt key", { length: key.length });
+					continue;
+				}
+				if (!row.cwd) continue; // the SQL predicate excludes null cwd; defensive.
+				const resolved = resolveProject(row.cwd);
+				if (!resolved) {
+					// A cwd inside a synced prefix should always resolve; if it does
+					// not, drop it rather than leak an absolute local path.
+					logger.debug("history domain skipping unresolved cwd", { key });
+					continue;
+				}
+				const value: HistoryValue = {
+					prompt: row.prompt,
+					createdAt: row.created_at,
+					project: { id: resolved.project.id, rel: resolved.rel },
+					sessionId: row.sessionId,
+				};
+				entries.push({ key, rev: row.created_at * 1000, value });
+			}
+			return entries;
+		},
+
+		applyRemote(entries: readonly StateEntry[]): void {
+			const rows: Array<{ prompt: string; createdAt: number; cwd?: string; sessionId?: string }> = [];
+			for (const entry of entries) {
+				// History has no delete path; a tombstone is meaningless here.
+				if (entry.value === null) continue;
+				if (!isHistoryValue(entry.value)) {
+					logger.debug("history domain dropping malformed remote entry", { key: entry.key });
+					continue;
+				}
+				const value = entry.value;
+				if (value.prompt.length > MAX_KEY_LENGTH) continue; // mirrors the outbound key cap.
+				let cwd: string | undefined;
+				if (value.project) {
+					// Reconstruct THIS machine's absolute cwd from the mapping. FAIL
+					// CLOSED: if the project is unknown here or has sync disabled, drop
+					// the prompt so an unmapped project's history never lands locally.
+					const local = projectById(value.project.id);
+					if (!local?.sync) {
+						logger.debug("history domain skipping unmapped/disabled project", {
+							id: value.project.id,
+						});
+						continue;
+					}
+					cwd = value.project.rel ? path.join(local.localPath, value.project.rel) : local.localPath;
+				} else {
+					// Backward tolerance: a pre-scoping peer still sends a bare `cwd`
+					// string naming a path on ITS machine. Accept the prompt but drop
+					// the meaningless cwd rather than reject it — rejecting would
+					// error-loop a mixed-version fleet.
+					cwd = undefined;
+				}
+				rows.push({
+					prompt: value.prompt,
+					createdAt: value.createdAt,
+					cwd,
+					sessionId: value.sessionId,
+				});
+			}
+			// One batched transaction for the whole delta; LWW makes replays safe.
+			if (rows.length > 0) storage.mergeRemote(rows);
+		},
+	};
+}

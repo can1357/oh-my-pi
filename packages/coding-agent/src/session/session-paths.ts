@@ -88,6 +88,19 @@ function getDefaultSessionDirName(cwd: string): {
 }
 
 /**
+ * Encoded session-dir *name* (basename only) for a cwd, without any side effect.
+ *
+ * Replication needs the directory name purely to scan and translate session
+ * paths across machines, so — unlike {@link computeDefaultSessionDir} — this
+ * performs NO migration and NO mkdir. It never touches disk beyond the path
+ * canonicalization {@link getDefaultSessionDirName} already does, and callers
+ * join it with their sessions root themselves.
+ */
+export function sessionDirNameForCwd(cwd: string): string {
+	return getDefaultSessionDirName(cwd).encodedDirName;
+}
+
+/**
  * Migrate old `--<home-encoded>-*--` session dirs to the new `-*` format.
  * Runs once per sessions root on first access, best-effort.
  */

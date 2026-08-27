@@ -35,13 +35,24 @@ import {
 import { AuthBrokerClient, DEFAULT_AUTH_BROKER_BIND, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
 import { refreshOAuthToken } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
-import { $which, APP_NAME, getAgentDbPath, getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
+import {
+	$which,
+	APP_NAME,
+	getAgentDbPath,
+	getConfigRootDir,
+	getStateDbPath,
+	isEnoent,
+	logger,
+	VERSION,
+} from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
 import { $ } from "bun";
 import { refreshManagedMcpOAuthCredential } from "../mcp/oauth-credentials";
 import { isManagedMCPOAuthCredentialId, mcpOAuthServerUrlFromCredentialId } from "../mcp/oauth-flow";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
+import { createStateBrokerRoutes } from "../state-broker/server";
+import { StateBrokerStore } from "../state-broker/store";
 
 export type AuthBrokerAction = "serve" | "token" | "login" | "logout" | "status" | "import" | "migrate" | "list";
 
@@ -166,13 +177,17 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 			refreshBrokerOAuthCredential(provider, credential, signal),
 	});
 	await storage.reload();
+	// The broker doubles as the shared-state replication hub: `state.db` is
+	// created here and nowhere else, so a plain client run never touches it.
+	const stateStore = StateBrokerStore.open(getStateDbPath());
 	const handle = startAuthBroker({
 		storage,
 		bind,
 		bearerTokens: [token],
 		version: VERSION,
+		routes: [createStateBrokerRoutes(stateStore)],
 	});
-	logger.info("auth-broker listening", { url: handle.url });
+	logger.info("auth-broker listening", { url: handle.url, state: `${handle.url}/v1/state` });
 	logger.info("auth-broker bearer token loaded", { path: getTokenFilePath(), mode: "0600" });
 
 	const credentialDisabledUnsub = storage.onCredentialDisabled((event: CredentialDisabledEvent) => {
@@ -183,6 +198,7 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 		logger.info("auth-broker shutting down", { signal });
 		credentialDisabledUnsub();
 		await handle.close();
+		stateStore.close();
 		storage.close();
 		process.exit(0);
 	};

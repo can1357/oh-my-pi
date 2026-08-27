@@ -1,8 +1,16 @@
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@oh-my-pi/pi-ai";
-import { getAgentDir as getDefaultAgentDir, logger, parseJsonlLenient, toError } from "@oh-my-pi/pi-utils";
+import {
+	getAgentDir as getDefaultAgentDir,
+	getSessionsDir,
+	logger,
+	parseJsonlLenient,
+	toError,
+} from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
+import { readRemoteSessionIndex, type SessionIndexEntry } from "../state-broker/domains/sessions";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { lookupSessionTitle, recordSessionTitle } from "./title-index";
@@ -43,6 +51,14 @@ export interface SessionInfo {
 	 * synthesized {@link SessionInfo}s (cross-project stubs, tests) leave it unset.
 	 */
 	status?: SessionStatus;
+	/**
+	 * True when this entry describes a session whose body lives on a peer machine
+	 * and has not been fetched here yet — synthesized from the remote session
+	 * index, not scanned from a local file. The resume path MUST download the
+	 * body to {@link path} before opening it. Optional so every real,
+	 * locally-scanned session omits it.
+	 */
+	remoteOnly?: true;
 }
 
 export interface ResolvedSessionMatch {
@@ -618,17 +634,100 @@ export function listSessionsReadOnly(sessionDir: string, storage: SessionStorage
 	return scanSessionDirReadOnly(sessionDir, storage, true);
 }
 
+/** Controls what {@link listAllSessions} folds into the all-projects listing. */
+export interface ListAllSessionsOptions {
+	/**
+	 * Fold remote-only session index rows (sessions whose bodies live on peer
+	 * machines) into the result so the all-projects resume picker can reach them.
+	 * Off by default: consumers that assume every listed session has a readable
+	 * local `.jsonl` — the ACP bridge, `SessionManager.listAll` — MUST NOT
+	 * receive {@link SessionInfo.remoteOnly} stubs.
+	 */
+	includeRemoteOnly?: boolean;
+}
+
 /** List all sessions across all project directories (newest first). */
-export async function listAllSessions(storage: SessionStorage = new FileSessionStorage()): Promise<SessionInfo[]> {
+export async function listAllSessions(
+	storage: SessionStorage = new FileSessionStorage(),
+	options: ListAllSessionsOptions = {},
+): Promise<SessionInfo[]> {
 	const sessionsRoot = path.join(getDefaultAgentDir(), "sessions");
 	try {
 		const files = await Array.fromAsync(new Bun.Glob("*/*.jsonl").scan(sessionsRoot), name =>
 			path.join(sessionsRoot, name),
 		);
-		return await collectSessionsFromFiles(files, storage, true);
+		const local = await collectSessionsFromFiles(files, storage, true);
+		return options.includeRemoteOnly ? mergeRemoteOnlySessions(local) : local;
 	} catch {
 		return [];
 	}
+}
+
+/**
+ * Fold remote-only session index rows into a local {@link SessionInfo} listing.
+ *
+ * A remote-only row describes a session body that exists on a peer machine and
+ * was indexed here for resume, but whose `.jsonl` has not been fetched yet. We
+ * surface it in the all-projects picker so it is reachable; the resume path
+ * downloads the body on open (keyed off {@link SessionInfo.remoteOnly}).
+ *
+ * The local copy always wins: an index row whose local file already exists — or
+ * whose session id is already listed — is dropped so a real, openable session
+ * is never shadowed by a stub. The merged list stays in newest-first recency
+ * order the picker expects. With no index present the input is returned
+ * unchanged, so listing behaviour is byte-identical to a sync-disabled install.
+ * Never throws: a broken index degrades to `local`.
+ */
+export function mergeRemoteOnlySessions(local: SessionInfo[], sessionsDir: string = getSessionsDir()): SessionInfo[] {
+	let index: SessionIndexEntry[];
+	try {
+		index = readRemoteSessionIndex(sessionsDir);
+	} catch (error) {
+		logger.warn("Remote session index unreadable; showing local sessions only", {
+			error: toError(error).message,
+		});
+		return local;
+	}
+	if (index.length === 0) return local;
+
+	const localIds = new Set(local.map(session => session.id));
+	const stubs: SessionInfo[] = [];
+	for (const entry of index) {
+		// `rel` is this machine's local layout (POSIX-separated), relative to the
+		// sessions dir; rebuild the path the resume path will actually open.
+		const absPath = path.join(sessionsDir, ...entry.rel.split("/"));
+		let localFileExists = false;
+		try {
+			localFileExists = fs.existsSync(absPath);
+		} catch {
+			// Treat an unstatable path as absent; existsSync should never throw, but
+			// replication code must not surface I/O errors to the picker.
+		}
+		if (localFileExists) continue;
+		const id = sessionIdFromSessionPath(entry.rel);
+		if (id && localIds.has(id)) continue;
+		// Only index metadata is available — no body to scan — so body-derived
+		// fields take their documented empty values (see {@link SessionInfo}).
+		const mtime = new Date(entry.mtimeMs);
+		stubs.push({
+			path: absPath,
+			id: id ?? "",
+			cwd: "",
+			title: entry.title,
+			created: mtime,
+			modified: mtime,
+			messageCount: 0,
+			size: entry.size,
+			firstMessage: "",
+			allMessagesText: "",
+			remoteOnly: true,
+		});
+	}
+	if (stubs.length === 0) return local;
+
+	// `local` is already newest-first; a stable sort keeps its order among ties
+	// and drops each stub into its recency slot.
+	return [...local, ...stubs].sort((a, b) => b.modified.getTime() - a.modified.getTime());
 }
 
 /** Exported for testing */
