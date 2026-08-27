@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `lsp diagnostics file: "*"` now covers Dart and Flutter projects via `dart analyze`.
+
 ## [18.0.7] - 2026-08-26
 
 ### Added
@@ -323,7 +327,6 @@
 
 ### Added
 
-- `lsp diagnostics file: "*"` now covers Dart and Flutter projects via `dart analyze`.
 - Added `/shake thinking` to remove model reasoning blocks from session history
 - Added icon support to slash command autocomplete, with unique visuals for actions, files, settings, and other command types
 - Slash-command autocomplete now ranks equally matching commands by how often you use them; usage counts persist across sessions in agent.db
