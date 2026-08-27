@@ -349,6 +349,7 @@ import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
+import { resolveSettingsOpenrouterVariant } from "./settings-stream-fn";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { skillPromptTitleInput } from "./skill-title-input";
 import { ToolChoiceQueue } from "./tool-choice-queue";
@@ -7587,16 +7588,19 @@ export class AgentSession {
 	}
 
 	/**
-	 * Re-derive the credential-resolved endpoint fingerprint and, when it moved,
-	 * rebuild the in-memory context so compaction history bound to the previous
-	 * endpoint is re-expanded before the request is constructed.
+	 * Re-derive the credential-resolved endpoint fingerprint and rebuild the
+	 * in-memory context whenever it moves. The first resolution counts: a resumed
+	 * session admitted its compaction against the credential-free target, so the
+	 * initial resolved endpoint is the first chance to re-expand history bound to
+	 * a different one.
 	 */
 	#syncActiveRequestTarget(model: Model, apiKey: string | undefined): void {
-		const requestTarget = getOpenAIResponsesRequestTarget(model, apiKey);
+		const requestTarget = getOpenAIResponsesRequestTarget(model, apiKey, {
+			openrouterVariant: resolveSettingsOpenrouterVariant(this.settings),
+		});
 		if (this.#activeRequestTarget === requestTarget) return;
-		const hadTarget = this.#activeRequestTarget !== undefined;
 		this.#activeRequestTarget = requestTarget;
-		if (hadTarget) this.agent.replaceMessages(this.buildDisplaySessionContext().messages);
+		this.agent.replaceMessages(this.buildDisplaySessionContext().messages);
 	}
 
 	async #setModelWithProviderSessionReset(model: Model): Promise<void> {

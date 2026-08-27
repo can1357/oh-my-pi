@@ -2461,6 +2461,74 @@ describe("compact() remote compaction failure handling", () => {
 		expect(canReuseOpenAiCompactionHistory(preserved, compactionModel, false)).toBe(true);
 	});
 
+	test("re-expands originals when preparation runs against a moved credential-resolved endpoint", () => {
+		const model = makeOpenAiModel({
+			id: "gpt-5.4-copilot",
+			provider: "github-copilot",
+			remoteCompaction: { enabled: true },
+		});
+		const persistedTarget = getOpenAIResponsesReferenceTarget(
+			model,
+			undefined,
+			"https://api.business.githubcopilot.com",
+		);
+		const movedTarget = getOpenAIResponsesReferenceTarget(
+			model,
+			undefined,
+			"https://api.enterprise.githubcopilot.com",
+		);
+		const ts = (n: number) => new Date(n).toISOString();
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "m1",
+				parentId: null,
+				timestamp: ts(1),
+				message: { role: "user", content: "ORIGINAL COPILOT port 4242", timestamp: 1 },
+			},
+			{
+				type: "compaction",
+				id: "c1",
+				parentId: "m1",
+				timestamp: ts(2),
+				summary: "Remote compaction preserved provider-native history",
+				firstKeptEntryId: "m1",
+				tokensBefore: 100_000,
+				preserveData: {
+					openaiRemoteCompaction: {
+						provider: model.provider,
+						referenceTarget: getOpenAiCompactionReferenceTarget(model, false),
+						replayTarget: getOpenAIResponsesReferenceTarget(model),
+						requestTarget: persistedTarget,
+						replacementHistory: [{ type: "compaction", encrypted_content: "enc_copilot" }],
+						compactionItem: { type: "compaction", encrypted_content: "enc_copilot" },
+					},
+				},
+			},
+			{
+				type: "message",
+				id: "m2",
+				parentId: "c1",
+				timestamp: ts(3),
+				message: { role: "user", content: "second turn", timestamp: 3 },
+			},
+			{
+				type: "message",
+				id: "m3",
+				parentId: "m2",
+				timestamp: ts(4),
+				message: { role: "user", content: "third turn", timestamp: 4 },
+			},
+		];
+		const settings = { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 1, remoteStreamingV2Enabled: false };
+
+		const sameEndpoint = prepareCompaction(entries, settings, model, undefined, undefined, persistedTarget);
+		expect(JSON.stringify(sameEndpoint?.messagesToSummarize ?? [])).not.toContain("ORIGINAL COPILOT port 4242");
+
+		const movedEndpoint = prepareCompaction(entries, settings, model, undefined, undefined, movedTarget);
+		expect(JSON.stringify(movedEndpoint?.messagesToSummarize ?? [])).toContain("ORIGINAL COPILOT port 4242");
+	});
+
 	test("persists the credential-resolved request target for dynamic-endpoint providers", async () => {
 		vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
 		const preparation = makePreparation();

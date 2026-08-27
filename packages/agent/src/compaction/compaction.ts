@@ -713,6 +713,12 @@ export interface SummaryOptions {
 	 * Defaults to the compaction model when omitted.
 	 */
 	runtimeModel?: Model;
+	/**
+	 * Session-level OpenRouter routing variant. It becomes part of the wire model
+	 * id, so the request target stamped onto preserved history must resolve it
+	 * exactly as the live stream does or replay fails closed on the next turn.
+	 */
+	openrouterVariant?: string;
 	/** Optional fetch implementation threaded into remote compaction calls. */
 	fetch?: FetchImpl;
 	/**
@@ -1356,11 +1362,17 @@ export function findReadableCompactionIndex(
 	settings: CompactionSettings,
 	activeModel?: Model,
 	compactionModels?: readonly Model[],
+	resolvedRequestTarget?: string,
 ): number {
 	for (let i = pathEntries.length - 1; i >= 0; i--) {
 		if (pathEntries[i].type !== "compaction") continue;
 		const entry = pathEntries[i] as CompactionEntry;
-		if (activeModel && !remotePreserveReusable(entry.preserveData, activeModel, settings, compactionModels)) continue;
+		if (
+			activeModel &&
+			!remotePreserveReusable(entry.preserveData, activeModel, settings, compactionModels, resolvedRequestTarget)
+		) {
+			continue;
+		}
 		return i;
 	}
 	return -1;
@@ -1377,12 +1389,19 @@ export function prepareCompaction(
 	activeModel?: Model,
 	tokenizer: Tokenizer = new Tokenizer(activeModel),
 	compactionModels?: readonly Model[],
+	resolvedRequestTarget?: string,
 ): CompactionPreparation | undefined {
 	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
 		return undefined;
 	}
 
-	let prevCompactionIndex = findReadableCompactionIndex(pathEntries, settings, activeModel, compactionModels);
+	let prevCompactionIndex = findReadableCompactionIndex(
+		pathEntries,
+		settings,
+		activeModel,
+		compactionModels,
+		resolvedRequestTarget,
+	);
 
 	// Honor the latest `/clear` reset boundary. `/clear` records a
 	// `reset_boundary` marker and reports the model context empty, so compaction
@@ -1700,7 +1719,9 @@ export async function compact(
 				const remote = await withAuth(
 					apiKey,
 					key => {
-						v2RequestTarget = getOpenAIResponsesRequestTarget(summaryOptions.runtimeModel ?? model, key);
+						v2RequestTarget = getOpenAIResponsesRequestTarget(summaryOptions.runtimeModel ?? model, key, {
+							openrouterVariant: summaryOptions.openrouterVariant,
+						});
 						return requestCompactionV2Streaming(model, key, request, signal, {
 							fetch: summaryOptions.fetch,
 							providerSessionState: summaryOptions.providerSessionState,
@@ -1768,7 +1789,9 @@ export async function compact(
 								providerSessionState: summaryOptions.providerSessionState,
 								codexCompaction: summaryOptions.codexCompaction,
 								replayTarget: getOpenAIResponsesReferenceTarget(summaryOptions.runtimeModel ?? model),
-								requestTarget: getOpenAIResponsesRequestTarget(summaryOptions.runtimeModel ?? model, key),
+								requestTarget: getOpenAIResponsesRequestTarget(summaryOptions.runtimeModel ?? model, key, {
+									openrouterVariant: summaryOptions.openrouterVariant,
+								}),
 							},
 						),
 					{ signal },

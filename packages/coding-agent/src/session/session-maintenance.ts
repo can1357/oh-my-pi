@@ -89,6 +89,7 @@ import type { SessionContext } from "./session-context";
 import { getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
+import { resolveSettingsOpenrouterVariant } from "./settings-stream-fn";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { resolveSpeculationLeadTokens, SPECULATION_LEAD_MIN_TOKENS } from "./speculation-lead";
 
@@ -835,6 +836,7 @@ export class SessionMaintenance {
 				activeModel,
 				this.#tokenizer,
 				compactionCandidates,
+				this.#host.activeRequestTarget(),
 			);
 			if (!preparation) {
 				// Check why we can't compact
@@ -1202,6 +1204,8 @@ export class SessionMaintenance {
 			resolveMethodSettings(compactionSettings, "handoff"),
 			model,
 			this.#tokenizer,
+			undefined,
+			this.#host.activeRequestTarget(),
 		);
 		if (!preparation) throw new Error("Nothing to hand off (already compacted)");
 		const result = await this.#host.generateHandoffDocument(customInstructions, options);
@@ -1346,7 +1350,14 @@ export class SessionMaintenance {
 									shouldUseProviderNativeCompaction(candidate, effectiveSettings)
 							: undefined,
 					);
-		const preparation = prepareCompaction(branch, effectiveSettings, model, this.#tokenizer, candidates);
+		const preparation = prepareCompaction(
+			branch,
+			effectiveSettings,
+			model,
+			this.#tokenizer,
+			candidates,
+			this.#host.activeRequestTarget(),
+		);
 		if (!preparation) return clear();
 		const signal = run.controller.signal;
 		let armed: ArmedSpeculation;
@@ -1599,8 +1610,14 @@ export class SessionMaintenance {
 		}
 		if (
 			pendingMidTurnDeadEnd &&
-			prepareCompaction(this.#host.sessionManager.getBranch(), compactionSettings, model, this.#tokenizer) ===
-				undefined
+			prepareCompaction(
+				this.#host.sessionManager.getBranch(),
+				compactionSettings,
+				model,
+				this.#tokenizer,
+				undefined,
+				this.#host.activeRequestTarget(),
+			) === undefined
 		) {
 			// The prior tool loop already attempted the rescue and warned for this
 			// persisted oversized turn. Only a later persisted cut point makes a
@@ -1720,8 +1737,14 @@ export class SessionMaintenance {
 			// soon as one appears.
 			if (
 				!model ||
-				prepareCompaction(this.#host.sessionManager.getBranch(), compactionSettings, model, this.#tokenizer) ===
-					undefined
+				prepareCompaction(
+					this.#host.sessionManager.getBranch(),
+					compactionSettings,
+					model,
+					this.#tokenizer,
+					undefined,
+					this.#host.activeRequestTarget(),
+				) === undefined
 			) {
 				return;
 			}
@@ -2234,6 +2257,7 @@ export class SessionMaintenance {
 						thinkingLevel: this.#host.thinkingLevel(),
 						tools: this.#host.agent.state.tools,
 						runtimeModel: this.#model,
+						openrouterVariant: resolveSettingsOpenrouterVariant(this.#host.settings),
 						sessionId: this.#host.sessionId(),
 						promptCacheKey: this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId,
 						providerSessionState: this.#host.providerSessionState,
@@ -3090,6 +3114,7 @@ export class SessionMaintenance {
 				this.#model,
 				this.#tokenizer,
 				compactionCandidates,
+				this.#host.activeRequestTarget(),
 			);
 			if (!preparation) {
 				// prepareCompaction found nothing to summarize because the kept region
@@ -3146,6 +3171,7 @@ export class SessionMaintenance {
 									this.#model,
 									this.#tokenizer,
 									compactionCandidates,
+									this.#host.activeRequestTarget(),
 								);
 								return preparation !== undefined;
 							},
@@ -3491,6 +3517,7 @@ export class SessionMaintenance {
 									thinkingLevel: this.#host.thinkingLevel(),
 									tools: this.#host.agent.state.tools,
 									runtimeModel: this.#model,
+									openrouterVariant: resolveSettingsOpenrouterVariant(this.#host.settings),
 									sessionId: this.#host.sessionId(),
 									promptCacheKey: this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId,
 									providerSessionState: this.#host.providerSessionState,

@@ -234,14 +234,35 @@ function setHeaderIfAbsent(headers: Record<string, string>, name: string, value:
 	headers[name] = value;
 }
 
+/** Per-request routing inputs the Responses serializer folds into the wire request. */
+export interface OpenAIResponsesRequestRouting {
+	openrouterVariant?: string;
+	extraBody?: Record<string, unknown>;
+}
+
 /**
  * Fingerprint of the endpoint this request will actually reach, resolved the
  * same way the transport resolves it. Session-level replay decisions and the
- * serializer must agree on one identity, so both derive it here.
+ * serializer must agree on one identity, so both derive it here — including the
+ * wire model-id transform and the routing selectors an `extraBody` supplies.
  */
-export function getOpenAIResponsesRequestTarget(model: Model, apiKey: string | undefined): string {
+export function getOpenAIResponsesRequestTarget(
+	model: Model,
+	apiKey: string | undefined,
+	routing?: OpenAIResponsesRequestRouting,
+): string {
 	if (model.api === "azure-openai-responses") return getOpenAIResponsesReferenceTarget(model);
-	return getOpenAIResponsesReferenceTarget(model, undefined, resolveOpenAIRequestBaseUrl(model, apiKey));
+	const compat = model.compat as { wireModelIdMode?: ResolvedOpenAISharedCompat["wireModelIdMode"] } | undefined;
+	const wireModelId = resolveResponsesWireModelId(
+		model.requestModelId ?? model.id,
+		compat?.wireModelIdMode ?? "raw",
+		routing?.openrouterVariant,
+		routing?.extraBody,
+	);
+	return getOpenAIResponsesReferenceTarget(model, wireModelId, resolveOpenAIRequestBaseUrl(model, apiKey), {
+		provider: routing?.extraBody?.provider,
+		providerOptions: routing?.extraBody?.providerOptions,
+	});
 }
 
 /**

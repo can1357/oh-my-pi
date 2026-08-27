@@ -5,8 +5,9 @@ import {
 	streamOpenAICodexResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
-import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { buildResponsesInput, getOpenAIResponsesRequestTarget } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type {
+	AssistantMessage,
 	Context,
 	FetchImpl,
 	Model,
@@ -434,7 +435,7 @@ function createStampedSseResponse(): Response {
 function buildStampedResponsesModel(baseUrl: string): Model<"openai-responses"> {
 	return buildModel({
 		id: "gpt-5-stamped",
-		name: "GPT-5 Stamped",
+		name: "GPT-5.5 Stamped",
 		api: "openai-responses",
 		provider: "openai",
 		baseUrl,
@@ -449,7 +450,7 @@ function buildStampedResponsesModel(baseUrl: string): Model<"openai-responses"> 
 function buildVercelGatewayResponsesModel(routing: VercelGatewayRouting): Model<"openai-responses"> {
 	return buildModel({
 		id: "openai/gpt-5-stamped",
-		name: "GPT-5 Stamped",
+		name: "GPT-5.5 Stamped",
 		api: "openai-responses",
 		provider: "vercel-ai-gateway",
 		baseUrl: "https://ai-gateway.vercel.sh/v1",
@@ -701,6 +702,64 @@ describe("OpenAI responses history payload", () => {
 		})) as { input?: unknown[] };
 		expect(containsEncryptedReasoning(configShapeRouting.input)).toBe(false);
 		expect(containsAssistantOutputText(configShapeRouting.input, "stamped answer")).toBe(true);
+	});
+
+	it("derives the session request target from the transformed wire model id", async () => {
+		const model = buildModel({
+			id: "openai/gpt-5-stamped",
+			name: "GPT-5 Stamped",
+			api: "openai-responses",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"openai-responses">);
+		const routing = { openrouterVariant: "floor" };
+		const sessionTarget = getOpenAIResponsesRequestTarget(model, "test-key", routing);
+		expect(sessionTarget).not.toBe(getOpenAIResponsesRequestTarget(model, "test-key"));
+
+		const stream = streamOpenAIResponses(
+			model,
+			{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
+			{ apiKey: "test-key", ...routing, fetch: async () => createStampedSseResponse() },
+		);
+		let message: AssistantMessage | undefined;
+		for await (const event of stream) {
+			if (event.type === "done") message = event.message;
+			if (event.type === "error") throw event.error;
+		}
+		if (!message) throw new Error("expected a completed assistant message");
+
+		// Session-level replay decisions stamp compaction metadata with this target,
+		// so it must equal the fingerprint the transport actually generated.
+		expect(message.providerPayload).toMatchObject({
+			type: "openaiResponsesHistory",
+			referenceTarget: sessionTarget,
+		});
+
+		const replayed = (await captureResponsesPayload(
+			model,
+			{
+				messages: [
+					{
+						...message,
+						providerPayload: {
+							type: "openaiResponsesHistory",
+							provider: model.provider,
+							referenceTarget: sessionTarget,
+							items: (message.providerPayload as { items: Array<Record<string, unknown>> }).items,
+						},
+					},
+					{ role: "user", content: "continue", timestamp: 1 },
+				],
+			},
+			undefined,
+			routing,
+		)) as { input?: unknown[] };
+		expect(containsEncryptedReasoning(replayed.input)).toBe(true);
 	});
 
 	it("hashes routing identity and keeps query-scoped Responses targets distinct", async () => {
