@@ -46,9 +46,9 @@ import type {
 } from "../types";
 import {
 	createOpenAIResponsesHistoryPayload,
-	getOpenAIResponsesReferenceTarget,
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
+	getOpenAIResponsesReferenceTarget,
 	normalizeSystemPrompts,
 	sanitizeOpenAIResponsesAssistantFallbackItemsForReplay,
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
@@ -94,7 +94,6 @@ import type {
 import {
 	accumulateCustomToolCallInputDelta,
 	accumulateToolCallArgumentsDelta,
-	assertCompatibleCompactionHistory,
 	appendMessageContentPart,
 	appendMessageTextDelta,
 	appendReasoningSummaryPart,
@@ -104,6 +103,7 @@ import {
 	appendResponsesToolResultMessages,
 	applyOpenAIServiceTier,
 	applyReasoningSummaryDone,
+	assertCompatibleCompactionHistory,
 	assertResponsesWireRoutingUnchanged,
 	buildResponsesDeltaInput,
 	computerCallMetadata,
@@ -4588,6 +4588,14 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 							referenceTarget,
 						)
 					: undefined;
+			const stampedPayload = assistantMsg.providerPayload;
+			// A stamped payload that fails the target check is endpoint-owned: its
+			// reasoning ids, encrypted content, and item ids belong to the endpoint
+			// that minted them and must not leak through the canonical fallback.
+			const targetOwnedHistoryRejected =
+				stampedPayload?.type === "openaiResponsesHistory" &&
+				stampedPayload.referenceTarget !== undefined &&
+				stampedPayload.referenceTarget !== referenceTarget;
 			const historyItems = providerPayload?.items as Array<Record<string, unknown>> | undefined;
 			let suppressHiddenEmptyFallback = false;
 			if (historyItems) {
@@ -4619,7 +4627,7 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 				model,
 				msgIndex,
 				knownCallIds,
-				!suppressHiddenEmptyFallback,
+				!suppressHiddenEmptyFallback && !targetOwnedHistoryRejected,
 				customCallIds,
 				false,
 				true,
