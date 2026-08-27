@@ -1358,6 +1358,172 @@ describe("pi-native gateway image reference validation", () => {
 		}
 	});
 
+	it("promotes a placeholder-safe computer screenshot data URL into canonical content", async () => {
+		const upstreamRequests: CapturedOpenAICompletionRequest[] = [];
+		const upstream = startOpenAICompletionsUpstream(upstreamRequests);
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-computer-placeholder-url-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openai", "test-key");
+		const model = buildModel({
+			id: "pi-native-computer-placeholder-url",
+			name: "Pi Native Computer Placeholder URL",
+			api: "openai-completions",
+			provider: "openai",
+			baseUrl: `${upstream.url.origin}/v1`,
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"openai-completions">);
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => model,
+			version: "test",
+		});
+
+		try {
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: model.id,
+					context: {
+						messages: [
+							{
+								role: "assistant",
+								content: [
+									{ type: "toolCall", id: "call_computer_placeholder", name: "computer", arguments: {} },
+								],
+								api: model.api,
+								provider: model.provider,
+								model: model.id,
+								usage: ZERO_USAGE,
+								stopReason: "toolUse",
+								timestamp: 0,
+							},
+							{
+								role: "toolResult",
+								toolCallId: "call_computer_placeholder",
+								toolName: "computer",
+								content: [],
+								providerMetadata: {
+									type: "computer",
+									screenshot: { type: "computer_screenshot", image_url: `data:image/bmp;base64,${BMP_B64}` },
+									acknowledgedSafetyChecks: [],
+								},
+								isError: false,
+								timestamp: 0,
+							},
+						],
+					},
+					stream: false,
+				}),
+			});
+
+			expect(response.status).toBe(200);
+			await response.json();
+			expect(upstreamRequests).toHaveLength(1);
+			const parts = (upstreamRequests[0]?.messages ?? []).flatMap(message =>
+				Array.isArray(message.content) ? message.content : [],
+			);
+			expect(parts).toContainEqual({ type: "text", text: "[unsupported image: image/bmp]" });
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			upstream.stop(true);
+		}
+	});
+
+	it("counts placeholder-safe canonical content as a computer screenshot fallback", async () => {
+		const upstreamRequests: CapturedOpenAICompletionRequest[] = [];
+		const upstream = startOpenAICompletionsUpstream(upstreamRequests);
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-computer-placeholder-content-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openai", "test-key");
+		const model = buildModel({
+			id: "pi-native-computer-placeholder-content",
+			name: "Pi Native Computer Placeholder Content",
+			api: "openai-completions",
+			provider: "openai",
+			baseUrl: `${upstream.url.origin}/v1`,
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"openai-completions">);
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => model,
+			version: "test",
+		});
+
+		try {
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: model.id,
+					context: {
+						messages: [
+							{
+								role: "assistant",
+								content: [
+									{
+										type: "toolCall",
+										id: "call_computer_placeholder_content",
+										name: "computer",
+										arguments: {},
+									},
+								],
+								api: model.api,
+								provider: model.provider,
+								model: model.id,
+								usage: ZERO_USAGE,
+								stopReason: "toolUse",
+								timestamp: 0,
+							},
+							{
+								role: "toolResult",
+								toolCallId: "call_computer_placeholder_content",
+								toolName: "computer",
+								content: [{ type: "image", data: BMP_B64, mimeType: "image/bmp" }],
+								providerMetadata: {
+									type: "computer",
+									screenshot: { type: "computer_screenshot", file_id: "file_stale_screen" },
+									acknowledgedSafetyChecks: [],
+								},
+								isError: false,
+								timestamp: 0,
+							},
+						],
+					},
+					stream: false,
+				}),
+			});
+
+			expect(response.status).toBe(200);
+			await response.json();
+			expect(upstreamRequests).toHaveLength(1);
+			const parts = (upstreamRequests[0]?.messages ?? []).flatMap(message =>
+				Array.isArray(message.content) ? message.content : [],
+			);
+			expect(parts).toContainEqual({ type: "text", text: "[unsupported image: image/bmp]" });
+			expect(JSON.stringify(upstreamRequests[0])).not.toContain("file_stale_screen");
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			upstream.stop(true);
+		}
+	});
+
 	it("preserves a supported URL when the file reference is unsupported", async () => {
 		const upstreamRequests: CapturedOpenAICompletionRequest[] = [];
 		const upstream = startOpenAICompletionsUpstream(upstreamRequests);

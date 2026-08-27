@@ -99,11 +99,16 @@ const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
 function promoteComputerScreenshotImage(message: Record<string, unknown>, model: Model, imageUrl: string): boolean {
 	const decoded = decodeDataUri(imageUrl);
 	const decodedMimeType = decoded ? getUsableInlineImageMimeType(decoded) : undefined;
+	const placeholderSafeMimeType =
+		decoded && !decodedMimeType ? getUnreplayableInlineImageMimeType(decoded) : undefined;
 	const image = decodedMimeType
 		? { type: "image", ...decoded, mimeType: decodedMimeType }
-		: isRemoteImageUrl(imageUrl) && supportsRemoteImageUrls(model, { mimeType: REMOTE_COMPUTER_SCREENSHOT_MIME_TYPE })
-			? { type: "image", data: "", mimeType: REMOTE_COMPUTER_SCREENSHOT_MIME_TYPE, url: imageUrl }
-			: undefined;
+		: placeholderSafeMimeType
+			? { type: "image", ...decoded, mimeType: placeholderSafeMimeType }
+			: isRemoteImageUrl(imageUrl) &&
+					supportsRemoteImageUrls(model, { mimeType: REMOTE_COMPUTER_SCREENSHOT_MIME_TYPE })
+				? { type: "image", data: "", mimeType: REMOTE_COMPUTER_SCREENSHOT_MIME_TYPE, url: imageUrl }
+				: undefined;
 	if (!image) return false;
 	if (Array.isArray(message.content)) {
 		message.content.push(image);
@@ -134,14 +139,14 @@ function promoteComputerScreenshotFileId(message: Record<string, unknown>, model
 function validateComputerScreenshotReference(
 	message: Record<string, unknown>,
 	model: Model,
-	hasSupportedSource: boolean,
+	hasUsableSource: boolean,
 ): string | undefined {
 	if (message.role !== "toolResult") return undefined;
 	const metadata = message.providerMetadata;
 	if (!isRecord(metadata) || metadata.type !== "computer") return undefined;
 	const screenshot = isRecord(metadata.screenshot) ? metadata.screenshot : undefined;
 	if (supportsComputerScreenshotReferences(model, screenshot)) return undefined;
-	if (hasSupportedSource) {
+	if (hasUsableSource) {
 		const fallback = resolveResponsesComputerScreenshot(message as unknown as ToolResultMessage, model, false);
 		if (fallback) {
 			metadata.screenshot = fallback;
@@ -189,7 +194,7 @@ export function validateAndNormalizeImageReferences(context: Context, model: Mod
 			return `\`context.messages[${messageIndex}].content\` must be a string or an array`;
 		}
 		const blocks: unknown[] = message.content;
-		let hasSupportedImageSourceInMessage = false;
+		let hasUsableImageSourceInMessage = false;
 		for (const [blockIndex, block] of blocks.entries()) {
 			if (!isRecord(block)) {
 				return `\`context.messages[${messageIndex}].content[${blockIndex}]\` must be an object`;
@@ -227,7 +232,7 @@ export function validateAndNormalizeImageReferences(context: Context, model: Mod
 				supportsRemoteImageUrls(model, { mimeType: normalizedMimeType });
 			if (hasInlineData || hasSupportedProviderFileReference || hasSupportedUrlReference) {
 				block.mimeType = normalizedMimeType;
-				hasSupportedImageSourceInMessage = true;
+				hasUsableImageSourceInMessage = true;
 			}
 
 			if (hasProviderFileReference && !hasSupportedProviderFileReference) delete block.providerFile;
@@ -236,6 +241,7 @@ export function validateAndNormalizeImageReferences(context: Context, model: Mod
 
 			if (getUnreplayableInlineImageMimeType({ data, mimeType }) !== undefined) {
 				block.mimeType = normalizedMimeType;
+				hasUsableImageSourceInMessage = true;
 				continue;
 			}
 			if (providerFile?.provider === "openai") {
@@ -252,7 +258,7 @@ export function validateAndNormalizeImageReferences(context: Context, model: Mod
 		const computerScreenshotError = validateComputerScreenshotReference(
 			message,
 			model,
-			hasSupportedImageSourceInMessage,
+			hasUsableImageSourceInMessage,
 		);
 		if (computerScreenshotError) return computerScreenshotError;
 	}
