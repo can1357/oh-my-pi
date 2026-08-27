@@ -41,7 +41,11 @@ export const SEARCH_PROVIDER_OPTIONS = [
 	{ value: "tinyfish", label: "TinyFish", description: "Requires TINYFISH_API_KEY" },
 	{ value: "jina", label: "Jina", description: "Requires JINA_API_KEY" },
 	{ value: "kagi", label: "Kagi", description: "Requires KAGI_API_KEY and Kagi Search API beta access" },
-	{ value: "tavily", label: "Tavily", description: "Requires TAVILY_API_KEY" },
+	{
+		value: "tavily",
+		label: "Tavily",
+		description: "Uses TAVILY_API_KEY when configured; explicit selection supports rate-limited keyless access",
+	},
 	{
 		value: "firecrawl",
 		label: "Firecrawl",

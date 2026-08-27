@@ -173,11 +173,12 @@ Each provider search transport receives a hard timeout from `providers.webSearch
     - `limit` and `num_search_results` are collapsed together before dispatch, clamped to `1..40`, default `10`.
     - Output: `sources` (concatenated `data.search` + `data.video` + `data.news` + `data.infobox`, with video/news/infobox results tagged in the title), `relatedQuestions` (`data.adjacent_question` + `data.related_search` `props.question`), `answer` (`data.direct_answer[0].snippet ?? title`), `requestId` (`meta.trace`).
   - **Tavily** — `packages/coding-agent/src/web/search/providers/tavily.ts`
-    - Availability: API key from env or `agent.db` via `findCredential()`.
+    - Availability: API key from env or `agent.db` admits Tavily to the automatic chain. Explicit selection works without credentials through Tavily's rate-limited keyless access mode.
     - Querying: POST `https://api.tavily.com/search`.
+    - Authentication: keyed requests send bearer auth; keyless requests identify the client with `X-Client-Name: oh-my-pi` and `X-Tavily-Access-Mode: keyless` without an authorization header.
     - `recency` maps to Tavily `time_range`; code explicitly keeps `topic` at default general scope instead of narrowing to news.
     - `limit` / `num_search_results`: adapter uses `params.numSearchResults ?? params.limit`, clamped to `5..20` with default `5`.
-    - Output: `answer`, `sources`, `requestId`, `authMode: "api_key"`.
+    - Output: `answer`, `sources`, `requestId`, `authMode: "api_key" | "keyless"`.
   - **Firecrawl** — `packages/coding-agent/src/web/search/providers/firecrawl.ts`
     - Availability: credentials admit it to the automatic chain; explicit/configured selection is always available and uses keyless mode when no credential resolves.
     - Querying: POST `https://api.firecrawl.dev/v2/search` with `sources: [{ type: "web" }]`. Google-style operators are formatted into the query; `recency` and parsed absolute dates map to `tbs`.
