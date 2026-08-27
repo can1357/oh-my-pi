@@ -823,6 +823,18 @@ export class RelayBridge {
 					sequence: ++this.#subscriptionSeq,
 				});
 				return;
+			case "Emulation.clearDeviceMetricsOverride":
+				this.#forgetSessionSubscription(tab, "Emulation.setDeviceMetricsOverride", ownerSessionId);
+				return;
+			case "Page.clearDeviceMetricsOverride":
+				this.#forgetSessionSubscription(tab, "Page.setDeviceMetricsOverride", ownerSessionId);
+				return;
+			case "Emulation.clearGeolocationOverride":
+				this.#forgetSessionSubscription(tab, "Emulation.setGeolocationOverride", ownerSessionId);
+				return;
+			case "Page.clearGeolocationOverride":
+				this.#forgetSessionSubscription(tab, "Page.setGeolocationOverride", ownerSessionId);
+				return;
 			case "Emulation.setDeviceMetricsOverride":
 			case "Page.setDeviceMetricsOverride":
 			case "Emulation.setGeolocationOverride":

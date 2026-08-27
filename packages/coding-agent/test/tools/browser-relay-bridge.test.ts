@@ -1286,6 +1286,37 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send")).toHaveLength(2);
 	});
 
+	it("does not replay a cleared persistent root setter after recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		const sendRootCommand = async (method: string, params?: Record<string, unknown>): Promise<void> => {
+			const id = ++msgSeq;
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId: pageSession, method, params }));
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+			expect(cdp.messages.filter(message => message.id === id && "result" in message)).toHaveLength(1);
+		};
+
+		const metrics = { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false };
+		await sendRootCommand("Emulation.setDeviceMetricsOverride", metrics);
+		await sendRootCommand("Emulation.clearDeviceMetricsOverride");
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
+		ack(bridge, ext2, "attach");
+		await flush();
+
+		expect(ext2.rpcs("send")).toHaveLength(0);
+	});
+
 	it("clears replayed extra headers when the replay owner disconnects during recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

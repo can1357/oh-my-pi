@@ -2,10 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { snapshotAfterPendingOperationsSettle } from "./pending-ops";
 
 function deferred<T>() {
-	let resolve!: (value: T | PromiseLike<T>) => void;
-	const promise = new Promise<T>(res => {
-		resolve = res;
-	});
+	const { promise, resolve } = Promise.withResolvers<T>();
 	return { promise, resolve };
 }
 
