@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Vibe delegated workers requiring a registered skill from being reported as ordinary completed output: the parent session now validates and dispatches the skill, then resumes the same worker with correlated `skill-dispatch-result/v1` evidence.
+
 ## [18.0.7] - 2026-08-26
 
 ### Added

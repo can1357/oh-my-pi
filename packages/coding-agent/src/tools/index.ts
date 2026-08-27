@@ -186,6 +186,14 @@ export interface ToolSession {
 	workspaceTree?: WorkspaceTree;
 	/** Pre-loaded skills */
 	skills?: readonly Skill[];
+	/**
+	 * Parent-owned registry skill dispatch used by delegated workers. Workers never
+	 * receive this callback; it is intentionally kept on the parent session.
+	 */
+	dispatchSkillDependency?: (
+		request: unknown,
+		ownerScope: { ownerId: string; parentSessionId: string; parentSessionFile: string | null },
+	) => Promise<unknown>;
 	/** Rediscover live session skills after a tool mutates their backing files. */
 	refreshSkills?: () => Promise<void>;
 	/** Pre-loaded prompt templates */

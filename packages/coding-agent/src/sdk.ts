@@ -112,6 +112,7 @@ import {
 	wrapRegisteredTools,
 } from "./extensibility/extensions";
 import {
+	buildSkillPromptMessage,
 	loadSkills as loadSkillsInternal,
 	type Skill,
 	type SkillWarning,
@@ -158,6 +159,7 @@ import {
 	convertToLlm,
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
 	replaceLlmImagesWithText,
+	SKILL_PROMPT_MESSAGE_TYPE,
 	USER_INTERRUPT_LABEL,
 	wrapSteeringForModel,
 } from "./session/messages";
@@ -1277,6 +1279,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const cwd = options.cwd ?? getProjectDir();
 	const agentDir = options.agentDir ?? getAgentDir();
 	const eventBus = options.eventBus ?? new EventBus();
+	const skillDependencyDispatches = new Map<string, Promise<unknown>>();
 
 	registerSshCleanup();
 	registerEvalCleanup();
@@ -1876,6 +1879,39 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// this undefined so tools and session job snapshots refuse async work
 			// instead of silently routing into the owning session (issue #1923).
 			asyncJobManager: scopedAsyncJobManager,
+		};
+		const dispatchSkillDependency = createSkillDependencyDispatcher({
+			enabled: () => Boolean(session.skillsSettings?.enableSkillCommands),
+			knownSkill: skill => session.skills.some(candidate => candidate.name === skill),
+			buildMessage: async (skill, args) => {
+				const definition = session.skills.find(candidate => candidate.name === skill);
+				if (!definition) return "";
+				const built = await buildSkillPromptMessage(definition, args, "user");
+				return {
+					customType: SKILL_PROMPT_MESSAGE_TYPE,
+					content: built.message,
+					display: true,
+					details: built.details,
+					attribution: "user",
+				};
+			},
+			send: (message, correlationId) =>
+				session.sendCustomMessage(
+					{ ...(message as Record<string, unknown>), details: { ...((message as { details?: object }).details ?? {}), correlationId } } as never,
+					{ triggerTurn: true, deliverAs: "nextTurn" },
+				),
+			subscribe: listener => session.subscribe(listener),
+		});
+		toolSession.dispatchSkillDependency = async (request, ownerScope) => {
+			const input = request as { skill?: unknown; args?: unknown; dependent_gate?: unknown; dependent_artifact?: unknown };
+			const skill = typeof input.skill === "string" ? input.skill : "";
+			const args = typeof input.args === "string" ? input.args : "";
+			const key = JSON.stringify([ownerScope.ownerId, ownerScope.parentSessionId, skill, args, input.dependent_gate, input.dependent_artifact]);
+			const prior = skillDependencyDispatches.get(key);
+			if (prior) return prior;
+			const dispatch = dispatchSkillDependency(request as never, ownerScope.parentSessionId);
+			skillDependencyDispatches.set(key, dispatch);
+			return dispatch;
 		};
 
 		// Wire process-wide internal URL singletons owned by their real classes.

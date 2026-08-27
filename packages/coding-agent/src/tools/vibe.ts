@@ -54,7 +54,9 @@ const vibeSpawnSchema = type({
 		"worker flavor: fast = low-latency model for mechanical work; good = strong model for hard work",
 	),
 	"name?": type("string <= 48").describe("optional session name; generated when omitted"),
-	prompt: type("string > 0").describe("first instruction; the worker starts with no other context"),
+	prompt: type("string > 0").describe(
+		"first instruction; delegated workers return dependency_required for registered skills; parent invokes exact /skill:<name> <args> and validates skill-dispatch-result/v1",
+	),
 });
 
 const vibeSendSchema = type({

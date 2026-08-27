@@ -18,7 +18,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManager } from "../async/job-manager";
-import { resolveAgentModelSelection } from "../config/model-resolver";
+import { resolveAgentModelPatterns } from "../config/model-resolver";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
@@ -35,22 +35,16 @@ import type { ToolSession } from "../tools";
 import { formatDuration } from "../tools/render-utils";
 import { ToolError } from "../tools/tool-errors";
 import { calculateTokensPerSecond } from "../utils/token-rate";
+import type { SkillDispatchResult } from "./delegated-skill-boundary";
+import { buildVibeDelegatedAssignment, coordinateDelegatedSkillDependency } from "./delegated-skill-boundary";
+/** The two worker CLI flavors the director drives. */
+export type VibeCli = "fast" | "good";
 
-import {
-	parseLifecycleEvent,
-	VIBE_LIFECYCLE_CUSTOM_TYPE,
-	VIBE_LIFECYCLE_VERSION,
-	type VibeCli,
-	type VibeLifecycleBase,
-	type VibeLifecycleEvent,
-	type VibeSpawnLifecycleEvent,
-	type VibeTombstoneReason,
-} from "./lifecycle";
 /**
  * CLI flavor → bundled agent type. This IS the model-tier mapping: `sonic`
  * carries `model: "@smol"` (the configured fast/low-latency role) and `task`
  * carries `model: "@task"` (inherits the session's strong model).
- * Resolution goes through {@link resolveAgentModelSelection} exactly like a
+ * Resolution goes through {@link resolveAgentModelPatterns} exactly like a
  * `task` spawn, so `task.agentModelOverrides` and model-role settings apply.
  */
 export const VIBE_CLI_AGENT: Record<VibeCli, string> = {
@@ -79,6 +73,9 @@ const RESPONSE_PREVIEW_MAX = 6000;
 /** Grace period for Vibe cancellation/release cleanup before teardown detaches (ms). */
 const VIBE_TEARDOWN_GRACE_MS = 5_000;
 
+const VIBE_LIFECYCLE_CUSTOM_TYPE = "vibe-session-lifecycle";
+const VIBE_LIFECYCLE_VERSION = 1;
+
 export interface VibeOwnerScope {
 	ownerId: string;
 	parentSessionId: string;
@@ -95,9 +92,47 @@ export interface VibeParentSession {
 		>;
 	asyncJobManager?: AsyncJobManager;
 	settings: ToolSession["settings"];
-	getActiveModelString?: () => string | undefined;
 	getModelString?: () => string | undefined;
+	getActiveModelString?: () => string | undefined;
+	dispatchSkillDependency?: ToolSession["dispatchSkillDependency"];
 }
+type VibeTombstoneReason = "explicit-kill" | "mode-exit" | "spawn-failed" | "unrecoverable";
+
+interface VibeLifecycleBase {
+	version: typeof VIBE_LIFECYCLE_VERSION;
+	id: string;
+	ownerId: string;
+	parentSessionId: string;
+}
+
+interface VibeSpawnLifecycleEvent extends VibeLifecycleBase {
+	action: "spawn";
+	cli: VibeCli;
+	agent: string;
+	childSessionFile: string;
+	createdAt: number;
+}
+
+interface VibeTurnLifecycleEvent extends VibeLifecycleBase {
+	action: "turn-started" | "turn-settled";
+	turn: number;
+}
+
+interface VibeTombstoneLifecycleEvent extends VibeLifecycleBase {
+	action: "tombstone";
+	reason: VibeTombstoneReason;
+}
+
+interface VibeTombstoneRevocationEvent extends VibeLifecycleBase {
+	action: "tombstone-revoked";
+	reason: "mode-exit";
+}
+
+type VibeLifecycleEvent =
+	| VibeSpawnLifecycleEvent
+	| VibeTurnLifecycleEvent
+	| VibeTombstoneLifecycleEvent
+	| VibeTombstoneRevocationEvent;
 
 interface VibeRestoreCandidate {
 	spawn: VibeSpawnLifecycleEvent;
@@ -110,8 +145,6 @@ interface VibeRestoreCandidate {
 interface ResolvedVibeWorker {
 	agent: AgentDefinition;
 	modelOverride?: string | string[];
-	/** Pre-expansion role alias behind {@link modelOverride}, when the worker agent named one. */
-	modelRole?: string;
 }
 
 interface VibeTurn {
@@ -133,8 +166,6 @@ interface VibeRecord {
 	childSessionFile?: string;
 	agent: AgentDefinition;
 	modelOverride?: string | string[];
-	/** Pre-expansion role alias behind {@link modelOverride}, when the worker agent named one. */
-	modelRole?: string;
 	state: VibeSessionState;
 	createdAt: number;
 	lastActivityAt: number;
@@ -279,6 +310,77 @@ function matchesScope(record: VibeRecord, scope: VibeOwnerScope): boolean {
 		record.parentSessionFile === scope.parentSessionFile
 	);
 }
+
+function objectRecord(value: unknown): Record<string, unknown> | undefined {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+	return value as Record<string, unknown>;
+}
+
+function parseLifecycleEvent(value: unknown): VibeLifecycleEvent | undefined {
+	const data = objectRecord(value);
+	if (!data || data.version !== VIBE_LIFECYCLE_VERSION) return undefined;
+	if (typeof data.id !== "string" || !data.id) return undefined;
+	if (typeof data.ownerId !== "string" || !data.ownerId) return undefined;
+	if (typeof data.parentSessionId !== "string" || !data.parentSessionId) return undefined;
+	const base: VibeLifecycleBase = {
+		version: VIBE_LIFECYCLE_VERSION,
+		id: data.id,
+		ownerId: data.ownerId,
+		parentSessionId: data.parentSessionId,
+	};
+	if (data.action === "spawn") {
+		const cli = data.cli === "fast" || data.cli === "good" ? data.cli : undefined;
+		if (!cli || typeof data.agent !== "string" || typeof data.childSessionFile !== "string") return undefined;
+		if (typeof data.createdAt !== "number" || !Number.isFinite(data.createdAt)) return undefined;
+		return {
+			...base,
+			action: "spawn",
+			cli,
+			agent: data.agent,
+			childSessionFile: data.childSessionFile,
+			createdAt: data.createdAt,
+		};
+	}
+	if (data.action === "turn-started" || data.action === "turn-settled") {
+		if (typeof data.turn !== "number" || !Number.isInteger(data.turn) || data.turn < 1) return undefined;
+		return { ...base, action: data.action, turn: data.turn };
+	}
+	if (data.action === "tombstone") {
+		const reason = data.reason;
+		if (
+			reason !== "explicit-kill" &&
+			reason !== "mode-exit" &&
+			reason !== "spawn-failed" &&
+			reason !== "unrecoverable"
+		) {
+			return undefined;
+		}
+		return { ...base, action: "tombstone", reason };
+	}
+	if (data.action === "tombstone-revoked" && data.reason === "mode-exit") {
+		return { ...base, action: "tombstone-revoked", reason: "mode-exit" };
+	}
+	return undefined;
+}
+
+/** Child ids claimed by valid Vibe spawn records from untrusted persisted JSON. */
+export function persistedVibeChildIds(entries: Iterable<unknown>): Set<string> {
+	const ids = new Set<string>();
+	for (const value of entries) {
+		const entry = objectRecord(value);
+		if (entry?.type !== "custom" || entry.customType !== VIBE_LIFECYCLE_CUSTOM_TYPE) continue;
+		const event = parseLifecycleEvent(entry.data);
+		if (
+			event?.action === "spawn" &&
+			/^[A-Za-z0-9_-]+$/.test(event.id) &&
+			event.childSessionFile === `${event.id}.jsonl`
+		) {
+			ids.add(event.id);
+		}
+	}
+	return ids;
+}
+
 /** Merge the monitor's rolling `recentTools` window (newest first) into the per-turn trace (oldest first). */
 function mergeTrace(turn: VibeTurn, progress: AgentProgress): void {
 	turn.toolCount = progress.toolCount;
@@ -316,17 +418,11 @@ export class VibeSessionRegistry {
 	}
 
 	/**
-	 * Insert a bare worker record without the spawn machinery. Test-only —
-	 * lets focused runtime tests attach an optional synthetic in-flight job.
+	 * Insert a bare worker record without the spawn/job machinery. Test-only —
+	 * lets {@link aggregateVibeWorkerTokensPerSecond} be exercised against a
+	 * fake roster + AgentRegistry session without driving a real turn.
 	 */
-	registerRecordForTests(record: {
-		id: string;
-		cli?: VibeCli;
-		ownerId: string;
-		state?: VibeSessionState;
-		jobId?: string;
-	}): void {
-		const now = Date.now();
+	registerRecordForTests(record: { id: string; cli?: VibeCli; ownerId: string; state?: VibeSessionState }): void {
 		this.#records.set(record.id, {
 			id: record.id,
 			cli: record.cli ?? "fast",
@@ -335,11 +431,8 @@ export class VibeSessionRegistry {
 			parentSessionFile: null,
 			agent: getBundledAgent("sonic")!,
 			state: record.state ?? "running",
-			createdAt: now,
-			lastActivityAt: now,
-			turn: record.jobId
-				? { jobId: record.jobId, message: "test turn", startedAt: now, trace: [], toolCount: 0 }
-				: undefined,
+			createdAt: Date.now(),
+			lastActivityAt: Date.now(),
 			queue: [],
 			turnCount: 0,
 			killed: false,
@@ -351,6 +444,7 @@ export class VibeSessionRegistry {
 	readonly #records = new Map<string, VibeRecord>();
 	readonly #terminationTails = new Map<string, Promise<void>>();
 	readonly #terminatedScopes = new Set<string>();
+	readonly #dependencyCache = new Map<string, Promise<SkillDispatchResult | null>>();
 	#teardownGraceMs = VIBE_TEARDOWN_GRACE_MS;
 
 	/** Override the teardown grace period for deterministic lifecycle tests. */
@@ -398,17 +492,16 @@ export class VibeSessionRegistry {
 			throw new ToolError(`Bundled agent "${agentName}" for vibe cli "${cli}" is unavailable.`);
 		}
 		const agentModelOverrides = session.settings.get("task.agentModelOverrides");
-		// Same contract as the task spawn path: the expansion discards the role
-		// alias (`@task`, `@smol`), so patterns and role identity come from one
-		// call — the child's inherited retry-fallback chain is keyed off the role.
-		const { patterns, role } = resolveAgentModelSelection({
-			settingsOverride: agentModelOverrides[agentName],
-			agentModel: agent.model,
-			settings: session.settings,
-			activeModelPattern: session.getActiveModelString?.(),
-			fallbackModelPattern: session.getModelString?.(),
-		});
-		return { agent, modelOverride: patterns, modelRole: role };
+		return {
+			agent,
+			modelOverride: resolveAgentModelPatterns({
+				settingsOverride: agentModelOverrides[agentName],
+				agentModel: agent.model,
+				settings: session.settings,
+				activeModelPattern: session.getActiveModelString?.(),
+				fallbackModelPattern: session.getModelString?.(),
+			}),
+		};
 	}
 
 	async #appendLifecycleEvent(
@@ -799,7 +892,7 @@ export class VibeSessionRegistry {
 				existing.sessionFile === childSessionFile &&
 				(existing.status === "idle" || existing.status === "parked");
 			const blockedByCollision = Boolean(existing && !existingIsResumable);
-			const { agent, modelOverride, modelRole } = this.#resolveWorker(session, spawn.cli);
+			const { agent, modelOverride } = this.#resolveWorker(session, spawn.cli);
 			if (!existing) {
 				AgentRegistry.global().register({
 					id: spawn.id,
@@ -820,7 +913,6 @@ export class VibeSessionRegistry {
 				childSessionFile,
 				agent,
 				modelOverride,
-				modelRole,
 				state: "idle",
 				createdAt: spawn.createdAt,
 				lastActivityAt: candidate.lastActivityAt,
@@ -855,7 +947,7 @@ export class VibeSessionRegistry {
 			throw new ToolError("Vibe mode has exited; enter Vibe mode again before spawning a worker.");
 		}
 		const manager = this.#manager(session);
-		const { agent, modelOverride, modelRole } = this.#resolveWorker(session, args.cli);
+		const { agent, modelOverride } = this.#resolveWorker(session, args.cli);
 		if (!session.agentOutputManager) {
 			session.agentOutputManager = new AgentOutputManager(session.getArtifactsDir ?? (() => null));
 		}
@@ -879,7 +971,6 @@ export class VibeSessionRegistry {
 			childSessionFile,
 			agent,
 			modelOverride,
-			modelRole,
 			state: "starting",
 			createdAt,
 			lastActivityAt: createdAt,
@@ -1032,27 +1123,24 @@ export class VibeSessionRegistry {
 			if (args.signal) {
 				const { promise: abortPromise, resolve: abortResolve } = Promise.withResolvers<"aborted">();
 				const onAbort = () => abortResolve("aborted");
-				if (args.signal.aborted) {
-					onAbort();
-				} else {
+				if (args.signal.aborted) onAbort();
+				else {
 					args.signal.addEventListener("abort", onAbort, { once: true });
 					abortCleanup = () => args.signal?.removeEventListener("abort", onAbort);
 				}
 				racePromises.push(abortPromise);
 			}
 			try {
-				waitEndedByTimeout = (await Promise.race(racePromises)) === "timeout";
+				const outcome = await Promise.race(racePromises);
+				waitEndedByTimeout = outcome === "timeout";
 			} finally {
 				manager.unwatchJobs(watchedJobIds);
 				clearTimeout(timeoutHandle);
 				abortCleanup?.();
 			}
 		}
-
 		const settled = collectSettled();
 		manager.acknowledgeDeliveries(settled.map(entry => entry.jobId));
-		// Current in-flight state, independent of the snapshot: a session whose
-		// watched turn settled may already be mid queued follow-up.
 		const stillRunning = watched.filter(record => record.turn !== undefined).map(record => record.id);
 		return { settled, stillRunning, timedOut: waitEndedByTimeout && settled.length === 0 };
 	}
@@ -1307,7 +1395,6 @@ export class VibeSessionRegistry {
 			});
 	}
 
-	/** Build the ExecutorOptions for a first spawn, mirroring the `task`/eval-bridge plumbing. */
 	async #buildSpawnOptions(
 		session: ToolSession,
 		record: VibeRecord,
@@ -1327,15 +1414,14 @@ export class VibeSessionRegistry {
 		return {
 			cwd: session.cwd,
 			agent: record.agent,
-			task: message,
-			assignment: message,
+			task: buildVibeDelegatedAssignment(message),
+			assignment: buildVibeDelegatedAssignment(message),
 			description: `vibe ${record.cli} session`,
 			index: 0,
 			id: record.id,
 			taskDepth: session.taskDepth ?? 0,
 			detached: true,
 			modelOverride: record.modelOverride,
-			modelRole: record.modelRole,
 			parentActiveModelPattern: session.getActiveModelString?.(),
 			thinkingLevel: record.agent.thinkingLevel,
 			sessionFile,
@@ -1350,12 +1436,11 @@ export class VibeSessionRegistry {
 			settings: session.settings,
 			mcpManager: session.mcpManager ?? MCPManager.instance(),
 			contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
-			skills: [...(session.skills ?? [])],
+			skills: [],
 			workspaceTree: session.workspaceTree,
 			promptTemplates: session.promptTemplates,
 			rules: session.rules,
 			preloadedExtensionPaths: session.extensionPaths,
-			preloadedPreparedExtensions: session.preparedExtensions,
 			preloadedCustomToolPaths: session.customToolPaths,
 			localProtocolOptions,
 			parentArtifactManager: session.getArtifactManager?.() ?? undefined,
@@ -1436,7 +1521,10 @@ export class VibeSessionRegistry {
 							});
 					return await this.#settleTurn(session, manager, record, turn, ownJobId, turnIndex, result);
 				} catch (error) {
-					if (error instanceof VibeTurnError) throw error;
+					if (error instanceof VibeTurnError) {
+						await this.#finishTurn(session, manager, record, ownJobId);
+						throw error;
+					}
 					await this.#finishTurn(session, manager, record, ownJobId);
 					const reason = error instanceof Error ? error.message : String(error);
 					record.lastActivity = firstLine(`turn failed: ${reason}`);
@@ -1445,6 +1533,7 @@ export class VibeSessionRegistry {
 					);
 				}
 			},
+
 			{ id: `${record.id}-t${turnIndex}`, agentId: record.id, ownerId: record.ownerId },
 		);
 		turn.jobId = jobId;
@@ -1511,6 +1600,24 @@ export class VibeSessionRegistry {
 		turnIndex: number,
 		result: SingleResult,
 	): Promise<string> {
+		const coordinated = await coordinateDelegatedSkillDependency(
+			result.output,
+			request => session.dispatchSkillDependency?.(request, this.ownerScope(session)) ?? Promise.resolve(null),
+			async payload => {
+				record.queue.unshift(JSON.stringify(payload));
+			},
+			this.#dependencyCache,
+			`${this.ownerScope(session).ownerId}:${this.ownerScope(session).parentSessionId}:${record.id}`,
+		);
+		if (coordinated.handled) {
+			await this.#finishTurn(session, manager, record, settledJobId);
+			record.lastActivity = firstLine(
+				coordinated.result?.status === "success"
+					? "dependency dispatched; worker resumed"
+					: `dependency blocked: ${coordinated.result?.evidence ?? "invalid dispatch evidence"}`,
+			);
+			return "";
+		}
 		await this.#finishTurn(session, manager, record, settledJobId);
 		const failed = result.exitCode !== 0 || result.aborted === true;
 		const status = result.aborted ? "aborted" : failed ? "failed" : "completed";
