@@ -1,5 +1,3 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import {
 	buildZedNativeAppSignInUrl,
 	decryptZedAccessToken,
@@ -15,7 +13,6 @@ import type { FetchImpl } from "../../types";
 import { type CallbackResult, OAuthCallbackFlow } from "./callback-server";
 import type { OAuthController, OAuthCredentials } from "./types";
 
-const execFileAsync = promisify(execFile);
 const DEFAULT_CALLBACK_PORT = 48921;
 
 /**
@@ -63,10 +60,20 @@ export async function tryImportLocalZedKeychain(
 	if (ctrl?.signal?.aborted) return null;
 	try {
 		if (process.platform === "linux") {
-			const { stdout } = await execFileAsync("secret-tool", ["lookup", "url", "https://zed.dev"], {
-				timeout: 3000,
-				signal: ctrl?.signal,
+			const timeoutSignal = AbortSignal.timeout(3000);
+			const keychainSignal = ctrl?.signal ? AbortSignal.any([ctrl.signal, timeoutSignal]) : timeoutSignal;
+			const proc = Bun.spawn(["secret-tool", "lookup", "url", "https://zed.dev"], {
+				stdin: "ignore",
+				stdout: "pipe",
+				stderr: "pipe",
+				signal: keychainSignal,
 			});
+			const [stdout, , exitCode] = await Promise.all([
+				new Response(proc.stdout).text(),
+				new Response(proc.stderr).text(),
+				proc.exited,
+			]);
+			if (exitCode !== 0) return null;
 			const secret = stdout.trim();
 			if (secret) {
 				// Secret tool returns either "userId accessToken" or just accessToken

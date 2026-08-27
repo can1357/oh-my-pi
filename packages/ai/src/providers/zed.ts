@@ -47,6 +47,7 @@ export function resolveProviderKind(modelId: string): ZedProviderKind {
 
 function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, options?: ZedOptions) {
 	const messages: Array<{ role: "user" | "assistant"; content: unknown }> = [];
+	const effectiveMaxTokens = options?.maxTokens ?? model.maxTokens ?? 8192;
 
 	for (const msg of context.messages) {
 		if (msg.role === "user" || msg.role === "developer") {
@@ -96,42 +97,36 @@ function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, opti
 			}
 			messages.push({ role: "assistant", content: contentBlocks });
 		} else if (msg.role === "toolResult") {
-			const contentBlocks: unknown[] = [];
-			for (const block of msg.content) {
-				if (block.type === "text") {
-					contentBlocks.push({
-						type: "tool_result",
-						tool_use_id: msg.toolCallId,
-						content: block.text,
-						is_error: msg.isError,
-					});
-				} else if (block.type === "image") {
-					contentBlocks.push({
-						type: "tool_result",
-						tool_use_id: msg.toolCallId,
-						content: [
-							{
-								type: "image",
-								source: {
-									type: "base64",
-									media_type: block.mimeType,
-									data: block.data,
-								},
+			const hasImage = msg.content.some(block => block.type === "image");
+			const toolResultContent = hasImage
+				? msg.content.map(block => {
+						if (block.type === "text") {
+							return { type: "text", text: block.text };
+						}
+						return {
+							type: "image",
+							source: {
+								type: "base64",
+								media_type: block.mimeType,
+								data: block.data,
 							},
-						],
+						};
+					})
+				: msg.content
+						.filter((block): block is TextContent => block.type === "text")
+						.map(block => block.text)
+						.join("\n");
+			messages.push({
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: msg.toolCallId,
+						content: toolResultContent,
 						is_error: msg.isError,
-					});
-				}
-			}
-			if (contentBlocks.length === 0) {
-				contentBlocks.push({
-					type: "tool_result",
-					tool_use_id: msg.toolCallId,
-					content: "",
-					is_error: msg.isError,
-				});
-			}
-			messages.push({ role: "user", content: contentBlocks });
+					},
+				],
+			});
 		}
 	}
 
@@ -145,7 +140,7 @@ function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, opti
 	const body: Record<string, unknown> = {
 		model: model.id,
 		messages,
-		max_tokens: options?.maxTokens ?? model.maxTokens ?? 8192,
+		max_tokens: effectiveMaxTokens,
 	};
 
 	if (context.systemPrompt && context.systemPrompt.length > 0) {
@@ -160,7 +155,7 @@ function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, opti
 		if (model.id.includes("4-5")) {
 			body.thinking = {
 				type: "enabled",
-				budget_tokens: 2048,
+				budget_tokens: Math.max(1, Math.min(2048, effectiveMaxTokens - 1)),
 			};
 		} else {
 			body.thinking = {
@@ -195,7 +190,7 @@ function mapContextToOpenAiResponses(context: Context, model: Model<"zed-agent">
 					}
 				}
 			}
-			input.push({ type: "message", role: "user", content: parts });
+			input.push({ type: "message", role: msg.role, content: parts });
 		} else if (msg.role === "assistant") {
 			let assistantMessage:
 				| { type: "message"; role: "assistant"; content: Array<Record<string, unknown>> }

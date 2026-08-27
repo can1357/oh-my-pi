@@ -17,6 +17,128 @@ describe("Zed Provider Payload Construction", () => {
 		expect(resolveProviderKind("grok-2")).toBe("x_ai");
 	});
 
+	it("preserves developer messages as developer-role Responses input", () => {
+		const model: Model<"zed-agent"> = {
+			id: "gpt-5.6-luna",
+			name: "GPT-5.6 Luna",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: "https://cloud.zed.dev",
+			reasoning: true,
+			contextWindow: 400000,
+			maxTokens: 128000,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			compat: undefined,
+		};
+
+		const payload = buildZedProviderRequest(
+			"open_ai",
+			{
+				messages: [{ role: "developer", content: "Follow these instructions.", timestamp: 1 }],
+			},
+			model,
+		) as { input: Array<{ type: string; role: string; content: Array<{ type: string; text: string }> }> };
+
+		expect(payload.input).toEqual([
+			{
+				type: "message",
+				role: "developer",
+				content: [{ type: "input_text", text: "Follow these instructions." }],
+			},
+		]);
+	});
+
+	it("keeps mixed Anthropic tool-result text and image content in one tool_result block", () => {
+		const model: Model<"zed-agent"> = {
+			id: "claude-sonnet-5",
+			name: "Claude Sonnet 5",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: "https://cloud.zed.dev",
+			reasoning: true,
+			contextWindow: 1000000,
+			maxTokens: 128000,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			compat: undefined,
+		};
+
+		const payload = buildZedProviderRequest(
+			"anthropic",
+			{
+				messages: [
+					{
+						role: "toolResult",
+						toolCallId: "call_inspect",
+						toolName: "inspect_image",
+						content: [
+							{ type: "text", text: "The image contains a diagram." },
+							{ type: "image", data: "AQID", mimeType: "image/png" },
+						],
+						isError: false,
+						timestamp: 1,
+					},
+				],
+			},
+			model,
+		) as { messages: Array<{ role: string; content: unknown }> };
+
+		expect(payload.messages).toEqual([
+			{
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: "call_inspect",
+						content: [
+							{ type: "text", text: "The image contains a diagram." },
+							{
+								type: "image",
+								source: {
+									type: "base64",
+									media_type: "image/png",
+									data: "AQID",
+								},
+							},
+						],
+						is_error: false,
+					},
+				],
+			},
+		]);
+	});
+
+	it("keeps Claude 4.5 thinking budget strictly below a low maxTokens limit", () => {
+		const model: Model<"zed-agent"> = {
+			id: "claude-sonnet-4-5",
+			name: "Claude Sonnet 4.5",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: "https://cloud.zed.dev",
+			reasoning: true,
+			contextWindow: 200000,
+			maxTokens: 128000,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			compat: undefined,
+		};
+
+		const payload = buildZedProviderRequest(
+			"anthropic",
+			{ messages: [{ role: "user", content: "Keep this concise.", timestamp: 1 }] },
+			model,
+			{ maxTokens: 1024 },
+		) as {
+			max_tokens: number;
+			thinking?: { budget_tokens?: number };
+		};
+
+		expect(payload.thinking?.budget_tokens).toBe(1023);
+		expect(payload.thinking?.budget_tokens).toBeGreaterThan(0);
+		expect(payload.thinking?.budget_tokens).toBeLessThan(payload.max_tokens);
+	});
+
 	it("formats OpenAI Responses API payload for open_ai provider models", () => {
 		const mockModel: Model<"zed-agent"> = {
 			id: "gpt-5.6-luna",
