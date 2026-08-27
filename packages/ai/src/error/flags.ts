@@ -99,6 +99,7 @@ const CONTEXT_OVERFLOW_EVIDENCE_PATTERNS = [
 	/model_context_window_exceeded/i, // z.ai non-standard finish_reason surfaced as error text
 	/prompt filled the context window/i, // Ollama OpenAI-compatible empty length completion
 	/exceeds the limit of \d+ tokens?\b/i,
+	/chat history exceeds the \d+-message limit/i, // Provider message-count cap
 ] as const;
 // Numeric limit pattern — also matches media budgets, so must never veto a payload flag (#9235).
 const GENERIC_LIMIT_OVERFLOW_PATTERN = /exceeds the limit of \d+/i;

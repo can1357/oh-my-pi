@@ -14,7 +14,7 @@ import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
-function createIsolatedSkillsSettings(): Settings {
+function createIsolatedSkillsSettings(extensions: string[] = []): Settings {
 	return Settings.isolated({
 		"skills.enabled": true,
 		"skills.enableCodexUser": false,
@@ -22,6 +22,7 @@ function createIsolatedSkillsSettings(): Settings {
 		"skills.enableClaudeProject": false,
 		"skills.enablePiUser": false,
 		"skills.enablePiProject": true,
+		extensions,
 	});
 }
 
@@ -128,7 +129,6 @@ Loaded via symbolic link.
 		createExtensionSkill(explicitPackage, "sdk-explicit-skill");
 		createExtensionSkill(settingsPackage, "sdk-settings-skill");
 		createExtensionSkill(installedPackage, "sdk-installed-skill");
-		fs.writeFileSync(path.join(tempDir, ".omp", "settings.json"), JSON.stringify({ extensions: [settingsPackage] }));
 		fs.mkdirSync(path.join(tempHomeDir, ".omp", "plugins"), { recursive: true });
 		fs.writeFileSync(
 			path.join(tempHomeDir, ".omp", "plugins", "package.json"),
@@ -154,7 +154,7 @@ Loaded via symbolic link.
 			({ session } = await createAgentSession({
 				...baseSessionOptions,
 				sessionManager: SessionManager.inMemory(),
-				settings: createIsolatedSkillsSettings(),
+				settings: createIsolatedSkillsSettings([settingsPackage]),
 				disableExtensionDiscovery: true,
 			}));
 
@@ -167,7 +167,7 @@ Loaded via symbolic link.
 			({ session } = await createAgentSession({
 				...baseSessionOptions,
 				sessionManager: SessionManager.inMemory(),
-				settings: createIsolatedSkillsSettings(),
+				settings: createIsolatedSkillsSettings([settingsPackage]),
 			}));
 
 			const mergedSkillNames = session.skills.map(skill => skill.name);

@@ -11,6 +11,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { getActiveProfile, getAgentDir, getProfileRootDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { JSONC, YAML } from "bun";
+import { stringifyYamlConfig } from "./config-file";
 
 /**
  * Application-level keybindings (coding agent specific).
@@ -418,7 +419,7 @@ function loadRawConfig(filePath: string): unknown {
 
 function writeKeybindingsConfig(filePath: string, config: KeybindingsConfig): boolean {
 	try {
-		fs.writeFileSync(filePath, YAML.stringify(config, null, 2), "utf-8");
+		fs.writeFileSync(filePath, stringifyYamlConfig(config), "utf-8");
 		logger.debug("Migrated keybindings config", { path: filePath });
 		return true;
 	} catch (error) {

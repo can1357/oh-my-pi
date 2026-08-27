@@ -8,17 +8,20 @@ import type { Settings } from "../config/settings";
 import { normalizeDiff, normalizeToLF, ParseError, previewPatch, stripBom } from "../edit";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import geminiToolReminderTemplate from "../prompts/system/gemini-tool-call-reminder.md" with { type: "text" };
-import toolCallLoopRedirectTemplate from "../prompts/system/tool-call-loop-redirect.md" with { type: "text" };
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { assertEditableFile } from "../tools/auto-generated-guard";
 import { isInternalUrlPath, normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import { ToolError } from "../tools/tool-errors";
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
+import {
+	renderToolCallLoopRedirect,
+	TOOL_CALL_LOOP_REDIRECT_TYPE,
+	toolCallLoopRedirectDetails,
+} from "./tool-call-loop-redirect";
 
 const GEMINI_HEADER_INTERRUPT_REASON = "Interrupted: emit a tool call instead of more planning";
 const GEMINI_TOOL_REMINDER_TYPE = "gemini-tool-call-reminder";
-const TOOL_CALL_LOOP_REDIRECT_TYPE = "tool-call-loop-redirect";
 
 /** Capabilities borrowed by the session's streaming and loop guards. */
 export interface StreamGuardsHost {
@@ -403,19 +406,9 @@ export class LoopGuards {
 	}
 
 	#injectToolCallLoopRedirect(messages: AgentMessage[], detection: RepeatedToolCallDetection): void {
-		const content = prompt.render(toolCallLoopRedirectTemplate, {
-			tool_name: detection.toolName,
-			count: detection.count,
-			arguments_summary: detection.argumentsSummary,
-			result_summary: detection.resultSummary || "(no text result)",
-		});
-		const details = {
-			toolName: detection.toolName,
-			count: detection.count,
-			argumentsSummary: detection.argumentsSummary,
-			resultSummary: detection.resultSummary,
-		};
 		logger.warn("cross-turn tool-call loop detected", { toolName: detection.toolName, count: detection.count });
+		const content = renderToolCallLoopRedirect(detection);
+		const details = toolCallLoopRedirectDetails(detection);
 		const redirectMessage: CustomMessage = {
 			role: "custom",
 			customType: TOOL_CALL_LOOP_REDIRECT_TYPE,

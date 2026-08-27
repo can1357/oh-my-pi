@@ -18,6 +18,21 @@ export function isCommandConfigValue(valueConfig: string | undefined): valueConf
 	return valueConfig?.startsWith("!") === true;
 }
 
+/**
+ * Drop the cached result (and any negative-cache backoff) for a command-backed
+ * config value so the next {@link resolveConfigValue} re-runs the command.
+ *
+ * Used by the 401 auth-retry path to force every command-backed credential a
+ * provider carries — API key AND header values — to re-mint, not just the
+ * apiKey (which alone was covered before). Non-command values are ignored.
+ */
+export function invalidateCommandConfig(valueConfig: string | undefined): void {
+	if (!isCommandConfigValue(valueConfig)) return;
+	const command = valueConfig.slice(1).trim();
+	commandValueCache.delete(command);
+	commandFailureRetryAt.delete(command);
+}
+
 function resolveCommandConfig(command: string, options?: ResolveConfigValueOptions): string | undefined {
 	if (options?.forceCommandRefresh === true) {
 		commandValueCache.delete(command);
