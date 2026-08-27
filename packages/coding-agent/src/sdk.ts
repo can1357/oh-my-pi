@@ -511,6 +511,8 @@ export interface CreateAgentSessionOptions {
 	outputSchema?: unknown;
 	/** Enforcement policy for {@link outputSchema}; defaults to legacy permissive behavior. */
 	outputSchemaMode?: StructuredSubagentSchemaMode;
+	/** Active tool names to retain after the first schema-invalid yield; undefined keeps the current set. */
+	outputSchemaFailureToolNames?: readonly string[];
 	/** Whether to include the yield tool by default */
 	requireYieldTool?: boolean;
 	/** Task recursion depth (for subagent sessions). Default: 0 */
@@ -1673,6 +1675,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				activeToolNames.add(name);
 			}
 		};
+		const outputSchemaFailureToolNames = options.outputSchemaFailureToolNames
+			? [...options.outputSchemaFailureToolNames]
+			: undefined;
+		const lockOutputSchemaCorrectionTools = outputSchemaFailureToolNames
+			? async (): Promise<void> => {
+					await session.setActiveToolCeiling(outputSchemaFailureToolNames);
+					const init = sessionManager.getBranch().findLast(entry => entry.type === "session_init");
+					if (init?.type !== "session_init") return;
+					const { type: _type, id: _id, parentId: _parentId, timestamp: _timestamp, ...contract } = init;
+					sessionManager.appendSessionInit({
+						...contract,
+						tools: outputSchemaFailureToolNames,
+						restrictToolNames: true,
+					});
+				}
+			: undefined;
 		const toolSession: ToolSession = {
 			get cwd() {
 				return sessionManager.getCwd();
@@ -1707,6 +1725,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			eventBus,
 			outputSchema: options.outputSchema,
 			outputSchemaMode: options.outputSchemaMode,
+			onOutputSchemaValidationFailure: lockOutputSchemaCorrectionTools,
 			requireYieldTool: options.requireYieldTool,
 			prewalkArmed: options.prewalk !== undefined,
 			taskDepth: options.taskDepth ?? 0,

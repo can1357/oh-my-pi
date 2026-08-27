@@ -33,6 +33,7 @@ import { kimiCodeProvider } from "./kimi-code";
 import { litellmProvider } from "./litellm";
 import { llamaCppProvider } from "./llama-cpp";
 import { lmStudioProvider } from "./lm-studio";
+import { mergeGatewayProvider } from "./merge-gateway";
 import { metaProvider } from "./meta";
 import { minimaxProvider } from "./minimax";
 import { minimaxCodeProvider } from "./minimax-code";
@@ -135,6 +136,7 @@ const ALL = [
 	nanogptProvider,
 	waferServerlessProvider,
 	coreWeaveProvider,
+	mergeGatewayProvider,
 	vercelAiGatewayProvider,
 	cloudflareAiGatewayProvider,
 	litellmProvider,

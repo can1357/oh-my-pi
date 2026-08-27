@@ -72,6 +72,10 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `github-copilot:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
+		case "merge-gateway": {
+			const baseUrl = (options.baseUrl ?? "https://api-gateway.merge.dev/v1/openai").replace(/\/+$/g, "");
+			return `merge-gateway:models-v1:${Bun.hash(baseUrl).toString(36)}`;
+		}
 		case "openrouter":
 			return "openrouter:pseudo-api";
 		case "vllm": {

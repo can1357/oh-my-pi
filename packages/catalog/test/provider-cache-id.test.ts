@@ -14,6 +14,7 @@ test("lightweight cache resolver matches scoped descriptor inputs", () => {
 		{ providerId: "ollama", baseUrl: "http://ollama.example:11434/v1/" },
 		{ providerId: "opencode-go", baseUrl: "https://opencode.example/go" },
 		{ providerId: "opencode-zen", baseUrl: "https://opencode.example/zen/v1/" },
+		{ providerId: "merge-gateway", baseUrl: "https://merge.example/v1/openai" },
 		{ providerId: "vllm", baseUrl: "http://vllm.example:8000/v1" },
 	] as const;
 	for (const { providerId, baseUrl } of cases) {

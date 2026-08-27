@@ -269,16 +269,19 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 	readonly intent = "omit" as const;
 	lenientArgValidation = true;
 
+	readonly #session: ToolSession;
 	readonly #validate?: (value: unknown) => JsonSchemaValidationResult;
 	readonly #validateSection?: ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult>;
 	#rejectUnknownSections = false;
 	#knownSectionLabels: readonly string[] = [];
 	#isKnownSection?: (label: string) => boolean;
 	#schemaValidationFailures = 0;
+	#schemaCorrectionLocked = false;
 	#emptyResultFailures = 0;
 	#hasIncrementalSections = false;
 
 	constructor(session: ToolSession) {
+		this.#session = session;
 		let validate: ((value: unknown) => JsonSchemaValidationResult) | undefined;
 		let validateSection: ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult> | undefined;
 		let rejectUnknownSections = false;
@@ -364,9 +367,16 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<YieldDetails>> {
 		const raw = params as Record<string, unknown>;
-		const yieldType = parseYieldType(raw.type);
+		let yieldType: string | string[] | undefined;
+		try {
+			yieldType = parseYieldType(raw.type);
+		} catch (error) {
+			await this.#notifySchemaValidationFailure();
+			throw error;
+		}
 		const resultRecord = resolveResultRecord(raw, yieldType);
 		if (resultRecord === undefined) {
+			await this.#notifySchemaValidationFailure();
 			throw new Error(`result must be an object containing either data or error. ${YIELD_RESULT_FORMAT_HINT}`);
 		}
 		const errorMessage = typeof resultRecord.error === "string" ? resultRecord.error : undefined;
@@ -379,9 +389,11 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		const isIncremental = Array.isArray(yieldType) && yieldType.length > 0;
 
 		if (errorMessage !== undefined && data !== undefined) {
+			await this.#notifySchemaValidationFailure();
 			throw new Error("result cannot contain both data and error");
 		}
 		if (errorMessage === undefined && data === undefined && yieldType === undefined) {
+			await this.#notifySchemaValidationFailure();
 			this.#emptyResultFailures++;
 			if (this.#emptyResultFailures > MAX_EMPTY_RESULT_RETRIES) {
 				const attemptCount = this.#emptyResultFailures;
@@ -415,6 +427,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		if (status === "success" && isIncremental) {
 			const unknownLabels = this.#unknownIncrementalLabels(yieldType as string[]);
 			if (unknownLabels.length > 0) {
+				await this.#notifySchemaValidationFailure();
 				const validLabels =
 					this.#knownSectionLabels.length > 0 ? formatYieldLabels(this.#knownSectionLabels) : "none";
 				throw new Error(
@@ -428,6 +441,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		// a retryable error instead. With sections present, a data-less finalize
 		// legitimately closes the incremental flow (assembly keeps the sections).
 		if (status === "success" && useLastTurn && !isIncremental && this.#validate && !this.#hasIncrementalSections) {
+			await this.#notifySchemaValidationFailure();
 			throw new Error(
 				"This task requires structured output matching the declared schema; a last-turn result cannot satisfy it. " +
 					`Submit the full object: {"result":{"data":<object matching the schema>}}.`,
@@ -435,6 +449,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		}
 		if (status === "success" && !useLastTurn) {
 			if (data === null) {
+				await this.#notifySchemaValidationFailure();
 				throw new Error("data is required when yield indicates success");
 			}
 			const validateData = (value: unknown): JsonSchemaValidationResult | undefined =>
@@ -460,6 +475,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 			}
 			if (sectionFailure && !sectionFailure.success) {
 				this.#schemaValidationFailures++;
+				await this.#notifySchemaValidationFailure();
 				if (this.#schemaValidationFailures <= MAX_SCHEMA_RETRIES) {
 					const remaining = MAX_SCHEMA_RETRIES - this.#schemaValidationFailures;
 					const retryHint =
@@ -494,6 +510,12 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				schemaOverridden: schemaValidationOverridden || undefined,
 			},
 		};
+	}
+
+	async #notifySchemaValidationFailure(): Promise<void> {
+		if (this.#schemaCorrectionLocked) return;
+		this.#schemaCorrectionLocked = true;
+		await this.#session.onOutputSchemaValidationFailure?.();
 	}
 
 	/**

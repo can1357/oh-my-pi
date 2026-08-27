@@ -208,6 +208,7 @@ export class SessionTools {
 	#announcedMountsSeeded = false;
 	#presentationPinnedToolNames: ReadonlySet<string> | undefined;
 	#runtimeSelectedToolNames: ReadonlySet<string> | undefined;
+	#activeToolCeiling: ReadonlySet<string> | undefined;
 	#baseSystemPrompt: string[];
 	/**
 	 * Per-turn system prompt returned by a `before_agent_start` extension hook
@@ -823,7 +824,11 @@ export class SessionTools {
 	async #applyActiveToolsByName(toolNames: string[], forcePromptRefresh = false, signal?: AbortSignal): Promise<void> {
 		signal?.throwIfAborted();
 		toolNames = normalizeToolNames(toolNames);
-		const injectEval = this.#toolRegistry.has("eval") && !toolNames.includes("eval");
+		const activeToolCeiling = this.#activeToolCeiling;
+		if (activeToolCeiling) {
+			toolNames = toolNames.filter(name => activeToolCeiling.has(name));
+		}
+		const injectEval = !activeToolCeiling && this.#toolRegistry.has("eval") && !toolNames.includes("eval");
 		const codeModeToolNames = injectEval ? [...toolNames, "eval"] : toolNames;
 		const codeMode = resolveCodeMode({
 			provider: this.#host.model()?.provider ?? "",
@@ -831,7 +836,7 @@ export class SessionTools {
 			setting: this.#host.settings.get("providers.openai-codex.codeMode"),
 			extraDirectTools: this.#host.settings.get("providers.openai-codex.codeModeDirectTools"),
 			enabledToolNames: codeModeToolNames,
-			evalTransportAvailable: this.#hasCodeModeEvalTransport(),
+			evalTransportAvailable: !activeToolCeiling && this.#hasCodeModeEvalTransport(),
 		});
 		const nextCodeModeInjectedEval = codeMode.active && injectEval;
 		if (codeMode.active) toolNames = codeModeToolNames;
@@ -1190,6 +1195,14 @@ export class SessionTools {
 				this.#xdev?.mountedNames ?? new Set(),
 				this.getActiveToolNames().includes("write"),
 			);
+		});
+	}
+
+	/** Permanently constrains this session's active tools until disposal. */
+	setActiveToolCeiling(toolNames: string[]): Promise<void> {
+		return this.runToolRegistryMutation(async () => {
+			this.#activeToolCeiling = new Set(normalizeToolNames(toolNames));
+			await this.#applyActiveToolsByName(this.getEnabledToolNames());
 		});
 	}
 

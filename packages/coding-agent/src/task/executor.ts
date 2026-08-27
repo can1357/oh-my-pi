@@ -85,6 +85,22 @@ export type { YieldItem } from "./types";
 
 const MCP_CALL_TIMEOUT_MS = 60_000;
 const TASK_ABORT_CLEANUP_GRACE_MS = 10_000;
+export interface StructuredOutputHarnessPolicy {
+	mode: StructuredSubagentSchemaMode | undefined;
+	failureToolNames: readonly string[] | undefined;
+}
+
+/** Merge schema-bearing agents fail closed and become yield-only after the first invalid result. */
+export function resolveStructuredOutputHarnessPolicy(
+	provider: string | undefined,
+	hasOutputSchema: boolean,
+	requestedMode: StructuredSubagentSchemaMode | undefined,
+): StructuredOutputHarnessPolicy {
+	if (provider !== "merge-gateway" || !hasOutputSchema) {
+		return { mode: requestedMode, failureToolNames: undefined };
+	}
+	return { mode: "strict", failureToolNames: ["yield"] };
+}
 
 /**
  * Soft per-agent request budgets (assistant requests per run). Crossing the
@@ -156,6 +172,10 @@ function normalizeModelPatterns(value: string | string[] | undefined): string[] 
 		.split(",")
 		.map(entry => entry.trim())
 		.filter(Boolean);
+}
+export function modelPatternTargetsProvider(pattern: string, provider: string): boolean {
+	const normalized = pattern.trim();
+	return normalized === provider || normalized.startsWith(`${provider}/`);
 }
 
 const SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX = "subagent:";
@@ -2661,6 +2681,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		signal,
 		onProgress,
 	} = options;
+	let effectiveOutputSchemaMode = options.outputSchemaMode;
+	let outputSchemaFailureToolNames: readonly string[] | undefined;
 	const cleanupGraceMs = options.cleanupGraceMs ?? TASK_ABORT_CLEANUP_GRACE_MS;
 	const startTime = Date.now();
 	// Set by the session's onFirstChatDispatch hook the first time the agent
@@ -2817,7 +2839,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			sessionFile: subtaskSessionFile,
 			maxRuntimeMs,
 			outputSchema,
-			outputSchemaMode: options.outputSchemaMode,
+			outputSchemaMode: effectiveOutputSchemaMode,
 			outputSchemaSource: options.outputSchemaSource,
 			artifactsDir: options.artifactsDir,
 		});
@@ -2912,6 +2934,29 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					id,
 				),
 			);
+			const retryFallbackCandidates = resolveSubagentRetryFallbackCandidates(
+				modelPatterns,
+				modelRegistry,
+				subagentSettings,
+			);
+			const inheritedMergeFallback =
+				inheritedRetryFallbackChain?.some(
+					selector =>
+						modelPatternTargetsProvider(selector, "merge-gateway") ||
+						resolveModelOverride([selector], modelRegistry, subagentSettings).model?.provider === "merge-gateway",
+				) === true;
+			const mergeMayServe =
+				model?.provider === "merge-gateway" ||
+				modelPatterns.some(pattern => modelPatternTargetsProvider(pattern, "merge-gateway")) ||
+				retryFallbackCandidates.some(candidate => candidate.model.provider === "merge-gateway") ||
+				inheritedMergeFallback;
+			const structuredOutputPolicy = resolveStructuredOutputHarnessPolicy(
+				mergeMayServe ? "merge-gateway" : model?.provider,
+				outputSchema !== undefined,
+				options.outputSchemaMode,
+			);
+			effectiveOutputSchemaMode = structuredOutputPolicy.mode;
+			outputSchemaFailureToolNames = structuredOutputPolicy.failureToolNames;
 			if (modelResolutionWarning) {
 				logger.warn("Subagent model resolution warning", {
 					warning: modelResolutionWarning,
@@ -2929,7 +2974,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const retryFallbackRole = installSubagentRetryFallbackChain({
 				settings: subagentSettings,
 				id,
-				candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, subagentSettings),
+				candidates: retryFallbackCandidates,
 				inheritedFallbackChain: inheritedRetryFallbackChain,
 				model,
 				authFallbackUsed,
@@ -3059,6 +3104,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const buildSubagentSessionOptions = (
 				sessionManagerForRun: SessionManager,
 				expectedAgentRef: CreateAgentSessionOptions["expectedAgentRef"],
+				lockedInit?: { tools: string[]; outputSchemaFailureToolNames?: string[] },
 			): CreateAgentSessionOptions => ({
 				cwd: worktree ?? cwd,
 				additionalDirectories: worktree !== undefined ? undefined : options.additionalDirectories,
@@ -3076,18 +3122,19 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
 				thinkingLevel: effectiveThinkingLevel,
 				thinkingLevelCeiling: spawnEffortCeiling,
-				toolNames,
+				toolNames: lockedInit?.tools ?? toolNames,
 				outputSchema,
-				outputSchemaMode: options.outputSchemaMode,
-				restrictToolNames: options.restrictToolNames,
+				outputSchemaMode: effectiveOutputSchemaMode,
+				outputSchemaFailureToolNames: lockedInit?.outputSchemaFailureToolNames ?? outputSchemaFailureToolNames,
+				restrictToolNames: lockedInit ? true : options.restrictToolNames,
 				requireYieldTool: true,
 				contextFiles: options.contextFiles,
 				skills: options.skills,
 				promptTemplates: options.promptTemplates,
 				workspaceTree: options.workspaceTree,
 				rules: options.rules,
-				preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
-				preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
+				preloadedExtensionPaths: lockedInit || restrictToolNames ? [] : options.preloadedExtensionPaths,
+				preloadedCustomToolPaths: lockedInit || restrictToolNames ? [] : options.preloadedCustomToolPaths,
 				systemPrompt: defaultPrompt => {
 					const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
 						agent: agent.systemPrompt,
@@ -3116,12 +3163,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				agentId: id,
 				agentDisplayName: agent.name,
 				expectedAgentRef,
-				enableLsp: lspEnabled,
-				enableIrc: options.enableIrc,
+				enableLsp: lockedInit ? false : lspEnabled,
+				enableIrc: lockedInit ? false : options.enableIrc,
 				skipPythonPreflight,
-				enableMCP,
-				mcpManager,
-				customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
+				enableMCP: lockedInit ? false : enableMCP,
+				mcpManager: lockedInit ? undefined : mcpManager,
+				customTools: !lockedInit && mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
 				localProtocolOptions: options.localProtocolOptions,
 				telemetry: subagentTelemetry,
 				parentEvalSessionId: options.parentEvalSessionId,
@@ -3165,8 +3212,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					if (options.parentArtifactManager) {
 						reopened.adoptArtifactManager(options.parentArtifactManager);
 					}
+					const lockedInit = reopened
+						.getBranch()
+						.findLast(entry => entry.type === "session_init" && entry.restrictToolNames === true);
 					const { session: revived } = await createAgentSession(
-						buildSubagentSessionOptions(reopened, expectedAgentRef),
+						buildSubagentSessionOptions(
+							reopened,
+							expectedAgentRef,
+							lockedInit?.type === "session_init" ? lockedInit : undefined,
+						),
 					);
 					// Re-run the executor's extension wiring on the rebuilt session.
 					// Skipping it leaves the runner pre-init, so a `tool_call` handler
@@ -3221,7 +3275,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				readSummarize: agent.readSummarize,
 				advisor: advisorSelection ? (advisorSelection.model ?? "on") : undefined,
 				outputSchema,
-				outputSchemaMode: options.outputSchemaMode,
+				outputSchemaMode: effectiveOutputSchemaMode,
+				outputSchemaFailureToolNames: outputSchemaFailureToolNames ? [...outputSchemaFailureToolNames] : undefined,
 				restrictToolNames: restrictToolNames || undefined,
 			});
 
@@ -3489,7 +3544,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		modelOverride,
 		modelRole,
 		outputSchema,
-		outputSchemaMode: options.outputSchemaMode,
+		outputSchemaMode: effectiveOutputSchemaMode,
 		outputSchemaSource: options.outputSchemaSource,
 		signal,
 		artifactsDir: options.artifactsDir,

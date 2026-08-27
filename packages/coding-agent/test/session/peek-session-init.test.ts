@@ -64,6 +64,7 @@ describe("SessionManager.peekSessionInit", () => {
 			spawns: "task",
 			readSummarize: false,
 			restrictToolNames: true,
+			outputSchemaFailureToolNames: ["yield"],
 		});
 		// Flush buffered entries (header + inits) so the lock-free peek can read them off disk.
 		manager.appendMessage(assistantMessage("flush"));
@@ -76,6 +77,7 @@ describe("SessionManager.peekSessionInit", () => {
 		expect(peek?.init?.spawns).toBe("task");
 		expect(peek?.init?.readSummarize).toBe(false);
 		expect(peek?.init?.restrictToolNames).toBe(true);
+		expect(peek?.init?.outputSchemaFailureToolNames).toEqual(["yield"]);
 	});
 
 	it("streams large file-backed sessions without a full read", async () => {

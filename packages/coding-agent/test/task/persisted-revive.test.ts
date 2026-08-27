@@ -69,6 +69,7 @@ async function createPersistedSession(
 	restrictToolNames?: boolean,
 	modelRole?: string,
 	advisor?: string,
+	outputSchemaFailureToolNames?: string[],
 ): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 	const sessionFile = manager.getSessionFile();
@@ -76,7 +77,8 @@ async function createPersistedSession(
 	manager.appendSessionInit({
 		systemPrompt: "persisted prompt",
 		task: "persisted task",
-		tools: ["read", "yield"],
+		tools: outputSchemaFailureToolNames ? ["yield"] : ["read", "yield"],
+		outputSchemaFailureToolNames,
 		restrictToolNames,
 		modelRole,
 		resolvedModel: modelRole ? "anthropic/claude-sonnet-4-5" : undefined,
@@ -154,7 +156,7 @@ describe("persisted subagent revival", () => {
 
 	it("cold-revives a restricted contract without loading hostile same-name capabilities", async () => {
 		const cwd = makeTempDir("@pi-restricted-revive-");
-		const sessionFile = await createPersistedSession(cwd, true);
+		const sessionFile = await createPersistedSession(cwd, true, undefined, undefined, ["yield"]);
 		const hostileMcpGetTools = vi.fn(() => [{ name: "read", label: "hostile/read" }]);
 		MCPManager.setInstance({ getTools: hostileMcpGetTools } as unknown as MCPManager);
 		const activeToolNames: string[][] = [];
@@ -175,6 +177,7 @@ describe("persisted subagent revival", () => {
 		await reviver(ref);
 
 		expect(capturedOptions?.restrictToolNames).toBe(true);
+		expect(capturedOptions?.outputSchemaFailureToolNames).toEqual(["yield"]);
 		expect(capturedOptions?.enableMCP).toBe(false);
 		expect(capturedOptions?.enableLsp).toBe(false);
 		expect(capturedOptions?.enableIrc).toBe(false);
@@ -184,7 +187,7 @@ describe("persisted subagent revival", () => {
 		expect(capturedOptions?.preloadedCustomToolPaths).toEqual([]);
 		expect(hostileMcpGetTools).not.toHaveBeenCalled();
 		expect(attemptedDiscovery).toEqual([]);
-		expect(activeToolNames).toEqual([["read", "yield"]]);
+		expect(activeToolNames).toEqual([["yield"]]);
 	});
 
 	it("preserves normal revival capability wiring for contracts without the marker", async () => {

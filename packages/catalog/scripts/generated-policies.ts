@@ -207,6 +207,7 @@ export function applyGeneratedModelPolicies(models: ModelSpec<Api>[]): void {
  */
 export function rebakeModelThinking(model: ModelSpec<Api>): void {
 	if (isVariantCollapsedSpec(model)) return;
+	if (model.provider === "merge-gateway" && model.thinking) return;
 	if (
 		model.provider === "alibaba-token-plan" &&
 		(model.id === "qwen3.8-max-preview" || model.id === "qwen3.8-max") &&
@@ -354,6 +355,9 @@ export function applyOllamaCloudOutputCap(models: ModelSpec<Api>[]): void {
 }
 
 function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
+	if (model.provider === "merge-gateway") {
+		delete (model as ModelSpec<Api> & { capabilities?: unknown }).capabilities;
+	}
 	if ((model.provider === "xai" || model.provider === "xai-oauth") && model.api === "openai-responses") {
 		const updated = applyXaiResponsesThinkingPolicy(model as ModelSpec<"openai-responses">);
 		model.compat = updated.compat;

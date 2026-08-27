@@ -153,6 +153,58 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("locks a schema-correction session to yield after its first invalid result", async () => {
+		const tempDir = makeTempDir();
+		const outputSchema = {
+			type: "object",
+			properties: { token: { type: "string", minLength: 3 } },
+			required: ["token"],
+		};
+		const codeModeModel: Model = {
+			...requireBundledModel("openai", "gpt-5"),
+			provider: "openai-codex",
+			toolMode: "code_mode_only",
+		};
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			model: codeModeModel,
+			settings: Settings.isolated({ "providers.openai-codex.codeMode": "on" }),
+			outputSchema,
+			outputSchemaFailureToolNames: ["yield"],
+			requireYieldTool: true,
+		});
+		session.sessionManager.appendSessionInit({
+			systemPrompt: "structured worker",
+			task: "return structured data",
+			tools: session.getEnabledToolNames(),
+			outputSchema,
+			outputSchemaMode: "strict",
+		});
+
+		try {
+			expect(session.getActiveToolNames().some(name => name !== "yield")).toBe(true);
+			const yieldTool = session.getToolByName("yield");
+			expect(yieldTool).toBeDefined();
+			await expect(yieldTool!.execute("bad-yield", { result: { data: { token: "x" } } })).rejects.toThrow(
+				"Output does not match schema",
+			);
+			expect(session.getActiveToolNames()).toEqual(["yield"]);
+			expect(session.getActiveToolNames()).not.toContain("eval");
+			expect(session.getXdevToolEntries()).toEqual([]);
+			await session.setActiveToolsByName(["read", "yield"]);
+			expect(session.getActiveToolNames()).toEqual(["yield"]);
+			const persisted = session.sessionManager.getBranch().findLast(entry => entry.type === "session_init");
+			expect(persisted).toMatchObject({
+				type: "session_init",
+				tools: ["yield"],
+				restrictToolNames: true,
+				outputSchemaMode: "strict",
+			});
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("activates the private think tool when external thinking is enabled at runtime", async () => {
 		const tempDir = makeTempDir();
 		const settings = Settings.isolated();

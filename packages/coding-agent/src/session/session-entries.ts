@@ -225,6 +225,8 @@ export interface SessionInitEntry extends SessionEntryBase {
 	outputSchema?: unknown;
 	/** Enforcement policy recorded with the output schema for faithful revival. */
 	outputSchemaMode?: StructuredSubagentSchemaMode;
+	/** Tool ceiling installed after the first schema-invalid yield. */
+	outputSchemaFailureToolNames?: string[];
 	/** Whether revival must retain only the explicitly persisted tool names. */
 	restrictToolNames?: boolean;
 	/** Spawn allowlist the subagent ran with ("" = none, "*" = any, else CSV); absent on pre-spawns files. */

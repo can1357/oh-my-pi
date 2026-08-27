@@ -21,7 +21,7 @@ export const DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS = 10_000;
  * successful fast discovery requests do not leave armed timeout signals for
  * concurrent GC to trip over later.
  */
-async function withOpenAICompatibleDiscoveryTimeout<T>(
+export async function withOpenAICompatibleDiscoveryTimeout<T>(
 	timeoutMs: number,
 	run: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {

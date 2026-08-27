@@ -121,6 +121,27 @@ describe("structured subagent primitive", () => {
 		expect(inherited.schema).toMatchObject({ source: "session", mode: "strict", outputSchemaOverridesAgent: false });
 	});
 
+	it("applies fail-closed yield-only correction only to schema-bearing Merge runs", () => {
+		expect(executorModule.resolveStructuredOutputHarnessPolicy("merge-gateway", true, "permissive")).toEqual({
+			mode: "strict",
+			failureToolNames: ["yield"],
+		});
+		expect(executorModule.resolveStructuredOutputHarnessPolicy("openrouter", true, "permissive")).toEqual({
+			mode: "permissive",
+			failureToolNames: undefined,
+		});
+		expect(executorModule.resolveStructuredOutputHarnessPolicy("merge-gateway", false, undefined)).toEqual({
+			mode: undefined,
+			failureToolNames: undefined,
+		});
+		expect(executorModule.modelPatternTargetsProvider("merge-gateway/deepseek/deepseek-v3.2", "merge-gateway")).toBe(
+			true,
+		);
+		expect(executorModule.modelPatternTargetsProvider("openrouter/deepseek/deepseek-v3.2", "merge-gateway")).toBe(
+			false,
+		);
+	});
+
 	it("gives task and eval invocations identical blocked-agent preflight errors", async () => {
 		const previous = Bun.env.PI_BLOCKED_AGENT;
 		Bun.env.PI_BLOCKED_AGENT = "worker";

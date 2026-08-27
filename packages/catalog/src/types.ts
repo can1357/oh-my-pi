@@ -877,6 +877,15 @@ export type ModelTokenizer =
 	| "kimi-k2"
 	| "glm5";
 
+/** Capabilities declared by the serving provider, independent of OMP harness policy. */
+export interface DeclaredModelCapabilities {
+	nativeToolCalling: boolean;
+	nativeToolChoice: boolean;
+	nativeStructuredOutputs: boolean;
+	streaming: boolean;
+	zeroDataRetention: boolean;
+}
+
 // Model interface for the unified model system
 export interface Model<TApi extends Api = Api> {
 	id: string;
@@ -920,6 +929,8 @@ export interface Model<TApi extends Api = Api> {
 	 * reports that native tool calling is unsupported.
 	 */
 	supportsTools?: boolean;
+	/** Provider declarations, kept separate from OMP's compatibility and fallback policy. */
+	declaredCapabilities?: DeclaredModelCapabilities;
 	/** Whether this model accepts the GA OpenAI Responses `{ type: "computer" }` native tool. */
 	supportsComputerUse?: boolean;
 	/** Verbatim explicit computer-use support from the spec; undefined when `buildModel` inferred the runtime value. */

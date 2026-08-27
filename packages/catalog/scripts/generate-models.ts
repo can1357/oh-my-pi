@@ -69,6 +69,17 @@ import {
 } from "./generated-policies";
 
 const packageRoot = path.join(import.meta.dir, "..");
+function requestedProvider(): string | undefined {
+	const inline = Bun.argv.find(argument => argument.startsWith("--provider="));
+	const index = Bun.argv.indexOf("--provider");
+	const value = inline?.slice("--provider=".length) ?? (index >= 0 ? Bun.argv[index + 1] : undefined);
+	if ((inline !== undefined || index >= 0) && !value?.trim()) {
+		throw new Error("--provider requires a non-empty provider id");
+	}
+	return value?.trim();
+}
+
+const REQUESTED_PROVIDER = requestedProvider();
 
 /**
  * Local/self-hosted providers (Ollama, vLLM, LM Studio, LiteLLM). Their model
@@ -747,11 +758,22 @@ async function generateModels() {
 	};
 
 	const modelSpecs: Record<string, Record<string, ModelSpec>> = sortObj(providers);
-	const MODELS: Record<string, Record<string, Model<Api>>> = {};
+	let MODELS: Record<string, Record<string, Model<Api>>> = {};
 	for (const [provider, models] of Object.entries(modelSpecs)) {
 		MODELS[provider] = Object.fromEntries(
 			Object.entries(sortObj(models)).map(([id, model]) => [id, buildModel(model)]),
 		);
+	}
+	if (REQUESTED_PROVIDER) {
+		const generated = MODELS[REQUESTED_PROVIDER];
+		if (!generated) {
+			throw new Error(`Requested provider "${REQUESTED_PROVIDER}" produced no bundled models`);
+		}
+		MODELS = sortObj({
+			...(prevModelsJson as unknown as Record<string, Record<string, Model<Api>>>),
+			[REQUESTED_PROVIDER]: generated,
+		});
+		console.log(`Preserved previous bundled models outside provider: ${REQUESTED_PROVIDER}`);
 	}
 
 	// Generate JSON file
@@ -789,5 +811,5 @@ function canonicalizeModelCompat(model: ModelSpec<Api>): void {
 	}
 }
 
-// Run the generator
-generateModels().catch(console.error);
+// Run the generator; uncaught failures must propagate to scripts and CI.
+await generateModels();

@@ -130,6 +130,7 @@ export function createPersistedSubagentReviverFactory(
 				toolNames: init.tools,
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,
+				outputSchemaFailureToolNames: init.outputSchemaFailureToolNames,
 				restrictToolNames: restrictToolNames || undefined,
 				requireYieldTool: true,
 				systemPrompt: () => [init.systemPrompt],

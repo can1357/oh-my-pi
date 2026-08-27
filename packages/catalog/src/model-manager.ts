@@ -39,6 +39,8 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	cacheTtlMs?: number;
 	/** When true, a successful dynamic fetch is the complete provider catalog and prunes static-only models. */
 	dynamicModelsAuthoritative?: boolean;
+	/** When true, same-id dynamic rows replace lower-precedence metadata instead of being field-merged. */
+	dynamicModelsReplaceExisting?: boolean;
 	/** Cached model ids whose presence forces refresh when the static or migration-policy fingerprint changes. */
 	dropCachedModelIdsOnStaticMismatch?: readonly string[];
 	/**
@@ -265,15 +267,27 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	// short retry that recovers a transient empty response (#6620). The two
 	// concerns are deliberately separate: result authority vs. cache retry.
 	const dynamicCacheAuthoritative = dynamicFetchSucceeded && dynamicModels.length > 0;
-	const mergedWithCache = mergeDynamicModels(mergeModelSources(staticModels, modelsDevModels), cacheModels);
-	const mergedModels = mergeDynamicModels(mergedWithCache, dynamicModels);
+	const mergedWithCache = mergeDynamicModels(
+		mergeModelSources(staticModels, modelsDevModels),
+		cacheModels,
+		options.dynamicModelsReplaceExisting ?? false,
+	);
+	const mergedModels = mergeDynamicModels(
+		mergedWithCache,
+		dynamicModels,
+		options.dynamicModelsReplaceExisting ?? false,
+	);
 	const models = collapseBuiltModelVariants(
 		dynamicModelsAuthoritative && dynamicFetchSucceeded ? retainModelIds(mergedModels, dynamicModels) : mergedModels,
 	);
 	const dynamicAuthoritative = !hasDynamicFetcher || dynamicFetchSucceeded || shouldUseFreshCacheAsAuthoritative;
 	if (shouldFetchFromNetwork) {
 		if (dynamicFetchSucceeded) {
-			const mergedSnapshot = mergeDynamicModels(mergeModelSources(staticModels, modelsDevModels), dynamicModels);
+			const mergedSnapshot = mergeDynamicModels(
+				mergeModelSources(staticModels, modelsDevModels),
+				dynamicModels,
+				options.dynamicModelsReplaceExisting ?? false,
+			);
 			const snapshotModels = dynamicModelsAuthoritative
 				? retainModelIds(mergedSnapshot, dynamicModels)
 				: mergedSnapshot;
@@ -429,6 +443,7 @@ function mergeModelSources<TApi extends Api>(...sources: readonly (readonly Mode
 function mergeDynamicModels<TApi extends Api>(
 	baseModels: readonly Model<TApi>[],
 	dynamicModels: readonly Model<TApi>[],
+	replaceExisting = false,
 ): Model<TApi>[] {
 	// Empty-side fast paths: `mergeDynamicModels(base, [])` is the common shape
 	// after we've already merged the first pair, and `(...)` with no base
@@ -445,7 +460,7 @@ function mergeDynamicModels<TApi extends Api>(
 			merged.set(dynamicModel.id, dynamicModel);
 			continue;
 		}
-		merged.set(dynamicModel.id, mergeDynamicModel(existingModel, dynamicModel));
+		merged.set(dynamicModel.id, replaceExisting ? dynamicModel : mergeDynamicModel(existingModel, dynamicModel));
 	}
 	return Array.from(merged.values());
 }

@@ -147,7 +147,7 @@ export function resolveModelThinking<TApi extends Api>(
 	compat: CompatOf<TApi>,
 ): ThinkingConfig | undefined {
 	if (!spec.reasoning) return undefined;
-	if (omitsWireReasoningEffort(spec.api, compat)) return undefined;
+	if (omitsWireReasoningEffort(spec, compat)) return undefined;
 	if (spec.thinking && Array.isArray(spec.thinking.efforts) && spec.thinking.efforts.length > 0) {
 		return fillThinkingWireDefaults(spec, compat, spec.thinking);
 	}
@@ -172,6 +172,7 @@ function fillThinkingWireDefaults<TApi extends Api>(
 	compat: CompatOf<TApi>,
 	thinking: ThinkingConfig,
 ): ThinkingConfig {
+	if (spec.provider === "merge-gateway") return thinking;
 	const parsed = parseKnownModel(spec.id);
 	const normalizedEfforts = getModelDefinedEfforts(spec, compat) ?? thinking.efforts;
 	const effortsChanged = !sameEffortList(normalizedEfforts, thinking.efforts);
@@ -246,16 +247,21 @@ export function deriveThinking<TApi extends Api>(spec: ModelSpec<TApi>, compat: 
 }
 
 /**
- * True when the model reasons natively but rejects the wire `reasoning.effort`
- * param. Scoped to openai-responses* because that's the only API surface where
- * `compat.supportsReasoningEffort: false` means "omit the field entirely"
- * (xAI Grok off the `isGrokReasoningEffortCapable` allowlist: grok-build,
- * grok-4.20-0309-reasoning). openai-completions keeps its thinking config even
- * without effort support — binary thinking formats (zai/qwen) drive reasoning
- * through other request fields.
+ * True when the model reasons natively but the selected surface rejects the
+ * wire effort parameter. Responses surfaces encode this through
+ * `supportsReasoningEffort: false`. Merge Gateway uses the same explicit
+ * override on its OpenAI Completions surface because available vendor routes
+ * do not share one portable effort vocabulary.
  */
-function omitsWireReasoningEffort(api: Api, compat: CompatOf<Api>): boolean {
-	if (api !== "openai-responses" && api !== "openai-codex-responses" && api !== "azure-openai-responses") {
+function omitsWireReasoningEffort(spec: ModelSpec<Api>, compat: CompatOf<Api>): boolean {
+	if (spec.provider === "merge-gateway" && spec.api === "openai-completions") {
+		return (compat as ResolvedOpenAICompat | undefined)?.supportsReasoningEffort === false;
+	}
+	if (
+		spec.api !== "openai-responses" &&
+		spec.api !== "openai-codex-responses" &&
+		spec.api !== "azure-openai-responses"
+	) {
 		return false;
 	}
 	return (compat as ResolvedOpenAIResponsesCompat | undefined)?.supportsReasoningEffort === false;

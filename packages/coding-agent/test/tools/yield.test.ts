@@ -379,6 +379,7 @@ describe("YieldTool", () => {
 	});
 
 	it("rejects unknown incremental labels for closed caller output schemas without consuming retries", async () => {
+		let lockdowns = 0;
 		const tool = new YieldTool(
 			createSession({
 				outputSchema: {
@@ -394,6 +395,9 @@ describe("YieldTool", () => {
 							elements: { type: "string" },
 						},
 					},
+				},
+				onOutputSchemaValidationFailure: () => {
+					lockdowns++;
 				},
 			}),
 		);
@@ -412,6 +416,7 @@ describe("YieldTool", () => {
 				/Section "findings" uses unknown incremental yield label\(s\): "findings"\. Resubmit with one of the schema's labels: "issue_key", "verdict", "blockers", "non_blocking_notes"\./,
 			);
 		}
+		expect(lockdowns).toBe(1);
 
 		// The last-turn short-circuit (`type: ["findings"], result: {}`) MUST also reject
 		// the unknown label. Otherwise the stale section silently accepts the last assistant
@@ -1210,6 +1215,35 @@ describe("YieldTool", () => {
 				text: "Result submitted (schema validation overridden after 4 failed attempt(s)).",
 			},
 		]);
+	});
+
+	it("triggers correction lockdown once so completed side effects cannot be offered again", async () => {
+		const outputSchema = {
+			type: "object",
+			properties: { token: { type: "string", minLength: 3 } },
+			required: ["token"],
+		};
+		let activeTools = ["write", "yield"];
+		let lockdowns = 0;
+		const tool = new YieldTool(
+			createSession({
+				outputSchema,
+				onOutputSchemaValidationFailure: () => {
+					lockdowns++;
+					activeTools = ["yield"];
+				},
+			}),
+		);
+
+		await expect(tool.execute("invalid-1", { result: { data: { token: "x" } } } as never)).rejects.toThrow(
+			"Output does not match schema",
+		);
+		expect(activeTools).toEqual(["yield"]);
+		expect(activeTools).not.toContain("write");
+		await expect(tool.execute("invalid-2", { result: { data: { token: "x" } } } as never)).rejects.toThrow(
+			"Output does not match schema",
+		);
+		expect(lockdowns).toBe(1);
 	});
 
 	it("keeps schema degradation counter at zero when submissions are valid", async () => {
