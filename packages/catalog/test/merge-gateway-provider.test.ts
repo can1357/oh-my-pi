@@ -8,6 +8,7 @@ import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	fetchMergeGatewayModels,
+	isCredentialScopedModelCacheProvider,
 	mapMergeGatewayModel,
 	mergeGatewayModelManagerOptions,
 	PROVIDER_DESCRIPTORS,
@@ -57,7 +58,7 @@ function model(id: string, vendors: Record<string, unknown>): Record<string, unk
 }
 
 describe("Merge Gateway provider", () => {
-	test("registers an authoritative first-class provider", () => {
+	test("registers an authoritative first-class provider", async () => {
 		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "merge-gateway");
 		expect(descriptor).toMatchObject({
 			defaultModel: "openai/gpt-5.6-sol",
@@ -70,10 +71,14 @@ describe("Merge Gateway provider", () => {
 			dynamicModelsAuthoritative: true,
 			dynamicModelsReplaceExisting: true,
 		});
+		expect(isCredentialScopedModelCacheProvider("merge-gateway")).toBe(true);
 		expect(manager.cacheProviderId).toStartWith("merge-gateway:");
 		expect(
 			mergeGatewayModelManagerOptions({ baseUrl: "https://gateway.example/v1/openai" }).cacheProviderId,
 		).not.toBe(manager.cacheProviderId);
+		expect(mergeGatewayModelManagerOptions({ apiKey: "account-a" }).cacheProviderId).not.toBe(
+			mergeGatewayModelManagerOptions({ apiKey: "account-b" }).cacheProviderId,
+		);
 		const bundled = getBundledModel("merge-gateway", "zai/glm-5.3-flash");
 		expect(bundled).toMatchObject({
 			name: "GLM-5.3 Flash",
@@ -95,6 +100,19 @@ describe("Merge Gateway provider", () => {
 				supportsDisplay: true,
 			},
 		});
+		const dynamic = await mergeGatewayModelManagerOptions({
+			apiKey: "account-a",
+			fetch: async () =>
+				Response.json({
+					object: "list",
+					data: [model("openai/gpt-5.5", { openai: route() })],
+					has_more: false,
+					next_cursor: null,
+				}),
+		}).fetchDynamicModels?.();
+		expect(dynamic?.find(model => model.id === "openai/gpt-5.5")?.contextPromotionTarget).toBe(
+			"merge-gateway/openai/gpt-5.4",
+		);
 	});
 
 	test("replaces stale bundled fields with authoritative live metadata", async () => {

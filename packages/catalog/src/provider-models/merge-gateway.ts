@@ -4,6 +4,7 @@ import {
 } from "../discovery/openai-compatible";
 import { type Effort, THINKING_EFFORTS } from "../effort";
 import type { ModelManagerOptions } from "../model-manager";
+import { getBundledModels } from "../models";
 import type { FetchImpl, ModelSpec } from "../types";
 import { discoveryFetch, isRecord, toNumber } from "../utils";
 import { resolveModelCacheProviderId } from "./cache-provider-id";
@@ -270,13 +271,23 @@ export function mergeGatewayModelManagerOptions(
 ): ModelManagerOptions<"openai-completions"> {
 	const apiKey = config?.apiKey;
 	const baseUrl = normalizeBaseUrl(config?.baseUrl ?? MERGE_GATEWAY_BASE_URL);
+	const bundledReferences = new Map(getBundledModels("merge-gateway").map(model => [model.id, model] as const));
 	return {
 		providerId: "merge-gateway",
 		dynamicModelsAuthoritative: true,
-		cacheProviderId: resolveModelCacheProviderId("merge-gateway", { baseUrl }),
+		cacheProviderId: resolveModelCacheProviderId("merge-gateway", { apiKey, baseUrl }),
 		dynamicModelsReplaceExisting: true,
 		...(apiKey && {
-			fetchDynamicModels: () => fetchMergeGatewayModels({ apiKey, baseUrl, fetch: config?.fetch }),
+			fetchDynamicModels: async () => {
+				const models = await fetchMergeGatewayModels({ apiKey, baseUrl, fetch: config?.fetch });
+				if (models === null) return null;
+				return models.map(model => {
+					const contextPromotionTarget = bundledReferences.get(model.id)?.contextPromotionTarget;
+					return contextPromotionTarget && !model.contextPromotionTarget
+						? { ...model, contextPromotionTarget }
+						: model;
+				});
+			},
 		}),
 	};
 }
