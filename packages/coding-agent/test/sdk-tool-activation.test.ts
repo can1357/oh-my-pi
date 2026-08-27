@@ -198,6 +198,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(persisted).toMatchObject({
 				type: "session_init",
 				tools: ["yield"],
+				outputSchemaCorrectionLocked: true,
 				restrictToolNames: true,
 				outputSchemaMode: "strict",
 			});

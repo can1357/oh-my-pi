@@ -112521,6 +112521,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 32000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -112603,6 +112604,7 @@
 			},
 			"contextWindow": 300000,
 			"maxTokens": 5000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -112684,6 +112686,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 5000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -112766,6 +112769,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 32000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -112848,6 +112852,7 @@
 			},
 			"contextWindow": 300000,
 			"maxTokens": 5000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -112930,6 +112935,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 128000,
+			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v5-sonnet",
 			"compat": {
 				"supportsStore": true,
@@ -113013,6 +113019,7 @@
 			},
 			"contextWindow": 200000,
 			"maxTokens": 64000,
+			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v3",
 			"compat": {
 				"supportsStore": true,
@@ -113096,6 +113103,7 @@
 			},
 			"contextWindow": 200000,
 			"maxTokens": 32000,
+			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v3",
 			"compat": {
 				"supportsStore": true,
@@ -113179,6 +113187,7 @@
 			},
 			"contextWindow": 200000,
 			"maxTokens": 64000,
+			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v3",
 			"compat": {
 				"supportsStore": true,
@@ -113262,6 +113271,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 128000,
+			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v3",
 			"compat": {
 				"supportsStore": true,
@@ -113345,6 +113355,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 128000,
+			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v47",
 			"compat": {
 				"supportsStore": true,
@@ -113428,6 +113439,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 128000,
+			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v47",
 			"compat": {
 				"supportsStore": true,
@@ -113511,6 +113523,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 128000,
+			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v5",
 			"compat": {
 				"supportsStore": true,
@@ -113594,6 +113607,7 @@
 			},
 			"contextWindow": 200000,
 			"maxTokens": 64000,
+			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v3",
 			"compat": {
 				"supportsStore": true,
@@ -113677,6 +113691,7 @@
 			},
 			"contextWindow": 200000,
 			"maxTokens": 64000,
+			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v3",
 			"compat": {
 				"supportsStore": true,
@@ -113760,6 +113775,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 128000,
+			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v5-sonnet",
 			"compat": {
 				"supportsStore": true,
@@ -113842,6 +113858,7 @@
 			},
 			"contextWindow": 256000,
 			"maxTokens": 8000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -113923,6 +113940,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 4000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -114004,6 +114022,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 4000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -114085,6 +114104,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 4000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -114166,6 +114186,7 @@
 			},
 			"contextWindow": 163840,
 			"maxTokens": 81920,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "deepseek-v3",
 			"compat": {
 				"supportsStore": true,
@@ -114249,6 +114270,7 @@
 			},
 			"contextWindow": 164000,
 			"maxTokens": 41000,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "deepseek-v3",
 			"compat": {
 				"supportsStore": true,
@@ -114332,6 +114354,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "deepseek-v3",
 			"compat": {
 				"supportsStore": true,
@@ -114424,6 +114447,7 @@
 					"max"
 				]
 			},
+			"requiresGlyphTokenization": false,
 			"tokenizer": "deepseek-v3",
 			"compat": {
 				"supportsStore": true,
@@ -114447,7 +114471,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -114478,6 +114502,7 @@
 				"supportsToolChoice": true,
 				"supportsForcedToolChoice": true,
 				"supportsNamedToolChoice": true,
+				"reasoningDisableMode": "none-effort",
 				"streamMarkupHealingPattern": "dsml"
 			}
 		},
@@ -114507,6 +114532,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 393216,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "deepseek-v3",
 			"compat": {
 				"supportsStore": true,
@@ -114599,6 +114625,7 @@
 					"max"
 				]
 			},
+			"requiresGlyphTokenization": false,
 			"tokenizer": "deepseek-v3",
 			"compat": {
 				"supportsStore": true,
@@ -114622,7 +114649,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -114653,6 +114680,7 @@
 				"supportsToolChoice": false,
 				"supportsForcedToolChoice": false,
 				"supportsNamedToolChoice": false,
+				"reasoningDisableMode": "none-effort",
 				"streamMarkupHealingPattern": "dsml"
 			}
 		},
@@ -114693,6 +114721,7 @@
 				],
 				"supportsDisplay": true
 			},
+			"requiresGlyphTokenization": false,
 			"tokenizer": "deepseek-v3",
 			"compat": {
 				"supportsStore": true,
@@ -114716,7 +114745,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -114747,6 +114776,7 @@
 				"supportsToolChoice": false,
 				"supportsForcedToolChoice": false,
 				"supportsNamedToolChoice": false,
+				"reasoningDisableMode": "none-effort",
 				"streamMarkupHealingPattern": "dsml"
 			}
 		},
@@ -114776,6 +114806,7 @@
 			},
 			"contextWindow": 512000,
 			"maxTokens": 128000,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "deepseek-v3",
 			"compat": {
 				"supportsStore": true,
@@ -114872,6 +114903,7 @@
 				"requiresEffort": true,
 				"supportsDisplay": true
 			},
+			"requiresGlyphTokenization": false,
 			"tokenizer": "deepseek-v3",
 			"compat": {
 				"supportsStore": true,
@@ -114956,6 +114988,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 64000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -115038,6 +115071,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -115120,6 +115154,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -115202,6 +115237,7 @@
 			},
 			"contextWindow": 1048576,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -115284,6 +115320,7 @@
 			},
 			"contextWindow": 1048576,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -115366,6 +115403,7 @@
 			},
 			"contextWindow": 1048576,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -115448,6 +115486,7 @@
 			},
 			"contextWindow": 1048576,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -115530,6 +115569,7 @@
 			},
 			"contextWindow": 1048576,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -115612,6 +115652,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -115694,6 +115735,7 @@
 			},
 			"contextWindow": 1048576,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -115776,6 +115818,7 @@
 			},
 			"contextWindow": 1048576,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -115858,6 +115901,7 @@
 			},
 			"contextWindow": 1048576,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -115940,6 +115984,7 @@
 			},
 			"contextWindow": 262144,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -116022,6 +116067,7 @@
 			},
 			"contextWindow": 175000,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -116103,6 +116149,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 2048,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -116184,6 +116231,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 2048,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -116265,6 +116313,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 4096,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -116347,6 +116396,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 4096,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -116428,6 +116478,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 4096,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -116510,6 +116561,7 @@
 			},
 			"contextWindow": 1048576,
 			"maxTokens": 262144,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -116592,6 +116644,7 @@
 			},
 			"contextWindow": 1048576,
 			"maxTokens": 262144,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -116674,6 +116727,7 @@
 			},
 			"contextWindow": 1048576,
 			"maxTokens": 262144,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -116755,6 +116809,7 @@
 			},
 			"contextWindow": 204800,
 			"maxTokens": 8192,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -116836,6 +116891,7 @@
 			},
 			"contextWindow": 204800,
 			"maxTokens": 8192,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -116917,6 +116973,7 @@
 			},
 			"contextWindow": 204800,
 			"maxTokens": 8192,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -116998,6 +117055,7 @@
 			},
 			"contextWindow": 204000,
 			"maxTokens": 8192,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -117079,6 +117137,7 @@
 			},
 			"contextWindow": 204800,
 			"maxTokens": 8192,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -117160,6 +117219,7 @@
 			},
 			"contextWindow": 196608,
 			"maxTokens": 8192,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -117241,6 +117301,7 @@
 			},
 			"contextWindow": 200000,
 			"maxTokens": 8192,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -117323,6 +117384,7 @@
 			},
 			"contextWindow": 256000,
 			"maxTokens": 128000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -117404,6 +117466,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 128000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -117485,6 +117548,7 @@
 			},
 			"contextWindow": 256000,
 			"maxTokens": 8192,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -117567,6 +117631,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 128000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -117648,6 +117713,7 @@
 			},
 			"contextWindow": 40000,
 			"maxTokens": 40000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -117729,6 +117795,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 128000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -117810,6 +117877,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 8192,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -117891,6 +117959,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 8192,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -117972,6 +118041,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 8192,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -118053,6 +118123,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 8192,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -118135,6 +118206,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 128000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -118217,6 +118289,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 40000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -118306,6 +118379,7 @@
 				],
 				"supportsDisplay": true
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -118328,7 +118402,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -118358,7 +118432,8 @@
 				"supportsReasoningEffort": true,
 				"supportsToolChoice": true,
 				"supportsForcedToolChoice": true,
-				"supportsNamedToolChoice": true
+				"supportsNamedToolChoice": true,
+				"reasoningDisableMode": "none-effort"
 			}
 		},
 		"mistral/mistral-small-2603": {
@@ -118388,6 +118463,7 @@
 			},
 			"contextWindow": 256000,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -118469,6 +118545,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 128000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -118550,6 +118627,7 @@
 			},
 			"contextWindow": 262000,
 			"maxTokens": 65500,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "kimi-k2",
 			"compat": {
 				"supportsStore": true,
@@ -118633,6 +118711,7 @@
 			},
 			"contextWindow": 256000,
 			"maxTokens": 16000,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "kimi-k2",
 			"compat": {
 				"supportsStore": true,
@@ -118717,6 +118796,7 @@
 			},
 			"contextWindow": 256000,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "kimi-k2",
 			"compat": {
 				"supportsStore": true,
@@ -118801,6 +118881,7 @@
 			},
 			"contextWindow": 256000,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "kimi-k2",
 			"compat": {
 				"supportsStore": true,
@@ -118884,6 +118965,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 262144,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "kimi-k2",
 			"compat": {
 				"supportsStore": true,
@@ -118972,6 +119054,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 131072,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -119054,6 +119137,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 131072,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -119135,6 +119219,7 @@
 			},
 			"contextWindow": 32768,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -119217,6 +119302,7 @@
 			},
 			"contextWindow": 32768,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -119298,6 +119384,7 @@
 			},
 			"contextWindow": 8192,
 			"maxTokens": 8192,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -119380,6 +119467,7 @@
 			},
 			"contextWindow": 8192,
 			"maxTokens": 8192,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -119461,6 +119549,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 131072,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -119542,6 +119631,7 @@
 			},
 			"contextWindow": 203000,
 			"maxTokens": 50750,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -119632,6 +119722,7 @@
 				],
 				"supportsDisplay": true
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -119654,7 +119745,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -119684,7 +119775,8 @@
 				"supportsReasoningEffort": true,
 				"supportsToolChoice": true,
 				"supportsForcedToolChoice": true,
-				"supportsNamedToolChoice": true
+				"supportsNamedToolChoice": true,
+				"reasoningDisableMode": "none-effort"
 			}
 		},
 		"nvidia/nemotron-nano-3-30b": {
@@ -119713,6 +119805,7 @@
 			},
 			"contextWindow": 262144,
 			"maxTokens": 8192,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -119794,6 +119887,7 @@
 			},
 			"contextWindow": 256000,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -119875,6 +119969,7 @@
 			},
 			"contextWindow": 16385,
 			"maxTokens": 4096,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -119957,6 +120052,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 4096,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -120039,6 +120135,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 4096,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -120121,6 +120218,7 @@
 			},
 			"contextWindow": 1047576,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -120203,6 +120301,7 @@
 			},
 			"contextWindow": 1047576,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -120285,6 +120384,7 @@
 			},
 			"contextWindow": 1047576,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -120367,6 +120467,7 @@
 			},
 			"contextWindow": 1047576,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -120449,6 +120550,7 @@
 			},
 			"contextWindow": 1047576,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -120531,6 +120633,7 @@
 			},
 			"contextWindow": 1047576,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -120613,6 +120716,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 16384,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -120695,6 +120799,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 4096,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -120777,6 +120882,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 16384,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -120859,6 +120965,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 16384,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -120941,6 +121048,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 16384,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -121023,6 +121131,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 16384,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -121115,6 +121224,7 @@
 				],
 				"requiresEffort": true
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -121207,6 +121317,7 @@
 				],
 				"requiresEffort": true
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -121299,6 +121410,7 @@
 				],
 				"requiresEffort": true
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -121391,6 +121503,7 @@
 				],
 				"requiresEffort": true
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -121483,6 +121596,7 @@
 				],
 				"requiresEffort": true
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -121575,6 +121689,7 @@
 				],
 				"requiresEffort": true
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -121657,6 +121772,7 @@
 			},
 			"contextWindow": 272000,
 			"maxTokens": 128000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -121739,6 +121855,7 @@
 			},
 			"contextWindow": 272000,
 			"maxTokens": 128000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -121829,6 +121946,7 @@
 					"high"
 				]
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -121851,7 +121969,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -121881,7 +121999,8 @@
 				"supportsReasoningEffort": true,
 				"supportsToolChoice": true,
 				"supportsForcedToolChoice": true,
-				"supportsNamedToolChoice": true
+				"supportsNamedToolChoice": true,
+				"reasoningDisableMode": "none-effort"
 			}
 		},
 		"openai/gpt-5.1-2025-11-13": {
@@ -121918,6 +122037,7 @@
 					"high"
 				]
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -121940,7 +122060,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -121970,7 +122090,8 @@
 				"supportsReasoningEffort": true,
 				"supportsToolChoice": true,
 				"supportsForcedToolChoice": true,
-				"supportsNamedToolChoice": true
+				"supportsNamedToolChoice": true,
+				"reasoningDisableMode": "none-effort"
 			}
 		},
 		"openai/gpt-5.1-chat-latest": {
@@ -122000,6 +122121,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 16384,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -122091,6 +122213,7 @@
 					"xhigh"
 				]
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -122113,7 +122236,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -122143,7 +122266,8 @@
 				"supportsReasoningEffort": true,
 				"supportsToolChoice": true,
 				"supportsForcedToolChoice": true,
-				"supportsNamedToolChoice": true
+				"supportsNamedToolChoice": true,
+				"reasoningDisableMode": "none-effort"
 			}
 		},
 		"openai/gpt-5.2-2025-12-11": {
@@ -122182,6 +122306,7 @@
 					"xhigh"
 				]
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -122204,7 +122329,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -122234,7 +122359,8 @@
 				"supportsReasoningEffort": true,
 				"supportsToolChoice": true,
 				"supportsForcedToolChoice": true,
-				"supportsNamedToolChoice": true
+				"supportsNamedToolChoice": true,
+				"reasoningDisableMode": "none-effort"
 			}
 		},
 		"openai/gpt-5.2-chat-latest": {
@@ -122264,6 +122390,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 16384,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -122346,6 +122473,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 16384,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -122437,6 +122565,7 @@
 					"xhigh"
 				]
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -122459,7 +122588,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -122489,7 +122618,8 @@
 				"supportsReasoningEffort": true,
 				"supportsToolChoice": true,
 				"supportsForcedToolChoice": true,
-				"supportsNamedToolChoice": true
+				"supportsNamedToolChoice": true,
+				"reasoningDisableMode": "none-effort"
 			}
 		},
 		"openai/gpt-5.4-2026-03-05": {
@@ -122528,6 +122658,7 @@
 					"xhigh"
 				]
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -122550,7 +122681,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -122580,7 +122711,8 @@
 				"supportsReasoningEffort": true,
 				"supportsToolChoice": true,
 				"supportsForcedToolChoice": true,
-				"supportsNamedToolChoice": true
+				"supportsNamedToolChoice": true,
+				"reasoningDisableMode": "none-effort"
 			}
 		},
 		"openai/gpt-5.4-mini": {
@@ -122619,6 +122751,7 @@
 					"xhigh"
 				]
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -122641,7 +122774,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -122671,7 +122804,8 @@
 				"supportsReasoningEffort": true,
 				"supportsToolChoice": true,
 				"supportsForcedToolChoice": true,
-				"supportsNamedToolChoice": true
+				"supportsNamedToolChoice": true,
+				"reasoningDisableMode": "none-effort"
 			}
 		},
 		"openai/gpt-5.4-mini-2026-03-17": {
@@ -122710,6 +122844,7 @@
 					"xhigh"
 				]
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -122732,7 +122867,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -122762,7 +122897,8 @@
 				"supportsReasoningEffort": true,
 				"supportsToolChoice": true,
 				"supportsForcedToolChoice": true,
-				"supportsNamedToolChoice": true
+				"supportsNamedToolChoice": true,
+				"reasoningDisableMode": "none-effort"
 			}
 		},
 		"openai/gpt-5.4-nano": {
@@ -122801,6 +122937,7 @@
 					"xhigh"
 				]
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -122823,7 +122960,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -122853,7 +122990,8 @@
 				"supportsReasoningEffort": true,
 				"supportsToolChoice": true,
 				"supportsForcedToolChoice": true,
-				"supportsNamedToolChoice": true
+				"supportsNamedToolChoice": true,
+				"reasoningDisableMode": "none-effort"
 			}
 		},
 		"openai/gpt-5.4-nano-2026-03-17": {
@@ -122892,6 +123030,7 @@
 					"xhigh"
 				]
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -122914,7 +123053,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -122944,7 +123083,8 @@
 				"supportsReasoningEffort": true,
 				"supportsToolChoice": true,
 				"supportsForcedToolChoice": true,
-				"supportsNamedToolChoice": true
+				"supportsNamedToolChoice": true,
+				"reasoningDisableMode": "none-effort"
 			}
 		},
 		"openai/gpt-5.5": {
@@ -122983,6 +123123,7 @@
 					"xhigh"
 				]
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -123005,7 +123146,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -123036,7 +123177,8 @@
 				"supportsReasoningEffort": true,
 				"supportsToolChoice": true,
 				"supportsForcedToolChoice": true,
-				"supportsNamedToolChoice": true
+				"supportsNamedToolChoice": true,
+				"reasoningDisableMode": "none-effort"
 			}
 		},
 		"openai/gpt-5.5-2026-04-23": {
@@ -123075,6 +123217,7 @@
 					"xhigh"
 				]
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -123097,7 +123240,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -123128,7 +123271,8 @@
 				"supportsReasoningEffort": true,
 				"supportsToolChoice": true,
 				"supportsForcedToolChoice": true,
-				"supportsNamedToolChoice": true
+				"supportsNamedToolChoice": true,
+				"reasoningDisableMode": "none-effort"
 			}
 		},
 		"openai/gpt-5.6-luna": {
@@ -123167,6 +123311,7 @@
 					"xhigh"
 				]
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -123189,7 +123334,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -123219,7 +123364,8 @@
 				"supportsReasoningEffort": true,
 				"supportsToolChoice": true,
 				"supportsForcedToolChoice": true,
-				"supportsNamedToolChoice": true
+				"supportsNamedToolChoice": true,
+				"reasoningDisableMode": "none-effort"
 			}
 		},
 		"openai/gpt-5.6-sol": {
@@ -123258,6 +123404,7 @@
 					"xhigh"
 				]
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -123280,7 +123427,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -123310,7 +123457,8 @@
 				"supportsReasoningEffort": true,
 				"supportsToolChoice": true,
 				"supportsForcedToolChoice": true,
-				"supportsNamedToolChoice": true
+				"supportsNamedToolChoice": true,
+				"reasoningDisableMode": "none-effort"
 			}
 		},
 		"openai/gpt-5.6-terra": {
@@ -123349,6 +123497,7 @@
 					"xhigh"
 				]
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -123371,7 +123520,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -123401,7 +123550,8 @@
 				"supportsReasoningEffort": true,
 				"supportsToolChoice": true,
 				"supportsForcedToolChoice": true,
-				"supportsNamedToolChoice": true
+				"supportsNamedToolChoice": true,
+				"reasoningDisableMode": "none-effort"
 			}
 		},
 		"openai/gpt-audio": {
@@ -123430,6 +123580,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 16384,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -123511,6 +123662,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 16384,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -123592,6 +123744,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 32000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -123673,6 +123826,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -123765,6 +123919,7 @@
 				],
 				"requiresEffort": true
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -123857,6 +124012,7 @@
 				],
 				"requiresEffort": true
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -123949,6 +124105,7 @@
 				],
 				"requiresEffort": true
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -124041,6 +124198,7 @@
 				],
 				"requiresEffort": true
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -124132,6 +124290,7 @@
 				],
 				"requiresEffort": true
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -124223,6 +124382,7 @@
 				],
 				"requiresEffort": true
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -124315,6 +124475,7 @@
 				],
 				"requiresEffort": true
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -124407,6 +124568,7 @@
 				],
 				"requiresEffort": true
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -124488,6 +124650,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 250000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -124569,6 +124732,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 250000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -124650,6 +124814,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -124731,6 +124896,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -124812,6 +124978,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -124893,6 +125060,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -124974,6 +125142,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -125055,6 +125224,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -125136,6 +125306,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -125217,6 +125388,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -125298,6 +125470,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -125379,6 +125552,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -125460,6 +125634,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 250000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -125541,6 +125716,7 @@
 			},
 			"contextWindow": 262144,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -125622,6 +125798,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 250000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -125703,6 +125880,7 @@
 			},
 			"contextWindow": 256000,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -125784,6 +125962,7 @@
 			},
 			"contextWindow": 256000,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -125865,6 +126044,7 @@
 			},
 			"contextWindow": 256000,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -125946,6 +126126,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 8192,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -126027,6 +126208,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -126108,6 +126290,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -126190,6 +126373,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 8192,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -126272,6 +126456,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -126354,6 +126539,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -126436,6 +126622,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -126518,6 +126705,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -126600,6 +126788,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -126682,6 +126871,7 @@
 			},
 			"contextWindow": 262144,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -126764,6 +126954,7 @@
 			},
 			"contextWindow": 262144,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -126846,6 +127037,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "qwen3",
 			"compat": {
 				"supportsStore": false,
@@ -126929,6 +127121,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "qwen3",
 			"compat": {
 				"supportsStore": false,
@@ -127012,6 +127205,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "qwen3",
 			"compat": {
 				"supportsStore": false,
@@ -127095,6 +127289,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "qwen3",
 			"compat": {
 				"supportsStore": false,
@@ -127178,6 +127373,7 @@
 			},
 			"contextWindow": 262144,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "qwen3",
 			"compat": {
 				"supportsStore": false,
@@ -127261,6 +127457,7 @@
 			},
 			"contextWindow": 262144,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "qwen3",
 			"compat": {
 				"supportsStore": false,
@@ -127344,6 +127541,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "qwen3",
 			"compat": {
 				"supportsStore": false,
@@ -127427,6 +127625,7 @@
 			},
 			"contextWindow": 256000,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "qwen3",
 			"compat": {
 				"supportsStore": false,
@@ -127510,6 +127709,7 @@
 			},
 			"contextWindow": 256000,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "qwen3",
 			"compat": {
 				"supportsStore": false,
@@ -127593,6 +127793,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "qwen3",
 			"compat": {
 				"supportsStore": false,
@@ -127676,6 +127877,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "qwen3",
 			"compat": {
 				"supportsStore": false,
@@ -127759,6 +127961,7 @@
 			},
 			"contextWindow": 262144,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "qwen3",
 			"compat": {
 				"supportsStore": false,
@@ -127842,6 +128045,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "qwen3",
 			"compat": {
 				"supportsStore": false,
@@ -127924,6 +128128,7 @@
 			},
 			"contextWindow": 256000,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "qwen3",
 			"compat": {
 				"supportsStore": false,
@@ -128007,6 +128212,7 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "qwen3",
 			"compat": {
 				"supportsStore": false,
@@ -128089,6 +128295,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "qwen3",
 			"compat": {
 				"supportsStore": false,
@@ -128172,6 +128379,7 @@
 			},
 			"contextWindow": 262144,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "qwen3",
 			"compat": {
 				"supportsStore": false,
@@ -128255,6 +128463,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 131072,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "qwen3",
 			"compat": {
 				"supportsStore": false,
@@ -128338,6 +128547,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 131072,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -128420,6 +128630,7 @@
 			},
 			"contextWindow": 262144,
 			"maxTokens": 65536,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -128502,6 +128713,7 @@
 			},
 			"contextWindow": 1048000,
 			"maxTokens": 32000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -128583,6 +128795,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 32000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -128664,6 +128877,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 250000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -128746,6 +128960,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 1000000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -128828,6 +129043,7 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 1000000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -128919,6 +129135,7 @@
 				],
 				"supportsDisplay": true
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -128941,7 +129158,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -128971,7 +129188,8 @@
 				"supportsReasoningEffort": true,
 				"supportsToolChoice": true,
 				"supportsForcedToolChoice": true,
-				"supportsNamedToolChoice": true
+				"supportsNamedToolChoice": true,
+				"reasoningDisableMode": "none-effort"
 			}
 		},
 		"xai/grok-4.5": {
@@ -129011,6 +129229,7 @@
 				"requiresEffort": true,
 				"supportsDisplay": true
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -129105,6 +129324,7 @@
 				"requiresEffort": true,
 				"supportsDisplay": true
 			},
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -129187,6 +129407,7 @@
 			},
 			"contextWindow": 256000,
 			"maxTokens": 256000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -129268,6 +129489,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 16384,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -129349,6 +129571,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 98304,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -129430,6 +129653,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 98304,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -129511,6 +129735,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 98304,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -129592,6 +129817,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 98304,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -129674,6 +129900,7 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 32000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -129755,6 +129982,7 @@
 			},
 			"contextWindow": 200000,
 			"maxTokens": 131072,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -129836,6 +130064,7 @@
 			},
 			"contextWindow": 200000,
 			"maxTokens": 50000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -129917,6 +130146,7 @@
 			},
 			"contextWindow": 200000,
 			"maxTokens": 128000,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -129998,6 +130228,7 @@
 			},
 			"contextWindow": 200000,
 			"maxTokens": 131072,
+			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -130079,6 +130310,7 @@
 			},
 			"contextWindow": 200000,
 			"maxTokens": 50750,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "glm5",
 			"compat": {
 				"supportsStore": true,
@@ -130161,6 +130393,7 @@
 			},
 			"contextWindow": 200000,
 			"maxTokens": 131072,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "glm5",
 			"compat": {
 				"supportsStore": true,
@@ -130243,6 +130476,7 @@
 			},
 			"contextWindow": 200000,
 			"maxTokens": 50500,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "glm5",
 			"compat": {
 				"supportsStore": true,
@@ -130325,6 +130559,7 @@
 			},
 			"contextWindow": 202000,
 			"maxTokens": 50000,
+			"requiresGlyphTokenization": false,
 			"tokenizer": "glm5",
 			"compat": {
 				"supportsStore": true,
@@ -130417,6 +130652,7 @@
 				"requiresEffort": true,
 				"supportsDisplay": true
 			},
+			"requiresGlyphTokenization": false,
 			"tokenizer": "glm5",
 			"compat": {
 				"supportsStore": true,
@@ -130510,6 +130746,7 @@
 				"requiresEffort": true,
 				"supportsDisplay": true
 			},
+			"requiresGlyphTokenization": false,
 			"tokenizer": "glm5",
 			"compat": {
 				"supportsStore": true,

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added API-key login and validation for Merge Gateway.
+
 ## [18.0.7] - 2026-08-26
 
 ### Added
@@ -124,7 +128,6 @@
 ### Added
 
 - Added Codex Responses support for Code Mode, preserving tool modes and passing tool namespace metadata during sessions.
-- Added API-key login and validation for Merge Gateway.
 
 ### Fixed
 

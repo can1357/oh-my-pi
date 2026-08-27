@@ -157,6 +157,24 @@ describe("Merge Gateway provider", () => {
 					zeroDataRetention: false,
 				},
 			});
+			const failedRefresh = await resolveProviderModels(
+				{
+					providerId: "merge-gateway",
+					staticModels: [stale!],
+					dynamicModelsAuthoritative: true,
+					dynamicModelsReplaceExisting: true,
+					fetchDynamicModels: async () => null,
+					cacheDbPath: path.join(tempDir, "models.db"),
+				},
+				"online",
+			);
+			expect(failedRefresh.models[0]).toMatchObject({
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: null,
+				maxTokens: null,
+			});
 			const offline = await resolveProviderModels(
 				{
 					providerId: "merge-gateway",
@@ -262,6 +280,39 @@ describe("Merge Gateway provider", () => {
 			supportsDisplay: true,
 		});
 		expect(built.compat.supportsReasoningEffort).toBe(true);
+	});
+
+	test("uses reasoning_effort none when every eligible route advertises portable disable", () => {
+		const capabilities = {
+			input: ["text"],
+			output: ["text", "tool_use"],
+			supports_tool_calling: true,
+			supports_tool_choice: true,
+			supports_structured_outputs: true,
+			supports_reasoning: true,
+			reasoning: {
+				configurable: true,
+				effort_values: ["none", "low", "high"],
+				disable_supported: true,
+				output_style: "reasoning_content",
+			},
+			streaming: true,
+		};
+		const mapped = mapMergeGatewayModel(
+			model("example/disablable-reasoner", {
+				first: route({ capabilities }),
+				second: route({ capabilities }),
+			}),
+			"https://api-gateway.merge.dev/v1/openai",
+		);
+		expect(mapped).not.toBeNull();
+		const built = buildModel(mapped!);
+		expect(built.compat.reasoningDisableMode).toBe("none-effort");
+		expect(built.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.High],
+			supportsDisplay: true,
+		});
 	});
 
 	test("keeps reasoning visible without inventing an effort ladder when routes disagree", () => {

@@ -1756,6 +1756,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					sessionManager.appendSessionInit({
 						...contract,
 						tools: outputSchemaFailureToolNames,
+						outputSchemaCorrectionLocked: true,
 						restrictToolNames: true,
 					});
 				}

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Merge Gateway as a dynamically discovered provider with separate native capability declarations and OMP compatibility policy for pricing, limits, vision, reasoning, tools, structured output, streaming, zero-data retention, and DeepSeek DSML recovery.
+
 ## [18.0.7] - 2026-08-26
 
 ### Added
@@ -73,7 +77,6 @@
 ### Added
 
 - Added helper functions and constants for reading enterprise ChatGPT workspace data-residency regions from Codex OAuth access tokens and forwarding the residency header to Codex backend endpoints.
-- Added Merge Gateway as a dynamically discovered provider with separate native capability declarations and OMP compatibility policy for pricing, limits, vision, reasoning, tools, structured output, streaming, zero-data retention, and DeepSeek DSML recovery.
 
 ### Changed
 

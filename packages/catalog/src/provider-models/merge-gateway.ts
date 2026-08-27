@@ -18,6 +18,7 @@ type MergeGatewayRoute = {
 	reasoning: boolean;
 	effortValues: readonly Effort[];
 	requiresEffort: boolean;
+	supportsDisable: boolean;
 	supportsDisplay: boolean;
 	structuredOutputs: boolean;
 	streaming: boolean;
@@ -76,16 +77,18 @@ function nonNegativeNumber(value: unknown): number {
 function reasoningMetadata(value: unknown): {
 	effortValues: readonly Effort[];
 	requiresEffort: boolean;
+	supportsDisable: boolean;
 	supportsDisplay: boolean;
 } {
 	if (!isRecord(value) || value.configurable !== true || !Array.isArray(value.effort_values)) {
-		return { effortValues: [], requiresEffort: false, supportsDisplay: false };
+		return { effortValues: [], requiresEffort: false, supportsDisable: false, supportsDisplay: false };
 	}
 	const advertised = new Set(value.effort_values);
 	const outputStyle = typeof value.output_style === "string" ? value.output_style : "";
 	return {
 		effortValues: THINKING_EFFORTS.filter(effort => advertised.has(effort)),
 		requiresEffort: value.disable_supported === false,
+		supportsDisable: value.disable_supported === true && advertised.has("none"),
 		supportsDisplay: outputStyle.length > 0 && outputStyle !== "hidden",
 	};
 }
@@ -106,6 +109,7 @@ function mapRoute(value: unknown): MergeGatewayRoute | null {
 		reasoning: capabilities.supports_reasoning === true,
 		effortValues: reasoning.effortValues,
 		requiresEffort: reasoning.requiresEffort,
+		supportsDisable: reasoning.supportsDisable,
 		supportsDisplay: reasoning.supportsDisplay,
 		structuredOutputs: capabilities.supports_structured_outputs === true,
 		streaming: capabilities.streaming === true,
@@ -151,6 +155,7 @@ export function mapMergeGatewayModel(value: unknown, baseUrl: string): ModelSpec
 	const reasoning = routes.every(route => route.reasoning);
 	const reasoningEfforts = reasoning ? commonReasoningEfforts(routes) : [];
 	const supportsReasoningEffort = reasoningEfforts.length > 0;
+	const supportsReasoningDisable = reasoning && routes.every(route => route.supportsDisable);
 	const useDsmlHealing = value.provider === "deepseek" || value.model.startsWith("deepseek/");
 	return {
 		id: value.model,
@@ -189,6 +194,7 @@ export function mapMergeGatewayModel(value: unknown, baseUrl: string): ModelSpec
 			supportsToolChoice,
 			supportsForcedToolChoice: supportsToolChoice,
 			supportsNamedToolChoice: supportsToolChoice,
+			...(supportsReasoningDisable && { reasoningDisableMode: "none-effort" as const }),
 			...(useDsmlHealing && { streamMarkupHealingPattern: "dsml" as const }),
 		},
 	};

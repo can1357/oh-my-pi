@@ -229,6 +229,8 @@ export interface SessionInitEntry extends SessionEntryBase {
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	/** Tool ceiling installed after the first schema-invalid yield. */
 	outputSchemaFailureToolNames?: string[];
+	/** True only after schema correction has activated the persisted tool ceiling. */
+	outputSchemaCorrectionLocked?: boolean;
 	/** Whether revival must retain only the explicitly persisted tool names. */
 	restrictToolNames?: boolean;
 	/** Spawn allowlist the subagent ran with ("" = none, "*" = any, else CSV); absent on pre-spawns files. */

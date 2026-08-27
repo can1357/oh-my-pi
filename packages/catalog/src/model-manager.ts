@@ -358,7 +358,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				? preparedLatestCacheModels.filter(model => !additiveStaticModelIds.has(model.id))
 				: preparedLatestCacheModels;
 			const fallbackSnapshotModels = collapseBuiltModelVariants(
-				mergeDynamicModels(mergeDynamicModels(staticModels, latestCacheModels), modelsDevModels),
+				mergeDynamicModels(
+					mergeDynamicModels(staticModels, latestCacheModels, replaceDynamicModels),
+					modelsDevModels,
+				),
 			);
 			writeModelCache(
 				cacheProviderId,

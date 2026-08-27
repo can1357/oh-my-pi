@@ -50,6 +50,11 @@ import { type ArtifactManager, writeArtifact } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
+import {
+	getRetryFallbackChains,
+	parseRetryFallbackSelector,
+	resolveRetryFallbackChainKey,
+} from "../session/retry-fallback-chains";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
@@ -99,13 +104,17 @@ export interface StructuredOutputHarnessPolicy {
 /** Merge schema-bearing agents fail closed and become yield-only after the first invalid result. */
 export function resolveStructuredOutputHarnessPolicy(
 	provider: string | undefined,
-	hasOutputSchema: boolean,
+	outputSchema: unknown,
 	requestedMode: StructuredSubagentSchemaMode | undefined,
 ): StructuredOutputHarnessPolicy {
-	if (provider !== "merge-gateway" || !hasOutputSchema) {
+	const { normalized } = normalizeSchema(outputSchema);
+	if (provider !== "merge-gateway" || normalized === undefined) {
 		return { mode: requestedMode, failureToolNames: undefined };
 	}
 	return { mode: "strict", failureToolNames: ["yield"] };
+}
+export function isOutputSchemaCorrectionLock(entry: { type: string; outputSchemaCorrectionLocked?: boolean }): boolean {
+	return entry.type === "session_init" && entry.outputSchemaCorrectionLocked === true;
 }
 
 /**
@@ -182,6 +191,19 @@ function normalizeModelPatterns(value: string | string[] | undefined): string[] 
 export function modelPatternTargetsProvider(pattern: string, provider: string): boolean {
 	const normalized = pattern.trim();
 	return normalized === provider || normalized.startsWith(`${provider}/`);
+}
+export function mergeMayServeSubagent(args: {
+	actualProvider: string | undefined;
+	requestedPatterns: readonly string[];
+	fallbackMayReachMerge: boolean;
+	authFallbackUsed: boolean;
+}): boolean {
+	if (args.actualProvider === "merge-gateway") return true;
+	if (args.authFallbackUsed) return false;
+	return (
+		args.requestedPatterns.some(pattern => modelPatternTargetsProvider(pattern, "merge-gateway")) ||
+		args.fallbackMayReachMerge
+	);
 }
 
 const SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX = "subagent:";
@@ -301,6 +323,40 @@ function installSubagentRetryFallbackChain(args: {
 	}
 	settings.override("retry.fallbackChains", fallbackChains);
 	return role;
+}
+export function retryFallbackMayReachProvider(args: {
+	settings: Settings;
+	modelRegistry: ModelRegistry;
+	initialSelector: string | undefined;
+	roleHint: string | undefined;
+	targetProvider: string;
+}): boolean {
+	const { settings, modelRegistry, initialSelector, roleHint, targetProvider } = args;
+	if (!initialSelector) return false;
+	const context = {
+		chains: getRetryFallbackChains(settings),
+		getModelRole: (role: string) => settings.getModelRole(role),
+		modelLookup: modelRegistry,
+	};
+	const queue: Array<{ selector: string; roleHint?: string }> = [{ selector: initialSelector, roleHint }];
+	const seen = new Set<string>();
+	while (queue.length > 0) {
+		const current = queue.shift()!;
+		const visitKey = `${current.selector}\u0000${current.roleHint ?? ""}`;
+		if (seen.has(visitKey)) continue;
+		seen.add(visitKey);
+		if (modelPatternTargetsProvider(current.selector, targetProvider)) return true;
+		const parsed = parseRetryFallbackSelector(current.selector, modelRegistry);
+		const currentModel = parsed ? modelRegistry.find(parsed.provider, parsed.id) : undefined;
+		if (currentModel?.provider === targetProvider) return true;
+		const chainKey = resolveRetryFallbackChainKey(context, current.selector, currentModel, current.roleHint);
+		const chain = chainKey ? context.chains[chainKey] : undefined;
+		if (!Array.isArray(chain)) continue;
+		for (const selector of chain) {
+			if (typeof selector === "string") queue.push({ selector });
+		}
+	}
+	return false;
 }
 
 export interface IrcPeerRosterRow {
@@ -3031,24 +3087,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				modelRegistry,
 				subagentSettings,
 			);
-			const inheritedMergeFallback =
-				inheritedRetryFallbackChain?.some(
-					selector =>
-						modelPatternTargetsProvider(selector, "merge-gateway") ||
-						resolveModelOverride([selector], modelRegistry, subagentSettings).model?.provider === "merge-gateway",
-				) === true;
-			const mergeMayServe =
-				model?.provider === "merge-gateway" ||
-				modelPatterns.some(pattern => modelPatternTargetsProvider(pattern, "merge-gateway")) ||
-				retryFallbackCandidates.some(candidate => candidate.model.provider === "merge-gateway") ||
-				inheritedMergeFallback;
-			const structuredOutputPolicy = resolveStructuredOutputHarnessPolicy(
-				mergeMayServe ? "merge-gateway" : model?.provider,
-				outputSchema !== undefined,
-				options.outputSchemaMode,
-			);
-			effectiveOutputSchemaMode = structuredOutputPolicy.mode;
-			outputSchemaFailureToolNames = structuredOutputPolicy.failureToolNames;
+			const { normalized: normalizedOutputSchema } = normalizeSchema(outputSchema);
 			if (modelResolutionWarning) {
 				logger.warn("Subagent model resolution warning", {
 					warning: modelResolutionWarning,
@@ -3077,6 +3116,30 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					requested: modelPatterns,
 				});
 			}
+			const selectedFallbackCandidate = retryFallbackCandidates.find(
+				candidate => candidate.model.provider === model?.provider && candidate.model.id === model?.id,
+			);
+			const initialFallbackSelector =
+				selectedFallbackCandidate?.selector ?? (model ? formatModelStringWithRouting(model) : modelPatterns[0]);
+			const mergeMayServe = mergeMayServeSubagent({
+				actualProvider: model?.provider,
+				requestedPatterns: modelPatterns,
+				fallbackMayReachMerge: retryFallbackMayReachProvider({
+					settings: subagentSettings,
+					modelRegistry,
+					initialSelector: initialFallbackSelector,
+					roleHint: retryFallbackRole ?? modelRole,
+					targetProvider: "merge-gateway",
+				}),
+				authFallbackUsed,
+			});
+			const structuredOutputPolicy = resolveStructuredOutputHarnessPolicy(
+				mergeMayServe ? "merge-gateway" : model?.provider,
+				outputSchema,
+				options.outputSchemaMode,
+			);
+			effectiveOutputSchemaMode = structuredOutputPolicy.mode;
+			outputSchemaFailureToolNames = structuredOutputPolicy.failureToolNames;
 			if (model?.contextWindow && model.contextWindow > 0) {
 				progress.contextWindow = model.contextWindow;
 			}
@@ -3187,7 +3250,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				});
 			}
 
-			const { normalized: normalizedOutputSchema } = normalizeSchema(outputSchema);
 			// Root resolved by the latest roster ensure; the prompt callback renders
 			// live peer rows scoped to it, so a session switch hides stale parked trees.
 			let ircRootSessionFile: string | undefined;
@@ -3332,9 +3394,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 								AgentRegistry.global().get(MAIN_AGENT_ID)?.sessionFile,
 						);
 					}
-					const lockedInit = reopened
-						.getBranch()
-						.findLast(entry => entry.type === "session_init" && entry.restrictToolNames === true);
+					const lockedInit = reopened.getBranch().findLast(isOutputSchemaCorrectionLock);
 					const { session: revived } = await createAgentSession(
 						buildSubagentSessionOptions(
 							reopened,

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Merge Gateway can now be connected with `/login merge-gateway` or `MERGE_GATEWAY_API_KEY`, exposing its coding-agent-compatible catalog; schema-bound Merge subagents fail closed and use yield-only correction after invalid results.
+
 ## [18.0.7] - 2026-08-26
 
 ### Added
@@ -423,7 +427,6 @@
 - Added repeat read warning hints when identical file content is read multiple times.
 - Explicit DAP adapters can now attach without a PID or port when `attachDefaults` provide the target arguments.
 - Added `isProjectTrusted()` compatibility shim to `ExtensionContext` for extensions targeting upstream per-directory trust gates.
-- Merge Gateway can now be connected with `/login merge-gateway` or `MERGE_GATEWAY_API_KEY`, exposing its coding-agent-compatible catalog; schema-bound Merge subagents fail closed and use yield-only correction after invalid results.
 
 ### Changed
 

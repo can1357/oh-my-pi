@@ -69,7 +69,12 @@ async function createPersistedSession(
 	restrictToolNames?: boolean,
 	modelRole?: string,
 	advisor?: string,
-	contract?: { tools?: string[]; readOnly?: boolean; outputSchemaFailureToolNames?: string[] },
+	contract?: {
+		tools?: string[];
+		readOnly?: boolean;
+		outputSchemaFailureToolNames?: string[];
+		outputSchemaCorrectionLocked?: boolean;
+	},
 ): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 	const sessionFile = manager.getSessionFile();
@@ -79,6 +84,7 @@ async function createPersistedSession(
 		task: "persisted task",
 		tools: contract?.tools ?? ["read", "yield"],
 		outputSchemaFailureToolNames: contract?.outputSchemaFailureToolNames,
+		outputSchemaCorrectionLocked: contract?.outputSchemaCorrectionLocked,
 		restrictToolNames,
 		modelRole,
 		resolvedModel: modelRole ? "anthropic/claude-sonnet-4-5" : undefined,
@@ -160,6 +166,7 @@ describe("persisted subagent revival", () => {
 		const sessionFile = await createPersistedSession(cwd, true, undefined, undefined, {
 			tools: ["yield"],
 			outputSchemaFailureToolNames: ["yield"],
+			outputSchemaCorrectionLocked: true,
 		});
 		const hostileMcpGetTools = vi.fn(() => [{ name: "read", label: "hostile/read" }]);
 		MCPManager.setInstance({ getTools: hostileMcpGetTools } as unknown as MCPManager);

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	artifactsDirsFromRegistry,
@@ -130,8 +131,12 @@ describe("structured subagent primitive", () => {
 			mode: "permissive",
 			failureToolNames: undefined,
 		});
-		expect(executorModule.resolveStructuredOutputHarnessPolicy("merge-gateway", false, undefined)).toEqual({
+		expect(executorModule.resolveStructuredOutputHarnessPolicy("merge-gateway", undefined, undefined)).toEqual({
 			mode: undefined,
+			failureToolNames: undefined,
+		});
+		expect(executorModule.resolveStructuredOutputHarnessPolicy("merge-gateway", null, "permissive")).toEqual({
+			mode: "permissive",
 			failureToolNames: undefined,
 		});
 		expect(executorModule.modelPatternTargetsProvider("merge-gateway/deepseek/deepseek-v3.2", "merge-gateway")).toBe(
@@ -140,6 +145,56 @@ describe("structured subagent primitive", () => {
 		expect(executorModule.modelPatternTargetsProvider("openrouter/deepseek/deepseek-v3.2", "merge-gateway")).toBe(
 			false,
 		);
+		expect(
+			executorModule.isOutputSchemaCorrectionLock({
+				type: "session_init",
+				outputSchemaCorrectionLocked: true,
+			}),
+		).toBe(true);
+		expect(executorModule.isOutputSchemaCorrectionLock({ type: "session_init" })).toBe(false);
+		expect(
+			executorModule.mergeMayServeSubagent({
+				actualProvider: "anthropic",
+				requestedPatterns: ["merge-gateway/deepseek/deepseek-v3.2"],
+				fallbackMayReachMerge: true,
+				authFallbackUsed: true,
+			}),
+		).toBe(false);
+		expect(
+			executorModule.mergeMayServeSubagent({
+				actualProvider: "merge-gateway",
+				requestedPatterns: [],
+				fallbackMayReachMerge: false,
+				authFallbackUsed: true,
+			}),
+		).toBe(true);
+	});
+
+	it("finds Merge through nested exact-model fallback chains", () => {
+		const models = new Map([
+			["anthropic/a", { provider: "anthropic", id: "a" }],
+			["openrouter/b", { provider: "openrouter", id: "b" }],
+			["merge-gateway/c", { provider: "merge-gateway", id: "c" }],
+		]);
+		const modelRegistry = {
+			find: (provider: string, id: string) => models.get(`${provider}/${id}`),
+			hasProvider: (provider: string) => [...models.values()].some(model => model.provider === provider),
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			"retry.fallbackChains": {
+				"anthropic/a": ["openrouter/b"],
+				"openrouter/b": ["merge-gateway/c"],
+			},
+		});
+		expect(
+			executorModule.retryFallbackMayReachProvider({
+				settings,
+				modelRegistry,
+				initialSelector: "anthropic/a",
+				roleHint: undefined,
+				targetProvider: "merge-gateway",
+			}),
+		).toBe(true);
 	});
 
 	it("gives task and eval invocations identical blocked-agent preflight errors", async () => {
