@@ -17,7 +17,7 @@ type PipedSubprocess<In extends InMask = InMask> = Subprocess<In, "pipe", "pipe"
 
 const LINUX_SUBREAPER_COMMAND_ENV = "OMP_PTREE_SUBREAPER_COMMAND";
 const LINUX_SUBREAPER_BUN_BE_BUN_ENV = "OMP_PTREE_SUBREAPER_BUN_BE_BUN";
-const SUBREAPER_KILL_SWEEP_MS = 100;
+const SUBREAPER_KILL_WINDOW_MS = 100;
 const SUBREAPER_KILL_POLL_MS = 5;
 
 /**
@@ -348,7 +348,7 @@ export class ChildProcess<In extends InMask = InMask> {
 			// walk and reparents it to the subreaper after that root was enumerated.
 			const root = Process.fromPid(this.proc.pid);
 			if (root) {
-				this.#terminating = this.#hardKillSubreaperTree(root);
+				this.#terminating = this.#hardKillSubreaperTree(root).catch(e => void e);
 				return;
 			}
 		}
@@ -388,19 +388,22 @@ export class ChildProcess<In extends InMask = InMask> {
 	}
 
 	async #hardKillSubreaperTree(root: Process): Promise<void> {
-		const deadline = Date.now() + SUBREAPER_KILL_SWEEP_MS;
-		let emptySweeps = 0;
-		while (emptySweeps < 2 && Date.now() < deadline) {
-			const children = root.children();
-			if (children.length === 0) {
-				emptySweeps++;
-			} else {
-				emptySweeps = 0;
-				for (const child of children) child.killTree(9);
+		try {
+			const deadline = Date.now() + SUBREAPER_KILL_WINDOW_MS;
+			let emptySweeps = 0;
+			while (emptySweeps < 2 && Date.now() < deadline) {
+				const children = root.children();
+				if (children.length === 0) {
+					emptySweeps++;
+				} else {
+					emptySweeps = 0;
+					for (const child of children) child.killTree(9);
+				}
+				if (emptySweeps < 2) await Bun.sleep(SUBREAPER_KILL_POLL_MS);
 			}
-			if (emptySweeps < 2) await Bun.sleep(SUBREAPER_KILL_POLL_MS);
+		} finally {
+			root.killTree(9);
 		}
-		root.killTree(9);
 	}
 
 	// ── Output helpers ───────────────────────────────────────────────────
