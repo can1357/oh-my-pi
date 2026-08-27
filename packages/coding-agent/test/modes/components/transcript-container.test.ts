@@ -449,6 +449,70 @@ describe("TranscriptContainer", () => {
 		expect(transcript.peekFinalizedBatch(80, 10)?.rows).toEqual(["committed", ""]);
 		expect(transcript.renderViewport(80, 10, frame)).toEqual(["active"]);
 	});
+	it("returns the first rendered row for a visible anchor", () => {
+		const transcript = new TranscriptContainer();
+		const before = new Block(["prompt"], true);
+		const response = new Block(["response start", "response end"], true);
+		transcript.addChild(before);
+		transcript.addChild(response);
+
+		const first = transcript.renderWithAnchor(80, response);
+		expect(first).toEqual({
+			rows: ["prompt", "", "response start", "response end"],
+			anchorRow: 2,
+		});
+		expect(transcript.renderWithAnchor(80, response).rows).toBe(first.rows);
+
+		response.finalize(["changed response"]);
+		const changed = transcript.renderWithAnchor(80, response);
+		expect(changed.rows).toEqual(["prompt", "", "changed response"]);
+		expect(changed.rows).not.toBe(first.rows);
+
+		transcript.releaseFullLedgerRenderCache();
+		expect(transcript.renderWithAnchor(80, response).rows).not.toBe(changed.rows);
+	});
+
+	it("falls forward from an empty anchor to the next visible block", () => {
+		const transcript = new TranscriptContainer();
+		const before = new Block(["prompt"], true);
+		const empty = new Block([], true);
+		const response = new Block(["response"], true);
+		transcript.addChild(before);
+		transcript.addChild(empty);
+		transcript.addChild(response);
+
+		expect(transcript.renderWithAnchor(80, empty)).toEqual({
+			rows: ["prompt", "", "response"],
+			anchorRow: 2,
+		});
+	});
+
+	it("accounts for one separator between every visible block", () => {
+		const transcript = new TranscriptContainer();
+		const first = new Block(["a1", "a2"], true);
+		const second = new Block(["b1", "b2"], true);
+		const third = new Block(["c1"], true);
+		transcript.addChild(first);
+		transcript.addChild(second);
+		transcript.addChild(third);
+
+		const anchored = transcript.renderWithAnchor(80, third);
+		expect(anchored.rows).toEqual(transcript.render(80));
+		expect(anchored.anchorRow).toBe(6);
+	});
+
+	it("returns no anchor row for a missing or trailing invisible anchor", () => {
+		const transcript = new TranscriptContainer();
+		const visible = new Block(["visible"], true);
+		const empty = new Block([], true);
+		const missing = new Block(["missing"], true);
+		transcript.addChild(visible);
+		transcript.addChild(empty);
+
+		expect(transcript.renderWithAnchor(80, missing).anchorRow).toBeUndefined();
+		expect(transcript.renderWithAnchor(80, empty).anchorRow).toBeUndefined();
+	});
+
 	it("renders exactly the trailing semantic rows without walking the full ledger", () => {
 		const transcript = new TranscriptContainer();
 		transcript.addChild(new Block(["a1", "a2"], true));

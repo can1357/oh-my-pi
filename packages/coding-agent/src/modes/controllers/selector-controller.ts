@@ -87,6 +87,7 @@ import { AgentHubOverlayComponent } from "../components/agent-hub";
 import { AgentsHubComponent } from "../components/agents-hub";
 import { AssistantMessageComponent } from "../components/assistant-message";
 import { CopySelectorComponent } from "../components/copy-selector";
+import { CurrentTranscriptViewer } from "../components/current-transcript-viewer";
 import { ExtensionDashboard } from "../components/extensions";
 import { listLiveToolRecords, liveToolRecordFromSession } from "../components/extensions/live-tool-session";
 import { HistorySearchComponent } from "../components/history-search";
@@ -103,7 +104,7 @@ import { SessionAccountSelectorComponent } from "../components/session-account-s
 import { SessionSelectorComponent, type SessionSelectorOptions } from "../components/session-selector";
 import { SettingsSelectorComponent } from "../components/settings-selector";
 import { ToolExecutionComponent } from "../components/tool-execution";
-import { TranscriptBlock } from "../components/transcript-container";
+import { TranscriptBlock, type TranscriptContainer } from "../components/transcript-container";
 import { TreeSelectorComponent } from "../components/tree-selector";
 import { UserMessageSelectorComponent } from "../components/user-message-selector";
 import type { SessionObserverRegistry } from "../session-observer-registry";
@@ -164,6 +165,22 @@ export class SelectorController {
 	focusActiveEditorArea(): void {
 		const visible = this.ctx.editorContainer.children[0] ?? this.ctx.editor;
 		this.ctx.ui.setFocus(visible);
+	}
+
+	showCurrentTranscript(container: TranscriptContainer, anchor: Component): void {
+		let overlayHandle: OverlayHandle | undefined;
+		const viewer = new CurrentTranscriptViewer({
+			container,
+			anchor,
+			requestRender: () => this.ctx.ui.requestRender(),
+			onClose: () => {
+				viewer.dispose();
+				overlayHandle?.hide();
+				this.focusActiveEditorArea();
+				this.ctx.ui.requestRender();
+			},
+		});
+		overlayHandle = this.#showFullscreenMenu(viewer);
 	}
 
 	/**

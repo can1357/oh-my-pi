@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a fullscreen latest-answer transcript reader, available with `Alt+U` or `/reader`, that skips prior tool work and visible reasoning while preserving keyboard, mouse-wheel, and native terminal scrollback behavior.
+
 ## [18.0.10] - 2026-08-28
 
 ### Added

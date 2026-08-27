@@ -47,6 +47,10 @@ interface FinalizableBlock {
 	renderTranscriptBlockEmergencyRow?(width: number): string | undefined;
 }
 
+interface TranscriptReaderAnchor {
+	getTranscriptReaderAnchorOffset?(width: number): number | undefined;
+}
+
 /**
  * Block lifecycle:
  * - `active`: still mutating; renders live and counts against tool admission.
@@ -69,6 +73,14 @@ interface TranscriptEntry {
 	 * state for emitted-row slicing but never emits another mid-stream row.
 	 */
 	stableFrozen: boolean;
+}
+
+interface FullLedgerCache {
+	width: number;
+	components: readonly Component[];
+	blocks: readonly (readonly string[])[];
+	rows: readonly string[];
+	anchorRows: ReadonlyMap<Component, number | undefined>;
 }
 
 type RetirementPolicy = "pressure" | "flush";
@@ -132,6 +144,7 @@ export class TranscriptContainer extends Container {
 	#replayRequested = false;
 	#toolActivityVisible = true;
 	#lastFrame: AnimationFrame = { tick: 0, now: 0 };
+	#fullLedgerCache: FullLedgerCache | undefined;
 
 	override addChild(component: Component): void {
 		if (isToolActivityComponent(component)) component.setToolActivityVisible(this.#toolActivityVisible);
@@ -453,16 +466,70 @@ export class TranscriptContainer extends Container {
 
 	/** Full semantic render used by exports and non-terminal commands. */
 	override render(width: number): readonly string[] {
+		return this.#renderFullLedger(width).rows;
+	}
+
+	/**
+	 * Full semantic render plus the first visible row at or after `anchor`.
+	 * The row mapping belongs here so navigation uses the same ledger and
+	 * separator accounting as exports and replay-oriented surfaces.
+	 */
+	renderWithAnchor(width: number, anchor: Component): { rows: readonly string[]; anchorRow: number | undefined } {
+		const result = this.#renderFullLedger(width, anchor, true);
+		if (result.anchorRow === undefined) return result;
+		const offset = (anchor as Component & TranscriptReaderAnchor).getTranscriptReaderAnchorOffset?.(width);
+		return offset === undefined ? result : { rows: result.rows, anchorRow: result.anchorRow + offset };
+	}
+
+	/** Release the navigation-only full-ledger snapshot when its reader closes. */
+	releaseFullLedgerRenderCache(): void {
+		this.#fullLedgerCache = undefined;
+	}
+
+	#renderFullLedger(
+		width: number,
+		anchor?: Component,
+		cacheResult = false,
+	): { rows: readonly string[]; anchorRow: number | undefined } {
 		this.#syncEntries();
-		const rows: string[] = [];
+		const components: Component[] = [];
+		const blocks: (readonly string[])[] = [];
 		for (const entry of this.#entries) {
 			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
-			const block = this.#renderEntry(entry, width);
+			components.push(entry.component);
+			blocks.push(this.#renderEntry(entry, width));
+		}
+
+		const cached = cacheResult ? this.#fullLedgerCache : undefined;
+		if (
+			cached?.width === width &&
+			cached.components.length === components.length &&
+			components.every(
+				(component, index) => cached.components[index] === component && cached.blocks[index] === blocks[index],
+			)
+		) {
+			return { rows: cached.rows, anchorRow: anchor === undefined ? undefined : cached.anchorRows.get(anchor) };
+		}
+
+		const rows: string[] = [];
+		const blockStarts: (number | undefined)[] = new Array(blocks.length);
+		for (let index = 0; index < blocks.length; index++) {
+			const block = blocks[index]!;
 			if (block.length === 0) continue;
 			if (rows.length > 0) rows.push("");
+			blockStarts[index] = rows.length;
 			rows.push(...block);
 		}
-		return rows;
+
+		if (!cacheResult) return { rows, anchorRow: undefined };
+		const anchorRows = new Map<Component, number | undefined>();
+		let nextVisibleRow: number | undefined;
+		for (let index = components.length - 1; index >= 0; index--) {
+			if (blockStarts[index] !== undefined) nextVisibleRow = blockStarts[index];
+			anchorRows.set(components[index]!, nextVisibleRow);
+		}
+		this.#fullLedgerCache = { width, components, blocks, rows, anchorRows };
+		return { rows, anchorRow: anchor === undefined ? undefined : anchorRows.get(anchor) };
 	}
 
 	#renderEntry(entry: TranscriptEntry, width: number): readonly string[] {

@@ -182,6 +182,7 @@ export class AssistantMessageComponent extends Container {
 	#markerSlot: Container;
 	#lastMessage?: AssistantMessage;
 	#emergencyText?: Markdown;
+	#responseAnchor?: Markdown;
 	#toolImagesByCallId = new Map<string, ImageContent[]>();
 	#convertedKittyImages = new Map<string, ImageContent>();
 	#showImages = true;
@@ -446,6 +447,26 @@ export class AssistantMessageComponent extends Container {
 		const rows = super.render(width);
 		this.#publishStableSnapshot(rows, width);
 		return rows;
+	}
+
+	/** Row offset of the first prose block, skipping visible reasoning above the final answer. */
+	getTranscriptReaderAnchorOffset(width: number): number | undefined {
+		const responseAnchor = this.#responseAnchor;
+		if (!responseAnchor) return undefined;
+		let offset = 0;
+		let found = false;
+		for (const child of this.#contentContainer.children) {
+			if (child === responseAnchor) {
+				found = true;
+				break;
+			}
+			offset += child.render(width).length;
+		}
+		if (!found) return undefined;
+		const rendered = super.render(width);
+		let leadingBlankRows = 0;
+		while (leadingBlankRows < rendered.length && !/\S/.test(rendered[leadingBlankRows]!)) leadingBlankRows++;
+		return Math.max(0, offset - leadingBlankRows);
 	}
 
 	/** Width-independent stable identities for the streamed leading thinking run. */
@@ -907,6 +928,7 @@ export class AssistantMessageComponent extends Container {
 		// Clear content container
 		this.#contentContainer.clear();
 		this.#emergencyText = undefined;
+		this.#responseAnchor = undefined;
 		this.#thinkingDots = undefined;
 		this.#hasTruncatableError = false;
 
@@ -936,6 +958,7 @@ export class AssistantMessageComponent extends Container {
 				const mdOptions = this.#textColorTransform ? { color: this.#textColorTransform } : undefined;
 				const md = new Markdown(trimmed, 1, 0, getMarkdownTheme(), mdOptions, 0);
 				this.#contentContainer.addChild(md);
+				this.#responseAnchor ??= md;
 				this.#emergencyText = md;
 				captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: trimmed });
 				hasRenderedContent = true;

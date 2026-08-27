@@ -46,6 +46,7 @@ export const COLLAB_GUEST_ALLOWED_COMMANDS: Record<string, true> = {
 	copy: true,
 	help: true,
 	hotkeys: true,
+	reader: true,
 	theme: true,
 	settings: true,
 	leave: true,

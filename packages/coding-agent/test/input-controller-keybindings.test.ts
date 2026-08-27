@@ -71,6 +71,7 @@ async function createContext() {
 		"app.clipboard.pasteImage": ["ctrl+v"],
 		"app.tools.toggleVisibility": ["ctrl+shift+o"],
 		"app.tools.expand": ["ctrl+o"],
+		"app.transcript.open": ["alt+u"],
 	};
 	const customHandlers = new Map<string, () => void>();
 	const setActionKeys = vi.fn();
@@ -226,6 +227,7 @@ async function createContext() {
 		showHistorySearch: vi.fn(),
 		toggleThinkingBlockVisibility: vi.fn(),
 		showModelSelector,
+		showCurrentTranscript: vi.fn(),
 		updateEditorBorderColor: vi.fn(),
 		hasActiveBtw,
 		handlesBtwBranchKey,
@@ -271,6 +273,7 @@ async function createContext() {
 			handleBtwCopyKey,
 			canCopyBtw,
 			showError,
+			showCurrentTranscript: ctx.showCurrentTranscript,
 		},
 	};
 }
@@ -297,6 +300,26 @@ describe("InputController keybinding setup", () => {
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(1, { temporaryOnly: true });
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(2);
 		expect(spies.resetDisplayAfterAppearanceRefresh).toHaveBeenCalledTimes(1);
+	});
+
+	it("registers a remapped transcript chord once without changing the draft", async () => {
+		const { InputController, ctx, editor, customHandlers, setKeybinding, spies } = await createContext();
+		setKeybinding("app.transcript.open", ["ctrl+x"]);
+		editor.setText("keep this draft");
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+
+		expect(customHandlers.has("ctrl+x")).toBe(true);
+		expect(
+			(editor.setCustomKeyHandler as Mock<(key: string, handler: () => void) => void>).mock.calls.filter(
+				call => call[0] === "ctrl+x",
+			),
+		).toHaveLength(1);
+		customHandlers.get("ctrl+x")?.();
+		expect(spies.showCurrentTranscript).toHaveBeenCalledTimes(1);
+		expect(spies.prompt).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("keep this draft");
 	});
 
 	it("registers the tool activity visibility action", async () => {
