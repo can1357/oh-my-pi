@@ -13,7 +13,7 @@ import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/ext
 import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
 import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
 import { type LocalProtocolOptions, XD_URL_PREFIX } from "../internal-urls";
-import { deduplicateMCPToolsByName } from "../mcp/tool-bridge";
+import { createMCPToolName, deduplicateMCPToolsByName } from "../mcp/tool-bridge";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
@@ -129,8 +129,24 @@ export interface MCPXdevGuidanceMapping extends MountedMCPToolRoute {
 }
 
 export interface MCPXdevGuidanceProjection {
+	/** Routes whose path the naming rule cannot produce, listed one by one. */
 	readonly mappings: readonly MCPXdevGuidanceMapping[];
 	readonly hasOmittedMappings: boolean;
+	/**
+	 * Servers whose every mounted route the naming rule reproduces exactly, so
+	 * the prompt states the rule once instead of one line per tool. A server
+	 * with even one deviating route stays out and its routes are listed.
+	 */
+	readonly ruleServerNames: readonly string[];
+	/**
+	 * Sorted names of the routes {@link ruleServerNames} covers, bounded by the
+	 * same cap as {@link mappings}. Not rendered: the rule replaces them in the
+	 * guidance. It exists so the applied-tool signature still notices a tool
+	 * appearing on or leaving an already-covered server — the rule text alone
+	 * does not change when a server gains its second tool, but the `xd://`
+	 * catalog that lists it does.
+	 */
+	readonly ruleRouteNames: readonly string[];
 }
 
 const MAX_MCP_XDEV_GUIDANCE_MAPPING_DATA_LENGTH = 4000;
@@ -165,7 +181,25 @@ export function projectMountedMCPXdevGuidance(routes: Iterable<MountedMCPToolRou
 	const mappings: MCPXdevGuidanceMapping[] = [];
 	let remainingMappingDataLength = MAX_MCP_XDEV_GUIDANCE_MAPPING_DATA_LENGTH;
 	let hasOmittedMappings = false;
-	for (const route of routes) {
+	// `createMCPToolName` derives a mounted name from (server, tool). When it
+	// reproduces the live name, the prompt can state that rule once for the
+	// whole server instead of spending a line per tool: with two MCP servers
+	// mounted that is the difference between three lines and thirty. Sanitizing,
+	// redundant-prefix stripping, and the 64-char hash cap can all make a name
+	// underivable, so any server with a single deviating route is excluded and
+	// its routes are listed explicitly.
+	const materialized = [...routes];
+	const deviatingServerNames = new Set<string>();
+	const candidateServerNames = new Set<string>();
+	for (const route of materialized) {
+		candidateServerNames.add(route.mcpServerName);
+		if (createMCPToolName(route.mcpServerName, route.mcpToolName) !== route.name) {
+			deviatingServerNames.add(route.mcpServerName);
+		}
+	}
+	const ruleServerNames = [...candidateServerNames].filter(name => !deviatingServerNames.has(name)).sort();
+	for (const route of materialized) {
+		if (!deviatingServerNames.has(route.mcpServerName)) continue;
 		const rawMappingDataLength = route.mcpToolName.length + XD_URL_PREFIX.length + route.name.length;
 		if (mappings.length >= MAX_MCP_XDEV_GUIDANCE_MAPPINGS || rawMappingDataLength > remainingMappingDataLength) {
 			hasOmittedMappings = true;
@@ -181,7 +215,12 @@ export function projectMountedMCPXdevGuidance(routes: Iterable<MountedMCPToolRou
 		mappings.push({ ...route, label, path });
 		remainingMappingDataLength -= mappingDataLength;
 	}
-	return { mappings, hasOmittedMappings };
+	const ruleRouteNames = materialized
+		.filter(route => !deviatingServerNames.has(route.mcpServerName))
+		.map(route => route.name)
+		.sort()
+		.slice(0, MAX_MCP_XDEV_GUIDANCE_MAPPINGS);
+	return { mappings, hasOmittedMappings, ruleServerNames, ruleRouteNames };
 }
 
 const XDEV_MOUNT_NOTICE_MESSAGE_TYPE = "xdev-mount-notice";
@@ -1716,6 +1755,12 @@ export class SessionTools {
 			JSON.stringify({
 				mappings: mountedMCPProjection.mappings.map(mapping => [mapping.label, mapping.path] as const),
 				hasOmittedMappings: mountedMCPProjection.hasOmittedMappings,
+				// Rule-covered routes are not rendered as mappings, but the xd://
+				// catalog still names them, so the signature must move when the set
+				// does. Capped like `mappings`, so churn behind the cap still does
+				// not rebuild.
+				ruleServerNames: mountedMCPProjection.ruleServerNames,
+				ruleRouteNames: mountedMCPProjection.ruleRouteNames,
 			}) ?? "{}";
 		const serverInstructions = this.#getMcpServerInstructions?.();
 		let instructionsSegment = "";
