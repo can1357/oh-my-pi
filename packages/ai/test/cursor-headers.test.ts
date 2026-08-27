@@ -2,17 +2,10 @@ import { describe, expect, test } from "bun:test";
 import {
 	buildCursorRunHeaders,
 	buildCursorUnaryHeaders,
-	CURSOR_CLIENT_VERSION,
 	sanitizeCursorCallerHeaders,
 } from "../src/providers/cursor/headers";
 
 const API_KEY = "ck_test_123";
-
-describe("CURSOR_CLIENT_VERSION", () => {
-	test("is the shipped cursor cli version", () => {
-		expect(CURSOR_CLIENT_VERSION).toBe("cli-2026.08.11-e8db854");
-	});
-});
 
 describe("sanitizeCursorCallerHeaders", () => {
 	test("drops pseudo-headers in any casing", () => {

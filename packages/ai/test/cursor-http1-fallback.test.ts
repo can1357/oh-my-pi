@@ -29,7 +29,8 @@ type PollPlan =
 	| { kind: "trailing-after-end" }
 	| { kind: "data-after-eof" }
 	| { kind: "first-nonzero" }
-	| { kind: "burst" };
+	| { kind: "burst" }
+	| { kind: "malformed-base64" };
 
 let plan: PollPlan = { kind: "success" };
 let appendStatus = 200;
@@ -200,6 +201,17 @@ async function startServer(): Promise<string> {
 				// validated first-value check must reject.
 				const body = Buffer.concat([
 					encodeConnectFrame(encodePollResponse(1n, Buffer.from("bad").toString("base64"), true), false),
+					frameConnectMessage(Buffer.from("{}", "utf8"), CONNECT_END_STREAM_FLAG),
+				]);
+				res.writeHead(200, { "content-type": "application/connect+proto" });
+				res.end(body);
+				return;
+			}
+			if (plan.kind === "malformed-base64") {
+				// The poll payload claims to be base64 but is not canonical; the
+				// bridge must reject it before queueing, not decode and deliver it.
+				const body = Buffer.concat([
+					encodeConnectFrame(encodePollResponse(0n, "!@#$", true), false),
 					frameConnectMessage(Buffer.from("{}", "utf8"), CONNECT_END_STREAM_FLAG),
 				]);
 				res.writeHead(200, { "content-type": "application/connect+proto" });
@@ -473,6 +485,34 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 		}
 		expect(error).toBeInstanceOf(ConnectProtocolError);
 		expect(String(error)).toContain("sequence violation");
+		await expect(bridge.trailers()).rejects.toBeInstanceOf(ConnectProtocolError);
+		expect(pollHits).toBe(1);
+		bridge.close();
+	});
+
+	it("rejects malformed base64 poll data as a protocol failure instead of queueing it", async () => {
+		plan = { kind: "malformed-base64" };
+		const baseUrl = await startServer();
+		const bridge = openCursorHttp1Bridge({
+			baseUrl,
+			requestPath: RUN_PATH,
+			runHeaders: testRunHeaders(),
+			gzipRequest: false,
+		});
+		bridge.write(encodeConnectFrame(Buffer.from("client-request"), false));
+
+		let sawData = false;
+		let error: unknown;
+		try {
+			for await (const frame of bridge.frames()) {
+				if (frame.kind === "data") sawData = true;
+			}
+		} catch (cause) {
+			error = cause;
+		}
+		expect(sawData).toBe(false);
+		expect(error).toBeInstanceOf(ConnectProtocolError);
+		expect(String(error)).toContain("malformed base64");
 		await expect(bridge.trailers()).rejects.toBeInstanceOf(ConnectProtocolError);
 		expect(pollHits).toBe(1);
 		bridge.close();

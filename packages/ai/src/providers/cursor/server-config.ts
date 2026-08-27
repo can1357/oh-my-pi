@@ -344,7 +344,7 @@ function decodeUnaryServerConfigBody(bytes: Uint8Array): CursorBidiAvailability 
 	} catch {
 		return "unspecified";
 	}
-	if (chunks.length === 0) return "unspecified";
+	if (chunks.length !== 1) return "unspecified";
 	return decodeServerConfig(chunks);
 }
 

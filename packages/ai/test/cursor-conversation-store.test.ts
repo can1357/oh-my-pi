@@ -268,4 +268,22 @@ describe("cursor conversation store — rotation", () => {
 		expect(isCursorRotationFresh(rotated)).toBe(true);
 		unpinCursorConversation(rotated);
 	});
+
+	it("keeps a fresh rotation mapping through retained-LRU overflow when the rotated id is not pinned", () => {
+		pinCursorConversation("fresh-base");
+		const rotated = requireRotation(rotateCursorConversation("fresh-base"));
+		unpinCursorConversation("fresh-base");
+
+		// Fill the retained LRU past capacity. The base is the oldest unpinned
+		// entry, so it would be the normal eviction victim, but its resolved
+		// wire id is still fresh and must not be discarded before retry.
+		for (let i = 0; i < CURSOR_RETAINED_CONVERSATION_LIMIT + 1; i++) {
+			const id = `churn-${i}`;
+			pinCursorConversation(id);
+			unpinCursorConversation(id);
+		}
+
+		expect(resolveCursorConversationId("fresh-base")).toBe(rotated);
+		expect(isCursorRotationFresh(rotated)).toBe(true);
+	});
 });

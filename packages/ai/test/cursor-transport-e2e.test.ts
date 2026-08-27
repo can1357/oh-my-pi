@@ -15,7 +15,11 @@ import { create, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { encodeConnectFrame } from "../src/providers/cursor/connect-frame";
 import { disposeCursorH2Pool } from "../src/providers/cursor/h2-pool";
 
-type Scenario = { kind: "gzip-round-trip" } | { kind: "reserved-flag" } | { kind: "bounded-drain" };
+type Scenario =
+	| { kind: "gzip-round-trip" }
+	| { kind: "reserved-flag" }
+	| { kind: "bounded-drain" }
+	| { kind: "trailing-after-turnEnded" };
 
 let server: http2.Http2Server | undefined;
 const sessions = new Set<http2.Http2Session>();
@@ -115,6 +119,16 @@ async function startServer(): Promise<string> {
 			bad.writeUInt32BE(0, 1);
 			stream.write(bad);
 			stream.write(encodeConnectFrame(turnEndedPayload(), false));
+			stream.end();
+			return;
+		}
+
+		if (scenario.kind === "trailing-after-turnEnded") {
+			// turnEnded, then a partial Connect frame that never completes. The
+			// decoder must surface a protocol/envelope error, not an incomplete
+			// stream that the consumer would tolerate as a clean done.
+			stream.write(encodeConnectFrame(turnEndedPayload(), false));
+			stream.write(Buffer.from([0x00, 0x00, 0x00, 0x00, 0x01])); // header claims 1 byte, no payload
 			stream.end();
 			return;
 		}
@@ -224,7 +238,7 @@ describe("Cursor pooled transport e2e", () => {
 		const stream = streamCursor(makeModel(baseUrl), context, {
 			apiKey: "test-token",
 			execHandlers: {
-				read: () => new Promise(() => {}),
+				read: () => Promise.withResolvers<never>().promise,
 			},
 			onToolResult: result => {
 				paired.push(result.toolCallId);
@@ -243,5 +257,17 @@ describe("Cursor pooled transport e2e", () => {
 		// synthetic "Tool not available"; the real result is allowed to win if
 		// it ever arrives, and a hung handler here never does.
 		expect(paired.length).toBe(0);
+	}, 15_000);
+	it("rejects partial trailing bytes after turnEnded as a protocol error", async () => {
+		scenario = { kind: "trailing-after-turnEnded" };
+		const baseUrl = await startServer();
+		const stream = streamCursor(makeModel(baseUrl), context, { apiKey: "test-token" });
+		const eventTypes: string[] = [];
+		for await (const event of stream) eventTypes.push(event.type);
+		const result = await stream.result();
+		expect(eventTypes).not.toContain("done");
+		expect(eventTypes.at(-1)).toBe("error");
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toMatch(/trailing|envelope|protocol/i);
 	}, 15_000);
 });

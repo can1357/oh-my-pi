@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Routed Cursor model discovery through a pooled HTTP/2 transport.
+
 ### Fixed
 
 - Removed the Cursor discovery timeout abort listener after the request completes so a long timeout cannot retain the response buffer.
@@ -11,9 +15,7 @@
 ### Fixed
 
 - Fixed LiteLLM model discovery so model pricing is correctly populated when pricing information is provided by a later metadata endpoint.
-### Changed
 
-- Routed Cursor model discovery through a pooled HTTP/2 transport.
 
 ## [18.0.5] - 2026-08-25
 

@@ -100,10 +100,15 @@ async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void
 /** Returns a loopback port that is currently free (connect will be refused). */
 async function freeClosedPort(): Promise<number> {
 	const srv = net.createServer();
-	await new Promise<void>(resolve => srv.listen(0, "127.0.0.1", () => resolve()));
+	const listening = Promise.withResolvers<void>();
+	srv.once("error", listening.reject);
+	srv.listen(0, "127.0.0.1", () => listening.resolve());
+	await listening.promise;
 	const address = srv.address();
 	const port = typeof address === "object" && address !== null ? address.port : 0;
-	await new Promise<void>(resolve => srv.close(() => resolve()));
+	const closed = Promise.withResolvers<void>();
+	srv.close(error => (error ? closed.reject(error) : closed.resolve()));
+	await closed.promise;
 	return port;
 }
 
@@ -360,12 +365,14 @@ describe("cursor HTTP/2 session pool", () => {
 			// "never settles", which is what a deadlock is.
 			const result = (await Promise.race([
 				acquireCursorH2(runArgs(baseUrl)),
-				new Promise<never>((_, reject) =>
+				(() => {
+					const { promise, reject } = Promise.withResolvers<never>();
 					setTimeout(
 						() => reject(new Error("deadlock: acquire hung after fresh-session drain before first lease")),
 						3000,
-					),
-				),
+					);
+					return promise;
+				})(),
 			])) as CursorH2Acquisition;
 
 			expect(result.ok).toBe(true);
@@ -393,7 +400,10 @@ describe("cursor HTTP/2 session pool", () => {
 			// the stream state and the assertion below would be a false negative.
 			sock.resume();
 		});
-		await new Promise<void>(resolve => sink.listen(0, "127.0.0.1", () => resolve()));
+		const listening = Promise.withResolvers<void>();
+		sink.once("error", listening.reject);
+		sink.listen(0, "127.0.0.1", () => listening.resolve());
+		await listening.promise;
 		const address = sink.address();
 		const port = typeof address === "object" && address !== null ? address.port : 0;
 		const baseUrl = `http://127.0.0.1:${port}`;
@@ -411,7 +421,11 @@ describe("cursor HTTP/2 session pool", () => {
 			// outside.
 			const disposed = await Promise.race([
 				disposeCursorH2Pool().then(() => true),
-				new Promise<false>(timedOut => setTimeout(() => timedOut(false), 3000)),
+				(() => {
+					const { promise, resolve } = Promise.withResolvers<false>();
+					setTimeout(() => resolve(false), 3000);
+					return promise;
+				})(),
 			]);
 			expect(disposed).toBe(true);
 
@@ -447,7 +461,10 @@ describe("cursor HTTP/2 session pool", () => {
 			// the stream state and the assertion below would be a false negative.
 			sock.resume();
 		});
-		await new Promise<void>(resolve => proxy.listen(0, "127.0.0.1", () => resolve()));
+		const listening = Promise.withResolvers<void>();
+		proxy.once("error", listening.reject);
+		proxy.listen(0, "127.0.0.1", () => listening.resolve());
+		await listening.promise;
 		const address = proxy.address();
 		const port = typeof address === "object" && address !== null ? address.port : 0;
 
@@ -479,7 +496,11 @@ describe("cursor HTTP/2 session pool", () => {
 			// 30s timeout.
 			const disposed = await Promise.race([
 				disposeCursorH2Pool().then(() => true),
-				new Promise<false>(timedOut => setTimeout(() => timedOut(false), 3000)),
+				(() => {
+					const { promise, resolve } = Promise.withResolvers<false>();
+					setTimeout(() => resolve(false), 3000);
+					return promise;
+				})(),
 			]);
 			expect(disposed).toBe(true);
 
@@ -517,9 +538,9 @@ describe("cursor HTTP/2 session pool", () => {
 		const bodyAtGate = Promise.withResolvers<void>();
 		__setCursorH2EstablishBodyGate(() => {
 			bodyAtGate.resolve();
-			return new Promise<void>(release => {
-				releaseBody = release;
-			});
+			const { promise, resolve } = Promise.withResolvers<void>();
+			releaseBody = resolve;
+			return promise;
 		});
 
 		try {
@@ -601,7 +622,11 @@ describe("cursor HTTP/2 session pool", () => {
 					() => "resolved",
 					() => "rejected",
 				),
-				new Promise<string>(resolve => setTimeout(() => resolve("hung"), 3000)),
+				(() => {
+					const { promise, resolve } = Promise.withResolvers<string>();
+					setTimeout(() => resolve("hung"), 3000);
+					return promise;
+				})(),
 			]);
 			expect(verdict).toBe("rejected");
 			await expect(first).rejects.toThrow("forced synchronous first-lease failure");
@@ -639,7 +664,10 @@ describe("cursor HTTP/2 session pool", () => {
 			stalledSocket = sock;
 			sock.resume();
 		});
-		await new Promise<void>(resolve => sink.listen(0, "127.0.0.1", () => resolve()));
+		const listening = Promise.withResolvers<void>();
+		sink.once("error", listening.reject);
+		sink.listen(0, "127.0.0.1", () => listening.resolve());
+		await listening.promise;
 		const address = sink.address();
 		const port = typeof address === "object" && address !== null ? address.port : 0;
 		const baseUrl = `https://127.0.0.1:${port}`;
@@ -656,13 +684,21 @@ describe("cursor HTTP/2 session pool", () => {
 					() => "resolved" as const,
 					(error: unknown) => error,
 				),
-				new Promise<"hung">(resolve => setTimeout(() => resolve("hung"), 3000)),
+				(() => {
+					const { promise, resolve } = Promise.withResolvers<"hung">();
+					setTimeout(() => resolve("hung"), 3000);
+					return promise;
+				})(),
 			]);
 			expect(verdict).toBe(reason);
 			await waitFor(() => __cursorH2ConnectingSnapshot().length === 0, 2000);
 			const disposed = await Promise.race([
 				disposeCursorH2Pool().then(() => true),
-				new Promise<false>(timedOut => setTimeout(() => timedOut(false), 3000)),
+				(() => {
+					const { promise, resolve } = Promise.withResolvers<false>();
+					setTimeout(() => resolve(false), 3000);
+					return promise;
+				})(),
 			]);
 			expect(disposed).toBe(true);
 		} finally {
@@ -676,7 +712,10 @@ describe("cursor HTTP/2 session pool", () => {
 			stalledSocket = sock;
 			sock.resume();
 		});
-		await new Promise<void>(resolve => sink.listen(0, "127.0.0.1", () => resolve()));
+		const listening = Promise.withResolvers<void>();
+		sink.once("error", listening.reject);
+		sink.listen(0, "127.0.0.1", () => listening.resolve());
+		await listening.promise;
 		const address = sink.address();
 		const port = typeof address === "object" && address !== null ? address.port : 0;
 		const baseUrl = `https://127.0.0.1:${port}`;
@@ -733,9 +772,9 @@ describe("cursor HTTP/2 session pool", () => {
 		let releaseBody: (() => void) | undefined;
 		__setCursorH2EstablishBodyGate(() => {
 			bodyAtGate.resolve();
-			return new Promise<void>(release => {
-				releaseBody = release;
-			});
+			const { promise, resolve } = Promise.withResolvers<void>();
+			releaseBody = resolve;
+			return promise;
 		});
 		try {
 			const owner = acquireCursorH2(runArgs(baseUrl));
@@ -818,7 +857,9 @@ describe("direct HTTP/2 handshake deadline", () => {
 		} finally {
 			__setCursorH2HandshakeTimeoutMs(undefined);
 			for (const socket of accepted) socket.destroy();
-			await new Promise<void>(resolve => srv.close(() => resolve()));
+			const closed = Promise.withResolvers<void>();
+			srv.close(error => (error ? closed.reject(error) : closed.resolve()));
+			await closed.promise;
 		}
 	}, 2_000);
 });

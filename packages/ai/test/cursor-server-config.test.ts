@@ -32,7 +32,8 @@ type Scenario =
 	| { kind: "oversized" }
 	| { kind: "route-required" }
 	| { kind: "gated"; released: Promise<void> }
-	| { kind: "raw-unary" };
+	| { kind: "raw-unary" }
+	| { kind: "double-data" };
 
 let server: http2.Http2Server | undefined;
 const sessions = new Set<http2.Http2Session>();
@@ -130,6 +131,20 @@ async function startServer(): Promise<string> {
 			}
 			stream.respond({ ":status": 200, "content-type": "application/proto" });
 			stream.write(Buffer.concat([responseFrame({ http2Config: Http2Config.FORCE_BIDI_DISABLED }), endFrame()]));
+			stream.end();
+			return;
+		}
+		if (scenario.kind === "double-data") {
+			// A valid end envelope cannot rescue two data envelopes; the unary
+			// decoder must fail open rather than concatenate two payloads.
+			stream.respond({ ":status": 200, "content-type": "application/proto" });
+			stream.write(
+				Buffer.concat([
+					responseFrame({ http2Config: Http2Config.FORCE_BIDI_DISABLED }),
+					responseFrame({ http2Config: Http2Config.FORCE_ALL_DISABLED }),
+					endFrame(),
+				]),
+			);
 			stream.end();
 			return;
 		}
@@ -231,6 +246,12 @@ describe("fetchCursorBidiAvailability", () => {
 
 	it("returns unspecified when the directive is absent", async () => {
 		scenario = { kind: "absent-directive" };
+		const baseUrl = await startServer();
+		expect(await fetchFor(baseUrl)).toBe("unspecified");
+	});
+
+	it("fails open to unspecified on a unary body with more than one data envelope", async () => {
+		scenario = { kind: "double-data" };
 		const baseUrl = await startServer();
 		expect(await fetchFor(baseUrl)).toBe("unspecified");
 	});

@@ -64,7 +64,10 @@ beforeAll(async () => {
 			stream.end(payload);
 		});
 	});
-	await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+	const listening = Promise.withResolvers<void>();
+	server.once("error", listening.reject);
+	server.listen(0, "127.0.0.1", listening.resolve);
+	await listening.promise;
 	const address = server.address();
 	if (!address || typeof address === "string") {
 		throw new Error("expected http2 fixture server to bind a tcp port");

@@ -283,16 +283,26 @@ export class ConnectFrameDecoder {
 		return frames;
 	}
 
-	/** Call on stream EOF. Throws `ConnectProtocolError` when no end-of-stream was seen, or when trailing bytes survive. */
+	/**
+	 * Call on stream EOF. Throws `ConnectProtocolError` when no end-of-stream
+	 * was seen, or when trailing bytes survive the final frame. A stream that
+	 * ends exactly on a frame boundary without a terminal envelope is still an
+	 * incomplete stream, which the Cursor consumer tolerates once it has seen
+	 * `turnEnded`; any dangling partial frame or stray bytes after that boundary
+	 * is a protocol/envelope error instead.
+	 */
 	finish(): void {
+		if (this.#pending > 0) {
+			throw new ConnectProtocolError(
+				this.#sawEndStream
+					? "Cursor Connect received bytes after end-of-stream envelope"
+					: "Cursor Connect received trailing bytes after final frame",
+				{ kind: "envelope" },
+			);
+		}
 		if (!this.#sawEndStream) {
 			throw new ConnectProtocolError("Cursor stream ended before end-of-stream frame", {
 				kind: "incomplete-stream",
-			});
-		}
-		if (this.#pending > 0) {
-			throw new ConnectProtocolError("Cursor Connect received bytes after end-of-stream envelope", {
-				kind: "envelope",
 			});
 		}
 	}

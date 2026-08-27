@@ -211,7 +211,7 @@ export function openCursorHttp1Bridge(args: {
 				}
 				expectedSeqno = pollResponse.seqno + 1n;
 				if (pollResponse.data) {
-					queue.push({ kind: "data", payload: Buffer.from(pollResponse.data, "base64") });
+					queue.push({ kind: "data", payload: decodeCanonicalBase64PollData(pollResponse.data) });
 				}
 				if (pollResponse.eof) sawPollEof = true;
 			}
@@ -413,6 +413,14 @@ function decodePollResponse(bytes: Uint8Array): PollResponse {
 		throw new ConnectProtocolError("Cursor HTTP/1 poll carried malformed protobuf", { kind: "envelope", cause });
 	}
 	return { seqno, data, eof };
+}
+
+function decodeCanonicalBase64PollData(value: string): Buffer {
+	const decoded = Buffer.from(value, "base64");
+	if (decoded.toString("base64") !== value) {
+		throw new ConnectProtocolError("Cursor HTTP/1 poll carried malformed base64 data", { kind: "envelope" });
+	}
+	return decoded;
 }
 
 function fieldVarint(field: number, value: bigint): Uint8Array {

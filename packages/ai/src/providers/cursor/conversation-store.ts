@@ -72,8 +72,9 @@ export function pinCursorConversation(id: string): CursorConversationEntry {
  * LRU: its base→rotated mapping and rotation count, its current rotated id
  * from the success/fresh sets, and the base id itself from those sets. Only
  * called for a base genuinely evicted from `retainedLru`. Entries whose
- * resolved (rotated) id is still pinned are skipped by the overflow loop so
- * an in-flight rotated request cannot lose its mapping.
+ * resolved (rotated) id is still active or fresh are skipped by the overflow
+ * loop so an in-flight or not-yet-retried rotated request cannot lose its
+ * mapping.
  */
 function evictCursorRotationState(baseId: string): void {
 	const rotated = rotatedConversationIds.get(baseId);
@@ -112,7 +113,8 @@ export function unpinCursorConversation(id: string): void {
 	while (retainedLru.size > CURSOR_RETAINED_CONVERSATION_LIMIT) {
 		let victim: string | undefined;
 		for (const candidate of retainedLru) {
-			if ((activePinCounts.get(resolveCursorConversationId(candidate)) ?? 0) > 0) continue;
+			const resolved = resolveCursorConversationId(candidate);
+			if ((activePinCounts.get(resolved) ?? 0) > 0 || freshRotatedConversationIds.has(resolved)) continue;
 			victim = candidate;
 			break;
 		}
