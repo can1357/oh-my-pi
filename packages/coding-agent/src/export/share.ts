@@ -273,6 +273,10 @@ function collectSettledEntryStrings(
 	addJsonStrings: (value: unknown) => void,
 ): void {
 	if (entry.outcome.kind === "failed") add(entry.outcome.failure.message);
+	// An interruption reason is the same free-form outcome text as a failure
+	// message (deriveToolOutcome persists abort reasons verbatim) — scan it
+	// for regex secrets too, or the redaction pass below has nothing to map.
+	if (entry.outcome.kind === "interrupted") add(entry.outcome.reason);
 	const presentation = entry.presentation;
 	add(presentation.stream?.text);
 	for (const fact of presentation.facts) collectToolFactStrings(fact, add);
@@ -419,7 +423,12 @@ function redactShareSettledEntry(
 						message: o.obfuscate(entry.outcome.failure.message, sharedRegexSecretValues),
 					},
 				}
-			: entry.outcome;
+			: entry.outcome.kind === "interrupted"
+				? {
+						...entry.outcome,
+						reason: o.obfuscate(entry.outcome.reason, sharedRegexSecretValues),
+					}
+				: entry.outcome;
 	return {
 		...entry,
 		outcome,

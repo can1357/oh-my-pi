@@ -484,6 +484,41 @@ describe("buildShareSnapshot", () => {
 		expect(JSON.stringify(entries)).toContain(secret);
 	});
 
+	test("redacts an interrupted outcome's reason before sharing, including regex-matched secrets", () => {
+		// The interruption reason is free-form outcome text like a failure
+		// message; a regex secret proves the pre-scan pass discovers it there
+		// (plain redaction alone would pass without the scan walking the arm).
+		const regexSecret = "tok_intr7reason";
+		const ts = "2026-06-12T00:00:00.000Z";
+		const entries: SessionEntry[] = [
+			{
+				type: "tool_execution_settled",
+				id: "j3",
+				parentId: null,
+				timestamp: ts,
+				recordVersion: 1,
+				executionId: "exec-intr-1",
+				outcome: { kind: "interrupted", reason: `aborted while reading ${regexSecret}` },
+				presentation: { version: 1, facts: [], attachments: [] },
+				modelProjection: { version: 1, content: [] },
+			} as unknown as SessionEntry,
+		];
+		const sm = {
+			getHeader: () => sessionData([], "x").header,
+			getEntries: () => entries,
+			getLeafId: () => "j3",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([{ type: "regex", content: "tok_intr[0-9a-z]+" }]);
+
+		const flat = JSON.stringify(buildShareSnapshot(sm, { obfuscator }));
+
+		expect(flat).not.toContain(regexSecret);
+		// Non-secret structure survives, and the reason text is redacted, not dropped.
+		expect(flat).toContain("aborted while reading");
+		// Source entries keep the real value; redaction is share-only.
+		expect(JSON.stringify(entries)).toContain(regexSecret);
+	});
+
 	test("redacts diff attachment paths before sharing", () => {
 		// A diff attachment's `path` is a workspace path like any other: a secret
 		// embedded in it must be obfuscated exactly like the attachment's texts
