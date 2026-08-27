@@ -2,11 +2,26 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Changed the extension/hook `tool_result` event's `EditToolResultEvent.details` shape for the `edit` tool: it is no longer the producer's internal `EditToolDetails` bag, but a derived `{ diff, files }` payload (`EditToolResultDetails`/`EditToolResultFile` from `extensibility/tool-event-details`) describing each file's `applied`/`failed`/`skipped` outcome. A `tool_result` handler that read bag fields (`perFileResults`, `oldText`/`newText`, `unattemptedPaths`) off an edit event, or echoed `event.details` back unmodified, must migrate to the new shape.
+
 ### Added
 
 - Transcript usage rows now show the total prompt-to-yield time (Δ + clock, including tool calls) after the turn timestamp, opt-in via `display.showTurnTime` (off by default).
 - `omp usage` now shows Z.AI GLM Coding Plan credit quotas (5h + weekly) with the subscribed plan tier.
 - The usage status line now labels untiered quota windows with the report's plan tier, surfacing Z.AI Coding Plan (`pro`) and Codex plan names next to the 5h/7d percentages.
+- ACP presentation events:
+	- Tools can now stream structured progress — output chunks, gaps, and other facts — through a dedicated channel instead of resending a growing snapshot on every update, closing off a whole class of duplicate-output bugs where both a live stream and a final snapshot delivered the same bytes.
+	- Local foreground `bash`/`shell`/`exec` calls (not a client-owned terminal, not PTY) now stream their **full** output to an ACP terminal card instead of the ~50 KB window kept for the model: a 192 KB command used to arrive truncated with a fabricated "earlier bytes were dropped" notice; it now arrives byte-for-byte, with the truncation and a link to the full output (`artifact://`) kept only on the model-facing side. Every other bash route and all `eval` backends are unaffected. The live/replayable presentation transcript itself is capped at 1 MiB (`PRESENTATION_MAX_RETAINED_BYTES`): past that, the card's feed stops and a single truncation fact records the rollover on every settlement whose presentation stream has not already begun freezing — the model-facing body and artifact capture are unaffected.
+	- ACP tool-call updates are now assembled by a single internal state machine, closing off several related bugs at once: a terminal card can no longer end up sharing an update with unrelated content, terminal-only metadata is never sent to a client that didn't ask for it, and a call's completed/failed status is always computed the same way. Tool updates also stop leaking the tool's entire raw result to the client; a small marker takes its place where a client (Zed) genuinely needed *something* there to avoid misreading a completed call as a rejected prompt.
+	- Updates sent to an ACP client for one session are now strictly ordered: a multi-part update can no longer be interleaved with an unrelated one, a failed send now stops the turn instead of pretending the client recovered, and a permission dialog always appears after its tool call's card rather than possibly racing ahead of it.
+
+### Changed
+
+- ACP: an external/MCP tool literally named `bash`, `shell`, `exec`, or `eval`, with no live client-owned terminal, now shows nothing in its terminal card until it finishes, then all of its output at once, instead of trying to stream live updates reconstructed from repeated snapshots — a reconstruction that was itself a source of duplicated output and false "bytes were dropped" warnings. Built-in `bash`/`shell`/`exec`/`eval` calls never went through this path and are unaffected.
+- ACP: the built-in `bash`/`shell`/`exec`/`eval` tools no longer duplicate their exit-code/wall-time/truncation/artifact notices into an old internal field — that information has been available as a proper structured fact for a while, and nothing was still reading the duplicate. One legacy compatibility path (an MCP-proxied eval-shaped tool) still uses it. No visible change for any client.
+- Bumped the session file format to version 4 to accommodate the persisted tool-execution journal (`tool_execution_started`/`tool_execution_settled`) groundwork; a v3 file migrates to v4 as a no-op beyond the version stamp, and a session file newer than this build's supported version is now rejected outright instead of being silently loaded as-is.
 
 ### Fixed
 
@@ -30,10 +45,41 @@
 - Fixed quitting re-streaming the entire committed transcript when a resize-triggered scrollback replay was still pending; shutdown now flushes only genuinely un-retired rows.
 - Fixed fast tool completions leaving a permanent running summary that blocked transcript retirement and squeezed later tool output.
 - Fixed `omp git` hunk navigation (`alt+↓`/`alt+↑`) appearing to do nothing while the file sidebar had focus: the diff cursor band now stays visible (dimmed) when the pane is unfocused.
-- Fixed the git TUI sidebar jumping back to the top of the file list after staging or unstaging a file; selection now stays on the nearest remaining row
-### Fixed
-
+- Fixed the git TUI sidebar jumping back to the top of the file list after staging or unstaging a file; selection now stays on the nearest remaining row.
 - Fixed the `aarch64-linux` `nix build` output segfaulting in the dynamic loader before startup by repointing the stale `DT_VERDEF` that `patchelf` leaves behind when it grows `.dynamic`, and surfaced smoke-test signal deaths in the build log instead of masking them ([#9881](https://github.com/can1357/oh-my-pi/issues/9881)).
+- Fixed a failed MCP tool call inside a `task`/subagent proxy (source tool no longer available, or the proxy's own timeout/error) being marked as a failure only in the result's details, not the top-level flag that renderers and the model actually check first — so the call looked and reported as a success.
+- Cancelling an ACP prompt no longer freezes an already-started tool call: its card and terminal now still receive their final status, while ordinary assistant content stays suppressed.
+- Fixed `bash`'s `pty: true` fallback notice ("pty requested but unavailable") sometimes showing up in the model's result but not the ACP display, or the other way around for a cancelled run's timeout notice. Both now always agree.
+- Fixed a rare case where `OutputSink` swallowed a real internal error as a harmless "arrived too late" warning. Only output that genuinely arrives after a call has already finished is now dropped-and-warned; every other failure surfaces properly.
+- Replaying a `session/load`ed tool call now uses the same logic as a live one instead of a separate, older reconstruction: the replayed card shows the call's own saved title, kind, and file locations instead of guessing them from its raw arguments. This only applies to calls recorded under the new format; older sessions are unaffected.
+- The interactive transcript now shows a dangling tool call left over from a resumed or rebuilt session — one that started but never got a result — as a real interrupted card with its saved title and command, instead of a generic "N tool calls elided" placeholder, whenever its history is unambiguous.
+- Fixed a still-running tool call occasionally rendering twice during a mid-stream transcript rebuild (`/shake`, auto-compaction, a settings toggle) — once as a new "interrupted" card and once as the real live one.
+- ACP fixes:
+	- Fixed a `bash`/`shell`/`exec` timeout showing partial output and no reason for stopping in an ACP terminal card: the timeout annotation was composed into the result text and never recorded as a structured fact, which is the only channel a terminal card reads.
+	- ACP terminal cards now reconcile a small, bounded tail (up to 8 lines / 2 KB) of a tool's own final output that reached no rendered channel, so a synthesized annotation a tool writes into its text without declaring it structurally no longer disappears.
+	- Fixed ACP `eval`'s kernel-timeout and stdin-requested notices reaching only the model-facing text instead of the terminal card.
+	- Fixed an ACP `eval` call's source code disappearing from the rendered card when replaying an interrupted eval via `session/load`, or when the eval produced an image.
+	- Fixed a failing `eval` reporting a successful ACP status and a synthesized exit code 0, even though its terminal output showed a nonzero exit.
+	- Fixed an ACP `eval` result's notice and error message being dropped when an image forced the meta-terminal fallback to a plain content card.
+	- Fixed a `bash`/`shell`/`exec` timeout in a client-owned ACP terminal replacing the live terminal card with plain text and losing its notices.
+	- Fixed an ACP tool call whose result carries an image, audio, or resource block beside a live terminal rendering as a terminal card that hides that content; it now falls back to a plain content card.
+	- Fixed identical LSP diagnostics on two edited files collapsing into one notice that named only the first file.
+	- Fixed large tool output losing its truncation notice and `artifact://` recovery pointer for ACP clients without terminal support.
+	- Fixed `hub start`/`restart` reporting a daemon that failed to launch as a successful tool call.
+	- Fixed a large command's output being duplicated in an ACP display-only terminal under a false "earlier bytes were dropped" warning.
+	- Enforced ACP terminal-content and unnegotiated-extension invariants on every outbound `session/update`, instead of catching each case only in review.
+	- Fixed the ACP meta-terminal convention re-sending already-streamed output with a false discontinuity notice when a tool's final result was a reformatted re-render rather than new output.
+	- Fixed `unstable_forkSession` streaming no history at all to the ACP client: forking a session copies its entire conversation on the backend, but the client previously saw an empty transcript under the new session id. The fork now replays the copied messages and tool calls the same way `session/load` does, deferred until after the response reaches the client (a forked id cannot be known to the client before then, unlike a client-supplied `session/load` id).
+	- Fixed the ACP terminal-sibling invariant firing on real-terminal clients that hadn't negotiated Zed's terminal extension.
+	- Fixed the ACP terminal path dropping the truncation/`artifact://` recovery notice when output was already elided before the final byte cap ran.
+	- Fixed resumed ACP sessions (`session/load`) replaying bash/shell/exec calls as empty terminal cards; recorded output now renders as a code block when the terminal isn't live on the current connection.
+	- Fixed ACP live terminal cards losing bash's post-stream notices (exit code, truncation, `artifact://` pointer).
+	- Fixed a framework-level error message being dropped from an ACP tool call that also carried structured content blocks.
+	- Fixed ACP command output escaping its Markdown code fence when the output contained an indented backtick run.
+	- Fixed any failed `edit`/`patch`/`apply_patch` call on the live ACP route (a stale hashline tag, a patch context mismatch, a plan-mode rejection, or any other thrown edit error) crashing the entire ACP prompt with a JSON-RPC internal error instead of settling as a normal failed tool call.
+	- Fixed malformed custom, MCP, or replayed edit-result details crashing ACP or emitting invalid diffs. Malformed structural edit fields now fall back to plain content, while malformed output metadata is discarded field-by-field so valid diffs, notices, and truncation markers survive instead of causing duplicate terminal output.
+	- A failing `eval` cell (nonzero exit or cancellation) now marks its tool result as an error at the result level, matching `bash`'s nonzero-exit behavior, instead of recording the failure only in the result's `details`.
+- Fixed the resume warning and `session_exit` diagnostic for a pending tool call left over from a killed process sometimes showing the wrong arguments or tool name; it now reads that information from the call's own saved record when available.
 
 ## [18.0.7] - 2026-08-26
 

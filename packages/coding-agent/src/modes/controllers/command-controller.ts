@@ -1322,7 +1322,7 @@ export class CommandController {
 
 			if (this.ctx.pythonComponent) {
 				const meta = outputMeta().truncationFromSummary(result, { direction: "tail" }).get();
-				this.ctx.pythonComponent.setComplete(result.exitCode, result.cancelled, {
+				this.ctx.pythonComponent.setComplete(result.exitCode, result.termination !== undefined, {
 					output: result.output,
 					truncation: meta?.truncation,
 				});

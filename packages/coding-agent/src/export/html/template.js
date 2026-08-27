@@ -364,9 +364,18 @@
           const entry = flatNode.node.entry;
           const label = flatNode.node.label;
           const isCurrentLeaf = entry.id === currentLeafId;
+          // A dangling `tool_execution_started` journal entry (the process died
+          // between persisting the call and its `tool_execution_settled`
+          // counterpart) can legitimately be the tree's leaf. Unlike
+          // every other entry type, it must NOT bypass the settings-entry filter
+          // below via the current-leaf exception: it has no display case (see
+          // `getTreeNodeDisplayHtml`'s default arm) and would render as a bare
+          // `[tool_execution_started]` fallback label forever, since nothing
+          // ever appends after it. Every other entry type keeps the exception.
+          const isJournalBookkeepingEntry = entry.type === 'tool_execution_started' || entry.type === 'tool_execution_settled';
 
           // Always show current leaf
-          if (isCurrentLeaf) return true;
+          if (isCurrentLeaf && !isJournalBookkeepingEntry) return true;
 
           // Hide assistant messages with only tool calls (no text) unless error/aborted
           if (entry.type === 'message' && entry.message.role === 'assistant') {
@@ -377,7 +386,7 @@
           }
 
           // Apply filter mode
-          const isSettingsEntry = ['label', 'custom', 'model_change', 'thinking_level_change', 'mode_change', 'ttsr_injection', 'session_init', 'credential_pin'].includes(entry.type);
+          const isSettingsEntry = ['label', 'custom', 'model_change', 'thinking_level_change', 'mode_change', 'ttsr_injection', 'session_init', 'credential_pin', 'tool_execution_started', 'tool_execution_settled'].includes(entry.type);
           let passesFilter = true;
 
           switch (filterMode) {

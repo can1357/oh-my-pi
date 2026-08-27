@@ -94,6 +94,11 @@ describe("EditTool apply_patch multi-file aggregate (#4074-B)", () => {
 		// The skipped third file must not have a per-file entry (we stop
 		// before attempting it).
 		expect(perFile.some(r => r.path.endsWith("c.txt"))).toBe(false);
+		// The skipped file's path must be surfaced structurally too — not just
+		// in the free-text echo — so downstream consumers (e.g. the ACP
+		// mapper) can distinguish "never attempted" from "attempted and
+		// failed" without re-parsing prose.
+		expect(details?.unattemptedPaths?.some(p => p.endsWith("c.txt"))).toBe(true);
 	});
 
 	test("all-success multi-file apply_patch does not set isError", async () => {

@@ -479,7 +479,7 @@ export function buildInMemoryTextResult(
 	}
 	resultBuilder.text(outputText);
 	if (truncationInfo) {
-		resultBuilder.truncation(truncationInfo.result, truncationInfo.options);
+		resultBuilder.truncationFact(truncationInfo.result, truncationInfo.options);
 	}
 	return resultBuilder.done();
 }

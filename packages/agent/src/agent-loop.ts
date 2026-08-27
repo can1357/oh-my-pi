@@ -9,12 +9,14 @@ import {
 	type ComputerSafetyCheck,
 	type Context,
 	EventStream,
+	type ImageContent,
 	isApiKeyResolver,
 	type Model,
 	resolveApiKeyOnce,
 	seedApiKeyResolver,
 	streamSimple,
 	stripSchemaDescriptions,
+	type TextContent,
 	type ToolCallProviderMetadata,
 	type ToolChoice,
 	type ToolResultMessage,
@@ -49,6 +51,24 @@ import {
 import { logger, sanitizeText, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { agentPauseGate } from "./pause";
+import type {
+	ToolCallPresentation,
+	ToolModelContentBlock,
+	ToolOutcome,
+	ToolPresentationEvent,
+	ToolProgressProtocol,
+	ToolProgressProtocolKind,
+} from "./presentation";
+import {
+	executionToolArguments,
+	isMintedToolOutcome,
+	outcomeFailed,
+	presentationProducerOf,
+	publicToolArguments,
+	setOwnJsonProperty,
+	streamId,
+	ToolPresentationStream,
+} from "./presentation";
 import { type AgentRunCoverage, type AgentRunSummary, ToolCallBlockedError } from "./run-collector";
 import {
 	type AgentTelemetry,
@@ -74,11 +94,13 @@ import type {
 	AgentPreModelCallResult,
 	AgentTool,
 	AgentToolCall,
+	AgentToolContext,
 	AgentToolResult,
 	AgentTurnEndContext,
 	AsideMessage,
 	BeforeToolCallResult,
 	CommittableAsideMessage,
+	JsonValue,
 	SoftToolRequirement,
 	SteeringInterruptSource,
 	SteeringQueueState,
@@ -458,6 +480,14 @@ function coerceToolResult(raw: unknown): { result: AgentToolResult<unknown>; mal
 	// Tools may flag the result contextually useless (zero matches, elapsed
 	// wait) so compaction can elide it once consumed. Errors are never useless.
 	const useless = Boolean(rawObj && "useless" in rawObj && rawObj.useless);
+	// A producer migrated onto the typed contract may already carry
+	// its own authoritative outcome; thread it through unchanged so it survives
+	// both the direct-execute normalization and an `afterToolCall` re-coercion.
+	const rawOutcome = rawObj && "outcome" in rawObj ? rawObj.outcome : undefined;
+	if (rawOutcome !== undefined && !isMintedToolOutcome(rawOutcome)) {
+		logger.debug("Dropped an unminted tool outcome at the coerceToolResult boundary", { rawOutcome });
+	}
+	const outcome = isMintedToolOutcome(rawOutcome) ? rawOutcome : undefined;
 
 	if (!Array.isArray(rawContent)) {
 		return {
@@ -507,13 +537,20 @@ function coerceToolResult(raw: unknown): { result: AgentToolResult<unknown>; mal
 		content.length = 0;
 		content.push({ type: "text", text: EMPTY_ERROR_TOOL_RESULT_TEXT });
 	}
+	// One invariant enforced at one site instead of five downstream restatements:
+	// `useless` never survives alongside a failure. A
+	// migrated producer's own `outcome` is authoritative for "succeeded"; an
+	// unmigrated producer has none yet (its outcome is derived later, from this
+	// same `isError`), so `!isError` reproduces today's behavior exactly.
+	const succeeded = outcome !== undefined ? outcome.kind === "succeeded" : !isError;
 	return {
 		result: {
 			content,
 			details,
 			providerMetadata,
 			...(isError ? { isError: true } : {}),
-			...(useless && !isError ? { useless: true } : {}),
+			...(useless && succeeded ? { useless: true } : {}),
+			...(outcome !== undefined ? { outcome } : {}),
 		},
 		malformed: invalidBlocks > 0 || providerMetadataResult.malformed,
 	};
@@ -2157,6 +2194,86 @@ function resolveToolForCall(
  * scheduling, and `tool.execute` all agree. Failures are recorded per call and
  * surfaced by `executeToolCalls` at the record's scheduled slot.
  */
+/**
+ * Runtime check that a value is a JSON value (no functions, Dates, Symbols,
+ * class instances, or other non-cloneable structures). Hook-revised tool
+ * arguments must be JSON values: the execution copy is a deep `structuredClone`
+ * that must succeed, and the public/execution views must never share a
+ * mutable graph. A non-JSON value is rejected at this boundary, before the
+ * clone, so the failure is a deterministic validation error rather than a
+ * `DataCloneError` caught later and silently turned into a "skipped" result.
+ *
+ * Bounded to prevent stack overflow on cyclic extension-provided objects: the
+ * depth limit is generous (128 — far beyond any legitimate tool argument) and
+ * a cycle or pathologically deep structure is rejected, not crashed on. Only
+ * true cycles reject — an ordinary object aliased at two properties (a DAG,
+ * which both JSON serialization and `structuredClone` accept) normalizes into
+ * independent duplicate subtrees, exactly as `JSON.stringify` would encode it.
+ * Because aliases re-visit, depth alone cannot bound total work: a chain of
+ * ~50 objects each aliasing one shared child at two properties stays within
+ * the depth cap while expanding 2^depth duplicate subtrees. The node budget
+ * caps total visits so such a graph rejects deterministically instead of
+ * hanging the loop inside argument normalization.
+ * Rejects `NaN`/`Infinity` (not representable in JSON) and symbol-keyed
+ * properties (which `JSON.stringify` drops silently but `structuredClone`
+ * preserves — a divergence from the `JsonValue` contract). Rejects `undefined`
+ * and sparse arrays (holes serialize differently from the execution clone).
+ */
+const JSON_MAX_DEPTH = 128;
+const JSON_MAX_NODES = 100_000;
+
+/**
+ * Produces a fresh, plain JSON tree at the untyped hook boundary. Descriptor
+ * reads reject accessors without invoking them; the outer catch converts every
+ * proxy/reflection failure into a deterministic validation failure.
+ */
+function normalizeJsonValue(value: unknown): JsonValue | undefined {
+	// Objects on the CURRENT recursion path only — membership is released once a
+	// subtree completes, so a shared (aliased) subobject re-visits cleanly while
+	// a genuine cycle still trips the guard.
+	const visiting = new WeakSet<object>();
+	let visited = 0;
+	const visit = (current: unknown, depth: number): JsonValue | undefined => {
+		if (++visited > JSON_MAX_NODES) return undefined;
+		if (depth > JSON_MAX_DEPTH || current === null) return current === null ? null : undefined;
+		if (typeof current === "string" || typeof current === "boolean") return current;
+		if (typeof current === "number") return Number.isFinite(current) ? current : undefined;
+		if (typeof current !== "object") return undefined;
+		if (visiting.has(current)) return undefined;
+		visiting.add(current);
+		if (Array.isArray(current)) {
+			const descriptors = Object.getOwnPropertyDescriptors(current);
+			const normalized: JsonValue[] = [];
+			for (let index = 0; index < current.length; index++) {
+				const descriptor = descriptors[String(index)];
+				if (descriptor === undefined || !("value" in descriptor)) return undefined;
+				const item = visit(descriptor.value, depth + 1);
+				if (item === undefined) return undefined;
+				normalized.push(item);
+			}
+			visiting.delete(current);
+			return normalized;
+		}
+		if (Object.getPrototypeOf(current) !== Object.prototype || Object.getOwnPropertySymbols(current).length > 0)
+			return undefined;
+		const descriptors = Object.getOwnPropertyDescriptors(current);
+		const normalized: { [key: string]: JsonValue } = {};
+		for (const [key, descriptor] of Object.entries(descriptors)) {
+			if (!descriptor.enumerable || !("value" in descriptor)) return undefined;
+			const item = visit(descriptor.value, depth + 1);
+			if (item === undefined) return undefined;
+			setOwnJsonProperty(normalized, key, item);
+		}
+		visiting.delete(current);
+		return normalized;
+	};
+	try {
+		return visit(value, 0);
+	} catch {
+		return undefined;
+	}
+}
+
 async function prepareToolCallDispatch(
 	assistantMessage: AssistantMessage,
 	context: AgentContext,
@@ -2227,18 +2344,108 @@ async function prepareToolCallDispatch(
 			continue;
 		}
 		if (beforeResult?.args !== undefined) {
-			// Revalidate: a hook revision is untrusted input to the tool schema.
-			const revised = validate(beforeResult.args);
+			// Enforce JSON at the untyped hook boundary: a non-JSON value (function,
+			// Date, Symbol, class instance) is a contract violation, rejected here
+			// before the deep clone produces the execution copy. A `DataCloneError`
+			// caught later is a silent "skipped" result; this makes it a deterministic
+			// validation error.
+			const normalized = normalizeJsonValue(beforeResult.args);
+			if (
+				normalized === undefined ||
+				normalized === null ||
+				Array.isArray(normalized) ||
+				typeof normalized !== "object"
+			) {
+				entry.validationErrorMessage = "beforeToolCall returned non-JSON arguments";
+				entry.args = beforeResult.args;
+				continue;
+			}
+			// Revalidate the normalized tree, not hostile hook-owned objects.
+			const revised = validate(normalized);
 			if (revised === undefined) continue;
-			// Bake the revision into the message itself. On the streamed path this
-			// precedes every consumer snapshot, so there is exactly one version of
-			// the call anywhere downstream.
-			toolCall.arguments = beforeResult.args;
+			// Bake the normalized revision into history and every public view.
+			toolCall.arguments = normalized;
 			entry.args = revised;
 		}
 	}
 	return prepared;
 }
+
+/**
+ * Total, structural narrowing of a tool's `content` blocks into
+ * {@link ToolModelContentBlock} — the presentation package's own mirror of
+ * `TextContent`/`ImageContent` (see `events.ts`'s doc comment on why it
+ * mirrors rather than imports them). Field-by-field, not a cast: this is the
+ * one conversion boundary between the two type algebras, and a future field
+ * added to either side fails here loudly (the `never` check on the default
+ * arm) instead of silently dropping data into the persisted journal.
+ */
+function toolModelContentOf(content: readonly (TextContent | ImageContent)[]): readonly ToolModelContentBlock[] {
+	return content.map(block => {
+		switch (block.type) {
+			case "text":
+				return block.textSignature === undefined
+					? { type: "text" as const, text: block.text }
+					: { type: "text" as const, text: block.text, textSignature: block.textSignature };
+			case "image":
+				return block.detail === undefined
+					? { type: "image" as const, data: block.data, mimeType: block.mimeType }
+					: { type: "image" as const, data: block.data, mimeType: block.mimeType, detail: block.detail };
+			default: {
+				const exhaustive: never = block;
+				throw new Error(`Unhandled tool content block: ${JSON.stringify(exhaustive)}`);
+			}
+		}
+	});
+}
+/**
+ * The one derivation of a {@link ToolOutcome} at the dispatcher boundary.
+ *
+ * A completed execution's own `result.outcome` wins when the producer set one:
+ * only the producer knows what its process/details actually did.
+ * An unmigrated producer sets nothing, so this falls through to the same
+ * `isError`-derived synthetic branch it always has -- unchanged behavior,
+ * which is what keeps an unmigrated producer's model goldens byte-identical.
+ * Every other settlement is synthetic and constructed here, which is what
+ * makes "settled exactly once, including on paths that never reached the
+ * tool" an ownership property rather than a per-producer obligation.
+ */
+function deriveToolOutcome(input: {
+	readonly result: AgentToolResult<unknown>;
+	readonly isError: boolean;
+	readonly caughtError: unknown;
+	readonly completedToolExecution: boolean;
+	readonly interrupted: boolean;
+	readonly interruptReason: string;
+}): ToolOutcome {
+	if (input.interrupted) {
+		return { kind: "interrupted", reason: input.interruptReason };
+	}
+	const caught = input.caughtError;
+	if (caught !== undefined) {
+		const message = caught instanceof Error ? caught.message : String(caught);
+		// A hook that threw did so *after* the tool completed, so the reason is
+		// distinguishable from an executor throw without inspecting the stack.
+		const reason =
+			caught instanceof ToolCallBlockedError ? "blocked" : input.completedToolExecution ? "hook" : "thrown";
+		return { kind: "failed", failure: { reason, message } };
+	}
+	if (input.completedToolExecution && input.result.outcome !== undefined) {
+		return input.result.outcome;
+	}
+	if (input.isError) {
+		const firstText = input.result.content?.find(block => block.type === "text");
+		return {
+			kind: "failed",
+			failure: {
+				reason: "tool_reported",
+				message: firstText?.type === "text" ? firstText.text : "Tool reported a failure",
+			},
+		};
+	}
+	return { kind: "succeeded" };
+}
+
 /**
  * Execute tool calls from an assistant message.
  */
@@ -2326,11 +2533,40 @@ async function executeToolCalls(
 			interruptible,
 			signal: interruptible ? interruptibleSignal : nonInterruptibleSignal,
 			started: false,
-			result: undefined as AgentToolResult<any> | undefined,
+			/**
+			 * Which progress protocol this call runs on, decided in `runTool` and read
+			 * back by `emitToolResult`.
+			 *
+			 * It has to live on the record rather than only on the start event: the
+			 * settlement is emitted from `emitToolResult`, which is also reachable from
+			 * the tail sweep, and a `tool_execution_end` that forgets the declaration
+			 * makes a presentation-protocol call render through the legacy mapper as
+			 * well — delivering the same output twice.
+			 */
+			progressProtocol: "legacy_snapshot" as ToolProgressProtocolKind,
+			result: undefined as AgentToolResult<unknown> | undefined,
 			isError: false,
 			skipped: false,
 			toolResultMessage: undefined as ToolResultMessage | undefined,
 			resultEmitted: false,
+			/**
+			 * The exact placeholder chosen to override this call's own `result`
+			 * before it settles — the steering-interrupt and lifecycle-rejection
+			 * paths in `runTool` set this before calling `settlePresentation`.
+			 *
+			 * Lives on the shared record, not a `runTool`-local variable: the
+			 * lifecycle-rejection path settles inside `runTool`'s own `catch` block
+			 * and then rethrows, skipping `runTool`'s own `emitToolResult` entirely —
+			 * the record only reaches the *outer* tail sweep in `executeToolCalls`
+			 * (a different function, after `Promise.allSettled`), which must reuse
+			 * this exact value rather than independently recomputing
+			 * `createSkippedToolResult(interruptState.source, false)`. Recomputing
+			 * there could observe a `source` a concurrent steering watcher changed
+			 * while `settlePresentation`'s internal awaits were in flight, producing
+			 * a placeholder that disagrees with the one already frozen into
+			 * `modelContent`.
+			 */
+			emittedResultOverride: undefined as AgentToolResult<unknown> | undefined,
 			validationErrorMessage: prepared.validationErrorMessage,
 			blocked: prepared.blocked === true,
 			blockReason: prepared.blockReason,
@@ -2393,7 +2629,11 @@ async function executeToolCalls(
 		await checkIrcInterrupts();
 	};
 
-	const emitToolResult = (record: (typeof records)[number], result: AgentToolResult<any>, isError: boolean): void => {
+	const emitToolResult = (
+		record: (typeof records)[number],
+		result: AgentToolResult<unknown>,
+		isError: boolean,
+	): void => {
 		if (record.resultEmitted) return;
 		const { toolCall } = record;
 		if (!record.started) {
@@ -2403,6 +2643,7 @@ async function executeToolCalls(
 				toolName: toolCall.name,
 				args: record.args,
 				intent: toolCall.intent,
+				progressProtocol: record.progressProtocol,
 			});
 		}
 		stream.push({
@@ -2411,8 +2652,19 @@ async function executeToolCalls(
 			toolName: toolCall.name,
 			result,
 			isError,
+			progressProtocol: record.progressProtocol,
 		});
 
+		// One-way bridge to the LLM wire: `outcome` is authoritative
+		// when the producer set one, since a migrated producer is not obliged to keep
+		// its legacy `isError` bit consistent with it (e.g. a timed-out process is a
+		// failed outcome that may render with a softer border, but is still a wire
+		// failure). An unmigrated producer has no `outcome`, so `wireIsError` falls
+		// back to the same `isError` this function always used — nothing regresses.
+		// This is a bridge, not a dual authority: no presentation-facing code may
+		// read `ToolResultMessage.isError` back as a failure signal (that's
+		// `AgentToolResult.isError`/`outcome`'s job via `toolResultFailed`).
+		const wireIsError = result.outcome !== undefined ? outcomeFailed(result.outcome) : isError;
 		const toolResultMessage: ToolResultMessage = {
 			role: "toolResult",
 			toolCallId: toolCall.id,
@@ -2420,8 +2672,8 @@ async function executeToolCalls(
 			content: result.content,
 			details: result.details,
 			providerMetadata: result.providerMetadata,
-			isError,
-			...(result.useless && !isError ? { useless: true } : {}),
+			isError: wireIsError,
+			...(result.useless && !wireIsError ? { useless: true } : {}),
 			timestamp: Date.now(),
 		};
 		record.result = result;
@@ -2463,11 +2715,15 @@ async function executeToolCalls(
 		// failure recorded there surfaces here at the record's scheduled slot so
 		// result emission keeps batch order.
 		if (record.validationErrorMessage !== undefined) {
+			const validationFailureDetails: ValidationFailureToolResultDetails = {
+				isError: true,
+				error: record.validationErrorMessage,
+			};
 			emitToolResult(
 				record,
 				{
 					content: [{ type: "text" as const, text: record.validationErrorMessage }],
-					details: { isError: true, error: record.validationErrorMessage },
+					details: validationFailureDetails,
 				},
 				true,
 			);
@@ -2484,121 +2740,324 @@ async function executeToolCalls(
 			emitToolResult(record, createToolSignalAbortedResult(record.signal), true);
 			return;
 		}
+		// Argument transformation happens *before* protocol selection, because it can
+		// change the route: a transform that flips `pty`/`async`/`timeout` would
+		// otherwise have the dispatcher select the presentation protocol for a route the
+		// tool never takes, leaving its output with no channel at all (the presentation
+		// arm passes no `onUpdate`). The throw is deferred to the execution block below so
+		// a failing transform still becomes the same error result it always did.
+		//
+		// Public and execution views never share a mutable object graph. The execution
+		// copy is always a deep clone of the validated public arguments — even on the
+		// no-transform path — so a `selects()` implementation or transform that mutates
+		// `params.nested.value` corrupts only its own copy, never the public object that
+		// `start()`, `tool_execution_start`, and `tool_execution_update` all read.
+		// `structuredClone` is used rather than JSON parse/stringify because arguments are
+		// model-authored JSON values (no functions, Dates, or other non-JSON types).
+		// The hook boundary validates JSON-ness before this point, so a clone failure
+		// here is a genuine internal error, not a contract violation — it becomes a
+		// deterministic tool failure via `transformError`, never a silent "skipped".
+		let transformError: unknown;
+		let cloneFailed = false;
+		let executionArgs: Record<string, unknown>;
+		try {
+			executionArgs = structuredClone(effectiveArgs);
+		} catch (cloneError) {
+			// Should not happen: the hook boundary rejects non-JSON values, and
+			// model-authored args are JSON. If it does, surface as a tool failure.
+			// Do NOT alias `effectiveArgs` into `executionArgs` — the transform or
+			// presentation selector below would mutate the public graph before the
+			// deferred failure surfaces, recreating the secret-leak path this
+			// boundary was introduced to eliminate. Use an empty object and skip
+			// transform/selection entirely; the `transformError` ensures the call
+			// becomes a deterministic tool failure in the execution block.
+			transformError = cloneError;
+			cloneFailed = true;
+			executionArgs = {};
+		}
+		if (!cloneFailed && transformToolCallArguments) {
+			try {
+				executionArgs = transformToolCallArguments(executionArgs, toolCall.name);
+			} catch (error) {
+				transformError = error;
+			}
+		}
+
+		const pushPresentation = (event: ToolPresentationEvent): void => {
+			stream.push({
+				type: "tool_presentation",
+				toolCallId: toolCall.id,
+				toolName: toolCall.name,
+				event,
+			});
+		};
+		const emitLegacyUpdate = (partialResult: AgentToolResult<unknown>): void => {
+			stream.push({
+				type: "tool_execution_update",
+				toolCallId: toolCall.id,
+				toolName: toolCall.name,
+				// Pre-transform arguments, matching `tool_execution_start`: this event reaches
+				// the same ACP mapper title/location derivation, and `executionArgs` may carry
+				// a host transform's deobfuscated secrets.
+				args: effectiveArgs,
+				partialResult: coerceToolResult(partialResult).result,
+			});
+		};
+		const buildToolContext = (
+			progress: ToolProgressProtocol<AgentToolResult<unknown>>,
+		): AgentToolContext | undefined =>
+			getToolContext
+				? getToolContext({
+						batchId,
+						index,
+						total: toolCalls.length,
+						toolCalls: toolCallInfos,
+						steeringSignal: steeringSoftController.signal,
+						providerMetadata: toolCall.providerMetadata,
+						progress,
+					})
+				: undefined;
+
+		// Protocol selection happens here, before the start event, because the event
+		// declares which protocol the call runs on and a consumer must be able to trust
+		// that declaration from the first frame. A throwing selector falls back to legacy
+		// rather than losing the call's progress entirely.
+		const adapter = tool === undefined ? undefined : tool.presentation;
+		let call: ToolCallPresentation | undefined;
+		let producer: ToolPresentationStream | undefined;
+		let toolContext: AgentToolContext | undefined;
+		if (adapter !== undefined && tool !== undefined && !cloneFailed) {
+			try {
+				// Build the whole presentation prerequisite set *before* asking the adapter
+				// whether it wants the protocol: the producer, and the host context the tool
+				// will actually receive. `selects` needs that context — a route can depend on
+				// it (bash's PTY route needs `ctx.hasUI`/`ctx.ui`), and calling `selects` with
+				// `undefined` made it judge a route the tool would not take.
+				const candidate = new ToolPresentationStream(streamId(toolCall.id), pushPresentation);
+				const candidateContext = buildToolContext({ kind: "presentation_events", presentation: candidate });
+				// Reachability is verified, never assumed. The producer can only arrive
+				// through the host-built `AgentToolContext`, and a host may legitimately
+				// build one without `toolCall` (or provide no `getToolContext` at all, as a
+				// standalone `Agent` does). Selecting the presentation protocol there would
+				// leave the call with no progress channel whatsoever, since the presentation
+				// arm deliberately passes no `onUpdate`.
+				if (presentationProducerOf(candidateContext?.toolCall?.progress) !== candidate) {
+					logger.warn("Host tool context does not carry the presentation producer; using the legacy protocol", {
+						toolName: toolCall.name,
+					});
+				} else {
+					const selection = adapter.selects.call(tool, executionToolArguments(executionArgs), candidateContext);
+					const selected =
+						selection === true ||
+						(typeof selection === "object" && selection !== null && selection.kind === "presentation_events");
+					if (selected) {
+						// `start` can throw on malformed input, so the descriptor is part of the
+						// prerequisite set too: a declared protocol is always an announced call.
+						// Public, pre-transform arguments only: `title`/`sourceEcho`/`rawInput` all
+						// flow onto a client-visible surface, and `executionArgs` may carry a host
+						// transform's deobfuscated secrets.
+						call = adapter.start.call(
+							tool,
+							toolCall.id,
+							publicToolArguments(effectiveArgs),
+							selection === true ? undefined : selection.routing,
+						);
+						producer = candidate;
+						toolContext = candidateContext;
+					}
+				}
+			} catch (error) {
+				// A selector or descriptor builder that throws is a presentation bug, not a
+				// reason to lose the call: fall back to legacy, which renders through the
+				// `tool_execution_*` pair the consumer still receives either way.
+				logger.warn("Tool presentation setup threw; falling back to the legacy protocol", {
+					toolName: toolCall.name,
+					error,
+				});
+				call = undefined;
+				producer = undefined;
+				toolContext = undefined;
+			}
+		}
+
+		// One announcement, one declaration, from the same decision. Because the
+		// descriptor and the reachable producer both exist by now, a call declared
+		// `presentation_events` is always announced — the earlier order could declare the
+		// protocol on `tool_execution_start` and then throw building the descriptor,
+		// leaving a call the ACP layer skips on the legacy path and never sees on the new
+		// one.
+		const activeProducer = producer;
+		const legacyUpdate = activeProducer === undefined ? emitLegacyUpdate : undefined;
+		if (activeProducer === undefined)
+			toolContext = buildToolContext({ kind: "legacy_snapshot", update: emitLegacyUpdate });
 		record.started = true;
+		record.progressProtocol = activeProducer === undefined ? "legacy_snapshot" : "presentation_events";
 		stream.push({
 			type: "tool_execution_start",
 			toolCallId: toolCall.id,
 			toolName: toolCall.name,
 			args: effectiveArgs,
 			intent: toolCall.intent,
+			progressProtocol: record.progressProtocol,
 		});
-
-		const toolSpan = startExecuteToolSpan(telemetry, {
-			tool,
-			toolName: toolCall.name,
-			toolCallId: toolCall.id,
-			args: effectiveArgs,
-			parent: invokeAgentSpan,
-		});
-		if (toolSpan && toolCall.intent) {
-			toolSpan.setAttribute(PiGenAIAttr.ToolCallIntent, toolCall.intent);
+		if (activeProducer !== undefined && call !== undefined) {
+			// The loop is the sole emitter of `started`; the producer handle cannot.
+			pushPresentation({ type: "started", call });
 		}
 
-		let result: AgentToolResult<any> = { content: [], details: {} };
+		let result: AgentToolResult<unknown> = { content: [], details: {} };
 		let isError = false;
 		let caughtError: unknown;
 		let completedToolExecution = false;
 		let executionStarted = false;
+		let settlementEmitted = false;
+		// The result actually emitted to history, once known, when it differs from
+		// `result` above — the steering-interrupt/lifecycle-rejection tail decisions
+		// below override `result` with a synthesized `createSkippedToolResult`
+		// placeholder *after* settlement already ran (a real, previously-shipped bug:
+		// `modelContent` snapshotted the pre-override `result`, so the persisted
+		// frozen model projection disagreed with the `ToolResultMessage` that
+		// actually entered history). Computed once, exactly where each override
+		// decision is made, and stored on `record.emittedResultOverride` (not a
+		// local variable — see its own doc comment) rather than recomputed a second
+		// time: recomputing `createSkippedToolResult` from `interruptState.source` a
+		// second time after `settlePresentation`'s awaits — or, for the
+		// lifecycle-rejection path, from the *outer* tail sweep in a different
+		// function entirely — could observe a source that changed concurrently.
 
-		await runInActiveSpan(toolSpan, async () => {
+		/**
+		 * The one settlement owner for an announced presentation call.
+		 *
+		 * Called from `finally`, so *every* way out of the block below settles exactly
+		 * once: normal return, timeout, user abort, executor throw, `afterToolCall`
+		 * failure, a telemetry span constructor that throws, and a failure while deriving
+		 * the outcome itself. Before this existed, `startExecuteToolSpan()` or
+		 * `adapter.outcome()` throwing left an announced call with no `settled` event at
+		 * all: the ACP layer skips the legacy `tool_execution_end` for a
+		 * presentation-protocol call, so the card stayed "running" forever.
+		 */
+		const settlePresentation = async (
+			lifecycleError?: unknown,
+			resultOverride?: AgentToolResult<unknown>,
+		): Promise<void> => {
+			if (activeProducer === undefined || settlementEmitted) return;
+			settlementEmitted = true;
+			// The flush-before-settlement barrier. A throttled `OutputSink` chunk is only
+			// registered as a flusher, so `dispose()` would clear its timer without ever
+			// emitting it. Nothing may append after this point, which the producer enforces
+			// irrevocably — including when a flusher itself throws.
 			try {
-				if (!tool) throw new Error(`Tool ${toolCall.name} not found`);
-				if (record.signal.aborted) {
-					result = createToolSignalAbortedResult(record.signal);
-					isError = true;
-					return;
-				}
-
-				if (record.prepareError !== undefined) throw record.prepareError;
-				if (record.blocked) {
-					throw new ToolCallBlockedError(record.blockReason);
-				}
-				const executionArgs = transformToolCallArguments
-					? transformToolCallArguments(effectiveArgs, toolCall.name)
-					: effectiveArgs;
-				record.args = executionArgs;
-
-				// The cooperative steering signal rides the loop-owned
-				// ToolCallContext (surfacing as `ctx.toolCall.steeringSignal`):
-				// AgentToolContext itself is app-built via declaration merging, so
-				// the loop cannot construct or extend one structurally.
-				const toolContext = getToolContext
-					? getToolContext({
-							batchId,
-							index,
-							total: toolCalls.length,
-							toolCalls: toolCallInfos,
-							steeringSignal: steeringSoftController.signal,
-							providerMetadata: toolCall.providerMetadata,
-						})
-					: undefined;
-				executionStarted = true;
-				const rawResult = await tool.execute(
-					toolCall.id,
-					executionArgs,
-					record.signal,
-					partialResult => {
-						stream.push({
-							type: "tool_execution_update",
-							toolCallId: toolCall.id,
-							toolName: toolCall.name,
-							args: executionArgs,
-							partialResult: coerceToolResult(partialResult).result,
-						});
-					},
-					toolContext,
-				);
-				completedToolExecution = true;
-				const coerced = coerceToolResult(rawResult);
-				result = coerced.result;
-				if (coerced.malformed || result.isError) isError = true;
-			} catch (e) {
-				caughtError = e;
-				result = {
-					content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],
-					details: {},
+				await activeProducer.freeze();
+			} catch (error) {
+				logger.warn("Tool presentation freeze failed", { toolName: toolCall.name, error });
+			}
+			let outcome: ToolOutcome;
+			try {
+				outcome = deriveToolOutcome({
+					result,
+					isError,
+					caughtError: caughtError ?? lifecycleError,
+					completedToolExecution,
+					// Any abort that left the call without a result is an interruption, not a
+					// defect. ACP `session/cancel` aborts the tool signal without touching the
+					// steering/IRC `interruptState`, so requiring `interruptState.triggered`
+					// classified every user cancellation as a thrown failure.
+					interrupted: abortedDuringExecution,
+					interruptReason: abortReasonText(record.signal),
+				});
+			} catch (error) {
+				// Deriving presentation data must not be able to swallow the settlement: a
+				// typed synthetic failure is strictly better than a card that never resolves.
+				logger.error("Tool outcome derivation threw; settling with a synthetic failure", {
+					toolName: toolCall.name,
+					error,
+				});
+				outcome = {
+					kind: "failed",
+					failure: { reason: "internal", message: error instanceof Error ? error.message : String(error) },
 				};
-				isError = true;
+			}
+			// `resultOverride` is the exact content the caller already knows will be
+			// (or already was) emitted to history in place of `result` — see the
+			// `emittedResultOverride` doc comment above for why this must never be
+			// re-derived independently of that decision.
+			pushPresentation({
+				type: "settled",
+				outcome,
+				modelContent: toolModelContentOf((resultOverride ?? result).content),
+			});
+			try {
+				await config.afterPresentationSettlement?.(toolCall.id);
+			} catch (error) {
+				logger.warn("Tool presentation settlement barrier failed", { toolName: toolCall.name, error });
+			}
+			try {
+				activeProducer.runAfterSettlementCallbacks();
+			} catch (error) {
+				logger.error("Tool presentation after-settlement callback threw", { toolName: toolCall.name, error });
+			}
+		};
+
+		let interrupted = false;
+		let perToolAborted = false;
+		let abortedDuringExecution = false;
+		// Declared outside the lifecycle block because `finishExecuteToolSpan` below
+		// still has to close it on every path.
+		let toolSpan: Span | undefined;
+
+		try {
+			toolSpan = startExecuteToolSpan(telemetry, {
+				tool,
+				toolName: toolCall.name,
+				toolCallId: toolCall.id,
+				args: effectiveArgs,
+				parent: invokeAgentSpan,
+			});
+			if (toolSpan && toolCall.intent) {
+				toolSpan.setAttribute(PiGenAIAttr.ToolCallIntent, toolCall.intent);
 			}
 
-			if (afterToolCall && (!record.signal.aborted || completedToolExecution)) {
+			await runInActiveSpan(toolSpan, async () => {
 				try {
-					const after = await afterToolCall(
-						{
-							assistantMessage,
-							toolCall,
-							args: record.args,
-							result,
-							isError,
-							context: currentContext,
-						},
-						record.signal,
-					);
-					if (after) {
-						// Re-normalize the post-hook result: `afterToolCall` is untyped user/extension
-						// code and may return malformed `content` (non-array / invalid blocks), which
-						// would otherwise be persisted verbatim and corrupt the session — the same
-						// hazard `coerceToolResult` guards on the execute path.
-						const coerced = coerceToolResult({
-							content: after.content ?? result.content,
-							details: after.details ?? result.details,
-							isError: after.isError ?? result.isError,
-							providerMetadata: after.providerMetadata ?? result.providerMetadata,
-							useless: after.useless ?? result.useless,
-						});
-						result = coerced.result;
-						isError = coerced.malformed || (after.isError ?? isError);
+					if (!tool) throw new Error(`Tool ${toolCall.name} not found`);
+					if (record.signal.aborted) {
+						result = createToolSignalAbortedResult(record.signal);
+						isError = true;
+						return;
 					}
+
+					if (record.prepareError !== undefined) throw record.prepareError;
+					if (record.blocked) {
+						throw new ToolCallBlockedError(record.blockReason);
+					}
+					// Deferred from the pre-announcement transform so the route decision could
+					// see the real arguments; the error surfaces exactly where it used to.
+					if (transformError !== undefined) throw transformError;
+					record.args = executionArgs;
+
+					// The cooperative steering signal rides the loop-owned
+					// ToolCallContext (surfacing as `ctx.toolCall.steeringSignal`):
+					// AgentToolContext itself is app-built via declaration merging, so
+					// the loop cannot construct or extend one structurally. That is also why the
+					// presentation producer's reachability through it is verified above rather
+					// than assumed.
+					//
+					// One callback object, surfaced through the protocol union and (on the legacy
+					// arm only) as the tool's `onUpdate` parameter. On the presentation arm
+					// `onUpdate` is `undefined`, so a migrated route cannot emit a cumulative
+					// snapshot beside its direct append events.
+					executionStarted = true;
+					const rawResult = await tool.execute(
+						toolCall.id,
+						executionArgs,
+						record.signal,
+						legacyUpdate,
+						toolContext,
+					);
+					completedToolExecution = true;
+					const coerced = coerceToolResult(rawResult);
+					result = coerced.result;
+					if (coerced.malformed || result.isError) isError = true;
 				} catch (e) {
 					caughtError = e;
 					result = {
@@ -2607,18 +3066,105 @@ async function executeToolCalls(
 					};
 					isError = true;
 				}
-			}
-		});
 
-		const interrupted = interruptState.triggered;
-		const perToolAborted = record.signal.aborted;
-		const abortedDuringExecution = perToolAborted && isError && !completedToolExecution;
+				if (afterToolCall && (!record.signal.aborted || completedToolExecution)) {
+					try {
+						const effect = await afterToolCall(
+							{
+								assistantMessage,
+								toolCall,
+								args: record.args,
+								result,
+								isError,
+								context: currentContext,
+							},
+							record.signal,
+						);
+						if (effect && effect.kind !== "unchanged") {
+							// The fact must ride live ACP, the retained record, the journal, and
+							// receipts too — not just the prepended text below — so it is declared
+							// on the presentation stream itself whenever one is open. Declared before
+							// the re-coercion/freeze below: `activeProducer.fact` mints the stream's
+							// own FactId (`${streamId}:fN`), which is the only FactId this fact ever
+							// gets (the effect carries a bare `ToolFactBody`, no id).
+							if (
+								effect.kind === "add_guidance_fact" &&
+								activeProducer !== undefined &&
+								activeProducer.phase === "open"
+							) {
+								activeProducer.fact(effect.fact);
+							}
+							// Re-normalize the post-hook result: `afterToolCall` is untyped user/extension
+							// code and its effect's payload may be malformed (a raw external object, or a
+							// guidance fact prepended onto invalid content), which would otherwise be
+							// persisted verbatim and corrupt the session — the same hazard
+							// `coerceToolResult` guards on the execute path.
+							const raw =
+								effect.kind === "transform_external_result"
+									? effect.raw
+									: {
+											content: [{ type: "text" as const, text: effect.fact.text }, ...result.content],
+											details: result.details,
+											isError: result.isError,
+											providerMetadata: result.providerMetadata,
+											useless: result.useless,
+											...(result.outcome !== undefined ? { outcome: result.outcome } : {}),
+										};
+							const coerced = coerceToolResult(raw);
+							result = coerced.result;
+							isError = coerced.malformed || result.isError === true;
+						}
+					} catch (e) {
+						caughtError = e;
+						result = {
+							content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],
+							details: {},
+						};
+						isError = true;
+					}
+				}
+			});
+
+			interrupted = interruptState.triggered;
+			perToolAborted = record.signal.aborted;
+			abortedDuringExecution = perToolAborted && isError && !completedToolExecution;
+			// Compute the steering-interrupt override, if any, *before* settling: this
+			// is the exact placeholder `emitToolResult` will use below in place of
+			// `result` when the call aborted without producing one of its own, so
+			// `modelContent` must reflect it instead of the pre-override `result`.
+			if (interrupted && abortedDuringExecution)
+				record.emittedResultOverride = createSkippedToolResult(interruptState.source, executionStarted);
+			await settlePresentation(undefined, record.emittedResultOverride);
+		} catch (lifecycleError) {
+			// Everything from the telemetry span onwards is inside the lifecycle owner, so a
+			// scaffolding failure still settles the announced call before it propagates to
+			// the tail sweep that emits the tool result. `emitToolResult` is never reached on
+			// this path (the rethrow below skips it), so the top-level tail sweep after
+			// `Promise.allSettled` is the ONE place this record's result gets emitted — always
+			// `createSkippedToolResult(interruptState.source, false)` (line ~3128). Stored on
+			// `record.emittedResultOverride` (not a local variable) so that *other* function's
+			// tail sweep reuses this exact value instead of recomputing it — a recomputation
+			// there could observe a `source` a concurrent steering watcher changed while this
+			// call's own `settlePresentation` awaits were in flight, producing a placeholder
+			// that disagrees with what was just frozen into `modelContent`.
+			record.emittedResultOverride = createSkippedToolResult(interruptState.source, false);
+			await settlePresentation(lifecycleError, record.emittedResultOverride);
+			throw lifecycleError;
+		} finally {
+			// Belt and braces for any future early return: settlement is idempotent.
+			await settlePresentation(undefined, record.emittedResultOverride);
+		}
+
 		if (interrupted && abortedDuringExecution) {
 			// This tool's own signal fired AND it failed to produce a result. The
 			// execution may already have performed partial work before throwing on
 			// abort, so preserve that distinction in the placeholder metadata.
 			record.skipped = true;
-			emitToolResult(record, createSkippedToolResult(interruptState.source, executionStarted), true);
+			emitToolResult(
+				record,
+				record.emittedResultOverride ?? createSkippedToolResult(interruptState.source, executionStarted),
+				true,
+			);
 		} else {
 			// No interrupt on this signal, or the tool finished before the interrupt landed
 			// (`completedToolExecution`) — even if the signal aborted around completion. Keep
@@ -2759,7 +3305,19 @@ async function executeToolCalls(
 				toolName: record.toolCall.name,
 				status: "skipped",
 			});
-			emitToolResult(record, createSkippedToolResult(interruptState.source, false), true);
+			// Reuse the exact placeholder `runTool`'s own lifecycle-rejection `catch`
+			// block already stored on the record and settled with — never recompute
+			// `createSkippedToolResult` independently here, in a different function,
+			// after `settlePresentation`'s awaits may have let `interruptState.source`
+			// change concurrently (see `emittedResultOverride`'s doc comment). Records
+			// that never reached `runTool`'s try block at all (the very-early
+			// `interruptState.triggered` return before any settlement) have no stored
+			// override, so this is the one place that fallback computation belongs.
+			emitToolResult(
+				record,
+				record.emittedResultOverride ?? createSkippedToolResult(interruptState.source, false),
+				true,
+			);
 		}
 	}
 
@@ -2795,6 +3353,19 @@ export interface SyntheticToolResultDetails {
 		| "interrupt_skipped";
 	executed: false;
 	upstreamError?: string;
+}
+
+/**
+ * The agent loop's own result for a tool call whose arguments failed schema
+ * validation before dispatch (`runTool`'s `record.validationErrorMessage`
+ * branch). Named and exported so consumers that must parse it back out of a
+ * legacy `details` blob — e.g. the ACP presentation seam's
+ * `validationFailureDetailsSchema` — are pinned to this exact producer shape
+ * rather than re-declaring it by hand and risking drift.
+ */
+export interface ValidationFailureToolResultDetails {
+	isError: true;
+	error: string;
 }
 
 /**

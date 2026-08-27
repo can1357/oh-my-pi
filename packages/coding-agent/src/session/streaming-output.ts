@@ -1,5 +1,6 @@
 import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import { formatBytes, sanitizeText } from "@oh-my-pi/pi-utils";
+import type { PresentationFlusherScope, ToolPresentationProducer } from "@oh-my-pi/pi-agent-core/presentation";
+import { formatBytes, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { sanitizeWithOptionalSixelPassthrough } from "../utils/sixel";
 
 // =============================================================================
@@ -47,6 +48,25 @@ export interface OutputSummary {
 	columnMax?: number;
 	/** Artifact ID for internal URL access (artifact://<id>) when truncated */
 	artifactId?: string;
+	/**
+	 * The bracketed `[notice]` line {@link OutputSink.dump} prefixed onto
+	 * {@link output}, verbatim — `undefined` when `dump()` got no notice.
+	 *
+	 * `push()` streams every chunk through `onChunk`, which is how bytes reach
+	 * a live renderer's tail buffer (the TUI card, the ACP meta-terminal
+	 * watermark). `dump(notice)` does not: it composes the notice straight into
+	 * the returned body. So a `dump()` annotation — the reason a command
+	 * stopped: a timeout, a kernel kill, a stdin request — exists only in the
+	 * model-facing text unless the caller declares it separately as its own
+	 * structural fact/annotation (bash's `stop_annotation`
+	 * `publishReturnedResultFacts`, eval's `stop_annotation` fact per cell, the
+	 * proxy-executor's `EvalToolDetails.notices`, the only remaining mirror).
+	 * Every caller that used to re-derive or re-thread that string by hand got
+	 * it wrong at least once, so the summary carries it: it travels with the text it was
+	 * baked into, and a fact-declaration site reads it instead of
+	 * reconstructing it.
+	 */
+	annotation?: string;
 }
 
 export interface OutputSinkOptions {
@@ -75,6 +95,23 @@ export interface OutputSinkOptions {
 	onChunk?: (chunk: string) => void;
 	/** Minimum ms between onChunk calls. 0 = every chunk (default). */
 	chunkThrottleMs?: number;
+	/**
+	 * Presentation producer this sink appends raw chunks to.
+	 *
+	 * Two properties matter and both are structural rather than documentary:
+	 *
+	 * - Appends happen at the **pre-cap** point, alongside `onChunk`, so the live
+	 *   byte stream is the complete raw output. The retained head/tail window is
+	 *   applied afterwards and produces a *truncation fact* on the retained
+	 *   record — never a `terminal_gap`. Fabricating a gap from retention rollover
+	 *   would recreate the false-discontinuity bug in new clothes.
+	 * - The sink registers its pending-coalesced-chunk flush with the producer's
+	 *   `freeze()` barrier, so a throttled chunk still reaches the client when the
+	 *   executor throws or the run is aborted. `dispose()` flushes the pending
+	 *   chunk itself while the producer is still open; the barrier registration
+	 *   remains the fallback for a mid-freeze disposal.
+	 */
+	presentation?: ToolPresentationProducer;
 	/**
 	 * Optional cap on bytes written to the artifact-on-disk file. When the cap
 	 * is hit, the head window is preserved verbatim and subsequent output feeds
@@ -609,6 +646,16 @@ function trimTailToLineBoundary(text: string): string {
 }
 
 /**
+ * Footer pointing at the artifact that holds the pre-elision text. Callers that
+ * need to re-state the footer out of band (e.g. bash surfacing it as a
+ * structured notice when the inline body is replaced by a terminal widget)
+ * share this formatter so the two spellings can't drift.
+ */
+export function formatRawOutputArtifactNotice(artifactId: string): string {
+	return `[raw output: artifact://${artifactId}]`;
+}
+
+/**
  * Final-defense inline size guard for tool results.
  *
  * No-op when `text` fits within `maxBytes` (the common path). Otherwise keeps
@@ -632,7 +679,7 @@ export async function enforceInlineByteCap(text: string, options: InlineByteCapO
 	const artifactId = await options.saveArtifact?.(text);
 	if (artifactId) {
 		const sep = composed.endsWith(NL) ? "" : NL;
-		composed += `${sep}[raw output: artifact://${artifactId}]`;
+		composed += `${sep}${formatRawOutputArtifactNotice(artifactId)}`;
 	}
 	return composed;
 }
@@ -771,6 +818,8 @@ export class OutputSink {
 	readonly #headLimit: number;
 	readonly #onChunk?: (chunk: string) => void;
 	readonly #chunkThrottleMs: number;
+	#presentation?: ToolPresentationProducer;
+	#unregisterPresentationFlusher?: () => void;
 	readonly #maxColumns: number;
 
 	// Optional artifact-on-disk cap. When `#artifactMaxBytes > 0` the file sink
@@ -797,6 +846,7 @@ export class OutputSink {
 			maxColumns = 0,
 			onChunk,
 			chunkThrottleMs = 0,
+			presentation,
 			artifactMaxBytes = ARTIFACT_DEFAULT_MAX_BYTES,
 			artifactHeadBytes = ARTIFACT_DEFAULT_HEAD_BYTES,
 		} = options ?? {};
@@ -810,6 +860,20 @@ export class OutputSink {
 		this.#artifactMaxBytes = Math.max(0, artifactMaxBytes);
 		this.#artifactHeadBudget = Math.max(0, Math.min(artifactHeadBytes, this.#artifactMaxBytes));
 		this.#artifactTailBudget = Math.max(0, this.#artifactMaxBytes - this.#artifactHeadBudget);
+		this.#presentation = presentation;
+		this.#unregisterPresentationFlusher = presentation?.registerFlusher(scope => {
+			this.#flushPendingChunk(scope);
+		});
+	}
+
+	/** Flush buffered raw bytes, then permanently detach this sink from the live stream. */
+	detachPresentation(): void {
+		if (this.#presentation?.phase === "open") {
+			this.#flushPendingChunk();
+		}
+		this.#unregisterPresentationFlusher?.();
+		this.#unregisterPresentationFlusher = undefined;
+		this.#presentation = undefined;
 	}
 
 	/**
@@ -858,7 +922,7 @@ export class OutputSink {
 		// final pending chunk when the process exits before that timer fires.
 		// Live preview gets the raw (pre-cap) chunk so the TUI never lags behind
 		// what reached the sink — the column cap is for the persisted LLM view.
-		if (this.#onChunk) {
+		if (this.#onChunk || this.#presentation) {
 			const now = Date.now();
 			if (now - this.#lastChunkTime >= this.#chunkThrottleMs) {
 				this.#emitPendingChunkWith(chunk, now);
@@ -1197,24 +1261,73 @@ export class OutputSink {
 		this.#pendingChunkTimer = undefined;
 	}
 
-	#emitPendingChunkWith(chunk: string, now: number): void {
+	#emitPendingChunkWith(chunk: string, now: number, scope?: PresentationFlusherScope): void {
 		this.#clearPendingChunkTimer();
 		this.#lastChunkTime = now;
 		const merged = this.#pendingChunk + chunk;
 		this.#pendingChunk = "";
 		this.#onChunk?.(merged);
+		this.#appendToPresentation(merged, scope);
 	}
 
-	#flushPendingChunk(): void {
+	/**
+	 * Hand exactly the newly accumulated bytes to the presentation producer.
+	 *
+	 * Throttling coalesces, so one append event may cover several `push()` calls —
+	 * but it is still *only* the new bytes, never a cumulative snapshot, which is
+	 * what lets the consumer treat the stream as append-only without any diffing.
+	 *
+	 * The feed itself is unbounded: every byte handed to `push()` reaches the
+	 * live presentation stream (a local
+	 * bash/eval terminal card streams the whole process, not just the first
+	 * megabyte). The model-facing body and artifact capture already retained
+	 * every byte; this closes the one channel that didn't. Bounding what a
+	 * *retained* record keeps for replay is `LiveToolPresentationRecord`'s
+	 * job, not this feed's — see its class doc.
+	 *
+	 * `scope` is set only when this call originated from the registered flusher
+	 * (the freeze barrier handed it a {@link PresentationFlusherScope} for exactly
+	 * this invocation); outside a flush the producer's own `appendTerminal` is
+	 * used, which the producer now rejects unconditionally once it starts closing —
+	 * only the scoped capability may append during that window.
+	 */
+	#appendToPresentation(chunk: string, scope?: PresentationFlusherScope): void {
+		const producer = this.#presentation;
+		if (!producer || chunk.length === 0) return;
+		if (scope) {
+			scope.appendTerminal(chunk);
+			return;
+		}
+		// Gate on the barrier's own lifecycle *before* calling the mutator, rather than
+		// catching whatever `appendTerminal` throws: "the barrier started closing" and
+		// "the producer/emitter itself is broken" are different failures with different
+		// owners. Once `phase !== "open"` a throw from `appendTerminal` can only be the
+		// second kind — split-surrogate/byte-accounting invariants the stream enforces
+		// unconditionally — and must propagate, not get relabelled as this well-known
+		// late-chunk race and silently dropped.
+		if (producer.phase !== "open") {
+			// The loop freezes only after `execute` returned, so a chunk arriving here
+			// means a backend kept writing past its own completion. Loud but not fatal:
+			// the model-facing body still has the bytes via the retained buffer.
+			logger.warn("OutputSink produced a chunk after the presentation stream began freezing", {
+				bytes: chunk.length,
+			});
+			return;
+		}
+		producer.appendTerminal(chunk);
+	}
+
+	#flushPendingChunk(scope?: PresentationFlusherScope): void {
 		if (this.#pendingChunk.length === 0) {
 			this.#clearPendingChunkTimer();
 			return;
 		}
-		this.#emitPendingChunkWith("", Date.now());
+		this.#emitPendingChunkWith("", Date.now(), scope);
 	}
 
 	#schedulePendingChunkFlush(): void {
 		if (this.#chunkThrottleMs <= 0 || this.#pendingChunkTimer) return;
+		if (this.#presentation?.frozen === true) return;
 		const elapsed = Date.now() - this.#lastChunkTime;
 		const delay = Math.max(0, this.#chunkThrottleMs - elapsed);
 		this.#pendingChunkTimer = setTimeout(() => {
@@ -1232,7 +1345,7 @@ export class OutputSink {
 	 * spilled past the head budget but still fits below `artifactMaxBytes`,
 	 * `droppedBytes` is zero — head + tail together are the verbatim stream
 	 * and the notice is suppressed so we don't corrupt the artifact with a
-	 * misleading "0 B elided" marker (PR #2083 review by codex).
+	 * misleading "0 B elided" marker.
 	 *
 	 * No-op when the cap was never hit at all (head budget never exhausted,
 	 * tail ring empty).
@@ -1264,7 +1377,8 @@ export class OutputSink {
 			this.#pendingCarriageReturn = false;
 			this.push(NL);
 		}
-		const noticeLine = notice ? `[${notice}]\n` : "";
+		const annotation = notice ? `[${notice}]` : undefined;
+		const noticeLine = annotation ? `${annotation}\n` : "";
 
 		// Flush any chunk still held back by the throttle so the live preview
 		// ends with the complete stream.
@@ -1332,6 +1446,7 @@ export class OutputSink {
 			columnTruncatedLines: this.#columnTruncatedLines > 0 ? this.#columnTruncatedLines : undefined,
 			columnMax: this.#columnTruncatedLines > 0 ? this.#maxColumns : undefined,
 			artifactId: this.#file?.artifactId,
+			annotation,
 		};
 	}
 
@@ -1372,11 +1487,29 @@ export class OutputSink {
 	 * Release the artifact spill descriptor on an exit path that skips
 	 * {@link dump} — a thrown error or abort. Idempotent and safe in a
 	 * `finally`: if {@link dump} already ran this is a no-op, otherwise it
-	 * flushes the capped tail and closes the sink so the descriptor is not
-	 * leaked until a later unrelated read hits `EMFILE` (issue #6463).
+	 * flushes any still-pending throttled chunk, flushes the capped artifact
+	 * tail, and closes the sink so the descriptor is not leaked until a later
+	 * unrelated read hits `EMFILE` (issue #6463).
 	 */
 	async dispose(): Promise<void> {
+		// Deliberately does NOT unregister the presentation flusher. `dispose()` runs
+		// on the same throw/abort paths where a throttled chunk is still pending, and
+		// the agent loop's `freeze()` comes afterwards — dropping the registration here
+		// is exactly how those bytes would go missing. `#pendingChunk` survives
+		// disposal, so the barrier can still flush it.
 		this.#clearPendingChunkTimer();
+		if (this.#presentation?.phase === "open") {
+			try {
+				this.#flushPendingChunk();
+			} catch (err) {
+				// Masking defense, same rationale as `#finalizeFile`: dispose() runs
+				// in the executors' `finally`, where a throw here would replace the
+				// original tool error that put us on this path. Nothing is lost by
+				// swallowing — `#emitPendingChunkWith` clears `#pendingChunk` before
+				// invoking the sinks.
+				logger.warn("OutputSink dispose failed to flush the pending chunk", { err });
+			}
+		}
 		await this.#finalizeFile();
 	}
 }
@@ -1442,9 +1575,9 @@ export function formatHeadTruncationNotice(
  * Build an onChunk handler that appends to a TailBuffer and emits a streaming
  * update (when `onUpdate` is defined) with the buffer's current text.
  */
-export function streamTailUpdates<TDetails, TInput = unknown>(
+export function streamTailUpdates<TDetails>(
 	tailBuffer: TailBuffer,
-	onUpdate: AgentToolUpdateCallback<TDetails, TInput> | undefined,
+	onUpdate: AgentToolUpdateCallback<TDetails> | undefined,
 ): (chunk: string) => void {
 	return chunk => {
 		tailBuffer.append(chunk);

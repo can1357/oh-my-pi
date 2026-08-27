@@ -66,7 +66,7 @@ describe("executePython (per-call)", () => {
 			cwd: tempDir.path(),
 		});
 
-		expect(result.cancelled).toBe(true);
+		expect(result.termination !== undefined).toBe(true);
 		expect(result.exitCode).toBeUndefined();
 		expect(result.output).toContain("Command timed out");
 	});
@@ -87,7 +87,7 @@ describe("executePython (per-call)", () => {
 			cwd: tempDir.path(),
 		});
 
-		expect(result.cancelled).toBe(true);
+		expect(result.termination !== undefined).toBe(true);
 		expect(result.exitCode).toBeUndefined();
 		expect(result.output).toContain("Command timed out");
 	});
@@ -112,7 +112,7 @@ describe("executePython (per-call)", () => {
 		abortController.abort(createCancellationError("AbortError", "caller aborted"));
 
 		const result = await resultPromise;
-		expect(result.cancelled).toBe(true);
+		expect(result.termination !== undefined).toBe(true);
 		expect(result.exitCode).toBeUndefined();
 		expect(result.output).toBe("");
 	});
@@ -165,7 +165,7 @@ describe("executePython (per-call)", () => {
 		abortController.abort(createCancellationError("TimeoutError", "execution deadline elapsed"));
 
 		const result = await resultPromise;
-		expect(result.cancelled).toBe(true);
+		expect(result.termination !== undefined).toBe(true);
 		expect(result.exitCode).toBeUndefined();
 		expect(result.output).toContain("eval cell timed out after");
 		expect(shutdownCalls).toBe(1);

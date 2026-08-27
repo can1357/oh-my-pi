@@ -118,7 +118,7 @@ export class EvalRunner {
 			code,
 			output: result.output,
 			exitCode: result.exitCode,
-			cancelled: result.cancelled,
+			cancelled: result.termination !== undefined,
 			truncated: result.truncated,
 			meta,
 			timestamp: Date.now(),

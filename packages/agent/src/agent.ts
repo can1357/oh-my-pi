@@ -445,6 +445,8 @@ export class Agent {
 	 * message emission. Reassign at any time to swap the implementation.
 	 */
 	afterToolCall?: AgentLoopConfig["afterToolCall"];
+	/** Host representation barrier for typed tool-settlement delivery. */
+	#afterPresentationSettlement?: AgentLoopConfig["afterPresentationSettlement"];
 	/**
 	 * Hook invoked once an assistant message is finalized, before context append,
 	 * UI emission, and tool dispatch. Reassign at any time to swap the implementation.
@@ -863,6 +865,10 @@ export class Agent {
 			| undefined,
 	): void {
 		this.#onTurnEnd = fn;
+	}
+
+	setAfterPresentationSettlement(fn: AgentLoopConfig["afterPresentationSettlement"] | undefined): void {
+		this.#afterPresentationSettlement = fn;
 	}
 
 	/**
@@ -1459,6 +1465,7 @@ export class Agent {
 			appendOnlyContext: this.#appendOnlyContext,
 			beforeToolCall: this.beforeToolCall ? (ctx, signal) => this.beforeToolCall?.(ctx, signal) : undefined,
 			afterToolCall: this.afterToolCall ? (ctx, signal) => this.afterToolCall?.(ctx, signal) : undefined,
+			afterPresentationSettlement: this.#afterPresentationSettlement,
 			transformAssistantMessage: this.transformAssistantMessage
 				? (message, signal) => this.transformAssistantMessage?.(message, signal)
 				: undefined,

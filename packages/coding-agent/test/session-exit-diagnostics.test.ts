@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
+import { toolExecutionId } from "@oh-my-pi/pi-agent-core/presentation";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -255,6 +256,284 @@ describe("session exit diagnostics", () => {
 			},
 		]);
 		expect(describePendingToolCalls(sessionManager.getBranch())).toContain("bun run check:ts");
+	});
+
+	it("sources a pending presentation_events call's diagnostic from its v4 journal when the started record exists", () => {
+		const sessionManager = SessionManager.inMemory();
+		const journalToolCallId = "toolu_journal_9K2M";
+		sessionManager.appendMessage({
+			...pendingAssistant,
+			content: [
+				{
+					type: "toolCall",
+					id: journalToolCallId,
+					name: "bash",
+					arguments: { command: "STALE_ASSISTANT_ARG_9K2M" },
+				},
+			],
+		});
+		// The journal's `started` record carries a different tool name and raw
+		// input than the assistant part above — proves the diagnostic is sourced
+		// from the journal fold, not the assistant message/legacy marker.
+		sessionManager.appendToolExecutionStarted({
+			recordVersion: 1,
+			executionId: toolExecutionId("exec-journal-9K2M"),
+			call: {
+				toolCallId: journalToolCallId,
+				toolName: "bash_journal_sourced",
+				title: "run JOURNAL_TITLE_9K2M",
+				kind: "execute",
+				rawInput: { command: "JOURNAL_RAW_INPUT_9K2M" },
+			},
+			presentation: { version: 1, facts: [] },
+		});
+		sessionManager.appendCustomEntry(TOOL_EXECUTION_START_CUSTOM_TYPE, {
+			toolCallId: journalToolCallId,
+			toolName: "bash",
+			args: { command: "STALE_ASSISTANT_ARG_9K2M" },
+			startedAt: "2026-01-02T00:00:00.000Z",
+		} satisfies ToolExecutionStartData);
+
+		expect(collectPendingToolCalls(sessionManager.getBranch())).toMatchObject([
+			{
+				toolCallId: journalToolCallId,
+				toolName: "bash_journal_sourced",
+				args: { command: "JOURNAL_RAW_INPUT_9K2M" },
+			},
+		]);
+	});
+
+	it("sources the diagnostic from the journal even when its started record is written before the assistant message (write-order race)", () => {
+		// AgentSession's real event handling can append the v4 journal `started`
+		// entry (and the legacy marker) to the branch before the matching
+		// assistant message's own persistence lands: `#recordToolExecutionStart`/
+		// `#trackToolPresentation` write synchronously, ahead of their own
+		// extension-delivery await, while the assistant message's persistence
+		// is gated behind ITS OWN extension-delivery await plus a
+		// cross-message-end serialization queue. This test builds that exact
+		// branch order directly (journal entry appended first) to prove
+		// `collectPendingToolCalls` does not depend on the assistant-message
+		// having landed already.
+		const sessionManager = SessionManager.inMemory();
+		const raceToolCallId = "toolu_race_4P8L";
+		sessionManager.appendToolExecutionStarted({
+			recordVersion: 1,
+			executionId: toolExecutionId("exec-race-4P8L"),
+			call: {
+				toolCallId: raceToolCallId,
+				toolName: "bash_race_sourced",
+				title: "run RACE_TITLE_4P8L",
+				kind: "execute",
+				rawInput: { command: "RACE_RAW_INPUT_4P8L" },
+			},
+			presentation: { version: 1, facts: [] },
+		});
+		sessionManager.appendCustomEntry(TOOL_EXECUTION_START_CUSTOM_TYPE, {
+			toolCallId: raceToolCallId,
+			toolName: "bash",
+			args: { command: "STALE_RACE_ASSISTANT_ARG_4P8L" },
+			startedAt: "2026-01-03T00:00:00.000Z",
+		} satisfies ToolExecutionStartData);
+		sessionManager.appendMessage({
+			...pendingAssistant,
+			content: [
+				{
+					type: "toolCall",
+					id: raceToolCallId,
+					name: "bash",
+					arguments: { command: "STALE_RACE_ASSISTANT_ARG_4P8L" },
+				},
+			],
+		});
+
+		expect(collectPendingToolCalls(sessionManager.getBranch())).toMatchObject([
+			{
+				toolCallId: raceToolCallId,
+				toolName: "bash_race_sourced",
+				args: { command: "RACE_RAW_INPUT_4P8L" },
+			},
+		]);
+	});
+
+	it("does not attribute an earlier journaled occurrence's descriptor to a pending tail occurrence of a recycled id with no journal coverage of its own", () => {
+		// Mixed per-call protocol selection on a recycled toolCallId: occurrence A
+		// runs on presentation_events (journaled, fully resolved), occurrence B
+		// reuses the same id later but runs on legacy_snapshot (never journaled)
+		// and is the one left pending. An unbounded journal scan would still find
+		// A's `started` record — the only one that exists for this id — and must
+		// NOT misattribute it to B; B's own legacy-marker values must survive.
+		const recycledId = "toolu_recycled_mix_7K2N";
+		const sessionManager = SessionManager.inMemory();
+
+		// Occurrence A: journaled via presentation_events, fully resolved.
+		sessionManager.appendMessage({
+			...pendingAssistant,
+			content: [
+				{ type: "toolCall", id: recycledId, name: "bash", arguments: { command: "FIRST_OCCURRENCE_ARG_7K2N" } },
+			],
+		});
+		sessionManager.appendToolExecutionStarted({
+			recordVersion: 1,
+			executionId: toolExecutionId("exec-mix-first-7K2N"),
+			call: {
+				toolCallId: recycledId,
+				toolName: "bash_first_occurrence",
+				title: "run FIRST_TITLE_7K2N",
+				kind: "execute",
+				rawInput: { command: "FIRST_RAW_INPUT_7K2N" },
+			},
+			presentation: { version: 1, facts: [] },
+		});
+		sessionManager.appendCustomEntry(TOOL_EXECUTION_START_CUSTOM_TYPE, {
+			toolCallId: recycledId,
+			toolName: "bash",
+			args: { command: "FIRST_OCCURRENCE_ARG_7K2N" },
+			startedAt: "2026-02-01T00:00:00.000Z",
+		} satisfies ToolExecutionStartData);
+		sessionManager.appendToolExecutionSettled({
+			recordVersion: 1,
+			executionId: toolExecutionId("exec-mix-first-7K2N"),
+			outcome: { kind: "succeeded" },
+			presentation: { version: 1, facts: [], attachments: [] },
+			modelProjection: { version: 1, content: [{ type: "text", text: "FIRST_OCCURRENCE_RESULT_7K2N" }] },
+		});
+		sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: recycledId,
+			toolName: "bash",
+			content: [{ type: "text", text: "FIRST_OCCURRENCE_RESULT_7K2N" }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// Occurrence B: the tail, same recycled id, legacy_snapshot — never journaled.
+		sessionManager.appendMessage({
+			...pendingAssistant,
+			content: [
+				{ type: "toolCall", id: recycledId, name: "bash", arguments: { command: "SECOND_OCCURRENCE_ARG_7K2N" } },
+			],
+		});
+		sessionManager.appendCustomEntry(TOOL_EXECUTION_START_CUSTOM_TYPE, {
+			toolCallId: recycledId,
+			toolName: "bash",
+			args: { command: "SECOND_OCCURRENCE_ARG_7K2N" },
+			startedAt: "2026-02-02T00:00:00.000Z",
+			intent: "SECOND_OCCURRENCE_INTENT_7K2N",
+		} satisfies ToolExecutionStartData);
+
+		expect(collectPendingToolCalls(sessionManager.getBranch())).toMatchObject([
+			{
+				toolCallId: recycledId,
+				toolName: "bash",
+				args: { command: "SECOND_OCCURRENCE_ARG_7K2N" },
+				startedAt: "2026-02-02T00:00:00.000Z",
+				intent: "SECOND_OCCURRENCE_INTENT_7K2N",
+			},
+		]);
+	});
+
+	it("does not misattribute an earlier occurrence's journal descriptor when the pending tail occurrence's own assistant message has not yet persisted", () => {
+		// A stricter variant of the mixed-protocol race above: occurrence A is
+		// fully persisted AND journaled (marker + v4 started/settled). Occurrence
+		// B reuses the same recycled toolCallId on legacy_snapshot; ITS marker is
+		// present (written synchronously by `#recordToolExecutionStart`,
+		// independent of message persistence), but B's own assistant message has
+		// NOT reached disk yet — a `message_end` persistence lag, this time
+		// landing between the marker and the transcript
+		// rather than between the marker and the journal. A transcript-content-
+		// based occurrence count would undercount B (0, since its assistant
+		// message is absent) and wrongly see A's marker-count(1) == A's
+		// journal-count(1) as "total" coverage, misattributing A's descriptor to
+		// B. The marker-based count sees both markers (2) against A's lone
+		// journal entry (1) — a mismatch — and correctly falls back to B's own
+		// marker values.
+		const recycledId = "toolu_recycled_lag_3W9V";
+		const sessionManager = SessionManager.inMemory();
+
+		// Occurrence A: fully persisted and journaled.
+		sessionManager.appendMessage({
+			...pendingAssistant,
+			content: [{ type: "toolCall", id: recycledId, name: "bash", arguments: { command: "LAG_FIRST_ARG_3W9V" } }],
+		});
+		sessionManager.appendToolExecutionStarted({
+			recordVersion: 1,
+			executionId: toolExecutionId("exec-lag-first-3W9V"),
+			call: {
+				toolCallId: recycledId,
+				toolName: "bash_lag_first_occurrence",
+				title: "run LAG_FIRST_TITLE_3W9V",
+				kind: "execute",
+				rawInput: { command: "LAG_FIRST_RAW_INPUT_3W9V" },
+			},
+			presentation: { version: 1, facts: [] },
+		});
+		sessionManager.appendCustomEntry(TOOL_EXECUTION_START_CUSTOM_TYPE, {
+			toolCallId: recycledId,
+			toolName: "bash",
+			args: { command: "LAG_FIRST_ARG_3W9V" },
+			startedAt: "2026-03-01T00:00:00.000Z",
+		} satisfies ToolExecutionStartData);
+		sessionManager.appendToolExecutionSettled({
+			recordVersion: 1,
+			executionId: toolExecutionId("exec-lag-first-3W9V"),
+			outcome: { kind: "succeeded" },
+			presentation: { version: 1, facts: [], attachments: [] },
+			modelProjection: { version: 1, content: [{ type: "text", text: "LAG_FIRST_RESULT_3W9V" }] },
+		});
+		sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: recycledId,
+			toolName: "bash",
+			content: [{ type: "text", text: "LAG_FIRST_RESULT_3W9V" }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// Occurrence B: the tail, same recycled id, legacy_snapshot. Its marker
+		// is present, but — unlike every other test in this file — its assistant
+		// message is deliberately NOT appended, modeling the exact persistence
+		// lag `#createMessageEndPersistenceSlot`'s extension-gated write can
+		// leave behind at the moment a signal/dispose handler calls
+		// `collectPendingToolCalls`.
+		sessionManager.appendCustomEntry(TOOL_EXECUTION_START_CUSTOM_TYPE, {
+			toolCallId: recycledId,
+			toolName: "bash",
+			args: { command: "LAG_SECOND_ARG_3W9V" },
+			startedAt: "2026-03-02T00:00:00.000Z",
+			intent: "LAG_SECOND_INTENT_3W9V",
+		} satisfies ToolExecutionStartData);
+
+		expect(collectPendingToolCalls(sessionManager.getBranch())).toMatchObject([
+			{
+				toolCallId: recycledId,
+				toolName: "bash",
+				args: { command: "LAG_SECOND_ARG_3W9V" },
+				startedAt: "2026-03-02T00:00:00.000Z",
+				intent: "LAG_SECOND_INTENT_3W9V",
+			},
+		]);
+	});
+
+	it("falls back to the legacy marker scan for a legacy_snapshot call with no journal record", () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage(pendingAssistant);
+		sessionManager.appendCustomEntry(TOOL_EXECUTION_START_CUSTOM_TYPE, {
+			toolCallId: "toolu_repro",
+			toolName: "bash",
+			args: { command: "bun run check:ts" },
+			startedAt: "2026-01-01T00:00:00.000Z",
+			intent: "LEGACY_FALLBACK_INTENT_5Q3W",
+		} satisfies ToolExecutionStartData);
+
+		expect(collectPendingToolCalls(sessionManager.getBranch())).toMatchObject([
+			{
+				toolCallId: "toolu_repro",
+				toolName: "bash",
+				args: { command: "bun run check:ts" },
+				startedAt: "2026-01-01T00:00:00.000Z",
+				intent: "LEGACY_FALLBACK_INTENT_5Q3W",
+			},
+		]);
 	});
 
 	it("clears the pending warning once the matching tool result is recorded", () => {

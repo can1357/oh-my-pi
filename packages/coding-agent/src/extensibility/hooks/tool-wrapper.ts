@@ -3,6 +3,7 @@
  */
 import type { AgentTool, AgentToolContext, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Static, TSchema } from "@oh-my-pi/pi-ai";
+import { normalizeToolEventDetails } from "../tool-event-details";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
 import type { HookRunner } from "./runner";
@@ -36,7 +37,7 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 		toolCallId: string,
 		params: Static<TParameters>,
 		signal?: AbortSignal,
-		onUpdate?: AgentToolUpdateCallback<TDetails, TParameters>,
+		onUpdate?: AgentToolUpdateCallback<TDetails>,
 		context?: AgentToolContext,
 	) {
 		// Emit tool_call event - hooks can block execution or revise the input the tool runs with.
@@ -88,7 +89,7 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 						resolveToolEventInput(this.tool, effectiveParams as Record<string, unknown>),
 					),
 					content: result.content,
-					details: result.details,
+					details: normalizeToolEventDetails(this.tool.name, result.details),
 					isError: false,
 				})) as ToolResultEventResult | undefined;
 

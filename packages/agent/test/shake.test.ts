@@ -255,8 +255,12 @@ describe("collectShakeRegions — useless results", () => {
 		expect(regions[0].entry).toBe(flagged);
 	});
 
-	test("an error result never bypasses the window even when flagged", () => {
-		const entry = messageEntry(toolResultMessage("search", "boom\n".repeat(50), { useless: true, isError: true }));
-		expect(collectShakeRegions([entry], tokenizer, cfg({ protectTokens: 1_000_000 }))).toHaveLength(0);
-	});
+	// The "useless with isError" case this used to construct directly and expect
+	// shake's own guard to reject is now unrepresentable coming out of the real
+	// pipeline: `coerceToolResult`/`emitToolResult`
+	// enforce "useless implies not isError" once, at message construction, so
+	// `useless` and `isError` can never both be true on a `ToolResultMessage`
+	// shake actually receives. That boundary contract is tested at its real
+	// enforcement site (`agent-loop.test.ts`'s "useless"/"isError" tool-result
+	// tests), not by hand-constructing an impossible fixture here.
 });

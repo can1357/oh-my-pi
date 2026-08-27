@@ -87,7 +87,7 @@ describe.skipIf(!SHOULD_RUN)("ruby runner subprocess", () => {
 			// the platform clock — fake timers cannot drive it. Abort once the cell is in flight.
 			setTimeout(() => controller.abort(), 300);
 			const cancelled = await executeRubyWithKernel(kernel, "sleep 30", { signal: controller.signal });
-			expect(cancelled.cancelled).toBe(true);
+			expect(cancelled.termination !== undefined).toBe(true);
 
 			const after = await executeRubyWithKernel(kernel, "20 + 22", {});
 			expect(after.exitCode).toBe(0);
@@ -106,7 +106,7 @@ describe.skipIf(!SHOULD_RUN)("ruby runner subprocess", () => {
 			const cancelled = await executeRubyWithKernel(kernel, 'File.write("aborted.txt", "nope")', {
 				signal: controller.signal,
 			});
-			expect(cancelled.cancelled).toBe(true);
+			expect(cancelled.termination !== undefined).toBe(true);
 
 			const sideEffect = await executeRubyWithKernel(kernel, 'File.exist?("aborted.txt")', {});
 			expect(sideEffect.exitCode).toBe(0);

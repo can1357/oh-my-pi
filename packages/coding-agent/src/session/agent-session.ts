@@ -22,7 +22,7 @@ import { isPromise } from "node:util/types";
 import type { Clipboard, InMemorySnapshotStore } from "@oh-my-pi/hashline";
 import {
 	type AfterToolCallContext,
-	type AfterToolCallResult,
+	type AfterToolCallEffect,
 	type Agent,
 	AgentBusyError,
 	type AgentEvent,
@@ -38,6 +38,7 @@ import {
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
 	EventLoopKeepalive,
+	type JsonValue,
 	resolveTelemetry,
 	type StreamFn,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
@@ -52,6 +53,7 @@ import {
 	generateBranchSummary,
 	type ShakeConfig,
 } from "@oh-my-pi/pi-agent-core/compaction";
+import { PRESENTATION_VERSION, toolExecutionId } from "@oh-my-pi/pi-agent-core/presentation";
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
@@ -165,6 +167,17 @@ import { containsWorkflow, renderWorkflowNotice } from "../modes/workflow";
 import { type PlanApprovalDetails, resolveApprovedPlan } from "../plan-mode/approved-plan";
 import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
 import type { PlanModeState } from "../plan-mode/state";
+import {
+	type FrozenModelProjection,
+	MODEL_PROJECTION_VERSION,
+	TOOL_JOURNAL_RECORD_VERSION,
+	toolCallRecordOf,
+} from "../presentation/journal";
+import {
+	LiveToolPresentationRecord,
+	type PendingToolExecutionPresentation,
+	type PendingToolPresentationSnapshot,
+} from "../presentation/live-record";
 import goalModeContextPrompt from "../prompts/goals/goal-mode-context.md" with { type: "text" };
 import goalTodoContextPrompt from "../prompts/goals/goal-todo-context.md" with { type: "text" };
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
@@ -511,6 +524,16 @@ export class AgentSession {
 	#cancelExitRecorder?: () => void;
 	#cancelFatalRecoveryHint?: () => void;
 	#exitRecorded = false;
+	/**
+	 * In-flight live folds keyed by `toolCallId`, one per call currently on the
+	 * `presentation_events` protocol between its `started` and `settled`
+	 * `tool_presentation` events. Carries the same `ToolExecutionId` the v4
+	 * journal's `started` record already minted, so a future consumer settling
+	 * the journal (`PersistedToolExecutionSettled`) can look it up without
+	 * minting a second one. Cleared on `settled` and on `beginDispose()`
+	 * (a call that never settles must not leak for the life of the session).
+	 */
+	#pendingToolPresentations = new Map<string, PendingToolExecutionPresentation>();
 	#unsubscribeAppendOnly?: () => void;
 	#unsubscribeModelRoles?: () => void;
 	#unsubscribeExtendedContext?: () => void;
@@ -1723,6 +1746,10 @@ export class AgentSession {
 		return this.#agentId;
 	}
 
+	setPresentationSettlementDeliveryBarrier(barrier: ((toolCallId: string) => Promise<void> | void) | undefined): void {
+		this.agent.setAfterPresentationSettlement(barrier);
+	}
+
 	/** Dequeue the next HARD forced tool choice for the upcoming LLM call, dropping
 	 *  (and rejecting) one whose named tool is no longer active. */
 	#nextHardToolChoice(): ToolChoice | undefined {
@@ -2103,6 +2130,139 @@ export class AgentSession {
 		if (args) data.args = args;
 		if (event.intent) data.intent = event.intent;
 		this.sessionManager.appendCustomEntry(TOOL_EXECUTION_START_CUSTOM_TYPE, data);
+	}
+
+	/**
+	 * Route one `tool_presentation` event: append the `started` arm of the v4
+	 * persisted tool journal and open this call's live
+	 * {@link LiveToolPresentationRecord} fold, fold `terminal_append`/
+	 * `terminal_gap`/`fact`/`attachment`/`display_output` into it, or take its
+	 * `finish()` snapshot and append the `settled` arm on `settled`.
+	 *
+	 * Fired from the `tool_presentation` event carrying `{ type: "started",
+	 * call }` — the same `ToolCallPresentation` `reduceAcpToolView` announces
+	 * live — rather than from `tool_execution_start` itself: that legacy event
+	 * has no `title`/`kind`/`locations`, and fabricating them from the tool name
+	 * would be exactly the kind of heuristic this journal exists to avoid. A
+	 * call that never reaches `presentation_events` (still `legacy_snapshot`)
+	 * has no `started` presentation event and therefore no journal entry or
+	 * live fold — consistent with `hydrateReplayableToolExecution` having
+	 * nothing to fold for it either.
+	 *
+	 * Purely additive: `#recordToolExecutionStart` above still writes its own
+	 * `TOOL_EXECUTION_START_CUSTOM_TYPE` bookkeeping entry for every call
+	 * (legacy or presentation) for the unrelated resume-warning diagnostic.
+	 *
+	 * `settled` reads the pending entry *before* deleting it — `record.finish()`
+	 * needs it, and the frozen model projection is built from the `settled`
+	 * event's own `modelContent` (the agent loop's post-`afterToolCall` result
+	 * content, never re-derived from the display record — see
+	 * `ToolPresentationEvent`'s `settled` arm doc comment for why the display
+	 * record cannot reproduce it on a client-owned-terminal or capped-output
+	 * route) — then appends `PersistedToolExecutionSettled` reusing the same
+	 * `executionId` `appendToolExecutionStarted` already minted, and only then
+	 * clears the map entry. The `outcome` on the event is the agent loop's own
+	 * `deriveToolOutcome` result (the agent loop alone emits
+	 * `started`/`settled`), so this producer never derives one of its own.
+	 */
+	#trackToolPresentation(event: Extract<AgentEvent, { type: "tool_presentation" }>): void {
+		const { toolCallId } = event;
+		switch (event.event.type) {
+			case "started": {
+				const executionId = toolExecutionId(Bun.randomUUIDv7());
+				this.sessionManager.appendToolExecutionStarted({
+					recordVersion: TOOL_JOURNAL_RECORD_VERSION,
+					executionId,
+					call: toolCallRecordOf(event.event.call),
+					presentation: { version: PRESENTATION_VERSION, facts: [] },
+				});
+				this.#pendingToolPresentations.set(toolCallId, { executionId, record: new LiveToolPresentationRecord() });
+				return;
+			}
+			case "terminal_append":
+			case "terminal_gap":
+			case "fact":
+			case "attachment":
+			case "display_output": {
+				const pending = this.#pendingToolPresentations.get(toolCallId);
+				if (!pending) {
+					// Should never happen: every presentation-protocol call opens its fold
+					// on `started` before any other event can reach here. Log and drop
+					// rather than throw — this is internal bookkeeping with no consumer
+					// yet, and the session must not crash over it.
+					logger.error("tool_presentation event for an untracked call", {
+						toolCallId,
+						toolName: event.toolName,
+						eventType: event.event.type,
+					});
+					return;
+				}
+				try {
+					pending.record.fold(event.event);
+				} catch (error) {
+					// A genuine continuity defect in the producer/transport. Never
+					// silently repaired: drop the in-flight fold so no consumer can read
+					// a corrupted record, and log loudly so the defect is visible.
+					logger.error("Dropping a live tool presentation fold after a continuity violation", {
+						toolCallId,
+						toolName: event.toolName,
+						eventType: event.event.type,
+						error: error instanceof Error ? error.message : String(error),
+					});
+					this.#pendingToolPresentations.delete(toolCallId);
+				}
+				return;
+			}
+			case "settled": {
+				const pending = this.#pendingToolPresentations.get(toolCallId);
+				if (!pending) {
+					// Mirrors the untracked-call handling above: should never happen
+					// (every presentation-protocol call opens its fold on `started`
+					// before `settled` can reach here), but this is internal bookkeeping
+					// with no consumer that must never crash the session over it.
+					logger.error("tool_presentation settled event for an untracked call", {
+						toolCallId,
+						toolName: event.toolName,
+					});
+					return;
+				}
+				const { modelContent } = event.event;
+				if (modelContent === undefined) {
+					// The agent loop is the only producer that supplies `modelContent`
+					// (events.ts's own doc comment). A reconstructed/replayed event
+					// stream has no such authority to offer, so there is nothing honest
+					// to persist as the frozen model projection here — never
+					// re-derived from the display record (that is exactly what a
+					// client-owned-terminal or capped-output route cannot reproduce).
+					// Drop the write; a dangling `started` entry folds to `interrupted`
+					// on replay, which is the correct degraded-but-honest outcome for
+					// data that genuinely was not captured.
+					logger.error("tool_presentation settled event carried no modelContent; dropping the journal write", {
+						toolCallId,
+						toolName: event.toolName,
+					});
+					this.#pendingToolPresentations.delete(toolCallId);
+					return;
+				}
+				const presentation = pending.record.finish();
+				const modelProjection: FrozenModelProjection = { version: MODEL_PROJECTION_VERSION, content: modelContent };
+				this.sessionManager.appendToolExecutionSettled({
+					recordVersion: TOOL_JOURNAL_RECORD_VERSION,
+					executionId: pending.executionId,
+					outcome: event.event.outcome,
+					presentation,
+					modelProjection,
+				});
+				this.#pendingToolPresentations.delete(toolCallId);
+				return;
+			}
+			case "live_terminal_attached":
+				return;
+			default: {
+				const exhaustive: never = event.event;
+				throw new Error(`Unhandled presentation event: ${JSON.stringify(exhaustive)}`);
+			}
+		}
 	}
 
 	#recordSessionExit(reason: postmortem.Reason | "dispose"): void {
@@ -2755,6 +2915,10 @@ export class AgentSession {
 
 		if (event.type === "tool_execution_start") {
 			this.#recordToolExecutionStart(event);
+		}
+
+		if (event.type === "tool_presentation") {
+			this.#trackToolPresentation(event);
 		}
 
 		if (event.type !== "agent_end") {
@@ -3558,7 +3722,7 @@ export class AgentSession {
 		}
 	}
 
-	#afterToolCall(ctx: AfterToolCallContext): AfterToolCallResult | undefined {
+	#afterToolCall(ctx: AfterToolCallContext): AfterToolCallEffect | undefined {
 		if (
 			this.#isTerminalYieldToolResult({
 				toolName: ctx.toolCall.name,
@@ -3616,7 +3780,10 @@ export class AgentSession {
 		// A computer call's event input is a synthetic {actions, pendingSafetyChecks}
 		// view, not the execution params — a revision cannot map back onto them.
 		if (callResult?.input !== undefined && !computer) {
-			return { args: callResult.input };
+			// Extension-revised args are untrusted `Record<string, unknown>`; the
+			// agent loop's `prepareToolCallDispatch` validates JSON-ness before the
+			// deep clone, so the cast here is narrowed at the boundary.
+			return { args: callResult.input as Record<string, JsonValue> };
 		}
 		return undefined;
 	}
@@ -3937,8 +4104,22 @@ export class AgentSession {
 	 * Temporarily disconnect from agent events.
 	 * User listeners are preserved and will receive events again after resubscribe().
 	 * Used internally during operations that need to pause event processing.
+	 *
+	 * Drops every in-flight `#pendingToolPresentations` fold. This is the one
+	 * structural predicate for "no further `settled` can arrive for anything
+	 * currently in flight": every caller here (`newSession`, `switchSession`,
+	 * model switch, `SessionMaintenance.compact()`, `#doDispose`) detaches this
+	 * listener *before* `await abort()` — see the auto-resume guard's own note
+	 * above — so the abort's synthetic settlement for each live call is emitted
+	 * while nothing is subscribed and can never reach `#trackToolPresentation`.
+	 * Clearing on the detach itself rather than at each transition means a
+	 * future caller cannot reintroduce the leak by forgetting one, and it cannot
+	 * discard a record whose settlement is still coming: the `abort()` that
+	 * follows every detach has already terminated those calls.
+	 * `beginDispose()` keeps its own clear as the synchronous dispose backstop.
 	 */
 	#disconnectFromAgent(): void {
+		this.#pendingToolPresentations.clear();
 		if (this.#unsubscribeAgent) {
 			this.#unsubscribeAgent();
 			this.#unsubscribeAgent = undefined;
@@ -4081,6 +4262,13 @@ export class AgentSession {
 	 * Wrappers that await other teardown before delegating to `dispose()` MUST
 	 * call this before their first await — otherwise work started in that async
 	 * gap slips past the disposal guards.
+	 *
+	 * Also drops every in-flight `#pendingToolPresentations` entry: a call
+	 * whose `started` presentation event landed but whose `settled` one never
+	 * will (an interrupted turn, a process that is going away) must not leak
+	 * its live fold for the life of a long-running session — the same
+	 * teardown discipline `AcpAgent`'s own per-call `toolViews` map already
+	 * applies (`record.toolViews.clear()` on a poisoned/torn-down session).
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
@@ -4099,6 +4287,7 @@ export class AgentSession {
 		this.agent.hasIrcInterrupts = undefined;
 		this.#advisors.stopRuntime();
 		this.#eval.beginDispose();
+		this.#pendingToolPresentations.clear();
 	}
 
 	/**
@@ -4791,6 +4980,11 @@ export class AgentSession {
 		return this.#tools.runToolRegistryMutation(mutation, signal);
 	}
 
+	/** Whether a live dispatch name resolves to a registered built-in tool. */
+	hasBuiltInToolDispatch(name: string): boolean {
+		return this.#tools.hasBuiltInToolDispatch(name);
+	}
+
 	/** Names of every registered tool. */
 	getAllToolNames(): string[] {
 		return this.#tools.getAllToolNames();
@@ -5022,6 +5216,26 @@ export class AgentSession {
 	trackPostPromptTaskForTests(task: Promise<unknown>): void {
 		if (!isBunTestRuntime()) throw new Error("trackPostPromptTaskForTests is test-only");
 		this.#trackPostPromptTask(task);
+	}
+
+	/**
+	 * Snapshot of in-flight `tool_presentation` folds, keyed by `toolCallId`.
+	 * Test-only.
+	 *
+	 * Returns a `finish()`-projected {@link PendingToolPresentationSnapshot} per
+	 * entry, never the live {@link LiveToolPresentationRecord} builder: `finish()`
+	 * is pure and repeatable, but the builder's own public `fold()` mutates
+	 * production state, and `ReadonlyMap` only prevents `set`/`delete` on the
+	 * copied container — a caller handed the builder itself could still fold a
+	 * fact/attachment/append/gap into the real accumulation.
+	 */
+	pendingToolPresentationsForTests(): ReadonlyMap<string, PendingToolPresentationSnapshot> {
+		if (!isBunTestRuntime()) throw new Error("pendingToolPresentationsForTests is test-only");
+		const snapshot = new Map<string, PendingToolPresentationSnapshot>();
+		for (const [toolCallId, pending] of this.#pendingToolPresentations) {
+			snapshot.set(toolCallId, { executionId: pending.executionId, presentation: pending.record.finish() });
+		}
+		return snapshot;
 	}
 
 	/** All messages including custom types like BashExecutionMessage */

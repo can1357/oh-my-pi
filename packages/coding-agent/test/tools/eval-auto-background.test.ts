@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import type { ToolPresentationEvent } from "@oh-my-pi/pi-agent-core/presentation";
+import { streamId, ToolPresentationStream } from "@oh-my-pi/pi-agent-core/presentation";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as evalIndex from "@oh-my-pi/pi-coding-agent/eval";
@@ -71,6 +73,29 @@ function steeringContext(steeringSignal: AbortSignal): AgentToolContext {
 			total: 1,
 			toolCalls: [{ id: "call-steer", name: "eval" }],
 			steeringSignal,
+		},
+	} as AgentToolContext;
+}
+
+function presentationContext(producer: ToolPresentationStream): AgentToolContext {
+	return {
+		sessionManager: SessionManager.inMemory(),
+		modelRegistry: {
+			find: () => undefined,
+			getAll: () => [],
+			getApiKey: async () => undefined,
+		} as unknown as AgentToolContext["modelRegistry"],
+		model: undefined,
+		isIdle: () => true,
+		hasQueuedMessages: () => false,
+		abort: () => {},
+		toolNames: [],
+		toolCall: {
+			batchId: "batch-1",
+			index: 0,
+			total: 1,
+			toolCalls: [{ id: "call-bg-presentation", name: "eval" }],
+			progress: { kind: "presentation_events", presentation: producer },
 		},
 	} as AgentToolContext;
 }
@@ -210,6 +235,66 @@ describe("EvalTool auto-background", () => {
 		cell.release();
 		await job?.promise;
 		expect(asyncJobManager.getJob(jobId)?.status).toBe("completed");
+		await asyncJobManager.dispose();
+	});
+
+	it("detaches the presentation producer at handoff so the backgrounded cell cannot write to the settled call", async () => {
+		const asyncJobManager = new AsyncJobManager({});
+		// A gated cell that streams, then — after release — emits a late chunk
+		// and returns an annotation plus a display output. Before the detach
+		// fix, each of those reached the frozen producer: the fact/display
+		// writes threw (failing the whole job) and the chunk was dropped as
+		// late output on a settled call.
+		const gate = Promise.withResolvers<void>();
+		vi.spyOn(evalIndex.jsBackend, "execute").mockImplementation((async (
+			_code: string,
+			options: { onChunk?: (chunk: string) => void },
+		) => {
+			options.onChunk?.("start\n");
+			await gate.promise;
+			options.onChunk?.("late chunk\n");
+			return baseResult({
+				output: "done",
+				annotation: "kernel stopped",
+				displayOutputs: [{ type: "json", data: { late: true } }],
+			});
+		}) as never);
+
+		const events: ToolPresentationEvent[] = [];
+		const producer = new ToolPresentationStream(streamId("call-bg-presentation"), event => events.push(event));
+		const tool = new EvalTool(
+			makeSession(
+				Settings.isolated({
+					"eval.autoBackground.enabled": true,
+					"eval.autoBackground.thresholdMs": 10,
+				}),
+				asyncJobManager,
+			),
+		);
+
+		const result = await tool.execute(
+			"call-bg-presentation",
+			{ language: "js", code: "await work()" },
+			undefined,
+			undefined,
+			presentationContext(producer),
+		);
+		expect(result.details?.async?.state).toBe("running");
+		const jobId = result.details?.async?.jobId;
+		if (!jobId) throw new Error("expected an auto-backgrounded job id");
+
+		// The agent loop settles the foreground call: the producer freezes.
+		await producer.freeze();
+		const eventsAtSettlement = events.length;
+
+		gate.resolve();
+		const job = asyncJobManager.getJob(jobId);
+		await job?.promise;
+		// The continuing cell completed as a success — no late write reached
+		// the frozen producer (any one of them would throw and fail the job) —
+		// and the settled presentation stream saw not a single post-freeze event.
+		expect(asyncJobManager.getJob(jobId)?.status).toBe("completed");
+		expect(events).toHaveLength(eventsAtSettlement);
 		await asyncJobManager.dispose();
 	});
 });

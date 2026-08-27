@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { coerceServiceTierByFamily, type ProviderPayload, type ServiceTierByFamily } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import type { ReplayableToolExecution } from "../presentation/journal";
 import {
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
@@ -12,6 +13,7 @@ import {
 	PREWALK_PLAN_MESSAGE_TYPE,
 } from "./messages";
 import { type CompactionEntry, EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
+import { createReplayToolJournalCursor, nextReplayableToolExecution } from "./tool-journal-correlation";
 
 // #4470 crash artifacts had legacy frames (no shape metadata) with 17 frames,
 // ~306k archive chars, and ~1.5M truncated chars. Current snapcompact frames
@@ -140,6 +142,166 @@ export interface BuildSessionContextOptions {
  */
 export interface StrippedToolCallsMarker {
 	strippedToolCalls?: number;
+}
+
+/**
+ * The `interrupted` arm of a folded v4 journal record — the only state a
+ * dangling transcript call can carry: a `started` record whose
+ * settlement never landed folds to `interrupted` before any consumer inspects
+ * tool lifecycle.
+ */
+export type InterruptedToolCallReplay = Extract<ReplayableToolExecution, { state: "interrupted" }>;
+
+/**
+ * Display-only marker set on transcript assistant messages whose dangling
+ * `toolCall` blocks the v4 tool journal can still account for.
+ *
+ * {@link StrippedToolCallsMarker}'s bare count is all a pre-v4 or
+ * `legacy_snapshot` call leaves behind — nothing on the resolved path says what
+ * it was. A `presentation_events` call, though, persisted its own
+ * `tool_execution_started` record, and folding that with the missing settlement
+ * yields the descriptor the call was announced with plus the reason no
+ * settlement landed. That is enough for the TUI to render the real call as
+ * interrupted history instead of counting it away. Every call the journal cannot
+ * unambiguously account for stays on {@link StrippedToolCallsMarker}'s count,
+ * unchanged.
+ */
+export interface InterruptedToolCallsMarker {
+	interruptedToolCalls?: readonly InterruptedToolCallReplay[];
+}
+
+/**
+ * Chronological key for one `toolCall` block occurrence: the index of the
+ * assistant message that carries it plus the block's index within that
+ * message's content. A provider-recycled `toolCallId` produces several
+ * occurrences sharing one id, so pairing/counting must key off transcript
+ * position, never the id alone.
+ */
+function toolCallOccurrenceKey(messageIndex: number, blockIndex: number): string {
+	return `${messageIndex}:${blockIndex}`;
+}
+
+/**
+ * Chronologically pair each `toolResult` message with the `toolCall`
+ * occurrence it settles, returning the set of paired occurrence keys (see
+ * {@link toolCallOccurrenceKey}) — an occurrence absent from the set is
+ * dangling.
+ *
+ * A provider can recycle a `toolCallId` across multiple calls in one
+ * transcript, so pairing cannot key on the id alone: a global "this id has a
+ * result somewhere" set marks every occurrence of a recycled id as settled
+ * the moment *any* of them gets a result, which hides a later dangling
+ * occurrence's interruption behind an earlier occurrence's settlement.
+ *
+ * Each `toolCallId` keeps a stack of its still-unpaired occurrences in
+ * transcript order; a `toolResult` pops (and pairs) the *latest*
+ * still-unpaired occurrence. This deliberately mispairs the pathological
+ * shape of a dangling first occurrence followed by a second occurrence of
+ * the same id that does settle — the result pairs the second occurrence, not
+ * the first, which a FIFO/queue scheme would get wrong instead. Under a
+ * well-formed transcript (an occurrence settles, if at all, before the same
+ * id is called again) both schemes agree, and duplicate ids within a single
+ * message are handled the same way as duplicates spread across messages.
+ */
+function pairToolCallOccurrences(messages: readonly AgentMessage[]): ReadonlySet<string> {
+	const unpaired = new Map<string, string[]>();
+	const paired = new Set<string>();
+	for (let i = 0; i < messages.length; i++) {
+		const message = messages[i];
+		if (message.role === "assistant") {
+			for (let b = 0; b < message.content.length; b++) {
+				const block = message.content[b];
+				if (block === undefined || block.type !== "toolCall") continue;
+				const key = toolCallOccurrenceKey(i, b);
+				const stack = unpaired.get(block.id);
+				if (stack === undefined) unpaired.set(block.id, [key]);
+				else stack.push(key);
+			}
+		} else if (message.role === "toolResult") {
+			const key = unpaired.get(message.toolCallId)?.pop();
+			if (key !== undefined) paired.add(key);
+		}
+	}
+	return paired;
+}
+
+/**
+ * Resolve every dangling `toolCall` occurrence the v4 tool journal can
+ * unambiguously account for, keyed by the index of the assistant message that
+ * carried it.
+ *
+ * `path` is the resolved leaf→root lineage, which is exactly
+ * `SessionManager#getBranch()` (both walk from `#index.leafId()`) — the scope
+ * {@link createReplayToolJournalCursor} requires. The flat entry array would let
+ * an abandoned branch's execution answer for the active one.
+ *
+ * `windowStart` narrows that lineage to the suffix `messages` was actually built
+ * from. The collapsed display transcript (`collapseCompactedHistory`) emits
+ * nothing before the active compaction's `firstKeptEntryId`, so the full branch
+ * still holds `tool_execution_started` records for turns the transcript no
+ * longer contains. Counting occurrences over the trimmed messages while reading
+ * starts off the untrimmed branch compares two different scopes, and for a
+ * `toolCallId` the provider recycled across the compaction boundary that either
+ * disqualifies a kept call the journal does cover totally, or — when the counts
+ * happen to coincide — resolves the kept call against the *pre*-compaction
+ * record and renders an earlier execution's descriptor. The window is a plain
+ * prefix cut of the same lineage, and a settlement is always recorded after its
+ * own start, so no record reachable from a start inside the window is lost with
+ * the prefix.
+ *
+ * The walk is chronological and consumes the cursor for **every** tool-call
+ * occurrence, paired or dangling: the cursor resolves the *k*-th encounter of a
+ * `toolCallId` against the *k*-th `tool_execution_started` record on the branch,
+ * so skipping the paired occurrences of a provider-recycled id would hand a
+ * later execution's descriptor to an earlier call. Whether an id is resolvable
+ * at all is the cursor's own totality gate (one record per transcript
+ * occurrence, or nothing for any of them); there is no second gate and no
+ * heuristic here. Both sides of that comparison are read from this one branch
+ * snapshot — the occurrences counted are the very blocks the walk visits — so a
+ * journal record whose assistant turn has not been persisted yet can only make
+ * the counts differ, which disqualifies the id and falls back.
+ *
+ * Only the `interrupted` fold is reported. A dangling *transcript* call whose
+ * journal proves settlement is not an interruption — its result simply is not on
+ * this path — and saying otherwise would invent a state neither source recorded.
+ */
+function resolveInterruptedDanglingToolCalls(
+	messages: readonly AgentMessage[],
+	pairedOccurrences: ReadonlySet<string>,
+	path: readonly SessionEntry[],
+	windowStart: number,
+): Map<number, InterruptedToolCallReplay[]> | undefined {
+	const occurrences = new Map<string, number>();
+	for (const message of messages) {
+		if (message.role !== "assistant") continue;
+		for (const block of message.content) {
+			if (block.type === "toolCall") occurrences.set(block.id, (occurrences.get(block.id) ?? 0) + 1);
+		}
+	}
+	if (occurrences.size === 0) return undefined;
+	const cursor = createReplayToolJournalCursor(windowStart === 0 ? path : path.slice(windowStart), occurrences);
+	// Pre-v4 history and every `legacy_snapshot` call journal nothing at all, so
+	// "this branch holds no records" is the common answer — skip the walk.
+	if (cursor.startsByToolCallId.size === 0) return undefined;
+	const interrupted = new Map<number, InterruptedToolCallReplay[]>();
+	for (let i = 0; i < messages.length; i++) {
+		const message = messages[i];
+		if (message.role !== "assistant") continue;
+		for (let b = 0; b < message.content.length; b++) {
+			const block = message.content[b];
+			if (block === undefined || block.type !== "toolCall") continue;
+			// Cursor consumed for every encounter regardless of pairing — a
+			// paired occurrence still advances the k-th-encounter walk, or a
+			// later dangling occurrence of the same recycled id would be handed
+			// the wrong start record.
+			const execution = nextReplayableToolExecution(cursor, block.id);
+			if (pairedOccurrences.has(toolCallOccurrenceKey(i, b)) || execution?.state !== "interrupted") continue;
+			const existing = interrupted.get(i);
+			if (existing === undefined) interrupted.set(i, [execution]);
+			else existing.push(execution);
+		}
+	}
+	return interrupted.size === 0 ? undefined : interrupted;
 }
 
 /**
@@ -362,6 +524,12 @@ export function buildSessionContext(
 		}
 	};
 
+	// Index in `path` at which the emitted message window begins. The collapsed
+	// display transcript drops every entry before the active compaction's
+	// `firstKeptEntryId`, so anything reading the branch alongside `messages`
+	// must honour the same cut — see `resolveInterruptedDanglingToolCalls`.
+	let messageWindowStart = 0;
+
 	if (options?.transcript && !options.collapseCompactedHistory) {
 		// Display transcript: every entry in chronological order. Compactions do
 		// not erase prior history here — each renders inline (as a divider in the
@@ -407,6 +575,14 @@ export function buildSessionContext(
 		// (and its kept tail) too, so only genuinely post-reset entries emit; a
 		// boundary before the latest compaction is superseded by it (the
 		// `else if (compaction)` branch below handles that case via this guard).
+		// The journal correlation window must honour the same cut as `messages`:
+		// pre-reset `tool_execution_started` records are as out-of-scope here as
+		// pre-compaction ones are for the compaction branch below. Leaving the
+		// window at 0 would count occurrences over post-reset messages while
+		// reading starts off the full lineage — a recycled toolCallId whose only
+		// start is pre-reset could then pass the totality gate and hand that
+		// earlier execution's descriptor to the post-reset call.
+		messageWindowStart = resetBoundaryIdx + 1;
 		for (let i = resetBoundaryIdx + 1; i < path.length; i++) {
 			appendMessage(path[i]);
 		}
@@ -438,6 +614,11 @@ export function buildSessionContext(
 
 		// Find compaction index in path
 		const compactionIdx = path.findIndex(e => e.type === "compaction" && e.id === compaction.id);
+		// Without a `firstKeptEntryId` match below, nothing before the compaction
+		// is emitted; the kept loop lowers this to that entry's own index. A
+		// missing compaction row (`-1`) leaves the whole path emitted, and the
+		// window with it.
+		messageWindowStart = compactionIdx + 1;
 
 		// The remote replacement payload (OpenAI remote compaction) carries the
 		// kept turns for the LLM context only; it is not rendered as visible
@@ -451,6 +632,7 @@ export function buildSessionContext(
 				const entry = path[i];
 				if (entry.id === compaction.firstKeptEntryId) {
 					foundFirstKept = true;
+					messageWindowStart = i;
 				}
 				if (foundFirstKept) {
 					appendMessage(entry);
@@ -512,22 +694,36 @@ export function buildSessionContext(
 	// a pending block instead of vanishing from the chat.)
 	const keepDangling = options?.transcript === true && options.keepDanglingToolCalls === true;
 	if (!keepDangling) {
-		const pairedToolResultIds = new Set<string>();
-		for (const message of messages) {
-			if (message.role === "toolResult") pairedToolResultIds.add(message.toolCallId);
-		}
+		const pairedOccurrences = pairToolCallOccurrences(messages);
+		// Display transcript only: a dangling call that ran on the presentation
+		// protocol left a journal record that still describes it, so it renders as
+		// real interrupted history instead of being counted away. The LLM context
+		// has no use for that (and is rebuilt on every request), so it never pays
+		// for the walk.
+		const interruptedByMessage =
+			options?.transcript === true
+				? resolveInterruptedDanglingToolCalls(messages, pairedOccurrences, path, messageWindowStart)
+				: undefined;
 		for (let i = messages.length - 1; i >= 0; i--) {
 			const message = messages[i];
 			if (message.role !== "assistant") continue;
-			let strippedToolCalls = 0;
-			for (const block of message.content) {
-				if (block.type === "toolCall" && !pairedToolResultIds.has(block.id)) strippedToolCalls++;
+			let danglingToolCalls = 0;
+			for (let b = 0; b < message.content.length; b++) {
+				const block = message.content[b];
+				if (
+					block !== undefined &&
+					block.type === "toolCall" &&
+					!pairedOccurrences.has(toolCallOccurrenceKey(i, b))
+				) {
+					danglingToolCalls++;
+				}
 			}
-			if (strippedToolCalls === 0) continue;
+			if (danglingToolCalls === 0) continue;
+			const interruptedToolCalls = interruptedByMessage?.get(i);
 			const normalized = message.content
 				.filter(
-					block =>
-						!(block.type === "toolCall" && !pairedToolResultIds.has(block.id)) &&
+					(block, b) =>
+						!(block.type === "toolCall" && !pairedOccurrences.has(toolCallOccurrenceKey(i, b))) &&
 						block.type !== "redactedThinking",
 				)
 				.map(block =>
@@ -540,10 +736,17 @@ export function buildSessionContext(
 			} else {
 				const rewritten = { ...message, content: normalized };
 				if (options?.transcript) {
-					// Display transcript: keep the turn (even content-less) and mark
-					// how many calls were dropped so the TUI renders a placeholder
-					// row instead of silently erasing the turn's activity.
-					(rewritten as AgentMessage & StrippedToolCallsMarker).strippedToolCalls = strippedToolCalls;
+					// Display transcript: keep the turn (even content-less). Calls the
+					// journal accounted for travel as their own folded records so the
+					// TUI renders them; the rest are only a count, so the turn's
+					// activity is visibly elided instead of silently erased.
+					if (interruptedToolCalls !== undefined) {
+						(rewritten as AgentMessage & InterruptedToolCallsMarker).interruptedToolCalls = interruptedToolCalls;
+					}
+					const strippedToolCalls = danglingToolCalls - (interruptedToolCalls?.length ?? 0);
+					if (strippedToolCalls > 0) {
+						(rewritten as AgentMessage & StrippedToolCallsMarker).strippedToolCalls = strippedToolCalls;
+					}
 				}
 				messages[i] = rewritten;
 			}

@@ -275,3 +275,33 @@ describe("executeHashlineSingle multi-section aggregate cap", () => {
 		expect(totalKept).toBeLessThanOrEqual(MAX_EDIT_SNAPSHOT_TEXT_CHARS);
 	});
 });
+
+describe("executePatchSingle pruned move", () => {
+	test("a pruned move keeps sourcePath and move even though oldText/newText are stripped", async () => {
+		// `pruneOversizedEditSnapshots` only ever strips `oldText`/`newText` off
+		// the flat bag; `sourcePath`/`move`/`op` are hand-carried alongside on
+		// every producer and are never at risk of being dropped in step with the
+		// snapshot. This asserts the same is true routed through
+		// `FileChangeEvidence`'s `pruned` variant (`PrunedFileChange`'s move arm
+		// keeps `sourcePath` — see `types.ts`).
+		await Bun.write(path.join(tempDir, "big.txt"), `${FILLER}anchor\n${FILLER}`);
+
+		const result = await executePatchSingle({
+			session: makeSession(tempDir),
+			path: "big.txt",
+			params: { op: "update", rename: "moved.txt", diff: "@@\n-anchor\n+ANCHOR" },
+			allowFuzzy: true,
+			fuzzyThreshold: DEFAULT_FUZZY_THRESHOLD,
+			writethrough: writethroughNoop,
+			beginDeferredDiagnosticsForPath: noopBeginDeferred,
+		});
+
+		const details = result.details!;
+		expect(details.oldText).toBeUndefined();
+		expect(details.newText).toBeUndefined();
+		expect(details.snapshotsPruned).toBe(true);
+		expect(details.move).toBe("moved.txt");
+		expect(details.sourcePath).toBe(path.join(tempDir, "big.txt"));
+		expect(details.path).toBe(path.join(tempDir, "moved.txt"));
+	});
+});

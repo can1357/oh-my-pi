@@ -657,7 +657,7 @@ describe("agent() through eval runtimes", () => {
 				toolSession: session,
 			},
 		);
-		if (result.exitCode === undefined && result.cancelled) {
+		if (result.exitCode === undefined && result.termination !== undefined) {
 			expect(result.output).toBe("");
 			return; // kernel unavailable in this environment
 		}
@@ -687,7 +687,7 @@ describe("agent() through eval runtimes", () => {
 			'import json\nprint(json.dumps(parallel([lambda n=n: agent(n) for n in ["a", "b", "c", "d"]])))',
 			{ cwd: tempDir.path(), sessionId, sessionFile, kernelMode: "per-call", toolSession: session },
 		);
-		if (result.exitCode === undefined && result.cancelled) {
+		if (result.exitCode === undefined && result.termination !== undefined) {
 			expect(result.output).toBe("");
 			return; // kernel unavailable in this environment
 		}
@@ -749,7 +749,7 @@ describe("agent() through eval runtimes", () => {
 			kernelMode: "session",
 			toolSession: session,
 		});
-		if (seed.exitCode === undefined && seed.cancelled) {
+		if (seed.exitCode === undefined && seed.termination !== undefined) {
 			expect(seed.output).toBe("");
 			return; // kernel unavailable in this environment
 		}
@@ -781,8 +781,9 @@ describe("agent() through eval runtimes", () => {
 		// them, so the cell could only settle because the abort propagated.
 		expect(abortedSubagents).toBe(6);
 		expect(completed).toBe(0);
-		// Cancelled, but cleanly: no hard-kill, and no second fan-out wave started.
-		expect(result.cancelled).toBe(true);
+		// Cancelled, but cleanly: no hard-kill, no orphaned bridge calls, and no
+		// second fan-out wave started after the deferred abort was delivered.
+		expect(result.termination !== undefined).toBe(true);
 		expect(result.output).not.toContain("Python kernel shutdown");
 		expect(runSpy).toHaveBeenCalledTimes(6);
 
@@ -1091,7 +1092,7 @@ describe("agent() through eval runtimes", () => {
 		const result = await cell;
 
 		expect(order).toEqual(["agent-saw-abort", "agent-returned", "cell-settled"]);
-		expect(result.cancelled).toBe(true);
+		expect(result.termination?.kind).toBe("interrupted");
 	}, 30_000);
 });
 

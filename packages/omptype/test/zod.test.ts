@@ -169,4 +169,45 @@ describe("zod-like parsing", () => {
 		expect(flags.parse({ A: true, B: false })).toEqual({ A: true, B: false });
 		expect(flags.safeParse({ C: true }).success).toBe(false);
 	});
+	it("builds strict, loose, discriminated, readonly, and lazy schemas", () => {
+		const strict = z.strictObject({ name: z.string() });
+		expect(strict.parse({ name: "Ada" })).toEqual({ name: "Ada" });
+		expect(strict.safeParse({ name: "Ada", extra: 1 }).success).toBe(false);
+
+		const loose = z.looseObject({ name: z.string() });
+		expect(loose.parse({ name: "Ada", extra: 1 })).toEqual({ name: "Ada", extra: 1 });
+		expect(loose.safeParse({ name: 1 }).success).toBe(false);
+
+		const termination = z.discriminatedUnion("kind", [
+			z.object({ kind: z.literal("interrupted") }),
+			z.object({ kind: z.literal("timed_out"), timeoutMs: z.number() }),
+		]);
+		type Termination = z.infer<typeof termination>;
+		const timedOut: Termination = termination.parse({ kind: "timed_out", timeoutMs: 5 });
+		expect(timedOut).toEqual({ kind: "timed_out", timeoutMs: 5 });
+		const interrupted: Termination = { kind: "interrupted" };
+		expect(termination.parse(interrupted)).toEqual(interrupted);
+		expect(termination.safeParse({ kind: "nope" }).success).toBe(false);
+		expect(termination.safeParse({}).success).toBe(false);
+		expect(termination.safeParse("str").success).toBe(false);
+
+		const parsedFrozen = z
+			.strictObject({ tags: z.array(z.string()) })
+			.readonly()
+			.parse({ tags: ["a"] });
+		expect(parsedFrozen).toEqual({ tags: ["a"] });
+		expect(Object.isFrozen(parsedFrozen)).toBe(true);
+		// Shallow, matching Zod's own contract: a nested value is left mutable.
+		expect(Object.isFrozen(parsedFrozen.tags)).toBe(false);
+		expect(Reflect.set(parsedFrozen, "tags", [])).toBe(false);
+		expect(z.array(z.string()).readonly().optional().parse(undefined)).toBeUndefined();
+
+		type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+		const jsonValue: z.ZodType<JsonValue> = z.lazy(() =>
+			z.union([z.string(), z.number(), z.boolean(), z.null(), z.array(jsonValue), z.record(z.string(), jsonValue)]),
+		);
+		const deep = { b: [2, { c: "d" }] };
+		expect(jsonValue.parse(["a", 1, true, null, deep])).toEqual(["a", 1, true, null, deep]);
+		expect(jsonValue.safeParse([() => {}]).success).toBe(false);
+	});
 });

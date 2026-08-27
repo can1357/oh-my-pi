@@ -7,7 +7,9 @@ declare module "@oh-my-pi/pi-agent-core" {
 		ui?: ExtensionUIContext;
 		hasUI?: boolean;
 		toolNames?: string[];
-		toolCall?: ToolCallContext;
+		// `toolCall` is declared by `@oh-my-pi/pi-agent-core` itself, so the dispatcher
+		// can verify that the context this host builds really carries the per-call
+		// progress protocol. Re-declaring it here would only invite the two to drift.
 		/** Set on `xd://` device dispatches: the write tool's outer approval gate
 		 *  already resolved this call at the mounted tool's tier, so the inner
 		 *  wrapper must not re-prompt for the same action (explicit per-tool

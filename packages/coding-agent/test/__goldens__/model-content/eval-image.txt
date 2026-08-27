@@ -1,0 +1,4 @@
+--- text ---
+<Figure size 640x480>
+
+--- image image/png (12 b64 chars) ---

@@ -19,7 +19,7 @@ describe("executePythonWithKernel mapping", () => {
 		const kernel = new FakeKernel({ status: "ok", cancelled: true, timedOut: true, stdinRequested: false });
 		const result = await executePythonWithKernel(kernel, "sleep(10)", { timeoutMs: 5000 });
 
-		expect(result.cancelled).toBe(true);
+		expect(result.termination).toEqual({ kind: "timed_out", timeoutMs: 5000 });
 		expect(result.exitCode).toBeUndefined();
 		expect(result.output).toContain("eval cell timed out after 5s");
 	});

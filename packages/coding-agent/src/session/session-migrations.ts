@@ -57,17 +57,56 @@ function migrateV2ToV3(entries: FileEntry[]): void {
 }
 
 /**
+ * Migrate v3 → v4: stamp the header only. Genuinely a no-op on every other
+ * entry — v3 and earlier files were written before `tool_execution_started`/
+ * `tool_execution_settled` existed, so there is no legacy shape to translate
+ * or backfill into them ("a v3→v4 migration cannot invent
+ * structure for old result messages"). A migrated v4 file therefore
+ * legitimately mixes untouched legacy entries with, going forward, new
+ * journal entries a v4+ writer appends.
+ */
+function migrateV3ToV4(entries: FileEntry[]): void {
+	for (const entry of entries) {
+		if (entry.type === "session") {
+			entry.version = 4;
+			break;
+		}
+	}
+}
+
+/** A session file whose header version exceeds what this build understands. */
+export class SessionVersionTooNewError extends Error {
+	constructor(
+		readonly version: number,
+		readonly supported: number,
+	) {
+		super(
+			`Session file is version ${version}, but this build only supports up to version ${supported}. ` +
+				"Update to a newer version to open it.",
+		);
+		this.name = "SessionVersionTooNewError";
+	}
+}
+
+/**
  * Run all necessary migrations to bring entries to current version.
  * Mutates entries in place. Returns true if any migration was applied.
+ *
+ * A header newer than `CURRENT_SESSION_VERSION` fails closed instead of being
+ * treated as already-migrated: `version >= current` is not a
+ * forward-compatibility check, and this build cannot honor a schema it
+ * predates.
  */
 export function migrateToCurrentVersion(entries: FileEntry[]): boolean {
 	const header = entries.find(e => e.type === "session") as SessionHeader | undefined;
 	const version = header?.version ?? 1;
 
-	if (version >= CURRENT_SESSION_VERSION) return false;
+	if (version > CURRENT_SESSION_VERSION) throw new SessionVersionTooNewError(version, CURRENT_SESSION_VERSION);
+	if (version === CURRENT_SESSION_VERSION) return false;
 
 	if (version < 2) migrateV1ToV2(entries);
 	if (version < 3) migrateV2ToV3(entries);
+	if (version < 4) migrateV3ToV4(entries);
 
 	return true;
 }

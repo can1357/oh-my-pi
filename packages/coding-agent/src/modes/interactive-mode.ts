@@ -2269,6 +2269,18 @@ export class InteractiveMode implements InteractiveModeContext {
 			const index = liveComponents.indexOf(resolved as unknown as Component);
 			if (index >= 0) liveComponents.splice(index, 1);
 		}
+		// Every id still left in `livePendingTools` at this point has no landed
+		// `toolResult` in `context.messages` at all — a genuinely in-flight call,
+		// including one a v4 tool journal record now covers (its `started` entry
+		// with no settlement folds to an `interrupted` card in `context.messages`
+		// even though the tool is still running: the journal cannot distinguish a
+		// live execution from an abandoned one, only the live component can). Its
+		// live component is the one this rebuild is about to re-append, so it must
+		// stay the sole render owner — otherwise the replayed interrupted card and
+		// the live block both render for the same call.
+		for (const id of livePendingTools.keys()) {
+			preservedLiveToolCallIds.add(id);
+		}
 		// Prune the settled-component cache to the messages this rebuild will
 		// actually render. Message objects stay strongly reachable through
 		// session entries for the whole session, so entries for compacted-away

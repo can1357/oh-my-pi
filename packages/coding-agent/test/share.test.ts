@@ -106,6 +106,48 @@ describe("sealToFit", () => {
 		expect(flat).toContain("[image omitted from share]");
 		expect(flat).toContain("see screenshot");
 	});
+
+	test("strips oversized kind-discriminated attachment images into blank-GIF placeholders", async () => {
+		const key = await makeKey();
+		const ts = "2026-06-12T00:00:00.000Z";
+		const payload = randomHex(400_000); // far over the 1024-char stripping threshold
+		const imageAttachmentEntry = {
+			type: "tool_execution_settled",
+			id: "j3",
+			parentId: null,
+			timestamp: ts,
+			recordVersion: 1,
+			executionId: "exec-3",
+			outcome: { kind: "failed", failure: { reason: "process", message: "render failed" } },
+			presentation: {
+				version: 1,
+				facts: [],
+				attachments: [{ kind: "image", data: payload, mimeType: "image/png" }],
+			},
+			modelProjection: { version: 1, content: [] },
+		} as unknown as SessionEntry;
+		const data = sessionData([imageAttachmentEntry], "j3");
+
+		const { sealed, truncated } = await sealToFit(key, data, SERVER_MAX_SEALED_BYTES);
+
+		expect(truncated).toBe(true);
+		const opened = await open(key, sealed);
+		const entry = opened.entries[0] as unknown as {
+			presentation: { attachments: Array<{ kind: string; data: string; mimeType: string }> };
+		};
+		// The attachment keeps its union shape but its payload is swapped for the
+		// same 1×1 transparent GIF other stripped images get — not raw base64 —
+		// and the declared mimeType matches the replacement bytes, not the
+		// stripped original.
+		expect(entry.presentation.attachments).toEqual([
+			{
+				kind: "image",
+				data: "R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==",
+				mimeType: "image/gif",
+			},
+		]);
+		expect(JSON.stringify(opened)).not.toContain(payload.slice(0, 32));
+	});
 });
 
 describe("buildShareSnapshot", () => {
@@ -348,6 +390,236 @@ describe("buildShareSnapshot", () => {
 		expect(flat).not.toContain(friendlyTitle);
 		expect(flat).not.toContain(friendlyPreviousTitle);
 		expect(flat).not.toContain(friendlyTrigger);
+	});
+
+	test("redacts tool journal call descriptor fields (title, cwd, sourceEcho, locations, rawInput) before sharing", () => {
+		const secret = "journal-share-secret-QWERTY";
+		const ts = "2026-06-12T00:00:00.000Z";
+		const entries: SessionEntry[] = [
+			{
+				type: "tool_execution_started",
+				id: "j1",
+				parentId: null,
+				timestamp: ts,
+				recordVersion: 1,
+				executionId: "exec-1",
+				call: {
+					toolCallId: "call-1",
+					toolName: "bash",
+					title: `printf ${secret}`,
+					kind: "execute",
+					cwd: `/private/${secret}/workdir`,
+					sourceEcho: `echo ${secret}`,
+					locations: [{ path: `/tmp/${secret}/file.txt`, line: 1 }],
+					rawInput: { command: `printf ${secret}` },
+				},
+				presentation: { version: 1, facts: [] },
+			} as unknown as SessionEntry,
+		];
+		const sm = {
+			getHeader: () => sessionData([], "x").header,
+			getEntries: () => entries,
+			getLeafId: () => "j1",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+
+		const snapshot = buildShareSnapshot(sm, { obfuscator });
+		const flat = JSON.stringify(snapshot);
+
+		expect(flat).not.toContain(secret);
+		// Non-secret structure survives redaction.
+		expect(flat).toContain("bash");
+		expect(flat).toContain("execute");
+		// Source entries keep the real values; redaction is share-only.
+		expect(JSON.stringify(entries)).toContain(secret);
+	});
+
+	test("redacts and pre-scans every settled journal arm field before sharing", () => {
+		const secret = "settled-journal-secret-ZXCVB";
+		const ts = "2026-06-12T00:00:00.000Z";
+		const entries: SessionEntry[] = [
+			{
+				type: "tool_execution_settled",
+				id: "j2",
+				parentId: null,
+				timestamp: ts,
+				recordVersion: 1,
+				executionId: "exec-1",
+				outcome: { kind: "failed", failure: { reason: "process", message: `cat failed: ${secret}` } },
+				presentation: {
+					version: 1,
+					stream: { streamId: "s1", startByte: 0, endByte: 12, text: `SECRET=${secret}`, gaps: [] },
+					facts: [
+						{ id: "f1", kind: "notice", text: `artifact ${secret}` },
+						{
+							id: "f2",
+							kind: "diagnostics",
+							entries: [{ path: `/tmp/${secret}/a.ts`, severity: "error", message: `boom ${secret}` }],
+						},
+					],
+					attachments: [{ kind: "diff", path: "/tmp/x.ts", oldText: `old ${secret}`, newText: `new ${secret}` }],
+					displays: [
+						{
+							atByte: 0,
+							display: { kind: "sequence", items: [{ kind: "json", value: { note: `nested ${secret}` } }] },
+						},
+					],
+				},
+				modelProjection: { version: 1, content: [{ type: "text", text: `model body ${secret}` }] },
+			} as unknown as SessionEntry,
+		];
+		const sm = {
+			getHeader: () => sessionData([], "x").header,
+			getEntries: () => entries,
+			getLeafId: () => "j2",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+
+		const flat = JSON.stringify(buildShareSnapshot(sm, { obfuscator }));
+
+		// Every text-bearing field of the settled arm is redacted...
+		expect(flat).not.toContain(secret);
+		// ...while non-secret structure survives.
+		expect(flat).toContain("tool_execution_settled");
+		expect(JSON.stringify(entries)).toContain(secret);
+	});
+
+	test("redacts diff attachment paths before sharing", () => {
+		// A diff attachment's `path` is a workspace path like any other: a secret
+		// embedded in it must be obfuscated exactly like the attachment's texts
+		// and a diagnostics fact's path, never uploaded verbatim.
+		const secret = "diff-path-secret-MNBVC";
+		const ts = "2026-06-12T00:00:00.000Z";
+		const entries: SessionEntry[] = [
+			{
+				type: "tool_execution_settled",
+				id: "j2",
+				parentId: null,
+				timestamp: ts,
+				recordVersion: 1,
+				executionId: "exec-1",
+				outcome: { kind: "failed", failure: { reason: "process", message: "edit rejected" } },
+				presentation: {
+					version: 1,
+					facts: [],
+					attachments: [
+						{
+							kind: "diff",
+							path: `/home/alice/${secret}/secrets.env`,
+							oldText: "unchanged body",
+							newText: "also unchanged",
+						},
+					],
+				},
+				modelProjection: { version: 1, content: [] },
+			} as unknown as SessionEntry,
+		];
+		const sm = {
+			getHeader: () => sessionData([], "x").header,
+			getEntries: () => entries,
+			getLeafId: () => "j2",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+
+		const snapshot = buildShareSnapshot(sm, { obfuscator });
+		const flat = JSON.stringify(snapshot);
+
+		expect(flat).not.toContain(secret);
+		// The path carries the reversible placeholder form...
+		expect(obfuscator.deobfuscate(flat)).toContain(secret);
+		// ...while the non-secret path shape survives so viewers see where the edit landed.
+		expect(flat).toContain("/home/alice/");
+		expect(flat).toContain("/secrets.env");
+		// Source entries keep the real values; redaction is share-only.
+		expect(JSON.stringify(entries)).toContain(secret);
+	});
+
+	test("includes diff attachment paths in the regex collision pre-scan", () => {
+		// Mirrors the rawInput pre-scan test below: a regex-matched secret living only
+		// inside a diff attachment's `path` must join the whole-snapshot collision set,
+		// so the header's unrelated plain secret is not minted with a friendly-name
+		// placeholder whose prefix spells out the regex secret's shape.
+		const plainSecret = "OTHER_JOURNAL_SECRET";
+		const friendlyName = "TOKDIFF123";
+		const regexSecret = "tok_diff123";
+		const ts = "2026-06-12T00:00:00.000Z";
+		const entries: SessionEntry[] = [
+			{
+				type: "tool_execution_settled",
+				id: "j2",
+				parentId: null,
+				timestamp: ts,
+				recordVersion: 1,
+				executionId: "exec-1",
+				outcome: { kind: "failed", failure: { reason: "process", message: "edit rejected" } },
+				presentation: {
+					version: 1,
+					facts: [],
+					attachments: [{ kind: "diff", path: `/srv/${regexSecret}/file.ts`, oldText: null, newText: null }],
+				},
+				modelProjection: { version: 1, content: [] },
+			} as unknown as SessionEntry,
+		];
+		const sm = {
+			getHeader: () => ({ ...sessionData([], "x").header, title: `investigating ${plainSecret}` }),
+			getEntries: () => entries,
+			getLeafId: () => "j2",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([
+			{ type: "plain", content: plainSecret, friendlyName },
+			{ type: "regex", content: "tok_diff[0-9]+" },
+		]);
+
+		const flat = JSON.stringify(buildShareSnapshot(sm, { obfuscator }));
+
+		expect(flat).not.toContain(plainSecret);
+		expect(flat).not.toContain(regexSecret);
+		expect(flat).not.toContain(`${friendlyName}_`);
+	});
+
+	test("includes the tool journal call descriptor's rawInput in the regex collision pre-scan", () => {
+		// Mirrors "collects regex-protected values across the whole snapshot" below, but with
+		// the regex-matching secret living only in the journal's `rawInput` instead of a bash
+		// output field: the header's unrelated plain secret must not be redacted under a
+		// friendly-name placeholder whose prefix spells out the regex secret's shape, which
+		// only holds if `collectShareRegexSecretValues` actually walks `entry.call.rawInput`.
+		const plainSecret = "OTHER_JOURNAL_SECRET";
+		const friendlyName = "TOKJRNL123";
+		const regexSecret = "tok_jrnl123";
+		const ts = "2026-06-12T00:00:00.000Z";
+		const entries: SessionEntry[] = [
+			{
+				type: "tool_execution_started",
+				id: "j1",
+				parentId: null,
+				timestamp: ts,
+				recordVersion: 1,
+				executionId: "exec-1",
+				call: {
+					toolCallId: "call-1",
+					toolName: "bash",
+					title: "printf token",
+					kind: "execute",
+					rawInput: { command: `printf ${regexSecret}` },
+				},
+				presentation: { version: 1, facts: [] },
+			} as unknown as SessionEntry,
+		];
+		const sm = {
+			getHeader: () => ({ ...sessionData([], "x").header, title: `investigating ${plainSecret}` }),
+			getEntries: () => entries,
+			getLeafId: () => "j1",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([
+			{ type: "plain", content: plainSecret, friendlyName },
+			{ type: "regex", content: "tok_jrnl[a-z0-9]+" },
+		]);
+
+		const flat = JSON.stringify(buildShareSnapshot(sm, { obfuscator }));
+
+		expect(flat).not.toContain(plainSecret);
+		expect(flat).not.toContain(regexSecret);
+		expect(flat).not.toContain(`${friendlyName}_`);
 	});
 
 	test("collects regex-protected values across the whole snapshot so an earlier field's friendly-name placeholder cannot leak a later field's secret", () => {

@@ -26,6 +26,7 @@ import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { MANY_TOOL_COUNT, manyToolName } from "./fixtures/many-tools-mcp";
+import { connectServersAndWaitReady } from "./helpers/mcp-connect";
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "many-tools-mcp.ts");
 
@@ -54,7 +55,9 @@ describe("MCP tool ownership with prefix-colliding server names", () => {
 	});
 
 	it("refreshing one server keeps the sibling server's tools registered", async () => {
-		await manager.connectServers({ [SHORT_SERVER]: fixtureConfig(), [COLON_SERVER]: fixtureConfig() }, {});
+		// Tools register in a background continuation that `connectServers`
+		// alone doesn't await — see `connectServersAndWaitReady`.
+		await connectServersAndWaitReady(manager, { [SHORT_SERVER]: fixtureConfig(), [COLON_SERVER]: fixtureConfig() });
 		const names = () => manager.getTools().map(t => t.name);
 		expect(names()).toContain(SHORT_TOOL);
 		expect(names()).toContain(COLON_TOOL);
@@ -80,7 +83,7 @@ describe("MCP tool ownership with prefix-colliding server names", () => {
 	}, 20_000);
 
 	it("disconnecting a server with sanitized name characters removes exactly its tools", async () => {
-		await manager.connectServers({ [SHORT_SERVER]: fixtureConfig(), [COLON_SERVER]: fixtureConfig() }, {});
+		await connectServersAndWaitReady(manager, { [SHORT_SERVER]: fixtureConfig(), [COLON_SERVER]: fixtureConfig() });
 		const payloads: string[][] = [];
 		manager.setOnToolsChanged(tools => {
 			payloads.push(tools.map(t => t.name));

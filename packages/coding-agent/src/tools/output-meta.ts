@@ -11,13 +11,15 @@ import type {
 	AgentToolResult,
 	AgentToolUpdateCallback,
 } from "@oh-my-pi/pi-agent-core";
+import type { ToolFactBody, TruncationFactMeta } from "@oh-my-pi/pi-agent-core/presentation";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { isRecord, logger } from "@oh-my-pi/pi-utils";
+import { logger } from "@oh-my-pi/pi-utils";
 import { getDefault, type Settings } from "../config/settings";
 import { formatGroupedDiagnosticMessages } from "../lsp/utils";
 import type { Theme } from "../modes/theme/theme";
+import { renderMiddleElisionNotice, renderTruncationWindowNotice } from "../presentation/projections";
 import { type OutputSummary, type TruncationResult, truncateMiddle, truncateTail } from "../session/streaming-output";
-import { formatBytes, wrapBrackets } from "./render-utils";
+import { wrapBrackets } from "./render-utils";
 import { renderError } from "./tool-errors";
 
 /**
@@ -83,6 +85,15 @@ export interface OutputMeta {
 }
 
 // =============================================================================
+// Runtime validation
+// =============================================================================
+
+/** The package has no shared type-guard module; this is the one canonical `Record` guard `acp-event-mapper.ts` also imports instead of redefining. */
+export function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+// =============================================================================
 // OutputMetaBuilder - Fluent API for building OutputMeta
 // =============================================================================
 
@@ -97,13 +108,6 @@ export interface TruncationSummaryOptions {
 	direction: "head" | "tail" | "middle";
 	startLine?: number;
 	totalFileLines?: number;
-}
-
-export interface TruncationTextOptions {
-	direction: "head" | "tail" | "middle";
-	totalLines?: number;
-	totalBytes?: number;
-	maxBytes?: number;
 }
 
 /**
@@ -258,51 +262,6 @@ export class OutputMetaBuilder {
 		return this;
 	}
 
-	/** Add truncation info from truncated output text. No-op if truncation not detected. */
-	truncationFromText(text: string, options: TruncationTextOptions): this {
-		const outputLines = text.length > 0 ? text.split("\n").length : 0;
-		const outputBytes = Buffer.byteLength(text, "utf-8");
-		const totalLines = options.totalLines ?? outputLines;
-		const totalBytes = options.totalBytes ?? outputBytes;
-
-		const truncated = totalLines > outputLines || totalBytes > outputBytes || false;
-		if (!truncated) return this;
-
-		const truncatedBy: "lines" | "bytes" =
-			options.maxBytes && outputBytes >= options.maxBytes
-				? "bytes"
-				: totalBytes > outputBytes
-					? "bytes"
-					: totalLines > outputLines
-						? "lines"
-						: "bytes";
-
-		let shownStart: number;
-		let shownEnd: number;
-
-		if (options.direction === "tail") {
-			shownStart = totalLines - outputLines + 1;
-			shownEnd = totalLines;
-		} else {
-			shownStart = 1;
-			shownEnd = outputLines;
-		}
-
-		this.#meta.truncation = {
-			direction: options.direction,
-			truncatedBy,
-			totalLines,
-			totalBytes,
-			outputLines,
-			outputBytes,
-			maxBytes: options.maxBytes,
-			shownRange: { start: shownStart, end: shownEnd },
-			nextOffset: options.direction === "head" ? shownEnd + 1 : undefined,
-		};
-
-		return this;
-	}
-
 	/** Add match limit notice. No-op if reached <= 0. */
 	matchLimit(reached: number, suggestion = reached * 2): this {
 		if (reached <= 0) return this;
@@ -442,52 +401,61 @@ export function stripGeneratedOutputNotice(text: string): string {
 	return trimmed.slice(0, lineStart === -1 ? 0 : lineStart).trimEnd();
 }
 
-export function formatTruncationMetaNotice(truncation: TruncationMeta): string {
-	let notice: string;
-
+/**
+ * The single derivation of a {@link TruncationFactMeta} from a
+ * {@link TruncationMeta}, for every direction including `middle`. Shared by
+ * {@link formatTruncationMetaNotice} (both branches), {@link truncationFactBody}
+ * (`ToolResultBuilder#pushTruncationMetaFacts`'s single source, in turn used by
+ * both `truncationFact` and `truncationFactFromSummary`), and
+ * {@link outputMetaFactBodies} (the artifact-spill re-derivation) — one field
+ * mapping, not one per call site.
+ */
+function truncationFactMeta(truncation: TruncationMeta): TruncationFactMeta {
 	if (truncation.direction === "middle") {
-		const head = truncation.headRange;
-		const tail = truncation.tailRange;
-		const totalLines = truncation.totalLines;
-		const elidedBytes = truncation.elidedBytes ?? Math.max(0, truncation.totalBytes - truncation.outputBytes);
-		const elidedLines = truncation.elidedLines ?? Math.max(0, totalLines - truncation.outputLines);
-		const headPart = head ? `lines ${head.start}-${head.end}` : "";
-		const tailPart = tail ? `${tail.start}-${tail.end}` : "";
-		if (headPart && tailPart) {
-			notice = `Showing ${headPart} and ${tailPart} of ${totalLines}; ${elidedLines.toLocaleString()} middle line${elidedLines === 1 ? "" : "s"} (${formatBytes(elidedBytes)}) elided`;
-		} else {
-			notice = `Showing ${truncation.outputLines} of ${totalLines} lines; middle elided`;
-		}
-		if (truncation.nextOffset != null) {
-			notice += `. Use :${truncation.nextOffset} to continue`;
-		}
-		if (truncation.artifactId != null) {
-			notice += `. ${formatFullOutputReference(truncation.artifactId)}`;
-		}
-		return notice;
+		return {
+			direction: "middle",
+			totalBytes: truncation.totalBytes,
+			retainedBytes: truncation.outputBytes,
+			totalLines: truncation.totalLines,
+			retainedLines: truncation.outputLines,
+			elidedBytes: truncation.elidedBytes,
+			elidedLines: truncation.elidedLines,
+			headLineRange: truncation.headRange,
+			tailLineRange: truncation.tailRange,
+			nextOffset: truncation.nextOffset,
+			artifactId: truncation.artifactId,
+		};
 	}
+	return {
+		direction: truncation.direction,
+		totalBytes: truncation.totalBytes,
+		retainedBytes: truncation.outputBytes,
+		totalLines: truncation.totalLines,
+		retainedLines: truncation.outputLines,
+		shownLineRange: truncation.shownRange,
+		truncatedBy: truncation.truncatedBy === "middle" ? undefined : truncation.truncatedBy,
+		maxBytes: truncation.maxBytes,
+		nextOffset: truncation.nextOffset,
+		artifactId: truncation.artifactId,
+	};
+}
 
-	const range = truncation.shownRange;
-	if (range && range.end >= range.start) {
-		notice = `Showing lines ${range.start}-${range.end} of ${truncation.totalLines}`;
-	} else {
-		notice = `Showing ${truncation.outputLines} of ${truncation.totalLines} lines`;
-	}
-
-	if (truncation.truncatedBy === "bytes") {
-		const maxBytes = truncation.maxBytes ?? truncation.outputBytes;
-		notice += ` (${formatBytes(maxBytes)} limit)`;
-	}
-
-	if (truncation.nextOffset != null) {
-		notice += `. Use :${truncation.nextOffset} to continue`;
-	}
-
-	if (truncation.artifactId != null) {
-		notice += `. ${formatFullOutputReference(truncation.artifactId)}`;
-	}
-
-	return notice;
+/**
+ * Delegated to the shared formatters (`renderMiddleElisionNotice`/
+ * `renderTruncationWindowNotice`) so this legacy path and the typed model
+ * projection (the typed model-content projection escape hatch, `renderNoticeTrail`) cannot drift
+ * into two spellings of the same notice — see those functions' doc comments
+ * for why the spelling differs from `factText`'s per-fact bracket.
+ *
+ * `renderMiddleElisionNotice` only returns `undefined` when both
+ * `totalLines`/`retainedLines` are absent, which cannot happen here:
+ * `TruncationMeta.totalLines`/`.outputLines` are non-optional, so
+ * `truncationFactMeta` always populates both for every direction. The `!`
+ * documents that guarantee rather than papering over a real gap.
+ */
+export function formatTruncationMetaNotice(truncation: TruncationMeta): string {
+	const meta = truncationFactMeta(truncation);
+	return truncation.direction === "middle" ? renderMiddleElisionNotice(meta)! : renderTruncationWindowNotice(meta);
 }
 
 /**
@@ -563,22 +531,128 @@ export function formatStyledTruncationWarning(meta: OutputMeta | undefined, them
 export function stripOutputNotice(text: string, meta: OutputMeta | undefined): string {
 	const notice = formatOutputNotice(meta);
 	if (!notice) return text;
-	// Trim trailing whitespace from `text` and from the notice itself so we
-	// match regardless of whether: (a) the caller already trimEnd()'d, (b)
-	// extra blank lines slipped in after the notice (diagnostics blocks add
-	// `\n\n` between sections, OutputSink may pad), or (c) neither. Returns
-	// the prefix before the notice so the caller can re-trim as needed.
+	return stripTrailingText(text, notice);
+}
+
+/**
+ * Remove `trail` from the end of `text` (both trimmed of trailing whitespace
+ * first, so it matches regardless of whether the caller already `trimEnd()`'d
+ * or extra blank lines slipped in after the trail). Shared by
+ * {@link stripOutputNotice} (re-derives the trail from `OutputMeta`) and read's
+ * typed model projection (`renderNoticeTrail` in
+ * `presentation/projections.ts`, which re-derives it from a `ToolFact`
+ * instead) — one slice/trim implementation regardless of which structure the
+ * trail was derived from.
+ */
+export function stripTrailingText(text: string, trail: string): string {
 	const trimmedText = text.trimEnd();
-	const trimmedNotice = notice.trimEnd();
-	if (trimmedText.endsWith(trimmedNotice)) {
-		return trimmedText.slice(0, -trimmedNotice.length);
+	const trimmedTrail = trail.trimEnd();
+	if (trimmedText.endsWith(trimmedTrail)) {
+		return trimmedText.slice(0, -trimmedTrail.length);
 	}
 	return text;
 }
 
 // =============================================================================
+// OutputMeta → presentation fact bodies
+// =============================================================================
+
+/**
+ * The `truncation` fact body for any direction, including `middle` — this
+ * step's un-bail of the prior `direction: "middle"` refusal.
+ *
+ * Reuses {@link truncationFactMeta}, the single derivation of a
+ * `TruncationFactMeta` from a {@link TruncationMeta} shared with
+ * {@link formatTruncationMetaNotice}: `ToolResultBuilder#pushTruncationMetaFacts`
+ * (a tool declaring the fact while it builds its result) and
+ * {@link outputMetaFactBodies} (the artifact spill re-deriving it after it
+ * replaced the retained window) both call this, so the field mapping cannot
+ * exist in two subtly different spellings.
+ */
+export function truncationFactBody(truncation: TruncationMeta): ToolFactBody {
+	return { kind: "truncation", meta: truncationFactMeta(truncation) };
+}
+
+/** The `limit`/`"column"` fact body for a per-line width cap that trimmed a line. */
+export function columnLimitFactBody(maxColumn: number): ToolFactBody {
+	return { kind: "limit", meta: { limit: "column", value: maxColumn } };
+}
+
+/** The `limit`/`"result_count"` fact body for a listing that stopped after `reached` records. */
+export function resultCountLimitFactBody(reached: number, suggestion: number): ToolFactBody {
+	return { kind: "limit", meta: { limit: "result_count", value: reached, suggestedValue: suggestion } };
+}
+
+/**
+ * Translate a complete {@link OutputMeta} into the fact bodies a registered
+ * {@link ToolModelContentProjection} renders (`renderNoticeTrail`), or
+ * `undefined` when the meta carries a notice part no fact body can represent.
+ *
+ * Used by {@link spillLargeResultToArtifact}, which replaces the retained
+ * window wholesale: the facts a tool declared *before* the spill ran describe a
+ * superseded window and cannot survive it. Re-deriving them from the post-spill
+ * meta keeps a migrated producer's spill notice on its own typed projection
+ * instead of dropping it back onto the legacy `formatOutputNotice` bracket.
+ *
+ * Partial on purpose. The remaining bail cases are exactly the
+ * `formatOutputNotice` parts `renderNoticeTrail` has no arm for, so a
+ * `readonly ToolFactBody[]` result is the promise that the projection renders
+ * the same bytes the legacy composition would:
+ * - `limits.matchLimit` / `limits.headLimit` — no `LimitFactMeta` arm carries
+ *   their wording (neither has a live built-in producer today, so this is a
+ *   guard against a future one, not a skipped migration);
+ * - `diagnostics` — a whole LSP block *outside* the notice bracket.
+ *
+ * `direction: "middle"` truncation is no longer a bail case: `truncationFactBody`
+ * derives a fact for every direction, and `renderNoticeTrail` renders it via
+ * `renderMiddleElisionNotice`. That renderer declines only when both
+ * `totalLines`/`retainedLines` are absent from the fact — impossible for a
+ * fact derived from this file's own `TruncationMeta`, whose `totalLines`/
+ * `outputLines` are non-optional — in which case `renderNoticeTrail` (not
+ * this function) falls back to the legacy `appendOutputNotice(meta)` bracket
+ * at the `wrappedExecute` call site.
+ *
+ * `source` renders nothing in either composition and is therefore ignored.
+ */
+export function outputMetaFactBodies(meta: OutputMeta): readonly ToolFactBody[] | undefined {
+	if (meta.diagnostics && meta.diagnostics.messages.length > 0) return undefined;
+	const limits = meta.limits;
+	if (limits?.matchLimit || limits?.headLimit) return undefined;
+	const facts: ToolFactBody[] = [];
+	if (meta.truncation) facts.push(truncationFactBody(meta.truncation));
+	if (limits?.resultLimit) {
+		facts.push(resultCountLimitFactBody(limits.resultLimit.reached, limits.resultLimit.suggestion));
+	}
+	if (limits?.columnTruncated) facts.push(columnLimitFactBody(limits.columnTruncated.maxColumn));
+	return facts;
+}
+
+// =============================================================================
 // Tool wrapper
 // =============================================================================
+
+/**
+ * Append `trail` to the last text block of `content` (or push a new text
+ * block if none exists). Shared by {@link appendOutputNotice} and read's
+ * typed model projection (`ReadTool#modelContentProjection`, the escape
+ * hatch) so both place a trailing notice identically regardless of
+ * whether it was derived from `OutputMeta` or from a `ToolFact`.
+ */
+export function appendTrailingText(
+	content: (TextContent | ImageContent)[],
+	trail: string,
+): (TextContent | ImageContent)[] {
+	const result = [...content];
+	for (let i = result.length - 1; i >= 0; i--) {
+		const item = result[i];
+		if (item.type === "text") {
+			result[i] = { ...item, text: item.text + trail };
+			return result;
+		}
+	}
+	result.push({ type: "text", text: trail.trim() });
+	return result;
+}
 
 /**
  * Append output notice to tool result content if meta is present.
@@ -588,19 +662,7 @@ function appendOutputNotice(
 	meta: OutputMeta | undefined,
 ): (TextContent | ImageContent)[] {
 	const notice = formatOutputNotice(meta);
-	if (!notice) return content;
-
-	const result = [...content];
-	for (let i = result.length - 1; i >= 0; i--) {
-		const item = result[i];
-		if (item.type === "text") {
-			result[i] = { ...item, text: item.text + notice };
-			return result;
-		}
-	}
-
-	result.push({ type: "text", text: notice.trim() });
-	return result;
+	return notice ? appendTrailingText(content, notice) : content;
 }
 
 const kUnwrappedExecute = Symbol("OutputMeta.UnwrappedExecute");
@@ -674,13 +736,21 @@ async function spillLargeResultToArtifact(
 	result: AgentToolResult,
 	toolName: string,
 	context: AgentToolContext | undefined,
+	hasModelContentProjection: boolean,
 ): Promise<AgentToolResult> {
 	const sessionManager = context?.sessionManager;
 	if (!sessionManager) return result;
 	const { threshold, tailBytes, tailLines, headBytes } = getSpillConfig(context?.settings);
 
-	// Skip if tool already saved an artifact
-	const existingMeta: OutputMeta | undefined = result.details?.meta;
+	// Skip if tool already saved an artifact. `details` is intentionally
+	// untyped here (this wrapper runs over every tool's result generically),
+	// so `meta` is read through a structural guard rather than assuming a
+	// concrete `AgentToolResult<T>` shape.
+	const details: unknown = result.details;
+	const existingMeta: OutputMeta | undefined =
+		details && typeof details === "object" && "meta" in details
+			? (details.meta as OutputMeta | undefined)
+			: undefined;
 	if (existingMeta?.truncation?.artifactId) return result;
 
 	// Reading an artifact already addresses recoverable full output. Spilling that
@@ -792,7 +862,27 @@ async function spillLargeResultToArtifact(
 	}
 
 	const newMeta: OutputMeta = { ...(existingMeta ?? {}), truncation: truncationMeta };
-	const newDetails = { ...(result.details ?? {}), meta: newMeta };
+	const newDetails: Record<string, unknown> = { ...(result.details ?? {}), meta: newMeta };
+	// Re-derive `presentationFacts` for the POST-SPILL window. The facts a
+	// tool's own registered projection (the typed model-content projection escape hatch) declared
+	// BEFORE this spill ran describe the pre-spill window, while
+	// `newMeta.truncation` above is the *post-spill* (elided, now carrying
+	// `artifactId`) truncation — so the declared array cannot survive as-is.
+	// Rebuilding it from `newMeta` (rather than clearing it, which dropped a
+	// migrated producer's spill notice back onto the legacy
+	// `appendOutputNotice` bracket) keeps the notice on that producer's own
+	// typed projection. `outputMetaFactBodies` returns `undefined` for a meta
+	// the projection cannot render identically — the dominant middle-elision
+	// spill included — and the legacy composition then takes over exactly as
+	// before.
+	//
+	// Scoped to fact-carrying producers: a tool with a registered projection
+	// (whose details type declares the field) or a result that already had the
+	// key. Every other tool's details shape is untouched and gains no key it
+	// never declared.
+	if (hasModelContentProjection || "presentationFacts" in newDetails) {
+		newDetails.presentationFacts = outputMetaFactBodies(newMeta);
+	}
 
 	// Prune the raw payload only MCP results duplicate into `details.rawContent`.
 	// Identify them by the required `serverName` + `mcpToolName` markers (the same
@@ -839,8 +929,40 @@ async function spillLargeResultToArtifact(
 // Tool wrapper
 // =============================================================================
 
+/**
+ * A tool's typed custom model-content trail projection (the escape
+ * hatch: "a typed custom projection registered on the tool contract...
+ * receives the complete presentation structure and cannot bypass fact
+ * threading"). Declared as an optional property on the tool instance — its
+ * "contract" — rather than threaded through {@link wrapToolWithMetaNotice}'s
+ * call sites, so registering one for a new tool never touches the ~8 places
+ * that already call `wrapToolWithMetaNotice(tool)` with no options.
+ *
+ * Deliberately narrow on both ends, so an implementing tool cannot recreate
+ * producer-authored model content:
+ * - **Input** is only the fact **bodies** the tool declared on
+ *   `details.presentationFacts` (`ToolResultBuilder#truncationFact`) — never
+ *   the raw `AgentToolResult`, so the projection cannot read (or react to) the
+ *   body text, `details`, or anything outside the facts it was given.
+ * - **Output** is only the trailing annotation text to append, or `undefined`
+ *   to fall back to the default `appendOutputNotice(meta)` composition (the
+ *   common case for a result with nothing bespoke to say). `wrappedExecute`
+ *   below is the sole placement authority — it appends the returned text with
+ *   the same {@link appendTrailingText} the legacy path uses, so the
+ *   projection can add a trail but can never replace or delete the body.
+ *
+ * Implemented by `read`, `grep`, `glob`, `bash`, and `eval` (`renderNoticeTrail`
+ * in `presentation/projections.ts`), for their head/tail truncation and
+ * count-based listing-cap results — including the ones
+ * {@link spillLargeResultToArtifact} re-derived facts for.
+ */
+export type ToolModelContentProjection = (facts: readonly ToolFactBody[]) => string | undefined;
+
 async function wrappedExecute(
-	this: AgentTool & { [kUnwrappedExecute]: AgentToolExecFn },
+	this: AgentTool & {
+		[kUnwrappedExecute]: AgentToolExecFn;
+		modelContentProjection?: ToolModelContentProjection;
+	},
 	toolCallId: string,
 	params: any,
 	signal?: AbortSignal,
@@ -853,14 +975,22 @@ async function wrappedExecute(
 		let result = await originalExecute.call(this, toolCallId, params, signal, onUpdate, context);
 
 		// Spill large results to artifact, truncate to tail
-		result = await spillLargeResultToArtifact(result, this.name, context);
+		result = await spillLargeResultToArtifact(result, this.name, context, this.modelContentProjection !== undefined);
 
-		// Append notices from meta
+		// Append notices from meta. A tool's registered projection may compose a
+		// bespoke trail from the facts it declared instead of the generic
+		// `formatOutputNotice(meta)` bracket — but only ever a trail,
+		// via the same placement primitive, never a content replacement.
 		const meta: OutputMeta | undefined = result.details?.meta;
 		if (meta) {
+			const facts: readonly ToolFactBody[] | undefined = result.details?.presentationFacts;
+			const trail = facts && facts.length > 0 ? this.modelContentProjection?.(facts) : undefined;
 			return {
 				...result,
-				content: appendOutputNotice(result.content, meta),
+				content:
+					trail !== undefined
+						? appendTrailingText(result.content, trail)
+						: appendOutputNotice(result.content, meta),
 			};
 		}
 		return result;

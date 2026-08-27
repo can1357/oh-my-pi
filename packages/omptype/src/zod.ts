@@ -1,5 +1,5 @@
 import { type OmpErrors, OmpTypeError } from "./errors";
-import { type EmbeddableSchema, embed, type IR, IR_BRAND, type PropIR } from "./ir";
+import { type EmbeddableSchema, type Extras, embed, hasMorph, type IR, IR_BRAND, type PropIR } from "./ir";
 import { type NarrowContext, type Type, type } from "./type";
 
 interface OptionalSchemaMarker {
@@ -25,9 +25,7 @@ export interface ZodLikeIssue {
 	message: string;
 }
 
-export type ZodLikeSafeParseResult<Out> =
-	| { success: true; data: Out }
-	| { success: false; error: { message: string; issues: ZodLikeIssue[] } };
+export type ZodLikeSafeParseResult<Out> = { success: true; data: Out } | { success: false; error: ZodError };
 
 /** A callable omptype schema carrying the Zod-v4-style fluent surface. */
 export interface ZodLikeSchema<out Out> extends Type<Out, unknown> {
@@ -54,6 +52,7 @@ export interface ZodLikeSchema<out Out> extends Type<Out, unknown> {
 	passthrough(): ZodLikeSchema<Out & Record<string, unknown>>;
 	strip(): ZodLikeSchema<Out>;
 	partial(): Out extends object ? ZodLikeSchema<Partial<Out>> : ZodLikeSchema<Out>;
+	readonly(): ZodLikeSchema<Readonly<Out>>;
 }
 
 function schemaFromIR<Out>(ir: IR): Decoratable<Out> {
@@ -65,6 +64,30 @@ function schemaFromIR<Out>(ir: IR): Decoratable<Out> {
 		run: value => value,
 	};
 	return type.raw(embedded) as unknown as Decoratable<Out>;
+}
+
+/**
+ * `value === undefined` short-circuit around an inner schema, as a dispatch
+ * morph. Composing a real union (`schema | undefined`) instead would trip
+ * omptype's unordered-union determinism check whenever the inner side carries
+ * morphs — which every shim-level recursive/lazy schema does.
+ */
+function undefinedDispatch<Out>(
+	schema: Decoratable<Out>,
+	fallback: (() => Out) | undefined,
+): Decoratable<Out | undefined> {
+	return schemaFromIR<Out | undefined>({
+		k: "morph",
+		input: { k: "unknown" },
+		fn: (input, ctx) => {
+			if (input === undefined) {
+				return fallback === undefined ? undefined : fallback();
+			}
+			const result = schema(input);
+			if (!(result instanceof type.errors)) return result;
+			return ctx.error(fallback === undefined ? "the schema or undefined" : "the default or a valid value");
+		},
+	});
 }
 
 function restrictBase<Out>(source: Decoratable<Out>, ir: IR): Decoratable<Out> {
@@ -186,22 +209,70 @@ function decorate<Out>(schema: Decoratable<Out>, optional = false): ZodLikeSchem
 			return next(restrictBase(schema, { ...schema.ir, url: true }));
 		},
 		optional(): ZodLikeSchema<Out | undefined> & OptionalSchemaMarker {
-			const widened = schema.or(type.raw("undefined")) as Decoratable<Out | undefined>;
-			return decorate(widened, true) as ZodLikeSchema<Out | undefined> & OptionalSchemaMarker;
+			// Morph-free inner schemas keep a real union so structural metadata
+			// (JSON Schema export, descriptions) survives the widening; morph-heavy
+			// ones take the dispatch morph below.
+			if (!hasMorph(schema.ir)) {
+				return decorate(
+					schemaFromIR<Out | undefined>({ k: "union", members: [schema.ir, { k: "undefined" }] }),
+					true,
+				) as ZodLikeSchema<Out | undefined> & OptionalSchemaMarker;
+			}
+			return decorate(undefinedDispatch<Out>(schema, undefined), true) as ZodLikeSchema<Out | undefined> &
+				OptionalSchemaMarker;
 		},
 		nullable(): ZodLikeSchema<Out | null> {
-			return decorate(schema.or(type.raw("null")) as Decoratable<Out | null>, optional);
+			const inner = schema;
+			const nullable = schemaFromIR<Out | null>({
+				k: "morph",
+				input: { k: "unknown" },
+				fn: (input, ctx) => {
+					if (input === null) return null;
+					const result = inner(input);
+					if (!(result instanceof type.errors)) return result;
+					return ctx.error("the schema or null");
+				},
+			});
+			return decorate(nullable, optional) as ZodLikeSchema<Out | null>;
 		},
 		default(
 			value: Exclude<Out, undefined> | (() => Exclude<Out, undefined>),
 		): ZodLikeSchema<Exclude<Out, undefined>> {
 			type DefaultOut = Exclude<Out, undefined>;
-			const widened = schema.or(type.raw("undefined")) as Decoratable<Out | undefined>;
-			const piped = widened.pipe(output => {
-				if (output !== undefined) return output as DefaultOut;
-				return typeof value === "function" ? (value as () => DefaultOut)() : value;
-			}) as Decoratable<DefaultOut>;
-			return decorate(piped.default(value as DefaultOut | (() => DefaultOut)));
+			// Morph-free inner schemas keep the original union+pipe composition so
+			// structural metadata survives JSON-Schema export.
+			if (!hasMorph(schema.ir)) {
+				const widened = schema.or(type.raw("undefined")) as Decoratable<Out | undefined>;
+				const pipedPlain = widened.pipe(output => {
+					if (output !== undefined) return output as DefaultOut;
+					return typeof value === "function" ? (value as () => DefaultOut)() : value;
+				}) as unknown as Decoratable<DefaultOut>;
+				const plain = decorate(pipedPlain);
+				Object.defineProperty(plain, "hasDefault", { value: true, enumerable: false });
+				Object.defineProperty(plain, "defaultValue", { value, enumerable: false });
+				return plain;
+			}
+			const fallback = value;
+			const piped = decorate(
+				schemaFromIR<DefaultOut>({
+					k: "morph",
+					input: { k: "unknown" },
+					fn: (input, ctx) => {
+						if (input === undefined) {
+							return typeof fallback === "function" ? (fallback as () => DefaultOut)() : fallback;
+						}
+						const result = schema(input);
+						if (!(result instanceof type.errors)) return result;
+						return ctx.error("the default or a valid value");
+					},
+				}),
+			) as unknown as Decoratable<DefaultOut>;
+			const result = decorate(piped);
+			// Stamp the default metadata objectSchema() reads when embedding this
+			// schema as a property: the prop must stay optional with this fallback.
+			Object.defineProperty(result, "hasDefault", { value: true, enumerable: false });
+			Object.defineProperty(result, "defaultValue", { value, enumerable: false });
+			return result;
 		},
 		describe(description: string): ZodLikeSchema<Out> {
 			return next(restrictBase(schema, { ...schema.ir, desc: description }).describe(description));
@@ -244,6 +315,16 @@ function decorate<Out>(schema: Decoratable<Out>, optional = false): ZodLikeSchem
 				? ZodLikeSchema<Partial<Out>>
 				: ZodLikeSchema<Out>;
 		},
+		/**
+		 * Matches Zod's runtime contract: `.readonly()` is not merely a type
+		 * cast, it shallow-freezes successful parse output (`Object.freeze`,
+		 * one level deep — a nested object is left mutable, exactly like Zod).
+		 * `Object.freeze` on a non-object `Out` (string/number/etc.) is a safe
+		 * no-op, so this applies uniformly across every schema kind.
+		 */
+		readonly(): ZodLikeSchema<Readonly<Out>> {
+			return next(schema.pipe(value => Object.freeze(value) as Out)) as ZodLikeSchema<Readonly<Out>>;
+		},
 	}) as unknown as ZodLikeSchema<Out>;
 }
 
@@ -263,7 +344,7 @@ type ObjectOutput<S extends Shape> = {
 type Simplify<T> = { [K in keyof T]: T[K] };
 type UnionOutput<Schemas extends readonly ZodLikeSchema<unknown>[]> = SchemaOutput<Schemas[number]>;
 
-function objectSchema<const S extends Shape>(shape: S): ZodLikeSchema<ObjectOutput<S>> {
+function objectSchema<const S extends Shape>(shape: S, extras: Extras = "delete"): ZodLikeSchema<ObjectOutput<S>> {
 	const props: PropIR[] = [];
 	for (const key in shape) {
 		const member = shape[key];
@@ -275,7 +356,7 @@ function objectSchema<const S extends Shape>(shape: S): ZodLikeSchema<ObjectOutp
 		}
 		props.push(prop);
 	}
-	return decorateUnknown(schemaFromIR<unknown>({ k: "object", props, extras: "delete" })) as unknown as ZodLikeSchema<
+	return decorateUnknown(schemaFromIR<unknown>({ k: "object", props, extras })) as unknown as ZodLikeSchema<
 		ObjectOutput<S>
 	>;
 }
@@ -293,16 +374,105 @@ const enumSchema = <const Values extends readonly [string, ...string[]]>(
 };
 
 export { enumSchema as enum };
+// Ordered first-match dispatcher rather than an omptype union: zod unions try
+// branches in declaration order, while omptype's unordered unions reject
+// overlapping morph inputs — a shape recursive schemas (`lazy` is a morph)
+// hit constantly. Wrapping the members in one unknown-input morph keeps zod's
+// ordering and keeps member morphs invisible to the determinism check.
 export const union = <
 	const Schemas extends readonly [ZodLikeSchema<unknown>, ZodLikeSchema<unknown>, ...ZodLikeSchema<unknown>[]],
 >(
 	schemas: Schemas,
-): ZodLikeSchema<UnionOutput<Schemas>> =>
-	decorate(schemaFromIR({ k: "union", members: schemas.map(schema => embed(schema)) }));
+): ZodLikeSchema<UnionOutput<Schemas>> => {
+	const members = schemas.map(schema => schema);
+	return decorate(
+		schemaFromIR({
+			k: "morph",
+			input: { k: "unknown" },
+			fn: (value, ctx) => {
+				for (const member of members) {
+					const result = member(value);
+					if (!(result instanceof type.errors)) return result;
+				}
+				return ctx.error(`a union of ${members.length} variants`);
+			},
+		}),
+	);
+};
+const NO_DISCRIMINANT = Symbol("omptype.zod.noDiscriminant");
+
+/**
+ * Literal value a discriminated-union variant pins the discriminator to, read
+ * straight off its structural IR; {@link NO_DISCRIMINANT} when unknowable.
+ */
+function discriminantLiteral(ir: IR, key: string): unknown {
+	if (ir.k !== "object") return NO_DISCRIMINANT;
+	for (const prop of ir.props) {
+		if (prop.key === key) return prop.val.k === "lit" ? prop.val.v : NO_DISCRIMINANT;
+	}
+	return NO_DISCRIMINANT;
+}
+
+/**
+ * Union dispatched on a literal discriminator property. Variants whose IR pins
+ * the discriminator to the input's value are tried first; when nothing matches
+ * (or no variant declares a usable literal), every variant is attempted in
+ * order so failures still report against the full union.
+ */
+export const discriminatedUnion = <
+	const Discriminator extends string,
+	const Schemas extends readonly [ZodLikeSchema<unknown>, ZodLikeSchema<unknown>, ...ZodLikeSchema<unknown>[]],
+>(
+	discriminator: Discriminator,
+	schemas: Schemas,
+): ZodLikeSchema<UnionOutput<Schemas>> => {
+	const variants = schemas.map(schema => ({
+		schema: schema as ZodLikeSchema<unknown>,
+		literal: discriminantLiteral(schema.ir, discriminator),
+	}));
+	const dispatch = type.unknown.pipe((value, ctx) => {
+		if (typeof value !== "object" || value === null) {
+			return ctx.error(`an object with a "${discriminator}" discriminator`);
+		}
+		let candidates = variants;
+		const disc = (value as Record<string, unknown>)[discriminator];
+		if (disc !== undefined) {
+			const matched = variants.filter(variant => variant.literal === disc);
+			if (matched.length > 0) candidates = matched;
+		}
+		for (const variant of candidates) {
+			const result = variant.schema(value);
+			if (!(result instanceof type.errors)) return result;
+		}
+		return ctx.error(`a "${discriminator}" union variant`);
+	});
+	return decorate(dispatch as Decoratable<unknown>) as ZodLikeSchema<UnionOutput<Schemas>>;
+};
+/** Defer schema construction until first parse — required for recursive shapes. */
+export const lazy = <Out>(getter: () => ZodLikeSchema<Out>): ZodLikeSchema<Out> => {
+	let resolved: ZodLikeSchema<Out> | undefined;
+	return decorate(
+		schemaFromIR<Out>({
+			k: "morph",
+			input: { k: "unknown" },
+			fn: value => {
+				resolved ??= getter();
+				return resolved(value);
+			},
+		}),
+	);
+};
 export const array = <Element>(element: ZodLikeSchema<Element>): ZodLikeSchema<Element[]> =>
 	decorate(schemaFromIR({ k: "array", el: embed(element) }));
 export const object = <const S extends Shape>(shape: S): ZodLikeSchema<Simplify<ObjectOutput<S>>> =>
 	objectSchema(shape);
+/** Object that rejects undeclared keys (zod `z.strictObject`). */
+export const strictObject = <const S extends Shape>(shape: S): ZodLikeSchema<Simplify<ObjectOutput<S>>> =>
+	objectSchema(shape, "reject");
+export const looseObject = <const S extends Shape>(
+	shape: S,
+): ZodLikeSchema<Simplify<ObjectOutput<S>> & Record<string, unknown>> =>
+	objectSchema(shape, "keep") as ZodLikeSchema<Simplify<ObjectOutput<S>> & Record<string, unknown>>;
 export const record = <Key extends string, Value>(
 	keySchema: ZodLikeSchema<Key>,
 	valueSchema: ZodLikeSchema<Value>,
@@ -340,13 +510,31 @@ export const z = {
 	union,
 	array,
 	object,
+	strictObject,
+	looseObject,
+	discriminatedUnion,
+	lazy,
 	record,
 	unknown,
 	any,
 	null: nullSchema,
 	undefined: undefinedSchema,
 };
-
 export namespace z {
+	/** Alias of {@link ZodLikeSchema} under zod's historical name; `Input` mirrors zod's two-parameter arity. */
+	// biome-ignore lint/correctness/noUnusedVariables: Input exists only to mirror zod's ZodType<Out, Input> arity.
+	export type ZodType<Out = unknown, Input = unknown> = ZodLikeSchema<Out>;
 	export type infer<Schema> = Schema extends { readonly _output: infer Out } ? Out : never;
+	/** Structural counterpart of zod's `ZodError`: the safeParse failure payload. */
+	export interface ZodError<Out = unknown> {
+		readonly message: string;
+		readonly issues: ZodLikeIssue[];
+		/** Phantom marker keeping zod's output type parameter attached. */
+		readonly _output?: Out;
+	}
 }
+
+/** Module-level aliases of the `z` namespace types under their bare names. */
+// biome-ignore lint/correctness/noUnusedVariables: Input exists only to mirror zod's ZodType<Out, Input> arity.
+export type ZodType<Out = unknown, Input = unknown> = z.ZodType<Out>;
+export type ZodError<Out = unknown> = z.ZodError<Out>;

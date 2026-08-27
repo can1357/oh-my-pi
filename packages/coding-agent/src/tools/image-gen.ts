@@ -517,7 +517,7 @@ async function buildImageEndpointResult(
 	provider: ImageProvider,
 	model: string,
 	inlineImages: InlineImageData[],
-): Promise<AgentToolResult<ImageGenToolDetails, ImageGenParams>> {
+): Promise<AgentToolResult<ImageGenToolDetails>> {
 	if (inlineImages.length === 0) {
 		return {
 			content: [{ type: "text", text: "No image data returned." }],

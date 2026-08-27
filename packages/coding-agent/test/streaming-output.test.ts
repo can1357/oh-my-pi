@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { ToolPresentationEvent, TruncationFactMeta } from "@oh-my-pi/pi-agent-core/presentation";
+import { byteLengthOf, byteOffset, streamId, ToolPresentationStream } from "@oh-my-pi/pi-agent-core/presentation";
 import {
 	enforceInlineByteCap,
 	formatHeadTruncationNotice,
@@ -17,7 +19,7 @@ import {
 	truncateTailBytes,
 } from "@oh-my-pi/pi-coding-agent/session/streaming-output";
 import { formatOutputNotice, outputMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { logger, removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const createdTempDirs: string[] = [];
 const originalForceProtocol = Bun.env.PI_FORCE_IMAGE_PROTOCOL;
@@ -805,5 +807,270 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 		expect(dropped).toBeGreaterThan(0);
 		// elided + dropped + kept ≤ totalBytes (with a small slack for the marker/newlines).
 		expect(elided + dropped).toBeLessThan(dumped.totalBytes);
+	});
+});
+
+describe("OutputSink presentation producer errors", () => {
+	// Real producer, not a mock: the freeze/flush/scope machinery under test lives
+	// in `ToolPresentationStream`, and a hand-rolled fake could accidentally
+	// implement the exact bug this suite exists to catch.
+	function collectingProducer(): { producer: ToolPresentationStream; events: ToolPresentationEvent[] } {
+		const events: ToolPresentationEvent[] = [];
+		return {
+			producer: new ToolPresentationStream(streamId("presentation-error-probe"), event => events.push(event)),
+			events,
+		};
+	}
+	function appends(events: readonly ToolPresentationEvent[]): readonly string[] {
+		return events.filter(event => event.type === "terminal_append").map(event => event.data);
+	}
+
+	/** Collect warn-level log events via the repository's standard log-sink pattern. */
+	function collectWarnings(): { events: logger.LogEvent[]; dispose: () => void } {
+		const events: logger.LogEvent[] = [];
+		const dispose = logger.registerLogSink(event => {
+			if (event.level === "warn") events.push(event);
+		});
+		return { events, dispose };
+	}
+
+	test("propagates a genuine emitter failure instead of swallowing it as a freeze race", () => {
+		// Reproduces a producer whose emitter throws synchronously.
+		// `OutputSink` used to catch *every* `appendTerminal` error unconditionally and
+		// log it as "arrived after freeze started", which silently ate this failure too.
+		const producer = new ToolPresentationStream(streamId("emitter-failure-probe"), () => {
+			throw new Error("emitter failed");
+		});
+		const sink = new OutputSink({ presentation: producer });
+		expect(() => sink.push("x")).toThrow("emitter failed");
+	});
+
+	test("warns and drops, without throwing, a chunk that arrives after freeze completed", async () => {
+		const { producer, events } = collectingProducer();
+		const { events: warnings, dispose } = collectWarnings();
+		try {
+			const sink = new OutputSink({ presentation: producer });
+			await producer.freeze();
+			expect(producer.phase).toBe("frozen");
+			expect(() => sink.push("late")).not.toThrow();
+			expect(appends(events)).toEqual([]);
+			// The late chunk produced a warn-level log, so its loss is observable —
+			// not silently discarded. Without this assertion the test would pass even
+			// if the warning were removed, leaving the drop undetectable.
+			expect(warnings).toHaveLength(1);
+			expect(warnings[0]?.message).toBe("OutputSink produced a chunk after the presentation stream began freezing");
+			expect(warnings[0]?.context).toMatchObject({ bytes: 4 });
+		} finally {
+			dispose();
+		}
+	});
+
+	test("warns and drops, without throwing, an ordinary chunk that arrives mid-freeze", async () => {
+		// Mid-freeze (`phase === "flushing"`) is not "frozen" yet, but an *ordinary*
+		// (non-scoped) append must still be rejected — only the flusher's own scope may
+		// append during that window.
+		const { producer, events } = collectingProducer();
+		const { events: warnings, dispose } = collectWarnings();
+		try {
+			const gate = Promise.withResolvers<void>();
+			producer.registerFlusher(async () => {
+				await gate.promise;
+			});
+			const sink = new OutputSink({ presentation: producer });
+			const freezing = producer.freeze();
+			// No wait needed: `#runFreeze` sets `#phase = "flushing"` synchronously, before
+			// its first `await`, so it has already happened by the time `freeze()` returns.
+			expect(producer.phase).toBe("flushing");
+			expect(() => sink.push("mid-freeze")).not.toThrow();
+			gate.resolve();
+			await freezing;
+			expect(appends(events)).toEqual([]);
+			// The mid-freeze chunk also produced a warning, not a silent drop.
+			expect(warnings).toHaveLength(1);
+			expect(warnings[0]?.message).toBe("OutputSink produced a chunk after the presentation stream began freezing");
+		} finally {
+			dispose();
+		}
+	});
+
+	test("still delivers a scoped flusher's own pending chunk during freeze", async () => {
+		const { producer, events } = collectingProducer();
+		const { events: warnings, dispose } = collectWarnings();
+		try {
+			const sink = new OutputSink({ presentation: producer, chunkThrottleMs: 60_000 });
+			sink.push("first"); // the throttle boundary always lets the first push straight through
+			sink.push("buffered"); // arrives inside the throttle window, held by the pending-chunk timer
+			expect(appends(events)).toEqual(["first"]);
+			await producer.freeze(); // the registered flusher flushes it through its own scope
+			expect(appends(events)).toEqual(["first", "buffered"]);
+			// A scoped flusher's own output is delivered normally — no warning.
+			expect(warnings).toHaveLength(0);
+		} finally {
+			dispose();
+		}
+	});
+
+	test("loses no bytes silently: a delivered chunk and a dropped late chunk are each observable", async () => {
+		const { producer, events } = collectingProducer();
+		const { events: warnings, dispose } = collectWarnings();
+		try {
+			const sink = new OutputSink({ presentation: producer });
+			sink.push("delivered");
+			await producer.freeze();
+			sink.push("dropped-after-freeze");
+			// The delivered chunk actually reached the producer's event stream...
+			expect(appends(events)).toEqual(["delivered"]);
+			// ...and the late chunk was neither appended nor silently discarded without a
+			// trace: it is absent from the delivered stream (not corrupted into it) and the
+			// producer's own retained cursor did not advance for it.
+			expect(producer.nextByte).toBe(byteOffset(byteLengthOf("delivered")));
+			// The late chunk also emitted a warning — its drop is observable, not silent.
+			// Without this assertion the test passes even if the warning is removed,
+			// leaving late output silently discarded.
+			expect(warnings).toHaveLength(1);
+			expect(warnings[0]?.message).toBe("OutputSink produced a chunk after the presentation stream began freezing");
+			expect(warnings[0]?.context).toMatchObject({ bytes: 20 });
+		} finally {
+			dispose();
+		}
+	});
+
+	test("dispose swallows a throwing pending-chunk flush instead of masking the tool error", async () => {
+		// dispose() runs in the executors' `finally`; a throw
+		// from the pending flush would replace the original tool error — the same
+		// masking its `#finalizeFile` sibling guards against. The swallow must
+		// hold when the emitter itself is the thrower.
+		const { events: warnings, dispose } = collectWarnings();
+		try {
+			let fail = false;
+			const events: ToolPresentationEvent[] = [];
+			const producer = new ToolPresentationStream(streamId("dispose-flush-throw-probe"), event => {
+				if (fail) throw new Error("emitter failed");
+				events.push(event);
+			});
+			const sink = new OutputSink({ presentation: producer, chunkThrottleMs: 60_000 });
+			sink.push("first"); // the throttle boundary lets the first push straight through
+			fail = true;
+			sink.push("buffered"); // pends inside the throttle window; flush will throw
+			expect(events.filter(event => event.type === "fact")).toHaveLength(0);
+
+			await expect(sink.dispose()).resolves.toBeUndefined();
+
+			// The failure is observable, not silent...
+			expect(
+				warnings.some(warning => warning.message === "OutputSink dispose failed to flush the pending chunk"),
+			).toBe(true);
+			// ...and no fabricated truncation fact was derived from diverged counters.
+			expect(events.filter(event => event.type === "fact")).toHaveLength(0);
+		} finally {
+			dispose();
+		}
+	});
+});
+
+describe("OutputSink presentation feed", () => {
+	// The shared feed is unbounded now — every chunk handed
+	// to `push()` reaches the presentation stream in full, whatever its size.
+	// Bounding what a *retained* record keeps is `LiveToolPresentationRecord`'s
+	// job (see `presentation-live-record.test.ts`), not this sink's.
+	function collectingProducer(): { producer: ToolPresentationStream; events: ToolPresentationEvent[] } {
+		const events: ToolPresentationEvent[] = [];
+		return {
+			producer: new ToolPresentationStream(streamId("s-feed"), event => events.push(event)),
+			events,
+		};
+	}
+	function truncationMetas(events: readonly ToolPresentationEvent[]): TruncationFactMeta[] {
+		const metas: TruncationFactMeta[] = [];
+		for (const event of events) {
+			if (event.type !== "fact") continue;
+			if (event.fact.kind !== "truncation") continue;
+			metas.push(event.fact.meta);
+		}
+		return metas;
+	}
+	function appendedBytes(events: readonly ToolPresentationEvent[]): number {
+		return events.reduce(
+			(sum, event) => (event.type === "terminal_append" ? sum + byteLengthOf(event.data) : sum),
+			0,
+		);
+	}
+
+	test("an oversized chunk reaches the presentation stream in full, with no cap and no truncation fact", async () => {
+		const { producer, events } = collectingProducer();
+		const sink = new OutputSink({ presentation: producer });
+		const chunk = "x".repeat(1024 * 1024 + 512 * 1024); // well past the old 1 MiB cap
+		await sink.push(chunk);
+
+		expect(appendedBytes(events)).toBe(byteLengthOf(chunk));
+
+		await sink.dump();
+
+		// The shared feed declares no truncation fact at all now: bounding
+		// retention moved to `LiveToolPresentationRecord`.
+		expect(truncationMetas(events)).toHaveLength(0);
+		expect(events.some(event => event.type === "fact")).toBe(false);
+	});
+
+	test("many chunks summing past the old cap size all reach the feed, in order", async () => {
+		const { producer, events } = collectingProducer();
+		const sink = new OutputSink({ presentation: producer });
+		const chunk = "x".repeat(64 * 1024);
+		for (let i = 0; i < 20; i++) await sink.push(chunk); // 20 × 64 KiB === 1.25 MiB
+		await sink.dump();
+
+		expect(appendedBytes(events)).toBe(20 * 64 * 1024);
+		expect(truncationMetas(events)).toHaveLength(0);
+	});
+
+	test("dispose delivers every byte without declaring a truncation fact", async () => {
+		const { producer, events } = collectingProducer();
+		const sink = new OutputSink({ presentation: producer });
+		const chunk = "x".repeat(1024 * 1024 + 1024);
+		await sink.push(chunk);
+
+		await sink.dispose(); // the throw-path exit: no dump()
+
+		expect(appendedBytes(events)).toBe(byteLengthOf(chunk));
+		expect(truncationMetas(events)).toHaveLength(0);
+	});
+
+	test("a throttled pending chunk larger than the old cap size still flushes in full through the freeze scope", async () => {
+		const { producer, events } = collectingProducer();
+		const sink = new OutputSink({ presentation: producer, chunkThrottleMs: 60_000 });
+		const first = "x".repeat(1024 * 1024 - 4); // first push bypasses the throttle
+		sink.push(first);
+		const second = "yyyy"; // buffered by the throttle, flushed through the freeze scope
+		sink.push(second);
+		await expect(producer.freeze()).resolves.toBeUndefined(); // must not throw
+
+		expect(appendedBytes(events)).toBe(byteLengthOf(first) + byteLengthOf(second));
+		expect(truncationMetas(events)).toHaveLength(0);
+		await expect(sink.dump()).resolves.toBeDefined();
+		expect(truncationMetas(events)).toHaveLength(0);
+	});
+
+	test("an ordinary chunk arriving mid-freeze is dropped wholesale by the freeze barrier, not by a byte cap", async () => {
+		const { producer, events } = collectingProducer();
+		const gate = Promise.withResolvers<void>();
+		producer.registerFlusher(async () => {
+			await gate.promise;
+		});
+		const sink = new OutputSink({ presentation: producer });
+		const first = "x".repeat(1024 * 1024 - 4);
+		sink.push(first);
+		const freezing = producer.freeze();
+		expect(producer.phase).toBe("flushing");
+		expect(() => sink.push("y".repeat(1024 * 1024))).not.toThrow();
+		gate.resolve();
+		await freezing;
+
+		// The pre-freeze chunk arrives whole; the mid-freeze chunk is dropped
+		// wholesale because the producer stopped accepting ordinary appends —
+		// never because of a retention cap.
+		expect(appendedBytes(events)).toBe(byteLengthOf(first));
+		expect(truncationMetas(events)).toHaveLength(0);
+		await expect(sink.dump()).resolves.toBeDefined();
+		expect(truncationMetas(events)).toHaveLength(0);
 	});
 });

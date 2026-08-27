@@ -7,6 +7,8 @@ import {
 	agentLoopDetailed,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
 } from "@oh-my-pi/pi-agent-core/agent-loop";
+import type { JsonValue } from "@oh-my-pi/pi-agent-core/presentation";
+import { mintToolOutcome } from "@oh-my-pi/pi-agent-core/presentation";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -3883,6 +3885,96 @@ describe("agentLoop useless-flag propagation", () => {
 	});
 });
 
+describe("agentLoop outcome→wire isError bridge", () => {
+	async function runOutcomeProbe(toolReturn: unknown): Promise<ToolResultMessage> {
+		const toolSchema = type({});
+		const tool: AgentTool<typeof toolSchema> = {
+			name: "probe",
+			label: "Probe",
+			description: "Probe tool",
+			parameters: toolSchema,
+			async execute() {
+				return toolReturn as never;
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "probe", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("go")], context, config, undefined, mock.stream)) {
+			events.push(event);
+		}
+		const message = events
+			.filter(e => e.type === "message_end")
+			.map(e => (e as { message: AgentMessage }).message)
+			.find(m => m.role === "toolResult");
+		expect(message).toBeDefined();
+		return message as ToolResultMessage;
+	}
+
+	// A migrated producer is not obliged to keep its legacy `isError` bit
+	// consistent with `outcome`: a genuinely *minted* `outcome` alone must
+	// reach the LLM wire. Without the bridge, `ToolResultMessage.isError`
+	// stays `false` — which for Anthropic-style providers means a genuinely
+	// failed call is reported to the model as a success.
+	it("reports a failed outcome on the wire even when the legacy isError bit is unset", async () => {
+		const message = await runOutcomeProbe({
+			content: [{ type: "text", text: "OUTCOME_BRIDGE_FAILED_FIXTURE_71C4" }],
+			details: {},
+			outcome: mintToolOutcome({
+				kind: "failed",
+				failure: { reason: "tool_reported", message: "OUTCOME_BRIDGE_FAILED_FIXTURE_71C4" },
+			}),
+		});
+		expect(message.isError).toBe(true);
+	});
+
+	// The reverse direction: a genuinely minted `outcome` is the authority,
+	// not merely a hint consulted when the legacy bit agrees.
+	it("reports a succeeded outcome on the wire even when a stray legacy isError bit is set", async () => {
+		const message = await runOutcomeProbe({
+			content: [{ type: "text", text: "OUTCOME_BRIDGE_SUCCEEDED_FIXTURE_5A38" }],
+			details: {},
+			isError: true,
+			outcome: mintToolOutcome({ kind: "succeeded" }),
+		});
+		expect(message.isError).toBe(false);
+	});
+
+	// The whole point of the provenance mint: a custom
+	// tool cannot forge the authoritative outcome just by returning an
+	// object literal that is shape-identical to a real `ToolOutcome`. Here
+	// the literal is constructed directly — never through `mintToolOutcome`
+	// — so `coerceToolResult` must drop it and fall back to the observed
+	// `isError` bit instead of trusting the forged "succeeded" discriminant.
+	it("drops an unminted outcome that merely looks like a ToolOutcome by shape and derives from isError instead", async () => {
+		const forgedOutcome = { kind: "succeeded" } as const;
+		const message = await runOutcomeProbe({
+			content: [{ type: "text", text: "OUTCOME_FORGERY_FIXTURE_9D21" }],
+			details: {},
+			isError: true,
+			outcome: forgedOutcome,
+		});
+		expect(message.isError).toBe(true);
+	});
+
+	// Malformed nesting (an `outcome` that isn't object-shaped at all) falls
+	// back cleanly to the isError-derived branches rather than throwing.
+	it("falls back cleanly when outcome is malformed", async () => {
+		const message = await runOutcomeProbe({
+			content: [{ type: "text", text: "OUTCOME_MALFORMED_FIXTURE_2C77" }],
+			details: {},
+			outcome: "succeeded",
+		});
+		expect(message.isError).toBe(false);
+	});
+});
+
 describe("agentLoopContinue with AgentMessage", () => {
 	it("should throw when context has no messages", () => {
 		const context: AgentContext = {
@@ -4207,6 +4299,191 @@ describe("agentLoopContinue with AgentMessage", () => {
 		expect(toolEnd?.type === "tool_execution_end" && toolEnd.isError).toBe(true);
 	});
 
+	it("accepts beforeToolCall args that alias one subobject at two properties (DAG, not a cycle)", async () => {
+		const toolSchema = type({ first: { n: "number" }, second: { n: "number" } });
+		const executed: unknown[] = [];
+		const tool: AgentTool<typeof toolSchema, undefined> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params);
+				return { content: [{ type: "text", text: "ok" }], details: undefined };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "tool-1", name: "echo", arguments: { first: { n: 0 }, second: { n: 0 } } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const shared = { n: 1 };
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			// Both JSON serialization and structuredClone accept this graph; the
+			// normalizer must not mistake the second reference for a cycle.
+			beforeToolCall: async () => ({ args: { first: shared, second: shared } }),
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("echo something")], context, config, undefined, mock.stream);
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		expect(executed).toEqual([{ first: { n: 1 }, second: { n: 1 } }]);
+		const toolEnd = events.find(e => e.type === "tool_execution_end");
+		expect(toolEnd?.type === "tool_execution_end" && toolEnd.isError).toBe(false);
+	});
+
+	it("preserves an own __proto__ key in hook-revised args without prototype pollution", async () => {
+		const toolSchema = type({ value: "string" });
+		const executed: Array<{ [key: string]: unknown }> = [];
+		const tool: AgentTool<typeof toolSchema, undefined> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params as { [key: string]: unknown });
+				return { content: [{ type: "text", text: "ok" }], details: undefined };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			// `JSON.parse` creates `__proto__` as an ordinary own data property;
+			// the normalizer must keep it an own key, never route it through the
+			// legacy prototype setter (which drops the key AND pollutes the
+			// normalized object's prototype baked into history).
+			beforeToolCall: async () => ({ args: JSON.parse('{"value":"revised","__proto__":{"polluted":true}}') }),
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("echo something")], context, config, undefined, mock.stream);
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		expect(executed).toHaveLength(1);
+		const params = executed[0]!;
+		expect(params.value).toBe("revised");
+		expect(Object.getPrototypeOf(params)).toBe(Object.prototype);
+		expect(Object.getOwnPropertyNames(params).sort()).toEqual(["__proto__", "value"]);
+		expect(Object.getOwnPropertyDescriptor(params, "__proto__")?.value).toEqual({ polluted: true });
+		const toolEnd = events.find(e => e.type === "tool_execution_end");
+		expect(toolEnd?.type === "tool_execution_end" && toolEnd.isError).toBe(false);
+	});
+
+	it("rejects a beforeToolCall args DAG whose aliasing expands past the node budget instead of hanging", async () => {
+		const toolSchema = type({ value: "string" });
+		const executed: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params.value);
+				return { content: [{ type: "text", text: `echoed: ${params.value}` }], details: { value: params.value } };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }] },
+				{ content: ["done"] },
+			],
+		});
+		// A 40-level chain where every level aliases the SAME child at two
+		// properties: well within the depth cap, but expanding every alias into
+		// an independent subtree walks 2^40 paths. The node budget must reject
+		// this deterministically instead of hanging the loop synchronously.
+		let shared: Record<string, JsonValue> = { leaf: true };
+		for (let level = 0; level < 40; level++) {
+			shared = { a: shared, b: shared };
+		}
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			beforeToolCall: async () => ({ args: { value: "hello", payload: shared } }),
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("echo something")], context, config, undefined, mock.stream);
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		expect(executed).toEqual([]);
+		const toolEnd = events.find(e => e.type === "tool_execution_end");
+		expect(toolEnd?.type === "tool_execution_end" && toolEnd.isError).toBe(true);
+	});
+
+	it("still rejects a beforeToolCall args replacement containing a genuine cycle", async () => {
+		const toolSchema = type({ value: "string" });
+		const executed: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params.value);
+				return { content: [{ type: "text", text: `echoed: ${params.value}` }], details: { value: params.value } };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }] },
+				{ content: ["done"] },
+			],
+		});
+		// Typed as the hook contract's own arg record; the cycle is a runtime
+		// property the type system cannot see, which is exactly the boundary
+		// normalizeJsonValue guards.
+		const cyclic: Record<string, JsonValue> = { value: "hello" };
+		cyclic.self = cyclic;
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			beforeToolCall: async () => ({ args: cyclic }),
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("echo something")], context, config, undefined, mock.stream);
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		expect(executed).toEqual([]);
+		const toolEnd = events.find(e => e.type === "tool_execution_end");
+		expect(toolEnd?.type === "tool_execution_end" && toolEnd.isError).toBe(true);
+	});
+
 	it("afterToolCall overrides content and isError on the emitted tool result", async () => {
 		const toolSchema = type({ value: "string" });
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {
@@ -4237,8 +4514,11 @@ describe("agentLoopContinue with AgentMessage", () => {
 			afterToolCall: async ({ args, isError }) => {
 				seen.push({ args, isError });
 				return {
-					content: [{ type: "text", text: "rewritten" }],
-					isError: true,
+					kind: "transform_external_result",
+					// `transform_external_result` fully replaces the result as a structured
+					// effect, not the old field-by-field patch, so `details`
+					// must be restated explicitly to survive.
+					raw: { content: [{ type: "text", text: "rewritten" }], details: { value: "hello" }, isError: true },
 				};
 			},
 		};
@@ -4256,7 +4536,7 @@ describe("agentLoopContinue with AgentMessage", () => {
 		if (toolEnd?.type === "tool_execution_end") {
 			expect(toolEnd.isError).toBe(true);
 			expect(toolEnd.result.content).toEqual([{ type: "text", text: "rewritten" }]);
-			// details preserved when override omits the field
+			// details restated explicitly in the effect's raw payload
 			expect(toolEnd.result.details).toEqual({ value: "hello" });
 		}
 
@@ -4294,14 +4574,18 @@ describe("agentLoopContinue with AgentMessage", () => {
 			convertToLlm: identityConverter,
 			afterToolCall: async () =>
 				({
-					providerMetadata: {
-						type: "computer",
-						screenshot: {
-							type: "computer_screenshot",
-							image_url: "data:image/png;base64,AAEC",
-							file_id: "file_conflicting_ref",
+					kind: "transform_external_result",
+					raw: {
+						content: [],
+						providerMetadata: {
+							type: "computer",
+							screenshot: {
+								type: "computer_screenshot",
+								image_url: "data:image/png;base64,AAEC",
+								file_id: "file_conflicting_ref",
+							},
+							acknowledgedSafetyChecks: [{ id: 42 }],
 						},
-						acknowledgedSafetyChecks: [{ id: 42 }],
 					},
 				}) as never,
 		};
@@ -4349,7 +4633,10 @@ describe("agentLoopContinue with AgentMessage", () => {
 			convertToLlm: identityConverter,
 			afterToolCall: async (_context, signal) => {
 				hookSawAbortedSignal = signal?.aborted === true;
-				return { content: [{ type: "text", text: "rewritten after abort" }] };
+				return {
+					kind: "transform_external_result",
+					raw: { content: [{ type: "text", text: "rewritten after abort" }] },
+				};
 			},
 		};
 

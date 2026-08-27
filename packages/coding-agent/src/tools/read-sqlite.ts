@@ -123,9 +123,9 @@ export async function readSqlite(
 				const resultBuilder = toolResult<ReadToolDetails>(details)
 					.text(truncation.content)
 					.sourcePath(resolvedSqlitePath.absolutePath)
-					.limits({ resultLimit: listLimit.meta.resultLimit?.reached });
+					.resultLimitFact(listLimit.meta.resultLimit?.reached);
 				if (truncation.truncated) {
-					resultBuilder.truncation(truncation, { direction: "head" });
+					resultBuilder.truncationFact(truncation, { direction: "head" });
 				}
 				return resultBuilder.done();
 			}

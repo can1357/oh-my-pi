@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Agent, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
-import { isRecord, logger, prompt, stringProperty, untilAborted } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
@@ -526,6 +526,21 @@ export class SessionTools {
 		return operation;
 	}
 
+	/**
+	 * Whether a live dispatch name belongs to a registered built-in. This also
+	 * resolves a built-in's custom wire name (for example EditTool's
+	 * `apply_patch`) using the same exact-name-first precedence as the agent
+	 * dispatcher. An external tool called `apply_patch` must shadow EditTool's
+	 * wire alias rather than inheriting its built-in provenance.
+	 */
+	hasBuiltInToolDispatch(name: string): boolean {
+		const tools = this.#host.agent.state.tools;
+		const dispatched =
+			tools.find(tool => tool.name === name) ??
+			tools.find(tool => tool.customWireName !== undefined && tool.customWireName === name);
+		return dispatched !== undefined && this.#builtInToolNames.has(dispatched.name);
+	}
+
 	/** Names of every registered tool. */
 	getAllToolNames(): string[] {
 		return Array.from(this.#toolRegistry.keys());
@@ -770,13 +785,6 @@ export class SessionTools {
 					if (!permissionIntent) {
 						return await target.execute(toolCallId, args as never, signal, onUpdate, ctx);
 					}
-					const command =
-						target.name === "bash" && args && typeof args === "object" && !Array.isArray(args)
-							? stringProperty(args, "command")
-							: undefined;
-					const commandContent = command
-						? [{ type: "content" as const, content: { type: "text" as const, text: `$ ${command}` } }]
-						: undefined;
 					// Short-circuit on persisted decisions.
 					const persisted = this.#acpPermissionDecisions.get(permissionIntent.cacheKey);
 					if (persisted === "allow_always") {
@@ -804,7 +812,6 @@ export class SessionTools {
 								...(target.name === "bash" ? { kind: "execute" } : {}),
 								status: "pending",
 								rawInput: args,
-								...(commandContent ? { content: commandContent } : {}),
 								locations: extractPermissionLocations(
 									args,
 									this.#host.sessionManager.getCwd(),

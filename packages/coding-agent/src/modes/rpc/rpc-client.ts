@@ -12,6 +12,7 @@ import { isRecord, ptree, readJsonl } from "@oh-my-pi/pi-utils";
 import type { FileSink } from "bun";
 import type { BashResult } from "../../exec/bash-executor";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
+import { ToolPresentationDisplayFold } from "../tool-presentation-fold";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameDecoder, type RpcProtocolVersion } from "./rpc-frame";
 import {
 	RPC_MESSAGES_PAGE_BUSY_ERROR,
@@ -170,6 +171,18 @@ function isAgentSessionEvent(value: unknown): value is AgentSessionEvent {
 	return sessionEventTypes.has(type as AgentSessionEvent["type"]);
 }
 
+/** Structural guard for a raw `tool_presentation` frame arriving on the wire. */
+function isToolPresentationFrame(
+	value: Record<string, unknown>,
+): value is Extract<AgentSessionEvent, { type: "tool_presentation" }> {
+	return (
+		value.type === "tool_presentation" &&
+		typeof value.toolCallId === "string" &&
+		typeof value.toolName === "string" &&
+		isRecord(value.event)
+	);
+}
+
 function isRpcSubagentLifecycleFrame(value: unknown): value is RpcSubagentLifecycleFrame {
 	if (!isRecord(value)) return false;
 	return value.type === "subagent_lifecycle" && isRecord(value.payload);
@@ -240,6 +253,61 @@ function isPageFallbackError(error: unknown): boolean {
 	return error.message === RPC_MESSAGES_PAGE_BUSY_ERROR || error.message === RPC_MESSAGES_PAGE_STALE_ERROR;
 }
 
+/**
+ * Fold state for presentation-protocol calls seen on the wire.
+ * Migrated bash/eval routes stopped emitting live
+ * `tool_execution_update`s, so the client folds raw `tool_presentation`
+ * frames into cumulative snapshots for its listeners; raw frames stay
+ * unforwarded exactly as before. Entries clear with the call lifecycle:
+ * end/settled per call, wholesale at agent_end and process teardown.
+ */
+export class RpcPresentationFold {
+	#folds = new Map<string, { fold: ToolPresentationDisplayFold; args: unknown }>();
+
+	/** Capture the authoritative args from `tool_execution_start`, whenever it arrives. */
+	noteStart(toolCallId: string, args: unknown): void {
+		const entry = this.#folds.get(toolCallId);
+		if (entry) entry.args = args;
+		else this.#folds.set(toolCallId, { fold: new ToolPresentationDisplayFold(), args });
+	}
+
+	noteEnd(toolCallId: string): void {
+		this.#folds.delete(toolCallId);
+	}
+
+	clear(): void {
+		this.#folds.clear();
+	}
+
+	/**
+	 * Fold one raw frame and return the synthesized cumulative
+	 * `tool_execution_update` for listener delivery — or undefined when
+	 * nothing observable has accumulated yet, or the call settled (status
+	 * stays with the real end event).
+	 */
+	synthesize(frame: Extract<AgentSessionEvent, { type: "tool_presentation" }>): AgentSessionEvent | undefined {
+		const { toolCallId, toolName } = frame;
+		if (frame.event.type === "settled") {
+			this.#folds.delete(toolCallId);
+			return undefined;
+		}
+		let entry = this.#folds.get(toolCallId);
+		if (!entry) {
+			entry = { fold: new ToolPresentationDisplayFold(), args: undefined };
+			this.#folds.set(toolCallId, entry);
+		}
+		entry.fold.append(frame.event);
+		if (entry.fold.isEmpty()) return undefined;
+		return {
+			type: "tool_execution_update",
+			toolCallId,
+			toolName,
+			args: entry.args,
+			partialResult: { content: [{ type: "text", text: entry.fold.snapshotText() }] },
+		};
+	}
+}
+
 // ============================================================================
 // RPC Client
 // ============================================================================
@@ -257,6 +325,11 @@ export class RpcClient {
 		new Map();
 	#customTools: RpcClientCustomTool[] = [];
 	#pendingHostToolCalls = new Map<string, { controller: AbortController }>();
+	// Folds raw `tool_presentation` frames into synthesized cumulative
+	// `tool_execution_update`s for listeners. Synthesis is
+	// a display-consumer concern: the ACP-bound subscriber consumes
+	// `tool_presentation` natively and never sees a re-synthesized update.
+	#presentationFold = new RpcPresentationFold();
 	#requestId = 0;
 	#protocolVersion: RpcProtocolVersion = 1;
 	#extensionUiListeners: Set<(req: RpcExtensionUIRequest) => void> = new Set();
@@ -324,6 +397,7 @@ export class RpcClient {
 			this.#pendingRequests.clear();
 			for (const pendingCall of this.#pendingHostToolCalls.values()) pendingCall.controller.abort(error);
 			this.#pendingHostToolCalls.clear();
+			this.#presentationFold.clear();
 
 			try {
 				child.kill(undefined, this.options.terminationGraceMs);
@@ -457,6 +531,7 @@ export class RpcClient {
 		for (const pendingCall of this.#pendingHostToolCalls.values()) {
 			pendingCall.controller.abort(error);
 		}
+		this.#presentationFold.clear();
 		this.#pendingHostToolCalls.clear();
 		return this.#waitForExit(child);
 	}
@@ -1081,17 +1156,45 @@ export class RpcClient {
 			return;
 		}
 
-		if (!isAgentSessionEvent(data)) return;
+		const sessionEvent = this.#ingestSessionFrame(data);
+		if (!sessionEvent) return;
 
 		for (const listener of this.#sessionEventListeners) {
-			listener(data);
+			listener(sessionEvent);
 		}
 
-		if (!isAgentEvent(data)) return;
+		if (!isAgentEvent(sessionEvent)) return;
 
 		for (const listener of this.#eventListeners) {
-			listener(data);
+			listener(sessionEvent);
 		}
+	}
+
+	/**
+	 * Pass genuine session events through untouched; fold raw
+	 * `tool_presentation` frames into synthesized cumulative
+	 * `tool_execution_update` snapshots so listeners keep the live-update
+	 * surface legacy routes provided. Returns undefined for frames that yield
+	 * no listener delivery.
+	 */
+	#ingestSessionFrame(data: unknown): AgentSessionEvent | undefined {
+		if (!isAgentSessionEvent(data)) {
+			if (!isRecord(data) || !isToolPresentationFrame(data)) return undefined;
+			return this.#presentationFold.synthesize(data);
+		}
+		switch (data.type) {
+			case "tool_execution_start":
+				this.#presentationFold.noteStart(data.toolCallId, data.args);
+				break;
+			case "tool_execution_end":
+				this.#presentationFold.noteEnd(data.toolCallId);
+				break;
+			case "agent_end":
+				// A fold still alive here lost its end event; drop it rather than leak.
+				this.#presentationFold.clear();
+				break;
+		}
+		return data;
 	}
 
 	#send(command: RpcCommandBody, timeoutMs = 30_000): Promise<RpcResponse> {

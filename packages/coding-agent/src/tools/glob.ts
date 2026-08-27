@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type { ToolFactBody } from "@oh-my-pi/pi-agent-core/presentation";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 import * as natives from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
@@ -11,6 +12,7 @@ import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { InternalUrlRouter } from "../internal-urls";
 import { splitMemoryGlobPattern } from "../internal-urls/memory-protocol";
 import type { Theme } from "../modes/theme/theme";
+import { renderNoticeTrail } from "../presentation/projections";
 import globDescription from "../prompts/tools/glob.md" with { type: "text" };
 import { type TruncationResult, truncateHead } from "../session/streaming-output";
 import { isScoutSpawnable } from "../task/spawn-policy";
@@ -59,6 +61,18 @@ export interface GlobToolDetails {
 	truncation?: TruncationResult;
 	resultLimitReached?: number;
 	meta?: OutputMeta;
+	/**
+	 * Fact bodies for `GlobTool#modelContentProjection` (the typed model-content projection escape
+	 * hatch, shared with `read`/`grep` via `renderNoticeTrail` in
+	 * `presentation/projections.ts`) — see `ToolResultBuilder#truncationFact`/
+	 * `#resultLimitFact`'s doc comments. `meta.truncation`/`meta.limits.resultLimit`
+	 * above stay populated exactly as before for every consumer that already
+	 * reads them (ACP mapper, `spillLargeResultToArtifact`, the TUI renderer's
+	 * own `truncationReasons`); this array is what `#modelContentProjection`
+	 * uses instead of `stripOutputNotice`/`appendOutputNotice`'s string
+	 * round-trip.
+	 */
+	presentationFacts?: readonly ToolFactBody[];
 	// Fields for TUI rendering
 	scopePath?: string;
 	fileCount?: number;
@@ -153,6 +167,15 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	readonly #nativeGlob: typeof natives.glob;
 	readonly #stat: typeof fs.promises.stat;
 	readonly #timeoutMs: number;
+
+	/**
+	 * Glob's typed model projection for its head/tail truncation notice and
+	 * count-based `resultLimit` cap (the typed model-content projection escape hatch, shared with
+	 * `read`/`grep` via `renderNoticeTrail` in `presentation/projections.ts`).
+	 * Every other call returns `undefined` and falls through to the default
+	 * `appendOutputNotice`.
+	 */
+	readonly modelContentProjection = (facts: readonly ToolFactBody[]): string | undefined => renderNoticeTrail(facts);
 
 	constructor(
 		private readonly session: ToolSession,
@@ -366,9 +389,9 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 
 				const resultBuilder = toolResult(details)
 					.text(truncation.content)
-					.limits({ resultLimit: limitMeta.resultLimit?.reached });
+					.resultLimitFact(limitMeta.resultLimit?.reached);
 				if (truncation.truncated) {
-					resultBuilder.truncation(truncation, { direction: "head" });
+					resultBuilder.truncationFact(truncation, { direction: "head" });
 				}
 
 				return resultBuilder.done();

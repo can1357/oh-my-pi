@@ -9,6 +9,7 @@ import type {
 	AgentToolUpdateCallback,
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
+import type { ToolFactBody } from "@oh-my-pi/pi-agent-core/presentation";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import {
 	BINARY_SNIFF_BYTES,
@@ -32,6 +33,7 @@ import { InternalUrlRouter, resolveLocalUrlToFile, resolveLocalUrlToPath } from 
 import { type ResolvedArtifactFile, resolveArtifactFile } from "../internal-urls/artifact-protocol";
 import { parseInternalUrl } from "../internal-urls/parse";
 import type { InternalUrl } from "../internal-urls/types";
+import { renderNoticeTrail } from "../presentation/projections";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 import {
@@ -550,6 +552,18 @@ export interface ReadToolDetails {
 	method?: string;
 	notes?: string[];
 	meta?: OutputMeta;
+	/**
+	 * Phase-3 escape hatch: fact **bodies** declared only by the
+	 * head/tail truncation call sites migrated onto
+	 * `ToolResultBuilder#truncationFact`. `meta.truncation`/
+	 * `meta.limits.columnTruncated` above stay populated exactly as before
+	 * for every consumer that already reads them (ACP mapper,
+	 * `spillLargeResultToArtifact`, `formatStyledTruncationWarning`); this
+	 * array is what `#modelContentProjection` and this file's own TUI render
+	 * function use instead of `stripOutputNotice`/`appendOutputNotice`'s
+	 * string round-trip for those specific results.
+	 */
+	presentationFacts?: readonly ToolFactBody[];
 	/** Full on-disk byte size recorded before applying a file range. */
 	fileSize?: number;
 	/** Full source line count when the read reached EOF and the count is exact. */
@@ -630,6 +644,21 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		return this.session.settings.get("memory.backend") === "off" ? readSchemaWithoutMemory : readSchema;
 	}
 	readonly strict = true;
+
+	/**
+	 * Phase-3 escape hatch ("a typed custom projection registered
+	 * on the tool contract"). `wrapToolWithMetaNotice`'s `wrappedExecute`
+	 * calls this with only the fact bodies read declared on
+	 * `details.presentationFacts` (never the raw result), and only ever uses
+	 * the returned string as a trail to append via `appendTrailingText` —
+	 * never as a content replacement. Read has a bespoke trail for a
+	 * non-`middle` truncation fact and/or a `limit`/`"result_count"` fact (all
+	 * 6 of read's former `.truncation()`/`.limits({resultLimit})` body-baking
+	 * sites are now migrated onto `ToolResultBuilder#truncationFact`/
+	 * `#resultLimitFact`); every other call returns `undefined` and falls
+	 * through to the default `appendOutputNotice`.
+	 */
+	readonly modelContentProjection = (facts: readonly ToolFactBody[]): string | undefined => renderNoticeTrail(facts);
 
 	readonly #autoResizeImages: boolean;
 	readonly #defaultLimit: number;
@@ -1889,9 +1918,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			resultBuilder.sourcePath(sourcePath);
 		}
 		if (truncationInfo) {
-			resultBuilder.truncation(truncationInfo.result, truncationInfo.options);
-		}
-		if (columnTruncated > 0) {
+			resultBuilder.truncationFact(
+				truncationInfo.result,
+				truncationInfo.options,
+				columnTruncated > 0 ? columnTruncated : undefined,
+			);
+		} else if (columnTruncated > 0) {
 			resultBuilder.limits({ columnMax: columnTruncated });
 		}
 		return resultBuilder.done();
@@ -2161,7 +2193,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			.text(outputText)
 			.sourcePath(artifact.path)
 			.sourceInternal(url.href);
-		if (truncationInfo) resultBuilder.truncation(truncationInfo.result, truncationInfo.options);
+		if (truncationInfo) resultBuilder.truncationFact(truncationInfo.result, truncationInfo.options);
 		return resultBuilder.done();
 	}
 
@@ -2366,7 +2398,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}
 			resultBuilder.text(text);
 			if (tree.truncated) {
-				resultBuilder.limits({ resultLimit: 1 });
+				resultBuilder.resultLimitFact(1);
 			}
 			return resultBuilder.done();
 		}
@@ -2374,10 +2406,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const truncation = truncateHead(output, { maxLines: Number.MAX_SAFE_INTEGER });
 		const resultBuilder = toolResult(details).text(truncation.content).sourcePath(tree.rootPath);
 		if (tree.truncated) {
-			resultBuilder.limits({ resultLimit: 1 });
+			resultBuilder.resultLimitFact(1);
 		}
 		if (truncation.truncated) {
-			resultBuilder.truncation(truncation, { direction: "head" });
+			resultBuilder.truncationFact(truncation, { direction: "head" });
 			details.truncation = truncation;
 		}
 

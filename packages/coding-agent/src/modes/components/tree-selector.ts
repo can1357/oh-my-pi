@@ -386,7 +386,9 @@ class TreeList implements Component {
 				entry.type === "session_init" ||
 				entry.type === "ttsr_injection" ||
 				entry.type === "mode_change" ||
-				entry.type === "reset_boundary";
+				entry.type === "reset_boundary" ||
+				entry.type === "tool_execution_started" ||
+				entry.type === "tool_execution_settled";
 
 			switch (this.#filterMode) {
 				case "user-only":

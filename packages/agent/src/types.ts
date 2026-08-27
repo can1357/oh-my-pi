@@ -23,6 +23,17 @@ import type {
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import type { AppendOnlyContextManager } from "./append-only-context";
+import type {
+	ExecutionToolArguments,
+	JsonValue,
+	PublicToolArguments,
+	ToolCallPresentation,
+	ToolFactBody,
+	ToolOutcome,
+	ToolPresentationEvent,
+	ToolProgressProtocol,
+	ToolProgressProtocolKind,
+} from "./presentation";
 import type { AgentRunCoverage, AgentRunSummary } from "./run-collector";
 import type { AgentTelemetryConfig } from "./telemetry";
 
@@ -518,15 +529,26 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Called after a tool finishes executing, before `tool_execution_end` and the
 	 * tool-result message are emitted.
 	 *
-	 * Return an `AfterToolCallResult` to override individual fields of the executed
-	 * tool result. Omitted fields keep their original values; there is no deep merge.
+	 * Return an {@link AfterToolCallEffect} to apply a structured effect to the
+	 * executed tool result; `undefined` (or `{kind: "unchanged"}`) leaves it as
+	 * is. The loop applies the effect through `coerceToolResult`, the same
+	 * untrusted-boundary normalizer the direct-execute path uses, before
+	 * freezing/persisting the final record.
 	 *
 	 * Throwing surfaces as a tool-error result and does not abort the rest of the batch.
 	 */
 	afterToolCall?: (
 		context: AfterToolCallContext,
 		signal?: AbortSignal,
-	) => Promise<AfterToolCallResult | undefined> | AfterToolCallResult | undefined;
+	) => Promise<AfterToolCallEffect | undefined> | AfterToolCallEffect | undefined;
+	/**
+	 * Wait for the active representation to deliver a typed call's settled frame.
+	 *
+	 * ACP installs this so manager follow-ups cannot overtake the literal terminal
+	 * settlement on its outbound FIFO. Other representations leave it undefined,
+	 * preserving the loop-only settlement boundary.
+	 */
+	afterPresentationSettlement?: (toolCallId: string) => Promise<void> | void;
 	/**
 	 * Opt-in OpenTelemetry instrumentation. Passing `{}` enables the loop's
 	 * GenAI-semantic-convention spans (`invoke_agent`, `chat`, `execute_tool`)
@@ -558,11 +580,29 @@ export interface ToolCallContext {
 	 * always safe (the message injects at the next batch boundary).
 	 */
 	steeringSignal?: AbortSignal;
+	/**
+	 * The progress protocol the dispatcher selected for **this** call.
+	 *
+	 * Exactly one is offered per call, as a type. On the `presentation_events` arm
+	 * the tool's `onUpdate` parameter is `undefined`, so a migrated route cannot
+	 * also publish a cumulative legacy snapshot; on the `legacy_snapshot` arm
+	 * `update` is the *same function object* the tool receives as `onUpdate`, so
+	 * there is one callback surfaced two ways rather than two channels.
+	 */
+	progress?: ToolProgressProtocol<AgentToolResult<unknown>>;
 }
 
 /** A single tool-call content block emitted by an assistant message. */
 export type AgentToolCall = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
 
+/**
+ * A JSON value: the only kind of value that can cross the hook boundary as
+ * revised tool arguments. Tool arguments are model-authored JSON, and the
+ * execution copy is a deep clone that must succeed; a hook that returns a
+ * non-JSON value (function, Date, Symbol, class instance) is a contract
+ * violation rejected at the boundary, not a `DataCloneError` caught later.
+ */
+export type { JsonValue } from "./presentation/json";
 /**
  * Result returned from `beforeToolCall`.
  *
@@ -574,31 +614,43 @@ export type AgentToolCall = Extract<AssistantMessage["content"][number], { type:
  * written back to the tool-call block on the assistant message, and seen by
  * history, scheduling, execution events, and `tool.execute` alike. It is
  * ignored when `block` is true.
+ *
+ * `args` is typed as `Record<string, JsonValue>`: hook-revised arguments are
+ * JSON values, validated at this untyped boundary. A non-JSON value is
+ * rejected here, before the deep clone that produces the execution copy.
  */
 export interface BeforeToolCallResult {
 	block?: boolean;
 	reason?: string;
-	args?: Record<string, unknown>;
+	args?: Record<string, JsonValue>;
 }
 
 /**
- * Partial override returned from `afterToolCall`.
+ * Structured effect returned from `afterToolCall`.
  *
- * Merge semantics are field-by-field; omitted fields keep the executed values.
- * No deep merge is performed.
+ * Replaces the old field-by-field `AfterToolCallResult` patch, which let a
+ * hook silently rewrite already-produced presentation state (including
+ * `isError`/`useless`, independently of the executed result's own
+ * `outcome`). Each arm names what it does instead of leaving the loop to
+ * guess from which fields happened to be set:
+ * - `"transform_external_result"` replaces the entire result with an
+ *   untrusted `raw` value, routed back through `coerceToolResult` exactly
+ *   like a tool's own return value — the boundary that already proves
+ *   hostile/malformed values must be normalized, never trusted verbatim.
+ * - `"add_guidance_fact"` prepends one `model_guidance` fact's rendered text
+ *   ahead of the executed result's own content, and — when a presentation
+ *   producer is active and still open — declares the fact on that stream too,
+ *   so it rides live ACP, the retained record, the journal, and receipts
+ *   (TTSR's only in-tree use — `ttsr-coordinator.ts`'s `#afterToolCall`).
+ *   Placement is always prepend, matching what TTSR already does today; this
+ *   is not configurable per call. The stream mints the fact's `FactId`
+ *   (`${streamId}:fN`) — this effect carries only the body.
+ * - `"unchanged"` (or returning `undefined`) leaves the executed result as is.
  */
-export interface AfterToolCallResult {
-	/** If provided, replaces the tool result content array in full. */
-	content?: (TextContent | ImageContent)[];
-	/** If provided, replaces the tool result details payload in full. */
-	details?: unknown;
-	/** If provided, replaces the provider-native result metadata in full. */
-	providerMetadata?: ToolResultProviderMetadata;
-	/** If provided, replaces the error flag carried with the tool result. */
-	isError?: boolean;
-	/** If provided, replaces the contextually-useless flag carried with the tool result. */
-	useless?: boolean;
-}
+export type AfterToolCallEffect =
+	| { kind: "transform_external_result"; raw: unknown }
+	| { kind: "add_guidance_fact"; fact: Extract<ToolFactBody, { kind: "model_guidance" }> }
+	| { kind: "unchanged" };
 
 /** Context passed to `beforeToolCall`. */
 export interface BeforeToolCallContext {
@@ -675,7 +727,7 @@ export interface AgentState {
 	error?: string;
 }
 
-export interface AgentToolResult<T = any, _TInput = unknown> {
+export interface AgentToolResult<T = unknown> {
 	// Content blocks supporting text and images
 	content: (TextContent | ImageContent)[];
 	// Details to be displayed in a UI or logged
@@ -687,10 +739,29 @@ export interface AgentToolResult<T = any, _TInput = unknown> {
 	providerMetadata?: ToolResultProviderMetadata;
 	/** Marks the result as contextually useless: safe for compaction to elide once consumed (e.g. zero matches, wait timeout). Ignored when isError is set. */
 	useless?: boolean;
+	/**
+	 * The authoritative outcome of this call. Producers migrated onto
+	 * the typed presentation protocol set this directly; `deriveToolOutcome`
+	 * (`agent-loop.ts`) reads it when present instead of deriving one. Optional
+	 * and terminal-only: an unmigrated producer omits it (and keeps falling
+	 * through `deriveToolOutcome`'s existing synthetic/isError-derived branches
+	 * unchanged, so its model goldens stay byte-identical), and a streamed
+	 * `partialResult` (`AgentToolUpdateCallback`) never carries one — a partial
+	 * has not terminated.
+	 *
+	 * Optional beside the retained `isError?` is the intended interim design,
+	 * not a gap: external/extension producers cannot author an `outcome`, so
+	 * the required-field end state waits for
+	 * derive-and-require at the `coerceToolResult` boundary. Until then,
+	 * `deriveToolOutcome`'s precedence (explicit `outcome` first, then the
+	 * synthetic/isError-derived branches) is the single authority reconciling
+	 * the two fields; nothing else may arbitrate between them.
+	 */
+	outcome?: ToolOutcome;
 }
 
 // Callback for streaming tool execution updates
-export type AgentToolUpdateCallback<T = any, TInput = unknown> = (partialResult: AgentToolResult<T, TInput>) => void;
+export type AgentToolUpdateCallback<T = unknown> = (partialResult: AgentToolResult<T>) => void;
 
 /** Options passed to renderResult */
 export interface RenderResultOptions {
@@ -746,7 +817,19 @@ export type ToolApproval = ToolApprovalDecision | ((args: unknown) => ToolApprov
  * Apps can extend via declaration merging.
  */
 export interface AgentToolContext {
-	// Empty by default - apps extend via declaration merging
+	/**
+	 * The dispatcher's per-call context, including the selected
+	 * {@link ToolProgressProtocol}.
+	 *
+	 * Core-owned rather than an app convention, because the dispatcher has to be able
+	 * to *verify* that the context a host built actually carries the producer it
+	 * created. A host that drops this (there are legitimately such hosts — a
+	 * standalone `Agent` supplies no `getToolContext` at all) makes the presentation
+	 * protocol undeliverable, and the loop must fall back to legacy snapshots rather
+	 * than run a call whose output has no channel. Apps still extend the rest of this
+	 * interface via declaration merging.
+	 */
+	toolCall?: ToolCallContext;
 }
 
 export type AgentToolExecFn<TParameters extends TSchema = TSchema, TDetails = any, TTheme = unknown> = (
@@ -754,9 +837,66 @@ export type AgentToolExecFn<TParameters extends TSchema = TSchema, TDetails = an
 	toolCallId: string,
 	params: Static<TParameters>,
 	signal?: AbortSignal,
-	onUpdate?: AgentToolUpdateCallback<TDetails, TParameters>,
+	onUpdate?: AgentToolUpdateCallback<TDetails>,
 	context?: AgentToolContext,
-) => Promise<AgentToolResult<TDetails, TParameters>>;
+) => Promise<AgentToolResult<TDetails>>;
+
+/**
+ * A registered tool's presentation adapter.
+ *
+ * Its presence is what makes a tool *eligible* for the presentation protocol;
+ * {@link ToolPresentationAdapter.selects} decides per call, because a single tool
+ * can serve several routes (bash: local executor, client-bridge terminal, PTY,
+ * async/background) and only some of them are migrated. An unmigrated route stays
+ * explicitly on `legacy_snapshot`.
+ *
+ * The adapter's `outcome` hook used to exist because the dispatcher holds the
+ * real tool instance when it invokes `execute`, so the input/detail generics
+ * were still known there -- the only place a typed outcome could be derived
+ * without the ACP mapper switching on `toolName` to guess a detail shape.
+ * Phase 5 moved {@link ToolOutcome} onto {@link AgentToolResult} itself
+ * (`outcome?`), so producers return it directly and the hook is gone; the
+ * adapter now only selects the presentation route and builds the `started`
+ * descriptor.
+ */
+export interface SelectedToolPresentationRoute<TRouting> {
+	/** The execution route selected from transformed, non-public arguments. */
+	readonly kind: "presentation_events";
+	/**
+	 * A tool-owned, display-safe capability derived while selecting the execution
+	 * route. It is deliberately not the transformed argument object: descriptors
+	 * remain unable to inspect a host's deobfuscated values.
+	 */
+	readonly routing: TRouting;
+}
+
+export interface ToolPresentationAdapter<TParameters extends TSchema = TSchema, TDetails = any, TRouting = unknown> {
+	/**
+	 * Whether *this* call runs on the presentation protocol. `false` keeps it legacy.
+	 *
+	 * Takes {@link ExecutionToolArguments}: a transform can flip `pty`/`async`/
+	 * `timeout`, and route selection must judge the arguments the tool will
+	 * actually execute with, not what the model wrote.
+	 */
+	selects: (
+		this: AgentTool<TParameters, TDetails>,
+		params: ExecutionToolArguments<Static<TParameters>>,
+		context?: AgentToolContext,
+	) => boolean | SelectedToolPresentationRoute<TRouting>;
+	/**
+	 * The call descriptor the loop emits as the `started` event.
+	 *
+	 * Takes {@link PublicToolArguments}: `title`, `sourceEcho`, and `rawInput` all
+	 * flow from this descriptor onto a client-visible surface, so it must never see
+	 * a host's post-transform (e.g. deobfuscated) arguments.
+	 */
+	start: (
+		this: AgentTool<TParameters, TDetails>,
+		toolCallId: string,
+		params: PublicToolArguments<Static<TParameters>>,
+		routing?: TRouting,
+	) => ToolCallPresentation;
+}
 
 // AgentTool extends Tool but adds the execute function
 export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any, TTheme = unknown>
@@ -839,15 +979,21 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	/** The main execution callback for this tool. */
 	execute: AgentToolExecFn<TParameters, TDetails, TTheme>;
 
+	/**
+	 * Opt-in to the typed presentation protocol. See {@link ToolPresentationAdapter}.
+	 *
+	 * Note the adapter carries no second `execute`: the permission gate and the
+	 * output-meta wrapper both proxy `execute`, and a parallel entry point would
+	 * bypass them. The producer handle reaches the tool through
+	 * `ctx.toolCall.progress` instead.
+	 */
+	presentation?: ToolPresentationAdapter<TParameters, TDetails>;
+
 	/** Optional custom rendering for tool call display (returns UI component) */
 	renderCall?: (args: Static<TParameters>, options: RenderResultOptions, theme: TTheme) => unknown;
 
 	/** Optional custom rendering for tool result display (returns UI component) */
-	renderResult?: (
-		result: AgentToolResult<TDetails, TParameters>,
-		options: RenderResultOptions,
-		theme: TTheme,
-	) => unknown;
+	renderResult?: (result: AgentToolResult<TDetails>, options: RenderResultOptions, theme: TTheme) => unknown;
 }
 
 // AgentContext is like Context but uses AgentTool
@@ -880,6 +1026,37 @@ export type AgentEvent =
 	| { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
 	| { type: "message_end"; message: AgentMessage }
 	// Tool execution lifecycle
-	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any; intent?: string }
+	| {
+			type: "tool_execution_start";
+			toolCallId: string;
+			toolName: string;
+			args: any;
+			intent?: string;
+			/**
+			 * Which progress protocol this call runs on. Omitted means
+			 * `legacy_snapshot`: every emitter other than the dispatcher's own
+			 * `runTool` is structurally incapable of creating a producer handle, so
+			 * absence is a fact about the emitter rather than a default nobody chose.
+			 * A consumer that renders presentation events reads this to know it must
+			 * ignore the legacy start/end pair for the same call.
+			 */
+			progressProtocol?: ToolProgressProtocolKind;
+	  }
 	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
-	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError?: boolean };
+	| {
+			type: "tool_execution_end";
+			toolCallId: string;
+			toolName: string;
+			result: any;
+			isError?: boolean;
+			progressProtocol?: ToolProgressProtocolKind;
+	  }
+	/**
+	 * One typed presentation event for one tool call.
+	 *
+	 * Additive and fully typed on purpose: routing new structure back through
+	 * `details: any` would recreate the drift class this work exists to delete.
+	 * `started`/`settled` are emitted by the agent loop alone; everything between
+	 * comes from the call's scoped producer handle.
+	 */
+	| { type: "tool_presentation"; toolCallId: string; toolName: string; event: ToolPresentationEvent };

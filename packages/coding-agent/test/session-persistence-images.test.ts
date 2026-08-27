@@ -1,14 +1,30 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { ToolPresentationRecord } from "@oh-my-pi/pi-agent-core/presentation";
+import {
+	byteLengthOf,
+	byteOffset,
+	PRESENTATION_VERSION,
+	sequence,
+	streamId,
+	toolExecutionId,
+} from "@oh-my-pi/pi-agent-core/presentation";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import { MODEL_PROJECTION_VERSION, TOOL_JOURNAL_RECORD_VERSION } from "@oh-my-pi/pi-coding-agent/presentation/journal";
+import {
+	LIVE_RECORD_DISPLAY_BUDGET_BYTES,
+	LIVE_RECORD_HEAD_WINDOW_BYTES,
+	LiveToolPresentationRecord,
+} from "@oh-my-pi/pi-coding-agent/presentation/live-record";
 import { BlobStore, isBlobRef } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import type {
 	CompactionEntry,
 	FileEntry,
 	SessionMessageEntry,
+	ToolExecutionSettledEntry,
 } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { resolveBlobRefsInEntries } from "@oh-my-pi/pi-coding-agent/session/session-loader";
-import { prepareEntryForPersistence } from "@oh-my-pi/pi-coding-agent/session/session-persistence";
+import { MAX_PERSIST_CHARS, prepareEntryForPersistence } from "@oh-my-pi/pi-coding-agent/session/session-persistence";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { Archive } from "@oh-my-pi/snapcompact";
 import * as snapcompact from "@oh-my-pi/snapcompact";
@@ -256,5 +272,86 @@ describe("snapcompact frame persistence", () => {
 			maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET,
 		});
 		expect(blocks).toEqual([{ type: "text", text: sourceText }]);
+	});
+});
+
+function settledEntry(presentation: ToolPresentationRecord): ToolExecutionSettledEntry {
+	return {
+		type: "tool_execution_settled",
+		id: "settled-1",
+		parentId: null,
+		timestamp: new Date(0).toISOString(),
+		recordVersion: TOOL_JOURNAL_RECORD_VERSION,
+		executionId: toolExecutionId("exec-1"),
+		outcome: { kind: "succeeded" },
+		presentation,
+		modelProjection: { version: MODEL_PROJECTION_VERSION, content: [] },
+	};
+}
+
+describe("tool journal presentation persistence", () => {
+	it("externalizes oversized presentation image attachments and resolves them back intact", async () => {
+		using tempDir = TempDir.createSync("@presentation-attachment-persistence-");
+		const blobStore = new BlobStore(tempDir.path());
+		// 400k bytes -> ~533k base64 chars: past the generic persist cap that
+		// would otherwise append the truncation notice to the base64 and make
+		// session/load replay a corrupted image attachment.
+		const attachmentData = Buffer.alloc(400_000, 7).toString("base64");
+		expect(isStrictBase64(attachmentData)).toBe(true);
+		expect(attachmentData.length).toBeGreaterThan(MAX_PERSIST_CHARS);
+
+		const entry = settledEntry({
+			version: PRESENTATION_VERSION,
+			facts: [],
+			attachments: [{ kind: "image", data: attachmentData, mimeType: "image/png" }],
+		});
+
+		const persisted = prepareEntryForPersistence(entry, blobStore) as ToolExecutionSettledEntry;
+		const persistedAttachment = persisted.presentation.attachments[0];
+		if (persistedAttachment?.kind !== "image") throw new Error("expected a persisted image attachment");
+		expect(isBlobRef(persistedAttachment.data)).toBe(true);
+		expect(persistedAttachment.data).not.toContain("[Session persistence truncated large content]");
+
+		const loaded: FileEntry[] = [structuredClone(persisted)];
+		await resolveBlobRefsInEntries(loaded, blobStore);
+		const resolved = (loaded[0] as ToolExecutionSettledEntry).presentation.attachments[0];
+		if (resolved?.kind !== "image") throw new Error("expected a resolved image attachment");
+		expect(resolved.data).toBe(attachmentData);
+		expect(isStrictBase64(resolved.data)).toBe(true);
+	});
+
+	it("persists a maximally-full retained stream window verbatim", () => {
+		using tempDir = TempDir.createSync("@presentation-stream-persistence-");
+		const blobStore = new BlobStore(tempDir.path());
+		// The retention budgets must never exceed the persistence string cap: a
+		// string's UTF-16 length never exceeds its UTF-8 byte length, so a
+		// window within the cap can never be notice-truncated on save. A budget
+		// above the cap silently desyncs the persisted `stream.text` from its
+		// `startByte`/`endByte` accounting and forces degraded hydration.
+		expect(LIVE_RECORD_HEAD_WINDOW_BYTES).toBeLessThanOrEqual(MAX_PERSIST_CHARS);
+		expect(LIVE_RECORD_DISPLAY_BUDGET_BYTES).toBeLessThanOrEqual(MAX_PERSIST_CHARS);
+
+		const acc = new LiveToolPresentationRecord();
+		acc.fold({
+			type: "terminal_append",
+			streamId: streamId("bash-1"),
+			sequence: sequence(0),
+			startByte: byteOffset(0),
+			data: "x".repeat(LIVE_RECORD_HEAD_WINDOW_BYTES + 100_000),
+		});
+		const record = acc.finish();
+		if (record.stream === undefined) throw new Error("expected a retained stream window");
+		expect(byteLengthOf(record.stream.text)).toBe(LIVE_RECORD_HEAD_WINDOW_BYTES);
+
+		const persisted = prepareEntryForPersistence(settledEntry(record), blobStore) as ToolExecutionSettledEntry;
+		// Structural sharing: nothing in a maximally-full record needs
+		// truncation, so persistence returns the retained record itself —
+		// the persisted window is byte-identical, not merely similar.
+		expect(persisted.presentation).toBe(record);
+
+		// The truncation fact's retainedBytes matches what actually survived to disk.
+		const truncation = record.facts.find(fact => fact.kind === "truncation");
+		if (truncation?.kind !== "truncation") throw new Error("expected a head-window truncation fact");
+		expect(truncation.meta.retainedBytes).toBe(byteLengthOf(persisted.presentation.stream?.text ?? ""));
 	});
 });

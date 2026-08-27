@@ -1,0 +1,7 @@
+--- text ---
+hi
+
+
+Wall time: 0.01 seconds
+
+Command exited with code 3

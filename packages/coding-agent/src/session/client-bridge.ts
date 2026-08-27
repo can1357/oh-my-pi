@@ -63,6 +63,12 @@ export interface ClientBridgeTerminalHandle {
 }
 
 export interface ClientBridgeCreateTerminalParams {
+	/**
+	 * Internal lifecycle key for a client-owned terminal. It never crosses the ACP
+	 * `terminal/create` request; the ACP bridge uses it to defer release until the
+	 * matching typed settlement batch has reached the writer.
+	 */
+	toolCallId?: string;
 	command: string;
 	args?: string[];
 	env?: Array<{ name: string; value: string }>;
@@ -77,6 +83,12 @@ export interface ClientBridge {
 	readTextFile?(params: { path: string; line?: number; limit?: number }): Promise<string>;
 	writeTextFile?(params: { path: string; content: string }): Promise<void>;
 	createTerminal?(params: ClientBridgeCreateTerminalParams): Promise<ClientBridgeTerminalHandle>;
+	/**
+	 * Releases a terminal registered by {@link ClientBridgeCreateTerminalParams.toolCallId}
+	 * after the matching typed settlement has been delivered. ACP supplies this;
+	 * non-ACP bridges keep the tool-owned direct release path.
+	 */
+	releaseTerminalAfterPresentationSettlement?(toolCallId: string): Promise<void>;
 	requestPermission?(
 		toolCall: ClientBridgePermissionToolCall,
 		options: ClientBridgePermissionOption[],

@@ -11,8 +11,8 @@ import type { FileDiagnosticsResult } from "../lsp";
 import { outputMeta } from "../tools/output-meta";
 import { generateDiffString } from "./diff";
 import type { Operation } from "./modes/patch";
-import type { EditToolDetails, EditToolPerFileResult } from "./renderer";
 import { pruneOversizedEditSnapshots } from "./snapshot-details";
+import type { EditToolDetails, EditToolPerFileResult } from "./types";
 
 /** Separates completed edit sections in model-visible tool output. */
 export const EDIT_RESULT_SEPARATOR = "\n\n";
@@ -66,6 +66,8 @@ export interface AggregateEditDetailsOptions {
 	oldText?: string;
 	newText?: string;
 	snapshotsPruned?: boolean;
+	/** Files never attempted because an earlier file in the same multi-file edit failed first. */
+	unattemptedPaths?: readonly string[];
 }
 
 /** Joins model-visible edit sections with hashline's blank-line separator. */
@@ -124,6 +126,9 @@ export function createAggregateEditDetails(options: AggregateEditDetailsOptions)
 		firstChangedLine:
 			options.firstChangedLine ??
 			perFileResults?.find(entry => entry.firstChangedLine !== undefined)?.firstChangedLine,
+		...(options.unattemptedPaths && options.unattemptedPaths.length > 0
+			? { unattemptedPaths: [...options.unattemptedPaths] }
+			: {}),
 		...(perFileResults ? { perFileResults } : {}),
 		...(options.path ? { path: options.path } : {}),
 		...("oldText" in options ? { oldText: options.oldText } : {}),
@@ -154,7 +159,7 @@ export function createAggregateEditToolResult(
 	};
 }
 
-function formatEditResultText(options: EditResultOptions): string {
+export function formatEditResultText(options: EditResultOptions): string {
 	if (options.text !== undefined) return options.text;
 	if (options.op === "delete") return `Deleted ${options.displayPath}`;
 

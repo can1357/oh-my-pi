@@ -71,7 +71,7 @@ interface CursorExecBridgeOptions {
 	 *
 	 * `PiEditExecArgs` is that mode's schema verbatim, and the session's own
 	 * `edit` may be in any mode — `hashline` by default — whose schema rejects
-	 * `old_string`/`new_string` outright. {@link tools} therefore cannot be trusted
+	 * `old_text`/`new_text` outright. {@link tools} therefore cannot be trusted
 	 * for this one frame: a session that starts on another provider keeps its
 	 * configured instance in the map (only Cursor sessions move `edit` out), and
 	 * switching to Cursor later does not rebuild the roster.
@@ -653,20 +653,23 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 
 	/**
 	 * `PiEditExecArgs` carries a path plus `oldText`/`newText` replacement
-	 * pairs. A single replacement maps onto the model-facing single-edit
-	 * `replace` schema verbatim; a multi-replacement frame still runs as ONE
-	 * tool lifecycle (one start/end event pair, one aggregate diff), so it is
-	 * sent in the tool's internal `edits` batch form (`ReplaceBatchParams`),
-	 * which only this bridge produces.
+	 * pairs. Every frame runs as ONE tool lifecycle (one start/end event pair,
+	 * one aggregate diff), so it is sent in the `replace` schema's `edits`
+	 * batch form (`ReplaceParams`), which only this bridge produces.
 	 *
 	 * The replace-mode instance is requested explicitly rather than resolved
 	 * from {@link CursorExecBridgeOptions.tools}: the registry's `edit` is in
 	 * the session's configured mode, whose schema rejects these arguments.
 	 */
 	async piEdit(call: Parameters<NonNullable<ICursorExecHandlers["piEdit"]>>[0]) {
-		const edits = call.args.edits.map(edit => ({ old_string: edit.oldText, new_string: edit.newText }));
-		const args = edits.length === 1 ? { path: call.args.path, ...edits[0] } : { path: call.args.path, edits };
-		return await executeTool(this.options, "edit", call.toolCallId, args, this.options.getEditReplaceTool?.());
+		const edits = call.args.edits.map(edit => ({ old_text: edit.oldText, new_text: edit.newText }));
+		return await executeTool(
+			this.options,
+			"edit",
+			call.toolCallId,
+			{ path: call.args.path, edits },
+			this.options.getEditReplaceTool?.(),
+		);
 	}
 
 	async piWrite(call: Parameters<NonNullable<ICursorExecHandlers["piWrite"]>>[0]) {

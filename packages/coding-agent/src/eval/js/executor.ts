@@ -1,7 +1,9 @@
 import { DEFAULT_MAX_BYTES, OutputSink } from "../../session/streaming-output";
 import type { ToolSession } from "../../tools";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../../tools/output-meta";
+import type { ExecutorTermination } from "../backend";
 import { isEvalTimeoutControlEvent } from "../bridge-timeout";
+import { cancellationTermination } from "../executor-base";
 import { executeInVmContext, type JsDisplayOutput } from "./context-manager";
 import type { JsStatusEvent } from "./shared/types";
 
@@ -33,7 +35,7 @@ export interface JsExecutorOptions {
 export interface JsResult {
 	output: string;
 	exitCode: number | undefined;
-	cancelled: boolean;
+	termination: ExecutorTermination | undefined;
 	truncated: boolean;
 	artifactId?: string;
 	totalLines: number;
@@ -128,7 +130,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 		return {
 			output: summary.output,
 			exitCode: 0,
-			cancelled: false,
+			termination: undefined,
 			truncated: summary.truncated,
 			artifactId: summary.artifactId,
 			totalLines: summary.totalLines,
@@ -147,7 +149,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			return {
 				output: summary.output,
 				exitCode: undefined,
-				cancelled: true,
+				termination: cancellationTermination(timedOut, legacyTimeoutMs ?? options.idleTimeoutMs),
 				truncated: summary.truncated,
 				artifactId: summary.artifactId,
 				totalLines: summary.totalLines,
@@ -163,7 +165,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 		return {
 			output: summary.output,
 			exitCode: 1,
-			cancelled: false,
+			termination: undefined,
 			truncated: summary.truncated,
 			artifactId: summary.artifactId,
 			totalLines: summary.totalLines,

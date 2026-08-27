@@ -3,6 +3,7 @@
  *
  * Uses brush-core via native bindings for shell execution.
  */
+import type { ToolPresentationProducer } from "@oh-my-pi/pi-agent-core/presentation";
 import { ExponentialYield } from "@oh-my-pi/pi-agent-core/utils/yield";
 import { type MinimizerOptions, PtySession, Shell, type ShellRunResult } from "@oh-my-pi/pi-natives";
 import { $env } from "@oh-my-pi/pi-utils/env";
@@ -20,6 +21,16 @@ export interface BashExecutorOptions {
 	timeout?: number;
 	onChunk?: (chunk: string) => void;
 	chunkThrottleMs?: number;
+	/**
+	 * Presentation producer for a call on the `presentation_events` protocol. The
+	 * sink appends raw pre-cap chunks to it and registers its throttle flush with
+	 * its `freeze()` barrier. See {@link OutputSinkOptions.presentation}.
+	 */
+	presentation?: ToolPresentationProducer;
+	/** Re-check whether a managed caller still owns its presentation stream before attaching the sink. */
+	presentationActive?: () => boolean;
+	/** Receives the live sink once it exists so a caller can detach presentation safely. */
+	onOutputSink?: (sink: OutputSink) => void;
 	signal?: AbortSignal;
 	/** Session key suffix to isolate shell sessions per agent */
 	sessionKey?: string;
@@ -66,6 +77,16 @@ export interface BashResult {
 	outputBytes: number;
 	artifactId?: string;
 	workingDir?: string;
+	/**
+	 * `OutputSummary.annotation` — the bracketed `[Command timed out after N
+	 * seconds]`/`[Command cancelled]` line `sink.dump(notice)` prefixed onto
+	 * `output` without ever streaming it through `onChunk`. Arrives here for
+	 * free via the `...(await sink.dump(...))` spreads below; `bash.ts` passes
+	 * it explicitly to its fact publisher as a `stop_annotation` so a
+	 * terminal-rendering client learns why the command stopped without
+	 * re-parsing rendered text.
+	 */
+	annotation?: string;
 }
 
 /** POSIX-safe variable name — gates which direnv unsets we inject into the
@@ -476,14 +497,21 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			: preflight.command;
 
 	// Create output sink for truncation and artifact handling
+	const presentation =
+		options?.presentation !== undefined && (options.presentationActive?.() ?? true)
+			? options.presentation
+			: undefined;
+	const streamsLive = Boolean(options?.onChunk) || presentation !== undefined;
 	const sink = new OutputSink({
 		onChunk: usePty ? undefined : options?.onChunk,
+		...(presentation === undefined ? {} : { presentation }),
 		artifactPath: options?.artifactPath,
 		artifactId: options?.artifactId,
 		headBytes: resolveOutputSinkHeadBytes(settings),
 		maxColumns: resolveOutputMaxColumns(settings),
-		chunkThrottleMs: !usePty && options?.onChunk ? (options.chunkThrottleMs ?? 50) : 0,
+		chunkThrottleMs: !usePty && streamsLive ? (options?.chunkThrottleMs ?? 50) : 0,
 	});
+	options?.onOutputSink?.(sink);
 
 	// sink.push() is synchronous — buffer management, counters, and onChunk
 	// all run inline. File writes (artifact path) are handled asynchronously

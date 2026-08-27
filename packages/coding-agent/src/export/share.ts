@@ -20,13 +20,20 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage, AgentState } from "@oh-my-pi/pi-agent-core";
+import type { RetainedDisplay, ToolAttachment, ToolFact } from "@oh-my-pi/pi-agent-core/presentation";
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { $which, logger } from "@oh-my-pi/pi-utils";
 import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { $ } from "bun";
 import { obfuscateToolArguments } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
-import { type SessionEntry, type SessionHeader, TITLE_CHANGE_ENTRY_TYPE } from "../session/session-entries";
+import { mapJsonStrings } from "../secrets/placeholder-scan";
+import {
+	type SessionEntry,
+	type SessionHeader,
+	TITLE_CHANGE_ENTRY_TYPE,
+	type ToolExecutionSettledEntry,
+} from "../session/session-entries";
 import type { SessionManager } from "../session/session-manager";
 import type { OutputMeta } from "../tools/output-meta";
 import { buildSessionData, type SessionData, type SubSession } from "./html";
@@ -47,8 +54,9 @@ const GIST_ID_RE = /^[0-9a-f]{20,64}$/;
 
 /** Progressively harsher per-string caps applied when the sealed blob is over budget. */
 const TEXT_CAPS = [32_768, 8_192, 2_048, 512];
-/** 1×1 transparent GIF; stands in for stripped data-URL images so <img> tags stay valid. */
-const BLANK_IMAGE_DATA_URL = "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
+/** 1×1 transparent GIF payload; stands in for stripped image data so <img> tags stay valid. */
+const BLANK_IMAGE_BASE64 = "R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
+const BLANK_IMAGE_DATA_URL = `data:image/gif;base64,${BLANK_IMAGE_BASE64}`;
 const IMAGE_OMITTED_TEXT = "[image omitted from share]";
 
 export type ShareStore = "blob" | "gist";
@@ -216,6 +224,26 @@ function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): 
 				add(entry.previousTitle);
 				add(entry.trigger);
 				return;
+			case "tool_execution_started":
+				// The v4 tool journal's call descriptor carries the same
+				// user-authored text an assistant `toolCall` block does — title, cwd,
+				// echoed source, touched paths, and the raw arguments — so it needs the
+				// same pre-scan. `rawInput` is model-authored JSON, hence `addJsonStrings`
+				// (the `toolCall.arguments` treatment above), not `add`.
+				add(entry.call.title);
+				add(entry.call.cwd);
+				add(entry.call.sourceEcho);
+				for (const location of entry.call.locations ?? []) add(location.path);
+				if (entry.call.rawInput) addJsonStrings(entry.call.rawInput);
+				return;
+			case "tool_execution_settled":
+				// The settled arm mirrors the `toolResult` message entry (whose text
+				// IS redacted) but carries the call's retained output a second time —
+				// the presentation stream, facts, attachments, failure message, and
+				// frozen model projection. Skipping it would leak unredacted through
+				// the journal duplicate.
+				collectSettledEntryStrings(entry, add, addJsonStrings);
+				return;
 			default:
 				return;
 		}
@@ -236,6 +264,189 @@ function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): 
 		for (const entry of sub.entries) addEntry(entry);
 	}
 	return values;
+}
+
+/** Scan the freeform strings one settled journal arm carries for regex secrets. */
+function collectSettledEntryStrings(
+	entry: ToolExecutionSettledEntry,
+	add: (value: string | undefined) => void,
+	addJsonStrings: (value: unknown) => void,
+): void {
+	if (entry.outcome.kind === "failed") add(entry.outcome.failure.message);
+	const presentation = entry.presentation;
+	add(presentation.stream?.text);
+	for (const fact of presentation.facts) collectToolFactStrings(fact, add);
+	for (const attachment of presentation.attachments) collectToolAttachmentStrings(attachment, add);
+	// `display()` values are model/user-authored JSON riding the same eval cell
+	// as the process bytes above — the same untyped-payload treatment
+	// `toolCall.arguments` gets, not the fixed-field `add` calls.
+	for (const retained of presentation.displays ?? []) {
+		for (const item of retained.display.items) {
+			if (item.kind === "json") addJsonStrings(item.value);
+		}
+	}
+	for (const block of entry.modelProjection.content) {
+		if (block.type === "text") add(block.text);
+	}
+}
+
+function collectToolFactStrings(fact: ToolFact, add: (value: string | undefined) => void): void {
+	switch (fact.kind) {
+		case "notice":
+		case "capability_notice":
+		case "stop_annotation":
+		case "unreported_annotation":
+		case "model_guidance":
+			add(fact.text);
+			return;
+		case "diagnostics":
+			for (const diagnostic of fact.entries) {
+				add(diagnostic.path);
+				add(diagnostic.message);
+			}
+			return;
+		default:
+			return;
+	}
+}
+
+function collectToolAttachmentStrings(attachment: ToolAttachment, add: (value: string | undefined) => void): void {
+	switch (attachment.kind) {
+		case "resource_link":
+			add(attachment.uri);
+			add(attachment.name);
+			return;
+		case "diff":
+			add(attachment.path);
+			add(attachment.oldText ?? undefined);
+			add(attachment.newText ?? undefined);
+			return;
+		default:
+			// Inline image bytes are left intact here (nothing field-redactable),
+			// but they are NOT turned into placeholders later unconditionally:
+			// {@link stripImagePayloads} swaps oversized payloads for placeholders
+			// only when the sealed blob sheds pressure.
+			return;
+	}
+}
+
+function redactShareToolFact(
+	o: SecretObfuscator,
+	fact: ToolFact,
+	sharedRegexSecretValues: ReadonlySet<string>,
+): ToolFact {
+	switch (fact.kind) {
+		case "notice":
+		case "capability_notice":
+		case "stop_annotation":
+		case "unreported_annotation":
+		case "model_guidance":
+			return { ...fact, text: o.obfuscate(fact.text, sharedRegexSecretValues) };
+		case "diagnostics":
+			return {
+				...fact,
+				entries: fact.entries.map(diagnostic => ({
+					...diagnostic,
+					path: o.obfuscate(diagnostic.path, sharedRegexSecretValues),
+					message: o.obfuscate(diagnostic.message, sharedRegexSecretValues),
+				})),
+			};
+		default:
+			return fact;
+	}
+}
+
+function redactShareToolAttachment(
+	o: SecretObfuscator,
+	attachment: ToolAttachment,
+	sharedRegexSecretValues: ReadonlySet<string>,
+): ToolAttachment {
+	switch (attachment.kind) {
+		case "resource_link":
+			return {
+				...attachment,
+				uri: o.obfuscate(attachment.uri, sharedRegexSecretValues),
+				name: o.obfuscate(attachment.name, sharedRegexSecretValues),
+			};
+		case "diff":
+			return {
+				...attachment,
+				path: o.obfuscate(attachment.path, sharedRegexSecretValues),
+				oldText: attachment.oldText === null ? null : o.obfuscate(attachment.oldText, sharedRegexSecretValues),
+				newText: attachment.newText === null ? null : o.obfuscate(attachment.newText, sharedRegexSecretValues),
+			};
+		default:
+			return attachment;
+	}
+}
+
+/** Redact secrets inside a retained eval display's JSON item value (same untyped-JSON-walk exception as {@link obfuscateToolArguments}). */
+function redactShareToolDisplay(
+	o: SecretObfuscator,
+	display: RetainedDisplay,
+	sharedRegexSecretValues: ReadonlySet<string>,
+): RetainedDisplay {
+	if (display.display.kind !== "sequence") return display;
+	return {
+		...display,
+		display: {
+			...display.display,
+			items: display.display.items.map(item =>
+				item.kind === "json"
+					? {
+							...item,
+							value: mapJsonStrings(item.value, s =>
+								o.obfuscate(s, sharedRegexSecretValues),
+							) as typeof item.value,
+						}
+					: item,
+			),
+		},
+	};
+}
+
+function redactShareSettledEntry(
+	o: SecretObfuscator,
+	entry: ToolExecutionSettledEntry,
+	sharedRegexSecretValues: ReadonlySet<string>,
+): SessionEntry {
+	const outcome =
+		entry.outcome.kind === "failed"
+			? {
+					...entry.outcome,
+					failure: {
+						...entry.outcome.failure,
+						message: o.obfuscate(entry.outcome.failure.message, sharedRegexSecretValues),
+					},
+				}
+			: entry.outcome;
+	return {
+		...entry,
+		outcome,
+		presentation: {
+			...entry.presentation,
+			stream:
+				entry.presentation.stream === undefined
+					? undefined
+					: {
+							...entry.presentation.stream,
+							text: o.obfuscate(entry.presentation.stream.text, sharedRegexSecretValues),
+						},
+			facts: entry.presentation.facts.map(fact => redactShareToolFact(o, fact, sharedRegexSecretValues)),
+			attachments: entry.presentation.attachments.map(attachment =>
+				redactShareToolAttachment(o, attachment, sharedRegexSecretValues),
+			),
+			displays: entry.presentation.displays?.map(display =>
+				redactShareToolDisplay(o, display, sharedRegexSecretValues),
+			),
+		},
+		modelProjection: {
+			...entry.modelProjection,
+			content: entry.modelProjection.content.map(block =>
+				block.type === "text" ? { ...block, text: o.obfuscate(block.text, sharedRegexSecretValues) } : block,
+			),
+		},
+	};
 }
 
 function redactShareHeader(
@@ -330,6 +541,31 @@ function redactShareEntry(
 				...entry,
 				label: entry.label === undefined ? undefined : o.obfuscate(entry.label, sharedRegexSecretValues),
 			};
+		case "tool_execution_started":
+			return {
+				...entry,
+				call: {
+					...entry.call,
+					title: o.obfuscate(entry.call.title, sharedRegexSecretValues),
+					cwd: entry.call.cwd === undefined ? undefined : o.obfuscate(entry.call.cwd, sharedRegexSecretValues),
+					sourceEcho:
+						entry.call.sourceEcho === undefined
+							? undefined
+							: o.obfuscate(entry.call.sourceEcho, sharedRegexSecretValues),
+					locations: entry.call.locations?.map(location => ({
+						...location,
+						path: o.obfuscate(location.path, sharedRegexSecretValues),
+					})),
+					rawInput:
+						entry.call.rawInput === undefined
+							? undefined
+							: (obfuscateToolArguments(
+									o,
+									entry.call.rawInput as Record<string, unknown>,
+									sharedRegexSecretValues,
+								) as typeof entry.call.rawInput),
+				},
+			};
 		case TITLE_CHANGE_ENTRY_TYPE:
 			return {
 				...entry,
@@ -340,6 +576,8 @@ function redactShareEntry(
 						: o.obfuscate(entry.previousTitle, sharedRegexSecretValues),
 				trigger: entry.trigger === undefined ? undefined : o.obfuscate(entry.trigger, sharedRegexSecretValues),
 			};
+		case "tool_execution_settled":
+			return redactShareSettledEntry(o, entry, sharedRegexSecretValues);
 		default:
 			return entry;
 	}
@@ -564,13 +802,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
 
-/** Replace inline image payloads (image blocks + data: URLs) with tiny placeholders, in place. */
+/** Replace inline image payloads (image blocks + attachment images + data: URLs) with tiny placeholders, in place. */
 function stripImagePayloads(value: unknown): void {
 	if (Array.isArray(value)) {
 		for (let i = 0; i < value.length; i++) {
 			const item: unknown = value[i];
-			if (isRecord(item) && item.type === "image" && typeof item.data === "string" && item.data.length > 1024) {
-				value[i] = { type: "text", text: IMAGE_OMITTED_TEXT };
+			const placeholder = strippedImagePlaceholder(item);
+			if (placeholder !== null) {
+				value[i] = placeholder;
 				continue;
 			}
 			stripImagePayloads(item);
@@ -586,6 +825,28 @@ function stripImagePayloads(value: unknown): void {
 		}
 		stripImagePayloads(v);
 	}
+}
+
+/**
+ * Placeholder for an oversized inline-image record (a `data` string longer than
+ * 1 KiB), or null when `item` is not one. Message content blocks collapse to a
+ * text marker; kind-discriminated tool-attachment images keep their union shape
+ * with the blank-GIF payload so the attachments array stays schema-valid. The
+ * declared mimeType matches the replacement bytes — keeping the original type
+ * (e.g. `image/png`) over GIF bytes makes decoders that trust the declared type
+ * fail on every stripped attachment.
+ */
+function strippedImagePlaceholder(item: unknown): Record<string, unknown> | null {
+	if (!isRecord(item) || typeof item.data !== "string" || item.data.length <= 1024) return null;
+	if (item.type === "image") return { type: "text", text: IMAGE_OMITTED_TEXT };
+	if (item.kind === "image") {
+		return {
+			kind: "image",
+			data: BLANK_IMAGE_BASE64,
+			mimeType: "image/gif",
+		};
+	}
+	return null;
 }
 
 /** Truncate every string longer than `cap`, in place. */

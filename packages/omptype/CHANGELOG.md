@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `z.lazy()` and `z.discriminatedUnion()` to the `@oh-my-pi/omptype/zod` compatibility layer for recursive schemas and discriminated-union parsing.
+
+### Fixed
+
+- Fixed `.readonly()` on the `@oh-my-pi/omptype/zod` layer to actually freeze successful parse output (`Object.freeze`, one level deep), matching Zod's runtime contract instead of only changing the inferred type.
+
 ## [17.3.1] - 2026-08-13
 
 ### Fixed

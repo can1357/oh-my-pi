@@ -20,6 +20,7 @@ import {
 } from "../tools/json-tree";
 import { formatStyledTruncationWarning, stripOutputNotice } from "../tools/output-meta";
 import { formatExpandHint, truncateToWidth } from "../tools/render-utils";
+import { toolResultFailed } from "../tools/tool-result";
 import { renderStatusLine, WidthAwareText } from "../tui";
 import type { MCPToolDetails } from "./tool-bridge";
 
@@ -64,7 +65,7 @@ function renderMarkdownMCPResult(
 	return {
 		render(contentWidth: number): readonly string[] {
 			const lines: string[] = [];
-			const isError = result.isError ?? result.details?.isError ?? false;
+			const isError = toolResultFailed(result);
 			const title = result.details ? `${result.details.serverName}/${result.details.mcpToolName}` : "MCP";
 			lines.push(
 				renderStatusLine(
@@ -135,7 +136,7 @@ export function renderMCPResult(
 	return new WidthAwareText(
 		contentWidth => {
 			const lines: string[] = [];
-			const isError = result.isError ?? result.details?.isError ?? false;
+			const isError = toolResultFailed(result);
 			const title = result.details ? `${result.details.serverName}/${result.details.mcpToolName}` : "MCP";
 			const success = !isError;
 			lines.push(

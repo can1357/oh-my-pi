@@ -156,7 +156,7 @@ async function synthesizeXai(
 	displayPath: string,
 	codec: TtsCodec,
 	signal: AbortSignal | undefined,
-): Promise<AgentToolResult<TtsToolDetails, TtsSchemaType>> {
+): Promise<AgentToolResult<TtsToolDetails>> {
 	const creds = await resolveXAIHttpCredentials(ctx.modelRegistry);
 	if (!creds) {
 		return {
@@ -227,7 +227,7 @@ async function synthesizeDeepInfra(
 	displayPath: string,
 	codec: TtsCodec,
 	signal: AbortSignal | undefined,
-): Promise<AgentToolResult<TtsToolDetails, TtsSchemaType>> {
+): Promise<AgentToolResult<TtsToolDetails>> {
 	const sessionId = ctx.sessionManager.getSessionId();
 	const storedKey = await ctx.modelRegistry.getApiKeyForProvider("deepinfra", sessionId);
 	if (!storedKey) {
@@ -282,7 +282,7 @@ async function synthesizeLocal(
 	cwd: string,
 	outputPath: string,
 	signal: AbortSignal | undefined,
-): Promise<AgentToolResult<TtsToolDetails, TtsSchemaType>> {
+): Promise<AgentToolResult<TtsToolDetails>> {
 	const modelSetting = readStringSetting("tts.localModel");
 	const modelKey = modelSetting && isTtsLocalModelKey(modelSetting) ? modelSetting : DEFAULT_TTS_LOCAL_MODEL_KEY;
 	const voice = readStringSetting("tts.localVoice") || DEFAULT_TTS_VOICE;
@@ -335,7 +335,7 @@ export const ttsTool: CustomTool<typeof ttsSchema, TtsToolDetails> = {
 		_onUpdate,
 		ctx: CustomToolContext,
 		signal?: AbortSignal,
-	): Promise<AgentToolResult<TtsToolDetails, TtsSchemaType>> {
+	): Promise<AgentToolResult<TtsToolDetails>> {
 		const cwd = ctx.sessionManager.getCwd();
 		const outputPath = resolveToCwd(params.output_path, cwd);
 		const displayPath = formatPathRelativeToCwd(outputPath, cwd);

@@ -3,6 +3,7 @@ import { Settings } from "../config/settings";
 import { OutputSink } from "../session/streaming-output";
 import type { ToolSession } from "../tools";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../tools/output-meta";
+import type { ExecutorTermination } from "./backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP, isEvalTimeoutControlEvent } from "./bridge-timeout";
 import type { JsStatusEvent } from "./js/shared/types";
 import type { KernelDisplayOutput } from "./py/display";
@@ -37,11 +38,24 @@ export interface KernelExecutorBaseOptions {
 	artifactPath?: string;
 }
 
-/** Normalised execution result produced by {@link executeWithKernelBase}. */
+/**
+ * Normalised execution result produced by {@link executeWithKernelBase}.
+ *
+ * `annotation` is `OutputSummary.annotation` verbatim — the bracketed
+ * `[notice]` line `dump(notice)` baked into `output` without ever streaming it
+ * through `onChunk`, unlike `push()`, which every other chunk goes through. So
+ * a `sink.push(text); … ; sink.dump()` producer (the JS backend's own
+ * executor) streams its annotation live into whatever tail buffer `onChunk`
+ * feeds, while a `sink.dump(notice)` producer (every kernel-backed language
+ * here) does not — the annotation would otherwise only ever reach the
+ * model-facing text, never a client's terminal watermark. Carrying the sink's own string
+ * rather than re-deriving one keeps the mirrored copy spelled exactly like the
+ * text copy, so a consumer diffing the two can't see a phantom difference.
+ */
 export interface KernelExecutionResult {
 	output: string;
 	exitCode: number | undefined;
-	cancelled: boolean;
+	termination: ExecutorTermination | undefined;
 	truncated: boolean;
 	artifactId: string | undefined;
 	totalLines: number;
@@ -50,6 +64,7 @@ export interface KernelExecutionResult {
 	outputBytes: number;
 	displayOutputs: KernelDisplayOutput[];
 	stdinRequested: boolean;
+	annotation?: string;
 }
 
 /** Minimal kernel surface the base executor drives, satisfied by every backend kernel. */
@@ -242,13 +257,13 @@ function createBridgeAbortShield(source: AbortSignal | undefined): BridgeAbortSh
 	return shield;
 }
 
-export function createCancelledKernelResult(output: string): KernelExecutionResult {
+export function createCancelledKernelResult(output: string, termination: ExecutorTermination): KernelExecutionResult {
 	const outputBytes = Buffer.byteLength(output, "utf-8");
 	const outputLines = output.length > 0 ? 1 : 0;
 	return {
 		output,
 		exitCode: undefined,
-		cancelled: true,
+		termination,
 		truncated: false,
 		artifactId: undefined,
 		totalLines: outputLines,
@@ -258,6 +273,11 @@ export function createCancelledKernelResult(output: string): KernelExecutionResu
 		displayOutputs: [],
 		stdinRequested: false,
 	};
+}
+export function cancellationTermination(timedOut: boolean, timeoutMs: number | undefined): ExecutorTermination {
+	if (!timedOut) return { kind: "interrupted" };
+	if (timeoutMs === undefined) throw new Error("Timed-out eval execution has no configured timeout");
+	return { kind: "timed_out", timeoutMs };
 }
 
 // ---------------------------------------------------------------------------
@@ -529,7 +549,7 @@ export async function executeWithKernelBase<
 			const dumped = await sink.dump(annotation);
 			return {
 				exitCode: undefined,
-				cancelled: true,
+				termination: cancellationTermination(timedOut, executionTimeoutMs ?? options?.idleTimeoutMs),
 				truncated: dumped.truncated,
 				output: dumped.output,
 				artifactId: dumped.artifactId ?? undefined,
@@ -539,14 +559,16 @@ export async function executeWithKernelBase<
 				outputBytes: dumped.outputBytes,
 				displayOutputs,
 				stdinRequested: !!result.stdinRequested,
+				annotation: dumped.annotation,
 			};
 		}
 
 		if (result.stdinRequested) {
-			const dumped = await sink.dump("Kernel requested stdin; interactive input is not supported.");
+			const annotation = "Kernel requested stdin; interactive input is not supported.";
+			const dumped = await sink.dump(annotation);
 			return {
 				exitCode: 1,
-				cancelled: false,
+				termination: undefined,
 				truncated: dumped.truncated,
 				output: dumped.output,
 				artifactId: dumped.artifactId ?? undefined,
@@ -556,6 +578,7 @@ export async function executeWithKernelBase<
 				outputBytes: dumped.outputBytes,
 				displayOutputs,
 				stdinRequested: true,
+				annotation: dumped.annotation,
 			};
 		}
 
@@ -563,7 +586,7 @@ export async function executeWithKernelBase<
 		const dumped = await sink.dump();
 		return {
 			exitCode,
-			cancelled: false,
+			termination: undefined,
 			truncated: dumped.truncated,
 			output: dumped.output,
 			artifactId: dumped.artifactId ?? undefined,
@@ -577,12 +600,13 @@ export async function executeWithKernelBase<
 	} catch (err) {
 		if (isCancellationError(err, cancelledErrorClass) || abortShield.abortRequested || abortShield.signal?.aborted) {
 			const timedOut = abortShield.timedOut || isTimedOutCancellation(err, cancelledErrorClass, abortShield.signal);
-			const dumped = await sink.dump(
-				timedOut ? formatTimeoutAnnotation(executionTimeoutMs ?? options?.idleTimeoutMs) : undefined,
-			);
+			const annotation = timedOut
+				? formatTimeoutAnnotation(executionTimeoutMs ?? options?.idleTimeoutMs)
+				: undefined;
+			const dumped = await sink.dump(annotation);
 			return {
 				exitCode: undefined,
-				cancelled: true,
+				termination: cancellationTermination(timedOut, executionTimeoutMs ?? options?.idleTimeoutMs),
 				truncated: dumped.truncated,
 				output: dumped.output,
 				artifactId: dumped.artifactId ?? undefined,
@@ -592,6 +616,7 @@ export async function executeWithKernelBase<
 				outputBytes: dumped.outputBytes,
 				displayOutputs,
 				stdinRequested: false,
+				annotation: dumped.annotation,
 			};
 		}
 		const error = err instanceof Error ? err : new Error(String(err));

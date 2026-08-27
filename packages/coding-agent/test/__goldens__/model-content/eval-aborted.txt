@@ -1,0 +1,4 @@
+--- text ---
+aborted-cell-line-1
+aborted-cell-line-2
+

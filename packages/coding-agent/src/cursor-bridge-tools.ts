@@ -113,25 +113,23 @@ export function isCursorStrReplaceMcpName(name: string): boolean {
  */
 export function normalizeCursorReplaceArgs(args: Record<string, unknown>): Record<string, unknown> {
 	const path = stringArg(args, "path");
-	const old_string =
+	const old_text =
 		stringArg(args, "old_string") ??
 		stringArg(args, "old_str") ??
 		stringArg(args, "old_text") ??
 		stringArg(args, "oldString") ??
 		stringArg(args, "oldText");
-	const new_string =
+	const new_text =
 		stringArg(args, "new_string") ??
 		stringArg(args, "new_str") ??
 		stringArg(args, "new_text") ??
 		stringArg(args, "newString") ??
 		stringArg(args, "newText");
-	const replaceAll = args.replace_all ?? args.replaceAll;
-	if (path === undefined || old_string === undefined || new_string === undefined) return args;
+	const all = args.replace_all ?? args.replaceAll ?? args.all;
+	if (path === undefined || old_text === undefined || new_text === undefined) return args;
 	return {
 		path,
-		old_string,
-		new_string,
-		...(typeof replaceAll === "boolean" ? { replace_all: replaceAll } : {}),
+		edits: [{ old_text, new_text, ...(typeof all === "boolean" ? { all } : {}) }],
 	};
 }
 
@@ -147,17 +145,17 @@ export function cursorMcpPrefersReplaceEdit(name: string, args: Record<string, u
 	if (isCursorStrReplaceMcpName(name)) return true;
 	if (name !== "edit") return false;
 	if (typeof args.input === "string" || typeof args._input === "string") return false;
-	const old_string =
+	const old_text =
 		stringArg(args, "old_string") ??
 		stringArg(args, "old_str") ??
 		stringArg(args, "old_text") ??
 		stringArg(args, "oldString") ??
 		stringArg(args, "oldText");
-	const new_string =
+	const new_text =
 		stringArg(args, "new_string") ??
 		stringArg(args, "new_str") ??
 		stringArg(args, "new_text") ??
 		stringArg(args, "newString") ??
 		stringArg(args, "newText");
-	return old_string !== undefined && new_string !== undefined;
+	return old_text !== undefined && new_text !== undefined;
 }

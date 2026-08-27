@@ -1,0 +1,12 @@
+{
+	"extends": "../../tsconfig.base.json",
+	"compilerOptions": {
+		"exactOptionalPropertyTypes": true,
+		"noUncheckedIndexedAccess": true
+	},
+	"include": [
+		"src/presentation.ts",
+		"src/presentation",
+		"test/presentation"
+	]
+}

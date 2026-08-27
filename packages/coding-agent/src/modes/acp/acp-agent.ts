@@ -42,6 +42,7 @@ import {
 	type SetSessionConfigOptionResponse,
 	type SetSessionModeRequest,
 	type SetSessionModeResponse,
+	type ToolCallContent,
 	type Usage,
 } from "@oh-my-pi/pi-utils/acp";
 import { disableProvider, enableProvider, reset as resetCapabilities } from "../../capability";
@@ -62,19 +63,35 @@ import type { MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
 import { theme } from "../../modes/theme/theme";
 import { normalizePlanTitle, type PlanApprovalDetails, resolveApprovedPlan } from "../../plan-mode/approved-plan";
+import { hydrateReplayableToolExecution } from "../../presentation/hydrate";
+import type { ReplayableToolExecution } from "../../presentation/journal";
+import {
+	type BashLikeResult,
+	type EditResult,
+	type EvalResult,
+	parseLegacyToolResult,
+	type ToolSource,
+} from "../../presentation/known-tool-result";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
 import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
 import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import type { UsageStatistics } from "../../session/session-entries";
 import type { SessionInfo as StoredSessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
+import {
+	createReplayToolJournalCursor,
+	nextReplayableToolExecution,
+	ReplayToolCallBookkeeping,
+	type ReplayToolJournalCursor,
+} from "../../session/tool-journal-correlation";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash-commands/available-commands";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "../../stt/models";
 import { refreshAgentDiscovery } from "../../task";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "../../thinking";
 import { OTHER_OPTION } from "../../tools/ask";
-import { normalizeLocalScheme } from "../../tools/path-utils";
+import { formatOutputNotice } from "../../tools/output-meta";
+import { normalizeLocalScheme, resolveToCwd } from "../../tools/path-utils";
 import { ToolError } from "../../tools/tool-errors";
 import {
 	DEFAULT_TTS_LOCAL_MODEL_KEY,
@@ -85,11 +102,41 @@ import {
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { createAcpClientBridge } from "./acp-client-bridge";
 import {
+	buildLegacyReplayTodoPlanUpdate,
+	buildLegacyReplayToolCallStartUpdate,
+	buildToolCallPresentation,
 	extractAssistantMessageText,
+	extractToolLocations,
 	mapAgentSessionEventToAcpSessionUpdates,
 	normalizeReplayToolArguments,
 } from "./acp-event-mapper";
+import { assertAcpUpdateInvariants } from "./acp-update-invariants";
+import { formatLegacyOutputNotice } from "./legacy-output-meta";
 import { ACP_TERMINAL_AUTH_FLAG } from "./terminal-auth";
+import type {
+	AcpRenderContext,
+	AcpToolFrame,
+	AcpToolViewState,
+	AcpToolViewStep,
+	CheckedToolNotification,
+} from "./view";
+import {
+	AcpOutboundCoordinator,
+	checkedNotificationPayload,
+	encodeToolFrames,
+	INITIAL_ACP_TOOL_VIEW,
+	negotiateTerminalMetaCap,
+	reduceAcpToolView,
+} from "./view";
+import { isLegacyBashToolName, LegacyBashPresentation, legacyBashStartedEvent } from "./view/legacy-bash";
+import {
+	isLegacyEditToolName,
+	legacyEditFramesWithLocations,
+	legacyEditSettlementEvents,
+	legacyEditStartedEvent,
+	legacyEditUpdateFrames,
+} from "./view/legacy-edit";
+import { LegacyEvalPresentation } from "./view/legacy-eval";
 
 const ACP_DEFAULT_MODE_ID = "default";
 const ACP_PLAN_MODE_ID = "plan";
@@ -114,6 +161,10 @@ export const ACP_BOOTSTRAP_RACE_GUARD_MS = 50;
 const ACP_CANCEL_CLEANUP_TIMEOUT_MS = 5_000;
 const ACP_ASYNC_DELIVERY_DRAIN_TIMEOUT_MS = 250;
 const ACP_ASYNC_DELIVERY_DRAIN_MAX_PASSES = 3;
+// The final typed settlement must be delivered before a client terminal is
+// released, but a peer that never answers terminal/release must not pin the
+// shared outbound FIFO (and therefore prompt completion) forever.
+const ACP_TERMINAL_RELEASE_GRACE_MS = 1_000;
 
 type AgentImageContent = {
 	type: "image";
@@ -163,6 +214,56 @@ function isPromptTurnInFlight(turn: PromptTurnState | undefined): turn is Prompt
 	return turn !== undefined && (!turn.settled || turn.cleanup !== undefined);
 }
 
+/**
+ * Whether an event still needs handling after the client cancelled.
+ *
+ * Cancellation resolves the ACP response immediately, but a tool call that already
+ * announced itself must still be driven to its one `settled` event or its card and
+ * its display-only terminal stay "running" forever. Ordinary assistant content is
+ * filtered: continuing to stream prose into a cancelled turn is the behaviour the
+ * cancel was asking to stop.
+ */
+function isCleanupRelevantEvent(event: AgentSessionEvent): boolean {
+	switch (event.type) {
+		case "tool_presentation":
+		case "tool_execution_start":
+		case "tool_execution_end":
+			return true;
+		default:
+			return false;
+	}
+}
+
+/**
+ * Outbound ordering tag for a legacy-mapper write.
+ *
+ * The reserved permission slot for tool call T waits for T's **start batch** to
+ * reach the writer and lets exactly that batch pass it. That prerequisite has to
+ * be declared by every route, not only by the migrated presentation path: an
+ * untagged legacy start is held behind the very slot that is waiting for it, so
+ * both the dialog and the card it refers to appeared only after the bounded
+ * barrier expired.
+ *
+ * `tool_execution_end` is the call's last write on this path, so it also releases
+ * the call's ordering state — in FIFO position, after the end frame lands.
+ */
+function legacyOutboundTag(event: AgentSessionEvent): {
+	readonly toolCallId?: string;
+	readonly isStart?: boolean;
+	readonly isFinal?: boolean;
+} {
+	switch (event.type) {
+		case "tool_execution_start":
+			return { toolCallId: event.toolCallId, isStart: true };
+		case "tool_execution_update":
+			return { toolCallId: event.toolCallId };
+		case "tool_execution_end":
+			return { toolCallId: event.toolCallId, isFinal: true };
+		default:
+			return {};
+	}
+}
+
 type ManagedSessionRecord = {
 	session: AgentSession;
 	setToolUIContext: ((uiContext: ExtensionUIContext, hasUI: boolean) => void) | undefined;
@@ -176,6 +277,19 @@ type ManagedSessionRecord = {
 	liveMessageId: string | undefined;
 	liveMessageProgress: { textEmitted: boolean; thoughtEmitted: boolean } | undefined;
 	toolArgsById: Map<string, unknown>;
+	/**
+	 * Per-session outbound coordinator: the FIFO that keeps a multi-frame reducer
+	 * transition contiguous, poisons on a failed send, and owns the reserved
+	 * permission slot. Shared with the ACP client bridge so a permission request
+	 * joins the same ordering domain as the frames.
+	 */
+	outbound: AcpOutboundCoordinator;
+	/** Reducer state per tool call on the `presentation_events` protocol. */
+	toolViews: Map<string, AcpToolViewState>;
+	/** Stateful typed conversion for built-in EvalTool proxy snapshots. */
+	legacyEvalPresentations: Map<string, LegacyEvalPresentation>;
+	/** Stateful typed conversion for built-in bash synthetic legacy snapshots. */
+	legacyBashPresentations: Map<string, LegacyBashPresentation>;
 	extensionsConfigured: boolean;
 	// Installed inside `#scheduleBootstrapUpdates` (post-race-guard); released
 	// in `#disposeSessionRecord`. Lives independent of any prompt turn.
@@ -183,6 +297,7 @@ type ManagedSessionRecord = {
 	closedError: PromptLifecycleError | undefined;
 	promptEventHandlers: Set<Promise<void>>;
 	extensionUserMessageTasks: Set<Promise<void>>;
+	presentationSettlementDeliveries: Map<string, PromiseWithResolvers<void>>;
 };
 
 type ReplayableMessage = {
@@ -201,6 +316,71 @@ type ReplayableToolItem = {
 	name?: unknown;
 	arguments?: unknown;
 	input?: unknown;
+};
+
+/** Narrows a replayed assistant-message content item to a real tool call, on both the counting pass and the dispatch pass — one predicate so the two can never disagree about which items are tool calls. */
+function isReplayableToolItem(item: ReplayableToolItem): item is ReplayableToolItem & { id: string; name: string } {
+	return (
+		(item.type === "toolCall" || item.type === "tool_use") &&
+		typeof item.id === "string" &&
+		typeof item.name === "string"
+	);
+}
+
+/**
+ * Count each `toolCallId`'s tool-call occurrences across a replayed
+ * transcript, for {@link ReplayToolJournalCursor}'s totality gate. A provider
+ * can recycle a `toolCallId` across turns; this and `startsByToolCallId`
+ * (branch-side) must agree exactly before any occurrence of that id is safe to
+ * hydrate — see that cursor's doc comment for why a short pairing cannot be
+ * resolved instead of disqualified.
+ */
+function countReplayToolCallOccurrences(messages: readonly ReplayableMessage[]): Map<string, number> {
+	const counts = new Map<string, number>();
+	for (const message of messages) {
+		if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+		for (const item of message.content) {
+			if (typeof item !== "object" || item === null || !("type" in item)) continue;
+			const toolItem = item as ReplayableToolItem;
+			if (!isReplayableToolItem(toolItem)) continue;
+			counts.set(toolItem.id, (counts.get(toolItem.id) ?? 0) + 1);
+		}
+	}
+	return counts;
+}
+
+/**
+ * One notification the chronological replay walk produced, tagged so
+ * `#replaySessionHistory` can route a hydrated tool frame through the
+ * `CheckedToolNotification` chokepoint (`#sendToolUpdate`) while every other
+ * replay notification keeps going through the general `#sendUpdate` path.
+ */
+type AcpReplayUpdate = SessionNotification | { readonly checked: CheckedToolNotification };
+
+/**
+ * Threaded state for one `#replaySessionHistory` walk over
+ * `SessionContext.messages`.
+ */
+interface AcpReplayWalk {
+	readonly sessionId: string;
+	readonly cwd: string;
+	readonly renderContext: AcpRenderContext;
+	readonly journal: ReplayToolJournalCursor;
+	/**
+	 * Pre-v4 legacy lifecycle bookkeeping: ids the walk has already dispatched
+	 * at their assistant-turn occurrence (hydrated *or* legacy-announced), ids
+	 * actually announced on the *legacy* path (hydrated ids excluded — they
+	 * carry their own reducer-owned settlement), and ids that reached a
+	 * resolution during replay. See {@link ReplayToolCallBookkeeping}.
+	 */
+	readonly bookkeeping: ReplayToolCallBookkeeping;
+}
+
+type LegacyReplayBodyBlock = {
+	type?: unknown;
+	text?: unknown;
+	data?: unknown;
+	mimeType?: unknown;
 };
 
 type MCPConfigMap = {
@@ -624,6 +804,126 @@ export class AcpAgent implements Agent {
 		this.#createSession = createSession;
 	}
 
+	/**
+	 * Whether the connected client advertised the display-only terminal
+	 * `_meta` convention (see `wantsMetaTerminal` in acp-event-mapper.ts) at
+	 * `initialize`. Shared by every live/replay event-mapping call site so
+	 * eval/replayed-command output can render as a rich terminal block
+	 * instead of falling back to fenced text.
+	 */
+	#terminalMetaCapable(): boolean {
+		return this.#clientCapabilities?._meta?.terminal_output === true;
+	}
+
+	/**
+	 * Single emit chokepoint for every outbound `session/update` — checks the
+	 * finished frame against `checkAcpUpdateInvariants` (a terminal content item
+	 * must be the update's only content item; an `_meta.terminal_*` key requires
+	 * the negotiated capability; a completed status must not sit above a nonzero
+	 * exit code) before forwarding it unchanged. See
+	 * `acp-update-invariants.ts` for why this
+	 * needs to run on the assembled frame rather than at each builder: a
+	 * violation is often only visible after content arrays from different
+	 * builders are merged. Returns the connection's promise directly (not
+	 * `async`) so callers that need the delivery promise itself (see the
+	 * `agent_message_chunk` streaming path) keep the same timing.
+	 */
+	#sendUpdate(notification: SessionNotification): Promise<void> {
+		assertAcpUpdateInvariants(notification, { terminalMetaCapable: this.#terminalMetaCapable() });
+		return this.#connection.sessionUpdate(notification);
+	}
+
+	/**
+	 * The **tool** notification chokepoint: accepts only a {@link CheckedToolNotification},
+	 * which the frame encoder alone can mint. A hand-rolled tool `SessionUpdate`
+	 * cannot reach the wire through this path.
+	 *
+	 * Deliberately separate from {@link AcpAgent.#sendUpdate}: assistant/thought
+	 * chunks, plans, configuration, session info and usage are not tool frames and
+	 * the tool encoder cannot construct them (see the 2026-08-03 plan amendment).
+	 * The runtime invariant check still runs, as the tripwire it now is rather than
+	 * the primary defence.
+	 */
+	#sendToolUpdate(checked: CheckedToolNotification): Promise<void> {
+		return this.#sendUpdate(checkedNotificationPayload(checked));
+	}
+
+	/**
+	 * Build the per-session outbound coordinator.
+	 *
+	 * A failed send poisons it, and poisoning is terminal for the whole managed
+	 * session — see {@link AcpAgent.#terminateSessionOnOutboundFailure}. A
+	 * caught-and-logged send failure that lets `agent_end` still report success is
+	 * precisely the "errors never surface" class this replaces.
+	 */
+	#createOutboundCoordinator(session: AgentSession): AcpOutboundCoordinator {
+		return new AcpOutboundCoordinator({
+			onPoison: error => {
+				this.#terminateSessionOnOutboundFailure(session.sessionId, error);
+			},
+		});
+	}
+
+	/**
+	 * The single terminal owner of a poisoned outbound queue.
+	 *
+	 * The coordinator invokes this exactly once (its own `#poisonNotified` latch), and
+	 * everything a poisoned session needs happens here rather than being hand-rolled
+	 * at the callback: the earlier version rejected the prompt in place, which left
+	 * the subscription installed, left the prompt slot occupied, and — worst — left
+	 * the record in `#sessions` holding a permanently poisoned coordinator, so the
+	 * next `prompt()` on that session subscribed again, received duplicate events,
+	 * and had every single frame rejected without a wire attempt.
+	 *
+	 * Order is deliberate: the record becomes unreachable *synchronously*, before any
+	 * await, so a prompt racing this teardown cannot pick up the dead coordinator.
+	 */
+	#terminateSessionOnOutboundFailure(sessionId: string, error: unknown): void {
+		const record = this.#sessions.get(sessionId);
+		if (record === undefined) return;
+		logger.warn("ACP outbound queue poisoned; closing the session", { sessionId, error });
+		record.closedError ??= this.#createPromptLifecycleError("ACP session closed after an outbound write failure");
+		this.#sessions.delete(sessionId);
+
+		// One terminal settlement of the prompt. `#finishPrompt` is a no-op once the
+		// response has been resolved (a cancel already in flight, say), which is what
+		// makes "reject exactly once" hold rather than depending on this callback
+		// running once.
+		const promptTurn = record.promptTurn;
+		this.#finishPrompt(record, undefined, error);
+		if (promptTurn !== undefined) {
+			// Unconditional, unlike `#finishPrompt`'s cancel-aware branch: cleanup
+			// delivery is impossible on a dead connection, so there is nothing left for
+			// the subscription to carry. `unsubscribe` is cleared, so this is once.
+			promptTurn.unsubscribe?.();
+			promptTurn.unsubscribe = undefined;
+			promptTurn.cleanup = undefined;
+			if (record.promptTurn === promptTurn) record.promptTurn = undefined;
+		}
+
+		// No later writes: drop the reducer state (a half-delivered view is not
+		// resumable) and release any tool fenced behind an unanswered dialog.
+		record.toolViews.clear();
+		record.outbound.rejectPendingPermissions(error);
+		void this.#tearDownPoisonedSession(record, error);
+	}
+
+	async #tearDownPoisonedSession(record: ManagedSessionRecord, error: unknown): Promise<void> {
+		try {
+			await record.session.abort({ reason: "ACP connection write failed" });
+		} catch (abortError) {
+			logger.warn("Failed to abort ACP session after an outbound write failure", { error: abortError });
+		}
+		// The record is already out of `#sessions`, so `AcpAgent#dispose` will never see
+		// it again: disposing here is what keeps the eviction from leaking the session's
+		// lifetime subscription and MCP connections.
+		await this.#disposeSessionRecord(record);
+		logger.warn("ACP session torn down after an outbound write failure", {
+			sessionId: record.session.sessionId,
+			error,
+		});
+	}
+
 	setCancelCleanupTimeoutForTesting(timeoutMs: number): void {
 		this.#cancelCleanupTimeoutMs = Math.max(1, timeoutMs);
 	}
@@ -747,6 +1047,13 @@ export class AcpAgent implements Agent {
 			configOptions: this.#buildConfigOptions(record.session),
 			modes: this.#buildModeState(record.session),
 		};
+		// A fork carries the source session's entire conversation, and the client
+		// has never seen any of it under this brand-new id, so it gets the same
+		// history replay `loadSession` performs — deferred past the response, for
+		// the reasons in `#replayForkedSessionHistory`. Parking the replay on the
+		// prompt queue keeps a client that prompts the instant it reads
+		// `sessionId` from interleaving a live turn into the replayed transcript.
+		record.promptQueue = { promise: this.#replayForkedSessionHistory(record), release: undefined };
 		this.#scheduleBootstrapUpdates(record.session.sessionId);
 		return response;
 	}
@@ -763,7 +1070,7 @@ export class AcpAgent implements Agent {
 	async setSessionMode(params: SetSessionModeRequest): Promise<SetSessionModeResponse> {
 		const record = this.#getSessionRecord(params.sessionId);
 		this.#applyModeChange(record.session, params.modeId);
-		await this.#connection.sessionUpdate({
+		await this.#sendUpdate({
 			sessionId: record.session.sessionId,
 			update: this.#buildCurrentModeUpdate(record.session),
 		});
@@ -795,7 +1102,7 @@ export class AcpAgent implements Agent {
 		// `current_mode_update` notification that `setSessionMode` emits so
 		// ACP clients tracking session-mode state see a consistent transition.
 		if (params.configId === MODE_CONFIG_ID) {
-			await this.#connection.sessionUpdate({
+			await this.#sendUpdate({
 				sessionId: record.session.sessionId,
 				update: this.#buildCurrentModeUpdate(record.session),
 			});
@@ -985,7 +1292,7 @@ export class AcpAgent implements Agent {
 				await this.#waitForPromptEventHandlers(record);
 			},
 			notifyTitleChanged: async () => {
-				await this.#connection.sessionUpdate({
+				await this.#sendUpdate({
 					sessionId: record.session.sessionId,
 					update: {
 						sessionUpdate: "session_info_update",
@@ -1093,7 +1400,11 @@ export class AcpAgent implements Agent {
 			return promptTurn.cleanup;
 		}
 		promptTurn.cancelRequested = true;
-		promptTurn.unsubscribe?.();
+		// Deliberately NOT unsubscribing here. The subscription becomes cleanup-only
+		// (see `isCleanupRelevantEvent`) so in-flight tool calls still reach their
+		// `settled` event and drain their terminal-exit/status frames. `#runCancelCleanup`
+		// unsubscribes once the queue has drained, or the bounded timeout closes the
+		// session.
 		const cleanup = this.#runCancelCleanup(record, promptTurn);
 		promptTurn.cleanup = cleanup;
 		this.#finishPrompt(record, {
@@ -1110,8 +1421,19 @@ export class AcpAgent implements Agent {
 		});
 		try {
 			await Promise.race([record.session.abort({ reason: USER_INTERRUPT_LABEL }), timeout]);
+			// The abort resolved: let the cleanup frames the tool calls produced actually
+			// reach the wire before dropping the subscription. A poisoned/closed
+			// connection cannot promise wire cleanup, so its rejection is expected here
+			// and does not turn a successful cancel into a failure.
+			await Promise.race([this.#waitForPromptEventHandlers(record), timeout]);
+			await Promise.race([record.outbound.idle(), timeout]);
 		} finally {
 			if (timer) clearTimeout(timer);
+			promptTurn.unsubscribe?.();
+			promptTurn.unsubscribe = undefined;
+			// An unanswered permission dialog must not fence the tool after the turn is
+			// gone; rejecting the reservation is not a poison (the connection is fine).
+			record.outbound.rejectPendingPermissions(new Error("ACP prompt cancelled"));
 			// Order matters: clear `cleanup` before evicting the slot so the slot-eviction
 			// branch matches what `#finishPrompt` saw if it ran first.
 			promptTurn.cleanup = undefined;
@@ -1322,7 +1644,14 @@ export class AcpAgent implements Agent {
 		setToolUIContext: ((uiContext: ExtensionUIContext, hasUI: boolean) => void) | undefined,
 	): Promise<ManagedSessionRecord> {
 		const record = this.#createManagedSessionRecord(session, setToolUIContext);
-		session.setClientBridge(createAcpClientBridge(this.#connection, session.sessionId, this.#clientCapabilities));
+		// The bridge shares this record's outbound coordinator so a permission request
+		// orders itself after its tool call's `started` frame batch.
+		session.setClientBridge(
+			createAcpClientBridge(this.#connection, session.sessionId, this.#clientCapabilities, record.outbound),
+		);
+		session.setPresentationSettlementDeliveryBarrier?.(toolCallId =>
+			this.#waitForPresentationSettlementDelivery(record, toolCallId),
+		);
 		// `record.lifetimeUnsubscribe` is installed in `#scheduleBootstrapUpdates`
 		// so it shares the bootstrap race guard — see that comment for why.
 		try {
@@ -1350,10 +1679,15 @@ export class AcpAgent implements Agent {
 			liveMessageId: undefined,
 			liveMessageProgress: undefined,
 			toolArgsById: new Map(),
+			outbound: this.#createOutboundCoordinator(session),
+			toolViews: new Map(),
+			legacyEvalPresentations: new Map(),
+			legacyBashPresentations: new Map(),
 			extensionsConfigured: false,
 			closedError: undefined,
 			promptEventHandlers: new Set(),
 			extensionUserMessageTasks: new Set(),
+			presentationSettlementDeliveries: new Map(),
 			lifetimeUnsubscribe: undefined,
 		};
 	}
@@ -1412,15 +1746,16 @@ export class AcpAgent implements Agent {
 
 	async #handlePromptEvent(record: ManagedSessionRecord, event: AgentSessionEvent): Promise<void> {
 		const promptTurn = record.promptTurn;
-		if (!promptTurn || promptTurn.settled || promptTurn.cancelRequested) {
-			return;
-		}
-
-		if (event.type === "tool_execution_start" || event.type === "tool_execution_update") {
-			record.toolArgsById.set(event.toolCallId, event.args);
-		}
-
-		this.#prepareLiveAssistantMessage(record, event);
+		if (!promptTurn) return;
+		// Cancellation switches to a **cleanup-only** subscription rather than
+		// unsubscribing: a started tool call must still be reduced through its one
+		// `settled` event so its terminal exit and final status reach the client. Only
+		// ordinary assistant content is filtered here. `settled` means the ACP
+		// *response* has been resolved, which is not the same thing as cleanup having
+		// been delivered.
+		const cleanupOnly = promptTurn.cancelRequested;
+		if (cleanupOnly && !isCleanupRelevantEvent(event)) return;
+		if (!cleanupOnly && promptTurn.settled) return;
 		const imageDataCache = new Map<string, string>();
 		const resolveImageDataForAcp = (data: string, mimeType: string | undefined): string => {
 			const key = `${mimeType ?? ""}\u0000${data}`;
@@ -1430,6 +1765,133 @@ export class AcpAgent implements Agent {
 			imageDataCache.set(key, resolved);
 			return resolved;
 		};
+
+		// Presentation-protocol calls are reduced, encoded and queued; the legacy
+		// start/update/end mapper path is skipped for them entirely, so no call can
+		// deliver its output through both protocols.
+		if (event.type === "tool_presentation") {
+			this.#handleToolPresentationEvent(record, event);
+			return;
+		}
+		const legacyEditSource =
+			(event.type === "tool_execution_start" ||
+				event.type === "tool_execution_update" ||
+				event.type === "tool_execution_end") &&
+			record.session.hasBuiltInToolDispatch(event.toolName) &&
+			isLegacyEditToolName(event.toolName)
+				? ({ origin: "builtin", name: event.toolName } as const)
+				: undefined;
+		if (
+			(event.type === "tool_execution_start" ||
+				event.type === "tool_execution_update" ||
+				event.type === "tool_execution_end") &&
+			legacyEditSource !== undefined
+		) {
+			this.#handleLegacyEditEvent(record, event, legacyEditSource, resolveImageDataForAcp);
+			return;
+		}
+		const isToolLifecycleEvent =
+			event.type === "tool_execution_start" ||
+			event.type === "tool_execution_update" ||
+			event.type === "tool_execution_end";
+		const legacyBashSource =
+			isToolLifecycleEvent &&
+			record.session.hasBuiltInToolDispatch(event.toolName) &&
+			isLegacyBashToolName(event.toolName)
+				? ({ origin: "builtin", name: event.toolName } as const)
+				: undefined;
+		const recordedLegacyBash =
+			isToolLifecycleEvent && legacyBashSource !== undefined && record.legacyBashPresentations.has(event.toolCallId);
+		if (
+			legacyBashSource !== undefined &&
+			// Omission is the AgentSessionEvent contract's legacy_snapshot default.
+			// The normal BashTool route explicitly declares presentation_events and
+			// must remain entirely outside this compatibility adapter.
+			((event.type === "tool_execution_start" && event.progressProtocol !== "presentation_events") ||
+				(event.type === "tool_execution_update" && recordedLegacyBash) ||
+				(event.type === "tool_execution_end" &&
+					event.progressProtocol !== "presentation_events" &&
+					recordedLegacyBash))
+		) {
+			this.#handleLegacyBashEvent(record, event, legacyBashSource);
+			return;
+		}
+		const legacyEvalSource =
+			isToolLifecycleEvent && record.session.hasBuiltInToolDispatch(event.toolName) && event.toolName === "eval"
+				? ({ origin: "builtin", name: "eval" } as const)
+				: undefined;
+		const recordedLegacyEval =
+			isToolLifecycleEvent && legacyEvalSource !== undefined && record.legacyEvalPresentations.has(event.toolCallId);
+		if (
+			legacyEvalSource !== undefined &&
+			// Omission is the AgentSessionEvent contract's legacy_snapshot default.
+			// Only an explicit presentation_events declaration belongs to the local
+			// producer route and must bypass this adapter.
+			((event.type === "tool_execution_start" && event.progressProtocol !== "presentation_events") ||
+				(event.type === "tool_execution_update" && recordedLegacyEval) ||
+				(event.type === "tool_execution_end" &&
+					event.progressProtocol !== "presentation_events" &&
+					recordedLegacyEval))
+		) {
+			this.#handleLegacyEvalEvent(record, event, legacyEvalSource);
+			return;
+		}
+		if (
+			(event.type === "tool_execution_start" || event.type === "tool_execution_end") &&
+			event.progressProtocol === "presentation_events"
+		) {
+			if (event.type === "tool_execution_start") record.toolArgsById.set(event.toolCallId, event.args);
+			else record.toolArgsById.delete(event.toolCallId);
+			return;
+		}
+		if (legacyEvalSource !== undefined) {
+			// Updates carry no protocol tag and an end without its recorded legacy
+			// start cannot be faithfully reduced. Neither may fall through to the
+			// generic mapper, whose compatibility updates bypass the checked tool
+			// notification sender.
+			if (event.type === "tool_execution_update") return;
+			if (event.type === "tool_execution_end") {
+				const error = new Error(`ACP built-in eval ended without a legacy start: ${event.toolCallId}`);
+				logger.error("ACP legacy eval lifecycle rejected", {
+					sessionId: record.session.sessionId,
+					toolCallId: event.toolCallId,
+					eventType: event.type,
+					error,
+				});
+				record.toolArgsById.delete(event.toolCallId);
+				record.legacyEvalPresentations.delete(event.toolCallId);
+				record.outbound.poison(error);
+				this.#resolvePresentationSettlementDelivery(record, event.toolCallId);
+				return;
+			}
+		}
+		if (legacyBashSource !== undefined) {
+			// A built-in bash alias may not leak into the generic mapper: that path
+			// accepts raw details and sends an unchecked compatibility update. An
+			// orphan legacy end is terminal because no reducer state can honestly
+			// consume its settlement.
+			if (event.type === "tool_execution_update") return;
+			if (event.type === "tool_execution_end") {
+				const error = new Error(`ACP built-in bash ended without a legacy start: ${event.toolCallId}`);
+				logger.error("ACP legacy bash lifecycle rejected", {
+					sessionId: record.session.sessionId,
+					toolCallId: event.toolCallId,
+					eventType: event.type,
+					error,
+				});
+				record.toolArgsById.delete(event.toolCallId);
+				record.legacyBashPresentations.delete(event.toolCallId);
+				record.outbound.poison(error);
+				this.#resolvePresentationSettlementDelivery(record, event.toolCallId);
+				return;
+			}
+		}
+
+		if (event.type === "tool_execution_start" || event.type === "tool_execution_update") {
+			record.toolArgsById.set(event.toolCallId, event.args);
+		}
+
+		this.#prepareLiveAssistantMessage(record, event);
 		const streamedAssistantError =
 			event.type === "message_update" &&
 			event.message.role === "assistant" &&
@@ -1440,8 +1902,20 @@ export class AcpAgent implements Agent {
 			getToolArgs: toolCallId => record.toolArgsById.get(toolCallId),
 			cwd: record.session.sessionManager.getCwd(),
 			resolveImageData: resolveImageDataForAcp,
+			terminalMetaCapable: this.#terminalMetaCapable(),
+			realTerminalCapable: this.#clientCapabilities?.terminal === true,
 		})) {
-			const delivery = this.#connection.sessionUpdate(notification);
+			// Every send joins the per-session FIFO so a batch cannot interleave with a
+			// later event's frames, and so a permission reservation can order itself
+			// against the same stream of writes.
+			//
+			// Tool writes MUST carry their call id and start/final role even on the legacy
+			// mapper path. The reserved permission slot keys off delivered starts, so an
+			// untagged legacy start cannot pass the slot that is waiting for it: the
+			// permission request — and the start frame behind it — stalled until the
+			// 10-second barrier expired for every permission-gated legacy route
+			// (`edit`, `delete`, `move`, unmigrated bash).
+			const delivery = record.outbound.enqueue(() => this.#sendUpdate(notification), legacyOutboundTag(event));
 			if (streamedAssistantError) {
 				// Resolves true only once the error chunk actually reached the
 				// client — a failed delivery keeps the agent_end fallback armed.
@@ -1471,6 +1945,545 @@ export class AcpAgent implements Agent {
 				usage: this.#buildTurnUsage(promptTurn.usageBaseline, record.session.sessionManager.getUsageStatistics()),
 			});
 		}
+	}
+
+	/**
+	 * Reduce one presentation event, encode it, and only then commit and queue it.
+	 *
+	 * **Synchronous through the reduce, encode, and enqueue.** `AgentSession#emit`
+	 * does not await async listeners and `#trackPromptEvent` starts handlers
+	 * concurrently, so anything after an `await` here could interleave with the next
+	 * event. Reducing and registering the batch before yielding is what makes a
+	 * multi-frame transition (meta terminal → content) contiguous relative to later
+	 * events; the coordinator then owns actual delivery order.
+	 *
+	 * **Ordering is compute-then-commit, not commit-then-compute.** Encoding runs
+	 * *before* `record.toolViews` is mutated. An encoder throw is exactly as fatal
+	 * as a reducer throw — a malformed frame is a producer/reducer bug, never
+	 * client data — but encoding used to run *after* the state commit (and after
+	 * the settled-call deletion), so a throw there left the reducer's own view of
+	 * this call advanced with no frame ever reaching the wire for it, while the
+	 * exception itself, hoisted into this async method's rejection, reached only
+	 * `#trackPromptEvent`'s generic catch-and-log — never `record.outbound.poison`.
+	 * The prompt then finished as though delivery had succeeded. Committing state
+	 * only after encoding proves out means a rejected commit can never happen.
+	 */
+	#handleToolPresentationEvent(
+		record: ManagedSessionRecord,
+		event: Extract<AgentSessionEvent, { type: "tool_presentation" }>,
+		transformFrames?: (frames: readonly AcpToolFrame[]) => readonly AcpToolFrame[],
+	): void {
+		const state = record.toolViews.get(event.toolCallId) ?? INITIAL_ACP_TOOL_VIEW;
+		const context = this.#buildRenderContext(record);
+		let step: AcpToolViewStep;
+		try {
+			step = reduceAcpToolView(state, event.event, context);
+		} catch (error) {
+			// A continuity violation is a producer/reducer bug, never client data. It
+			// must not be swallowed into a silently degraded card: poison the queue so
+			// the prompt fails deterministically instead of implying the client's view is
+			// intact.
+			logger.error("ACP presentation reducer rejected an event", {
+				sessionId: record.session.sessionId,
+				toolCallId: event.toolCallId,
+				eventType: event.event.type,
+				error,
+			});
+			record.outbound.poison(error);
+			if (event.event.type === "settled") this.#resolvePresentationSettlementDelivery(record, event.toolCallId);
+			return;
+		}
+
+		let checked: readonly CheckedToolNotification[];
+		try {
+			checked = encodeToolFrames(record.session.sessionId, transformFrames?.(step.frames) ?? step.frames);
+		} catch (error) {
+			// Same failure class as a reducer rejection, and must poison for the same
+			// reason — but *before* touching `record.toolViews`, so a poisoned prompt
+			// never leaves the reducer's state ahead of what actually reached the wire.
+			logger.error("ACP tool frame encoder rejected a reduced frame", {
+				sessionId: record.session.sessionId,
+				toolCallId: event.toolCallId,
+				eventType: event.event.type,
+				error,
+			});
+			record.outbound.poison(error);
+			if (event.event.type === "settled") this.#resolvePresentationSettlementDelivery(record, event.toolCallId);
+			return;
+		}
+
+		record.toolViews.set(event.toolCallId, step.state);
+
+		const isStart = event.event.type === "started";
+		// The call's ordering state is released by its **delivered** settlement, not by
+		// reaching the settled state here: under a slow writer the start batch can still
+		// be in flight, and its completion re-adds the id after an eager release.
+		const isFinal = step.state.state === "settled";
+		if (isFinal) record.toolViews.delete(event.toolCallId);
+		if (checked.length > 0 || isFinal) {
+			void record.outbound
+				.enqueue(
+					async () => {
+						for (const notification of checked) {
+							await this.#sendToolUpdate(notification);
+						}
+						// A live client terminal is released through the same FIFO only after
+						// every final fact/status/terminal_exit frame has reached the writer.
+						// Releasing from Bash's execute finally races ahead of the agent loop's
+						// freeze + settled emission under a slow client.
+						if (isFinal) await this.#releaseClientTerminalAfterSettlement(record, event.toolCallId);
+					},
+					{ toolCallId: event.toolCallId, isStart, isFinal },
+				)
+				.then(
+					() => {
+						if (isFinal) this.#resolvePresentationSettlementDelivery(record, event.toolCallId);
+					},
+					() => {
+						if (isFinal) this.#resolvePresentationSettlementDelivery(record, event.toolCallId);
+					},
+				);
+		}
+	}
+
+	#handleLegacyEditEvent(
+		record: ManagedSessionRecord,
+		event: Extract<
+			AgentSessionEvent,
+			{ type: "tool_execution_start" | "tool_execution_update" | "tool_execution_end" }
+		>,
+		source: Extract<ToolSource, { origin: "builtin" }>,
+		resolveImageData: (data: string, mimeType: string | undefined) => string,
+	): void {
+		if (source.name !== event.toolName || !isLegacyEditToolName(source.name)) return;
+		try {
+			switch (event.type) {
+				case "tool_execution_start":
+					record.toolArgsById.set(event.toolCallId, event.args);
+					this.#handleToolPresentationEvent(record, {
+						type: "tool_presentation",
+						toolCallId: event.toolCallId,
+						toolName: event.toolName,
+						event: legacyEditStartedEvent(
+							buildToolCallPresentation({
+								toolCallId: event.toolCallId,
+								toolName: event.toolName,
+								args: event.args,
+								...(event.intent === undefined ? {} : { intent: event.intent }),
+								cwd: record.session.sessionManager.getCwd(),
+							}),
+						),
+					});
+					return;
+				case "tool_execution_update": {
+					const result = this.#parseLegacyEditResult(source, event.partialResult);
+					this.#enqueueLegacyEditFrames(
+						record,
+						event.toolCallId,
+						legacyEditUpdateFrames(
+							event.toolCallId,
+							result,
+							extractToolLocations(event.args, record.session.sessionManager.getCwd()).map(location => ({
+								path: location.path,
+								...(location.line === null ? {} : { line: location.line }),
+							})),
+							resolveImageData,
+						),
+					);
+					return;
+				}
+				case "tool_execution_end": {
+					const result = this.#parseLegacyEditResult(source, event.result);
+					for (const presentationEvent of legacyEditSettlementEvents(
+						event.toolCallId,
+						result,
+						event.isError === true || result.isError,
+						formatOutputNotice,
+						resolveImageData,
+					)) {
+						this.#handleToolPresentationEvent(
+							record,
+							{
+								type: "tool_presentation",
+								toolCallId: event.toolCallId,
+								toolName: event.toolName,
+								event: presentationEvent,
+							},
+							presentationEvent.type === "settled"
+								? frames =>
+										legacyEditFramesWithLocations(
+											event.toolCallId,
+											frames,
+											result,
+											record.session.sessionManager.getCwd(),
+											this.#resolveEditLocationPath,
+										)
+								: undefined,
+						);
+					}
+					record.toolArgsById.delete(event.toolCallId);
+					return;
+				}
+				default: {
+					const exhaustive: never = event;
+					throw new Error(`Unhandled legacy edit event: ${JSON.stringify(exhaustive)}`);
+				}
+			}
+		} catch (error) {
+			logger.error("ACP legacy edit adapter rejected an event", {
+				sessionId: record.session.sessionId,
+				toolCallId: event.toolCallId,
+				eventType: event.type,
+				error,
+			});
+			record.outbound.poison(error);
+			if (event.type === "tool_execution_end") this.#resolvePresentationSettlementDelivery(record, event.toolCallId);
+		}
+	}
+
+	#parseLegacyEditResult(source: Extract<ToolSource, { origin: "builtin" }>, result: unknown): EditResult {
+		// Production path: degrade converts an unparseable built-in edit result into
+		// a minimal typed result — salvaged content blocks, envelope `isError`, empty
+		// details (`editThrownFailureDetailsSchema` is `strictObject({})`, which
+		// `editDetailsRows()` renders as no rows) — so it settles as an empty/failed
+		// card instead of poisoning the whole prompt via `record.outbound.poison`.
+		// Strict parsing remains the dev/test default (§3.4).
+		const parsed = parseLegacyToolResult(source, result, { onBuiltinSchemaError: "degrade" });
+		if (parsed.tool === "edit") return parsed;
+		if (parsed.tool === "unmodelled_builtin") {
+			logger.warn("ACP legacy edit result failed its schema; degrading to a minimal typed result", {
+				toolName: parsed.toolName,
+				isError: parsed.isError,
+				degraded: true,
+			});
+			return {
+				tool: "edit",
+				toolName: parsed.toolName,
+				content: parsed.content,
+				isError: parsed.isError,
+				details: {},
+			};
+		}
+		throw new Error(`Legacy edit result for ${source.name} parsed as ${parsed.tool}`);
+	}
+
+	#handleLegacyBashEvent(
+		record: ManagedSessionRecord,
+		event: Extract<
+			AgentSessionEvent,
+			{ type: "tool_execution_start" | "tool_execution_update" | "tool_execution_end" }
+		>,
+		source: Extract<ToolSource, { origin: "builtin" }>,
+	): void {
+		if (source.name !== event.toolName || !isLegacyBashToolName(source.name)) return;
+		try {
+			switch (event.type) {
+				case "tool_execution_start": {
+					record.toolArgsById.set(event.toolCallId, event.args);
+					record.legacyBashPresentations.set(event.toolCallId, new LegacyBashPresentation(event.toolCallId));
+					this.#handleToolPresentationEvent(record, {
+						type: "tool_presentation",
+						toolCallId: event.toolCallId,
+						toolName: event.toolName,
+						event: legacyBashStartedEvent(
+							buildToolCallPresentation({
+								toolCallId: event.toolCallId,
+								toolName: event.toolName,
+								args: event.args,
+								...(event.intent === undefined ? {} : { intent: event.intent }),
+								cwd: record.session.sessionManager.getCwd(),
+							}),
+						),
+					});
+					return;
+				}
+				case "tool_execution_update": {
+					const result = this.#parseLegacyBashResult(source, event.partialResult);
+					const presentation = this.#legacyBashPresentation(record, event.toolCallId);
+					if (presentation === undefined) return;
+					for (const presentationEvent of presentation.update(result)) {
+						this.#handleToolPresentationEvent(record, {
+							type: "tool_presentation",
+							toolCallId: event.toolCallId,
+							toolName: event.toolName,
+							event: presentationEvent,
+						});
+					}
+					return;
+				}
+				case "tool_execution_end": {
+					const result = this.#parseLegacyBashResult(source, event.result);
+					const presentation = this.#legacyBashPresentation(record, event.toolCallId);
+					if (presentation === undefined) return;
+					for (const presentationEvent of presentation.settle(result, event.isError === true)) {
+						this.#handleToolPresentationEvent(record, {
+							type: "tool_presentation",
+							toolCallId: event.toolCallId,
+							toolName: event.toolName,
+							event: presentationEvent,
+						});
+					}
+					record.toolArgsById.delete(event.toolCallId);
+					record.legacyBashPresentations.delete(event.toolCallId);
+					return;
+				}
+				default: {
+					const exhaustive: never = event;
+					throw new Error(`Unhandled legacy bash event: ${JSON.stringify(exhaustive)}`);
+				}
+			}
+		} catch (error) {
+			logger.error("ACP legacy bash adapter rejected an event", {
+				sessionId: record.session.sessionId,
+				toolCallId: event.toolCallId,
+				eventType: event.type,
+				error,
+			});
+			record.outbound.poison(error);
+			if (event.type === "tool_execution_end") {
+				record.toolArgsById.delete(event.toolCallId);
+				record.legacyBashPresentations.delete(event.toolCallId);
+				this.#resolvePresentationSettlementDelivery(record, event.toolCallId);
+			}
+		}
+	}
+
+	#legacyBashPresentation(record: ManagedSessionRecord, toolCallId: string): LegacyBashPresentation | undefined {
+		return record.legacyBashPresentations.get(toolCallId);
+	}
+
+	#parseLegacyBashResult(source: Extract<ToolSource, { origin: "builtin" }>, result: unknown): BashLikeResult {
+		// Production path: degrade converts an unparseable built-in bash result into
+		// a minimal typed result — salvaged content blocks, envelope `isError`,
+		// empty details (`legacyBashDetailsSchema` admits `{}`) — so it settles as
+		// an empty/failed card instead of poisoning the whole prompt via
+		// `record.outbound.poison`. Same rationale as `#parseLegacyEditResult`;
+		// strict parsing remains the dev/test default (§3.4).
+		const parsed = parseLegacyToolResult(source, result, { onBuiltinSchemaError: "degrade" });
+		if (parsed.tool === "bash") return parsed;
+		if (parsed.tool === "unmodelled_builtin") {
+			logger.warn("ACP legacy bash result failed its schema; degrading to a minimal typed result", {
+				toolName: parsed.toolName,
+				isError: parsed.isError,
+				degraded: true,
+			});
+			return {
+				tool: "bash",
+				toolName: parsed.toolName,
+				content: parsed.content,
+				isError: parsed.isError,
+				details: {},
+			};
+		}
+		throw new Error(`Legacy bash result for ${source.name} parsed as ${parsed.tool}`);
+	}
+
+	#handleLegacyEvalEvent(
+		record: ManagedSessionRecord,
+		event: Extract<
+			AgentSessionEvent,
+			{ type: "tool_execution_start" | "tool_execution_update" | "tool_execution_end" }
+		>,
+		source: Extract<ToolSource, { origin: "builtin" }>,
+	): void {
+		if (source.name !== event.toolName || source.name !== "eval") return;
+		try {
+			switch (event.type) {
+				case "tool_execution_start": {
+					record.toolArgsById.set(event.toolCallId, event.args);
+					record.legacyEvalPresentations.set(
+						event.toolCallId,
+						new LegacyEvalPresentation(event.toolCallId, formatLegacyOutputNotice),
+					);
+					const call = buildToolCallPresentation({
+						toolCallId: event.toolCallId,
+						toolName: event.toolName,
+						args: event.args,
+						...(event.intent === undefined ? {} : { intent: event.intent }),
+						cwd: record.session.sessionManager.getCwd(),
+					});
+					const code = legacyEvalCode(event.args);
+					this.#handleToolPresentationEvent(record, {
+						type: "tool_presentation",
+						toolCallId: event.toolCallId,
+						toolName: event.toolName,
+						event: {
+							type: "started",
+							call: { ...call, ...(code === undefined ? {} : { sourceEcho: code }) },
+						},
+					});
+					return;
+				}
+				case "tool_execution_update": {
+					const result = this.#parseLegacyEvalResult(source, event.partialResult);
+					const presentation = this.#legacyEvalPresentation(record, event.toolCallId);
+					if (presentation === undefined) return;
+					for (const presentationEvent of presentation.update(result)) {
+						this.#handleToolPresentationEvent(record, {
+							type: "tool_presentation",
+							toolCallId: event.toolCallId,
+							toolName: event.toolName,
+							event: presentationEvent,
+						});
+					}
+					return;
+				}
+				case "tool_execution_end": {
+					const result = this.#parseLegacyEvalResult(source, event.result);
+					const presentation = this.#legacyEvalPresentation(record, event.toolCallId);
+					if (presentation === undefined) return;
+					for (const presentationEvent of presentation.settle(result, event.isError === true)) {
+						this.#handleToolPresentationEvent(record, {
+							type: "tool_presentation",
+							toolCallId: event.toolCallId,
+							toolName: event.toolName,
+							event: presentationEvent,
+						});
+					}
+					record.toolArgsById.delete(event.toolCallId);
+					record.legacyEvalPresentations.delete(event.toolCallId);
+					return;
+				}
+				default: {
+					const exhaustive: never = event;
+					throw new Error(`Unhandled legacy eval event: ${JSON.stringify(exhaustive)}`);
+				}
+			}
+		} catch (error) {
+			logger.error("ACP legacy eval adapter rejected an event", {
+				sessionId: record.session.sessionId,
+				toolCallId: event.toolCallId,
+				eventType: event.type,
+				error,
+			});
+			record.outbound.poison(error);
+			if (event.type === "tool_execution_end") {
+				record.toolArgsById.delete(event.toolCallId);
+				record.legacyEvalPresentations.delete(event.toolCallId);
+				this.#resolvePresentationSettlementDelivery(record, event.toolCallId);
+			}
+		}
+	}
+
+	#legacyEvalPresentation(record: ManagedSessionRecord, toolCallId: string): LegacyEvalPresentation | undefined {
+		return record.legacyEvalPresentations.get(toolCallId);
+	}
+
+	#parseLegacyEvalResult(source: Extract<ToolSource, { origin: "builtin" }>, result: unknown): EvalResult {
+		// Production path: degrade converts an unparseable built-in eval result into
+		// a minimal typed result — salvaged content blocks, envelope `isError`,
+		// empty details (`evalDetailsSchema` admits `{}` and LegacyEvalPresentation
+		// reads detail fields undefined-tolerantly) — so it settles as an
+		// empty/failed card instead of poisoning the whole prompt via
+		// `record.outbound.poison`. Same rationale as `#parseLegacyEditResult`;
+		// strict parsing remains the dev/test default (§3.4).
+		const parsed = parseLegacyToolResult(source, result, { onBuiltinSchemaError: "degrade" });
+		if (parsed.tool === "eval") return parsed;
+		if (parsed.tool === "unmodelled_builtin") {
+			logger.warn("ACP legacy eval result failed its schema; degrading to a minimal typed result", {
+				toolName: parsed.toolName,
+				isError: parsed.isError,
+				degraded: true,
+			});
+			return {
+				tool: "eval",
+				toolName: parsed.toolName,
+				content: parsed.content,
+				isError: parsed.isError,
+				details: {},
+			};
+		}
+		throw new Error(`Legacy eval result for ${source.name} parsed as ${parsed.tool}`);
+	}
+
+	#resolveEditLocationPath(path: string, cwd: string): string {
+		try {
+			return resolveToCwd(path, cwd);
+		} catch {
+			return path;
+		}
+	}
+
+	#enqueueLegacyEditFrames(record: ManagedSessionRecord, toolCallId: string, frames: readonly AcpToolFrame[]): void {
+		let checked: readonly CheckedToolNotification[];
+		try {
+			checked = encodeToolFrames(record.session.sessionId, frames);
+		} catch (error) {
+			record.outbound.poison(error);
+			return;
+		}
+		void record.outbound.enqueue(
+			async () => {
+				for (const notification of checked) await this.#sendToolUpdate(notification);
+			},
+			{ toolCallId },
+		);
+	}
+
+	#waitForPresentationSettlementDelivery(record: ManagedSessionRecord, toolCallId: string): Promise<void> {
+		const existing = record.presentationSettlementDeliveries.get(toolCallId);
+		if (existing) return existing.promise;
+		const delivery = Promise.withResolvers<void>();
+		record.presentationSettlementDeliveries.set(toolCallId, delivery);
+		return delivery.promise;
+	}
+
+	#resolvePresentationSettlementDelivery(record: ManagedSessionRecord, toolCallId: string): void {
+		const delivery = record.presentationSettlementDeliveries.get(toolCallId);
+		if (!delivery) return;
+		record.presentationSettlementDeliveries.delete(toolCallId);
+		delivery.resolve();
+	}
+
+	/** Release the ACP bridge's terminal after its call's settlement writer batch. */
+	async #releaseClientTerminalAfterSettlement(record: ManagedSessionRecord, toolCallId: string): Promise<void> {
+		const released = await Promise.race([
+			this.#tryReleaseClientTerminalAfterSettlement(record, toolCallId).then(() => true),
+			Bun.sleep(ACP_TERMINAL_RELEASE_GRACE_MS).then(() => false),
+		]);
+		if (!released) {
+			logger.warn("ACP terminal release did not settle after presentation settlement", {
+				toolCallId,
+				graceMs: ACP_TERMINAL_RELEASE_GRACE_MS,
+			});
+		}
+	}
+
+	async #tryReleaseClientTerminalAfterSettlement(record: ManagedSessionRecord, toolCallId: string): Promise<void> {
+		try {
+			await record.session.clientBridge?.releaseTerminalAfterPresentationSettlement?.(toolCallId);
+		} catch (error) {
+			// Terminal release used to be best-effort in Bash's `finally`; preserve that
+			// failure policy while moving its *ordering* behind the delivered settlement.
+			logger.warn("ACP terminal release failed after presentation settlement", { toolCallId, error });
+		}
+	}
+
+	/**
+	 * The render context for this connection: a phase crossed with the terminal
+	 * capability actually negotiated at `initialize`.
+	 *
+	 * This replaces the scattered `wantsMetaTerminal`/`isPtyRequested`/
+	 * `hasTerminalItem` re-derivations whose disagreement was its own bug class —
+	 * the reducer selects a channel once, at `started`, from this single value.
+	 */
+	#buildRenderContext(record: ManagedSessionRecord): AcpRenderContext {
+		const metaCap = negotiateTerminalMetaCap(this.#terminalMetaCapable());
+		const cwd = record.session.sessionManager.getCwd();
+		if (this.#clientCapabilities?.terminal === true) {
+			return {
+				phase: "live",
+				terminal: { kind: "real", metaCap },
+				...(cwd === undefined ? {} : { cwd }),
+				fence: true,
+			};
+		}
+		return {
+			phase: "live",
+			terminal: metaCap === undefined ? { kind: "none" } : { kind: "meta_only", cap: metaCap },
+			...(cwd === undefined ? {} : { cwd }),
+			fence: true,
+		};
 	}
 
 	/**
@@ -1508,7 +2521,7 @@ export class AcpAgent implements Agent {
 			return;
 		}
 		progress.textEmitted = true;
-		await this.#connection.sessionUpdate({
+		await this.#sendUpdate({
 			sessionId: record.session.sessionId,
 			update: {
 				sessionUpdate: "agent_message_chunk",
@@ -1546,7 +2559,7 @@ export class AcpAgent implements Agent {
 		if (!errorMessage || isSilentAbort(lastAssistant)) {
 			return;
 		}
-		await this.#connection.sessionUpdate({
+		await this.#sendUpdate({
 			sessionId: record.session.sessionId,
 			update: {
 				sessionUpdate: "agent_message_chunk",
@@ -1563,11 +2576,37 @@ export class AcpAgent implements Agent {
 				timeoutMs: ACP_ASYNC_DELIVERY_DRAIN_TIMEOUT_MS,
 			});
 			if (!delivered) {
+				await this.#drainOutbound(record);
 				return;
 			}
 		}
 
 		await record.session.waitForIdle();
+		await this.#drainOutbound(record);
+	}
+
+	/**
+	 * Wait for every queued outbound frame to reach the writer.
+	 *
+	 * `prompt()` must not resolve while a tool call's settlement/status/terminal-exit
+	 * batch is still sitting in the FIFO: the reducer enqueues those batches
+	 * fire-and-forget (delivery order is the coordinator's job, not the event
+	 * handler's), so without this a slow writer let the ACP response overtake the
+	 * frames that describe the turn's own result.
+	 *
+	 * A poisoned coordinator rejects instead of draining; that is a terminal state
+	 * whose owner is `#terminateSessionOnOutboundFailure`, so swallowing it here does
+	 * not lose the failure.
+	 */
+	async #drainOutbound(record: ManagedSessionRecord): Promise<void> {
+		try {
+			await record.outbound.idle();
+		} catch (error) {
+			logger.warn("ACP outbound queue did not drain before the prompt finished", {
+				sessionId: record.session.sessionId,
+				error,
+			});
+		}
 	}
 
 	#prepareLiveAssistantMessage(record: ManagedSessionRecord, event: AgentSessionEvent): void {
@@ -1621,7 +2660,16 @@ export class AcpAgent implements Agent {
 			return;
 		}
 		promptTurn.settled = true;
-		promptTurn.unsubscribe?.();
+		// `settled` means the ACP *response* is resolved. It does not mean cleanup has
+		// been delivered, and the two must not share one flag: when a cancel is in
+		// flight the subscription has to stay installed so already-started tool calls
+		// still reach their `settled` event and drain their terminal-exit frames.
+		// `#runCancelCleanup` unsubscribes once the queue is drained (or the bounded
+		// timeout closes the session).
+		if (!promptTurn.cancelRequested) {
+			promptTurn.unsubscribe?.();
+			promptTurn.unsubscribe = undefined;
+		}
 		// Keep the slot occupied until cancel cleanup finishes — `#runCancelCleanup`
 		// evicts the slot in its finally block once both flags say it's safe.
 		if (!promptTurn.cleanup && record.promptTurn === promptTurn) {
@@ -1666,7 +2714,7 @@ export class AcpAgent implements Agent {
 		if (!text) {
 			return;
 		}
-		await this.#connection.sessionUpdate({
+		await this.#sendUpdate({
 			sessionId: record.session.sessionId,
 			update: {
 				sessionUpdate: "agent_message_chunk",
@@ -1725,7 +2773,7 @@ export class AcpAgent implements Agent {
 	}
 
 	async #pushConfigOptionUpdateForSession(session: AgentSession): Promise<void> {
-		await this.#connection.sessionUpdate({
+		await this.#sendUpdate({
 			sessionId: session.sessionId,
 			update: {
 				sessionUpdate: "config_option_update",
@@ -1924,7 +2972,7 @@ export class AcpAgent implements Agent {
 		session.setPlanProposalHandler?.(null);
 		session.setPlanModeState(undefined);
 		try {
-			await this.#connection.sessionUpdate({
+			await this.#sendUpdate({
 				sessionId: session.sessionId,
 				update: this.#buildCurrentModeUpdate(session),
 			});
@@ -2089,18 +3137,62 @@ export class AcpAgent implements Agent {
 		}, ACP_BOOTSTRAP_RACE_GUARD_MS);
 	}
 
+	/**
+	 * Stream a freshly-forked session's copied history to the client, the same
+	 * way `loadSession` streams a loaded session's — `#forkManagedSession`
+	 * already hydrates the *backend* session onto the fork (`switchSession` +
+	 * `session.fork()`); this is the missing wire step that tells the client.
+	 *
+	 * Unlike `loadSession`, the client cannot possibly know this session id
+	 * before the `unstable_forkSession` response reaches it — `session/load`'s
+	 * id comes from the client's own request, but a fork mints a brand-new id
+	 * server-side. A real client (see Zed's `agent_servers::acp`) only
+	 * registers a session id in its dispatch table once it observes that id —
+	 * for `session/load` that happens *before* the request is even sent, but
+	 * for fork there is no such hook, only the response. Replaying inline here,
+	 * mirroring `loadSession`'s exact call site, would therefore emit every
+	 * notification for a session id the client has not registered yet and get
+	 * every one silently dropped ("Received session notification for unknown
+	 * session") — the identical race `#scheduleBootstrapUpdates` exists to
+	 * dodge for `available_commands_update`/`session_info_update`. So this
+	 * replay is deferred behind the same `ACP_BOOTSTRAP_RACE_GUARD_MS` guard.
+	 *
+	 * The caller parks this promise on `record.promptQueue` so a prompt issued
+	 * the instant the client reads `sessionId` from the response queues behind
+	 * the replay instead of interleaving a live turn into the transcript.
+	 */
+	#replayForkedSessionHistory(record: ManagedSessionRecord): Promise<void> {
+		const sessionId = record.session.sessionId;
+		const { promise, resolve } = Promise.withResolvers<void>();
+		setTimeout(() => {
+			void (async () => {
+				try {
+					if (this.#connection.signal.aborted) return;
+					if (this.#sessions.get(sessionId) !== record) return;
+					await this.#replaySessionHistory(record);
+				} catch (error) {
+					logger.error("ACP forked-session history replay failed", { sessionId, error });
+					record.outbound.poison(error);
+				} finally {
+					resolve();
+				}
+			})();
+		}, ACP_BOOTSTRAP_RACE_GUARD_MS);
+		return promise;
+	}
+
 	async #emitBootstrapUpdates(sessionId: string, record: ManagedSessionRecord): Promise<void> {
 		if (this.#sessions.get(sessionId) !== record) {
 			return;
 		}
-		await this.#connection.sessionUpdate({
+		await this.#sendUpdate({
 			sessionId,
 			update: {
 				sessionUpdate: "available_commands_update",
 				availableCommands: await this.#buildAvailableCommands(record.session),
 			},
 		});
-		await this.#connection.sessionUpdate({
+		await this.#sendUpdate({
 			sessionId,
 			update: {
 				sessionUpdate: "session_info_update",
@@ -2111,7 +3203,7 @@ export class AcpAgent implements Agent {
 	}
 
 	async #emitAvailableCommandsUpdate(record: ManagedSessionRecord): Promise<void> {
-		await this.#connection.sessionUpdate({
+		await this.#sendUpdate({
 			sessionId: record.session.sessionId,
 			update: {
 				sessionUpdate: "available_commands_update",
@@ -2148,7 +3240,7 @@ export class AcpAgent implements Agent {
 		const contextUsage = record.session.getContextUsage();
 		if (contextUsage) {
 			const usageStats = record.session.sessionManager.getUsageStatistics();
-			await this.#connection.sessionUpdate({
+			await this.#sendUpdate({
 				sessionId,
 				update: {
 					sessionUpdate: "usage_update",
@@ -2159,7 +3251,7 @@ export class AcpAgent implements Agent {
 			});
 		}
 
-		await this.#connection.sessionUpdate({
+		await this.#sendUpdate({
 			sessionId,
 			update: {
 				sessionUpdate: "session_info_update",
@@ -2246,30 +3338,85 @@ export class AcpAgent implements Agent {
 
 	async #replaySessionHistory(record: ManagedSessionRecord): Promise<void> {
 		const cwd = record.session.sessionManager.getCwd();
-		const replayedToolCallIds = new Set<string>();
-		const replayedToolCallArgs = new Map<string, unknown>();
-		for (const message of record.session.sessionManager.buildSessionContext().messages as ReplayableMessage[]) {
-			for (const notification of this.#messageToReplayNotifications(
-				record.session.sessionId,
-				message,
-				cwd,
-				replayedToolCallIds,
-				replayedToolCallArgs,
-			)) {
-				await this.#connection.sessionUpdate(notification);
+		// `buildSessionContext()` (the default) builds the *LLM* context: it
+		// collapses pre-compaction history behind a summary and silently strips
+		// tool calls left dangling by an interrupted/killed process (no
+		// persisted result yet) — exactly wrong for reconstructing what a human
+		// should see on `session/load`. `buildTranscriptSessionContext` is the
+		// dedicated full-fidelity display builder (the same one `--resume`'s
+		// initial TUI redraw uses): every entry in chronological order,
+		// compactions inline, and `keepDanglingToolCalls` keeps a still-running
+		// call visible as pending instead of erasing the box entirely.
+		const context = record.session.buildTranscriptSessionContext({ keepDanglingToolCalls: true });
+		const messages = context.messages as ReplayableMessage[];
+		const walk: AcpReplayWalk = {
+			sessionId: record.session.sessionId,
+			cwd,
+			renderContext: this.#buildReplayRenderContext(record),
+			// `transcriptOccurrences` must be counted over this exact `messages`
+			// array — the cursor's totality gate compares like with like.
+			journal: createReplayToolJournalCursor(
+				record.session.sessionManager.getBranch(),
+				countReplayToolCallOccurrences(messages),
+			),
+			bookkeeping: new ReplayToolCallBookkeeping(),
+		};
+		for (const message of messages) {
+			for (const update of this.#messageToReplayNotifications(walk, message)) {
+				if ("checked" in update) await this.#sendToolUpdate(update.checked);
+				else await this.#sendUpdate(update);
 			}
+		}
+		// `keepDanglingToolCalls` is only correct for a *live* stream, where the
+		// still-running call really will resolve later (see `ui-helpers.ts`'s
+		// `viewSession.isStreaming` gate for the TUI's equivalent). A loaded,
+		// no-longer-running session has no live execution left to finish a
+		// dangling call, but the mapper's `tool_execution_start` alone leaves
+		// Zed's card in `Pending` — a state Zed only ever clears on cancel or
+		// error (`acp_thread.rs`'s `mark_pending_entries_as_canceled`), never at
+		// normal turn end, so it would spin forever. ACP v1 has no `canceled`
+		// tool-call status, so `failed` is the terminal state available; this
+		// keeps the call visible (why `keepDanglingToolCalls` is used at all)
+		// without a permanent spinner. Hydrated calls are excluded from the
+		// announced bookkeeping (they already carry their own terminal
+		// settlement or `interrupted` frame from the reducer), so this loop
+		// never double-settles one.
+		for (const toolCallId of walk.bookkeeping.danglingAnnouncedIds()) {
+			const explanation = "Interrupted: no result recorded before the process ended.";
+			await this.#sendUpdate({
+				sessionId: record.session.sessionId,
+				update: {
+					sessionUpdate: "tool_call_update",
+					toolCallId,
+					status: "failed",
+					content: [{ type: "content", content: { type: "text", text: explanation } }],
+				},
+			});
 		}
 	}
 
-	#messageToReplayNotifications(
-		sessionId: string,
-		message: ReplayableMessage,
-		cwd: string,
-		replayedToolCallIds: Set<string>,
-		replayedToolCallArgs: Map<string, unknown>,
-	): SessionNotification[] {
+	/**
+	 * The render context for replaying persisted tool journal entries — a
+	 * `phase: "replay"` counterpart to `#buildRenderContext`. `session/load` has
+	 * no live client-owned terminal to attach (there is no execution in
+	 * flight), so even a terminal-capable client renders through the
+	 * display-only meta terminal on replay, matching `hydrateReplayableToolExecution`'s
+	 * own documented rationale.
+	 */
+	#buildReplayRenderContext(record: ManagedSessionRecord): AcpRenderContext {
+		const metaCap = negotiateTerminalMetaCap(this.#terminalMetaCapable());
+		const cwd = record.session.sessionManager.getCwd();
+		return {
+			phase: "replay",
+			terminal: metaCap === undefined ? { kind: "none" } : { kind: "meta_only", cap: metaCap },
+			...(cwd === undefined ? {} : { cwd }),
+			fence: true,
+		};
+	}
+
+	#messageToReplayNotifications(walk: AcpReplayWalk, message: ReplayableMessage): AcpReplayUpdate[] {
 		if (message.role === "assistant") {
-			return this.#replayAssistantMessage(sessionId, message, cwd, replayedToolCallIds, replayedToolCallArgs);
+			return this.#replayAssistantMessage(walk, message);
 		}
 		if (
 			message.role === "user" ||
@@ -2278,7 +3425,7 @@ export class AcpAgent implements Agent {
 			message.role === "hookMessage"
 		) {
 			return this.#wrapReplayContent(
-				sessionId,
+				walk.sessionId,
 				this.#extractReplayContent(message.content, undefined),
 				"user_message_chunk",
 				crypto.randomUUID(),
@@ -2289,19 +3436,33 @@ export class AcpAgent implements Agent {
 			typeof message.toolCallId === "string" &&
 			typeof message.toolName === "string"
 		) {
-			return this.#replayToolResult(
-				sessionId,
-				cwd,
+			walk.bookkeeping.markResolved(message.toolCallId);
+			const todoPlan = buildLegacyReplayTodoPlanUpdate(message.toolName, message.isError, {
+				content: message.content,
+				details: message.details,
+			});
+			// A hydrated call already reached its terminal frame at its assistant-turn
+			// occurrence (`#replayHydratedToolExecution`); this settled/toolResult
+			// message is the same execution's legacy-shaped mirror, not a second
+			// notification to send.
+			const knownToolCall = walk.bookkeeping.wasReplayed(message.toolCallId);
+			const toolNotifications = this.#replayToolResult(
+				walk.sessionId,
+				walk.cwd,
 				{
 					...message,
 					toolCallId: message.toolCallId,
 					toolName: message.toolName,
 				},
 				{
-					includeStart: !replayedToolCallIds.has(message.toolCallId),
-					toolArgs: replayedToolCallArgs.get(message.toolCallId),
+					includeStart: !knownToolCall,
+					includeSettlement: !knownToolCall || walk.bookkeeping.wasAnnounced(message.toolCallId),
 				},
 			);
+			// Todo has two ACP projections: the tool call still needs its terminal
+			// settlement, then the persisted phases refresh the plan. Returning only
+			// the latter leaves a replayed pending tool card stuck forever.
+			return todoPlan ? [...toolNotifications, { sessionId: walk.sessionId, update: todoPlan }] : toolNotifications;
 		}
 		if (
 			message.role === "bashExecution" ||
@@ -2309,7 +3470,7 @@ export class AcpAgent implements Agent {
 			message.role === "compactionSummary"
 		) {
 			return this.#wrapReplayContent(
-				sessionId,
+				walk.sessionId,
 				this.#extractReplayContent(message.content, undefined),
 				"user_message_chunk",
 				crypto.randomUUID(),
@@ -2318,14 +3479,8 @@ export class AcpAgent implements Agent {
 		return [];
 	}
 
-	#replayAssistantMessage(
-		sessionId: string,
-		message: ReplayableMessage,
-		cwd: string,
-		replayedToolCallIds: Set<string>,
-		replayedToolCallArgs: Map<string, unknown>,
-	): SessionNotification[] {
-		const notifications: SessionNotification[] = [];
+	#replayAssistantMessage(walk: AcpReplayWalk, message: ReplayableMessage): AcpReplayUpdate[] {
+		const notifications: AcpReplayUpdate[] = [];
 		const messageId = crypto.randomUUID();
 		if (Array.isArray(message.content)) {
 			for (const item of message.content) {
@@ -2334,7 +3489,7 @@ export class AcpAgent implements Agent {
 				}
 				if (item.type === "text" && "text" in item && typeof item.text === "string" && item.text.length > 0) {
 					notifications.push({
-						sessionId,
+						sessionId: walk.sessionId,
 						update: {
 							sessionUpdate: "agent_message_chunk",
 							content: { type: "text", text: item.text },
@@ -2351,7 +3506,7 @@ export class AcpAgent implements Agent {
 					typeof item.mimeType === "string"
 				) {
 					notifications.push({
-						sessionId,
+						sessionId: walk.sessionId,
 						update: {
 							sessionUpdate: "agent_message_chunk",
 							content: { type: "image", data: item.data, mimeType: item.mimeType },
@@ -2364,7 +3519,7 @@ export class AcpAgent implements Agent {
 					const thinking = canonicalizeMessage(item.thinking);
 					if (thinking.length === 0) continue;
 					notifications.push({
-						sessionId,
+						sessionId: walk.sessionId,
 						update: {
 							sessionUpdate: "agent_thought_chunk",
 							content: { type: "text", text: thinking },
@@ -2374,32 +3529,39 @@ export class AcpAgent implements Agent {
 					continue;
 				}
 				const toolItem = item as ReplayableToolItem;
-				if (
-					(toolItem.type === "toolCall" || toolItem.type === "tool_use") &&
-					typeof toolItem.id === "string" &&
-					typeof toolItem.name === "string"
-				) {
+				if (isReplayableToolItem(toolItem)) {
+					// Route through the versioned hydration adapter whenever the branch's
+					// v4 tool journal actually has a record for *this* occurrence of the
+					// id; every pre-v4 session and every still-`legacy_snapshot`
+					// call falls through to the existing legacy-marker reconstruction below.
+					const execution = nextReplayableToolExecution(walk.journal, toolItem.id);
+					walk.bookkeeping.markReplayed(toolItem.id);
+					if (execution !== undefined) {
+						notifications.push(...this.#replayHydratedToolExecution(walk, toolItem.id, execution));
+						continue;
+					}
 					const args = this.#buildReplayAssistantToolArgs(toolItem);
-					notifications.push(
-						...mapAgentSessionEventToAcpSessionUpdates(
-							{
-								type: "tool_execution_start",
-								toolCallId: toolItem.id,
-								toolName: toolItem.name,
-								args,
-							},
-							sessionId,
-							{ cwd },
-						),
-					);
-					replayedToolCallIds.add(toolItem.id);
-					replayedToolCallArgs.set(toolItem.id, args);
+					const start = buildLegacyReplayToolCallStartUpdate({
+						toolCallId: toolItem.id,
+						toolName: toolItem.name,
+						args,
+						cwd: walk.cwd,
+					});
+					if (start) notifications.push({ sessionId: walk.sessionId, update: start });
+					// Only mark announced when a `tool_call` notification
+					// actually went out — that's the set the dangling-cleanup loop in
+					// `#replaySessionHistory` walks, so it never synthesizes a
+					// `tool_call_update` for a `toolCallId` the client was never told
+					// about.
+					if (start) {
+						walk.bookkeeping.markAnnounced(toolItem.id);
+					}
 				}
 			}
 		}
 		if (notifications.length === 0 && message.errorMessage && !isSilentAbort(message)) {
 			notifications.push({
-				sessionId,
+				sessionId: walk.sessionId,
 				update: {
 					sessionUpdate: "agent_message_chunk",
 					content: { type: "text", text: message.errorMessage },
@@ -2408,6 +3570,56 @@ export class AcpAgent implements Agent {
 			});
 		}
 		return notifications;
+	}
+
+	/**
+	 * Feed one correlated {@link ReplayableToolExecution} through the *same*
+	 * `hydrateReplayableToolExecution` → `reduceAcpToolView(phase:'replay')` →
+	 * `encodeToolFrames` pipeline `#handleToolPresentationEvent` uses live —
+	 * the whole point being there is no replay-specific frame
+	 * builder to drift from the live one. A settled or interrupted execution
+	 * reduces start-to-finish in one call, so this both produces the frames and
+	 * marks the call resolved; the dangling-cleanup loop in
+	 * `#replaySessionHistory` never sees it as outstanding.
+	 */
+	#replayHydratedToolExecution(
+		walk: AcpReplayWalk,
+		toolCallId: string,
+		execution: ReplayableToolExecution,
+	): AcpReplayUpdate[] {
+		// Fresh state, not carried over from a prior occurrence of this id: a
+		// `ReplayableToolExecution` is a complete `started` -> settlement sequence
+		// on its own, and this call's totality-gated pairing (see
+		// `ReplayToolJournalCursor`) means every occurrence of a hydrated id gets
+		// its own independent execution, never a continuation of the last one.
+		// Reusing the previous occurrence's terminal `settled` state here made
+		// `reduceStarted` reject the second occurrence as "started twice",
+		// poisoning the whole `session/load` on a fully-valid recycled-id pair.
+		let state = INITIAL_ACP_TOOL_VIEW;
+		const frames: AcpToolFrame[] = [];
+		try {
+			for (const event of hydrateReplayableToolExecution(execution)) {
+				const step = reduceAcpToolView(state, event, walk.renderContext);
+				state = step.state;
+				frames.push(...step.frames);
+			}
+			const checked = encodeToolFrames(walk.sessionId, frames);
+			walk.bookkeeping.markResolved(toolCallId);
+			return checked.map(notification => ({ checked: notification }));
+		} catch (error) {
+			// A malformed persisted record or a reducer/encoder rejection here is a
+			// producer/journal bug, never client data — the same class
+			// `#handleToolPresentationEvent` poisons the live queue for. There is no
+			// live prompt to poison during `session/load`, so the only honest move is
+			// to fail the load itself rather than silently falling back to the legacy
+			// path for a record that is supposed to be authoritative.
+			logger.error("ACP replay hydration rejected a persisted tool journal execution", {
+				sessionId: walk.sessionId,
+				toolCallId,
+				error,
+			});
+			throw error;
+		}
 	}
 
 	#buildReplayAssistantToolArgs(item: ReplayableToolItem): unknown {
@@ -2424,35 +3636,64 @@ export class AcpAgent implements Agent {
 		sessionId: string,
 		cwd: string,
 		message: Required<Pick<ReplayableMessage, "toolCallId" | "toolName">> & ReplayableMessage,
-		options: { includeStart?: boolean; toolArgs?: unknown } = {},
+		options: { includeStart?: boolean; includeSettlement?: boolean } = {},
 	): SessionNotification[] {
+		if (options.includeSettlement === false) return [];
 		const args = this.#buildReplayToolArgs(message.details);
-		const startEvent: AgentSessionEvent = {
-			type: "tool_execution_start",
+		const start = buildLegacyReplayToolCallStartUpdate({
 			toolCallId: message.toolCallId,
 			toolName: message.toolName,
 			args,
-		};
-		const endEvent: AgentSessionEvent = {
-			type: "tool_execution_end",
-			toolCallId: message.toolCallId,
-			toolName: message.toolName,
-			isError: message.isError === true,
-			result: {
-				content: message.content,
-				details: message.details,
-				errorMessage: message.errorMessage,
+			cwd,
+		});
+		const settlement: SessionNotification = {
+			sessionId,
+			update: {
+				sessionUpdate: "tool_call_update",
+				toolCallId: message.toolCallId,
+				status: message.isError === true ? "failed" : "completed",
+				content: this.#legacyReplayToolResultContent(message.content, message.errorMessage),
 			},
 		};
-		const notifications = mapAgentSessionEventToAcpSessionUpdates(endEvent, sessionId, {
-			cwd,
-			getToolArgs: toolCallId => (toolCallId === message.toolCallId ? options.toolArgs : undefined),
-			resolveImageData: (data, _mimeType) => resolveImageDataSync(this.#blobs, data),
-		});
-		if (options.includeStart === false) {
-			return notifications;
+		if (!start) return [];
+		return options.includeStart === false ? [settlement] : [{ sessionId, update: start }, settlement];
+	}
+
+	/**
+	 * Legacy persisted results are snapshots, not a presentation journal. Keep
+	 * their display authority to the settled body itself: no terminal details,
+	 * notices, diff reconstruction, or stream reconciliation may enter replay.
+	 */
+	#legacyReplayToolResultContent(content: unknown, errorMessage: string | undefined): ToolCallContent[] {
+		const replay: ToolCallContent[] = [];
+		if (Array.isArray(content)) {
+			for (const block of content) {
+				if (typeof block !== "object" || block === null) continue;
+				const legacyBlock = block as LegacyReplayBodyBlock;
+				if (legacyBlock.type === "text" && typeof legacyBlock.text === "string") {
+					replay.push({ type: "content", content: { type: "text", text: legacyBlock.text } });
+					continue;
+				}
+				if (
+					legacyBlock.type === "image" &&
+					typeof legacyBlock.data === "string" &&
+					typeof legacyBlock.mimeType === "string"
+				) {
+					replay.push({
+						type: "content",
+						content: {
+							type: "image",
+							data: resolveImageDataSync(this.#blobs, legacyBlock.data),
+							mimeType: legacyBlock.mimeType,
+						},
+					});
+				}
+			}
 		}
-		return [...mapAgentSessionEventToAcpSessionUpdates(startEvent, sessionId, { cwd }), ...notifications];
+		if (replay.length === 0 && errorMessage) {
+			replay.push({ type: "content", content: { type: "text", text: errorMessage } });
+		}
+		return replay;
 	}
 
 	#buildReplayToolArgs(details: unknown): { path?: string } {
@@ -2744,6 +3985,9 @@ export class AcpAgent implements Agent {
 
 	async #disposeSessionRecord(record: ManagedSessionRecord, reason?: postmortem.Reason): Promise<void> {
 		record.lifetimeUnsubscribe?.();
+		record.session.setPresentationSettlementDeliveryBarrier?.(undefined);
+		for (const delivery of record.presentationSettlementDeliveries.values()) delivery.resolve();
+		record.presentationSettlementDeliveries.clear();
 		if (record.mcpManager) {
 			try {
 				await record.mcpManager.disconnectAll();
@@ -2800,4 +4044,10 @@ export class AcpAgent implements Agent {
 
 		await this.#disposePromise;
 	}
+}
+
+function legacyEvalCode(args: unknown): string | undefined {
+	if (typeof args !== "object" || args === null || Array.isArray(args)) return undefined;
+	const code = (args as { readonly code?: unknown }).code;
+	return typeof code === "string" ? code : undefined;
 }

@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { ToolFactBody } from "@oh-my-pi/pi-agent-core/presentation";
 import { type FetchImpl, getEnvApiKey, type ImageContent, type TextContent } from "@oh-my-pi/pi-ai";
 import { htmlToMarkdown } from "@oh-my-pi/pi-natives";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
@@ -23,7 +24,7 @@ import { CONVERTIBLE_EXTENSIONS } from "../utils/markit";
 import { ensureTool } from "../utils/tools-manager";
 import { extractWithParallel, findParallelApiKey, getParallelExtractContent } from "../web/parallel";
 import type { RenderResult, SpecialHandler } from "../web/scrapers/types";
-import { finalizeOutput, loadPage, looksLikeHtml, MAX_BYTES, MAX_OUTPUT_CHARS } from "../web/scrapers/types";
+import { finalizeOutput, loadPage, looksLikeHtml, MAX_BYTES } from "../web/scrapers/types";
 import { convertWithMarkit, fetchBinary } from "../web/scrapers/utils";
 import { findCredential } from "../web/search/providers/utils";
 import { applyListLimit } from "./list-limit";
@@ -1569,6 +1570,16 @@ export interface ReadUrlToolDetails {
 	truncated: boolean;
 	notes: string[];
 	meta?: OutputMeta;
+	/**
+	 * Phase-3 escape hatch: the head-truncation fact body
+	 * `executeReadUrl` declares via `ToolResultBuilder#truncationFact`, so
+	 * `ReadTool`'s registered `modelContentProjection` renders this
+	 * delegate's notice through `renderNoticeTrail` too, matching every
+	 * other `read` truncation site (read.ts). `meta.truncation` above stays
+	 * populated exactly as before for every consumer that already reads it
+	 * (ACP mapper, `spillLargeResultToArtifact`, `renderReadUrlResult` below).
+	 */
+	presentationFacts?: readonly ToolFactBody[];
 }
 
 interface ReadUrlEntry {
@@ -1736,18 +1747,7 @@ export async function executeReadUrl(
 
 	const resultBuilder = toolResult(details).content(contentBlocks).sourceUrl(details.finalUrl);
 	if (needsArtifact) {
-		resultBuilder.truncation(truncation, { direction: "head", artifactId: entry.artifactId });
-	} else if (entry.details.truncated) {
-		const outputLines = entry.output.split("\n").length;
-		const outputBytes = Buffer.byteLength(entry.output, "utf-8");
-		const totalBytes = Math.max(outputBytes + 1, MAX_OUTPUT_CHARS + 1);
-		const totalLines = outputLines + 1;
-		resultBuilder.truncationFromText(entry.output, {
-			direction: "tail",
-			totalLines,
-			totalBytes,
-			maxBytes: MAX_OUTPUT_CHARS,
-		});
+		resultBuilder.truncationFact(truncation, { direction: "head", artifactId: entry.artifactId });
 	}
 
 	return resultBuilder.done();

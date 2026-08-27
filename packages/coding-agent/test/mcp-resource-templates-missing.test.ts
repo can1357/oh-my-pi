@@ -19,6 +19,7 @@ import { listResourceTemplates } from "../src/mcp/client";
 import { MCPManager } from "../src/mcp/manager";
 import type { MCPServerConnection, MCPStdioServerConfig, MCPTransport } from "../src/mcp/types";
 import { RESOURCE_URIS } from "./fixtures/resources-no-templates-mcp";
+import { connectServersAndWaitReady } from "./helpers/mcp-connect";
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "resources-no-templates-mcp.ts");
 const BUN_EXEC = process.execPath;
@@ -92,7 +93,10 @@ describe("MCPManager loads resources for a templates-less server", () => {
 		};
 
 		try {
-			await manager.connectServers({ docs: config }, {});
+			// `ensureServerResources` is a silent no-op for a server that isn't
+			// registered yet, and `connectServers` alone only waits out a fixed
+			// 250 ms startup budget — see `connectServersAndWaitReady`.
+			await connectServersAndWaitReady(manager, { docs: config });
 			await manager.ensureServerResources("docs");
 			const resources = manager.getServerResources("docs");
 
@@ -118,7 +122,7 @@ describe("MCPManager loads resources for a templates-less server", () => {
 		};
 
 		try {
-			await manager.connectServers({ docs: config }, {});
+			await connectServersAndWaitReady(manager, { docs: config });
 			await manager.ensureServerResources("docs");
 			const resources = manager.getServerResources("docs");
 

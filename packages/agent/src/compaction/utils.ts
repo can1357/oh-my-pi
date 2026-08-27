@@ -232,10 +232,12 @@ export function serializeConversation(messages: Message[], dialect?: Dialect): s
 	// Tool results flagged contextually useless (and their paired calls) are
 	// dropped from the serialized text: the source region is discarded after
 	// summarization anyway, so excluding them costs nothing and keeps garbage
-	// out of the summary input.
+	// out of the summary input. `useless` never coexists with `isError` (plan
+	// §3.5 decision 1, enforced once at the `coerceToolResult`/`emitToolResult`
+	// boundary), so no separate `isError` check is needed here.
 	const uselessCallIds = new Set<string>();
 	for (const msg of messages) {
-		if (msg.role === "toolResult" && msg.useless === true && msg.isError !== true) {
+		if (msg.role === "toolResult" && msg.useless === true) {
 			uselessCallIds.add(msg.toolCallId);
 		}
 	}

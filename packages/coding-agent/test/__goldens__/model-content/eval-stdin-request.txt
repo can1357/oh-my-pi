@@ -1,0 +1,6 @@
+--- text ---
+[Cell requested stdin; interactive input is unavailable]
+streamed-py-stdin-1
+
+
+Command exited with code 1

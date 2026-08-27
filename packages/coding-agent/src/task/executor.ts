@@ -878,9 +878,15 @@ export function createMCPProxyTools(mcpManager: MCPManager): CustomTool[] {
 					.getTools()
 					.find(t => t.mcpServerName === serverName && t.mcpToolName === mcpToolName);
 				if (!source?.execute) {
+					// Symmetric with `details.isError`: `tool-result.ts#toolResultFailed`'s
+					// interim fallback reads the top-level flag before it
+					// reads details, so a producer that sets only the nested flag reads as
+					// success there. Setting both flags here avoids that same asymmetry for
+					// this synthetic result.
 					return {
 						content: [{ type: "text" as const, text: `MCP error: tool ${mcpToolName} no longer available` }],
 						details: { serverName, mcpToolName, isError: true },
+						isError: true,
 					};
 				}
 				try {
@@ -905,6 +911,7 @@ export function createMCPProxyTools(mcpManager: MCPManager): CustomTool[] {
 							},
 						],
 						details: { serverName, mcpToolName, isError: true },
+						isError: true,
 					};
 				}
 			},

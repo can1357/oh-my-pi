@@ -33,6 +33,24 @@
 			}
 		}
 	},
+	"overrides": [
+		{
+			"includes": [
+				"packages/agent/src/presentation.ts",
+				"packages/agent/src/presentation/**/*.ts",
+				"packages/agent/test/presentation/**/*.ts",
+				"packages/coding-agent/src/presentation/**/*.ts",
+				"packages/coding-agent/src/modes/acp/**/*.ts"
+			],
+			"linter": {
+				"rules": {
+					"suspicious": {
+						"noExplicitAny": "error"
+					}
+				}
+			}
+		}
+	],
 	"formatter": {
 		"enabled": true,
 		"indentStyle": "tab",

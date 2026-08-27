@@ -51,7 +51,11 @@ import {
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
 } from "../../session/messages";
-import type { SessionContext, StrippedToolCallsMarker } from "../../session/session-context";
+import type {
+	InterruptedToolCallsMarker,
+	SessionContext,
+	StrippedToolCallsMarker,
+} from "../../session/session-context";
 import { replaceTabs } from "../../tools/render-utils";
 import { buildSkillCommandPrompt, invokeSkillCommandFromText, isKnownSkillCommand } from "../skill-command";
 import { createAssistantMessageComponent } from "./interactive-context-helpers";
@@ -598,11 +602,55 @@ export class UiHelpers {
 					}
 					appendAssistantSegment(afterToolSegment);
 				}
+				// A dangling toolCall whose v4 journal record proves it started but
+				// never settled renders as its own interrupted card — the real title
+				// and reason the journal persisted, not just a count.
+				const interruptedToolCalls =
+					(message as AgentMessage & InterruptedToolCallsMarker).interruptedToolCalls ?? [];
+				if (interruptedToolCalls.length > 0) {
+					readGroup?.seal();
+					readGroup = null;
+					for (const execution of interruptedToolCalls) {
+						// The journal cannot distinguish a still-running execution from an
+						// abandoned one — both are a `started` record with no settlement.
+						// A caller that preserved a live component for this id across a
+						// rebuild (`interactive-mode.ts`'s `rebuildChatFromMessages`) has
+						// already decided it, not this replayed card, is the sole render
+						// owner; rendering both would double the on-screen block.
+						if (options.preservedLiveToolCallIds?.has(execution.call.toolCallId)) continue;
+						const tool = this.ctx.viewSession.getToolByName(execution.call.toolName);
+						const component = new ToolExecutionComponent(
+							execution.call.toolName,
+							{ ...execution.call.rawInput },
+							{
+								snapshots: getFileSnapshotStore(this.ctx.viewSession),
+								clipboard: getEditClipboard(this.ctx.viewSession),
+								showImages: settings.get("terminal.showImages"),
+								editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
+								editAllowFuzzy: settings.get("edit.fuzzyMatch"),
+							},
+							tool,
+							this.ctx.ui,
+							this.ctx.viewSession.sessionManager.getCwd(),
+							execution.call.toolCallId,
+						);
+						component.setExpanded(this.ctx.toolOutputExpanded);
+						this.ctx.chatContainer.addChild(component);
+						component.setArgsComplete(execution.call.toolCallId);
+						component.updateResult(
+							{ content: [{ type: "text", text: execution.reason }], isError: true },
+							false,
+							execution.call.toolCallId,
+						);
+						component.seal();
+					}
+				}
 				// Dangling toolCalls (no result on the resolved path — failed or
 				// retried turns, results on sibling branches) were stripped by the
 				// context build; surface a placeholder so the turn's activity is
 				// visibly elided instead of silently vanishing (the "bare thinking
-				// lines" transcript trap).
+				// lines" transcript trap). Calls the journal accounted for above are
+				// excluded from this count — they rendered as real cards, not elisions.
 				const strippedToolCalls = (message as AgentMessage & StrippedToolCallsMarker).strippedToolCalls ?? 0;
 				if (strippedToolCalls > 0) {
 					this.ctx.chatContainer.addChild(

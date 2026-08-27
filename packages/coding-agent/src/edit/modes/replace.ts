@@ -11,9 +11,11 @@ import type { FileDiagnosticsResult, WritethroughCallback, WritethroughDeferredH
 import type { ToolSession } from "../../tools";
 import { routeWriteThroughBridge } from "../../tools/acp-bridge";
 import { invalidateFsScanAfterWrite } from "../../tools/fs-cache-invalidation";
+import { outputMeta } from "../../tools/output-meta";
 import { enforcePlanModeWrite, resolvePlanPath } from "../../tools/plan-mode-guard";
 import type { AppliedEditObserver } from "../blackbox";
 import { generateDiffString, replaceText } from "../diff";
+import { legacyEditDetails, type SingleFileProduction } from "../legacy-bag";
 import {
 	countLeadingWhitespace,
 	detectLineEnding,
@@ -24,8 +26,10 @@ import {
 	stripBom,
 } from "../normalize";
 import { readEditFileText, serializeEditFileText } from "../read-file";
-import type { EditToolDetails, LspBatchRequest } from "../renderer";
-import { createEditResult, toEditToolResult } from "../result";
+import type { LspBatchRequest } from "../renderer";
+import { formatEditResultText } from "../result";
+import { pruneEditFileSnapshots } from "../snapshot-details";
+import { type AppliedEditFile, aggregateEditOutcome, type EditToolDetails, normalizedPath } from "../types";
 
 export interface FuzzyMatch {
 	actualText: string;
@@ -1084,31 +1088,24 @@ export function findContextLine(
 	return { index: undefined, confidence: bestScore };
 }
 
-export const replaceEditSchema = type({
-	path: "string",
-	old_string: "string",
-	new_string: "string",
-	"replace_all?": "boolean",
+export const replaceEditEntrySchema = type({
+	old_text: "string",
+	new_text: "string",
+	"all?": "boolean",
 });
 
+export const replaceEditSchema = type({
+	path: "string",
+	edits: replaceEditEntrySchema.array(),
+});
+
+export type ReplaceEditEntry = typeof replaceEditEntrySchema.infer;
 export type ReplaceParams = typeof replaceEditSchema.infer;
 
-/**
- * Internal batch form of {@link ReplaceParams}, produced only by the Cursor
- * exec bridge: a `pi_edit` frame carries several replacements against one
- * path but must run as a single tool lifecycle with one aggregate result.
- * Never advertised to the model — the agent loop validates model calls
- * against {@link replaceEditSchema}, which has no `edits` field.
- */
-export interface ReplaceBatchParams {
-	path: string;
-	edits: Omit<ReplaceParams, "path">[];
-}
-
-export interface ExecuteReplaceOptions {
+export interface ExecuteReplaceSingleOptions {
 	session: ToolSession;
 	path: string;
-	params: Omit<ReplaceParams, "path">;
+	params: ReplaceEditEntry;
 	signal?: AbortSignal;
 	batchRequest?: LspBatchRequest;
 	allowFuzzy: boolean;
@@ -1119,9 +1116,9 @@ export interface ExecuteReplaceOptions {
 	onApplied?: AppliedEditObserver;
 }
 
-export async function executeReplace(
-	options: ExecuteReplaceOptions,
-): Promise<AgentToolResult<EditToolDetails, ReplaceParams>> {
+export async function executeReplaceSingleProduction(
+	options: ExecuteReplaceSingleOptions,
+): Promise<SingleFileProduction> {
 	const {
 		session,
 		path,
@@ -1134,12 +1131,12 @@ export async function executeReplace(
 		beginDeferredDiagnosticsForPath,
 		onApplied,
 	} = options;
-	const { old_string, new_string, replace_all } = params;
+	const { old_text, new_text, all } = params;
 
 	enforcePlanModeWrite(session, path);
 
-	if (old_string.length === 0) {
-		throw new Error("old_string must not be empty.");
+	if (old_text.length === 0) {
+		throw new Error("old_text must not be empty.");
 	}
 
 	const absolutePath = resolvePlanPath(session, path);
@@ -1147,12 +1144,12 @@ export async function executeReplace(
 	const { bom, text: content } = stripBom(rawContent);
 	const originalEnding = detectLineEnding(content);
 	const normalizedContent = normalizeToLF(content);
-	const normalizedOldText = normalizeToLF(old_string);
-	const normalizedNewText = normalizeToLF(new_string);
+	const normalizedOldText = normalizeToLF(old_text);
+	const normalizedNewText = normalizeToLF(new_text);
 
 	const result = replaceText(normalizedContent, normalizedOldText, normalizedNewText, {
 		fuzzy: allowFuzzy,
-		all: replace_all ?? false,
+		all: all ?? false,
 		threshold: fuzzyThreshold,
 	});
 
@@ -1196,14 +1193,72 @@ export async function executeReplace(
 
 	const diffResult = generateDiffString(normalizedContent, result.content, undefined, { path });
 	await onApplied?.({ path: absolutePath, prev: rawContent, next: finalContent });
-	const editResult = createEditResult({
-		displayPath: path,
-		resultPath: absolutePath,
-		diff: diffResult.diff,
-		firstChangedLine: diffResult.firstChangedLine,
+	const resultText = formatEditResultText({ displayPath: path, diff: diffResult.diff });
+
+	const meta = outputMeta()
+		.diagnostics(diagnostics?.summary ?? "", diagnostics?.messages ?? [])
+		.get();
+
+	const file: AppliedEditFile = {
+		kind: "applied",
+		path: normalizedPath(absolutePath),
+		evidence: { kind: "available", change: { operation: "update", before: rawContent, after: finalContent } },
 		diagnostics,
-		oldText: rawContent,
-		newText: finalContent,
+	};
+	const [prunedFile] = pruneEditFileSnapshots([file]) as [AppliedEditFile];
+
+	return {
+		file: prunedFile,
+		presentation: { diff: diffResult.diff, firstChangedLine: diffResult.firstChangedLine, meta },
+		move: undefined,
+		text: resultText,
+	};
+}
+
+/**
+ * Thin `AgentToolResult` wrapper around {@link executeReplaceSingleProduction}
+ * for direct single-file callers. `executeSinglePathEntries` (`edit/index.ts`)
+ * calls the production function directly instead.
+ */
+export async function executeReplaceSingle(
+	options: ExecuteReplaceSingleOptions,
+): Promise<AgentToolResult<EditToolDetails>> {
+	const { file, presentation, text } = await executeReplaceSingleProduction(options);
+	const { outcome, isError } = aggregateEditOutcome([file]);
+	return {
+		content: [{ type: "text", text }],
+		details: legacyEditDetails(file, presentation, undefined, false),
+		outcome,
+		...(isError ? { isError } : {}),
+	};
+}
+
+/**
+ * Upstream-compat wrapper preserving the pre-rewrite single-edit call shape
+ * (`old_string`/`new_string`/`replace_all`) still spoken by the tests and
+ * external adapters. Forwards to {@link executeReplaceSingle}.
+ */
+export interface ExecuteReplaceOptions {
+	session: ToolSession;
+	path: string;
+	params: { old_string: string; new_string: string; replace_all?: boolean };
+	signal?: AbortSignal;
+	batchRequest?: LspBatchRequest;
+	allowFuzzy: boolean;
+	fuzzyThreshold: number;
+	writethrough: WritethroughCallback;
+	beginDeferredDiagnosticsForPath: (path: string) => WritethroughDeferredHandle;
+	/** Observes a committed content transition before result snapshots are pruned. */
+	onApplied?: AppliedEditObserver;
+}
+
+export async function executeReplace(options: ExecuteReplaceOptions): Promise<AgentToolResult<EditToolDetails>> {
+	const {
+		params: { old_string, new_string, replace_all },
+		...rest
+	} = options;
+	return executeReplaceSingle({
+		...rest,
+		params: { old_text: old_string, new_text: new_string, all: replace_all },
 	});
-	return toEditToolResult(editResult);
 }
