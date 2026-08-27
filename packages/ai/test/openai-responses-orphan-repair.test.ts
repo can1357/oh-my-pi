@@ -222,6 +222,44 @@ describe("repairOrphanResponsesToolOutputs", () => {
 		expect(repaired.some(item => item.type === "message" && item.role === "user")).toBe(false);
 	});
 
+	it("falls back safely when a canonical orphan has only an unsupported provider file", () => {
+		const model = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
+		if (!model) throw new Error("expected the bundled Codex model");
+		const messages: ResponseInput = [];
+		appendResponsesToolResultMessages(
+			messages,
+			{
+				role: "toolResult",
+				toolCallId: "call_unsupported_file",
+				toolName: "read",
+				content: [
+					{ type: "text", text: "orphan output text" },
+					{
+						type: "image",
+						data: "",
+						mimeType: "image/png",
+						providerFile: { provider: "openai", id: "file_foreign" },
+					},
+				],
+				isError: false,
+				timestamp: 0,
+			},
+			model,
+			true,
+			model.compat.supportsImageDetailOriginal,
+			new Set(),
+		);
+
+		expect(messages).toEqual([
+			{
+				type: "message",
+				role: "assistant",
+				content: expect.stringContaining("orphan output text"),
+			},
+		]);
+		expect(JSON.stringify(messages)).not.toContain("file_foreign");
+	});
+
 	it("preserves original image detail for supporting orphan replay", () => {
 		const model = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
 		if (!model) throw new Error("expected the bundled Codex model");

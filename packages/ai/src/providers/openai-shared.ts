@@ -2476,17 +2476,10 @@ export interface ResponsesToolResultOutputEncoding {
 	outputText: string;
 }
 
-/**
- * Encodes one canonical tool result for OpenAI Responses replay.
- *
- * Image-capable models receive an ordered native content array; text-only
- * models and callers without images receive the compatible string form.
- */
-export function encodeResponsesToolResultOutput<TApi extends Api>(
+function encodeResponsesToolResultOutputText<TApi extends Api>(
 	toolResult: ToolResultMessage,
 	model: Model<TApi>,
-	supportsImageDetailOriginal: boolean,
-): ResponsesToolResultOutputEncoding {
+): string {
 	const supportsImages = model.input.includes("image");
 	const textResult = toolResult.content
 		.filter((block): block is TextContent => block.type === "text")
@@ -2503,11 +2496,27 @@ export function encodeResponsesToolResultOutput<TApi extends Api>(
 					? "(see attached image)"
 					: ""
 	).toWellFormed();
+	return isHarmonyDialectModel(model) ? escapeHarmonyControlTokens(rawOutput) : rawOutput;
+}
+
+/**
+ * Encodes one canonical tool result for OpenAI Responses replay.
+ *
+ * Image-capable models receive an ordered native content array; text-only
+ * models and callers without images receive the compatible string form.
+ */
+export function encodeResponsesToolResultOutput<TApi extends Api>(
+	toolResult: ToolResultMessage,
+	model: Model<TApi>,
+	supportsImageDetailOriginal: boolean,
+): ResponsesToolResultOutputEncoding {
+	const supportsImages = model.input.includes("image");
+	const hasImages = toolResult.content.some((block): block is ImageContent => block.type === "image");
 	const escapeControlTokens = isHarmonyDialectModel(model);
 	// Harmony-server models reject reserved control-token spellings even as tool
 	// data; escape the transport copy so a grep/read result cannot poison the
 	// session (#6913). Covers every downstream branch that consumes `output`.
-	const outputText = escapeControlTokens ? escapeHarmonyControlTokens(rawOutput) : rawOutput;
+	const outputText = encodeResponsesToolResultOutputText(toolResult, model);
 	const output: string | ResponseInputContent[] =
 		hasImages && supportsImages
 			? toolResult.content.map((block): ResponseInputContent => {
@@ -2519,6 +2528,18 @@ export function encodeResponsesToolResultOutput<TApi extends Api>(
 					};
 				})
 			: outputText;
+	return { output, outputText };
+}
+
+export function encodeResponsesOrphanToolResultOutput<TApi extends Api>(
+	toolResult: ToolResultMessage,
+	model: Model<TApi>,
+	supportsImageDetailOriginal: boolean,
+): ResponsesToolResultOutputEncoding {
+	const outputText = encodeResponsesToolResultOutputText(toolResult, model);
+	const content = toolResult.content.filter(block => block.type !== "image" || hasSupportedImageSource(model, block));
+	if (content.length === 0 && toolResult.content.length > 0) return { output: outputText, outputText };
+	const { output } = encodeResponsesToolResultOutput({ ...toolResult, content }, model, supportsImageDetailOriginal);
 	return { output, outputText };
 }
 
@@ -2534,8 +2555,10 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 	supportsCustomToolCalls = true,
 	computerCallIds?: ReadonlySet<string>,
 ): void {
-	const { output, outputText } = encodeResponsesToolResultOutput(toolResult, model, supportsImageDetailOriginal);
 	const normalized = normalizeResponsesToolCallId(toolResult.toolCallId);
+	const { output, outputText } = knownCallIds.has(normalized.callId)
+		? encodeResponsesToolResultOutput(toolResult, model, supportsImageDetailOriginal)
+		: encodeResponsesOrphanToolResultOutput(toolResult, model, supportsImageDetailOriginal);
 	const hasSupportedImageSourceInResult = toolResult.content.some(
 		(block): block is ImageContent => block.type === "image" && hasSupportedImageSource(model, block),
 	);

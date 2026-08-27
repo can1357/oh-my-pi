@@ -484,6 +484,35 @@ describe("buildOpenAiNativeHistory multimodal tool results", () => {
 			{ type: "input_image", detail: "auto", image_url: `data:image/png;base64,${imageData}` },
 		]);
 	});
+
+	test("preserves orphan text while discarding an unsupported provider file", () => {
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_orphan_file|fc_call_orphan_file",
+			toolName: "read",
+			content: [
+				{ type: "text", text: "orphan output text" },
+				{
+					type: "image",
+					data: "",
+					mimeType: "image/png",
+					providerFile: { provider: "openai", id: "file_foreign" },
+				},
+			],
+			isError: false,
+			timestamp: Date.now(),
+		};
+
+		const items = buildOpenAiNativeHistory([result], makeOpenAiCodexModel());
+
+		expect(items).toContainEqual({
+			type: "message",
+			role: "assistant",
+			content: expect.stringContaining("orphan output text"),
+		});
+		expect(items.some(item => item.type === "message" && item.role === "user")).toBe(false);
+		expect(JSON.stringify(items)).not.toContain("file_foreign");
+	});
 });
 
 describe("buildOpenAiNativeHistory interleaved assistant message (#8789)", () => {

@@ -23,6 +23,7 @@ import {
 	getCodexAttestationHeader,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import {
+	encodeResponsesOrphanToolResultOutput,
 	encodeResponsesToolResultOutput,
 	hoistInterleavedResponsesToolBatchMessages,
 	parseAzureDeploymentNameMap,
@@ -771,7 +772,9 @@ export function buildOpenAiNativeHistory(
 				msgIndex++;
 				continue;
 			}
-			const { output, outputText } = encodeResponsesToolResultOutput(message, model, supportsImageDetailOriginal);
+			const { output, outputText } = knownCallIds.has(normalized.callId)
+				? encodeResponsesToolResultOutput(message, model, supportsImageDetailOriginal)
+				: encodeResponsesOrphanToolResultOutput(message, model, supportsImageDetailOriginal);
 			if (demotedComputerCallIds.has(normalized.callId)) {
 				const resultItem =
 					message.providerMetadata?.type === "computer"
