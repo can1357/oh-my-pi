@@ -1582,7 +1582,7 @@ mod tests {
 		let mut snapshot = launch_snapshot(catalog, &root, "apple-intelligence/apple-intelligence");
 		let mut model_settings = omp_catalog::settings::ModelSettings::default();
 		model_settings.enabled_models =
-			Box::new([omp_catalog::settings::PathScopedStringEntry::Bare(Str::new("no/such"))]);
+			Arc::from([omp_catalog::settings::PathScopedStringEntry::Bare(Str::new("no/such"))]);
 		let revived = omp_agent::revive_existing(&path, journal, snapshot).expect("revive");
 		snapshot = revived.snapshot;
 		let error = apply_revived_session_model(
