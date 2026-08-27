@@ -40,6 +40,7 @@ import { vocalizer } from "../../tts/vocalizer";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { setTerminalTitleState } from "../../utils/title-generator";
 import { interruptHint } from "../shared";
+import { ToolPresentationDisplayFold } from "../tool-presentation-fold";
 import { createAssistantMessageComponent } from "../utils/interactive-context-helpers";
 import {
 	assistantHasVisibleContent,
@@ -126,6 +127,12 @@ export class EventController {
 	// those calls arrive so the normal no-pending path cannot recreate the
 	// retracted card below the rewind's fresh blocks (#6879).
 	#retractedToolCallIds = new Set<string>();
+	// Per-call folds of `tool_presentation` events for migrated routes (bash/eval
+	// under `presentation_events`), which emit no live `tool_execution_update`s.
+	// Each fold composes cumulative card snapshots; entries live exactly as long
+	// as their `pendingTools` entry — created on first presentation event, dropped
+	// at settled/end/seal/dispose (leak guard).
+	#toolPresentationFolds = new Map<string, ToolPresentationDisplayFold>();
 	#executionStartedCallIds = new Set<string>();
 	// Cards settled by a synthetic aborted/error `tool_execution_end` (agent-loop
 	// emits one per never-run call on a terminal error/abort). They stay visible
@@ -294,12 +301,13 @@ export class EventController {
 				this.ctx.ui.requestRender(true);
 			},
 			goal_updated: async () => {},
-			// The TUI still renders tool calls from the `tool_execution_*` pair, which
-			// every route keeps emitting. It is not a presentation-event consumer yet
-			// (phase 3 moves TUI rendering onto the projection family), so this is a
-			// deliberate no-op rather than an oversight — the exhaustive handler map is
-			// what forced the decision to be written down here at all.
-			tool_presentation: async () => {},
+			// Migrated routes (bash/eval under `presentation_events`) stopped
+			// emitting live `tool_execution_update`s; this fold restores them by
+			// composing cumulative card snapshots from the `tool_presentation`
+			// stream. Synthesis is a display-consumer concern: the ACP-bound
+			// subscriber consumes `tool_presentation` natively and never sees a
+			// re-synthesized update.
+			tool_presentation: async e => this.#handleToolPresentation(e),
 		} satisfies AgentSessionEventHandlers;
 	}
 
@@ -322,6 +330,7 @@ export class EventController {
 		}
 		this.#ircExpiryTimers.clear();
 		this.#liveIrcCards.clear();
+		this.#toolPresentationFolds.clear();
 	}
 
 	#resetReadGroup(): void {
@@ -347,6 +356,7 @@ export class EventController {
 			if (this.#backgroundTaskCallIds.has(toolCallId)) continue;
 			component.seal();
 			this.ctx.pendingTools.delete(toolCallId);
+			this.#toolPresentationFolds.delete(toolCallId);
 		}
 		this.#backgroundTaskCallIds = new Set(
 			Array.from(this.#backgroundTaskCallIds).filter(toolCallId => this.ctx.pendingTools.has(toolCallId)),
@@ -461,6 +471,11 @@ export class EventController {
 		if (readAssistant !== undefined) {
 			this.#readToolCallAssistantComponents.delete(oldId);
 			this.#readToolCallAssistantComponents.set(newId, readAssistant);
+		}
+		const presentationFold = this.#toolPresentationFolds.get(oldId);
+		if (presentationFold !== undefined) {
+			this.#toolPresentationFolds.delete(oldId);
+			this.#toolPresentationFolds.set(newId, presentationFold);
 		}
 		// A collapsed read renders into a shared group keyed by id; rename its
 		// entry so the row isn't duplicated under the new id.
@@ -1504,6 +1519,9 @@ export class EventController {
 			this.ctx.pendingTools.set(event.toolCallId, component);
 			this.#toolTimelineComponents.set(event.toolCallId, component);
 			this.#settleHeldCompletionIfPresent(event.toolCallId, component);
+			// `started`/early presentation events can outrun the card's creation;
+			// give it whatever the fold already accumulated.
+			this.#pushFoldedSnapshot(event.toolCallId);
 			this.ctx.ui.requestRender();
 		} else {
 			// The tool is about to run, so its arguments are final and validated.
@@ -1577,6 +1595,34 @@ export class EventController {
 		}
 	}
 
+	#handleToolPresentation(event: Extract<AgentSessionEvent, { type: "tool_presentation" }>): void {
+		if (event.event.type === "settled") {
+			// Status stays with the end path: `tool_execution_end` settles the card
+			// with the authoritative result, so stop folding here.
+			this.#toolPresentationFolds.delete(event.toolCallId);
+			return;
+		}
+		let fold = this.#toolPresentationFolds.get(event.toolCallId);
+		if (!fold) {
+			fold = new ToolPresentationDisplayFold();
+			this.#toolPresentationFolds.set(event.toolCallId, fold);
+		}
+		fold.append(event.event);
+		this.#pushFoldedSnapshot(event.toolCallId);
+	}
+
+	/**
+	 * Push a fold's cumulative snapshot onto the live card as a partial frame,
+	 * mirroring the live `tool_execution_update` frames legacy routes emitted.
+	 */
+	#pushFoldedSnapshot(toolCallId: string): void {
+		const fold = this.#toolPresentationFolds.get(toolCallId);
+		const component = this.ctx.pendingTools.get(toolCallId);
+		if (!fold || !component || fold.isEmpty()) return;
+		component.updateResult({ content: [{ type: "text", text: fold.snapshotText() }] }, true, toolCallId);
+		this.ctx.ui.requestRender();
+	}
+
 	#settleHeldCompletionIfPresent(toolCallId: string, component: ToolExecutionHandle): void {
 		const event = this.#orphanedToolCompletions.get(toolCallId);
 		if (!event) return;
@@ -1601,6 +1647,7 @@ export class EventController {
 	): void {
 		component.updateResult({ ...event.result, isError: event.isError }, false, event.toolCallId);
 		this.ctx.pendingTools.delete(event.toolCallId);
+		this.#toolPresentationFolds.delete(event.toolCallId);
 		if (
 			component instanceof ToolExecutionComponent &&
 			component.isDisplaceableBlock() &&
@@ -1628,6 +1675,7 @@ export class EventController {
 		// message_end; consume the completion instead of recreating/updating UI.
 		if (this.#retractedToolCallIds.delete(event.toolCallId)) return;
 		this.#executionStartedCallIds.delete(event.toolCallId);
+		this.#toolPresentationFolds.delete(event.toolCallId);
 		// A synthetic aborted/error completion (agent-loop's placeholder for a
 		// never-run call on a terminal error/abort) settles the card in place so a
 		// terminal failure stays visible. Remember it so `#handleAutoRetryStart`
