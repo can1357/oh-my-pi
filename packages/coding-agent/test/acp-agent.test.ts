@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
+import { getOpenAIResponsesReferenceTarget } from "@oh-my-pi/pi-ai/utils";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
@@ -298,6 +299,13 @@ class FakeAgentSession {
 
 	getContextUsage(): undefined {
 		return undefined;
+	}
+
+	buildDisplaySessionContext() {
+		return this.sessionManager.buildSessionContext({
+			activeModel: this.model,
+			compactionSettings: this.settings.getGroup("compaction"),
+		});
 	}
 
 	async switchSession(sessionPath: string): Promise<boolean> {
@@ -1138,6 +1146,62 @@ describe("ACP agent", () => {
 				update => typeof getChunkMessageId(update) === "string" && getChunkMessageId(update)!.length > 0,
 			),
 		).toBe(true);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("replays compacted ACP history without expanding target-bound context", async () => {
+		const harness = await createHarness();
+		const stored = new FakeAgentSession(harness.cwdA);
+		harness.sessions.push(stored);
+		const beforeId = stored.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "ancient context" }],
+			timestamp: Date.now(),
+		});
+		stored.sessionManager.appendCompaction("opaque remote summary", undefined, beforeId, 100, {
+			method: "remote",
+			preserveData: {
+				openaiRemoteCompaction: {
+					provider: TEST_MODELS[0]!.provider,
+					referenceTarget: getOpenAIResponsesReferenceTarget(TEST_MODELS[0]!),
+					replacementHistory: [
+						{
+							type: "message",
+							role: "user",
+							content: [{ type: "input_text", text: "opaque provider history" }],
+						},
+					],
+				},
+			},
+		});
+		stored.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "recent context" }],
+			timestamp: Date.now(),
+		});
+		await stored.sessionManager.ensureOnDisk();
+		await stored.sessionManager.flush();
+
+		await harness.agent.loadSession({
+			sessionId: stored.sessionId,
+			cwd: harness.cwdA,
+			mcpServers: [],
+		});
+
+		const replayedText = harness.updates
+			.filter(
+				update =>
+					update.sessionId === stored.sessionId && update.update.sessionUpdate === "user_message_chunk",
+			)
+			.flatMap(update =>
+				update.update.sessionUpdate === "user_message_chunk" && update.update.content.type === "text"
+					? [update.update.content.text]
+					: [],
+			);
+		expect(replayedText).toEqual(["recent context"]);
+		expectAcpNotifications(harness.updates);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);

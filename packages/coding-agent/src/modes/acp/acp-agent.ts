@@ -2231,7 +2231,7 @@ export class AcpAgent implements Agent {
 		const cwd = record.session.sessionManager.getCwd();
 		const replayedToolCallIds = new Set<string>();
 		const replayedToolCallArgs = new Map<string, unknown>();
-		for (const message of record.session.sessionManager.buildSessionContext().messages as ReplayableMessage[]) {
+		for (const message of record.session.buildDisplaySessionContext().messages as ReplayableMessage[]) {
 			for (const notification of this.#messageToReplayNotifications(
 				record.session.sessionId,
 				message,
