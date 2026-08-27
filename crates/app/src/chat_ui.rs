@@ -8403,13 +8403,30 @@ fn handle_agent_event(
 				let _ = modes.settle_plan_transition();
 			}
 		},
-		AgentEvent::Snapshot(_)
-		| AgentEvent::ToolObserved { .. }
+		AgentEvent::Snapshot(snapshot) => {
+			refresh_snapshot_model(backend, state, snapshot);
+		},
+		AgentEvent::ToolObserved { .. }
 		| AgentEvent::PlanStateChanged { .. }
 		| AgentEvent::PhaseChanged { .. }
 		| AgentEvent::RosterChanged { .. } => {},
 	}
 	send_status(backend, state, bus, dropped);
+}
+
+fn refresh_snapshot_model(
+	backend: &flume::Sender<BackendEvent>,
+	state: &mut BridgeState,
+	snapshot: &omp_agent::AgentSnapshot,
+) {
+	if snapshot.turn.params.model == state.model {
+		return;
+	}
+	state.model.clone_from(&snapshot.turn.params.model);
+	state.edit_model.set(Str::new(&state.model));
+	state.context_window = resolve_model(state.catalog.as_ref(), &state.model)
+		.and_then(|spec| spec.limits.context_window);
+	send_models_updated(backend, state);
 }
 
 fn autoqa_consent_request(item: &Item) -> Option<omp_chat_ui::autoqa::ConsentRequest> {
@@ -10072,6 +10089,55 @@ mod tests {
 			bus.publish(AgentEvent::RosterChanged { generation });
 		}
 		assert_eq!(events.len(), 300);
+	}
+
+	#[test]
+	fn snapshot_model_change_refreshes_edit_attribution_without_duplicate_notices() {
+		let scratch = tempfile::tempdir().expect("scratch directory");
+		let (tx, rx) = flume::unbounded();
+		let mut state = test_bridge_state(scratch.path());
+		state.model = "launch/model".to_owned();
+		state.edit_model.set(Str::new("launch/model"));
+		let modes = RegimeHandle::new();
+		let renderers = RenderRegistry::new();
+		let bus = omp_agent::EventBus::new();
+		let mut snapshot = omp_agent::AgentSnapshot::default();
+		snapshot.turn.params.model = "plan/model".to_owned();
+		handle_agent_event(
+			&tx,
+			&mut state,
+			&AgentEvent::Snapshot(Arc::new(snapshot.clone())),
+			&modes,
+			&renderers,
+			&bus,
+			0,
+		);
+		assert_eq!(state.model, "plan/model");
+		assert_eq!(state.edit_model.current().as_str(), "plan/model");
+		let first: Vec<_> = rx.drain().collect();
+		assert!(
+			first
+				.iter()
+				.any(|event| matches!(event, BackendEvent::ModelsUpdated { .. })),
+			"a changed snapshot model must refresh UI model metadata"
+		);
+
+		handle_agent_event(
+			&tx,
+			&mut state,
+			&AgentEvent::Snapshot(Arc::new(snapshot)),
+			&modes,
+			&renderers,
+			&bus,
+			0,
+		);
+		let second: Vec<_> = rx.drain().collect();
+		assert!(
+			!second
+				.iter()
+				.any(|event| matches!(event, BackendEvent::ModelsUpdated { .. })),
+			"an unchanged snapshot model must not emit duplicate model notifications"
+		);
 	}
 
 	#[test]

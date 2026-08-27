@@ -71,7 +71,8 @@ impl EditBlackboxModel {
 		*self.0.write() = model;
 	}
 
-	fn current(&self) -> Str {
+	/// Returns the active model identity for edit attribution.
+	pub fn current(&self) -> Str {
 		self.0.read().clone()
 	}
 }
