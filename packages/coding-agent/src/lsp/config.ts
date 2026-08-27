@@ -308,7 +308,25 @@ export function resolveCommand(command: string, cwd: string, options?: ResolveCo
 	if (!options) return $which(command);
 	return $which(command, { cache: options.cache, PATH: options.PATH });
 }
+const TSC_PROBE_TIMEOUT_MS = 500;
 
+function hasSupportedTypeScriptVersion(command: string, cwd: string): boolean {
+	try {
+		const result = Bun.spawnSync([command, "--version"], {
+			cwd,
+			stdout: "pipe",
+			stderr: "ignore",
+			timeout: TSC_PROBE_TIMEOUT_MS,
+			killSignal: "SIGKILL",
+		});
+		if (result.exitCode !== 0 || result.exitedDueToTimeout) return false;
+		const output = result.stdout.toString("utf-8").trim();
+		const match = /^Version\s+(\d+)(?:\.\d+){0,2}(?:[-+][\w.-]+)?$/.exec(output);
+		return match !== null && Number(match[1]) >= 7;
+	} catch {
+		return false;
+	}
+}
 interface ConfigSource {
 	read(): NormalizedConfig | null;
 }
@@ -466,6 +484,7 @@ export function loadConfig(cwd: string): LspConfig {
 			// Check if the language server binary is available (local or $PATH)
 			const resolved = resolveCommand(config.command, cwd);
 			if (!resolved) continue;
+			if (name === "tsc" && !hasSupportedTypeScriptVersion(resolved, cwd)) continue;
 
 			detected[name] = { ...config, resolvedCommand: resolved };
 		}
@@ -482,6 +501,7 @@ export function loadConfig(cwd: string): LspConfig {
 		if (!hasRootMarkers(cwd, config.rootMarkers)) continue;
 		const resolved = resolveCommand(config.command, cwd);
 		if (!resolved) continue;
+		if (name === "tsc" && !hasSupportedTypeScriptVersion(resolved, cwd)) continue;
 		available[name] = { ...config, resolvedCommand: resolved };
 	}
 

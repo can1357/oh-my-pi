@@ -301,6 +301,7 @@
 - Fixed completed assistant replies disappearing from the live transcript under viewport pressure.
 - Accelerated SHA-2 and SHA-3 checksums on supported ARM64 hardware.
 - Fixed large MCP tool payloads being stored redundantly on disk.
+- Fixed native TypeScript LSP autodetection skipping pre-7 or unlaunchable `tsc` binaries so the classic server remains available ([#9986](https://github.com/can1357/oh-my-pi/pull/9986) by [@christian-auguste](https://github.com/christian-auguste)).
 
 ## [18.0.4] - 2026-08-24
 

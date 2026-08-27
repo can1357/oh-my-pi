@@ -5070,6 +5070,13 @@ describe("native tsc lsp", () => {
 	it("auto-detects tsc when a TypeScript project marker and binary are present", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-tsc-detect-");
 		const resolvedTsc = path.join(tempDir.path(), "bin", "tsc");
+		const valid7Result = {
+			...Bun.spawnSync([process.execPath, "--version"], { stdout: "pipe", stderr: "pipe" }),
+			exitCode: 0,
+			stdout: Buffer.from("Version 7.0.2\n"),
+			stderr: Buffer.from(""),
+		} satisfies Bun.ReadableSyncSubprocess;
+		vi.spyOn(Bun, "spawnSync").mockReturnValue(valid7Result);
 		const whichSpy = vi
 			.spyOn(piUtils, "$which")
 			.mockImplementation(command => (command === "tsc" ? resolvedTsc : null));
@@ -5108,6 +5115,13 @@ describe("native tsc lsp", () => {
 		const tempDir = TempDir.createSync("@omp-lsp-tsc-both-");
 		const resolvedTsc = path.join(tempDir.path(), "bin", "tsc");
 		const resolvedClassic = path.join(tempDir.path(), "bin", "typescript-language-server");
+		const valid7Result = {
+			...Bun.spawnSync([process.execPath, "--version"], { stdout: "pipe", stderr: "pipe" }),
+			exitCode: 0,
+			stdout: Buffer.from("Version 7.0.2\n"),
+			stderr: Buffer.from(""),
+		} satisfies Bun.ReadableSyncSubprocess;
+		vi.spyOn(Bun, "spawnSync").mockReturnValue(valid7Result);
 		vi.spyOn(piUtils, "$which").mockImplementation(command =>
 			command === "tsc" ? resolvedTsc : command === "typescript-language-server" ? resolvedClassic : null,
 		);
@@ -5120,6 +5134,58 @@ describe("native tsc lsp", () => {
 				"tsc",
 				"typescript-language-server",
 			]);
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+	it("falls back to typescript-language-server when native tsc reports a pre-7 version", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-tsc-pre7-");
+		const resolvedTsc = path.join(tempDir.path(), "bin", "tsc");
+		const resolvedClassic = path.join(tempDir.path(), "bin", "typescript-language-server");
+		const pre7Result = {
+			...Bun.spawnSync([process.execPath, "--version"], { stdout: "pipe", stderr: "pipe" }),
+			exitCode: 0,
+			stdout: Buffer.from("Version 6.0.3\n"),
+			stderr: Buffer.from(""),
+		} satisfies Bun.ReadableSyncSubprocess;
+		const spawnSyncSpy = vi.spyOn(Bun, "spawnSync").mockReturnValue(pre7Result);
+		const whichSpy = vi
+			.spyOn(piUtils, "$which")
+			.mockImplementation(command =>
+				command === "tsc" ? resolvedTsc : command === "typescript-language-server" ? resolvedClassic : null,
+			);
+		try {
+			await Bun.write(path.join(tempDir.path(), "package.json"), "{}\n");
+			const config = loadConfig(tempDir.path());
+			expect(config.servers.tsc).toBeUndefined();
+			expect(config.servers["typescript-language-server"]?.resolvedCommand).toBe(resolvedClassic);
+			expect(getServerForFile(config, path.join(tempDir.path(), "app.ts"))?.[0]).toBe("typescript-language-server");
+			expect(whichSpy).toHaveBeenCalledWith("tsc");
+			expect(whichSpy).toHaveBeenCalledWith("typescript-language-server");
+			expect(spawnSyncSpy).toHaveBeenCalled();
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("falls back to typescript-language-server when native tsc cannot be launched", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-tsc-unlaunchable-");
+		const resolvedTsc = path.join(tempDir.path(), "bin", "tsc");
+		const resolvedClassic = path.join(tempDir.path(), "bin", "typescript-language-server");
+		const whichSpy = vi
+			.spyOn(piUtils, "$which")
+			.mockImplementation(command =>
+				command === "tsc" ? resolvedTsc : command === "typescript-language-server" ? resolvedClassic : null,
+			);
+		try {
+			await Bun.write(resolvedTsc, "#!/bin/sh\nexit 1\n");
+			await Bun.write(path.join(tempDir.path(), "package.json"), "{}\n");
+			const config = loadConfig(tempDir.path());
+			expect(config.servers.tsc).toBeUndefined();
+			expect(config.servers["typescript-language-server"]?.resolvedCommand).toBe(resolvedClassic);
+			expect(getServerForFile(config, path.join(tempDir.path(), "app.ts"))?.[0]).toBe("typescript-language-server");
+			expect(whichSpy).toHaveBeenCalledWith("tsc");
+			expect(whichSpy).toHaveBeenCalledWith("typescript-language-server");
 		} finally {
 			tempDir.removeSync();
 		}

@@ -17,7 +17,7 @@ When no config file contributes a server override, OMP auto-detects built-in ser
 
 Root-marker detection at startup is cwd-only; it does not search parent directories. Wildcard markers such as `*.cabal` match entries directly inside the cwd and do not recurse. No configuration is required for common setups; see [`defaults.json`](../packages/coding-agent/src/lsp/defaults.json) for the full built-in set.
 
-The `tsc` entry provides the native TypeScript 7 server. OMP runs `tsc --lsp --stdio` and discovers a user-installed `tsc` in supported project-local bin directories before `$PATH`. The config key and command are both `tsc`.
+The `tsc` entry provides the native TypeScript 7 server. OMP discovers a user-installed `tsc` in supported project-local bin directories before `$PATH`, then registers it only when the executable is launchable and reports TypeScript 7 or newer. Older or unusable `tsc` installations are skipped, so `typescript-language-server` remains eligible. The registered server runs `tsc --lsp --stdio`; the config key and command are both `tsc`.
 
 For TypeScript and JavaScript files, OMP prefers `tsc` when both servers are available. `typescript-language-server` remains an independent fallback. Configure or disable either server by its own key without changing the other.
 Operations such as diagnostics and synchronization may query both matching servers when both are available.
