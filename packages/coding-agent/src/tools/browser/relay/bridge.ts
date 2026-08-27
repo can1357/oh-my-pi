@@ -953,8 +953,22 @@ export class RelayBridge {
 			return { method: `${subscription.method.slice(0, -".enable".length)}.disable` };
 		}
 		switch (subscription.method) {
-			case "Target.setAutoAttach":
-				return { method: subscription.method, params: { autoAttach: false } };
+			case "Target.setAutoAttach": {
+				// CDP requires `waitForDebuggerOnStart` on every Target.setAutoAttach
+				// call, even when flipping autoAttach back off during recovery cleanup.
+				// Preserve the original replay shape so owner loss does not turn the
+				// cleanup into a protocol error that aborts recovery for other holders.
+				const params = subscription.params ?? {};
+				return {
+					method: subscription.method,
+					params: {
+						...params,
+						autoAttach: false,
+						waitForDebuggerOnStart:
+							typeof params.waitForDebuggerOnStart === "boolean" ? params.waitForDebuggerOnStart : false,
+					},
+				};
+			}
 			case "Target.setDiscoverTargets":
 				return { method: subscription.method, params: { discover: false } };
 			case "Page.setLifecycleEventsEnabled":
