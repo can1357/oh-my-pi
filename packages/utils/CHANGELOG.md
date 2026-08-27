@@ -5,6 +5,7 @@
 ### Added
 
 - Added the Linux `subreaper` spawn option to retain reparented descendants for process-tree cleanup.
+- Added `NonEmptyArray<T>` to `@oh-my-pi/pi-utils`'s barrel-exported type helpers.
 
 ### Fixed
 
