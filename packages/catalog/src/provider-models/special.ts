@@ -226,6 +226,7 @@ export function zedModelManagerOptions(config: ZedModelManagerConfig = {}): Mode
 	const { apiKey, fetch } = config;
 	return {
 		providerId: "zed-agent",
+		cacheProviderId: resolveModelCacheProviderId("zed-agent", { apiKey }),
 		dynamicModelsAuthoritative: true,
 		fetchDynamicModels: async () => {
 			return fetchZedModels({ token: apiKey, fetcher: fetch });

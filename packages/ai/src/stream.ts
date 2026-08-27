@@ -1869,9 +1869,7 @@ function resolveGoogleThinkingOff<TApi extends Api>(model: Model<TApi>): NonNull
 	}
 	return thinking;
 }
-
 const castApi = <TApi extends Api>(api: OptionsForApi<TApi>): OptionsForApi<Api> => api as OptionsForApi<Api>;
-
 /**
  * Mandatory-reasoning endpoints (`thinking.requiresEffort`) reject disabled
  * or omitted thinking ("Reasoning is mandatory for this endpoint and cannot
@@ -1949,6 +1947,7 @@ function mapOptionsForApi<TApi extends Api>(
 		presencePenalty: options?.presencePenalty,
 		repetitionPenalty: options?.repetitionPenalty,
 		maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
+		toolChoice: options?.toolChoice,
 		signal: options?.signal,
 		apiKey: apiKey ?? (typeof options?.apiKey === "string" ? options.apiKey : undefined),
 		cacheRetention: options?.cacheRetention,

@@ -2,7 +2,7 @@ import * as crypto from "node:crypto";
 import { mapEffortToGoogleThinkingLevel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { parseZedCredentials, ZED_APP_VERSION, ZED_CLOUD_URL, ZED_HEADERS } from "@oh-my-pi/pi-catalog/wire/zed";
-import { ProviderHttpError, ProviderResponseError } from "../../src/error";
+import { AbortError, finalize, ProviderHttpError, ProviderResponseError } from "../../src/error";
 import { OAuthError } from "../../src/error/oauth";
 import { getOrMintZedLlmToken, invalidateZedLlmToken } from "../registry/oauth/zed-token-pool";
 import type {
@@ -14,9 +14,11 @@ import type {
 	TextContent,
 	ThinkingContent,
 	ToolCall,
+	ToolChoice,
 } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { normalizeSchemaForCCA } from "../utils/schema";
+import { mapToOpenAICompletionsToolChoice, mapToOpenAIResponsesToolChoice } from "../utils/tool-choice";
 import { isThinkingPart, retainThoughtSignature } from "./google-shared";
 
 export interface ZedOptions extends StreamOptions {
@@ -24,6 +26,7 @@ export interface ZedOptions extends StreamOptions {
 	promptId?: string;
 	reasoning?: Effort;
 	disableReasoning?: boolean;
+	toolChoice?: ToolChoice;
 }
 
 export type ZedProviderKind = "anthropic" | "open_ai" | "google" | "x_ai";
@@ -43,6 +46,22 @@ export function resolveProviderKind(modelId: string): ZedProviderKind {
 	if (lower.startsWith("gemini-")) return "google";
 	if (lower.startsWith("grok-")) return "x_ai";
 	return "anthropic";
+}
+function extractToolChoiceFunctionName(choice: ToolChoice | undefined): string | undefined {
+	if (!choice || typeof choice === "string") return undefined;
+	if (choice.type === "tool" && "name" in choice && typeof choice.name === "string") {
+		return choice.name;
+	}
+	if (choice.type === "function") {
+		if ("function" in choice && choice.function && typeof choice.function === "object" && "name" in choice.function) {
+			const fnName = choice.function.name;
+			if (typeof fnName === "string") return fnName;
+		}
+		if ("name" in choice && typeof choice.name === "string") {
+			return choice.name;
+		}
+	}
+	return undefined;
 }
 
 function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, options?: ZedOptions) {
@@ -130,11 +149,14 @@ function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, opti
 		}
 	}
 
-	const tools = context.tools?.map(t => ({
-		name: t.name,
-		description: t.description,
-		input_schema: t.parameters ?? { type: "object", properties: {} },
-	}));
+	const tools =
+		options?.toolChoice === "none"
+			? undefined
+			: context.tools?.map(t => ({
+					name: t.name,
+					description: t.description,
+					input_schema: t.parameters ?? { type: "object", properties: {} },
+				}));
 
 	const isReasoning = model.reasoning && !options?.disableReasoning;
 	const body: Record<string, unknown> = {
@@ -149,6 +171,21 @@ function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, opti
 
 	if (tools && tools.length > 0) {
 		body.tools = tools;
+	}
+
+	if (options?.toolChoice) {
+		if (typeof options.toolChoice === "string") {
+			if (options.toolChoice === "required") {
+				body.tool_choice = { type: "any" };
+			} else {
+				body.tool_choice = { type: options.toolChoice };
+			}
+		} else {
+			const toolName = extractToolChoiceFunctionName(options.toolChoice);
+			if (toolName) {
+				body.tool_choice = { type: "tool", name: toolName };
+			}
+		}
 	}
 
 	if (isReasoning) {
@@ -238,12 +275,15 @@ function mapContextToOpenAiResponses(context: Context, model: Model<"zed-agent">
 		}
 	}
 
-	const tools = context.tools?.map(t => ({
-		type: "function",
-		name: t.name,
-		description: t.description,
-		parameters: t.parameters ?? { type: "object", properties: {} },
-	}));
+	const tools =
+		options?.toolChoice === "none"
+			? undefined
+			: context.tools?.map(t => ({
+					type: "function",
+					name: t.name,
+					description: t.description,
+					parameters: t.parameters ?? { type: "object", properties: {} },
+				}));
 
 	const isReasoning = model.reasoning && !options?.disableReasoning;
 	const body: Record<string, unknown> = {
@@ -259,6 +299,13 @@ function mapContextToOpenAiResponses(context: Context, model: Model<"zed-agent">
 
 	if (tools && tools.length > 0) {
 		body.tools = tools;
+	}
+
+	if (options?.toolChoice) {
+		const toolChoice = mapToOpenAIResponsesToolChoice(options.toolChoice);
+		if (toolChoice) {
+			body.tool_choice = toolChoice;
+		}
 	}
 
 	if (isReasoning) {
@@ -365,7 +412,7 @@ function mapContextToGoogle(context: Context, model: Model<"zed-agent">, options
 		};
 	}
 
-	if (context.tools && context.tools.length > 0) {
+	if (options?.toolChoice !== "none" && context.tools && context.tools.length > 0) {
 		body.tools = [
 			{
 				functionDeclarations: context.tools.map(t => ({
@@ -375,6 +422,33 @@ function mapContextToGoogle(context: Context, model: Model<"zed-agent">, options
 				})),
 			},
 		];
+	}
+
+	if (options?.toolChoice) {
+		if (typeof options.toolChoice === "string") {
+			switch (options.toolChoice) {
+				case "auto":
+					body.toolConfig = { functionCallingConfig: { mode: "AUTO" } };
+					break;
+				case "none":
+					body.toolConfig = { functionCallingConfig: { mode: "NONE" } };
+					break;
+				case "any":
+				case "required":
+					body.toolConfig = { functionCallingConfig: { mode: "ANY" } };
+					break;
+			}
+		} else {
+			const toolName = extractToolChoiceFunctionName(options.toolChoice);
+			if (toolName) {
+				body.toolConfig = {
+					functionCallingConfig: {
+						mode: "ANY",
+						allowedFunctionNames: [toolName],
+					},
+				};
+			}
+		}
 	}
 
 	if (model.reasoning) {
@@ -450,7 +524,7 @@ function mapContextToOpenAiChat(context: Context, model: Model<"zed-agent">, opt
 		max_completion_tokens: options?.maxTokens ?? model.maxTokens ?? 8192,
 	};
 
-	if (context.tools && context.tools.length > 0) {
+	if (options?.toolChoice !== "none" && context.tools && context.tools.length > 0) {
 		body.tools = context.tools.map(t => ({
 			type: "function",
 			function: {
@@ -459,6 +533,13 @@ function mapContextToOpenAiChat(context: Context, model: Model<"zed-agent">, opt
 				parameters: t.parameters ?? { type: "object", properties: {} },
 			},
 		}));
+	}
+
+	if (options?.toolChoice) {
+		const toolChoice = mapToOpenAICompletionsToolChoice(options.toolChoice);
+		if (toolChoice) {
+			body.tool_choice = toolChoice;
+		}
 	}
 
 	if (model.reasoning && !options?.disableReasoning) {
@@ -511,13 +592,18 @@ export function streamZed(
 		const providerKind = resolveProviderKind(model.id);
 		const providerRequest = buildZedProviderRequest(providerKind, context, model, options);
 
-		const completionBody = {
+		let completionBody: unknown = {
 			thread_id: options.threadId ?? crypto.randomUUID(),
 			prompt_id: options.promptId ?? crypto.randomUUID(),
 			provider: providerKind,
 			model: model.id,
 			provider_request: providerRequest,
 		};
+
+		const replacementBody = await options.onPayload?.(completionBody, model);
+		if (replacementBody !== undefined) {
+			completionBody = replacementBody;
+		}
 
 		const fetcher = options.fetch ?? fetch;
 
@@ -537,7 +623,6 @@ export function streamZed(
 		};
 
 		let response = await sendRequest(llmToken);
-
 		// Handle expired/outdated token auto-refresh & retry
 		if (
 			userId &&
@@ -1292,15 +1377,23 @@ export function streamZed(
 			stream.push({ type: "done", reason: doneReason, message: outputMessage });
 			stream.end(outputMessage);
 		} catch (err) {
+			const normalizedError = options.signal?.aborted ? new AbortError() : err;
+			const finalized = await finalize(normalizedError, {
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				signal: options.signal,
+			});
 			const errorMsg: AssistantMessage = {
 				role: "assistant",
 				api: "zed-agent",
 				provider: "zed-agent",
 				model: model.id,
-				content: [{ type: "text", text: `Error: ${String(err)}` }],
-				stopReason: "error",
-				errorMessage: err instanceof Error ? err.message : String(err),
-				errorStatus: err instanceof ProviderHttpError ? err.status : undefined,
+				content: [{ type: "text", text: `Error: ${finalized.message}` }],
+				stopReason: finalized.stopReason,
+				errorMessage: finalized.message,
+				errorStatus: finalized.status,
+				errorId: finalized.id,
 				usage: {
 					input: 0,
 					output: 0,
@@ -1311,19 +1404,27 @@ export function streamZed(
 				},
 				timestamp: Date.now(),
 			};
-			stream.push({ type: "error", reason: "error", error: errorMsg });
+			stream.push({ type: "error", reason: finalized.stopReason, error: errorMsg });
 			stream.end(errorMsg);
 		}
-	})().catch(err => {
+	})().catch(async err => {
+		const normalizedError = options.signal?.aborted ? new AbortError() : err;
+		const finalized = await finalize(normalizedError, {
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			signal: options.signal,
+		});
 		const errorMsg: AssistantMessage = {
 			role: "assistant",
 			api: "zed-agent",
 			provider: "zed-agent",
 			model: model.id,
-			content: [{ type: "text", text: `Fatal Error: ${String(err)}` }],
-			stopReason: "error",
-			errorMessage: err instanceof Error ? err.message : String(err),
-			errorStatus: err instanceof ProviderHttpError ? err.status : undefined,
+			content: [{ type: "text", text: `Fatal Error: ${finalized.message}` }],
+			stopReason: finalized.stopReason,
+			errorMessage: finalized.message,
+			errorStatus: finalized.status,
+			errorId: finalized.id,
 			usage: {
 				input: 0,
 				output: 0,
@@ -1334,7 +1435,7 @@ export function streamZed(
 			},
 			timestamp: Date.now(),
 		};
-		stream.push({ type: "error", reason: "error", error: errorMsg });
+		stream.push({ type: "error", reason: finalized.stopReason, error: errorMsg });
 		stream.end(errorMsg);
 	});
 

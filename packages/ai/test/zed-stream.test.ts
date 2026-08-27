@@ -6,6 +6,7 @@ import type {
 	Context,
 	FetchImpl,
 	Model,
+	ToolChoice,
 	ToolResultMessage,
 } from "../src/types";
 import { mockFetch } from "./helpers/fetch-mock";
@@ -291,5 +292,176 @@ describe("Zed provider protocol regressions", () => {
 		expect(requests).toHaveLength(1);
 		expect(requests[0]?.input).toBe("https://cloud.zed.dev/completions");
 		expect(requests[0]?.init?.headers).toMatchObject({ Authorization: "Bearer raw-access-token" });
+	});
+
+	it("sends an asynchronous onPayload replacement in the outgoing completion request", async () => {
+		let sentBody: Record<string, unknown> | undefined;
+		let hookPayload: Record<string, unknown> | undefined;
+		const fetchMock: FetchImpl = mockFetch(async (_input, init) => {
+			sentBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			return ndjsonResponse([{ status: "stream_ended" }]);
+		});
+
+		const stream = streamZed(makeModel("gpt-5.6-luna"), userContext(), {
+			apiKey: "raw-zed-token",
+			fetch: fetchMock,
+			onPayload: async payload => {
+				hookPayload = payload as Record<string, unknown>;
+				const completionPayload = payload as { provider_request: Record<string, unknown> };
+				const providerRequest = completionPayload.provider_request;
+				return {
+					...(payload as Record<string, unknown>),
+					provider_request: {
+						...providerRequest,
+						input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "replacement" }] }],
+					},
+				};
+			},
+		});
+		await stream.result();
+
+		expect(hookPayload?.model).toBe("gpt-5.6-luna");
+		const sentProviderRequest = sentBody?.provider_request as Record<string, unknown> | undefined;
+		expect(sentProviderRequest?.input).toEqual([
+			{ type: "message", role: "user", content: [{ type: "input_text", text: "replacement" }] },
+		]);
+	});
+
+	it("maps none, required, and named tool choices for every Zed protocol flavor", () => {
+		const tools = [
+			{
+				name: "search",
+				description: "Search the web",
+				parameters: { type: "object", properties: { query: { type: "string" } } },
+			},
+		];
+		const anthropicTools = tools.map(({ name, description, parameters }) => ({
+			name,
+			description,
+			input_schema: parameters,
+		}));
+		const openAiTools = tools.map(tool => ({ type: "function", ...tool }));
+		const googleTools = [
+			{
+				functionDeclarations: tools.map(({ name, description, parameters }) => ({
+					name,
+					description,
+					parameters,
+				})),
+			},
+		];
+		const xAiTools = tools.map(tool => ({ type: "function", function: tool }));
+		const context: Context = {
+			messages: [{ role: "user", content: "find this", timestamp: 1 }],
+			tools,
+		};
+		const choices: ToolChoice[] = ["none", "required", { type: "function", name: "search" }];
+		const cases: Array<{
+			kind: "anthropic" | "open_ai" | "google" | "x_ai";
+			model: string;
+			expected: [Record<string, unknown>, Record<string, unknown>, Record<string, unknown>];
+		}> = [
+			{
+				kind: "anthropic",
+				model: "claude-sonnet-5",
+				expected: [
+					{ tool_choice: { type: "none" } },
+					{ tools: anthropicTools, tool_choice: { type: "any" } },
+					{ tools: anthropicTools, tool_choice: { type: "tool", name: "search" } },
+				],
+			},
+			{
+				kind: "open_ai",
+				model: "gpt-5.6-luna",
+				expected: [
+					{ tool_choice: "none" },
+					{ tools: openAiTools, tool_choice: "required" },
+					{
+						tools: openAiTools,
+						tool_choice: { type: "function", name: "search" },
+					},
+				],
+			},
+			{
+				kind: "google",
+				model: "gemini-3-flash",
+				expected: [
+					{ toolConfig: { functionCallingConfig: { mode: "NONE" } } },
+					{
+						tools: googleTools,
+						toolConfig: { functionCallingConfig: { mode: "ANY" } },
+					},
+					{
+						tools: googleTools,
+						toolConfig: { functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["search"] } },
+					},
+				],
+			},
+			{
+				kind: "x_ai",
+				model: "grok-4.6",
+				expected: [
+					{ tool_choice: "none" },
+					{ tools: xAiTools, tool_choice: "required" },
+					{
+						tools: xAiTools,
+						tool_choice: { type: "function", function: { name: "search" } },
+					},
+				],
+			},
+		];
+
+		for (const testCase of cases) {
+			for (const [index, choice] of choices.entries()) {
+				const payload = buildZedProviderRequest(testCase.kind, { ...context }, makeModel(testCase.model), {
+					toolChoice: choice,
+				}) as Record<string, unknown>;
+				expect(payload).toMatchObject(testCase.expected[index]);
+				if (choice === "none") {
+					expect(payload.tools).toBeUndefined();
+				} else {
+					expect(payload.tools).toBeDefined();
+				}
+			}
+		}
+	});
+
+	it("preserves aborted status when the response body fails during a caller cancellation", async () => {
+		const abortController = new AbortController();
+		const encoder = new TextEncoder();
+		const responseReady = Promise.withResolvers<void>();
+		const readStarted = Promise.withResolvers<void>();
+		let bodyController: ReadableStreamDefaultController<Uint8Array> | undefined;
+		const fetchMock: FetchImpl = mockFetch(async () => {
+			const body = new ReadableStream<Uint8Array>({
+				start(controller) {
+					bodyController = controller;
+					const firstFrame = JSON.stringify({
+						event: { type: "response.output_text.delta", delta: "partial" },
+					});
+					controller.enqueue(encoder.encode(`${firstFrame}\n`));
+				},
+				pull() {
+					readStarted.resolve();
+				},
+			});
+			responseReady.resolve();
+			return new Response(body, { status: 200, headers: { "content-type": "application/x-ndjson" } });
+		});
+
+		const stream = streamZed(makeModel("gpt-5.6-luna"), userContext(), {
+			apiKey: "raw-zed-token",
+			fetch: fetchMock,
+			signal: abortController.signal,
+		});
+		await responseReady.promise;
+		await readStarted.promise;
+		abortController.abort();
+		bodyController?.error(new DOMException("The operation was aborted.", "AbortError"));
+		const result = await stream.result();
+
+		expect(result.stopReason).toBe("aborted");
+		expect(result.errorStatus).toBeUndefined();
+		expect(result.errorMessage).toMatch(/aborted/i);
 	});
 });
