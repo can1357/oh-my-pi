@@ -29,7 +29,7 @@ import { truncateForPrompt } from "../tools/approval";
 import { isIrcEnabled } from "../tools/hub";
 import { formatBytes, formatDuration } from "../tools/render-utils";
 import { isReadOnlyAgent } from "./read-only-policy";
-import { isScoutSpawnable, isIsolationAvailable, resolveSpawnPolicy } from "./spawn-policy";
+import { isIsolationAvailable, isScoutSpawnable, resolveSpawnPolicy } from "./spawn-policy";
 import {
 	type AgentDefinition,
 	type AgentProgress,
@@ -616,7 +616,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	get description(): string {
 		const disabledAgents = this.session.settings.get("task.disabledAgents") as string[];
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
-		const isolationMode = this.session.settings.get("task.isolation.mode");
 		return renderDescription({
 			agents:
 				discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
