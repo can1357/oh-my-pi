@@ -39,6 +39,7 @@ thread_local! {
 /// set.
 const EXTRA_SYNTAXES: &[&str] = &[
 	include_str!("syntaxes/Julia.sublime-syntax"),
+	include_str!("syntaxes/Liquid.sublime-syntax"),
 	include_str!("syntaxes/Nix.sublime-syntax"),
 	include_str!("syntaxes/Mermaid.sublime-syntax"),
 	include_str!("syntaxes/TypeScript.sublime-syntax"),
@@ -209,6 +210,7 @@ const LANG_ALIASES: &[(&[&str], &str)] = &[
 	(&["py", "python"], "Python"),
 	(&["rb", "ruby"], "Ruby"),
 	(&["jl", "julia"], "Julia"),
+	(&["liquid"], "Liquid"),
 	(&["nix"], "Nix"),
 	(&["mermaid", "mmd"], "Mermaid"),
 	(&["rs", "rust"], "Rust"),
@@ -661,6 +663,68 @@ mod tests {
 		assert!(out.contains("<k>let"));
 		assert!(out.contains("<s>hello"));
 		assert!(out.contains("<c># greeting"));
+	}
+
+	#[test]
+	fn highlights_liquid_vendored_syntax() {
+		assert!(get_supported_languages().contains(&"Liquid".to_string()));
+		assert!(supports_language_impl("liquid"));
+
+		let out = highlight_code_impl(
+			concat!(
+				"{% assign discounted_price = product.price | times: 0.8 %}\n",
+				"{{ discounted_price | money }}\n",
+				"{% block 'badge-list', badges: ['New', 'Sale'] %}\n",
+				"{{ self['featured_product'].title }}\n",
+				"{% endblock %}\n",
+				"{% partial 'product-grid' %}\n",
+				"{{ collection.products.size }}\n",
+				"{% endpartial %}\n",
+				"{% comment %}sale price{% endcomment %}\n",
+			),
+			Some("liquid"),
+			&test_colors(),
+		);
+		assert!(out.contains("<k>assign"));
+		assert!(out.contains("<f>times"));
+		assert!(out.contains("<n>0"));
+		assert!(out.contains("<v>self"));
+		assert!(out.contains("<s>featured_product"));
+		assert!(out.contains("<f>block"));
+		assert!(out.contains("<k>endblock"));
+		assert!(out.contains("<f>partial"));
+		assert!(out.contains("<k>endpartial"));
+		assert!(out.contains("<c>sale price"));
+	}
+
+	#[test]
+	fn liquid_embedded_base_syntaxes_resolve() {
+		let colors = test_colors();
+		for (code, expected) in [
+			("{% javascript %}\nconst message = \"hello\";\n{% endjavascript %}\n", "<k>const"),
+			("{% style %}\n@media screen { .badge { color: red; } }\n{% endstyle %}\n", "<t>color"),
+			("{% doc %}\n@example\n<div class=\"product\">Example</div>\n{% enddoc %}\n", "<v>div"),
+		] {
+			let out = highlight_code_impl(code, Some("liquid"), &colors);
+			assert!(out.contains(expected), "embedded syntax was not highlighted: {out}");
+		}
+	}
+
+	#[test]
+	fn liquid_missing_jekyll_embeds_fall_back_to_plain_text() {
+		let colors = test_colors();
+		for language in ["akh", "nim", "xonsh"] {
+			let code = format!(
+				"{{% highlight {language} %}}\nvalue\n{{% endhighlight %}}\n{{% assign resumed = true \
+				 %}}\n"
+			);
+			let out = highlight_code_impl(&code, Some("liquid"), &colors);
+			assert!(out.contains("\nvalue\n"), "fallback body was not plain text: {out}");
+			assert!(
+				out.contains("<k>assign"),
+				"Liquid highlighting did not resume after the fallback block: {out}"
+			);
+		}
 	}
 
 	#[test]

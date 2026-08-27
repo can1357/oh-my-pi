@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Liquid code fences now receive syntax highlighting.
+
 ## [18.1.9] - 2026-09-04
 
 ### Added
