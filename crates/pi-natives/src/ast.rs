@@ -353,13 +353,15 @@ pub struct AstReplaceFileChange {
 	pub count: u32,
 }
 
-/// Per-pattern match count from an `astEdit` run.
+/// Per-pattern, per-language match count from an `astEdit` run.
 #[napi(object)]
 pub struct AstReplaceRuleMatch {
 	/// Rewrite pattern that was scanned.
-	pub pattern: String,
+	pub pattern:  String,
+	/// Canonical language name for the files that were scanned.
+	pub language: String,
 	/// Matches observed before duplicate edits were suppressed.
-	pub count:   u32,
+	pub count:    u32,
 }
 
 /// Summary of an ast-grep rewrite pass, including whether disk writes occurred.
@@ -369,8 +371,8 @@ pub struct AstReplaceResult {
 	pub changes:            Vec<AstReplaceChange>,
 	/// Replacement counts grouped by file.
 	pub file_changes:       Vec<AstReplaceFileChange>,
-	/// Match counts grouped by rewrite pattern, including patterns with no
-	/// matches.
+	/// Match counts grouped by rewrite pattern and language, including
+	/// pattern-language pairs with no matches.
 	pub rewrite_matches:    Vec<AstReplaceRuleMatch>,
 	/// Total replacements applied or previewed.
 	pub total_replacements: u32,
@@ -384,6 +386,23 @@ pub struct AstReplaceResult {
 	pub limit_reached:      bool,
 	/// Parse or pattern errors when not failing the whole operation.
 	pub parse_errors:       Option<Vec<String>>,
+}
+
+fn into_rewrite_matches(
+	counts: BTreeMap<String, BTreeMap<String, u32>>,
+) -> Vec<AstReplaceRuleMatch> {
+	counts
+		.into_iter()
+		.flat_map(|(pattern, languages)| {
+			languages
+				.into_iter()
+				.map(move |(language, count)| AstReplaceRuleMatch {
+					pattern: pattern.clone(),
+					language,
+					count,
+				})
+		})
+		.collect()
 }
 
 struct FileCandidate {
@@ -968,10 +987,6 @@ fn ast_edit_blocking(
 	fail_on_parse_error: Option<bool>,
 ) -> Result<AstReplaceResult> {
 	let rewrite_rules = normalize_rewrite_map(rewrites)?;
-	let mut rewrite_match_counts = rewrite_rules
-		.iter()
-		.map(|(pattern, _)| (pattern.clone(), 0u32))
-		.collect::<BTreeMap<_, _>>();
 	let strictness = resolve_strictness(strictness);
 	let dry_run = dry_run.unwrap_or(true);
 	let max_replacements = max_replacements.unwrap_or(u32::MAX).max(1);
@@ -993,6 +1008,16 @@ fn ast_edit_blocking(
 
 	let (resolved_candidates, languages) = resolve_candidates_for_find(candidates, lang_str, &ct)?;
 	let files_searched = to_u32(resolved_candidates.len());
+	let mut rewrite_match_counts = rewrite_rules
+		.iter()
+		.map(|(pattern, _)| {
+			let language_counts = languages
+				.keys()
+				.map(|language| (language.clone(), 0u32))
+				.collect::<BTreeMap<_, _>>();
+			(pattern.clone(), language_counts)
+		})
+		.collect::<BTreeMap<_, _>>();
 
 	let mut parse_errors = Vec::new();
 	let mut compiled_rules: Vec<CompiledRewriteRule> = Vec::with_capacity(rewrite_rules.len());
@@ -1042,10 +1067,7 @@ fn ast_edit_blocking(
 	if compiled_rules.is_empty() {
 		return Ok(AstReplaceResult {
 			file_changes: vec![],
-			rewrite_matches: rewrite_match_counts
-				.into_iter()
-				.map(|(pattern, count)| AstReplaceRuleMatch { pattern, count })
-				.collect(),
+			rewrite_matches: into_rewrite_matches(rewrite_match_counts),
 			total_replacements: 0,
 			files_touched: 0,
 			files_searched,
@@ -1119,11 +1141,12 @@ fn ast_edit_blocking(
 		let mut file_changes = Vec::new();
 		let mut reached_max_replacements = false;
 		'patterns: for &(rule, compiled) in &runnable_rules {
+			let count = rewrite_match_counts
+				.get_mut(&rule.pattern)
+				.and_then(|language_counts| language_counts.get_mut(lang_key))
+				.expect("compiled rewrite rule must retain its language match counter");
 			for matched in ast.root().find_all(compiled.clone()) {
 				ct.heartbeat()?;
-				let count = rewrite_match_counts
-					.get_mut(&rule.pattern)
-					.expect("compiled rewrite rule must retain its match counter");
 				*count = count.saturating_add(1);
 				let edit = matched.replace_by(rule.rewrite.as_str());
 				// Multiple rules matching the same node with the same output are one
@@ -1220,10 +1243,7 @@ fn ast_edit_blocking(
 
 	Ok(AstReplaceResult {
 		file_changes,
-		rewrite_matches: rewrite_match_counts
-			.into_iter()
-			.map(|(pattern, count)| AstReplaceRuleMatch { pattern, count })
-			.collect(),
+		rewrite_matches: into_rewrite_matches(rewrite_match_counts),
 		total_replacements: to_u32(changes.len()),
 		files_touched,
 		files_searched,
@@ -1456,6 +1476,7 @@ mod tests {
 		let mut rewrites = HashMap::new();
 		rewrites.insert("foo($X)".to_string(), "qux($X)".to_string());
 		rewrites.insert("foo(bar)".to_string(), "qux(bar)".to_string());
+		rewrites.insert("missing($X)".to_string(), "unused($X)".to_string());
 
 		let result = ast_edit_blocking(
 			task::CancelToken::default(),
@@ -1473,9 +1494,72 @@ mod tests {
 		.expect("identical duplicate matches should apply cleanly");
 
 		assert_eq!(result.total_replacements, 1, "duplicate match must be counted once");
+		let rewrite_matches = result
+			.rewrite_matches
+			.iter()
+			.map(|entry| (entry.pattern.as_str(), entry.language.as_str(), entry.count))
+			.collect::<Vec<_>>();
+		assert_eq!(
+			rewrite_matches,
+			vec![
+				("foo($X)", "typescript", 1),
+				("foo(bar)", "typescript", 1),
+				("missing($X)", "typescript", 0),
+			],
+			"every rule reports observed matches before duplicate edits are suppressed",
+		);
 		assert_eq!(
 			fs::read_to_string(&file_path).expect("a.ts should be readable"),
 			"const b = qux(bar);\n",
+		);
+	}
+
+	#[test]
+	fn ast_edit_reports_rewrite_matches_per_language() {
+		let unique = SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.expect("system time should be after UNIX_EPOCH")
+			.as_nanos();
+		let root = std::env::temp_dir().join(format!("pi-ast-language-counts-{unique}"));
+		fs::create_dir_all(&root).expect("temp language-count dir should be created");
+		fs::write(root.join("functions.js"), "function greet(value) { return value; }\n")
+			.expect("temp JavaScript file should be written");
+		fs::write(
+			root.join("Example.php"),
+			"<?php\nclass Example { function greet($value) { return $value; } }\n",
+		)
+		.expect("temp PHP file should be written");
+		let tree = TempTree { root };
+
+		let pattern = "function $NAME($$$ARGS) { $$$BODY }";
+		let mut rewrites = HashMap::new();
+		rewrites.insert(pattern.to_string(), "function renamed($$$ARGS) { $$$BODY }".to_string());
+
+		let result = ast_edit_blocking(
+			task::CancelToken::default(),
+			Some(rewrites),
+			None,
+			Some(tree.root.to_string_lossy().into_owned()),
+			None,
+			None,
+			None,
+			Some(true),
+			None,
+			None,
+			None,
+		)
+		.expect("mixed JavaScript/PHP tree should report matches per language");
+
+		assert_eq!(result.total_replacements, 1, "only the top-level JavaScript function matches");
+		let rewrite_matches = result
+			.rewrite_matches
+			.iter()
+			.map(|entry| (entry.pattern.as_str(), entry.language.as_str(), entry.count))
+			.collect::<Vec<_>>();
+		assert_eq!(
+			rewrite_matches,
+			vec![(pattern, "javascript", 1), (pattern, "php", 0)],
+			"the JavaScript match must not hide the missing PHP member match",
 		);
 	}
 

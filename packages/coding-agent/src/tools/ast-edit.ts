@@ -12,6 +12,7 @@ import { normalizeToLF } from "../edit/normalize";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
 import astEditDescription from "../prompts/tools/ast-edit.md" with { type: "text" };
+import phpMemberWrapperHint from "../prompts/tools/ast-edit-php-member-hint.md" with { type: "text" };
 import {
 	Ellipsis,
 	fileHyperlink,
@@ -59,8 +60,6 @@ const astEditSchema = type({
 });
 
 const PHP_MEMBER_PATTERN = /^\s*(?:(?:abstract|final|public|protected|private|readonly|static)\s+)*function\b/u;
-const PHP_MEMBER_WRAPPER_HINT =
-	"Hint: If this operation targets a PHP member, retry it alone with `pat` wrapped in `class $_ { … }` and `selector` set to `method_declaration`.";
 
 function isPhpMemberPattern(pattern: string): boolean {
 	return PHP_MEMBER_PATTERN.test(pattern);
@@ -78,7 +77,7 @@ interface AstEditCallOptions {
 interface AstEditAggregatedResult {
 	changes: natives.AstReplaceChange[];
 	fileChanges: natives.AstReplaceFileChange[];
-	rewriteMatches: natives.AstReplaceRuleMatch[];
+	rewriteMatches?: natives.AstReplaceRuleMatch[];
 	totalReplacements: number;
 	filesTouched: number;
 	filesSearched: number;
@@ -94,12 +93,13 @@ async function runAstEditTargets(
 ): Promise<AstEditAggregatedResult> {
 	const aggregatedChanges: natives.AstReplaceChange[] = [];
 	const fileCounts = new Map<string, number>();
-	const rewriteMatchCounts = new Map(Object.keys(options.rewrites).map(pattern => [pattern, 0]));
+	const rewriteMatchCounts = new Map<string, Map<string, number>>();
 	const parseErrors: string[] = [];
 	let totalReplacements = 0;
 	let filesSearched = 0;
 	let limitReached = false;
 	let applied = !options.dryRun;
+	let rewriteMatchesAvailable = true;
 	for (const target of targets) {
 		const targetResult = await natives.astEdit({
 			rewrites: options.rewrites,
@@ -116,11 +116,20 @@ async function runAstEditTargets(
 		limitReached = limitReached || targetResult.limitReached;
 		applied = applied && targetResult.applied;
 		if (targetResult.parseErrors) parseErrors.push(...targetResult.parseErrors);
-		for (const rewriteMatch of targetResult.rewriteMatches) {
-			rewriteMatchCounts.set(
-				rewriteMatch.pattern,
-				(rewriteMatchCounts.get(rewriteMatch.pattern) ?? 0) + rewriteMatch.count,
-			);
+		if (Array.isArray(targetResult.rewriteMatches)) {
+			for (const rewriteMatch of targetResult.rewriteMatches) {
+				let languageCounts = rewriteMatchCounts.get(rewriteMatch.pattern);
+				if (!languageCounts) {
+					languageCounts = new Map<string, number>();
+					rewriteMatchCounts.set(rewriteMatch.pattern, languageCounts);
+				}
+				languageCounts.set(
+					rewriteMatch.language,
+					(languageCounts.get(rewriteMatch.language) ?? 0) + rewriteMatch.count,
+				);
+			}
+		} else {
+			rewriteMatchesAvailable = false;
 		}
 		for (const change of targetResult.changes) {
 			const absolute = path.resolve(target.basePath, change.path);
@@ -137,10 +146,11 @@ async function runAstEditTargets(
 		path: changePath,
 		count,
 	}));
-	const rewriteMatches: natives.AstReplaceRuleMatch[] = Array.from(rewriteMatchCounts, ([pattern, count]) => ({
-		pattern,
-		count,
-	}));
+	const rewriteMatches: natives.AstReplaceRuleMatch[] | undefined = rewriteMatchesAvailable
+		? Array.from(rewriteMatchCounts, ([pattern, languageCounts]) =>
+				Array.from(languageCounts, ([language, count]) => ({ pattern, language, count })),
+			).flat()
+		: undefined;
 	return {
 		changes: aggregatedChanges,
 		fileChanges,
@@ -346,11 +356,15 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			});
 
 			const { errors: cappedParseErrors, total: parseErrorsTotal } = capParseErrors(result.parseErrors);
-			const rewriteMatchCounts = new Map(result.rewriteMatches.map(({ pattern, count }) => [pattern, count]));
+			const phpRewriteMatchCounts = new Map(
+				(result.rewriteMatches ?? [])
+					.filter(({ language }) => language === "php")
+					.map(({ pattern, count }) => [pattern, count]),
+			);
 			const patternHint = ops.some(
-				([pattern]) => isPhpMemberPattern(pattern) && (rewriteMatchCounts.get(pattern) ?? 0) === 0,
+				([pattern]) => isPhpMemberPattern(pattern) && phpRewriteMatchCounts.get(pattern) === 0,
 			)
-				? PHP_MEMBER_WRAPPER_HINT
+				? phpMemberWrapperHint.trim()
 				: undefined;
 			const formatPath = (filePath: string): string =>
 				formatResultPath(filePath, isDirectory, resolvedSearchPath, this.session.cwd);

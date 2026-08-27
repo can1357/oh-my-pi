@@ -35,6 +35,22 @@ function asSchemaObject(value: unknown): Record<string, unknown> {
 	return value as Record<string, unknown>;
 }
 
+function mockRewriteMatches(rewriteMatches: readonly natives.AstReplaceRuleMatch[]) {
+	const astEdit = natives.astEdit;
+	return spyOn(natives, "astEdit").mockImplementation(async options => ({
+		...(await astEdit(options)),
+		rewriteMatches: [...rewriteMatches],
+	}));
+}
+
+function mockLegacyAstEditResult() {
+	const astEdit = natives.astEdit;
+	return spyOn(natives, "astEdit").mockImplementation(async options => {
+		const { rewriteMatches: _rewriteMatches, ...legacyResult } = await astEdit(options);
+		return legacyResult as natives.AstReplaceResult;
+	});
+}
+
 describe("ast_edit tool schema", () => {
 	it("uses op entries as [{ pat, out }]", async () => {
 		const tools = await createTools(createTestSession(), ["ast_edit"]);
@@ -94,6 +110,8 @@ describe("ast_edit tool schema", () => {
 
 	it("guides zero-match PHP member patterns to safe contextual selection", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-php-member-"));
+		const pattern = "public function $NAME($$$ARGS) { $$$BODY }";
+		const astEditSpy = mockRewriteMatches([{ pattern, language: "php", count: 0 }]);
 		try {
 			const filePath = path.join(tempDir, "Example.php");
 			await Bun.write(
@@ -125,7 +143,7 @@ class Example {
 			const result = await tool!.execute("ast-edit-php-member", {
 				ops: [
 					{
-						pat: "public function $NAME($$$ARGS) { $$$BODY }",
+						pat: pattern,
 						out: "protected function $NAME($$$ARGS) { $$$BODY }",
 					},
 				],
@@ -166,12 +184,18 @@ class Example {
 			expect(updated).toContain("protected function keep");
 			expect(updated).not.toContain("public function");
 		} finally {
+			astEditSpy.mockRestore();
 			await removeWithRetries(tempDir);
 		}
 	});
 
 	it("surfaces PHP member guidance when another batch rewrite matches", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-php-batch-"));
+		const memberPattern = "function $NAME($$$ARGS) { $$$BODY }";
+		const astEditSpy = mockRewriteMatches([
+			{ pattern: memberPattern, language: "php", count: 0 },
+			{ pattern: "legacy($ARG)", language: "php", count: 1 },
+		]);
 		try {
 			const filePath = path.join(tempDir, "Example.php");
 			await Bun.write(
@@ -193,7 +217,7 @@ class Example {
 			const result = await tool!.execute("ast-edit-php-batch", {
 				ops: [
 					{
-						pat: "function $NAME($$$ARGS) { $$$BODY }",
+						pat: memberPattern,
 						out: "protected function $NAME($$$ARGS) { $$$BODY }",
 					},
 					{ pat: "legacy($ARG)", out: "modern($ARG)" },
@@ -207,6 +231,68 @@ class Example {
 			expect(details?.patternHint).toContain("method_declaration");
 			expect(text).toContain("modern($value)");
 			expect(text).toContain("method_declaration");
+		} finally {
+			astEditSpy.mockRestore();
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("does not let a JavaScript match suppress missing PHP member guidance", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-php-mixed-language-"));
+		const pattern = "function $NAME($$$ARGS) { $$$BODY }";
+		const astEditSpy = mockRewriteMatches([
+			{ pattern, language: "javascript", count: 1 },
+			{ pattern, language: "php", count: 0 },
+		]);
+		try {
+			await Bun.write(path.join(tempDir, "functions.js"), "function greet(value) { return value; }\n");
+			await Bun.write(
+				path.join(tempDir, "Example.php"),
+				"<?php\nclass Example { function greet($value) { return $value; } }\n",
+			);
+			const tools = await createTools(createTestSession(tempDir), ["ast_edit"]);
+			const tool = tools.find(entry => entry.name === "ast_edit");
+			expect(tool).toBeDefined();
+
+			const result = await tool!.execute("ast-edit-php-mixed-language", {
+				ops: [{ pat: pattern, out: "function renamed($$$ARGS) { $$$BODY }" }],
+				paths: [tempDir],
+			});
+			const details = result.details as { totalReplacements?: number; patternHint?: string } | undefined;
+
+			expect(details?.totalReplacements).toBe(1);
+			expect(details?.patternHint).toContain("method_declaration");
+			expect(astEditSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			astEditSpy.mockRestore();
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("does not show PHP guidance for a zero-match TypeScript function pattern", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-non-php-function-"));
+		try {
+			const filePath = path.join(tempDir, "functions.ts");
+			await Bun.write(filePath, "const value = 1;\n");
+			const tools = await createTools(createTestSession(tempDir), ["ast_edit"]);
+			const tool = tools.find(entry => entry.name === "ast_edit");
+			expect(tool).toBeDefined();
+
+			const result = await tool!.execute("ast-edit-typescript-function", {
+				ops: [
+					{
+						pat: "function $NAME($$$ARGS) { $$$BODY }",
+						out: "function renamed($$$ARGS) { $$$BODY }",
+					},
+				],
+				paths: [filePath],
+			});
+			const details = result.details as { totalReplacements?: number; patternHint?: string } | undefined;
+			const text = result.content.find(content => content.type === "text")?.text ?? "";
+
+			expect(details?.totalReplacements).toBe(0);
+			expect(details?.patternHint).toBeUndefined();
+			expect(text).not.toContain("method_declaration");
 		} finally {
 			await removeWithRetries(tempDir);
 		}
@@ -273,6 +359,33 @@ class Example {
 			expect(details?.totalReplacements).toBe(2);
 			expect(details?.patternHint).toBeUndefined();
 			expect(astEditSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			astEditSpy.mockRestore();
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("accepts the previous native result shape without failing ordinary rewrites", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-legacy-native-result-"));
+		const astEditSpy = mockLegacyAstEditResult();
+		try {
+			const filePath = path.join(tempDir, "legacy.ts");
+			await Bun.write(filePath, "legacy(value);\n");
+			const tools = await createTools(createTestSession(tempDir), ["ast_edit"]);
+			const tool = tools.find(entry => entry.name === "ast_edit");
+			expect(tool).toBeDefined();
+
+			const result = await tool!.execute("ast-edit-legacy-native-result", {
+				ops: [{ pat: "legacy($ARG)", out: "modern($ARG)" }],
+				paths: [filePath],
+			});
+			const details = result.details as { totalReplacements?: number; patternHint?: string } | undefined;
+			const text = result.content.find(content => content.type === "text")?.text ?? "";
+
+			expect(result.isError).toBeUndefined();
+			expect(details?.totalReplacements).toBe(1);
+			expect(details?.patternHint).toBeUndefined();
+			expect(text).toContain("modern(value)");
 		} finally {
 			astEditSpy.mockRestore();
 			await removeWithRetries(tempDir);

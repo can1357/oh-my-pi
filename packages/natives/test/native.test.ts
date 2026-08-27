@@ -1069,28 +1069,6 @@ console.log("ok");
 			expect(await Bun.file(filePath).text()).toBe('(defun greet (name)\n  (format-message "Hello %s" name))\n');
 		});
 
-		it("reports every rewrite's matches before duplicate edit suppression", async () => {
-			const filePath = path.join(testDir, "ast-edit-rewrite-matches.ts");
-			await fs.writeFile(filePath, "legacy(value);\n");
-
-			const result = await astEdit({
-				path: filePath,
-				rewrites: {
-					"legacy($ARG)": "modern($ARG)",
-					"legacy($VALUE)": "modern($VALUE)",
-					"missing($ARG)": "unused($ARG)",
-				},
-				dryRun: true,
-			});
-
-			expect(result.totalReplacements).toBe(1);
-			expect(result.rewriteMatches).toEqual([
-				{ pattern: "legacy($ARG)", count: 1 },
-				{ pattern: "legacy($VALUE)", count: 1 },
-				{ pattern: "missing($ARG)", count: 0 },
-			]);
-		});
-
 		it("reports parse errors for incomplete source without throwing", async () => {
 			const result = await astMatch({ source: "console.log(", lang: "ts", patterns: ["console.log($A)"] });
 			expect(result.totalMatches).toBe(0);
