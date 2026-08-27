@@ -3129,6 +3129,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				model: getActiveModelString(),
 				includeModelInPrompt: settings.get("includeModelInPrompt"),
 				personality: agentKind === "sub" ? "none" : settings.get("personality"),
+				promptProfile: settings.get("promptProfile"),
 				renderMermaid: settings.get("tui.renderMermaid"),
 				activeRepoContext,
 			});

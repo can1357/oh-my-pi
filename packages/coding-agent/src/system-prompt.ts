@@ -20,7 +20,7 @@ import {
 import { contextFileCapability } from "./capability/context-file";
 import { systemPromptCapability } from "./capability/system-prompt";
 import { findConfigFile } from "./config";
-import type { Personality, SkillsSettings } from "./config/settings";
+import type { Personality, PromptProfile, SkillsSettings } from "./config/settings";
 import { type ContextFile, loadCapability, type SystemPrompt as SystemPromptFile } from "./discovery";
 import { expandAtImports } from "./discovery/at-imports";
 import { loadSkills, type Skill } from "./extensibility/skills";
@@ -33,6 +33,7 @@ import friendlyPersonality from "./prompts/system/personalities/friendly.md" wit
 import pragmaticPersonality from "./prompts/system/personalities/pragmatic.md" with { type: "text" };
 import projectPromptTemplate from "./prompts/system/project-prompt.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
+import systemPromptTemplateCompact from "./prompts/system/system-prompt-compact.md" with { type: "text" };
 import { normalizeConcurrencyLimit } from "./task/parallel";
 import { usesCodexTaskPrompt } from "./task/prompt-policy";
 import { type ActiveRepoContext, resolveActiveRepoContext } from "./utils/active-repo-context";
@@ -661,6 +662,16 @@ export interface BuildSystemPromptOptions {
 	autoQaEnabled?: boolean;
 	/** Whether active `write` is restricted to xd:// dispatch and the plan artifact sandbox. */
 	writeTransportOnly?: boolean;
+	/**
+	 * Which bundled instruction template to render. "compact" trades the
+	 * examples, the internal-URL catalog, and the long workflow/delegation prose
+	 * for a short contract, keeping every generated surface (skills, rules,
+	 * context files, tool inventory, `xd://` protocol) intact. For local models
+	 * where the prompt competes with the conversation for a small window.
+	 * Ignored when a custom `SYSTEM.md` is active, which replaces the template
+	 * outright. Default: "full".
+	 */
+	promptProfile?: PromptProfile;
 }
 
 /** Result of building provider-facing system prompt messages. */
@@ -720,6 +731,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		xdevDocs = "",
 		autoQaEnabled = false,
 		writeTransportOnly = false,
+		promptProfile = "full",
 		activeRepoContext: providedActiveRepoContext,
 	} = options;
 	const inlineToolDescriptors = providedInlineToolDescriptors ?? false;
@@ -1015,7 +1027,14 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		autoQaEnabled,
 		writeTransportOnly,
 	};
-	const rendered = prompt.render(resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate, data);
+	// A custom SYSTEM.md replaces the instruction template outright, so the
+	// profile only chooses between the two bundled ones.
+	const baseTemplate = resolvedCustomPrompt
+		? customSystemPromptTemplate
+		: promptProfile === "compact"
+			? systemPromptTemplateCompact
+			: systemPromptTemplate;
+	const rendered = prompt.render(baseTemplate, data);
 	const systemPrompt = [rendered];
 	if (toolNames.includes("computer")) {
 		systemPrompt.push(computerSafetyPrompt.trim());
