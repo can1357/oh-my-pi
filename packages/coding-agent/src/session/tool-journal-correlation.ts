@@ -212,25 +212,33 @@ export function nextReplayableToolExecution(
  * Every v4-journaled call's execution state comes exclusively from
  * `nextReplayableToolExecution` → `hydrateReplayableToolExecution` →
  * `reduceAcpToolView`; hydrated ids are deliberately *excluded* from the
- * announced set so the dangling-cleanup pass can never double-settle one.
- * These Sets therefore track only pre-v4 legacy `toolResult` messages, which
- * have no journal records to normalize — the "Legacy-history policy" of the
- * refactor plan (§3.8) mandates settled-body-only rendering for exactly those
- * sessions, forever.
+ * announced tally so the dangling-cleanup pass can never double-settle one.
+ * This bookkeeping therefore tracks only pre-v4 legacy `toolResult` messages,
+ * which have no journal records to normalize — the "Legacy-history policy" of
+ * the refactor plan (§3.8) mandates settled-body-only rendering for exactly
+ * those sessions, forever.
  *
- * - `replayed`: ids dispatched at their assistant-turn occurrence (hydrated
- *   *or* legacy-announced), so the message walk's `toolResult` branch never
+ * A provider may recycle one `toolCallId` across several turns, so
+ * announcements and resolutions are counted **per occurrence**, not collapsed
+ * into a single per-id bit: a session whose occurrence 1 of id `X` settled and
+ * whose occurrence 2 of `X` was left dangling has one announcement more than
+ * it has resolutions, and that difference — not `resolved.has(X)` — is what
+ * makes `X` dangling. Collapsing them let the earlier settlement mask the
+ * later dangling occurrence, leaving its `session/load` card pending forever.
+ *
+ * - `replayed`: ids dispatched at an assistant-turn occurrence (hydrated *or*
+ *   legacy-announced), so the message walk's `toolResult` branch never
  *   re-attempts a start through its own args reconstruction.
- * - `announced`: ids that actually got a `tool_call` notification sent on the
- *   legacy path. Deliberately excludes hydrated ids — they carry their own
+ * - `announced`: per-id count of `tool_call` notifications actually sent on
+ *   the legacy path. Deliberately excludes hydrated ids — they carry their own
  *   reducer-owned settlement, so they must never enter the dangling cleanup.
- * - `resolved`: ids that reached a persisted `toolResult` message or a
- *   hydrated settlement/interruption during replay.
+ * - `resolved`: per-id count of resolutions observed — a persisted
+ *   `toolResult` message or a hydrated settlement/interruption.
  */
 export class ReplayToolCallBookkeeping {
 	readonly #replayed = new Set<string>();
-	readonly #announced = new Set<string>();
-	readonly #resolved = new Set<string>();
+	readonly #announced = new Map<string, number>();
+	readonly #resolved = new Map<string, number>();
 
 	/** Record that this id was dispatched at its assistant-turn occurrence. */
 	markReplayed(toolCallId: string): void {
@@ -242,27 +250,36 @@ export class ReplayToolCallBookkeeping {
 		return this.#replayed.has(toolCallId);
 	}
 
-	/** Record that a legacy `tool_call` notification actually went out for this id. */
+	/** Record that a legacy `tool_call` notification actually went out for this occurrence. */
 	markAnnounced(toolCallId: string): void {
-		this.#announced.add(toolCallId);
+		this.#announced.set(toolCallId, (this.#announced.get(toolCallId) ?? 0) + 1);
 	}
 
-	/** Whether a legacy announcement went out for this id. */
+	/** Whether a legacy announcement went out for any occurrence of this id. */
 	wasAnnounced(toolCallId: string): boolean {
 		return this.#announced.has(toolCallId);
 	}
 
-	/** Record that this id reached a settlement/interruption during replay. */
+	/** Record that one occurrence of this id reached a settlement/interruption during replay. */
 	markResolved(toolCallId: string): void {
-		this.#resolved.add(toolCallId);
+		this.#resolved.set(toolCallId, (this.#resolved.get(toolCallId) ?? 0) + 1);
 	}
 
 	/**
-	 * Announced ids with no resolution observed anywhere in the walk, in
-	 * announcement order — the inputs for the synthetic-`failed` dangling
-	 * cleanup. Hydrated ids are never announced, hence never appear here.
+	 * Announced ids with at least one unresolved occurrence, in first-announcement
+	 * order — the inputs for the synthetic-`failed` dangling cleanup. Hydrated
+	 * ids are never announced, hence never appear here.
+	 *
+	 * Emitted once per id even when several of its occurrences dangle: ACP
+	 * addresses a card by `toolCallId` alone, so a recycled id has exactly one
+	 * card to settle and a second identical `tool_call_update` would say nothing
+	 * new.
 	 */
 	danglingAnnouncedIds(): readonly string[] {
-		return [...this.#announced].filter(toolCallId => !this.#resolved.has(toolCallId));
+		const dangling: string[] = [];
+		for (const [toolCallId, announced] of this.#announced) {
+			if (announced > (this.#resolved.get(toolCallId) ?? 0)) dangling.push(toolCallId);
+		}
+		return dangling;
 	}
 }

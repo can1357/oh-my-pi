@@ -2665,6 +2665,113 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("settles a recycled toolCallId's dangling second occurrence failed without letting the first occurrence's settlement mask it", async () => {
+		// Regression: `ReplayToolCallBookkeeping` used to track `announced`/
+		// `resolved` as one Set per id, so a first occurrence's settlement set
+		// the id's single `resolved` bit and a later dangling occurrence of the
+		// SAME id was invisible to `danglingAnnouncedIds()` -- its card stayed
+		// `pending` forever. Bookkeeping must count occurrences instead: the
+		// second announcement outnumbering the one resolution is what makes
+		// this id dangling, not `resolved.has(id)`.
+		const harness = await createHarness();
+		const stored = new FakeAgentSession(harness.cwdA);
+		harness.sessions.push(stored);
+		const recycledId = "toolu_recycled_settled_then_dangling_7N2X";
+
+		// First occurrence: legacy tool_use with a matching toolResult -- settles cleanly.
+		stored.sessionManager.appendMessage({ role: "user", content: "run recycled first", timestamp: Date.now() });
+		stored.sessionManager.appendMessage({
+			role: "assistant",
+			content: [
+				{ type: "tool_use", id: recycledId, name: "bash", input: { command: "echo RECYCLED_SETTLED_FIRST_7N2X" } },
+			] as unknown as Array<{ type: "toolCall"; id: string; name: string; arguments: Record<string, unknown> }>,
+			api: "openai-responses",
+			provider: "openai",
+			model: TEST_MODELS[1].id,
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		});
+		const firstBody = "RECYCLED_SETTLED_FIRST_BODY_7N2X";
+		stored.sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: recycledId,
+			toolName: "bash",
+			content: [{ type: "text", text: firstBody }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// Second occurrence: the SAME toolCallId, tool_use persisted but no
+		// matching toolResult -- the process died before the result landed.
+		stored.sessionManager.appendMessage({ role: "user", content: "run recycled second", timestamp: Date.now() });
+		stored.sessionManager.appendMessage({
+			role: "assistant",
+			content: [
+				{ type: "tool_use", id: recycledId, name: "bash", input: { command: "sleep 100" } },
+			] as unknown as Array<{ type: "toolCall"; id: string; name: string; arguments: Record<string, unknown> }>,
+			api: "openai-responses",
+			provider: "openai",
+			model: TEST_MODELS[1].id,
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		});
+		await stored.sessionManager.ensureOnDisk();
+		await stored.sessionManager.flush();
+
+		await harness.agent.loadSession({ sessionId: stored.sessionId, cwd: harness.cwdA, mcpServers: [] });
+
+		const toolUpdates = harness.updates
+			.filter(update => update.sessionId === stored.sessionId)
+			.map(notification => notification.update)
+			.filter(
+				(update): update is Extract<typeof update, { toolCallId: string }> =>
+					"toolCallId" in update && update.toolCallId === recycledId,
+			);
+		// Two `tool_call` starts (one per occurrence), the first occurrence
+		// settling `completed` with its real body, the second's card ending in
+		// a synthetic `failed` -- never left `pending`.
+		expect(toolUpdates).toEqual([
+			expect.objectContaining({ sessionUpdate: "tool_call", toolCallId: recycledId, status: "pending" }),
+			expect.objectContaining({
+				sessionUpdate: "tool_call_update",
+				toolCallId: recycledId,
+				status: "completed",
+				content: [{ type: "content", content: { type: "text", text: firstBody } }],
+			}),
+			expect.objectContaining({ sessionUpdate: "tool_call", toolCallId: recycledId, status: "pending" }),
+			expect.objectContaining({
+				sessionUpdate: "tool_call_update",
+				toolCallId: recycledId,
+				status: "failed",
+				content: [
+					{
+						type: "content",
+						content: { type: "text", text: "Interrupted: no result recorded before the process ended." },
+					},
+				],
+			}),
+		]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
 	it("does not synthesize a failed update for a dangling internal Hub call", async () => {
 		// Regression test: an internal Hub coordination call
 		// (`isInternalHubMessageTool`) never gets a `tool_call` notification --
