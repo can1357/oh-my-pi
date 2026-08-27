@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added built-in Qwen Cloud provider support (`qwen-cloud`, `QWEN_CLOUD_API_KEY`) for Alibaba Model Studio (DashScope International): live account-scoped model discovery against `compatible-mode/v1/models`, a curated bundled chat catalog, and DashScope Qwen wire-compat (top-level `enable_thinking`, single system block).
+
 ## [18.0.5] - 2026-08-25
 
 ### Added

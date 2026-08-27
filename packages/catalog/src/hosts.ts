@@ -42,7 +42,7 @@ export const KNOWN_HOSTS = {
 	zhipu: { providers: ["zhipu-coding-plan"], urlMarkers: ["open.bigmodel.cn"] },
 	kilo: { providers: ["kilo"], urlMarkers: ["api.kilo.ai"] },
 	alibabaDashscope: {
-		providers: ["alibaba-coding-plan", "alibaba-token-plan"],
+		providers: ["alibaba-coding-plan", "alibaba-token-plan", "qwen-cloud"],
 		urlMarkers: ["dashscope", "token-plan."],
 	},
 	umans: { providers: ["umans"], urlMarkers: ["api.code.umans.ai"] },

@@ -54,6 +54,7 @@ import { openrouterProvider } from "./openrouter";
 import { parallelProvider } from "./parallel";
 import { perplexityProvider } from "./perplexity";
 import { qianfanProvider } from "./qianfan";
+import { qwenCloudProvider } from "./qwen-cloud";
 import { qwenPortalProvider } from "./qwen-portal";
 import { sakanaProvider } from "./sakana";
 import { siliconflowProvider } from "./siliconflow";
@@ -109,6 +110,7 @@ const ALL = [
 	aimlApiProvider,
 	zhipuCodingPlanProvider,
 	umansProvider,
+	qwenCloudProvider,
 	qwenPortalProvider,
 	sakanaProvider,
 	minimaxCodeProvider,

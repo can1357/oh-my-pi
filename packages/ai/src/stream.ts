@@ -37,14 +37,16 @@ import { isKimiModel, streamKimi } from "./providers/kimi";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
 import { streamPiNative } from "./providers/pi-native-client";
+import { isQwenCloudModel, streamQwenCloud } from "./providers/qwen-cloud";
 // Heavy provider stream functions are imported lazily via register-builtins,
 // which wraps each provider module in a dynamic import. This keeps the
 // AWS SDK, google-auth-library, @google/genai, and
 // other provider SDKs out of the CLI startup parse graph. The
-// gitlab-duo / kimi / synthetic providers stay eager because their modules
-// export routing predicates (isGitLabDuoModel, isKimiModel, isSyntheticModel)
-// that must be callable synchronously before streaming begins, and their
-// modules are thin wrappers with no heavy SDK dependencies.
+// gitlab-duo / kimi / synthetic / qwen-cloud providers stay eager because
+// their modules export routing predicates (isGitLabDuoModel, isKimiModel,
+// isSyntheticModel, isQwenCloudModel) that must be callable synchronously
+// before streaming begins, and their modules are thin wrappers with no heavy
+// SDK dependencies.
 import {
 	streamAnthropic,
 	streamAzureOpenAIResponses,
@@ -1687,6 +1689,20 @@ function streamSimpleRequest<TApi extends Api>(
 					...opts,
 					apiKey,
 					format: opts?.syntheticApiFormat ?? "openai",
+				}),
+			),
+		);
+	}
+
+	// Qwen Cloud (Alibaba Model Studio) - route to dedicated handler that wraps
+	// OpenAI or Anthropic API. Defaults to the OpenAI surface, matching discovery.
+	if (isQwenCloudModel(model)) {
+		return withThinkingLoopGuard(model, requestOptions, opts =>
+			withProviderInFlightLimit(model, opts, () =>
+				streamQwenCloud(model as Model<"openai-completions">, context, {
+					...opts,
+					apiKey,
+					format: opts?.qwenCloudApiFormat ?? "openai",
 				}),
 			),
 		);

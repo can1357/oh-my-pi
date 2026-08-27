@@ -43,6 +43,7 @@ import {
 	opencodeZenModelManagerOptions,
 	openrouterModelManagerOptions,
 	qianfanModelManagerOptions,
+	qwenCloudModelManagerOptions,
 	qwenPortalModelManagerOptions,
 	sakanaModelManagerOptions,
 	siliconflowCnModelManagerOptions,
@@ -388,6 +389,14 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["QIANFAN_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => qianfanModelManagerOptions(config),
 		catalogDiscovery: { label: "Qianfan" },
+	},
+	{
+		id: "qwen-cloud",
+		defaultModel: "qwen3.8-max",
+		envVars: ["QWEN_CLOUD_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => qwenCloudModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Qwen Cloud (Alibaba Model Studio)" },
 	},
 	{
 		id: "qwen-portal",

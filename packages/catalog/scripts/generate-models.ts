@@ -50,6 +50,7 @@ import {
 	mapModelsDevToModels,
 	OPENAI_DAYBREAK_CURATED_FALLBACK_MODELS,
 	projectOpenAIProReasoningAliases,
+	QWEN_CLOUD_STATIC_MODELS,
 	SAKANA_FUGU_STATIC_MODELS,
 	stripFireworksDeepSeekThinkingToggle,
 	YOLO_AUTO_STATIC_MODELS,
@@ -601,6 +602,12 @@ async function generateModels() {
 	if (!authoritativeCatalogProviders.has("yolo-auto")) {
 		allModels.push(...YOLO_AUTO_STATIC_MODELS);
 	}
+	// Seed Qwen Cloud's curated chat catalog so the provider is usable when
+	// generation has no QWEN_CLOUD_API_KEY. A live account-scoped `/v1/models`
+	// snapshot is authoritative and replaces the seed.
+	if (!authoritativeCatalogProviders.has("qwen-cloud")) {
+		allModels.push(...QWEN_CLOUD_STATIC_MODELS);
+	}
 	// Seed the GMI Cloud default model so a fresh install (and a regen without a
 	// `GMI_API_KEY`) still resolves the descriptor's `defaultModel` synchronously
 	// at boot. If live `/v1/models` discovery succeeds, it is authoritative.
@@ -672,9 +679,11 @@ async function generateModels() {
 			if (
 				!fetchedKeys.has(`${model.provider}/${model.id}`) &&
 				!DISCOVERY_ONLY_PROVIDERS.has(model.provider) &&
-				// Yolo-Auto's documented static seed is the complete fallback
-				// catalog; never resurrect retired ids from the previous snapshot.
+				// Yolo-Auto / Qwen Cloud's documented static seed is the complete
+				// fallback catalog; never resurrect retired ids from the previous
+				// snapshot.
 				model.provider !== "yolo-auto" &&
+				model.provider !== "qwen-cloud" &&
 				!RETIRED_PROVIDERS.has(model.provider) &&
 				!authoritativeCatalogProviders.has(model.provider) &&
 				!authoritativeSpecialDiscoveryProviders.has(model.provider) &&

@@ -3530,6 +3530,333 @@ export function alibabaTokenPlanModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// Alibaba Qwen Cloud (dashscope-intl) — dual OpenAI/Anthropic surface
+// ---------------------------------------------------------------------------
+
+/**
+ * OpenAI-compatible endpoint for Alibaba Model Studio (DashScope International).
+ * Serves the account's full `/models` catalog for discovery and `chat/completions`.
+ */
+export const QWEN_CLOUD_OPENAI_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
+/**
+ * Anthropic-compatible endpoint for the same Qwen Cloud account. Messages-only
+ * (no `/models`); the Anthropic transport appends `/v1/messages`.
+ */
+export const QWEN_CLOUD_ANTHROPIC_BASE_URL = "https://dashscope-intl.aliyuncs.com/apps/anthropic";
+
+const QWEN_CLOUD_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
+const QWEN_CLOUD_COMPAT: OpenAICompat = { supportsDeveloperRole: false };
+const QWEN_CLOUD_EFFORT_REASONING: ThinkingConfig = {
+	mode: "effort",
+	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+};
+const QWEN_CLOUD_GLM_REASONING: ThinkingConfig = {
+	mode: "effort",
+	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.Max],
+};
+const QWEN_CLOUD_DEEPSEEK_REASONING: ThinkingConfig = {
+	mode: "effort",
+	efforts: [Effort.High, Effort.Max],
+};
+// Qwen3.8-Max combines Qwen's binary thinking toggle with OpenAI-style
+// `reasoning_effort`; the base view encodes disabled turns and reasoning
+// requests swap to the OpenAI effort dialect (matches the Token Plan surface).
+const QWEN_CLOUD_QWEN_EFFORT_COMPAT: OpenAICompat = {
+	...QWEN_CLOUD_COMPAT,
+	supportsReasoningEffort: true,
+	whenThinking: {
+		thinkingFormat: "openai",
+		extraBody: { enable_thinking: true },
+	},
+};
+
+/**
+ * Curated Qwen Cloud chat catalog. Distributed as pay-as-you-go by Alibaba
+ * Model Studio; context/max-token caps and tiered reasoning come from the
+ * official model documentation and the bundled DashScope entries, so a fresh
+ * install and a keyless regen stay usable. A live `/v1/models` snapshot is
+ * authoritative for the account and replaces this seed.
+ */
+export const QWEN_CLOUD_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: "qwen3.8-max",
+		name: "Qwen3.8 Max",
+		api: "openai-completions",
+		provider: "qwen-cloud",
+		baseUrl: QWEN_CLOUD_OPENAI_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: QWEN_CLOUD_COST,
+		contextWindow: 1_000_000,
+		maxTokens: 131_072,
+		thinking: {
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.XHigh],
+			defaultLevel: Effort.XHigh,
+		},
+		compat: QWEN_CLOUD_QWEN_EFFORT_COMPAT,
+	},
+	{
+		id: "qwen3.8-max-preview",
+		name: "Qwen3.8 Max Preview",
+		api: "openai-completions",
+		provider: "qwen-cloud",
+		baseUrl: QWEN_CLOUD_OPENAI_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: QWEN_CLOUD_COST,
+		contextWindow: 983_616,
+		maxTokens: 131_072,
+		thinking: {
+			mode: "effort",
+			efforts: [Effort.Low, Effort.High, Effort.XHigh],
+			requiresEffort: true,
+		},
+		compat: {
+			...QWEN_CLOUD_COMPAT,
+			supportsReasoningEffort: true,
+		},
+	},
+	{
+		id: "qwen3.7-max",
+		name: "Qwen3.7 Max",
+		api: "openai-completions",
+		provider: "qwen-cloud",
+		baseUrl: QWEN_CLOUD_OPENAI_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: QWEN_CLOUD_COST,
+		contextWindow: 1_000_000,
+		maxTokens: 65_536,
+		thinking: QWEN_CLOUD_EFFORT_REASONING,
+		compat: QWEN_CLOUD_COMPAT,
+	},
+	{
+		id: "qwen3.7-plus",
+		name: "Qwen3.7 Plus",
+		api: "openai-completions",
+		provider: "qwen-cloud",
+		baseUrl: QWEN_CLOUD_OPENAI_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: QWEN_CLOUD_COST,
+		contextWindow: 1_000_000,
+		maxTokens: 64_000,
+		thinking: QWEN_CLOUD_EFFORT_REASONING,
+		compat: QWEN_CLOUD_COMPAT,
+	},
+	{
+		id: "qwen3.6-plus",
+		name: "Qwen3.6 Plus",
+		api: "openai-completions",
+		provider: "qwen-cloud",
+		baseUrl: QWEN_CLOUD_OPENAI_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: QWEN_CLOUD_COST,
+		contextWindow: 1_000_000,
+		maxTokens: 65_536,
+		thinking: QWEN_CLOUD_EFFORT_REASONING,
+		compat: QWEN_CLOUD_COMPAT,
+	},
+	{
+		id: "qwen3.6-flash",
+		name: "Qwen3.6 Flash",
+		api: "openai-completions",
+		provider: "qwen-cloud",
+		baseUrl: QWEN_CLOUD_OPENAI_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: QWEN_CLOUD_COST,
+		contextWindow: 1_000_000,
+		maxTokens: 65_536,
+		thinking: QWEN_CLOUD_EFFORT_REASONING,
+		compat: QWEN_CLOUD_COMPAT,
+	},
+	{
+		id: "glm-5.2",
+		name: "GLM-5.2",
+		api: "openai-completions",
+		provider: "qwen-cloud",
+		baseUrl: QWEN_CLOUD_OPENAI_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: QWEN_CLOUD_COST,
+		contextWindow: 1_000_000,
+		maxTokens: 131_072,
+		thinking: QWEN_CLOUD_GLM_REASONING,
+		compat: QWEN_CLOUD_COMPAT,
+	},
+	{
+		id: "glm-5.1",
+		name: "GLM-5.1",
+		api: "openai-completions",
+		provider: "qwen-cloud",
+		baseUrl: QWEN_CLOUD_OPENAI_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: QWEN_CLOUD_COST,
+		contextWindow: 202_752,
+		maxTokens: 128_000,
+		thinking: QWEN_CLOUD_GLM_REASONING,
+		compat: QWEN_CLOUD_COMPAT,
+	},
+	{
+		id: "deepseek-v4-flash",
+		name: "DeepSeek V4 Flash",
+		api: "openai-completions",
+		provider: "qwen-cloud",
+		baseUrl: QWEN_CLOUD_OPENAI_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: QWEN_CLOUD_COST,
+		contextWindow: 1_000_000,
+		maxTokens: 384_000,
+		thinking: QWEN_CLOUD_DEEPSEEK_REASONING,
+		compat: QWEN_CLOUD_COMPAT,
+	},
+	{
+		id: "deepseek-v4-pro",
+		name: "DeepSeek V4 Pro",
+		api: "openai-completions",
+		provider: "qwen-cloud",
+		baseUrl: QWEN_CLOUD_OPENAI_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: QWEN_CLOUD_COST,
+		contextWindow: 1_000_000,
+		maxTokens: 384_000,
+		thinking: QWEN_CLOUD_DEEPSEEK_REASONING,
+		compat: QWEN_CLOUD_COMPAT,
+	},
+	{
+		id: "kimi-k2.7-code",
+		name: "Kimi K2.7 Code",
+		api: "openai-completions",
+		provider: "qwen-cloud",
+		baseUrl: QWEN_CLOUD_OPENAI_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: QWEN_CLOUD_COST,
+		contextWindow: 262_144,
+		maxTokens: 262_144,
+		compat: QWEN_CLOUD_COMPAT,
+	},
+];
+
+/** Metadata for Qwen Cloud models discovered but not in the static seed. */
+export const QWEN_CLOUD_DISCOVERED_MODEL_LIMITS: Readonly<
+	Record<string, { contextWindow: number; maxTokens: number }>
+> = {
+	"qwen3.8-27b": { contextWindow: 1_000_000, maxTokens: 131_072 },
+	"qwen3.7-flash": { contextWindow: 1_000_000, maxTokens: 65_536 },
+	"qwen3.6-max": { contextWindow: 1_000_000, maxTokens: 65_536 },
+	"qwen3.6-27b": { contextWindow: 1_000_000, maxTokens: 65_536 },
+	"qwen3.5-plus": { contextWindow: 1_000_000, maxTokens: 65_536 },
+	"qwen3.5-flash": { contextWindow: 1_000_000, maxTokens: 65_536 },
+	"deepseek-v4-flash-0731": { contextWindow: 1_000_000, maxTokens: 384_000 },
+	"deepseek-v4-pro-0813": { contextWindow: 1_000_000, maxTokens: 384_000 },
+	"deepseek-v3.2": { contextWindow: 131_072, maxTokens: 65_536 },
+	"glm-5.2-fast-preview": { contextWindow: 1_000_000, maxTokens: 131_072 },
+	"kimi-k3": { contextWindow: 1_000_000, maxTokens: 131_072 },
+};
+
+// DashScope serves its catalog across image/tts/asr/embedding/omni/realtime
+// surfaces alongside chat. Filter those out so the chat picker only sees
+// usable chat-completions models.
+const QWEN_CLOUD_NON_CHAT_PREFIXES = [
+	"fun-asr",
+	"qwen-audio-",
+	"qwen-image-",
+	"qwen-omni-",
+	"qwen-tts-",
+	"qwen-asr-",
+	"qwen-s2s-",
+	"qwen-livetranslate-",
+	"qwen-mt-",
+	"qwen-vl-ocr",
+	"text-embedding-",
+	"wan2.7-",
+	"z-image-",
+	"tongyi-",
+	"ccai-",
+] as const;
+
+/**
+ * DashScope ids carry the generation in the suffix (`qwen3-tts-`, `qwen3-asr-`),
+ * so the TTS/ASR filters match on `-tts-` / `-asr-` anywhere in the id rather
+ * than a single prefix.
+ */
+function isQwenCloudChatModelId(id: string): boolean {
+	const normalized = id.trim().toLowerCase();
+	if (normalized.length === 0) return false;
+	if (normalized.includes("realtime")) return false;
+	if (normalized.includes("-tts-") || normalized.startsWith("qwen-tts")) return false;
+	if (normalized.includes("-asr-") || normalized.startsWith("qwen-asr-") || normalized.endsWith("-asr-flash"))
+		return false;
+	return !QWEN_CLOUD_NON_CHAT_PREFIXES.some(prefix => normalized.startsWith(prefix));
+}
+
+export interface QwenCloudModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function qwenCloudModelManagerOptions(
+	config?: QwenCloudModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? QWEN_CLOUD_OPENAI_BASE_URL;
+	return {
+		providerId: "qwen-cloud",
+		dynamicModelsAuthoritative: true,
+		staticModels: QWEN_CLOUD_STATIC_MODELS,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "qwen-cloud",
+					baseUrl,
+					apiKey,
+					filterModel: (_entry, model) => isQwenCloudChatModelId(model.id),
+					mapModel: (_entry, defaults) => {
+						const reference = QWEN_CLOUD_STATIC_MODELS.find(model => model.id === defaults.id);
+						if (reference) {
+							return {
+								...reference,
+								id: defaults.id,
+								api: defaults.api,
+								provider: defaults.provider,
+								baseUrl: defaults.baseUrl,
+							};
+						}
+						const normalizedId = defaults.id.trim().toLowerCase();
+						const limits = QWEN_CLOUD_DISCOVERED_MODEL_LIMITS[normalizedId];
+						const enriched = limits
+							? {
+									...defaults,
+									contextWindow: limits.contextWindow,
+									maxTokens: limits.maxTokens,
+								}
+							: defaults;
+
+						if (normalizedId.startsWith("deepseek-v4")) {
+							return {
+								...enriched,
+								reasoning: true,
+								thinking: QWEN_CLOUD_DEEPSEEK_REASONING,
+							};
+						}
+						return enriched;
+					},
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 11. Vercel AI Gateway
 // ---------------------------------------------------------------------------
 

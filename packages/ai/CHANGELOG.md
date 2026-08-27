@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Qwen Cloud (Alibaba Model Studio / DashScope International) as a loginable provider with a dual OpenAI/Anthropic streaming surface: the default transport hits `dashscope-intl.aliyuncs.com/compatible-mode/v1`, and `qwenCloudApiFormat: "anthropic"` routes the same models through the `apps/anthropic` messages endpoint using one workspace API key.
+
 ## [18.0.6] - 2026-08-26
 
 ### Added
