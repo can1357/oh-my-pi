@@ -11,7 +11,7 @@ import type {
 	StreamOptions,
 	ToolChoice,
 } from "../types";
-import { resolveCacheRetention } from "../utils";
+import { resolveCacheRetention, resolveOpenAIResponsesRequestModel } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
 import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
@@ -38,7 +38,6 @@ import {
 	createInitialResponsesAssistantMessage,
 	getOpenAIPromptCacheKey,
 	isOpenAIResponsesProgressEvent,
-	parseAzureDeploymentNameMap,
 	processResponsesStream,
 } from "./openai-shared";
 
@@ -52,8 +51,7 @@ function resolveDeploymentName(model: Model<"azure-openai-responses">, options?:
 	if (options?.azureDeploymentName) {
 		return options.azureDeploymentName;
 	}
-	const mappedDeployment = parseAzureDeploymentNameMap($env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP).get(model.id);
-	return mappedDeployment ?? model.id;
+	return resolveOpenAIResponsesRequestModel(model);
 }
 
 // Azure OpenAI Responses-specific options

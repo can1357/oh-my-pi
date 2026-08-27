@@ -363,7 +363,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		expect(runtimeUser.providerPayload).toEqual(preservedUserPayload);
 	});
 
-	it("reuses compatible target-bound compaction history during startup resume and tree navigation", async () => {
+	it("restores compatible target-bound compaction after resume, navigation, and model switches", async () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-compaction-resume-${Snowflake.next()}-`));
 		tempDirs.push(tempDir);
 		const model = getBundledModel("openai", "gpt-5-mini");
@@ -432,6 +432,28 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 			throw new Error("Expected compatible remote compaction summary after tree navigation");
 		}
 		expect(navigatedSummary.providerPayload?.referenceTarget).toBe(referenceTarget);
+		expect(
+			session.messages.some(
+				message => message.role === "user" && getTextContent(message) === "Original compacted context",
+			),
+		).toBe(false);
+
+		const incompatibleModel = getBundledModel("openai", "gpt-5.4-mini");
+		if (!incompatibleModel) throw new Error("Expected incompatible bundled OpenAI test model");
+		await session.setModel(incompatibleModel);
+		expect(session.messages.some(message => message.role === "compactionSummary")).toBe(false);
+		expect(
+			session.messages.some(
+				message => message.role === "user" && getTextContent(message) === "Original compacted context",
+			),
+		).toBe(true);
+
+		await session.setModel(model);
+		const restoredSummary = session.messages.find(message => message.role === "compactionSummary");
+		if (restoredSummary?.role !== "compactionSummary") {
+			throw new Error("Expected compatible remote compaction summary after switching back");
+		}
+		expect(restoredSummary.providerPayload?.referenceTarget).toBe(referenceTarget);
 		expect(
 			session.messages.some(
 				message => message.role === "user" && getTextContent(message) === "Original compacted context",

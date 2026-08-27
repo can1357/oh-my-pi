@@ -12,6 +12,7 @@ import {
 import {
 	buildCompactionV2Request,
 	buildOpenAiNativeHistory,
+	canReplayOpenAiCompactionHistory,
 	CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE,
 	getCompactionV2PreserveData,
 	getOpenAiCompactionReferenceTarget,
@@ -129,6 +130,36 @@ test("uses the runtime Codex target for configured compaction routes", () => {
 
 	expect(getOpenAiCompactionReferenceTarget(customModel, false)).toBe(customRuntimeTarget);
 	expect(getOpenAiCompactionReferenceTarget(customModel, true)).toBe(customRuntimeTarget);
+});
+
+test("replays Azure compaction with its mapped deployment identity", () => {
+	const previousDeploymentMap = Bun.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP;
+	try {
+		Bun.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP = "gpt-5=deployment-prod";
+		const model = makeAzureModel({
+			remoteCompaction: {
+				enabled: true,
+				api: "azure-openai-responses",
+				v2StreamingEnabled: true,
+			},
+		});
+		const referenceTarget = getOpenAiCompactionReferenceTarget(model, false);
+
+		expect(
+			canReplayOpenAiCompactionHistory(
+				{ provider: model.provider, referenceTarget, replacementHistory: [] },
+				model,
+			),
+		).toBe(true);
+		expect(getOpenAiCompactionReferenceTarget(model, true)).toBe(referenceTarget);
+		expect(buildCompactionV2Request(model, [], "instructions").model).toBe("deployment-prod");
+	} finally {
+		if (previousDeploymentMap === undefined) {
+			delete Bun.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP;
+		} else {
+			Bun.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP = previousDeploymentMap;
+		}
+	}
 });
 
 function makeAzureModel(overrides: Partial<ModelSpec<"azure-openai-responses">> = {}): Model<"azure-openai-responses"> {

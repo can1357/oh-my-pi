@@ -20,9 +20,9 @@ import {
 import {
 	getOpenAIPromptCacheKey,
 	getOpenAIResponsesRoutingSessionId,
-	parseAzureDeploymentNameMap,
 	resolveOpenAIRequestSetup,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { resolveOpenAIResponsesRequestModel } from "@oh-my-pi/pi-ai/utils";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
 import {
 	applyCodexResidencyHeader,
@@ -176,9 +176,9 @@ function appendAzureApiVersion(endpoint: string): string {
 
 function resolveCompactionV2Model(model: Model): string {
 	const requestModel = model.remoteCompaction?.model ?? model.requestModelId ?? model.id;
-	if (compactionV2Api(model) !== "azure-openai-responses") return requestModel;
-	const mappedDeployment = parseAzureDeploymentNameMap($env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP).get(requestModel);
-	return mappedDeployment ?? requestModel;
+	const api = compactionV2Api(model);
+	const requestTarget = api === model.api ? model : ({ ...model, api } as Model);
+	return resolveOpenAIResponsesRequestModel(requestTarget, requestModel);
 }
 
 // ============================================================================

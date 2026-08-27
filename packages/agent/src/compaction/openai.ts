@@ -26,7 +26,6 @@ import {
 	encodeResponsesOrphanToolResultOutput,
 	encodeResponsesToolResultOutput,
 	hoistInterleavedResponsesToolBatchMessages,
-	parseAzureDeploymentNameMap,
 	parseTextSignature,
 	splitResponsesOrphanOutput,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
@@ -46,6 +45,7 @@ import {
 	getOpenAIResponsesHistoryPayload,
 	getOpenAIResponsesReferenceTarget,
 	normalizeResponsesToolCallId,
+	resolveOpenAIResponsesRequestModel,
 	stripOpenAIResponsesOutputOnlyStatusesForReplay,
 } from "@oh-my-pi/pi-ai/utils";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
@@ -410,9 +410,8 @@ function appendAzureApiVersion(endpoint: string): string {
 function resolveOpenAiCompactModel(model: Model): string {
 	const requestModel = model.remoteCompaction?.model ?? model.requestModelId ?? model.id;
 	const compactionApi = model.remoteCompaction?.api ?? model.api;
-	if (compactionApi !== "azure-openai-responses") return requestModel;
-	const mappedDeployment = parseAzureDeploymentNameMap($env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP).get(requestModel);
-	return mappedDeployment ?? requestModel;
+	const requestTarget = compactionApi === model.api ? model : ({ ...model, api: compactionApi } as Model);
+	return resolveOpenAIResponsesRequestModel(requestTarget, requestModel);
 }
 
 function resolveOpenAiCodexCompactEndpoint(baseUrl: string | undefined): string {

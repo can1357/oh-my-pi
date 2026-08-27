@@ -488,9 +488,30 @@ export function canonicalizeOpenAIResponsesReferenceBaseUrl(endpoint: string): s
 	}
 }
 
-export function getOpenAIResponsesReferenceTarget(
+export function parseAzureDeploymentNameMap(value: string | undefined): Map<string, string> {
+	const map = new Map<string, string>();
+	if (!value) return map;
+	for (const entry of value.split(",")) {
+		const trimmed = entry.trim();
+		if (!trimmed) continue;
+		const [modelId, deploymentName] = trimmed.split("=", 2);
+		if (!modelId || !deploymentName) continue;
+		map.set(modelId.trim(), deploymentName.trim());
+	}
+	return map;
+}
+
+export function resolveOpenAIResponsesRequestModel(
 	model: Model,
 	requestModel = model.requestModelId ?? model.id,
+): string {
+	if (model.api !== "azure-openai-responses") return requestModel;
+	return parseAzureDeploymentNameMap($env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP).get(requestModel) ?? requestModel;
+}
+
+export function getOpenAIResponsesReferenceTarget(
+	model: Model,
+	requestModel = resolveOpenAIResponsesRequestModel(model),
 ): string {
 	const supportsImageDetailOriginal =
 		!!model.compat &&

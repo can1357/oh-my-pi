@@ -61,6 +61,7 @@ import {
 } from "../types";
 
 export type { OpenAIPromptCacheOptions } from "../types";
+export { parseAzureDeploymentNameMap } from "../utils";
 
 import {
 	getOpenAIResponsesReferenceTarget,
@@ -492,19 +493,6 @@ export function getOpenRouterResponsesSessionId(
 ): string | undefined {
 	if (resolveCacheRetention(options?.cacheRetention) === "none") return undefined;
 	return normalizeOpenRouterResponsesSessionId(options?.sessionId);
-}
-
-export function parseAzureDeploymentNameMap(value: string | undefined): Map<string, string> {
-	const map = new Map<string, string>();
-	if (!value) return map;
-	for (const entry of value.split(",")) {
-		const trimmed = entry.trim();
-		if (!trimmed) continue;
-		const [modelId, deploymentName] = trimmed.split("=", 2);
-		if (!modelId || !deploymentName) continue;
-		map.set(modelId.trim(), deploymentName.trim());
-	}
-	return map;
 }
 
 export function createOpenAIStrictToolsState(): OpenAIStrictToolsState {

@@ -7577,6 +7577,7 @@ export class AgentSession {
 	async #setModelWithProviderSessionReset(model: Model): Promise<void> {
 		const currentModel = this.model;
 		const isChanging = !currentModel || !modelsAreEqual(currentModel, model);
+		const currentReferenceTarget = currentModel ? getOpenAIResponsesReferenceTarget(currentModel) : undefined;
 		const codeModeChanged = this.#tools.codeModeChangesBetween(currentModel, model);
 		if (currentModel) {
 			this.#closeProviderSessionsForModelSwitch(currentModel, model);
@@ -7586,13 +7587,7 @@ export class AgentSession {
 		}
 		this.agent.setModel(model);
 		const referenceTarget = getOpenAIResponsesReferenceTarget(model);
-		const hasIncompatibleCompaction = this.agent.state.messages.some(
-			message =>
-				message.role === "compactionSummary" &&
-				message.providerPayload?.referenceTarget !== undefined &&
-				message.providerPayload.referenceTarget !== referenceTarget,
-		);
-		if (hasIncompatibleCompaction) {
+		if (currentReferenceTarget !== undefined && currentReferenceTarget !== referenceTarget) {
 			this.agent.replaceMessages(this.buildDisplaySessionContext().messages);
 		}
 		// Model mutations driven through ModelControls (explicit /model, prewalk
