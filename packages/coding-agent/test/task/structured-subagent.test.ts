@@ -157,6 +157,7 @@ describe("structured subagent primitive", () => {
 				actualProvider: "anthropic",
 				requestedPatterns: ["merge-gateway/deepseek/deepseek-v3.2"],
 				fallbackMayReachMerge: true,
+				prewalkMayServeMerge: false,
 				authFallbackUsed: true,
 			}),
 		).toBe(false);
@@ -165,6 +166,16 @@ describe("structured subagent primitive", () => {
 				actualProvider: "merge-gateway",
 				requestedPatterns: [],
 				fallbackMayReachMerge: false,
+				prewalkMayServeMerge: false,
+				authFallbackUsed: true,
+			}),
+		).toBe(true);
+		expect(
+			executorModule.mergeMayServeSubagent({
+				actualProvider: "anthropic",
+				requestedPatterns: [],
+				fallbackMayReachMerge: false,
+				prewalkMayServeMerge: true,
 				authFallbackUsed: true,
 			}),
 		).toBe(true);
@@ -193,6 +204,39 @@ describe("structured subagent primitive", () => {
 				initialSelector: "anthropic/a",
 				roleHint: undefined,
 				targetProvider: "merge-gateway",
+			}),
+		).toBe(true);
+	});
+
+	it("hardens a non-Merge prewalk target whose runtime fallback reaches Merge", () => {
+		const models = new Map([
+			["openrouter/b", { provider: "openrouter", id: "b" }],
+			["merge-gateway/c", { provider: "merge-gateway", id: "c" }],
+		]);
+		const modelRegistry = {
+			find: (provider: string, id: string) => models.get(`${provider}/${id}`),
+			hasProvider: (provider: string) => [...models.values()].some(model => model.provider === provider),
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			"retry.fallbackChains": {
+				"openrouter/b": ["merge-gateway/c"],
+			},
+		});
+		const prewalkMayServeMerge = executorModule.retryFallbackMayReachProvider({
+			settings,
+			modelRegistry,
+			initialSelector: "openrouter/b",
+			roleHint: undefined,
+			targetProvider: "merge-gateway",
+		});
+		expect(prewalkMayServeMerge).toBe(true);
+		expect(
+			executorModule.mergeMayServeSubagent({
+				actualProvider: "anthropic",
+				requestedPatterns: [],
+				fallbackMayReachMerge: false,
+				prewalkMayServeMerge,
+				authFallbackUsed: true,
 			}),
 		).toBe(true);
 	});

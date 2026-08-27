@@ -197,9 +197,10 @@ export function mergeMayServeSubagent(args: {
 	actualProvider: string | undefined;
 	requestedPatterns: readonly string[];
 	fallbackMayReachMerge: boolean;
+	prewalkMayServeMerge: boolean;
 	authFallbackUsed: boolean;
 }): boolean {
-	if (args.actualProvider === "merge-gateway") return true;
+	if (args.actualProvider === "merge-gateway" || args.prewalkMayServeMerge) return true;
 	if (args.authFallbackUsed) return false;
 	return (
 		args.requestedPatterns.some(pattern => modelPatternTargetsProvider(pattern, "merge-gateway")) ||
@@ -3136,6 +3137,31 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			);
 			const initialFallbackSelector =
 				selectedFallbackCandidate?.selector ?? (model ? formatModelStringWithRouting(model) : modelPatterns[0]);
+			const prewalkPattern = resolveAgentPrewalkPattern({
+				settingsOverride: settings.get("task.agentPrewalk")[agent.name],
+				agentPrewalk: resolveAgentPrewalkDefault(agent, settings.get("task.prewalk")),
+			});
+			let prewalkTarget: Model<Api> | undefined;
+			let prewalkThinkingLevel: ConfiguredThinkingLevel | undefined;
+			let prewalkWarning: string | undefined;
+			if (prewalkPattern) {
+				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
+				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
+				prewalkTarget = resolvedPrewalk.model;
+				prewalkThinkingLevel = resolvedPrewalk.thinkingLevel;
+				prewalkWarning = resolvedPrewalk.warning;
+			}
+			const prewalkMayServeMerge =
+				prewalkTarget !== undefined &&
+				modelRegistry.hasConfiguredAuth(prewalkTarget) &&
+				(prewalkTarget.provider === "merge-gateway" ||
+					retryFallbackMayReachProvider({
+						settings: subagentSettings,
+						modelRegistry,
+						initialSelector: formatModelStringWithRouting(prewalkTarget),
+						roleHint: prewalkPattern ? resolveExplicitModelRole([prewalkPattern], subagentSettings) : undefined,
+						targetProvider: "merge-gateway",
+					}));
 			const mergeMayServe = mergeMayServeSubagent({
 				actualProvider: model?.provider,
 				requestedPatterns: modelPatterns,
@@ -3146,6 +3172,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					roleHint: retryFallbackRole ?? modelRole,
 					targetProvider: "merge-gateway",
 				}),
+				prewalkMayServeMerge,
 				authFallbackUsed,
 			});
 			const structuredOutputPolicy = resolveStructuredOutputHarnessPolicy(
@@ -3199,21 +3226,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// frontmatter default; the `task.prewalk` toggle (default off) arms it.
 			// Resolution failures skip prewalk instead of failing the spawn.
 			let prewalk: Prewalk | undefined;
-			const prewalkPattern = resolveAgentPrewalkPattern({
-				settingsOverride: settings.get("task.agentPrewalk")[agent.name],
-				agentPrewalk: resolveAgentPrewalkDefault(agent, settings.get("task.prewalk")),
-			});
 			if (prewalkPattern) {
-				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
-				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
-				const target = resolvedPrewalk.model;
-				if (!target || !modelRegistry.hasConfiguredAuth(target)) {
+				if (!prewalkTarget || !modelRegistry.hasConfiguredAuth(prewalkTarget)) {
 					logger.warn("Subagent prewalk target unavailable; skipping prewalk", {
 						agent: agent.name,
 						pattern: prewalkPattern,
-						warning: resolvedPrewalk.warning,
+						warning: prewalkWarning,
 					});
-				} else if (prewalkWouldBeNoop(model, effectiveThinkingLevel, target, resolvedPrewalk.thinkingLevel)) {
+				} else if (prewalkWouldBeNoop(model, effectiveThinkingLevel, prewalkTarget, prewalkThinkingLevel)) {
 					// Same model AND same effective thinking level: switching would only
 					// inject the plan/checklist nudges for no gain — skip. An effort-only
 					// delta on the same model still arms (it is a real cheapening hand-off).
@@ -3222,7 +3242,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						pattern: prewalkPattern,
 					});
 				} else {
-					prewalk = { target, thinkingLevel: resolvedPrewalk.thinkingLevel };
+					prewalk = { target: prewalkTarget, thinkingLevel: prewalkThinkingLevel };
 				}
 			}
 
