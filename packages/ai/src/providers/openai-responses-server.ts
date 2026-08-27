@@ -44,7 +44,7 @@ import {
 	openaiResponsesRequestSchema,
 } from "./openai-responses-server-schema";
 import { encodeTextSignatureV1, parseTextSignature } from "./openai-shared";
-import { getUsableInlineImageMimeType, isRemoteImageUrl } from "./vision-guard";
+import { getUsableInlineImageMimeType, isRemoteImageUrl, REMOTE_COMPUTER_SCREENSHOT_MIME_TYPE } from "./vision-guard";
 
 export type { ParsedRequest };
 
@@ -566,7 +566,7 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 									{
 										type: "image",
 										data: "",
-										mimeType: "application/octet-stream",
+										mimeType: REMOTE_COMPUTER_SCREENSHOT_MIME_TYPE,
 										url: remoteScreenshotUrl,
 									},
 								]

@@ -1,11 +1,12 @@
 import { describe, expect, it } from "bun:test";
+import { resolveResponsesComputerScreenshot } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import {
 	normalizeImageMimeType,
 	supportsComputerScreenshotReferences,
 	supportsProviderFileReference,
 	supportsRemoteImageUrls,
 } from "@oh-my-pi/pi-ai/providers/vision-guard";
-import type { ModelSpec } from "@oh-my-pi/pi-ai/types";
+import type { ModelSpec, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
@@ -297,6 +298,31 @@ describe("OpenAI provider-file capability", () => {
 				image,
 			),
 		).toBe(false);
+	});
+
+	it("resolves no computer screenshot for a target that cannot carry one", () => {
+		// A stale `computer` marker can ride along with a provider-file image that
+		// only the owning non-Responses API can encode. Resolving a Responses
+		// screenshot from it used to throw and surface as a gateway 500.
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_computer",
+			toolName: "computer",
+			content: [
+				{
+					type: "image",
+					data: "",
+					mimeType: "image/png",
+					providerFile: { provider: "anthropic", id: "file_screenshot" },
+				},
+			],
+			isError: false,
+			timestamp: 0,
+		};
+
+		for (const model of [makeAnthropicModel("https://api.anthropic.com/v1"), makeGoogleModel()]) {
+			expect(resolveResponsesComputerScreenshot(toolResult, model, false)).toBeUndefined();
+		}
 	});
 
 	it("rejects malformed and non-finite provider-file expirations", () => {

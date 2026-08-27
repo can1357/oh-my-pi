@@ -703,6 +703,14 @@ export interface SummaryOptions {
 	codexCompaction?: CodexCompactionContext;
 	/** Provider-visible tools for remote compaction transports that replay native tool history. */
 	tools?: Tool[];
+	/**
+	 * Active session model. Compaction may run through a different candidate
+	 * (a configured `compactionModel` or a fallback), so the runtime replay
+	 * fingerprint persisted alongside the preserved history must describe the
+	 * model that will actually consume it, not the compaction side model.
+	 * Defaults to the compaction model when omitted.
+	 */
+	runtimeModel?: Model;
 	/** Optional fetch implementation threaded into remote compaction calls. */
 	fetch?: FetchImpl;
 	/**
@@ -1593,6 +1601,7 @@ export async function compact(
 		preferWebsockets: options?.preferWebsockets,
 		codexCompaction: options?.codexCompaction,
 		tools: options?.tools,
+		runtimeModel: options?.runtimeModel,
 		fetch: options?.fetch,
 		completeImpl: options?.completeImpl,
 	};
@@ -1683,7 +1692,7 @@ export async function compact(
 						remote,
 						model,
 						getOpenAiCompactionReferenceTarget(model, true),
-						getOpenAIResponsesReferenceTarget(model),
+						getOpenAIResponsesReferenceTarget(summaryOptions.runtimeModel ?? model),
 					),
 				};
 				usedRemoteCompaction = true;
@@ -1733,6 +1742,7 @@ export async function compact(
 								sessionId: summaryOptions.sessionId,
 								providerSessionState: summaryOptions.providerSessionState,
 								codexCompaction: summaryOptions.codexCompaction,
+								replayTarget: getOpenAIResponsesReferenceTarget(summaryOptions.runtimeModel ?? model),
 							},
 						),
 					{ signal },

@@ -128,6 +128,7 @@ import {
 	NON_VISION_IMAGE_PLACEHOLDER,
 	partitionVisionContent,
 	resolveUsableInlineImage,
+	supportsComputerScreenshotOutput,
 	supportsComputerScreenshotReferences,
 	supportsProviderFileReference,
 	supportsRemoteImageUrls,
@@ -2612,6 +2613,7 @@ function computerScreenshotFromContent<TApi extends Api>(
 	model: Model<TApi>,
 	supportsImageDetailOriginal: boolean,
 ): ComputerScreenshotRef | undefined {
+	if (!supportsComputerScreenshotOutput(model)) return undefined;
 	for (const block of toolResult.content) {
 		if (block.type !== "image" || !hasSupportedImageSource(model, block)) continue;
 		const image = convertResponsesInputImage(block, supportsImageDetailOriginal, model);

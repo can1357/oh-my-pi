@@ -1001,6 +1001,12 @@ export async function requestOpenAiRemoteCompaction(
 		sessionId?: string;
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
+		/**
+		 * Runtime fingerprint of the model that will replay the preserved
+		 * history. Defaults to `model`, which is only correct when compaction
+		 * runs on the active session model rather than a side model.
+		 */
+		replayTarget?: string;
 	},
 ): Promise<OpenAiRemoteCompactionResponse> {
 	const endpoint = resolveOpenAiCompactEndpoint(model);
@@ -1137,7 +1143,7 @@ export async function requestOpenAiRemoteCompaction(
 	return {
 		provider: model.provider,
 		referenceTarget: getOpenAiCompactionReferenceTarget(model, false),
-		replayTarget: getOpenAIResponsesReferenceTarget(model),
+		replayTarget: opts?.replayTarget ?? getOpenAIResponsesReferenceTarget(model),
 		replacementHistory,
 		compactionItem,
 	};

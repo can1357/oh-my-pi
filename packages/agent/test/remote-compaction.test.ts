@@ -18,6 +18,7 @@ import {
 	getCompactionV2Endpoint,
 	getCompactionV2PreserveData,
 	getOpenAiCompactionReferenceTarget,
+	getPreservedOpenAiRemoteCompactionData,
 	requestCompactionV2Streaming,
 	requestOpenAiRemoteCompaction,
 	requestRemoteCompaction,
@@ -2438,6 +2439,27 @@ describe("compact() remote compaction failure handling", () => {
 			settings: { ...DEFAULT_COMPACTION_SETTINGS, remoteStreamingV2Enabled: false },
 		};
 	}
+
+	test("persists the active runtime replay target when compaction runs on a side model", async () => {
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
+		const preparation = makePreparation();
+		const activeModel = makeOpenAiModel({ id: "gpt-5.4" });
+		const compactionModel = makeOpenAiModel({ id: "gpt-5-mini", remoteCompaction: { enabled: true } });
+		const fetchMock: FetchImpl = async () =>
+			Response.json({ output: [{ type: "compaction_summary", summary: "compact" }] });
+
+		const result = await compact(preparation, compactionModel, "test-key", undefined, undefined, {
+			fetch: fetchMock,
+			runtimeModel: activeModel,
+		});
+
+		const preserved = getPreservedOpenAiRemoteCompactionData(result.preserveData);
+		if (!preserved) throw new Error("expected preserved remote compaction data");
+		expect(preserved.replayTarget).toBe(getOpenAIResponsesReferenceTarget(activeModel));
+		expect(preserved.replayTarget).not.toBe(getOpenAIResponsesReferenceTarget(compactionModel));
+		expect(canReplayOpenAiCompactionHistory(preserved, activeModel)).toBe(true);
+		expect(canReuseOpenAiCompactionHistory(preserved, compactionModel, false)).toBe(true);
+	});
 
 	test("streams V2 compaction before V1 when both settings and model opt in", async () => {
 		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));

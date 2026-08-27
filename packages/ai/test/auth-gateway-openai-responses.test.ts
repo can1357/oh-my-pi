@@ -8,6 +8,7 @@ import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { encodeResponse, encodeStream, parseRequest } from "@oh-my-pi/pi-ai/providers/openai-responses-server";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { hasSupportedImageSource } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import type { AssistantMessage, Context, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -242,6 +243,44 @@ describe("openai-responses parseRequest", () => {
 			},
 			{ type: "text", text: "done" },
 		]);
+	});
+
+	function makeVertexScreenshotModel() {
+		return buildModel({
+			id: "gemini-3-pro",
+			name: "Gemini 3 Pro",
+			api: "google-vertex",
+			provider: "google-vertex",
+			baseUrl: "https://us-central1-aiplatform.googleapis.com",
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"google-vertex">);
+	}
+
+	it("normalizes a remote computer screenshot as a replayable PNG reference", () => {
+		const imageUrl = "https://images.example.invalid/screenshot.png";
+		const parsed = parseRequest({
+			model: "gpt-5.6-sol",
+			input: [
+				{
+					type: "computer_call_output",
+					call_id: "call_remote_screenshot",
+					output: { type: "computer_screenshot", image_url: imageUrl },
+				},
+			],
+		});
+
+		const result = parsed.context.messages[0];
+		if (result?.role !== "toolResult") throw new Error("expected tool result");
+		expect(result.content).toEqual([{ type: "image", data: "", mimeType: "image/png", url: imageUrl }]);
+		// Google targets only replay a remote reference whose media type they support,
+		// so an unknown media type would strand an otherwise replayable screenshot.
+		const image = result.content[0];
+		if (image?.type !== "image") throw new Error("expected image content");
+		expect(hasSupportedImageSource(makeVertexScreenshotModel(), image)).toBe(true);
 	});
 
 	it("rejects function output images with an empty source", () => {
@@ -675,7 +714,7 @@ describe("openai-responses parseRequest", () => {
 			{
 				type: "image",
 				data: "",
-				mimeType: "application/octet-stream",
+				mimeType: "image/png",
 				url: imageUrl,
 			},
 		]);

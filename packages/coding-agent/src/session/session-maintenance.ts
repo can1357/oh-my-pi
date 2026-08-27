@@ -2196,6 +2196,7 @@ export class SessionMaintenance {
 						// (xai-oauth/grok-build) don't trip requireSupportedEffort.
 						thinkingLevel: this.#host.thinkingLevel(),
 						tools: this.#host.agent.state.tools,
+						runtimeModel: this.#model,
 						sessionId: this.#host.sessionId(),
 						promptCacheKey: this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId,
 						providerSessionState: this.#host.providerSessionState,
@@ -3452,6 +3453,7 @@ export class SessionMaintenance {
 									// resolveCompactionEffort.
 									thinkingLevel: this.#host.thinkingLevel(),
 									tools: this.#host.agent.state.tools,
+									runtimeModel: this.#model,
 									sessionId: this.#host.sessionId(),
 									promptCacheKey: this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId,
 									providerSessionState: this.#host.providerSessionState,

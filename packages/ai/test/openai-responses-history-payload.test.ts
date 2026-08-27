@@ -379,7 +379,103 @@ function containsUserInputText(input: unknown[] | undefined, text: string): bool
 	});
 }
 
+function createStampedSseResponse(): Response {
+	const events = [
+		{
+			type: "response.output_item.done",
+			output_index: 0,
+			item: { type: "reasoning", id: "rs_stamped", encrypted_content: "enc_stamped", summary: [] },
+		},
+		{
+			type: "response.output_item.added",
+			output_index: 1,
+			item: { type: "message", id: "msg_stamped", role: "assistant", content: [] },
+		},
+		{ type: "response.content_part.added", part: { type: "output_text", text: "" } },
+		{ type: "response.output_text.delta", delta: "stamped answer" },
+		{
+			type: "response.output_item.done",
+			output_index: 1,
+			item: {
+				type: "message",
+				id: "msg_stamped",
+				role: "assistant",
+				status: "completed",
+				content: [{ type: "output_text", text: "stamped answer" }],
+			},
+		},
+		{
+			type: "response.completed",
+			response: {
+				status: "completed",
+				usage: {
+					input_tokens: 1,
+					output_tokens: 1,
+					total_tokens: 2,
+					input_tokens_details: { cached_tokens: 0 },
+				},
+			},
+		},
+	];
+	return new Response(`${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\n`, {
+		status: 200,
+		headers: { "content-type": "text/event-stream" },
+	});
+}
+
+function buildStampedResponsesModel(baseUrl: string): Model<"openai-responses"> {
+	return buildModel({
+		id: "gpt-5-stamped",
+		name: "GPT-5 Stamped",
+		api: "openai-responses",
+		provider: "openai",
+		baseUrl,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 32_768,
+		maxTokens: 4_096,
+	} satisfies ModelSpec<"openai-responses">);
+}
+
 describe("OpenAI responses history payload", () => {
+	it("binds generated Responses history to the endpoint that produced it", async () => {
+		const model = buildStampedResponsesModel("https://api.openai.com/v1");
+		const stream = streamOpenAIResponses(
+			model,
+			{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
+			{ apiKey: "test-key", fetch: async () => createStampedSseResponse() },
+		);
+		let message: Awaited<ReturnType<typeof stream.result>> | undefined;
+		for await (const event of stream) {
+			if (event.type === "done") message = event.message;
+			if (event.type === "error") throw event.error;
+		}
+		if (!message) throw new Error("expected a completed assistant message");
+
+		expect(message.providerPayload).toMatchObject({
+			type: "openaiResponsesHistory",
+			provider: "openai",
+			referenceTarget: getOpenAIResponsesReferenceTarget(model),
+		});
+
+		const followUp: Context = {
+			messages: [message, { role: "user", content: "continue", timestamp: 1 }],
+		};
+		// The native item id only survives when the endpoint-bound history is replayed;
+		// the canonical fallback re-serializes the same text without it.
+		const sameEndpoint = (await captureResponsesPayload(model, followUp)) as { input?: unknown[] };
+		expect(containsAssistantOutputText(sameEndpoint.input, "stamped answer")).toBe(true);
+		expect(containsEncryptedReasoning(sameEndpoint.input)).toBe(true);
+
+		const movedEndpoint = (await captureResponsesPayload(
+			buildStampedResponsesModel("https://proxy.example.invalid/v1"),
+			followUp,
+		)) as { input?: unknown[] };
+		expect(containsEncryptedReasoning(movedEndpoint.input)).toBe(false);
+		expect(containsAssistantOutputText(movedEndpoint.input, "stamped answer")).toBe(true);
+	});
+
 	it("fails closed when Codex compaction history targets another endpoint", () => {
 		const model = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
 		const context: Context = {

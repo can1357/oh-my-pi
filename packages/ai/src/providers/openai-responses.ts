@@ -20,6 +20,7 @@ import type {
 } from "../types";
 import {
 	createOpenAIResponsesHistoryPayload,
+	getOpenAIResponsesReferenceTarget,
 	normalizeSystemPrompts,
 	resolveCacheRetention,
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
@@ -841,7 +842,12 @@ const streamOpenAIResponsesOnce = (
 				}
 			}
 
-			output.providerPayload = createOpenAIResponsesHistoryPayload(model.provider, nativeOutputItems);
+			output.providerPayload = createOpenAIResponsesHistoryPayload(
+				model.provider,
+				nativeOutputItems,
+				true,
+				getOpenAIResponsesReferenceTarget(model),
+			);
 			const replayableResponseItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
 				structuredCloneJSON(nativeOutputItems),
 			);

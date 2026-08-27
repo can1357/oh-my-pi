@@ -9,6 +9,14 @@ import { decodeDataUri } from "./openai-data-uri";
 
 export const NON_VISION_IMAGE_PLACEHOLDER = "[image omitted: model does not support vision]";
 export const UNREPLAYABLE_IMAGE_PLACEHOLDER = "[image omitted: source cannot be replayed]";
+
+/**
+ * Media type assumed for a `computer_call_output` screenshot referenced only by
+ * a remote URL. Screenshots are PNG on every computer-use surface, and the
+ * capability check, the wire parsers, and the gateway promotion path must all
+ * assume the same value or a replayable URL is rejected by MIME-aware targets.
+ */
+export const REMOTE_COMPUTER_SCREENSHOT_MIME_TYPE = "image/png";
 // `vision` delimited by non-alphanumerics, so `deepseek-v4-flash-vision-exp`
 // and `deepseek_vision` match but `deepseek-r1-revision-0528` does not.
 // Inputs are lowercased before testing.
@@ -255,8 +263,13 @@ interface ComputerScreenshotCandidate {
 	image_url?: unknown;
 }
 
+/** Whether this model can carry a `computer_call_output` screenshot at all. */
+export function supportsComputerScreenshotOutput(model: Model): boolean {
+	return COMPUTER_SCREENSHOT_APIS.has(model.api) && model.supportsComputerUse === true;
+}
+
 export function supportsComputerScreenshotReferences(model: Model, screenshot?: ComputerScreenshotCandidate): boolean {
-	if (!COMPUTER_SCREENSHOT_APIS.has(model.api) || model.supportsComputerUse !== true) return false;
+	if (!supportsComputerScreenshotOutput(model)) return false;
 	if (screenshot?.file_id !== undefined) {
 		return supportsProviderFileReference(
 			model,
@@ -266,7 +279,7 @@ export function supportsComputerScreenshotReferences(model: Model, screenshot?: 
 	}
 	if (typeof screenshot?.image_url !== "string") return false;
 	if (isRemoteImageUrl(screenshot.image_url)) {
-		return supportsRemoteImageUrls(model, { mimeType: "image/png" });
+		return supportsRemoteImageUrls(model, { mimeType: REMOTE_COMPUTER_SCREENSHOT_MIME_TYPE });
 	}
 	const inlineImage = decodeDataUri(screenshot.image_url);
 	return inlineImage !== undefined && getUsableInlineImageMimeType(inlineImage) !== undefined;

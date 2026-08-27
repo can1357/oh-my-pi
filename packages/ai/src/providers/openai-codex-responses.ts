@@ -2947,7 +2947,12 @@ class CodexStreamProcessor {
 			throw new CodexProviderStreamError("Codex response failed", false);
 		}
 
-		output.providerPayload = createOpenAIResponsesHistoryPayload(this.model.provider, this.runtime.nativeOutputItems);
+		output.providerPayload = createOpenAIResponsesHistoryPayload(
+			this.model.provider,
+			this.runtime.nativeOutputItems,
+			true,
+			getOpenAIResponsesReferenceTarget(this.model),
+		);
 		output.duration = performance.now() - this.startTime;
 		if (completion.firstTokenTime) {
 			output.ttft = completion.firstTokenTime - this.startTime;

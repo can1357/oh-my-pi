@@ -32,9 +32,11 @@ import * as openaiResponses from "../providers/openai-responses-server";
 import { resolveResponsesComputerScreenshot } from "../providers/openai-shared";
 import * as piNative from "../providers/pi-native-server";
 import {
+	getUnreplayableInlineImageMimeType,
 	getUsableInlineImageMimeType,
 	isRemoteImageUrl,
 	normalizeImageMimeType,
+	REMOTE_COMPUTER_SCREENSHOT_MIME_TYPE,
 	resolveUsableInlineImage,
 	supportsComputerScreenshotReferences,
 	supportsProviderFileReference,
@@ -99,8 +101,8 @@ function promoteComputerScreenshotImage(message: Record<string, unknown>, model:
 	const decodedMimeType = decoded ? getUsableInlineImageMimeType(decoded) : undefined;
 	const image = decodedMimeType
 		? { type: "image", ...decoded, mimeType: decodedMimeType }
-		: isRemoteImageUrl(imageUrl) && supportsRemoteImageUrls(model, { mimeType: "application/octet-stream" })
-			? { type: "image", data: "", mimeType: "application/octet-stream", url: imageUrl }
+		: isRemoteImageUrl(imageUrl) && supportsRemoteImageUrls(model, { mimeType: REMOTE_COMPUTER_SCREENSHOT_MIME_TYPE })
+			? { type: "image", data: "", mimeType: REMOTE_COMPUTER_SCREENSHOT_MIME_TYPE, url: imageUrl }
 			: undefined;
 	if (!image) return false;
 	if (Array.isArray(message.content)) {
@@ -219,6 +221,10 @@ function validateAndNormalizeImageReferences(context: Context, model: Model): st
 			}
 			if (hasProviderFileReference) {
 				return `input_image.providerFile cannot be forwarded to ${model.api}; use inline image data or target the matching provider API`;
+			}
+			if (getUnreplayableInlineImageMimeType({ data, mimeType }) !== undefined) {
+				block.mimeType = normalizedMimeType;
+				continue;
 			}
 			return `input_image cannot be forwarded to ${model.api} without non-empty image data or a supported reference`;
 		}
