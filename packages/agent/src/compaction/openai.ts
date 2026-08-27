@@ -45,6 +45,7 @@ import {
 	getOpenAIResponsesHistoryPayload,
 	getOpenAIResponsesReferenceTarget,
 	normalizeResponsesToolCallId,
+	resolveAzureOpenAIBaseUrl,
 	resolveOpenAIResponsesRequestModel,
 	stripOpenAIResponsesOutputOnlyStatusesForReplay,
 } from "@oh-my-pi/pi-ai/utils";
@@ -302,7 +303,8 @@ export function resolveOpenAiCompactionReferenceModel(model: Model, streamingV2:
 	const configuredEndpoint = streamingV2
 		? (model.remoteCompaction?.v2Endpoint ?? model.remoteCompaction?.streamingEndpoint)
 		: model.remoteCompaction?.endpoint;
-	const rawBaseUrl = configuredEndpoint ?? model.baseUrl;
+	const rawBaseUrl =
+		configuredEndpoint ?? (api === "azure-openai-responses" ? resolveAzureOpenAIBaseUrl(model) : model.baseUrl);
 	const baseUrl = rawBaseUrl ? canonicalizeOpenAIResponsesReferenceBaseUrl(rawBaseUrl) : rawBaseUrl;
 	if (api === model.api && baseUrl === model.baseUrl) return model;
 	return {
@@ -314,7 +316,11 @@ export function resolveOpenAiCompactionReferenceModel(model: Model, streamingV2:
 
 export function getOpenAiCompactionReferenceTarget(model: Model, streamingV2: boolean): string {
 	const referenceModel = resolveOpenAiCompactionReferenceModel(model, streamingV2);
-	return getOpenAIResponsesReferenceTarget(referenceModel, resolveOpenAiCompactModel(model));
+	return getOpenAIResponsesReferenceTarget(
+		referenceModel,
+		resolveOpenAiCompactModel(model),
+		referenceModel.baseUrl,
+	);
 }
 
 function replacementHistoryContainsTargetDependentImage(history: Array<Record<string, unknown>>): boolean {
@@ -389,10 +395,7 @@ function resolveAzureOpenAiCompactEndpoint(model: Model, configuredEndpoint: str
 }
 
 function resolveAzureOpenAiBaseUrl(model: Model): string {
-	const baseUrl = $env.AZURE_OPENAI_BASE_URL?.trim() || undefined;
-	const resourceName = $env.AZURE_OPENAI_RESOURCE_NAME;
-	const resolvedBaseUrl =
-		baseUrl ?? (resourceName ? `https://${resourceName}.openai.azure.com/openai/v1` : undefined) ?? model.baseUrl;
+	const resolvedBaseUrl = resolveAzureOpenAIBaseUrl(model);
 	if (!resolvedBaseUrl) {
 		throw new Error(
 			"Azure OpenAI base URL is required. Set AZURE_OPENAI_BASE_URL or AZURE_OPENAI_RESOURCE_NAME, or configure model.baseUrl.",

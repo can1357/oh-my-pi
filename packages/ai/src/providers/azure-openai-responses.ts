@@ -11,7 +11,7 @@ import type {
 	StreamOptions,
 	ToolChoice,
 } from "../types";
-import { resolveCacheRetention, resolveOpenAIResponsesRequestModel } from "../utils";
+import { resolveAzureOpenAIBaseUrl, resolveCacheRetention, resolveOpenAIResponsesRequestModel } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
 import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
@@ -280,19 +280,7 @@ function resolveAzureConfig(
 	options?: AzureOpenAIResponsesOptions,
 ): { baseUrl: string; apiVersion: string } {
 	const apiVersion = options?.azureApiVersion || $env.AZURE_OPENAI_API_VERSION || DEFAULT_AZURE_API_VERSION;
-
-	const baseUrl = options?.azureBaseUrl?.trim() || $env.AZURE_OPENAI_BASE_URL?.trim() || undefined;
-	const resourceName = options?.azureResourceName || $env.AZURE_OPENAI_RESOURCE_NAME;
-
-	let resolvedBaseUrl = baseUrl;
-
-	if (!resolvedBaseUrl && resourceName) {
-		resolvedBaseUrl = `https://${resourceName}.openai.azure.com/openai/v1`;
-	}
-
-	if (!resolvedBaseUrl && model.baseUrl) {
-		resolvedBaseUrl = model.baseUrl;
-	}
+	const resolvedBaseUrl = resolveAzureOpenAIBaseUrl(model, options);
 
 	if (!resolvedBaseUrl) {
 		throw new AIError.ConfigurationError(

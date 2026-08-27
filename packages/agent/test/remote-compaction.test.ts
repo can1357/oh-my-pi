@@ -14,6 +14,7 @@ import {
 	buildOpenAiNativeHistory,
 	canReplayOpenAiCompactionHistory,
 	CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE,
+	getCompactionV2Endpoint,
 	getCompactionV2PreserveData,
 	getOpenAiCompactionReferenceTarget,
 	requestCompactionV2Streaming,
@@ -158,6 +159,62 @@ test("replays Azure compaction with its mapped deployment identity", () => {
 			delete Bun.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP;
 		} else {
 			Bun.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP = previousDeploymentMap;
+		}
+	}
+});
+
+test("invalidates Azure compaction replay when its effective resource changes", () => {
+	const previousBaseUrl = Bun.env.AZURE_OPENAI_BASE_URL;
+	const previousResourceName = Bun.env.AZURE_OPENAI_RESOURCE_NAME;
+	try {
+		delete Bun.env.AZURE_OPENAI_BASE_URL;
+		Bun.env.AZURE_OPENAI_RESOURCE_NAME = "resource-a";
+		const model = makeAzureModel({
+			remoteCompaction: {
+				enabled: true,
+				api: "azure-openai-responses",
+				v2StreamingEnabled: true,
+			},
+		});
+		const resourceTarget = getOpenAiCompactionReferenceTarget(model, true);
+
+		expect(resourceTarget).toBe(getOpenAIResponsesReferenceTarget(model));
+		expect(getCompactionV2Endpoint(model)).toStartWith(
+			"https://resource-a.openai.azure.com/openai/v1/responses",
+		);
+
+		Bun.env.AZURE_OPENAI_RESOURCE_NAME = "resource-b";
+		expect(
+			canReplayOpenAiCompactionHistory(
+				{ provider: model.provider, referenceTarget: resourceTarget, replacementHistory: [] },
+				model,
+			),
+		).toBe(false);
+
+		Bun.env.AZURE_OPENAI_BASE_URL = "https://override-a.openai.azure.com/openai/v1/";
+		const baseUrlTarget = getOpenAiCompactionReferenceTarget(model, true);
+		expect(baseUrlTarget).toBe(getOpenAIResponsesReferenceTarget(model));
+		expect(getCompactionV2Endpoint(model)).toStartWith(
+			"https://override-a.openai.azure.com/openai/v1/responses",
+		);
+
+		Bun.env.AZURE_OPENAI_BASE_URL = "https://override-b.openai.azure.com/openai/v1";
+		expect(
+			canReplayOpenAiCompactionHistory(
+				{ provider: model.provider, referenceTarget: baseUrlTarget, replacementHistory: [] },
+				model,
+			),
+		).toBe(false);
+	} finally {
+		if (previousBaseUrl === undefined) {
+			delete Bun.env.AZURE_OPENAI_BASE_URL;
+		} else {
+			Bun.env.AZURE_OPENAI_BASE_URL = previousBaseUrl;
+		}
+		if (previousResourceName === undefined) {
+			delete Bun.env.AZURE_OPENAI_RESOURCE_NAME;
+		} else {
+			Bun.env.AZURE_OPENAI_RESOURCE_NAME = previousResourceName;
 		}
 	}
 });

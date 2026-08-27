@@ -22,7 +22,7 @@ import {
 	getOpenAIResponsesRoutingSessionId,
 	resolveOpenAIRequestSetup,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
-import { resolveOpenAIResponsesRequestModel } from "@oh-my-pi/pi-ai/utils";
+import { resolveAzureOpenAIBaseUrl, resolveOpenAIResponsesRequestModel } from "@oh-my-pi/pi-ai/utils";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
 import {
 	applyCodexResidencyHeader,
@@ -156,10 +156,7 @@ function resolveOpenAiCodexResponsesEndpoint(baseUrl: string | undefined): strin
 }
 
 function resolveAzureOpenAiBaseUrl(model: Model): string {
-	const baseUrl = $env.AZURE_OPENAI_BASE_URL?.trim() || undefined;
-	const resourceName = $env.AZURE_OPENAI_RESOURCE_NAME;
-	const resolvedBaseUrl =
-		baseUrl ?? (resourceName ? `https://${resourceName}.openai.azure.com/openai/v1` : undefined) ?? model.baseUrl;
+	const resolvedBaseUrl = resolveAzureOpenAIBaseUrl(model);
 	if (!resolvedBaseUrl) {
 		throw new Error(
 			"Azure OpenAI base URL is required. Set AZURE_OPENAI_BASE_URL or AZURE_OPENAI_RESOURCE_NAME, or configure model.baseUrl.",

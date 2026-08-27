@@ -509,9 +509,26 @@ export function resolveOpenAIResponsesRequestModel(
 	return parseAzureDeploymentNameMap($env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP).get(requestModel) ?? requestModel;
 }
 
+export interface AzureOpenAIEndpointOverrides {
+	azureBaseUrl?: string;
+	azureResourceName?: string;
+}
+
+export function resolveAzureOpenAIBaseUrl(
+	model: Model,
+	overrides?: AzureOpenAIEndpointOverrides,
+): string | undefined {
+	const baseUrl = overrides?.azureBaseUrl?.trim() || $env.AZURE_OPENAI_BASE_URL?.trim() || undefined;
+	const resourceName = overrides?.azureResourceName || $env.AZURE_OPENAI_RESOURCE_NAME;
+	const resolvedBaseUrl =
+		baseUrl ?? (resourceName ? `https://${resourceName}.openai.azure.com/openai/v1` : undefined) ?? model.baseUrl;
+	return resolvedBaseUrl?.replace(/\/+$/, "");
+}
+
 export function getOpenAIResponsesReferenceTarget(
 	model: Model,
 	requestModel = resolveOpenAIResponsesRequestModel(model),
+	referenceBaseUrl = model.api === "azure-openai-responses" ? resolveAzureOpenAIBaseUrl(model) : model.baseUrl,
 ): string {
 	const supportsImageDetailOriginal =
 		!!model.compat &&
@@ -520,7 +537,7 @@ export function getOpenAIResponsesReferenceTarget(
 	return JSON.stringify({
 		api: model.api,
 		provider: model.provider,
-		baseUrl: model.baseUrl ? canonicalizeOpenAIResponsesReferenceBaseUrl(model.baseUrl) : "",
+		baseUrl: referenceBaseUrl ? canonicalizeOpenAIResponsesReferenceBaseUrl(referenceBaseUrl) : "",
 		model: requestModel,
 		input: [...model.input].sort(),
 		supportsComputerUse: model.supportsComputerUse === true,
