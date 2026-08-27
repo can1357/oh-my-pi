@@ -93,18 +93,42 @@ function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, opti
 			}
 			messages.push({ role: "assistant", content: contentBlocks });
 		} else if (msg.role === "toolResult") {
-			const textResult = msg.content.map(b => (b.type === "text" ? b.text : "")).join("\n");
-			messages.push({
-				role: "user",
-				content: [
-					{
+			const contentBlocks: unknown[] = [];
+			for (const block of msg.content) {
+				if (block.type === "text") {
+					contentBlocks.push({
 						type: "tool_result",
 						tool_use_id: msg.toolCallId,
-						content: textResult,
+						content: block.text,
 						is_error: msg.isError,
-					},
-				],
-			});
+					});
+				} else if (block.type === "image") {
+					contentBlocks.push({
+						type: "tool_result",
+						tool_use_id: msg.toolCallId,
+						content: [
+							{
+								type: "image",
+								source: {
+									type: "base64",
+									media_type: block.mimeType,
+									data: block.data,
+								},
+							},
+						],
+						is_error: msg.isError,
+					});
+				}
+			}
+			if (contentBlocks.length === 0) {
+				contentBlocks.push({
+					type: "tool_result",
+					tool_use_id: msg.toolCallId,
+					content: "",
+					is_error: msg.isError,
+				});
+			}
+			messages.push({ role: "user", content: contentBlocks });
 		}
 	}
 
@@ -181,7 +205,10 @@ function mapContextToOpenAiResponses(context: Context, model: Model<"zed-agent">
 				input.push({ type: "message", role: "assistant", content: parts });
 			}
 		} else if (msg.role === "toolResult") {
-			const textResult = msg.content.map(b => (b.type === "text" ? b.text : "")).join("\n");
+			const textResult = msg.content
+				.filter(b => b.type === "text")
+				.map(b => (b as TextContent).text)
+				.join("\n");
 			input.push({
 				type: "function_call_output",
 				call_id: msg.toolCallId,
@@ -261,18 +288,29 @@ function mapContextToGoogle(context: Context, _model: Model<"zed-agent">) {
 			}
 			contents.push({ role: "model", parts });
 		} else if (msg.role === "toolResult") {
-			const textResult = msg.content.map(b => (b.type === "text" ? b.text : "")).join("\n");
-			contents.push({
-				role: "user",
-				parts: [
-					{
-						functionResponse: {
-							name: msg.toolCallId,
-							response: { content: textResult },
-						},
+			const textResult = msg.content
+				.filter(b => b.type === "text")
+				.map(b => (b as TextContent).text)
+				.join("\n");
+			const parts: Array<Record<string, unknown>> = [
+				{
+					functionResponse: {
+						name: msg.toolName,
+						response: { content: textResult },
 					},
-				],
-			});
+				},
+			];
+			for (const block of msg.content) {
+				if (block.type === "image") {
+					parts.push({
+						inlineData: {
+							mimeType: block.mimeType,
+							data: block.data,
+						},
+					});
+				}
+			}
+			contents.push({ role: "user", parts });
 		}
 	}
 
@@ -343,7 +381,10 @@ function mapContextToOpenAiChat(context: Context, model: Model<"zed-agent">, opt
 			if (toolCalls.length > 0) assistantMsg.tool_calls = toolCalls;
 			messages.push(assistantMsg);
 		} else if (msg.role === "toolResult") {
-			const textResult = msg.content.map(b => (b.type === "text" ? b.text : "")).join("\n");
+			const textResult = msg.content
+				.filter(b => b.type === "text")
+				.map(b => (b as TextContent).text)
+				.join("\n");
 			messages.push({ role: "tool", tool_call_id: msg.toolCallId, content: textResult });
 		}
 	}
@@ -644,6 +685,18 @@ export function streamZed(
 							});
 							currentToolCall = null;
 						}
+					} else if (eventType === "message_delta") {
+						const delta = event.delta as Record<string, unknown> | undefined;
+						if (delta?.stop_reason) {
+							const sr = String(delta.stop_reason);
+							if (sr === "max_tokens") outputMessage.stopReason = "length";
+							else if (sr === "tool_use") outputMessage.stopReason = "toolUse";
+							else outputMessage.stopReason = "stop";
+						}
+						const usage = event.usage as { output_tokens?: number } | undefined;
+						if (usage?.output_tokens && outputMessage.usage) {
+							outputMessage.usage.output = usage.output_tokens;
+						}
 					}
 
 					// ─── OPENAI RESPONSES EVENT FLAVOR ───
@@ -755,7 +808,15 @@ export function streamZed(
 
 					// ─── OPENAI CHAT & GOOGLE GEMINI EVENT FLAVORS ───
 					else if (Array.isArray(event.choices) && event.choices.length > 0) {
-						const choice = event.choices[0] as { delta?: { content?: string; reasoning_content?: string } };
+						const choice = event.choices[0] as {
+							delta?: { content?: string; reasoning_content?: string };
+							finish_reason?: string;
+						};
+						if (choice.finish_reason) {
+							if (choice.finish_reason === "length") outputMessage.stopReason = "length";
+							else if (choice.finish_reason === "tool_calls" || choice.finish_reason === "function_call")
+								outputMessage.stopReason = "toolUse";
+						}
 						if (typeof choice.delta?.content === "string" && choice.delta.content.length > 0) {
 							if (currentContentIndex === -1 || outputMessage.content[currentContentIndex]?.type !== "text") {
 								currentContentIndex++;
@@ -800,6 +861,8 @@ export function streamZed(
 						}
 					} else if (Array.isArray(event.candidates) && event.candidates.length > 0) {
 						const candidate = event.candidates[0] as {
+							finish_reason?: string;
+							finishReason?: string;
 							content?: {
 								parts?: Array<{
 									text?: string;
@@ -807,6 +870,11 @@ export function streamZed(
 								}>;
 							};
 						};
+						const gfr = candidate.finish_reason ?? candidate.finishReason;
+						if (gfr) {
+							if (gfr === "MAX_TOKENS") outputMessage.stopReason = "length";
+							else outputMessage.stopReason = "stop";
+						}
 						const parts = candidate.content?.parts ?? [];
 						for (const part of parts) {
 							if (typeof part.text === "string" && part.text.length > 0) {
@@ -874,6 +942,14 @@ export function streamZed(
 							outputMessage.usage.cacheWrite =
 								usage.cache_creation_input_tokens ?? outputMessage.usage.cacheWrite;
 						}
+					} else if (event.usageMetadata && typeof event.usageMetadata === "object" && outputMessage.usage) {
+						const um = event.usageMetadata as { promptTokenCount?: number; candidatesTokenCount?: number };
+						if (um.promptTokenCount) outputMessage.usage.input = um.promptTokenCount;
+						if (um.candidatesTokenCount) outputMessage.usage.output = um.candidatesTokenCount;
+					} else if (event.usage && typeof event.usage === "object" && outputMessage.usage) {
+						const u = event.usage as { prompt_tokens?: number; completion_tokens?: number };
+						if (u.prompt_tokens) outputMessage.usage.input = u.prompt_tokens;
+						if (u.completion_tokens) outputMessage.usage.output = u.completion_tokens;
 					} else if (eventType === "message_start") {
 						const message = event.message as
 							| {
@@ -900,7 +976,11 @@ export function streamZed(
 				calculateCost(model, outputMessage.usage);
 			}
 
-			stream.push({ type: "done", reason: "stop", message: outputMessage });
+			const doneReason =
+				outputMessage.stopReason === "length" || outputMessage.stopReason === "toolUse"
+					? outputMessage.stopReason
+					: "stop";
+			stream.push({ type: "done", reason: doneReason, message: outputMessage });
 			stream.end(outputMessage);
 		} catch (err) {
 			const errorMsg: AssistantMessage = {

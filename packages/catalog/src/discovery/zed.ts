@@ -63,7 +63,7 @@ const ZED_OFFICIAL_RATES: Record<string, ModelCost> = {
 	"gpt-5.6-terra": { input: 2.75, output: 16.5, cacheRead: 0.275, cacheWrite: 3.4375 },
 	"gpt-5.6-luna": { input: 1.1, output: 6.6, cacheRead: 0.11, cacheWrite: 1.375 },
 	"gpt-5.5": { input: 5.5, output: 33.0, cacheRead: 0.55, cacheWrite: 6.875 },
-	"gpt-5.4": { input: 2.75, output: 16.5, cacheRead: 0.0275, cacheWrite: 3.4375 },
+	"gpt-5.4": { input: 2.75, output: 16.5, cacheRead: 0.275, cacheWrite: 3.4375 },
 	"gpt-5.3-codex": { input: 1.925, output: 15.4, cacheRead: 0.1925, cacheWrite: 2.406 },
 	"gpt-5.2": { input: 1.925, output: 15.4, cacheRead: 0.1925, cacheWrite: 2.406 },
 	"gpt-5-mini": { input: 0.275, output: 2.2, cacheRead: 0.0275, cacheWrite: 0.343 },

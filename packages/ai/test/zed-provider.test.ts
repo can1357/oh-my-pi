@@ -104,4 +104,48 @@ describe("Zed Provider Payload Construction", () => {
 		expect(messages[0].role).toBe("user");
 		expect(messages[0].content).toBe("Hello world");
 	});
+
+	it("formats Google AI GenerateContentRequest payload for google provider models", () => {
+		const mockModel: Model<"zed-agent"> = {
+			id: "gemini-3-flash",
+			name: "Gemini 3 Flash",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: "https://cloud.zed.dev",
+			reasoning: true,
+			contextWindow: 1000000,
+			maxTokens: 66000,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			compat: undefined,
+		};
+
+		const mockContext: Context = {
+			systemPrompt: ["You are a Google assistant."],
+			messages: [
+				{
+					role: "user",
+					content: "Hello Gemini",
+					timestamp: Date.now(),
+				},
+			],
+			tools: [
+				{
+					name: "search_tool",
+					description: "Search web",
+					parameters: { type: "object", properties: { query: { type: "string" } } },
+				},
+			],
+		};
+
+		const payload = buildZedProviderRequest("google", mockContext, mockModel) as Record<string, unknown>;
+
+		expect(payload.contents).toBeArray();
+		const contents = payload.contents as Array<{ role: string; parts: Array<{ text?: string }> }>;
+		expect(contents.length).toBe(1);
+		expect(contents[0].role).toBe("user");
+		expect(contents[0].parts[0].text).toBe("Hello Gemini");
+		expect(payload.systemInstruction).toEqual({ parts: [{ text: "You are a Google assistant." }] });
+		expect(payload.tools).toBeArray();
+	});
 });

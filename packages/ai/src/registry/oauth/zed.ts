@@ -100,6 +100,19 @@ export async function loginZed(ctrl: OAuthController): Promise<OAuthCredentials>
 	const { promise, resolve, reject } = Promise.withResolvers<OAuthCredentials>();
 	let isResolved = false;
 
+	const timeoutId = setTimeout(() => {
+		if (!isResolved) {
+			isResolved = true;
+			server.close();
+			reject(
+				new AIError.OAuthError("Zed authentication timed out after 5 minutes.", {
+					kind: "configuration",
+					provider: "zed-agent",
+				}),
+			);
+		}
+	}, 300_000);
+
 	const server = createServer((req, res) => {
 		try {
 			const url = new URL(req.url ?? "/", `http://127.0.0.1:${DEFAULT_CALLBACK_PORT}`);
@@ -118,6 +131,7 @@ export async function loginZed(ctrl: OAuthController): Promise<OAuthCredentials>
 			res.end(renderOauthPage({ ok: true, provider: "Zed Agent" }));
 			if (!isResolved) {
 				isResolved = true;
+				clearTimeout(timeoutId);
 				server.close();
 				resolve({
 					access: `${userId} ${accessToken}`,
@@ -131,23 +145,14 @@ export async function loginZed(ctrl: OAuthController): Promise<OAuthCredentials>
 			res.end(renderOauthPage({ ok: false, provider: "Zed Agent", error: String(err) }));
 			if (!isResolved) {
 				isResolved = true;
+				clearTimeout(timeoutId);
 				server.close();
 				reject(new AIError.OAuthError(`Failed to decrypt Zed access token: ${String(err)}`));
 			}
 		}
 	});
 
-	server.on("error", (err: NodeJS.ErrnoException) => {
-		if (err.code === "EADDRINUSE") {
-			// Fallback to random dynamic port
-			server.listen(0, "127.0.0.1");
-		} else if (!isResolved) {
-			isResolved = true;
-			reject(new AIError.OAuthError(`Zed callback server failed: ${err.message}`));
-		}
-	});
-
-	server.listen(DEFAULT_CALLBACK_PORT, "127.0.0.1", () => {
+	server.on("listening", () => {
 		const address = server.address();
 		const port = typeof address === "object" && address !== null ? address.port : DEFAULT_CALLBACK_PORT;
 		const authUrl = buildZedNativeAppSignInUrl(port, publicKeyDerBase64Url);
@@ -158,9 +163,23 @@ export async function loginZed(ctrl: OAuthController): Promise<OAuthCredentials>
 		});
 	});
 
+	server.on("error", (err: NodeJS.ErrnoException) => {
+		if (err.code === "EADDRINUSE") {
+			// Fallback to random dynamic port
+			server.listen(0, "127.0.0.1");
+		} else if (!isResolved) {
+			isResolved = true;
+			clearTimeout(timeoutId);
+			reject(new AIError.OAuthError(`Zed callback server failed: ${err.message}`));
+		}
+	});
+
+	server.listen(DEFAULT_CALLBACK_PORT, "127.0.0.1");
+
 	ctrl.signal?.addEventListener("abort", () => {
 		if (!isResolved) {
 			isResolved = true;
+			clearTimeout(timeoutId);
 			server.close();
 			reject(new AIError.AbortError("Zed authentication was aborted."));
 		}
