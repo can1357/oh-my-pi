@@ -2270,7 +2270,7 @@ export function convertMessages(
 			params.push(assistantMsg);
 		} else if (msg.role === "toolResult") {
 			// Batch consecutive tool results and collect all images
-			const imageBlocks: OpenAICompletionsImagePart[] = [];
+			const imageBlocks: Array<{ type: "image_url"; image_url: { url: string } }> = [];
 			let j = i;
 
 			for (; j < transformedMessages.length && transformedMessages[j].role === "toolResult"; j++) {
@@ -2284,6 +2284,20 @@ export function convertMessages(
 				const supportsImages = isOpenAICompletionsVisionSupported(model);
 				const hasImages = toolMsg.content.some(c => c.type === "image");
 				const omittedImages = hasImages && !supportsImages;
+				// Convert before composing the tool text: a well-formed but
+				// unreplayable format degrades to a placeholder, so the attachment
+				// prose and the synthetic user turn must follow the surviving parts.
+				const convertedParts = supportsImages
+					? toolMsg.content
+							.filter((block): block is ImageContent => block.type === "image")
+							.map(block => resolveOpenAICompletionsImagePart(block, model))
+					: [];
+				const convertedImages = convertedParts.filter(
+					(part): part is { type: "image_url"; image_url: { url: string } } => part.type === "image_url",
+				);
+				const placeholderTexts = convertedParts
+					.filter((part): part is { type: "text"; text: string } => part.type === "text")
+					.map(part => part.text);
 
 				// Always send tool result with text (or placeholder if only images)
 				const hasText = textResult.length > 0;
@@ -2292,11 +2306,9 @@ export function convertMessages(
 					remappedToolCallId ?? ensureToolCallId(toolMsg.toolCallId, `${j}:${toolMsg.toolName ?? "tool"}`);
 				const toolResultContent = omittedImages
 					? joinTextWithImagePlaceholder(textResult, true)
-					: hasText
-						? textResult
-						: hasImages
-							? "(see attached image)"
-							: "";
+					: [hasText ? textResult : convertedImages.length > 0 ? "(see attached image)" : "", ...placeholderTexts]
+							.filter(part => part.length > 0)
+							.join("\n");
 				const toolResultMsg: OpenAICompletionsToolMessageParam = {
 					role: "tool",
 					content: toolResultContent.toWellFormed(),
@@ -2307,13 +2319,7 @@ export function convertMessages(
 				}
 				params.push(toolResultMsg);
 
-				if (hasImages && supportsImages) {
-					for (const block of toolMsg.content) {
-						if (block.type === "image") {
-							imageBlocks.push(resolveOpenAICompletionsImagePart(block, model));
-						}
-					}
-				}
+				imageBlocks.push(...convertedImages);
 			}
 
 			i = j - 1;

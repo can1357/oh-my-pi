@@ -246,6 +246,80 @@ describe("openai-responses parseRequest", () => {
 		]);
 	});
 
+	it("keeps a usable OpenAI file ID beside a placeholder-safe inline image", () => {
+		const bmpData = Buffer.from("424d1e00000000000000001a0000000c000000010001000100180000000000", "hex").toString(
+			"base64",
+		);
+		const parsed = parseRequest({
+			model: "gpt-5.6-sol",
+			input: [
+				{
+					type: "function_call",
+					id: "fc_shot",
+					call_id: "call_shot",
+					name: "screenshot",
+					arguments: "{}",
+				},
+				{
+					type: "function_call_output",
+					call_id: "call_shot",
+					output: [
+						{
+							type: "input_image",
+							image_url: `data:image/bmp;base64,${bmpData}`,
+							file_id: "file_image_123",
+							detail: null,
+						},
+					],
+				},
+			],
+		});
+
+		const result = parsed.context.messages[1];
+		if (result?.role !== "toolResult") throw new Error("expected tool result");
+		expect(result.content).toEqual([
+			{
+				type: "image",
+				data: bmpData,
+				mimeType: "image/bmp",
+				providerFile: { provider: "openai", id: "file_image_123" },
+			},
+		]);
+
+		const responsesModel = (provider: string, baseUrl: string) =>
+			buildModel({
+				id: "gpt-5.6-sol",
+				name: "GPT-5.6 Sol",
+				api: "openai-responses",
+				provider,
+				baseUrl,
+				reasoning: true,
+				input: ["text", "image"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 1_000_000,
+				maxTokens: 128_000,
+			} satisfies ModelSpec<"openai-responses">);
+		const outputFor = (model: ReturnType<typeof responsesModel>) => {
+			const item = buildResponsesInput({
+				model,
+				context: parsed.context,
+				strictResponsesPairing: true,
+				supportsImageDetailOriginal: true,
+			}).find(entry => entry.type === "function_call_output");
+			if (item?.type !== "function_call_output") throw new Error("expected function output");
+			return item.output;
+		};
+
+		// The owning endpoint can still replay the handle; every other target has
+		// no usable source and degrades to the unsupported-format placeholder.
+		expect(outputFor(responsesModel("openai", "https://api.openai.com/v1"))).toEqual([
+			{ type: "input_image", detail: "auto", file_id: "file_image_123" },
+		]);
+		expect(outputFor(responsesModel("xai", "https://api.x.ai/v1"))).toEqual([
+			{ type: "input_text", text: "[unsupported image: image/bmp]" },
+		]);
+	});
+
 	function makeVertexScreenshotModel() {
 		return buildModel({
 			id: "gemini-3-pro",

@@ -852,9 +852,19 @@ export function buildOpenAiNativeHistory(
 			}
 			const isDifferentModel =
 				assistant.model !== model.id && assistant.provider === model.provider && assistant.api === model.api;
+			const stampedPayload = assistant.providerPayload;
+			const targetOwnedHistoryRejected =
+				stampedPayload?.type === "openaiResponsesHistory" &&
+				stampedPayload.referenceTarget !== undefined &&
+				stampedPayload.referenceTarget !== referenceTarget;
 
 			for (const block of assistant.content) {
-				if (block.type === "thinking" && assistant.stopReason !== "error" && block.thinkingSignature) {
+				if (
+					block.type === "thinking" &&
+					!targetOwnedHistoryRejected &&
+					assistant.stopReason !== "error" &&
+					block.thinkingSignature
+				) {
 					try {
 						const reasoningItem = JSON.parse(block.thinkingSignature) as Record<string, unknown>;
 						if (reasoningItem && typeof reasoningItem === "object") {
@@ -871,7 +881,7 @@ export function buildOpenAiNativeHistory(
 
 				if (block.type === "text") {
 					if (!block.text || block.text.trim().length === 0) continue;
-					const parsedSignature = parseTextSignature(block.textSignature);
+					const parsedSignature = targetOwnedHistoryRejected ? undefined : parseTextSignature(block.textSignature);
 					let msgId = parsedSignature?.id;
 					if (!msgId) {
 						msgId = `msg_${msgIndex}`;

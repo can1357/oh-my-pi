@@ -49,6 +49,9 @@ function percentDecode(value: string): Buffer | undefined {
 	return output.subarray(0, writeIndex);
 }
 
+const ASCII_WHITESPACE = /[\t\n\f\r ]/;
+const ASCII_WHITESPACE_RUN = /[\t\n\f\r ]+/g;
+
 export function isDataUri(url: string): boolean {
 	return url.slice(0, 5).toLowerCase() === "data:";
 }
@@ -56,10 +59,12 @@ export function isDataUri(url: string): boolean {
 /**
  * Transports that line-wrap base64 (MCP servers, ACP resource attachments,
  * percent-encoded data URLs) still carry a well-formed payload; canonical
- * validation and the wire copy both use the unwrapped form.
+ * validation and the wire copy both use the unwrapped form. Only ASCII
+ * whitespace is wrapping: `\s` would also swallow NBSP and other non-ASCII
+ * separators that make a payload malformed rather than wrapped.
  */
 export function normalizeBase64Payload(data: string): string {
-	return /\s/.test(data) ? data.replace(/\s+/g, "") : data;
+	return ASCII_WHITESPACE.test(data) ? data.replace(ASCII_WHITESPACE_RUN, "") : data;
 }
 
 /**

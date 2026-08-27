@@ -30,4 +30,14 @@ describe("OpenAI data URI decoding", () => {
 		expect(decodeDataUri("data:image/png;base64,=")).toBeUndefined();
 		expect(decodeDataUri("data:image/png;base64,%20%0A")).toBeUndefined();
 	});
+
+	it("rejects non-ASCII whitespace inside the base64 payload", () => {
+		const head = PNG_B64.slice(0, 32);
+		const tail = PNG_B64.slice(32);
+
+		// A no-break space is not base64 wrapping: the payload is malformed and
+		// must stay fail-closed so an alternate reference survives.
+		expect(decodeDataUri(`data:image/png;base64,${head}%C2%A0${tail}`)).toBeUndefined();
+		expect(decodeDataUri(`data:image/png;base64,${head}%A0${tail}`)).toBeUndefined();
+	});
 });

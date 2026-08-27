@@ -326,7 +326,17 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 			const omittedImages = !supportsImages && msg.content.some((c): c is ImageContent => c.type === "image");
 
 			const hasText = textResult.length > 0;
-			const hasImages = imageContent.length > 0;
+			// Convert before composing the response value: a well-formed but
+			// unreplayable format degrades to a text part, so only surviving media
+			// parts may claim an attachment or open a separate image turn.
+			const convertedImageParts = imageContent.map(image => convertGoogleImagePart(image, model));
+			const imageParts = convertedImageParts.filter(
+				part => part.inlineData !== undefined || part.fileData !== undefined,
+			);
+			const placeholderTexts = convertedImageParts
+				.filter((part): part is { text: string } => typeof part.text === "string")
+				.map(part => part.text);
+			const hasImages = imageParts.length > 0;
 
 			// Gemini 3+ models support multimodal function responses with images nested inside
 			// functionResponse.parts. Claude and other non-Gemini models behind Cloud Code Assist /
@@ -336,13 +346,9 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 			// Use "output" key for success, "error" key for errors as per SDK documentation
 			const responseValue = omittedImages
 				? [hasText ? textResult.toWellFormed() : "", NON_VISION_IMAGE_PLACEHOLDER].filter(Boolean).join("\n")
-				: hasText
-					? textResult.toWellFormed()
-					: hasImages
-						? "(see attached image)"
-						: "";
-
-			const imageParts = imageContent.map(image => convertGoogleImagePart(image, model));
+				: [hasText ? textResult.toWellFormed() : hasImages ? "(see attached image)" : "", ...placeholderTexts]
+						.filter(Boolean)
+						.join("\n");
 
 			const includeId = supportsFunctionPartId(model);
 			const emittedName = emittedToolCallNames.get(msg.toolCallId);

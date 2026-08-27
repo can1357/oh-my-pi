@@ -1431,10 +1431,7 @@ describe("pi-native gateway image reference validation", () => {
 			resolveModel: () => model,
 			version: "test",
 		});
-		const imageUrls = [
-			"https://images.example.invalid/computer.png",
-			`data:image/png;base64,${PNG_B64}`,
-		];
+		const imageUrls = ["https://images.example.invalid/computer.png", `data:image/png;base64,${PNG_B64}`];
 
 		try {
 			for (const [index, imageUrl] of imageUrls.entries()) {
@@ -1562,10 +1559,19 @@ describe("pi-native gateway image reference validation", () => {
 			expect(response.status).toBe(200);
 			await response.json();
 			expect(upstreamRequests).toHaveLength(1);
-			const parts = (upstreamRequests[0]?.messages ?? []).flatMap(message =>
-				Array.isArray(message.content) ? message.content : [],
+			// The placeholder rides the tool result itself: a converted image that
+			// degrades to text must not open a synthetic "attached image" turn.
+			const texts = (upstreamRequests[0]?.messages ?? []).flatMap(message =>
+				typeof message.content === "string"
+					? [message.content]
+					: Array.isArray(message.content)
+						? message.content.flatMap(part =>
+								typeof (part as { text?: unknown }).text === "string" ? [(part as { text: string }).text] : [],
+							)
+						: [],
 			);
-			expect(parts).toContainEqual({ type: "text", text: "[unsupported image: image/bmp]" });
+			expect(texts).toContain("[unsupported image: image/bmp]");
+			expect(texts.some(text => text.includes("Attached image(s) from tool result"))).toBe(false);
 		} finally {
 			await handle.close();
 			storage.close();
@@ -1647,10 +1653,19 @@ describe("pi-native gateway image reference validation", () => {
 			expect(response.status).toBe(200);
 			await response.json();
 			expect(upstreamRequests).toHaveLength(1);
-			const parts = (upstreamRequests[0]?.messages ?? []).flatMap(message =>
-				Array.isArray(message.content) ? message.content : [],
+			// The placeholder rides the tool result itself: a converted image that
+			// degrades to text must not open a synthetic "attached image" turn.
+			const texts = (upstreamRequests[0]?.messages ?? []).flatMap(message =>
+				typeof message.content === "string"
+					? [message.content]
+					: Array.isArray(message.content)
+						? message.content.flatMap(part =>
+								typeof (part as { text?: unknown }).text === "string" ? [(part as { text: string }).text] : [],
+							)
+						: [],
 			);
-			expect(parts).toContainEqual({ type: "text", text: "[unsupported image: image/bmp]" });
+			expect(texts).toContain("[unsupported image: image/bmp]");
+			expect(texts.some(text => text.includes("Attached image(s) from tool result"))).toBe(false);
 			expect(JSON.stringify(upstreamRequests[0])).not.toContain("file_stale_screen");
 		} finally {
 			await handle.close();

@@ -353,6 +353,7 @@ function functionOutputContent(output: string | readonly unknown[] | undefined):
 					...decoded,
 					mimeType: placeholderSafeMimeType,
 					...(detail ? { detail } : {}),
+					...(fileId ? { providerFile: { provider: "openai" as const, id: fileId } } : {}),
 				});
 			} else {
 				const referenceImage: ImageContent = {

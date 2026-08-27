@@ -588,6 +588,66 @@ function toolResultFor(callId: string, custom = false): ToolResultMessage {
 	};
 }
 
+describe("buildOpenAiNativeHistory endpoint-owned assistant history", () => {
+	function stampedAssistant(referenceTarget?: string): AssistantMessage {
+		return {
+			role: "assistant",
+			content: [
+				{
+					type: "thinking",
+					thinking: "weighing options",
+					thinkingSignature: JSON.stringify({
+						type: "reasoning",
+						id: "rs_endpoint_a",
+						encrypted_content: "enc_endpoint_a",
+						summary: [],
+					}),
+				},
+				{ type: "text", text: "answer", textSignature: "msg_endpoint_a" },
+			],
+			timestamp: Date.now(),
+			provider: "openai",
+			model: "gpt-5",
+			api: "openai-responses",
+			usage: ZERO_USAGE,
+			stopReason: "stop",
+			...(referenceTarget !== undefined
+				? {
+						providerPayload: {
+							type: "openaiResponsesHistory",
+							provider: "openai",
+							referenceTarget,
+							items: [
+								{ type: "reasoning", id: "rs_endpoint_a", encrypted_content: "enc_endpoint_a", summary: [] },
+							],
+						},
+					}
+				: {}),
+		} as unknown as AssistantMessage;
+	}
+
+	test("suppresses reasoning and message ids stamped for another target", () => {
+		const items = buildOpenAiNativeHistory([stampedAssistant("sha256:endpoint-a")], makeOpenAiModel());
+
+		expect(items.some(item => item.type === "reasoning")).toBe(false);
+		expect(JSON.stringify(items)).not.toContain("enc_endpoint_a");
+		expect(JSON.stringify(items)).not.toContain("rs_endpoint_a");
+		const message = items.find(item => item.type === "message");
+		expect(message?.id).toBe("msg_0");
+		expect(message?.content).toEqual([{ type: "output_text", text: "answer", annotations: [] }]);
+	});
+
+	test("replays unstamped portable reasoning and message ids", () => {
+		const items = buildOpenAiNativeHistory([stampedAssistant()], makeOpenAiModel());
+
+		expect(items.find(item => item.type === "reasoning")).toMatchObject({
+			id: "rs_endpoint_a",
+			encrypted_content: "enc_endpoint_a",
+		});
+		expect(items.find(item => item.type === "message")?.id).toBe("msg_endpoint_a");
+	});
+});
+
 describe("buildOpenAiNativeHistory multimodal tool results", () => {
 	test("encodes ReadTool images inside the native function output", () => {
 		const imageData = PNG_B64;
