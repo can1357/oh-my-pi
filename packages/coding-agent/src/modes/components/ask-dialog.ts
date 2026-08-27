@@ -20,6 +20,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
+import { formatKeyHints } from "../../config/keybindings";
 import type {
 	ExtensionAskDialogOption,
 	ExtensionAskDialogQuestion,
@@ -257,7 +258,14 @@ function cancelKeyLabel(): string {
 }
 
 function askActionKey(action: "app.ask.expand" | "app.ask.note" | "app.ask.filter"): string {
-	return editorKey(action);
+	// `n` and `shift+n` are the same physical key — an uppercase N arrives
+	// canonicalized as `shift+n` — so collapse the pair into one label
+	// instead of printing "N/Shift+N". Other modifiers are left untouched.
+	const keys = getKeybindings().getKeys(action);
+	const distinct = keys.filter(
+		key => !(key.length === 7 && key.startsWith("shift+") && keys.some(prev => prev === key.slice(6))),
+	);
+	return formatKeyHints(distinct);
 }
 
 function normalizedInlineInput(input: string): string {
@@ -314,12 +322,20 @@ function previewFacetWidths(
 	return { listWidth, previewWidth, split: previewWidth > 0 };
 }
 
-function countedMoreCue(hidden: number): string {
+function countedMoreCue(hidden: number, width: number): string {
 	const glyph = theme.nav.expand || "▾";
 	const noun = hidden === 1 ? "line" : "lines";
 	// Name the key that reveals the rest: the facet cannot scroll, so a bare
-	// count would advertise unread lines with no way to reach them.
-	return theme.fg("dim", `${glyph} ${hidden} more ${noun} · ${askActionKey("app.ask.expand")} expand`);
+	// count would advertise unread lines with no way to reach them. The full
+	// form outgrows the narrowest split facet (29 columns), so shed count
+	// wording — never the reveal — as the facet narrows. The key sits ahead
+	// of the verb so even an over-long custom binding clips its tail first.
+	const reveal = `${askActionKey("app.ask.expand")} expand`;
+	const full = `${glyph} ${hidden} more ${noun} · ${reveal}`;
+	if (visibleWidth(full) <= width) return theme.fg("dim", full);
+	const counted = `${glyph} ${hidden} more · ${reveal}`;
+	if (visibleWidth(counted) <= width) return theme.fg("dim", counted);
+	return theme.fg("dim", `${glyph} ${reveal}`);
 }
 
 function truncateFooter(parts: string[], maxWidth: number): string {
@@ -1277,7 +1293,7 @@ export class AskDialogComponent implements Component, Focusable {
 		if (hiddenBelow > 0 && window.length > 0) {
 			// Replace the last visible row with a counted overflow cue so the
 			// facet height stays fixed while still advertising unread lines.
-			window[window.length - 1] = countedMoreCue(hiddenBelow + 1);
+			window[window.length - 1] = countedMoreCue(hiddenBelow + 1, previewWidth);
 		}
 		for (const line of window) out.push(fit(line, previewWidth));
 		while (out.length < rows) out.push("");

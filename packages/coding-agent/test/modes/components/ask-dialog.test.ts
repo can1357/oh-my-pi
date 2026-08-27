@@ -454,6 +454,38 @@ describe("AskDialogComponent", () => {
 		expect(onSubmit.mock.calls[0][0].results[0].note).toBe("My Custom Note");
 	});
 
+	it("uppercase N (Shift+N or Caps Lock) opens the note prompt under shipped defaults", async () => {
+		const onPrompt = vi.fn().mockReturnValue(Promise.resolve("Upper note"));
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Choose one?",
+				options: [{ label: "Option A" }, { label: "Option B" }],
+			},
+		];
+
+		const component = new AskDialogComponent(questions, {
+			onSubmit: vi.fn(),
+			onCancel: vi.fn(),
+			onPrompt,
+		});
+
+		// Terminals deliver Shift+N as a bare uppercase N; the manager
+		// canonicalizes it to `shift+n`, which the bare `n` default must not miss.
+		component.handleInput("N");
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(onPrompt).toHaveBeenCalledTimes(1);
+		expect(onPrompt.mock.calls[0][0]).toBe("Note for Option A: Choose one?");
+
+		// `n` and `shift+n` are one physical key, so the footer hint collapses
+		// the pair instead of advertising a second, nonexistent shortcut.
+		const out = render(component);
+		expect(out).toContain("N note");
+		expect(out).not.toContain("Shift+N");
+	});
+
 	it("note prefill is empty when editing a different row after noting another option", async () => {
 		const onPrompt = vi.fn();
 		const onSubmit = vi.fn();
@@ -1630,6 +1662,38 @@ describe("AskDialogComponent", () => {
 				reached = stripVTControlCharacters(component.render(120).join("\n")).includes("PREVIEW-LINE-40");
 			}
 			expect(reached).toBe(true);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("keeps the expand key visible in the preview overflow cue at the narrowest split width", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const preview = Array.from({ length: 40 }, (_, index) => `PREVIEW-LINE-${index + 1}`).join("\n");
+			const component = new AskDialogComponent(
+				[{ id: "q1", question: "Pick?", options: [{ label: "Alpha", preview }, { label: "Bravo" }] }],
+				{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+			);
+			// Width 64 → 60 inner columns: the narrowest layout that still splits,
+			// leaving the preview facet 29 columns — one less than the full cue.
+			// The cue is the only expand hint here: split mode leaves the footer's
+			// preview-suppression hint off, so clipping its key would advertise
+			// hidden lines with no way to reach them.
+			const narrow = stripVTControlCharacters(component.render(64).join("\n"));
+			expect(narrow).toContain("PREVIEW-LINE-1");
+			expect(narrow).not.toContain("PREVIEW-LINE-40");
+			expect(narrow).toMatch(/more( lines)? · Right expand/);
+
+			// A longer user-configured binding sheds the count before the key.
+			setKeybindings(
+				KeybindingsManager.inMemory({ "tui.select.cancel": "ctrl+g", "app.ask.expand": "ctrl+shift+alt+right" }),
+			);
+			const custom = stripVTControlCharacters(component.render(64).join("\n"));
+			expect(custom).toContain("Ctrl+Shift+Alt+Right expand");
+			expect(custom).not.toMatch(/\d+ more/);
 		} finally {
 			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
 			else Reflect.deleteProperty(process.stdout, "rows");

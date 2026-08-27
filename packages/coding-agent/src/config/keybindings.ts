@@ -232,7 +232,10 @@ export const KEYBINDINGS = {
 		description: "Collapse the focused ask option",
 	},
 	"app.ask.note": {
-		defaultKeys: "n",
+		// Uppercase N (Shift+N or Caps Lock) reaches the manager canonicalized
+		// as `shift+n`, so a bare `n` default would silently drop the uppercase
+		// path the pre-configurable dialog handler matched (`n` and `N`).
+		defaultKeys: ["n", "shift+n"],
 		description: "Attach a note to the focused ask option",
 	},
 	"app.ask.filter": {
