@@ -189,6 +189,41 @@ class Example {
 		}
 	});
 
+	it("guides attribute-prefixed PHP member patterns to contextual selection", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-php-attributed-member-"));
+		const pattern = '#[Route(path: "/items/[id]")]\nfunction $NAME($$$ARGS) { $$$BODY }';
+		const astEditSpy = mockRewriteMatches([{ pattern, language: "php", count: 0 }]);
+		try {
+			const filePath = path.join(tempDir, "Example.php");
+			await Bun.write(
+				filePath,
+				`<?php
+class Example {
+	#[Route(path: "/items/[id]")]
+	function greet($value) { return $value; }
+}
+`,
+			);
+			const tools = await createTools(createTestSession(tempDir), ["ast_edit"]);
+			const tool = tools.find(entry => entry.name === "ast_edit");
+			expect(tool).toBeDefined();
+
+			const result = await tool!.execute("ast-edit-php-attributed-member", {
+				ops: [{ pat: pattern, out: "function renamed($$$ARGS) { $$$BODY }" }],
+				paths: [filePath],
+			});
+			const details = result.details as { totalReplacements?: number; patternHint?: string } | undefined;
+			const text = result.content.find(content => content.type === "text")?.text ?? "";
+
+			expect(details?.totalReplacements).toBe(0);
+			expect(details?.patternHint).toContain("method_declaration");
+			expect(text).toContain("class $_ { … }");
+		} finally {
+			astEditSpy.mockRestore();
+			await removeWithRetries(tempDir);
+		}
+	});
+
 	it("surfaces PHP member guidance when another batch rewrite matches", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-php-batch-"));
 		const memberPattern = "function $NAME($$$ARGS) { $$$BODY }";

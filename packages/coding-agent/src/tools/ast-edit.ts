@@ -59,10 +59,45 @@ const astEditSchema = type({
 	"selector?": type("string").describe("AST node kind to rewrite in a single-operation contextual pattern"),
 });
 
-const PHP_MEMBER_PATTERN = /^\s*(?:(?:abstract|final|public|protected|private|readonly|static)\s+)*function\b/u;
+const PHP_MEMBER_DECLARATION_PATTERN =
+	/^(?:(?:abstract|final|public|protected|private|readonly|static)\s+)*function\b/u;
+
+function findPhpAttributeEnd(pattern: string): number | undefined {
+	let bracketDepth = 0;
+	let quote: "'" | '"' | undefined;
+	let escaped = false;
+	for (let index = 1; index < pattern.length; index++) {
+		const char = pattern[index]!;
+		if (quote) {
+			if (escaped) {
+				escaped = false;
+			} else if (char === "\\") {
+				escaped = true;
+			} else if (char === quote) {
+				quote = undefined;
+			}
+			continue;
+		}
+		if (char === "'" || char === '"') {
+			quote = char;
+		} else if (char === "[") {
+			bracketDepth++;
+		} else if (char === "]") {
+			bracketDepth--;
+			if (bracketDepth === 0) return index + 1;
+		}
+	}
+	return undefined;
+}
 
 function isPhpMemberPattern(pattern: string): boolean {
-	return PHP_MEMBER_PATTERN.test(pattern);
+	let declaration = pattern.trimStart();
+	while (declaration.startsWith("#[")) {
+		const attributeEnd = findPhpAttributeEnd(declaration);
+		if (attributeEnd === undefined) return false;
+		declaration = declaration.slice(attributeEnd).trimStart();
+	}
+	return PHP_MEMBER_DECLARATION_PATTERN.test(declaration);
 }
 
 interface AstEditCallOptions {
