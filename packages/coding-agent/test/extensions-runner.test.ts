@@ -27,6 +27,8 @@ import type {
 	InputEvent,
 	InputEventResult,
 	ProviderModelConfig,
+	ToolApprovalReviewEvent,
+	ToolApprovalReviewResult,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -2610,6 +2612,665 @@ describe("ExtensionRunner", () => {
 				},
 			]);
 			delete globalState.__partialContextApprovalEvents;
+		});
+		// Tests for the generic tool_approval_review seam, written before the implementation.
+		describe("tool_approval_review seam", () => {
+			const globalWithReview = globalThis as typeof globalThis & {
+				__reviewTrace?: Array<Record<string, unknown>>;
+				__reviewController?: AbortController;
+				__reviewEntered?: () => void;
+			};
+			const setTrace = (): Array<Record<string, unknown>> => {
+				const trace: Array<Record<string, unknown>> = [];
+				globalWithReview.__reviewTrace = trace;
+				return trace;
+			};
+			const clearTrace = (): void => {
+				delete globalWithReview.__reviewTrace;
+				delete globalWithReview.__reviewController;
+				delete globalWithReview.__reviewEntered;
+			};
+
+			const firstReviewText = (result: { content: readonly (TextContent | ImageContent)[] }): string | undefined => {
+				const block = result.content[0];
+				return block?.type === "text" ? block.text : undefined;
+			};
+
+			const reviewHandlerCode = (body: string) => `
+				pi.on("tool_approval_review", async (event) => {
+					globalThis.__reviewTrace.push({
+						kind: "review",
+						sessionId: event.sessionId,
+						toolName: event.toolName,
+						toolCallId: event.toolCallId,
+						approvalMode: event.approvalMode,
+						tier: event.tier,
+						input: event.input,
+					});
+					${body}
+				});`;
+
+			// Extension source with an optional `tool_approval_review` handler plus
+			// native approval observers, so every test records full host ordering.
+			const reviewExtensionCode = (reviewBody: string | null) => `
+				export default function(pi) {
+					${reviewBody === null ? "" : reviewHandlerCode(reviewBody)}
+					pi.on("tool_approval_requested", async () => {
+						globalThis.__reviewTrace.push({ kind: "requested" });
+					});
+					pi.on("tool_approval_resolved", async (event) => {
+						globalThis.__reviewTrace.push({ kind: "resolved", approved: event.approved });
+					});
+				}
+			`;
+
+			const recordingApprovalTool = () => ({
+				...approvalTool,
+				execute: async (_toolCallId: string, params: unknown) => {
+					globalWithReview.__reviewTrace?.push({ kind: "executed", params });
+					return { content: [{ type: "text" as const, text: "ok" }] };
+				},
+			});
+
+			const alwaysAskSettings = { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) };
+
+			const executeReviewCase = (
+				runner: ExtensionRunner,
+				tool: AgentTool,
+				toolCallId: string,
+				options?: {
+					params?: unknown;
+					signal?: AbortSignal;
+					settings?: { get: (key: string) => unknown };
+					extraContext?: Record<string, unknown>;
+				},
+			) =>
+				(new ExtensionToolWrapper(tool, runner) as ExtensionToolWrapper<any>).execute(
+					toolCallId,
+					(options?.params ?? {}) as never,
+					options?.signal,
+					undefined,
+					{
+						sessionManager,
+						modelRegistry,
+						model: undefined,
+						isIdle: () => true,
+						hasQueuedMessages: () => false,
+						abort: () => {},
+						settings: (options?.settings ?? alwaysAskSettings) as never,
+						...options?.extraContext,
+					} as never,
+				);
+
+			const reviewRunnerFromFile = async (
+				fileName: string,
+				code: string,
+				customSelect?: (title: string, options: string[]) => Promise<string | undefined>,
+			) => {
+				fs.writeFileSync(path.join(extensionsDir, fileName), code);
+				const result = await loadTestExtensions();
+				const runner = new ExtensionRunner(
+					result.extensions,
+					result.runtime,
+					tempDir.path(),
+					sessionManager,
+					modelRegistry,
+				);
+				const select = vi.fn(
+					customSelect ??
+						(async () => {
+							globalWithReview.__reviewTrace?.push({ kind: "ui_select" });
+							return "Approve";
+						}),
+				);
+				initializeRunner(runner, select);
+				return { runner, select };
+			};
+
+			// --- Dedicated unanimous dispatch (runner level) ---
+
+			const dispatchRunner = (reviewHandlers: Array<(event: unknown, ctx: unknown) => unknown>): ExtensionRunner => {
+				const extensionPath = path.join(extensionsDir, "review-dispatch.ts");
+				const extension: Extension = {
+					path: extensionPath,
+					resolvedPath: extensionPath,
+					handlers: new Map([["tool_approval_review", reviewHandlers as never]]),
+					tools: new Map(),
+					assistantThinkingRenderers: [],
+					fileWriteFallbackHandlers: [],
+					fileDeleteFallbackHandlers: [],
+					messageRenderers: new Map(),
+					composerShapes: new Map(),
+					commands: new Map(),
+					flags: new Map(),
+					shortcuts: new Map(),
+				};
+				return new ExtensionRunner(
+					[extension],
+					new ExtensionRuntime(),
+					tempDir.path(),
+					sessionManager,
+					modelRegistry,
+				);
+			};
+
+			const dispatchEvent = {
+				type: "tool_approval_review",
+				sessionId: "session-review",
+				toolName: "dangerous_tool",
+				toolCallId: "call-dispatch",
+				input: { command: "echo hi" },
+				approvalMode: "always-ask",
+				tier: "exec",
+			} as ToolApprovalReviewEvent;
+
+			it("dispatch returns escalation when no review handler exists (distinct from approval)", async () => {
+				const runner = dispatchRunner([]);
+				await expect(runner.emitToolApprovalReview(dispatchEvent)).resolves.toMatchObject({ decision: "escalate" });
+			});
+
+			it("dispatch returns approve only for unanimous approval and delivers the exact public event", async () => {
+				const seen: ToolApprovalReviewEvent[] = [];
+				const runner = dispatchRunner([
+					async event => {
+						seen.push(event);
+						return { decision: "approve" };
+					},
+				]);
+				await expect(runner.emitToolApprovalReview(dispatchEvent)).resolves.toEqual({ decision: "approve" });
+				expect(seen).toHaveLength(1);
+				expect(seen[0]).toEqual(dispatchEvent);
+				// The public event carries exactly these fields — no deny, rewrite, or mode channels.
+				expect(Object.keys(seen[0] ?? {}).sort()).toEqual([
+					"approvalMode",
+					"input",
+					"sessionId",
+					"tier",
+					"toolCallId",
+					"toolName",
+					"type",
+				]);
+			});
+
+			it("dispatch returns escalation when handlers disagree (no last-result-wins)", async () => {
+				const runner = dispatchRunner([
+					async () => ({ decision: "approve" }),
+					async () => ({ decision: "escalate", reason: "second opinion" }),
+				]);
+				await expect(runner.emitToolApprovalReview(dispatchEvent)).resolves.toMatchObject({ decision: "escalate" });
+			});
+
+			it("dispatch returns escalation for malformed handler results", async () => {
+				const malformed = [
+					undefined,
+					"approve",
+					{},
+					{ decision: "deny" },
+					{ decision: "approve", input: { command: "rewritten" } },
+				];
+				for (const result of malformed) {
+					const runner = dispatchRunner([async () => result]);
+					await expect(runner.emitToolApprovalReview(dispatchEvent)).resolves.toMatchObject({
+						decision: "escalate",
+					});
+				}
+			});
+
+			it("dispatch returns escalation when a handler throws", async () => {
+				const runner = dispatchRunner([
+					async () => {
+						throw new Error("reviewer exploded");
+					},
+				]);
+				await expect(runner.emitToolApprovalReview(dispatchEvent)).resolves.toMatchObject({ decision: "escalate" });
+			});
+
+			it("dispatch returns escalation on handler timeout", async () => {
+				testSetExtensionHandlerTimeoutMs(20);
+				const never = Promise.withResolvers<void>();
+				const runner = dispatchRunner([async () => never.promise]);
+				await expect(runner.emitToolApprovalReview(dispatchEvent)).resolves.toMatchObject({ decision: "escalate" });
+			});
+
+			it("dispatch returns escalation when the signal is already aborted and never calls handlers", async () => {
+				const handler = vi.fn(async () => ({ decision: "approve" }));
+				const runner = dispatchRunner([handler]);
+				const controller = new AbortController();
+				controller.abort();
+				await expect(runner.emitToolApprovalReview(dispatchEvent, controller.signal)).resolves.toMatchObject({
+					decision: "escalate",
+				});
+				expect(handler).not.toHaveBeenCalled();
+			});
+
+			it("exposes the public result contract types", () => {
+				expectTypeOf<ToolApprovalReviewResult>().toEqualTypeOf<
+					{ decision: "approve"; rationale?: string } | { decision: "escalate"; reason?: string }
+				>();
+			});
+
+			// --- Wrapper insertion point (integration level) ---
+
+			it("mode-derived prompt with unanimous review approval executes with zero selector calls and no native approval events", async () => {
+				const trace = setTrace();
+				const { runner, select } = await reviewRunnerFromFile(
+					"review-approve.ts",
+					reviewExtensionCode(`return { decision: "approve" };`),
+				);
+				const result = await executeReviewCase(runner, approvalTool, "call-review-approve");
+
+				expect(firstReviewText(result)).toBe("ok");
+				expect(select).not.toHaveBeenCalled();
+				expect(trace).toEqual([
+					{
+						kind: "review",
+						sessionId: expect.any(String),
+						toolName: "dangerous_tool",
+						toolCallId: "call-review-approve",
+						approvalMode: "always-ask",
+						tier: "exec",
+						input: {},
+					},
+				]);
+				clearTrace();
+			});
+
+			it("review escalation falls through to exactly one native selector with native approval events preserved", async () => {
+				const trace = setTrace();
+				const { runner, select } = await reviewRunnerFromFile(
+					"review-escalate.ts",
+					reviewExtensionCode(`return { decision: "escalate", reason: "unsure" };`),
+				);
+				const result = await executeReviewCase(runner, approvalTool, "call-review-escalate");
+
+				expect(firstReviewText(result)).toBe("ok");
+				expect(select).toHaveBeenCalledTimes(1);
+				expect(trace).toEqual([
+					expect.objectContaining({ kind: "review", toolCallId: "call-review-escalate" }),
+					{ kind: "requested" },
+					{ kind: "ui_select" },
+					{ kind: "resolved", approved: true },
+				]);
+				clearTrace();
+			});
+
+			it("with no review handler the native selector runs unchanged", async () => {
+				const trace = setTrace();
+				const { runner, select } = await reviewRunnerFromFile("review-observers.ts", reviewExtensionCode(null));
+				const result = await executeReviewCase(runner, approvalTool, "call-no-review");
+
+				expect(firstReviewText(result)).toBe("ok");
+				expect(select).toHaveBeenCalledTimes(1);
+				expect(trace).toEqual([{ kind: "requested" }, { kind: "ui_select" }, { kind: "resolved", approved: true }]);
+				clearTrace();
+			});
+
+			it("a throwing review handler escalates to the native selector", async () => {
+				const trace = setTrace();
+				const { runner, select } = await reviewRunnerFromFile(
+					"review-throw.ts",
+					reviewExtensionCode(`throw new Error("reviewer exploded");`),
+				);
+				const result = await executeReviewCase(runner, approvalTool, "call-review-throw");
+
+				expect(firstReviewText(result)).toBe("ok");
+				expect(select).toHaveBeenCalledTimes(1);
+				expect(trace).toEqual([
+					expect.objectContaining({ kind: "review", toolCallId: "call-review-throw" }),
+					{ kind: "requested" },
+					{ kind: "ui_select" },
+					{ kind: "resolved", approved: true },
+				]);
+				clearTrace();
+			});
+
+			it("a timed-out review handler escalates to the native selector", async () => {
+				testSetExtensionHandlerTimeoutMs(20);
+				const trace = setTrace();
+				const { runner, select } = await reviewRunnerFromFile(
+					"review-hang.ts",
+					reviewExtensionCode(`const never = Promise.withResolvers(); await never.promise;`),
+				);
+				const result = await executeReviewCase(runner, approvalTool, "call-review-hang");
+
+				expect(firstReviewText(result)).toBe("ok");
+				expect(select).toHaveBeenCalledTimes(1);
+				expect(trace).toEqual([
+					expect.objectContaining({ kind: "review" }),
+					{ kind: "requested" },
+					{ kind: "ui_select" },
+					{ kind: "resolved", approved: true },
+				]);
+				clearTrace();
+			});
+
+			it("cancellation during review never executes the tool", async () => {
+				const trace = setTrace();
+				const { runner, select } = await reviewRunnerFromFile(
+					"review-cancel.ts",
+					reviewExtensionCode(`
+						globalThis.__reviewEntered?.();
+						const { promise, resolve } = Promise.withResolvers<void>();
+						const signal = globalThis.__reviewController.signal;
+						if (signal.aborted) resolve();
+						else signal.addEventListener("abort", () => resolve());
+						await promise;
+						return { decision: "escalate" };
+					`),
+					// The native selector also releases the wait, so a missing seam fails the
+					// assertions below instead of hanging on the never-invoked review handler.
+					async () => {
+						globalWithReview.__reviewEntered?.();
+						globalWithReview.__reviewTrace?.push({ kind: "ui_select" });
+						return "Approve";
+					},
+				);
+				const controller = new AbortController();
+				globalWithReview.__reviewController = controller;
+				const entered = Promise.withResolvers<void>();
+				globalWithReview.__reviewEntered = entered.resolve;
+				const toolCallId = "call-review-cancel";
+				const execution = executeReviewCase(runner, recordingApprovalTool(), toolCallId, {
+					signal: controller.signal,
+					extraContext: {
+						toolCall: {
+							batchId: `batch-${toolCallId}`,
+							index: 0,
+							total: 1,
+							toolCalls: [{ id: toolCallId, name: "dangerous_tool" }],
+						},
+					},
+				});
+				await entered.promise;
+				controller.abort();
+				await expect(execution).rejects.toThrow();
+				expect(select).not.toHaveBeenCalled();
+				expect(trace.some(entry => entry.kind === "executed")).toBe(false);
+				expect(trace.some(entry => entry.kind === "requested")).toBe(false);
+				clearTrace();
+			});
+
+			it("approve + escalate handlers are not last-result-wins: the native selector decides", async () => {
+				const trace = setTrace();
+				fs.writeFileSync(
+					path.join(extensionsDir, "review-b-escalate.ts"),
+					reviewExtensionCode(`return { decision: "escalate" };`),
+				);
+				const { runner, select } = await reviewRunnerFromFile(
+					"review-a-approve.ts",
+					reviewExtensionCode(`return { decision: "approve" };`),
+				);
+				const result = await executeReviewCase(runner, approvalTool, "call-review-mixed");
+
+				expect(firstReviewText(result)).toBe("ok");
+				expect(select).toHaveBeenCalledTimes(1);
+				expect(trace.filter(entry => entry.kind === "review")).toHaveLength(2);
+				expect(trace[2]).toEqual({ kind: "requested" });
+				expect(trace[3]).toEqual({ kind: "ui_select" });
+				expect(trace[4]).toEqual({ kind: "resolved", approved: true });
+				clearTrace();
+			});
+
+			it("explicit user tools.approval prompt never emits review", async () => {
+				const trace = setTrace();
+				const { runner, select } = await reviewRunnerFromFile(
+					"review-explicit-user.ts",
+					reviewExtensionCode(`return { decision: "approve" };`),
+				);
+				const result = await executeReviewCase(runner, approvalTool, "call-explicit-user", {
+					settings: {
+						get: (key: string) =>
+							key === "tools.approvalMode"
+								? "always-ask"
+								: key === "tools.approval"
+									? { dangerous_tool: "prompt" }
+									: {},
+					},
+				});
+
+				expect(firstReviewText(result)).toBe("ok");
+				expect(select).toHaveBeenCalledTimes(1);
+				expect(trace).toEqual([{ kind: "requested" }, { kind: "ui_select" }, { kind: "resolved", approved: true }]);
+				clearTrace();
+			});
+
+			it("tool override prompt never emits review", async () => {
+				const trace = setTrace();
+				const { runner, select } = await reviewRunnerFromFile(
+					"review-override.ts",
+					reviewExtensionCode(`return { decision: "approve" };`),
+				);
+				const tool = { ...approvalTool, approval: { tier: "exec", policy: "prompt", override: true } };
+				const result = await executeReviewCase(runner, tool, "call-override-prompt");
+
+				expect(firstReviewText(result)).toBe("ok");
+				expect(select).toHaveBeenCalledTimes(1);
+				expect(trace).toEqual([{ kind: "requested" }, { kind: "ui_select" }, { kind: "resolved", approved: true }]);
+				clearTrace();
+			});
+
+			it("user and tool deny never emit review and never execute", async () => {
+				const trace = setTrace();
+				const { runner, select } = await reviewRunnerFromFile(
+					"review-deny.ts",
+					reviewExtensionCode(`return { decision: "approve" };`),
+				);
+				const recording = recordingApprovalTool();
+
+				await expect(
+					executeReviewCase(runner, recording, "call-user-deny", {
+						settings: {
+							get: (key: string) =>
+								key === "tools.approvalMode"
+									? "always-ask"
+									: key === "tools.approval"
+										? { dangerous_tool: "deny" }
+										: {},
+						},
+					}),
+				).rejects.toThrow();
+				const denyTool = { ...approvalTool, approval: { policy: "deny", tier: "exec", reason: "no" } };
+				await expect(executeReviewCase(runner, denyTool, "call-tool-deny")).rejects.toThrow();
+
+				expect(select).not.toHaveBeenCalled();
+				expect(trace.some(entry => entry.kind === "review")).toBe(false);
+				expect(trace.some(entry => entry.kind === "executed")).toBe(false);
+				clearTrace();
+			});
+
+			it("provider computer safety never emits review and still requires native approval", async () => {
+				const trace = setTrace();
+				const { runner, select } = await reviewRunnerFromFile(
+					"review-computer.ts",
+					reviewExtensionCode(`return { decision: "approve" };`),
+				);
+				const toolCallId = "call-computer";
+				const context: Record<string, unknown> = {
+					sessionManager,
+					modelRegistry,
+					model: undefined,
+					isIdle: () => true,
+					hasQueuedMessages: () => false,
+					abort: () => {},
+					settings: alwaysAskSettings,
+					toolCall: {
+						batchId: `batch-${toolCallId}`,
+						index: 0,
+						total: 1,
+						toolCalls: [{ id: toolCallId, name: "dangerous_tool" }],
+						providerMetadata: {
+							type: "computer",
+							actions: [{ type: "click", x: 4, y: 2 }],
+							pendingSafetyChecks: [{ id: "check-1", code: "code-1", message: "confirm in browser" }],
+						},
+					},
+				};
+				const wrapper = new ExtensionToolWrapper(recordingApprovalTool(), runner);
+				const result = await (wrapper as ExtensionToolWrapper<any>).execute(
+					toolCallId,
+					{},
+					undefined,
+					undefined,
+					context as never,
+				);
+
+				expect(firstReviewText(result)).toBe("ok");
+				expect(select).toHaveBeenCalledTimes(1);
+				expect(select).toHaveBeenCalledWith(expect.stringContaining("Provider safety checks"), ["Approve", "Deny"]);
+				expect(trace).toEqual([
+					{ kind: "requested" },
+					{ kind: "ui_select" },
+					{ kind: "resolved", approved: true },
+					{ kind: "executed", params: {} },
+				]);
+				expect(context.providerSafetyApproved).toBe(true);
+				clearTrace();
+			});
+
+			it("yolo-resolved allow never emits review", async () => {
+				const trace = setTrace();
+				const { runner, select } = await reviewRunnerFromFile(
+					"review-yolo.ts",
+					reviewExtensionCode(`return { decision: "approve" };`),
+				);
+				const result = await executeReviewCase(runner, recordingApprovalTool(), "call-yolo-allow", {
+					settings: { get: (key: string) => (key === "tools.approvalMode" ? "yolo" : {}) },
+				});
+
+				expect(firstReviewText(result)).toBe("ok");
+				expect(select).not.toHaveBeenCalled();
+				expect(trace).toEqual([{ kind: "executed", params: {} }]);
+				clearTrace();
+			});
+
+			it("review event input is the exact final effective execution input and is what executes", async () => {
+				const trace = setTrace();
+				const extCode = `
+					export default function(pi) {
+						pi.on("tool_call", async (event) => ({ input: { ...event.input, command: "echo final" } }));
+						pi.on("tool_approval_review", async (event) => {
+							globalThis.__reviewTrace.push({ kind: "review", input: event.input });
+							return { decision: "approve" };
+						});
+					}
+				`;
+				const { runner, select } = await reviewRunnerFromFile("review-exact-input.ts", extCode);
+				// Simulates the host's final transformToolCallArguments output (timeout clamp +
+				// deobfuscation) as the wrapper receives it.
+				const params = { command: "echo original", timeout: 5000 };
+				const result = await executeReviewCase(runner, recordingApprovalTool(), "call-exact-input", { params });
+
+				expect(firstReviewText(result)).toBe("ok");
+				expect(select).not.toHaveBeenCalled();
+				const review = trace.find(entry => entry.kind === "review");
+				const executed = trace.find(entry => entry.kind === "executed");
+				expect(review?.input).toEqual({ command: "echo final", timeout: 5000 });
+				expect(executed?.params).toEqual({ command: "echo final", timeout: 5000 });
+				// The reviewed object IS the executed object — no derived view, no rewrite channel.
+				expect(review?.input).toBe(executed?.params);
+				clearTrace();
+			});
+
+			it("review event input carries the exact deobfuscated execution value", async () => {
+				const trace = setTrace();
+				const { runner } = await reviewRunnerFromFile(
+					"review-secret.ts",
+					reviewExtensionCode(`return { decision: "approve" };`),
+				);
+				// The host deobfuscates secret placeholders before the wrapper sees the call;
+				// review must see the same final value that would reach the tool.
+				const secretCommand = "deploy --token sk-live-abc123";
+				const result = await executeReviewCase(runner, recordingApprovalTool(), "call-secret-input", {
+					params: { command: secretCommand },
+				});
+
+				expect(firstReviewText(result)).toBe("ok");
+				const review = trace.find(entry => entry.kind === "review");
+				expect(review?.input).toEqual({ command: secretCommand });
+				clearTrace();
+			});
+
+			it("approved review executes the reviewed input and cannot rewrite it", async () => {
+				const trace = setTrace();
+				const { runner, select } = await reviewRunnerFromFile(
+					"review-rewrite-attempt.ts",
+					reviewExtensionCode(`return { decision: "approve", input: { command: "evil" } };`),
+				);
+				const result = await executeReviewCase(runner, recordingApprovalTool(), "call-rewrite-attempt", {
+					params: { command: "echo good" },
+				});
+
+				expect(firstReviewText(result)).toBe("ok");
+				expect(select).not.toHaveBeenCalled();
+				const executed = trace.find(entry => entry.kind === "executed");
+				expect(executed?.params).toEqual({ command: "echo good" });
+				clearTrace();
+			});
+
+			it("a deny-shaped review result is not a deny: it escalates to the native selector", async () => {
+				const trace = setTrace();
+				const { runner, select } = await reviewRunnerFromFile(
+					"review-deny-shape.ts",
+					reviewExtensionCode(`return { decision: "deny", reason: "reviewer refuses" };`),
+				);
+				const result = await executeReviewCase(runner, recordingApprovalTool(), "call-deny-shape", {
+					params: { command: "echo good" },
+				});
+
+				expect(firstReviewText(result)).toBe("ok");
+				expect(select).toHaveBeenCalledTimes(1);
+				expect(trace[0]).toMatchObject({ kind: "review", toolCallId: "call-deny-shape" });
+				expect(trace.some(entry => entry.kind === "executed")).toBe(true);
+				clearTrace();
+			});
+
+			it("headless review escalation keeps the no-UI failure while headless review approval executes", async () => {
+				const trace = setTrace();
+				fs.writeFileSync(
+					path.join(extensionsDir, "review-headless.ts"),
+					reviewExtensionCode(`
+						if (event.toolCallId.startsWith("headless-escalate")) return { decision: "escalate" };
+						return { decision: "approve" };
+					`),
+				);
+				const result = await loadTestExtensions();
+				const runner = new ExtensionRunner(
+					result.extensions,
+					result.runtime,
+					tempDir.path(),
+					sessionManager,
+					modelRegistry,
+				);
+				// No initializeRunner: the runner keeps its no-op UI context (headless).
+				const tool = recordingApprovalTool();
+
+				await expect(executeReviewCase(runner, tool, "headless-escalate-1")).rejects.toThrow(
+					'Tool "dangerous_tool" requires approval but no interactive UI available.',
+				);
+				const approved = await executeReviewCase(runner, tool, "headless-approve-1");
+
+				expect(firstReviewText(approved)).toBe("ok");
+				expect(trace.filter(entry => entry.kind === "review")).toHaveLength(2);
+				expect(trace.some(entry => entry.kind === "ui_select")).toBe(false);
+				expect(trace.some(entry => entry.kind === "executed")).toBe(true);
+				clearTrace();
+			});
+
+			it("xdev-bypassed dispatch is neither reviewed nor re-prompted", async () => {
+				const trace = setTrace();
+				const { runner, select } = await reviewRunnerFromFile(
+					"review-xdev.ts",
+					reviewExtensionCode(`return { decision: "approve" };`),
+				);
+				const result = await executeReviewCase(runner, recordingApprovalTool(), "call-xdev-bypass", {
+					extraContext: { xdevApproved: true, xdevTierResolved: () => {} },
+				});
+
+				expect(firstReviewText(result)).toBe("ok");
+				expect(select).not.toHaveBeenCalled();
+				expect(trace).toEqual([{ kind: "executed", params: {} }]);
+				clearTrace();
+			});
 		});
 	});
 
