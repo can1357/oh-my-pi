@@ -66,6 +66,7 @@ import {
 	devinModelManagerOptions,
 	gitLabDuoWorkflowModelManagerOptions,
 	zaiModelManagerOptions,
+	zedModelManagerOptions,
 } from "./special";
 
 export const CATALOG_PROVIDERS = [
@@ -545,6 +546,14 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["ZAI_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => zaiModelManagerOptions(config),
 		catalogDiscovery: { label: "zAI" },
+	},
+	{
+		id: "zed-agent",
+		defaultModel: "claude-sonnet-4-6",
+		envVars: ["ZED_ACCESS_TOKEN"],
+		createModelManagerOptions: (config: ModelManagerConfig) => zedModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Zed Agent", oauthProvider: "zed-agent" },
 	},
 	{
 		id: "zenmux",

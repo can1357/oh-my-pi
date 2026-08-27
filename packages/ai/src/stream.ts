@@ -58,8 +58,10 @@ import {
 	streamOpenAICodexResponses,
 	streamOpenAICompletions,
 	streamOpenAIResponses,
+	streamZed,
 } from "./providers/register-builtins";
 import { isSyntheticModel, streamSynthetic } from "./providers/synthetic";
+import type { ZedOptions } from "./providers/zed";
 import { getProviderDefinition, PROVIDER_REGISTRY } from "./registry";
 import type {
 	Api,
@@ -1027,6 +1029,8 @@ function streamDispatch<TApi extends Api>(
 
 		case "devin-agent":
 			return streamDevin(providerModel as Model<"devin-agent">, context, providerOptions as DevinOptions);
+		case "zed-agent":
+			return streamZed(providerModel as Model<"zed-agent">, context, providerOptions as ZedOptions);
 
 		default:
 			throw new AIError.ConfigurationError(`Unhandled API: ${api}`);
@@ -2377,6 +2381,18 @@ function mapOptionsForApi<TApi extends Api>(
 			return castApi<"devin-agent">({
 				...base,
 				chatModelUid: resolveWireModelId(devinModel, effort),
+			});
+		}
+		case "zed-agent": {
+			const zedModel = model as Model<"zed-agent">;
+			const effort =
+				options?.reasoning && !options.disableReasoning && !options.forceReasoningOff && zedModel.reasoning
+					? requireSupportedEffort(zedModel, options.reasoning)
+					: undefined;
+			return castApi<"zed-agent">({
+				...base,
+				reasoning: effort,
+				disableReasoning: options?.disableReasoning,
 			});
 		}
 		default:

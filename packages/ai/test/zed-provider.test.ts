@@ -1,0 +1,107 @@
+import { describe, expect, it } from "bun:test";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { buildZedProviderRequest, resolveProviderKind } from "../src/providers/zed";
+import type { Context, Model } from "../src/types";
+
+describe("Zed Provider Payload Construction", () => {
+	it("resolves exact provider kinds matching Zed serde conventions", () => {
+		expect(resolveProviderKind("gpt-5.6-luna")).toBe("open_ai");
+		expect(resolveProviderKind("gpt-5.6-sol")).toBe("open_ai");
+		expect(resolveProviderKind("gpt-5.4")).toBe("open_ai");
+		expect(resolveProviderKind("claude-sonnet-5")).toBe("anthropic");
+		expect(resolveProviderKind("claude-sonnet-4-6")).toBe("anthropic");
+		expect(resolveProviderKind("gemini-3.1-pro-preview")).toBe("google");
+		expect(resolveProviderKind("grok-2")).toBe("x_ai");
+	});
+
+	it("formats OpenAI Responses API payload for open_ai provider models", () => {
+		const mockModel: Model<"zed-agent"> = {
+			id: "gpt-5.6-luna",
+			name: "GPT-5.6 Luna",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: "https://cloud.zed.dev",
+			reasoning: true,
+			contextWindow: 400000,
+			maxTokens: 128000,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			compat: undefined,
+		};
+
+		const mockContext: Context = {
+			systemPrompt: ["You are an assistant."],
+			messages: [
+				{
+					role: "user",
+					content: "Hello world",
+					timestamp: Date.now(),
+				},
+			],
+		};
+
+		const payload = buildZedProviderRequest("open_ai", mockContext, mockModel, {
+			reasoning: Effort.Medium,
+		}) as Record<string, unknown>;
+
+		expect(payload.model).toBe("gpt-5.6-luna");
+		expect(payload.instructions).toBe("You are an assistant.");
+		expect(payload.stream).toBe(true);
+		expect(payload.reasoning).toEqual({ effort: "medium", summary: "auto" });
+
+		const input = payload.input as Array<{
+			type: string;
+			role: string;
+			content: Array<{ type: string; text: string }>;
+		}>;
+		expect(input).toBeArray();
+		expect(input.length).toBe(1);
+		expect(input[0].type).toBe("message");
+		expect(input[0].role).toBe("user");
+		expect(input[0].content[0].type).toBe("input_text");
+		expect(input[0].content[0].text).toBe("Hello world");
+	});
+
+	it("formats Anthropic Messages API payload for anthropic provider models", () => {
+		const mockModel: Model<"zed-agent"> = {
+			id: "claude-sonnet-5",
+			name: "Claude Sonnet 5",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: "https://cloud.zed.dev",
+			reasoning: true,
+			contextWindow: 1000000,
+			maxTokens: 128000,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			compat: undefined,
+		};
+
+		const mockContext: Context = {
+			systemPrompt: ["You are an assistant."],
+			messages: [
+				{
+					role: "user",
+					content: "Hello world",
+					timestamp: Date.now(),
+				},
+			],
+		};
+
+		const payload = buildZedProviderRequest("anthropic", mockContext, mockModel, {
+			reasoning: Effort.High,
+		}) as Record<string, unknown>;
+
+		expect(payload.model).toBe("claude-sonnet-5");
+		expect(payload.system).toBe("You are an assistant.");
+		expect(payload.max_tokens).toBe(128000);
+		expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
+		expect(payload.output_config).toEqual({ effort: "high" });
+
+		const messages = payload.messages as Array<{ role: string; content: string }>;
+		expect(messages).toBeArray();
+		expect(messages.length).toBe(1);
+		expect(messages[0].role).toBe("user");
+		expect(messages[0].content).toBe("Hello world");
+	});
+});

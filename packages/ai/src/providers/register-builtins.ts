@@ -43,6 +43,7 @@ import type { OllamaChatOptions } from "./ollama";
 import type { OpenAICodexResponsesOptions } from "./openai-codex-responses";
 import type { OpenAICompletionsOptions } from "./openai-completions";
 import type { OpenAIResponsesOptions } from "./openai-responses";
+import type { ZedOptions } from "./zed";
 
 // ---------------------------------------------------------------------------
 // Lazy provider module shape
@@ -144,6 +145,10 @@ interface BedrockProviderModule {
 	) => AssistantMessageEventStream;
 }
 
+interface ZedProviderModule {
+	streamZed: (model: Model<"zed-agent">, context: Context, options: ZedOptions) => AssistantMessageEventStream;
+}
+
 // ---------------------------------------------------------------------------
 // Module-level lazy promise caches
 // ---------------------------------------------------------------------------
@@ -162,6 +167,7 @@ let cursorProviderModuleOverride: LazyProviderModule<"cursor-agent"> | undefined
 let devinProviderModulePromise: Promise<LazyProviderModule<"devin-agent">> | undefined;
 let bedrockProviderModuleOverride: LazyProviderModule<"bedrock-converse-stream"> | undefined;
 let bedrockProviderModulePromise: Promise<LazyProviderModule<"bedrock-converse-stream">> | undefined;
+let zedProviderModulePromise: Promise<LazyProviderModule<"zed-agent">> | undefined;
 
 export function setBedrockProviderModule(module: BedrockProviderModule): void {
 	bedrockProviderModuleOverride = {
@@ -458,6 +464,14 @@ function loadDevinProviderModule(): Promise<LazyProviderModule<"devin-agent">> {
 	return devinProviderModulePromise;
 }
 
+function loadZedProviderModule(): Promise<LazyProviderModule<"zed-agent">> {
+	zedProviderModulePromise ||= import("./zed").then(module => {
+		const provider = module as ZedProviderModule;
+		return { stream: provider.streamZed };
+	});
+	return zedProviderModulePromise;
+}
+
 function loadBedrockProviderModule(): Promise<LazyProviderModule<"bedrock-converse-stream">> {
 	if (bedrockProviderModuleOverride) {
 		return Promise.resolve(bedrockProviderModuleOverride);
@@ -503,5 +517,6 @@ export const streamOpenAIResponses = createLazyStream(
 export const streamCursor = createLazyStream(loadCursorProviderModule);
 export const streamDevin = createLazyStream(loadDevinProviderModule);
 export const streamOllama = createLazyStream(loadOllamaProviderModule, OPENAI_IDLE_FLOORED_LAZY_STREAM_LIMITS);
+export const streamZed = createLazyStream(loadZedProviderModule);
 
 export const streamBedrock = createLazyStream(loadBedrockProviderModule);
