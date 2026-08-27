@@ -741,6 +741,8 @@ pub struct ChatUiSession {
 	pub context_window: Option<u64>,
 	/// Current durable title authority restored from the sessions index.
 	pub title:          SessionTitleState,
+	/// Shared edit-attribution model updated by live model switches.
+	pub edit_model:     omp_tools::edit::observer::EditBlackboxModel,
 }
 
 enum UiCmd {
@@ -979,6 +981,7 @@ fn inspect_image_enabled(state: &BridgeState) -> bool {
 struct BridgeState {
 	catalog: Arc<Catalog>,
 	model: String,
+	edit_model: omp_tools::edit::observer::EditBlackboxModel,
 	model_settings: ModelSettings,
 	pending_session_delete: Option<std::time::Instant>,
 	git: Option<GitWorkbenchBackend>,
@@ -1715,9 +1718,8 @@ fn command_completions(
 	settings: &BrowserSettings,
 ) -> Vec<Command> {
 	roster.completions_for_described(role, |declaration| {
-		(declaration.name.as_str() == "browser").then(|| {
-			Str::new_static(commands::browser::autocomplete_description(settings))
-		})
+		(declaration.name.as_str() == "browser")
+			.then(|| Str::new_static(commands::browser::autocomplete_description(settings)))
 	})
 }
 
@@ -1728,8 +1730,7 @@ fn chat_scene(seed: &ChatSceneSeed, ctx: &UiContext) -> Chat {
 		.map(|keyword| Str::from(keyword.text))
 		.collect();
 	chat.set_keyword_accent(KeywordAccent::from_shared(accent_keywords));
-	let mut commands =
-		command_completions(&seed.typed_commands, seed.role, &seed.browser_settings);
+	let mut commands = command_completions(&seed.typed_commands, seed.role, &seed.browser_settings);
 	commands.extend(seed.skills.all().iter().map(|skill| {
 		let name = format!("skill:{}", skill.name);
 		Command::new(&name, skill.description.as_str(), &[]).with_icon(Icon::Skill)
@@ -2107,6 +2108,7 @@ where
 	let mut state = BridgeState {
 		catalog,
 		model,
+		edit_model: session.edit_model,
 		model_settings,
 		pending_session_delete: None,
 		git: None,
@@ -4029,9 +4031,9 @@ where
 				let now = Instant::now();
 				if !force
 					&& self
-					.state
-					.pending_session_delete
-					.is_none_or(|started| now.duration_since(started) > Duration::from_secs(30))
+						.state
+						.pending_session_delete
+						.is_none_or(|started| now.duration_since(started) > Duration::from_secs(30))
 				{
 					self.state.pending_session_delete = Some(now);
 					return Box::pin(async {
@@ -9131,6 +9133,7 @@ async fn switch_model(
 			omp_driver::chat::interrupted_reasoning_dialect(catalog, &snapshot.turn.params.model);
 	});
 	state.model = key;
+	state.edit_model.set(Str::new(&state.model));
 	state.context_window = spec.limits.context_window;
 	send_models_updated(backend, state);
 	send_backend(
@@ -9997,6 +10000,7 @@ mod tests {
 		BridgeState {
 			catalog: Arc::new(Catalog::embedded().clone()),
 			model: "test/model".to_owned(),
+			edit_model: omp_tools::edit::observer::EditBlackboxModel::default(),
 			model_settings: ModelSettings::default(),
 			pending_session_delete: None,
 			git: None,

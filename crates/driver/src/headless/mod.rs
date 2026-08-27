@@ -387,6 +387,7 @@ pub struct HeadlessSession {
 	session_id:          Str,
 	initial_items:       Vec<Item>,
 	notices:             Vec<HeadlessNotice>,
+	edit_model:          omp_tools::edit::observer::EditBlackboxModel,
 	_inference_registry: InferenceRegistry,
 	_catalog:            Arc<snapshot::Catalog>,
 	_memory_extraction:  Option<ExtractionWorker>,
@@ -1057,6 +1058,7 @@ impl HeadlessSession {
 			session_id: session.id,
 			initial_items: session.initial_items,
 			notices,
+			edit_model,
 			_inference_registry: inference_registry,
 			_catalog: catalog_owner,
 			_memory_extraction: memory_extraction,
@@ -1343,6 +1345,7 @@ impl HeadlessSession {
 		self
 			.state
 			.update(|snapshot| snapshot.turn.params.model = model.to_string());
+		self.edit_model.set(model);
 		Ok(())
 	}
 

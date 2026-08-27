@@ -2190,7 +2190,14 @@ async fn run_ui<C: TurnClient + Clone + Send + Sync + 'static>(
 		let outcome = chat_ui::run(
 			agent,
 			environment,
-			ChatUiSession { session_id: id, journal_path, initial_items, context_window, title },
+			ChatUiSession {
+				session_id: id,
+				journal_path,
+				initial_items,
+				context_window,
+				title,
+				edit_model: edit_model.clone(),
+			},
 			Some(advisor_engine),
 			advisor_notices,
 			Arc::clone(&catalog_owner),
