@@ -83,8 +83,10 @@ export function createPersistedSubagentReviverFactory(
 		}
 		const subagentSettings = createSubagentSettings(ctx.settings, {
 			...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
-			// `undefined` (absent) inherits the global tools.xdevPromote; an
-			// explicitly empty list clears it, remounting everything under xd://.
+			// `init.xdevPromote` is the effective value frozen at spawn: replay it
+			// verbatim so revived sessions keep parent-inherited promotions.
+			// `undefined` (only in pre-freeze session files) inherits the global
+			// tools.xdevPromote.
 			...(init.xdevPromote !== undefined ? { "tools.xdevPromote": init.xdevPromote } : undefined),
 			// Rebuild the same advisor opt-in the original spawn resolved: `"on"` =
 			// advisor-role model, anything else = the explicit pattern stamped onto

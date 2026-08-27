@@ -45,4 +45,29 @@ describe("createSubagentSettings xdevPromote override drives mounting", () => {
 		const promoted = compileXdevPromoteSet(child.get("tools.xdevPromote"));
 		expect(isMountableUnderXdev({ name: "ast_edit", loadMode: "discoverable" }, promoted)).toBe(false);
 	});
+	it("cold revival inherits a parent promotion when the persisted init carries the frozen effective value", () => {
+		// Spawn side: nested agent with no xdevPromote frontmatter inherits the
+		// parent's promotion; the executor freezes that effective value into
+		// session_init (executor.ts `subagentSettings.get("tools.xdevPromote")`).
+		const spawned = createSubagentSettings(parent);
+		const frozen = spawned.get("tools.xdevPromote");
+		expect(frozen).toEqual(["lsp"]);
+		// Revival side: persisted-revive replays the frozen value over the root
+		// settings. Root settings carry no promotion — replaying raw frontmatter
+		// (`undefined`) here would remount `lsp` under xd:// after a restart.
+		const root = Settings.isolated();
+		const revived = createSubagentSettings(root, { "tools.xdevPromote": frozen });
+		const promoted = compileXdevPromoteSet(revived.get("tools.xdevPromote"));
+		expect(isMountableUnderXdev(discoverableTool, promoted)).toBe(false);
+	});
+
+	it("cold revival from a pre-freeze session file (persisted xdevPromote absent) falls back to global inheritance", () => {
+		const root = Settings.isolated();
+		// init.xdevPromote === undefined branch in persisted-revive: no override,
+		// so the child snapshots root settings, whose default promotes nothing.
+		const revived = createSubagentSettings(root);
+		const promoted = compileXdevPromoteSet(revived.get("tools.xdevPromote"));
+		expect(promoted).toBeUndefined();
+		expect(isMountableUnderXdev(discoverableTool, promoted)).toBe(true);
+	});
 });

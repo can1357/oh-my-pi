@@ -3363,7 +3363,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				readOnly: isReadOnlyAgent(agent),
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,
-				xdevPromote: agent.xdevPromote,
+				// Freeze the effective value — not raw frontmatter — so cold
+				// revival through persisted-revive inherits a parent-level
+				// `tools.xdevPromote` the same way the live spawn did
+				// (createSubagentSettings snapshots parent values; the reviver's
+				// ctx.settings is the root settings, where `undefined` would
+				// silently remount inherited promotions under xd://).
+				xdevPromote: subagentSettings.get("tools.xdevPromote"),
 				advisor: advisorSelection ? (advisorSelection.model ?? "on") : undefined,
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
