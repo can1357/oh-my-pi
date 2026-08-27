@@ -30,6 +30,8 @@ export interface SearchParams {
 	 * provider calls), parse with `parseSearchQuery(params.query)`.
 	 */
 	parsedQuery?: StructuredQuery;
+	/** True when this provider was explicitly selected or listed in the configured provider order. */
+	explicitProvider?: boolean;
 	limit?: number;
 	/**
 	 * Temporal filter narrowing results to the specified time window.

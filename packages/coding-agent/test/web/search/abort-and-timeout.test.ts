@@ -22,6 +22,7 @@ import * as provider from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import { searchAnthropic } from "@oh-my-pi/pi-coding-agent/web/search/providers/anthropic";
 import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/providers/base";
 import { searchBrave } from "@oh-my-pi/pi-coding-agent/web/search/providers/brave";
+import { TavilyProvider } from "@oh-my-pi/pi-coding-agent/web/search/providers/tavily";
 import { withHardTimeout } from "@oh-my-pi/pi-coding-agent/web/search/providers/utils";
 import {
 	SearchProviderError,
@@ -364,6 +365,36 @@ describe("executeSearch abort propagation", () => {
 		expect(result.details?.response.provider).toBe("brave");
 		expect(getProvider).toHaveBeenCalledTimes(2);
 		expect(fallbackSearch).toHaveBeenCalledTimes(1);
+	});
+
+	it("falls through when automatic Tavily availability passes but credential resolution is empty", async () => {
+		const tavily = new TavilyProvider();
+		const fallbackSearch = vi.fn(
+			async (): Promise<SearchResponse> => ({
+				provider: "brave",
+				sources: [{ title: "Fallback result", url: "https://example.com/fallback" }],
+			}),
+		);
+		const brave = fakeProvider("brave", fallbackSearch);
+		vi.spyOn(provider, "resolveProviderCandidates").mockReturnValue([
+			{ id: "tavily", explicit: false },
+			{ id: "brave", explicit: false },
+		]);
+		vi.spyOn(provider, "getSearchProvider").mockImplementation(async id => {
+			if (id === "tavily") return tavily;
+			if (id === "brave") return brave;
+			throw new Error(`Unexpected provider: ${id}`);
+		});
+		const authStorage = {
+			hasAuth: (id: string) => id === "tavily",
+			resolver: vi.fn(() => async () => undefined),
+		} as unknown as AuthStorage;
+
+		const result = await runSearchQuery({ query: "anything", provider: "auto" }, { authStorage });
+
+		expect(authStorage.resolver).toHaveBeenCalledWith("tavily", { sessionId: undefined });
+		expect(fallbackSearch).toHaveBeenCalledTimes(1);
+		expect(result.details?.response.provider).toBe("brave");
 	});
 
 	it("does not fall through after an explicitly selected provider fails", async () => {

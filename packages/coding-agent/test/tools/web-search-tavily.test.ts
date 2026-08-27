@@ -241,7 +241,11 @@ describe("Tavily web search provider", () => {
 			);
 		};
 
-		const response = await searchTavily({ ...makeParams("keyless search"), fetch: fetchMock });
+		const response = await searchTavily({
+			...makeParams("keyless search"),
+			explicitProvider: true,
+			fetch: fetchMock,
+		});
 
 		expect(requestHeaders?.has("Authorization")).toBe(false);
 		expect(requestHeaders?.get("X-Client-Name")).toBe("oh-my-pi");

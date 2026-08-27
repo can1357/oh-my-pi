@@ -231,6 +231,9 @@ export async function searchTavily(params: SearchParams): Promise<SearchResponse
 
 	const numResults = clampNumResults(tavilyParams.num_results, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS);
 	const resolvedKey = await resolveApiKeyOnce(keyResolver, params.signal);
+	if (!resolvedKey && !params.explicitProvider) {
+		throw new SearchProviderError("tavily", "Tavily credentials are unavailable for automatic web search.");
+	}
 	const authMode = resolvedKey ? "api_key" : "keyless";
 	const keyOrResolver: ApiKey | undefined = resolvedKey ? seedApiKeyResolver(resolvedKey, keyResolver) : undefined;
 	const callSearch = (searchParams: TavilySearchParams) =>
