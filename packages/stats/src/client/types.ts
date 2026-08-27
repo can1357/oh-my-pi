@@ -8,8 +8,8 @@
  *     `@oh-my-pi/pi-ai` (the server-side AI types package).
  *   - `MessageStats.stopReason` is widened from the server's `StopReason`
  *     enum to `string`, again to keep the client free of pi-ai types.
- *   - `TimeRange`, `OverviewStats`, `ModelDashboardStats`,
- *     `CostDashboardStats` are UI-only view shapes the server never produces.
+ *   - `OverviewStats`, `ModelDashboardStats`, `CostDashboardStats` are UI-only
+ *     view shapes the server never produces.
  */
 
 import type {
@@ -60,8 +60,6 @@ export interface RequestDetails extends MessageStats {
 	messages: unknown[];
 	output: unknown;
 }
-
-export type TimeRange = "1h" | "24h" | "7d" | "30d" | "90d" | "all";
 
 export interface OverviewStats {
 	overall: AggregatedStats;

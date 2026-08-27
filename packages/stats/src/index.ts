@@ -10,6 +10,7 @@ export {
 	getDashboardStats,
 	getToolDashboardStats,
 	getTotalMessageCount,
+	normalizeTimeRange,
 	type SyncOptions,
 	type SyncProgress,
 	smokeTestSyncWorker,
@@ -24,6 +25,7 @@ export type {
 	GainSourceTotals,
 	GainTimeSeriesPoint,
 } from "./shared-types";
+export { STATS_RANGES, type TimeRange } from "./shared-types";
 export type {
 	AggregatedStats,
 	DashboardStats,

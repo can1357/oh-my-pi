@@ -60,6 +60,7 @@ export interface StatsCommandArgs {
 	host: string;
 	json: boolean;
 	summary: boolean;
+	range: string;
 }
 
 function formatCost(n: number): string {
@@ -78,8 +79,25 @@ function normalizePremiumRequests(n: number): number {
 
 export async function runStatsCommand(cmd: StatsCommandArgs): Promise<void> {
 	// Lazy import to avoid loading stats module when not needed
-	const { closeDb, formatStatsDashboardUrl, getDashboardStats, getTotalMessageCount, startServer, syncAllSessions } =
-		await import("@oh-my-pi/omp-stats");
+	const {
+		closeDb,
+		formatStatsDashboardUrl,
+		getDashboardStats,
+		getTotalMessageCount,
+		normalizeTimeRange,
+		startServer,
+		STATS_RANGES,
+		syncAllSessions,
+	} = await import("@oh-my-pi/omp-stats");
+
+	// Validate --range before doing any sync/db work.
+	const range = normalizeTimeRange(cmd.range);
+	if (!range) {
+		process.stderr.write(
+			`${chalk.red(`Error: Invalid --range "${cmd.range}". Valid values: ${STATS_RANGES.join(" | ")}.`)}\n`,
+		);
+		process.exit(1);
+	}
 
 	// Sync session files first
 	const progress = createSyncProgressReporter();
@@ -90,13 +108,13 @@ export async function runStatsCommand(cmd: StatsCommandArgs): Promise<void> {
 	console.log(`Synced ${processed} new entries from ${files} files (${total} total)\n`);
 
 	if (cmd.json) {
-		const stats = await getDashboardStats();
+		const stats = await getDashboardStats(range);
 		console.log(JSON.stringify(stats, null, 2));
 		return;
 	}
 
 	if (cmd.summary) {
-		await printStatsSummary();
+		await printStatsSummary(range);
 		return;
 	}
 
@@ -121,12 +139,12 @@ export async function runStatsCommand(cmd: StatsCommandArgs): Promise<void> {
 	await new Promise(() => {});
 }
 
-async function printStatsSummary(): Promise<void> {
+async function printStatsSummary(range: string): Promise<void> {
 	const { getDashboardStats } = await import("@oh-my-pi/omp-stats");
-	const stats = await getDashboardStats();
+	const stats = await getDashboardStats(range);
 	const { overall, byModel, byFolder } = stats;
 
-	console.log(chalk.bold("\n=== AI Usage Statistics ===\n"));
+	console.log(chalk.bold(`\n=== AI Usage Statistics (${range}) ===\n`));
 
 	console.log(chalk.bold("Overall:"));
 	console.log(`  Requests: ${formatNumber(overall.totalRequests)} (${formatNumber(overall.failedRequests)} errors)`);

@@ -5,6 +5,10 @@
  * without dragging server dependencies into its bundle.
  */
 
+/** Accepted `--range` values, shared by the dashboard, HTTP API, CLI, and client. */
+export const STATS_RANGES = ["1h", "24h", "7d", "30d", "90d", "all"] as const;
+export type TimeRange = (typeof STATS_RANGES)[number];
+
 /**
  * Aggregated stats for a model or folder.
  */

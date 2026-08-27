@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import type { DashboardStats } from "@oh-my-pi/omp-stats";
+import * as ompStats from "@oh-my-pi/omp-stats";
 import * as statsCli from "../src/cli/stats-cli";
 import Stats from "../src/commands/stats";
 import * as theme from "../src/modes/theme/theme";
@@ -23,7 +25,22 @@ describe("stats dashboard host arguments", () => {
 			host: "::",
 			json: false,
 			summary: false,
+			range: "24h",
 		});
+	});
+
+	it("passes the selected --range through to the stats query", async () => {
+		vi.spyOn(theme, "initTheme").mockResolvedValue();
+		vi.spyOn(ompStats, "syncAllSessions").mockResolvedValue({ processed: 0, files: 0 });
+		vi.spyOn(ompStats, "getTotalMessageCount").mockResolvedValue(0);
+		const getDashboardStats = vi
+			.spyOn(ompStats, "getDashboardStats")
+			.mockResolvedValue({} as unknown as DashboardStats);
+
+		const command = new Stats(["--range", "30d", "--json"], TEST_CONFIG);
+		await command.run();
+
+		expect(getDashboardStats).toHaveBeenCalledWith("30d");
 	});
 
 	it("keeps the slash command loopback-only unless a host is requested", () => {

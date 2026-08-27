@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- `omp stats --range` — select the time window (`1h | 24h | 7d | 30d | 90d | all`) for `--json` and `--summary` output ([#9728](https://github.com/can1357/oh-my-pi/issues/9728)).
 ## [18.0.7] - 2026-08-26
 
 ### Added

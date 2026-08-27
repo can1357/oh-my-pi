@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Exported `STATS_RANGES`, `TimeRange`, and `normalizeTimeRange` from `@oh-my-pi/omp-stats` so `omp stats --range` validates against the shared range vocabulary ([#9728](https://github.com/can1357/oh-my-pi/issues/9728)).
+
 ## [18.0.4] - 2026-08-24
 
 ### Fixed

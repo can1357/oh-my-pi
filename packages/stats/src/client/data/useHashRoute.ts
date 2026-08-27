@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { STATS_RANGES } from "../../shared-types";
 import type { DashboardSection } from "../app/routes";
 import type { TimeRange } from "../types";
 
@@ -15,7 +16,7 @@ const VALID_SECTIONS: DashboardSection[] = [
 	"gain",
 ];
 
-const VALID_RANGES: TimeRange[] = ["1h", "24h", "7d", "30d", "90d", "all"];
+const VALID_RANGES: readonly TimeRange[] = STATS_RANGES;
 
 function parseHash(hash: string): { section: DashboardSection; range: TimeRange } {
 	const cleanHash = hash.replace(/^#\/?/, "");

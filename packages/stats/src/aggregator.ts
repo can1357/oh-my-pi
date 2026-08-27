@@ -35,6 +35,7 @@ import {
 	updateUserMessageLinks,
 } from "./db";
 import { getSessionEntry, listAllSessionFiles, type ParseSessionResult, parseSessionFile } from "./parser";
+import { STATS_RANGES, type TimeRange } from "./shared-types";
 import type { SyncWorkerRequest, SyncWorkerResponse } from "./sync-worker";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so the compiled binary and npm bundle only need one
@@ -329,8 +330,6 @@ const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const FIVE_MIN_MS = 5 * 60 * 1000;
 
-type TimeRange = "1h" | "24h" | "7d" | "30d" | "90d" | "all";
-
 interface TimeRangeConfig {
 	timeSeriesHours: number;
 	timeSeriesBucketMs: number;
@@ -414,6 +413,18 @@ export function getTimeRangeConfig(range?: string | null): TimeRangeConfig {
 		...fallbackConfig,
 		cutoff: Date.now() - fallbackConfig.timeSeriesHours * 60 * 60 * 1000,
 	};
+}
+
+/**
+ * Normalize a user-supplied range string to a canonical {@link TimeRange}.
+ * Returns the default range for a missing/blank value, or `null` for an
+ * unrecognized value so callers can surface a clear error instead of silently
+ * falling back like {@link getTimeRangeConfig}.
+ */
+export function normalizeTimeRange(raw?: string | null): TimeRange | null {
+	if (!raw || raw.trim() === "") return DEFAULT_TIME_RANGE;
+	const normalized = raw.trim().toLowerCase();
+	return (STATS_RANGES as readonly string[]).includes(normalized) ? (normalized as TimeRange) : null;
 }
 
 /**
