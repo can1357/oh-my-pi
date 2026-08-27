@@ -58,6 +58,18 @@ describe("Cursor requestedModel wire shape", () => {
 		expect(payload.requestedModel?.parameters).toEqual([]);
 	});
 
+	it("pins the Standard tier for bare composer-2.5 (#9012)", async () => {
+		const payload = await capture(cursorModel("composer-2.5"));
+		expect(payload.requestedModel?.modelId).toBe("composer-2.5");
+		expect(payload.requestedModel?.parameters).toEqual([expect.objectContaining({ id: "fast", value: "false" })]);
+	});
+
+	it("keeps explicit composer-2.5-fast on the Fast lane with no parameters", async () => {
+		const payload = await capture(cursorModel("composer-2.5-fast"));
+		expect(payload.requestedModel?.modelId).toBe("composer-2.5-fast");
+		expect(payload.requestedModel?.parameters).toEqual([]);
+	});
+
 	it("does not translate non-OpenAI siblings (Claude effort schema is undecoded)", async () => {
 		const payload = await capture(cursorModel("claude-fable-5-low"));
 		expect(payload.requestedModel?.modelId).toBe("claude-fable-5-low");

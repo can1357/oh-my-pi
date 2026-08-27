@@ -32,6 +32,7 @@ import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
 import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
 import { getLanguageFromPath, highlightCode, type Theme } from "../modes/theme/theme";
 import writeDescription from "../prompts/tools/write.md" with { type: "text" };
+import writeDeviceOnlyDescription from "../prompts/tools/write-device-only.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 import { fileHyperlink, framedBlock, renderStatusLine } from "../tui";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
@@ -57,7 +58,12 @@ import {
 	resolveFileWriteApprovalTier,
 	splitPathAndSel,
 } from "./path-utils";
-import { enforcePlanModeWrite, resolvePlanPath, unwrapHashlineHeaderPath } from "./plan-mode-guard";
+import {
+	enforcePlanModeWrite,
+	resolvePlanPath,
+	targetsLocalSandbox,
+	unwrapHashlineHeaderPath,
+} from "./plan-mode-guard";
 import {
 	cachedRenderedString,
 	createRenderedStringCache,
@@ -560,7 +566,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		return [`Path: ${truncateForPrompt(targetPath)}`, `Content:\n${truncateForPrompt(content)}`];
 	};
 	readonly label = "Write";
-	readonly description: string;
+	get description(): string {
+		const deviceOnly = this.session.deviceOnlyWrite === true && this.session.pendingFullWriteDescription !== true;
+		return prompt.render(deviceOnly ? writeDeviceOnlyDescription : writeDescription);
+	}
 	readonly parameters = writeSchema;
 	readonly strict = true;
 	readonly concurrency = "exclusive";
@@ -591,7 +600,6 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 						: undefined,
 				})
 			: writethroughNoop;
-		this.description = prompt.render(writeDescription);
 	}
 
 	async #resolveArchiveWritePath(writePath: string): Promise<ResolvedArchiveWritePath | null> {
@@ -1111,6 +1119,20 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// Peel a read-tool selector (`:raw`, `:1-20`, …) so the write target matches
 		// what `read` resolves for the same URL; line-range/malformed selectors throw.
 		const path = peelWriteUrlSelector(unwrapHashlineHeaderPath(rawPath));
+		// A device-only session grants `write` purely as the xd:// transport (see
+		// createTools): device dispatches proceed, every other target is rejected
+		// before any handler, guard, conflict resolver, or bridge sees it. Active
+		// plan mode additionally permits its local artifact sandbox, but does not
+		// relax the restriction for working-tree or non-xd internal URLs.
+		if (
+			this.session.deviceOnlyWrite === true &&
+			!parseXdUrl(path) &&
+			!(this.session.getPlanModeState?.()?.enabled === true && targetsLocalSandbox(this.session, path))
+		) {
+			throw new ToolError(
+				"This `write` tool is limited to the xd:// device transport: call it with path `xd://<tool>` and the device's JSON arguments in `content` (`read xd://` lists mounted devices). Active plan mode additionally permits local:// sandbox drafts. Filesystem writes are not available elsewhere.",
+			);
+		}
 		return untilAborted(signal, async () => {
 			// Strip hashline display prefixes ([PATH#HASH] + LINE:) if the model copied them from read output
 			const { text: cleanContent, stripped } = stripWriteContent(this.session, content);

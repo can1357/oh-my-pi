@@ -31,6 +31,7 @@ import type {
 import { getEnvApiKey, getEnvApiKeyName } from "./stream";
 import type { Provider } from "./types";
 import type {
+	ClientUsageIdentity,
 	ClientUsageReport,
 	ClientUsageSummary,
 	CredentialRankingContext,
@@ -458,8 +459,10 @@ export interface AuthCredentialStore {
 	 * Client hook: forward locally observed request usage. Remote broker stores
 	 * batch these to the broker so it can attribute token burn per install;
 	 * local stores omit it and observation is skipped.
+	 * `client` overrides the reporting identity (gateway requests attribute to
+	 * the originating client, not the gateway host).
 	 */
-	recordObservedUsage?(entries: ObservedUsageEntry[]): void;
+	recordObservedUsage?(entries: ObservedUsageEntry[], client?: ClientUsageIdentity): void;
 	/** Broker host: persist one client's observed-usage report. */
 	recordClientUsage?(report: ClientUsageReport): void;
 	/** Broker host: aggregate recorded per-client usage since a timestamp. */
@@ -3461,23 +3464,29 @@ export class AuthStorage {
 		usage: { input: number; output: number; cacheRead: number; cacheWrite: number };
 		costUsd?: number;
 		at?: number;
+		/** Attribution override; defaults to this process's install identity. */
+		client?: ClientUsageIdentity;
 	}): void {
 		const record = this.#store.recordObservedUsage;
 		if (!record) return;
 		try {
-			record.call(this.#store, [
-				{
-					at: entry.at ?? Date.now(),
-					provider: entry.provider,
-					model: entry.model,
-					requests: 1,
-					inputTokens: entry.usage.input,
-					outputTokens: entry.usage.output,
-					cacheReadTokens: entry.usage.cacheRead,
-					cacheWriteTokens: entry.usage.cacheWrite,
-					costUsd: Number.isFinite(entry.costUsd) ? (entry.costUsd ?? 0) : 0,
-				},
-			]);
+			record.call(
+				this.#store,
+				[
+					{
+						at: entry.at ?? Date.now(),
+						provider: entry.provider,
+						model: entry.model,
+						requests: 1,
+						inputTokens: entry.usage.input,
+						outputTokens: entry.usage.output,
+						cacheReadTokens: entry.usage.cacheRead,
+						cacheWriteTokens: entry.usage.cacheWrite,
+						costUsd: Number.isFinite(entry.costUsd) ? (entry.costUsd ?? 0) : 0,
+					},
+				],
+				entry.client,
+			);
 		} catch (error) {
 			this.#usageLogger?.debug("observed usage record failed", {
 				provider: entry.provider,

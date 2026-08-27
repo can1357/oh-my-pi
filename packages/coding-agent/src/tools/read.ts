@@ -48,6 +48,7 @@ import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import {
 	ImageInputTooLargeError,
 	loadImageInput,
+	loadSvgImageInput,
 	MAX_IMAGE_INPUT_BYTES,
 	webpExclusionForModel,
 } from "../utils/image-loading";
@@ -803,11 +804,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	}
 
 	/**
-	 * Build content blocks for an on-disk image file: an `inspect_image`
-	 * metadata note when inspection is active, otherwise the decoded image
-	 * block. Shared by the plain-file read path and the `local://` image fast
-	 * path so both honor the effective inspect_image state, the size cap, and
-	 * auto-resize identically. Too-large / unsupported images surface as {@link ToolError}.
+	 * Build content blocks for a vision-ready image: an `inspect_image` metadata
+	 * note when inspection is active, otherwise the decoded image block. Shared
+	 * by the plain-file read path, `local://` image fast path, and explicit SVG
+	 * rasterization so all honor inspect_image state, size caps, and auto-resize
+	 * identically. Too-large / unsupported images surface as {@link ToolError}.
 	 */
 	async #loadImageContent(options: {
 		readPath: string;
@@ -815,10 +816,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		mimeType: string;
 		imageMetadata: ImageMetadata | null;
 		fileSize: number;
+		imageKind?: "svg";
+		inspectPath?: string;
 	}): Promise<{ content: Array<TextContent | ImageContent>; details: ReadToolDetails; sourcePath: string }> {
-		const { readPath, absolutePath, mimeType, imageMetadata, fileSize } = options;
+		const { readPath, absolutePath, mimeType, imageMetadata, fileSize, imageKind, inspectPath } = options;
 		if (this.syncInspectImageState()) {
 			const outputMime = imageMetadata?.mimeType ?? mimeType;
+			const inspectImagePath = inspectPath ?? formatPathRelativeToCwd(absolutePath, this.session.cwd);
 			const metadataLines = [
 				"Image metadata:",
 				`- MIME: ${outputMime}`,
@@ -833,31 +837,34 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						? "- Alpha: no"
 						: "- Alpha: unknown",
 				"",
-				`If you want to analyze the image, call inspect_image with path="${formatPathRelativeToCwd(
-					absolutePath,
-					this.session.cwd,
-				)}" and a question describing what to inspect and the desired output format.`,
+				`If you want to analyze the image, call inspect_image with path="${inspectImagePath}" and a question describing what to inspect and the desired output format.`,
 			];
 			return { content: [{ type: "text", text: metadataLines.join("\n") }], details: {}, sourcePath: absolutePath };
 		}
-
 		if (fileSize > MAX_IMAGE_SIZE) {
 			const sizeStr = formatBytes(fileSize);
 			const maxStr = formatBytes(MAX_IMAGE_SIZE);
 			throw new ToolError(`Image file too large: ${sizeStr} exceeds ${maxStr} limit.`);
 		}
 		try {
-			const imageInput = await loadImageInput({
+			const imageLoadOptions = {
 				path: readPath,
 				cwd: this.session.cwd,
 				autoResize: this.#autoResizeImages,
 				maxBytes: MAX_IMAGE_SIZE,
 				resolvedPath: absolutePath,
-				detectedMimeType: mimeType,
 				excludeWebP: webpExclusionForModel(this.session.getActiveModel?.()),
-			});
+			};
+			const imageInput =
+				imageKind === "svg"
+					? await loadSvgImageInput(imageLoadOptions)
+					: await loadImageInput({ ...imageLoadOptions, detectedMimeType: mimeType });
 			if (!imageInput) {
-				throw new ToolError(`Read image file [${mimeType}] failed: unsupported image format.`);
+				throw new ToolError(
+					imageKind === "svg"
+						? "The ':img' selector only supports .svg and .svgz files."
+						: `Read image file [${mimeType}] failed: unsupported image format.`,
+				);
 			}
 			return {
 				content: [
@@ -1152,11 +1159,15 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			const parsed = parseSel(internalTarget.sel);
 			if (internalTarget.sel !== undefined && parsed.kind === "none") {
 				throw new ToolError(
-					`Invalid selector ':${internalTarget.sel}' on '${internalTarget.path}'. Use :N, :N-M, :N+K, :N- (open-ended), a comma-separated list of ranges, :raw, or a range combined with raw (e.g. :raw:50-100).`,
+					`Invalid selector ':${internalTarget.sel}' on '${internalTarget.path}'. Use :N, :N-M, :N+K, :N- (open-ended), a comma-separated list of ranges, :raw, :img for SVG rendering, or a range combined with raw (e.g. :raw:50-100).`,
 				);
 			}
 			const urlMeta = parseInternalUrl(internalTarget.path);
 			const scheme = urlMeta.protocol.replace(/:$/, "").toLowerCase();
+			const imageSelectorMessage = "The ':img' selector only supports local .svg and .svgz files.";
+			if (parsed.kind === "image" && scheme !== "local") {
+				throw new ToolError(imageSelectorMessage);
+			}
 			if (scheme === "local") {
 				const localFile = await resolveLocalUrlToFile(urlMeta, {
 					cwd: this.session.cwd,
@@ -1171,6 +1182,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					// cannot shadow the URL's selector semantics during filesystem routing.
 					promotedSelector = internalTarget.sel;
 				} else {
+					if (parsed.kind === "image") throw new ToolError(imageSelectorMessage);
 					return this.#handleInternalUrl(internalTarget.path, parsed, signal);
 				}
 			} else {
@@ -1363,7 +1375,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			| { result: TruncationResult; options: { direction: "head"; startLine?: number; totalFileLines?: number } }
 			| undefined;
 
-		if (mimeType) {
+		if (parsed.kind === "image") {
+			({ content, details, sourcePath } = await this.#loadImageContent({
+				readPath: localReadPath,
+				absolutePath,
+				mimeType: "image/svg+xml",
+				imageMetadata: null,
+				fileSize,
+				imageKind: "svg",
+				inspectPath: `${resolvedDisplayPath}:img`,
+			}));
+		} else if (mimeType) {
 			({ content, details, sourcePath } = await this.#loadImageContent({
 				readPath,
 				absolutePath,
@@ -2195,6 +2217,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			cwd: this.session.cwd,
 			settings: this.session.settings,
 			signal,
+			sessionFile: this.session.getSessionFile() ?? undefined,
 			localProtocolOptions: this.session.localProtocolOptions,
 			skills: this.session.skills,
 			xd: {

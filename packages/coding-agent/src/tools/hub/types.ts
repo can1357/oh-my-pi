@@ -40,6 +40,21 @@ export interface HubPeerInfo {
 	activity?: string;
 }
 
+/** Status values `op:"list"` can filter on. Advisor is a kind, not a status. */
+export type HubListStatus = "running" | "idle" | "parked";
+/** Model-facing roster bounds shared by the hub schema and executor. */
+export const DEFAULT_HUB_LIST_LIMIT = 32;
+export const MAX_HUB_LIST_LIMIT = 100;
+
+/** Addressable roster tallies always returned by `op:"list"`. */
+export interface HubRosterCounts {
+	running: number;
+	idle: number;
+	parked: number;
+	shown: number;
+	truncated: number;
+}
+
 /** Background-job row surfaced by `wait`/`cancel`/`jobs` results. */
 export interface JobSnapshot {
 	id: string;
@@ -93,6 +108,8 @@ export interface CoordinationDetails {
 	waited?: IrcMessage | null;
 	inbox?: IrcMessage[];
 	peers?: HubPeerInfo[];
+	/** Present on `op:"list"`: addressable running/idle/parked plus page size. */
+	counts?: HubRosterCounts;
 	jobs?: JobSnapshot[];
 	cancelled?: { id: string; status: CancelStatus }[];
 	/** Running subagents not represented by a job row in this result. */

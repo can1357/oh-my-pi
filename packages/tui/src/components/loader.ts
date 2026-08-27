@@ -32,7 +32,7 @@ export class Loader extends Text {
 		ui: TUI,
 		private spinnerColorFn: ColorFn,
 		private messageColorFn: LoaderMessageColorFn,
-		private message: string = "Loading...",
+		private message: string | (() => string) = "Loading...",
 		spinnerFrames?: string[],
 	) {
 		super("", 1, 0);
@@ -149,11 +149,18 @@ export class Loader extends Text {
 		}, delayMs);
 		this.#intervalId = timer;
 	}
-	/** Re-wrap the underlying Text only when its message or frame width changes. */
+	#resolveMessage(): string {
+		return typeof this.message === "function" ? this.message() : this.message;
+	}
+
+	/** Re-wrap the underlying Text only when its message or frame width changes.
+	 * When {@link message} is a function it is re-evaluated on every spinner
+	 * tick, so a dynamic label (e.g. a live countdown) advances in sync with
+	 * the glyph instead of freezing on the initial value. */
 	#syncText(): boolean {
 		const layoutFrame = this.#layoutFrames[this.#currentFrame];
 		this.#layoutFrame = layoutFrame;
-		return this.setText(`${layoutFrame} ${this.message}`);
+		return this.setText(`${layoutFrame} ${this.#resolveMessage()}`);
 	}
 
 	#requestPaint() {

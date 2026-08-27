@@ -492,9 +492,17 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 	// dynamic discovery also pre-applies the correct image fallback for omitted
 	// `supports.vision`, so its explicit `false` must not be OR-upgraded by the
 	// canonical bundled model.
+	// DeepInfra's discovery is authoritative (`dynamicModelsAuthoritative`) and
+	// its `vision`/`vlm` tags are the catalog's whole truth for modality. Every
+	// row shares the single DeepInfra endpoint, so `endpointChanged` never fires
+	// there: without this carve-out a model that dropped those tags would keep
+	// the bundled reference's image support and the agent would go on sending
+	// images to a now text-only route.
 	const endpointChanged = existingModel.baseUrl !== dynamicModel.baseUrl;
 	const dynamicInputAuthoritative =
-		endpointChanged || (existingModel.provider === "github-copilot" && dynamicModel.provider === "github-copilot");
+		endpointChanged ||
+		(existingModel.provider === "github-copilot" && dynamicModel.provider === "github-copilot") ||
+		(existingModel.provider === "deepinfra" && dynamicModel.provider === "deepinfra");
 	const supportsImage = dynamicInputAuthoritative
 		? dynamicModel.input.includes("image")
 		: existingModel.input.includes("image") || dynamicModel.input.includes("image");

@@ -67,9 +67,13 @@ export interface DiffOptions {
 	readonly base?: string;
 	readonly binary?: boolean;
 	readonly cached?: boolean;
+	/** Unified context lines (`git diff --unified=<n>`). */
+	readonly context?: number;
 	readonly env?: Record<string, string | undefined>;
 	readonly files?: readonly string[];
 	readonly head?: string;
+	/** Per-stream capture ceiling for unusually large but intentional diffs. */
+	readonly maxOutputBytes?: number;
 	readonly nameOnly?: boolean;
 	readonly noIndex?: { left: string; right: string };
 	readonly numstat?: boolean;
@@ -762,6 +766,9 @@ function buildDiffArgs(options: DiffOptions): string[] {
 	const args = ["diff"];
 	if (options.binary) args.push("--binary");
 	if (options.cached) args.push("--cached");
+	if (options.context !== undefined && Number.isFinite(options.context) && options.context >= 0) {
+		args.push(`--unified=${Math.trunc(options.context)}`);
+	}
 	if (options.nameOnly) args.push("--name-only");
 	if (options.stat) args.push("--stat");
 	if (options.numstat) args.push("--numstat");
@@ -1389,9 +1396,21 @@ export const diff = Object.assign(
 	async function diff(cwd: string, options: DiffOptions = {}): Promise<string> {
 		const args = buildDiffArgs(options);
 		if (options.allowFailure) {
-			return (await git(cwd, args, { env: options.env, readOnly: true, signal: options.signal })).stdout;
+			return (
+				await git(cwd, args, {
+					env: options.env,
+					maxOutputBytes: options.maxOutputBytes,
+					readOnly: true,
+					signal: options.signal,
+				})
+			).stdout;
 		}
-		const result = await runChecked(cwd, args, { env: options.env, readOnly: true, signal: options.signal });
+		const result = await runChecked(cwd, args, {
+			env: options.env,
+			maxOutputBytes: options.maxOutputBytes,
+			readOnly: true,
+			signal: options.signal,
+		});
 		if (options.requireComplete && result.truncated) {
 			throw new GitOutputTruncatedError(args, result);
 		}
