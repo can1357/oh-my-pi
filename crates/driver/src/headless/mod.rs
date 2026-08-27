@@ -549,6 +549,7 @@ impl HeadlessSession {
 			&mut snapshot,
 			catalog,
 			revived.model_override.as_ref(),
+			revived.has_durable_tool_restriction,
 			&root,
 			&options.additional_roots,
 			&model_settings,
@@ -780,6 +781,7 @@ impl HeadlessSession {
 				&mut snapshot,
 				catalog,
 				revived.model_override.as_ref(),
+				revived.has_durable_tool_restriction,
 				&root,
 				&options.additional_roots,
 				&model_settings,
@@ -1511,6 +1513,7 @@ fn apply_revived_session_model(
 	snapshot: &mut AgentSnapshot,
 	catalog: &snapshot::Catalog,
 	model_override: Option<&JournalModelChange>,
+	has_durable_tool_restriction: bool,
 	root: &Path,
 	additional_roots: &[PathBuf],
 	model_settings: &omp_catalog::settings::ModelSettings,
@@ -1562,26 +1565,30 @@ fn apply_revived_session_model(
 		.map_err(HeadlessError::SessionBlueprint)?;
 		let projected =
 			chat::agent_snapshot(&blueprint, catalog, None).map_err(HeadlessError::AgentSnapshot)?;
-		let retained: Arc<[Str]> = snapshot
-			.enabled_tools
-			.iter()
-			.filter(|name| {
-				projected
-					.enabled_tools
-					.iter()
-					.any(|available| available == *name)
-			})
-			.cloned()
-			.collect::<Vec<_>>()
-			.into();
-		let retained_set: BTreeSet<&str> = retained.iter().map(Str::as_str).collect();
 		let mut turn = projected.turn;
-		turn
-			.params
-			.tools
-			.retain(|tool| retained_set.contains(tool.name.as_str()));
+		if has_durable_tool_restriction {
+			let retained: Arc<[Str]> = snapshot
+				.enabled_tools
+				.iter()
+				.filter(|name| {
+					projected
+						.enabled_tools
+						.iter()
+						.any(|available| available == *name)
+				})
+				.cloned()
+				.collect::<Vec<_>>()
+				.into();
+			let retained_set: BTreeSet<&str> = retained.iter().map(Str::as_str).collect();
+			turn
+				.params
+				.tools
+				.retain(|tool| retained_set.contains(tool.name.as_str()));
+			snapshot.enabled_tools = retained;
+		} else {
+			snapshot.enabled_tools = projected.enabled_tools;
+		}
 		snapshot.turn = turn;
-		snapshot.enabled_tools = retained;
 		snapshot.reasoning_dialect = projected.reasoning_dialect;
 	}
 	Ok(RevivedModelResult { notice, substituted })
@@ -1592,7 +1599,7 @@ mod tests {
 	use omp_agent::{Journal, TurnInputRecord, TurnOptionsRecord, TurnStart};
 	use omp_proto::thread::v1::{Message, Part, Role, Thread, item, part};
 	use omp_storage::transcript::{Event, Header, ItemRecord, Kind, Patch, SessionId, Writer};
-	use omp_tool::Registry;
+	use omp_tool::{Claims, Precedence, Presentation, Registry};
 
 	use super::*;
 
@@ -1629,6 +1636,25 @@ mod tests {
 
 	fn launch_snapshot(catalog: &snapshot::Catalog, root: &Path, model: &str) -> AgentSnapshot {
 		launch_snapshot_with_registry(catalog, root, model, Arc::new(Registry::new()))
+	}
+
+	fn native_tool_registry() -> Arc<Registry> {
+		let mut registry = Registry::new();
+		registry
+			.register(omp_tools::yield_tool::tool(), Presentation::Slot, Claims {
+				precedence: Precedence::DEFAULT,
+				claimant:   sf!("test"),
+				replaces:   None,
+			})
+			.expect("register yield test tool");
+		registry
+			.register(omp_tools::todo::tool(), Presentation::Slot, Claims {
+				precedence: Precedence::DEFAULT,
+				claimant:   sf!("test"),
+				replaces:   None,
+			})
+			.expect("register todo test tool");
+		Arc::new(registry)
 	}
 
 	fn write_unavailable_model_journal(root: &Path) -> std::path::PathBuf {
@@ -1701,6 +1727,7 @@ mod tests {
 			&mut snapshot,
 			catalog,
 			revived.model_override.as_ref(),
+			revived.has_durable_tool_restriction,
 			&root,
 			&[],
 			&model_settings,
@@ -1759,6 +1786,7 @@ mod tests {
 			&mut snapshot,
 			catalog,
 			revived.model_override.as_ref(),
+			revived.has_durable_tool_restriction,
 			&root,
 			&[],
 			&model_settings,
@@ -1787,6 +1815,7 @@ mod tests {
 			&mut snapshot,
 			catalog,
 			revived.model_override.as_ref(),
+			revived.has_durable_tool_restriction,
 			&root,
 			&[],
 			&model_settings,
@@ -1801,8 +1830,6 @@ mod tests {
 
 	#[test]
 	fn revived_session_retains_durable_tool_restriction_after_model_substitution() {
-		use omp_tool::{Claims, Precedence, Presentation};
-
 		let catalog = snapshot::Catalog::try_embedded().expect("embedded catalog");
 		let scratch = tempfile::tempdir().expect("scratch");
 		let root = scratch.path().join("project");
@@ -1810,22 +1837,7 @@ mod tests {
 		let path = write_unavailable_model_journal(&root);
 		let mut journal = Journal::open(&path).expect("open journal");
 
-		let mut registry = Registry::new();
-		registry
-			.register(omp_tools::yield_tool::tool(), Presentation::Slot, Claims {
-				precedence: Precedence::DEFAULT,
-				claimant:   sf!("test"),
-				replaces:   None,
-			})
-			.expect("register yield test tool");
-		registry
-			.register(omp_tools::todo::tool(), Presentation::Slot, Claims {
-				precedence: Precedence::DEFAULT,
-				claimant:   sf!("test"),
-				replaces:   None,
-			})
-			.expect("register todo test tool");
-		let registry = Arc::new(registry);
+		let registry = native_tool_registry();
 
 		let snapshot = launch_snapshot_with_registry(
 			catalog,
@@ -1853,6 +1865,7 @@ mod tests {
 			.expect("persist durable tool restriction");
 		let model_settings = omp_catalog::settings::ModelSettings::default();
 		let revived = omp_agent::revive_existing(&path, journal, snapshot).expect("revive");
+		assert!(revived.has_durable_tool_restriction);
 		let mut snapshot = revived.snapshot;
 		assert_eq!(snapshot.enabled_tools.as_ref(), &[sf!("yield")]);
 		let provider = omp_catalog::ProviderId::new("openai");
@@ -1860,6 +1873,7 @@ mod tests {
 			&mut snapshot,
 			catalog,
 			revived.model_override.as_ref(),
+			revived.has_durable_tool_restriction,
 			&root,
 			&[],
 			&model_settings,
@@ -1878,6 +1892,46 @@ mod tests {
 				.all(|tool| tool.name == "yield")
 		);
 		assert_eq!(snapshot.turn.params.tools.len(), 1);
+	}
+
+	#[test]
+	fn revived_session_without_durable_tool_restriction_adopts_fallback_roster() {
+		let catalog = snapshot::Catalog::try_embedded().expect("embedded catalog");
+		let launch = catalog
+			.models()
+			.iter()
+			.find(|model| chat::model_rejects_tools(catalog, model.key.as_str()))
+			.expect("embedded catalog includes a tool-rejecting model");
+		let scratch = tempfile::tempdir().expect("scratch");
+		let root = scratch.path().join("project");
+		std::fs::create_dir_all(&root).expect("project");
+		let path = write_unavailable_model_journal(&root);
+		let journal = Journal::open(&path).expect("open journal");
+		let snapshot =
+			launch_snapshot_with_registry(catalog, &root, launch.key.as_str(), native_tool_registry());
+		assert!(snapshot.enabled_tools.is_empty(), "launch model rejects tools");
+		let model_settings = omp_catalog::settings::ModelSettings::default();
+		let revived = omp_agent::revive_existing(&path, journal, snapshot).expect("revive");
+		assert!(!revived.has_durable_tool_restriction);
+		let mut snapshot = revived.snapshot;
+		let provider = omp_catalog::ProviderId::new("openai");
+		let result = apply_revived_session_model(
+			&mut snapshot,
+			catalog,
+			revived.model_override.as_ref(),
+			revived.has_durable_tool_restriction,
+			&root,
+			&[],
+			&model_settings,
+			Some(&provider),
+		)
+		.expect("fallback applies");
+		assert!(result.substituted);
+		assert!(!chat::model_rejects_tools(catalog, &snapshot.turn.params.model));
+		assert_eq!(snapshot.enabled_tools.len(), 2);
+		assert!(snapshot.enabled_tools.iter().any(|name| name == "yield"));
+		assert!(snapshot.enabled_tools.iter().any(|name| name == "todo"));
+		assert_eq!(snapshot.turn.params.tools.len(), 2);
 	}
 
 	#[tokio::test]

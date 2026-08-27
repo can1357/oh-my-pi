@@ -26,16 +26,18 @@ pub enum RevivalError {
 /// Durable facts required to restart an equivalent loop around a journal.
 pub struct RevivedSession {
 	/// Sole mutable owner reopened on the existing journal.
-	pub journal:        Journal,
+	pub journal: Journal,
 	/// Reconstructed loop snapshot, including workspace and tool manifest.
-	pub snapshot:       AgentSnapshot,
+	pub snapshot: AgentSnapshot,
 	/// Most recent journaled temporary model selection.
 	pub model_override: Option<ModelChange>,
 	/// Whether inference must discard provider-native session affinity before
 	/// the next request.
 	pub provider_reset: bool,
+	/// Whether the journal restored an explicit per-turn tool restriction.
+	pub has_durable_tool_restriction: bool,
 	/// Original immutable workspace root recorded by the journal header.
-	pub original_root:  PathBuf,
+	pub original_root: PathBuf,
 }
 
 /// Cold-loads the journal and applies its durable projections on the supplied
@@ -92,7 +94,9 @@ pub fn revive_existing(
 	snapshot
 		.props
 		.set(prompt_keys::ADDITIONAL_ROOTS, additional);
-	if let Some(start) = journal.latest_turn_start() {
+	let latest_turn_start = journal.latest_turn_start();
+	let has_durable_tool_restriction = latest_turn_start.is_some();
+	if let Some(start) = latest_turn_start {
 		let mounted = &snapshot.registry;
 		snapshot.enabled_tools = start
 			.enabled_tools
@@ -107,6 +111,7 @@ pub fn revive_existing(
 		snapshot,
 		model_override,
 		provider_reset,
+		has_durable_tool_restriction,
 		original_root: log.header().cwd.clone(),
 	})
 }
@@ -176,6 +181,7 @@ mod tests {
 		drop(journal);
 
 		let revived = revive(&path, AgentSnapshot::default()).expect("revive compacted journal");
+		assert!(!revived.has_durable_tool_restriction);
 		let log = revived.journal.load().expect("load revived journal");
 		let thread = project_journal(&log, log.as_ref(), &Registry::new(), &CapsBase {
 			maximum_parts:      8,
