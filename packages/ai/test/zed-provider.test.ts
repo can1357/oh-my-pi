@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { NON_VISION_IMAGE_PLACEHOLDER } from "../src/providers/vision-guard";
 import { buildZedProviderRequest, resolveProviderKind } from "../src/providers/zed";
 import { invalidateZedLlmToken } from "../src/registry/oauth/zed-token-pool";
 import { streamSimple } from "../src/stream";
@@ -47,6 +48,124 @@ describe("Zed Provider Payload Construction", () => {
 				content: [{ type: "input_text", text: "Follow these instructions." }],
 			},
 		]);
+	});
+	it("preserves ordered text and image content in GPT Responses tool outputs", () => {
+		const model: Model<"zed-agent"> = {
+			id: "gpt-5.6-luna",
+			name: "GPT-5.6 Luna",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: "https://cloud.zed.dev",
+			reasoning: true,
+			contextWindow: 400000,
+			maxTokens: 128000,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			compat: undefined,
+		};
+
+		const payload = buildZedProviderRequest(
+			"open_ai",
+			{
+				messages: [
+					{
+						role: "toolResult",
+						toolCallId: "call_screenshot",
+						toolName: "capture",
+						content: [
+							{ type: "text", text: "Screenshot captured." },
+							{ type: "image", data: "AQID", mimeType: "image/png" },
+						],
+						isError: false,
+						timestamp: 1,
+					},
+				],
+			},
+			model,
+		) as { input: Array<Record<string, unknown>> };
+
+		expect(payload.input).toEqual([
+			{
+				type: "function_call_output",
+				call_id: "call_screenshot",
+				output: [
+					{ type: "input_text", text: "Screenshot captured." },
+					{
+						type: "input_image",
+						detail: "auto",
+						image_url: "data:image/png;base64,AQID",
+					},
+				],
+			},
+		]);
+	});
+
+	it("replaces images with the standard placeholder for text-only Zed xAI models", () => {
+		const model: Model<"zed-agent"> = {
+			id: "grok-4.20",
+			name: "Grok 4.20",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: "https://cloud.zed.dev",
+			reasoning: false,
+			contextWindow: 1_000_000,
+			maxTokens: 128_000,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			compat: undefined,
+		};
+
+		const payload = buildZedProviderRequest(
+			"x_ai",
+			{
+				messages: [
+					{
+						role: "user",
+						content: [
+							{ type: "text", text: "Describe the screenshot." },
+							{ type: "image", data: "AQID", mimeType: "image/png" },
+						],
+						timestamp: 1,
+					},
+				],
+			},
+			model,
+		) as { messages: Array<{ role: string; content: unknown }> };
+
+		expect(payload.messages).toEqual([
+			{
+				role: "user",
+				content: [
+					{ type: "text", text: "Describe the screenshot." },
+					{ type: "text", text: NON_VISION_IMAGE_PLACEHOLDER },
+				],
+			},
+		]);
+	});
+
+	it("forwards temperature and topP to Zed xAI chat requests", () => {
+		const model: Model<"zed-agent"> = {
+			id: "grok-2",
+			name: "Grok 2",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: "https://cloud.zed.dev",
+			reasoning: false,
+			contextWindow: 131_072,
+			maxTokens: 8_192,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			compat: undefined,
+		};
+
+		const payload = buildZedProviderRequest(
+			"x_ai",
+			{ messages: [{ role: "user", content: "Hello Grok", timestamp: 1 }] },
+			model,
+			{ temperature: 0.2, topP: 0.8 },
+		) as Record<string, unknown>;
+
+		expect(payload).toMatchObject({ temperature: 0.2, top_p: 0.8 });
 	});
 
 	it("keeps mixed Anthropic tool-result text and image content in one tool_result block", () => {
@@ -109,7 +228,7 @@ describe("Zed Provider Payload Construction", () => {
 		]);
 	});
 
-	it("keeps Claude 4.5 thinking budget strictly below a low maxTokens limit", () => {
+	it("maps Claude 4.5 reasoning effort to budget and clamps it below maxTokens", () => {
 		const model: Model<"zed-agent"> = {
 			id: "claude-sonnet-4-5",
 			name: "Claude Sonnet 4.5",
@@ -123,20 +242,42 @@ describe("Zed Provider Payload Construction", () => {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			compat: undefined,
 		};
+		const expectedBudgets = [
+			[Effort.Minimal, 1024],
+			[Effort.Low, 4096],
+			[Effort.Medium, 8192],
+			[Effort.High, 16384],
+		] as const;
 
-		const payload = buildZedProviderRequest(
+		for (const [effort, expectedBudget] of expectedBudgets) {
+			const payload = buildZedProviderRequest(
+				"anthropic",
+				{ messages: [{ role: "user", content: "Keep this concise.", timestamp: 1 }] },
+				model,
+				{ reasoning: effort },
+			) as {
+				max_tokens: number;
+				thinking?: { budget_tokens?: number };
+			};
+
+			expect(payload.thinking?.budget_tokens).toBe(expectedBudget);
+			expect(payload.thinking?.budget_tokens).toBeLessThan(payload.max_tokens);
+		}
+
+		const clampedPayload = buildZedProviderRequest(
 			"anthropic",
 			{ messages: [{ role: "user", content: "Keep this concise.", timestamp: 1 }] },
 			model,
-			{ maxTokens: 1024 },
+			{ reasoning: Effort.High, maxTokens: 1024 },
 		) as {
 			max_tokens: number;
 			thinking?: { budget_tokens?: number };
 		};
 
-		expect(payload.thinking?.budget_tokens).toBe(1023);
-		expect(payload.thinking?.budget_tokens).toBeGreaterThan(0);
-		expect(payload.thinking?.budget_tokens).toBeLessThan(payload.max_tokens);
+		expect(clampedPayload.max_tokens).toBe(1024);
+		expect(clampedPayload.thinking?.budget_tokens).toBe(1023);
+		expect(clampedPayload.thinking?.budget_tokens).toBeGreaterThan(0);
+		expect(clampedPayload.thinking?.budget_tokens).toBeLessThan(clampedPayload.max_tokens);
 	});
 
 	it("formats OpenAI Responses API payload for open_ai provider models", () => {

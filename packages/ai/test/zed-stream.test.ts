@@ -235,6 +235,64 @@ describe("Zed provider protocol regressions", () => {
 		expect(run.events.filter(event => event.type === "thinking_start")).toHaveLength(1);
 		expect(run.events.filter(event => event.type === "thinking_end")).toHaveLength(1);
 	});
+	it("decodes redacted Anthropic thinking and replays it only for the originating model", async () => {
+		const model = makeModel("claude-sonnet-4-6", true);
+		const run = await runZedStream(model, [
+			{
+				event: {
+					type: "content_block_start",
+					content_block: { type: "redacted_thinking", data: "opaque-thinking-blob" },
+				},
+			},
+			{ event: { type: "content_block_stop" } },
+			{
+				event: {
+					type: "content_block_start",
+					content_block: { type: "tool_use", id: "call_read", name: "read" },
+				},
+			},
+			{
+				event: {
+					type: "content_block_delta",
+					delta: { type: "input_json_delta", partial_json: '{"path":"README.md"}' },
+				},
+			},
+			{ event: { type: "content_block_stop" } },
+			{ status: "stream_ended" },
+		]);
+
+		expect(run.result.content).toEqual([
+			{ type: "redactedThinking", data: "opaque-thinking-blob" },
+			{ type: "toolCall", id: "call_read", name: "read", arguments: { path: "README.md" } },
+		]);
+
+		const sameModelPayload = buildZedProviderRequest("anthropic", { messages: [run.result] }, model) as {
+			messages: Array<{ role: string; content: unknown }>;
+		};
+		expect(sameModelPayload.messages).toEqual([
+			{
+				role: "assistant",
+				content: [
+					{ type: "redacted_thinking", data: "opaque-thinking-blob" },
+					{ type: "tool_use", id: "call_read", name: "read", input: { path: "README.md" } },
+				],
+			},
+		]);
+
+		const foreignModelPayload = buildZedProviderRequest(
+			"anthropic",
+			{ messages: [run.result] },
+			makeModel("claude-sonnet-5", true),
+		) as {
+			messages: Array<{ role: string; content: unknown }>;
+		};
+		expect(foreignModelPayload.messages).toEqual([
+			{
+				role: "assistant",
+				content: [{ type: "tool_use", id: "call_read", name: "read", input: { path: "README.md" } }],
+			},
+		]);
+	});
 
 	it("promotes a final Gemini function call to the toolUse stop reason", async () => {
 		const run = await runZedStream(makeModel("gemini-3-flash", true), [

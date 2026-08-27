@@ -1,4 +1,5 @@
 import * as crypto from "node:crypto";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { hasOpus47ApiRestrictions } from "@oh-my-pi/pi-catalog/identity";
 import { mapEffortToGoogleThinkingLevel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
@@ -7,11 +8,12 @@ import { AbortError, finalize, ProviderHttpError, ProviderResponseError } from "
 import { OAuthError } from "../../src/error/oauth";
 import { renderDemotedThinking } from "../dialect/demotion";
 import { getOrMintZedLlmToken, invalidateZedLlmToken } from "../registry/oauth/zed-token-pool";
+import { ANTHROPIC_THINKING } from "../stream";
 import type {
 	AssistantMessage,
 	Context,
-	Effort,
 	Model,
+	RedactedThinkingContent,
 	StreamOptions,
 	TextContent,
 	ThinkingContent,
@@ -23,6 +25,8 @@ import { notifyProviderResponse } from "../utils/provider-response";
 import { normalizeSchemaForCCA } from "../utils/schema";
 import { mapToOpenAICompletionsToolChoice, mapToOpenAIResponsesToolChoice } from "../utils/tool-choice";
 import { isThinkingPart, resolveThoughtSignature, retainThoughtSignature } from "./google-shared";
+import { encodeResponsesToolResultOutput } from "./openai-shared";
+import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 
 export interface ZedOptions extends StreamOptions {
 	threadId?: string;
@@ -31,7 +35,6 @@ export interface ZedOptions extends StreamOptions {
 	disableReasoning?: boolean;
 	toolChoice?: ToolChoice;
 }
-
 export type ZedProviderKind = "anthropic" | "open_ai" | "google" | "x_ai";
 
 export function resolveProviderKind(modelId: string): ZedProviderKind {
@@ -97,7 +100,6 @@ function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, opti
 		} else if (msg.role === "assistant") {
 			const contentBlocks: unknown[] = [];
 			const isSameModel = msg.provider === model.provider && msg.api === model.api && msg.model === model.id;
-
 			for (const block of msg.content) {
 				if (block.type === "text") {
 					contentBlocks.push({ type: "text", text: block.text });
@@ -112,6 +114,13 @@ function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, opti
 						contentBlocks.push({
 							type: "text",
 							text: renderDemotedThinking(model.id, block.thinking),
+						});
+					}
+				} else if (block.type === "redactedThinking") {
+					if (isSameModel && block.data && block.data.trim().length > 0) {
+						contentBlocks.push({
+							type: "redacted_thinking",
+							data: block.data,
 						});
 					}
 				} else if (block.type === "toolCall") {
@@ -199,9 +208,11 @@ function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, opti
 
 	if (isReasoning) {
 		if (model.id.includes("4-5")) {
+			const effort = options?.reasoning ?? Effort.Medium;
+			const targetBudget = ANTHROPIC_THINKING[effort] ?? 8192;
 			body.thinking = {
 				type: "enabled",
-				budget_tokens: Math.max(1, Math.min(2048, effectiveMaxTokens - 1)),
+				budget_tokens: Math.max(1, Math.min(targetBudget, effectiveMaxTokens - 1)),
 			};
 		} else {
 			body.thinking = {
@@ -286,14 +297,11 @@ function mapContextToOpenAiResponses(context: Context, model: Model<"zed-agent">
 			}
 			flushAssistantMessage();
 		} else if (msg.role === "toolResult") {
-			const textResult = msg.content
-				.filter(b => b.type === "text")
-				.map(b => (b as TextContent).text)
-				.join("\n");
+			const { output } = encodeResponsesToolResultOutput(msg, model, false);
 			input.push({
 				type: "function_call_output",
 				call_id: msg.toolCallId,
-				output: textResult,
+				output,
 			});
 		}
 	}
@@ -520,6 +528,7 @@ function mapContextToGoogle(context: Context, model: Model<"zed-agent">, options
 }
 function mapContextToOpenAiChat(context: Context, model: Model<"zed-agent">, options?: ZedOptions) {
 	const messages: Array<{ role: string; content?: unknown; tool_calls?: unknown; tool_call_id?: string }> = [];
+	const supportsImages = model.input.includes("image");
 
 	if (context.systemPrompt && context.systemPrompt.length > 0) {
 		messages.push({ role: "system", content: context.systemPrompt.join("\n\n") });
@@ -530,11 +539,25 @@ function mapContextToOpenAiChat(context: Context, model: Model<"zed-agent">, opt
 			if (typeof msg.content === "string") {
 				messages.push({ role: "user", content: msg.content });
 			} else {
-				const parts = msg.content.map(b =>
-					b.type === "text"
-						? { type: "text", text: b.text }
-						: { type: "image_url", image_url: { url: `data:${b.mimeType};base64,${b.data}` } },
-				);
+				const parts: Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }> = [];
+				let omittedImages = false;
+				for (const b of msg.content) {
+					if (b.type === "text") {
+						parts.push({ type: "text", text: b.text });
+					} else if (b.type === "image") {
+						if (supportsImages) {
+							parts.push({
+								type: "image_url",
+								image_url: { url: b.url ?? `data:${b.mimeType};base64,${b.data}` },
+							});
+						} else {
+							omittedImages = true;
+						}
+					}
+				}
+				if (omittedImages) {
+					parts.push({ type: "text", text: NON_VISION_IMAGE_PLACEHOLDER });
+				}
 				messages.push({ role: "user", content: parts });
 			}
 		} else if (msg.role === "assistant") {
@@ -564,7 +587,16 @@ function mapContextToOpenAiChat(context: Context, model: Model<"zed-agent">, opt
 				.filter(b => b.type === "text")
 				.map(b => (b as TextContent).text)
 				.join("\n");
-			messages.push({ role: "tool", tool_call_id: msg.toolCallId, content: textResult });
+			const hasImages = msg.content.some(b => b.type === "image");
+			const omittedImages = hasImages && !supportsImages;
+			const toolResultContent = omittedImages
+				? [textResult, NON_VISION_IMAGE_PLACEHOLDER].filter(Boolean).join("\n")
+				: textResult.length > 0
+					? textResult
+					: hasImages
+						? "(see attached image)"
+						: "";
+			messages.push({ role: "tool", tool_call_id: msg.toolCallId, content: toolResultContent });
 		}
 	}
 
@@ -591,6 +623,13 @@ function mapContextToOpenAiChat(context: Context, model: Model<"zed-agent">, opt
 		if (toolChoice) {
 			body.tool_choice = toolChoice;
 		}
+	}
+
+	if (options?.temperature !== undefined) {
+		body.temperature = options.temperature;
+	}
+	if (options?.topP !== undefined) {
+		body.top_p = options.topP;
 	}
 
 	if (model.reasoning && !options?.disableReasoning) {
@@ -1001,6 +1040,13 @@ export function streamZed(
 									contentIndex: anthropicCurrentIndex,
 									partial: outputMessage,
 								});
+							} else if (blockType === "redacted_thinking") {
+								anthropicCurrentIndex++;
+								const block: RedactedThinkingContent = {
+									type: "redactedThinking",
+									data: typeof contentBlock.data === "string" ? contentBlock.data : "",
+								};
+								outputMessage.content.push(block);
 							} else if (blockType === "tool_use") {
 								anthropicCurrentIndex++;
 								anthropicToolArgsJson = "";
