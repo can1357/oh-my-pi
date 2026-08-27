@@ -1,4 +1,5 @@
-import { Menu } from "lucide-react";
+import { Command, Menu } from "lucide-react";
+import type { Density } from "../data/density";
 import type { TimeRange } from "../types";
 import { RangeControl } from "./RangeControl";
 import type { DashboardSection } from "./routes";
@@ -14,6 +15,8 @@ export interface TopBarProps {
 	onSyncStart?: () => void;
 	onSyncComplete?: (result: { success: boolean }) => void;
 	onMenuToggle?: () => void;
+	density?: Density;
+	onDensityChange?: (d: Density) => void;
 	className?: string;
 }
 
@@ -25,6 +28,8 @@ export function TopBar({
 	onSyncStart,
 	onSyncComplete,
 	onMenuToggle,
+	density = "comfortable",
+	onDensityChange,
 	className = "",
 }: TopBarProps) {
 	const currentRoute = routes.find(r => r.id === activeSection);
@@ -49,20 +54,40 @@ export function TopBar({
 						<Menu size={20} />
 					</button>
 				)}
-				<h1 className="stats-page-title">{title}</h1>
+				<h1 className="stats-page-title">
+					{title} <span className="stats-page-title-rule" aria-hidden />
+				</h1>
+				<span
+					style={{
+						fontFamily: "var(--font-mono)",
+						fontSize: 10,
+						color: "var(--dim)",
+						display: "inline-flex",
+						alignItems: "center",
+						gap: 4,
+					}}
+				>
+					<Command size={11} />K
+				</span>
 			</div>
 
 			<div className="stats-top-bar-right">
-				<div className="stats-top-bar-meta">
-					<span
-						className="stats-last-updated"
-						title={updatedAt ? new Date(updatedAt).toLocaleString() : undefined}
-					>
-						{formatLastUpdated(updatedAt)}
-					</span>
-				</div>
+				<span className="stats-last-updated" title={updatedAt ? new Date(updatedAt).toLocaleString() : undefined}>
+					{formatLastUpdated(updatedAt)}
+				</span>
 
 				<RangeControl value={range} onChange={onRangeChange} />
+
+				{onDensityChange && (
+					<button
+						type="button"
+						className="stats-density-toggle"
+						onClick={() => onDensityChange(density === "compact" ? "comfortable" : "compact")}
+						title={`Density: ${density} — click to toggle`}
+					>
+						{density === "compact" ? "Compact" : "Comfy"}
+					</button>
+				)}
 
 				<ThemeToggle />
 

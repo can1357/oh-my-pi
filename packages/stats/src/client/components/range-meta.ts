@@ -25,6 +25,13 @@ export interface RangeMeta {
 }
 
 const RANGE_META: Record<TimeRange, RangeMeta> = {
+	today: {
+		windowLabel: "today since midnight",
+		trendLabel: "Today",
+		bucketMs: HOUR_MS,
+		bucketCount: 24,
+		tickFormat: "HH:mm",
+	},
 	"1h": {
 		windowLabel: "the last hour",
 		trendLabel: "1h Trend",
@@ -62,7 +69,6 @@ const RANGE_META: Record<TimeRange, RangeMeta> = {
 	},
 	all: { windowLabel: "all time", trendLabel: "Trend", bucketMs: DAY_MS, bucketCount: 0, tickFormat: "MMM d" },
 };
-
 export function rangeMeta(range: TimeRange): RangeMeta {
 	return RANGE_META[range];
 }

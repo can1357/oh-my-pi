@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a Today time range to the dashboard and stats API that anchors the chart to local midnight, so just-after-midnight activity is labeled on the correct day in any timezone.
+- Added a versioned public query API (`/api/v1/*`) with parameter validation and a framework-neutral TypeScript client SDK.
+- Added `omp stats create-site` scaffolding for embedding the stats dashboard into other pages.
+- Added a redesigned dashboard with overview and per-section inner pages, named dashboard layouts, density modes, and a command palette.
+
 ## [18.0.4] - 2026-08-24
 
 ### Fixed

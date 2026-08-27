@@ -1,5 +1,6 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AppLayout } from "./app/AppLayout";
+import { CommandPalette } from "./app/CommandPalette";
 import type { DashboardSection } from "./app/routes";
 import { useHashRoute } from "./data/useHashRoute";
 import {
@@ -14,6 +15,7 @@ import {
 	RequestsRoute,
 	ToolsRoute,
 } from "./routes";
+import type { TimeRange } from "./types";
 import { RequestDrawer } from "./ui/RequestDrawer";
 
 export default function App() {
@@ -21,6 +23,7 @@ export default function App() {
 	const [refreshTrigger, setRefreshTrigger] = useState(0);
 	const [selectedRequestId, setSelectedRequestId] = useState<number | null>(null);
 	const [updatedAt, setUpdatedAt] = useState<number | null>(() => Date.now());
+	const [paletteOpen, setPaletteOpen] = useState(false);
 
 	const handleSyncComplete = useCallback((result: { success: boolean }) => {
 		if (result.success) {
@@ -29,16 +32,29 @@ export default function App() {
 		}
 	}, []);
 
-	// Stable identity so the drawer's effects don't tear down on every App render.
 	const closeDrawer = useCallback(() => setSelectedRequestId(null), []);
+
+	useEffect(() => {
+		const onKey = (e: KeyboardEvent) => {
+			if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+				e.preventDefault();
+				setPaletteOpen(o => !o);
+			}
+		};
+		window.addEventListener("keydown", onKey);
+		return () => window.removeEventListener("keydown", onKey);
+	}, []);
+
+	const handlePaletteNav = useCallback(
+		(sectionArg: string, rangeArg?: TimeRange) => {
+			if (rangeArg) setRange(rangeArg);
+			if (sectionArg) setSection(sectionArg as DashboardSection);
+		},
+		[setRange, setSection],
+	);
 
 	const active = section;
 
-	// Keep every visited section mounted and just toggle visibility. Remounting a
-	// route on each navigation replays the chart entry animations (a visible
-	// flicker); keeping it alive makes revisits instant while the live chart
-	// instances still animate in place on data/range updates. Only the active
-	// route fetches/polls (enabled), so hidden routes don't keep hitting the API.
 	const mountedRef = useRef<Set<DashboardSection>>(new Set());
 	mountedRef.current.add(active);
 
@@ -107,6 +123,7 @@ export default function App() {
 			</AppLayout>
 
 			<RequestDrawer id={selectedRequestId} onClose={closeDrawer} />
+			<CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} onNavigate={handlePaletteNav} />
 		</>
 	);
 }

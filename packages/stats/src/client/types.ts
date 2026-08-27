@@ -61,7 +61,7 @@ export interface RequestDetails extends MessageStats {
 	output: unknown;
 }
 
-export type TimeRange = "1h" | "24h" | "7d" | "30d" | "90d" | "all";
+export type TimeRange = "today" | "1h" | "24h" | "7d" | "30d" | "90d" | "all";
 
 export interface OverviewStats {
 	overall: AggregatedStats;

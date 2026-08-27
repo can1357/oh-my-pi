@@ -19,6 +19,7 @@ import {
 	getTotalMessageCount,
 	syncAllSessions,
 } from "./aggregator";
+import { handleApiV1 } from "./api-v1";
 import { decodeEmbeddedClientArchive } from "./embedded-client";
 import embeddedClientArchiveTxt from "./embedded-client.generated.txt";
 import { getGainDashboardStats } from "./gain-aggregator";
@@ -30,6 +31,14 @@ import {
 	STATS_DASHBOARD_HOSTNAME_HEADER,
 	STATS_DASHBOARD_SECURITY_VERSION,
 } from "./port-conflict";
+
+/** CORS headers for v1 API loopback development. */
+const V1_CORS_HEADERS: Record<string, string> = {
+	"Access-Control-Allow-Origin": "http://localhost:3000",
+	"Access-Control-Allow-Methods": "GET, OPTIONS",
+	"Access-Control-Allow-Headers": "Content-Type",
+	"Access-Control-Max-Age": "86400",
+};
 
 const EMBEDDED_CLIENT_ARCHIVE = decodeEmbeddedClientArchive(embeddedClientArchiveTxt);
 
@@ -198,6 +207,11 @@ export async function handleApi(req: Request): Promise<Response> {
 	const url = new URL(req.url);
 	const path = url.pathname;
 
+	// Versioned API v1 — delegate to dedicated router
+	if (path.startsWith("/api/v1/")) {
+		return handleApiV1(req);
+	}
+
 	// Stats reads are DB-only; explicit /api/sync does the expensive session scan.
 	const range = url.searchParams.get("range");
 
@@ -328,6 +342,11 @@ function createDashboardServer(port: number, hostname: string) {
 				[STATS_DASHBOARD_HEADER]: STATS_DASHBOARD_SECURITY_VERSION,
 				[STATS_DASHBOARD_HOSTNAME_HEADER]: hostname,
 			};
+
+			// Versioned API v1 OPTIONS gets CORS + dashboard identity headers.
+			if (path.startsWith("/api/v1/") && req.method === "OPTIONS") {
+				return new Response(null, { status: 204, headers: { ...dashboardHeaders, ...V1_CORS_HEADERS } });
+			}
 
 			if (req.method === "OPTIONS") {
 				return new Response(null, { headers: dashboardHeaders });

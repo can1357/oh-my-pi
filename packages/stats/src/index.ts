@@ -8,6 +8,7 @@ import { formatStatsDashboardUrl, startServer } from "./server";
 
 export {
 	getDashboardStats,
+	getRequestsPaginated,
 	getToolDashboardStats,
 	getTotalMessageCount,
 	type SyncOptions,

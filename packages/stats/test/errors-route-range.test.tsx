@@ -47,10 +47,11 @@ describe("ErrorsRoute range", () => {
 		installGlobal("Node", domWindow.Node);
 		installGlobal("Element", domWindow.Element);
 		installGlobal("HTMLElement", domWindow.HTMLElement);
+		installGlobal("HTMLSelectElement", Reflect.get(domWindow, "HTMLSelectElement"));
+		installGlobal("HTMLOptionElement", Reflect.get(domWindow, "HTMLOptionElement"));
 		installGlobal("HTMLIFrameElement", domWindow.HTMLIFrameElement);
 		installGlobal("SVGElement", domWindow.SVGElement);
 		installGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-
 		const requestedUrls: string[] = [];
 		const fetchStub = Object.assign(
 			async (input: FetchInput, _init?: FetchInit) => {
@@ -68,14 +69,14 @@ describe("ErrorsRoute range", () => {
 		await act(async () => {
 			root?.render(<ErrorsRoute active range="24h" refreshTrigger={0} onRequestClick={() => {}} />);
 		});
-		expect(requestedUrls).toEqual(["/api/stats/errors?range=24h&limit=50"]);
+		expect(requestedUrls).toEqual(["/api/v1/errors?range=24h&limit=50"]);
 
 		await act(async () => {
 			root?.render(<ErrorsRoute active range="7d" refreshTrigger={0} onRequestClick={() => {}} />);
 		});
 		expect(requestedUrls).toEqual([
-			"/api/stats/errors?range=24h&limit=50",
-			"/api/stats/errors?range=7d&limit=50",
+			"/api/v1/errors?range=24h&limit=50",
+			"/api/v1/errors?range=7d&limit=50",
 		]);
 	});
 });

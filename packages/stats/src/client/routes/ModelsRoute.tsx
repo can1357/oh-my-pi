@@ -1,34 +1,36 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Line } from "react-chartjs-2";
 import { getModelDashboardStats } from "../api";
-import { CHART_THEMES, MODEL_COLORS } from "../components/chart-shared";
-import {
-	DetailChartEmpty,
-	detailChartPlugins,
-	detailChartScalesDualAxis,
-	ExpandableModelRow,
-	lineSeriesStyle,
-	MiniSparkline,
-	ModelNameCell,
-	ModelTableBody,
-	ModelTableHeader,
-	ModelTableShell,
-	TABLE_CHART_THEMES,
-	type TableChartTheme,
-	TrendEmpty,
-} from "../components/models-table-shared";
-import { formatRangeTick, rangeMeta } from "../components/range-meta";
-import { formatEstimatedCost } from "../data/formatters";
+import { CHART_THEMES } from "../components/chart-shared";
+import { formatRangeTick } from "../components/range-meta";
+import { formatCompact, formatEstimatedCost, formatInteger, formatPercent } from "../data/formatters";
 import { useResource } from "../data/useResource";
-import { buildModelPerformanceLookup } from "../data/view-models";
-import type { ModelPerformancePoint, ModelStats, ModelTimeSeriesPoint, TimeRange } from "../types";
-import { AsyncBoundary, Panel } from "../ui";
+import { buildModelRows, type ModelSortKey, type SortDir, sortModelRows } from "../data/view-models";
+import type { ModelStats, ModelTimeSeriesPoint, TimeRange } from "../types";
+import { AsyncBoundary } from "../ui";
 import { useSystemTheme } from "../useSystemTheme";
 
 export interface ModelsRouteProps {
 	active: boolean;
 	range: TimeRange;
 	refreshTrigger: number;
+}
+
+const SORT_STORAGE_KEY = "omp-stats:models-sort";
+type StoredSort = { key: ModelSortKey; dir: SortDir };
+
+function loadSort(): StoredSort {
+	try {
+		const raw = sessionStorage.getItem(SORT_STORAGE_KEY);
+		if (raw) return JSON.parse(raw) as StoredSort;
+	} catch {}
+	return { key: "requests", dir: "desc" };
+}
+
+function saveSort(v: StoredSort) {
+	try {
+		sessionStorage.setItem(SORT_STORAGE_KEY, JSON.stringify(v));
+	} catch {}
 }
 
 export function ModelsRoute({ active, range, refreshTrigger }: ModelsRouteProps) {
@@ -42,400 +44,404 @@ export function ModelsRoute({ active, range, refreshTrigger }: ModelsRouteProps)
 	});
 
 	return (
-		<div className="stats-route-container space-y-6">
+		<div className="stats-route-container">
+			<div className="omp-hero">
+				<div className="omp-hero-head">
+					<h2 className="omp-hero-title">
+						Models <span>{range} · ranked by share</span>
+					</h2>
+					<span className="omp-hero-range">
+						{modelStats
+							? `${modelStats.byModel.length} models · ${formatInteger(modelStats.byModel.reduce((s, m) => s + m.totalRequests, 0))} requests`
+							: "loading"}
+					</span>
+				</div>
+				{modelStats && modelStats.byModel.length > 0 && (
+					<div className="omp-token-grid" style={{ marginTop: 4 }}>
+						<div className="omp-token-item">
+							<div className="omp-token-label">Top model share</div>
+							<div className="omp-token-value">
+								{formatPercent(
+									modelStats.byModel[0].totalRequests /
+										modelStats.byModel.reduce((s, m) => s + m.totalRequests, 0),
+								)}
+							</div>
+							<div className="omp-token-bar">
+								<div
+									className="omp-token-bar-fill"
+									style={{
+										width: `${(modelStats.byModel[0].totalRequests / modelStats.byModel.reduce((s, m) => s + m.totalRequests, 0)) * 100}%`,
+										background: "var(--text)",
+									}}
+								/>
+							</div>
+						</div>
+						<div className="omp-token-item">
+							<div className="omp-token-label">Total tokens</div>
+							<div className="omp-token-value">
+								{formatCompact(
+									modelStats.byModel.reduce(
+										(s, m) =>
+											s +
+											m.totalInputTokens +
+											m.totalOutputTokens +
+											m.totalCacheReadTokens +
+											m.totalCacheWriteTokens,
+										0,
+									),
+								)}
+							</div>
+							<div className="omp-token-label" style={{ textTransform: "none", letterSpacing: "0" }}>
+								in {formatCompact(modelStats.byModel.reduce((s, m) => s + m.totalInputTokens, 0))} · out{" "}
+								{formatCompact(modelStats.byModel.reduce((s, m) => s + m.totalOutputTokens, 0))}
+							</div>
+						</div>
+						<div className="omp-token-item">
+							<div className="omp-token-label">Est. cost</div>
+							<div className="omp-token-value">
+								{formatEstimatedCost(
+									modelStats.byModel.reduce((s, m) => s + m.totalCost, 0),
+									modelStats.byModel.reduce((s, m) => s + m.unpricedRequests, 0),
+								)}
+							</div>
+							<div className="omp-token-label" style={{ textTransform: "none", letterSpacing: "0" }}>
+								api-equivalent · excludes unpriced
+							</div>
+						</div>
+						<div className="omp-token-item">
+							<div className="omp-token-label">Avg cache hit</div>
+							<div className="omp-token-value">
+								{formatPercent(
+									modelStats.byModel.reduce((s, m) => s + m.cacheRate * m.totalRequests, 0) /
+										Math.max(
+											1,
+											modelStats.byModel.reduce((s, m) => s + m.totalRequests, 0),
+										),
+								)}
+							</div>
+							<div className="omp-token-label" style={{ textTransform: "none", letterSpacing: "0" }}>
+								prompt cache · weighted
+							</div>
+						</div>
+					</div>
+				)}
+			</div>
+
 			<AsyncBoundary loading={loading} error={error} data={modelStats}>
 				{modelStats && (
-					<>
-						<ModelShareChart modelSeries={modelStats.modelSeries} timeRange={range} />
-						<ModelsTable
-							models={modelStats.byModel}
-							performanceSeries={modelStats.modelPerformanceSeries}
-							timeRange={range}
-						/>
-					</>
+					<ModelsRanked byModel={modelStats.byModel} modelSeries={modelStats.modelSeries} timeRange={range} />
 				)}
 			</AsyncBoundary>
 		</div>
 	);
 }
 
-function ModelShareChart({ modelSeries, timeRange }: { modelSeries: ModelTimeSeriesPoint[]; timeRange: TimeRange }) {
+function ModelsRanked({
+	byModel,
+	modelSeries,
+	timeRange,
+}: {
+	byModel: ModelStats[];
+	modelSeries: ModelTimeSeriesPoint[];
+	timeRange: TimeRange;
+}) {
+	const [sort, setSort] = useState<StoredSort>(() => loadSort());
+	const [expanded, setExpanded] = useState<string | null>(null);
+	useEffect(() => saveSort(sort), [sort]);
+
+	const rows = useMemo(() => {
+		const base = buildModelRows(byModel);
+		return sortModelRows(base, sort.key, sort.dir);
+	}, [byModel, sort]);
+
+	const toggle = (key: ModelSortKey) => {
+		setSort(prev => {
+			if (prev.key === key) return { key, dir: prev.dir === "asc" ? "desc" : "asc" };
+			return { key, dir: "desc" };
+		});
+	};
+
+	const headerBtn = (label: string, key: ModelSortKey, alignRight = true) => {
+		const active = sort.key === key;
+		return (
+			<button
+				type="button"
+				data-active={active ? "true" : "false"}
+				onClick={() => toggle(key)}
+				style={{ justifyContent: alignRight ? "flex-end" : "flex-start" }}
+			>
+				{label}
+				<span aria-hidden style={{ fontSize: 10, opacity: active ? 1 : 0.35 }}>
+					{active ? (sort.dir === "asc" ? "↑" : "↓") : "↕"}
+				</span>
+			</button>
+		);
+	};
+
+	return (
+		<div className="omp-section">
+			<div className="omp-section-head">
+				<div>
+					<div className="omp-section-title">Ranked models</div>
+					<p className="omp-section-desc">
+						Click a row for usage-over-time, cost and error detail — mono values, share bars encode dominance
+						without extra cards.
+					</p>
+				</div>
+				<div className="omp-error-controls" style={{ fontSize: 11 }}>
+					<span style={{ fontFamily: "var(--font-mono)", color: "var(--dim)" }}>{rows.length} models</span>
+				</div>
+			</div>
+			<div className="omp-section-rule" />
+			<div className="omp-section-body">
+				<div
+					className="omp-ranked-head"
+					style={{
+						display: "grid",
+						gridTemplateColumns: "22px minmax(0, 1.6fr) 84px repeat(4, 82px) minmax(0, 0.8fr) 28px",
+						gap: 10,
+					}}
+					role="row"
+				>
+					<span style={{ textAlign: "right" }}>#</span>
+					<span>{headerBtn("Model", "model", false)}</span>
+					<span style={{ textAlign: "center" }}>Share</span>
+					<span style={{ textAlign: "right" }}>{headerBtn("Requests", "requests")}</span>
+					<span style={{ textAlign: "right" }}>{headerBtn("Tokens", "tokens")}</span>
+					<span style={{ textAlign: "right" }}>{headerBtn("Est. cost", "cost")}</span>
+					<span style={{ textAlign: "right" }}>{headerBtn("Cache", "cache")}</span>
+					<span className="omp-ranked-hide-sm" style={{ textAlign: "right" }}>
+						{headerBtn("Errors", "errorRate")}
+					</span>
+					<span />
+				</div>
+
+				<div className="omp-ranked-list">
+					{rows.map((m, idx) => {
+						const key = `${m.model}::${m.provider}`;
+						const isExpanded = expanded === key;
+						const totalTokens = m.totalTokens;
+						return (
+							<div
+								key={key}
+								className="omp-ranked-row"
+								data-expanded={isExpanded ? "true" : "false"}
+								role="button"
+								tabIndex={0}
+								onClick={() => setExpanded(isExpanded ? null : key)}
+								onKeyDown={e => {
+									if (e.key === "Enter" || e.key === " ") {
+										e.preventDefault();
+										setExpanded(isExpanded ? null : key);
+									}
+								}}
+							>
+								<span className="omp-ranked-row-rank">{idx + 1}</span>
+								<span className="omp-ranked-row-main">
+									<span className="omp-ranked-row-title" title={m.model}>
+										{m.model}
+									</span>
+									<span className="omp-ranked-row-sub">{m.provider}</span>
+								</span>
+								<span className="omp-ranked-bar" aria-hidden>
+									<span className="omp-ranked-bar-fill" style={{ width: `${m.share * 100}%` }} />
+								</span>
+								<span className="omp-ranked-metric">
+									<strong>{formatInteger(m.totalRequests)}</strong>
+									<small>{formatPercent(m.share, 1)} share</small>
+								</span>
+								<span className="omp-ranked-metric">
+									<strong>{formatCompact(totalTokens)}</strong>
+									<small>
+										{formatCompact(m.totalInputTokens)}/{formatCompact(m.totalOutputTokens)}
+									</small>
+								</span>
+								<span className="omp-ranked-metric">
+									{formatEstimatedCost(m.totalCost, m.unpricedRequests, 2)}
+								</span>
+								<span className="omp-ranked-metric">{formatPercent(m.cacheRate)}</span>
+								<span
+									className="omp-ranked-metric omp-ranked-hide-sm"
+									style={{
+										color:
+											m.errorRate > 0.05
+												? "var(--danger)"
+												: m.errorRate > 0
+													? "var(--amber)"
+													: "var(--muted)",
+									}}
+								>
+									{formatPercent(m.errorRate, 1)}
+								</span>
+								<button
+									type="button"
+									className="omp-ranked-expand"
+									aria-label={isExpanded ? "Collapse" : "Expand"}
+									onClick={e => {
+										e.stopPropagation();
+										setExpanded(isExpanded ? null : key);
+									}}
+								>
+									{isExpanded ? "−" : "+"}
+								</button>
+
+								{isExpanded && (
+									<div className="omp-ranked-detail" onClick={e => e.stopPropagation()}>
+										<div className="omp-ranked-detail-grid">
+											<div>
+												<div className="omp-ranked-detail-label">Requests</div>
+												<div className="omp-ranked-detail-value">{formatInteger(m.totalRequests)}</div>
+												<div style={{ fontSize: 11, color: "var(--muted)" }}>
+													{formatInteger(m.successfulRequests)} ok · {formatInteger(m.failedRequests)} fail
+													· {formatPercent(m.errorRate)} error
+												</div>
+											</div>
+											<div>
+												<div className="omp-ranked-detail-label">Tokens · in / out</div>
+												<div className="omp-ranked-detail-value">{formatCompact(totalTokens)}</div>
+												<div
+													style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)" }}
+												>
+													in {formatCompact(m.totalInputTokens)} · out {formatCompact(m.totalOutputTokens)}{" "}
+													· cache {formatCompact(m.totalCacheReadTokens)}
+												</div>
+											</div>
+											<div>
+												<div className="omp-ranked-detail-label">Est. cost</div>
+												<div className="omp-ranked-detail-value">
+													{formatEstimatedCost(m.totalCost, m.unpricedRequests, 4)}
+												</div>
+												<div style={{ fontSize: 11, color: "var(--muted)" }}>
+													{m.avgDuration ? `${(m.avgDuration / 1000).toFixed(2)}s avg` : "no latency"} ·{" "}
+													{m.avgTokensPerSecond ? `${m.avgTokensPerSecond.toFixed(1)} tok/s` : ""}
+												</div>
+											</div>
+											<div>
+												<div className="omp-ranked-detail-label">Provider</div>
+												<div className="omp-ranked-detail-value" style={{ fontSize: 12 }}>
+													{m.provider}
+												</div>
+												<div style={{ fontSize: 11, color: "var(--muted)" }}>
+													cache {formatPercent(m.cacheRate)} · savings {formatPercent(m.cacheSavings)}
+												</div>
+											</div>
+										</div>
+										<ModelSpark
+											model={m.model}
+											provider={m.provider}
+											series={modelSeries}
+											timeRange={timeRange}
+										/>
+									</div>
+								)}
+							</div>
+						);
+					})}
+				</div>
+			</div>
+		</div>
+	);
+}
+
+function ModelSpark({
+	model,
+	provider,
+	series,
+	timeRange,
+}: {
+	model: string;
+	provider: string;
+	series: ModelTimeSeriesPoint[];
+	timeRange: TimeRange;
+}) {
 	const theme = useSystemTheme();
 	const chartTheme = CHART_THEMES[theme];
-	const meta = rangeMeta(timeRange);
-
-	const chartData = useMemo(() => buildModelPreferenceSeries(modelSeries), [modelSeries]);
-
+	const filtered = useMemo(
+		() => series.filter(s => s.model === model && s.provider === provider).sort((a, b) => a.timestamp - b.timestamp),
+		[series, model, provider],
+	);
 	const data = useMemo(() => {
+		const labels = filtered.map(p => formatRangeTick(p.timestamp, timeRange));
 		return {
-			labels: chartData.data.map(d => formatRangeTick(d.timestamp, timeRange)),
-			datasets: chartData.series.map((seriesName, index) => ({
-				label: seriesName,
-				data: chartData.data.map(d => d[seriesName] ?? 0),
-				borderColor: MODEL_COLORS[index % MODEL_COLORS.length],
-				backgroundColor: `${MODEL_COLORS[index % MODEL_COLORS.length]}20`,
-				fill: true,
-				tension: 0.4,
-				pointRadius: 0,
-				pointHoverRadius: 4,
-				borderWidth: 2,
-			})),
+			labels,
+			datasets: [
+				{
+					label: "Requests",
+					data: filtered.map(p => p.requests),
+					borderColor: theme === "dark" ? "oklch(0.85 0.02 307)" : "oklch(0.35 0.02 307)",
+					backgroundColor: theme === "dark" ? "oklch(0.85 0.02 307 / 0.08)" : "oklch(0.35 0.02 307 / 0.06)",
+					tension: 0.32,
+					borderWidth: 1.6,
+					pointRadius: filtered.length <= 8 ? 3 : 0,
+					pointHoverRadius: 4,
+					fill: true,
+				},
+			],
 		};
-	}, [chartData, timeRange]);
+	}, [filtered, timeRange, theme]);
 
-	const options = useMemo(() => {
-		return {
+	const options = useMemo(
+		() => ({
 			responsive: true,
 			maintainAspectRatio: false,
-			interaction: {
-				mode: "index" as const,
-				intersect: false,
-			},
+			interaction: { mode: "index" as const, intersect: false },
 			plugins: {
-				legend: {
-					position: "top" as const,
-					align: "start" as const,
-					labels: {
-						color: chartTheme.legendLabel,
-						usePointStyle: true,
-						padding: 16,
-						font: { size: 12 },
-						boxWidth: 8,
-					},
-				},
+				legend: { display: false },
 				tooltip: {
 					backgroundColor: chartTheme.tooltipBackground,
 					titleColor: chartTheme.tooltipTitle,
 					bodyColor: chartTheme.tooltipBody,
 					borderColor: chartTheme.tooltipBorder,
 					borderWidth: 1,
-					padding: 12,
 					cornerRadius: 8,
-					callbacks: {
-						label: (context: { dataset: { label?: string }; parsed: { y: number | null } }) => {
-							const label = context.dataset.label ?? "";
-							const value = context.parsed.y;
-							return `${label}: ${(value ?? 0).toFixed(1)}%`;
-						},
-					},
+					padding: 8,
 				},
 			},
 			scales: {
 				x: {
-					grid: {
-						color: chartTheme.grid,
-						drawBorder: false,
-					},
+					grid: { color: chartTheme.grid, drawBorder: false },
 					ticks: {
 						color: chartTheme.tick,
-						font: { size: 11 },
+						font: { size: 10, family: "var(--font-mono)" },
+						maxTicksLimit: 6,
+						maxRotation: 0,
 					},
+					border: { display: false },
 				},
 				y: {
-					grid: {
-						color: chartTheme.grid,
-						drawBorder: false,
-					},
-					ticks: {
-						color: chartTheme.tick,
-						font: { size: 11 },
-						callback: (value: number | string) => `${value}%`,
-					},
+					grid: { color: chartTheme.grid, drawBorder: false },
+					ticks: { color: chartTheme.tick, font: { size: 10, family: "var(--font-mono)" } },
 					min: 0,
-					max: 100,
+					border: { display: false },
 				},
 			},
-		};
-	}, [chartTheme]);
+		}),
+		[chartTheme],
+	);
 
-	return (
-		<Panel title="Model Preference" subtitle={`Share of requests over ${meta.windowLabel}`}>
-			<div className="h-[280px]">
-				{chartData.data.length === 0 ? (
-					<div className="h-full flex items-center justify-center text-stats-muted text-sm">No data available</div>
-				) : (
-					<Line data={data} options={options} />
-				)}
+	if (filtered.length === 0) {
+		return (
+			<div style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)", padding: "8px 0" }}>
+				No time-series for this model in range.
 			</div>
-		</Panel>
-	);
-}
-
-function buildModelPreferenceSeries(
-	points: ModelTimeSeriesPoint[],
-	topN = 5,
-): {
-	data: Array<Record<string, number>>;
-	series: string[];
-} {
-	if (points.length === 0) return { data: [], series: [] };
-
-	const totals = new Map<string, { model: string; provider: string; total: number }>();
-	for (const point of points) {
-		const key = `${point.model}::${point.provider}`;
-		const existing = totals.get(key);
-		if (existing) {
-			existing.total += point.requests;
-		} else {
-			totals.set(key, {
-				model: point.model,
-				provider: point.provider,
-				total: point.requests,
-			});
-		}
-	}
-
-	const sorted = [...totals.entries()].map(([key, value]) => ({ key, ...value })).sort((a, b) => b.total - a.total);
-	const topEntries = sorted.slice(0, topN);
-	const topKeys = new Set(topEntries.map(entry => entry.key));
-
-	const topModelCounts = new Map<string, number>();
-	for (const entry of topEntries) {
-		topModelCounts.set(entry.model, (topModelCounts.get(entry.model) ?? 0) + 1);
-	}
-
-	const labelByKey = new Map<string, string>();
-	for (const entry of topEntries) {
-		const showProvider = (topModelCounts.get(entry.model) ?? 0) > 1;
-		labelByKey.set(entry.key, showProvider ? `${entry.model} (${entry.provider})` : entry.model);
-	}
-
-	const dataMap = new Map<number, Record<string, number>>();
-
-	for (const point of points) {
-		const key = `${point.model}::${point.provider}`;
-		const bucket = dataMap.get(point.timestamp) ?? {
-			timestamp: point.timestamp,
-			total: 0,
-		};
-		bucket.total += point.requests;
-		const seriesLabel = topKeys.has(key) ? (labelByKey.get(key) ?? point.model) : "Other";
-		bucket[seriesLabel] = (bucket[seriesLabel] ?? 0) + point.requests;
-		dataMap.set(point.timestamp, bucket);
-	}
-
-	const series = topEntries.map(entry => labelByKey.get(entry.key) ?? entry.model);
-	if ([...dataMap.values()].some(row => (row.Other ?? 0) > 0)) {
-		series.push("Other");
-	}
-
-	const data = [...dataMap.values()]
-		.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0))
-		.map(row => {
-			const total = row.total ?? 0;
-			for (const key of series) {
-				row[key] = total > 0 ? ((row[key] ?? 0) / total) * 100 : 0;
-			}
-			return row;
-		});
-
-	return { data, series };
-}
-
-const GRID_TEMPLATE = "2fr 0.9fr 0.9fr 1fr 0.8fr 0.8fr 140px 40px";
-
-function ModelsTable({
-	models,
-	performanceSeries,
-	timeRange,
-}: {
-	models: ModelStats[];
-	performanceSeries: ModelPerformancePoint[];
-	timeRange: TimeRange;
-}) {
-	const [expandedKey, setExpandedKey] = useState<string | null>(null);
-	const meta = rangeMeta(timeRange);
-
-	const performanceSeriesByKey = useMemo(
-		() => buildModelPerformanceLookup(performanceSeries, timeRange),
-		[performanceSeries, timeRange],
-	);
-
-	const theme = useSystemTheme();
-	const chartTheme = TABLE_CHART_THEMES[theme];
-
-	const sortedModels = useMemo(() => {
-		return [...models].sort(
-			(a, b) => b.totalInputTokens + b.totalOutputTokens - (a.totalInputTokens + a.totalOutputTokens),
 		);
-	}, [models]);
-
+	}
 	return (
-		<ModelTableShell title="Model Statistics">
-			<ModelTableHeader
-				gridTemplate={GRID_TEMPLATE}
-				columns={[
-					{ label: "Model" },
-					{ label: "Requests", align: "right" },
-					{ label: "API-equivalent estimate", align: "right" },
-					{ label: "Tokens", align: "right" },
-					{ label: "Tokens/s", align: "right" },
-					{ label: "TTFT", align: "right" },
-					{ label: meta.trendLabel, align: "center" },
-				]}
-			/>
-
-			<ModelTableBody>
-				{sortedModels.map((model, index) => {
-					const key = `${model.model}::${model.provider}`;
-					const performance = performanceSeriesByKey.get(key);
-					const trendData = performance?.data ?? [];
-					const trendColor = MODEL_COLORS[index % MODEL_COLORS.length];
-					const isExpanded = expandedKey === key;
-					const errorRate = model.errorRate * 100;
-
-					return (
-						<ExpandableModelRow
-							key={key}
-							gridTemplate={GRID_TEMPLATE}
-							isExpanded={isExpanded}
-							onToggle={() => setExpandedKey(isExpanded ? null : key)}
-							cells={[
-								<ModelNameCell key="name" model={model.model} provider={model.provider} />,
-								<div key="requests" className="text-right text-[var(--text-secondary)] font-mono text-sm">
-									{model.totalRequests.toLocaleString()}
-								</div>,
-								<div key="cost" className="text-right text-[var(--text-secondary)] font-mono text-sm">
-									{formatEstimatedCost(model.totalCost, model.unpricedRequests)}
-								</div>,
-								<div key="tokens" className="text-right text-[var(--text-secondary)] font-mono text-sm">
-									{(model.totalInputTokens + model.totalOutputTokens).toLocaleString()}
-								</div>,
-								<div key="tps" className="text-right text-[var(--text-secondary)] font-mono text-sm">
-									{model.avgTokensPerSecond?.toFixed(1) ?? "-"}
-								</div>,
-								<div key="ttft" className="text-right text-[var(--text-secondary)] font-mono text-sm">
-									{model.avgTtft ? `${(model.avgTtft / 1000).toFixed(2)}s` : "-"}
-								</div>,
-							]}
-							trendCell={
-								trendData.length === 0 ? (
-									<TrendEmpty />
-								) : (
-									<MiniSparkline
-										timestamps={trendData.map(d => d.timestamp)}
-										values={trendData.map(d => d.avgTokensPerSecond ?? 0)}
-										color={trendColor}
-									/>
-								)
-							}
-							expandedContent={
-								<div className="grid gap-4" style={{ gridTemplateColumns: "200px 1fr" }}>
-									<div className="space-y-4 text-sm">
-										<div>
-											<div className="text-[var(--text-primary)] font-medium mb-2">Efficiency</div>
-											<div className="space-y-1 text-[var(--text-secondary)]">
-												<div className="flex items-center justify-between">
-													<span>Error rate</span>
-													<span
-														className={
-															errorRate > 5 ? "text-[var(--accent-red)]" : "text-[var(--accent-green)]"
-														}
-													>
-														{errorRate.toFixed(1)}%
-													</span>
-												</div>
-												<div className="flex items-center justify-between">
-													<span>Cache rate</span>
-													<span className="font-mono">{(model.cacheRate * 100).toFixed(1)}%</span>
-												</div>
-												<div className="flex items-center justify-between">
-													<span>Cache savings</span>
-													<span
-														className={
-															model.cacheSavings < 0
-																? "text-[var(--accent-red)]"
-																: "text-[var(--accent-green)]"
-														}
-													>
-														{(model.cacheSavings * 100).toFixed(1)}%
-													</span>
-												</div>
-											</div>
-										</div>
-										<div>
-											<div className="text-[var(--text-primary)] font-medium mb-2">Latency</div>
-											<div className="space-y-1 text-[var(--text-secondary)]">
-												<div className="flex items-center justify-between">
-													<span>Avg duration</span>
-													<span className="font-mono">
-														{model.avgDuration ? `${(model.avgDuration / 1000).toFixed(2)}s` : "-"}
-													</span>
-												</div>
-												<div className="flex items-center justify-between">
-													<span>Avg TTFT</span>
-													<span className="font-mono">
-														{model.avgTtft ? `${(model.avgTtft / 1000).toFixed(2)}s` : "-"}
-													</span>
-												</div>
-											</div>
-										</div>
-									</div>
-									<div className="h-[200px]">
-										{trendData.length === 0 ? (
-											<DetailChartEmpty />
-										) : (
-											<PerformanceChart
-												data={trendData}
-												color={trendColor}
-												chartTheme={chartTheme}
-												timeRange={timeRange}
-											/>
-										)}
-									</div>
-								</div>
-							}
-						/>
-					);
-				})}
-			</ModelTableBody>
-		</ModelTableShell>
+		<div>
+			<div
+				style={{
+					fontFamily: "var(--font-sans)",
+					fontSize: 11,
+					fontWeight: 600,
+					color: "var(--text)",
+					marginBottom: 6,
+				}}
+			>
+				Usage over time · {filtered.length} buckets
+			</div>
+			<div style={{ height: 140 }}>
+				<Line data={data as never} options={options as never} />
+			</div>
+		</div>
 	);
-}
-
-function PerformanceChart({
-	data,
-	color,
-	chartTheme,
-	timeRange,
-}: {
-	data: Array<{
-		timestamp: number;
-		avgTtftSeconds: number | null;
-		avgTokensPerSecond: number | null;
-	}>;
-	color: string;
-	chartTheme: TableChartTheme;
-	timeRange: TimeRange;
-}) {
-	const chartData = useMemo(() => {
-		return {
-			labels: data.map(d => formatRangeTick(d.timestamp, timeRange)),
-			datasets: [
-				{
-					label: "TTFT",
-					data: data.map(d => d.avgTtftSeconds ?? null),
-					...lineSeriesStyle("#5ad8e6"),
-					yAxisID: "y" as const,
-				},
-				{
-					label: "Tokens/s",
-					data: data.map(d => d.avgTokensPerSecond ?? null),
-					...lineSeriesStyle(color),
-					yAxisID: "y1" as const,
-				},
-			],
-		};
-	}, [data, color, timeRange]);
-
-	const options = useMemo(() => {
-		return {
-			responsive: true,
-			maintainAspectRatio: false,
-			plugins: detailChartPlugins(chartTheme),
-			scales: detailChartScalesDualAxis(chartTheme),
-		};
-	}, [chartTheme]);
-
-	return <Line data={chartData} options={options} />;
 }
