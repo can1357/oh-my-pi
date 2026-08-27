@@ -7,6 +7,11 @@
 - Added `tools.xdevForceMount`, a glob list of tool names to mount under `xd://` even when a tool declares itself essential or is pinned top-level, so their schemas stay out of every request and `read xd://<tool>` fetches them on demand. `read` and `write` still cannot be demoted: they carry the `xd://` transport. Off by default; intended for local models where tool schemas can outweigh the rest of the prompt.
 - Added `promptProfile`, selecting which bundled instruction template renders. `compact` drops the examples, the internal-URL catalog, and the long workflow and delegation prose for a short contract, and keeps every generated surface: skills, rules, context files, tool inventory, and the `xd://` protocol. A custom `SYSTEM.md` still replaces the template outright and ignores the profile.
 
+### Changed
+
+- Reduced the MCP route block in the system prompt to a single naming rule per server when the mounted names are derivable from the server and tool names, instead of one line per mounted tool. Servers with a name the rule cannot derive still list their routes.
+- Shortened the `xd://` device catalog under `tools.xdevDocs: catalog`: MCP tools group by server, and every catalog summary is capped at its first clause. Full docs and schemas remain available through `read xd://<tool>`.
+
 ## [18.0.7] - 2026-08-26
 
 ### Added

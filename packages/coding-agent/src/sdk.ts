@@ -120,6 +120,7 @@ import {
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionState } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
+import { XD_URL_PREFIX } from "./internal-urls/xd-protocol";
 import { setSharedLspEnabled } from "./lsp/client";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
 import {
@@ -200,6 +201,7 @@ import {
 import {
 	BashTool,
 	BUILTIN_TOOLS,
+	compileToolNameGlobs,
 	createTools,
 	createVibeTools,
 	type DeferredDiagnosticsEntry,
@@ -211,7 +213,6 @@ import {
 	GrepTool,
 	getSearchTools,
 	HIDDEN_TOOLS,
-	compileToolNameGlobs,
 	isMountableUnderXdev,
 	type LspStartupServerInfo,
 	listXdevTools,
@@ -3036,7 +3037,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const projection = projectMountedMCPXdevGuidance(
 				collectMountedMCPToolRoutes(toolSession.xdev ? listXdevTools(toolSession.xdev) : []),
 			);
-			if (projection.mappings.length > 0 || projection.hasOmittedMappings) {
+			if (projection.mappings.length > 0 || projection.ruleServerNames.length > 0 || projection.hasOmittedMappings) {
 				appendParts.push(
 					prompt
 						.render(mcpXdevGuidanceTemplate, {
@@ -3044,6 +3045,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 								mcpToolName: mapping.label,
 								path: mapping.path,
 							})),
+							ruleServers: projection.ruleServerNames,
+							xdPrefix: XD_URL_PREFIX,
 							hasOmittedTools: projection.hasOmittedMappings,
 						})
 						.trim(),

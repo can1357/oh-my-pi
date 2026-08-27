@@ -391,9 +391,12 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			async () => {
 				rebuildCount++;
 				const projection = projectMountedMCPXdevGuidance(collectMountedMCPToolRoutes(listXdevTools(xdevState)));
+				// Mirrors everything the real guidance renders: explicit mappings for
+				// routes the naming rule cannot derive, plus the servers the rule
+				// covers and the routes it covers for them.
 				const generatedPrompt = `mounted:${projection.mappings
 					.map(mapping => `${mapping.label}=${mapping.path}`)
-					.join(",")}`;
+					.join(",")}|rule:${projection.ruleServerNames.join(",")}|routes:${projection.ruleRouteNames.join(",")}`;
 				renderedPrompts.push(generatedPrompt);
 				return generatedPrompt;
 			},
@@ -402,10 +405,12 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
 		const fetch = createMcpCustomTool("mcp__nucleus_fetch", "nucleus", "fetch", "Fetch nucleus");
 		const uninstructed = createMcpCustomTool("mcp__silent_ping", "silent", "ping", "Ping silently");
-		const searchPrompt = 'mounted:"search"=xd://mcp__nucleus_search';
-		const searchAndUninstructedPrompt = 'mounted:"search"=xd://mcp__nucleus_search,"ping"=xd://mcp__silent_ping';
+		// Every name here is derivable from (server, tool), so the rule covers them
+		// all and no explicit mapping renders.
+		const searchPrompt = "mounted:|rule:nucleus|routes:mcp__nucleus_search";
+		const searchAndUninstructedPrompt = "mounted:|rule:nucleus,silent|routes:mcp__nucleus_search,mcp__silent_ping";
 		const searchFetchAndUninstructedPrompt =
-			'mounted:"search"=xd://mcp__nucleus_search,"fetch"=xd://mcp__nucleus_fetch,"ping"=xd://mcp__silent_ping';
+			"mounted:|rule:nucleus,silent|routes:mcp__nucleus_fetch,mcp__nucleus_search,mcp__silent_ping";
 
 		await session.refreshMCPTools([search]);
 		expect(rebuildCount).toBe(1);
@@ -429,32 +434,36 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(rebuildCount).toBe(3);
 		expect(session.systemPrompt).toEqual([searchFetchAndUninstructedPrompt]);
 
-		const fetchSearchAndUninstructedPrompt =
-			'mounted:"fetch"=xd://mcp__nucleus_fetch,"search"=xd://mcp__nucleus_search,"ping"=xd://mcp__silent_ping';
+		// Reordering the same routes no longer changes what renders: the rule names
+		// servers, and its route list is sorted. So no rebuild.
 		await session.refreshMCPTools([fetch, equivalentSearch, uninstructed]);
-		expect(rebuildCount).toBe(4);
-		expect(session.systemPrompt).toEqual([fetchSearchAndUninstructedPrompt]);
+		expect(rebuildCount).toBe(3);
+		expect(session.systemPrompt).toEqual([searchFetchAndUninstructedPrompt]);
 
 		const replacementSearch = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
 		await session.refreshMCPTools([replacementSearch, uninstructed]);
-		expect(rebuildCount).toBe(5);
+		expect(rebuildCount).toBe(4);
 		expect(session.systemPrompt).toEqual([searchAndUninstructedPrompt]);
 		const stableLabel = replacementSearch.label;
+		const reownedAndUninstructedPrompt =
+			'mounted:"search"=xd://mcp__nucleus_search|rule:silent|routes:mcp__silent_ping';
 		const reownedSearch = {
 			...createMcpCustomTool("mcp__nucleus_search", "archive", "search", "Search nucleus"),
 			label: stableLabel,
 		};
-		// Ownership alone is not rendered in the global route projection.
+		// Ownership now reaches the prompt. `mcp__nucleus_search` is not what
+		// `createMCPToolName("archive", "search")` produces, so re-owning the route
+		// drops `archive` out of the rule and lists that one route explicitly.
 		await session.refreshMCPTools([reownedSearch, uninstructed]);
 		expect(rebuildCount).toBe(5);
-		expect(session.systemPrompt).toEqual([searchAndUninstructedPrompt]);
+		expect(session.systemPrompt).toEqual([reownedAndUninstructedPrompt]);
 
 		const renamedOriginalSearch = {
 			...createMcpCustomTool("mcp__nucleus_search", "archive", "lookup", "Search nucleus"),
 			label: stableLabel,
 		};
 		const renamedOriginalAndUninstructedPrompt =
-			'mounted:"lookup"=xd://mcp__nucleus_search,"ping"=xd://mcp__silent_ping';
+			'mounted:"lookup"=xd://mcp__nucleus_search|rule:silent|routes:mcp__silent_ping';
 		await session.refreshMCPTools([renamedOriginalSearch, uninstructed]);
 		expect(rebuildCount).toBe(6);
 		expect(session.systemPrompt).toEqual([renamedOriginalAndUninstructedPrompt]);
@@ -463,7 +472,9 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			...createMcpCustomTool("mcp__archive_lookup", "archive", "lookup", "Search nucleus"),
 			label: stableLabel,
 		};
-		const remountedAndUninstructedPrompt = 'mounted:"lookup"=xd://mcp__archive_lookup,"ping"=xd://mcp__silent_ping';
+		// `mcp__archive_lookup` is exactly what the naming rule produces for
+		// (archive, lookup), so this route rejoins the rule and stops being listed.
+		const remountedAndUninstructedPrompt = "mounted:|rule:archive,silent|routes:mcp__archive_lookup,mcp__silent_ping";
 		await session.refreshMCPTools([remountedSearch, uninstructed]);
 		expect(rebuildCount).toBe(7);
 		expect(session.systemPrompt).toEqual([remountedAndUninstructedPrompt]);
@@ -477,7 +488,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(session.systemPrompt).toEqual([remountedAndUninstructedPrompt]);
 
 		// Removing the uninstructed server's rendered route also changes guidance.
-		const remountedPrompt = 'mounted:"lookup"=xd://mcp__archive_lookup';
+		const remountedPrompt = "mounted:|rule:archive|routes:mcp__archive_lookup";
 		await session.refreshMCPTools([equivalentRemountedSearch]);
 		expect(rebuildCount).toBe(8);
 		expect(session.systemPrompt).toEqual([remountedPrompt]);
@@ -485,8 +496,8 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			searchPrompt,
 			searchAndUninstructedPrompt,
 			searchFetchAndUninstructedPrompt,
-			fetchSearchAndUninstructedPrompt,
 			searchAndUninstructedPrompt,
+			reownedAndUninstructedPrompt,
 			renamedOriginalAndUninstructedPrompt,
 			remountedAndUninstructedPrompt,
 			remountedPrompt,

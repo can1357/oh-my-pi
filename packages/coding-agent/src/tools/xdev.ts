@@ -281,6 +281,13 @@ export const XDEV_DOCS_TOTAL_BUDGET = 48_000;
 export const XDEV_DOCS_PER_DEVICE_CAP = 10_000;
 /** Description cap for external mounted tools; their full docs remain readable on demand. */
 export const XDEV_EXTERNAL_DESCRIPTION_CAP = 200;
+/**
+ * Catalog-row cap in "catalog" mode, where a row exists to say the device is
+ * there and roughly what it does; `read xd://<tool>` carries the rest. A first
+ * clause is enough for that, and the uncapped built-in summaries were the
+ * largest block left in a small-context prompt.
+ */
+export const XDEV_CATALOG_DESCRIPTION_CAP = 90;
 
 /** Resolve any enabled tool through the canonical session map. */
 export function resolveXdevTool(state: XdevState, name: string): Tool | undefined {
@@ -365,16 +372,52 @@ export function xdevDocsAll(
 		sections.push(
 			[
 				"## Additional devices (docs on demand)",
-				...overflow.map(tool => {
-					const maxBytes = state.builtInNames.has(tool.name) ? undefined : XDEV_EXTERNAL_DESCRIPTION_CAP;
-					return `- ${XD_URL_PREFIX}${tool.name} — ${promptCatalogSummary(tool, maxBytes)}`;
-				}),
+				...renderOverflowCatalog(state, overflow, mode),
 				"",
 				`Read ${XD_URL_PREFIX}<tool> for full docs + JSON schema before first use.`,
 			].join("\n"),
 		);
 	}
 	return sections.join("\n\n");
+}
+
+/**
+ * Catalog rows for devices whose docs are not inlined.
+ *
+ * "catalog" mode means "list every device, fetch all docs on demand", so an
+ * MCP server's tools list by name under one heading instead of spending a
+ * summary line each: a single 21-tool server was costing more prompt than the
+ * whole tool policy. Built-in devices keep their one-line summary — there are
+ * few of them and the name alone does not say what `xd://hub` is. Every other
+ * mode keeps the previous per-device summary.
+ */
+function renderOverflowCatalog(state: XdevState, overflow: readonly Tool[], mode: XdevDocsMode): string[] {
+	const summaryRow = (tool: Tool): string => {
+		const externalCap = state.builtInNames.has(tool.name) ? undefined : XDEV_EXTERNAL_DESCRIPTION_CAP;
+		const maxBytes =
+			mode === "catalog" ? Math.min(externalCap ?? Infinity, XDEV_CATALOG_DESCRIPTION_CAP) : externalCap;
+		return `- ${XD_URL_PREFIX}${tool.name} — ${promptCatalogSummary(tool, maxBytes)}`;
+	};
+	if (mode !== "catalog") return overflow.map(summaryRow);
+
+	const rows: string[] = [];
+	const byServer = new Map<string, string[]>();
+	for (const tool of overflow) {
+		const parsed = state.builtInNames.has(tool.name) ? null : parseMCPToolName(tool.name);
+		if (!parsed) {
+			rows.push(summaryRow(tool));
+			continue;
+		}
+		const names = byServer.get(parsed.serverName);
+		if (names) names.push(tool.name);
+		else byServer.set(parsed.serverName, [tool.name]);
+	}
+	for (const [serverName, names] of byServer) {
+		rows.push(
+			`- MCP server \`${serverName}\` (${names.length}): ${names.map(name => `${XD_URL_PREFIX}${name}`).join(", ")}`,
+		);
+	}
+	return rows;
 }
 
 /** Docs for selected mounted devices under the configured prompt-doc policy. */

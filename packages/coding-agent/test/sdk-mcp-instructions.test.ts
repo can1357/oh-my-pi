@@ -27,7 +27,10 @@ import {
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "instructions-mcp.ts");
 const MCP_TOOL_NAME = "mcp__instr_do_thing";
 const MCP_ROUTE_SECTION = "## MCP Tool Routes";
-const CONTEXT_MODE_ROUTE = '- "ctx_execute" → `xd://mcp__context_mode_ctx_execute`';
+// `mcp__context_mode_ctx_execute` is exactly what the naming rule produces for
+// (context-mode, ctx_execute), so the guidance states the rule for that server
+// instead of listing the route.
+const CONTEXT_MODE_RULE = "Servers following this rule: context-mode.";
 const CONTEXT_MODE_MCP_TOOL_NAME = "mcp__context_mode_ctx_execute";
 
 describe("createAgentSession MCP server instructions (deferred UI)", () => {
@@ -121,11 +124,12 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			}
 
 			expect(prompt).toContain(SERVER_INSTRUCTIONS);
-			// The instructions are framed under the MCP section, and guidance keeps
-			// the escaped original tool name while routing through the exact
-			// normalized name actually mounted in the live xd:// registry.
+			// The instructions are framed under the MCP section. The tool's original
+			// name carries a backtick, and sanitizing it is exactly what the naming
+			// rule does, so the route is covered by the rule rather than listed.
 			expect(prompt).toContain("MCP Server Instructions");
-			expect(prompt).toContain('- "do\\u0060thing" → `xd://mcp__instr_do_thing`');
+			expect(prompt).toContain("Servers following this rule: instr.");
+			expect(prompt).not.toContain("xd://mcp__instr_do_thing`");
 		} finally {
 			await session.dispose();
 		}
@@ -168,14 +172,14 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			// completion signal for this real child-process handshake, and fake
 			// timers cannot drive it, so poll only until the route becomes visible.
 			let prompt = session.systemPrompt.join("\n");
-			expect(prompt).not.toContain(CONTEXT_MODE_ROUTE);
+			expect(prompt).not.toContain(CONTEXT_MODE_RULE);
 			const deadline = Date.now() + 12_000;
-			while (!prompt.includes(CONTEXT_MODE_ROUTE) && Date.now() < deadline) {
+			while (!prompt.includes(CONTEXT_MODE_RULE) && Date.now() < deadline) {
 				await Bun.sleep(10);
 				prompt = session.systemPrompt.join("\n");
 			}
 
-			expect(prompt).toContain(CONTEXT_MODE_ROUTE);
+			expect(prompt).toContain(CONTEXT_MODE_RULE);
 			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain(CONTEXT_MODE_MCP_TOOL_NAME);
 			expect(session.getActiveToolNames()).not.toContain(CONTEXT_MODE_MCP_TOOL_NAME);
 			expect(prompt.split(MCP_ROUTE_SECTION)).toHaveLength(2);
@@ -229,13 +233,15 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			}
 
 			expect(prompt).toContain(SERVER_INSTRUCTIONS);
+			// Every one of these names is derivable from (server, tool), so the whole
+			// server collapses to one rule clause: the guidance no longer grows with
+			// the tool count at all, and the per-mapping cap has nothing to truncate.
 			const renderedMappings = prompt.split("\n").filter(line => line.startsWith('- "row_'));
-			expect(renderedMappings).toHaveLength(64);
-			expect(renderedMappings[0]).toBe('- "row_aa" → `xd://mcp__instr_row_aa`');
-			expect(renderedMappings[63]).toBe('- "row_cl" → `xd://mcp__instr_row_cl`');
-			expect(prompt).not.toContain('- "row_cm" → `xd://mcp__instr_row_cm`');
-			// Truncation notice present (row_cm absent above proves the cap applied).
-			expect(prompt).toContain("omitted");
+			expect(renderedMappings).toHaveLength(0);
+			expect(prompt).toContain("Servers following this rule: instr.");
+			expect(prompt).not.toContain("omitted");
+			// The live inventory still carries every route.
+			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__instr_row_cm");
 		} finally {
 			await session.dispose();
 		}
