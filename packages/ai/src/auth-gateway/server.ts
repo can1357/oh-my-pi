@@ -29,6 +29,7 @@ import * as anthropicMessages from "../providers/anthropic-messages-server";
 import * as openaiChat from "../providers/openai-chat-server";
 import { decodeDataUri } from "../providers/openai-data-uri";
 import * as openaiResponses from "../providers/openai-responses-server";
+import { resolveResponsesComputerScreenshot } from "../providers/openai-shared";
 import * as piNative from "../providers/pi-native-server";
 import {
 	getUsableInlineImageMimeType,
@@ -39,7 +40,7 @@ import {
 	supportsRemoteImageUrls,
 } from "../providers/vision-guard";
 import { completeSimple, streamSimple } from "../stream";
-import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
+import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions, ToolResultMessage } from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { parseBind } from "../utils/parse-bind";
 import {
@@ -119,8 +120,13 @@ function validateComputerScreenshotReference(
 	const screenshot = isRecord(metadata.screenshot) ? metadata.screenshot : undefined;
 	if (supportsComputerScreenshotReferences(model, screenshot)) return undefined;
 	if (hasSupportedSource) {
-		delete metadata.type;
-		delete metadata.screenshot;
+		const fallback = resolveResponsesComputerScreenshot(message as unknown as ToolResultMessage, model, false);
+		if (fallback) {
+			metadata.screenshot = fallback;
+		} else {
+			delete metadata.type;
+			delete metadata.screenshot;
+		}
 		return undefined;
 	}
 	if (!screenshot) return undefined;

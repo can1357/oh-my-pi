@@ -3,6 +3,8 @@ import { convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { AssistantMessage, DeveloperMessage, Message, Model, ModelSpec, UserMessage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
+const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
 /**
  * Claude Opus 4.8 and the Fable/Mythos 5 generation support mid-conversation
  * `role: "system"` messages. Our `developer` messages (the system-priority
@@ -80,7 +82,7 @@ describe("Anthropic mid-conversation system messages", () => {
 			role: "developer",
 			content: [
 				{ type: "text", text: "Match this reference design." },
-				{ type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+				{ type: "image", data: PNG_B64, mimeType: "image/png" },
 			],
 			timestamp: Date.now(),
 		};
