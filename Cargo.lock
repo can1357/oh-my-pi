@@ -643,7 +643,7 @@ dependencies = [
  "cc",
  "cfg-if",
  "constant_time_eq",
- "cpufeatures 0.3.1",
+ "cpufeatures 0.3.0",
 ]
 
 [[package]]
@@ -1045,7 +1045,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d524456ba66e72eb8b115ff89e01e497f8e6d11d78b70b1aa13c0fbd97540a81"
 dependencies = [
  "cfg-if",
- "cpufeatures 0.3.1",
+ "cpufeatures 0.3.0",
  "rand_core 0.10.1",
 ]
 
@@ -1364,9 +1364,9 @@ dependencies = [
 
 [[package]]
 name = "cpufeatures"
-version = "0.3.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
+checksum = "8b2a41393f66f16b0823bb79094d54ac5fbd34ab292ddafb9a0456ac9f87d201"
 dependencies = [
  "libc",
 ]
@@ -4977,7 +4977,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.0.7"
+version = "18.0.8"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -5047,7 +5047,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "18.0.7"
+version = "18.0.8"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -5134,7 +5134,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "18.0.7"
+version = "18.0.8"
 dependencies = [
  "async-trait",
  "libc",
@@ -5146,7 +5146,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "18.0.7"
+version = "18.0.8"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5222,7 +5222,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "18.0.7"
+version = "18.0.8"
 dependencies = [
  "anyhow",
  "brush-core",
@@ -5250,7 +5250,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "18.0.7"
+version = "18.0.8"
 dependencies = [
  "audiopus_sys",
  "bytes",
@@ -5265,7 +5265,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "18.0.7"
+version = "18.0.8"
 dependencies = [
  "dashmap",
  "globset",
@@ -7959,9 +7959,9 @@ dependencies = [
 
 [[package]]
 name = "uuid"
-version = "1.25.0"
+version = "1.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f053576934f05a761a402421fbbe3d425d9366f75f978806a037b3ca481abecc"
+checksum = "b5772d71c9be8a8a6ac2117d949c5b224c1b72241bb611d9a3012edcf8af7812"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
@@ -8413,9 +8413,9 @@ dependencies = [
 
 [[package]]
 name = "wide"
-version = "1.6.1"
+version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de2aaf408e58689c2096682331b1f42bb2d9f2ed6b11560407d023cd0a6c634e"
+checksum = "8cf05ca94c9fba0c51316899caa1d1e74a064fc310a5efa7375e614343d415be"
 dependencies = [
  "bytemuck",
  "safe_arch",

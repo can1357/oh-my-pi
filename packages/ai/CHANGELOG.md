@@ -19,6 +19,16 @@
 - Fixed Cursor Connect streams mis-parsing compressed or end-of-stream frames, which previously surfaced as protobuf errors mid-stream.
 - Fixed long-lived Cursor sessions retaining conversation state without bound; cached conversations are now capped and rotation depth is limited.
 - Recorded the selected Cursor transport in `PI_REQ_DEBUG` dumps so HTTP/1 bridge sessions are not labeled `http2`.
+## [18.0.8] - 2026-08-27
+
+### Added
+
+- Added Z.AI GLM Coding Plan usage tracking: credit-based `CREDIT_LIMIT` windows (5h + weekly) now surface in `omp usage` and the status line with the plan tier (`plan: lite/pro/max`).
+
+### Fixed
+
+- Fixed Amazon Bedrock requests to OpenAI-schema models (the `gpt-5.x` SKUs) failing with HTTP 400 `unknown_parameter: 'thinking'` when reasoning was enabled, by sending `reasoning.effort` instead of Anthropic's `thinking` budget block for models the catalog marks as effort-controlled.
+- Fixed Cursor replay rejecting sessions with orphaned tool results while preserving their output as assistant context.
 
 ## [18.0.7] - 2026-08-26
 
