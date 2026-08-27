@@ -58,6 +58,7 @@
       "chart.js": "^4.5.1",
       "diff": "^9.0.0",
       "fastembed": "2.1.0",
+      "katex": "^0.18.4",
       "kitty-vt-wasm": "^0.2.0",
       "lint-staged": "^17.0.8",
       "lucide-react": "^1.24.0",

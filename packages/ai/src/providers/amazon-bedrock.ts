@@ -1089,6 +1089,15 @@ function buildAdditionalModelRequestFields(
 		};
 	}
 
+	if (mode === "effort") {
+		// OpenAI-schema models on Bedrock (the GPT-5.x SKUs) reject the
+		// Anthropic budget block with `unknown_parameter: 'thinking'` and take
+		// `reasoning.effort` instead — same effort vocabulary the catalog
+		// already bakes (low/medium/high/xhigh/max).
+		const level = requireSupportedEffort(model, reasoning);
+		return { reasoning: { effort: model.thinking?.effortMap?.[level] ?? level } };
+	}
+
 	const level = requireSupportedEffort(model, reasoning);
 	const defaultBudgets: Record<Effort, number> = {
 		minimal: 1024,

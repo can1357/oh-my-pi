@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
-import { fetchLiteLLMRichModels, litellmModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import {
+	fetchLiteLLMRichModels,
+	litellmModelManagerOptions,
+	resolveLiteLLMApi,
+} from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import type { Api, FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 
 const ORIGINAL_LITELLM_BASE_URL = Bun.env.LITELLM_BASE_URL;
@@ -126,7 +131,7 @@ describe("LiteLLM provider discovery", () => {
 		const models = await options.fetchDynamicModels?.();
 
 		expect(options.cacheProviderId).toBe(
-			`litellm:rich-v7:${Bun.hash("http://litellm.example:4100/v1").toString(36)}`,
+			`litellm:rich-v8:${Bun.hash("http://litellm.example:4100/v1").toString(36)}`,
 		);
 		expect(fetchMock).toHaveBeenCalledTimes(6);
 		expect(models).toHaveLength(1);
@@ -150,7 +155,7 @@ describe("LiteLLM provider discovery", () => {
 		const models = await options.fetchDynamicModels?.();
 
 		expect(options.cacheProviderId).toBe(
-			`litellm:rich-v7:${Bun.hash("http://litellm-config.example:4200/v1/").toString(36)}`,
+			`litellm:rich-v8:${Bun.hash("http://litellm-config.example:4200/v1/").toString(36)}`,
 		);
 		expect(fetchMock).toHaveBeenCalledTimes(6);
 		expect(models).toHaveLength(1);
@@ -181,6 +186,116 @@ describe("LiteLLM provider discovery", () => {
 				output: 2,
 			},
 		});
+	});
+
+	test("does not inherit a colliding bundled model's provider-specific wire transport (#9938)", async () => {
+		// The coding-agent discovery path resolves discovered aliases against the
+		// *resolved* bundled reference index, so a custom endpoint exposing
+		// `kimi-k3` (which collides with the bundled Fireworks `kimi-k3`) would
+		// otherwise inherit Fireworks' resolved `wireModelIdMode: "fireworks"` and
+		// POST `accounts/fireworks/models/kimi-k3` — an id the endpoint never
+		// advertised, which the proxy rejects with HTTP 400. Only provider-
+		// independent reasoning hints may cross the provider boundary; every
+		// transport field must be re-derived from the discovered provider.
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url === "http://primary:4000/model_group/info") {
+				return Response.json({
+					data: [
+						{
+							model_group: "kimi-k3",
+							model_info: {
+								max_input_tokens: 200_000,
+								max_output_tokens: 32_000,
+								supports_function_calling: true,
+							},
+						},
+					],
+				});
+			}
+			return new Response("{}", { status: 404 });
+		}) as FetchImpl;
+
+		// Mimic getBundledModelReferenceIndex: a reference carrying fully-resolved,
+		// provider-specific compat (wire-id transform, tool-schema flavor) plus
+		// provider-independent reasoning metadata.
+		const referenceResolver = (id: string): ModelSpec<Api> | undefined =>
+			id === "kimi-k3"
+				? ({
+						id: "kimi-k3",
+						name: "Kimi K3",
+						api: "openai-completions",
+						provider: "fireworks",
+						baseUrl: "https://api.fireworks.ai/inference/v1",
+						reasoning: true,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 1_048_576,
+						maxTokens: 131_072,
+						compat: {
+							wireModelIdMode: "fireworks",
+							toolSchemaFlavor: "moonshot-mfjs",
+							supportsReasoningEffort: true,
+							reasoningEffortMap: { max: "max" },
+						},
+					} as unknown as ModelSpec<Api>)
+				: undefined;
+
+		const specs = await fetchLiteLLMRichModels<Api>({
+			api: "openai-completions",
+			provider: "e-infra",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+			referenceResolver,
+			resolveApi: (entry, id) => resolveLiteLLMApi(entry, id, "openai-completions"),
+		});
+
+		expect(specs).toHaveLength(1);
+		const spec = specs?.[0];
+		if (!spec) throw new Error("expected exactly one discovered model");
+		expect(spec.provider).toBe("e-infra");
+		// Provider-specific transport must NOT cross the boundary.
+		expect(spec.compat).not.toHaveProperty("wireModelIdMode");
+		expect(spec.compat).not.toHaveProperty("toolSchemaFlavor");
+		// Provider-independent reasoning hints still enrich the discovered model.
+		expect(spec.compat).toMatchObject({
+			supportsReasoningEffort: true,
+			reasoningEffortMap: { max: "max" },
+		});
+		// buildModel re-derives the wire-id transform from the discovered
+		// provider (`e-infra`, not Fireworks), so the alias serializes verbatim.
+		expect(buildModel(spec as ModelSpec<"openai-completions">).compat.wireModelIdMode).toBe("raw");
+	});
+
+	test("preserves generic effort support when rich metadata and references omit it", async () => {
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url === "http://primary:4000/model_group/info") {
+				return Response.json({
+					data: [
+						{
+							model_group: "private-reasoner",
+							supports_vision: false,
+							supports_reasoning: true,
+						},
+					],
+				});
+			}
+			return new Response("{}", { status: 404 });
+		}) as FetchImpl;
+
+		const specs = await fetchLiteLLMRichModels<"openai-completions">({
+			api: "openai-completions",
+			provider: "private-litellm",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		});
+
+		expect(specs).toHaveLength(1);
+		const spec = specs?.[0];
+		if (!spec) throw new Error("expected exactly one discovered model");
+		expect(spec.compat).not.toHaveProperty("supportsReasoningEffort");
+		expect(buildModel(spec).compat.supportsReasoningEffort).toBe(true);
 	});
 
 	test("routes only OpenAI-backed rich models through Responses", async () => {

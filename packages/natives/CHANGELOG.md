@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Large session histories no longer leave macOS Terminal unresponsive during repaint.
+- Bounded the interactive PTY reader→JS queue (64 × ≤64 KiB) and forward chunks through a separate `call_async` pump so a fast child plus a stalled JS consumer cannot accumulate unbounded output in-process, without freezing PTY input/resize/kill. After a finite child exit, wait until accepted output reaches `on_chunk`; only a permanently open slave skips that wait. Cancel, timeout, and that stuck-open path abort the pump before `start()` resolves. Same defect class as the non-PTY bash bridge (#4078).
+
 ## [18.0.6] - 2026-08-26
 
 ### Fixed
