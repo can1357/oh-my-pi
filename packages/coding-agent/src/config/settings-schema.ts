@@ -4667,6 +4667,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tools.xdevForceMount": {
+		type: "array",
+		default: EMPTY_STRING_ARRAY,
+		ui: {
+			tab: "tools",
+			group: "Discovery & MCP",
+			label: "xd:// Force Mount",
+			description:
+				"Mount tools matching these glob patterns under xd:// even when they declare themselves essential or are pinned top-level, keeping their schemas out of every request. For small-context local models, where tool schemas can outweigh the whole prompt. read and write always stay top-level: they carry the xd:// transport. Forcing grep, todo, ask, or web_search costs the harness integration that pinned them.",
+		},
+	},
+
 	"tools.xdevInlineDevices": {
 		type: "array",
 		default: EMPTY_STRING_ARRAY,

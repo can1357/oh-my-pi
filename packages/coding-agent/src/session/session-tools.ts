@@ -25,7 +25,14 @@ import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { isFilesystemSourcePath } from "../tools/path-utils";
 import { supportsExternalThinking } from "../tools/think";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
-import { isMountableUnderXdev, listXdevTools, type XdevState, xdevDocsFor, xdevEntries } from "../tools/xdev";
+import {
+	compileToolNameGlobs,
+	isMountableUnderXdev,
+	listXdevTools,
+	type XdevState,
+	xdevDocsFor,
+	xdevEntries,
+} from "../tools/xdev";
 import { type EditMode, resolveEditMode } from "../utils/edit-mode";
 import { type InspectImageMode, isInspectImageToolActive } from "../utils/inspect-image-mode";
 import {
@@ -892,13 +899,14 @@ export class SessionTools {
 			(selectedTools.some(({ name }) => name === "write") || this.#deviceOnlyWriteTransportAvailable);
 		const isPresentationPinned = (name: string): boolean =>
 			this.#presentationPinnedToolNames?.has(name) === true || this.#runtimeSelectedToolNames?.has(name) === true;
+		const forceMountGlobs = compileToolNameGlobs(this.#host.settings.get("tools.xdevForceMount"));
 		const mountCandidates = selectedTools.filter(
 			({ name, tool }) =>
 				this.#xdev !== undefined &&
 				xdevReadAvailable &&
 				xdevWriteAvailable &&
 				!isPresentationPinned(name) &&
-				isMountableUnderXdev(tool),
+				isMountableUnderXdev(tool, forceMountGlobs),
 		);
 		const mountNames = new Set(mountCandidates.map(({ name }) => name));
 		// Demoted tools stay reachable through the eval bridge, so nothing is

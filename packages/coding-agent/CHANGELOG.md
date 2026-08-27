@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `tools.xdevForceMount`, a glob list of tool names to mount under `xd://` even when a tool declares itself essential or is pinned top-level, so their schemas stay out of every request and `read xd://<tool>` fetches them on demand. `read` and `write` still cannot be demoted: they carry the `xd://` transport. Off by default; intended for local models where tool schemas can outweigh the rest of the prompt.
+
 ## [18.0.7] - 2026-08-26
 
 ### Added
