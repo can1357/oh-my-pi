@@ -946,16 +946,14 @@ pub(crate) async fn run(
 		identifier:        model.clone(),
 		codex_task_policy: prompt_policy::uses_codex_task_prompt(model.as_str()),
 	};
-	let preserve_thinking = if let Some(level) = args.thinking
+	let explicit_thinking = if let Some(level) = args.thinking
 		&& level != crate::cli::ThinkingLevel::Auto
 		&& !args.external_thinking
 	{
 		let effort = thinking_effort(level.into(), auto_thinking);
-		snapshot.turn.params.thinking =
-			Some(inference_pb::Reasoning { effort: effort as i32, ..Default::default() });
-		true
+		Some(inference_pb::Reasoning { effort: effort as i32, ..Default::default() })
 	} else {
-		false
+		None
 	};
 	if resume.is_some() || fork.is_some() {
 		let path = sessions_dir.join(format!("{}.jsonl", session.id.as_str()));
@@ -997,10 +995,13 @@ pub(crate) async fn run(
 				&root,
 				&args.add_dir,
 				revived.has_durable_tool_restriction,
-				preserve_thinking,
+				explicit_thinking.clone(),
 			)
 			.map_err(|error| miette::miette!(error))?;
 		}
+	}
+	if let Some(thinking) = explicit_thinking {
+		snapshot.turn.params.thinking = Some(thinking);
 	}
 	edit_model.set(Str::new(&snapshot.turn.params.model));
 	snapshot.compaction = settings.compaction.method_order();

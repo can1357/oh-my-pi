@@ -1589,9 +1589,7 @@ fn apply_revived_session_model(
 			root,
 			additional_roots,
 			has_durable_tool_restriction,
-			// Headless launches expose no explicit thinking override, and revival
-			// projects no durable thinking override.
-			false,
+			None,
 		)
 		.map_err(HeadlessError::AgentSnapshot)?;
 	}
@@ -1965,8 +1963,18 @@ mod tests {
 		)
 		.expect("catalog fallback");
 		snapshot.turn.params.model = fallback.as_str().to_owned();
-		chat::reproject_model_derived_snapshot(&mut snapshot, catalog, &root, &[], false, true)
-			.expect("reproject");
+		chat::reproject_model_derived_snapshot(
+			&mut snapshot,
+			catalog,
+			&root,
+			&[],
+			false,
+			Some(omp_proto::inference::v1::Reasoning {
+				effort: omp_proto::inference::v1::Effort::High as i32,
+				..Default::default()
+			}),
+		)
+		.expect("reproject");
 		assert_eq!(
 			snapshot
 				.turn
@@ -2005,7 +2013,7 @@ mod tests {
 			&root,
 			&[],
 			false,
-			false,
+			None,
 		)
 		.expect("reproject model default");
 		assert_eq!(default_thinking.turn.params.thinking, expected_thinking);

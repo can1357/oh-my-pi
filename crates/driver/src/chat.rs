@@ -6384,7 +6384,7 @@ pub fn reproject_model_derived_snapshot(
 	root: &Path,
 	additional_roots: &[PathBuf],
 	has_durable_tool_restriction: bool,
-	preserve_thinking: bool,
+	explicit_thinking: Option<inference_pb::Reasoning>,
 ) -> Result<(), ChatError> {
 	let session_id = snapshot
 		.turn
@@ -6400,9 +6400,7 @@ pub fn reproject_model_derived_snapshot(
 		Arc::clone(&snapshot.registry),
 	)?;
 	let projected = agent_snapshot(&blueprint, catalog, None)?;
-	let explicit_thinking = preserve_thinking
-		.then(|| snapshot.turn.params.thinking.clone())
-		.flatten();
+
 	if has_durable_tool_restriction {
 		let retained: Arc<[Str]> = snapshot
 			.enabled_tools
