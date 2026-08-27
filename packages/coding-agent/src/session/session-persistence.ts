@@ -8,7 +8,17 @@ import {
 } from "./blob-store";
 import type { FileEntry } from "./session-entries";
 
-const MAX_PERSIST_CHARS = 500_000;
+/**
+ * Generic string cap for persisted session entries. Any string longer than
+ * this is notice-truncated by {@link truncateForPersistence} unless its
+ * position is exempt (signed blocks) or externalized (image payloads).
+ * Exported because the presentation live-record's retention budgets
+ * (`LIVE_RECORD_HEAD_WINDOW_BYTES`/`LIVE_RECORD_DISPLAY_BUDGET_BYTES`) must
+ * stay at or below it so a retained `ToolPresentationRecord` persists
+ * byte-identical — see the contract test in
+ * `test/session-persistence-images.test.ts`.
+ */
+export const MAX_PERSIST_CHARS = 500_000;
 const TRUNCATION_NOTICE = "\n\n[Session persistence truncated large content]";
 /** Minimum base64 length to externalize to blob store (skip tiny inline images) */
 const BLOB_EXTERNALIZE_THRESHOLD = 1024;
@@ -19,6 +29,12 @@ const TEXT_CONTENT_KEY = "content";
  *  generic string truncation, which appends {@link TRUNCATION_NOTICE} and
  *  corrupts the base64 the provider decodes on resume. */
 const SNAPCOMPACT_FRAMES_KEY = "frames";
+/** Parent key of a `ToolPresentationRecord`'s `attachments[]` (the v4 tool
+ *  journal's `presentation.attachments`). Its `kind: "image"` entries carry
+ *  base64 that must externalize to the blob store: generic string truncation
+ *  would append {@link TRUNCATION_NOTICE} to the base64, and `session/load`
+ *  would then replay a corrupted image attachment to ACP clients. */
+const ATTACHMENTS_KEY = "attachments";
 
 function truncateString(value: string, maxLength: number): string {
 	if (value.length <= maxLength) return value;
@@ -65,17 +81,23 @@ export function isImageDataPayload(value: unknown): value is { data: string; mim
 /**
  * True when an image payload sits in a persistence position whose base64 is
  * externalized to the blob store instead of truncated as a generic string: a
- * `content` image block, an `images[]` entry, or a snapcompact frame under
- * `frames[]`. Shared by the persist path ({@link shouldExternalizeImagePayload})
- * and the load path (`resolvePersistedBlobRefs`) so the two never drift and
- * strand a payload externalized on write but not resolved on read.
+ * `content` image block, an `images[]` entry, a snapcompact frame under
+ * `frames[]`, or a tool-presentation attachment under `attachments[]`. Shared
+ * by the persist path ({@link shouldExternalizeImagePayload}) and the load
+ * path (`resolvePersistedBlobRefs`) so the two never drift and strand a
+ * payload externalized on write but not resolved on read.
  */
 export function isExternalizableImagePosition(
 	value: unknown,
 	key: string | undefined,
 ): value is { data: string; mimeType?: string } {
 	if (!isImageDataPayload(value)) return false;
-	return (key === TEXT_CONTENT_KEY && isImageBlock(value)) || key === "images" || key === SNAPCOMPACT_FRAMES_KEY;
+	return (
+		(key === TEXT_CONTENT_KEY && isImageBlock(value)) ||
+		key === "images" ||
+		key === SNAPCOMPACT_FRAMES_KEY ||
+		key === ATTACHMENTS_KEY
+	);
 }
 
 function shouldExternalizeImagePayload(
