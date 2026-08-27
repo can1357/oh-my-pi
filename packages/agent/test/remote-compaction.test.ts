@@ -39,8 +39,7 @@ import * as piUtils from "@oh-my-pi/pi-utils";
 
 const { isRecord } = piUtils;
 const TEST_INSTALLATION_ID = "00000000-0000-4000-8000-000000000001";
-const PNG_B64 =
-	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 const TEST_CODEX_COMPACTION: CodexCompactionContext = {
 	operationId: "compaction-operation-1",
 	trigger: "auto",
@@ -578,6 +577,36 @@ describe("buildOpenAiNativeHistory multimodal tool results", () => {
 		});
 		expect(items.some(item => item.type === "message" && item.role === "user")).toBe(false);
 		expect(JSON.stringify(items)).not.toContain("file_foreign");
+	});
+
+	test("uses normalized orphan text after filtering an invalid image", () => {
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_invalid_image|fc_call_invalid_image",
+			toolName: "read",
+			content: [
+				{
+					type: "image",
+					data: Buffer.from("not an image").toString("base64"),
+					mimeType: "image/png",
+				},
+			],
+			isError: false,
+			timestamp: Date.now(),
+		};
+
+		const items = buildOpenAiNativeHistory(
+			[result],
+			makeOpenAiModel({ provider: "openai-codex", input: ["text", "image"] }),
+		);
+
+		expect(items).toContainEqual({
+			type: "message",
+			role: "assistant",
+			content: expect.stringContaining("[image omitted: source cannot be replayed]"),
+		});
+		expect(JSON.stringify(items)).not.toContain("see attached image");
+		expect(items.some(item => item.type === "message" && item.role === "user")).toBe(false);
 	});
 });
 
@@ -2499,6 +2528,7 @@ describe("compact() remote compaction failure handling", () => {
 		vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("re-expanded local summary"));
 		const compactionItem = { type: "compaction", encrypted_content: "enc_v2" };
 		const v2Model = makeOpenAiModel({
+			input: ["text", "image"],
 			remoteCompaction: {
 				enabled: true,
 				v2StreamingEnabled: true,
@@ -2571,6 +2601,52 @@ describe("compact() remote compaction failure handling", () => {
 		expect(reused).toBeDefined();
 		const reusedText = JSON.stringify(reused?.messagesToSummarize ?? []);
 		expect(reusedText).not.toContain("ORIGINAL ALPHA port 4242");
+
+		const changedEndpointModel = makeOpenAiModel({
+			input: ["text", "image"],
+			remoteCompaction: {
+				enabled: true,
+				v2StreamingEnabled: true,
+				v2Endpoint: "https://other-compact.example/v1/responses",
+			},
+		});
+		const changedEndpoint = prepareCompaction(
+			entries,
+			{ ...baseSettings, remoteStreamingV2Enabled: true },
+			changedEndpointModel,
+		);
+		expect(JSON.stringify(changedEndpoint?.messagesToSummarize ?? [])).toContain("ORIGINAL ALPHA port 4242");
+
+		const changedRequestModel = makeOpenAiModel({
+			input: ["text", "image"],
+			remoteCompaction: {
+				enabled: true,
+				v2StreamingEnabled: true,
+				v2Endpoint: "https://compact.example/v1/responses",
+				model: "gpt-5-mini",
+			},
+		});
+		const changedModel = prepareCompaction(
+			entries,
+			{ ...baseSettings, remoteStreamingV2Enabled: true },
+			changedRequestModel,
+		);
+		expect(JSON.stringify(changedModel?.messagesToSummarize ?? [])).toContain("ORIGINAL ALPHA port 4242");
+
+		const changedCapabilitiesModel = makeOpenAiModel({
+			input: ["text"],
+			remoteCompaction: {
+				enabled: true,
+				v2StreamingEnabled: true,
+				v2Endpoint: "https://compact.example/v1/responses",
+			},
+		});
+		const changedCapabilities = prepareCompaction(
+			entries,
+			{ ...baseSettings, remoteStreamingV2Enabled: true },
+			changedCapabilitiesModel,
+		);
+		expect(JSON.stringify(changedCapabilities?.messagesToSummarize ?? [])).toContain("ORIGINAL ALPHA port 4242");
 	});
 
 	test("re-expands a stranded remote compaction when the active model cannot replay it (#6343)", () => {

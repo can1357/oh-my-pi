@@ -332,10 +332,18 @@ function canonicalizeCompactionReferenceBaseUrl(endpoint: string): string {
 
 export function getOpenAiCompactionReferenceTarget(model: Model, streamingV2: boolean): string {
 	const referenceModel = resolveOpenAiCompactionReferenceModel(model, streamingV2);
+	const supportsImageDetailOriginal =
+		!!referenceModel.compat &&
+		"supportsImageDetailOriginal" in referenceModel.compat &&
+		referenceModel.compat.supportsImageDetailOriginal === true;
 	return JSON.stringify({
 		api: referenceModel.api,
 		provider: referenceModel.provider,
 		baseUrl: referenceModel.baseUrl ? canonicalizeCompactionReferenceBaseUrl(referenceModel.baseUrl) : "",
+		model: resolveOpenAiCompactModel(model),
+		input: [...referenceModel.input].sort(),
+		supportsComputerUse: referenceModel.supportsComputerUse === true,
+		supportsImageDetailOriginal,
 	});
 }
 
@@ -883,7 +891,9 @@ export function buildOpenAiNativeHistory(
 					const orphanOutput = splitResponsesOrphanOutput(output, referenceModel, supportsImageDetailOriginal);
 					const limit = 16_000;
 					const noteText =
-						outputText.length > limit ? `${outputText.slice(0, limit)}\n...[truncated]` : outputText;
+						orphanOutput.text.length > limit
+							? `${orphanOutput.text.slice(0, limit)}\n...[truncated]`
+							: orphanOutput.text;
 					input.push({
 						type: "message",
 						role: "assistant",

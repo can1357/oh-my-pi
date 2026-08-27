@@ -18,7 +18,7 @@ import type {
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
-const PNG_B64 = Buffer.from("not-actually-a-png, but bytes are opaque here").toString("base64");
+const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 const BLOB_URL = "https://blobs.example.com/0123456789abcdef0123456789abcdef.png";
 
 const userMessage: Message = {
@@ -378,7 +378,7 @@ describe("image url parts", () => {
 		).toThrow("without non-empty image data or a supported reference");
 	});
 
-	it("google falls back to inline data when a provider file is expired or has unknown media", () => {
+	it("google falls back to valid inline data and rejects invalid image media", () => {
 		const model = getBundledModel("google", "gemini-2.5-flash") as Model<"google-generative-ai">;
 		const expired = convertGoogleMessages(model, {
 			messages: [
@@ -400,30 +400,24 @@ describe("image url parts", () => {
 				},
 			],
 		});
-		const unknownMime = convertGoogleMessages(model, {
-			messages: [
-				{
-					role: "user",
-					content: [
-						{
-							type: "image",
-							data: PNG_B64,
-							mimeType: "application/octet-stream",
-							providerFile: {
-								provider: "google",
-								uri: "https://generativelanguage.googleapis.com/v1/files/unknown",
-							},
-						},
-					],
-					timestamp: 0,
-				},
-			],
-		});
-
 		expect(expired[0]?.parts).toContainEqual({ inlineData: { mimeType: "image/png", data: PNG_B64 } });
-		expect(unknownMime[0]?.parts).toContainEqual({
-			inlineData: { mimeType: "application/octet-stream", data: PNG_B64 },
-		});
+		expect(() =>
+			convertGoogleMessages(model, {
+				messages: [
+					{
+						role: "user",
+						content: [
+							{
+								type: "image",
+								data: Buffer.from("not an image").toString("base64"),
+								mimeType: "application/octet-stream",
+							},
+						],
+						timestamp: 0,
+					},
+				],
+			}),
+		).toThrow("without non-empty image data or a supported reference");
 	});
 
 	it("completions sends the url in image_url content parts", async () => {

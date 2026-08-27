@@ -1265,10 +1265,11 @@ export interface CompactionPreparation {
  * by the active model — the model that assembles the request context on every
  * turn. A local compaction (no remote preserve) always can: it holds a real
  * textual summary. A remote compaction (V2 or V1) only can when the active model
- * shares the blob's provider AND remote replay is still enabled; otherwise the
- * active model's encoder drops the payload (see `getOpenAIResponsesHistoryPayload`)
- * and only the opaque placeholder summary survives, so the caller must re-expand
- * the originals into a portable local summary rather than strand that history.
+ * matches the blob's effective API, provider, endpoint, request model, and replay
+ * capabilities while remote replay is still enabled; otherwise the active model's
+ * encoder drops the payload (see `getOpenAIResponsesHistoryPayload`) and only the
+ * opaque placeholder summary survives, so the caller must re-expand the originals
+ * into a portable local summary rather than strand that history.
  *
  * Judged against the ACTIVE model, not the compaction candidate set: a role
  * model (e.g. `modelRoles.smol`) that still maps to the blob's provider does not
@@ -1280,12 +1281,16 @@ export function remotePreserveReusable(
 	activeModel: Model,
 	settings: CompactionSettings,
 ): boolean {
-	const remote = getCompactionV2PreserveData(preserveData) ?? getPreservedOpenAiRemoteCompactionData(preserveData);
-	if (!remote) return true;
+	const v2Preserve = getCompactionV2PreserveData(preserveData);
+	const v1Preserve = getPreservedOpenAiRemoteCompactionData(preserveData);
+	if (!v2Preserve && !v1Preserve) return true;
 	if (settings.remoteEnabled === false) return false;
-	if (remote.provider !== activeModel.provider) return false;
-	const v2Ok = settings.remoteStreamingV2Enabled !== false && shouldUseCompactionV2Streaming(activeModel);
-	return v2Ok || shouldUseOpenAiRemoteCompaction(activeModel);
+	if (settings.remoteStreamingV2Enabled !== false && shouldUseCompactionV2Streaming(activeModel)) {
+		return !!v2Preserve && canReuseOpenAiCompactionHistory(v2Preserve, activeModel, true);
+	}
+	if (!shouldUseOpenAiRemoteCompaction(activeModel)) return false;
+	const v1Candidate = v1Preserve ?? v2Preserve;
+	return !!v1Candidate && canReuseOpenAiCompactionHistory(v1Candidate, activeModel, false);
 }
 
 /**

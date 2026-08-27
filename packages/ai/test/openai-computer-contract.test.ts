@@ -365,7 +365,14 @@ describe("OpenAI GA computer contract", () => {
 				role: "toolResult",
 				toolCallId: "call_123|item_123",
 				toolName: "computer",
-				content: [],
+				content: [
+					{
+						type: "image",
+						data: "",
+						mimeType: "image/png",
+						providerFile: { provider: "anthropic", id: "file_foreign" },
+					},
+				],
 				isError: false,
 				timestamp: 2,
 				providerMetadata: {
@@ -399,6 +406,49 @@ describe("OpenAI GA computer contract", () => {
 			expect(sanitized[0]).toMatchObject({ id: "item_123", type: "computer_call" });
 			expect(sanitized[1]).toMatchObject({ output: screenshot });
 		}
+	});
+
+	test("routes unsupported computer screenshot references before image encoding", () => {
+		const calls: ResponseInput = [];
+		const unsupported = model("openai-responses", "gpt-5.3");
+		appendResponsesToolResultMessages(
+			calls,
+			{
+				role: "toolResult",
+				toolCallId: "call_unsupported|item_unsupported",
+				toolName: "computer",
+				content: [
+					{
+						type: "image",
+						data: "",
+						mimeType: "image/png",
+						providerFile: { provider: "anthropic", id: "file_foreign" },
+					},
+				],
+				isError: false,
+				timestamp: 2,
+				providerMetadata: {
+					type: "computer",
+					screenshot: { type: "computer_screenshot", file_id: "file_native_screenshot" },
+					acknowledgedSafetyChecks: [],
+				},
+			},
+			unsupported,
+			false,
+			true,
+			new Set(["call_unsupported"]),
+			undefined,
+			true,
+			new Set(["call_unsupported"]),
+		);
+
+		expect(calls).toEqual([
+			{
+				type: "message",
+				role: "assistant",
+				content: expect.stringContaining("file_native_screenshot"),
+			},
+		]);
 	});
 
 	test("keeps inline screenshot data when stale computer metadata targets an unsupported model", () => {

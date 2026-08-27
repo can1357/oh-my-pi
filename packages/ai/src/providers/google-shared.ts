@@ -41,8 +41,8 @@ import type {
 } from "./google-types";
 import { transformMessages } from "./transform-messages";
 import {
+	getUsableInlineImageMimeType,
 	isRemoteImageUrl,
-	isUsableInlineImageData,
 	NON_VISION_IMAGE_PLACEHOLDER,
 	normalizeImageMimeType,
 	supportsProviderFileReference,
@@ -72,8 +72,9 @@ function convertGoogleImagePart<T extends GoogleApiType>(image: ImageContent, mo
 	if (typeof image.url === "string" && isRemoteImageUrl(image.url) && supportsRemoteImageUrls(model, image)) {
 		return { fileData: { fileUri: image.url, mimeType } };
 	}
-	if (isUsableInlineImageData(image.data)) {
-		return { inlineData: { mimeType, data: image.data } };
+	const inlineMimeType = getUsableInlineImageMimeType(image);
+	if (inlineMimeType) {
+		return { inlineData: { mimeType: inlineMimeType, data: image.data } };
 	}
 	throw new AIError.ValidationError(
 		`input_image cannot be forwarded to ${model.api} without non-empty image data or a supported reference`,

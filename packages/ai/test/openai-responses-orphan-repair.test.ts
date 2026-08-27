@@ -7,8 +7,7 @@ import {
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
-const PNG_B64 =
-	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 describe("repairOrphanResponsesToolCalls", () => {
 	it("appends a synthetic function_call_output after a call with no result", () => {
@@ -280,6 +279,42 @@ describe("repairOrphanResponsesToolOutputs", () => {
 						data: "",
 						mimeType: "image/png",
 						providerFile: { provider: "openai", id: "file_foreign" },
+					},
+				],
+				isError: false,
+				timestamp: 0,
+			},
+			model,
+			true,
+			model.compat.supportsImageDetailOriginal,
+			new Set(),
+		);
+
+		expect(messages).toEqual([
+			{
+				type: "message",
+				role: "assistant",
+				content: expect.stringContaining("[image omitted: source cannot be replayed]"),
+			},
+		]);
+		expect(JSON.stringify(messages)).not.toContain("see attached image");
+	});
+
+	it("uses filtered orphan text when image bytes do not match their media type", () => {
+		const model = getBundledModel<"openai-responses">("openai", "gpt-5-mini");
+		if (!model) throw new Error("expected the bundled OpenAI model");
+		const messages: ResponseInput = [];
+		appendResponsesToolResultMessages(
+			messages,
+			{
+				role: "toolResult",
+				toolCallId: "call_invalid_image",
+				toolName: "read",
+				content: [
+					{
+						type: "image",
+						data: Buffer.from("not an image").toString("base64"),
+						mimeType: "image/png",
 					},
 				],
 				isError: false,

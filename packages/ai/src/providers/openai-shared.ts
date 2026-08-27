@@ -2567,9 +2567,6 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 	computerCallIds?: ReadonlySet<string>,
 ): void {
 	const normalized = normalizeResponsesToolCallId(toolResult.toolCallId);
-	const { output, outputText } = knownCallIds.has(normalized.callId)
-		? encodeResponsesToolResultOutput(toolResult, model, supportsImageDetailOriginal)
-		: encodeResponsesOrphanToolResultOutput(toolResult, model, supportsImageDetailOriginal);
 	const hasSupportedImageSourceInResult = toolResult.content.some(
 		(block): block is ImageContent => block.type === "image" && hasSupportedImageSource(model, block),
 	);
@@ -2583,17 +2580,8 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		} as ResponseInput[number]);
 		return;
 	}
-	if (computerCallIds?.has(normalized.callId) && !(unsupportedComputerMetadata && hasSupportedImageSourceInResult)) {
-		if (toolResult.providerMetadata?.type !== "computer") {
-			const limit = 16_000;
-			const noteText = outputText.length > limit ? `${outputText.slice(0, limit)}\n...[truncated]` : outputText;
-			messages.push({
-				type: "message",
-				role: "assistant",
-				content: `[Computer tool failed before a screenshot was produced; call_id=${normalized.callId}]: ${noteText}`,
-			} as ResponseInput[number]);
-			return;
-		}
+	const isComputerCall = computerCallIds?.has(normalized.callId) === true;
+	if (isComputerCall && toolResult.providerMetadata?.type === "computer" && !unsupportedComputerMetadata) {
 		if (strictResponsesPairing && !knownCallIds.has(normalized.callId)) {
 			messages.push({
 				type: "message",
@@ -2610,21 +2598,33 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		} as ResponseInput[number]);
 		return;
 	}
-	if (strictResponsesPairing && !knownCallIds.has(normalized.callId)) {
-		// Strict backends (Azure, Copilot) reject unpaired outputs outright, but
-		// silently dropping the result loses information the model needs. Fold it
-		// into an assistant note instead (same shape as repairOrphanResponsesToolOutputs).
+	const { output, outputText } = knownCallIds.has(normalized.callId)
+		? encodeResponsesToolResultOutput(toolResult, model, supportsImageDetailOriginal)
+		: encodeResponsesOrphanToolResultOutput(toolResult, model, supportsImageDetailOriginal);
+	if (isComputerCall && toolResult.providerMetadata?.type !== "computer") {
 		const limit = 16_000;
 		const noteText = outputText.length > limit ? `${outputText.slice(0, limit)}\n...[truncated]` : outputText;
 		messages.push({
 			type: "message",
 			role: "assistant",
+			content: `[Computer tool failed before a screenshot was produced; call_id=${normalized.callId}]: ${noteText}`,
+		} as ResponseInput[number]);
+		return;
+	}
+	if (strictResponsesPairing && !knownCallIds.has(normalized.callId)) {
+		// Strict backends (Azure, Copilot) reject unpaired outputs outright, but
+		// silently dropping the result loses information the model needs. Fold it
+		// into an assistant note instead (same shape as repairOrphanResponsesToolOutputs).
+		const orphanOutput = splitResponsesOrphanOutput(output, model, supportsImageDetailOriginal);
+		const limit = 16_000;
+		const noteText =
+			orphanOutput.text.length > limit ? `${orphanOutput.text.slice(0, limit)}\n...[truncated]` : orphanOutput.text;
+		messages.push({
+			type: "message",
+			role: "assistant",
 			content: `[Orphan ${toolResult.toolName || "tool"} result; call_id=${normalized.callId}]: ${noteText}`,
 		} as ResponseInput[number]);
-		appendResponsesOrphanImages(
-			messages,
-			splitResponsesOrphanOutput(output, model, supportsImageDetailOriginal).images,
-		);
+		appendResponsesOrphanImages(messages, orphanOutput.images);
 		return;
 	}
 	if (supportsCustomToolCalls && customCallIds?.has(normalized.callId)) {
