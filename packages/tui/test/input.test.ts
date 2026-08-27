@@ -322,4 +322,41 @@ describe("Input component", () => {
 		input.pasteText("sk-line1\nsk-line2\r\nsk-line3");
 		expect(input.getValue()).toBe("sk-line1sk-line2sk-line3");
 	});
+
+	it("clears undo and redo history when setValue replaces the input", () => {
+		const input = new Input();
+		input.focused = true;
+		input.handleInput("secret");
+		input.handleInput("\x1b[45;5u"); // undo
+		expect(input.getValue()).toBe("");
+
+		input.setValue("");
+		input.handleInput("\x1b[45;3u"); // redo
+		expect(input.getValue()).toBe("");
+
+		input.handleInput("old");
+		input.setValue("new");
+		input.handleInput("\x1b[45;5u"); // undo
+		expect(input.getValue()).toBe("new");
+
+		input.handleInput("x");
+		input.handleInput("\x1b[45;5u"); // undo
+		expect(input.getValue()).toBe("new");
+	});
+
+	it("preserves redo when a pasted payload sanitizes to nothing", () => {
+		const input = new Input();
+		input.focused = true;
+		input.handleInput("a");
+		input.handleInput("\x1b[45;5u"); // undo
+		expect(input.getValue()).toBe("");
+
+		// A bracketed paste of a lone newline sanitizes to an empty string, so it changes
+		// nothing. It must not fork history and discard the reachable redo entry.
+		input.handleInput("\x1b[200~\n\x1b[201~");
+		expect(input.getValue()).toBe("");
+
+		input.handleInput("\x1b[45;3u"); // redo
+		expect(input.getValue()).toBe("a");
+	});
 });

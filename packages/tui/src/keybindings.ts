@@ -28,6 +28,7 @@ export interface Keybindings {
 	"tui.editor.yankPop": true;
 	"tui.editor.undo": true;
 	"tui.editor.spellingSuggestions": true;
+	"tui.editor.redo": true;
 	// Generic input actions
 	"tui.input.newLine": true;
 	"tui.input.submit": true;
@@ -123,6 +124,7 @@ export const TUI_KEYBINDINGS = {
 		defaultKeys: "ctrl+.",
 		description: "Show spelling replacements",
 	},
+	"tui.editor.redo": { defaultKeys: ["alt+-", "alt+_"], description: "Redo" },
 	"tui.input.newLine": { defaultKeys: ["shift+enter", "ctrl+j"], description: "Insert newline" },
 	"tui.input.submit": { defaultKeys: "enter", description: "Submit input" },
 	"tui.input.tab": { defaultKeys: "tab", description: "Tab / autocomplete" },

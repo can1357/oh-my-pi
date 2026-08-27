@@ -2706,6 +2706,151 @@ describe("Editor component", () => {
 		});
 	});
 
+	describe("Redo", () => {
+		const UNDO = "\x1b[45;5u"; // Ctrl+-
+		const REDO = "\x1b[45;3u"; // Alt+-
+
+		it("replays an edit that was undone", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.handleInput("h");
+			editor.handleInput("i");
+			editor.handleInput(" ");
+			editor.handleInput("y");
+			editor.handleInput("o");
+
+			editor.handleInput(UNDO);
+			expect(editor.getText()).toBe("hi ");
+			editor.handleInput(REDO);
+			expect(editor.getText()).toBe("hi yo");
+		});
+
+		it("walks the whole undo history back out again", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.handleInput("h");
+			editor.handleInput("i");
+			editor.handleInput(" ");
+			editor.handleInput("y");
+			editor.handleInput("o");
+
+			editor.handleInput(UNDO);
+			editor.handleInput(UNDO);
+			editor.handleInput(UNDO);
+			expect(editor.getText()).toBe("");
+
+			editor.handleInput(REDO);
+			expect(editor.getText()).toBe("hi");
+			editor.handleInput(REDO);
+			expect(editor.getText()).toBe("hi ");
+			editor.handleInput(REDO);
+			expect(editor.getText()).toBe("hi yo");
+		});
+
+		it("restores the cursor position, not just the text", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("abc");
+			editor.handleInput("\x01"); // Ctrl+A → line start
+			editor.handleInput("X");
+			expect(editor.getText()).toBe("Xabc");
+			expect(editor.getCursor()).toEqual({ line: 0, col: 1 });
+
+			editor.handleInput(UNDO);
+			expect(editor.getText()).toBe("abc");
+			expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
+
+			editor.handleInput(REDO);
+			expect(editor.getText()).toBe("Xabc");
+			expect(editor.getCursor()).toEqual({ line: 0, col: 1 });
+		});
+
+		it("is a no-op when nothing has been undone", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.handleInput("a");
+			editor.handleInput(REDO);
+			expect(editor.getText()).toBe("a");
+			expect(editor.getCursor()).toEqual({ line: 0, col: 1 });
+		});
+
+		it("drops the redo branch once a fresh edit forks history", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.handleInput("a");
+			editor.handleInput(UNDO);
+			expect(editor.getText()).toBe("");
+
+			editor.handleInput("b");
+			editor.handleInput(REDO);
+			expect(editor.getText()).toBe("b");
+		});
+
+		it("clears both stacks on submit so a new draft cannot resurrect the old one", () => {
+			const editor = new Editor(defaultEditorTheme);
+			let submitted: string | undefined;
+			editor.onSubmit = value => {
+				submitted = value;
+			};
+			editor.handleInput("a");
+			editor.handleInput(UNDO);
+			editor.handleInput("\r");
+			expect(submitted).toBe("");
+
+			editor.handleInput(REDO);
+			expect(editor.getText()).toBe("");
+			editor.handleInput(UNDO);
+			expect(editor.getText()).toBe("");
+		});
+
+		it("uses the configured redo binding", () => {
+			setKeybindings(
+				new KeybindingsManager(TUI_KEYBINDINGS, {
+					"tui.editor.redo": "f8",
+				}),
+			);
+
+			const editor = new Editor(defaultEditorTheme);
+			editor.handleInput("a");
+			editor.handleInput(UNDO);
+			expect(editor.getText()).toBe("");
+
+			editor.handleInput("\x1b[19~"); // F8
+			expect(editor.getText()).toBe("a");
+		});
+
+		for (const [name, sequence] of [
+			["Alt+-", "\x1b-"],
+			["Alt+_", "\x1b_"],
+		] as const) {
+			it(`recognizes raw legacy ${name} as redo`, () => {
+				const editor = new Editor(defaultEditorTheme);
+				editor.handleInput("a");
+				editor.handleInput(UNDO);
+				expect(editor.getText()).toBe("");
+
+				editor.handleInput(sequence);
+				expect(editor.getText()).toBe("a");
+			});
+		}
+
+		for (const [name, sequence] of [
+			["backspace at column zero", "\x7f"],
+			["forward delete at the end of the buffer", "\x1b[3~"],
+			["backward word delete at the start of the buffer", "\x17"],
+			["forward word delete at the end of the buffer", "\x1bd"],
+			["line-start kill at the start of the buffer", "\x15"],
+			["line-end kill at the end of the buffer", "\x0b"],
+		] as const) {
+			it(`preserves redo after no-op ${name}`, () => {
+				const editor = new Editor(defaultEditorTheme);
+				editor.handleInput("a");
+				editor.handleInput(UNDO);
+				expect(editor.getText()).toBe("");
+
+				editor.handleInput(sequence);
+				expect(editor.getText()).toBe("");
+				editor.handleInput(REDO);
+				expect(editor.getText()).toBe("a");
+			});
+		}
+	});
+
 	describe("decorateText around the cursor seam", () => {
 		// Editor.#decorate is the only seam that sees both the user prose AND the
 		// trailing CURSOR_MARKER, so a decorator with a right-boundary lookahead
@@ -2811,6 +2956,19 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("line one\nline two");
 			editor.setVolatileText("single line");
 			expect(editor.getText()).toBe("single line");
+		});
+
+		it("discards an active preview before undo so redo cannot make it permanent", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.handleInput("a");
+			editor.setVolatileText("draft");
+			expect(editor.getText()).toBe("adraft");
+
+			editor.handleInput("\x1b[45;5u"); // undo
+			expect(editor.getText()).toBe("");
+			editor.clearVolatileText();
+			editor.handleInput("\x1b[45;3u"); // redo
+			expect(editor.getText()).toBe("a");
 		});
 	});
 

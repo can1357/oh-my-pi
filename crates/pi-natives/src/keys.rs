@@ -215,6 +215,22 @@ static ASCII_PRINTABLE: [&str; 94] = [
 	"m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z", "{", "|", "}", "~",
 ];
 
+/// Pre-allocated Alt+printable ASCII combinations (33-126)
+static ALT_ASCII_PRINTABLE: [&str; 94] = [
+	"alt+!", "alt+\"", "alt+#", "alt+$", "alt+%", "alt+&", "alt+'", "alt+(",
+	"alt+)", "alt+*", "alt++", "alt+,", "alt+-", "alt+.", "alt+/", "alt+0",
+	"alt+1", "alt+2", "alt+3", "alt+4", "alt+5", "alt+6", "alt+7", "alt+8",
+	"alt+9", "alt+:", "alt+;", "alt+<", "alt+=", "alt+>", "alt+?", "alt+@",
+	"alt+A", "alt+B", "alt+C", "alt+D", "alt+E", "alt+F", "alt+G", "alt+H",
+	"alt+I", "alt+J", "alt+K", "alt+L", "alt+M", "alt+N", "alt+O", "alt+P",
+	"alt+Q", "alt+R", "alt+S", "alt+T", "alt+U", "alt+V", "alt+W", "alt+X",
+	"alt+Y", "alt+Z", "alt+[", "alt+\\", "alt+]", "alt+^", "alt+_", "alt+`",
+	"alt+a", "alt+b", "alt+c", "alt+d", "alt+e", "alt+f", "alt+g", "alt+h",
+	"alt+i", "alt+j", "alt+k", "alt+l", "alt+m", "alt+n", "alt+o", "alt+p",
+	"alt+q", "alt+r", "alt+s", "alt+t", "alt+u", "alt+v", "alt+w", "alt+x",
+	"alt+y", "alt+z", "alt+{", "alt+|", "alt+}", "alt+~",
+];
+
 /// Pre-allocated modifier+letter combinations
 static CTRL_LETTERS: [&str; 26] = [
 	"ctrl+a", "ctrl+b", "ctrl+c", "ctrl+d", "ctrl+e", "ctrl+f", "ctrl+g", "ctrl+h", "ctrl+i",
@@ -1157,6 +1173,9 @@ fn parse_esc_pair(code: u8, kitty_protocol_active: bool) -> Option<Cow<'static, 
 		1..=26 => Some(Cow::Borrowed(CTRL_ALT_LETTERS[(code - 1) as usize])),
 		b'a'..=b'z' => Some(Cow::Borrowed(ALT_LETTERS[(code - b'a') as usize])),
 		b'A'..=b'Z' => Some(Cow::Borrowed(ALT_SHIFT_LETTERS[(code - b'A') as usize])),
+		// ESC [ introduces CSI; do not reinterpret a truncated control sequence as Alt+[.
+		b'[' => None,
+		33..=126 => Some(Cow::Borrowed(ALT_ASCII_PRINTABLE[(code - 33) as usize])),
 		_ => None,
 	}
 }
@@ -1574,6 +1593,16 @@ mod tests {
 		for active in [false, true] {
 			assert_eq!(parse_key_inner(b"\x1b\n", active).as_deref(), Some("alt+enter"));
 			assert!(matches_key_inner(b"\x1b\n", "alt+enter", active));
+		}
+	}
+
+	#[test]
+	fn esc_pair_alt_printable_symbols_and_digits() {
+		for active in [false, true] {
+			assert_eq!(parse_key_inner(b"\x1b-", active).as_deref(), Some("alt+-"));
+			assert_eq!(parse_key_inner(b"\x1b_", active).as_deref(), Some("alt+_"));
+			assert_eq!(parse_key_inner(b"\x1b7", active).as_deref(), Some("alt+7"));
+			assert_eq!(parse_key_inner(b"\x1b[", active).as_deref(), None);
 		}
 	}
 
