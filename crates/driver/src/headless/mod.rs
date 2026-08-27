@@ -96,8 +96,16 @@ pub enum HeadlessError {
 	#[error(transparent)]
 	TurnClient(#[from] omp_agent::Error),
 	/// Two extension hosts declared the same layer, tier, and extension.
-	#[error("duplicate extension host identity: {}/{}/{}", .0.layer(), .0.tier(), .0.extension())]
-	DuplicateExtensionHost(omp_envd::worker::HostKey),
+	#[error(
+		"duplicate extension host identity: {}/{}/{}",
+		.key.layer(),
+		.key.tier(),
+		.key.extension()
+	)]
+	DuplicateExtensionHost {
+		/// Identity declared by two attached extension hosts.
+		key: omp_envd::worker::HostKey,
+	},
 	/// The sessions index could not be listed for the latest durable session.
 	#[error("could not list the sessions index")]
 	SessionsIndex(#[source] omp_storage::index::Error),
@@ -345,7 +353,7 @@ fn validate_extension_host_keys<'a>(
 	let mut seen = BTreeSet::new();
 	for key in keys {
 		if !seen.insert(key.clone()) {
-			return Err(HeadlessError::DuplicateExtensionHost(key.clone()));
+			return Err(HeadlessError::DuplicateExtensionHost { key: key.clone() });
 		}
 	}
 	Ok(())
@@ -353,12 +361,14 @@ fn validate_extension_host_keys<'a>(
 
 /// Single owner of every authority needed by a non-interactive agent loop.
 ///
-/// The project Environment must outlive every authority that borrows it, so
-/// those owners are grouped in one `EnvironmentBound` field declared before
-/// `_environment`; Rust drops fields in declaration order, which keeps the
-/// Environment — still declared last — the final drop. `environment_bound`
-/// drops before `_ephemeral_sessions` so live session resources do not borrow
-/// the temporary directory after it has been removed.
+/// Rust drops fields in declaration order. `environment_bound` owns the live
+/// session (`SessionHandle`) and is declared before `approval_book`,
+/// `approval_route`, `approval_inbox`, and `_goal_binding` so the session
+/// interrupts before any host binding that the still-running actor may observe.
+/// It remains before `_ephemeral_sessions` so live session resources do not
+/// borrow the temporary directory after it has been removed, and `_environment`
+/// remains the final drop so the Environment outlives every authority that
+/// borrows it.
 pub struct HeadlessSession {
 	advise_queue:        omp_agent::advisor::AdvisorAdviceQueue,
 	state:               AgentState,
@@ -368,6 +378,7 @@ pub struct HeadlessSession {
 	events:              Option<EventSubscription>,
 	lifecycle:           HeadlessLifecycleSink,
 	lifecycle_events:    Option<HeadlessLifecycleSubscription>,
+	environment_bound:   EnvironmentBound,
 	approval_book:       Arc<ApprovalBook>,
 	approval_route:      ApprovalRoute,
 	approval_inbox:      Option<ApprovalInbox>,
@@ -385,7 +396,6 @@ pub struct HeadlessSession {
 	_mid_turn_policy:    omp_agent::MidTurnCompactionPolicy,
 	_retry_policy:       omp_agent::RetryPolicy,
 	_forced_tool:        Mutex<Option<Str>>,
-	environment_bound:   EnvironmentBound,
 	_ephemeral_sessions: Option<chat::EphemeralSessions>,
 	_environment:        omp_envd::ProjectEnvironment,
 }
@@ -495,6 +505,14 @@ impl HeadlessSession {
 			.map_err(HeadlessError::SettingsProjection)?
 			.get()
 			.resolve_path_scopes(&root, &home);
+		if matches!(policy.session, HeadlessSessionOpen::New | HeadlessSessionOpen::Ephemeral)
+			&& !crate::discovery::roles::model_selector_allowed(
+				catalog,
+				&model_settings,
+				model.as_str(),
+			) {
+			return Err(HeadlessError::MissingRoute(model));
+		}
 		let prompt_discovery_settings = discovery::PromptDiscoverySettings {
 			model:   model_settings.clone(),
 			skills:  settings_snapshot
@@ -643,15 +661,9 @@ impl HeadlessSession {
 		) {
 			let journal_path = sessions_dir.join(format!("{}.jsonl", session.id.as_str()));
 			let mut revived = omp_agent::revive_existing(&journal_path, session.journal, snapshot)?;
-			if let Some(pending) = revived.journal.pending_turn().cloned() {
-				revived
-					.journal
-					.abort_turn(now_ms(), pending.turn_id.as_str(), AbortDisposition::Continue)
-					.map_err(|error| HeadlessError::Revival(error.into()))?;
-			}
 			session.journal = revived.journal;
 			snapshot = revived.snapshot;
-			if let Some(notice) = apply_revived_session_model(
+			let revived_model = apply_revived_session_model(
 				&mut snapshot,
 				catalog,
 				revived.model_override.as_ref(),
@@ -659,8 +671,17 @@ impl HeadlessSession {
 				&options.additional_roots,
 				&model_settings,
 				options.credential_provider.as_ref(),
-			)? {
+			)?;
+			if let Some(notice) = revived_model.notice {
 				notices.push(notice);
+			}
+			if revived_model.substituted {
+				if let Some(pending) = session.journal.pending_turn().cloned() {
+					session
+						.journal
+						.abort_turn(now_ms(), pending.turn_id.as_str(), AbortDisposition::Continue)
+						.map_err(|error| HeadlessError::Revival(error.into()))?;
+				}
 			}
 		}
 		apply_tool_policy(&mut snapshot, &policy.tools, policy.lsp_enabled);
@@ -905,6 +926,12 @@ impl HeadlessSession {
 			events: Some(events),
 			lifecycle,
 			lifecycle_events: Some(lifecycle_events),
+			environment_bound: EnvironmentBound {
+				session: session_handle,
+				advisor_parent,
+				env,
+				_edit_repair_task: edit_repair_task,
+			},
 			approval_book,
 			approval_route,
 			approval_inbox: Some(approval_inbox),
@@ -916,20 +943,14 @@ impl HeadlessSession {
 			_inference_registry: inference_registry,
 			_catalog: catalog_owner,
 			_memory_extraction: memory_extraction,
-			_ephemeral_sessions: ephemeral_sessions,
 			_tool_policy: policy.tools,
 			_lsp_enabled: policy.lsp_enabled,
 			_compaction_methods: compaction_methods,
 			_mid_turn_policy: mid_turn_policy,
 			_retry_policy: retry_policy,
 			_forced_tool: Mutex::new(None),
+			_ephemeral_sessions: ephemeral_sessions,
 			_environment: environment,
-			environment_bound: EnvironmentBound {
-				session: session_handle,
-				advisor_parent,
-				env,
-				_edit_repair_task: edit_repair_task,
-			},
 		})
 	}
 
@@ -1362,6 +1383,13 @@ impl HeadlessSession {
 		self.environment_bound.session.publish(event);
 	}
 }
+/// Result of reconciling the model selector after reviving a durable session.
+struct RevivedModelResult {
+	/// Selector that could not be selected, with the fallback used instead.
+	pub notice:      Option<HeadlessNotice>,
+	/// Whether a catalog fallback replaced the journaled or launch selector.
+	pub substituted: bool,
+}
 
 /// Applies a journaled model override, substitutes a catalog fallback when the
 /// pinned selector is unselectable, and reprojects model-derived snapshot
@@ -1374,14 +1402,16 @@ fn apply_revived_session_model(
 	additional_roots: &[PathBuf],
 	model_settings: &omp_catalog::settings::ModelSettings,
 	credential_provider: Option<&ProviderId>,
-) -> Result<Option<HeadlessNotice>, HeadlessError> {
-	let launch = snapshot.turn.params.model.clone();
+) -> Result<RevivedModelResult, HeadlessError> {
+	let mut model_applied = false;
 	if let Some(model) = model_override
 		&& !model.fallback
 	{
 		snapshot.turn.params.model = model.model.model.0.to_string();
+		model_applied = true;
 	}
 	let mut notice = None;
+	let mut substituted = false;
 	if !chat::model_selector_is_selectable(catalog, &snapshot.turn.params.model)
 		|| !crate::discovery::roles::model_selector_allowed(
 			catalog,
@@ -1402,8 +1432,9 @@ fn apply_revived_session_model(
 			.ok_or(HeadlessError::NoSelectableModel)?;
 		snapshot.turn.params.model = fallback.as_str().to_owned();
 		notice = Some(HeadlessNotice { saved, fallback });
+		substituted = true;
 	}
-	if snapshot.turn.params.model != launch {
+	if model_applied || substituted {
 		let session_id = snapshot
 			.turn
 			.context_id
@@ -1424,7 +1455,7 @@ fn apply_revived_session_model(
 		snapshot.enabled_tools = projected.enabled_tools;
 		snapshot.reasoning_dialect = projected.reasoning_dialect;
 	}
-	Ok(notice)
+	Ok(RevivedModelResult { notice, substituted })
 }
 
 #[cfg(test)]
@@ -1440,7 +1471,7 @@ mod tests {
 	fn duplicate_extension_host_keys_fail_before_environment_freeze() {
 		let key = omp_envd::worker::HostKey::new("project", "trusted", "example/tool");
 		let error = validate_extension_host_keys([&key, &key]).expect_err("duplicate rejected");
-		let HeadlessError::DuplicateExtensionHost(duplicate) = error else {
+		let HeadlessError::DuplicateExtensionHost { key: duplicate } = error else {
 			panic!("duplicate key must be a duplicate extension host error");
 		};
 		assert_eq!(duplicate.layer().as_str(), "project");
@@ -1529,7 +1560,7 @@ mod tests {
 		let model_settings = omp_catalog::settings::ModelSettings::default();
 		let revived = omp_agent::revive_existing(&path, journal, snapshot).expect("revive");
 		snapshot = revived.snapshot;
-		let notice = apply_revived_session_model(
+		let result = apply_revived_session_model(
 			&mut snapshot,
 			catalog,
 			revived.model_override.as_ref(),
@@ -1542,8 +1573,9 @@ mod tests {
 		let expected = crate::discovery::roles::fallback_model_selector(catalog, &model_settings)
 			.expect("catalog fallback");
 		assert_eq!(snapshot.turn.params.model, expected.as_str());
+		assert!(result.substituted);
 		assert_eq!(
-			notice,
+			result.notice,
 			Some(HeadlessNotice { saved: Str::from("gone/gone"), fallback: expected.clone() })
 		);
 		assert_eq!(
@@ -1585,7 +1617,7 @@ mod tests {
 			Arc::from([omp_catalog::settings::PathScopedStringEntry::Bare(Str::new("no/such"))]);
 		let revived = omp_agent::revive_existing(&path, journal, snapshot).expect("revive");
 		snapshot = revived.snapshot;
-		let error = apply_revived_session_model(
+		let error = match apply_revived_session_model(
 			&mut snapshot,
 			catalog,
 			revived.model_override.as_ref(),
@@ -1593,8 +1625,10 @@ mod tests {
 			&[],
 			&model_settings,
 			None,
-		)
-		.expect_err("empty catalog fallback");
+		) {
+			Err(error) => error,
+			Ok(_) => panic!("empty catalog fallback"),
+		};
 		assert!(matches!(error, HeadlessError::NoSelectableModel));
 	}
 

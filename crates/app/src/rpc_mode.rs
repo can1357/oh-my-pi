@@ -75,8 +75,7 @@ use crate::{
 	chat_ui::commands::{
 		BrowserRequest, CommandFuture, CommandResult, CommandRoster, ConfigCommandHost,
 		ConsumedResult, FlowCommandHost, McpRequest, ModelCommandHost, ParsedFlags,
-		SessionCommandHost,
-		SessionRequest, ShellCommandHost, WorkspaceRequest,
+		SessionCommandHost, SessionRequest, ShellCommandHost, WorkspaceRequest,
 	},
 	cli::{RpcArgs, turn_id},
 };
@@ -319,6 +318,8 @@ async fn run_inner(args: RpcArgs, ui_enabled: bool) -> miette::Result<()> {
 	)
 	.await
 	.into_diagnostic()?;
+	let headless_model = headless.model().to_string();
+	let notices = headless.take_notices();
 	let headless_id = headless.session_id().to_owned();
 	let headless_events = headless
 		.take_events()
@@ -351,7 +352,7 @@ async fn run_inner(args: RpcArgs, ui_enabled: bool) -> miette::Result<()> {
 		shutdown: ShutdownCoordinator::default(),
 		negotiated,
 		state: Mutex::new(ServerState::new(
-			model.to_string(),
+			headless_model,
 			models,
 			providers,
 			preferred_provider,
@@ -369,6 +370,14 @@ async fn run_inner(args: RpcArgs, ui_enabled: bool) -> miette::Result<()> {
 			.map_err(|error| miette!(error.message))?;
 	}
 	runtime.notify_session_start()?;
+	for notice in notices {
+		runtime.notify(json!({
+			"type": "command_output",
+			"stream": "stderr",
+			"content": format!("{notice}"),
+			"generation": 0,
+		}))?;
+	}
 	runtime.notify_available_commands()?;
 
 	let (input_tx, input_rx) = flume::unbounded();
@@ -3412,18 +3421,13 @@ impl FlowCommandHost for RpcCommandHost {
 			};
 			runtime
 				.settings_manager
-				.set(
-					MutationScope::Project,
-					"browser.headless",
-					if next { "true" } else { "false" },
-				)
+				.set(MutationScope::Project, "browser.headless", if next { "true" } else { "false" })
 				.await
 				.into_diagnostic()?;
 			let registry = runtime.headless.lock().await.session.tool_registry();
 			let mode = if next { "headless" } else { "visible" };
 			let status =
-				match crate::chat_ui::commands::browser::restart_for_mode_change(&registry, next)
-					.await
+				match crate::chat_ui::commands::browser::restart_for_mode_change(&registry, next).await
 				{
 					Ok(()) => sf!("Browser mode: {mode}"),
 					Err(error) => sf!("Browser mode set to {mode}, but restart failed: {error}"),
