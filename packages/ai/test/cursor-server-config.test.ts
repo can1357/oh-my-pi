@@ -11,12 +11,14 @@ import {
 	resetCursorServerConfigCache,
 } from "@oh-my-pi/pi-ai/providers/cursor/server-config";
 import { openCursorTransport } from "@oh-my-pi/pi-ai/providers/cursor/transport";
+import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
 import {
+	GetServerConfigRequestSchema,
 	type GetServerConfigResponse,
 	GetServerConfigResponseSchema,
 	Http2Config,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
-import { create, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
+import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 
 const GET_SERVER_CONFIG_PATH = "/agent.v1.AgentService/GetServerConfig";
 const CONNECT_END_STREAM_FLAG = 0b00000010;
@@ -28,7 +30,9 @@ type Scenario =
 	| { kind: "http-500" }
 	| { kind: "hang" }
 	| { kind: "oversized" }
-	| { kind: "route-required" };
+	| { kind: "route-required" }
+	| { kind: "gated"; released: Promise<void> }
+	| { kind: "raw-unary" };
 
 let server: http2.Http2Server | undefined;
 const sessions = new Set<http2.Http2Session>();
@@ -59,7 +63,7 @@ async function startServer(): Promise<string> {
 		sessions.add(session);
 		session.on("close", () => sessions.delete(session));
 	});
-	server.on("stream", (stream: http2.ServerHttp2Stream, headers: http2.IncomingHttpHeaders) => {
+	server.on("stream", async (stream: http2.ServerHttp2Stream, headers: http2.IncomingHttpHeaders) => {
 		stream.on("data", () => {});
 		// Writing to a stream the client already destroyed emits an error on the
 		// server side; swallow it so the closed-leak test does not surface one.
@@ -72,6 +76,32 @@ async function startServer(): Promise<string> {
 		invocations++;
 		if (scenario.kind === "http-500") {
 			stream.respond({ ":status": 500 });
+			stream.end();
+			return;
+		}
+		if (scenario.kind === "gated" || scenario.kind === "raw-unary") {
+			// Unary requests carry the raw serialized message: the gated variant
+			// holds the (enveloped) response until the test releases it, and the
+			// raw-unary variant answers with the bare protobuf message — the plain
+			// Connect unary response shape.
+			const body = await readH2RequestBody(stream);
+			if (!isRawUnaryRequest(body)) {
+				stream.respond({ ":status": 400 });
+				stream.end();
+				return;
+			}
+			if (scenario.kind === "gated") await scenario.released;
+			stream.respond({ ":status": 200, "content-type": "application/proto" });
+			if (scenario.kind === "raw-unary") {
+				stream.write(
+					toBinary(
+						GetServerConfigResponseSchema,
+						create(GetServerConfigResponseSchema, { http2Config: Http2Config.FORCE_BIDI_DISABLED }),
+					),
+				);
+			} else {
+				stream.write(Buffer.concat([responseFrame({ http2Config: Http2Config.FORCE_BIDI_DISABLED }), endFrame()]));
+			}
 			stream.end();
 			return;
 		}
@@ -126,6 +156,31 @@ async function startServer(): Promise<string> {
 		throw new Error("expected http2 fixture server to bind a tcp port");
 	}
 	return `http://127.0.0.1:${address.port}`;
+}
+
+/** Collects one HTTP/2 request body; resolves on end or error. */
+async function readH2RequestBody(stream: http2.ServerHttp2Stream): Promise<Buffer> {
+	const parts: Buffer[] = [];
+	const ended = Promise.withResolvers<void>();
+	stream.on("data", (chunk: Buffer) => parts.push(chunk));
+	stream.on("end", () => ended.resolve());
+	stream.on("error", () => ended.resolve());
+	await ended.promise;
+	return Buffer.concat(parts);
+}
+
+/**
+ * True when `body` is a raw unary protobuf request. The empty
+ * `GetServerConfigRequest` serializes to 0 bytes; the streaming-envelope form
+ * wraps it in five zero bytes, which is not valid protobuf.
+ */
+function isRawUnaryRequest(body: Buffer): boolean {
+	try {
+		fromBinary(GetServerConfigRequestSchema, body);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 async function stopServer(): Promise<void> {
@@ -350,6 +405,25 @@ describe("fetchCursorBidiAvailability concurrent miss coalescing", () => {
 		// Without coalescing, each caller would start its own wire request.
 		expect(invocations).toBe(1);
 	});
+	it("keeps the shared fetch alive when the first caller aborts, so survivors get the real answer", async () => {
+		const gate = Promise.withResolvers<void>();
+		scenario = { kind: "gated", released: gate.promise };
+		const baseUrl = await startServer();
+		const controller = new AbortController();
+		const abandoned = fetchFor(baseUrl, controller.signal);
+		const survivor = fetchFor(baseUrl);
+		// Both callers coalesced onto the one gated wire request. The first
+		// caller's abort must abandon only its own wait — not cancel the shared
+		// fetch, and not publish the abort as the cached answer.
+		controller.abort();
+		gate.resolve();
+		expect(await abandoned).toBe("unspecified");
+		expect(await survivor).toBe("bidi-disabled");
+		expect(invocations).toBe(1);
+		// The shared result — not the abort — is what was published and cached.
+		expect(await fetchFor(baseUrl)).toBe("bidi-disabled");
+		expect(invocations).toBe(1);
+	});
 });
 
 describe("fetchCursorBidiAvailability HTTP/1 truncated response", () => {
@@ -430,6 +504,174 @@ describe("fetchCursorBidiAvailability HTTP/1 truncated response", () => {
 		if (!address || typeof address === "string") throw new Error("expected h1 fixture to bind");
 		const baseUrl = `http://127.0.0.1:${address.port}`;
 		expect(await fetchFor(baseUrl)).toBe("bidi-disabled");
+	});
+});
+
+describe("unary wire framing", () => {
+	let h1Server: http.Server | undefined;
+
+	beforeEach(async () => {
+		await h2Pool.disposeCursorH2Pool();
+		resetCursorServerConfigCache();
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await h2Pool.disposeCursorH2Pool();
+		await stopServer();
+		if (h1Server) {
+			const closing = h1Server;
+			h1Server = undefined;
+			const closed = Promise.withResolvers<void>();
+			closing.close(error => (error ? closed.reject(error) : closed.resolve()));
+			await closed.promise;
+		}
+	});
+
+	it("sends the raw protobuf request and decodes a raw response over HTTP/2", async () => {
+		// The fixture rejects a streaming-envelope request body with 400 and
+		// answers with the bare protobuf message — both halves of the unary
+		// Connect contract on one wire.
+		scenario = { kind: "raw-unary" };
+		const baseUrl = await startServer();
+		expect(await fetchFor(baseUrl)).toBe("bidi-disabled");
+	});
+
+	it("sends the raw protobuf request over HTTP/1", async () => {
+		// Force the H1 fallback path by mocking the h2 acquisition to fail ALPN.
+		vi.spyOn(h2Pool, "acquireCursorH2").mockResolvedValue({
+			ok: false,
+			unavailable: {
+				reason: "alpn",
+				cause: Object.assign(new Error("h2 is not supported"), { code: "ERR_HTTP2_ERROR" }),
+			},
+		});
+		h1Server = http.createServer((req, res) => {
+			const parts: Buffer[] = [];
+			req.on("data", (chunk: Buffer) => parts.push(chunk));
+			req.on("end", () => {
+				// A conforming unary request is the raw serialized message; the
+				// streaming-envelope form of the empty request is five zero bytes
+				// of invalid protobuf and must be rejected here.
+				if (!isRawUnaryRequest(Buffer.concat(parts))) {
+					res.statusCode = 400;
+					res.end();
+					return;
+				}
+				res.writeHead(200, { "content-type": "application/proto" });
+				res.end(responseFrame({ http2Config: Http2Config.FORCE_BIDI_DISABLED }));
+			});
+		});
+		const listening = Promise.withResolvers<void>();
+		h1Server.once("error", listening.reject);
+		h1Server.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
+		const address = h1Server.address();
+		if (!address || typeof address === "string") throw new Error("expected h1 fixture to bind");
+		const baseUrl = `http://127.0.0.1:${address.port}`;
+		expect(await fetchFor(baseUrl)).toBe("bidi-disabled");
+	});
+
+	it("decodes a raw unary response over HTTP/1", async () => {
+		vi.spyOn(h2Pool, "acquireCursorH2").mockResolvedValue({
+			ok: false,
+			unavailable: {
+				reason: "alpn",
+				cause: Object.assign(new Error("h2 is not supported"), { code: "ERR_HTTP2_ERROR" }),
+			},
+		});
+		h1Server = http.createServer((_req, res) => {
+			// The bare protobuf message with no envelope — the plain Connect
+			// unary response shape. An envelope-only decoder fails open here.
+			const message = create(GetServerConfigResponseSchema, {
+				http2Config: Http2Config.FORCE_BIDI_DISABLED,
+			});
+			res.writeHead(200, { "content-type": "application/proto" });
+			res.end(toBinary(GetServerConfigResponseSchema, message));
+		});
+		const listening = Promise.withResolvers<void>();
+		h1Server.once("error", listening.reject);
+		h1Server.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
+		const address = h1Server.address();
+		if (!address || typeof address === "string") throw new Error("expected h1 fixture to bind");
+		const baseUrl = `http://127.0.0.1:${address.port}`;
+		expect(await fetchFor(baseUrl)).toBe("bidi-disabled");
+	});
+});
+
+describe("HTTP/1 fallback provider proxy routing", () => {
+	let proxyServer: http.Server | undefined;
+	let savedProxyEnv: Record<string, string | undefined> = {};
+	const PROXY_ENV_NAMES = ["PI_PROXY_CURSOR", "PI_PROXY", "NO_PROXY", "no_proxy"] as const;
+
+	beforeEach(async () => {
+		await h2Pool.disposeCursorH2Pool();
+		resetCursorServerConfigCache();
+		savedProxyEnv = {};
+		for (const name of PROXY_ENV_NAMES) {
+			savedProxyEnv[name] = Bun.env[name];
+		}
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await h2Pool.disposeCursorH2Pool();
+		if (proxyServer) {
+			const closing = proxyServer;
+			proxyServer = undefined;
+			const closed = Promise.withResolvers<void>();
+			closing.close(error => (error ? closed.reject(error) : closed.resolve()));
+			await closed.promise;
+		}
+		for (const name of PROXY_ENV_NAMES) {
+			const saved = savedProxyEnv[name];
+			if (saved === undefined) delete Bun.env[name];
+			else Bun.env[name] = saved;
+		}
+		// After the env is restored, drop any memoized "cursor" proxy
+		// resolution so no other suite inherits this test's throwaway proxy.
+		__resetProxyCache();
+	});
+
+	it("routes the GetServerConfig HTTP/1 probe through PI_PROXY_CURSOR", async () => {
+		let proxiedRequests = 0;
+		let forwardedTarget = "";
+		proxyServer = http.createServer((req, res) => {
+			proxiedRequests++;
+			forwardedTarget = req.url ?? "";
+			const message = create(GetServerConfigResponseSchema, {
+				http2Config: Http2Config.FORCE_BIDI_DISABLED,
+			});
+			res.writeHead(200, { "content-type": "application/proto" });
+			res.end(toBinary(GetServerConfigResponseSchema, message));
+		});
+		const listening = Promise.withResolvers<void>();
+		proxyServer.once("error", listening.reject);
+		proxyServer.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
+		const address = proxyServer.address();
+		if (!address || typeof address === "string") throw new Error("expected proxy fixture to bind");
+		delete Bun.env.PI_PROXY;
+		delete Bun.env.NO_PROXY;
+		delete Bun.env.no_proxy;
+		Bun.env.PI_PROXY_CURSOR = `http://127.0.0.1:${address.port}`;
+		// The provider proxy resolution is memoized; re-resolve after the env.
+		__resetProxyCache();
+		vi.spyOn(h2Pool, "acquireCursorH2").mockResolvedValue({
+			ok: false,
+			unavailable: {
+				reason: "alpn",
+				cause: Object.assign(new Error("h2 is not supported"), { code: "ERR_HTTP2_ERROR" }),
+			},
+		});
+		// A non-local origin that cannot be reached directly: honoring the
+		// proxy delivers the request to the local fixture, while a direct
+		// probe fails open to "unspecified" — the regression this pins.
+		const baseUrl = "http://cursor-config-proxy-probe.invalid:1";
+		expect(await fetchFor(baseUrl)).toBe("bidi-disabled");
+		expect(proxiedRequests).toBe(1);
+		expect(forwardedTarget).toContain(GET_SERVER_CONFIG_PATH);
 	});
 });
 
