@@ -154,6 +154,7 @@ type OpenAICompletionsUsageLike = {
 type OpenAICompletionsPromptTokenDetails = {
 	cached_tokens?: unknown;
 	cache_write_tokens?: unknown;
+	created_cache_tokens?: unknown;
 };
 
 type OpenAICompletionsCompletionTokenDetails = {
@@ -1776,13 +1777,14 @@ export function parseChunkUsage(
 	const promptTokenCachedTokens = promptTokenDetails?.cached_tokens;
 	const completionReasoningTokens = completionTokenDetails?.reasoning_tokens;
 	const cacheWriteTokens = promptTokenDetails?.cache_write_tokens;
+	const createdCacheTokens = promptTokenDetails?.created_cache_tokens;
 	const outputTokens = typeof completionTokens === "number" ? completionTokens : 0;
 	const accounting = calculateOpenAIUsageAccounting({
 		promptTokens: typeof promptTokens === "number" ? promptTokens : 0,
 		outputTokens,
 		cachedTokens: firstPositiveNumber(cachedTokens, promptCacheHitTokens, promptTokenCachedTokens),
 		reasoningTokens: typeof completionReasoningTokens === "number" ? completionReasoningTokens : 0,
-		cacheWriteOpenRouter: typeof cacheWriteTokens === "number" ? cacheWriteTokens : undefined,
+		cacheWriteOpenRouter: firstPositiveNumber(cacheWriteTokens, createdCacheTokens) || undefined,
 		cacheWriteDeepSeek: typeof promptCacheMissTokens === "number" ? promptCacheMissTokens : undefined,
 		hasDeepSeekCacheHitAndMiss: typeof promptCacheHitTokens === "number" && typeof promptCacheMissTokens === "number",
 	});

@@ -233,6 +233,44 @@ describe("openai-completions parseChunkUsage", () => {
 		expect(usage.cacheWrite).toBe(5_000);
 		expect(usage.totalTokens).toBe(6_250);
 	});
+
+	it("maps vLLM created_cache_tokens to cacheWrite on cold turn", () => {
+		// vLLM with --enable-prompt-tokens-details reports cache creation
+		// via prompt_tokens_details.created_cache_tokens (not cache_write_tokens).
+		// On the first (cold) turn: cached_tokens=0, created_cache_tokens=1920.
+		const usage = parseChunkUsage(
+			{
+				prompt_tokens: 3_026,
+				completion_tokens: 10,
+				prompt_tokens_details: { cached_tokens: 0, created_cache_tokens: 1_920 },
+			},
+			OPENAI_MODEL,
+			undefined,
+		);
+
+		expect(usage.input).toBe(1_106); // 3026 - 0 - 1920
+		expect(usage.cacheRead).toBe(0);
+		expect(usage.cacheWrite).toBe(1_920);
+		expect(usage.totalTokens).toBe(3_036); // 1106 + 10 + 0 + 1920
+	});
+
+	it("maps vLLM cached_tokens to cacheRead on warm turn", () => {
+		// On subsequent (warm) turns: cached_tokens=1920, created_cache_tokens=0.
+		const usage = parseChunkUsage(
+			{
+				prompt_tokens: 3_026,
+				completion_tokens: 10,
+				prompt_tokens_details: { cached_tokens: 1_920, created_cache_tokens: 0 },
+			},
+			OPENAI_MODEL,
+			undefined,
+		);
+
+		expect(usage.input).toBe(1_106); // 3026 - 1920 - 0
+		expect(usage.cacheRead).toBe(1_920);
+		expect(usage.cacheWrite).toBe(0);
+		expect(usage.totalTokens).toBe(3_036); // 1106 + 10 + 1920 + 0
+	});
 });
 
 describe("shared OpenAI usage accounting", () => {
