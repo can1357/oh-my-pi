@@ -572,9 +572,15 @@ async function readUnaryResponse(
 	}
 	const { promise, resolve } = Promise.withResolvers<Uint8Array | null>();
 	let settled = false;
+	const onAbort = (): void => finish(null);
 	const finish = (value: Uint8Array | null): void => {
 		if (settled) return;
 		settled = true;
+		// Drop the timeout listener on every settle path. The signal is the
+		// `AbortSignal.timeout(timeoutMs)` object itself: a long timeout that
+		// never fires would otherwise retain `finish` — and through it the
+		// request, the lease, and every buffered chunk — until the timer's GC.
+		signal.removeEventListener("abort", onAbort);
 		release();
 		resolve(value);
 	};
@@ -590,7 +596,7 @@ async function readUnaryResponse(
 		finish(null);
 		return promise;
 	}
-	signal.addEventListener("abort", () => finish(null), { once: true });
+	signal.addEventListener("abort", onAbort, { once: true });
 	if (body.length > 0) request.end(Buffer.from(body));
 	else request.end();
 	return promise;

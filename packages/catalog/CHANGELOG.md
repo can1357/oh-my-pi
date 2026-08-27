@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Removed the Cursor discovery timeout abort listener after the request completes so a long timeout cannot retain the response buffer.
+
 ## [18.0.7] - 2026-08-26
 
 ### Fixed

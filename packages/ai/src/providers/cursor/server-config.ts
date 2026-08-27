@@ -29,7 +29,7 @@ const GET_SERVER_CONFIG_PATH = "/agent.v1.AgentService/GetServerConfig";
 /** Wall-clock budget for one config fetch. Exceeding it fails open to `"unspecified"`. */
 const CURSOR_SERVER_CONFIG_TIMEOUT_MS = 5_000;
 
-/** Per-`apiKey`+`baseUrl` TTL; two calls within it make one wire request. */
+/** Per-key TTL (apiKey + baseUrl + caller headers); two calls within it make one wire request. */
 const CURSOR_SERVER_CONFIG_TTL_MS = 30_000;
 
 /** Maximum retained cache entries (LRU bound). */
@@ -39,15 +39,17 @@ const CURSOR_SERVER_CONFIG_CACHE_CAP = 8;
 const MAX_SERVER_CONFIG_RESPONSE_BYTES = 1_048_576; // 1 MiB
 
 /**
- * Per-`apiKey`+`baseUrl` result cache. An `"unspecified"` result is cached
- * too — it is a valid answer, and the transport caller hits this fetch on
- * every ALPN failure, so a healthy account must not re-query on every retry.
- * The policy is per-ENDPOINT (the server's FORCE_* directives are scoped to
- * the backend, and `baseUrl` is independently configurable), so the key
- * composes both — same apiKey against endpoint A then B within the TTL must
- * not cross-contaminate. The map is bounded at `CURSOR_SERVER_CONFIG_CACHE_CAP`
- * entries (LRU) so a long-lived process with rotating keys does not hold
- * them forever; expired entries are pruned opportunistically on every write.
+ * Per-key result cache (apiKey + baseUrl + caller headers). An `"unspecified"`
+ * result is cached too — it is a valid answer, and the transport caller hits
+ * this fetch on every ALPN failure, so a healthy account must not re-query on
+ * every retry. The policy is per-ENDPOINT (the server's FORCE_* directives are
+ * scoped to the backend, and `baseUrl` is independently configurable), so the
+ * key composes both — same apiKey against endpoint A then B within the TTL
+ * must not cross-contaminate. Caller headers are part of the key because one
+ * endpoint can serve several routes distinguished only by those headers. The
+ * map is bounded at `CURSOR_SERVER_CONFIG_CACHE_CAP` entries (LRU) so a
+ * long-lived process with rotating keys does not hold them forever; expired
+ * entries are pruned opportunistically on every write.
  */
 const cache = new Map<string, { value: CursorBidiAvailability; expiresAt: number }>();
 /**
@@ -91,8 +93,8 @@ export function __cursorServerConfigCacheSize(): number {
 /**
  * Returns the account's bidi availability, or `"unspecified"` when it cannot
  * be determined for any reason (fail open). The result is cached per
- * `apiKey`+`baseUrl` for the TTL; the cache is LRU-bounded and pruned on
- * every write.
+ * `apiKey` + `baseUrl` + caller headers for the TTL; the cache is LRU-bounded
+ * and pruned on every write.
  */
 export async function fetchCursorBidiAvailability(args: {
 	apiKey: string;
@@ -101,8 +103,9 @@ export async function fetchCursorBidiAvailability(args: {
 	 * Sanitized caller headers (see `sanitizeCursorCallerHeaders`) forwarded to
 	 * both config transports beneath the fixed unary set — a gateway may require
 	 * a caller-supplied routing or auth field on `GetServerConfig` exactly as it
-	 * does on Run. Not part of the cache key: one provider endpoint implies one
-	 * header set.
+	 * does on Run. Part of the cache and in-flight key: one endpoint can serve
+	 * several routes distinguished only by these headers, so a directive (or a
+	 * coalesced wire request) must never cross header sets.
 	 */
 	callerHeaders?: Record<string, string>;
 	/**
@@ -112,7 +115,7 @@ export async function fetchCursorBidiAvailability(args: {
 	 */
 	signal?: AbortSignal;
 }): Promise<CursorBidiAvailability> {
-	const key = `${args.apiKey}|${args.baseUrl}`;
+	const key = serverConfigCacheKey(args.apiKey, args.baseUrl, args.callerHeaders);
 	const cached = cache.get(key);
 	if (cached && cached.expiresAt > Date.now()) {
 		// LRU: move to most-recently-used end.
@@ -125,6 +128,26 @@ export async function fetchCursorBidiAvailability(args: {
 	const existing = inflight.get(key);
 	const shared = existing ?? beginSharedServerConfigFetch(key, args.apiKey, args.baseUrl, args.callerHeaders);
 	return awaitSharedServerConfig(shared, args.signal);
+}
+
+/**
+ * Cache and in-flight key: `apiKey` + `baseUrl` plus a canonical serialization
+ * of the sanitized caller headers. A gateway can answer `GetServerConfig`
+ * per caller header, so two callers that differ only in headers must not
+ * share a cached or coalesced result. Header names are sorted so insertion
+ * order cannot split one header set into two keys, and `JSON.stringify`
+ * escaping keeps the encoding unambiguous. Undefined or empty headers keep
+ * the bare `apiKey|baseUrl` shape so the no-header path keeps one key.
+ */
+function serverConfigCacheKey(
+	apiKey: string,
+	baseUrl: string,
+	callerHeaders: Record<string, string> | undefined,
+): string {
+	const names = Object.keys(callerHeaders ?? {}).sort();
+	if (names.length === 0) return `${apiKey}|${baseUrl}`;
+	const entries = names.map(name => [name, callerHeaders?.[name] ?? ""]);
+	return `${apiKey}|${baseUrl}|${JSON.stringify(entries)}`;
 }
 
 /**

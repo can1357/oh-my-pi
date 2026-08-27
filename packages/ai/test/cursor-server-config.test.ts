@@ -749,4 +749,76 @@ describe("caller header forwarding to the config probe", () => {
 		attempt.close();
 		await expect(attempt.trailers()).resolves.toEqual({});
 	});
+
+	it("does not reuse a cached directive across different caller header sets", async () => {
+		// One endpoint, two routes distinguished only by the caller header: the
+		// gateway serves route "east" a bidi-disabled directive and rejects every
+		// other route value with 403 (→ unspecified). A cache key that omits the
+		// headers hands route west east's directive — authorizing the HTTP/1
+		// bridge for the wrong route.
+		scenario = { kind: "route-required" };
+		const baseUrl = await startServer();
+		expect(
+			await fetchCursorBidiAvailability({
+				apiKey: "test-token",
+				baseUrl,
+				callerHeaders: { "x-gateway-route": "east" },
+			}),
+		).toBe("bidi-disabled");
+		expect(
+			await fetchCursorBidiAvailability({
+				apiKey: "test-token",
+				baseUrl,
+				callerHeaders: { "x-gateway-route": "west" },
+			}),
+		).toBe("unspecified");
+		// West made its own wire request; it was not served east's cache entry.
+		expect(invocations).toBe(2);
+	});
+
+	it("does not coalesce concurrent callers with different caller header sets", async () => {
+		scenario = { kind: "route-required" };
+		const baseUrl = await startServer();
+		const [east, west] = await Promise.all([
+			fetchCursorBidiAvailability({ apiKey: "test-token", baseUrl, callerHeaders: { "x-gateway-route": "east" } }),
+			fetchCursorBidiAvailability({ apiKey: "test-token", baseUrl, callerHeaders: { "x-gateway-route": "west" } }),
+		]);
+		// Coalescing onto one wire request would publish east's directive to
+		// west — the wrong route authorized off one probe.
+		expect(east).toBe("bidi-disabled");
+		expect(west).toBe("unspecified");
+		expect(invocations).toBe(2);
+	});
+
+	it("keys undefined and empty caller headers identically", async () => {
+		scenario = { kind: "bidi-disabled" };
+		const baseUrl = await startServer();
+		expect(await fetchFor(baseUrl)).toBe("bidi-disabled");
+		expect(await fetchCursorBidiAvailability({ apiKey: "test-token", baseUrl, callerHeaders: {} })).toBe(
+			"bidi-disabled",
+		);
+		// Both hit the no-header cache entry: one wire request, not two.
+		expect(invocations).toBe(1);
+	});
+
+	it("is insensitive to caller header insertion order in the cache key", async () => {
+		scenario = { kind: "route-required" };
+		const baseUrl = await startServer();
+		expect(
+			await fetchCursorBidiAvailability({
+				apiKey: "test-token",
+				baseUrl,
+				callerHeaders: { "x-gateway-route": "east", "x-trace-id": "t1" },
+			}),
+		).toBe("bidi-disabled");
+		expect(
+			await fetchCursorBidiAvailability({
+				apiKey: "test-token",
+				baseUrl,
+				callerHeaders: { "x-trace-id": "t1", "x-gateway-route": "east" },
+			}),
+		).toBe("bidi-disabled");
+		// Same header set in a different insertion order: same key, one wire request.
+		expect(invocations).toBe(1);
+	});
 });

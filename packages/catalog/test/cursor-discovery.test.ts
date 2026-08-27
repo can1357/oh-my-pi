@@ -466,6 +466,49 @@ describe("fetchCursorUsableModels", () => {
 		]);
 	});
 
+	it("removes the timeout signal's abort listener after a successful discovery", async () => {
+		const response = create(GetUsableModelsResponseSchema, {
+			models: [create(ModelDetailsSchema, { modelId: "composer-3" })],
+		});
+		const url = await startCursorDiscoveryServer(toBinary(GetUsableModelsResponseSchema, response));
+		// A long `timeoutMs` arms a signal that never fires: swap it for a
+		// counting wrapper so the test can see the listener bookkeeping. The
+		// abort listener `readUnaryResponse` installs must come off when the
+		// read settles, or it retains `finish` — and through it the request,
+		// the lease, and every buffered chunk — until the timer's own GC.
+		const inner = new AbortController().signal;
+		let listeners = 0;
+		const counted = new Proxy(inner, {
+			get(target, prop) {
+				if (prop === "addEventListener") {
+					return (type: string, listener: EventListener, options?: unknown) => {
+						listeners++;
+						target.addEventListener(type, listener, options as AddEventListenerOptions);
+					};
+				}
+				if (prop === "removeEventListener") {
+					return (type: string, listener: EventListener, options?: unknown) => {
+						listeners--;
+						target.removeEventListener(type, listener, options as EventListenerOptions);
+					};
+				}
+				const value = Reflect.get(target, prop, target);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		}) as AbortSignal;
+		const originalTimeout = AbortSignal.timeout;
+		AbortSignal.timeout = () => counted;
+		try {
+			const models = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 60_000 });
+			expect(models).toEqual([expect.objectContaining({ id: "composer-3" })]);
+			// Every listener taken on the timeout signal (the read's own plus
+			// the pool's connect-wait and lease guards) was removed on settle.
+			expect(listeners).toBe(0);
+		} finally {
+			AbortSignal.timeout = originalTimeout;
+		}
+	});
+
 	it("cancels a connect whose last waiter aborted mid-handshake instead of publishing it", async () => {
 		const response = create(GetUsableModelsResponseSchema, {
 			models: [create(ModelDetailsSchema, { modelId: "composer-3" })],

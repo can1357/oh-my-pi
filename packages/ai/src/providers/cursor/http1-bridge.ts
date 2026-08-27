@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type * as http2 from "node:http2";
+import { getProxyForUrl } from "../../utils/proxy";
 import {
 	CONNECT_FLAG_COMPRESSED,
 	CONNECT_FLAG_END_STREAM,
@@ -78,6 +79,13 @@ export function openCursorHttp1Bridge(args: {
 		baseHeaders[name] = Array.isArray(value) ? value.join(", ") : String(value);
 	}
 
+	// The bridge's poll and append fetches must honor the provider proxy the
+	// same way the config probe does (`fetchServerConfigOverHttp1`): a proxied
+	// deployment that cannot reach the origin directly would otherwise open the
+	// bridge on the probe's downgrade permit and then fail every bridge
+	// request. Resolved once per bridge from `args.baseUrl`.
+	const proxy = getProxyForUrl("cursor", new URL(args.baseUrl));
+
 	const settleSuccess = (): void => {
 		if (terminal) return;
 		terminal = true;
@@ -133,6 +141,7 @@ export function openCursorHttp1Bridge(args: {
 			headers,
 			body: encodeConnectFrame(encodePollRequest(requestId), args.gzipRequest),
 			signal,
+			...(proxy ? { proxy } : {}),
 		});
 		if (!response.ok) throw new Error(`Cursor HTTP/1 poll failed with HTTP ${response.status}`);
 		if (!response.body) throw new Error("Cursor HTTP/1 poll response had no body");
@@ -176,6 +185,17 @@ export function openCursorHttp1Bridge(args: {
 					queue.push({ kind: "end", error: null });
 					settleSuccess();
 					return;
+				}
+				// The eof flag terminates the poll's data sequence. Any data
+				// envelope after it is a protocol violation, not a stale
+				// continuation to decode and queue — accepting one would let a
+				// malformed server append payloads after it already declared the
+				// end of the response. The Connect end envelope above remains the
+				// only frame legal after eof, so a clean eof+end pair still settles.
+				if (sawPollEof) {
+					throw new ConnectProtocolError("Cursor HTTP/1 poll received data after its eof flag", {
+						kind: "envelope",
+					});
 				}
 				const pollResponse = decodePollResponse(frame.payload);
 				if (pollResponse.seqno !== expectedSeqno) {
@@ -228,6 +248,7 @@ export function openCursorHttp1Bridge(args: {
 					headers,
 					body: encodeAppendRequest(requestId, seqno, payload),
 					signal,
+					...(proxy ? { proxy } : {}),
 				});
 				if (!response.ok) throw new Error(`Cursor HTTP/1 append failed with HTTP ${response.status}`);
 			});

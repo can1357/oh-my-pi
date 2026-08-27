@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Keyed the Cursor GetServerConfig cache by caller routing headers so one route cannot authorize the HTTP/1 bridge for another.
+- Routed Cursor HTTP/1 poll and append fetches through `PI_PROXY_CURSOR`.
+- Rejected Cursor HTTP/1 poll data envelopes after the poll EOF flag.
+
 ## [18.0.7] - 2026-08-26
 
 ### Added
