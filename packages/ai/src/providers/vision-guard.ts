@@ -257,7 +257,7 @@ export function isRemoteImageUrl(value: string): boolean {
 }
 
 interface ComputerScreenshotCandidate {
-	/** `"computer_screenshot"` discriminant carried by real refs; unused here. */
+	/** `"computer_screenshot"` discriminant every real ref carries. */
 	type?: unknown;
 	file_id?: unknown;
 	image_url?: unknown;
@@ -268,20 +268,39 @@ export function supportsComputerScreenshotOutput(model: Model): boolean {
 	return COMPUTER_SCREENSHOT_APIS.has(model.api) && model.supportsComputerUse === true;
 }
 
+/**
+ * `ComputerScreenshotRef` is an exclusive union: the discriminant plus exactly
+ * one non-empty `file_id` or `image_url`. Runtime metadata is untrusted, so a
+ * candidate that misses that shape has no source to authorize.
+ */
+function resolveComputerScreenshotSource(
+	screenshot: ComputerScreenshotCandidate | undefined,
+): { kind: "file_id" | "image_url"; value: string } | undefined {
+	if (screenshot === undefined || screenshot.type !== "computer_screenshot") return undefined;
+	const hasFileId = screenshot.file_id !== undefined;
+	const hasImageUrl = screenshot.image_url !== undefined;
+	if (hasFileId === hasImageUrl) return undefined;
+	if (hasFileId) {
+		return typeof screenshot.file_id === "string" && screenshot.file_id.length > 0
+			? { kind: "file_id", value: screenshot.file_id }
+			: undefined;
+	}
+	return typeof screenshot.image_url === "string" && screenshot.image_url.length > 0
+		? { kind: "image_url", value: screenshot.image_url }
+		: undefined;
+}
+
 export function supportsComputerScreenshotReferences(model: Model, screenshot?: ComputerScreenshotCandidate): boolean {
 	if (!supportsComputerScreenshotOutput(model)) return false;
-	if (screenshot?.file_id !== undefined) {
-		return supportsProviderFileReference(
-			model,
-			{ provider: "openai", id: screenshot.file_id },
-			{ mimeType: "image/png" },
-		);
+	const source = resolveComputerScreenshotSource(screenshot);
+	if (source === undefined) return false;
+	if (source.kind === "file_id") {
+		return supportsProviderFileReference(model, { provider: "openai", id: source.value }, { mimeType: "image/png" });
 	}
-	if (typeof screenshot?.image_url !== "string") return false;
-	if (isRemoteImageUrl(screenshot.image_url)) {
+	if (isRemoteImageUrl(source.value)) {
 		return supportsRemoteImageUrls(model, { mimeType: REMOTE_COMPUTER_SCREENSHOT_MIME_TYPE });
 	}
-	const inlineImage = decodeDataUri(screenshot.image_url);
+	const inlineImage = decodeDataUri(source.value);
 	return inlineImage !== undefined && getUsableInlineImageMimeType(inlineImage) !== undefined;
 }
 

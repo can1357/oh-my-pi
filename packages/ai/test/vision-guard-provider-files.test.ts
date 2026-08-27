@@ -279,6 +279,26 @@ describe("OpenAI provider-file capability", () => {
 		).toBe(false);
 	});
 
+	it("requires the computer_screenshot discriminant and exactly one source", () => {
+		const model = makeResponsesTargetModel("openai-responses", "openai", "https://api.openai.com/v1");
+
+		expect(
+			supportsComputerScreenshotReferences(model, { type: "computer_screenshot", file_id: "file_image_123" }),
+		).toBe(true);
+		expect(supportsComputerScreenshotReferences(model, { type: "bogus", file_id: "file_image_123" })).toBe(false);
+		expect(supportsComputerScreenshotReferences(model, { file_id: "file_image_123" })).toBe(false);
+		expect(
+			supportsComputerScreenshotReferences(model, {
+				type: "computer_screenshot",
+				file_id: "file_image_123",
+				image_url: "https://images.example.invalid/screenshot.png",
+			}),
+		).toBe(false);
+		expect(supportsComputerScreenshotReferences(model, { type: "computer_screenshot" })).toBe(false);
+		expect(supportsComputerScreenshotReferences(model, { type: "computer_screenshot", file_id: "" })).toBe(false);
+		expect(supportsComputerScreenshotReferences(model, { type: "computer_screenshot", file_id: 42 })).toBe(false);
+	});
+
 	it("accepts Anthropic handles on canonical official API bases", () => {
 		const reference = { provider: "anthropic", id: "file_anthropic_123" };
 		const image = { mimeType: "image/png" };

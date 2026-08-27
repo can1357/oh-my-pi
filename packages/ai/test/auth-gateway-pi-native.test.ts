@@ -1064,6 +1064,142 @@ describe("pi-native gateway image reference validation", () => {
 		}
 	});
 
+	it("rejects a computer screenshot whose runtime shape is not a computer_screenshot ref", async () => {
+		const upstreamRequests: Array<Record<string, unknown>> = [];
+		const upstream = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				upstreamRequests.push((await request.json()) as Record<string, unknown>);
+				const events = [
+					{
+						type: "response.output_item.added",
+						output_index: 0,
+						item: { type: "message", id: "msg_computer_shape", role: "assistant", content: [] },
+					},
+					{ type: "response.output_text.delta", delta: "ok" },
+					{
+						type: "response.output_item.done",
+						output_index: 0,
+						item: {
+							type: "message",
+							id: "msg_computer_shape",
+							role: "assistant",
+							content: [{ type: "output_text", text: "ok" }],
+						},
+					},
+					{
+						type: "response.completed",
+						response: {
+							id: "resp_computer_shape",
+							status: "completed",
+							usage: {
+								input_tokens: 1,
+								output_tokens: 1,
+								total_tokens: 2,
+								input_tokens_details: { cached_tokens: 0 },
+							},
+						},
+					},
+				];
+				return new Response(`${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\n`, {
+					headers: { "Content-Type": "text/event-stream" },
+				});
+			},
+		});
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-computer-shape-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openai", "test-key");
+		const model = buildModel({
+			id: "gpt-5.4",
+			name: "Custom Responses Computer Shape",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: `${upstream.url.origin}/v1`,
+			reasoning: false,
+			input: ["text", "image"],
+			supportsComputerUse: true,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"openai-responses">);
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => model,
+			version: "test",
+		});
+		const screenshotUrl = "https://images.example.invalid/shape.png";
+
+		try {
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: model.id,
+					context: {
+						messages: [
+							{
+								role: "assistant",
+								content: [
+									{
+										type: "toolCall",
+										id: "call_computer_shape|item_computer_shape",
+										name: "computer",
+										arguments: {},
+										providerMetadata: {
+											type: "computer",
+											providerItemId: "item_computer_shape",
+											actions: [{ type: "screenshot" }],
+										},
+									},
+								],
+								api: model.api,
+								provider: model.provider,
+								model: model.id,
+								usage: ZERO_USAGE,
+								stopReason: "toolUse",
+								timestamp: 0,
+							},
+							{
+								role: "toolResult",
+								toolCallId: "call_computer_shape|item_computer_shape",
+								toolName: "computer",
+								content: [],
+								providerMetadata: {
+									type: "computer",
+									screenshot: { type: "bogus", image_url: screenshotUrl },
+									acknowledgedSafetyChecks: [],
+								},
+								isError: false,
+								timestamp: 0,
+							},
+						],
+					},
+					stream: false,
+				}),
+			});
+
+			expect(response.status).toBe(200);
+			await response.json();
+			expect(upstreamRequests).toHaveLength(1);
+			const input = upstreamRequests[0]?.input;
+			if (!Array.isArray(input)) throw new Error("expected Responses input");
+			expect(JSON.stringify(input)).not.toContain("bogus");
+			expect(input).toContainEqual({
+				type: "computer_call_output",
+				call_id: "call_computer_shape",
+				output: { type: "computer_screenshot", image_url: screenshotUrl },
+			});
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			upstream.stop(true);
+		}
+	});
+
 	it("degrades a well-formed unverifiable image carrying an unsupported provider file", async () => {
 		const upstreamRequests: CapturedOpenAICompletionRequest[] = [];
 		const upstream = startOpenAICompletionsUpstream(upstreamRequests);
