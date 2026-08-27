@@ -174,9 +174,7 @@ describe("speculative tool calling through a real session", () => {
 		expect(speculated).toEqual([{ prompt: "haiku please" }]);
 	});
 
-	// The whole chain. If the interceptor, the arg read, the store, or the WeakMap
-	// binding is broken, the cell's completion() dispatches for real against a
-	// mock-only session and the marker never appears in the output.
+	// Covers the whole chain: interceptor, arg read, store, and WeakMap binding.
 	it("serves the cell's completion() from the speculation instead of dispatching again", async () => {
 		await build(true);
 		const code = 'const a = await completion("haiku please"); display(a);';
@@ -194,9 +192,6 @@ describe("speculative tool calling through a real session", () => {
 		expect(speculated).toHaveLength(1);
 	});
 
-	// The expensive way to be wrong: one prompt's speculated answer satisfying a
-	// call that asked something else. The cell would receive an answer to a
-	// question it never asked, and both requests would be billed.
 	it("keys speculations per prompt rather than serving whichever is parked", async () => {
 		await build(true);
 		// Both literals are scanned and launched, including the unreachable one the
@@ -221,9 +216,6 @@ describe("speculative tool calling through a real session", () => {
 		expect(speculated.map(args => args.prompt).sort()).toEqual(["actually called", "never called"]);
 	});
 
-	// The mirror of the claim path: a call the scanner cannot speculate must reach
-	// the real bridge. If `claimSpeculation` ever answered on a loose match, or the
-	// store handed back some unrelated parked entry, this is where it would show.
 	it("lets a non-speculatable call fall through to the real bridge", async () => {
 		await build(true);
 		// A concatenation is not a single literal, so the scanner skips it while the
@@ -238,10 +230,8 @@ describe("speculative tool calling through a real session", () => {
 		await session.prompt("run a cell");
 
 		const resultText = getToolResultText(session.agent.state.messages, "call_spec_4");
-		// The `ERR:` prefix is only reachable through the cell's own catch, so it
-		// proves the call really dispatched and rejected downstream rather than the
-		// cell dying earlier. Without it, `not.toContain` below would pass vacuously
-		// for any cell that never reached its completion() call at all.
+		// Only the cell's own catch can produce this, so it proves the call really
+		// dispatched rather than the cell dying before reaching completion().
 		expect(resultText, `expected a real dispatch attempt, saw: ${JSON.stringify(resultText)}`).toContain("ERR:");
 		expect(resultText, `no speculated value may satisfy this call: ${JSON.stringify(resultText)}`).not.toContain(
 			SPECULATED_PREFIX,
