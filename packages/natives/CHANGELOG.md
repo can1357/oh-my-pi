@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.0.8] - 2026-08-27
+
 ### Fixed
 
 - Large session histories no longer leave macOS Terminal unresponsive during repaint.

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.0.8] - 2026-08-27
+
 ### Added
 
 - Added the Linux `subreaper` spawn option to retain reparented descendants for process-tree cleanup.
