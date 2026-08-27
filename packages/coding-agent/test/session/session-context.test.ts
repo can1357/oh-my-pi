@@ -681,6 +681,104 @@ describe("buildSessionContext dangling toolCalls with a v4 tool journal", () => 
 		expect((assistant as AgentMessage & InterruptedToolCallsMarker).interruptedToolCalls).toBeUndefined();
 		expect((assistant as AgentMessage & StrippedToolCallsMarker).strippedToolCalls).toBe(1);
 	});
+
+	it("never misattributes a recycled toolCallId's pre-reset record to the post-/clear call", () => {
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "m1",
+				parentId: null,
+				timestamp,
+				message: { role: "user", content: [{ type: "text", text: "start" }], timestamp: 1 },
+			},
+			{
+				type: "message",
+				id: "m2",
+				parentId: "m1",
+				timestamp,
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "echo AAA111" } }],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-sonnet-4-5",
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 2,
+				},
+			},
+			// The ONLY started record for call-1 on the whole branch, and it
+			// belongs to the pre-reset call above — `/clear` drops it from the
+			// emitted `messages`, but it is still on the full `path`.
+			{
+				type: "tool_execution_started",
+				id: "j1",
+				parentId: "m2",
+				timestamp,
+				recordVersion: 1,
+				executionId: toolExecutionId("exec-SCTX0006"),
+				call: { toolCallId: "call-1", toolName: "bash", title: "Run FIXTURE_MARKER_SCTX0006_PRE", kind: "execute" },
+				presentation: { version: 1, facts: [] },
+			},
+			{ type: "reset_boundary", id: "r1", parentId: "j1", timestamp },
+			{
+				type: "message",
+				id: "m3",
+				parentId: "r1",
+				timestamp,
+				message: { role: "user", content: [{ type: "text", text: "after clear" }], timestamp: 3 },
+			},
+			{
+				type: "message",
+				id: "m4",
+				parentId: "m3",
+				timestamp,
+				message: {
+					role: "assistant",
+					// Recycled toolCallId, post-reset, and journals NO started record
+					// of its own — with the window left at 0 the pre-reset start
+					// above would satisfy the totality gate (1 start == 1 occurrence)
+					// and hand this call the earlier execution's descriptor.
+					content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "echo BBB222" } }],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-sonnet-4-5",
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 4,
+				},
+			},
+		];
+
+		const context = buildSessionContext(entries, undefined, undefined, {
+			transcript: true,
+			collapseCompactedHistory: true,
+		});
+
+		expect(danglingCallIds(context.messages)).toEqual([]);
+		const assistant = context.messages.find(message => message.role === "assistant" && message.content.length === 0);
+		expect(assistant).toBeDefined();
+		// The post-reset window holds no `tool_execution_started` record for
+		// call-1 at all (the only one is pre-reset, outside the window), so this
+		// call must fall back to the plain elision count — never render the
+		// earlier execution's title under its own name.
+		expect((assistant as AgentMessage & InterruptedToolCallsMarker).interruptedToolCalls).toBeUndefined();
+		expect((assistant as AgentMessage & StrippedToolCallsMarker).strippedToolCalls).toBe(1);
+	});
 });
 
 const assistantUsage: AssistantMessage["usage"] = {

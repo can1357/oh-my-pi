@@ -575,6 +575,14 @@ export function buildSessionContext(
 		// (and its kept tail) too, so only genuinely post-reset entries emit; a
 		// boundary before the latest compaction is superseded by it (the
 		// `else if (compaction)` branch below handles that case via this guard).
+		// The journal correlation window must honour the same cut as `messages`:
+		// pre-reset `tool_execution_started` records are as out-of-scope here as
+		// pre-compaction ones are for the compaction branch below. Leaving the
+		// window at 0 would count occurrences over post-reset messages while
+		// reading starts off the full lineage — a recycled toolCallId whose only
+		// start is pre-reset could then pass the totality gate and hand that
+		// earlier execution's descriptor to the post-reset call.
+		messageWindowStart = resetBoundaryIdx + 1;
 		for (let i = resetBoundaryIdx + 1; i < path.length; i++) {
 			appendMessage(path[i]);
 		}
