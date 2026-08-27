@@ -20,7 +20,19 @@ import { buildToolNamespacesInfo, resolveCodeMode } from "../src/session/code-mo
 import { SessionManager } from "../src/session/session-manager";
 import { generateCodeModeDeclarations } from "../src/tools/eval-format/code-mode-declarations";
 
-const ENABLED = ["eval", "ask", "todo", "yield", "think", "read", "bash", "edit", "mcp__gmail__search"];
+const ENABLED = [
+	"eval",
+	"ask",
+	"todo",
+	"yield",
+	"think",
+	"checkpoint",
+	"rewind",
+	"read",
+	"bash",
+	"edit",
+	"mcp__gmail__search",
+];
 
 describe("resolveCodeMode", () => {
 	test("off: inactive regardless of catalog flag", () => {
@@ -43,7 +55,7 @@ describe("resolveCodeMode", () => {
 			evalTransportAvailable: true,
 		});
 		expect(r.active).toBe(true);
-		expect([...r.directToolNames].sort()).toEqual(["ask", "eval", "think", "todo", "yield"]);
+		expect([...r.directToolNames].sort()).toEqual(["ask", "checkpoint", "eval", "rewind", "think", "todo", "yield"]);
 	});
 	test("auto without flag: inactive", () => {
 		expect(
@@ -359,6 +371,18 @@ describe("Code Mode session reconciliation", () => {
 		expect(session.getEnabledToolNames()).toEqual(["read"]);
 		expect(session.getActiveToolNames()).toEqual(["read"]);
 		expect(session.codeModeNamespacesInfo).toBeUndefined();
+	});
+
+	test("startup reconcile survives a transiently narrow live tool set", async () => {
+		const { session } = createSession(Settings.isolated({ "providers.openai-codex.codeMode": "auto" }));
+		// Before the first apply, a startup-time mutation can shrink the live
+		// agent tools. A reconcile landing in that window must reapply the
+		// construction slate, not commit the shrunken set as sticky.
+		session.agent.setTools([]);
+		await session.initializeCodeMode();
+
+		expect(session.getEnabledToolNames()).toEqual(["eval", "read"]);
+		expect(session.getActiveToolNames()).toEqual(["eval"]);
 	});
 
 	test("an eval replacement that cannot state transport support keeps the direct surface", async () => {

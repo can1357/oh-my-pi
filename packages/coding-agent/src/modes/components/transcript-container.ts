@@ -1,5 +1,6 @@
 import type { Component, HistoryBatch } from "@oh-my-pi/pi-tui";
 import { Container } from "@oh-my-pi/pi-tui";
+import { logger } from "@oh-my-pi/pi-utils";
 import { isToolActivityComponent } from "./tool-activity";
 
 /** Shared animation time supplied by the constrained transcript root. */
@@ -25,6 +26,9 @@ export interface TranscriptStableRow {
  * Explicit semantic-row contract for a block whose stable head may enter native
  * history before finalization. Every later array must extend the prior keys
  * exactly; each row renderer is deterministic for its width.
+ * A publication that breaks these invariants (e.g. a mid-stream theme change
+ * re-coloring already-emitted bytes) freezes further stable-row emission for
+ * that block instead of failing the render — see {@link TranscriptContainer}.
  */
 export interface AppendOnlyTranscriptBlock {
 	readonly transcriptBlockMode: "appendOnly";
@@ -58,6 +62,13 @@ interface TranscriptEntry {
 	stableRows: readonly TranscriptStableRow[];
 	renderedStableByWidth: Map<number, readonly string[]>;
 	emitted: number;
+	/**
+	 * Set when a published stable row drifted (retraction, byte change within a
+	 * width epoch, or no longer a render prefix). Rows already in native
+	 * scrollback cannot be retracted, so the entry keeps its last good stable
+	 * state for emitted-row slicing but never emits another mid-stream row.
+	 */
+	stableFrozen: boolean;
 }
 
 type RetirementPolicy = "pressure" | "flush";
@@ -85,7 +96,8 @@ function isPlainBlank(line: string): boolean {
 	return !/\S/.test(line);
 }
 
-function isRowPrefix(prefix: readonly string[], rows: readonly string[]): boolean {
+/** Whether `prefix` matches `rows` byte-for-byte from the top. */
+export function isRowPrefix(prefix: readonly string[], rows: readonly string[]): boolean {
 	if (prefix.length > rows.length) return false;
 	for (let index = 0; index < prefix.length; index++) {
 		if (prefix[index] !== rows[index]) return false;
@@ -131,6 +143,7 @@ export class TranscriptContainer extends Container {
 			stableRows: EMPTY_STABLE_ROWS,
 			renderedStableByWidth: new Map(),
 			emitted: 0,
+			stableFrozen: false,
 		});
 	}
 
@@ -352,6 +365,7 @@ export class TranscriptContainer extends Container {
 			policy === "pressure" &&
 			total > room &&
 			head?.mode === "appendOnly" &&
+			!head.stableFrozen &&
 			head.state !== "committed" &&
 			head.emitted < head.stableRows.length
 		) {
@@ -359,7 +373,8 @@ export class TranscriptContainer extends Container {
 			const before = this.#renderStablePrefix(head, head.emitted, width);
 			const after = this.#renderStablePrefix(head, emittedEnd, width);
 			if (!isRowPrefix(before, after) || after.length === before.length) {
-				throw new Error("Append-only transcript semantic row render must add a non-empty suffix");
+				this.#freezeStableRows(head, EMPTY_ROWS, "semantic row render added no suffix");
+				return undefined;
 			}
 			const batch: HistoryBatch = {
 				id: this.#nextBatchId++,
@@ -452,14 +467,14 @@ export class TranscriptContainer extends Container {
 
 	#renderEntry(entry: TranscriptEntry, width: number): readonly string[] {
 		const rendered = trimBlankEdges(entry.component.render(width));
-		if (entry.mode === "mutable") return rendered;
+		if (entry.mode === "mutable" || entry.stableFrozen) return rendered;
 		const appendOnly = entry.component as Component & AppendOnlyTranscriptBlock;
 		const stable = appendOnly.getTranscriptStableRows();
 		if (!isStablePrefix(entry.stableRows, stable)) {
-			throw new Error("Append-only transcript stable rows must extend the previously published prefix");
+			return this.#freezeStableRows(entry, rendered, "publication retracted the published prefix");
 		}
 		if (entry.emitted > stable.length) {
-			throw new Error("Append-only transcript stable rows cannot retract emitted history");
+			return this.#freezeStableRows(entry, rendered, "publication retracted emitted history");
 		}
 		const published =
 			stable.length > entry.stableRows.length
@@ -467,14 +482,27 @@ export class TranscriptContainer extends Container {
 				: entry.stableRows;
 		const stableRendered = appendOnly.renderTranscriptStableRows(published.length, width);
 		if (!isRowPrefix(stableRendered, rendered)) {
-			throw new Error("Append-only transcript stable rows must render as a prefix of the block");
+			return this.#freezeStableRows(entry, rendered, "stable rows no longer render as a prefix of the block");
 		}
 		const priorRender = entry.renderedStableByWidth.get(width);
 		if (priorRender && !isRowPrefix(priorRender, stableRendered)) {
-			throw new Error("Append-only transcript stable rows changed within a width epoch");
+			return this.#freezeStableRows(entry, rendered, "stable rows changed within a width epoch");
 		}
 		entry.stableRows = published;
 		entry.renderedStableByWidth.set(width, stableRendered.slice());
+		return rendered;
+	}
+
+	/**
+	 * Demote a drifting append-only publication: rows already written to native
+	 * scrollback cannot be retracted, so keep the last good stable state for
+	 * emitted-row slicing and stop mid-stream emission for this block. The block
+	 * still renders and retires whole on finalization; worst case is the old
+	 * finalize-time behavior plus a possible stale-byte seam in scrollback.
+	 */
+	#freezeStableRows(entry: TranscriptEntry, rendered: readonly string[], reason: string): readonly string[] {
+		entry.stableFrozen = true;
+		logger.warn("Append-only transcript block frozen", { reason, emitted: entry.emitted });
 		return rendered;
 	}
 
@@ -640,6 +668,7 @@ export class TranscriptContainer extends Container {
 					stableRows: EMPTY_STABLE_ROWS,
 					renderedStableByWidth: new Map(),
 					emitted: 0,
+					stableFrozen: false,
 				},
 		);
 		this.#frontier = this.#entries.findIndex(entry => entry.state !== "committed");

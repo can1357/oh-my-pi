@@ -21,7 +21,7 @@ import {
 	isReasoningGlmModelId,
 } from "../identity/family";
 import { resolveModelReference } from "../identity/reference";
-import type { ModelManagerOptions } from "../model-manager";
+import type { ModelManagerOptions, ModelsDevFallback } from "../model-manager";
 import { type GeneratedProvider, getBundledModels } from "../models";
 import { OPENAI_GPT_56_CYBER_STANDARD_COST, OPENAI_GPT_56_SOL_STANDARD_COST } from "../openai-pricing";
 import type {
@@ -47,6 +47,7 @@ import {
 import { createBundledReferenceMap, createReferenceResolver, toModelSpec } from "./bundled-references";
 import { getDefaultModelDiscoveryBaseUrl, resolveModelCacheProviderId } from "./cache-provider-id";
 import type { ModelManagerConfig } from "./descriptor-types";
+import { filterModelsDevCatalogRows } from "./models-dev-policies";
 
 const MODELS_DEV_URL = "https://catalog.stencil.so/models.json.zstd";
 
@@ -114,17 +115,40 @@ function toInputCapabilities(value: unknown): ("text" | "image")[] {
 }
 
 /**
- * Process-wide catalog session: the first call downloads the payload (the one
- * request the server logs); later calls revalidate with `If-None-Match` and
- * reuse the decoded payload on `304`. Failure after a successful load falls
- * back to the session copy.
+ * Catalog sessions are scoped to the fetch implementation that owns their
+ * network and authentication context. Callers sharing one fetch reuse the same
+ * conditional request state; isolated registries cannot observe each other's
+ * payloads, ETags, or in-flight requests.
  */
-const catalogSession: {
+interface CatalogSession {
 	inflight: Promise<unknown> | null;
 	payload: unknown;
 	etag: string | null;
 	hasPayload: boolean;
-} = { inflight: null, payload: undefined, etag: null, hasPayload: false };
+}
+
+const defaultCatalogSession: CatalogSession = { inflight: null, payload: undefined, etag: null, hasPayload: false };
+const catalogSessionsByFetch = new WeakMap<FetchImpl, CatalogSession>();
+
+function getCatalogSession(fetchImpl: FetchImpl | undefined): CatalogSession {
+	if (!fetchImpl) return defaultCatalogSession;
+	const existing = catalogSessionsByFetch.get(fetchImpl);
+	if (existing) return existing;
+	const created: CatalogSession = { inflight: null, payload: undefined, etag: null, hasPayload: false };
+	catalogSessionsByFetch.set(fetchImpl, created);
+	return created;
+}
+
+function waitForCatalogRequest<T>(request: Promise<T>, signal?: AbortSignal): Promise<T> {
+	if (!signal) return request;
+	if (signal.aborted) return Promise.reject(signal.reason);
+	const aborted = Promise.withResolvers<never>();
+	const rejectAborted = () => aborted.reject(signal.reason);
+	signal.addEventListener("abort", rejectAborted, { once: true });
+	return Promise.race([request, aborted.promise]).finally(() => {
+		signal.removeEventListener("abort", rejectAborted);
+	});
+}
 
 const CATALOG_USER_AGENT = USER_AGENT;
 
@@ -134,52 +158,66 @@ const CATALOG_USER_AGENT = USER_AGENT;
  * The frame magic is sniffed rather than trusting content-type so plain-JSON
  * responses (test stubs, fallback mirrors) parse identically.
  *
- * Fetched fully once per process: concurrent callers share the in-flight
- * request, repeat callers send a conditional GET that the server answers
- * (and deliberately does not log) with `304`.
+ * Fetched fully once per fetch context: concurrent callers sharing a fetch
+ * implementation reuse one transport request, while repeat callers send a
+ * conditional GET that the server answers with `304`. Each subscriber may stop
+ * waiting independently; the shared transport retains its own hard deadline.
+ * Transient failures reuse the last in-memory payload for callers that only
+ * need best-effort metadata.
  */
 export function fetchWellKnownModels(fetchImpl?: FetchImpl, signal?: AbortSignal): Promise<unknown> {
-	if (!catalogSession.inflight) {
-		catalogSession.inflight = fetchCatalogPayload(fetchImpl ?? discoveryFetch(), signal).finally(() => {
-			catalogSession.inflight = null;
-		});
-	}
-	return catalogSession.inflight;
+	const session = getCatalogSession(fetchImpl);
+	return fetchRevalidatedWellKnownModels(fetchImpl, signal).catch(error => {
+		if (session.hasPayload) return session.payload;
+		throw error;
+	});
 }
 
-async function fetchCatalogPayload(fetchImpl: FetchImpl, signal?: AbortSignal): Promise<unknown> {
+function fetchRevalidatedWellKnownModels(fetchImpl?: FetchImpl, signal?: AbortSignal): Promise<unknown> {
+	const session = getCatalogSession(fetchImpl);
+	if (!session.inflight) {
+		session.inflight = withCatalogDiscoveryTimeout(DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS, transportSignal =>
+			fetchCatalogPayload(fetchImpl ?? discoveryFetch(), session, transportSignal),
+		).finally(() => {
+			session.inflight = null;
+		});
+	}
+	return waitForCatalogRequest(session.inflight, signal);
+}
+
+function fetchRevalidatedWellKnownModelsWithTimeout(
+	fetchImpl?: FetchImpl,
+	timeoutMs = DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
+): Promise<unknown> {
+	return withCatalogDiscoveryTimeout(timeoutMs, signal => fetchRevalidatedWellKnownModels(fetchImpl, signal));
+}
+
+async function fetchCatalogPayload(
+	fetchImpl: FetchImpl,
+	session: CatalogSession,
+	signal?: AbortSignal,
+): Promise<unknown> {
 	const headers: Record<string, string> = {
 		Accept: "application/zstd, application/json",
 		"User-Agent": CATALOG_USER_AGENT,
 	};
-	if (catalogSession.hasPayload && catalogSession.etag) {
-		headers["If-None-Match"] = catalogSession.etag;
+	if (session.hasPayload && session.etag) {
+		headers["If-None-Match"] = session.etag;
 	}
-	let response: Response;
-	try {
-		response = await fetchImpl(MODELS_DEV_URL, { method: "GET", headers, signal });
-	} catch (error) {
-		if (catalogSession.hasPayload) {
-			return catalogSession.payload;
-		}
-		throw error;
-	}
-	if (response.status === 304 && catalogSession.hasPayload) {
-		return catalogSession.payload;
+	const response = await fetchImpl(MODELS_DEV_URL, { method: "GET", headers, signal });
+	if (response.status === 304 && session.hasPayload) {
+		return session.payload;
 	}
 	if (!response.ok) {
-		if (catalogSession.hasPayload) {
-			return catalogSession.payload;
-		}
 		throw new Error(`models catalog fetch failed: ${response.status}`);
 	}
 	const bytes = new Uint8Array(await response.arrayBuffer());
 	const isZstd = bytes.length >= 4 && new DataView(bytes.buffer, bytes.byteOffset).getUint32(0, true) === ZSTD_MAGIC;
 	const text = new TextDecoder().decode(isZstd ? await Bun.zstdDecompress(bytes) : bytes);
 	const payload: unknown = JSON.parse(text);
-	catalogSession.payload = payload;
-	catalogSession.etag = response.headers.get("etag");
-	catalogSession.hasPayload = true;
+	session.payload = payload;
+	session.etag = response.headers.get("etag");
+	session.hasPayload = true;
 	return payload;
 }
 
@@ -2852,7 +2890,7 @@ function openCodeModelManagerOptions(
 		// by the 2h cache TTL instead.
 		dropCachedModelIdsOnStaticMismatch: Object.keys(apiOverrides),
 		modelsDev: {
-			fetch: () => fetchWellKnownModels(config?.fetch),
+			fetch: () => fetchRevalidatedWellKnownModelsWithTimeout(config?.fetch),
 			map: payload => {
 				if (!isRecord(payload)) return [];
 				return mapModelsDevToModels(payload, OPENCODE_MODELS_DEV_DESCRIPTORS)
@@ -5054,6 +5092,7 @@ type LiteLLMRichEndpointModel<TApi extends Api> = {
 	hasToolMetadata: boolean;
 	hasSupportedOpenAIParams: boolean;
 	hasCost: boolean;
+	reportedCost: Partial<ModelSpec<Api>["cost"]>;
 };
 type LiteLLMRichEndpointFailure = {
 	endpoint: string;
@@ -5178,30 +5217,36 @@ function getLiteLLMParams(entry: LiteLLMRichModelEntry): LiteLLMRichModelEntry |
 function getLiteLLMMetadataValue(entry: LiteLLMRichModelEntry, key: string): unknown {
 	return entry[key] ?? getLiteLLMModelInfo(entry)?.[key];
 }
-
-/** Per-million USD cost from a `*_per_token` LiteLLM field, or `undefined` when absent/non-positive. */
+/** Per-million USD cost from a positive `*_per_token` LiteLLM field. */
 function getLiteLLMPerMillionCost(entry: LiteLLMRichModelEntry, key: string): number | undefined {
 	const perToken = toNumber(getLiteLLMMetadataValue(entry, key));
 	return perToken !== undefined && perToken > 0 ? perToken * 1_000_000 : undefined;
 }
 
-/**
- * Map LiteLLM's per-token pricing (`input_cost_per_token`, `output_cost_per_token`,
- * cache costs) onto {@link ModelSpec.cost} in $/million tokens. Returns `undefined`
- * when LiteLLM reports neither an input nor an output price so callers keep the
- * bundled reference cost.
- */
-function getLiteLLMCost(entry: LiteLLMRichModelEntry): ModelSpec<Api>["cost"] | undefined {
+/** Map positive LiteLLM per-token prices onto their per-million cost fields. */
+function getLiteLLMReportedCost(entry: LiteLLMRichModelEntry): Partial<ModelSpec<Api>["cost"]> {
 	const input = getLiteLLMPerMillionCost(entry, "input_cost_per_token");
 	const output = getLiteLLMPerMillionCost(entry, "output_cost_per_token");
-	if (input === undefined && output === undefined) {
+	const cacheRead = getLiteLLMPerMillionCost(entry, "cache_read_input_token_cost");
+	const cacheWrite = getLiteLLMPerMillionCost(entry, "cache_creation_input_token_cost");
+	return {
+		...(input !== undefined ? { input } : {}),
+		...(output !== undefined ? { output } : {}),
+		...(cacheRead !== undefined ? { cacheRead } : {}),
+		...(cacheWrite !== undefined ? { cacheWrite } : {}),
+	};
+}
+
+function getLiteLLMCost(entry: LiteLLMRichModelEntry): ModelSpec<Api>["cost"] | undefined {
+	const cost = getLiteLLMReportedCost(entry);
+	if (cost.input === undefined && cost.output === undefined) {
 		return undefined;
 	}
 	return {
-		input: input ?? 0,
-		output: output ?? 0,
-		cacheRead: getLiteLLMPerMillionCost(entry, "cache_read_input_token_cost") ?? 0,
-		cacheWrite: getLiteLLMPerMillionCost(entry, "cache_creation_input_token_cost") ?? 0,
+		input: cost.input ?? 0,
+		output: cost.output ?? 0,
+		cacheRead: cost.cacheRead ?? 0,
+		cacheWrite: cost.cacheWrite ?? 0,
 	};
 }
 
@@ -5352,12 +5397,29 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 							["tools", "tool_choice", "functions", "function_call"].includes(param),
 						)
 					: reference?.supportsTools;
+	// Enrich from the bundled reference with provider-INDEPENDENT reasoning
+	// hints only. The reference is resolved against the global bundled catalog,
+	// so a custom endpoint exposing an alias that collides with a bundled model
+	// (a LiteLLM proxy serving `kimi-k3`, which matches Fireworks' bundled
+	// `kimi-k3`) must not inherit that provider's transport compat. Spreading
+	// the resolved `reference.compat` wholesale leaked `wireModelIdMode`,
+	// `toolSchemaFlavor`, `thinkingFormat`, etc. across the provider boundary —
+	// rewriting the wire id to `accounts/fireworks/models/kimi-k3` for a
+	// non-Fireworks endpoint (issue #9938). `buildModel` re-derives every
+	// transport field from the discovered provider and model id, so only the
+	// effort vocabulary flows through here. Mirrors `discoverOpenAIModelsList`.
+	const referenceCompat = reference?.compat as OpenAICompat | undefined;
 	const compat: OpenAICompat = {
-		...(reference?.compat ?? {}),
 		supportsStore: false,
 		supportsDeveloperRole: false,
 		...(supportedOpenAIParams !== undefined
 			? { supportsReasoningEffort: supportedOpenAIParams.includes("reasoning_effort") }
+			: referenceCompat?.supportsReasoningEffort !== undefined
+				? { supportsReasoningEffort: referenceCompat.supportsReasoningEffort }
+				: {}),
+		...(referenceCompat?.reasoningEffortMap ? { reasoningEffortMap: referenceCompat.reasoningEffortMap } : {}),
+		...(referenceCompat?.omitReasoningEffort !== undefined
+			? { omitReasoningEffort: referenceCompat.omitReasoningEffort }
 			: {}),
 	};
 	return {
@@ -5401,13 +5463,23 @@ function mergeLiteLLMRichEndpointModels<TApi extends Api>(
 		maxTokens: next.hasMaxTokens ? next.model.maxTokens : existing.model.maxTokens,
 		input: next.supportsVision === true || next.supportsVision === false ? next.model.input : existing.model.input,
 		reasoning: typeof next.supportsReasoning === "boolean" ? next.model.reasoning : existing.model.reasoning,
-		cost: next.hasCost ? next.model.cost : existing.model.cost,
+		cost: { ...existing.model.cost, ...existing.reportedCost, ...next.reportedCost },
 		compat: next.hasSupportedOpenAIParams ? next.model.compat : existing.model.compat,
 	};
 	if (next.hasToolMetadata) {
 		model.supportsTools = next.model.supportsTools;
 	}
-	return { ...next, apiRoute, model };
+	return {
+		...next,
+		apiRoute,
+		model,
+		reportedCost: { ...existing.reportedCost, ...next.reportedCost },
+		hasContextWindow: existing.hasContextWindow || next.hasContextWindow,
+		hasMaxTokens: existing.hasMaxTokens || next.hasMaxTokens,
+		hasToolMetadata: existing.hasToolMetadata || next.hasToolMetadata,
+		hasSupportedOpenAIParams: existing.hasSupportedOpenAIParams || next.hasSupportedOpenAIParams,
+		hasCost: existing.hasCost || next.hasCost,
+	};
 }
 
 async function fetchLiteLLMRichEndpoint<TApi extends Api>(
@@ -5469,6 +5541,7 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 					supportedOpenAIParams !== undefined,
 				hasSupportedOpenAIParams: supportedOpenAIParams !== undefined,
 				hasCost: getLiteLLMCost(entry) !== undefined,
+				reportedCost: getLiteLLMReportedCost(entry),
 			};
 			const existing = deduped.get(model.id);
 			deduped.set(model.id, existing ? mergeLiteLLMRichEndpointModels(existing, next) : next);
@@ -5530,7 +5603,12 @@ async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 			for (const entry of deduped.values()) {
 				if (
 					(entry.supportsVision !== true && entry.supportsVision !== false) ||
-					(options.resolveApi !== undefined && entry.apiRoute === "unknown")
+					(options.resolveApi !== undefined && entry.apiRoute === "unknown") ||
+					(Object.keys(entry.reportedCost).length > 0 &&
+						(entry.reportedCost.input === undefined ||
+							entry.reportedCost.output === undefined ||
+							entry.reportedCost.cacheRead === undefined ||
+							entry.reportedCost.cacheWrite === undefined))
 				) {
 					needsMoreMetadata = true;
 					break;
@@ -5567,12 +5645,14 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("litellm")!;
 	return {
 		providerId: "litellm",
-		// rich-v6 invalidates rows cached before OpenAI models moved to Responses.
-		// Earlier versions added bundled reference fallback, continued discovery
-		// past incomplete `/model_group/info`, stripped reseller usage suffixes,
-		// filtered placeholder-only `all-team-models` rows, and mapped rich pricing.
-		// Bump the version whenever the mappers below change, or warm authoritative
-		// caches keep serving pre-change rows for the full TTL.
+		// rich-v8 invalidates rows whose `compatConfig` retained a colliding
+		// bundled model's provider-specific transport (e.g. Fireworks
+		// `wireModelIdMode`) before that leak was fixed. Earlier versions added
+		// bundled reference fallback, moved OpenAI models to Responses, continued
+		// past incomplete vision/API metadata and endpoints omitting cache
+		// pricing, stripped reseller usage suffixes, filtered placeholder rows,
+		// and mapped rich pricing. Bump the version whenever these mappers change,
+		// or warm authoritative caches keep serving pre-change rows for the full TTL.
 		cacheProviderId: resolveModelCacheProviderId("litellm", { baseUrl }),
 		// litellm is a local-only proxy and is never bundled in models.json (that
 		// would leak the machine's localhost catalog). Prefer the proxy's richer
@@ -6095,7 +6175,7 @@ export function anthropicModelManagerOptions(
 	return {
 		providerId: "anthropic",
 		modelsDev: {
-			fetch: () => fetchWellKnownModels(config?.fetch),
+			fetch: () => fetchRevalidatedWellKnownModelsWithTimeout(config?.fetch),
 			map: payload => mapAnthropicModelsDev(payload, baseUrl),
 		},
 		...(apiKey && {
@@ -6767,3 +6847,42 @@ export const MODELS_DEV_PROVIDER_DESCRIPTORS: readonly ModelsDevProviderDescript
 	...MODELS_DEV_PROVIDER_DESCRIPTORS_CODING_PLANS,
 	...MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED,
 ];
+
+const MODELS_DEV_DESCRIPTORS_BY_PROVIDER: Record<string, ModelsDevProviderDescriptor[]> = Object.create(null);
+for (const descriptor of MODELS_DEV_PROVIDER_DESCRIPTORS) {
+	const providerDescriptors = MODELS_DEV_DESCRIPTORS_BY_PROVIDER[descriptor.providerId];
+	if (providerDescriptors) {
+		providerDescriptors.push(descriptor);
+	} else {
+		MODELS_DEV_DESCRIPTORS_BY_PROVIDER[descriptor.providerId] = [descriptor];
+	}
+}
+
+/** Providers whose bundled catalog can receive additive models.dev updates at runtime. */
+export const MODELS_DEV_CATALOG_PROVIDER_IDS: readonly string[] = Object.freeze(
+	Object.keys(MODELS_DEV_DESCRIPTORS_BY_PROVIDER),
+);
+
+/**
+ * Build the shared models.dev fallback for one known provider.
+ *
+ * Provider managers sharing one fetch implementation reuse its conditional
+ * catalog session. Each mapped provider slice is persisted independently so
+ * startup can restore it without parsing the full catalog.
+ *
+ * `timeoutMs` bounds the catalog request. It is configurable for callers with a
+ * stricter startup budget and for deterministic timeout tests.
+ */
+export function modelsDevCatalogFallback(
+	providerId: string,
+	fetchImpl?: FetchImpl,
+	timeoutMs = DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
+): ModelsDevFallback<Api> | undefined {
+	const descriptors = MODELS_DEV_DESCRIPTORS_BY_PROVIDER[providerId];
+	if (!descriptors) return undefined;
+	return {
+		additiveOnly: true,
+		fetch: () => fetchRevalidatedWellKnownModelsWithTimeout(fetchImpl, timeoutMs),
+		map: payload => (isRecord(payload) ? filterModelsDevCatalogRows(mapModelsDevToModels(payload, descriptors)) : []),
+	};
+}

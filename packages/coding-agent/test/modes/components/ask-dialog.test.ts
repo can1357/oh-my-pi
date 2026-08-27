@@ -1349,6 +1349,77 @@ describe("AskDialogComponent", () => {
 		// Count occurrences of the repeated phrase — should be far fewer than 30.
 		const matches = output.match(/This is a very long question/g);
 		expect(matches?.length ?? 0).toBeLessThan(10);
+		expect(output).toContain("Ctrl+O expand");
+	});
+
+	it("expands a truncated question header on Ctrl+O and collapses on a second press", () => {
+		const longQuestion = "This is a very long question ".repeat(200);
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "q1",
+					question: longQuestion,
+					options: [{ label: "Option A" }, { label: "Option B" }],
+				},
+			],
+			{
+				onSubmit: vi.fn(),
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+			},
+		);
+
+		const collapsed = render(component);
+		const collapsedCount = collapsed.match(/This is a very long question/g)?.length ?? 0;
+		expect(collapsedCount).toBeLessThan(10);
+		expect(collapsed).toContain("Ctrl+O expand");
+
+		component.handleInput("\x0f");
+		const expanded = render(component);
+		const expandedCount = expanded.match(/This is a very long question/g)?.length ?? 0;
+		expect(expandedCount).toBeGreaterThan(collapsedCount);
+		const cap = Math.max(12, Math.floor((process.stdout.rows || 40) * 0.7));
+		expect(component.render(80).length).toBeLessThanOrEqual(cap);
+		// Wrapping can split a few phrases across lines; require a clearly
+		// larger header rather than an exact copy count.
+		expect(expandedCount).toBeGreaterThanOrEqual(15);
+		expect(expanded).toContain("Ctrl+O collapse");
+		expect(expanded).not.toContain("Ctrl+O expand");
+
+		component.handleInput("\x0f");
+		const recollapsed = render(component);
+		expect(recollapsed.match(/This is a very long question/g)?.length ?? 0).toBe(collapsedCount);
+		expect(recollapsed).toContain("Ctrl+O expand");
+	});
+
+	it("does not consume expansion while the submit tab hides the question header", () => {
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "q1",
+					question: "This is a very long question ".repeat(30),
+					options: [{ label: "Option A" }],
+					multi: true,
+				},
+			],
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+		component.render(80);
+		expect(component.toggleQuestionExpansion()).toBe(true);
+
+		component.handleInput(SHIFT_TAB);
+		expect(component.toggleQuestionExpansion()).toBe(false);
+	});
+
+	it("leaves a short question unchanged and does not advertise expand", () => {
+		const component = new AskDialogComponent(
+			[{ id: "q1", question: "Choose one?", options: [{ label: "Option A" }] }],
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+		const before = render(component);
+		expect(before).not.toContain("Ctrl+O expand");
+		expect(component.toggleQuestionExpansion()).toBe(false);
+		expect(render(component)).toBe(before);
 	});
 
 	it("wraps long option labels onto indented continuation lines instead of truncating", () => {

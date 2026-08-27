@@ -252,7 +252,7 @@ export async function resolveEffectiveSubagentPolicy(
 	assertPlanControlsAllowed(request, planMode);
 	assertDepthAndSpawnAllowed(request, agentName);
 
-	const discovery = await discoverAgents(request.session.cwd);
+	const discovery = await discoverAgents(request.session.cwd, undefined, request.session.effectiveExtensionRoots?.());
 	const agent = getAgent(discovery.agents, agentName);
 	if (!agent) {
 		const available = discovery.agents.map(candidate => candidate.name).join(", ") || "none";
@@ -439,7 +439,12 @@ function buildExecutorOptions(
 		workspaceTree: session.workspaceTree,
 		promptTemplates: session.promptTemplates,
 		rules: session.rules,
+		// Root policy and module paths have separate jobs: the live policy drives
+		// recursive sub-discovery; preloaded paths only avoid re-scanning/reusing
+		// parent-bound extension instances while constructing the child.
+		extensionRoots: session.effectiveExtensionRoots?.bind(session),
 		preloadedExtensionPaths: restrictToolNames ? [] : session.extensionPaths,
+		preloadedPreparedExtensions: restrictToolNames ? [] : session.preparedExtensions,
 		preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
 		localProtocolOptions,
 		parentArtifactManager: session.getArtifactManager?.() ?? undefined,

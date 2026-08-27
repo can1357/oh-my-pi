@@ -13,6 +13,9 @@
  *   session cwd (passed through `ResolveContext`).
  * - `issue://owner/repo/123` / `pr://owner/repo/123` — fully qualified single
  *   item.
+ * - `pr://ghe.example.com/owner/repo/123` — same, on a GitHub Enterprise host;
+ *   any shape above may carry a `<host>/` prefix. A host with no dot (`ghe`) is
+ *   recognized only in this numbered form.
  * - `issue://owner/repo/123?comments=0` — single item, comments suppressed.
  * - `issue://owner/repo?state=closed&limit=20` — list options pass through to
  *   `gh`.
@@ -20,6 +23,7 @@
 import type { Settings } from "../config/settings";
 import { AgentRegistry } from "../registry/agent-registry";
 import {
+	formatRepoRef,
 	getOrFetchIssue,
 	getOrFetchPr,
 	getOrFetchPrDiff,
@@ -102,12 +106,12 @@ function parseListOptions(url: InternalUrl, scheme: Scheme, repo: string | undef
 }
 
 function parseUrl(url: InternalUrl, scheme: Scheme): Parsed {
-	const host = url.rawHost || url.hostname;
+	let host = url.rawHost || url.hostname;
 	const rawPath = url.rawPathname ?? url.pathname;
 	// Strip a single leading slash so we can detect empty internal segments
 	// (e.g. `pr://owner//77` → pathname `//77` → stripped `/77` → ["", "77"]).
 	const stripped = rawPath.startsWith("/") ? rawPath.slice(1) : rawPath;
-	const parts: string[] = [];
+	let parts: string[] = [];
 	if (stripped !== "") {
 		for (const seg of stripped.split("/")) {
 			let decoded: string;
@@ -123,7 +127,30 @@ function parseUrl(url: InternalUrl, scheme: Scheme): Parsed {
 		}
 	}
 
-	// Shapes:
+	// Detect a leading `<host>/` prefix. A dotted first segment can only be a
+	// host, because GitHub owner names are alphanumeric-plus-hyphen, so dotted
+	// hosts work with every shape below. A single-label host (`ghe`,
+	// `localhost`) is only recognizable from the item number's position, so it
+	// is accepted in the numbered form alone — `<host>/<owner>/<repo>` with no
+	// number is indistinguishable from `<owner>/<repo>/<bad-number>`, and
+	// keeping the latter's error beats guessing.
+	let repoHost: string | undefined;
+	const dottedHost = host.includes(".");
+	if (dottedHost && parts.length < 2) {
+		throw new Error(
+			`Invalid ${scheme}:// URL. Expected ${scheme}://<host>/<owner>/<repo> or ${scheme}://<host>/<owner>/<repo>/<number>`,
+		);
+	}
+	const hostPrefixed = dottedHost
+		? parts.length >= 2
+		: parts.length >= 3 && parsePositiveDecimalInt(parts[2]) !== undefined;
+	if (hostPrefixed) {
+		repoHost = host;
+		host = parts[0] ?? "";
+		parts = parts.slice(1);
+	}
+
+	// Shapes (each optionally prefixed with an enterprise `<host>/`):
 	//   scheme://                    → list default repo
 	//   scheme://N                   → single item, default repo
 	//   scheme://owner/repo          → list specific repo
@@ -150,11 +177,11 @@ function parseUrl(url: InternalUrl, scheme: Scheme): Parsed {
 		diffParts = parts;
 	} else if (host && parts.length === 1) {
 		// scheme://owner/repo  → list
-		repo = `${host}/${parts[0]}`;
+		repo = formatRepoRef(repoHost, `${host}/${parts[0]}`);
 		return parseListOptions(url, scheme, repo);
 	} else if (host && parts.length >= 2) {
 		// scheme://owner/repo/N[/diff[/<sub>]]
-		repo = `${host}/${parts[0]}`;
+		repo = formatRepoRef(repoHost, `${host}/${parts[0]}`);
 		numberPart = parts[1];
 		diffParts = parts.slice(2);
 	} else {

@@ -1,7 +1,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import * as git from "../utils/git";
-import { appendRepoFlag } from "./gh-common";
+import { appendRepoFlag, ghApiHostArgs, parseRepoRef } from "./gh-common";
 import type { ViewLookupResult } from "./gh-view";
 import { getOrFetchView, resolveGithubCacheAuthKey } from "./github-cache";
 import { ToolError } from "./tool-errors";
@@ -373,9 +373,10 @@ export async function fetchPrDiffViaFilesApi(
 	number: number,
 	signal: AbortSignal | undefined,
 ): Promise<string> {
+	const ref = parseRepoRef(repo);
 	const pull = await git.github.json<GhPrApi>(
 		cwd,
-		["api", "--method", "GET", `/repos/${repo}/pulls/${number}`],
+		["api", ...ghApiHostArgs(ref), "--method", "GET", `/repos/${ref.slug}/pulls/${number}`],
 		signal,
 		{ repoProvided: true },
 	);
@@ -392,9 +393,10 @@ export async function fetchPrDiffViaFilesApi(
 			cwd,
 			[
 				"api",
+				...ghApiHostArgs(ref),
 				"--method",
 				"GET",
-				`/repos/${repo}/pulls/${number}/files`,
+				`/repos/${ref.slug}/pulls/${number}/files`,
 				"-F",
 				`per_page=${PR_DIFF_FILES_PAGE_SIZE}`,
 				"-F",

@@ -130,7 +130,7 @@ export function makeIsolationCommitMessage(session: ToolSession): BuildCommitMes
 export interface IsolatedRunOptions {
 	/**
 	 * Base run options handed to the subagent subprocess. This helper sets
-	 * `worktree`, clears `preloadedExtensionPaths` / `preloadedCustomToolPaths`
+	 * `worktree`, clears prepared/path extension preloads and custom-tool paths
 	 * (isolated runs re-discover inside the worktree), and forwards everything
 	 * else unchanged.
 	 */
@@ -200,6 +200,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			...opts.baseOptions,
 			worktree: isolationDir,
 			preloadedExtensionPaths: undefined,
+			preloadedPreparedExtensions: undefined,
 			preloadedCustomToolPaths: undefined,
 			onCleanupDeferred: completion => {
 				deferredCleanup = completion;

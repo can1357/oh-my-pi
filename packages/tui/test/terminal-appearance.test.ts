@@ -65,7 +65,10 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		restoreEnv("TMUX", originalTmux);
 	});
 
-	function setupTerminal() {
+	// conpty defaults false so kitty-flag assertions stay hermetic under WSL,
+	// where isConPTYHosted() would otherwise read the live WSL_* env. The two
+	// ConPTY cases opt in explicitly.
+	function setupTerminal({ conpty = false }: { conpty?: boolean } = {}) {
 		const writes: string[] = [];
 		const received: string[] = [];
 		vi.spyOn(process, "kill").mockReturnValue(true);
@@ -77,7 +80,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 			return true;
 		});
 
-		const terminal = new ProcessTerminal();
+		const terminal = new ProcessTerminal({ conpty });
 		terminal.start(
 			data => received.push(data),
 			() => {},
@@ -653,10 +656,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 	});
 
 	it("uses disambiguation-only keyboard reporting on ConPTY", () => {
-		Object.defineProperty(process, "platform", { value: "linux", configurable: true });
-		Bun.env.WSL_DISTRO_NAME = "Ubuntu";
-
-		const { terminal, writes } = setupTerminal();
+		const { terminal, writes } = setupTerminal({ conpty: true });
 		writes.length = 0;
 		process.stdin.emit("data", "\x1b[?0u");
 
@@ -666,10 +666,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 	});
 
 	it("avoids alternate-key reporting on ConPTY while preserving parent event reporting", () => {
-		Object.defineProperty(process, "platform", { value: "linux", configurable: true });
-		Bun.env.WSL_INTEROP = "/run/WSL/1_interop";
-
-		const { terminal, writes } = setupTerminal();
+		const { terminal, writes } = setupTerminal({ conpty: true });
 		writes.length = 0;
 		process.stdin.emit("data", "\x1b[?3u");
 

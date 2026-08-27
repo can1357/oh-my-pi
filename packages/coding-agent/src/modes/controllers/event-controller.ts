@@ -19,12 +19,18 @@ import {
 import { TodoReminderComponent } from "../../modes/components/todo-reminder";
 import { ToolExecutionComponent, type ToolExecutionHandle } from "../../modes/components/tool-execution";
 import { TtsrNotificationComponent } from "../../modes/components/ttsr-notification";
-import { createUsageRowBlock } from "../../modes/components/usage-row";
+import { createUsageRowBlock, turnElapsedMs } from "../../modes/components/usage-row";
 import { getSymbolTheme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext, TodoPhase } from "../../modes/types";
 import idleRecapPrompt from "../../prompts/system/recap-user.md" with { type: "text" };
 import type { AgentSessionEvent } from "../../session/agent-session";
-import { isSilentAbort, isUserInvokedSkillPrompt, readQueueChipText, resolveAbortLabel } from "../../session/messages";
+import {
+	isSilentAbort,
+	isUserInvokedSkillPrompt,
+	isUserTurnInitiator,
+	readQueueChipText,
+	resolveAbortLabel,
+} from "../../session/messages";
 import { type ApprovalMode, resolveApproval } from "../../tools/approval";
 import { previewLine, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { PROPOSE_DEVICE_NAME, writeDeviceDispatch } from "../../tools/resolve";
@@ -82,6 +88,10 @@ interface ApprovalPreviewGate {
 
 export class EventController {
 	#lastReadGroup: ReadToolGroupComponent | undefined = undefined;
+	/** Timestamp of the current turn's user prompt; drives the usage row's prompt→yield delta. */
+	#turnStartedAt: number | undefined = undefined;
+	/** When the last completed run ended; stale `#turnStartedAt` anchors are cleared against it. */
+	#lastAgentEndAt: number | undefined = undefined;
 	// Count of visible assistant content blocks (rendered non-empty text/thinking)
 	// already seen in the current streaming message. A newly appearing one breaks
 	// the read run: the rendered reasoning/answer is a visual separator, so reads
@@ -680,6 +690,8 @@ export class EventController {
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#lastAssistantComponent = undefined;
+		this.#turnStartedAt = undefined;
+		this.#lastAgentEndAt = undefined;
 		this.#pinnedErrorComponent = undefined;
 		this.#pinnedErrorMessage = undefined;
 		this.#restorePinnedErrorInline = true;
@@ -763,6 +775,18 @@ export class EventController {
 	}
 
 	async #handleAgentStart(_event: Extract<AgentSessionEvent, { type: "agent_start" }>): Promise<void> {
+		// A run with no user prompt in it (synthetic-only: `/goal` kickoff,
+		// approved-plan execution) must not measure prompt→yield from an unrelated
+		// earlier prompt. Normal user turns reseed via message_start before
+		// agent_start; retries of the same turn keep the anchor because it still
+		// postdates the last completed run.
+		if (
+			this.#turnStartedAt !== undefined &&
+			this.#lastAgentEndAt !== undefined &&
+			this.#turnStartedAt < this.#lastAgentEndAt
+		) {
+			this.#turnStartedAt = undefined;
+		}
 		this.#clearApprovalPreviewGates();
 		// A new turn cannot inherit a foreground tool execution. A dropped
 		// agent_end (for example after a renderer exception) otherwise leaves a
@@ -813,6 +837,12 @@ export class EventController {
 			}
 			this.#renderedCustomMessages.add(signature);
 			this.#resetReadGroup();
+			// A directly-invoked `/skill:` or writable-collab custom prompt is the
+			// run's initiating message (user attribution): seed the prompt→yield
+			// delta from it, the same as a user message.
+			if (event.message.role === "custom" && isUserTurnInitiator(event.message)) {
+				this.#turnStartedAt = event.message.timestamp;
+			}
 			if (
 				event.message.role === "custom" &&
 				this.ctx.optimisticSkillMessagePending &&
@@ -833,6 +863,9 @@ export class EventController {
 			this.ctx.ui.requestRender();
 		} else if (event.message.role === "user") {
 			vocalizer.clear();
+			// Only genuinely user-attributed prompts anchor the delta; a mid-run
+			// agent-attributed `user` message (advisor tool-loop redirect) must not.
+			if (event.message.attribution !== "agent") this.#turnStartedAt = event.message.timestamp;
 			const textContent = this.ctx.getUserMessageText(event.message);
 			const imageBlocks =
 				typeof event.message.content === "string"
@@ -880,6 +913,17 @@ export class EventController {
 				this.ctx.updatePendingMessagesDisplay();
 			}
 			this.ctx.ui.requestRender(true);
+		} else if (event.message.role === "developer") {
+			// A run-initiating synthetic developer prompt (auto-continue, or a
+			// queued follow-up drained inside the current run — plan approval, /goal)
+			// starts fresh work without a new agent_start: clear the preceding user
+			// prompt's anchor so its rows don't inherit the old turn's span.
+			if (event.message.synthetic) {
+				// A deliberate operator action (`.`, `c` continue shortcut) is the
+				// turn's own prompt: anchor the delta to it instead of clearing.
+				if (event.message.userInitiated) this.#turnStartedAt = event.message.timestamp;
+				else this.#turnStartedAt = undefined;
+			}
 		} else if (event.message.role === "fileMention") {
 			this.#resetReadGroup();
 			this.ctx.addMessageToChat(event.message);
@@ -1020,6 +1064,17 @@ export class EventController {
 	 */
 	inheritDisplaceableTodo(component: ToolExecutionComponent | null | undefined): void {
 		this.#displaceableTodoComponent = component?.canBeDisplacedBy("todo") ? component : undefined;
+	}
+	/**
+	 * Adopt the rebuild's replayed user-prompt timestamp so a still-running turn
+	 * keeps its prompt→yield delta. Focus attach and mid-turn rebuilds reset the
+	 * controller's turn start before replaying entries; without the handoff the
+	 * in-flight assistant `message_end` would render the usage row without the
+	 * elapsed figure. Mirrors {@link inheritDisplaceableTodo}. Drops the
+	 * candidate when the rebuild saw no user message.
+	 */
+	inheritTurnStart(turnStartedAt: number | undefined): void {
+		if (turnStartedAt !== undefined) this.#turnStartedAt = turnStartedAt;
 	}
 
 	async #handleNotice(event: Extract<AgentSessionEvent, { type: "notice" }>): Promise<void> {
@@ -1341,6 +1396,9 @@ export class EventController {
 			this.#lastAssistantComponent = lastPostToolAssistantComponent ?? this.ctx.streamingComponent;
 			if (settings.get("display.showTokenUsage") && assistantUsageIsBilled(event.message.usage)) {
 				const readCallIds = groupedReadUsageCallIds(event.message);
+				const turnElapsed = settings.get("display.showTurnTime")
+					? turnElapsedMs(this.#turnStartedAt, event.message)
+					: undefined;
 				const usageAttached =
 					readCallIds !== undefined &&
 					(this.#lastReadGroup?.attachUsage(
@@ -1349,6 +1407,7 @@ export class EventController {
 						event.message.duration,
 						event.message.ttft,
 						event.message.timestamp,
+						turnElapsed,
 					) ??
 						false);
 				if (!usageAttached) {
@@ -1359,6 +1418,7 @@ export class EventController {
 							event.message.duration,
 							event.message.ttft,
 							event.message.timestamp,
+							turnElapsed,
 						),
 					);
 				}
@@ -1808,6 +1868,7 @@ export class EventController {
 	async #finishAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
 		this.#setTerminalProgress(false);
 		this.ctx.statusLine.markActivityEnd();
+		this.#lastAgentEndAt = Date.now();
 		this.#streamingReveal.stop();
 		this.#toolArgsReveal.flushAll();
 		if (this.ctx.loadingAnimation) {

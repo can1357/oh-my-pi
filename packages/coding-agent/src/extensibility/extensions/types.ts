@@ -1574,7 +1574,8 @@ export interface ProviderConfig {
 	 * Async factory that fetches the live model list from the provider endpoint.
 	 * Runs through the same SQLite model-cache as built-in providers (keyed by
 	 * provider name, default 24 h TTL). Receives the resolved API key (undefined
-	 * when unauthenticated). Mutually exclusive with `models`.
+	 * when unauthenticated). When combined with `models`, the static models remain as fallbacks
+	 * alongside the live catalog.
 	 */
 	fetchDynamicModels?: (apiKey: string | undefined) => Promise<readonly ProviderModelConfig[]>;
 }
@@ -1601,6 +1602,8 @@ export interface ProviderModelConfig {
 	contextWindow: number;
 	/** Maximum output tokens. */
 	maxTokens: number;
+	/** Whether Codex requests should prefer WebSocket transport. */
+	preferWebsockets?: boolean;
 	/** Custom headers for this model. */
 	headers?: Record<string, string>;
 	/** OpenAI compatibility settings. */
@@ -1755,11 +1758,25 @@ export interface Extension {
 	shortcuts: Map<KeyId, ExtensionShortcut>;
 }
 
+/**
+ * Imported extension factory detached from any session runtime. The same
+ * prepared module may be rebound to multiple session-scoped ExtensionAPI
+ * instances without evaluating its module graph again.
+ */
+export interface PreparedExtension {
+	path: string;
+	resolvedPath: string;
+	factory: ExtensionFactory | null;
+	error: string | null;
+}
+
 /** Result of loading extensions. */
 export interface LoadExtensionsResult {
 	extensions: Extension[];
 	errors: Array<{ path: string; error: string }>;
 	runtime: ExtensionRuntime;
+	/** Session-independent imported factories safe to rebind in child sessions. */
+	preparedExtensions?: PreparedExtension[];
 }
 
 // ============================================================================

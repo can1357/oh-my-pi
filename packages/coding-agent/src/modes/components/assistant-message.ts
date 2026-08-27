@@ -19,6 +19,7 @@ import { convertImageToPng } from "../../utils/image-loading";
 import { canonicalizeMessage, formatThinkingForDisplay, hasDisplayableThinking } from "../../utils/thinking-display";
 import { resolveAssistantErrorPresentation } from "../utils/transcript-render-helpers";
 import { type CacheInvalidation, CacheInvalidationMarkerComponent } from "./cache-invalidation-marker";
+import { isRowPrefix, type TranscriptStableRow, trimBlankEdges } from "./transcript-container";
 
 /**
  * Max lines of a turn-ending provider error rendered inline in the transcript.
@@ -28,9 +29,35 @@ import { type CacheInvalidation, CacheInvalidationMarkerComponent } from "./cach
  * the persisted session.
  */
 const MAX_TRANSCRIPT_ERROR_LINES = 8;
+const EMPTY_STABLE_RENDER: readonly string[] = [];
 
 type ThinkingContentBlock = Extract<AssistantMessage["content"][number], { type: "thinking" }>;
 type DisplayThinkingContentBlock = ThinkingContentBlock & { rawThinking?: string };
+type StableThinkingPart = { kind: "thinking"; text: string } | { kind: "spacer" };
+
+/**
+ * One published prefix of the leading visible-thinking run. Later snapshots
+ * extend earlier ones part-wise (only the final thinking part may grow), so
+ * rendered stable rows only ever gain a suffix — the append-only transcript
+ * contract that lets them retire into native scrollback mid-stream.
+ */
+interface ThinkingStableSnapshot {
+	readonly key: string;
+	readonly parts: readonly StableThinkingPart[];
+}
+
+function isSnapshotExtension(previous: ThinkingStableSnapshot, current: ThinkingStableSnapshot): boolean {
+	if (previous.parts.length > current.parts.length) return false;
+	for (let index = 0; index < previous.parts.length; index++) {
+		const before = previous.parts[index]!;
+		const after = current.parts[index]!;
+		if (before.kind !== after.kind) return false;
+		if (before.kind === "spacer" || after.kind === "spacer") continue;
+		const isLast = index === previous.parts.length - 1;
+		if (isLast ? !after.text.startsWith(before.text) : after.text !== before.text) return false;
+	}
+	return true;
+}
 
 function resolveThinkingDisplay(block: ThinkingContentBlock, proseOnly: boolean): { text: string; visible: boolean } {
 	const rawThinking = (block as DisplayThinkingContentBlock).rawThinking;
@@ -143,8 +170,14 @@ function lerpHex(from: string, to: string, t: number): string {
 /**
  * Renders an assistant message; streaming content remains mutable until the
  * provider finalizes it because later deltas can revise earlier Markdown.
+ * The exception is the leading run of visible thinking blocks: raw thinking
+ * only ever appends, so its frozen Markdown prefix publishes as append-only
+ * stable rows ({@link AppendOnlyTranscriptBlock}) and can retire into native
+ * scrollback while the block still streams — a long reasoning trace is no
+ * longer clipped to the mutable viewport.
  */
 export class AssistantMessageComponent extends Container {
+	readonly transcriptBlockMode = "appendOnly" as const;
 	#contentContainer: Container;
 	#markerSlot: Container;
 	#lastMessage?: AssistantMessage;
@@ -206,6 +239,11 @@ export class AssistantMessageComponent extends Container {
 	 *  Undefined until the first thinking update of this block. */
 	#lastTokenCount: number | undefined;
 	#lastTokenTime = 0;
+	/** Published width-independent thinking prefixes; grows only, never retracts. */
+	#stableSnapshots: ThinkingStableSnapshot[] = [];
+	#transcriptStableRows: TranscriptStableRow[] = [];
+	/** Rendered stable rows memoized by `${count}:${width}`, insertion-evicted. */
+	#stableRenderCache = new Map<string, readonly string[]>();
 	/** Provider-reported tokens in the live thinking block — reasoning tokens when
 	 *  the provider streams them, else total output — shown dimmed beside the
 	 *  speed badge. 0 when no thinking is streaming. */
@@ -402,6 +440,125 @@ export class AssistantMessageComponent extends Container {
 
 	isTranscriptBlockFinalized(): boolean {
 		return this.#transcriptBlockFinalized;
+	}
+
+	override render(width: number): readonly string[] {
+		const rows = super.render(width);
+		this.#publishStableSnapshot(rows, width);
+		return rows;
+	}
+
+	/** Width-independent stable identities for the streamed leading thinking run. */
+	getTranscriptStableRows(): readonly TranscriptStableRow[] {
+		return this.#transcriptStableRows;
+	}
+
+	renderTranscriptStableRows(count: number, width: number): readonly string[] {
+		const index = Math.min(Math.trunc(count), this.#stableSnapshots.length);
+		if (index <= 0) return EMPTY_STABLE_RENDER;
+		const key = `${index}:${width}`;
+		const cached = this.#stableRenderCache.get(key);
+		if (cached) return cached;
+		const rows = this.#renderStableSnapshot(this.#stableSnapshots[index - 1]!, width);
+		this.#stableRenderCache.set(key, rows);
+		// Bounded: the container re-requests only recent counts at live widths.
+		if (this.#stableRenderCache.size > 64) {
+			const oldest = this.#stableRenderCache.keys().next().value;
+			if (oldest !== undefined) this.#stableRenderCache.delete(oldest);
+		}
+		return rows;
+	}
+
+	/**
+	 * Publish the frozen prefix of the leading visible-thinking run as stable
+	 * transcript rows so a long reasoning stream can retire into native
+	 * scrollback mid-turn. Only thinking publishes: streamed text deltas can
+	 * revise earlier Markdown, and published bytes must never change — they may
+	 * already sit in terminal history. Every guard skips publication; nothing
+	 * ever retracts it.
+	 */
+	#publishStableSnapshot(rendered: readonly string[], width: number): void {
+		const snapshot = this.#currentStableSnapshot();
+		if (!snapshot) return;
+		const previous = this.#stableSnapshots.at(-1);
+		if (previous?.key === snapshot.key) return;
+		if (previous && !isSnapshotExtension(previous, snapshot)) return;
+		const currentRows = this.#renderStableSnapshot(snapshot, width);
+		// The container verifies stable rows against the blank-trimmed render.
+		if (!isRowPrefix(currentRows, trimBlankEdges(rendered))) return;
+		const previousRows = previous
+			? this.renderTranscriptStableRows(this.#stableSnapshots.length, width)
+			: EMPTY_STABLE_RENDER;
+		if (!isRowPrefix(previousRows, currentRows)) return;
+		// Each stable row must add at least one physical row at every width.
+		if (currentRows.length === previousRows.length) return;
+		this.#stableSnapshots.push(snapshot);
+		this.#transcriptStableRows.push({ key: snapshot.key });
+		this.#stableRenderCache.set(`${this.#stableSnapshots.length}:${width}`, currentRows);
+	}
+
+	/**
+	 * Width-independent parts eligible for publication right now: the leading
+	 * run of visible thinking blocks, ending inside the streaming block at
+	 * Markdown's frozen boundary. Undefined whenever any prefix byte could
+	 * still change (finalized or non-transient renders, marker rows, extension
+	 * components, hidden thinking, or no frozen prefix yet).
+	 */
+	#currentStableSnapshot(): ThinkingStableSnapshot | undefined {
+		if (this.#transcriptBlockFinalized || !this.#lastUpdateTransient) return undefined;
+		if (this.#markerSlot.children.length > 0) return undefined;
+		const items = this.#fastPathItems;
+		if (!items || items.length === 0) return undefined;
+		const parts: StableThinkingPart[] = [];
+		let itemIndex = 0;
+		for (const child of this.#contentContainer.children) {
+			const item = items[itemIndex];
+			if (item?.md === child) {
+				// Text blocks never publish: their deltas can revise earlier rows.
+				if (item.blockType !== "thinking") break;
+				if (itemIndex === items.length - 1) {
+					// Streaming block: publish Markdown's frozen prefix, and only
+					// once non-blank content exists past it — the thinking fold may
+					// still rewrite the display text's last non-blank line (prose
+					// ellipsis), which must stay out of published bytes.
+					const frozen = item.md.getLastRenderStableText();
+					if (frozen.length > 0 && /\S/.test(item.lastText.slice(frozen.length))) {
+						parts.push({ kind: "thinking", text: frozen });
+					}
+					break;
+				}
+				parts.push({ kind: "thinking", text: item.lastText });
+				itemIndex++;
+				continue;
+			}
+			if (child instanceof Spacer) {
+				parts.push({ kind: "spacer" });
+				continue;
+			}
+			// Unknown child (thinking extension, pulse, image, error row): stop.
+			break;
+		}
+		while (parts.at(-1)?.kind === "spacer") parts.pop();
+		if (!parts.some(part => part.kind === "thinking")) return undefined;
+		return { key: JSON.stringify(parts), parts };
+	}
+
+	#renderStableSnapshot(snapshot: ThinkingStableSnapshot, width: number): readonly string[] {
+		const rows: string[] = [];
+		for (const part of snapshot.parts) {
+			if (part.kind === "spacer") {
+				rows.push("");
+				continue;
+			}
+			// Constructor args mirror the live thinking Markdown exactly so these
+			// rows are byte-identical to the block render's prefix.
+			const markdown = new Markdown(part.text, 1, 0, getMarkdownTheme(), {
+				color: (text: string) => theme.fg("thinkingText", text),
+				italic: true,
+			});
+			rows.push(...markdown.render(width));
+		}
+		return rows;
 	}
 
 	/** Render completed prose rather than an earlier thinking row under emergency viewport pressure. */

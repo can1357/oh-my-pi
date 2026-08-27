@@ -157,6 +157,97 @@ describe("AgentSession concurrent prompt guard", () => {
 		).toBe(true);
 	});
 
+	it("reports streaming while a tool is still executing", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const blockingTool: AgentTool = {
+			name: "blocking_tool",
+			label: "Blocking Tool",
+			description: "Waits until the test releases it",
+			parameters: type({}),
+			execute: async () => {
+				started.resolve();
+				await release.promise;
+				return { content: [{ type: "text" as const, text: "done" }] };
+			},
+		};
+		let streamCall = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [blockingTool] },
+			streamFn: () => {
+				const stream = new AssistantMessageEventStream();
+				const toolTurn = ++streamCall === 1;
+				queueMicrotask(() => {
+					const message: AssistantMessage = toolTurn
+						? {
+								role: "assistant",
+								content: [
+									{
+										type: "toolCall",
+										id: "call-blocking",
+										name: "blocking_tool",
+										arguments: {},
+									},
+								],
+								api: "anthropic-messages",
+								provider: "anthropic",
+								model: model.id,
+								usage: {
+									input: 0,
+									output: 0,
+									cacheRead: 0,
+									cacheWrite: 0,
+									totalTokens: 0,
+									cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+								},
+								stopReason: "toolUse",
+								timestamp: Date.now(),
+							}
+						: {
+								role: "assistant",
+								content: [{ type: "text", text: "finished" }],
+								api: "anthropic-messages",
+								provider: "anthropic",
+								model: model.id,
+								usage: {
+									input: 0,
+									output: 0,
+									cacheRead: 0,
+									cacheWrite: 0,
+									totalTokens: 0,
+									cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+								},
+								stopReason: "stop",
+								timestamp: Date.now(),
+							};
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "done", reason: toolTurn ? "toolUse" : "stop", message });
+				});
+				return stream;
+			},
+			convertToLlm,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: sharedModelRegistry,
+		});
+
+		const prompt = session.prompt("Run the blocking tool");
+		await started.promise;
+
+		// `UiHelpers.renderInitialMessages` uses this exact predicate to retain
+		// dangling toolCalls in pendingTools during a focus rebuild.
+		expect(session.isStreaming).toBe(true);
+
+		release.resolve();
+		await prompt;
+		expect(session.isStreaming).toBe(false);
+	});
+
 	it("uses non-empty session_stop reason when additional context is empty", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({
