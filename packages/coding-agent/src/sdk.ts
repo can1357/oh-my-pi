@@ -1431,8 +1431,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		sessionManager.appendMessage(interruptedTurnAbort);
 		existingBranch = logger.time("getRecoveredSessionBranch", () => sessionManager.getBranch());
 	}
+	// Pre-model-resolution reads only settings/models/mode. Building messages here
+	// would re-expand every target-bound remote compaction before the active model
+	// is known; the model-scoped rebuild below materializes them once.
 	let existingSession = logger.time("loadSessionContext", () =>
-		deobfuscateSessionContext(sessionManager.buildSessionContext(), obfuscator),
+		deobfuscateSessionContext(sessionManager.buildSessionContext({ metadataOnly: true }), obfuscator),
 	);
 	const hasExistingSession = existingBranch.length > 0;
 	const hasThinkingEntry = existingBranch.some(entry => entry.type === "thinking_level_change");
@@ -2641,20 +2644,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				sessionManager.appendMessage(selectedModelAbort);
 				existingBranch = logger.time("getRecoveredUserTailBranch", () => sessionManager.getBranch());
 				existingSession = logger.time("loadRecoveredUserTailContext", () =>
-					deobfuscateSessionContext(sessionManager.buildSessionContext(), obfuscator),
+					deobfuscateSessionContext(sessionManager.buildSessionContext({ metadataOnly: true }), obfuscator),
 				);
 			}
-			if (hasExistingSession) {
-				existingSession = logger.time("loadModelScopedSessionContext", () =>
-					deobfuscateSessionContext(
-						sessionManager.buildSessionContext({
-							activeModel: model,
-							compactionSettings: settings.getGroup("compaction"),
-						}),
-						obfuscator,
+		}
+
+		if (hasExistingSession) {
+			const activeModel = model;
+			existingSession = logger.time("loadModelScopedSessionContext", () =>
+				deobfuscateSessionContext(
+					sessionManager.buildSessionContext(
+						activeModel ? { activeModel, compactionSettings: settings.getGroup("compaction") } : undefined,
 					),
-				);
-			}
+					obfuscator,
+				),
+			);
 		}
 
 		// Discovery started with the other cwd/agentDir-only scans, before model

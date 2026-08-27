@@ -31,6 +31,7 @@ import {
 	NativeCompactionError,
 	prepareCompaction,
 	RESCUE_SHAKE_CONFIG,
+	remotePreserveReplayable,
 	remotePreserveReusable,
 	resolveBudgetReserveTokens,
 	resolveThresholdTokens,
@@ -214,6 +215,8 @@ interface ArmedSpeculation {
 	snapshotLeafId: string;
 	/** Context size when speculation started; drives refresh-on-growth. */
 	contextTokensAtStart: number;
+	/** Model that actually produced the summary; owns the compaction-extension target. */
+	compactionModel?: Model;
 }
 
 /** One background speculative-compaction run and (once resolved) its armed result. */
@@ -430,6 +433,22 @@ export class SessionMaintenance {
 	 * already carry skill protection). The matcher reads the current plan
 	 * reference path at match time, so retitled plans are covered.
 	 */
+	/**
+	 * Newest compaction entry the active model can actually read. A compaction it
+	 * cannot replay is re-expanded by `buildSessionContext`, so its prefix is live
+	 * prompt context that prune/shake must still be allowed to reclaim.
+	 */
+	#readableCompactionEntry(branchEntries: SessionEntry[]): CompactionEntry | undefined {
+		const model = this.#model;
+		for (let i = branchEntries.length - 1; i >= 0; i--) {
+			const entry = branchEntries[i];
+			if (entry.type !== "compaction") continue;
+			if (model && !remotePreserveReplayable(entry.preserveData, model)) continue;
+			return entry;
+		}
+		return undefined;
+	}
+
 	#withPlanProtection<T extends { protectedTools: ProtectedToolMatcher[] }>(config: T): T {
 		const planMatcher = createPlanReadMatcher(() => this.#host.planReferencePath());
 		return { ...config, protectedTools: [...config.protectedTools, planMatcher] };
@@ -437,7 +456,7 @@ export class SessionMaintenance {
 
 	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		const branchEntries = this.#host.sessionManager.getBranch();
-		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
+		const keepBoundaryId = this.#readableCompactionEntry(branchEntries)?.firstKeptEntryId;
 		const result = pruneToolOutputs(
 			branchEntries,
 			this.#tokenizer,
@@ -480,7 +499,7 @@ export class SessionMaintenance {
 		const { supersedeReads, dropUseless } = this.#host.settings.getGroup("compaction");
 		if (!supersedeReads && !dropUseless) return undefined;
 		const branchEntries = this.#host.sessionManager.getBranch();
-		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
+		const keepBoundaryId = this.#readableCompactionEntry(branchEntries)?.firstKeptEntryId;
 		const result = pruneSupersededToolResults(
 			branchEntries,
 			this.#tokenizer,
@@ -605,13 +624,13 @@ export class SessionMaintenance {
 		}
 
 		const branchEntries = this.#host.sessionManager.getBranch();
-		const latestCompaction = getLatestCompactionEntry(branchEntries);
+		const latestCompaction = this.#readableCompactionEntry(branchEntries);
 		const config = this.#withPlanProtection({
 			...(opts.config ?? AGGRESSIVE_SHAKE_CONFIG),
-			// Skip entries summarized away by the latest compaction — shaking them
-			// only churns persisted history with no prompt/cache effect. The cut is
-			// unconditional on the wire (see `buildSessionContext`), so a compaction
-			// the active model cannot replay still hides its prefix from the prompt.
+			// Skip entries summarized away by a compaction the active model can read —
+			// shaking them only churns persisted history with no prompt/cache effect.
+			// A compaction it cannot replay is re-expanded into the prompt, so its
+			// prefix stays shakeable.
 			keepBoundaryId: latestCompaction?.firstKeptEntryId,
 		});
 		const regions = collectShakeRegions(branchEntries, this.#tokenizer, config);
@@ -1360,6 +1379,7 @@ export class SessionMaintenance {
 				reason: "context_limit",
 				phase: "standalone_turn",
 			});
+			let compactionModel: Model | undefined;
 			const result = await this.#compactWithFallbackModel(
 				preparation,
 				undefined,
@@ -1376,6 +1396,9 @@ export class SessionMaintenance {
 					preferWebsockets: false,
 				},
 				candidates,
+				candidate => {
+					compactionModel = candidate;
+				},
 			);
 			armed = {
 				result: {
@@ -1387,6 +1410,7 @@ export class SessionMaintenance {
 				codexCompaction,
 				snapshotLeafId,
 				contextTokensAtStart: contextTokens,
+				compactionModel,
 			};
 		}
 		if (signal.aborted || this.#speculation !== run) return;
@@ -1408,9 +1432,17 @@ export class SessionMaintenance {
 		const model = this.#model;
 		if (!model) return false;
 		const settings = this.#host.settings.getGroup("compaction");
+		// Runtime replay is validated against the ACTIVE model, while the
+		// compaction-extension target belongs to the candidate that produced the
+		// summary — a configured side model would otherwise fail its own result.
 		if (
 			armed.result.preserveData &&
-			!remotePreserveReusable(armed.result.preserveData, model, resolveMethodSettings(settings, armed.method))
+			!remotePreserveReusable(
+				armed.result.preserveData,
+				model,
+				resolveMethodSettings(settings, armed.method),
+				armed.compactionModel ? [armed.compactionModel] : [],
+			)
 		) {
 			return false;
 		}
@@ -2161,6 +2193,7 @@ export class SessionMaintenance {
 		signal: AbortSignal,
 		options?: SummaryOptions,
 		precomputedCandidates?: Model[],
+		onCandidateSelected?: (candidate: Model) => void,
 	): Promise<CompactionResult> {
 		const candidates =
 			precomputedCandidates ?? this.#getCompactionModelCandidates(this.#host.modelRegistry.getAvailable());
@@ -2179,6 +2212,7 @@ export class SessionMaintenance {
 			}
 
 			try {
+				onCandidateSelected?.(candidate);
 				return await compact(
 					this.#host.obfuscatePreparationForProvider(preparation),
 					candidate,

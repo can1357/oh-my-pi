@@ -468,6 +468,7 @@ const streamOpenAIResponsesOnce = (
 					resetOpenAIResponsesChainState(chainState);
 				}
 			}
+			const referenceTarget = getOpenAIResponsesReferenceTarget(model, undefined, baseUrl ?? model.baseUrl);
 			const builtParams = buildParams(
 				model,
 				context,
@@ -476,6 +477,7 @@ const streamOpenAIResponsesOnce = (
 				strictToolsScope,
 				false,
 				chainState?.canAppend ? chainState.lastParams?.input : undefined,
+				referenceTarget,
 			);
 			const { params, trailingScaffoldingItems } = builtParams;
 			let activeParams = params;
@@ -647,6 +649,7 @@ const streamOpenAIResponsesOnce = (
 								strictToolsScope,
 								true,
 								chainState?.canAppend ? chainState.lastParams?.input : undefined,
+								referenceTarget,
 							);
 							const fallbackParams = fallbackBuilt.params;
 							if (chainState && !chainState.disabled) fallbackParams.store = true;
@@ -701,6 +704,8 @@ const streamOpenAIResponsesOnce = (
 							providerSessionState,
 							strictToolsScope,
 							forceDisableStrictTools,
+							undefined,
+							referenceTarget,
 						);
 						const currentParams = currentBuilt.params;
 						// Only ZDR forces `store: false` (the org never persists responses). A
@@ -846,7 +851,7 @@ const streamOpenAIResponsesOnce = (
 				model.provider,
 				nativeOutputItems,
 				true,
-				getOpenAIResponsesReferenceTarget(model),
+				referenceTarget,
 			);
 			const replayableResponseItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
 				structuredCloneJSON(nativeOutputItems),
@@ -1149,6 +1154,7 @@ export function buildParams(
 	strictToolsScope?: OpenAIStrictToolsScope,
 	disableStrictToolsOverride = false,
 	statefulCacheBaseline?: ResponseInput,
+	referenceTarget?: string,
 ): { params: OpenAIResponsesSamplingParams; trailingScaffoldingItems: number; strictToolsApplied: boolean } {
 	const policy = resolveOpenAICompatPolicy(model, {
 		endpoint: "responses",
@@ -1177,6 +1183,7 @@ export function buildParams(
 		requiresReasoningReplayForToolCalls:
 			policy.reasoning.enabled && policy.reasoning.requiresReasoningContentForToolCalls,
 		repairOrphanOutputs: true,
+		referenceTarget,
 	});
 
 	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);

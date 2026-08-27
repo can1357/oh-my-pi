@@ -476,6 +476,110 @@ describe("OpenAI responses history payload", () => {
 		expect(containsAssistantOutputText(movedEndpoint.input, "stamped answer")).toBe(true);
 	});
 
+	it("hashes routing identity and keeps query-scoped Responses targets distinct", async () => {
+		const secretModel = buildStampedResponsesModel("https://tenant:s3cr3t-token@proxy.example/v1?api-key=s3cr3t-key");
+		const target = getOpenAIResponsesReferenceTarget(secretModel);
+		expect(target).toMatch(/^sha256:[0-9a-f]{64}$/);
+		for (const secret of ["s3cr3t-token", "s3cr3t-key", "proxy.example", "tenant"]) {
+			expect(target).not.toContain(secret);
+		}
+
+		const stream = streamOpenAIResponses(
+			secretModel,
+			{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
+			{ apiKey: "test-key", fetch: async () => createStampedSseResponse() },
+		);
+		let message: Awaited<ReturnType<typeof stream.result>> | undefined;
+		for await (const event of stream) {
+			if (event.type === "done") message = event.message;
+			if (event.type === "error") throw event.error;
+		}
+		if (!message) throw new Error("expected a completed assistant message");
+		expect(JSON.stringify(message.providerPayload)).not.toContain("s3cr3t");
+
+		// Query-routed proxies fan one host out to independent upstreams; their
+		// histories must not be interchangeable.
+		expect(
+			getOpenAIResponsesReferenceTarget(secretModel, undefined, "https://proxy.example/v1/responses?t=a"),
+		).not.toBe(getOpenAIResponsesReferenceTarget(secretModel, undefined, "https://proxy.example/v1/responses?t=b"));
+	});
+
+	it("binds Responses history to the resolved request endpoint, not the catalog base URL", async () => {
+		const model = buildModel({
+			id: "kimi-responses",
+			name: "Kimi Responses",
+			api: "openai-responses",
+			provider: "moonshot",
+			baseUrl: "https://api.moonshot.ai/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"openai-responses">);
+		const previous = Bun.env.MOONSHOT_BASE_URL;
+		try {
+			Bun.env.MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1";
+			const stream = streamOpenAIResponses(
+				model,
+				{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
+				{ apiKey: "test-key", fetch: async () => createStampedSseResponse() },
+			);
+			let message: Awaited<ReturnType<typeof stream.result>> | undefined;
+			for await (const event of stream) {
+				if (event.type === "done") message = event.message;
+				if (event.type === "error") throw event.error;
+			}
+			if (!message) throw new Error("expected a completed assistant message");
+			expect(message.providerPayload).toMatchObject({
+				referenceTarget: getOpenAIResponsesReferenceTarget(model, undefined, "https://api.moonshot.cn/v1"),
+			});
+
+			const followUp: Context = { messages: [message, { role: "user", content: "continue", timestamp: 1 }] };
+			const sameEndpoint = (await captureResponsesPayload(model, followUp)) as { input?: unknown[] };
+			expect(containsEncryptedReasoning(sameEndpoint.input)).toBe(true);
+
+			Bun.env.MOONSHOT_BASE_URL = "https://api.moonshot.ai/v1";
+			const movedEndpoint = (await captureResponsesPayload(model, followUp)) as { input?: unknown[] };
+			expect(containsEncryptedReasoning(movedEndpoint.input)).toBe(false);
+		} finally {
+			if (previous === undefined) delete Bun.env.MOONSHOT_BASE_URL;
+			else Bun.env.MOONSHOT_BASE_URL = previous;
+		}
+	});
+
+	it("does not replay endpoint-owned reasoning through the canonical fallback", async () => {
+		const model = buildStampedResponsesModel("https://api.openai.com/v1");
+		const foreignTarget = getOpenAIResponsesReferenceTarget(
+			buildStampedResponsesModel("https://proxy.example.invalid/v1"),
+		);
+		const reasoningItem = { type: "reasoning", id: "rs_foreign", encrypted_content: "enc_foreign", summary: [] };
+		const assistant = {
+			role: "assistant" as const,
+			api: "openai-responses" as const,
+			provider: "openai",
+			model: model.id,
+			content: [
+				{ type: "thinking" as const, thinking: "hidden", thinkingSignature: JSON.stringify(reasoningItem) },
+				{ type: "text" as const, text: "foreign answer" },
+			],
+			usage: issue5002ZeroUsage,
+			stopReason: "stop" as const,
+			providerPayload: createOpenAIResponsesHistoryPayload("openai", [reasoningItem], false, foreignTarget),
+			timestamp: Date.now(),
+		};
+		const payload = (await captureResponsesPayload(model, {
+			messages: [
+				{ role: "user", content: "first", timestamp: 0 },
+				assistant,
+				{ role: "user", content: "second", timestamp: 1 },
+			],
+		})) as { input?: unknown[] };
+
+		expect(containsEncryptedReasoning(payload.input)).toBe(false);
+		expect(containsAssistantOutputText(payload.input, "foreign answer")).toBe(true);
+	});
+
 	it("fails closed when Codex compaction history targets another endpoint", () => {
 		const model = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
 		const context: Context = {

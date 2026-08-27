@@ -140,7 +140,7 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	const planStartupIgnored =
 		session.settings.get("plan.defaultOnStartup") &&
 		session.settings.get("plan.enabled") &&
-		session.sessionManager.buildSessionContext().messages.length === 0 &&
+		session.sessionManager.buildSessionContext({ metadataOnly: true }).hasMessages !== true &&
 		!session.sessionManager.getEntries().some(entry => entry.type === "mode_change") &&
 		!planYolo;
 	if (planStartupIgnored) {

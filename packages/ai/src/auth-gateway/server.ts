@@ -115,6 +115,22 @@ function promoteComputerScreenshotImage(message: Record<string, unknown>, model:
 	return true;
 }
 
+function promoteComputerScreenshotFileId(message: Record<string, unknown>, model: Model, fileId: unknown): boolean {
+	const providerFile = { provider: "openai", id: fileId };
+	if (!supportsProviderFileReference(model, providerFile, { mimeType: REMOTE_COMPUTER_SCREENSHOT_MIME_TYPE })) {
+		return false;
+	}
+	const image = { type: "image", data: "", mimeType: REMOTE_COMPUTER_SCREENSHOT_MIME_TYPE, providerFile };
+	if (Array.isArray(message.content)) {
+		message.content.push(image);
+	} else if (typeof message.content === "string") {
+		message.content = message.content.length > 0 ? [{ type: "text", text: message.content }, image] : [image];
+	} else {
+		return false;
+	}
+	return true;
+}
+
 function validateComputerScreenshotReference(
 	message: Record<string, unknown>,
 	model: Model,
@@ -145,6 +161,11 @@ function validateComputerScreenshotReference(
 		delete metadata.screenshot;
 		return undefined;
 	}
+	if (hasFileId && promoteComputerScreenshotFileId(message, model, fileId)) {
+		delete metadata.type;
+		delete metadata.screenshot;
+		return undefined;
+	}
 	if (hasFileId) {
 		return `input_image.file_id cannot be forwarded to ${model.api}; target an OpenAI Responses model or use an inline data URL`;
 	}
@@ -154,7 +175,7 @@ function validateComputerScreenshotReference(
 	return undefined;
 }
 
-function validateAndNormalizeImageReferences(context: Context, model: Model): string | undefined {
+export function validateAndNormalizeImageReferences(context: Context, model: Model): string | undefined {
 	const messages: unknown[] = context.messages;
 	for (const [messageIndex, message] of messages.entries()) {
 		if (!isRecord(message)) return `\`context.messages[${messageIndex}]\` must be an object`;

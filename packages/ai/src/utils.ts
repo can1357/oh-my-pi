@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { ResponseInput, ResponseInputItem } from "./providers/openai-responses-wire";
 import { redactSensitiveCredentials } from "./providers/transform-messages";
@@ -464,20 +465,17 @@ export function canonicalizeOpenAIResponsesReferenceBaseUrl(endpoint: string): s
 		const pathname = url.pathname.replace(/\/+$/, "");
 		const officialCodexHost =
 			url.protocol === "https:" && (url.hostname === "chatgpt.com" || url.hostname === "chat.openai.com");
+		url.hash = "";
 		if (
 			officialCodexHost &&
 			(pathname === "/backend-api/codex/responses" || pathname === "/backend-api/codex/responses/compact")
 		) {
 			url.pathname = "/backend-api";
-			url.search = "";
-			url.hash = "";
 			return url.toString().replace(/\/$/, "");
 		}
 		for (const suffix of ["/responses/compact", "/responses"]) {
 			if (pathname.endsWith(suffix)) {
 				url.pathname = pathname.slice(0, -suffix.length) || "/";
-				url.search = "";
-				url.hash = "";
 				return url.toString().replace(/\/$/, "");
 			}
 		}
@@ -534,7 +532,7 @@ export function getOpenAIResponsesReferenceTarget(
 		!!model.compat &&
 		"supportsImageDetailOriginal" in model.compat &&
 		model.compat.supportsImageDetailOriginal === true;
-	return JSON.stringify({
+	const identity = JSON.stringify({
 		api: model.api,
 		provider: model.provider,
 		baseUrl: referenceBaseUrl ? canonicalizeOpenAIResponsesReferenceBaseUrl(referenceBaseUrl) : "",
@@ -543,6 +541,7 @@ export function getOpenAIResponsesReferenceTarget(
 		supportsComputerUse: model.supportsComputerUse === true,
 		supportsImageDetailOriginal,
 	});
+	return `sha256:${createHash("sha256").update(identity).digest("hex")}`;
 }
 
 export function getOpenAIResponsesHistoryPayload(

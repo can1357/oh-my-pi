@@ -82,6 +82,12 @@ export interface SessionContext {
 	 * Only populated in transcript mode.
 	 */
 	cacheMissExplainedAt?: boolean[];
+	/**
+	 * Whether the resolved path would emit at least one message. Populated on
+	 * every build so `metadataOnly` callers can answer "is this session empty?"
+	 * without materializing the messages.
+	 */
+	hasMessages?: boolean;
 }
 
 /** Lists session model strings to try when restoring, in fallback order. */
@@ -134,6 +140,12 @@ export interface BuildSessionContextOptions {
 	 * hides the call the agent is still waiting on.
 	 */
 	keepDanglingToolCalls?: boolean;
+	/**
+	 * Read session settings/mode/models without materializing messages. Callers
+	 * that run before the active model is resolved use this so a target-bound
+	 * remote compaction is not transiently re-expanded into a full message array.
+	 */
+	metadataOnly?: boolean;
 }
 
 /**
@@ -316,6 +328,8 @@ export function buildSessionContext(
 	// 1. Emit summary first (entry = compaction)
 	// 2. Emit kept messages (from firstKeptEntryId up to compaction)
 	// 3. Emit messages after compaction
+	const metadataOnly = options?.metadataOnly === true;
+	let emittedMessages = 0;
 	const messages: AgentMessage[] = [];
 	const cacheMissExplainedAt: boolean[] = [];
 	let pendingReset = false;
@@ -337,6 +351,8 @@ export function buildSessionContext(
 	};
 
 	const pushMessage = (msg: AgentMessage) => {
+		emittedMessages++;
+		if (metadataOnly) return;
 		messages.push(msg);
 		if (!options?.transcript) return;
 		if (msg.role === "assistant") {
@@ -606,6 +622,7 @@ export function buildSessionContext(
 
 	return {
 		messages,
+		hasMessages: emittedMessages > 0,
 		cacheMissExplainedAt: options?.transcript ? cacheMissExplainedAt : undefined,
 		thinkingLevel,
 		configuredThinkingLevel,

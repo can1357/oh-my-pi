@@ -2244,6 +2244,15 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 							referenceTarget,
 						)
 					: undefined;
+			const stampedPayload = assistantMsg.providerPayload;
+			// A stamped payload that fails the target check is endpoint-owned; its
+			// reasoning ids, encrypted content, and item ids belong to the endpoint
+			// that produced them and must not be replayed through the canonical
+			// fallback either.
+			const targetOwnedHistoryRejected =
+				stampedPayload?.type === "openaiResponsesHistory" &&
+				stampedPayload.referenceTarget !== undefined &&
+				stampedPayload.referenceTarget !== referenceTarget;
 			const nativeReplayEnabled = options.nativeHistory?.replay === true;
 			const historyItems = providerPayload?.items;
 			let suppressHiddenEmptyFallback = false;
@@ -2291,9 +2300,9 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				options.model,
 				msgIndex,
 				knownCallIds,
-				suppressHiddenEmptyFallback ? false : includeThinkingSignatures,
+				suppressHiddenEmptyFallback || targetOwnedHistoryRejected ? false : includeThinkingSignatures,
 				customCallIds,
-				options.preserveAssistantMessageIds,
+				options.preserveAssistantMessageIds && !targetOwnedHistoryRejected,
 				supportsCustomToolCalls,
 				customToolWireNameMap,
 				computerCallIds,

@@ -1,5 +1,6 @@
 import { describe, expect, it, spyOn } from "bun:test";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ModelSpec } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type {
 	BranchSummaryEntry,
@@ -309,6 +310,52 @@ describe("buildSessionContext", () => {
 				],
 			});
 			expect((ctx.messages[1] as { content: string }).content).toBe("after compact");
+		});
+
+		it("answers message presence without materializing a target-bound remote compaction", () => {
+			const activeModel = buildModel({
+				id: "gpt-5.4",
+				name: "GPT-5.4",
+				api: "openai-responses",
+				provider: "openai",
+				baseUrl: "https://api.openai.com/v1",
+				reasoning: false,
+				input: ["text", "image"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 32_768,
+				maxTokens: 4_096,
+			} satisfies ModelSpec<"openai-responses">);
+			const remoteCompaction: CompactionEntry = {
+				...compaction("3", "2", "Remote summary", "1"),
+				preserveData: {
+					openaiRemoteCompaction: {
+						provider: "openai",
+						replayTarget: "sha256:some-other-endpoint",
+						replacementHistory: [
+							{ type: "message", role: "user", content: [{ type: "input_text", text: "Preserved user" }] },
+						],
+						compactionItem: { type: "compaction", encrypted_content: "enc_123" },
+					},
+				},
+			};
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "first"),
+				msg("2", "1", "assistant", "response"),
+				remoteCompaction,
+				msg("4", "3", "user", "after compact"),
+			];
+
+			// The active model cannot replay this blob, so the full build re-expands
+			// the originals it summarized away.
+			const full = buildSessionContext(entries, undefined, undefined, { activeModel });
+			expect(full.messages.length).toBeGreaterThan(1);
+			expect(full.hasMessages).toBe(true);
+
+			const metadata = buildSessionContext(entries, undefined, undefined, { activeModel, metadataOnly: true });
+			expect(metadata.messages).toEqual([]);
+			expect(metadata.hasMessages).toBe(true);
+
+			expect(buildSessionContext([], undefined, undefined, { metadataOnly: true }).hasMessages).toBeFalsy();
 		});
 
 		it("caps snapcompact frame payload in LLM context but preserves transcript frames", () => {
