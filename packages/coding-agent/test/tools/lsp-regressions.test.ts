@@ -5052,18 +5052,42 @@ describe("native tsc lsp", () => {
 		expect(names).toContain("typescript-language-server");
 		expect(names.indexOf("tsc")).toBeLessThan(names.indexOf("typescript-language-server"));
 		expect(getServerForFile(config, "app.ts")?.[0]).toBe("tsc");
-	});
-
-	it("defines tsc with the native LSP command and all supported TypeScript extensions", () => {
-		const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
-		expect(config.servers.tsc).toMatchObject({
-			command: "tsc",
-			args: ["--lsp", "--stdio"],
-			fileTypes: [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"],
-			rootMarkers: ["package.json", "tsconfig.json", "jsconfig.json"],
-		});
 		for (const extension of [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"]) {
 			expect(getServersForFile(config, `app${extension}`).map(([name]) => name)).toContain("tsc");
+		}
+	});
+
+	it("launches native tsc with LSP arguments and completes initialization", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-tsc-launch-");
+		const resolvedTsc = path.join(tempDir.path(), "bin", "tsc");
+		const valid7Result = {
+			...Bun.spawnSync([process.execPath, "--version"], { stdout: "pipe", stderr: "pipe" }),
+			exitCode: 0,
+			stdout: Buffer.from("Version 7.0.2\n"),
+			stderr: Buffer.from(""),
+		} satisfies Bun.ReadableSyncSubprocess;
+		vi.spyOn(Bun, "spawnSync").mockReturnValue(valid7Result);
+		vi.spyOn(piUtils, "$which").mockImplementation(command => (command === "tsc" ? resolvedTsc : null));
+		try {
+			await Bun.write(path.join(tempDir.path(), "package.json"), "{}\n");
+			const config = loadConfig(tempDir.path());
+			const tscConfig = config.servers.tsc;
+			if (!tscConfig) throw new Error("native tsc was not detected");
+			const server = installHandshakeLsp();
+
+			const client = await lspClient.getOrCreateClient(tscConfig, tempDir.path(), 1_000);
+
+			expect(piUtils.ptree.spawn).toHaveBeenCalledWith(
+				[resolvedTsc, "--lsp", "--stdio"],
+				expect.objectContaining({ cwd: tempDir.path(), stdin: "pipe" }),
+			);
+			const initialize = await server.waitFor(message => message.method === "initialize");
+			expect(initialize.params).toMatchObject({ rootPath: tempDir.path() });
+			await server.waitFor(message => message.method === "initialized");
+			expect(client.status).toBe("ready");
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
 		}
 	});
 
