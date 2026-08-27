@@ -420,6 +420,59 @@ describe("buildSessionContext", () => {
 			});
 		});
 
+		it("re-expands remote compaction bound to a superseded credential-resolved endpoint", () => {
+			const activeModel = buildResponsesModel();
+			const previousEndpointTarget = getOpenAIResponsesReferenceTarget(
+				activeModel,
+				undefined,
+				"https://api.business.copilot.example/v1",
+			);
+			const currentEndpointTarget = getOpenAIResponsesReferenceTarget(
+				activeModel,
+				undefined,
+				"https://api.enterprise.copilot.example/v1",
+			);
+			const remoteCompaction: CompactionEntry = {
+				...compaction("3", "2", "Remote summary", "1"),
+				preserveData: {
+					openaiRemoteCompaction: {
+						provider: "openai",
+						replayTarget: getOpenAIResponsesReferenceTarget(activeModel),
+						requestTarget: previousEndpointTarget,
+						replacementHistory: [
+							{ type: "message", role: "user", content: [{ type: "input_text", text: "Preserved user" }] },
+							{ type: "compaction", encrypted_content: "enc_123" },
+						],
+						compactionItem: { type: "compaction", encrypted_content: "enc_123" },
+					},
+				},
+			};
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "first"),
+				msg("2", "1", "assistant", "response"),
+				remoteCompaction,
+				msg("4", "3", "user", "after compact"),
+			];
+
+			// The credential still resolves to the endpoint that issued the blob.
+			const sameEndpoint = buildSessionContext(entries, undefined, undefined, {
+				activeModel,
+				activeRequestTarget: previousEndpointTarget,
+			});
+			expect(
+				sameEndpoint.messages.find(message => message.role === "compactionSummary")?.providerPayload,
+			).toMatchObject({ type: "openaiResponsesHistory", referenceTarget: previousEndpointTarget });
+
+			// A refreshed credential moved the endpoint, so the originals come back
+			// instead of stranding behind a serializer that fails closed.
+			const movedEndpoint = buildSessionContext(entries, undefined, undefined, {
+				activeModel,
+				activeRequestTarget: currentEndpointTarget,
+			});
+			expect(movedEndpoint.messages.some(message => message.role === "compactionSummary")).toBe(false);
+			expect(movedEndpoint.messages.length).toBeGreaterThan(1);
+		});
+
 		it("answers message presence without materializing a target-bound remote compaction", () => {
 			const activeModel = buildResponsesModel();
 			const remoteCompaction: CompactionEntry = {

@@ -258,6 +258,8 @@ export interface SessionMaintenanceHost {
 	providerSessionState: Map<string, ProviderSessionState>;
 	preferWebsockets: boolean | undefined;
 	model(): Model | undefined;
+	/** Endpoint fingerprint from the last credential resolution, when known. */
+	activeRequestTarget(): string | undefined;
 	thinkingLevel(): ThinkingLevel | undefined;
 	isDisposed(): boolean;
 	isStreaming(): boolean;
@@ -443,7 +445,7 @@ export class SessionMaintenance {
 		for (let i = branchEntries.length - 1; i >= 0; i--) {
 			const entry = branchEntries[i];
 			if (entry.type !== "compaction") continue;
-			if (model && !remotePreserveReplayable(entry.preserveData, model)) continue;
+			if (model && !remotePreserveReplayable(entry.preserveData, model, this.#host.activeRequestTarget())) continue;
 			return entry;
 		}
 		return undefined;
@@ -1442,6 +1444,7 @@ export class SessionMaintenance {
 				model,
 				resolveMethodSettings(settings, armed.method),
 				armed.compactionModel ? [armed.compactionModel] : [],
+				this.#host.activeRequestTarget(),
 			)
 		) {
 			return false;

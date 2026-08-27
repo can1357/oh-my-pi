@@ -78,6 +78,7 @@ import type {
 import { type Effort, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { getOpenAIResponsesRequestTarget } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { getOpenAIResponsesReferenceTarget } from "@oh-my-pi/pi-ai/utils";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
@@ -678,6 +679,14 @@ export class AgentSession {
 	#sessionStopContinuationCount = 0;
 	#sessionStopHookActive = false;
 	#obfuscator: SecretObfuscator | undefined;
+	/**
+	 * Endpoint fingerprint from the most recent credential resolution. Providers
+	 * that derive their base URL from the credential (GitHub Copilot enterprise
+	 * routing, alibaba token plans) can move between turns, and the Responses
+	 * serializer fails closed on history bound to the previous endpoint, so the
+	 * session compares the same fingerprint and re-expands instead.
+	 */
+	#activeRequestTarget: string | undefined;
 	/** Session-start value of `inlineToolDescriptors`; drives handoff tool pruning. */
 	#pruneToolDescriptions = false;
 	#checkpointState: CheckpointState | undefined = undefined;
@@ -1380,6 +1389,7 @@ export class AgentSession {
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
 			model: () => this.model,
+			activeRequestTarget: () => this.#activeRequestTarget,
 			sessionId: () => this.sessionId,
 			localProtocolOptions: () => this.#localProtocolOptions(),
 			transformContext: (messages, signal) => this.#transformContext(messages, signal),
@@ -1564,6 +1574,7 @@ export class AgentSession {
 			providerSessionState: this.#providerSessionState,
 			preferWebsockets: this.#preferWebsockets,
 			model: () => this.model,
+			activeRequestTarget: () => this.#activeRequestTarget,
 			thinkingLevel: () => this.thinkingLevel,
 			isDisposed: () => this.#isDisposed,
 			isStreaming: () => this.isStreaming,
@@ -5805,6 +5816,7 @@ export class AgentSession {
 						`Use /login, set an API key environment variable, or create ${getAgentDbPath()}`,
 				);
 			}
+			this.#syncActiveRequestTarget(this.model, apiKey);
 
 			// Recover a previously failed/incomplete assistant turn before sending.
 			// Successful historical turns take the cheaper pre-prompt threshold path
@@ -7574,6 +7586,19 @@ export class AgentSession {
 		}
 	}
 
+	/**
+	 * Re-derive the credential-resolved endpoint fingerprint and, when it moved,
+	 * rebuild the in-memory context so compaction history bound to the previous
+	 * endpoint is re-expanded before the request is constructed.
+	 */
+	#syncActiveRequestTarget(model: Model, apiKey: string | undefined): void {
+		const requestTarget = getOpenAIResponsesRequestTarget(model, apiKey);
+		if (this.#activeRequestTarget === requestTarget) return;
+		const hadTarget = this.#activeRequestTarget !== undefined;
+		this.#activeRequestTarget = requestTarget;
+		if (hadTarget) this.agent.replaceMessages(this.buildDisplaySessionContext().messages);
+	}
+
 	async #setModelWithProviderSessionReset(model: Model): Promise<void> {
 		const currentModel = this.model;
 		const isChanging = !currentModel || !modelsAreEqual(currentModel, model);
@@ -7586,6 +7611,7 @@ export class AgentSession {
 			}
 		}
 		this.agent.setModel(model);
+		if (isChanging) this.#activeRequestTarget = undefined;
 		const referenceTarget = getOpenAIResponsesReferenceTarget(model);
 		if (currentReferenceTarget !== referenceTarget) {
 			this.agent.replaceMessages(this.buildDisplaySessionContext().messages);
@@ -8896,6 +8922,7 @@ export class AgentSession {
 		// Update agent state — build display context to populate agent messages.
 		const stateContext = this.sessionManager.buildSessionContext({
 			activeModel: this.model,
+			activeRequestTarget: this.#activeRequestTarget,
 			compactionSettings: this.settings.getGroup("compaction"),
 		});
 		const displayContext = deobfuscateSessionContext(stateContext, this.#obfuscator);
@@ -8928,6 +8955,7 @@ export class AgentSession {
 			});
 			const rawContext = this.sessionManager.buildSessionContext({
 				activeModel: this.model,
+				activeRequestTarget: this.#activeRequestTarget,
 				compactionSettings: this.settings.getGroup("compaction"),
 			});
 			return {

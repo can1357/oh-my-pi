@@ -151,6 +151,14 @@ export interface BuildSessionContextOptions {
 	 * compaction is not handed downstream as a re-expanded message array.
 	 */
 	metadataOnly?: boolean;
+	/**
+	 * Fingerprint of the endpoint the next request will actually reach, resolved
+	 * from the active credential. Supplied by callers that build context after
+	 * credential resolution so a dynamically routed endpoint change re-expands
+	 * the originals here rather than stranding them behind a serializer that
+	 * fails closed.
+	 */
+	activeRequestTarget?: string;
 }
 
 /**
@@ -310,7 +318,7 @@ export function buildSessionContext(
 				options?.transcript === true ||
 				remoteCompaction === undefined ||
 				(options?.activeModel !== undefined
-					? remotePreserveReplayable(entry.preserveData, options.activeModel)
+					? remotePreserveReplayable(entry.preserveData, options.activeModel, options.activeRequestTarget)
 					: remotePreserveTargetIndependent(entry.preserveData));
 			if (canReplay) compaction = entry;
 		} else if (entry.type === "ttsr_injection") {

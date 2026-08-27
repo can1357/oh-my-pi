@@ -30,6 +30,8 @@ export interface SessionProviderBoundaryHost {
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	model(): Model | undefined;
+	/** Endpoint fingerprint from the last credential resolution, when known. */
+	activeRequestTarget(): string | undefined;
 	sessionId(): string;
 	localProtocolOptions(): LocalProtocolOptions;
 	transformContext(messages: AgentMessage[], signal?: AbortSignal): AgentMessage[] | Promise<AgentMessage[]>;
@@ -82,6 +84,7 @@ export class SessionProviderBoundary {
 		return deobfuscateSessionContext(
 			this.#host.sessionManager.buildSessionContext({
 				activeModel: this.#host.model(),
+				activeRequestTarget: this.#host.activeRequestTarget(),
 				compactionSettings: this.#host.settings.getGroup("compaction"),
 			}),
 			this.#host.obfuscator,

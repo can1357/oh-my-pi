@@ -6,7 +6,15 @@ import {
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
-import type { Context, FetchImpl, Model, ModelSpec, ProviderSessionState, Tool } from "@oh-my-pi/pi-ai/types";
+import type {
+	Context,
+	FetchImpl,
+	Model,
+	ModelSpec,
+	ProviderSessionState,
+	Tool,
+	VercelGatewayRouting,
+} from "@oh-my-pi/pi-ai/types";
 import {
 	createOpenAIResponsesHistoryPayload,
 	getOpenAIResponsesReferenceTarget,
@@ -438,6 +446,22 @@ function buildStampedResponsesModel(baseUrl: string): Model<"openai-responses"> 
 	} satisfies ModelSpec<"openai-responses">);
 }
 
+function buildVercelGatewayResponsesModel(routing: VercelGatewayRouting): Model<"openai-responses"> {
+	return buildModel({
+		id: "openai/gpt-5-stamped",
+		name: "GPT-5 Stamped",
+		api: "openai-responses",
+		provider: "vercel-ai-gateway",
+		baseUrl: "https://ai-gateway.vercel.sh/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 32_768,
+		maxTokens: 4_096,
+		compat: { vercelGatewayRouting: routing },
+	} satisfies ModelSpec<"openai-responses">);
+}
+
 describe("OpenAI responses history payload", () => {
 	it("binds generated Responses history to the endpoint that produced it", async () => {
 		const model = buildStampedResponsesModel("https://api.openai.com/v1");
@@ -641,6 +665,42 @@ describe("OpenAI responses history payload", () => {
 		})) as { input?: unknown[] };
 		expect(containsEncryptedReasoning(rerouted.input)).toBe(false);
 		expect(containsAssistantOutputText(rerouted.input, "stamped answer")).toBe(true);
+	});
+
+	it("fingerprints Vercel gateway routing in the shape that reaches the wire", async () => {
+		const model = buildVercelGatewayResponsesModel({ only: ["bedrock"] });
+		const stream = streamOpenAIResponses(
+			model,
+			{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
+			{ apiKey: "test-key", fetch: async () => createStampedSseResponse() },
+		);
+		let message: Awaited<ReturnType<typeof stream.result>> | undefined;
+		for await (const event of stream) {
+			if (event.type === "done") message = event.message;
+			if (event.type === "error") throw event.error;
+		}
+		if (!message) throw new Error("expected a completed assistant message");
+
+		const followUp: Context = {
+			messages: [message, { role: "user", content: "continue", timestamp: 1 }],
+		};
+
+		// The serializer nests configured gateway routing under
+		// `providerOptions.gateway`, so an override carrying that exact wire shape
+		// reaches the same upstream and may replay endpoint-owned reasoning.
+		const sameWireRouting = (await captureResponsesPayload(model, followUp, undefined, {
+			extraBody: { providerOptions: { gateway: { only: ["bedrock"] } } },
+		})) as { input?: unknown[]; providerOptions?: unknown };
+		expect(sameWireRouting.providerOptions).toEqual({ gateway: { only: ["bedrock"] } });
+		expect(containsEncryptedReasoning(sameWireRouting.input)).toBe(true);
+
+		// The raw configuration shape is a different wire route, so history bound to
+		// the gateway route must not follow it.
+		const configShapeRouting = (await captureResponsesPayload(model, followUp, undefined, {
+			extraBody: { providerOptions: { only: ["bedrock"] } },
+		})) as { input?: unknown[] };
+		expect(containsEncryptedReasoning(configShapeRouting.input)).toBe(false);
+		expect(containsAssistantOutputText(configShapeRouting.input, "stamped answer")).toBe(true);
 	});
 
 	it("hashes routing identity and keeps query-scoped Responses targets distinct", async () => {

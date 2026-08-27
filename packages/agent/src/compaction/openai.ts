@@ -416,17 +416,28 @@ export function getOpenAiCompactionSerializationTarget(
 	return preserved.requestTarget ?? getOpenAiCompactionRuntimeReplayTarget(preserved);
 }
 
+/**
+ * Whether the active model can replay this history. `resolvedRequestTarget` is
+ * the fingerprint the transport will compute once the credential is resolved;
+ * when the caller knows it, compare exactly what the serializer compares, so a
+ * dynamically routed endpoint change re-expands the originals here instead of
+ * failing closed at request construction with no way back.
+ */
 export function canReplayOpenAiCompactionHistory(
 	preserved: Pick<
 		OpenAiRemoteCompactionPreserveData,
-		"provider" | "referenceTarget" | "replayTarget" | "replacementHistory"
+		"provider" | "referenceTarget" | "replayTarget" | "requestTarget" | "replacementHistory"
 	>,
 	model: Model,
+	resolvedRequestTarget?: string,
 ): boolean {
 	if (preserved.provider !== model.provider) return false;
-	const replayTarget = getOpenAiCompactionRuntimeReplayTarget(preserved);
-	if (replayTarget !== undefined) {
-		return replayTarget === getOpenAIResponsesReferenceTarget(model);
+	const boundTarget =
+		resolvedRequestTarget !== undefined
+			? getOpenAiCompactionSerializationTarget(preserved)
+			: getOpenAiCompactionRuntimeReplayTarget(preserved);
+	if (boundTarget !== undefined) {
+		return boundTarget === (resolvedRequestTarget ?? getOpenAIResponsesReferenceTarget(model));
 	}
 	return !replacementHistoryContainsTargetDependentImage(preserved.replacementHistory);
 }

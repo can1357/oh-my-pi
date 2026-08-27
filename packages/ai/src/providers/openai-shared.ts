@@ -73,6 +73,7 @@ import {
 	normalizeSystemPrompts,
 	resolveCacheRetention,
 	resolveOpenAIResponsesRoutingIdentity,
+	resolveOpenAIResponsesWireRouting,
 	sanitizeOpenAIResponsesAssistantFallbackItemsForReplay,
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
 	sanitizeOpenAIResponsesHistoryItemsForReplay,
@@ -231,6 +232,16 @@ function setHeaderIfAbsent(headers: Record<string, string>, name: string, value:
 		if (existingName.toLowerCase() === normalizedName) return;
 	}
 	headers[name] = value;
+}
+
+/**
+ * Fingerprint of the endpoint this request will actually reach, resolved the
+ * same way the transport resolves it. Session-level replay decisions and the
+ * serializer must agree on one identity, so both derive it here.
+ */
+export function getOpenAIResponsesRequestTarget(model: Model, apiKey: string | undefined): string {
+	if (model.api === "azure-openai-responses") return getOpenAIResponsesReferenceTarget(model);
+	return getOpenAIResponsesReferenceTarget(model, undefined, resolveOpenAIRequestBaseUrl(model, apiKey));
 }
 
 /**
@@ -778,11 +789,9 @@ export function applyVercelResponsesCacheControls(
 	const routing = resolveOpenAIResponsesRoutingIdentity(compat)?.vercelGatewayRouting;
 	if (!compat.isVercelGatewayHost) return;
 
-	if (routing?.only || routing?.order) {
-		const gateway: Pick<VercelGatewayRouting, "only" | "order"> = {};
-		if (routing.only) gateway.only = routing.only;
-		if (routing.order) gateway.order = routing.order;
-		params.providerOptions = { gateway };
+	const wireRouting = resolveOpenAIResponsesWireRouting(compat).providerOptions;
+	if (wireRouting !== undefined) {
+		params.providerOptions = wireRouting as VercelResponsesCacheParams["providerOptions"];
 	}
 
 	if (cacheRetention === "none" || routing?.caching !== "auto") return;

@@ -29,9 +29,9 @@ import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/provi
 import { convertTools } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import {
 	buildResponsesInput,
+	getOpenAIResponsesRequestTarget,
 	hoistInterleavedResponsesToolBatchMessages,
 	resolveOpenAICompatPolicy,
-	resolveOpenAIRequestBaseUrl,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import {
 	getOpenAIResponsesReferenceTarget,
@@ -1291,12 +1291,13 @@ export function remotePreserveReusable(
 	activeModel: Model,
 	settings: CompactionSettings,
 	compactionModels: readonly Model[] = [],
+	resolvedRequestTarget?: string,
 ): boolean {
 	const v2Preserve = getCompactionV2PreserveData(preserveData);
 	const v1Preserve = getPreservedOpenAiRemoteCompactionData(preserveData);
 	if (!v2Preserve && !v1Preserve) return true;
 	if (settings.remoteEnabled === false) return false;
-	if (!remotePreserveReplayable(preserveData, activeModel)) return false;
+	if (!remotePreserveReplayable(preserveData, activeModel, resolvedRequestTarget)) return false;
 	const reusableByModel = (model: Model): boolean => {
 		if (settings.remoteStreamingV2Enabled !== false && shouldUseCompactionV2Streaming(model)) {
 			return !!v2Preserve && canReuseOpenAiCompactionHistory(v2Preserve, model, true);
@@ -1312,12 +1313,16 @@ export function remotePreserveReusable(
 export function remotePreserveReplayable(
 	preserveData: Record<string, unknown> | undefined,
 	activeModel: Model,
+	resolvedRequestTarget?: string,
 ): boolean {
 	const v2Preserve = getCompactionV2PreserveData(preserveData);
 	const v1Preserve = getPreservedOpenAiRemoteCompactionData(preserveData);
 	if (!v2Preserve && !v1Preserve) return true;
 	const runtimePreserve = v2Preserve ?? v1Preserve;
-	return runtimePreserve !== undefined && canReplayOpenAiCompactionHistory(runtimePreserve, activeModel);
+	return (
+		runtimePreserve !== undefined &&
+		canReplayOpenAiCompactionHistory(runtimePreserve, activeModel, resolvedRequestTarget)
+	);
 }
 
 /**
@@ -1573,17 +1578,6 @@ function formatRemoteCompactionSummary(inputTokens: number): string {
  * @param preparation - Pre-calculated preparation from prepareCompaction()
  * @param customInstructions - Optional custom focus for the summary
  */
-/**
- * Replay fingerprint for the endpoint the runtime will actually dispatch to.
- * Providers such as github-copilot and alibaba-token-plan derive their base URL
- * from the resolved credential, so stamping the static catalog URL would strand
- * every payload the moment it is replayed. Azure keeps its own resolver.
- */
-function resolveRuntimeRequestTarget(runtimeModel: Model, apiKey: string | undefined): string {
-	if (runtimeModel.api === "azure-openai-responses") return getOpenAIResponsesReferenceTarget(runtimeModel);
-	return getOpenAIResponsesReferenceTarget(runtimeModel, undefined, resolveOpenAIRequestBaseUrl(runtimeModel, apiKey));
-}
-
 export async function compact(
 	preparation: CompactionPreparation,
 	model: Model,
@@ -1706,7 +1700,7 @@ export async function compact(
 				const remote = await withAuth(
 					apiKey,
 					key => {
-						v2RequestTarget = resolveRuntimeRequestTarget(summaryOptions.runtimeModel ?? model, key);
+						v2RequestTarget = getOpenAIResponsesRequestTarget(summaryOptions.runtimeModel ?? model, key);
 						return requestCompactionV2Streaming(model, key, request, signal, {
 							fetch: summaryOptions.fetch,
 							providerSessionState: summaryOptions.providerSessionState,
@@ -1774,7 +1768,7 @@ export async function compact(
 								providerSessionState: summaryOptions.providerSessionState,
 								codexCompaction: summaryOptions.codexCompaction,
 								replayTarget: getOpenAIResponsesReferenceTarget(summaryOptions.runtimeModel ?? model),
-								requestTarget: resolveRuntimeRequestTarget(summaryOptions.runtimeModel ?? model, key),
+								requestTarget: getOpenAIResponsesRequestTarget(summaryOptions.runtimeModel ?? model, key),
 							},
 						),
 					{ signal },

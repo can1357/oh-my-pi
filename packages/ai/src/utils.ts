@@ -570,6 +570,35 @@ export interface OpenAIResponsesRoutingOverrides {
 	providerOptions?: unknown;
 }
 
+interface OpenAIResponsesGatewayRoutingShape {
+	only?: unknown;
+	order?: unknown;
+}
+
+/**
+ * Routing selectors in the exact shape the Responses serializer writes onto the
+ * request body. Configured gateway routing is nested under `providerOptions
+ * .gateway`, while an `extraBody` override supplies that field verbatim, so the
+ * identity hash and the post-shaping wire check must both read the wire shape —
+ * comparing the raw configuration would let two structurally different routes
+ * share a fingerprint.
+ */
+export function resolveOpenAIResponsesWireRouting<Router, Gateway extends OpenAIResponsesGatewayRoutingShape>(
+	compat: OpenAIResponsesRoutingIdentityCompat<Router, Gateway> | undefined,
+): OpenAIResponsesRoutingOverrides {
+	const identity = resolveOpenAIResponsesRoutingIdentity(compat);
+	if (!identity) return {};
+	if (compat?.isVercelGatewayHost) {
+		const routing = identity.vercelGatewayRouting;
+		if (!routing || (!routing.only && !routing.order)) return {};
+		const gateway: OpenAIResponsesGatewayRoutingShape = {};
+		if (routing.only) gateway.only = routing.only;
+		if (routing.order) gateway.order = routing.order;
+		return { providerOptions: { gateway } };
+	}
+	return identity.openRouterRouting !== undefined ? { provider: identity.openRouterRouting } : {};
+}
+
 export function getOpenAIResponsesReferenceTarget(
 	model: Model,
 	requestModel = resolveOpenAIResponsesRequestModel(model),
@@ -580,14 +609,12 @@ export function getOpenAIResponsesReferenceTarget(
 		!!model.compat &&
 		"supportsImageDetailOriginal" in model.compat &&
 		model.compat.supportsImageDetailOriginal === true;
-	const configuredRouting = resolveOpenAIResponsesRoutingIdentity(
-		model.compat as OpenAIResponsesRoutingIdentityCompat | undefined,
+	const configuredRouting = resolveOpenAIResponsesWireRouting(
+		model.compat as OpenAIResponsesRoutingIdentityCompat<unknown, OpenAIResponsesGatewayRoutingShape> | undefined,
 	);
 	const routing: Record<string, unknown> = {};
-	if (configuredRouting?.openRouterRouting !== undefined) routing.provider = configuredRouting.openRouterRouting;
-	if (configuredRouting?.vercelGatewayRouting !== undefined) {
-		routing.providerOptions = configuredRouting.vercelGatewayRouting;
-	}
+	if (configuredRouting.provider !== undefined) routing.provider = configuredRouting.provider;
+	if (configuredRouting.providerOptions !== undefined) routing.providerOptions = configuredRouting.providerOptions;
 	if (routingOverrides?.provider !== undefined) routing.provider = routingOverrides.provider;
 	if (routingOverrides?.providerOptions !== undefined) routing.providerOptions = routingOverrides.providerOptions;
 	const identity = JSON.stringify({
