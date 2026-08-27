@@ -24,6 +24,7 @@ import {
 	startClipboardBatch,
 } from "@oh-my-pi/hashline";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { mintToolOutcome } from "@oh-my-pi/pi-agent-core/presentation";
 import type { FileDiagnosticsResult, WritethroughCallback, WritethroughDeferredHandle } from "../../lsp";
 import type { ToolSession } from "../../tools";
 import { outputMeta } from "../../tools/output-meta";
@@ -153,7 +154,7 @@ function renderNoopResult(path: string): AgentToolResult<EditToolDetails> {
 	return {
 		content: [{ type: "text", text: noChangeDiagnostic(path) }],
 		details: { diff: "", op: "update", meta: outputMeta().get() },
-		outcome: { kind: "succeeded" },
+		outcome: mintToolOutcome({ kind: "succeeded" }),
 	};
 }
 

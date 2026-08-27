@@ -6,7 +6,7 @@
  */
 
 import type { ToolFailure, ToolOutcome } from "@oh-my-pi/pi-agent-core/presentation";
-import { outcomeFailed } from "@oh-my-pi/pi-agent-core/presentation";
+import { mintToolOutcome, outcomeFailed } from "@oh-my-pi/pi-agent-core/presentation";
 import type { NonEmptyArray } from "@oh-my-pi/pi-utils";
 import type { FileDiagnosticsResult } from "../lsp";
 import type { OutputMeta } from "../tools/output-meta";
@@ -70,8 +70,8 @@ export interface EditToolDetails {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Closed per-file union — computed internally by every edit producer, then
-// projected back down to the legacy `EditToolDetails` bag (see the 2026-08-23
-// plan amendment; the bag is what crosses AgentToolResult.details)
+// projected back down to the legacy `EditToolDetails` bag (the bag is what
+// crosses AgentToolResult.details)
 // ═══════════════════════════════════════════════════════════════════════════
 
 declare const normalizedPathBrand: unique symbol;
@@ -230,7 +230,7 @@ export function aggregateEditOutcome(files: readonly EditFileOutcome[]): Aggrega
 		throw new Error("aggregateEditOutcome: a skipped entry requires at least one failed entry in the same call");
 	}
 
-	const outcome: ToolOutcome =
+	const outcome: ToolOutcome = mintToolOutcome(
 		failures.length === 0
 			? { kind: "succeeded" }
 			: {
@@ -239,7 +239,8 @@ export function aggregateEditOutcome(files: readonly EditFileOutcome[]): Aggrega
 						reason: "tool_reported",
 						message: failures.map(f => `${f.path}: ${f.message}`).join("; "),
 					} satisfies ToolFailure,
-				};
+				},
+	);
 
 	return { files: nonEmptyFiles, outcome, isError: outcomeFailed(outcome) };
 }

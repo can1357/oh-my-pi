@@ -13,7 +13,7 @@ import type {
 	ToolOutcome,
 	ToolPresentationProducer,
 } from "@oh-my-pi/pi-agent-core/presentation";
-import { nonZeroExitCode, presentationProducerOf } from "@oh-my-pi/pi-agent-core/presentation";
+import { mintToolOutcome, nonZeroExitCode, presentationProducerOf } from "@oh-my-pi/pi-agent-core/presentation";
 import type { ImageContent, ToolExample } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import {
@@ -305,13 +305,13 @@ export function evalOutcome(result: AgentToolResult<EvalToolDetails | undefined>
 	if (termination !== undefined) {
 		switch (termination.kind) {
 			case "timed_out":
-				return {
+				return mintToolOutcome({
 					kind: "failed",
 					failure: { reason: "process", message: "Command timed out" },
 					process: { kind: "timed_out", timeoutMs: termination.timeoutMs },
-				};
+				});
 			case "interrupted":
-				return { kind: "interrupted", reason: "Command aborted" };
+				return mintToolOutcome({ kind: "interrupted", reason: "Command aborted" });
 			default: {
 				const exhaustive: never = termination;
 				throw new Error(`Unhandled eval termination: ${JSON.stringify(exhaustive)}`);
@@ -322,16 +322,16 @@ export function evalOutcome(result: AgentToolResult<EvalToolDetails | undefined>
 	const lastCell = cells?.[cells.length - 1];
 	const exitCode = lastCell?.exitCode;
 	if (typeof exitCode === "number" && exitCode !== 0) {
-		return {
+		return mintToolOutcome({
 			kind: "failed",
 			failure: { reason: "process", message: `Command exited with code ${exitCode}` },
 			process: { kind: "exited", code: nonZeroExitCode(exitCode) },
-		};
+		});
 	}
 	if (result.isError === true) {
-		return { kind: "failed", failure: { reason: "tool_reported", message: "Command failed" } };
+		return mintToolOutcome({ kind: "failed", failure: { reason: "tool_reported", message: "Command failed" } });
 	}
-	return { kind: "succeeded", process: { kind: "exited", code: 0 } };
+	return mintToolOutcome({ kind: "succeeded", process: { kind: "exited", code: 0 } });
 }
 function formatEvalInputLanguage(value: string): string {
 	if (value === "py" || value === "python") return "python";

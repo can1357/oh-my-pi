@@ -7,6 +7,7 @@ import {
 	agentLoopDetailed,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
 } from "@oh-my-pi/pi-agent-core/agent-loop";
+import { mintToolOutcome } from "@oh-my-pi/pi-agent-core/presentation";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -3916,30 +3917,58 @@ describe("agentLoop outcome→wire isError bridge", () => {
 	}
 
 	// A migrated producer is not obliged to keep its legacy `isError` bit
-	// consistent with `outcome`: `outcome` alone must reach the
-	// LLM wire. Without the bridge, `ToolResultMessage.isError` stays `false` —
-	// which for Anthropic-style providers means a genuinely failed call is
-	// reported to the model as a success.
+	// consistent with `outcome`: a genuinely *minted* `outcome` alone must
+	// reach the LLM wire. Without the bridge, `ToolResultMessage.isError`
+	// stays `false` — which for Anthropic-style providers means a genuinely
+	// failed call is reported to the model as a success.
 	it("reports a failed outcome on the wire even when the legacy isError bit is unset", async () => {
 		const message = await runOutcomeProbe({
 			content: [{ type: "text", text: "OUTCOME_BRIDGE_FAILED_FIXTURE_71C4" }],
 			details: {},
-			outcome: {
+			outcome: mintToolOutcome({
 				kind: "failed",
 				failure: { reason: "tool_reported", message: "OUTCOME_BRIDGE_FAILED_FIXTURE_71C4" },
-			},
+			}),
 		});
 		expect(message.isError).toBe(true);
 	});
 
-	// The reverse direction: `outcome` is the authority, not merely a hint
-	// consulted when the legacy bit agrees.
+	// The reverse direction: a genuinely minted `outcome` is the authority,
+	// not merely a hint consulted when the legacy bit agrees.
 	it("reports a succeeded outcome on the wire even when a stray legacy isError bit is set", async () => {
 		const message = await runOutcomeProbe({
 			content: [{ type: "text", text: "OUTCOME_BRIDGE_SUCCEEDED_FIXTURE_5A38" }],
 			details: {},
 			isError: true,
-			outcome: { kind: "succeeded" },
+			outcome: mintToolOutcome({ kind: "succeeded" }),
+		});
+		expect(message.isError).toBe(false);
+	});
+
+	// The whole point of the provenance mint: a custom
+	// tool cannot forge the authoritative outcome just by returning an
+	// object literal that is shape-identical to a real `ToolOutcome`. Here
+	// the literal is constructed directly — never through `mintToolOutcome`
+	// — so `coerceToolResult` must drop it and fall back to the observed
+	// `isError` bit instead of trusting the forged "succeeded" discriminant.
+	it("drops an unminted outcome that merely looks like a ToolOutcome by shape and derives from isError instead", async () => {
+		const forgedOutcome = { kind: "succeeded" } as const;
+		const message = await runOutcomeProbe({
+			content: [{ type: "text", text: "OUTCOME_FORGERY_FIXTURE_9D21" }],
+			details: {},
+			isError: true,
+			outcome: forgedOutcome,
+		});
+		expect(message.isError).toBe(true);
+	});
+
+	// Malformed nesting (an `outcome` that isn't object-shaped at all) falls
+	// back cleanly to the isError-derived branches rather than throwing.
+	it("falls back cleanly when outcome is malformed", async () => {
+		const message = await runOutcomeProbe({
+			content: [{ type: "text", text: "OUTCOME_MALFORMED_FIXTURE_2C77" }],
+			details: {},
+			outcome: "succeeded",
 		});
 		expect(message.isError).toBe(false);
 	});

@@ -80,6 +80,45 @@ export type ToolOutcome =
 			readonly process?: Extract<FailedProcessTermination, { kind: "signaled" }>;
 	  };
 
+/**
+ * Provenance brand for {@link ToolOutcome} values authored in-tree.
+ *
+ * `coerceToolResult` (`agent-loop.ts`) crosses a *serialization* boundary — an
+ * MCP server payload, subprocess stdout, or `transform_external_result`'s raw
+ * JSON can be shape-identical to a `ToolOutcome` (same `kind` discriminant)
+ * without having actually observed the call's real `isError`, because none of
+ * those producers can carry this module's own object identity across the
+ * boundary. Trusting such a value by shape alone would let a hostile/buggy
+ * producer override the boundary's own `isError` observation.
+ *
+ * The `WeakSet` is module-private: nothing outside this file can add to it,
+ * so only outcomes built by {@link mintToolOutcome} — i.e. only this
+ * module's own in-tree authors — pass {@link isMintedToolOutcome}. A forged
+ * object literal that merely looks like a `ToolOutcome`, or a value that
+ * crossed a real serialization boundary, never enters the set.
+ *
+ * Out of scope by design: an in-process custom tool or extension that can
+ * `import { mintToolOutcome }` already has arbitrary code execution in the
+ * agent process (the package has no export boundary that hides it from such
+ * a caller) — it can already return `isError: false` outright with the same
+ * one import. Minting only lets that actor create an `isError`/`outcome`
+ * *inconsistency*; it grants no capability it didn't already have. This brand
+ * defends data crossing a boundary that cannot preserve identity, not an
+ * in-process actor that already controls the process.
+ */
+const mintedOutcomes = new WeakSet<ToolOutcome>();
+
+/** Mint a {@link ToolOutcome}, branding it as an in-tree authored value. Call this at every outcome construction site, never on a value received from outside the process. */
+export function mintToolOutcome<T extends ToolOutcome>(outcome: T): T {
+	mintedOutcomes.add(outcome);
+	return outcome;
+}
+
+/** Whether `value` is a `ToolOutcome` minted in-tree via {@link mintToolOutcome} — the only provenance `coerceToolResult` trusts. */
+export function isMintedToolOutcome(value: unknown): value is ToolOutcome {
+	return typeof value === "object" && value !== null && mintedOutcomes.has(value as ToolOutcome);
+}
+
 /** Rendering severity derived from the outcome — the *only* place timeout softening lives. */
 export type PresentationSeverity = "success" | "warning" | "error";
 

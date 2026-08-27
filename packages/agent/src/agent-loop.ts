@@ -61,6 +61,7 @@ import type {
 } from "./presentation";
 import {
 	executionToolArguments,
+	isMintedToolOutcome,
 	outcomeFailed,
 	presentationProducerOf,
 	publicToolArguments,
@@ -463,16 +464,6 @@ function hasSubstantiveToolResultContent(content: AgentToolResult["content"]): b
 	return false;
 }
 
-/** Minimal shape check for a raw `outcome` value crossing the untrusted boundary — not full schema validation, matching this function's existing light-touch coercion of `isError`/`useless`. */
-function isPlainToolOutcome(value: unknown): value is ToolOutcome {
-	return (
-		typeof value === "object" &&
-		value !== null &&
-		"kind" in value &&
-		(value.kind === "succeeded" || value.kind === "failed" || value.kind === "interrupted")
-	);
-}
-
 function coerceToolResult(raw: unknown): { result: AgentToolResult<unknown>; malformed: boolean } {
 	const rawObj = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
 	const rawContent = rawObj?.content;
@@ -492,7 +483,10 @@ function coerceToolResult(raw: unknown): { result: AgentToolResult<unknown>; mal
 	// its own authoritative outcome; thread it through unchanged so it survives
 	// both the direct-execute normalization and an `afterToolCall` re-coercion.
 	const rawOutcome = rawObj && "outcome" in rawObj ? rawObj.outcome : undefined;
-	const outcome = isPlainToolOutcome(rawOutcome) ? rawOutcome : undefined;
+	if (rawOutcome !== undefined && !isMintedToolOutcome(rawOutcome)) {
+		logger.debug("Dropped an unminted tool outcome at the coerceToolResult boundary", { rawOutcome });
+	}
+	const outcome = isMintedToolOutcome(rawOutcome) ? rawOutcome : undefined;
 
 	if (!Array.isArray(rawContent)) {
 		return {

@@ -19,6 +19,7 @@ import type {
 import {
 	afterPresentationSettlement,
 	createLiveTerminalBinding,
+	mintToolOutcome,
 	nonZeroExitCode,
 	presentationProducerOf,
 } from "@oh-my-pi/pi-agent-core/presentation";
@@ -563,7 +564,7 @@ export function bashOutcome(result: AgentToolResult<BashToolDetails>): ToolOutco
 	const details = result.details;
 	if (details?.timedOut === true) {
 		const timeoutMs = (details.timeoutSeconds ?? 0) * 1000;
-		return {
+		return mintToolOutcome({
 			kind: "failed",
 			failure: {
 				reason: "process",
@@ -573,20 +574,20 @@ export function bashOutcome(result: AgentToolResult<BashToolDetails>): ToolOutco
 						: `Command timed out after ${details.timeoutSeconds} seconds`,
 			},
 			process: { kind: "timed_out", timeoutMs },
-		};
+		});
 	}
 	const exitCode = details?.exitCode;
 	if (typeof exitCode === "number" && exitCode !== 0) {
-		return {
+		return mintToolOutcome({
 			kind: "failed",
 			failure: { reason: "process", message: `Command exited with code ${exitCode}` },
 			process: { kind: "exited", code: nonZeroExitCode(exitCode) },
-		};
+		});
 	}
 	if (result.isError === true) {
-		return { kind: "failed", failure: { reason: "tool_reported", message: "Command failed" } };
+		return mintToolOutcome({ kind: "failed", failure: { reason: "tool_reported", message: "Command failed" } });
 	}
-	return { kind: "succeeded", process: { kind: "exited", code: 0 } };
+	return mintToolOutcome({ kind: "succeeded", process: { kind: "exited", code: 0 } });
 }
 
 function formatWallTimeSeconds(wallTimeMs: number): string {
