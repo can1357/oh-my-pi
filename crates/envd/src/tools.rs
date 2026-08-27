@@ -2267,6 +2267,7 @@ pub(crate) fn production_registry<
 	for dynamic in dynamic_tools {
 		dynamic.register(&mut registry)?;
 	}
+	registry.protect_core_claims(["hub"]);
 	for factory in dynamic_tool_factories {
 		factory.register(&mut registry)?;
 	}
