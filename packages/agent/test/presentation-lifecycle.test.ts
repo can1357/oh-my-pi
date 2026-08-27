@@ -1035,4 +1035,32 @@ describe("add_guidance_fact effect", () => {
 			.join("\n");
 		expect(text).toContain("<reminder>run the tests</reminder>");
 	});
+
+	it("keeps a thrown tool's failure through the guidance re-coercion — annotates, never absolves", async () => {
+		const tool = streamingTool();
+		const throwing: AgentTool<typeof toolSchema, { value: string }> = {
+			...tool,
+			async execute() {
+				throw new Error("the tool itself is broken");
+			},
+		};
+		const events = await runLoop(throwing, {
+			getToolContext: threadingHost(),
+			afterToolCall: guidanceEffect,
+		});
+		// The caught throw's synthesized result carries no isError field of its
+		// own; the guidance-only effect must re-coerce from the derived failure
+		// state, not launder the call into a success.
+		const end = events.find(event => event.type === "tool_execution_end");
+		if (end?.type !== "tool_execution_end") throw new Error("expected a tool_execution_end");
+		expect(end.isError).toBe(true);
+		const settled = settlements(events)[0]?.event;
+		if (settled?.type !== "settled") throw new Error("expected a settlement");
+		expect(settled.outcome.kind).toBe("failed");
+		// The guidance text still rides the (failed) result content.
+		const content = end.result.content as readonly { type: string; text?: string }[];
+		const text = content.map(part => (part.type === "text" ? (part.text ?? "") : "")).join("\n");
+		expect(text).toContain("<reminder>run the tests</reminder>");
+		expect(text).toContain("the tool itself is broken");
+	});
 });

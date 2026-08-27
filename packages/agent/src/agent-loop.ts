@@ -3105,7 +3105,15 @@ async function executeToolCalls(
 									: {
 											content: [{ type: "text" as const, text: effect.fact.text }, ...result.content],
 											details: result.details,
-											isError: result.isError,
+											// The derived local `isError`, never `result.isError` alone: a
+											// caught throw's synthesized result carries no isError field of
+											// its own — copying only the field would launder the
+											// already-established failure into a success for the tool-result
+											// message and legacy completion. (A malformed first coercion
+											// already stamps isError: true on its result; the local flag
+											// covers both.) A guidance-only effect annotates the result; it
+											// never absolves it.
+											isError: isError || result.isError,
 											providerMetadata: result.providerMetadata,
 											useless: result.useless,
 											...(result.outcome !== undefined ? { outcome: result.outcome } : {}),
