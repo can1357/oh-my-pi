@@ -1,26 +1,6 @@
 /**
- * End-to-end coverage for speculative programmatic tool calling.
- *
- * The unit tests in `speculation.test.ts` cover the scanner, the store, and the
- * bridge claim in isolation. They cannot see the part that carries the feature:
- *
- *   Agent stream emits an `eval` tool call
- *     -> AgentSession's assistant-event interceptor
- *       -> streamedEvalCell reads toolCall.arguments mid-stream
- *         -> EvalSpeculationStore.observe launches completion("literal")
- *           -> EvalTool executes the cell for real
- *             -> prelude completion() -> __omp_call_tool__
- *               -> callSessionTool claims the parked result
- *
- * If any link breaks, speculation silently does nothing and every isolated test
- * still passes. That is the failure mode these tests exist to catch.
- *
- * The chain is driven with a scripted mock model, so it costs no provider calls.
- * One thing it deliberately cannot prove: that a real provider fills
- * `toolCall.arguments` progressively while the cell is still streaming. The mock
- * shares one array between `partial.content` and the emitted blocks, so args are
- * complete at the first delta. Only a live turn settles that, which is why
- * `EvalSpeculationStore` logs each launch and claim.
+ * End-to-end: stream interceptor, mid-stream arg read, store launch, cell execution, and
+ * bridge claim. Uses a scripted mock model, so it cannot prove progressive arg delivery.
  */
 import { afterAll, afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
@@ -41,10 +21,7 @@ import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 /**
- * Prefix on every stubbed speculation result. The value is prompt-specific on
- * purpose: a single constant would prove a claim happened but could not tell a
- * correct claim from one prompt's answer leaking into another's call, which is
- * the expensive way for this feature to be wrong.
+ * Prefix on every stubbed result. Prompt-specific so a leak between prompts is visible.
  */
 const SPECULATED_PREFIX = "SPECULATED:";
 
@@ -77,14 +54,8 @@ describe("speculative tool calling through a real session", () => {
 	let scriptedResponses: MockResponse[];
 	let speculated: Array<Record<string, unknown>>;
 
-	/**
-	 * Build a session whose eval tool shares one `ToolSession` with the
-	 * speculation store, mirroring `sdk.ts`, which registers the store against the
-	 * same object it hands to `createTools`.
-	 *
-	 * `registerTool` controls whether the agent can actually run the cell, which
-	 * separates "did the stream launch it" from "did the cell claim it".
-	 */
+	/** Share one `ToolSession` between eval tool and store, as `sdk.ts` does. `registerTool`
+	 * separates "did the stream launch it" from "did the cell claim it". */
 	async function build(registerTool: boolean): Promise<void> {
 		tempDir = path.join(os.tmpdir(), `pi-sptc-e2e-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		fs.mkdirSync(tempDir, { recursive: true });
