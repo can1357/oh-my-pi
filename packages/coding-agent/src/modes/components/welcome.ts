@@ -480,19 +480,18 @@ export class WelcomeComponent implements Component {
 	}
 }
 
-export const PI_LOGO = ["▀██████████▀", " ╘██    ██  ", "  ██    ██  ", "  ██    ██  ", " ▄██▄  ▄██▄ "];
+/** Block-grid brand mark shared by the welcome and setup surfaces. */
+export const PI_LOGO = ["████████████", "   ██  ██   ", "   ██  ██   ", "   ▒▒  ██   ", "       ██   "];
 
 /** Multi-stop palette for the diagonal gradient. */
 const GRADIENT_STOPS: ReadonlyArray<readonly [number, number, number]> = [
-	[255, 92, 200], // hot pink
-	[200, 110, 255], // violet
-	[120, 130, 255], // periwinkle
-	[60, 200, 255], // bright cyan
-	[120, 255, 220], // mint
+	[248, 79, 204], // oklch(0.7 0.24 340)
+	[147, 98, 244], // oklch(0.62 0.21 295)
+	[0, 219, 228], // oklch(0.81 0.14 200)
 ];
 
 /** 256-color ramp fallback when truecolor isn't available. */
-const GRADIENT_RAMP_256 = [199, 171, 135, 99, 75, 51, 87];
+const GRADIENT_RAMP_256 = [206, 170, 134, 99, 69, 74, 44];
 
 /** Half-width of the shine highlight band, expressed in gradient-t units. */
 const SHINE_HALF_WIDTH = 0.18;
@@ -548,7 +547,7 @@ export function gradientEscape(t: number, shine?: ShineConfig): string {
 }
 
 /**
- * Apply a multi-stop diagonal gradient (bottom-left → top-right) plus an
+ * Apply a multi-stop diagonal gradient (top-left → bottom-right) plus an
  * optional sliding shine band across multi-line art. `phase` (0..1) shifts the
  * gradient along the diagonal, wrapping at 1. When `shine` is provided, a soft
  * white highlight is composited on top, centered at `shine.pos`.
@@ -557,9 +556,9 @@ export function gradientLogo(lines: readonly string[], phase = 0, shine?: ShineC
 	const reset = "\x1b[0m";
 	const rows = lines.length;
 	const cols = Math.max(...lines.map(l => l.length));
-	// span+1 so `base` stays strictly < 1: avoids the wrap-around at the
-	// far corner mapping back to t=0 (hot pink) on the resting frame.
-	const span = Math.max(1, cols + rows - 1);
+	const xSpan = Math.max(1, cols - 1);
+	const ySpan = Math.max(1, rows - 1);
+	const normalizedPhase = ((phase % 1) + 1) % 1;
 	return lines.map((line, y) => {
 		let result = "";
 		for (let x = 0; x < line.length; x++) {
@@ -568,9 +567,10 @@ export function gradientLogo(lines: readonly string[], phase = 0, shine?: ShineC
 				result += char;
 				continue;
 			}
-			// Diagonal: bottom-left (x=0, y=rows-1) → top-right (x=cols-1, y=0)
-			const base = (x + (rows - 1 - y)) / span;
-			const t = (((base + phase) % 1) + 1) % 1;
+			// SVG's (0,0) → (1,1) gradient projects both normalized axes
+			// equally: top-right and bottom-left land on the purple midpoint.
+			const base = (x / xSpan + y / ySpan) / 2;
+			const t = normalizedPhase === 0 ? base : (base + normalizedPhase) % 1;
 			result += gradientEscape(t, shine) + char + reset;
 		}
 		return result;

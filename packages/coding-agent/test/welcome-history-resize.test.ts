@@ -253,6 +253,36 @@ describe("composer welcome native-history resize", () => {
 		expect(countRows(transient, marker)).toBe(0);
 		composer.ui.stop();
 	});
+	it("recomposes the retired welcome header at the settled width on a rebuild resize", async () => {
+		vi.spyOn(Math, "random").mockReturnValue(0.5);
+		const terminal = new VirtualTerminal(60, 12);
+		const scheduler = new VirtualRenderScheduler();
+		const composer = new Composer({
+			terminal,
+			tuiOptions: { renderScheduler: scheduler },
+			preferences: { ...COMPOSER_DEFAULTS, quiet: false, resizeScrollback: "rebuild" },
+			welcome: { version: "test", modelName: "test-model", providerName: "test-provider" },
+		});
+		composer.setRuntimeChildren([new TranscriptContainer(), new MutableComposerTail()]);
+		composer.start({ playWelcomeIntro: false });
+		await scheduler.settle(terminal);
+
+		const narrow = plainBuffer(terminal);
+		expect(countRows(narrow, "Welcome back!")).toBe(1);
+		// Box width tracks the terminal: min(100, 60 - 2) = 58 columns.
+		expect(Math.max(...narrow.map(row => visibleWidth(row)))).toBeLessThanOrEqual(58);
+
+		terminal.resize(100, 12);
+		await scheduler.advance(terminal, 160);
+
+		const rebuilt = plainBuffer(terminal);
+		expect(countRows(rebuilt, "Welcome back!")).toBe(1);
+		// A hard-wrap reflow can never widen a committed 58-column row; only a
+		// recompose at the settled width produces the 98-column box.
+		expect(Math.max(...rebuilt.map(row => visibleWidth(row)))).toBeGreaterThan(58);
+		composer.ui.stop();
+	});
+
 	it("rebuilds retired transcript rows at the settled width by default", async () => {
 		const terminal = new VirtualTerminal(20, 4);
 		const scheduler = new VirtualRenderScheduler();

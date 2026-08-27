@@ -301,6 +301,7 @@ export const clientUsageReportRequestSchema: FluentType<ClientUsageReportRequest
 	"+": "reject",
 	installId: "string",
 	"hostname?": "string",
+	"app?": "string",
 	entries: observedUsageEntrySchema.array(),
 });
 
@@ -315,6 +316,7 @@ const clientUsageClientSummarySchema = type({
 	firstSeen: "number",
 	lastSeen: "number",
 	providers: type({
+		"app?": "string",
 		provider: "string",
 		requests: "number",
 		inputTokens: "number",

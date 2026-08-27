@@ -394,6 +394,11 @@ export class SessionMaintenance {
 		return run.armed ? "armed" : "running";
 	}
 
+	/** Completion of the current speculative pass, used to resume maintenance skipped during its handoff. */
+	get speculationCompletion(): Promise<void> | undefined {
+		return this.#speculation?.promise;
+	}
+
 	/** Abort and discard any in-flight or armed speculative compaction. */
 	cancelSpeculation(): void {
 		const run = this.#speculation;

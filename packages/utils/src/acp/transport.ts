@@ -77,6 +77,15 @@ export class RequestError extends Error {
 			uri === undefined ? undefined : { uri },
 		);
 	}
+	/**
+	 * Creates a session-busy error: the agent/session is already processing, so the
+	 * request can be retried once idle (steer/follow-up/wait) instead of treating it
+	 * as a fault. `message` carries the caller's user-facing wording; `data` should
+	 * keep the stable discriminator shape (`reason: "session_busy"`).
+	 */
+	static sessionBusy(message: string, data?: unknown): RequestError {
+		return new RequestError(-32003, message, data);
+	}
 	/** Converts this error into a JSON-RPC result. */
 	toResult(): { error: ErrorResponse } {
 		return { error: this.toErrorResponse() };

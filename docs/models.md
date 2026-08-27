@@ -514,6 +514,11 @@ Request shaping:
 
 Reasoning / thinking:
 
+Custom model entries may define `thinking: { mode, efforts, defaultLevel, requiresEffort }`.
+`requiresEffort` defaults to auto-detection; set it to `false` only when the
+configured backend has been verified to accept an explicit reasoning-off
+request. This keeps the `:off` selector from being clamped to the lowest effort.
+
 - `supportsReasoningEffort` — accept `reasoning_effort`. Default: auto (off for Grok, Z.ai/Zhipu, and Xiaomi MiMo).
 - `supportsReasoningParams` — whether request shaping may send reasoning params at all. Default: auto (off for GitHub Copilot chat-completions).
 - `reasoningEffortMap` — partial map from internal effort levels (`minimal|low|medium|high|xhigh|max`) to provider-specific strings (e.g. Fireworks GLM maps `minimal -> "none"`).

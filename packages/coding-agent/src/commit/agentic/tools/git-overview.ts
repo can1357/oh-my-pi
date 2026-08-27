@@ -1,6 +1,7 @@
 import { type } from "@oh-my-pi/omptype";
 import type { CommitAgentState, GitOverviewSnapshot } from "../../../commit/agentic/state";
-import { extractScopeCandidates } from "../../../commit/analysis/scope";
+import { DEFAULT_CONVENTIONAL_GENERATION_CONFIG } from "../../../commit/conventional/config";
+import { extractScopeCandidates } from "../../../commit/conventional/scope";
 import type { CustomTool } from "../../../extensibility/custom-tools/types";
 import * as git from "../../../utils/git";
 import { EXCLUDED_LOCK_FILES } from "../lock-files";
@@ -41,7 +42,7 @@ export function createGitOverviewTool(cwd: string, state: CommitAgentState): Cus
 			const stat = await git.diff(cwd, { stat: true, cached: staged });
 			const allNumstat = await git.diff.numstat(cwd, { cached: staged });
 			const numstat = allNumstat.filter(entry => !isExcludedFile(entry.path));
-			const scopeResult = extractScopeCandidates(numstat);
+			const scopeResult = extractScopeCandidates(numstat, DEFAULT_CONVENTIONAL_GENERATION_CONFIG);
 			const untrackedFiles = !staged && params.include_untracked ? await git.ls.untracked(cwd) : undefined;
 			const snapshot: GitOverviewSnapshot = {
 				files,

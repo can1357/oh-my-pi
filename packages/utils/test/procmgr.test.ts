@@ -81,14 +81,13 @@ describe("resolveWindowsShell", () => {
 		expect(resolveWindowsShell({ ProgramFiles: programFiles, ComSpec: "C:\\Windows\\System32\\cmd.exe" })).toBe(bash);
 	});
 
-	// On a real Windows host (or WSL, which inherits the Windows PATH and
-	// exposes bash.exe from System32) bash.exe/sh.exe may resolve from PATH
-	// before the cmd.exe fallback is reached, so the fallback contract is only
-	// deterministic on non-Windows, non-WSL hosts.
-	it.skipIf(
+	// On a real Windows host — or under WSL, which inherits the Windows PATH —
+	// bash.exe/sh.exe may resolve from PATH before the cmd.exe fallback is
+	// reached, so the fallback contract is only deterministic off-Windows.
+	const isWindowsHost =
 		process.platform === "win32" ||
-			(process.platform === "linux" && Boolean(process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP)),
-	)("falls back to cmd.exe instead of failing when no bash exists", () => {
+		(process.platform === "linux" && Boolean(process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP));
+	it.skipIf(isWindowsHost)("falls back to cmd.exe instead of failing when no bash exists", () => {
 		expect(resolveWindowsShell({})).toBe("C:\\Windows\\System32\\cmd.exe");
 		expect(resolveWindowsShell({ ComSpec: "D:\\win\\cmd.exe" })).toBe("D:\\win\\cmd.exe");
 	});
