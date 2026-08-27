@@ -403,7 +403,7 @@ describe("European gateway provider catalog support", () => {
 		);
 	});
 
-	test("preserves known limits for sparse European gateway refreshes", async () => {
+	test("preserves known limits and pricing for sparse European gateway refreshes", async () => {
 		const fetchMock: FetchImpl = vi.fn(async () => {
 			return Response.json({
 				data: [{ id: "claude-sonnet-5", name: "Claude Sonnet 5" }],
@@ -417,6 +417,12 @@ describe("European gateway provider catalog support", () => {
 			provider: "eurouter",
 			contextWindow: 1_000_000,
 			maxTokens: 128_000,
+			cost: {
+				input: 3,
+				output: 15,
+				cacheRead: 0.3,
+				cacheWrite: 3.75,
+			},
 		});
 	});
 

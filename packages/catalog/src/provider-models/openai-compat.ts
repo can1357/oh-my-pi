@@ -975,12 +975,22 @@ function mapEuropeanGatewayModel(
 			model.reasoning || hasEuropeanGatewayReasoningIdentity(model) || hasEuropeanGatewayKnownReasoning(model),
 		input: toGatewayInputCapabilities(entry, model, model.input),
 		cost: {
-			input: toGatewayCostPerMillion(pricing?.prompt ?? pricing?.input_token) ?? model.cost.input,
-			output: toGatewayCostPerMillion(pricing?.completion ?? pricing?.output_token) ?? model.cost.output,
+			input:
+				toGatewayCostPerMillion(pricing?.prompt ?? pricing?.input_token) ??
+				knownReference?.cost.input ??
+				model.cost.input,
+			output:
+				toGatewayCostPerMillion(pricing?.completion ?? pricing?.output_token) ??
+				knownReference?.cost.output ??
+				model.cost.output,
 			cacheRead:
-				toGatewayCostPerMillion(pricing?.input_cache_read ?? pricing?.cache_read_cost) ?? model.cost.cacheRead,
+				toGatewayCostPerMillion(pricing?.input_cache_read ?? pricing?.cache_read_cost) ??
+				knownReference?.cost.cacheRead ??
+				model.cost.cacheRead,
 			cacheWrite:
-				toGatewayCostPerMillion(pricing?.input_cache_write ?? pricing?.cache_write_cost) ?? model.cost.cacheWrite,
+				toGatewayCostPerMillion(pricing?.input_cache_write ?? pricing?.cache_write_cost) ??
+				knownReference?.cost.cacheWrite ??
+				model.cost.cacheWrite,
 		},
 		contextWindow: toPositiveNumber(
 			entry.context_length,
