@@ -236,9 +236,8 @@ export function findSpeculatableCalls(code: string, language: SpeculationLanguag
 		}
 		if (ch === '"' || ch === "'" || (language === "js" && ch === "`")) {
 			const literal = readStringLiteral(code, index, language);
-			// No locatable terminator: stop. Scanning onward would read the string's
-			// contents as code, and a missed speculation is free while a phantom one
-			// is billed.
+			// Stop rather than read the string body as code: a missed speculation is
+			// free, a phantom one is billed.
 			if (!literal) return found;
 			index = literal.end;
 			continue;
@@ -268,10 +267,17 @@ export type SpeculationRunner = (name: string, args: Record<string, unknown>, si
 /** Outcome of claiming a speculation. `ok: false` means the caller must run the call itself. */
 export type SpeculationClaim = { ok: true; value: unknown } | { ok: false };
 
+/** Launch/settle times for one speculation, created before the run so callbacks can close over it. */
+interface SpeculationTiming {
+	launchedAt: number;
+	settledAt?: number;
+}
+
 interface SpeculationEntry {
 	promise: Promise<SpeculationClaim>;
 	controller: AbortController;
 	claimed: boolean;
+	timing: SpeculationTiming;
 }
 
 export interface EvalSpeculationOptions {
@@ -329,26 +335,25 @@ export class EvalSpeculationStore {
 
 	#launch(key: string, call: SpeculatableCall): void {
 		const controller = new AbortController();
+		const timing: SpeculationTiming = { launchedAt: performance.now() };
 		const promise = this.#run(call.name, call.args, controller.signal).then(
-			(value): SpeculationClaim => ({ ok: true, value }),
+			(value): SpeculationClaim => {
+				timing.settledAt = performance.now();
+				return { ok: true, value };
+			},
 			(error): SpeculationClaim => {
-				// A speculation must never become the cell's failure. Report the miss
-				// and let the caller run the real call with its own signal.
+				// A speculation must never become the cell's failure; the caller runs the real call.
+				timing.settledAt = performance.now();
 				logger.debug("eval speculation failed, falling back", { tool: call.name, error: String(error) });
 				return { ok: false };
 			},
 		);
 		const list = this.#entries.get(key);
-		const entry: SpeculationEntry = { promise, controller, claimed: false };
+		const entry: SpeculationEntry = { promise, controller, claimed: false, timing };
 		if (list) list.push(entry);
 		else this.#entries.set(key, [entry]);
 		this.#launched++;
-		// The whole feature degrades to a silent no-op if the streaming hook stops
-		// firing or the store is never injected, and a speedup is too noisy to read
-		// as confirmation. These three lines are how an operator verifies from
-		// ~/.omp/logs that enabling it did anything. Prompt text is deliberately
-		// omitted: only the tool and counts are needed, and the prompt may be
-		// sensitive.
+		// Detects a broken streaming hook or an uninjected store. Prompt text omitted.
 		logger.debug("eval speculation launched", { tool: call.name, launched: this.#launched });
 	}
 
@@ -362,7 +367,22 @@ export class EvalSpeculationStore {
 		const entry = this.#entries.get(speculationKey(name, args))?.find(candidate => !candidate.claimed);
 		if (!entry) return undefined;
 		entry.claimed = true;
-		logger.debug("eval speculation claimed", { tool: name });
+		const claimedAt = performance.now();
+		// Log after settlement so claims that were still in flight are measured too.
+		void entry.promise.then(result => {
+			const settledAt = entry.timing.settledAt ?? performance.now();
+			const resolveMs = Math.round(settledAt - entry.timing.launchedAt);
+			const claimWaitMs = Math.round(Math.max(0, settledAt - claimedAt));
+			logger.debug("eval speculation claimed", {
+				tool: name,
+				ok: result.ok,
+				leadMs: Math.round(claimedAt - entry.timing.launchedAt),
+				resolveMs,
+				claimWaitMs,
+				savedMs: result.ok ? resolveMs - claimWaitMs : 0,
+				addedWaitMs: result.ok ? 0 : claimWaitMs,
+			});
+		});
 		return entry.promise;
 	}
 
