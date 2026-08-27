@@ -102,8 +102,12 @@ Live delivery is uncapped by construction; **retention** is bounded
 separately. `LiveToolPresentationRecord`
 (`coding-agent/src/presentation/live-record.ts`) folds the live event stream
 into the compact `ToolPresentationRecord` (`presentation/record.ts`): one
-retained stream window (capped at 1 MiB, with an honest `truncation` fact on
-the cut), the ordered facts, attachments, and displays. This record — never
+retained stream window (capped at 500 000 bytes — the session-persistence
+string cap, so the persisted window is byte-identical to the retained one —
+with an honest `truncation` fact on the cut), the ordered facts, attachments,
+and displays. Image attachments externalize their base64 to the blob store on
+persist and resolve back on load, like every other persisted image position.
+This record — never
 the live event log — is what gets persisted and what drives replay and the
 final projections.
 

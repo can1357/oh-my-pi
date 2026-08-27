@@ -228,7 +228,7 @@ describe("ToolPresentationDisplayFold head-window cap", () => {
 		expect(foldEvents(events, 16)).toContain("8 bytes not shown");
 	});
 
-	it("defaults to the shared 1 MiB head window", () => {
+	it("defaults to the 1 MiB live-display head window", () => {
 		expect(PRESENTATION_FOLD_HEAD_WINDOW_BYTES).toBe(1024 * 1024);
 	});
 });

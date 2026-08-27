@@ -28,9 +28,10 @@ import { utf8PrefixWithin } from "../presentation/utf8";
 /**
  * Explicit head-window cap on folded process text: carried here from day
  * one so the display fold can never grow with an unbounded stream (the
- * feed-side cap is bounded separately). Matches the retention budget
- * `presentation/live-record.ts`'s `LiveToolPresentationRecord` bounds its
- * own retained head window to.
+ * feed-side cap is bounded separately). A live-display bound like the ACP
+ * view reducer's `PROCESS_TEXT_HEAD_WINDOW_BYTES` — deliberately larger than
+ * `presentation/live-record.ts`'s persistence-safe retention budget, which is
+ * sized to the session-persistence string cap instead.
  */
 export const PRESENTATION_FOLD_HEAD_WINDOW_BYTES = 1024 * 1024;
 

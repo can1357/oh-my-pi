@@ -71,8 +71,20 @@ import { utf8PrefixWithin } from "./utf8";
  * event — so a capped window can never desync the continuity invariants
  * `fold` enforces on every subsequent event. Only what gets copied into
  * `text` (and therefore persisted/replayed) is capped.
+ *
+ * Sized to the session-persistence string cap (`MAX_PERSIST_CHARS`,
+ * `session/session-persistence.ts`), never above it: a string's UTF-16 length
+ * never exceeds its UTF-8 byte length, so a window of this many bytes can
+ * never trip the generic persistence truncation and the persisted
+ * `stream.text` is always byte-identical to the retained one. A larger window
+ * would be silently notice-truncated on save, breaking the
+ * `byteLength(text) + Σ dropped === endByte − startByte` accounting exact
+ * replay depends on (`hydrate.ts` would fall back to degraded placement and
+ * replay mutated output) and falsifying the truncation fact's
+ * `retainedBytes`. Enforced by a contract test in
+ * `test/session-persistence-images.test.ts`.
  */
-export const LIVE_RECORD_HEAD_WINDOW_BYTES = 1024 * 1024; // 1 MiB
+export const LIVE_RECORD_HEAD_WINDOW_BYTES = 500_000;
 
 /**
  * Bound on how many {@link RetainedDisplay} items {@link LiveToolPresentationRecord}
@@ -84,9 +96,15 @@ export const LIVE_RECORD_HEAD_WINDOW_BYTES = 1024 * 1024; // 1 MiB
  * small displays exhausting the count, or one oversized display alone
  * exhausting the bytes — drops that display and records a `limit` fact
  * (`display_count`/`display_bytes`) so the omission is structural, not silent.
+ *
+ * The byte budget shares the head window's persistence-safe bound: every
+ * string leaf inside a retained display's JSON is no longer (in UTF-16 units)
+ * than the whole display's serialized UTF-8 byte size, so a combined budget
+ * at `MAX_PERSIST_CHARS` guarantees no leaf can trip the generic persistence
+ * truncation and the persisted display trees stay verbatim.
  */
 export const LIVE_RECORD_DISPLAY_ITEM_LIMIT = 256;
-export const LIVE_RECORD_DISPLAY_BUDGET_BYTES = 1024 * 1024; // 1 MiB
+export const LIVE_RECORD_DISPLAY_BUDGET_BYTES = 500_000;
 
 export class LiveToolPresentationRecord {
 	#stream: AccumulatingStream | undefined;

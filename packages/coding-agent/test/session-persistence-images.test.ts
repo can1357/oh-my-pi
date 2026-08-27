@@ -1,9 +1,21 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ToolPresentationRecord } from "@oh-my-pi/pi-agent-core/presentation";
-import { PRESENTATION_VERSION, toolExecutionId } from "@oh-my-pi/pi-agent-core/presentation";
+import {
+	byteLengthOf,
+	byteOffset,
+	PRESENTATION_VERSION,
+	sequence,
+	streamId,
+	toolExecutionId,
+} from "@oh-my-pi/pi-agent-core/presentation";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { MODEL_PROJECTION_VERSION, TOOL_JOURNAL_RECORD_VERSION } from "@oh-my-pi/pi-coding-agent/presentation/journal";
+import {
+	LIVE_RECORD_DISPLAY_BUDGET_BYTES,
+	LIVE_RECORD_HEAD_WINDOW_BYTES,
+	LiveToolPresentationRecord,
+} from "@oh-my-pi/pi-coding-agent/presentation/live-record";
 import { BlobStore, isBlobRef } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import type {
 	CompactionEntry,
@@ -306,5 +318,40 @@ describe("tool journal presentation persistence", () => {
 		if (resolved?.kind !== "image") throw new Error("expected a resolved image attachment");
 		expect(resolved.data).toBe(attachmentData);
 		expect(isStrictBase64(resolved.data)).toBe(true);
+	});
+
+	it("persists a maximally-full retained stream window verbatim", () => {
+		using tempDir = TempDir.createSync("@presentation-stream-persistence-");
+		const blobStore = new BlobStore(tempDir.path());
+		// The retention budgets must never exceed the persistence string cap: a
+		// string's UTF-16 length never exceeds its UTF-8 byte length, so a
+		// window within the cap can never be notice-truncated on save. A budget
+		// above the cap silently desyncs the persisted `stream.text` from its
+		// `startByte`/`endByte` accounting and forces degraded hydration.
+		expect(LIVE_RECORD_HEAD_WINDOW_BYTES).toBeLessThanOrEqual(MAX_PERSIST_CHARS);
+		expect(LIVE_RECORD_DISPLAY_BUDGET_BYTES).toBeLessThanOrEqual(MAX_PERSIST_CHARS);
+
+		const acc = new LiveToolPresentationRecord();
+		acc.fold({
+			type: "terminal_append",
+			streamId: streamId("bash-1"),
+			sequence: sequence(0),
+			startByte: byteOffset(0),
+			data: "x".repeat(LIVE_RECORD_HEAD_WINDOW_BYTES + 100_000),
+		});
+		const record = acc.finish();
+		if (record.stream === undefined) throw new Error("expected a retained stream window");
+		expect(byteLengthOf(record.stream.text)).toBe(LIVE_RECORD_HEAD_WINDOW_BYTES);
+
+		const persisted = prepareEntryForPersistence(settledEntry(record), blobStore) as ToolExecutionSettledEntry;
+		// Structural sharing: nothing in a maximally-full record needs
+		// truncation, so persistence returns the retained record itself —
+		// the persisted window is byte-identical, not merely similar.
+		expect(persisted.presentation).toBe(record);
+
+		// The truncation fact's retainedBytes matches what actually survived to disk.
+		const truncation = record.facts.find(fact => fact.kind === "truncation");
+		if (truncation?.kind !== "truncation") throw new Error("expected a head-window truncation fact");
+		expect(truncation.meta.retainedBytes).toBe(byteLengthOf(persisted.presentation.stream?.text ?? ""));
 	});
 });
