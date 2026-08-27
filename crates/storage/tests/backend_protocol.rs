@@ -92,15 +92,38 @@ impl RedisTransport for RedisFake {
 	}
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SqlOp {
+	Initialize,
+	Length,
+	Range,
+	Append,
+	Truncate,
+}
+
+impl From<&SqlCommand<'_>> for SqlOp {
+	fn from(command: &SqlCommand<'_>) -> Self {
+		match *command {
+			SqlCommand::Initialize { .. } => Self::Initialize,
+			SqlCommand::Length { .. } => Self::Length,
+			SqlCommand::Range { .. } => Self::Range,
+			SqlCommand::Append { .. } => Self::Append,
+			SqlCommand::Truncate { .. } => Self::Truncate,
+		}
+	}
+}
+
 #[derive(Default)]
 struct SqlFake {
 	bytes: Arc<Mutex<Vec<u8>>>,
+	ops:   Arc<Mutex<Vec<SqlOp>>>,
 }
 
 impl SqlTransport for SqlFake {
 	type Error = Infallible;
 
 	fn execute(&mut self, command: SqlCommand<'_>) -> Result<SqlReply, Self::Error> {
+		self.ops.lock().push(SqlOp::from(&command));
 		let mut bytes = self.bytes.lock();
 		Ok(match command {
 			SqlCommand::Initialize { .. } => SqlReply::Done,
@@ -187,12 +210,27 @@ fn redis_store_satisfies_byte_journal_contract() {
 
 #[test]
 fn sql_store_satisfies_byte_journal_contract() {
-	let store = SqlStore::open(SqlFake::default(), SqlDialect::Sqlite, "session")
-		.expect("initialize dialect");
+	let shared_ops = Arc::new(Mutex::new(Vec::new()));
+	let fake = SqlFake { bytes: Arc::new(Mutex::new(Vec::new())), ops: Arc::clone(&shared_ops) };
+	let store = SqlStore::open(fake, SqlDialect::Sqlite, "session").expect("initialize dialect");
 	assert_byte_journal_contract(store);
+	assert_eq!(
+		*shared_ops.lock(),
+		vec![
+			SqlOp::Initialize,
+			SqlOp::Length,
+			SqlOp::Append,
+			SqlOp::Append,
+			SqlOp::Range,
+			SqlOp::Truncate,
+			SqlOp::Range,
+		],
+		"SQL initialize DDL runs once before the byte-journal protocol, and cached length avoids \
+		 redundant remote length calls"
+	);
 
 	let shared_bytes = Arc::new(Mutex::new(b"v4\n".to_vec()));
-	let fake = SqlFake { bytes: Arc::clone(&shared_bytes) };
+	let fake = SqlFake { bytes: Arc::clone(&shared_bytes), ops: Arc::new(Mutex::new(Vec::new())) };
 	let mut store =
 		SqlStore::open(fake, SqlDialect::Sqlite, "conflict").expect("initialize conflict store");
 	assert_eq!(store.len().expect("initial length"), 3, "store caches the pre-race length");
