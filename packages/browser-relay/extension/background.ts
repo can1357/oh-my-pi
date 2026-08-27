@@ -54,6 +54,7 @@ let recoverableUpdates: Promise<void> = recoverableReady;
 
 function trackPendingDetach<T>(promise: Promise<T>): Promise<T> {
 	pendingOperationGeneration++;
+	invalidateHelloRefresh();
 	const tracked = promise.finally(() => {
 		pendingDetaches.delete(tracked as Promise<void>);
 	});
@@ -312,6 +313,10 @@ function refreshHello(): void {
 	startRefresh();
 }
 
+function invalidateHelloRefresh(): void {
+	if (helloRefresh) helloRefresh.dirty = true;
+}
+
 async function buildHello(): Promise<Extract<ExtToRelayMessage, { t: "hello" }>> {
 	// An attach requested by the previous socket can finish during a fast
 	// reconnect. Guard/internal detaches can be in flight for the same window,
@@ -352,6 +357,7 @@ async function attachTab(tabId: number, socket: WebSocket): Promise<void> {
 	pendingAttachTabs.add(tabId);
 	const pending = attachTabOperation(tabId, socket);
 	pendingOperationGeneration++;
+	invalidateHelloRefresh();
 	pendingAttaches.add(pending);
 	try {
 		await pending;

@@ -824,16 +824,16 @@ export class RelayBridge {
 				});
 				return;
 			case "Emulation.clearDeviceMetricsOverride":
-				this.#forgetSessionSubscription(tab, "Emulation.setDeviceMetricsOverride", ownerSessionId);
+				this.#forgetTabSubscription(tab, "Emulation.setDeviceMetricsOverride");
 				return;
 			case "Page.clearDeviceMetricsOverride":
-				this.#forgetSessionSubscription(tab, "Page.setDeviceMetricsOverride", ownerSessionId);
+				this.#forgetTabSubscription(tab, "Page.setDeviceMetricsOverride");
 				return;
 			case "Emulation.clearGeolocationOverride":
-				this.#forgetSessionSubscription(tab, "Emulation.setGeolocationOverride", ownerSessionId);
+				this.#forgetTabSubscription(tab, "Emulation.setGeolocationOverride");
 				return;
 			case "Page.clearGeolocationOverride":
-				this.#forgetSessionSubscription(tab, "Page.setGeolocationOverride", ownerSessionId);
+				this.#forgetTabSubscription(tab, "Page.setGeolocationOverride");
 				return;
 			case "Emulation.setDeviceMetricsOverride":
 			case "Page.setDeviceMetricsOverride":
@@ -898,6 +898,10 @@ export class RelayBridge {
 		if (!owners) return;
 		owners.delete(ownerSessionId);
 		if (owners.size === 0) tab.subscriptions.delete(key);
+	}
+
+	#forgetTabSubscription(tab: TabState, key: string): void {
+		tab.subscriptions.delete(key);
 	}
 
 	#forgetSessionSubscriptions(tabId: number, sessionIds: Iterable<string>): void {

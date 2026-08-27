@@ -97,6 +97,7 @@ var recoverableReady = chrome.storage.session.get({ [RECOVERABLE_TAB_IDS_KEY]: [
 var recoverableUpdates = recoverableReady;
 function trackPendingDetach(promise) {
   pendingOperationGeneration++;
+  invalidateHelloRefresh();
   const tracked = promise.finally(() => {
     pendingDetaches.delete(tracked);
   });
@@ -274,6 +275,10 @@ function refreshHello() {
   };
   startRefresh();
 }
+function invalidateHelloRefresh() {
+  if (helloRefresh)
+    helloRefresh.dirty = true;
+}
 async function buildHello() {
   await recoverableUpdates;
   const [tabs, targets] = await snapshotAfterPendingOperationsSettle(() => pendingOperationGeneration, () => [...pendingAttaches, ...pendingDetaches], () => Promise.all([chrome.tabs.query({}), chrome.debugger.getTargets()]));
@@ -306,6 +311,7 @@ async function attachTab(tabId, socket) {
   pendingAttachTabs.add(tabId);
   const pending = attachTabOperation(tabId, socket);
   pendingOperationGeneration++;
+  invalidateHelloRefresh();
   pendingAttaches.add(pending);
   try {
     await pending;

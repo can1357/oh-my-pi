@@ -1394,6 +1394,44 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send")).toHaveLength(0);
 	});
 
+	it("does not replay a persistent root setter after another session clears it", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const clearer = new FakeCdpSocket();
+		const clearerConn = bridge.cdpConnected(clearer);
+		const clearerSession = await attachPage(bridge, ext, clearer, clearerConn, 1);
+
+		const sendRootCommand = async (
+			connId: number,
+			sessionId: string,
+			method: string,
+			params?: Record<string, unknown>,
+		): Promise<void> => {
+			const id = ++msgSeq;
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+		};
+
+		const metrics = { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false };
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setDeviceMetricsOverride", metrics);
+		await sendRootCommand(clearerConn, clearerSession, "Emulation.clearDeviceMetricsOverride");
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
+		ack(bridge, ext2, "attach");
+		await flush();
+
+		expect(ext2.rpcs("send")).toHaveLength(0);
+	});
+
 	it("clears replayed extra headers when the replay owner disconnects during recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
