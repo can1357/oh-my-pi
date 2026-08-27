@@ -365,6 +365,12 @@ export function canReuseOpenAiCompactionHistory(
 	return !replacementHistoryContainsTargetDependentImage(preserved.replacementHistory);
 }
 
+export function getOpenAiCompactionRuntimeReplayTarget(
+	preserved: Pick<OpenAiRemoteCompactionPreserveData, "referenceTarget" | "replayTarget">,
+): string | undefined {
+	return preserved.replayTarget ?? preserved.referenceTarget;
+}
+
 export function canReplayOpenAiCompactionHistory(
 	preserved: Pick<
 		OpenAiRemoteCompactionPreserveData,
@@ -373,8 +379,9 @@ export function canReplayOpenAiCompactionHistory(
 	model: Model,
 ): boolean {
 	if (preserved.provider !== model.provider) return false;
-	if (preserved.replayTarget !== undefined) {
-		return preserved.replayTarget === getOpenAIResponsesReferenceTarget(model);
+	const replayTarget = getOpenAiCompactionRuntimeReplayTarget(preserved);
+	if (replayTarget !== undefined) {
+		return replayTarget === getOpenAIResponsesReferenceTarget(model);
 	}
 	return !replacementHistoryContainsTargetDependentImage(preserved.replacementHistory);
 }

@@ -363,6 +363,77 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		expect(runtimeUser.providerPayload).toEqual(preservedUserPayload);
 	});
 
+	it("replays compaction history preserved for a distinct compaction target", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-compaction-replay-target-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const model = getBundledModel("openai", "gpt-5-mini");
+		if (!model) throw new Error("Expected bundled OpenAI test model");
+		const otherModel = getBundledModel("openai", "gpt-5.4-mini");
+		if (!otherModel) throw new Error("Expected second bundled OpenAI test model");
+		const replayTarget = getOpenAIResponsesReferenceTarget(model);
+		const compactionTarget = getOpenAIResponsesReferenceTarget(otherModel);
+		expect(compactionTarget).not.toBe(replayTarget);
+
+		const { sessionFile } = await createPersistedSession(tempDir, sessionManager => {
+			const compactedId = sessionManager.appendMessage({
+				role: "user",
+				content: "Original compacted context",
+				timestamp: Date.now() - 2,
+			});
+			sessionManager.appendCompaction("opaque remote summary", undefined, compactedId, 100, {
+				preserveData: {
+					openaiRemoteCompaction: {
+						provider: "openai",
+						referenceTarget: compactionTarget,
+						replayTarget,
+						compactionItem: { type: "compaction", encrypted_content: "enc_override" },
+						replacementHistory: [
+							{
+								type: "message",
+								role: "user",
+								content: [{ type: "input_text", text: "Provider-preserved compacted context" }],
+							},
+						],
+					},
+				},
+			});
+			sessionManager.appendMessage({ role: "user", content: "Recent context", timestamp: Date.now() - 1 });
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "Recent response" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: createUsage(),
+				stopReason: "stop",
+				timestamp: Date.now(),
+			});
+		});
+
+		const reloadedSessionManager = await SessionManager.open(sessionFile, tempDir);
+		const { session } = await createSessionHarness(tempDir, reloadedSessionManager, { model });
+		sessions.push(session);
+
+		const summary = session.messages.find(message => message.role === "compactionSummary");
+		if (summary?.role !== "compactionSummary") {
+			throw new Error("Expected remote compaction summary for the runtime replay target");
+		}
+		expect(summary.providerPayload?.referenceTarget).toBe(replayTarget);
+		expect(
+			session.messages.some(
+				message => message.role === "user" && getTextContent(message) === "Original compacted context",
+			),
+		).toBe(false);
+
+		await session.setModel(otherModel);
+		expect(session.messages.some(message => message.role === "compactionSummary")).toBe(false);
+		expect(
+			session.messages.some(
+				message => message.role === "user" && getTextContent(message) === "Original compacted context",
+			),
+		).toBe(true);
+	});
+
 	it("restores compatible target-bound compaction after resume, navigation, and model switches", async () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-compaction-resume-${Snowflake.next()}-`));
 		tempDirs.push(tempDir);
@@ -419,7 +490,9 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		if (summary?.role !== "compactionSummary") throw new Error("Expected compatible remote compaction summary");
 		expect(summary.providerPayload?.referenceTarget).toBe(referenceTarget);
 		expect(
-			session.messages.some(message => message.role === "user" && getTextContent(message) === "Original compacted context"),
+			session.messages.some(
+				message => message.role === "user" && getTextContent(message) === "Original compacted context",
+			),
 		).toBe(false);
 		expect(
 			session.messages.some(message => message.role === "user" && getTextContent(message) === "Recent context"),

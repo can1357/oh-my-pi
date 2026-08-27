@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { remotePreserveReplayable, type CompactionSettings } from "@oh-my-pi/pi-agent-core/compaction";
+import { type CompactionSettings, remotePreserveReplayable } from "@oh-my-pi/pi-agent-core/compaction";
+import { getOpenAiCompactionRuntimeReplayTarget } from "@oh-my-pi/pi-agent-core/compaction/openai";
 import { coerceServiceTierByFamily, type Model, type ProviderPayload, type ServiceTierByFamily } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import {
@@ -164,13 +165,22 @@ export function getOpenAiRemoteCompactionPayload(
 ): ProviderPayload | undefined {
 	const candidate = compaction?.preserveData?.openaiRemoteCompaction;
 	if (!candidate || typeof candidate !== "object") return undefined;
-	const remote = candidate as { provider?: unknown; referenceTarget?: unknown; replacementHistory?: unknown };
+	const remote = candidate as {
+		provider?: unknown;
+		referenceTarget?: unknown;
+		replayTarget?: unknown;
+		replacementHistory?: unknown;
+	};
 	if (typeof remote.provider !== "string" || remote.provider.length === 0) return undefined;
 	if (!Array.isArray(remote.replacementHistory)) return undefined;
+	const replayTarget = getOpenAiCompactionRuntimeReplayTarget({
+		referenceTarget: typeof remote.referenceTarget === "string" ? remote.referenceTarget : undefined,
+		replayTarget: typeof remote.replayTarget === "string" ? remote.replayTarget : undefined,
+	});
 	return {
 		type: "openaiResponsesHistory",
 		provider: remote.provider,
-		...(typeof remote.referenceTarget === "string" ? { referenceTarget: remote.referenceTarget } : {}),
+		...(replayTarget !== undefined ? { referenceTarget: replayTarget } : {}),
 		items: remote.replacementHistory as Array<Record<string, unknown>>,
 	};
 }
@@ -280,8 +290,7 @@ export function buildSessionContext(
 			const canReplay =
 				options?.transcript === true ||
 				remoteCompaction === undefined ||
-				(options?.activeModel !== undefined &&
-					remotePreserveReplayable(entry.preserveData, options.activeModel));
+				(options?.activeModel !== undefined && remotePreserveReplayable(entry.preserveData, options.activeModel));
 			if (canReplay) compaction = entry;
 		} else if (entry.type === "ttsr_injection") {
 			// Collect injected TTSR rule names
