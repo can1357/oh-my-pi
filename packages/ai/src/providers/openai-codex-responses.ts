@@ -104,7 +104,7 @@ import {
 	appendResponsesToolResultMessages,
 	applyOpenAIServiceTier,
 	applyReasoningSummaryDone,
-	assertResponsesWireModelUnchanged,
+	assertResponsesWireRoutingUnchanged,
 	buildResponsesDeltaInput,
 	computerCallMetadata,
 	convertResponsesAssistantMessage,
@@ -1802,7 +1802,7 @@ async function openCodexWebSocketTransport(
 	if (replacementWebsocketRequest !== undefined) {
 		websocketRequest = replacementWebsocketRequest as typeof websocketRequest;
 	}
-	assertResponsesWireModelUnchanged(websocketRequest, expectedWireModel, model.api);
+	assertResponsesWireRoutingUnchanged(websocketRequest, { model: expectedWireModel }, model.api);
 	recordCodexTurnRequestDiagnostics(websocketState, websocketRequest, "websocket", canAppendBeforeRequest);
 	const websocketHeaders = createCodexHeaders(
 		requestContext.requestHeaders,
@@ -1931,7 +1931,7 @@ async function openCodexSseTransport(
 	if (replacementWireBody !== undefined) {
 		wireBody = replacementWireBody as RequestBody;
 	}
-	assertResponsesWireModelUnchanged(wireBody, expectedWireModel, model.api);
+	assertResponsesWireRoutingUnchanged(wireBody, { model: expectedWireModel }, model.api);
 	recordCodexTurnRequestDiagnostics(state, wireBody, "sse", canAppendBeforeRequest);
 	return { eventStream: await open(wireBody), requestBodyForState: structuredCloneJSON(wireBody), transport: "sse" };
 }

@@ -65,12 +65,14 @@ export type { OpenAIPromptCacheOptions } from "../types";
 export { parseAzureDeploymentNameMap } from "../utils";
 
 import {
+	canonicalJsonString,
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	getOpenAIResponsesReferenceTarget,
 	normalizeResponsesToolCallId,
 	normalizeSystemPrompts,
 	resolveCacheRetention,
+	resolveOpenAIResponsesRoutingIdentity,
 	sanitizeOpenAIResponsesAssistantFallbackItemsForReplay,
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
 	sanitizeOpenAIResponsesHistoryItemsForReplay,
@@ -231,6 +233,37 @@ function setHeaderIfAbsent(headers: Record<string, string>, name: string, value:
 	headers[name] = value;
 }
 
+/**
+ * Request base URL after the provider overrides that depend only on the model
+ * and the resolved credential. Transport and compaction replay metadata must
+ * agree on the endpoint they fingerprint, so both resolve it here.
+ */
+export function resolveOpenAIRequestBaseUrl(
+	model: { provider: string; baseUrl?: string },
+	apiKey: string | undefined,
+): string | undefined {
+	if (model.provider === "moonshot") {
+		// Bundled `moonshot` catalog models hardcode the international endpoint
+		// (`api.moonshot.ai`). MOONSHOT_BASE_URL lets users redirect the provider
+		// at the China platform (`api.moonshot.cn`), which only accepts China keys
+		// and rejects the international host. (#2883)
+		const moonshotBaseUrl = $env.MOONSHOT_BASE_URL?.trim();
+		if (moonshotBaseUrl) return moonshotBaseUrl;
+	}
+	if (model.provider === "sakana") {
+		const sakanaBaseUrl = resolveSakanaRequestBaseUrl();
+		if (sakanaBaseUrl) return sakanaBaseUrl;
+	}
+	if (model.provider === "github-copilot") {
+		return resolveGitHubCopilotBaseUrl(model.baseUrl, apiKey) ?? model.baseUrl;
+	}
+	if (model.provider === "alibaba-token-plan" && apiKey) {
+		const credential = parseAlibabaTokenPlanCredential(apiKey);
+		if (credential?.baseUrl) return credential.baseUrl;
+	}
+	return model.baseUrl;
+}
+
 export function resolveOpenAIRequestSetup(
 	model: OpenAIRequestSetupModel,
 	options: OpenAIRequestSetupOptions,
@@ -259,23 +292,7 @@ export function resolveOpenAIRequestSetup(
 	}
 
 	let copilotPremiumRequests: number | undefined;
-	let baseUrl = model.baseUrl;
-	if (model.provider === "moonshot") {
-		// Bundled `moonshot` catalog models hardcode the international endpoint
-		// (`api.moonshot.ai`). MOONSHOT_BASE_URL lets users redirect the provider
-		// at the China platform (`api.moonshot.cn`), which only accepts China keys
-		// and rejects the international host. (#2883)
-		const moonshotBaseUrl = $env.MOONSHOT_BASE_URL?.trim();
-		if (moonshotBaseUrl) {
-			baseUrl = moonshotBaseUrl;
-		}
-	}
-	if (model.provider === "sakana") {
-		const sakanaBaseUrl = resolveSakanaRequestBaseUrl();
-		if (sakanaBaseUrl) {
-			baseUrl = sakanaBaseUrl;
-		}
-	}
+	let baseUrl = resolveOpenAIRequestBaseUrl(model, rawApiKey);
 	if (model.provider === "github-copilot") {
 		apiKey = parseGitHubCopilotApiKey(rawApiKey).accessToken;
 		const copilot = buildCopilotDynamicHeaders({
@@ -287,7 +304,6 @@ export function resolveOpenAIRequestSetup(
 		});
 		Object.assign(headers, copilot.headers);
 		copilotPremiumRequests = copilot.premiumRequests;
-		baseUrl = resolveGitHubCopilotBaseUrl(model.baseUrl, rawApiKey) ?? model.baseUrl;
 	}
 
 	if (model.provider === "alibaba-token-plan") {
@@ -300,7 +316,6 @@ export function resolveOpenAIRequestSetup(
 		const credential = parseAlibabaTokenPlanCredential(rawApiKey);
 		if (!credential) throw new AIError.ConfigurationError("Invalid QwenCloud Token Plan credential");
 		apiKey = credential.token;
-		if (credential.baseUrl) baseUrl = credential.baseUrl;
 	}
 
 	if (options.alibabaCodingPlanAuth && model.provider === "alibaba-coding-plan") {
@@ -602,14 +617,45 @@ export function resolveResponsesWireModelId(
  * returned replacement — and the wire selector must be the exact primitive
  * string the target fingerprint was built from.
  */
-export function assertResponsesWireModelUnchanged(payload: unknown, expectedModel: string, api: string): void {
-	const replacedModel = isRecord(payload) ? payload.model : undefined;
-	if (typeof replacedModel === "string" && replacedModel === expectedModel) return;
-	const describeReplacement =
-		typeof replacedModel === "string" ? `"${replacedModel}"` : `a non-string ${typeof replacedModel} model selector`;
-	throw new AIError.ValidationError(
-		`onPayload cannot repoint a ${api} request from model "${expectedModel}" to ${describeReplacement}; replayed history is bound to the original routing target`,
-	);
+export interface ResponsesWireRoutingExpectation {
+	model: string;
+	/**
+	 * Canonicalized wire routing selectors captured before the hook ran, keyed by
+	 * request field. Omitted by transports whose body carries no routing fields.
+	 */
+	routing?: Record<string, string>;
+}
+
+export function captureResponsesWireRouting(params: Record<string, unknown>): Record<string, string> {
+	return {
+		provider: canonicalJsonString(params.provider),
+		providerOptions: canonicalJsonString(params.providerOptions),
+	};
+}
+
+export function assertResponsesWireRoutingUnchanged(
+	payload: unknown,
+	expected: ResponsesWireRoutingExpectation,
+	api: string,
+): void {
+	const body = isRecord(payload) ? payload : undefined;
+	const replacedModel = body?.model;
+	if (typeof replacedModel !== "string" || replacedModel !== expected.model) {
+		const describeReplacement =
+			typeof replacedModel === "string"
+				? `"${replacedModel}"`
+				: `a non-string ${typeof replacedModel} model selector`;
+		throw new AIError.ValidationError(
+			`onPayload cannot repoint a ${api} request from model "${expected.model}" to ${describeReplacement}; replayed history is bound to the original routing target`,
+		);
+	}
+	if (!expected.routing) return;
+	for (const [field, expectedValue] of Object.entries(expected.routing)) {
+		if (canonicalJsonString(body?.[field]) === expectedValue) continue;
+		throw new AIError.ValidationError(
+			`onPayload cannot repoint a ${api} request through routing selector "${field}"; replayed history is bound to the original routing target`,
+		);
+	}
 }
 
 export interface OpenAIOutputTokenParam {
@@ -691,11 +737,12 @@ export function applyOpenAIGatewayRouting(
 	compat: OpenAIGatewayRoutingCompat,
 	cacheEnabled = true,
 ): void {
-	if (compat.isOpenRouterHost && compat.openRouterRouting) {
-		params.provider = compat.openRouterRouting;
+	const identity = resolveOpenAIResponsesRoutingIdentity(compat);
+	if (identity?.openRouterRouting) {
+		params.provider = identity.openRouterRouting;
 	}
-	if (compat.isVercelGatewayHost && compat.vercelGatewayRouting) {
-		const routing = compat.vercelGatewayRouting;
+	if (identity?.vercelGatewayRouting) {
+		const routing = identity.vercelGatewayRouting;
 		if (routing.only || routing.order || (cacheEnabled && routing.caching)) {
 			const gatewayOptions: Pick<VercelGatewayRouting, "only" | "order" | "caching"> = {};
 			if (routing.only) gatewayOptions.only = routing.only;
@@ -728,7 +775,7 @@ export function applyVercelResponsesCacheControls(
 	compat: VercelResponsesCacheCompat,
 	cacheRetention: CacheRetention = "short",
 ): void {
-	const routing = compat.vercelGatewayRouting;
+	const routing = resolveOpenAIResponsesRoutingIdentity(compat)?.vercelGatewayRouting;
 	if (!compat.isVercelGatewayHost) return;
 
 	if (routing?.only || routing?.order) {

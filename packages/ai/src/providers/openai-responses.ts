@@ -22,6 +22,7 @@ import {
 	createOpenAIResponsesHistoryPayload,
 	getOpenAIResponsesReferenceTarget,
 	normalizeSystemPrompts,
+	type OpenAIResponsesRoutingOverrides,
 	resolveCacheRetention,
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
 } from "../utils";
@@ -76,9 +77,10 @@ import {
 	applyOpenAIGatewayRouting,
 	applyResponsesCompatPolicy,
 	applyVercelResponsesCacheControls,
-	assertResponsesWireModelUnchanged,
+	assertResponsesWireRoutingUnchanged,
 	buildResponsesDeltaInput,
 	buildResponsesInput,
+	captureResponsesWireRouting,
 	clearOpenAIStrictToolsState,
 	createInitialResponsesAssistantMessage,
 	createOpenAIStrictToolsState,
@@ -475,7 +477,16 @@ const streamOpenAIResponsesOnce = (
 				options?.openrouterVariant,
 				options?.extraBody,
 			);
-			const referenceTarget = getOpenAIResponsesReferenceTarget(model, wireModelId, baseUrl ?? model.baseUrl);
+			const routingOverrides: OpenAIResponsesRoutingOverrides = {
+				provider: options?.extraBody?.provider,
+				providerOptions: options?.extraBody?.providerOptions,
+			};
+			const referenceTarget = getOpenAIResponsesReferenceTarget(
+				model,
+				wireModelId,
+				baseUrl ?? model.baseUrl,
+				routingOverrides,
+			);
 			const builtParams = buildParams(
 				model,
 				context,
@@ -528,10 +539,11 @@ const streamOpenAIResponsesOnce = (
 				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
 			const requestUrl = `${resolvedBaseUrl}/responses`;
 			const applyPayloadReplacement = async (requestParams: OpenAIResponsesSamplingParams) => {
+				const expectedRouting = captureResponsesWireRouting(requestParams as unknown as Record<string, unknown>);
 				const replacementPayload = await options?.onPayload?.(requestParams, model);
 				const payload =
 					replacementPayload !== undefined ? (replacementPayload as OpenAIResponsesSamplingParams) : requestParams;
-				assertResponsesWireModelUnchanged(payload, wireModelId, model.api);
+				assertResponsesWireRoutingUnchanged(payload, { model: wireModelId, routing: expectedRouting }, model.api);
 				applyReasoningEffortFallbackForRequest(payload);
 				return payload;
 			};

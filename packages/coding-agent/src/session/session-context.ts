@@ -4,7 +4,7 @@ import {
 	remotePreserveReplayable,
 	remotePreserveTargetIndependent,
 } from "@oh-my-pi/pi-agent-core/compaction";
-import { getOpenAiCompactionRuntimeReplayTarget } from "@oh-my-pi/pi-agent-core/compaction/openai";
+import { getOpenAiCompactionSerializationTarget } from "@oh-my-pi/pi-agent-core/compaction/openai";
 import { coerceServiceTierByFamily, type Model, type ProviderPayload, type ServiceTierByFamily } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import {
@@ -186,18 +186,20 @@ export function getOpenAiRemoteCompactionPayload(
 		provider?: unknown;
 		referenceTarget?: unknown;
 		replayTarget?: unknown;
+		requestTarget?: unknown;
 		replacementHistory?: unknown;
 	};
 	if (typeof remote.provider !== "string" || remote.provider.length === 0) return undefined;
 	if (!Array.isArray(remote.replacementHistory)) return undefined;
-	const replayTarget = getOpenAiCompactionRuntimeReplayTarget({
+	const serializationTarget = getOpenAiCompactionSerializationTarget({
 		referenceTarget: typeof remote.referenceTarget === "string" ? remote.referenceTarget : undefined,
 		replayTarget: typeof remote.replayTarget === "string" ? remote.replayTarget : undefined,
+		requestTarget: typeof remote.requestTarget === "string" ? remote.requestTarget : undefined,
 	});
 	return {
 		type: "openaiResponsesHistory",
 		provider: remote.provider,
-		...(replayTarget !== undefined ? { referenceTarget: replayTarget } : {}),
+		...(serializationTarget !== undefined ? { referenceTarget: serializationTarget } : {}),
 		items: remote.replacementHistory as Array<Record<string, unknown>>,
 	};
 }

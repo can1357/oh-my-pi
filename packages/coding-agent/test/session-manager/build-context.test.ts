@@ -1,5 +1,6 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import type { AssistantMessage, ModelSpec } from "@oh-my-pi/pi-ai";
+import { getOpenAIResponsesReferenceTarget } from "@oh-my-pi/pi-ai/utils";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { INTERRUPTED_THINKING_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
@@ -12,6 +13,21 @@ import type {
 	ThinkingLevelChangeEntry,
 } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+
+function buildResponsesModel(baseUrl = "https://api.openai.com/v1") {
+	return buildModel({
+		id: "gpt-5.4",
+		name: "GPT-5.4",
+		api: "openai-responses",
+		provider: "openai",
+		baseUrl,
+		reasoning: false,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 32_768,
+		maxTokens: 4_096,
+	} satisfies ModelSpec<"openai-responses">);
+}
 
 function msg(id: string, parentId: string | null, role: "user" | "assistant", text: string): SessionMessageEntry {
 	const base = { type: "message" as const, id, parentId, timestamp: "2025-01-01T00:00:00Z" };
@@ -279,6 +295,7 @@ describe("buildSessionContext", () => {
 		});
 
 		it("uses preserved OpenAI replacement history instead of kept raw messages", () => {
+			const activeModel = buildResponsesModel();
 			const remoteCompaction: CompactionEntry = {
 				...compaction("3", "2", "Remote summary", "1"),
 				preserveData: {
@@ -298,7 +315,7 @@ describe("buildSessionContext", () => {
 				remoteCompaction,
 				msg("4", "3", "user", "after compact"),
 			];
-			const ctx = buildSessionContext(entries);
+			const ctx = buildSessionContext(entries, undefined, undefined, { activeModel });
 			expect(ctx.messages).toHaveLength(2);
 			expect(ctx.messages[0]?.role).toBe("compactionSummary");
 			if (ctx.messages[0]?.role !== "compactionSummary") throw new Error("Expected compaction summary message");
@@ -339,19 +356,72 @@ describe("buildSessionContext", () => {
 			expect(ctx.messages.length).toBeGreaterThan(1);
 		});
 
-		it("answers message presence without materializing a target-bound remote compaction", () => {
-			const activeModel = buildModel({
-				id: "gpt-5.4",
-				name: "GPT-5.4",
-				api: "openai-responses",
+		it("keeps legacy encrypted remote compaction unreadable without an active model", () => {
+			const legacyEncrypted: CompactionEntry = {
+				...compaction("3", "2", "Remote summary", "1"),
+				preserveData: {
+					openaiRemoteCompaction: {
+						provider: "openai",
+						replacementHistory: [
+							{ type: "message", role: "user", content: [{ type: "input_text", text: "Preserved user" }] },
+							{ type: "compaction", encrypted_content: "enc_123" },
+						],
+						compactionItem: { type: "compaction", encrypted_content: "enc_123" },
+					},
+				},
+			};
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "first"),
+				msg("2", "1", "assistant", "response"),
+				legacyEncrypted,
+				msg("4", "3", "user", "after compact"),
+			];
+
+			const ctx = buildSessionContext(entries);
+			expect(ctx.messages.some(message => message.role === "compactionSummary")).toBe(false);
+			expect(ctx.messages.length).toBeGreaterThan(1);
+		});
+
+		it("replays remote compaction against the credential-resolved request target", () => {
+			const activeModel = buildResponsesModel();
+			const requestTarget = getOpenAIResponsesReferenceTarget(
+				activeModel,
+				undefined,
+				"https://api.copilot.example/v1",
+			);
+			const remoteCompaction: CompactionEntry = {
+				...compaction("3", "2", "Remote summary", "1"),
+				preserveData: {
+					openaiRemoteCompaction: {
+						provider: "openai",
+						replayTarget: getOpenAIResponsesReferenceTarget(activeModel),
+						requestTarget,
+						replacementHistory: [
+							{ type: "message", role: "user", content: [{ type: "input_text", text: "Preserved user" }] },
+							{ type: "compaction", encrypted_content: "enc_123" },
+						],
+						compactionItem: { type: "compaction", encrypted_content: "enc_123" },
+					},
+				},
+			};
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "first"),
+				msg("2", "1", "assistant", "response"),
+				remoteCompaction,
+				msg("4", "3", "user", "after compact"),
+			];
+
+			const ctx = buildSessionContext(entries, undefined, undefined, { activeModel });
+			const summary = ctx.messages.find(message => message.role === "compactionSummary");
+			expect(summary?.providerPayload).toMatchObject({
+				type: "openaiResponsesHistory",
 				provider: "openai",
-				baseUrl: "https://api.openai.com/v1",
-				reasoning: false,
-				input: ["text", "image"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				contextWindow: 32_768,
-				maxTokens: 4_096,
-			} satisfies ModelSpec<"openai-responses">);
+				referenceTarget: requestTarget,
+			});
+		});
+
+		it("answers message presence without materializing a target-bound remote compaction", () => {
+			const activeModel = buildResponsesModel();
 			const remoteCompaction: CompactionEntry = {
 				...compaction("3", "2", "Remote summary", "1"),
 				preserveData: {

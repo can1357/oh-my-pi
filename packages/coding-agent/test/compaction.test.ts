@@ -653,6 +653,7 @@ describe("remote compaction setting", () => {
 				provider: "openai",
 				referenceTarget: getOpenAiCompactionReferenceTarget(model, false),
 				replayTarget: getOpenAIResponsesReferenceTarget(model),
+				requestTarget: getOpenAIResponsesReferenceTarget(model),
 				replacementHistory: remoteOutput,
 				compactionItem: { type: "compaction", encrypted_content: "new_encrypted" },
 			},
@@ -851,6 +852,7 @@ describe("remote compaction setting", () => {
 				provider: "openai",
 				referenceTarget: getOpenAiCompactionReferenceTarget(model, false),
 				replayTarget: getOpenAIResponsesReferenceTarget(model),
+				requestTarget: getOpenAIResponsesReferenceTarget(model),
 				replacementHistory: [
 					{ type: "message", role: "user", content: [{ type: "input_text", text: "Real preserved user" }] },
 					{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Kept assistant" }] },
@@ -1123,6 +1125,7 @@ describe("remote compaction setting", () => {
 				provider: "openai",
 				referenceTarget: getOpenAiCompactionReferenceTarget(model, false),
 				replayTarget: getOpenAIResponsesReferenceTarget(model),
+				requestTarget: getOpenAIResponsesReferenceTarget(model),
 				replacementHistory: remoteOutput,
 				compactionItem: { type: "compaction", encrypted_content: "new_encrypted" },
 			},

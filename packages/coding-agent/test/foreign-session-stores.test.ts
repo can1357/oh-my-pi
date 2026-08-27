@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { ModelSpec } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ClaudeSessionStore } from "../src/session/claude-session-store";
 import { CodexSessionStore } from "../src/session/codex-session-store";
 import { persistForeignSession } from "../src/session/foreign-session-import";
@@ -283,7 +285,10 @@ describe("CodexSessionStore", () => {
 				compactionItem: replacementHistory[1],
 			},
 		});
-		const activeContext = buildSessionContext(entries);
+		// The imported compaction item carries encrypted Codex state, so it stays
+		// unreadable until an active model of the issuing provider is known.
+		expect(buildSessionContext(entries).messages.some(message => message.role === "compactionSummary")).toBe(false);
+		const activeContext = buildSessionContext(entries, undefined, undefined, { activeModel: codexActiveModel() });
 		expect(activeContext.messages.map(message => message.role)).toEqual([
 			"compactionSummary",
 			"user",
@@ -333,6 +338,21 @@ describe("CodexSessionStore", () => {
 		expect(resultCount).toBe(2);
 	});
 });
+
+function codexActiveModel() {
+	return buildModel({
+		id: "gpt-5.3-codex",
+		name: "GPT-5.3 Codex",
+		api: "openai-codex-responses",
+		provider: "openai-codex",
+		baseUrl: "https://chatgpt.com/backend-api/codex/responses",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 400_000,
+		maxTokens: 128_000,
+	} satisfies ModelSpec<"openai-codex-responses">);
+}
 
 describe("foreign session persistence", () => {
 	it("writes a fresh OMP identity with source provenance", async () => {

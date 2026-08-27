@@ -31,6 +31,7 @@ import {
 	buildResponsesInput,
 	hoistInterleavedResponsesToolBatchMessages,
 	resolveOpenAICompatPolicy,
+	resolveOpenAIRequestBaseUrl,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import {
 	getOpenAIResponsesReferenceTarget,
@@ -1572,6 +1573,17 @@ function formatRemoteCompactionSummary(inputTokens: number): string {
  * @param preparation - Pre-calculated preparation from prepareCompaction()
  * @param customInstructions - Optional custom focus for the summary
  */
+/**
+ * Replay fingerprint for the endpoint the runtime will actually dispatch to.
+ * Providers such as github-copilot and alibaba-token-plan derive their base URL
+ * from the resolved credential, so stamping the static catalog URL would strand
+ * every payload the moment it is replayed. Azure keeps its own resolver.
+ */
+function resolveRuntimeRequestTarget(runtimeModel: Model, apiKey: string | undefined): string {
+	if (runtimeModel.api === "azure-openai-responses") return getOpenAIResponsesReferenceTarget(runtimeModel);
+	return getOpenAIResponsesReferenceTarget(runtimeModel, undefined, resolveOpenAIRequestBaseUrl(runtimeModel, apiKey));
+}
+
 export async function compact(
 	preparation: CompactionPreparation,
 	model: Model,
@@ -1690,15 +1702,18 @@ export async function compact(
 					promptCacheKey: summaryOptions.promptCacheKey,
 					retainedMessageBudget: settings.v2RetainedMessageBudget,
 				});
+				let v2RequestTarget: string | undefined;
 				const remote = await withAuth(
 					apiKey,
-					key =>
-						requestCompactionV2Streaming(model, key, request, signal, {
+					key => {
+						v2RequestTarget = resolveRuntimeRequestTarget(summaryOptions.runtimeModel ?? model, key);
+						return requestCompactionV2Streaming(model, key, request, signal, {
 							fetch: summaryOptions.fetch,
 							providerSessionState: summaryOptions.providerSessionState,
 							preferWebsockets: summaryOptions.preferWebsockets,
 							codexCompaction: summaryOptions.codexCompaction,
-						}),
+						});
+					},
 					{ signal },
 				);
 				preserveData = {
@@ -1708,6 +1723,7 @@ export async function compact(
 						model,
 						getOpenAiCompactionReferenceTarget(model, true),
 						getOpenAIResponsesReferenceTarget(summaryOptions.runtimeModel ?? model),
+						v2RequestTarget,
 					),
 				};
 				usedRemoteCompaction = true;
@@ -1758,6 +1774,7 @@ export async function compact(
 								providerSessionState: summaryOptions.providerSessionState,
 								codexCompaction: summaryOptions.codexCompaction,
 								replayTarget: getOpenAIResponsesReferenceTarget(summaryOptions.runtimeModel ?? model),
+								requestTarget: resolveRuntimeRequestTarget(summaryOptions.runtimeModel ?? model, key),
 							},
 						),
 					{ signal },

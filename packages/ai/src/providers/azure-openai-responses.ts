@@ -40,7 +40,7 @@ import type { ResponseCreateParamsStreaming, ResponseStreamEvent } from "./opena
 import {
 	applyCommonResponsesSamplingParams,
 	applyResponsesReasoningParams,
-	assertResponsesWireModelUnchanged,
+	assertResponsesWireRoutingUnchanged,
 	buildResponsesInput,
 	createInitialResponsesAssistantMessage,
 	getOpenAIPromptCacheKey,
@@ -139,7 +139,7 @@ const streamAzureOpenAIResponsesOnce = (
 			if (replacementPayload !== undefined) {
 				params = replacementPayload as typeof params;
 			}
-			assertResponsesWireModelUnchanged(params, deploymentName, model.api);
+			assertResponsesWireRoutingUnchanged(params, { model: deploymentName }, model.api);
 			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs();
 			const firstEventTimeoutMs =
 				options?.streamFirstEventTimeoutMs ?? getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs);

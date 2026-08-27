@@ -267,6 +267,13 @@ export interface OpenAiRemoteCompactionPreserveData {
 	 * compatibility must never be checked against the compaction fingerprint.
 	 */
 	replayTarget?: string;
+	/**
+	 * Fingerprint of the runtime request target after credential-resolved
+	 * endpoint routing, which is what the Responses serializer compares the
+	 * replayed payload against. {@link replayTarget} stays credential-free so
+	 * session reconstruction can still check it without provider auth.
+	 */
+	requestTarget?: string;
 	replacementHistory: Array<Record<string, unknown>>;
 	compactionItem: OpenAiRemoteCompactionItem;
 }
@@ -331,7 +338,14 @@ export function getOpenAiCompactionReferenceTarget(model: Model, streamingV2: bo
 	return getOpenAIResponsesReferenceTarget(referenceModel, resolveOpenAiCompactModel(model), referenceModel.baseUrl);
 }
 
-function replacementHistoryContainsTargetDependentImage(history: Array<Record<string, unknown>>): boolean {
+/**
+ * Walk every nested item of unstamped history and report the first value that
+ * `probe` marks as resolvable only on the endpoint that produced it.
+ */
+function replacementHistoryContains(
+	history: Array<Record<string, unknown>>,
+	probe: (value: Record<string, unknown>) => boolean,
+): boolean {
 	const pending: unknown[] = [...history];
 	while (pending.length > 0) {
 		const value = pending.pop();
@@ -340,17 +354,37 @@ function replacementHistoryContainsTargetDependentImage(history: Array<Record<st
 			continue;
 		}
 		if (!isRecord(value)) continue;
-		if (typeof value.file_id === "string" && value.file_id.length > 0) return true;
-		if (
-			typeof value.image_url === "string" &&
-			value.image_url.length > 0 &&
-			!value.image_url.trimStart().toLowerCase().startsWith("data:")
-		) {
-			return true;
-		}
+		if (probe(value)) return true;
 		pending.push(...Object.values(value));
 	}
 	return false;
+}
+
+function isEndpointOwnedImageReference(value: Record<string, unknown>): boolean {
+	if (typeof value.file_id === "string" && value.file_id.length > 0) return true;
+	return (
+		typeof value.image_url === "string" &&
+		value.image_url.length > 0 &&
+		!value.image_url.trimStart().toLowerCase().startsWith("data:")
+	);
+}
+
+function replacementHistoryContainsTargetDependentImage(history: Array<Record<string, unknown>>): boolean {
+	return replacementHistoryContains(history, isEndpointOwnedImageReference);
+}
+
+/**
+ * Encrypted state — the payload of a native compaction or reasoning item — is
+ * issued by one endpoint and opaque everywhere else, so it binds history just as
+ * firmly as an uploaded image handle does.
+ */
+function replacementHistoryContainsEndpointOwnedState(history: Array<Record<string, unknown>>): boolean {
+	return replacementHistoryContains(
+		history,
+		value =>
+			isEndpointOwnedImageReference(value) ||
+			(typeof value.encrypted_content === "string" && value.encrypted_content.length > 0),
+	);
 }
 
 export function canReuseOpenAiCompactionHistory(
@@ -371,6 +405,17 @@ export function getOpenAiCompactionRuntimeReplayTarget(
 	return preserved.replayTarget ?? preserved.referenceTarget;
 }
 
+/**
+ * Fingerprint the Responses serializer must see on the replayed payload. Falls
+ * back to the credential-free targets for history persisted before the resolved
+ * request target was recorded.
+ */
+export function getOpenAiCompactionSerializationTarget(
+	preserved: Pick<OpenAiRemoteCompactionPreserveData, "referenceTarget" | "replayTarget" | "requestTarget">,
+): string | undefined {
+	return preserved.requestTarget ?? getOpenAiCompactionRuntimeReplayTarget(preserved);
+}
+
 export function canReplayOpenAiCompactionHistory(
 	preserved: Pick<
 		OpenAiRemoteCompactionPreserveData,
@@ -388,14 +433,15 @@ export function canReplayOpenAiCompactionHistory(
 
 /**
  * Whether preserved history carries no target binding at all: no runtime replay
- * stamp and no endpoint-owned image reference. Such history predates target
- * fingerprints and stays readable without an active model to validate against.
+ * stamp, no endpoint-owned image handle, and no encrypted state. Unlike the
+ * provider-scoped reuse checks this runs with no model to compare against, so it
+ * has to reject everything an unrelated endpoint could not resolve.
  */
 export function isOpenAiCompactionHistoryTargetIndependent(
 	preserved: Pick<OpenAiRemoteCompactionPreserveData, "referenceTarget" | "replayTarget" | "replacementHistory">,
 ): boolean {
 	if (getOpenAiCompactionRuntimeReplayTarget(preserved) !== undefined) return false;
-	return !replacementHistoryContainsTargetDependentImage(preserved.replacementHistory);
+	return !replacementHistoryContainsEndpointOwnedState(preserved.replacementHistory);
 }
 
 function resolveOpenAiCompactEndpoint(model: Model): string {
@@ -472,6 +518,7 @@ export function getPreservedOpenAiRemoteCompactionData(
 		provider?: unknown;
 		referenceTarget?: unknown;
 		replayTarget?: unknown;
+		requestTarget?: unknown;
 		replacementHistory?: unknown;
 		compactionItem?: unknown;
 	};
@@ -489,6 +536,7 @@ export function getPreservedOpenAiRemoteCompactionData(
 		provider: typeof maybeData.provider === "string" ? maybeData.provider : undefined,
 		referenceTarget: typeof maybeData.referenceTarget === "string" ? maybeData.referenceTarget : undefined,
 		replayTarget: typeof maybeData.replayTarget === "string" ? maybeData.replayTarget : undefined,
+		requestTarget: typeof maybeData.requestTarget === "string" ? maybeData.requestTarget : undefined,
 		replacementHistory: maybeData.replacementHistory as Array<Record<string, unknown>>,
 		compactionItem: compactionItem as unknown as OpenAiRemoteCompactionItem,
 	};
@@ -1019,6 +1067,8 @@ export async function requestOpenAiRemoteCompaction(
 		 * runs on the active session model rather than a side model.
 		 */
 		replayTarget?: string;
+		/** Credential-resolved runtime request fingerprint the serializer compares. */
+		requestTarget?: string;
 	},
 ): Promise<OpenAiRemoteCompactionResponse> {
 	const endpoint = resolveOpenAiCompactEndpoint(model);
@@ -1156,6 +1206,7 @@ export async function requestOpenAiRemoteCompaction(
 		provider: model.provider,
 		referenceTarget: getOpenAiCompactionReferenceTarget(model, false),
 		replayTarget: opts?.replayTarget ?? getOpenAIResponsesReferenceTarget(model),
+		...(opts?.requestTarget !== undefined ? { requestTarget: opts.requestTarget } : {}),
 		replacementHistory,
 		compactionItem,
 	};

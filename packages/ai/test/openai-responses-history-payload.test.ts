@@ -568,6 +568,81 @@ describe("OpenAI responses history payload", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(0);
 	});
 
+	it("rejects an onPayload replacement that repoints the Responses request through routing selectors", async () => {
+		const model = buildStampedResponsesModel("https://api.openai.com/v1");
+		const fetchMock = vi.fn(async () => createStampedSseResponse());
+		const stream = streamOpenAIResponses(
+			model,
+			{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
+			{
+				apiKey: "test-key",
+				fetch: fetchMock as unknown as FetchImpl,
+				onPayload: payload => ({
+					...(payload as Record<string, unknown>),
+					provider: { order: ["fireworks"] },
+				}),
+			},
+		);
+		let errorMessage: string | undefined;
+		for await (const event of stream) {
+			if (event.type === "error") errorMessage = event.error.errorMessage;
+		}
+		expect(errorMessage).toContain("provider");
+		expect(fetchMock).toHaveBeenCalledTimes(0);
+	});
+
+	it("rejects an onPayload hook that mutates Responses gateway providerOptions in place", async () => {
+		const model = buildStampedResponsesModel("https://api.openai.com/v1");
+		const fetchMock = vi.fn(async () => createStampedSseResponse());
+		const stream = streamOpenAIResponses(
+			model,
+			{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
+			{
+				apiKey: "test-key",
+				fetch: fetchMock as unknown as FetchImpl,
+				onPayload: payload => {
+					(payload as Record<string, unknown>).providerOptions = { gateway: { only: ["bedrock"] } };
+					return undefined;
+				},
+			},
+		);
+		let errorMessage: string | undefined;
+		for await (const event of stream) {
+			if (event.type === "error") errorMessage = event.error.errorMessage;
+		}
+		expect(errorMessage).toContain("providerOptions");
+		expect(fetchMock).toHaveBeenCalledTimes(0);
+	});
+
+	it("binds Responses history to the routing selectors that reached the wire", async () => {
+		const model = buildStampedResponsesModel("https://api.openai.com/v1");
+		const stream = streamOpenAIResponses(
+			model,
+			{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
+			{ apiKey: "test-key", fetch: async () => createStampedSseResponse() },
+		);
+		let message: Awaited<ReturnType<typeof stream.result>> | undefined;
+		for await (const event of stream) {
+			if (event.type === "done") message = event.message;
+			if (event.type === "error") throw event.error;
+		}
+		if (!message) throw new Error("expected a completed assistant message");
+
+		const followUp: Context = {
+			messages: [message, { role: "user", content: "continue", timestamp: 1 }],
+		};
+		const sameRouting = (await captureResponsesPayload(model, followUp)) as { input?: unknown[] };
+		expect(containsEncryptedReasoning(sameRouting.input)).toBe(true);
+
+		// Routing selectors pick the upstream that actually serves the request, so
+		// history stamped without them cannot be replayed through them.
+		const rerouted = (await captureResponsesPayload(model, followUp, undefined, {
+			extraBody: { provider: { order: ["fireworks"] } },
+		})) as { input?: unknown[] };
+		expect(containsEncryptedReasoning(rerouted.input)).toBe(false);
+		expect(containsAssistantOutputText(rerouted.input, "stamped answer")).toBe(true);
+	});
+
 	it("hashes routing identity and keeps query-scoped Responses targets distinct", async () => {
 		const secretModel = buildStampedResponsesModel("https://tenant:s3cr3t-token@proxy.example/v1?api-key=s3cr3t-key");
 		const target = getOpenAIResponsesReferenceTarget(secretModel);

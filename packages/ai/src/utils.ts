@@ -523,15 +523,73 @@ export function resolveAzureOpenAIBaseUrl(
 	return resolvedBaseUrl?.replace(/\/+$/, "");
 }
 
+/** Key-order-independent JSON so structurally equal routing configs hash alike. */
+export function canonicalJsonString(value: unknown): string {
+	const normalize = (input: unknown): unknown => {
+		if (Array.isArray(input)) return input.map(normalize);
+		if (!input || typeof input !== "object") return input;
+		const entries = Object.entries(input as Record<string, unknown>)
+			.filter(([, entryValue]) => entryValue !== undefined)
+			.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+		return Object.fromEntries(entries.map(([key, entryValue]) => [key, normalize(entryValue)]));
+	};
+	return JSON.stringify(normalize(value)) ?? "";
+}
+
+export interface OpenAIResponsesRoutingIdentityCompat<Router = unknown, Gateway = unknown> {
+	isOpenRouterHost?: boolean;
+	openRouterRouting?: Router;
+	isVercelGatewayHost?: boolean;
+	vercelGatewayRouting?: Gateway;
+}
+
+/**
+ * Gateway routing configuration that actually reaches the wire, gating each
+ * entry on the host flag the serializers use. Routing decides which upstream
+ * serves the request, so it belongs to the replay target identity and to the
+ * post-shaping wire check — one derivation keeps those in step.
+ */
+export function resolveOpenAIResponsesRoutingIdentity<Router, Gateway>(
+	compat: OpenAIResponsesRoutingIdentityCompat<Router, Gateway> | undefined,
+): { openRouterRouting?: Router; vercelGatewayRouting?: Gateway } | undefined {
+	if (!compat) return undefined;
+	const identity: { openRouterRouting?: Router; vercelGatewayRouting?: Gateway } = {};
+	if (compat.isOpenRouterHost && compat.openRouterRouting !== undefined) {
+		identity.openRouterRouting = compat.openRouterRouting;
+	}
+	if (compat.isVercelGatewayHost && compat.vercelGatewayRouting !== undefined) {
+		identity.vercelGatewayRouting = compat.vercelGatewayRouting;
+	}
+	return identity.openRouterRouting === undefined && identity.vercelGatewayRouting === undefined
+		? undefined
+		: identity;
+}
+
+export interface OpenAIResponsesRoutingOverrides {
+	provider?: unknown;
+	providerOptions?: unknown;
+}
+
 export function getOpenAIResponsesReferenceTarget(
 	model: Model,
 	requestModel = resolveOpenAIResponsesRequestModel(model),
 	referenceBaseUrl = model.api === "azure-openai-responses" ? resolveAzureOpenAIBaseUrl(model) : model.baseUrl,
+	routingOverrides?: OpenAIResponsesRoutingOverrides,
 ): string {
 	const supportsImageDetailOriginal =
 		!!model.compat &&
 		"supportsImageDetailOriginal" in model.compat &&
 		model.compat.supportsImageDetailOriginal === true;
+	const configuredRouting = resolveOpenAIResponsesRoutingIdentity(
+		model.compat as OpenAIResponsesRoutingIdentityCompat | undefined,
+	);
+	const routing: Record<string, unknown> = {};
+	if (configuredRouting?.openRouterRouting !== undefined) routing.provider = configuredRouting.openRouterRouting;
+	if (configuredRouting?.vercelGatewayRouting !== undefined) {
+		routing.providerOptions = configuredRouting.vercelGatewayRouting;
+	}
+	if (routingOverrides?.provider !== undefined) routing.provider = routingOverrides.provider;
+	if (routingOverrides?.providerOptions !== undefined) routing.providerOptions = routingOverrides.providerOptions;
 	const identity = JSON.stringify({
 		api: model.api,
 		provider: model.provider,
@@ -540,6 +598,7 @@ export function getOpenAIResponsesReferenceTarget(
 		input: [...model.input].sort(),
 		supportsComputerUse: model.supportsComputerUse === true,
 		supportsImageDetailOriginal,
+		...(Object.keys(routing).length > 0 ? { routing: canonicalJsonString(routing) } : {}),
 	});
 	return `sha256:${createHash("sha256").update(identity).digest("hex")}`;
 }
