@@ -844,7 +844,19 @@ export class RelayBridge {
 				return;
 		}
 		if (!enabled) {
-			this.#forgetSessionSubscription(tab, msg.method, ownerSessionId);
+			switch (msg.method) {
+				case "Target.setDiscoverTargets":
+				case "Page.setLifecycleEventsEnabled":
+				case "Network.setCacheDisabled":
+				case "Page.setBypassCSP":
+				case "Emulation.setTouchEmulationEnabled":
+				case "Page.setTouchEmulationEnabled":
+					tab.subscriptions.delete(msg.method);
+					break;
+				default:
+					this.#forgetSessionSubscription(tab, msg.method, ownerSessionId);
+					break;
+			}
 			return;
 		}
 		this.#rememberSessionSubscription(tab, msg.method, ownerSessionId, {

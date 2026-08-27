@@ -947,6 +947,63 @@ describe("RelayBridge tab grouping", () => {
 		expect(first.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
+	it("drops stale tab-wide toggles when another preserved session disables them before recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const first = new FakeCdpSocket();
+		const firstConn = bridge.cdpConnected(first);
+		const firstSession = await attachPage(bridge, ext, first, firstConn, 1);
+		const second = new FakeCdpSocket();
+		const secondConn = bridge.cdpConnected(second);
+		const secondSession = await attachPage(bridge, ext, second, secondConn, 1);
+
+		bridge.cdpMessage(
+			firstConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: firstSession,
+				method: "Network.setCacheDisabled",
+				params: { cacheDisabled: true },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.cdpMessage(
+			secondConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: secondSession,
+				method: "Network.setCacheDisabled",
+				params: { cacheDisabled: false },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await flush();
+
+		expect(ext2.rpcs("send")).toHaveLength(0);
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			firstConn,
+			JSON.stringify({ id: commandId, sessionId: firstSession, method: "Network.getCookies" }),
+		);
+		await flush();
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.getCookies"]);
+		ack(bridge, ext2, "send", { cookies: [] });
+		await flush();
+		expect(first.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+	});
+
 	it("drops root subscriptions owned by retracted auto-attach sessions during recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
