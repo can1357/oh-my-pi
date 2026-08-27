@@ -18,6 +18,7 @@ import {
 	renderDisplayOutput,
 	renderExitNotice,
 	renderFact,
+	renderFactText,
 	renderToolOutputSegments,
 	type ToolOutputSegment,
 } from "../../../presentation/projections";
@@ -1307,10 +1308,24 @@ function buildReplacementSnapshotContent(
 	if (state.call.sourceEcho !== undefined) sections.push(state.call.sourceEcho);
 	const body = renderSegments(state.segments);
 	if (body.length > 0) sections.push(context.fence ? fenceBlock(body) : body);
-	const factText = factsFor(state.facts, "human")
+	const factLines = factsFor(state.facts, "human")
 		.map(fact => renderFact(fact).text)
-		.filter(text => text.length > 0)
-		.join("\n");
+		.filter(text => text.length > 0);
+	if (state.processTextCapped) {
+		factLines.push(
+			renderFactText({
+				kind: "truncation",
+				meta: {
+					direction: "head",
+					totalBytes: state.cursor,
+					retainedBytes: state.processTextBytes,
+					truncatedBy: "bytes",
+					maxBytes: PROCESS_TEXT_HEAD_WINDOW_BYTES,
+				},
+			}),
+		);
+	}
+	const factText = factLines.join("\n");
 	if (factText.length > 0) sections.push(factText);
 	const exitNotice = renderExitNotice(outcome);
 	if (exitNotice !== undefined) sections.push(exitNotice);

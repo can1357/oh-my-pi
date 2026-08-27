@@ -100,10 +100,24 @@ export interface RenderedFact {
 
 /** Render one fact to its canonical single spelling. Shared by every projection. */
 export function renderFact(fact: ToolFact): RenderedFact {
-	return { factId: fact.id, kind: fact.kind, text: factText(fact) };
+	return { factId: fact.id, kind: fact.kind, text: renderFactText(fact) };
 }
 
-function factText(fact: ToolFact): string {
+/**
+ * The canonical spelling of one fact's text, keyed off its payload alone.
+ *
+ * Exported over the id-less {@link ToolFactBody} for the one consumer that has
+ * to render a fact it deliberately never published: the ACP reducer's
+ * settlement snapshot must disclose its own retained-byte head-window cut
+ * (`buildReplacementSnapshotContent` in `modes/acp/view/reducer.ts`) without
+ * minting a `FactId` that could collide with a producer's — and without
+ * entering `state.facts`, which would emit a content-snapshot receipt for a
+ * fact that never crossed the wire. It must be *this* formatter rather than
+ * {@link renderTruncationWindowNotice}: a replayed persisted record renders its
+ * truncation fact through here, so any other spelling would make live and
+ * replay disagree about the same cut.
+ */
+export function renderFactText(fact: ToolFactBody): string {
 	switch (fact.kind) {
 		case "wall_time":
 			return `Wall time: ${(fact.ms / 1000).toFixed(2)} seconds`;
@@ -147,7 +161,7 @@ function factText(fact: ToolFact): string {
 	}
 }
 
-/** Single canonical spelling per {@link LimitFactMeta} discriminant, shared by `factText`. */
+/** Single canonical spelling per {@link LimitFactMeta} discriminant, shared by {@link renderFactText}. */
 function limitFactText(meta: LimitFactMeta): string {
 	switch (meta.limit) {
 		case "column":
@@ -167,7 +181,7 @@ function limitFactText(meta: LimitFactMeta): string {
  * still-unmigrated call site) and this file's typed model projection
  * (`renderNoticeTrail` below, an escape hatch) share one formatter —
  * two spellings of "showing lines A-B of N" would drift the instant either
- * one changed. `factText`'s generic `"truncation"` case above intentionally
+ * one changed. `renderFactText`'s generic `"truncation"` case above intentionally
  * uses a *different* one-fact-per-bracket spelling (used only by the
  * exhaustive `renderModelContent`/`renderTuiPresentation`, whose audience
  * table forbids the model from seeing this kind at all); this formatter
@@ -282,7 +296,7 @@ export function renderMiddleElisionNotice(meta: TruncationFactMeta): string | un
  * bash/eval already declare for their own per-line cap — one structure, many
  * projections, "not forced to be byte-identical" (this file's own doc comment
  * above). This projection renders it with the tools' own historical wording
- * (`"Some lines truncated to N chars"`) rather than the generic `factText`
+ * (`"Some lines truncated to N chars"`) rather than the generic `renderFactText`
  * spelling (`"Lines wider than N bytes were truncated"`), because that generic
  * spelling is bash/eval's own byte-locked history, not read/grep/glob's.
  * Likewise `limit`/`"result_count"` renders with the historical
@@ -421,13 +435,14 @@ export function renderStreamBody(record: ToolPresentationRecord): string {
  * not, because the retained body already carries the sink's own elision marker and
  * adding them would insert lines today's model content does not have.
  *
- * No production caller wires this into the agent loop yet: §3.3's "model
+ * No production caller wires this into the agent loop yet: the "model
  * sees only audience-eligible facts" projection guarantee is enforced by
  * `test/presentation-model-goldens.test.ts` (byte-exact golden lock) and
  * `test/presentation-model-parity.test.ts` (proves those goldens match what
  * a real producer actually sends the model today), not by construction —
- * see "Enforced invariants" in `docs/acp-development.md`. Phase 3 lands the
- * atomic golden-locked cutover that wires a real caller; do not add one here.
+ * see "Enforced invariants" in `docs/acp-development.md`. A later phase lands
+ * the atomic golden-locked cutover that wires a real caller; do not add one
+ * here.
  */
 export function renderModelContent(view: ToolPresentationView): readonly PresentationContentBlock[] {
 	const parts = partitionFacts(factsFor(view.presentation.facts, "model"));

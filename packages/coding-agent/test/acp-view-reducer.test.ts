@@ -457,18 +457,19 @@ it("projects typed image dimensions without producer-authored display text", () 
 });
 
 describe("ACP tool view reducer — process text retention bound", () => {
-	it("bounds the plain-mode settlement content to the process-text head window without throwing on later appends", () => {
+	it("bounds the plain-mode settlement content to the process-text head window and discloses the cut", () => {
 		const { events, producer } = record();
 		const head = "h".repeat(PROCESS_TEXT_HEAD_WINDOW_BYTES);
+		const overflow = "o".repeat(PROCESS_TEXT_HEAD_WINDOW_BYTES);
 		producer.appendTerminal(head);
-		producer.appendTerminal("overflow-tail");
+		producer.appendTerminal(overflow);
 
 		const settlement = run(
 			[{ type: "started", call: bashCall() }, ...events, { type: "settled", outcome: { kind: "succeeded" } }],
 			{ phase: "live", terminal: { kind: "none" }, fence: false },
 		).updates.at(-1) as unknown as { content: { content: { text: string } }[] };
 
-		expect(settlement.content[0]?.content.text).toBe(head);
+		expect(settlement.content[0]?.content.text).toBe(`${head}\n\n[Showing first 1.0MB of 2.0MB]`);
 	});
 
 	it("keeps every byte on the meta-terminal wire even past the retained head window (wire delivery stays uncapped)", () => {
@@ -501,7 +502,7 @@ describe("ACP tool view reducer — process text retention bound", () => {
 	});
 
 	it("carries the full plain-era process bytes at live_terminal_attached even past the retained head window", () => {
-		// Round-1 review P4-followup: `reduceLiveTerminalAttached`'s plain catch-up
+		// `reduceLiveTerminalAttached`'s plain catch-up
 		// frame is the ONLY delivery path for bytes buffered while a plain-routed
 		// call had no live wire — `reduceAppend`'s plain arm emits no frame.
 		// Capping `segments` for the settlement-snapshot replay must not truncate
@@ -509,7 +510,7 @@ describe("ACP tool view reducer — process text retention bound", () => {
 		//
 		// `awaitsLiveTerminal: true` (bash's client_terminal route) is the only
 		// route `selectAcpToolRenderMode` ever sends a `live_terminal_attached`
-		// event to — see the round-2 regression test below for the (far more
+		// event to — see the regression test below for the (far more
 		// common) plain routes that never receive that event and must not build
 		// this mirror at all.
 		const cap = negotiateTerminalMetaCap(true);
@@ -531,7 +532,7 @@ describe("ACP tool view reducer — process text retention bound", () => {
 	});
 
 	it("never accumulates an unbounded raw mirror for a plain call that cannot receive live_terminal_attached", () => {
-		// Round-2 review P4-followup 2b: `awaitsLiveTerminal` is the only route
+		// `awaitsLiveTerminal` is the only route
 		// `selectAcpToolRenderMode` ever sends a `live_terminal_attached` event to
 		// (bash's client_terminal route). A `read`-kind call — like any other plain
 		// call with `awaitsLiveTerminal` unset — stays `plain` for its ENTIRE
@@ -670,13 +671,13 @@ describe("ACP tool view reducer — fact delivery by audience", () => {
 
 	describe("ACP tool view reducer — plain to live_terminal transition", () => {
 		it("delivers carried plain-era output at attach and never replaces the terminal card at settlement", () => {
-			// THE P17 REGRESSION: the closing-snapshot settle arm used to remove the
+			// Regression coverage: the closing-snapshot settle arm used to remove the
 			// live terminal item from the card and erase every byte displayed after
 			// attachment. The carry now resolves at the transition, where the
 			// pre-attach bytes precede post-attach live bytes in the client's
 			// terminal buffer; settlement touches only correlated status/exit state.
 			//
-			// `awaitsLiveTerminal: true` is load-bearing (round-2 P4-followup 2b): it
+			// `awaitsLiveTerminal: true` is load-bearing: it
 			// is the only route `selectAcpToolRenderMode` ever sends a
 			// `live_terminal_attached` event to, and now the only route whose plain
 			// state builds the uncapped `rawSegments` mirror this carry reads from.
@@ -790,7 +791,7 @@ describe("ACP tool view reducer — fact delivery by audience", () => {
 		});
 
 		it("accepts-and-suppresses an attachment declared while the view is live_terminal", () => {
-			// P18: an image has no byte form the client-owned terminal buffer could
+			// An image has no byte form the client-owned terminal buffer could
 			// replay, and a sibling content item would erase the terminal card — so
 			// the attachment is accepted, never framed, and explicitly suppressed.
 			const cap = negotiateTerminalMetaCap(true);
@@ -823,7 +824,7 @@ describe("ACP tool view reducer — fact delivery by audience", () => {
 			// `kind: "read"` is load-bearing: an `execute` call on a terminal-capable
 			// client selects meta_terminal at started, which would exercise the
 			// meta->live arm instead of the genuinely-plain acceptance loop this
-			// test exists for (round-3 review P8).
+			// test exists for.
 			const cap = negotiateTerminalMetaCap(true);
 			if (!cap) throw new Error("expected a capability witness");
 			const { events, producer } = record();
@@ -862,11 +863,11 @@ describe("ACP tool view reducer — fact delivery by audience", () => {
 		});
 
 		it("receipts the attach transition's carried spans excluding declared gaps", () => {
-			// Round-3 review P5: the transition used to claim the whole [0, cursor)
+			// Regression coverage: the transition used to claim the whole [0, cursor)
 			// range as delivered, including gap bytes whose own stream_gap receipts
 			// already record them as never received.
 			//
-			// `awaitsLiveTerminal: true` is load-bearing (round-2 P4-followup 2b): see
+			// `awaitsLiveTerminal: true` is load-bearing: see
 			// the matching note on the earlier "delivers carried plain-era output"
 			// test — `carriedData` (and so these "stream" receipts) comes from the
 			// `rawSegments` mirror, which only this route ever populates.
