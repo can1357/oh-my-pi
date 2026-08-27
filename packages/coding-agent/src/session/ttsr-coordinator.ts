@@ -8,7 +8,6 @@ import {
 	type AgentMessage,
 	createToolScopedAbortReason,
 } from "@oh-my-pi/pi-agent-core";
-import { factId } from "@oh-my-pi/pi-agent-core/presentation";
 import type { AssistantMessage, ToolCall } from "@oh-my-pi/pi-ai";
 import { isRecord, prompt, relativePathWithinRoot } from "@oh-my-pi/pi-utils";
 import type { Rule } from "../capability/rule";
@@ -140,7 +139,7 @@ export class TtsrCoordinator {
 		if (ruleNames.length > 0) this.#host.sessionManager.appendTtsrInjection(ruleNames);
 		return {
 			kind: "add_guidance_fact",
-			fact: { id: factId(`ttsr:${ctx.toolCall.id}`), kind: "model_guidance", source: "ttsr", text: reminder },
+			fact: { kind: "model_guidance", source: "ttsr", text: reminder },
 		};
 	}
 

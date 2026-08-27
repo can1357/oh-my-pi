@@ -28,7 +28,7 @@ import type {
 	JsonValue,
 	PublicToolArguments,
 	ToolCallPresentation,
-	ToolFact,
+	ToolFactBody,
 	ToolOutcome,
 	ToolPresentationEvent,
 	ToolProgressProtocol,
@@ -638,14 +638,18 @@ export interface BeforeToolCallResult {
  *   like a tool's own return value — the boundary that already proves
  *   hostile/malformed values must be normalized, never trusted verbatim.
  * - `"add_guidance_fact"` prepends one `model_guidance` fact's rendered text
- *   ahead of the executed result's own content (TTSR's only in-tree use —
- *   `ttsr-coordinator.ts`'s `#afterToolCall`). Placement is always prepend,
- *   matching what TTSR already does today; this is not configurable per call.
+ *   ahead of the executed result's own content, and — when a presentation
+ *   producer is active and still open — declares the fact on that stream too,
+ *   so it rides live ACP, the retained record, the journal, and receipts
+ *   (TTSR's only in-tree use — `ttsr-coordinator.ts`'s `#afterToolCall`).
+ *   Placement is always prepend, matching what TTSR already does today; this
+ *   is not configurable per call. The stream mints the fact's `FactId`
+ *   (`${streamId}:fN`) — this effect carries only the body.
  * - `"unchanged"` (or returning `undefined`) leaves the executed result as is.
  */
 export type AfterToolCallEffect =
 	| { kind: "transform_external_result"; raw: unknown }
-	| { kind: "add_guidance_fact"; fact: Extract<ToolFact, { kind: "model_guidance" }> }
+	| { kind: "add_guidance_fact"; fact: Extract<ToolFactBody, { kind: "model_guidance" }> }
 	| { kind: "unchanged" };
 
 /** Context passed to `beforeToolCall`. */
@@ -746,8 +750,8 @@ export interface AgentToolResult<T = unknown> {
 	 * has not terminated.
 	 *
 	 * Optional beside the retained `isError?` is the intended interim design,
-	 * not a gap (plan §8 amendment, 2026-08-24): external/extension producers
-	 * cannot author an `outcome`, so §3.5's required-field end state waits for
+	 * not a gap: external/extension producers cannot author an `outcome`, so
+	 * the required-field end state waits for
 	 * derive-and-require at the `coerceToolResult` boundary. Until then,
 	 * `deriveToolOutcome`'s precedence (explicit `outcome` first, then the
 	 * synthetic/isError-derived branches) is the single authority reconciling

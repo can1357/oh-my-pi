@@ -3066,6 +3066,19 @@ async function executeToolCalls(
 							record.signal,
 						);
 						if (effect && effect.kind !== "unchanged") {
+							// The fact must ride live ACP, the retained record, the journal, and
+							// receipts too — not just the prepended text below — so it is declared
+							// on the presentation stream itself whenever one is open. Declared before
+							// the re-coercion/freeze below: `activeProducer.fact` mints the stream's
+							// own FactId (`${streamId}:fN`), which is the only FactId this fact ever
+							// gets (the effect carries a bare `ToolFactBody`, no id).
+							if (
+								effect.kind === "add_guidance_fact" &&
+								activeProducer !== undefined &&
+								activeProducer.phase === "open"
+							) {
+								activeProducer.fact(effect.fact);
+							}
 							// Re-normalize the post-hook result: `afterToolCall` is untyped user/extension
 							// code and its effect's payload may be malformed (a raw external object, or a
 							// guidance fact prepended onto invalid content), which would otherwise be

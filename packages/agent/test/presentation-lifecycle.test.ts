@@ -13,7 +13,7 @@ import type {
 import type { Message } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import type { ToolPresentationProducer } from "../src/presentation";
-import { createLiveTerminalBinding } from "../src/presentation";
+import { createLiveTerminalBinding, factId } from "../src/presentation";
 import type { ToolPresentationAdapter } from "../src/types";
 import { createUserMessage } from "./helpers";
 
@@ -76,7 +76,10 @@ function threadingHost(): (toolCall?: ToolCallContext) => AgentToolContext | und
 
 async function runLoop(
 	tool: AgentTool<typeof toolSchema, { value: string }>,
-	options: { readonly getToolContext?: (toolCall?: ToolCallContext) => AgentToolContext | undefined } = {},
+	options: {
+		readonly getToolContext?: (toolCall?: ToolCallContext) => AgentToolContext | undefined;
+		readonly afterToolCall?: AgentLoopConfig["afterToolCall"];
+	} = {},
 ): Promise<AgentEvent[]> {
 	const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
 	const mock = createMockModel({
@@ -89,6 +92,7 @@ async function runLoop(
 		model: mock.model,
 		convertToLlm: identityConverter,
 		...(options.getToolContext === undefined ? {} : { getToolContext: options.getToolContext }),
+		...(options.afterToolCall === undefined ? {} : { afterToolCall: options.afterToolCall }),
 	};
 	const events: AgentEvent[] = [];
 	const stream = agentLoop([createUserMessage("go")], context, config, undefined, mock.stream);
@@ -973,5 +977,62 @@ describe("presentation lifecycle under scaffolding and cancellation failures", (
 		expect(settled.outcome.kind).toBe("failed");
 		if (settled.outcome.kind !== "failed") throw new Error("expected a failure");
 		expect(settled.outcome.failure.reason).toBe("thrown");
+	});
+});
+
+/** The same tool, minus a `presentation` adapter — dispatches on the legacy protocol. */
+function legacyTool(): AgentTool<typeof toolSchema, { value: string }> {
+	const tool = streamingTool();
+	return { ...tool, presentation: undefined };
+}
+
+describe("add_guidance_fact effect", () => {
+	const guidanceEffect: AgentLoopConfig["afterToolCall"] = async () => ({
+		kind: "add_guidance_fact",
+		fact: { kind: "model_guidance", source: "ttsr", text: "<reminder>run the tests</reminder>" },
+	});
+
+	it("declares exactly one model_guidance fact on the open presentation stream before settled", async () => {
+		const events = await runLoop(streamingTool(), {
+			getToolContext: threadingHost(),
+			afterToolCall: guidanceEffect,
+		});
+		const presentation = presentationEvents(events);
+		const factIndices = presentation
+			.map((event, index) => ({ event, index }))
+			.filter(({ event }) => event.event.type === "fact");
+		expect(factIndices).toHaveLength(1);
+		const factEvent = factIndices[0]!.event.event;
+		if (factEvent.type !== "fact") throw new Error("expected a fact event");
+		expect(factEvent.fact.kind).toBe("model_guidance");
+		// The stream (not the coordinator) mints the id, keyed off its own streamId.
+		expect(factEvent.fact.id).toBe(factId("call-1:f0"));
+		const settledIndex = presentation.findIndex(event => event.event.type === "settled");
+		expect(settledIndex).toBeGreaterThan(-1);
+		expect(factIndices[0]!.index).toBeLessThan(settledIndex);
+		// Goldens unchanged: the text is still prepended into the emitted result content.
+		const settledEvent = presentation[settledIndex]?.event;
+		if (settledEvent?.type !== "settled") throw new Error("expected a settlement");
+		const modelContent = settledEvent.modelContent ?? [];
+		const text = modelContent
+			.filter((part): part is { type: "text"; text: string } => part.type === "text")
+			.map(part => part.text)
+			.join("\n");
+		expect(text).toContain("<reminder>run the tests</reminder>");
+	});
+
+	it("declares no fact for a legacy call — the guidance text still only lands in content", async () => {
+		const events = await runLoop(legacyTool(), { afterToolCall: guidanceEffect });
+		expect(startProtocol(events)).toBe("legacy_snapshot");
+		const factEvents = presentationEvents(events).filter(event => event.event.type === "fact");
+		expect(factEvents).toHaveLength(0);
+		const end = events.find(event => event.type === "tool_execution_end");
+		if (end?.type !== "tool_execution_end") throw new Error("expected a legacy tool_execution_end");
+		const content = end.result.content as readonly { type: string; text?: string }[];
+		const text = content
+			.filter((part): part is { type: "text"; text: string } => part.type === "text")
+			.map(part => part.text)
+			.join("\n");
+		expect(text).toContain("<reminder>run the tests</reminder>");
 	});
 });
