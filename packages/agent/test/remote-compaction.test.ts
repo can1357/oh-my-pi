@@ -179,6 +179,27 @@ test("rejects unstamped legacy compaction history that carries encrypted native 
 	expect(canReuseOpenAiCompactionHistory(portableLegacy, model, false)).toBe(true);
 });
 
+test("rejects unstamped legacy history that carries a native compaction item", () => {
+	const model = makeOpenAiModel();
+	for (const type of ["compaction", "compaction_summary"]) {
+		const nativeLegacy = {
+			provider: model.provider,
+			replacementHistory: [
+				{ type: "message", role: "user", content: [{ type: "input_text", text: "kept" }] },
+				{ type, summary: "snapshot" },
+			],
+		};
+
+		expect(canReplayOpenAiCompactionHistory(nativeLegacy, model)).toBe(false);
+		expect(canReplayOpenAiCompactionHistory(nativeLegacy, makeOpenAiModel({ id: "gpt-5.4" }))).toBe(false);
+		expect(canReplayOpenAiCompactionHistory(nativeLegacy, model, getOpenAIResponsesReferenceTarget(model))).toBe(
+			false,
+		);
+		expect(canReuseOpenAiCompactionHistory(nativeLegacy, model, false)).toBe(false);
+		expect(canReuseOpenAiCompactionHistory(nativeLegacy, model, true)).toBe(false);
+	}
+});
+
 test("replays Azure compaction with its mapped deployment identity", () => {
 	const previousDeploymentMap = Bun.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP;
 	try {

@@ -281,6 +281,8 @@ describe("async speculative compaction", () => {
 					openaiRemoteCompaction: {
 						version: "v2",
 						provider: model.provider,
+						referenceTarget: getOpenAiCompactionReferenceTarget(model, true),
+						replayTarget: getOpenAIResponsesReferenceTarget(model),
 						replacementHistory: [{ type: "compaction_summary", summary: "snapshot" }],
 						usedTokens: 1_000,
 					},

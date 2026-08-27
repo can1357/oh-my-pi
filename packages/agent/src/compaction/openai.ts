@@ -370,15 +370,20 @@ function isEndpointOwnedImageReference(value: Record<string, unknown>): boolean 
 }
 
 /**
- * Encrypted state — the payload of a native compaction or reasoning item — is
- * issued by one endpoint and opaque everywhere else, so it binds history just as
- * firmly as an uploaded image handle does.
+ * Native compaction items and the encrypted state they carry are issued by one
+ * endpoint and opaque everywhere else, so they bind history just as firmly as an
+ * uploaded image handle does.
  */
+function isEndpointOwnedNativeCompactionItem(value: Record<string, unknown>): boolean {
+	return value.type === "compaction" || value.type === "compaction_summary";
+}
+
 function replacementHistoryContainsEndpointOwnedState(history: Array<Record<string, unknown>>): boolean {
 	return replacementHistoryContains(
 		history,
 		value =>
 			isEndpointOwnedImageReference(value) ||
+			isEndpointOwnedNativeCompactionItem(value) ||
 			(typeof value.encrypted_content === "string" && value.encrypted_content.length > 0),
 	);
 }
