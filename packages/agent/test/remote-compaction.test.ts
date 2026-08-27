@@ -2384,6 +2384,51 @@ describe("compact() remote compaction failure handling", () => {
 		expect(serializedInput).not.toContain("enc_previous");
 	});
 
+	test("does not replay legacy remote image URLs without target ownership", async () => {
+		const preparation = makePreparation();
+		preparation.previousPreserveData = {
+			openaiRemoteCompaction: {
+				provider: "openai",
+				replacementHistory: [
+					{
+						type: "message",
+						role: "user",
+						content: [
+							{
+								type: "input_image",
+								image_url: "https://images.example.invalid/legacy.png",
+							},
+						],
+					},
+					{ type: "compaction", encrypted_content: "enc_legacy_url" },
+				],
+				compactionItem: { type: "compaction", encrypted_content: "enc_legacy_url" },
+			},
+		};
+		const model = makeOpenAiModel({
+			input: ["text", "image"],
+			remoteCompaction: {
+				enabled: true,
+				endpoint: "https://compact.example/v1/responses/compact",
+			},
+		});
+		let requestInput: Array<Record<string, unknown>> = [];
+		const fetchMock: FetchImpl = async (_input, init) => {
+			const body: unknown = JSON.parse(String(init?.body));
+			if (!isRecord(body) || !Array.isArray(body.input) || !body.input.every(isRecord)) {
+				throw new Error("expected V1 compaction input");
+			}
+			requestInput = body.input;
+			return Response.json({ output: [{ type: "compaction", encrypted_content: "enc_new" }] });
+		};
+
+		await compact(preparation, model, "test-key", undefined, undefined, { fetch: fetchMock });
+
+		const serializedInput = JSON.stringify(requestInput);
+		expect(serializedInput).not.toContain("images.example.invalid/legacy.png");
+		expect(serializedInput).not.toContain("enc_legacy_url");
+	});
+
 	test("rewrites an oversized trailing tool output before V2 streaming compaction", async () => {
 		const preparation = makePreparation();
 		preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: true };

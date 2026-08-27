@@ -339,7 +339,7 @@ export function getOpenAiCompactionReferenceTarget(model: Model, streamingV2: bo
 	});
 }
 
-function replacementHistoryContainsProviderFile(history: Array<Record<string, unknown>>): boolean {
+function replacementHistoryContainsTargetDependentImage(history: Array<Record<string, unknown>>): boolean {
 	const pending: unknown[] = [...history];
 	while (pending.length > 0) {
 		const value = pending.pop();
@@ -349,6 +349,13 @@ function replacementHistoryContainsProviderFile(history: Array<Record<string, un
 		}
 		if (!isRecord(value)) continue;
 		if (typeof value.file_id === "string" && value.file_id.length > 0) return true;
+		if (
+			typeof value.image_url === "string" &&
+			value.image_url.length > 0 &&
+			!value.image_url.trimStart().toLowerCase().startsWith("data:")
+		) {
+			return true;
+		}
 		pending.push(...Object.values(value));
 	}
 	return false;
@@ -363,7 +370,7 @@ export function canReuseOpenAiCompactionHistory(
 	if (preserved.referenceTarget !== undefined) {
 		return preserved.referenceTarget === getOpenAiCompactionReferenceTarget(model, streamingV2);
 	}
-	return !replacementHistoryContainsProviderFile(preserved.replacementHistory);
+	return !replacementHistoryContainsTargetDependentImage(preserved.replacementHistory);
 }
 
 function resolveOpenAiCompactEndpoint(model: Model): string {
