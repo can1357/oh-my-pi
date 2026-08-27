@@ -167,6 +167,122 @@ describe("Zed provider protocol regressions", () => {
 		]);
 	});
 
+	it("replays the complete OpenAI Responses reasoning item on a Zed tool turn", async () => {
+		const reasoningText = "Inspect README before reading it.";
+		const reasoningItem = {
+			type: "reasoning",
+			id: "rs_zed_reasoning",
+			status: "completed",
+			summary: [{ type: "summary_text", text: reasoningText }],
+			content: [{ type: "reasoning_text", text: reasoningText }],
+			metadata: { source: "zed", turn: 7 },
+		};
+		const functionCall = {
+			type: "function_call",
+			id: "fc_zed_read",
+			call_id: "call_zed_read",
+			name: "read_file",
+			arguments: '{"path":"README.md"}',
+			status: "completed",
+		};
+		const run = await runZedStream(makeModel("gpt-5.6-luna", true), [
+			{
+				event: {
+					type: "response.output_item.added",
+					output_index: 0,
+					item: { ...reasoningItem, status: "in_progress", summary: [] },
+				},
+			},
+			{
+				event: {
+					type: "response.reasoning_summary_text.delta",
+					item_id: reasoningItem.id,
+					output_index: 0,
+					summary_index: 0,
+					delta: "Inspect README ",
+				},
+			},
+			{
+				event: {
+					type: "response.reasoning_summary_text.delta",
+					item_id: reasoningItem.id,
+					output_index: 0,
+					summary_index: 0,
+					delta: "before reading it.",
+				},
+			},
+			{
+				event: {
+					type: "response.reasoning_summary_text.done",
+					item_id: reasoningItem.id,
+					output_index: 0,
+					summary_index: 0,
+					text: reasoningText,
+				},
+			},
+			{ event: { type: "response.output_item.done", output_index: 0, item: reasoningItem } },
+			{
+				event: {
+					type: "response.output_item.added",
+					output_index: 1,
+					item: { ...functionCall, status: "in_progress" },
+				},
+			},
+			{
+				event: {
+					type: "response.function_call_arguments.delta",
+					item_id: functionCall.id,
+					output_index: 1,
+					delta: functionCall.arguments,
+				},
+			},
+			{ event: { type: "response.output_item.done", output_index: 1, item: functionCall } },
+			{ status: "stream_ended" },
+		]);
+
+		const thinking = run.result.content.find(block => block.type === "thinking");
+		if (thinking?.type !== "thinking") throw new Error("Zed reasoning block was not emitted");
+		expect(thinking).toMatchObject({
+			thinking: reasoningText,
+			thinkingSignature: JSON.stringify(reasoningItem),
+			itemId: reasoningItem.id,
+		});
+		expect(JSON.parse(thinking.thinkingSignature ?? "")).toEqual(reasoningItem);
+		expect(run.result.content).toContainEqual({
+			type: "toolCall",
+			id: functionCall.call_id,
+			name: functionCall.name,
+			arguments: { path: "README.md" },
+		});
+
+		const payload = buildZedProviderRequest(
+			"open_ai",
+			{
+				messages: [run.result, toolResult(functionCall.call_id, functionCall.name, "README contents", false)],
+			},
+			makeModel("gpt-5.6-luna", true),
+		) as { input: Array<Record<string, unknown>> };
+
+		expect(payload.input.map(item => item.type)).toEqual(["reasoning", "function_call", "function_call_output"]);
+		expect(payload.input[0]).toEqual(reasoningItem);
+		expect(payload.input[0]).not.toEqual({
+			type: "reasoning",
+			id: reasoningItem.id,
+			summary: reasoningItem.summary,
+		});
+		expect(payload.input[1]).toMatchObject({
+			type: "function_call",
+			call_id: functionCall.call_id,
+			name: functionCall.name,
+			arguments: functionCall.arguments,
+		});
+		expect(payload.input[2]).toEqual({
+			type: "function_call_output",
+			call_id: functionCall.call_id,
+			output: "README contents",
+		});
+	});
+
 	it("assembles fragmented xAI streamed tool_calls by delta index", async () => {
 		const run = await runZedStream(makeModel("grok-4.6"), [
 			{

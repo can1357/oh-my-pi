@@ -25,7 +25,7 @@ import { notifyProviderResponse } from "../utils/provider-response";
 import { normalizeSchemaForCCA } from "../utils/schema";
 import { mapToOpenAICompletionsToolChoice, mapToOpenAIResponsesToolChoice } from "../utils/tool-choice";
 import { isThinkingPart, resolveThoughtSignature, retainThoughtSignature } from "./google-shared";
-import { encodeResponsesToolResultOutput } from "./openai-shared";
+import { encodeResponsesToolResultOutput, parseResponseReasoningReplayItem } from "./openai-shared";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 
 export interface ZedOptions extends StreamOptions {
@@ -279,7 +279,11 @@ function mapContextToOpenAiResponses(context: Context, model: Model<"zed-agent">
 					assistantMessage.content.push({ type: "output_text", text: block.text });
 				} else if (block.type === "thinking") {
 					flushAssistantMessage();
-					if (block.thinking) {
+					const replayItem = parseResponseReasoningReplayItem(block.thinkingSignature);
+					if (replayItem) {
+						const replayInputItem: Record<string, unknown> = { ...replayItem };
+						input.push(replayInputItem);
+					} else if (block.thinking) {
 						input.push({
 							type: "reasoning",
 							summary: [{ type: "summary_text", text: block.thinking }],
@@ -848,6 +852,146 @@ export function streamZed(
 			}
 		};
 
+		// OpenAI Responses reasoning tracking (keyed by item_id / output_index)
+		type ResponsesReasoningState = {
+			block: ThinkingContent;
+			contentIndex: number;
+			itemId?: string;
+			outputIndex?: number;
+			ended?: boolean;
+		};
+		const openResponsesReasoningsByItemId = new Map<string, ResponsesReasoningState>();
+		const openResponsesReasoningsByOutputIndex = new Map<number, ResponsesReasoningState>();
+		const endedResponsesReasoningsByItemId = new Map<string, ResponsesReasoningState>();
+		const endedResponsesReasoningsByOutputIndex = new Map<number, ResponsesReasoningState>();
+		const openResponsesReasonings: ResponsesReasoningState[] = [];
+		let lastAddedResponsesReasoning: ResponsesReasoningState | null = null;
+
+		const getResponsesReasoningIdentity = (rawEvent: Record<string, unknown>) => {
+			const item =
+				typeof rawEvent.item === "object" && rawEvent.item !== null
+					? (rawEvent.item as Record<string, unknown>)
+					: typeof rawEvent.output_item === "object" && rawEvent.output_item !== null
+						? (rawEvent.output_item as Record<string, unknown>)
+						: undefined;
+			const itemId =
+				typeof rawEvent.item_id === "string"
+					? rawEvent.item_id
+					: typeof item?.id === "string"
+						? item.id
+						: undefined;
+			const outputIndex =
+				typeof rawEvent.output_index === "number" && Number.isFinite(rawEvent.output_index)
+					? Math.trunc(rawEvent.output_index)
+					: typeof item?.output_index === "number" && Number.isFinite(item.output_index)
+						? Math.trunc(item.output_index)
+						: undefined;
+			return {
+				item,
+				itemId,
+				outputIndex,
+				hasExplicitKey: itemId !== undefined || outputIndex !== undefined,
+			};
+		};
+
+		const findResponsesReasoning = (rawEvent: Record<string, unknown>): ResponsesReasoningState | null => {
+			const { itemId, outputIndex, hasExplicitKey } = getResponsesReasoningIdentity(rawEvent);
+			if (itemId) {
+				const found = openResponsesReasoningsByItemId.get(itemId) ?? endedResponsesReasoningsByItemId.get(itemId);
+				if (found) return found;
+			}
+			if (outputIndex !== undefined) {
+				const found =
+					openResponsesReasoningsByOutputIndex.get(outputIndex) ??
+					endedResponsesReasoningsByOutputIndex.get(outputIndex);
+				if (found) return found;
+			}
+			if (hasExplicitKey) return null;
+			return lastAddedResponsesReasoning ?? openResponsesReasonings[openResponsesReasonings.length - 1] ?? null;
+		};
+
+		const extractReasoningSummaryText = (item: Record<string, unknown> | undefined): string => {
+			if (!item) return "";
+			if (Array.isArray(item.summary)) {
+				return item.summary
+					.map(part =>
+						typeof part === "object" && part !== null && typeof part.text === "string" ? part.text : "",
+					)
+					.filter(t => t.length > 0)
+					.join("\n\n");
+			}
+			if (Array.isArray(item.content)) {
+				return item.content
+					.map(part =>
+						typeof part === "object" &&
+						part !== null &&
+						part.type === "reasoning_text" &&
+						typeof part.text === "string"
+							? part.text
+							: "",
+					)
+					.filter(t => t.length > 0)
+					.join("\n\n");
+			}
+			return "";
+		};
+
+		const removeOpenResponsesReasoning = (state: ResponsesReasoningState) => {
+			const idx = openResponsesReasonings.indexOf(state);
+			if (idx >= 0) openResponsesReasonings.splice(idx, 1);
+			if (lastAddedResponsesReasoning === state) lastAddedResponsesReasoning = null;
+			if (state.itemId && openResponsesReasoningsByItemId.get(state.itemId) === state) {
+				openResponsesReasoningsByItemId.delete(state.itemId);
+			}
+			if (state.outputIndex !== undefined && openResponsesReasoningsByOutputIndex.get(state.outputIndex) === state) {
+				openResponsesReasoningsByOutputIndex.delete(state.outputIndex);
+			}
+		};
+
+		const finishResponsesReasoning = (state: ResponsesReasoningState, doneItem?: Record<string, unknown>) => {
+			if (state.ended) {
+				if (!doneItem) return;
+				const summaryText = extractReasoningSummaryText(doneItem);
+				if (summaryText) state.block.thinking = summaryText;
+				state.block.thinkingSignature = JSON.stringify(doneItem);
+				if (state.itemId && endedResponsesReasoningsByItemId.get(state.itemId) === state) {
+					endedResponsesReasoningsByItemId.delete(state.itemId);
+				}
+				if (
+					state.outputIndex !== undefined &&
+					endedResponsesReasoningsByOutputIndex.get(state.outputIndex) === state
+				) {
+					endedResponsesReasoningsByOutputIndex.delete(state.outputIndex);
+				}
+				return;
+			}
+			state.ended = true;
+			const finalItem = doneItem ?? (state.itemId ? { type: "reasoning", id: state.itemId } : undefined);
+			if (finalItem) {
+				const summaryText = extractReasoningSummaryText(finalItem);
+				if (summaryText) {
+					state.block.thinking = summaryText;
+				}
+				state.block.thinkingSignature = JSON.stringify(finalItem);
+			}
+			removeOpenResponsesReasoning(state);
+			if (state.itemId) endedResponsesReasoningsByItemId.set(state.itemId, state);
+			if (state.outputIndex !== undefined) endedResponsesReasoningsByOutputIndex.set(state.outputIndex, state);
+			if (activeThinkingBlock === state.block) activeThinkingBlock = null;
+			stream.push({
+				type: "thinking_end",
+				contentIndex: state.contentIndex,
+				content: state.block.thinking,
+				partial: outputMessage,
+			});
+		};
+
+		const finishAllPendingReasonings = () => {
+			for (const state of [...openResponsesReasonings]) {
+				finishResponsesReasoning(state);
+			}
+		};
+
 		// OpenAI Responses tool-call tracking (keyed by item_id / output_index)
 		type ResponsesToolCallState = {
 			toolCall: ToolCall;
@@ -915,11 +1059,12 @@ export function streamZed(
 			return lastAddedResponsesToolCall ?? openResponsesToolCalls[openResponsesToolCalls.length - 1] ?? null;
 		};
 
-		const finishResponsesToolCall = (state: ResponsesToolCallState) => {
+		const finishResponsesToolCall = (state: ResponsesToolCallState, doneItem?: Record<string, unknown>) => {
 			if (state.ended) return;
 			state.ended = true;
 			try {
-				state.toolCall.arguments = JSON.parse(state.rawArgs || "{}");
+				const rawArgs = typeof doneItem?.arguments === "string" ? doneItem.arguments : state.rawArgs;
+				state.toolCall.arguments = JSON.parse(rawArgs || "{}");
 			} catch {
 				state.toolCall.arguments = {};
 			}
@@ -1153,7 +1298,41 @@ export function streamZed(
 					// ─── OPENAI RESPONSES EVENT FLAVOR ───
 					else if (eventType === "response.output_item.added") {
 						const item = (event.item ?? event.output_item) as Record<string, unknown> | undefined;
-						if (item?.type === "function_call") {
+						if (item?.type === "reasoning") {
+							closeActiveText();
+							closeActiveThinking();
+							const itemId = typeof item.id === "string" ? item.id : undefined;
+							const wireItemId = typeof event.item_id === "string" ? event.item_id : undefined;
+							const effectiveItemId = itemId ?? wireItemId;
+							const outputIndex =
+								typeof event.output_index === "number" && Number.isFinite(event.output_index)
+									? Math.trunc(event.output_index)
+									: undefined;
+							const initialSummary = extractReasoningSummaryText(item);
+							const thinkingBlock: ThinkingContent = {
+								type: "thinking",
+								thinking: initialSummary,
+								...(effectiveItemId ? { itemId: effectiveItemId } : {}),
+							};
+							outputMessage.content.push(thinkingBlock);
+							const contentIndex = outputMessage.content.length - 1;
+							const state: ResponsesReasoningState = {
+								block: thinkingBlock,
+								contentIndex,
+								itemId: effectiveItemId,
+								outputIndex,
+							};
+							if (effectiveItemId) openResponsesReasoningsByItemId.set(effectiveItemId, state);
+							if (outputIndex !== undefined) openResponsesReasoningsByOutputIndex.set(outputIndex, state);
+							openResponsesReasonings.push(state);
+							lastAddedResponsesReasoning = state;
+							activeThinkingBlock = thinkingBlock;
+							stream.push({
+								type: "thinking_start",
+								contentIndex,
+								partial: outputMessage,
+							});
+						} else if (item?.type === "function_call") {
 							closeActiveText();
 							closeActiveThinking();
 							const itemId = typeof item.id === "string" ? item.id : undefined;
@@ -1204,7 +1383,19 @@ export function streamZed(
 							eventType === "response.reasoning_text.delta") &&
 						typeof event.delta === "string"
 					) {
-						startOrAppendThinking(event.delta);
+						closeActiveText();
+						const target = findResponsesReasoning(event);
+						if (target) {
+							target.block.thinking += event.delta;
+							stream.push({
+								type: "thinking_delta",
+								contentIndex: target.contentIndex,
+								delta: event.delta,
+								partial: outputMessage,
+							});
+						} else {
+							startOrAppendThinking(event.delta);
+						}
 					} else if (eventType === "response.function_call_arguments.delta" && typeof event.delta === "string") {
 						closeActiveText();
 						closeActiveThinking();
@@ -1223,10 +1414,20 @@ export function streamZed(
 						eventType === "response.function_call_arguments.done"
 					) {
 						const item = (event.item ?? event.output_item) as Record<string, unknown> | undefined;
-						if (item?.type === "function_call" || eventType === "response.function_call_arguments.done") {
+						if (item?.type === "reasoning") {
+							const target = findResponsesReasoning(event);
+							if (target) {
+								finishResponsesReasoning(target, item);
+							} else {
+								closeActiveThinking();
+							}
+						} else if (item?.type === "function_call" || eventType === "response.function_call_arguments.done") {
 							const target = findResponsesToolCall(event);
 							if (target) {
-								finishResponsesToolCall(target);
+								finishResponsesToolCall(
+									target,
+									item ?? (typeof event.arguments === "string" ? event : undefined),
+								);
 							}
 						} else if (item?.type === "message" || eventType === "response.output_item.done") {
 							closeActiveText();
@@ -1238,7 +1439,12 @@ export function streamZed(
 						eventType === "response.reasoning_summary_text.done" ||
 						eventType === "response.reasoning.done"
 					) {
-						closeActiveThinking();
+						const target = findResponsesReasoning(event);
+						if (target) {
+							finishResponsesReasoning(target);
+						} else {
+							closeActiveThinking();
+						}
 					}
 
 					// ─── OPENAI CHAT & GOOGLE GEMINI EVENT FLAVORS ───
@@ -1471,6 +1677,7 @@ export function streamZed(
 
 			closeActiveText();
 			closeActiveThinking();
+			finishAllPendingReasonings();
 			finishAllPendingToolCalls();
 
 			if (outputMessage.content.some(b => b.type === "toolCall") && outputMessage.stopReason === "stop") {
