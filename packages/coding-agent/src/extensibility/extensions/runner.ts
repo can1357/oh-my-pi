@@ -64,6 +64,8 @@ import type {
 	SessionCompactingResult,
 	SessionStopEvent,
 	SessionStopEventResult,
+	ToolApprovalReviewEvent,
+	ToolApprovalReviewResult,
 	ToolCallEvent,
 	ToolCallEventResult,
 	ToolRegistrationListener,
@@ -1508,6 +1510,60 @@ export class ExtensionRunner {
 			return { block: true, reason: `Tool execution was cancelled while an extension handler was pending` };
 		}
 		return result;
+	}
+
+	/**
+	 * Emit a `tool_approval_review` event to every subscribed extension.
+	 *
+	 * Advisory pre-execution review of an eligible mode-derived approval prompt.
+	 * Approval is returned only when at least one handler participates and every
+	 * handler returns exactly `{ decision: "approve" }`. Any other outcome — no
+	 * handlers, escalation, malformed results, throws, timeouts, or
+	 * cancellation — maps to `{ decision: "escalate" }`, which keeps the caller
+	 * on the ordinary native approval path. The review can never deny or
+	 * rewrite the call: the event carries no deny/rewrite shape and only a
+	 * unanimous approve suppresses the prompt.
+	 */
+	async emitToolApprovalReview(
+		event: ToolApprovalReviewEvent,
+		signal?: AbortSignal,
+	): Promise<ToolApprovalReviewResult> {
+		let ctx: ExtensionContext | undefined;
+		let participated = false;
+
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get(event.type);
+			if (!handlers || handlers.length === 0) continue;
+			ctx ??= this.createContext();
+
+			for (const handler of handlers) {
+				const result = await this.#runHandlerWithTimeout<ToolApprovalReviewEvent, ToolApprovalReviewResult>(
+					handler as (event: ToolApprovalReviewEvent, ctx: ExtensionContext) => Promise<ToolApprovalReviewResult | undefined>,
+					event,
+					ctx,
+					ext,
+					normalizeHandlerTimeout(
+						this.settings?.get("extensionHandlers.toolCallTimeoutMs") ?? extensionHandlerTimeoutMs,
+					),
+					() => ({ decision: "escalate", reason: `Extension ${ext.path} failed or timed out` }),
+					signal,
+				);
+				if (
+					result?.decision === "approve" &&
+					Object.keys(result).every(key => key === "decision" || key === "rationale")
+				) {
+					participated = true;
+					continue;
+				}
+				return {
+					decision: "escalate",
+					...(result?.decision === "escalate" && result.reason ? { reason: result.reason } : {}),
+				};
+			}
+		}
+
+		if (!participated) return { decision: "escalate", reason: "no review handlers" };
+		return { decision: "approve" };
 	}
 
 	async emitUserBash(event: UserBashEvent): Promise<UserBashEventResult | undefined> {

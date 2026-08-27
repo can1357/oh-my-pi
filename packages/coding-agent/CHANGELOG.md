@@ -175,6 +175,7 @@
 - Kept embedded context usage visible in the status line when long session names or paths consume available space.
 - Added a status message when `CTRL-O` toggles tool-output expansion.
 - Fixed `omp usage` to report Codex Chat and Spark capacity meters separately when they share a usage window.
+- Extensions can now subscribe to `tool_approval_review`, an advisory review emitted after final tool-input resolution but before the native approval selector; a unanimous `{ decision: "approve" }` from all subscribed handlers skips only an eligible mode-derived approval prompt, while any other outcome keeps the native prompt path unchanged.
 
 ## [18.0.8] - 2026-08-27
 

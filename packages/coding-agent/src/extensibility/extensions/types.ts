@@ -77,7 +77,7 @@ import type {
 	ReadToolInput,
 	WriteToolInput,
 } from "../../tools";
-import type { ApprovalMode } from "../../tools/approval";
+import type { ApprovalMode, ToolTier } from "../../tools/approval";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import type { EventBus } from "../../utils/event-bus";
 import type {
@@ -927,6 +927,27 @@ export interface ToolApprovalResolvedEvent {
 	reason?: string;
 }
 
+/**
+ * Fired after final tool-input resolution for an eligible mode-derived prompt,
+ * before the native approval selector. The review is advisory: it may approve
+ * the call (skipping the ordinary prompt) or escalate back to it — it can never
+ * deny the call or rewrite its input. `input` is the exact object that will
+ * reach execution.
+ */
+export interface ToolApprovalReviewEvent {
+	type: "tool_approval_review";
+	sessionId: string;
+	toolCallId: string;
+	toolName: string;
+	input: Record<string, unknown>;
+	approvalMode: ApprovalMode;
+	tier: ToolTier;
+}
+
+export type ToolApprovalReviewResult =
+	| { decision: "approve"; rationale?: string }
+	| { decision: "escalate"; reason?: string };
+
 interface ToolCallEventBase {
 	type: "tool_call";
 	toolCallId: string;
@@ -1100,7 +1121,8 @@ export type ExtensionEvent =
 	| ToolCallEvent
 	| ToolResultEvent
 	| ToolApprovalRequestedEvent
-	| ToolApprovalResolvedEvent;
+	| ToolApprovalResolvedEvent
+	| ToolApprovalReviewEvent;
 
 // ============================================================================
 // Event Results
@@ -1285,6 +1307,10 @@ export interface ExtensionAPI {
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;
 	on(event: "tool_approval_requested", handler: ExtensionHandler<ToolApprovalRequestedEvent>): void;
 	on(event: "tool_approval_resolved", handler: ExtensionHandler<ToolApprovalResolvedEvent>): void;
+	on(
+		event: "tool_approval_review",
+		handler: ExtensionHandler<ToolApprovalReviewEvent, ToolApprovalReviewResult>,
+	): void;
 	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;
 	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;

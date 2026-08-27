@@ -2994,7 +2994,12 @@ describe("ExtensionRunner", () => {
 				const trace = setTrace();
 				fs.writeFileSync(
 					path.join(extensionsDir, "review-b-escalate.ts"),
-					reviewExtensionCode(`return { decision: "escalate" };`),
+					`export default function(pi) {
+						pi.on("tool_approval_review", async () => {
+							globalThis.__reviewTrace.push({ kind: "review" });
+							return { decision: "escalate" };
+						});
+					}`,
 				);
 				const { runner, select } = await reviewRunnerFromFile(
 					"review-a-approve.ts",
@@ -3190,7 +3195,7 @@ describe("ExtensionRunner", () => {
 				clearTrace();
 			});
 
-			it("approved review executes the reviewed input and cannot rewrite it", async () => {
+			it("a rewrite attempt inside an approve result is ignored and escalates to the native selector", async () => {
 				const trace = setTrace();
 				const { runner, select } = await reviewRunnerFromFile(
 					"review-rewrite-attempt.ts",
@@ -3200,10 +3205,14 @@ describe("ExtensionRunner", () => {
 					params: { command: "echo good" },
 				});
 
+				// The extra input field makes the result malformed: the native selector
+				// decides, and the original input executes — "evil" can never run.
 				expect(firstReviewText(result)).toBe("ok");
-				expect(select).not.toHaveBeenCalled();
+				expect(select).toHaveBeenCalledTimes(1);
+				expect(trace[0]).toMatchObject({ kind: "review", toolCallId: "call-rewrite-attempt" });
 				const executed = trace.find(entry => entry.kind === "executed");
 				expect(executed?.params).toEqual({ command: "echo good" });
+				expect(JSON.stringify(trace)).not.toContain("evil");
 				clearTrace();
 			});
 
@@ -3243,7 +3252,6 @@ describe("ExtensionRunner", () => {
 				);
 				// No initializeRunner: the runner keeps its no-op UI context (headless).
 				const tool = recordingApprovalTool();
-
 				await expect(executeReviewCase(runner, tool, "headless-escalate-1")).rejects.toThrow(
 					'Tool "dangerous_tool" requires approval but no interactive UI available.',
 				);

@@ -268,6 +268,39 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			reason: resolved.reason,
 		};
 
+		// Advisory extension review, exactly between final input resolution and
+		// the native selector. Eligible only for mode-derived prompts: unanimous
+		// approval suppresses the ordinary prompt below; every other outcome
+		// keeps it unchanged. The review cannot deny or rewrite the call — the
+		// event carries the exact execution input and the result shape carries
+		// no deny or rewrite fields.
+		if (
+			approvalCheck.required &&
+			resolved.policy === "prompt" &&
+			resolved.source === "mode" &&
+			!explicitPrompt &&
+			pendingSafetyChecks.length === 0 &&
+			!xdevBypass &&
+			!signal?.aborted
+		) {
+			const review = await this.runner.emitToolApprovalReview(
+				{
+					type: "tool_approval_review",
+					sessionId: context?.sessionManager?.getSessionId() ?? "",
+					toolCallId,
+					toolName: this.tool.name,
+					input: effectiveParams as Record<string, unknown>,
+					approvalMode,
+					tier: resolved.tier,
+				},
+				signal,
+			);
+			if (review.decision === "approve") {
+				// Suppress only this eligible mode-derived native prompt.
+				approvalCheck.required = false;
+			}
+		}
+
 		if (approvalCheck.required) {
 			const scheduledCall = context?.toolCall?.toolCalls[context.toolCall.index];
 			if (
