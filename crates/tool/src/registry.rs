@@ -1747,15 +1747,20 @@ impl Registry {
 	///
 	/// Reservations are monotone and may be installed before or after the core
 	/// implementation. Later non-core claims fail instead of shadowing,
-	/// demoting, or blocking the essential slot.
+	/// demoting, or blocking the essential slot.  When protection is applied
+	/// after a non-core claimant has already occupied a name, that preexisting
+	/// claim is evicted so the invariant — a protected core name never carries
+	/// a live non-core claim — holds at the owning seam.
 	pub fn protect_core_claims<I, S>(&mut self, names: I)
 	where
 		I: IntoIterator<Item = S>,
 		S: Into<Str>,
 	{
-		self
-			.protected_core
-			.extend(names.into_iter().map(Into::into));
+		for name in names {
+			let name = name.into();
+			self.evict_foreign_live_claim(&name);
+			self.protected_core.insert(name);
+		}
 	}
 
 	/// Reserves essential built-in names that the user-facing roster should
@@ -1767,6 +1772,7 @@ impl Registry {
 	{
 		for name in names {
 			let name = name.into();
+			self.evict_foreign_live_claim(&name);
 			self.protected_core.insert(name.clone());
 			self.user_visible_reserved.insert(name);
 		}
@@ -1775,6 +1781,48 @@ impl Registry {
 	/// Reserves every currently-live claim name as a protected core claim.
 	pub fn protect_live_claims(&mut self) {
 		self.protected_core.extend(self.live.keys().cloned());
+	}
+
+	/// Retains only core ownership for a newly protected name.
+	fn evict_foreign_live_claim(&mut self, name: &str) {
+		let Some(claim) = self.live.remove(name) else {
+			return;
+		};
+		let foreign_winner = claim.claimant != "omp/core";
+		let mut core_claims = SmallVec::<ShadowClaim, 1>::new();
+		if !foreign_winner {
+			core_claims.push(ShadowClaim {
+				rev:        claim.rev,
+				precedence: claim.precedence,
+				claimant:   claim.claimant,
+				replaces:   claim.replaces,
+			});
+		}
+		core_claims.extend(
+			claim
+				.shadowed
+				.into_iter()
+				.filter(|shadow| shadow.claimant == "omp/core"),
+		);
+		if let Some(winner) = core_claims.first().cloned() {
+			core_claims.remove(0);
+			self.live.insert(Str::new(name), Claim {
+				rev:        winner.rev,
+				precedence: winner.precedence,
+				claimant:   winner.claimant,
+				replaces:   winner.replaces,
+				shadowed:   core_claims,
+			});
+		}
+		if foreign_winner {
+			self.unlisted.remove(name);
+		}
+		if let Some(versions) = self.versions.get_mut(name) {
+			versions.retain(|_, entry| entry.claims.claimant == "omp/core");
+		}
+		if self.versions.get(name).is_some_and(BTreeMap::is_empty) {
+			self.versions.remove(name);
+		}
 	}
 
 	/// Omits one live claim from the user-facing roster while leaving its

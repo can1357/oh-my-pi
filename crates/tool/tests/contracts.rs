@@ -930,6 +930,87 @@ fn protect_live_claims_reserves_slot_and_device_names() {
 }
 
 #[test]
+fn protect_core_claims_evicts_preexisting_non_core_claim() {
+	let mut registry = Registry::new();
+	// A non-core claimant occupies the name before protection is applied.
+	registry
+		.register(
+			fake_tool(1, "foreign", Arc::new(AtomicUsize::new(0))).named("hub"),
+			Presentation::Slot,
+			claims("publisher/extension", Precedence::DEFAULT),
+		)
+		.expect("foreign claim succeeds before protection");
+	assert!(registry.live_identity("hub").is_some(), "non-core claimant is live before protection");
+
+	// Protecting the name must evict the preexisting non-core claimant.
+	registry.protect_core_claims(["hub"]);
+	assert!(
+		registry.live_identity("hub").is_none(),
+		"preexisting non-core claim is evicted by protection"
+	);
+
+	// A subsequent non-core registration must be rejected.
+	let error = registry
+		.register_worker(
+			worker_spec("hub", [3; 32]),
+			Presentation::Slot,
+			claims("other/publisher", Precedence::DEFAULT),
+		)
+		.expect_err("protected name rejects non-core claim");
+	assert!(matches!(
+		error,
+		RegistryError::CoreNameClaim { name, claimant, .. }
+			if name == "hub" && claimant == "other/publisher"
+	));
+
+	// The core claimant can still register cleanly after eviction.
+	registry
+		.register(
+			fake_tool(2, "core", Arc::new(AtomicUsize::new(0))).named("hub"),
+			Presentation::Slot,
+			claims("omp/core", Precedence::CORE),
+		)
+		.expect("core claimant registers after eviction");
+	assert!(registry.live_identity("hub").is_some(), "core claimant is live after registration");
+}
+
+#[test]
+fn protect_user_visible_core_evicts_preexisting_non_core_claim() {
+	let mut registry = Registry::new();
+	registry
+		.register(
+			fake_tool(1, "foreign", Arc::new(AtomicUsize::new(0))).named("read"),
+			Presentation::Slot,
+			claims("publisher/extension", Precedence::DEFAULT),
+		)
+		.expect("foreign claim succeeds before protection");
+	assert!(registry.live_identity("read").is_some());
+
+	registry.protect_user_visible_core(["read"]);
+	assert!(
+		registry.live_identity("read").is_none(),
+		"preexisting non-core claim is evicted by user-visible protection"
+	);
+	assert!(
+		registry.disabled_roster().any(|name| name == "read"),
+		"evicted name remains in the disabled roster"
+	);
+
+	let error = registry
+		.register_worker(
+			worker_spec("read", [5; 32]),
+			Presentation::Slot,
+			claims("publisher/extension", Precedence::DEFAULT),
+		)
+		.expect_err("protected name rejects non-core claim");
+	assert!(matches!(
+		error,
+		RegistryError::CoreNameClaim { name, claimant, .. }
+			if name == "read" && claimant == "publisher/extension"
+	));
+}
+
+#[test]
 fn disabled_builtin_name_cannot_be_claimed_by_extension() {
 	let mut registry = Registry::new();
 	registry.protect_core_claims(["shell"]);
