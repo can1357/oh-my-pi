@@ -11,7 +11,8 @@ const ZERO_USAGE: Usage = {
 	totalTokens: 0,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
-const IMAGE_DATA = Buffer.from("base64-image-data").toString("base64");
+// Smallest valid 1x1 PNG: inline image payloads must sniff as their declared media type.
+const IMAGE_DATA = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 function createGoogleModel(
 	id: string,

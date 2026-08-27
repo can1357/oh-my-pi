@@ -32,7 +32,10 @@ import {
 	hoistInterleavedResponsesToolBatchMessages,
 	resolveOpenAICompatPolicy,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
-import { stripOpenAIResponsesOutputOnlyStatusesForReplay } from "@oh-my-pi/pi-ai/utils";
+import {
+	getOpenAIResponsesReferenceTarget,
+	stripOpenAIResponsesOutputOnlyStatusesForReplay,
+} from "@oh-my-pi/pi-ai/utils";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
@@ -1676,7 +1679,12 @@ export async function compact(
 				);
 				preserveData = {
 					...(preserveData ?? {}),
-					...storeCompactionV2PreserveData(remote, model, getOpenAiCompactionReferenceTarget(model, true)),
+					...storeCompactionV2PreserveData(
+						remote,
+						model,
+						getOpenAiCompactionReferenceTarget(model, true),
+						getOpenAIResponsesReferenceTarget(model),
+					),
 				};
 				usedRemoteCompaction = true;
 			} catch (err) {

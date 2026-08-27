@@ -805,12 +805,14 @@ export function storeCompactionV2PreserveData(
 	response: CompactionV2Response,
 	model: Model,
 	referenceTarget?: string,
+	replayTarget?: string,
 ): Record<string, unknown> {
 	return {
 		[OPENAI_REMOTE_COMPACTION_PRESERVE_KEY]: {
 			version: "v2",
 			provider: model.provider,
 			...(referenceTarget ? { referenceTarget } : {}),
+			...(replayTarget ? { replayTarget } : {}),
 			replacementHistory: response.replacementHistory,
 			usedTokens: response.usedTokens,
 			usage: response.usage,
@@ -824,6 +826,7 @@ export function getCompactionV2PreserveData(preserveData: Record<string, unknown
 	| {
 			provider: string;
 			referenceTarget?: string;
+			replayTarget?: string;
 			replacementHistory: Array<Record<string, unknown>>;
 			usedTokens: number;
 	  }
@@ -837,6 +840,7 @@ export function getCompactionV2PreserveData(preserveData: Record<string, unknown
 	return {
 		provider,
 		referenceTarget: stringField(candidate, "referenceTarget"),
+		replayTarget: stringField(candidate, "replayTarget"),
 		replacementHistory: candidate.replacementHistory as Array<Record<string, unknown>>,
 		usedTokens: numberField(candidate, "usedTokens") ?? 0,
 	};

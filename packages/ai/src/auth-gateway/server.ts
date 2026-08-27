@@ -35,12 +35,20 @@ import {
 	getUsableInlineImageMimeType,
 	isRemoteImageUrl,
 	normalizeImageMimeType,
+	resolveUsableInlineImage,
 	supportsComputerScreenshotReferences,
 	supportsProviderFileReference,
 	supportsRemoteImageUrls,
 } from "../providers/vision-guard";
 import { completeSimple, streamSimple } from "../stream";
-import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions, ToolResultMessage } from "../types";
+import type {
+	Api,
+	AssistantMessageEventStream,
+	Context,
+	Model,
+	SimpleStreamOptions,
+	ToolResultMessage,
+} from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { parseBind } from "../utils/parse-bind";
 import {
@@ -86,11 +94,7 @@ const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
 	"/v1/responses": { module: openaiResponses, label: "openai-responses" },
 };
 
-function promoteComputerScreenshotImage(
-	message: Record<string, unknown>,
-	model: Model,
-	imageUrl: string,
-): boolean {
+function promoteComputerScreenshotImage(message: Record<string, unknown>, model: Model, imageUrl: string): boolean {
 	const decoded = decodeDataUri(imageUrl);
 	const decodedMimeType = decoded ? getUsableInlineImageMimeType(decoded) : undefined;
 	const image = decodedMimeType
@@ -177,9 +181,13 @@ function validateAndNormalizeImageReferences(context: Context, model: Model): st
 
 			const data = block.data;
 			const mimeType = block.mimeType;
-			const inlineMimeType = getUsableInlineImageMimeType({ data, mimeType });
-			const hasInlineData = inlineMimeType !== undefined;
-			if (inlineMimeType) block.mimeType = inlineMimeType;
+			const inline = resolveUsableInlineImage({ data, mimeType });
+			const inlineMimeType = inline?.mimeType;
+			const hasInlineData = inline !== undefined;
+			if (inline) {
+				block.mimeType = inline.mimeType;
+				block.data = inline.data;
+			}
 			const normalizedMimeType = inlineMimeType ?? normalizeImageMimeType(mimeType);
 			const hasProviderFileReference = block.providerFile !== undefined;
 			const providerFile = isRecord(block.providerFile) ? block.providerFile : undefined;

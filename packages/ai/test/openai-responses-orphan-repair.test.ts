@@ -146,6 +146,36 @@ describe("repairOrphanResponsesToolOutputs", () => {
 		});
 	});
 
+	it("keeps an orphan fallback outside a batch interrupted by an assistant message", () => {
+		// `hoistInterleavedResponsesToolBatchMessages` treats the assistant note as
+		// batch-internal, so the orphan repair must not treat it as a batch boundary
+		// and drop the fallback between two paired outputs.
+		const imageUrl = `data:image/png;base64,${PNG_B64}`;
+		const repaired = repairOrphanResponsesToolOutputs([
+			{ type: "function_call", call_id: "call_a", name: "read", arguments: "{}" },
+			{ type: "function_call", call_id: "call_c", name: "read", arguments: "{}" },
+			{ type: "message", role: "assistant", content: "running both reads" } as ResponseInput[number],
+			{ type: "function_call_output", call_id: "call_a", output: "ok" } as ResponseInput[number],
+			{
+				type: "function_call_output",
+				call_id: "call_b",
+				output: [{ type: "input_image", detail: "auto", image_url: imageUrl }],
+			} as ResponseInput[number],
+			{ type: "function_call_output", call_id: "call_c", output: "ok" } as ResponseInput[number],
+		]);
+
+		const kinds = repaired.map(item => (item as { type?: string }).type);
+		const firstOutput = kinds.indexOf("function_call_output");
+		const lastOutput = kinds.lastIndexOf("function_call_output");
+		expect(firstOutput).toBeGreaterThanOrEqual(0);
+		expect(kinds.slice(firstOutput, lastOutput + 1)).toEqual(["function_call_output", "function_call_output"]);
+		expect(repaired).toContainEqual({
+			type: "message",
+			role: "user",
+			content: [{ type: "input_image", detail: "auto", image_url: imageUrl }],
+		});
+	});
+
 	it("preserves orphan images as user-message fallbacks", () => {
 		const imageData = PNG_B64;
 		const imageUrl = `data:image/png;base64,${imageData}`;

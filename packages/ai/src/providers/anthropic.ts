@@ -101,11 +101,13 @@ import {
 import { getOpenAIPromptCacheKey } from "./openai-shared";
 import { transformMessages } from "./transform-messages";
 import {
-	getUsableInlineImageMimeType,
+	getUnreplayableInlineImageMimeType,
 	isRemoteImageUrl,
 	NON_VISION_IMAGE_PLACEHOLDER,
+	resolveUsableInlineImage,
 	supportsProviderFileReference,
 	supportsRemoteImageUrls,
+	unreplayableImageFormatPlaceholder,
 } from "./vision-guard";
 
 export type AnthropicHeaderOptions = {
@@ -1039,18 +1041,23 @@ function convertContentBlocks(
 
 		let source = getAnthropicImageReferenceSource(block, model);
 		if (!source) {
-			const inlineMimeType = getUsableInlineImageMimeType(block);
-			if (!inlineMimeType) {
+			const inline = resolveUsableInlineImage(block);
+			if (!inline) {
+				const unreplayableMimeType = getUnreplayableInlineImageMimeType(block);
+				if (unreplayableMimeType) {
+					blocks.push({ type: "text", text: unreplayableImageFormatPlaceholder(unreplayableMimeType) });
+					continue;
+				}
 				throw new AIError.ValidationError(
 					`input_image cannot be forwarded to ${model.api} without non-empty image data or a supported reference`,
 				);
 			}
-			const mediaType = normalizeAnthropicImageMediaType(inlineMimeType);
+			const mediaType = normalizeAnthropicImageMediaType(inline.mimeType);
 			if (!mediaType) {
-				blocks.push({ type: "text", text: `[unsupported image: ${block.mimeType}]` });
+				blocks.push({ type: "text", text: unreplayableImageFormatPlaceholder(inline.mimeType) });
 				continue;
 			}
-			source = { type: "base64", media_type: mediaType, data: block.data };
+			source = { type: "base64", media_type: mediaType, data: inline.data };
 		}
 
 		sawImage = true;

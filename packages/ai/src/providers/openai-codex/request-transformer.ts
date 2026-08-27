@@ -4,6 +4,7 @@ import { requireSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { Model } from "../../types";
 import {
+	classifyResponsesBatchItem,
 	hoistInterleavedResponsesToolBatchMessages,
 	mapOpenAIReasoningEffort,
 	splitResponsesOrphanOutput,
@@ -271,19 +272,26 @@ function repairToolCallPairs(input: InputItem[], model: Model<"openai-codex-resp
 	let activeBatchHasCall = false;
 	let activeBatchHasOutput = false;
 	const appendBatchItem = (item: InputItem): void => {
-		const callKind = toolCallKind(item.type);
-		const outputKind = toolOutputKind(item.type);
-		if (callKind) {
-			activeBatchHasCall = true;
-		} else if (outputKind) {
-			activeBatchHasOutput = true;
-		} else {
-			if (deferredFallbacks.length > 0) {
-				repaired.push(...deferredFallbacks);
-				deferredFallbacks.length = 0;
-			}
-			activeBatchHasCall = false;
-			activeBatchHasOutput = false;
+		// Mirrors `repairOrphanResponsesToolOutputs`: an assistant message wedged in a
+		// call → output run is batch-internal for `hoistInterleavedResponsesToolBatchMessages`,
+		// so only a genuinely unrelated item closes the batch.
+		switch (classifyResponsesBatchItem(item)) {
+			case "call":
+				activeBatchHasCall = true;
+				break;
+			case "output":
+				activeBatchHasOutput = true;
+				break;
+			case "assistant-message":
+				break;
+			default:
+				if (deferredFallbacks.length > 0) {
+					repaired.push(...deferredFallbacks);
+					deferredFallbacks.length = 0;
+				}
+				activeBatchHasCall = false;
+				activeBatchHasOutput = false;
+				break;
 		}
 		repaired.push(item);
 	};

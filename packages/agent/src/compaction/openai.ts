@@ -255,7 +255,18 @@ export type OpenAiRemoteCompactionItem = {
 
 export interface OpenAiRemoteCompactionPreserveData {
 	provider?: string;
+	/**
+	 * Fingerprint of the compaction request target. Only this target can extend
+	 * the preserved `compactionItem`, whose encrypted content is endpoint-bound.
+	 */
 	referenceTarget?: string;
+	/**
+	 * Fingerprint of the runtime request target the `replacementHistory` was
+	 * encoded for. Distinct from {@link referenceTarget} whenever the model
+	 * configures a `remoteCompaction` model/api/endpoint override, so replay
+	 * compatibility must never be checked against the compaction fingerprint.
+	 */
+	replayTarget?: string;
 	replacementHistory: Array<Record<string, unknown>>;
 	compactionItem: OpenAiRemoteCompactionItem;
 }
@@ -317,11 +328,7 @@ export function resolveOpenAiCompactionReferenceModel(model: Model, streamingV2:
 
 export function getOpenAiCompactionReferenceTarget(model: Model, streamingV2: boolean): string {
 	const referenceModel = resolveOpenAiCompactionReferenceModel(model, streamingV2);
-	return getOpenAIResponsesReferenceTarget(
-		referenceModel,
-		resolveOpenAiCompactModel(model),
-		referenceModel.baseUrl,
-	);
+	return getOpenAIResponsesReferenceTarget(referenceModel, resolveOpenAiCompactModel(model), referenceModel.baseUrl);
 }
 
 function replacementHistoryContainsTargetDependentImage(history: Array<Record<string, unknown>>): boolean {
@@ -359,12 +366,15 @@ export function canReuseOpenAiCompactionHistory(
 }
 
 export function canReplayOpenAiCompactionHistory(
-	preserved: Pick<OpenAiRemoteCompactionPreserveData, "provider" | "referenceTarget" | "replacementHistory">,
+	preserved: Pick<
+		OpenAiRemoteCompactionPreserveData,
+		"provider" | "referenceTarget" | "replayTarget" | "replacementHistory"
+	>,
 	model: Model,
 ): boolean {
 	if (preserved.provider !== model.provider) return false;
-	if (preserved.referenceTarget !== undefined) {
-		return preserved.referenceTarget === getOpenAIResponsesReferenceTarget(model);
+	if (preserved.replayTarget !== undefined) {
+		return preserved.replayTarget === getOpenAIResponsesReferenceTarget(model);
 	}
 	return !replacementHistoryContainsTargetDependentImage(preserved.replacementHistory);
 }
@@ -442,6 +452,7 @@ export function getPreservedOpenAiRemoteCompactionData(
 	const maybeData = candidate as {
 		provider?: unknown;
 		referenceTarget?: unknown;
+		replayTarget?: unknown;
 		replacementHistory?: unknown;
 		compactionItem?: unknown;
 	};
@@ -458,6 +469,7 @@ export function getPreservedOpenAiRemoteCompactionData(
 	return {
 		provider: typeof maybeData.provider === "string" ? maybeData.provider : undefined,
 		referenceTarget: typeof maybeData.referenceTarget === "string" ? maybeData.referenceTarget : undefined,
+		replayTarget: typeof maybeData.replayTarget === "string" ? maybeData.replayTarget : undefined,
 		replacementHistory: maybeData.replacementHistory as Array<Record<string, unknown>>,
 		compactionItem: compactionItem as unknown as OpenAiRemoteCompactionItem,
 	};
@@ -871,11 +883,8 @@ export function buildOpenAiNativeHistory(
 				const outputText =
 					message.providerMetadata?.type === "computer"
 						? ""
-						: encodeResponsesOrphanToolResultOutput(
-								message,
-								referenceModel,
-								supportsImageDetailOriginal,
-							).outputText;
+						: encodeResponsesOrphanToolResultOutput(message, referenceModel, supportsImageDetailOriginal)
+								.outputText;
 				const resultItem =
 					message.providerMetadata?.type === "computer"
 						? {
@@ -1121,6 +1130,7 @@ export async function requestOpenAiRemoteCompaction(
 	return {
 		provider: model.provider,
 		referenceTarget: getOpenAiCompactionReferenceTarget(model, false),
+		replayTarget: getOpenAIResponsesReferenceTarget(model),
 		replacementHistory,
 		compactionItem,
 	};

@@ -474,6 +474,79 @@ describe("image url parts", () => {
 		expect(images[0].image_url?.url).toBe(`data:image/png;base64,${PNG_B64}`);
 	});
 
+	it("degrades an unverifiable image format to a text placeholder instead of failing the turn", async () => {
+		// MCP tool results and ACP attachments forward any `image/*` verbatim, so a
+		// well-formed BMP/HEIC/SVG payload must not abort the whole request.
+		const bmpImage = {
+			type: "image" as const,
+			data: Buffer.from("BM\u0000\u0000\u0000\u0000bitmap-bytes").toString("base64"),
+			mimeType: "image/bmp",
+		};
+		const anthropicModel = getBundledModel("anthropic", "claude-sonnet-4-5") as Model<"anthropic-messages">;
+		const googleModel = getBundledModel("google", "gemini-2.5-flash") as Model<"google-generative-ai">;
+		const completionsModel = {
+			...(getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">),
+			api: "openai-completions",
+		} satisfies Model<"openai-completions">;
+
+		expect(convertResponsesInputContent([bmpImage], true, true)).toEqual([
+			{ type: "input_text", text: "[unsupported image: image/bmp]" },
+		]);
+
+		const anthropicParams = convertAnthropicMessages(
+			[{ role: "user", content: [bmpImage], timestamp: 0 }],
+			anthropicModel,
+			false,
+		);
+		expect(anthropicParams[0].content).toContainEqual({ type: "text", text: "[unsupported image: image/bmp]" });
+
+		const googleContents = convertGoogleMessages(googleModel, {
+			messages: [{ role: "user", content: [bmpImage], timestamp: 0 }],
+		});
+		expect(googleContents[0].parts).toContainEqual({ text: "[unsupported image: image/bmp]" });
+
+		let completionsBody: { messages?: Array<{ content: unknown }> } | undefined;
+		const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
+			completionsBody = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+			const sse =
+				`data: ${JSON.stringify({ id: "c", object: "chat.completion.chunk", created: 0, model: completionsModel.id, choices: [{ index: 0, delta: { role: "assistant", content: "ok" } }] })}\n\n` +
+				`data: ${JSON.stringify({ id: "c", object: "chat.completion.chunk", created: 0, model: completionsModel.id, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n` +
+				"data: [DONE]\n\n";
+			return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+		}) as FetchImpl;
+		await streamOpenAICompletions(
+			completionsModel,
+			{ messages: [{ role: "user", content: [bmpImage], timestamp: 0 }] },
+			{ apiKey: "test", fetch: fetchImpl },
+		).result();
+		expect(completionsBody?.messages?.[0]?.content).toEqual([
+			{ type: "text", text: "[unsupported image: image/bmp]" },
+		]);
+	});
+
+	it("replays whitespace-wrapped base64 as canonical inline image data", () => {
+		const wrapped = {
+			type: "image" as const,
+			data: `${PNG_B64.slice(0, 20)}\n${PNG_B64.slice(20)}`,
+			mimeType: "image/png",
+		};
+		const anthropicModel = getBundledModel("anthropic", "claude-sonnet-4-5") as Model<"anthropic-messages">;
+
+		expect(convertResponsesInputContent([wrapped], true, true)).toEqual([
+			{ type: "input_image", detail: "auto", image_url: `data:image/png;base64,${PNG_B64}` },
+		]);
+
+		const anthropicParams = convertAnthropicMessages(
+			[{ role: "user", content: [wrapped], timestamp: 0 }],
+			anthropicModel,
+			false,
+		);
+		expect(anthropicParams[0].content).toContainEqual({
+			type: "image",
+			source: { type: "base64", media_type: "image/png", data: PNG_B64 },
+		});
+	});
+
 	it("rejects Base64 text mislabeled as an image across direct serializers", async () => {
 		const invalidImage = {
 			type: "image" as const,
@@ -495,11 +568,7 @@ describe("image url parts", () => {
 			"without non-empty image data or a supported reference",
 		);
 		expect(() =>
-			convertAnthropicMessages(
-				[{ role: "user", content: [invalidImage], timestamp: 0 }],
-				anthropicModel,
-				false,
-			),
+			convertAnthropicMessages([{ role: "user", content: [invalidImage], timestamp: 0 }], anthropicModel, false),
 		).toThrow("without non-empty image data or a supported reference");
 		const completionsResult = await streamOpenAICompletions(
 			completionsModel,

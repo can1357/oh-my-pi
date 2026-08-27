@@ -65,9 +65,9 @@ export type { OpenAIPromptCacheOptions } from "../types";
 export { parseAzureDeploymentNameMap } from "../utils";
 
 import {
-	getOpenAIResponsesReferenceTarget,
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
+	getOpenAIResponsesReferenceTarget,
 	normalizeResponsesToolCallId,
 	normalizeSystemPrompts,
 	resolveCacheRetention,
@@ -120,17 +120,19 @@ import type {
 } from "./openai-responses-wire";
 import { transformMessages } from "./transform-messages";
 import {
-	getUsableInlineImageMimeType,
+	getUnreplayableInlineImageMimeType,
 	hasSupportedImageSource,
 	isRemoteImageUrl,
 	isUsableInlineImage,
 	joinTextWithImagePlaceholder,
 	NON_VISION_IMAGE_PLACEHOLDER,
 	partitionVisionContent,
+	resolveUsableInlineImage,
 	supportsComputerScreenshotReferences,
 	supportsProviderFileReference,
 	supportsRemoteImageUrls,
 	UNREPLAYABLE_IMAGE_PLACEHOLDER,
+	unreplayableImageFormatPlaceholder,
 } from "./vision-guard";
 
 /**
@@ -1599,16 +1601,19 @@ export function repairOrphanResponsesToolOutputs(
 		const outputKind = responsesToolOutputKind(item.type);
 		if (!outputKind || !callId || precedingCalls.has(`${outputKind}\0${callId}`)) {
 			const itemKind = classifyResponsesBatchItem(item);
-			if (deferredFallbacks.length > 0 && itemKind !== "call" && itemKind !== "output") {
-				repaired?.push(...deferredFallbacks);
-				deferredFallbacks.length = 0;
-			}
-			if (itemKind === "call") activeBatchHasCall = true;
-			else if (itemKind === "output") activeBatchHasOutput = true;
-			else {
+			// `hoistInterleavedResponsesToolBatchMessages` treats an assistant message
+			// wedged between calls and outputs as batch-internal, so it must not close
+			// the batch here either — otherwise the fallback lands inside the run and
+			// the later hoist cannot walk back past the already-emitted outputs (#8789).
+			if (itemKind === "other") {
+				if (deferredFallbacks.length > 0) {
+					repaired?.push(...deferredFallbacks);
+					deferredFallbacks.length = 0;
+				}
 				activeBatchHasCall = false;
 				activeBatchHasOutput = false;
-			}
+			} else if (itemKind === "call") activeBatchHasCall = true;
+			else if (itemKind === "output") activeBatchHasOutput = true;
 			repaired?.push(item);
 			continue;
 		}
@@ -1701,7 +1706,7 @@ export function repairOrphanResponsesToolCalls(input: ResponseInput): ResponseIn
 type ResponsesBatchItemKind = "call" | "output" | "assistant-message" | "other";
 
 /** Classify a Responses input item for tool-call/output batch normalization. */
-function classifyResponsesBatchItem(item: object): ResponsesBatchItemKind {
+export function classifyResponsesBatchItem(item: object): ResponsesBatchItemKind {
 	const type = "type" in item ? item.type : undefined;
 	if (responsesToolCallKind(type) !== undefined) return "call";
 	if (responsesToolOutputKind(type) !== undefined) return "output";
@@ -1829,12 +1834,46 @@ function convertResponsesInputImage(
 		isRemoteImageUrl(url) &&
 		(model === undefined || supportsRemoteImageUrls(model, image));
 	if (remoteUrl) return { type: "input_image", detail, image_url: url };
-	const inlineMimeType = getUsableInlineImageMimeType(image);
-	if (inlineMimeType) {
-		return { type: "input_image", detail, image_url: `data:${inlineMimeType};base64,${image.data}` };
+	const inline = resolveUsableInlineImage(image);
+	if (inline) {
+		return { type: "input_image", detail, image_url: `data:${inline.mimeType};base64,${inline.data}` };
 	}
 	throw new AIError.ValidationError(
 		`input_image cannot be forwarded to ${model?.api ?? "openai-responses"} without non-empty image data or a supported reference`,
+	);
+}
+
+/**
+ * Image part for a message/tool-result content array. Well-formed payloads in a
+ * format this build cannot verify or serialize degrade to a text placeholder so
+ * one unreplayable attachment cannot abort the whole request.
+ */
+function convertResponsesImageContentPart(
+	image: ImageContent,
+	supportsImageDetailOriginal: boolean,
+	model?: Model,
+): ResponseInputImage | ResponseInputText {
+	const unreplayableMimeType = getUnreplayableInlineImageMimeType(image);
+	if (unreplayableMimeType && !hasSupportedResponsesImageReference(image, model)) {
+		return { type: "input_text", text: unreplayableImageFormatPlaceholder(unreplayableMimeType) };
+	}
+	return convertResponsesInputImage(image, supportsImageDetailOriginal, model);
+}
+
+/** Whether {@link convertResponsesInputImage} would prefer a reference over inline bytes. */
+function hasSupportedResponsesImageReference(image: ImageContent, model?: Model): boolean {
+	const providerFile = image.providerFile;
+	if (
+		providerFile?.provider === "openai" &&
+		typeof providerFile.id === "string" &&
+		(model === undefined || supportsProviderFileReference(model, providerFile, image))
+	) {
+		return true;
+	}
+	return (
+		typeof image.url === "string" &&
+		isRemoteImageUrl(image.url) &&
+		(model === undefined || supportsRemoteImageUrls(model, image))
 	);
 }
 
@@ -1868,7 +1907,7 @@ export function convertResponsesInputContent(
 		} satisfies ResponseInputText);
 	}
 	for (const item of imageBlocks) {
-		normalizedContent.push(convertResponsesInputImage(item, supportsImageDetailOriginal, model));
+		normalizedContent.push(convertResponsesImageContentPart(item, supportsImageDetailOriginal, model));
 	}
 	if (omittedImages) {
 		normalizedContent.push({
@@ -1905,7 +1944,7 @@ export function assertCompatibleCompactionHistory(
 	if (
 		providerPayload?.type !== "openaiResponsesHistory" ||
 		providerPayload.referenceTarget === undefined ||
-		(providerPayload.provider ?? provider) === provider && providerPayload.referenceTarget === referenceTarget
+		((providerPayload.provider ?? provider) === provider && providerPayload.referenceTarget === referenceTarget)
 	) {
 		return;
 	}
@@ -2539,7 +2578,8 @@ export function encodeResponsesToolResultOutput<TApi extends Api>(
 	const output: string | ResponseInputContent[] =
 		hasImages && supportsImages
 			? toolResult.content.map((block): ResponseInputContent => {
-					if (block.type === "image") return convertResponsesInputImage(block, supportsImageDetailOriginal, model);
+					if (block.type === "image")
+						return convertResponsesImageContentPart(block, supportsImageDetailOriginal, model);
 					const text = block.text.toWellFormed();
 					return {
 						type: "input_text",

@@ -110,7 +110,10 @@ describe("async speculative compaction", () => {
 			disconnectFromAgent: () => {},
 			reconnectToAgent: () => {},
 			drainStrandedQueuedMessages: () => {},
-			buildDisplaySessionContext: () => sessionManager.buildSessionContext(),
+			// Mirrors the real provider boundary: display/replay contexts are always
+			// built against the active model so target-bound remote compactions stay
+			// readable instead of re-expanding their originals.
+			buildDisplaySessionContext: () => sessionManager.buildSessionContext({ activeModel: model }),
 			convertToLlmForSideRequest: (messages: AgentMessage[]) => messages as never,
 			obfuscateTextForProvider: (text: string | undefined) => text,
 			obfuscatePreparationForProvider: <T>(preparation: T) => preparation,

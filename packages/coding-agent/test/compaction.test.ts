@@ -14,9 +14,11 @@ import {
 	resolveThresholdTokens,
 	shouldCompact,
 } from "@oh-my-pi/pi-agent-core/compaction/compaction";
+import { getOpenAiCompactionReferenceTarget } from "@oh-my-pi/pi-agent-core/compaction/openai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { encodeTextSignatureV1 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { AssistantMessage, Model, ProviderPayload, Usage } from "@oh-my-pi/pi-ai/types";
+import { getOpenAIResponsesReferenceTarget } from "@oh-my-pi/pi-ai/utils";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type {
@@ -649,6 +651,8 @@ describe("remote compaction setting", () => {
 		expect(result.preserveData).toEqual({
 			openaiRemoteCompaction: {
 				provider: "openai",
+				referenceTarget: getOpenAiCompactionReferenceTarget(model, false),
+				replayTarget: getOpenAIResponsesReferenceTarget(model),
 				replacementHistory: remoteOutput,
 				compactionItem: { type: "compaction", encrypted_content: "new_encrypted" },
 			},
@@ -845,6 +849,8 @@ describe("remote compaction setting", () => {
 		expect(result.preserveData).toEqual({
 			openaiRemoteCompaction: {
 				provider: "openai",
+				referenceTarget: getOpenAiCompactionReferenceTarget(model, false),
+				replayTarget: getOpenAIResponsesReferenceTarget(model),
 				replacementHistory: [
 					{ type: "message", role: "user", content: [{ type: "input_text", text: "Real preserved user" }] },
 					{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Kept assistant" }] },
@@ -1115,6 +1121,8 @@ describe("remote compaction setting", () => {
 			otherState: "keep-me",
 			openaiRemoteCompaction: {
 				provider: "openai",
+				referenceTarget: getOpenAiCompactionReferenceTarget(model, false),
+				replayTarget: getOpenAIResponsesReferenceTarget(model),
 				replacementHistory: remoteOutput,
 				compactionItem: { type: "compaction", encrypted_content: "new_encrypted" },
 			},

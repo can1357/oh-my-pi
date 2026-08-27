@@ -12,8 +12,9 @@ import {
 import {
 	buildCompactionV2Request,
 	buildOpenAiNativeHistory,
-	canReplayOpenAiCompactionHistory,
 	CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE,
+	canReplayOpenAiCompactionHistory,
+	canReuseOpenAiCompactionHistory,
 	getCompactionV2Endpoint,
 	getCompactionV2PreserveData,
 	getOpenAiCompactionReferenceTarget,
@@ -133,6 +134,25 @@ test("uses the runtime Codex target for configured compaction routes", () => {
 	expect(getOpenAiCompactionReferenceTarget(customModel, true)).toBe(customRuntimeTarget);
 });
 
+test("keeps compaction history replayable when a compaction model override is configured", async () => {
+	// The compaction request runs on `gpt-5-mini` while the turn keeps running on
+	// `gpt-5`, so the extension fingerprint and the runtime replay fingerprint
+	// differ by construction; checking replay against the compaction one would
+	// discard every fresh compaction and re-expand the originals on the next turn.
+	const model = makeOpenAiModel({ remoteCompaction: { enabled: true, model: "gpt-5-mini" } });
+	const fetchMock: FetchImpl = async () =>
+		Response.json({ output: [{ type: "compaction_summary", summary: "compact" }] });
+
+	const preserved = await requestOpenAiRemoteCompaction(model, "test-key", [], "compact", undefined, {
+		fetch: fetchMock,
+	});
+
+	expect(getOpenAiCompactionReferenceTarget(model, false)).not.toBe(getOpenAIResponsesReferenceTarget(model));
+	expect(canReplayOpenAiCompactionHistory(preserved, model)).toBe(true);
+	expect(canReuseOpenAiCompactionHistory(preserved, model, false)).toBe(true);
+	expect(canReplayOpenAiCompactionHistory(preserved, makeOpenAiModel({ id: "gpt-5.4" }))).toBe(false);
+});
+
 test("replays Azure compaction with its mapped deployment identity", () => {
 	const previousDeploymentMap = Bun.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP;
 	try {
@@ -148,7 +168,7 @@ test("replays Azure compaction with its mapped deployment identity", () => {
 
 		expect(
 			canReplayOpenAiCompactionHistory(
-				{ provider: model.provider, referenceTarget, replacementHistory: [] },
+				{ provider: model.provider, referenceTarget, replayTarget: referenceTarget, replacementHistory: [] },
 				model,
 			),
 		).toBe(true);
@@ -179,14 +199,17 @@ test("invalidates Azure compaction replay when its effective resource changes", 
 		const resourceTarget = getOpenAiCompactionReferenceTarget(model, true);
 
 		expect(resourceTarget).toBe(getOpenAIResponsesReferenceTarget(model));
-		expect(getCompactionV2Endpoint(model)).toStartWith(
-			"https://resource-a.openai.azure.com/openai/v1/responses",
-		);
+		expect(getCompactionV2Endpoint(model)).toStartWith("https://resource-a.openai.azure.com/openai/v1/responses");
 
 		Bun.env.AZURE_OPENAI_RESOURCE_NAME = "resource-b";
 		expect(
 			canReplayOpenAiCompactionHistory(
-				{ provider: model.provider, referenceTarget: resourceTarget, replacementHistory: [] },
+				{
+					provider: model.provider,
+					referenceTarget: resourceTarget,
+					replayTarget: resourceTarget,
+					replacementHistory: [],
+				},
 				model,
 			),
 		).toBe(false);
@@ -194,14 +217,17 @@ test("invalidates Azure compaction replay when its effective resource changes", 
 		Bun.env.AZURE_OPENAI_BASE_URL = "https://override-a.openai.azure.com/openai/v1/";
 		const baseUrlTarget = getOpenAiCompactionReferenceTarget(model, true);
 		expect(baseUrlTarget).toBe(getOpenAIResponsesReferenceTarget(model));
-		expect(getCompactionV2Endpoint(model)).toStartWith(
-			"https://override-a.openai.azure.com/openai/v1/responses",
-		);
+		expect(getCompactionV2Endpoint(model)).toStartWith("https://override-a.openai.azure.com/openai/v1/responses");
 
 		Bun.env.AZURE_OPENAI_BASE_URL = "https://override-b.openai.azure.com/openai/v1";
 		expect(
 			canReplayOpenAiCompactionHistory(
-				{ provider: model.provider, referenceTarget: baseUrlTarget, replacementHistory: [] },
+				{
+					provider: model.provider,
+					referenceTarget: baseUrlTarget,
+					replayTarget: baseUrlTarget,
+					replacementHistory: [],
+				},
 				model,
 			),
 		).toBe(false);
@@ -2888,7 +2914,12 @@ describe("compact() remote compaction failure handling", () => {
 							...entry.preserveData,
 							openaiRemoteCompaction: {
 								...(entry.preserveData?.openaiRemoteCompaction as Record<string, unknown>),
+								// Extension-compatible with the configured compaction target, but bound
+								// to a different runtime request target than the active model.
 								referenceTarget: getOpenAiCompactionReferenceTarget(compactionModelOverride, true),
+								replayTarget: getOpenAIResponsesReferenceTarget(
+									makeOpenAiModel({ id: "gpt-5.4", input: ["text", "image"] }),
+								),
 							},
 						},
 					}

@@ -64,7 +64,20 @@ function isBedrockModel(model: Model): boolean {
 	}
 }
 
-function decodeUsableInlineImageData(data: string): Buffer | undefined {
+// Media types `parseImageMetadata` can verify from magic bytes. A payload
+// declaring one of these must actually sniff as that format, otherwise it is
+// mislabelled and stays fail-closed.
+const VERIFIABLE_IMAGE_MIME_TYPES: ReadonlySet<string> = new Set([
+	"image/png",
+	"image/jpeg",
+	"image/gif",
+	"image/webp",
+]);
+
+// RFC 2045 `image/<subtype>` essence, already lowercased by `normalizeImageMimeType`.
+const IMAGE_MIME_ESSENCE = /^image\/[a-z0-9][a-z0-9!#$&^_.+-]*$/;
+
+function decodeCanonicalBase64(data: string): Buffer | undefined {
 	if (data.length === 0) return undefined;
 	try {
 		const bytes = Buffer.from(data, "base64");
@@ -72,6 +85,16 @@ function decodeUsableInlineImageData(data: string): Buffer | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+// Transports that line-wrap base64 (MCP servers, ACP resource attachments) still
+// carry a well-formed payload; the wire copy must use the unwrapped form.
+function normalizeBase64Payload(data: string): string {
+	return /\s/.test(data) ? data.replace(/\s+/g, "") : data;
+}
+
+function decodeUsableInlineImageData(data: string): Buffer | undefined {
+	return decodeCanonicalBase64(normalizeBase64Payload(data));
 }
 
 export function isUsableInlineImageData(data: string): boolean {
@@ -83,16 +106,52 @@ export function normalizeImageMimeType(mimeType: string): string {
 	return essence === "image/jpg" ? "image/jpeg" : essence;
 }
 
-export function getUsableInlineImageMimeType(image: Pick<ImageContent, "data" | "mimeType">): string | undefined {
-	const bytes = decodeUsableInlineImageData(image.data);
+export interface UsableInlineImage {
+	/** Sniffed media type, normalized to its MIME essence. */
+	mimeType: string;
+	/** Canonical, whitespace-free base64 payload safe to put on the wire. */
+	data: string;
+}
+
+export function resolveUsableInlineImage(
+	image: Pick<ImageContent, "data" | "mimeType">,
+): UsableInlineImage | undefined {
+	const data = normalizeBase64Payload(image.data);
+	const bytes = decodeCanonicalBase64(data);
 	if (!bytes) return undefined;
 	const detectedMimeType = parseImageMetadata(bytes)?.mimeType;
-	const declaredMimeType = normalizeImageMimeType(image.mimeType);
-	return detectedMimeType !== undefined && detectedMimeType === declaredMimeType ? detectedMimeType : undefined;
+	if (detectedMimeType === undefined) return undefined;
+	return detectedMimeType === normalizeImageMimeType(image.mimeType)
+		? { mimeType: detectedMimeType, data }
+		: undefined;
+}
+
+export function getUsableInlineImageMimeType(image: Pick<ImageContent, "data" | "mimeType">): string | undefined {
+	return resolveUsableInlineImage(image)?.mimeType;
 }
 
 export function isUsableInlineImage(image: Pick<ImageContent, "data" | "mimeType">): boolean {
-	return getUsableInlineImageMimeType(image) !== undefined;
+	return resolveUsableInlineImage(image) !== undefined;
+}
+
+/**
+ * Media type of a well-formed inline payload that declares an image format this
+ * build cannot verify or serialize (BMP, HEIC, SVG, TIFF, …). MCP tool results
+ * and ACP resource attachments forward any `image/*` verbatim, so serializers
+ * degrade these to a text placeholder instead of aborting the whole request.
+ * Mislabelled payloads (a declared PNG/JPEG/GIF/WebP whose bytes disagree) and
+ * undecodable base64 stay fail-closed and are not reported here.
+ */
+export function getUnreplayableInlineImageMimeType(image: Pick<ImageContent, "data" | "mimeType">): string | undefined {
+	if (resolveUsableInlineImage(image) !== undefined) return undefined;
+	const essence = normalizeImageMimeType(image.mimeType);
+	if (!IMAGE_MIME_ESSENCE.test(essence) || VERIFIABLE_IMAGE_MIME_TYPES.has(essence)) return undefined;
+	return decodeUsableInlineImageData(image.data) ? essence : undefined;
+}
+
+/** Text stand-in emitted for a well-formed image whose format cannot be replayed. */
+export function unreplayableImageFormatPlaceholder(mimeType: string): string {
+	return `[unsupported image: ${mimeType}]`;
 }
 
 function hasReplayableGoogleImageMimeType(image: Pick<ImageContent, "mimeType">): boolean {
@@ -190,14 +249,13 @@ export function isRemoteImageUrl(value: string): boolean {
 }
 
 interface ComputerScreenshotCandidate {
+	/** `"computer_screenshot"` discriminant carried by real refs; unused here. */
+	type?: unknown;
 	file_id?: unknown;
 	image_url?: unknown;
 }
 
-export function supportsComputerScreenshotReferences(
-	model: Model,
-	screenshot?: ComputerScreenshotCandidate,
-): boolean {
+export function supportsComputerScreenshotReferences(model: Model, screenshot?: ComputerScreenshotCandidate): boolean {
 	if (!COMPUTER_SCREENSHOT_APIS.has(model.api) || model.supportsComputerUse !== true) return false;
 	if (screenshot?.file_id !== undefined) {
 		return supportsProviderFileReference(

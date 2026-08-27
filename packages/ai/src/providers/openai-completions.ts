@@ -112,24 +112,35 @@ import {
 } from "./openai-shared";
 import { transformMessages } from "./transform-messages";
 import {
-	getUsableInlineImageMimeType,
+	getUnreplayableInlineImageMimeType,
 	isOpenAICompletionsVisionSupported,
 	isRemoteImageUrl,
 	joinTextWithImagePlaceholder,
 	NON_VISION_IMAGE_PLACEHOLDER,
+	resolveUsableInlineImage,
 	supportsRemoteImageUrls,
+	unreplayableImageFormatPlaceholder,
 } from "./vision-guard";
 
 export { applyOpenRouterRoutingVariant } from "./openai-shared";
 
 type OpenAICompletionsReasoningField = NonNullable<ResolvedOpenAICompat["reasoningContentField"]>;
 
-function resolveOpenAICompletionsImageUrl(image: ImageContent, model: Model<"openai-completions">): string {
+type OpenAICompletionsImagePart = { type: "image_url"; image_url: { url: string } } | { type: "text"; text: string };
+
+function resolveOpenAICompletionsImagePart(
+	image: ImageContent,
+	model: Model<"openai-completions">,
+): OpenAICompletionsImagePart {
 	if (typeof image.url === "string" && isRemoteImageUrl(image.url) && supportsRemoteImageUrls(model, image)) {
-		return image.url;
+		return { type: "image_url", image_url: { url: image.url } };
 	}
-	const inlineMimeType = getUsableInlineImageMimeType(image);
-	if (inlineMimeType) return `data:${inlineMimeType};base64,${image.data}`;
+	const inline = resolveUsableInlineImage(image);
+	if (inline) {
+		return { type: "image_url", image_url: { url: `data:${inline.mimeType};base64,${inline.data}` } };
+	}
+	const unreplayableMimeType = getUnreplayableInlineImageMimeType(image);
+	if (unreplayableMimeType) return { type: "text", text: unreplayableImageFormatPlaceholder(unreplayableMimeType) };
 	throw new AIError.ValidationError(
 		`input_image cannot be forwarded to ${model.api} without non-empty image data or a supported reference`,
 	);
@@ -1987,14 +1998,19 @@ export function convertMessages(
 							text,
 						} satisfies ChatCompletionContentPartText);
 					} else if (supportsImages) {
-						content.push({
-							type: "image_url",
-							image_url: {
-								url: resolveOpenAICompletionsImageUrl(item, model),
-								// Chat Completions has no "original"; omit it (provider default).
-								...(item.detail && item.detail !== "original" ? { detail: item.detail } : {}),
-							},
-						} satisfies ChatCompletionContentPartImage);
+						const part = resolveOpenAICompletionsImagePart(item, model);
+						if (part.type === "text") {
+							content.push({ type: "text", text: part.text } satisfies ChatCompletionContentPartText);
+						} else {
+							content.push({
+								type: "image_url",
+								image_url: {
+									url: part.image_url.url,
+									// Chat Completions has no "original"; omit it (provider default).
+									...(item.detail && item.detail !== "original" ? { detail: item.detail } : {}),
+								},
+							} satisfies ChatCompletionContentPartImage);
+						}
 					} else {
 						omittedImages = true;
 					}
@@ -2254,7 +2270,7 @@ export function convertMessages(
 			params.push(assistantMsg);
 		} else if (msg.role === "toolResult") {
 			// Batch consecutive tool results and collect all images
-			const imageBlocks: Array<{ type: "image_url"; image_url: { url: string } }> = [];
+			const imageBlocks: OpenAICompletionsImagePart[] = [];
 			let j = i;
 
 			for (; j < transformedMessages.length && transformedMessages[j].role === "toolResult"; j++) {
@@ -2294,12 +2310,7 @@ export function convertMessages(
 				if (hasImages && supportsImages) {
 					for (const block of toolMsg.content) {
 						if (block.type === "image") {
-							imageBlocks.push({
-								type: "image_url",
-								image_url: {
-									url: resolveOpenAICompletionsImageUrl(block, model),
-								},
-							});
+							imageBlocks.push(resolveOpenAICompletionsImagePart(block, model));
 						}
 					}
 				}
