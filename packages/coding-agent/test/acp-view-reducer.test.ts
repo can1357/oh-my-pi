@@ -1274,6 +1274,26 @@ describe("ACP tool view reducer — settlement failure reasons", () => {
 		// "\n" + 2000 chars + "…" + "\n"
 		expect(data?.length).toBe(2003);
 	});
+	it("backs an oversized cut off a surrogate pair straddling the 2000-code-unit boundary", () => {
+		// 1999 ASCII chars, then an astral emoji whose high surrogate sits at
+		// index 1999 and low surrogate at index 2000: a naive slice(0, 2000)
+		// keeps a lone high surrogate. The bound must cut on a string boundary.
+		const message = `${"x".repeat(1999)}😀${"y".repeat(100)}`;
+		const { updates } = run([
+			{ type: "started", call: bashCall() },
+			{
+				type: "settled",
+				outcome: { kind: "failed", failure: { reason: "thrown", message } },
+			},
+		]);
+		const [data] = terminalOutputs(updates);
+		if (data === undefined) throw new Error("expected a settlement reason on the terminal");
+		expect(data.isWellFormed()).toBe(true);
+		expect(data).not.toContain("😀");
+		expect(data.endsWith("…\n")).toBe(true);
+		// "\n" + 1999 kept chars (the pair's high surrogate dropped) + "…" + "\n"
+		expect(data.length).toBe(2002);
+	});
 
 	it("renders the failure reason in the plain replacement snapshot when nothing streamed", () => {
 		const settlement = run(
