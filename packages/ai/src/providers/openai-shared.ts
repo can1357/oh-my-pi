@@ -1509,6 +1509,7 @@ export function splitResponsesOrphanOutput(
 	supportsImageDetailOriginal = modelSupportsImageDetailOriginal(model),
 ): { text: string; images: ResponseInputImage[] } {
 	const images: ResponseInputImage[] = [];
+	let omittedImages = false;
 	let noteOutput = output;
 	if (Array.isArray(output)) {
 		const remaining: unknown[] = [];
@@ -1537,6 +1538,8 @@ export function splitResponsesOrphanOutput(
 					images.push(image);
 					continue;
 				}
+				omittedImages = true;
+				continue;
 			}
 			remaining.push(block);
 		}
@@ -1554,6 +1557,7 @@ export function splitResponsesOrphanOutput(
 			text = String(noteOutput);
 		}
 	}
+	if (omittedImages) text = [text, UNREPLAYABLE_IMAGE_PLACEHOLDER].filter(Boolean).join("\n");
 	return { text, images };
 }
 

@@ -58,6 +58,46 @@ describe("image url parts", () => {
 		});
 	});
 
+	it("anthropic custom endpoints fall back from provider files to inline data", () => {
+		const model = buildModel({
+			id: "custom-claude",
+			name: "Custom Claude",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: "https://gateway.example.invalid/anthropic",
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"anthropic-messages">);
+		const params = convertAnthropicMessages(
+			[
+				{
+					role: "user",
+					content: [
+						{
+							type: "image",
+							data: PNG_B64,
+							mimeType: "image/png",
+							providerFile: { provider: "anthropic", id: "file_anthropic_123" },
+						},
+					],
+					timestamp: 0,
+				},
+			],
+			model,
+			false,
+		);
+
+		const content = params[0].content as Array<{ type: string; source?: Record<string, unknown> }>;
+		expect(content.find(block => block.type === "image")?.source).toEqual({
+			type: "base64",
+			media_type: "image/png",
+			data: PNG_B64,
+		});
+	});
+
 	it("openai responses prefer its provider file over the url and base64 payload", () => {
 		const message = withProviderFile({ provider: "openai", id: "file_openai_123" });
 		if (!Array.isArray(message.content)) {

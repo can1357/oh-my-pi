@@ -209,7 +209,11 @@ describe("openai-codex request transformer", () => {
 			tools: [{ type: "function", name: "tool", description: "", parameters: {} }],
 		};
 
-		const transformed = await transformRequestBody(body, createCodexModel(body.model), {});
+		const transformed = await transformRequestBody(
+			body,
+			createCodexModel(body.model, { input: ["text", "image"] }),
+			{},
+		);
 
 		expect(transformed.store).toBe(false);
 		expect(transformed.stream).toBe(true);
@@ -236,6 +240,27 @@ describe("openai-codex request transformer", () => {
 				),
 		);
 		expect(imageFallback?.content).toEqual([{ type: "input_image", detail: "auto", image_url: imageUrl }]);
+	});
+
+	it("omits unreplayable orphan images from text-only model notes", async () => {
+		const imageUrl = `data:image/png;base64,${Buffer.alloc(4096, 97).toString("base64")}`;
+		const body: RequestBody = {
+			model: "gpt-5.1-codex",
+			input: [
+				{
+					type: "function_call_output",
+					call_id: "missing",
+					output: [{ type: "input_image", detail: "auto", image_url: imageUrl }],
+				},
+			],
+		};
+
+		const transformed = await transformRequestBody(body, createCodexModel(body.model), {});
+		const serialized = JSON.stringify(transformed.input);
+
+		expect(serialized).toContain("[image omitted: source cannot be replayed]");
+		expect(serialized).not.toContain(imageUrl);
+		expect(transformed.input?.some(item => item.type === "message" && item.role === "user")).toBe(false);
 	});
 });
 
@@ -330,7 +355,11 @@ describe("openai-codex orphan tool-call repair", () => {
 			],
 		};
 
-		const transformed = await transformRequestBody(body, createCodexModel(body.model), {});
+		const transformed = await transformRequestBody(
+			body,
+			createCodexModel(body.model, { input: ["text", "image"] }),
+			{},
+		);
 		const input = transformed.input || [];
 		expect(input.map(item => item.type)).toEqual(["message", "message", "function_call", "function_call_output"]);
 		const callIndex = input.findIndex(item => item.type === "function_call" && item.call_id === "call_a");

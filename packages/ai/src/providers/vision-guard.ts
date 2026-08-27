@@ -118,6 +118,26 @@ function isExactOfficialOpenAIEndpoint(baseUrl: string | undefined): boolean {
 	}
 }
 
+function isExactOfficialAnthropicEndpoint(baseUrl: string | undefined): boolean {
+	const value = baseUrl?.trim() ?? "";
+	if (value.length === 0) return false;
+	try {
+		const url = new URL(value);
+		return (
+			url.protocol === "https:" &&
+			url.hostname.toLowerCase() === "api.anthropic.com" &&
+			url.username.length === 0 &&
+			url.password.length === 0 &&
+			url.search.length === 0 &&
+			url.hash.length === 0 &&
+			url.port.length === 0 &&
+			(url.pathname === "" || url.pathname === "/")
+		);
+	} catch {
+		return false;
+	}
+}
+
 function isOfficialAzureOpenAIEndpoint(baseUrl: string | undefined): boolean {
 	const value = baseUrl?.trim() ?? "";
 	if (value.length === 0) return true;
@@ -216,7 +236,8 @@ export function supportsProviderFileReference(
 			typeof reference.id === "string" &&
 			reference.id.length > 0 &&
 			model.api === "anthropic-messages" &&
-			model.provider === "anthropic"
+			model.provider === "anthropic" &&
+			isExactOfficialAnthropicEndpoint(model.baseUrl)
 		);
 	}
 	return (

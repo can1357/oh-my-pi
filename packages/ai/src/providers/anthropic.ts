@@ -1866,6 +1866,7 @@ const streamAnthropicOnce = (
 			}
 			const apiKey = options?.apiKey ?? getEnvApiKey(model.provider) ?? "";
 			const baseUrl = resolveAnthropicBaseUrl(model, apiKey) ?? "https://api.anthropic.com";
+			const referenceModel = baseUrl === model.baseUrl ? model : { ...model, baseUrl };
 			const supportsEagerToolInputStreaming = resolveEagerToolInputStreamingSupport(model, baseUrl);
 			const providerSessionState = getAnthropicProviderSessionState(
 				options?.providerSessionState,
@@ -2014,9 +2015,9 @@ const streamAnthropicOnce = (
 				client = created.client;
 				isOAuthToken = created.isOAuthToken;
 			}
-			const preparedContext = await prepareAnthropicManyImageContext(context, model);
+			const preparedContext = await prepareAnthropicManyImageContext(context, referenceModel);
 			const prepareParams = async (): Promise<MessageCreateParamsStreaming> => {
-				let nextParams = buildParams(model, preparedContext, isOAuthToken, options, {
+				let nextParams = buildParams(referenceModel, preparedContext, isOAuthToken, options, {
 					disableStrictTools,
 					useUmansGatewayWebSearch: umansGatewayWebSearchHeader !== undefined,
 					forceDemoteUnsignedThinking,

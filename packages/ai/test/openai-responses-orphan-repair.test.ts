@@ -202,7 +202,7 @@ describe("repairOrphanResponsesToolOutputs", () => {
 		]);
 	});
 
-	it("does not replay a foreign provider file from an orphan output", () => {
+	it("omits a foreign provider file from an orphan output note", () => {
 		const model = getBundledModel("openai-codex", "gpt-5.5");
 		if (!model) throw new Error("expected the bundled Codex model");
 		const repaired = repairOrphanResponsesToolOutputs(
@@ -218,7 +218,8 @@ describe("repairOrphanResponsesToolOutputs", () => {
 
 		expect(repaired).toHaveLength(1);
 		expect(repaired[0]).toMatchObject({ type: "message", role: "assistant" });
-		expect(JSON.stringify(repaired[0])).toContain("file_openai_123");
+		expect(JSON.stringify(repaired[0])).toContain("[image omitted: source cannot be replayed]");
+		expect(JSON.stringify(repaired[0])).not.toContain("file_openai_123");
 		expect(repaired.some(item => item.type === "message" && item.role === "user")).toBe(false);
 	});
 
