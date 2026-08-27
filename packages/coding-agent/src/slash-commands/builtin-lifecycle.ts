@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
@@ -432,6 +433,38 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				runtime.ctx.showStatus("Nothing to retry");
 			}
 			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "continue",
+		icon: "redo",
+		description: "Continue an interrupted response (no message sent)",
+		getTuiAutocompleteDescription: runtime => {
+			const tail = runtime.ctx.session.messages[runtime.ctx.session.messages.length - 1] as
+				| AssistantMessage
+				| undefined;
+			if (tail?.role !== "assistant") return undefined;
+			return tail.stopReason === "aborted" ? "Continue: resumable interrupted turn" : "Continue: nothing to resume";
+		},
+		handle: async (_command, runtime) => {
+			if (runtime.session.isStreaming) {
+				return usage("Wait for the current response to finish or abort it before continuing.", runtime);
+			}
+			if (!runtime.session.continueInterrupted()) {
+				return usage("Nothing to continue — no interrupted turn.", runtime);
+			}
+			await runtime.output("Continuing the interrupted turn.");
+			// Same post-prompt continuation contract as /retry: the continuation is
+			// only scheduled, so ACP hosts must keep their prompt turn open across
+			// it or its output would stream into an already-unsubscribed turn.
+			await runtime.keepTurnOpenUntilIdle?.();
+			return commandConsumed({ agentInvoked: true });
+		},
+		handleTui: async (_command, runtime) => {
+			runtime.ctx.editor.setText("");
+			if (!runtime.ctx.session.continueInterrupted()) {
+				runtime.ctx.showStatus("Nothing to continue");
+			}
 		},
 	},
 	{

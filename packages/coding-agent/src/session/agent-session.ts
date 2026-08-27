@@ -7806,6 +7806,20 @@ export class AgentSession {
 		return this.#recovery.retry();
 	}
 
+	/**
+	 * Resume a user-interrupted (aborted) assistant turn without appending any
+	 * user-visible message. Returns false when there is no aborted assistant
+	 * tail to resume or the session is busy.
+	 */
+	continueInterrupted(): boolean {
+		if (this.isStreaming || this.isCompacting || this.#recovery.isRetrying) return false;
+		const messages = this.agent.state.messages;
+		const tail = messages[messages.length - 1] as AssistantMessage | undefined;
+		if (tail?.role !== "assistant" || tail.stopReason !== "aborted") return false;
+		this.#scheduleAgentContinue();
+		return true;
+	}
+
 	// =========================================================================
 	// Bash Execution
 	// =========================================================================
