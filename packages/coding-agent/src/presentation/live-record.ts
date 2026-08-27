@@ -11,6 +11,7 @@ import type {
 	ToolPresentationRecord,
 } from "@oh-my-pi/pi-agent-core/presentation";
 import { byteLengthOf, byteOffset, factId, PRESENTATION_VERSION } from "@oh-my-pi/pi-agent-core/presentation";
+import { utf8PrefixWithin } from "./utf8";
 
 /**
  * The live fold of a call's presentation events into its retained
@@ -42,12 +43,12 @@ import { byteLengthOf, byteOffset, factId, PRESENTATION_VERSION } from "@oh-my-p
  *   retains no live-terminal identity. `hydrate.ts` documents the same loss
  *   on the replay side; this is the write-side half, absent by construction
  *   rather than by omission.
- * - Nothing else. `display_output` is folded, not dropped (final-review-7
- *   P2): each one retains the byte cursor at fold time alongside the
+ * - Nothing else. `display_output` is folded, not dropped:
+ *   each one retains the byte cursor at fold time alongside the
  *   declared display, so `hydrate.ts` can place it back against the
  *   retained stream window deterministically instead of guessing — see
  *   {@link RetainedDisplay}.
- * - Retention *is* bounded here (final-review-7 P4): `fold`
+ * - Retention *is* bounded here: `fold`
  *   asserts continuity over every byte the producer declares — `cursor`
  *   always advances by a `terminal_append`/`terminal_gap`'s full length,
  *   whatever this class chooses to keep — but copies at most
@@ -72,21 +73,6 @@ import { byteLengthOf, byteOffset, factId, PRESENTATION_VERSION } from "@oh-my-p
  * `text` (and therefore persisted/replayed) is capped.
  */
 export const LIVE_RECORD_HEAD_WINDOW_BYTES = 1024 * 1024; // 1 MiB
-
-/**
- * Longest prefix of `chunk` that fits in `maxBytes` without splitting a UTF-8
- * code point. Module-local copy: the presentation-boundary layering rules out
- * importing this from session code (`streaming-output.ts`'s helper of the
- * same name — unused there since P4 moved feed retention here).
- */
-function utf8PrefixWithin(chunk: string, maxBytes: number): string {
-	if (maxBytes <= 0) return "";
-	const buf = Buffer.from(chunk, "utf8");
-	if (buf.length <= maxBytes) return chunk;
-	let end = maxBytes;
-	while (end > 0 && (buf[end] & 0xc0) === 0x80) end--;
-	return buf.subarray(0, end).toString("utf8");
-}
 
 export class LiveToolPresentationRecord {
 	#stream: AccumulatingStream | undefined;

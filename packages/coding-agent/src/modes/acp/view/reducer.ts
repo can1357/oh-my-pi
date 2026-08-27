@@ -22,6 +22,7 @@ import {
 	renderToolOutputSegments,
 	type ToolOutputSegment,
 } from "../../../presentation/projections";
+import { utf8PrefixWithin } from "../../../presentation/utf8";
 import type {
 	AcpStatusChange,
 	AcpToolDiagnostic,
@@ -175,34 +176,19 @@ export type FactSuppressionReason =
 /**
  * Head-window cap on the cumulative "process" (raw stream) text this reducer
  * retains in `segments` for the `plain`/`meta_terminal` states' eventual
- * settlement content — final-review-7 P4 change 3: `OutputSink`'s shared
- * feed is unbounded now (every `terminal_append` reaches the wire live, in
- * full — see `streaming-output.ts#appendToPresentation`), but this reducer
+ * settlement content — the shared feed `OutputSink` writes to is unbounded
+ * now (every `terminal_append` reaches the wire live, in full — see
+ * `streaming-output.ts#appendToPresentation`), but this reducer
  * still accumulates process text for later replay (a `plain` call's one
  * settlement content snapshot, a `meta_terminal` call's rare
  * attachment-transition snapshot — see `buildReplacementSnapshotContent`),
  * and an unbounded accumulation there would just relocate the memory hazard
- * P4 removes from the feed. Bytes past the window are dropped from what's
+ * removed from the feed. Bytes past the window are dropped from what's
  * retained; the live per-event frames this reducer emits (`reduceAppend`'s
  * `meta_terminal` arm) carry `event.data` directly, never `segments` — so
  * wire delivery itself stays uncapped.
  */
 export const PROCESS_TEXT_HEAD_WINDOW_BYTES = 1024 * 1024; // 1 MiB
-
-/**
- * Longest prefix of `chunk` that fits in `maxBytes` without splitting a UTF-8
- * code point. Module-local copy: the presentation-boundary layering rules out
- * importing this from session code or from `presentation/live-record.ts`'s
- * own private copy of the same helper.
- */
-function utf8PrefixWithin(chunk: string, maxBytes: number): string {
-	if (maxBytes <= 0) return "";
-	const buf = Buffer.from(chunk, "utf8");
-	if (buf.length <= maxBytes) return chunk;
-	let end = maxBytes;
-	while (end > 0 && (buf[end] & 0xc0) === 0x80) end--;
-	return buf.subarray(0, end).toString("utf8");
-}
 
 type RenderSegment = ToolOutputSegment & {
 	readonly id: number;
@@ -277,8 +263,8 @@ export type AcpToolViewState =
 			 * delivery path for bytes buffered while a `plain` call had no live
 			 * wire (`reduceAppend`'s `plain` arm emits no frame), so it must not
 			 * read the capped `segments` above — that cap exists only to bound the
-			 * settlement-snapshot replay in `buildReplacementSnapshotContent`
-			 * (final-review-7 P4), which stays capped by design and is the only
+			 * settlement-snapshot replay in `buildReplacementSnapshotContent`,
+			 * which stays capped by design and is the only
 			 * other reader of `segments`.
 			 *
 			 * Only ever populated for `call.awaitsLiveTerminal === true` calls —
@@ -1079,7 +1065,7 @@ function reduceDisplayOutput(state: AcpToolViewState, display: ToolDisplayOutput
 						{ id: state.nextSegmentId, kind: "display", display, delivery: "pending" },
 					],
 					nextSegmentId: state.nextSegmentId + 1,
-					// Display output was never subject to P4's process-text cap, so
+					// Display output was never subject to the process-text cap, so
 					// this mirrors verbatim into the uncapped `rawSegments` too — see
 					// its field doc on the `plain` state. Only worth building for a
 					// call that can actually reach `reduceLiveTerminalAttached`'s

@@ -2,7 +2,7 @@
  * Consumer-side fold of `tool_presentation` events for non-ACP display
  * consumers (the TUI's EventController and the embedded-host RpcClient).
  *
- * Scope guard (final-review-7 P8): synthesis lives ONLY inside display
+ * Scope guard: synthesis lives ONLY inside display
  * consumers. The ACP-bound subscriber consumes `tool_presentation` natively
  * and must never observe a re-synthesized update, so nothing that feeds the
  * ACP path may touch this module.
@@ -23,31 +23,16 @@ import {
 	renderToolOutputSegments,
 	type ToolOutputSegment,
 } from "../presentation/projections";
+import { utf8PrefixWithin } from "../presentation/utf8";
 
 /**
- * Explicit head-window cap on folded process text, per final-review-7 P8
- * change 2: carried here from day one so the display fold can never grow with
- * an unbounded stream (P4 removes the incidental feed-side cap separately).
- * Matches the retention budget `presentation/live-record.ts`'s
- * `LiveToolPresentationRecord` bounds its own retained head window to (P4).
+ * Explicit head-window cap on folded process text: carried here from day
+ * one so the display fold can never grow with an unbounded stream (the
+ * feed-side cap is bounded separately). Matches the retention budget
+ * `presentation/live-record.ts`'s `LiveToolPresentationRecord` bounds its
+ * own retained head window to.
  */
 export const PRESENTATION_FOLD_HEAD_WINDOW_BYTES = 1024 * 1024;
-
-/**
- * Longest prefix of `chunk` that fits in `maxBytes` without splitting a UTF-8
- * code point. Module-local copy of the same helper `presentation/live-record.ts`
- * and the ACP reducer each keep privately: the fold lives beside the display
- * consumers, and the presentation project's boundary rules out importing it
- * from session code.
- */
-function utf8PrefixWithin(chunk: string, maxBytes: number): string {
-	if (maxBytes <= 0) return "";
-	const buf = Buffer.from(chunk, "utf8");
-	if (buf.length <= maxBytes) return chunk;
-	let end = maxBytes;
-	while (end > 0 && (buf[end] & 0xc0) === 0x80) end--;
-	return buf.subarray(0, end).toString("utf8");
-}
 
 /** Per-call accumulator folding one call's `tool_presentation` deltas into cumulative snapshot text. */
 export class ToolPresentationDisplayFold {
