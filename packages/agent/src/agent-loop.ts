@@ -2394,7 +2394,7 @@ function toolModelContentOf(content: readonly (TextContent | ImageContent)[]): r
  * tool" an ownership property rather than a per-producer obligation.
  */
 function deriveToolOutcome(input: {
-	readonly result: AgentToolResult<any>;
+	readonly result: AgentToolResult<unknown>;
 	readonly isError: boolean;
 	readonly caughtError: unknown;
 	readonly completedToolExecution: boolean;
@@ -2527,7 +2527,7 @@ async function executeToolCalls(
 			 * well — delivering the same output twice.
 			 */
 			progressProtocol: "legacy_snapshot" as ToolProgressProtocolKind,
-			result: undefined as AgentToolResult<any> | undefined,
+			result: undefined as AgentToolResult<unknown> | undefined,
 			isError: false,
 			skipped: false,
 			toolResultMessage: undefined as ToolResultMessage | undefined,
@@ -2549,7 +2549,7 @@ async function executeToolCalls(
 			 * a placeholder that disagrees with the one already frozen into
 			 * `modelContent`.
 			 */
-			emittedResultOverride: undefined as AgentToolResult<any> | undefined,
+			emittedResultOverride: undefined as AgentToolResult<unknown> | undefined,
 			validationErrorMessage: prepared.validationErrorMessage,
 			blocked: prepared.blocked === true,
 			blockReason: prepared.blockReason,
@@ -2612,7 +2612,11 @@ async function executeToolCalls(
 		await checkIrcInterrupts();
 	};
 
-	const emitToolResult = (record: (typeof records)[number], result: AgentToolResult<any>, isError: boolean): void => {
+	const emitToolResult = (
+		record: (typeof records)[number],
+		result: AgentToolResult<unknown>,
+		isError: boolean,
+	): void => {
 		if (record.resultEmitted) return;
 		const { toolCall } = record;
 		if (!record.started) {
@@ -2884,7 +2888,7 @@ async function executeToolCalls(
 			pushPresentation({ type: "started", call });
 		}
 
-		let result: AgentToolResult<any> = { content: [], details: {} };
+		let result: AgentToolResult<unknown> = { content: [], details: {} };
 		let isError = false;
 		let caughtError: unknown;
 		let completedToolExecution = false;
@@ -2917,7 +2921,7 @@ async function executeToolCalls(
 		 */
 		const settlePresentation = async (
 			lifecycleError?: unknown,
-			resultOverride?: AgentToolResult<any>,
+			resultOverride?: AgentToolResult<unknown>,
 		): Promise<void> => {
 			if (activeProducer === undefined || settlementEmitted) return;
 			settlementEmitted = true;
