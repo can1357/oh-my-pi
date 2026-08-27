@@ -70,7 +70,7 @@ function makeContext(model: Model): Context {
 				toolName: "read",
 				content: [
 					{ type: "text", text: "first" },
-					{ type: "image", mimeType: "image/png", data: "AAAA" },
+					{ type: "image", mimeType: "image/png", data: PNG_B64 },
 				],
 				isError: false,
 				timestamp: 2,
@@ -81,7 +81,7 @@ function makeContext(model: Model): Context {
 				toolName: "read",
 				content: [
 					{ type: "text", text: "second" },
-					{ type: "image", mimeType: "image/png", data: "BBBB" },
+					{ type: "image", mimeType: "image/png", data: PNG_B64 },
 				],
 				isError: false,
 				timestamp: 3,
@@ -111,7 +111,7 @@ function expectOrderedToolResults(items: ResponseInput): void {
 			call_id: "call_read_36",
 			output: [
 				{ type: "input_text", text: "first" },
-				{ type: "input_image", detail: "auto", image_url: "data:image/png;base64,AAAA" },
+				{ type: "input_image", detail: "auto", image_url: `data:image/png;base64,${PNG_B64}` },
 			],
 		},
 		{
@@ -119,7 +119,7 @@ function expectOrderedToolResults(items: ResponseInput): void {
 			call_id: "call_read_37",
 			output: [
 				{ type: "input_text", text: "second" },
-				{ type: "input_image", detail: "auto", image_url: "data:image/png;base64,BBBB" },
+				{ type: "input_image", detail: "auto", image_url: `data:image/png;base64,${PNG_B64}` },
 			],
 		},
 		{ type: "function_call_output", call_id: "call_bash_38", output: "done" },

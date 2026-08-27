@@ -11,7 +11,12 @@ import type {
 	StreamOptions,
 	ToolChoice,
 } from "../types";
-import { resolveAzureOpenAIBaseUrl, resolveCacheRetention, resolveOpenAIResponsesRequestModel } from "../utils";
+import {
+	getOpenAIResponsesReferenceTarget,
+	resolveAzureOpenAIBaseUrl,
+	resolveCacheRetention,
+	resolveOpenAIResponsesRequestModel,
+} from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
 import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
@@ -126,7 +131,8 @@ const streamAzureOpenAIResponsesOnce = (
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const { url, headers, baseUrl } = buildAzureResponsesRequest(model, apiKey, options);
 			const requestModel = modelForAzureEndpoint(model, baseUrl);
-			let params = buildParams(requestModel, context, options, deploymentName);
+			const referenceTarget = getOpenAIResponsesReferenceTarget(requestModel, deploymentName, baseUrl);
+			let params = buildParams(requestModel, context, options, deploymentName, referenceTarget);
 			const replacementPayload = await options?.onPayload?.(params, requestModel);
 			if (replacementPayload !== undefined) {
 				params = replacementPayload as typeof params;
@@ -298,17 +304,22 @@ function modelForAzureEndpoint(
 	model: Model<"azure-openai-responses">,
 	baseUrl: string,
 ): Model<"azure-openai-responses"> {
-	if (model.supportsComputerUseConfig !== undefined || model.supportsComputerUse !== true) return model;
-	try {
-		const url = new URL(baseUrl);
-		if (
-			url.protocol === "https:" &&
-			(url.hostname.endsWith(".openai.azure.com") || url.hostname === "models.inference.ai.azure.com")
-		) {
-			return model;
+	let supportsComputerUse = model.supportsComputerUse;
+	if (model.supportsComputerUseConfig === undefined && model.supportsComputerUse === true) {
+		try {
+			const url = new URL(baseUrl);
+			if (
+				url.protocol !== "https:" ||
+				(!url.hostname.endsWith(".openai.azure.com") && url.hostname !== "models.inference.ai.azure.com")
+			) {
+				supportsComputerUse = false;
+			}
+		} catch {
+			supportsComputerUse = false;
 		}
-	} catch {}
-	return { ...model, supportsComputerUse: false };
+	}
+	if (model.baseUrl === baseUrl && model.supportsComputerUse === supportsComputerUse) return model;
+	return { ...model, baseUrl, supportsComputerUse };
 }
 
 /**
@@ -355,6 +366,7 @@ function buildParams(
 	context: Context,
 	options: AzureOpenAIResponsesOptions | undefined,
 	deploymentName: string,
+	referenceTarget: string,
 ) {
 	const systemRole = model.reasoning && model.compat.supportsDeveloperRole ? "developer" : "system";
 	const messages = buildResponsesInput({
@@ -367,6 +379,7 @@ function buildParams(
 		includeThinkingSignatures: true,
 		developerStringContent: true,
 		preserveAssistantMessageIds: true,
+		referenceTarget,
 	});
 
 	const params: AzureOpenAIResponsesSamplingParams = {

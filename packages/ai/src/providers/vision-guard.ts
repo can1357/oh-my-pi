@@ -188,8 +188,24 @@ export function isRemoteImageUrl(value: string): boolean {
 	}
 }
 
-export function supportsComputerScreenshotReferences(model: Model): boolean {
-	return COMPUTER_SCREENSHOT_APIS.has(model.api) && model.supportsComputerUse === true;
+interface ComputerScreenshotCandidate {
+	file_id?: unknown;
+	image_url?: unknown;
+}
+
+export function supportsComputerScreenshotReferences(
+	model: Model,
+	screenshot?: ComputerScreenshotCandidate,
+): boolean {
+	if (!COMPUTER_SCREENSHOT_APIS.has(model.api) || model.supportsComputerUse !== true) return false;
+	if (screenshot?.file_id !== undefined) {
+		return supportsProviderFileReference(
+			model,
+			{ provider: "openai", id: screenshot.file_id },
+			{ mimeType: "image/png" },
+		);
+	}
+	return true;
 }
 
 /** Whether this model can replay a remote URL for an image with this media type. */

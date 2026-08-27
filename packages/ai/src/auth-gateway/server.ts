@@ -116,14 +116,14 @@ function validateComputerScreenshotReference(
 	if (message.role !== "toolResult") return undefined;
 	const metadata = message.providerMetadata;
 	if (!isRecord(metadata) || metadata.type !== "computer") return undefined;
-	if (supportsComputerScreenshotReferences(model)) return undefined;
+	const screenshot = isRecord(metadata.screenshot) ? metadata.screenshot : undefined;
+	if (supportsComputerScreenshotReferences(model, screenshot)) return undefined;
 	if (hasSupportedSource) {
 		delete metadata.type;
 		delete metadata.screenshot;
 		return undefined;
 	}
-	if (!isRecord(metadata.screenshot)) return undefined;
-	const screenshot = metadata.screenshot;
+	if (!screenshot) return undefined;
 	const fileId = screenshot.file_id;
 	const imageUrl = screenshot.image_url;
 	const hasFileId = fileId !== undefined;

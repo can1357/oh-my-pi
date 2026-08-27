@@ -4,6 +4,7 @@ import {
 	streamAzureOpenAIResponses,
 } from "@oh-my-pi/pi-ai/providers/azure-openai-responses";
 import type { Context, FetchImpl, Model, ModelSpec, Tool } from "@oh-my-pi/pi-ai/types";
+import { getOpenAIResponsesReferenceTarget } from "@oh-my-pi/pi-ai/utils";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 const azureModel: Model<"azure-openai-responses"> = buildModel({
@@ -311,6 +312,40 @@ describe("azure openai responses streaming", () => {
 			},
 		]);
 		expect(gatewayPayload.tool_choice).toEqual({ type: "function", name: "computer" });
+	});
+
+	it("invalidates native history when Azure request target overrides change", async () => {
+		const nativeItem = { type: "message" as const, role: "user" as const, content: "native history" };
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					content: "canonical fallback",
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: azureModel.provider,
+						referenceTarget: getOpenAIResponsesReferenceTarget(azureModel),
+						items: [nativeItem],
+						dt: true,
+					},
+					timestamp: Date.now(),
+				},
+			],
+		};
+
+		const matching = await captureAzurePayload(context);
+		expect(matching.input).toEqual([nativeItem]);
+
+		for (const options of [
+			{ azureBaseUrl: "https://other.openai.azure.com/openai/v1" },
+			{ azureBaseUrl: undefined, azureResourceName: "other" },
+			{ azureDeploymentName: "other-deployment" },
+		]) {
+			const mismatched = await captureAzurePayload(context, azureModel, options);
+			expect(mismatched.input).toEqual([
+				{ role: "user", content: [{ type: "input_text", text: "canonical fallback" }] },
+			]);
+		}
 	});
 
 	it("surfaces nested response.failed provider errors", async () => {

@@ -1971,6 +1971,7 @@ export interface BuildResponsesInputOptions<TApi extends Api> {
 	requiresReasoningReplayForAllTurns?: boolean;
 	/** As {@link requiresReasoningReplayForAllTurns}, but only for turns that contain a tool call. */
 	requiresReasoningReplayForToolCalls?: boolean;
+	referenceTarget?: string;
 }
 
 /**
@@ -2112,7 +2113,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 	// user/tool text so ordinary docs, code, or grep results cannot poison the
 	// session (#6913). The persisted transcript is never touched.
 	const escapeControlTokens = isHarmonyDialectModel(options.model);
-	const referenceTarget = getOpenAIResponsesReferenceTarget(options.model);
+	const referenceTarget = options.referenceTarget ?? getOpenAIResponsesReferenceTarget(options.model);
 
 	let msgIndex = 0;
 	for (const msg of transformedMessages) {
@@ -2563,7 +2564,8 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		(block): block is ImageContent => block.type === "image" && hasSupportedImageSource(model, block),
 	);
 	const unsupportedComputerMetadata =
-		toolResult.providerMetadata?.type === "computer" && !supportsComputerScreenshotReferences(model);
+		toolResult.providerMetadata?.type === "computer" &&
+		!supportsComputerScreenshotReferences(model, toolResult.providerMetadata.screenshot);
 	if (unsupportedComputerMetadata && !hasSupportedImageSourceInResult) {
 		messages.push({
 			type: "message",

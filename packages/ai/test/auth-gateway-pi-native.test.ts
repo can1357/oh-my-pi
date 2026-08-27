@@ -704,6 +704,83 @@ describe("pi-native gateway image reference validation", () => {
 		}
 	});
 
+	it("rejects computer file IDs before dispatch to custom Responses endpoints", async () => {
+		let upstreamCalls = 0;
+		const upstream = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch() {
+				upstreamCalls++;
+				return new Response("unexpected dispatch", { status: 500 });
+			},
+		});
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-computer-file-id-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openai", "test-key");
+		const model = buildModel({
+			id: "gpt-5.4",
+			name: "Custom Responses Computer",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: `${upstream.url.origin}/v1`,
+			reasoning: false,
+			input: ["text", "image"],
+			supportsComputerUse: true,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"openai-responses">);
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => model,
+			version: "test",
+		});
+
+		try {
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: model.id,
+					context: {
+						messages: [
+							{
+								role: "toolResult",
+								toolCallId: "call_computer",
+								toolName: "computer",
+								content: [],
+								providerMetadata: {
+									type: "computer",
+									screenshot: { type: "computer_screenshot", file_id: "file_image_123" },
+								},
+								isError: false,
+								timestamp: 0,
+							},
+						],
+					},
+					stream: false,
+				}),
+			});
+
+			expect(response.status).toBe(400);
+			expect(await response.json()).toEqual({
+				error: {
+					type: "invalid_request_error",
+					message:
+						"input_image.file_id cannot be forwarded to openai-responses; target an OpenAI Responses model or use an inline data URL",
+				},
+			});
+			expect(upstreamCalls).toBe(0);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			upstream.stop(true);
+		}
+	});
+
 	it("uses inline image data after removing unsupported references", async () => {
 		const fixture = await createPiNativeImageGatewayFixture();
 		const imageData = PNG_B64;
