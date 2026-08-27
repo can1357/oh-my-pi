@@ -2647,6 +2647,15 @@ describe("compact() remote compaction failure handling", () => {
 			changedCapabilitiesModel,
 		);
 		expect(JSON.stringify(changedCapabilities?.messagesToSummarize ?? [])).toContain("ORIGINAL ALPHA port 4242");
+
+		const candidateMismatch = prepareCompaction(
+			entries,
+			{ ...baseSettings, remoteStreamingV2Enabled: true },
+			v2Model,
+			new Tokenizer(v2Model),
+			[changedRequestModel],
+		);
+		expect(JSON.stringify(candidateMismatch?.messagesToSummarize ?? [])).toContain("ORIGINAL ALPHA port 4242");
 	});
 
 	test("re-expands a stranded remote compaction when the active model cannot replay it (#6343)", () => {

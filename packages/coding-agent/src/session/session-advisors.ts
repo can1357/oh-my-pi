@@ -1535,7 +1535,7 @@ export class SessionAdvisors {
 			this.#host.sessionId(),
 			advisor.slug,
 		);
-		const preparation = prepareCompaction(pathEntries, compactionSettings, advisorModel, agent.tokenizer);
+		const preparation = prepareCompaction(pathEntries, compactionSettings, advisorModel, agent.tokenizer, candidates);
 		if (!preparation) {
 			// Cannot prepare compaction, fallback to re-prime
 			return true;

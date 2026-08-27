@@ -41,8 +41,10 @@ import type {
 	ProviderSessionState,
 } from "@oh-my-pi/pi-ai/types";
 import {
+	canonicalizeOpenAIResponsesReferenceBaseUrl,
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
+	getOpenAIResponsesReferenceTarget,
 	normalizeResponsesToolCallId,
 	stripOpenAIResponsesOutputOnlyStatusesForReplay,
 } from "@oh-my-pi/pi-ai/utils";
@@ -301,7 +303,7 @@ export function resolveOpenAiCompactionReferenceModel(model: Model, streamingV2:
 		? (model.remoteCompaction?.v2Endpoint ?? model.remoteCompaction?.streamingEndpoint)
 		: model.remoteCompaction?.endpoint;
 	const rawBaseUrl = configuredEndpoint ?? model.baseUrl;
-	const baseUrl = rawBaseUrl ? canonicalizeCompactionReferenceBaseUrl(rawBaseUrl) : rawBaseUrl;
+	const baseUrl = rawBaseUrl ? canonicalizeOpenAIResponsesReferenceBaseUrl(rawBaseUrl) : rawBaseUrl;
 	if (api === model.api && baseUrl === model.baseUrl) return model;
 	return {
 		...model,
@@ -310,41 +312,9 @@ export function resolveOpenAiCompactionReferenceModel(model: Model, streamingV2:
 	} as Model;
 }
 
-function canonicalizeCompactionReferenceBaseUrl(endpoint: string): string {
-	const value = endpoint.trim();
-	try {
-		const url = new URL(value);
-		const pathname = url.pathname.replace(/\/+$/, "");
-		for (const suffix of ["/responses/compact", "/responses"]) {
-			if (pathname.endsWith(suffix)) {
-				url.pathname = pathname.slice(0, -suffix.length) || "/";
-				url.search = "";
-				url.hash = "";
-				return url.toString().replace(/\/$/, "");
-			}
-		}
-		url.pathname = pathname || "/";
-		return url.toString().replace(/\/$/, "");
-	} catch {
-		return value;
-	}
-}
-
 export function getOpenAiCompactionReferenceTarget(model: Model, streamingV2: boolean): string {
 	const referenceModel = resolveOpenAiCompactionReferenceModel(model, streamingV2);
-	const supportsImageDetailOriginal =
-		!!referenceModel.compat &&
-		"supportsImageDetailOriginal" in referenceModel.compat &&
-		referenceModel.compat.supportsImageDetailOriginal === true;
-	return JSON.stringify({
-		api: referenceModel.api,
-		provider: referenceModel.provider,
-		baseUrl: referenceModel.baseUrl ? canonicalizeCompactionReferenceBaseUrl(referenceModel.baseUrl) : "",
-		model: resolveOpenAiCompactModel(model),
-		input: [...referenceModel.input].sort(),
-		supportsComputerUse: referenceModel.supportsComputerUse === true,
-		supportsImageDetailOriginal,
-	});
+	return getOpenAIResponsesReferenceTarget(referenceModel, resolveOpenAiCompactModel(model));
 }
 
 function replacementHistoryContainsTargetDependentImage(history: Array<Record<string, unknown>>): boolean {
@@ -606,6 +576,7 @@ export function buildOpenAiNativeHistory(
 	supportsImageDetailOriginal = false,
 ): Array<Record<string, unknown>> {
 	const referenceModel = resolveOpenAiCompactionReferenceModel(model, false);
+	const referenceTarget = getOpenAiCompactionReferenceTarget(model, false);
 	const input: Array<Record<string, unknown>> = previousReplacementHistory
 		? adaptComputerHistoryForCompaction([...previousReplacementHistory], model.supportsComputerUse === true)
 		: [];
@@ -652,13 +623,23 @@ export function buildOpenAiNativeHistory(
 		if (message.role !== "user" && message.role !== "developer" && message.role !== "assistant") continue;
 		const providerPayload = (message as { providerPayload?: AssistantMessage["providerPayload"] }).providerPayload;
 		if (message.role !== "assistant") {
-			const rawHistoryItems = getOpenAIResponsesHistoryItems(providerPayload, model.provider);
+			const rawHistoryItems = getOpenAIResponsesHistoryItems(
+				providerPayload,
+				model.provider,
+				undefined,
+				referenceTarget,
+			);
 			if (rawHistoryItems) {
 				for (const callId of snapshotIdsFromItems(rawHistoryItems)) snapshotCallIds.add(callId);
 			}
 			continue;
 		}
-		const rawHistoryItems = getOpenAIResponsesHistoryPayload(providerPayload, model.provider, message.provider);
+		const rawHistoryItems = getOpenAIResponsesHistoryPayload(
+			providerPayload,
+			model.provider,
+			message.provider,
+			referenceTarget,
+		);
 		if (!rawHistoryItems) {
 			addSnapshotContentCallIds(message);
 			continue;
@@ -680,7 +661,12 @@ export function buildOpenAiNativeHistory(
 		const message = transformedMessages[transformedIndex];
 		if (message.role === "user" || message.role === "developer") {
 			const providerPayload = (message as { providerPayload?: AssistantMessage["providerPayload"] }).providerPayload;
-			const rawHistoryItems = getOpenAIResponsesHistoryItems(providerPayload, model.provider);
+			const rawHistoryItems = getOpenAIResponsesHistoryItems(
+				providerPayload,
+				model.provider,
+				undefined,
+				referenceTarget,
+			);
 			if (rawHistoryItems) {
 				if (model.supportsComputerUse !== true) {
 					for (const item of rawHistoryItems) {
@@ -730,6 +716,7 @@ export function buildOpenAiNativeHistory(
 				assistant.providerPayload,
 				model.provider,
 				assistant.provider,
+				referenceTarget,
 			);
 			if (providerPayload) {
 				if (!providerPayload.dt) demotedComputerCallIds.clear();

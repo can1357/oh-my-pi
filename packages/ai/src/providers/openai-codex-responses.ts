@@ -46,6 +46,7 @@ import type {
 } from "../types";
 import {
 	createOpenAIResponsesHistoryPayload,
+	getOpenAIResponsesReferenceTarget,
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	normalizeSystemPrompts,
@@ -4531,13 +4532,17 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 			}
 		}
 	};
+	const referenceTarget = getOpenAIResponsesReferenceTarget(model);
 
 	for (const msg of transformedMessages) {
 		if (msg.role === "user" || msg.role === "developer") {
 			const providerPayload = (msg as { providerPayload?: AssistantMessage["providerPayload"] }).providerPayload;
-			const historyItems = getOpenAIResponsesHistoryItems(providerPayload, model.provider) as
-				| Array<ResponseInput[number]>
-				| undefined;
+			const historyItems = getOpenAIResponsesHistoryItems(
+				providerPayload,
+				model.provider,
+				undefined,
+				referenceTarget,
+			) as Array<ResponseInput[number]> | undefined;
 			if (historyItems) {
 				const redactedHistoryItems = redactSensitiveInObject(historyItems).result as Array<ResponseInput[number]>;
 				const replayItems =
@@ -4564,7 +4569,12 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 			// back to block re-encode, which strips foreign signatures.
 			const providerPayload =
 				assistantMsg.api === model.api && assistantMsg.model === model.id
-					? getOpenAIResponsesHistoryPayload(assistantMsg.providerPayload, model.provider, assistantMsg.provider)
+					? getOpenAIResponsesHistoryPayload(
+							assistantMsg.providerPayload,
+							model.provider,
+							assistantMsg.provider,
+							referenceTarget,
+						)
 					: undefined;
 			const historyItems = providerPayload?.items as Array<Record<string, unknown>> | undefined;
 			let suppressHiddenEmptyFallback = false;

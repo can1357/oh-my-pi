@@ -1,6 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { DEFAULT_COMPACTION_SETTINGS } from "@oh-my-pi/pi-agent-core/compaction";
+import type { AssistantMessage, ModelSpec } from "@oh-my-pi/pi-ai";
+import { getOpenAIResponsesReferenceTarget } from "@oh-my-pi/pi-ai/utils";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { type CompactionSummaryMessage, INTERRUPTED_THINKING_MESSAGE_TYPE } from "../../src/session/messages";
 import { buildSessionContext, type StrippedToolCallsMarker } from "../../src/session/session-context";
@@ -52,6 +55,76 @@ function compactionSummary(messages: AgentMessage[]): CompactionSummaryMessage {
 }
 
 describe("buildSessionContext snapcompact archives", () => {
+	it("re-expands target-bound native history for an incompatible runtime endpoint", () => {
+		const sourceModel = buildModel({
+			id: "gpt-5-mini",
+			name: "GPT-5 mini",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_000,
+		} satisfies ModelSpec<"openai-responses">);
+		const targetModel = buildModel({ ...sourceModel, baseUrl: "https://proxy.example/v1" });
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "before",
+				parentId: null,
+				timestamp,
+				message: { role: "user", content: "original durable context", timestamp: 1 },
+			},
+			{
+				type: "compaction",
+				id: "compact",
+				parentId: "before",
+				timestamp,
+				summary: "opaque remote summary",
+				firstKeptEntryId: "before",
+				tokensBefore: 100,
+				preserveData: {
+					openaiRemoteCompaction: {
+						provider: "openai",
+						referenceTarget: getOpenAIResponsesReferenceTarget(sourceModel),
+						replacementHistory: [
+							{
+								type: "message",
+								role: "user",
+								content: [{ type: "input_image", file_id: "file_image_source" }],
+							},
+						],
+					},
+				},
+			},
+			{
+				type: "message",
+				id: "after",
+				parentId: "compact",
+				timestamp,
+				message: { role: "user", content: "recent context", timestamp: 2 },
+			},
+		];
+
+		const context = buildSessionContext(entries, undefined, undefined, {
+			activeModel: targetModel,
+			compactionSettings: DEFAULT_COMPACTION_SETTINGS,
+		});
+		const compatibleContext = buildSessionContext(entries, undefined, undefined, {
+			activeModel: sourceModel,
+			compactionSettings: DEFAULT_COMPACTION_SETTINGS,
+		});
+
+		expect(context.messages.map(message => message.role)).toEqual(["user", "user"]);
+		expect(JSON.stringify(context.messages)).toContain("original durable context");
+		expect(JSON.stringify(context.messages)).not.toContain("file_image_source");
+		expect(compactionSummary(compatibleContext.messages).providerPayload?.referenceTarget).toBe(
+			getOpenAIResponsesReferenceTarget(sourceModel),
+		);
+	});
+
 	it("omits snapcompact archive blocks from collapsed transcript summaries", () => {
 		const context = buildSessionContext(compactedEntries, undefined, undefined, {
 			transcript: true,

@@ -7,7 +7,11 @@ import {
 import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { Context, Model, ModelSpec, ProviderSessionState, Tool } from "@oh-my-pi/pi-ai/types";
-import { createOpenAIResponsesHistoryPayload, truncateResponseItemId } from "@oh-my-pi/pi-ai/utils";
+import {
+	createOpenAIResponsesHistoryPayload,
+	getOpenAIResponsesReferenceTarget,
+	truncateResponseItemId,
+} from "@oh-my-pi/pi-ai/utils";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import * as piUtils from "@oh-my-pi/pi-utils";
@@ -374,6 +378,46 @@ function containsUserInputText(input: unknown[] | undefined, text: string): bool
 }
 
 describe("OpenAI responses history payload", () => {
+	it("falls back to portable content when replacement history targets another endpoint", () => {
+		const sourceModel = getOpenAIReasoningModel("openai", "gpt-5-mini");
+		const targetModel = buildModel({
+			...sourceModel,
+			baseUrl: "https://proxy.example/v1",
+		});
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					content: "portable compaction fallback",
+					providerPayload: createOpenAIResponsesHistoryPayload(
+						"openai",
+						[
+							{
+								type: "message",
+								role: "user",
+								content: [{ type: "input_image", file_id: "file_image_source" }],
+							},
+						],
+						false,
+						getOpenAIResponsesReferenceTarget(sourceModel),
+					),
+					timestamp: Date.now(),
+				},
+			],
+		};
+
+		const input = buildResponsesInput({
+			model: targetModel,
+			context,
+			strictResponsesPairing: false,
+			supportsImageDetailOriginal: targetModel.compat.supportsImageDetailOriginal,
+			nativeHistory: { replay: true, filterReasoning: false },
+		});
+
+		expect(JSON.stringify(input)).toContain("portable compaction fallback");
+		expect(JSON.stringify(input)).not.toContain("file_image_source");
+	});
+
 	it("appends user-message replacement history without wiping prefix or tail", () => {
 		const middleItems = [
 			{ type: "function_call", call_id: "call_middle", name: "middle_tool", arguments: "{}" },

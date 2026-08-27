@@ -79,7 +79,13 @@ export class SessionProviderBoundary {
 
 	/** Builds the current deobfuscated context for agent display and replay. */
 	buildDisplaySessionContext(): SessionContext {
-		return deobfuscateSessionContext(this.#host.sessionManager.buildSessionContext(), this.#host.obfuscator);
+		return deobfuscateSessionContext(
+			this.#host.sessionManager.buildSessionContext({
+				activeModel: this.#host.model(),
+				compactionSettings: this.#host.settings.getGroup("compaction"),
+			}),
+			this.#host.obfuscator,
+		);
 	}
 
 	/** Builds the full display-only transcript context. */

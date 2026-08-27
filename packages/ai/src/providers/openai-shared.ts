@@ -63,6 +63,7 @@ import {
 export type { OpenAIPromptCacheOptions } from "../types";
 
 import {
+	getOpenAIResponsesReferenceTarget,
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	normalizeResponsesToolCallId,
@@ -2122,13 +2123,14 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 	// user/tool text so ordinary docs, code, or grep results cannot poison the
 	// session (#6913). The persisted transcript is never touched.
 	const escapeControlTokens = isHarmonyDialectModel(options.model);
+	const referenceTarget = getOpenAIResponsesReferenceTarget(options.model);
 
 	let msgIndex = 0;
 	for (const msg of transformedMessages) {
 		if (msg.role === "user" || msg.role === "developer") {
 			const providerPayload = (msg as { providerPayload?: AssistantMessage["providerPayload"] }).providerPayload;
 			const historyItems = options.nativeHistory
-				? getOpenAIResponsesHistoryItems(providerPayload, options.model.provider)
+				? getOpenAIResponsesHistoryItems(providerPayload, options.model.provider, undefined, referenceTarget)
 				: undefined;
 			const shouldReplayPayloadItems =
 				options.nativeHistory?.replay ||
@@ -2189,6 +2191,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 							assistantMsg.providerPayload,
 							options.model.provider,
 							assistantMsg.provider,
+							referenceTarget,
 						)
 					: undefined;
 			const nativeReplayEnabled = options.nativeHistory?.replay === true;

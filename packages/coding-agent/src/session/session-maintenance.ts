@@ -808,7 +808,13 @@ export class SessionMaintenance {
 				return await this.compact(customInstructions, options, selectedMethodIndex + 1, compactionAbortController);
 			}
 			const pathEntries = this.#host.sessionManager.getBranch();
-			const preparation = prepareCompaction(pathEntries, effectiveSettings, activeModel, this.#tokenizer);
+			const preparation = prepareCompaction(
+				pathEntries,
+				effectiveSettings,
+				activeModel,
+				this.#tokenizer,
+				compactionCandidates,
+			);
 			if (!preparation) {
 				// Check why we can't compact
 				const lastEntry = pathEntries[pathEntries.length - 1];
@@ -1308,7 +1314,18 @@ export class SessionMaintenance {
 		const branch = this.#host.sessionManager.getBranch();
 		const snapshotLeafId = branch[branch.length - 1]?.id;
 		if (!snapshotLeafId) return clear();
-		const preparation = prepareCompaction(branch, effectiveSettings, model, this.#tokenizer);
+		const candidates =
+			method === "handoff"
+				? []
+				: this.#getCompactionModelCandidates(
+						this.#host.modelRegistry.getAvailable(),
+						method === "remote" && !effectiveSettings.remoteEndpoint
+							? candidate =>
+									candidate.provider === model.provider &&
+									shouldUseProviderNativeCompaction(candidate, effectiveSettings)
+							: undefined,
+					);
+		const preparation = prepareCompaction(branch, effectiveSettings, model, this.#tokenizer, candidates);
 		if (!preparation) return clear();
 		const signal = run.controller.signal;
 		let armed: ArmedSpeculation;
@@ -1337,14 +1354,6 @@ export class SessionMaintenance {
 			// No hookCompaction is passed above, so "fromHook" is unreachable;
 			// the guard just narrows the union.
 			if (compactionPrep.kind === "fromHook") return clear();
-			const candidates = this.#getCompactionModelCandidates(
-				this.#host.modelRegistry.getAvailable(),
-				method === "remote" && !effectiveSettings.remoteEndpoint
-					? candidate =>
-							candidate.provider === model.provider &&
-							shouldUseProviderNativeCompaction(candidate, effectiveSettings)
-					: undefined,
-			);
 			if (candidates.length === 0) return clear();
 			const codexCompaction = createCodexCompactionContext({
 				trigger: "auto",
@@ -3027,9 +3036,23 @@ export class SessionMaintenance {
 			}
 
 			const pathEntries = this.#host.sessionManager.getBranch();
+			const compactionCandidates = this.#getCompactionModelCandidates(
+				availableModels,
+				method === "remote" && !effectiveSettings.remoteEndpoint
+					? candidate =>
+							candidate.provider === this.#model?.provider &&
+							shouldUseProviderNativeCompaction(candidate, effectiveSettings)
+					: undefined,
+			);
 
 			let pathEntriesForCompaction = pathEntries;
-			let preparation = prepareCompaction(pathEntriesForCompaction, effectiveSettings, this.#model, this.#tokenizer);
+			let preparation = prepareCompaction(
+				pathEntriesForCompaction,
+				effectiveSettings,
+				this.#model,
+				this.#tokenizer,
+				compactionCandidates,
+			);
 			if (!preparation) {
 				// prepareCompaction found nothing to summarize because the kept region
 				// is a single oversized recent turn — findCutPoint never cuts inside a
@@ -3084,6 +3107,7 @@ export class SessionMaintenance {
 									effectiveSettings,
 									this.#model,
 									this.#tokenizer,
+									compactionCandidates,
 								);
 								return preparation !== undefined;
 							},
@@ -3378,14 +3402,7 @@ export class SessionMaintenance {
 				details = snapcompactResult.details;
 				preserveData = { ...(compactionPrep.preserveData ?? {}), ...(snapcompactResult.preserveData ?? {}) };
 			} else {
-				const candidates = this.#getCompactionModelCandidates(
-					availableModels,
-					method === "remote" && !effectiveSettings.remoteEndpoint
-						? candidate =>
-								candidate.provider === this.#model?.provider &&
-								shouldUseProviderNativeCompaction(candidate, effectiveSettings)
-						: undefined,
-				);
+				const candidates = compactionCandidates;
 				const retrySettings = this.#host.settings.getGroup("retry");
 				const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
 				let compactResult: CompactionResult | undefined;

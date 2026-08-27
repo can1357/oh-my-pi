@@ -78,6 +78,7 @@ import type {
 import { type Effort, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { getOpenAIResponsesReferenceTarget } from "@oh-my-pi/pi-ai/utils";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -7584,6 +7585,16 @@ export class AgentSession {
 			}
 		}
 		this.agent.setModel(model);
+		const referenceTarget = getOpenAIResponsesReferenceTarget(model);
+		const hasIncompatibleCompaction = this.agent.state.messages.some(
+			message =>
+				message.role === "compactionSummary" &&
+				message.providerPayload?.referenceTarget !== undefined &&
+				message.providerPayload.referenceTarget !== referenceTarget,
+		);
+		if (hasIncompatibleCompaction) {
+			this.agent.replaceMessages(this.buildDisplaySessionContext().messages);
+		}
 		// Model mutations driven through ModelControls (explicit /model, prewalk
 		// hand-offs, retry-fallback, model cycling) funnel through this method,
 		// so this is the single point that notifies subscribers (ACP config

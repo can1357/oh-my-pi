@@ -1,7 +1,7 @@
 import { $env } from "@oh-my-pi/pi-utils";
 import type { ResponseInput, ResponseInputItem } from "./providers/openai-responses-wire";
 import { redactSensitiveCredentials } from "./providers/transform-messages";
-import type { CacheRetention, OpenAIResponsesHistoryPayload, ProviderPayload } from "./types";
+import type { CacheRetention, Model, OpenAIResponsesHistoryPayload, ProviderPayload } from "./types";
 
 type OpenAIResponsesReplayItem = ResponseInput[number];
 const NON_WHITESPACE_RE = /\S/;
@@ -446,25 +446,70 @@ export function createOpenAIResponsesHistoryPayload(
 	provider: string,
 	items: Array<Record<string, unknown>>,
 	incremental = true,
+	referenceTarget?: string,
 ): OpenAIResponsesHistoryPayload {
 	return {
 		type: "openaiResponsesHistory",
 		provider,
+		...(referenceTarget ? { referenceTarget } : {}),
 		...(incremental ? { dt: true } : {}),
 		items,
 	};
+}
+
+export function canonicalizeOpenAIResponsesReferenceBaseUrl(endpoint: string): string {
+	const value = endpoint.trim();
+	try {
+		const url = new URL(value);
+		const pathname = url.pathname.replace(/\/+$/, "");
+		for (const suffix of ["/responses/compact", "/responses"]) {
+			if (pathname.endsWith(suffix)) {
+				url.pathname = pathname.slice(0, -suffix.length) || "/";
+				url.search = "";
+				url.hash = "";
+				return url.toString().replace(/\/$/, "");
+			}
+		}
+		url.pathname = pathname || "/";
+		return url.toString().replace(/\/$/, "");
+	} catch {
+		return value;
+	}
+}
+
+export function getOpenAIResponsesReferenceTarget(
+	model: Model,
+	requestModel = model.requestModelId ?? model.id,
+): string {
+	const supportsImageDetailOriginal =
+		!!model.compat &&
+		"supportsImageDetailOriginal" in model.compat &&
+		model.compat.supportsImageDetailOriginal === true;
+	return JSON.stringify({
+		api: model.api,
+		provider: model.provider,
+		baseUrl: model.baseUrl ? canonicalizeOpenAIResponsesReferenceBaseUrl(model.baseUrl) : "",
+		model: requestModel,
+		input: [...model.input].sort(),
+		supportsComputerUse: model.supportsComputerUse === true,
+		supportsImageDetailOriginal,
+	});
 }
 
 export function getOpenAIResponsesHistoryPayload(
 	providerPayload: ProviderPayload | undefined,
 	currentProvider: string,
 	fallbackProvider?: string,
+	currentReferenceTarget?: string,
 ): OpenAIResponsesHistoryPayload | undefined {
 	if (providerPayload?.type !== "openaiResponsesHistory" || !Array.isArray(providerPayload.items)) {
 		return undefined;
 	}
 	const payloadProvider = providerPayload.provider ?? fallbackProvider ?? currentProvider;
 	if (payloadProvider !== currentProvider) return undefined;
+	if (providerPayload.referenceTarget !== undefined && providerPayload.referenceTarget !== currentReferenceTarget) {
+		return undefined;
+	}
 	return { ...providerPayload, provider: payloadProvider };
 }
 
@@ -472,8 +517,10 @@ export function getOpenAIResponsesHistoryItems(
 	providerPayload: ProviderPayload | undefined,
 	currentProvider: string,
 	fallbackProvider?: string,
+	currentReferenceTarget?: string,
 ): Array<Record<string, unknown>> | undefined {
-	return getOpenAIResponsesHistoryPayload(providerPayload, currentProvider, fallbackProvider)?.items;
+	return getOpenAIResponsesHistoryPayload(providerPayload, currentProvider, fallbackProvider, currentReferenceTarget)
+		?.items;
 }
 
 /**

@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { coerceServiceTierByFamily, type ProviderPayload, type ServiceTierByFamily } from "@oh-my-pi/pi-ai";
+import { remotePreserveReusable, type CompactionSettings } from "@oh-my-pi/pi-agent-core/compaction";
+import { coerceServiceTierByFamily, type Model, type ProviderPayload, type ServiceTierByFamily } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import {
 	createBranchSummaryMessage,
@@ -112,6 +113,8 @@ export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEnt
 }
 
 export interface BuildSessionContextOptions {
+	activeModel?: Model;
+	compactionSettings?: CompactionSettings;
 	/**
 	 * Build the display transcript instead of the LLM context. By default this
 	 * preserves every path entry with compactions inline; set
@@ -161,12 +164,13 @@ export function getOpenAiRemoteCompactionPayload(
 ): ProviderPayload | undefined {
 	const candidate = compaction?.preserveData?.openaiRemoteCompaction;
 	if (!candidate || typeof candidate !== "object") return undefined;
-	const remote = candidate as { provider?: unknown; replacementHistory?: unknown };
+	const remote = candidate as { provider?: unknown; referenceTarget?: unknown; replacementHistory?: unknown };
 	if (typeof remote.provider !== "string" || remote.provider.length === 0) return undefined;
 	if (!Array.isArray(remote.replacementHistory)) return undefined;
 	return {
 		type: "openaiResponsesHistory",
 		provider: remote.provider,
+		...(typeof remote.referenceTarget === "string" ? { referenceTarget: remote.referenceTarget } : {}),
 		items: remote.replacementHistory as Array<Record<string, unknown>>,
 	};
 }
@@ -272,7 +276,11 @@ export function buildSessionContext(
 				models.default = `${entry.message.provider}/${entry.message.model}`;
 			}
 		} else if (entry.type === "compaction") {
-			compaction = entry;
+			const canReplay =
+				!options?.activeModel ||
+				!options.compactionSettings ||
+				remotePreserveReusable(entry.preserveData, options.activeModel, options.compactionSettings);
+			if (canReplay) compaction = entry;
 		} else if (entry.type === "ttsr_injection") {
 			// Collect injected TTSR rule names
 			for (const ruleName of entry.injectedRules) {

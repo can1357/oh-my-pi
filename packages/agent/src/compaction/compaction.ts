@@ -1271,26 +1271,26 @@ export interface CompactionPreparation {
  * opaque placeholder summary survives, so the caller must re-expand the originals
  * into a portable local summary rather than strand that history.
  *
- * Judged against the ACTIVE model, not the compaction candidate set: a role
- * model (e.g. `modelRoles.smol`) that still maps to the blob's provider does not
- * let the active model replay it, so keying reuse on "any candidate shares the
- * provider" left a provider-switched session permanently context-less (#6343).
  */
 export function remotePreserveReusable(
 	preserveData: Record<string, unknown> | undefined,
 	activeModel: Model,
 	settings: CompactionSettings,
+	compactionModels: readonly Model[] = [],
 ): boolean {
 	const v2Preserve = getCompactionV2PreserveData(preserveData);
 	const v1Preserve = getPreservedOpenAiRemoteCompactionData(preserveData);
 	if (!v2Preserve && !v1Preserve) return true;
 	if (settings.remoteEnabled === false) return false;
-	if (settings.remoteStreamingV2Enabled !== false && shouldUseCompactionV2Streaming(activeModel)) {
-		return !!v2Preserve && canReuseOpenAiCompactionHistory(v2Preserve, activeModel, true);
-	}
-	if (!shouldUseOpenAiRemoteCompaction(activeModel)) return false;
-	const v1Candidate = v1Preserve ?? v2Preserve;
-	return !!v1Candidate && canReuseOpenAiCompactionHistory(v1Candidate, activeModel, false);
+	const reusableByModel = (model: Model): boolean => {
+		if (settings.remoteStreamingV2Enabled !== false && shouldUseCompactionV2Streaming(model)) {
+			return !!v2Preserve && canReuseOpenAiCompactionHistory(v2Preserve, model, true);
+		}
+		if (!shouldUseOpenAiRemoteCompaction(model)) return false;
+		const v1Candidate = v1Preserve ?? v2Preserve;
+		return !!v1Candidate && canReuseOpenAiCompactionHistory(v1Candidate, model, false);
+	};
+	return reusableByModel(activeModel) && compactionModels.every(reusableByModel);
 }
 
 /**
@@ -1309,11 +1309,12 @@ export function findReadableCompactionIndex(
 	pathEntries: SessionEntry[],
 	settings: CompactionSettings,
 	activeModel?: Model,
+	compactionModels?: readonly Model[],
 ): number {
 	for (let i = pathEntries.length - 1; i >= 0; i--) {
 		if (pathEntries[i].type !== "compaction") continue;
 		const entry = pathEntries[i] as CompactionEntry;
-		if (activeModel && !remotePreserveReusable(entry.preserveData, activeModel, settings)) continue;
+		if (activeModel && !remotePreserveReusable(entry.preserveData, activeModel, settings, compactionModels)) continue;
 		return i;
 	}
 	return -1;
@@ -1329,12 +1330,13 @@ export function prepareCompaction(
 	settings: CompactionSettings,
 	activeModel?: Model,
 	tokenizer: Tokenizer = new Tokenizer(activeModel),
+	compactionModels?: readonly Model[],
 ): CompactionPreparation | undefined {
 	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
 		return undefined;
 	}
 
-	let prevCompactionIndex = findReadableCompactionIndex(pathEntries, settings, activeModel);
+	let prevCompactionIndex = findReadableCompactionIndex(pathEntries, settings, activeModel, compactionModels);
 
 	// Honor the latest `/clear` reset boundary. `/clear` records a
 	// `reset_boundary` marker and reports the model context empty, so compaction
