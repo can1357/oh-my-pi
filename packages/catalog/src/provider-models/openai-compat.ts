@@ -880,11 +880,16 @@ const EUROPEAN_GATEWAY_NON_CHAT_ID_SUBSTRINGS = [
 	"veo",
 ] as const;
 
-function hasOnlyNonTextOutput(entry: OpenAICompatibleModelRecord): boolean {
+function getGatewayOutputModalities(entry: OpenAICompatibleModelRecord): string[] {
 	const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
-	const outputModalities = toStringArray(architecture?.output_modalities ?? entry.output_modalities).map(modality =>
+	return toStringArray(architecture?.output_modalities ?? entry.output_modalities).map(modality =>
 		modality.trim().toLowerCase(),
 	);
+}
+
+function hasOnlyNonTextOutput(entry: OpenAICompatibleModelRecord): boolean {
+	const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+	const outputModalities = getGatewayOutputModalities(entry);
 	return (
 		(outputModalities.length > 0 && !outputModalities.includes("text")) ||
 		hasGatewayOnlyNonTextOutputModality(architecture?.modality ?? entry.modality)
@@ -919,7 +924,7 @@ function isLikelyEuropeanGatewayChatModel(entry: OpenAICompatibleModelRecord, mo
 	}
 	const normalized = `${model.id} ${model.name}`.trim().toLowerCase();
 	return (
-		!EUROPEAN_GATEWAY_NON_CHAT_ID_PATTERN.test(normalized) &&
+		(getGatewayOutputModalities(entry).includes("text") || !EUROPEAN_GATEWAY_NON_CHAT_ID_PATTERN.test(normalized)) &&
 		!EUROPEAN_GATEWAY_NON_CHAT_ID_SUBSTRINGS.some(token => normalized.includes(token))
 	);
 }
@@ -977,18 +982,22 @@ function mapEuropeanGatewayModel(
 		cost: {
 			input:
 				toGatewayCostPerMillion(pricing?.prompt ?? pricing?.input_token) ??
+				reference?.cost.input ??
 				knownReference?.cost.input ??
 				model.cost.input,
 			output:
 				toGatewayCostPerMillion(pricing?.completion ?? pricing?.output_token) ??
+				reference?.cost.output ??
 				knownReference?.cost.output ??
 				model.cost.output,
 			cacheRead:
 				toGatewayCostPerMillion(pricing?.input_cache_read ?? pricing?.cache_read_cost) ??
+				reference?.cost.cacheRead ??
 				knownReference?.cost.cacheRead ??
 				model.cost.cacheRead,
 			cacheWrite:
 				toGatewayCostPerMillion(pricing?.input_cache_write ?? pricing?.cache_write_cost) ??
+				reference?.cost.cacheWrite ??
 				knownReference?.cost.cacheWrite ??
 				model.cost.cacheWrite,
 		},

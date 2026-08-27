@@ -426,6 +426,30 @@ describe("European gateway provider catalog support", () => {
 		});
 	});
 
+	test("preserves provider-local pricing for sparse gateway default refreshes", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			return Response.json({
+				data: [{ id: "Qwen/Qwen3-235B-A22B-Instruct-2507", name: "Qwen3 235B A22B Instruct 2507" }],
+			});
+		});
+
+		const models = await nebiusModelManagerOptions({
+			apiKey: "nebius-test-key",
+			fetch: fetchMock,
+		}).fetchDynamicModels?.();
+
+		expect(models?.[0]).toMatchObject({
+			id: "Qwen/Qwen3-235B-A22B-Instruct-2507",
+			provider: "nebius",
+			cost: {
+				input: 0.2,
+				output: 0.6,
+				cacheRead: 0,
+				cacheWrite: 0,
+			},
+		});
+	});
+
 	test("preserves known reasoning capability for reordered Claude gateway ids", async () => {
 		const fetchMock: FetchImpl = vi.fn(async () => {
 			return new Response(
@@ -632,6 +656,30 @@ describe("European gateway provider catalog support", () => {
 		const models = await eurouterModelManagerOptions({ fetch: fetchMock }).fetchDynamicModels?.();
 
 		expect(models?.map(model => model.id)).toEqual(["custom-chat-model"]);
+	});
+
+	test("keeps image-named gateway models with explicit text output", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			return Response.json({
+				data: [
+					{
+						id: "image-understanding-chat",
+						name: "Image Understanding Chat",
+						architecture: {
+							input_modalities: ["text", "image"],
+							output_modalities: ["text"],
+						},
+					},
+				],
+			});
+		});
+
+		const models = await eurouterModelManagerOptions({ fetch: fetchMock }).fetchDynamicModels?.();
+
+		expect(models?.[0]).toMatchObject({
+			id: "image-understanding-chat",
+			input: ["text", "image"],
+		});
 	});
 
 	test("filters modality-only image generation rows from European gateway discovery", async () => {
