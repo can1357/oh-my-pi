@@ -2566,6 +2566,7 @@ where
 									{
 										tracing::warn!(%error, "collaboration stream projection failed");
 									}
+									let live_model = agent_state.snapshot().turn.params.model.clone();
 									handle_agent_event(
 										&backend_tx,
 										&mut state,
@@ -2574,6 +2575,7 @@ where
 										renderers.as_ref(),
 										&bus,
 										0,
+										live_model.as_str(),
 									);
 								}
 							},
@@ -8019,6 +8021,7 @@ fn handle_agent_event(
 	renderers: &RenderRegistry,
 	bus: &omp_agent::EventBus,
 	dropped: u64,
+	live_model: &str,
 ) {
 	match event {
 		AgentEvent::Turn { turn_id, event } => match &event.event {
@@ -8403,8 +8406,8 @@ fn handle_agent_event(
 				let _ = modes.settle_plan_transition();
 			}
 		},
-		AgentEvent::Snapshot(snapshot) => {
-			refresh_snapshot_model(backend, state, snapshot);
+		AgentEvent::Snapshot(_) => {
+			refresh_snapshot_model(backend, state, live_model);
 		},
 		AgentEvent::ToolObserved { .. }
 		| AgentEvent::PlanStateChanged { .. }
@@ -8417,12 +8420,12 @@ fn handle_agent_event(
 fn refresh_snapshot_model(
 	backend: &flume::Sender<BackendEvent>,
 	state: &mut BridgeState,
-	snapshot: &omp_agent::AgentSnapshot,
+	live_model: &str,
 ) {
-	if snapshot.turn.params.model == state.model {
+	if live_model == state.model {
 		return;
 	}
-	state.model.clone_from(&snapshot.turn.params.model);
+	state.model = live_model.to_owned();
 	state.edit_model.set(Str::new(&state.model));
 	state.context_window = resolve_model(state.catalog.as_ref(), &state.model)
 		.and_then(|spec| spec.limits.context_window);
@@ -10111,6 +10114,7 @@ mod tests {
 			&renderers,
 			&bus,
 			0,
+			"plan/model",
 		);
 		assert_eq!(state.model, "plan/model");
 		assert_eq!(state.edit_model.current().as_str(), "plan/model");
@@ -10130,6 +10134,7 @@ mod tests {
 			&renderers,
 			&bus,
 			0,
+			"plan/model",
 		);
 		let second: Vec<_> = rx.drain().collect();
 		assert!(
@@ -10137,6 +10142,37 @@ mod tests {
 				.iter()
 				.any(|event| matches!(event, BackendEvent::ModelsUpdated { .. })),
 			"an unchanged snapshot model must not emit duplicate model notifications"
+		);
+	}
+
+	#[test]
+	fn stale_snapshot_cannot_overwrite_a_newer_manual_model() {
+		let scratch = tempfile::tempdir().expect("scratch directory");
+		let (tx, rx) = flume::unbounded();
+		let mut state = test_bridge_state(scratch.path());
+		state.model = "manual/model".to_owned();
+		state.edit_model.set(Str::new("manual/model"));
+		let modes = RegimeHandle::new();
+		let renderers = RenderRegistry::new();
+		let bus = omp_agent::EventBus::new();
+		let mut snapshot = omp_agent::AgentSnapshot::default();
+		snapshot.turn.params.model = "queued/model".to_owned();
+		handle_agent_event(
+			&tx,
+			&mut state,
+			&AgentEvent::Snapshot(Arc::new(snapshot)),
+			&modes,
+			&renderers,
+			&bus,
+			0,
+			"manual/model",
+		);
+		assert_eq!(state.model, "manual/model");
+		assert_eq!(state.edit_model.current().as_str(), "manual/model");
+		assert!(
+			!rx.drain()
+				.any(|event| matches!(event, BackendEvent::ModelsUpdated { .. })),
+			"a queued snapshot older than a manual switch must not refresh UI model metadata"
 		);
 	}
 
@@ -10158,6 +10194,7 @@ mod tests {
 			Event::PartDelta(v1::PartDelta { index: 0, chunk: Bytes::from_static(b"banana") }),
 			Event::PartEnd(v1::PartEnd { index: 0, signature: Bytes::new() }),
 		] {
+			let live_model = state.model.clone();
 			handle_agent_event(
 				&tx,
 				&mut state,
@@ -10169,6 +10206,7 @@ mod tests {
 				&renderers,
 				&bus,
 				0,
+				&live_model,
 			);
 		}
 		send_backend(&tx, BackendEvent::Error(sf!("Compaction failed: unauthorized")));
@@ -10229,6 +10267,7 @@ mod tests {
 				chunk: Bytes::from_static(br#"{"command":"cd /w"#),
 			}),
 		] {
+			let live_model = state.model.clone();
 			handle_agent_event(
 				&tx,
 				&mut state,
@@ -10240,9 +10279,11 @@ mod tests {
 				&renderers,
 				&bus,
 				0,
+				&live_model,
 			);
 		}
 		assert!(state.tools.get("toolu_1").is_some_and(|tool| tool.started));
+		let live_model = state.model.clone();
 		handle_agent_event(
 			&tx,
 			&mut state,
@@ -10254,6 +10295,7 @@ mod tests {
 			&renderers,
 			&bus,
 			0,
+			&live_model,
 		);
 		assert!(state.active_parts.is_empty());
 		assert!(state.streaming_tools.is_empty());
