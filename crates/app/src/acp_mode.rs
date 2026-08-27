@@ -1301,6 +1301,20 @@ impl Runtime {
 		self.open_session(None, Some(source), &inherited).await
 	}
 
+	fn apply_acp_session_open(
+		launch_policy: &mut HeadlessLaunchPolicy,
+		resume: Option<Str>,
+		fork: Option<Str>,
+	) {
+		let Some(session) = fork
+			.map(HeadlessSessionOpen::Fork)
+			.or_else(|| resume.map(HeadlessSessionOpen::Resume))
+		else {
+			return;
+		};
+		launch_policy.session = session;
+	}
+
 	async fn open_session(
 		self: &Arc<Self>,
 		resume: Option<Str>,
@@ -1335,6 +1349,7 @@ impl Runtime {
 				generation,
 			)
 		};
+		Self::apply_acp_session_open(&mut launch_policy, resume, fork);
 		let root = canonical_session_root(required_text(params, "cwd")?)?;
 		let home = env::var_os("HOME").map_or_else(|| root.clone(), PathBuf::from);
 		let mut paths = SettingsPaths::discover(&data_dir, Some(&root));
@@ -1388,37 +1403,33 @@ impl Runtime {
 			.get("thinking")
 			.and_then(Value::as_str)
 			.unwrap_or(&default_thinking);
-		launch_policy.session = if let Some(source) = fork {
-			HeadlessSessionOpen::Fork(source)
-		} else if let Some(source) = resume {
-			HeadlessSessionOpen::Resume(source)
-		} else {
-			launch_policy.session
+		let options = HeadlessSessionOptions {
+			project: root.clone(),
+			settings_overlays,
+			additional_roots,
+			model: Str::from(model),
+			initial_regime: (mode == "plan").then_some("plan"),
+			initial_prompt_slot: None,
+			plan_handoff: None,
+			resume: None,
+			fork: None,
+			py_eval: false,
+			approval_mode: None,
+			pty_denied: false,
+			credential_provider: None,
+			api_key: None,
+			prompt_cache_affinity: None,
+			session_generation: generation,
 		};
-		let mut headless = HeadlessSession::open_with_policy(
-			data_dir,
-			HeadlessSessionOptions {
-				project: root.clone(),
-				settings_overlays,
-				additional_roots,
-				model: Str::from(model),
-				initial_regime: (mode == "plan").then_some("plan"),
-				initial_prompt_slot: None,
-				plan_handoff: None,
-				resume: None,
-				fork: None,
-				py_eval: false,
-				approval_mode: None,
-				pty_denied: false,
-				credential_provider: None,
-				api_key: None,
-				prompt_cache_affinity: None,
-				session_generation: generation,
-			},
-			launch_policy,
-		)
-		.await
-		.into_diagnostic()?;
+		let effective_model =
+			HeadlessSession::preview_effective_model(&data_dir, &options, &launch_policy)
+				.into_diagnostic()?
+				.as_str()
+				.to_owned();
+		validate_thinking_for_model(&effective_model, requested)?;
+		let mut headless = HeadlessSession::open_with_policy(data_dir, options, launch_policy)
+			.await
+			.into_diagnostic()?;
 		for notice in headless.take_notices() {
 			eprintln!("{notice}");
 		}
@@ -3313,10 +3324,25 @@ fn config_options(session: &AcpSessionMeta, models: &[String]) -> Vec<Value> {
 	]
 }
 
+fn validate_thinking_for_model(model: &str, requested: &str) -> miette::Result<()> {
+	if matches!(requested, "auto" | "none") {
+		// Auto and none are syntactically valid and will be clamped against the
+		// effective model after the session opens.
+		return Ok(());
+	}
+	let _ = resolve_thinking_effort(model, requested)?;
+	Ok(())
+}
+
 fn clamp_thinking_level(model: &str, requested: &str) -> miette::Result<&'static str> {
 	if matches!(requested, "auto" | "none") {
 		return Ok(if requested == "none" { "none" } else { "auto" });
 	}
+	let effort = resolve_thinking_effort(model, requested)?;
+	Ok(<&'static str>::from(effort))
+}
+
+fn resolve_thinking_effort(model: &str, requested: &str) -> miette::Result<ThinkingEffort> {
 	let requested = requested
 		.parse::<ThinkingEffort>()
 		.map_err(|_| miette!("unknown thinking level `{requested}`"))?;
@@ -3329,9 +3355,8 @@ fn clamp_thinking_level(model: &str, requested: &str) -> miette::Result<&'static
 		.as_ref()
 		.and_then(|id| catalog.thinking_policy(id))
 		.ok_or_else(|| miette!("model `{}` does not support thinking", model.key))?;
-	let effective = clamp_thinking_effort(policy, Some(requested), None)
-		.ok_or_else(|| miette!("model `{}` has no compatible thinking level", model.key))?;
-	Ok(<&'static str>::from(effective))
+	clamp_thinking_effort(policy, Some(requested), None)
+		.ok_or_else(|| miette!("model `{}` has no compatible thinking level", model.key))
 }
 
 fn ask_elicitation_params(session_id: &str, questions: &[omp_tools::ask::Question]) -> Value {
@@ -3651,6 +3676,22 @@ mod tests {
 	use super::*;
 
 	#[test]
+	fn explicit_acp_session_open_overrides_only_the_default() {
+		let mut policy = HeadlessLaunchPolicy::default();
+		Runtime::apply_acp_session_open(&mut policy, None, None);
+		assert_eq!(policy.session, HeadlessSessionOpen::New);
+
+		Runtime::apply_acp_session_open(&mut policy, Some(Str::new_static("resume")), None);
+		assert_eq!(policy.session, HeadlessSessionOpen::Resume(Str::new_static("resume")));
+
+		Runtime::apply_acp_session_open(
+			&mut policy,
+			Some(Str::new_static("resume")),
+			Some(Str::new_static("fork")),
+		);
+		assert_eq!(policy.session, HeadlessSessionOpen::Fork(Str::new_static("fork")));
+	}
+	#[test]
 	fn canonical_auth_methods_follow_client_terminal_capability() {
 		let agent_only = acp_auth_methods(false);
 		assert_eq!(agent_only.len(), 1);
@@ -3870,5 +3911,32 @@ mod tests {
 		.expect("terminal snapshot");
 		let status = snapshot.exit.expect("terminal exit");
 		assert_eq!(status.exit_code.or_else(|| status.signal.map(|_| 137)), Some(137));
+	}
+
+	#[test]
+	fn acp_pre_open_thinking_validation_rejects_unknown_level() {
+		let error = validate_thinking_for_model("apple-intelligence/apple-intelligence", "bogus")
+			.expect_err("unknown level rejected");
+		assert!(error.to_string().contains("unknown thinking level"));
+	}
+
+	#[test]
+	fn acp_pre_open_thinking_validation_accepts_auto_and_none() {
+		validate_thinking_for_model("apple-intelligence/apple-intelligence", "auto")
+			.expect("auto valid");
+		validate_thinking_for_model("apple-intelligence/apple-intelligence", "none")
+			.expect("none valid");
+	}
+
+	#[test]
+	fn acp_thinking_clamp_preserves_auto_and_none() {
+		assert_eq!(
+			clamp_thinking_level("apple-intelligence/apple-intelligence", "auto").unwrap(),
+			"auto"
+		);
+		assert_eq!(
+			clamp_thinking_level("apple-intelligence/apple-intelligence", "none").unwrap(),
+			"none"
+		);
 	}
 }

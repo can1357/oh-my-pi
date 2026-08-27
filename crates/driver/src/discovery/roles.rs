@@ -34,7 +34,7 @@ pub fn resolve_launch_roles(
 	plan: Option<&str>,
 ) -> Result<LaunchRoles, SelectionError> {
 	let configured_roles = configured_roles(settings)?;
-	let models = eligible_models(catalog, settings);
+	let models = eligible_models(catalog, settings, None);
 	let resolve_selected = |cli: Option<&str>, variable: &str, role: &str| {
 		let environment = env::var(variable).ok();
 		let Some(selector) = cli
@@ -73,7 +73,7 @@ pub fn resolve_role_selector(
 	selector: &str,
 ) -> Result<SelectedModel, SelectionError> {
 	let roles = configured_roles(settings)?;
-	let models = eligible_models(catalog, settings);
+	let models = eligible_models(catalog, settings, None);
 	select_model(&models, catalog.routes(), catalog.aliases(), &roles, &Default::default(), selector)
 }
 
@@ -127,16 +127,25 @@ pub fn model_selector_allowed(catalog: &Catalog, settings: &ModelSettings, selec
 		})
 }
 
-/// Chooses the deterministic allowed fallback model.
-pub fn fallback_model_selector(catalog: &Catalog, settings: &ModelSettings) -> Option<Str> {
-	let models = eligible_models(catalog, settings);
+/// Chooses the deterministic allowed fallback model, optionally constrained to
+/// a provider.
+pub fn fallback_model_selector(
+	catalog: &Catalog,
+	settings: &ModelSettings,
+	credential_provider: Option<&omp_catalog::ProviderId>,
+) -> Option<Str> {
+	let models = eligible_models(catalog, settings, credential_provider);
 	let mru = Default::default();
 	omp_catalog::find_smol(&models, catalog.routes(), &mru)
 		.or_else(|| omp_catalog::pick_default(&models, catalog.routes(), &mru))
 		.map(|selected| Str::new(selected.model.as_str()))
 }
 
-fn eligible_models(catalog: &Catalog, settings: &ModelSettings) -> Vec<omp_catalog::ModelSpec> {
+fn eligible_models(
+	catalog: &Catalog,
+	settings: &ModelSettings,
+	credential_provider: Option<&omp_catalog::ProviderId>,
+) -> Vec<omp_catalog::ModelSpec> {
 	catalog
 		.models()
 		.iter()
@@ -149,6 +158,14 @@ fn eligible_models(catalog: &Catalog, settings: &ModelSettings) -> Vec<omp_catal
 						.split_once('/')
 						.map_or(model.key.as_str(), |(_, model)| model);
 					settings.model_allowed(route.provider.as_str(), model_id)
+						&& credential_provider.is_none_or(|provider| {
+							crate::chat::resolve_model_provider(
+								catalog,
+								model.key.as_str(),
+								Some(provider.as_str()),
+							)
+							.is_ok()
+						})
 				})
 			})
 		})

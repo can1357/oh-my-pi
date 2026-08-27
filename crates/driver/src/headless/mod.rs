@@ -12,7 +12,7 @@ use std::{
 use omp_agent::{
 	AbortDisposition, Agent, AgentEvent, AgentKind, AgentRunSummary, AgentSnapshot, AgentState,
 	AgentStatus, AgentTree, ApprovalBook, ApprovalInbox, ApprovalRoute, Budget, EventSubscription,
-	InProcTurnClient, TurnId,
+	InProcTurnClient, Journal, TurnId,
 };
 use omp_catalog::{ModelKey, ProviderId, snapshot};
 use omp_core::{SecretString, Str, sf};
@@ -442,6 +442,119 @@ impl HeadlessSession {
 		policy: HeadlessLaunchPolicy,
 	) -> Result<Self, HeadlessError> {
 		Self::open_inner(data_dir, options, policy, None).await
+	}
+
+	/// Derives the effective model for the requested open without creating or
+	/// modifying durable session state. Callers can validate per-model options
+	/// before calling `open_with_policy`.
+	pub fn preview_effective_model(
+		data_dir: &Path,
+		options: &HeadlessSessionOptions,
+		policy: &HeadlessLaunchPolicy,
+	) -> Result<Str, HeadlessError> {
+		let root =
+			chat::canonical_project(&options.project).map_err(HeadlessError::CanonicalProject)?;
+		let home = env::var_os("HOME").map_or_else(|| root.clone(), PathBuf::from);
+		let catalog_owner =
+			crate::registry::production_catalog(data_dir).map_err(HeadlessError::ProductionCatalog)?;
+		let catalog = catalog_owner.as_ref();
+		let mut settings_paths = SettingsPaths::discover(data_dir, Some(&root));
+		settings_paths
+			.overlays
+			.extend(options.settings_overlays.iter().cloned());
+		let settings_manager = SettingsManager::open(settings_paths)?;
+		let settings_snapshot = settings_manager.snapshot();
+		let model_settings = settings_snapshot
+			.project::<omp_catalog::settings::ModelSettings>()
+			.map_err(HeadlessError::SettingsProjection)?
+			.get()
+			.resolve_path_scopes(&root, &home);
+
+		let model = chat::resolve_model_selector(catalog, options.model.as_str())
+			.map_err(HeadlessError::ResolveModelSelector)?;
+		if matches!(&policy.session, HeadlessSessionOpen::New | HeadlessSessionOpen::Ephemeral)
+			&& !crate::discovery::roles::model_selector_allowed(
+				catalog,
+				&model_settings,
+				model.as_str(),
+			) {
+			return Err(HeadlessError::MissingRoute(model));
+		}
+
+		if matches!(&policy.session, HeadlessSessionOpen::New | HeadlessSessionOpen::Ephemeral) {
+			return Ok(model);
+		}
+
+		let state_dir = omp_env::project_state::directory(data_dir, &root)
+			.map_err(|source| HeadlessError::ProjectStateDirectory { path: root.clone(), source })?;
+		let sessions_dir = match (&policy.session, policy.sessions_dir.as_ref()) {
+			(HeadlessSessionOpen::Ephemeral, Some(_)) => {
+				return Err(HeadlessError::EphemeralSessionsDirectory);
+			},
+			(HeadlessSessionOpen::Ephemeral, None) => {
+				let owner =
+					chat::EphemeralSessions::create().map_err(HeadlessError::EphemeralSessions)?;
+				owner.path().to_owned()
+			},
+			(_, Some(directory)) => directory.clone(),
+			(_, None) => state_dir.join("sessions"),
+		};
+
+		let source = match &policy.session {
+			HeadlessSessionOpen::Resume(source) | HeadlessSessionOpen::Fork(source) => {
+				Some(source.clone())
+			},
+			HeadlessSessionOpen::ContinueLatest => {
+				let index =
+					omp_storage::index::SessionIndex::open(sessions_dir.join("sessions.sqlite3"))
+						.map_err(HeadlessError::SessionsIndex)?;
+				let page = index
+					.list(&SessionFilter {
+						project: Some(Str::from(root.to_string_lossy().as_ref())),
+						limit: 1,
+						..SessionFilter::default()
+					})
+					.map_err(HeadlessError::SessionsIndex)?;
+				Some(
+					page
+						.sessions
+						.first()
+						.map(|session| session.id.0.clone())
+						.ok_or(HeadlessError::NoDurableSession)?,
+				)
+			},
+			_ => None,
+		};
+		let source = source.expect("resume/fork/continue have a source");
+		let journal_path = sessions_dir.join(format!("{}.jsonl", source.as_str()));
+		let journal =
+			Journal::open(&journal_path).map_err(|error| HeadlessError::Revival(error.into()))?;
+		let registry = Arc::new(omp_tool::Registry::new());
+		let session_id = sf!("preview");
+		let blueprint = chat::session_blueprint(
+			model.as_str(),
+			catalog,
+			&root,
+			&options.additional_roots,
+			&session_id,
+			Arc::clone(&registry),
+		)
+		.map_err(HeadlessError::SessionBlueprint)?;
+		let snapshot =
+			chat::agent_snapshot(&blueprint, catalog, None).map_err(HeadlessError::AgentSnapshot)?;
+		let revived = omp_agent::revive_existing(&journal_path, journal, snapshot)
+			.map_err(HeadlessError::Revival)?;
+		let mut snapshot = revived.snapshot;
+		apply_revived_session_model(
+			&mut snapshot,
+			catalog,
+			revived.model_override.as_ref(),
+			&root,
+			&options.additional_roots,
+			&model_settings,
+			options.credential_provider.as_ref(),
+		)?;
+		Ok(Str::new(snapshot.turn.params.model.as_str()))
 	}
 
 	/// Constructs a production session over an exact command-owned tool
@@ -1422,14 +1535,12 @@ fn apply_revived_session_model(
 			.is_err()
 	}) {
 		let saved = Str::new(snapshot.turn.params.model.as_str());
-		let fallback = crate::discovery::roles::fallback_model_selector(catalog, model_settings)
-			.filter(|candidate| {
-				credential_provider.is_none_or(|provider| {
-					chat::resolve_model_provider(catalog, candidate.as_str(), Some(provider.as_str()))
-						.is_ok()
-				})
-			})
-			.ok_or(HeadlessError::NoSelectableModel)?;
+		let fallback = crate::discovery::roles::fallback_model_selector(
+			catalog,
+			model_settings,
+			credential_provider,
+		)
+		.ok_or(HeadlessError::NoSelectableModel)?;
 		snapshot.turn.params.model = fallback.as_str().to_owned();
 		notice = Some(HeadlessNotice { saved, fallback });
 		substituted = true;
@@ -1451,8 +1562,26 @@ fn apply_revived_session_model(
 		.map_err(HeadlessError::SessionBlueprint)?;
 		let projected =
 			chat::agent_snapshot(&blueprint, catalog, None).map_err(HeadlessError::AgentSnapshot)?;
-		snapshot.turn = projected.turn;
-		snapshot.enabled_tools = projected.enabled_tools;
+		let retained: Arc<[Str]> = snapshot
+			.enabled_tools
+			.iter()
+			.filter(|name| {
+				projected
+					.enabled_tools
+					.iter()
+					.any(|available| available == *name)
+			})
+			.cloned()
+			.collect::<Vec<_>>()
+			.into();
+		let retained_set: BTreeSet<&str> = retained.iter().map(Str::as_str).collect();
+		let mut turn = projected.turn;
+		turn
+			.params
+			.tools
+			.retain(|tool| retained_set.contains(tool.name.as_str()));
+		snapshot.turn = turn;
+		snapshot.enabled_tools = retained;
 		snapshot.reasoning_dialect = projected.reasoning_dialect;
 	}
 	Ok(RevivedModelResult { notice, substituted })
@@ -1460,8 +1589,8 @@ fn apply_revived_session_model(
 
 #[cfg(test)]
 mod tests {
-	use omp_agent::Journal;
-	use omp_proto::thread::v1::{Message, Part, Role, item, part};
+	use omp_agent::{Journal, TurnInputRecord, TurnOptionsRecord, TurnStart};
+	use omp_proto::thread::v1::{Message, Part, Role, Thread, item, part};
 	use omp_storage::transcript::{Event, Header, ItemRecord, Kind, Patch, SessionId, Writer};
 	use omp_tool::Registry;
 
@@ -1486,12 +1615,20 @@ mod tests {
 		validate_extension_host_keys([&first, &second]).expect("distinct scoped keys");
 	}
 
-	fn launch_snapshot(catalog: &snapshot::Catalog, root: &Path, model: &str) -> AgentSnapshot {
-		let registry = Arc::new(Registry::new());
+	fn launch_snapshot_with_registry(
+		catalog: &snapshot::Catalog,
+		root: &Path,
+		model: &str,
+		registry: Arc<Registry>,
+	) -> AgentSnapshot {
 		let session_id = sf!("test-session");
 		let blueprint = chat::session_blueprint(model, catalog, root, &[], &session_id, registry)
 			.expect("blueprint");
 		chat::agent_snapshot(&blueprint, catalog, None).expect("snapshot")
+	}
+
+	fn launch_snapshot(catalog: &snapshot::Catalog, root: &Path, model: &str) -> AgentSnapshot {
+		launch_snapshot_with_registry(catalog, root, model, Arc::new(Registry::new()))
 	}
 
 	fn write_unavailable_model_journal(root: &Path) -> std::path::PathBuf {
@@ -1570,8 +1707,9 @@ mod tests {
 			None,
 		)
 		.expect("fallback applies");
-		let expected = crate::discovery::roles::fallback_model_selector(catalog, &model_settings)
-			.expect("catalog fallback");
+		let expected =
+			crate::discovery::roles::fallback_model_selector(catalog, &model_settings, None)
+				.expect("catalog fallback");
 		assert_eq!(snapshot.turn.params.model, expected.as_str());
 		assert!(result.substituted);
 		assert_eq!(
@@ -1632,6 +1770,116 @@ mod tests {
 		assert!(matches!(error, HeadlessError::NoSelectableModel));
 	}
 
+	#[test]
+	fn revived_journal_falls_back_through_incompatible_provider_to_compatible() {
+		let catalog = snapshot::Catalog::try_embedded().expect("embedded catalog");
+		let scratch = tempfile::tempdir().expect("scratch");
+		let root = scratch.path().join("project");
+		std::fs::create_dir_all(&root).expect("project");
+		let path = write_unavailable_model_journal(&root);
+		let journal = Journal::open(&path).expect("open journal");
+		let mut snapshot = launch_snapshot(catalog, &root, "apple-intelligence/apple-intelligence");
+		let model_settings = omp_catalog::settings::ModelSettings::default();
+		let revived = omp_agent::revive_existing(&path, journal, snapshot).expect("revive");
+		snapshot = revived.snapshot;
+		let provider = omp_catalog::ProviderId::new("openai");
+		let result = apply_revived_session_model(
+			&mut snapshot,
+			catalog,
+			revived.model_override.as_ref(),
+			&root,
+			&[],
+			&model_settings,
+			Some(&provider),
+		)
+		.expect("fallback applies");
+		assert!(result.substituted);
+		assert_ne!(snapshot.turn.params.model, "apple-intelligence/apple-intelligence");
+		chat::resolve_model_provider(catalog, &snapshot.turn.params.model, Some(provider.as_str()))
+			.expect("fallback is compatible with the credential provider");
+	}
+
+	#[test]
+	fn revived_session_retains_durable_tool_restriction_after_model_substitution() {
+		use omp_tool::{Claims, Precedence, Presentation};
+
+		let catalog = snapshot::Catalog::try_embedded().expect("embedded catalog");
+		let scratch = tempfile::tempdir().expect("scratch");
+		let root = scratch.path().join("project");
+		std::fs::create_dir_all(&root).expect("project");
+		let path = write_unavailable_model_journal(&root);
+		let mut journal = Journal::open(&path).expect("open journal");
+
+		let mut registry = Registry::new();
+		registry
+			.register(omp_tools::yield_tool::tool(), Presentation::Slot, Claims {
+				precedence: Precedence::DEFAULT,
+				claimant:   sf!("test"),
+				replaces:   None,
+			})
+			.expect("register yield test tool");
+		registry
+			.register(omp_tools::todo::tool(), Presentation::Slot, Claims {
+				precedence: Precedence::DEFAULT,
+				claimant:   sf!("test"),
+				replaces:   None,
+			})
+			.expect("register todo test tool");
+		let registry = Arc::new(registry);
+
+		let snapshot = launch_snapshot_with_registry(
+			catalog,
+			&root,
+			"apple-intelligence/apple-intelligence",
+			registry,
+		);
+		journal
+			.start_turn(4, TurnStart {
+				turn_id:            sf!("durable"),
+				item_events:        Vec::new(),
+				prompt_hash:        omp_core::Hash32::new([0; 32]),
+				prompt_head_events: Vec::new(),
+				toolset_hash:       snapshot.registry.slot_hash(),
+				enabled_tools:      vec![sf!("yield")],
+				sequence_targets:   Vec::new(),
+				input:              TurnInputRecord::Full { thread: Thread::default() },
+				options:            TurnOptionsRecord {
+					context_id: snapshot.turn.context_id.clone(),
+					params:     snapshot.turn.params.clone(),
+					executor:   snapshot.turn.executor.clone(),
+					props:      snapshot.turn.props.clone(),
+				},
+			})
+			.expect("persist durable tool restriction");
+		let model_settings = omp_catalog::settings::ModelSettings::default();
+		let revived = omp_agent::revive_existing(&path, journal, snapshot).expect("revive");
+		let mut snapshot = revived.snapshot;
+		assert_eq!(snapshot.enabled_tools.as_ref(), &[sf!("yield")]);
+		let provider = omp_catalog::ProviderId::new("openai");
+		let result = apply_revived_session_model(
+			&mut snapshot,
+			catalog,
+			revived.model_override.as_ref(),
+			&root,
+			&[],
+			&model_settings,
+			Some(&provider),
+		)
+		.expect("fallback applies");
+		assert!(result.substituted);
+		assert!(!chat::model_rejects_tools(catalog, &snapshot.turn.params.model));
+		assert_eq!(snapshot.enabled_tools.as_ref(), &[sf!("yield")]);
+		assert!(
+			snapshot
+				.turn
+				.params
+				.tools
+				.iter()
+				.all(|tool| tool.name == "yield")
+		);
+		assert_eq!(snapshot.turn.params.tools.len(), 1);
+	}
+
 	#[tokio::test]
 	async fn dropped_session_without_finalize_leaves_environment_reopenable() {
 		let scratch = tempfile::tempdir().expect("scratch directory");
@@ -1666,6 +1914,101 @@ mod tests {
 			.await
 			.expect("second session opens on the same project root");
 		drop(second);
+	}
+	#[test]
+	fn preview_effective_model_returns_resolved_new_session_model() {
+		let catalog = snapshot::Catalog::try_embedded().expect("embedded catalog");
+		let launch = crate::discovery::roles::fallback_model_selector(
+			&catalog,
+			&omp_catalog::settings::ModelSettings::default(),
+			None,
+		)
+		.expect("fallback");
+		let scratch = tempfile::tempdir().expect("scratch");
+		let data_dir = scratch.path().join("data");
+		std::fs::create_dir_all(&data_dir).expect("data dir");
+		let root = scratch.path().join("project");
+		std::fs::create_dir_all(&root).expect("project");
+		let options = HeadlessSessionOptions {
+			project:               root,
+			settings_overlays:     Box::new([]),
+			additional_roots:      Box::new([]),
+			model:                 launch.clone(),
+			initial_regime:        None,
+			initial_prompt_slot:   None,
+			plan_handoff:          None,
+			resume:                None,
+			fork:                  None,
+			py_eval:               false,
+			approval_mode:         None,
+			pty_denied:            false,
+			credential_provider:   None,
+			api_key:               None,
+			prompt_cache_affinity: None,
+			session_generation:    1,
+		};
+		let policy = HeadlessLaunchPolicy::default();
+		let effective =
+			HeadlessSession::preview_effective_model(&data_dir, &options, &policy).expect("preview");
+		assert_eq!(effective.as_str(), launch.as_str());
+	}
+
+	#[test]
+	fn preview_effective_model_falls_back_from_unavailable_pinned_model() {
+		let catalog = snapshot::Catalog::try_embedded().expect("embedded catalog");
+		let scratch = tempfile::tempdir().expect("scratch");
+		let data_dir = scratch.path().join("data");
+		std::fs::create_dir_all(&data_dir).expect("data dir");
+		let root = scratch.path().join("project");
+		std::fs::create_dir_all(&root).expect("project");
+
+		let journal_path = write_unavailable_model_journal(&root);
+		let source = Str::new(journal_path.file_stem().unwrap().to_str().unwrap());
+
+		let state_dir = omp_env::project_state::directory(&data_dir, &root).expect("state dir");
+		let sessions_dir = state_dir.join("sessions");
+		std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+		let target = sessions_dir.join(journal_path.file_name().unwrap());
+		std::fs::copy(&journal_path, &target).expect("copy journal");
+
+		let launch = crate::discovery::roles::fallback_model_selector(
+			&catalog,
+			&omp_catalog::settings::ModelSettings::default(),
+			None,
+		)
+		.expect("fallback");
+		let options = HeadlessSessionOptions {
+			project:               root,
+			settings_overlays:     Box::new([]),
+			additional_roots:      Box::new([]),
+			model:                 launch.clone(),
+			initial_regime:        None,
+			initial_prompt_slot:   None,
+			plan_handoff:          None,
+			resume:                None,
+			fork:                  None,
+			py_eval:               false,
+			approval_mode:         None,
+			pty_denied:            false,
+			credential_provider:   None,
+			api_key:               None,
+			prompt_cache_affinity: None,
+			session_generation:    1,
+		};
+		let policy = HeadlessLaunchPolicy {
+			session: HeadlessSessionOpen::Resume(source),
+			..HeadlessLaunchPolicy::default()
+		};
+		let effective =
+			HeadlessSession::preview_effective_model(&data_dir, &options, &policy).expect("preview");
+		let expected = crate::discovery::roles::fallback_model_selector(
+			&catalog,
+			&omp_catalog::settings::ModelSettings::default(),
+			None,
+		)
+		.expect("fallback");
+		assert_eq!(effective, expected);
+		assert_ne!(effective.as_str(), "gone/gone");
 	}
 }
 

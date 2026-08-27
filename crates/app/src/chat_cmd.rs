@@ -723,8 +723,8 @@ pub(crate) async fn run(
 			);
 		},
 		Ok(_) | Err(_) if explicit_model.is_none() => {
-			let fallback = roles::fallback_model_selector(catalog, &model_settings)
-				.ok_or_else(|| miette::miette!("no model is allowed by effective settings"))?;
+			let fallback = roles::fallback_model_selector(catalog, &model_settings, None)
+				.ok_or_else(|| miette!("no model is allowed by effective settings"))?;
 			eprintln!(
 				"Saved model `{}` is unavailable; using `{}` for this session without changing the \
 				 saved preference.",
@@ -969,8 +969,9 @@ pub(crate) async fn run(
 			|| !roles::model_selector_allowed(catalog, &model_settings, &snapshot.turn.params.model)
 		{
 			let saved = snapshot.turn.params.model.clone();
-			let fallback = roles::fallback_model_selector(catalog, &model_settings)
-				.ok_or_else(|| miette::miette!("no selectable model is available to resume"))?;
+			let fallback =
+				roles::fallback_model_selector(catalog, &model_settings, credential_provider.as_ref())
+					.ok_or_else(|| miette!("no selectable model is available to resume"))?;
 			snapshot.turn.params.model = fallback.as_str().to_owned();
 			eprintln!(
 				"Session model `{saved}` is unavailable; resumed with `{fallback}` without changing \
