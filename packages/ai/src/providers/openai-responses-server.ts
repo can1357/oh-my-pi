@@ -44,7 +44,7 @@ import {
 	openaiResponsesRequestSchema,
 } from "./openai-responses-server-schema";
 import { encodeTextSignatureV1, parseTextSignature } from "./openai-shared";
-import { isRemoteImageUrl } from "./vision-guard";
+import { isRemoteImageUrl, isUsableInlineImage } from "./vision-guard";
 
 export type { ParsedRequest };
 
@@ -337,7 +337,7 @@ function functionOutputContent(output: string | readonly unknown[] | undefined):
 				raw.detail === "auto" || raw.detail === "low" || raw.detail === "high" || raw.detail === "original"
 					? raw.detail
 					: undefined;
-			if (decoded && decoded.data.length > 0) {
+			if (decoded && isUsableInlineImage(decoded)) {
 				content.push({ type: "image", ...decoded, ...(detail ? { detail } : {}) });
 			} else {
 				const referenceImage: ImageContent = {
@@ -555,7 +555,7 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 					toolCallId: output.call_id,
 					toolName: findToolNameById(messages, output.call_id) || "computer",
 					content:
-						decodedScreenshot && decodedScreenshot.data.length > 0
+						decodedScreenshot && isUsableInlineImage(decodedScreenshot)
 							? [{ type: "image", ...decodedScreenshot }]
 							: [],
 					isError: output.status === "failed",

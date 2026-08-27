@@ -1,6 +1,7 @@
 import { isDashscopeCompatibleModeUrl, modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import { isDeepseekModelIdOrName, isQwenModelId } from "@oh-my-pi/pi-catalog/identity";
 import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
+import { parseImageMetadata } from "@oh-my-pi/pi-utils";
 
 import type { ImageContent, Model, TextContent } from "../types";
 
@@ -61,14 +62,29 @@ function isBedrockModel(model: Model): boolean {
 	}
 }
 
-export function isUsableInlineImageData(data: string): boolean {
-	if (data.length === 0) return false;
+function decodeUsableInlineImageData(data: string): Buffer | undefined {
+	if (data.length === 0) return undefined;
 	try {
 		const bytes = Buffer.from(data, "base64");
-		return bytes.length > 0 && bytes.toString("base64") === data;
+		return bytes.length > 0 && bytes.toString("base64") === data ? bytes : undefined;
 	} catch {
-		return false;
+		return undefined;
 	}
+}
+
+export function isUsableInlineImageData(data: string): boolean {
+	return decodeUsableInlineImageData(data) !== undefined;
+}
+
+export function isUsableInlineImage(image: Pick<ImageContent, "data" | "mimeType">): boolean {
+	const bytes = decodeUsableInlineImageData(image.data);
+	if (!bytes) return false;
+	const detectedMimeType = parseImageMetadata(bytes)?.mimeType;
+	const declaredMimeType = image.mimeType.trim().toLowerCase();
+	return (
+		detectedMimeType !== undefined &&
+		detectedMimeType === (declaredMimeType === "image/jpg" ? "image/jpeg" : declaredMimeType)
+	);
 }
 
 function hasReplayableGoogleImageMimeType(image: Pick<ImageContent, "mimeType">): boolean {

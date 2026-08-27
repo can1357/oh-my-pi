@@ -14,6 +14,8 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { type CapturedOpenAICompletionRequest, startOpenAICompletionsUpstream } from "./helpers";
 
+const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
 function zeroUsage(): AssistantMessage["usage"] {
 	return {
 		input: 0,
@@ -198,7 +200,7 @@ describe("openai-responses parseRequest", () => {
 	});
 
 	it("preserves canonical multimodal order and nullable fallback sources", () => {
-		const imageData = Buffer.from("tool image").toString("base64");
+		const imageData = PNG_B64;
 		const parsed = parseRequest({
 			model: "gpt-5.6-sol",
 			input: [
@@ -259,13 +261,15 @@ describe("openai-responses parseRequest", () => {
 
 	it("decodes large percent-encoded tool images to exact bytes", () => {
 		const byteCount = 128 * 1024;
-		const parsed = parseRequest(toolImageRequest("gpt-5.6-sol", `data:image/png,${"%ff".repeat(byteCount)}`));
+		const imageBytes = Buffer.concat([Buffer.from(PNG_B64, "base64"), Buffer.alloc(byteCount, 0xff)]);
+		const encodedBytes = Array.from(imageBytes, byte => `%${byte.toString(16).padStart(2, "0")}`).join("");
+		const parsed = parseRequest(toolImageRequest("gpt-5.6-sol", `data:image/png,${encodedBytes}`));
 		const result = parsed.context.messages[1];
 		if (result?.role !== "toolResult") throw new Error("expected tool result");
 		const image = result.content[0];
 		if (image?.type !== "image") throw new Error("expected image content");
 		expect(image.mimeType).toBe("image/png");
-		expect(Buffer.from(image.data, "base64")).toEqual(Buffer.alloc(byteCount, 0xff));
+		expect(Buffer.from(image.data, "base64")).toEqual(imageBytes);
 	});
 
 	it("rejects file blocks in tool outputs instead of flattening their content", () => {
@@ -284,7 +288,7 @@ describe("openai-responses parseRequest", () => {
 	});
 
 	it("concatenates legacy function output text while retaining inline images", () => {
-		const imageData = Buffer.from("legacy image").toString("base64");
+		const imageData = PNG_B64;
 		const parsed = parseRequest({
 			model: "gpt-5.6-sol",
 			input: [
@@ -335,7 +339,7 @@ describe("openai-responses parseRequest", () => {
 	});
 
 	it("round-trips Pi image-read image forms as native function output blocks", () => {
-		const imageData = Buffer.from("read tool image").toString("base64");
+		const imageData = PNG_B64;
 		const imageUrl = "https://blob.example.invalid/read-image.png";
 		const providerFileId = "file_read_image_123";
 		const model = buildModel({
@@ -438,7 +442,7 @@ describe("openai-responses parseRequest", () => {
 	});
 
 	it("round-trips array-valued custom tool outputs without demoting them", () => {
-		const imageData = Buffer.from("custom tool image").toString("base64");
+		const imageData = PNG_B64;
 		const model = buildModel({
 			id: "gpt-5.6-sol",
 			name: "GPT-5.6 Sol",
@@ -1481,7 +1485,7 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 			resolveModel: () => mock.model,
 			version: "test",
 		});
-		const imageData = Buffer.from("computer screenshot").toString("base64");
+		const imageData = PNG_B64;
 
 		try {
 			const response = await fetch(`${gateway.url}/v1/responses`, {
@@ -1580,7 +1584,7 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 		}
 	});
 
-	it("rejects reference-only remote tool images before invoking Ollama", async () => {
+	it("rejects unreplayable tool image sources before invoking Ollama", async () => {
 		const upstreamRequests: unknown[] = [];
 		const upstream = Bun.serve({
 			hostname: "127.0.0.1",
@@ -1623,6 +1627,15 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 		});
 
 		try {
+			const nonImageResponse = await fetch(`${gateway.url}/v1/responses`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+				body: JSON.stringify(toolImageRequest(model.id, "data:text/plain;base64,SGVsbG8=", "file_image_123")),
+			});
+			expect(nonImageResponse.status).toBe(400);
+			expect(await nonImageResponse.text()).toContain("input_image.file_id cannot be forwarded to ollama-chat");
+			expect(upstreamRequests).toHaveLength(0);
+
 			const response = await fetch(`${gateway.url}/v1/responses`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
@@ -1852,7 +1865,7 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 				);
 				expect(upstreamRequests).toHaveLength(0);
 			}
-			const inlineImageUrl = `data:image/png;base64,${Buffer.from("valid image").toString("base64")}`;
+			const inlineImageUrl = `data:image/png;base64,${PNG_B64}`;
 			const inlineResponse = await fetch(`${gateway.url}/v1/responses`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
@@ -1865,11 +1878,13 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 				Array.isArray(message.content) ? message.content : [],
 			);
 			expect(inlineContentParts).toContainEqual({ type: "image_url", image_url: { url: inlineImageUrl } });
-			const normalizedMixedCaseImageUrl = "data:image/png;base64,SGk=";
+			const normalizedMixedCaseImageUrl = `data:image/png;base64,${PNG_B64}`;
 			const mixedCaseInlineResponse = await fetch(`${gateway.url}/v1/responses`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-				body: JSON.stringify(toolImageRequest(model.id, "DATA:image/png;BASE64,SGk%3D", "file_image_123")),
+				body: JSON.stringify(
+					toolImageRequest(model.id, `DATA:image/png;BASE64,${PNG_B64.replaceAll("=", "%3D")}`, "file_image_123"),
+				),
 			});
 			expect(mixedCaseInlineResponse.status).toBe(200);
 			await mixedCaseInlineResponse.text();
@@ -1884,7 +1899,9 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 			const fragmentInlineResponse = await fetch(`${gateway.url}/v1/responses`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-				body: JSON.stringify(toolImageRequest(model.id, "data:image/png;base64,SGk=#preview", "file_image_123")),
+				body: JSON.stringify(
+					toolImageRequest(model.id, `data:image/png;base64,${PNG_B64}#preview`, "file_image_123"),
+				),
 			});
 			expect(fragmentInlineResponse.status).toBe(200);
 			await fragmentInlineResponse.text();

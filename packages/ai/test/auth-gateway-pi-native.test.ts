@@ -19,6 +19,8 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { type CapturedOpenAICompletionRequest, startOpenAICompletionsUpstream } from "./helpers";
 
+const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
 function makeEventStream(events: AssistantMessageEvent[], final: AssistantMessage): AssistantMessageEventStream {
 	async function* iter() {
 		for (const e of events) yield e;
@@ -401,6 +403,29 @@ describe("pi-native gateway image reference validation", () => {
 					messages: [
 						{
 							role: "toolResult",
+							toolCallId: "call_non_image_bytes",
+							toolName: "read",
+							content: [
+								{
+									type: "image",
+									data: "SGVsbG8=",
+									mimeType: "image/png",
+									providerFile: { provider: "openai", id: "file_image_123" },
+								},
+							],
+							isError: false,
+							timestamp: 0,
+						},
+					],
+				},
+				message:
+					"input_image.file_id cannot be forwarded to mock; target an OpenAI Responses model or use an inline data URL",
+			},
+			{
+				context: {
+					messages: [
+						{
+							role: "toolResult",
 							toolCallId: "call_invalid_inline",
 							toolName: "read",
 							content: [
@@ -699,7 +724,7 @@ describe("pi-native gateway image reference validation", () => {
 				}),
 			);
 
-			const inlineData = Buffer.from("inline fallback").toString("base64");
+			const inlineData = PNG_B64;
 			const expiredResponse = await fetch(`${handle.url}/v1/pi/stream`, {
 				method: "POST",
 				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
@@ -747,7 +772,7 @@ describe("pi-native gateway image reference validation", () => {
 
 	it("uses inline image data after removing unsupported references", async () => {
 		const fixture = await createPiNativeImageGatewayFixture();
-		const imageData = Buffer.from("inline image").toString("base64");
+		const imageData = PNG_B64;
 		fixture.mock.push({ content: ["ok"] });
 
 		try {
@@ -840,7 +865,7 @@ describe("pi-native gateway image reference validation", () => {
 
 	it("prefers inline screenshots over unsupported screenshot metadata", async () => {
 		const fixture = await createPiNativeImageGatewayFixture();
-		const imageData = Buffer.from("inline screenshot").toString("base64");
+		const imageData = PNG_B64;
 		fixture.mock.push({ content: ["ok"] });
 
 		try {
