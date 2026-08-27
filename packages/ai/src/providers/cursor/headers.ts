@@ -1,8 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type http2 from "node:http2";
+import {
+	buildCursorUnaryHeaders as buildCatalogCursorUnaryHeaders,
+	CURSOR_CLIENT_VERSION,
+} from "@oh-my-pi/pi-catalog/discovery/cursor-headers";
 
+export { CURSOR_CLIENT_VERSION };
 export const CURSOR_API_URL = "https://api2.cursor.sh";
-export const CURSOR_CLIENT_VERSION = "cli-2026.08.11-e8db854";
 
 /**
  * HTTP/1 connection-specific headers that HTTP/2 forbids. Node's `http2.request()`
@@ -115,18 +119,9 @@ export function buildCursorRunHeaders(args: {
 
 /**
  * Build the headers for the unary `GetUsableModels` RPC used by catalog model
- * discovery. Plain header record — no pseudo-headers, no `connect-protocol-version`
- * (the unary path does not send them today and the server does not require them).
- * `CURSOR_CLIENT_VERSION` is the single source; an explicit override may pin an
- * older wire value.
+ * discovery. Delegates to the catalog helper so discovery and Run advertise
+ * the same client version.
  */
 export function buildCursorUnaryHeaders(args: { apiKey: string; clientVersion?: string }): Record<string, string> {
-	return {
-		"content-type": "application/proto",
-		te: "trailers",
-		authorization: `Bearer ${args.apiKey}`,
-		"x-ghost-mode": "true",
-		"x-cursor-client-version": args.clientVersion ?? CURSOR_CLIENT_VERSION,
-		"x-cursor-client-type": "cli",
-	};
+	return buildCatalogCursorUnaryHeaders(args.apiKey, args.clientVersion);
 }

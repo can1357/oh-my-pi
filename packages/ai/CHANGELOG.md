@@ -22,6 +22,9 @@
 - Stopped a reset Cursor server-config probe from republishing into the cache.
 - Paired Cursor tool results only after the result sink succeeded.
 - Encoded Cursor interaction replies with the shared Connect frame helper.
+- Started the Cursor HTTP/2 frame pump when the lease is wrapped so a stream that ends before `frames()` is iterated cannot hang the turn.
+- Evicted the oldest fresh Cursor conversation rotation when every retained mapping was still in the retry window.
+
 
 ## [18.0.8] - 2026-08-27
 

@@ -5,14 +5,12 @@ import { bareModelId, parseGlmModel, semverGte } from "../identity/classify";
 import { getBundledModels } from "../models";
 import { toModelSpec } from "../provider-models/bundled-references";
 import type { Model, ModelSpec } from "../types";
+import { buildCursorUnaryHeaders } from "./cursor-headers";
 import { GetUsableModelsRequestSchema, GetUsableModelsResponseSchema } from "./cursor-proto";
 import { create, fromBinary, toBinary } from "./protobuf";
 
 const CURSOR_DEFAULT_BASE_URL = "https://api2.cursor.sh";
 const CURSOR_GET_USABLE_MODELS_PATH = "/agent.v1.AgentService/GetUsableModels";
-
-/** Default `x-cursor-client-version` when a caller pins no override. */
-const CURSOR_DEFAULT_CLIENT_VERSION = "cli-2026.08.11-e8db854";
 
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 const DEFAULT_MAX_TOKENS = 64_000;
@@ -125,22 +123,6 @@ export async function fetchCursorUsableModels(
 	} catch {
 		return null;
 	}
-}
-
-/**
- * Build the unary `GetUsableModels` request headers on the wire values Cursor
- * expects. Kept catalog-local so discovery never imports the AI package's
- * transport at runtime.
- */
-function buildCursorUnaryHeaders(apiKey: string, clientVersion: string | undefined): Record<string, string> {
-	return {
-		"content-type": "application/proto",
-		te: "trailers",
-		authorization: `Bearer ${apiKey}`,
-		"x-ghost-mode": "true",
-		"x-cursor-client-version": clientVersion ?? CURSOR_DEFAULT_CLIENT_VERSION,
-		"x-cursor-client-type": "cli",
-	};
 }
 
 /**

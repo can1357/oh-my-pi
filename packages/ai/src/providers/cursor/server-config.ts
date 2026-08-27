@@ -4,7 +4,7 @@ import {
 	Http2Config,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
-import { getProxyForUrl } from "../../utils/proxy";
+import * as proxy from "../../utils/proxy";
 import { CONNECT_FLAG_COMPRESSED, CONNECT_FLAG_END_STREAM, ConnectFrameDecoder } from "./connect-frame";
 import { acquireCursorH2, type CursorH2Lease } from "./h2-pool";
 import { buildCursorUnaryHeaders } from "./headers";
@@ -271,7 +271,7 @@ async function fetchServerConfigOverHttp1(
 		// `PI_PROXY`, or proxied deployments probe direct, observe
 		// `"unspecified"`, and lose the HTTP/1 bridge exactly where an
 		// ALPN-stripping proxy forces the downgrade.
-		const proxy = getProxyForUrl("cursor", url);
+		const proxyUrl = proxy.getProxyForUrl("cursor", url);
 		const response = await Bun.fetch(url, {
 			method: "POST",
 			headers: cursorUnaryHeaders(apiKey, callerHeaders),
@@ -280,7 +280,7 @@ async function fetchServerConfigOverHttp1(
 			// transport is the in-repo precedent).
 			body: toBinary(GetServerConfigRequestSchema, create(GetServerConfigRequestSchema, {})),
 			signal,
-			...(proxy ? { proxy } : {}),
+			...(proxyUrl ? { proxy: proxyUrl } : {}),
 		});
 		if (!response.ok) return "unspecified";
 		// Read the body incrementally and cancel once the cumulative cap is

@@ -286,4 +286,26 @@ describe("cursor conversation store — rotation", () => {
 		expect(resolveCursorConversationId("fresh-base")).toBe(rotated);
 		expect(isCursorRotationFresh(rotated)).toBe(true);
 	});
+
+	it("evicts the oldest fresh rotation when every retained mapping is still fresh", () => {
+		const bases: string[] = [];
+		const rotatedByBase = new Map<string, string>();
+		for (let i = 0; i < CURSOR_RETAINED_CONVERSATION_LIMIT + 2; i++) {
+			const id = `all-fresh-${i}`;
+			bases.push(id);
+			pinCursorConversation(id);
+			rotatedByBase.set(id, requireRotation(rotateCursorConversation(id)));
+			unpinCursorConversation(id);
+		}
+		const oldest = bases[0];
+		const oldestRotated = rotatedByBase.get(oldest ?? "");
+		if (oldest === undefined || oldestRotated === undefined) throw new Error("expected oldest rotation");
+		expect(resolveCursorConversationId(oldest)).toBe(oldest);
+		expect(isCursorRotationFresh(oldestRotated)).toBe(false);
+		const newest = bases[bases.length - 1];
+		const newestRotated = rotatedByBase.get(newest ?? "");
+		if (newest === undefined || newestRotated === undefined) throw new Error("expected newest rotation");
+		expect(resolveCursorConversationId(newest)).toBe(newestRotated);
+		expect(isCursorRotationFresh(newestRotated)).toBe(true);
+	});
 });

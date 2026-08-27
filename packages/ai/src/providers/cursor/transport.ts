@@ -174,59 +174,75 @@ function wrapH2Lease(lease: h2Pool.CursorH2Lease): CursorTransportAttempt {
 		settleTrailers({});
 	});
 
+	const pump = startH2FramePump(request, decoder);
+
 	return {
 		write(frame: Buffer): void {
 			request.write(frame);
 		},
 		frames(): AsyncIterable<ConnectFrame> {
-			return iterateH2Frames(request, decoder);
+			return iterateH2FramePump(pump);
 		},
 		trailers: () => trailersResult.promise,
 		responseHeaders: () => responseResult.promise,
 		close(): void {
 			if (closed) return;
 			closed = true;
+			pump.stop();
 			release();
 		},
 	};
 }
 
-async function* iterateH2Frames(
-	request: http2.ClientHttp2Stream,
-	decoder: ConnectFrameDecoder,
-): AsyncGenerator<ConnectFrame> {
-	const pending: ConnectFrame[] = [];
-	let head = 0;
-	const waiters: Array<() => void> = [];
-	let done = false;
-	let failure: Error | undefined;
+interface H2FramePump {
+	pending: ConnectFrame[];
+	head: number;
+	waiters: Array<() => void>;
+	done: boolean;
+	failure: Error | undefined;
+	wake(): void;
+	stop(): void;
+}
 
-	const wake = (): void => {
-		for (const resolve of waiters.splice(0)) resolve();
+function startH2FramePump(request: http2.ClientHttp2Stream, decoder: ConnectFrameDecoder): H2FramePump {
+	const pump: H2FramePump = {
+		pending: [],
+		head: 0,
+		waiters: [],
+		done: false,
+		failure: undefined,
+		wake(): void {
+			for (const resolve of pump.waiters.splice(0)) resolve();
+		},
+		stop(): void {
+			request.off("data", onData);
+			request.off("end", onEnd);
+			request.off("error", fail);
+		},
 	};
+
 	const fail = (cause: unknown): void => {
-		if (done || failure) return;
-		failure = cause instanceof Error ? cause : new Error(String(cause));
-		wake();
+		if (pump.done || pump.failure) return;
+		pump.failure = cause instanceof Error ? cause : new Error(String(cause));
+		pump.wake();
 	};
-
 	const onData = (chunk: Buffer | string): void => {
-		if (done || failure) return;
+		if (pump.done || pump.failure) return;
 		try {
 			const frames = decoder.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
 			if (frames.length === 0) return;
-			pending.push(...frames);
-			wake();
+			pump.pending.push(...frames);
+			pump.wake();
 		} catch (cause) {
 			fail(cause);
 		}
 	};
 	const onEnd = (): void => {
-		if (done || failure) return;
+		if (pump.done || pump.failure) return;
 		try {
 			decoder.finish();
-			done = true;
-			wake();
+			pump.done = true;
+			pump.wake();
 		} catch (cause) {
 			fail(cause);
 		}
@@ -236,37 +252,35 @@ async function* iterateH2Frames(
 	request.on("end", onEnd);
 	request.on("error", fail);
 	request.on("close", () => {
-		if (!done && !failure) onEnd();
+		if (!pump.done && !pump.failure) onEnd();
 	});
+	if (request.closed || request.destroyed) onEnd();
+	return pump;
+}
 
+async function* iterateH2FramePump(pump: H2FramePump): AsyncGenerator<ConnectFrame> {
 	try {
 		for (;;) {
-			const frame = head < pending.length ? pending[head++] : undefined;
-			// Head-index dequeue keeps each dequeue O(1) where Array#shift()
-			// would relocate the whole tail per frame. Compact when the queue
-			// drains, and again past a small threshold so a never-draining
-			// backlog cannot pin already-delivered frames.
-			if (head === pending.length) {
-				pending.length = 0;
-				head = 0;
-			} else if (head > 64) {
-				pending.copyWithin(0, head);
-				pending.length -= head;
-				head = 0;
+			const frame = pump.head < pump.pending.length ? pump.pending[pump.head++] : undefined;
+			if (pump.head === pump.pending.length) {
+				pump.pending.length = 0;
+				pump.head = 0;
+			} else if (pump.head > 64) {
+				pump.pending.copyWithin(0, pump.head);
+				pump.pending.length -= pump.head;
+				pump.head = 0;
 			}
 			if (frame) {
 				yield frame;
 				continue;
 			}
-			if (failure) throw failure;
-			if (done) return;
+			if (pump.failure) throw pump.failure;
+			if (pump.done) return;
 			const waiter = Promise.withResolvers<void>();
-			waiters.push(waiter.resolve);
+			pump.waiters.push(waiter.resolve);
 			await waiter.promise;
 		}
 	} finally {
-		request.off("data", onData);
-		request.off("end", onEnd);
-		request.off("error", fail);
+		pump.stop();
 	}
 }

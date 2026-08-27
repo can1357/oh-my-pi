@@ -10,6 +10,8 @@
 
 - Removed the Cursor discovery timeout abort listener after the request completes so a long timeout cannot retain the response buffer.
 - Discarded the Cursor discovery HTTP/2 session when GetUsableModels times out.
+- Shared Cursor unary request headers and client version with the AI package so discovery and Run cannot drift.
+
 
 ## [18.0.8] - 2026-08-27
 

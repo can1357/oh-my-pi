@@ -11,7 +11,7 @@ import {
 	resetCursorServerConfigCache,
 } from "@oh-my-pi/pi-ai/providers/cursor/server-config";
 import { openCursorTransport } from "@oh-my-pi/pi-ai/providers/cursor/transport";
-import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
+import * as proxy from "@oh-my-pi/pi-ai/utils/proxy";
 import {
 	GetServerConfigRequestSchema,
 	type GetServerConfigResponse,
@@ -645,16 +645,10 @@ describe("unary wire framing", () => {
 
 describe("HTTP/1 fallback provider proxy routing", () => {
 	let proxyServer: http.Server | undefined;
-	let savedProxyEnv: Record<string, string | undefined> = {};
-	const PROXY_ENV_NAMES = ["PI_PROXY_CURSOR", "PI_PROXY", "NO_PROXY", "no_proxy"] as const;
 
 	beforeEach(async () => {
 		await h2Pool.disposeCursorH2Pool();
 		resetCursorServerConfigCache();
-		savedProxyEnv = {};
-		for (const name of PROXY_ENV_NAMES) {
-			savedProxyEnv[name] = Bun.env[name];
-		}
 	});
 
 	afterEach(async () => {
@@ -667,17 +661,9 @@ describe("HTTP/1 fallback provider proxy routing", () => {
 			closing.close(error => (error ? closed.reject(error) : closed.resolve()));
 			await closed.promise;
 		}
-		for (const name of PROXY_ENV_NAMES) {
-			const saved = savedProxyEnv[name];
-			if (saved === undefined) delete Bun.env[name];
-			else Bun.env[name] = saved;
-		}
-		// After the env is restored, drop any memoized "cursor" proxy
-		// resolution so no other suite inherits this test's throwaway proxy.
-		__resetProxyCache();
 	});
 
-	it("routes the GetServerConfig HTTP/1 probe through PI_PROXY_CURSOR", async () => {
+	it("routes the GetServerConfig HTTP/1 probe through the provider proxy", async () => {
 		let proxiedRequests = 0;
 		let forwardedTarget = "";
 		proxyServer = http.createServer((req, res) => {
@@ -695,12 +681,7 @@ describe("HTTP/1 fallback provider proxy routing", () => {
 		await listening.promise;
 		const address = proxyServer.address();
 		if (!address || typeof address === "string") throw new Error("expected proxy fixture to bind");
-		delete Bun.env.PI_PROXY;
-		delete Bun.env.NO_PROXY;
-		delete Bun.env.no_proxy;
-		Bun.env.PI_PROXY_CURSOR = `http://127.0.0.1:${address.port}`;
-		// The provider proxy resolution is memoized; re-resolve after the env.
-		__resetProxyCache();
+		vi.spyOn(proxy, "getProxyForUrl").mockReturnValue(`http://127.0.0.1:${address.port}`);
 		vi.spyOn(h2Pool, "acquireCursorH2").mockResolvedValue({
 			ok: false,
 			unavailable: {
@@ -708,9 +689,6 @@ describe("HTTP/1 fallback provider proxy routing", () => {
 				cause: Object.assign(new Error("h2 is not supported"), { code: "ERR_HTTP2_ERROR" }),
 			},
 		});
-		// A non-local origin that cannot be reached directly: honoring the
-		// proxy delivers the request to the local fixture, while a direct
-		// probe fails open to "unspecified" — the regression this pins.
 		const baseUrl = "http://cursor-config-proxy-probe.invalid:1";
 		expect(await fetchFor(baseUrl)).toBe("bidi-disabled");
 		expect(proxiedRequests).toBe(1);

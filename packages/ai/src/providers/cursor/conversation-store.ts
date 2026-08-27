@@ -112,12 +112,18 @@ export function unpinCursorConversation(id: string): void {
 	retainedLru.add(id);
 	while (retainedLru.size > CURSOR_RETAINED_CONVERSATION_LIMIT) {
 		let victim: string | undefined;
+		let freshVictim: string | undefined;
 		for (const candidate of retainedLru) {
 			const resolved = resolveCursorConversationId(candidate);
-			if ((activePinCounts.get(resolved) ?? 0) > 0 || freshRotatedConversationIds.has(resolved)) continue;
+			if ((activePinCounts.get(resolved) ?? 0) > 0) continue;
+			if (freshRotatedConversationIds.has(resolved)) {
+				freshVictim ??= candidate;
+				continue;
+			}
 			victim = candidate;
 			break;
 		}
+		victim ??= freshVictim;
 		if (victim === undefined) break;
 		retainedLru.delete(victim);
 		entries.delete(victim);

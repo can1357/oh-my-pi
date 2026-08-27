@@ -481,7 +481,7 @@ describe("cursor heartbeat and outbound write lifecycle", () => {
 			const stream = streamCursor(makeModel(h1Url), streamContext, {
 				apiKey: API_KEY,
 				execHandlers: {
-					read: () => new Promise(() => {}),
+					read: () => Promise.withResolvers<ToolResultMessage>().promise,
 				},
 			});
 			const eventTypes: string[] = [];
@@ -594,7 +594,7 @@ describe("cursor heartbeat and outbound write lifecycle", () => {
 						if (args.toolCallId === "call-slow") {
 							return releaseSlow.promise;
 						}
-						return new Promise(() => {});
+						return Promise.withResolvers<ToolResultMessage>().promise;
 					},
 				},
 				onToolResult: result => {
@@ -703,7 +703,7 @@ describe("cursor heartbeat and outbound write lifecycle", () => {
 								timestamp: 1,
 							});
 						}
-						return new Promise(() => {});
+						return Promise.withResolvers<ToolResultMessage>().promise;
 					},
 				},
 				onToolResult: result => {
