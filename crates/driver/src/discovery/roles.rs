@@ -110,6 +110,17 @@ fn configured_roles(settings: &ModelSettings) -> Result<Vec<ModelRole>, Selectio
 /// Reports whether one concrete selector remains inside configured model and
 /// provider admission.
 pub fn model_selector_allowed(catalog: &Catalog, settings: &ModelSettings, selector: &str) -> bool {
+	model_selector_allowed_for_provider(catalog, settings, selector, None)
+}
+
+/// Reports whether one concrete selector remains inside configured admission
+/// on an optional credential-pinned provider route.
+pub fn model_selector_allowed_for_provider(
+	catalog: &Catalog,
+	settings: &ModelSettings,
+	selector: &str,
+	credential_provider: Option<&omp_catalog::ProviderId>,
+) -> bool {
 	catalog
 		.model(ModelKey::from_ref(selector))
 		.or_else(|| catalog.resolve_alias(selector))
@@ -121,7 +132,7 @@ pub fn model_selector_allowed(catalog: &Catalog, settings: &ModelSettings, selec
 						.as_str()
 						.split_once('/')
 						.map_or(model.key.as_str(), |(_, model)| model);
-					settings.model_allowed(route.provider.as_str(), model_id)
+					credential_route_allowed(settings, &route.provider, model_id, credential_provider)
 				})
 			})
 		})

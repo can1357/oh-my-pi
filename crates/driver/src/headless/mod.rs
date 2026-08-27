@@ -502,7 +502,7 @@ impl HeadlessSession {
 
 		let source = match &policy.session {
 			HeadlessSessionOpen::Resume(source) | HeadlessSessionOpen::Fork(source) => {
-				Some(source.clone())
+				Some(chat::strict_session_id(source).map_err(HeadlessError::OpenSession)?)
 			},
 			HeadlessSessionOpen::ContinueLatest => {
 				let index =
@@ -1529,14 +1529,12 @@ fn apply_revived_session_model(
 	let mut notice = None;
 	let mut substituted = false;
 	if !chat::model_selector_is_selectable(catalog, &snapshot.turn.params.model)
-		|| !crate::discovery::roles::model_selector_allowed(
+		|| !crate::discovery::roles::model_selector_allowed_for_provider(
 			catalog,
 			model_settings,
 			&snapshot.turn.params.model,
-		) || credential_provider.is_some_and(|provider| {
-		chat::resolve_model_provider(catalog, &snapshot.turn.params.model, Some(provider.as_str()))
-			.is_err()
-	}) {
+			credential_provider,
+		) {
 		let saved = Str::new(snapshot.turn.params.model.as_str());
 		let fallback = crate::discovery::roles::fallback_model_selector(
 			catalog,
@@ -1969,6 +1967,27 @@ mod tests {
 			.expect("second session opens on the same project root");
 		drop(second);
 	}
+
+	fn preview_options(project: PathBuf, model: Str) -> HeadlessSessionOptions {
+		HeadlessSessionOptions {
+			project,
+			settings_overlays: Box::new([]),
+			additional_roots: Box::new([]),
+			model,
+			initial_regime: None,
+			initial_prompt_slot: None,
+			plan_handoff: None,
+			resume: None,
+			fork: None,
+			py_eval: false,
+			approval_mode: None,
+			pty_denied: false,
+			credential_provider: None,
+			api_key: None,
+			prompt_cache_affinity: None,
+			session_generation: 1,
+		}
+	}
 	#[test]
 	fn preview_effective_model_returns_resolved_new_session_model() {
 		let catalog = snapshot::Catalog::try_embedded().expect("embedded catalog");
@@ -1983,24 +2002,7 @@ mod tests {
 		std::fs::create_dir_all(&data_dir).expect("data dir");
 		let root = scratch.path().join("project");
 		std::fs::create_dir_all(&root).expect("project");
-		let options = HeadlessSessionOptions {
-			project:               root,
-			settings_overlays:     Box::new([]),
-			additional_roots:      Box::new([]),
-			model:                 launch.clone(),
-			initial_regime:        None,
-			initial_prompt_slot:   None,
-			plan_handoff:          None,
-			resume:                None,
-			fork:                  None,
-			py_eval:               false,
-			approval_mode:         None,
-			pty_denied:            false,
-			credential_provider:   None,
-			api_key:               None,
-			prompt_cache_affinity: None,
-			session_generation:    1,
-		};
+		let options = preview_options(root, launch.clone());
 		let policy = HeadlessLaunchPolicy::default();
 		let effective =
 			HeadlessSession::preview_effective_model(&data_dir, &options, &policy).expect("preview");
@@ -2031,24 +2033,7 @@ mod tests {
 			None,
 		)
 		.expect("fallback");
-		let options = HeadlessSessionOptions {
-			project:               root,
-			settings_overlays:     Box::new([]),
-			additional_roots:      Box::new([]),
-			model:                 launch.clone(),
-			initial_regime:        None,
-			initial_prompt_slot:   None,
-			plan_handoff:          None,
-			resume:                None,
-			fork:                  None,
-			py_eval:               false,
-			approval_mode:         None,
-			pty_denied:            false,
-			credential_provider:   None,
-			api_key:               None,
-			prompt_cache_affinity: None,
-			session_generation:    1,
-		};
+		let options = preview_options(root, launch.clone());
 		let policy = HeadlessLaunchPolicy {
 			session: HeadlessSessionOpen::Resume(source),
 			..HeadlessLaunchPolicy::default()
@@ -2063,6 +2048,30 @@ mod tests {
 		.expect("fallback");
 		assert_eq!(effective, expected);
 		assert_ne!(effective.as_str(), "gone/gone");
+	}
+
+	#[test]
+	fn preview_effective_model_rejects_noncanonical_resume_before_journal_open() {
+		let catalog = snapshot::Catalog::try_embedded().expect("embedded catalog");
+		let launch = crate::discovery::roles::fallback_model_selector(
+			&catalog,
+			&omp_catalog::settings::ModelSettings::default(),
+			None,
+		)
+		.expect("fallback");
+		let scratch = tempfile::tempdir().expect("scratch");
+		let data_dir = scratch.path().join("data");
+		std::fs::create_dir_all(&data_dir).expect("data dir");
+		let root = scratch.path().join("project");
+		std::fs::create_dir_all(&root).expect("project");
+		let options = preview_options(root, launch);
+		let policy = HeadlessLaunchPolicy {
+			session: HeadlessSessionOpen::Resume(sf!("../escape")),
+			..HeadlessLaunchPolicy::default()
+		};
+		let error = HeadlessSession::preview_effective_model(&data_dir, &options, &policy)
+			.expect_err("noncanonical session id rejected before journal open");
+		assert!(matches!(error, HeadlessError::OpenSession(_)));
 	}
 }
 

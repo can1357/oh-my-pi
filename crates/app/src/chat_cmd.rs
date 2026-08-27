@@ -963,11 +963,15 @@ pub(crate) async fn run(
 		if let Some(model) = revived.model_override
 			&& !model.fallback
 		{
-			snapshot.turn.params.model = format!("{}/{}", model.model.provider.0, model.model.model.0);
+			snapshot.turn.params.model = model.model.model.0.to_string();
 		}
 		if !model_selector_is_selectable(catalog, &snapshot.turn.params.model)
-			|| !roles::model_selector_allowed(catalog, &model_settings, &snapshot.turn.params.model)
-		{
+			|| !roles::model_selector_allowed_for_provider(
+				catalog,
+				&model_settings,
+				&snapshot.turn.params.model,
+				credential_provider.as_ref(),
+			) {
 			let saved = snapshot.turn.params.model.clone();
 			let fallback =
 				roles::fallback_model_selector(catalog, &model_settings, credential_provider.as_ref())
