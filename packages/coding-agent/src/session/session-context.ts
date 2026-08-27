@@ -276,10 +276,13 @@ export function buildSessionContext(
 				models.default = `${entry.message.provider}/${entry.message.model}`;
 			}
 		} else if (entry.type === "compaction") {
+			const requiresTargetValidation = getOpenAiRemoteCompactionPayload(entry)?.referenceTarget !== undefined;
 			const canReplay =
-				!options?.activeModel ||
-				!options.compactionSettings ||
-				remotePreserveReusable(entry.preserveData, options.activeModel, options.compactionSettings);
+				options?.transcript === true ||
+				!requiresTargetValidation ||
+				(options?.activeModel !== undefined &&
+					options.compactionSettings !== undefined &&
+					remotePreserveReusable(entry.preserveData, options.activeModel, options.compactionSettings));
 			if (canReplay) compaction = entry;
 		} else if (entry.type === "ttsr_injection") {
 			// Collect injected TTSR rule names

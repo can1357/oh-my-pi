@@ -868,6 +868,39 @@ describe("buildOpenAiNativeHistory computer calls", () => {
 		]);
 	});
 
+	test("uses native screenshot metadata before unsupported canonical image fallback", () => {
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_computer_1|item_computer_1",
+			toolName: "computer",
+			content: [
+				{
+					type: "image",
+					data: "",
+					mimeType: "image/png",
+					providerFile: { provider: "anthropic", id: "file_unusable_fallback" },
+				},
+			],
+			isError: false,
+			timestamp: Date.now(),
+			providerMetadata: {
+				type: "computer",
+				screenshot: { type: "computer_screenshot", file_id: "file_native_screen" },
+				acknowledgedSafetyChecks,
+			},
+		};
+
+		const items = buildOpenAiNativeHistory([computerAssistant(), result], computerModel);
+
+		expect(items.at(-1)).toEqual({
+			type: "computer_call_output",
+			call_id: "call_computer_1",
+			output: { type: "computer_screenshot", file_id: "file_native_screen" },
+			acknowledged_safety_checks: acknowledgedSafetyChecks,
+		});
+		expect(JSON.stringify(items)).not.toContain("file_unusable_fallback");
+	});
+
 	test("registers native provider-payload computer calls for exact output pairing", () => {
 		const assistant = computerAssistant();
 		assistant.providerPayload = {
@@ -2532,7 +2565,7 @@ describe("compact() remote compaction failure handling", () => {
 			remoteCompaction: {
 				enabled: true,
 				v2StreamingEnabled: true,
-				v2Endpoint: "https://compact.example/v1/responses",
+				v2Endpoint: "https://api.openai.com/v1/responses",
 			},
 		});
 		// Produce a real V2 preserve payload (opaque placeholder summary, provider "openai").
@@ -2656,6 +2689,36 @@ describe("compact() remote compaction failure handling", () => {
 			[changedRequestModel],
 		);
 		expect(JSON.stringify(candidateMismatch?.messagesToSummarize ?? [])).toContain("ORIGINAL ALPHA port 4242");
+
+		const compactionModelOverride = makeOpenAiModel({
+			input: ["text", "image"],
+			remoteCompaction: {
+				enabled: true,
+				v2StreamingEnabled: true,
+				v2Endpoint: "https://compact.example/v1/responses",
+				model: "gpt-5-mini",
+			},
+		});
+		const runtimeMismatchEntries = entries.map(entry =>
+			entry.type === "compaction"
+				? {
+						...entry,
+						preserveData: {
+							...entry.preserveData,
+							openaiRemoteCompaction: {
+								...(entry.preserveData?.openaiRemoteCompaction as Record<string, unknown>),
+								referenceTarget: getOpenAiCompactionReferenceTarget(compactionModelOverride, true),
+							},
+						},
+					}
+				: entry,
+		) as SessionEntry[];
+		const runtimeMismatch = prepareCompaction(
+			runtimeMismatchEntries,
+			{ ...baseSettings, remoteStreamingV2Enabled: true },
+			compactionModelOverride,
+		);
+		expect(JSON.stringify(runtimeMismatch?.messagesToSummarize ?? [])).toContain("ORIGINAL ALPHA port 4242");
 	});
 
 	test("re-expands a stranded remote compaction when the active model cannot replay it (#6343)", () => {

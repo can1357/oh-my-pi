@@ -54,6 +54,7 @@ import { NativeCompactionError } from "./errors";
 import { type ConvertToLlm, createBranchSummaryMessage, createCustomMessage, defaultConvertToLlm } from "./messages";
 import {
 	buildOpenAiNativeHistory,
+	canReplayOpenAiCompactionHistory,
 	canReuseOpenAiCompactionHistory,
 	getOpenAiCompactionReferenceTarget,
 	getPreservedOpenAiRemoteCompactionData,
@@ -1282,6 +1283,8 @@ export function remotePreserveReusable(
 	const v1Preserve = getPreservedOpenAiRemoteCompactionData(preserveData);
 	if (!v2Preserve && !v1Preserve) return true;
 	if (settings.remoteEnabled === false) return false;
+	const runtimePreserve = v2Preserve ?? v1Preserve;
+	if (!runtimePreserve || !canReplayOpenAiCompactionHistory(runtimePreserve, activeModel)) return false;
 	const reusableByModel = (model: Model): boolean => {
 		if (settings.remoteStreamingV2Enabled !== false && shouldUseCompactionV2Streaming(model)) {
 			return !!v2Preserve && canReuseOpenAiCompactionHistory(v2Preserve, model, true);
@@ -1290,7 +1293,8 @@ export function remotePreserveReusable(
 		const v1Candidate = v1Preserve ?? v2Preserve;
 		return !!v1Candidate && canReuseOpenAiCompactionHistory(v1Candidate, model, false);
 	};
-	return reusableByModel(activeModel) && compactionModels.every(reusableByModel);
+	const extensionModels = compactionModels.length > 0 ? compactionModels : [activeModel];
+	return extensionModels.every(reusableByModel);
 }
 
 /**

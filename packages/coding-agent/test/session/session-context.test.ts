@@ -112,17 +112,25 @@ describe("buildSessionContext snapcompact archives", () => {
 			activeModel: targetModel,
 			compactionSettings: DEFAULT_COMPACTION_SETTINGS,
 		});
+		const unscopedContext = buildSessionContext(entries);
 		const compatibleContext = buildSessionContext(entries, undefined, undefined, {
 			activeModel: sourceModel,
 			compactionSettings: DEFAULT_COMPACTION_SETTINGS,
+		});
+		const transcriptContext = buildSessionContext(entries, undefined, undefined, {
+			transcript: true,
+			collapseCompactedHistory: true,
 		});
 
 		expect(context.messages.map(message => message.role)).toEqual(["user", "user"]);
 		expect(JSON.stringify(context.messages)).toContain("original durable context");
 		expect(JSON.stringify(context.messages)).not.toContain("file_image_source");
+		expect(unscopedContext.messages.map(message => message.role)).toEqual(["user", "user"]);
+		expect(JSON.stringify(unscopedContext.messages)).toContain("original durable context");
 		expect(compactionSummary(compatibleContext.messages).providerPayload?.referenceTarget).toBe(
 			getOpenAIResponsesReferenceTarget(sourceModel),
 		);
+		expect(compactionSummary(transcriptContext.messages).summary).toBe("opaque remote summary");
 	});
 
 	it("omits snapcompact archive blocks from collapsed transcript summaries", () => {

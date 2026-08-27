@@ -351,6 +351,17 @@ export function canReuseOpenAiCompactionHistory(
 	return !replacementHistoryContainsTargetDependentImage(preserved.replacementHistory);
 }
 
+export function canReplayOpenAiCompactionHistory(
+	preserved: Pick<OpenAiRemoteCompactionPreserveData, "provider" | "referenceTarget" | "replacementHistory">,
+	model: Model,
+): boolean {
+	if (preserved.provider !== model.provider) return false;
+	if (preserved.referenceTarget !== undefined) {
+		return preserved.referenceTarget === getOpenAIResponsesReferenceTarget(model);
+	}
+	return !replacementHistoryContainsTargetDependentImage(preserved.replacementHistory);
+}
+
 function resolveOpenAiCompactEndpoint(model: Model): string {
 	const configuredEndpoint = model.remoteCompaction?.endpoint;
 	const compactionApi = model.remoteCompaction?.api ?? model.api;
@@ -853,10 +864,15 @@ export function buildOpenAiNativeHistory(
 				msgIndex++;
 				continue;
 			}
-			const { output, outputText } = knownCallIds.has(normalized.callId)
-				? encodeResponsesToolResultOutput(message, referenceModel, supportsImageDetailOriginal)
-				: encodeResponsesOrphanToolResultOutput(message, referenceModel, supportsImageDetailOriginal);
 			if (demotedComputerCallIds.has(normalized.callId)) {
+				const outputText =
+					message.providerMetadata?.type === "computer"
+						? ""
+						: encodeResponsesOrphanToolResultOutput(
+								message,
+								referenceModel,
+								supportsImageDetailOriginal,
+							).outputText;
 				const resultItem =
 					message.providerMetadata?.type === "computer"
 						? {
@@ -875,6 +891,11 @@ export function buildOpenAiNativeHistory(
 			}
 			if (!knownCallIds.has(normalized.callId)) {
 				if (!staleCallIds.has(normalized.callId)) {
+					const { output } = encodeResponsesOrphanToolResultOutput(
+						message,
+						referenceModel,
+						supportsImageDetailOriginal,
+					);
 					const orphanOutput = splitResponsesOrphanOutput(output, referenceModel, supportsImageDetailOriginal);
 					const limit = 16_000;
 					const noteText =
@@ -905,6 +926,11 @@ export function buildOpenAiNativeHistory(
 					continue;
 				}
 
+				const { outputText } = encodeResponsesToolResultOutput(
+					message,
+					referenceModel,
+					supportsImageDetailOriginal,
+				);
 				const callIndex = input.findLastIndex(
 					item => item.type === "computer_call" && item.call_id === normalized.callId,
 				);
@@ -918,6 +944,7 @@ export function buildOpenAiNativeHistory(
 				continue;
 			}
 
+			const { output } = encodeResponsesToolResultOutput(message, referenceModel, supportsImageDetailOriginal);
 			input.push({
 				type: customCallIds.has(normalized.callId) ? "custom_tool_call_output" : "function_call_output",
 				call_id: normalized.callId,
