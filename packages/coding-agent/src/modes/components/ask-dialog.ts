@@ -576,9 +576,11 @@ export class AskDialogComponent implements Component, Focusable {
 				this.#handleQuestionInput(keyData);
 				return;
 			}
+			const prevFocusedKey = active ? this.#visibleRows(active.question)[active.state.cursorIndex]?.key : undefined;
 			this.#filterInput.handleInput(keyData);
 			if (this.#filterInput) {
 				this.#filterQuery = this.#filterInput.getValue();
+				if (active) this.#reanchorCursor(active.question, active.state, prevFocusedKey);
 				this.#requestRender();
 			}
 			return;
@@ -845,6 +847,30 @@ export class AskDialogComponent implements Component, Focusable {
 		const other = rows.find(rowItem => rowItem.kind === "other");
 		const filtered = fuzzyFilter(options, query, rowItem => rowItem.label);
 		return other ? [...filtered, other] : filtered;
+	}
+
+	/** Re-anchor `cursorIndex` after a filter query narrows the visible rows.
+	 *  Preserve focus on the prior row when it remains visible; otherwise reset
+	 *  to the first matching option row — never to `Other` and never to a stale
+	 *  numeric index that clamps onto the trailing `Other` row. */
+	#reanchorCursor(
+		question: ExtensionAskDialogQuestion,
+		state: QuestionState,
+		prevFocusedKey: string | undefined,
+	): void {
+		const rows = this.#visibleRows(question);
+		if (rows.length === 0) return;
+		if (prevFocusedKey !== undefined) {
+			const idx = rows.findIndex(r => r.key === prevFocusedKey);
+			if (idx >= 0) {
+				state.cursorIndex = idx;
+				state.manualScroll = false;
+				return;
+			}
+		}
+		const firstOption = rows.findIndex(r => r.kind === "option");
+		state.cursorIndex = firstOption >= 0 ? firstOption : 0;
+		state.manualScroll = false;
 	}
 
 	#optionLabel(question: ExtensionAskDialogQuestion, label: string, index: number): string {

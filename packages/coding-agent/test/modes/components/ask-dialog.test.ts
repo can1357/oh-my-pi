@@ -1740,7 +1740,8 @@ describe("AskDialogComponent", () => {
 			let out = stripVTControlCharacters(component.render(80).join("\n")).replaceAll(CURSOR_MARKER, "");
 			expect(out).toContain("/ 1");
 			expect(out).toMatch(/\d+\/21/);
-			expect(out).toContain("❯ 1 ○");
+			const focusedLine = out.split("\n").find(line => line.includes("❯"));
+			expect(focusedLine).toContain("Option 01");
 			component.handleInput(CANCEL);
 			out = stripVTControlCharacters(component.render(80).join("\n")).replaceAll(CURSOR_MARKER, "");
 			expect(out).not.toContain("/ 1");
@@ -2201,13 +2202,14 @@ describe("AskDialogComponent", () => {
 		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
 		try {
 			const onPrompt = vi.fn().mockReturnValue(Promise.resolve(undefined));
+			const onSubmit = vi.fn();
 			const options = [
 				{ label: "Alpha match" },
 				{ label: "Bravo match" },
 				...Array.from({ length: 18 }, (_, index) => ({ label: `Other ${index}` })),
 			];
 			const component = new AskDialogComponent([{ id: "q1", question: "Pick many?", options, multi: true }], {
-				onSubmit: vi.fn(),
+				onSubmit,
 				onCancel: vi.fn(),
 				onPrompt,
 			});
@@ -2216,15 +2218,53 @@ describe("AskDialogComponent", () => {
 			for (let i = 0; i < 10; i++) component.handleInput(DOWN);
 			component.handleInput("/");
 			for (const ch of "match") component.handleInput(ch);
-			// Enter without an intervening render: without the clamp fix,
-			// cursorIndex (10) exceeds the filtered array length (3) and
-			// #activateFocusedRow silently returns. With the fix, the cursor
-			// is clamped to a valid row and activation proceeds — here it
-			// lands on the "Other" row and opens the custom-input prompt.
+			// Typing into the filter re-anchors the cursor to the first
+			// matching option row ("Alpha match"), so Enter activates it
+			// and advances — it must not clamp onto the trailing "Other"
+			// row and open the custom-input prompt.
 			component.handleInput(ENTER);
-			expect(onPrompt).toHaveBeenCalledTimes(1);
+			expect(onPrompt).not.toHaveBeenCalled();
+			expect(onSubmit).toHaveBeenCalledTimes(1);
 			await Promise.resolve();
 			await Promise.resolve();
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("filter reanchor: focus on a later row narrows to an earlier match and activates it, not Other", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const onPrompt = vi.fn();
+			const onSubmit = vi.fn();
+			const options = [
+				{ label: "Alpha zebra" },
+				{ label: "Bravo zebra" },
+				{ label: "Charlie zebra" },
+				{ label: "Delta zebra" },
+				{ label: "Echo zebra" },
+				...Array.from({ length: 18 }, (_, index) => ({ label: `Filler ${index}` })),
+			];
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick?", options }], {
+				onSubmit,
+				onCancel: vi.fn(),
+				onPrompt,
+			});
+			component.focused = true;
+			// Move focus to a later row (Delta zebra, index 3).
+			for (let i = 0; i < 3; i++) component.handleInput(DOWN);
+			// Open the filter and type a query that leaves an earlier
+			// matching option ("Alpha zebra") as the first visible row.
+			component.handleInput("/");
+			for (const ch of "Alpha") component.handleInput(ch);
+			// Enter must select the first matching option ("Alpha zebra")
+			// and advance — not open the custom-input prompt on "Other".
+			component.handleInput(ENTER);
+			expect(onPrompt).not.toHaveBeenCalled();
+			expect(onSubmit).toHaveBeenCalledTimes(1);
+			expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Alpha zebra"]);
 		} finally {
 			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
 			else Reflect.deleteProperty(process.stdout, "rows");
