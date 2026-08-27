@@ -20,13 +20,14 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage, AgentState } from "@oh-my-pi/pi-agent-core";
-import type { ToolAttachment, ToolFact } from "@oh-my-pi/pi-agent-core/presentation";
+import type { RetainedDisplay, ToolAttachment, ToolFact } from "@oh-my-pi/pi-agent-core/presentation";
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { $which, logger } from "@oh-my-pi/pi-utils";
 import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { $ } from "bun";
 import { obfuscateToolArguments } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import { mapJsonStrings } from "../secrets/placeholder-scan";
 import {
 	type SessionEntry,
 	type SessionHeader,
@@ -379,6 +380,29 @@ function redactShareToolAttachment(
 	}
 }
 
+/** Redact secrets inside a retained eval display's JSON item value (same untyped-JSON-walk exception as {@link obfuscateToolArguments}). */
+function redactShareToolDisplay(
+	o: SecretObfuscator,
+	display: RetainedDisplay,
+	sharedRegexSecretValues: ReadonlySet<string>,
+): RetainedDisplay {
+	if (display.display.kind !== "sequence") return display;
+	return {
+		...display,
+		display: {
+			...display.display,
+			items: display.display.items.map(item =>
+				item.kind === "json"
+					? {
+							...item,
+							value: mapJsonStrings(item.value, s => o.obfuscate(s, sharedRegexSecretValues)) as typeof item.value,
+						}
+					: item,
+			),
+		},
+	};
+}
+
 function redactShareSettledEntry(
 	o: SecretObfuscator,
 	entry: ToolExecutionSettledEntry,
@@ -409,6 +433,9 @@ function redactShareSettledEntry(
 			facts: entry.presentation.facts.map(fact => redactShareToolFact(o, fact, sharedRegexSecretValues)),
 			attachments: entry.presentation.attachments.map(attachment =>
 				redactShareToolAttachment(o, attachment, sharedRegexSecretValues),
+			),
+			displays: entry.presentation.displays?.map(display =>
+				redactShareToolDisplay(o, display, sharedRegexSecretValues),
 			),
 		},
 		modelProjection: {

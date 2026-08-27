@@ -458,6 +458,12 @@ describe("buildShareSnapshot", () => {
 						},
 					],
 					attachments: [{ kind: "diff", path: "/tmp/x.ts", oldText: `old ${secret}`, newText: `new ${secret}` }],
+					displays: [
+						{
+							atByte: 0,
+							display: { kind: "sequence", items: [{ kind: "json", value: { note: `nested ${secret}` } }] },
+						},
+					],
 				},
 				modelProjection: { version: 1, content: [{ type: "text", text: `model body ${secret}` }] },
 			} as unknown as SessionEntry,

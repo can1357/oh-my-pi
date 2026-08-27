@@ -475,9 +475,12 @@ export function collectJsonRegexSecretValues(obfuscator: SecretObfuscator, value
 }
 
 /**
- * Map every string in arbitrary JSON. Used ONLY for tool-call arguments, whose
- * shape is model-authored and not known ahead of time. No other caller may walk
- * untyped data: every message/content path is handled by a typed transformer.
+ * Map every string in arbitrary JSON. Sanctioned for exactly two untyped-JSON
+ * shapes whose contents are model/tool-authored and not known ahead of time:
+ * tool-call arguments, and a retained eval display's `json` item value
+ * (`export/share.ts`'s `redactShareToolDisplay`). No other caller may walk
+ * untyped data: every other message/content path is handled by a typed
+ * transformer.
  */
 export function mapJsonStrings(value: JsonValue, fn: (s: string) => string): JsonValue {
 	if (typeof value === "string") return fn(value);
