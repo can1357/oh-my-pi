@@ -929,10 +929,10 @@ export interface ToolApprovalResolvedEvent {
 
 /**
  * Fired after final tool-input resolution for an eligible mode-derived prompt,
- * before the native approval selector. The review is advisory: it may approve
- * the call (skipping the ordinary prompt) or escalate back to it — it can never
- * deny the call or rewrite its input. `input` is the exact object that will
- * reach execution.
+ * before the native approval selector. The review may approve the call
+ * (skipping the ordinary prompt), escalate back to it, or deny the call. It
+ * cannot rewrite the input. `input` is the exact object that will reach
+ * execution.
  */
 export interface ToolApprovalReviewEvent {
 	type: "tool_approval_review";
@@ -946,7 +946,8 @@ export interface ToolApprovalReviewEvent {
 
 export type ToolApprovalReviewResult =
 	| { decision: "approve"; rationale?: string }
-	| { decision: "escalate"; reason?: string };
+	| { decision: "escalate"; reason?: string }
+	| { decision: "deny"; reason?: string };
 
 interface ToolCallEventBase {
 	type: "tool_call";

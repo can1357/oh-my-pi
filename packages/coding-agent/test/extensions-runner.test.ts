@@ -2613,7 +2613,7 @@ describe("ExtensionRunner", () => {
 			]);
 			delete globalState.__partialContextApprovalEvents;
 		});
-		// Tests for the generic tool_approval_review seam, written before the implementation.
+		// Tests for the generic tool_approval_review seam.
 		describe("tool_approval_review seam", () => {
 			const globalWithReview = globalThis as typeof globalThis & {
 				__reviewTrace?: Array<Record<string, unknown>>;
@@ -2729,7 +2729,9 @@ describe("ExtensionRunner", () => {
 
 			// --- Dedicated unanimous dispatch (runner level) ---
 
-			const dispatchRunner = (reviewHandlers: Array<(event: unknown, ctx: unknown) => unknown>): ExtensionRunner => {
+			const dispatchRunner = (
+				reviewHandlers: Array<(event: ToolApprovalReviewEvent, ctx: unknown) => unknown>,
+			): ExtensionRunner => {
 				const extensionPath = path.join(extensionsDir, "review-dispatch.ts");
 				const extension: Extension = {
 					path: extensionPath,
@@ -2780,7 +2782,7 @@ describe("ExtensionRunner", () => {
 				await expect(runner.emitToolApprovalReview(dispatchEvent)).resolves.toEqual({ decision: "approve" });
 				expect(seen).toHaveLength(1);
 				expect(seen[0]).toEqual(dispatchEvent);
-				// The public event carries exactly these fields — no deny, rewrite, or mode channels.
+				// The public event carries exactly these fields — no input rewrite channel.
 				expect(Object.keys(seen[0] ?? {}).sort()).toEqual([
 					"approvalMode",
 					"input",
@@ -2792,12 +2794,32 @@ describe("ExtensionRunner", () => {
 				]);
 			});
 
-			it("dispatch returns escalation when handlers disagree (no last-result-wins)", async () => {
+			it("dispatch returns a valid deny result with its reason", async () => {
+				const runner = dispatchRunner([async () => ({ decision: "deny", reason: "policy refusal" })]);
+				await expect(runner.emitToolApprovalReview(dispatchEvent)).resolves.toEqual({
+					decision: "deny",
+					reason: "policy refusal",
+				});
+			});
+
+			it("dispatch gives deny precedence over escalation and approval", async () => {
+				const seen: string[] = [];
 				const runner = dispatchRunner([
-					async () => ({ decision: "approve" }),
-					async () => ({ decision: "escalate", reason: "second opinion" }),
+					async () => {
+						seen.push("approve");
+						return { decision: "approve" };
+					},
+					async () => {
+						seen.push("escalate");
+						return { decision: "escalate", reason: "second opinion" };
+					},
+					async () => {
+						seen.push("deny");
+						return { decision: "deny" };
+					},
 				]);
-				await expect(runner.emitToolApprovalReview(dispatchEvent)).resolves.toMatchObject({ decision: "escalate" });
+				await expect(runner.emitToolApprovalReview(dispatchEvent)).resolves.toEqual({ decision: "deny" });
+				expect(seen).toEqual(["approve", "escalate", "deny"]);
 			});
 
 			it("dispatch returns escalation for malformed handler results", async () => {
@@ -2805,7 +2827,9 @@ describe("ExtensionRunner", () => {
 					undefined,
 					"approve",
 					{},
-					{ decision: "deny" },
+					{ decision: "deny", extra: true },
+					{ decision: "deny", reason: 123 },
+					{ decision: "approve", rationale: 123 },
 					{ decision: "approve", input: { command: "rewritten" } },
 				];
 				for (const result of malformed) {
@@ -2842,10 +2866,11 @@ describe("ExtensionRunner", () => {
 				});
 				expect(handler).not.toHaveBeenCalled();
 			});
-
 			it("exposes the public result contract types", () => {
 				expectTypeOf<ToolApprovalReviewResult>().toEqualTypeOf<
-					{ decision: "approve"; rationale?: string } | { decision: "escalate"; reason?: string }
+					| { decision: "approve"; rationale?: string }
+					| { decision: "escalate"; reason?: string }
+					| { decision: "deny"; reason?: string }
 				>();
 			});
 
@@ -3045,7 +3070,7 @@ describe("ExtensionRunner", () => {
 					"review-override.ts",
 					reviewExtensionCode(`return { decision: "approve" };`),
 				);
-				const tool = { ...approvalTool, approval: { tier: "exec", policy: "prompt", override: true } };
+				const tool = { ...approvalTool, approval: { tier: "exec", policy: "prompt", override: true } as const };
 				const result = await executeReviewCase(runner, tool, "call-override-prompt");
 
 				expect(firstReviewText(result)).toBe("ok");
@@ -3074,7 +3099,7 @@ describe("ExtensionRunner", () => {
 						},
 					}),
 				).rejects.toThrow();
-				const denyTool = { ...approvalTool, approval: { policy: "deny", tier: "exec", reason: "no" } };
+				const denyTool = { ...approvalTool, approval: { policy: "deny", tier: "exec", reason: "no" } as const };
 				await expect(executeReviewCase(runner, denyTool, "call-tool-deny")).rejects.toThrow();
 
 				expect(select).not.toHaveBeenCalled();
@@ -3216,20 +3241,23 @@ describe("ExtensionRunner", () => {
 				clearTrace();
 			});
 
-			it("a deny-shaped review result is not a deny: it escalates to the native selector", async () => {
+			it("review deny rejects via native denial path without selector or execution", async () => {
 				const trace = setTrace();
 				const { runner, select } = await reviewRunnerFromFile(
-					"review-deny-shape.ts",
+					"review-deny.ts",
 					reviewExtensionCode(`return { decision: "deny", reason: "reviewer refuses" };`),
 				);
-				const result = await executeReviewCase(runner, recordingApprovalTool(), "call-deny-shape", {
-					params: { command: "echo good" },
-				});
 
-				expect(firstReviewText(result)).toBe("ok");
-				expect(select).toHaveBeenCalledTimes(1);
-				expect(trace[0]).toMatchObject({ kind: "review", toolCallId: "call-deny-shape" });
-				expect(trace.some(entry => entry.kind === "executed")).toBe(true);
+				await expect(
+					executeReviewCase(runner, recordingApprovalTool(), "call-review-deny", {
+						params: { command: "echo good" },
+					}),
+				).rejects.toThrow('Tool "dangerous_tool" is blocked by tool policy.\nReason: reviewer refuses');
+
+				expect(select).not.toHaveBeenCalled();
+				expect(trace).toHaveLength(1);
+				expect(trace[0]).toMatchObject({ kind: "review", toolCallId: "call-review-deny" });
+				expect(trace.some(entry => entry.kind === "executed")).toBe(false);
 				clearTrace();
 			});
 

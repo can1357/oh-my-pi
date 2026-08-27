@@ -269,11 +269,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		};
 
 		// Advisory extension review, exactly between final input resolution and
-		// the native selector. Eligible only for mode-derived prompts: unanimous
-		// approval suppresses the ordinary prompt below; every other outcome
-		// keeps it unchanged. The review cannot deny or rewrite the call — the
-		// event carries the exact execution input and the result shape carries
-		// no deny or rewrite fields.
+		// the native selector. Eligible only for mode-derived prompts: approve
+		// suppresses the ordinary prompt, escalate keeps it unchanged, and deny
+		// rejects through the native policy-denial path without UI or execution.
 		if (
 			approvalCheck.required &&
 			resolved.policy === "prompt" &&
@@ -295,6 +293,17 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				},
 				signal,
 			);
+			if (review.decision === "deny") {
+				throw denyError(
+					{
+						...resolved,
+						policy: "deny",
+						source: "tool",
+						...(review.reason ? { reason: review.reason } : {}),
+					},
+					this.tool.name,
+				);
+			}
 			if (review.decision === "approve") {
 				// Suppress only this eligible mode-derived native prompt.
 				approvalCheck.required = false;

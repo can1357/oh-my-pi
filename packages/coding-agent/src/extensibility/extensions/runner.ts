@@ -125,6 +125,25 @@ function handlerTimeoutForEvent(eventType: string): number {
 const EXTENSION_HANDLER_TIMEOUT = Symbol("extensionHandlerTimeout");
 const EXTENSION_HANDLER_ABORTED = Symbol("extensionHandlerAborted");
 
+function isToolApprovalReviewResult(value: unknown): value is ToolApprovalReviewResult {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+	const record = value as Record<string, unknown>;
+	const keys = Object.keys(record);
+	if (record.decision === "approve") {
+		return (
+			keys.every(key => key === "decision" || key === "rationale") &&
+			(record.rationale === undefined || typeof record.rationale === "string")
+		);
+	}
+	if (record.decision === "escalate" || record.decision === "deny") {
+		return (
+			keys.every(key => key === "decision" || key === "reason") &&
+			(record.reason === undefined || typeof record.reason === "string")
+		);
+	}
+	return false;
+}
+
 interface HandlerTimeoutBudget {
 	pause(): void;
 	resume(): void;
@@ -1515,14 +1534,11 @@ export class ExtensionRunner {
 	/**
 	 * Emit a `tool_approval_review` event to every subscribed extension.
 	 *
-	 * Advisory pre-execution review of an eligible mode-derived approval prompt.
-	 * Approval is returned only when at least one handler participates and every
-	 * handler returns exactly `{ decision: "approve" }`. Any other outcome — no
-	 * handlers, escalation, malformed results, throws, timeouts, or
-	 * cancellation — maps to `{ decision: "escalate" }`, which keeps the caller
-	 * on the ordinary native approval path. The review can never deny or
-	 * rewrite the call: the event carries no deny/rewrite shape and only a
-	 * unanimous approve suppresses the prompt.
+	 * Review of an eligible mode-derived approval prompt. A valid deny takes
+	 * precedence over escalation; escalation includes malformed results, throws,
+	 * timeouts, and cancellation. Approval is returned only when at least one
+	 * handler participates and every handler returns exactly a valid approve
+	 * result. No handlers escalate to the ordinary native approval path.
 	 */
 	async emitToolApprovalReview(
 		event: ToolApprovalReviewEvent,
@@ -1530,6 +1546,10 @@ export class ExtensionRunner {
 	): Promise<ToolApprovalReviewResult> {
 		let ctx: ExtensionContext | undefined;
 		let participated = false;
+		let hasEscalation = false;
+		let escalationReason: string | undefined;
+		let hasDenial = false;
+		let denialReason: string | undefined;
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get(event.type);
@@ -1538,7 +1558,10 @@ export class ExtensionRunner {
 
 			for (const handler of handlers) {
 				const result = await this.#runHandlerWithTimeout<ToolApprovalReviewEvent, ToolApprovalReviewResult>(
-					handler as (event: ToolApprovalReviewEvent, ctx: ExtensionContext) => Promise<ToolApprovalReviewResult | undefined>,
+					handler as (
+						event: ToolApprovalReviewEvent,
+						ctx: ExtensionContext,
+					) => Promise<ToolApprovalReviewResult | undefined>,
 					event,
 					ctx,
 					ext,
@@ -1548,20 +1571,25 @@ export class ExtensionRunner {
 					() => ({ decision: "escalate", reason: `Extension ${ext.path} failed or timed out` }),
 					signal,
 				);
-				if (
-					result?.decision === "approve" &&
-					Object.keys(result).every(key => key === "decision" || key === "rationale")
-				) {
-					participated = true;
+				participated = true;
+				if (!isToolApprovalReviewResult(result)) {
+					hasEscalation = true;
 					continue;
 				}
-				return {
-					decision: "escalate",
-					...(result?.decision === "escalate" && result.reason ? { reason: result.reason } : {}),
-				};
+				if (result.decision === "deny") {
+					hasDenial = true;
+					denialReason ??= result.reason;
+					continue;
+				}
+				if (result.decision === "escalate") {
+					hasEscalation = true;
+					escalationReason ??= result.reason;
+				}
 			}
 		}
 
+		if (hasDenial) return { decision: "deny", ...(denialReason ? { reason: denialReason } : {}) };
+		if (hasEscalation) return { decision: "escalate", ...(escalationReason ? { reason: escalationReason } : {}) };
 		if (!participated) return { decision: "escalate", reason: "no review handlers" };
 		return { decision: "approve" };
 	}
