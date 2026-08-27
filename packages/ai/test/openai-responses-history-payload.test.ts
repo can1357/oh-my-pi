@@ -6,7 +6,7 @@ import {
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
-import type { Context, Model, ModelSpec, ProviderSessionState, Tool } from "@oh-my-pi/pi-ai/types";
+import type { Context, FetchImpl, Model, ModelSpec, ProviderSessionState, Tool } from "@oh-my-pi/pi-ai/types";
 import {
 	createOpenAIResponsesHistoryPayload,
 	getOpenAIResponsesReferenceTarget,
@@ -474,6 +474,55 @@ describe("OpenAI responses history payload", () => {
 		)) as { input?: unknown[] };
 		expect(containsEncryptedReasoning(movedEndpoint.input)).toBe(false);
 		expect(containsAssistantOutputText(movedEndpoint.input, "stamped answer")).toBe(true);
+	});
+
+	it("binds Responses history to the effective wire model, not the catalog id", async () => {
+		const model = buildStampedResponsesModel("https://api.openai.com/v1");
+		const stream = streamOpenAIResponses(
+			model,
+			{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
+			{ apiKey: "test-key", fetch: async () => createStampedSseResponse() },
+		);
+		let message: Awaited<ReturnType<typeof stream.result>> | undefined;
+		for await (const event of stream) {
+			if (event.type === "done") message = event.message;
+			if (event.type === "error") throw event.error;
+		}
+		if (!message) throw new Error("expected a completed assistant message");
+
+		const followUp: Context = {
+			messages: [message, { role: "user", content: "continue", timestamp: 1 }],
+		};
+		const sameModel = (await captureResponsesPayload(model, followUp)) as { input?: unknown[]; model?: unknown };
+		expect(sameModel.model).toBe("gpt-5-stamped");
+		expect(containsEncryptedReasoning(sameModel.input)).toBe(true);
+
+		const routed = (await captureResponsesPayload(model, followUp, undefined, {
+			extraBody: { model: "gpt-5-routed" },
+		})) as { input?: unknown[]; model?: unknown };
+		expect(routed.model).toBe("gpt-5-routed");
+		expect(containsEncryptedReasoning(routed.input)).toBe(false);
+		expect(containsAssistantOutputText(routed.input, "stamped answer")).toBe(true);
+	});
+
+	it("rejects an onPayload replacement that repoints the Responses request at another model", async () => {
+		const model = buildStampedResponsesModel("https://api.openai.com/v1");
+		const fetchMock = vi.fn(async () => createStampedSseResponse());
+		const stream = streamOpenAIResponses(
+			model,
+			{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
+			{
+				apiKey: "test-key",
+				fetch: fetchMock as unknown as FetchImpl,
+				onPayload: payload => ({ ...(payload as Record<string, unknown>), model: "gpt-5-elsewhere" }),
+			},
+		);
+		let errorMessage: string | undefined;
+		for await (const event of stream) {
+			if (event.type === "error") errorMessage = event.error.errorMessage;
+		}
+		expect(errorMessage).toContain("gpt-5-elsewhere");
+		expect(fetchMock).toHaveBeenCalledTimes(0);
 	});
 
 	it("hashes routing identity and keeps query-scoped Responses targets distinct", async () => {

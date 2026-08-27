@@ -576,6 +576,37 @@ export function applyWireModelIdTransform(
 	}
 }
 
+/**
+ * Effective `model` selector the Responses request carries on the wire: the
+ * catalog id after `wireModelIdMode`/OpenRouter-variant transformation, then
+ * any explicit `extraBody.model` override. Target fingerprints and the request
+ * body must both go through this so replay validation matches actual routing.
+ */
+export function resolveResponsesWireModelId(
+	baseId: string,
+	mode: ResolvedOpenAISharedCompat["wireModelIdMode"],
+	openrouterVariant: string | undefined,
+	extraBody: Record<string, unknown> | undefined,
+): string {
+	const override = extraBody?.model;
+	if (typeof override === "string" && override.length > 0) return override;
+	return applyWireModelIdTransform(baseId, mode, openrouterVariant);
+}
+
+/**
+ * Target-bound native history is admitted against the routing target computed
+ * before request shaping, so a late `onPayload` replacement that re-points the
+ * request at another model would replay endpoint-owned items to it.
+ */
+export function assertResponsesWireModelUnchanged(payload: unknown, expectedModel: string, api: string): void {
+	if (!isRecord(payload)) return;
+	const replacedModel = payload.model;
+	if (typeof replacedModel !== "string" || replacedModel === expectedModel) return;
+	throw new AIError.ValidationError(
+		`onPayload cannot repoint a ${api} request from model "${expectedModel}" to "${replacedModel}"; replayed history is bound to the original routing target`,
+	);
+}
+
 export interface OpenAIOutputTokenParam {
 	field: "max_tokens" | "max_completion_tokens" | "max_output_tokens";
 	value: number;

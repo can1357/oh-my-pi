@@ -12,6 +12,7 @@ import type {
 	ToolChoice,
 } from "../types";
 import {
+	createOpenAIResponsesHistoryPayload,
 	getOpenAIResponsesReferenceTarget,
 	resolveAzureOpenAIBaseUrl,
 	resolveCacheRetention,
@@ -39,6 +40,7 @@ import type { ResponseCreateParamsStreaming, ResponseStreamEvent } from "./opena
 import {
 	applyCommonResponsesSamplingParams,
 	applyResponsesReasoningParams,
+	assertResponsesWireModelUnchanged,
 	buildResponsesInput,
 	createInitialResponsesAssistantMessage,
 	getOpenAIPromptCacheKey,
@@ -135,6 +137,7 @@ const streamAzureOpenAIResponsesOnce = (
 			let params = buildParams(requestModel, context, options, deploymentName, referenceTarget);
 			const replacementPayload = await options?.onPayload?.(params, requestModel);
 			if (replacementPayload !== undefined) {
+				assertResponsesWireModelUnchanged(replacementPayload, deploymentName, model.api);
 				params = replacementPayload as typeof params;
 			}
 			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs();
@@ -211,9 +214,13 @@ const streamAzureOpenAIResponsesOnce = (
 				isProgressItem: isOpenAIResponsesProgressEvent,
 			});
 			let sawTerminalResponseEvent = false;
+			const nativeOutputItems: Array<Record<string, unknown>> = [];
 			await processResponsesStream(timedOpenaiStream, output, stream, model, {
 				onFirstToken: () => {
 					if (!firstTokenTime) firstTokenTime = performance.now();
+				},
+				onOutputItemDone: item => {
+					nativeOutputItems.push(item as unknown as Record<string, unknown>);
 				},
 				onCompleted: () => {
 					sawTerminalResponseEvent = true;
@@ -243,6 +250,12 @@ const streamAzureOpenAIResponsesOnce = (
 				});
 			}
 
+			output.providerPayload = createOpenAIResponsesHistoryPayload(
+				model.provider,
+				nativeOutputItems,
+				true,
+				referenceTarget,
+			);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "done", reason: output.stopReason, message: output });

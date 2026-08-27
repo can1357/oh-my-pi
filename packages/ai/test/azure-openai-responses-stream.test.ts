@@ -314,6 +314,97 @@ describe("azure openai responses streaming", () => {
 		expect(gatewayPayload.tool_choice).toEqual({ type: "function", name: "computer" });
 	});
 
+	it("stamps generated Azure history with the resolved request target", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () =>
+			createSseResponse([
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: { type: "message", id: "msg_azure_a", role: "assistant", content: [] },
+				},
+				{ type: "response.content_part.added", part: { type: "output_text", text: "" } },
+				{ type: "response.output_text.delta", delta: "resource A answer" },
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: {
+						type: "message",
+						id: "msg_azure_a",
+						role: "assistant",
+						status: "completed",
+						content: [{ type: "output_text", text: "resource A answer" }],
+					},
+				},
+				{
+					type: "response.completed",
+					response: {
+						status: "completed",
+						usage: {
+							input_tokens: 1,
+							output_tokens: 1,
+							total_tokens: 2,
+							input_tokens_details: { cached_tokens: 0 },
+						},
+					},
+				},
+			]),
+		);
+		const message = await streamAzureOpenAIResponses(
+			azureModel,
+			{ messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }] },
+			{ apiKey: "test-key", azureBaseUrl: azureModel.baseUrl, azureApiVersion: "v1", fetch: fetchMock },
+		).result();
+
+		expect(message.stopReason).toBe("stop");
+		expect(message.providerPayload).toMatchObject({
+			type: "openaiResponsesHistory",
+			provider: azureModel.provider,
+			referenceTarget: getOpenAIResponsesReferenceTarget(azureModel),
+		});
+
+		const followUp: Context = {
+			messages: [message, { role: "user", content: "follow-up", timestamp: Date.now() }],
+		};
+		const sameResource = await captureAzurePayload(followUp);
+		expect(sameResource.input).toEqual([
+			{ type: "message", role: "assistant", content: [{ type: "output_text", text: "resource A answer" }] },
+			{ role: "user", content: [{ type: "input_text", text: "follow-up" }] },
+		]);
+
+		const movedResource = await captureAzurePayload(followUp, azureModel, {
+			azureDeploymentName: "other-deployment",
+		});
+		expect(JSON.stringify(movedResource.input)).not.toContain("msg_azure_a");
+		expect(movedResource.input).toEqual([
+			{
+				type: "message",
+				role: "assistant",
+				content: [{ type: "output_text", text: "resource A answer", annotations: [] }],
+				status: "completed",
+			},
+			{ role: "user", content: [{ type: "input_text", text: "follow-up" }] },
+		]);
+	});
+
+	it("rejects an onPayload replacement that repoints the Azure request at another deployment", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () => new Response("unexpected dispatch", { status: 500 }));
+		const result = await streamAzureOpenAIResponses(
+			azureModel,
+			{ messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }] },
+			{
+				apiKey: "test-key",
+				azureBaseUrl: azureModel.baseUrl,
+				azureApiVersion: "v1",
+				fetch: fetchMock,
+				onPayload: payload => ({ ...(payload as Record<string, unknown>), model: "other-deployment" }),
+			},
+		).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("other-deployment");
+		expect(fetchMock).toHaveBeenCalledTimes(0);
+	});
+
 	it("invalidates native history when Azure request target overrides change", async () => {
 		const nativeItem = { type: "message" as const, role: "user" as const, content: "native history" };
 		const context: Context = {
