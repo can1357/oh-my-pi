@@ -970,6 +970,7 @@ export class AcpAgent implements Agent {
 			session: record.session,
 			sessionManager: record.session.sessionManager,
 			settings: record.session.settings,
+			localProtocolOptions: record.session?.getLocalProtocolOptions?.(),
 			cwd: record.session.sessionManager.getCwd(),
 			output: output => this.#emitCommandOutput(record, output),
 			refreshCommands: () => this.#emitAvailableCommandsUpdate(record),

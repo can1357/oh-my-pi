@@ -1,5 +1,5 @@
-import { prompt } from "@oh-my-pi/pi-utils";
 import { randomUUID } from "node:crypto";
+import { prompt } from "@oh-my-pi/pi-utils";
 import { pythonBackend } from "../eval";
 import { DEFAULT_PROBE_TIMEOUT_MS } from "../eval/probe";
 import { resolveLocalUrlToPath } from "../internal-urls/local-protocol";
@@ -63,22 +63,21 @@ export async function handleRlmCommand(
 	if (!request.trim()) {
 		return { prompt: prompt.render(rlmTemplate, { request: "(no request text provided)" }).trim() };
 	}
-	// Externalize the inline payload into a session-local file instead of
-	// interpolating it into the prompt: the whole point of RLM is to keep
-	// oversized input out of the model's context, so the prompt must carry
-	// only a reference the model loads from inside the eval sandbox. The
-	// load-instruction prose itself lives in rlm.md (never build prompts in
-	// code), rendered with the externalized-payload variables below.
-	//
-	// Pin the write to *this* session's own mapping rather than consulting
-	// LocalProtocolHandler's process-wide override/"first main session"
-	// fallback: those are last-resort branches for callers with no session
-	// reference (e.g. TUI hyperlink resolution). /rlm always has one, and
-	// per LocalProtocolHandler.resolveOptions()'s own documented priority
-	// an explicit session mapping always wins over that global state anyway
-	// — so building it directly is equivalent and avoids pinning the write
-	// to the wrong session in a multi-session host.
-	const localProtocolOptions = {
+	// Write through the eval session's canonical local:// mapping — the same
+	// one the sandbox resolves `read("local://…")` through
+	// (ToolSession.localProtocolOptions). The dispatchers expose that mapping
+	// on the runtime; reconstructing it from sessionManager here would diverge
+	// when an SDK host supplies a custom localProtocolOptions on
+	// createAgentSession: the write would land under the session manager's
+	// artifacts dir while the sandbox reads from the custom root
+	// (file-not-found). The fallback below is the sessionManager-derived
+	// mapping itself — exactly what ToolSession.localProtocolOptions defaults
+	// to when no host override exists — so behavior is identical for hosts
+	// that do not carry the field (and for test fixtures). The process-wide
+	// LocalProtocolHandler override is deliberately never consulted: it is a
+	// last-resort branch for callers with no session reference, and in a
+	// multi-session process it belongs to whichever session installed it last.
+	const localProtocolOptions = runtime.localProtocolOptions ?? {
 		getArtifactsDir: () => runtime.sessionManager.getArtifactsDir(),
 		getSessionId: () => runtime.sessionManager.getSessionId(),
 	};

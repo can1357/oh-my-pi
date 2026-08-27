@@ -1,16 +1,24 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import * as fs from "node:fs";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { LocalProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+import { pythonBackend } from "@oh-my-pi/pi-coding-agent/eval";
+import {
+	LocalProtocolHandler,
+	type LocalProtocolOptions,
+} from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import type { AcpBuiltinSlashCommandResult, SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
-import { pythonBackend } from "@oh-my-pi/pi-coding-agent/eval";
+import { isEnoent } from "@oh-my-pi/pi-utils";
 
 const DISABLE_MESSAGE =
 	"RLM mode is disabled. Enable it via the rlm.enabled setting (e.g. omp config set rlm.enabled true).";
 
-function acpRuntime(options?: { enabled?: boolean; backends?: Record<string, boolean> }) {
+async function acpRuntime(options?: {
+	enabled?: boolean;
+	backends?: Record<string, boolean>;
+	localProtocolOptions?: LocalProtocolOptions;
+}) {
 	const store: Record<string, unknown> = {
 		"rlm.enabled": options?.enabled ?? false,
 		...options?.backends,
@@ -20,12 +28,23 @@ function acpRuntime(options?: { enabled?: boolean; backends?: Record<string, boo
 	} as unknown as SlashCommandRuntime["settings"];
 	const get = vi.spyOn(settings, "get");
 	const output = vi.fn();
-	const artifactsDir = fs.mkdtempSync(path.join(os.tmpdir(), "rlm-test-"));
+	const artifactsDir = await mkdtemp(path.join(os.tmpdir(), "rlm-test-"));
 	const sessionManager = {
 		getArtifactsDir: () => artifactsDir,
 		getSessionId: () => "test-session",
 	} as unknown as SlashCommandRuntime["sessionManager"];
-	const runtime = { settings, output, sessionManager, cwd: artifactsDir } as unknown as SlashCommandRuntime;
+	const runtime = {
+		settings,
+		output,
+		sessionManager,
+		// Mirrors what the ACP/RPC/TUI dispatchers populate from the session's
+		// canonical mapping (AgentSession.getLocalProtocolOptions()): undefined
+		// exercises the handler's sessionManager-derived fallback, a value
+		// exercises the SDK-host case where the eval sandbox reads local://
+		// through a custom root.
+		localProtocolOptions: options?.localProtocolOptions,
+		cwd: artifactsDir,
+	} as unknown as SlashCommandRuntime;
 	return { get, output, runtime, artifactsDir };
 }
 
@@ -34,16 +53,26 @@ function promptOf(result: AcpBuiltinSlashCommandResult): string {
 	return result.prompt;
 }
 
+/** Lists the session's local:// root; ENOENT (nothing written yet) reads as empty. */
+async function localDirEntries(localDir: string): Promise<string[]> {
+	try {
+		return await readdir(localDir);
+	} catch (error) {
+		if (isEnoent(error)) return [];
+		throw error;
+	}
+}
+
 describe("/rlm slash command", () => {
 	const tempDirs: string[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		vi.restoreAllMocks();
-		for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+		for (const dir of tempDirs.splice(0)) await rm(dir, { recursive: true, force: true });
 	});
 
 	it("outputs the enable hint and consumes the command when rlm.enabled is false", async () => {
-		const h = acpRuntime({ enabled: false });
+		const h = await acpRuntime({ enabled: false });
 
 		const result = await executeAcpBuiltinSlashCommand("/rlm analyze this input", h.runtime);
 
@@ -53,7 +82,7 @@ describe("/rlm slash command", () => {
 	});
 
 	it("does not leak a prompt when the gate is disabled", async () => {
-		const h = acpRuntime({ enabled: false });
+		const h = await acpRuntime({ enabled: false });
 
 		const result = await executeAcpBuiltinSlashCommand("/rlm summarize", h.runtime);
 
@@ -62,7 +91,7 @@ describe("/rlm slash command", () => {
 	});
 
 	it("externalizes the inline request to a local:// file instead of inlining it", async () => {
-		const h = acpRuntime({ enabled: true });
+		const h = await acpRuntime({ enabled: true });
 		tempDirs.push(h.artifactsDir);
 
 		const result = await executeAcpBuiltinSlashCommand("/rlm summarize the report", h.runtime);
@@ -82,11 +111,11 @@ describe("/rlm slash command", () => {
 		const match = prompt.match(/local:\/\/(rlm-input-[\w.-]+\.txt)/);
 		expect(match).not.toBeNull();
 		const writtenPath = path.join(h.artifactsDir, "local", match?.[1] ?? "");
-		expect(fs.readFileSync(writtenPath, "utf-8")).toBe("summarize the report");
+		expect(await Bun.file(writtenPath).text()).toBe("summarize the report");
 	});
 
 	it("writes each /rlm payload to a distinct path so a second call never clobbers the first", async () => {
-		const h = acpRuntime({ enabled: true });
+		const h = await acpRuntime({ enabled: true });
 		tempDirs.push(h.artifactsDir);
 
 		const first = await executeAcpBuiltinSlashCommand("/rlm summarize the report", h.runtime);
@@ -100,16 +129,12 @@ describe("/rlm slash command", () => {
 		// Date.now() path, so the second write silently overwrote the first
 		// payload and the first rendered prompt analyzed the second request.
 		expect(firstUrl).not.toBe(secondUrl);
-		expect(fs.readFileSync(path.join(h.artifactsDir, "local", firstUrl ?? ""), "utf-8")).toBe(
-			"summarize the report",
-		);
-		expect(fs.readFileSync(path.join(h.artifactsDir, "local", secondUrl ?? ""), "utf-8")).toBe(
-			"summarize the report",
-		);
+		expect(await Bun.file(path.join(h.artifactsDir, "local", firstUrl ?? "")).text()).toBe("summarize the report");
+		expect(await Bun.file(path.join(h.artifactsDir, "local", secondUrl ?? "")).text()).toBe("summarize the report");
 	});
 
 	it("rejects with an actionable message when no eval backend is enabled", async () => {
-		const h = acpRuntime({ enabled: true, backends: { "eval.py": false, "eval.js": false } });
+		const h = await acpRuntime({ enabled: true, backends: { "eval.py": false, "eval.js": false } });
 
 		const result = await executeAcpBuiltinSlashCommand("/rlm summarize the report", h.runtime);
 
@@ -118,7 +143,7 @@ describe("/rlm slash command", () => {
 	});
 
 	it("rejects when only Ruby/Julia are enabled (RLM helpers are py/js-only)", async () => {
-		const h = acpRuntime({
+		const h = await acpRuntime({
 			enabled: true,
 			backends: { "eval.py": false, "eval.js": false, "eval.rb": true, "eval.jl": true },
 		});
@@ -130,9 +155,9 @@ describe("/rlm slash command", () => {
 	});
 
 	it("pins the write to this session's own root, ignoring a process-wide localProtocolOptions override", async () => {
-		const h = acpRuntime({ enabled: true });
+		const h = await acpRuntime({ enabled: true });
 		tempDirs.push(h.artifactsDir);
-		const overrideDir = fs.mkdtempSync(path.join(os.tmpdir(), "rlm-override-"));
+		const overrideDir = await mkdtemp(path.join(os.tmpdir(), "rlm-override-"));
 		tempDirs.push(overrideDir);
 		LocalProtocolHandler.setOverride({
 			getArtifactsDir: () => overrideDir,
@@ -143,21 +168,54 @@ describe("/rlm slash command", () => {
 			const prompt = promptOf(result);
 			const match = prompt.match(/local:\/\/(rlm-input-[\w.-]+\.txt)/);
 			expect(match).not.toBeNull();
-			// /rlm has a session reference (runtime.sessionManager), so per
-			// LocalProtocolHandler's own documented priority that must win over
-			// the process-wide override — otherwise a multi-session host could
-			// pin the write to an unrelated session's root.
+			// This fixture's runtime carries no localProtocolOptions, so the
+			// handler falls back to the sessionManager-derived mapping. The
+			// process-wide override must NOT redirect the write: it is a
+			// last-resort branch for callers with no session reference, and in
+			// a multi-session process it belongs to whichever session installed
+			// it last — pinning the write to an unrelated session's root would
+			// be exactly the bug this test guards against.
 			const sessionPath = path.join(h.artifactsDir, "local", match?.[1] ?? "");
-			expect(fs.readFileSync(sessionPath, "utf-8")).toBe("summarize the report");
+			expect(await Bun.file(sessionPath).text()).toBe("summarize the report");
 			const overriddenPath = path.join(overrideDir, "local", match?.[1] ?? "");
-			expect(fs.existsSync(overriddenPath)).toBe(false);
+			expect(await Bun.file(overriddenPath).exists()).toBe(false);
 		} finally {
 			LocalProtocolHandler.resetOverrideForTests();
 		}
 	});
 
+	it("writes through the runtime's canonical localProtocolOptions when an SDK host supplies a custom mapping", async () => {
+		// SDK hosts wire a custom local:// mapping on createAgentSession; eval
+		// sandboxes and the model's tools resolve local:// through that
+		// (ToolSession.localProtocolOptions), NOT the session manager's
+		// artifacts dir. The dispatchers expose the canonical mapping on the
+		// runtime, and the payload write must follow it — otherwise the
+		// rendered `read("local://…")` instruction points at a root the
+		// sandbox never reads from (file-not-found).
+		const customDir = await mkdtemp(path.join(os.tmpdir(), "rlm-custom-"));
+		tempDirs.push(customDir);
+		const h = await acpRuntime({
+			enabled: true,
+			localProtocolOptions: {
+				getArtifactsDir: () => customDir,
+				getSessionId: () => "custom-session",
+			},
+		});
+		tempDirs.push(h.artifactsDir);
+
+		const result = await executeAcpBuiltinSlashCommand("/rlm summarize the report", h.runtime);
+
+		const prompt = promptOf(result);
+		const match = prompt.match(/local:\/\/(rlm-input-[\w.-]+\.txt)/);
+		expect(match).not.toBeNull();
+		const customPath = path.join(customDir, "local", match?.[1] ?? "");
+		expect(await Bun.file(customPath).text()).toBe("summarize the report");
+		const sessionPath = path.join(h.artifactsDir, "local", match?.[1] ?? "");
+		expect(await Bun.file(sessionPath).exists()).toBe(false);
+	});
+
 	it("renders an explicit no-request marker and skips externalization when invoked without arguments", async () => {
-		const h = acpRuntime({ enabled: true });
+		const h = await acpRuntime({ enabled: true });
 		tempDirs.push(h.artifactsDir);
 
 		const result = await executeAcpBuiltinSlashCommand("/rlm", h.runtime);
@@ -174,12 +232,12 @@ describe("/rlm slash command", () => {
 		expect(prompt).not.toContain("local://rlm-input-");
 		expect(prompt).not.toContain("Inline payload externalized");
 		const localDir = path.join(h.artifactsDir, "local");
-		expect(fs.existsSync(localDir) ? fs.readdirSync(localDir) : []).toHaveLength(0);
+		expect(await localDirEntries(localDir)).toHaveLength(0);
 		expect(h.output).not.toHaveBeenCalled();
 	});
 
 	it("preserves leading/trailing whitespace byte-for-byte in the externalized payload", async () => {
-		const h = acpRuntime({ enabled: true });
+		const h = await acpRuntime({ enabled: true });
 		tempDirs.push(h.artifactsDir);
 
 		// Indented code block ending with a blank line: the shared slash
@@ -201,13 +259,13 @@ describe("/rlm slash command", () => {
 		const match = prompt.match(/local:\/\/(rlm-input-[\w.-]+\.txt)/);
 		expect(match).not.toBeNull();
 		const writtenPath = path.join(h.artifactsDir, "local", match?.[1] ?? "");
-		expect(fs.readFileSync(writtenPath, "utf-8")).toBe(expectedPayload);
+		expect(await Bun.file(writtenPath).text()).toBe(expectedPayload);
 		// charCount must describe the lossless payload, not the trimmed one.
 		expect(prompt).toContain(`(${expectedPayload.length} chars)`);
 	});
 
 	it("externalizes an oversized input end-to-end: full payload on disk, prompt carries only the local:// handle", async () => {
-		const h = acpRuntime({ enabled: true });
+		const h = await acpRuntime({ enabled: true });
 		tempDirs.push(h.artifactsDir);
 
 		// ~324k chars — well past a typical model context window (≈64k
@@ -240,16 +298,16 @@ describe("/rlm slash command", () => {
 		const match = prompt.match(/local:\/\/(rlm-input-[\w.-]+\.txt)/);
 		expect(match).not.toBeNull();
 		const writtenPath = path.join(h.artifactsDir, "local", match?.[1] ?? "");
-		const written = fs.readFileSync(writtenPath, "utf-8");
+		const written = await Bun.file(writtenPath).text();
 		expect(written).toBe(oversizedPayload);
-		expect(fs.statSync(writtenPath).size).toBe(Buffer.byteLength(oversizedPayload, "utf-8"));
+		expect((await Bun.file(writtenPath).stat()).size).toBe(Buffer.byteLength(oversizedPayload, "utf-8"));
 
 		// (d) The rendered charCount describes the real payload size.
 		expect(prompt).toContain(`(${oversizedPayload.length} chars)`);
 	});
 
 	it("falls back to the no-request marker when the input contains only whitespace", async () => {
-		const h = acpRuntime({ enabled: true });
+		const h = await acpRuntime({ enabled: true });
 		tempDirs.push(h.artifactsDir);
 
 		const result = await executeAcpBuiltinSlashCommand("/rlm   \n\t ", h.runtime);
@@ -259,12 +317,12 @@ describe("/rlm slash command", () => {
 		expect(prompt).not.toContain("local://rlm-input-");
 		expect(prompt).not.toContain("Inline payload externalized");
 		const localDir = path.join(h.artifactsDir, "local");
-		expect(fs.existsSync(localDir) ? fs.readdirSync(localDir) : []).toHaveLength(0);
+		expect(await localDirEntries(localDir)).toHaveLength(0);
 		expect(h.output).not.toHaveBeenCalled();
 	});
 
 	it("rejects when Python is the only enabled backend but no interpreter is available", async () => {
-		const h = acpRuntime({ enabled: true, backends: { "eval.js": false } });
+		const h = await acpRuntime({ enabled: true, backends: { "eval.js": false } });
 		// The real probe spawns `python -c ...` (bounded by
 		// DEFAULT_PROBE_TIMEOUT_MS); in tests the kernel availability checker
 		// short-circuits to "available", so stub the backend's own
@@ -282,11 +340,11 @@ describe("/rlm slash command", () => {
 		expect(h.output).toHaveBeenCalledWith(expect.stringContaining("no working Python interpreter"));
 		expect(pythonBackend.isAvailable).toHaveBeenCalledTimes(1);
 		const localDir = path.join(h.artifactsDir, "local");
-		expect(fs.existsSync(localDir) ? fs.readdirSync(localDir) : []).toHaveLength(0);
+		expect(await localDirEntries(localDir)).toHaveLength(0);
 	});
 
 	it("accepts /rlm when Python is the sole backend and its interpreter is available", async () => {
-		const h = acpRuntime({ enabled: true, backends: { "eval.js": false } });
+		const h = await acpRuntime({ enabled: true, backends: { "eval.js": false } });
 		tempDirs.push(h.artifactsDir);
 		vi.spyOn(pythonBackend, "isAvailable").mockResolvedValue(true);
 

@@ -152,6 +152,7 @@ export async function executeBuiltinSlashCommand(
 			session: ctx.session,
 			sessionManager: ctx.sessionManager,
 			settings: ctx.settings,
+			localProtocolOptions: ctx.session?.getLocalProtocolOptions?.(),
 			cwd: ctx.sessionManager.getCwd(),
 			output: (text: string) => {
 				ctx.showStatus(text);
