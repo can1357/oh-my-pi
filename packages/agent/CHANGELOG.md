@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `transformToolCallArguments` sharing the very object the loop publishes in `tool_execution_start`/`tool_execution_update` (and to a presentation adapter's `start()`): an in-place mutating transform — e.g. deobfuscating a secret placeholder before execution — could corrupt those events because they read the same reference the transform had just mutated. The transform now gets an isolated copy.
+- `emitToolResult` now derives the LLM-facing `ToolResultMessage.isError` from a producer's typed `outcome` when one is present, instead of trusting only the older `isError` flag — so a producer whose two signals disagree (e.g. it reports success via `outcome` but left a stray `isError: true` set, or the reverse) now reaches the model correctly either way. Producers without an `outcome` are unaffected.
+
 ## [18.0.7] - 2026-08-26
 
 ### Fixed
