@@ -155,6 +155,61 @@ describe("Zed OAuth flow", () => {
 		}
 	});
 
+	it("accepts an encrypted Zed redirect pasted through manual input", async () => {
+		const keypair = generateZedAuthKeypair();
+		const userId = "manual-zed-user";
+		const accessToken = "zed-manual-access-token";
+		const authReady = Promise.withResolvers<OAuthAuthInfo>();
+		const abort = new AbortController();
+		let promptCount = 0;
+		const requests: Array<{ url: string; headers: Headers }> = [];
+		const fetchMock = mockFetch(async (input, init) => {
+			requests.push({
+				url: typeof input === "string" ? input : input.toString(),
+				headers: new Headers(init?.headers),
+			});
+			return responseJson({ id: 4815162342, github_login: "manual-zed-user" });
+		});
+		const flow = new ZedOAuthFlow(
+			{
+				onAuth: info => authReady.resolve(info),
+				onManualCodeInput: async () => {
+					promptCount += 1;
+					if (promptCount === 1) {
+						const info = await authReady.promise;
+						return callbackUrl(info, {
+							user_id: userId,
+							access_token: encryptZedAccessToken(accessToken, keypair),
+						}).toString();
+					}
+					// A legacy parser would discard the encrypted redirect and
+					// accept this raw fallback, which keeps the regression test
+					// finite while proving the first prompt was sufficient.
+					return accessToken;
+				},
+				signal: abort.signal,
+				fetch: fetchMock,
+			},
+			keypair,
+		);
+		flow.preferredPort = 0;
+		const login = flow.login();
+
+		try {
+			await expect(login).resolves.toMatchObject({
+				access: `4815162342 ${accessToken}`,
+				refresh: `4815162342 ${accessToken}`,
+				accountId: "4815162342",
+			});
+			expect(promptCount).toBe(1);
+			expect(requests).toHaveLength(1);
+			expect(requests[0]?.headers.get("Authorization")).toBe(`${userId} ${accessToken}`);
+		} finally {
+			abort.abort("test cleanup");
+			await login.catch(() => undefined);
+		}
+	});
+
 	it("rejects an explicit authorization denial instead of waiting for timeout", async () => {
 		const keypair = generateZedAuthKeypair();
 		const { info, abort, login } = await startZedFlow(

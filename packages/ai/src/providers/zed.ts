@@ -12,6 +12,7 @@ import { ANTHROPIC_THINKING } from "../stream";
 import type {
 	AssistantMessage,
 	Context,
+	ImageContent,
 	Model,
 	RedactedThinkingContent,
 	StreamOptions,
@@ -24,7 +25,15 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { normalizeSchemaForCCA } from "../utils/schema";
 import { mapToOpenAICompletionsToolChoice, mapToOpenAIResponsesToolChoice } from "../utils/tool-choice";
-import { isThinkingPart, mapStopReasonString, resolveThoughtSignature, retainThoughtSignature } from "./google-shared";
+import {
+	convertGoogleImagePart,
+	isThinkingPart,
+	mapStopReasonString,
+	resolveThoughtSignature,
+	retainThoughtSignature,
+	supportsMultimodalFunctionResponse,
+} from "./google-shared";
+import type { Part } from "./google-types";
 import { encodeResponsesToolResultOutput, parseResponseReasoningReplayItem } from "./openai-shared";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 
@@ -68,6 +77,15 @@ function extractToolChoiceFunctionName(choice: ToolChoice | undefined): string |
 		}
 	}
 	return undefined;
+}
+
+function convertChatImagePart(image: ImageContent): { type: "image_url"; image_url: { url: string } } {
+	return {
+		type: "image_url",
+		image_url: {
+			url: image.url ?? `data:${image.mimeType};base64,${image.data}`,
+		},
+	};
 }
 
 function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, options?: ZedOptions) {
@@ -360,61 +378,83 @@ function mapContextToOpenAiResponses(context: Context, model: Model<"zed-agent">
 	return body;
 }
 function mapContextToGoogle(context: Context, model: Model<"zed-agent">, options?: ZedOptions) {
-	const contents: Array<{ role: string; parts: Array<Record<string, unknown>> }> = [];
-	let pendingFunctionResponses: Array<Record<string, unknown>> = [];
+	const contents: Array<{ role: string; parts: Part[] }> = [];
+	let pendingFunctionResponses: Part[] = [];
+	let pendingToolImageParts: Part[] = [];
 	const flushFunctionResponses = () => {
 		if (pendingFunctionResponses.length === 0) return;
 		contents.push({ role: "user", parts: pendingFunctionResponses });
 		pendingFunctionResponses = [];
 	};
+	const flushPendingToolImages = () => {
+		if (pendingToolImageParts.length === 0) return;
+		contents.push({ role: "user", parts: pendingToolImageParts });
+		pendingToolImageParts = [];
+	};
 
 	for (const msg of context.messages) {
 		if (msg.role === "toolResult") {
-			const textResult = msg.content
-				.filter(b => b.type === "text")
-				.map(b => (b as TextContent).text)
-				.join("\n");
+			const supportsImages = model.input.includes("image");
+			const textContent = msg.content.filter((b): b is TextContent => b.type === "text");
+			const textResult = textContent.map(b => b.text).join("\n");
+			const imageContent = supportsImages ? msg.content.filter((b): b is ImageContent => b.type === "image") : [];
+			const omittedImages = !supportsImages && msg.content.some(b => b.type === "image");
+
+			const hasText = textResult.length > 0;
+			const hasImages = imageContent.length > 0;
+			const modelSupportsMultimodalFunctionResponse = supportsMultimodalFunctionResponse(model.id);
+
+			const responseValue = omittedImages
+				? [hasText ? textResult : "", NON_VISION_IMAGE_PLACEHOLDER].filter(Boolean).join("\n")
+				: hasText
+					? textResult
+					: hasImages
+						? "(see attached image)"
+						: "";
+
+			const imageParts = imageContent.map(convertGoogleImagePart);
+
 			pendingFunctionResponses.push({
 				functionResponse: {
 					name: msg.toolName,
-					response: msg.isError ? { error: textResult } : { output: textResult },
+					response: msg.isError ? { error: responseValue } : { output: responseValue },
+					...(hasImages && modelSupportsMultimodalFunctionResponse && { parts: imageParts }),
 				},
 			});
-			for (const block of msg.content) {
-				if (block.type === "image") {
-					pendingFunctionResponses.push({
-						inlineData: {
-							mimeType: block.mimeType,
-							data: block.data,
-						},
-					});
-				}
+
+			if (hasImages && !modelSupportsMultimodalFunctionResponse) {
+				pendingToolImageParts.push({ text: "Tool result image:" }, ...imageParts);
 			}
 			continue;
 		}
 
 		flushFunctionResponses();
+		flushPendingToolImages();
 		if (msg.role === "user" || msg.role === "developer") {
-			const parts: Array<Record<string, unknown>> = [];
+			const parts: Part[] = [];
 			if (typeof msg.content === "string") {
 				parts.push({ text: msg.content });
 			} else {
+				const supportsImages = model.input.includes("image");
+				let omittedImages = false;
 				for (const block of msg.content) {
 					if (block.type === "text") {
 						parts.push({ text: block.text });
 					} else if (block.type === "image") {
-						parts.push({
-							inlineData: {
-								mimeType: block.mimeType,
-								data: block.data,
-							},
-						});
+						if (supportsImages) {
+							parts.push(convertGoogleImagePart(block));
+						} else {
+							omittedImages = true;
+						}
 					}
+				}
+				if (omittedImages) {
+					parts.push({ text: NON_VISION_IMAGE_PLACEHOLDER });
 				}
 			}
 			contents.push({ role: "user", parts });
 		} else if (msg.role === "assistant") {
-			const parts: Array<Record<string, unknown>> = [];
+			const parts: Part[] = [];
 			const isSameProviderAndModel =
 				msg.provider === model.provider && msg.api === model.api && msg.model === model.id;
 			for (const block of msg.content) {
@@ -450,7 +490,7 @@ function mapContextToGoogle(context: Context, model: Model<"zed-agent">, options
 		}
 	}
 	flushFunctionResponses();
-
+	flushPendingToolImages();
 	const generationConfig: Record<string, unknown> = {
 		maxOutputTokens: options?.maxTokens ?? model.maxTokens ?? 8192,
 	};
@@ -557,10 +597,7 @@ function mapContextToOpenAiChat(context: Context, model: Model<"zed-agent">, opt
 						parts.push({ type: "text", text: b.text });
 					} else if (b.type === "image") {
 						if (supportsImages) {
-							parts.push({
-								type: "image_url",
-								image_url: { url: b.url ?? `data:${b.mimeType};base64,${b.data}` },
-							});
+							parts.push(convertChatImagePart(b));
 						} else {
 							omittedImages = true;
 						}
@@ -602,11 +639,14 @@ function mapContextToOpenAiChat(context: Context, model: Model<"zed-agent">, opt
 			const omittedImages = hasImages && !supportsImages;
 			const toolResultContent = omittedImages
 				? [textResult, NON_VISION_IMAGE_PLACEHOLDER].filter(Boolean).join("\n")
-				: textResult.length > 0
-					? textResult
-					: hasImages
-						? "(see attached image)"
-						: "";
+				: hasImages && supportsImages
+					? msg.content.map(b => {
+							if (b.type === "text") {
+								return { type: "text" as const, text: b.text };
+							}
+							return convertChatImagePart(b);
+						})
+					: textResult;
 			messages.push({ role: "tool", tool_call_id: msg.toolCallId, content: toolResultContent });
 		}
 	}

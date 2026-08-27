@@ -438,6 +438,20 @@ export abstract class OAuthCallbackFlow {
 	}
 
 	/**
+	 * Parse a manually pasted authorization code or redirect input.
+	 *
+	 * Subclasses can override this for provider-specific manual formats while
+	 * retaining the generic raw-code, redirect, and state-validation behavior.
+	 * A `null` result keeps the prompt loop active without settling the login.
+	 */
+	protected parseManualCallbackInput(input: string, expectedState: string): CallbackResult | null {
+		const parsed = parseCallbackInput(input);
+		if (!parsed.code) return null;
+		if (expectedState && parsed.state && parsed.state !== expectedState) return null;
+		return { code: parsed.code, state: parsed.state ?? expectedState };
+	}
+
+	/**
 	 * Handle OAuth callback HTTP request. Two routes on the same loopback server:
 	 * - `callbackPath` (default `/callback`) — the provider redirect target.
 	 * - {@link LAUNCH_PATH} (`/launch`) — 302 to the pending authorization URL so
@@ -534,12 +548,7 @@ export abstract class OAuthCallbackFlow {
 					const result = await Promise.race([
 						callbackPromise,
 						requestManualInput()
-							.then((input): CallbackResult | null => {
-								const parsed = parseCallbackInput(input);
-								if (!parsed.code) return null;
-								if (expectedState && parsed.state && parsed.state !== expectedState) return null;
-								return { code: parsed.code, state: parsed.state ?? expectedState };
-							})
+							.then((input): CallbackResult | null => this.parseManualCallbackInput(input, expectedState))
 							.catch((): CallbackResult | null => null),
 					]);
 					if (result) return result;

@@ -144,6 +144,70 @@ describe("Zed Provider Payload Construction", () => {
 		]);
 	});
 
+	it("preserves xAI tool-result images for vision models and uses a placeholder otherwise", () => {
+		const context: Context = {
+			messages: [
+				{
+					role: "toolResult",
+					toolCallId: "call_screenshot",
+					toolName: "capture",
+					content: [
+						{ type: "text", text: "Screenshot captured." },
+						{ type: "image", data: "AQID", mimeType: "image/png" },
+					],
+					isError: false,
+					timestamp: 1,
+				},
+			],
+		};
+		const visionModel: Model<"zed-agent"> = {
+			id: "grok-4.6",
+			name: "Grok 4.6",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: "https://cloud.zed.dev",
+			reasoning: false,
+			contextWindow: 1_000_000,
+			maxTokens: 128_000,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			compat: undefined,
+		};
+		const visionPayload = buildZedProviderRequest("x_ai", context, visionModel) as {
+			messages: Array<{ role: string; tool_call_id?: string; content: unknown }>;
+		};
+		expect(visionPayload.messages).toEqual([
+			{
+				role: "tool",
+				tool_call_id: "call_screenshot",
+				content: [
+					{ type: "text", text: "Screenshot captured." },
+					{
+						type: "image_url",
+						image_url: { url: "data:image/png;base64,AQID" },
+					},
+				],
+			},
+		]);
+
+		const textOnlyModel: Model<"zed-agent"> = {
+			...visionModel,
+			id: "grok-4.20",
+			name: "Grok 4.20",
+			input: ["text"],
+		};
+		const textOnlyPayload = buildZedProviderRequest("x_ai", context, textOnlyModel) as {
+			messages: Array<{ role: string; tool_call_id?: string; content: unknown }>;
+		};
+		expect(textOnlyPayload.messages).toEqual([
+			{
+				role: "tool",
+				tool_call_id: "call_screenshot",
+				content: `Screenshot captured.\n${NON_VISION_IMAGE_PLACEHOLDER}`,
+			},
+		]);
+	});
+
 	it("forwards temperature and topP to Zed xAI chat requests", () => {
 		const model: Model<"zed-agent"> = {
 			id: "grok-2",
@@ -633,6 +697,56 @@ describe("Zed Provider Payload Construction", () => {
 			repetitionPenalty: 1.1,
 			thinkingConfig: { thinkingLevel: "MEDIUM" },
 		});
+	});
+
+	it("nests Gemini function-response images with the tool result that produced them", () => {
+		const model: Model<"zed-agent"> = {
+			id: "gemini-3-flash",
+			name: "Gemini 3 Flash",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: "https://cloud.zed.dev",
+			reasoning: true,
+			contextWindow: 1_000_000,
+			maxTokens: 66_000,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			compat: undefined,
+		};
+		const payload = buildZedProviderRequest(
+			"google",
+			{
+				messages: [
+					{
+						role: "toolResult",
+						toolCallId: "call_screenshot",
+						toolName: "capture",
+						content: [
+							{ type: "text", text: "Screenshot captured." },
+							{ type: "image", data: "AQID", mimeType: "image/png" },
+						],
+						isError: false,
+						timestamp: 1,
+					},
+				],
+			},
+			model,
+		) as { contents: Array<{ role: string; parts: Array<Record<string, unknown>> }> };
+
+		expect(payload.contents).toEqual([
+			{
+				role: "user",
+				parts: [
+					{
+						functionResponse: {
+							name: "capture",
+							response: { output: "Screenshot captured." },
+							parts: [{ inlineData: { mimeType: "image/png", data: "AQID" } }],
+						},
+					},
+				],
+			},
+		]);
 	});
 
 	it("replays only valid same-model Gemini thought signatures", () => {

@@ -161,6 +161,41 @@ export class ZedOAuthFlow extends OAuthCallbackFlow {
 		}
 	}
 
+	protected override parseManualCallbackInput(input: string, expectedState: string): CallbackResult | null {
+		const trimmed = input.trim();
+		if (!trimmed) return null;
+
+		let candidateUrl: URL | null = null;
+		try {
+			candidateUrl = new URL(trimmed);
+		} catch {
+			if (trimmed.includes("user_id=") || trimmed.includes("access_token=")) {
+				try {
+					candidateUrl = new URL(`http://localhost/?${trimmed.replace(/^[?#]/, "")}`);
+				} catch {
+					candidateUrl = null;
+				}
+			}
+		}
+
+		if (candidateUrl) {
+			const parsedZed = this.parseCallbackParams(candidateUrl, expectedState);
+			if (parsedZed?.ok) {
+				return parsedZed.result;
+			}
+			if (
+				candidateUrl.searchParams.has("user_id") ||
+				candidateUrl.searchParams.has("access_token") ||
+				candidateUrl.searchParams.has("error") ||
+				candidateUrl.searchParams.has("code")
+			) {
+				return null;
+			}
+		}
+
+		return super.parseManualCallbackInput(input, expectedState);
+	}
+
 	override async exchangeToken(accessToken: string, userId: string): Promise<OAuthCredentials> {
 		if (this.ctrl.signal?.aborted) {
 			throw new AIError.LoginCancelledError(`OAuth callback cancelled: ${this.ctrl.signal.reason}`);

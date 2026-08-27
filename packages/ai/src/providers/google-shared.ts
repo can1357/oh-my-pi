@@ -53,7 +53,7 @@ export { normalizeSchemaForGoogle };
 
 type GoogleApiType = "google-generative-ai" | "google-gemini-cli" | "google-vertex";
 
-function convertGoogleImagePart(image: ImageContent): Part {
+export function convertGoogleImagePart(image: ImageContent): Part {
 	if (image.providerFile?.provider === "google" && image.providerFile.uri) {
 		return { fileData: { fileUri: image.providerFile.uri, mimeType: image.mimeType } };
 	}
@@ -167,7 +167,7 @@ function getGeminiMajorVersion(modelId: string): number | undefined {
 	return Number.parseInt(match[1], 10);
 }
 
-function supportsMultimodalFunctionResponse(modelId: string): boolean {
+export function supportsMultimodalFunctionResponse(modelId: string): boolean {
 	const geminiMajorVersion = getGeminiMajorVersion(modelId);
 	if (geminiMajorVersion !== undefined) {
 		return geminiMajorVersion >= 3;
