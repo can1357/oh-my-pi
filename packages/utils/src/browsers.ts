@@ -4,10 +4,22 @@ import type * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { extractArchive } from "./ar";
+import { type ArchiveLimits, extractArchive } from "./ar";
 
 const CHROME_FOR_TESTING_BASE_URL = "https://storage.googleapis.com/chrome-for-testing-public";
 const CHROME_METADATA_BASE_URL = "https://googlechromelabs.github.io/chrome-for-testing";
+
+/**
+ * Archive ceilings for the managed browser download. The default archive
+ * limits (64 MiB per member / 256 MiB in memory) guard against attacker-
+ * controlled archives, but the Chrome-for-Testing binary is a trusted
+ * first-party download whose `chrome` executable already exceeds both
+ * (~269 MB and growing), so extraction gets a ceiling sized for it.
+ */
+const BROWSER_ARCHIVE_LIMITS: Partial<ArchiveLimits> = {
+	maxMemberSize: 1024 * 1024 * 1024,
+	maxInMemorySize: 1024 * 1024 * 1024,
+};
 
 /** Supported browser products. */
 export enum Browser {
@@ -242,7 +254,7 @@ export async function install(options: InstallOptions): Promise<InstalledBrowser
 			archivePath,
 			options.downloadProgressCallback,
 		);
-		await extractArchive(archivePath, stagingPath);
+		await extractArchive(archivePath, stagingPath, { limits: BROWSER_ARCHIVE_LIMITS });
 		await fsp.mkdir(path.dirname(installPath), { recursive: true });
 		await fsp.rm(installPath, { recursive: true, force: true });
 		await fsp.rename(stagingPath, installPath);

@@ -2210,8 +2210,9 @@ describe("executeSloppy multi-file", () => {
 			expect(await Bun.file(dir.join("b.ts")).text()).toBe("const beta = 20;\n");
 			expect(result.details?.perFileResults).toHaveLength(2);
 			const text = result.content?.find(entry => entry.type === "text")?.text ?? "";
-			expect(text).toContain("a.ts");
-			expect(text).toContain("b.ts");
+			expect(text).toContain("[a.ts]\n1:const alpha = 10;");
+			expect(text).toContain("\n\n[b.ts]\n1:const beta = 20;");
+			expect(text).not.toMatch(/^\[[^\]\n]+#[0-9A-F]{4}\]/);
 		} finally {
 			await dir.remove();
 		}

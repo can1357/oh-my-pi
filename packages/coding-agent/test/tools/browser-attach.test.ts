@@ -15,7 +15,7 @@ import {
 	releaseBrowser,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import { acquireTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
-import type { Browser, Page, Target } from "puppeteer-core";
+import type { Browser, HTTPRequest, Page, Target } from "puppeteer-core";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -172,17 +172,27 @@ describe("pickElectronTarget", () => {
 	test.skipIf(!CHROMIUM_AVAILABLE)(
 		"does not retry an attached navigation failure as worker startup",
 		async () => {
-			let requestCount = 0;
-			const server = Bun.serve({
-				port: 0,
-				fetch: () => {
-					requestCount++;
-					return new Promise<Response>(() => {});
-				},
-			});
+			// An earlier form raced a real navigation timeout against a hanging
+			// local server, but Puppeteer installs its timeout watcher before
+			// Page.navigate: under load the timeout could win before Chrome
+			// dispatched any HTTP request, and the request-count assertion read 0.
+			// Abort the navigation via request interception on the exact page
+			// attach adopts instead — the navigation fails deterministically on
+			// its first request, and a wrongly retried worker startup would
+			// navigate again and read 2.
 			const launched = sharedHeadless;
 			if (!launched || !("browser" in launched)) throw new Error("Expected a shared Puppeteer browser");
 			const endpoint = new URL(launched.browser.wsEndpoint());
+			const targetPage = (await launched.browser.pages())[0];
+			if (!targetPage) throw new Error("Expected the launched browser to expose a page target");
+
+			let requestCount = 0;
+			const onRequest = (request: HTTPRequest) => {
+				requestCount++;
+				void request.abort("failed");
+			};
+			await targetPage.setRequestInterception(true);
+			targetPage.on("request", onRequest);
 			let attached: BrowserHandle | undefined;
 
 			let attempted = false;
@@ -194,15 +204,19 @@ describe("pickElectronTarget", () => {
 				attempted = true;
 				await expect(
 					acquireTab(`attach-failure-${process.pid}-${Math.random().toString(36).slice(2)}`, attached, {
-						url: `http://127.0.0.1:${server.port}/hang`,
+						// Loopback keeps a hypothetical interception miss local and
+						// loud (instant connection refusal, count 0) instead of
+						// wandering into DNS or a proxy.
+						url: "http://127.0.0.1:9/aborted-by-interception",
 						waitUntil: "domcontentloaded",
-						timeoutMs: 100,
+						timeoutMs: 15_000,
 					}),
-				).rejects.toThrow(/Navigation timeout/i);
+				).rejects.toThrow(/net::ERR_FAILED/);
 				expect(requestCount).toBe(1);
 			} finally {
+				targetPage.off("request", onRequest);
+				await targetPage.setRequestInterception(false);
 				if (attached && !attempted) await releaseBrowser(attached, { kill: false });
-				await server.stop(true);
 			}
 		},
 		30_000,

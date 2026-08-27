@@ -126,7 +126,7 @@ describe("LiteLLM provider discovery", () => {
 		const models = await options.fetchDynamicModels?.();
 
 		expect(options.cacheProviderId).toBe(
-			`litellm:rich-v6:${Bun.hash("http://litellm.example:4100/v1").toString(36)}`,
+			`litellm:rich-v7:${Bun.hash("http://litellm.example:4100/v1").toString(36)}`,
 		);
 		expect(fetchMock).toHaveBeenCalledTimes(6);
 		expect(models).toHaveLength(1);
@@ -150,7 +150,7 @@ describe("LiteLLM provider discovery", () => {
 		const models = await options.fetchDynamicModels?.();
 
 		expect(options.cacheProviderId).toBe(
-			`litellm:rich-v6:${Bun.hash("http://litellm-config.example:4200/v1/").toString(36)}`,
+			`litellm:rich-v7:${Bun.hash("http://litellm-config.example:4200/v1/").toString(36)}`,
 		);
 		expect(fetchMock).toHaveBeenCalledTimes(6);
 		expect(models).toHaveLength(1);
@@ -645,6 +645,149 @@ describe("LiteLLM provider discovery", () => {
 			input: ["text"],
 			reasoning: true,
 		});
+	});
+
+	test("continues rich discovery for cache pricing omitted by model group info", async () => {
+		const calls: string[] = [];
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			calls.push(url);
+			if (url === MODELS_DEV_URL) {
+				return Response.json({});
+			}
+			if (url === "http://primary:4000/model_group/info") {
+				return Response.json({
+					data: [
+						{
+							model_group: "team-gpt",
+							input_cost_per_token: 0.000_005_5,
+							output_cost_per_token: 0.000_033,
+							supports_vision: false,
+						},
+					],
+				});
+			}
+			if (url === "http://primary:4000/v2/model/info") {
+				return Response.json({
+					data: [
+						{
+							model_name: "team-gpt",
+							model_info: {
+								cache_read_input_token_cost: 0.000_000_55,
+								cache_creation_input_token_cost: 0.000_006_875,
+							},
+						},
+					],
+				});
+			}
+			if (url === "http://primary:4000/model/info" || url === "http://primary:4000/v1/model/info") {
+				return new Response("{}", { status: 404 });
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		}) as FetchImpl;
+		const options = litellmModelManagerOptions({
+			apiKey: "sk-rich",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		});
+
+		const models = await options.fetchDynamicModels?.();
+
+		expect(calls).toContain("http://primary:4000/v2/model/info");
+		expect(models?.[0]?.cost).toEqual({ input: 5.5, output: 33, cacheRead: 0.55, cacheWrite: 6.875 });
+	});
+
+	test("ignores zero placeholder prices from later rich metadata", async () => {
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url === MODELS_DEV_URL) {
+				return Response.json({});
+			}
+			if (url === "http://primary:4000/model_group/info") {
+				return Response.json({
+					data: [
+						{
+							model_group: "placeholder-cache",
+							input_cost_per_token: 0.000_005,
+							output_cost_per_token: 0.000_03,
+							cache_read_input_token_cost: 0.000_000_5,
+							supports_vision: false,
+						},
+					],
+				});
+			}
+			if (url === "http://primary:4000/v2/model/info") {
+				return Response.json({
+					data: [
+						{
+							model_name: "placeholder-cache",
+							model_info: {
+								input_cost_per_token: 0,
+								output_cost_per_token: 0,
+								cache_read_input_token_cost: 0,
+								cache_creation_input_token_cost: 0,
+							},
+						},
+					],
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		}) as FetchImpl;
+
+		const models = await litellmModelManagerOptions({
+			apiKey: "sk-rich",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		}).fetchDynamicModels?.();
+
+		expect(models?.[0]?.cost).toEqual({ input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 });
+	});
+
+	test("preserves cache prices reported before base prices", async () => {
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url === MODELS_DEV_URL) {
+				return Response.json({});
+			}
+			if (url === "http://primary:4000/model_group/info") {
+				return Response.json({
+					data: [
+						{
+							model_group: "cache-first",
+							cache_read_input_token_cost: 0.000_000_5,
+							cache_creation_input_token_cost: 0.000_006_25,
+							supports_vision: false,
+						},
+					],
+				});
+			}
+			if (url === "http://primary:4000/v2/model/info") {
+				return Response.json({
+					data: [
+						{
+							model_name: "cache-first",
+							model_info: {
+								input_cost_per_token: 0.000_005,
+								output_cost_per_token: 0.000_03,
+								supports_vision: false,
+							},
+						},
+					],
+				});
+			}
+			if (url === "http://primary:4000/model/info" || url === "http://primary:4000/v1/model/info") {
+				return new Response("{}", { status: 404 });
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		}) as FetchImpl;
+
+		const models = await litellmModelManagerOptions({
+			apiKey: "sk-rich",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		}).fetchDynamicModels?.();
+
+		expect(models?.[0]?.cost).toEqual({ input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 });
 	});
 
 	test("merges API routing evidence across rich metadata endpoints", async () => {

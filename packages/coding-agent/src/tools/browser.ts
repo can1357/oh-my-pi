@@ -330,7 +330,9 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 					}),
 				);
 			} catch (error) {
-				await releaseBrowser(browser, { kill: false });
+				await releaseBrowser(browser, {
+					kill: "subprocess" in browser && browser.subprocess !== undefined,
+				});
 				throw error;
 			}
 			await releaseBrowser(browser, { kill: false });

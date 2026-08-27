@@ -150,7 +150,14 @@ export interface Usage {
 	};
 }
 
-export type OpenAIReasoningFormat = "openai" | "openrouter" | "zai" | "kimi" | "qwen" | "qwen-chat-template";
+export type OpenAIReasoningFormat =
+	| "openai"
+	| "openrouter"
+	| "zai"
+	| "kimi"
+	| "qwen"
+	| "qwen-chat-template"
+	| "chat-template";
 
 export type OpenAIReasoningDisableMode =
 	| "omit"
@@ -160,7 +167,8 @@ export type OpenAIReasoningDisableMode =
 	| "venice-disable-thinking"
 	| "zai-thinking-disabled"
 	| "qwen-enable-thinking-false"
-	| "qwen-template-false";
+	| "qwen-template-false"
+	| "chat-template-thinking-false";
 
 export type OpenAIStreamMarkupHealingPattern = "kimi" | "dsml" | "qwen" | "thinking";
 

@@ -130,7 +130,7 @@ export function makeIsolationCommitMessage(session: ToolSession): BuildCommitMes
 export interface IsolatedRunOptions {
 	/**
 	 * Base run options handed to the subagent subprocess. This helper sets
-	 * `worktree`, clears `preloadedExtensionPaths` / `preloadedCustomToolPaths`
+	 * `worktree`, clears prepared/path extension preloads and custom-tool paths
 	 * (isolated runs re-discover inside the worktree), and forwards everything
 	 * else unchanged.
 	 */
@@ -200,6 +200,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			...opts.baseOptions,
 			worktree: isolationDir,
 			preloadedExtensionPaths: undefined,
+			preloadedPreparedExtensions: undefined,
 			preloadedCustomToolPaths: undefined,
 			onCleanupDeferred: completion => {
 				deferredCleanup = completion;
@@ -207,7 +208,12 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			},
 		});
 		opts.onSubprocessResult?.(result);
-		if (deferredCleanup) return result;
+		// A successful result cannot be captured while deferred owner jobs or
+		// shutdown hooks may still write the worktree. Failed runs skip capture,
+		// so their cleanup remains asynchronous.
+		if (deferredCleanup && result.exitCode === 0) {
+			await deferredCleanup;
+		}
 		if (opts.mergeMode === "branch" && result.exitCode === 0) {
 			try {
 				const commitResult = await commitToBranch(

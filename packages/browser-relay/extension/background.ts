@@ -19,6 +19,7 @@ const RECONNECT_MAX_MS = 10_000;
 let ws: WebSocket | null = null;
 let reconnectDelay = RECONNECT_MIN_MS;
 let pingTimer: NodeJS.Timeout | null = null;
+const relayInitiatedDetachTabs = new Set<number>();
 
 interface RelaySettings {
 	port: number;
@@ -157,8 +158,14 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>): Promise<un
 			await chrome.debugger.attach({ tabId: msg.tabId }, "1.3");
 			return {};
 		case "detach":
-			await chrome.debugger.detach({ tabId: msg.tabId });
-			return {};
+			relayInitiatedDetachTabs.add(msg.tabId);
+			try {
+				await chrome.debugger.detach({ tabId: msg.tabId });
+				return {};
+			} catch (error) {
+				relayInitiatedDetachTabs.delete(msg.tabId);
+				throw error;
+			}
 		case "send":
 			return await chrome.debugger.sendCommand(
 				msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId },
@@ -250,7 +257,8 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 
 chrome.debugger.onDetach.addListener((source, reason) => {
 	if (source.tabId === undefined) return;
-	post({ t: "detached", tabId: source.tabId, reason });
+	const relayInitiated = relayInitiatedDetachTabs.delete(source.tabId);
+	post({ t: "detached", tabId: source.tabId, reason, relayInitiated });
 });
 
 chrome.tabs.onCreated.addListener(tab => {
