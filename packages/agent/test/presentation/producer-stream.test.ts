@@ -70,10 +70,87 @@ describe("ToolPresentationStream byte accounting", () => {
 		expect(plain(stream.nextByte)).toBe(expected);
 	});
 
-	it("refuses a chunk that ends inside a surrogate pair", () => {
-		const { stream } = collect();
+	it("reunites an astral pair split across two appends instead of throwing", () => {
+		// JS strings and an eval backend's process.stdout.write shim can legally
+		// split an astral character across writes; the stream holds the trailing
+		// high surrogate and rejoins it with the next chunk, so every EMITTED
+		// chunk is well-formed and the UTF-8 offsets stay honest.
+		const { events, stream } = collect();
 		const emoji = "😀";
-		expect(() => stream.appendTerminal(emoji.slice(0, 1))).toThrow(/surrogate/);
+		stream.appendTerminal(emoji.slice(0, 1));
+		expect(appends(events)).toEqual([]); // nothing emittable yet
+		stream.appendTerminal(`${emoji.slice(1)} ok`);
+
+		const emitted = appends(events);
+		expect(emitted.map(event => event.data)).toEqual([`${emoji} ok`]);
+		expect(emitted.every(event => event.data.isWellFormed())).toBe(true);
+		expect(plain(stream.nextByte)).toBe(byteLengthOf(`${emoji} ok`));
+	});
+
+	it("encodes a genuinely unmatched surrogate as U+FFFD instead of throwing", () => {
+		const { events, stream } = collect();
+		// Interior lone low surrogate: no partner can ever arrive.
+		stream.appendTerminal("a\udc00b");
+		// Trailing lone high surrogate followed by a non-low unit: unmatched.
+		stream.appendTerminal("\ud83dz");
+
+		const emitted = appends(events);
+		expect(emitted.map(event => event.data)).toEqual(["a\ufffdb", "\ufffdz"]);
+		let expected = 0;
+		for (const event of emitted) {
+			expect(plain(event.startByte)).toBe(expected);
+			expected += byteLengthOf(event.data);
+		}
+	});
+
+	it("flushes a held trailing high surrogate as U+FFFD at the freeze barrier", async () => {
+		const { events, stream } = collect();
+		stream.appendTerminal("tail\ud83d");
+		expect(appends(events).map(event => event.data)).toEqual(["tail"]);
+
+		await stream.freeze();
+
+		const emitted = appends(events);
+		expect(emitted.map(event => event.data)).toEqual(["tail", "\ufffd"]);
+		expect(plain(stream.nextByte)).toBe(byteLengthOf("tail\ufffd"));
+		expect(stream.frozen).toBe(true);
+	});
+
+	it("flushes a held trailing high surrogate as U+FFFD before a declared gap", () => {
+		// A pair cannot span a declared discontinuity: the held unit must be
+		// encoded and accounted BEFORE the gap's fromByte is read, or the gap
+		// would be misplaced by the replacement's 3 bytes.
+		const { events, stream } = collect();
+		stream.appendTerminal("x\ud83d");
+		stream.declareGap(10);
+
+		const emitted = appends(events);
+		expect(emitted.map(event => [event.data, plain(event.startByte)])).toEqual([
+			["x", 0],
+			["\ufffd", 1],
+		]);
+		const gap = events.find(event => event.type === "terminal_gap");
+		if (gap?.type !== "terminal_gap") throw new Error("expected a terminal_gap event");
+		expect(plain(gap.fromByte)).toBe(4);
+		expect(plain(gap.toByte)).toBe(14);
+		expect(plain(stream.nextByte)).toBe(14);
+	});
+
+	it("still freezes when the pending-surrogate flush's emitter throws", async () => {
+		// The emitter is explicitly allowed to fail; a held surrogate whose
+		// replacement emission throws must not leave the stream wedged in
+		// `flushing` after the loop has already emitted settlement.
+		const events: ToolPresentationEvent[] = [];
+		const stream = new ToolPresentationStream(streamId("call-1"), event => {
+			if (event.type === "terminal_append" && event.data === "\ufffd") {
+				throw new Error("emitter rejected the flush");
+			}
+			events.push(event);
+		});
+		stream.appendTerminal("tail\ud83d");
+
+		await expect(stream.freeze()).rejects.toThrow("emitter rejected the flush");
+		expect(stream.frozen).toBe(true);
 	});
 
 	it("treats an empty append as a no-op rather than a zero-length event", () => {

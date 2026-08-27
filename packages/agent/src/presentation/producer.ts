@@ -23,7 +23,7 @@
  */
 
 import type { ByteOffset, FactId, Sequence, StreamId } from "./brands";
-import { byteLengthOf, byteOffset, endsOnStringBoundary, factId, sequence } from "./brands";
+import { byteLengthOf, byteOffset, factId, sequence } from "./brands";
 import type { LiveTerminalBinding, ToolAttachment, ToolDisplayOutput, ToolPresentationEmitter } from "./events";
 import type { ToolFact, ToolFactBody } from "./facts";
 
@@ -65,9 +65,11 @@ export interface ToolPresentationProducer {
 	 * flusher for the duration of its own call. A caller distinguishes "the barrier
 	 * has started closing" from "the barrier's own machinery failed" by checking
 	 * this field *before* calling a mutator: once `phase !== "open"`, a resulting
-	 * throw is a genuine producer/emitter defect (a split surrogate pair, a byte-
-	 * accounting invariant violation), never the barrier itself, so it must never be
-	 * caught and treated as the same "arrived too late" case.
+	 * throw is a genuine producer/emitter defect (a byte-accounting invariant
+	 * violation), never the barrier itself, so it must never be caught and
+	 * treated as the same "arrived too late" case. Ill-formed UTF-16 is NOT a
+	 * defect: lone/split surrogates are legal producer input, buffered or
+	 * encoded by the stream itself — see `#appendTerminalCore`.
 	 */
 	readonly phase: PresentationPhase;
 	/**
@@ -123,6 +125,12 @@ export class ToolPresentationStream implements ToolPresentationProducer {
 	#sequence = 0;
 	#cursor = 0;
 	#factCounter = 0;
+	/**
+	 * A trailing high surrogate held back from the last append, awaiting its
+	 * low half in the next chunk — see {@link #appendTerminalCore}. Flushed as
+	 * U+FFFD before any gap and at the freeze barrier.
+	 */
+	#pendingHighSurrogate = "";
 	/**
 	 * Freeze is a three-phase lifecycle, not a boolean.
 	 *
@@ -184,22 +192,44 @@ export class ToolPresentationStream implements ToolPresentationProducer {
 	 * where it is load-bearing: `reduceAcpToolView`'s and
 	 * `LiveToolPresentationRecord`'s continuity checks throw on any offset the
 	 * running cursor does not predict.
+	 *
+	 * Producers may legally deliver ill-formed UTF-16: JS strings permit lone
+	 * surrogates, and an eval backend's `process.stdout.write` shim can split
+	 * an astral character across two writes. Every EMITTED chunk must still be
+	 * well-formed (the byte offsets above are UTF-8, and consumers slice at
+	 * them), so a trailing high surrogate is held back and rejoined with the
+	 * next chunk — reuniting a pair split across writes — while a genuinely
+	 * unmatched surrogate encodes as U+FFFD, exactly as UTF-8 encoding would.
+	 * The held unit is flushed (as U+FFFD) before any gap — a pair cannot span
+	 * a declared discontinuity — and at the freeze barrier.
 	 */
 	#appendTerminalCore(data: string): void {
-		if (data.length === 0) return;
-		if (!endsOnStringBoundary(data)) {
-			throw new Error(`Presentation stream ${this.streamId} appended a chunk that splits a surrogate pair`);
+		let chunk = this.#pendingHighSurrogate + data;
+		this.#pendingHighSurrogate = "";
+		const last = chunk.length === 0 ? 0 : chunk.charCodeAt(chunk.length - 1);
+		if (last >= 0xd800 && last <= 0xdbff) {
+			this.#pendingHighSurrogate = chunk.slice(-1);
+			chunk = chunk.slice(0, -1);
 		}
+		if (chunk.length === 0) return;
+		if (!chunk.isWellFormed()) chunk = chunk.toWellFormed();
 		const startByte = byteOffset(this.#cursor);
-		const length = byteLengthOf(data);
+		const length = byteLengthOf(chunk);
 		this.#cursor = startByte + length;
 		this.#emit({
 			type: "terminal_append",
 			streamId: this.streamId,
 			sequence: this.#nextSequence(),
 			startByte,
-			data,
+			data: chunk,
 		});
+	}
+
+	/** Emit a held trailing high surrogate as U+FFFD — its partner can no longer arrive. */
+	#flushPendingSurrogate(): void {
+		if (this.#pendingHighSurrogate.length === 0) return;
+		this.#pendingHighSurrogate = "";
+		this.#appendTerminalCore("\ufffd");
 	}
 
 	/**
@@ -215,6 +245,7 @@ export class ToolPresentationStream implements ToolPresentationProducer {
 			throw new Error(`declareGap requires a positive integer byte count, got ${droppedBytes}`);
 		}
 		this.#assertMutable("declared a gap");
+		this.#flushPendingSurrogate();
 		const fromByte = byteOffset(this.#cursor);
 		this.#cursor = fromByte + droppedBytes;
 		this.#emit({
@@ -333,7 +364,17 @@ export class ToolPresentationStream implements ToolPresentationProducer {
 				}
 			}
 		} finally {
-			this.#phase = "frozen";
+			// A pair split across writes whose second half never arrived: encode
+			// the held unit before the stream closes so its bytes are accounted,
+			// not silently dropped. Must run while emission is still legal — and
+			// the phase transition must survive a throwing emitter (an explicitly
+			// supported failure mode), or the stream would report `flushing`
+			// forever after the loop has already emitted settlement.
+			try {
+				this.#flushPendingSurrogate();
+			} finally {
+				this.#phase = "frozen";
+			}
 		}
 		if (failure !== undefined) throw failure;
 	}

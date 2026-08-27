@@ -110,9 +110,12 @@ export function nonZeroExitCode(value: number): NonZeroExitCode {
  *
  * A chunk that ends mid-pair cannot be measured in UTF-8 bytes without either
  * over-counting the replacement character or silently shifting every later
- * offset, so the producer refuses it instead of emitting an offset it cannot
- * honour. Callers that split a decoded stream must hold the partial pair (which
- * is what `TextDecoder({stream:true})` does for them).
+ * offset. The presentation producer buffers/encodes ill-formed input itself
+ * (see `ToolPresentationStream`'s append path — it holds a trailing high
+ * surrogate and rejoins it with the next chunk); this helper remains for
+ * consumers that cut an already well-formed string and must not leave a
+ * dangling surrogate at the cut (see `projections.ts`'s bounded settlement
+ * reason).
  */
 export function endsOnStringBoundary(text: string): boolean {
 	if (text.length === 0) return true;

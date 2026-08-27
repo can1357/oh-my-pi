@@ -1302,9 +1302,10 @@ export class OutputSink {
 		// catching whatever `appendTerminal` throws: "the barrier started closing" and
 		// "the producer/emitter itself is broken" are different failures with different
 		// owners. Once `phase !== "open"` a throw from `appendTerminal` can only be the
-		// second kind — split-surrogate/byte-accounting invariants the stream enforces
-		// unconditionally — and must propagate, not get relabelled as this well-known
-		// late-chunk race and silently dropped.
+		// second kind — byte-accounting invariants the stream enforces unconditionally
+		// (ill-formed UTF-16 never throws; the stream buffers or encodes it) — and must
+		// propagate, not get relabelled as this well-known late-chunk race and silently
+		// dropped.
 		if (producer.phase !== "open") {
 			// The loop freezes only after `execute` returned, so a chunk arriving here
 			// means a backend kept writing past its own completion. Loud but not fatal:
