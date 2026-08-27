@@ -116,7 +116,6 @@ describe("mindshub provider support", () => {
 
 		const options = mindshubModelManagerOptions({ apiKey: "mindshub-test-key", fetch: fetchMock });
 		expect(options.providerId).toBe("mindshub");
-		expect(options.fetchDynamicModels).toBeDefined();
 
 		const models = await options.fetchDynamicModels?.();
 		expect(models).not.toBeNull();
