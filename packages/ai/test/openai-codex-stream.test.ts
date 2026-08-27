@@ -619,6 +619,31 @@ describe("openai-codex streaming", () => {
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
+	it("rejects an onPayload hook that repoints the Codex SSE request without returning a replacement", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const token = createCodexTestToken();
+		const context = createCodexTestContext();
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+		const fetchMock = vi.fn(async () => {
+			throw new Error("a repointed Codex request must never reach the wire");
+		});
+
+		const result = await streamOpenAICodexResponses(model, context, {
+			apiKey: token,
+			fetch: fetchMock as unknown as typeof fetch,
+			onPayload: payload => {
+				(payload as Record<string, unknown>).model = "gpt-5.3-codex-mutated";
+				return undefined;
+			},
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("gpt-5.3-codex-spark");
+		expect(result.errorMessage).toContain("gpt-5.3-codex-mutated");
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
 	it("forwards SimpleStreamOptions textVerbosity into the Codex request body", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());

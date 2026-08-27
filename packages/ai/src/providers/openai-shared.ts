@@ -595,15 +595,20 @@ export function resolveResponsesWireModelId(
 
 /**
  * Target-bound native history is admitted against the routing target computed
- * before request shaping, so a late `onPayload` replacement that re-points the
- * request at another model would replay endpoint-owned items to it.
+ * before request shaping, so a late `onPayload` hook that re-points the request
+ * at another model would replay endpoint-owned items to it. The hook receives
+ * the live request object and may mutate it in place or return any shape, so
+ * callers must run this on the body they are about to send — not only on a
+ * returned replacement — and the wire selector must be the exact primitive
+ * string the target fingerprint was built from.
  */
 export function assertResponsesWireModelUnchanged(payload: unknown, expectedModel: string, api: string): void {
-	if (!isRecord(payload)) return;
-	const replacedModel = payload.model;
-	if (typeof replacedModel !== "string" || replacedModel === expectedModel) return;
+	const replacedModel = isRecord(payload) ? payload.model : undefined;
+	if (typeof replacedModel === "string" && replacedModel === expectedModel) return;
+	const describeReplacement =
+		typeof replacedModel === "string" ? `"${replacedModel}"` : `a non-string ${typeof replacedModel} model selector`;
 	throw new AIError.ValidationError(
-		`onPayload cannot repoint a ${api} request from model "${expectedModel}" to "${replacedModel}"; replayed history is bound to the original routing target`,
+		`onPayload cannot repoint a ${api} request from model "${expectedModel}" to ${describeReplacement}; replayed history is bound to the original routing target`,
 	);
 }
 

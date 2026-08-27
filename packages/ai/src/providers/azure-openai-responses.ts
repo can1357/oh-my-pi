@@ -137,9 +137,9 @@ const streamAzureOpenAIResponsesOnce = (
 			let params = buildParams(requestModel, context, options, deploymentName, referenceTarget);
 			const replacementPayload = await options?.onPayload?.(params, requestModel);
 			if (replacementPayload !== undefined) {
-				assertResponsesWireModelUnchanged(replacementPayload, deploymentName, model.api);
 				params = replacementPayload as typeof params;
 			}
+			assertResponsesWireModelUnchanged(params, deploymentName, model.api);
 			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs();
 			const firstEventTimeoutMs =
 				options?.streamFirstEventTimeoutMs ?? getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs);

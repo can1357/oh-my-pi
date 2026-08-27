@@ -313,6 +313,32 @@ describe("buildSessionContext", () => {
 			expect((ctx.messages[1] as { content: string }).content).toBe("after compact");
 		});
 
+		it("keeps target-bound remote compaction unreadable without an active model", () => {
+			const targetBound: CompactionEntry = {
+				...compaction("3", "2", "Remote summary", "1"),
+				preserveData: {
+					openaiRemoteCompaction: {
+						provider: "openai",
+						replayTarget: "sha256:some-other-endpoint",
+						replacementHistory: [
+							{ type: "message", role: "user", content: [{ type: "input_text", text: "Preserved user" }] },
+						],
+						compactionItem: { type: "compaction", encrypted_content: "enc_123" },
+					},
+				},
+			};
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "first"),
+				msg("2", "1", "assistant", "response"),
+				targetBound,
+				msg("4", "3", "user", "after compact"),
+			];
+
+			const ctx = buildSessionContext(entries);
+			expect(ctx.messages.some(message => message.role === "compactionSummary")).toBe(false);
+			expect(ctx.messages.length).toBeGreaterThan(1);
+		});
+
 		it("answers message presence without materializing a target-bound remote compaction", () => {
 			const activeModel = buildModel({
 				id: "gpt-5.4",

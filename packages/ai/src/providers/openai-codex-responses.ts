@@ -1792,6 +1792,7 @@ async function openCodexWebSocketTransport(
 	if (requestContext.turnState.value) {
 		websocketClientMetadata[X_CODEX_TURN_STATE_HEADER] = requestContext.turnState.value;
 	}
+	const expectedWireModel = chainedBody.model;
 	let websocketRequest = {
 		type: "response.create",
 		...chainedBody,
@@ -1799,9 +1800,9 @@ async function openCodexWebSocketTransport(
 	};
 	const replacementWebsocketRequest = await options?.onPayload?.(websocketRequest, model);
 	if (replacementWebsocketRequest !== undefined) {
-		assertResponsesWireModelUnchanged(replacementWebsocketRequest, chainedBody.model, model.api);
 		websocketRequest = replacementWebsocketRequest as typeof websocketRequest;
 	}
+	assertResponsesWireModelUnchanged(websocketRequest, expectedWireModel, model.api);
 	recordCodexTurnRequestDiagnostics(websocketState, websocketRequest, "websocket", canAppendBeforeRequest);
 	const websocketHeaders = createCodexHeaders(
 		requestContext.requestHeaders,
@@ -1924,12 +1925,13 @@ async function openCodexSseTransport(
 		);
 	};
 	const canAppendBeforeRequest = state?.canAppend === true;
+	const expectedWireModel = body.model;
 	let wireBody = body;
 	const replacementWireBody = await options?.onPayload?.(wireBody, model);
 	if (replacementWireBody !== undefined) {
-		assertResponsesWireModelUnchanged(replacementWireBody, body.model, model.api);
 		wireBody = replacementWireBody as RequestBody;
 	}
+	assertResponsesWireModelUnchanged(wireBody, expectedWireModel, model.api);
 	recordCodexTurnRequestDiagnostics(state, wireBody, "sse", canAppendBeforeRequest);
 	return { eventStream: await open(wireBody), requestBodyForState: structuredCloneJSON(wireBody), transport: "sse" };
 }

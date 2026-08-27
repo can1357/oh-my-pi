@@ -1,5 +1,9 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { type CompactionSettings, remotePreserveReplayable } from "@oh-my-pi/pi-agent-core/compaction";
+import {
+	type CompactionSettings,
+	remotePreserveReplayable,
+	remotePreserveTargetIndependent,
+} from "@oh-my-pi/pi-agent-core/compaction";
 import { getOpenAiCompactionRuntimeReplayTarget } from "@oh-my-pi/pi-agent-core/compaction/openai";
 import { coerceServiceTierByFamily, type Model, type ProviderPayload, type ServiceTierByFamily } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
@@ -303,7 +307,9 @@ export function buildSessionContext(
 			const canReplay =
 				options?.transcript === true ||
 				remoteCompaction === undefined ||
-				(options?.activeModel !== undefined && remotePreserveReplayable(entry.preserveData, options.activeModel));
+				(options?.activeModel !== undefined
+					? remotePreserveReplayable(entry.preserveData, options.activeModel)
+					: remotePreserveTargetIndependent(entry.preserveData));
 			if (canReplay) compaction = entry;
 		} else if (entry.type === "ttsr_injection") {
 			// Collect injected TTSR rule names

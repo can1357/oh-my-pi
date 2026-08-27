@@ -61,6 +61,7 @@ import {
 	canReuseOpenAiCompactionHistory,
 	getOpenAiCompactionReferenceTarget,
 	getPreservedOpenAiRemoteCompactionData,
+	isOpenAiCompactionHistoryTargetIndependent,
 	requestOpenAiRemoteCompaction,
 	requestRemoteCompaction,
 	resolveOpenAiCompactionReferenceModel,
@@ -1316,6 +1317,20 @@ export function remotePreserveReplayable(
 	if (!v2Preserve && !v1Preserve) return true;
 	const runtimePreserve = v2Preserve ?? v1Preserve;
 	return runtimePreserve !== undefined && canReplayOpenAiCompactionHistory(runtimePreserve, activeModel);
+}
+
+/**
+ * Replayability for callers that have no active model to validate against, such
+ * as transcript-adjacent context builds performed before model selection. Only
+ * history with no target binding at all qualifies; target-bound blobs stay
+ * unreadable until a model-scoped rebuild can check them.
+ */
+export function remotePreserveTargetIndependent(preserveData: Record<string, unknown> | undefined): boolean {
+	const v2Preserve = getCompactionV2PreserveData(preserveData);
+	const v1Preserve = getPreservedOpenAiRemoteCompactionData(preserveData);
+	if (!v2Preserve && !v1Preserve) return true;
+	const runtimePreserve = v2Preserve ?? v1Preserve;
+	return runtimePreserve !== undefined && isOpenAiCompactionHistoryTargetIndependent(runtimePreserve);
 }
 
 /**

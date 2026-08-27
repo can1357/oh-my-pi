@@ -386,6 +386,18 @@ export function canReplayOpenAiCompactionHistory(
 	return !replacementHistoryContainsTargetDependentImage(preserved.replacementHistory);
 }
 
+/**
+ * Whether preserved history carries no target binding at all: no runtime replay
+ * stamp and no endpoint-owned image reference. Such history predates target
+ * fingerprints and stays readable without an active model to validate against.
+ */
+export function isOpenAiCompactionHistoryTargetIndependent(
+	preserved: Pick<OpenAiRemoteCompactionPreserveData, "referenceTarget" | "replayTarget" | "replacementHistory">,
+): boolean {
+	if (getOpenAiCompactionRuntimeReplayTarget(preserved) !== undefined) return false;
+	return !replacementHistoryContainsTargetDependentImage(preserved.replacementHistory);
+}
+
 function resolveOpenAiCompactEndpoint(model: Model): string {
 	const configuredEndpoint = model.remoteCompaction?.endpoint;
 	const compactionApi = model.remoteCompaction?.api ?? model.api;

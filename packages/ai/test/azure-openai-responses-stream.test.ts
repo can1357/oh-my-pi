@@ -405,6 +405,28 @@ describe("azure openai responses streaming", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(0);
 	});
 
+	it("rejects an onPayload hook that repoints the Azure request without returning a replacement", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () => new Response("unexpected dispatch", { status: 500 }));
+		const result = await streamAzureOpenAIResponses(
+			azureModel,
+			{ messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }] },
+			{
+				apiKey: "test-key",
+				azureBaseUrl: azureModel.baseUrl,
+				azureApiVersion: "v1",
+				fetch: fetchMock,
+				onPayload: payload => {
+					(payload as Record<string, unknown>).model = "mutated-deployment";
+					return undefined;
+				},
+			},
+		).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("mutated-deployment");
+		expect(fetchMock).toHaveBeenCalledTimes(0);
+	});
+
 	it("invalidates native history when Azure request target overrides change", async () => {
 		const nativeItem = { type: "message" as const, role: "user" as const, content: "native history" };
 		const context: Context = {

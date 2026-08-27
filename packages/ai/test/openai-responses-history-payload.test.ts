@@ -525,6 +525,49 @@ describe("OpenAI responses history payload", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(0);
 	});
 
+	it("rejects an onPayload hook that repoints the Responses request without returning a replacement", async () => {
+		const model = buildStampedResponsesModel("https://api.openai.com/v1");
+		const fetchMock = vi.fn(async () => createStampedSseResponse());
+		const stream = streamOpenAIResponses(
+			model,
+			{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
+			{
+				apiKey: "test-key",
+				fetch: fetchMock as unknown as FetchImpl,
+				onPayload: payload => {
+					(payload as Record<string, unknown>).model = "gpt-5-mutated";
+					return undefined;
+				},
+			},
+		);
+		let errorMessage: string | undefined;
+		for await (const event of stream) {
+			if (event.type === "error") errorMessage = event.error.errorMessage;
+		}
+		expect(errorMessage).toContain("gpt-5-mutated");
+		expect(fetchMock).toHaveBeenCalledTimes(0);
+	});
+
+	it("rejects an onPayload replacement whose model is not a primitive string", async () => {
+		const model = buildStampedResponsesModel("https://api.openai.com/v1");
+		const fetchMock = vi.fn(async () => createStampedSseResponse());
+		const stream = streamOpenAIResponses(
+			model,
+			{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
+			{
+				apiKey: "test-key",
+				fetch: fetchMock as unknown as FetchImpl,
+				onPayload: payload => ({ ...(payload as Record<string, unknown>), model: new String("gpt-5-boxed") }),
+			},
+		);
+		let errorMessage: string | undefined;
+		for await (const event of stream) {
+			if (event.type === "error") errorMessage = event.error.errorMessage;
+		}
+		expect(errorMessage).toContain("non-string");
+		expect(fetchMock).toHaveBeenCalledTimes(0);
+	});
+
 	it("hashes routing identity and keeps query-scoped Responses targets distinct", async () => {
 		const secretModel = buildStampedResponsesModel("https://tenant:s3cr3t-token@proxy.example/v1?api-key=s3cr3t-key");
 		const target = getOpenAIResponsesReferenceTarget(secretModel);
