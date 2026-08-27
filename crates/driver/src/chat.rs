@@ -2022,9 +2022,8 @@ impl<C: TurnClient + Clone + Send + 'static> AgentsControlAuthority<C> {
 				Some(SubagentTerminalKind::Succeeded) => "completed",
 				Some(SubagentTerminalKind::Cancelled) => "cancelled",
 				Some(SubagentTerminalKind::RuntimeLimit) => "exhausted",
-				Some(SubagentTerminalKind::SchemaInvalid | SubagentTerminalKind::Failed) | None => {
-					"failed"
-				},
+				Some(SubagentTerminalKind::SchemaInvalid | SubagentTerminalKind::Failed) => "failed",
+				None => "settled",
 			},
 		}
 	}
@@ -6707,6 +6706,18 @@ mod tests {
 			model: "scripted".to_owned(),
 			..inference_pb::Outcome::default()
 		}
+	}
+
+	#[test]
+	fn revived_idle_generation_reports_settled() {
+		let state = SubagentRunState::new(sf!("revived-child"));
+		state.transition(SubagentLifecycle::Settled).unwrap();
+		state.transition(SubagentLifecycle::Parked).unwrap();
+		state.begin_generation().unwrap();
+		state.transition(SubagentLifecycle::Settled).unwrap();
+
+		assert!(state.terminal().is_none());
+		assert_eq!(AgentsControlAuthority::<ScriptedParentClient>::run_status(&state), "settled");
 	}
 
 	fn write_session(sessions_dir: &Path, root: &Path, prompt: &str, title: Option<&str>) -> Str {
