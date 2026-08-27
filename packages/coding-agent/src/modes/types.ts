@@ -410,7 +410,7 @@ export interface InteractiveModeContext {
 	refreshSlashCommandState(cwd?: string): Promise<void>;
 	/** Reload session skills and derived `/skill:<name>` commands. */
 	refreshSkillState(): Promise<void>;
-	applyCwdChange(newCwd: string): Promise<void>;
+	applyCwdChange(newCwd: string): Promise<boolean>;
 
 	// Selector handling
 	showSettingsSelector(): void;
@@ -485,7 +485,9 @@ export interface InteractiveModeContext {
 	handleGuidedGoalCommand(rest?: string, input?: Pick<SubmittedUserInput, "images" | "imageLinks">): Promise<boolean>;
 	handleLoopCommand(args?: string): Promise<string | undefined>;
 	setLoopPrompt(prompt: string): void;
-	disableLoopMode(): void;
+	disableLoopMode(message?: string): void;
+	cancelGoalContinuation(): void;
+	disableGoalMode(message?: string): void;
 	pauseLoop(): void;
 	handlePlanApproval(details: PlanApprovalDetails): Promise<void>;
 	openPlanReview(): Promise<void>;

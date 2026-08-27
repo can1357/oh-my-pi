@@ -30,6 +30,7 @@ import {
 	isCatalogDescriptor,
 } from "../src/provider-models/descriptor-types";
 import { PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
+import { filterModelsDevCatalogRows } from "../src/provider-models/models-dev-policies";
 import {
 	AIAND_STATIC_MODELS,
 	ALIBABA_TOKEN_PLAN_STATIC_MODELS,
@@ -64,8 +65,6 @@ import {
 	applyGeneratedModelPolicies,
 	applyOllamaCloudOutputCap,
 	CLOUDFLARE_FALLBACK_MODEL,
-	dropBedrockMantleOpenAIModels,
-	dropUnsupportedBedrockGeoIds,
 	hasBillableCost,
 	linkOpenAIPromotionTargets,
 } from "./generated-policies";
@@ -337,50 +336,6 @@ function applyFireworksDeepSeekReasoningShape(models: readonly ModelSpec[]): Mod
 		if (model.provider !== "fireworks" || model.api !== "openai-completions") return model;
 		// `.api` equality doesn't narrow the generic; the guard makes this cast sound.
 		return stripFireworksDeepSeekThinkingToggle(model as ModelSpec<"openai-completions">, model.id);
-	});
-}
-
-/**
- * Z.AI's `/v1/models` advertises context-tier variants with a `[1m]` suffix
- * (e.g. `glm-5.2[1m]`). That suffix is a Claude Code-side convention — Z.AI's
- * own docs instruct users to append `[1m]` to enable 1M context *inside Claude
- * Code* — but the inference endpoint rejects the bracketed id outright with
- * `[1211][Unknown Model, please check the model code.]`. The base id
- * (`glm-5.2`) already carries the full 1M context window (pinned by
- * {@link applyGeneratedModelPolicy}), so drop the unusable bracketed siblings
- * from the bundled catalog rather than ship a model that 400s on first use.
- */
-function dropUnusableZaiContextTierIds(models: readonly ModelSpec[]): ModelSpec[] {
-	return models.filter(model => !(model.provider === "zai" && model.id.endsWith("[1m]")));
-}
-
-/**
- * Fireworks discovery and prior snapshots can surface internal control-plane
- * resource ids (`accounts/fireworks/{models,routers}/...`) alongside the public
- * request ids (`kimi-k2.7-code`, `deepseek-v4-flash`, ...). The wire ids are an
- * implementation detail the request path reconstructs from the public id, so
- * drop them from the bundle outright.
- */
-function dropFireworksWireIds(models: readonly ModelSpec[]): ModelSpec[] {
-	return models.filter(
-		model =>
-			!(
-				(model.provider === "fireworks" || model.provider === "firepass") &&
-				model.id.startsWith("accounts/fireworks/")
-			),
-	);
-}
-
-/**
- * Xiaomi's `/v1/models` can advertise ASR/TTS ids alongside chat/completions
- * models. Runtime discovery filters them, but previous bundled snapshots can
- * still resurrect those stale ids via the fallback merge. Drop them here so the
- * committed catalog matches the runtime surface.
- */
-function dropXiaomiAudioOnlyIds(models: readonly ModelSpec[]): ModelSpec[] {
-	return models.filter(model => {
-		const isXiaomiProvider = model.provider === "xiaomi" || model.provider.startsWith("xiaomi-token-plan-");
-		return !isXiaomiProvider || (!model.id.includes("-tts") && !model.id.includes("-asr"));
 	});
 }
 
@@ -701,11 +656,7 @@ async function generateModels() {
 	allModels = applyAntigravityPricingFallback(allModels);
 	allModels = applyKimiMaxTokensCap(allModels);
 	allModels = applyFireworksDeepSeekReasoningShape(allModels);
-	allModels = dropFireworksWireIds(allModels);
-	allModels = dropUnusableZaiContextTierIds(allModels);
-	allModels = dropXiaomiAudioOnlyIds(allModels);
-	allModels = dropUnsupportedBedrockGeoIds(allModels);
-	allModels = dropBedrockMantleOpenAIModels(allModels);
+	allModels = filterModelsDevCatalogRows(allModels);
 	allModels = normalizeAntigravityEndpoint(allModels);
 	// Normalize display names: gateway author prefixes ("OpenAI: …"), alias
 	// markers ("(latest)"), provider attribution ("(Antigravity)"), and

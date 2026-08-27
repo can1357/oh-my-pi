@@ -606,6 +606,29 @@ describe("Cursor history encoding", () => {
 		]);
 	});
 
+	it("folds an orphaned tool result into assistant text for Cursor replay", () => {
+		const messages: Context["messages"] = [
+			{ role: "user", content: "Wait for the background task.", timestamp: 1 },
+			{
+				role: "toolResult",
+				toolCallId: "call-orphan",
+				toolName: "hub",
+				content: [{ type: "text", text: "The background task was cancelled." }],
+				isError: false,
+				timestamp: 2,
+			},
+			{ role: "user", content: "Continue.", timestamp: 3 },
+		];
+
+		const history = buildCursorHistoryForTest(messages);
+		const repairedText = "[Tool Result]\nThe background task was cancelled.";
+		expect(history.rootPromptMessagesJson).toEqual([
+			{ role: "user", content: [{ type: "text", text: "Wait for the background task." }] },
+			{ role: "assistant", content: [{ type: "text", text: repairedText }] },
+		]);
+		expect(history.turnStepMessagesJson).toEqual([[{ assistantMessage: { text: repairedText } }]]);
+	});
+
 	it("omits undefined optional tool arguments from protobuf replay", () => {
 		const messages: Context["messages"] = [
 			{ role: "user", content: "Search for TODOs.", timestamp: 1 },

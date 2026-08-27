@@ -153,6 +153,64 @@ describe("Loader component", () => {
 		loader.stop();
 	});
 
+	it("backs off from the completed TUI frame cost when render requests are asynchronous", () => {
+		vi.useFakeTimers();
+		let lastFrameCostMs = 0;
+		const ui = {
+			synchronizedOutput: true,
+			get lastFrameCostMs() {
+				return lastFrameCostMs;
+			},
+			requestComponentRender: vi.fn(),
+		};
+		const loader = new Loader(
+			ui as unknown as TUI,
+			text => text,
+			text => text,
+			"Checking",
+			["0", "1"],
+		);
+
+		expect(ui.requestComponentRender).toHaveBeenCalledTimes(1);
+		lastFrameCostMs = 40;
+		vi.advanceTimersByTime(80);
+		expect(ui.requestComponentRender).toHaveBeenCalledTimes(2);
+
+		vi.advanceTimersByTime(359);
+		expect(ui.requestComponentRender).toHaveBeenCalledTimes(2);
+		vi.advanceTimersByTime(1);
+		expect(ui.requestComponentRender).toHaveBeenCalledTimes(3);
+
+		loader.stop();
+	});
+
+	it("caps backpressure after a pathological one-off frame", () => {
+		vi.useFakeTimers();
+		const ui = {
+			synchronizedOutput: true,
+			lastFrameCostMs: 5_000,
+			requestComponentRender: vi.fn(),
+		};
+		const loader = new Loader(
+			ui as unknown as TUI,
+			text => text,
+			text => text,
+			"Checking",
+			["0", "1"],
+		);
+
+		expect(ui.requestComponentRender).toHaveBeenCalledTimes(1);
+		vi.advanceTimersByTime(80);
+		expect(ui.requestComponentRender).toHaveBeenCalledTimes(2);
+
+		vi.advanceTimersByTime(1_799);
+		expect(ui.requestComponentRender).toHaveBeenCalledTimes(2);
+		vi.advanceTimersByTime(1);
+		expect(ui.requestComponentRender).toHaveBeenCalledTimes(3);
+
+		loader.stop();
+	});
+
 	it("reuses text layout when only animated ANSI styling changes", () => {
 		vi.useFakeTimers();
 		let colorFrame = 0;
