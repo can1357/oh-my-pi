@@ -154,7 +154,24 @@ function renderDocs(inst: Tool, heading = "#", descriptionCap?: number): string 
 		`type Args = ${schema};`,
 		"```",
 		`Execute by writing JSON to ${XD_URL_PREFIX}${inst.name}.`,
+		// A worked call, because "write JSON" alone left a local model looping on
+		// how to escape a multi-line argument: it built the payload with python
+		// in bash for 25 minutes. Shown as the wire call, newlines escaped.
+		`Example: write(path="${XD_URL_PREFIX}${inst.name}", content=${JSON.stringify(JSON.stringify(exampleArgs(inst)))}) — one JSON object, newlines inside strings as \\n.`,
 	].join("\n");
+}
+
+/** Minimal example args for a device doc: the first required string property. */
+function exampleArgs(inst: Tool): Record<string, unknown> {
+	const schema = toolWireSchema(inst as AiTool) as {
+		properties?: Record<string, { type?: string }>;
+		required?: string[];
+	};
+	const props = schema?.properties ?? {};
+	const first =
+		(schema?.required ?? Object.keys(props)).find(name => props[name]?.type === "string") ?? Object.keys(props)[0];
+	if (!first) return {};
+	return { [first]: first === "input" ? "[src/app.ts#1A2B]\nPUT 3.=3:\n+  return value;" : "..." };
 }
 
 /**
@@ -391,6 +408,21 @@ export function xdevDocsAll(
  * few of them and the name alone does not say what `xd://hub` is. Every other
  * mode keeps the previous per-device summary.
  */
+/** Shortest mounted-name prefix worth factoring out of an MCP catalog row. */
+const XD_MCP_PREFIX_MIN = "mcp__".length + 1;
+
+function commonPrefix(names: readonly string[]): string {
+	let prefix = names[0] ?? "";
+	for (const name of names.slice(1)) {
+		let k = 0;
+		while (k < prefix.length && k < name.length && prefix[k] === name[k]) k++;
+		prefix = prefix.slice(0, k);
+	}
+	// Cut at the last underscore so the brace list starts on a name boundary.
+	const cut = prefix.lastIndexOf("_");
+	return cut > 0 ? prefix.slice(0, cut + 1) : "";
+}
+
 function renderOverflowCatalog(state: XdevState, overflow: readonly Tool[], mode: XdevDocsMode): string[] {
 	const summaryRow = (tool: Tool): string => {
 		const externalCap = state.builtInNames.has(tool.name) ? undefined : XDEV_EXTERNAL_DESCRIPTION_CAP;
@@ -413,9 +445,14 @@ function renderOverflowCatalog(state: XdevState, overflow: readonly Tool[], mode
 		else byServer.set(parsed.serverName, [tool.name]);
 	}
 	for (const [serverName, names] of byServer) {
-		rows.push(
-			`- MCP server \`${serverName}\` (${names.length}): ${names.map(name => `${XD_URL_PREFIX}${name}`).join(", ")}`,
-		);
+		// One prefix + a brace list instead of the full mounted name per tool:
+		// with a 21-tool server that is ~420 fewer characters on every request.
+		const prefix = commonPrefix(names);
+		const body =
+			names.length > 1 && prefix.length > XD_MCP_PREFIX_MIN
+				? `${XD_URL_PREFIX}${prefix}{${names.map(name => name.slice(prefix.length)).join("|")}}`
+				: names.map(name => `${XD_URL_PREFIX}${name}`).join(", ");
+		rows.push(`- MCP server \`${serverName}\` (${names.length}): ${body}`);
 	}
 	return rows;
 }

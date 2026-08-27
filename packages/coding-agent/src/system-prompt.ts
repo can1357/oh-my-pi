@@ -25,6 +25,7 @@ import { type ContextFile, loadCapability, type SystemPrompt as SystemPromptFile
 import { expandAtImports } from "./discovery/at-imports";
 import { loadSkills, type Skill } from "./extensibility/skills";
 import { hasObsidian } from "./internal-urls/vault-protocol";
+import { XD_URL_PREFIX } from "./internal-urls/xd-protocol";
 import activeRepoContextTemplate from "./prompts/system/active-repo-context.md" with { type: "text" };
 import computerSafetyPrompt from "./prompts/system/computer-safety.md" with { type: "text" };
 import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
@@ -932,7 +933,12 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// and resolve their own name as the reference — the xd:// section explains
 	// the access path. The Tool Inventory list stays limited to real defs.
 	for (const mounted of xdevTools) {
-		if (!toolPromptNames.has(mounted.name)) toolPromptNames.set(mounted.name, mounted.name);
+		if (toolPromptNames.has(mounted.name)) continue;
+		// The compact profile names the device path outright: a 27B local model
+		// given "MUST use `grep`" for a mounted grep called `grep` by name five
+		// times in one benchmark run. `full` keeps the bare name so its output
+		// stays byte-identical.
+		toolPromptNames.set(mounted.name, promptProfile === "compact" ? `${XD_URL_PREFIX}${mounted.name}` : mounted.name);
 	}
 	const toolRefs = Object.fromEntries(toolPromptNames.entries());
 	const xdevToolNames = new Set(xdevTools.map(mounted => mounted.name));
