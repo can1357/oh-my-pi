@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:te
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Agent } from "@oh-my-pi/pi-agent-core";
 import type {
 	AssistantMessage,
 	Message,
@@ -16,7 +17,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
-import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -432,6 +433,69 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 				message => message.role === "user" && getTextContent(message) === "Original compacted context",
 			),
 		).toBe(true);
+	});
+
+	it("restores compatible target-bound compaction on the first model selection", async () => {
+		const model = getBundledModel("openai", "gpt-5-mini");
+		if (!model) throw new Error("Expected bundled OpenAI test model");
+		const replayTarget = getOpenAIResponsesReferenceTarget(model);
+
+		const sessionManager = SessionManager.inMemory();
+		const compactedId = sessionManager.appendMessage({
+			role: "user",
+			content: "Original compacted context",
+			timestamp: Date.now() - 2,
+		});
+		sessionManager.appendCompaction("opaque remote summary", undefined, compactedId, 100, {
+			preserveData: {
+				openaiRemoteCompaction: {
+					provider: "openai",
+					replayTarget,
+					compactionItem: { type: "compaction", encrypted_content: "enc_first_model" },
+					replacementHistory: [
+						{
+							type: "message",
+							role: "user",
+							content: [{ type: "input_text", text: "Provider-preserved compacted context" }],
+						},
+					],
+				},
+			},
+		});
+		sessionManager.appendMessage({ role: "user", content: "Recent context", timestamp: Date.now() - 1 });
+
+		// A session that boots without a resolvable model installs the unscoped
+		// (re-expanded) branch, exactly as SDK startup does.
+		const expanded = sessionManager.buildSessionContext();
+		expect(expanded.messages.some(message => message.role === "compactionSummary")).toBe(false);
+		const agent = new Agent({
+			initialState: { model: undefined, systemPrompt: ["Test"], tools: [], messages: expanded.messages },
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": true }),
+			modelRegistry: sharedModelRegistry,
+		});
+		sessions.push(session);
+		expect(
+			session.messages.some(
+				message => message.role === "user" && getTextContent(message) === "Original compacted context",
+			),
+		).toBe(true);
+
+		await session.setModel(model);
+
+		const summary = session.messages.find(message => message.role === "compactionSummary");
+		if (summary?.role !== "compactionSummary") {
+			throw new Error("Expected compatible remote compaction summary after the first model selection");
+		}
+		expect(summary.providerPayload?.referenceTarget).toBe(replayTarget);
+		expect(
+			session.messages.some(
+				message => message.role === "user" && getTextContent(message) === "Original compacted context",
+			),
+		).toBe(false);
 	});
 
 	it("restores compatible target-bound compaction after resume, navigation, and model switches", async () => {

@@ -725,6 +725,41 @@ describe("buildSessionContext", () => {
 	});
 
 	describe("edge cases", () => {
+		it("reports no messages when cleanup empties the model context", () => {
+			const abortedTurn: SessionMessageEntry = {
+				type: "message",
+				id: "a1",
+				parentId: null,
+				timestamp: "2025-01-01T00:00:00Z",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "partial answer" }],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-test",
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "aborted",
+					timestamp: 1,
+				},
+			};
+			const entries: SessionEntry[] = [abortedTurn];
+
+			const full = buildSessionContext(entries);
+			expect(full.messages).toEqual([]);
+			expect(full.hasMessages).toBe(false);
+
+			const metadata = buildSessionContext(entries, undefined, undefined, { metadataOnly: true });
+			expect(metadata.messages).toEqual([]);
+			expect(metadata.hasMessages).toBe(false);
+		});
+
 		it("uses last entry when leafId not found", () => {
 			const entries: SessionEntry[] = [msg("1", null, "user", "hello"), msg("2", "1", "assistant", "hi")];
 			const ctx = buildSessionContext(entries, "nonexistent");

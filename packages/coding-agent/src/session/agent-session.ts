@@ -7587,7 +7587,7 @@ export class AgentSession {
 		}
 		this.agent.setModel(model);
 		const referenceTarget = getOpenAIResponsesReferenceTarget(model);
-		if (currentReferenceTarget !== undefined && currentReferenceTarget !== referenceTarget) {
+		if (currentReferenceTarget !== referenceTarget) {
 			this.agent.replaceMessages(this.buildDisplaySessionContext().messages);
 		}
 		// Model mutations driven through ModelControls (explicit /model, prewalk
