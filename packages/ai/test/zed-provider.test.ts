@@ -95,7 +95,7 @@ describe("Zed Provider Payload Construction", () => {
 		expect(payload.model).toBe("claude-sonnet-5");
 		expect(payload.system).toBe("You are an assistant.");
 		expect(payload.max_tokens).toBe(128000);
-		expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
+		expect(payload.thinking).toEqual({ type: "adaptive" });
 		expect(payload.output_config).toEqual({ effort: "high" });
 
 		const messages = payload.messages as Array<{ role: string; content: string }>;
@@ -144,7 +144,9 @@ describe("Zed Provider Payload Construction", () => {
 			],
 		};
 
-		const payload = buildZedProviderRequest("google", mockContext, mockModel) as Record<string, unknown>;
+		const payload = buildZedProviderRequest("google", mockContext, mockModel, {
+			reasoning: Effort.Medium,
+		}) as Record<string, unknown>;
 
 		expect(payload.contents).toBeArray();
 		const contents = payload.contents as Array<{ role: string; parts: Array<{ text?: string }> }>;
@@ -158,5 +160,6 @@ describe("Zed Provider Payload Construction", () => {
 		}>;
 		const params = tools[0].functionDeclarations[0].parameters as { properties: { limit: Record<string, unknown> } };
 		expect(params.properties.limit.exclusiveMinimum).toBeUndefined();
+		expect(payload.generationConfig).toEqual({ thinkingConfig: { thinkingLevel: "medium" } });
 	});
 });

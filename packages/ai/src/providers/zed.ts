@@ -155,13 +155,19 @@ function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, opti
 	}
 
 	if (isReasoning) {
-		body.thinking = {
-			type: "adaptive",
-			display: "summarized",
-		};
-		body.output_config = {
-			effort: options?.reasoning ?? "medium",
-		};
+		if (model.id.includes("4-5")) {
+			body.thinking = {
+				type: "enabled",
+				budget_tokens: 2048,
+			};
+		} else {
+			body.thinking = {
+				type: "adaptive",
+			};
+			body.output_config = {
+				effort: options?.reasoning ?? "medium",
+			};
+		}
 	}
 
 	return body;
@@ -193,6 +199,13 @@ function mapContextToOpenAiResponses(context: Context, model: Model<"zed-agent">
 			for (const block of msg.content) {
 				if (block.type === "text") {
 					parts.push({ type: "output_text", text: block.text });
+				} else if (block.type === "thinking") {
+					if (block.thinking) {
+						input.push({
+							type: "reasoning",
+							summary: [{ type: "summary_text", text: block.thinking }],
+						});
+					}
 				} else if (block.type === "toolCall") {
 					input.push({
 						type: "function_call",
@@ -249,8 +262,7 @@ function mapContextToOpenAiResponses(context: Context, model: Model<"zed-agent">
 
 	return body;
 }
-
-function mapContextToGoogle(context: Context, _model: Model<"zed-agent">) {
+function mapContextToGoogle(context: Context, model: Model<"zed-agent">, options?: ZedOptions) {
 	const contents: Array<{ role: string; parts: Array<Record<string, unknown>> }> = [];
 
 	for (const msg of context.messages) {
@@ -335,6 +347,22 @@ function mapContextToGoogle(context: Context, _model: Model<"zed-agent">) {
 				})),
 			},
 		];
+	}
+
+	if (model.reasoning) {
+		if (options?.disableReasoning) {
+			body.generationConfig = {
+				thinkingConfig: {
+					thinkingBudget: 0,
+				},
+			};
+		} else {
+			body.generationConfig = {
+				thinkingConfig: {
+					thinkingLevel: options?.reasoning ?? "medium",
+				},
+			};
+		}
 	}
 
 	return body;
@@ -427,7 +455,7 @@ export function buildZedProviderRequest(
 		return mapContextToOpenAiResponses(context, model, options);
 	}
 	if (providerKind === "google") {
-		return mapContextToGoogle(context, model);
+		return mapContextToGoogle(context, model, options);
 	}
 	return mapContextToOpenAiChat(context, model, options);
 }
