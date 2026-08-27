@@ -157,7 +157,7 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 			scoutAvailable: isScoutSpawnable(
 				this.session.settings.get("task.disabledAgents") as string[] | undefined,
 				this.session.getSessionSpawns?.() ?? "*",
-				getDiscoveredScoutAgent(this.session.cwd),
+				getDiscoveredScoutAgent(this.session.cwd, this.session.effectiveExtensionRoots?.()),
 			),
 		});
 	}

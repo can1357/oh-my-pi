@@ -13,7 +13,6 @@
  *   - Progress tracking via JSON events
  *   - Session artifacts for debugging
  */
-import path from "node:path";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env, logger, prompt } from "@oh-my-pi/pi-utils";
@@ -28,7 +27,7 @@ import { TASK_EFFORTS, type TaskEffort } from "../thinking";
 import { truncateForPrompt } from "../tools/approval";
 import { isIrcEnabled } from "../tools/hub";
 import { formatBytes, formatDuration } from "../tools/render-utils";
-import { getDiscoveredAgents, publishDiscoveredAgents } from "./discovery-snapshot";
+import { discoveryCacheKey, getDiscoveredAgents, publishDiscoveredAgents } from "./discovery-snapshot";
 import { isReadOnlyAgent } from "./read-only-policy";
 import {
 	DEFAULT_SPAWN_AGENT,
@@ -482,11 +481,6 @@ class TaskJobError extends Error {}
 const discoveryMemo = new Map<string, Promise<DiscoveryResult>>();
 let discoveryMemoFn: typeof discoverAgents | undefined;
 
-/** Stable cache identity for the filesystem root and the full effective extension-root struct. */
-function discoveryCacheKey(cwd: string, extensionRoots?: EffectiveExtensionRoots): string {
-	return `${path.resolve(cwd)}\0${JSON.stringify(extensionRoots ?? null)}`;
-}
-
 function discoverAgentsForCreate(cwd: string, extensionRoots?: EffectiveExtensionRoots): Promise<DiscoveryResult> {
 	const fn = discoverAgents;
 	if (discoveryMemoFn !== fn) {
@@ -609,7 +603,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * binding, which clears the snapshot).
 	 */
 	#roster(): AgentDefinition[] {
-		const snapshot = getDiscoveredAgents(path.resolve(this.session.cwd));
+		const snapshot = getDiscoveredAgents(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.()));
 		return snapshot.length > 0 ? snapshot : this.#discoveredAgents;
 	}
 	/**
@@ -733,7 +727,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// Publish the discovered roster to the shared snapshot so sibling
 		// surfaces (system prompt, grep/glob/ast-grep descriptions) can read
 		// the scout definition's availability synchronously.
-		publishDiscoveredAgents(path.resolve(session.cwd), agents);
+		publishDiscoveredAgents(discoveryCacheKey(session.cwd, session.effectiveExtensionRoots?.()), agents);
 		return new TaskTool(session, agents);
 	}
 

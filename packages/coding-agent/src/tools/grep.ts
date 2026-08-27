@@ -926,7 +926,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 			scoutAvailable: isScoutSpawnable(
 				this.session.settings.get("task.disabledAgents") as string[] | undefined,
 				this.session.getSessionSpawns?.() ?? "*",
-				getDiscoveredScoutAgent(this.session.cwd),
+				getDiscoveredScoutAgent(this.session.cwd, this.session.effectiveExtensionRoots?.()),
 			),
 		});
 	}

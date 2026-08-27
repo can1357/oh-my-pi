@@ -3511,7 +3511,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				scoutAvailable: isScoutSpawnable(
 					settings.get("task.disabledAgents") as string[] | undefined,
 					session?.getSessionSpawns?.() ?? options.spawns ?? "*",
-					getDiscoveredScoutAgent(promptCwd),
+					getDiscoveredScoutAgent(promptCwd, session?.effectiveExtensionRoots ?? buildSessionExtensionRoots()),
 				),
 				taskIrcEnabled: !promptRestricted && isIrcEnabled(settings, options.taskDepth ?? 0),
 				autoQaEnabled: !promptRestricted && isAutoQaEnabled(settings),
@@ -4083,7 +4083,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			scoutAllowedBySpawnPolicy: isScoutSpawnable(
 				undefined,
 				options.spawns ?? "*",
-				getDiscoveredScoutAgent(sessionManager.getCwd()),
+				getDiscoveredScoutAgent(sessionManager.getCwd(), buildSessionExtensionRoots()),
 			),
 			evalKernelOwnerId,
 			// Launch `--agent` persona: seed the mutable persona channel (so a
