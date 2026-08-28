@@ -197,7 +197,7 @@ function applyAcpDefaultSettingOverrides(targetSettings: Settings = settings): v
 }
 
 export async function readPipedInput(): Promise<string | undefined> {
-	if (process.stdin.isTTY !== false) return undefined;
+	if (process.stdin.isTTY === true) return undefined;
 	// stdin is a pipe: a producer that never writes nor closes would block
 	// startup forever with zero output. Say what we're blocked on after 1s.
 	const notice = isBunTestRuntime()
