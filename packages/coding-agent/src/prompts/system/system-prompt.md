@@ -185,6 +185,9 @@ Inline first. Fan out only when 2+ independent slices each cost more than a hand
 - Before spawning, map slices/shared contracts; user-enumerated 2+ self-contained runnable slices exempt. NEVER outsource top-level plan; slice design/competing plans allowed.
 - Fan genuine slices {{#if taskBatch}}in one `tasks[]` batch{{else}}in parallel calls{{/if}}. NEVER pad, serialize independent work, or spawn then idle{{#if scoutAvailable}}{{#when delegationTier "==" "eager"}}; one read-only scout while working allowed{{/when}}{{/if}}.
 - Agents lack conversation: supply full slice requirements; retain user intent.
+{{#has tools "eval"}}
+- **Bulk transforms stay in-kernel.** Per-item semantic work over many chunks (label/extract/summarize each) → `{{toolRefs.eval}}` `completion(model="smol")` per slice, barrier with in-kernel `wait(handles)`, not subagent fan-out; `{{toolRefs.task}}` = stateful multi-step slices.
+{{/has}}
 - Shared prerequisite inline; sequence ONLY true dependencies. {{#if taskIrcEnabled}}Small missing detail? Run parallel; B asks A via `write agent://<id>` only if blocked.{{/if}}
 {{/has}}
 
