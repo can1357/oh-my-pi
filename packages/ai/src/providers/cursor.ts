@@ -853,19 +853,18 @@ function streamCursorWithWireMode(
 							void debugResponseLogPromise?.then(log => log?.write(frame.payload));
 						}
 						if (frame.kind === "end") {
-							// Logical outbound close + heartbeat disarm. Do not
-							// destroy the transport here: h2 trailers still need
-							// to arrive. Physical teardown stays in finally.
+							// The logical close disarms heartbeats. Physical teardown stays in finally.
 							closeOutboundWrites();
 							if (frame.error) {
 								endStreamError = frame.error;
-								// An error-bearing end frame is terminal: a half-open peer
-								// may never close the stream, so waiting for the natural
-								// end would hang. Break now and let the post-loop settle
-								// surface the error with the existing precedence. Clean end
-								// frames (no error) still fall through to wait for trailers.
+								// End errors terminate both transports; a half-open peer might never close.
 								break;
 							}
+							if (transport.responseHeaders) {
+								// An HTTP/2 end envelope is terminal. Trailers resolve independently above.
+								break;
+							}
+							// HTTP/1 publishes end before its append drain; keep reading so drain errors propagate.
 							continue;
 						}
 						try {

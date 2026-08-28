@@ -64,6 +64,13 @@ function releasePoll(): void {
 	pendingPoll = undefined;
 	respond?.();
 }
+let holdPollTerminal = false;
+let pendingPollTerminal: (() => void) | undefined;
+function releasePollTerminal(): void {
+	const respond = pendingPollTerminal;
+	pendingPollTerminal = undefined;
+	respond?.();
+}
 /** Yield to the event loop once so queued IO/microtasks make progress (no wall-clock wait). */
 function nextTick(): Promise<void> {
 	const { promise, resolve } = Promise.withResolvers<void>();
@@ -145,14 +152,19 @@ async function startServer(): Promise<string> {
 		if (url.includes("RunPoll")) {
 			pollHits++;
 			if (plan.kind === "success") {
-				const body = Buffer.concat([
+				const data = Buffer.concat([
 					encodeConnectFrame(encodePollResponse(0n, Buffer.from("hello-frame").toString("base64"), false), false),
 					encodeConnectFrame(encodePollResponse(1n, Buffer.from("bye-frame").toString("base64"), true), false),
-					frameConnectMessage(Buffer.from("{}", "utf8"), CONNECT_END_STREAM_FLAG),
 				]);
+				const terminal = frameConnectMessage(Buffer.from("{}", "utf8"), CONNECT_END_STREAM_FLAG);
 				const respond = (): void => {
 					res.writeHead(200, { "content-type": "application/connect+proto" });
-					res.end(body);
+					if (holdPollTerminal) {
+						res.write(data);
+						pendingPollTerminal = () => res.end(terminal);
+						return;
+					}
+					res.end(Buffer.concat([data, terminal]));
 				};
 				if (holdPollResponse) {
 					pendingPoll = respond;
@@ -306,8 +318,10 @@ afterEach(async () => {
 	// server.close() forever.
 	releaseAllHeldAppends();
 	releasePoll();
+	releasePollTerminal();
 	holdAppendResponses = false;
 	holdPollResponse = false;
+	holdPollTerminal = false;
 	plan = { kind: "success" };
 	appendOpenBody = false;
 	appendResponsesClosed.length = 0;
@@ -458,16 +472,11 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 	});
 
 	it("reclaims per-frame overhead on dequeue so a later terminal frame is admitted at equality", async () => {
-		// Park the poll reader on a held append before the terminal push, drain
-		// both data frames (freeing 64+payload each), then tighten the budget to
-		// exactly the terminal frame's 64 B and release. Correct symmetric
-		// accounting drains #bytes to 0, so the terminal push lands at equality
-		// (64 > 64 is false) and the turn completes cleanly. Payload-only
-		// dequeue would leave 128 B of residual overhead, so the same push
-		// (192 B) would exceed the 64 B budget and the queue would fail instead.
+		// Drain both data frames, lower the limit to the terminal frame's 64 B cost,
+		// then release the terminal frame while append #1 remains pending.
 		plan = { kind: "success" };
 		holdAppendResponses = true;
-		holdPollResponse = true;
+		holdPollTerminal = true;
 		const baseUrl = await startServer();
 		const bridge = openCursorHttp1Bridge({
 			baseUrl,
@@ -477,11 +486,10 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 		});
 		bridge.write(encodeConnectFrame(Buffer.from("client-request"), false));
 		while (appendHits < 1) await nextTick();
-		releaseAllHeldAppends(); // append #0 settles → poll may start
-		bridge.write(encodeConnectFrame(Buffer.from("frameB"), false)); // append #1, held
+		releaseAllHeldAppends(); // append #0 settles, so poll may start
+		bridge.write(encodeConnectFrame(Buffer.from("frameB"), false)); // append #1 remains held
 		while (appendHits < 2) await nextTick();
 		while (pollHits < 1) await nextTick();
-		releasePoll(); // deliver both data frames; reader parks awaiting append #1
 
 		const consumed: ConnectFrame[] = [];
 		const drained = Promise.withResolvers<void>();
@@ -489,9 +497,10 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 			for await (const frame of bridge.frames()) consumed.push(frame);
 			drained.resolve();
 		})();
-		while (consumed.length < 2) await nextTick(); // both data frames dequeued → #bytes 0
-		__setCursorPollQueueByteLimit(64); // terminal push must land at equality
-		releaseAllHeldAppends(); // append #1 settles → reader pushes the terminal frame
+		while (consumed.length < 2) await nextTick();
+		__setCursorPollQueueByteLimit(64);
+		releasePollTerminal();
+		releaseAllHeldAppends();
 		await drained.promise;
 
 		expect(consumed.filter(frame => frame.kind === "data")).toHaveLength(2);
@@ -503,15 +512,11 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 	});
 
 	it("does not double-subtract overhead on dequeue, so a drained queue still enforces its budget", async () => {
-		// Same park as the reclamation test, but the budget is set one byte
-		// below the terminal frame's 64 B. Correct accounting drains #bytes to
-		// 0, so the terminal push (64 B) exceeds the 63 B budget and the queue
-		// fails. Double-subtracting overhead on dequeue would drive #bytes
-		// negative, so the same push would be admitted and the turn would
-		// settle cleanly instead of failing.
+		// One byte below the terminal frame's 64 B cost distinguishes a zero
+		// balance from an invalid negative balance after both data dequeues.
 		plan = { kind: "success" };
 		holdAppendResponses = true;
-		holdPollResponse = true;
+		holdPollTerminal = true;
 		const baseUrl = await startServer();
 		const bridge = openCursorHttp1Bridge({
 			baseUrl,
@@ -525,7 +530,6 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 		bridge.write(encodeConnectFrame(Buffer.from("frameB"), false));
 		while (appendHits < 2) await nextTick();
 		while (pollHits < 1) await nextTick();
-		releasePoll();
 
 		const consumed: ConnectFrame[] = [];
 		let error: unknown;
@@ -540,6 +544,7 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 		})();
 		while (consumed.length < 2) await nextTick();
 		__setCursorPollQueueByteLimit(63);
+		releasePollTerminal();
 		releaseAllHeldAppends();
 		await settled.promise;
 

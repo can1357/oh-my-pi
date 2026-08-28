@@ -23,6 +23,7 @@ const CONNECT_END_STREAM_FLAG = 0b00000010;
 type Scenario =
 	| { kind: "success" }
 	| { kind: "connect-error-half-open" }
+	| { kind: "connect-clean-end-half-open" }
 	| { kind: "connect-error-after-turn" }
 	| { kind: "connect-detailed-error-after-turn" }
 	| { kind: "connect-classification-detail-after-turn" }
@@ -269,6 +270,12 @@ async function startServer(): Promise<string> {
 			return;
 		}
 
+		if (scenario.kind === "connect-clean-end-half-open") {
+			stream.write(frameConnectMessage(Buffer.from("{}", "utf8"), CONNECT_END_STREAM_FLAG));
+			// The end envelope must settle without waiting for this half-open stream.
+			return;
+		}
+
 		if (scenario.kind === "hang-after-turn") {
 			return;
 		}
@@ -384,6 +391,19 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(eventTypes).not.toContain("done");
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("Connect error unavailable: half-open connect failure");
+	});
+
+	it("settles promptly on a clean end frame even when the stream stays half-open", async () => {
+		// The server sends turnEnded and a clean end envelope, but never closes HTTP/2.
+		scenario = { kind: "connect-clean-end-half-open" };
+		const baseUrl = await startServer();
+		const started = Date.now();
+		const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+		// Completion must not wait for the 5s heartbeat or the test timeout.
+		expect(Date.now() - started).toBeLessThan(2500);
+		expect(eventTypes).toEqual(["start", "text_start", "text_delta", "text_end", "done"]);
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
 	});
 
 	it("surfaces standard Connect detail values without changing recovery classification", async () => {

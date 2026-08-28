@@ -184,15 +184,12 @@ export function openCursorHttp1Bridge(args: {
 					// walk — so a malformed poll body settles as a protocol failure,
 					// never a clean turn.
 					decoder.finish();
-					// Close append admission ATOMICALLY before draining: write() is
-					// synchronous, so flipping this flag here guarantees no further
-					// write() can extend the chain while the drain's `await appendTail`
-					// is pending — a late write surfaces an error to ITS caller instead
-					// of being silently orphaned by the abort that follows settle.
+					// Close admission before draining so synchronous late writes cannot extend the chain.
 					admitting = false;
+					// Let the owner disarm heartbeats now, but keep the queue open so drain failures propagate.
+					queue.push({ kind: "end", error: null });
 					await appendTail;
 					if (terminal) return;
-					queue.push({ kind: "end", error: null });
 					settleSuccess();
 					return;
 				}

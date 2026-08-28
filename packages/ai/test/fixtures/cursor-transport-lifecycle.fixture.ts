@@ -1,9 +1,9 @@
 import { expect, test, vi } from "bun:test";
 import { EventEmitter } from "node:events";
 import * as http from "node:http";
-import * as http2 from "node:http2";
+import type * as http2 from "node:http2";
 import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
-import type { Context, Model, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
+import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	AgentServerMessageSchema,
@@ -24,7 +24,6 @@ import * as serverConfig from "../../src/providers/cursor/server-config";
 // preserves the original observable assertions, and prints a single
 // LIFECYCLE_RESULT=<json> line for the parent to parse and re-assert.
 
-const RUN_PATH = "/agent.v1.AgentService/Run";
 const CONNECT_END_STREAM_FLAG = 0b00000010;
 const API_KEY = "transport-lifecycle-key";
 
@@ -86,7 +85,7 @@ const turnEndedPayload = toBinary(
 	}),
 );
 
-function execReadPayload(toolCallId = "call-hang", path = "/tmp/hang"): Uint8Array {
+function execReadPayload(toolCallId = "call-read", path = "/tmp/read"): Uint8Array {
 	return toBinary(
 		AgentServerMessageSchema,
 		create(AgentServerMessageSchema, {
@@ -163,16 +162,37 @@ async function runHeartbeatDrain(): Promise<LifecycleResult> {
 	const removeCollectors = installExceptionCollectors(collected);
 	const execB64 = Buffer.from(execReadPayload()).toString("base64");
 	const turnB64 = Buffer.from(turnEndedPayload).toString("base64");
+	// Hold the read-result append past the heartbeat that each successful write arms.
+	const heartbeatIntervalMs = 5_000;
+	const appendHoldMs = heartbeatIntervalMs + 600;
+	let appendRequests = 0;
+	const laterAppendPending = Promise.withResolvers<void>();
 	const server = http.createServer((req, res) => {
 		if (req.url?.includes("RunPoll")) {
-			const body = Buffer.concat([
-				encodeConnectFrame(pollResponse(0n, execB64, false), false),
-				encodeConnectFrame(pollResponse(1n, turnB64, false), false),
-				encodeConnectFrame(pollResponse(2n, "", true), false),
-				frame(Buffer.from("{}", "utf8"), CONNECT_END_STREAM_FLAG),
-			]);
 			res.writeHead(200, { "content-type": "application/connect+proto" });
-			res.end(body);
+			res.write(encodeConnectFrame(pollResponse(0n, execB64, false), false));
+			// End the poll only after the read result starts its append request.
+			void laterAppendPending.promise.then(() => {
+				res.write(encodeConnectFrame(pollResponse(1n, turnB64, false), false));
+				res.write(encodeConnectFrame(pollResponse(2n, "", true), false));
+				res.write(frame(Buffer.from("{}", "utf8"), CONNECT_END_STREAM_FLAG));
+				res.end();
+			});
+			return;
+		}
+		if (req.url?.includes("BidiAppend")) {
+			appendRequests++;
+			if (appendRequests === 1) {
+				res.statusCode = 200;
+				res.end();
+				return;
+			}
+			// Keep the read-result append pending while the heartbeat would fire.
+			laterAppendPending.resolve();
+			setTimeout(() => {
+				res.statusCode = 200;
+				res.end();
+			}, appendHoldMs);
 			return;
 		}
 		res.statusCode = 200;
@@ -189,7 +209,15 @@ async function runHeartbeatDrain(): Promise<LifecycleResult> {
 		const stream = streamCursor(model(baseUrl), context, {
 			apiKey: API_KEY,
 			execHandlers: {
-				read: () => Promise.withResolvers<ToolResultMessage>().promise,
+				read: () =>
+					Promise.resolve({
+						role: "toolResult" as const,
+						toolCallId: "call-read",
+						toolName: "read",
+						content: [{ type: "text" as const, text: "file body" }],
+						isError: false,
+						timestamp: 1,
+					}),
 			},
 		});
 		const eventTypes: string[] = [];
