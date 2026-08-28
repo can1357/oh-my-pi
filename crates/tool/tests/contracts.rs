@@ -1660,6 +1660,50 @@ fn all_adjacent_lifts_compose_to_the_live_revision_byte_identically() {
 }
 
 #[test]
+fn retired_adjacent_revisions_remain_lift_steps() {
+	let mut registry = Registry::new();
+	registry
+		.register(
+			fake_tool(1, "one", Arc::new(AtomicUsize::new(0))).named("guarded"),
+			Presentation::Slot,
+			claims("test/foreign", Precedence::DEFAULT),
+		)
+		.unwrap();
+	registry
+		.register(
+			fake_tool(2, "two", Arc::new(AtomicUsize::new(0)))
+				.named("guarded")
+				.lifting_from(1),
+			Presentation::Slot,
+			claims("test/foreign", Precedence::DEFAULT),
+		)
+		.unwrap();
+	registry.protect_core_claims(["guarded"]);
+	registry
+		.register(
+			fake_tool(3, "three", Arc::new(AtomicUsize::new(0)))
+				.named("guarded")
+				.lifting_from(2),
+			Presentation::Slot,
+			claims("omp/core", Precedence::CORE),
+		)
+		.unwrap();
+	let original = RecordedCallOwned {
+		identity: ToolIdentity { name: sf!("guarded"), rev: Rev { family: sf!("fake"), n: 1 } },
+		raw_args: Bytes::from_static(b"raw"),
+		verdict:  Bytes::from_static(b"verdict"),
+	};
+	assert_eq!(
+		registry.project(original),
+		ProjectedCall::Live(RecordedCallOwned {
+			identity: ToolIdentity { name: sf!("guarded"), rev: Rev { family: sf!("fake"), n: 3 } },
+			raw_args: Bytes::from_static(b"raw>2>3"),
+			verdict:  Bytes::from_static(b"verdict>2>3"),
+		})
+	);
+}
+
+#[test]
 fn incomplete_lift_chain_preserves_the_exact_original_as_data() {
 	let mut registry = Registry::new();
 	registry

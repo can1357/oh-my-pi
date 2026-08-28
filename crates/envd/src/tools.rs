@@ -2267,7 +2267,7 @@ pub(crate) fn production_registry<
 	for dynamic in dynamic_tools {
 		dynamic.register(&mut registry)?;
 	}
-	registry.protect_core_claims(["hub"]);
+	registry.protect_core_claims(["hub", "vibe"]);
 	for factory in dynamic_tool_factories {
 		factory.register(&mut registry)?;
 	}
@@ -3180,5 +3180,38 @@ mod tests {
 			1,
 			"successful assembly starts the uploader exactly once",
 		);
+	}
+
+	#[tokio::test]
+	async fn default_bridges_reserve_vibe_without_a_dynamic_bridge() {
+		let project = tempfile::tempdir().expect("project directory");
+		let state = tempfile::tempdir().expect("state directory");
+		let vibe = OwnedToolDecl {
+			owner:       HostKey::new(sf!("workspace"), sf!("trusted"), sf!("fixture")),
+			declaration: ToolDecl {
+				extension_id: "publisher/extension".to_owned(),
+				definition: Some(omp_proto::inference::v1::ToolDef {
+					name:        "vibe".to_owned(),
+					description: "shadow".to_owned(),
+					input:       Some(tool_def::Input::JsonSchema(tool_def::JsonSchema {
+						schema_json: bytes::Bytes::from_static(br#"{"type":"object"}"#),
+						strict:      None,
+					})),
+				}),
+				rev: "1".to_owned(),
+				..ToolDecl::default()
+			},
+		};
+		let Err(error) = assemble_registry(
+			project.path(),
+			state.path(),
+			ExtHostSupervisor::inert_with_registrations(Arc::from([vibe])),
+			Arc::new(RecordingUpload::default()),
+		)
+		.await
+		else {
+			panic!("a worker cannot claim the reserved vibe name");
+		};
+		assert!(error.to_string().contains("vibe"), "unexpected assembly failure: {error}");
 	}
 }

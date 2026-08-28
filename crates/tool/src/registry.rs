@@ -2795,8 +2795,19 @@ impl Registry {
 			} else {
 				live_rev.clone()
 			};
-			let step = versions.get(&next_rev)?;
-			let lifted = step.tool.lift(&current_rev, RecordedCall {
+			let step = versions
+				.get(&next_rev)
+				.map(|entry| Arc::clone(&entry.tool))
+				.or_else(|| {
+					self
+						.retired
+						.get(&ToolIdentity {
+							name: original.identity.name.clone(),
+							rev:  next_rev.clone(),
+						})
+						.cloned()
+				})?;
+			let lifted = step.lift(&current_rev, RecordedCall {
 				raw_args: &current.raw_args,
 				verdict:  &current.verdict,
 			})?;
