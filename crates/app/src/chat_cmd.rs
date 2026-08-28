@@ -724,7 +724,7 @@ pub(crate) async fn run(
 		},
 		Ok(_) | Err(_) if explicit_model.is_none() => {
 			let fallback = roles::fallback_model_selector(catalog, &model_settings, None)
-				.ok_or_else(|| miette!("no model is allowed by effective settings"))?;
+				.ok_or_else(|| miette::miette!("no model is allowed by effective settings"))?;
 			eprintln!(
 				"Saved model `{}` is unavailable; using `{}` for this session without changing the \
 				 saved preference.",
@@ -980,7 +980,7 @@ pub(crate) async fn run(
 			let saved = snapshot.turn.params.model.clone();
 			let fallback =
 				roles::fallback_model_selector(catalog, &model_settings, credential_provider.as_ref())
-					.ok_or_else(|| miette!("no selectable model is available to resume"))?;
+					.ok_or_else(|| miette::miette!("no selectable model is available to resume"))?;
 			snapshot.turn.params.model = fallback.as_str().to_owned();
 			substituted = true;
 			eprintln!(
@@ -1124,6 +1124,7 @@ pub(crate) async fn run(
 			blueprint,
 			eval_control.clone(),
 			edit_repair_requests,
+			edit_model.clone(),
 			None,
 			goal_control.clone(),
 			None,
@@ -1209,6 +1210,7 @@ pub(crate) async fn run(
 			blueprint,
 			eval_control,
 			edit_repair_requests,
+			edit_model.clone(),
 			Some(inference_registry),
 			goal_control,
 			Some(auth_control),
@@ -1702,6 +1704,7 @@ async fn run_ui<C: TurnClient + Clone + Send + Sync + 'static>(
 	mut blueprint: SessionBlueprint,
 	eval_control: EvalSessionControl,
 	edit_repair_requests: Option<flume::Receiver<omp_tools::edit::observer::EditRepairRequest>>,
+	edit_model: omp_tools::edit::observer::EditBlackboxModel,
 	auth_registry: Option<InferenceRegistry>,
 	goal_control: AgentGoalControl,
 	auth_control: Option<omp_inference::auth::AuthControlHandle>,
