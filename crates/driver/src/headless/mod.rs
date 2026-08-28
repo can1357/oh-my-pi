@@ -1349,6 +1349,11 @@ impl HeadlessSession {
 		Str::new(self.state.snapshot().turn.params.model.as_str())
 	}
 
+	/// Returns the catalog snapshot this session was composed against.
+	pub fn catalog(&self) -> &snapshot::Catalog {
+		self._catalog.as_ref()
+	}
+
 	/// Applies a validated session-only model override and records it in the
 	/// owning v4 journal before changing the live snapshot.
 	pub async fn set_model(&self, selector: &str) -> Result<(), HeadlessError> {

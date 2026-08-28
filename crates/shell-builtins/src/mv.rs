@@ -20,8 +20,6 @@ use std::{
 
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, error::ErrorKind};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle, TermLike};
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
-use omp_core::FastHashMap;
 use omp_core::{FastHashSet, FastState};
 use omp_shell_engine::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
 use parking_lot::Mutex;
@@ -1227,10 +1225,6 @@ fn rename_dir_fallback(
 		(..) => None,
 	};
 
-	#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
-	let xattrs =
-		fsxattr::retrieve_xattrs(host.resolve(from)).unwrap_or_else(|_| FastHashMap::default());
-
 	// Use directory copying (with or without hardlink support)
 	let result = copy_dir_contents(
 		host,
@@ -1245,10 +1239,12 @@ fn rename_dir_fallback(
 		display_manager,
 	);
 
-	#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
-	fsxattr::apply_xattrs(host.resolve(to), xattrs)?;
-
 	result?;
+
+	#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+	{
+		let _ = copy_xattrs_if_supported(host, from, to);
+	}
 
 	// Remove the source directory after successful copy
 	fs::remove_dir_all(host.resolve(from))?;

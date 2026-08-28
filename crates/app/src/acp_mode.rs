@@ -2058,16 +2058,11 @@ impl Runtime {
 		let requested = required_text(params, "thinking")?;
 		let session_id = Str::from(required_text(params, "sessionId")?);
 		let session = self.session(&session_id)?;
-		let data_dir = self.state.lock().data_dir.clone();
-		let catalog = omp_driver::registry::production_catalog(&data_dir).into_diagnostic()?;
+		let headless = session.asynchronous.headless.lock().await;
 		let model = session.meta.lock().model.clone();
-		let thinking = clamp_thinking_level(catalog.as_ref(), &model, requested)?.to_owned();
-		session
-			.asynchronous
-			.headless
-			.lock()
-			.await
-			.set_thinking(reasoning_for(&thinking));
+		let thinking = clamp_thinking_level(headless.catalog(), &model, requested)?.to_owned();
+		headless.set_thinking(reasoning_for(&thinking));
+		drop(headless);
 		session.meta.lock().thinking = thinking.clone();
 		self.update(&session_id, json!({"sessionUpdate":"config_option_update","configOptions":[{"id":"thinking","currentValue":thinking}]}))?;
 		Ok(json!({}))
