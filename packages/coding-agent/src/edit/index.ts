@@ -1,5 +1,5 @@
 import * as nodePath from "node:path";
-import { MismatchError as HashlineMismatchError, Patch } from "@oh-my-pi/hashline";
+import { forkClipboard, MismatchError as HashlineMismatchError, Patch } from "@oh-my-pi/hashline";
 import hashlineGrammar from "@oh-my-pi/hashline/grammar.lark" with { type: "text" };
 import hashlineDescription from "@oh-my-pi/hashline/prompt.md" with { type: "text" };
 import type {
@@ -475,6 +475,7 @@ export class EditTool implements AgentTool<TInput> {
 	readonly concurrency = "exclusive";
 	readonly strict = true;
 	#speculativeHashlineEdits = new Map<string, StagedHashlineEdit>();
+	#speculativeHashlineEditExecutions = new Map<string, { discarded: boolean }>();
 
 	readonly speculation = {
 		finalized: {
@@ -535,15 +536,22 @@ export class EditTool implements AgentTool<TInput> {
 		) {
 			throw new Error("Invalid speculative hashline operation");
 		}
-		const transaction = await openSpeculativePalTransaction(
-			this.session.cwd,
-			context.toolCall.id,
-			context.effect.resources.map(resource => resource.path),
-		);
+		const execution = { discarded: false };
+		this.#speculativeHashlineEditExecutions.set(context.toolCall.id, execution);
+		let transaction: SpeculativePalTransaction | undefined;
 		try {
+			transaction = await openSpeculativePalTransaction(
+				this.session.cwd,
+				context.toolCall.id,
+				context.effect.resources.map(resource => resource.path),
+			);
+			if (signal.aborted || execution.discarded) {
+				throw new Error("Speculative hashline edit was discarded during staging");
+			}
 			const sandboxSession = Object.create(this.session) as ToolSession;
 			Object.defineProperties(sandboxSession, {
 				cwd: { value: transaction.isolation.mergedDir },
+				editClipboard: { value: forkClipboard(this.session.editClipboard), writable: true },
 				enableLsp: { value: false },
 			});
 			const stagedDiagnostics = new DeferredDiagnostics(sandboxSession, false);
@@ -554,12 +562,19 @@ export class EditTool implements AgentTool<TInput> {
 				beginDeferredDiagnosticsForPath: target => stagedDiagnostics.begin(target),
 				writethrough: writethroughNoop,
 			});
+			if (signal.aborted || execution.discarded) {
+				throw new Error("Speculative hashline edit was discarded during staging");
+			}
 			const staged = { transaction, params: { input: context.args.input } } satisfies StagedHashlineEdit;
 			this.#speculativeHashlineEdits.set(context.toolCall.id, staged);
 			return { kind: "staged", token: staged };
 		} catch (error) {
-			await transaction.close();
+			await transaction?.close();
 			throw error;
+		} finally {
+			if (this.#speculativeHashlineEditExecutions.get(context.toolCall.id) === execution) {
+				this.#speculativeHashlineEditExecutions.delete(context.toolCall.id);
+			}
 		}
 	}
 
@@ -581,6 +596,8 @@ export class EditTool implements AgentTool<TInput> {
 	}
 
 	async #discardSpeculativeHashline(toolCallId: string): Promise<void> {
+		const execution = this.#speculativeHashlineEditExecutions.get(toolCallId);
+		if (execution) execution.discarded = true;
 		const staged = this.#speculativeHashlineEdits.get(toolCallId);
 		this.#speculativeHashlineEdits.delete(toolCallId);
 		await staged?.transaction.close();
