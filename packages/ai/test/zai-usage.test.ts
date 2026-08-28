@@ -252,6 +252,25 @@ describe("zai usage provider", () => {
 		expect(limit.amount.remaining).toBe(1234);
 		expect(limit.amount.usedFraction).toBeUndefined();
 	});
+	it("keeps credit units for partial absolute meters", async () => {
+		const report = await zaiUsageProvider.fetchUsage!(
+			{ provider: "zai", credential: makeCredential(), signal: undefined },
+			makeCtx({
+				success: true,
+				data: {
+					limits: [
+						{ type: "CREDIT_LIMIT", currentValue: 1200, percentage: 12, unit: 3, number: 5 },
+						{ type: "CREDIT_LIMIT", usage: 10000, percentage: 12, unit: 6, number: 1 },
+					],
+				},
+			}),
+		);
+
+		expect(report).not.toBeNull();
+		expect(report!.limits.map(limit => limit.amount.unit)).toEqual(["credits", "credits"]);
+		expect(report!.limits.map(limit => limit.amount.used)).toEqual([1200, undefined]);
+		expect(report!.limits.map(limit => limit.amount.limit)).toEqual([undefined, 10000]);
+	});
 	it("keeps one ranked limit per window when tokens and credits meters coexist", async () => {
 		const report = await zaiUsageProvider.fetchUsage!(
 			{ provider: "zai", credential: makeCredential(), signal: undefined },

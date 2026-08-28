@@ -332,7 +332,11 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 			// absolute remaining value in credits and use percentages only by themselves.
 			const window = buildZaiWindow(parsed);
 			const hasAbsoluteMeter = parsed.currentValue !== undefined && parsed.usage !== undefined && parsed.usage > 0;
-			const usePercentUnit = !hasAbsoluteMeter && parsed.remaining === undefined && parsed.percentage !== undefined;
+			const usePercentUnit =
+				parsed.currentValue === undefined &&
+				parsed.usage === undefined &&
+				parsed.remaining === undefined &&
+				parsed.percentage !== undefined;
 			const amount = buildUsageAmount({
 				used: parsed.currentValue,
 				limit: parsed.usage,
