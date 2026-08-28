@@ -241,6 +241,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 	signal: AbortSignal,
 	format: string,
 	peer: string,
+	requestId: string,
 ): Promise<string | undefined> {
 	const message = error instanceof Error ? error.message : String(error);
 	const status = extractHttpStatusFromError(error);
@@ -263,7 +264,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 			error: message,
 		});
 		if (!switched) return undefined;
-		return storage.getApiKey(provider, sessionId, { modelId: model.id, signal });
+		return storage.getApiKey(provider, sessionId, { modelId: model.id, signal, requestId });
 	}
 	await storage.invalidateCredentialMatching(provider, oldKey, { sessionId, signal });
 	logger.debug("auth-gateway retrying provider request after credential invalidation", {
@@ -272,7 +273,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 		peer,
 		error: message,
 	});
-	return storage.getApiKey(provider, sessionId, { modelId: model.id, signal });
+	return storage.getApiKey(provider, sessionId, { modelId: model.id, signal, requestId });
 }
 
 /**
@@ -296,6 +297,7 @@ function buildGatewayApiKeyResolver(
 	requestSignal: AbortSignal,
 	format: string,
 	peer: string,
+	requestId: string,
 ): ApiKeyResolver {
 	let lastKey = initialKey;
 	return async ({ lastChance, error, signal }) => {
@@ -309,6 +311,7 @@ function buildGatewayApiKeyResolver(
 				modelId: model.id,
 				signal: sig,
 				forceRefresh: true,
+				requestId,
 			});
 			lastKey = refreshed ?? lastKey;
 			return refreshed;
@@ -323,6 +326,7 @@ function buildGatewayApiKeyResolver(
 			sig,
 			format,
 			peer,
+			requestId,
 		);
 		lastKey = next ?? lastKey;
 		return next;
@@ -369,6 +373,39 @@ function mirrorRequestAbort(req: Request): AbortController {
 }
 
 // (handlePassthrough removed — see note above.)
+
+function releaseTurnOnStreamEnd(
+	stream: ReadableStream<Uint8Array>,
+	storage: AuthStorage,
+	requestId: string,
+	commitGate?: StreamCommitGate,
+): ReadableStream<Uint8Array> {
+	const reader = stream.getReader();
+	let released = false;
+	const release = (): void => {
+		if (released) return;
+		released = true;
+		if (commitGate && (commitGate.state === "committed" || commitGate.state === "terminated")) {
+			storage.settleQuotaProbeSuccess(requestId);
+		}
+		storage.releaseTurnReservation(requestId);
+	};
+	return new ReadableStream({
+		async pull(controller) {
+			const { done, value } = await reader.read();
+			if (done) {
+				release();
+				controller.close();
+				return;
+			}
+			controller.enqueue(value);
+		},
+		cancel(reason) {
+			release();
+			return reader.cancel(reason);
+		},
+	});
+}
 
 async function handleFormatEndpoint(
 	route: { module: FormatModule; label: string },
@@ -472,6 +509,7 @@ async function handleFormatEndpoint(
 		apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
 			modelId: model.id,
 			signal: controller.signal,
+			requestId,
 		});
 	} catch (error) {
 		if (controller.signal.aborted) return clientClosedResponse(route);
@@ -515,6 +553,7 @@ async function handleFormatEndpoint(
 		controller.signal,
 		route.label,
 		peer,
+		requestId,
 	);
 	const commitGate = new StreamCommitGate();
 	// openai-responses wraps the downstream body in observeSseCommit. Feeding
@@ -570,6 +609,7 @@ async function handleFormatEndpoint(
 				const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
 				return route.module.formatError(classified.status, classified.type, errorMessage);
 			}
+			bootOpts.storage.settleQuotaProbeSuccess(requestId);
 			return json(
 				200,
 				route.module.encodeResponse(message, parsed.modelId),
@@ -584,19 +624,28 @@ async function handleFormatEndpoint(
 				peer,
 			});
 			return route.module.formatError(classified.status, classified.type, classified.message);
+		} finally {
+			bootOpts.storage.releaseTurnReservation(requestId);
 		}
 	}
 
 	let events: AssistantMessageEventStream;
 	try {
-		if (controller.signal.aborted) return clientClosedResponse(route);
+		if (controller.signal.aborted) {
+			bootOpts.storage.releaseTurnReservation(requestId);
+			return clientClosedResponse(route);
+		}
 		events = streamSimple(model, parsed.context, streamOpts);
 	} catch (error) {
+		bootOpts.storage.releaseTurnReservation(requestId);
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway streamSimple threw", { format: route.label, error: classified.message, peer });
 		return route.module.formatError(classified.status, classified.type, classified.message);
 	}
-	if (controller.signal.aborted) return clientClosedResponse(route);
+	if (controller.signal.aborted) {
+		bootOpts.storage.releaseTurnReservation(requestId);
+		return clientClosedResponse(route);
+	}
 	void events
 		.result()
 		.then(message => recordGatewayUsage(bootOpts.storage, model, client, message))
@@ -613,6 +662,7 @@ async function handleFormatEndpoint(
 	if (route.label === "openai-responses") {
 		sseStream = observeSseCommit(sseStream, commitGate);
 	}
+	sseStream = releaseTurnOnStreamEnd(sseStream, bootOpts.storage, requestId, commitGate);
 	return new Response(sseStream, {
 		status: 200,
 		headers: {
@@ -689,6 +739,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
 			modelId: model.id,
 			signal: controller.signal,
+			requestId,
 		});
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();
@@ -736,6 +787,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		controller.signal,
 		"pi-native",
 		peer,
+		requestId,
 	);
 	if (model.api === "openai-codex-responses") {
 		delete streamOpts.temperature;
@@ -784,31 +836,41 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 				const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
 				return piNative.formatError(classified.status, classified.type, errorMessage);
 			}
+			bootOpts.storage.settleQuotaProbeSuccess(requestId);
 			return json(200, { message }, gatewayResponseHeaders(model, { requestId, message, startedAt }));
 		} catch (error) {
 			if (controller.signal.aborted) return aborted();
 			const classified = classifyGatewayError(error);
 			logger.warn("auth-gateway non-streaming aborted", { format: "pi-native", error: classified.message, peer });
 			return piNative.formatError(classified.status, classified.type, classified.message);
+		} finally {
+			bootOpts.storage.releaseTurnReservation(requestId);
 		}
 	}
 
 	let events: AssistantMessageEventStream;
 	try {
-		if (controller.signal.aborted) return aborted();
+		if (controller.signal.aborted) {
+			bootOpts.storage.releaseTurnReservation(requestId);
+			return aborted();
+		}
 		events = streamSimple(model, parsed.context, streamOpts);
 	} catch (error) {
+		bootOpts.storage.releaseTurnReservation(requestId);
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway streamSimple threw", { format: "pi-native", error: classified.message, peer });
 		return piNative.formatError(classified.status, classified.type, classified.message);
 	}
-	if (controller.signal.aborted) return aborted();
+	if (controller.signal.aborted) {
+		bootOpts.storage.releaseTurnReservation(requestId);
+		return aborted();
+	}
 	void events
 		.result()
 		.then(message => recordGatewayUsage(bootOpts.storage, model, client, message))
 		.catch(() => {});
 
-	const sseStream = piNative.encodeStream(events, parsed.modelId, parsed.options, {
+	let sseStream = piNative.encodeStream(events, parsed.modelId, parsed.options, {
 		signal: controller.signal,
 		onCancel: reason => {
 			if (!controller.signal.aborted) {
@@ -816,6 +878,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 			}
 		},
 	});
+	sseStream = releaseTurnOnStreamEnd(sseStream, bootOpts.storage, requestId);
 	return new Response(sseStream, {
 		status: 200,
 		headers: {
