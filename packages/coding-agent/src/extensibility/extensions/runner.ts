@@ -37,6 +37,7 @@ import type {
 	ContextUsage,
 	Extension,
 	ExtensionActions,
+	ExtensionCollabState,
 	ExtensionCommandContext,
 	ExtensionCommandContextActions,
 	ExtensionContext,
@@ -554,6 +555,19 @@ export class ExtensionRunner {
 	/** Whether a native built-in of `name` is available to delegate to. */
 	hasNativeTool(name: string): boolean {
 		return this.#nativeToolResolver?.(name) !== undefined;
+	}
+
+	/**
+	 * Backing state for `ctx.collab`, kept live across every {@link createContext} call
+	 * (see the `get collab()` accessor there) rather than snapshotted at creation time, so
+	 * a handler that reads `ctx.collab` after `/collab stop` sees `hosting: false` even
+	 * though its own `ExtensionContext` was built before the session tore down.
+	 */
+	#collabState: ExtensionCollabState = { hosting: false, roomId: undefined };
+
+	/** Set by `CollabHost.start()`/`stop()` (interactive mode only) to back `ctx.collab`. */
+	setCollabState(state: ExtensionCollabState): void {
+		this.#collabState = state;
 	}
 
 	/**
@@ -1154,6 +1168,7 @@ export class ExtensionRunner {
 		},
 	): ExtensionContext {
 		const getModel = model ? () => model : this.#getModel;
+		const getCollabState = () => this.#collabState;
 		return {
 			ui: this.#uiContext,
 			mode: this.#mode,
@@ -1169,6 +1184,9 @@ export class ExtensionRunner {
 				return getModel();
 			},
 			models: createExtensionModelQuery(this.modelRegistry, this.settings, getModel),
+			get collab() {
+				return getCollabState();
+			},
 			isIdle: () => this.#isIdleFn(),
 			abort: () => this.#abortFn(),
 			hasPendingMessages: () => this.#hasPendingMessagesFn(),

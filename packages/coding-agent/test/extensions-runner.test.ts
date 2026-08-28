@@ -159,6 +159,78 @@ describe("ExtensionRunner", () => {
 		expect(runner.createContext().mode).toBe("tui");
 	});
 
+	describe("collab state", () => {
+		it("defaults ctx.collab to not-hosting and reflects setCollabState() live", async () => {
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			expect(runner.createContext().collab).toEqual({ hosting: false, roomId: undefined });
+
+			runner.setCollabState({ hosting: true, roomId: "room-123" });
+			expect(runner.createContext().collab).toEqual({ hosting: true, roomId: "room-123" });
+
+			// Same guarantee as the live `model` getter (see "reflects
+			// SessionManager.moveTo()" above): a context handed to an in-flight
+			// handler must observe a later state change, not a construction-time
+			// snapshot.
+			const liveCtx = runner.createContext();
+			runner.setCollabState({ hosting: false, roomId: undefined });
+			expect(liveCtx.collab).toEqual({ hosting: false, roomId: undefined });
+		});
+
+		it("dispatches collab_start/collab_end to subscribed extensions with the documented payload", async () => {
+			const markerPath = path.join(tempDir.path(), "collab-events.jsonl");
+			fs.writeFileSync(
+				path.join(extensionsDir, "collab-listener.ts"),
+				`
+					import * as fs from "node:fs";
+
+					export default function(pi) {
+						const record = (type, event) => {
+							fs.appendFileSync(${JSON.stringify(markerPath)}, JSON.stringify({ type, event }) + "\\n");
+						};
+						pi.on("collab_start", event => record("collab_start", event));
+						pi.on("collab_end", event => record("collab_end", event));
+					}
+				`,
+			);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			const payload = {
+				roomId: "room-abc",
+				relayUrl: "wss://relay.example",
+				webLink: "https://example.com",
+				hasWriteToken: true,
+			};
+			await runner.emit({ type: "collab_start", ...payload });
+			await runner.emit({ type: "collab_end", ...payload });
+
+			const recorded = fs
+				.readFileSync(markerPath, "utf8")
+				.split("\n")
+				.filter(line => line.length > 0)
+				.map(line => JSON.parse(line));
+			expect(recorded).toEqual([
+				{ type: "collab_start", event: { type: "collab_start", ...payload } },
+				{ type: "collab_end", event: { type: "collab_end", ...payload } },
+			]);
+		});
+	});
+
 	describe("shortcut conflicts", () => {
 		it("warns when extension shortcut conflicts with built-in", async () => {
 			const extCode = `

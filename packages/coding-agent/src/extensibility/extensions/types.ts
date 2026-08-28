@@ -477,6 +477,8 @@ export interface ExtensionContext {
 	model: Model | undefined;
 	/** Read-only model query facade: list / current / resolve / family. */
 	models: ExtensionModelQuery;
+	/** Live `/collab` host state for this session: whether it's hosting, and the active room id. */
+	collab: ExtensionCollabState;
 	/** Whether the agent is idle (not streaming) */
 	isIdle(): boolean;
 	/** Abort the current agent operation */
@@ -864,6 +866,53 @@ export interface McpNotificationEvent {
 }
 
 // ============================================================================
+// Collab Events
+// ============================================================================
+
+/**
+ * Fired once a `/collab` host session is live and broadcasting to guests, and
+ * again with `collab_end` when it tears down (user `/collab stop`, relay
+ * drop, or session switch).
+ *
+ * Deliberately excludes the room key and write token that make
+ * `CollabHost.link`/`CollabHost.webLink` joinable. Extensions run trusted
+ * in-process — the same trust level as the terminal user who already sees
+ * the raw link — but there is no reason to widen the blast radius of a
+ * future extension bug or a malicious extension by handing every loaded
+ * extension the literal secret on every event fire. `roomId` plus
+ * `ctx.collab` (see {@link ExtensionContext.collab}) is enough for an
+ * extension to know a session is live and which room it is.
+ */
+export interface CollabStartEvent {
+	type: "collab_start";
+	/** Room identifier guests join through. Not secret on its own: joining still requires the room key/write token. */
+	roomId: string;
+	/** Relay server hosting the room. */
+	relayUrl: string;
+	/** Base origin of the configured collab web UI, with no room key/write-token fragment attached. */
+	webLink: string;
+	/** Whether the host session carries a write-capable link (`CollabHost` always starts write-enabled). */
+	hasWriteToken: boolean;
+}
+
+/** Fired when a `/collab` host session tears down. See {@link CollabStartEvent}. */
+export interface CollabEndEvent {
+	type: "collab_end";
+	roomId: string;
+	relayUrl: string;
+	webLink: string;
+	hasWriteToken: boolean;
+}
+
+/** Live `ctx.collab` snapshot: whether this session is hosting a `/collab` session right now. */
+export interface ExtensionCollabState {
+	/** True while this session has an active `/collab` host session. */
+	hosting: boolean;
+	/** Room id of the active session, or `undefined` when not hosting. */
+	roomId: string | undefined;
+}
+
+// ============================================================================
 // User Bash Events
 // ============================================================================
 
@@ -1094,6 +1143,8 @@ export type ExtensionEvent =
 	| GoalUpdatedEvent
 	| CredentialDisabledEvent
 	| McpNotificationEvent
+	| CollabStartEvent
+	| CollabEndEvent
 	| UserBashEvent
 	| UserPythonEvent
 	| InputEvent
@@ -1282,6 +1333,8 @@ export interface ExtensionAPI {
 	on(event: "todo_reminder", handler: ExtensionHandler<TodoReminderEvent>): void;
 	on(event: "goal_updated", handler: ExtensionHandler<GoalUpdatedEvent>): void;
 	on(event: "credential_disabled", handler: ExtensionHandler<CredentialDisabledEvent>): void;
+	on(event: "collab_start", handler: ExtensionHandler<CollabStartEvent>): void;
+	on(event: "collab_end", handler: ExtensionHandler<CollabEndEvent>): void;
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;
 	on(event: "tool_approval_requested", handler: ExtensionHandler<ToolApprovalRequestedEvent>): void;
 	on(event: "tool_approval_resolved", handler: ExtensionHandler<ToolApprovalResolvedEvent>): void;

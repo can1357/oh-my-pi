@@ -48,7 +48,8 @@ console.log(pdf.markdown, pdf.pagesNeedingOcr);
 ## Building
 
 ```bash
-# Build native addon from workspace root (requires Rust)
+# Build native addon from workspace root (requires Rust, plus cmake and ninja
+# on PATH for the bundled Opus/audio bindings — e.g. `brew install cmake ninja` on macOS)
 bun run build
 
 # Type check

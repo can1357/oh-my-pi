@@ -204,7 +204,14 @@ export function formatCollabLink(relayUrl: string, roomId: string, key: Uint8Arr
 	return `${compact}/r/${roomId}.${keyText}`;
 }
 
-function normalizeCollabWebBaseUrl(relayUrl: string, webUrl?: string): string {
+/**
+ * Base origin (+ path) of the collab web UI, with no room key or write token
+ * attached. Exported so callers that must not carry the room secret — e.g.
+ * the `collab_start`/`collab_end` extension events in
+ * `extensibility/extensions/types.ts`, which are deliberately kept
+ * secret-free — can still point at the web app.
+ */
+export function normalizeCollabWebBaseUrl(relayUrl: string, webUrl?: string): string {
 	const explicitWebUrl = webUrl?.trim();
 	if (!explicitWebUrl) {
 		const normalized = normalizeRelayOrigin(relayUrl);

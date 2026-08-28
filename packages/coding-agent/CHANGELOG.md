@@ -13,6 +13,7 @@
 - Include token usage statistics in inspect_image tool output
 - Pressing the session model shortcut (alt+p) again inside the picker toggles a red Task mode that switches the Task subagent's model for this session instead.
 - Git TUI: an AI staging wand next to "Stage All" asks "What should we stage?" and stages only the matching changes — the tiny/smol model picks the matching files from the whole change list, then filters their hunks in parallel; file-scoped requests ("git stuff") stage the picked files whole, content-scoped ones ("all comment changes") stage only the matching hunks.
+- Extensions can now observe `/collab` host sessions: new `collab_start`/`collab_end` events plus a live `ctx.collab` accessor (`hosting`, `roomId`).
 
 ### Changed
 

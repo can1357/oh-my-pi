@@ -6131,6 +6131,9 @@ export class AgentSession {
 
 			model: this.model ?? undefined,
 			models: createExtensionModelQuery(this.#modelRegistry, this.settings, () => this.model ?? undefined),
+			// No `CollabHost` reaches this runner-less fallback: it only exists without an
+			// ExtensionRunner (e.g. a subagent session), and collab hosting is interactive-only.
+			collab: { hosting: false, roomId: undefined },
 			isIdle: () => !this.isStreaming,
 			abort: () => {
 				void this.abort();
