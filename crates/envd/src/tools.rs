@@ -2271,9 +2271,6 @@ pub(crate) fn production_registry<
 	for factory in dynamic_tool_factories {
 		factory.register(&mut registry)?;
 	}
-	if let Some(upload) = telemetry_upload {
-		upload.start(Arc::clone(telemetry), Arc::clone(&github_credentials));
-	}
 	if tool_settings.enabled("bash") && shell_settings.enabled {
 		let sibling_tools = registry
 			.live_identities()
@@ -2388,6 +2385,12 @@ pub(crate) fn production_registry<
 	eval_host
 		.bind_prelude(prelude, Arc::new(prelude_invoker))
 		.map_err(|error| EnvdError::Eval(Str::from(error.to_string())))?;
+	// Start background delivery only after every fallible assembly step has
+	// succeeded: a failed start must not leave an unowned upload task
+	// retaining the telemetry index and credentials.
+	if let Some(upload) = telemetry_upload {
+		upload.start(Arc::clone(telemetry), Arc::clone(&github_credentials));
+	}
 	Ok((
 		registry,
 		eval_host,
@@ -2858,6 +2861,11 @@ mod tests {
 	use omp_proto::toolhost::v1;
 
 	use super::*;
+	use crate::{
+		eval::BridgeHostError,
+		worker::{HostKey, OwnedToolDecl},
+	};
+
 	fn prelude_param(
 		name: &str,
 		kind: PreludeParamKind,
@@ -2962,5 +2970,215 @@ mod tests {
 				.expect_err("invalid prelude signature was accepted");
 			assert!(error.to_string().contains(expected), "{error}");
 		}
+	}
+
+	/// Counts telemetry uploader starts through the composition bridge.
+	#[derive(Default)]
+	struct RecordingUpload(AtomicU64);
+
+	impl TelemetryUpload for RecordingUpload {
+		fn start(&self, _index: Arc<TelemetryIndex>, _credentials: Arc<GithubCredentialBridge>) {
+			self.0.fetch_add(1, Ordering::SeqCst);
+		}
+	}
+
+	#[derive(Clone, Default)]
+	struct UnusedDeviceInvoker;
+
+	impl omp_tools::device::DeviceInvoker for UnusedDeviceInvoker {
+		async fn invoke(
+			&self,
+			_request: omp_tools::device::DeviceInvokeRequest,
+		) -> omp_tool::ErasedStream<'static> {
+			Box::pin(async_stream::stream! {
+				yield Err(omp_tool::RegistryError::UnknownTool(sf!(
+					"no worker devices in assembly tests"
+				)));
+			})
+		}
+	}
+
+	struct UnusedPreludeInvoker;
+
+	#[async_trait::async_trait]
+	impl PreludeInvoker for UnusedPreludeInvoker {
+		async fn invoke(
+			&self,
+			_name: &str,
+			_rev: &str,
+			_args: serde_json::Value,
+		) -> Result<serde_json::Value, BridgeHostError> {
+			Err(BridgeHostError::message(sf!("no prelude helpers in assembly tests")))
+		}
+	}
+
+	/// Serves exactly the document hello handshake so assembly can bind a
+	/// `DocumentHost` without a live document server; assembly never issues
+	/// document calls, so the transport then just stays open.
+	async fn handshake_document_host(root: &Path) -> DocumentHost {
+		let (client, mut server) = tokio::io::duplex(64 * 1024);
+		let root_uri = format!("file://{}", root.display());
+		tokio::spawn(async move {
+			use omp_docserver::{
+				connection::{PROTOCOL_MAJOR, PROTOCOL_MINOR},
+				wire,
+			};
+			let config = wire::FrameConfig::default();
+			let mut scratch = bytes::BytesMut::new();
+			if wire::read_client_frame(&mut server, config, &mut scratch)
+				.await
+				.is_err()
+			{
+				return;
+			}
+			let hello = omp_proto::document::v1::ServerFrame {
+				request_id: 0,
+				body:       Some(omp_proto::document::v1::server_frame::Body::Hello(
+					omp_proto::document::v1::ServerHello {
+						protocol_major: PROTOCOL_MAJOR,
+						protocol_minor: PROTOCOL_MINOR,
+						workspace_id: bytes::Bytes::from_static(b"assembly-test"),
+						root_uri,
+						server_epoch: bytes::Bytes::from_static(b"epoch"),
+						server_build: "envd-test".to_owned(),
+					},
+				)),
+			};
+			if wire::write_server_frame(&mut server, &hello, config, &mut scratch)
+				.await
+				.is_err()
+			{
+				return;
+			}
+			std::future::pending::<()>().await;
+		});
+		DocumentHost::connect(client)
+			.await
+			.expect("document host handshake")
+	}
+
+	/// Assembles the production registry over throwaway hosts while counting
+	/// telemetry uploader starts.
+	async fn assemble_registry(
+		project: &Path,
+		state: &Path,
+		workers: ExtHostSupervisor,
+		upload: Arc<RecordingUpload>,
+	) -> Result<Arc<Registry>, EnvdError> {
+		let documents = handshake_document_host(project).await;
+		let exec = ExecHost::new();
+		let blobs = BlobHost::open(state.join("blobs")).expect("blob host");
+		let github_cache = Arc::new(
+			GithubCache::open(state.join("github-cache.sqlite3"), time::Duration::from_secs(300))
+				.expect("github cache"),
+		);
+		let mcp = Arc::new(McpService::open(state.join("mcp-cache.sqlite3")).expect("MCP service"));
+		let workspace = WorkspaceHost::open(project).expect("workspace host");
+		let memory = omp_memory::runtime::MemoryRuntime::start(omp_memory::runtime::RuntimeStart {
+			session_id:             sf!("assembly-test"),
+			data_dir:               state.join("memory"),
+			workspace_root:         workspace.root().to_path_buf(),
+			canonical_primary_root: None,
+			backend:                omp_memory::MemoryBackend::Off,
+			mnemopi:                omp_memory::MnemopiSettings::default(),
+		})
+		.expect("memory runtime");
+		let telemetry = Arc::new(
+			TelemetryIndex::open(&state.join("telemetry"), &state.join("telemetry.sqlite3"))
+				.expect("telemetry index"),
+		);
+		let supervisor = Arc::new(workers);
+		let root_uri = sf!("file:///assembly-test");
+		let browser_settings = BrowserSettings { enabled: false, ..BrowserSettings::default() };
+		let autolearn = omp_memory::AutolearnSettings::default();
+		let (
+			registry,
+			_eval_bridge,
+			_reflection_bridge,
+			_eval_control,
+			_checkpoint_control,
+			_previews,
+			_resolvers,
+			_search_bridge,
+			_credentials,
+			_ask_presenter,
+		) = production_registry(
+			&documents,
+			&blobs,
+			&exec,
+			None,
+			state,
+			"assembly-test",
+			Arc::clone(&github_cache),
+			&mcp,
+			&workspace,
+			&memory,
+			&telemetry,
+			&root_uri,
+			supervisor.as_ref(),
+			Duration::new(30, omp_core::DurationUnit::Seconds),
+			&ToolSettings::default(),
+			&browser_settings,
+			&ShellSettings::default(),
+			&AcpSettings::default(),
+			AcpExecSlot::default(),
+			&autolearn,
+			UnusedDeviceInvoker,
+			UnusedPreludeInvoker,
+			ToolsPolicy::Auto,
+			Registry::new(),
+			RegistryBridges { telemetry_upload: Some(upload), ..RegistryBridges::default() },
+		)?;
+		Ok(registry)
+	}
+
+	#[tokio::test]
+	async fn failed_worker_assembly_leaves_the_telemetry_uploader_unstarted() {
+		let project = tempfile::tempdir().expect("project directory");
+		let state = tempfile::tempdir().expect("state directory");
+		// A malformed declaration: assembly must reject it and never reach
+		// the uploader start.
+		let malformed = OwnedToolDecl {
+			owner:       HostKey::new(sf!("workspace"), sf!("trusted"), sf!("fixture")),
+			declaration: ToolDecl { rev: "helper.1".to_owned(), ..ToolDecl::default() },
+		};
+		let upload = Arc::new(RecordingUpload::default());
+		let Err(error) = assemble_registry(
+			project.path(),
+			state.path(),
+			ExtHostSupervisor::inert_with_registrations(Arc::from([malformed])),
+			Arc::clone(&upload),
+		)
+		.await
+		else {
+			panic!("a declaration without a definition must fail assembly");
+		};
+		assert!(error.to_string().contains("no definition"), "unexpected assembly failure: {error}");
+		assert_eq!(
+			upload.0.load(Ordering::SeqCst),
+			0,
+			"failed assembly must not start the telemetry uploader",
+		);
+	}
+
+	#[tokio::test]
+	async fn successful_assembly_starts_the_telemetry_uploader_once() {
+		let project = tempfile::tempdir().expect("project directory");
+		let state = tempfile::tempdir().expect("state directory");
+		let upload = Arc::new(RecordingUpload::default());
+		let registry = assemble_registry(
+			project.path(),
+			state.path(),
+			ExtHostSupervisor::inert_with_registrations(Arc::from([])),
+			Arc::clone(&upload),
+		)
+		.await
+		.expect("empty worker assembly succeeds");
+		assert!(registry.live_identity("bash").is_some(), "core tools registered");
+		assert_eq!(
+			upload.0.load(Ordering::SeqCst),
+			1,
+			"successful assembly starts the uploader exactly once",
+		);
 	}
 }

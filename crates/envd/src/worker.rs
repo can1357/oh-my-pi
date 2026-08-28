@@ -2016,6 +2016,44 @@ impl ExtHostSupervisor {
 		&self.registrations
 	}
 
+	/// Builds an inert supervisor that surfaces fabricated registrations.
+	///
+	/// Production spawn verifies live worker processes; registry-assembly
+	/// tests only need the declaration list that `production_registry`
+	/// consumes, with no routes or actors behind it.
+	#[cfg(test)]
+	pub(crate) fn inert_with_registrations(registrations: Arc<[OwnedToolDecl]>) -> Self {
+		Self {
+			routes: BTreeMap::new(),
+			registrations,
+			next_invocation: AtomicU64::new(1),
+			actors: Vec::new(),
+			data_authority: None,
+			journal_runtime: Arc::new(Mutex::new(JournalRuntimeSlot {
+				binding:   None,
+				was_bound: false,
+			})),
+			availability_pending: Arc::new(Mutex::new(VecDeque::new())),
+			availability_sink: Arc::new(Mutex::new(None)),
+			children_active: AtomicBool::new(false),
+			control_authorities: None,
+			registry_control: None,
+			frozen_registry: Arc::new(Mutex::new(BTreeMap::new())),
+			domain_control: DomainControlSlot::new(),
+			service_router: Arc::new(ServiceRouter {
+				broker: Arc::new(Mutex::new(ServiceBroker::new(1))),
+				routes: Mutex::new(BTreeMap::new()),
+			}),
+			agents_control: Arc::new(AgentsControlSlot {
+				session_generation: 1,
+				next_id:            AtomicU64::new(1),
+				was_bound:          AtomicBool::new(false),
+				binding:            Mutex::new(None),
+			}),
+			control_activations: Vec::new(),
+		}
+	}
+
 	/// Installs sole-owner Agent Journal CONTROL routing.
 	///
 	/// # Errors
