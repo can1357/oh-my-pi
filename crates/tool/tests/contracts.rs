@@ -1031,6 +1031,35 @@ fn protect_live_claims_keeps_a_restored_core_claim_unlisted() {
 }
 
 #[test]
+fn protecting_a_foreign_only_name_clears_its_stale_unlist() {
+	let mut registry = Registry::new();
+	registry
+		.register(
+			fake_tool(1, "foreign", Arc::new(AtomicUsize::new(0))).named("browser"),
+			Presentation::Device,
+			claims("publisher/ext", Precedence::DEFAULT),
+		)
+		.expect("foreign claim before reservation");
+	registry
+		.unlist_from_roster("browser")
+		.expect("live claim can be unlisted");
+
+	registry.protect_user_visible_core(["browser"]);
+	registry
+		.register(
+			fake_tool(2, "core", Arc::new(AtomicUsize::new(0))).named("browser"),
+			Presentation::Device,
+			claims("omp/core", Precedence::ENHANCEMENT),
+		)
+		.expect("core claim occupies the reservation");
+
+	assert!(
+		registry.user_visible("browser"),
+		"a stale foreign unlist must not hide the later core tool"
+	);
+}
+
+#[test]
 fn registration_rejects_names_carrying_the_claimant_delimiter() {
 	let mut registry = Registry::new();
 	let native = registry
