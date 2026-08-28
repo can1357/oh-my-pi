@@ -1347,41 +1347,55 @@ def _emit_error(rid: str, exc: BaseException) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _parse_request(line: str) -> dict | None:
+    """Parse one NDJSON control line, or ``None`` when it should be skipped.
+
+    Emits a ``ProtocolError`` frame for malformed JSON so the host sees the
+    same diagnostic the reader has always produced.
+    """
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError as exc:
+        _emit(
+            {
+                "type": "error",
+                "id": "",
+                "ename": "ProtocolError",
+                "evalue": f"Invalid JSON request: {exc}",
+                "traceback": [],
+            }
+        )
+        return None
+
+
 def _read_stdin(loop: asyncio.AbstractEventLoop, queue: asyncio.Queue, stdin) -> None:
+    """Feed control-channel requests to the event loop from a reader thread.
+
+    POSIX only -- see ``_serve_windows`` for why Windows cannot run a
+    perpetually blocked stdin reader.
+    """
     for raw_line in stdin:
         line = raw_line.strip()
         if not line:
             continue
-        try:
-            req = json.loads(line)
-        except json.JSONDecodeError as exc:
-            _emit(
-                {
-                    "type": "error",
-                    "id": "",
-                    "ename": "ProtocolError",
-                    "evalue": f"Invalid JSON request: {exc}",
-                    "traceback": [],
-                }
-            )
+        req = _parse_request(line)
+        if req is None:
             continue
         loop.call_soon_threadsafe(queue.put_nowait, req)
     loop.call_soon_threadsafe(queue.put_nowait, {"type": "exit"})
 
 
-async def _main_async() -> None:
-    sys.stdout = _StreamProxy("stdout")
-    sys.stderr = _StreamProxy("stderr")
-    _install_idle_sigint()
-    _start_parent_watchdog()
-    _start_capture_drain()
+async def _serve_posix(loop: asyncio.AbstractEventLoop, stdin) -> None:
+    """Dispatch requests concurrently, one asyncio task per request.
 
-    stdin = sys.__stdin__
-    if stdin is None:
-        return
-
-    loop = asyncio.get_running_loop()
-    _STATE.loop = loop
+    A background thread reads stdin and enqueues requests so a cell parked on
+    a top-level ``await`` (an ``await agent(...)`` bridge call, say) does not
+    block sibling requests: eval sessions are shared across concurrent agents
+    (subagents inherit the parent's eval session id), so multiple requests can
+    be in flight on one kernel at once. The reader thread stays blocked in a
+    ``sys.stdin`` read for its whole life, which is safe on POSIX but wedges
+    native-extension imports on Windows (see ``_serve_windows``).
+    """
     queue: asyncio.Queue = asyncio.Queue()
     reader = threading.Thread(
         target=_read_stdin,
@@ -1415,6 +1429,60 @@ async def _main_async() -> None:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _serve_windows(loop: asyncio.AbstractEventLoop, stdin) -> None:
+    """Dispatch requests serially, reading each control line on demand.
+
+    A thread perpetually parked in a blocking ``sys.stdin`` read deadlocks
+    native-extension imports (NumPy in particular) under a pipe-backed
+    subprocess on Windows: the native DLL load and the concurrent stdin read
+    wedge each other (numpy#24290, issue #7985). Reading each line via
+    ``run_in_executor`` confines the stdin read to the gap *between* requests
+    -- once a line arrives the reader returns, so no thread is reading stdin
+    while a cell (and its imports) run. The trade-off is that requests are
+    handled one at a time instead of interleaved; on Windows that is strictly
+    better than the alternative, since any concurrent reader deadlocks the
+    import outright.
+    """
+    while True:
+        raw_line = await loop.run_in_executor(None, stdin.readline)
+        if not raw_line:
+            break  # EOF: the host closed the control channel.
+        line = raw_line.strip()
+        if not line:
+            continue
+        req = _parse_request(line)
+        if req is None:
+            continue
+        if req.get("type") == "exit":
+            break
+        try:
+            await _handle_request_async(req)
+        except asyncio.CancelledError:
+            raise  # task cancellation must propagate; never swallow it and spin
+        except BaseException as exc:  # noqa: BLE001 - one bad request must not wedge the loop
+            _emit_error(str(req.get("id", "")), exc)
+
+
+async def _main_async() -> None:
+    sys.stdout = _StreamProxy("stdout")
+    sys.stderr = _StreamProxy("stderr")
+    _install_idle_sigint()
+    _start_parent_watchdog()
+    _start_capture_drain()
+
+    stdin = sys.__stdin__
+    if stdin is None:
+        return
+
+    loop = asyncio.get_running_loop()
+    _STATE.loop = loop
+
+    if os.name == "nt":
+        await _serve_windows(loop, stdin)
+    else:
+        await _serve_posix(loop, stdin)
 
 
 def main() -> None:
