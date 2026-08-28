@@ -472,6 +472,67 @@ describe("AgentSession advisor context maintenance", () => {
 		expect(JSON.stringify(advisor.state.messages)).toContain("same-provider native summary");
 	});
 
+	it("retains the messages of the preparation the winning advisor candidate ran against", async () => {
+		const { advisor, nativeModel, sameProviderModel } = createAdvisorFallbackHarness();
+		const headTail: AgentMessage = { role: "user", content: "head-scoped retained tail", timestamp: 1 };
+		const rebuiltTail: AgentMessage[] = [
+			{ role: "user", content: "rebuilt retained tail alpha", timestamp: 2 },
+			{ role: "user", content: "rebuilt retained tail beta", timestamp: 3 },
+		];
+		const realPrepareCompaction = compactionModule.prepareCompaction;
+		vi.spyOn(compactionModule, "prepareCompaction").mockImplementation(
+			(pathEntries, settings, activeModel, tokenizer, compactionModels, resolvedRequestTarget) => {
+				const base = realPrepareCompaction(
+					pathEntries,
+					settings,
+					activeModel,
+					tokenizer,
+					compactionModels,
+					resolvedRequestTarget,
+				);
+				if (!base || activeModel?.id !== nativeModel.id) return base;
+				if (compactionModels?.length === 1) return { ...base, recentMessages: rebuiltTail };
+				return {
+					...base,
+					recentMessages: [headTail],
+					// A boundary only the preserved native history justifies: no
+					// candidate can extend this payload, so every candidate that runs
+					// must receive a preparation rebuilt from the branch.
+					previousPreserveData: {
+						openaiRemoteCompaction: {
+							provider: "openai",
+							replacementHistory: [{ type: "compaction", encrypted_content: "enc_head_only" }],
+							referenceTarget: "sha256:head-candidate-only",
+						},
+					},
+				};
+			},
+		);
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
+			if (model.provider === nativeModel.provider && model.id === nativeModel.id) {
+				throw new compactionModule.NativeCompactionError(new Error("V2 native compaction transport failed"));
+			}
+			if (model.provider === sameProviderModel.provider && model.id === sameProviderModel.id) {
+				return {
+					summary: "fallback candidate summary",
+					shortSummary: "fallback candidate",
+					firstKeptEntryId: preparation.firstKeptEntryId,
+					tokensBefore: 42,
+				};
+			}
+			throw new Error(`Unexpected advisor compaction model ${model.provider}/${model.id}`);
+		});
+
+		await session.prompt("small current update");
+
+		expect(JSON.stringify(advisor.state.messages[0])).toContain("fallback candidate summary");
+		expect(advisor.state.messages.slice(1, 1 + rebuiltTail.length)).toEqual(rebuiltTail);
+		expect(JSON.stringify(advisor.state.messages)).not.toContain("head-scoped retained tail");
+		expect((advisor.state.messages[0] as AdvisorCompactionSummaryFixture).advisorUsageAnchorStartIndex).toBe(
+			rebuiltTail.length + 1,
+		);
+	});
+
 	it("skips unauthenticated advisor candidates before enforcing the native boundary", async () => {
 		const { advisor, apiKeySpy, crossProviderModel, nativeModel, sameProviderModel, settings } =
 			createAdvisorFallbackHarness();

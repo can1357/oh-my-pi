@@ -182,6 +182,30 @@ function isExactOfficialOpenAIEndpoint(baseUrl: string | undefined): boolean {
 	}
 }
 
+/**
+ * Whether `uri` is an official Gemini Files API resource reference. The Files
+ * API is the only producer of Google image handles, and Google serialization
+ * prefers a provider-file URI over usable inline bytes, so an arbitrary URL
+ * carried on `providerFile` must not qualify as a replayable reference.
+ */
+export function isOfficialGeminiFilesUri(uri: string): boolean {
+	try {
+		const url = new URL(uri);
+		return (
+			url.protocol === "https:" &&
+			url.hostname.toLowerCase() === "generativelanguage.googleapis.com" &&
+			url.username.length === 0 &&
+			url.password.length === 0 &&
+			url.search.length === 0 &&
+			url.hash.length === 0 &&
+			url.port.length === 0 &&
+			/^\/v1(beta\d*)?\/files\/[^/]+$/.test(url.pathname)
+		);
+	} catch {
+		return false;
+	}
+}
+
 export function isOfficialGoogleProviderFileEndpoint(model: Model): boolean {
 	if (model.provider !== "google" || model.api !== "google-generative-ai") return false;
 	const value = model.baseUrl?.trim() ?? "";
@@ -390,7 +414,7 @@ export function supportsProviderFileReference(
 	return (
 		reference.provider === "google" &&
 		typeof reference.uri === "string" &&
-		reference.uri.length > 0 &&
+		isOfficialGeminiFilesUri(reference.uri) &&
 		isOfficialGoogleProviderFileEndpoint(model) &&
 		hasReplayableGoogleImageMimeType(image)
 	);

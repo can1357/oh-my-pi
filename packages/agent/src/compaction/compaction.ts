@@ -64,6 +64,7 @@ import {
 	getPreservedOpenAiRemoteCompactionData,
 	isOpenAiCompactionHistoryTargetIndependent,
 	producesRuntimeReplayableCompactionHistory,
+	producesRuntimeRequestReplayableCompactionHistory,
 	requestOpenAiRemoteCompaction,
 	requestRemoteCompaction,
 	resolveOpenAiCompactionReferenceModel,
@@ -1628,6 +1629,20 @@ function formatRemoteCompactionSummary(inputTokens: number): string {
 }
 
 /**
+ * Raised before a native compaction request is issued once the credential the
+ * producer resolved proves it would post to an endpoint the runtime request
+ * cannot read back. It is a routing decision rather than a remote failure, so
+ * the caller falls through to portable local summarization without recording a
+ * `NativeCompactionError`.
+ */
+class UnreplayableCompactionProducerError extends Error {
+	constructor() {
+		super("Native compaction producer target differs from the resolved runtime request target");
+		this.name = "UnreplayableCompactionProducerError";
+	}
+}
+
+/**
  * Generate summaries for compaction using prepared data.
  * Returns CompactionResult - SessionManager adds id/parentId when saving.
  *
@@ -1721,6 +1736,19 @@ export async function compact(
 		getOpenAIResponsesRequestTarget(runtimeReplayModel, key, {
 			openrouterVariant: summaryOptions.openrouterVariant,
 		});
+	// The credential-free gate above cannot see endpoints that only the resolved
+	// credential selects, and the compaction transport resolves its endpoint from
+	// static model configuration alone. Re-check against the credential-resolved
+	// runtime request target — the fingerprint the serializer compares on replay —
+	// before the request is issued, so producer-bound state is never stamped as
+	// runtime-owned.
+	const resolveRuntimeOwnedRequestTarget = (key: string, streamingV2: boolean): string => {
+		const runtimeRequestTarget = resolveRuntimeRequestTarget(key);
+		if (!producesRuntimeRequestReplayableCompactionHistory(model, runtimeRequestTarget, streamingV2)) {
+			throw new UnreplayableCompactionProducerError();
+		}
+		return runtimeRequestTarget;
+	};
 	if (
 		settings.remoteEnabled !== false &&
 		settings.remoteStreamingV2Enabled !== false &&
@@ -1774,7 +1802,7 @@ export async function compact(
 				const remote = await withAuth(
 					apiKey,
 					key => {
-						v2RequestTarget = resolveRuntimeRequestTarget(key);
+						v2RequestTarget = resolveRuntimeOwnedRequestTarget(key, true);
 						return requestCompactionV2Streaming(model, key, request, signal, {
 							fetch: summaryOptions.fetch,
 							providerSessionState: summaryOptions.providerSessionState,
@@ -1800,12 +1828,19 @@ export async function compact(
 				// swallowing it here would downgrade Esc into "fall back to local
 				// summarization" and keep compaction running on an aborted signal.
 				if (signal?.aborted) throw err;
-				nativeCompactionError = selectNativeCompactionError(nativeCompactionError, err);
-				logger.warn("OpenAI V2 remote compaction failed, falling back to V1 remote compaction", {
-					error: err instanceof Error ? err.message : String(err),
-					model: model.id,
-					provider: model.provider,
-				});
+				if (err instanceof UnreplayableCompactionProducerError) {
+					logger.info("Skipped OpenAI V2 remote compaction: producer target is not runtime-replayable", {
+						model: model.id,
+						provider: model.provider,
+					});
+				} else {
+					nativeCompactionError = selectNativeCompactionError(nativeCompactionError, err);
+					logger.warn("OpenAI V2 remote compaction failed, falling back to V1 remote compaction", {
+						error: err instanceof Error ? err.message : String(err),
+						model: model.id,
+						provider: model.provider,
+					});
+				}
 			}
 		}
 	}
@@ -1847,7 +1882,7 @@ export async function compact(
 								providerSessionState: summaryOptions.providerSessionState,
 								codexCompaction: summaryOptions.codexCompaction,
 								replayTarget: getOpenAIResponsesReferenceTarget(runtimeReplayModel),
-								requestTarget: resolveRuntimeRequestTarget(key),
+								requestTarget: resolveRuntimeOwnedRequestTarget(key, false),
 							},
 						),
 					{ signal },
@@ -1859,12 +1894,19 @@ export async function compact(
 				// swallowing it here would downgrade Esc into "fall back to local
 				// summarization" and keep compaction running on an aborted signal.
 				if (signal?.aborted) throw err;
-				nativeCompactionError = selectNativeCompactionError(nativeCompactionError, err);
-				logger.warn("OpenAI remote compaction failed", {
-					error: err instanceof Error ? err.message : String(err),
-					model: model.id,
-					provider: model.provider,
-				});
+				if (err instanceof UnreplayableCompactionProducerError) {
+					logger.info("Skipped OpenAI remote compaction: producer target is not runtime-replayable", {
+						model: model.id,
+						provider: model.provider,
+					});
+				} else {
+					nativeCompactionError = selectNativeCompactionError(nativeCompactionError, err);
+					logger.warn("OpenAI remote compaction failed", {
+						error: err instanceof Error ? err.message : String(err),
+						model: model.id,
+						provider: model.provider,
+					});
+				}
 			}
 		}
 	}

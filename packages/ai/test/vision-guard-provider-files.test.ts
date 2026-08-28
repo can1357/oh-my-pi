@@ -263,11 +263,7 @@ describe("OpenAI provider-file capability", () => {
 		).toBe(false);
 		expect(
 			supportsComputerScreenshotReferences(
-				makeResponsesTargetModel(
-					"azure-openai-responses",
-					"azure",
-					"https://resource.openai.azure.com/openai/v1",
-				),
+				makeResponsesTargetModel("azure-openai-responses", "azure", "https://resource.openai.azure.com/openai/v1"),
 				screenshot,
 			),
 		).toBe(false);
@@ -312,11 +308,7 @@ describe("OpenAI provider-file capability", () => {
 			expect(supportsProviderFileReference(makeAnthropicModel(baseUrl), reference, image)).toBe(true);
 		}
 		expect(
-			supportsProviderFileReference(
-				makeAnthropicModel("https://api.anthropic.com/v1/proxy"),
-				reference,
-				image,
-			),
+			supportsProviderFileReference(makeAnthropicModel("https://api.anthropic.com/v1/proxy"), reference, image),
 		).toBe(false);
 	});
 
@@ -354,6 +346,30 @@ describe("OpenAI provider-file capability", () => {
 			expect(supportsProviderFileReference(model, { ...reference, expiresAt }, image)).toBe(false);
 		}
 		expect(supportsProviderFileReference(model, { ...reference, expiresAt: Date.now() + 60_000 }, image)).toBe(true);
+	});
+
+	it("rejects Google provider files whose URI is not an official Files resource", () => {
+		const model = makeGoogleModel();
+		const image = { mimeType: "image/png" };
+
+		for (const uri of [
+			"https://example.invalid/image.png",
+			"https://generativelanguage.googleapis.com/v1beta/files",
+			"https://generativelanguage.googleapis.com/v1beta/files/vision/extra",
+			"http://generativelanguage.googleapis.com/v1beta/files/vision",
+			"https://generativelanguage.googleapis.com.evil.invalid/v1beta/files/vision",
+			"not-a-url",
+			"",
+		]) {
+			expect(supportsProviderFileReference(model, { provider: "google", uri }, image)).toBe(false);
+		}
+		expect(
+			supportsProviderFileReference(
+				model,
+				{ provider: "google", uri: "https://generativelanguage.googleapis.com/v1beta/files/vision" },
+				image,
+			),
+		).toBe(true);
 	});
 
 	it("accepts parameterized MIME types for replayable Google references", () => {

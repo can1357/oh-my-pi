@@ -1568,6 +1568,12 @@ export class SessionAdvisors {
 		// configured for snapcompact.
 
 		let compactResult: CompactionResult | undefined;
+		// A fallback candidate may run against a preparation rebuilt from the
+		// branch, whose retained tail differs from the head candidate's. Advisor
+		// state is replaced in memory rather than by entry id, so the retained
+		// messages must come from the preparation that actually produced the
+		// summary or messages it kept are dropped instead of summarized.
+		let winningPreparation = preparation;
 		let lastError: unknown;
 		let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
 		// Instrument the advisor's overflow-compaction one-shot like the primary
@@ -1628,6 +1634,7 @@ export class SessionAdvisors {
 						codexCompaction,
 					},
 				);
+				winningPreparation = candidatePreparation;
 				break;
 			} catch (error) {
 				if (signal.aborted) throw error;
@@ -1656,14 +1663,14 @@ export class SessionAdvisors {
 		// The retained messages still carry provider usage from before this
 		// compaction. Record their exact array boundary on the in-memory summary so
 		// only assistants appended afterward can become the next usage anchor.
-		const advisorUsageAnchorStartIndex = preparation.recentMessages.length + 1;
+		const advisorUsageAnchorStartIndex = winningPreparation.recentMessages.length + 1;
 		const summaryMessage = {
 			...createCompactionSummaryMessage(summary, tokensBefore, new Date().toISOString(), { shortSummary }),
 			firstKeptEntryId,
 			advisorUsageAnchorStartIndex,
 		} satisfies AdvisorCompactionSummaryMessage;
 
-		agent.replaceMessages([summaryMessage, ...preparation.recentMessages]);
+		agent.replaceMessages([summaryMessage, ...winningPreparation.recentMessages]);
 		return false;
 	}
 	/**

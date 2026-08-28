@@ -160,6 +160,29 @@ describe("image url parts", () => {
 		});
 	});
 
+	it("google keeps inline data when the provider file is not a Files API resource", () => {
+		const model = getBundledModel("google", "gemini-2.5-flash") as Model<"google-generative-ai">;
+		const contents = convertGoogleMessages(model, {
+			messages: [
+				{
+					role: "user",
+					content: [
+						{
+							type: "image",
+							data: PNG_B64,
+							mimeType: "image/png",
+							providerFile: { provider: "google", uri: "https://example.invalid/image.png" },
+						},
+					],
+					timestamp: 0,
+				},
+			],
+		});
+
+		expect(contents[0]?.parts).toContainEqual({ inlineData: { mimeType: "image/png", data: PNG_B64 } });
+		expect(contents.flatMap(content => content.parts ?? []).some(part => part.fileData !== undefined)).toBe(false);
+	});
+
 	it("google custom endpoints fall back from provider files to inline data", () => {
 		const model = buildModel({
 			id: "custom-gemini",

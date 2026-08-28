@@ -288,6 +288,30 @@ describe("provider-native file clients", () => {
 		});
 	});
 
+	test("Gemini rejects a finalize response whose file URI is not a Files API resource", async () => {
+		const wire = scriptedFetch([
+			new Response(null, {
+				status: 200,
+				headers: { "X-Goog-Upload-URL": "https://upload.example.test/session/abc" },
+			}),
+			Response.json({
+				file: {
+					name: "files/gemini-1",
+					uri: "https://example.invalid/image.png",
+					mimeType: "image/png",
+					expirationTime: "2026-08-23T00:00:00.000Z",
+					state: "ACTIVE",
+				},
+			}),
+		]);
+		const client = createGeminiProviderFileClient(geminiModel, "gemini-secret", wire.fetch);
+		if (!client) throw new Error("Expected the official Gemini model to support native files");
+
+		await expect(client.upload({ bytes: new Uint8Array([1, 2, 3]), mimeType: "image/png" })).rejects.toThrow(
+			"invalid file.uri",
+		);
+	});
+
 	test("all clients reject compatible-looking non-official endpoints before network access", () => {
 		let requestCount = 0;
 		const forbiddenFetch: FetchImpl = async () => {

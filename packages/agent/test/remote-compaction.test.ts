@@ -20,6 +20,7 @@ import {
 	getCompactionV2PreserveData,
 	getOpenAiCompactionReferenceTarget,
 	getPreservedOpenAiRemoteCompactionData,
+	producesRuntimeRequestReplayableCompactionHistory,
 	requestCompactionV2Streaming,
 	requestOpenAiRemoteCompaction,
 	requestRemoteCompaction,
@@ -30,6 +31,7 @@ import {
 import * as ai from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getOpenAICodexTransportDetails } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { getOpenAIResponsesRequestTarget } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
@@ -2567,6 +2569,75 @@ describe("compact() remote compaction failure handling", () => {
 		expect(canReuseOpenAiCompactionHistory(preserved, compactionModel, false)).toBe(true);
 	});
 
+	test("summarizes locally when the resolved runtime request target differs from the producer", async () => {
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
+		const model = makeOpenAiModel({ id: "gpt-5.4", remoteCompaction: { enabled: true } });
+		// The compaction transport resolves its endpoint from static model
+		// configuration while runtime dispatch resolves it from the credential, so
+		// the credential-free fingerprints still match while the request the
+		// history must replay against reaches a different endpoint.
+		const resolvedRuntimeTarget = getOpenAIResponsesReferenceTarget(
+			makeOpenAiModel({ id: "gpt-5.4", baseUrl: "https://resolved.example.invalid/v1" }),
+		);
+		expect(getOpenAiCompactionReferenceTarget(model, false)).toBe(getOpenAIResponsesReferenceTarget(model));
+		expect(producesRuntimeRequestReplayableCompactionHistory(model, resolvedRuntimeTarget, false)).toBe(false);
+		let remoteRequests = 0;
+		const fetchMock: FetchImpl = async () => {
+			remoteRequests++;
+			return Response.json({ output: [{ type: "compaction", encrypted_content: "enc_resolved_endpoint" }] });
+		};
+
+		const result = await compact(makePreparation(), model, "test-key", undefined, undefined, {
+			fetch: fetchMock,
+			runtimeModel: model,
+			activeRequestTarget: resolvedRuntimeTarget,
+		});
+
+		expect(remoteRequests).toBe(0);
+		expect(getPreservedOpenAiRemoteCompactionData(result.preserveData)).toBeUndefined();
+		expect(result.summary).toContain("local summary");
+	});
+
+	test("summarizes locally when a V2 producer cannot reach the resolved runtime request target", async () => {
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
+		const model = makeOpenAiModel({
+			id: "gpt-5.4",
+			remoteCompaction: { enabled: true, v2StreamingEnabled: true },
+		});
+		const resolvedRuntimeTarget = getOpenAIResponsesReferenceTarget(
+			makeOpenAiModel({ id: "gpt-5.4", baseUrl: "https://resolved.example.invalid/v1" }),
+		);
+		expect(getOpenAiCompactionReferenceTarget(model, true)).toBe(getOpenAIResponsesReferenceTarget(model));
+		expect(producesRuntimeRequestReplayableCompactionHistory(model, resolvedRuntimeTarget, true)).toBe(false);
+		const preparation = makePreparation();
+		preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: true };
+		let remoteRequests = 0;
+
+		const result = await compact(preparation, model, "test-key", undefined, undefined, {
+			fetch: async () => {
+				remoteRequests++;
+				return sseResponse([
+					{
+						type: "response.output_item.done",
+						output_index: 0,
+						item: { type: "compaction", encrypted_content: "enc_v2_resolved_endpoint" },
+					},
+					{
+						type: "response.completed",
+						response: { usage: { input_tokens: 55, output_tokens: 3, total_tokens: 58 } },
+					},
+				]);
+			},
+			runtimeModel: model,
+			activeRequestTarget: resolvedRuntimeTarget,
+		});
+
+		expect(remoteRequests).toBe(0);
+		expect(getCompactionV2PreserveData(result.preserveData)).toBeUndefined();
+		expect(getPreservedOpenAiRemoteCompactionData(result.preserveData)).toBeUndefined();
+		expect(result.summary).toContain("local summary");
+	});
+
 	test("summarizes locally when a V1 side model would compact on the active endpoint", async () => {
 		vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
 		const preparation = makePreparation();
@@ -2750,7 +2821,6 @@ describe("compact() remote compaction failure handling", () => {
 
 	test("persists the credential-resolved request target for dynamic-endpoint providers", async () => {
 		vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
-		const preparation = makePreparation();
 		const activeModel = makeOpenAiModel({
 			id: "gpt-5.4-copilot",
 			provider: "github-copilot",
@@ -2762,30 +2832,49 @@ describe("compact() remote compaction failure handling", () => {
 			baseUrl: "https://api.githubcopilot.com",
 			remoteCompaction: { enabled: true },
 		});
-		const apiKey = JSON.stringify({
+		// The compaction transport posts to the statically configured endpoint, so
+		// only a credential resolving that same endpoint mints opaque history the
+		// runtime request can read back.
+		const sameEndpointKey = JSON.stringify({
 			token: "ghu_test_copilot_token",
-			apiEndpoint: "https://api.business.githubcopilot.com",
+			apiEndpoint: "https://api.githubcopilot.com",
 		});
-		const fetchMock: FetchImpl = async () =>
-			Response.json({ output: [{ type: "compaction_summary", summary: "compact" }] });
+		let remoteRequests = 0;
+		const fetchMock: FetchImpl = async () => {
+			remoteRequests++;
+			return Response.json({ output: [{ type: "compaction_summary", summary: "compact" }] });
+		};
 
-		const result = await compact(preparation, compactionModel, apiKey, undefined, undefined, {
+		const result = await compact(makePreparation(), compactionModel, sameEndpointKey, undefined, undefined, {
 			fetch: fetchMock,
 			runtimeModel: activeModel,
 		});
 
+		expect(remoteRequests).toBe(1);
 		const preserved = getPreservedOpenAiRemoteCompactionData(result.preserveData);
 		if (!preserved) throw new Error("expected preserved remote compaction data");
 		expect(preserved.requestTarget).toBe(
-			getOpenAIResponsesReferenceTarget(activeModel, undefined, "https://api.business.githubcopilot.com"),
+			getOpenAIResponsesReferenceTarget(activeModel, undefined, "https://api.githubcopilot.com"),
 		);
-		expect(preserved.requestTarget).not.toBe(preserved.replayTarget);
+
+		// A credential that routes the runtime request elsewhere leaves the producer
+		// minting state that endpoint could never read, so nothing is requested.
+		const movedEndpointKey = JSON.stringify({
+			token: "ghu_test_copilot_token",
+			apiEndpoint: "https://api.business.githubcopilot.com",
+		});
+		const moved = await compact(makePreparation(), compactionModel, movedEndpointKey, undefined, undefined, {
+			fetch: fetchMock,
+			runtimeModel: activeModel,
+		});
+
+		expect(remoteRequests).toBe(1);
+		expect(getPreservedOpenAiRemoteCompactionData(moved.preserveData)).toBeUndefined();
+		expect(moved.summary).toContain("local summary");
 	});
 
 	test("persists the credential-resolved request target through V2 streaming compaction", async () => {
 		vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
-		const preparation = makePreparation();
-		preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: true };
 		const activeModel = makeOpenAiModel({
 			id: "gpt-5.4-copilot",
 			provider: "github-copilot",
@@ -2801,12 +2890,10 @@ describe("compact() remote compaction failure handling", () => {
 				v2Endpoint: "https://api.githubcopilot.com/responses",
 			},
 		});
-		const apiKey = JSON.stringify({
-			token: "ghu_test_copilot_token",
-			apiEndpoint: "https://api.business.githubcopilot.com",
-		});
-		const fetchMock: FetchImpl = async () =>
-			sseResponse([
+		let remoteRequests = 0;
+		const fetchMock: FetchImpl = async () => {
+			remoteRequests++;
+			return sseResponse([
 				{
 					type: "response.output_item.done",
 					output_index: 0,
@@ -2817,18 +2904,41 @@ describe("compact() remote compaction failure handling", () => {
 					response: { usage: { input_tokens: 55, output_tokens: 3, total_tokens: 58 } },
 				},
 			]);
+		};
+		const v2Preparation = () => {
+			const preparation = makePreparation();
+			preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: true };
+			return preparation;
+		};
 
-		const result = await compact(preparation, compactionModel, apiKey, undefined, undefined, {
-			fetch: fetchMock,
-			runtimeModel: activeModel,
-		});
+		const result = await compact(
+			v2Preparation(),
+			compactionModel,
+			JSON.stringify({ token: "ghu_test_copilot_token", apiEndpoint: "https://api.githubcopilot.com" }),
+			undefined,
+			undefined,
+			{ fetch: fetchMock, runtimeModel: activeModel },
+		);
 
+		expect(remoteRequests).toBe(1);
 		const remote = getCompactionV2PreserveData(result.preserveData);
 		if (!remote) throw new Error("expected preserved V2 compaction data");
 		expect(remote.requestTarget).toBe(
-			getOpenAIResponsesReferenceTarget(activeModel, undefined, "https://api.business.githubcopilot.com"),
+			getOpenAIResponsesReferenceTarget(activeModel, undefined, "https://api.githubcopilot.com"),
 		);
-		expect(remote.requestTarget).not.toBe(remote.replayTarget);
+
+		const moved = await compact(
+			v2Preparation(),
+			compactionModel,
+			JSON.stringify({ token: "ghu_test_copilot_token", apiEndpoint: "https://api.business.githubcopilot.com" }),
+			undefined,
+			undefined,
+			{ fetch: fetchMock, runtimeModel: activeModel },
+		);
+
+		expect(remoteRequests).toBe(1);
+		expect(getCompactionV2PreserveData(moved.preserveData)).toBeUndefined();
+		expect(moved.summary).toContain("local summary");
 	});
 
 	test("persists the host-resolved active request target instead of the side-model derivation", async () => {
@@ -2838,17 +2948,14 @@ describe("compact() remote compaction failure handling", () => {
 			provider: "github-copilot",
 			baseUrl: "https://api.githubcopilot.com",
 		});
-		// The active Copilot credential routes at an enterprise endpoint the
-		// separate OpenAI compaction key cannot resolve.
-		const hostTarget = getOpenAIResponsesReferenceTarget(
-			activeModel,
-			undefined,
-			"https://api.enterprise.githubcopilot.com",
-		);
-		const sideKeyTarget = getOpenAIResponsesReferenceTarget(activeModel);
-		expect(hostTarget).not.toBe(sideKeyTarget);
-		// Side model on the SAME endpoint as the active model: its native result is
-		// readable there, so the host-resolved active target is the truthful stamp.
+		// The active credential routes at the endpoint the compaction transport also
+		// posts to, while the separate compaction credential resolves elsewhere.
+		const hostTarget = getOpenAIResponsesReferenceTarget(activeModel, undefined, "https://api.githubcopilot.com");
+		const sideCredential = JSON.stringify({
+			token: "ghu_test_side_token",
+			apiEndpoint: "https://api.side.githubcopilot.com",
+		});
+		expect(getOpenAIResponsesRequestTarget(activeModel, sideCredential)).not.toBe(hostTarget);
 		const compactionModel = makeOpenAiModel({
 			id: "gpt-5.4-copilot",
 			provider: "github-copilot",
@@ -2858,7 +2965,7 @@ describe("compact() remote compaction failure handling", () => {
 		const fetchMock: FetchImpl = async () =>
 			Response.json({ output: [{ type: "compaction_summary", summary: "compact" }] });
 
-		const v1 = await compact(makePreparation(), compactionModel, "sk-openai-side-key", undefined, undefined, {
+		const v1 = await compact(makePreparation(), compactionModel, sideCredential, undefined, undefined, {
 			fetch: fetchMock,
 			runtimeModel: activeModel,
 			activeRequestTarget: hostTarget,
@@ -2879,7 +2986,7 @@ describe("compact() remote compaction failure handling", () => {
 				v2Endpoint: "https://api.githubcopilot.com/responses",
 			},
 		});
-		const v2 = await compact(v2Preparation, v2Model, "sk-openai-side-key", undefined, undefined, {
+		const v2 = await compact(v2Preparation, v2Model, sideCredential, undefined, undefined, {
 			fetch: async () =>
 				sseResponse([
 					{
@@ -2898,6 +3005,26 @@ describe("compact() remote compaction failure handling", () => {
 		const remote = getCompactionV2PreserveData(v2.preserveData);
 		if (!remote) throw new Error("expected preserved V2 compaction data");
 		expect(remote.requestTarget).toBe(hostTarget);
+
+		// An active credential that routes off the producer endpoint must not have
+		// its target stamped onto history the producer minted somewhere else.
+		const enterpriseTarget = getOpenAIResponsesReferenceTarget(
+			activeModel,
+			undefined,
+			"https://api.enterprise.githubcopilot.com",
+		);
+		let strandedRequests = 0;
+		const stranded = await compact(makePreparation(), compactionModel, sideCredential, undefined, undefined, {
+			fetch: async () => {
+				strandedRequests++;
+				return Response.json({ output: [{ type: "compaction_summary", summary: "compact" }] });
+			},
+			runtimeModel: activeModel,
+			activeRequestTarget: enterpriseTarget,
+		});
+		expect(strandedRequests).toBe(0);
+		expect(getPreservedOpenAiRemoteCompactionData(stranded.preserveData)).toBeUndefined();
+		expect(stranded.summary).toContain("local summary");
 	});
 
 	test("streams V2 compaction before V1 when both settings and model opt in", async () => {

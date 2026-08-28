@@ -361,6 +361,21 @@ export function producesRuntimeReplayableCompactionHistory(
 }
 
 /**
+ * Whether the compaction request `compactionModel` is about to issue reaches the
+ * exact request target `runtimeRequestTarget` identifies. Compaction transports
+ * resolve their endpoint from static model configuration while runtime dispatch
+ * resolves it from the credential, so only this comparison proves the opaque
+ * state the request mints is readable by the request that will replay it.
+ */
+export function producesRuntimeRequestReplayableCompactionHistory(
+	compactionModel: Model,
+	runtimeRequestTarget: string,
+	streamingV2: boolean,
+): boolean {
+	return getOpenAiCompactionReferenceTarget(compactionModel, streamingV2) === runtimeRequestTarget;
+}
+
+/**
  * Walk every nested item of unstamped history and report the first value that
  * `probe` marks as resolvable only on the endpoint that produced it.
  */

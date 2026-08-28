@@ -1,5 +1,5 @@
 import type { Model } from "@oh-my-pi/pi-ai";
-import { isOfficialGoogleProviderFileEndpoint } from "@oh-my-pi/pi-ai/providers/vision-guard";
+import { isOfficialGeminiFilesUri, isOfficialGoogleProviderFileEndpoint } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import type { ProviderFileClient, ProviderFileHandle, ProviderFileUploadRequest } from "./provider-file-types";
 import type { FetchImpl } from "./uploader-runtime";
 
@@ -47,6 +47,9 @@ function parseFinalizedFile(payload: Record<string, unknown>): GeminiFileResourc
 		throw new Error("Gemini Files API finalize response contains an invalid file.name");
 	}
 	const uri = requireString(file.uri, "file.uri");
+	if (!isOfficialGeminiFilesUri(uri)) {
+		throw new Error("Gemini Files API finalize response contains an invalid file.uri");
+	}
 	const mimeType = requireString(file.mimeType, "file.mimeType");
 	const expirationTime = requireString(file.expirationTime, "file.expirationTime");
 	const expiresAt = Date.parse(expirationTime);
