@@ -853,6 +853,7 @@ export class RelayBridge {
 			case "Page.setDeviceMetricsOverride":
 			case "Emulation.setGeolocationOverride":
 			case "Page.setGeolocationOverride":
+			case "Network.emulateNetworkConditions":
 			case "Network.setUserAgentOverride":
 			case "Emulation.setUserAgentOverride":
 				// Persistent root setters survive as long as the shared debugger root.
