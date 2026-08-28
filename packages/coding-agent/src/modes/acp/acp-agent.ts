@@ -187,7 +187,6 @@ type ManagedSessionRecord = {
 type ReplayableMessage = {
 	role: string;
 	content?: unknown;
-	summary?: string;
 	errorMessage?: string;
 	toolCallId?: string;
 	toolName?: string;
@@ -2232,7 +2231,7 @@ export class AcpAgent implements Agent {
 		const cwd = record.session.sessionManager.getCwd();
 		const replayedToolCallIds = new Set<string>();
 		const replayedToolCallArgs = new Map<string, unknown>();
-		for (const message of record.session.buildDisplaySessionContext().messages as ReplayableMessage[]) {
+		for (const message of record.session.sessionManager.buildSessionContext().messages as ReplayableMessage[]) {
 			for (const notification of this.#messageToReplayNotifications(
 				record.session.sessionId,
 				message,
@@ -2287,18 +2286,14 @@ export class AcpAgent implements Agent {
 				},
 			);
 		}
-		if (message.role === "bashExecution" || message.role === "pythonExecution") {
+		if (
+			message.role === "bashExecution" ||
+			message.role === "pythonExecution" ||
+			message.role === "compactionSummary"
+		) {
 			return this.#wrapReplayContent(
 				sessionId,
 				this.#extractReplayContent(message.content, undefined),
-				"user_message_chunk",
-				crypto.randomUUID(),
-			);
-		}
-		if (message.role === "compactionSummary" && typeof message.summary === "string") {
-			return this.#wrapReplayContent(
-				sessionId,
-				message.summary.length > 0 ? [{ type: "text", text: message.summary }] : [],
 				"user_message_chunk",
 				crypto.randomUUID(),
 			);

@@ -8,15 +8,10 @@ import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { encodeResponse, encodeStream, parseRequest } from "@oh-my-pi/pi-ai/providers/openai-responses-server";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
-import { hasSupportedImageSource } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import type { AssistantMessage, Context, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { type CapturedOpenAICompletionRequest, startOpenAICompletionsUpstream } from "./helpers";
-
-const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
-const BMP_B64 = "Qk06AAAAAAAAADYAAAAoAAAAAQAAAAEAAAABABgAAAAAAAQAAAATCwAAEwsAAAAAAAAAAAAAAAD/AA==";
 
 function zeroUsage(): AssistantMessage["usage"] {
 	return {
@@ -66,25 +61,6 @@ function parseSse(raw: string): SseFrame[] {
 		}
 	}
 	return frames;
-}
-
-function toolImageRequest(model: string, imageUrl: string, fileId?: string): unknown {
-	return {
-		model,
-		input: [
-			{
-				type: "function_call",
-				call_id: "call_read",
-				name: "read",
-				arguments: '{"path":"image.png"}',
-			},
-			{
-				type: "function_call_output",
-				call_id: "call_read",
-				output: [{ type: "input_image", image_url: imageUrl, ...(fileId ? { file_id: fileId } : {}) }],
-			},
-		],
-	};
 }
 
 describe("openai-responses parseRequest", () => {
@@ -202,7 +178,7 @@ describe("openai-responses parseRequest", () => {
 	});
 
 	it("preserves canonical multimodal order and nullable fallback sources", () => {
-		const imageData = PNG_B64;
+		const imageData = Buffer.from("tool image").toString("base64");
 		const parsed = parseRequest({
 			model: "gpt-5.6-sol",
 			input: [
@@ -246,118 +222,6 @@ describe("openai-responses parseRequest", () => {
 		]);
 	});
 
-	it("keeps a usable OpenAI file ID beside a placeholder-safe inline image", () => {
-		const bmpData = Buffer.from("424d1e00000000000000001a0000000c000000010001000100180000000000", "hex").toString(
-			"base64",
-		);
-		const parsed = parseRequest({
-			model: "gpt-5.6-sol",
-			input: [
-				{
-					type: "function_call",
-					id: "fc_shot",
-					call_id: "call_shot",
-					name: "screenshot",
-					arguments: "{}",
-				},
-				{
-					type: "function_call_output",
-					call_id: "call_shot",
-					output: [
-						{
-							type: "input_image",
-							image_url: `data:image/bmp;base64,${bmpData}`,
-							file_id: "file_image_123",
-							detail: null,
-						},
-					],
-				},
-			],
-		});
-
-		const result = parsed.context.messages[1];
-		if (result?.role !== "toolResult") throw new Error("expected tool result");
-		expect(result.content).toEqual([
-			{
-				type: "image",
-				data: bmpData,
-				mimeType: "image/bmp",
-				providerFile: { provider: "openai", id: "file_image_123" },
-			},
-		]);
-
-		const responsesModel = (provider: string, baseUrl: string) =>
-			buildModel({
-				id: "gpt-5.6-sol",
-				name: "GPT-5.6 Sol",
-				api: "openai-responses",
-				provider,
-				baseUrl,
-				reasoning: true,
-				input: ["text", "image"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				contextWindow: 1_000_000,
-				maxTokens: 128_000,
-			} satisfies ModelSpec<"openai-responses">);
-		const outputFor = (model: ReturnType<typeof responsesModel>) => {
-			const item = buildResponsesInput({
-				model,
-				context: parsed.context,
-				strictResponsesPairing: true,
-				supportsImageDetailOriginal: true,
-			}).find(entry => entry.type === "function_call_output");
-			if (item?.type !== "function_call_output") throw new Error("expected function output");
-			return item.output;
-		};
-
-		// The owning endpoint can still replay the handle; every other target has
-		// no usable source and degrades to the unsupported-format placeholder.
-		expect(outputFor(responsesModel("openai", "https://api.openai.com/v1"))).toEqual([
-			{ type: "input_image", detail: "auto", file_id: "file_image_123" },
-		]);
-		expect(outputFor(responsesModel("xai", "https://api.x.ai/v1"))).toEqual([
-			{ type: "input_text", text: "[unsupported image: image/bmp]" },
-		]);
-	});
-
-	function makeVertexScreenshotModel() {
-		return buildModel({
-			id: "gemini-3-pro",
-			name: "Gemini 3 Pro",
-			api: "google-vertex",
-			provider: "google-vertex",
-			baseUrl: "https://us-central1-aiplatform.googleapis.com",
-			reasoning: false,
-			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 32_768,
-			maxTokens: 4_096,
-		} satisfies ModelSpec<"google-vertex">);
-	}
-
-	it("normalizes a remote computer screenshot as a replayable PNG reference", () => {
-		const imageUrl = "https://images.example.invalid/screenshot.png";
-		const parsed = parseRequest({
-			model: "gpt-5.6-sol",
-			input: [
-				{
-					type: "computer_call_output",
-					call_id: "call_remote_screenshot",
-					output: { type: "computer_screenshot", image_url: imageUrl },
-				},
-			],
-		});
-
-		const result = parsed.context.messages[0];
-		if (result?.role !== "toolResult") throw new Error("expected tool result");
-		expect(result.content).toEqual([{ type: "image", data: "", mimeType: "image/png", url: imageUrl }]);
-		// Google targets only replay a remote reference whose media type they support,
-		// so an unknown media type would strand an otherwise replayable screenshot.
-		const image = result.content[0];
-		if (image?.type !== "image") throw new Error("expected image content");
-		expect(hasSupportedImageSource(makeVertexScreenshotModel(), image)).toBe(true);
-	});
-
 	it("rejects function output images with an empty source", () => {
 		expect(() =>
 			parseRequest({
@@ -371,19 +235,6 @@ describe("openai-responses parseRequest", () => {
 				],
 			}),
 		).toThrow(/at least one of `image_url` or `file_id`/);
-	});
-
-	it("decodes large percent-encoded tool images to exact bytes", () => {
-		const byteCount = 128 * 1024;
-		const imageBytes = Buffer.concat([Buffer.from(PNG_B64, "base64"), Buffer.alloc(byteCount, 0xff)]);
-		const encodedBytes = Array.from(imageBytes, byte => `%${byte.toString(16).padStart(2, "0")}`).join("");
-		const parsed = parseRequest(toolImageRequest("gpt-5.6-sol", `data:image/png,${encodedBytes}`));
-		const result = parsed.context.messages[1];
-		if (result?.role !== "toolResult") throw new Error("expected tool result");
-		const image = result.content[0];
-		if (image?.type !== "image") throw new Error("expected image content");
-		expect(image.mimeType).toBe("image/png");
-		expect(Buffer.from(image.data, "base64")).toEqual(imageBytes);
 	});
 
 	it("rejects file blocks in tool outputs instead of flattening their content", () => {
@@ -402,7 +253,7 @@ describe("openai-responses parseRequest", () => {
 	});
 
 	it("concatenates legacy function output text while retaining inline images", () => {
-		const imageData = PNG_B64;
+		const imageData = Buffer.from("legacy image").toString("base64");
 		const parsed = parseRequest({
 			model: "gpt-5.6-sol",
 			input: [
@@ -427,33 +278,8 @@ describe("openai-responses parseRequest", () => {
 		]);
 	});
 
-	it("preserves legacy text encounter order around input text blocks", () => {
-		const parsed = parseRequest({
-			model: "gpt-5.6-sol",
-			input: [
-				{
-					type: "function_call_output",
-					call_id: "call_order",
-					output: [
-						{ type: "output_text", text: "before" },
-						{ type: "input_text", text: "middle" },
-						{ type: "output_text", text: "after" },
-					],
-				},
-			],
-		});
-
-		const result = parsed.context.messages[0];
-		if (result?.role !== "toolResult") throw new Error("expected tool result");
-		expect(result.content).toEqual([
-			{ type: "text", text: "before" },
-			{ type: "text", text: "middle" },
-			{ type: "text", text: "after" },
-		]);
-	});
-
 	it("round-trips Pi image-read image forms as native function output blocks", () => {
-		const imageData = PNG_B64;
+		const imageData = Buffer.from("read tool image").toString("base64");
 		const imageUrl = "https://blob.example.invalid/read-image.png";
 		const providerFileId = "file_read_image_123";
 		const model = buildModel({
@@ -556,7 +382,7 @@ describe("openai-responses parseRequest", () => {
 	});
 
 	it("round-trips array-valued custom tool outputs without demoting them", () => {
-		const imageData = PNG_B64;
+		const imageData = Buffer.from("custom tool image").toString("base64");
 		const model = buildModel({
 			id: "gpt-5.6-sol",
 			name: "GPT-5.6 Sol",
@@ -785,14 +611,7 @@ describe("openai-responses parseRequest", () => {
 				pendingSafetyChecks: [],
 			},
 		});
-		expect(urlResult.content).toEqual([
-			{
-				type: "image",
-				data: "",
-				mimeType: "image/png",
-				url: imageUrl,
-			},
-		]);
+		expect(urlResult.content).toEqual([]);
 		expect(urlResult.providerMetadata).toEqual({
 			type: "computer",
 			screenshot: { type: "computer_screenshot", image_url: imageUrl },
@@ -1592,104 +1411,7 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 		}
 	});
 
-	it("replays an inline computer screenshot through a non-Responses provider", async () => {
-		registerMockApi();
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-computer-inline-"));
-		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openai", "test-key");
-		const mock = createMockModel({ provider: "openai", id: "mock/computer-inline" });
-		mock.push({ content: ["ok"] });
-		const gateway = startAuthGateway({
-			bind: "127.0.0.1:0",
-			bearerTokens: ["test-token"],
-			storage,
-			resolveModel: () => mock.model,
-			version: "test",
-		});
-		const imageData = PNG_B64;
-
-		try {
-			const response = await fetch(`${gateway.url}/v1/responses`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-				body: JSON.stringify({
-					model: "mock/computer-inline",
-					input: [
-						{
-							type: "computer_call_output",
-							call_id: "call_computer_inline",
-							output: {
-								type: "computer_screenshot",
-								image_url: `data:image/png;base64,${imageData}`,
-							},
-						},
-					],
-				}),
-			});
-			expect(response.status).toBe(200);
-			await response.text();
-			expect(mock.calls).toHaveLength(1);
-			const toolResult = mock.calls[0]!.context.messages.find(message => message.role === "toolResult");
-			expect(toolResult?.content).toEqual([{ type: "image", data: imageData, mimeType: "image/png" }]);
-		} finally {
-			await gateway.close();
-			storage.close();
-			await fs.rm(dir, { recursive: true, force: true });
-			clearCustomApis();
-		}
-	});
-
-	it("preserves a well-formed unverifiable tool image data URI for placeholder replay", async () => {
-		registerMockApi();
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-tool-placeholder-image-"));
-		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openai", "test-key");
-		const mock = createMockModel({ provider: "openai", id: "mock/tool-placeholder-image" });
-		mock.push({ content: ["ok"] });
-		const gateway = startAuthGateway({
-			bind: "127.0.0.1:0",
-			bearerTokens: ["test-token"],
-			storage,
-			resolveModel: () => mock.model,
-			version: "test",
-		});
-
-		try {
-			const response = await fetch(`${gateway.url}/v1/responses`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-				body: JSON.stringify({
-					model: "mock/tool-placeholder-image",
-					input: [
-						{
-							type: "function_call",
-							call_id: "call_read",
-							name: "read",
-							arguments: '{"path":"image.bmp"}',
-						},
-						{
-							type: "function_call_output",
-							call_id: "call_read",
-							output: [{ type: "input_image", image_url: `data:image/bmp;base64,${BMP_B64}` }],
-						},
-					],
-				}),
-			});
-
-			expect(response.status).toBe(200);
-			await response.text();
-			expect(mock.calls).toHaveLength(1);
-			const toolResult = mock.calls[0]!.context.messages.find(message => message.role === "toolResult");
-			expect(toolResult?.content).toEqual([{ type: "image", data: BMP_B64, mimeType: "image/bmp" }]);
-		} finally {
-			await gateway.close();
-			storage.close();
-			await fs.rm(dir, { recursive: true, force: true });
-			clearCustomApis();
-		}
-	});
-
-	it("rejects unusable tool image sources before invoking a non-Responses provider", async () => {
+	it("rejects OpenAI file-id tool images before invoking a non-Responses provider", async () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-provider-file-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
@@ -1704,448 +1426,34 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 		});
 
 		try {
-			const cases = [
-				{
-					image: { type: "input_image", file_id: "file_image_123" },
-					error: "input_image.file_id cannot be forwarded to mock",
-				},
-				{
-					image: {
-						type: "input_image",
-						image_url: "data:image/png;base64,",
-						file_id: "file_image_123",
-					},
-					error: "input_image.file_id cannot be forwarded to mock",
-				},
-				{
-					image: { type: "input_image", image_url: "data:image/png;base64," },
-					error: "input_image cannot be forwarded to mock without non-empty image data or a supported reference",
-				},
-			];
-			for (const testCase of cases) {
-				const response = await fetch(`${gateway.url}/v1/responses`, {
-					method: "POST",
-					headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-					body: JSON.stringify({
-						model: "mock/provider-file",
-						input: [
-							{
-								type: "function_call",
-								call_id: "call_read",
-								name: "read",
-								arguments: '{"path":"image.png"}',
-							},
-							{
-								type: "function_call_output",
-								call_id: "call_read",
-								output: [testCase.image],
-							},
-						],
-					}),
-				});
-				expect(response.status).toBe(400);
-				expect(await response.text()).toContain(testCase.error);
-				expect(mock.calls).toHaveLength(0);
-			}
+			const response = await fetch(`${gateway.url}/v1/responses`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+				body: JSON.stringify({
+					model: "mock/provider-file",
+					input: [
+						{
+							type: "function_call",
+							call_id: "call_read",
+							name: "read",
+							arguments: '{"path":"image.png"}',
+						},
+						{
+							type: "function_call_output",
+							call_id: "call_read",
+							output: [{ type: "input_image", file_id: "file_image_123" }],
+						},
+					],
+				}),
+			});
+			expect(response.status).toBe(400);
+			expect(await response.text()).toContain("input_image.file_id cannot be forwarded to mock");
+			expect(mock.calls).toHaveLength(0);
 		} finally {
 			await gateway.close();
 			storage.close();
 			await fs.rm(dir, { recursive: true, force: true });
 			clearCustomApis();
-		}
-	});
-
-	it("rejects unreplayable tool image sources before invoking Ollama", async () => {
-		const upstreamRequests: unknown[] = [];
-		const upstream = Bun.serve({
-			hostname: "127.0.0.1",
-			port: 0,
-			async fetch(request) {
-				upstreamRequests.push(await request.json());
-				return new Response(
-					`${JSON.stringify({
-						message: { role: "assistant", content: "ok" },
-						done: true,
-						done_reason: "stop",
-						prompt_eval_count: 1,
-						eval_count: 1,
-					})}\n`,
-					{ headers: { "Content-Type": "application/x-ndjson" } },
-				);
-			},
-		});
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-remote-image-ollama-"));
-		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("ollama", "test-key");
-		const model = buildModel({
-			id: "vision-model",
-			name: "Vision Model",
-			api: "ollama-chat",
-			provider: "ollama",
-			baseUrl: upstream.url.origin,
-			reasoning: false,
-			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 32_768,
-			maxTokens: 4_096,
-		} satisfies ModelSpec<"ollama-chat">);
-		const gateway = startAuthGateway({
-			bind: "127.0.0.1:0",
-			bearerTokens: ["test-token"],
-			storage,
-			resolveModel: () => model,
-			version: "test",
-		});
-
-		try {
-			const nonImageResponse = await fetch(`${gateway.url}/v1/responses`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-				body: JSON.stringify(toolImageRequest(model.id, "data:text/plain;base64,SGVsbG8=", "file_image_123")),
-			});
-			expect(nonImageResponse.status).toBe(400);
-			expect(await nonImageResponse.text()).toContain("input_image.file_id cannot be forwarded to ollama-chat");
-			expect(upstreamRequests).toHaveLength(0);
-
-			const response = await fetch(`${gateway.url}/v1/responses`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-				body: JSON.stringify(toolImageRequest(model.id, "https://images.example.invalid/read.png")),
-			});
-			expect(response.status).toBe(400);
-			expect(await response.text()).toContain(
-				"input_image.image_url cannot be forwarded to ollama-chat without inline image data",
-			);
-			expect(upstreamRequests).toHaveLength(0);
-		} finally {
-			await gateway.close();
-			storage.close();
-			await fs.rm(dir, { recursive: true, force: true });
-			upstream.stop(true);
-		}
-	});
-
-	it("rejects reference-only remote tool images for URL-blind providers on shared APIs", async () => {
-		const upstreamRequests: CapturedOpenAICompletionRequest[] = [];
-		const upstream = startOpenAICompletionsUpstream(upstreamRequests);
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-remote-image-moonshot-"));
-		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("moonshot", "test-key");
-		const model = buildModel({
-			id: "vision-model",
-			name: "Vision Model",
-			api: "openai-completions",
-			provider: "moonshot",
-			baseUrl: `${upstream.url.origin}/v1`,
-			reasoning: false,
-			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 32_768,
-			maxTokens: 4_096,
-		} satisfies ModelSpec<"openai-completions">);
-		const gateway = startAuthGateway({
-			bind: "127.0.0.1:0",
-			bearerTokens: ["test-token"],
-			storage,
-			resolveModel: () => model,
-			version: "test",
-		});
-
-		try {
-			const response = await fetch(`${gateway.url}/v1/responses`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-				body: JSON.stringify(toolImageRequest(model.id, "https://images.example.invalid/read.png")),
-			});
-			expect(response.status).toBe(400);
-			expect(await response.text()).toContain(
-				"input_image.image_url cannot be forwarded to openai-completions without inline image data",
-			);
-			expect(upstreamRequests).toHaveLength(0);
-		} finally {
-			await gateway.close();
-			storage.close();
-			await fs.rm(dir, { recursive: true, force: true });
-			upstream.stop(true);
-		}
-	});
-
-	it("rejects remote tool images blocked by effective OpenAI vision guards", async () => {
-		const upstreamRequests: CapturedOpenAICompletionRequest[] = [];
-		const upstream = startOpenAICompletionsUpstream(upstreamRequests);
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-remote-image-dashscope-"));
-		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("alibaba-coding-plan", "test-key");
-		const model = buildModel({
-			id: "qwen3-coder",
-			name: "Qwen 3 Coder",
-			api: "openai-completions",
-			provider: "alibaba-coding-plan",
-			baseUrl: `${upstream.url.origin}/dashscope.aliyuncs.com/compatible-mode/v1`,
-			reasoning: false,
-			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 32_768,
-			maxTokens: 4_096,
-		} satisfies ModelSpec<"openai-completions">);
-		const gateway = startAuthGateway({
-			bind: "127.0.0.1:0",
-			bearerTokens: ["test-token"],
-			storage,
-			resolveModel: () => model,
-			version: "test",
-		});
-
-		try {
-			const response = await fetch(`${gateway.url}/v1/responses`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-				body: JSON.stringify(toolImageRequest(model.id, "https://images.example.invalid/read.png")),
-			});
-			expect(response.status).toBe(400);
-			expect(await response.text()).toContain(
-				"input_image.image_url cannot be forwarded to openai-completions without inline image data",
-			);
-			expect(upstreamRequests).toHaveLength(0);
-		} finally {
-			await gateway.close();
-			storage.close();
-			await fs.rm(dir, { recursive: true, force: true });
-			upstream.stop(true);
-		}
-	});
-
-	it("rejects Google remote tool images without a known media type", async () => {
-		const upstreamRequests: unknown[] = [];
-		const upstream = Bun.serve({
-			hostname: "127.0.0.1",
-			port: 0,
-			async fetch(request) {
-				upstreamRequests.push(await request.json());
-				return new Response(
-					`data: ${JSON.stringify({
-						response: {
-							candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
-							usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1, totalTokenCount: 2 },
-						},
-					})}\n\n`,
-					{ headers: { "Content-Type": "text/event-stream" } },
-				);
-			},
-		});
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-remote-image-google-"));
-		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey(
-			"google-antigravity",
-			JSON.stringify({ token: "test-token", projectId: "test-project" }),
-		);
-		const model = buildModel({
-			id: "gemini-3-flash",
-			name: "Gemini 3 Flash",
-			api: "google-gemini-cli",
-			provider: "google-antigravity",
-			baseUrl: upstream.url.origin,
-			reasoning: false,
-			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 32_768,
-			maxTokens: 4_096,
-		} satisfies ModelSpec<"google-gemini-cli">);
-		const gateway = startAuthGateway({
-			bind: "127.0.0.1:0",
-			bearerTokens: ["test-token"],
-			storage,
-			resolveModel: () => model,
-			version: "test",
-		});
-
-		try {
-			const response = await fetch(`${gateway.url}/v1/responses`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-				body: JSON.stringify(toolImageRequest(model.id, "https://images.example.invalid/read.png")),
-			});
-			expect(response.status).toBe(400);
-			expect(await response.text()).toContain(
-				"input_image.image_url cannot be forwarded to google-gemini-cli without inline image data",
-			);
-			expect(upstreamRequests).toHaveLength(0);
-		} finally {
-			await gateway.close();
-			storage.close();
-			await fs.rm(dir, { recursive: true, force: true });
-			upstream.stop(true);
-		}
-	});
-
-	it("rejects malformed data URIs but forwards remote tool images to URL-capable APIs", async () => {
-		const upstreamRequests: CapturedOpenAICompletionRequest[] = [];
-		const upstream = startOpenAICompletionsUpstream(upstreamRequests);
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-remote-image-openai-"));
-		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openai", "test-key");
-		const model = buildModel({
-			id: "vision-model",
-			name: "Vision Model",
-			api: "openai-completions",
-			provider: "openai",
-			baseUrl: `${upstream.url.origin}/v1`,
-			reasoning: false,
-			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 32_768,
-			maxTokens: 4_096,
-		} satisfies ModelSpec<"openai-completions">);
-		const gateway = startAuthGateway({
-			bind: "127.0.0.1:0",
-			bearerTokens: ["test-token"],
-			storage,
-			resolveModel: () => model,
-			version: "test",
-		});
-		const imageUrl = "https://images.example.invalid/read.png";
-
-		try {
-			const invalidUrlResponse = await fetch(`${gateway.url}/v1/responses`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-				body: JSON.stringify(toolImageRequest(model.id, "not-a-url", "file_image_123")),
-			});
-			expect(invalidUrlResponse.status).toBe(400);
-			expect(await invalidUrlResponse.text()).toContain(
-				"input_image.file_id cannot be forwarded to openai-completions",
-			);
-			expect(upstreamRequests).toHaveLength(0);
-			for (const malformedDataUri of [
-				"data:image/png;base64",
-				"data:image/png#preview,SGk=",
-				"data:image/png,%",
-				"data:image/png;base64,",
-				"data:image/png;base64,!!!!",
-				"data:image/png;base64,A===",
-				"data:image/png;base64,AB==",
-			]) {
-				const malformedResponse = await fetch(`${gateway.url}/v1/responses`, {
-					method: "POST",
-					headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-					body: JSON.stringify(toolImageRequest(model.id, malformedDataUri, "file_image_123")),
-				});
-				expect(malformedResponse.status).toBe(400);
-				expect(await malformedResponse.text()).toContain(
-					"input_image.file_id cannot be forwarded to openai-completions",
-				);
-				expect(upstreamRequests).toHaveLength(0);
-			}
-			const inlineImageUrl = `data:image/png;base64,${PNG_B64}`;
-			const inlineResponse = await fetch(`${gateway.url}/v1/responses`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-				body: JSON.stringify(toolImageRequest(model.id, inlineImageUrl, "file_image_123")),
-			});
-			expect(inlineResponse.status).toBe(200);
-			await inlineResponse.text();
-			expect(upstreamRequests).toHaveLength(1);
-			const inlineContentParts = (upstreamRequests[0]?.messages ?? []).flatMap(message =>
-				Array.isArray(message.content) ? message.content : [],
-			);
-			expect(inlineContentParts).toContainEqual({ type: "image_url", image_url: { url: inlineImageUrl } });
-			const parameterizedInlineResponse = await fetch(`${gateway.url}/v1/responses`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-				body: JSON.stringify(
-					toolImageRequest(model.id, `data:image/png;charset=binary;base64,${PNG_B64}`, "file_image_123"),
-				),
-			});
-			expect(parameterizedInlineResponse.status).toBe(200);
-			await parameterizedInlineResponse.text();
-			expect(upstreamRequests).toHaveLength(2);
-			const parameterizedInlineContentParts = (upstreamRequests[1]?.messages ?? []).flatMap(message =>
-				Array.isArray(message.content) ? message.content : [],
-			);
-			expect(parameterizedInlineContentParts).toContainEqual({
-				type: "image_url",
-				image_url: { url: inlineImageUrl },
-			});
-			const normalizedMixedCaseImageUrl = `data:image/png;base64,${PNG_B64}`;
-			const mixedCaseInlineResponse = await fetch(`${gateway.url}/v1/responses`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-				body: JSON.stringify(
-					toolImageRequest(model.id, `DATA:image/png;BASE64,${PNG_B64.replaceAll("=", "%3D")}`, "file_image_123"),
-				),
-			});
-			expect(mixedCaseInlineResponse.status).toBe(200);
-			await mixedCaseInlineResponse.text();
-			expect(upstreamRequests).toHaveLength(3);
-			const mixedCaseInlineContentParts = (upstreamRequests[2]?.messages ?? []).flatMap(message =>
-				Array.isArray(message.content) ? message.content : [],
-			);
-			expect(mixedCaseInlineContentParts).toContainEqual({
-				type: "image_url",
-				image_url: { url: normalizedMixedCaseImageUrl },
-			});
-			const fragmentInlineResponse = await fetch(`${gateway.url}/v1/responses`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-				body: JSON.stringify(
-					toolImageRequest(model.id, `data:image/png;base64,${PNG_B64}#preview`, "file_image_123"),
-				),
-			});
-			expect(fragmentInlineResponse.status).toBe(200);
-			await fragmentInlineResponse.text();
-			expect(upstreamRequests).toHaveLength(4);
-			const fragmentInlineContentParts = (upstreamRequests[3]?.messages ?? []).flatMap(message =>
-				Array.isArray(message.content) ? message.content : [],
-			);
-			expect(fragmentInlineContentParts).toContainEqual({
-				type: "image_url",
-				image_url: { url: normalizedMixedCaseImageUrl },
-			});
-			const response = await fetch(`${gateway.url}/v1/responses`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-				body: JSON.stringify(toolImageRequest(model.id, imageUrl, "file_image_123")),
-			});
-			expect(response.status).toBe(200);
-			await response.text();
-			expect(upstreamRequests).toHaveLength(5);
-			const contentParts = (upstreamRequests[4]?.messages ?? []).flatMap(message =>
-				Array.isArray(message.content) ? message.content : [],
-			);
-			expect(contentParts).toContainEqual({ type: "image_url", image_url: { url: imageUrl } });
-
-			const computerResponse = await fetch(`${gateway.url}/v1/responses`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-				body: JSON.stringify({
-					model: model.id,
-					input: [
-						{
-							type: "function_call",
-							call_id: "call_remote_screenshot",
-							name: "computer",
-							arguments: "{}",
-						},
-						{
-							type: "computer_call_output",
-							call_id: "call_remote_screenshot",
-							output: { type: "computer_screenshot", image_url: imageUrl },
-						},
-					],
-				}),
-			});
-			expect(computerResponse.status).toBe(200);
-			await computerResponse.text();
-			expect(upstreamRequests).toHaveLength(6);
-			const computerContentParts = (upstreamRequests[5]?.messages ?? []).flatMap(message =>
-				Array.isArray(message.content) ? message.content : [],
-			);
-			expect(computerContentParts).toContainEqual({ type: "image_url", image_url: { url: imageUrl } });
-		} finally {
-			await gateway.close();
-			storage.close();
-			await fs.rm(dir, { recursive: true, force: true });
-			upstream.stop(true);
 		}
 	});
 });

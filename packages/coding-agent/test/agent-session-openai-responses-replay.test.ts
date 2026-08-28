@@ -2,22 +2,20 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:te
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
 import type {
 	AssistantMessage,
 	Message,
-	Model,
 	ProviderPayload,
 	ProviderSessionState,
 	ToolResultMessage,
 	Usage,
 } from "@oh-my-pi/pi-ai/types";
-import { createOpenAIResponsesHistoryPayload, getOpenAIResponsesReferenceTarget } from "@oh-my-pi/pi-ai/utils";
+import { createOpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai/utils";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
-import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -248,10 +246,10 @@ let sharedRegistryDir: string;
 async function createSessionHarness(
 	tempDir: string,
 	sessionManager: SessionManager,
-	options: { provider?: Parameters<typeof getBundledModel>[0]; modelId?: string; model?: Model } = {},
+	options: { provider?: Parameters<typeof getBundledModel>[0]; modelId?: string } = {},
 ): Promise<{ session: AgentSession }> {
 	const { provider = "openai", modelId = "gpt-5-mini" } = options;
-	const model = options.model ?? getBundledModel(provider, modelId);
+	const model = getBundledModel(provider, modelId);
 	if (!model) {
 		throw new Error(`Expected bundled test model ${provider}/${modelId}`);
 	}
@@ -362,240 +360,6 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 			throw new Error("Expected runtime user message");
 		}
 		expect(runtimeUser.providerPayload).toEqual(preservedUserPayload);
-	});
-
-	it("replays compaction history preserved for a distinct compaction target", async () => {
-		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-compaction-replay-target-${Snowflake.next()}-`));
-		tempDirs.push(tempDir);
-		const model = getBundledModel("openai", "gpt-5-mini");
-		if (!model) throw new Error("Expected bundled OpenAI test model");
-		const otherModel = getBundledModel("openai", "gpt-5.4-mini");
-		if (!otherModel) throw new Error("Expected second bundled OpenAI test model");
-		const replayTarget = getOpenAIResponsesReferenceTarget(model);
-		const compactionTarget = getOpenAIResponsesReferenceTarget(otherModel);
-		expect(compactionTarget).not.toBe(replayTarget);
-
-		const { sessionFile } = await createPersistedSession(tempDir, sessionManager => {
-			const compactedId = sessionManager.appendMessage({
-				role: "user",
-				content: "Original compacted context",
-				timestamp: Date.now() - 2,
-			});
-			sessionManager.appendCompaction("opaque remote summary", undefined, compactedId, 100, {
-				preserveData: {
-					openaiRemoteCompaction: {
-						provider: "openai",
-						referenceTarget: compactionTarget,
-						replayTarget,
-						compactionItem: { type: "compaction", encrypted_content: "enc_override" },
-						replacementHistory: [
-							{
-								type: "message",
-								role: "user",
-								content: [{ type: "input_text", text: "Provider-preserved compacted context" }],
-							},
-						],
-					},
-				},
-			});
-			sessionManager.appendMessage({ role: "user", content: "Recent context", timestamp: Date.now() - 1 });
-			sessionManager.appendMessage({
-				role: "assistant",
-				content: [{ type: "text", text: "Recent response" }],
-				api: model.api,
-				provider: model.provider,
-				model: model.id,
-				usage: createUsage(),
-				stopReason: "stop",
-				timestamp: Date.now(),
-			});
-		});
-
-		const reloadedSessionManager = await SessionManager.open(sessionFile, tempDir);
-		const { session } = await createSessionHarness(tempDir, reloadedSessionManager, { model });
-		sessions.push(session);
-
-		const summary = session.messages.find(message => message.role === "compactionSummary");
-		if (summary?.role !== "compactionSummary") {
-			throw new Error("Expected remote compaction summary for the runtime replay target");
-		}
-		expect(summary.providerPayload?.referenceTarget).toBe(replayTarget);
-		expect(
-			session.messages.some(
-				message => message.role === "user" && getTextContent(message) === "Original compacted context",
-			),
-		).toBe(false);
-
-		await session.setModel(otherModel);
-		expect(session.messages.some(message => message.role === "compactionSummary")).toBe(false);
-		expect(
-			session.messages.some(
-				message => message.role === "user" && getTextContent(message) === "Original compacted context",
-			),
-		).toBe(true);
-	});
-
-	it("restores compatible target-bound compaction on the first model selection", async () => {
-		const model = getBundledModel("openai", "gpt-5-mini");
-		if (!model) throw new Error("Expected bundled OpenAI test model");
-		const replayTarget = getOpenAIResponsesReferenceTarget(model);
-
-		const sessionManager = SessionManager.inMemory();
-		const compactedId = sessionManager.appendMessage({
-			role: "user",
-			content: "Original compacted context",
-			timestamp: Date.now() - 2,
-		});
-		sessionManager.appendCompaction("opaque remote summary", undefined, compactedId, 100, {
-			preserveData: {
-				openaiRemoteCompaction: {
-					provider: "openai",
-					replayTarget,
-					compactionItem: { type: "compaction", encrypted_content: "enc_first_model" },
-					replacementHistory: [
-						{
-							type: "message",
-							role: "user",
-							content: [{ type: "input_text", text: "Provider-preserved compacted context" }],
-						},
-					],
-				},
-			},
-		});
-		sessionManager.appendMessage({ role: "user", content: "Recent context", timestamp: Date.now() - 1 });
-
-		// A session that boots without a resolvable model installs the unscoped
-		// (re-expanded) branch, exactly as SDK startup does.
-		const expanded = sessionManager.buildSessionContext();
-		expect(expanded.messages.some(message => message.role === "compactionSummary")).toBe(false);
-		const agent = new Agent({
-			initialState: { model: undefined, systemPrompt: ["Test"], tools: [], messages: expanded.messages },
-		});
-		const session = new AgentSession({
-			agent,
-			sessionManager,
-			settings: Settings.isolated({ "compaction.enabled": true }),
-			modelRegistry: sharedModelRegistry,
-		});
-		sessions.push(session);
-		expect(
-			session.messages.some(
-				message => message.role === "user" && getTextContent(message) === "Original compacted context",
-			),
-		).toBe(true);
-
-		await session.setModel(model);
-
-		const summary = session.messages.find(message => message.role === "compactionSummary");
-		if (summary?.role !== "compactionSummary") {
-			throw new Error("Expected compatible remote compaction summary after the first model selection");
-		}
-		expect(summary.providerPayload?.referenceTarget).toBe(replayTarget);
-		expect(
-			session.messages.some(
-				message => message.role === "user" && getTextContent(message) === "Original compacted context",
-			),
-		).toBe(false);
-	});
-
-	it("restores compatible target-bound compaction after resume, navigation, and model switches", async () => {
-		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-compaction-resume-${Snowflake.next()}-`));
-		tempDirs.push(tempDir);
-		const model = getBundledModel("openai", "gpt-5-mini");
-		if (!model) throw new Error("Expected bundled OpenAI test model");
-		const referenceTarget = getOpenAIResponsesReferenceTarget(model);
-
-		const { sessionFile, treeTargetId } = await createPersistedSession(tempDir, sessionManager => {
-			const compactedId = sessionManager.appendMessage({
-				role: "user",
-				content: "Original compacted context",
-				timestamp: Date.now() - 2,
-			});
-			sessionManager.appendCompaction("opaque remote summary", undefined, compactedId, 100, {
-				preserveData: {
-					openaiRemoteCompaction: {
-						provider: "openai",
-						referenceTarget,
-						compactionItem: { type: "compaction", encrypted_content: "enc_resume" },
-						replacementHistory: [
-							{
-								type: "message",
-								role: "user",
-								content: [{ type: "input_text", text: "Provider-preserved compacted context" }],
-							},
-						],
-					},
-				},
-			});
-			sessionManager.appendMessage({
-				role: "user",
-				content: "Recent context",
-				timestamp: Date.now() - 1,
-			});
-			const treeTargetId = sessionManager.appendMessage({
-				role: "assistant",
-				content: [{ type: "text", text: "Recent response" }],
-				api: model.api,
-				provider: model.provider,
-				model: model.id,
-				usage: createUsage(),
-				stopReason: "stop",
-				timestamp: Date.now(),
-			});
-			return { treeTargetId };
-		});
-		if (!treeTargetId) throw new Error("Expected compacted branch target");
-
-		const reloadedSessionManager = await SessionManager.open(sessionFile, tempDir);
-		const { session } = await createSessionHarness(tempDir, reloadedSessionManager, { model });
-		sessions.push(session);
-
-		const summary = session.messages.find(message => message.role === "compactionSummary");
-		if (summary?.role !== "compactionSummary") throw new Error("Expected compatible remote compaction summary");
-		expect(summary.providerPayload?.referenceTarget).toBe(referenceTarget);
-		expect(
-			session.messages.some(
-				message => message.role === "user" && getTextContent(message) === "Original compacted context",
-			),
-		).toBe(false);
-		expect(
-			session.messages.some(message => message.role === "user" && getTextContent(message) === "Recent context"),
-		).toBe(true);
-
-		const navigation = await session.navigateTree(treeTargetId, { summarize: false });
-		expect(navigation.cancelled).toBe(false);
-		const navigatedSummary = session.messages.find(message => message.role === "compactionSummary");
-		if (navigatedSummary?.role !== "compactionSummary") {
-			throw new Error("Expected compatible remote compaction summary after tree navigation");
-		}
-		expect(navigatedSummary.providerPayload?.referenceTarget).toBe(referenceTarget);
-		expect(
-			session.messages.some(
-				message => message.role === "user" && getTextContent(message) === "Original compacted context",
-			),
-		).toBe(false);
-
-		const incompatibleModel = getBundledModel("openai", "gpt-5.4-mini");
-		if (!incompatibleModel) throw new Error("Expected incompatible bundled OpenAI test model");
-		await session.setModel(incompatibleModel);
-		expect(session.messages.some(message => message.role === "compactionSummary")).toBe(false);
-		expect(
-			session.messages.some(
-				message => message.role === "user" && getTextContent(message) === "Original compacted context",
-			),
-		).toBe(true);
-
-		await session.setModel(model);
-		const restoredSummary = session.messages.find(message => message.role === "compactionSummary");
-		if (restoredSummary?.role !== "compactionSummary") {
-			throw new Error("Expected compatible remote compaction summary after switching back");
-		}
-		expect(restoredSummary.providerPayload?.referenceTarget).toBe(referenceTarget);
-		expect(
-			session.messages.some(
-				message => message.role === "user" && getTextContent(message) === "Original compacted context",
-			),
-		).toBe(false);
 	});
 
 	it("preserves codex assistant replay metadata for direct SessionManager.open consumers", async () => {

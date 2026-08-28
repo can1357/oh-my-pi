@@ -40,7 +40,6 @@ import {
 	type AssistantMessage,
 	type CacheRetention,
 	type ComputerAction,
-	type ComputerScreenshotRef,
 	type ComputerToolCallMetadata,
 	type Context,
 	type ImageContent,
@@ -62,21 +61,13 @@ import {
 } from "../types";
 
 export type { OpenAIPromptCacheOptions } from "../types";
-export { parseAzureDeploymentNameMap } from "../utils";
 
 import {
-	canonicalJsonString,
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
-	getOpenAIResponsesReferenceTarget,
-	isOpenAIResponsesAssistantFallbackTargetOwned,
-	isOpenAIResponsesAssistantHistoryTargetOwned,
 	normalizeResponsesToolCallId,
 	normalizeSystemPrompts,
 	resolveCacheRetention,
-	resolveOpenAIResponsesRoutingIdentity,
-	resolveOpenAIResponsesRoutingOverrides,
-	resolveOpenAIResponsesWireRouting,
 	sanitizeOpenAIResponsesAssistantFallbackItemsForReplay,
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
 	sanitizeOpenAIResponsesHistoryItemsForReplay,
@@ -105,7 +96,6 @@ import {
 } from "./github-copilot-headers";
 import type { ChatCompletionCreateParamsStreaming } from "./openai-chat-wire";
 import type { InputItem } from "./openai-codex/request-transformer";
-import { decodeDataUri, isDataUri } from "./openai-data-uri";
 import type {
 	Response as OpenAIResponse,
 	ResponseComputerToolCall,
@@ -125,22 +115,7 @@ import type {
 	ResponseStreamEvent,
 } from "./openai-responses-wire";
 import { transformMessages } from "./transform-messages";
-import {
-	getUnreplayableInlineImageMimeType,
-	hasSupportedImageSource,
-	isRemoteImageUrl,
-	isUsableInlineImage,
-	joinTextWithImagePlaceholder,
-	NON_VISION_IMAGE_PLACEHOLDER,
-	partitionVisionContent,
-	resolveUsableInlineImage,
-	supportsComputerScreenshotOutput,
-	supportsComputerScreenshotReferences,
-	supportsProviderFileReference,
-	supportsRemoteImageUrls,
-	UNREPLAYABLE_IMAGE_PLACEHOLDER,
-	unreplayableImageFormatPlaceholder,
-} from "./vision-guard";
+import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
 
 /**
  * Keyless-provider sentinel. Custom providers configured with `auth: none`
@@ -237,70 +212,6 @@ function setHeaderIfAbsent(headers: Record<string, string>, name: string, value:
 	headers[name] = value;
 }
 
-/** Per-request routing inputs the Responses serializer folds into the wire request. */
-export interface OpenAIResponsesRequestRouting {
-	openrouterVariant?: string;
-	extraBody?: Record<string, unknown>;
-}
-
-/**
- * Fingerprint of the endpoint this request will actually reach, resolved the
- * same way the transport resolves it. Session-level replay decisions and the
- * serializer must agree on one identity, so both derive it here — including the
- * wire model-id transform and the routing selectors an `extraBody` supplies.
- */
-export function getOpenAIResponsesRequestTarget(
-	model: Model,
-	apiKey: string | undefined,
-	routing?: OpenAIResponsesRequestRouting,
-): string {
-	if (model.api === "azure-openai-responses") return getOpenAIResponsesReferenceTarget(model);
-	const compat = model.compat as { wireModelIdMode?: ResolvedOpenAISharedCompat["wireModelIdMode"] } | undefined;
-	const wireModelId = resolveResponsesWireModelId(
-		model.requestModelId ?? model.id,
-		compat?.wireModelIdMode ?? "raw",
-		routing?.openrouterVariant,
-		routing?.extraBody,
-	);
-	return getOpenAIResponsesReferenceTarget(
-		model,
-		wireModelId,
-		resolveOpenAIRequestBaseUrl(model, apiKey),
-		resolveOpenAIResponsesRoutingOverrides(routing?.extraBody),
-	);
-}
-
-/**
- * Request base URL after the provider overrides that depend only on the model
- * and the resolved credential. Transport and compaction replay metadata must
- * agree on the endpoint they fingerprint, so both resolve it here.
- */
-export function resolveOpenAIRequestBaseUrl(
-	model: { provider: string; baseUrl?: string },
-	apiKey: string | undefined,
-): string | undefined {
-	if (model.provider === "moonshot") {
-		// Bundled `moonshot` catalog models hardcode the international endpoint
-		// (`api.moonshot.ai`). MOONSHOT_BASE_URL lets users redirect the provider
-		// at the China platform (`api.moonshot.cn`), which only accepts China keys
-		// and rejects the international host. (#2883)
-		const moonshotBaseUrl = $env.MOONSHOT_BASE_URL?.trim();
-		if (moonshotBaseUrl) return moonshotBaseUrl;
-	}
-	if (model.provider === "sakana") {
-		const sakanaBaseUrl = resolveSakanaRequestBaseUrl();
-		if (sakanaBaseUrl) return sakanaBaseUrl;
-	}
-	if (model.provider === "github-copilot") {
-		return resolveGitHubCopilotBaseUrl(model.baseUrl, apiKey) ?? model.baseUrl;
-	}
-	if (model.provider === "alibaba-token-plan" && apiKey) {
-		const credential = parseAlibabaTokenPlanCredential(apiKey);
-		if (credential?.baseUrl) return credential.baseUrl;
-	}
-	return model.baseUrl;
-}
-
 export function resolveOpenAIRequestSetup(
 	model: OpenAIRequestSetupModel,
 	options: OpenAIRequestSetupOptions,
@@ -329,7 +240,23 @@ export function resolveOpenAIRequestSetup(
 	}
 
 	let copilotPremiumRequests: number | undefined;
-	let baseUrl = resolveOpenAIRequestBaseUrl(model, rawApiKey);
+	let baseUrl = model.baseUrl;
+	if (model.provider === "moonshot") {
+		// Bundled `moonshot` catalog models hardcode the international endpoint
+		// (`api.moonshot.ai`). MOONSHOT_BASE_URL lets users redirect the provider
+		// at the China platform (`api.moonshot.cn`), which only accepts China keys
+		// and rejects the international host. (#2883)
+		const moonshotBaseUrl = $env.MOONSHOT_BASE_URL?.trim();
+		if (moonshotBaseUrl) {
+			baseUrl = moonshotBaseUrl;
+		}
+	}
+	if (model.provider === "sakana") {
+		const sakanaBaseUrl = resolveSakanaRequestBaseUrl();
+		if (sakanaBaseUrl) {
+			baseUrl = sakanaBaseUrl;
+		}
+	}
 	if (model.provider === "github-copilot") {
 		apiKey = parseGitHubCopilotApiKey(rawApiKey).accessToken;
 		const copilot = buildCopilotDynamicHeaders({
@@ -341,6 +268,7 @@ export function resolveOpenAIRequestSetup(
 		});
 		Object.assign(headers, copilot.headers);
 		copilotPremiumRequests = copilot.premiumRequests;
+		baseUrl = resolveGitHubCopilotBaseUrl(model.baseUrl, rawApiKey) ?? model.baseUrl;
 	}
 
 	if (model.provider === "alibaba-token-plan") {
@@ -353,6 +281,7 @@ export function resolveOpenAIRequestSetup(
 		const credential = parseAlibabaTokenPlanCredential(rawApiKey);
 		if (!credential) throw new AIError.ConfigurationError("Invalid QwenCloud Token Plan credential");
 		apiKey = credential.token;
+		if (credential.baseUrl) baseUrl = credential.baseUrl;
 	}
 
 	if (options.alibabaCodingPlanAuth && model.provider === "alibaba-coding-plan") {
@@ -551,6 +480,19 @@ export function getOpenRouterResponsesSessionId(
 	return normalizeOpenRouterResponsesSessionId(options?.sessionId);
 }
 
+export function parseAzureDeploymentNameMap(value: string | undefined): Map<string, string> {
+	const map = new Map<string, string>();
+	if (!value) return map;
+	for (const entry of value.split(",")) {
+		const trimmed = entry.trim();
+		if (!trimmed) continue;
+		const [modelId, deploymentName] = trimmed.split("=", 2);
+		if (!modelId || !deploymentName) continue;
+		map.set(modelId.trim(), deploymentName.trim());
+	}
+	return map;
+}
+
 export function createOpenAIStrictToolsState(): OpenAIStrictToolsState {
 	return {
 		strictTools: {
@@ -625,73 +567,6 @@ export function applyWireModelIdTransform(
 			return applyOpenRouterRoutingVariant(baseId, openrouterVariant);
 		default:
 			return baseId;
-	}
-}
-
-/**
- * Effective `model` selector the Responses request carries on the wire: the
- * catalog id after `wireModelIdMode`/OpenRouter-variant transformation, then
- * any explicit `extraBody.model` override. Target fingerprints and the request
- * body must both go through this so replay validation matches actual routing.
- */
-export function resolveResponsesWireModelId(
-	baseId: string,
-	mode: ResolvedOpenAISharedCompat["wireModelIdMode"],
-	openrouterVariant: string | undefined,
-	extraBody: Record<string, unknown> | undefined,
-): string {
-	const override = extraBody?.model;
-	if (typeof override === "string" && override.length > 0) return override;
-	return applyWireModelIdTransform(baseId, mode, openrouterVariant);
-}
-
-/**
- * Target-bound native history is admitted against the routing target computed
- * before request shaping, so a late `onPayload` hook that re-points the request
- * at another model would replay endpoint-owned items to it. The hook receives
- * the live request object and may mutate it in place or return any shape, so
- * callers must run this on the body they are about to send — not only on a
- * returned replacement — and the wire selector must be the exact primitive
- * string the target fingerprint was built from.
- */
-export interface ResponsesWireRoutingExpectation {
-	model: string;
-	/**
-	 * Canonicalized wire routing selectors captured before the hook ran, keyed by
-	 * request field. Omitted by transports whose body carries no routing fields.
-	 */
-	routing?: Record<string, string>;
-}
-
-export function captureResponsesWireRouting(params: Record<string, unknown>): Record<string, string> {
-	return {
-		provider: canonicalJsonString(params.provider),
-		providerOptions: canonicalJsonString(params.providerOptions),
-	};
-}
-
-export function assertResponsesWireRoutingUnchanged(
-	payload: unknown,
-	expected: ResponsesWireRoutingExpectation,
-	api: string,
-): void {
-	const body = isRecord(payload) ? payload : undefined;
-	const replacedModel = body?.model;
-	if (typeof replacedModel !== "string" || replacedModel !== expected.model) {
-		const describeReplacement =
-			typeof replacedModel === "string"
-				? `"${replacedModel}"`
-				: `a non-string ${typeof replacedModel} model selector`;
-		throw new AIError.ValidationError(
-			`onPayload cannot repoint a ${api} request from model "${expected.model}" to ${describeReplacement}; replayed history is bound to the original routing target`,
-		);
-	}
-	if (!expected.routing) return;
-	for (const [field, expectedValue] of Object.entries(expected.routing)) {
-		if (canonicalJsonString(body?.[field]) === expectedValue) continue;
-		throw new AIError.ValidationError(
-			`onPayload cannot repoint a ${api} request through routing selector "${field}"; replayed history is bound to the original routing target`,
-		);
 	}
 }
 
@@ -774,12 +649,11 @@ export function applyOpenAIGatewayRouting(
 	compat: OpenAIGatewayRoutingCompat,
 	cacheEnabled = true,
 ): void {
-	const identity = resolveOpenAIResponsesRoutingIdentity(compat);
-	if (identity?.openRouterRouting) {
-		params.provider = identity.openRouterRouting;
+	if (compat.isOpenRouterHost && compat.openRouterRouting) {
+		params.provider = compat.openRouterRouting;
 	}
-	if (identity?.vercelGatewayRouting) {
-		const routing = identity.vercelGatewayRouting;
+	if (compat.isVercelGatewayHost && compat.vercelGatewayRouting) {
+		const routing = compat.vercelGatewayRouting;
 		if (routing.only || routing.order || (cacheEnabled && routing.caching)) {
 			const gatewayOptions: Pick<VercelGatewayRouting, "only" | "order" | "caching"> = {};
 			if (routing.only) gatewayOptions.only = routing.only;
@@ -788,21 +662,6 @@ export function applyOpenAIGatewayRouting(
 			params.providerOptions = { gateway: gatewayOptions };
 		}
 	}
-}
-
-/**
- * Gateway routing selectors the Responses serializer writes for `model`, in the
- * exact wire shape dispatch uses. Side requests that fingerprint themselves as
- * the model's routing target — remote compaction above all — must send the same
- * selectors or they reach the gateway's default upstream while claiming the
- * pinned one produced their state.
- */
-export function resolveOpenAIModelWireRouting(model: Model, cacheEnabled = true): OpenAIGatewayRoutingParams {
-	const compat = model.compat as OpenAIGatewayRoutingCompat | undefined;
-	if (!compat) return {};
-	const params: OpenAIGatewayRoutingParams = {};
-	applyOpenAIGatewayRouting(params, compat, cacheEnabled);
-	return params;
 }
 
 export interface VercelResponsesCacheParams {
@@ -827,12 +686,14 @@ export function applyVercelResponsesCacheControls(
 	compat: VercelResponsesCacheCompat,
 	cacheRetention: CacheRetention = "short",
 ): void {
-	const routing = resolveOpenAIResponsesRoutingIdentity(compat)?.vercelGatewayRouting;
+	const routing = compat.vercelGatewayRouting;
 	if (!compat.isVercelGatewayHost) return;
 
-	const wireRouting = resolveOpenAIResponsesWireRouting(compat).providerOptions;
-	if (wireRouting !== undefined) {
-		params.providerOptions = wireRouting as VercelResponsesCacheParams["providerOptions"];
+	if (routing?.only || routing?.order) {
+		const gateway: Pick<VercelGatewayRouting, "only" | "order"> = {};
+		if (routing.only) gateway.only = routing.only;
+		if (routing.order) gateway.order = routing.order;
+		params.providerOptions = { gateway };
 	}
 
 	if (cacheRetention === "none" || routing?.caching !== "auto") return;
@@ -1590,109 +1451,6 @@ export function collectComputerCallIds(messages: ResponseInput): Set<string> {
 	return computerCallIds;
 }
 
-function normalizeResponsesOrphanImage(
-	block: Record<string, unknown>,
-	detail: ResponseInputImage["detail"],
-	model: Model,
-	supportsImageDetailOriginal: boolean,
-): ResponseInputImage | undefined {
-	if (!model.input.includes("image")) return undefined;
-	const imageUrl = typeof block.image_url === "string" && block.image_url.length > 0 ? block.image_url : undefined;
-	const fileId = typeof block.file_id === "string" && block.file_id.length > 0 ? block.file_id : undefined;
-	const image: ImageContent = {
-		type: "image",
-		data: "",
-		mimeType: "application/octet-stream",
-		detail,
-	};
-	if (fileId !== undefined) image.providerFile = { provider: "openai", id: fileId };
-	if (imageUrl !== undefined) {
-		if (isDataUri(imageUrl)) {
-			const decoded = decodeDataUri(imageUrl);
-			if (decoded && isUsableInlineImage(decoded)) {
-				image.data = decoded.data;
-				image.mimeType = decoded.mimeType;
-			}
-		} else {
-			image.url = imageUrl;
-		}
-	}
-	if (image.data.length === 0 && image.url === undefined && image.providerFile === undefined) return undefined;
-	try {
-		return convertResponsesInputImage(image, supportsImageDetailOriginal, model);
-	} catch {
-		return undefined;
-	}
-}
-
-function modelSupportsImageDetailOriginal(model: Model | undefined): boolean {
-	const compat = model?.compat;
-	return !!compat && "supportsImageDetailOriginal" in compat && compat.supportsImageDetailOriginal === true;
-}
-
-export function splitResponsesOrphanOutput(
-	output: unknown,
-	model?: Model,
-	supportsImageDetailOriginal = modelSupportsImageDetailOriginal(model),
-): { text: string; images: ResponseInputImage[] } {
-	const images: ResponseInputImage[] = [];
-	let omittedImages = false;
-	let noteOutput = output;
-	if (Array.isArray(output)) {
-		const remaining: unknown[] = [];
-		for (const block of output) {
-			if (
-				isRecord(block) &&
-				block.type === "input_image" &&
-				((typeof block.image_url === "string" && block.image_url.length > 0) ||
-					(typeof block.file_id === "string" && block.file_id.length > 0))
-			) {
-				const detail =
-					block.detail === "low" ||
-					block.detail === "high" ||
-					block.detail === "auto" ||
-					block.detail === "original"
-						? block.detail
-						: "auto";
-				const image = model
-					? normalizeResponsesOrphanImage(block, detail, model, supportsImageDetailOriginal)
-					: ({
-							...block,
-							type: "input_image",
-							detail,
-						} as ResponseInputImage);
-				if (image) {
-					images.push(image);
-					continue;
-				}
-				omittedImages = true;
-				continue;
-			}
-			remaining.push(block);
-		}
-		noteOutput = remaining;
-	}
-
-	let text: string;
-	if (typeof noteOutput === "string") text = noteOutput;
-	else if (noteOutput == null) text = "";
-	else if (Array.isArray(noteOutput) && noteOutput.length === 0 && images.length > 0) text = "(see attached image)";
-	else {
-		try {
-			text = JSON.stringify(noteOutput) ?? "";
-		} catch {
-			text = String(noteOutput);
-		}
-	}
-	if (omittedImages) text = [text, UNREPLAYABLE_IMAGE_PLACEHOLDER].filter(Boolean).join("\n");
-	return { text, images };
-}
-
-function appendResponsesOrphanImages(messages: ResponseInput, images: ResponseInputImage[]): void {
-	if (images.length === 0) return;
-	messages.push({ type: "message", role: "user", content: images } as ResponseInput[number]);
-}
-
 /**
  * Convert orphan `function_call_output` / `custom_tool_call_output` items —
  * those whose `call_id` has no matching preceding `function_call` /
@@ -1716,16 +1474,9 @@ function appendResponsesOrphanImages(messages: ResponseInput, images: ResponseIn
  * input grammar. Matches the behavior of {@link transformRequestBody} in the
  * codex provider — issue #1351 / regression of #472.
  */
-export function repairOrphanResponsesToolOutputs(
-	input: ResponseInput,
-	model?: Model,
-	supportsImageDetailOriginal = modelSupportsImageDetailOriginal(model),
-): ResponseInput {
+export function repairOrphanResponsesToolOutputs(input: ResponseInput): ResponseInput {
 	const precedingCalls = new Set<string>();
 	let repaired: ResponseInput | undefined;
-	const deferredFallbacks: ResponseInput[number][] = [];
-	let activeBatchHasCall = false;
-	let activeBatchHasOutput = false;
 	for (let index = 0; index < input.length; index++) {
 		const item = input[index];
 		const callKind = responsesToolCallKind(item.type);
@@ -1734,20 +1485,6 @@ export function repairOrphanResponsesToolOutputs(
 
 		const outputKind = responsesToolOutputKind(item.type);
 		if (!outputKind || !callId || precedingCalls.has(`${outputKind}\0${callId}`)) {
-			const itemKind = classifyResponsesBatchItem(item);
-			// `hoistInterleavedResponsesToolBatchMessages` treats an assistant message
-			// wedged between calls and outputs as batch-internal, so it must not close
-			// the batch here either — otherwise the fallback lands inside the run and
-			// the later hoist cannot walk back past the already-emitted outputs (#8789).
-			if (itemKind === "other") {
-				if (deferredFallbacks.length > 0) {
-					repaired?.push(...deferredFallbacks);
-					deferredFallbacks.length = 0;
-				}
-				activeBatchHasCall = false;
-				activeBatchHasOutput = false;
-			} else if (itemKind === "call") activeBatchHasCall = true;
-			else if (itemKind === "output") activeBatchHasOutput = true;
 			repaired?.push(item);
 			continue;
 		}
@@ -1755,23 +1492,25 @@ export function repairOrphanResponsesToolOutputs(
 		if (!repaired) repaired = input.slice(0, index);
 		const toolName = outputKind === "computer" ? "computer" : "tool";
 		const rawOutput = "output" in item ? item.output : undefined;
-		const orphanOutput = splitResponsesOrphanOutput(rawOutput, model, supportsImageDetailOriginal);
-		let text = orphanOutput.text;
+		let text: string;
+		if (typeof rawOutput === "string") text = rawOutput;
+		else if (rawOutput == null) text = "";
+		else {
+			try {
+				text = JSON.stringify(rawOutput);
+			} catch {
+				text = String(rawOutput);
+			}
+		}
 		const ORPHAN_OUTPUT_LIMIT = 16_000;
 		if (text.length > ORPHAN_OUTPUT_LIMIT) text = `${text.slice(0, ORPHAN_OUTPUT_LIMIT)}\n...[truncated]`;
-		const fallback: ResponseInput = [
-			{
-				type: "message",
-				role: "assistant",
-				content: `[Orphan ${toolName} result; call_id=${callId}]: ${text}`,
-			} as ResponseInput[number],
-		];
-		appendResponsesOrphanImages(fallback, orphanOutput.images);
-		if (activeBatchHasCall && activeBatchHasOutput) deferredFallbacks.push(...fallback);
-		else repaired.push(...fallback);
+		repaired.push({
+			type: "message",
+			role: "assistant",
+			content: `[Orphan ${toolName} result; call_id=${callId}]: ${text}`,
+		} as ResponseInput[number]);
 	}
-	if (deferredFallbacks.length > 0) repaired?.push(...deferredFallbacks);
-	return repaired ? hoistInterleavedResponsesToolBatchMessages(repaired) : input;
+	return repaired ?? input;
 }
 
 /** Placeholder output for a tool call whose result is absent from the input. */
@@ -1834,39 +1573,19 @@ export function repairOrphanResponsesToolCalls(input: ResponseInput): ResponseIn
 			output: ORPHAN_TOOL_CALL_PLACEHOLDER,
 		} as ResponseInput[number]);
 	}
-	return hoistInterleavedResponsesToolBatchMessages(repaired);
+	return repaired;
 }
 
 type ResponsesBatchItemKind = "call" | "output" | "assistant-message" | "other";
 
 /** Classify a Responses input item for tool-call/output batch normalization. */
-export function classifyResponsesBatchItem(item: object): ResponsesBatchItemKind {
+function classifyResponsesBatchItem(item: object): ResponsesBatchItemKind {
 	const type = "type" in item ? item.type : undefined;
 	if (responsesToolCallKind(type) !== undefined) return "call";
 	if (responsesToolOutputKind(type) !== undefined) return "output";
 	const role = "role" in item ? item.role : undefined;
 	if (type === "message" && role === "assistant") return "assistant-message";
 	return "other";
-}
-
-function isResponsesOrphanAssistantMessage(item: object): boolean {
-	if (classifyResponsesBatchItem(item) !== "assistant-message") return false;
-	const content = "content" in item ? item.content : undefined;
-	return (
-		typeof content === "string" &&
-		(content.startsWith("[Orphan ") || content.startsWith("[Previous ")) &&
-		content.includes(" result; call_id=")
-	);
-}
-
-function isResponsesOrphanImageMessage(item: object): boolean {
-	if (!("role" in item) || item.role !== "user") return false;
-	const content = "content" in item ? item.content : undefined;
-	return (
-		Array.isArray(content) &&
-		content.length > 0 &&
-		content.every(part => isRecord(part) && part.type === "input_image")
-	);
 }
 
 /**
@@ -1900,14 +1619,6 @@ export function hoistInterleavedResponsesToolBatchMessages<T extends object>(ite
 			const kind = classifyResponsesBatchItem(items[start - 1]);
 			if (kind === "call") {
 				sawCall = true;
-			} else if (
-				start >= 2 &&
-				isResponsesOrphanAssistantMessage(items[start - 2]) &&
-				isResponsesOrphanImageMessage(items[start - 1])
-			) {
-				messageIndexes.push(start - 1, start - 2);
-				start -= 2;
-				continue;
 			} else if (kind === "assistant-message") {
 				messageIndexes.push(start - 1);
 			} else {
@@ -1950,65 +1661,16 @@ function clampResponsesImageDetail(
 	return resolved === "original" && !supportsImageDetailOriginal ? "auto" : resolved;
 }
 
-function convertResponsesInputImage(
-	image: ImageContent,
-	supportsImageDetailOriginal: boolean,
-	model?: Model,
-): ResponseInputImage {
+function convertResponsesInputImage(image: ImageContent, supportsImageDetailOriginal: boolean): ResponseInputImage {
 	const detail = clampResponsesImageDetail(image.detail, supportsImageDetailOriginal);
-	const providerFile = image.providerFile;
-	const supportsFile =
-		providerFile !== undefined && (model === undefined || supportsProviderFileReference(model, providerFile, image));
-	if (providerFile?.provider === "openai" && typeof providerFile.id === "string" && supportsFile) {
-		return { type: "input_image", detail, file_id: providerFile.id };
+	if (image.providerFile?.provider === "openai" && image.providerFile.id) {
+		return { type: "input_image", detail, file_id: image.providerFile.id };
 	}
-	const url = image.url;
-	const remoteUrl =
-		typeof url === "string" &&
-		isRemoteImageUrl(url) &&
-		(model === undefined || supportsRemoteImageUrls(model, image));
-	if (remoteUrl) return { type: "input_image", detail, image_url: url };
-	const inline = resolveUsableInlineImage(image);
-	if (inline) {
-		return { type: "input_image", detail, image_url: `data:${inline.mimeType};base64,${inline.data}` };
-	}
-	throw new AIError.ValidationError(
-		`input_image cannot be forwarded to ${model?.api ?? "openai-responses"} without non-empty image data or a supported reference`,
-	);
-}
-
-/**
- * Image part for a message/tool-result content array. Well-formed payloads in a
- * format this build cannot verify or serialize degrade to a text placeholder so
- * one unreplayable attachment cannot abort the whole request.
- */
-function convertResponsesImageContentPart(
-	image: ImageContent,
-	supportsImageDetailOriginal: boolean,
-	model?: Model,
-): ResponseInputImage | ResponseInputText {
-	const unreplayableMimeType = getUnreplayableInlineImageMimeType(image);
-	if (unreplayableMimeType && !hasSupportedResponsesImageReference(image, model)) {
-		return { type: "input_text", text: unreplayableImageFormatPlaceholder(unreplayableMimeType) };
-	}
-	return convertResponsesInputImage(image, supportsImageDetailOriginal, model);
-}
-
-/** Whether {@link convertResponsesInputImage} would prefer a reference over inline bytes. */
-function hasSupportedResponsesImageReference(image: ImageContent, model?: Model): boolean {
-	const providerFile = image.providerFile;
-	if (
-		providerFile?.provider === "openai" &&
-		typeof providerFile.id === "string" &&
-		(model === undefined || supportsProviderFileReference(model, providerFile, image))
-	) {
-		return true;
-	}
-	return (
-		typeof image.url === "string" &&
-		isRemoteImageUrl(image.url) &&
-		(model === undefined || supportsRemoteImageUrls(model, image))
-	);
+	return {
+		type: "input_image",
+		detail,
+		image_url: image.url ?? `data:${image.mimeType};base64,${image.data}`,
+	};
 }
 
 export function convertResponsesInputContent(
@@ -2016,7 +1678,6 @@ export function convertResponsesInputContent(
 	supportsImages: boolean,
 	supportsImageDetailOriginal: boolean,
 	escapeControlTokens = false,
-	model?: Model,
 ): ResponseInputContent[] | undefined {
 	if (typeof content === "string") {
 		if (content.trim().length === 0) return undefined;
@@ -2041,7 +1702,7 @@ export function convertResponsesInputContent(
 		} satisfies ResponseInputText);
 	}
 	for (const item of imageBlocks) {
-		normalizedContent.push(convertResponsesImageContentPart(item, supportsImageDetailOriginal, model));
+		normalizedContent.push(convertResponsesInputImage(item, supportsImageDetailOriginal));
 	}
 	if (omittedImages) {
 		normalizedContent.push({
@@ -2068,22 +1729,6 @@ function buildCustomToolWireNameMap(tools: readonly Tool[] | undefined): Readonl
 
 function resolveReplayCustomToolName(wireName: string, wireNameMap: ReadonlyMap<string, string> | undefined): string {
 	return wireNameMap?.get(wireName) ?? (wireName === "apply_patch" ? "edit" : wireName);
-}
-
-export function assertCompatibleCompactionHistory(
-	providerPayload: AssistantMessage["providerPayload"],
-	provider: string,
-	referenceTarget: string,
-): void {
-	if (
-		providerPayload?.type !== "openaiResponsesHistory" ||
-		providerPayload.referenceTarget === undefined ||
-		((providerPayload.provider ?? provider) === provider && providerPayload.referenceTarget === referenceTarget)
-	) {
-		return;
-	}
-	if (!providerPayload.items.some(item => item.type === "compaction" || item.type === "compaction_summary")) return;
-	throw new AIError.ValidationError(AIError.INCOMPATIBLE_COMPACTION_TARGET_MESSAGE);
 }
 
 /**
@@ -2161,7 +1806,6 @@ export interface BuildResponsesInputOptions<TApi extends Api> {
 	requiresReasoningReplayForAllTurns?: boolean;
 	/** As {@link requiresReasoningReplayForAllTurns}, but only for turns that contain a tool call. */
 	requiresReasoningReplayForToolCalls?: boolean;
-	referenceTarget?: string;
 }
 
 /**
@@ -2186,41 +1830,26 @@ export interface BuildResponsesInputOptions<TApi extends Api> {
  * Callers gate on {@link isHarmonyDialectModel}. Items are copied, not mutated.
  */
 export function escapeReplayedControlTokens(items: ResponseInput): ResponseInput {
-	const escapeToolOutputPart = (part: unknown): unknown => {
-		if (!isRecord(part)) return part;
-		if (part.type === "input_text") {
-			return typeof part.text === "string" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part;
-		}
-		const runtimePart = part as { type?: unknown; text?: unknown; refusal?: unknown };
-		if ((runtimePart.type === "text" || runtimePart.type === "output_text") && typeof runtimePart.text === "string") {
-			return { ...part, text: escapeHarmonyControlTokens(runtimePart.text) };
-		}
-		if (runtimePart.type === "refusal" && typeof runtimePart.refusal === "string") {
-			return {
-				...part,
-				refusal: escapeHarmonyControlTokens(runtimePart.refusal),
-			};
-		}
-		return part;
-	};
-	const escapeToolOutputParts = <T>(parts: T[]): T[] => parts.map(part => escapeToolOutputPart(part) as T);
-
 	return items.map(item => {
 		if (item.type === "function_call_output") {
-			if (typeof item.output === "string") return { ...item, output: escapeHarmonyControlTokens(item.output) };
-			if (!Array.isArray(item.output)) return item;
-			return {
-				...item,
-				output: escapeToolOutputParts(item.output),
-			};
+			return typeof item.output === "string"
+				? { ...item, output: escapeHarmonyControlTokens(item.output) }
+				: {
+						...item,
+						output: item.output.map(part =>
+							part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
+						),
+					};
 		}
 		if (item.type === "custom_tool_call_output") {
-			if (typeof item.output === "string") return { ...item, output: escapeHarmonyControlTokens(item.output) };
-			if (!Array.isArray(item.output)) return item;
-			return {
-				...item,
-				output: escapeToolOutputParts(item.output),
-			};
+			return typeof item.output === "string"
+				? { ...item, output: escapeHarmonyControlTokens(item.output) }
+				: {
+						...item,
+						output: item.output.map(part =>
+							part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
+						),
+					};
 		}
 		if (item.type === "function_call") {
 			return typeof item.arguments === "string"
@@ -2290,10 +1919,6 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 		options.context.messages,
 		options.model,
 		normalizeResponsesToolCallIdForTransform,
-		undefined,
-		undefined,
-		undefined,
-		{ preserveOrphanToolResultImages: true },
 	);
 	const filterReasoning = <T extends { type?: string }>(items: T[]): T[] =>
 		options.nativeHistory?.filterReasoning ? items.filter(item => item?.type !== "reasoning") : items;
@@ -2303,15 +1928,13 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 	// user/tool text so ordinary docs, code, or grep results cannot poison the
 	// session (#6913). The persisted transcript is never touched.
 	const escapeControlTokens = isHarmonyDialectModel(options.model);
-	const referenceTarget = options.referenceTarget ?? getOpenAIResponsesReferenceTarget(options.model);
 
 	let msgIndex = 0;
 	for (const msg of transformedMessages) {
 		if (msg.role === "user" || msg.role === "developer") {
 			const providerPayload = (msg as { providerPayload?: AssistantMessage["providerPayload"] }).providerPayload;
-			assertCompatibleCompactionHistory(providerPayload, options.model.provider, referenceTarget);
 			const historyItems = options.nativeHistory
-				? getOpenAIResponsesHistoryItems(providerPayload, options.model.provider, undefined, referenceTarget)
+				? getOpenAIResponsesHistoryItems(providerPayload, options.model.provider)
 				: undefined;
 			const shouldReplayPayloadItems =
 				options.nativeHistory?.replay ||
@@ -2344,7 +1967,6 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				options.model.input.includes("image"),
 				supportsImageDetailOriginal,
 				escapeControlTokens,
-				options.model,
 			);
 			if (!content) continue;
 			const developerText =
@@ -2372,25 +1994,8 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 							assistantMsg.providerPayload,
 							options.model.provider,
 							assistantMsg.provider,
-							referenceTarget,
 						)
 					: undefined;
-			// A payload that fails the target check is endpoint-owned; its reasoning
-			// ids, encrypted content, and item ids belong to the endpoint that
-			// produced them and must not be replayed through the canonical fallback
-			// either. Legacy history carries no stamp, so its own endpoint-owned
-			// state is what marks it foreign.
-			const targetOwnedHistoryRejected = isOpenAIResponsesAssistantHistoryTargetOwned(
-				assistantMsg.providerPayload,
-				referenceTarget,
-			);
-			// A turn that reaches the fallback without a trusted stamp carries its
-			// endpoint identity only in the canonical signatures, which re-encode the
-			// same reasoning item and output-item id the native payload would have.
-			const targetOwnedFallbackRejected = isOpenAIResponsesAssistantFallbackTargetOwned(
-				assistantMsg,
-				referenceTarget,
-			);
 			const nativeReplayEnabled = options.nativeHistory?.replay === true;
 			const historyItems = providerPayload?.items;
 			let suppressHiddenEmptyFallback = false;
@@ -2410,7 +2015,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 							options.model.supportsComputerUse === true,
 						)
 					: undefined;
-				if (nativeReplayEnabled && sanitizedHistoryItems && !targetOwnedHistoryRejected) {
+				if (nativeReplayEnabled && sanitizedHistoryItems) {
 					// Model-owned replay items can carry reserved control-token
 					// spellings as data (the model writing *about* Harmony); escape the
 					// transport copy just like client turns.
@@ -2438,15 +2043,14 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				options.model,
 				msgIndex,
 				knownCallIds,
-				suppressHiddenEmptyFallback || targetOwnedFallbackRejected ? false : includeThinkingSignatures,
+				suppressHiddenEmptyFallback ? false : includeThinkingSignatures,
 				customCallIds,
-				options.preserveAssistantMessageIds && !targetOwnedFallbackRejected,
+				options.preserveAssistantMessageIds,
 				supportsCustomToolCalls,
 				customToolWireNameMap,
 				computerCallIds,
 				options.requiresReasoningReplayForAllTurns ?? false,
 				options.requiresReasoningReplayForToolCalls ?? false,
-				targetOwnedFallbackRejected,
 			);
 			const outputItems = suppressHiddenEmptyFallback
 				? sanitizeOpenAIResponsesAssistantFallbackItemsForReplay(convertedOutputItems)
@@ -2470,13 +2074,9 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 	}
 
 	const hoisted = hoistInterleavedResponsesToolBatchMessages(messages);
-	const withRepairedOutputs = options.repairOrphanOutputs
-		? repairOrphanResponsesToolOutputs(hoisted, options.model, supportsImageDetailOriginal)
-		: hoisted;
+	const withRepairedOutputs = options.repairOrphanOutputs ? repairOrphanResponsesToolOutputs(hoisted) : hoisted;
 	const withRepairedCalls = repairOrphanResponsesToolCalls(withRepairedOutputs);
-	return stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay(
-		hoistInterleavedResponsesToolBatchMessages(withRepairedCalls),
-	);
+	return stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay(withRepairedCalls);
 }
 
 type ResponsesReplayAssistantMessage = Omit<ResponseOutputMessage, "id"> & { id?: string };
@@ -2507,7 +2107,6 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 	computerCallIds?: Set<string>,
 	requiresReasoningReplayForAllTurns = false,
 	requiresReasoningReplayForToolCalls = false,
-	endpointOwnedIdsRejected = false,
 ): ResponseInput {
 	const outputItems: ResponseInput = [];
 	let unsignedTextBlocks = 0;
@@ -2538,7 +2137,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 	for (const block of assistantMsg.content) {
 		if (block.type === "thinking" && assistantMsg.stopReason !== "error") {
 			if (requiresReasoningItem) {
-				if (block.itemId && !endpointOwnedIdsRejected) synthesizedReasoningItemId ??= block.itemId;
+				if (block.itemId) synthesizedReasoningItemId ??= block.itemId;
 				if (block.thinking.trim().length > 0) carriedReasoningTexts.push(block.thinking);
 			}
 			if (!includeThinkingSignatures) {
@@ -2600,10 +2199,9 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			const normalized = normalizeResponsesToolCallId(block.id, "ctc");
 			knownCallIds.add(normalized.callId);
 			computerCallIds?.add(normalized.callId);
-			const computerItemId = endpointOwnedIdsRejected ? undefined : block.providerMetadata.providerItemId;
 			outputItems.push({
 				type: "computer_call",
-				...(computerItemId ? { id: computerItemId } : {}),
+				id: block.providerMetadata.providerItemId,
 				call_id: normalized.callId,
 				actions: structuredCloneJSON(block.providerMetadata.actions),
 				pending_safety_checks: structuredCloneJSON(block.providerMetadata.pendingSafetyChecks),
@@ -2612,7 +2210,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			continue;
 		}
 		const normalized = normalizeResponsesToolCallId(block.id, block.customWireName ? "ctc" : "fc");
-		let itemId: string | undefined = endpointOwnedIdsRejected ? undefined : normalized.itemId;
+		let itemId: string | undefined = normalized.itemId;
 		if (
 			!hasReplayableReasoningItem &&
 			(itemId?.startsWith("fc_") || itemId?.startsWith("fcr_") || itemId?.startsWith("ctc_"))
@@ -2685,10 +2283,17 @@ export interface ResponsesToolResultOutputEncoding {
 	outputText: string;
 }
 
-function encodeResponsesToolResultOutputText<TApi extends Api>(
+/**
+ * Encodes one canonical tool result for OpenAI Responses replay.
+ *
+ * Image-capable models receive an ordered native content array; text-only
+ * models and callers without images receive the compatible string form.
+ */
+export function encodeResponsesToolResultOutput<TApi extends Api>(
 	toolResult: ToolResultMessage,
 	model: Model<TApi>,
-): string {
+	supportsImageDetailOriginal: boolean,
+): ResponsesToolResultOutputEncoding {
 	const supportsImages = model.input.includes("image");
 	const textResult = toolResult.content
 		.filter((block): block is TextContent => block.type === "text")
@@ -2705,32 +2310,15 @@ function encodeResponsesToolResultOutputText<TApi extends Api>(
 					? "(see attached image)"
 					: ""
 	).toWellFormed();
-	return isHarmonyDialectModel(model) ? escapeHarmonyControlTokens(rawOutput) : rawOutput;
-}
-
-/**
- * Encodes one canonical tool result for OpenAI Responses replay.
- *
- * Image-capable models receive an ordered native content array; text-only
- * models and callers without images receive the compatible string form.
- */
-export function encodeResponsesToolResultOutput<TApi extends Api>(
-	toolResult: ToolResultMessage,
-	model: Model<TApi>,
-	supportsImageDetailOriginal: boolean,
-): ResponsesToolResultOutputEncoding {
-	const supportsImages = model.input.includes("image");
-	const hasImages = toolResult.content.some((block): block is ImageContent => block.type === "image");
 	const escapeControlTokens = isHarmonyDialectModel(model);
 	// Harmony-server models reject reserved control-token spellings even as tool
 	// data; escape the transport copy so a grep/read result cannot poison the
 	// session (#6913). Covers every downstream branch that consumes `output`.
-	const outputText = encodeResponsesToolResultOutputText(toolResult, model);
+	const outputText = escapeControlTokens ? escapeHarmonyControlTokens(rawOutput) : rawOutput;
 	const output: string | ResponseInputContent[] =
 		hasImages && supportsImages
 			? toolResult.content.map((block): ResponseInputContent => {
-					if (block.type === "image")
-						return convertResponsesImageContentPart(block, supportsImageDetailOriginal, model);
+					if (block.type === "image") return convertResponsesInputImage(block, supportsImageDetailOriginal);
 					const text = block.text.toWellFormed();
 					return {
 						type: "input_text",
@@ -2739,94 +2327,6 @@ export function encodeResponsesToolResultOutput<TApi extends Api>(
 				})
 			: outputText;
 	return { output, outputText };
-}
-
-export function encodeResponsesOrphanToolResultOutput<TApi extends Api>(
-	toolResult: ToolResultMessage,
-	model: Model<TApi>,
-	supportsImageDetailOriginal: boolean,
-): ResponsesToolResultOutputEncoding {
-	const content = toolResult.content.filter(block => block.type !== "image" || hasSupportedImageSource(model, block));
-	const omittedImages = content.length < toolResult.content.length;
-	const replayableToolResult = { ...toolResult, content };
-	const replayableOutputText = encodeResponsesToolResultOutputText(replayableToolResult, model);
-	const outputText = omittedImages
-		? [replayableOutputText, UNREPLAYABLE_IMAGE_PLACEHOLDER].filter(Boolean).join("\n")
-		: replayableOutputText;
-	if (omittedImages && !content.some(block => block.type === "image")) return { output: outputText, outputText };
-	const { output } = encodeResponsesToolResultOutput(replayableToolResult, model, supportsImageDetailOriginal);
-	return { output, outputText };
-}
-
-function computerScreenshotFromContent<TApi extends Api>(
-	toolResult: ToolResultMessage,
-	model: Model<TApi>,
-	supportsImageDetailOriginal: boolean,
-): ComputerScreenshotRef | undefined {
-	if (!supportsComputerScreenshotOutput(model)) return undefined;
-	for (const block of toolResult.content) {
-		if (block.type !== "image" || !hasSupportedImageSource(model, block)) continue;
-		const image = convertResponsesInputImage(block, supportsImageDetailOriginal, model);
-		if (image.file_id) {
-			const screenshot: ComputerScreenshotRef = { type: "computer_screenshot", file_id: image.file_id };
-			if (supportsComputerScreenshotReferences(model, screenshot)) return screenshot;
-		}
-		if (image.image_url) {
-			const screenshot: ComputerScreenshotRef = { type: "computer_screenshot", image_url: image.image_url };
-			if (supportsComputerScreenshotReferences(model, screenshot)) return screenshot;
-		}
-	}
-	return undefined;
-}
-
-export function resolveResponsesComputerScreenshot<TApi extends Api>(
-	toolResult: ToolResultMessage,
-	model: Model<TApi>,
-	supportsImageDetailOriginal: boolean,
-): ComputerScreenshotRef | undefined {
-	const metadata = toolResult.providerMetadata?.type === "computer" ? toolResult.providerMetadata : undefined;
-	if (metadata && supportsComputerScreenshotReferences(model, metadata.screenshot)) return metadata.screenshot;
-	return computerScreenshotFromContent(toolResult, model, supportsImageDetailOriginal);
-}
-
-/**
- * Note text for a computer result whose screenshot did not survive conversion.
- * The converted output already resolved every image against the target — a
- * format the target cannot replay became an `[unsupported image: …]` marker —
- * so the note has to be built from it rather than from the pre-conversion text,
- * which claims an attachment that no longer exists.
- */
-function responsesComputerResultNoteText(
-	output: string | ResponseInputContent[],
-	orphanOutput: { text: string; images: ResponseInputImage[] },
-): string {
-	if (typeof output !== "string") {
-		const texts = output
-			.filter((part): part is ResponseInputText => part.type === "input_text" && part.text.length > 0)
-			.map(part => part.text);
-		if (texts.length > 0) return texts.join("\n");
-	}
-	return orphanOutput.text;
-}
-
-/**
- * Replace an already-emitted `computer_call` with the note used for targets
- * that cannot replay a computer exchange. A result whose screenshot did not
- * survive conversion has no `computer_call_output` to pair with, and leaving
- * the call behind makes orphan repair rewrite it into an "interrupted before a
- * screenshot was recorded" note that discards the recorded actions.
- */
-function demoteResponsesComputerCall(messages: ResponseInput, callId: string): void {
-	for (let index = messages.length - 1; index >= 0; index--) {
-		const item = messages[index];
-		if (item.type !== "computer_call" || responseInputCallId(item) !== callId) continue;
-		messages[index] = {
-			type: "message",
-			role: "assistant",
-			content: `[Computer call failed before a screenshot was recorded; call_id=${callId}]: ${stringifyJson(item) ?? ""}`,
-		} as ResponseInput[number];
-		return;
-	}
 }
 
 /** Appends one Responses tool result. */
@@ -2841,26 +2341,27 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 	supportsCustomToolCalls = true,
 	computerCallIds?: ReadonlySet<string>,
 ): void {
+	const { output, outputText } = encodeResponsesToolResultOutput(toolResult, model, supportsImageDetailOriginal);
 	const normalized = normalizeResponsesToolCallId(toolResult.toolCallId);
-	const isComputerCall = computerCallIds?.has(normalized.callId) === true;
-	const hasSupportedImageSourceInResult = toolResult.content.some(
-		(block): block is ImageContent => block.type === "image" && hasSupportedImageSource(model, block),
-	);
-	const computerMetadata = toolResult.providerMetadata?.type === "computer" ? toolResult.providerMetadata : undefined;
-	const computerScreenshot = isComputerCall
-		? resolveResponsesComputerScreenshot(toolResult, model, supportsImageDetailOriginal)
-		: undefined;
-	const unsupportedComputerMetadata =
-		computerMetadata !== undefined && !supportsComputerScreenshotReferences(model, computerMetadata.screenshot);
-	if (unsupportedComputerMetadata && !hasSupportedImageSourceInResult) {
+	if (toolResult.providerMetadata?.type === "computer" && model.supportsComputerUse !== true) {
 		messages.push({
 			type: "message",
 			role: "assistant",
-			content: `[Previous computer result; call_id=${normalized.callId}]: ${stringifyJson(computerMetadata.screenshot) ?? ""}`,
+			content: `[Previous computer result; call_id=${normalized.callId}]: ${stringifyJson(toolResult.providerMetadata.screenshot) ?? ""}`,
 		} as ResponseInput[number]);
 		return;
 	}
-	if (isComputerCall && computerScreenshot) {
+	if (computerCallIds?.has(normalized.callId)) {
+		if (toolResult.providerMetadata?.type !== "computer") {
+			const limit = 16_000;
+			const noteText = outputText.length > limit ? `${outputText.slice(0, limit)}\n...[truncated]` : outputText;
+			messages.push({
+				type: "message",
+				role: "assistant",
+				content: `[Computer tool failed before a screenshot was produced; call_id=${normalized.callId}]: ${noteText}`,
+			} as ResponseInput[number]);
+			return;
+		}
 		if (strictResponsesPairing && !knownCallIds.has(normalized.callId)) {
 			messages.push({
 				type: "message",
@@ -2872,42 +2373,22 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		messages.push({
 			type: "computer_call_output",
 			call_id: normalized.callId,
-			output: structuredCloneJSON(computerScreenshot),
-			acknowledged_safety_checks: structuredCloneJSON(computerMetadata?.acknowledgedSafetyChecks),
+			output: structuredCloneJSON(toolResult.providerMetadata.screenshot),
+			acknowledged_safety_checks: structuredCloneJSON(toolResult.providerMetadata.acknowledgedSafetyChecks),
 		} as ResponseInput[number]);
-		return;
-	}
-	const { output } = knownCallIds.has(normalized.callId)
-		? encodeResponsesToolResultOutput(toolResult, model, supportsImageDetailOriginal)
-		: encodeResponsesOrphanToolResultOutput(toolResult, model, supportsImageDetailOriginal);
-	if (isComputerCall && toolResult.providerMetadata?.type !== "computer") {
-		const orphanOutput = splitResponsesOrphanOutput(output, model, supportsImageDetailOriginal);
-		const resultText = responsesComputerResultNoteText(output, orphanOutput);
-		const limit = 16_000;
-		const noteText = resultText.length > limit ? `${resultText.slice(0, limit)}\n...[truncated]` : resultText;
-		demoteResponsesComputerCall(messages, normalized.callId);
-		messages.push({
-			type: "message",
-			role: "assistant",
-			content: `[Computer tool failed before a screenshot was produced; call_id=${normalized.callId}]: ${noteText}`,
-		} as ResponseInput[number]);
-		appendResponsesOrphanImages(messages, orphanOutput.images);
 		return;
 	}
 	if (strictResponsesPairing && !knownCallIds.has(normalized.callId)) {
 		// Strict backends (Azure, Copilot) reject unpaired outputs outright, but
 		// silently dropping the result loses information the model needs. Fold it
 		// into an assistant note instead (same shape as repairOrphanResponsesToolOutputs).
-		const orphanOutput = splitResponsesOrphanOutput(output, model, supportsImageDetailOriginal);
 		const limit = 16_000;
-		const noteText =
-			orphanOutput.text.length > limit ? `${orphanOutput.text.slice(0, limit)}\n...[truncated]` : orphanOutput.text;
+		const noteText = outputText.length > limit ? `${outputText.slice(0, limit)}\n...[truncated]` : outputText;
 		messages.push({
 			type: "message",
 			role: "assistant",
 			content: `[Orphan ${toolResult.toolName || "tool"} result; call_id=${normalized.callId}]: ${noteText}`,
 		} as ResponseInput[number]);
-		appendResponsesOrphanImages(messages, orphanOutput.images);
 		return;
 	}
 	if (supportsCustomToolCalls && customCallIds?.has(normalized.callId)) {

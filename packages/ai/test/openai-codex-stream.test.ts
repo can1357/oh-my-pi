@@ -594,56 +594,6 @@ describe("openai-codex streaming", () => {
 		expect(capturedBody?.prompt_cache_key).toBe("replacement-cache-key");
 	});
 
-	it("rejects an onPayload replacement that repoints the Codex SSE request at another model", async () => {
-		const tempDir = TempDir.createSync("@pi-codex-stream-");
-		setAgentDir(tempDir.path());
-		const token = createCodexTestToken();
-		const context = createCodexTestContext();
-		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
-		const fetchMock = vi.fn(async () => {
-			throw new Error("a repointed Codex request must never reach the wire");
-		});
-
-		const result = await streamOpenAICodexResponses(model, context, {
-			apiKey: token,
-			fetch: fetchMock as unknown as typeof fetch,
-			onPayload: async payload => ({
-				...(payload as Record<string, unknown>),
-				model: "gpt-5.3-codex-elsewhere",
-			}),
-		}).result();
-
-		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toContain("gpt-5.3-codex-spark");
-		expect(result.errorMessage).toContain("gpt-5.3-codex-elsewhere");
-		expect(fetchMock).not.toHaveBeenCalled();
-	});
-
-	it("rejects an onPayload hook that repoints the Codex SSE request without returning a replacement", async () => {
-		const tempDir = TempDir.createSync("@pi-codex-stream-");
-		setAgentDir(tempDir.path());
-		const token = createCodexTestToken();
-		const context = createCodexTestContext();
-		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
-		const fetchMock = vi.fn(async () => {
-			throw new Error("a repointed Codex request must never reach the wire");
-		});
-
-		const result = await streamOpenAICodexResponses(model, context, {
-			apiKey: token,
-			fetch: fetchMock as unknown as typeof fetch,
-			onPayload: payload => {
-				(payload as Record<string, unknown>).model = "gpt-5.3-codex-mutated";
-				return undefined;
-			},
-		}).result();
-
-		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toContain("gpt-5.3-codex-spark");
-		expect(result.errorMessage).toContain("gpt-5.3-codex-mutated");
-		expect(fetchMock).not.toHaveBeenCalled();
-	});
-
 	it("forwards SimpleStreamOptions textVerbosity into the Codex request body", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());
@@ -4154,52 +4104,6 @@ describe("openai-codex streaming", () => {
 		expect(thirdInput).toHaveLength(1);
 		expect(JSON.stringify(thirdInput)).toContain("Third question");
 		expect(JSON.stringify(thirdInput)).not.toContain("First question");
-	});
-
-	it("rejects an onPayload replacement that repoints the Codex websocket frame at another model", async () => {
-		const tempDir = TempDir.createSync("@pi-codex-ws-payload-repoint-");
-		setAgentDir(tempDir.path());
-		const token = createCodexTestToken();
-		const sentRequests: Array<Record<string, unknown>> = [];
-		const fetchMock = vi.fn(async () => {
-			throw new Error("a repointed Codex request must never reach the wire");
-		});
-
-		class RepointWebSocket extends MockWebSocket {
-			constructor(url: string, options?: { headers?: WsHeaders }) {
-				super(url, options);
-				this.scheduleOpen();
-			}
-
-			override send(data: string): void {
-				sentRequests.push(JSON.parse(data) as Record<string, unknown>);
-				this.emitCodexResponse({
-					messageId: "msg_repoint",
-					responseId: "resp_repoint",
-					text: "should not be reached",
-					terminalType: "response.completed",
-					includeCreated: true,
-				});
-			}
-		}
-
-		global.WebSocket = RepointWebSocket as unknown as typeof WebSocket;
-		const model = createCodexTestModel("https://chatgpt.com/backend-api");
-		const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
-			fetch: fetchMock as FetchImpl,
-			apiKey: token,
-			sessionId: "ws-repoint-session",
-			providerSessionState: new Map<string, ProviderSessionState>(),
-			onPayload: async payload => ({
-				...(payload as Record<string, unknown>),
-				model: "gpt-5.3-codex-elsewhere",
-			}),
-		}).result();
-
-		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toContain("gpt-5.3-codex-elsewhere");
-		expect(sentRequests).toHaveLength(0);
-		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
 	it("preserves turn-state when append matching falls back to full context", async () => {

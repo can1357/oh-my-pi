@@ -12,7 +12,6 @@ import { createCodexModel } from "./helpers";
 
 const DEFAULT_PROMPT_PREFIX =
 	"You are an expert coding assistant. You help users with coding tasks by reading files, executing commands";
-const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 describe("openai-codex oauth", () => {
 	it("uses the same default originator for browser login and API requests", () => {
@@ -180,7 +179,6 @@ describe("openai-codex tool schemas", () => {
 
 describe("openai-codex request transformer", () => {
 	it("filters item_reference and strips ids", async () => {
-		const imageUrl = `data:image/png;base64,${PNG_B64}`;
 		const body: RequestBody = {
 			model: "gpt-5.1-codex",
 			input: [
@@ -197,24 +195,12 @@ describe("openai-codex request transformer", () => {
 					content: [{ type: "input_text", text: "hello" }],
 				},
 				{ type: "item_reference", id: "ref-1" },
-				{
-					type: "function_call_output",
-					call_id: "missing",
-					name: "tool",
-					output: [
-						{ type: "input_text", text: "result" },
-						{ type: "input_image", detail: "auto", image_url: imageUrl },
-					],
-				},
+				{ type: "function_call_output", call_id: "missing", name: "tool", output: "result" },
 			],
 			tools: [{ type: "function", name: "tool", description: "", parameters: {} }],
 		};
 
-		const transformed = await transformRequestBody(
-			body,
-			createCodexModel(body.model, { input: ["text", "image"] }),
-			{},
-		);
+		const transformed = await transformRequestBody(body, createCodexModel(body.model), {});
 
 		expect(transformed.store).toBe(false);
 		expect(transformed.stream).toBe(true);
@@ -230,63 +216,6 @@ describe("openai-codex request transformer", () => {
 
 		const orphaned = input.find(item => item.type === "message" && item.role === "assistant");
 		expect(orphaned?.content).toMatch(/Previous tool result/);
-		expect(orphaned?.content).not.toContain(imageUrl);
-		const imageFallback = input.find(
-			item =>
-				item.type === "message" &&
-				item.role === "user" &&
-				Array.isArray(item.content) &&
-				item.content.some(
-					part => part !== null && typeof part === "object" && "type" in part && part.type === "input_image",
-				),
-		);
-		expect(imageFallback?.content).toEqual([{ type: "input_image", detail: "auto", image_url: imageUrl }]);
-	});
-
-	it("omits unreplayable orphan images from text-only model notes", async () => {
-		const imageUrl = `data:image/png;base64,${Buffer.alloc(4096, 97).toString("base64")}`;
-		const body: RequestBody = {
-			model: "gpt-5.1-codex",
-			input: [
-				{
-					type: "function_call_output",
-					call_id: "missing",
-					output: [{ type: "input_image", detail: "auto", image_url: imageUrl }],
-				},
-			],
-		};
-
-		const transformed = await transformRequestBody(body, createCodexModel(body.model), {});
-		const serialized = JSON.stringify(transformed.input);
-
-		expect(serialized).toContain("[image omitted: source cannot be replayed]");
-		expect(serialized).not.toContain(imageUrl);
-		expect(transformed.input?.some(item => item.type === "message" && item.role === "user")).toBe(false);
-	});
-
-	it("omits non-image orphan data from image-capable requests", async () => {
-		const imageUrl = "data:text/plain;base64,SGVsbG8=";
-		const body: RequestBody = {
-			model: "gpt-5.1-codex",
-			input: [
-				{
-					type: "function_call_output",
-					call_id: "missing",
-					output: [{ type: "input_image", detail: "auto", image_url: imageUrl }],
-				},
-			],
-		};
-
-		const transformed = await transformRequestBody(
-			body,
-			createCodexModel(body.model, { input: ["text", "image"] }),
-			{},
-		);
-		const serialized = JSON.stringify(transformed.input);
-
-		expect(serialized).toContain("[image omitted: source cannot be replayed]");
-		expect(serialized).not.toContain(imageUrl);
-		expect(transformed.input?.some(item => item.type === "message" && item.role === "user")).toBe(false);
 	});
 });
 
@@ -361,79 +290,6 @@ describe("openai-codex orphan tool-call repair", () => {
 		const note = input.find(item => item.type === "message" && item.role === "assistant");
 		expect(note?.content).toMatch(/call_custom_orphan/);
 		expect(note?.content).toMatch(/Done!/);
-	});
-
-	it("keeps orphan text and image fallbacks outside a paired tool batch", async () => {
-		const imageUrl = `data:image/png;base64,${PNG_B64}`;
-		const body: RequestBody = {
-			model: "gpt-5.1-codex",
-			input: [
-				{ type: "function_call", call_id: "call_a", name: "read", arguments: "{}" },
-				{
-					type: "function_call_output",
-					call_id: "call_b",
-					output: [
-						{ type: "input_text", text: "orphan" },
-						{ type: "input_image", detail: "high", image_url: imageUrl },
-					],
-				},
-				{ type: "function_call_output", call_id: "call_a", output: "ok" },
-			],
-		};
-
-		const transformed = await transformRequestBody(
-			body,
-			createCodexModel(body.model, { input: ["text", "image"] }),
-			{},
-		);
-		const input = transformed.input || [];
-		expect(input.map(item => item.type)).toEqual(["message", "message", "function_call", "function_call_output"]);
-		const callIndex = input.findIndex(item => item.type === "function_call" && item.call_id === "call_a");
-		expect(input[callIndex + 1]).toMatchObject({ type: "function_call_output", call_id: "call_a" });
-		expect(input[1]).toMatchObject({
-			type: "message",
-			role: "user",
-			content: [{ type: "input_image", detail: "high", image_url: imageUrl }],
-		});
-	});
-
-	it("defers orphan fallbacks until every paired output closes", async () => {
-		const imageUrl = `data:image/png;base64,${PNG_B64}`;
-		const body: RequestBody = {
-			model: "gpt-5.1-codex",
-			input: [
-				{ type: "function_call", call_id: "call_a", name: "read", arguments: "{}" },
-				{ type: "function_call", call_id: "call_c", name: "read", arguments: "{}" },
-				{ type: "function_call_output", call_id: "call_a", output: "a" },
-				{
-					type: "function_call_output",
-					call_id: "call_b",
-					output: [{ type: "input_image", detail: "auto", image_url: imageUrl }],
-				},
-				{ type: "function_call_output", call_id: "call_c", output: "c" },
-			],
-		};
-
-		const transformed = await transformRequestBody(
-			body,
-			createCodexModel(body.model, { input: ["text", "image"] }),
-			{},
-		);
-		const input = transformed.input || [];
-
-		expect(input.slice(0, 4).map(item => item.type)).toEqual([
-			"function_call",
-			"function_call",
-			"function_call_output",
-			"function_call_output",
-		]);
-		expect(input[2]).toMatchObject({ type: "function_call_output", call_id: "call_a" });
-		expect(input[3]).toMatchObject({ type: "function_call_output", call_id: "call_c" });
-		expect(input.at(-1)).toMatchObject({
-			type: "message",
-			role: "user",
-			content: [{ type: "input_image", detail: "auto", image_url: imageUrl }],
-		});
 	});
 });
 

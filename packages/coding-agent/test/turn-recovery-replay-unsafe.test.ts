@@ -89,7 +89,6 @@ function createHost(
 		sessionMessageAlreadyPersisted: () => false,
 		setModelWithProviderSessionReset: async () => {},
 		resetCurrentResponsesProviderSession: () => {},
-		resyncActiveRequestTarget: async () => false,
 		maybeAutoRedeemCodexReset: async () => false,
 		runAutoCompaction: async () =>
 			({ deferredHandoff: false, continuationScheduled: false }) as RecoveryCompactionResult,
@@ -117,71 +116,6 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 	afterAll(() => {
 		authStorage.close();
 		tempDir.removeSync();
-	});
-
-	it("rebuilds the resolved request target before replaying an incompatible compaction turn", async () => {
-		const responsesModel = getBundledModel("openai", "gpt-5-mini");
-		if (!responsesModel) throw new Error("Expected bundled OpenAI Responses model");
-		const failed: AssistantMessage = {
-			...makeMessage([], responsesModel),
-			errorMessage: AIError.INCOMPATIBLE_COMPACTION_TARGET_MESSAGE,
-		};
-		const host = createHost(responsesModel, modelRegistry, { messages: [], textOutputCommitted: false });
-		host.sessionManager = {
-			getBranch: () => [],
-			getSessionId: () => "compaction-target-session",
-		} as never;
-		let resyncCalls = 0;
-		let continued = 0;
-		host.resyncActiveRequestTarget = async () => {
-			resyncCalls++;
-			return true;
-		};
-		host.scheduleAgentContinue = () => {
-			continued++;
-		};
-		const recovery = new TurnRecovery(host);
-
-		// A credential rotation moved the endpoint mid-turn, so the failure is not
-		// terminal: the session rebuilds for the resolved target and replays.
-		expect(recovery.isRetryableError(failed)).toBe(true);
-		expect(await recovery.handleRetryableError(failed)).toBe(true);
-		expect(resyncCalls).toBe(1);
-		expect(continued).toBe(1);
-	});
-
-	it("rebuilds the resolved request target when an account-policy denial rotates the credential", async () => {
-		const rotatingAuth = await AuthStorage.create(":memory:");
-		rotatingAuth.setRuntimeApiKey("anthropic", "test-key");
-		rotatingAuth.rotateSessionCredential = async () => true;
-		const rotatingRegistry = new ModelRegistry(rotatingAuth, tempDir.join("models-rotation.yml"));
-		try {
-			const failed: AssistantMessage = {
-				...makeMessage([], model),
-				errorMessage: "403 cyber_policy: trusted access for cyber is required",
-			};
-			const host = createHost(model, rotatingRegistry, { messages: [], textOutputCommitted: false });
-			host.sessionManager = {
-				getBranch: () => [],
-				getSessionId: () => "credential-rotation-session",
-			} as never;
-			const order: string[] = [];
-			host.resyncActiveRequestTarget = async () => {
-				order.push("resync");
-				return true;
-			};
-			host.scheduleAgentContinue = () => {
-				order.push("continue");
-			};
-			const recovery = new TurnRecovery(host);
-
-			// Rotation can land on a sibling credential whose endpoint differs, so
-			// target-bound history must be rebuilt before the replay is queued.
-			expect(await recovery.handleRetryableError(failed)).toBe(true);
-			expect(order).toEqual(["resync", "continue"]);
-		} finally {
-			rotatingAuth.close();
-		}
 	});
 
 	it("rolls back a usage fallback cancelled during model reconciliation", async () => {

@@ -11,7 +11,6 @@ import { getEnvApiKey } from "../stream";
 import type {
 	AssistantMessage,
 	Context,
-	ImageContent,
 	Message,
 	MessageAttribution,
 	Model,
@@ -112,39 +111,14 @@ import {
 } from "./openai-shared";
 import { transformMessages } from "./transform-messages";
 import {
-	getUnreplayableInlineImageMimeType,
 	isOpenAICompletionsVisionSupported,
-	isRemoteImageUrl,
 	joinTextWithImagePlaceholder,
 	NON_VISION_IMAGE_PLACEHOLDER,
-	resolveUsableInlineImage,
-	supportsRemoteImageUrls,
-	unreplayableImageFormatPlaceholder,
 } from "./vision-guard";
 
 export { applyOpenRouterRoutingVariant } from "./openai-shared";
 
 type OpenAICompletionsReasoningField = NonNullable<ResolvedOpenAICompat["reasoningContentField"]>;
-
-type OpenAICompletionsImagePart = { type: "image_url"; image_url: { url: string } } | { type: "text"; text: string };
-
-function resolveOpenAICompletionsImagePart(
-	image: ImageContent,
-	model: Model<"openai-completions">,
-): OpenAICompletionsImagePart {
-	if (typeof image.url === "string" && isRemoteImageUrl(image.url) && supportsRemoteImageUrls(model, image)) {
-		return { type: "image_url", image_url: { url: image.url } };
-	}
-	const inline = resolveUsableInlineImage(image);
-	if (inline) {
-		return { type: "image_url", image_url: { url: `data:${inline.mimeType};base64,${inline.data}` } };
-	}
-	const unreplayableMimeType = getUnreplayableInlineImageMimeType(image);
-	if (unreplayableMimeType) return { type: "text", text: unreplayableImageFormatPlaceholder(unreplayableMimeType) };
-	throw new AIError.ValidationError(
-		`input_image cannot be forwarded to ${model.api} without non-empty image data or a supported reference`,
-	);
-}
 
 type ProviderAttributedChatCompletionChunk = ChatCompletionChunk & {
 	provider?: unknown;
@@ -1998,19 +1972,14 @@ export function convertMessages(
 							text,
 						} satisfies ChatCompletionContentPartText);
 					} else if (supportsImages) {
-						const part = resolveOpenAICompletionsImagePart(item, model);
-						if (part.type === "text") {
-							content.push({ type: "text", text: part.text } satisfies ChatCompletionContentPartText);
-						} else {
-							content.push({
-								type: "image_url",
-								image_url: {
-									url: part.image_url.url,
-									// Chat Completions has no "original"; omit it (provider default).
-									...(item.detail && item.detail !== "original" ? { detail: item.detail } : {}),
-								},
-							} satisfies ChatCompletionContentPartImage);
-						}
+						content.push({
+							type: "image_url",
+							image_url: {
+								url: item.url ?? `data:${item.mimeType};base64,${item.data}`,
+								// Chat Completions has no "original"; omit it (provider default).
+								...(item.detail && item.detail !== "original" ? { detail: item.detail } : {}),
+							},
+						} satisfies ChatCompletionContentPartImage);
 					} else {
 						omittedImages = true;
 					}
@@ -2284,20 +2253,6 @@ export function convertMessages(
 				const supportsImages = isOpenAICompletionsVisionSupported(model);
 				const hasImages = toolMsg.content.some(c => c.type === "image");
 				const omittedImages = hasImages && !supportsImages;
-				// Convert before composing the tool text: a well-formed but
-				// unreplayable format degrades to a placeholder, so the attachment
-				// prose and the synthetic user turn must follow the surviving parts.
-				const convertedParts = supportsImages
-					? toolMsg.content
-							.filter((block): block is ImageContent => block.type === "image")
-							.map(block => resolveOpenAICompletionsImagePart(block, model))
-					: [];
-				const convertedImages = convertedParts.filter(
-					(part): part is { type: "image_url"; image_url: { url: string } } => part.type === "image_url",
-				);
-				const placeholderTexts = convertedParts
-					.filter((part): part is { type: "text"; text: string } => part.type === "text")
-					.map(part => part.text);
 
 				// Always send tool result with text (or placeholder if only images)
 				const hasText = textResult.length > 0;
@@ -2306,9 +2261,11 @@ export function convertMessages(
 					remappedToolCallId ?? ensureToolCallId(toolMsg.toolCallId, `${j}:${toolMsg.toolName ?? "tool"}`);
 				const toolResultContent = omittedImages
 					? joinTextWithImagePlaceholder(textResult, true)
-					: [hasText ? textResult : convertedImages.length > 0 ? "(see attached image)" : "", ...placeholderTexts]
-							.filter(part => part.length > 0)
-							.join("\n");
+					: hasText
+						? textResult
+						: hasImages
+							? "(see attached image)"
+							: "";
 				const toolResultMsg: OpenAICompletionsToolMessageParam = {
 					role: "tool",
 					content: toolResultContent.toWellFormed(),
@@ -2319,7 +2276,18 @@ export function convertMessages(
 				}
 				params.push(toolResultMsg);
 
-				imageBlocks.push(...convertedImages);
+				if (hasImages && supportsImages) {
+					for (const block of toolMsg.content) {
+						if (block.type === "image") {
+							imageBlocks.push({
+								type: "image_url",
+								image_url: {
+									url: block.url ?? `data:${block.mimeType};base64,${block.data}`,
+								},
+							});
+						}
+					}
+				}
 			}
 
 			i = j - 1;

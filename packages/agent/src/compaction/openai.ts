@@ -23,14 +23,10 @@ import {
 	getCodexAttestationHeader,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import {
-	encodeResponsesOrphanToolResultOutput,
 	encodeResponsesToolResultOutput,
 	hoistInterleavedResponsesToolBatchMessages,
-	type OpenAIGatewayRoutingParams,
+	parseAzureDeploymentNameMap,
 	parseTextSignature,
-	resolveOpenAIModelWireRouting,
-	resolveResponsesComputerScreenshot,
-	splitResponsesOrphanOutput,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import type {
@@ -43,14 +39,9 @@ import type {
 	ProviderSessionState,
 } from "@oh-my-pi/pi-ai/types";
 import {
-	canonicalizeOpenAIResponsesReferenceBaseUrl,
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
-	getOpenAIResponsesReferenceTarget,
-	isOpenAIResponsesAssistantHistoryTargetOwned,
 	normalizeResponsesToolCallId,
-	resolveAzureOpenAIBaseUrl,
-	resolveOpenAIResponsesRequestModel,
 	stripOpenAIResponsesOutputOnlyStatusesForReplay,
 } from "@oh-my-pi/pi-ai/utils";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
@@ -258,30 +249,11 @@ export type OpenAiRemoteCompactionItem = {
 
 export interface OpenAiRemoteCompactionPreserveData {
 	provider?: string;
-	/**
-	 * Fingerprint of the compaction request target. Only this target can extend
-	 * the preserved `compactionItem`, whose encrypted content is endpoint-bound.
-	 */
-	referenceTarget?: string;
-	/**
-	 * Fingerprint of the runtime request target the `replacementHistory` was
-	 * encoded for. Distinct from {@link referenceTarget} whenever the model
-	 * configures a `remoteCompaction` model/api/endpoint override, so replay
-	 * compatibility must never be checked against the compaction fingerprint.
-	 */
-	replayTarget?: string;
-	/**
-	 * Fingerprint of the runtime request target after credential-resolved
-	 * endpoint routing, which is what the Responses serializer compares the
-	 * replayed payload against. {@link replayTarget} stays credential-free so
-	 * session reconstruction can still check it without provider auth.
-	 */
-	requestTarget?: string;
 	replacementHistory: Array<Record<string, unknown>>;
 	compactionItem: OpenAiRemoteCompactionItem;
 }
 
-export interface OpenAiRemoteCompactionRequest extends OpenAIGatewayRoutingParams {
+export interface OpenAiRemoteCompactionRequest {
 	model: string;
 	input: Array<Record<string, unknown>>;
 	instructions: string;
@@ -320,181 +292,6 @@ export function shouldUseOpenAiRemoteCompaction(model: Model): boolean {
 	return isOpenAiRemoteCompactionApi(model.remoteCompaction.api ?? model.api);
 }
 
-export function resolveOpenAiCompactionReferenceModel(model: Model, streamingV2: boolean): Model {
-	const api = model.remoteCompaction?.api ?? model.api;
-	const configuredEndpoint = streamingV2
-		? (model.remoteCompaction?.v2Endpoint ?? model.remoteCompaction?.streamingEndpoint)
-		: model.remoteCompaction?.endpoint;
-	const rawBaseUrl =
-		configuredEndpoint ?? (api === "azure-openai-responses" ? resolveAzureOpenAIBaseUrl(model) : model.baseUrl);
-	const baseUrl = rawBaseUrl ? canonicalizeOpenAIResponsesReferenceBaseUrl(rawBaseUrl) : rawBaseUrl;
-	if (api === model.api && baseUrl === model.baseUrl) return model;
-	return {
-		...model,
-		api,
-		baseUrl,
-	} as Model;
-}
-
-export function getOpenAiCompactionReferenceTarget(model: Model, streamingV2: boolean): string {
-	const referenceModel = resolveOpenAiCompactionReferenceModel(model, streamingV2);
-	return getOpenAIResponsesReferenceTarget(referenceModel, resolveOpenAiCompactModel(model), referenceModel.baseUrl);
-}
-
-/**
- * Whether the compaction request `compactionModel` is about to issue mints
- * replacement history that `runtimeModel` can still read. `compaction` and
- * `compaction_summary` items are opaque outside the exact request that produced
- * them, so the producing fingerprint — endpoint, api, and compact request model
- * alike — must equal the fingerprint the active model will dispatch with. A side
- * model or a `remoteCompaction.model` override sharing an endpoint still mints
- * model-owned state, and stamping the active target on it would relabel another
- * model's history as the active model's own.
- */
-export function producesRuntimeReplayableCompactionHistory(
-	compactionModel: Model,
-	runtimeModel: Model,
-	streamingV2: boolean,
-): boolean {
-	return (
-		getOpenAiCompactionReferenceTarget(compactionModel, streamingV2) ===
-		getOpenAIResponsesReferenceTarget(runtimeModel)
-	);
-}
-
-/**
- * Whether the compaction request `compactionModel` is about to issue reaches the
- * exact request target `runtimeRequestTarget` identifies. Compaction transports
- * resolve their endpoint from static model configuration while runtime dispatch
- * resolves it from the credential, so only this comparison proves the opaque
- * state the request mints is readable by the request that will replay it.
- */
-export function producesRuntimeRequestReplayableCompactionHistory(
-	compactionModel: Model,
-	runtimeRequestTarget: string,
-	streamingV2: boolean,
-): boolean {
-	return getOpenAiCompactionReferenceTarget(compactionModel, streamingV2) === runtimeRequestTarget;
-}
-
-/**
- * Walk every nested item of unstamped history and report the first value that
- * `probe` marks as resolvable only on the endpoint that produced it.
- */
-function replacementHistoryContains(
-	history: Array<Record<string, unknown>>,
-	probe: (value: Record<string, unknown>) => boolean,
-): boolean {
-	const pending: unknown[] = [...history];
-	while (pending.length > 0) {
-		const value = pending.pop();
-		if (Array.isArray(value)) {
-			pending.push(...value);
-			continue;
-		}
-		if (!isRecord(value)) continue;
-		if (probe(value)) return true;
-		pending.push(...Object.values(value));
-	}
-	return false;
-}
-
-function isEndpointOwnedImageReference(value: Record<string, unknown>): boolean {
-	if (typeof value.file_id === "string" && value.file_id.length > 0) return true;
-	return (
-		typeof value.image_url === "string" &&
-		value.image_url.length > 0 &&
-		!value.image_url.trimStart().toLowerCase().startsWith("data:")
-	);
-}
-
-/**
- * Native compaction items and the encrypted state they carry are issued by one
- * endpoint and opaque everywhere else, so they bind history just as firmly as an
- * uploaded image handle does.
- */
-function isEndpointOwnedNativeCompactionItem(value: Record<string, unknown>): boolean {
-	return value.type === "compaction" || value.type === "compaction_summary";
-}
-
-function replacementHistoryContainsEndpointOwnedState(history: Array<Record<string, unknown>>): boolean {
-	return replacementHistoryContains(
-		history,
-		value =>
-			isEndpointOwnedImageReference(value) ||
-			isEndpointOwnedNativeCompactionItem(value) ||
-			(typeof value.encrypted_content === "string" && value.encrypted_content.length > 0),
-	);
-}
-
-export function canReuseOpenAiCompactionHistory(
-	preserved: Pick<OpenAiRemoteCompactionPreserveData, "provider" | "referenceTarget" | "replacementHistory">,
-	model: Model,
-	streamingV2: boolean,
-): boolean {
-	if (preserved.provider !== model.provider) return false;
-	if (preserved.referenceTarget !== undefined) {
-		return preserved.referenceTarget === getOpenAiCompactionReferenceTarget(model, streamingV2);
-	}
-	return !replacementHistoryContainsEndpointOwnedState(preserved.replacementHistory);
-}
-
-export function getOpenAiCompactionRuntimeReplayTarget(
-	preserved: Pick<OpenAiRemoteCompactionPreserveData, "referenceTarget" | "replayTarget">,
-): string | undefined {
-	return preserved.replayTarget ?? preserved.referenceTarget;
-}
-
-/**
- * Fingerprint the Responses serializer must see on the replayed payload. Falls
- * back to the credential-free targets for history persisted before the resolved
- * request target was recorded.
- */
-export function getOpenAiCompactionSerializationTarget(
-	preserved: Pick<OpenAiRemoteCompactionPreserveData, "referenceTarget" | "replayTarget" | "requestTarget">,
-): string | undefined {
-	return preserved.requestTarget ?? getOpenAiCompactionRuntimeReplayTarget(preserved);
-}
-
-/**
- * Whether the active model can replay this history. `resolvedRequestTarget` is
- * the fingerprint the transport will compute once the credential is resolved;
- * when the caller knows it, compare exactly what the serializer compares, so a
- * dynamically routed endpoint change re-expands the originals here instead of
- * failing closed at request construction with no way back.
- */
-export function canReplayOpenAiCompactionHistory(
-	preserved: Pick<
-		OpenAiRemoteCompactionPreserveData,
-		"provider" | "referenceTarget" | "replayTarget" | "requestTarget" | "replacementHistory"
-	>,
-	model: Model,
-	resolvedRequestTarget?: string,
-): boolean {
-	if (preserved.provider !== model.provider) return false;
-	const boundTarget =
-		resolvedRequestTarget !== undefined
-			? getOpenAiCompactionSerializationTarget(preserved)
-			: getOpenAiCompactionRuntimeReplayTarget(preserved);
-	if (boundTarget !== undefined) {
-		return boundTarget === (resolvedRequestTarget ?? getOpenAIResponsesReferenceTarget(model));
-	}
-	return !replacementHistoryContainsEndpointOwnedState(preserved.replacementHistory);
-}
-
-/**
- * Whether preserved history carries no target binding at all: no runtime replay
- * stamp, no endpoint-owned image handle, and no encrypted state. Unlike the
- * provider-scoped reuse checks this runs with no model to compare against, so it
- * has to reject everything an unrelated endpoint could not resolve.
- */
-export function isOpenAiCompactionHistoryTargetIndependent(
-	preserved: Pick<OpenAiRemoteCompactionPreserveData, "referenceTarget" | "replayTarget" | "replacementHistory">,
-): boolean {
-	if (getOpenAiCompactionRuntimeReplayTarget(preserved) !== undefined) return false;
-	return !replacementHistoryContainsEndpointOwnedState(preserved.replacementHistory);
-}
-
 function resolveOpenAiCompactEndpoint(model: Model): string {
 	const configuredEndpoint = model.remoteCompaction?.endpoint;
 	const compactionApi = model.remoteCompaction?.api ?? model.api;
@@ -522,7 +319,10 @@ function resolveAzureOpenAiCompactEndpoint(model: Model, configuredEndpoint: str
 }
 
 function resolveAzureOpenAiBaseUrl(model: Model): string {
-	const resolvedBaseUrl = resolveAzureOpenAIBaseUrl(model);
+	const baseUrl = $env.AZURE_OPENAI_BASE_URL?.trim() || undefined;
+	const resourceName = $env.AZURE_OPENAI_RESOURCE_NAME;
+	const resolvedBaseUrl =
+		baseUrl ?? (resourceName ? `https://${resourceName}.openai.azure.com/openai/v1` : undefined) ?? model.baseUrl;
 	if (!resolvedBaseUrl) {
 		throw new Error(
 			"Azure OpenAI base URL is required. Set AZURE_OPENAI_BASE_URL or AZURE_OPENAI_RESOURCE_NAME, or configure model.baseUrl.",
@@ -540,8 +340,9 @@ function appendAzureApiVersion(endpoint: string): string {
 function resolveOpenAiCompactModel(model: Model): string {
 	const requestModel = model.remoteCompaction?.model ?? model.requestModelId ?? model.id;
 	const compactionApi = model.remoteCompaction?.api ?? model.api;
-	const requestTarget = compactionApi === model.api ? model : ({ ...model, api: compactionApi } as Model);
-	return resolveOpenAIResponsesRequestModel(requestTarget, requestModel);
+	if (compactionApi !== "azure-openai-responses") return requestModel;
+	const mappedDeployment = parseAzureDeploymentNameMap($env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP).get(requestModel);
+	return mappedDeployment ?? requestModel;
 }
 
 function resolveOpenAiCodexCompactEndpoint(baseUrl: string | undefined): string {
@@ -565,14 +366,7 @@ export function getPreservedOpenAiRemoteCompactionData(
 ): OpenAiRemoteCompactionPreserveData | undefined {
 	const candidate = preserveData?.[OPENAI_REMOTE_COMPACTION_PRESERVE_KEY];
 	if (!candidate || typeof candidate !== "object") return undefined;
-	const maybeData = candidate as {
-		provider?: unknown;
-		referenceTarget?: unknown;
-		replayTarget?: unknown;
-		requestTarget?: unknown;
-		replacementHistory?: unknown;
-		compactionItem?: unknown;
-	};
+	const maybeData = candidate as { provider?: unknown; replacementHistory?: unknown; compactionItem?: unknown };
 	if (!Array.isArray(maybeData.replacementHistory)) return undefined;
 	const maybeItem = maybeData.compactionItem;
 	if (!maybeItem || typeof maybeItem !== "object") return undefined;
@@ -585,9 +379,6 @@ export function getPreservedOpenAiRemoteCompactionData(
 	}
 	return {
 		provider: typeof maybeData.provider === "string" ? maybeData.provider : undefined,
-		referenceTarget: typeof maybeData.referenceTarget === "string" ? maybeData.referenceTarget : undefined,
-		replayTarget: typeof maybeData.replayTarget === "string" ? maybeData.replayTarget : undefined,
-		requestTarget: typeof maybeData.requestTarget === "string" ? maybeData.requestTarget : undefined,
 		replacementHistory: maybeData.replacementHistory as Array<Record<string, unknown>>,
 		compactionItem: compactionItem as unknown as OpenAiRemoteCompactionItem,
 	};
@@ -634,21 +425,17 @@ function addOpenAiCallIds(
 	knownCallIds: Set<string>,
 	customCallIds: Set<string>,
 	computerCallIds: Set<string>,
-	staleCallIds?: Set<string>,
 ): void {
 	for (const item of items) {
 		if (typeof item.call_id !== "string") continue;
 		if (item.type === "function_call") {
 			knownCallIds.add(item.call_id);
-			staleCallIds?.delete(item.call_id);
 		} else if (item.type === "custom_tool_call") {
 			knownCallIds.add(item.call_id);
 			customCallIds.add(item.call_id);
-			staleCallIds?.delete(item.call_id);
 		} else if (item.type === "computer_call") {
 			knownCallIds.add(item.call_id);
 			computerCallIds.add(item.call_id);
-			staleCallIds?.delete(item.call_id);
 		}
 	}
 }
@@ -719,98 +506,21 @@ export function buildOpenAiNativeHistory(
 	previousReplacementHistory?: Array<Record<string, unknown>>,
 	supportsImageDetailOriginal = false,
 ): Array<Record<string, unknown>> {
-	const referenceModel = resolveOpenAiCompactionReferenceModel(model, false);
-	const referenceTarget = getOpenAiCompactionReferenceTarget(model, false);
 	const input: Array<Record<string, unknown>> = previousReplacementHistory
 		? adaptComputerHistoryForCompaction([...previousReplacementHistory], model.supportsComputerUse === true)
 		: [];
-	const transformedMessages = transformMessages(
-		messages,
-		model,
-		id => normalizeOpenAiCompactionToolCallId(id),
-		undefined,
-		undefined,
-		undefined,
-		{ preserveOrphanToolResultImages: true },
-	);
+	const transformedMessages = transformMessages(messages, model, id => normalizeOpenAiCompactionToolCallId(id));
 
 	let msgIndex = 0;
 	const knownCallIds = new Set<string>();
 	const customCallIds = new Set<string>();
 	const computerCallIds = new Set<string>();
 	const demotedComputerCallIds = new Set<string>();
-	const staleCallIds = new Set<string>();
-	addOpenAiCallIds(input, knownCallIds, customCallIds, computerCallIds, staleCallIds);
-	const staleSnapshotIndices = new Map<string, number[]>();
-	const snapshotCallIds = new Set<string>(knownCallIds);
-	const addSnapshotContentCallIds = (message: Message): void => {
-		if (message.role !== "assistant") return;
-		for (const block of message.content) {
-			if (block.type !== "toolCall") continue;
-			snapshotCallIds.add(normalizeResponsesToolCallId(block.id, block.customWireName ? "ctc" : "fc").callId);
-		}
-	};
-	const snapshotIdsFromItems = (items: Array<Record<string, unknown>>): Set<string> => {
-		const ids = new Set<string>();
-		for (const item of items) {
-			if (
-				(item.type === "function_call" || item.type === "custom_tool_call" || item.type === "computer_call") &&
-				typeof item.call_id === "string"
-			) {
-				ids.add(item.call_id);
-			}
-		}
-		return ids;
-	};
-	for (let transformedIndex = 0; transformedIndex < transformedMessages.length; transformedIndex++) {
-		const message = transformedMessages[transformedIndex];
-		if (message.role !== "user" && message.role !== "developer" && message.role !== "assistant") continue;
-		const providerPayload = (message as { providerPayload?: AssistantMessage["providerPayload"] }).providerPayload;
-		if (message.role !== "assistant") {
-			const rawHistoryItems = getOpenAIResponsesHistoryItems(
-				providerPayload,
-				model.provider,
-				undefined,
-				referenceTarget,
-			);
-			if (rawHistoryItems) {
-				for (const callId of snapshotIdsFromItems(rawHistoryItems)) snapshotCallIds.add(callId);
-			}
-			continue;
-		}
-		const rawHistoryItems = getOpenAIResponsesHistoryPayload(
-			providerPayload,
-			model.provider,
-			message.provider,
-			referenceTarget,
-		);
-		if (!rawHistoryItems) {
-			addSnapshotContentCallIds(message);
-			continue;
-		}
-		const currentCallIds = snapshotIdsFromItems(rawHistoryItems.items);
-		if (!rawHistoryItems.dt) {
-			for (const callId of snapshotCallIds) {
-				if (currentCallIds.has(callId)) continue;
-				const indices = staleSnapshotIndices.get(callId);
-				if (indices) indices.push(transformedIndex);
-				else staleSnapshotIndices.set(callId, [transformedIndex]);
-			}
-			snapshotCallIds.clear();
-		}
-		for (const callId of currentCallIds) snapshotCallIds.add(callId);
-	}
-
-	for (let transformedIndex = 0; transformedIndex < transformedMessages.length; transformedIndex++) {
-		const message = transformedMessages[transformedIndex];
+	addOpenAiCallIds(input, knownCallIds, customCallIds, computerCallIds);
+	for (const message of transformedMessages) {
 		if (message.role === "user" || message.role === "developer") {
 			const providerPayload = (message as { providerPayload?: AssistantMessage["providerPayload"] }).providerPayload;
-			const rawHistoryItems = getOpenAIResponsesHistoryItems(
-				providerPayload,
-				model.provider,
-				undefined,
-				referenceTarget,
-			);
+			const rawHistoryItems = getOpenAIResponsesHistoryItems(providerPayload, model.provider);
 			if (rawHistoryItems) {
 				if (model.supportsComputerUse !== true) {
 					for (const item of rawHistoryItems) {
@@ -821,7 +531,7 @@ export function buildOpenAiNativeHistory(
 				}
 				const historyItems = adaptComputerHistoryForCompaction(rawHistoryItems, model.supportsComputerUse === true);
 				input.push(...historyItems);
-				addOpenAiCallIds(historyItems, knownCallIds, customCallIds, computerCallIds, staleCallIds);
+				addOpenAiCallIds(historyItems, knownCallIds, customCallIds, computerCallIds);
 				msgIndex++;
 				continue;
 			}
@@ -860,7 +570,6 @@ export function buildOpenAiNativeHistory(
 				assistant.providerPayload,
 				model.provider,
 				assistant.provider,
-				referenceTarget,
 			);
 			if (providerPayload) {
 				if (!providerPayload.dt) demotedComputerCallIds.clear();
@@ -877,32 +586,22 @@ export function buildOpenAiNativeHistory(
 				);
 				if (providerPayload.dt) {
 					input.push(...historyItems);
-					addOpenAiCallIds(historyItems, knownCallIds, customCallIds, computerCallIds, staleCallIds);
+					addOpenAiCallIds(historyItems, knownCallIds, customCallIds, computerCallIds);
 				} else {
-					for (const callId of knownCallIds) staleCallIds.add(callId);
 					input.splice(0, input.length, ...historyItems);
 					knownCallIds.clear();
 					customCallIds.clear();
 					computerCallIds.clear();
-					addOpenAiCallIds(input, knownCallIds, customCallIds, computerCallIds, staleCallIds);
+					addOpenAiCallIds(input, knownCallIds, customCallIds, computerCallIds);
 				}
 				msgIndex++;
 				continue;
 			}
 			const isDifferentModel =
 				assistant.model !== model.id && assistant.provider === model.provider && assistant.api === model.api;
-			const targetOwnedHistoryRejected = isOpenAIResponsesAssistantHistoryTargetOwned(
-				assistant.providerPayload,
-				referenceTarget,
-			);
 
 			for (const block of assistant.content) {
-				if (
-					block.type === "thinking" &&
-					!targetOwnedHistoryRejected &&
-					assistant.stopReason !== "error" &&
-					block.thinkingSignature
-				) {
+				if (block.type === "thinking" && assistant.stopReason !== "error" && block.thinkingSignature) {
 					try {
 						const reasoningItem = JSON.parse(block.thinkingSignature) as Record<string, unknown>;
 						if (reasoningItem && typeof reasoningItem === "object") {
@@ -919,7 +618,7 @@ export function buildOpenAiNativeHistory(
 
 				if (block.type === "text") {
 					if (!block.text || block.text.trim().length === 0) continue;
-					const parsedSignature = targetOwnedHistoryRejected ? undefined : parseTextSignature(block.textSignature);
+					const parsedSignature = parseTextSignature(block.textSignature);
 					let msgId = parsedSignature?.id;
 					if (!msgId) {
 						msgId = `msg_${msgIndex}`;
@@ -954,7 +653,6 @@ export function buildOpenAiNativeHistory(
 							continue;
 						}
 						knownCallIds.add(normalized.callId);
-						staleCallIds.delete(normalized.callId);
 						computerCallIds.add(normalized.callId);
 						input.push(computerCall);
 						continue;
@@ -967,7 +665,6 @@ export function buildOpenAiNativeHistory(
 						itemId = undefined;
 					}
 					knownCallIds.add(normalized.callId);
-					staleCallIds.delete(normalized.callId);
 					if (block.customWireName) {
 						const rawInput = typeof block.arguments?.input === "string" ? block.arguments.input : "";
 						customCallIds.add(normalized.callId);
@@ -996,22 +693,8 @@ export function buildOpenAiNativeHistory(
 
 		if (message.role === "toolResult") {
 			const normalized = normalizeResponsesToolCallId(message.toolCallId);
-			const invalidatedByFutureSnapshot = staleSnapshotIndices
-				.get(normalized.callId)
-				?.some(snapshotIndex => snapshotIndex > transformedIndex);
-			if (
-				invalidatedByFutureSnapshot ||
-				(!knownCallIds.has(normalized.callId) && staleCallIds.has(normalized.callId))
-			) {
-				msgIndex++;
-				continue;
-			}
+			const { output, outputText } = encodeResponsesToolResultOutput(message, model, supportsImageDetailOriginal);
 			if (demotedComputerCallIds.has(normalized.callId)) {
-				const outputText =
-					message.providerMetadata?.type === "computer"
-						? ""
-						: encodeResponsesOrphanToolResultOutput(message, referenceModel, supportsImageDetailOriginal)
-								.outputText;
 				const resultItem =
 					message.providerMetadata?.type === "computer"
 						? {
@@ -1029,56 +712,21 @@ export function buildOpenAiNativeHistory(
 				continue;
 			}
 			if (!knownCallIds.has(normalized.callId)) {
-				if (!staleCallIds.has(normalized.callId)) {
-					const { output } = encodeResponsesOrphanToolResultOutput(
-						message,
-						referenceModel,
-						supportsImageDetailOriginal,
-					);
-					const orphanOutput = splitResponsesOrphanOutput(output, referenceModel, supportsImageDetailOriginal);
-					const limit = 16_000;
-					const noteText =
-						orphanOutput.text.length > limit
-							? `${orphanOutput.text.slice(0, limit)}\n...[truncated]`
-							: orphanOutput.text;
-					input.push({
-						type: "message",
-						role: "assistant",
-						content: `[Orphan ${message.toolName || "tool"} result; call_id=${normalized.callId}]: ${noteText}`,
-					});
-					if (orphanOutput.images.length > 0) {
-						input.push({ type: "message", role: "user", content: orphanOutput.images });
-					}
-				}
 				msgIndex++;
 				continue;
 			}
 			if (computerCallIds.has(normalized.callId)) {
-				const computerScreenshot = resolveResponsesComputerScreenshot(
-					message,
-					referenceModel,
-					supportsImageDetailOriginal,
-				);
-				if (computerScreenshot) {
+				if (message.providerMetadata?.type === "computer") {
 					input.push({
 						type: "computer_call_output",
 						call_id: normalized.callId,
-						output: structuredCloneJSON(computerScreenshot),
-						acknowledged_safety_checks: structuredCloneJSON(
-							message.providerMetadata?.type === "computer"
-								? message.providerMetadata.acknowledgedSafetyChecks
-								: undefined,
-						),
+						output: structuredCloneJSON(message.providerMetadata.screenshot),
+						acknowledged_safety_checks: structuredCloneJSON(message.providerMetadata.acknowledgedSafetyChecks),
 					});
 					msgIndex++;
 					continue;
 				}
 
-				const { outputText } = encodeResponsesOrphanToolResultOutput(
-					message,
-					referenceModel,
-					supportsImageDetailOriginal,
-				);
 				const callIndex = input.findLastIndex(
 					item => item.type === "computer_call" && item.call_id === normalized.callId,
 				);
@@ -1092,7 +740,6 @@ export function buildOpenAiNativeHistory(
 				continue;
 			}
 
-			const { output } = encodeResponsesToolResultOutput(message, referenceModel, supportsImageDetailOriginal);
 			input.push({
 				type: customCallIds.has(normalized.callId) ? "custom_tool_call_output" : "function_call_output",
 				call_id: normalized.callId,
@@ -1121,14 +768,6 @@ export async function requestOpenAiRemoteCompaction(
 		sessionId?: string;
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
-		/**
-		 * Runtime fingerprint of the model that will replay the preserved
-		 * history. Defaults to `model`, which is only correct when compaction
-		 * runs on the active session model rather than a side model.
-		 */
-		replayTarget?: string;
-		/** Credential-resolved runtime request fingerprint the serializer compares. */
-		requestTarget?: string;
 	},
 ): Promise<OpenAiRemoteCompactionResponse> {
 	const endpoint = resolveOpenAiCompactEndpoint(model);
@@ -1156,9 +795,6 @@ export async function requestOpenAiRemoteCompaction(
 		// reasoning, or call/result pairing.
 		input: trimmed.input,
 		instructions,
-		// The producer fingerprint folds the model's configured gateway routing, so
-		// the request has to reach the same upstream that fingerprint names.
-		...resolveOpenAIModelWireRouting(model, false),
 	};
 	const isAzureOpenAiResponses = (model.remoteCompaction?.api ?? model.api) === "azure-openai-responses";
 	const isCodexResponses =
@@ -1265,14 +901,7 @@ export async function requestOpenAiRemoteCompaction(
 		});
 		throw new Error("Remote compaction response missing compaction item");
 	}
-	return {
-		provider: model.provider,
-		referenceTarget: getOpenAiCompactionReferenceTarget(model, false),
-		replayTarget: opts?.replayTarget ?? getOpenAIResponsesReferenceTarget(model),
-		...(opts?.requestTarget !== undefined ? { requestTarget: opts.requestTarget } : {}),
-		replacementHistory,
-		compactionItem,
-	};
+	return { provider: model.provider, replacementHistory, compactionItem };
 }
 
 /**

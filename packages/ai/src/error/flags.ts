@@ -201,15 +201,6 @@ function isCodexChatGPTAccountPolicyText(
 	return deniedIdentity !== undefined && deniedIdentity === requestedIdentity;
 }
 const STALE_RESPONSE_ITEM_PATTERNS = [/\bItem with id ['"][^'"]+['"] not found\.?/i, /previous[ _]?response/i] as const;
-/**
- * Raised by the Responses serializers when endpoint-bound remote compaction
- * history cannot reach the target the request actually resolved to. Shared so
- * the classifier recognizes it without matching serializer prose: the recovery
- * is the same as a stale native item — rebuild the context for the effective
- * target and replay immediately.
- */
-export const INCOMPATIBLE_COMPACTION_TARGET_MESSAGE =
-	"Target-bound remote compaction history is incompatible with the active Responses target; rebuild the session context for the effective target before retrying";
 const STALE_RESPONSE_ITEM_DETAIL_PATTERN = /not[ _]?found|invalid|expired|stale|zero[ _-]?data[ _-]?retention/i;
 /**
  * Local llama.cpp / Ollama deterministic tool-call argument JSON parse failure.
@@ -508,9 +499,6 @@ function classifyText(
 		// AIError.retriable from treating the temporary cap as terminal.
 		if (reason === "CONCURRENT_LIMIT") kinds |= Flag.Transient;
 		if ((api === "openai-responses" || api === "openai-codex-responses") && isStaleResponsesText(errorMessage)) {
-			kinds |= Flag.StaleResponsesItem;
-		}
-		if (errorMessage.includes(INCOMPATIBLE_COMPACTION_TARGET_MESSAGE)) {
 			kinds |= Flag.StaleResponsesItem;
 		}
 

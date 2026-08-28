@@ -27,19 +27,11 @@ function timeoutSecondsToMs(value: number): number | undefined {
  *
  * Caller-supplied `streamOptions` always win — the helper only fills holes.
  */
-/**
- * Session-level OpenRouter routing variant, normalized so `default` means "no
- * suffix". The variant becomes part of the wire model id, so replay-target
- * fingerprints must resolve it the same way the stream wrapper does.
- */
-export function resolveSettingsOpenrouterVariant(settings: Settings): string | undefined {
-	const preset = settings.get("providers.openrouterVariant");
-	return preset && preset !== "default" ? preset : undefined;
-}
-
 export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn = streamSimple): StreamFn {
 	return (model, context, streamOptions) => {
-		const openrouterVariant = resolveSettingsOpenrouterVariant(settings);
+		const openrouterRoutingPreset = settings.get("providers.openrouterVariant");
+		const openrouterVariant =
+			openrouterRoutingPreset && openrouterRoutingPreset !== "default" ? openrouterRoutingPreset : undefined;
 		const antigravityEndpointMode = settings.get("providers.antigravityEndpoint");
 		const textVerbosity =
 			model.api === "openai-codex-responses"

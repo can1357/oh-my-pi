@@ -21,7 +21,6 @@ beforeAll(() => configureCredentialRedaction(true));
 afterAll(() => configureCredentialRedaction(false));
 
 const TEST_INSTALLATION_ID = "00000000-0000-4000-8000-000000000001";
-const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 beforeEach(() => {
 	vi.spyOn(piUtils, "getInstallId").mockReturnValue(TEST_INSTALLATION_ID);
@@ -241,14 +240,14 @@ describe("openai-codex Responses Lite input shaping", () => {
 				role: "user",
 				content: [
 					{ type: "input_text", text: "look" },
-					{ type: "input_image", detail: "auto", image_url: `data:image/png;base64,${PNG_B64}` },
+					{ type: "input_image", detail: "auto", image_url: "data:image/png;base64,AAAA" },
 				],
 			},
 			{ type: "function_call", call_id: "call_1", name: "shot", arguments: "{}" },
 			{
 				type: "function_call_output",
 				call_id: "call_1",
-				output: [{ type: "input_image", detail: "high", image_url: `data:image/png;base64,${PNG_B64}` }],
+				output: [{ type: "input_image", detail: "high", image_url: "data:image/png;base64,BBBB" }],
 			},
 		];
 
@@ -256,8 +255,8 @@ describe("openai-codex Responses Lite input shaping", () => {
 		expect(lite.input?.[0]).toEqual({ type: "additional_tools", role: "developer", tools: [] });
 		const liteMessage = lite.input?.[1]?.content as Array<Record<string, unknown>>;
 		const liteOutput = lite.input?.[3]?.output as Array<Record<string, unknown>>;
-		expect(liteMessage[1]).toEqual({ type: "input_image", image_url: `data:image/png;base64,${PNG_B64}` });
-		expect(liteOutput[0]).toEqual({ type: "input_image", image_url: `data:image/png;base64,${PNG_B64}` });
+		expect(liteMessage[1]).toEqual({ type: "input_image", image_url: "data:image/png;base64,AAAA" });
+		expect(liteOutput[0]).toEqual({ type: "input_image", image_url: "data:image/png;base64,BBBB" });
 
 		const plain = await transformRequestBody({ model: model.id, input: makeInput() }, model, {});
 		const plainMessage = plain.input?.[0]?.content as Array<Record<string, unknown>>;
@@ -285,7 +284,7 @@ describe("openai-codex Responses Lite input shaping", () => {
 					timestamp: Date.now(),
 					content: [
 						{ type: "text", text: "look" },
-						{ type: "image", mimeType: "image/png", data: PNG_B64, detail: "original" },
+						{ type: "image", mimeType: "image/png", data: "AAAA", detail: "original" },
 					],
 				},
 			],
@@ -644,7 +643,7 @@ describe("openai-codex Responses Lite and client metadata wire format", () => {
 						timestamp: Date.now(),
 						content: [
 							{ type: "text", text: "read this image" },
-							{ type: "image", mimeType: "image/png", data: PNG_B64 },
+							{ type: "image", mimeType: "image/png", data: "AAAA" },
 						],
 					},
 				],
@@ -665,7 +664,7 @@ describe("openai-codex Responses Lite and client metadata wire format", () => {
 				role: "user",
 				content: [
 					{ type: "input_text", text: "read this image" },
-					{ type: "input_image", image_url: `data:image/png;base64,${PNG_B64}` },
+					{ type: "input_image", image_url: "data:image/png;base64,AAAA" },
 				],
 			},
 		]);

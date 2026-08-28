@@ -3,12 +3,7 @@ import { supportsAllTurnsReasoningContext, supportsCodexReasoningSummary } from 
 import { requireSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { Model } from "../../types";
-import {
-	classifyResponsesBatchItem,
-	hoistInterleavedResponsesToolBatchMessages,
-	mapOpenAIReasoningEffort,
-	splitResponsesOrphanOutput,
-} from "../openai-shared";
+import { mapOpenAIReasoningEffort } from "../openai-shared";
 
 /** Reasoning replay scope for the Codex Responses API (`reasoning.context`). */
 export type CodexReasoningContext = "auto" | "current_turn" | "all_turns";
@@ -200,29 +195,24 @@ const CODEX_ORPHAN_OUTPUT_LIMIT = 16_000;
 const CODEX_INTERRUPTED_TOOL_OUTPUT =
 	"[No tool output recorded: the tool call was interrupted before it produced a result.]";
 
-function orphanFunctionOutputItems(
-	item: InputItem,
-	callId: string,
-	model: Model<"openai-codex-responses">,
-): InputItem[] {
+function orphanFunctionOutputToMessage(item: InputItem, callId: string): InputItem {
 	const itemRecord = item as unknown as Record<string, unknown>;
 	const toolName = typeof itemRecord.name === "string" ? itemRecord.name : "tool";
-	const orphanOutput = splitResponsesOrphanOutput(itemRecord.output, model, model.compat.supportsImageDetailOriginal);
-	let text = orphanOutput.text;
+	let text = "";
+	try {
+		const output = itemRecord.output;
+		text = typeof output === "string" ? output : JSON.stringify(output);
+	} catch {
+		text = String(itemRecord.output ?? "");
+	}
 	if (text.length > CODEX_ORPHAN_OUTPUT_LIMIT) {
 		text = `${text.slice(0, CODEX_ORPHAN_OUTPUT_LIMIT)}\n...[truncated]`;
 	}
-	const items: InputItem[] = [
-		{
-			type: "message",
-			role: "assistant",
-			content: `[Previous ${toolName} result; call_id=${callId}]: ${text}`,
-		},
-	];
-	if (orphanOutput.images.length > 0) {
-		items.push({ type: "message", role: "user", content: orphanOutput.images });
-	}
-	return items;
+	return {
+		type: "message",
+		role: "assistant",
+		content: `[Previous ${toolName} result; call_id=${callId}]: ${text}`,
+	} as InputItem;
 }
 
 type ToolCallKind = "function" | "custom" | "computer";
@@ -255,7 +245,7 @@ function toolOutputKind(type: unknown): ToolCallKind | undefined {
  *   tool-result child is dropped from the reconstructed history) or when a turn
  *   is aborted/crashes after the call streamed but before its result persisted.
  */
-function repairToolCallPairs(input: InputItem[], model: Model<"openai-codex-responses">): InputItem[] {
+function repairToolCallPairs(input: InputItem[]): InputItem[] {
 	const callKinds = new Map<string, ToolCallKind>();
 	const outputKinds = new Map<string, ToolCallKind>();
 	for (const item of input) {
@@ -268,65 +258,34 @@ function repairToolCallPairs(input: InputItem[], model: Model<"openai-codex-resp
 	}
 
 	const repaired: InputItem[] = [];
-	const deferredFallbacks: InputItem[] = [];
-	let activeBatchHasCall = false;
-	let activeBatchHasOutput = false;
-	const appendBatchItem = (item: InputItem): void => {
-		// Mirrors `repairOrphanResponsesToolOutputs`: an assistant message wedged in a
-		// call → output run is batch-internal for `hoistInterleavedResponsesToolBatchMessages`,
-		// so only a genuinely unrelated item closes the batch.
-		switch (classifyResponsesBatchItem(item)) {
-			case "call":
-				activeBatchHasCall = true;
-				break;
-			case "output":
-				activeBatchHasOutput = true;
-				break;
-			case "assistant-message":
-				break;
-			default:
-				if (deferredFallbacks.length > 0) {
-					repaired.push(...deferredFallbacks);
-					deferredFallbacks.length = 0;
-				}
-				activeBatchHasCall = false;
-				activeBatchHasOutput = false;
-				break;
-		}
-		repaired.push(item);
-	};
 	for (const item of input) {
 		const callId = typeof item.call_id === "string" ? item.call_id : undefined;
 		const callKind = toolCallKind(item.type);
 		const outputKind = toolOutputKind(item.type);
 
 		if (outputKind && callId !== undefined && callKinds.get(callId) !== outputKind) {
-			const fallback = orphanFunctionOutputItems(item, callId, model);
-			if (activeBatchHasCall && activeBatchHasOutput) deferredFallbacks.push(...fallback);
-			else repaired.push(...fallback);
+			repaired.push(orphanFunctionOutputToMessage(item, callId));
 			continue;
 		}
 		if (callKind && callId !== undefined && outputKinds.get(callId) !== callKind) {
 			if (callKind === "computer") {
-				appendBatchItem({
+				repaired.push({
 					type: "message",
 					role: "assistant",
 					content: `[Computer call interrupted before a screenshot was recorded; call_id=${callId}]`,
 				});
 				continue;
 			}
-			appendBatchItem(item);
-			appendBatchItem({
+			repaired.push(item, {
 				type: callKind === "custom" ? "custom_tool_call_output" : "function_call_output",
 				call_id: callId,
 				output: CODEX_INTERRUPTED_TOOL_OUTPUT,
 			});
 			continue;
 		}
-		appendBatchItem(item);
+		repaired.push(item);
 	}
-	if (deferredFallbacks.length > 0) repaired.push(...deferredFallbacks);
-	return hoistInterleavedResponsesToolBatchMessages(repaired);
+	return repaired;
 }
 
 /**
@@ -431,7 +390,7 @@ export async function transformRequestBody(
 	if (body.input && Array.isArray(body.input)) {
 		body.input = filterInput(body.input);
 		if (body.input) {
-			body.input = repairToolCallPairs(body.input, model);
+			body.input = repairToolCallPairs(body.input);
 		}
 	}
 

@@ -4,7 +4,6 @@ import {
 	streamAzureOpenAIResponses,
 } from "@oh-my-pi/pi-ai/providers/azure-openai-responses";
 import type { Context, FetchImpl, Model, ModelSpec, Tool } from "@oh-my-pi/pi-ai/types";
-import { getOpenAIResponsesReferenceTarget } from "@oh-my-pi/pi-ai/utils";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 const azureModel: Model<"azure-openai-responses"> = buildModel({
@@ -314,190 +313,6 @@ describe("azure openai responses streaming", () => {
 		expect(gatewayPayload.tool_choice).toEqual({ type: "function", name: "computer" });
 	});
 
-	it("stamps generated Azure history with the resolved request target", async () => {
-		const fetchMock: FetchImpl = vi.fn(async () =>
-			createSseResponse([
-				{
-					type: "response.output_item.added",
-					output_index: 0,
-					item: { type: "message", id: "msg_azure_a", role: "assistant", content: [] },
-				},
-				{ type: "response.content_part.added", part: { type: "output_text", text: "" } },
-				{ type: "response.output_text.delta", delta: "resource A answer" },
-				{
-					type: "response.output_item.done",
-					output_index: 0,
-					item: {
-						type: "message",
-						id: "msg_azure_a",
-						role: "assistant",
-						status: "completed",
-						content: [{ type: "output_text", text: "resource A answer" }],
-					},
-				},
-				{
-					type: "response.completed",
-					response: {
-						status: "completed",
-						usage: {
-							input_tokens: 1,
-							output_tokens: 1,
-							total_tokens: 2,
-							input_tokens_details: { cached_tokens: 0 },
-						},
-					},
-				},
-			]),
-		);
-		const message = await streamAzureOpenAIResponses(
-			azureModel,
-			{ messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }] },
-			{ apiKey: "test-key", azureBaseUrl: azureModel.baseUrl, azureApiVersion: "v1", fetch: fetchMock },
-		).result();
-
-		expect(message.stopReason).toBe("stop");
-		expect(message.providerPayload).toMatchObject({
-			type: "openaiResponsesHistory",
-			provider: azureModel.provider,
-			referenceTarget: getOpenAIResponsesReferenceTarget(azureModel),
-		});
-
-		const followUp: Context = {
-			messages: [message, { role: "user", content: "follow-up", timestamp: Date.now() }],
-		};
-		const sameResource = await captureAzurePayload(followUp);
-		expect(sameResource.input).toEqual([
-			{ type: "message", role: "assistant", content: [{ type: "output_text", text: "resource A answer" }] },
-			{ role: "user", content: [{ type: "input_text", text: "follow-up" }] },
-		]);
-
-		const movedResource = await captureAzurePayload(followUp, azureModel, {
-			azureDeploymentName: "other-deployment",
-		});
-		expect(JSON.stringify(movedResource.input)).not.toContain("msg_azure_a");
-		expect(movedResource.input).toEqual([
-			{
-				type: "message",
-				role: "assistant",
-				content: [{ type: "output_text", text: "resource A answer", annotations: [] }],
-				status: "completed",
-			},
-			{ role: "user", content: [{ type: "input_text", text: "follow-up" }] },
-		]);
-	});
-
-	it("rejects an onPayload replacement that repoints the Azure request at another deployment", async () => {
-		const fetchMock: FetchImpl = vi.fn(async () => new Response("unexpected dispatch", { status: 500 }));
-		const result = await streamAzureOpenAIResponses(
-			azureModel,
-			{ messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }] },
-			{
-				apiKey: "test-key",
-				azureBaseUrl: azureModel.baseUrl,
-				azureApiVersion: "v1",
-				fetch: fetchMock,
-				onPayload: payload => ({ ...(payload as Record<string, unknown>), model: "other-deployment" }),
-			},
-		).result();
-
-		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toContain("other-deployment");
-		expect(fetchMock).toHaveBeenCalledTimes(0);
-	});
-
-	it("rejects an onPayload hook that repoints the Azure request without returning a replacement", async () => {
-		const fetchMock: FetchImpl = vi.fn(async () => new Response("unexpected dispatch", { status: 500 }));
-		const result = await streamAzureOpenAIResponses(
-			azureModel,
-			{ messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }] },
-			{
-				apiKey: "test-key",
-				azureBaseUrl: azureModel.baseUrl,
-				azureApiVersion: "v1",
-				fetch: fetchMock,
-				onPayload: payload => {
-					(payload as Record<string, unknown>).model = "mutated-deployment";
-					return undefined;
-				},
-			},
-		).result();
-
-		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toContain("mutated-deployment");
-		expect(fetchMock).toHaveBeenCalledTimes(0);
-	});
-
-	it("invalidates native history when Azure request target overrides change", async () => {
-		const nativeItem = { type: "message" as const, role: "user" as const, content: "native history" };
-		const context: Context = {
-			messages: [
-				{
-					role: "user",
-					content: "canonical fallback",
-					providerPayload: {
-						type: "openaiResponsesHistory",
-						provider: azureModel.provider,
-						referenceTarget: getOpenAIResponsesReferenceTarget(azureModel),
-						items: [nativeItem],
-						dt: true,
-					},
-					timestamp: Date.now(),
-				},
-			],
-		};
-
-		const matching = await captureAzurePayload(context);
-		expect(matching.input).toEqual([nativeItem]);
-
-		for (const options of [
-			{ azureBaseUrl: "https://other.openai.azure.com/openai/v1" },
-			{ azureBaseUrl: undefined, azureResourceName: "other" },
-			{ azureDeploymentName: "other-deployment" },
-		]) {
-			const mismatched = await captureAzurePayload(context, azureModel, options);
-			expect(mismatched.input).toEqual([
-				{ role: "user", content: [{ type: "input_text", text: "canonical fallback" }] },
-			]);
-		}
-	});
-
-	it("fails closed when Azure request overrides strand opaque compaction history", async () => {
-		const fetchMock: FetchImpl = vi.fn(async () => new Response("unexpected dispatch", { status: 500 }));
-		const context: Context = {
-			messages: [
-				{
-					role: "user",
-					content: "Remote compaction preserved provider-native history for this session.",
-					providerPayload: {
-						type: "openaiResponsesHistory",
-						provider: azureModel.provider,
-						referenceTarget: getOpenAIResponsesReferenceTarget(azureModel),
-						items: [{ type: "compaction_summary", summary: "opaque" }],
-					},
-					timestamp: Date.now(),
-				},
-			],
-		};
-
-		for (const options of [
-			{ azureBaseUrl: "https://other.openai.azure.com/openai/v1" },
-			{ azureBaseUrl: undefined, azureResourceName: "other" },
-			{ azureDeploymentName: "other-deployment" },
-		]) {
-			const result = await streamAzureOpenAIResponses(azureModel, context, {
-				apiKey: "test-key",
-				azureApiVersion: "v1",
-				fetch: fetchMock,
-				...options,
-			}).result();
-			expect(result.stopReason).toBe("error");
-			expect(result.errorMessage).toContain(
-				"Target-bound remote compaction history is incompatible with the active Responses target",
-			);
-		}
-		expect(fetchMock).toHaveBeenCalledTimes(0);
-	});
-
 	it("surfaces nested response.failed provider errors", async () => {
 		const fetchMock: FetchImpl = vi.fn(async () =>
 			createSseResponse([
@@ -566,7 +381,7 @@ describe("azure openai responses streaming", () => {
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("server_error: backend exploded late");
 	});
-	it("preserves assistant message phase while dropping the unstamped endpoint-owned id", async () => {
+	it("preserves assistant message phase when rebuilding fallback replay history", async () => {
 		const payload = await captureAzurePayload({
 			messages: [
 				{ role: "user", content: "first user", timestamp: Date.now() },
@@ -585,13 +400,14 @@ describe("azure openai responses streaming", () => {
 				role: "assistant",
 				content: [{ type: "output_text", text: "Commentary answer", annotations: [] }],
 				status: "completed",
+				id: "msg_commentary",
 				phase: "final_answer",
 			},
 			{ role: "user", content: [{ type: "input_text", text: "follow-up" }] },
 		]);
 	});
 
-	it("drops legacy plain-string text signature ids when rebuilding fallback replay history", async () => {
+	it("keeps legacy plain-string text signatures when rebuilding fallback replay history", async () => {
 		const payload = await captureAzurePayload({
 			messages: [
 				{ role: "user", content: "first user", timestamp: Date.now() },
@@ -607,6 +423,7 @@ describe("azure openai responses streaming", () => {
 				role: "assistant",
 				content: [{ type: "output_text", text: "Legacy answer", annotations: [] }],
 				status: "completed",
+				id: "msg_legacy",
 			},
 			{ role: "user", content: [{ type: "input_text", text: "follow-up" }] },
 		]);

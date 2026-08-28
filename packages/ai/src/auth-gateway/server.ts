@@ -19,7 +19,7 @@
  */
 
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { extractHttpStatusFromError, extractRetryHint, isRecord, logger } from "@oh-my-pi/pi-utils";
+import { extractHttpStatusFromError, extractRetryHint, logger } from "@oh-my-pi/pi-utils";
 import type { ApiKeyResolver } from "../auth-retry";
 import type { AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
@@ -27,30 +27,10 @@ import { classifyGatewayError } from "../error/gateway";
 import { isUsageLimitOutcome } from "../error/rate-limit";
 import * as anthropicMessages from "../providers/anthropic-messages-server";
 import * as openaiChat from "../providers/openai-chat-server";
-import { decodeDataUri } from "../providers/openai-data-uri";
 import * as openaiResponses from "../providers/openai-responses-server";
-import { resolveResponsesComputerScreenshot } from "../providers/openai-shared";
 import * as piNative from "../providers/pi-native-server";
-import {
-	getUnreplayableInlineImageMimeType,
-	getUsableInlineImageMimeType,
-	isRemoteImageUrl,
-	normalizeImageMimeType,
-	REMOTE_COMPUTER_SCREENSHOT_MIME_TYPE,
-	resolveUsableInlineImage,
-	supportsComputerScreenshotReferences,
-	supportsProviderFileReference,
-	supportsRemoteImageUrls,
-} from "../providers/vision-guard";
 import { completeSimple, streamSimple } from "../stream";
-import type {
-	Api,
-	AssistantMessageEventStream,
-	Context,
-	Model,
-	SimpleStreamOptions,
-	ToolResultMessage,
-} from "../types";
+import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { parseBind } from "../utils/parse-bind";
 import {
@@ -96,173 +76,18 @@ const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
 	"/v1/responses": { module: openaiResponses, label: "openai-responses" },
 };
 
-function promoteComputerScreenshotImage(message: Record<string, unknown>, model: Model, imageUrl: string): boolean {
-	const decoded = decodeDataUri(imageUrl);
-	const decodedMimeType = decoded ? getUsableInlineImageMimeType(decoded) : undefined;
-	const placeholderSafeMimeType =
-		decoded && !decodedMimeType ? getUnreplayableInlineImageMimeType(decoded) : undefined;
-	const image = decodedMimeType
-		? { type: "image", ...decoded, mimeType: decodedMimeType }
-		: placeholderSafeMimeType
-			? { type: "image", ...decoded, mimeType: placeholderSafeMimeType }
-			: isRemoteImageUrl(imageUrl) &&
-					supportsRemoteImageUrls(model, { mimeType: REMOTE_COMPUTER_SCREENSHOT_MIME_TYPE })
-				? { type: "image", data: "", mimeType: REMOTE_COMPUTER_SCREENSHOT_MIME_TYPE, url: imageUrl }
-				: undefined;
-	if (!image) return false;
-	if (Array.isArray(message.content)) {
-		message.content.push(image);
-	} else if (typeof message.content === "string") {
-		message.content = message.content.length > 0 ? [{ type: "text", text: message.content }, image] : [image];
-	} else {
-		return false;
-	}
-	return true;
+function supportsOpenAIImageFileReferences(api: Api): boolean {
+	return api === "openai-responses" || api === "openai-codex-responses" || api === "azure-openai-responses";
 }
 
-function promoteComputerScreenshotFileId(message: Record<string, unknown>, model: Model, fileId: unknown): boolean {
-	const providerFile = { provider: "openai", id: fileId };
-	if (!supportsProviderFileReference(model, providerFile, { mimeType: REMOTE_COMPUTER_SCREENSHOT_MIME_TYPE })) {
-		return false;
-	}
-	const image = { type: "image", data: "", mimeType: REMOTE_COMPUTER_SCREENSHOT_MIME_TYPE, providerFile };
-	if (Array.isArray(message.content)) {
-		message.content.push(image);
-	} else if (typeof message.content === "string") {
-		message.content = message.content.length > 0 ? [{ type: "text", text: message.content }, image] : [image];
-	} else {
-		return false;
-	}
-	return true;
-}
-
-function validateComputerScreenshotReference(
-	message: Record<string, unknown>,
-	model: Model,
-	hasUsableSource: boolean,
-): string | undefined {
-	if (message.role !== "toolResult") return undefined;
-	const metadata = message.providerMetadata;
-	if (!isRecord(metadata) || metadata.type !== "computer") return undefined;
-	const screenshot = isRecord(metadata.screenshot) ? metadata.screenshot : undefined;
-	if (supportsComputerScreenshotReferences(model, screenshot)) return undefined;
-	if (hasUsableSource) {
-		const fallback = resolveResponsesComputerScreenshot(message as unknown as ToolResultMessage, model, false);
-		if (fallback) {
-			metadata.screenshot = fallback;
-		} else {
-			delete metadata.type;
-			delete metadata.screenshot;
+function hasOpenAIImageFileReference(context: Context): boolean {
+	for (const message of context.messages) {
+		if (message.role !== "toolResult") continue;
+		for (const block of message.content) {
+			if (block.type === "image" && block.providerFile?.provider === "openai") return true;
 		}
-		return undefined;
 	}
-	if (!screenshot) return undefined;
-	const fileId = screenshot.file_id;
-	const imageUrl = screenshot.image_url;
-	const hasFileId = fileId !== undefined;
-	const hasImageUrl = imageUrl !== undefined;
-	if (typeof imageUrl === "string" && promoteComputerScreenshotImage(message, model, imageUrl)) {
-		delete metadata.type;
-		delete metadata.screenshot;
-		return undefined;
-	}
-	if (hasFileId && promoteComputerScreenshotFileId(message, model, fileId)) {
-		delete metadata.type;
-		delete metadata.screenshot;
-		return undefined;
-	}
-	if (hasFileId) {
-		return `input_image.file_id cannot be forwarded to ${model.api}; target an OpenAI Responses model or use an inline data URL`;
-	}
-	if (hasImageUrl) {
-		return `input_image.image_url cannot be forwarded to ${model.api} without inline image data; use a data URL or target an API that supports remote image URLs`;
-	}
-	return undefined;
-}
-
-export function validateAndNormalizeImageReferences(context: Context, model: Model): string | undefined {
-	const messages: unknown[] = context.messages;
-	for (const [messageIndex, message] of messages.entries()) {
-		if (!isRecord(message)) return `\`context.messages[${messageIndex}]\` must be an object`;
-		if (message.role === "assistant") continue;
-		if (typeof message.content === "string") {
-			const computerScreenshotError = validateComputerScreenshotReference(message, model, false);
-			if (computerScreenshotError) return computerScreenshotError;
-			continue;
-		}
-		if (!Array.isArray(message.content)) {
-			return `\`context.messages[${messageIndex}].content\` must be a string or an array`;
-		}
-		const blocks: unknown[] = message.content;
-		let hasUsableImageSourceInMessage = false;
-		for (const [blockIndex, block] of blocks.entries()) {
-			if (!isRecord(block)) {
-				return `\`context.messages[${messageIndex}].content[${blockIndex}]\` must be an object`;
-			}
-			if (block.type !== "image") continue;
-			if (typeof block.data !== "string") {
-				return `\`context.messages[${messageIndex}].content[${blockIndex}].data\` must be a string`;
-			}
-			if (typeof block.mimeType !== "string") {
-				return `\`context.messages[${messageIndex}].content[${blockIndex}].mimeType\` must be a string`;
-			}
-
-			const data = block.data;
-			const mimeType = block.mimeType;
-			const inline = resolveUsableInlineImage({ data, mimeType });
-			const inlineMimeType = inline?.mimeType;
-			const hasInlineData = inline !== undefined;
-			if (inline) {
-				block.mimeType = inline.mimeType;
-				block.data = inline.data;
-			}
-			const normalizedMimeType = inlineMimeType ?? normalizeImageMimeType(mimeType);
-			const hasProviderFileReference = block.providerFile !== undefined;
-			const providerFile = isRecord(block.providerFile) ? block.providerFile : undefined;
-			const hasSupportedProviderFileReference =
-				providerFile !== undefined &&
-				supportsProviderFileReference(model, providerFile, { mimeType: normalizedMimeType });
-			const hasUrlReference = block.url !== undefined;
-			if (hasUrlReference && typeof block.url !== "string") {
-				return `\`context.messages[${messageIndex}].content[${blockIndex}].url\` must be a string`;
-			}
-			const hasSupportedUrlReference =
-				typeof block.url === "string" &&
-				isRemoteImageUrl(block.url) &&
-				supportsRemoteImageUrls(model, { mimeType: normalizedMimeType });
-			if (hasInlineData || hasSupportedProviderFileReference || hasSupportedUrlReference) {
-				block.mimeType = normalizedMimeType;
-				hasUsableImageSourceInMessage = true;
-			}
-
-			if (hasProviderFileReference && !hasSupportedProviderFileReference) delete block.providerFile;
-			if (hasUrlReference && !hasSupportedUrlReference) delete block.url;
-			if (hasInlineData || hasSupportedProviderFileReference || hasSupportedUrlReference) continue;
-
-			if (getUnreplayableInlineImageMimeType({ data, mimeType }) !== undefined) {
-				block.mimeType = normalizedMimeType;
-				hasUsableImageSourceInMessage = true;
-				continue;
-			}
-			if (providerFile?.provider === "openai") {
-				return `input_image.file_id cannot be forwarded to ${model.api}; target an OpenAI Responses model or use an inline data URL`;
-			}
-			if (hasUrlReference) {
-				return `input_image.image_url cannot be forwarded to ${model.api} without inline image data; use a data URL or target an API that supports remote image URLs`;
-			}
-			if (hasProviderFileReference) {
-				return `input_image.providerFile cannot be forwarded to ${model.api}; use inline image data or target the matching provider API`;
-			}
-			return `input_image cannot be forwarded to ${model.api} without non-empty image data or a supported reference`;
-		}
-		const computerScreenshotError = validateComputerScreenshotReference(
-			message,
-			model,
-			hasUsableImageSourceInMessage,
-		);
-		if (computerScreenshotError) return computerScreenshotError;
-	}
-	return undefined;
+	return false;
 }
 
 // (passthrough fast-path removed — it bypassed pi-ai provider logic, in
@@ -582,9 +407,12 @@ async function handleFormatEndpoint(
 		const message = error instanceof Error ? error.message : String(error);
 		return route.module.formatError(400, "invalid_request_error", message);
 	}
-	const imageReferenceError = validateAndNormalizeImageReferences(parsed.context, model);
-	if (imageReferenceError) {
-		return route.module.formatError(400, "invalid_request_error", imageReferenceError);
+	if (!supportsOpenAIImageFileReferences(model.api) && hasOpenAIImageFileReference(parsed.context)) {
+		return route.module.formatError(
+			400,
+			"invalid_request_error",
+			`input_image.file_id cannot be forwarded to ${model.api}; target an OpenAI Responses model or use image_url`,
+		);
 	}
 	// Merge gateway-captured passthrough headers under the parser's own
 	// captures. Parsers that set `options.headers` themselves win (they may
@@ -762,10 +590,6 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	const model = bootOpts.resolveModel(parsed.modelId);
 	if (!model) {
 		return piNative.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
-	}
-	const imageReferenceError = validateAndNormalizeImageReferences(parsed.context, model);
-	if (imageReferenceError) {
-		return piNative.formatError(400, "invalid_request_error", imageReferenceError);
 	}
 	// Pi-native already parsed `streamOpts.sessionId` (when set by the
 	// client); fall back to the derived key so credential-stickiness lines

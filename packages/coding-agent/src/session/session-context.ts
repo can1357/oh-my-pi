@@ -1,11 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import {
-	type CompactionSettings,
-	remotePreserveReplayable,
-	remotePreserveTargetIndependent,
-} from "@oh-my-pi/pi-agent-core/compaction";
-import { getOpenAiCompactionSerializationTarget } from "@oh-my-pi/pi-agent-core/compaction/openai";
-import { coerceServiceTierByFamily, type Model, type ProviderPayload, type ServiceTierByFamily } from "@oh-my-pi/pi-ai";
+import { coerceServiceTierByFamily, type ProviderPayload, type ServiceTierByFamily } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import {
 	createBranchSummaryMessage,
@@ -86,13 +80,6 @@ export interface SessionContext {
 	 * Only populated in transcript mode.
 	 */
 	cacheMissExplainedAt?: boolean[];
-	/**
-	 * Whether the resolved path emits at least one message after dangling
-	 * tool-call and aborted-turn cleanup. Populated on every build so
-	 * `metadataOnly` callers can answer "is this session empty?" without
-	 * receiving the messages.
-	 */
-	hasMessages?: boolean;
 }
 
 /** Lists session model strings to try when restoring, in fallback order. */
@@ -125,8 +112,6 @@ export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEnt
 }
 
 export interface BuildSessionContextOptions {
-	activeModel?: Model;
-	compactionSettings?: CompactionSettings;
 	/**
 	 * Build the display transcript instead of the LLM context. By default this
 	 * preserves every path entry with compactions inline; set
@@ -145,20 +130,6 @@ export interface BuildSessionContextOptions {
 	 * hides the call the agent is still waiting on.
 	 */
 	keepDanglingToolCalls?: boolean;
-	/**
-	 * Read session settings/mode/models without receiving messages. Callers that
-	 * run before the active model is resolved use this so a target-bound remote
-	 * compaction is not handed downstream as a re-expanded message array.
-	 */
-	metadataOnly?: boolean;
-	/**
-	 * Fingerprint of the endpoint the next request will actually reach, resolved
-	 * from the active credential. Supplied by callers that build context after
-	 * credential resolution so a dynamically routed endpoint change re-expands
-	 * the originals here rather than stranding them behind a serializer that
-	 * fails closed.
-	 */
-	activeRequestTarget?: string;
 }
 
 /**
@@ -190,24 +161,12 @@ export function getOpenAiRemoteCompactionPayload(
 ): ProviderPayload | undefined {
 	const candidate = compaction?.preserveData?.openaiRemoteCompaction;
 	if (!candidate || typeof candidate !== "object") return undefined;
-	const remote = candidate as {
-		provider?: unknown;
-		referenceTarget?: unknown;
-		replayTarget?: unknown;
-		requestTarget?: unknown;
-		replacementHistory?: unknown;
-	};
+	const remote = candidate as { provider?: unknown; replacementHistory?: unknown };
 	if (typeof remote.provider !== "string" || remote.provider.length === 0) return undefined;
 	if (!Array.isArray(remote.replacementHistory)) return undefined;
-	const serializationTarget = getOpenAiCompactionSerializationTarget({
-		referenceTarget: typeof remote.referenceTarget === "string" ? remote.referenceTarget : undefined,
-		replayTarget: typeof remote.replayTarget === "string" ? remote.replayTarget : undefined,
-		requestTarget: typeof remote.requestTarget === "string" ? remote.requestTarget : undefined,
-	});
 	return {
 		type: "openaiResponsesHistory",
 		provider: remote.provider,
-		...(serializationTarget !== undefined ? { referenceTarget: serializationTarget } : {}),
 		items: remote.replacementHistory as Array<Record<string, unknown>>,
 	};
 }
@@ -313,14 +272,7 @@ export function buildSessionContext(
 				models.default = `${entry.message.provider}/${entry.message.model}`;
 			}
 		} else if (entry.type === "compaction") {
-			const remoteCompaction = getOpenAiRemoteCompactionPayload(entry);
-			const canReplay =
-				options?.transcript === true ||
-				remoteCompaction === undefined ||
-				(options?.activeModel !== undefined
-					? remotePreserveReplayable(entry.preserveData, options.activeModel, options.activeRequestTarget)
-					: remotePreserveTargetIndependent(entry.preserveData));
-			if (canReplay) compaction = entry;
+			compaction = entry;
 		} else if (entry.type === "ttsr_injection") {
 			// Collect injected TTSR rule names
 			for (const ruleName of entry.injectedRules) {
@@ -345,8 +297,6 @@ export function buildSessionContext(
 	// 1. Emit summary first (entry = compaction)
 	// 2. Emit kept messages (from firstKeptEntryId up to compaction)
 	// 3. Emit messages after compaction
-	const metadataOnly = options?.metadataOnly === true;
-	let survivingMessageEmitted = false;
 	const messages: AgentMessage[] = [];
 	const cacheMissExplainedAt: boolean[] = [];
 	let pendingReset = false;
@@ -368,19 +318,6 @@ export function buildSessionContext(
 	};
 
 	const pushMessage = (msg: AgentMessage) => {
-		if (metadataOnly) {
-			// Only `assistant` and `toolResult` turns can be removed by the cleanup
-			// passes below, so any other role settles presence for good: drop the
-			// retained candidates and stop accumulating the rest of the path.
-			if (survivingMessageEmitted) return;
-			if (msg.role !== "assistant" && msg.role !== "toolResult") {
-				survivingMessageEmitted = true;
-				messages.length = 0;
-				return;
-			}
-			messages.push(msg);
-			return;
-		}
 		messages.push(msg);
 		if (!options?.transcript) return;
 		if (msg.role === "assistant") {
@@ -574,8 +511,7 @@ export function buildSessionContext(
 	// Those callers pass `keepDanglingToolCalls` so the in-flight call stays visible as
 	// a pending block instead of vanishing from the chat.)
 	const keepDangling = options?.transcript === true && options.keepDanglingToolCalls === true;
-	const presenceAlreadySettled = metadataOnly && survivingMessageEmitted;
-	if (!keepDangling && !presenceAlreadySettled) {
+	if (!keepDangling) {
 		const pairedToolResultIds = new Set<string>();
 		for (const message of messages) {
 			if (message.role === "toolResult") pairedToolResultIds.add(message.toolCallId);
@@ -622,7 +558,7 @@ export function buildSessionContext(
 	// Keep the interrupted-thinking continuity pair: convertToLlm strips the
 	// unsafe trailing thinking from that assistant and sends the hidden
 	// continuity note instead.
-	if (!options?.transcript && !presenceAlreadySettled) {
+	if (!options?.transcript) {
 		for (let i = messages.length - 1; i >= 0; i--) {
 			const message = messages[i];
 			if (message?.role !== "assistant") continue;
@@ -650,8 +586,7 @@ export function buildSessionContext(
 	}
 
 	return {
-		messages: metadataOnly ? [] : messages,
-		hasMessages: survivingMessageEmitted || messages.length > 0,
+		messages,
 		cacheMissExplainedAt: options?.transcript ? cacheMissExplainedAt : undefined,
 		thinkingLevel,
 		configuredThinkingLevel,

@@ -1,8 +1,7 @@
-import { createHash } from "node:crypto";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { ResponseInput, ResponseInputItem } from "./providers/openai-responses-wire";
 import { redactSensitiveCredentials } from "./providers/transform-messages";
-import type { CacheRetention, Model, OpenAIResponsesHistoryPayload, ProviderPayload } from "./types";
+import type { CacheRetention, OpenAIResponsesHistoryPayload, ProviderPayload } from "./types";
 
 type OpenAIResponsesReplayItem = ResponseInput[number];
 const NON_WHITESPACE_RE = /\S/;
@@ -447,376 +446,34 @@ export function createOpenAIResponsesHistoryPayload(
 	provider: string,
 	items: Array<Record<string, unknown>>,
 	incremental = true,
-	referenceTarget?: string,
 ): OpenAIResponsesHistoryPayload {
 	return {
 		type: "openaiResponsesHistory",
 		provider,
-		...(referenceTarget ? { referenceTarget } : {}),
 		...(incremental ? { dt: true } : {}),
 		items,
 	};
-}
-
-export function canonicalizeOpenAIResponsesReferenceBaseUrl(endpoint: string): string {
-	const value = endpoint.trim();
-	try {
-		const url = new URL(value);
-		const pathname = url.pathname.replace(/\/+$/, "");
-		const officialCodexHost =
-			url.protocol === "https:" && (url.hostname === "chatgpt.com" || url.hostname === "chat.openai.com");
-		url.hash = "";
-		if (
-			officialCodexHost &&
-			(pathname === "/backend-api/codex/responses" || pathname === "/backend-api/codex/responses/compact")
-		) {
-			url.pathname = "/backend-api";
-			return url.toString().replace(/\/$/, "");
-		}
-		for (const suffix of ["/responses/compact", "/responses"]) {
-			if (pathname.endsWith(suffix)) {
-				url.pathname = pathname.slice(0, -suffix.length) || "/";
-				return url.toString().replace(/\/$/, "");
-			}
-		}
-		url.pathname = pathname || "/";
-		return url.toString().replace(/\/$/, "");
-	} catch {
-		return value;
-	}
-}
-
-export function parseAzureDeploymentNameMap(value: string | undefined): Map<string, string> {
-	const map = new Map<string, string>();
-	if (!value) return map;
-	for (const entry of value.split(",")) {
-		const trimmed = entry.trim();
-		if (!trimmed) continue;
-		const [modelId, deploymentName] = trimmed.split("=", 2);
-		if (!modelId || !deploymentName) continue;
-		map.set(modelId.trim(), deploymentName.trim());
-	}
-	return map;
-}
-
-export function resolveOpenAIResponsesRequestModel(
-	model: Model,
-	requestModel = model.requestModelId ?? model.id,
-): string {
-	if (model.api !== "azure-openai-responses") return requestModel;
-	return parseAzureDeploymentNameMap($env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP).get(requestModel) ?? requestModel;
-}
-
-export interface AzureOpenAIEndpointOverrides {
-	azureBaseUrl?: string;
-	azureResourceName?: string;
-}
-
-export function resolveAzureOpenAIBaseUrl(model: Model, overrides?: AzureOpenAIEndpointOverrides): string | undefined {
-	const baseUrl = overrides?.azureBaseUrl?.trim() || $env.AZURE_OPENAI_BASE_URL?.trim() || undefined;
-	const resourceName = overrides?.azureResourceName || $env.AZURE_OPENAI_RESOURCE_NAME;
-	const resolvedBaseUrl =
-		baseUrl ?? (resourceName ? `https://${resourceName}.openai.azure.com/openai/v1` : undefined) ?? model.baseUrl;
-	return resolvedBaseUrl?.replace(/\/+$/, "");
-}
-
-/** Key-order-independent JSON so structurally equal routing configs hash alike. */
-export function canonicalJsonString(value: unknown): string {
-	const normalize = (input: unknown): unknown => {
-		if (Array.isArray(input)) return input.map(normalize);
-		if (!input || typeof input !== "object") return input;
-		const entries = Object.entries(input as Record<string, unknown>)
-			.filter(([, entryValue]) => entryValue !== undefined)
-			.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-		return Object.fromEntries(entries.map(([key, entryValue]) => [key, normalize(entryValue)]));
-	};
-	return JSON.stringify(normalize(value)) ?? "";
-}
-
-export interface OpenAIResponsesRoutingIdentityCompat<Router = unknown, Gateway = unknown> {
-	isOpenRouterHost?: boolean;
-	openRouterRouting?: Router;
-	isVercelGatewayHost?: boolean;
-	vercelGatewayRouting?: Gateway;
-}
-
-/**
- * Gateway routing configuration that actually reaches the wire, gating each
- * entry on the host flag the serializers use. Routing decides which upstream
- * serves the request, so it belongs to the replay target identity and to the
- * post-shaping wire check — one derivation keeps those in step.
- */
-export function resolveOpenAIResponsesRoutingIdentity<Router, Gateway>(
-	compat: OpenAIResponsesRoutingIdentityCompat<Router, Gateway> | undefined,
-): { openRouterRouting?: Router; vercelGatewayRouting?: Gateway } | undefined {
-	if (!compat) return undefined;
-	const identity: { openRouterRouting?: Router; vercelGatewayRouting?: Gateway } = {};
-	if (compat.isOpenRouterHost && compat.openRouterRouting !== undefined) {
-		identity.openRouterRouting = compat.openRouterRouting;
-	}
-	if (compat.isVercelGatewayHost && compat.vercelGatewayRouting !== undefined) {
-		identity.vercelGatewayRouting = compat.vercelGatewayRouting;
-	}
-	return identity.openRouterRouting === undefined && identity.vercelGatewayRouting === undefined
-		? undefined
-		: identity;
-}
-
-export interface OpenAIResponsesRoutingOverrides {
-	provider?: unknown;
-	providerOptions?: unknown;
-}
-
-const OPENAI_RESPONSES_ROUTING_FIELDS = ["provider", "providerOptions"] as const;
-
-/**
- * Routing selectors an `extraBody` supplies, carried by key presence rather than
- * by value. The serializer merges `extraBody` with `Object.assign`, so an
- * explicitly `undefined` key overwrites the configured selector and
- * `JSON.stringify` then drops the field entirely — the request reaches the
- * gateway's default upstream. The identity hash has to drop it too, or the
- * response is stamped for the configured upstream that never served it.
- */
-export function resolveOpenAIResponsesRoutingOverrides(
-	extraBody: Record<string, unknown> | undefined,
-): OpenAIResponsesRoutingOverrides {
-	const overrides: OpenAIResponsesRoutingOverrides = {};
-	if (!extraBody) return overrides;
-	for (const field of OPENAI_RESPONSES_ROUTING_FIELDS) {
-		if (Object.hasOwn(extraBody, field)) overrides[field] = extraBody[field];
-	}
-	return overrides;
-}
-
-interface OpenAIResponsesGatewayRoutingShape {
-	only?: unknown;
-	order?: unknown;
-}
-
-/**
- * Routing selectors in the exact shape the Responses serializer writes onto the
- * request body. Configured gateway routing is nested under `providerOptions
- * .gateway`, while an `extraBody` override supplies that field verbatim, so the
- * identity hash and the post-shaping wire check must both read the wire shape —
- * comparing the raw configuration would let two structurally different routes
- * share a fingerprint.
- */
-export function resolveOpenAIResponsesWireRouting<Router, Gateway extends OpenAIResponsesGatewayRoutingShape>(
-	compat: OpenAIResponsesRoutingIdentityCompat<Router, Gateway> | undefined,
-): OpenAIResponsesRoutingOverrides {
-	const identity = resolveOpenAIResponsesRoutingIdentity(compat);
-	if (!identity) return {};
-	if (compat?.isVercelGatewayHost) {
-		const routing = identity.vercelGatewayRouting;
-		if (!routing || (!routing.only && !routing.order)) return {};
-		const gateway: OpenAIResponsesGatewayRoutingShape = {};
-		if (routing.only) gateway.only = routing.only;
-		if (routing.order) gateway.order = routing.order;
-		return { providerOptions: { gateway } };
-	}
-	return identity.openRouterRouting !== undefined ? { provider: identity.openRouterRouting } : {};
-}
-
-export function getOpenAIResponsesReferenceTarget(
-	model: Model,
-	requestModel = resolveOpenAIResponsesRequestModel(model),
-	referenceBaseUrl = model.api === "azure-openai-responses" ? resolveAzureOpenAIBaseUrl(model) : model.baseUrl,
-	routingOverrides?: OpenAIResponsesRoutingOverrides,
-): string {
-	const supportsImageDetailOriginal =
-		!!model.compat &&
-		"supportsImageDetailOriginal" in model.compat &&
-		model.compat.supportsImageDetailOriginal === true;
-	const configuredRouting = resolveOpenAIResponsesWireRouting(
-		model.compat as OpenAIResponsesRoutingIdentityCompat<unknown, OpenAIResponsesGatewayRoutingShape> | undefined,
-	);
-	const routing: Record<string, unknown> = {};
-	if (configuredRouting.provider !== undefined) routing.provider = configuredRouting.provider;
-	if (configuredRouting.providerOptions !== undefined) routing.providerOptions = configuredRouting.providerOptions;
-	if (routingOverrides) {
-		for (const field of OPENAI_RESPONSES_ROUTING_FIELDS) {
-			if (!Object.hasOwn(routingOverrides, field)) continue;
-			const override = routingOverrides[field];
-			if (override === undefined) delete routing[field];
-			else routing[field] = override;
-		}
-	}
-	const identity = JSON.stringify({
-		api: model.api,
-		provider: model.provider,
-		baseUrl: referenceBaseUrl ? canonicalizeOpenAIResponsesReferenceBaseUrl(referenceBaseUrl) : "",
-		model: requestModel,
-		input: [...model.input].sort(),
-		supportsComputerUse: model.supportsComputerUse === true,
-		supportsImageDetailOriginal,
-		...(Object.keys(routing).length > 0 ? { routing: canonicalJsonString(routing) } : {}),
-	});
-	return `sha256:${createHash("sha256").update(identity).digest("hex")}`;
 }
 
 export function getOpenAIResponsesHistoryPayload(
 	providerPayload: ProviderPayload | undefined,
 	currentProvider: string,
 	fallbackProvider?: string,
-	currentReferenceTarget?: string,
 ): OpenAIResponsesHistoryPayload | undefined {
 	if (providerPayload?.type !== "openaiResponsesHistory" || !Array.isArray(providerPayload.items)) {
 		return undefined;
 	}
 	const payloadProvider = providerPayload.provider ?? fallbackProvider ?? currentProvider;
 	if (payloadProvider !== currentProvider) return undefined;
-	if (providerPayload.referenceTarget !== undefined && providerPayload.referenceTarget !== currentReferenceTarget) {
-		return undefined;
-	}
 	return { ...providerPayload, provider: payloadProvider };
-}
-
-/** Assistant output items whose `id` is minted by the endpoint that served the turn. */
-const ENDPOINT_OWNED_RESPONSES_ITEM_TYPES = new Set([
-	"reasoning",
-	"message",
-	"function_call",
-	"custom_tool_call",
-	"computer_call",
-]);
-
-function containsEncryptedResponsesState(value: unknown): boolean {
-	const pending: unknown[] = [value];
-	while (pending.length > 0) {
-		const current = pending.pop();
-		if (Array.isArray(current)) {
-			pending.push(...current);
-			continue;
-		}
-		if (!current || typeof current !== "object") continue;
-		const record = current as Record<string, unknown>;
-		if (typeof record.encrypted_content === "string" && record.encrypted_content.length > 0) return true;
-		pending.push(...Object.values(record));
-	}
-	return false;
-}
-
-/**
- * Whether assistant native history can only be resolved by the endpoint that
- * produced it. Reasoning items, encrypted reasoning state, and endpoint-minted
- * output-item ids are all opaque elsewhere, so history carrying any of them is
- * bound to its producing endpoint even when no `referenceTarget` stamp records
- * which endpoint that was.
- */
-export function openAIResponsesHistoryItemsAreEndpointOwned(items: readonly unknown[]): boolean {
-	for (const item of items) {
-		if (!item || typeof item !== "object") continue;
-		const record = item as Record<string, unknown>;
-		if (record.type === "reasoning") return true;
-		if (
-			typeof record.type === "string" &&
-			ENDPOINT_OWNED_RESPONSES_ITEM_TYPES.has(record.type) &&
-			typeof record.id === "string" &&
-			record.id.length > 0
-		) {
-			return true;
-		}
-		if (containsEncryptedResponsesState(record)) return true;
-	}
-	return false;
-}
-
-/**
- * Whether a stamped or legacy assistant payload belongs to an endpoint other
- * than the one about to be dispatched to. History persisted before reference
- * stamping existed carries no target at all, so a reroute cannot be detected by
- * comparing fingerprints; treat unstamped history that carries endpoint-owned
- * state as foreign instead of replaying it blind.
- */
-export function isOpenAIResponsesAssistantHistoryTargetOwned(
-	providerPayload: ProviderPayload | undefined,
-	currentReferenceTarget?: string,
-): boolean {
-	if (providerPayload?.type !== "openaiResponsesHistory" || !Array.isArray(providerPayload.items)) return false;
-	if (providerPayload.referenceTarget !== undefined) {
-		return providerPayload.referenceTarget !== currentReferenceTarget;
-	}
-	return openAIResponsesHistoryItemsAreEndpointOwned(providerPayload.items);
-}
-
-/**
- * Whether a canonical `textSignature` names an output item minted by the
- * endpoint that served the turn. Current producers encode the message id as a
- * versioned JSON envelope, while pre-envelope history stored the raw id in any
- * shape the endpoint used; `parseTextSignature` replays every non-empty
- * signature as an output-item id, so every one of them is endpoint-owned.
- */
-function responsesTextSignatureIsEndpointOwned(signature: unknown): boolean {
-	return typeof signature === "string" && signature.length > 0;
-}
-
-/**
- * Whether a canonical `thinkingSignature` carries a Responses reasoning item.
- * The serializer replays the parsed item verbatim, so its reasoning id and
- * encrypted content belong to the endpoint that minted them.
- */
-function responsesReasoningSignatureIsEndpointOwned(signature: unknown): boolean {
-	if (typeof signature !== "string" || signature.length === 0) return false;
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(signature);
-	} catch {
-		return false;
-	}
-	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
-	return openAIResponsesHistoryItemsAreEndpointOwned([parsed]);
-}
-
-/**
- * Whether an assistant turn's canonical replay signatures are endpoint-owned.
- * The canonical fallback re-encodes those signatures into the same reasoning
- * item and output-item id the native payload would have carried, so history
- * that reaches it without a trusted target stamp is foreign whenever either
- * signature is present.
- */
-export function openAIResponsesAssistantContentIsEndpointOwned(content: unknown): boolean {
-	if (!Array.isArray(content)) return false;
-	for (const block of content) {
-		if (!block || typeof block !== "object") continue;
-		const record = block as Record<string, unknown>;
-		if (record.type === "thinking" && responsesReasoningSignatureIsEndpointOwned(record.thinkingSignature)) {
-			return true;
-		}
-		if (record.type === "text" && responsesTextSignatureIsEndpointOwned(record.textSignature)) return true;
-	}
-	return false;
-}
-
-/**
- * Whether the canonical fallback for `assistant` would replay state owned by
- * another endpoint. A stamped payload settles the question on its own; without
- * one, the canonical signatures are the only record of who minted the reasoning
- * item and output-item ids the fallback is about to re-emit.
- */
-export function isOpenAIResponsesAssistantFallbackTargetOwned(
-	assistant: { providerPayload?: ProviderPayload; content: unknown },
-	currentReferenceTarget?: string,
-): boolean {
-	if (isOpenAIResponsesAssistantHistoryTargetOwned(assistant.providerPayload, currentReferenceTarget)) return true;
-	const providerPayload = assistant.providerPayload;
-	if (
-		providerPayload?.type === "openaiResponsesHistory" &&
-		Array.isArray(providerPayload.items) &&
-		providerPayload.referenceTarget !== undefined
-	) {
-		return false;
-	}
-	return openAIResponsesAssistantContentIsEndpointOwned(assistant.content);
 }
 
 export function getOpenAIResponsesHistoryItems(
 	providerPayload: ProviderPayload | undefined,
 	currentProvider: string,
 	fallbackProvider?: string,
-	currentReferenceTarget?: string,
 ): Array<Record<string, unknown>> | undefined {
-	return getOpenAIResponsesHistoryPayload(providerPayload, currentProvider, fallbackProvider, currentReferenceTarget)
-		?.items;
+	return getOpenAIResponsesHistoryPayload(providerPayload, currentProvider, fallbackProvider)?.items;
 }
 
 /**

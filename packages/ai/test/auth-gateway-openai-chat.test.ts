@@ -173,33 +173,6 @@ describe("auth-gateway openai-chat: parseRequest", () => {
 		expect(() => parseRequest({ model: "x" })).toThrow(/messages/);
 	});
 
-	it("rejects malformed data URIs without rejecting remote image references", () => {
-		for (const message of [
-			{
-				role: "user",
-				content: [{ type: "image_url", image_url: { url: "data:image/png;base64,!!!!" } }],
-			},
-			{
-				role: "tool",
-				tool_call_id: "call_1",
-				content: [{ type: "image_url", image_url: { url: "DATA:image/png;BASE64,!!!!" } }],
-			},
-		]) {
-			expect(() => parseRequest({ model: "m", messages: [message] })).toThrow(
-				"openai-chat: image_url contains a malformed data URI",
-			);
-		}
-
-		const remoteUrl = "https://images.example.invalid/read.png";
-		const parsed = parseRequest({
-			model: "m",
-			messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: remoteUrl } }] }],
-		});
-		const user = parsed.context.messages[0];
-		if (user?.role !== "user" || typeof user.content === "string") throw new Error("expected user content parts");
-		expect(user.content).toEqual([{ type: "text", text: `[image: ${remoteUrl}]` }]);
-	});
-
 	it("falls back to max_tokens when max_completion_tokens is absent", () => {
 		const parsed = parseRequest({ model: "m", messages: [], max_tokens: 256 });
 		expect(parsed.options.maxOutputTokens).toBe(256);

@@ -1,8 +1,5 @@
 import { describe, expect, it, spyOn } from "bun:test";
-import type { AssistantMessage, ModelSpec } from "@oh-my-pi/pi-ai";
-import { getOpenAIResponsesReferenceTarget } from "@oh-my-pi/pi-ai/utils";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { INTERRUPTED_THINKING_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type {
 	BranchSummaryEntry,
@@ -13,21 +10,6 @@ import type {
 	ThinkingLevelChangeEntry,
 } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import * as snapcompact from "@oh-my-pi/snapcompact";
-
-function buildResponsesModel(baseUrl = "https://api.openai.com/v1") {
-	return buildModel({
-		id: "gpt-5.4",
-		name: "GPT-5.4",
-		api: "openai-responses",
-		provider: "openai",
-		baseUrl,
-		reasoning: false,
-		input: ["text", "image"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 32_768,
-		maxTokens: 4_096,
-	} satisfies ModelSpec<"openai-responses">);
-}
 
 function msg(id: string, parentId: string | null, role: "user" | "assistant", text: string): SessionMessageEntry {
 	const base = { type: "message" as const, id, parentId, timestamp: "2025-01-01T00:00:00Z" };
@@ -295,13 +277,11 @@ describe("buildSessionContext", () => {
 		});
 
 		it("uses preserved OpenAI replacement history instead of kept raw messages", () => {
-			const activeModel = buildResponsesModel();
 			const remoteCompaction: CompactionEntry = {
 				...compaction("3", "2", "Remote summary", "1"),
 				preserveData: {
 					openaiRemoteCompaction: {
 						provider: "openai",
-						replayTarget: getOpenAIResponsesReferenceTarget(activeModel),
 						replacementHistory: [
 							{ type: "message", role: "user", content: [{ type: "input_text", text: "Preserved user" }] },
 							{ type: "compaction", encrypted_content: "enc_123" },
@@ -316,198 +296,19 @@ describe("buildSessionContext", () => {
 				remoteCompaction,
 				msg("4", "3", "user", "after compact"),
 			];
-			const ctx = buildSessionContext(entries, undefined, undefined, { activeModel });
+			const ctx = buildSessionContext(entries);
 			expect(ctx.messages).toHaveLength(2);
 			expect(ctx.messages[0]?.role).toBe("compactionSummary");
 			if (ctx.messages[0]?.role !== "compactionSummary") throw new Error("Expected compaction summary message");
 			expect(ctx.messages[0].providerPayload).toEqual({
 				type: "openaiResponsesHistory",
 				provider: "openai",
-				referenceTarget: getOpenAIResponsesReferenceTarget(activeModel),
 				items: [
 					{ type: "message", role: "user", content: [{ type: "input_text", text: "Preserved user" }] },
 					{ type: "compaction", encrypted_content: "enc_123" },
 				],
 			});
 			expect((ctx.messages[1] as { content: string }).content).toBe("after compact");
-		});
-
-		it("keeps target-bound remote compaction unreadable without an active model", () => {
-			const targetBound: CompactionEntry = {
-				...compaction("3", "2", "Remote summary", "1"),
-				preserveData: {
-					openaiRemoteCompaction: {
-						provider: "openai",
-						replayTarget: "sha256:some-other-endpoint",
-						replacementHistory: [
-							{ type: "message", role: "user", content: [{ type: "input_text", text: "Preserved user" }] },
-						],
-						compactionItem: { type: "compaction", encrypted_content: "enc_123" },
-					},
-				},
-			};
-			const entries: SessionEntry[] = [
-				msg("1", null, "user", "first"),
-				msg("2", "1", "assistant", "response"),
-				targetBound,
-				msg("4", "3", "user", "after compact"),
-			];
-
-			const ctx = buildSessionContext(entries);
-			expect(ctx.messages.some(message => message.role === "compactionSummary")).toBe(false);
-			expect(ctx.messages.length).toBeGreaterThan(1);
-		});
-
-		it("keeps legacy encrypted remote compaction unreadable without an active model", () => {
-			const legacyEncrypted: CompactionEntry = {
-				...compaction("3", "2", "Remote summary", "1"),
-				preserveData: {
-					openaiRemoteCompaction: {
-						provider: "openai",
-						replacementHistory: [
-							{ type: "message", role: "user", content: [{ type: "input_text", text: "Preserved user" }] },
-							{ type: "compaction", encrypted_content: "enc_123" },
-						],
-						compactionItem: { type: "compaction", encrypted_content: "enc_123" },
-					},
-				},
-			};
-			const entries: SessionEntry[] = [
-				msg("1", null, "user", "first"),
-				msg("2", "1", "assistant", "response"),
-				legacyEncrypted,
-				msg("4", "3", "user", "after compact"),
-			];
-
-			const ctx = buildSessionContext(entries);
-			expect(ctx.messages.some(message => message.role === "compactionSummary")).toBe(false);
-			expect(ctx.messages.length).toBeGreaterThan(1);
-		});
-
-		it("replays remote compaction against the credential-resolved request target", () => {
-			const activeModel = buildResponsesModel();
-			const requestTarget = getOpenAIResponsesReferenceTarget(
-				activeModel,
-				undefined,
-				"https://api.copilot.example/v1",
-			);
-			const remoteCompaction: CompactionEntry = {
-				...compaction("3", "2", "Remote summary", "1"),
-				preserveData: {
-					openaiRemoteCompaction: {
-						provider: "openai",
-						replayTarget: getOpenAIResponsesReferenceTarget(activeModel),
-						requestTarget,
-						replacementHistory: [
-							{ type: "message", role: "user", content: [{ type: "input_text", text: "Preserved user" }] },
-							{ type: "compaction", encrypted_content: "enc_123" },
-						],
-						compactionItem: { type: "compaction", encrypted_content: "enc_123" },
-					},
-				},
-			};
-			const entries: SessionEntry[] = [
-				msg("1", null, "user", "first"),
-				msg("2", "1", "assistant", "response"),
-				remoteCompaction,
-				msg("4", "3", "user", "after compact"),
-			];
-
-			const ctx = buildSessionContext(entries, undefined, undefined, { activeModel });
-			const summary = ctx.messages.find(message => message.role === "compactionSummary");
-			expect(summary?.providerPayload).toMatchObject({
-				type: "openaiResponsesHistory",
-				provider: "openai",
-				referenceTarget: requestTarget,
-			});
-		});
-
-		it("re-expands remote compaction bound to a superseded credential-resolved endpoint", () => {
-			const activeModel = buildResponsesModel();
-			const previousEndpointTarget = getOpenAIResponsesReferenceTarget(
-				activeModel,
-				undefined,
-				"https://api.business.copilot.example/v1",
-			);
-			const currentEndpointTarget = getOpenAIResponsesReferenceTarget(
-				activeModel,
-				undefined,
-				"https://api.enterprise.copilot.example/v1",
-			);
-			const remoteCompaction: CompactionEntry = {
-				...compaction("3", "2", "Remote summary", "1"),
-				preserveData: {
-					openaiRemoteCompaction: {
-						provider: "openai",
-						replayTarget: getOpenAIResponsesReferenceTarget(activeModel),
-						requestTarget: previousEndpointTarget,
-						replacementHistory: [
-							{ type: "message", role: "user", content: [{ type: "input_text", text: "Preserved user" }] },
-							{ type: "compaction", encrypted_content: "enc_123" },
-						],
-						compactionItem: { type: "compaction", encrypted_content: "enc_123" },
-					},
-				},
-			};
-			const entries: SessionEntry[] = [
-				msg("1", null, "user", "first"),
-				msg("2", "1", "assistant", "response"),
-				remoteCompaction,
-				msg("4", "3", "user", "after compact"),
-			];
-
-			// The credential still resolves to the endpoint that issued the blob.
-			const sameEndpoint = buildSessionContext(entries, undefined, undefined, {
-				activeModel,
-				activeRequestTarget: previousEndpointTarget,
-			});
-			expect(
-				sameEndpoint.messages.find(message => message.role === "compactionSummary")?.providerPayload,
-			).toMatchObject({ type: "openaiResponsesHistory", referenceTarget: previousEndpointTarget });
-
-			// A refreshed credential moved the endpoint, so the originals come back
-			// instead of stranding behind a serializer that fails closed.
-			const movedEndpoint = buildSessionContext(entries, undefined, undefined, {
-				activeModel,
-				activeRequestTarget: currentEndpointTarget,
-			});
-			expect(movedEndpoint.messages.some(message => message.role === "compactionSummary")).toBe(false);
-			expect(movedEndpoint.messages.length).toBeGreaterThan(1);
-		});
-
-		it("answers message presence without materializing a target-bound remote compaction", () => {
-			const activeModel = buildResponsesModel();
-			const remoteCompaction: CompactionEntry = {
-				...compaction("3", "2", "Remote summary", "1"),
-				preserveData: {
-					openaiRemoteCompaction: {
-						provider: "openai",
-						replayTarget: "sha256:some-other-endpoint",
-						replacementHistory: [
-							{ type: "message", role: "user", content: [{ type: "input_text", text: "Preserved user" }] },
-						],
-						compactionItem: { type: "compaction", encrypted_content: "enc_123" },
-					},
-				},
-			};
-			const entries: SessionEntry[] = [
-				msg("1", null, "user", "first"),
-				msg("2", "1", "assistant", "response"),
-				remoteCompaction,
-				msg("4", "3", "user", "after compact"),
-			];
-
-			// The active model cannot replay this blob, so the full build re-expands
-			// the originals it summarized away.
-			const full = buildSessionContext(entries, undefined, undefined, { activeModel });
-			expect(full.messages.length).toBeGreaterThan(1);
-			expect(full.hasMessages).toBe(true);
-
-			const metadata = buildSessionContext(entries, undefined, undefined, { activeModel, metadataOnly: true });
-			expect(metadata.messages).toEqual([]);
-			expect(metadata.hasMessages).toBe(true);
-
-			expect(buildSessionContext([], undefined, undefined, { metadataOnly: true }).hasMessages).toBeFalsy();
 		});
 
 		it("caps snapcompact frame payload in LLM context but preserves transcript frames", () => {
@@ -877,86 +678,6 @@ describe("buildSessionContext", () => {
 	});
 
 	describe("edge cases", () => {
-		it("keeps an aborted turn preserved by its interrupted-thinking marker", () => {
-			const entries: SessionEntry[] = [
-				{
-					type: "message",
-					id: "a1",
-					parentId: null,
-					timestamp: "2025-01-01T00:00:00Z",
-					message: {
-						role: "assistant",
-						content: [{ type: "text", text: "partial answer" }],
-						api: "anthropic-messages",
-						provider: "anthropic",
-						model: "claude-test",
-						usage: {
-							input: 1,
-							output: 1,
-							cacheRead: 0,
-							cacheWrite: 0,
-							totalTokens: 2,
-							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-						},
-						stopReason: "aborted",
-						timestamp: 1,
-					},
-				},
-				{
-					type: "custom_message",
-					id: "c1",
-					parentId: "a1",
-					timestamp: "2025-01-01T00:00:01Z",
-					customType: INTERRUPTED_THINKING_MESSAGE_TYPE,
-					content: "resume where you left off",
-					display: false,
-				},
-			];
-
-			const full = buildSessionContext(entries);
-			expect(full.messages.map(message => message.role)).toEqual(["assistant", "custom"]);
-			expect(full.hasMessages).toBe(true);
-
-			const metadata = buildSessionContext(entries, undefined, undefined, { metadataOnly: true });
-			expect(metadata.messages).toEqual([]);
-			expect(metadata.hasMessages).toBe(true);
-		});
-
-		it("reports no messages when cleanup empties the model context", () => {
-			const abortedTurn: SessionMessageEntry = {
-				type: "message",
-				id: "a1",
-				parentId: null,
-				timestamp: "2025-01-01T00:00:00Z",
-				message: {
-					role: "assistant",
-					content: [{ type: "text", text: "partial answer" }],
-					api: "anthropic-messages",
-					provider: "anthropic",
-					model: "claude-test",
-					usage: {
-						input: 1,
-						output: 1,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 2,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					},
-					stopReason: "aborted",
-					timestamp: 1,
-				},
-			};
-			const entries: SessionEntry[] = [abortedTurn];
-
-			const full = buildSessionContext(entries);
-			expect(full.messages).toEqual([]);
-			expect(full.hasMessages).toBe(false);
-
-			const metadata = buildSessionContext(entries, undefined, undefined, { metadataOnly: true });
-			expect(metadata.messages).toEqual([]);
-			expect(metadata.hasMessages).toBe(false);
-		});
-
 		it("uses last entry when leafId not found", () => {
 			const entries: SessionEntry[] = [msg("1", null, "user", "hello"), msg("2", "1", "assistant", "hi")];
 			const ctx = buildSessionContext(entries, "nonexistent");

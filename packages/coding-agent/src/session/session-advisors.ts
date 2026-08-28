@@ -14,7 +14,6 @@ import {
 	type CompactionResult,
 	compact,
 	compactionContextTokens,
-	compactionPreparationHoldsForCandidate,
 	createCompactionSummaryMessage,
 	estimateTranscriptTokens,
 	NativeCompactionError,
@@ -1536,23 +1535,7 @@ export class SessionAdvisors {
 			this.#host.sessionId(),
 			advisor.slug,
 		);
-		// The compaction-history reuse check reads the head of this list as the
-		// model that will actually run, so drop leading candidates the session
-		// cannot authenticate.
-		let orderedCandidates = candidates;
-		for (let i = 0; i < candidates.length; i++) {
-			if (await this.#host.modelRegistry.getApiKey(candidates[i], advisorProviderSessionId, { signal })) {
-				orderedCandidates = candidates.slice(i);
-				break;
-			}
-		}
-		const preparation = prepareCompaction(
-			pathEntries,
-			compactionSettings,
-			advisorModel,
-			agent.tokenizer,
-			orderedCandidates,
-		);
+		const preparation = prepareCompaction(pathEntries, compactionSettings, advisorModel, agent.tokenizer);
 		if (!preparation) {
 			// Cannot prepare compaction, fallback to re-prime
 			return true;
@@ -1568,12 +1551,6 @@ export class SessionAdvisors {
 		// configured for snapcompact.
 
 		let compactResult: CompactionResult | undefined;
-		// A fallback candidate may run against a preparation rebuilt from the
-		// branch, whose retained tail differs from the head candidate's. Advisor
-		// state is replaced in memory rather than by entry id, so the retained
-		// messages must come from the preparation that actually produced the
-		// summary or messages it kept are dropped instead of summarized.
-		let winningPreparation = preparation;
 		let lastError: unknown;
 		let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
 		// Instrument the advisor's overflow-compaction one-shot like the primary
@@ -1586,17 +1563,9 @@ export class SessionAdvisors {
 			phase: "pre_turn",
 		});
 
-		for (const candidate of orderedCandidates) {
+		for (const candidate of candidates) {
 			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, advisorProviderSessionId, { signal });
 			if (!apiKey) continue;
-			// Execution can fall through past the head candidate after an auth or
-			// native-compaction failure. Rebuild the boundary for the candidate that
-			// actually runs so it never commits a summary that hides originals the
-			// head candidate could have replayed natively.
-			const candidatePreparation = compactionPreparationHoldsForCandidate(preparation, advisorModel, candidate)
-				? preparation
-				: (prepareCompaction(pathEntries, compactionSettings, advisorModel, agent.tokenizer, [candidate]) ??
-					preparation);
 			if (
 				nativeCompactionFailure &&
 				(candidate.provider !== nativeCompactionFailure.provider ||
@@ -1616,7 +1585,7 @@ export class SessionAdvisors {
 				: undefined;
 			try {
 				compactResult = await compact(
-					candidatePreparation,
+					preparation,
 					candidate,
 					this.#host.modelRegistry.resolver(candidate, advisorProviderSessionId),
 					undefined,
@@ -1634,7 +1603,6 @@ export class SessionAdvisors {
 						codexCompaction,
 					},
 				);
-				winningPreparation = candidatePreparation;
 				break;
 			} catch (error) {
 				if (signal.aborted) throw error;
@@ -1663,14 +1631,14 @@ export class SessionAdvisors {
 		// The retained messages still carry provider usage from before this
 		// compaction. Record their exact array boundary on the in-memory summary so
 		// only assistants appended afterward can become the next usage anchor.
-		const advisorUsageAnchorStartIndex = winningPreparation.recentMessages.length + 1;
+		const advisorUsageAnchorStartIndex = preparation.recentMessages.length + 1;
 		const summaryMessage = {
 			...createCompactionSummaryMessage(summary, tokensBefore, new Date().toISOString(), { shortSummary }),
 			firstKeptEntryId,
 			advisorUsageAnchorStartIndex,
 		} satisfies AdvisorCompactionSummaryMessage;
 
-		agent.replaceMessages([summaryMessage, ...winningPreparation.recentMessages]);
+		agent.replaceMessages([summaryMessage, ...preparation.recentMessages]);
 		return false;
 	}
 	/**

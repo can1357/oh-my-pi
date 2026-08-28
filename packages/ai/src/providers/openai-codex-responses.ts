@@ -48,9 +48,6 @@ import {
 	createOpenAIResponsesHistoryPayload,
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
-	getOpenAIResponsesReferenceTarget,
-	isOpenAIResponsesAssistantFallbackTargetOwned,
-	isOpenAIResponsesAssistantHistoryTargetOwned,
 	normalizeSystemPrompts,
 	sanitizeOpenAIResponsesAssistantFallbackItemsForReplay,
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
@@ -105,8 +102,6 @@ import {
 	appendResponsesToolResultMessages,
 	applyOpenAIServiceTier,
 	applyReasoningSummaryDone,
-	assertCompatibleCompactionHistory,
-	assertResponsesWireRoutingUnchanged,
 	buildResponsesDeltaInput,
 	computerCallMetadata,
 	convertResponsesAssistantMessage,
@@ -122,7 +117,6 @@ import {
 	finalizeToolCallArgumentsDone,
 	getOpenAIPromptCacheKey,
 	hasExecutableIncompleteResponsesToolCalls,
-	hoistInterleavedResponsesToolBatchMessages,
 	isOpenAIResponsesProgressEvent,
 	mapOpenAIResponsesStopReason,
 	normalizeOpenAIPromptCacheKey,
@@ -1794,7 +1788,6 @@ async function openCodexWebSocketTransport(
 	if (requestContext.turnState.value) {
 		websocketClientMetadata[X_CODEX_TURN_STATE_HEADER] = requestContext.turnState.value;
 	}
-	const expectedWireModel = chainedBody.model;
 	let websocketRequest = {
 		type: "response.create",
 		...chainedBody,
@@ -1804,7 +1797,6 @@ async function openCodexWebSocketTransport(
 	if (replacementWebsocketRequest !== undefined) {
 		websocketRequest = replacementWebsocketRequest as typeof websocketRequest;
 	}
-	assertResponsesWireRoutingUnchanged(websocketRequest, { model: expectedWireModel }, model.api);
 	recordCodexTurnRequestDiagnostics(websocketState, websocketRequest, "websocket", canAppendBeforeRequest);
 	const websocketHeaders = createCodexHeaders(
 		requestContext.requestHeaders,
@@ -1927,13 +1919,11 @@ async function openCodexSseTransport(
 		);
 	};
 	const canAppendBeforeRequest = state?.canAppend === true;
-	const expectedWireModel = body.model;
 	let wireBody = body;
 	const replacementWireBody = await options?.onPayload?.(wireBody, model);
 	if (replacementWireBody !== undefined) {
 		wireBody = replacementWireBody as RequestBody;
 	}
-	assertResponsesWireRoutingUnchanged(wireBody, { model: expectedWireModel }, model.api);
 	recordCodexTurnRequestDiagnostics(state, wireBody, "sse", canAppendBeforeRequest);
 	return { eventStream: await open(wireBody), requestBodyForState: structuredCloneJSON(wireBody), transport: "sse" };
 }
@@ -2954,12 +2944,7 @@ class CodexStreamProcessor {
 			throw new CodexProviderStreamError("Codex response failed", false);
 		}
 
-		output.providerPayload = createOpenAIResponsesHistoryPayload(
-			this.model.provider,
-			this.runtime.nativeOutputItems,
-			true,
-			getOpenAIResponsesReferenceTarget(this.model),
-		);
+		output.providerPayload = createOpenAIResponsesHistoryPayload(this.model.provider, this.runtime.nativeOutputItems);
 		output.duration = performance.now() - this.startTime;
 		if (completion.firstTokenTime) {
 			output.ttft = completion.firstTokenTime - this.startTime;
@@ -4517,15 +4502,7 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 		return `${normalizedCallId}|${normalizedItemId}`;
 	};
 
-	const transformedMessages = transformMessages(
-		context.messages,
-		model,
-		normalizeToolCallId,
-		undefined,
-		undefined,
-		undefined,
-		{ preserveOrphanToolResultImages: true },
-	);
+	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
 	// gpt-5.x reject raw Harmony control-token spellings anywhere in replayed
 	// input, including the model's own tool-call arguments (#6913).
 	const escapeControlTokens = isHarmonyDialectModel(model);
@@ -4536,34 +4513,28 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 	const customCallIds = new Set<string>();
 	const knownCallIds = new Set<string>();
 	const computerCallIds = new Set<string>();
-	const addCallIds = (items: ResponseInput): void => {
-		for (const item of items) {
-			if (item.type === "custom_tool_call") customCallIds.add(item.call_id);
-			if (item.type === "computer_call") computerCallIds.add(item.call_id);
-			if ((item.type === "function_call" || item.type === "custom_tool_call") && item.call_id) {
-				knownCallIds.add(item.call_id);
-			}
-		}
-	};
-	const referenceTarget = getOpenAIResponsesReferenceTarget(model);
 
 	for (const msg of transformedMessages) {
 		if (msg.role === "user" || msg.role === "developer") {
 			const providerPayload = (msg as { providerPayload?: AssistantMessage["providerPayload"] }).providerPayload;
-			assertCompatibleCompactionHistory(providerPayload, model.provider, referenceTarget);
-			const historyItems = getOpenAIResponsesHistoryItems(
-				providerPayload,
-				model.provider,
-				undefined,
-				referenceTarget,
-			) as Array<ResponseInput[number]> | undefined;
+			const historyItems = getOpenAIResponsesHistoryItems(providerPayload, model.provider) as
+				| Array<ResponseInput[number]>
+				| undefined;
 			if (historyItems) {
 				const redactedHistoryItems = redactSensitiveInObject(historyItems).result as Array<ResponseInput[number]>;
 				const replayItems =
 					model.supportsComputerUse === true
 						? redactedHistoryItems
 						: unrollCodexComputerItems(redactedHistoryItems, model.compat.supportsImageDetailOriginal);
-				addCallIds(replayItems);
+				for (const item of replayItems) {
+					if (item.type === "custom_tool_call") {
+						customCallIds.add(item.call_id);
+					}
+					if (item.type === "computer_call") computerCallIds.add(item.call_id);
+					if ((item.type === "function_call" || item.type === "custom_tool_call") && item.call_id) {
+						knownCallIds.add(item.call_id);
+					}
+				}
 				messages.push(...(escapeControlTokens ? escapeReplayedControlTokens(replayItems) : replayItems));
 				msgIndex += 1;
 				continue;
@@ -4583,52 +4554,37 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 			// back to block re-encode, which strips foreign signatures.
 			const providerPayload =
 				assistantMsg.api === model.api && assistantMsg.model === model.id
-					? getOpenAIResponsesHistoryPayload(
-							assistantMsg.providerPayload,
-							model.provider,
-							assistantMsg.provider,
-							referenceTarget,
-						)
+					? getOpenAIResponsesHistoryPayload(assistantMsg.providerPayload, model.provider, assistantMsg.provider)
 					: undefined;
-			// A payload that fails the target check is endpoint-owned: its reasoning
-			// ids, encrypted content, and item ids belong to the endpoint that minted
-			// them and must not leak through the canonical fallback. Legacy history
-			// carries no stamp, so its own endpoint-owned state marks it foreign.
-			const targetOwnedHistoryRejected = isOpenAIResponsesAssistantHistoryTargetOwned(
-				assistantMsg.providerPayload,
-				referenceTarget,
-			);
-			// Legacy turns reach the fallback with no payload at all, so their
-			// canonical signatures are the only record of the endpoint that minted
-			// the reasoning item and message id it would re-emit.
-			const targetOwnedFallbackRejected = isOpenAIResponsesAssistantFallbackTargetOwned(
-				assistantMsg,
-				referenceTarget,
-			);
 			const historyItems = providerPayload?.items as Array<Record<string, unknown>> | undefined;
 			let suppressHiddenEmptyFallback = false;
 			if (historyItems) {
 				const sanitizedHistoryItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(historyItems);
-				if (sanitizedHistoryItems && !targetOwnedHistoryRejected) {
+				if (sanitizedHistoryItems) {
 					const rawReplayItems =
 						model.supportsComputerUse === true
 							? sanitizedHistoryItems
 							: unrollCodexComputerItems(sanitizedHistoryItems, model.compat.supportsImageDetailOriginal);
 					const replayItems = escapeControlTokens ? escapeReplayedControlTokens(rawReplayItems) : rawReplayItems;
+					for (const item of replayItems) {
+						if (item.type === "custom_tool_call") {
+							customCallIds.add(item.call_id);
+						}
+						if (item.type === "computer_call") computerCallIds.add(item.call_id);
+						if ((item.type === "function_call" || item.type === "custom_tool_call") && item.call_id) {
+							knownCallIds.add(item.call_id);
+						}
+					}
 					if (providerPayload?.dt) {
-						addCallIds(replayItems);
 						messages.push(...replayItems);
 					} else {
 						messages.splice(0, messages.length, ...replayItems);
-						knownCallIds.clear();
-						customCallIds.clear();
-						computerCallIds.clear();
-						addCallIds(replayItems);
+						// Keep customCallIds from the pre-splice state since historyItems may re-introduce them.
 					}
 					msgIndex += 1;
 					continue;
 				}
-				if (!sanitizedHistoryItems) suppressHiddenEmptyFallback = true;
+				suppressHiddenEmptyFallback = true;
 			}
 
 			const convertedOutputItems = convertResponsesAssistantMessage(
@@ -4636,15 +4592,12 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 				model,
 				msgIndex,
 				knownCallIds,
-				!suppressHiddenEmptyFallback && !targetOwnedFallbackRejected,
+				!suppressHiddenEmptyFallback,
 				customCallIds,
 				false,
 				true,
 				undefined,
 				computerCallIds,
-				false,
-				false,
-				targetOwnedFallbackRejected,
 			);
 			const outputItems = suppressHiddenEmptyFallback
 				? sanitizeOpenAIResponsesAssistantFallbackItemsForReplay(convertedOutputItems)
@@ -4673,7 +4626,7 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 		msgIndex += 1;
 	}
 
-	return hoistInterleavedResponsesToolBatchMessages(messages);
+	return messages;
 }
 
 function normalizeInputMessageContent(
@@ -4698,7 +4651,6 @@ function normalizeInputMessageContent(
 			model.input.includes("image"),
 			model.compat.supportsImageDetailOriginal,
 			escapeControlTokens,
-			model,
 		) ?? []
 	);
 }

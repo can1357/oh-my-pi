@@ -3,8 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ModelSpec } from "@oh-my-pi/pi-ai";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ClaudeSessionStore } from "../src/session/claude-session-store";
 import { CodexSessionStore } from "../src/session/codex-session-store";
 import { persistForeignSession } from "../src/session/foreign-session-import";
@@ -285,28 +283,24 @@ describe("CodexSessionStore", () => {
 				compactionItem: replacementHistory[1],
 			},
 		});
-		// The imported compaction item carries encrypted Codex state that only the
-		// issuing endpoint can decrypt, and the import records no target, so it is
-		// never replayed as native history: the originals stay expanded instead.
-		expect(buildSessionContext(entries).messages.some(message => message.role === "compactionSummary")).toBe(false);
-		const activeContext = buildSessionContext(entries, undefined, undefined, { activeModel: codexActiveModel() });
+		const activeContext = buildSessionContext(entries);
 		expect(activeContext.messages.map(message => message.role)).toEqual([
-			"user",
-			"assistant",
-			"assistant",
-			"toolResult",
+			"compactionSummary",
 			"user",
 			"assistant",
 			"toolResult",
 			"assistant",
 		]);
-		expect(activeContext.messages[0]).toMatchObject({
-			role: "user",
-			content: [{ type: "text", text: "Inspect" }],
-		});
-		expect(activeContext.messages[4]).toMatchObject({
+		expect(activeContext.messages[1]).toMatchObject({
 			role: "user",
 			content: [{ type: "text", text: "Continue" }],
+		});
+		const activeSummary = activeContext.messages[0];
+		if (activeSummary?.role !== "compactionSummary") throw new Error("Missing active Codex compaction context");
+		expect(activeSummary.providerPayload).toEqual({
+			type: "openaiResponsesHistory",
+			provider: "openai-codex",
+			items: replacementHistory,
 		});
 		const transcript = buildSessionContext(entries, undefined, undefined, { transcript: true });
 		expect(transcript.messages.map(message => message.role)).toEqual([
@@ -339,21 +333,6 @@ describe("CodexSessionStore", () => {
 		expect(resultCount).toBe(2);
 	});
 });
-
-function codexActiveModel() {
-	return buildModel({
-		id: "gpt-5.3-codex",
-		name: "GPT-5.3 Codex",
-		api: "openai-codex-responses",
-		provider: "openai-codex",
-		baseUrl: "https://chatgpt.com/backend-api/codex/responses",
-		reasoning: true,
-		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 400_000,
-		maxTokens: 128_000,
-	} satisfies ModelSpec<"openai-codex-responses">);
-}
 
 describe("foreign session persistence", () => {
 	it("writes a fresh OMP identity with source provenance", async () => {

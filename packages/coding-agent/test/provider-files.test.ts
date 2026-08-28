@@ -17,20 +17,6 @@ import { createOpenAIFileClient } from "@oh-my-pi/pi-coding-agent/blob-broker/pr
 import type { FetchImpl } from "@oh-my-pi/pi-coding-agent/blob-broker/uploader-runtime";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
-async function withEnv(overrides: Record<string, string | undefined>, fn: () => void | Promise<void>): Promise<void> {
-	const previous = new Map<string, string | undefined>(Object.keys(overrides).map(key => [key, Bun.env[key]]));
-	const assign = (key: string, value: string | undefined): void => {
-		if (value === undefined) delete Bun.env[key];
-		else Bun.env[key] = value;
-	};
-	try {
-		for (const [key, value] of Object.entries(overrides)) assign(key, value);
-		await fn();
-	} finally {
-		for (const [key, value] of previous) assign(key, value);
-	}
-}
-
 interface RecordedRequest {
 	readonly url: string;
 	readonly init: RequestInit;
@@ -52,7 +38,7 @@ function testModel<TApi extends Api>(api: TApi, provider: string, baseUrl: strin
 }
 
 const openAIModel = testModel("openai-responses", "openai", "https://api.openai.com/v1");
-const anthropicModel = testModel("anthropic-messages", "anthropic", "https://api.anthropic.com/v1");
+const anthropicModel = testModel("anthropic-messages", "anthropic", "https://api.anthropic.com");
 const geminiModel = testModel("google-generative-ai", "google", "https://generativelanguage.googleapis.com/v1beta");
 const unsupportedModel = testModel("openai-responses", "openrouter", "https://openrouter.ai/api/v1");
 
@@ -288,30 +274,6 @@ describe("provider-native file clients", () => {
 		});
 	});
 
-	test("Gemini rejects a finalize response whose file URI is not a Files API resource", async () => {
-		const wire = scriptedFetch([
-			new Response(null, {
-				status: 200,
-				headers: { "X-Goog-Upload-URL": "https://upload.example.test/session/abc" },
-			}),
-			Response.json({
-				file: {
-					name: "files/gemini-1",
-					uri: "https://example.invalid/image.png",
-					mimeType: "image/png",
-					expirationTime: "2026-08-23T00:00:00.000Z",
-					state: "ACTIVE",
-				},
-			}),
-		]);
-		const client = createGeminiProviderFileClient(geminiModel, "gemini-secret", wire.fetch);
-		if (!client) throw new Error("Expected the official Gemini model to support native files");
-
-		await expect(client.upload({ bytes: new Uint8Array([1, 2, 3]), mimeType: "image/png" })).rejects.toThrow(
-			"invalid file.uri",
-		);
-	});
-
 	test("all clients reject compatible-looking non-official endpoints before network access", () => {
 		let requestCount = 0;
 		const forbiddenFetch: FetchImpl = async () => {
@@ -336,45 +298,6 @@ describe("provider-native file clients", () => {
 				forbiddenFetch,
 			),
 		).toBeNull();
-		expect(requestCount).toBe(0);
-	});
-
-	test("the Anthropic client follows the endpoint the request actually resolves to", async () => {
-		let requestCount = 0;
-		const forbiddenFetch: FetchImpl = async () => {
-			requestCount++;
-			throw new Error("A rejected model must not reach the network");
-		};
-
-		await withEnv(
-			{ ANTHROPIC_BASE_URL: undefined, CLAUDE_CODE_USE_FOUNDRY: undefined, FOUNDRY_BASE_URL: undefined },
-			() => {
-				expect(createAnthropicFileClient(anthropicModel, "secret", forbiddenFetch)).not.toBeNull();
-			},
-		);
-
-		await withEnv(
-			{
-				ANTHROPIC_BASE_URL: "https://gateway.example.test",
-				CLAUDE_CODE_USE_FOUNDRY: undefined,
-				FOUNDRY_BASE_URL: undefined,
-			},
-			() => {
-				expect(createAnthropicFileClient(anthropicModel, "secret", forbiddenFetch)).toBeNull();
-			},
-		);
-
-		await withEnv(
-			{
-				ANTHROPIC_BASE_URL: undefined,
-				CLAUDE_CODE_USE_FOUNDRY: "true",
-				FOUNDRY_BASE_URL: "https://resource.services.ai.azure.com/anthropic",
-			},
-			() => {
-				expect(createAnthropicFileClient(anthropicModel, "secret", forbiddenFetch)).toBeNull();
-			},
-		);
-
 		expect(requestCount).toBe(0);
 	});
 });

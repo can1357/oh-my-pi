@@ -28,7 +28,7 @@ import type {
 	Tool,
 	ToolCall,
 } from "../types";
-import { decodeDataUri, isDataUri } from "./openai-data-uri";
+import { decodeDataUri } from "./openai-data-uri";
 import {
 	type OpenAIResponsesComputerCallItem,
 	type OpenAIResponsesComputerCallOutputItem,
@@ -44,12 +44,6 @@ import {
 	openaiResponsesRequestSchema,
 } from "./openai-responses-server-schema";
 import { encodeTextSignatureV1, parseTextSignature } from "./openai-shared";
-import {
-	getUnreplayableInlineImageMimeType,
-	getUsableInlineImageMimeType,
-	isRemoteImageUrl,
-	REMOTE_COMPUTER_SCREENSHOT_MIME_TYPE,
-} from "./vision-guard";
 
 export type { ParsedRequest };
 
@@ -334,27 +328,13 @@ function functionOutputContent(output: string | readonly unknown[] | undefined):
 		if (blockType === "input_image") {
 			flushLegacyText();
 			const imageUrl = asString(raw.image_url) || undefined;
-			const fileId = asString(raw.file_id) || undefined;
-			const hasDataScheme = imageUrl ? isDataUri(imageUrl) : false;
-			const remoteImageUrl = imageUrl && !hasDataScheme && isRemoteImageUrl(imageUrl) ? imageUrl : undefined;
 			const decoded = imageUrl ? decodeDataUri(imageUrl) : undefined;
-			const decodedMimeType = decoded ? getUsableInlineImageMimeType(decoded) : undefined;
 			const detail =
 				raw.detail === "auto" || raw.detail === "low" || raw.detail === "high" || raw.detail === "original"
 					? raw.detail
 					: undefined;
-			const placeholderSafeMimeType =
-				decoded && !decodedMimeType ? getUnreplayableInlineImageMimeType(decoded) : undefined;
-			if (decoded && decodedMimeType) {
-				content.push({ type: "image", ...decoded, mimeType: decodedMimeType, ...(detail ? { detail } : {}) });
-			} else if (decoded && placeholderSafeMimeType) {
-				content.push({
-					type: "image",
-					...decoded,
-					mimeType: placeholderSafeMimeType,
-					...(detail ? { detail } : {}),
-					...(fileId ? { providerFile: { provider: "openai" as const, id: fileId } } : {}),
-				});
+			if (decoded) {
+				content.push({ type: "image", ...decoded, ...(detail ? { detail } : {}) });
 			} else {
 				const referenceImage: ImageContent = {
 					type: "image",
@@ -362,18 +342,12 @@ function functionOutputContent(output: string | readonly unknown[] | undefined):
 					mimeType: "application/octet-stream",
 					...(detail ? { detail } : {}),
 				};
-				if (hasDataScheme) {
-					content.push(
-						fileId ? { ...referenceImage, providerFile: { provider: "openai", id: fileId } } : referenceImage,
-					);
-				} else if (remoteImageUrl) {
-					content.push({
-						...referenceImage,
-						url: remoteImageUrl,
-						...(fileId ? { providerFile: { provider: "openai" as const, id: fileId } } : {}),
-					});
-				} else if (fileId) content.push({ ...referenceImage, providerFile: { provider: "openai", id: fileId } });
-				else content.push(referenceImage);
+				if (imageUrl) {
+					content.push({ ...referenceImage, url: imageUrl });
+				} else {
+					const fileId = asString(raw.file_id) || undefined;
+					if (fileId) content.push({ ...referenceImage, providerFile: { provider: "openai", id: fileId } });
+				}
 			}
 		}
 	}
@@ -563,38 +537,15 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 			}
 			if (effectiveType === "computer_call_output") {
 				const output = item as OpenAIResponsesComputerCallOutputItem;
-				const screenshot = output.output as ComputerScreenshotRef;
-				const decodedScreenshot =
-					typeof screenshot.image_url === "string" ? decodeDataUri(screenshot.image_url) : undefined;
-				const decodedScreenshotMimeType = decodedScreenshot
-					? getUsableInlineImageMimeType(decodedScreenshot)
-					: undefined;
-				const remoteScreenshotUrl =
-					typeof screenshot.image_url === "string" && isRemoteImageUrl(screenshot.image_url)
-						? screenshot.image_url
-						: undefined;
-				const screenshotContent: ImageContent[] =
-					decodedScreenshot && decodedScreenshotMimeType
-						? [{ type: "image", ...decodedScreenshot, mimeType: decodedScreenshotMimeType }]
-						: remoteScreenshotUrl
-							? [
-									{
-										type: "image",
-										data: "",
-										mimeType: REMOTE_COMPUTER_SCREENSHOT_MIME_TYPE,
-										url: remoteScreenshotUrl,
-									},
-								]
-							: [];
 				messages.push({
 					role: "toolResult",
 					toolCallId: output.call_id,
 					toolName: findToolNameById(messages, output.call_id) || "computer",
-					content: screenshotContent,
+					content: [],
 					isError: output.status === "failed",
 					providerMetadata: {
 						type: "computer",
-						screenshot,
+						screenshot: output.output as ComputerScreenshotRef,
 						acknowledgedSafetyChecks: (output.acknowledged_safety_checks ?? []) as ComputerSafetyCheck[],
 					},
 					timestamp: now,

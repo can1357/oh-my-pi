@@ -10,7 +10,6 @@
 
 import * as path from "node:path";
 import type { Context, ImageContent, Model } from "@oh-my-pi/pi-ai";
-import { resolveUsableInlineImage, supportsRemoteImageUrls } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { getBlobsDir, logger } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { Settings } from "../config/settings";
@@ -21,6 +20,7 @@ import {
 	contextHasProviderFiles,
 	decorateContextImages,
 	inlineContextImages,
+	supportsRemoteImageUrls,
 } from "./context-images";
 import { connectDaemonBlobBackend, type RenderCallbackHost } from "./daemon";
 import type { BlobBrokerWorkerConfig } from "./protocol";
@@ -333,47 +333,35 @@ export class ImageUrlService {
 		configs: readonly BlobBrokerWorkerConfig[],
 		backendKey: string,
 	): Promise<Context> {
-		if (configs.length === 0 || this.#quarantined.has(model.provider)) {
+		if (configs.length === 0 || this.#quarantined.has(model.provider) || !supportsRemoteImageUrls(model)) {
 			return context;
 		}
+		const backend = await this.#ensureBackend(configs, backendKey);
+		if (!backend) return context;
 
 		const byHash = new Map<string, ImageContent[]>();
-		const payloadByHash = new Map<string, { mimeType: string; data: string }>();
 		for (const message of context.messages) {
 			if (message.role !== "user" && message.role !== "developer" && message.role !== "toolResult") continue;
 			if (!Array.isArray(message.content)) continue;
 			for (const block of message.content) {
-				if (block.type !== "image" || block.url || block.providerFile) continue;
-				// A published url becomes the serializer's preferred source, so only
-				// bytes that already pass inline-image validation may be hoisted out
-				// of the request. Malformed and placeholder-safe formats stay inline
-				// and keep their fail-closed / `[unsupported image: ...]` handling.
-				const usable = resolveUsableInlineImage(block);
-				if (!usable || !supportsRemoteImageUrls(model, { ...block, mimeType: usable.mimeType })) continue;
-				const hash = contentHash(usable.data, usable.mimeType);
+				if (block.type !== "image" || block.url || block.providerFile || block.data.length === 0) continue;
+				const hash = contentHash(block.data, block.mimeType);
 				const group = byHash.get(hash);
 				if (group) group.push(block);
-				else {
-					byHash.set(hash, [block]);
-					payloadByHash.set(hash, usable);
-				}
+				else byHash.set(hash, [block]);
 			}
 		}
 		if (byHash.size === 0) return context;
-		const backend = await this.#ensureBackend(configs, backendKey);
-		if (!backend) return context;
 
 		const urlByBlock = new Map<ImageContent, string>();
 		await Promise.all(
 			[...byHash].map(async ([hash, blocks]) => {
-				const payload = payloadByHash.get(hash);
-				if (!payload) return;
 				let publication: BlobPublication | null;
 				try {
 					publication = await backend.ensureBlob(
 						hash,
-						payload.mimeType,
-						() => new Uint8Array(Buffer.from(payload.data, "base64")),
+						blocks[0].mimeType,
+						() => new Uint8Array(Buffer.from(blocks[0].data, "base64")),
 					);
 				} catch (error) {
 					logger.warn("blob-broker: backend publication failed", {

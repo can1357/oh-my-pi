@@ -27,16 +27,8 @@ import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { convertTools } from "@oh-my-pi/pi-ai/providers/openai-responses";
-import {
-	buildResponsesInput,
-	getOpenAIResponsesRequestTarget,
-	hoistInterleavedResponsesToolBatchMessages,
-	resolveOpenAICompatPolicy,
-} from "@oh-my-pi/pi-ai/providers/openai-shared";
-import {
-	getOpenAIResponsesReferenceTarget,
-	stripOpenAIResponsesOutputOnlyStatusesForReplay,
-} from "@oh-my-pi/pi-ai/utils";
+import { buildResponsesInput, resolveOpenAICompatPolicy } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { stripOpenAIResponsesOutputOnlyStatusesForReplay } from "@oh-my-pi/pi-ai/utils";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
@@ -54,20 +46,13 @@ import {
 	V2_RETAINED_MESSAGE_TOKEN_BUDGET,
 } from "./compaction-v2-streaming";
 import type { CompactionEntry, SessionEntry } from "./entries";
-import { NativeCompactionError, StrandedCompactionHistoryError } from "./errors";
+import { NativeCompactionError } from "./errors";
 import { type ConvertToLlm, createBranchSummaryMessage, createCustomMessage, defaultConvertToLlm } from "./messages";
 import {
 	buildOpenAiNativeHistory,
-	canReplayOpenAiCompactionHistory,
-	canReuseOpenAiCompactionHistory,
-	getOpenAiCompactionReferenceTarget,
 	getPreservedOpenAiRemoteCompactionData,
-	isOpenAiCompactionHistoryTargetIndependent,
-	producesRuntimeReplayableCompactionHistory,
-	producesRuntimeRequestReplayableCompactionHistory,
 	requestOpenAiRemoteCompaction,
 	requestRemoteCompaction,
-	resolveOpenAiCompactionReferenceModel,
 	shouldUseOpenAiRemoteCompaction,
 	trimRemoteCompactionInputToContextWindow,
 	withOpenAiRemoteCompactionPreserveData,
@@ -707,27 +692,6 @@ export interface SummaryOptions {
 	codexCompaction?: CodexCompactionContext;
 	/** Provider-visible tools for remote compaction transports that replay native tool history. */
 	tools?: Tool[];
-	/**
-	 * Active session model. Compaction may run through a different candidate
-	 * (a configured `compactionModel` or a fallback), so the runtime replay
-	 * fingerprint persisted alongside the preserved history must describe the
-	 * model that will actually consume it, not the compaction side model.
-	 * Defaults to the compaction model when omitted.
-	 */
-	runtimeModel?: Model;
-	/**
-	 * Session-level OpenRouter routing variant. It becomes part of the wire model
-	 * id, so the request target stamped onto preserved history must resolve it
-	 * exactly as the live stream does or replay fails closed on the next turn.
-	 */
-	openrouterVariant?: string;
-	/**
-	 * Fingerprint of the endpoint the ACTIVE session model resolved to. Compaction
-	 * may run through a side model whose credential cannot resolve the active
-	 * provider's endpoint at all, so the host supplies the target it already
-	 * resolved instead of letting the side key derive a wrong one.
-	 */
-	activeRequestTarget?: string;
 	/** Optional fetch implementation threaded into remote compaction calls. */
 	fetch?: FetchImpl;
 	/**
@@ -1294,93 +1258,27 @@ export interface CompactionPreparation {
  * by the active model — the model that assembles the request context on every
  * turn. A local compaction (no remote preserve) always can: it holds a real
  * textual summary. A remote compaction (V2 or V1) only can when the active model
- * matches the blob's effective API, provider, endpoint, request model, and replay
- * capabilities while remote replay is still enabled; otherwise the active model's
- * encoder drops the payload (see `getOpenAIResponsesHistoryPayload`) and only the
- * opaque placeholder summary survives, so the caller must re-expand the originals
- * into a portable local summary rather than strand that history.
+ * shares the blob's provider AND remote replay is still enabled; otherwise the
+ * active model's encoder drops the payload (see `getOpenAIResponsesHistoryPayload`)
+ * and only the opaque placeholder summary survives, so the caller must re-expand
+ * the originals into a portable local summary rather than strand that history.
  *
+ * Judged against the ACTIVE model, not the compaction candidate set: a role
+ * model (e.g. `modelRoles.smol`) that still maps to the blob's provider does not
+ * let the active model replay it, so keying reuse on "any candidate shares the
+ * provider" left a provider-switched session permanently context-less (#6343).
  */
 export function remotePreserveReusable(
 	preserveData: Record<string, unknown> | undefined,
 	activeModel: Model,
 	settings: CompactionSettings,
-	compactionModels: readonly Model[] = [],
-	resolvedRequestTarget?: string,
 ): boolean {
-	const v2Preserve = getCompactionV2PreserveData(preserveData);
-	const v1Preserve = getPreservedOpenAiRemoteCompactionData(preserveData);
-	if (!v2Preserve && !v1Preserve) return true;
+	const remote = getCompactionV2PreserveData(preserveData) ?? getPreservedOpenAiRemoteCompactionData(preserveData);
+	if (!remote) return true;
 	if (settings.remoteEnabled === false) return false;
-	if (!remotePreserveReplayable(preserveData, activeModel, resolvedRequestTarget)) return false;
-	const reusableByModel = (model: Model): boolean => {
-		if (settings.remoteStreamingV2Enabled !== false && shouldUseCompactionV2Streaming(model)) {
-			return !!v2Preserve && canReuseOpenAiCompactionHistory(v2Preserve, model, true);
-		}
-		if (!shouldUseOpenAiRemoteCompaction(model)) return false;
-		const v1Candidate = v1Preserve ?? v2Preserve;
-		return !!v1Candidate && canReuseOpenAiCompactionHistory(v1Candidate, model, false);
-	};
-	// `compactionModels` is the runner's ordered preference list, and only its
-	// head actually performs the next compaction. Requiring every entry to match
-	// let an unrelated role fallback veto a boundary the selected candidate can
-	// extend, which re-expanded and re-summarized the whole original prefix on
-	// every compaction.
-	return reusableByModel(compactionModels[0] ?? activeModel);
-}
-
-/**
- * Whether the pre-compaction prefix that `preparation` excluded is still
- * covered once `candidate` — rather than the head of the preference list the
- * boundary was chosen for — actually performs the compaction. A provider-native
- * boundary hides its originals behind an opaque placeholder summary, so a
- * candidate that cannot extend that payload must run against a preparation
- * rebuilt from the full branch instead of committing a summary that covers only
- * the recent tail.
- */
-export function compactionPreparationHoldsForCandidate(
-	preparation: CompactionPreparation,
-	activeModel: Model,
-	candidate: Model,
-	resolvedRequestTarget?: string,
-): boolean {
-	if (!preparation.previousPreserveData) return true;
-	return remotePreserveReusable(
-		preparation.previousPreserveData,
-		activeModel,
-		preparation.settings,
-		[candidate],
-		resolvedRequestTarget,
-	);
-}
-
-export function remotePreserveReplayable(
-	preserveData: Record<string, unknown> | undefined,
-	activeModel: Model,
-	resolvedRequestTarget?: string,
-): boolean {
-	const v2Preserve = getCompactionV2PreserveData(preserveData);
-	const v1Preserve = getPreservedOpenAiRemoteCompactionData(preserveData);
-	if (!v2Preserve && !v1Preserve) return true;
-	const runtimePreserve = v2Preserve ?? v1Preserve;
-	return (
-		runtimePreserve !== undefined &&
-		canReplayOpenAiCompactionHistory(runtimePreserve, activeModel, resolvedRequestTarget)
-	);
-}
-
-/**
- * Replayability for callers that have no active model to validate against, such
- * as transcript-adjacent context builds performed before model selection. Only
- * history with no target binding at all qualifies; target-bound blobs stay
- * unreadable until a model-scoped rebuild can check them.
- */
-export function remotePreserveTargetIndependent(preserveData: Record<string, unknown> | undefined): boolean {
-	const v2Preserve = getCompactionV2PreserveData(preserveData);
-	const v1Preserve = getPreservedOpenAiRemoteCompactionData(preserveData);
-	if (!v2Preserve && !v1Preserve) return true;
-	const runtimePreserve = v2Preserve ?? v1Preserve;
-	return runtimePreserve !== undefined && isOpenAiCompactionHistoryTargetIndependent(runtimePreserve);
+	if (remote.provider !== activeModel.provider) return false;
+	const v2Ok = settings.remoteStreamingV2Enabled !== false && shouldUseCompactionV2Streaming(activeModel);
+	return v2Ok || shouldUseOpenAiRemoteCompaction(activeModel);
 }
 
 /**
@@ -1399,18 +1297,11 @@ export function findReadableCompactionIndex(
 	pathEntries: SessionEntry[],
 	settings: CompactionSettings,
 	activeModel?: Model,
-	compactionModels?: readonly Model[],
-	resolvedRequestTarget?: string,
 ): number {
 	for (let i = pathEntries.length - 1; i >= 0; i--) {
 		if (pathEntries[i].type !== "compaction") continue;
 		const entry = pathEntries[i] as CompactionEntry;
-		if (
-			activeModel &&
-			!remotePreserveReusable(entry.preserveData, activeModel, settings, compactionModels, resolvedRequestTarget)
-		) {
-			continue;
-		}
+		if (activeModel && !remotePreserveReusable(entry.preserveData, activeModel, settings)) continue;
 		return i;
 	}
 	return -1;
@@ -1426,20 +1317,12 @@ export function prepareCompaction(
 	settings: CompactionSettings,
 	activeModel?: Model,
 	tokenizer: Tokenizer = new Tokenizer(activeModel),
-	compactionModels?: readonly Model[],
-	resolvedRequestTarget?: string,
 ): CompactionPreparation | undefined {
 	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
 		return undefined;
 	}
 
-	let prevCompactionIndex = findReadableCompactionIndex(
-		pathEntries,
-		settings,
-		activeModel,
-		compactionModels,
-		resolvedRequestTarget,
-	);
+	let prevCompactionIndex = findReadableCompactionIndex(pathEntries, settings, activeModel);
 
 	// Honor the latest `/clear` reset boundary. `/clear` records a
 	// `reset_boundary` marker and reports the model context empty, so compaction
@@ -1577,8 +1460,9 @@ function buildOpenAiResponsesCompactionInput(
 		}
 		nativeInput.push(item);
 	}
-	const combinedInput = previousReplacementHistory ? [...previousReplacementHistory, ...nativeInput] : nativeInput;
-	return stripOpenAIResponsesOutputOnlyStatusesForReplay(hoistInterleavedResponsesToolBatchMessages(combinedInput));
+	return stripOpenAIResponsesOutputOnlyStatusesForReplay(
+		previousReplacementHistory ? [...previousReplacementHistory, ...nativeInput] : nativeInput,
+	);
 }
 
 /**
@@ -1626,20 +1510,6 @@ function formatRemoteCompactionSummary(inputTokens: number): string {
 		"Remote compaction preserved provider-native history for this session." +
 		(inputTokens > 0 ? ` Compaction processed ${inputTokens} input tokens.` : "")
 	);
-}
-
-/**
- * Raised before a native compaction request is issued once the credential the
- * producer resolved proves it would post to an endpoint the runtime request
- * cannot read back. It is a routing decision rather than a remote failure, so
- * the caller falls through to portable local summarization without recording a
- * `NativeCompactionError`.
- */
-class UnreplayableCompactionProducerError extends Error {
-	constructor() {
-		super("Native compaction producer target differs from the resolved runtime request target");
-		this.name = "UnreplayableCompactionProducerError";
-	}
 }
 
 /**
@@ -1693,9 +1563,6 @@ export async function compact(
 		preferWebsockets: options?.preferWebsockets,
 		codexCompaction: options?.codexCompaction,
 		tools: options?.tools,
-		runtimeModel: options?.runtimeModel,
-		openrouterVariant: options?.openrouterVariant,
-		activeRequestTarget: options?.activeRequestTarget,
 		fetch: options?.fetch,
 		completeImpl: options?.completeImpl,
 	};
@@ -1712,13 +1579,6 @@ export async function compact(
 		? createSnapcompactArchiveMigrationMessage(previousSnapcompactArchiveText)
 		: undefined;
 
-	// The boundary the preparation chose can sit behind a provider-native
-	// compaction whose originals live only inside that opaque payload, which this
-	// reset drops. Whenever it does, the messages this call can still summarize
-	// are the recent tail alone.
-	const preservedNativeHistoryHidesOriginals =
-		getCompactionV2PreserveData(previousPreserveData) !== undefined ||
-		getPreservedOpenAiRemoteCompactionData(previousPreserveData) !== undefined;
 	let preserveData = withOpenAiRemoteCompactionPreserveData(previousPreserveData, undefined);
 	const remoteMessages: AgentMessage[] = [
 		...(snapcompactArchiveMigrationMessage ? [snapcompactArchiveMigrationMessage] : []),
@@ -1728,51 +1588,19 @@ export async function compact(
 	];
 	let usedRemoteCompaction = false;
 	let nativeCompactionError: unknown;
-	// Compaction may run on a side model or a compact-model override. Its native
-	// result is opaque, endpoint- and model-owned state that only the producing
-	// request target can read back, so a producer whose fingerprint differs from
-	// the one the active model dispatches with must not compact natively at all:
-	// the active model could never replay the result, so the request would be
-	// billed and reduce nothing. Those producers fall through to portable local
-	// summarization instead, which every target can read.
-	const runtimeReplayModel = summaryOptions.runtimeModel ?? model;
-	const producesRuntimeOwnedHistory = (streamingV2: boolean) =>
-		producesRuntimeReplayableCompactionHistory(model, runtimeReplayModel, streamingV2);
-	const resolveRuntimeRequestTarget = (key: string) =>
-		summaryOptions.activeRequestTarget ??
-		getOpenAIResponsesRequestTarget(runtimeReplayModel, key, {
-			openrouterVariant: summaryOptions.openrouterVariant,
-		});
-	// The credential-free gate above cannot see endpoints that only the resolved
-	// credential selects, and the compaction transport resolves its endpoint from
-	// static model configuration alone. Re-check against the credential-resolved
-	// runtime request target — the fingerprint the serializer compares on replay —
-	// before the request is issued, so producer-bound state is never stamped as
-	// runtime-owned.
-	const resolveRuntimeOwnedRequestTarget = (key: string, streamingV2: boolean): string => {
-		const runtimeRequestTarget = resolveRuntimeRequestTarget(key);
-		if (!producesRuntimeRequestReplayableCompactionHistory(model, runtimeRequestTarget, streamingV2)) {
-			throw new UnreplayableCompactionProducerError();
-		}
-		return runtimeRequestTarget;
-	};
 	if (
 		settings.remoteEnabled !== false &&
 		settings.remoteStreamingV2Enabled !== false &&
-		shouldUseCompactionV2Streaming(model) &&
-		producesRuntimeOwnedHistory(true)
+		shouldUseCompactionV2Streaming(model)
 	) {
 		const previousRemoteCompaction = getCompactionV2PreserveData(previousPreserveData);
 		const previousReplacementHistory =
-			previousRemoteCompaction && canReuseOpenAiCompactionHistory(previousRemoteCompaction, model, true)
+			previousRemoteCompaction?.provider === model.provider
 				? previousRemoteCompaction.replacementHistory
 				: undefined;
-		const referenceModel = resolveOpenAiCompactionReferenceModel(model, true) as Model<
-			"openai-responses" | "azure-openai-responses" | "openai-codex-responses"
-		>;
 		const remoteHistory = buildOpenAiResponsesCompactionInput(
 			(summaryOptions.convertToLlm ?? defaultConvertToLlm)(remoteMessages),
-			referenceModel,
+			model,
 			previousReplacementHistory,
 		);
 		if (remoteHistory.length > 0) {
@@ -1805,65 +1633,41 @@ export async function compact(
 					promptCacheKey: summaryOptions.promptCacheKey,
 					retainedMessageBudget: settings.v2RetainedMessageBudget,
 				});
-				let v2RequestTarget: string | undefined;
 				const remote = await withAuth(
 					apiKey,
-					key => {
-						v2RequestTarget = resolveRuntimeOwnedRequestTarget(key, true);
-						return requestCompactionV2Streaming(model, key, request, signal, {
+					key =>
+						requestCompactionV2Streaming(model, key, request, signal, {
 							fetch: summaryOptions.fetch,
 							providerSessionState: summaryOptions.providerSessionState,
 							preferWebsockets: summaryOptions.preferWebsockets,
 							codexCompaction: summaryOptions.codexCompaction,
-						});
-					},
+						}),
 					{ signal },
 				);
-				preserveData = {
-					...(preserveData ?? {}),
-					...storeCompactionV2PreserveData(
-						remote,
-						model,
-						getOpenAiCompactionReferenceTarget(model, true),
-						getOpenAIResponsesReferenceTarget(runtimeReplayModel),
-						v2RequestTarget,
-					),
-				};
+				preserveData = { ...(preserveData ?? {}), ...storeCompactionV2PreserveData(remote, model) };
 				usedRemoteCompaction = true;
 			} catch (err) {
 				// A user/session abort is a cancellation, not a remote failure —
 				// swallowing it here would downgrade Esc into "fall back to local
 				// summarization" and keep compaction running on an aborted signal.
 				if (signal?.aborted) throw err;
-				if (err instanceof UnreplayableCompactionProducerError) {
-					logger.info("Skipped OpenAI V2 remote compaction: producer target is not runtime-replayable", {
-						model: model.id,
-						provider: model.provider,
-					});
-				} else {
-					nativeCompactionError = selectNativeCompactionError(nativeCompactionError, err);
-					logger.warn("OpenAI V2 remote compaction failed, falling back to V1 remote compaction", {
-						error: err instanceof Error ? err.message : String(err),
-						model: model.id,
-						provider: model.provider,
-					});
-				}
+				nativeCompactionError = selectNativeCompactionError(nativeCompactionError, err);
+				logger.warn("OpenAI V2 remote compaction failed, falling back to V1 remote compaction", {
+					error: err instanceof Error ? err.message : String(err),
+					model: model.id,
+					provider: model.provider,
+				});
 			}
 		}
 	}
 
-	if (
-		!usedRemoteCompaction &&
-		settings.remoteEnabled !== false &&
-		shouldUseOpenAiRemoteCompaction(model) &&
-		producesRuntimeOwnedHistory(false)
-	) {
+	if (!usedRemoteCompaction && settings.remoteEnabled !== false && shouldUseOpenAiRemoteCompaction(model)) {
 		const previousRemoteCompaction = getPreservedOpenAiRemoteCompactionData(previousPreserveData);
 		const previousV2Compaction = getCompactionV2PreserveData(previousPreserveData);
 		const previousReplacementHistory =
-			previousRemoteCompaction && canReuseOpenAiCompactionHistory(previousRemoteCompaction, model, false)
+			previousRemoteCompaction?.provider === model.provider
 				? previousRemoteCompaction.replacementHistory
-				: previousV2Compaction && canReuseOpenAiCompactionHistory(previousV2Compaction, model, false)
+				: previousV2Compaction?.provider === model.provider
 					? previousV2Compaction.replacementHistory
 					: undefined;
 		const remoteHistory = buildOpenAiNativeHistory(
@@ -1888,8 +1692,6 @@ export async function compact(
 								sessionId: summaryOptions.sessionId,
 								providerSessionState: summaryOptions.providerSessionState,
 								codexCompaction: summaryOptions.codexCompaction,
-								replayTarget: getOpenAIResponsesReferenceTarget(runtimeReplayModel),
-								requestTarget: resolveRuntimeOwnedRequestTarget(key, false),
 							},
 						),
 					{ signal },
@@ -1901,29 +1703,18 @@ export async function compact(
 				// swallowing it here would downgrade Esc into "fall back to local
 				// summarization" and keep compaction running on an aborted signal.
 				if (signal?.aborted) throw err;
-				if (err instanceof UnreplayableCompactionProducerError) {
-					logger.info("Skipped OpenAI remote compaction: producer target is not runtime-replayable", {
-						model: model.id,
-						provider: model.provider,
-					});
-				} else {
-					nativeCompactionError = selectNativeCompactionError(nativeCompactionError, err);
-					logger.warn("OpenAI remote compaction failed", {
-						error: err instanceof Error ? err.message : String(err),
-						model: model.id,
-						provider: model.provider,
-					});
-				}
+				nativeCompactionError = selectNativeCompactionError(nativeCompactionError, err);
+				logger.warn("OpenAI remote compaction failed", {
+					error: err instanceof Error ? err.message : String(err),
+					model: model.id,
+					provider: model.provider,
+				});
 			}
 		}
 	}
 
 	if (!usedRemoteCompaction && nativeCompactionError !== undefined && !summaryOptions.remoteEndpoint) {
 		throw new NativeCompactionError(nativeCompactionError);
-	}
-
-	if (!usedRemoteCompaction && preservedNativeHistoryHidesOriginals) {
-		throw new StrandedCompactionHistoryError();
 	}
 
 	// Generate summaries (can be parallel if both needed) and merge into one

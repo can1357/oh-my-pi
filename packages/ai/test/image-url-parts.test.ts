@@ -6,19 +6,10 @@ import { convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { convertMessages as convertGoogleMessages } from "@oh-my-pi/pi-ai/providers/google-shared";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { convertResponsesInputContent } from "@oh-my-pi/pi-ai/providers/openai-shared";
-import type {
-	Context,
-	FetchImpl,
-	Message,
-	Model,
-	ModelSpec,
-	ProviderFileReference,
-	UserMessage,
-} from "@oh-my-pi/pi-ai/types";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import type { Context, FetchImpl, Message, Model, ProviderFileReference, UserMessage } from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
-const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+const PNG_B64 = Buffer.from("not-actually-a-png, but bytes are opaque here").toString("base64");
 const BLOB_URL = "https://blobs.example.com/0123456789abcdef0123456789abcdef.png";
 
 const userMessage: Message = {
@@ -26,7 +17,7 @@ const userMessage: Message = {
 	content: [
 		{ type: "text", text: "what is in these?" },
 		{ type: "image", data: PNG_B64, mimeType: "image/png", url: BLOB_URL },
-		{ type: "image", data: PNG_B64, mimeType: "IMAGE/PNG; charset=binary" },
+		{ type: "image", data: PNG_B64, mimeType: "image/png" },
 	],
 	timestamp: 0,
 };
@@ -58,46 +49,6 @@ describe("image url parts", () => {
 		});
 	});
 
-	it("anthropic custom endpoints fall back from provider files to inline data", () => {
-		const model = buildModel({
-			id: "custom-claude",
-			name: "Custom Claude",
-			api: "anthropic-messages",
-			provider: "anthropic",
-			baseUrl: "https://gateway.example.invalid/anthropic",
-			reasoning: false,
-			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 32_768,
-			maxTokens: 4_096,
-		} satisfies ModelSpec<"anthropic-messages">);
-		const params = convertAnthropicMessages(
-			[
-				{
-					role: "user",
-					content: [
-						{
-							type: "image",
-							data: PNG_B64,
-							mimeType: "image/png",
-							providerFile: { provider: "anthropic", id: "file_anthropic_123" },
-						},
-					],
-					timestamp: 0,
-				},
-			],
-			model,
-			false,
-		);
-
-		const content = params[0].content as Array<{ type: string; source?: Record<string, unknown> }>;
-		expect(content.find(block => block.type === "image")?.source).toEqual({
-			type: "base64",
-			media_type: "image/png",
-			data: PNG_B64,
-		});
-	});
-
 	it("openai responses prefer its provider file over the url and base64 payload", () => {
 		const message = withProviderFile({ provider: "openai", id: "file_openai_123" });
 		if (!Array.isArray(message.content)) {
@@ -110,38 +61,6 @@ describe("image url parts", () => {
 			detail: "auto",
 			file_id: "file_openai_123",
 		});
-	});
-
-	it("rejects an unsupported provider file when no replayable image source remains", () => {
-		const model = buildModel({
-			id: "vision-model",
-			name: "Vision Model",
-			api: "openai-responses",
-			provider: "xai",
-			baseUrl: "https://api.x.ai/v1",
-			reasoning: false,
-			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 32_768,
-			maxTokens: 4_096,
-		} satisfies ModelSpec<"openai-responses">);
-
-		expect(() =>
-			convertResponsesInputContent(
-				[
-					{
-						type: "image",
-						data: "",
-						mimeType: "image/png",
-						providerFile: { provider: "openai", id: "file_openai_123" },
-					},
-				],
-				true,
-				true,
-				false,
-				model,
-			),
-		).toThrow("without non-empty image data or a supported reference");
 	});
 
 	it("google prefers its provider file over the url and base64 payload", () => {
@@ -158,66 +77,6 @@ describe("image url parts", () => {
 				mimeType: "image/png",
 			},
 		});
-	});
-
-	it("google keeps inline data when the provider file is not a Files API resource", () => {
-		const model = getBundledModel("google", "gemini-2.5-flash") as Model<"google-generative-ai">;
-		const contents = convertGoogleMessages(model, {
-			messages: [
-				{
-					role: "user",
-					content: [
-						{
-							type: "image",
-							data: PNG_B64,
-							mimeType: "image/png",
-							providerFile: { provider: "google", uri: "https://example.invalid/image.png" },
-						},
-					],
-					timestamp: 0,
-				},
-			],
-		});
-
-		expect(contents[0]?.parts).toContainEqual({ inlineData: { mimeType: "image/png", data: PNG_B64 } });
-		expect(contents.flatMap(content => content.parts ?? []).some(part => part.fileData !== undefined)).toBe(false);
-	});
-
-	it("google custom endpoints fall back from provider files to inline data", () => {
-		const model = buildModel({
-			id: "custom-gemini",
-			name: "Custom Gemini",
-			api: "google-generative-ai",
-			provider: "google",
-			baseUrl: "https://gateway.example.invalid/v1beta",
-			reasoning: false,
-			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 32_768,
-			maxTokens: 4_096,
-		} satisfies ModelSpec<"google-generative-ai">);
-		const contents = convertGoogleMessages(model, {
-			messages: [
-				{
-					role: "user",
-					content: [
-						{
-							type: "image",
-							data: PNG_B64,
-							mimeType: "image/png",
-							providerFile: {
-								provider: "google",
-								uri: "https://generativelanguage.googleapis.com/v1/files/abc",
-							},
-						},
-					],
-					timestamp: 0,
-				},
-			],
-		});
-
-		expect(contents[0]?.parts).toContainEqual({ inlineData: { mimeType: "image/png", data: PNG_B64 } });
-		expect(contents.flatMap(content => content.parts ?? []).some(part => part.fileData !== undefined)).toBe(false);
 	});
 
 	it("ignores a provider file for a different provider and falls back to the url", () => {
@@ -245,81 +104,6 @@ describe("image url parts", () => {
 		expect(JSON.stringify(images[0])).not.toContain(PNG_B64);
 	});
 
-	it("anthropic falls back to inline data for unsupported URL and expired file references", () => {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5") as Model<"anthropic-messages">;
-		const expired = convertAnthropicMessages(
-			[
-				{
-					role: "user",
-					content: [
-						{
-							type: "image",
-							data: PNG_B64,
-							mimeType: "image/png",
-							providerFile: { provider: "anthropic", id: "file_expired", expiresAt: Date.now() - 1 },
-						},
-					],
-					timestamp: 0,
-				},
-			],
-			model,
-			false,
-		);
-		const nonOfficial = buildModel({
-			id: "custom-claude",
-			name: "Custom Claude",
-			api: "anthropic-messages",
-			provider: "custom",
-			baseUrl: "https://proxy.example/v1",
-			reasoning: false,
-			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 32_768,
-			maxTokens: 4_096,
-		} satisfies ModelSpec<"anthropic-messages">);
-		const unsupportedUrl = convertAnthropicMessages([userMessage], nonOfficial, false);
-
-		expect(
-			(expired[0]?.content as Array<{ type: string; source?: Record<string, unknown> }> | undefined)?.find(
-				block => block.type === "image",
-			)?.source,
-		).toEqual({ type: "base64", media_type: "image/png", data: PNG_B64 });
-		expect(
-			(unsupportedUrl[0]?.content as Array<{ type: string; source?: Record<string, unknown> }> | undefined)?.find(
-				block => block.type === "image",
-			)?.source,
-		).toEqual({ type: "base64", media_type: "image/png", data: PNG_B64 });
-	});
-
-	it("anthropic rejects an unsupported reference without usable inline data", () => {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5") as Model<"anthropic-messages">;
-
-		expect(() =>
-			convertAnthropicMessages(
-				[
-					{
-						role: "user",
-						content: [
-							{
-								type: "image",
-								data: "",
-								mimeType: "image/png",
-								providerFile: {
-									provider: "anthropic",
-									id: "file_expired",
-									expiresAt: Date.now() - 1,
-								},
-							},
-						],
-						timestamp: 0,
-					},
-				],
-				model,
-				false,
-			),
-		).toThrow("input_image cannot be forwarded to anthropic-messages without non-empty image data");
-	});
-
 	it("responses input uses the url as image_url and a data URI otherwise", () => {
 		const converted = convertResponsesInputContent(
 			userMessage.content as Exclude<typeof userMessage.content, string>,
@@ -332,22 +116,7 @@ describe("image url parts", () => {
 		expect(images[1].image_url).toBe(`data:image/png;base64,${PNG_B64}`);
 	});
 
-	it("responses falls back to inline data when the image URL is malformed", () => {
-		const model = getBundledModel("openai", "gpt-5-mini") as Model<"openai-responses">;
-		const converted = convertResponsesInputContent(
-			[{ type: "image", data: PNG_B64, mimeType: "image/png", url: "not-a-url" }],
-			true,
-			model.compat.supportsImageDetailOriginal,
-			false,
-			model,
-		);
-
-		expect(converted).toEqual([
-			{ type: "input_image", detail: "auto", image_url: `data:image/png;base64,${PNG_B64}` },
-		]);
-	});
-
-	it("google keeps inline data when remote URLs are unsupported", () => {
+	it("google emits fileData for decorated blocks in user turns and tool results", () => {
 		const model = getBundledModel("google", "gemini-2.5-flash") as Model<"google-generative-ai">;
 		const toolCallMessage: Message = {
 			role: "assistant",
@@ -378,69 +147,14 @@ describe("image url parts", () => {
 		const contents = convertGoogleMessages(model, { messages: [userMessage, toolCallMessage, toolResultMessage] });
 
 		const userParts = contents[0].parts ?? [];
+		expect(userParts).toContainEqual({ fileData: { fileUri: BLOB_URL, mimeType: "image/png" } });
 		expect(userParts).toContainEqual({ inlineData: { mimeType: "image/png", data: PNG_B64 } });
 
 		const trailingParts = contents.flatMap(content => content.parts ?? []);
 		const fileDataParts = trailingParts.filter(part => part.fileData !== undefined);
-		expect(fileDataParts).toHaveLength(0);
-		expect(trailingParts.filter(part => part.inlineData !== undefined)).toHaveLength(3);
-	});
-
-	it("google rejects a reference-only image when its URL is not replayable", () => {
-		const model = getBundledModel("google", "gemini-2.5-flash") as Model<"google-generative-ai">;
-		expect(() =>
-			convertGoogleMessages(model, {
-				messages: [
-					{
-						role: "user",
-						content: [{ type: "image", data: "", mimeType: "image/png", url: BLOB_URL }],
-						timestamp: 0,
-					},
-				],
-			}),
-		).toThrow("without non-empty image data or a supported reference");
-	});
-
-	it("google falls back to valid inline data and rejects invalid image media", () => {
-		const model = getBundledModel("google", "gemini-2.5-flash") as Model<"google-generative-ai">;
-		const expired = convertGoogleMessages(model, {
-			messages: [
-				{
-					role: "user",
-					content: [
-						{
-							type: "image",
-							data: PNG_B64,
-							mimeType: "image/png",
-							providerFile: {
-								provider: "google",
-								uri: "https://generativelanguage.googleapis.com/v1/files/expired",
-								expiresAt: 0,
-							},
-						},
-					],
-					timestamp: 0,
-				},
-			],
-		});
-		expect(expired[0]?.parts).toContainEqual({ inlineData: { mimeType: "image/png", data: PNG_B64 } });
-		expect(() =>
-			convertGoogleMessages(model, {
-				messages: [
-					{
-						role: "user",
-						content: [
-							{
-								type: "image",
-								data: Buffer.from("not an image").toString("base64"),
-								mimeType: "application/octet-stream",
-							},
-						],
-						timestamp: 0,
-					},
-				],
-			}),
-		).toThrow("without non-empty image data or a supported reference");
+		// User turn + tool result each carry the decorated block as fileData.
+		expect(fileDataParts).toHaveLength(2);
+		expect(fileDataParts[1].fileData).toEqual({ fileUri: BLOB_URL, mimeType: "image/png" });
 	});
 
 	it("completions sends the url in image_url content parts", async () => {
@@ -465,141 +179,5 @@ describe("image url parts", () => {
 		const images = parts.filter(part => part.type === "image_url");
 		expect(images[0].image_url?.url).toBe(BLOB_URL);
 		expect(images[1].image_url?.url).toBe(`data:image/png;base64,${PNG_B64}`);
-	});
-
-	it("completions falls back to inline data when a native URL is unsupported", async () => {
-		const model = buildModel({
-			id: "kimi-k2.5",
-			name: "Kimi K2.5",
-			api: "openai-completions",
-			provider: "moonshot",
-			baseUrl: "https://api.moonshot.ai/v1",
-			reasoning: false,
-			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 32_768,
-			maxTokens: 4_096,
-		} satisfies ModelSpec<"openai-completions">);
-		let captured: { messages?: Array<{ content: unknown }> } | undefined;
-		const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
-			captured = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
-			const sse =
-				`data: ${JSON.stringify({ id: "c", object: "chat.completion.chunk", created: 0, model: model.id, choices: [{ index: 0, delta: { role: "assistant", content: "ok" } }] })}\n\n` +
-				`data: ${JSON.stringify({ id: "c", object: "chat.completion.chunk", created: 0, model: model.id, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n` +
-				"data: [DONE]\n\n";
-			return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
-		}) as FetchImpl;
-
-		await streamOpenAICompletions(model, { messages: [userMessage] }, { apiKey: "test", fetch: fetchImpl }).result();
-
-		const parts = captured?.messages?.[0]?.content as Array<{ type: string; image_url?: { url: string } }>;
-		const images = parts.filter(part => part.type === "image_url");
-		expect(images[0].image_url?.url).toBe(`data:image/png;base64,${PNG_B64}`);
-	});
-
-	it("degrades an unverifiable image format to a text placeholder instead of failing the turn", async () => {
-		// MCP tool results and ACP attachments forward any `image/*` verbatim, so a
-		// well-formed BMP/HEIC/SVG payload must not abort the whole request.
-		const bmpImage = {
-			type: "image" as const,
-			data: Buffer.from("BM\u0000\u0000\u0000\u0000bitmap-bytes").toString("base64"),
-			mimeType: "image/bmp",
-		};
-		const anthropicModel = getBundledModel("anthropic", "claude-sonnet-4-5") as Model<"anthropic-messages">;
-		const googleModel = getBundledModel("google", "gemini-2.5-flash") as Model<"google-generative-ai">;
-		const completionsModel = {
-			...(getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">),
-			api: "openai-completions",
-		} satisfies Model<"openai-completions">;
-
-		expect(convertResponsesInputContent([bmpImage], true, true)).toEqual([
-			{ type: "input_text", text: "[unsupported image: image/bmp]" },
-		]);
-
-		const anthropicParams = convertAnthropicMessages(
-			[{ role: "user", content: [bmpImage], timestamp: 0 }],
-			anthropicModel,
-			false,
-		);
-		expect(anthropicParams[0].content).toContainEqual({ type: "text", text: "[unsupported image: image/bmp]" });
-
-		const googleContents = convertGoogleMessages(googleModel, {
-			messages: [{ role: "user", content: [bmpImage], timestamp: 0 }],
-		});
-		expect(googleContents[0].parts).toContainEqual({ text: "[unsupported image: image/bmp]" });
-
-		let completionsBody: { messages?: Array<{ content: unknown }> } | undefined;
-		const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
-			completionsBody = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
-			const sse =
-				`data: ${JSON.stringify({ id: "c", object: "chat.completion.chunk", created: 0, model: completionsModel.id, choices: [{ index: 0, delta: { role: "assistant", content: "ok" } }] })}\n\n` +
-				`data: ${JSON.stringify({ id: "c", object: "chat.completion.chunk", created: 0, model: completionsModel.id, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n` +
-				"data: [DONE]\n\n";
-			return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
-		}) as FetchImpl;
-		await streamOpenAICompletions(
-			completionsModel,
-			{ messages: [{ role: "user", content: [bmpImage], timestamp: 0 }] },
-			{ apiKey: "test", fetch: fetchImpl },
-		).result();
-		expect(completionsBody?.messages?.[0]?.content).toEqual([
-			{ type: "text", text: "[unsupported image: image/bmp]" },
-		]);
-	});
-
-	it("replays whitespace-wrapped base64 as canonical inline image data", () => {
-		const wrapped = {
-			type: "image" as const,
-			data: `${PNG_B64.slice(0, 20)}\n${PNG_B64.slice(20)}`,
-			mimeType: "image/png",
-		};
-		const anthropicModel = getBundledModel("anthropic", "claude-sonnet-4-5") as Model<"anthropic-messages">;
-
-		expect(convertResponsesInputContent([wrapped], true, true)).toEqual([
-			{ type: "input_image", detail: "auto", image_url: `data:image/png;base64,${PNG_B64}` },
-		]);
-
-		const anthropicParams = convertAnthropicMessages(
-			[{ role: "user", content: [wrapped], timestamp: 0 }],
-			anthropicModel,
-			false,
-		);
-		expect(anthropicParams[0].content).toContainEqual({
-			type: "image",
-			source: { type: "base64", media_type: "image/png", data: PNG_B64 },
-		});
-	});
-
-	it("rejects Base64 text mislabeled as an image across direct serializers", async () => {
-		const invalidImage = {
-			type: "image" as const,
-			data: Buffer.from("not an image").toString("base64"),
-			mimeType: "image/png",
-		};
-		const anthropicModel = getBundledModel("anthropic", "claude-sonnet-4-5") as Model<"anthropic-messages">;
-		const completionsModel = {
-			...(getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">),
-			api: "openai-completions",
-		} satisfies Model<"openai-completions">;
-		let providerCalls = 0;
-		const fetchImpl = (async () => {
-			providerCalls++;
-			return new Response(null, { status: 500 });
-		}) as FetchImpl;
-
-		expect(() => convertResponsesInputContent([invalidImage], true, true)).toThrow(
-			"without non-empty image data or a supported reference",
-		);
-		expect(() =>
-			convertAnthropicMessages([{ role: "user", content: [invalidImage], timestamp: 0 }], anthropicModel, false),
-		).toThrow("without non-empty image data or a supported reference");
-		const completionsResult = await streamOpenAICompletions(
-			completionsModel,
-			{ messages: [{ role: "user", content: [invalidImage], timestamp: 0 }] },
-			{ apiKey: "test", fetch: fetchImpl },
-		).result();
-		expect(completionsResult.stopReason).toBe("error");
-		expect(completionsResult.errorMessage).toContain("without non-empty image data or a supported reference");
-		expect(providerCalls).toBe(0);
 	});
 });

@@ -88,12 +88,6 @@ class ReplayTestSession {
 		return [TEST_MODEL];
 	}
 
-	// Mirrors `AgentSession`: ACP replay reads the display context so a
-	// target-bound remote compaction stays collapsed instead of re-expanding.
-	buildDisplaySessionContext(): ReturnType<SessionManager["buildSessionContext"]> {
-		return this.sessionManager.buildSessionContext({ activeModel: this.model });
-	}
-
 	getAvailableThinkingLevels(): ReadonlyArray<string> {
 		return [];
 	}

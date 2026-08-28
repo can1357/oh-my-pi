@@ -407,7 +407,7 @@ export function shouldEnterPlanModeOnStartup(
 	sessionManager: Pick<SessionManager, "buildSessionContext" | "getEntries">,
 	sessionSettings: Pick<Settings, "get">,
 ): boolean {
-	const hasConversationContext = sessionManager.buildSessionContext({ metadataOnly: true }).hasMessages === true;
+	const hasConversationContext = sessionManager.buildSessionContext().messages.length > 0;
 	const hasExplicitMode = sessionManager.getEntries().some(entry => entry.type === "mode_change");
 	return (
 		!hasConversationContext &&
@@ -2957,7 +2957,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	async #reconcileModeFromSession(options?: { preserveActiveGoal?: boolean }): Promise<void> {
 		const vibeScopeAlreadySuspended = this.#vibeScopeSuspendedForSwitch;
 		this.#vibeScopeSuspendedForSwitch = false;
-		const sessionContext = this.sessionManager.buildSessionContext({ metadataOnly: true });
+		const sessionContext = this.sessionManager.buildSessionContext();
 		const vibeSession = this.#vibeParentSession();
 		const targetVibeScope = VibeSessionRegistry.global().ownerScope(vibeSession);
 		const preserveVibe =

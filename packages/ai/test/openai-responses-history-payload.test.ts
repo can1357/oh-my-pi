@@ -5,28 +5,14 @@ import {
 	streamOpenAICodexResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
-import { buildResponsesInput, getOpenAIResponsesRequestTarget } from "@oh-my-pi/pi-ai/providers/openai-shared";
-import type {
-	AssistantMessage,
-	Context,
-	FetchImpl,
-	Model,
-	ModelSpec,
-	ProviderSessionState,
-	Tool,
-	VercelGatewayRouting,
-} from "@oh-my-pi/pi-ai/types";
-import {
-	createOpenAIResponsesHistoryPayload,
-	getOpenAIResponsesReferenceTarget,
-	truncateResponseItemId,
-} from "@oh-my-pi/pi-ai/utils";
+import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import type { Context, Model, ModelSpec, ProviderSessionState, Tool } from "@oh-my-pi/pi-ai/types";
+import { createOpenAIResponsesHistoryPayload, truncateResponseItemId } from "@oh-my-pi/pi-ai/utils";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import * as piUtils from "@oh-my-pi/pi-utils";
 
 const TEST_INSTALLATION_ID = "00000000-0000-4000-8000-000000000001";
-const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 beforeEach(() => {
 	vi.spyOn(piUtils, "getInstallId").mockReturnValue(TEST_INSTALLATION_ID);
@@ -298,14 +284,7 @@ function makeAssistantMessage(
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
 		stopReason: "stop" as const,
-		// Stamp the producing endpoint the way the providers do; unstamped native
-		// history carrying endpoint-owned state is no longer replayed anywhere.
-		providerPayload: createOpenAIResponsesHistoryPayload(
-			provider,
-			items,
-			incremental,
-			getOpenAIResponsesReferenceTarget(getBundledModel(provider, model)),
-		),
+		providerPayload: createOpenAIResponsesHistoryPayload(provider, items, incremental),
 		timestamp: Date.now(),
 	};
 }
@@ -394,606 +373,7 @@ function containsUserInputText(input: unknown[] | undefined, text: string): bool
 	});
 }
 
-function createStampedSseResponse(): Response {
-	const events = [
-		{
-			type: "response.output_item.done",
-			output_index: 0,
-			item: { type: "reasoning", id: "rs_stamped", encrypted_content: "enc_stamped", summary: [] },
-		},
-		{
-			type: "response.output_item.added",
-			output_index: 1,
-			item: { type: "message", id: "msg_stamped", role: "assistant", content: [] },
-		},
-		{ type: "response.content_part.added", part: { type: "output_text", text: "" } },
-		{ type: "response.output_text.delta", delta: "stamped answer" },
-		{
-			type: "response.output_item.done",
-			output_index: 1,
-			item: {
-				type: "message",
-				id: "msg_stamped",
-				role: "assistant",
-				status: "completed",
-				content: [{ type: "output_text", text: "stamped answer" }],
-			},
-		},
-		{
-			type: "response.completed",
-			response: {
-				status: "completed",
-				usage: {
-					input_tokens: 1,
-					output_tokens: 1,
-					total_tokens: 2,
-					input_tokens_details: { cached_tokens: 0 },
-				},
-			},
-		},
-	];
-	return new Response(`${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\n`, {
-		status: 200,
-		headers: { "content-type": "text/event-stream" },
-	});
-}
-
-function buildStampedResponsesModel(baseUrl: string): Model<"openai-responses"> {
-	return buildModel({
-		id: "gpt-5-stamped",
-		name: "GPT-5.5 Stamped",
-		api: "openai-responses",
-		provider: "openai",
-		baseUrl,
-		reasoning: true,
-		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 32_768,
-		maxTokens: 4_096,
-	} satisfies ModelSpec<"openai-responses">);
-}
-
-function buildVercelGatewayResponsesModel(routing: VercelGatewayRouting): Model<"openai-responses"> {
-	return buildModel({
-		id: "openai/gpt-5-stamped",
-		name: "GPT-5.5 Stamped",
-		api: "openai-responses",
-		provider: "vercel-ai-gateway",
-		baseUrl: "https://ai-gateway.vercel.sh/v1",
-		reasoning: true,
-		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 32_768,
-		maxTokens: 4_096,
-		compat: { vercelGatewayRouting: routing },
-	} satisfies ModelSpec<"openai-responses">);
-}
-
 describe("OpenAI responses history payload", () => {
-	it("binds generated Responses history to the endpoint that produced it", async () => {
-		const model = buildStampedResponsesModel("https://api.openai.com/v1");
-		const stream = streamOpenAIResponses(
-			model,
-			{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
-			{ apiKey: "test-key", fetch: async () => createStampedSseResponse() },
-		);
-		let message: Awaited<ReturnType<typeof stream.result>> | undefined;
-		for await (const event of stream) {
-			if (event.type === "done") message = event.message;
-			if (event.type === "error") throw event.error;
-		}
-		if (!message) throw new Error("expected a completed assistant message");
-
-		expect(message.providerPayload).toMatchObject({
-			type: "openaiResponsesHistory",
-			provider: "openai",
-			referenceTarget: getOpenAIResponsesReferenceTarget(model),
-		});
-
-		const followUp: Context = {
-			messages: [message, { role: "user", content: "continue", timestamp: 1 }],
-		};
-		// The native item id only survives when the endpoint-bound history is replayed;
-		// the canonical fallback re-serializes the same text without it.
-		const sameEndpoint = (await captureResponsesPayload(model, followUp)) as { input?: unknown[] };
-		expect(containsAssistantOutputText(sameEndpoint.input, "stamped answer")).toBe(true);
-		expect(containsEncryptedReasoning(sameEndpoint.input)).toBe(true);
-
-		const movedEndpoint = (await captureResponsesPayload(
-			buildStampedResponsesModel("https://proxy.example.invalid/v1"),
-			followUp,
-		)) as { input?: unknown[] };
-		expect(containsEncryptedReasoning(movedEndpoint.input)).toBe(false);
-		expect(containsAssistantOutputText(movedEndpoint.input, "stamped answer")).toBe(true);
-	});
-
-	it("binds Responses history to the effective wire model, not the catalog id", async () => {
-		const model = buildStampedResponsesModel("https://api.openai.com/v1");
-		const stream = streamOpenAIResponses(
-			model,
-			{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
-			{ apiKey: "test-key", fetch: async () => createStampedSseResponse() },
-		);
-		let message: Awaited<ReturnType<typeof stream.result>> | undefined;
-		for await (const event of stream) {
-			if (event.type === "done") message = event.message;
-			if (event.type === "error") throw event.error;
-		}
-		if (!message) throw new Error("expected a completed assistant message");
-
-		const followUp: Context = {
-			messages: [message, { role: "user", content: "continue", timestamp: 1 }],
-		};
-		const sameModel = (await captureResponsesPayload(model, followUp)) as { input?: unknown[]; model?: unknown };
-		expect(sameModel.model).toBe("gpt-5-stamped");
-		expect(containsEncryptedReasoning(sameModel.input)).toBe(true);
-
-		const routed = (await captureResponsesPayload(model, followUp, undefined, {
-			extraBody: { model: "gpt-5-routed" },
-		})) as { input?: unknown[]; model?: unknown };
-		expect(routed.model).toBe("gpt-5-routed");
-		expect(containsEncryptedReasoning(routed.input)).toBe(false);
-		expect(containsAssistantOutputText(routed.input, "stamped answer")).toBe(true);
-	});
-
-	it("rejects an onPayload replacement that repoints the Responses request at another model", async () => {
-		const model = buildStampedResponsesModel("https://api.openai.com/v1");
-		const fetchMock = vi.fn(async () => createStampedSseResponse());
-		const stream = streamOpenAIResponses(
-			model,
-			{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
-			{
-				apiKey: "test-key",
-				fetch: fetchMock as unknown as FetchImpl,
-				onPayload: payload => ({ ...(payload as Record<string, unknown>), model: "gpt-5-elsewhere" }),
-			},
-		);
-		let errorMessage: string | undefined;
-		for await (const event of stream) {
-			if (event.type === "error") errorMessage = event.error.errorMessage;
-		}
-		expect(errorMessage).toContain("gpt-5-elsewhere");
-		expect(fetchMock).toHaveBeenCalledTimes(0);
-	});
-
-	it("rejects an onPayload hook that repoints the Responses request without returning a replacement", async () => {
-		const model = buildStampedResponsesModel("https://api.openai.com/v1");
-		const fetchMock = vi.fn(async () => createStampedSseResponse());
-		const stream = streamOpenAIResponses(
-			model,
-			{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
-			{
-				apiKey: "test-key",
-				fetch: fetchMock as unknown as FetchImpl,
-				onPayload: payload => {
-					(payload as Record<string, unknown>).model = "gpt-5-mutated";
-					return undefined;
-				},
-			},
-		);
-		let errorMessage: string | undefined;
-		for await (const event of stream) {
-			if (event.type === "error") errorMessage = event.error.errorMessage;
-		}
-		expect(errorMessage).toContain("gpt-5-mutated");
-		expect(fetchMock).toHaveBeenCalledTimes(0);
-	});
-
-	it("rejects an onPayload replacement whose model is not a primitive string", async () => {
-		const model = buildStampedResponsesModel("https://api.openai.com/v1");
-		const fetchMock = vi.fn(async () => createStampedSseResponse());
-		const stream = streamOpenAIResponses(
-			model,
-			{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
-			{
-				apiKey: "test-key",
-				fetch: fetchMock as unknown as FetchImpl,
-				onPayload: payload => ({ ...(payload as Record<string, unknown>), model: new String("gpt-5-boxed") }),
-			},
-		);
-		let errorMessage: string | undefined;
-		for await (const event of stream) {
-			if (event.type === "error") errorMessage = event.error.errorMessage;
-		}
-		expect(errorMessage).toContain("non-string");
-		expect(fetchMock).toHaveBeenCalledTimes(0);
-	});
-
-	it("rejects an onPayload replacement that repoints the Responses request through routing selectors", async () => {
-		const model = buildStampedResponsesModel("https://api.openai.com/v1");
-		const fetchMock = vi.fn(async () => createStampedSseResponse());
-		const stream = streamOpenAIResponses(
-			model,
-			{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
-			{
-				apiKey: "test-key",
-				fetch: fetchMock as unknown as FetchImpl,
-				onPayload: payload => ({
-					...(payload as Record<string, unknown>),
-					provider: { order: ["fireworks"] },
-				}),
-			},
-		);
-		let errorMessage: string | undefined;
-		for await (const event of stream) {
-			if (event.type === "error") errorMessage = event.error.errorMessage;
-		}
-		expect(errorMessage).toContain("provider");
-		expect(fetchMock).toHaveBeenCalledTimes(0);
-	});
-
-	it("rejects an onPayload hook that mutates Responses gateway providerOptions in place", async () => {
-		const model = buildStampedResponsesModel("https://api.openai.com/v1");
-		const fetchMock = vi.fn(async () => createStampedSseResponse());
-		const stream = streamOpenAIResponses(
-			model,
-			{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
-			{
-				apiKey: "test-key",
-				fetch: fetchMock as unknown as FetchImpl,
-				onPayload: payload => {
-					(payload as Record<string, unknown>).providerOptions = { gateway: { only: ["bedrock"] } };
-					return undefined;
-				},
-			},
-		);
-		let errorMessage: string | undefined;
-		for await (const event of stream) {
-			if (event.type === "error") errorMessage = event.error.errorMessage;
-		}
-		expect(errorMessage).toContain("providerOptions");
-		expect(fetchMock).toHaveBeenCalledTimes(0);
-	});
-
-	it("binds Responses history to the routing selectors that reached the wire", async () => {
-		const model = buildStampedResponsesModel("https://api.openai.com/v1");
-		const stream = streamOpenAIResponses(
-			model,
-			{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
-			{ apiKey: "test-key", fetch: async () => createStampedSseResponse() },
-		);
-		let message: Awaited<ReturnType<typeof stream.result>> | undefined;
-		for await (const event of stream) {
-			if (event.type === "done") message = event.message;
-			if (event.type === "error") throw event.error;
-		}
-		if (!message) throw new Error("expected a completed assistant message");
-
-		const followUp: Context = {
-			messages: [message, { role: "user", content: "continue", timestamp: 1 }],
-		};
-		const sameRouting = (await captureResponsesPayload(model, followUp)) as { input?: unknown[] };
-		expect(containsEncryptedReasoning(sameRouting.input)).toBe(true);
-
-		// Routing selectors pick the upstream that actually serves the request, so
-		// history stamped without them cannot be replayed through them.
-		const rerouted = (await captureResponsesPayload(model, followUp, undefined, {
-			extraBody: { provider: { order: ["fireworks"] } },
-		})) as { input?: unknown[] };
-		expect(containsEncryptedReasoning(rerouted.input)).toBe(false);
-		expect(containsAssistantOutputText(rerouted.input, "stamped answer")).toBe(true);
-	});
-
-	it("drops configured routing from the target when an extraBody key removes it", async () => {
-		const routedSpec = {
-			id: "openai/gpt-5-stamped",
-			name: "GPT-5.5 Stamped",
-			api: "openai-responses",
-			provider: "openrouter",
-			baseUrl: "https://openrouter.ai/api/v1",
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 32_768,
-			maxTokens: 4_096,
-		} satisfies ModelSpec<"openai-responses">;
-		const model = buildModel({ ...routedSpec, compat: { openRouterRouting: { only: ["anthropic"] } } });
-		const unrouted = buildModel(routedSpec);
-
-		const stream = streamOpenAIResponses(
-			model,
-			{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
-			{
-				apiKey: "test-key",
-				extraBody: { provider: undefined },
-				fetch: async () => createStampedSseResponse(),
-			},
-		);
-		let message: Awaited<ReturnType<typeof stream.result>> | undefined;
-		for await (const event of stream) {
-			if (event.type === "done") message = event.message;
-			if (event.type === "error") throw event.error;
-		}
-		if (!message) throw new Error("expected a completed assistant message");
-
-		// The override removed `provider` from the serialized body, so the request
-		// reached the gateway's default upstream, not the pinned one.
-		expect(message.providerPayload).toMatchObject({
-			referenceTarget: getOpenAIResponsesReferenceTarget(unrouted),
-		});
-		expect(message.providerPayload).not.toMatchObject({
-			referenceTarget: getOpenAIResponsesReferenceTarget(model),
-		});
-
-		const followUp: Context = { messages: [message, { role: "user", content: "continue", timestamp: 1 }] };
-		const sameRoute = (await captureResponsesPayload(model, followUp, undefined, {
-			extraBody: { provider: undefined },
-		})) as { input?: unknown[]; provider?: unknown };
-		expect(JSON.parse(JSON.stringify(sameRoute))).not.toHaveProperty("provider");
-		expect(containsEncryptedReasoning(sameRoute.input)).toBe(true);
-
-		// Restoring the configured route changes the upstream, so default-upstream
-		// history must not follow it.
-		const pinnedRoute = (await captureResponsesPayload(model, followUp)) as {
-			input?: unknown[];
-			provider?: unknown;
-		};
-		expect(pinnedRoute.provider).toEqual({ only: ["anthropic"] });
-		expect(containsEncryptedReasoning(pinnedRoute.input)).toBe(false);
-		expect(containsAssistantOutputText(pinnedRoute.input, "stamped answer")).toBe(true);
-	});
-
-	it("fingerprints Vercel gateway routing in the shape that reaches the wire", async () => {
-		const model = buildVercelGatewayResponsesModel({ only: ["bedrock"] });
-		const stream = streamOpenAIResponses(
-			model,
-			{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
-			{ apiKey: "test-key", fetch: async () => createStampedSseResponse() },
-		);
-		let message: Awaited<ReturnType<typeof stream.result>> | undefined;
-		for await (const event of stream) {
-			if (event.type === "done") message = event.message;
-			if (event.type === "error") throw event.error;
-		}
-		if (!message) throw new Error("expected a completed assistant message");
-
-		const followUp: Context = {
-			messages: [message, { role: "user", content: "continue", timestamp: 1 }],
-		};
-
-		// The serializer nests configured gateway routing under
-		// `providerOptions.gateway`, so an override carrying that exact wire shape
-		// reaches the same upstream and may replay endpoint-owned reasoning.
-		const sameWireRouting = (await captureResponsesPayload(model, followUp, undefined, {
-			extraBody: { providerOptions: { gateway: { only: ["bedrock"] } } },
-		})) as { input?: unknown[]; providerOptions?: unknown };
-		expect(sameWireRouting.providerOptions).toEqual({ gateway: { only: ["bedrock"] } });
-		expect(containsEncryptedReasoning(sameWireRouting.input)).toBe(true);
-
-		// The raw configuration shape is a different wire route, so history bound to
-		// the gateway route must not follow it.
-		const configShapeRouting = (await captureResponsesPayload(model, followUp, undefined, {
-			extraBody: { providerOptions: { only: ["bedrock"] } },
-		})) as { input?: unknown[] };
-		expect(containsEncryptedReasoning(configShapeRouting.input)).toBe(false);
-		expect(containsAssistantOutputText(configShapeRouting.input, "stamped answer")).toBe(true);
-	});
-
-	it("derives the session request target from the transformed wire model id", async () => {
-		const model = buildModel({
-			id: "openai/gpt-5-stamped",
-			name: "GPT-5 Stamped",
-			api: "openai-responses",
-			provider: "openrouter",
-			baseUrl: "https://openrouter.ai/api/v1",
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 32_768,
-			maxTokens: 4_096,
-		} satisfies ModelSpec<"openai-responses">);
-		const routing = { openrouterVariant: "floor" };
-		const sessionTarget = getOpenAIResponsesRequestTarget(model, "test-key", routing);
-		expect(sessionTarget).not.toBe(getOpenAIResponsesRequestTarget(model, "test-key"));
-
-		const stream = streamOpenAIResponses(
-			model,
-			{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
-			{ apiKey: "test-key", ...routing, fetch: async () => createStampedSseResponse() },
-		);
-		let message: AssistantMessage | undefined;
-		for await (const event of stream) {
-			if (event.type === "done") message = event.message;
-			if (event.type === "error") throw event.error;
-		}
-		if (!message) throw new Error("expected a completed assistant message");
-
-		// Session-level replay decisions stamp compaction metadata with this target,
-		// so it must equal the fingerprint the transport actually generated.
-		expect(message.providerPayload).toMatchObject({
-			type: "openaiResponsesHistory",
-			referenceTarget: sessionTarget,
-		});
-
-		const replayed = (await captureResponsesPayload(
-			model,
-			{
-				messages: [
-					{
-						...message,
-						providerPayload: {
-							type: "openaiResponsesHistory",
-							provider: model.provider,
-							referenceTarget: sessionTarget,
-							items: (message.providerPayload as { items: Array<Record<string, unknown>> }).items,
-						},
-					},
-					{ role: "user", content: "continue", timestamp: 1 },
-				],
-			},
-			undefined,
-			routing,
-		)) as { input?: unknown[] };
-		expect(containsEncryptedReasoning(replayed.input)).toBe(true);
-	});
-
-	it("hashes routing identity and keeps query-scoped Responses targets distinct", async () => {
-		const secretModel = buildStampedResponsesModel("https://tenant:s3cr3t-token@proxy.example/v1?api-key=s3cr3t-key");
-		const target = getOpenAIResponsesReferenceTarget(secretModel);
-		expect(target).toMatch(/^sha256:[0-9a-f]{64}$/);
-		for (const secret of ["s3cr3t-token", "s3cr3t-key", "proxy.example", "tenant"]) {
-			expect(target).not.toContain(secret);
-		}
-
-		const stream = streamOpenAIResponses(
-			secretModel,
-			{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
-			{ apiKey: "test-key", fetch: async () => createStampedSseResponse() },
-		);
-		let message: Awaited<ReturnType<typeof stream.result>> | undefined;
-		for await (const event of stream) {
-			if (event.type === "done") message = event.message;
-			if (event.type === "error") throw event.error;
-		}
-		if (!message) throw new Error("expected a completed assistant message");
-		expect(JSON.stringify(message.providerPayload)).not.toContain("s3cr3t");
-
-		// Query-routed proxies fan one host out to independent upstreams; their
-		// histories must not be interchangeable.
-		expect(
-			getOpenAIResponsesReferenceTarget(secretModel, undefined, "https://proxy.example/v1/responses?t=a"),
-		).not.toBe(getOpenAIResponsesReferenceTarget(secretModel, undefined, "https://proxy.example/v1/responses?t=b"));
-	});
-
-	it("binds Responses history to the resolved request endpoint, not the catalog base URL", async () => {
-		const model = buildModel({
-			id: "kimi-responses",
-			name: "Kimi Responses",
-			api: "openai-responses",
-			provider: "moonshot",
-			baseUrl: "https://api.moonshot.ai/v1",
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 32_768,
-			maxTokens: 4_096,
-		} satisfies ModelSpec<"openai-responses">);
-		const previous = Bun.env.MOONSHOT_BASE_URL;
-		try {
-			Bun.env.MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1";
-			const stream = streamOpenAIResponses(
-				model,
-				{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
-				{ apiKey: "test-key", fetch: async () => createStampedSseResponse() },
-			);
-			let message: Awaited<ReturnType<typeof stream.result>> | undefined;
-			for await (const event of stream) {
-				if (event.type === "done") message = event.message;
-				if (event.type === "error") throw event.error;
-			}
-			if (!message) throw new Error("expected a completed assistant message");
-			expect(message.providerPayload).toMatchObject({
-				referenceTarget: getOpenAIResponsesReferenceTarget(model, undefined, "https://api.moonshot.cn/v1"),
-			});
-
-			const followUp: Context = { messages: [message, { role: "user", content: "continue", timestamp: 1 }] };
-			const sameEndpoint = (await captureResponsesPayload(model, followUp)) as { input?: unknown[] };
-			expect(containsEncryptedReasoning(sameEndpoint.input)).toBe(true);
-
-			Bun.env.MOONSHOT_BASE_URL = "https://api.moonshot.ai/v1";
-			const movedEndpoint = (await captureResponsesPayload(model, followUp)) as { input?: unknown[] };
-			expect(containsEncryptedReasoning(movedEndpoint.input)).toBe(false);
-		} finally {
-			if (previous === undefined) delete Bun.env.MOONSHOT_BASE_URL;
-			else Bun.env.MOONSHOT_BASE_URL = previous;
-		}
-	});
-
-	it("does not replay endpoint-owned reasoning through the canonical fallback", async () => {
-		const model = buildStampedResponsesModel("https://api.openai.com/v1");
-		const foreignTarget = getOpenAIResponsesReferenceTarget(
-			buildStampedResponsesModel("https://proxy.example.invalid/v1"),
-		);
-		const reasoningItem = { type: "reasoning", id: "rs_foreign", encrypted_content: "enc_foreign", summary: [] };
-		const assistant = {
-			role: "assistant" as const,
-			api: "openai-responses" as const,
-			provider: "openai",
-			model: model.id,
-			content: [
-				{ type: "thinking" as const, thinking: "hidden", thinkingSignature: JSON.stringify(reasoningItem) },
-				{ type: "text" as const, text: "foreign answer" },
-			],
-			usage: issue5002ZeroUsage,
-			stopReason: "stop" as const,
-			providerPayload: createOpenAIResponsesHistoryPayload("openai", [reasoningItem], false, foreignTarget),
-			timestamp: Date.now(),
-		};
-		const payload = (await captureResponsesPayload(model, {
-			messages: [
-				{ role: "user", content: "first", timestamp: 0 },
-				assistant,
-				{ role: "user", content: "second", timestamp: 1 },
-			],
-		})) as { input?: unknown[] };
-
-		expect(containsEncryptedReasoning(payload.input)).toBe(false);
-		expect(containsAssistantOutputText(payload.input, "foreign answer")).toBe(true);
-	});
-
-	it("fails closed when Codex compaction history targets another endpoint", () => {
-		const model = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
-		const context: Context = {
-			messages: [
-				{
-					role: "user",
-					content: "Remote compaction preserved provider-native history for this session.",
-					providerPayload: createOpenAIResponsesHistoryPayload(
-						model.provider,
-						[{ type: "compaction", encrypted_content: "opaque" }],
-						false,
-						"incompatible-target",
-					),
-					timestamp: Date.now(),
-				},
-			],
-		};
-
-		expect(() => convertCodexResponsesMessages(model, context)).toThrow(
-			"Target-bound remote compaction history is incompatible with the active Responses target",
-		);
-	});
-
-	it("falls back to portable content when replacement history targets another endpoint", () => {
-		const sourceModel = getOpenAIReasoningModel("openai", "gpt-5-mini");
-		const targetModel = buildModel({
-			...sourceModel,
-			baseUrl: "https://proxy.example/v1",
-		});
-		const context: Context = {
-			messages: [
-				{
-					role: "user",
-					content: "portable compaction fallback",
-					providerPayload: createOpenAIResponsesHistoryPayload(
-						"openai",
-						[
-							{
-								type: "message",
-								role: "user",
-								content: [{ type: "input_image", file_id: "file_image_source" }],
-							},
-						],
-						false,
-						getOpenAIResponsesReferenceTarget(sourceModel),
-					),
-					timestamp: Date.now(),
-				},
-			],
-		};
-
-		const input = buildResponsesInput({
-			model: targetModel,
-			context,
-			strictResponsesPairing: false,
-			supportsImageDetailOriginal: targetModel.compat.supportsImageDetailOriginal,
-			nativeHistory: { replay: true, filterReasoning: false },
-		});
-
-		expect(JSON.stringify(input)).toContain("portable compaction fallback");
-		expect(JSON.stringify(input)).not.toContain("file_image_source");
-	});
-
 	it("appends user-message replacement history without wiping prefix or tail", () => {
 		const middleItems = [
 			{ type: "function_call", call_id: "call_middle", name: "middle_tool", arguments: "{}" },
@@ -1060,7 +440,7 @@ describe("OpenAI responses history payload", () => {
 					role: "user",
 					content: [
 						{ type: "text", text: "previous frame" },
-						{ type: "image", mimeType: "image/png", data: PNG_B64, detail: "original" },
+						{ type: "image", mimeType: "image/png", data: "ZmFrZQ==", detail: "original" },
 					],
 					timestamp: Date.now(),
 				},
@@ -1144,7 +524,7 @@ describe("OpenAI responses history payload", () => {
 				role: "user",
 				content: [
 					{ type: "input_text", text: "previous native frame" },
-					{ type: "input_image", detail: "original", image_url: `data:image/png;base64,${PNG_B64}` },
+					{ type: "input_image", detail: "original", image_url: "data:image/png;base64,ZmFrZQ==" },
 				],
 			},
 			{ type: "custom_tool_call", call_id: "call_native_apply", name: "apply_patch", input: ISSUE_5002_PATCH },
@@ -1262,12 +642,7 @@ describe("OpenAI responses history payload", () => {
 					model: codexModel.id,
 					usage: issue5002ZeroUsage,
 					stopReason: "stop",
-					providerPayload: createOpenAIResponsesHistoryPayload(
-						"openai-codex",
-						nativeItems,
-						true,
-						getOpenAIResponsesReferenceTarget(codexModel),
-					),
+					providerPayload: createOpenAIResponsesHistoryPayload("openai-codex", nativeItems),
 					timestamp: Date.now(),
 				},
 				{ role: "user", content: "continue", timestamp: Date.now() },
@@ -1283,54 +658,6 @@ describe("OpenAI responses history payload", () => {
 			arguments: JSON.stringify({ message: "hello", task_name: "worker" }),
 			encrypted_function_args: [],
 		});
-	});
-
-	it("rebuilds Codex call tracking after a replacement snapshot", () => {
-		const codexModel = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
-		const oldCall = {
-			type: "function_call",
-			id: "fc_old",
-			call_id: "call_old",
-			name: "read",
-			arguments: "{}",
-			status: "completed",
-		};
-		const replacement = {
-			type: "message",
-			role: "assistant",
-			content: [{ type: "output_text", text: "replacement", annotations: [] }],
-			status: "completed",
-		};
-		const context: Context = {
-			messages: [
-				makeAssistantMessage([oldCall], true, "openai-codex", codexModel.id),
-				makeAssistantMessage([replacement], false, "openai-codex", codexModel.id),
-				{
-					role: "toolResult",
-					toolCallId: "call_old|fc_old",
-					toolName: "read",
-					content: [
-						{
-							type: "image",
-							data: "",
-							mimeType: "image/png",
-							providerFile: { provider: "openai", id: "file_old" },
-						},
-					],
-					isError: false,
-					timestamp: Date.now(),
-				},
-			],
-		};
-
-		const input = convertCodexResponsesMessages(codexModel, context);
-
-		expect(input).toContainEqual({
-			type: "function_call_output",
-			call_id: "call_old",
-			output: "[image omitted: source cannot be replayed]",
-		});
-		expect(JSON.stringify(input)).not.toContain("file_old");
 	});
 
 	it("prepends multiple OpenAI developer instructions in order without changing prompt cache key routing", async () => {
@@ -1803,7 +1130,7 @@ describe("OpenAI responses history payload", () => {
 		]);
 	});
 
-	it("drops the reasoning item and hashed legacy id when the turn carries no trusted target stamp", async () => {
+	it("keeps hashed long legacy signature IDs when the replayed turn carries its reasoning item", async () => {
 		const legacySignature = `item_${"copilot/legacy+opaque=".repeat(8)}`;
 		const context: Context = {
 			messages: [
@@ -1843,15 +1170,16 @@ describe("OpenAI responses history payload", () => {
 		const payload = (await captureResponsesPayload(model, context)) as { input?: unknown[] };
 		expect(payload.input).toEqual([
 			{ role: "user", content: [{ type: "input_text", text: "first user" }] },
+			{ type: "reasoning", id: "rs_keep", encrypted_content: "enc_keep" },
 			{
 				type: "message",
 				role: "assistant",
 				content: [{ type: "output_text", text: "Signed answer", annotations: [] }],
 				status: "completed",
+				id: `msg_${Bun.hash(legacySignature).toString(36)}`,
 			},
 			{ role: "user", content: [{ type: "input_text", text: "follow-up" }] },
 		]);
-		expect(JSON.stringify(payload.input)).not.toContain(Bun.hash(legacySignature).toString(36));
 	});
 
 	it("strips output-only replay metadata while preserving paired call_id values", async () => {
@@ -1969,7 +1297,7 @@ describe("OpenAI responses history payload", () => {
 			{
 				type: "computer_call_output",
 				call_id: "call_interrupted_computer_turn",
-				output: { type: "computer_screenshot", image_url: `data:image/png;base64,${PNG_B64}` },
+				output: { type: "computer_screenshot", image_url: "data:image/png;base64,AAEC" },
 			},
 		];
 		const context: Context = {
@@ -2000,7 +1328,7 @@ describe("OpenAI responses history payload", () => {
 			{
 				type: "computer_call_output",
 				call_id: "call_interrupted_computer_turn",
-				output: { type: "computer_screenshot", image_url: `data:image/png;base64,${PNG_B64}` },
+				output: { type: "computer_screenshot", image_url: "data:image/png;base64,AAEC" },
 			},
 			{ role: "user", content: [{ type: "input_text", text: "continue after interrupt" }] },
 		]);
@@ -2051,12 +1379,12 @@ describe("OpenAI responses history payload", () => {
 					role: "toolResult",
 					toolCallId: "call_split_computer_turn|cu_split_computer_turn",
 					toolName: "computer",
-					content: [{ type: "image", data: PNG_B64, mimeType: "image/png" }],
+					content: [{ type: "image", data: "AAEC", mimeType: "image/png" }],
 					isError: false,
 					timestamp: Date.now(),
 					providerMetadata: {
 						type: "computer",
-						screenshot: { type: "computer_screenshot", image_url: `data:image/png;base64,${PNG_B64}` },
+						screenshot: { type: "computer_screenshot", image_url: "data:image/png;base64,AAEC" },
 						acknowledgedSafetyChecks: [],
 					},
 				},

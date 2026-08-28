@@ -40,16 +40,7 @@ import type {
 	ThinkingLevel,
 } from "./google-types";
 import { transformMessages } from "./transform-messages";
-import {
-	getUnreplayableInlineImageMimeType,
-	isRemoteImageUrl,
-	NON_VISION_IMAGE_PLACEHOLDER,
-	normalizeImageMimeType,
-	resolveUsableInlineImage,
-	supportsProviderFileReference,
-	supportsRemoteImageUrls,
-	unreplayableImageFormatPlaceholder,
-} from "./vision-guard";
+import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 
 export type {
 	Content,
@@ -62,27 +53,13 @@ export { normalizeSchemaForGoogle };
 
 type GoogleApiType = "google-generative-ai" | "google-gemini-cli" | "google-vertex";
 
-function convertGoogleImagePart<T extends GoogleApiType>(image: ImageContent, model: Model<T>): Part {
-	const mimeType = normalizeImageMimeType(image.mimeType);
-	if (
-		image.providerFile?.provider === "google" &&
-		typeof image.providerFile.uri === "string" &&
-		supportsProviderFileReference(model, image.providerFile, image)
-	) {
-		return { fileData: { fileUri: image.providerFile.uri, mimeType } };
+function convertGoogleImagePart(image: ImageContent): Part {
+	if (image.providerFile?.provider === "google" && image.providerFile.uri) {
+		return { fileData: { fileUri: image.providerFile.uri, mimeType: image.mimeType } };
 	}
-	if (typeof image.url === "string" && isRemoteImageUrl(image.url) && supportsRemoteImageUrls(model, image)) {
-		return { fileData: { fileUri: image.url, mimeType } };
-	}
-	const inline = resolveUsableInlineImage(image);
-	if (inline) {
-		return { inlineData: { mimeType: inline.mimeType, data: inline.data } };
-	}
-	const unreplayableMimeType = getUnreplayableInlineImageMimeType(image);
-	if (unreplayableMimeType) return { text: unreplayableImageFormatPlaceholder(unreplayableMimeType) };
-	throw new AIError.ValidationError(
-		`input_image cannot be forwarded to ${model.api} without non-empty image data or a supported reference`,
-	);
+	return image.url
+		? { fileData: { fileUri: image.url, mimeType: image.mimeType } }
+		: { inlineData: { mimeType: image.mimeType, data: image.data } };
 }
 
 /**
@@ -243,7 +220,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 						if (text.trim().length === 0) continue;
 						parts.push({ text });
 					} else if (supportsImages) {
-						parts.push(convertGoogleImagePart(item, model));
+						parts.push(convertGoogleImagePart(item));
 					} else {
 						omittedImages = true;
 					}
@@ -326,17 +303,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 			const omittedImages = !supportsImages && msg.content.some((c): c is ImageContent => c.type === "image");
 
 			const hasText = textResult.length > 0;
-			// Convert before composing the response value: a well-formed but
-			// unreplayable format degrades to a text part, so only surviving media
-			// parts may claim an attachment or open a separate image turn.
-			const convertedImageParts = imageContent.map(image => convertGoogleImagePart(image, model));
-			const imageParts = convertedImageParts.filter(
-				part => part.inlineData !== undefined || part.fileData !== undefined,
-			);
-			const placeholderTexts = convertedImageParts
-				.filter((part): part is { text: string } => typeof part.text === "string")
-				.map(part => part.text);
-			const hasImages = imageParts.length > 0;
+			const hasImages = imageContent.length > 0;
 
 			// Gemini 3+ models support multimodal function responses with images nested inside
 			// functionResponse.parts. Claude and other non-Gemini models behind Cloud Code Assist /
@@ -346,9 +313,13 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 			// Use "output" key for success, "error" key for errors as per SDK documentation
 			const responseValue = omittedImages
 				? [hasText ? textResult.toWellFormed() : "", NON_VISION_IMAGE_PLACEHOLDER].filter(Boolean).join("\n")
-				: [hasText ? textResult.toWellFormed() : hasImages ? "(see attached image)" : "", ...placeholderTexts]
-						.filter(Boolean)
-						.join("\n");
+				: hasText
+					? textResult.toWellFormed()
+					: hasImages
+						? "(see attached image)"
+						: "";
+
+			const imageParts = imageContent.map(convertGoogleImagePart);
 
 			const includeId = supportsFunctionPartId(model);
 			const emittedName = emittedToolCallNames.get(msg.toolCallId);

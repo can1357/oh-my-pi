@@ -21,7 +21,6 @@ import {
 	collectShakeRegions,
 	compact,
 	compactionContextTokens,
-	compactionPreparationHoldsForCandidate,
 	computeFileLists,
 	createCompactionSummaryMessage,
 	DEFAULT_SHAKE_CONFIG,
@@ -32,7 +31,6 @@ import {
 	NativeCompactionError,
 	prepareCompaction,
 	RESCUE_SHAKE_CONFIG,
-	remotePreserveReplayable,
 	remotePreserveReusable,
 	resolveBudgetReserveTokens,
 	resolveThresholdTokens,
@@ -90,7 +88,6 @@ import type { SessionContext } from "./session-context";
 import { getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
-import { resolveSettingsOpenrouterVariant } from "./settings-stream-fn";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { resolveSpeculationLeadTokens, SPECULATION_LEAD_MIN_TOKENS } from "./speculation-lead";
 
@@ -217,8 +214,6 @@ interface ArmedSpeculation {
 	snapshotLeafId: string;
 	/** Context size when speculation started; drives refresh-on-growth. */
 	contextTokensAtStart: number;
-	/** Model that actually produced the summary; owns the compaction-extension target. */
-	compactionModel?: Model;
 }
 
 /** One background speculative-compaction run and (once resolved) its armed result. */
@@ -260,8 +255,6 @@ export interface SessionMaintenanceHost {
 	providerSessionState: Map<string, ProviderSessionState>;
 	preferWebsockets: boolean | undefined;
 	model(): Model | undefined;
-	/** Endpoint fingerprint from the last credential resolution, when known. */
-	activeRequestTarget(): string | undefined;
 	thinkingLevel(): ThinkingLevel | undefined;
 	isDisposed(): boolean;
 	isStreaming(): boolean;
@@ -437,22 +430,6 @@ export class SessionMaintenance {
 	 * already carry skill protection). The matcher reads the current plan
 	 * reference path at match time, so retitled plans are covered.
 	 */
-	/**
-	 * Newest compaction entry the active model can actually read. A compaction it
-	 * cannot replay is re-expanded by `buildSessionContext`, so its prefix is live
-	 * prompt context that prune/shake must still be allowed to reclaim.
-	 */
-	#readableCompactionEntry(branchEntries: SessionEntry[]): CompactionEntry | undefined {
-		const model = this.#model;
-		for (let i = branchEntries.length - 1; i >= 0; i--) {
-			const entry = branchEntries[i];
-			if (entry.type !== "compaction") continue;
-			if (model && !remotePreserveReplayable(entry.preserveData, model, this.#host.activeRequestTarget())) continue;
-			return entry;
-		}
-		return undefined;
-	}
-
 	#withPlanProtection<T extends { protectedTools: ProtectedToolMatcher[] }>(config: T): T {
 		const planMatcher = createPlanReadMatcher(() => this.#host.planReferencePath());
 		return { ...config, protectedTools: [...config.protectedTools, planMatcher] };
@@ -460,7 +437,7 @@ export class SessionMaintenance {
 
 	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		const branchEntries = this.#host.sessionManager.getBranch();
-		const keepBoundaryId = this.#readableCompactionEntry(branchEntries)?.firstKeptEntryId;
+		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
 		const result = pruneToolOutputs(
 			branchEntries,
 			this.#tokenizer,
@@ -503,7 +480,7 @@ export class SessionMaintenance {
 		const { supersedeReads, dropUseless } = this.#host.settings.getGroup("compaction");
 		if (!supersedeReads && !dropUseless) return undefined;
 		const branchEntries = this.#host.sessionManager.getBranch();
-		const keepBoundaryId = this.#readableCompactionEntry(branchEntries)?.firstKeptEntryId;
+		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
 		const result = pruneSupersededToolResults(
 			branchEntries,
 			this.#tokenizer,
@@ -628,13 +605,13 @@ export class SessionMaintenance {
 		}
 
 		const branchEntries = this.#host.sessionManager.getBranch();
-		const latestCompaction = this.#readableCompactionEntry(branchEntries);
+		const latestCompaction = getLatestCompactionEntry(branchEntries);
 		const config = this.#withPlanProtection({
 			...(opts.config ?? AGGRESSIVE_SHAKE_CONFIG),
-			// Skip entries summarized away by a compaction the active model can read —
-			// shaking them only churns persisted history with no prompt/cache effect.
-			// A compaction it cannot replay is re-expanded into the prompt, so its
-			// prefix stays shakeable.
+			// Skip entries summarized away by the latest compaction — shaking them
+			// only churns persisted history with no prompt/cache effect. The cut is
+			// unconditional on the wire (see `buildSessionContext`), so a compaction
+			// the active model cannot replay still hides its prefix from the prompt.
 			keepBoundaryId: latestCompaction?.firstKeptEntryId,
 		});
 		const regions = collectShakeRegions(branchEntries, this.#tokenizer, config);
@@ -822,7 +799,6 @@ export class SessionMaintenance {
 							shouldUseProviderNativeCompaction(candidate, effectiveSettings)
 					: undefined,
 			);
-			const orderedCandidates = await this.#candidatesFromFirstAuthenticated(compactionCandidates);
 			if (requireProviderRemote && compactionCandidates.length === 0) {
 				this.#host.emitNotice(
 					"warning",
@@ -832,14 +808,7 @@ export class SessionMaintenance {
 				return await this.compact(customInstructions, options, selectedMethodIndex + 1, compactionAbortController);
 			}
 			const pathEntries = this.#host.sessionManager.getBranch();
-			const preparation = prepareCompaction(
-				pathEntries,
-				effectiveSettings,
-				activeModel,
-				this.#tokenizer,
-				orderedCandidates,
-				this.#host.activeRequestTarget(),
-			);
+			const preparation = prepareCompaction(pathEntries, effectiveSettings, activeModel, this.#tokenizer);
 			if (!preparation) {
 				// Check why we can't compact
 				const lastEntry = pathEntries[pathEntries.length - 1];
@@ -1032,17 +1001,7 @@ export class SessionMaintenance {
 							convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 							codexCompaction,
 						},
-						orderedCandidates,
-						undefined,
-						candidate =>
-							prepareCompaction(
-								pathEntries,
-								effectiveSettings,
-								activeModel,
-								this.#tokenizer,
-								[candidate],
-								this.#host.activeRequestTarget(),
-							),
+						compactionCandidates,
 					);
 					summary = result.summary;
 					shortSummary = result.shortSummary;
@@ -1216,8 +1175,6 @@ export class SessionMaintenance {
 			resolveMethodSettings(compactionSettings, "handoff"),
 			model,
 			this.#tokenizer,
-			undefined,
-			this.#host.activeRequestTarget(),
 		);
 		if (!preparation) throw new Error("Nothing to hand off (already compacted)");
 		const result = await this.#host.generateHandoffDocument(customInstructions, options);
@@ -1351,26 +1308,7 @@ export class SessionMaintenance {
 		const branch = this.#host.sessionManager.getBranch();
 		const snapshotLeafId = branch[branch.length - 1]?.id;
 		if (!snapshotLeafId) return clear();
-		const candidates =
-			method === "handoff"
-				? []
-				: this.#getCompactionModelCandidates(
-						this.#host.modelRegistry.getAvailable(),
-						method === "remote" && !effectiveSettings.remoteEndpoint
-							? candidate =>
-									candidate.provider === model.provider &&
-									shouldUseProviderNativeCompaction(candidate, effectiveSettings)
-							: undefined,
-					);
-		const orderedCandidates = await this.#candidatesFromFirstAuthenticated(candidates);
-		const preparation = prepareCompaction(
-			branch,
-			effectiveSettings,
-			model,
-			this.#tokenizer,
-			orderedCandidates,
-			this.#host.activeRequestTarget(),
-		);
+		const preparation = prepareCompaction(branch, effectiveSettings, model, this.#tokenizer);
 		if (!preparation) return clear();
 		const signal = run.controller.signal;
 		let armed: ArmedSpeculation;
@@ -1399,13 +1337,20 @@ export class SessionMaintenance {
 			// No hookCompaction is passed above, so "fromHook" is unreachable;
 			// the guard just narrows the union.
 			if (compactionPrep.kind === "fromHook") return clear();
+			const candidates = this.#getCompactionModelCandidates(
+				this.#host.modelRegistry.getAvailable(),
+				method === "remote" && !effectiveSettings.remoteEndpoint
+					? candidate =>
+							candidate.provider === model.provider &&
+							shouldUseProviderNativeCompaction(candidate, effectiveSettings)
+					: undefined,
+			);
 			if (candidates.length === 0) return clear();
 			const codexCompaction = createCodexCompactionContext({
 				trigger: "auto",
 				reason: "context_limit",
 				phase: "standalone_turn",
 			});
-			let compactionModel: Model | undefined;
 			const result = await this.#compactWithFallbackModel(
 				preparation,
 				undefined,
@@ -1421,19 +1366,7 @@ export class SessionMaintenance {
 					sessionId: `${this.#host.sessionId()}:spec:${Snowflake.next()}`,
 					preferWebsockets: false,
 				},
-				orderedCandidates,
-				candidate => {
-					compactionModel = candidate;
-				},
-				candidate =>
-					prepareCompaction(
-						branch,
-						effectiveSettings,
-						model,
-						this.#tokenizer,
-						[candidate],
-						this.#host.activeRequestTarget(),
-					),
+				candidates,
 			);
 			armed = {
 				result: {
@@ -1445,7 +1378,6 @@ export class SessionMaintenance {
 				codexCompaction,
 				snapshotLeafId,
 				contextTokensAtStart: contextTokens,
-				compactionModel,
 			};
 		}
 		if (signal.aborted || this.#speculation !== run) return;
@@ -1467,18 +1399,9 @@ export class SessionMaintenance {
 		const model = this.#model;
 		if (!model) return false;
 		const settings = this.#host.settings.getGroup("compaction");
-		// Runtime replay is validated against the ACTIVE model, while the
-		// compaction-extension target belongs to the candidate that produced the
-		// summary — a configured side model would otherwise fail its own result.
 		if (
 			armed.result.preserveData &&
-			!remotePreserveReusable(
-				armed.result.preserveData,
-				model,
-				resolveMethodSettings(settings, armed.method),
-				armed.compactionModel ? [armed.compactionModel] : [],
-				this.#host.activeRequestTarget(),
-			)
+			!remotePreserveReusable(armed.result.preserveData, model, resolveMethodSettings(settings, armed.method))
 		) {
 			return false;
 		}
@@ -1632,14 +1555,8 @@ export class SessionMaintenance {
 		}
 		if (
 			pendingMidTurnDeadEnd &&
-			prepareCompaction(
-				this.#host.sessionManager.getBranch(),
-				compactionSettings,
-				model,
-				this.#tokenizer,
-				undefined,
-				this.#host.activeRequestTarget(),
-			) === undefined
+			prepareCompaction(this.#host.sessionManager.getBranch(), compactionSettings, model, this.#tokenizer) ===
+				undefined
 		) {
 			// The prior tool loop already attempted the rescue and warned for this
 			// persisted oversized turn. Only a later persisted cut point makes a
@@ -1759,14 +1676,8 @@ export class SessionMaintenance {
 			// soon as one appears.
 			if (
 				!model ||
-				prepareCompaction(
-					this.#host.sessionManager.getBranch(),
-					compactionSettings,
-					model,
-					this.#tokenizer,
-					undefined,
-					this.#host.activeRequestTarget(),
-				) === undefined
+				prepareCompaction(this.#host.sessionManager.getBranch(), compactionSettings, model, this.#tokenizer) ===
+					undefined
 			) {
 				return;
 			}
@@ -2181,45 +2092,6 @@ export class SessionMaintenance {
 		return this.resolveCompactionModelCandidates(this.#model, availableModels, filter);
 	}
 
-	/**
-	 * Drop the leading candidates that have no usable credentials so the head of
-	 * the list is the model `#compactWithFallbackModel` will actually run. The
-	 * compaction-history reuse check reads that head, so a configured target the
-	 * session cannot authenticate must not decide whether the previous native
-	 * replay payload can be extended.
-	 */
-	async #candidatesFromFirstAuthenticated(candidates: Model[]): Promise<Model[]> {
-		for (let i = 0; i < candidates.length; i++) {
-			if (await this.#host.modelRegistry.getApiKey(candidates[i], this.#host.sessionId())) {
-				return candidates.slice(i);
-			}
-		}
-		return candidates;
-	}
-
-	/**
-	 * Candidate execution can fall through past the head after an auth failure,
-	 * a native-compaction failure, or retry exhaustion. A preparation whose
-	 * boundary was justified by the head candidate's ability to extend the
-	 * preserved native history would then let the executing candidate commit a
-	 * summary covering only the recent tail, permanently hiding the originals,
-	 * so rebuild it from the branch for the candidate that actually runs.
-	 */
-	#preparationForCandidate(
-		preparation: CompactionPreparation,
-		candidate: Model,
-		reprepare: ((candidate: Model) => CompactionPreparation | undefined) | undefined,
-	): CompactionPreparation {
-		const activeModel = this.#model;
-		if (!reprepare || !activeModel) return preparation;
-		if (
-			compactionPreparationHoldsForCandidate(preparation, activeModel, candidate, this.#host.activeRequestTarget())
-		) {
-			return preparation;
-		}
-		return reprepare(candidate) ?? preparation;
-	}
-
 	resolveCompactionModelCandidates(
 		preferredModel: Model | null | undefined,
 		availableModels: Model[],
@@ -2280,8 +2152,6 @@ export class SessionMaintenance {
 		signal: AbortSignal,
 		options?: SummaryOptions,
 		precomputedCandidates?: Model[],
-		onCandidateSelected?: (candidate: Model) => void,
-		reprepare?: (candidate: Model) => CompactionPreparation | undefined,
 	): Promise<CompactionResult> {
 		const candidates =
 			precomputedCandidates ?? this.#getCompactionModelCandidates(this.#host.modelRegistry.getAvailable());
@@ -2291,19 +2161,17 @@ export class SessionMaintenance {
 		for (const candidate of candidates) {
 			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 			if (!apiKey) continue;
-			const candidatePreparation = this.#preparationForCandidate(preparation, candidate, reprepare);
 			if (
 				nativeCompactionFailure &&
 				(candidate.provider !== nativeCompactionFailure.provider ||
-					!shouldUseProviderNativeCompaction(candidate, candidatePreparation.settings))
+					!shouldUseProviderNativeCompaction(candidate, preparation.settings))
 			) {
 				throw nativeCompactionFailure.error;
 			}
 
 			try {
-				onCandidateSelected?.(candidate);
 				return await compact(
-					this.#host.obfuscatePreparationForProvider(candidatePreparation),
+					this.#host.obfuscatePreparationForProvider(preparation),
 					candidate,
 					this.#host.modelRegistry.resolver(candidate, this.#host.sessionId()),
 					this.#host.obfuscateTextForProvider(customInstructions),
@@ -2319,9 +2187,6 @@ export class SessionMaintenance {
 						// (xai-oauth/grok-build) don't trip requireSupportedEffort.
 						thinkingLevel: this.#host.thinkingLevel(),
 						tools: this.#host.agent.state.tools,
-						runtimeModel: this.#model,
-						openrouterVariant: resolveSettingsOpenrouterVariant(this.#host.settings),
-						activeRequestTarget: this.#host.activeRequestTarget(),
 						sessionId: this.#host.sessionId(),
 						promptCacheKey: this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId,
 						providerSessionState: this.#host.providerSessionState,
@@ -3162,25 +3027,9 @@ export class SessionMaintenance {
 			}
 
 			const pathEntries = this.#host.sessionManager.getBranch();
-			const compactionCandidates = this.#getCompactionModelCandidates(
-				availableModels,
-				method === "remote" && !effectiveSettings.remoteEndpoint
-					? candidate =>
-							candidate.provider === this.#model?.provider &&
-							shouldUseProviderNativeCompaction(candidate, effectiveSettings)
-					: undefined,
-			);
 
-			const orderedCompactionCandidates = await this.#candidatesFromFirstAuthenticated(compactionCandidates);
 			let pathEntriesForCompaction = pathEntries;
-			let preparation = prepareCompaction(
-				pathEntriesForCompaction,
-				effectiveSettings,
-				this.#model,
-				this.#tokenizer,
-				orderedCompactionCandidates,
-				this.#host.activeRequestTarget(),
-			);
+			let preparation = prepareCompaction(pathEntriesForCompaction, effectiveSettings, this.#model, this.#tokenizer);
 			if (!preparation) {
 				// prepareCompaction found nothing to summarize because the kept region
 				// is a single oversized recent turn — findCutPoint never cuts inside a
@@ -3235,8 +3084,6 @@ export class SessionMaintenance {
 									effectiveSettings,
 									this.#model,
 									this.#tokenizer,
-									orderedCompactionCandidates,
-									this.#host.activeRequestTarget(),
 								);
 								return preparation !== undefined;
 							},
@@ -3531,7 +3378,14 @@ export class SessionMaintenance {
 				details = snapcompactResult.details;
 				preserveData = { ...(compactionPrep.preserveData ?? {}), ...(snapcompactResult.preserveData ?? {}) };
 			} else {
-				const candidates = orderedCompactionCandidates;
+				const candidates = this.#getCompactionModelCandidates(
+					availableModels,
+					method === "remote" && !effectiveSettings.remoteEndpoint
+						? candidate =>
+								candidate.provider === this.#model?.provider &&
+								shouldUseProviderNativeCompaction(candidate, effectiveSettings)
+						: undefined,
+				);
 				const retrySettings = this.#host.settings.getGroup("retry");
 				const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
 				let compactResult: CompactionResult | undefined;
@@ -3550,20 +3404,10 @@ export class SessionMaintenance {
 					const hasMoreCandidates = candidateIndex < candidates.length - 1;
 					const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 					if (!apiKey) continue;
-					const candidatePreparation = this.#preparationForCandidate(preparation, candidate, next =>
-						prepareCompaction(
-							pathEntriesForCompaction,
-							effectiveSettings,
-							this.#model,
-							this.#tokenizer,
-							[next],
-							this.#host.activeRequestTarget(),
-						),
-					);
 					if (
 						nativeCompactionFailure &&
 						(candidate.provider !== nativeCompactionFailure.provider ||
-							!shouldUseProviderNativeCompaction(candidate, candidatePreparation.settings))
+							!shouldUseProviderNativeCompaction(candidate, preparation.settings))
 					) {
 						throw nativeCompactionFailure.error;
 					}
@@ -3572,7 +3416,7 @@ export class SessionMaintenance {
 					while (true) {
 						try {
 							compactResult = await compact(
-								this.#host.obfuscatePreparationForProvider(candidatePreparation),
+								this.#host.obfuscatePreparationForProvider(preparation),
 								candidate,
 								this.#host.modelRegistry.resolver(candidate, this.#host.sessionId()),
 								undefined,
@@ -3591,9 +3435,6 @@ export class SessionMaintenance {
 									// resolveCompactionEffort.
 									thinkingLevel: this.#host.thinkingLevel(),
 									tools: this.#host.agent.state.tools,
-									runtimeModel: this.#model,
-									openrouterVariant: resolveSettingsOpenrouterVariant(this.#host.settings),
-									activeRequestTarget: this.#host.activeRequestTarget(),
 									sessionId: this.#host.sessionId(),
 									promptCacheKey: this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId,
 									providerSessionState: this.#host.providerSessionState,

@@ -215,7 +215,7 @@ describe("AgentSession shake", () => {
 			).toBeUndefined();
 		});
 
-		it("reclaims entries a remote compaction the active model cannot replay left in the prompt", async () => {
+		it("does not subtract remote-compacted entries omitted from the provider prompt", async () => {
 			seedHeavyToolResult("X".repeat(20_000));
 			const firstKeptEntryId = sessionManager.getBranch()[0]?.id;
 			if (!firstKeptEntryId) throw new Error("Expected seeded branch");
@@ -242,7 +242,7 @@ describe("AgentSession shake", () => {
 			const result = await session.shake("elide");
 
 			expect(result.tokensFreed).toBeGreaterThan(0);
-			expect(session.getContextUsage()?.tokens).toBe(20_000 - result.tokensFreed);
+			expect(session.getContextUsage()?.tokens).toBe(20_000);
 			const anchor = sessionManager
 				.getBranch()
 				.findLast(entry => entry.type === "message" && entry.message.role === "assistant");
@@ -250,33 +250,7 @@ describe("AgentSession shake", () => {
 				anchor?.type === "message" && anchor.message.role === "assistant"
 					? anchor.message.contextSnapshot?.historyRewriteTokensRemoved
 					: undefined,
-			).toBe(result.tokensFreed);
-		});
-
-		it("leaves entries summarized away by a readable compaction alone", async () => {
-			seedHeavyToolResult("X".repeat(20_000));
-			sessionManager.appendMessage({
-				role: "user",
-				content: [{ type: "text", text: "keep me" }],
-				timestamp: Date.now(),
-			});
-			const firstKeptEntryId = sessionManager.getBranch().at(-1)?.id;
-			if (!firstKeptEntryId) throw new Error("Expected seeded branch");
-			sessionManager.appendCompaction("local summary", undefined, firstKeptEntryId, 10_000);
-			sessionManager.appendMessage({
-				role: "assistant",
-				content: [{ type: "text", text: recentProtectedTail("post-compaction") }],
-				...apiInfo,
-				stopReason: "stop",
-				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
-				timestamp: Date.now(),
-			});
-			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
-
-			const result = await session.shake("elide");
-
-			expect(result.tokensFreed).toBe(0);
-			expect(result.toolResultsDropped).toBe(0);
+			).toBeUndefined();
 		});
 
 		it("returns zero counts for an empty branch", async () => {

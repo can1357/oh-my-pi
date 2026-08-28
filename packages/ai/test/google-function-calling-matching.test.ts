@@ -11,8 +11,6 @@ const ZERO_USAGE: Usage = {
 	totalTokens: 0,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
-// Smallest valid 1x1 PNG: inline image payloads must sniff as their declared media type.
-const IMAGE_DATA = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 function createGoogleModel(
 	id: string,
@@ -117,7 +115,7 @@ describe("Google GenerateContent function response matching", () => {
 		toolResult.content.push({
 			type: "image",
 			mimeType: "image/png",
-			data: IMAGE_DATA,
+			data: "base64-image-data",
 		});
 
 		const model = createGoogleModel("gemini-3.5-flash");
@@ -127,7 +125,7 @@ describe("Google GenerateContent function response matching", () => {
 			{
 				inlineData: {
 					mimeType: "image/png",
-					data: IMAGE_DATA,
+					data: "base64-image-data",
 				},
 			},
 		]);

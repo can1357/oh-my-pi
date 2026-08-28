@@ -3,32 +3,27 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AssistantMessage, AssistantMessageEvent, Context, Model } from "@oh-my-pi/pi-ai";
-import { supportsRemoteImageUrls } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { LocalBlobBackend } from "../src/blob-broker/broker";
-import { contextHasImageUrls } from "../src/blob-broker/context-images";
+import { contextHasImageUrls, supportsRemoteImageUrls } from "../src/blob-broker/context-images";
 import { ImageUrlService } from "../src/blob-broker/service";
 import { type BlobPersistence, BlobRegistry } from "../src/blob-broker/store";
 import { wrapStreamFnWithBlobUrlFallback } from "../src/blob-broker/stream-fallback";
 import { createCommandUploader, extractUploadUrl, splitCommandTemplate } from "../src/blob-broker/uploaders";
 import { BlobStore as SessionBlobStore } from "../src/session/blob-store";
 
-const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
-const OTHER_B64 =
-	"/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==";
-const MISLABELLED_B64 = Buffer.from("blob-broker-test-not-an-image").toString("base64");
-const BMP_B64 = Buffer.from("424d1e00000000000000001a0000000c000000010001000100180000000000", "hex").toString("base64");
-const KNOWN_IMAGE_REFERENCE = { mimeType: "image/png" };
+const PNG_B64 = Buffer.from("blob-broker-test-bytes-1").toString("base64");
+const OTHER_B64 = Buffer.from("blob-broker-test-bytes-2").toString("base64");
 
-function makeModel(api: string, provider: string, baseUrl = "https://example.invalid"): Model {
+function makeModel(api: string, provider: string): Model {
 	return buildModel({
 		id: "test-model",
 		name: "Test Model",
 		api,
 		provider,
-		baseUrl,
+		baseUrl: "https://example.invalid",
 		reasoning: false,
 		input: ["text", "image"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -37,7 +32,7 @@ function makeModel(api: string, provider: string, baseUrl = "https://example.inv
 	});
 }
 
-const anthropicModel = makeModel("anthropic-messages", "anthropic", "https://api.anthropic.com");
+const anthropicModel = makeModel("anthropic-messages", "anthropic");
 
 function makeContext(): Context {
 	return {
@@ -316,94 +311,23 @@ describe("ImageUrlService", () => {
 		if (restored.type !== "image") throw new Error("unexpected block");
 		expect(restored.data.length).toBeGreaterThan(0);
 	});
-
-	it("keeps known-media broker URLs enabled for Google transports", async () => {
-		const service = makeService();
-		const decorated = await service.decorateContext(makeContext(), makeModel("google-vertex", "google-vertex"));
-		expect(contextHasImageUrls(decorated)).toBe(true);
-	});
-
-	it("publishes only bytes that pass inline-image validation", async () => {
-		const service = makeService();
-		const context: Context = {
-			messages: [
-				{
-					role: "user",
-					content: [
-						{ type: "image", data: PNG_B64, mimeType: "image/png" },
-						{ type: "image", data: MISLABELLED_B64, mimeType: "image/png" },
-						{ type: "image", data: BMP_B64, mimeType: "image/bmp" },
-					],
-					timestamp: 0,
-				},
-			],
-		};
-
-		const decorated = await service.decorateContext(context, anthropicModel);
-		const user = decorated.messages[0];
-		if (user.role !== "user" || typeof user.content === "string") throw new Error("unexpected shape");
-		const [verified, mislabelled, placeholderSafe] = user.content;
-		if (verified.type !== "image" || mislabelled.type !== "image" || placeholderSafe.type !== "image") {
-			throw new Error("unexpected block");
-		}
-		// A published url becomes the serializer's preferred source, so bytes that
-		// fail validation must keep their fail-closed / placeholder handling.
-		expect(verified.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\//);
-		expect(mislabelled.url).toBeUndefined();
-		expect(placeholderSafe.url).toBeUndefined();
-	});
 });
 
 describe("supportsRemoteImageUrls", () => {
 	it("admits verified url-fetching surfaces and refuses shared-API lookalikes", () => {
-		expect(supportsRemoteImageUrls(anthropicModel, KNOWN_IMAGE_REFERENCE)).toBe(true);
-		expect(supportsRemoteImageUrls(makeModel("openai-codex-responses", "openai-codex"), KNOWN_IMAGE_REFERENCE)).toBe(
-			true,
-		);
-		expect(supportsRemoteImageUrls(makeModel("openai-responses", "xai"), KNOWN_IMAGE_REFERENCE)).toBe(true);
-		expect(supportsRemoteImageUrls(makeModel("openai-completions", "openai"), KNOWN_IMAGE_REFERENCE)).toBe(true);
-		expect(supportsRemoteImageUrls(makeModel("openai-responses", "ollama"), KNOWN_IMAGE_REFERENCE)).toBe(false);
-		expect(supportsRemoteImageUrls(makeModel("openai-completions", "ollama"), KNOWN_IMAGE_REFERENCE)).toBe(false);
-		expect(
-			supportsRemoteImageUrls(
-				makeModel("openai-responses", "custom", "http://127.0.0.1:11434/v1"),
-				KNOWN_IMAGE_REFERENCE,
-			),
-		).toBe(false);
-		expect(supportsRemoteImageUrls(makeModel("google-gemini-cli", "google-antigravity"), KNOWN_IMAGE_REFERENCE)).toBe(
-			true,
-		);
+		expect(supportsRemoteImageUrls(anthropicModel)).toBe(true);
+		expect(supportsRemoteImageUrls(makeModel("openai-codex-responses", "openai-codex"))).toBe(true);
+		expect(supportsRemoteImageUrls(makeModel("openai-responses", "xai"))).toBe(true);
+		expect(supportsRemoteImageUrls(makeModel("google-gemini-cli", "google-antigravity"))).toBe(true);
 		// Same API shape, backend that cannot fetch arbitrary URLs.
-		expect(supportsRemoteImageUrls(makeModel("anthropic-messages", "opencode"), KNOWN_IMAGE_REFERENCE)).toBe(false);
-		// Same provider id, endpoint that is not the first-party Claude API.
-		expect(
-			supportsRemoteImageUrls(
-				makeModel("anthropic-messages", "anthropic", "https://claude-proxy.example.invalid/v1"),
-				KNOWN_IMAGE_REFERENCE,
-			),
-		).toBe(false);
+		expect(supportsRemoteImageUrls(makeModel("anthropic-messages", "opencode"))).toBe(false);
 		// Moonshot-native hosts reject remote image URLs on both transports
 		// ("unsupported image url" 400) despite the openai-completions catalog api.
-		expect(supportsRemoteImageUrls(makeModel("openai-completions", "kimi-code"), KNOWN_IMAGE_REFERENCE)).toBe(false);
-		expect(supportsRemoteImageUrls(makeModel("anthropic-messages", "kimi-code"), KNOWN_IMAGE_REFERENCE)).toBe(false);
-		expect(supportsRemoteImageUrls(makeModel("openai-completions", "moonshot"), KNOWN_IMAGE_REFERENCE)).toBe(false);
-		expect(supportsRemoteImageUrls(makeModel("google-generative-ai", "google"), KNOWN_IMAGE_REFERENCE)).toBe(false);
-		expect(supportsRemoteImageUrls(makeModel("google-gemini-cli", "google-gemini-cli"), KNOWN_IMAGE_REFERENCE)).toBe(
-			false,
-		);
-		expect(
-			supportsRemoteImageUrls(makeModel("bedrock-converse-stream", "amazon-bedrock"), KNOWN_IMAGE_REFERENCE),
-		).toBe(false);
-		expect(
-			supportsRemoteImageUrls(
-				makeModel("openai-responses", "bedrock-mantle", "https://bedrock-mantle.us-east-1.api.aws/openai/v1"),
-				KNOWN_IMAGE_REFERENCE,
-			),
-		).toBe(false);
-	});
-
-	it("rejects inherited property names used as custom API identifiers", () => {
-		expect(supportsRemoteImageUrls(makeModel("toString", "custom"), KNOWN_IMAGE_REFERENCE)).toBe(false);
+		expect(supportsRemoteImageUrls(makeModel("openai-completions", "kimi-code"))).toBe(false);
+		expect(supportsRemoteImageUrls(makeModel("anthropic-messages", "kimi-code"))).toBe(false);
+		expect(supportsRemoteImageUrls(makeModel("openai-completions", "moonshot"))).toBe(false);
+		expect(supportsRemoteImageUrls(makeModel("google-gemini-cli", "google-gemini-cli"))).toBe(false);
+		expect(supportsRemoteImageUrls(makeModel("bedrock-converse-stream", "amazon-bedrock"))).toBe(false);
 	});
 });
 

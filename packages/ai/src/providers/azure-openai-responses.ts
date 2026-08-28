@@ -11,13 +11,7 @@ import type {
 	StreamOptions,
 	ToolChoice,
 } from "../types";
-import {
-	createOpenAIResponsesHistoryPayload,
-	getOpenAIResponsesReferenceTarget,
-	resolveAzureOpenAIBaseUrl,
-	resolveCacheRetention,
-	resolveOpenAIResponsesRequestModel,
-} from "../utils";
+import { resolveCacheRetention } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
 import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
@@ -40,11 +34,11 @@ import type { ResponseCreateParamsStreaming, ResponseStreamEvent } from "./opena
 import {
 	applyCommonResponsesSamplingParams,
 	applyResponsesReasoningParams,
-	assertResponsesWireRoutingUnchanged,
 	buildResponsesInput,
 	createInitialResponsesAssistantMessage,
 	getOpenAIPromptCacheKey,
 	isOpenAIResponsesProgressEvent,
+	parseAzureDeploymentNameMap,
 	processResponsesStream,
 } from "./openai-shared";
 
@@ -58,7 +52,8 @@ function resolveDeploymentName(model: Model<"azure-openai-responses">, options?:
 	if (options?.azureDeploymentName) {
 		return options.azureDeploymentName;
 	}
-	return resolveOpenAIResponsesRequestModel(model);
+	const mappedDeployment = parseAzureDeploymentNameMap($env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP).get(model.id);
+	return mappedDeployment ?? model.id;
 }
 
 // Azure OpenAI Responses-specific options
@@ -133,13 +128,11 @@ const streamAzureOpenAIResponsesOnce = (
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const { url, headers, baseUrl } = buildAzureResponsesRequest(model, apiKey, options);
 			const requestModel = modelForAzureEndpoint(model, baseUrl);
-			const referenceTarget = getOpenAIResponsesReferenceTarget(requestModel, deploymentName, baseUrl);
-			let params = buildParams(requestModel, context, options, deploymentName, referenceTarget);
+			let params = buildParams(requestModel, context, options, deploymentName);
 			const replacementPayload = await options?.onPayload?.(params, requestModel);
 			if (replacementPayload !== undefined) {
 				params = replacementPayload as typeof params;
 			}
-			assertResponsesWireRoutingUnchanged(params, { model: deploymentName }, model.api);
 			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs();
 			const firstEventTimeoutMs =
 				options?.streamFirstEventTimeoutMs ?? getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs);
@@ -214,13 +207,9 @@ const streamAzureOpenAIResponsesOnce = (
 				isProgressItem: isOpenAIResponsesProgressEvent,
 			});
 			let sawTerminalResponseEvent = false;
-			const nativeOutputItems: Array<Record<string, unknown>> = [];
 			await processResponsesStream(timedOpenaiStream, output, stream, model, {
 				onFirstToken: () => {
 					if (!firstTokenTime) firstTokenTime = performance.now();
-				},
-				onOutputItemDone: item => {
-					nativeOutputItems.push(item as unknown as Record<string, unknown>);
 				},
 				onCompleted: () => {
 					sawTerminalResponseEvent = true;
@@ -250,12 +239,6 @@ const streamAzureOpenAIResponsesOnce = (
 				});
 			}
 
-			output.providerPayload = createOpenAIResponsesHistoryPayload(
-				model.provider,
-				nativeOutputItems,
-				true,
-				referenceTarget,
-			);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "done", reason: output.stopReason, message: output });
@@ -299,7 +282,19 @@ function resolveAzureConfig(
 	options?: AzureOpenAIResponsesOptions,
 ): { baseUrl: string; apiVersion: string } {
 	const apiVersion = options?.azureApiVersion || $env.AZURE_OPENAI_API_VERSION || DEFAULT_AZURE_API_VERSION;
-	const resolvedBaseUrl = resolveAzureOpenAIBaseUrl(model, options);
+
+	const baseUrl = options?.azureBaseUrl?.trim() || $env.AZURE_OPENAI_BASE_URL?.trim() || undefined;
+	const resourceName = options?.azureResourceName || $env.AZURE_OPENAI_RESOURCE_NAME;
+
+	let resolvedBaseUrl = baseUrl;
+
+	if (!resolvedBaseUrl && resourceName) {
+		resolvedBaseUrl = `https://${resourceName}.openai.azure.com/openai/v1`;
+	}
+
+	if (!resolvedBaseUrl && model.baseUrl) {
+		resolvedBaseUrl = model.baseUrl;
+	}
 
 	if (!resolvedBaseUrl) {
 		throw new AIError.ConfigurationError(
@@ -317,22 +312,17 @@ function modelForAzureEndpoint(
 	model: Model<"azure-openai-responses">,
 	baseUrl: string,
 ): Model<"azure-openai-responses"> {
-	let supportsComputerUse = model.supportsComputerUse;
-	if (model.supportsComputerUseConfig === undefined && model.supportsComputerUse === true) {
-		try {
-			const url = new URL(baseUrl);
-			if (
-				url.protocol !== "https:" ||
-				(!url.hostname.endsWith(".openai.azure.com") && url.hostname !== "models.inference.ai.azure.com")
-			) {
-				supportsComputerUse = false;
-			}
-		} catch {
-			supportsComputerUse = false;
+	if (model.supportsComputerUseConfig !== undefined || model.supportsComputerUse !== true) return model;
+	try {
+		const url = new URL(baseUrl);
+		if (
+			url.protocol === "https:" &&
+			(url.hostname.endsWith(".openai.azure.com") || url.hostname === "models.inference.ai.azure.com")
+		) {
+			return model;
 		}
-	}
-	if (model.baseUrl === baseUrl && model.supportsComputerUse === supportsComputerUse) return model;
-	return { ...model, baseUrl, supportsComputerUse };
+	} catch {}
+	return { ...model, supportsComputerUse: false };
 }
 
 /**
@@ -379,7 +369,6 @@ function buildParams(
 	context: Context,
 	options: AzureOpenAIResponsesOptions | undefined,
 	deploymentName: string,
-	referenceTarget: string,
 ) {
 	const systemRole = model.reasoning && model.compat.supportsDeveloperRole ? "developer" : "system";
 	const messages = buildResponsesInput({
@@ -392,7 +381,6 @@ function buildParams(
 		includeThinkingSignatures: true,
 		developerStringContent: true,
 		preserveAssistantMessageIds: true,
-		referenceTarget,
 	});
 
 	const params: AzureOpenAIResponsesSamplingParams = {

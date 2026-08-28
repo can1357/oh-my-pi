@@ -1,5 +1,4 @@
 import type { Model } from "@oh-my-pi/pi-ai";
-import { supportsAnthropicProviderFileEndpoint } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import type { ProviderFileClient, ProviderFileHandle, ProviderFileUploadRequest } from "./provider-file-types";
 import type { FetchImpl } from "./uploader-runtime";
@@ -13,6 +12,24 @@ interface AnthropicFileMetadata {
 	mime_type: string;
 	size_bytes: number;
 	expires_at?: string | null;
+}
+
+function isOfficialAnthropicBaseUrl(baseUrl: string): boolean {
+	try {
+		const url = new URL(baseUrl);
+		return (
+			url.protocol === "https:" &&
+			url.hostname === "api.anthropic.com" &&
+			url.port === "" &&
+			(url.pathname === "" || url.pathname === "/") &&
+			url.search === "" &&
+			url.hash === "" &&
+			url.username === "" &&
+			url.password === ""
+		);
+	} catch {
+		return false;
+	}
 }
 
 function authHeaders(credential: string): Readonly<Record<string, string>> {
@@ -71,15 +88,18 @@ function uploadedFile(request: ProviderFileUploadRequest): File {
 
 /**
  * Create a native Anthropic Files API client for an official Anthropic Messages model.
- * Unsupported providers, APIs, and endpoints that the request actually resolves to
- * outside the first-party API return `null` without making a request.
+ * Unsupported providers, APIs, and non-Anthropic endpoints return `null` without making a request.
  */
 export function createAnthropicFileClient(
 	model: Model,
 	credential: string,
 	fetchImpl: FetchImpl = globalThis.fetch,
 ): ProviderFileClient | null {
-	if (!supportsAnthropicProviderFileEndpoint(model)) {
+	if (
+		model.provider !== "anthropic" ||
+		model.api !== "anthropic-messages" ||
+		!isOfficialAnthropicBaseUrl(model.baseUrl)
+	) {
 		return null;
 	}
 	if (credential.length === 0) throw new Error("Anthropic Files API credential is required");

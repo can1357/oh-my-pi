@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed auth-gateway OpenAI Responses requests rejecting multimodal function-call outputs containing input text and images; inline images and URL-capable remote references are preserved as tool-result content, while remote references and OpenAI file-backed images are rejected before dispatch to APIs that cannot replay them.
+- Fixed auth-gateway OpenAI Responses requests rejecting multimodal function-call outputs containing input text and images; inline and remote images are preserved as tool-result content, while OpenAI file-backed images are preserved for Responses-family targets and rejected before dispatch to incompatible APIs.
 
 ## [18.0.5] - 2026-08-25
 

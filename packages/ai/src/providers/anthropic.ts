@@ -100,15 +100,7 @@ import {
 } from "./github-copilot-headers";
 import { getOpenAIPromptCacheKey } from "./openai-shared";
 import { transformMessages } from "./transform-messages";
-import {
-	getUnreplayableInlineImageMimeType,
-	isRemoteImageUrl,
-	NON_VISION_IMAGE_PLACEHOLDER,
-	resolveUsableInlineImage,
-	supportsProviderFileReference,
-	supportsRemoteImageUrls,
-	unreplayableImageFormatPlaceholder,
-} from "./vision-guard";
+import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 
 export type AnthropicHeaderOptions = {
 	apiKey: string;
@@ -830,28 +822,6 @@ function decodeAnthropicToolName(name: string, isOAuthToken: boolean, escapeBuil
 const ANTHROPIC_MANY_IMAGE_THRESHOLD = 20;
 const ANTHROPIC_MANY_IMAGE_MAX_DIMENSION = 2000;
 
-type AnthropicImageSource =
-	| { type: "base64"; media_type: AnthropicImageMediaType; data: string }
-	| { type: "url"; url: string }
-	| { type: "file"; file_id: string };
-
-function getAnthropicImageReferenceSource(
-	block: ImageContent,
-	model: Model<"anthropic-messages">,
-): AnthropicImageSource | undefined {
-	if (
-		block.providerFile?.provider === "anthropic" &&
-		block.providerFile.id &&
-		supportsProviderFileReference(model, block.providerFile, block)
-	) {
-		return { type: "file", file_id: block.providerFile.id };
-	}
-	if (block.url && isRemoteImageUrl(block.url) && supportsRemoteImageUrls(model, block)) {
-		return { type: "url", url: block.url };
-	}
-	return undefined;
-}
-
 function countAnthropicImageBlocks(messages: Message[]): number {
 	let count = 0;
 	for (const message of messages) {
@@ -940,7 +910,6 @@ async function resizeAnthropicManyImageContent(
 	content: (TextContent | ImageContent)[],
 	state: { resized: number },
 	limit: ResizeLimiter,
-	model: Model<"anthropic-messages">,
 ): Promise<(TextContent | ImageContent)[]> {
 	let changed = false;
 	const next = await Promise.all(
@@ -948,7 +917,12 @@ async function resizeAnthropicManyImageContent(
 			// Remotely referenced blocks never put base64 on the wire, so their size
 			// cannot violate the many-image request budget — and resizing would
 			// desync fallback bytes from the advertised remote image.
-			if (block.type !== "image" || getAnthropicImageReferenceSource(block, model)) return block;
+			if (
+				block.type !== "image" ||
+				block.url ||
+				(block.providerFile?.provider === "anthropic" && block.providerFile.id)
+			)
+				return block;
 			let resized = anthropicManyImageResizeCache.get(block);
 			if (resized === undefined) {
 				resized = await limit(() => resizeAnthropicManyImageBlock(block));
@@ -968,25 +942,21 @@ async function resizeAnthropicManyImageMessage(
 	message: Message,
 	state: { resized: number },
 	limit: ResizeLimiter,
-	model: Model<"anthropic-messages">,
 ): Promise<Message> {
 	if (message.role === "user" || message.role === "developer") {
 		if (!Array.isArray(message.content)) return message;
-		const content = await resizeAnthropicManyImageContent(message.content, state, limit, model);
+		const content = await resizeAnthropicManyImageContent(message.content, state, limit);
 		return content === message.content ? message : { ...message, content };
 	}
 	if (message.role === "toolResult") {
-		const content = await resizeAnthropicManyImageContent(message.content, state, limit, model);
+		const content = await resizeAnthropicManyImageContent(message.content, state, limit);
 		return content === message.content ? message : { ...message, content };
 	}
 	return message;
 }
 
-async function prepareAnthropicManyImageContext(
-	context: Context,
-	model: Model<"anthropic-messages">,
-): Promise<Context> {
-	if (!model.input.includes("image")) return context;
+async function prepareAnthropicManyImageContext(context: Context, supportsImages: boolean): Promise<Context> {
+	if (!supportsImages) return context;
 	const imageCount = countAnthropicImageBlocks(context.messages);
 	if (imageCount <= ANTHROPIC_MANY_IMAGE_THRESHOLD) return context;
 
@@ -995,7 +965,7 @@ async function prepareAnthropicManyImageContext(
 	const limit = createResizeLimiter(ANTHROPIC_IMAGE_RESIZE_CONCURRENCY);
 	const messages = await Promise.all(
 		context.messages.map(async message => {
-			const next = await resizeAnthropicManyImageMessage(message, state, limit, model);
+			const next = await resizeAnthropicManyImageMessage(message, state, limit);
 			if (next !== message) changed = true;
 			return next;
 		}),
@@ -1009,6 +979,11 @@ async function prepareAnthropicManyImageContext(
 	return { ...context, messages };
 }
 
+type AnthropicImageSource =
+	| { type: "base64"; media_type: AnthropicImageMediaType; data: string }
+	| { type: "url"; url: string }
+	| { type: "file"; file_id: string };
+
 type AnthropicToolResultContent =
 	| string
 	| Array<{ type: "text"; text: string } | { type: "image"; source: AnthropicImageSource }>;
@@ -1018,8 +993,7 @@ type AnthropicToolResultContent =
  */
 function convertContentBlocks(
 	content: (TextContent | ImageContent)[],
-	supportsImages: boolean,
-	model: Model<"anthropic-messages">,
+	supportsImages = true,
 ): AnthropicToolResultContent {
 	const blocks: Array<{ type: "text"; text: string } | { type: "image"; source: AnthropicImageSource }> = [];
 	let sawText = false;
@@ -1039,25 +1013,18 @@ function convertContentBlocks(
 			continue;
 		}
 
-		let source = getAnthropicImageReferenceSource(block, model);
-		if (!source) {
-			const inline = resolveUsableInlineImage(block);
-			if (!inline) {
-				const unreplayableMimeType = getUnreplayableInlineImageMimeType(block);
-				if (unreplayableMimeType) {
-					blocks.push({ type: "text", text: unreplayableImageFormatPlaceholder(unreplayableMimeType) });
-					continue;
-				}
-				throw new AIError.ValidationError(
-					`input_image cannot be forwarded to ${model.api} without non-empty image data or a supported reference`,
-				);
-			}
-			const mediaType = normalizeAnthropicImageMediaType(inline.mimeType);
+		let source: AnthropicImageSource;
+		if (block.providerFile?.provider === "anthropic" && block.providerFile.id) {
+			source = { type: "file", file_id: block.providerFile.id };
+		} else if (block.url) {
+			source = { type: "url", url: block.url };
+		} else {
+			const mediaType = normalizeAnthropicImageMediaType(block.mimeType);
 			if (!mediaType) {
-				blocks.push({ type: "text", text: unreplayableImageFormatPlaceholder(inline.mimeType) });
+				blocks.push({ type: "text", text: `[unsupported image: ${block.mimeType}]` });
 				continue;
 			}
-			source = { type: "base64", media_type: mediaType, data: inline.data };
+			source = { type: "base64", media_type: mediaType, data: block.data };
 		}
 
 		sawImage = true;
@@ -1874,7 +1841,6 @@ const streamAnthropicOnce = (
 			}
 			const apiKey = options?.apiKey ?? getEnvApiKey(model.provider) ?? "";
 			const baseUrl = resolveAnthropicBaseUrl(model, apiKey) ?? "https://api.anthropic.com";
-			const referenceModel = baseUrl === model.baseUrl ? model : { ...model, baseUrl };
 			const supportsEagerToolInputStreaming = resolveEagerToolInputStreamingSupport(model, baseUrl);
 			const providerSessionState = getAnthropicProviderSessionState(
 				options?.providerSessionState,
@@ -2023,9 +1989,9 @@ const streamAnthropicOnce = (
 				client = created.client;
 				isOAuthToken = created.isOAuthToken;
 			}
-			const preparedContext = await prepareAnthropicManyImageContext(context, referenceModel);
+			const preparedContext = await prepareAnthropicManyImageContext(context, model.input.includes("image"));
 			const prepareParams = async (): Promise<MessageCreateParamsStreaming> => {
-				let nextParams = buildParams(referenceModel, preparedContext, isOAuthToken, options, {
+				let nextParams = buildParams(model, preparedContext, isOAuthToken, options, {
 					disableStrictTools,
 					useUmansGatewayWebSearch: umansGatewayWebSearchHeader !== undefined,
 					forceDemoteUnsignedThinking,
@@ -3567,7 +3533,7 @@ function buildToolResultBlock(
 	msg: ToolResultMessage,
 	hoistedImages: ContentBlockParam[],
 ): ContentBlockParam {
-	let content = convertContentBlocks(msg.content, model.input.includes("image"), model);
+	let content = convertContentBlocks(msg.content, model.input.includes("image"));
 	// Anthropic rejects images inside error tool results ("all content must be
 	// type `text` if `is_error` is true") — keep the text in the block and
 	// hoist the images after the message's tool_result run.
@@ -3668,7 +3634,7 @@ export function convertAnthropicMessages(
 				if (msg.content.trim().length === 0) continue;
 				content = msg.content.toWellFormed();
 			} else {
-				const contentBlocks = convertContentBlocks(msg.content, model.input.includes("image"), model);
+				const contentBlocks = convertContentBlocks(msg.content, model.input.includes("image"));
 				if (typeof contentBlocks === "string") {
 					if (contentBlocks.trim().length === 0) continue;
 					content = contentBlocks;

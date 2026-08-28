@@ -35,27 +35,6 @@ export class NativeCompactionError extends Error {
 }
 
 /**
- * A compaction boundary chosen behind a provider-native compaction keeps its
- * originals only inside that opaque payload, so the messages a preparation kept
- * cover just the recent tail. Portable local summarization is a safe fallback
- * for such a boundary only while the payload is carried forward; once the
- * producing request target proves unreachable the payload is dropped, and
- * summarizing the tail alone would strand the hidden prefix permanently.
- *
- * Callers own the branch and can re-prepare a boundary from it, so the
- * condition is surfaced rather than committed.
- */
-export class StrandedCompactionHistoryError extends Error {
-	override readonly name = "StrandedCompactionHistoryError" as const;
-
-	constructor(
-		message = "Native compaction is not replayable by the runtime request target, and the prepared boundary hides its originals behind preserved provider-native history",
-	) {
-		super(message);
-	}
-}
-
-/**
  * Outcome of a compaction attempt, surfaced by `CommandController.executeCompaction`
  * so callers (e.g. the plan-mode approval flow) can distinguish a deliberate abort
  * from an unrelated failure.

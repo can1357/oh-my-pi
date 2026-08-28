@@ -78,8 +78,6 @@ import type {
 import { type Effort, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
-import { getOpenAIResponsesRequestTarget } from "@oh-my-pi/pi-ai/providers/openai-shared";
-import { getOpenAIResponsesReferenceTarget } from "@oh-my-pi/pi-ai/utils";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -349,7 +347,6 @@ import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
-import { resolveSettingsOpenrouterVariant } from "./settings-stream-fn";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { skillPromptTitleInput } from "./skill-title-input";
 import { ToolChoiceQueue } from "./tool-choice-queue";
@@ -680,14 +677,6 @@ export class AgentSession {
 	#sessionStopContinuationCount = 0;
 	#sessionStopHookActive = false;
 	#obfuscator: SecretObfuscator | undefined;
-	/**
-	 * Endpoint fingerprint from the most recent credential resolution. Providers
-	 * that derive their base URL from the credential (GitHub Copilot enterprise
-	 * routing, alibaba token plans) can move between turns, and the Responses
-	 * serializer fails closed on history bound to the previous endpoint, so the
-	 * session compares the same fingerprint and re-expands instead.
-	 */
-	#activeRequestTarget: string | undefined;
 	/** Session-start value of `inlineToolDescriptors`; drives handoff tool pruning. */
 	#pruneToolDescriptions = false;
 	#checkpointState: CheckpointState | undefined = undefined;
@@ -1150,7 +1139,6 @@ export class AgentSession {
 			sessionMessageAlreadyPersisted: message => this.#sessionMessageAlreadyPersisted(message),
 			setModelWithProviderSessionReset: model => this.#setModelWithProviderSessionReset(model),
 			resetCurrentResponsesProviderSession: reason => this.#resetCurrentResponsesProviderSession(reason),
-			resyncActiveRequestTarget: () => this.#resyncActiveRequestTarget(),
 			maybeAutoRedeemCodexReset: activeBlockUnblockAtMs => this.#maybeAutoRedeemCodexReset(activeBlockUnblockAtMs),
 			runAutoCompaction: (reason, willRetry, deferred, allowDefer, options) =>
 				this.#maintenance.runAutoCompaction(reason, willRetry, deferred, allowDefer, options),
@@ -1391,7 +1379,6 @@ export class AgentSession {
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
 			model: () => this.model,
-			activeRequestTarget: () => this.#activeRequestTarget,
 			sessionId: () => this.sessionId,
 			localProtocolOptions: () => this.#localProtocolOptions(),
 			transformContext: (messages, signal) => this.#transformContext(messages, signal),
@@ -1576,7 +1563,6 @@ export class AgentSession {
 			providerSessionState: this.#providerSessionState,
 			preferWebsockets: this.#preferWebsockets,
 			model: () => this.model,
-			activeRequestTarget: () => this.#activeRequestTarget,
 			thinkingLevel: () => this.thinkingLevel,
 			isDisposed: () => this.#isDisposed,
 			isStreaming: () => this.isStreaming,
@@ -5818,7 +5804,6 @@ export class AgentSession {
 						`Use /login, set an API key environment variable, or create ${getAgentDbPath()}`,
 				);
 			}
-			this.#syncActiveRequestTarget(this.model, apiKey);
 
 			// Recover a previously failed/incomplete assistant turn before sending.
 			// Successful historical turns take the cheaper pre-prompt threshold path
@@ -7588,47 +7573,9 @@ export class AgentSession {
 		}
 	}
 
-	/**
-	 * Re-derive the credential-resolved endpoint fingerprint and rebuild the
-	 * in-memory context whenever it moves. The first resolution counts: a resumed
-	 * session admitted its compaction against the credential-free target, so the
-	 * initial resolved endpoint is the first chance to re-expand history bound to
-	 * a different one.
-	 */
-	#syncActiveRequestTarget(model: Model, apiKey: string | undefined): boolean {
-		const requestTarget = getOpenAIResponsesRequestTarget(model, apiKey, {
-			openrouterVariant: resolveSettingsOpenrouterVariant(this.settings),
-		});
-		if (this.#activeRequestTarget === requestTarget) return false;
-		this.#activeRequestTarget = requestTarget;
-		this.agent.replaceMessages(this.buildDisplaySessionContext().messages);
-		return true;
-	}
-
-	/**
-	 * Re-resolve the request target between turns. The stream's resolver rotates
-	 * to a sibling credential on an auth or quota failure, and providers that
-	 * derive their endpoint from the credential land somewhere the preflight
-	 * fingerprint never described, so the retry must replay history rebuilt for
-	 * the endpoint it will actually reach.
-	 */
-	async #resyncActiveRequestTarget(): Promise<boolean> {
-		const model = this.model;
-		if (!model) return false;
-		let apiKey: string | undefined;
-		try {
-			apiKey = await this.#modelRegistry.getApiKey(model, this.sessionId);
-		} catch {
-			return false;
-		}
-		if (!apiKey) return false;
-		return this.#syncActiveRequestTarget(model, apiKey);
-	}
-
 	async #setModelWithProviderSessionReset(model: Model): Promise<void> {
 		const currentModel = this.model;
 		const isChanging = !currentModel || !modelsAreEqual(currentModel, model);
-		const currentReferenceTarget = currentModel ? getOpenAIResponsesReferenceTarget(currentModel) : undefined;
 		const codeModeChanged = this.#tools.codeModeChangesBetween(currentModel, model);
 		if (currentModel) {
 			this.#closeProviderSessionsForModelSwitch(currentModel, model);
@@ -7637,11 +7584,6 @@ export class AgentSession {
 			}
 		}
 		this.agent.setModel(model);
-		if (isChanging) this.#activeRequestTarget = undefined;
-		const referenceTarget = getOpenAIResponsesReferenceTarget(model);
-		if (currentReferenceTarget !== referenceTarget) {
-			this.agent.replaceMessages(this.buildDisplaySessionContext().messages);
-		}
 		// Model mutations driven through ModelControls (explicit /model, prewalk
 		// hand-offs, retry-fallback, model cycling) funnel through this method,
 		// so this is the single point that notifies subscribers (ACP config
@@ -8183,7 +8125,6 @@ export class AgentSession {
 		const previousSystemPrompt = this.agent.state.systemPrompt;
 		const previousBaseSystemPromptBeforeMemoryPromotion = this.#memory.promotionSnapshot;
 		const previousFreshProviderSessionId = this.#freshProviderSessionId;
-		const previousActiveRequestTarget = this.#activeRequestTarget;
 		const previousInheritedProviderPromptCacheKey = this.#inheritedProviderPromptCacheKey;
 
 		// Snapshot the full checkpoint runtime state: the success path calls
@@ -8212,11 +8153,6 @@ export class AgentSession {
 			this.#bash.markSessionTransition(bashTransition);
 			if (switchingToDifferentSession) {
 				this.#freshProviderSessionId = undefined;
-				// The fingerprint belongs to the endpoint the previous session was
-				// dispatched to. Two sessions on the same model can resolve to
-				// different session-sticky endpoints, so carrying it into the target
-				// rebuilds its history against a target that never served it.
-				this.#activeRequestTarget = undefined;
 				this.#clearInheritedProviderPromptCacheKey();
 				this.#adoptInheritedProviderPromptCacheKey();
 			}
@@ -8364,7 +8300,6 @@ export class AgentSession {
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
-			this.#activeRequestTarget = previousActiveRequestTarget;
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
 			this.#memory.rekeyForCurrentSessionId();
 			this.agent.setTools(previousTools);
@@ -8953,11 +8888,7 @@ export class AgentSession {
 		}
 
 		// Update agent state — build display context to populate agent messages.
-		const stateContext = this.sessionManager.buildSessionContext({
-			activeModel: this.model,
-			activeRequestTarget: this.#activeRequestTarget,
-			compactionSettings: this.settings.getGroup("compaction"),
-		});
+		const stateContext = this.sessionManager.buildSessionContext();
 		const displayContext = deobfuscateSessionContext(stateContext, this.#obfuscator);
 		this.agent.replaceMessages(displayContext.messages);
 		this.#rehydrateCheckpointRewindState();
@@ -8986,11 +8917,7 @@ export class AgentSession {
 				summaryEntry,
 				fromExtension: summaryText ? fromExtension : undefined,
 			});
-			const rawContext = this.sessionManager.buildSessionContext({
-				activeModel: this.model,
-				activeRequestTarget: this.#activeRequestTarget,
-				compactionSettings: this.settings.getGroup("compaction"),
-			});
+			const rawContext = this.sessionManager.buildSessionContext();
 			return {
 				editorText,
 				editorImages,

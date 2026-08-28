@@ -1,10 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
-import { getOpenAiCompactionReferenceTarget } from "@oh-my-pi/pi-agent-core/compaction";
-import { shouldUseCompactionV2Streaming } from "@oh-my-pi/pi-agent-core/compaction/compaction-v2-streaming";
 import type { AssistantMessage, Model, UserMessage } from "@oh-my-pi/pi-ai";
-import { getOpenAIResponsesReferenceTarget } from "@oh-my-pi/pi-ai/utils";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -89,7 +86,6 @@ describe("async speculative compaction", () => {
 			providerSessionState: new Map(),
 			preferWebsockets: undefined,
 			model: () => model,
-			activeRequestTarget: () => undefined,
 			thinkingLevel: () => undefined,
 			isDisposed: () => false,
 			isStreaming: () => false,
@@ -114,10 +110,7 @@ describe("async speculative compaction", () => {
 			disconnectFromAgent: () => {},
 			reconnectToAgent: () => {},
 			drainStrandedQueuedMessages: () => {},
-			// Mirrors the real provider boundary: display/replay contexts are always
-			// built against the active model so target-bound remote compactions stay
-			// readable instead of re-expanding their originals.
-			buildDisplaySessionContext: () => sessionManager.buildSessionContext({ activeModel: model }),
+			buildDisplaySessionContext: () => sessionManager.buildSessionContext(),
 			convertToLlmForSideRequest: (messages: AgentMessage[]) => messages as never,
 			obfuscateTextForProvider: (text: string | undefined) => text,
 			obfuscatePreparationForProvider: <T>(preparation: T) => preparation,
@@ -215,52 +208,6 @@ describe("async speculative compaction", () => {
 		expect(events).toEqual(expect.arrayContaining(["auto_compaction_start", "auto_compaction_end"]));
 	});
 
-	it("commits an armed remote summary produced by a configured compaction side model", async () => {
-		const bundled = getBundledModel("openai", "gpt-5.4");
-		if (!bundled) throw new Error("Expected built-in OpenAI model");
-		model = { ...bundled, contextWindow: CONTEXT_WINDOW, compactionModel: "openai/gpt-5-mini" };
-		authStorage.setRuntimeApiKey("openai", "test-key");
-		maintenance = createMaintenance({ methodOrder: ["remote"] });
-
-		const candidates: Model[] = [];
-		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, candidate) => {
-			candidates.push(candidate);
-			return {
-				summary: "side model summary",
-				firstKeptEntryId: preparation.firstKeptEntryId,
-				tokensBefore: preparation.tokensBefore,
-				details: {},
-				preserveData: {
-					openaiRemoteCompaction: {
-						provider: candidate.provider,
-						// Extension target belongs to the summarizing candidate; runtime
-						// replay target belongs to the active model.
-						referenceTarget: getOpenAiCompactionReferenceTarget(
-							candidate,
-							shouldUseCompactionV2Streaming(candidate),
-						),
-						replayTarget: getOpenAIResponsesReferenceTarget(model),
-						replacementHistory: [{ type: "compaction_summary", summary: "snapshot" }],
-						usedTokens: 1_000,
-					},
-				},
-			};
-		});
-
-		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
-		await waitForState("armed");
-		expect(candidates[0]?.id).toBe("gpt-5-mini");
-		expect(getOpenAiCompactionReferenceTarget(candidates[0], false)).not.toBe(
-			getOpenAiCompactionReferenceTarget(model, false),
-		);
-
-		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
-
-		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
-		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("side model summary");
-		expect(compactSpy).toHaveBeenCalledTimes(1);
-	});
-
 	it("replays a user turn appended while remote compaction is in flight", async () => {
 		const bundled = getBundledModel("openai", "gpt-5");
 		if (!bundled) throw new Error("Expected built-in OpenAI model");
@@ -281,8 +228,6 @@ describe("async speculative compaction", () => {
 					openaiRemoteCompaction: {
 						version: "v2",
 						provider: model.provider,
-						referenceTarget: getOpenAiCompactionReferenceTarget(model, true),
-						replayTarget: getOpenAIResponsesReferenceTarget(model),
 						replacementHistory: [{ type: "compaction_summary", summary: "snapshot" }],
 						usedTokens: 1_000,
 					},

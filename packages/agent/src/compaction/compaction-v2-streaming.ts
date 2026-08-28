@@ -20,10 +20,9 @@ import {
 import {
 	getOpenAIPromptCacheKey,
 	getOpenAIResponsesRoutingSessionId,
-	resolveOpenAIModelWireRouting,
+	parseAzureDeploymentNameMap,
 	resolveOpenAIRequestSetup,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
-import { resolveAzureOpenAIBaseUrl, resolveOpenAIResponsesRequestModel } from "@oh-my-pi/pi-ai/utils";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
 import {
 	applyCodexResidencyHeader,
@@ -157,7 +156,10 @@ function resolveOpenAiCodexResponsesEndpoint(baseUrl: string | undefined): strin
 }
 
 function resolveAzureOpenAiBaseUrl(model: Model): string {
-	const resolvedBaseUrl = resolveAzureOpenAIBaseUrl(model);
+	const baseUrl = $env.AZURE_OPENAI_BASE_URL?.trim() || undefined;
+	const resourceName = $env.AZURE_OPENAI_RESOURCE_NAME;
+	const resolvedBaseUrl =
+		baseUrl ?? (resourceName ? `https://${resourceName}.openai.azure.com/openai/v1` : undefined) ?? model.baseUrl;
 	if (!resolvedBaseUrl) {
 		throw new Error(
 			"Azure OpenAI base URL is required. Set AZURE_OPENAI_BASE_URL or AZURE_OPENAI_RESOURCE_NAME, or configure model.baseUrl.",
@@ -174,9 +176,9 @@ function appendAzureApiVersion(endpoint: string): string {
 
 function resolveCompactionV2Model(model: Model): string {
 	const requestModel = model.remoteCompaction?.model ?? model.requestModelId ?? model.id;
-	const api = compactionV2Api(model);
-	const requestTarget = api === model.api ? model : ({ ...model, api } as Model);
-	return resolveOpenAIResponsesRequestModel(requestTarget, requestModel);
+	if (compactionV2Api(model) !== "azure-openai-responses") return requestModel;
+	const mappedDeployment = parseAzureDeploymentNameMap($env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP).get(requestModel);
+	return mappedDeployment ?? requestModel;
 }
 
 // ============================================================================
@@ -330,9 +332,6 @@ async function attemptCompactionV2Streaming(
 			: {}),
 		...(promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
 		...(request.tools && request.tools.length > 0 ? { tools: request.tools, tool_choice: "auto" } : {}),
-		// The producer fingerprint folds the model's configured gateway routing, so
-		// the stream has to reach the same upstream that fingerprint names.
-		...resolveOpenAIModelWireRouting(model, false),
 	};
 	if (options.codexMetadata) {
 		body.client_metadata = options.codexMetadata.clientMetadata;
@@ -805,20 +804,11 @@ function approxTokenCount(text: string): number {
 // ============================================================================
 
 /** Store V2 replacement history in the OpenAI remote-compaction preserve slot. */
-export function storeCompactionV2PreserveData(
-	response: CompactionV2Response,
-	model: Model,
-	referenceTarget?: string,
-	replayTarget?: string,
-	requestTarget?: string,
-): Record<string, unknown> {
+export function storeCompactionV2PreserveData(response: CompactionV2Response, model: Model): Record<string, unknown> {
 	return {
 		[OPENAI_REMOTE_COMPACTION_PRESERVE_KEY]: {
 			version: "v2",
 			provider: model.provider,
-			...(referenceTarget ? { referenceTarget } : {}),
-			...(replayTarget ? { replayTarget } : {}),
-			...(requestTarget ? { requestTarget } : {}),
 			replacementHistory: response.replacementHistory,
 			usedTokens: response.usedTokens,
 			usage: response.usage,
@@ -828,16 +818,9 @@ export function storeCompactionV2PreserveData(
 }
 
 /** Retrieve preserved OpenAI replacement history that V2 can extend. */
-export function getCompactionV2PreserveData(preserveData: Record<string, unknown> | undefined):
-	| {
-			provider: string;
-			referenceTarget?: string;
-			replayTarget?: string;
-			requestTarget?: string;
-			replacementHistory: Array<Record<string, unknown>>;
-			usedTokens: number;
-	  }
-	| undefined {
+export function getCompactionV2PreserveData(
+	preserveData: Record<string, unknown> | undefined,
+): { provider: string; replacementHistory: Array<Record<string, unknown>>; usedTokens: number } | undefined {
 	const candidate = preserveData?.[OPENAI_REMOTE_COMPACTION_PRESERVE_KEY];
 	if (!isRecord(candidate)) return undefined;
 	const provider = stringField(candidate, "provider");
@@ -846,9 +829,6 @@ export function getCompactionV2PreserveData(preserveData: Record<string, unknown
 
 	return {
 		provider,
-		referenceTarget: stringField(candidate, "referenceTarget"),
-		replayTarget: stringField(candidate, "replayTarget"),
-		requestTarget: stringField(candidate, "requestTarget"),
 		replacementHistory: candidate.replacementHistory as Array<Record<string, unknown>>,
 		usedTokens: numberField(candidate, "usedTokens") ?? 0,
 	};

@@ -197,21 +197,6 @@ describe("error-id classification", () => {
 		expect(AIError.is(responsesId, AIError.Flag.StaleResponsesItem)).toBe(true);
 	});
 
-	it("makes an incompatible compaction target retriable so the session can rebuild", () => {
-		// The Responses serializers throw this before any request reaches the wire
-		// when an auth/quota rotation moves the resolved endpoint; the recovery is
-		// to rebuild the context for the new target and replay.
-		const id = AIError.classify(
-			new AIError.ValidationError(AIError.INCOMPATIBLE_COMPACTION_TARGET_MESSAGE),
-			"openai-responses",
-		);
-		expect(AIError.is(id, AIError.Flag.StaleResponsesItem)).toBe(true);
-		expect(AIError.retriable(id)).toBe(true);
-		expect(
-			AIError.retriable(AIError.classify(new AIError.ValidationError("bad tool schema"), "openai-responses")),
-		).toBe(false);
-	});
-
 	it("walks causes and preserves carried ids", () => {
 		const inner = AIError.attach(new Error("inner"), AIError.create(AIError.Flag.ThinkingLoop));
 		const outer = new Error("outer", { cause: inner });

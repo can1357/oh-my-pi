@@ -14,11 +14,9 @@ import {
 	resolveThresholdTokens,
 	shouldCompact,
 } from "@oh-my-pi/pi-agent-core/compaction/compaction";
-import { getOpenAiCompactionReferenceTarget } from "@oh-my-pi/pi-agent-core/compaction/openai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { encodeTextSignatureV1 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { AssistantMessage, Model, ProviderPayload, Usage } from "@oh-my-pi/pi-ai/types";
-import { getOpenAIResponsesReferenceTarget } from "@oh-my-pi/pi-ai/utils";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type {
@@ -570,7 +568,6 @@ describe("remote compaction setting", () => {
 		previousCompaction.preserveData = {
 			openaiRemoteCompaction: {
 				provider: "openai",
-				referenceTarget: getOpenAiCompactionReferenceTarget(model, false),
 				replacementHistory: [
 					{ type: "message", role: "user", content: [{ type: "input_text", text: "Previous preserved user" }] },
 					{ type: "compaction", encrypted_content: "prior_encrypted" },
@@ -652,87 +649,9 @@ describe("remote compaction setting", () => {
 		expect(result.preserveData).toEqual({
 			openaiRemoteCompaction: {
 				provider: "openai",
-				referenceTarget: getOpenAiCompactionReferenceTarget(model, false),
-				replayTarget: getOpenAIResponsesReferenceTarget(model),
-				requestTarget: getOpenAIResponsesReferenceTarget(model),
 				replacementHistory: remoteOutput,
 				compactionItem: { type: "compaction", encrypted_content: "new_encrypted" },
 			},
-		});
-	});
-	it("drops unstamped legacy compaction history that carries encrypted native state", async () => {
-		const model = getBundledModel("openai", "gpt-5.1");
-		if (!model) {
-			throw new Error("Expected openai/gpt-5.1 model to exist");
-		}
-
-		const oldUser = createMessageEntry(createUserMessage("Older turn"));
-		const oldAssistant = createMessageEntry(createAssistantMessage("Older answer"));
-		const previousCompaction = createCompactionEntry("Previous summary", oldAssistant.id);
-		previousCompaction.preserveData = {
-			openaiRemoteCompaction: {
-				provider: "openai",
-				replacementHistory: [
-					{ type: "message", role: "user", content: [{ type: "input_text", text: "Previous preserved user" }] },
-					{ type: "compaction", encrypted_content: "prior_encrypted" },
-				],
-				compactionItem: { type: "compaction", encrypted_content: "prior_encrypted" },
-			},
-		};
-
-		const entries: SessionEntry[] = [
-			oldUser,
-			oldAssistant,
-			previousCompaction,
-			createMessageEntry(createUserMessage("Turn 1")),
-			createMessageEntry(
-				createOpenAiAssistantMessage(
-					"Answer 1",
-					model,
-					createMockUsage(0, 100, 4000, 0),
-					"encrypted_reasoning_turn_1",
-				),
-			),
-			createMessageEntry(createUserMessage("Turn 2")),
-			createMessageEntry(
-				createOpenAiAssistantMessage(
-					"Answer 2",
-					model,
-					createMockUsage(0, 100, 9000, 0),
-					"encrypted_reasoning_turn_2",
-				),
-			),
-		];
-
-		const preparation = prepareCompaction(entries, {
-			...DEFAULT_COMPACTION_SETTINGS,
-			keepRecentTokens: 1000,
-			remoteEnabled: true,
-		});
-		if (!preparation) {
-			throw new Error("Expected compaction preparation");
-		}
-
-		const fetchHandler = vi.fn(
-			async (_input, _init) =>
-				new Response(JSON.stringify({ output: [{ type: "compaction", encrypted_content: "new_encrypted" }] }), {
-					status: 200,
-					headers: { "Content-Type": "application/json" },
-				}),
-		);
-		const fetchSpy = mockFetch(fetchHandler);
-
-		await compact(preparation, model, "test-api-key", undefined, undefined, { fetch: fetchSpy });
-		const requestBody = JSON.parse(String(fetchHandler.mock.calls[0]?.[1]?.body)) as {
-			input: Array<Record<string, unknown>>;
-		};
-
-		expect(requestBody.input.some(item => item.encrypted_content === "prior_encrypted")).toBe(false);
-		expect(JSON.stringify(requestBody.input)).not.toContain("Previous preserved user");
-		expect(requestBody.input[0]).toEqual({
-			type: "message",
-			role: "user",
-			content: [{ type: "input_text", text: "Turn 1" }],
 		});
 	});
 	it("prefers persisted assistant native history snapshots for OpenAI remote compaction", async () => {
@@ -926,9 +845,6 @@ describe("remote compaction setting", () => {
 		expect(result.preserveData).toEqual({
 			openaiRemoteCompaction: {
 				provider: "openai",
-				referenceTarget: getOpenAiCompactionReferenceTarget(model, false),
-				replayTarget: getOpenAIResponsesReferenceTarget(model),
-				requestTarget: getOpenAIResponsesReferenceTarget(model),
 				replacementHistory: [
 					{ type: "message", role: "user", content: [{ type: "input_text", text: "Real preserved user" }] },
 					{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Kept assistant" }] },
@@ -1199,9 +1115,6 @@ describe("remote compaction setting", () => {
 			otherState: "keep-me",
 			openaiRemoteCompaction: {
 				provider: "openai",
-				referenceTarget: getOpenAiCompactionReferenceTarget(model, false),
-				replayTarget: getOpenAIResponsesReferenceTarget(model),
-				requestTarget: getOpenAIResponsesReferenceTarget(model),
 				replacementHistory: remoteOutput,
 				compactionItem: { type: "compaction", encrypted_content: "new_encrypted" },
 			},

@@ -142,22 +142,14 @@ describe("issue #967 vision guard", () => {
 					role: "user",
 					content: [
 						{ type: "text", text: "plot summary" },
-						{
-							type: "image",
-							mimeType: "image/png",
-							data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-						},
+						{ type: "image", mimeType: "image/png", data: "ZmFrZQ==" },
 					],
 					timestamp: 1,
 				},
 				makeAssistant(model.api, model.provider, model.id),
 				makeToolResult([
 					{ type: "text", text: "saved plot to /tmp/plot.png" },
-					{
-						type: "image",
-						mimeType: "image/png",
-						data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-					},
+					{ type: "image", mimeType: "image/png", data: "ZmFrZQ==" },
 				]),
 			],
 		};
@@ -182,11 +174,7 @@ describe("issue #967 vision guard", () => {
 		const userContent = convertResponsesInputContent(
 			[
 				{ type: "text", text: "plot summary" },
-				{
-					type: "image",
-					mimeType: "image/png",
-					data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-				},
+				{ type: "image", mimeType: "image/png", data: "ZmFrZQ==" },
 			],
 			false,
 			model.compat.supportsImageDetailOriginal,
@@ -202,11 +190,7 @@ describe("issue #967 vision guard", () => {
 			payload as never,
 			makeToolResult([
 				{ type: "text", text: "saved plot to /tmp/plot.png" },
-				{
-					type: "image",
-					mimeType: "image/png",
-					data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-				},
+				{ type: "image", mimeType: "image/png", data: "ZmFrZQ==" },
 			]),
 			model,
 			true,
@@ -231,22 +215,12 @@ describe("issue #967 vision guard", () => {
 					role: "user",
 					content: [
 						{ type: "text", text: "plot summary" },
-						{
-							type: "image",
-							mimeType: "image/png",
-							data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-						},
+						{ type: "image", mimeType: "image/png", data: "ZmFrZQ==" },
 					],
 					timestamp: 1,
 				},
 				makeAssistant(model.api, model.provider, model.id),
-				makeToolResult([
-					{
-						type: "image",
-						mimeType: "image/png",
-						data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-					},
-				]),
+				makeToolResult([{ type: "image", mimeType: "image/png", data: "ZmFrZQ==" }]),
 			],
 		};
 
@@ -273,22 +247,12 @@ describe("issue #967 vision guard", () => {
 					role: "user",
 					content: [
 						{ type: "text", text: "plot summary" },
-						{
-							type: "image",
-							mimeType: "image/png",
-							data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-						},
+						{ type: "image", mimeType: "image/png", data: "ZmFrZQ==" },
 					],
 					timestamp: 1,
 				},
 				makeAssistant(model.api, model.provider, model.id),
-				makeToolResult([
-					{
-						type: "image",
-						mimeType: "image/png",
-						data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-					},
-				]),
+				makeToolResult([{ type: "image", mimeType: "image/png", data: "ZmFrZQ==" }]),
 			],
 			model,
 			false,
@@ -311,22 +275,12 @@ describe("issue #967 vision guard", () => {
 					role: "user",
 					content: [
 						{ type: "text", text: "plot summary" },
-						{
-							type: "image",
-							mimeType: "image/png",
-							data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-						},
+						{ type: "image", mimeType: "image/png", data: "ZmFrZQ==" },
 					],
 					timestamp: 1,
 				},
 				makeAssistant(model.api, model.provider, model.id),
-				makeToolResult([
-					{
-						type: "image",
-						mimeType: "image/png",
-						data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-					},
-				]),
+				makeToolResult([{ type: "image", mimeType: "image/png", data: "ZmFrZQ==" }]),
 			],
 		};
 

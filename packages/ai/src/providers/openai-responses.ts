@@ -20,10 +20,8 @@ import type {
 } from "../types";
 import {
 	createOpenAIResponsesHistoryPayload,
-	getOpenAIResponsesReferenceTarget,
 	normalizeSystemPrompts,
 	resolveCacheRetention,
-	resolveOpenAIResponsesRoutingOverrides,
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
 } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
@@ -77,10 +75,9 @@ import {
 	applyOpenAIGatewayRouting,
 	applyResponsesCompatPolicy,
 	applyVercelResponsesCacheControls,
-	assertResponsesWireRoutingUnchanged,
+	applyWireModelIdTransform,
 	buildResponsesDeltaInput,
 	buildResponsesInput,
-	captureResponsesWireRouting,
 	clearOpenAIStrictToolsState,
 	createInitialResponsesAssistantMessage,
 	createOpenAIStrictToolsState,
@@ -102,7 +99,6 @@ import {
 	resolveOpenAIOutputTokenParam,
 	resolveOpenAIRequestSetup,
 	resolveOpenAIResponsesOutputClamp,
-	resolveResponsesWireModelId,
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
 } from "./openai-shared";
@@ -471,19 +467,6 @@ const streamOpenAIResponsesOnce = (
 					resetOpenAIResponsesChainState(chainState);
 				}
 			}
-			const wireModelId = resolveResponsesWireModelId(
-				model.requestModelId ?? model.id,
-				model.compat.wireModelIdMode,
-				options?.openrouterVariant,
-				options?.extraBody,
-			);
-			const routingOverrides = resolveOpenAIResponsesRoutingOverrides(options?.extraBody);
-			const referenceTarget = getOpenAIResponsesReferenceTarget(
-				model,
-				wireModelId,
-				baseUrl ?? model.baseUrl,
-				routingOverrides,
-			);
 			const builtParams = buildParams(
 				model,
 				context,
@@ -492,7 +475,6 @@ const streamOpenAIResponsesOnce = (
 				strictToolsScope,
 				false,
 				chainState?.canAppend ? chainState.lastParams?.input : undefined,
-				referenceTarget,
 			);
 			const { params, trailingScaffoldingItems } = builtParams;
 			let activeParams = params;
@@ -536,11 +518,9 @@ const streamOpenAIResponsesOnce = (
 				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
 			const requestUrl = `${resolvedBaseUrl}/responses`;
 			const applyPayloadReplacement = async (requestParams: OpenAIResponsesSamplingParams) => {
-				const expectedRouting = captureResponsesWireRouting(requestParams as unknown as Record<string, unknown>);
 				const replacementPayload = await options?.onPayload?.(requestParams, model);
 				const payload =
 					replacementPayload !== undefined ? (replacementPayload as OpenAIResponsesSamplingParams) : requestParams;
-				assertResponsesWireRoutingUnchanged(payload, { model: wireModelId, routing: expectedRouting }, model.api);
 				applyReasoningEffortFallbackForRequest(payload);
 				return payload;
 			};
@@ -666,7 +646,6 @@ const streamOpenAIResponsesOnce = (
 								strictToolsScope,
 								true,
 								chainState?.canAppend ? chainState.lastParams?.input : undefined,
-								referenceTarget,
 							);
 							const fallbackParams = fallbackBuilt.params;
 							if (chainState && !chainState.disabled) fallbackParams.store = true;
@@ -721,8 +700,6 @@ const streamOpenAIResponsesOnce = (
 							providerSessionState,
 							strictToolsScope,
 							forceDisableStrictTools,
-							undefined,
-							referenceTarget,
 						);
 						const currentParams = currentBuilt.params;
 						// Only ZDR forces `store: false` (the org never persists responses). A
@@ -864,12 +841,7 @@ const streamOpenAIResponsesOnce = (
 				}
 			}
 
-			output.providerPayload = createOpenAIResponsesHistoryPayload(
-				model.provider,
-				nativeOutputItems,
-				true,
-				referenceTarget,
-			);
+			output.providerPayload = createOpenAIResponsesHistoryPayload(model.provider, nativeOutputItems);
 			const replayableResponseItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
 				structuredCloneJSON(nativeOutputItems),
 			);
@@ -1171,7 +1143,6 @@ export function buildParams(
 	strictToolsScope?: OpenAIStrictToolsScope,
 	disableStrictToolsOverride = false,
 	statefulCacheBaseline?: ResponseInput,
-	referenceTarget?: string,
 ): { params: OpenAIResponsesSamplingParams; trailingScaffoldingItems: number; strictToolsApplied: boolean } {
 	const policy = resolveOpenAICompatPolicy(model, {
 		endpoint: "responses",
@@ -1200,7 +1171,6 @@ export function buildParams(
 		requiresReasoningReplayForToolCalls:
 			policy.reasoning.enabled && policy.reasoning.requiresReasoningContentForToolCalls,
 		repairOrphanOutputs: true,
-		referenceTarget,
 	});
 
 	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);
@@ -1223,11 +1193,10 @@ export function buildParams(
 
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 	const promptCacheKey = getOpenAIPromptCacheKey(options);
-	const modelId = resolveResponsesWireModelId(
+	const modelId = applyWireModelIdTransform(
 		model.requestModelId ?? model.id,
 		model.compat.wireModelIdMode,
 		options?.openrouterVariant,
-		options?.extraBody,
 	);
 	const params: OpenAIResponsesSamplingParams = {
 		model: modelId,
