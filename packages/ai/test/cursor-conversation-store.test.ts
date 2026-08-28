@@ -212,7 +212,9 @@ describe("cursor conversation store — rotation", () => {
 		}
 		const oldest = "rot-r-0";
 		const oldestCapped = rotatedByBase.get(oldest)!;
-		expect(resolveCursorConversationId(oldest)).toBe(oldestCapped);
+		// Observe the pre-overflow mapping state without resolveCursorConversationId:
+		// a resolve is a use and would refresh the oldest mapping's LRU position.
+		expect(isCursorRotationMarked(oldestCapped)).toBe(true);
 		expect(rotateCursorConversation(oldest)).toBeUndefined();
 
 		pinCursorConversation("rot-r-65");
@@ -330,5 +332,41 @@ describe("cursor conversation store — rotation", () => {
 		expect(resolveCursorConversationId("newest-base")).toBe(newestRotated);
 		expect(isCursorRotationFresh(newestRotated)).toBe(true);
 		for (const rotated of rotatedPins) unpinCursorConversation(rotated);
+	});
+
+	it("recent rotated use keeps the base mapping owned when later admissions overflow the retained LRU", () => {
+		// Regression: a turn after rotation pins and refreshes only the rotated
+		// id, so the base's retained slot used to age at its pre-rotation
+		// position. A consumer observes this as the next turn reverting to the
+		// poisoned base conversation id (empty state, reset rotation count)
+		// even though the conversation was used moments ago.
+		pinCursorConversation("used-base");
+		unpinCursorConversation("used-base");
+		const rotated = requireRotation(rotateCursorConversation("used-base"));
+		markCursorRotationSucceeded(rotated);
+
+		// Age the base to the LRU head: every later admission is another
+		// conversation, none of them touches "used-base" itself.
+		for (let i = 0; i < CURSOR_RETAINED_CONVERSATION_LIMIT - 2; i++) {
+			const id = `aged-${i}`;
+			pinCursorConversation(id);
+			unpinCursorConversation(id);
+		}
+		expect(resolveCursorConversationId("used-base")).toBe(rotated);
+
+		// The recent turn on the rotated id must have refreshed the base
+		// mapping's ownership: the overflow admission evicts the next-oldest
+		// retained entry instead of the still-current base → rotated mapping.
+		const entry = pinCursorConversation(rotated);
+		unpinCursorConversation(rotated);
+		pinCursorConversation("overflow-admission");
+		unpinCursorConversation("overflow-admission");
+
+		expect(resolveCursorConversationId("used-base")).toBe(rotated);
+		expect(isCursorRotationMarked(rotated)).toBe(true);
+		// The conversation's state entry is the same object — a stale-ownership
+		// eviction would have recreated it empty on this turn.
+		expect(pinCursorConversation(resolveCursorConversationId("used-base"))).toBe(entry);
+		unpinCursorConversation(resolveCursorConversationId("used-base"));
 	});
 });

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as http2 from "node:http2";
 import * as net from "node:net";
+import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	AgentServerMessageSchema,
@@ -21,7 +22,6 @@ import {
 	disposeCursorH2Pool,
 } from "../src/providers/cursor/h2-pool";
 import type { Context, Model } from "../src/types";
-import { __resetProxyCache } from "../src/utils/proxy";
 
 /**
  * Pool fixtures run against a real loopback `http2.createServer()` so session
@@ -311,38 +311,25 @@ describe("cursor HTTP/2 session pool", () => {
 	});
 
 	it("classifies an unreachable proxy tunnel as connect-tunnel unavailability, not a throw", async () => {
-		const provider = "cursor-h2-proxy-test";
-		const envKey = `PI_PROXY_${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
-		const saved = {
-			[envKey]: Bun.env[envKey],
-			NO_PROXY: Bun.env.NO_PROXY,
-			no_proxy: Bun.env.no_proxy,
-		};
-		try {
-			Bun.env[envKey] = "http://127.0.0.1:1";
-			Bun.env.NO_PROXY = "";
-			Bun.env.no_proxy = "";
-			__resetProxyCache();
-
-			const result = await acquireCursorH2({
-				baseUrl: "https://cursor.example.invalid",
-				requestPath: RUN_PATH,
-				headers: {},
-				provider,
-			});
-			expect(result.ok).toBe(false);
-			if (result.ok) return;
-			expect(result.unavailable.reason).toBe("connect-tunnel");
-		} finally {
-			if (saved[envKey] === undefined) delete Bun.env[envKey];
-			else Bun.env[envKey] = saved[envKey];
-			if (saved.NO_PROXY === undefined) delete Bun.env.NO_PROXY;
-			else Bun.env.NO_PROXY = saved.NO_PROXY;
-			if (saved.no_proxy === undefined) delete Bun.env.no_proxy;
-			else Bun.env.no_proxy = saved.no_proxy;
-			__resetProxyCache();
-		}
-	});
+		// The proxy env vars are process-global, so the scenario runs in a child
+		// process (pattern: cursor-proxy-env.test.ts) instead of mutating
+		// Bun.env underneath concurrent test files.
+		const child = Bun.spawn([process.execPath, path.join(import.meta.dir, "fixtures/cursor-h2-proxy-env.ts")], {
+			cwd: path.resolve(import.meta.dir, "../../.."),
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		expect(exitCode).toBe(0);
+		expect(stderr).toBe("");
+		const result = JSON.parse(stdout) as { ok: boolean; reason?: string };
+		expect(result.ok).toBe(false);
+		expect(result.reason).toBe("connect-tunnel");
+	}, 60_000);
 
 	it("rejects a non-ALPN connect error instead of classifying it as unavailable", async () => {
 		const port = await freeClosedPort();
@@ -355,6 +342,7 @@ describe("cursor HTTP/2 session pool", () => {
 		await expect(promise).rejects.toBeTruthy();
 		expect(poolOutstanding()).toBe(0);
 	});
+
 	it("restores the lease count when session.request() throws synchronously", async () => {
 		const baseUrl = await startServer();
 		serveStream = respondOk;
@@ -495,83 +483,36 @@ describe("cursor HTTP/2 session pool", () => {
 	});
 
 	it("dispose tears down a still-resolving proxy tunnel instead of leaving it live", async () => {
-		// A CONNECT proxy that accepts TCP but never replies to the CONNECT
-		// request keeps the establishment's tunnel stage pending indefinitely it
-		// would only settle on its own 30s timeout. `session` is not yet assigned
-		// during the tunnel, so disposal must abort the tunnel via the
-		// establishment controller — tearing the pre-disposal socket down now —
-		// rather than returning with it still live until that timeout.
-		const provider = "cursor-h2-proxy-dispose-test";
-		const envKey = `PI_PROXY_${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
-
-		let proxySocket: net.Socket | undefined;
-		const proxy = net.createServer(sock => {
-			proxySocket = sock;
-			// Flow the socket so the peer's teardown (FIN / close) is processed
-			// and `destroyed` flips true — on a paused socket Node never advances
-			// the stream state and the assertion below would be a false negative.
-			sock.resume();
+		// The proxy env vars are process-global, so the scenario runs in a child
+		// process (pattern: cursor-proxy-env.test.ts) instead of mutating
+		// Bun.env underneath concurrent test files. The child starts a silent
+		// CONNECT proxy and reports each teardown observation.
+		const child = Bun.spawn([process.execPath, path.join(import.meta.dir, "fixtures/cursor-h2-proxy-dispose.ts")], {
+			cwd: path.resolve(import.meta.dir, "../../.."),
+			stdout: "pipe",
+			stderr: "pipe",
 		});
-		const listening = Promise.withResolvers<void>();
-		proxy.once("error", listening.reject);
-		proxy.listen(0, "127.0.0.1", () => listening.resolve());
-		await listening.promise;
-		const address = proxy.address();
-		const port = typeof address === "object" && address !== null ? address.port : 0;
-
-		const saved = {
-			[envKey]: Bun.env[envKey],
-			NO_PROXY: Bun.env.NO_PROXY,
-			no_proxy: Bun.env.no_proxy,
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		expect(exitCode).toBe(0);
+		expect(stderr).toBe("");
+		const result = JSON.parse(stdout) as {
+			tunnelLiveBeforeDispose: boolean;
+			disposed: boolean;
+			socketDestroyedAfterDispose: boolean;
+			poolEmptyAfterDispose: boolean;
+			poolEmptyAfterAcquirer: boolean;
 		};
-		try {
-			Bun.env[envKey] = `http://127.0.0.1:${port}`;
-			Bun.env.NO_PROXY = "";
-			Bun.env.no_proxy = "";
-			__resetProxyCache();
-
-			// The establishment hangs in the tunnel stage (waiting for a CONNECT
-			// reply the silent proxy never sends).
-			const acquirer = acquireCursorH2({
-				baseUrl: "https://cursor.example.invalid",
-				requestPath: RUN_PATH,
-				headers: {},
-				provider,
-			}).catch(e => e);
-			await waitFor(() => proxySocket !== undefined, 2000);
-			// The pre-disposal tunnel is live: the peer accepted the CONNECT.
-			expect(proxySocket?.destroyed).toBe(false);
-
-			// Disposal must abort the tunnel and resolve within a bounded watchdog
-			// — NOT return while the pre-disposal tunnel keeps running into its own
-			// 30s timeout.
-			const disposed = await Promise.race([
-				disposeCursorH2Pool().then(() => true),
-				(() => {
-					const { promise, resolve } = Promise.withResolvers<false>();
-					setTimeout(() => resolve(false), 3000);
-					return promise;
-				})(),
-			]);
-			expect(disposed).toBe(true);
-
-			// Disposal's cancellation tore the still-resolving tunnel's socket down.
-			await waitFor(() => proxySocket?.destroyed === true, 2000);
-			expect(__cursorH2PoolSnapshot()).toHaveLength(0);
-
-			await acquirer;
-			expect(__cursorH2PoolSnapshot()).toHaveLength(0);
-		} finally {
-			if (saved[envKey] === undefined) delete Bun.env[envKey];
-			else Bun.env[envKey] = saved[envKey];
-			if (saved.NO_PROXY === undefined) delete Bun.env.NO_PROXY;
-			else Bun.env.NO_PROXY = saved.NO_PROXY;
-			if (saved.no_proxy === undefined) delete Bun.env.no_proxy;
-			else Bun.env.no_proxy = saved.no_proxy;
-			__resetProxyCache();
-			proxy.close();
-		}
-	});
+		// The pre-disposal tunnel is live: the peer accepted the CONNECT.
+		expect(result.tunnelLiveBeforeDispose).toBe(true);
+		expect(result.disposed).toBe(true);
+		expect(result.socketDestroyedAfterDispose).toBe(true);
+		expect(result.poolEmptyAfterDispose).toBe(true);
+		expect(result.poolEmptyAfterAcquirer).toBe(true);
+	}, 60_000);
 
 	it("dispose does not resolve until the establishment body's done-teardown has fully run", async () => {
 		// Frames the exact audit race: `cancel` rejects the outward acquisition

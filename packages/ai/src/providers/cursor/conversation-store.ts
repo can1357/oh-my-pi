@@ -114,7 +114,10 @@ export function unpinCursorConversation(id: string): void {
 		let victim: string | undefined;
 		let freshVictim: string | undefined;
 		for (const candidate of retainedLru) {
-			const resolved = resolveCursorConversationId(candidate);
+			// Raw mapping read, not resolveCursorConversationId: the overflow scan
+			// must stay side-effect-free — resolving here would re-admit its own
+			// candidate at the LRU tail mid-iteration.
+			const resolved = rotatedConversationIds.get(candidate) ?? candidate;
 			if ((activePinCounts.get(resolved) ?? 0) > 0) continue;
 			if (freshRotatedConversationIds.has(resolved)) {
 				freshVictim ??= candidate;
@@ -142,9 +145,24 @@ export function unpinCursorConversation(id: string): void {
  * external consumer (Task 10) can resolve the id it should actually use and
  * then query its fresh/marked state via `isCursorRotationFresh` /
  * `isCursorRotationMarked`.
+ *
+ * A successful base→rotated resolution is a use of the conversation: it
+ * refreshes the base mapping's retained-LRU ownership. Later turns pin and
+ * unpin only the rotated id, so without this refresh the base's slot ages at
+ * its pre-rotation position and eviction purges a still-current mapping
+ * while its rotated entry was just used. The refresh only applies while the
+ * base actually holds a retained slot — a pinned base must stay out of the
+ * eviction set until its final unpin re-admits it.
  */
 export function resolveCursorConversationId(baseId: string): string {
-	return rotatedConversationIds.get(baseId) ?? baseId;
+	const rotated = rotatedConversationIds.get(baseId);
+	if (rotated === undefined) return baseId;
+	if (retainedLru.has(baseId)) {
+		// Most-recently-used goes to the tail; the LRU is oldest-first.
+		retainedLru.delete(baseId);
+		retainedLru.add(baseId);
+	}
+	return rotated;
 }
 
 /**
