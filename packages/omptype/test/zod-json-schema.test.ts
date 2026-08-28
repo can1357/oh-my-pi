@@ -136,6 +136,23 @@ describe("zod shim JSON Schema structure", () => {
 		expect(items).toEqual({ type: "string" });
 		expect(nested.parse({ list: [{ name: "x" }] })).toEqual({ list: [{ name: "x" }] });
 	});
+
+	it("exports required recursive edges and pins optional recursive edges on the dispatcher", () => {
+		// The emission boundary for recursion: REQUIRED array/record edges
+		// export as $ref; OPTIONAL or NULLABLE recursive edges keep the
+		// ordered dispatcher and erase, because the union determinism probe
+		// cannot see through a deferred alias. `.optional()` is the common
+		// authoring spelling for a recursive edge, so this pins the boundary
+		// instead of letting it silently regress or silently widen.
+		type LinkedList = { name: string; next?: LinkedList };
+		const list: z.ZodType<LinkedList> = z.lazy(() => z.object({ name: z.string(), next: list.optional() }));
+		const json = asObjectSchema(list.toJsonSchema());
+		const def = resolveRef(json, json.$ref);
+		expect(def?.properties?.name).toEqual({ type: "string" });
+		expect(def?.properties?.next).toEqual({});
+		expect(list.parse({ name: "a", next: { name: "b" } })).toEqual({ name: "a", next: { name: "b" } });
+		expect(list.parse({ name: "a" })).toEqual({ name: "a" });
+	});
 });
 
 describe("z.lazy deferred alias", () => {

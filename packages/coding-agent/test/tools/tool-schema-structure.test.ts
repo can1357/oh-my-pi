@@ -50,6 +50,27 @@ interface Erasure {
 	value: "true" | "{}";
 }
 
+// Named allow-list of legitimate unconstrained positions. Each entry must
+// carry a reason; the walk fails on any erasure not listed here. A
+// deliberately unconstrained parameter (z.unknown()/z.any()) honestly emits
+// `properties.<name> = {}` — if a tool gains one, add it here, e.g.:
+// { tool: /^mytool$/, pointer: /\/properties\/whatever$/, reason: "deliberately unconstrained" }
+const ALLOWED_ERASURES: Array<{ tool: RegExp; pointer: RegExp; reason: string }> = [
+	{
+		// yield's user-requested `outputSchema: true` emits a description-only
+		// data schema that escapes normalizeEmptySchemas; pinned to stay
+		// description-only by the dedicated assertion in the yield test.
+		tool: /^yield:/,
+		pointer: /\/data$/,
+		reason: "description-only data schema for outputSchema: true",
+	},
+];
+
+const unexpectedErasures = (erasures: Erasure[]): Erasure[] =>
+	erasures.filter(
+		erasure => !ALLOWED_ERASURES.some(entry => entry.tool.test(erasure.tool) && entry.pointer.test(erasure.pointer)),
+	);
+
 const SCHEMA_MAP_KEYS = new Set(["properties", "$defs", "definitions"]);
 const SCHEMA_ARRAY_KEYS = new Set(["anyOf", "oneOf", "allOf", "prefixItems"]);
 const SCHEMA_VALUE_KEYS = new Set(["items", "not"]);
@@ -134,8 +155,10 @@ describe("discovered tool wire schemas are structurally constrained", () => {
 		for (const tool of await discoveredToolsPromise) {
 			walkSchema(tool.name, "", toolWireSchema(tool), erasures);
 		}
-		expect(erasureMessage(erasures)).toBe("");
-		expect(erasures).toEqual([]);
+		// Anything flagged must be a named allow-list entry (see
+		// ALLOWED_ERASURES); an unlisted erasure is a real regression.
+		expect(erasureMessage(unexpectedErasures(erasures))).toBe("");
+		expect(unexpectedErasures(erasures)).toEqual([]);
 	});
 
 	it("never relays a degenerate fallback base for discovered tools", async () => {
@@ -258,24 +281,29 @@ describe("shipped example extension schemas are structurally constrained", () =>
 	// runtime,with-deps} and examples/custom-tools/hello, re-declared against
 	// the same shim. The example modules themselves are not imported: they
 	// sit outside the package tsconfig and carry pre-existing type errors, so
-	// importing them would force unrelated example fixes into this PR. Their
-	// shapes — plain `pi.zod.object` members with primitives, enums, and
-	// defaults — are exactly the documented authoring surface at risk.
+	// importing them would force unrelated example fixes into this PR. Each
+	// shape mirrors the cited example source; if the example changes its
+	// parameters, update the entry here — the line refs make drift findable.
 	const cases: Array<[string, unknown]> = [
-		["extensions/hello.ts", zod.object({ name: zod.string().describe("Name to greet") })],
+		// examples/extensions/hello.ts:15-17
+		["extensions/hello.ts:15", zod.object({ name: zod.string().describe("Name to greet") })],
+		// examples/extensions/api-demo.ts:19-22
 		[
-			"extensions/api-demo.ts",
+			"extensions/api-demo.ts:19",
 			zod.object({
 				message: zod.string().describe("Test message"),
 				logLevel: zod.enum(["error", "warn", "debug"]).default("debug").describe("Log level to use"),
 			}),
 		],
-		["extensions/reload-runtime.ts", zod.object({})],
+		// examples/extensions/reload-runtime.ts:29
+		["extensions/reload-runtime.ts:29", zod.object({})],
+		// examples/extensions/with-deps/index.ts:19-21
 		[
-			"extensions/with-deps",
+			"extensions/with-deps/index.ts:19",
 			zod.object({ duration: zod.string().describe("Duration string like '2 days', '1h', '5m'") }),
 		],
-		["custom-tools/hello", zod.object({ name: zod.string().describe("Name to greet") })],
+		// examples/custom-tools/hello/index.ts:7-9
+		["custom-tools/hello/index.ts:7", zod.object({ name: zod.string().describe("Name to greet") })],
 	];
 
 	for (const [label, parameters] of cases) {
