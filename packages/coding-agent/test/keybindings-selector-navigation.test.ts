@@ -29,7 +29,7 @@ beforeAll(() => {
 
 afterEach(async () => {
 	setKeybindings(KeybindingsManager.inMemory());
-	HistoryStorage.resetInstance();
+	HistoryStorage.close();
 	await Bun.sleep(0);
 	await Promise.all(tempDirs.splice(0).map(tempDir => tempDir.remove().catch(() => {})));
 });
@@ -96,7 +96,7 @@ function createExtension(id: string, displayName: string): Extension {
 async function createHistoryStorage(prompts: string[]): Promise<HistoryStorage> {
 	const dir = TempDir.createSync("@omp-history-nav-");
 	tempDirs.push(dir);
-	HistoryStorage.resetInstance();
+	HistoryStorage.close();
 	const storage = HistoryStorage.open(dir.join("history.db"));
 	// add() batches writes behind a 100ms AsyncDrain timer. Drive that timer with
 	// fake timers so the flush is instant instead of waiting real wall-clock time.

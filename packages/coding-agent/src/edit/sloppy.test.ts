@@ -188,6 +188,35 @@ describe("sloppy v8", () => {
 
 		expect(variant.apply(content, input, context)).toBe("start();\nreplacement();\nmore();\nend();\n");
 	});
+	test("deletes a run of －-marked lines silently", () => {
+		const content = "first();\nold();\nolder();\nlast();\n";
+		const notes: string[] = [];
+		const input = inlineOperation("first();\n－old();\n－older();\nlast();");
+
+		expect(variant.apply(content, input, { path: context.path, notes })).toBe("first();\nlast();\n");
+		expect(notes).toEqual([]);
+	});
+
+	test("replaces a － run with the ＋ run directly below it", () => {
+		const content = "start();\nold();\nend();\n";
+		const input = inlineOperation("start();\n－old();\n＋fresh();\nend();");
+
+		expect(variant.apply(content, input, context)).toBe("start();\nfresh();\nend();\n");
+	});
+
+	test("deletes an indented －-marked line byte-for-byte", () => {
+		const content = "fn main() {\n\tsetup();\n\trun();\n}\n";
+		const input = inlineOperation("\tsetup();\n－\trun();");
+
+		expect(variant.apply(content, input, context)).toBe("fn main() {\n\tsetup();\n}\n");
+	});
+
+	test("drops －-marked old lines from a REWRITE paired with ＋ lines", () => {
+		const content = "alpha();\nbeta();\n";
+		const input = operation("beta();", "－beta();\n＋gamma();");
+
+		expect(variant.apply(content, input, context)).toBe("alpha();\ngamma();\n");
+	});
 
 	test("drops apply-patch end-of-edit sentinels from the payload", () => {
 		const content = "start();\nmiddle();\nend();\n";

@@ -66,14 +66,14 @@ beforeEach(() => {
 	invalidateProjectScope();
 	invalidateSessionOwnerCache();
 	invalidateSyncedTitleIds();
-	HistoryStorage.resetInstance();
+	HistoryStorage.close();
 	resetSessionTitleIndexForTests();
 });
 
 afterEach(async () => {
 	homedirSpy?.mockRestore();
 	homedirSpy = undefined;
-	HistoryStorage.resetInstance();
+	HistoryStorage.close();
 	resetSessionTitleIndexForTests();
 	fs.rmSync(getProjectsConfigPath(AGENT_DIR), { force: true });
 	ProjectsConfigFile.invalidate();

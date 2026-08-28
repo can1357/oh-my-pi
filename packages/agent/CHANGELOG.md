@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.0.10] - 2026-08-28
+
+### Added
+
+- Added support for continuing interrupted agent runs with pending tool calls, allowing those calls to be retried before requesting the next model response.
+
 ## [18.0.9] - 2026-08-28
 
 ### Fixed
