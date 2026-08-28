@@ -305,6 +305,148 @@ describe("AgentSession retry fallback", () => {
 		]);
 	});
 
+	it("keeps a pinned primary beyond the retry budget without consulting model fallback", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled test models to exist");
+
+		const requestedModels: string[] = [];
+		let primaryAttempts = 0;
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				if (model.provider !== primaryModel.provider || model.id !== primaryModel.id) {
+					throw new Error("Pinned primary unexpectedly routed to fallback");
+				}
+				primaryAttempts++;
+				mock.push(
+					primaryAttempts <= 2
+						? { throw: "overloaded_error: provider returned error 503" }
+						: { content: ["Recovered on pinned primary"] },
+				);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 1,
+			"retry.maxRetries": 1,
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		const sessionManager = SessionManager.inMemory();
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+
+		expect(session.setPrimaryProviderPinned(true)).toBe(true);
+		expect(session.primaryProviderPinned).toBe(true);
+		await session.prompt("Wait for the primary");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual(Array(3).fill(`${primaryModel.provider}/${primaryModel.id}`));
+		expect(getLastAssistantMessage(session).content).toContainEqual({
+			type: "text",
+			text: "Recovered on pinned primary",
+		});
+		expect(session.setPrimaryProviderPinned(false)).toBe(false);
+		expect(session.primaryProviderPinned).toBe(false);
+		expect(sessionManager.getEntries().filter(entry => entry.type === "custom")).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ customType: "primary_provider_pin", data: { pinned: true } }),
+				expect.objectContaining({ customType: "primary_provider_pin", data: { pinned: false } }),
+			]),
+		);
+	});
+
+	it("restores the primary-provider pin from the persisted session branch", async () => {
+		using sessionDir = TempDir.createSync("@omp-primary-provider-pin-");
+		try {
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!primaryModel) throw new Error("Expected bundled Anthropic test model to exist");
+
+			const settings = Settings.isolated({ "compaction.enabled": false });
+			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+			const firstManager = SessionManager.create(sessionDir.path(), sessionDir.path());
+			session = new AgentSession({
+				agent: createFallbackAgent(primaryModel, []),
+				sessionManager: firstManager,
+				settings,
+				modelRegistry,
+			});
+			expect(session.setPrimaryProviderPinned(true)).toBe(true);
+			await firstManager.ensureOnDisk();
+			await firstManager.flush();
+			const sessionFile = firstManager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected persisted session path");
+
+			const firstSession = session;
+			session = undefined;
+			await firstSession.dispose();
+			const resumedManager = await SessionManager.open(sessionFile, sessionDir.path());
+			session = new AgentSession({
+				agent: createFallbackAgent(primaryModel, []),
+				sessionManager: resumedManager,
+				settings,
+				modelRegistry,
+			});
+
+			expect(session.primaryProviderPinned).toBe(true);
+		} finally {
+			const activeSession = session;
+			session = undefined;
+			await activeSession?.dispose();
+		}
+	});
+
+	it("waits for local network recovery without consulting model fallback", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled test models to exist");
+
+		const requestedModels: string[] = [];
+		let primaryAttempts = 0;
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				primaryAttempts++;
+				mock.push(
+					primaryAttempts <= 4
+						? { throw: "Unable to connect. Is the computer able to access the url?" }
+						: { content: ["Recovered after the network returned"] },
+				);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 1,
+			"retry.maxRetries": 1,
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Wait for network recovery");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual(Array(5).fill(`${primaryModel.provider}/${primaryModel.id}`));
+		expect(getLastAssistantMessage(session).content).toContainEqual({
+			type: "text",
+			text: "Recovered after the network returned",
+		});
+	});
+
 	it("hops to the chain owned by a fallback that is the last entry of the chain it came from", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const firstFallback = getBundledModel("openai", "gpt-4o-mini");
@@ -4023,6 +4165,95 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.provider).toBe(fallbackModel.provider);
 		expect(session.model?.id).toBe(fallbackModel.id);
 	});
+	it("restores the primary after cooldown expiry inside one tool-call loop", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled Anthropic and OpenAI test models to exist");
+		}
+
+		let now = Date.now();
+		let toolExecutions = 0;
+		const toolSchema = type({ value: type("string") });
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "advance_cooldown",
+			label: "Advance cooldown",
+			description: "Advance the test clock between model requests",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				toolExecutions += 1;
+				now += 240;
+				return { content: [{ type: "text", text: params.value }], details: params };
+			},
+		};
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		let primaryAttempts = 0;
+		let fallbackAttempts = 0;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [tool], messages: [] },
+			streamFn: (model, context, options) => {
+				const selector = `${model.provider}/${model.id}`;
+				requestedModels.push(selector);
+				if (selector === primarySelector) {
+					if (primaryAttempts++ === 0) {
+						mock.push({ throw: "rate limit exceeded retry-after-ms=200" });
+					} else {
+						mock.push({ content: ["Primary restored inside the active tool loop"] });
+					}
+				} else if (selector === fallbackSelector) {
+					if (fallbackAttempts++ === 0) {
+						mock.push({
+							content: [
+								{
+									type: "toolCall",
+									id: "advance-cooldown",
+									name: "advance_cooldown",
+									arguments: { value: "cooldown expired" },
+								},
+							],
+							stopReason: "toolUse",
+						});
+					} else {
+						mock.push({ content: ["Fallback remained active"] });
+					}
+				} else {
+					throw new Error(`Unexpected model requested: ${selector}`);
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+			"retry.fallbackRevertPolicy": "cooldown-expiry",
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		await session.prompt("Restore the primary without starting a second prompt");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([primarySelector, fallbackSelector, primarySelector]);
+		expect(toolExecutions).toBe(1);
+		expect(session.model?.provider).toBe(primaryModel.provider);
+		expect(session.model?.id).toBe(primaryModel.id);
+		expect(getLastAssistantMessage(session).content).toContainEqual({
+			type: "text",
+			text: "Primary restored inside the active tool loop",
+		});
+	});
+
 	it("suppresses cooled selectors and lazily reverts to the role primary after cooldown expiry", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
@@ -4087,6 +4318,44 @@ describe("AgentSession retry fallback", () => {
 			selector: `${primaryModel.provider}/${primaryModel.id}`,
 			isFallback: false,
 		});
+	});
+
+	it("forces an active fallback back to the primary when the session is pinned", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled Anthropic and OpenAI test models to exist");
+		}
+
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const requestedModels: string[] = [];
+		const agent = createFallbackAgent(primaryModel, requestedModels, { retryAfterMs: 60_000 });
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+			"retry.fallbackRevertPolicy": "never",
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		await session.prompt("First prompt triggers fallback");
+		await session.waitForIdle();
+		expect(requestedModels).toEqual([primarySelector, fallbackSelector]);
+		expect(session.model?.id).toBe(fallbackModel.id);
+
+		session.setPrimaryProviderPinned(true);
+		await session.prompt("Pinned prompt must return to the primary");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([primarySelector, fallbackSelector, primarySelector]);
+		expect(session.model?.id).toBe(primaryModel.id);
 	});
 
 	it("keeps credit with the fallback when a restored primary fails without serving", async () => {
@@ -5336,6 +5605,51 @@ describe("AgentSession retry fallback", () => {
 			selector: `${fallbackModel.provider}/${fallbackModel.id}`,
 			isFallback: true,
 		});
+	});
+
+	it("does not apply usage-aware model fallback while the primary route is pinned", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled Anthropic and OpenAI test models to exist");
+		}
+
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const requestedModels: string[] = [];
+		const mock = createMockModel({ responses: [{ content: ["served on the pinned primary"] }] });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.usageAwareFallback": true,
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", primarySelector);
+		const usageHealth = vi.spyOn(modelRegistry.authStorage, "getModelUsageHealth").mockResolvedValue({
+			state: "depleted",
+			accounts: [{ credentialId: 1, credentialType: "oauth", state: "depleted" }],
+		});
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		session.setPrimaryProviderPinned(true);
+
+		await session.prompt("Stay on the pinned primary");
+		await session.waitForIdle();
+
+		expect(usageHealth).not.toHaveBeenCalled();
+		expect(requestedModels).toEqual([primarySelector]);
+		expect(session.model?.id).toBe(primaryModel.id);
 	});
 
 	// A thinking-loop abort is a same-model resample signal (the guard pairs it

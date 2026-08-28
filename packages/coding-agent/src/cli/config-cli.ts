@@ -27,7 +27,7 @@ import { initXdg } from "./commands/init-xdg";
 // Types
 // =============================================================================
 
-export type ConfigAction = "list" | "get" | "set" | "reset" | "path" | "init-xdg";
+export type ConfigAction = "list" | "get" | "set" | "reset" | "path" | "init-xdg" | "capabilities";
 
 export interface ConfigCommandArgs {
 	action: ConfigAction;
@@ -78,7 +78,7 @@ function getSettingValues(def: CliSettingDef): readonly string[] | undefined {
 // Argument Parser
 // =============================================================================
 
-const VALID_ACTIONS: ConfigAction[] = ["list", "get", "set", "reset", "path", "init-xdg"];
+const VALID_ACTIONS: ConfigAction[] = ["list", "get", "set", "reset", "path", "init-xdg", "capabilities"];
 
 /**
  * Parse config subcommand arguments.
@@ -241,6 +241,14 @@ function parseAndSetValue(path: SettingPath, rawValue: string): void {
 // =============================================================================
 
 export async function runConfigCommand(cmd: ConfigCommandArgs): Promise<void> {
+	// Capability negotiation must stay usable even when user configuration is
+	// missing or invalid: external hosts use this before enabling runtime-only
+	// controls, and older builds reject this action quickly as unsupported.
+	if (cmd.action === "capabilities") {
+		await handleCapabilities(cmd.flags);
+		return;
+	}
+
 	await Settings.init();
 
 	switch (cmd.action) {
@@ -275,6 +283,21 @@ async function writeStdout(text: string): Promise<void> {
 		pending.resolve();
 	});
 	await pending.promise;
+}
+const RUNTIME_CAPABILITIES = {
+	primaryProviderPin: true,
+} as const;
+
+async function handleCapabilities(flags: { json?: boolean }): Promise<void> {
+	if (flags.json) {
+		await writeStdout(`${JSON.stringify(RUNTIME_CAPABILITIES, null, 2)}\n`);
+		return;
+	}
+
+	console.log(chalk.bold("Runtime capabilities:\n"));
+	for (const [name, enabled] of Object.entries(RUNTIME_CAPABILITIES)) {
+		console.log(`  ${chalk.white(name)} = ${formatValue(enabled)}`);
+	}
 }
 
 async function handleList(flags: { json?: boolean }): Promise<void> {
@@ -439,6 +462,7 @@ ${chalk.bold("Commands:")}
   reset <key>        Reset a setting to its default value
   path               Print the config directory path
   init-xdg           Initialize XDG Base Directory structure
+  capabilities       Print machine-detectable runtime capabilities
 
 ${chalk.bold("Options:")}
   --json             Output as JSON
@@ -451,6 +475,7 @@ ${chalk.bold("Examples:")}
   ${APP_NAME} config set defaultThinkingLevel medium
   ${APP_NAME} config reset steeringMode
   ${APP_NAME} config list --json
+  ${APP_NAME} config capabilities --json
   ${APP_NAME} config init-xdg
 
 ${chalk.bold("Boolean Values:")}

@@ -197,6 +197,18 @@ describe("config CLI schema coverage", () => {
 		const parsed: unknown = JSON.parse(output);
 		expect(parsed).toMatchObject({ modelRoles: { type: "record" } });
 	});
+	it("exports stable runtime capabilities without loading user settings", async () => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		await Bun.write(path.join(testAgentDir.path(), "config.yml"), "invalid: [unterminated\n");
+
+		const { exitCode, output, error } = await runCliProcess(["config", "capabilities", "--json"], {
+			PI_CODING_AGENT_DIR: testAgentDir.path(),
+		});
+
+		expect(exitCode).toBe(0);
+		expect(error).toBe("");
+		expect(JSON.parse(output)).toEqual({ primaryProviderPin: true });
+	});
 	it("loads PI_CONFIG_FILES overlays in path-list order", async () => {
 		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
 		const baseOverlayPath = path.join(testAgentDir.path(), "base-overlay.yml");
