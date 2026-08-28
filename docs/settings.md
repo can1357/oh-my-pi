@@ -695,6 +695,7 @@ For a custom status line, set `statusLine.preset: custom` and configure `statusL
 | `followUpMode`         | enum    | `one-at-a-time` | `all`, `one-at-a-time`.                                                                                 |
 | `interruptMode`        | enum    | `immediate`     | `immediate`, `wait`.                                                                                    |
 | `doubleEscapeAction`   | enum    | `tree`          | `branch`, `tree`, `none`.                                                                               |
+| `agentHub.defaultView` | enum    | `roster`        | Initial Agent Hub layout: `roster` or `tree`.                                                          |
 | `autoResume`           | boolean | `false`         | Auto-resume the most recent session in the cwd.                                                         |
 | `plan.enabled`         | boolean | `true`          | Enable plan mode.                                                                                       |
 | `plan.defaultOnStartup` | boolean | `false`         | Start each fresh interactive session in plan mode when plan mode is enabled. Print/JSON (`--print`) mode ignores this and prints a note; use `--plan-yolo` for a headless plan flow. |

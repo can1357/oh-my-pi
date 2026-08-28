@@ -792,6 +792,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	unfocusSession(): Promise<void> {
 		return this.#focusController.unfocus();
 	}
+	switchComposerDraft(fromAgentId: string | undefined, toAgentId: string | undefined): void {
+		this.#inputController.switchComposerDraft(fromAgentId, toAgentId);
+	}
 	clearTransientSessionUi(): void {
 		this.#hideSessionInfo();
 		if (this.loadingAnimation) {

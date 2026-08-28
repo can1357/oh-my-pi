@@ -47,6 +47,7 @@ interface Harness {
 	handledEvents: unknown[];
 	setSessionCalls: Array<[AgentSession, string | undefined]>;
 	reloadTodoSessions: AgentSession[];
+	composerSwitches: Array<[string | undefined, string | undefined]>;
 	counts: {
 		clearTransientSessionUi: () => number;
 		resetTranscriptAnchors: () => number;
@@ -60,6 +61,7 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 	const handledEvents: unknown[] = [];
 	const setSessionCalls: Array<[AgentSession, string | undefined]> = [];
 	const reloadTodoSessions: AgentSession[] = [];
+	const composerSwitches: Array<[string | undefined, string | undefined]> = [];
 	let clearTransientSessionUi = 0;
 	let resetTranscriptAnchors = 0;
 	let renderInitialMessages = 0;
@@ -94,6 +96,9 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 		reloadTodos: async (source?: AgentSession) => {
 			reloadTodoSessions.push(source ?? main.session);
 		},
+		switchComposerDraft: (fromAgentId: string | undefined, toAgentId: string | undefined) => {
+			composerSwitches.push([fromAgentId, toAgentId]);
+		},
 		updateEditorBorderColor() {},
 		ui: { requestRender() {} },
 		showStatus() {},
@@ -112,6 +117,7 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 		handledEvents,
 		setSessionCalls,
 		reloadTodoSessions,
+		composerSwitches,
 		counts: {
 			clearTransientSessionUi: () => clearTransientSessionUi,
 			resetTranscriptAnchors: () => resetTranscriptAnchors,
@@ -146,6 +152,7 @@ describe("SessionFocusController", () => {
 		expect(h.counts.renderInitialMessages()).toBe(1);
 		expect(h.reloadTodoSessions).toEqual([worker.session]);
 		expect(h.setSessionCalls).toEqual([[worker.session, "Worker"]]);
+		expect(h.composerSwitches).toEqual([[undefined, "Worker"]]);
 
 		const event = { type: "message_start", message: { role: "user" } };
 		await worker.emit(event);
@@ -169,6 +176,10 @@ describe("SessionFocusController", () => {
 		expect(h.controller.focusedAgentId).toBeUndefined();
 		expect(h.setSessionCalls.at(-1)).toEqual([h.main.session, undefined]);
 		expect(h.reloadTodoSessions).toEqual([worker.session, h.main.session]);
+		expect(h.composerSwitches).toEqual([
+			[undefined, "Worker"],
+			["Worker", undefined],
+		]);
 	});
 
 	it("does not let a superseded focus attachment restore the worker todo HUD after unfocusing", async () => {
@@ -247,6 +258,11 @@ describe("SessionFocusController", () => {
 			[worker.session, "Worker"],
 			[parent.session, "Parent"],
 			[h.main.session, undefined],
+		]);
+		expect(h.composerSwitches).toEqual([
+			[undefined, "Worker"],
+			["Worker", "Parent"],
+			["Parent", undefined],
 		]);
 	});
 

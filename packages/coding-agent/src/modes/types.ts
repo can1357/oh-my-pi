@@ -143,6 +143,8 @@ export interface InteractiveModeContext {
 	focusParentSession(): Promise<void>;
 	/** Return the view to the main session (delegates to SessionFocusController.unfocus). */
 	unfocusSession(): Promise<void>;
+	/** Save the current session's composer draft and restore the target session's draft. */
+	switchComposerDraft(fromAgentId: string | undefined, toAgentId: string | undefined): void;
 	/** Clear loader, transient HUD/pending containers, streaming state, and pending tools. */
 	clearTransientSessionUi(): void;
 	settings: Settings;

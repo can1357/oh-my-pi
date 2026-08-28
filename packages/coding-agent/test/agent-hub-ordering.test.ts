@@ -156,6 +156,104 @@ describe("Agent hub row ordering", () => {
 		}
 	});
 
+	it("opens in the configured parent/child tree view", () => {
+		geometry = stubStdoutGeometry(120);
+		const agents = new AgentRegistry();
+		agents.register({
+			id: "Parent",
+			displayName: "Parent",
+			kind: "sub",
+			parentId: "Main",
+			session: {} as AgentSession,
+		});
+		agents.register({
+			id: "Child",
+			displayName: "Child",
+			kind: "sub",
+			parentId: "Parent",
+			session: {} as AgentSession,
+		});
+		const settings = Settings.isolated();
+		settings.set("agentHub.defaultView", "tree");
+		const hub = makeHub(agents, { settings });
+
+		try {
+			expect(renderedAgentIds(hub)).toEqual(["Parent", "Child"]);
+			expect(Bun.stripANSI(renderedRosterEntry(hub, "Child", 120))).toContain("└── Child");
+		} finally {
+			hub.dispose();
+		}
+	});
+
+	it("renders selectable Main as the tree root without counting it as a subagent", () => {
+		geometry = stubStdoutGeometry(120);
+		const agents = new AgentRegistry();
+		agents.register({ id: "Main", displayName: "Main", kind: "main", session: {} as AgentSession });
+		agents.register({
+			id: "Parent",
+			displayName: "Parent",
+			kind: "sub",
+			parentId: "Main",
+			session: {} as AgentSession,
+		});
+		agents.register({
+			id: "Child",
+			displayName: "Child",
+			kind: "sub",
+			parentId: "Parent",
+			session: {} as AgentSession,
+		});
+		agents.register({
+			id: "DepthFour",
+			displayName: "Depth Four",
+			kind: "sub",
+			parentId: "Child",
+			session: {} as AgentSession,
+		});
+		const settings = Settings.isolated();
+		settings.set("agentHub.defaultView", "tree");
+		const hub = makeHub(agents, { settings });
+
+		try {
+			expect(renderedAgentIds(hub)).toEqual(["Main", "Parent", "Child", "DepthFour"]);
+			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "Main", 120))).not.toMatch(/[├└]──/u);
+			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "Parent", 120))).toContain("└── Parent");
+			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "Child", 120))).toContain("    └── Child");
+			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "DepthFour", 120))).toContain("        └── DepthFour");
+			const tree = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(tree).toContain("Root session · 1 children");
+			expect(tree).toContain("0/3 measured");
+			expect(hub.isEmpty).toBe(false);
+
+			hub.handleInput("x");
+			expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain("Main is the root session — it cannot be killed");
+			hub.handleInput("r");
+			expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain(
+				"Main is the root session — it does not need revival",
+			);
+
+			hub.handleInput("t");
+			expect(renderedAgentIds(hub)).toEqual(["Child", "DepthFour", "Parent"]);
+		} finally {
+			hub.dispose();
+		}
+	});
+
+	it("keeps the Hub content-empty contract when tree mode has only Main", () => {
+		const agents = new AgentRegistry();
+		agents.register({ id: "Main", displayName: "Main", kind: "main", session: {} as AgentSession });
+		const settings = Settings.isolated();
+		settings.set("agentHub.defaultView", "tree");
+		const hub = makeHub(agents, { settings });
+
+		try {
+			expect(hub.isEmpty).toBe(true);
+			expect(renderedAgentIds(hub)).toEqual(["Main"]);
+		} finally {
+			hub.dispose();
+		}
+	});
+
 	it("freezes the initial lastActivity order while the hub is open", () => {
 		vi.useFakeTimers();
 		let hub: AgentHubOverlayComponent | undefined;
@@ -940,7 +1038,14 @@ describe("Agent hub row ordering", () => {
 		geometry.setRows(32);
 		const agents = new AgentRegistry();
 		agents.register({ id: "Parent", displayName: "Parent", kind: "sub", parentId: "Main", session: null });
-		agents.register({ id: "First", displayName: "First", kind: "sub", parentId: "Parent", session: null });
+		agents.register({
+			id: "First",
+			displayName: "First",
+			kind: "sub",
+			parentId: "Parent",
+			activity: "Inspect every wrapped detail row while preserving the visible parent lineage",
+			session: null,
+		});
 		agents.register({ id: "Grandchild", displayName: "Grandchild", kind: "sub", parentId: "First", session: null });
 		agents.register({ id: "Last", displayName: "Last", kind: "sub", parentId: "Parent", session: null });
 		const hub = makeHub(agents);
@@ -950,6 +1055,15 @@ describe("Agent hub row ordering", () => {
 			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "First", 120))).toContain("├── First");
 			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "Grandchild", 120))).toContain("│   └── Grandchild");
 			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "Last", 120))).toContain("└── Last");
+			const firstEntry = Bun.stripANSI(renderedRosterEntry(hub, "First", 72)).split("\n");
+			expect(firstEntry.length).toBeGreaterThan(2);
+			for (const detailRow of firstEntry.slice(1)) {
+				expect(detailRow).toStartWith("    │   ");
+			}
+			const grandchildEntry = Bun.stripANSI(renderedRosterEntry(hub, "Grandchild", 72)).split("\n");
+			expect(grandchildEntry[1]).toStartWith("    │       ");
+			const lastEntry = Bun.stripANSI(renderedRosterEntry(hub, "Last", 72)).split("\n");
+			expect(lastEntry[1]).not.toContain("│");
 		} finally {
 			hub.dispose();
 		}

@@ -1,6 +1,6 @@
 # Agent Hub
 
-Agent Hub is the interactive TUI for watching and controlling subagents associated with the current session. It combines a live roster, per-agent activity and usage, transcript access, steering, revive, and kill controls. The main agent is not listed because its conversation is the ambient session view.
+Agent Hub is the interactive TUI for watching and controlling agents associated with the current session. It combines a stable operational roster, parent/child tree, per-agent activity and usage, transcript access, steering, revive, and kill controls. In a local tree view, Main is the selectable root; the flat roster remains subagent-only.
 
 The Hub also discovers parked subagents from the current session's persisted artifacts when a session is resumed. Advisor transcript files appear as read-only rows.
 
@@ -30,7 +30,12 @@ The roster updates from the session's agent registry and progress events. Its re
 - assigned task or current activity;
 - cost, active time or elapsed span, request count, tool-call count, and tokens.
 
-The header aggregates status and usage across measured agents. Press `t` to switch between the stable flat roster and a parent/child tree.
+The header aggregates status and usage across measured subagents. Press `t` to switch between the stable flat roster and a parent/child tree. The tree continues dim ancestry guides through each agent's wrapped activity and usage rows, stopping each guide after its last sibling. Set the initial view globally with:
+
+```yaml
+agentHub:
+  defaultView: tree
+```
 
 On a wide terminal, the selected agent's inspector appears beside the roster. On a narrow terminal, press `Tab` to replace the roster with it. The inspector adds:
 
@@ -54,17 +59,19 @@ Metrics depend on the progress or persisted usage data available for that agent.
 | `x`                         | Abort a running turn if necessary, then kill and release the selected agent. |
 | `Esc`                       | Close the inspector first on narrow terminals, then close the Hub.           |
 
-Only `parked` agents can be revived. `x` is immediate; use it only when you intend to discard that agent instance.
+Only `parked` subagents can be revived. `x` is immediate; use it only when you intend to discard that subagent instance.
 
 ## Read and steer a subagent
+
+In a local tree view, selecting Main returns the TUI to the root session without interrupting the focused child. The child continues working, and its unsent draft is restored when it is focused again.
 
 For a normal local subagent, `Enter` or click focuses the main TUI on that agent's session and closes the Hub. Focusing a parked agent revives it. The transcript, status line, and editor then belong to that subagent:
 
 1. Read its live transcript and tool activity.
 2. Type a message and press `Enter` to steer a running turn or prompt an idle agent.
-3. Press `Esc` with an empty editor, or double-tap `←`, to return to the main session.
+3. Press `Esc` with text in the editor to clear it. With an empty editor, `Esc` returns directly to Main. Double-tap `←` also returns to Main when the editor is empty.
 
-Steering uses the normal prompt path, so the message and response are written to the subagent's persisted session history. While a subagent is focused, `Esc` returns to the main session; it does not interrupt the subagent.
+While the top-level OMP process remains open, each focused session owns its unsent composer draft. Moving through Agent Hub preserves the current text and images, then restores the target session's draft.
 
 Contexts without a local focusable session use the Hub's full-screen transcript viewer instead. This includes collab guests and advisor rows. The viewer incrementally tails the file-backed transcript and provides an input line only when the selected agent can be messaged. Sending there has the same semantics: revive if parked, steer if running, and prompt if idle.
 

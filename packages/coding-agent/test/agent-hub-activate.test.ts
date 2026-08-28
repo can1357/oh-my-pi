@@ -120,6 +120,49 @@ describe("Agent hub Enter activation", () => {
 		hub.dispose();
 	});
 
+	it("selecting the Main tree root returns to Main without interrupting the child", async () => {
+		const agents = new AgentRegistry();
+		agents.register({
+			id: "Main",
+			displayName: "Main",
+			kind: "main",
+			session: { subscribe: () => () => {} } as unknown as AgentSession,
+			status: "running",
+		});
+		const childAbort = vi.fn(async () => {});
+		agents.register({
+			id: AGENT_ID,
+			displayName: AGENT_ID,
+			kind: "sub",
+			parentId: "Main",
+			session: { abort: childAbort, subscribe: () => () => {} } as unknown as AgentSession,
+			status: "running",
+		});
+		const settings = Settings.isolated();
+		settings.set("agentHub.defaultView", "tree");
+		const focusedIds: string[] = [];
+		const done = Promise.withResolvers<void>();
+		const hub = new AgentHubOverlayComponent({
+			settings,
+			observers: new SessionObserverRegistry(),
+			hubKeys: [],
+			onDone: () => done.resolve(),
+			requestRender: () => {},
+			registry: agents,
+			irc: new IrcBus(agents),
+			focusAgent: async id => {
+				focusedIds.push(id);
+			},
+		});
+
+		hub.handleInput("\r");
+		await done.promise;
+
+		expect(focusedIds).toEqual(["Main"]);
+		expect(childAbort).not.toHaveBeenCalled();
+		hub.dispose();
+	});
+
 	it("a focus failure keeps the hub open and shows the error as a notice", async () => {
 		const message = 'Agent "X" is aborted and cannot be revived';
 		const { hub, doneCalls, renderRequested } = makeHub(() => Promise.reject(new Error(message)));
