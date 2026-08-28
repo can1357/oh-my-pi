@@ -17,6 +17,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import type { LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -81,6 +82,39 @@ describe("createAgentSession preloadedExtensions isolation (issue #2190)", () =>
 			expect(preloaded.extensions.length).toBe(beforeLength);
 		} finally {
 			await session.dispose();
+		}
+	});
+	it("does not reuse ordinary preloaded extensions in a restricted session", async () => {
+		const extensionPath = path.join(sharedDir, "restricted-preloaded.ts");
+		fs.writeFileSync(
+			extensionPath,
+			`export default function (pi) { pi.registerCommand("must-stay-disabled", { handler: async () => {} }); }`,
+		);
+		const preloaded = await loadExtensions([extensionPath], sharedDir);
+		expect(preloaded.extensions).toHaveLength(1);
+
+		const result = await createAgentSession({
+			cwd: sharedDir,
+			agentDir: sharedDir,
+			sessionManager: SessionManager.inMemory(),
+			modelRegistry,
+			settings: Settings.isolated(),
+			preloadedExtensions: preloaded,
+			restrictToolNames: true,
+			toolNames: ["read"],
+			enableLsp: false,
+			enableMCP: false,
+			skipPythonPreflight: true,
+			skills: [],
+			rules: [],
+			preloadedCustomToolPaths: [],
+			contextFiles: [],
+			promptTemplates: [],
+		});
+		try {
+			expect(result.extensionsResult.extensions).toHaveLength(0);
+		} finally {
+			await result.session.dispose();
 		}
 	});
 });

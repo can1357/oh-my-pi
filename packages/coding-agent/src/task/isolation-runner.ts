@@ -136,8 +136,8 @@ export interface IsolatedRunOptions {
 	/**
 	 * Base run options handed to the subagent subprocess. This helper sets
 	 * `worktree`, clears prepared/path extension preloads and custom-tool paths
-	 * (isolated runs re-discover inside the worktree), and forwards everything
-	 * else unchanged.
+	 * so ordinary isolated runs re-discover inside the worktree. Required mode
+	 * instead preserves its verified specs/snapshots and exact extension paths.
 	 */
 	baseOptions: ExecutorOptions;
 	/** Context returned by {@link prepareIsolationContext}. Baseline is cloned per spawn. */
@@ -201,12 +201,14 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		const taskBaseline = structuredClone(opts.context.baseline);
 		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
 		const isolationDir = handle.mergedDir;
+		const required = opts.baseOptions.requiredExtensionOptions;
 		const result = await runSubprocess({
 			...opts.baseOptions,
 			worktree: isolationDir,
-			preloadedExtensionPaths: undefined,
+			preloadedExtensionPaths: required ? required.requiredExtensions.map(extension => extension.path) : undefined,
 			preloadedPreparedExtensions: undefined,
 			preloadedCustomToolPaths: undefined,
+			requiredExtensionOptions: required,
 			onCleanupDeferred: completion => {
 				deferredCleanup = completion;
 				opts.baseOptions.onCleanupDeferred?.(completion);

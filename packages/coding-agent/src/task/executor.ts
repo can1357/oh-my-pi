@@ -491,6 +491,8 @@ export interface ExecutorOptions {
 	 * extension against its own `ExtensionAPI` (cwd, eventBus, runtime).
 	 */
 	preloadedExtensionPaths?: string[];
+	/** Verified required-extension specs and snapshots forwarded to child sessions. */
+	requiredExtensionOptions?: CreateAgentSessionOptions["requiredExtensionOptions"];
 	/** Parent-imported extension factories rebound to the child runtime. */
 	preloadedPreparedExtensions?: readonly PreparedExtension[];
 	/**
@@ -3185,6 +3187,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				promptTemplates: options.promptTemplates,
 				workspaceTree: options.workspaceTree,
 				rules: options.rules,
+				requiredExtensionOptions: options.requiredExtensionOptions,
 				extensionRoots: options.extensionRoots,
 				preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
 				preloadedPreparedExtensions: restrictToolNames ? [] : options.preloadedPreparedExtensions,

@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { $env, APP_NAME, logger } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { ServiceTierOpenAISettingValue } from "../config/service-tier";
+import { validateRequiredExtensionOptions } from "../extensibility/extensions/required";
 import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "../thinking";
 import { normalizeToolNames } from "../tools/builtin-names";
 import {
@@ -71,6 +72,9 @@ export interface Args {
 	hooks?: string[];
 	extensions?: string[];
 	trustedExtensions?: string[];
+	requiredExtensions?: string[];
+	requiredExtensionSha256?: string[];
+	extensionLoadReceipt?: string;
 	noExtensions?: boolean;
 	pluginDirs?: string[];
 	print?: boolean;
@@ -112,7 +116,13 @@ const PARSE_DEPS: ParseDeps = {
 	thinkingEfforts: CLI_THINKING_LEVELS,
 };
 
-const WINDOWS_PATH_VALUE_FLAGS = new Set(["--extension", "-e", "--hook", "--trusted-extension"]);
+const WINDOWS_PATH_VALUE_FLAGS = new Set([
+	"--extension",
+	"-e",
+	"--hook",
+	"--trusted-extension",
+	"--required-extension",
+]);
 const WINDOWS_PATH_START_RE =
 	/^(?:[A-Za-z]:[\\/]|\\\\[?]\\(?:[A-Za-z]:[\\/]|UNC[\\/])|\\\\[^\\/]+[\\/][^\\/]+[\\/]|\/\/[?]\/(?:[A-Za-z]:\/|UNC\/)|\/\/[^/]+\/[^/]+\/)/;
 const WINDOWS_MODULE_PATH_SUFFIX_RE = /\.(?:[cm]?[jt]sx?)$/i;
@@ -328,6 +338,7 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			throw new CliUsageError(`--trusted-extension requires an absolute path: ${trustedPath}`);
 		}
 	}
+	validateRequiredExtensionOptions(result);
 
 	return result;
 }

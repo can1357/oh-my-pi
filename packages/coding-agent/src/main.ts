@@ -22,7 +22,7 @@ import {
 	setProjectDir,
 	VERSION,
 } from "@oh-my-pi/pi-utils";
-import chalk from "@oh-my-pi/pi-utils/chalk";
+import chalk from "chalk";
 import { reset as resetCapabilities } from "./capability";
 import { type Args, reportUnrecognizedFlags, validateToolNames } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
@@ -56,6 +56,7 @@ import {
 import { injectOmpExtensionCliRoots } from "./discovery/omp-extension-roots";
 import { formatExtensionLoadNotifications } from "./extensibility/extensions/load-errors";
 import { loadExtensions } from "./extensibility/extensions/loader";
+import { validateRequiredExtensionOptions } from "./extensibility/extensions/required";
 import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
@@ -195,7 +196,6 @@ function applyAcpDefaultSettingOverrides(targetSettings: Settings = settings): v
 	applyDefaultSettingOverrides(HOST_DEFAULTED_SETTING_PATHS, targetSettings);
 }
 
-/** Reads a non-TTY stdin stream as prompt text. */
 export async function readPipedInput(): Promise<string | undefined> {
 	if (process.stdin.isTTY === true) return undefined;
 	// stdin is a pipe: a producer that never writes nor closes would block
@@ -412,6 +412,7 @@ async function loadTrustedSessionExtensions(
  * tool registry and shadow the client-supplied servers (issue #1234).
  */
 export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSessionFactory {
+	let requiredExtensionOptions = args.baseOptions.requiredExtensionOptions;
 	return async (cwd, factoryOptions) => {
 		const nextSettings = await args.settings.cloneForCwd(cwd);
 		const nextSessionManager = SessionManager.create(cwd, args.sessionDir);
@@ -433,7 +434,7 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 				`Trusted extension failed to load: ${trustedExtensions.errors.map(item => item.error).join("; ")}`,
 			);
 		}
-		const { session: nextSession, setToolUIContext } = await args.createSession({
+		const result = await args.createSession({
 			...args.baseOptions,
 			cwd,
 			sessionManager: nextSessionManager,
@@ -441,6 +442,7 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			authStorage: args.authStorage,
 			modelRegistry: args.modelRegistry,
 			agentId,
+			requiredExtensionOptions,
 			// ACP defers the `ask` capability and reserve-policy confirmation until
 			// client capabilities are known, without enabling other UI-only behavior.
 			interactivePrompts: factoryOptions?.interactivePrompts,
@@ -450,6 +452,8 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			eventBus,
 			preloadedExtensions: trustedExtensions,
 		});
+		const { session: nextSession, setToolUIContext } = result;
+		requiredExtensionOptions = result.extensionsResult?.requiredExtensionOptions ?? requiredExtensionOptions;
 		if (args.parsedArgs.apiKey && !args.baseOptions.model && nextSession.model) {
 			args.authStorage.setRuntimeApiKey(nextSession.model.provider, args.parsedArgs.apiKey);
 		}
@@ -1081,10 +1085,10 @@ export async function buildSessionOptions(
 		cwd: parsed.cwd ?? getProjectDir(),
 		autoApprove: parsed.autoApprove ?? false,
 	};
-	const restoringSession = Boolean(parsed.continue || parsed.resume || isForeignSessionImport(parsed));
 	if (parsed.serviceTier !== undefined) {
 		options.openAIServiceTier = serviceTierSettingToTier(parsed.serviceTier) ?? null;
 	}
+	const restoringSession = Boolean(parsed.continue || parsed.resume || isForeignSessionImport(parsed));
 	const cliDirs = parsed.addDir ?? [];
 	const settingsDirs = activeSettings.get("workspace.additionalDirectories");
 	if (cliDirs.length > 0 || settingsDirs.length > 0) {
@@ -1234,10 +1238,9 @@ export async function buildSessionOptions(
 	if (parsed.noPrewalk && (parsed.prewalk || parsed.prewalkInto !== undefined)) {
 		throw new Error("--no-prewalk cannot be combined with --prewalk or --prewalk-into");
 	}
-	const explicitPrewalk = parsed.prewalk === true || parsed.prewalkInto !== undefined;
 	const prewalkEnabled = parsed.noPrewalk
 		? false
-		: explicitPrewalk
+		: parsed.prewalk === true || parsed.prewalkInto !== undefined
 			? true
 			: !restoringSession && activeSettings.get("prewalk.enabled");
 	if (prewalkEnabled) {
@@ -1363,6 +1366,12 @@ export async function buildSessionOptions(
 		if (cliExtensionPaths.length > 0) {
 			options.additionalExtensionPaths = cliExtensionPaths;
 		}
+		const requiredExtensions = validateRequiredExtensionOptions(parsed);
+		if (requiredExtensions) {
+			options.additionalExtensionPaths = requiredExtensions.requiredExtensions.map(extension => extension.path);
+			options.disableExtensionDiscovery = true;
+			options.requiredExtensionOptions = requiredExtensions;
+		}
 
 		if (parsed.noExtensions) {
 			options.disableExtensionDiscovery = true;
@@ -1431,7 +1440,6 @@ export async function runRootCommand(
 			process.exit(1);
 		}
 		const mode = parsedArgs.mode || "text";
-		// RPC owns stdin. Claim its singleton stream before plugin/extension discovery can load an in-process consumer.
 		const rpcInput = mode === "rpc" || mode === "rpc-ui" ? claimRpcInput() : undefined;
 
 		// Kick off plugin-root preload in parallel with the remaining startup work.
@@ -1882,7 +1890,15 @@ export async function runRootCommand(
 			const subagentEventBus = new EventBus();
 			const extensionsResult = parsedArgs.trustedExtensions?.length
 				? await loadTrustedSessionExtensions(sessionOptions, cwd, eventBus)
-				: await loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus);
+				: await loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus, {
+						requiredExtensions: parsedArgs.requiredExtensions,
+						requiredExtensionSha256: parsedArgs.requiredExtensionSha256,
+						extensionLoadReceipt: parsedArgs.extensionLoadReceipt,
+						extensions: parsedArgs.extensions,
+						hooks: parsedArgs.hooks,
+					});
+			sessionOptions.requiredExtensionOptions =
+				extensionsResult.requiredExtensionOptions ?? sessionOptions.requiredExtensionOptions;
 			const extensionFlagSink: ExtensionFlagSink = {
 				getFlags: () => ExtensionRunner.aggregateFlags(extensionsResult.extensions),
 				setFlagValue: (name, value) => {

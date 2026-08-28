@@ -87,6 +87,17 @@ export const launchHelp = {
 			description: "Load an extension file (can be used multiple times)",
 			multiple: true,
 		}),
+		"required-extension": Flags.string({
+			description: "Load only this digest-pinned extension file (repeatable)",
+			multiple: true,
+		}),
+		"required-extension-sha256": Flags.string({
+			description: "SHA-256 digest paired with --required-extension (repeatable)",
+			multiple: true,
+		}),
+		"extension-load-receipt": Flags.string({
+			description: "Write the required-extension load receipt to this path",
+		}),
 		"no-extensions": Flags.boolean({
 			description: "Disable extension discovery (explicit -e paths still work)",
 		}),

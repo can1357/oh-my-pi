@@ -108,7 +108,10 @@ import {
 	loadExtensions,
 	type PreparedExtension,
 	type RegisteredTool,
+	type RequiredExtensionOptions,
+	type RequiredExtensionOptionsInput,
 	type ToolDefinition,
+	validateRequiredExtensionOptions,
 	wrapRegisteredTools,
 } from "./extensibility/extensions";
 import {
@@ -474,6 +477,12 @@ export interface CreateAgentSessionOptions {
 	 * Compatibility pass-through for callers that do not have prepared factories.
 	 */
 	preloadedExtensionPaths?: string[];
+
+	/**
+	 * Required extension specs and their verified in-process source snapshots.
+	 * Forwarded to every child session; ambient discovery is disabled.
+	 */
+	requiredExtensionOptions?: RequiredExtensionOptions;
 	/**
 	 * Session-independent imported extension factories. Child sessions rebind
 	 * these to their own ExtensionAPI without re-evaluating the module graph.
@@ -775,7 +784,19 @@ export async function loadSessionExtensions(
 	cwd: string,
 	settings: Settings,
 	eventBus: EventBus,
+	requiredOptions?: RequiredExtensionOptionsInput,
 ): Promise<LoadExtensionsResult> {
+	const required = validateRequiredExtensionOptions(requiredOptions ?? {});
+	if (required) {
+		return logger.time(
+			"loadRequiredExtensions",
+			loadExtensions,
+			required.requiredExtensions.map(extension => extension.path),
+			cwd,
+			eventBus,
+			required,
+		);
+	}
 	const paths = await discoverSessionExtensionPaths(options, cwd, settings);
 	const result = await logger.time("loadExtensions", loadExtensions, paths, cwd, eventBus);
 	for (const { path, error } of result.errors) {
@@ -2093,6 +2114,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		//      Extension instances. Shallow-clone `extensions` so the inline
 		//      push below cannot mutate the caller's array. `runtime` is shared
 		//      so flag values set pre-creation flow into the live session.
+		// Restricted sessions ignore ordinary preloads. A verified required-mode
+		// preload is the explicit exception because it is caller-pinned, not discovered.
 		//   2. `preloadedPreparedExtensions` (subagent): caller imported modules;
 		//      re-bind their factories to THIS session's ExtensionAPI without
 		//      evaluating the same module graph again.
@@ -2103,21 +2126,37 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// the flag and pre-resolved the result already reflects that choice.
 		let extensionPaths: string[];
 		let extensionsResult: LoadExtensionsResult;
-		if (restrictToolNames) {
-			// Allocate a session runtime without evaluating caller-provided extension
-			// instances, paths, or factories.
-			extensionPaths = [];
-			extensionsResult = await loadExtensions([], cwd, eventBus);
-		} else if (options.preloadedExtensions) {
+		const reusablePreloadedExtensions =
+			options.preloadedExtensions &&
+			(!restrictToolNames ||
+				(options.requiredExtensionOptions !== undefined &&
+					options.preloadedExtensions.requiredExtensionOptions === options.requiredExtensionOptions))
+				? options.preloadedExtensions
+				: undefined;
+		if (reusablePreloadedExtensions) {
 			extensionsResult = {
-				...options.preloadedExtensions,
-				extensions: [...options.preloadedExtensions.extensions],
+				...reusablePreloadedExtensions,
+				extensions: [...reusablePreloadedExtensions.extensions],
 			};
-			// Capture paths for downstream forwarding; filter inline-factory
-			// entries (`<inline-N>`) — those are per-session, not source paths.
 			extensionPaths = extensionsResult.extensions
 				.map(ext => ext.resolvedPath)
 				.filter(p => !p.startsWith("<inline"));
+		} else if (options.requiredExtensionOptions) {
+			extensionPaths = options.requiredExtensionOptions.requiredExtensions.map(extension => extension.path);
+			extensionsResult = await logger.time(
+				"loadRequiredExtensions",
+				loadExtensions,
+				extensionPaths,
+				cwd,
+				eventBus,
+				options.requiredExtensionOptions,
+			);
+			for (const { path, error } of extensionsResult.errors) {
+				logger.error("Failed to load extension", { path, error });
+			}
+		} else if (restrictToolNames) {
+			extensionPaths = [];
+			extensionsResult = await loadExtensions([], cwd, eventBus);
 		} else if (options.preloadedPreparedExtensions) {
 			extensionPaths = options.preloadedPreparedExtensions.map(prepared => prepared.path);
 			extensionsResult = await logger.time(
@@ -2151,6 +2190,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		toolSession.effectiveExtensionRoots = buildSessionExtensionRoots;
 		toolSession.preparedExtensions = extensionsResult.preparedExtensions;
 
+		toolSession.requiredExtensionOptions =
+			extensionsResult.requiredExtensionOptions ?? options.requiredExtensionOptions;
 		// Load inline extensions from factories
 		if (inlineExtensions.length > 0) {
 			for (let i = 0; i < inlineExtensions.length; i++) {
@@ -3009,6 +3050,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			tools: Map<string, AgentTool>,
 			rebuildOptions?: { directToolNames?: readonly string[] },
 		): Promise<BuildSystemPromptResult> => {
+			toolContextStore.setToolNames(toolNames);
 			const promptCwd = sessionManager.getCwd();
 			const activeRepoContext = hasSession
 				? await logger.time("resolveActiveRepoContext", resolveRepoContext, promptCwd)
@@ -3851,8 +3893,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			build: buildMcpNotificationBatchMessage,
 		});
 		session.yieldQueue.register<DeferredDiagnosticsEntry>(LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE, {
-			build: buildLateDiagnosticsBatchMessage,
 			isStale: entry => entry.isStale(),
+			build: buildLateDiagnosticsBatchMessage,
 		});
 
 		// Attach the live session to the pre-registered ref so peers can route IRC

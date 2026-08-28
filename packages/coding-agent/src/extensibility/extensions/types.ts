@@ -118,8 +118,8 @@ import type {
 	TurnStartEvent,
 } from "../shared-events";
 import type { SlashCommandInfo } from "../slash-commands";
+import type { RequiredExtensionOptions } from "./required";
 
-export type { OverlayHandle, OverlayOptions } from "@oh-my-pi/pi-tui";
 export type { AppKeybinding, KeybindingsManager } from "../../config/keybindings";
 export type { ExecOptions, ExecResult } from "../../exec/exec";
 export type { AgentToolResult, AgentToolUpdateCallback };
@@ -1770,6 +1770,8 @@ export interface LoadExtensionsResult {
 	extensions: Extension[];
 	errors: Array<{ path: string; error: string }>;
 	runtime: ExtensionRuntime;
+	/** Effective required-mode options, including verified source snapshots. */
+	requiredExtensionOptions?: RequiredExtensionOptions;
 	/** Session-independent imported factories safe to rebind in child sessions. */
 	preparedExtensions?: PreparedExtension[];
 }
