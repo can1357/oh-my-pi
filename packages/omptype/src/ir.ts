@@ -170,8 +170,8 @@ export type IR = IRAnalysis &
 				 * `walk`/`checks` (interp.ts), `compile` (compile.ts), `emit`
 				 * (json-schema.ts), and error-path resolvers all run after the
 				 * definition is complete. Construction-time scan paths MUST:
-				 * `scanMorph` (conservative morph=true), `scanExportable`
-				 * (conservative exportable=false), `scanAlias` (true, unresolved),
+				 * `scanIR`'s alias arm (conservative: changesOutput: true,
+				 * exportable: false), `scanAlias` (true, unresolved),
 				 * `morphIdentities` (skip), `assertDeterminateMorphUnions` (skip).
 				 */
 				deferred?: boolean;
