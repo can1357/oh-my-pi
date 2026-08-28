@@ -86,6 +86,11 @@
 - Kept embedded context usage visible in the status line when long session names or paths consume available space.
 - Added a status message when `CTRL-O` toggles tool-output expansion.
 - Fixed `omp usage` to report Codex Chat and Spark capacity meters separately when they share a usage window.
+### Added
+- Added native TypeScript 7 LSP autodetection via `tsc --lsp --stdio`, preferred over `typescript-language-server` when both are available ([#9986](https://github.com/can1357/oh-my-pi/pull/9986) by [@christian-auguste](https://github.com/christian-auguste)).
+
+### Fixed
+- Fixed native TypeScript LSP autodetection skipping pre-7 or unlaunchable `tsc` binaries so the classic server remains available ([#9986](https://github.com/can1357/oh-my-pi/pull/9986) by [@christian-auguste](https://github.com/christian-auguste)).
 
 ## [18.0.8] - 2026-08-27
 
