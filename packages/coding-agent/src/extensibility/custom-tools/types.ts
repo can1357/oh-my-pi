@@ -115,16 +115,30 @@ export type CustomToolSessionEvent =
 	  }
 	| {
 			reason: "auto_compaction_start";
-			trigger: "threshold" | "overflow" | "idle" | "incomplete";
-			action: "context-full" | "remote" | "handoff" | "shake" | "snapcompact";
+			/** `manual` is an operator asking; the rest are the engine's own triggers. */
+			trigger: "threshold" | "overflow" | "idle" | "incomplete" | "manual";
+			/** `soft` only ever reaches here from a manual pass. */
+			action: "context-full" | "remote" | "handoff" | "shake" | "snapcompact" | "soft";
 	  }
 	| {
 			reason: "auto_compaction_end";
-			action: "context-full" | "remote" | "handoff" | "shake" | "snapcompact";
+			action: "context-full" | "remote" | "handoff" | "shake" | "snapcompact" | "soft";
+			/**
+			 * Why the pass ran, echoed from its start. Optional because it arrived
+			 * after the event did. `action` cannot stand in for it — a manual pass
+			 * and an automatic one both report `remote` — so a custom tool that
+			 * wants to ignore the operator's own compaction has nothing else to key
+			 * off, and the start half has carried it all along.
+			 */
+			trigger?: "threshold" | "overflow" | "idle" | "incomplete" | "manual";
 			result: CompactionResult | undefined;
+			/** Context tokens after the rewrite; `CompactionResult` carries only the before. */
+			tokensAfter?: number;
 			aborted: boolean;
 			willRetry: boolean;
 			errorMessage?: string;
+			/** True when the pass was skipped for a benign reason (nothing to compact). */
+			skipped?: boolean;
 	  }
 	| {
 			reason: "auto_retry_start";

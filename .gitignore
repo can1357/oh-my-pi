@@ -91,3 +91,6 @@ packages/coding-agent/bench/boot-baseline.json
 /bazel-pi
 /bazel-oh-my-pi
 /.bazelrc.user
+
+# Contributor-local agent tooling: a per-checkout project id, not repo config.
+.serena/

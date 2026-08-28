@@ -11,6 +11,7 @@
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
 import { once } from "node:events";
+import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isRecord, Snowflake } from "@oh-my-pi/pi-utils";
@@ -26,11 +27,14 @@ import {
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { type Theme, theme } from "../../modes/theme/theme";
+import { type PlanApprovalDetails, resolveApprovedPlan } from "../../plan-mode/approved-plan";
+import { listPlanFiles, readPlanFile } from "../../plan-mode/plan-files";
 import type { AgentSession } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
+import { ToolError } from "../../tools/tool-errors";
 import type { EventBus } from "../../utils/event-bus";
 import { calculateTokensPerSecond } from "../../utils/token-rate";
 import { initializeExtensions } from "../runtime-init";
@@ -257,8 +261,13 @@ export function watchAndReportLocalOnlyPromptResult(input: {
 export interface RpcInputFrameDeps {
 	handleCommand: (command: RpcCommand) => Promise<RpcResponse>;
 	output: RpcOutput;
-	errorResponse: (id: string | undefined, command: string, message: string) => RpcResponse;
-	trackBackgroundTask?: (task: Promise<void>) => void;
+	errorResponse: (id: string | undefined, command: string, message: string, code?: string) => RpcResponse;
+	/**
+	 * Required, not optional: background commands run for minutes and are the
+	 * only work `drain()` cannot see, so an embedder that forgets this silently
+	 * loses all shutdown coverage for exactly the work that most needs it.
+	 */
+	trackBackgroundTask: (task: Promise<void>) => void;
 	pendingExtensionRequests: Map<string, PendingExtensionRequest>;
 	onHostToolResult: (frame: RpcHostToolResult) => void;
 	onHostToolUpdate: (frame: RpcHostToolUpdate) => void;
@@ -317,6 +326,48 @@ export function dispatchRpcControlFrame(parsed: unknown, deps: RpcInputFrameDeps
  *   for the command has been emitted via `output`. Errors from `handleCommand`
  *   on non-`bash` commands propagate; the caller is expected to wrap them.
  */
+/**
+ * Commands dispatched off the serial queue.
+ *
+ * Long-running work that must not hold the door shut against the frames meant
+ * to interrupt it. Each one owes two things in return: it catches its own
+ * dispatch errors, and it has a dedicated cancel command (`abort_bash`,
+ * `abort_compact`).
+ */
+const BACKGROUND_RPC_COMMANDS = new Set<RpcCommand["type"]>(["bash", "compact"]);
+
+export function isBackgroundRpcCommand(command: RpcCommand): boolean {
+	return BACKGROUND_RPC_COMMANDS.has(command.type);
+}
+
+/**
+ * Machine-readable codes for the ways a compaction can decline.
+ *
+ * The engine raises these as prose, and a client that wants to tell "there was
+ * nothing to do" from "something broke" would otherwise have to match on the
+ * sentences — which is exactly the trade this protocol has a `code` field to
+ * avoid. Mapped here, at the boundary, rather than reshaping the engine's
+ * errors.
+ */
+function compactionErrorCode(error: unknown): string | undefined {
+	/*
+	 * Cancellation is asked of the type, not of the prose. The others are
+	 * anchored sentences the engine writes; this one used to be an unanchored
+	 * `/cancel/i`, which claimed any failure whose message merely mentioned the
+	 * word — a provider error about a cancelled upstream request, say — and told
+	 * the client the operator had stopped it.
+	 */
+	if (error instanceof CompactionCancelledError) return "cancelled";
+
+	const text = (error instanceof Error ? error.message : String(error)).trim();
+	if (/^Already compacted$/i.test(text)) return "already_compacted";
+	if (/^Nothing to compact\b/i.test(text)) return "nothing_to_compact";
+	if (/^Compaction already in progress$/i.test(text)) return "compaction_in_progress";
+	if (/^No model selected$/i.test(text)) return "no_model";
+	if (/^No configured compaction method/i.test(text)) return "no_method";
+	return undefined;
+}
+
 export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps): Promise<void> | undefined {
 	if (dispatchRpcControlFrame(parsed, deps)) return undefined;
 	// Regular RPC command. The transport contract states each remaining frame
@@ -325,20 +376,31 @@ export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps):
 	// the union here.
 	const command = parsed as RpcCommand;
 
-	// `bash` can run for a long time. Dispatch it in the background so a
-	// subsequent `abort_bash` frame can be read and handled without waiting
-	// for the shell command to finish on its own. The response is emitted
-	// when `handleCommand` resolves; clients correlate via `command.id`.
-	if (command.type === "bash") {
+	/*
+	 * `bash` and `compact` both run for a long time, and both are dispatched in
+	 * the background so the frames that would interrupt them — `abort_bash`,
+	 * `abort_compact` — can still be read and handled instead of queueing behind
+	 * the very operation they are meant to stop.
+	 *
+	 * The try/catch is not decoration. A backgrounded command's promise has no
+	 * caller to await it, so a throw from `handleCommand` becomes an unhandled
+	 * rejection and takes the process down. Pressing compact twice did exactly
+	 * that: the second press threw "Already compacted" — `prepareCompaction`
+	 * finding nothing left to do — and the refusal had nowhere to go. (A truly
+	 * concurrent second press throws "Compaction already in progress" instead;
+	 * both used to be fatal.)
+	 */
+	if (isBackgroundRpcCommand(command)) {
 		const task = (async () => {
 			try {
 				deps.output(await deps.handleCommand(command));
 			} catch (err: unknown) {
 				const message = err instanceof Error ? err.message : String(err);
-				deps.output(deps.errorResponse(command.id, "bash", message));
+				const code = command.type === "compact" ? compactionErrorCode(err) : undefined;
+				deps.output(deps.errorResponse(command.id, command.type, message, code));
 			}
 		})();
-		deps.trackBackgroundTask?.(task);
+		deps.trackBackgroundTask(task);
 		return undefined;
 	}
 
@@ -365,7 +427,26 @@ export class RpcInputDispatcher {
 			if (dispatchRpcControlFrame(parsed, this.#deps)) return;
 
 			const command = parsed as RpcCommand;
-			if (command.type === "bash") {
+			/*
+			 * Off the serial queue — one predicate, shared with
+			 * `dispatchRpcInputFrame`, because two copies of a concurrency rule is
+			 * how the next long-running command gets added to one and not the other.
+			 *
+			 * `bash` was always here because it is long-running and concurrent by
+			 * design. `compact` joins it for a sharper reason: it runs for minutes
+			 * and it is the one operation an operator most wants to be able to stop,
+			 * but `abort` travels through this very queue — so a compaction handled
+			 * serially holds the door shut against the command meant to interrupt
+			 * it, and against the `get_state` that would show it running.
+			 *
+			 * Both are backgrounded inside `dispatchRpcInputFrame`, which owns the
+			 * try/catch they need: nothing here awaits the task, so an escaping
+			 * rejection would have no handler at all.
+			 *
+			 * The response contract does not change: it still resolves with the
+			 * `CompactionResult` when the work is done.
+			 */
+			if (isBackgroundRpcCommand(command)) {
 				dispatchRpcInputFrame(command, this.#deps);
 				return;
 			}
@@ -542,13 +623,22 @@ function isSubagentSubscriptionLevel(value: unknown): value is RpcSubagentSubscr
 	return value === "off" || value === "progress" || value === "events";
 }
 
-/** Sends an RPC select request while retaining aligned option descriptions. */
+/**
+ * Sends an RPC select request while retaining aligned option descriptions.
+ *
+ * `extra` rides on the frame untouched. It exists for the one caller that has
+ * something to show alongside the choices — a plan review, where approving
+ * without seeing the plan is not a decision — and stays out of
+ * `ExtensionUIContext`, whose `select` is implemented by the TUI and ACP too and
+ * needs none of this.
+ */
 export function requestRpcSelect(
 	pendingRequests: Map<string, PendingExtensionRequest>,
 	output: RpcOutput,
 	title: string,
 	options: ExtensionUISelectItem[],
 	dialogOptions?: ExtensionUIDialogOptions,
+	extra?: { message?: string; planFilePath?: string },
 ): Promise<string | undefined> {
 	const labels = new Array<string>(options.length);
 	let optionDetails: RpcExtensionUISelectOptionDetail[] | undefined;
@@ -572,6 +662,8 @@ export function requestRpcSelect(
 			title,
 			options: labels,
 			...(optionDetails ? { optionDetails } : {}),
+			...(extra?.message ? { message: extra.message } : {}),
+			...(extra?.planFilePath ? { planFilePath: extra.planFilePath } : {}),
 			timeout: dialogOptions?.timeout,
 		},
 		response => parseValueDialogResponse(response, dialogOptions),
@@ -692,6 +784,51 @@ export function requestRpcDialog<T>(
 	output({ type: "extension_ui_request", id, ...request } as RpcExtensionUIRequest);
 	return promise;
 }
+
+/** The part of {@link AgentSession} that leaving plan mode touches. */
+export interface RpcPlanModeExitTarget {
+	readonly isStreaming: boolean;
+	abort(options?: { reason?: string }): Promise<void>;
+	runModeExitTeardown(teardown: () => Promise<void>): Promise<void>;
+	setPlanMode(enabled: boolean, options?: { restoreTools?: string[] }): Promise<string[]>;
+}
+
+/**
+ * Leave plan mode, stopping the turn still running under the plan-mode toolset
+ * when the exit is the user deciding to stop planning.
+ *
+ * Not every exit is. Approving a plan leaves plan mode from inside the very
+ * turn that wrote to `xd://propose`, so an abort there kills the execution the
+ * approval exists to start. Both RPC exits share one door on purpose —
+ * `planPreviousTools` used to be cleared by one and left behind by the other,
+ * and the next enable read the leftover as a re-entry — so the door itself has
+ * to carry the difference. The terminal splits the same way: its `/plan`
+ * toggle exits with `interruptActiveTurn`, `#approvePlan` without it.
+ *
+ * The abort sits inside `runModeExitTeardown` for the reason the interactive
+ * path gives: a steer queued behind the aborted turn would otherwise start a
+ * fresh run while the plan-mode tools are still live, and then have them
+ * removed underneath it.
+ */
+export async function exitRpcPlanMode(
+	session: RpcPlanModeExitTarget,
+	options: { restoreTools: string[] | undefined; interruptActiveTurn: boolean },
+): Promise<void> {
+	const tearDown = async () => {
+		await session.setPlanMode(false, { restoreTools: options.restoreTools });
+	};
+	// Nothing streaming is nothing to interrupt, and an abort raised over an idle
+	// session is an interruption event the client would have to explain away.
+	if (!options.interruptActiveTurn || !session.isStreaming) {
+		await tearDown();
+		return;
+	}
+	await session.runModeExitTeardown(async () => {
+		await session.abort({ reason: USER_INTERRUPT_LABEL });
+		await tearDown();
+	});
+}
+
 /**
  * Run in RPC mode.
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
@@ -956,6 +1093,163 @@ export async function runRpcMode(
 	const rpcUiContext = new RpcExtensionUIContext(pendingExtensionRequests, output);
 	setToolUIContext?.(rpcUiContext, true);
 
+	/*
+	 * Plan mode, for a client that has no terminal.
+	 *
+	 * Approval is the piece that was missing entirely: without a proposal
+	 * handler an `xd://propose` write throws "No plan is awaiting approval",
+	 * so an RPC client could strand the agent inside plan mode with no way out.
+	 * This mirrors the ACP handler — the other front-end that had to solve
+	 * approving a plan without a TUI — and routes the choice through the same
+	 * extension-UI channel the `ask` tool uses, which every RPC client already
+	 * has to render.
+	 */
+	const planLocalOptions = {
+		getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+		getSessionId: () => session.sessionManager.getSessionId(),
+	};
+	const APPROVE_OPTION = "Approve and execute";
+	const REFINE_OPTION = "Refine plan";
+
+	const handleRpcPlanProposal = async (title: string) => {
+		const state = session.getPlanModeState();
+		if (!state?.enabled) throw new ToolError("Plan mode is not active.");
+
+		const { planFilePath, title: resolvedTitle } = await resolveApprovedPlan({
+			suppliedTitle: title,
+			statePlanFilePath: state.planFilePath,
+			readPlan: (url: string) =>
+				readPlanFile(url, { localProtocolOptions: planLocalOptions, cwd: session.sessionManager.getCwd() }),
+			listPlanFiles: () => listPlanFiles({ localProtocolOptions: planLocalOptions }),
+		});
+		const details: PlanApprovalDetails = { planFilePath, title: resolvedTitle, planExists: true };
+
+		/*
+		 * The plan travels with the request. A client that only receives a title
+		 * and two buttons is asking you to approve something you cannot read — the
+		 * TUI shows the plan in a full-screen review, and this is the equivalent
+		 * for a client that has no terminal.
+		 *
+		 * `planFilePath` on the frame is not decoration either: it is what tells a
+		 * client this `message` is markdown, and not the prose of an `ask`.
+		 *
+		 * Sent through `requestRpcSelect` rather than `rpcUiContext.select` because
+		 * the extra fields are RPC's own; the shared `ExtensionUIContext` that the
+		 * TUI and ACP also implement stays untouched.
+		 */
+		const planMarkdown = await readPlanFile(planFilePath, {
+			localProtocolOptions: planLocalOptions,
+			cwd: session.sessionManager.getCwd(),
+		}).catch(() => null);
+
+		planReviewCancel = new AbortController();
+		const choice = await requestRpcSelect(
+			pendingExtensionRequests,
+			output,
+			`Plan Review — ${resolvedTitle}`,
+			[
+				{ label: APPROVE_OPTION, description: "Leave plan mode and carry it out" },
+				{ label: REFINE_OPTION, description: "Keep planning; the agent revises the plan file" },
+			],
+			// No timeout: a plan review waits for a person. `ask` does the same thing
+			// while plan mode is on, for the same reason. The signal is the way back
+			// out of that wait — a review that no one answers otherwise pins the turn
+			// it blocks, and with it anything waiting for that turn to stop.
+			{ signal: planReviewCancel.signal },
+			planMarkdown ? { message: planMarkdown, planFilePath } : undefined,
+		);
+
+		if (choice !== APPROVE_OPTION) {
+			/*
+			 * Refine, or a dismissal. Plan mode stays on for another planning turn;
+			 * promote the reviewed path so the next turn targets the plan just seen.
+			 *
+			 * Re-read rather than write back the copy captured at entry: a review
+			 * blocks on a person, and plan mode can be turned off from anywhere
+			 * while the dialog is up — spreading the stale copy would carry
+			 * `enabled: true` back in and silently switch it on again.
+			 */
+			const current = session.getPlanModeState();
+			if (current?.enabled && current.planFilePath !== planFilePath) {
+				session.setPlanModeState({ ...current, planFilePath });
+			}
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: `Plan refinement requested. Update the plan file, then write ${resolvedTitle} to xd://propose again when ready.`,
+					},
+				],
+				details,
+			};
+		}
+
+		session.setPlanReferencePath(planFilePath);
+		/*
+		 * Through the same door as every other exit. Calling `session.setPlanMode`
+		 * directly restored the tools but left `planPreviousTools` defined, so the
+		 * next enable read it as a re-entry and sent the wrong plan-mode context to
+		 * a session that had never been in plan mode this time round.
+		 *
+		 * Without `interruptActiveTurn`, and that is not an oversight: an approval
+		 * is a request to start executing, and when it arrives from the `write` to
+		 * `xd://propose` the turn it would stop is the one carrying it out. Only the
+		 * client toggling the mode off is asking for a turn to end.
+		 */
+		await setRpcPlanMode(false, { interruptActiveTurn: false });
+		return {
+			content: [
+				{
+					type: "text" as const,
+					text: `Plan approved at ${planFilePath}. Plan mode exited; proceed with the implementation.`,
+				},
+			],
+			details,
+		};
+	};
+
+	/** The tool set to hand back when plan mode ends. */
+	let planPreviousTools: string[] | undefined;
+
+	/**
+	 * The plan review currently on a client's screen, if any.
+	 *
+	 * It is the one dialog in the process that survives an abort: `ask` is handed
+	 * the tool call's own signal, while a plan-proposal handler is handed no
+	 * signal at all, so leaving plan mode has to supply one.
+	 */
+	let planReviewCancel: AbortController | undefined;
+
+	/*
+	 * `interruptActiveTurn` is required, not optional, and that is the point: the
+	 * two exits differ only in this flag, so a default would let one of them be
+	 * deleted as tidying — "both go through the same door, why does one pass a
+	 * flag?" — and the deletion would be silent. Made mandatory, each caller has
+	 * to state which kind of exit it is, and removing that no longer compiles.
+	 */
+	const setRpcPlanMode = async (enabled: boolean, options: { interruptActiveTurn: boolean }): Promise<void> => {
+		if (enabled) {
+			if (session.getPlanModeState()?.enabled) return;
+			planPreviousTools = await session.setPlanMode(true, { reentry: planPreviousTools !== undefined });
+			session.setPlanProposalHandler(handleRpcPlanProposal);
+			return;
+		}
+		if (!session.getPlanModeState()?.enabled) return;
+		/*
+		 * The review goes first, and it has to: `abort()` waits for the agent loop,
+		 * and the loop is inside the `write` that is waiting on the review dialog.
+		 * A client that toggles the mode off instead of answering would hold the
+		 * serial command queue against every later frame — `abort` included — with
+		 * nothing left able to release it.
+		 */
+		if (options.interruptActiveTurn) planReviewCancel?.abort();
+		await exitRpcPlanMode(session, {
+			restoreTools: planPreviousTools,
+			interruptActiveTurn: options.interruptActiveTurn,
+		});
+		planPreviousTools = undefined;
+	};
+
 	// Set up extensions with RPC-based UI context
 	await initializeExtensions(session, {
 		mode: "rpc",
@@ -1056,6 +1350,22 @@ export async function runRpcMode(
 					return success(id, "prompt", { agentInvoked: builtinResult.agentInvoked === true });
 				}
 
+				/*
+				 * Title the session, the way every other front-end does.
+				 *
+				 * The TUI calls this per submission (input-controller.ts) and the CLI
+				 * bootstrap calls it too (main.ts); `rpc-ui` was the only surface that
+				 * never did, so a session driven from a GUI never got a name and every
+				 * list fell back to its raw first message.
+				 *
+				 * Safe to call on every prompt: it stands down when the session is
+				 * already named, when a generation is in flight, when the message is a
+				 * local extension command, and when the text carries too little signal
+				 * to name anything (`isLowSignalTitleInput`). That last one is what
+				 * keeps "hola" from being given an invented title.
+				 */
+				session.maybeStartTitleGeneration(command.message);
+
 				// Don't await - events will stream
 				// Extension commands are executed immediately, file prompt templates are expanded
 				// If streaming and streamingBehavior specified, queues via steer/followUp
@@ -1074,11 +1384,15 @@ export async function runRpcMode(
 			}
 
 			case "steer": {
+				// A steer is a user message too, so it can name a session the first
+				// prompt was too thin to name.
+				session.maybeStartTitleGeneration(command.message);
 				await session.steer(command.message, command.images);
 				return success(id, "steer");
 			}
 
 			case "follow_up": {
+				session.maybeStartTitleGeneration(command.message);
 				await session.followUp(command.message, command.images);
 				return success(id, "follow_up");
 			}
@@ -1123,6 +1437,10 @@ export async function runRpcMode(
 					autoCompactionEnabled: session.autoCompactionEnabled,
 					queuedMessageCount: session.queuedMessageCount,
 					todoPhases: session.getTodoPhases(),
+					planMode: (() => {
+						const plan = session.getPlanModeState();
+						return plan ? { enabled: plan.enabled, planFilePath: plan.planFilePath } : { enabled: false };
+					})(),
 					fastModeEnabled: session.isFastModeEnabled(),
 					tokensPerSecond: calculateTokensPerSecond(session.messages, session.isStreaming),
 					fastModeActive: session.isFastModeActive(),
@@ -1300,6 +1618,72 @@ export async function runRpcMode(
 			case "set_auto_compaction": {
 				session.setAutoCompactionEnabled(command.enabled);
 				return success(id, "set_auto_compaction");
+			}
+
+			case "abort_compact": {
+				// Awaited, so the acknowledgement means the session has finished
+				// unwinding. Answering first let a `get_state` that followed it report
+				// `isCompacting: true`, a second `compact` come back
+				// `compaction_in_progress`, and the desktop re-enable its button on a
+				// session that was not ready for it.
+				await session.abortCompaction();
+				return success(id, "abort_compact");
+			}
+
+			// =================================================================
+			// Plan mode
+			// =================================================================
+
+			case "set_plan_mode": {
+				if (!session.settings.get("plan.enabled")) {
+					return error(id, "set_plan_mode", "Plan mode is disabled. Enable it in settings (plan.enabled).");
+				}
+				/*
+				 * Turning it off is the user saying stop planning, so the turn still
+				 * running under the plan-mode toolset stops with it. Without that, the
+				 * plan-mode block the turn started under kept the model planning until
+				 * it produced a plan, long after the client had been told the mode was
+				 * off — the same thing the terminal's `/plan` toggle was fixed for in
+				 * #9699. The approval exit shares this helper and does not pass the
+				 * flag.
+				 */
+				await setRpcPlanMode(command.enabled, { interruptActiveTurn: true });
+				return success(id, "set_plan_mode", { enabled: session.getPlanModeState()?.enabled === true });
+			}
+
+			case "plan_review": {
+				if (!session.getPlanModeState()?.enabled) {
+					return error(id, "plan_review", "Plan mode is not active.");
+				}
+				/*
+				 * Fire and forget: the review is a blocking UI request, and awaiting
+				 * it here would hold the serial command queue for as long as a person
+				 * takes to read a plan — including against the `abort` that would
+				 * cancel it.
+				 */
+				shutdownCoordinator.track(
+					handleRpcPlanProposal("")
+						.then(() => {})
+						.catch(err => {
+							/*
+							 * A notice, not a response frame.
+							 *
+							 * This command answers `success` immediately — it has to, or the
+							 * serial queue is held for as long as a person takes to read a
+							 * plan. So by the time this fires the request is settled, and a
+							 * second frame carrying its id matches nothing a client is
+							 * waiting on. It went out with `id: undefined` before, which
+							 * matched even less. Notices are the channel for exactly this:
+							 * out-of-band conditions the user should see.
+							 */
+							session.emitNotice(
+								"error",
+								`Plan review failed: ${err instanceof Error ? err.message : String(err)}`,
+								"plan",
+							);
+						}),
+				);
+				return success(id, "plan_review");
 			}
 
 			// =================================================================
@@ -1534,6 +1918,14 @@ export async function runRpcMode(
 	pendingExtensionRequests.rejectAll("RPC client disconnected before extension UI response completed");
 	hostToolBridge.close("RPC client disconnected before host tool execution completed");
 	hostUriBridge.clear("RPC client disconnected before host URI request completed");
+	/*
+	 * And the compaction, for the same reason as the three above: it is
+	 * background work that can run for minutes, and there is no longer anyone to
+	 * receive its result. Without this, closing the client left the sidecar
+	 * summarising a transcript nobody would read, then writing the response into
+	 * a dead pipe before exiting — indistinguishable, from outside, from a hang.
+	 */
+	session.abortCompaction();
 	await inputDispatcher.drain();
 	await shutdownCoordinator.drain();
 	subagentRegistry?.dispose();

@@ -1,0 +1,39 @@
+/*
+ * The face the CLI draws with.
+ *
+ * omp's TUI runs with `symbolPreset: nerd`, so its output is full of glyphs no
+ * system monospace carries — the tree spines, the language marks, the bracket
+ * pair around a key hint. On SF Mono those land as tofu, which is why this is
+ * bundled rather than asked for by name: a font that happens to be installed on
+ * the machine that built the app is not a dependency, it is a coincidence.
+ *
+ * Regular, bold and italic only. Bold-italic exists in markdown and almost
+ * nowhere else, and the engine synthesises it convincingly for 1.1 MB less.
+ *
+ * MesloLG Nerd Font — Apache 2.0, Copyright 2009, 2010, 2013 André Berg.
+ * Full text in ../assets/fonts/LICENSE.txt and THIRD-PARTY-NOTICES.txt.
+ */
+
+@font-face {
+	font-family: "MesloLGM Nerd Font";
+	src: url("../assets/fonts/MesloLGMNerdFont-Regular.woff2") format("woff2");
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
+}
+
+@font-face {
+	font-family: "MesloLGM Nerd Font";
+	src: url("../assets/fonts/MesloLGMNerdFont-Bold.woff2") format("woff2");
+	font-weight: 700;
+	font-style: normal;
+	font-display: swap;
+}
+
+@font-face {
+	font-family: "MesloLGM Nerd Font";
+	src: url("../assets/fonts/MesloLGMNerdFont-Italic.woff2") format("woff2");
+	font-weight: 400;
+	font-style: italic;
+	font-display: swap;
+}

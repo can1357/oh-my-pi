@@ -1,0 +1,58 @@
+/**
+ * Style entry point.
+ *
+ * Layer order matters and is declared up front so imports cannot reorder it:
+ * later layers win regardless of specificity, which is what lets app.css
+ * override a vendored rule without selector arms races.
+ */
+
+@layer theme, base, vendor-components, app;
+
+/*
+ * opencode's token foundation — vendored, MIT. See src/styles/vendor/opencode/.
+ * Kept because `base.css` and omp's tool renderers resolve against these ~586
+ * variables; palette.css then overrides the ~30 the app actually shows.
+ */
+@import "./vendor/opencode/colors.css" layer(theme);
+@import "./vendor/opencode/theme.css" layer(theme);
+@import "./vendor/opencode/base.css" layer(base);
+
+/* Aliases that point omp's tool renderers at the palette. */
+@import "./tv-bridge.css" layer(theme);
+
+/*
+ * None of the 25 vendored component stylesheets are imported any more. The flat
+ * terminal look has no cards, dialogs, tabs, selects, toasts or popovers, and
+ * its buttons are plain rules in app.css rather than the three-attribute
+ * contract opencode's need. `diff-changes` was the last one standing, and it
+ * went because its `justify-content: flex-end` turned a sizing mistake into
+ * digits printed over a file path.
+ */
+
+/*
+ * omp's per-tool renderers are NOT imported here, and the `tool-render` layer
+ * above is reserved rather than filled.
+ *
+ * `ToolView.tsx` does `import "./tool-render.css"` at module scope, so the
+ * bundler emits it as its own UNLAYERED stylesheet — and unlayered rules beat
+ * every layer, whatever the layer order says. Importing it a second time into
+ * `layer(tool-render)` only made the cascade look like something it was not:
+ * the layered copy never won a single declaration. Overrides for `.tv-*` live
+ * in app.css and carry `!important`, which is the only lever a layer has
+ * against an unlayered sheet.
+ */
+
+/* Ours. palette.css last in `theme` so it wins over the vendored tokens. */
+@import "./palette.css" layer(theme);
+
+/*
+ * The transcript column's palette, generated from omp's own `titanium` theme.
+ * Scoped to `.omp-main`, so it redefines the tokens for that subtree only —
+ * inheritance settles it, not source order.
+ */
+@import "./tui-theme.css" layer(theme);
+
+/* The bundled terminal face. Declares @font-face, so it belongs before `base`. */
+@import "./fonts.css" layer(theme);
+
+@import "./app.css" layer(app);

@@ -1,0 +1,65 @@
+{
+	"type": "module",
+	"name": "@oh-my-pi/desktop",
+	"version": "18.0.7",
+	"private": true,
+	"description": "omp Desktop \u2014 native desktop app driving omp over the RPC protocol",
+	"homepage": "https://omp.sh",
+	"author": "Stencil Labs, Inc.",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/can1357/oh-my-pi.git",
+		"directory": "packages/desktop"
+	},
+	"bugs": {
+		"url": "https://github.com/can1357/oh-my-pi/issues"
+	},
+	"keywords": [
+		"tauri",
+		"desktop",
+		"agent",
+		"react"
+	],
+	"scripts": {
+		"dev": "bun --port 1420 ./index.html",
+		"build": "rm -rf dist && bun build ./index.html --outdir=dist --minify --entry-naming=[hash].[ext] --chunk-naming=[hash].[ext] --asset-naming=[hash].[ext] && mv dist/*.html dist/index.html",
+		"tauri": "tauri",
+		"app:dev": "tauri dev",
+		"app:build": "tauri build",
+		"sync:sidecar": "bun scripts/sync-sidecar.ts",
+		"gen:theme": "bun scripts/gen-theme-css.ts",
+		"gen:fonts": "bun scripts/gen-fonts.ts",
+		"test": "bun test --parallel",
+		"check": "biome check . && bun run check:types",
+		"check:types": "tsgo -p tsconfig.json --noEmit",
+		"check:rs": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-deps -- -D warnings",
+		"lint": "biome lint .",
+		"fix": "biome check --write --unsafe .",
+		"fmt": "biome format --write .",
+		"release": "bun scripts/release.ts",
+		"smoke": "bun scripts/smoke.ts"
+	},
+	"dependencies": {
+		"@oh-my-pi/collab-web": "workspace:*",
+		"@tauri-apps/api": "^2.11.1",
+		"@tauri-apps/plugin-clipboard-manager": "2.3.2",
+		"@tauri-apps/plugin-dialog": "^2.4.0",
+		"@tauri-apps/plugin-notification": "^2.3.1",
+		"@tauri-apps/plugin-opener": "^2.5.0",
+		"lucide-react": "catalog:",
+		"react": "catalog:",
+		"react-dom": "catalog:",
+		"react-router": "^8.3.0"
+	},
+	"devDependencies": {
+		"@tauri-apps/cli": "^2.11.4",
+		"@types/bun": "catalog:",
+		"@types/react": "catalog:",
+		"@types/react-dom": "catalog:",
+		"wawoff2": "2.0.1"
+	},
+	"engines": {
+		"bun": ">=1.3.14"
+	}
+}

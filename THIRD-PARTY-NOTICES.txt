@@ -19,6 +19,72 @@ TRACKED VENDORED CODE AND ASSET NOTICES
 =======================================
 
 -------------------------------------------------------------------------------
+packages/desktop/src/styles/vendor/opencode
+
+This directory contains a vendored copy of the opencode design system
+(https://github.com/anomalyco/opencode, packages/ui/src/styles), used under the
+MIT License. omp Desktop replicates opencode's visual design; the stylesheets
+are plain CSS with cascade layers and carry no framework coupling, so they are
+used as-is from React.
+
+  Copyright (c) opencode contributors
+
+The files are unmodified apart from a prepended attribution header. Local
+overrides live in packages/desktop/src/styles/app.css, which sits in a later
+cascade layer so no vendored rule needs editing.
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+-------------------------------------------------------------------------------
+packages/desktop/src/assets/fonts
+
+This directory contains MesloLG Nerd Font (regular, bold and italic), from the
+Nerd Fonts v3.5.1 release (https://github.com/ryanoasis/nerd-fonts), used under
+the Apache License 2.0. omp Desktop bundles it because the app renders omp's own
+TUI output, which is drawn with `symbolPreset: nerd` and therefore uses glyphs
+no system monospace carries.
+
+  Copyright 2009, 2010, 2013 Andre Berg
+
+MesloLG is a customized fork of Apple's Menlo, itself derived from Bitstream
+Vera and DejaVu; Nerd Fonts patches it with additional icon glyphs. The upstream
+LICENSE.txt accompanies the files unmodified. The only change made here is
+format: the shipped TTFs were converted to WOFF2 for the webview, with no
+subsetting, re-hinting or renaming.
+
+Apache License 2.0
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+-------------------------------------------------------------------------------
 crates/vendor/brush-core/LICENSE
 
 This directory contains a vendored, locally-patched copy of brush-core from the

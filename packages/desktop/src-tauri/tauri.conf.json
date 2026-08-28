@@ -1,0 +1,71 @@
+{
+	"$schema": "https://schema.tauri.app/config/2",
+	"productName": "omp Desktop",
+	"version": "18.0.7",
+	"identifier": "sh.omp.desktop",
+	"build": {
+		"beforeDevCommand": "bun run dev",
+		"devUrl": "http://localhost:1420",
+		"beforeBuildCommand": "bun run build",
+		"frontendDist": "../dist"
+	},
+	"app": {
+		"windows": [
+			{
+				"label": "main",
+				"title": "OMP",
+				"width": 1280,
+				"height": 860,
+				"minWidth": 720,
+				"minHeight": 480,
+				"resizable": true,
+				"titleBarStyle": "Overlay",
+				"hiddenTitle": true
+			}
+		],
+		"security": {
+			"csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: asset: http://asset.localhost; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost ws://localhost:1420 http://localhost:1420; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'"
+		}
+	},
+	"bundle": {
+		"active": true,
+		"targets": [
+			"app",
+			"dmg"
+		],
+		"icon": [
+			"icons/32x32.png",
+			"icons/128x128.png",
+			"icons/icon.icns"
+		],
+		"copyright": "Copyright © Stencil Labs, Inc.",
+		"category": "DeveloperTool",
+		"shortDescription": "omp Desktop",
+		"longDescription": "A native desktop client for the omp coding agent.",
+		"externalBin": [
+			"binaries/omp"
+		],
+		"macOS": {
+			"minimumSystemVersion": "10.15",
+			"dmg": {
+				"appPosition": {
+					"x": 180,
+					"y": 190
+				},
+				"applicationFolderPosition": {
+					"x": 480,
+					"y": 190
+				},
+				"windowSize": {
+					"width": 660,
+					"height": 400
+				}
+			}
+		}
+	},
+	"plugins": {
+		"opener": {
+			"requireLiteralLeadingDot": false
+		}
+	}
+}

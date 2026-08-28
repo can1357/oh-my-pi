@@ -1,0 +1,4 @@
+/target/
+/gen/schemas
+# Built or shimmed sidecars — regenerate with `bun run sync:sidecar`.
+/binaries/

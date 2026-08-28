@@ -95,6 +95,11 @@ const fastWorkspacePackages = [
 	"packages/snapcompact",
 	"packages/agent",
 	"packages/mnemopi",
+	// The desktop app: pure logic and `renderToStaticMarkup`, no DOM harness. Its
+	// suite includes the conformance test that pins the wire shapes against
+	// coding-agent's own rpc-types.ts, which is the only mechanical guard against
+	// the field-name drift that has caused five separate defects in that package.
+	"packages/desktop",
 ];
 
 // These suites cover the native package, TUI/browser-ish behavior, local servers,

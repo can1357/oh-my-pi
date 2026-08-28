@@ -3911,7 +3911,9 @@ export class AgentSession {
 			await this.#extensionRunner.emit({
 				type: "auto_compaction_end",
 				action: event.action,
+				reason: event.reason,
 				result: event.result,
+				tokensAfter: event.tokensAfter,
 				aborted: event.aborted,
 				willRetry: event.willRetry,
 				errorMessage: event.errorMessage,
@@ -5071,9 +5073,21 @@ export class AgentSession {
 		return this.#maintenance.compact(customInstructions, options);
 	}
 
-	/** Cancel active manual, automatic, and handoff maintenance, preserving an optional source reason. */
-	abortCompaction(reason?: unknown): void {
-		void this.#maintenance.abortCompaction(reason);
+	/**
+	 * Cancel active manual, automatic, and handoff maintenance, preserving an
+	 * optional source reason.
+	 *
+	 * Hands back the manual pass's cleanup barrier rather than dropping it. The
+	 * maintenance layer has always returned one; `void` threw it away and the
+	 * `void` return type stopped any caller from waiting even if it wanted to, so
+	 * a client that asked anything straight after a cancellation could still be
+	 * told the session was compacting. The terminal works around exactly that
+	 * with `while (isCompacting) await Bun.sleep(10)` in two places.
+	 *
+	 * `undefined` when no manual pass was running — there is nothing to wait for.
+	 */
+	abortCompaction(reason?: unknown): Promise<void> | undefined {
+		return this.#maintenance.abortCompaction(reason);
 	}
 
 	/** Trigger idle compaction through the automatic maintenance flow. */
@@ -5219,6 +5233,87 @@ export class AgentSession {
 	/** Prewalk state, if armed and active */
 	getPrewalkState(): Prewalk | undefined {
 		return this.#prewalk.state;
+	}
+
+	/**
+	 * Enter or leave plan mode, at the session level.
+	 *
+	 * The whole mode used to be reachable only from the terminal: `/plan` and
+	 * `/plan-review` carry only a `handleTui`, so both RPC gates drop them —
+	 * `available-commands.ts` will not list a builtin without a `handle`, and
+	 * `acp-builtins.ts` refuses to run one. A client without a TUI could not turn
+	 * plan mode on, off, or find out that it was on.
+	 *
+	 * Everything that makes plan mode *mean* something is already here, though:
+	 * the state the write guard reads, the tool set, the per-turn context
+	 * message, the proposal handler, the journal entry. This is that core, in the
+	 * order the comments in the interactive path explain it has to happen —
+	 * state before the tool partition, because under Code Mode the direct surface
+	 * keeps `write` only while something needs it, and plan approval *is* a
+	 * top-level `write` to `xd://propose`.
+	 *
+	 * The interactive mode calls this too, and keeps its own presentation around
+	 * it: warnings, the status line, the model role, the previous-tools stash.
+	 *
+	 * @returns the tools that were active before, so a caller can restore them.
+	 */
+	async setPlanMode(
+		enabled: boolean,
+		options?: {
+			planFilePath?: string;
+			workflow?: "parallel" | "iterative";
+			reentry?: boolean;
+			restoreTools?: string[];
+		},
+	): Promise<string[]> {
+		const previousTools = this.getEnabledToolNames();
+		const previousState = this.#planModeState;
+
+		if (!enabled) {
+			this.setPlanModeState(undefined);
+			this.setPlanProposalHandler(null);
+			if (options?.restoreTools) await this.setActiveToolsByName(options.restoreTools);
+			this.sessionManager.appendModeChange("none");
+			await this.#emitPlanModeChanged();
+			return previousTools;
+		}
+
+		const planFilePath = options?.planFilePath ?? this.getPlanReferencePath() ?? "local://PLAN.md";
+		/*
+		 * `write` must be active: the prompt tells the agent to draft the plan with
+		 * it, and the approval is a write to `xd://propose`. Only the built-in one
+		 * — a shadowing extension tool named `write` would sit outside the guard
+		 * that makes plan mode read-only.
+		 */
+		const tools = this.hasBuiltInTool("write") ? [...new Set([...previousTools, "write"])] : previousTools;
+
+		this.setPlanModeState({
+			enabled: true,
+			planFilePath,
+			workflow: options?.workflow ?? "parallel",
+			reentry: options?.reentry ?? false,
+		});
+		try {
+			await this.setActiveToolsByName(tools);
+		} catch (error) {
+			this.setPlanModeState(previousState);
+			throw error;
+		}
+		this.setPlanProposalHandler(title => this.preparePlanForReview(title));
+		if (this.isStreaming) await this.sendPlanModeContext({ deliverAs: "steer" });
+		this.sessionManager.appendModeChange("plan", { planFilePath });
+		await this.#emitPlanModeChanged();
+		return previousTools;
+	}
+
+	/** Tell every client the mode moved, whoever moved it. */
+	async #emitPlanModeChanged(): Promise<void> {
+		const state = this.#planModeState;
+		await this.#emitSessionEvent({
+			type: "plan_mode_changed",
+			enabled: state?.enabled === true,
+			planFilePath: state?.planFilePath,
+		});
 	}
 
 	setPlanModeState(state: PlanModeState | undefined): void {

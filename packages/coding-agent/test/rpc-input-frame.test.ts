@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
 import { RpcHostToolBridge } from "@oh-my-pi/pi-coding-agent/modes/rpc/host-tools";
 import {
 	dispatchRpcInputFrame,
@@ -28,13 +29,15 @@ const makeDeps = (
 		output: obj => {
 			outputs.push(obj as OutputFrame);
 		},
-		errorResponse: (id, command, message) => ({
+		errorResponse: (id, command, message, code) => ({
 			id,
 			type: "response",
 			command,
 			success: false,
 			error: message,
+			...(code ? { code } : {}),
 		}),
+		trackBackgroundTask: () => {},
 		pendingExtensionRequests: options?.pendingExtensionRequests ?? new Map<string, PendingExtensionRequest>(),
 		onHostToolResult: () => {},
 		onHostToolUpdate: () => {},
@@ -682,5 +685,134 @@ describe("RpcShutdownCoordinator", () => {
 		gateB.resolve();
 		await drain;
 		expect(drained).toBe(true);
+	});
+});
+
+/*
+ * A backgrounded command has no caller to await it, so anything its handler
+ * throws becomes an unhandled rejection — which in Bun takes the process with
+ * it. Pressing compact twice did exactly that: the server correctly refused
+ * with "Already compacted" and the refusal killed the sidecar, because the
+ * bypass that keeps `compact` off the serial queue discarded the promise.
+ */
+describe("backgrounded commands never let a rejection escape", () => {
+	for (const type of ["bash", "compact"] as const) {
+		test(`${type} turns a throwing handler into an error response`, async () => {
+			const { deps, outputs } = makeDeps(async () => {
+				throw new Error("Already compacted");
+			});
+			const tracked: Array<Promise<void>> = [];
+			deps.trackBackgroundTask = task => tracked.push(task);
+
+			const dispatcher = new RpcInputDispatcher({ deps });
+			dispatcher.dispatch({ id: "c1", type } as RpcCommand);
+			await Promise.all(tracked);
+
+			expect(outputs).toHaveLength(1);
+			expect(outputs[0]).toMatchObject({
+				id: "c1",
+				type: "response",
+				command: type,
+				success: false,
+				error: "Already compacted",
+			});
+		});
+	}
+
+	/*
+	 * The bypass is only safe because the session's single-flight check and the
+	 * controller it sets are separated by no `await` — the guard is atomic by
+	 * construction, and nothing in the file says so. Two `compact` frames in one
+	 * chunk is what would notice if someone inserted one.
+	 */
+	test("two compactions in one chunk: one runs, one is told why not", async () => {
+		let running = false;
+		const { deps, outputs } = makeDeps(async command => {
+			if (running) throw new Error("Compaction already in progress");
+			running = true;
+			await new Promise(resolve => setTimeout(resolve, 10));
+			running = false;
+			return { id: command.id, type: "response", command: "compact", success: true } as RpcResponse;
+		});
+		const tracked: Array<Promise<void>> = [];
+		deps.trackBackgroundTask = task => tracked.push(task);
+
+		const dispatcher = new RpcInputDispatcher({ deps });
+		dispatcher.dispatch({ id: "a", type: "compact" } as RpcCommand);
+		dispatcher.dispatch({ id: "b", type: "compact" } as RpcCommand);
+		await Promise.all(tracked);
+
+		expect(outputs).toHaveLength(2);
+		const refusal = outputs.find(frame => (frame as { success?: boolean }).success === false);
+		expect(refusal).toMatchObject({ id: "b", success: false, code: "compaction_in_progress" });
+		expect(outputs.find(frame => (frame as { success?: boolean }).success === true)).toMatchObject({ id: "a" });
+	});
+
+	test("a refusal carries a code the client can branch on", async () => {
+		const { deps, outputs } = makeDeps(async () => {
+			throw new Error("Already compacted");
+		});
+		const tracked: Array<Promise<void>> = [];
+		deps.trackBackgroundTask = task => tracked.push(task);
+
+		new RpcInputDispatcher({ deps }).dispatch({ id: "c1", type: "compact" } as RpcCommand);
+		await Promise.all(tracked);
+
+		// Without this the client is left matching on the engine's wording.
+		expect(outputs[0]).toMatchObject({ code: "already_compacted" });
+	});
+
+	test("a failure that merely mentions cancelling is not reported as cancelled", async () => {
+		/*
+		 * `cancelled` used to be an unanchored `/cancel/i` while every other code
+		 * matched an anchored sentence the engine writes. Any failure whose message
+		 * happened to contain the word — a provider complaining about a cancelled
+		 * upstream request — told the client the operator had stopped it.
+		 */
+		const { deps, outputs } = makeDeps(async () => {
+			throw new Error("provider error: upstream request was cancelled by the gateway");
+		});
+		const tracked: Array<Promise<void>> = [];
+		deps.trackBackgroundTask = task => tracked.push(task);
+
+		new RpcInputDispatcher({ deps }).dispatch({ id: "c1", type: "compact" } as RpcCommand);
+		await Promise.all(tracked);
+
+		expect(outputs[0]).toMatchObject({ success: false });
+		expect((outputs[0] as { code?: string }).code).toBeUndefined();
+	});
+
+	test("a real cancellation is recognised by its type, not its wording", async () => {
+		const { deps, outputs } = makeDeps(async () => {
+			throw new CompactionCancelledError();
+		});
+		const tracked: Array<Promise<void>> = [];
+		deps.trackBackgroundTask = task => tracked.push(task);
+
+		new RpcInputDispatcher({ deps }).dispatch({ id: "c1", type: "compact" } as RpcCommand);
+		await Promise.all(tracked);
+
+		expect(outputs[0]).toMatchObject({ code: "cancelled" });
+	});
+
+	test("compact does not queue behind the serial commands it must outlive", async () => {
+		const order: string[] = [];
+		const { deps } = makeDeps(async command => {
+			order.push(command.type);
+			if (command.type === "compact") await new Promise(resolve => setTimeout(resolve, 20));
+			return { id: command.id, type: "response", command: command.type, success: true } as RpcResponse;
+		});
+		const tracked: Array<Promise<void>> = [];
+		deps.trackBackgroundTask = task => tracked.push(task);
+
+		const dispatcher = new RpcInputDispatcher({ deps });
+		dispatcher.dispatch({ id: "c1", type: "compact" } as RpcCommand);
+		dispatcher.dispatch({ id: "c2", type: "abort" } as RpcCommand);
+		await dispatcher.drain();
+		await Promise.all(tracked);
+
+		// The abort reached the handler without waiting for the compaction: it is
+		// the command meant to stop it.
+		expect(order).toEqual(["compact", "abort"]);
 	});
 });

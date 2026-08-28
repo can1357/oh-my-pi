@@ -1,0 +1,74 @@
+/**
+ * Palette, read from a screenshot of opencode's TUI (1.18.20).
+ *
+ * These are NOT opencode's published values. Their default theme's primary is
+ * orange (#fab283) and none of their 37 themes matches this blue exactly, so
+ * everything here is sampled by eye from the image. Each value is on its own
+ * line precisely so a wrong one is a one-line correction.
+ *
+ * Sits in the `app` layer — the last one — so it overrides theme.css without
+ * editing a single vendored file.
+ */
+
+:root {
+	color-scheme: dark;
+
+	/*
+	 * --- what is NOT here ------------------------------------------------
+	 *
+	 * The neutrals — surfaces, text and borders — and the interactive blue come
+	 * from opencode's vendored theme, untouched.
+	 *
+	 * They used to be overridden here, sampled by eye from a screenshot, and two
+	 * of those guesses made the whole app read as one black slab:
+	 *
+	 *   - `--background-base` and `--background-strong` were both `#0d0d0d`, so
+	 *     the sidebar, the chat and the right panel shared a single surface where
+	 *     opencode has four (`#101010`, `#121212`, `#151515`, `#1e1e1e`).
+	 *   - `--border-base` was `7%` against opencode's `19.5%`, so with the
+	 *     surfaces identical the separators could not draw the structure either.
+	 *
+	 * The text went the other way: brighter than opencode's. Near-black grounds
+	 * under near-white text is what "too dark" actually looks like — plenty of
+	 * contrast, no middle greys.
+	 *
+	 * What follows is only what this design genuinely decides differently.
+	 */
+
+	/* --- accents, used sparingly ---------------------------------------- */
+	--icon-success-base: #3fb950;
+	--icon-warning-base: #d29922;
+	--icon-critical-base: #f85149;
+	--surface-critical-base: rgb(248 81 73 / 12%);
+
+	/* --- diff ----------------------------------------------------------- */
+	--text-diff-add-base: #7ee787;
+	--text-diff-add-strong: #3fb950;
+	--text-diff-delete-base: #ffa198;
+	--text-diff-delete-strong: #f85149;
+
+	/* --- type ------------------------------------------------------------ */
+	/*
+	 * Mono everywhere, including the chrome. Mapping `sans` to the mono stack
+	 * carries the change into the vendored component CSS without touching it.
+	 */
+	--font-family-mono: "MesloLGM Nerd Font", ui-monospace, "SF Mono", "Menlo", "Cascadia Mono", monospace;
+	--font-family-sans: var(--font-family-mono);
+	--font-size-base: 13px;
+	--font-size-small: 12px;
+	--font-size-large: 15px;
+	--font-size-x-large: 18px;
+
+	/* --- geometry -------------------------------------------------------- */
+	/* One knob for the whole app's flatness. */
+	--omp-radius: 0px;
+	/* Width of the accent bar that marks your turn and the input. */
+	--omp-bar: 2px;
+	/*
+	 * How far the main column holds its content off the window frame on a side
+	 * with no panel open. Resolved per side into `--omp-gutter-start` and
+	 * `--omp-gutter-end` by the shell, which is the only thing that knows which
+	 * panels are up.
+	 */
+	--omp-gutter: 12px;
+}

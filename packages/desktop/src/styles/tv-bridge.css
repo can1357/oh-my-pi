@@ -1,0 +1,44 @@
+/**
+ * Bridges omp's 30 tool renderers onto opencode's palette.
+ *
+ * The renderers in `@oh-my-pi/collab-web/tool-render` theme themselves through
+ * a fallback chain — `--tv-fg: var(--fg, var(--text, <literal>))` — so the
+ * intended seam is the HOST-side names (`--fg`, `--accent`, `--bg-raised`, …),
+ * not the `--tv-*` variables themselves. Defining the upstream names here lets
+ * the renderers resolve naturally instead of fighting an override.
+ *
+ * Two things about opencode's scale that are easy to get backwards:
+ *
+ *   · Text runs strong → base → weak → weaker, and `--text-base` is already
+ *     muted (#6f6f6f light / 61.8% white dark). Primary text is `--text-strong`.
+ *   · Backgrounds are NOT ordered by lightness. In dark, `--background-base`
+ *     is the darkest (#101010) and `--background-weak` the lightest (#1e1e1e),
+ *     so a *raised* surface maps to `weak` and an *inset* one to `base`.
+ *
+ * Light/dark needs no work here: theme.css declares both under `:root` and a
+ * nested `@media (prefers-color-scheme: dark)`, so these aliases follow along.
+ */
+
+:root {
+	/* text */
+	--fg: var(--text-strong);
+	--fg-muted: var(--text-base);
+	--fg-faint: var(--text-weak);
+
+	/* surfaces */
+	--bg-raised: var(--background-weak);
+	--bg-inset: var(--background-base);
+
+	/* lines */
+	--border: var(--border-base);
+	--ring: var(--border-focus);
+
+	/* semantic */
+	--accent: var(--text-interactive-base);
+	--ok: var(--icon-success-base);
+	--err: var(--icon-critical-base);
+	--warn: var(--icon-warning-base);
+
+	/* type */
+	--font-mono: var(--font-family-mono);
+}

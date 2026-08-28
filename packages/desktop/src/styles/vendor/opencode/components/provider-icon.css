@@ -1,0 +1,13 @@
+/*!
+ * Vendored from opencode — https://github.com/anomalyco/opencode
+ * packages/ui/src/styles/ · MIT License · Copyright (c) opencode contributors
+ *
+ * Unmodified copy. Local overrides belong in src/styles/app.css, which sits in
+ * a later cascade layer (see src/styles/index.css).
+ */
+
+[data-component="provider-icon"] {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+}

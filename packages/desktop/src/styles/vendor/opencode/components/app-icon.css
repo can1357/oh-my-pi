@@ -1,0 +1,13 @@
+/*!
+ * Vendored from opencode — https://github.com/anomalyco/opencode
+ * packages/ui/src/styles/ · MIT License · Copyright (c) opencode contributors
+ *
+ * Unmodified copy. Local overrides belong in src/styles/app.css, which sits in
+ * a later cascade layer (see src/styles/index.css).
+ */
+
+img[data-component="app-icon"] {
+  display: block;
+  box-sizing: border-box;
+  object-fit: contain;
+}

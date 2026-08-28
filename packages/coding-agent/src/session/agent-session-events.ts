@@ -17,13 +17,38 @@ export type AgentSessionEvent =
 	  })
 	| {
 			type: "auto_compaction_start";
-			reason: "threshold" | "overflow" | "idle" | "incomplete";
-			action: "context-full" | "remote" | "handoff" | "shake" | "snapcompact";
+			/**
+			 * `manual` is an operator asking for it. The other four are the engine's
+			 * own triggers.
+			 *
+			 * A manual pass used to emit nothing at all, which left every non-TUI
+			 * client to infer the outcome from the prose the slash command prints.
+			 * The two paths are the same operation and now announce themselves the
+			 * same way; the reason is what tells them apart.
+			 */
+			reason: "threshold" | "overflow" | "idle" | "incomplete" | "manual";
+			/** `soft` only ever reaches here from a manual pass; the rest are shared. */
+			action: "context-full" | "remote" | "handoff" | "shake" | "snapcompact" | "soft";
 	  }
 	| {
 			type: "auto_compaction_end";
-			action: "context-full" | "remote" | "handoff" | "shake" | "snapcompact";
+			action: "context-full" | "remote" | "handoff" | "shake" | "snapcompact" | "soft";
+			/**
+			 * Why the pass ran, echoed from its `auto_compaction_start`.
+			 *
+			 * Optional because it arrived after the event did. A consumer that has to
+			 * tell a user-initiated pass from one the engine started needs it on both
+			 * halves: the TUI stands down for `manual` on either, and pairing by
+			 * arrival order is not something a bus with several front-ends can offer.
+			 */
+			reason?: "threshold" | "overflow" | "idle" | "incomplete" | "manual";
 			result: CompactionResult | undefined;
+			/**
+			 * Context tokens after the rewrite. `CompactionResult` carries only
+			 * `tokensBefore` — the after is computed at commit time — so without this
+			 * a client cannot report the one number the operator wants.
+			 */
+			tokensAfter?: number;
 			aborted: boolean;
 			willRetry: boolean;
 			errorMessage?: string;
@@ -50,6 +75,13 @@ export type AgentSessionEvent =
 	| { type: "model_changed" }
 	| { type: "advisor_cost_changed" }
 	| { type: "ttsr_triggered"; rules: Rule[] }
+	/**
+	 * Plan mode moved, whoever moved it.
+	 *
+	 * Modelled on `goal_updated` below: a mode is state, and a client that has to
+	 * poll for state drifts the moment anything changes it from elsewhere.
+	 */
+	| { type: "plan_mode_changed"; enabled: boolean; planFilePath?: string }
 	| { type: "todo_reminder"; todos: TodoItem[]; attempt: number; maxAttempts: number }
 	| { type: "todo_auto_clear" }
 	| { type: "irc_message"; message: CustomMessage }

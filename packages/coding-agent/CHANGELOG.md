@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Added
+
+- Plan mode is now controllable over the `rpc-ui` protocol: `set_plan_mode` and `plan_review` commands, a `planMode` field in the session state, and a `plan_mode_changed` event, so a non-terminal client can enter, leave and follow it.
+- Approving a plan over RPC now sends the plan's markdown with the request, so a client can show what it is asking you to approve.
+- `abort_compact` cancels a compaction without aborting the turn, and closing stdin cancels one in flight.
+- Manual compaction now reports itself the same way automatic compaction does, and the end of a pass carries the token count after the rewrite.
+- Compaction refusals carry a machine-readable code, so clients no longer match on English prose.
+- The compaction lifecycle events extensions receive now carry `reason` on the end half as well as the start, so an extension can tell an operator-initiated pass from an automatic one — `action` cannot, since both report the same value.
+
+### Changed
+
+- `compact` is dispatched in the background like `bash`, so `abort` and `get_state` keep answering while a compaction runs.
+
+### Fixed
+
+- `abort_compact` now answers once the compaction has unwound, so a client that asks straight afterwards is no longer told the session is still compacting.
+- Custom tools receive the compaction's origin on the end event, not only on the start.
+- Fixed a manual compaction that fell back to another method leaving its lifecycle event unmatched, so a client could keep showing a compaction that had finished.
+- Fixed `set_plan_mode: false` over the `rpc-ui` protocol leaving the running turn planning under the plan-mode toolset; it now interrupts that turn, like the terminal's `/plan` toggle. Approving a plan still exits without interrupting.
+- Fixed `omp sessions --json` failing to build after the pi-vcs migration; worktrees are attributed to their primary checkout again.
 ### Fixed
 
 - Fixed `import numpy` (and other native-extension imports) hanging indefinitely in the Python eval tool on Windows, where the runner's always-on background stdin reader deadlocked native DLL loading; Windows now reads the control channel serially between requests while POSIX keeps concurrent request dispatch ([#7985](https://github.com/can1357/oh-my-pi/issues/7985)).

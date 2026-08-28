@@ -40,6 +40,55 @@ describe("RPC extension UI", () => {
 		expect(await result).toBe("Keep");
 	});
 
+	it("carries a plan alongside the choices, and marks it as one", async () => {
+		// A plan review that only sends a title and two buttons asks you to approve
+		// something you cannot read. `planFilePath` is what tells the client the
+		// message is markdown rather than the prose of an `ask`.
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const result = requestRpcSelect(
+			pendingRequests,
+			output,
+			"Plan Review — readme",
+			["Approve and execute", "Refine plan"],
+			{},
+			{ message: "# Readme\n\n- one\n", planFilePath: "local://readme-plan.md" },
+		);
+		const request = requireRequest(output.mock.calls[0]?.[0]);
+
+		expect(output).toHaveBeenCalledWith({
+			type: "extension_ui_request",
+			id: request.id,
+			method: "select",
+			title: "Plan Review — readme",
+			options: ["Approve and execute", "Refine plan"],
+			message: "# Readme\n\n- one\n",
+			planFilePath: "local://readme-plan.md",
+			timeout: undefined,
+		});
+
+		resolveSelection(pendingRequests, request.id, "Approve and execute");
+		expect(await result).toBe("Approve and execute");
+	});
+
+	it("omits the plan fields entirely when there is no plan", async () => {
+		// The bare shape is asserted elsewhere; this pins that passing `extra` with
+		// nothing in it does not start emitting empty keys to every other client.
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		void requestRpcSelect(pendingRequests, output, "Action", ["Keep"], {}, {});
+		const request = requireRequest(output.mock.calls[0]?.[0]);
+
+		expect(output).toHaveBeenCalledWith({
+			type: "extension_ui_request",
+			id: request.id,
+			method: "select",
+			title: "Action",
+			options: ["Keep"],
+			timeout: undefined,
+		});
+	});
+
 	it("emits aligned descriptions and resolves with the selected label", async () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();

@@ -1,0 +1,34 @@
+/*!
+ * Vendored from opencode — https://github.com/anomalyco/opencode
+ * packages/ui/src/styles/ · MIT License · Copyright (c) opencode contributors
+ *
+ * Unmodified copy. Local overrides belong in src/styles/app.css, which sits in
+ * a later cascade layer (see src/styles/index.css).
+ */
+
+[data-component="file-icon"] {
+  display: block;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+}
+
+/*
+  File tree: show monochrome weak icons by default.
+  On hover, show the original file-type colors.
+*/
+[data-component="filetree"] .filetree-icon--mono {
+  color: var(--icon-base);
+}
+
+[data-component="filetree"] .filetree-iconpair {
+  position: relative;
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+}
+
+[data-component="filetree"] .filetree-iconpair [data-component="file-icon"] {
+  position: absolute;
+  inset: 0;
+}

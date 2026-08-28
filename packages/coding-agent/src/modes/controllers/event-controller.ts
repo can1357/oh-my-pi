@@ -294,6 +294,10 @@ export class EventController {
 				this.ctx.ui.requestRender(true);
 			},
 			goal_updated: async () => {},
+			// The terminal already knows: it is the thing that moved the mode, and
+			// it keeps its own `planModeEnabled` mirror. The event exists for the
+			// clients that are not driving.
+			plan_mode_changed: async () => {},
 		} satisfies AgentSessionEventHandlers;
 	}
 
@@ -1917,6 +1921,18 @@ export class EventController {
 	async #handleAutoCompactionStart(
 		event: Extract<AgentSessionEvent, { type: "auto_compaction_start" }>,
 	): Promise<void> {
+		// A user-initiated `/compact` owns its own status line and its own repaint.
+		//
+		// These events were added for RPC clients, which had no other way to know a
+		// manual compaction was running, and they go out on the session bus — which
+		// reaches every front-end, not just the one that asked for them. Before that
+		// the manual path emitted nothing at all, so standing down here is exactly
+		// the behaviour the TUI had. Handling them instead would tear down the
+		// loader `executeCompaction` just installed and label a compaction the user
+		// asked for as if it had happened on its own: `reason: "manual"` matches
+		// none of the branches below, so the prefix comes out empty and the action
+		// label reads "Auto …".
+		if (event.reason === "manual") return;
 		this.#cancelIdleCompaction();
 		this.#cancelIdleRecap();
 		this.#setTerminalProgress(true);
@@ -1952,6 +1968,10 @@ export class EventController {
 	}
 
 	async #handleAutoCompactionEnd(event: Extract<AgentSessionEvent, { type: "auto_compaction_end" }>): Promise<void> {
+		// See `#handleAutoCompactionStart`. Acting here would rebuild the chat and
+		// clear the scrollback a second time, after `executeCompaction` has already
+		// done both.
+		if (event.reason === "manual") return;
 		this.#cancelIdleCompaction();
 		this.#cancelIdleRecap();
 		this.#setTerminalProgress(false);

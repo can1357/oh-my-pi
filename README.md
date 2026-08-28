@@ -637,6 +637,7 @@ For architecture and contribution guidelines, see [packages/coding-agent/DEVELOP
 | Package                                                                       | Description                                                                 |
 | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
 | **[@oh-my-pi/collab-web](packages/collab-web)**                               | Browser guest client, mock host, and local relay for collab live sessions   |
+| **[@oh-my-pi/desktop](packages/desktop)**                                     | Native desktop app: drives omp sessions over the rpc-ui protocol            |
 | **[@oh-my-pi/pi-ai](packages/ai)**                                            | Multi-provider LLM client with streaming and model/provider integration     |
 | **[@oh-my-pi/pi-catalog](packages/catalog)**                                  | Model catalog: bundled model database, provider descriptors, and identity   |
 | **[@oh-my-pi/pi-agent-core](packages/agent)**                                 | Agent runtime with tool calling and state management                        |

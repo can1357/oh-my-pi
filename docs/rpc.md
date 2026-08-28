@@ -153,7 +153,37 @@ Important edge behavior from runtime:
 ### Compaction
 
 - `{ id?, type: "compact", customInstructions?: string }`
+- `{ id?, type: "abort_compact" }`
 - `{ id?, type: "set_auto_compaction", enabled: boolean }`
+
+`compact` is dispatched concurrently, like `bash`: a compaction runs for
+minutes, and handling it on the serial queue would hold the door shut against
+the very commands meant to observe or stop it — `abort_compact`, `get_state`.
+Its response still carries the `CompactionResult` and is emitted when the work
+completes; correlate it via `id`.
+
+Use `abort_compact` to cancel one. Plain `abort` also cancels a compaction, but
+it ends the turn and aborts `bash` and `eval` besides — more than cancelling a
+compaction should mean.
+
+Only one compaction runs at a time. A second `compact` is refused rather than
+queued, and refusals carry a machine-readable `code` so a client does not have
+to match on wording:
+
+| `code` | Meaning |
+|---|---|
+| `already_compacted` | Nothing new since the last compaction. Not a failure. |
+| `nothing_to_compact` | The session is too small to have a cut point. Not a failure. |
+| `compaction_in_progress` | One is already running. |
+| `no_model` / `no_method` | Nothing configured that can compact manually. |
+| `cancelled` | Stopped by `abort_compact` or `abort`. |
+
+Both manual and automatic passes announce themselves with
+`auto_compaction_start` / `auto_compaction_end`; `reason: "manual"` is what
+distinguishes an operator asking from the engine deciding, and the end event
+carries `tokensAfter`, which `CompactionResult` does not.
+
+Closing stdin cancels an in-flight compaction rather than waiting it out.
 
 ### Retry
 

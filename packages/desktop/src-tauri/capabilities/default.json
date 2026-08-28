@@ -1,0 +1,34 @@
+{
+	"$schema": "../gen/schemas/desktop-schema.json",
+	"identifier": "default",
+	"description": "Core permissions for the main window. The opener entries carry an explicit scope because its commands check `allowed.iter().any(...)`: a bare `allow-open-path` grants the command and permits no path, so every open failed silently. The scope alone is not enough either — Tauri defaults `require_literal_leading_dot` to true on unix, which makes `**` skip every path component starting with a dot, so `plugins.opener` in tauri.conf.json turns that off; without it no file under `.github/` or a checkout inside `.claude/` can be opened. The reveal-item-in-dir entry is inert (that command takes no scope in 2.5.4) and is kept only so the grant reads consistently. The omp sidecar is owned entirely by Rust, so no shell:* permission is granted: the webview must not be able to spawn it directly and bypass the relay.",
+	"windows": [
+		"main"
+	],
+	"permissions": [
+		"core:default",
+		"core:window:allow-start-dragging",
+		"dialog:allow-open",
+		"dialog:allow-save",
+		"clipboard-manager:allow-read-text",
+		"clipboard-manager:allow-write-text",
+		"notification:default",
+		"opener:default",
+		{
+			"identifier": "opener:allow-open-path",
+			"allow": [
+				{
+					"path": "**"
+				}
+			]
+		},
+		{
+			"identifier": "opener:allow-reveal-item-in-dir",
+			"allow": [
+				{
+					"path": "**"
+				}
+			]
+		}
+	]
+}

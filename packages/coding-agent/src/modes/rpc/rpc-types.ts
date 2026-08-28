@@ -65,6 +65,18 @@ export type RpcCommand =
 	// Compaction
 	| { id?: string; type: "compact"; customInstructions?: string }
 	| { id?: string; type: "set_auto_compaction"; enabled: boolean }
+	/**
+	 * Cancel a compaction, and only the compaction.
+	 *
+	 * The twin of `abort_bash`. Plain `abort` also ends the turn, kills bash and
+	 * eval and drains the post-prompt queue — far more than someone pressing
+	 * cancel on a compaction asked for.
+	 */
+	| { id?: string; type: "abort_compact" }
+
+	// Plan mode
+	| { id?: string; type: "set_plan_mode"; enabled: boolean }
+	| { id?: string; type: "plan_review" }
 
 	// Retry
 	| { id?: string; type: "set_auto_retry"; enabled: boolean }
@@ -114,6 +126,14 @@ export interface RpcSessionState {
 	messageCount: number;
 	queuedMessageCount: number;
 	todoPhases: TodoPhase[];
+	/**
+	 * Plan mode, when it is on.
+	 *
+	 * Absent rather than `{ enabled: false }` so a client can tell "off" from an
+	 * omp too old to report it — the distinction matters, because the second
+	 * means the client must not offer a toggle it cannot honour.
+	 */
+	planMode?: { enabled: boolean; planFilePath?: string };
 	/** For session dump / export (plain-text parity with /dump). */
 	systemPrompt?: string[];
 	dumpTools?: Array<{ name: string; description: string; parameters: unknown; examples?: readonly ToolExample[] }>;
@@ -293,6 +313,11 @@ export type RpcResponse =
 	// Compaction
 	| { id?: string; type: "response"; command: "compact"; success: true; data: CompactionResult }
 	| { id?: string; type: "response"; command: "set_auto_compaction"; success: true }
+	| { id?: string; type: "response"; command: "abort_compact"; success: true }
+
+	// Plan mode
+	| { id?: string; type: "response"; command: "set_plan_mode"; success: true; data: { enabled: boolean } }
+	| { id?: string; type: "response"; command: "plan_review"; success: true }
 
 	// Retry
 	| { id?: string; type: "response"; command: "set_auto_retry"; success: true }
