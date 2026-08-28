@@ -1,14 +1,15 @@
 // Lazy registry of web search providers.
 //
-// Each provider is loaded on first use; importing this module loads zero
-// provider implementations. Provider modules are heavy (each pulls in
-// fetch/parse/format helpers) and only one — at most — is needed per session,
-// so eager construction was wasted work at startup.
+// Most providers are loaded on first use. Provider modules are heavy (each
+// pulls in fetch/parse/format helpers) and only one — at most — is needed per
+// session, so eager construction was wasted work at startup. AnySearch is
+// imported top-level per the no-dynamic-imports rule (AGENTS.md).
 //
-// Provider modules are loaded lazily; display metadata lives in types.ts so UI
-// listings can share it without importing provider implementations.
+// Display metadata lives in types.ts so UI listings can share it without
+// importing provider implementations.
 
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
+import { AnySearchProvider } from "./providers/anysearch";
 import type { SearchProvider } from "./providers/base";
 import { SEARCH_PROVIDER_LABELS, SEARCH_PROVIDER_ORDER, SearchProviderError, type SearchProviderId } from "./types";
 
@@ -87,7 +88,7 @@ const PROVIDER_META: Record<SearchProviderId, ProviderMeta> = {
 	anysearch: {
 		id: "anysearch",
 		label: SEARCH_PROVIDER_LABELS.anysearch,
-		load: async () => new (await import("./providers/anysearch")).AnySearchProvider(),
+		load: async () => new AnySearchProvider(),
 	},
 	brave: {
 		id: "brave",
