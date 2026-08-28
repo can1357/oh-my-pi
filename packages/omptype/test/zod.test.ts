@@ -53,6 +53,91 @@ describe("zod-like parsing", () => {
 		});
 	});
 
+	it("preserves JSON Schema structure for morph-free unions and nullable members", () => {
+		// Provider tool definitions read toolWireSchema's JSON Schema: a
+		// dispatcher-morph wrapper erases the structural IR and the parameter
+		// arrives at the model as an unconstrained `{}`.
+		const unionSchema = z.object({ mode: z.union([z.literal("fast"), z.literal("safe")]) });
+		const unionJson = unionSchema.toJsonSchema() as {
+			properties?: { mode?: Record<string, unknown> };
+		};
+		expect(unionJson.properties?.mode).toBeDefined();
+		expect(Object.keys(unionJson.properties?.mode ?? {}).length).toBeGreaterThan(0);
+		expect(JSON.stringify(unionJson.properties?.mode)).toContain("fast");
+		expect(JSON.stringify(unionJson.properties?.mode)).toContain("safe");
+		// Runtime contract unchanged.
+		expect(unionSchema.parse({ mode: "fast" })).toEqual({ mode: "fast" });
+		expect(unionSchema.safeParse({ mode: "slow" }).success).toBe(false);
+
+		const nullableSchema = z.object({ value: z.string().nullable() });
+		const nullableJson = nullableSchema.toJsonSchema() as {
+			properties?: { value?: Record<string, unknown> };
+		};
+		expect(Object.keys(nullableJson.properties?.value ?? {}).length).toBeGreaterThan(0);
+		expect(JSON.stringify(nullableJson.properties?.value)).toContain("string");
+		expect(nullableSchema.parse({ value: "ok" })).toEqual({ value: "ok" });
+		expect(nullableSchema.parse({ value: null })).toEqual({ value: null });
+		expect(nullableSchema.safeParse({ value: 42 }).success).toBe(false);
+
+		// Members carrying Type-attached steps (transform/refine — invisible to
+		// the member IR) must take the ordered dispatcher path: an IR rebuild
+		// would silently DROP the step, not just degrade the JSON Schema.
+		const morphUnion = z.union([z.string().transform(value => value.length), z.number()]);
+		expect(morphUnion.parse("abc")).toBe(3);
+		expect(morphUnion.parse(7)).toBe(7);
+		expect(
+			z
+				.string()
+				.transform(value => value.length)
+				.optional()
+				.parse("abc"),
+		).toBe(3);
+		expect(
+			z
+				.string()
+				.refine(value => value.startsWith("x"))
+				.optional()
+				.safeParse("abc").success,
+		).toBe(false);
+		expect(
+			z
+				.string()
+				.refine(value => value.startsWith("x"))
+				.nullable()
+				.safeParse("abc").success,
+		).toBe(false);
+		expect(
+			z
+				.string()
+				.refine(value => value.startsWith("x"))
+				.nullable()
+				.parse(null),
+		).toBeNull();
+
+		// Discriminated unions with purely structural variants take the same
+		// structural path; a pipeline-carrying variant set keeps the ordered
+		// literal dispatcher (and its transform semantics).
+		const eventSchema = z.object({
+			evt: z.discriminatedUnion("kind", [
+				z.strictObject({ kind: z.literal("append"), n: z.number() }),
+				z.strictObject({ kind: z.literal("gap"), s: z.string() }),
+			]),
+		});
+		const eventJson = eventSchema.toJsonSchema() as {
+			properties?: { evt?: Record<string, unknown> };
+		};
+		expect(Object.keys(eventJson.properties?.evt ?? {}).length).toBeGreaterThan(0);
+		expect(JSON.stringify(eventJson.properties?.evt)).toContain("append");
+		expect(JSON.stringify(eventJson.properties?.evt)).toContain("gap");
+		expect(eventSchema.parse({ evt: { kind: "append", n: 1 } })).toEqual({ evt: { kind: "append", n: 1 } });
+		expect(eventSchema.safeParse({ evt: { kind: "nope" } }).success).toBe(false);
+		const steppedVariants = z.discriminatedUnion("kind", [
+			z.strictObject({ kind: z.literal("len"), v: z.string().transform(value => value.length) }),
+			z.strictObject({ kind: z.literal("raw"), v: z.number() }),
+		]);
+		expect(steppedVariants.parse({ kind: "len", v: "abc" })).toEqual({ kind: "len", v: 3 });
+	});
+
 	it("parses valid values and reports nested safeParse issues", () => {
 		const schema = z.object({ profile: z.object({ age: z.number().int().positive() }) });
 		expect(schema.parse({ profile: { age: 42 } })).toEqual({ profile: { age: 42 } });
@@ -168,5 +253,73 @@ describe("zod-like parsing", () => {
 		const flags = z.record(z.enum(["A", "B"] as const), z.boolean());
 		expect(flags.parse({ A: true, B: false })).toEqual({ A: true, B: false });
 		expect(flags.safeParse({ C: true }).success).toBe(false);
+	});
+	it("builds strict, loose, discriminated, readonly, and lazy schemas", () => {
+		const strict = z.strictObject({ name: z.string() });
+		expect(strict.parse({ name: "Ada" })).toEqual({ name: "Ada" });
+		expect(strict.safeParse({ name: "Ada", extra: 1 }).success).toBe(false);
+
+		const loose = z.looseObject({ name: z.string() });
+		expect(loose.parse({ name: "Ada", extra: 1 })).toEqual({ name: "Ada", extra: 1 });
+		expect(loose.safeParse({ name: 1 }).success).toBe(false);
+
+		const termination = z.discriminatedUnion("kind", [
+			z.object({ kind: z.literal("interrupted") }),
+			z.object({ kind: z.literal("timed_out"), timeoutMs: z.number() }),
+		]);
+		type Termination = z.infer<typeof termination>;
+		const timedOut: Termination = termination.parse({ kind: "timed_out", timeoutMs: 5 });
+		expect(timedOut).toEqual({ kind: "timed_out", timeoutMs: 5 });
+		const interrupted: Termination = { kind: "interrupted" };
+		expect(termination.parse(interrupted)).toEqual(interrupted);
+		expect(termination.safeParse({ kind: "nope" }).success).toBe(false);
+		expect(termination.safeParse({}).success).toBe(false);
+		expect(termination.safeParse("str").success).toBe(false);
+
+		const parsedFrozen = z
+			.strictObject({ tags: z.array(z.string()) })
+			.readonly()
+			.parse({ tags: ["a"] });
+		expect(parsedFrozen).toEqual({ tags: ["a"] });
+		expect(Object.isFrozen(parsedFrozen)).toBe(true);
+		// Shallow, matching Zod's own contract: a nested value is left mutable.
+		expect(Object.isFrozen(parsedFrozen.tags)).toBe(false);
+		expect(Reflect.set(parsedFrozen, "tags", [])).toBe(false);
+		expect(z.array(z.string()).readonly().optional().parse(undefined)).toBeUndefined();
+
+		// `.readonly()` freezes only its own parse output, NEVER the caller's
+		// input graph: a persisted session entry is schema-validated (with
+		// nested `.readonly()` arms) BEFORE blob hydration mutates it in place,
+		// so a freeze leaking onto the input would make the session unloadable.
+		const inputAttachment = { kind: "image", data: "blob:sha256:abc", mimeType: "image/png" };
+		const inputEntry = { attachment: inputAttachment };
+		const nestedReadonly = z.strictObject({
+			attachment: z.strictObject({ kind: z.literal("image"), data: z.string(), mimeType: z.string() }).readonly(),
+		});
+		expect(nestedReadonly.safeParse(inputEntry).success).toBe(true);
+		expect(Object.isFrozen(inputAttachment)).toBe(false);
+		inputAttachment.data = "resolved-bytes"; // the hydration write must still work
+		expect(inputAttachment.data).toBe("resolved-bytes");
+
+		// Non-plain parse output (reachable via z.unknown()/z.any()/transforms)
+		// has no non-destructive shallow clone: it passes through untouched —
+		// identity, prototype, and internal slots intact, and NOT frozen (an
+		// in-place freeze would mutate the caller's value).
+		const map = new Map([[1, 2]]);
+		const unknownReadonly = z.unknown().readonly();
+		expect(unknownReadonly.parse(map)).toBe(map);
+		expect(Object.isFrozen(map)).toBe(false);
+		expect(map.get(1)).toBe(2);
+		const date = new Date(0);
+		expect(unknownReadonly.parse(date)).toBe(date);
+		expect((unknownReadonly.parse(date) as Date).getTime()).toBe(0);
+
+		type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+		const jsonValue: z.ZodType<JsonValue> = z.lazy(() =>
+			z.union([z.string(), z.number(), z.boolean(), z.null(), z.array(jsonValue), z.record(z.string(), jsonValue)]),
+		);
+		const deep = { b: [2, { c: "d" }] };
+		expect(jsonValue.parse(["a", 1, true, null, deep])).toEqual(["a", 1, true, null, deep]);
+		expect(jsonValue.safeParse([() => {}]).success).toBe(false);
 	});
 });
