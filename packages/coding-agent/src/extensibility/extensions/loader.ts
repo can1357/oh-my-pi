@@ -493,6 +493,7 @@ export async function loadExtensionFromFactory(
 		);
 		throw error;
 	}
+	return extension;
 }
 
 async function canonicalizeRequiredSpecs(
