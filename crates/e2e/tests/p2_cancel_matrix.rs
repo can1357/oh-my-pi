@@ -319,7 +319,7 @@ async fn rust_drop_cancellation_is_exact_and_cannot_mutate_after_interrupt() {
 		.register(
 			CancellableSleeper::new(started.clone(), marker.clone(), Arc::clone(&dropped)),
 			Presentation::Slot,
-			Claims { precedence: Precedence::CORE, claimant: sf!("omp/core"), replaces: None },
+			Claims { precedence: Precedence::CORE, claimant: sf!("e2e/matrix"), replaces: None },
 		)
 		.expect("register cancellable sleeper");
 	let worker = test_config();

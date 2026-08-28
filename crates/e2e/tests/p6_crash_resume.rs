@@ -1608,7 +1608,7 @@ const fn caps() -> CapsBase {
 }
 
 const fn core_claims() -> Claims {
-	Claims { precedence: Precedence::CORE, claimant: sf!("omp/core"), replaces: None }
+	Claims { precedence: Precedence::CORE, claimant: sf!("e2e/core"), replaces: None }
 }
 
 const fn worker_claims() -> Claims {
