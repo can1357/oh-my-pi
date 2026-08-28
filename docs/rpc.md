@@ -180,8 +180,21 @@ correlate it via `id`. Ordering across concurrent commands is not guaranteed
 - `{ id?, type: "branch", entryId: string }`
 - `{ id?, type: "get_branch_messages" }`
 - `{ id?, type: "get_last_assistant_text" }`
+- `{ id?, type: "get_tree" }`
+- `{ id?, type: "get_navigation_tree", filter?: "default" | "no-tools" | "user-only" | "labeled-only" | "all", search?: string }`
 - `{ id?, type: "set_session_name", name: string }`
 - `{ id?, type: "handoff", customInstructions?: string }`
+
+`get_tree` returns the raw session tree: `leafId` plus the nested
+`SessionTreeNode` projection (`entry`, `children`, resolved `label`) from
+`SessionManager.getTree()`. `get_navigation_tree` returns the flattened rows
+the `/tree` selector renders for the same session: active branch first,
+connector geometry (`indent`, `showConnector`, `isLast`, `gutters`,
+`isVirtualRootChild`), `onActivePath` / `isLeaf` markers, and a `preview` of
+the same searchable text the selector indexes (capped at 200 chars). `filter`
+applies the selector's filter modes (default `"default"`) and `search` its
+tokenized fuzzy search; `totalNodes` reports the row count before filtering.
+An unknown `filter` fails the command with code `invalid_filter`.
 
 ### Messages
 

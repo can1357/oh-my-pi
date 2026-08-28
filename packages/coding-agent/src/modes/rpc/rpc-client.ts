@@ -31,14 +31,17 @@ import type {
 	RpcHostToolDefinition,
 	RpcHostToolResult,
 	RpcHostToolUpdate,
+	RpcNavigationTree,
 	RpcResponse,
 	RpcSessionState,
+	RpcSessionTree,
 	RpcSubagentEventFrame,
 	RpcSubagentLifecycleFrame,
 	RpcSubagentMessagesResult,
 	RpcSubagentProgressFrame,
 	RpcSubagentSnapshot,
 	RpcSubagentSubscriptionLevel,
+	RpcTreeFilterMode,
 } from "./rpc-types";
 
 /** Distributive Omit that works with union types */
@@ -836,6 +839,28 @@ export class RpcClient {
 	async getLastAssistantText(): Promise<string | null> {
 		const response = await this.#send({ type: "get_last_assistant_text" });
 		return this.#getData<{ text: string | null }>(response).text;
+	}
+
+	/**
+	 * Get the full session tree (`SessionManager.getTree()`): nested entry
+	 * nodes with resolved labels, plus the active leaf id.
+	 */
+	async getTree(): Promise<RpcSessionTree> {
+		const response = await this.#send({ type: "get_tree" });
+		return this.#getData<RpcSessionTree>(response);
+	}
+
+	/**
+	 * Get the flattened navigation tree the `/tree` selector renders: active
+	 * branch first, with filter modes and fuzzy search applied server-side.
+	 */
+	async getNavigationTree(options: { filter?: RpcTreeFilterMode; search?: string } = {}): Promise<RpcNavigationTree> {
+		const response = await this.#send({
+			type: "get_navigation_tree",
+			filter: options.filter,
+			search: options.search,
+		});
+		return this.#getData<RpcNavigationTree>(response);
 	}
 
 	/**

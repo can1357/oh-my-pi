@@ -10,7 +10,7 @@ import type { Effort, ImageContent, Model, ToolExample } from "@oh-my-pi/pi-ai";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
-import type { FileEntry } from "../../session/session-entries";
+import type { FileEntry, SessionEntry, SessionTreeNode } from "../../session/session-entries";
 import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
 import type {
 	AgentProgress,
@@ -81,6 +81,8 @@ export type RpcCommand =
 	| { id?: string; type: "branch"; entryId: string }
 	| { id?: string; type: "get_branch_messages" }
 	| { id?: string; type: "get_last_assistant_text" }
+	| { id?: string; type: "get_tree" }
+	| { id?: string; type: "get_navigation_tree"; filter?: RpcTreeFilterMode; search?: string }
 	| { id?: string; type: "set_session_name"; name: string }
 	| { id?: string; type: "handoff"; customInstructions?: string }
 
@@ -186,6 +188,58 @@ export interface RpcSubagentMessagesResult {
 	reset: boolean;
 	entries: FileEntry[];
 	messages: AgentMessage[];
+}
+
+// ============================================================================
+// Session Tree
+// ============================================================================
+
+/** Filter modes for `get_navigation_tree`, mirroring the `/tree` selector. */
+export type RpcTreeFilterMode = "default" | "no-tools" | "user-only" | "labeled-only" | "all";
+
+/** Full session tree snapshot: `SessionManager.getTree()` plus the active leaf. */
+export interface RpcSessionTree {
+	leafId: string | null;
+	tree: SessionTreeNode[];
+}
+
+/** One row of the flattened navigation tree (same projection as the `/tree` selector). */
+export interface RpcNavigationTreeNode {
+	entryId: string;
+	parentId: string | null;
+	entryType: SessionEntry["type"];
+	/** Message role for `message` entries. */
+	role?: string;
+	timestamp: string;
+	label?: string;
+	/** Searchable text for the row (label + type-specific content), capped at 200 chars. */
+	preview: string;
+	/** Indentation level (each level renders as 3 cells in the TUI). */
+	indent: number;
+	/** True when the parent has multiple children (connector shown unless virtual root child). */
+	showConnector: boolean;
+	/** True when this node is the last sibling under its parent. */
+	isLast: boolean;
+	/** True for roots nested under the virtual branching root (multiple roots). */
+	isVirtualRootChild: boolean;
+	/** Ancestor branch points: connector position and whether more siblings follow. */
+	gutters: Array<{ position: number; show: boolean }>;
+	/** True when the node lies on the path from root to the current leaf. */
+	onActivePath: boolean;
+	/** True when the node is the current leaf. */
+	isLeaf: boolean;
+}
+
+/** Flattened navigation tree: rows after filter/search, plus pre-filter totals. */
+export interface RpcNavigationTree {
+	leafId: string | null;
+	filter: RpcTreeFilterMode;
+	search: string;
+	/** True when the session has multiple roots (rows nest under a virtual root). */
+	multipleRoots: boolean;
+	/** Row count before filter/search were applied. */
+	totalNodes: number;
+	nodes: RpcNavigationTreeNode[];
 }
 
 // ============================================================================
@@ -307,6 +361,8 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "export_html"; success: true; data: { path: string } }
 	| { id?: string; type: "response"; command: "switch_session"; success: true; data: { cancelled: boolean } }
 	| { id?: string; type: "response"; command: "branch"; success: true; data: { text: string; cancelled: boolean } }
+	| { id?: string; type: "response"; command: "get_tree"; success: true; data: RpcSessionTree }
+	| { id?: string; type: "response"; command: "get_navigation_tree"; success: true; data: RpcNavigationTree }
 	| {
 			id?: string;
 			type: "response";

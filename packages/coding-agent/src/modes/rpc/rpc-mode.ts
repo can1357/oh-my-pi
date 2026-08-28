@@ -39,6 +39,7 @@ import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
 import { claimRpcInput, readRpcInputFrames } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
+import { getNavigationTree, getSessionTree } from "./rpc-session-tree";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
 	RpcCommand,
@@ -1352,6 +1353,19 @@ export async function runRpcMode(
 			case "get_last_assistant_text": {
 				const text = session.getLastAssistantText();
 				return success(id, "get_last_assistant_text", { text });
+			}
+
+			case "get_tree": {
+				return success(id, "get_tree", getSessionTree(session.sessionManager));
+			}
+
+			case "get_navigation_tree": {
+				const result = getNavigationTree(session.sessionManager, {
+					filter: command.filter,
+					search: command.search,
+				});
+				if (!result.ok) return error(id, "get_navigation_tree", result.error, result.code);
+				return success(id, "get_navigation_tree", result.data);
 			}
 
 			case "set_session_name": {

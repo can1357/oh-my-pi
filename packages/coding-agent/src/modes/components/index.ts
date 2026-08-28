@@ -34,6 +34,7 @@ export * from "./thinking-selector";
 export * from "./tiny-title-download-progress";
 export * from "./todo-reminder";
 export * from "./tool-execution";
+export * from "./tree-model";
 export * from "./tree-selector";
 export * from "./ttsr-notification";
 export * from "./user-message";
