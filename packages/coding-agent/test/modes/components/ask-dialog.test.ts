@@ -1404,6 +1404,59 @@ describe("AskDialogComponent", () => {
 		expect(render(component)).toBe(before);
 	});
 
+	it("recomputes header expansion at the filtered title width", () => {
+		const options = Array.from({ length: 22 }, (_, i) => ({ label: `Option ${i}` }));
+		const make = (n: number) =>
+			new AskDialogComponent([{ id: "q1", question: "xxxx ".repeat(n).trim(), options }], {
+				onSubmit: vi.fn(),
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+			});
+		let found = false;
+		for (let n = 8; n < 80; n++) {
+			const full = make(n);
+			full.render(80);
+			if (full.toggleQuestionExpansion()) continue;
+			const filtered = make(n);
+			filtered.render(80);
+			filtered.focused = true;
+			filtered.handleInput("/");
+			filtered.render(80);
+			if (!filtered.toggleQuestionExpansion()) continue;
+			found = true;
+			break;
+		}
+		expect(found).toBe(true);
+	});
+
+	it("collapses newlines in the preview facet title to a single line", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const component = new AskDialogComponent(
+				[
+					{
+						id: "q1",
+						question: "Pick?",
+						options: [
+							{ label: "Alpha\nBravo", preview: "body-one" },
+							{ label: "Other", preview: "body-two" },
+						],
+					},
+				],
+				{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+			);
+			const stripped = stripVTControlCharacters(component.render(80).join("\n"));
+			expect(stripped).toContain("Alpha Bravo");
+			expect(stripped).not.toMatch(/Alpha\nBravo/);
+			const previewLines = stripped.split("\n").filter(line => line.includes("│"));
+			expect(previewLines.some(line => /Alpha Bravo/.test(line))).toBe(true);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
 	it("wraps long option labels onto indented continuation lines instead of truncating", () => {
 		const onSubmit = vi.fn();
 		const tail = "UNIQUE_TAIL_MARKER_8654";

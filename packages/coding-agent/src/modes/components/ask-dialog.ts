@@ -489,12 +489,23 @@ export class AskDialogComponent implements Component, Focusable {
 		if (this.#closed || this.#isSubmitTab()) return false;
 		const question = this.#questions[this.#currentQuestionIndex()];
 		if (!question) return false;
-		const overflows = wrapQuestionTitle(question, this.#contentWidth).length > MAX_HEADER_ROWS;
+		const overflows =
+			wrapQuestionTitle(question, this.#headerTitleWidth(this.#contentWidth, question)).length > MAX_HEADER_ROWS;
 		if (!overflows) return false;
 		this.#expanded = !this.#expanded;
 		this.invalidate();
 		this.#requestRender();
 		return true;
+	}
+	/** Width used to wrap the question title, matching the filter-count suffix
+	 *  reservation in `#renderHeader`. Toggle and the expandable flag must use
+	 *  this same width or Ctrl+O is a no-op while the rendered title is truncated. */
+	#headerTitleWidth(width: number, question: ExtensionAskDialogQuestion): number {
+		const filterActive = this.#filterOpen || this.#filterQuery.length > 0;
+		if (!filterActive) return width;
+		const visible = this.#visibleRows(question).length;
+		const total = this.#questionRows(question).length;
+		return Math.max(1, width - (2 + visibleWidth(`${visible}/${total}`)));
 	}
 
 	handleInput(keyData: string): void {
@@ -755,19 +766,15 @@ export class AskDialogComponent implements Component, Focusable {
 			this.#headerExpandable = false;
 			return lines;
 		}
-		const wrapped = wrapQuestionTitle(question, width);
-		this.#headerExpandable = wrapped.length > MAX_HEADER_ROWS;
+		const titleWidth = this.#headerTitleWidth(width, question);
+		this.#headerExpandable = wrapQuestionTitle(question, titleWidth).length > MAX_HEADER_ROWS;
 		const maxRows = this.#expanded ? maxTitleRows : MAX_HEADER_ROWS;
 		const filterActive = this.#filterOpen || this.#filterQuery.length > 0;
 		if (filterActive) {
 			const rows = this.#visibleRows(question);
 			const total = this.#questionRows(question).length;
 			const countText = `${rows.length}/${total}`;
-			// Reserve the suffix width before the title is wrapped so the appended
-			// count cannot be truncated away when the first title line already
-			// fills the available width.
-			const suffixWidth = 2 + visibleWidth(countText);
-			const title = renderQuestionTitle(question, Math.max(1, width - suffixWidth), maxRows);
+			const title = renderQuestionTitle(question, titleWidth, maxRows);
 			const count = theme.fg("dim", countText);
 			if (title.length > 0) {
 				title[0] = `${title[0] ?? ""}  ${count}`;
@@ -1325,7 +1332,11 @@ export class AskDialogComponent implements Component, Focusable {
 			return Array.from({ length: rows }, () => "");
 		}
 		const option = focusedRow?.kind === "option" ? question.options[focusedRow.optionIndex ?? -1] : undefined;
-		const title = truncateToWidth(replaceTabs(focusedRow?.label ?? ""), previewWidth, Ellipsis.Unicode);
+		const title = truncateToWidth(
+			replaceTabs((focusedRow?.label ?? "").replace(/[\r\n]+/g, " ")),
+			previewWidth,
+			Ellipsis.Unicode,
+		);
 		const titleLine = theme.bold(theme.fg("accent", title));
 		const bodyBudget = Math.max(0, rows - 1);
 		const previewText = option?.preview?.trim() ? option.preview : "";
