@@ -4930,6 +4930,13 @@ export class InteractiveMode implements InteractiveModeContext {
 	showStatus(message: string, options?: { dim?: boolean }): void {
 		this.#uiHelpers.showStatus(message, options);
 	}
+	setTranscriptReveal(target: { component: Component; label: string } | undefined): void {
+		this.composer.setTranscriptReveal(target);
+	}
+
+	hasTranscriptReveal(): boolean {
+		return this.composer.hasTranscriptReveal();
+	}
 
 	showError(message: string): void {
 		this.#pendingSubmittedInput = undefined;

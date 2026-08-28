@@ -17,6 +17,7 @@ import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 import { expandKeyHint, getPreviewLines, resolveImageOptions, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { convertImageToPng } from "../../utils/image-loading";
 import { canonicalizeMessage, formatThinkingForDisplay, hasDisplayableThinking } from "../../utils/thinking-display";
+import type { CodeBlockLocation } from "../utils/copy-targets";
 import { resolveAssistantErrorPresentation } from "../utils/transcript-render-helpers";
 import { type CacheInvalidation, CacheInvalidationMarkerComponent } from "./cache-invalidation-marker";
 import { isRowPrefix, type TranscriptStableRow, trimBlankEdges } from "./transcript-container";
@@ -234,6 +235,14 @@ export class AssistantMessageComponent extends Container {
 	#thinkingDots: Text | undefined;
 	#thinkingDotsTimer: NodeJS.Timeout | undefined;
 	#thinkingDotsFrame = 0;
+	/** Transient "copied code block" marker shown under this message (undefined = hidden). */
+	#copiedBlockMarker: string | undefined;
+	#copiedBlockMarkerText: Text | undefined;
+	/** Fence highlighted in this message's rendered markdown (undefined = none). */
+	#highlightedCodeBlock: CodeBlockLocation | undefined;
+	#highlightedCodeBlockMd: Markdown | undefined;
+	/** Markdown child per text content index, rebuilt on every slow-path render. */
+	#markdownByContentIndex = new Map<number, Markdown>();
 	/** Previous cumulative provider token count + timestamp, for deriving this
 	 *  block's instantaneous streaming rate fed into {@link sharedSpeedTracker}.
 	 *  Undefined until the first thinking update of this block. */
@@ -860,6 +869,57 @@ export class AssistantMessageComponent extends Container {
 		return true;
 	}
 
+	/** Show/hide the transient "copied code block" marker under this message. */
+	setCopiedBlockMarker(label: string | undefined): void {
+		this.#copiedBlockMarker = label;
+		const existing = this.#copiedBlockMarkerText;
+		if (label === undefined) {
+			if (existing) {
+				this.#contentContainer.removeChild(existing);
+				this.#copiedBlockMarkerText = undefined;
+			}
+			return;
+		}
+		if (existing) {
+			existing.setText(label);
+			return;
+		}
+		const marker = new Text(theme.fg("accent", label), 1, 0);
+		this.#copiedBlockMarkerText = marker;
+		this.#contentContainer.addChild(marker);
+	}
+
+	/** Highlight the fenced code block at {@link CodeBlockLocation}; undefined clears. */
+	setHighlightedCodeBlock(location: CodeBlockLocation | undefined): void {
+		const previous = this.#highlightedCodeBlockMd;
+		if (previous) previous.setHighlightedFence(undefined);
+		this.#highlightedCodeBlockMd = undefined;
+		this.#highlightedCodeBlock = location;
+		if (!location) return;
+		const md = this.#markdownByContentIndex.get(location.contentIndex);
+		if (md) {
+			md.setHighlightedFence(location.localIndex);
+			this.#highlightedCodeBlockMd = md;
+		}
+	}
+	/**
+	 * Row range (within this component's render at `width`) of the highlighted
+	 * code block — the transcript reveal scrolls here. Undefined when no block
+	 * is highlighted or the render hasn't recorded a span yet.
+	 */
+	getRevealRowRange(width: number): { start: number; end: number } | undefined {
+		const md = this.#highlightedCodeBlockMd;
+		if (!md) return undefined;
+		const mdRange = md.getHighlightedFenceRowRange(width);
+		if (!mdRange) return undefined;
+		let offset = 0;
+		for (const child of this.#contentContainer.children) {
+			if (child === md) break;
+			offset += child.render(width).length;
+		}
+		return { start: offset + mdRange.start, end: offset + mdRange.end };
+	}
+
 	updateContent(message: AssistantMessage, opts?: { transient?: boolean }): void {
 		this.#blockVersion++;
 		this.#lastMessage = message;
@@ -906,6 +966,7 @@ export class AssistantMessageComponent extends Container {
 
 		// Clear content container
 		this.#contentContainer.clear();
+		this.#markdownByContentIndex.clear();
 		this.#emergencyText = undefined;
 		this.#thinkingDots = undefined;
 		this.#hasTruncatableError = false;
@@ -937,6 +998,11 @@ export class AssistantMessageComponent extends Container {
 				const md = new Markdown(trimmed, 1, 0, getMarkdownTheme(), mdOptions, 0);
 				this.#contentContainer.addChild(md);
 				this.#emergencyText = md;
+				this.#markdownByContentIndex.set(i, md);
+				if (this.#highlightedCodeBlock?.contentIndex === i) {
+					md.setHighlightedFence(this.#highlightedCodeBlock.localIndex);
+					this.#highlightedCodeBlockMd = md;
+				}
 				captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: trimmed });
 				hasRenderedContent = true;
 			} else if (content.type === "thinking" && resolveThinkingDisplay(content, this.proseOnlyThinking).visible) {
@@ -1009,6 +1075,9 @@ export class AssistantMessageComponent extends Container {
 				}
 			}
 		}
+		// The marker node was detached by the clear above; recreate it fresh.
+		this.#copiedBlockMarkerText = undefined;
+		if (this.#copiedBlockMarker) this.setCopiedBlockMarker(this.#copiedBlockMarker);
 		// Store fast-path state for next call
 		if (shouldCapture) {
 			this.#fastPathItems = captureItems;

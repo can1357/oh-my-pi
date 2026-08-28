@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ToolCall } from "@oh-my-pi/pi-ai";
+import { minIndent } from "../../edit/normalize";
 
 /** A fenced code block extracted from assistant markdown. */
 export interface CodeBlock {
@@ -66,7 +67,8 @@ const QUOTE_LINE_RE = /^>(.*)$/;
  * Split assistant markdown into drillable blocks — fenced code and `>`-quoted
  * runs — in document order. Fences mask their bodies, so a `>` line inside a
  * code block is never mistaken for a quote. An unclosed fence is treated as
- * ordinary text, matching the fenced-block grammar.
+ * ordinary text, matching the fenced-block grammar. Empty fenced blocks (no
+ * body) are omitted — they have nothing to copy.
  */
 export function extractBlocks(text: string): MessageBlock[] {
 	const blocks: MessageBlock[] = [];
@@ -92,7 +94,10 @@ export function extractBlocks(text: string): MessageBlock[] {
 			}
 			if (close !== -1) {
 				flushQuote();
-				blocks.push({ kind: "code", lang: open[1].trim(), code: lines.slice(i + 1, close).join("\n") });
+				const code = lines.slice(i + 1, close).join("\n");
+				if (code.trim().length > 0) {
+					blocks.push({ kind: "code", lang: open[1].trim(), code });
+				}
 				i = close;
 				continue;
 			}
@@ -126,6 +131,68 @@ export function extractLastCodeBlock(messages: readonly AgentMessage[]): CodeBlo
 		if (!text) continue;
 		const blocks = extractCodeBlocks(text);
 		if (blocks.length > 0) return blocks[blocks.length - 1];
+	}
+	return undefined;
+}
+/** A fenced code block plus the assistant message it came from. */
+export interface CodeBlockRef {
+	message: AgentMessage;
+	/** Position within the message's document-order block list (0 = first). */
+	blockIndex: number;
+	block: CodeBlock;
+}
+
+/**
+ * Enumerate fenced code blocks from assistant messages, newest message first,
+ * and within each message the blocks in reverse document order — the first
+ * entry is the block nearest the end of the transcript.
+ */
+export function extractCodeBlocksNewestFirst(messages: readonly AgentMessage[]): CodeBlockRef[] {
+	const refs: CodeBlockRef[] = [];
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const msg = messages[i];
+		const text = assistantText(msg);
+		if (!text) continue;
+		const blocks = extractCodeBlocks(text);
+		for (let j = blocks.length - 1; j >= 0; j--) {
+			refs.push({ message: msg, blockIndex: j, block: blocks[j]! });
+		}
+	}
+	return refs;
+}
+
+/** Strip the minimum common leading whitespace of non-blank lines. */
+export function dedentCodeBlock(code: string): string {
+	const min = minIndent(code);
+	if (min === 0) return code;
+	return code
+		.split("\n")
+		.map(line => line.slice(min)) // slice clamps: blank/shorter lines become ""
+		.join("\n");
+}
+/** Where a fenced code block sits inside an assistant message's content array. */
+export interface CodeBlockLocation {
+	/** Index into `message.content` of the text block carrying the fence. */
+	contentIndex: number;
+	/** Ordinal of the fence within that text block's own block list (0-based). */
+	localIndex: number;
+}
+
+/**
+ * Map a document-order block index (as produced by
+ * {@link extractCodeBlocksNewestFirst}) to the message content block and
+ * per-block ordinal that the transcript renders it at. Returns undefined when
+ * the message has no such block (or is not an assistant message).
+ */
+export function locateCodeBlockInMessage(message: AgentMessage, blockIndex: number): CodeBlockLocation | undefined {
+	if (message.role !== "assistant") return undefined;
+	let seen = 0;
+	for (let i = 0; i < message.content.length; i++) {
+		const content = message.content[i];
+		if (content.type !== "text") continue;
+		const count = extractCodeBlocks(content.text).length;
+		if (blockIndex < seen + count) return { contentIndex: i, localIndex: blockIndex - seen };
+		seen += count;
 	}
 	return undefined;
 }

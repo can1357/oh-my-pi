@@ -474,4 +474,26 @@ describe("TranscriptContainer", () => {
 		transcript.cancelReplay();
 		expect(transcript.peekFlushBatch(80)?.rows).toEqual(["tail", ""]);
 	});
+	it("reports a block's row span within the full render", () => {
+		const transcript = new TranscriptContainer();
+		const first = new Block(["a1", "a2"], true);
+		const second = new Block(["b1", "b2", "b3"], true);
+		transcript.addChild(first);
+		transcript.addChild(second);
+
+		// render(): first (2 rows) + separator + second (3 rows).
+		expect(transcript.rowRangeOf(first, 80)).toEqual({ start: 0, end: 1 });
+		expect(transcript.rowRangeOf(second, 80)).toEqual({ start: 3, end: 5 });
+		expect(transcript.rowRangeOf(new Block(["x"], true), 80)).toBeUndefined();
+	});
+
+	it("skips empty blocks when computing row spans, matching render", () => {
+		const transcript = new TranscriptContainer();
+		transcript.addChild(new Block(["a1"], true));
+		transcript.addChild(new Block([], true));
+		transcript.addChild(new Block(["b1"], true));
+
+		expect(transcript.rowRangeOf(transcript.children[0] as Block, 80)).toEqual({ start: 0, end: 0 });
+		expect(transcript.rowRangeOf(transcript.children[2] as Block, 80)).toEqual({ start: 2, end: 2 });
+	});
 });

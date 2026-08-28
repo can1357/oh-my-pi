@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- New Alt+Y / Alt+Shift+Y hotkeys copy the nearest fenced code block from the session; repeated presses cycle through older blocks, and the copied block is highlighted with an accent bar and scrolled into view when it is no longer on screen.
+
+### Fixed
+
+- Copy code block hotkeys no longer cycle through empty fenced blocks that copy nothing.
 ## [18.0.8] - 2026-08-27
 
 ### Added

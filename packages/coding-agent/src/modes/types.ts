@@ -273,7 +273,15 @@ export interface InteractiveModeContext {
 	 * leak.
 	 */
 	resetTranscript(): void;
-	showStatus(message: string, options?: { dim?: boolean }): void;
+	showStatus(message: string, options?: { dim?: boolean; autoDismissMs?: number }): void;
+	/**
+	 * Scroll the main transcript to reveal a block (e.g. a just-copied code
+	 * block that scrolled out of the recent output); undefined restores the
+	 * live tail.
+	 */
+	setTranscriptReveal(target: { component: Component; label: string } | undefined): void;
+	/** Whether a transcript reveal (copied-block peek) is currently presented. */
+	hasTranscriptReveal(): boolean;
 	showModelCycleTrack(track: string): void;
 	showError(message: string): void;
 	showPinnedError(message: string): void;

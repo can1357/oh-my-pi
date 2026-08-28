@@ -39,6 +39,8 @@ interface AppKeybindings {
 	"app.clipboard.pasteTextRaw": true;
 	"app.clipboard.copyLine": true;
 	"app.clipboard.copyPrompt": true;
+	"app.clipboard.copyCodeBlock": true;
+	"app.clipboard.copyCodeBlockPrev": true;
 	"app.agents.hub": true;
 	"app.session.new": true;
 	"app.session.tree": true;
@@ -166,6 +168,14 @@ export const KEYBINDINGS = {
 	"app.clipboard.copyPrompt": {
 		defaultKeys: "alt+shift+c",
 		description: "Copy prompt",
+	},
+	"app.clipboard.copyCodeBlock": {
+		defaultKeys: "alt+y",
+		description: "Copy nearest code block",
+	},
+	"app.clipboard.copyCodeBlockPrev": {
+		defaultKeys: "alt+shift+y",
+		description: "Copy next code block (toward newest)",
 	},
 	"app.session.new": {
 		defaultKeys: [],

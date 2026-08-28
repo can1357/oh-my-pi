@@ -37,6 +37,8 @@ interface PromptActionAutocompleteOptions {
 	keybindings: KeybindingsManager;
 	copyCurrentLine: () => void;
 	copyPrompt: () => void;
+	copyCodeBlock: () => void;
+	copyCodeBlockPrev: () => void;
 	undo: (prefix: string) => void;
 	moveCursorToMessageEnd: () => void;
 	moveCursorToMessageStart: () => void;
@@ -289,6 +291,20 @@ export function createPromptActionAutocompleteProvider(
 			description: formatKeyHints(options.keybindings.getKeys("app.clipboard.copyPrompt")),
 			keywords: ["copy", "prompt", "clipboard", "message"],
 			execute: options.copyPrompt,
+		},
+		{
+			id: "copy-code-block",
+			label: "Copy code block",
+			description: formatKeyHints(options.keybindings.getKeys("app.clipboard.copyCodeBlock")),
+			keywords: ["copy", "code", "block", "clipboard"],
+			execute: options.copyCodeBlock,
+		},
+		{
+			id: "copy-code-block-prev",
+			label: "Copy previous code block",
+			description: formatKeyHints(options.keybindings.getKeys("app.clipboard.copyCodeBlockPrev")),
+			keywords: ["copy", "code", "block", "previous", "clipboard"],
+			execute: options.copyCodeBlockPrev,
 		},
 		{
 			id: "undo",

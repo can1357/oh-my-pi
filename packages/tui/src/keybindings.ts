@@ -117,7 +117,7 @@ export const TUI_KEYBINDINGS = {
 		description: "Delete to line end",
 	},
 	"tui.editor.yank": { defaultKeys: "ctrl+y", description: "Yank" },
-	"tui.editor.yankPop": { defaultKeys: "alt+y", description: "Yank pop" },
+	"tui.editor.yankPop": { defaultKeys: "ctrl+alt+y", description: "Yank pop" },
 	"tui.editor.undo": { defaultKeys: ["ctrl+-", "ctrl+_"], description: "Undo" },
 	"tui.editor.spellingSuggestions": {
 		defaultKeys: "ctrl+.",

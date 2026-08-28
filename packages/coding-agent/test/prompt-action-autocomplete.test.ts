@@ -33,6 +33,8 @@ describe("prompt action autocomplete", () => {
 			}),
 			copyCurrentLine: () => {},
 			copyPrompt: () => {},
+			copyCodeBlock: () => {},
+			copyCodeBlockPrev: () => {},
 			undo: () => {},
 			moveCursorToMessageEnd: () => {},
 			moveCursorToMessageStart: () => {},
@@ -46,6 +48,8 @@ describe("prompt action autocomplete", () => {
 		expect(suggestions?.items.map(item => item.label)).toEqual([
 			"Copy current line",
 			"Copy whole prompt",
+			"Copy code block",
+			"Copy previous code block",
 			"Undo",
 			"Move cursor to end of message",
 			"Move cursor to beginning of message",
@@ -72,6 +76,8 @@ describe("prompt action autocomplete", () => {
 			keybindings: AppKeybindingsManager.inMemory(),
 			copyCurrentLine: () => {},
 			copyPrompt: () => {},
+			copyCodeBlock: () => {},
+			copyCodeBlockPrev: () => {},
 			undo: prefix => {
 				undoCalls += 1;
 				undoPrefix = prefix;
@@ -105,6 +111,8 @@ describe("prompt action autocomplete", () => {
 			keybindings: AppKeybindingsManager.inMemory(),
 			copyCurrentLine: () => {},
 			copyPrompt: () => {},
+			copyCodeBlock: () => {},
+			copyCodeBlockPrev: () => {},
 			undo: () => {},
 			moveCursorToMessageEnd: () => {},
 			moveCursorToMessageStart: () => {},
@@ -123,6 +131,8 @@ describe("prompt action autocomplete", () => {
 			keybindings: AppKeybindingsManager.inMemory(),
 			copyCurrentLine: () => {},
 			copyPrompt: () => {},
+			copyCodeBlock: () => {},
+			copyCodeBlockPrev: () => {},
 			undo: () => {},
 			moveCursorToMessageEnd: () => {},
 			moveCursorToMessageStart: () => {},
@@ -143,6 +153,8 @@ describe("prompt action autocomplete", () => {
 			keybindings: AppKeybindingsManager.inMemory(),
 			copyCurrentLine: () => {},
 			copyPrompt: () => {},
+			copyCodeBlock: () => {},
+			copyCodeBlockPrev: () => {},
 			undo: () => {},
 			moveCursorToMessageEnd: () => {},
 			moveCursorToMessageStart: () => {},
@@ -154,7 +166,12 @@ describe("prompt action autocomplete", () => {
 		const suggestions = await provider.getSuggestions([line], 0, line.length);
 
 		expect(suggestions?.prefix).toBe("#copy");
-		expect(suggestions?.items.map(item => item.label)).toEqual(["Copy current line", "Copy whole prompt"]);
+		expect(suggestions?.items.map(item => item.label)).toEqual([
+			"Copy current line",
+			"Copy whole prompt",
+			"Copy code block",
+			"Copy previous code block",
+		]);
 	});
 
 	it("returns slash command argument completions instead of # prompt actions when the command defines them", async () => {
@@ -174,6 +191,8 @@ describe("prompt action autocomplete", () => {
 			keybindings: AppKeybindingsManager.inMemory(),
 			copyCurrentLine: () => {},
 			copyPrompt: () => {},
+			copyCodeBlock: () => {},
+			copyCodeBlockPrev: () => {},
 			undo: () => {},
 			moveCursorToMessageEnd: () => {},
 			moveCursorToMessageStart: () => {},
@@ -197,6 +216,8 @@ describe("prompt action autocomplete", () => {
 			keybindings: AppKeybindingsManager.inMemory(),
 			copyCurrentLine: () => {},
 			copyPrompt: () => {},
+			copyCodeBlock: () => {},
+			copyCodeBlockPrev: () => {},
 			undo: () => {},
 			moveCursorToMessageEnd: () => {},
 			moveCursorToMessageStart: () => {},
@@ -226,6 +247,8 @@ describe("prompt action autocomplete", () => {
 			keybindings: AppKeybindingsManager.inMemory(),
 			copyCurrentLine: () => {},
 			copyPrompt: () => {},
+			copyCodeBlock: () => {},
+			copyCodeBlockPrev: () => {},
 			undo: () => {},
 			moveCursorToMessageEnd: () => {},
 			moveCursorToMessageStart: () => {},
@@ -248,6 +271,8 @@ describe("prompt action autocomplete", () => {
 			keybindings: AppKeybindingsManager.inMemory(),
 			copyCurrentLine: () => {},
 			copyPrompt: () => {},
+			copyCodeBlock: () => {},
+			copyCodeBlockPrev: () => {},
 			undo: () => {},
 			moveCursorToMessageEnd: () => {},
 			moveCursorToMessageStart: () => {},
@@ -267,6 +292,8 @@ describe("prompt action autocomplete", () => {
 			keybindings: AppKeybindingsManager.inMemory(),
 			copyCurrentLine: () => {},
 			copyPrompt: () => {},
+			copyCodeBlock: () => {},
+			copyCodeBlockPrev: () => {},
 			undo: () => {},
 			moveCursorToMessageEnd: () => {},
 			moveCursorToMessageStart: () => {},

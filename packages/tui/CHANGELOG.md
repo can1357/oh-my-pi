@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `Markdown.setHighlightedFence()` to highlight one fenced code block, with the row span exposed via `getHighlightedFenceRowRange()` and a theme-provided accent bar (`codeBlockHighlightBar`) rendered per wrapped row within the content width.
+
+### Changed
+
+- Moved the default `tui.editor.yankPop` binding from `Alt+Y` to `Ctrl+Alt+Y` so the chord stays available to app-level actions.
+
+## [18.0.7] - 2026-08-26
 ## [18.0.8] - 2026-08-27
 
 ### Added

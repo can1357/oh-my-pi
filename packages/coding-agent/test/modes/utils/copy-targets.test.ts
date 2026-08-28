@@ -4,9 +4,12 @@ import {
 	buildCopyTargets,
 	type CopySource,
 	type CopyTarget,
+	dedentCodeBlock,
 	extractCodeBlocks,
+	extractCodeBlocksNewestFirst,
 	extractLastCommand,
 	extractQuoteBlocks,
+	locateCodeBlockInMessage,
 } from "@oh-my-pi/pi-coding-agent/modes/utils/copy-targets";
 
 function source(overrides: Partial<CopySource>): CopySource {
@@ -43,6 +46,10 @@ describe("extractCodeBlocks", () => {
 		const blocks = extractCodeBlocks("```\nplain\n```\n\n```py\nprint(1)\n```");
 		expect(blocks.map(b => b.lang)).toEqual(["", "py"]);
 		expect(blocks.map(b => b.code)).toEqual(["plain", "print(1)"]);
+	});
+	it("ignores empty and whitespace-only fenced blocks", () => {
+		const blocks = extractCodeBlocks("```\n```\n\n```ts\n\n```\n\n```js\nconst x = 1;\n```");
+		expect(blocks.map(b => b.code)).toEqual(["const x = 1;"]);
 	});
 });
 
@@ -210,5 +217,78 @@ describe("buildCopyTargets", () => {
 		expect(cmd?.content).toBe("bun check");
 		expect(cmd?.language).toBe("bash");
 		expect(byId(targets, "cmd:2")?.content).toBe("echo old");
+	});
+});
+describe("extractCodeBlocksNewestFirst", () => {
+	it("enumerates newest message first with blocks reversed within a message", () => {
+		const older = assistantText("```ts\nconst a = 1;\n```\ntext\n```js\nconst b = 2;\n```");
+		const newer = assistantText("```py\nprint(1)\n```");
+		const refs = extractCodeBlocksNewestFirst([older, newer] as unknown as AgentMessage[]);
+
+		expect(refs.map(r => r.block.code)).toEqual(["print(1)", "const b = 2;", "const a = 1;"]);
+		expect(refs[0]!.message).toBe(newer);
+		expect(refs[1]!.message).toBe(older);
+		expect(refs[2]!.message).toBe(older);
+		expect(refs.map(r => r.blockIndex)).toEqual([0, 1, 0]);
+	});
+
+	it("skips user messages and assistant messages without text or blocks", () => {
+		const user = { role: "user", content: [{ type: "text", text: "```c\nx\n```" }] } as unknown as AgentMessage;
+		const proseOnly = assistantText("just prose");
+		const noContent = { role: "assistant", content: [] } as unknown as AgentMessage;
+		const block = assistantText("```\ncode\n```");
+		const refs = extractCodeBlocksNewestFirst([user, proseOnly, noContent, block] as unknown as AgentMessage[]);
+
+		expect(refs.map(r => r.block.code)).toEqual(["code"]);
+		expect(refs[0]!.message).toBe(block);
+	});
+	it("skips empty fenced blocks so the cycle only walks copyable content", () => {
+		const message = assistantText("```\n```\n\n```ts\nconst a = 1;\n```");
+		const refs = extractCodeBlocksNewestFirst([message] as unknown as AgentMessage[]);
+		expect(refs.map(r => r.block.code)).toEqual(["const a = 1;"]);
+	});
+});
+
+describe("dedentCodeBlock", () => {
+	it("strips the minimum common leading whitespace of non-blank lines", () => {
+		expect(dedentCodeBlock("    def f():\n        return 1\n    x = 2")).toBe("def f():\n    return 1\nx = 2");
+	});
+
+	it("turns blank and whitespace-only lines into empty strings without truncation", () => {
+		expect(dedentCodeBlock("  a\n\n  b\n  c")).toBe("a\n\nb\nc");
+		expect(dedentCodeBlock("  a\n \n  b")).toBe("a\n\nb");
+	});
+
+	it("returns the input unchanged when there is no common indent", () => {
+		const code = "a\nb\n  c";
+		expect(dedentCodeBlock(code)).toBe(code);
+		expect(dedentCodeBlock("x\n")).toBe("x\n");
+	});
+});
+describe("locateCodeBlockInMessage", () => {
+	it("maps a document-order block index to its content block and local ordinal", () => {
+		const message = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "reasoning" },
+				{ type: "text", text: "prose\n```ts\nconst a = 1;\n```\n```js\nconst b = 2;\n```" },
+				{ type: "text", text: "```py\nprint(1)\n```" },
+			],
+		} as unknown as AgentMessage;
+		// Document order across the concatenated assistant text: block 0 = ts,
+		// 1 = js, 2 = py. Non-text content does not shift ordinals.
+		expect(locateCodeBlockInMessage(message, 0)).toEqual({ contentIndex: 1, localIndex: 0 });
+		expect(locateCodeBlockInMessage(message, 1)).toEqual({ contentIndex: 1, localIndex: 1 });
+		expect(locateCodeBlockInMessage(message, 2)).toEqual({ contentIndex: 2, localIndex: 0 });
+	});
+
+	it("returns undefined for out-of-range, empty, or non-assistant messages", () => {
+		const message = {
+			role: "assistant",
+			content: [{ type: "text", text: "no fences here" }],
+		} as unknown as AgentMessage;
+		expect(locateCodeBlockInMessage(message, 0)).toBeUndefined();
+		const user = { role: "user", content: [{ type: "text", text: "```c\nx\n```" }] } as unknown as AgentMessage;
+		expect(locateCodeBlockInMessage(user, 0)).toBeUndefined();
 	});
 });

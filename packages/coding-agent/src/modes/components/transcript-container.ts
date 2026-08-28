@@ -464,6 +464,26 @@ export class TranscriptContainer extends Container {
 		}
 		return rows;
 	}
+	/**
+	 * Inclusive row span of `component` within a full render at `width`,
+	 * matching {@link render}'s per-block blank separators. Returns undefined
+	 * when the component is not a transcript block.
+	 */
+	rowRangeOf(component: Component, width: number): { start: number; end: number } | undefined {
+		this.#syncEntries();
+		let cursor = 0;
+		for (const entry of this.#entries) {
+			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
+			const block = this.#renderEntry(entry, width);
+			if (block.length === 0) continue;
+			if (cursor > 0) cursor += 1; // blank separator between blocks
+			const start = cursor;
+			const end = cursor + block.length - 1;
+			if (entry.component === component) return { start, end };
+			cursor = end + 1;
+		}
+		return undefined;
+	}
 
 	#renderEntry(entry: TranscriptEntry, width: number): readonly string[] {
 		const rendered = trimBlankEdges(entry.component.render(width));

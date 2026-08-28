@@ -1,11 +1,15 @@
 import { beforeAll, describe, expect, test, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import {
+	type AnimationFrame,
+	TranscriptContainer,
+} from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext, RenderSessionContextOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { buildSessionContext, type SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
-import { type Component, Container } from "@oh-my-pi/pi-tui";
+import { type Component, Container, type Text } from "@oh-my-pi/pi-tui";
 
 function renderLastLine(container: Container, width = 120): string {
 	const last = container.children[container.children.length - 1];
@@ -159,5 +163,72 @@ describe("InteractiveMode.showStatus", () => {
 		// handler owns this lifecycle and uses it to guard against clearing the
 		// user's in-progress editor draft during an optimistic send (#783).
 		expect(ctx.optimisticUserMessageSignature).toBe("hello\u00001");
+	});
+
+	test("auto-dismiss blanks a status that is still the live tail", () => {
+		const chatContainer = new TranscriptContainer();
+		const ctx = {
+			chatContainer,
+			ui: { requestRender: vi.fn() },
+			present: (content: Component | readonly Component[]) => {
+				const items = Array.isArray(content) ? content : [content];
+				for (const item of items) ctx.chatContainer.addChild(item);
+				ctx.ui.requestRender();
+			},
+			lastStatusSpacer: undefined,
+			lastStatusText: undefined,
+		} as unknown as InteractiveModeContext;
+		const helpers = new UiHelpers(ctx);
+
+		vi.useFakeTimers();
+		try {
+			helpers.showStatus("live status", { autoDismissMs: 1000 });
+			const statusText = ctx.lastStatusText as Text;
+			expect(statusText.getText()).toBe("live status");
+
+			vi.advanceTimersByTime(1001);
+
+			// Still transient and at the tail — the line is blanked.
+			expect(statusText.getText()).toBe("");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test("auto-dismiss skips a status committed to transcript history before the timer fires", () => {
+		const chatContainer = new TranscriptContainer();
+		const ctx = {
+			chatContainer,
+			ui: { requestRender: vi.fn() },
+			present: (content: Component | readonly Component[]) => {
+				const items = Array.isArray(content) ? content : [content];
+				for (const item of items) ctx.chatContainer.addChild(item);
+				ctx.ui.requestRender();
+			},
+			lastStatusSpacer: undefined,
+			lastStatusText: undefined,
+		} as unknown as InteractiveModeContext;
+		const helpers = new UiHelpers(ctx);
+
+		vi.useFakeTimers();
+		try {
+			helpers.showStatus("transient status", { autoDismissMs: 1000 });
+			const statusText = ctx.lastStatusText as Text;
+
+			// Pressure commits the status tail into native history: settle the
+			// entries, then offer the finalized prefix at zero capacity.
+			const frame: AnimationFrame = { now: 0, tick: 0 };
+			chatContainer.renderViewport(80, 100, frame);
+			const batch = chatContainer.peekFinalizedBatch(80, 0);
+			expect(batch).not.toBeUndefined();
+
+			vi.advanceTimersByTime(1001);
+
+			// The block backs already-written native history — mutating it would
+			// desync replay from scrollback, so the timer leaves it alone.
+			expect(statusText.getText()).toBe("transient status");
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

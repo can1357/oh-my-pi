@@ -9,6 +9,8 @@ describe("buildHotkeysMarkdown", () => {
 		const displayStrings: Record<string, string> = {
 			"app.clipboard.copyLine": "Alt+Shift+L",
 			"app.clipboard.copyPrompt": "Ctrl+Shift+P",
+			"app.clipboard.copyCodeBlock": "Alt+Y",
+			"app.clipboard.copyCodeBlockPrev": "Alt+Shift+Y",
 			"app.plan.toggle": "Alt+Shift+P",
 			"app.tools.expand": "Ctrl+O",
 			"app.tools.toggleVisibility": "Ctrl+Shift+O",
@@ -41,6 +43,8 @@ describe("buildHotkeysMarkdown", () => {
 		const lines = markdown.split("\n");
 		expect(lines[0]).toBe("**Navigation**");
 		expect(markdown).toContain("| `Ctrl+Shift+P` | Copy whole prompt |");
+		expect(markdown).toContain("| `Alt+Y` | Copy nearest code block |");
+		expect(markdown).toContain("| `Alt+Shift+Y` | Copy next code block (toward newest) |");
 		expect(markdown).toContain("| `Ctrl+Shift+L` | Select model (temporary) |");
 		expect(markdown).toContain("| `Alt+M` | Select model (set roles) |");
 		expect(markdown).toContain("| `Alt+L` | Reset terminal display |");

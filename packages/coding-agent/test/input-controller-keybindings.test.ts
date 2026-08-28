@@ -235,6 +235,8 @@ async function createContext() {
 		handleBtwCopyKey,
 		showError,
 		showStatus: vi.fn(),
+		setTranscriptReveal: vi.fn(),
+		hasTranscriptReveal: vi.fn(() => false),
 	} as unknown as InteractiveModeContext;
 
 	return {

@@ -57,6 +57,20 @@ export interface ComposerWelcomeUpdate {
 	readonly recentSessions?: readonly RecentSession[];
 	readonly lspServers?: readonly LspServerInfo[];
 }
+/** A transcript block the composer should scroll into view (copied-code-block peek). */
+export interface TranscriptRevealTarget {
+	readonly component: Component;
+	/** Hint row shown under the revealed slice, e.g. "Copied code block 1 of 2". */
+	readonly label: string;
+}
+/** Component that can report a sub-block row range (a highlighted fence) for reveals. */
+interface TranscriptRevealBlock {
+	getRevealRowRange(width: number): { start: number; end: number } | undefined;
+}
+
+function isTranscriptRevealBlock(component: Component): component is Component & TranscriptRevealBlock {
+	return "getRevealRowRange" in component && typeof component.getRevealRowRange === "function";
+}
 
 /** Optional dependencies and initial state for a standalone composer. */
 export interface ComposerOptions {
@@ -119,6 +133,8 @@ export class Composer implements TerminalFrameProvider {
 	#headerAfter: readonly Component[] = [];
 	#runtimeChildren: readonly Component[] = [];
 	#runtimeMounted = false;
+	/** Block the viewport is currently scrolled to reveal (undefined = live tail). */
+	#transcriptReveal: TranscriptRevealTarget | undefined;
 	// Composer-owned history id space. Transcript batch ids restart across
 	// container clears/swaps; the composer translates them into one monotonic
 	// sequence the terminal's accepted-id watermark can trust.
@@ -226,6 +242,45 @@ export class Composer implements TerminalFrameProvider {
 		const transcript = roots[transcriptIndex] as TranscriptContainer;
 		const preRoots = this.#renderRoots(roots.slice(0, transcriptIndex), width);
 		const after = this.#renderRoots(roots.slice(transcriptIndex + 1), width);
+		const reveal = this.#transcriptReveal;
+		if (reveal !== undefined) {
+			const full = transcript.render(width);
+			const range = transcript.rowRangeOf(reveal.component, width);
+			const inner = isTranscriptRevealBlock(reveal.component)
+				? reveal.component.getRevealRowRange(width)
+				: undefined;
+			const blockStart = range === undefined ? undefined : range.start + (inner?.start ?? 0);
+			const blockEnd = range === undefined ? undefined : range.start + (inner?.end ?? range.end - range.start);
+			// The transcript's normal viewport is the terminal height minus the
+			// fixed roots above (header/pre) and below (editor, status, …) — the
+			// same capacity the live tail renders into. A block inside the last
+			// `after` rows of a full-height tail is hidden by the post-transcript
+			// chrome and must still reveal.
+			const headerVisible = !this.#headerRetired && this.#offeredHistory?.source !== "header";
+			const headerRows = headerVisible ? this.#header.render(width) : [];
+			const capacity = Math.max(0, rows - headerRows.length - preRoots.length - after.length);
+			if (
+				range === undefined ||
+				blockStart === undefined ||
+				blockEnd === undefined ||
+				blockStart >= full.length - capacity
+			) {
+				// Block missing or already fully visible — drop the peek.
+				this.#transcriptReveal = undefined;
+			} else {
+				// The last row is the dismiss hint; the block gets the rest.
+				const maxContent = Math.max(1, rows - 1);
+				const blockHeight = blockEnd - blockStart + 1;
+				// Too tall for one screen: anchor the block's top at the top of
+				// the viewport. Otherwise show the whole block as low as possible
+				// (its bottom row just above the hint).
+				const sliceStart = blockHeight > maxContent ? blockStart : Math.max(0, blockEnd - maxContent + 1);
+				const sliceEnd = blockHeight > maxContent ? blockStart + maxContent : blockEnd + 1;
+				const slice = full.slice(sliceStart, sliceEnd);
+				const hint = theme.fg("dim", `${reveal.label} — press any key to return to the live view`);
+				return { viewport: [...slice, hint].slice(-rows) };
+			}
+		}
 		// Offer history under capacity pressure only: blocks stay live (and keep
 		// reflowing to the current width) while the screen has room. A batch
 		// leaves the mutable viewport in the same frame it is appended, so its
@@ -561,6 +616,21 @@ export class Composer implements TerminalFrameProvider {
 		for (const child of children) this.ui.addChild(child);
 		this.ui.addChild(this.#statusHost);
 		this.ui.requestRender();
+	}
+	/**
+	 * Scroll the transcript viewport to reveal a block (e.g. a just-copied code
+	 * block that scrolled out of the recent output). `undefined` restores the
+	 * live tail. The peek frame persists until dismissed; any key dismisses it.
+	 */
+	setTranscriptReveal(target: TranscriptRevealTarget | undefined): void {
+		if (this.#transcriptReveal === target) return;
+		this.#transcriptReveal = target;
+		this.ui.requestRender(true, { clearScrollback: true });
+	}
+
+	/** Whether a transcript reveal (copied-block peek) is currently presented. */
+	hasTranscriptReveal(): boolean {
+		return this.#transcriptReveal !== undefined;
 	}
 
 	/** Play or replay the welcome intro against the stable header render target. */
