@@ -1432,6 +1432,102 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send")).toHaveLength(0);
 	});
 
+	it("keeps tab-wide clear commands after the issuing session disconnects before the reply", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const clearer = new FakeCdpSocket();
+		const clearerConn = bridge.cdpConnected(clearer);
+		const clearerSession = await attachPage(bridge, ext, clearer, clearerConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Fetch.enable",
+				params: { patterns: [{ urlPattern: "https://owner.example/*" }] },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.cdpMessage(
+			clearerConn,
+			JSON.stringify({ id: ++msgSeq, sessionId: clearerSession, method: "Fetch.disable" }),
+		);
+		await flush();
+		bridge.cdpClosed(clearerConn);
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await flush();
+
+		expect(ext2.rpcs("send")).toHaveLength(0);
+	});
+
+	it("drops tab-wide empty-value clears across session owners before recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const clearer = new FakeCdpSocket();
+		const clearerConn = bridge.cdpConnected(clearer);
+		const clearerSession = await attachPage(bridge, ext, clearer, clearerConn, 1);
+
+		const sendRootCommand = async (
+			connId: number,
+			sessionId: string,
+			method: string,
+			params?: Record<string, unknown>,
+		): Promise<void> => {
+			const id = ++msgSeq;
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+		};
+
+		await sendRootCommand(ownerConn, ownerSession, "Network.setExtraHTTPHeaders", {
+			headers: { "x-owner": "1" },
+		});
+		await sendRootCommand(clearerConn, clearerSession, "Network.setExtraHTTPHeaders", { headers: {} });
+
+		await sendRootCommand(ownerConn, ownerSession, "Network.setBlockedURLs", {
+			urls: ["https://blocked.example/*"],
+		});
+		await sendRootCommand(clearerConn, clearerSession, "Network.setBlockedURLs", { urls: [] });
+
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setLocaleOverride", { locale: "fr-FR" });
+		await sendRootCommand(clearerConn, clearerSession, "Emulation.setLocaleOverride", {});
+
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setEmulatedMedia", {
+			media: "print",
+			features: [{ name: "prefers-color-scheme", value: "dark" }],
+		});
+		await sendRootCommand(clearerConn, clearerSession, "Emulation.setEmulatedMedia", {});
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await flush();
+
+		expect(ext2.rpcs("send")).toHaveLength(0);
+	});
+
 	it("clears replayed extra headers when the replay owner disconnects during recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

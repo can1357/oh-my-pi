@@ -718,11 +718,14 @@ export class RelayBridge {
 				method: msg.method,
 				params: msg.params,
 			});
-			if (!this.#forwardingSessionIsCurrent(conn, msg, tabId, realSessionId, pageRef)) {
+			const forwardingSessionIsCurrent = this.#forwardingSessionIsCurrent(conn, msg, tabId, realSessionId, pageRef);
+			if (pageRef && msg.sessionId) {
+				this.#recordSubscription(tabId, msg, msg.sessionId, forwardingSessionIsCurrent);
+			}
+			if (!forwardingSessionIsCurrent) {
 				this.#replyError(conn, msg, `Unknown session id ${String(msg.sessionId)}`);
 				return;
 			}
-			if (pageRef && msg.sessionId) this.#recordSubscription(tabId, msg, msg.sessionId);
 			this.#reply(conn, msg, (result as Record<string, unknown> | undefined) ?? {});
 		} catch (err) {
 			this.#replyError(conn, msg, err instanceof Error ? err.message : String(err));
@@ -741,8 +744,16 @@ export class RelayBridge {
 		return true;
 	}
 
-	/** Remember successful commands that changed the shared Chrome root state. */
-	#recordSubscription(tabId: number, msg: CdpCommand, ownerSessionId: string): void {
+	/**
+	 * Remember successful commands that changed the shared Chrome root state.
+	 *
+	 * Tab-wide clears/disables must still win even if the issuing pseudo-session
+	 * vanished before the RPC reply came back: Chrome already applied the change
+	 * to the shared debugger root, so recovery must not replay older state.
+	 * Owner-bound enables/setters, however, should only be journaled while the
+	 * originating pseudo-session is still live.
+	 */
+	#recordSubscription(tabId: number, msg: CdpCommand, ownerSessionId: string, ownerIsCurrent: boolean): void {
 		const tab = this.#tabs.get(tabId);
 		if (!tab) return;
 		const separator = msg.method.indexOf(".");
@@ -752,7 +763,7 @@ export class RelayBridge {
 			const key = `${domain}.enable`;
 			if (command === "disable") {
 				tab.subscriptions.delete(key);
-			} else {
+			} else if (ownerIsCurrent) {
 				this.#rememberSessionSubscription(tab, key, ownerSessionId, {
 					method: msg.method,
 					params: msg.params,
@@ -785,9 +796,10 @@ export class RelayBridge {
 			case "Network.setExtraHTTPHeaders": {
 				const headers = msg.params?.headers;
 				if (!hasObjectKeys(headers)) {
-					this.#forgetSessionSubscription(tab, msg.method, ownerSessionId);
+					this.#forgetTabSubscription(tab, msg.method);
 					return;
 				}
+				if (!ownerIsCurrent) return;
 				this.#rememberSessionSubscription(tab, msg.method, ownerSessionId, {
 					method: msg.method,
 					params: msg.params,
@@ -799,9 +811,10 @@ export class RelayBridge {
 			case "Network.setBlockedURLs": {
 				const urls = msg.params?.urls;
 				if (!Array.isArray(urls) || urls.length === 0) {
-					this.#forgetSessionSubscription(tab, msg.method, ownerSessionId);
+					this.#forgetTabSubscription(tab, msg.method);
 					return;
 				}
+				if (!ownerIsCurrent) return;
 				this.#rememberSessionSubscription(tab, msg.method, ownerSessionId, {
 					method: msg.method,
 					params: msg.params,
@@ -813,9 +826,10 @@ export class RelayBridge {
 			case "Emulation.setEmulatedMedia":
 			case "Emulation.setLocaleOverride":
 				if (!hasObjectKeys(msg.params)) {
-					this.#forgetSessionSubscription(tab, msg.method, ownerSessionId);
+					this.#forgetTabSubscription(tab, msg.method);
 					return;
 				}
+				if (!ownerIsCurrent) return;
 				this.#rememberSessionSubscription(tab, msg.method, ownerSessionId, {
 					method: msg.method,
 					params: msg.params,
@@ -845,6 +859,7 @@ export class RelayBridge {
 				// When a guard-authorized detach swaps that root, replay the latest
 				// winning command for each setter so preserved pseudo-sessions keep the
 				// state they previously established.
+				if (!ownerIsCurrent) return;
 				this.#rememberSessionSubscription(tab, msg.method, ownerSessionId, {
 					method: msg.method,
 					params: msg.params,
@@ -871,6 +886,7 @@ export class RelayBridge {
 			}
 			return;
 		}
+		if (!ownerIsCurrent) return;
 		this.#rememberSessionSubscription(tab, msg.method, ownerSessionId, {
 			method: msg.method,
 			params: msg.params,
