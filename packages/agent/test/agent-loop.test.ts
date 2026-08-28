@@ -4393,6 +4393,52 @@ describe("agentLoopContinue with AgentMessage", () => {
 		expect(toolEnd?.type === "tool_execution_end" && toolEnd.isError).toBe(false);
 	});
 
+	it("accepts a null-prototype record as hook-revised args", async () => {
+		const toolSchema = type({ value: "string" });
+		const executed: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params.value);
+				return { content: [{ type: "text", text: `echoed: ${params.value}` }], details: { value: params.value } };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			// A null-prototype dictionary is as JSON-plain as a literal: it
+			// serializes and structuredClones normally and must not be rejected
+			// as "non-JSON arguments".
+			beforeToolCall: async () => {
+				const args: Record<string, JsonValue> = Object.create(null);
+				args.value = "revised";
+				return { args };
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("echo something")], context, config, undefined, mock.stream);
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		expect(executed).toEqual(["revised"]);
+		const toolEnd = events.find(e => e.type === "tool_execution_end");
+		expect(toolEnd?.type === "tool_execution_end" && toolEnd.isError).toBe(false);
+	});
+
 	it("rejects a beforeToolCall args DAG whose aliasing expands past the node budget instead of hanging", async () => {
 		const toolSchema = type({ value: "string" });
 		const executed: string[] = [];

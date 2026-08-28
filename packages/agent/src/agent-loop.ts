@@ -2254,7 +2254,12 @@ function normalizeJsonValue(value: unknown): JsonValue | undefined {
 			visiting.delete(current);
 			return normalized;
 		}
-		if (Object.getPrototypeOf(current) !== Object.prototype || Object.getOwnPropertySymbols(current).length > 0)
+		// Plain records only — but a null prototype is as JSON-plain as
+		// Object.prototype (Object.create(null) dictionaries serialize and
+		// structuredClone normally, and normalizeDisplayJson accepts the same
+		// shape); only class instances/exotic prototypes reject.
+		const proto = Object.getPrototypeOf(current);
+		if ((proto !== Object.prototype && proto !== null) || Object.getOwnPropertySymbols(current).length > 0)
 			return undefined;
 		const descriptors = Object.getOwnPropertyDescriptors(current);
 		const normalized: { [key: string]: JsonValue } = {};
