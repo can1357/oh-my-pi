@@ -1666,6 +1666,10 @@ impl Registry {
 				});
 			}
 
+			// The claimant-qualifier grammar owns '@'. `insert` enforces the
+			// same ban for the disjoint native/worker store; this seam guards
+			// the host-tool state reached by the exact-name dispatch fallback,
+			// so both guards are load-bearing and neither is a duplicate.
 			if spec.name.contains('@') {
 				return Err(RegistryError::QualifiedToolName { name: spec.name.clone() });
 			}
