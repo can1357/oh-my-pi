@@ -14,6 +14,7 @@ import {
 	type CompactionResult,
 	compact,
 	compactionContextTokens,
+	compactionPreparationHoldsForCandidate,
 	createCompactionSummaryMessage,
 	estimateTranscriptTokens,
 	NativeCompactionError,
@@ -1582,6 +1583,14 @@ export class SessionAdvisors {
 		for (const candidate of orderedCandidates) {
 			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, advisorProviderSessionId, { signal });
 			if (!apiKey) continue;
+			// Execution can fall through past the head candidate after an auth or
+			// native-compaction failure. Rebuild the boundary for the candidate that
+			// actually runs so it never commits a summary that hides originals the
+			// head candidate could have replayed natively.
+			const candidatePreparation = compactionPreparationHoldsForCandidate(preparation, advisorModel, candidate)
+				? preparation
+				: (prepareCompaction(pathEntries, compactionSettings, advisorModel, agent.tokenizer, [candidate]) ??
+					preparation);
 			if (
 				nativeCompactionFailure &&
 				(candidate.provider !== nativeCompactionFailure.provider ||
@@ -1601,7 +1610,7 @@ export class SessionAdvisors {
 				: undefined;
 			try {
 				compactResult = await compact(
-					preparation,
+					candidatePreparation,
 					candidate,
 					this.#host.modelRegistry.resolver(candidate, advisorProviderSessionId),
 					undefined,

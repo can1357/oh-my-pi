@@ -21,6 +21,7 @@ import {
 	collectShakeRegions,
 	compact,
 	compactionContextTokens,
+	compactionPreparationHoldsForCandidate,
 	computeFileLists,
 	createCompactionSummaryMessage,
 	DEFAULT_SHAKE_CONFIG,
@@ -1032,6 +1033,16 @@ export class SessionMaintenance {
 							codexCompaction,
 						},
 						orderedCandidates,
+						undefined,
+						candidate =>
+							prepareCompaction(
+								pathEntries,
+								effectiveSettings,
+								activeModel,
+								this.#tokenizer,
+								[candidate],
+								this.#host.activeRequestTarget(),
+							),
 					);
 					summary = result.summary;
 					shortSummary = result.shortSummary;
@@ -1414,6 +1425,15 @@ export class SessionMaintenance {
 				candidate => {
 					compactionModel = candidate;
 				},
+				candidate =>
+					prepareCompaction(
+						branch,
+						effectiveSettings,
+						model,
+						this.#tokenizer,
+						[candidate],
+						this.#host.activeRequestTarget(),
+					),
 			);
 			armed = {
 				result: {
@@ -2177,6 +2197,29 @@ export class SessionMaintenance {
 		return candidates;
 	}
 
+	/**
+	 * Candidate execution can fall through past the head after an auth failure,
+	 * a native-compaction failure, or retry exhaustion. A preparation whose
+	 * boundary was justified by the head candidate's ability to extend the
+	 * preserved native history would then let the executing candidate commit a
+	 * summary covering only the recent tail, permanently hiding the originals,
+	 * so rebuild it from the branch for the candidate that actually runs.
+	 */
+	#preparationForCandidate(
+		preparation: CompactionPreparation,
+		candidate: Model,
+		reprepare: ((candidate: Model) => CompactionPreparation | undefined) | undefined,
+	): CompactionPreparation {
+		const activeModel = this.#model;
+		if (!reprepare || !activeModel) return preparation;
+		if (
+			compactionPreparationHoldsForCandidate(preparation, activeModel, candidate, this.#host.activeRequestTarget())
+		) {
+			return preparation;
+		}
+		return reprepare(candidate) ?? preparation;
+	}
+
 	resolveCompactionModelCandidates(
 		preferredModel: Model | null | undefined,
 		availableModels: Model[],
@@ -2238,6 +2281,7 @@ export class SessionMaintenance {
 		options?: SummaryOptions,
 		precomputedCandidates?: Model[],
 		onCandidateSelected?: (candidate: Model) => void,
+		reprepare?: (candidate: Model) => CompactionPreparation | undefined,
 	): Promise<CompactionResult> {
 		const candidates =
 			precomputedCandidates ?? this.#getCompactionModelCandidates(this.#host.modelRegistry.getAvailable());
@@ -2247,10 +2291,11 @@ export class SessionMaintenance {
 		for (const candidate of candidates) {
 			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 			if (!apiKey) continue;
+			const candidatePreparation = this.#preparationForCandidate(preparation, candidate, reprepare);
 			if (
 				nativeCompactionFailure &&
 				(candidate.provider !== nativeCompactionFailure.provider ||
-					!shouldUseProviderNativeCompaction(candidate, preparation.settings))
+					!shouldUseProviderNativeCompaction(candidate, candidatePreparation.settings))
 			) {
 				throw nativeCompactionFailure.error;
 			}
@@ -2258,7 +2303,7 @@ export class SessionMaintenance {
 			try {
 				onCandidateSelected?.(candidate);
 				return await compact(
-					this.#host.obfuscatePreparationForProvider(preparation),
+					this.#host.obfuscatePreparationForProvider(candidatePreparation),
 					candidate,
 					this.#host.modelRegistry.resolver(candidate, this.#host.sessionId()),
 					this.#host.obfuscateTextForProvider(customInstructions),
@@ -3505,10 +3550,20 @@ export class SessionMaintenance {
 					const hasMoreCandidates = candidateIndex < candidates.length - 1;
 					const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 					if (!apiKey) continue;
+					const candidatePreparation = this.#preparationForCandidate(preparation, candidate, next =>
+						prepareCompaction(
+							pathEntriesForCompaction,
+							effectiveSettings,
+							this.#model,
+							this.#tokenizer,
+							[next],
+							this.#host.activeRequestTarget(),
+						),
+					);
 					if (
 						nativeCompactionFailure &&
 						(candidate.provider !== nativeCompactionFailure.provider ||
-							!shouldUseProviderNativeCompaction(candidate, preparation.settings))
+							!shouldUseProviderNativeCompaction(candidate, candidatePreparation.settings))
 					) {
 						throw nativeCompactionFailure.error;
 					}
@@ -3517,7 +3572,7 @@ export class SessionMaintenance {
 					while (true) {
 						try {
 							compactResult = await compact(
-								this.#host.obfuscatePreparationForProvider(preparation),
+								this.#host.obfuscatePreparationForProvider(candidatePreparation),
 								candidate,
 								this.#host.modelRegistry.resolver(candidate, this.#host.sessionId()),
 								undefined,

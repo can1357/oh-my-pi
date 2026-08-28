@@ -3,6 +3,7 @@ import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import {
 	type CompactionPreparation,
 	compact,
+	compactionPreparationHoldsForCandidate,
 	createFileOps,
 	DEFAULT_COMPACTION_SETTINGS,
 	NativeCompactionError,
@@ -3379,6 +3380,21 @@ describe("compact() remote compaction failure handling", () => {
 		expect(JSON.stringify(unrelatedFallbackReuse?.messagesToSummarize ?? [])).not.toContain(
 			"ORIGINAL ALPHA port 4242",
 		);
+
+		// Execution can still fall through to that fallback after the head candidate
+		// fails, so the head-scoped boundary must be detected as invalid for it and
+		// the rebuilt preparation must bring the originals back.
+		if (!unrelatedFallbackReuse) throw new Error("expected a head-candidate preparation");
+		expect(compactionPreparationHoldsForCandidate(unrelatedFallbackReuse, v2Model, v2Model)).toBe(true);
+		expect(compactionPreparationHoldsForCandidate(unrelatedFallbackReuse, v2Model, unrelatedFallback)).toBe(false);
+		const fallbackPreparation = prepareCompaction(
+			entries,
+			{ ...baseSettings, remoteStreamingV2Enabled: true },
+			v2Model,
+			new Tokenizer(v2Model),
+			[unrelatedFallback],
+		);
+		expect(JSON.stringify(fallbackPreparation?.messagesToSummarize ?? [])).toContain("ORIGINAL ALPHA port 4242");
 
 		const compactionModelOverride = makeOpenAiModel({
 			input: ["text", "image"],

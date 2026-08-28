@@ -1328,6 +1328,31 @@ export function remotePreserveReusable(
 	return reusableByModel(compactionModels[0] ?? activeModel);
 }
 
+/**
+ * Whether the pre-compaction prefix that `preparation` excluded is still
+ * covered once `candidate` — rather than the head of the preference list the
+ * boundary was chosen for — actually performs the compaction. A provider-native
+ * boundary hides its originals behind an opaque placeholder summary, so a
+ * candidate that cannot extend that payload must run against a preparation
+ * rebuilt from the full branch instead of committing a summary that covers only
+ * the recent tail.
+ */
+export function compactionPreparationHoldsForCandidate(
+	preparation: CompactionPreparation,
+	activeModel: Model,
+	candidate: Model,
+	resolvedRequestTarget?: string,
+): boolean {
+	if (!preparation.previousPreserveData) return true;
+	return remotePreserveReusable(
+		preparation.previousPreserveData,
+		activeModel,
+		preparation.settings,
+		[candidate],
+		resolvedRequestTarget,
+	);
+}
+
 export function remotePreserveReplayable(
 	preserveData: Record<string, unknown> | undefined,
 	activeModel: Model,
