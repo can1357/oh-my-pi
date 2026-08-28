@@ -34,6 +34,7 @@ import type { ApprovalMode } from "./tools/approval";
 import { resolveApproval } from "./tools/approval";
 import { confineToWorkspace, resolveToCwd } from "./tools/path-utils";
 import type { TodoPhase, TodoStatus } from "./tools/todo";
+import { toolResultFailed } from "./tools/tool-result";
 
 /** Phase used for Cursor-owned tasks with no local phase grouping. */
 const CURSOR_TODO_PHASE = "Tasks";
@@ -279,7 +280,13 @@ async function executeTool(
 		result = buildToolErrorResult(message);
 		isError = true;
 	}
-	isError ||= result.isError === true;
+	// The central failure derivation, not `result.isError` alone: the Cursor bridge
+	// runs `tool.execute` outside the agent loop, so it never crosses
+	// `coerceToolResult`'s projection of a typed `outcome` onto the legacy flag. A
+	// producer that reports its failure only through a minted `outcome` (or only in
+	// `details.isError`, as `eval` does on replay) would otherwise be announced to the
+	// Cursor client — and to the model in the tool-result message below — as a success.
+	isError ||= toolResultFailed(result);
 
 	const sanitizedFinalResult: AgentToolResult<unknown> = {
 		content: result.content.map(c => (c.type === "text" ? { ...c, text: sanitizeText(c.text) } : c)),
@@ -577,7 +584,9 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			result = buildToolErrorResult(message);
 			isError = true;
 		}
-		isError ||= result.isError === true;
+		// Same central derivation as `executeTool` above, for the same reason: this
+		// bridge is also outside the agent loop's normalization boundary.
+		isError ||= toolResultFailed(result);
 
 		// onUpdate may not fire for every chunk — flush any remaining output
 		// from the final result that wasn't already streamed.

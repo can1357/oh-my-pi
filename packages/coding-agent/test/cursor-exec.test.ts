@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentEvent, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import { mintToolOutcome, nonZeroExitCode } from "@oh-my-pi/pi-agent-core/presentation";
 import { type BlockState, handleServerMessage, type ToolCallState } from "@oh-my-pi/pi-ai/providers/cursor";
 import { buildPiLsResult, piTruncation } from "@oh-my-pi/pi-ai/providers/cursor/exec-modern";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai/types";
@@ -825,6 +826,62 @@ describe("CursorExecHandlers error results", () => {
 		expect(result.isError).toBe(true);
 		expect(result.content).toEqual([{ type: "text", text: "Enriched recovery guidance" }]);
 		expect(stdout).toEqual(["Enriched recovery guidance"]);
+		const end = events.find(event => event.type === "tool_execution_end");
+		expect(end?.isError).toBe(true);
+	});
+
+	// A producer migrated onto the typed presentation protocol is allowed to report
+	// its verdict through `outcome` alone. The agent loop projects that onto the
+	// legacy flag at its normalization boundary, but this bridge runs `tool.execute`
+	// itself, so deriving the flag from `result.isError` alone announced a failed
+	// call to the Cursor client — and to the model, via the returned tool-result
+	// message — as a success.
+	const outcomeOnlyFailureTool = (name: string): AgentTool => ({
+		name,
+		label: name,
+		description: "reports failure only through its typed outcome",
+		parameters: type({}),
+		execute: async () => ({
+			content: [{ type: "text", text: "Command exited with code 3" }],
+			details: {},
+			outcome: mintToolOutcome({
+				kind: "failed",
+				failure: { reason: "process", message: "Command exited with code 3" },
+				process: { kind: "exited", code: nonZeroExitCode(3) },
+			}),
+		}),
+	});
+
+	it("reports an outcome-only failure through the standard exec bridge", async () => {
+		const events: AgentEvent[] = [];
+		const handlers = new CursorExecHandlers({
+			cwd: ".",
+			tools: new Map([["read", outcomeOnlyFailureTool("read")]]),
+			emitEvent: event => events.push(event),
+		});
+
+		const result = await handlers.read(create(ReadArgsSchema, { toolCallId: "call-read", path: "ignored" }));
+		expect(result.isError).toBe(true);
+		const end = events.find(event => event.type === "tool_execution_end");
+		expect(end?.isError).toBe(true);
+	});
+
+	it("reports an outcome-only failure through the shell stream bridge", async () => {
+		const events: AgentEvent[] = [];
+		const handlers = new CursorExecHandlers({
+			cwd: ".",
+			tools: new Map([["bash", outcomeOnlyFailureTool("bash")]]),
+			emitEvent: event => events.push(event),
+		});
+
+		const result = await handlers.shellStream(
+			create(ShellArgsSchema, { toolCallId: "call-shell", command: "ignored" }),
+			{
+				onStdout: () => {},
+				onStderr: () => {},
+			},
+		);
+		expect(result.isError).toBe(true);
 		const end = events.find(event => event.type === "tool_execution_end");
 		expect(end?.isError).toBe(true);
 	});
