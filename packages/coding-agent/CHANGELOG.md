@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `omp usage` percentage rendering for Z.AI credit quotas that omit absolute values.
+
 ## [18.0.9] - 2026-08-28
 
 ### Breaking Changes

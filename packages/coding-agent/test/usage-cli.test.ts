@@ -331,6 +331,53 @@ describe("formatUsageBreakdown", () => {
 		expect(text).not.toContain("%");
 		expect(text).not.toContain("resets");
 	});
+	it("renders absolute credit quotas with their unit", () => {
+		const creditReport = makeReport("zai", "credits@example.test", [
+			{
+				id: "zai:credits:5h",
+				label: "ZAI 5 Hours Credit Quota",
+				scope: { provider: "zai", windowId: "5h" },
+				window: { id: "5h", label: "5 Hours" },
+				amount: { used: 2000, limit: 2000, unit: "credits", usedFraction: 1 },
+				status: "exhausted",
+			},
+		]);
+		const text = stripVTControlCharacters(formatUsageBreakdown([creditReport], [], Date.now()));
+		expect(text).toContain("2K / 2K credits");
+		expect(text).not.toContain("2Kundefined");
+	});
+
+	it("renders remaining credit quotas with their unit", () => {
+		const remainingReport = makeReport("zai", "remaining@example.test", [
+			{
+				id: "zai:credits:5h",
+				label: "ZAI 5 Hours Credit Quota",
+				scope: { provider: "zai", windowId: "5h" },
+				window: { id: "5h", label: "5 Hours" },
+				amount: { remaining: 2000, unit: "credits" },
+				status: "ok",
+			},
+		]);
+		const text = stripVTControlCharacters(formatUsageBreakdown([remainingReport], [], Date.now()));
+		expect(text).toContain("2K credits left");
+		expect(text).not.toContain("no data");
+	});
+	it("renders percentage-only credit quotas without claiming a credit count", () => {
+		const fallbackReport = makeReport("zai", "percentage@example.test", [
+			{
+				id: "zai:credits:5h",
+				label: "ZAI 5 Hours Credit Quota",
+				scope: { provider: "zai", windowId: "5h" },
+				window: { id: "5h", label: "5 Hours" },
+				amount: { unit: "percent", usedFraction: 0.42, remainingFraction: 0.58 },
+				status: "ok",
+			},
+		]);
+		const text = stripVTControlCharacters(formatUsageBreakdown([fallbackReport], [], Date.now()));
+		expect(text).toContain("42.0% used");
+		expect(text).not.toContain("credits");
+	});
+
 	it("renders every account: reported ones with limits, credential-only ones as no-data rows", () => {
 		const text = stripVTControlCharacters(formatUsageBreakdown(reports, accounts, Date.now()));
 		expect(text).toContain("dummy.primary@example.test");
