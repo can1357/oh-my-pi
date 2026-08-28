@@ -635,4 +635,37 @@ describe("auth-gateway DELETE /v1/routes/:id", () => {
 			expect(body.error).toBe(`Unknown route: ${primaryId}`);
 		});
 	});
+	it("does not bump generation on 404 delete (negative)", async () => {
+		await withEmptyRoutesGateway(async url => {
+			const beforeRes = await fetch(`${url}/v1/routes`, {
+				headers: { Authorization: "Bearer t" },
+			});
+			expect(beforeRes.status).toBe(200);
+			const before = (await beforeRes.json()) as RoutesListResponse;
+
+			const delRes = await fetch(`${url}/v1/routes/no-such-route`, {
+				method: "DELETE",
+				headers: { Authorization: "Bearer t" },
+			});
+			expect(delRes.status).toBe(404);
+
+			const afterRes = await fetch(`${url}/v1/routes`, {
+				headers: { Authorization: "Bearer t" },
+			});
+			expect(afterRes.status).toBe(200);
+			const after = (await afterRes.json()) as RoutesListResponse;
+			expect(after.generation).toBe(before.generation);
+		});
+	});
+
+	it("CORS preflight allows PUT and DELETE", async () => {
+		await withEmptyRoutesGateway(async url => {
+			const res = await fetch(`${url}/v1/routes/${hotRouteId}`, { method: "OPTIONS" });
+			expect(res.status).toBe(204);
+			const allow = res.headers.get("Access-Control-Allow-Methods") ?? "";
+			expect(allow).toContain("PUT");
+			expect(allow).toContain("DELETE");
+			expect(allow).toContain("GET");
+		});
+	});
 });

@@ -16,6 +16,7 @@
  *   GET  /v1/routes                        → list registered virtual routes
  *   GET  /v1/routes/:id                    → one registered virtual route
  *   PUT  /v1/routes/:id                    → register or replace a virtual route
+ *   DELETE /v1/routes/:id                    → unregister a virtual route
  *   POST /v1/chat/completions              → OpenAI chat-completions in/out
  *   POST /v1/messages                      → Anthropic messages in/out
  *   POST /v1/responses                     → OpenAI Responses in/out
