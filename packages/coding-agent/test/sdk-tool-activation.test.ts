@@ -2208,9 +2208,12 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		});
 
 		try {
-			const active = session.getActiveToolNames();
-			expect(active).not.toContain("mcp__foo_bar");
-			expect(active).toContain("mcp__baz_qux");
+			// Non-disallowed MCP tools stay enabled and reachable; under the
+			// device's xd:// transport they mount off the top-level active set,
+			// so assert against enabled names plus mounts rather than active.
+			const enabled = [...session.getEnabledToolNames(), ...session.getMountedXdevToolNames()];
+			expect(enabled).not.toContain("mcp__foo_bar");
+			expect(enabled).toContain("mcp__baz_qux");
 		} finally {
 			await session.dispose();
 		}
@@ -2613,9 +2616,11 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		try {
 			await session.setActiveToolsByName(session.getAllToolNames());
 
-			// Disallow patterns persist; non-disallowed tools stay runtime-selectable.
-			expect(session.getActiveToolNames()).not.toContain("mcp__foo_bar");
-			expect(session.getActiveToolNames()).toContain("mcp__baz_qux");
+			// Disallow patterns persist; the non-disallowed server stays
+			// runtime-selectable (mounted under xd://, never re-activatable for
+			// the denied server's pattern).
+			expect(session.getEnabledToolNames()).not.toContain("mcp__foo_bar");
+			expect(session.getMountedXdevToolNames()).toContain("mcp__baz_qux");
 		} finally {
 			await session.dispose();
 		}
