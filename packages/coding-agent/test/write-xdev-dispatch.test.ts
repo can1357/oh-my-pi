@@ -113,6 +113,32 @@ describe("read and write route xd:// device URLs", () => {
 		}
 	});
 
+	it("dispatches typed device arguments without nested JSON escaping", async () => {
+		let received: unknown;
+		const echoDevice: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Returns its payload",
+			parameters: type({ content: "string" }),
+			approval: () => "read",
+			async execute(_toolCallId, params) {
+				received = params;
+				return { content: [{ type: "text", text: "received" }] };
+			},
+		};
+		const write = new WriteTool(xdevSession(process.cwd(), { xdev: createTestXdevState([echoDevice]) }));
+		const payload = { content: 'first\tline\n"quoted" — \\backslash' };
+
+		expect(write.approval({ path: "xd://echo", args: payload })).toEqual({ tier: "read", policyKey: "echo" });
+		const result = await write.execute("write-xdev-typed-args", { path: "xd://echo", args: payload });
+
+		expect(result.isError).toBeUndefined();
+		expect(received).toEqual(payload);
+		await expect(
+			write.execute("write-xdev-both-payloads", { path: "xd://echo", content: "{}", args: payload }),
+		).rejects.toThrow("either `content` or typed `args`");
+	});
+
 	it("records a read tier on the dispatch of a read-only device", async () => {
 		const readDevice: AgentTool = {
 			name: "peek",

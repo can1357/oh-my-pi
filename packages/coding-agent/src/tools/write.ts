@@ -305,7 +305,8 @@ function resolveBulkDirectives(raw: string, stripped: string): Map<number, strin
 
 const writeSchema = type({
 	path: type("string").describe("file path"),
-	content: type("string").describe("file content"),
+	"content?": type("string").describe("file content; required unless `args` targets an xd:// device"),
+	"args?": type("object").describe("typed arguments for an xd:// device; mutually exclusive with content"),
 });
 
 export type WriteToolInput = typeof writeSchema.infer;
@@ -535,12 +536,18 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			// functions that reject schema-invalid objects stay exec so the gate
 			// fails closed — the dispatch itself rejects invalid arguments too.
 			const rawContent = (args as Partial<WriteParams>).content;
-			if (typeof rawContent !== "string") return "exec";
+			const typedArgs = (args as Partial<WriteParams>).args;
 			let parsed: unknown;
-			try {
-				parsed = JSON.parse(rawContent);
-			} catch {
-				return "exec";
+			if (typedArgs !== undefined) {
+				if (typeof rawContent === "string" || !isRecord(typedArgs)) return "exec";
+				parsed = typedArgs;
+			} else {
+				if (typeof rawContent !== "string") return "exec";
+				try {
+					parsed = JSON.parse(rawContent);
+				} catch {
+					return "exec";
+				}
 			}
 			if (!isRecord(parsed)) return "exec";
 			try {
@@ -562,7 +569,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<WriteParams>;
 		const targetPath = typeof params.path === "string" ? params.path : "(missing)";
-		const content = typeof params.content === "string" ? params.content : "";
+		const typedArgs = params.args;
+		const content =
+			typeof params.content === "string" ? params.content : typedArgs !== undefined ? JSON.stringify(typedArgs) : "";
 		return [`Path: ${truncateForPrompt(targetPath)}`, `Content:\n${truncateForPrompt(content)}`];
 	};
 	readonly label = "Write";
@@ -1103,7 +1112,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 	async execute(
 		_toolCallId: string,
-		{ path: rawPath, content }: WriteParams,
+		{ path: rawPath, content, args }: WriteParams,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<WriteToolDetails>,
 		context?: AgentToolContext,
@@ -1119,6 +1128,20 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// Peel a read-tool selector (`:raw`, `:1-20`, …) so the write target matches
 		// what `read` resolves for the same URL; line-range/malformed selectors throw.
 		const path = peelWriteUrlSelector(unwrapHashlineHeaderPath(rawPath));
+		const xdevTarget = parseXdUrl(path);
+		if (content !== undefined && args !== undefined) {
+			throw new ToolError("write accepts either `content` or typed `args`, never both.");
+		}
+		if (args !== undefined && !xdevTarget) {
+			throw new ToolError("Typed `args` are valid only for an xd:// device; filesystem writes require `content`.");
+		}
+		if (args !== undefined && !isRecord(args)) {
+			throw new ToolError("Typed `args` for an xd:// device must be a JSON object.");
+		}
+		if (content === undefined && args === undefined) {
+			throw new ToolError("write requires `content`, or typed `args` for an xd:// device.");
+		}
+		const deviceContent = args === undefined ? content! : JSON.stringify(args);
 		// A device-only session grants `write` purely as the xd:// transport (see
 		// createTools): device dispatches proceed, every other target is rejected
 		// before any handler, guard, conflict resolver, or bridge sees it. Active
@@ -1130,12 +1153,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			!(this.session.getPlanModeState?.()?.enabled === true && targetsLocalSandbox(this.session, path))
 		) {
 			throw new ToolError(
-				"This `write` tool is limited to the xd:// device transport: call it with path `xd://<tool>` and the device's JSON arguments in `content` (`read xd://` lists mounted devices). Active plan mode additionally permits local:// sandbox drafts. Filesystem writes are not available elsewhere.",
+				"This `write` tool is limited to the xd:// device transport: call it with path `xd://<tool>` and typed JSON arguments in `args` (`read xd://` lists mounted devices). Active plan mode additionally permits local:// sandbox drafts. Filesystem writes are not available elsewhere.",
 			);
 		}
 		return untilAborted(signal, async () => {
 			// Strip hashline display prefixes ([PATH#HASH] + LINE:) if the model copied them from read output
-			const { text: cleanContent, stripped } = stripWriteContent(this.session, content);
+			const { text: cleanContent, stripped } = stripWriteContent(this.session, deviceContent);
 			const internalRouter = InternalUrlRouter.instance();
 			assertWriteTargetAddressable(path, internalRouter);
 			if (internalRouter.canHandle(path)) {
@@ -1371,6 +1394,7 @@ interface WriteRenderArgs {
 	path?: unknown;
 	file_path?: unknown;
 	content?: unknown;
+	args?: unknown;
 }
 
 const WRITE_PREVIEW_LINES = 6;
@@ -1397,6 +1421,12 @@ function writeContentOf(args: unknown): string {
 	if (args == null || typeof args !== "object" || !("content" in args)) return "";
 	const content = args.content;
 	return typeof content === "string" ? content : "";
+}
+
+function writeDeviceContentOf(args: WriteRenderArgs): string | undefined {
+	if (typeof args.content === "string") return args.content;
+	if (!isRecord(args.args)) return undefined;
+	return JSON.stringify(args.args);
 }
 
 function formatLineCountSuffix(lineCount: number, uiTheme: Theme): string {
@@ -1608,7 +1638,7 @@ export const writeToolRenderer = {
 		const xdev = parseXdUrl(rawPath);
 		if (xdev?.name) {
 			const resolveMounted = (context.renderContext as WriteRenderContext | undefined)?.resolveXdevMounted;
-			return xdevActivitySummary(xdev.name, writeArgs.content, resolveMounted);
+			return xdevActivitySummary(xdev.name, writeDeviceContentOf(writeArgs), resolveMounted);
 		}
 		return { label: "Write", detail: shortenPath(rawPath) };
 	},
@@ -1628,12 +1658,12 @@ export const writeToolRenderer = {
 		if (args.path === undefined && args.file_path === undefined) return undefined;
 		if (rawPath && couldBecomeXdUrl(rawPath)) {
 			const xdev = parseXdUrl(rawPath);
-			// The path string is settled once the content field started streaming.
-			const pathSettled = args.content !== undefined;
-			if (!xdev?.name || !pathSettled) return undefined;
-			if (isResolutionDeviceName(xdev.name)) return renderResolutionDeviceCall(xdev.name, args.content, uiTheme);
-			if (xdev.name === REPORT_ISSUE_DEVICE_NAME) return renderReportIssueDeviceCall(args.content, uiTheme);
-			return renderXdevCall(xdev.name, args.content, options, uiTheme, options.renderContext?.resolveXdevMounted);
+			const deviceContent = writeDeviceContentOf(args);
+			// The path string is settled once the device payload arrived.
+			if (!xdev?.name || deviceContent === undefined) return undefined;
+			if (isResolutionDeviceName(xdev.name)) return renderResolutionDeviceCall(xdev.name, deviceContent, uiTheme);
+			if (xdev.name === REPORT_ISSUE_DEVICE_NAME) return renderReportIssueDeviceCall(deviceContent, uiTheme);
+			return renderXdevCall(xdev.name, deviceContent, options, uiTheme, options.renderContext?.resolveXdevMounted);
 		}
 		const filePath = shortenPath(rawPath);
 		const lang = rawPath ? (getLanguageFromPath(rawPath) ?? "text") : "text";

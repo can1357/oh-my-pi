@@ -5,9 +5,9 @@
  * tools array and exposed as internal URLs driven through the `read`/`write`
  * tools the model already has:
  *
- *   read  xd://          → mounted tool listing (discovery)
  *   read  xd://<tool>    → tool docs + JSON parameter schema
- *   write xd://<tool>    → execute: `content` is the JSON args object
+ *   write xd://<tool>    → execute: `args` is the typed JSON argument object
+ *                              (`content` may carry its JSON serialization)
  *
  * Direct and device dispatch share one canonical tool map. The mounted-name
  * set controls presentation only; dispatch accepts the enabled union of
@@ -136,7 +136,7 @@ function renderDocs(inst: Tool, heading = "#", descriptionCap?: number): string 
 		"```ts",
 		`type Args = ${schema};`,
 		"```",
-		`Execute by writing JSON to ${XD_URL_PREFIX}${inst.name}.`,
+		`Execute by writing typed JSON arguments to ${XD_URL_PREFIX}${inst.name}.`,
 	].join("\n");
 }
 
