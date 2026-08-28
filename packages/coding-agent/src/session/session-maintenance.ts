@@ -1634,7 +1634,7 @@ export class SessionMaintenance {
 			contextWindow,
 			model: `${model.provider}/${model.id}`,
 		});
-		this.#explainExtendedContextCapOnce(model, contextTokens);
+		this.#explainExtendedContextCapOnce(model, contextTokens, compactionSettings);
 		await this.runAutoCompaction("threshold", false, false, false, {
 			autoContinue: false,
 			triggerContextTokens: contextTokens,
@@ -1645,16 +1645,29 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * Explain, at most once per session, that compaction is firing because
-	 * `extendedContext: false` capped the model's window — not because the
-	 * model ran out of context. Stays silent when the full window would not
-	 * have avoided this compaction anyway, so the notice always names a
-	 * setting change that would actually have helped.
+	 * Explain, at most once per session, that threshold compaction is firing
+	 * because `extendedContext: false` capped the model's window — not because
+	 * the model ran out of context. Shared by every threshold-compaction entry
+	 * point ({@link runPrePromptCompactionIfNeeded},
+	 * {@link maintainContextMidRun}, {@link checkCompaction}) so a capped model
+	 * explains itself on whichever path first crosses the threshold.
+	 *
+	 * Silent unless the uncapped window would actually have avoided this
+	 * compaction. The trigger is `shouldCompact`, not a bare window comparison,
+	 * so the counterfactual must re-run the same decision against the full
+	 * window: a fixed `compaction.thresholdTokens` is window-independent and
+	 * trips either way, and a context past the full window's own threshold
+	 * compacts either way too. Promising the toggle in those cases would name a
+	 * setting change that changes nothing.
 	 */
-	#explainExtendedContextCapOnce(model: Model, contextTokens: number): void {
+	#explainExtendedContextCapOnce(
+		model: Model,
+		contextTokens: number,
+		compactionSettings: ConfiguredCompactionSettings,
+	): void {
 		if (this.#extendedContextCapExplained) return;
 		const fullWindow = this.#host.modelRegistry.cappedExtendedContextWindow(model);
-		if (fullWindow === undefined || contextTokens >= fullWindow) return;
+		if (fullWindow === undefined || shouldCompact(contextTokens, fullWindow, compactionSettings)) return;
 		this.#extendedContextCapExplained = true;
 		this.#host.emitNotice(
 			"warning",
@@ -1765,6 +1778,7 @@ export class SessionMaintenance {
 			return;
 		}
 
+		if (model) this.#explainExtendedContextCapOnce(model, contextTokens, compactionSettings);
 		const messagesBefore = activeMessages.length;
 		const result = await this.runAutoCompaction("threshold", false, false, false, {
 			autoContinue: false,
@@ -2081,6 +2095,8 @@ export class SessionMaintenance {
 			// Try promotion first — if a larger model is available, switch instead of compacting
 			const promoted = await this.#tryContextPromotion(assistantMessage);
 			if (!promoted) {
+				const activeModel = this.#model;
+				if (activeModel) this.#explainExtendedContextCapOnce(activeModel, contextTokens, compactionSettings);
 				return await this.runAutoCompaction("threshold", false, false, allowDefer, {
 					autoContinue,
 					triggerContextTokens: postMaintenanceContextTokens,

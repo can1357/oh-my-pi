@@ -1713,6 +1713,30 @@ describe("ModelRegistry", () => {
 			expect(restored?.contextWindow).toBe(1_000_000);
 			expect(registry.cappedExtendedContextWindow(restored!)).toBeUndefined();
 		});
+
+		test("a below-full contextWindow override is not reported as a cap unlock", async () => {
+			// The long-context clamp runs before per-model overrides are applied, so
+			// a smaller final window is not proof the cap owns it. Here the user
+			// asked for 500K on a 1M model: flipping `extendedContext` cannot
+			// restore anything, and advertising a 1M unlock would promise a restore
+			// that never happens.
+			writeRawModelsJson({
+				"openai-codex": { modelOverrides: { "gpt-5.6-sol": { contextWindow: 500_000 } } },
+			});
+			await Settings.init({ inMemory: true });
+			settings.set("extendedContext", false);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+
+			const overridden = registry.find("openai-codex", "gpt-5.6-sol");
+			expect(overridden?.contextWindow).toBe(500_000);
+			expect(registry.cappedExtendedContextWindow(overridden!)).toBeUndefined();
+
+			settings.set("extendedContext", true);
+			await registry.reapplyModelPolicies();
+			const unchanged = registry.find("openai-codex", "gpt-5.6-sol");
+			expect(unchanged?.contextWindow).toBe(500_000);
+			expect(registry.cappedExtendedContextWindow(unchanged!)).toBeUndefined();
+		});
 	});
 	describe("bundled Anthropic catalog availability", () => {
 		let anthropicAuth: AuthStorage;

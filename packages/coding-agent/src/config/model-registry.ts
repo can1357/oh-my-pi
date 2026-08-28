@@ -263,11 +263,14 @@ export class ModelRegistry {
 	#ignoreLocalModelConfig: boolean;
 	#fetch: FetchImpl;
 	#settings: Settings | undefined;
-	// Pre-clamp context window of every model `extendedContext: false` capped at
-	// its premium long-context threshold, keyed `provider\0id`. Without it the
-	// full window is unrecoverable after the cap and the shrink is invisible:
-	// a 1M Codex window silently reports 272K and compaction starts firing.
-	#cappedExtendedWindows: Map<string, number> = new Map();
+	// Long-context cap bookkeeping for every model `extendedContext: false`
+	// clamped, keyed `provider\0id`. `full` is the pre-clamp window, which is
+	// otherwise unrecoverable after the clamp and makes the shrink invisible: a
+	// 1M Codex window silently reports 272K and compaction starts firing.
+	// `clamped` is the window the clamp installed; later composition steps
+	// (`#applyModelOverrides`, provider guardrails) can overwrite it, so only a
+	// model still reporting `clamped` is capped by this setting today.
+	#cappedExtendedWindows: Map<string, { full: number; clamped: number }> = new Map();
 
 	#resolveCommandBackedApiKey(provider: string, options?: { forceCommandRefresh?: boolean }): CommandApiKeyResolution {
 		const keyConfig = this.#customProviderApiKeys.get(provider);
@@ -2064,7 +2067,7 @@ export class ModelRegistry {
 				const threshold = model.cost.longContext?.inputThreshold;
 				const key = `${model.provider}\u0000${model.id}`;
 				if (threshold !== undefined && model.contextWindow !== null && model.contextWindow > threshold) {
-					this.#cappedExtendedWindows.set(key, model.contextWindow);
+					this.#cappedExtendedWindows.set(key, { full: model.contextWindow, clamped: threshold });
 					model = applyModelOverride(model, { contextWindow: threshold });
 				} else {
 					// A model can stop being capped mid-session (setting toggled,
@@ -2293,15 +2296,17 @@ export class ModelRegistry {
 	 * Context window `extendedContext: true` would unlock for this model, or
 	 * `undefined` when the setting is not currently capping it.
 	 *
-	 * Returns the pre-clamp window recorded by the long-context cap, and only
-	 * while the model still reports a smaller one — an explicit per-model
-	 * `contextWindow` override reapplies after the cap and wins over it, so the
-	 * recorded value alone does not prove the model is capped today.
+	 * Reports the pre-clamp window recorded by the long-context cap, and only
+	 * while the model's final window is still the one the clamp installed. An
+	 * explicit per-model `contextWindow` override reapplies after the cap and
+	 * wins over it, so a smaller window is not proof the cap owns it: a 500K
+	 * override on a 1M model stays 500K when the setting flips, and promising a
+	 * 1M unlock there would advertise a restore that cannot happen.
 	 */
 	cappedExtendedContextWindow(model: Pick<Model<Api>, "provider" | "id" | "contextWindow">): number | undefined {
-		const full = this.#cappedExtendedWindows.get(`${model.provider}\u0000${model.id}`);
-		if (full === undefined) return undefined;
-		return model.contextWindow !== null && model.contextWindow < full ? full : undefined;
+		const cap = this.#cappedExtendedWindows.get(`${model.provider}\u0000${model.id}`);
+		if (cap === undefined) return undefined;
+		return model.contextWindow === cap.clamped ? cap.full : undefined;
 	}
 
 	/**

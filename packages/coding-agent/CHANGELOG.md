@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Compaction now explains when a model's context window is capped by `extendedContext` being off, and `omp models` marks capped rows so the smaller window is not mistaken for the model's real limit.
+
 ## [18.0.10] - 2026-08-28
 
 ### Added
@@ -26,10 +30,6 @@
 - Fixed a macOS composer display issue where undercurl could remain attached to stale text after rapid typing.
 - Improved `xd://` MCP failure messages with actionable transport stages, failure categories, server and tool context, retryability, trace IDs, and redacted JSON-RPC details.
 - Fixed ACP `read` tool-call locations so clients such as Zed Follow receive the resolved filesystem path rather than the OMP line-range selector.
-- Fixed `import numpy` (and other native-extension imports) hanging indefinitely in the Python eval tool on Windows, where the runner's always-on background stdin reader deadlocked native DLL loading; Windows now reads the control channel serially between requests while POSIX keeps concurrent request dispatch ([#7985](https://github.com/can1357/oh-my-pi/issues/7985)).
-### Added
-
-- Compaction now explains when a model's context window is capped by `extendedContext` being off, and `omp models` marks capped rows so the smaller window is not mistaken for the model's real limit.
 
 ## [18.0.9] - 2026-08-28
 
