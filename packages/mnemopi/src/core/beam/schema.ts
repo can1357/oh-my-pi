@@ -109,10 +109,15 @@ export function initBeam(db: Database): void {
 	addColumnIfMissing(db, "working_memory", "embed_text", "TEXT DEFAULT NULL");
 	addColumnIfMissing(db, "episodic_memory", "memory_type", "TEXT DEFAULT 'unknown'");
 	addColumnIfMissing(db, "episodic_memory", "binary_vector", "BLOB");
-	const consolidatedAtAdded = addColumnIfMissing(db, "working_memory", "consolidated_at", "TEXT");
-	if (consolidatedAtAdded) {
-		db.run("UPDATE working_memory SET consolidated_at = ? WHERE consolidated_at IS NULL", [new Date().toISOString()]);
-	}
+	// D7: `consolidated_at` NULL now means "not yet promoted to episodic", the
+	// state trimWorkingMemory() (beam/store.ts) treats as protected and never
+	// deletes. Backfilling a timestamp here for a column newly added to an
+	// upgraded bank would mark every legacy row as already-consolidated,
+	// making it immediately trim-eligible once past TTL despite never having
+	// reached episodic memory — silently destroying an upgraded bank's whole
+	// working memory on the next remember(). Leave it NULL so legacy rows
+	// stay protected and remain real candidates for sleep() promotion.
+	addColumnIfMissing(db, "working_memory", "consolidated_at", "TEXT");
 	db.run(
 		"CREATE INDEX IF NOT EXISTS idx_wm_unconsolidated ON working_memory(session_id, timestamp) WHERE consolidated_at IS NULL",
 	);
@@ -196,6 +201,35 @@ export function initBeam(db: Database): void {
 	addColumnIfMissing(db, "memoria_facts", "valid_from_msg_idx", "INTEGER");
 	addColumnIfMissing(db, "memoria_facts", "valid_to_msg_idx", "INTEGER");
 	addColumnIfMissing(db, "memoria_facts", "source_memory_id", "TEXT");
+
+	// FTS5 index over memoria_facts.value: gives flat extracted statements
+	// (fact_type='entity', key='fact' — a legitimate label here, not a
+	// fabricated subject) a text-searchable home now that they no longer
+	// project into `facts`. content_rowid='id' because memoria_facts's rowid
+	// alias column is literally named `id` (unlike episodic_memory, whose
+	// alias column is named `rowid`, hence fts_episodes uses content_rowid='rowid').
+	const memoriaFactsFtsExisted =
+		db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'fts_memoria_facts'").get() !== null;
+	db.run(`
+		CREATE VIRTUAL TABLE IF NOT EXISTS fts_memoria_facts USING fts5(
+			value, content='memoria_facts', content_rowid='id'
+		)
+	`);
+	runAll(db, [
+		`CREATE TRIGGER IF NOT EXISTS mf_ai AFTER INSERT ON memoria_facts BEGIN
+			INSERT INTO fts_memoria_facts(rowid, value) VALUES (new.id, new.value);
+		END`,
+		`CREATE TRIGGER IF NOT EXISTS mf_ad AFTER DELETE ON memoria_facts BEGIN
+			INSERT INTO fts_memoria_facts(fts_memoria_facts, rowid, value) VALUES ('delete', old.id, old.value);
+		END`,
+		`CREATE TRIGGER IF NOT EXISTS mf_au AFTER UPDATE OF value ON memoria_facts BEGIN
+			INSERT INTO fts_memoria_facts(fts_memoria_facts, rowid, value) VALUES ('delete', old.id, old.value);
+			INSERT INTO fts_memoria_facts(rowid, value) VALUES (new.id, new.value);
+		END`,
+	]);
+	if (!memoriaFactsFtsExisted) {
+		db.run("INSERT INTO fts_memoria_facts(rowid, value) SELECT id, value FROM memoria_facts");
+	}
 
 	db.run(`
 		CREATE TABLE IF NOT EXISTS memoria_timelines (

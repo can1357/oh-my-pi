@@ -320,6 +320,61 @@ export function heuristicExtractFacts(text: string): string[] {
 	return facts.slice(0, 5);
 }
 
+/**
+ * Bounded repeat counts (`{0,4}` per proper-noun phrase, `{1,40}` for the role
+ * word span) keep this immune to catastrophic backtracking on adversarial
+ * input while still spanning realistic multi-word names/roles/orgs.
+ */
+const ROLE_OF_PATTERN =
+	/\b([A-Z][\w'.-]*(?:\s+[A-Z][\w'.-]*){0,4})\s+is\s+(?:the\s+|an?\s+)?([a-zA-Z][a-zA-Z\s-]{1,40}?)\s+of\s+([A-Z][\w'.-]*(?:\s+[A-Z][\w'.-]*){0,4})\b/;
+
+function addUniqueTriple(out: ExtractedKgTriple[], subject: string, predicate: string, object: string): void {
+	const triple = { subject: normalizeFact(subject), predicate, object: normalizeFact(object) };
+	const isDuplicate = out.some(
+		t => t.subject === triple.subject && t.predicate === triple.predicate && t.object === triple.object,
+	);
+	if (triple.subject.length > 1 && triple.object.length > 1 && !isDuplicate) {
+		out.push(triple);
+	}
+}
+
+/**
+ * Deterministic, no-LLM knowledge-graph extraction. An "<X> is the <role> of
+ * <Y>" clause (e.g. "Priya Natarajan is the CEO of Vindral") is an
+ * unambiguous subject-predicate-object relation regardless of which words
+ * fill X/role/Y, so it is safe to promote it to a real `kg` triple
+ * (predicate `is_<role>_of`) instead of letting it degrade into a flat fact
+ * string. Mirrors heuristicExtractFacts's clause splitting so both
+ * heuristics agree on sentence boundaries; this is a general grammatical
+ * rule, not a fixed list of role names.
+ */
+export function heuristicExtractKg(text: string): ExtractedKgTriple[] {
+	const normalized = text.replace(/\s+/g, " ").trim();
+	if (normalized === "") {
+		return [];
+	}
+	const triples: ExtractedKgTriple[] = [];
+	const clauses = normalized.split(/(?:[.!?;]+|\s+and\s+|\s+but\s+)/i);
+	for (const clause of clauses) {
+		const match = ROLE_OF_PATTERN.exec(clause.trim());
+		const subject = match?.[1];
+		const role = match?.[2];
+		const object = match?.[3];
+		if (subject !== undefined && role !== undefined && object !== undefined) {
+			const slug = role
+				.trim()
+				.toLowerCase()
+				.replace(/[^a-z0-9]+/g, "_")
+				.replace(/^_+|_+$/g, "");
+			if (slug !== "") {
+				addUniqueTriple(triples, subject, `is_${slug}_of`, object);
+			}
+		}
+		if (triples.length >= STRUCTURED_CATEGORY_LIMIT) break;
+	}
+	return triples;
+}
+
 async function tryHostExtraction(prompt: string): Promise<[boolean, string | null]> {
 	if (!llmEnabled() || !hostLlmEnabled() || getHostLlmBackend() === null) {
 		return [false, null];
@@ -360,10 +415,11 @@ async function localFallback(
 	}
 	diag.recordFailure("local", undefined, "model_not_loaded");
 	const heuristic = heuristicExtractFacts(sourceText);
-	if (heuristic.length > 0) {
-		diag.recordSuccess("local", heuristic.length);
+	const kg = heuristicExtractKg(sourceText);
+	if (heuristic.length > 0 || kg.length > 0) {
+		diag.recordSuccess("local", heuristic.length + kg.length);
 		diag.recordCall({ succeeded: true });
-		return { ...emptyFactCategories(), facts: heuristic };
+		return { ...emptyFactCategories(), facts: heuristic, kg };
 	}
 	diag.recordCall({ succeeded: false, allEmpty: true });
 	return emptyFactCategories();
@@ -437,10 +493,11 @@ export async function extractFactCategories(
 	if (!llmAvailable()) {
 		diag.recordAttempt("local");
 		const heuristic = heuristicExtractFacts(text);
-		if (heuristic.length > 0) {
-			diag.recordSuccess("local", heuristic.length);
+		const kg = heuristicExtractKg(text);
+		if (heuristic.length > 0 || kg.length > 0) {
+			diag.recordSuccess("local", heuristic.length + kg.length);
 			diag.recordCall({ succeeded: true });
-			return { ...emptyFactCategories(), facts: heuristic };
+			return { ...emptyFactCategories(), facts: heuristic, kg };
 		}
 		diag.recordFailure("local", undefined, "llm_unavailable_at_call_site");
 		diag.recordCall({ succeeded: false });

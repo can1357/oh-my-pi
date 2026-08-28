@@ -5,7 +5,13 @@ import { adjustWeights, classifyIntent } from "../query-intent";
 import { getSynonyms, normalizeQuery, STOP_WORDS as QUERY_STOP_WORDS } from "../synonyms";
 import { extractTemporal } from "../temporal-parser";
 import { cosineSimilarity } from "../vector-math";
-import type { BeamMemoryState, RecallEnhancedOptions, RecallOptions, RecallResult } from "./types";
+import type {
+	BeamMemoryState,
+	RecallEnhancedOptions,
+	RecallLengthNormalization,
+	RecallOptions,
+	RecallResult,
+} from "./types";
 
 type DbValue = string | number | null | Uint8Array;
 type Row = Record<string, unknown>;
@@ -49,6 +55,13 @@ type FactRecallResult = RecallResult & {
 	fact_id?: string;
 	subject?: string;
 	predicate?: string;
+	/**
+	 * Memory this fact was extracted from (`memoria_facts.source_memory_id`).
+	 * Only populated for facts recalled through the memoria FTS index —
+	 * legacy `facts`-table hits have no memory reference and leave this
+	 * unset.
+	 */
+	source_memory_id?: string | null;
 };
 
 type RecallMmrItem = {
@@ -97,8 +110,59 @@ export function clipRecallContent(
 	return { content: `${head}…`, truncated: true, fullLength };
 }
 
+/**
+ * Discount `score` by `contentLength` under {@link RecallLengthNormalization} `mode`
+ * (see {@link RecallOptions.lengthNormalization}). Applied to a widened candidate
+ * pool BEFORE the final MMR/topK selection in {@link recallEnhanced}, and mirrored by
+ * the polyphonic path's `diversityRerank`, so a long candidate that would otherwise
+ * win purely on raw relevance can be discounted relative to shorter, equally
+ * relevant candidates.
+ *
+ * - `none` (and any unrecognised runtime value): identity -- byte-identical to the
+ *   Phase-1 pipeline.
+ * - `log`: `score / log2(contentLength + 2)`. Mild penalty, independent of
+ *   `meanLength`.
+ * - `bm25`: `score / (0.25 + 0.75 * (contentLength / meanLength))` -- the classic
+ *   BM25 length-normalization term with `b = 0.75`, scaled relative to the
+ *   candidate pool's mean length (`meanLength`), so it penalizes outliers more
+ *   sharply than `log`.
+ *
+ * Every input is sanitized to a finite, non-negative value first (a non-finite or
+ * negative `score`/`contentLength`/`meanLength` becomes `0`, and a non-positive
+ * `meanLength` falls back to `1` for the `bm25` division), so the result is always
+ * finite regardless of what a caller passes.
+ */
+export function normalizeRecallScore(
+	score: number,
+	contentLength: number,
+	mode: RecallLengthNormalization,
+	meanLength = 0,
+): number {
+	const safeScore = Number.isFinite(score) ? Math.max(0, score) : 0;
+	if (mode === "none") return safeScore;
+	const safeLength = Number.isFinite(contentLength) ? Math.max(0, contentLength) : 0;
+	if (mode === "log") {
+		const denom = Math.log2(safeLength + 2);
+		return denom > 0 ? safeScore / denom : safeScore;
+	}
+	if (mode === "bm25") {
+		const safeMean = Number.isFinite(meanLength) && meanLength > 0 ? meanLength : 1;
+		const denom = 0.25 + 0.75 * (safeLength / safeMean);
+		return denom > 0 ? safeScore / denom : safeScore;
+	}
+	return safeScore;
+}
+
 const DEFAULT_LIMIT = 500;
-const STOP_WORDS = new Set([
+/**
+ * Grammatical stop words for query tokenisation. Exported so the polyphonic engine's
+ * full-text fact matching uses the SAME notion of "unsearchable word" as this linear path.
+ * Do NOT confuse this with `ENTITY_EXTRACTION_STOP_WORDS` in `../entities`, which is an
+ * extraction-side junk-ENTITY list containing domain nouns (`memory`, `system`, `data`,
+ * `user`, …); filtering search terms through that list makes ordinary domain questions
+ * unsearchable.
+ */
+export const STOP_WORDS = new Set([
 	"a",
 	"an",
 	"and",
@@ -545,15 +609,24 @@ function ftsRows(
 ): Row[] {
 	if (!tableExists(beam, table)) return [];
 	try {
+		// Superseded rows stay in the FTS mirrors (their content never changed) but must not
+		// occupy LIMIT slots — visibility filtering would drop them AFTER they displaced live rows.
 		if (table === "fts_working") {
-			return queryAll(beam, "SELECT id, rank FROM fts_working WHERE fts_working MATCH ? ORDER BY rank, id LIMIT ?", [
-				ftsQuery(query, useSynonyms),
-				limit,
-			]);
+			return queryAll(
+				beam,
+				`SELECT id, rank FROM fts_working
+				 WHERE fts_working MATCH ?
+				   AND id IN (SELECT id FROM working_memory WHERE superseded_by IS NULL)
+				 ORDER BY rank, id LIMIT ?`,
+				[ftsQuery(query, useSynonyms), limit],
+			);
 		}
 		return queryAll(
 			beam,
-			"SELECT rowid, rank FROM fts_episodes WHERE fts_episodes MATCH ? ORDER BY rank, rowid LIMIT ?",
+			`SELECT rowid, rank FROM fts_episodes
+			 WHERE fts_episodes MATCH ?
+			   AND rowid IN (SELECT rowid FROM episodic_memory WHERE superseded_by IS NULL)
+			 ORDER BY rank, rowid LIMIT ?`,
 			[ftsQuery(query, useSynonyms), limit],
 		);
 	} catch {
@@ -1042,13 +1115,37 @@ export async function recallEnhanced(
 		useIntent: options.useIntent !== false,
 		useMmr: options.useMmr !== false,
 	};
-	const results = await recall(beam, query, Math.max(topK * 2, topK), {
+	const lengthNormalization = options.lengthNormalization ?? "none";
+	// `none` (the default) overfetches exactly like Phase 1, byte-identical output.
+	// Non-`none` modes overfetch a much wider raw pool first -- `normalizeRecallScore`
+	// below can only discount a long candidate that actually made it into the pool the
+	// final MMR/topK draws from.
+	const innerTopK = lengthNormalization === "none" ? Math.max(topK * 2, topK) : Math.max(topK * 4, 30);
+	const results = await recall(beam, query, innerTopK, {
 		...enhancedOptions,
 		updateRecallCounts: false,
 	});
 	if (options.includeFacts === true) {
 		const facts = factRecall(beam, query, factRecallLimit(topK));
 		results.push(...facts);
+	}
+	if (lengthNormalization !== "none") {
+		let totalLength = 0;
+		for (const result of results) totalLength += result.full_length ?? result.content.length;
+		const meanLength = results.length > 0 ? totalLength / results.length : 0;
+		for (const result of results) {
+			const length = result.full_length ?? result.content.length;
+			result.score = round4(normalizeRecallScore(result.score ?? 0, length, lengthNormalization, meanLength));
+		}
+	}
+	const scoreFloor =
+		typeof options.scoreFloor === "number" && Number.isFinite(options.scoreFloor)
+			? Math.max(0, options.scoreFloor)
+			: 0;
+	if (scoreFloor > 0) {
+		for (let index = results.length - 1; index >= 0; index--) {
+			if ((results[index]?.score ?? 0) < scoreFloor) results.splice(index, 1);
+		}
 	}
 	results.sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
 	const finalResults = rerankRecallResults(results, options.mmrLambda ?? 0.7, topK);
@@ -1121,7 +1218,7 @@ export function formatContext(beam: BeamMemoryState, results: readonly RecallRes
 	return lines.join("\n");
 }
 
-export function factRecall(beam: BeamMemoryState, query: string, topK = 30): FactRecallResult[] {
+function factRecallFromFacts(beam: BeamMemoryState, query: string, topK: number): FactRecallResult[] {
 	if (topK <= 0 || !tableExists(beam, "facts")) return [];
 	let matched: Row[] = [];
 	if (tableExists(beam, "fts_facts")) {
@@ -1218,4 +1315,97 @@ export function factRecall(beam: BeamMemoryState, query: string, topK = 30): Fac
 		.filter(result => (result.score ?? 0) > 0)
 		.sort((left, right) => (right.score ?? 0) - (left.score ?? 0))
 		.slice(0, topK);
+}
+
+/**
+ * Flat extracted statements (`storeFactStrings`) now live only in
+ * `memoria_facts` — they never got a real subject/predicate, so they are no
+ * longer projected into `facts` (see `insertFactRows`'s `projectToFacts`
+ * option). This searches the `fts_memoria_facts` index over `value` instead,
+ * mapping each hit's `source_memory_id` onto {@link FactRecallResult.source_memory_id}
+ * (not `id` — a single source memory routinely yields several distinct flat
+ * facts, e.g. `storeFactStrings` called with a whole batch, and those must
+ * stay independently recallable rather than collapse onto one shared id).
+ * `id` instead identifies the individual `memoria_facts` row, which is
+ * already unique per fact.
+ */
+function factRecallFromMemoriaFacts(beam: BeamMemoryState, query: string, topK: number): FactRecallResult[] {
+	if (topK <= 0 || !tableExists(beam, "fts_memoria_facts")) return [];
+	let rows: Row[] = [];
+	try {
+		rows = queryAll(
+			beam,
+			`SELECT memoria_facts.id AS id,
+			        memoria_facts.value AS value,
+			        memoria_facts.source_memory_id AS source_memory_id,
+			        memoria_facts.importance AS importance,
+			        memoria_facts.timestamp AS timestamp,
+			        fts_memoria_facts.rank AS rank
+			 FROM fts_memoria_facts
+			 JOIN memoria_facts ON memoria_facts.id = fts_memoria_facts.rowid
+			 WHERE fts_memoria_facts MATCH ?
+			   AND memoria_facts.session_id = ?
+			   AND memoria_facts.source_memory_id IS NOT NULL
+			 ORDER BY fts_memoria_facts.rank, fts_memoria_facts.rowid
+			 LIMIT ?`,
+			[ftsQuery(query), beam.sessionId, topK * 3],
+		);
+	} catch {
+		rows = [];
+	}
+	// Blend BM25 relevance into the score. Previously this was `round4(importance)` alone,
+	// which is a CONSTANT for flat facts (measured: all 164 memoria facts on a real bank scored
+	// exactly 0.7000), so the `rank` captured just below into `fts_score` was never used and a
+	// perfect text match ranked identically to a weak one. Downstream that matters twice: the
+	// merge in `factRecall` resolves ties arbitrarily, and `recallEnhanced`'s MMR rerank treats
+	// every flat fact as equally relevant.
+	//
+	// Shape mirrors the legacy branch above (relevance scales a confidence-weighted base), with
+	// importance as a floor so the worst-ranked hit cannot fall to 0 and be dropped by the
+	// `score > 0` filter — `normalizeRanks` maps the worst row in a set to exactly 0. The best
+	// hit keeps its previous score, so this only ever demotes weaker matches.
+	const ranks = normalizeRanks(rows, "id");
+	return rows
+		.map(row => {
+			const importance = asNumber(row.importance, 0.5);
+			const rank = asNumber(row.rank, 0);
+			const relevance = ranks.get(asNumber(row.id)) ?? 1;
+			const result: FactRecallResult = {
+				id: `memoria:${asNumber(row.id)}`,
+				content: asString(row.value),
+				score: round4(importance * (0.8 + relevance * 0.2)),
+				source_memory_id: asNullableString(row.source_memory_id),
+				timestamp: asNullableString(row.timestamp),
+				tier_label: "fact",
+				tier: "fact",
+				source: "memoria_facts",
+				importance_score: round4(importance),
+				fts_score: round4(rank),
+				explanation: `memoria fact importance=${round4(importance)} relevance=${round4(relevance)}`,
+				voice_scores: {
+					importance: round4(importance),
+					fts: round4(rank),
+					keyword: round4(relevance),
+				},
+			};
+			return result;
+		})
+		.filter(result => (result.score ?? 0) > 0)
+		.sort((left, right) => (right.score ?? 0) - (left.score ?? 0))
+		.slice(0, topK);
+}
+
+export function factRecall(beam: BeamMemoryState, query: string, topK = 30): FactRecallResult[] {
+	if (topK <= 0) return [];
+	const legacyResults = factRecallFromFacts(beam, query, topK);
+	const memoriaResults = factRecallFromMemoriaFacts(beam, query, topK);
+	if (legacyResults.length === 0 && memoriaResults.length === 0) return [];
+	const byId = new Map<string, FactRecallResult>();
+	for (const result of [...legacyResults, ...memoriaResults]) {
+		const existing = byId.get(result.id);
+		if (existing === undefined || (result.score ?? 0) > (existing.score ?? 0)) {
+			byId.set(result.id, result);
+		}
+	}
+	return [...byId.values()].sort((left, right) => (right.score ?? 0) - (left.score ?? 0)).slice(0, topK);
 }

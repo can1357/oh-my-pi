@@ -147,13 +147,61 @@ function emitEvent(beam: BeamMemoryState, type: string, data: EventPayload): voi
 	void beam.pluginManager?.emit?.(event);
 }
 
+/**
+ * Invalidate every cache derived from `working_memory` / `facts` / `gists` state
+ * after a store, forget, or invalidate write:
+ *  - the polyphonic recall query cache (`queryCache` / legacy `_queryCache`);
+ *  - the polyphonic engine's memoized subject dictionary (`polyphonicEngine`),
+ *    built from `facts.subject` + `gists.participants_json`.
+ *
+ * The dictionary's own staleness check compares `MAX(rowid)` of `facts` and
+ * `gists`, which cannot see a deletion of a non-maximal row, an in-place
+ * `UPDATE`, or SQLite rowid reuse (neither table is `AUTOINCREMENT`, so a
+ * delete-then-insert at the old max rowid leaves the stamp unchanged). Every
+ * write path that can change those tables must therefore call this explicitly
+ * rather than rely on the engine noticing on its own.
+ */
 function invalidateCaches(beam: BeamMemoryState): void {
 	const cache = beam.caches as {
 		queryCache?: { invalidate?: () => void };
 		_queryCache?: { invalidate?: () => void };
+		polyphonicEngine?: { invalidateDictionary?: () => void };
 	};
 	cache.queryCache?.invalidate?.();
 	cache._queryCache?.invalidate?.();
+	cache.polyphonicEngine?.invalidateDictionary?.();
+}
+
+/**
+ * Existing row with this exact id in the current session, if any.
+ *
+ * Used when the caller supplies an explicit `memoryId`. Such a caller owns identity itself, so a
+ * rerun with the same id must UPDATE its row, while two of its rows that merely share content stay
+ * distinct.
+ */
+function findById(beam: BeamMemoryState, memoryId: string, content: string): string | null {
+	using statement = beam.db.prepare("SELECT id, session_id, content FROM working_memory WHERE id = ? LIMIT 1");
+	const row = statement.get(memoryId) as { id: string; session_id: string; content: string } | null;
+	if (row === null) return null;
+	// `id` is a global PRIMARY KEY, so a caller-supplied id that belongs to another session would
+	// otherwise fall through to an INSERT and surface as a raw SQLite constraint error.
+	if (row.session_id !== beam.sessionId) {
+		throw new Error(
+			`mnemopi: memoryId ${memoryId} already exists in session ${row.session_id}; ids are globally unique`,
+		);
+	}
+	// An explicit id addresses one row, and every derived artifact -- embeddings, extracted facts,
+	// annotations, episodic gists -- was produced from that row's content. Rewriting the content in
+	// place would strand all of it (and `scheduleEmbedding` only re-runs when embed_text differs
+	// from content), so a content change under a reused id is refused rather than half-applied.
+	// Callers that derive the id from the content, as the chunk paths do via `stableMemoryId`, get a
+	// new id automatically when the content changes and never hit this.
+	if (row.content !== content) {
+		throw new Error(
+			`mnemopi: memoryId ${memoryId} already stores different content; derive a new id instead of rewriting it`,
+		);
+	}
+	return row.id;
 }
 
 function findDuplicate(beam: BeamMemoryState, content: string): string | null {
@@ -223,12 +271,20 @@ function purgeWorkingMemoryArtifacts(db: BeamMemoryState["db"], ids: readonly st
 }
 
 /**
- * TTL / overflow trim for transient working memory. Only genuine scratch is
- * eligible: `consolidated_at IS NULL` no longer suffices on its own, since
- * restored or imported durable rows legitimately carry a NULL consolidation
- * marker with an old event timestamp (issue #4819). Rows flagged `IMPORTED`
- * are treated as durable and never trimmed, and trimmed rows cascade all linked
- * artifacts via `purgeWorkingMemoryArtifacts`.
+ * TTL / overflow trim for transient working memory. Only rows that have
+ * already been promoted to episodic memory (`consolidated_at IS NOT NULL`)
+ * are eligible for deletion here: a row that has not yet been consolidated
+ * is exactly the data `sleep()` still needs to promote, so trimming it would
+ * destroy memory before it ever reached episodic storage (D7 — promote, or
+ * skip, but never delete un-promoted memory). Rows flagged `IMPORTED` are
+ * additionally exempt even once consolidated, treating restored/imported
+ * banks as durable. Trimmed rows cascade all linked artifacts via
+ * `purgeWorkingMemoryArtifacts`.
+ *
+ * Consequence: consolidation (`sleep`) is now the ONLY path that reclaims
+ * un-consolidated working rows. If consolidation never runs for a session,
+ * its working memory can grow past `workingMemoryLimit` — that unbounded
+ * growth is the accepted cost of never silently losing un-promoted memory.
  */
 function trimWorkingMemory(beam: BeamMemoryState): void {
 	const limit = beam.config.workingMemoryLimit;
@@ -239,13 +295,13 @@ function trimWorkingMemory(beam: BeamMemoryState): void {
 		using selectStatement = beam.db.prepare(`
 			SELECT id FROM working_memory
 			WHERE session_id = ?
-			  AND consolidated_at IS NULL
+			  AND consolidated_at IS NOT NULL
 			  AND trust_tier IS NOT 'IMPORTED'
 			  AND (
 				timestamp < ? OR
 				id NOT IN (
 					SELECT id FROM working_memory
-					WHERE session_id = ? AND consolidated_at IS NULL AND trust_tier IS NOT 'IMPORTED'
+					WHERE session_id = ? AND consolidated_at IS NOT NULL AND trust_tier IS NOT 'IMPORTED'
 					ORDER BY timestamp DESC
 					LIMIT ?
 				)
@@ -448,7 +504,14 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 	const metadata = options.metadata ?? null;
 	const embedText = embeddingText(content, options);
 
-	const existingId = findDuplicate(beam, content);
+	// Content dedupe is a convenience for callers that do not track identity. A caller that DOES
+	// supply an id owns identity itself, and two of its rows may legitimately hold identical
+	// content -- byte-identical retention chunks of one oversized message, distinguished only by
+	// `chunk_index` and `ranges`, are the motivating case. Collapsing those kept only the FIRST
+	// chunk's metadata and lost every later chunk's ranges, making exact reconstruction impossible.
+	// So an explicit id is matched by id, never by content.
+	const explicitId = options.memoryId ?? options.memory_id ?? null;
+	const existingId = explicitId !== null ? findById(beam, explicitId, content) : findDuplicate(beam, content);
 	if (existingId !== null) {
 		beam.db.run(
 			`
@@ -463,6 +526,7 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 					veracity = CASE WHEN ? != 'unknown' THEN ? ELSE veracity END,
 					trust_tier = COALESCE(?, trust_tier),
 					embed_text = COALESCE(?, embed_text),
+					metadata_json = COALESCE(?, metadata_json),
 					consolidated_at = NULL
 				WHERE id = ? AND session_id = ?
 			`,
@@ -480,6 +544,10 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 				veracity,
 				trustTier,
 				storedEmbeddingText(content, embedText),
+				// Only an explicit-id update refreshes metadata. On the content-dedupe path the caller
+				// did not address a specific row, and overwriting whatever metadata that row already
+				// carries would be a behaviour change unrelated to this fix; NULL keeps it via COALESCE.
+				explicitId !== null ? metadataJson(metadata) : null,
 				existingId,
 				beam.sessionId,
 			],
@@ -496,7 +564,7 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 		return existingId;
 	}
 
-	const memoryId = options.memoryId ?? options.memory_id ?? generateId(content, new Date(timestamp));
+	const memoryId = explicitId ?? generateId(content, new Date(timestamp));
 	beam.db.run(
 		`
 			INSERT INTO working_memory
@@ -889,10 +957,11 @@ export function importFromDict(beam: BeamMemoryState, data: Record<string, unkno
 		consolidation_log: { inserted: 0 },
 	} satisfies ImportStats;
 	const db: Database = beam.db;
-	// Imported working-memory rows are durable, not scratch: stamp any that
-	// arrive unconsolidated so the TTL trim treats them as consolidated and can
-	// never silently discard a restored bank (issue #4819).
-	const importedAt = toUtcIso();
+	// Imported working-memory rows are durable, not scratch, but under D7 the
+	// TTL/overflow trim only ever reclaims rows that ARE consolidated — so an
+	// arriving row with no `consolidated_at` is passed through as NULL, which
+	// is now the protected state (and leaves it eligible for real promotion
+	// via `sleep()` instead of being permanently marked as already handled).
 	const oldToNewRowid = new Map<number, number>();
 
 	transaction(db, () => {
@@ -937,7 +1006,7 @@ export function importFromDict(beam: BeamMemoryState, data: Record<string, unkno
 					sqlBinding(item.last_recalled, null),
 					sqlBinding(item.created_at, null),
 					clampVeracity(item.veracity),
-					item.consolidated_at == null ? importedAt : sqlBinding(item.consolidated_at, importedAt),
+					sqlBinding(item.consolidated_at, null),
 					sqlBinding(item.memory_type, "unknown"),
 					sqlBinding(item.embed_text, null),
 					sqlBinding(item.author_id, null),

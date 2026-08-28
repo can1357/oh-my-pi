@@ -1,4 +1,6 @@
 import type { SQLQueryBindings } from "bun:sqlite";
+import { logger } from "@oh-my-pi/pi-utils";
+import { transaction } from "../../db";
 import { generateId, stableMemoryId } from "../../util/ids";
 import { aaakEncode } from "../aaak";
 import { REGEX_EXTRACTION_MAX_INPUT_CHARS } from "../entities";
@@ -262,6 +264,20 @@ function emitEvent(
 	void beam.pluginManager?.emit?.(event);
 }
 
+type InsertFactRowsOptions = {
+	/**
+	 * When `false`, write only the `memoria_facts` row and skip the projection
+	 * into `facts`. Flat extracted statements (`storeFactStrings`'s
+	 * `factType="entity"`, `key="fact"` call) have no real subject/predicate —
+	 * `key`/`factType` are storage labels, not SPO components, so projecting
+	 * them into `facts.subject`/`facts.predicate` fabricates a triple that
+	 * poisons every subject-based feature. Defaults to `true`: every other
+	 * caller passes a genuine key (e.g. `"iso_date"`, a computed metric key,
+	 * `"version"`) and must keep projecting exactly as before.
+	 */
+	projectToFacts?: boolean;
+};
+
 function insertFactRows(
 	beam: BeamMemoryState,
 	messageIdx: number,
@@ -271,6 +287,7 @@ function insertFactRows(
 	context: string,
 	importance: number,
 	sourceMemoryId: string | null,
+	options: InsertFactRowsOptions = {},
 ): void {
 	const timestamp = isoNow();
 	beam.db.run(
@@ -279,6 +296,8 @@ function insertFactRows(
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		[sourceSession(beam), messageIdx, factType, key, value, context, importance, timestamp, sourceMemoryId],
 	);
+
+	if (options.projectToFacts === false) return;
 
 	const factId = stableMemoryId(`${sourceSession(beam)}\0${factType}\0${key}\0${value}`, sourceMemoryId ?? "");
 	beam.db.run(
@@ -505,7 +524,9 @@ export function storeFactStrings(
 	const routeHeuristicCategories = options.routeHeuristicCategories ?? true;
 	let stored = 0;
 	for (const fact of facts) {
-		insertFactRows(beam, messageIdx, "entity", "fact", fact, fact, importance, sourceMemoryId);
+		insertFactRows(beam, messageIdx, "entity", "fact", fact, fact, importance, sourceMemoryId, {
+			projectToFacts: false,
+		});
 		stored++;
 		if (!routeHeuristicCategories) continue;
 		const pref = /^The user (prefers|dislikes) (.+)$/i.exec(fact);
@@ -969,33 +990,101 @@ function eligibleWorkingRows(beam: BeamMemoryState, sessionId: string): Row[] {
 	);
 }
 
-export function sleep(beam: BeamMemoryState, dryRun = false): SleepResult {
-	let rows = eligibleWorkingRows(beam, sourceSession(beam));
-	if (rows.length === 0)
-		return { dry_run: dryRun, status: "no_op", message: "No old working memories to consolidate" };
-	if (!dryRun) {
+type ChunkPlan = {
+	ids: string[];
+	summary: string;
+	metadata: Metadata;
+	scope: string;
+	validUntil: string | null;
+	veracity: string;
+};
+
+/**
+ * Compute everything `consolidateToEpisodic` needs for one chunk's *actual* item set.
+ * Takes a bare item list (rather than a `SleepChunk`) so `promoteChunk` can re-plan
+ * against just the rows a claim actually won, instead of the full pre-claim candidate
+ * set another concurrent sleeper may have partly grabbed first.
+ */
+function planChunk(beam: BeamMemoryState, source: string, items: readonly Row[]): ChunkPlan | null {
+	const ids = items.map(item => rowValue(item, "id")).filter((id): id is string => id !== null);
+	if (ids.length === 0) return null;
+	let scope = "session";
+	let validUntil: string | null = null;
+	for (const item of items) {
+		if (rowValue(item, "scope") === "global") scope = "global";
+		const itemValidUntil = rowValue(item, "valid_until");
+		if (itemValidUntil && (validUntil === null || itemValidUntil < validUntil)) validUntil = itemValidUntil;
+	}
+	const originalChars = items.map(item => rowValue(item, "content") ?? "").join(SLEEP_SUMMARY_SEPARATOR).length;
+	const sleepSummary = buildSleepSummary(beam, source, { items: [...items], originalChars });
+	const metadata: Metadata = { original_count: items.length, source, llm_used: false };
+	if (sleepSummary.truncated) {
+		metadata.truncated = true;
+		metadata.original_chars = sleepSummary.originalChars;
+		metadata.max_chars = sleepSummary.maxChars;
+	}
+	return {
+		ids,
+		summary: sleepSummary.summary,
+		metadata,
+		scope,
+		validUntil,
+		veracity: aggregateEpisodicVeracity(items.map(item => rowValue(item, "veracity") ?? "unknown")),
+	};
+}
+
+type ChunkOutcome = { kind: "promoted"; ids: string[] } | { kind: "raced" } | { kind: "error" };
+
+/**
+ * Claim this chunk's working_memory ids and promote them to episodic_memory as one
+ * SQLite transaction (fixes B2: the previous code stamped `consolidated_at` for the
+ * *whole* batch up front, then promoted chunk-by-chunk with nothing spanning the two,
+ * so a mid-batch throw left "phantom consolidated" rows — stamped but never promoted —
+ * that `trimWorkingMemory`'s `consolidated_at IS NOT NULL` predicate would silently
+ * delete). Claiming and promoting a chunk together means a throw anywhere in here,
+ * including inside `consolidateToEpisodic`'s fact/graph writes, rolls the whole chunk
+ * back via `transaction()`'s automatic ROLLBACK — the rows stay `consolidated_at IS
+ * NULL` and are picked up by a future sleep instead of being orphaned.
+ *
+ * If a concurrent `sleep()` already claimed every row in this chunk, the UPDATE claims
+ * nothing and this reports `raced` without writing anything (dryRun never reaches this
+ * function, so it stays side-effect free by construction).
+ */
+function promoteChunk(beam: BeamMemoryState, source: string, chunk: SleepChunk): ChunkOutcome {
+	return transaction(beam.db, (): ChunkOutcome => {
+		const candidateIds = chunk.items.map(item => rowValue(item, "id")).filter((id): id is string => id !== null);
+		if (candidateIds.length === 0) return { kind: "raced" };
 		const claimTs = isoNow();
-		const ids = rows.map(row => rowValue(row, "id")).filter((id): id is string => id !== null);
-		const placeholders = ids.map(() => "?").join(",");
+		const placeholders = candidateIds.map(() => "?").join(",");
 		beam.db.run(
 			`UPDATE working_memory SET consolidated_at = ? WHERE id IN (${placeholders}) AND consolidated_at IS NULL`,
-			[claimTs, ...ids],
+			[claimTs, ...candidateIds],
 		);
 		const claimed = new Set(
 			asRows(
 				beam.db
 					.query(`SELECT id FROM working_memory WHERE id IN (${placeholders}) AND consolidated_at = ?`)
-					.all(...ids, claimTs),
+					.all(...candidateIds, claimTs),
 			).map(row => rowValue(row, "id")),
 		);
-		if (claimed.size === 0)
-			return {
-				dry_run: false,
-				status: "no_op",
-				message: "All eligible rows claimed by concurrent sleep",
-			};
-		rows = rows.filter(row => claimed.has(rowValue(row, "id")));
-	}
+		if (claimed.size === 0) return { kind: "raced" };
+		const claimedItems = chunk.items.filter(item => claimed.has(rowValue(item, "id")));
+		const plan = planChunk(beam, source, claimedItems);
+		if (plan === null) return { kind: "raced" };
+		consolidateToEpisodic(beam, plan.summary, plan.ids, "sleep_consolidation", 0.6, {
+			scope: plan.scope,
+			validUntil: plan.validUntil,
+			veracity: plan.veracity,
+			metadata: plan.metadata,
+		});
+		return { kind: "promoted", ids: plan.ids };
+	});
+}
+
+export function sleep(beam: BeamMemoryState, dryRun = false): SleepResult {
+	const rows = eligibleWorkingRows(beam, sourceSession(beam));
+	if (rows.length === 0)
+		return { dry_run: dryRun, status: "no_op", message: "No old working memories to consolidate" };
 
 	const grouped = new Map<string, Row[]>();
 	for (const row of rows) {
@@ -1007,36 +1096,56 @@ export function sleep(beam: BeamMemoryState, dryRun = false): SleepResult {
 
 	const consolidatedIds: string[] = [];
 	let summariesCreated = 0;
+	let chunkCount = 0;
+	let racedChunks = 0;
 	for (const [source, items] of grouped) {
 		for (const chunk of splitSleepItems(beam, source, items)) {
-			const ids = chunk.items.map(item => rowValue(item, "id")).filter((id): id is string => id !== null);
-			let scope = "session";
-			let validUntil: string | null = null;
-			for (const item of chunk.items) {
-				if (rowValue(item, "scope") === "global") scope = "global";
-				const itemValidUntil = rowValue(item, "valid_until");
-				if (itemValidUntil && (validUntil === null || itemValidUntil < validUntil)) validUntil = itemValidUntil;
+			chunkCount++;
+			if (dryRun) {
+				const plan = planChunk(beam, source, chunk.items);
+				if (plan !== null) {
+					consolidatedIds.push(...plan.ids);
+					summariesCreated++;
+				}
+				continue;
 			}
-			const sleepSummary = buildSleepSummary(beam, source, chunk);
-			const metadata: Metadata = { original_count: chunk.items.length, source, llm_used: false };
-			if (sleepSummary.truncated) {
-				metadata.truncated = true;
-				metadata.original_chars = sleepSummary.originalChars;
-				metadata.max_chars = sleepSummary.maxChars;
-			}
-			const summary = sleepSummary.summary;
-			if (!dryRun) {
-				consolidateToEpisodic(beam, summary, ids, "sleep_consolidation", 0.6, {
-					scope,
-					validUntil,
-					veracity: aggregateEpisodicVeracity(chunk.items.map(item => rowValue(item, "veracity") ?? "unknown")),
-					metadata,
+			let outcome: ChunkOutcome;
+			try {
+				outcome = promoteChunk(beam, source, chunk);
+			} catch (error) {
+				// A bad row (e.g. one that trips fact extraction) must not become a poison
+				// pill that blocks every other row queued behind it forever, so we SKIP the
+				// failed chunk and keep consolidating the rest of the batch rather than
+				// aborting `sleep()` outright — matching `degradeEpisodic`'s per-row
+				// skip-and-continue convention below. `transaction()` already rolled this
+				// chunk's claim back, so its rows remain `consolidated_at IS NULL`.
+				logger.warn("mnemopi: sleep_consolidation chunk failed; rolled back and skipped", {
+					source,
+					itemCount: chunk.items.length,
+					error: String(error),
 				});
+				outcome = { kind: "error" };
 			}
-			consolidatedIds.push(...ids);
-			summariesCreated++;
+			if (outcome.kind === "promoted") {
+				consolidatedIds.push(...outcome.ids);
+				summariesCreated++;
+			} else if (outcome.kind === "raced") {
+				racedChunks++;
+			}
 		}
 	}
+
+	// Every chunk raced (claimed by a concurrent sleep) and none errored: mirrors the
+	// previous whole-batch `claimed.size === 0` guard. A genuine per-chunk error must
+	// NOT be reported as this benign concurrency case, so `racedChunks` excludes them.
+	if (!dryRun && consolidatedIds.length === 0 && chunkCount > 0 && racedChunks === chunkCount) {
+		return {
+			dry_run: false,
+			status: "no_op",
+			message: "All eligible rows claimed by concurrent sleep",
+		};
+	}
+
 	if (!dryRun) {
 		beam.db.run(
 			`INSERT INTO consolidation_log (session_id, items_consolidated, summary_preview, created_at) VALUES (?, ?, ?, ?)`,
@@ -1049,6 +1158,17 @@ export function sleep(beam: BeamMemoryState, dryRun = false): SleepResult {
 		);
 	}
 	const degradation = degradeEpisodic(beam, dryRun);
+	if (!dryRun && consolidatedIds.length > 0) {
+		// Consolidation just inserted gists/facts (via `ingestIntoEpisodicGraph`) and
+		// promoted episodic rows; without this an enabled QueryCache would keep serving
+		// pre-consolidation results and the polyphonic engine's subject dictionary would
+		// go stale. Fires on partial success too (at least one chunk committed), since a
+		// partially consolidated bank is still a changed bank. Duck-typed to match
+		// `beam/store.ts`'s `invalidateCaches` exactly — importing it here would cycle
+		// (store.ts already imports from this module).
+		(beam.caches.queryCache as { invalidate?: () => void })?.invalidate?.();
+		(beam.caches.polyphonicEngine as { invalidateDictionary?: () => void })?.invalidateDictionary?.();
+	}
 	return {
 		dry_run: dryRun,
 		status: dryRun ? "dry_run" : "consolidated",
@@ -1105,6 +1225,14 @@ export function sleepAllSessions(beam: BeamMemoryState, dryRun = false): SleepRe
 		summaries += Number(result.summaries_created ?? 0);
 	}
 	const degradation = degradeEpisodic(beam, dryRun);
+	if (!dryRun) {
+		// `sleep(scoped, ...)` above already invalidates after each session it actually
+		// consolidates, but this `degradeEpisodic` call runs on the unscoped `beam` after
+		// every session has been processed and is a write of its own (tier
+		// degradation/content compression), not something any per-session call covers.
+		(beam.caches.queryCache as { invalidate?: () => void })?.invalidate?.();
+		(beam.caches.polyphonicEngine as { invalidateDictionary?: () => void })?.invalidateDictionary?.();
+	}
 	return {
 		dry_run: dryRun,
 		status: dryRun ? "dry_run" : items > 0 ? "consolidated" : "no_op",

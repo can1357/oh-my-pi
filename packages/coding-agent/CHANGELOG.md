@@ -561,6 +561,22 @@
 - Cancelled prompts during pre-stream turn setup restore the text and image attachments to the editor.
 - `top` builtin accepts single-dash macOS flags such as `-pid` and `-stats`.
 - GNU/BSD compat sweep across built-in shell utilities (`timeout`, `diff`, `find`, `date`, `tail`, `head`, `rg`, `stat`, `truncate`, `cksum`, `sleep`, `which`, `nohup`, `kill`).
+### Added
+
+- Added `mnemopi.consolidateEveryNTurns` (default `20`): Mnemopi consolidation previously only ran from an explicit `/memory enqueue`, so an automated session never promoted aged working memory or wrote a `consolidation_log` row. The periodic pass runs from `agent_end`; `0` disables it.
+- Added `MNEMOPI_CROSS_PROJECT_RECALL=1`, an opt-in that extends recall to non-empty sibling project banks. Project banks are keyed to one absolute path, so a second checkout or git worktree of the same repository could not reach memories retained from the other — and under `per-project-tagged` nothing ever writes to the shared bank whose recall visibility that mode advertises. Off by default; recall-only; `per-project-tagged` only.
+- Added `mnemopi.recallLengthNormalization` (`none`|`log`|`bm25`, default `none`) and `mnemopi.recallScoreFloor` (default `0`) as observable recall A/B modes threaded through to the Mnemopi engine and included in its recall cache keys. Both default to Phase-1 behavior: on a 160-query labelled retrieval benchmark with frozen development/validation splits, both length modes regressed positive-query nDCG@8 versus `none`, and the abstention floor's held-out safety bound could not be re-proven after its holdout split was invalidated, so the floor ships disabled.
+- Added `mnemopi.retentionChunkMaxChars` (default `6000`): automatic retention previously stored each retained transcript window as one unbounded row (real sessions produced rows past 100k characters that dominated recall previews). Retention now splits deterministically at user-turn and message boundaries, falling back to Unicode-safe mid-message splits only for a single oversized message; chunk metadata records `chunk_of`/`chunk_index`/`chunk_count` plus a per-chunk crash-safe retention cursor, extraction and embedding see true per-message roles, and `0` disables chunking entirely.
+- Added a programmatic, transactional chunk migration (`src/mnemopi/chunk-migration.ts`) that re-chunks oversized pre-existing `coding-agent-transcript` rows into bounded children with dry-run/apply modes, idempotent re-runs, exact source-reconstruction validation, provenance metadata, and per-source failure receipts; embeddings, fact references and graph edges are remapped to the specific child that carries the referenced text, with low-confidence mappings excluded from active retrieval and recorded for review. It is not wired to any automatic startup path.
+
+### Changed
+
+- `Mnemopi.recallEnhanced()` now routes through `orchestrateRecall()` instead of calling the linear beam retriever directly, so `mnemopi.polyphonicRecall` and `mnemopi.enhancedRecall` actually affect the injected `<memories>` block. Both settings were previously accepted and ignored on this path: the orchestrator, its four voices and their `combined_score`/`voice_scores` had no production caller. With the gates off, behaviour is unchanged.
+- The Mnemopi backend uses the core module's structured extraction prompt instead of substituting an unstructured one, so LLM extraction returns the knowledge-graph triples the schema is built for.
+
+### Fixed
+
+- Fixed the agent-end memory pass losing a turn's transcript when consolidation threw: consolidation now runs before the retention that triggers trim, and retention is still attempted when consolidation fails.
 
 ## [17.3.8] - 2026-08-19
 

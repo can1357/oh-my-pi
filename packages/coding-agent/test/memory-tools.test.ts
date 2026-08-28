@@ -136,11 +136,15 @@ function makeMnemopiConfig(
 		enhancedRecall: false,
 		proactiveLinking: false,
 		retainEveryNTurns: 3,
+		retentionChunkMaxChars: 0,
+		consolidateEveryNTurns: 0,
 		recallLimit: 10,
 		recallContextTurns: 1,
 		recallMaxQueryChars: 800,
 		injectionTokenLimit: 1024,
 		debug: false,
+		recallLengthNormalization: "none",
+		recallScoreFloor: 0,
 		providerOptions: {
 			noEmbeddings: true,
 			embeddingModel: undefined,
@@ -483,6 +487,18 @@ describe("Mnemopi backend lifecycle", () => {
 		expect(state.hasRecalledForFirstTurn).toBe(false);
 	});
 
+	it("passes the configured length normalization and score floor into every scoped recall", async () => {
+		const state = registerMnemopiState(
+			makeMnemopiConfig({ recallLengthNormalization: "log", recallScoreFloor: 0.25 }),
+		);
+		const spy = vi.spyOn(state.getScopedRecallTargets()[0].memory, "recallEnhanced").mockResolvedValue([]);
+
+		await state.collectScopedRecallResults("what changed recently");
+
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(spy.mock.calls[0]?.[2]).toMatchObject({ lengthNormalization: "log", scoreFloor: 0.25 });
+	});
+
 	it("contains unavailable-bank failures from agent-end retention", async () => {
 		const listeners = new Set<AgentSessionEventListener>();
 		const entries = [{ type: "message", message: { role: "user", content: "turn one" } }];
@@ -662,6 +678,48 @@ describe("Mnemopi backend lifecycle", () => {
 		expect(options.embedText).toContain("I never use semicolons");
 		expect(options.embedText).not.toContain("[role:");
 		expect(options.embedText).not.toContain(":end]");
+	});
+
+	it("stores bounded transcript chunks with per-chunk crash-safe cursor metadata", async () => {
+		const maxChars = 190;
+		const state = registerMnemopiState(makeMnemopiConfig({ retentionChunkMaxChars: maxChars }), {
+			cwd: "/work/project-alpha",
+		});
+		const rememberSpy = vi.spyOn(state, "rememberInScope").mockReturnValue("memory-id");
+		const messages = [
+			{ role: "user", content: `third question ${"a".repeat(55)}` },
+			{ role: "assistant", content: `third answer ${"b".repeat(55)}` },
+			{ role: "user", content: `fourth question ${"c".repeat(55)}` },
+			{ role: "assistant", content: `fourth answer ${"d".repeat(55)}` },
+		];
+
+		await state.retainMessages(messages, "source-chunk", { retainedThroughUserTurn: 4 });
+
+		expect(rememberSpy).toHaveBeenCalledTimes(2);
+		const calls = rememberSpy.mock.calls;
+		expect(
+			calls.every(
+				([transcript]) => (typeof transcript === "string" ? transcript : transcript.content).length <= maxChars,
+			),
+		).toBe(true);
+		expect(
+			calls.map(([, options]) => ((options?.metadata ?? {}) as Record<string, unknown>).retained_through_user_turn),
+		).toEqual([3, 4]);
+		expect(calls.map(([, options]) => ((options?.metadata ?? {}) as Record<string, unknown>).chunk_index)).toEqual([
+			0, 1,
+		]);
+		expect(calls.map(([, options]) => ((options?.metadata ?? {}) as Record<string, unknown>).chunk_count)).toEqual([
+			2, 2,
+		]);
+		expect(calls.map(([, options]) => ((options?.metadata ?? {}) as Record<string, unknown>).chunk_of)).toEqual([
+			"source-chunk",
+			"source-chunk",
+		]);
+		for (const [transcript, options] of calls) {
+			expect(transcript).toContain("[role:");
+			expect(options?.embedText).not.toContain("[role:");
+			expect(options?.extractText).not.toContain("[role: assistant]");
+		}
 	});
 
 	it("registers subagent aliases from parent Mnemopi state without Hindsight", async () => {
@@ -892,6 +950,72 @@ describe("Mnemopi backend lifecycle", () => {
 		expect(sleepSpy).not.toHaveBeenCalled();
 
 		registeredMnemopiState = undefined;
+	});
+
+	it("force-retains the current session when periodic consolidation's sleep step throws (B3)", async () => {
+		const entries = [{ type: "message", message: { role: "user", content: "hello there" } }];
+		const state = registerMnemopiState(makeMnemopiConfig({ autoRetain: false, consolidateEveryNTurns: 1 }), {
+			entries: () => entries,
+		});
+		const retainMemory = state.getScopedRetainTarget().memory;
+		const sleepError = new Error("sleep boom");
+		vi.spyOn(retainMemory, "sleep").mockImplementation(() => {
+			throw sleepError;
+		});
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+		// autoRetain is off, so only the force-retain inside consolidate()
+		// can write the transcript; maybeConsolidateOnAgentEnd() must not
+		// let the sleep throw propagate before that retain runs.
+		await expect(state.maybeConsolidateOnAgentEnd()).resolves.toBeUndefined();
+
+		const rows = state.memory.beam.db
+			.prepare<{ content: string }, [string]>(`
+				SELECT content
+				FROM working_memory
+				WHERE source = 'coding-agent-transcript'
+				  AND json_extract(metadata_json, '$.session_id') = ?
+			`)
+			.all(TEST_SESSION_ID);
+		expect(rows).toHaveLength(1);
+		expect(rows[0].content).toContain("hello there");
+
+		// The sleep failure must stay visible in the logs rather than being
+		// silently swallowed by the force-retain fix.
+		expect(warn).toHaveBeenCalledWith(
+			"Mnemopi: consolidation flush/sleep failed; retaining current session before propagating.",
+			expect.objectContaining({ error: "sleep boom" }),
+		);
+		expect(warn).toHaveBeenCalledWith(
+			"Mnemopi: periodic consolidation failed.",
+			expect.objectContaining({ error: "sleep boom" }),
+		);
+	});
+
+	it("force-retains the current session via periodic consolidation on the happy path", async () => {
+		const entries = [{ type: "message", message: { role: "user", content: "hello there" } }];
+		const state = registerMnemopiState(makeMnemopiConfig({ autoRetain: false, consolidateEveryNTurns: 1 }), {
+			entries: () => entries,
+		});
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+		await expect(state.maybeConsolidateOnAgentEnd()).resolves.toBeUndefined();
+
+		const rows = state.memory.beam.db
+			.prepare<{ content: string }, [string]>(`
+				SELECT content
+				FROM working_memory
+				WHERE source = 'coding-agent-transcript'
+				  AND json_extract(metadata_json, '$.session_id') = ?
+			`)
+			.all(TEST_SESSION_ID);
+		expect(rows).toHaveLength(1);
+		expect(rows[0].content).toContain("hello there");
+		expect(warn).not.toHaveBeenCalledWith(
+			"Mnemopi: consolidation flush/sleep failed; retaining current session before propagating.",
+			expect.anything(),
+		);
+		expect(warn).not.toHaveBeenCalledWith("Mnemopi: periodic consolidation failed.", expect.anything());
 	});
 
 	it("skips consolidation when disposing an aliased subagent state (#2320)", async () => {

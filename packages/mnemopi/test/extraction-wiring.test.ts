@@ -89,9 +89,25 @@ describe("remember(extract) wires the LLM fact extractor", () => {
 			predicate: "uses",
 			object: "SQLite",
 		});
+		// Flat statements no longer fabricate a `facts` triple. They live in `memoria_facts`
+		// (whose key/value shape actually fits them) and stay reachable by text through
+		// `fts_memoria_facts`.
 		expect(
 			memory.conn.query("SELECT subject, predicate, object FROM facts WHERE object = ?").get("Always use tabs"),
-		).toEqual({ subject: "fact", predicate: "entity", object: "Always use tabs" });
+		).toBeNull();
+		expect(
+			memory.conn.query("SELECT fact_type, key, value FROM memoria_facts WHERE value = ?").get("Always use tabs"),
+		).toEqual({ fact_type: "entity", key: "fact", value: "Always use tabs" });
+		expect(
+			memory.conn
+				.query(
+					`SELECT memoria_facts.value AS value
+					 FROM fts_memoria_facts
+					 JOIN memoria_facts ON memoria_facts.id = fts_memoria_facts.rowid
+					 WHERE fts_memoria_facts MATCH ?`,
+				)
+				.get('"tabs"'),
+		).toEqual({ value: "Always use tabs" });
 	});
 
 	it("uses a runtime-configured remote LLM in background extraction", async () => {

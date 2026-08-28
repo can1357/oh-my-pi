@@ -17,7 +17,6 @@ import type {
 	MemoryBackendStatus,
 } from "../memory-backend/types";
 import memoryConsolidationPrompt from "../prompts/system/memory-consolidation-system.md" with { type: "text" };
-import memoryExtractionPrompt from "../prompts/system/memory-extraction-system.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
 import { isTinyMemoryLocalModelKey, ONLINE_MEMORY_MODEL_KEY } from "../tiny/models";
 import { tinyModelClient } from "../tiny/title-client";
@@ -71,16 +70,21 @@ export interface MemoryCompletionInput {
 
 /** Maps a Mnemopi completion into instruction and input turns.
  *
- *  Extraction is the only task with its own instructions, and it always supplies
- *  the raw text, so the instructions become the system turn and the text becomes
- *  the user turn. Every other task keeps the prompt Mnemopi rendered. */
+ *  Every task, extraction included, keeps the prompt Mnemopi core rendered as
+ *  the sole turn. core/extraction.ts's buildExtractionPrompt() already embeds
+ *  the structured, `kg`-triple-requesting JSON schema together with the
+ *  source text into that one prompt (and honors a MNEMOPI_EXTRACTION_PROMPT
+ *  override), so this used to special-case `options.task.kind ===
+ *  "memory-extraction"` by discarding that rendered prompt and substituting
+ *  the unlabelled, JSON-less memory-extraction-system.md instructions as a
+ *  separate system turn. That swap made the tiny-local-model and smol
+ *  completion paths incapable of ever emitting a `kg` triple. `options`
+ *  stays part of the signature so this remains a stable seam for callers
+ *  that pass MnemopiLlmCompleteOptions. */
 export function resolveMemoryCompletionInput(
 	prompt: string,
-	options?: MnemopiLlmCompleteOptions,
+	_options?: MnemopiLlmCompleteOptions,
 ): MemoryCompletionInput {
-	if (options?.task?.kind === "memory-extraction") {
-		return { prompt: options.task.input, systemPrompt: memoryExtractionPrompt };
-	}
 	return { prompt };
 }
 
@@ -535,9 +539,10 @@ async function resolveMnemopiProviderOptions(
 						systemPrompt: request.systemPrompt,
 					});
 				},
-				// No `extractionPrompt`: resolveMemoryCompletionInput supplies the
-				// instructions as a system turn for every extraction call, so anything
-				// rendered here would be built in code and then discarded.
+				// No `extractionPrompt` override: the tiny local model receives core's
+				// default structured, kg-requesting JSON template (buildExtractionPrompt)
+				// unmodified via resolveMemoryCompletionInput, same as every other
+				// extraction path.
 				consolidationPrompt: memoryConsolidationPrompt,
 			},
 		};
@@ -561,7 +566,13 @@ async function resolveMnemopiProviderOptions(
 		const resolved = resolveRoleSelection(["tiny", "smol"], settings, modelRegistry.getAvailable());
 		const model = resolved?.model;
 		if (!model) {
-			logger.warn("Mnemopi: llmMode=smol but no tiny/smol model resolved; continuing without LLM.");
+			// mnemopi.llmMode=smol explicitly requests LLM-backed extraction/consolidation,
+			// so failing to resolve any tiny/smol model is a real misconfiguration (not a
+			// transient blip) that silently degrades every retain to the heuristic
+			// extractor. logger.warn only reaches the rotating log file by default
+			// (console output is opt-in), so this is escalated to error so a developer
+			// actually sees why Mnemopi never produced kg triples or non-'entity' facts.
+			logger.error("Mnemopi: llmMode=smol but no tiny/smol model resolved; continuing without LLM.");
 			return base;
 		}
 		return {
@@ -570,7 +581,10 @@ async function resolveMnemopiProviderOptions(
 				const request = resolveMemoryCompletionInput(prompt, opts);
 				const hasApiKey = await modelRegistry.getApiKey(model, sessionId);
 				if (!hasApiKey) {
-					logger.warn("Mnemopi: smol completion requested but no current API key is available.", {
+					// Same visibility reasoning as the "no model resolved" branch above:
+					// this is the per-call reason extraction/consolidation silently fell
+					// back to the heuristic extractor for this session.
+					logger.error("Mnemopi: smol completion requested but no current API key is available.", {
 						provider: model.provider,
 						model: model.id,
 					});
@@ -601,7 +615,7 @@ async function resolveMnemopiProviderOptions(
 			},
 		};
 	} catch (error) {
-		logger.warn("Mnemopi: smol LLM resolution failed; continuing without LLM.", { error: String(error) });
+		logger.error("Mnemopi: smol LLM resolution failed; continuing without LLM.", { error: String(error) });
 		return base;
 	}
 }

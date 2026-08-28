@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { closeQuietly, type DatabasePath, openDatabase } from "../db";
+import { ENTITY_EXTRACTION_STOP_WORDS } from "./entities";
 
 export interface Gist {
 	readonly id: string;
@@ -12,6 +13,7 @@ export interface Gist {
 }
 
 export interface Fact {
+	/** `facts.fact_id` — a fact identifier, NOT a memory id. */
 	readonly id: string;
 	readonly subject: string;
 	readonly predicate: string;
@@ -19,6 +21,12 @@ export interface Fact {
 	readonly timestamp: string;
 	readonly confidence: number;
 	readonly temporalQualifier?: string | null;
+	/**
+	 * `facts.source_msg_id` — the memory this fact was extracted from, and the only
+	 * reliable way back to a hydratable row. Optional because stored rows may carry a
+	 * NULL `source_msg_id`; callers that need a memory id must handle absence.
+	 */
+	readonly sourceMemoryId?: string | null;
 }
 
 export interface GraphEdge {
@@ -155,6 +163,7 @@ function rowToFact(row: FactRow): Fact {
 		timestamp: row.timestamp ?? "",
 		confidence: row.confidence ?? 0.5,
 		temporalQualifier: null,
+		sourceMemoryId: row.source_msg_id,
 	};
 }
 
@@ -183,6 +192,52 @@ function lowerSet(values: readonly (string | null)[]): Set<string> {
 		if (normalized.length > 0) out.add(normalized);
 	}
 	return out;
+}
+
+const FACT_SUBJECT_CONTROL_CHAR_PATTERN = /[\u0000-\u001f\u007f]/;
+const FACT_SUBJECT_MAX_WORDS = 4;
+
+/**
+ * Subordinating conjunctions that leave a captured fact subject looking
+ * truncated mid-clause (e.g. "Left Option for Hungarian symbols while").
+ * ENTITY_EXTRACTION_STOP_WORDS already covers coordinating conjunctions and
+ * simple prepositions ("for", "of", "with", "and", ...) so this only
+ * supplies the subordinators that list does not carry.
+ */
+export const DANGLING_FACT_SUBJECT_ENDINGS: Readonly<Record<string, true>> = {
+	while: true,
+	although: true,
+	though: true,
+	because: true,
+	since: true,
+	unless: true,
+	until: true,
+	whereas: true,
+	if: true,
+};
+
+/**
+ * Rejects fact subjects captured by extractFacts's loose regexes that are
+ * sentence fragments rather than plausible entity names: subjects with an
+ * embedded control character (including a newline), ones that open with a
+ * pronoun / article / auxiliary / negation / preposition (all present in
+ * ENTITY_EXTRACTION_STOP_WORDS, so a single leading-word membership test
+ * also covers the "one word and that word is a stop word" case), ones
+ * that run past a handful of words, and ones that trail off on a dangling
+ * conjunction or preposition.
+ */
+export function isPlausibleFactSubject(subject: string): boolean {
+	if (FACT_SUBJECT_CONTROL_CHAR_PATTERN.test(subject)) return false;
+	const words = subject
+		.trim()
+		.split(/\s+/)
+		.filter(word => word.length > 0);
+	if (words.length === 0 || words.length > FACT_SUBJECT_MAX_WORDS) return false;
+	const first = words[0]?.toLocaleLowerCase() ?? "";
+	if (ENTITY_EXTRACTION_STOP_WORDS.has(first)) return false;
+	const last = words[words.length - 1]?.toLocaleLowerCase() ?? "";
+	if (ENTITY_EXTRACTION_STOP_WORDS.has(last) || Object.hasOwn(DANGLING_FACT_SUBJECT_ENDINGS, last)) return false;
+	return true;
 }
 
 const CONTENT_STOPWORDS = new Set([
@@ -318,7 +373,13 @@ export class EpisodicGraph {
 		const pushFact = (subject: string, predicate: string, object: string, confidence: number): void => {
 			const cleanSubject = subject.trim();
 			const cleanObject = object.trim();
-			if (cleanSubject.length <= 2 || cleanObject.length <= 2 || facts.length >= MAX_FACTS_PER_MEMORY) return;
+			if (
+				cleanSubject.length <= 2 ||
+				cleanObject.length <= 2 ||
+				facts.length >= MAX_FACTS_PER_MEMORY ||
+				!isPlausibleFactSubject(cleanSubject)
+			)
+				return;
 			facts.push({
 				id: `fact_${memoryId}_${facts.length}`,
 				subject: cleanSubject,
@@ -327,6 +388,7 @@ export class EpisodicGraph {
 				timestamp: nowIso(),
 				confidence,
 				temporalQualifier: null,
+				sourceMemoryId: memoryId,
 			});
 		};
 

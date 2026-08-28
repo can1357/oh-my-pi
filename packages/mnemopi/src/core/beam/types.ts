@@ -6,6 +6,20 @@ export type Metadata = Record<string, JsonValue>;
 
 export type MemoryScope = "global" | "session" | "channel" | string;
 export type TrustTier = "STATED" | "OBSERVED" | "INFERRED" | "SYSTEM" | string;
+/**
+ * How {@link recallEnhanced} and the polyphonic recall path discount a candidate's
+ * score by its content length before the final MMR/topK selection.
+ *
+ * - `none`: no discount; identical to the Phase-1 pipeline (the default).
+ * - `log`: divides by `log2(length + 2)` -- a mild, mean-independent penalty.
+ * - `bm25`: divides by the classic BM25 length-normalization term
+ *   `0.25 + 0.75 * (length / meanLength)` (`b = 0.75`), which penalizes candidates
+ *   relative to the surrounding candidate pool's mean length.
+ *
+ * See {@link normalizeRecallScore} in `beam/recall.ts` for the exact formulas.
+ */
+export type RecallLengthNormalization = "none" | "log" | "bm25";
+
 export type Veracity =
 	| "unknown"
 	| "likely_true"
@@ -39,6 +53,7 @@ export interface TripleStoreLike {
 export interface BeamCaches {
 	timestampParse: Map<string, Date>;
 	polyphonicEngine?: unknown;
+	queryCache?: unknown;
 	extractionClient?: unknown;
 	extractionBuffer: unknown[];
 	[key: string]: unknown;
@@ -181,6 +196,24 @@ export interface RecallOptions {
 	 * {@link RECALL_CONTENT_PREVIEW_CHARS} (500).
 	 */
 	contentPreviewChars?: number;
+	/**
+	 * Discount applied to each candidate's score by its content length before the
+	 * final MMR/topK selection. `none` (the default) is byte-identical to the
+	 * Phase-1 pipeline. See {@link RecallLengthNormalization}.
+	 */
+	lengthNormalization?: RecallLengthNormalization;
+	/** Minimum normalized score required before final MMR/topK. <=0/undefined disables abstention. */
+	scoreFloor?: number;
+	/**
+	 * Pool floor for the diversity (MMR) stage: candidates below it are held out of the MMR pool
+	 * while the RETURNED COUNT stays identical to `poolFloor: 0` (below-floor rows are appended as
+	 * filler after selection). Never abstains, never truncates — `scoreFloor` remains the only
+	 * knob that changes how many rows come back. Absent/0 = inert.
+	 *
+	 * Declared `readonly` to match {@link PolyphonicRecallOptions.poolFloor}; a mutable declaration
+	 * here made `OrchestrateRecallOptions`'s two parents structurally incompatible.
+	 */
+	readonly poolFloor?: number;
 }
 
 export interface RecallEnhancedOptions extends RecallOptions {

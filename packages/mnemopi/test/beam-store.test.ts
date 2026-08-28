@@ -219,6 +219,107 @@ describe("beam store free functions", () => {
 		expect(scratchpadRead(dest).map(row => row.content)).toEqual([]);
 	});
 
+	it("keeps byte-identical rows distinct when the caller supplies explicit ids", () => {
+		// Retention chunking motivates this: two chunks of one oversized message can be
+		// byte-identical (a long repeated payload) and are distinguished only by chunk_index and
+		// ranges. Content dedupe collapsed them -- the later chunk UPDATED the earlier row, so only
+		// the first chunk's metadata survived and exact reconstruction became impossible.
+		const beam = makeState("explicit-ids");
+		const content = "[role: user]\nrepeated payload\n[user:end]";
+		const first = remember(beam, content, { memoryId: "chunk-a", metadata: { chunk_index: 0 } });
+		const second = remember(beam, content, { memoryId: "chunk-b", metadata: { chunk_index: 1 } });
+		expect(first).toBe("chunk-a");
+		expect(second).toBe("chunk-b");
+		const rows = beam.db
+			.prepare("SELECT id, json_extract(metadata_json,'$.chunk_index') AS idx FROM working_memory ORDER BY id")
+			.all() as { id: string; idx: number }[];
+		expect(rows.map(row => row.id)).toEqual(["chunk-a", "chunk-b"]);
+		expect(rows.map(row => row.idx)).toEqual([0, 1]);
+	});
+
+	it("refreshes metadata when the same explicit id is stored again with the same content", () => {
+		// An explicit id must dedupe against ITSELF so a retention rerun or a re-migration updates
+		// its row instead of inserting a copy. The update must rewrite metadata_json: for a chunk the
+		// ranges ARE the payload, so skipping them would leave a row whose recorded position no
+		// longer matches its content.
+		const beam = makeState("explicit-ids-idempotent");
+		const content = "chunk body that does not change";
+		remember(beam, content, { memoryId: "chunk-x", metadata: { chunk_index: 0, ranges: [{ start: 0 }] } });
+		remember(beam, content, { memoryId: "chunk-x", metadata: { chunk_index: 4, ranges: [{ start: 9 }] } });
+		const rows = beam.db.prepare("SELECT id, content, metadata_json FROM working_memory").all() as {
+			id: string;
+			content: string;
+			metadata_json: string;
+		}[];
+		expect(rows).toHaveLength(1);
+		expect(rows[0]?.content).toBe(content);
+		const meta = JSON.parse(rows[0]?.metadata_json ?? "{}") as {
+			chunk_index: number;
+			ranges: { start: number }[];
+		};
+		expect(meta.chunk_index).toBe(4);
+		expect(meta.ranges[0]?.start).toBe(9);
+	});
+
+	it("refuses to rewrite the content stored under an existing explicit id", () => {
+		// Embeddings, extracted facts, annotations and episodic gists were all derived from the
+		// row's content, and scheduleEmbedding only re-runs when embed_text differs from content.
+		// Rewriting content in place would strand all of it, so the store refuses rather than
+		// half-applying. Callers deriving the id from content (both chunk paths, via stableMemoryId)
+		// get a fresh id when content changes and never reach this.
+		const beam = makeState("explicit-ids-content-change");
+		remember(beam, "original body", { memoryId: "chunk-z" });
+		expect(() => remember(beam, "different body", { memoryId: "chunk-z" })).toThrow(/different content/);
+		const row = beam.db.prepare("SELECT content FROM working_memory WHERE id = 'chunk-z'").get() as {
+			content: string;
+		};
+		expect(row.content).toBe("original body");
+	});
+
+	it("refuses an explicit id that already belongs to another session", () => {
+		// `id` is a global PRIMARY KEY, so without this check a cross-session id would fall through
+		// to an INSERT and surface as a raw SQLite constraint error.
+		const beam = makeState("session-one");
+		remember(beam, "shared body", { memoryId: "chunk-shared" });
+		const collided = { ...beam, sessionId: "session-two" } as typeof beam;
+		expect(() => remember(collided, "shared body", { memoryId: "chunk-shared" })).toThrow(
+			/already exists in session/,
+		);
+	});
+
+	it("leaves stored metadata alone when an explicit-id update supplies none", () => {
+		// COALESCE semantics: a caller updating without metadata must not wipe what is stored.
+		const beam = makeState("explicit-ids-keep-meta");
+		const content = "stable chunk body";
+		remember(beam, content, { memoryId: "chunk-y", metadata: { chunk_index: 7 } });
+		remember(beam, content, { memoryId: "chunk-y" });
+		const row = beam.db
+			.prepare("SELECT json_extract(metadata_json,'$.chunk_index') AS idx FROM working_memory WHERE id = 'chunk-y'")
+			.get() as { idx: number | null };
+		expect(row.idx).toBe(7);
+	});
+
+	it("does not rewrite metadata on the implicit content-dedupe path", () => {
+		// Regression guard for the fix itself: adding metadata_json to the shared UPDATE must not
+		// change behaviour for callers that never supplied an id.
+		const beam = makeState("implicit-keeps-meta");
+		remember(beam, "same words", { metadata: { origin: "first" } });
+		remember(beam, "same words", { metadata: { origin: "second" } });
+		const row = beam.db
+			.prepare("SELECT json_extract(metadata_json,'$.origin') AS origin FROM working_memory")
+			.get() as { origin: string };
+		expect(row.origin).toBe("first");
+	});
+
+	it("still dedupes by content when no explicit id is given", () => {
+		// Unchanged behaviour for callers that do not track identity.
+		const beam = makeState("implicit-dedupe");
+		const a = remember(beam, "same words", { source: "conversation" });
+		const b = remember(beam, "same words", { source: "conversation" });
+		expect(a).toBe(b);
+		expect(beam.db.prepare("SELECT COUNT(*) AS c FROM working_memory").get()).toEqual({ c: 1 });
+	});
+
 	it("keeps restored durable rows and cascades linked artifacts on trim, force-import, and forget (issue #4819)", () => {
 		const beam = makeState("trim-4819");
 		// EpisodicGraph owns the `gists` / `graph_edges` schema; init it so the
@@ -279,14 +380,27 @@ describe("beam store free functions", () => {
 			.run(durableId, oldTimestamp);
 		seedArtifacts(durableId);
 
-		// (2) Transient scratch row: old timestamp, consolidated_at NULL, STATED tier.
-		const transientId = "transient-scratch";
+		// (2) Un-consolidated scratch row: old timestamp, consolidated_at NULL,
+		// STATED tier (no IMPORTED exemption). D7: the TTL/overflow trim only
+		// ever reclaims rows that ARE consolidated, so this row must survive
+		// purely because `sleep()` has not promoted it yet.
+		const unconsolidatedId = "unconsolidated-scratch";
 		beam.db
 			.prepare(
 				"INSERT INTO working_memory (id, content, source, timestamp, session_id, importance, trust_tier, consolidated_at) VALUES (?, 'idle chatter', 'conversation', ?, 'trim-4819', 0.2, 'STATED', NULL)",
 			)
-			.run(transientId, oldTimestamp);
-		seedArtifacts(transientId);
+			.run(unconsolidatedId, oldTimestamp);
+		seedArtifacts(unconsolidatedId);
+
+		// (3) Already-consolidated old row: past TTL, STATED tier, consolidated_at
+		// set. This is the only shape the TTL/overflow trim may still reclaim.
+		const consolidatedOldId = "consolidated-old";
+		beam.db
+			.prepare(
+				"INSERT INTO working_memory (id, content, source, timestamp, session_id, importance, trust_tier, consolidated_at) VALUES (?, 'already promoted', 'conversation', ?, 'trim-4819', 0.2, 'STATED', ?)",
+			)
+			.run(consolidatedOldId, oldTimestamp, oldTimestamp);
+		seedArtifacts(consolidatedOldId);
 
 		// A normal write triggers the automatic trim.
 		remember(beam, "a fresh conversational note", { source: "conversation" });
@@ -295,17 +409,20 @@ describe("beam store free functions", () => {
 		expect(get(beam, durableId)?.content).toBe("canonical fact");
 		expect(artifactCount(durableId)).toBe(7);
 
-		// Transient old row is trimmed and every linked artifact cascades.
-		expect(get(beam, durableId) === null).toBe(false);
-		expect(countOf("SELECT COUNT(*) AS count FROM working_memory WHERE id = ?", transientId)).toBe(0);
-		expect(artifactCount(transientId)).toBe(0);
+		// Un-consolidated row survives too: trim never deletes un-promoted memory.
+		expect(get(beam, unconsolidatedId)?.content).toBe("idle chatter");
+		expect(artifactCount(unconsolidatedId)).toBe(7);
 
-		// (3) forgetWorking cascades every linked artifact, not just annotations.
+		// Already-consolidated old row is trimmed and every linked artifact cascades.
+		expect(countOf("SELECT COUNT(*) AS count FROM working_memory WHERE id = ?", consolidatedOldId)).toBe(0);
+		expect(artifactCount(consolidatedOldId)).toBe(0);
+
+		// (4) forgetWorking cascades every linked artifact, not just annotations.
 		expect(forgetWorking(beam, durableId)).toBe(true);
 		expect(artifactCount(durableId)).toBe(0);
 	});
 
-	it("marks imported working memory as consolidated so restored banks survive trim (issue #4819)", () => {
+	it("leaves imported un-consolidated working memory NULL so restored banks survive trim (issue #4819, D7)", () => {
 		const dest = makeState("import-4819");
 		const oldTimestamp = new Date(Date.now() - 1000 * 3_600_000).toISOString();
 		importFromDict(
@@ -327,7 +444,12 @@ describe("beam store free functions", () => {
 		const importedRow = dest.db
 			.prepare("SELECT consolidated_at FROM working_memory WHERE id = 'restored-import'")
 			.get() as { consolidated_at: string | null };
-		expect(importedRow.consolidated_at).not.toBeNull();
+		// D7: trim now only reclaims rows that ARE consolidated, so protection
+		// comes from staying NULL — which also leaves the row free to actually
+		// promote via `sleep()` later — rather than from a fake "already
+		// consolidated" stamp that would otherwise make it immediately eligible
+		// for deletion.
+		expect(importedRow.consolidated_at).toBeNull();
 
 		remember(dest, "a fresh note", { source: "conversation" });
 		expect(get(dest, "restored-import")?.content).toBe("durable restored fact");

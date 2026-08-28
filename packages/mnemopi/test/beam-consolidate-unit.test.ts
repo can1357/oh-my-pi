@@ -328,10 +328,21 @@ describe("beam consolidation free functions", () => {
 
 		const metrics = memoriaRetrieve(beam, "what was dashboard api latency", "IE", 5);
 		expect(metrics.results.some(row => String((row as Record<string, unknown>).value).includes("250ms"))).toBe(true);
+		// `facts` now holds only rows with a REAL key (metric/date/version extractors); flat
+		// statements no longer fabricate a `subject='fact'` triple and live in memoria_facts.
 		const facts = beam.db.query("SELECT COUNT(*) AS count FROM facts WHERE source_msg_id = ?").get("wm-facts") as {
 			count: number;
 		};
-		expect(facts.count).toBeGreaterThanOrEqual(4);
+		expect(facts.count).toBeGreaterThanOrEqual(3);
+		const fabricated = beam.db
+			.query("SELECT COUNT(*) AS count FROM facts WHERE subject = 'fact' AND predicate = 'entity'")
+			.get() as { count: number };
+		expect(fabricated.count).toBe(0);
+		// The flat statements are still there, in the table whose shape fits them.
+		const flat = beam.db
+			.query("SELECT COUNT(*) AS count FROM memoria_facts WHERE source_memory_id = ? AND key = 'fact'")
+			.get("wm-facts") as { count: number };
+		expect(flat.count).toBeGreaterThanOrEqual(1);
 	});
 
 	it("skips pattern fact extraction for oversized raw transcripts", () => {

@@ -6,18 +6,37 @@ import type * as MnemopiCoreNs from "@oh-my-pi/pi-mnemopi/core";
 import type { LocalModelInitializer } from "@oh-my-pi/pi-mnemopi/core";
 import { logger, toError } from "@oh-my-pi/pi-utils";
 import {
+	chunkRetentionMessages,
 	composeRecallQuery,
 	formatCurrentTime,
 	prepareEmbeddableRetentionTranscript,
 	prepareRetentionTranscript,
 	prepareUserRetentionTranscript,
+	type RetentionChunkRange,
+	sanitizeRetentionMessages,
 	stripRetentionProtocolMarkers,
 	truncateRecallQuery,
 } from "../hindsight/content";
 import { extractMessages } from "../hindsight/transcript";
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
+import { chunkMemoryId } from "./chunk-migration";
 import type { MnemopiBackendConfig, MnemopiScoping } from "./config";
 import { mnemopiEmbedClient } from "./embed-client";
+
+/**
+ * Re-exported so `migrateWorkingMemoryChunks`/`validateWorkingMemoryChunkMigration` share one
+ * public entry point with the rest of the Mnemopi session-state API; the implementation
+ * lives in `./chunk-migration` since it operates on a caller-supplied `dbPath` directly via
+ * SQLite rather than through a session's own `Mnemopi` instance.
+ */
+export {
+	type ChunkMigrationValidation,
+	chunkMemoryId,
+	type MigrateWorkingMemoryChunksOptions,
+	type MigrationReceipt,
+	migrateWorkingMemoryChunks,
+	validateWorkingMemoryChunkMigration,
+} from "./chunk-migration";
 
 // The mnemopi package pulls the embeddings stack; keep it off the CLI startup
 // module graph by loading it lazily at the async boundaries that need it.
@@ -205,6 +224,24 @@ function sliceUnretainedMessages(
 	return [];
 }
 
+/**
+ * Recover the TRUE per-piece role for every range a chunk covers, by slicing the matching
+ * original message's own content. A chunk's stored `messages` may frame several original
+ * messages under one synthetic role to fit a tight `retentionChunkMaxChars` cap — extraction
+ * and embedding must see the real roles so an assistant reply chunked alongside a user
+ * question is never mistaken for user-authored text, and a chunked user question is never
+ * dropped from extraction.
+ */
+function resolveChunkSourceMessages(
+	messages: readonly MnemopiRetentionMessage[],
+	ranges: readonly RetentionChunkRange[],
+): MnemopiRetentionMessage[] {
+	return ranges.map(range => {
+		const source = messages[range.messageIndex];
+		return { role: range.role, content: source === undefined ? "" : source.content.slice(range.start, range.end) };
+	});
+}
+
 export function getMnemopiSessionState(session: AgentSession | undefined): MnemopiSessionState | undefined {
 	return session ? (session as AgentSessionWithMnemopiState)[kMnemopiSessionState] : undefined;
 }
@@ -238,10 +275,12 @@ export class MnemopiSessionState {
 	readonly aliasOf?: MnemopiSessionState;
 	private readonly scoped: MnemopiScopedResources;
 	lastRetainedTurn: number;
+	lastConsolidatedTurn: number;
 	hasRecalledForFirstTurn: boolean;
 	lastRecallSnippet?: string;
 	unsubscribe?: () => void;
 	#retentionCursorLoaded = false;
+	#consolidating = false;
 
 	constructor(options: MnemopiSessionStateOptions) {
 		this.sessionId = options.sessionId;
@@ -249,6 +288,7 @@ export class MnemopiSessionState {
 		this.session = options.session;
 		this.aliasOf = options.aliasOf;
 		this.lastRetainedTurn = options.lastRetainedTurn ?? 0;
+		this.lastConsolidatedTurn = 0;
 		this.hasRecalledForFirstTurn = options.hasRecalledForFirstTurn ?? false;
 		this.scoped = options.aliasOf?.scoped ?? createScopedResources(options.config);
 		this.memory = this.scoped.retain.memory;
@@ -259,11 +299,13 @@ export class MnemopiSessionState {
 		if (this.sessionId === sessionId) return;
 		this.sessionId = sessionId;
 		this.lastRetainedTurn = 0;
+		this.lastConsolidatedTurn = 0;
 		this.#retentionCursorLoaded = false;
 	}
 
 	resetConversationTracking(): void {
 		this.lastRetainedTurn = 0;
+		this.lastConsolidatedTurn = 0;
 		this.#retentionCursorLoaded = false;
 		this.hasRecalledForFirstTurn = false;
 		this.lastRecallSnippet = undefined;
@@ -402,6 +444,8 @@ export class MnemopiSessionState {
 					const results = await target.memory.recallEnhanced(recallQuery, this.config.recallLimit, {
 						includeFacts: true,
 						channelId: target.bank,
+						lengthNormalization: this.config.recallLengthNormalization,
+						scoreFloor: this.config.recallScoreFloor,
 					});
 					targetSucceeded = true;
 					for (const result of results) {
@@ -495,7 +539,12 @@ export class MnemopiSessionState {
 
 	async maybeRetainOnAgentEnd(_messages: AgentMessage[]): Promise<void> {
 		if (!this.config.autoRetain || this.aliasOf) return;
-		const flat = extractMessages(this.session.sessionManager);
+		// Sanitized HERE, not just inside retainMessages(): `userTurns` and sliceUnretainedMessages()
+		// are computed from this array, and the per-chunk crash-safe cursor subtracts a batch total
+		// from it. Counting turns in one space and chunking in another inflates every non-final
+		// chunk's cursor whenever a turn is dropped (one wholly made of a recalled memory block),
+		// which on resume would skip the unretained remainder of a half-written turn.
+		const flat = sanitizeRetentionMessages(extractMessages(this.session.sessionManager));
 		this.#restoreRetainedTurnCursor();
 		const userTurns = flat.filter(message => message.role === "user").length;
 		if (userTurns - this.lastRetainedTurn < this.config.retainEveryNTurns) return;
@@ -507,9 +556,58 @@ export class MnemopiSessionState {
 		this.lastRetainedTurn = userTurns;
 	}
 
+	/**
+	 * Periodic in-session counterpart to {@link maybeRetainOnAgentEnd}: once
+	 * every `consolidateEveryNTurns` user turns, run the same
+	 * {@link consolidate} pass `/memory enqueue` uses (backend.ts `enqueue`),
+	 * scoped to just the current session's own working memory (`full: false`,
+	 * i.e. `memory.sleep()` not `sleepAllSessions()`) so it never touches a
+	 * concurrent session's bank. Reuses the retain turn-accounting shape via
+	 * {@link lastConsolidatedTurn} rather than inventing a parallel cursor.
+	 *
+	 * `consolidateEveryNTurns <= 0` (including an unset/non-numeric config,
+	 * which the `> 0` form treats as disabled) is a no-op, and so is any
+	 * aliased subagent state (`aliasOf`), matching how
+	 * {@link maybeRetainOnAgentEnd} defers subagent turn-counting to the
+	 * parent. `extract: false` mirrors {@link dispose}'s shutdown pass: the
+	 * retain step inside `consolidate()` only has anything to do here when
+	 * `autoRetain` is off or lagging, and a best-effort background pass
+	 * should not add a fresh LLM extraction round-trip. Actual eligibility
+	 * for promotion out of working memory is unchanged — only rows older
+	 * than half the working-memory TTL are ever picked up (see
+	 * `eligibleWorkingRows` in `beam/consolidate.ts`) — so most firings are
+	 * cheap no-ops; `#consolidating` keeps overlapping firings from racing,
+	 * and running BEFORE `maybeRetainOnAgentEnd` (see `attachSessionListeners`,
+	 * D7) keeps this pass's own `forceRetainCurrentSession()` call — which is
+	 * itself a `remember()` and would otherwise trigger `trimWorkingMemory()`
+	 * ahead of the sleep this same pass just ran — from racing a promotion it
+	 * hasn't made yet; `maybeRetainOnAgentEnd`'s subsequent run just no-ops
+	 * against the now-advanced `lastRetainedTurn` cursor.
+	 */
+	async maybeConsolidateOnAgentEnd(): Promise<void> {
+		if (!(this.config.consolidateEveryNTurns > 0) || this.aliasOf || this.#consolidating) return;
+		const flat = extractMessages(this.session.sessionManager);
+		const userTurns = flat.filter(message => message.role === "user").length;
+		if (userTurns - this.lastConsolidatedTurn < this.config.consolidateEveryNTurns) return;
+		this.lastConsolidatedTurn = userTurns;
+		this.#consolidating = true;
+		try {
+			await this.consolidate({ full: false, extract: false, sleep: true });
+		} catch (error) {
+			logger.warn("Mnemopi: periodic consolidation failed.", {
+				bank: this.config.bank,
+				error: toError(error).message,
+			});
+		} finally {
+			this.#consolidating = false;
+		}
+	}
+
 	async forceRetainCurrentSession(options: { extract?: boolean } = {}): Promise<void> {
 		if (this.aliasOf) return;
-		const flat = extractMessages(this.session.sessionManager);
+		// Sanitized here for the same reason as in maybeRetainOnAgentEnd: turn counting, slicing,
+		// chunking and the per-chunk cursor must all be done in one turn space.
+		const flat = sanitizeRetentionMessages(extractMessages(this.session.sessionManager));
 		this.#restoreRetainedTurnCursor();
 		const userTurns = flat.filter(message => message.role === "user").length;
 		await this.retainMessages(sliceUnretainedMessages(flat, this.lastRetainedTurn), this.sessionId, {
@@ -524,21 +622,134 @@ export class MnemopiSessionState {
 		sourceId: string,
 		options: { extract?: boolean; retainedThroughUserTurn?: number } = {},
 	): Promise<void> {
-		const { transcript, messageCount } = prepareRetentionTranscript(messages, true);
+		const maxChars = this.config.retentionChunkMaxChars;
+		// Strip memory tags BEFORE chunking. Chunk boundaries are computed on framed length, so a
+		// recalled <memories> block can straddle one whenever the surrounding text alone exceeds the
+		// cap; neither half then matches the tag regexes and framing can no longer strip it. Every
+		// downstream use -- chunking, range resolution, framing -- must see this same array so the
+		// recorded ranges are offsets into the content that was actually stored.
+		const sanitized = sanitizeRetentionMessages(messages);
+		if (sanitized.length === 0) return;
+		if (maxChars <= 0) {
+			this.#rememberTranscriptRow(sanitized, sanitized, sourceId, options.retainedThroughUserTurn, options.extract);
+			return;
+		}
+		const chunks = chunkRetentionMessages(sanitized, maxChars);
+		if (chunks.length === 0) return;
+		const totalUserTurns = sanitized.filter(message => message.role === "user").length;
+		const chunkCount = chunks.length;
+		// Where this batch STARTS in the session's turn sequence. `chunkIndex` restarts at 0 every
+		// call, so session + index alone would give two different batches the same id whenever the
+		// same text recurs at the same batch-local index -- and the explicit-id path would then update
+		// the earlier occurrence instead of storing the new one. The start cursor is stable when the
+		// same window is replayed (same input, same arithmetic) and advances between batches, which
+		// is exactly the distinction the id needs.
+		const batchStartUserTurn =
+			options.retainedThroughUserTurn === undefined ? undefined : options.retainedThroughUserTurn - totalUserTurns;
+		chunks.forEach((chunk, chunkIndex) => {
+			// Crash-safe per-chunk cursor: the final input cursor minus the turns this whole
+			// call covers, plus however many of them THIS chunk has fully persisted so far.
+			// Non-final pieces of a still-splitting oversized turn report the PRIOR turn's
+			// count (chunk.completedUserTurns doesn't advance until that turn's last piece),
+			// so a crash mid-turn never leaves the restored cursor past an unfinished turn.
+			const retainedThroughUserTurn =
+				options.retainedThroughUserTurn === undefined
+					? undefined
+					: options.retainedThroughUserTurn - totalUserTurns + chunk.completedUserTurns;
+			this.#rememberTranscriptRow(
+				chunk.messages,
+				resolveChunkSourceMessages(sanitized, chunk.ranges),
+				sourceId,
+				retainedThroughUserTurn,
+				options.extract,
+				{
+					chunkOf: sourceId,
+					chunkIndex,
+					chunkCount,
+					ranges: chunk.ranges,
+					// Global, batching-invariant locator for this chunk.
+					turnNumber: batchStartUserTurn === undefined ? undefined : batchStartUserTurn + chunk.turnNumber,
+					pieceIndex: chunk.pieceIndex,
+				},
+			);
+		});
+	}
+
+	/**
+	 * Remember one retention row. `transcriptMessages` frames the stored transcript and must
+	 * already fit any active `retentionChunkMaxChars` cap (a chunk that merges several
+	 * messages to fit frames them under one synthetic role). `extractSourceMessages` is the
+	 * same content with every piece's TRUE role restored, so user-only extraction and the
+	 * embedding projection never mistake a chunked assistant reply for user-authored text and
+	 * never drop a chunked user question.
+	 */
+	#rememberTranscriptRow(
+		transcriptMessages: MnemopiRetentionMessage[],
+		extractSourceMessages: MnemopiRetentionMessage[],
+		sourceId: string,
+		retainedThroughUserTurn: number | undefined,
+		shouldExtractOption: boolean | undefined,
+		chunkMeta?: {
+			chunkOf: string;
+			chunkIndex: number;
+			chunkCount: number;
+			ranges: readonly RetentionChunkRange[];
+			turnNumber?: number;
+			pieceIndex: number;
+		},
+	): void {
+		const { transcript, messageCount } = prepareRetentionTranscript(transcriptMessages, true);
 		if (!transcript) return;
-		const { transcript: extractText } = prepareUserRetentionTranscript(messages);
-		const { transcript: embedText } = prepareEmbeddableRetentionTranscript(messages);
-		const shouldExtract = options.extract !== false && extractText !== null;
+		const { transcript: extractText } = prepareUserRetentionTranscript(extractSourceMessages);
+		const { transcript: embedText } = prepareEmbeddableRetentionTranscript(extractSourceMessages);
+		const shouldExtract = shouldExtractOption !== false && extractText !== null;
 		this.rememberInScope(transcript, {
 			source: "coding-agent-transcript",
 			importance: 0.65,
+			// A chunk's identity is its POSITION in the parent, not merely its text. Two chunks of one
+			// oversized message can be byte-identical (a long repeated payload); without an explicit
+			// id the store's content dedupe collapsed them, the later chunk updated the earlier row,
+			// and only the first chunk's ranges survived. The derivation is the same one
+			// `chunk-migration.ts` already uses for migrated children, so a content change yields a new
+			// id instead of trying to rewrite a row whose derived artifacts came from the old text.
+			//
+			// Keyed on session + batch start + chunk index, never on `sourceId`:
+			// `maybeRetainOnAgentEnd` builds that from `Date.now()`, so keying on it would give the
+			// same chunk a fresh id every pass and re-retention after a cursor reset would insert
+			// duplicates -- with duplicate facts, annotations and embeddings -- where content dedupe
+			// used to collapse them. The locator is the chunk's GLOBAL turn number plus its ordinal
+			// within that turn, never the batch-global `chunkIndex`: that index depends on how the
+			// pass happened to be sliced, so retaining turns 1 and 2 in separate passes and then
+			// replaying both in one pass gave turn 2 a different id and duplicated it. Turns are
+			// segmented before packing and packed independently, so this locator is identical
+			// however the same turns are batched.
+			...(chunkMeta === undefined
+				? {}
+				: {
+						memoryId: chunkMemoryId(
+							transcript,
+							`${this.sessionId}@t${chunkMeta.turnNumber ?? "na"}`,
+							chunkMeta.pieceIndex,
+						),
+					}),
 			metadata: {
 				session_id: this.sessionId,
 				source_id: sourceId,
 				message_count: messageCount,
-				...(options.retainedThroughUserTurn === undefined
+				...(retainedThroughUserTurn === undefined ? {} : { retained_through_user_turn: retainedThroughUserTurn }),
+				...(chunkMeta === undefined
 					? {}
-					: { retained_through_user_turn: options.retainedThroughUserTurn }),
+					: {
+							chunk_of: chunkMeta.chunkOf,
+							chunk_index: chunkMeta.chunkIndex,
+							chunk_count: chunkMeta.chunkCount,
+							ranges: chunkMeta.ranges.map(range => ({
+								messageIndex: range.messageIndex,
+								start: range.start,
+								end: range.end,
+								role: range.role,
+							})),
+						}),
 				cwd: this.session.sessionManager.getCwd(),
 			},
 			scope: "bank",
@@ -582,9 +793,26 @@ export class MnemopiSessionState {
 					);
 				});
 			} else if (event.type === "agent_end") {
-				void this.maybeRetainOnAgentEnd(event.messages).catch(error => {
-					this.#logLifecycleFailure("agent_end retention", [this.scoped.retain.bank], error);
-				});
+				// D7: consolidation (sleep) runs before retention so a fresh
+				// forceRetainCurrentSession() trim can never run ahead of this
+				// turn's promotion pass. maybeConsolidateOnAgentEnd() already
+				// catches its own errors internally (see its try/catch), so it
+				// never rejects and this leg's `.catch()` below is defense in
+				// depth only — the chain always reaches maybeRetainOnAgentEnd()
+				// next regardless of consolidation's outcome. That leg is itself
+				// gated on `autoRetain` and no-ops when it is off, so it is NOT
+				// what guarantees this turn's transcript survives a
+				// consolidation failure; that guarantee lives inside
+				// consolidate() itself (see its docblock), which force-retains
+				// even after a sleep failure regardless of `autoRetain`.
+				void this.maybeConsolidateOnAgentEnd()
+					.catch(error => {
+						this.#logLifecycleFailure("agent_end consolidation", [this.config.bank], error);
+					})
+					.then(() => this.maybeRetainOnAgentEnd(event.messages))
+					.catch(error => {
+						this.#logLifecycleFailure("agent_end retention", [this.scoped.retain.bank], error);
+					});
 			}
 		});
 	}
@@ -629,6 +857,17 @@ export class MnemopiSessionState {
 	 * `/memory enqueue` path requests full cross-session consolidation; disposal
 	 * composes the lighter retain-and-flush path with closing the DB handles.
 	 *
+	 * Sleep runs BEFORE {@link forceRetainCurrentSession} (D7): the retain
+	 * step is itself a `remember()`, which triggers `trimWorkingMemory` on
+	 * the same bank. Retaining first would let that trim run before this same
+	 * call's `sleep()` ever got a chance to promote older rows to episodic —
+	 * exactly the ordering that let un-consolidated working memory get
+	 * deleted instead of promoted. Running sleep first is safe for the
+	 * transcript this call is about to retain: consolidation only ever
+	 * considers working rows older than half the working-memory TTL (12h by
+	 * default — see `eligibleWorkingRows` in `beam/consolidate.ts`), so it
+	 * never reaches back far enough to need the turn that just ended.
+	 *
 	 * Aliased subagent states share `scoped` (and therefore the actual SQLite
 	 * banks) with their parent. `consolidate()` deliberately does NOT
 	 * short-circuit on `aliasOf`: `forceRetainCurrentSession` already guards
@@ -637,6 +876,17 @@ export class MnemopiSessionState {
 	 * otherwise enqueue would report success while leaving the subagent's
 	 * retained memories unconsolidated until a later full consolidation request
 	 * (PR #2327 review).
+	 *
+	 * A throw from the flush/sleep loop below must not cost this turn's
+	 * transcript (issue B3): the loop is wrapped in its own try/catch so a
+	 * failure is captured, logged with the same `logger.warn` +
+	 * `toError(error).message` shape used elsewhere in this class, and only
+	 * rethrown after {@link forceRetainCurrentSession} has been attempted.
+	 * Every current caller of `consolidate()` (this class's own
+	 * `maybeConsolidateOnAgentEnd` and `dispose`, plus the `/memory enqueue`
+	 * backend path) already wraps its call in a catch, so rethrowing — rather
+	 * than swallowing — keeps the failure visible to those callers instead of
+	 * silently reporting success.
 	 *
 	 * @param options.full - When true, run `sleepAllSessions` on every owned bank
 	 *  (the full cross-session consolidation used by `/memory enqueue`). When
@@ -650,16 +900,26 @@ export class MnemopiSessionState {
 	 *  so `dispose` does not block on a fresh LLM round-trip.
 	 */
 	async consolidate(options: { full?: boolean; extract?: boolean; sleep?: boolean } = {}): Promise<void> {
-		await this.forceRetainCurrentSession({ extract: options.extract });
-		for (const memory of this.scoped.owned) {
-			await memory.flushExtractions();
-			if (options.sleep === false) continue;
-			if (options.full) {
-				memory.sleepAllSessions(false);
-			} else {
-				memory.sleep(false);
+		let sleepFailure: Error | undefined;
+		try {
+			for (const memory of this.scoped.owned) {
+				await memory.flushExtractions();
+				if (options.sleep === false) continue;
+				if (options.full) {
+					memory.sleepAllSessions(false);
+				} else {
+					memory.sleep(false);
+				}
 			}
+		} catch (error) {
+			sleepFailure = toError(error);
+			logger.warn("Mnemopi: consolidation flush/sleep failed; retaining current session before propagating.", {
+				bank: this.config.bank,
+				error: sleepFailure.message,
+			});
 		}
+		await this.forceRetainCurrentSession({ extract: options.extract });
+		if (sleepFailure) throw sleepFailure;
 	}
 
 	/**

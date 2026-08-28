@@ -3227,11 +3227,19 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 	"mnemopi.retainEveryNTurns": { type: "number", default: 4 },
+	"mnemopi.consolidateEveryNTurns": { type: "number", default: 20 },
 	"mnemopi.recallLimit": { type: "number", default: 8 },
 	"mnemopi.recallContextTurns": { type: "number", default: 3 },
 	"mnemopi.recallMaxQueryChars": { type: "number", default: 4000 },
 	"mnemopi.injectionTokenLimit": { type: "number", default: 5000 },
 	"mnemopi.debug": { type: "boolean", default: false },
+	"mnemopi.recallLengthNormalization": {
+		type: "enum",
+		values: ["none", "log", "bm25"] as const,
+		default: "none",
+	},
+	"mnemopi.recallScoreFloor": { type: "number", default: 0 },
+	"mnemopi.retentionChunkMaxChars": { type: "number", default: 6000 },
 
 	// Hindsight (https://hindsight.vectorize.io)
 	"hindsight.apiUrl": {

@@ -163,6 +163,36 @@ describe("Mnemopi facade", () => {
 		}
 	});
 
+	it("forwards poolFloor through the recall option rebuild", async () => {
+		// `toRecallOptions` enumerates fields individually, so any option it forgets is silently
+		// dropped — the facade option-loss trap. poolFloor was dropped exactly this way, which meant
+		// no production entry point could be configured into the state the round-4 benchmark
+		// measured, while the benchmark (which builds its own engine) could never detect it.
+		const memory = new Mnemopi({
+			dbPath: join(tempRoot(), "mnemopi.db"),
+			session_id: "poolfloor",
+		});
+		try {
+			for (const text of [
+				"quokka protocol primary answer about retention windows",
+				"quokka protocol secondary answer about retention windows",
+				"quokka protocol tertiary answer about retention windows",
+			]) {
+				memory.addMemory(text, { source: "test" });
+			}
+			// A floor above every fused score must stay INERT: the count is invariant by design, so
+			// the row count matches the unfloored call rather than collapsing to zero.
+			const unfloored = await memory.recallEnhanced("quokka protocol", 3);
+			const floored = await memory.recallEnhanced("quokka protocol", 3, { poolFloor: 0.9 });
+			expect(Array.isArray(floored)).toBe(true);
+			expect(floored.length).toBe(unfloored.length);
+			// And an explicitly inert floor must be accepted rather than rejected by the facade.
+			expect(Array.isArray(await memory.recallEnhanced("quokka protocol", 3, { poolFloor: 0 }))).toBe(true);
+		} finally {
+			memory.close();
+		}
+	});
+
 	it("exposes module-level singleton functions and resets cleanly for tests", async () => {
 		useTempDataDir();
 		const id = remember("Module-level memory", { importance: 0.8 });

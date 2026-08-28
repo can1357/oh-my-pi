@@ -270,7 +270,7 @@ export function cjkLikeSearch(
 	const conditions = cjkChars.map(() => "content LIKE ? ESCAPE '\\'").join(" OR ");
 	try {
 		const rows = db
-			.query(`SELECT ${idColumn}, content FROM ${table} WHERE ${conditions} LIMIT ?`)
+			.query(`SELECT ${idColumn}, content FROM ${table} WHERE superseded_by IS NULL AND (${conditions}) LIMIT ?`)
 			.all(...cjkChars.map(ch => `%${ch}%`), k * 5) as Record<string, unknown>[];
 		const scored: Array<{ id: string | number; score: number }> = [];
 		for (const row of rows) {
@@ -296,7 +296,10 @@ export function ftsSearch(db: Database, query: string, k = 20): FtsRankResult[] 
 	if (!ftsQuery) return hasCjk(query) ? (cjkLikeSearch(db, query, k, false) as FtsRankResult[]) : [];
 	try {
 		const rows = db
-			.query("SELECT rowid, rank FROM fts_episodes WHERE fts_episodes MATCH ? ORDER BY rank, rowid LIMIT ?")
+			.query(`SELECT rowid, rank FROM fts_episodes
+				 WHERE fts_episodes MATCH ?
+				   AND rowid IN (SELECT rowid FROM episodic_memory WHERE superseded_by IS NULL)
+				 ORDER BY rank, rowid LIMIT ?`)
 			.all(ftsQuery, k) as Record<string, unknown>[];
 		if (rows.length === 0 && hasCjk(query)) return cjkLikeSearch(db, query, k, false) as FtsRankResult[];
 		return rows.map(row => ({ rowid: Number(row.rowid), rank: Number(row.rank) }));
@@ -310,7 +313,10 @@ export function ftsSearchWorking(db: Database, query: string, k = 20): WorkingFt
 	if (!ftsQuery) return hasCjk(query) ? (cjkLikeSearch(db, query, k, true) as WorkingFtsRankResult[]) : [];
 	try {
 		const rows = db
-			.query("SELECT id, rank FROM fts_working WHERE fts_working MATCH ? ORDER BY rank, id LIMIT ?")
+			.query(`SELECT id, rank FROM fts_working
+				 WHERE fts_working MATCH ?
+				   AND id IN (SELECT id FROM working_memory WHERE superseded_by IS NULL)
+				 ORDER BY rank, id LIMIT ?`)
 			.all(ftsQuery, k) as Record<string, unknown>[];
 		if (rows.length === 0 && hasCjk(query)) return cjkLikeSearch(db, query, k, true) as WorkingFtsRankResult[];
 		return rows.map(row => ({ id: String(row.id), rank: Number(row.rank) }));
@@ -785,15 +791,31 @@ async function runEmbedding(beam: BeamMemoryState, items: readonly EmbedItem[]):
 		using insertEmbedding = beam.db.prepare(
 			"INSERT OR REPLACE INTO memory_embeddings(memory_id, embedding_json, model) VALUES (?, ?, ?)",
 		);
+		let committed = 0;
 		const insertMany = beam.db.transaction((rows: readonly EmbedItem[]) => {
 			for (let i = 0; i < rows.length; i += 1) {
 				const vector = matrix[i];
 				const item = rows[i];
 				if (vector === undefined || item === undefined) continue;
 				insertEmbedding.run(item.memoryId, JSON.stringify(Array.from(vector)), model);
+				committed += 1;
 			}
 		});
 		insertMany(items);
+		// A recall taken while these vectors were still generating cached an FTS-only ranking, and
+		// committing vectors changes what recall returns -- so that cache must be dropped, or the
+		// pre-embedding order keeps being served for the whole cache TTL. Gated on `committed`: a
+		// batch whose provider returned a short or empty matrix inserts nothing, changes no ranking,
+		// and invalidating there would only discard a still-valid cache. Only the query cache is
+		// affected; the polyphonic subject dictionary is built from facts/gists, which an embedding
+		// batch never touches.
+		if (committed > 0) {
+			const caches = beam.caches as
+				| { queryCache?: { invalidate?: () => void }; _queryCache?: { invalidate?: () => void } }
+				| undefined;
+			caches?.queryCache?.invalidate?.();
+			caches?._queryCache?.invalidate?.();
+		}
 	} catch (error) {
 		// Background embedding generation is best-effort: a failing provider, a closed DB
 		// during shutdown, or a transient API error must never disrupt the synchronous
