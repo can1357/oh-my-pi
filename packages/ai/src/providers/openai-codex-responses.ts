@@ -54,6 +54,7 @@ import {
 	stripOpenAIResponsesComputerLinkedReasoningIdsForReplay,
 } from "../utils";
 import { clearStreamingPartialJson, kStreamingLastParseLen, kStreamingPartialJson } from "../utils/block-symbols";
+import { hasVisibleAssistantContent } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { escapeHarmonyControlTokens, isHarmonyDialectModel } from "../utils/harmony-leak";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
@@ -458,6 +459,7 @@ export interface OpenAICodexWebSocketDebugStats {
 type CodexWebSocketSessionState = {
 	disableWebsocket: boolean;
 	lastRequest?: RequestBody;
+	/** Last completed response; an in-progress response cannot replace the retry baseline. */
 	lastResponseId?: string;
 	lastResponseItems?: InputItem[];
 	canAppend: boolean;
@@ -1019,14 +1021,6 @@ class CodexStreamRuntime {
 		const input = (rawEvent as { input?: string }).input;
 		if (typeof input === "string") finalizeCustomToolCallInputDone(entry.block, input);
 	}
-
-	handleResponseCreated(rawEvent: Record<string, unknown>): void {
-		const response = (rawEvent as { response?: { id?: string } }).response;
-		const state = this.websocketState;
-		if (state && this.transport === "websocket" && typeof response?.id === "string" && response.id.length > 0) {
-			state.lastResponseId = response.id;
-		}
-	}
 }
 
 interface CodexWhitespaceToolCallArgumentsDeltaState {
@@ -1047,6 +1041,7 @@ interface CodexStreamFailureContext {
 	output: AssistantMessage;
 	options: OpenAICodexResponsesOptions | undefined;
 	requestContext: CodexRequestContext;
+	runtime?: CodexStreamRuntime;
 	startTime: number;
 	firstTokenTime?: number;
 }
@@ -2000,6 +1995,11 @@ const CODEX_STALE_PREVIOUS_RESPONSE_CODES: Record<string, true> = {
 	codex_previous_response_stale: true,
 };
 
+const CODEX_APPEND_PRESERVING_REJECTION_CODES: Record<string, true> = {
+	rate_limit_exceeded: true,
+	slow_down: true,
+};
+
 function isCodexStalePreviousResponseError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
 	if (
@@ -2021,9 +2021,22 @@ function isCodexStalePreviousResponseError(error: unknown): boolean {
 	);
 }
 
+function shouldPreserveCodexWebSocketAppendState(context: CodexStreamFailureContext, error: unknown): boolean {
+	if (!(error instanceof CodexProviderStreamError) || !error.code) return false;
+	const state = context.requestContext.websocketState;
+	return (
+		Object.hasOwn(CODEX_APPEND_PRESERVING_REJECTION_CODES, error.code.toLowerCase()) &&
+		context.runtime?.transport === "websocket" &&
+		state?.canAppend === true &&
+		state.lastRequest !== undefined &&
+		state.lastResponseId !== undefined &&
+		state.lastResponseItems !== undefined
+	);
+}
+
 async function handleCodexStreamFailure(context: CodexStreamFailureContext, error: unknown): Promise<AssistantMessage> {
 	const { output } = context;
-	if (context.requestContext.websocketState) {
+	if (context.requestContext.websocketState && !shouldPreserveCodexWebSocketAppendState(context, error)) {
 		resetCodexWebSocketAppendState(context.requestContext.websocketState);
 		context.requestContext.websocketState.modelsEtag = undefined;
 	}
@@ -2293,11 +2306,6 @@ class CodexStreamProcessor {
 		if (eventType === "response.output_item.done") {
 			this.runtime.whitespaceToolCallArgumentsDelta = undefined;
 			this.#handleOutputItemDone(rawEvent);
-			return firstTokenTime;
-		}
-
-		if (eventType === "response.created") {
-			this.runtime.handleResponseCreated(rawEvent);
 			return firstTokenTime;
 		}
 
@@ -2779,16 +2787,67 @@ class CodexStreamProcessor {
 		return true;
 	}
 
+	/**
+	 * Emit balancing `*_end` events for every block that opened (pushed a
+	 * `*_start`) but never committed visible content, so a retry that resets
+	 * `output` and replays cannot leave the consumer with an orphaned
+	 * `text_start`/`thinking_start` from the abandoned attempt. Only reachable
+	 * blocks are empty text/reasoning ones — a committed tool/text block blocks
+	 * the retry upstream.
+	 */
+	#closeOpenBlocksForReplay(): void {
+		const { runtime, output, stream } = this;
+		const open = new Set<CodexOpenItem>(runtime.openItems.values());
+		for (const entry of runtime.openItemsByOutputIndex.values()) open.add(entry);
+		if (runtime.currentEntry) open.add(runtime.currentEntry);
+		for (const entry of open) {
+			const block = entry.block;
+			if (block?.type === "thinking") {
+				stream.push({
+					type: "thinking_end",
+					contentIndex: entry.contentIndex,
+					content: block.thinking,
+					partial: output,
+				});
+			} else if (block?.type === "text") {
+				stream.push({ type: "text_end", contentIndex: entry.contentIndex, content: block.text, partial: output });
+			}
+		}
+	}
+
 	async #tryRetryProviderError(error: unknown): Promise<boolean> {
+		const retryable =
+			error instanceof CodexProviderStreamError
+				? error.retryable
+				: AIError.isProviderRetryableError(error, { provider: this.model.provider });
+		// A leading `response.output_item.added` opens an empty block and emits only
+		// a `*_start` before any delta; that is replay-safe. But once any text or
+		// thinking delta has streamed — including a whitespace-only
+		// `output_text.delta`, which still reaches consumers as `text_delta` — or a
+		// visible tool/image block exists, replaying would duplicate/reorder those
+		// already-delivered events, so treat the attempt as committed. Emptiness is
+		// measured by the streamed block length (whitespace counts), not by visible
+		// final content.
+		const streamedContent = this.output.content.some(
+			block =>
+				(block.type === "text" && block.text.length > 0) ||
+				(block.type === "thinking" && block.thinking.length > 0),
+		);
 		if (
-			!(error instanceof CodexProviderStreamError && error.retryable) ||
-			this.output.content.length > 0 ||
+			!retryable ||
+			hasVisibleAssistantContent(this.output) ||
+			streamedContent ||
+			!this.runtime.canSafelyReplayWebsocketOverSse ||
 			this.runtime.providerRetryAttempt >= CODEX_MAX_RETRIES ||
 			this.options?.signal?.aborted
 		) {
 			return false;
 		}
 
+		// A leading `output_item.added` already pushed a `*_start` for the (empty)
+		// open block; balance it with the matching end before the reset+replay so
+		// consumers never see an orphaned start from the abandoned attempt.
+		this.#closeOpenBlocksForReplay();
 		this.runtime.providerRetryAttempt += 1;
 		const websocketState = this.requestContext.websocketState;
 		if (websocketState) {
@@ -3463,10 +3522,14 @@ function recordCodexTurnUsageDiagnostics(
 	CODEX_DEBUG && logger.debug("[codex] codex turn diagnostics", { diagnostics: state.stats.lastTurn });
 }
 
+const CODEX_CHAIN_TOP_LEVEL_EXCLUDE_MAP = {
+	service_tier: true,
+};
+
 /**
- * Shape the next websocket turn's request body: when the session's append
- * baseline is intact (same options, strict history prefix), chain via
- * `previous_response_id` + delta-only `input`; otherwise break the chain and
+ * Shape the next websocket turn's request body: when the session's strict
+ * history prefix is intact and request options other than the per-turn
+ * service_tier match, chain via previous_response_id + delta-only input;
  * replay the full transcript. SSE requests never chain — the HTTP endpoint's
  * request schema has no `previous_response_id` (codex-rs carries it only on
  * websocket `response.create` frames) and strict gateway validators 400 it
@@ -3478,7 +3541,12 @@ function buildCodexChainedRequestBody(
 ): RequestBody {
 	const chainable = state?.canAppend === true;
 	const appendInput = chainable
-		? buildResponsesDeltaInput(state.lastRequest, state.lastResponseItems, requestBody)
+		? buildResponsesDeltaInput(
+				state.lastRequest,
+				state.lastResponseItems,
+				requestBody,
+				CODEX_CHAIN_TOP_LEVEL_EXCLUDE_MAP,
+			)
 		: null;
 	if (appendInput && appendInput.length > 0 && state?.lastResponseId) {
 		return { ...requestBody, previous_response_id: state.lastResponseId, input: appendInput };
@@ -3599,14 +3667,19 @@ class CodexWebSocketConnection {
 	}
 
 	close(reason = "done"): void {
-		if (
-			this.#socket &&
-			(this.#socket.readyState === WebSocket.OPEN || this.#socket.readyState === WebSocket.CONNECTING)
-		) {
-			this.#socket.close(1000, reason);
-		}
+		const socket = this.#socket;
 		this.#socket = null;
 		this.#stopHeartbeat();
+		if (!socket || (socket.readyState !== WebSocket.OPEN && socket.readyState !== WebSocket.CONNECTING)) return;
+		try {
+			socket.close(1000, reason);
+		} catch (error) {
+			CODEX_DEBUG &&
+				logger.debug("[codex] codex websocket close failed", {
+					error: error instanceof Error ? error.message : String(error),
+					reason,
+				});
+		}
 	}
 
 	async connect(signal?: AbortSignal): Promise<void> {
@@ -3634,7 +3707,7 @@ class CodexWebSocketConnection {
 			if (signal) signal.removeEventListener("abort", onAbort);
 		};
 		const onAbort = () => {
-			socket.close(1000, "aborted");
+			this.close("aborted");
 			if (!settled) {
 				settled = true;
 				clearPending();
@@ -3650,7 +3723,7 @@ class CodexWebSocketConnection {
 		}
 		if (!settled) {
 			timeout = setTimeout(() => {
-				socket.close(1000, "connect-timeout");
+				this.close("connect-timeout");
 				if (!settled) {
 					settled = true;
 					clearPending();

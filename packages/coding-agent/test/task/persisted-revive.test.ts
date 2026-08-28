@@ -69,6 +69,7 @@ async function createPersistedSession(
 	restrictToolNames?: boolean,
 	modelRole?: string,
 	advisor?: string,
+	contract?: { tools?: string[]; readOnly?: boolean },
 ): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 	const sessionFile = manager.getSessionFile();
@@ -76,11 +77,12 @@ async function createPersistedSession(
 	manager.appendSessionInit({
 		systemPrompt: "persisted prompt",
 		task: "persisted task",
-		tools: ["read", "yield"],
+		tools: contract?.tools ?? ["read", "yield"],
 		restrictToolNames,
 		modelRole,
 		resolvedModel: modelRole ? "anthropic/claude-sonnet-4-5" : undefined,
 		advisor,
+		readOnly: contract?.readOnly,
 	});
 	manager.appendMessage({
 		role: "assistant",
@@ -185,6 +187,50 @@ describe("persisted subagent revival", () => {
 		expect(hostileMcpGetTools).not.toHaveBeenCalled();
 		expect(attemptedDiscovery).toEqual([]);
 		expect(activeToolNames).toEqual([["read", "yield"]]);
+	});
+
+	it("strips synthetic write from legacy read-only cold revival", async () => {
+		const cwd = makeTempDir("@pi-read-only-revive-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+			tools: ["read", "write", "yield"],
+			readOnly: true,
+		});
+		const activeToolNames: string[][] = [];
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession(activeToolNames).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.toolNames).toEqual(["read", "yield"]);
+		expect(activeToolNames).toEqual([["read", "yield"]]);
+	});
+
+	it("preserves explicitly writable cold-revival contracts", async () => {
+		const cwd = makeTempDir("@pi-write-revive-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+			tools: ["read", "write", "yield"],
+			readOnly: false,
+		});
+		const activeToolNames: string[][] = [];
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession(activeToolNames).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.toolNames).toEqual(["read", "write", "yield"]);
+		expect(activeToolNames).toEqual([["read", "write", "yield"]]);
 	});
 
 	it("preserves normal revival capability wiring for contracts without the marker", async () => {

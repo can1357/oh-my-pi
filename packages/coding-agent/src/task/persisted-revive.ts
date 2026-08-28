@@ -149,6 +149,7 @@ export function createPersistedSubagentReviverFactory(
 							enableIrc: false,
 							enableMCP: false,
 							preloadedExtensionPaths: [],
+							preloadedPreparedExtensions: [],
 							preloadedCustomToolPaths: [],
 						}
 					: {

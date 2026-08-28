@@ -96,6 +96,28 @@ describe("SessionManager cwd adoption on resume", () => {
 		expect(manager.getCwd()).toBe(path.resolve(projectA));
 		expect(manager.getSessionDir()).toBe(path.resolve(sessionsA));
 	});
+	it("clears fallback persistence after adopting an accessible session", async () => {
+		const launch = makeTempDir("@pi-cwd-fallback-launch-");
+		const deniedProject = makeTempDir("@pi-cwd-fallback-denied-");
+		const store = makeTempDir("@pi-cwd-fallback-store-");
+		const launchSessions = path.join(launch, "sessions");
+		const deniedFile = await writeSession(deniedProject, store);
+		const accessibleFile = await writeSession(launch, launchSessions);
+		await removeWithRetries(deniedProject);
+
+		const manager = await SessionManager.open(deniedFile, undefined, undefined, { initialCwd: launch });
+		await manager.setSessionFile(accessibleFile);
+		await manager.addWorkspaceDirectory(path.join(launch, "extra"));
+		await manager.flush();
+		await manager.close();
+
+		const reopened = await SessionManager.open(accessibleFile);
+		try {
+			expect(reopened.getAdditionalDirectories()).toContain(path.join(launch, "extra"));
+		} finally {
+			await reopened.close();
+		}
+	});
 
 	it("keeps the current cwd when the resumed session's project directory is gone", async () => {
 		const launch = makeTempDir("@pi-cwd-launch-");

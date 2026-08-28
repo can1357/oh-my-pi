@@ -262,10 +262,8 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		return null;
 	}
 
-	let tools = parseArrayOrCSV(frontmatter.tools);
-	// An explicit empty array is a real (protocol-only) allowlist, not absence —
-	// preserve it so the executor keeps enforcement on downstream.
-	if (tools === undefined && Array.isArray(frontmatter.tools)) tools = [];
+	let tools =
+		Array.isArray(frontmatter.tools) && frontmatter.tools.length === 0 ? [] : parseArrayOrCSV(frontmatter.tools);
 	if (tools) tools = normalizeToolNames(tools);
 
 	// Subagents with explicit tool lists always need yield

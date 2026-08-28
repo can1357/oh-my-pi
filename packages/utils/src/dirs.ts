@@ -15,6 +15,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { engines, version } from "../package.json" with { type: "json" };
+import { isEnoent, isEnotdir } from "./fs-error";
 
 /** App name (e.g. "omp") */
 export const APP_NAME: string = "omp";
@@ -178,17 +179,50 @@ export function relativePathWithinRoot(root: string, candidate: string): string 
 	return relative || null;
 }
 
-let projectDir = standardizeMacOSPath(process.cwd());
+let projectDir: string | undefined;
 
 /** Get the project directory. */
 export function getProjectDir(): string {
+	if (projectDir === undefined) {
+		try {
+			projectDir = standardizeMacOSPath(process.cwd());
+		} catch {
+			const candidates = [process.env.PWD, os.homedir(), os.tmpdir()];
+			for (const candidate of candidates) {
+				if (!candidate || !path.isAbsolute(candidate)) continue;
+				try {
+					process.chdir(candidate);
+					projectDir = standardizeMacOSPath(candidate);
+					break;
+				} catch {}
+			}
+			if (projectDir === undefined) {
+				throw new Error("Unable to determine an accessible working directory");
+			}
+		}
+	}
 	return projectDir;
 }
 
 /** Set the project directory. */
 export function setProjectDir(dir: string): void {
-	projectDir = standardizeMacOSPath(path.resolve(dir));
-	process.chdir(projectDir);
+	const resolved = standardizeMacOSPath(path.resolve(dir));
+	process.chdir(resolved);
+	projectDir = resolved;
+}
+
+/** Reset the cached project directory (test seam). */
+export function __resetProjectDirCacheForTests(): void {
+	projectDir = undefined;
+}
+
+/** Whether a path is absent or not a directory. Other stat failures return false. */
+export async function directoryIsMissing(dir: string): Promise<boolean> {
+	try {
+		return !(await fs.promises.stat(dir)).isDirectory();
+	} catch (error) {
+		return isEnoent(error) || isEnotdir(error);
+	}
 }
 
 /**
@@ -203,6 +237,44 @@ export async function directoryExists(dir: string): Promise<boolean> {
 	} catch {
 		return false;
 	}
+}
+
+/**
+ * Whether `dir` both exists and can be entered. POSIX `stat` succeeds for a
+ * directory whose own search/execute permission is denied (it only needs
+ * +x on the parent chain), so existence alone does not imply `chdir` works.
+ * Callers that adopt a directory as a working directory must check this
+ * rather than {@link directoryExists} alone.
+ */
+export async function directoryIsEnterable(dir: string): Promise<boolean> {
+	try {
+		const [stats] = await Promise.all([fs.promises.stat(dir), fs.promises.access(dir, fs.constants.X_OK)]);
+		return stats.isDirectory();
+	} catch {
+		return false;
+	}
+}
+
+/** Whether `dir` is enterable, synchronous variant. See {@link directoryIsEnterable}. */
+export function directoryIsEnterableSync(dir: string): boolean {
+	try {
+		fs.accessSync(dir, fs.constants.X_OK);
+		return fs.statSync(dir).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Project directory when it is enterable, otherwise a safe fallback.
+ * Used by spawns that must preserve project-relative behavior when healthy.
+ */
+export function getSafeProjectCwd(): string {
+	try {
+		const dir = getProjectDir();
+		if (directoryIsEnterableSync(dir)) return dir;
+	} catch {}
+	return os.homedir();
 }
 
 /** Get the config directory name relative to home (e.g. ".omp" or PI_CONFIG_DIR override). */
@@ -677,6 +749,15 @@ export function getGithubCacheDbPath(): string {
 	if (override) return override;
 	return dirs.rootSubdir(path.join("cache", "github-cache.db"), "cache");
 }
+/**
+ * Get the conventional commit inference cache database path (~/.omp/cache/commit-inference.db).
+ * Honors `OMP_COMMIT_CACHE_DB` so tests and operators can isolate the cache.
+ */
+export function getCommitCacheDbPath(): string {
+	const override = process.env.OMP_COMMIT_CACHE_DB;
+	if (override) return override;
+	return dirs.rootSubdir(path.join("cache", "commit-inference.db"), "cache");
+}
 
 /** Get the legacy Pi extension parse cache database path. */
 export function getLegacyPiExtensionCacheDbPath(): string {
@@ -781,6 +862,10 @@ export function getTinyModelsCacheDir(agentDir?: string): string {
 /** Get the document conversion cache directory (~/.omp/agent/cache/document-conversions; XDG default: $XDG_CACHE_HOME/omp/cache/document-conversions). */
 export function getDocumentConversionCacheDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, path.join("cache", "document-conversions"), "cache");
+}
+/** Get the per-project composer speculative cache directory (~/.omp/agent/cache/composer; XDG default: $XDG_CACHE_HOME/omp/cache/composer). */
+export function getComposerCacheDir(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, path.join("cache", "composer"), "cache");
 }
 
 /** Get the sessions directory (~/.omp/agent/sessions). */
@@ -946,6 +1031,17 @@ export function getSSHConfigPath(scope: "user" | "project", cwd: string = getPro
 let cachedInstallId: string | null = null;
 
 const INSTALL_ID_FILE = "install-id";
+/**
+ * Application label for usage attribution (`OMP_APP_NAME`), defaulting to
+ * `omp`. Embedders that drive omp programmatically (robomp, CI bots, …) set
+ * the env var so broker-side per-client burn tracking can answer "what did
+ * app X use" instead of folding everything into one install-wide bucket.
+ */
+export function getAppName(): string {
+	const value = process.env.OMP_APP_NAME?.trim();
+	return value ? value : "omp";
+}
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**

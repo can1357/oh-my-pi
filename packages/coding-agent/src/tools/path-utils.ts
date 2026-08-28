@@ -20,14 +20,14 @@ export function isFilesystemSourcePath(value: string): boolean {
 // `-` in parseLineRangeChunk. Keep this fragment and LINE_RANGE_CHUNK_RE in sync.
 const RANGE_CHUNK_SRC = String.raw`L?\d+(?:(?:[-+]|\.\.)L?\d+|-|\.\.)?`;
 const RANGE_LIST_SRC = `${RANGE_CHUNK_SRC}(?:,${RANGE_CHUNK_SRC})*`;
-const FILE_LINE_RANGE_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|raw|conflicts)$`, "i");
+const FILE_LINE_RANGE_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|raw|conflicts|img)$`, "i");
 const FILE_LINE_RANGE_ONLY_RE = new RegExp(`^${RANGE_LIST_SRC}$`, "i");
 const FILE_RAW_ONLY_RE = /^raw$/i;
 // Permissive selector chunk for internal URLs — accepts well-formed selectors
 // plus common malformed shapes (e.g. `:-N`) so the read tool peels the entire
 // selector chain off before dispatching to a protocol handler.
 const INTERNAL_URL_SELECTOR_PART_RE = new RegExp(
-	String.raw`^(?:raw|conflicts|${RANGE_LIST_SRC}|-\d+(?:[-+]\d+)?)$`,
+	String.raw`^(?:raw|conflicts|img|${RANGE_LIST_SRC}|-\d+(?:[-+]\d+)?)$`,
 	"i",
 );
 // Schemes whose host grammar is identifier-shaped, so any trailing
@@ -1436,6 +1436,8 @@ export interface ToolScopeOptions {
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Calling session's loaded skills — lets skill:// resolve without process-global state. */
 	skills?: readonly Skill[];
+	/** Calling session's session file — lets history:///agent:// resolve against the caller's root. */
+	sessionFile?: string;
 	/** Materialize readable external URLs to local text files before scope derivation. */
 	resolveExternalUrl?: (rawPath: string) => Promise<ResolvedExternalSearchUrl | undefined>;
 }
@@ -1523,6 +1525,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 			cwd,
 			settings: opts.settings,
 			signal: opts.signal,
+			sessionFile: opts.sessionFile,
 			localProtocolOptions: opts.localProtocolOptions,
 			skills: opts.skills,
 			// Tool-scope resolution only needs `sourcePath`; skip content

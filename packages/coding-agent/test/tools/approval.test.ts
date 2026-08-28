@@ -3,6 +3,7 @@ import type { AgentTool, ToolApproval } from "@oh-my-pi/pi-agent-core";
 import { LSP_READONLY_ACTIONS } from "@oh-my-pi/pi-coding-agent/lsp";
 import {
 	type ApprovalMode,
+	denyError,
 	formatApprovalPrompt,
 	requiresApproval,
 	resolveApproval,
@@ -112,6 +113,30 @@ describe("resolveApproval override and user policy", () => {
 		expect(() => requiresApproval(blocked, {}, "write", { bash: "allow" })).toThrow(
 			'Tool "bash" is blocked by tool policy',
 		);
+	});
+
+	it("tool-sourced deny surfaces the reason and does not mention tools.approval", () => {
+		const blocked = tool("bash", {
+			tier: "exec",
+			override: true,
+			policy: "deny",
+			reason: "Blocked by bash pattern: rm -rf *",
+		});
+		const resolved = resolveApproval(blocked, {}, "yolo", { bash: "allow" });
+		expect(() => {
+			throw denyError(resolved, "bash");
+		}).toThrow('Tool "bash" is blocked by tool policy.\nReason: Blocked by bash pattern: rm -rf *');
+		expect(() => {
+			throw denyError(resolved, "bash");
+		}).not.toThrow(/tools\.approval/);
+	});
+
+	it("user-sourced deny keeps the original tools.approval message", () => {
+		const writeTool = tool("write", "write");
+		const resolved = resolveApproval(writeTool, {}, "yolo", { write: "deny" });
+		expect(() => {
+			throw denyError(resolved, "write");
+		}).toThrow('Tool "write" is blocked by user policy.\nTo allow: remove "tools.approval.write: deny" from config.');
 	});
 
 	it("valid user policy overrides mode and tier when no tool override is active", () => {

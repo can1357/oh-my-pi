@@ -734,14 +734,14 @@ export class GitModel {
 		}
 	}
 
-	/** Stage one file (or everything when `file` is omitted). */
-	async stage(file?: ChangedFile): Promise<void> {
-		await git.stage.files(this.cwd, file ? [file.path] : []);
+	/** Stage the given files (or everything when omitted). */
+	async stage(files?: readonly ChangedFile[]): Promise<void> {
+		await git.stage.files(this.cwd, files?.map(file => file.path) ?? []);
 	}
 
-	/** Unstage one file (or everything when `file` is omitted). */
-	async unstage(file?: ChangedFile): Promise<void> {
-		await git.stage.reset(this.cwd, file ? [file.path] : []);
+	/** Unstage the given files (or everything when omitted). */
+	async unstage(files?: readonly ChangedFile[]): Promise<void> {
+		await git.stage.reset(this.cwd, files?.map(file => file.path) ?? []);
 	}
 
 	/** Create (or amend) a commit from the staged changes. */

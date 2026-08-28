@@ -46,6 +46,17 @@ function replyStream(text: string): AssistantMessageEventStream {
 	})();
 	return Object.assign(iterator, { result: async () => message }) as unknown as AssistantMessageEventStream;
 }
+function errorStream(errorMessage: string): AssistantMessageEventStream {
+	const events = [{ type: "error", error: { errorMessage } }] as unknown as AssistantMessageEvent[];
+	const iterator = (async function* () {
+		for (const event of events) yield event;
+	})();
+	return Object.assign(iterator, {
+		result: async () => {
+			throw new Error(errorMessage);
+		},
+	}) as unknown as AssistantMessageEventStream;
+}
 
 /** Replay the machine locally to answer turn `turn` of a run exactly as a perfect model would. */
 function perfectResult(turn: number): string {
@@ -184,6 +195,56 @@ describe("if-bench run", () => {
 		expect(report.actionsPassed).toBe(6);
 		expect(report.failure).toBeUndefined();
 		expect(summary.failures).toBe(0);
+	});
+	it("retries a transient cyber refusal instead of ending the run", async () => {
+		// The Anthropic cyber classifier refuses stochastically near the threshold;
+		// the first attempt refuses, the retry answers, and the turn must pass.
+		let attempts = 0;
+		const summary = await runIfBenchCommand(
+			{ models: ["acme/if-bench-model"], flags: { turns: 2, par: 1 } },
+			{
+				createRuntime: async () => ({ modelRegistry: registry, close: () => {} }),
+				randomSessionId: () => `sess-${crypto.randomUUID()}`,
+				sleep: () => Promise.resolve(),
+				writeStdout: () => {},
+				writeStderr: () => {},
+				setExitCode: () => {},
+				now: () => 0,
+				stdoutIsTTY: false,
+				streamSimple: (_m, context) => {
+					attempts += 1;
+					// Turn number == user messages so far; turn 1's first attempt refuses.
+					const turn = context.messages.filter(m => m.role === "user").length;
+					return attempts === 1
+						? errorStream("Refusal (cyber): This request triggered restrictions on violative cyber content")
+						: replyStream(`<${perfectResult(turn)}> nya`);
+				},
+			},
+		);
+		const report = summary.models[0]!;
+		expect(report.turns[0]!.passed).toBe(true);
+		expect(report.turnsPassed).toBe(2);
+		expect(report.failure).toBeUndefined();
+	});
+
+	it("scores a run-ending provider failure only after the refusal budget is spent", async () => {
+		const summary = await runIfBenchCommand(
+			{ models: ["acme/if-bench-model"], flags: { turns: 1, par: 1 } },
+			{
+				createRuntime: async () => ({ modelRegistry: registry, close: () => {} }),
+				randomSessionId: () => "sess-x",
+				sleep: () => Promise.resolve(),
+				writeStdout: () => {},
+				writeStderr: () => {},
+				setExitCode: () => {},
+				now: () => 0,
+				stdoutIsTTY: false,
+				streamSimple: () => errorStream("Refusal (cyber): blocked"),
+			},
+		);
+		const report = summary.models[0]!;
+		expect(report.turnsPassed).toBe(0);
+		expect(report.failure).toMatchObject({ turn: 1, kind: "provider" });
 	});
 
 	it("classifies a provider failure separately from a wrong answer", async () => {

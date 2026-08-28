@@ -450,6 +450,10 @@ describe("openai-completions convertMessages", () => {
 			{ id: "deepseek-chat", provider: "deepseek", baseUrl: "https://api.deepseek.com" },
 			{ id: "deepseek-reasoner", provider: "deepseek", baseUrl: "https://api.deepseek.com" },
 			{ id: "deepseek-ai/DeepSeek-V4-Pro", provider: "custom-proxy", baseUrl: "https://llm-proxy.example.com/v1" },
+			// `vision` inside `revision` is a substring, not a multimodal token.
+			{ id: "deepseek-r1-revision-0528", provider: "custom-proxy", baseUrl: "https://llm-proxy.example.com/v1" },
+			// `vision` inside `provisioned` is a substring, not a multimodal token.
+			{ id: "deepseek-v4-provisioned", provider: "custom-proxy", baseUrl: "https://llm-proxy.example.com/v1" },
 		];
 
 		const baseModel = getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">;
@@ -541,6 +545,34 @@ describe("openai-completions convertMessages", () => {
 		expect(messages).toHaveLength(1);
 		expect(messages[0].content).toEqual([
 			{ type: "text", text: "Read this document" },
+			{
+				type: "image_url",
+				image_url: { url: "data:image/png;base64,ZmFrZQ==" },
+			},
+		]);
+	});
+	it("preserves image_url for the multimodal DeepSeek vision SKU", () => {
+		// deepseek-v4-flash-vision-exp is genuinely multimodal: the blanket
+		// DeepSeek text-only guard must not strip its image parts.
+		const model = getBundledModel("deepseek", "deepseek-v4-flash-vision-exp") as Model<"openai-completions">;
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "Describe this image" },
+						{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" },
+					],
+					timestamp: Date.now(),
+				},
+			],
+		};
+
+		const messages = convertMessages(model, context, compat);
+
+		expect(messages).toHaveLength(1);
+		expect(messages[0].content).toEqual([
+			{ type: "text", text: "Describe this image" },
 			{
 				type: "image_url",
 				image_url: { url: "data:image/png;base64,ZmFrZQ==" },

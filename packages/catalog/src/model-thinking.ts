@@ -329,6 +329,14 @@ function getModelDefinedEfforts<TApi extends Api>(
 	spec: ModelSpec<TApi>,
 	compat: CompatOf<TApi>,
 ): readonly Effort[] | undefined {
+	if (
+		isOpenAICompatReasoningApi(spec.api) &&
+		isChatTemplateThinkingFormat(compat) &&
+		spec.thinking?.mode === "effort" &&
+		spec.thinking.efforts.length > 0
+	) {
+		return spec.thinking.efforts;
+	}
 	if (isGlm53ReasoningEffortModelId(spec.id)) {
 		// GLM-5.3+ exposes a uniform wire-exact low/high/max ladder on every
 		// host — unlike GLM-5.2, whose reasoning_effort dialect is
@@ -518,6 +526,9 @@ function isQwenTemplateReasoningEffortCompat(compat: CompatOf<Api>): boolean {
 	return (
 		compat !== undefined && "qwenTemplateReasoningEffort" in compat && compat.qwenTemplateReasoningEffort === true
 	);
+}
+function isChatTemplateThinkingFormat(compat: CompatOf<Api>): boolean {
+	return compat !== undefined && "thinkingFormat" in compat && compat.thinkingFormat === "chat-template";
 }
 
 function inferDetectedEffortMap<TApi extends Api>(
@@ -765,6 +776,14 @@ function inferThinkingControlMode<TApi extends Api>(
 				if (parsedModel.kind === "opus" && semverGte(parsedModel.version, "4.5")) {
 					return "anthropic-budget-effort";
 				}
+			}
+			// Bedrock serves the GPT-5.x models through OpenAI's own request
+			// schema, which rejects Anthropic's budget block outright:
+			// `unknown_parameter: 'thinking'`. It takes `reasoning.effort`
+			// instead. gpt-oss parses as `unknown` (no `gpt-<digits>`), so it
+			// keeps the budget path it ships with today.
+			if (parsedModel.family === "openai") {
+				return "effort";
 			}
 			return "budget";
 

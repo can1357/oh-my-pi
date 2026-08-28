@@ -18,6 +18,7 @@ function createSpec<TApi extends Api>(overrides: {
 	priority?: number;
 	applyPatchToolType?: "freeform" | "function";
 	cost?: ModelSpec<TApi>["cost"];
+	compat?: ModelSpec<TApi>["compat"];
 	thinking?: ModelSpec<TApi>["thinking"];
 }): ModelSpec<TApi> {
 	return {
@@ -27,6 +28,7 @@ function createSpec<TApi extends Api>(overrides: {
 		provider: overrides.provider,
 		baseUrl: "https://example.com",
 		reasoning: overrides.reasoning ?? true,
+		compat: overrides.compat,
 		thinking: overrides.thinking,
 		input: ["text"],
 		cost: overrides.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -114,6 +116,34 @@ describe("generated model policies", () => {
 			defaultLevel: Effort.Max,
 			requiresEffort: true,
 		});
+	});
+
+	it("preserves generic chat-template provider-authored effort mappings", () => {
+		const thinking = {
+			mode: "effort" as const,
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+			effortMap: {
+				[Effort.Minimal]: "low",
+				[Effort.Low]: "low",
+				[Effort.Medium]: "high",
+				[Effort.High]: "high",
+				[Effort.XHigh]: "max",
+				[Effort.Max]: "max",
+			},
+		};
+		const models: ModelSpec<Api>[] = [
+			createSpec({
+				id: "deepseek-flash-v4",
+				api: "openai-completions",
+				provider: "yolo-auto",
+				compat: { thinkingFormat: "chat-template", supportsReasoningEffort: true },
+				thinking,
+			}),
+		];
+
+		applyGeneratedModelPolicies(models);
+
+		expect(models[0]?.thinking).toEqual(thinking);
 	});
 
 	it("applies GPT-5.6 off and long-context pricing through request-model aliases", () => {

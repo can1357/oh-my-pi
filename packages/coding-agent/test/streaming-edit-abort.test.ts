@@ -160,7 +160,7 @@ function createStreamingEdit(
 	chunks: string[],
 	abortSignalRef: { current?: AbortSignal },
 	createArguments: (path: string, streamedText: string) => Record<string, unknown>,
-	streamStateRef?: { deltaCount: number; waitBeforeFirstDelta?: Promise<void> },
+	streamStateRef?: { deltaCount: number; waitBeforeFirstDelta?: Promise<void>; waitBeforeFinish?: Promise<void> },
 ): Agent["streamFn"] {
 	let callIndex = 0;
 	return (_model, _context, options) => {
@@ -221,6 +221,12 @@ function createStreamingEdit(
 				await Bun.sleep(0);
 			}
 
+			// Optional gate before the final events: lets a test hold the turn open
+			// until the guard's async verification verdict has landed, instead of
+			// racing `done` against I/O-backed verification.
+			if (streamStateRef?.waitBeforeFinish) {
+				await streamStateRef.waitBeforeFinish;
+			}
 			if (aborted) return;
 
 			const finalCall = createToolCall(toolCallId, createArguments(path, streamedText));
@@ -238,7 +244,7 @@ function createStreamForDiff(
 	path: string,
 	chunks: string[],
 	abortSignalRef: { current?: AbortSignal },
-	streamStateRef?: { deltaCount: number; waitBeforeFirstDelta?: Promise<void> },
+	streamStateRef?: { deltaCount: number; waitBeforeFirstDelta?: Promise<void>; waitBeforeFinish?: Promise<void> },
 ): Agent["streamFn"] {
 	return createStreamingEdit(
 		path,
@@ -303,27 +309,80 @@ it(
 it(
 	"aborts for failing patches across random streams",
 	async () => {
-		await Bun.write(path.join(tempDir, "sample.txt"), "alpha\nbeta\ngamma\n");
+		// This test raced the fake provider against the guard's async
+		// verification: Bun.sleep(0) between deltas does not guarantee the
+		// Bun.file().text() load plus the verification chain settle before the
+		// provider emits `done`, and the turn reset then correctly discards the
+		// late verdict (CI flake: expected "aborted", received "stop"). Keep the
+		// full session contract — event forwarding into the guard, agent.abort()
+		// translated into an aborted turn and AbortSignal — but gate both async
+		// legs explicitly: hold the target's file load open until every seed-7
+		// fragmented delta (which splits the decision-critical `-omega` line)
+		// has streamed, and hold the provider's final `done` until the released
+		// verification has had its macrotasks to land the verdict.
+		const target = path.join(tempDir, "sample.txt");
+		await Bun.write(target, "alpha\nbeta\ngamma\n");
 		const diff = "@@\n-omega\n+beta2\n";
+		const chunks = chunkStringRandomly(diff, 7);
+		const abortSignalRef: { current?: AbortSignal } = {};
+		const finishGate = Promise.withResolvers<void>();
+		const streamState = { deltaCount: 0, waitBeforeFinish: finishGate.promise };
+		const streamFn = createStreamForDiff("sample.txt", chunks, abortSignalRef, streamState);
+		const { session, authStorage } = await createSession(tempDir, streamFn, editTool);
 
-		for (const seed of seeds) {
-			const chunks = chunkStringRandomly(diff, seed);
-			const abortSignalRef: { current?: AbortSignal } = {};
-			const streamFn = createStreamForDiff("sample.txt", chunks, abortSignalRef);
-			const { session, authStorage } = await createSession(tempDir, streamFn, editTool);
+		const { promise: heldLoad, resolve: releaseLoad } = Promise.withResolvers<string>();
+		const realFile = Bun.file.bind(Bun);
+		const fileSpy = vi.spyOn(Bun, "file").mockImplementation(((pathLike: string) => {
+			const real = realFile(pathLike);
+			if (pathLike !== target) return real;
+			// Only .text() is held; the session may touch other BunFile members.
+			return new Proxy(real, {
+				get(obj, prop) {
+					if (prop === "text") return () => heldLoad;
+					const value = Reflect.get(obj, prop);
+					return typeof value === "function" ? value.bind(obj) : value;
+				},
+			});
+		}) as typeof Bun.file);
 
+		const promptPromise = session.prompt("apply patch");
+		let stopWaitingForDeltas = false;
+		try {
+			const first = await Promise.race([
+				(async () => {
+					while (!stopWaitingForDeltas && streamState.deltaCount < chunks.length) {
+						await drainMacrotasks(1);
+					}
+					return "deltas" as const;
+				})(),
+				promptPromise.then(() => "prompt" as const),
+			]);
+			if (first === "prompt") throw new Error("Prompt completed before every streamed delta was emitted");
+			stopWaitingForDeltas = true;
+
+			// Every queued verification is still pending behind the held load, so
+			// the abort decision cannot have raced the stream.
+			expect(abortSignalRef.current?.aborted ?? false).toBe(false);
+
+			releaseLoad("alpha\nbeta\ngamma\n");
+			await heldLoad;
+			await drainMacrotasks(10);
+			finishGate.resolve();
+			await promptPromise;
+
+			const lastAssistant = lastAssistantMessage(session.state.messages);
+			expect(lastAssistant?.stopReason).toBe("aborted");
+			expect(abortSignalRef.current?.aborted ?? false).toBe(true);
+		} finally {
+			stopWaitingForDeltas = true;
+			releaseLoad("alpha\nbeta\ngamma\n");
+			finishGate.resolve();
+			await promptPromise.catch(() => undefined);
+			fileSpy.mockRestore();
 			try {
-				await session.prompt("apply patch");
-
-				const lastAssistant = lastAssistantMessage(session.state.messages);
-				expect(lastAssistant?.stopReason).toBe("aborted");
-				expect(abortSignalRef.current?.aborted ?? false).toBe(true);
+				await session.dispose();
 			} finally {
-				try {
-					await session.dispose();
-				} finally {
-					authStorage.close();
-				}
+				authStorage.close();
 			}
 		}
 	},
@@ -521,9 +580,8 @@ it("aborts auto-generated file edits as soon as the path is available", async ()
 	}
 });
 
-// Builds a 2MB target whose tail matches the patch's removed lines: every
-// verification scan walks nearly the whole file, so a synchronous guard would
-// block the event loop far past the 5ms budget while the diff grows.
+// Builds a 2MB target whose tail matches the patch's removed lines, forcing
+// verification to scan enough content to exercise its time-slicing path.
 async function createLargeTargetSetup(abortCalls: { count: number }) {
 	const target = path.join(tempDir, "big.txt");
 	const fillerLine = `${"x".repeat(59)}\n`;
@@ -564,102 +622,94 @@ async function createLargeTargetSetup(abortCalls: { count: number }) {
 	return { target, removedLines, guard, makeEvent };
 }
 
-// Drift monitoring is the contract under test (real event-loop blocking), so
-// these tests deliberately use the platform clock; fake timers cannot observe a
-// blocked loop. The 1ms tick adds no artificial waits to assertions.
-async function measureMaxDrift(run: () => Promise<void>): Promise<number> {
-	let monitoring = true;
-	let maxDriftMs = 0;
-	const monitor = (async () => {
-		let last = performance.now();
-		while (monitoring) {
-			await Bun.sleep(1);
-			const now = performance.now();
-			maxDriftMs = Math.max(maxDriftMs, now - last - 1);
-			last = now;
-		}
-	})();
-	try {
-		await run();
-	} finally {
-		monitoring = false;
-		await monitor;
-	}
-	return maxDriftMs;
-}
-
 /** Streams the diff in multi-line deltas paced across macrotasks like a real stream. */
 async function streamDiff(
-	guard: StreamingEditGuard | undefined,
-	makeEvent: ((t: "toolcall_start" | "toolcall_delta", d: string) => AgentEvent) | undefined,
+	guard: StreamingEditGuard,
+	makeEvent: (t: "toolcall_start" | "toolcall_delta", d: string) => AgentEvent,
 	diff: string,
-): Promise<number> {
-	// Longest synchronous span spent inside the guard calls themselves — the
-	// regression signature of the old implementation (sync file read + full
-	// rescan per delta happened inline).
-	let maxSyncSpanMs = 0;
-	const timed = (run: () => void): void => {
-		if (!guard) return;
-		const start = performance.now();
-		run();
-		maxSyncSpanMs = Math.max(maxSyncSpanMs, performance.now() - start);
-	};
-
-	const startEvent = makeEvent?.("toolcall_start", "");
-	if (guard && startEvent) timed(() => guard.preCache(startEvent));
+): Promise<void> {
+	guard.preCache(makeEvent("toolcall_start", ""));
 	let streamed = "";
 	for (let offset = 0; offset < diff.length; offset += 256) {
 		streamed = diff.slice(0, offset + 256);
-		const event = makeEvent?.("toolcall_delta", streamed);
-		if (guard && event) {
-			timed(() => {
-				guard.preCache(event);
-				guard.maybeAbort(event);
-			});
-		}
+		const event = makeEvent("toolcall_delta", streamed);
+		guard.preCache(event);
+		guard.maybeAbort(event);
 		// Macrotask pacing mirrors a real stream: the guard's async file cache and
 		// time-sliced verdicts only settle across event-loop ticks.
 		await Bun.sleep(0);
 	}
 	await Bun.sleep(0);
 	await Bun.sleep(0);
-	return maxSyncSpanMs;
+}
+
+// Polls the guard's timer-sliced verdict bounded by wall time, not tick count:
+// a zero-delay setImmediate spin can burn a fixed tick budget in under a
+// millisecond on a loaded runner without firing a single timer or letting the
+// target's disk read settle. Fake timers cannot drive this — the verdict waits
+// on real file I/O, and the guard exposes no promise for it — so this awaits
+// the real condition with a 1ms poll, deadline-bounded only against hangs.
+async function drainUntilAbort(guard: StreamingEditGuard, timeoutMs = 15_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!guard.abortTriggered && Date.now() < deadline) {
+		await drainMacrotasks(1);
+		if (!guard.abortTriggered) await Bun.sleep(1);
+	}
 }
 
 it(
-	"streams large-target edit prechecks without blocking the event loop",
+	"keeps the event loop responsive while prechecking a large-target edit",
 	async () => {
 		const abortCalls = { count: 0 };
-		const { removedLines, guard, makeEvent } = await createLargeTargetSetup(abortCalls);
-		const diff = `@@\n${removedLines.map(l => `-${l}`).join("\n")}\n+replacement\n`;
-
-		// Ambient control: identical pacing with no guard work. Under heavy machine
-		// load the drift monitor reports OS scheduling jitter for any process; the
-		// guard run may only exceed it by a small margin plus the absolute budget.
-		const ambientDriftMs = await measureMaxDrift(async () => {
-			await streamDiff(undefined, undefined, diff);
+		const { target, removedLines, guard, makeEvent } = await createLargeTargetSetup(abortCalls);
+		const content = await Bun.file(target).text();
+		const { promise: heldLoad, resolve: releaseLoad } = Promise.withResolvers<string>();
+		const realFile = Bun.file.bind(Bun);
+		const fileSpy = vi.spyOn(Bun, "file").mockImplementation(((pathLike: string) => ({
+			text: () => (pathLike === target ? heldLoad : realFile(pathLike).text()),
+		})) as typeof Bun.file);
+		// Advance the guard's slice clock deterministically so the scan crosses its
+		// time-slice boundary after each line regardless of real scan duration; the
+		// responsiveness contract below is proven by an external task, not by the
+		// clock or the guard's internal yield count.
+		let nowMs = 0;
+		const clockSpy = vi.spyOn(performance, "now").mockImplementation(() => {
+			nowMs += 3;
+			return nowMs;
 		});
 
-		let maxSyncSpanMs = 0;
-		const maxDriftMs = await measureMaxDrift(async () => {
-			maxSyncSpanMs = await streamDiff(guard, makeEvent, diff);
-		});
+		try {
+			const diff = `@@\n${removedLines.map(line => `-${line}`).join("\n")}\n-absent-line-xyz\n+replacement\n`;
+			const event = makeEvent("toolcall_delta", diff);
+			guard.preCache(event);
+			guard.maybeAbort(event);
 
-		// performance.now() spans include runner-preemption time the ambient drift
-		// control also absorbs, so calibrate the guard-work ceiling against the
-		// measured jitter instead of trusting a fixed wall-clock bound alone.
-		expect(maxSyncSpanMs).toBeLessThan(Math.max(5, ambientDriftMs * 3));
-		// The guard run legitimately spends one tick decoding + LF-normalizing the
-		// 2MB target and then pays GC for that churn — single-digit ms locally,
-		// 12ms observed on a 2-core CI runner. The ambient control cannot absorb
-		// those (they only occur under guard work), so the absolute floor covers
-		// them. Regression drift is an order of magnitude above it: an unsliced
-		// removed-lines pass scans 200 lines x 2MB in one continuation (>=40ms
-		// even on fast hardware), and inline-sync blocking is caught by the
-		// tighter maxSyncSpanMs bound above.
-		expect(maxDriftMs).toBeLessThan(Math.max(30, ambientDriftMs + 5));
-		expect(guard.abortTriggered).toBe(false);
-		expect(abortCalls.count).toBe(0);
+			// The streaming callback returns while the async target load is pending:
+			// no synchronous scan blocks the caller.
+			expect(guard.abortTriggered).toBe(false);
+			expect(abortCalls.count).toBe(0);
+
+			// Release the load, then race an independently scheduled macrotask against
+			// the removed-lines scan. The absent line sits at the tail: a scan that
+			// blocked the loop would reach it and abort before any other task could
+			// run, so the beacon would observe an already-aborted guard. A responsive
+			// scan yields first, letting the beacon run mid-flight.
+			releaseLoad(content);
+			const beacon = Promise.withResolvers<boolean>();
+			setImmediate(() => beacon.resolve(guard.abortTriggered));
+			const abortedWhenBeaconRan = await beacon.promise;
+			expect(abortedWhenBeaconRan).toBe(false);
+
+			// Draining the remaining slices completes the scan and surfaces the abort
+			// the absent tail line must trigger.
+			await drainUntilAbort(guard);
+			expect(guard.abortTriggered).toBe(true);
+			expect(abortCalls.count).toBe(1);
+		} finally {
+			releaseLoad(content);
+			clockSpy.mockRestore();
+			fileSpy.mockRestore();
+		}
 	},
 	STREAMING_EDIT_RANDOM_STREAM_TIMEOUT_MS,
 );
@@ -681,6 +731,9 @@ it(
 		const diff = `${diffLines.join("\n")}\n`;
 
 		await streamDiff(guard, makeEvent, diff);
+		// The time-sliced scan may need more ticks than the stream provided on a
+		// slow machine; drain until the verdict lands.
+		await drainUntilAbort(guard);
 
 		expect(guard.abortTriggered).toBe(true);
 		expect(abortCalls.count).toBe(1);

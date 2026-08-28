@@ -707,6 +707,23 @@ describe("model thinking derivation", () => {
 		expect(sonnet5Bedrock.thinking?.supportsDisplay).toBe(true);
 	});
 
+	it("classifies OpenAI-schema Bedrock models as effort, leaving gpt-oss on budget", () => {
+		// Bedrock serves the GPT-5.x SKUs through OpenAI's own request schema,
+		// which rejects Anthropic's budget block: `unknown_parameter: 'thinking'`.
+		for (const id of ["global.openai.gpt-5.6-luna", "global.openai.gpt-5.6-sol", "global.openai.gpt-5.6-terra"]) {
+			expect(createModel({ id, api: "bedrock-converse-stream", provider: "amazon-bedrock" }).thinking?.mode).toBe(
+				"effort",
+			);
+		}
+
+		// gpt-oss is not a `gpt-<digits>` id, so it stays unclassified and keeps
+		// the budget path it ships with today.
+		expect(
+			createModel({ id: "openai.gpt-oss-120b", api: "bedrock-converse-stream", provider: "amazon-bedrock" }).thinking
+				?.mode,
+		).toBe("budget");
+	});
+
 	it("backfills wire facts onto explicit thinking, explicit values winning", () => {
 		// Authored partial ladders on wire-exact models normalize to the
 		// model-defined ladder, and the wire map is re-derived alongside:
@@ -1131,6 +1148,49 @@ describe("model thinking runtime helpers", () => {
 		expect(emptyEfforts.thinking).toEqual({
 			mode: "effort",
 			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+		});
+	});
+});
+
+describe("generic chat-template thinking dialect", () => {
+	it("preserves an explicit model effort ladder and derives the thinking-off wire mode", () => {
+		const model = createModel({
+			id: "deepseek-flash-v4",
+			name: "DeepSeek Flash V4",
+			api: "openai-completions",
+			provider: "yolo-auto",
+			baseUrl: "https://yolo-auto.com/v1",
+			compat: {
+				supportsReasoningEffort: true,
+				thinkingFormat: "chat-template",
+			},
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+				effortMap: {
+					[Effort.Minimal]: "low",
+					[Effort.Low]: "low",
+					[Effort.Medium]: "high",
+					[Effort.High]: "high",
+					[Effort.XHigh]: "max",
+					[Effort.Max]: "max",
+				},
+			},
+		});
+
+		expect(model.compat.thinkingFormat).toBe("chat-template");
+		expect(model.compat.reasoningDisableMode).toBe("chat-template-thinking-false");
+		expect(model.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+			effortMap: {
+				[Effort.Minimal]: "low",
+				[Effort.Low]: "low",
+				[Effort.Medium]: "high",
+				[Effort.High]: "high",
+				[Effort.XHigh]: "max",
+				[Effort.Max]: "max",
+			},
 		});
 	});
 });

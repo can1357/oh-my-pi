@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -15,6 +15,7 @@ import {
 	parseSearchDateBound,
 	resolveDefaultRepoMemoized,
 } from "@oh-my-pi/pi-coding-agent/tools/gh";
+import { parseIssueUrl, parsePullRequestUrl } from "@oh-my-pi/pi-coding-agent/tools/gh-common";
 import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { $which, getAgentDir, hashPath, removeWithRetries, setAgentDir, WhichCachePolicy } from "@oh-my-pi/pi-utils";
@@ -957,7 +958,7 @@ describe("github tool", () => {
 	});
 
 	it("search_prs: defaults `repo:` to the current checkout when `repo` is omitted", async () => {
-		const textSpy = vi.spyOn(git.github, "text").mockResolvedValue("acme/widgets\n");
+		const textSpy = vi.spyOn(git.github, "text").mockResolvedValue("https://github.com/acme/widgets\n");
 		const jsonSpy = vi.spyOn(git.github, "json").mockResolvedValue({ items: [] });
 		const tool = new GithubTool(createSession("/tmp/gh-default-prs"));
 		await tool.execute("search-prs", {
@@ -966,19 +967,19 @@ describe("github tool", () => {
 			limit: 1,
 		});
 
-		// `gh repo view --json nameWithOwner` runs against the session cwd to fetch the
-		// default scope; the resolved owner/repo gets layered onto the API query.
+		// `gh repo view --json url` runs against the session cwd to fetch the default
+		// scope; the resolved owner/repo gets layered onto the API query.
 		expect(textSpy).toHaveBeenCalled();
 		const repoViewArgs = textSpy.mock.calls[0]?.[1] ?? [];
 		expect(repoViewArgs.slice(0, 2)).toEqual(["repo", "view"]);
-		expect(repoViewArgs).toContain("nameWithOwner");
+		expect(repoViewArgs).toContain("url");
 
 		const apiArgs = jsonSpy.mock.calls[0]?.[1] ?? [];
 		expect(apiArgs).toContain("q=is:open repo:acme/widgets is:pr");
 	});
 
 	it("search_issues: skips the current-repo default when the query already carries a scope qualifier", async () => {
-		const textSpy = vi.spyOn(git.github, "text").mockResolvedValue("acme/widgets\n");
+		const textSpy = vi.spyOn(git.github, "text").mockResolvedValue("https://github.com/acme/widgets\n");
 		const jsonSpy = vi.spyOn(git.github, "json").mockResolvedValue({ items: [] });
 		const tool = new GithubTool(createSession("/tmp/gh-default-skip-qualifier"));
 		await tool.execute("search-issues", {
@@ -1014,7 +1015,7 @@ describe("github tool", () => {
 	});
 
 	it("search_commits: honors an explicit `repo` override over the current-checkout default", async () => {
-		const textSpy = vi.spyOn(git.github, "text").mockResolvedValue("acme/widgets\n");
+		const textSpy = vi.spyOn(git.github, "text").mockResolvedValue("https://github.com/acme/widgets\n");
 		const jsonSpy = vi.spyOn(git.github, "json").mockResolvedValue({ items: [] });
 		const tool = new GithubTool(createSession("/tmp/gh-default-explicit-override"));
 		await tool.execute("search-commits", {
@@ -1045,11 +1046,12 @@ describe("github tool", () => {
 		});
 
 		it("checks out a pull request into a worktree and configures contributor push metadata", async () => {
-			vi.spyOn(git.github, "json")
+			const githubSpy = vi
+				.spyOn(git.github, "json")
 				.mockResolvedValueOnce({
 					number: 123,
 					title: "Contributor fix",
-					url: "https://github.com/base/repo/pull/123",
+					url: "https://ghe.example.com/base/repo/pull/123",
 					baseRefName: "main",
 					headRefName: fixture.headRefName,
 					headRefOid: fixture.headRefOid,
@@ -1066,6 +1068,7 @@ describe("github tool", () => {
 
 			const tool = new GithubTool(createSession(fixture.repoRoot));
 			const result = await tool.execute("pr-checkout", { op: "pr_checkout", pr: "123" });
+			expect(githubSpy.mock.calls[1]?.[1]).toContain("ghe.example.com/contrib/repo");
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			const primaryRoot = (await git.repo.primaryRoot(fixture.repoRoot)) ?? fixture.repoRoot;
 			const worktreePath = await expectedWorktreePath(tempHome.home, primaryRoot, "pr-123");
@@ -1460,7 +1463,8 @@ echo ok
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 
 			expect(text).toContain("# GitHub Actions Run #77");
-			expect(text).toContain("Repository: owner/repo");
+			// The run URL named a host, so the repo keeps it.
+			expect(text).toContain("Repository: github.com/owner/repo");
 			expect(text).toContain("### test [failure]");
 			expect(text).toContain("delta");
 			expect(text).toContain("epsilon");
@@ -1609,7 +1613,7 @@ echo ok
 		// Unique cwd per test — `resolveDefaultRepoMemoized` caches by absolute
 		// path for the lifetime of the process.
 		const cwd = `/tmp/run-watch-explicit-repo-mismatch-${Date.now()}`;
-		const textSpy = vi.spyOn(git.github, "text").mockResolvedValue(cwdRepo);
+		const textSpy = vi.spyOn(git.github, "text").mockResolvedValue(`https://github.com/${cwdRepo}`);
 		const jsonSpy = vi.spyOn(git.github, "json");
 
 		const tool = new GithubTool(createSession(cwd));
@@ -1627,8 +1631,8 @@ echo ok
 		const cwd = `/tmp/run-watch-stale-cwd-repo-cache-${Date.now()}`;
 		const textSpy = vi
 			.spyOn(git.github, "text")
-			.mockResolvedValueOnce(targetRepo)
-			.mockResolvedValueOnce(replacedCwdRepo);
+			.mockResolvedValueOnce(`https://github.com/${targetRepo}`)
+			.mockResolvedValueOnce(`https://github.com/${replacedCwdRepo}`);
 		const jsonSpy = vi.spyOn(git.github, "json");
 
 		// Populate `resolveDefaultRepoMemoized` for this exact cwd, simulating a
@@ -1658,7 +1662,7 @@ echo ok
 	});
 
 	it("treats explicit `repo` and the cwd repo as matching when only casing differs (PR #1951)", async () => {
-		// `gh repo view --json nameWithOwner` returns the canonical GitHub casing.
+		// `gh repo view --json url` returns the canonical GitHub casing.
 		// A caller who types `cagedbird043/cxf` while the canonical form is
 		// `CagedBird043/cxf` MUST be treated as the same repo — GitHub repository
 		// paths are case-insensitive — and run_watch must NOT force them to pass
@@ -1666,7 +1670,7 @@ echo ok
 		const canonicalRepo = "CagedBird043/CXF";
 		const userRepo = "cagedbird043/cxf";
 		const cwd = `/tmp/run-watch-explicit-repo-casing-${Date.now()}`;
-		vi.spyOn(git.github, "text").mockResolvedValue(canonicalRepo);
+		vi.spyOn(git.github, "text").mockResolvedValue(`https://github.com/${canonicalRepo}`);
 		// Past the case-insensitive guard, run_watch keeps using the caller's
 		// `repo` (downstream `/repos/...` paths are case-insensitive on GitHub).
 		// Stub the cwd's git HEAD/branch lookups so the watch proceeds to its
@@ -1687,5 +1691,187 @@ echo ok
 		expect(jsonSpy).toHaveBeenCalled();
 		const firstCall = jsonSpy.mock.calls[0]?.[1] as string[];
 		expect(firstCall.some(arg => arg === `/repos/${userRepo}/actions/runs`)).toBe(true);
+	});
+});
+
+describe("github tool on a GitHub Enterprise host", () => {
+	const ENTERPRISE_URL = "https://ghe.example.com/acme/widgets";
+	const ENTERPRISE_REPO = "ghe.example.com/acme/widgets";
+
+	// A host-less repo belongs to whatever `GH_HOST` names, so these tests pin
+	// it themselves instead of inheriting the developer's value. Restored per
+	// test to keep later files unaffected.
+	let savedGhHost: string | undefined;
+	beforeEach(() => {
+		savedGhHost = process.env.GH_HOST;
+		delete process.env.GH_HOST;
+	});
+
+	afterEach(() => {
+		if (savedGhHost === undefined) {
+			delete process.env.GH_HOST;
+		} else {
+			process.env.GH_HOST = savedGhHost;
+		}
+		vi.restoreAllMocks();
+	});
+
+	it("resolves the current checkout to a host-qualified repo", async () => {
+		// `gh` resolves a host-less `--repo` against GH_HOST (github.com by
+		// default), so dropping the host here sends every lookup for an
+		// enterprise checkout to github.com.
+		vi.spyOn(git.github, "text").mockResolvedValue(`${ENTERPRISE_URL}\n`);
+		await expect(resolveDefaultRepoMemoized(`/tmp/gh-enterprise-resolve-${Date.now()}`)).resolves.toBe(
+			ENTERPRISE_REPO,
+		);
+	});
+
+	it("keeps github.com on the checkout's identity when GH_HOST names another host", async () => {
+		process.env.GH_HOST = "ghe.example.com";
+		// Stripping the host here would hand `gh` a bare ref and send a
+		// github.com checkout's lookups to the enterprise instance.
+		vi.spyOn(git.github, "text").mockResolvedValue("https://github.com/acme/widgets\n");
+		await expect(resolveDefaultRepoMemoized(`/tmp/gh-default-host-retained-${Date.now()}`)).resolves.toBe(
+			"github.com/acme/widgets",
+		);
+	});
+
+	it("file_read links a bare repo to the host its request went to", async () => {
+		process.env.GH_HOST = "ghe.example.com";
+		vi.spyOn(git.github, "json").mockResolvedValue({
+			type: "file",
+			encoding: "none",
+			size: 2 * 1024 * 1024,
+		} as never);
+		const tool = new GithubTool(createSession("/tmp/gh-default-host-file-read"));
+
+		const result = await tool.execute("file-read", {
+			op: "file_read",
+			repo: "acme/widgets",
+			path: "docs/readme.md",
+		});
+
+		// The request carried no --hostname, so it hit GH_HOST; the fallback link
+		// must name the same instance rather than github.com.
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text).toContain("https://ghe.example.com/acme/widgets/blob/HEAD/docs/readme.md");
+	});
+
+	it("file_read passes the host as a flag and keeps it out of the API path", async () => {
+		const jsonSpy = vi.spyOn(git.github, "json").mockResolvedValue({
+			type: "file",
+			encoding: "none",
+			size: 2 * 1024 * 1024,
+		} as never);
+		const tool = new GithubTool(createSession("/tmp/gh-enterprise-file-read"));
+
+		const result = await tool.execute("file-read", {
+			op: "file_read",
+			repo: ENTERPRISE_REPO,
+			path: "docs/readme.md",
+		});
+
+		const args = (jsonSpy.mock.calls[0]?.[1] ?? []) as string[];
+		// `gh api` endpoints are host-relative: an embedded host would 404.
+		expect(args).toContain("/repos/acme/widgets/contents/docs/readme.md");
+		expect(args[args.indexOf("--hostname") + 1]).toBe("ghe.example.com");
+		// Without an html_url from the API the fallback link must still point at
+		// the enterprise instance, not github.com.
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text).toContain("https://ghe.example.com/acme/widgets/blob/HEAD/docs/readme.md");
+	});
+
+	it("search scopes the query to a bare slug and the request to the host", async () => {
+		vi.spyOn(git.github, "text").mockResolvedValue(`${ENTERPRISE_URL}\n`);
+		const jsonSpy = vi.spyOn(git.github, "json").mockResolvedValue({ items: [] });
+		const tool = new GithubTool(createSession("/tmp/gh-enterprise-search"));
+
+		await tool.execute("search-prs", { op: "search_prs", query: "is:open", limit: 1 });
+
+		const args = (jsonSpy.mock.calls[0]?.[1] ?? []) as string[];
+		// GitHub rejects `repo:host/owner/name`; the host belongs in --hostname.
+		expect(args).toContain("q=is:open repo:acme/widgets is:pr");
+		expect(args[args.indexOf("--hostname") + 1]).toBe("ghe.example.com");
+	});
+
+	it("run_watch keeps the host out of the run URL's repo path", async () => {
+		const abort = new AbortController();
+		const jsonSpy = vi.spyOn(git.github, "json").mockImplementation((async () => {
+			abort.abort();
+			return { id: 12, status: "queued" };
+		}) as unknown as typeof git.github.json);
+		const tool = new GithubTool(createSession("/tmp/gh-enterprise-run-watch"));
+
+		await tool
+			.execute(
+				"run-watch",
+				{ op: "run_watch", run: "https://ghe.example.com/acme/widgets/actions/runs/12" },
+				abort.signal,
+			)
+			.catch(() => {});
+
+		const args = (jsonSpy.mock.calls[0]?.[1] ?? []) as string[];
+		expect(args).toContain("/repos/acme/widgets/actions/runs/12");
+		expect(args[args.indexOf("--hostname") + 1]).toBe("ghe.example.com");
+	});
+
+	it("run_watch refuses to infer a commit for a bare repo that resolves elsewhere", async () => {
+		// The bare `repo` goes to github.com (no GH_HOST), so the enterprise
+		// checkout's HEAD says nothing about the runs being watched.
+		vi.spyOn(git.github, "text").mockResolvedValue(`${ENTERPRISE_URL}\n`);
+		const jsonSpy = vi.spyOn(git.github, "json");
+		const tool = new GithubTool(createSession(`/tmp/gh-enterprise-mismatch-${Date.now()}`));
+
+		await expect(tool.execute("run-watch", { op: "run_watch", repo: "acme/widgets" })).rejects.toThrow(
+			"current checkout is ghe.example.com/acme/widgets",
+		);
+		expect(jsonSpy).not.toHaveBeenCalled();
+	});
+
+	it("run_watch accepts a bare repo when GH_HOST names the checkout's host", async () => {
+		process.env.GH_HOST = "ghe.example.com";
+		vi.spyOn(git.github, "text").mockResolvedValue(`${ENTERPRISE_URL}\n`);
+		vi.spyOn(git.branch, "current").mockResolvedValue("main");
+		vi.spyOn(git.head, "sha").mockResolvedValue("c215f3a91217c215f3a91217c215f3a91217c215");
+		const abort = new AbortController();
+		const jsonSpy = vi.spyOn(git.github, "json").mockImplementation((async () => {
+			abort.abort();
+			return { workflow_runs: [] };
+		}) as unknown as typeof git.github.json);
+		const tool = new GithubTool(createSession(`/tmp/gh-enterprise-ghhost-${Date.now()}`));
+
+		await tool.execute("run-watch", { op: "run_watch", repo: "acme/widgets" }, abort.signal).catch(() => {});
+
+		// Guard passed: the watch reached its first poll, and the caller's bare
+		// repo is left host-less so `gh` applies the same GH_HOST.
+		const args = (jsonSpy.mock.calls[0]?.[1] ?? []) as string[];
+		expect(args).toContain("/repos/acme/widgets/actions/runs");
+		expect(args).not.toContain("--hostname");
+	});
+});
+
+describe("GitHub URL parsing", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("keeps the host a full URL names so the request cannot drift to another instance", () => {
+		expect(parsePullRequestUrl("https://ghe.example.com/acme/widgets/pull/7")).toEqual({
+			repo: "ghe.example.com/acme/widgets",
+			prNumber: 7,
+		});
+		// A host-less repo is resolved by `gh` against GH_HOST, so an explicit
+		// github.com must survive parsing too.
+		expect(parseIssueUrl("https://github.com/acme/widgets/issues/7")).toEqual({
+			repo: "github.com/acme/widgets",
+			issueNumber: 7,
+		});
+	});
+
+	it("leaves the session checkout's github.com identity bare", () => {
+		vi.spyOn(git.github, "text").mockResolvedValue("https://github.com/acme/widgets\n");
+		return expect(resolveDefaultRepoMemoized(`/tmp/gh-canonical-identity-${Date.now()}`)).resolves.toBe(
+			"acme/widgets",
+		);
 	});
 });
