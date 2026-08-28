@@ -364,6 +364,7 @@ export type { AdvisorStats, PerAdvisorStat } from "./session-advisors";
 const SESSION_STOP_CONTINUATION_CAP = 8;
 
 import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
+import { UnverifiedMergeLatch } from "./settle-gates";
 import { TodoTracker, type TodoTrackerHost } from "./todo-tracker";
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
@@ -577,6 +578,7 @@ export class AgentSession {
 	#planModeReminderCount = 0;
 	#planModeReminderAwaitingProgress = false;
 	readonly #todo: TodoTracker;
+	readonly #unverifiedMergeLatch = new UnverifiedMergeLatch();
 	#replanTitleRefreshInFlight: Promise<void> | undefined = undefined;
 	/** Resolved TITLE_SYSTEM.md override applied to every automatic session-title
 	 *  generation path. Refresh via {@link AgentSession.setTitleSystemPrompt} when
@@ -1140,6 +1142,8 @@ export class AgentSession {
 			toolRegistry: () => this.#tools.registry,
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			consumeLastServedToolChoiceLabel: () => this.#toolChoiceQueue.consumeLastServedLabel(),
+			hasUnverifiedMerge: () => this.#unverifiedMergeLatch.size > 0,
+			clearUnverifiedMerge: () => this.#unverifiedMergeLatch.clear(),
 		};
 		this.#todo = new TodoTracker(todoHost);
 		this.#ownedAsyncJobManager = config.ownedAsyncJobManager;
@@ -1746,6 +1750,10 @@ export class AgentSession {
 
 	getAgentId(): string | undefined {
 		return this.#agentId;
+	}
+
+	markUnverifiedMerge(agentId: string): void {
+		this.#unverifiedMergeLatch.mark(agentId);
 	}
 
 	/** Dequeue the next HARD forced tool choice for the upcoming LLM call, dropping

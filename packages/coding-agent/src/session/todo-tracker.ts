@@ -6,6 +6,7 @@ import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
 import { getLatestTodoPhasesFromEntries, isTodoPhase, type TodoItem, type TodoPhase } from "../tools/todo";
+import { MERGED_UNVERIFIED_MARKER } from "./settle-gates";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { SessionManager } from "./session-manager";
@@ -58,6 +59,8 @@ export interface TodoTrackerHost {
 	toolRegistry(): Map<string, AgentTool>;
 	planModeEnabled(): boolean;
 	consumeLastServedToolChoiceLabel(): string | undefined;
+	hasUnverifiedMerge?(): boolean;
+	clearUnverifiedMerge?(): void;
 }
 
 /** Owns canonical todo state, eager preludes, and completion reminders. */
@@ -107,6 +110,9 @@ export class TodoTracker {
 			this.#mutationsSinceLastTouch = 0;
 		} else if (!isError && MUTATING_TOOLS[toolName]) {
 			this.#mutationsSinceLastTouch++;
+		}
+		if (!isError && (toolName === "bash" || toolName === "eval" || toolName === "lsp")) {
+			this.#host.clearUnverifiedMerge?.();
 		}
 		this.#reminderAwaitingProgress = false;
 	}
@@ -216,7 +222,8 @@ export class TodoTracker {
 			return false;
 		}
 		const phases = this.phases;
-		if (phases.length === 0) {
+		const unverifiedMergeEarly = this.#host.hasUnverifiedMerge?.() === true;
+		if (phases.length === 0 && !unverifiedMergeEarly) {
 			this.#reminderCount = 0;
 			this.#reminderAwaitingProgress = false;
 			return false;
@@ -233,7 +240,8 @@ export class TodoTracker {
 			}))
 			.filter(phase => phase.tasks.length > 0);
 		const incomplete = incompleteByPhase.flatMap(phase => phase.tasks);
-		if (incomplete.length === 0) {
+		const unverifiedMerge = this.#host.hasUnverifiedMerge?.() === true;
+		if (incomplete.length === 0 && !unverifiedMerge) {
 			this.#reminderCount = 0;
 			this.#reminderAwaitingProgress = false;
 			return false;
@@ -254,9 +262,13 @@ export class TodoTracker {
 		const todoList = incompleteByPhase
 			.map(phase => `- ${phase.name}\n${phase.tasks.map(task => `  - ${task.content}`).join("\n")}`)
 			.join("\n");
+		const unverifiedLine = unverifiedMerge ? `\n${MERGED_UNVERIFIED_MARKER}\n` : "";
 		const reminder =
 			`<system-reminder>\n` +
-			`You stopped with ${incomplete.length} incomplete todo item(s):\n${todoList}\n\n` +
+			(incomplete.length > 0
+				? `You stopped with ${incomplete.length} incomplete todo item(s):\n${todoList}\n\n`
+				: "You stopped after an isolated merge without parent verification.\n") +
+			unverifiedLine +
 			`Please continue working on these tasks or mark them complete if finished.\n` +
 			`(Reminder ${this.#reminderCount}/${remindersMax})\n` +
 			`</system-reminder>`;

@@ -52,6 +52,7 @@ import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
+import { annotateUnverifiedMergeSummary, isolatedApplyShouldLatch } from "../session/settle-gates";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
 
 function renderSubagentUserPrompt(assignment: string): string {
@@ -1459,11 +1460,18 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					});
 				},
 			});
+			const latch = isolatedApplyShouldLatch({
+				isolated: execution.policy.isIsolated,
+				applyChanges: execution.policy.applyChanges,
+				changesApplied: execution.changesApplied,
+				exitCode: execution.result.exitCode,
+			});
+			if (latch) this.session.noteUnverifiedMerge?.(execution.result.id);
 			return this.#buildResultPayload(
 				execution.result,
 				execution.policy.discovery.projectAgentsDir,
 				Date.now() - startTime,
-				execution.mergeSummary,
+				annotateUnverifiedMergeSummary(execution.mergeSummary, latch),
 			);
 		} catch (error) {
 			const message = error instanceof StructuredSubagentError ? error.message : String(error);

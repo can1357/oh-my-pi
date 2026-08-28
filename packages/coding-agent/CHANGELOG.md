@@ -66,6 +66,9 @@
 - Fixed a macOS composer display issue where undercurl could remain attached to stale text after rapid typing.
 - Improved `xd://` MCP failure messages with actionable transport stages, failure categories, server and tool context, retryability, trace IDs, and redacted JSON-RPC details.
 - Fixed ACP `read` tool-call locations so clients such as Zed Follow receive the resolved filesystem path rather than the OMP line-range selector.
+### Fixed
+
+- Isolated task merges now latch parent verification: child yield is not evidence. A successful parent `bash`/`eval`/`lsp` result clears the latch; stopping with an unverified merge continues the session like incomplete todos.
 
 ## [18.0.9] - 2026-08-28
 
