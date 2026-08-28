@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- RPC clients can list Agent Hub agents (including nested children) and steer, revive, or kill them via `list_agents`, `send_agent_message`, `revive_agent`, and `kill_agent` ([#10021](https://github.com/can1357/oh-my-pi/pull/10021) by [@Giardi77](https://github.com/Giardi77)).
+
 ## [18.0.8] - 2026-08-27
 
 ### Added

@@ -36,6 +36,7 @@ import { calculateTokensPerSecond } from "../../utils/token-rate";
 import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
+import { killAgent, listAgents, reviveAgent, sendAgentMessage } from "./rpc-agent-hub";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
 import { claimRpcInput, readRpcInputFrames } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
@@ -1211,6 +1212,28 @@ export async function runRpcMode(
 				} catch (err) {
 					return error(id, "get_subagent_messages", err instanceof Error ? err.message : String(err));
 				}
+			}
+
+			case "list_agents": {
+				return success(id, "list_agents", { agents: listAgents() });
+			}
+
+			case "send_agent_message": {
+				const result = await sendAgentMessage(command.agentId, command.message);
+				if (!result.ok) return error(id, "send_agent_message", result.error, result.code);
+				return success(id, "send_agent_message", { agent: result.agent });
+			}
+
+			case "revive_agent": {
+				const result = await reviveAgent(command.agentId);
+				if (!result.ok) return error(id, "revive_agent", result.error, result.code);
+				return success(id, "revive_agent", { agent: result.agent });
+			}
+
+			case "kill_agent": {
+				const result = await killAgent(command.agentId);
+				if (!result.ok) return error(id, "kill_agent", result.error, result.code);
+				return success(id, "kill_agent", { agent: result.agent });
 			}
 
 			// =================================================================

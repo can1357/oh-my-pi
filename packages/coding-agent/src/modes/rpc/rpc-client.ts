@@ -20,6 +20,7 @@ import {
 	type RpcMessagesPageOptions,
 } from "./rpc-messages";
 import type {
+	RpcAgentSnapshot,
 	RpcAvailableCommandsUpdateFrame,
 	RpcAvailableSlashCommand,
 	RpcCommand,
@@ -669,6 +670,41 @@ export class RpcClient {
 			fromByte: selector.fromByte,
 		});
 		return this.#getData<RpcSubagentMessagesResult>(response);
+	}
+
+	/**
+	 * Agent Hub roster: every registered agent except Main, including nested
+	 * children (`parentId`), parked, aborted, and advisors. Distinct from
+	 * `getSubagents()`, which only tracks first-level task-tool event-bus rows.
+	 */
+	async listAgents(): Promise<RpcAgentSnapshot[]> {
+		const response = await this.#send({ type: "list_agents" });
+		return this.#getData<{ agents: RpcAgentSnapshot[] }>(response).agents;
+	}
+
+	/**
+	 * Steer a Hub agent: revive if parked, then prompt with streamingBehavior "steer".
+	 * Advisors and Main are rejected.
+	 */
+	async sendAgentMessage(agentId: string, message: string): Promise<RpcAgentSnapshot> {
+		const response = await this.#send({ type: "send_agent_message", agentId, message });
+		return this.#getData<{ agent: RpcAgentSnapshot }>(response).agent;
+	}
+
+	/**
+	 * Revive a parked Hub agent. Idle/running agents return their live snapshot.
+	 */
+	async reviveAgent(agentId: string): Promise<RpcAgentSnapshot> {
+		const response = await this.#send({ type: "revive_agent", agentId });
+		return this.#getData<{ agent: RpcAgentSnapshot }>(response).agent;
+	}
+
+	/**
+	 * Kill a Hub agent (abort if running, then tombstone). Advisors and Main are rejected.
+	 */
+	async killAgent(agentId: string): Promise<RpcAgentSnapshot> {
+		const response = await this.#send({ type: "kill_agent", agentId });
+		return this.#getData<{ agent: RpcAgentSnapshot }>(response).agent;
 	}
 
 	/**

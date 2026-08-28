@@ -9,6 +9,7 @@ import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort, ImageContent, Model, ToolExample } from "@oh-my-pi/pi-ai";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
+import type { AgentHistorySummary, AgentKind, AgentStatus } from "../../registry/agent-registry";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
 import type { FileEntry } from "../../session/session-entries";
 import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
@@ -47,6 +48,10 @@ export type RpcCommand =
 	| { id?: string; type: "set_subagent_subscription"; level: RpcSubagentSubscriptionLevel }
 	| { id?: string; type: "get_subagents" }
 	| { id?: string; type: "get_subagent_messages"; subagentId?: string; sessionFile?: string; fromByte?: number }
+	| { id?: string; type: "list_agents" }
+	| { id?: string; type: "send_agent_message"; agentId: string; message: string }
+	| { id?: string; type: "revive_agent"; agentId: string }
+	| { id?: string; type: "kill_agent"; agentId: string }
 
 	// Model
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
@@ -188,6 +193,21 @@ export interface RpcSubagentMessagesResult {
 	messages: AgentMessage[];
 }
 
+/** Agent Hub roster row. Nested agents carry `parentId`; `live` is true when a session is attached. */
+export interface RpcAgentSnapshot {
+	id: string;
+	displayName: string;
+	kind: AgentKind;
+	parentId?: string;
+	status: AgentStatus;
+	sessionFile: string | null;
+	createdAt: number;
+	lastActivity: number;
+	activity?: string;
+	history?: AgentHistorySummary;
+	live: boolean;
+}
+
 // ============================================================================
 // RPC Responses (stdout)
 // ============================================================================
@@ -250,6 +270,34 @@ export type RpcResponse =
 			command: "get_subagent_messages";
 			success: true;
 			data: RpcSubagentMessagesResult;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "list_agents";
+			success: true;
+			data: { agents: RpcAgentSnapshot[] };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "send_agent_message";
+			success: true;
+			data: { agent: RpcAgentSnapshot };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "revive_agent";
+			success: true;
+			data: { agent: RpcAgentSnapshot };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "kill_agent";
+			success: true;
+			data: { agent: RpcAgentSnapshot };
 	  }
 
 	// Model

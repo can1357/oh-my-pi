@@ -132,6 +132,10 @@ Important edge behavior from runtime:
 - `{ id?, type: "set_subagent_subscription", level: "off" | "progress" | "events" }`
 - `{ id?, type: "get_subagents" }`
 - `{ id?, type: "get_subagent_messages", subagentId?: string, sessionFile?: string, fromByte?: number }`
+- `{ id?, type: "list_agents" }`
+- `{ id?, type: "send_agent_message", agentId: string, message: string }`
+- `{ id?, type: "revive_agent", agentId: string }`
+- `{ id?, type: "kill_agent", agentId: string }`
 
 ### Model
 
@@ -535,6 +539,29 @@ Subagent forwarding defaults to `"off"`. `set_subagent_subscription` selects:
 `fromByte`, `nextByte`, `reset`, raw transcript `entries`, and converted
 `messages`. If `fromByte` exceeds the current file size, reading restarts at
 byte zero and reports `reset: true`.
+
+### Agent Hub control
+
+These commands operate on the process-global Agent Hub roster (`AgentRegistry`),
+including nested subagents (`parentId`) and parked/aborted rows. They are
+distinct from `get_subagents`, which only tracks first-level task-tool children
+on the session event bus.
+
+- `list_agents` returns `{ agents }` for every registered agent except Main,
+  sorted running → idle → parked → aborted, then recency.
+- `send_agent_message` revives a parked agent if needed, then prompts it with
+  `streamingBehavior: "steer"` (same path as collab Hub chat). Empty messages,
+  advisors, Main, and unknown ids fail with a machine-readable `code`.
+- `revive_agent` brings a parked agent back to a live session.
+- `kill_agent` aborts a running session and tombstones the roster row as `aborted`.
+
+Advisor transcripts are listed but rejected for send/revive/kill
+(`code: "advisor_readonly"`). Other failures use `unknown_agent`,
+`main_forbidden`, `empty_message`, `invalid_agent_id`, and
+`agent_control_failed`.
+
+Live `subagent_*` frames for nested (depth ≥ 2) task children still require
+`set_subagent_subscription`; nested *roster* rows are already in `list_agents`.
 
 ## Prompt/Queue Concurrency and Ordering
 
