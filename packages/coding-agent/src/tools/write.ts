@@ -1467,14 +1467,67 @@ function writeDeviceContentOf(args: WriteRenderArgs): string | undefined {
 	return undefined;
 }
 
-const PARTIAL_ARGS_OPENING = /"args"\s*:\s*\{/u;
-
+/**
+ * Start of the top-level `args` object inside a streamed argument prefix, or undefined while it has
+ * not arrived.
+ *
+ * A plain `/"args"\s*:\s*\{/` would be *nearly* right: JSON escapes quotes inside string values, so
+ * prose such as `call with "args": {...}` arrives as `\"args\"` and never matches. It breaks on depth
+ * instead — a sibling object carrying its own `args` key (`{"opts":{"args":{…}},"args":{…}}`, which a
+ * hallucinated extra field can produce) would hand the preview the wrong object for the rest of the
+ * stream. This scan skips whole strings and only accepts a key at depth 1, so neither shape can win.
+ */
 function partialDeviceArgsOf(partialJson: unknown): string | undefined {
 	if (typeof partialJson !== "string") return undefined;
-	const opening = PARTIAL_ARGS_OPENING.exec(partialJson);
-	if (!opening) return undefined;
-	// From the `{` itself: the tail is the object as far as it has arrived.
-	return partialJson.slice(opening.index + opening[0].length - 1);
+	let depth = 0;
+	let index = 0;
+	while (index < partialJson.length) {
+		const char = partialJson[index];
+		if (char === '"') {
+			const token = scanJsonString(partialJson, index);
+			// Truncated inside a string: nothing decidable, and the next frame is longer anyway.
+			if (token === undefined) return undefined;
+			if (depth === 1 && token.value === "args") {
+				const valueStart = skipToObjectValue(partialJson, token.end);
+				if (valueStart !== undefined) return partialJson.slice(valueStart);
+			}
+			index = token.end;
+			continue;
+		}
+		if (char === "{" || char === "[") depth++;
+		else if (char === "}" || char === "]") depth--;
+		index++;
+	}
+	return undefined;
+}
+
+/** The string starting at `open`, plus the offset just past its closing quote. */
+function scanJsonString(text: string, open: number): { value: string; end: number } | undefined {
+	let index = open + 1;
+	let value = "";
+	while (index < text.length) {
+		const char = text[index];
+		if (char === "\\") {
+			// Escapes only matter for finding the real end; the decoded form is irrelevant to a key match.
+			value += text.slice(index, index + 2);
+			index += 2;
+			continue;
+		}
+		if (char === '"') return { value, end: index + 1 };
+		value += char;
+		index++;
+	}
+	return undefined;
+}
+
+/** Offset of the `{` opening this key's object value, or undefined when it is absent or not an object. */
+function skipToObjectValue(text: string, afterKey: number): number | undefined {
+	let index = afterKey;
+	while (index < text.length && /\s/u.test(text[index]!)) index++;
+	if (text[index] !== ":") return undefined;
+	index++;
+	while (index < text.length && /\s/u.test(text[index]!)) index++;
+	return text[index] === "{" ? index : undefined;
 }
 
 function formatLineCountSuffix(lineCount: number, uiTheme: Theme): string {

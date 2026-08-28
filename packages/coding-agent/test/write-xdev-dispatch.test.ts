@@ -250,6 +250,43 @@ describe("read and write route xd:// device URLs", () => {
 		).toBeUndefined();
 	});
 
+	// The payload slice must come from the TOP-LEVEL `args`. Two shapes could fool a plain regex: an
+	// injected intent whose prose contains JSON-looking text (harmless in practice — JSON escapes the
+	// quotes) and a sibling object carrying its own `args` key, which a hallucinated extra field can
+	// produce and which would poison the preview for the rest of the stream.
+	it("slices the top-level args even when another args key appears first", async () => {
+		await themeModule.initTheme();
+		const uiTheme = (await themeModule.getThemeByName("dark")) ?? (await themeModule.getThemeByName("light"));
+		if (!uiTheme) throw new Error("expected an initialized theme");
+		const options = { expanded: false, isPartial: true };
+		const render = (partial: string) =>
+			Bun.stripANSI(
+				writeToolRenderer
+					.renderCall({ path: "xd://mcp__ecoport_search", __partialJson: partial }, options, uiTheme)!
+					.render(120)
+					.join("\n"),
+			);
+
+		// Intent field first, prose shaped like JSON.
+		expect(
+			render(
+				JSON.stringify({
+					path: "xd://mcp__ecoport_search",
+					i: 'call with "args": {"pattern":"Decoy"}',
+					args: { pattern: "Real" },
+				}),
+			),
+		).toContain("Real");
+
+		// A sibling object holding its own args key, textually ahead of the real one.
+		expect(
+			render('{"path":"xd://mcp__ecoport_search","opts":{"args":{"pattern":"Decoy"}},"args":{"pattern":"Real"}}'),
+		).toContain("Real");
+
+		// Still streaming inside the real object: the partial tail is what the inner renderer gets.
+		expect(render('{"path":"xd://mcp__ecoport_search","args":{"pattern":"Rea')).toContain("Rea");
+	});
+
 	it("resolves device dispatches against the device's user policy, falling back to write's", async () => {
 		// Like the pi-knowledge plugin in #7923: the mounted device declares no
 		// approval, so it defaults to exec tier — but a device-scoped user policy
