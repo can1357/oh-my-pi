@@ -46,6 +46,12 @@ describe("Command Code provider", () => {
 		}) as unknown as typeof globalThis.fetch;
 
 		const options = commandCodeModelManagerOptions({ apiKey: "test-key", fetch });
+		expect(options.cacheProviderId).not.toBe(
+			commandCodeModelManagerOptions({
+				apiKey: "test-key",
+				baseUrl: "https://proxy.example/provider",
+			}).cacheProviderId,
+		);
 		const models = (await options.fetchDynamicModels?.()) ?? [];
 		const byId = new Map(models.map(model => [model.id, model]));
 

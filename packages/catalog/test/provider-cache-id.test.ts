@@ -10,6 +10,7 @@ test("lightweight cache resolver matches every descriptor default", () => {
 
 test("lightweight cache resolver matches scoped descriptor inputs", () => {
 	const cases = [
+		{ providerId: "command-code", baseUrl: "https://command-code.example/provider/v1/" },
 		{ providerId: "litellm", baseUrl: "http://litellm.example:4100/v1" },
 		{ providerId: "ollama", baseUrl: "http://ollama.example:11434/v1/" },
 		{ providerId: "opencode-go", baseUrl: "https://opencode.example/go" },
@@ -30,4 +31,16 @@ test("ollama cache scope preserves reverse-proxy path prefixes", () => {
 	expect(teamA).toBe(resolveModelCacheProviderId("ollama", { baseUrl: "https://proxy.example/team-a" }));
 	expect(teamA).toBe(resolveModelCacheProviderId("ollama", { baseUrl: "https://proxy.example/team-a/" }));
 	expect(teamA).not.toBe(resolveModelCacheProviderId("ollama", { baseUrl: "https://proxy.example/team-b/v1" }));
+});
+
+test("command-code cache scope follows the normalized discovery endpoint", () => {
+	const teamA = resolveModelCacheProviderId("command-code", {
+		baseUrl: "https://proxy.example/team-a/provider/v1/",
+	});
+	expect(teamA).toBe(
+		resolveModelCacheProviderId("command-code", { baseUrl: "https://proxy.example/team-a/provider" }),
+	);
+	expect(teamA).not.toBe(
+		resolveModelCacheProviderId("command-code", { baseUrl: "https://proxy.example/team-b/provider/v1" }),
+	);
 });

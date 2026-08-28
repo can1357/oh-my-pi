@@ -4,6 +4,7 @@ import { isAnthropicNamespacedModelId, isClaudeModelId } from "../identity/famil
 import { inheritReferenceThinking, resolveModelReference } from "../identity/reference";
 import type { ModelManagerOptions } from "../model-manager";
 import type { Api, ModelSpec } from "../types";
+import { resolveModelCacheProviderId } from "./cache-provider-id";
 import type { ModelManagerConfig } from "./descriptor-types";
 
 const COMMAND_CODE_PROVIDER_BASE_URL = "https://api.commandcode.ai/provider";
@@ -60,6 +61,7 @@ export function commandCodeModelManagerOptions(config?: ModelManagerConfig): Mod
 
 	return {
 		providerId: "command-code",
+		cacheProviderId: resolveModelCacheProviderId("command-code", { baseUrl: discoveryBaseUrl }),
 		dynamicModelsAuthoritative: true,
 		...(apiKey && {
 			fetchDynamicModels: () =>
