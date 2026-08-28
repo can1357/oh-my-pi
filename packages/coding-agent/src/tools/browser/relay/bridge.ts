@@ -65,6 +65,8 @@ interface SessionRootSubscription {
 	ownerSessionId: string;
 	/** Preserves the original cross-session command order during recovery replay. */
 	sequence: number;
+	/** Field-level update order for partial setters like Emulation.setEmulatedMedia. */
+	fieldSequences?: Record<string, number>;
 }
 
 function subscriptionKey(method: string): string {
@@ -94,6 +96,18 @@ function mergeSubscriptionParams(
 ): Record<string, unknown> | undefined {
 	if (key !== "Emulation.setEmulatedMedia") return next;
 	return { ...(previous ?? {}), ...(next ?? {}) };
+}
+
+function mergeSubscriptionFieldSequences(
+	key: string,
+	previous: Record<string, number> | undefined,
+	nextParams: Record<string, unknown> | undefined,
+	sequence: number,
+): Record<string, number> | undefined {
+	if (key !== "Emulation.setEmulatedMedia" || !nextParams) return previous;
+	const merged = { ...(previous ?? {}) };
+	for (const field of Object.keys(nextParams)) merged[field] = sequence;
+	return merged;
 }
 
 function subscriptionParamsEqual(
@@ -197,6 +211,8 @@ class TabState {
 	restorePending = false;
 	/** Effective root-domain state by subscription key and owning page pseudo-session. */
 	readonly subscriptions = new Map<string, Map<string, SessionRootSubscription>>();
+	/** In-flight root-state commands by subscription key. */
+	readonly pendingSubscriptions = new Map<string, Set<Promise<void>>>();
 
 	constructor(
 		readonly tabId: number,
@@ -762,6 +778,7 @@ export class RelayBridge {
 			this.#reply(conn, msg, {});
 			return;
 		}
+		const pendingSubscription = pageRef && msg.sessionId ? this.#trackPendingSubscription(tabId, msg) : null;
 		try {
 			const result = await this.#rpc({
 				op: "send",
@@ -774,14 +791,84 @@ export class RelayBridge {
 			if (pageRef && msg.sessionId) {
 				this.#recordSubscription(tabId, msg, msg.sessionId, forwardingSessionIsCurrent);
 			}
+			pendingSubscription?.resolve();
+			if (pageRef && msg.sessionId && !forwardingSessionIsCurrent) {
+				await this.#cleanupOrphanedCompletedSubscription(tabId, msg);
+			}
 			if (!forwardingSessionIsCurrent) {
 				this.#replyError(conn, msg, `Unknown session id ${String(msg.sessionId)}`);
 				return;
 			}
 			this.#reply(conn, msg, (result as Record<string, unknown> | undefined) ?? {});
 		} catch (err) {
+			pendingSubscription?.resolve();
 			this.#replyError(conn, msg, err instanceof Error ? err.message : String(err));
 		}
+	}
+
+	#trackPendingSubscription(tabId: number, msg: CdpCommand): { resolve: () => void } | null {
+		const tab = this.#tabs.get(tabId);
+		const key = this.#subscriptionTrackingKey(msg);
+		if (!tab || !key) return null;
+		const { promise, resolve } = Promise.withResolvers<void>();
+		let pending = tab.pendingSubscriptions.get(key);
+		if (!pending) {
+			pending = new Set();
+			tab.pendingSubscriptions.set(key, pending);
+		}
+		pending.add(promise);
+		return {
+			resolve: () => {
+				resolve();
+				pending?.delete(promise);
+				if (pending && pending.size === 0) tab.pendingSubscriptions.delete(key);
+			},
+		};
+	}
+
+	async #cleanupOrphanedCompletedSubscription(tabId: number, msg: CdpCommand): Promise<void> {
+		const tab = this.#tabs.get(tabId);
+		const key = this.#subscriptionTrackingKey(msg);
+		if (!tab || !key) return;
+		if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tabId).length === 0) return;
+		const expectedExt = this.#ext;
+		if (!expectedExt) return;
+		const orphaned = {
+			method: msg.method,
+			params: msg.params,
+			ownerSessionId: typeof msg.sessionId === "string" ? msg.sessionId : "",
+			sequence: 0,
+		} satisfies SessionRootSubscription;
+		const disable = this.#subscriptionDisableCommand(orphaned);
+		if (!disable) return;
+		const prior = tab.subscriptionReconciling ?? Promise.resolve();
+		const task = prior
+			.catch(() => {})
+			.then(async () => {
+				await this.#awaitPendingSubscriptions(tab, key);
+				if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tabId).length === 0) return;
+				if (this.#latestSubscriptionForKey(tab, key)) return;
+				this.#assertExtensionCurrent(expectedExt);
+				await this.#rpc({
+					op: "send",
+					tabId,
+					method: disable.method,
+					params: disable.params,
+				});
+				this.#assertExtensionCurrent(expectedExt);
+			})
+			.catch(err => {
+				if (err instanceof ExtensionReplacedError) return;
+				this.#log("orphaned subscription cleanup failed", {
+					tabId,
+					method: msg.method,
+					error: err instanceof Error ? err.message : String(err),
+				});
+			});
+		tab.subscriptionReconciling = task.finally(() => {
+			if (tab.subscriptionReconciling === task) tab.subscriptionReconciling = null;
+		});
+		await task;
 	}
 
 	#forwardingSessionIsCurrent(
@@ -1005,6 +1092,12 @@ export class RelayBridge {
 		owners.set(ownerSessionId, {
 			...subscription,
 			params: mergeSubscriptionParams(key, previous?.params, subscription.params),
+			fieldSequences: mergeSubscriptionFieldSequences(
+				key,
+				previous?.fieldSequences,
+				subscription.params,
+				subscription.sequence,
+			),
 		});
 	}
 
@@ -1064,6 +1157,7 @@ export class RelayBridge {
 				for (const change of ordered) {
 					if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tab.tabId).length === 0)
 						return;
+					await this.#awaitPendingSubscriptions(tab, change.key);
 					const current = this.#latestSubscriptionForKey(tab, change.key);
 					if (!subscriptionEquals(current, change.next)) continue;
 					const command = current
@@ -1118,9 +1212,73 @@ export class RelayBridge {
 		const latest = ordered.at(-1);
 		if (!latest) return undefined;
 		if (key !== "Emulation.setEmulatedMedia") return latest;
-		let params: Record<string, unknown> | undefined;
-		for (const subscription of ordered) params = mergeSubscriptionParams(key, params, subscription.params);
-		return { ...latest, params };
+		const params: Record<string, unknown> = {};
+		const fieldSequences: Record<string, number> = {};
+		for (const subscription of ordered) {
+			for (const [field, sequence] of Object.entries(subscription.fieldSequences ?? {})) {
+				if (fieldSequences[field] !== undefined && fieldSequences[field]! >= sequence) continue;
+				if (subscription.params && field in subscription.params) {
+					params[field] = subscription.params[field];
+					fieldSequences[field] = sequence;
+				}
+			}
+		}
+		return {
+			...latest,
+			params: Object.keys(params).length > 0 ? params : undefined,
+			fieldSequences: Object.keys(fieldSequences).length > 0 ? fieldSequences : undefined,
+		};
+	}
+
+	async #awaitPendingSubscriptions(tab: TabState, key: string): Promise<void> {
+		while (true) {
+			const pending = tab.pendingSubscriptions.get(key);
+			if (!pending || pending.size === 0) return;
+			await Promise.allSettled([...pending]);
+		}
+	}
+
+	#subscriptionTrackingKey(msg: CdpCommand): string | undefined {
+		const separator = msg.method.indexOf(".");
+		const domain = separator > 0 ? msg.method.slice(0, separator) : "";
+		const command = separator > 0 ? msg.method.slice(separator + 1) : "";
+		if (domain && domain !== "Runtime" && (command === "enable" || command === "disable")) {
+			return `${domain}.enable`;
+		}
+		switch (msg.method) {
+			case "Target.setAutoAttach":
+			case "Target.setDiscoverTargets":
+			case "Page.setLifecycleEventsEnabled":
+			case "Network.setCacheDisabled":
+			case "Page.setBypassCSP":
+			case "Emulation.setTouchEmulationEnabled":
+			case "Page.setTouchEmulationEnabled":
+			case "Network.setExtraHTTPHeaders":
+			case "Network.setBlockedURLs":
+			case "Emulation.setEmulatedMedia":
+			case "Emulation.setLocaleOverride":
+			case "Emulation.setTimezoneOverride":
+			case "Emulation.setCPUThrottlingRate":
+			case "Emulation.setScriptExecutionDisabled":
+			case "Emulation.clearDeviceMetricsOverride":
+			case "Page.clearDeviceMetricsOverride":
+			case "Emulation.clearGeolocationOverride":
+			case "Page.clearGeolocationOverride":
+			case "Emulation.clearIdleOverride":
+			case "Emulation.setDeviceMetricsOverride":
+			case "Page.setDeviceMetricsOverride":
+			case "Emulation.setGeolocationOverride":
+			case "Page.setGeolocationOverride":
+			case "Emulation.setIdleOverride":
+			case "Network.emulateNetworkConditions":
+			case "Network.setBypassServiceWorker":
+			case "Network.setUserAgentOverride":
+			case "Emulation.setUserAgentOverride":
+			case "Security.setIgnoreCertificateErrors":
+				return subscriptionKey(msg.method);
+			default:
+				return undefined;
+		}
 	}
 
 	#isCurrentPreservedSubscription(

@@ -2127,6 +2127,52 @@ describe("RelayBridge tab grouping", () => {
 		});
 	});
 
+	it("replays emulated media using per-field freshness across interleaved owners", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const updater = new FakeCdpSocket();
+		const updaterConn = bridge.cdpConnected(updater);
+		const updaterSession = await attachPage(bridge, ext, updater, updaterConn, 1);
+
+		const sendRootCommand = async (
+			connId: number,
+			sessionId: string,
+			method: string,
+			params?: Record<string, unknown>,
+		): Promise<void> => {
+			const id = ++msgSeq;
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+		};
+
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setEmulatedMedia", { media: "print" });
+		await sendRootCommand(updaterConn, updaterSession, "Emulation.setEmulatedMedia", { media: "screen" });
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setEmulatedMedia", {
+			features: [{ name: "prefers-color-scheme", value: "dark" }],
+		});
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
+		ack(bridge, ext2, "attach");
+
+		await waitFor(() => ext2.rpcs("send").length === 1, "interleaved emulated media replay");
+		expect(ext2.rpcs("send")[0]).toMatchObject({
+			method: "Emulation.setEmulatedMedia",
+			params: {
+				media: "screen",
+				features: [{ name: "prefers-color-scheme", value: "dark" }],
+			},
+		});
+	});
+
 	it("merges emulated media fields across session owners before recovery replay", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
@@ -2237,6 +2283,43 @@ describe("RelayBridge tab grouping", () => {
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
 		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+	});
+
+	it("waits for an in-flight idle override before live owner-loss cleanup", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		await attachPage(bridge, ext, holder, holderConn, 1);
+
+		const id = ++msgSeq;
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id,
+				sessionId: ownerSession,
+				method: "Emulation.setIdleOverride",
+				params: { isUserActive: false, isScreenUnlocked: false },
+			}),
+		);
+		await flush();
+		expect(ext.pending("send").map(rpc => rpc.method)).toEqual(["Emulation.setIdleOverride"]);
+
+		bridge.cdpClosed(ownerConn);
+		await flush();
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual(["Emulation.setIdleOverride"]);
+
+		ack(bridge, ext, "send");
+		await flush();
+		await waitFor(() => ext.rpcs("send").length === 2, "idle cleanup after in-flight owner loss");
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Emulation.setIdleOverride",
+			"Emulation.clearIdleOverride",
+		]);
 	});
 
 	it("clears persistent root setters across Page and Emulation aliases before recovery", async () => {
