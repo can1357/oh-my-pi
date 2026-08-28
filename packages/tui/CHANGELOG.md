@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Inline hex-color mentions now render VS Code-style: the `#hex` token itself is painted with the color as background and a YIQ-contrast black/white foreground, in addition to the chip glyph before it.
+
+### Fixed
+
+- Fixed background styling issues when inline color swatches are used inside highlighted lines
+
 ## [18.0.8] - 2026-08-27
 
 ### Added

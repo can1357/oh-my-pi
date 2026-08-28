@@ -1,6 +1,19 @@
 # Changelog
 
 ## [Unreleased]
+### Breaking Changes
+
+- Replaced the Git-only `watchHead`/`headWatchTarget` API with backend-neutral `watch`/`VcsRepo.watchTarget`.
+
+### Added
+
+- Added `VcsRepo`, `repo()`, and `require()` for portable repository discovery and read operations across Git and Jujutsu, with explicit `stagedDiff` and `revDiff` capability checks.
+- Added the `Vcs*` API: in-process git (gitoxide) and Jujutsu (jj-lib) repository operations — discovery, HEAD/refs, status, diffs (including no-index and binary patches), staging, commits, branches, worktrees, patch application, stash, cherry-pick, and CLI-backed push/fetch/clone with AbortSignal cancellation.
+
+### Fixed
+
+- Intent-to-add files (`git add -N`) now appear in `statusPorcelain` as unstaged additions (` A`), matching git — they were previously invisible to the git TUI and AI staging.
+- Staging or applying a new-file patch over an intent-to-add index entry no longer fails with "already exists", and cached patch application preserves the intent-to-add flag of unrelated index entries instead of silently staging them as empty files.
 
 ## [18.0.8] - 2026-08-27
 

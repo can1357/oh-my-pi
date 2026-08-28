@@ -10,6 +10,32 @@
 - Fixed that same recovery path tearing down a bare `Target.attachToTarget` holder's page session while re-attaching, which made the holder's next command fail `Unknown session id` and — with no session left to sweep — left the debugger attachment orphaned past client disconnect: the relay bridge now preserves those tabId-routed page sessions across the Chrome root swap, so recovered tabs stay drivable and are still detached (infobar cleared) when the last holder disconnects ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
 - Fixed browser-relay recovery minting fresh auto-attach sessions for a tab the user detached (dismissed the debugger infobar) while the final subscription-replay RPC was in flight: the replay continuation now revalidates that the tab is still attached, unbanned, and on the same extension socket before emitting replacement sessions, so downstream clients no longer receive sessions whose every command fails ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
 - Fixed a second, concurrent subscription replay being launched when another tab's delayed guard detach triggered a same-socket hello while a replay was still in flight, which could double-issue journaled subscriptions and let a stale task retract sessions after commands resumed: same-socket hellos now preserve the active replay instead of discarding its task pointer ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
+### Breaking Changes
+
+- The `git`/`jj` wrapper modules are gone from the SDK surface: VCS operations are exposed by `@oh-my-pi/pi-natives/vcs` (native handles, typed `VcsError`); the package now re-exports only the `github` (gh CLI) helpers.
+
+### Added
+
+- Git and Jujutsu operations now run in-process (gitoxide/jj-lib) instead of spawning `git`/`jj` subprocesses — faster status lines, diffs, staging, and worktree operations. The git binary is only used for credential-bound network transfers (push/fetch/clone) and reftable repositories.
+- Status lines, footers, reviews, project identity, cleanse, and autoresearch reads now work in pure Jujutsu workspaces as well as Git checkouts.
+- Include token usage statistics in inspect_image tool output
+- Pressing the session model shortcut (alt+p) again inside the picker toggles a red Task mode that switches the Task subagent's model for this session instead.
+- Git TUI: an AI staging wand next to "Stage All" asks "What should we stage?" and stages only the matching changes — the tiny/smol model picks the matching files from the whole change list, then filters their hunks in parallel; file-scoped requests ("git stuff") stage the picked files whole, content-scoped ones ("all comment changes") stage only the matching hunks.
+
+### Changed
+
+- Enforce a 5-minute timeout and 8 MiB output limit for GitHub CLI operations
+- Apply a 30-minute timeout for marketplace plugin repository cloning
+- Improve large file handling with blob streaming and explicit truncation support
+
+### Fixed
+
+- Fixed the VCS status line counting every file inside an untracked directory instead of collapsing it to one entry like `git status`.
+- Fixed git TUI sidebar wheel scrolling snapping back to the selected row after staging or collapsing entries; the list now follows the selection only when it actually changes.
+- Fixed `inspect_image` selecting a text-only vision/default role when an image-capable model was available on the active provider.
+- Improved unexpected-stop recovery for reasoning-only stalls by requiring the next concrete tool action instead of repeated analysis.
+- The edit tool now repairs a stray closing marker typed in place of the divider in a selection (`old⟫new` inside one selection instead of `old│new`) and applies the intended replacement with a note, instead of failing with an unmatched-marker error.
+
 ## [18.0.8] - 2026-08-27
 
 ### Added

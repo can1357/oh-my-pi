@@ -331,6 +331,201 @@ export declare class TtyWriter {
   stop(flushTimeoutMs: number): void
 }
 
+/** In-process Git repository handle. */
+export declare class VcsGitRepo {
+  /** Repository metadata. */
+  info(): VcsGitRepoInfo
+  /** Primary checkout root. */
+  primaryRoot(): string
+  /** Linked-worktree metadata. */
+  linkedWorktree(): VcsLinkedWorktree | null
+  /** Resolve HEAD synchronously. */
+  headSync(): VcsHeadState
+  /** Worktree-relative prefix of a directory. */
+  prefixOf(dir: string): string | null
+  /** Resolve HEAD. */
+  head(signal?: unknown | undefined | null): Promise<VcsHeadState>
+  /** Resolve HEAD SHA. */
+  headSha(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Current branch. */
+  currentBranch(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Default remote branch. */
+  defaultBranch(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Resolve a revision. */
+  resolveRef(name: string, signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Test revision existence. */
+  refExists(name: string, signal?: unknown | undefined | null): Promise<boolean>
+  /** Tags pointing at a revision. */
+  tagsAt(rev: string, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** List branches. */
+  listBranches(all: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
+  /**
+   * Whether default porcelain status reports a staged, unstaged, or untracked
+   * change.
+   */
+  isDirty(signal?: unknown | undefined | null): Promise<boolean>
+  /** Porcelain status. */
+  statusPorcelain(options: VcsStatusOptions, signal?: unknown | undefined | null): Promise<string>
+  /** Status counts. */
+  statusSummary(signal?: unknown | undefined | null): Promise<VcsStatusSummary>
+  /** Read config. */
+  configGet(key: string, signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Set config. */
+  configSet(key: string, value: string, signal?: unknown | undefined | null): Promise<undefined>
+  /** List remotes. */
+  remoteList(signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Remote URL. */
+  remoteUrl(name: string, signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Add remote. */
+  remoteAdd(name: string, url: string, signal?: unknown | undefined | null): Promise<undefined>
+  /** List worktrees. */
+  worktrees(signal?: unknown | undefined | null): Promise<Array<VcsWorktreeEntry>>
+  /** Add worktree. */
+  worktreeAdd(path: string, refName: string, detach: boolean, signal?: unknown | undefined | null): Promise<undefined>
+  /** Remove worktree. */
+  worktreeRemove(path: string, force: boolean, signal?: unknown | undefined | null): Promise<boolean>
+  /** Prune worktrees. */
+  worktreePrune(signal?: unknown | undefined | null): Promise<undefined>
+  /** Recent subjects. */
+  logSubjects(count: number, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Recent one-line commits. */
+  logOnelines(count: number, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Commits in a range. */
+  revListRange(base: string, head: string, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Commits touching a file. */
+  revListTouching(rev: string, file: string, limit: number, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Commit details. */
+  commitDetails(rev: string, signal?: unknown | undefined | null): Promise<VcsCommitDetails>
+  /** List index or untracked paths. */
+  lsFiles(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** List tree paths. */
+  lsTree(rev: string, paths: Array<string>, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** List submodule paths. */
+  submodulePaths(signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Read blob bytes. */
+  showBlob(spec: string, maxBytes?: number | undefined | null, signal?: unknown | undefined | null): Promise<VcsShowResult>
+  /** Read commit and patch bytes. */
+  showCommit(rev: string, maxBytes?: number | undefined | null, signal?: unknown | undefined | null): Promise<VcsShowResult>
+  /** Local LFS media directory. */
+  lfsMediaDir(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Render a patch. */
+  diffText(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<string>
+  /** Render a no-index patch between two filesystem paths. */
+  diffNoIndex(left: string, right: string, binary: boolean, signal?: unknown | undefined | null): Promise<string>
+  /** Changed paths. */
+  changedFiles(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Per-file line counts. */
+  numstat(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<Array<VcsNumstatEntry>>
+  /** Test for a diff. */
+  hasDiff(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<boolean>
+  /** Diff two trees. */
+  diffTree(base: string, head: string, binary: boolean, signal?: unknown | undefined | null): Promise<string>
+  /** Stage paths. */
+  stageFiles(files: Array<string>, signal?: unknown | undefined | null): Promise<undefined>
+  /** Unstage paths. */
+  unstage(files: Array<string>, signal?: unknown | undefined | null): Promise<undefined>
+  /** Stage selected hunks. */
+  stageHunks(selections: Array<VcsHunkSelection>, rawDiff?: string | undefined | null, signal?: unknown | undefined | null): Promise<undefined>
+  /** Create commit. */
+  commitCreate(message: string, options: VcsCommitOptions, signal?: unknown | undefined | null): Promise<string>
+  /** Checkout revision. */
+  checkout(rev: string, signal?: unknown | undefined | null): Promise<undefined>
+  /** Create branch. */
+  createBranch(name: string, start: string, force: boolean, signal?: unknown | undefined | null): Promise<undefined>
+  /** Delete branch. */
+  deleteBranch(name: string, force: boolean, signal?: unknown | undefined | null): Promise<boolean>
+  /** Create and checkout branch. */
+  checkoutNewBranch(name: string, signal?: unknown | undefined | null): Promise<undefined>
+  /** Restore paths. */
+  restore(options: VcsRestoreOptions, signal?: unknown | undefined | null): Promise<undefined>
+  /** Reset repository state. */
+  reset(mode: string, target?: string | undefined | null, signal?: unknown | undefined | null): Promise<undefined>
+  /** Clean untracked paths. */
+  clean(options: VcsCleanOptions, signal?: unknown | undefined | null): Promise<undefined>
+  /** Read tree into index. */
+  readTree(treeish: string, indexPath?: string | undefined | null, signal?: unknown | undefined | null): Promise<undefined>
+  /** Write index tree. */
+  writeTree(indexPath?: string | undefined | null, signal?: unknown | undefined | null): Promise<string>
+  /** Apply patch. */
+  applyPatch(patch: string, options: VcsApplyOptions, signal?: unknown | undefined | null): Promise<undefined>
+  /** Check patch applicability. */
+  canApplyPatch(patch: string, options: VcsApplyOptions, signal?: unknown | undefined | null): Promise<boolean>
+  /** Cherry-pick commit. */
+  cherryPick(rev: string, signal?: unknown | undefined | null): Promise<undefined>
+  /** Abort cherry-pick. */
+  cherryPickAbort(signal?: unknown | undefined | null): Promise<undefined>
+  /** Skip cherry-pick. */
+  cherryPickSkip(signal?: unknown | undefined | null): Promise<undefined>
+  /** Push stash. */
+  stashPush(message?: string | undefined | null, signal?: unknown | undefined | null): Promise<boolean>
+  /** Pop stash if cleanly applicable. */
+  stashTryPop(reinstateIndex: boolean, signal?: unknown | undefined | null): Promise<boolean>
+  /** Push via Git CLI. */
+  push(options: VcsPushOptions, signal?: unknown | undefined | null): Promise<void>
+  /** Fetch a refspec via Git CLI. */
+  fetch(remote: string, source: string, target: string, timeoutMs?: number | undefined | null, signal?: unknown | undefined | null): Promise<void>
+}
+
+/** In-process Jujutsu workspace handle. */
+export declare class VcsJjWorkspace {
+  /** Workspace root. */
+  root(): string
+  /** Shared store directory. */
+  storeDir(): string
+  /** Working-copy label. */
+  workingCopyLabel(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Status counts. */
+  statusSummary(signal?: unknown | undefined | null): Promise<VcsStatusSummary>
+  /** Render working-copy patch. */
+  diffText(files: Array<string>, snapshot: boolean, signal?: unknown | undefined | null): Promise<string>
+  /** List changed paths. */
+  changedFiles(files: Array<string>, snapshot: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
+}
+
+/** Backend-agnostic repository handle for portable VCS reads. */
+export declare class VcsRepo {
+  /** Backend kind (`"git"` or `"jj"`). */
+  kind(): string
+  /** Checkout or workspace root. */
+  root(): string
+  /** Primary checkout or default workspace root. */
+  primaryRoot(): string
+  /** Worktree-relative prefix of a directory. */
+  prefixOf(dir: string): string | null
+  /** Filesystem target to watch for repository-head changes. */
+  watchTarget(): string
+  /** Whether this backend implements a portable feature. */
+  supports(feature: string): boolean
+  /** Git-specific handle when this repository is backed by Git. */
+  asGit(): VcsGitRepo | null
+  /** Jujutsu-specific handle when this repository is backed by Jujutsu. */
+  asJj(): VcsJjWorkspace | null
+  /** Human label for the working copy. */
+  label(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Working-copy commit id. */
+  headId(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Status counts. */
+  statusSummary(signal?: unknown | undefined | null): Promise<VcsStatusSummary>
+  /** Porcelain status. */
+  statusPorcelain(options: VcsStatusOptions, signal?: unknown | undefined | null): Promise<string>
+  /** Render a patch. */
+  diffText(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<string>
+  /** Changed paths. */
+  changedFiles(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Per-file line counts. */
+  numstat(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<Array<VcsNumstatEntry>>
+  /** Every working-copy change since the last commit. */
+  uncommittedDiff(files: Array<string>, signal?: unknown | undefined | null): Promise<string>
+  /** Recent subjects. */
+  logSubjects(count: number, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Recent one-line commits. */
+  logOnelines(count: number, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Commit details. */
+  commitDetails(rev: string, signal?: unknown | undefined | null): Promise<VcsCommitDetails>
+  /** List tracked or untracked paths. */
+  lsFiles(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
+}
+
 /**
  * Install the bounded Tokio runtime napi-rs adopts for async exports and the
  * bounded Rayon global pool used by native parallel iterators.
@@ -2212,6 +2407,177 @@ export declare function supportsLanguage(lang: string): boolean
  * Pads with spaces when requested.
  */
 export declare function truncateToWidth(text: string, maxWidth: number, ellipsisKind: Ellipsis | undefined | null, pad: boolean | undefined | null, tabWidth: number): string
+
+/** Patch application options. */
+export interface VcsApplyOptions {
+  cached?: boolean
+  indexPath?: string
+  reverse?: boolean
+  threeWay?: boolean
+}
+
+/** Clean options. */
+export interface VcsCleanOptions {
+  ignoredOnly?: boolean
+  includeIgnored?: boolean
+  paths?: Array<string>
+}
+
+/** Clone options. */
+export interface VcsCloneOptions {
+  refName?: string
+  sha?: string
+  timeoutMs?: number
+}
+
+/** Commit author identity. */
+export interface VcsCommitAuthor {
+  name: string
+  email: string
+  date?: string
+}
+
+/** Commit metadata. */
+export interface VcsCommitDetails {
+  sha: string
+  parents: Array<string>
+  author: VcsCommitAuthor
+  message: string
+}
+
+/** Commit creation options. */
+export interface VcsCommitOptions {
+  author?: VcsCommitAuthor
+  allowEmpty?: boolean
+  amend?: boolean
+  files?: Array<string>
+}
+
+/** Detach copied Git metadata. */
+export declare function vcsDetachGitDir(worktreeRoot: string, sourceCommonDir: string, signal?: unknown | undefined | null): Promise<string>
+
+/** Diff generation options. */
+export interface VcsDiffOptions {
+  cached?: boolean
+  base?: string
+  head?: string
+  files?: Array<string>
+  context?: number
+  binary?: boolean
+}
+
+/** Discover the repository owning a directory. */
+export declare function vcsDiscover(dir: string): VcsRepo | null
+
+/** Clone a Git repository. */
+export declare function vcsGitClone(url: string, target: string, options: VcsCloneOptions, signal?: unknown | undefined | null): Promise<void>
+
+/** Discover the Git checkout containing a directory. */
+export declare function vcsGitDiscover(dir: string): VcsGitRepo | null
+
+/** Discover Git metadata without opening the repository. */
+export declare function vcsGitRepoInfo(dir: string): VcsGitRepoInfo | null
+
+/** Discovered Git repository paths. */
+export interface VcsGitRepoInfo {
+  repoRoot: string
+  gitEntryPath: string
+  gitDir: string
+  commonDir: string
+  headPath: string
+  isReftable: boolean
+}
+
+/** Resolved HEAD state. */
+export interface VcsHeadState {
+  kind: string
+  refName?: string
+  branch?: string
+  commit?: string
+}
+
+/** Selected hunks or line range for a path. */
+export interface VcsHunkSelection {
+  path: string
+  kind: string
+  indices?: Array<number>
+  start?: number
+  end?: number
+}
+
+/** Invalid hunk selection. */
+export interface VcsHunkSelectionError {
+  path: string
+  message: string
+}
+
+/** Test whether a directory is a pure jj workspace. */
+export declare function vcsIsPureJj(dir: string): boolean
+
+/** Discover a Jujutsu workspace. */
+export declare function vcsJjDiscover(dir: string): VcsJjWorkspace | null
+
+/** Join patch fragments. */
+export declare function vcsJoinPatches(parts: Array<string>): string
+
+/** Linked worktree metadata. */
+export interface VcsLinkedWorktree {
+  root: string
+  primaryRoot: string
+}
+
+/** Per-file line counts. */
+export interface VcsNumstatEntry {
+  path: string
+  added?: number
+  removed?: number
+}
+
+/** Push options. */
+export interface VcsPushOptions {
+  remote?: string
+  refspec?: string
+  forceWithLease?: boolean
+}
+
+/** Restore options. */
+export interface VcsRestoreOptions {
+  source?: string
+  staged?: boolean
+  worktree?: boolean
+  files?: Array<string>
+}
+
+/** Bounded object contents. */
+export interface VcsShowResult {
+  data: Buffer
+  truncated: boolean
+}
+
+/** Status query options. */
+export interface VcsStatusOptions {
+  untracked?: string
+  pathspecs?: Array<string>
+  nulTerminated?: boolean
+}
+
+/** Git status counts. */
+export interface VcsStatusSummary {
+  staged: number
+  unstaged: number
+  untracked: number
+}
+
+/** Validate hunk selections. */
+export declare function vcsValidateHunkSelections(rawDiff: string, selections: Array<VcsHunkSelection>): Array<VcsHunkSelectionError>
+
+/** One worktree listing row. */
+export interface VcsWorktreeEntry {
+  path: string
+  head?: string
+  branch?: string
+  detached: boolean
+}
 
 /**
  * Score every row of a normalized `f32` matrix against `query` and return

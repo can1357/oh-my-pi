@@ -30,6 +30,9 @@ export const Process = nativeBindings.Process;
 export const PtySession = nativeBindings.PtySession;
 export const Shell = nativeBindings.Shell;
 export const TtyWriter = nativeBindings.TtyWriter;
+export const VcsGitRepo = nativeBindings.VcsGitRepo;
+export const VcsJjWorkspace = nativeBindings.VcsJjWorkspace;
+export const VcsRepo = nativeBindings.VcsRepo;
 
 // functions
 export const __ompInstallTokioRuntime = nativeBindings.__ompInstallTokioRuntime;
@@ -91,6 +94,15 @@ export const structuredPatchHunks = nativeBindings.structuredPatchHunks;
 export const summarizeCode = nativeBindings.summarizeCode;
 export const supportsLanguage = nativeBindings.supportsLanguage;
 export const truncateToWidth = nativeBindings.truncateToWidth;
+export const vcsDetachGitDir = nativeBindings.vcsDetachGitDir;
+export const vcsDiscover = nativeBindings.vcsDiscover;
+export const vcsGitClone = nativeBindings.vcsGitClone;
+export const vcsGitDiscover = nativeBindings.vcsGitDiscover;
+export const vcsGitRepoInfo = nativeBindings.vcsGitRepoInfo;
+export const vcsIsPureJj = nativeBindings.vcsIsPureJj;
+export const vcsJjDiscover = nativeBindings.vcsJjDiscover;
+export const vcsJoinPatches = nativeBindings.vcsJoinPatches;
+export const vcsValidateHunkSelections = nativeBindings.vcsValidateHunkSelections;
 export const vectorIndexTopK = nativeBindings.vectorIndexTopK;
 export const visibleWidth = nativeBindings.visibleWidth;
 export const warmHighlighter = nativeBindings.warmHighlighter;

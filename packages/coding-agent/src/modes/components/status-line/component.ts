@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import {
 	type Component,
 	type ComposerStyle,
@@ -15,8 +16,8 @@ import type { AgentSession } from "../../../session/agent-session";
 import type { OAuthAccountIdentity } from "../../../session/auth-storage";
 import { limitMatchesActiveAccount } from "../../../slash-commands/helpers/active-oauth-account";
 import { type ActiveRepoContext, resolveActiveRepoContextSync } from "../../../utils/active-repo-context";
-import * as git from "../../../utils/git";
-import * as jj from "../../../utils/jj";
+import { withTimeoutSignal } from "../../../utils/fetch-timeout";
+import { GH_COMMAND_TIMEOUT_MS, github } from "../../../utils/github";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../../utils/session-color";
 import { calculateTokensPerSecond } from "../../../utils/token-rate";
 import { sanitizeStatusText } from "../../shared";
@@ -40,6 +41,7 @@ import type {
 } from "./types";
 
 const JJ_REFRESH_TTL_MS = 5000;
+const JJ_COMMAND_TIMEOUT_MS = 5_000;
 const WATCHER_FAILURE_POLL_TTL_MS = 5000;
 
 /** A displayable limit after provider, account, model, and window filtering. */
@@ -256,7 +258,7 @@ interface WorktreeContext {
  * resolve to the shared `foo.git` dir, so a trailing `.git` is stripped.
  */
 function resolveWorktreeContext(cwd: string): WorktreeContext | null {
-	const worktree = git.repo.linkedWorktreeSync(cwd);
+	const worktree = vcs.git(cwd)?.linkedWorktree();
 	if (!worktree) return null;
 	const base = path.basename(worktree.primaryRoot);
 	const projectName = base.endsWith(".git") ? base.slice(0, -4) : base;
@@ -351,7 +353,6 @@ export class StatusLineComponent implements Component {
 	#cachedBranch: string | null | undefined = undefined;
 	#cachedBranchRepoId: string | null | undefined = undefined;
 	#cachedBranchCwd: string | undefined = undefined;
-	#cachedBranchHasGitRepository = false;
 	// In-flight reftable resolve slot. Ownership is the launch id, not the cwd:
 	// two live resolves can share a cwd string across an invalidation, and a
 	// stale one must never free (or poison) a slot it no longer owns.
@@ -362,7 +363,7 @@ export class StatusLineComponent implements Component {
 	// launch; a mismatch on resolve means the cache was invalidated underneath
 	// it (a newer resolve superseded it), so its result is stale and must be
 	// dropped rather than overwrite the value the newer resolve committed.
-	// Mirrors #jjCacheGeneration / #getJjBranch in this file.
+	// Mirrors #jjCacheGeneration / #getBranchLabel in this file.
 	// Timestamp of the latest branch read; only bounds cache freshness when the
 	// HEAD watcher could not be installed.
 	#branchLastFetch: number | undefined = undefined;
@@ -371,7 +372,7 @@ export class StatusLineComponent implements Component {
 	// launch; a mismatch on resolve means the cache was invalidated underneath
 	// it (a newer resolve superseded it), so its result is stale and must be
 	// dropped rather than overwrite the value the newer resolve committed.
-	// Mirrors #jjCacheGeneration / #getJjBranch in this file.
+	// Mirrors #jjCacheGeneration / #getBranchLabel in this file.
 	#branchCacheGeneration = 0;
 	#gitUnwatch: (() => void) | null = null;
 	#gitWatcherUnavailable = false;
@@ -422,8 +423,6 @@ export class StatusLineComponent implements Component {
 	#cachedGitStatusCwd: string | undefined = undefined;
 	#gitStatusLastFetch = 0;
 	#gitStatusInFlightCwd: string | undefined = undefined;
-	#jjRoot: string | null | undefined = undefined;
-	#jjRootCwd: string | undefined = undefined;
 	#cachedJjBranch: string | null = null;
 	#jjBranchLastFetch = 0;
 	#jjResolveSeq = 0;
@@ -431,7 +430,7 @@ export class StatusLineComponent implements Component {
 	#cachedJjStatus: { staged: number; unstaged: number; untracked: number } | null = null;
 	#jjStatusLastFetch = 0;
 	#jjStatusActive: JjResolveRequest | undefined = undefined;
-	// Bumped on every jj-cache reset — a cwd switch (#jjRootFor) or a HEAD /
+	// Bumped on every jj-cache reset — a cwd switch (#applyCwdChange) or a HEAD /
 	// bookmark move (#invalidateGitCaches). An in-flight jj query captures this
 	// at launch; a mismatch on resolve means the caches were reset underneath it
 	// (including a reset that re-resolves to the SAME root, which a root-equality
@@ -713,7 +712,7 @@ export class StatusLineComponent implements Component {
 		}
 
 		const { effectiveGitCwd } = this.#resolveActiveRepoCache();
-		const repository = git.repo.resolveSync(effectiveGitCwd);
+		const repository = vcs.repo(effectiveGitCwd);
 		if (!repository) {
 			// There is no path to watch yet. Cache the negative result only for the
 			// fallback poll interval so a later `git init` becomes visible without
@@ -722,15 +721,10 @@ export class StatusLineComponent implements Component {
 			return;
 		}
 
-		// git swaps HEAD via `HEAD.lock` + atomic rename. That both unlinks the
-		// HEAD inode (freezing a file-bound `fs.watch` after the first switch —
-		// issue #8412) and, on Bun/Linux, permanently wedges an inotify-backed
-		// directory watch after the first rename event (oven-sh/bun#24875).
-		// `git.head.watch` stat-polls the HEAD path (or the reftable dir), which
-		// survives inode swaps on every platform. A vanished repo surfaces as a
-		// stat change too, so there is no separate watcher error path.
+		// Backends atomically replace their head markers, so stat-poll the
+		// backend-selected target instead of binding a watcher to one inode.
 		try {
-			const unwatch = git.head.watch(repository, () => {
+			const unwatch = vcs.watch(repository, () => {
 				if (this.#disposed || this.#gitUnwatch !== unwatch) return;
 				this.invalidateGitCaches();
 				this.#onBranchChange?.();
@@ -827,7 +821,6 @@ export class StatusLineComponent implements Component {
 		this.#cachedBranch = undefined;
 		this.#cachedBranchRepoId = undefined;
 		this.#cachedBranchCwd = undefined;
-		this.#cachedBranchHasGitRepository = false;
 		// Abort before releasing the in-flight slot. Releasing alone would allow
 		// repeated invalidations to fan out still-running git subprocesses.
 		this.#branchResolveActive?.controller.abort();
@@ -837,10 +830,8 @@ export class StatusLineComponent implements Component {
 		this.#cachedPrContext = undefined;
 		// jj label/status share the git segment's lifecycle: a HEAD move (e.g. a
 		// colocated `jj new`/bookmark move) must drop the throttled jj caches too,
-		// mirroring #jjRootFor's per-cwd reset so the next render refetches.
+		// so the next render refetches.
 		this.#resetJjRequests();
-		this.#jjRoot = undefined;
-		this.#jjRootCwd = undefined;
 		this.#cachedJjBranch = null;
 		this.#jjBranchLastFetch = 0;
 		this.#cachedJjStatus = null;
@@ -871,10 +862,42 @@ export class StatusLineComponent implements Component {
 		this.#jjStatusActive?.controller.abort();
 		this.#jjStatusActive = undefined;
 	}
-	#getCurrentBranch(effectiveGitCwd?: string): string | null {
+	#getBranchLabel(effectiveGitCwd?: string): string | null {
 		if (!this.#gitEnabled()) return null;
 
 		const gitCwd = effectiveGitCwd ?? this.#resolveActiveRepoCache().effectiveGitCwd;
+		const repository = vcs.repo(gitCwd);
+		if (!repository) return null;
+		const gitRepository = repository.asGit();
+		if (!gitRepository) {
+			if (this.#jjBranchActive || Date.now() - this.#jjBranchLastFetch < JJ_REFRESH_TTL_MS) {
+				return this.#cachedJjBranch;
+			}
+			const request: JjResolveRequest = {
+				id: ++this.#jjResolveSeq,
+				controller: new AbortController(),
+			};
+			this.#jjBranchActive = request;
+			const generation = this.#jjCacheGeneration;
+			(async () => {
+				let next: string | null = null;
+				try {
+					next =
+						(await repository.label(withTimeoutSignal(JJ_COMMAND_TIMEOUT_MS, request.controller.signal))) ?? null;
+				} catch {
+					next = null;
+				} finally {
+					if (this.#jjBranchActive?.id === request.id) this.#jjBranchActive = undefined;
+					if (this.#jjCacheGeneration === generation) this.#jjBranchLastFetch = Date.now();
+				}
+				if (this.#jjCacheGeneration !== generation || this.#disposed) return;
+				const changed = next !== this.#cachedJjBranch;
+				this.#cachedJjBranch = next;
+				if (changed) this.#onBranchChange?.();
+			})();
+			return this.#cachedJjBranch;
+		}
+
 		const fallbackCacheExpired =
 			this.#gitWatcherUnavailable &&
 			(this.#branchLastFetch === undefined || Date.now() - this.#branchLastFetch >= WATCHER_FAILURE_POLL_TTL_MS);
@@ -886,9 +909,9 @@ export class StatusLineComponent implements Component {
 		// `git rev-parse` — the unbounded spawn that froze the render path (F7).
 		// A non-reftable repo resolves HEAD with cheap sync filesystem reads, so
 		// only the reftable branch moves off the render path, mirroring
-		// #getGitStatus and #getJjBranch in this file.
-		const repository = git.repo.resolveSync(gitCwd);
-		if (repository && git.repo.isReftableSync(repository)) {
+		// #getStatus and the Jujutsu label path above.
+		const repoInfo = vcs.gitInfo(gitCwd);
+		if (repoInfo?.isReftable) {
 			if (this.#branchResolveActive !== undefined) {
 				return this.#branchResolveActive.cwd === gitCwd && this.#cachedBranchCwd === gitCwd
 					? (this.#cachedBranch ?? null)
@@ -905,19 +928,15 @@ export class StatusLineComponent implements Component {
 			// start while this one is still pending. Without a generation check the
 			// older resolve would finish later, install its stale HEAD, and clear the
 			// slot — dropping the fresh result and freezing the status line on the
-			// pre-change branch. Mirrors #jjCacheGeneration / #getJjBranch.
+			// pre-change branch. Mirrors #jjCacheGeneration / #getBranchLabel.
 			const generation = this.#branchCacheGeneration;
 			(async () => {
 				let next: string | null = null;
 				let repoId: string | null = null;
 				try {
-					const headState = await git.head.resolve(gitCwd, request.controller.signal);
-					repoId = headState?.headPath ?? null;
-					next = !headState
-						? null
-						: headState.kind === "ref"
-							? (headState.branchName ?? headState.ref)
-							: "detached";
+					const headState = await gitRepository.head(request.controller.signal);
+					repoId = repoInfo.headPath;
+					next = headState.kind === "ref" ? (headState.branch ?? headState.refName ?? "HEAD") : "detached";
 				} catch {
 					next = null;
 				} finally {
@@ -933,7 +952,6 @@ export class StatusLineComponent implements Component {
 				const prev = this.#cachedBranchCwd === gitCwd ? this.#cachedBranch : undefined;
 				this.#cachedBranchCwd = gitCwd;
 				this.#cachedBranchRepoId = repoId;
-				this.#cachedBranchHasGitRepository = next === null;
 				this.#cachedBranch = next;
 				this.#branchLastFetch = Date.now();
 				if (prev !== next && this.#onBranchChange) this.#onBranchChange();
@@ -942,8 +960,14 @@ export class StatusLineComponent implements Component {
 		}
 
 		// Non-reftable: cheap sync filesystem read, safe on the render path.
-		const head = git.head.resolveSync(gitCwd);
-		const gitHeadPath = head?.headPath ?? null;
+		const head = (() => {
+			try {
+				return gitRepository.headSync();
+			} catch {
+				return null;
+			}
+		})();
+		const gitHeadPath = repoInfo?.headPath ?? null;
 		this.#cachedBranchCwd = gitCwd;
 		this.#cachedBranchRepoId = gitHeadPath;
 		this.#branchLastFetch = Date.now();
@@ -951,7 +975,7 @@ export class StatusLineComponent implements Component {
 			this.#cachedBranch = null;
 			return null;
 		}
-		this.#cachedBranch = head.kind === "ref" ? (head.branchName ?? head.ref) : "detached";
+		this.#cachedBranch = head.kind === "ref" ? (head.branch ?? head.refName ?? "HEAD") : "detached";
 		return this.#cachedBranch ?? null;
 	}
 
@@ -965,7 +989,7 @@ export class StatusLineComponent implements Component {
 			this.#defaultBranch = "main";
 			const lookupCwd = effectiveGitCwd;
 			(async () => {
-				const resolved = await git.branch.default(lookupCwd);
+				const resolved = await vcs.git(lookupCwd)?.defaultBranch();
 				if (this.#disposed || this.#defaultBranchCwd !== lookupCwd) return;
 				if (resolved) {
 					this.#defaultBranch = resolved;
@@ -978,10 +1002,42 @@ export class StatusLineComponent implements Component {
 		return branch === this.#defaultBranch;
 	}
 
-	#getGitStatus(effectiveGitCwd?: string): { staged: number; unstaged: number; untracked: number } | null {
+	#getStatus(effectiveGitCwd?: string): { staged: number; unstaged: number; untracked: number } | null {
 		if (!this.#gitEnabled()) return null;
 
 		const gitCwd = effectiveGitCwd ?? this.#resolveActiveRepoCache().effectiveGitCwd;
+		const repository = vcs.repo(gitCwd);
+		if (!repository) return null;
+		if (repository.kind() === "jj") {
+			if (this.#jjStatusActive || Date.now() - this.#jjStatusLastFetch < JJ_REFRESH_TTL_MS) {
+				return this.#cachedJjStatus;
+			}
+			const request: JjResolveRequest = {
+				id: ++this.#jjResolveSeq,
+				controller: new AbortController(),
+			};
+			this.#jjStatusActive = request;
+			const generation = this.#jjCacheGeneration;
+			(async () => {
+				let next: { staged: number; unstaged: number; untracked: number } | null = null;
+				try {
+					next = await repository.statusSummary(
+						withTimeoutSignal(JJ_COMMAND_TIMEOUT_MS, request.controller.signal),
+					);
+				} catch {
+					next = null;
+				} finally {
+					if (this.#jjStatusActive?.id === request.id) this.#jjStatusActive = undefined;
+					if (this.#jjCacheGeneration === generation) this.#jjStatusLastFetch = Date.now();
+				}
+				if (this.#jjCacheGeneration !== generation || this.#disposed) return;
+				const prev = this.#cachedJjStatus;
+				this.#cachedJjStatus = next;
+				if (JSON.stringify(prev) !== JSON.stringify(next)) this.#onBranchChange?.();
+			})();
+			return this.#cachedJjStatus;
+		}
+
 		if (this.#gitStatusInFlightCwd !== undefined) {
 			return this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitStatus : null;
 		}
@@ -994,7 +1050,7 @@ export class StatusLineComponent implements Component {
 		(async () => {
 			let nextStatus: { staged: number; unstaged: number; untracked: number } | null = null;
 			try {
-				nextStatus = await git.status.summary(gitCwd);
+				nextStatus = (await repository.statusSummary()) ?? null;
 			} catch {
 				nextStatus = null;
 			} finally {
@@ -1014,102 +1070,12 @@ export class StatusLineComponent implements Component {
 		return this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitStatus : null;
 	}
 
-	// Resolve (and cache per cwd) the jj workspace root, resetting both jj caches
-	// on a cwd change so a directory switch refetches label + status.
-	#jjRootFor(cwd: string): string | null {
-		if (this.#jjRoot === undefined || this.#jjRootCwd !== cwd) {
-			this.#jjRootCwd = cwd;
-			this.#jjRoot = jj.repo.rootSync(cwd);
-			this.#cachedJjBranch = null;
-			this.#jjBranchLastFetch = 0;
-			this.#cachedJjStatus = null;
-			this.#jjStatusLastFetch = 0;
-			this.#jjCacheGeneration++;
-		}
-		return this.#jjRoot;
-	}
-
-	// jj working-copy bookmark label (nearest bookmark, change-id fallback), shown
-	// in the `git` segment where git HEAD is detached/absent under jj. Throttled,
-	// cached, and repaints on resolve.
-	#getJjBranch(effectiveGitCwd?: string): string | null {
-		const cwd = effectiveGitCwd ?? this.#resolveActiveRepoCache().effectiveGitCwd;
-		const root = this.#jjRootFor(cwd);
-		if (!root) return null;
-		if (this.#jjBranchActive || Date.now() - this.#jjBranchLastFetch < JJ_REFRESH_TTL_MS) {
-			return this.#cachedJjBranch;
-		}
-		const request: JjResolveRequest = {
-			id: ++this.#jjResolveSeq,
-			controller: new AbortController(),
-		};
-		this.#jjBranchActive = request;
-		const generation = this.#jjCacheGeneration;
-		(async () => {
-			let next: string | null = null;
-			try {
-				next = await jj.workingCopy.label(root, {
-					signal: request.controller.signal,
-					timeoutMs: jj.JJ_COMMAND_TIMEOUT_MS,
-				});
-			} finally {
-				if (this.#jjBranchActive?.id === request.id) this.#jjBranchActive = undefined;
-				// Advance the throttle only if no reset raced this query; a reset
-				// leaves LastFetch at 0 so the current root refetches instead of
-				// being throttled on a superseded result.
-				if (this.#jjCacheGeneration === generation) this.#jjBranchLastFetch = Date.now();
-			}
-			// Drop a result whose caches were reset mid-flight — a repo switch OR a
-			// same-root HEAD/bookmark move — so a superseded label never lands in
-			// the live cache.
-			if (this.#jjCacheGeneration !== generation || this.#disposed) return;
-			const changed = next !== this.#cachedJjBranch;
-			this.#cachedJjBranch = next;
-			if (changed) this.#onBranchChange?.();
-		})();
-		return this.#cachedJjBranch;
-	}
-
-	// jj working-copy status counts (`@` vs its parent), used in place of git
-	// status in a jj repo where `git status` has no `.git` to read. Throttled,
-	// cached, and repaints on resolve like #getJjBranch.
-	#getJjStatus(effectiveGitCwd?: string): { staged: number; unstaged: number; untracked: number } | null {
-		const cwd = effectiveGitCwd ?? this.#resolveActiveRepoCache().effectiveGitCwd;
-		const root = this.#jjRootFor(cwd);
-		if (!root) return null;
-		if (this.#jjStatusActive || Date.now() - this.#jjStatusLastFetch < JJ_REFRESH_TTL_MS) {
-			return this.#cachedJjStatus;
-		}
-		const request: JjResolveRequest = {
-			id: ++this.#jjResolveSeq,
-			controller: new AbortController(),
-		};
-		this.#jjStatusActive = request;
-		const generation = this.#jjCacheGeneration;
-		(async () => {
-			let next: { staged: number; unstaged: number; untracked: number } | null = null;
-			try {
-				next = await jj.status.summary(root, {
-					signal: request.controller.signal,
-					timeoutMs: jj.JJ_COMMAND_TIMEOUT_MS,
-				});
-			} finally {
-				if (this.#jjStatusActive?.id === request.id) this.#jjStatusActive = undefined;
-				if (this.#jjCacheGeneration === generation) this.#jjStatusLastFetch = Date.now();
-			}
-			if (this.#jjCacheGeneration !== generation || this.#disposed) return;
-			const prev = this.#cachedJjStatus;
-			this.#cachedJjStatus = next;
-			if (JSON.stringify(prev) !== JSON.stringify(next)) this.#onBranchChange?.();
-		})();
-		return this.#cachedJjStatus;
-	}
-
 	#lookupPr(effectiveGitCwd?: string): { number: number; url: string } | null {
 		if (!this.#gitEnabled()) return null;
 
 		const gitCwd = effectiveGitCwd ?? this.#resolveActiveRepoCache().effectiveGitCwd;
-		const branch = this.#getCurrentBranch(gitCwd);
+		if (vcs.repo(gitCwd)?.kind() !== "git") return null;
+		const branch = this.#getBranchLabel(gitCwd);
 		const currentContext = branch ? createPrCacheContext(branch, this.#cachedBranchRepoId ?? null) : null;
 
 		if (canReuseCachedPr(this.#cachedPr, this.#cachedPrContext, currentContext)) {
@@ -1137,7 +1103,7 @@ export class StatusLineComponent implements Component {
 		(async () => {
 			// Helper: only write cache if branch/repo context hasn't changed since launch
 			const setCachedPr = (value: { number: number; url: string } | null) => {
-				const latestBranch = this.#getCurrentBranch(lookupCwd);
+				const latestBranch = this.#getBranchLabel(lookupCwd);
 				const latestContext = latestBranch
 					? createPrCacheContext(latestBranch, this.#cachedBranchRepoId ?? null)
 					: undefined;
@@ -1152,10 +1118,10 @@ export class StatusLineComponent implements Component {
 				// hard-terminates on the git command deadline instead of stalling
 				// the status-line indefinitely (#4234). Requires `gh repo set-default`;
 				// non-zero exit still falls through to the null cache below.
-				const result = await git.github.run(
+				const result = await github.run(
 					lookupCwd,
 					["pr", "view", "--json", "number,url"],
-					AbortSignal.timeout(git.GIT_COMMAND_TIMEOUT_MS),
+					AbortSignal.timeout(GH_COMMAND_TIMEOUT_MS),
 				);
 				if (this.#disposed) return;
 				if (result.exitCode !== 0) {
@@ -1707,23 +1673,8 @@ export class StatusLineComponent implements Component {
 		const activeRepoCache = shouldResolveActiveRepo
 			? this.#resolveActiveRepoCache()
 			: { projectDir, activeRepo: null, effectiveGitCwd: projectDir, worktree: null };
-		let gitBranch = includeGit || includePr ? this.#getCurrentBranch(activeRepoCache.effectiveGitCwd) : null;
-		// A jj repo has no git branch to read: git HEAD is detached (colocated) or
-		// absent. A pending reftable resolve owns this cwd as an explicit Git repo,
-		// so it must not be mistaken for an absent Git checkout and fall through to
-		// an ancestor jj workspace.
-		const gitHeadResolvePending = this.#branchResolveActive?.cwd === activeRepoCache.effectiveGitCwd;
-		const gitHeadIsJjLike =
-			!this.#cachedBranchHasGitRepository &&
-			!gitHeadResolvePending &&
-			(gitBranch === "detached" || gitBranch === null);
-		if (includeGit && gitHeadIsJjLike) {
-			gitBranch = this.#getJjBranch(activeRepoCache.effectiveGitCwd) ?? gitBranch;
-		}
-		const gitStatus = includeGit
-			? ((gitHeadIsJjLike ? this.#getJjStatus(activeRepoCache.effectiveGitCwd) : null) ??
-				this.#getGitStatus(activeRepoCache.effectiveGitCwd))
-			: null;
+		const gitBranch = includeGit || includePr ? this.#getBranchLabel(activeRepoCache.effectiveGitCwd) : null;
+		const gitStatus = includeGit ? this.#getStatus(activeRepoCache.effectiveGitCwd) : null;
 		const gitPr = includePr ? this.#lookupPr(activeRepoCache.effectiveGitCwd) : null;
 		const compactionSpeculation = this.session.compactionSpeculation ?? "idle";
 		this.#syncSpeculationBlink(compactionSpeculation);

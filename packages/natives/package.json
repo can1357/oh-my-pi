@@ -80,5 +80,10 @@
       "types": "./native/clipboard.d.ts",
       "import": "./native/clipboard.js"
     }
+    ,
+    "./vcs": {
+      "types": "./native/vcs.d.ts",
+      "import": "./native/vcs.js"
+    }
   }
 }

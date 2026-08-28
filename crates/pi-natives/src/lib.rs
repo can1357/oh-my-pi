@@ -49,6 +49,7 @@ pub mod snapcompact;
 pub mod spelling;
 pub mod svg;
 pub mod utok;
+pub mod vcs;
 pub use pi_ast::language;
 
 pub mod power;
