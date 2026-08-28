@@ -53,6 +53,68 @@ describe("zod-like parsing", () => {
 		});
 	});
 
+	it("preserves JSON Schema structure for morph-free unions and nullable members", () => {
+		// Provider tool definitions read toolWireSchema's JSON Schema: a
+		// dispatcher-morph wrapper erases the structural IR and the parameter
+		// arrives at the model as an unconstrained `{}`.
+		const unionSchema = z.object({ mode: z.union([z.literal("fast"), z.literal("safe")]) });
+		const unionJson = unionSchema.toJsonSchema() as {
+			properties?: { mode?: Record<string, unknown> };
+		};
+		expect(unionJson.properties?.mode).toBeDefined();
+		expect(Object.keys(unionJson.properties?.mode ?? {}).length).toBeGreaterThan(0);
+		expect(JSON.stringify(unionJson.properties?.mode)).toContain("fast");
+		expect(JSON.stringify(unionJson.properties?.mode)).toContain("safe");
+		// Runtime contract unchanged.
+		expect(unionSchema.parse({ mode: "fast" })).toEqual({ mode: "fast" });
+		expect(unionSchema.safeParse({ mode: "slow" }).success).toBe(false);
+
+		const nullableSchema = z.object({ value: z.string().nullable() });
+		const nullableJson = nullableSchema.toJsonSchema() as {
+			properties?: { value?: Record<string, unknown> };
+		};
+		expect(Object.keys(nullableJson.properties?.value ?? {}).length).toBeGreaterThan(0);
+		expect(JSON.stringify(nullableJson.properties?.value)).toContain("string");
+		expect(nullableSchema.parse({ value: "ok" })).toEqual({ value: "ok" });
+		expect(nullableSchema.parse({ value: null })).toEqual({ value: null });
+		expect(nullableSchema.safeParse({ value: 42 }).success).toBe(false);
+
+		// Members carrying Type-attached steps (transform/refine — invisible to
+		// the member IR) must take the ordered dispatcher path: an IR rebuild
+		// would silently DROP the step, not just degrade the JSON Schema.
+		const morphUnion = z.union([z.string().transform(value => value.length), z.number()]);
+		expect(morphUnion.parse("abc")).toBe(3);
+		expect(morphUnion.parse(7)).toBe(7);
+		expect(
+			z
+				.string()
+				.transform(value => value.length)
+				.optional()
+				.parse("abc"),
+		).toBe(3);
+		expect(
+			z
+				.string()
+				.refine(value => value.startsWith("x"))
+				.optional()
+				.safeParse("abc").success,
+		).toBe(false);
+		expect(
+			z
+				.string()
+				.refine(value => value.startsWith("x"))
+				.nullable()
+				.safeParse("abc").success,
+		).toBe(false);
+		expect(
+			z
+				.string()
+				.refine(value => value.startsWith("x"))
+				.nullable()
+				.parse(null),
+		).toBeNull();
+	});
+
 	it("parses valid values and reports nested safeParse issues", () => {
 		const schema = z.object({ profile: z.object({ age: z.number().int().positive() }) });
 		expect(schema.parse({ profile: { age: 42 } })).toEqual({ profile: { age: 42 } });

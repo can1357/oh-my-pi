@@ -209,10 +209,14 @@ function decorate<Out>(schema: Decoratable<Out>, optional = false): ZodLikeSchem
 			return next(restrictBase(schema, { ...schema.ir, url: true }));
 		},
 		optional(): ZodLikeSchema<Out | undefined> & OptionalSchemaMarker {
-			// Morph-free inner schemas keep a real union so structural metadata
-			// (JSON Schema export, descriptions) survives the widening; morph-heavy
-			// ones take the dispatch morph below.
-			if (!hasMorph(schema.ir)) {
+			// Purely structural inner schemas keep a real union so structural
+			// metadata (JSON Schema export, descriptions) survives the widening.
+			// Anything carrying a runtime pipeline takes the dispatch morph below:
+			// `hasMorph(ir)` covers in-IR morphs (lazy, string.numeric.parse), and
+			// `hasSteps` covers Type-attached `.transform()`/`.refine()` steps the
+			// IR alone cannot see — rebuilding from `schema.ir` would silently
+			// DROP those steps, not just degrade the emitted JSON Schema.
+			if (!schema.hasSteps && !hasMorph(schema.ir)) {
 				return decorate(
 					schemaFromIR<Out | undefined>({ k: "union", members: [schema.ir, { k: "undefined" }] }),
 					true,
@@ -222,6 +226,16 @@ function decorate<Out>(schema: Decoratable<Out>, optional = false): ZodLikeSchem
 				OptionalSchemaMarker;
 		},
 		nullable(): ZodLikeSchema<Out | null> {
+			// Purely structural inner schemas keep a real union so structural
+			// metadata (JSON Schema export for provider tool definitions) survives
+			// the widening — the dispatcher morph below erases the IR, emitting
+			// `{}` for the member. Same pipeline gate as optional() above.
+			if (!schema.hasSteps && !hasMorph(schema.ir)) {
+				return decorate(
+					schemaFromIR<Out | null>({ k: "union", members: [schema.ir, { k: "lit", v: null }] }),
+					optional,
+				) as ZodLikeSchema<Out | null>;
+			}
 			const inner = schema;
 			const nullable = schemaFromIR<Out | null>({
 				k: "morph",
@@ -402,12 +416,24 @@ export { enumSchema as enum };
 // overlapping morph inputs — a shape recursive schemas (`lazy` is a morph)
 // hit constantly. Wrapping the members in one unknown-input morph keeps zod's
 // ordering and keeps member morphs invisible to the determinism check.
+//
+// The dispatcher is reserved for unions that actually contain a morph: a
+// morph-free union stays structural, because the morph wrapper erases the IR
+// and `toJsonSchema()` then emits `{}` for the member — a provider-facing
+// tool parameter would appear unconstrained. For pure validators any-match
+// equals first-match, so zod's ordering is not observable there.
 export const union = <
 	const Schemas extends readonly [ZodLikeSchema<unknown>, ZodLikeSchema<unknown>, ...ZodLikeSchema<unknown>[]],
 >(
 	schemas: Schemas,
 ): ZodLikeSchema<UnionOutput<Schemas>> => {
 	const members = schemas.map(schema => schema);
+	const irs = members.map(member => member.ir);
+	// Same pipeline gate as optional()/nullable(): `hasSteps` covers
+	// Type-attached transform/refine steps the member IR cannot see.
+	if (members.every(member => !member.hasSteps) && irs.every(ir => !hasMorph(ir))) {
+		return decorate(schemaFromIR<UnionOutput<Schemas>>({ k: "union", members: irs }));
+	}
 	return decorate(
 		schemaFromIR({
 			k: "morph",
