@@ -49,7 +49,10 @@ export class StreamCommitGate {
 
 		const kind = classifyCommitEvent(eventType);
 		if (this.#state === "committed") {
-			if (kind === "terminal-success" || kind === "terminal-failure") {
+			// Post-commit, every terminal event ends the stream's failover
+			// eligibility — including `response.failed` (retryable elsewhere),
+			// whose failure must surface to the client instead of re-dispatching.
+			if (kind === "terminal-success" || kind === "terminal-retryable" || kind === "terminal-failure") {
 				this.#state = "terminated";
 			}
 			return this.#state;
@@ -72,6 +75,7 @@ export function classifyCommitEvent(eventType: string): CommitClass {
 	if (METADATA_EVENTS[eventType]) return "metadata";
 	if (eventType === "response.completed") return "terminal-success";
 	if (eventType === "response.failed") return "terminal-retryable";
+	if (eventType === "response.incomplete") return "terminal-success";
 	if (eventType === "response.error") return "terminal-failure";
 	return "output";
 }

@@ -499,6 +499,15 @@ async function handleFormatEndpoint(
 			let bytes = 0;
 			for (const line of raw) bytes += line.length + 1;
 			commitGate.classifyAndObserve(event.event ?? "", bytes);
+			// Consume the observation: a terminal event that ended the stream
+			// before commit is the pre-commit-failure signal later parts route
+			// failover on; surface it instead of discarding the gate state.
+			if (commitGate.state === "terminated") {
+				logger.debug("auth-gateway stream terminated pre-commit", {
+					route: route.label,
+					event: event.event ?? "",
+				});
+			}
 			previousSse?.(event, sseModel);
 		};
 	}

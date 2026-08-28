@@ -28,11 +28,20 @@ describe("StreamCommitGate", () => {
 		expect(gate.classifyAndObserve("response.created", FOUR_MIB - 1)).toBe("probing");
 	});
 
-	it("does not uncommit after a retryable terminal once output has committed", () => {
+	it("terminates after a retryable terminal once output has committed (failover stays forbidden)", () => {
 		const gate = new StreamCommitGate();
 		expect(gate.classifyAndObserve("response.output_text.delta", 12)).toBe("committed");
-		expect(gate.classifyAndObserve("response.failed", 40)).toBe("committed");
-		expect(gate.state).toBe("committed");
+		// Post-commit `response.failed` ends the stream: the failure surfaces to
+		// the client and the state machine must reflect terminality, not linger
+		// in "committed" as if output could still flow.
+		expect(gate.classifyAndObserve("response.failed", 40)).toBe("terminated");
+		expect(gate.state).toBe("terminated");
+	});
+
+	it("classifies response.incomplete as a terminal, never as output", () => {
+		const gate = new StreamCommitGate();
+		expect(gate.classifyAndObserve("response.created", 20)).toBe("probing");
+		expect(gate.classifyAndObserve("response.incomplete", 40)).toBe("terminated");
 	});
 
 	it("terminates as retryable when response.failed arrives before any output (negative)", () => {
