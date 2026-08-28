@@ -2825,6 +2825,11 @@ export class SessionManager {
 		const manager = new SessionManager(cwd, dir, true, storage);
 		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
 
+		// Forking reads a session file, so it needs the same remote-body fetch the
+		// resume path gets: `--fork <id>` can name a session whose body still
+		// lives on a peer machine. A no-op unless replication is running and the
+		// path is in the remote index.
+		await fetchRemoteSessionIfMissing(sourcePath);
 		const sourceEntries = structuredClone(await loadEntriesFromFile(sourcePath, storage)) as FileEntry[];
 		migrateToCurrentVersion(sourceEntries);
 		await resolveBlobRefsInEntries(sourceEntries, manager.#blobs);

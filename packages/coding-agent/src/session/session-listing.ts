@@ -11,6 +11,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { readRemoteSessionIndex, type SessionIndexEntry } from "../state-broker/domains/sessions";
+import { projectById } from "../state-broker/project-scope";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { lookupSessionTitle, recordSessionTitle } from "./title-index";
@@ -673,10 +674,15 @@ export async function listAllSessions(
  *
  * The local copy always wins: an index row whose local file already exists — or
  * whose session id is already listed — is dropped so a real, openable session
- * is never shadowed by a stub. The merged list stays in newest-first recency
- * order the picker expects. With no index present the input is returned
- * unchanged, so listing behaviour is byte-identical to a sync-disabled install.
- * Never throws: a broken index degrades to `local`.
+ * is never shadowed by a stub. A row is also dropped when its project is no
+ * longer mapped here or has sync disabled: those rows deliberately STAY on disk
+ * (inbound application skips a disabled project rather than deleting anything,
+ * because absence is not deletion), but `SessionReplicator.ensureLocal` refuses
+ * to download a body for a project that is not synced, so surfacing them would
+ * offer the picker sessions that cannot be opened. The merged list stays in
+ * newest-first recency order the picker expects. With no index present the input
+ * is returned unchanged, so listing behaviour is byte-identical to a
+ * sync-disabled install. Never throws: a broken index degrades to `local`.
  */
 export function mergeRemoteOnlySessions(local: SessionInfo[], sessionsDir: string = getSessionsDir()): SessionInfo[] {
 	let index: SessionIndexEntry[];
@@ -708,6 +714,10 @@ export function mergeRemoteOnlySessions(local: SessionInfo[], sessionsDir: strin
 			logger.warn("Ignoring remote session row outside the sessions dir", { rel: entry.rel });
 			continue;
 		}
+		// Judged against the CURRENT registry, not the mapping that was in effect
+		// when the row was written. A row with no project id is unusable too:
+		// `ensureLocal` is keyed by project, so there is nothing to fetch from.
+		if (!projectById(entry.projectId)?.sync) continue;
 		let localFileExists = false;
 		try {
 			localFileExists = fs.existsSync(absPath);
@@ -837,6 +847,18 @@ function sessionMatchesResumeArg(session: SessionInfo, sessionArg: string): bool
 export interface ResolveResumableSessionOptions {
 	/** Search default global session buckets after the active/custom session directory misses. */
 	allowGlobalFallback?: boolean;
+	/**
+	 * Let the global fallback match a session whose body lives only on a peer
+	 * machine, returning a {@link SessionInfo.remoteOnly} stub whose `path` is
+	 * where the body will be downloaded to.
+	 *
+	 * Opt-in for the same reason {@link ListAllSessionsOptions.includeRemoteOnly}
+	 * is: only a caller that opens through `SessionManager.open()` gets the
+	 * download. One that reads the returned path directly (`omp render`, which
+	 * also runs without replication started) would turn a clean "not found" into
+	 * an ENOENT on a file that was never there.
+	 */
+	includeRemoteOnly?: boolean;
 }
 
 function isSessionStorage(value: SessionStorage | ResolveResumableSessionOptions): value is SessionStorage {
@@ -863,7 +885,9 @@ export async function resolveResumableSession(
 		return undefined;
 	}
 
-	const globalSessions = await listAllSessions(storage);
+	const globalSessions = await listAllSessions(storage, {
+		includeRemoteOnly: resolvedOptions.includeRemoteOnly === true,
+	});
 	const globalMatch = globalSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
 	if (!globalMatch) {
 		return undefined;

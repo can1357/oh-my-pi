@@ -148,6 +148,68 @@ describe("history domain", () => {
 	});
 
 	/**
+	 * `resolveProject` returns the DEEPEST registered match, and a nested project
+	 * with `sync: false` sits inside its enabled parent's SQL prefix. The scan
+	 * therefore reads the nested project's prompts, and stamping the resolved id
+	 * on them replicated the very history the user opted out of — under the
+	 * disabled project's own id.
+	 */
+	test("does NOT emit a prompt from a nested sync:false project inside a synced parent", () => {
+		const ws = makeDir("omp-hist-ws-");
+		const foo = path.join(ws, "foo");
+		const nested = path.join(foo, "pkg", "private");
+		fs.mkdirSync(nested, { recursive: true });
+		setProjects([
+			{ id: "proj:foo", path: foo, sync: true },
+			{ id: "proj:private", path: nested, sync: false },
+		]);
+
+		const storage = openStorage();
+		storage.mergeRemote([
+			{ prompt: "kept", createdAt: 1000, cwd: foo },
+			{ prompt: "secret", createdAt: 1001, cwd: nested },
+		]);
+
+		const entries = createHistoryDomain(storage).changedSince(0, 10);
+		expect(entries.map(e => e.key)).toEqual(["kept"]);
+	});
+
+	/**
+	 * `created_at` has one-second granularity, so a burst of prompts shares a
+	 * value and a limited page can end mid-second. Advancing by `created_at`
+	 * alone — either the scan's own cursor or the watermark the engine adopts
+	 * from the last returned entry — then skips the rest of that second forever,
+	 * because the next scan compares `created_at >` strictly.
+	 */
+	test("a page ending mid-second does not skip the rest of that second", () => {
+		const ws = makeDir("omp-hist-ws-");
+		const foo = path.join(ws, "foo");
+		fs.mkdirSync(foo, { recursive: true });
+		setProjects([{ id: "proj:foo", path: foo, sync: true }]);
+
+		const storage = openStorage();
+		// One unsendable row and two eligible ones in the SAME second, then a
+		// newer row. With limit 2 the first page is [oversized, b], which drops to
+		// a single entry and used to be returned as though the second were done.
+		storage.mergeRemote([
+			{ prompt: "x".repeat(5000), createdAt: 1000, cwd: foo },
+			{ prompt: "b", createdAt: 1000, cwd: foo },
+			{ prompt: "c", createdAt: 1000, cwd: foo },
+			{ prompt: "d", createdAt: 2000, cwd: foo },
+		]);
+
+		const domain = createHistoryDomain(storage);
+		const first = domain.changedSince(0, 2);
+		// `c` shares `b`'s second, so it must not be left behind a watermark that
+		// has already moved onto that second.
+		expect(first.map(e => e.key)).toEqual(["b", "c"]);
+
+		// Resuming from the watermark the engine would adopt still reaches `d`.
+		const next = domain.changedSince(first[first.length - 1].rev, 2);
+		expect(next.map(e => e.key)).toEqual(["d"]);
+	});
+
+	/**
 	 * The watermark-stall regression. A page filled entirely with prompts too
 	 * long to be wire keys must not make `changedSince` report "nothing to
 	 * send": the sync engine reads an empty page as end-of-data and leaves the
@@ -455,6 +517,45 @@ describe("sessions domain", () => {
 		expect(mapped?.title).toBe("Remote");
 		// Unmapped project fails closed: never recorded.
 		expect(index.some(e => e.projectId === "proj:ghost")).toBe(false);
+	});
+
+	/**
+	 * An index key encodes THIS machine's directory name, which changes when
+	 * `omp project path` repoints the project. The repoint resets the inbound
+	 * cursor so every row replays and lands under a new key, and the old
+	 * path-derived key used to stay behind: the picker then showed two stubs for
+	 * one session, and selecting the stale one downloaded the body into the
+	 * directory the project no longer lives in.
+	 */
+	test("repointing a project's path leaves one index row, not two", () => {
+		const { home, sessionsDir } = setupHome();
+		const entry = {
+			key: encodeWireKey("proj:foo", "ffff6666.jsonl"),
+			rev: 77_000,
+			value: {
+				projectId: "proj:foo",
+				relCwd: "",
+				file: "ffff6666.jsonl",
+				size: 10,
+				mtimeMs: 77_000,
+				title: "Moves With Me",
+			},
+		};
+		createSessionsDomain(sessionsDir).applyRemote([entry]);
+		expect(readRemoteSessionIndex(sessionsDir).map(e => e.rel)).toEqual(["-projects-foo/ffff6666.jsonl"]);
+
+		// Same project id, new local path: exactly what `omp project path` does.
+		const moved = path.join(home, "dev", "foo");
+		fs.mkdirSync(moved, { recursive: true });
+		setProjects([{ id: "proj:foo", path: moved, sync: true }]);
+
+		// A fresh domain instance: the repoint reset the cursor, so the row
+		// replays into a process that loads the index from disk.
+		createSessionsDomain(sessionsDir).applyRemote([entry]);
+
+		const index = readRemoteSessionIndex(sessionsDir);
+		expect(index.map(e => e.rel)).toEqual(["-dev-foo/ffff6666.jsonl"]);
+		expect(index[0].title).toBe("Moves With Me");
 	});
 
 	/**

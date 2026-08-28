@@ -19,8 +19,11 @@
 - Turning off sync for a project, or a momentary failure to read the sessions directory, no longer deletes that project's sessions from your other machines.
 - A session written to while it was being uploaded is no longer archived truncated, so resuming it on another machine gets the whole conversation.
 - A replica now recovers instead of going permanently deaf when the broker's `state.db` is recreated or restored from an older backup.
-### Fixed
-
+- Prompts from a project with sync turned off are no longer replicated when it sits inside an enabled parent project.
+- `omp --resume <id>` and `--fork <id>` now reach a session whose body is still on another machine, matching what the resume picker already offered.
+- Long prompt histories no longer lose prompts that share a second with the last replicated one.
+- Repointing a project with `omp project path` no longer leaves a duplicate entry in the resume picker.
+- The resume picker no longer lists sessions from projects whose sync has since been turned off, which could not be opened.
 - Fixed `import numpy` (and other native-extension imports) hanging indefinitely in the Python eval tool on Windows, where the runner's always-on background stdin reader deadlocked native DLL loading; Windows now reads the control channel serially between requests while POSIX keeps concurrent request dispatch ([#7985](https://github.com/can1357/oh-my-pi/issues/7985)).
 
 ## [18.0.9] - 2026-08-28

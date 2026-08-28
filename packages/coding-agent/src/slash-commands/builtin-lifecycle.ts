@@ -320,7 +320,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				sessionArg,
 				runtime.ctx.sessionManager.getCwd(),
 				runtime.ctx.sessionManager.getSessionDir(),
-				{ allowGlobalFallback: true },
+				{ allowGlobalFallback: true, includeRemoteOnly: true },
 			);
 			if (!match) {
 				runtime.ctx.showError(`Session "${sessionArg}" not found`);

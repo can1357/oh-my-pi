@@ -113,6 +113,29 @@ function readTitleSlot(absPath: string): string | undefined {
 	}
 }
 
+/**
+ * Index keys naming `file` within `projectId`, whatever local subdirectory the
+ * row landed in.
+ *
+ * A key is `<localDirName>/<file>`, and the directory half is derived from THIS
+ * machine's project path, so it is not knowable from a wire entry alone: a
+ * subdirectory session, or a project since repointed, produces a different one.
+ * Session filenames embed a UUID and are unique within a project, so every hit
+ * is the same logical session.
+ */
+function keysForSessionFile(
+	index: Record<string, SessionIndexEntry>,
+	projectId: string,
+	file: string,
+): string[] {
+	const suffix = `/${file}`;
+	const hits: string[] = [];
+	for (const [key, row] of Object.entries(index)) {
+		if (row.projectId === projectId && key.endsWith(suffix)) hits.push(key);
+	}
+	return hits;
+}
+
 class SessionsDomain implements ReplicatedDomain {
 	readonly id = "sessions" as const;
 
@@ -279,11 +302,10 @@ class SessionsDomain implements ReplicatedDomain {
 				// Tombstone: relCwd is unknown here, so remove any local row for
 				// this project's file wherever its subdir landed (filenames are
 				// UUID-unique, so at most one matches).
-				for (const [key, row] of Object.entries(index)) {
-					if (row.projectId === project.id && key.endsWith(`/${file}`) && row.mtimeMs < entry.rev) {
-						delete index[key];
-						dirty = true;
-					}
+				for (const key of keysForSessionFile(index, project.id, file)) {
+					if (index[key].mtimeMs >= entry.rev) continue;
+					delete index[key];
+					dirty = true;
 				}
 				continue;
 			}
@@ -309,6 +331,19 @@ class SessionsDomain implements ReplicatedDomain {
 			const existing = index[localRel];
 			// LWW: ignore anything not strictly newer than what we already hold.
 			if (existing && existing.mtimeMs >= entry.rev) continue;
+			// A row's key encodes THIS machine's directory name, which changes when
+			// `omp project path` repoints the project. The repoint resets the
+			// inbound cursor, so every row replays and computes a new key while the
+			// old path-derived one stays behind: the picker would then show two
+			// stubs for one session, and selecting the stale one would download the
+			// body into the directory the project no longer lives in. Filenames are
+			// UUID-unique within a project, so any other key naming this file is by
+			// definition the same session at a stale path.
+			for (const key of keysForSessionFile(index, project.id, file)) {
+				if (key === localRel) continue;
+				delete index[key];
+				dirty = true;
+			}
 
 			index[localRel] = {
 				rel: localRel,

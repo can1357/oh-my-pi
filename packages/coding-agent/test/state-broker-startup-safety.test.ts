@@ -14,7 +14,7 @@ import { type AuthBrokerServerHandle, startAuthBroker } from "@oh-my-pi/pi-ai/au
 import { ProjectsConfigFile, getProjectsConfigPath, saveProjects } from "@oh-my-pi/pi-coding-agent/config/projects-config";
 import { drainBlobUploads } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import { BlobStore } from "@oh-my-pi/pi-coding-agent/session/blob-store";
-import { mergeRemoteOnlySessions } from "@oh-my-pi/pi-coding-agent/session/session-listing";
+import { mergeRemoteOnlySessions, resolveResumableSession } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { sessionDirNameForCwd } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
@@ -76,11 +76,19 @@ function writeSessionBody(dir: string, file: string, cwd: string, title: string)
 	fs.writeFileSync(path.join(dir, file), `${slot}${header}\n${JSON.stringify({ type: "message" })}\n`);
 }
 
+/** Register a project mapping, invalidating every cache that reads it. */
+function registerProject(entries: Array<{ id: string; path: string; sync: boolean }>): void {
+	saveProjects(entries, AGENT_DIR);
+	ProjectsConfigFile.invalidate();
+	invalidateProjectScope();
+	invalidateSessionOwnerCache();
+}
+
 /** Write a remote-session index exactly where `readRemoteSessionIndex` looks. */
-function writeIndex(sessionsDir: string, rels: string[]): void {
+function writeIndex(sessionsDir: string, rels: string[], projectId = "proj:foo"): void {
 	const entries: Record<string, unknown> = {};
 	for (const rel of rels) {
-		entries[rel] = { rel, projectId: "proj:foo", relCwd: "", size: 10, mtimeMs: 1000 };
+		entries[rel] = { rel, projectId, relCwd: "", size: 10, mtimeMs: 1000 };
 	}
 	fs.writeFileSync(
 		path.join(path.dirname(sessionsDir), "remote-session-index.json"),
@@ -100,6 +108,9 @@ describe("remote-only session stubs", () => {
 		const root = makeDir("omp-stub-root-");
 		const sessionsDir = path.join(root, "sessions");
 		fs.mkdirSync(sessionsDir, { recursive: true });
+		// A stub is only offered for a mapped, sync-enabled project, so the
+		// containment check has something to reject in the first place.
+		registerProject([{ id: "proj:foo", path: makeDir("omp-stub-proj-"), sync: true }]);
 		writeIndex(sessionsDir, ["-projects-foo/../../../../tmp/evil.jsonl", "-projects-foo/ok_1111.jsonl"]);
 
 		const stubs = mergeRemoteOnlySessions([], sessionsDir);
@@ -111,17 +122,79 @@ describe("remote-only session stubs", () => {
 		}
 	});
 
+	/**
+	 * A project switched to `sync: false` (or unregistered) keeps its cached
+	 * index rows: inbound application skips the project rather than deleting
+	 * anything, because absence is not deletion. But `ensureLocal` refuses to
+	 * download a body for a project that is not synced here, so offering those
+	 * rows puts sessions in the picker that fail the moment they are selected.
+	 */
+	test("a cached row for a project whose sync was turned off is not offered", () => {
+		const root = makeDir("omp-stub-root-");
+		const sessionsDir = path.join(root, "sessions");
+		fs.mkdirSync(sessionsDir, { recursive: true });
+		const project = makeDir("omp-stub-proj-");
+		writeIndex(sessionsDir, ["-projects-foo/gone_3333.jsonl"]);
+
+		registerProject([{ id: "proj:foo", path: project, sync: true }]);
+		expect(mergeRemoteOnlySessions([], sessionsDir)).toHaveLength(1);
+
+		// Same rows on disk, sync turned off: nothing openable is offered.
+		registerProject([{ id: "proj:foo", path: project, sync: false }]);
+		expect(mergeRemoteOnlySessions([], sessionsDir)).toHaveLength(0);
+
+		// Unregistering the project entirely is the same story.
+		registerProject([]);
+		expect(mergeRemoteOnlySessions([], sessionsDir)).toHaveLength(0);
+	});
+
 	test("an existing local session is not duplicated as a remote stub", () => {
 		const root = makeDir("omp-stub-root-");
 		const sessionsDir = path.join(root, "sessions");
 		const dir = path.join(sessionsDir, "-projects-foo");
 		fs.mkdirSync(dir, { recursive: true });
+		// Registered and synced, so the row is eligible: what suppresses the stub
+		// has to be the existing local file, not a missing project mapping.
+		registerProject([{ id: "proj:foo", path: makeDir("omp-stub-proj-"), sync: true }]);
 		const rel = "-projects-foo/live_2222.jsonl";
 		fs.writeFileSync(path.join(sessionsDir, ...rel.split("/")), "{}\n");
 		writeIndex(sessionsDir, [rel]);
 
 		const local: SessionInfo[] = [];
 		expect(mergeRemoteOnlySessions(local, sessionsDir)).toHaveLength(0);
+	});
+
+	/**
+	 * The picker and `--resume <id>` must agree about what exists. The picker
+	 * opts into remote-only rows; the id-based resolver used to look only at
+	 * local files, so the initial sync could populate the index and `omp
+	 * --resume <id>` would still report "Session not found" for a session the
+	 * picker listed and could open.
+	 *
+	 * The stub's `path` is exactly where the body is downloaded to, and every
+	 * caller passing `includeRemoteOnly` opens through `SessionManager`, which
+	 * fetches it first.
+	 */
+	test("--resume <id> finds a session that exists here only as a replicated index row", async () => {
+		// `listAllSessions` reads the agent dir's own sessions root, not an
+		// injected one, so the fixture has to live there.
+		const sessionsDir = path.join(AGENT_DIR, "sessions");
+		cleanupRoots.push(sessionsDir);
+		fs.rmSync(path.join(AGENT_DIR, "remote-session-index.json"), { force: true });
+		const project = makeDir("omp-resume-proj-");
+		const dirName = sessionDirNameForCwd(project);
+		fs.mkdirSync(path.join(sessionsDir, dirName), { recursive: true });
+		registerProject([{ id: "proj:foo", path: project, sync: true }]);
+		writeIndex(sessionsDir, [`${dirName}/2026-01-01T00-00-00_bbbb2222.jsonl`]);
+
+		// Default behaviour is unchanged: a caller that reads the returned path
+		// directly must not be handed a file that is not there yet.
+		expect(await resolveResumableSession("bbbb2222", project)).toBeUndefined();
+
+		const match = await resolveResumableSession("bbbb2222", project, undefined, { includeRemoteOnly: true });
+		expect(match?.scope).toBe("global");
+		expect(match?.session.remoteOnly).toBe(true);
+		expect(match?.session.path).toBe(path.join(sessionsDir, dirName, "2026-01-01T00-00-00_bbbb2222.jsonl"));
 	});
 });
 

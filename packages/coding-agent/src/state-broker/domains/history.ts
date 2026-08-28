@@ -81,15 +81,17 @@ export function createHistoryDomain(storage: HistoryStorage = HistoryStorage.ope
 				if (project.canonicalPath !== project.localPath) prefixes.push(project.canonicalPath);
 			}
 			const entries: StateEntry[] = [];
-			// Scan FORWARD until a page yields something sendable.
+			// Scan FORWARD until the page is either full or provably ends on a
+			// COMPLETE second.
 			//
 			// The project-prefix and null-cwd predicates run in SQL, before the
 			// LIMIT, but two predicates cannot: an oversized key (see
-			// MAX_KEY_LENGTH) and an unresolvable cwd. Dropping rows after the
-			// limit is what makes an all-dropped page possible, and an empty return
-			// tells the sync engine there is nothing to send — so it leaves the
-			// outbound watermark where it is, and one page's worth of overlong
-			// prompts blocks every newer prompt from ever replicating.
+			// MAX_KEY_LENGTH) and a cwd that is not in a sync-enabled project.
+			// Dropping rows after the limit is what makes an all-dropped page
+			// possible, and an empty return tells the sync engine there is nothing
+			// to send — so it leaves the outbound watermark where it is, and one
+			// page's worth of overlong prompts blocks every newer prompt from ever
+			// replicating.
 			//
 			// The length predicate deliberately stays here rather than moving into
 			// SQL: the wire caps `key` at 4096 UTF-16 code units, while SQLite's
@@ -98,15 +100,19 @@ export function createHistoryDomain(storage: HistoryStorage = HistoryStorage.ope
 			// latter would silently drop legitimate CJK prompts at a third of the
 			// allowance. So we keep the exact check and make skipping cheap instead.
 			//
-			// Each pass reads `limit` rows and the loop ends as soon as one row
-			// survives, so the ordinary case is a single query. `scanChangedSince…`
-			// compares `created_at > cursor` strictly and returns rows ascending,
-			// so the cursor advances every pass and the walk always terminates.
-			let cursor = afterSeconds;
-			while (entries.length === 0) {
-				const rows = storage.scanChangedSinceForPaths(cursor, limit, prefixes);
-				if (rows.length === 0) break;
+			// The cursor is composite — `(created_at, id)` — because `created_at`
+			// has one-second granularity and a page can therefore end mid-second.
+			// Advancing by `created_at` alone would skip whatever else that second
+			// holds, which is the same class of bug as advancing the watermark onto
+			// a partially covered rev; here it is worse, because this cursor is
+			// internal and the engine cannot compensate for it.
+			let cursorSec = afterSeconds;
+			let cursorId: number | undefined;
+			for (;;) {
+				const rows = storage.scanChangedSinceForPaths(cursorSec, limit, prefixes, cursorId);
+				if (rows.length === 0) break; // nothing left: everything scanned is complete.
 				for (const row of rows) {
+					if (entries.length >= limit) break; // page full; the rest waits for the next pass.
 					const key = row.prompt;
 					if (key.length > MAX_KEY_LENGTH) {
 						// Truncating would alias two distinct prompts under one key, so skip.
@@ -115,10 +121,15 @@ export function createHistoryDomain(storage: HistoryStorage = HistoryStorage.ope
 					}
 					if (!row.cwd) continue; // the SQL predicate excludes null cwd; defensive.
 					const resolved = resolveProject(row.cwd);
-					if (!resolved) {
-						// A cwd inside a synced prefix should always resolve; if it does
-						// not, drop it rather than leak an absolute local path.
-						logger.debug("history domain skipping unresolved cwd", { key });
+					// A cwd inside a synced prefix normally resolves to that project,
+					// but not always to a SYNCED one: a registered nested project with
+					// `sync: false` sits inside its enabled parent's prefix, and
+					// `resolveProject` returns the deepest match. Sending the prompt
+					// then stamps the disabled project's own id on it, replicating the
+					// history the user opted out of. Judge the resolved project, never
+					// the prefix that found it.
+					if (!resolved?.project.sync) {
+						logger.debug("history domain skipping prompt outside a synced project", { key });
 						continue;
 					}
 					const value: HistoryValue = {
@@ -129,7 +140,22 @@ export function createHistoryDomain(storage: HistoryStorage = HistoryStorage.ope
 					};
 					entries.push({ key, rev: row.created_at * 1000, value });
 				}
-				cursor = rows[rows.length - 1].created_at;
+				const last = rows[rows.length - 1];
+				cursorSec = last.created_at;
+				cursorId = last.id;
+				// A full page is saturated, so the engine trims its trailing tie and
+				// the leftovers are re-read next pass.
+				if (entries.length >= limit) break;
+				// A short page is the end of the data: every second it touched is
+				// complete by definition.
+				if (rows.length < limit) break;
+				// Otherwise more rows may share `last.created_at`. Returning now
+				// would let the engine commit a watermark on that second while part
+				// of it is unscanned, and the strict `created_at > cursor` on the
+				// next call would skip the remainder forever. Only stop once a kept
+				// entry's second is strictly below the second we stopped in.
+				const lastEntry = entries[entries.length - 1];
+				if (lastEntry && lastEntry.rev < last.created_at * 1000) break;
 			}
 			return entries;
 		},

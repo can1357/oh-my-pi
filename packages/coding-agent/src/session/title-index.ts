@@ -31,9 +31,8 @@ interface TitleIndexHandle {
 	upsert: Statement;
 	select: Statement;
 	// Replication statements, prepared lazily on first sync use so the ordinary
-	// record/lookup open path prepares nothing extra. See scanChangedSince/mergeRemote.
-	scan?: Statement;
-	// Project-scoped replication scan, prepared lazily on first scoped sync use.
+	// record/lookup open path prepares nothing extra.
+	// See scanChangedSinceForSessionIds/mergeRemote.
 	scanScoped?: Statement;
 	merge?: Statement;
 }
@@ -47,7 +46,6 @@ function closeHandle(): void {
 	try {
 		handle.upsert.finalize();
 		handle.select.finalize();
-		handle.scan?.finalize();
 		handle.scanScoped?.finalize();
 		handle.merge?.finalize();
 		handle.db.close();
@@ -122,43 +120,25 @@ export interface TitleRow {
 }
 
 /**
- * Replication read path: session titles whose `updated_at` is strictly greater
- * than `afterRev`, ordered ASCENDING so the sync engine can advance its
- * watermark to the last row's clock without skipping entries. `afterRev` and
- * the returned `updatedAt` are epoch SECONDS (the domain adapter converts to
- * the wire's epoch-millis `rev`). Best-effort: swallows and logs failures.
- */
-export function scanChangedSince(afterRev: number, limit: number): TitleRow[] {
-	const index = openTitleIndex();
-	if (!index) return [];
-	try {
-		index.scan ??= index.db.prepare(
-			"SELECT session_id, title, updated_at FROM session_titles WHERE updated_at > ? ORDER BY updated_at ASC, session_id ASC LIMIT ?",
-		);
-		const rows = index.scan.all(afterRev, limit) as Array<{
-			session_id: string;
-			title: string;
-			updated_at: number;
-		}>;
-		return rows.map(row => ({ sessionId: row.session_id, title: row.title, updatedAt: row.updated_at }));
-	} catch (error) {
-		logger.debug("Session title index scan failed", { error: String(error) });
-		return [];
-	}
-}
-
-/**
- * Project-scoped replication read path: like {@link scanChangedSince}, but only
- * returns titles whose `session_id` is in `sessionIds` (the ids belonging to
- * sync-enabled projects). The intersection is applied BEFORE the page limit is
- * satisfied: we page through candidate rows in ascending `updated_at` order via
- * OFFSET, collecting matches until we have `limit` of them or rows are
- * exhausted. This guarantees a full page never comes back empty while eligible
- * rows remain beyond it — an all-filtered page would stall the sync watermark
- * (the engine advances only to the last RETURNED row's clock). Because we stop
- * the instant we hit `limit` matches, the last returned row is also the last
- * one considered, so the watermark advances correctly past every skipped row.
- * `afterRev`/`updatedAt` are epoch SECONDS. Best-effort.
+ * Project-scoped replication read path: session titles whose `updated_at` is
+ * strictly greater than `afterRev` AND whose `session_id` is in `sessionIds`
+ * (the ids belonging to sync-enabled projects), ordered ASCENDING so the sync
+ * engine can advance its watermark to the last row's clock without skipping
+ * entries.
+ *
+ * The intersection is applied BEFORE the page limit is satisfied: we page
+ * through candidate rows in ascending `updated_at` order via OFFSET, collecting
+ * matches until we have `limit` of them or rows are exhausted. This guarantees a
+ * full page never comes back empty while eligible rows remain beyond it — an
+ * all-filtered page would stall the sync watermark (the engine advances only to
+ * the last RETURNED row's clock). Because we stop the instant we hit `limit`
+ * matches, the last returned row is also the last one considered, so the
+ * watermark advances correctly past every skipped row: either the page is full,
+ * and the engine trims its trailing same-`rev` tie itself, or the candidate rows
+ * ran out and every second the scan touched is complete.
+ *
+ * `afterRev`/`updatedAt` are epoch SECONDS (the domain adapter converts to the
+ * wire's epoch-millis `rev`). Best-effort: swallows and logs failures.
  */
 export function scanChangedSinceForSessionIds(
 	afterRev: number,

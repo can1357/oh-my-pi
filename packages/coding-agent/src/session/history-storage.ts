@@ -73,12 +73,12 @@ export class HistoryStorage {
 	#searchStmt: Statement;
 	// Cache substring-fallback prepared statements keyed by token count.
 	#substringStmts = new Map<number, Statement>();
-	// Cache project-scoped scan statements keyed by path-prefix count, mirroring
-	// #substringStmts. Prepared lazily on first scoped sync use.
-	#scanChangedForPathsStmts = new Map<number, Statement>();
-	// Replication statements — prepared lazily on first sync use so the local-only
-	// open path (sync disabled) prepares nothing extra. See #scanChangedSince/#mergeRemote.
-	#scanChangedStmt?: Statement;
+	// Cache project-scoped scan statements keyed by path-prefix count and whether
+	// the (created_at, id) tie-breaker is bound, mirroring #substringStmts.
+	// Prepared lazily on first scoped sync use.
+	#scanChangedForPathsStmts = new Map<string, Statement>();
+	// Replication merge statement — prepared lazily on first sync use so the
+	// local-only open path (sync disabled) prepares nothing extra.
 	#mergeRowStmt?: Statement;
 
 	private constructor(dbPath: string) {
@@ -154,7 +154,6 @@ ON CONFLICT(prompt) DO UPDATE SET
 		this.#upsertRowStmt.finalize();
 		this.#recentStmt.finalize();
 		this.#searchStmt.finalize();
-		this.#scanChangedStmt?.finalize();
 		this.#mergeRowStmt?.finalize();
 		this.#db.close();
 	}
@@ -266,45 +265,38 @@ ON CONFLICT(prompt) DO UPDATE SET
 	}
 
 	/**
-	 * Replication read path: unique prompts whose `created_at` is strictly
-	 * greater than `afterRev`, ordered ASCENDING so the sync engine can advance
-	 * its watermark to the last returned row's clock without skipping entries.
+	 * Replication read path: unique prompts belonging to sync-enabled projects,
+	 * ordered ASCENDING by `(created_at, id)` and capped at `limit`.
 	 * `afterRev`/`created_at` are epoch SECONDS here (the domain adapter converts
-	 * to the wire's epoch-millis `rev` at the boundary). Statement is prepared
-	 * lazily so the local-only open path stays untouched.
-	 */
-	scanChangedSince(afterRev: number, limit: number): HistoryEntry[] {
-		this.#scanChangedStmt ??= this.#db.prepare(
-			"SELECT id, prompt, created_at, cwd, session_id FROM history WHERE created_at > ? ORDER BY created_at ASC, id ASC LIMIT ?",
-		);
-		try {
-			const rows = this.#scanChangedStmt.all(afterRev, this.#normalizeLimit(limit)) as HistoryRow[];
-			return rows.map(row => this.#toEntry(row));
-		} catch (error) {
-			logger.warn("HistoryStorage scanChangedSince failed", { error: String(error) });
-			return [];
-		}
-	}
-
-	/**
-	 * Project-scoped variant of {@link scanChangedSince}: same ascending-`rev`
-	 * ordering and limit semantics, but restricts `cwd` to the given absolute
-	 * path prefixes so only prompts belonging to sync-enabled projects are ever
-	 * read for replication. The predicate is applied IN SQL (before the LIMIT):
-	 * post-filtering a limited page could return an all-dropped page while newer
-	 * eligible rows sit beyond it, stalling the sync watermark forever.
+	 * to the wire's epoch-millis `rev` at the boundary).
 	 *
-	 * Each prefix matches the project root exactly OR anything strictly under
-	 * `<root>/`. Rows with `cwd IS NULL` are excluded — a null cwd cannot be
-	 * attributed to a project, so it must never leave this machine. An empty
-	 * `pathPrefixes` returns `[]` without touching the db. Statements are cached
-	 * by prefix count, mirroring {@link #getSubstringStmt}.
+	 * `cwd` is restricted to the given absolute path prefixes so only prompts
+	 * belonging to sync-enabled projects are ever read. The predicate is applied
+	 * IN SQL (before the LIMIT): post-filtering a limited page could return an
+	 * all-dropped page while newer eligible rows sit beyond it, stalling the sync
+	 * watermark forever. Each prefix matches the project root exactly OR anything
+	 * strictly under `<root>/`. Rows with `cwd IS NULL` are excluded — a null cwd
+	 * cannot be attributed to a project, so it must never leave this machine. An
+	 * empty `pathPrefixes` returns `[]` without touching the db.
+	 *
+	 * `afterId` makes the cursor composite: rows are taken strictly after
+	 * `(afterRev, afterId)` rather than strictly after `afterRev`, which is the
+	 * only way to page THROUGH a second rather than over it. `created_at` has
+	 * one-second granularity, so a burst of prompts routinely shares a value and
+	 * a page can end mid-second; a caller that advanced by `created_at` alone
+	 * would skip whatever else that second holds. Statements are cached by prefix
+	 * count and cursor shape, mirroring {@link #getSubstringStmt}.
 	 */
-	scanChangedSinceForPaths(afterRev: number, limit: number, pathPrefixes: readonly string[]): HistoryEntry[] {
+	scanChangedSinceForPaths(
+		afterRev: number,
+		limit: number,
+		pathPrefixes: readonly string[],
+		afterId?: number,
+	): HistoryEntry[] {
 		if (pathPrefixes.length === 0) return [];
 		try {
-			const stmt = this.#getScanChangedForPathsStmt(pathPrefixes.length);
-			const params: unknown[] = [afterRev];
+			const stmt = this.#getScanChangedForPathsStmt(pathPrefixes.length, afterId !== undefined);
+			const params: unknown[] = afterId === undefined ? [afterRev] : [afterRev, afterRev, afterId];
 			for (const prefix of pathPrefixes) {
 				// Exact root, then everything below it. Wildcards in the prefix
 				// itself are escaped so a literal `%`/`_` in a path stays literal.
@@ -320,14 +312,16 @@ ON CONFLICT(prompt) DO UPDATE SET
 		}
 	}
 
-	#getScanChangedForPathsStmt(prefixCount: number): Statement {
-		let stmt = this.#scanChangedForPathsStmts.get(prefixCount);
+	#getScanChangedForPathsStmt(prefixCount: number, withTieBreaker: boolean): Statement {
+		const cacheKey = `${prefixCount}:${withTieBreaker ? "tie" : "rev"}`;
+		let stmt = this.#scanChangedForPathsStmts.get(cacheKey);
 		if (stmt) return stmt;
 		const pathClause = Array(prefixCount).fill("(cwd = ? OR cwd LIKE ? ESCAPE '\\')").join(" OR ");
+		const cursorClause = withTieBreaker ? "(created_at > ? OR (created_at = ? AND id > ?))" : "created_at > ?";
 		stmt = this.#db.prepare(
-			`SELECT id, prompt, created_at, cwd, session_id FROM history WHERE created_at > ? AND cwd IS NOT NULL AND (${pathClause}) ORDER BY created_at ASC, id ASC LIMIT ?`,
+			`SELECT id, prompt, created_at, cwd, session_id FROM history WHERE ${cursorClause} AND cwd IS NOT NULL AND (${pathClause}) ORDER BY created_at ASC, id ASC LIMIT ?`,
 		);
-		this.#scanChangedForPathsStmts.set(prefixCount, stmt);
+		this.#scanChangedForPathsStmts.set(cacheKey, stmt);
 		return stmt;
 	}
 

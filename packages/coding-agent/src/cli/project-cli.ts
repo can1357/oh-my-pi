@@ -10,6 +10,7 @@
  */
 
 import * as fs from "node:fs";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getProjectDir, resolveEquivalentPath } from "@oh-my-pi/pi-utils";
 // The subcommand runner in `packages/utils/src/cli.ts` renders usage errors
 // without a stack trace by `instanceof` against ITS OWN CliUsageError. The
@@ -21,7 +22,6 @@ import { loadProjects, type ProjectEntry, projectIdFromRemoteUrl, saveProjects }
 import { Settings } from "../config/settings";
 import { invalidateProjectScope, resolveProject } from "../state-broker/project-scope";
 import { resetProjectScopedCursors } from "../state-broker/registry";
-import * as git from "../utils/git";
 
 export const PROJECT_ACTIONS = ["list", "enable", "disable", "add", "rm", "path"] as const;
 export type ProjectAction = (typeof PROJECT_ACTIONS)[number];
@@ -170,8 +170,9 @@ async function runEnable(command: ProjectCommandArgs, cwd: string): Promise<void
 		} else {
 			// Registration-time only: `changedSince` is synchronous and must never
 			// shell out, so the git-derived id is baked into the registry here.
-			const root = await git.repo.root(target);
-			const url = root ? await git.remote.url(root, "origin") : undefined;
+			const repo = vcs.git(target);
+			const root = repo?.info().repoRoot;
+			const url = repo ? ((await repo.remoteUrl("origin")) ?? undefined) : undefined;
 			const derived = url ? projectIdFromRemoteUrl(url) : undefined;
 			if (!root || !derived) {
 				throw new CliUsageError(

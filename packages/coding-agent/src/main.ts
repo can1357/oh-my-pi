@@ -947,7 +947,9 @@ export async function createSessionManager(
 		if (forkSource.includes("/") || forkSource.includes("\\") || forkSource.endsWith(".jsonl")) {
 			return await SessionManager.forkFrom(forkSource, cwd, parsed.sessionDir);
 		}
-		const match = await resolveResumableSession(forkSource, cwd, parsed.sessionDir);
+		// `forkFrom` fetches a peer-hosted body before reading it, so a session
+		// that exists here only as a replicated index row is forkable.
+		const match = await resolveResumableSession(forkSource, cwd, parsed.sessionDir, { includeRemoteOnly: true });
 		if (!match) {
 			throw new SessionResolutionError(
 				`Session "${forkSource}" not found.`,
@@ -967,7 +969,11 @@ export async function createSessionManager(
 		if (sessionArg.includes("/") || sessionArg.includes("\\") || sessionArg.endsWith(".jsonl")) {
 			return await SessionManager.open(sessionArg, parsed.sessionDir);
 		}
-		const match = await resolveResumableSession(sessionArg, cwd, parsed.sessionDir);
+		// `SessionManager.open` downloads a peer-hosted body, so `--resume <id>`
+		// reaches a session whose body has not been fetched here yet. Without this
+		// the initial sync populates the index and explicit resume still reports
+		// "not found" while the picker can open the very same session.
+		const match = await resolveResumableSession(sessionArg, cwd, parsed.sessionDir, { includeRemoteOnly: true });
 		if (!match) {
 			throw new SessionResolutionError(
 				`Session "${sessionArg}" not found.`,
