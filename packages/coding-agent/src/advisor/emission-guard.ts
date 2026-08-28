@@ -100,6 +100,12 @@ const SUPPRESSED_NORMALIZED_PHRASES: Record<string, true> = {
  */
 const DEFAULT_HISTORY_CAPACITY = 4096;
 
+const OPERATIONAL_NOTE_PATTERNS = [
+	/\b(?:git|github|graphite|gh|gt|pull request|tool call|tool result)\b/u,
+	/\b(?:shell|bash|command|tool)\b(?:\s+\S+){0,12}\s+\b(?:skipped|failed|timed out|timeout|retry|retried)\b/u,
+	/\b(?:branch|commit|checkout|merge|push|fetch|rebase|remote)\b(?:\s+\S+){0,12}\s+\b(?:repository|repo|origin|upstream|head|staging|main)\b/u,
+] as const;
+
 /**
  * Decides whether an advisor `advise()` call should reach the primary agent.
  *
@@ -158,6 +164,7 @@ export class AdvisorEmissionGuard {
 		const key = normalizeAdvisorNote(note);
 		if (!key) return false;
 		if (SUPPRESSED_NORMALIZED_PHRASES[key]) return false;
+		if (OPERATIONAL_NOTE_PATTERNS.some(pattern => pattern.test(key))) return false;
 		if (this.#seen.has(key)) return false;
 		if (this.#consumedThisUpdate) return false;
 		this.#consumedThisUpdate = true;

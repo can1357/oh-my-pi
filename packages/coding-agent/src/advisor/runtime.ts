@@ -13,6 +13,7 @@ import {
 	PRIMARY_CONTEXT_CUSTOM_TYPES,
 } from "../session/session-history-format";
 import { ADVISOR_RENDER_OPTIONS, renderAdvisorDeltaChunks } from "./delta-split";
+import { filterAdvisorInput } from "./input-filter";
 import { fingerprintMessage } from "./message-fingerprint";
 
 /**
@@ -285,6 +286,7 @@ export class AdvisorRuntime {
 	#renderRevision = 0;
 	/** Regex secret values observed in primary deltas and retained until advisor context resets. */
 	#advisorRegexSecretValues = new Set<string>();
+	readonly #hiddenOperationalCallIds = new Set<string>();
 	#pending: PendingDelta[] = [];
 	#busy = false;
 	#sessionTransitionPaused = false;
@@ -487,6 +489,7 @@ export class AdvisorRuntime {
 		}
 		this.#lastCount = 0;
 		this.#deliveredPrefix = [];
+		this.#hiddenOperationalCallIds.clear();
 		this.#pending = [];
 		this.#clearAdvisorContextAtCurrentCursor();
 		if (clearBacklog) {
@@ -573,6 +576,7 @@ export class AdvisorRuntime {
 	 */
 	seedTo(count: number): void {
 		const messages = this.host.snapshotMessages().slice(0, count);
+		filterAdvisorInput(messages, this.#hiddenOperationalCallIds);
 		this.#lastCount = messages.length;
 		this.#deliveredPrefix = messages.map(message => ({
 			message,
@@ -800,7 +804,7 @@ export class AdvisorRuntime {
 			logger.debug("advisor context reset", { reason: "delivered-prefix-changed", lastCount: this.#lastCount });
 			this.#resetAdvisorContext(true, true);
 		}
-		const rawMessages = all.slice(this.#lastCount);
+		const rawMessages = filterAdvisorInput(all.slice(this.#lastCount), this.#hiddenOperationalCallIds);
 		for (let i = this.#lastCount; i < all.length; i++) {
 			const message = all[i];
 			if (message === undefined) continue;

@@ -39,6 +39,32 @@ describe("AdvisorEmissionGuard", () => {
 		expect(guard.accept("No further watcher input needed.")).toBe(false);
 	});
 
+	it("suppresses repository and tool-operation findings", () => {
+		const notes = [
+			"The git checkout was skipped; retry it before continuing.",
+			"Run gh pr view before merging.",
+			"The Graphite submission needs the correct parent branch.",
+			"The bash command timed out, so the tool result is unverified.",
+			"Fetch origin/main before changing the repository remote.",
+		];
+		for (const note of notes) {
+			const guard = new AdvisorEmissionGuard();
+			expect(guard.accept(note)).toBe(false);
+		}
+	});
+
+	it("preserves code findings that use operational words in a code context", () => {
+		const notes = [
+			"The retry schedule is unbounded after a transient database error.",
+			"The command parser accepts an empty executable name.",
+			"The conditional branch drops the authenticated user ID.",
+		];
+		for (const note of notes) {
+			const guard = new AdvisorEmissionGuard();
+			expect(guard.accept(note)).toBe(true);
+		}
+	});
+
 	it("dedupes by normalized text across the session, ignoring casing and trailing punctuation", () => {
 		const guard = new AdvisorEmissionGuard();
 		expect(guard.accept("Move retries into the queue, not the request path.")).toBe(true);

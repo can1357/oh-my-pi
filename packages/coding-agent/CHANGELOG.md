@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Restricted Advisor review to implementation work by filtering Git, GitHub, and Graphite tool messages and suppressing repository-operation findings before delivery.
+
 ## [18.0.10] - 2026-08-28
 
 ### Added
