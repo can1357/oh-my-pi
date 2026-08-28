@@ -14,6 +14,7 @@ import {
 	alibabaCodingPlanModelManagerOptions,
 	alibabaTokenPlanModelManagerOptions,
 	anthropicModelManagerOptions,
+	arkaneCloudModelManagerOptions,
 	basetenModelManagerOptions,
 	bedrockMantleModelManagerOptions,
 	cerebrasModelManagerOptions,
@@ -125,6 +126,17 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["ANTHROPIC_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => anthropicModelManagerOptions(config),
 		catalogDiscovery: { label: "Anthropic" },
+	},
+	{
+		id: "arkanecloud",
+		defaultModel: "deepseek-ai/DeepSeek-V4-Flash",
+		envVars: ["ARKANECLOUD_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => arkaneCloudModelManagerOptions(config),
+		// `GET /api/v2/models` is credential-gated, so there is no keyless
+		// generation path: no `catalogDiscovery`, nothing bundled, and live
+		// discovery (which publishes complete pricing/limits/capabilities) is the
+		// authoritative catalog.
+		dynamicModelsAuthoritative: true,
 	},
 	{
 		id: "azure",

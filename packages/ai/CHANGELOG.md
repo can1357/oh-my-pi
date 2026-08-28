@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an ArkaneCloud `/login` flow that accepts a pasted `ak_...` API key and rejects it if ArkaneCloud does not accept it; `ARKANECLOUD_API_KEY` continues to work as an environment fallback.
+
 ## [18.0.9] - 2026-08-28
 
 ### Fixed
