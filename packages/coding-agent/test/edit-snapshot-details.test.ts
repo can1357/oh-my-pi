@@ -305,3 +305,50 @@ describe("executePatchSingle pruned move", () => {
 		expect(details.path).toBe(path.join(tempDir, "moved.txt"));
 	});
 });
+
+describe("executeApplyPatchPerFile partial-update aggregate cap", () => {
+	test("prunes progressive partial results with the same shared budget as the final result", async () => {
+		// Three files whose individual oldText+newText snapshots each fit the
+		// per-entry budget but whose combined size exceeds it: every
+		// progressive onUpdate payload must honour the shared aggregate cap
+		// exactly like the final result, or the streamed TUI/RPC/ACP payload
+		// grows by up to the whole per-call budget per completed file.
+		const fileCount = 3;
+		const session = makeSession(tempDir);
+		const filler = "a chunky line of content xxxx yyyy zzzz\n".repeat(300); // ~12 KB
+		const names: string[] = [];
+		for (let i = 0; i < fileCount; i++) {
+			const name = `partial${i}.ts`;
+			names.push(name);
+			await Bun.write(path.join(tempDir, name), `header${i}\n${filler}`);
+		}
+		const patch = [
+			"*** Begin Patch",
+			...names.flatMap((name, i) => [`*** Update File: ${name}`, "@@", `-header${i}`, `+HEADER${i}`]),
+			"*** End Patch",
+			"",
+		].join("\n");
+
+		const partials: EditToolDetails[] = [];
+		const result = await new EditTool(session, "apply_patch").execute(
+			"partial-cap",
+			{ input: patch },
+			undefined,
+			update => {
+				partials.push(update.details as EditToolDetails);
+			},
+		);
+
+		expect(result.isError).not.toBe(true);
+		// Two progressive updates for three files (none after the last).
+		expect(partials.length).toBe(fileCount - 1);
+		const lastPartial = partials.at(-1)!;
+		expect(lastPartial.perFileResults!.length).toBe(fileCount - 1);
+		const keptChars = lastPartial.perFileResults!.reduce(
+			(acc, entry) => acc + (entry.oldText?.length ?? 0) + (entry.newText?.length ?? 0),
+			0,
+		);
+		expect(keptChars).toBeLessThanOrEqual(MAX_EDIT_SNAPSHOT_TEXT_CHARS);
+		expect(lastPartial.perFileResults!.some(entry => entry.snapshotsPruned === true)).toBe(true);
+	});
+});

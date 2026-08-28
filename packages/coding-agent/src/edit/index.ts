@@ -262,7 +262,12 @@ async function executeApplyPatchPerFile(
 
 		// Emit partial result after each file so UI shows progressive completion
 		if (!isLast && onUpdate) {
-			const partialResults = outcomes
+			// Same aggregate snapshot budget as the final result below: the
+			// progressive updates carry the same per-file oldText/newText
+			// snapshots, and sending them unpruned would grow every streamed
+			// TUI/RPC/ACP payload by up to the whole per-call budget per
+			// completed file even though each file fits its own cap.
+			const partialResults = pruneEditFileSnapshots(outcomes)
 				.map((outcome, idx) =>
 					outcome.kind === "skipped"
 						? undefined
