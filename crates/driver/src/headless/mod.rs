@@ -1602,6 +1602,10 @@ fn apply_revived_session_model(
 			additional_roots,
 			has_durable_tool_restriction,
 			None,
+			// Headless opens carry no invocation-scoped external-thinking
+			// override; the replacement model's default thinking surface
+			// applies.
+			None,
 		)
 		.map_err(HeadlessError::AgentSnapshot)?;
 	}
@@ -1985,6 +1989,7 @@ mod tests {
 				effort: omp_proto::inference::v1::Effort::High as i32,
 				..Default::default()
 			}),
+			None,
 		)
 		.expect("reproject");
 		assert_eq!(
@@ -2026,9 +2031,97 @@ mod tests {
 			&[],
 			false,
 			None,
+			None,
 		)
 		.expect("reproject model default");
 		assert_eq!(default_thinking.turn.params.thinking, expected_thinking);
+	}
+
+	#[test]
+	fn reproject_preserves_external_thinking_override_across_model_change() {
+		let catalog = snapshot::Catalog::try_embedded().expect("embedded catalog");
+		let scratch = tempfile::tempdir().expect("scratch");
+		let root = scratch.path().join("project");
+		std::fs::create_dir_all(&root).expect("project root");
+		let external = catalog
+			.models()
+			.iter()
+			.find(|model| omp_agent::external_thinking_for_model(&model.capabilities, None))
+			.expect("external-thinking model in embedded catalog")
+			.key
+			.clone();
+		// Replacement model whose default surface keeps provider reasoning, so
+		// only the carried override can admit the hidden `think` tool.
+		let target = catalog
+			.models()
+			.iter()
+			.find(|model| {
+				model.key.as_str() != external.as_str()
+					&& !omp_agent::external_thinking_for_model(&model.capabilities, None)
+			})
+			.expect("native-reasoning model in embedded catalog")
+			.key
+			.clone();
+		let mut registry = Registry::new();
+		registry
+			.register(omp_tools::yield_tool::tool(), Presentation::Slot, Claims {
+				precedence: Precedence::DEFAULT,
+				claimant:   sf!("test"),
+				replaces:   None,
+			})
+			.expect("register yield test tool");
+		registry
+			.register(omp_tools::think::tool(), Presentation::Hidden, Claims {
+				precedence: Precedence::DEFAULT,
+				claimant:   sf!("test"),
+				replaces:   None,
+			})
+			.expect("register hidden think test tool");
+		let registry = Arc::new(registry);
+		let session_id = sf!("test-session");
+		let blueprint = chat::session_blueprint(
+			external.as_str(),
+			catalog,
+			&root,
+			&[],
+			&session_id,
+			Arc::clone(&registry),
+		)
+		.expect("blueprint");
+		let mut snapshot = chat::agent_snapshot(&blueprint, catalog, Some(true)).expect("snapshot");
+		assert!(
+			snapshot
+				.enabled_tools
+				.iter()
+				.any(|name| name.as_str() == "think")
+		);
+		snapshot.turn.params.model = target.as_str().to_owned();
+		chat::reproject_model_derived_snapshot(
+			&mut snapshot,
+			catalog,
+			&root,
+			&[],
+			false,
+			None,
+			Some(true),
+		)
+		.expect("reproject");
+		assert!(
+			snapshot
+				.enabled_tools
+				.iter()
+				.any(|name| name.as_str() == "think"),
+			"invocation-scoped external thinking must survive reprojection"
+		);
+		assert_eq!(
+			snapshot
+				.turn
+				.params
+				.thinking
+				.as_ref()
+				.map(|thinking| thinking.effort),
+			Some(omp_proto::inference::v1::Effort::Off as i32)
+		);
 	}
 
 	#[tokio::test]

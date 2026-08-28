@@ -1023,6 +1023,7 @@ pub(crate) async fn run(
 				&args.add_dir,
 				revived.has_durable_tool_restriction,
 				explicit_thinking.clone(),
+				args.external_thinking.then_some(true),
 			)
 			.map_err(|error| miette::miette!(error))?;
 		}

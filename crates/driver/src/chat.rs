@@ -6378,6 +6378,9 @@ pub fn agent_snapshot(
 /// Explicit thinking, context identity, executor, turn props, and
 /// provider-reset stay on the live turn. A durable restricted tool subset is
 /// retained rather than widened to the new model's advertised roster.
+/// `external_thinking` carries the invocation-scoped `--external-thinking`
+/// override so the rebuilt snapshot keeps the hidden `think` tool instead of
+/// falling back to the replacement model's default thinking surface.
 pub fn reproject_model_derived_snapshot(
 	snapshot: &mut AgentSnapshot,
 	catalog: &snapshot::Catalog,
@@ -6385,6 +6388,7 @@ pub fn reproject_model_derived_snapshot(
 	additional_roots: &[PathBuf],
 	has_durable_tool_restriction: bool,
 	explicit_thinking: Option<inference_pb::Reasoning>,
+	external_thinking: Option<bool>,
 ) -> Result<(), ChatError> {
 	let session_id = snapshot
 		.turn
@@ -6399,7 +6403,7 @@ pub fn reproject_model_derived_snapshot(
 		&session_id,
 		Arc::clone(&snapshot.registry),
 	)?;
-	let projected = agent_snapshot(&blueprint, catalog, None)?;
+	let projected = agent_snapshot(&blueprint, catalog, external_thinking)?;
 
 	if has_durable_tool_restriction {
 		let retained: Arc<[Str]> = snapshot
