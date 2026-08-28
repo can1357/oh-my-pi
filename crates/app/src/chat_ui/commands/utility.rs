@@ -119,7 +119,9 @@ pub(crate) fn render_tools(
 	all.extend(declarations.iter().filter_map(|declaration| {
 		if let omp_driver::discovery::manifest::CapabilityPayload::Tools(tool) = &declaration.payload
 		{
-			(!registry.is_unlisted(tool.name.as_str())).then(|| tool.name.as_str())
+			(!registry.is_unlisted(tool.name.as_str())
+				&& !matches!(registry.presentation(tool.name.as_str()), Ok(Presentation::Hidden)))
+			.then(|| tool.name.as_str())
 		} else {
 			None
 		}
@@ -437,6 +439,52 @@ mod tests {
 		assert!(
 			!rendered.lines().any(|line| line == "* custom_report"),
 			"unknown configured custom tool is never active: {rendered}"
+		);
+	}
+
+	fn tools_declaration(name: &str) -> omp_driver::discovery::manifest::DiscoveredCapability {
+		use omp_driver::discovery::manifest::{
+			CapabilityPayload, DiscoveredCapability, SourceProvenance, SourceScope,
+			ToolHandlerDeclaration, ToolPayload,
+		};
+		DiscoveredCapability::keyed(
+			Str::new(name),
+			CapabilityPayload::Tools(ToolPayload {
+				name:         Str::new(name),
+				path:         std::path::PathBuf::from(format!("/tmp/{name}/tool.json")),
+				description:  sf!("discovered custom tool"),
+				input_schema: serde_json::json!({"type": "object"}),
+				handler:      ToolHandlerDeclaration::Process {
+					program: std::path::PathBuf::from("/bin/true"),
+					args:    Vec::new(),
+				},
+			}),
+			SourceProvenance::native(
+				sf!("test"),
+				std::path::PathBuf::from("/tmp"),
+				SourceScope::Project,
+			),
+		)
+	}
+
+	#[test]
+	fn tools_do_not_render_hidden_names_from_declarations() {
+		let registry = roster_registry();
+		let declarations = [tools_declaration("secret"), tools_declaration("custom_report")];
+		let rendered = render_tools(
+			&registry,
+			&[],
+			&[sf!("read")],
+			&omp_envd::tool_settings::ToolSettings::default(),
+			&declarations,
+		);
+		assert!(
+			rendered.lines().any(|line| line == "- custom_report"),
+			"unknown discovered declaration stays listed as disabled: {rendered}"
+		);
+		assert!(
+			!rendered.lines().any(|line| line.ends_with("secret")),
+			"declaration sharing a hidden tool's name must stay off the listing: {rendered}"
 		);
 	}
 
