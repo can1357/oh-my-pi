@@ -128,8 +128,11 @@ export function encodeConnectFrame(payload: Uint8Array, compress: boolean): Buff
  * Stateful per-stream Connect decoder. Appends raw bytes and emits every frame
  * that completes, enforcing the terminal grammar: reserved flags and unknown
  * compression are rejected, at most one end-of-stream envelope may arrive, and
- * `finish()` requires that the end-of-stream envelope was seen with no trailing
- * bytes surviving in the buffer.
+ * an emitted end frame is always trustworthy: when bytes are still buffered
+ * behind the terminal envelope, `push()` delivers the preceding data frames but
+ * withholds the end frame and poisons the decoder, so the next `push()` or
+ * `finish()` throws. `finish()` requires that the end-of-stream envelope was
+ * seen.
  *
  * Buffering is amortized O(1) per push: bytes accumulate in a geometrically
  * growing backing buffer and the consumed head is reclaimed only when a new
@@ -195,6 +198,7 @@ export class ConnectFrameDecoder {
 		this.#append(chunk);
 
 		const frames: ConnectFrame[] = [];
+		let endFrame: ConnectFrame | undefined;
 		while (this.#pending >= 5) {
 			const flags = this.#buf[this.#start];
 			const msgLen = this.#buf.readUInt32BE(this.#start + 1);
@@ -275,11 +279,17 @@ export class ConnectFrameDecoder {
 
 			if ((flags & CONNECT_FLAG_END_STREAM) !== 0) {
 				this.#sawEndStream = true;
-				frames.push({ kind: "end", error: parseEndStreamFrame(body) });
+				endFrame = { kind: "end", error: parseEndStreamFrame(body) };
 			} else {
 				frames.push({ kind: "data", payload: body });
 			}
 		}
+		// An emitted end frame is always trustworthy: the terminal envelope must
+		// end the buffer exactly. Bytes still buffered behind it (a stray tail or
+		// a partial envelope) withhold the end frame and leave the decoder
+		// poisoned, so the next push() or finish() reports the protocol error
+		// while the data frames decoded ahead of it are still delivered.
+		if (endFrame !== undefined && this.#pending === 0) frames.push(endFrame);
 		return frames;
 	}
 

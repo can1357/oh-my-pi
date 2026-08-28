@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { once } from "node:events";
 import * as http from "node:http";
 import * as http2 from "node:http2";
 import * as path from "node:path";
+import { Duplex } from "node:stream";
 import { ProviderResponseError } from "@oh-my-pi/pi-ai/error";
 import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
 import type { Context, Model, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
@@ -269,6 +271,34 @@ describe("openCursorTransport lifecycle", () => {
 		expect(h1Paths).toContain(GET_SERVER_CONFIG_PATH);
 		expect(h1Paths.some(path => path.includes("Run"))).toBe(false);
 	});
+
+	it("settles response and trailers to empty headers when the lease request is already terminal", async () => {
+		// Destroying and awaiting close fires every terminal event before the
+		// wrapper installs its listeners, so only reconciliation can settle.
+		const request = new Duplex({ read() {} });
+		request.destroy();
+		await once(request, "close");
+		vi.spyOn(h2Pool, "acquireCursorH2").mockResolvedValue({
+			ok: true,
+			lease: {
+				request: request as http2.ClientHttp2Stream,
+				release() {},
+			},
+		});
+
+		const attempt = await openCursorTransport({
+			baseUrl: "http://127.0.0.1:1",
+			apiKey: API_KEY,
+			requestPath: RUN_PATH,
+			runHeaders: testRunHeaders(),
+			gzipRequest: false,
+			provider: "cursor",
+		});
+
+		expect(await attempt.responseHeaders?.()).toEqual({});
+		expect(await attempt.trailers()).toEqual({});
+		attempt.close();
+	}, 10_000);
 
 	it("opens the HTTP/1.1 bridge when ALPN fails and GetServerConfig is discovered over HTTP/1", async () => {
 		const payload = Buffer.from("server-frame", "utf8");
@@ -620,6 +650,61 @@ describe("openCursorTransport lifecycle", () => {
 			attempt.close();
 		} finally {
 			__setCursorH2FrameQueueBytes(undefined);
+			for (const session of sessions) session.destroy();
+			const closed = Promise.withResolvers<void>();
+			server.close(error => (error ? closed.reject(error) : closed.resolve()));
+			await closed.promise;
+		}
+	}, 10_000);
+
+	it("fails the turn when stray bytes follow the end envelope in the same chunk, after delivering data frames", async () => {
+		// The reviewer scenario: turnEnded data + clean end envelope + stray tail
+		// in one DATA chunk. The decoder withholds the untrustworthy end frame,
+		// so the consumer cannot break on it and report a clean turn; the pump
+		// reaches stream EOF and finish() surfaces the protocol error instead.
+		let server: http2.Http2Server | undefined;
+		const sessions = new Set<http2.Http2Session>();
+		server = http2.createServer();
+		server.on("session", session => {
+			sessions.add(session);
+			session.on("close", () => sessions.delete(session));
+		});
+		server.on("stream", (stream: http2.ServerHttp2Stream) => {
+			stream.on("data", () => {});
+			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+			stream.end(
+				Buffer.concat([frameConnectMessage(turnEndedPayload()), endFrame(), Buffer.from([0x01, 0x02, 0x03])]),
+			);
+		});
+		const listening = Promise.withResolvers<void>();
+		server.once("error", listening.reject);
+		server.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
+		const address = server.address();
+		if (!address || typeof address === "string") throw new Error("expected live h2 fixture");
+
+		try {
+			const attempt = await openCursorTransport({
+				baseUrl: `http://127.0.0.1:${address.port}`,
+				apiKey: API_KEY,
+				requestPath: RUN_PATH,
+				runHeaders: testRunHeaders(),
+				gzipRequest: false,
+				provider: "cursor",
+			});
+			attempt.write(encodeConnectFrame(Buffer.from("client-request"), false));
+			const frames: Array<{ kind: string }> = [];
+			let error: unknown;
+			try {
+				for await (const frame of attempt.frames()) frames.push(frame);
+			} catch (cause) {
+				error = cause;
+			}
+			expect(frames.filter(frame => frame.kind === "data")).toHaveLength(1);
+			expect(frames.some(frame => frame.kind === "end")).toBe(false);
+			expect(String(error)).toContain("after end-of-stream");
+			attempt.close();
+		} finally {
 			for (const session of sessions) session.destroy();
 			const closed = Promise.withResolvers<void>();
 			server.close(error => (error ? closed.reject(error) : closed.resolve()));

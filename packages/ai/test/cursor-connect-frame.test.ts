@@ -201,6 +201,21 @@ describe("ConnectFrameDecoder grammar", () => {
 		expectProtocolError(() => decoder.push(rawFrame(0x00, "late data")), undefined, "envelope");
 	});
 
+	test("terminal envelope plus an incomplete trailing envelope in one push withholds the end frame", () => {
+		const decoder = new ConnectFrameDecoder({ acceptCompressed: true });
+		// The trailing bytes form a complete header declaring more payload than
+		// the chunk holds, so the decode loop exits on an incomplete frame.
+		// push() must not return an end frame with bytes still pending; the
+		// poisoned decoder reports the tail at finish().
+		const chunk = Buffer.concat([
+			rawFrame(CONNECT_FLAG_END_STREAM, JSON.stringify({ error: null })),
+			Buffer.from([0x00, 0x00, 0x00, 0x00, 0x04]),
+		]);
+		expect(decoder.push(chunk)).toEqual([]);
+		expect(decoder.sawEndStream).toBe(true);
+		expectProtocolError(() => decoder.finish(), "bytes after end-of-stream", "envelope");
+	});
+
 	test("declared length above the cap is rejected before allocating", () => {
 		const decoder = new ConnectFrameDecoder({ acceptCompressed: true });
 		const oversized = Buffer.alloc(5);
@@ -287,21 +302,28 @@ describe("ConnectFrameDecoder hardening (grill loop batch 1)", () => {
 		);
 	});
 
-	test("trailing bytes after end-stream: stray bytes then finish() throw (1 byte)", () => {
+	test("stray tail after end-stream in the same chunk withholds the end frame (1 byte)", () => {
 		const decoder = new ConnectFrameDecoder({ acceptCompressed: true });
 		const endFrame = rawFrame(CONNECT_FLAG_END_STREAM, JSON.stringify({ error: null }));
-		// Deliver the end frame plus one stray byte in one chunk.
-		const frames = decoder.push(Buffer.concat([endFrame, Buffer.from([0x00])]));
-		expect(frames).toHaveLength(1);
-		expect(frames[0]).toEqual({ kind: "end", error: null });
+		// The end frame plus one stray byte in one chunk: the untrustworthy end
+		// frame is withheld so no consumer can accept a malformed terminal state.
+		expect(decoder.push(Buffer.concat([endFrame, Buffer.from([0x00])]))).toEqual([]);
 		expect(decoder.sawEndStream).toBe(true);
+		// The decoder stays poisoned: finish() reports the buffered tail.
 		expectProtocolError(() => decoder.finish(), "bytes after end-of-stream", "envelope");
 	});
 
-	test("trailing bytes after end-stream: stray bytes then finish() throw (3 bytes)", () => {
+	test("stray tail after end-stream: data frames ahead of the withheld end frame are still delivered", () => {
 		const decoder = new ConnectFrameDecoder({ acceptCompressed: true });
-		const endFrame = rawFrame(CONNECT_FLAG_END_STREAM, JSON.stringify({ error: null }));
-		decoder.push(Buffer.concat([endFrame, Buffer.from([0x01, 0x02, 0x03])]));
+		const chunk = Buffer.concat([
+			rawFrame(0x00, "streamed tokens"),
+			rawFrame(CONNECT_FLAG_END_STREAM, JSON.stringify({ error: null })),
+			Buffer.from([0x01, 0x02, 0x03]),
+		]);
+		const frames = decoder.push(chunk);
+		expect(frames).toHaveLength(1);
+		expect(frames[0]).toEqual({ kind: "data", payload: Buffer.from("streamed tokens") });
+		expect(decoder.sawEndStream).toBe(true);
 		expectProtocolError(() => decoder.finish(), "bytes after end-of-stream", "envelope");
 	});
 

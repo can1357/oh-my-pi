@@ -176,14 +176,11 @@ export function openCursorHttp1Bridge(args: {
 							{ kind: "envelope" },
 						);
 					}
-					// A complete terminal envelope must also be the stream's final
-					// bytes: push() emits the end frame while a truncated following
-					// envelope or stray trailing bytes can still sit in its buffer.
-					// finish() throws when any survive — the same completion check
-					// the server-config probe applies before trusting an end-of-stream
-					// walk — so a malformed poll body settles as a protocol failure,
-					// never a clean turn.
-					decoder.finish();
+					// push() withholds the end frame unless the terminal envelope
+					// ended its buffer exactly, so reaching this frame proves the
+					// poll body is complete; a stray tail or truncated following
+					// envelope poisons the decoder instead and settles as a
+					// protocol failure at the stream-EOF finish() below.
 					// Close admission before draining so synchronous late writes cannot extend the chain.
 					admitting = false;
 					// Let the owner disarm heartbeats now, but keep the queue open so drain failures propagate.

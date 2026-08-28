@@ -173,6 +173,12 @@ function wrapH2Lease(lease: h2Pool.CursorH2Lease): CursorTransportAttempt {
 		settleResponse({});
 		settleTrailers({});
 	});
+	// Abort can race issueLease: terminal events fired before the listeners
+	// above existed never reach them, so reconcile here or the promises hang.
+	if (request.closed || request.destroyed) {
+		settleResponse({});
+		settleTrailers({});
+	}
 
 	const pump = startH2FramePump(request, decoder);
 

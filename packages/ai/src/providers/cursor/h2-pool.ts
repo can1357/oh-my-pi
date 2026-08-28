@@ -227,9 +227,9 @@ function evictIdleEntries(): void {
 	}
 }
 
-/** Waits for a session's `close` (destroy already initiated). */
+/** Resolves on `close`; the listener is installed before `destroy()` because `close` fires exactly once. */
 function closeSession(session: http2.ClientHttp2Session): Promise<void> {
-	if (session.closed) return Promise.resolve();
+	if (session.destroyed) return Promise.resolve();
 	const { promise, resolve } = Promise.withResolvers<void>();
 	session.once("close", () => resolve());
 	try {

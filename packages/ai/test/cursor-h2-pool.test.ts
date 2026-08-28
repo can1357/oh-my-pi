@@ -288,6 +288,31 @@ describe("cursor HTTP/2 session pool", () => {
 		expect(poolOutstanding()).toBe(0);
 	});
 
+	it("destroys a gracefully closed session that still has an active stream and waits for its close", async () => {
+		const baseUrl = await startServer();
+		serveStream = stream => {
+			stream.on("data", () => {});
+		};
+
+		const acquired = await acquireCursorH2(runArgs(baseUrl));
+		expect(acquired.ok).toBe(true);
+		if (!acquired.ok) return;
+		const session = acquired.lease.request.session;
+		if (!session) throw new Error("expected the leased request to expose its session");
+
+		// Graceful close flips `closed` but not `destroyed` while the active
+		// stream keeps the session alive.
+		await waitFor(() => streamCount >= 1);
+		session.close();
+		await waitFor(() => session.closed);
+		expect(session.destroyed).toBe(false);
+
+		await disposeCursorH2Pool();
+		expect(session.destroyed).toBe(true);
+		await waitFor(() => acquired.lease.request.closed);
+		await waitFor(() => sessions.size === 0);
+	});
+
 	it("rejects a pre-aborted acquisition instead of leasing, and leaks nothing", async () => {
 		const baseUrl = await startServer();
 		serveStream = respondOk;
