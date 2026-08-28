@@ -158,6 +158,8 @@ export class EvalShadowCellSession implements ToolSpeculationStreamSession {
 	#language: string | undefined;
 	#closed = false;
 	#updates = Promise.resolve();
+	#pendingPlan: { codePrefix: string; language: string } | undefined;
+	#planning = false;
 
 	constructor(options: EvalShadowCellOptions) {
 		this.#options = options;
@@ -171,10 +173,26 @@ export class EvalShadowCellSession implements ToolSpeculationStreamSession {
 			return;
 		}
 		if (decoded.kind !== "snapshot") return;
-		this.#language = decoded.snapshot.language ?? "js";
-		this.#updates = this.#updates
-			.then(() => this.#plan(decoded.snapshot.codePrefix, this.#language as string))
-			.catch(() => undefined);
+		const language = decoded.snapshot.language ?? "js";
+		this.#language = language;
+		this.#pendingPlan = { codePrefix: decoded.snapshot.codePrefix, language };
+		if (!this.#planning) {
+			this.#planning = true;
+			this.#updates = this.#drainPlanUpdates();
+		}
+	}
+
+	async #drainPlanUpdates(): Promise<void> {
+		try {
+			while (!this.#closed) {
+				const pending = this.#pendingPlan;
+				if (!pending) return;
+				this.#pendingPlan = undefined;
+				await this.#plan(pending.codePrefix, pending.language).catch(() => undefined);
+			}
+		} finally {
+			this.#planning = false;
+		}
 	}
 
 	async finalize(context: { args: Readonly<Record<string, unknown>> }): Promise<void> {
@@ -191,6 +209,7 @@ export class EvalShadowCellSession implements ToolSpeculationStreamSession {
 	async discard(reason: string): Promise<void> {
 		if (this.#closed) return;
 		this.#closed = true;
+		this.#pendingPlan = undefined;
 		this.#claims.discard();
 		try {
 			await this.#options.coordinator.close(reason);

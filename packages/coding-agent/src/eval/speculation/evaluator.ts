@@ -102,6 +102,12 @@ export function evaluateShadowExpression(expression: ShadowExpression, context: 
 		case "transform": {
 			const input = evaluateShadowExpression(expression.input, context);
 			if (expression.name === "String") return { value: String(input.value), origins: input.origins };
+			if (expression.name === "Python.str") {
+				if (typeof input.value !== "string") {
+					throw new Error("Python str() projection requires a string shadow value");
+				}
+				return input;
+			}
 			if (expression.name === "JSON.stringify") {
 				const value = JSON.stringify(input.value);
 				if (value === undefined) throw new Error("JSON.stringify produced no value");

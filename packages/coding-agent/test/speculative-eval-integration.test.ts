@@ -15,7 +15,7 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { setStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
+import * as jsContextManager from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { disposeAllKernelSessions } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import { EvalShadowCellSession } from "@oh-my-pi/pi-coding-agent/eval/speculation/cell-session";
 import { CodingAgentSpeculativeExecutionHost } from "@oh-my-pi/pi-coding-agent/speculation/host";
@@ -30,7 +30,7 @@ const pythonIt = process.env.PI_PYTHON_INTEGRATION === "1" ? it : it.skip;
 
 afterEach(async () => {
 	vi.restoreAllMocks();
-	await disposeAllVmContexts();
+	await jsContextManager.disposeAllVmContexts();
 	await disposeAllKernelSessions();
 	await Promise.all(temporaryDirectories.splice(0).map(directory => removeWithRetries(directory)));
 });
@@ -462,6 +462,46 @@ describe("streamed eval speculation", () => {
 		expect(closeReasons).toEqual(["streamed eval argument buffer restarted"]);
 		expect(admissionCount).toBe(1);
 		expect(committed).toBe(false);
+	});
+
+	it("coalesces streamed shadow plans to the newest pending prefix", async () => {
+		const plannedCodes: string[] = [];
+		const firstPlan = Promise.withResolvers<jsContextManager.JavaScriptShadowPlanningResult | null>();
+		vi.spyOn(jsContextManager, "shadowPlanIfPresent").mockImplementation(options => {
+			plannedCodes.push(options.code);
+			return plannedCodes.length === 1 ? firstPlan.promise : Promise.resolve(null);
+		});
+		const session = {
+			cwd: process.cwd(),
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated({}),
+		} satisfies ToolSession;
+		const shadow = new EvalShadowCellSession({
+			coordinator: {
+				maxInFlight: 2,
+				admit: async () => undefined,
+				close() {},
+			},
+			parentToolCallId: "eval-coalesced",
+			session,
+			cwd: session.cwd,
+			sessionId: "speculative-eval-coalesced-test",
+		});
+		const args = { language: "js", code: "abc" };
+		const toolCall = { type: "toolCall" as const, id: "eval-coalesced", name: "eval", arguments: args };
+
+		await shadow.update(toolCall, '{"language":"js","code":"a');
+		expect(plannedCodes).toEqual(["a"]);
+		await shadow.update(toolCall, '{"language":"js","code":"ab');
+		await shadow.update(toolCall, '{"language":"js","code":"abc');
+		await shadow.update(toolCall, JSON.stringify(args));
+		firstPlan.resolve(null);
+		await shadow.finalize({ args });
+
+		expect(plannedCodes).toEqual(["a", "abc"]);
+		await shadow.discard("test complete");
 	});
 
 	it("falls back when a speculative child returns or throws an error", async () => {

@@ -200,6 +200,27 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 					},
 				],
 			});
+			await expect(kernel.shadowPlan("tool.read({'path': str(True)})")).resolves.toMatchObject({
+				operations: [
+					{
+						call: {
+							args: {
+								kind: "object",
+								entries: [
+									{
+										key: "path",
+										value: {
+											kind: "transform",
+											name: "Python.str",
+											input: { kind: "literal", value: true },
+										},
+									},
+								],
+							},
+						},
+					},
+				],
+			});
 			const loop = await kernel.shadowPlan(
 				["for path in ['a', 'b']:", "    await tool.read({'path': path})"].join("\n"),
 			);

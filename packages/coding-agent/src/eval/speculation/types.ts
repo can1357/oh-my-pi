@@ -20,7 +20,7 @@ export type ShadowExpression =
 	| { kind: "concat"; items: readonly ShadowExpression[] }
 	| {
 			kind: "transform";
-			name: "String" | "JSON.stringify" | "Array.join";
+			name: "String" | "JSON.stringify" | "Array.join" | "Python.str";
 			input: ShadowExpression;
 			argument?: ShadowExpression;
 	  };

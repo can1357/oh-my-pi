@@ -63,6 +63,20 @@ describe("shadow IR evaluator", () => {
 		});
 	});
 
+	it("preserves Python string conversion only when JavaScript formatting is identical", () => {
+		const expression = {
+			kind: "transform" as const,
+			name: "Python.str" as const,
+			input: { kind: "snapshot" as const, name: "value" },
+		};
+
+		expect(evaluateShadowExpression(expression, { snapshot: { value: "note.txt" }, results: new Map() }).value).toBe(
+			"note.txt",
+		);
+		expect(() => evaluateShadowExpression(expression, { snapshot: { value: true }, results: new Map() })).toThrow(
+			"Python str() projection requires a string shadow value",
+		);
+	});
 	it("blocks persistent and local-read values from completion egress", () => {
 		const operation = completionOperation();
 		expect(() =>

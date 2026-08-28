@@ -5971,4 +5971,27 @@ describe("speculative tool execution", () => {
 		expect(speculativeExecutions).toBe(1);
 		await coordinator.close("test complete");
 	});
+
+	it("does not attach a coordinator after its close begins", async () => {
+		const cleanup = Promise.withResolvers<void>();
+		const coordinator = new SpeculativeOperationCoordinator({ enabled: true });
+		expect(
+			coordinator.registerStreamSession("late-stream", {
+				update() {},
+				finalize() {},
+				commit() {},
+				async discard() {
+					await cleanup.promise;
+				},
+			}),
+		).toBe(true);
+		const closing = coordinator.close("turn aborted", "aborted");
+		const message = createAssistantMessage([]);
+
+		coordinator.attach(message);
+
+		expect(SpeculativeOperationCoordinator.take(message)).toBeUndefined();
+		cleanup.resolve();
+		await closing;
+	});
 });

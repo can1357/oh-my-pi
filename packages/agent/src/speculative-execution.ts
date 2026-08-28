@@ -416,6 +416,7 @@ export class SpeculativeOperationCoordinator {
 	}
 
 	attach(message: AssistantMessage): void {
+		if (this.#closed) return;
 		if (this.#candidates.size > 0 || this.#streamSessions.size > 0) coordinatorByMessage.set(message, this);
 	}
 

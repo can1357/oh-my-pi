@@ -363,7 +363,7 @@ def _shadow_expression(node: ast.AST, environment: dict[str, dict[str, Any]]) ->
                 projected = _shadow_expression(value.value, environment)
                 if projected is None:
                     return None
-                items.append({"kind": "transform", "name": "String", "input": projected})
+                items.append({"kind": "transform", "name": "Python.str", "input": projected})
             else:
                 return None
         return {"kind": "concat", "items": items}
@@ -379,7 +379,7 @@ def _shadow_expression(node: ast.AST, environment: dict[str, dict[str, Any]]) ->
         if isinstance(node.func, ast.Name) and node.func.id == "str" and len(node.args) == 1:
             projected = _shadow_expression(node.args[0], environment)
             return (
-                {"kind": "transform", "name": "String", "input": projected}
+                {"kind": "transform", "name": "Python.str", "input": projected}
                 if projected is not None
                 else None
             )
