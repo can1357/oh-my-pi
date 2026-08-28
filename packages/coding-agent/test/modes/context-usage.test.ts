@@ -323,6 +323,23 @@ describe("computeNonMessageBreakdown skills description budget", () => {
 		);
 	});
 
+	it("prefers the live setting over a frozen session snapshot", () => {
+		// A session built with explicit skills is not skills-reloadable, so its
+		// skillsSettings snapshot never advances while the prompt keeps being
+		// rebuilt from the live value. Accounting must follow the prompt.
+		const stale = {
+			systemPrompt: [nameOnlyPrompt],
+			agent: { state: { tools: [readTool] } },
+			skills: [wordy, terse],
+			skillsSettings: { catalogDescriptionBudgetChars: -1 },
+			settings: { get: () => 0 },
+		} as never;
+
+		expect(computeNonMessageBreakdown(stale, tokenizer).skillsTokens).toBe(
+			computeNonMessageBreakdown(session(0), tokenizer).skillsTokens,
+		);
+	});
+
 	it("re-splits when the budget changes on a stable skills reference (memo keyed on budget)", () => {
 		// One object mutated in place: the skills/tools/prompt refs are unchanged,
 		// so only a budget-aware memo key forces the recompute. Without it the
