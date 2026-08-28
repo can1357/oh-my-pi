@@ -11,6 +11,8 @@
  * rich context for the orchestrating agent to distribute work across
  * multiple reviewer agents based on diff weight and locality.
  */
+
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { CustomCommand, CustomCommandAPI } from "../../../../extensibility/custom-commands/types";
 import type { HookCommandContext } from "../../../../extensibility/hooks/types";
@@ -18,8 +20,6 @@ import reviewCustomRequestTemplate from "../../../../prompts/review-custom-reque
 import reviewHeadlessRequestTemplate from "../../../../prompts/review-headless-request.md" with { type: "text" };
 import reviewRequestTemplate from "../../../../prompts/review-request.md" with { type: "text" };
 import * as gh from "../../../../tools/gh";
-import * as git from "../../../../utils/git";
-import * as jj from "../../../../utils/jj";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -541,7 +541,7 @@ export class ReviewCommand implements CustomCommand {
 				const currentBranch = await getCurrentBranch(this.api);
 				let diffText: string;
 				try {
-					diffText = await git.diff(this.api.cwd, { base: `${baseBranch}...${currentBranch}` });
+					diffText = await vcs.requireGit(this.api.cwd).diffText({ base: `${baseBranch}...${currentBranch}` });
 				} catch (err) {
 					ctx.ui.notify(`Failed to get diff: ${err instanceof Error ? err.message : String(err)}`, "error");
 					return undefined;
@@ -587,7 +587,8 @@ export class ReviewCommand implements CustomCommand {
 
 				let diffText: string;
 				try {
-					diffText = await git.show(this.api.cwd, hash, { format: "" });
+					const result = await vcs.requireGit(this.api.cwd).showCommit(hash);
+					diffText = result.data.toString("utf8");
 				} catch (err) {
 					ctx.ui.notify(`Failed to get commit: ${err instanceof Error ? err.message : String(err)}`, "error");
 					return undefined;
@@ -635,7 +636,7 @@ export class ReviewCommand implements CustomCommand {
 
 async function getGitBranches(api: CustomCommandAPI): Promise<string[]> {
 	try {
-		return await git.branch.list(api.cwd, { all: true });
+		return await vcs.requireGit(api.cwd).listBranches(true);
 	} catch {
 		return [];
 	}
@@ -643,53 +644,27 @@ async function getGitBranches(api: CustomCommandAPI): Promise<string[]> {
 
 async function getCurrentBranch(api: CustomCommandAPI): Promise<string> {
 	try {
-		return (await git.branch.current(api.cwd)) ?? "HEAD";
+		return (await vcs.git(api.cwd)?.currentBranch()) ?? "HEAD";
 	} catch {
 		return "HEAD";
 	}
 }
 
-async function getGitStatus(api: CustomCommandAPI): Promise<string> {
-	try {
-		return await git.status(api.cwd);
-	} catch {
-		return "";
-	}
-}
-
 async function getUncommittedReviewDiff(api: CustomCommandAPI): Promise<CurrentReviewDiff> {
-	if (await jj.repo.is(api.cwd)) {
-		return {
-			diffText: await jj.diff(api.cwd),
-			diffInstruction: JJ_UNCOMMITTED_DIFF_INSTRUCTION,
-			emptyMessage: "No uncommitted changes found",
-			mode: "Reviewing JJ working-copy changes",
-		};
-	}
-
-	const status = await getGitStatus(api);
-	if (!status.trim()) {
-		return {
-			diffText: "",
-			diffInstruction: GIT_UNCOMMITTED_DIFF_INSTRUCTION,
-			emptyMessage: "No uncommitted changes found",
-			mode: "Reviewing uncommitted changes (staged + unstaged)",
-		};
-	}
-
-	const [unstagedDiff, stagedDiff] = await Promise.all([git.diff(api.cwd), git.diff(api.cwd, { cached: true })]);
-	const combinedDiff = [unstagedDiff, stagedDiff].filter(Boolean).join("\n");
+	const repository = vcs.require(api.cwd);
+	const diffText = await repository.uncommittedDiff([]);
+	const isJj = repository.kind() === "jj";
 	return {
-		diffText: combinedDiff,
-		diffInstruction: GIT_UNCOMMITTED_DIFF_INSTRUCTION,
-		emptyMessage: "No diff content found",
-		mode: "Reviewing uncommitted changes (staged + unstaged)",
+		diffText,
+		diffInstruction: isJj ? JJ_UNCOMMITTED_DIFF_INSTRUCTION : GIT_UNCOMMITTED_DIFF_INSTRUCTION,
+		emptyMessage: isJj || !diffText.trim() ? "No uncommitted changes found" : "No diff content found",
+		mode: isJj ? "Reviewing JJ working-copy changes" : "Reviewing uncommitted changes (staged + unstaged)",
 	};
 }
 
 async function getRecentCommits(api: CustomCommandAPI, count: number): Promise<string[]> {
 	try {
-		return await git.log.onelines(api.cwd, count);
+		return await vcs.require(api.cwd).logOnelines(count);
 	} catch {
 		return [];
 	}

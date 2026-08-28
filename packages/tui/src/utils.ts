@@ -623,7 +623,16 @@ export function applyBackgroundToLine(line: string, width: number, bgFn: (text: 
 	const paddingNeeded = Math.max(0, width - visibleLen);
 
 	// Apply background to content + padding
-	const withPadding = line + padding(paddingNeeded);
+	let withPadding = line + padding(paddingNeeded);
+	// Nested background resets (e.g. inline color chips closing with \x1b[49m)
+	// would terminate a plain open…close background wrapper early; re-open the
+	// line background after each one (same trick as Theme.bgFill).
+	if (line.includes("\x1b[49m")) {
+		const probe = bgFn("\x01");
+		const probeIdx = probe.indexOf("\x01");
+		const open = probeIdx > 0 ? probe.slice(0, probeIdx) : "";
+		if (open) withPadding = withPadding.replaceAll("\x1b[49m", `\x1b[49m${open}`);
+	}
 	return bgFn(withPadding);
 }
 

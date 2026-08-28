@@ -10,7 +10,12 @@ import {
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { stripThinkingVariantToken } from "@oh-my-pi/pi-catalog/identity/family";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
-import { defaultSupportedEffort, resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
+import {
+	defaultSupportedEffort,
+	mapEffortToGoogleThinkingLevel,
+	resolveWireModelId,
+} from "@oh-my-pi/pi-catalog/model-thinking";
+import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { googleGeminiCliModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/google";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import {
@@ -160,6 +165,76 @@ describe("collapseEffortVariants", () => {
 		expect(resolveWireModelId(model, Effort.Low)).toBe("gemini-3.6-flash-low");
 		expect(resolveWireModelId(model, Effort.Medium)).toBe("gemini-3.6-flash-medium");
 		expect(resolveWireModelId(model, Effort.High)).toBe("gemini-3.6-flash-high");
+	});
+
+	it("folds the gemini-3.7-flash-tiered alias into gemini-3.7-flash so :minimal sends LOW not MINIMAL (#10016)", () => {
+		const out = collapseEffortVariants(
+			[
+				memberSpec("gemini-3.7-flash-high"),
+				memberSpec("gemini-3.7-flash-low"),
+				memberSpec("gemini-3.7-flash-medium"),
+				memberSpec("gemini-3.7-flash-tiered"),
+			],
+			ANTIGRAVITY_VARIANT_COLLAPSE_TABLE,
+		);
+
+		expect(out).toHaveLength(1);
+		const flash = out[0];
+		expect(flash?.id).toBe("gemini-3.7-flash");
+		expect(flash?.thinking?.effortRouting).toEqual({
+			minimal: "gemini-3.7-flash-low",
+			low: "gemini-3.7-flash-low",
+			medium: "gemini-3.7-flash-medium",
+			high: "gemini-3.7-flash-high",
+		});
+
+		// The actual regression: Cloud Code Assist rejects thinkingLevel MINIMAL on
+		// this SKU with HTTP 400, so the collapsed routing must downgrade both :off
+		// (floored to minimal by requiresEffort) and :minimal to LOW on the wire.
+		const model = buildModel(flash as ModelSpec<"google-gemini-cli">);
+		expect(mapEffortToGoogleThinkingLevel(Effort.Minimal, model)).toBe("LOW");
+		expect(mapEffortToGoogleThinkingLevel(Effort.Low, model)).toBe("LOW");
+		expect(resolveWireModelId(model, Effort.Minimal)).toBe("gemini-3.7-flash-low");
+	});
+
+	it("dedupes a stale standalone gemini-3.7-flash-tiered snapshot into the collapsed gemini-3.7-flash (#10016)", () => {
+		// Mirrors the bundled catalog snapshot: the already-collapsed logical id
+		// plus a raw -tiered alias that older snapshots emitted as its own
+		// MINIMAL-sending model. Runtime collapse must fold the alias away.
+		const collapsedFlash = memberSpec("gemini-3.7-flash", {
+			requestModelId: "gemini-3.7-flash-low",
+			thinking: {
+				mode: "google-level",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+				requiresEffort: true,
+				effortRouting: {
+					minimal: "gemini-3.7-flash-low",
+					low: "gemini-3.7-flash-low",
+					medium: "gemini-3.7-flash-medium",
+					high: "gemini-3.7-flash-high",
+				},
+			},
+		});
+		const staleTiered = memberSpec("gemini-3.7-flash-tiered", {
+			thinking: {
+				mode: "google-level",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+				requiresEffort: true,
+			},
+		});
+
+		const out = collapseEffortVariants([collapsedFlash, staleTiered], ANTIGRAVITY_VARIANT_COLLAPSE_TABLE);
+		expect(out.map(m => m.id)).toEqual(["gemini-3.7-flash"]);
+		expect(out[0]?.thinking?.effortRouting?.minimal).toBe("gemini-3.7-flash-low");
+	});
+
+	it("bundles only the routed gemini-3.7-flash model after generation (#10016)", () => {
+		const models = getBundledModels("google-antigravity");
+		expect(models.some(model => model.id === "gemini-3.7-flash-tiered")).toBe(false);
+
+		const flash = getBundledModel("google-antigravity", "gemini-3.7-flash");
+		expect(flash?.thinking?.effortRouting?.minimal).toBe("gemini-3.7-flash-low");
+		expect(flash ? mapEffortToGoogleThinkingLevel(Effort.Minimal, flash) : undefined).toBe("LOW");
 	});
 
 	it("drops routes whose target member is absent", () => {
@@ -1001,6 +1076,7 @@ describe("Cursor generic tier routing (issue #9237)", () => {
 describe("variant aliases", () => {
 	it("resolves members and recycled ids per provider", () => {
 		expect(resolveVariantAlias("google-antigravity", "gemini-3.5-flash-low")).toBe("gemini-3.5-flash");
+		expect(resolveVariantAlias("google-antigravity", "gemini-3.7-flash-tiered")).toBe("gemini-3.7-flash");
 		expect(resolveVariantAlias("google-gemini-cli", "gemini-pro-agent")).toBe("gemini-3.1-pro");
 		expect(resolveVariantAlias("google-antigravity", "gemini-3-flash")).toBe("gemini-3.5-flash");
 		expect(resolveVariantAlias("google-antigravity", "gemini-2.5-flash-thinking")).toBe("gemini-2.5-flash");

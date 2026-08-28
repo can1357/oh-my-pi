@@ -1148,7 +1148,7 @@ export class TUI extends Container {
 						this.terminal.columns,
 					);
 					const top = Math.max(0, Math.min(this.#providerViewportTop, this.terminal.rows - staleRows));
-					erase = `\x1b[?25l\x1b[${top + 1};1H\x1b[J`;
+					erase = `\x1b[?25l${this.#eraseBelowRow(top, this.terminal.rows)}`;
 				} else {
 					const up = this.#reflowedRowCount(
 						this.#providerWindow,
@@ -1156,7 +1156,8 @@ export class TUI extends Container {
 						this.#parkedViewportOffset,
 						this.terminal.columns,
 					);
-					erase = `\x1b[?25l${up > 0 ? `\x1b[${up}A` : ""}\r\x1b[J`;
+					const eraseBelow = this.#eraseBelowCursorRow(this.terminal.columns, this.terminal.rows);
+					erase = `\x1b[?25l${up > 0 ? `\x1b[${up}A` : ""}${eraseBelow}`;
 				}
 				// Both erase paths leave the cursor on the viewport's top row, so the
 				// parked offset no longer applies; carrying a stale nonzero offset
@@ -2264,6 +2265,47 @@ export class TUI extends Container {
 	}
 
 	/**
+	 * Erase `row` and everything below it, absolute-addressed, without ever
+	 * issuing a full-screen clear. tmux and Windows conhost (#9597) archive a
+	 * screen-wide erase into pane history instead of discarding it, so an erase
+	 * anchored on the first row would preserve the unfinished frame it exists to
+	 * remove (#9780). Below existing history a plain ED0 cannot span the screen;
+	 * on the first row, EL2 that row and ED0 from the second down touch the same
+	 * cells with no full-screen clear. `row` is clamped because a caller's
+	 * viewport top can predate a height shrink.
+	 * Every form leaves the cursor on the clamped row at column zero.
+	 */
+	#eraseBelowRow(row: number, height: number): string {
+		const top = Math.max(0, Math.min(row, Math.max(0, height - 1)));
+		if (top > 0) return `\x1b[${top + 1};1H\x1b[J`;
+		if (height <= 1) return `\x1b[1;1H${ERASE_LINE}`;
+		return `\x1b[1;1H${ERASE_LINE}\x1b[2;1H\x1b[J\x1b[1;1H`;
+	}
+
+	/**
+	 * Erase the cursor's row and everything below it, cursor-relative, without
+	 * ever issuing a full-screen clear. Used where the resize path must stay
+	 * cursor-relative: the terminal reflowed the normal buffer, so absolute rows
+	 * are stale and only the parked cursor still tracks the viewport's logical
+	 * line. Every form leaves the cursor on column zero of that row, exactly
+	 * where a plain `\r\x1b[J` left it.
+	 *
+	 * The erase must never run from the first cell, which is what makes tmux and
+	 * Windows conhost (#9597) archive the screen instead of discarding it
+	 * (#9780), and a clamped CUU can put the cursor on the first row without
+	 * naming it. Stepping one column right is enough and needs no row movement,
+	 * but at one column CUF cannot leave the first cell, so step one row down
+	 * instead: from the first row that can only reach row 1, and DECSC/DECRC
+	 * restores the anchor even when CUD clamps at the last row. A one-row screen
+	 * has nothing below the cursor, so EL2 alone clears everything.
+	 */
+	#eraseBelowCursorRow(width: number, height: number): string {
+		if (height <= 1) return `\r${ERASE_LINE}`;
+		if (width > 1) return `\r${ERASE_LINE}\x1b[C\x1b[J\r`;
+		return `\r${ERASE_LINE}\x1b7\x1b[B\x1b[J\x1b8`;
+	}
+
+	/**
 	 * Physical write transaction: append an ordinary batch, or bottom-split one
 	 * complete replay into a history remainder and final viewport, then serialize
 	 * the whole result in one terminal write before acknowledgement.
@@ -2371,16 +2413,7 @@ export class TUI extends Container {
 			// committed rows and blanks, never an unfinished frame.
 			const pushed = Math.max(0, startTop + preparedHistory.length + rows - height);
 			if (pushed > this.#providerViewportTop && this.#providerWindow.length > 0) {
-				const eraseTop = this.#providerViewportTop;
-				if (eraseTop > 0) {
-					// Below existing history: ED0 here never spans the whole screen.
-					buffer += `\x1b[${eraseTop + 1};1H\x1b[J`;
-				} else {
-					// Full-screen erase makes tmux preserve the live rows (#9780);
-					// EL2 the first row + ED0 the rest clears the same cells, no full clear.
-					buffer += "\x1b[1;1H\x1b[2K";
-					if (height > 1) buffer += "\x1b[2;1H\x1b[J";
-				}
+				buffer += this.#eraseBelowRow(this.#providerViewportTop, height);
 			}
 			buffer += `\x1b[${startTop + 1};1H`;
 			let screenRow = startTop;

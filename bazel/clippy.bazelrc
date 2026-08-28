@@ -10,6 +10,7 @@ build:clippy-strict --@rules_rust//rust/settings:clippy_flag=-Wclippy::perf
 build:clippy-strict --@rules_rust//rust/settings:clippy_flag=-Wclippy::style
 build:clippy-strict --@rules_rust//rust/settings:clippy_flag=-Dclippy::suspicious
 build:clippy-strict --@rules_rust//rust/settings:clippy_flag=-Wclippy::allow_attributes_without_reason
+build:clippy-strict --@rules_rust//rust/settings:clippy_flag=-Aclippy::assert_is_empty
 build:clippy-strict --@rules_rust//rust/settings:clippy_flag=-Aclippy::borrow_as_ptr
 build:clippy-strict --@rules_rust//rust/settings:clippy_flag=-Aclippy::cast_lossless
 build:clippy-strict --@rules_rust//rust/settings:clippy_flag=-Aclippy::cast_possible_truncation
