@@ -47,6 +47,8 @@ export interface ResolveLoaderCandidatesInput {
 	addonFilenames: string[];
 	isCompiledBinary: boolean;
 	stageFromNodeModules?: boolean;
+	/** Also probes the exact package version's standalone-binary extraction cache. */
+	includeVersionedCache?: boolean;
 	nativeDir: string;
 	leafPackageDir?: string | null;
 	execDir: string;
@@ -55,6 +57,9 @@ export interface ResolveLoaderCandidatesInput {
 }
 
 export function resolveLoaderCandidates(input: ResolveLoaderCandidatesInput): string[];
+
+/** Formats recovery instructions for native addon load failures. */
+export function buildHelpMessage(ctx: NativeLoaderContext): string;
 
 export interface InitLoaderContextOverrides {
 	nativeDir?: string;

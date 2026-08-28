@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fresh source checkouts can reuse a matching released `omp` native addon, and failed extraction no longer suggests nonexistent release assets.
+
 ## [18.0.10] - 2026-08-28
 
 ### Added

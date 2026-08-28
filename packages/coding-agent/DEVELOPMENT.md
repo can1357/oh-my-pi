@@ -26,6 +26,11 @@ Never invoke `tsc`/`npx tsc` directly — `bun run check` is the typecheck gate.
 changing the React tool renderers under `collab-web/src/tool-render/`, rebuild them
 with `bun run gen:tool-views`.
 
+Tests that import `@oh-my-pi/pi-natives` need a host addon. Build it with
+`bun --cwd=packages/natives run build`; without a native toolchain, run the
+matching released `omp` version once and the workspace loader will reuse its
+versioned addon cache.
+
 ## Boot flow
 
 ```text

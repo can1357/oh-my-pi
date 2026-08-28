@@ -133,10 +133,13 @@ export function shouldStageNodeModulesAddon({ platform, isCompiledBinary, native
 }
 
 /**
+ * Resolve native addon candidates in loader precedence order.
+ *
  * @param {{
  *   addonFilenames: string[];
  *   isCompiledBinary: boolean;
  *   stageFromNodeModules?: boolean;
+ *   includeVersionedCache?: boolean;
  *   nativeDir: string;
  *   leafPackageDir?: string | null;
  *   execDir: string;
@@ -149,6 +152,7 @@ export function resolveLoaderCandidates({
 	addonFilenames,
 	isCompiledBinary,
 	stageFromNodeModules = false,
+	includeVersionedCache = false,
 	nativeDir,
 	leafPackageDir = null,
 	execDir,
@@ -160,18 +164,23 @@ export function resolveLoaderCandidates({
 		path.join(execDir, filename),
 	]);
 	const leafCandidates = leafPackageDir ? addonFilenames.map(filename => path.join(leafPackageDir, filename)) : [];
+	const versionedCandidates = addonFilenames.map(filename => path.join(versionedDir, filename));
 	const compiledCandidates = addonFilenames.flatMap(filename => [
 		path.join(versionedDir, filename),
 		path.join(userDataDir, filename),
 	]);
-	const stagedCandidates = stageFromNodeModules ? addonFilenames.map(filename => path.join(versionedDir, filename)) : [];
+	const stagedCandidates = stageFromNodeModules ? versionedCandidates : [];
 	let releaseCandidates;
 	if (isCompiledBinary) {
 		releaseCandidates = [...compiledCandidates, ...baseReleaseCandidates];
 	} else if (stageFromNodeModules) {
 		releaseCandidates = [...stagedCandidates, ...leafCandidates, ...baseReleaseCandidates];
 	} else {
-		releaseCandidates = [...leafCandidates, ...baseReleaseCandidates];
+		releaseCandidates = [
+			...leafCandidates,
+			...baseReleaseCandidates,
+			...(includeVersionedCache ? versionedCandidates : []),
+		];
 	}
 	return [...new Set(releaseCandidates)];
 }
@@ -740,24 +749,27 @@ function installNativeTokioRuntime(bindings) {
 }
 
 
-function buildHelpMessage(ctx) {
+/**
+ * Format actionable recovery steps for a native addon load failure.
+ *
+ * @param {{ isCompiledBinary: boolean; addonFilenames: string[]; versionedDir: string; packageVersion: string }} ctx
+ * @returns {string}
+ */
+export function buildHelpMessage(ctx) {
+	const releasePage = `https://github.com/can1357/oh-my-pi/releases/tag/v${ctx.packageVersion}`;
 	if (ctx.isCompiledBinary) {
 		const expectedPaths = ctx.addonFilenames.map(filename => `  ${path.join(ctx.versionedDir, filename)}`).join("\n");
-		const downloadHints = ctx.addonFilenames
-			.map(filename => {
-				const downloadUrl = `https://github.com/can1357/oh-my-pi/releases/latest/download/${filename}`;
-				const targetPath = path.join(ctx.versionedDir, filename);
-				return `  curl -fsSL "${downloadUrl}" -o "${targetPath}"`;
-			})
-			.join("\n");
 		return (
 			`The compiled binary should extract one of:\n${expectedPaths}\n\n` +
-			`If missing, delete ${ctx.versionedDir} and re-run, or download manually:\n${downloadHints}`
+			`If missing, delete ${ctx.versionedDir} and re-run. If extraction still fails, ` +
+			`reinstall omp v${ctx.packageVersion} from:\n  ${releasePage}`
 		);
 	}
 	return (
 		"If installed via npm/bun, try reinstalling: bun install @oh-my-pi/pi-natives\n" +
 		"If developing locally, build with: bun --cwd=packages/natives run build\n" +
+		`Without a native toolchain, run omp v${ctx.packageVersion} once to populate ${ctx.versionedDir}:\n` +
+		`  ${releasePage}\n` +
 		"Explicit targets: bun scripts/bazel-natives.ts <target> --dest packages/natives/native"
 	);
 }
@@ -816,6 +828,7 @@ export function initLoaderContext(overrides = {}) {
 		addonFilenames,
 		isCompiledBinary,
 		stageFromNodeModules,
+		includeVersionedCache: isWorkspaceLoad,
 		nativeDir,
 		leafPackageDir,
 		execDir,
