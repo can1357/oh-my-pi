@@ -306,7 +306,15 @@ function resolveBulkDirectives(raw: string, stripped: string): Map<number, strin
 const writeSchema = type({
 	path: type("string").describe("file path"),
 	"content?": type("string").describe("file content; required unless `args` targets an xd:// device"),
-	"args?": type("object").describe("typed arguments for an xd:// device; mutually exclusive with content"),
+	// An OPEN record, not `type("object")`: a bare object node declares no properties, and strict
+	// adaptation closes it (`additionalProperties: false`, `properties: {}`), leaving `{}` as the only
+	// value a strict provider could emit — every device call carrying fields would fail wrapped-tool
+	// validation. An explicit open map disqualifies the schema from strict mode instead, so
+	// `adaptSchemaForStrict` fails open to non-strict and the payload survives. `bash.env` is the same
+	// trade, and write-schema-strict.test.ts pins both halves.
+	"args?": type({ "[string]": "unknown" }).describe(
+		"typed arguments for an xd:// device; mutually exclusive with content",
+	),
 });
 
 export type WriteToolInput = typeof writeSchema.infer;
@@ -1395,6 +1403,8 @@ interface WriteRenderArgs {
 	file_path?: unknown;
 	content?: unknown;
 	args?: unknown;
+	/** Raw streamed prefix, fresh every reveal frame (see RAW_PARTIAL_JSON_RENDERERS). */
+	__partialJson?: unknown;
 }
 
 const WRITE_PREVIEW_LINES = 6;
@@ -1423,10 +1433,31 @@ function writeContentOf(args: unknown): string {
 	return typeof content === "string" ? content : "";
 }
 
+/**
+ * The device payload as a (possibly unterminated) JSON string, which is what the mounted renderer's
+ * incremental decode consumes.
+ *
+ * The `__partialJson` fallback is what keeps a typed-args dispatch live while it streams: a `content`
+ * string is decoded incrementally by ToolArgsRevealController's string extractor, but `args` is an
+ * object, so the parsed view only appears when a throttled full parse lands. Slicing the raw prefix
+ * from `"args": {` onward gives the inner renderer the same partial JSON it already handles, so the
+ * preview grows at reveal cadence instead of jumping between parse windows. `bash.env` reads its
+ * streaming prefix the same way.
+ */
 function writeDeviceContentOf(args: WriteRenderArgs): string | undefined {
 	if (typeof args.content === "string") return args.content;
-	if (!isRecord(args.args)) return undefined;
-	return JSON.stringify(args.args);
+	if (isRecord(args.args)) return JSON.stringify(args.args);
+	return partialDeviceArgsOf(args.__partialJson);
+}
+
+const PARTIAL_ARGS_OPENING = /"args"\s*:\s*\{/u;
+
+function partialDeviceArgsOf(partialJson: unknown): string | undefined {
+	if (typeof partialJson !== "string") return undefined;
+	const opening = PARTIAL_ARGS_OPENING.exec(partialJson);
+	if (!opening) return undefined;
+	// From the `{` itself: the tail is the object as far as it has arrived.
+	return partialJson.slice(opening.index + opening[0].length - 1);
 }
 
 function formatLineCountSuffix(lineCount: number, uiTheme: Theme): string {

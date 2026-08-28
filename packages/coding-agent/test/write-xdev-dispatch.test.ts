@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import { adaptSchemaForStrict, toolWireSchema } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as themeModule from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { ToolChoiceQueue } from "@oh-my-pi/pi-coding-agent/session/tool-choice-queue";
@@ -156,6 +157,58 @@ describe("read and write route xd:// device URLs", () => {
 		const result = await write.execute("write-xdev-read", { path: "xd://peek", content: JSON.stringify({ q: "x" }) });
 		expect(result.isError).toBeUndefined();
 		expect(result.details?.xdev).toMatchObject({ tool: "peek", mode: "execute", tier: "read" });
+	});
+
+	// A bare `type("object")` for `args` survives the wire pass untouched, and strict adaptation then
+	// CLOSES it — `additionalProperties: false` with an empty `properties` map — so an OpenAI/Codex
+	// strict path can only emit `args: {}` and every real device call fails validation. The open record
+	// disqualifies the schema from strict mode instead, which `adaptSchemaForStrict` reports by failing
+	// open to non-strict and returning the schema unchanged (the same trade `bash.env` makes).
+	it("keeps typed device args open in the provider wire schema", () => {
+		const write = new WriteTool(xdevSession(process.cwd()));
+		const wire = toolWireSchema(write as unknown as AgentTool);
+		const wireArgs = (wire.properties as Record<string, Record<string, unknown>>).args;
+
+		expect(wireArgs.type).toBe("object");
+		expect(wireArgs.additionalProperties).toBe(true);
+
+		const adapted = adaptSchemaForStrict(wire, true);
+		expect(adapted.strict).toBe(false);
+		const adaptedArgs = (adapted.schema.properties as Record<string, Record<string, unknown>>).args;
+		expect(adaptedArgs.additionalProperties).toBe(true);
+		expect(adaptedArgs.properties).toEqual({});
+	});
+
+	// `content` is decoded incrementally by the streamed-args reveal; a typed `args` object is not, so
+	// the renderer has to read the raw prefix or the mounted card sits blank between full parses.
+	it("renders a typed-args device dispatch while it is still streaming", async () => {
+		await themeModule.initTheme();
+		const uiTheme = (await themeModule.getThemeByName("dark")) ?? (await themeModule.getThemeByName("light"));
+		if (!uiTheme) throw new Error("expected an initialized theme");
+		const options = { expanded: false, isPartial: true };
+
+		// Mid-stream: `args` has not closed, so no parse has produced an object yet.
+		const streaming = writeToolRenderer.renderCall(
+			{
+				path: "xd://mcp__ecoport_search",
+				__partialJson: '{"path":"xd://mcp__ecoport_search","args":{"pattern":"Broken","scope":"game.Sta',
+			},
+			options,
+			uiTheme,
+		);
+		expect(streaming).toBeDefined();
+		const streamingText = Bun.stripANSI(streaming!.render(120).join("\n"));
+		expect(streamingText).toContain("ecoport/search");
+		expect(streamingText).toContain("Broken");
+
+		// No `args` in the prefix yet: still nothing to show, and nothing invented.
+		expect(
+			writeToolRenderer.renderCall(
+				{ path: "xd://mcp__ecoport_search", __partialJson: '{"path":"xd://mcp__ecoport_sea' },
+				options,
+				uiTheme,
+			),
+		).toBeUndefined();
 	});
 
 	it("resolves device dispatches against the device's user policy, falling back to write's", async () => {
