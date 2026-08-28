@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
+import { parseFileSelection, parseVerdict } from "../src/cli/git-tui/ai-stage";
 import { AvatarLoader } from "../src/cli/git-tui/avatar";
 import { Sidebar, type SidebarAction } from "../src/cli/git-tui/sidebar";
 import { GitModel } from "../src/cli/git-tui/state";
@@ -78,7 +79,7 @@ class SidebarHarness {
 	/** Apply the last raised stage/unstage action the way GitTuiComponent#runAction does. */
 	async applyLastAction(): Promise<void> {
 		const action = this.actions.at(-1);
-		if (!action || action.type === "commit" || action.type === "generate")
+		if (!action || (action.type !== "stage" && action.type !== "unstage"))
 			throw new Error("no stage/unstage action was raised");
 		if (action.type === "stage") await this.model.stage(action.selection?.files);
 		else await this.model.unstage(action.selection?.files);
@@ -168,29 +169,34 @@ describe("git tui sidebar staging", () => {
 			expect(model.unstaged.map(file => file.path).sort()).toEqual(["a/one.txt", "a/two.txt", "b/three.txt"]);
 		});
 	});
-	test("pure additions form their own list; staging their dir skips modified siblings", async () => {
+	test("staging a directory with mixed tracked and untracked files stages both", async () => {
 		await withMixedRepo(async harness => {
 			const { sidebar, model, actions } = harness;
-			// Targets: [Stage All] → dir a/ (changes) → a/tracked.txt → dir a/ (additions) → a/new.txt.
+			// Targets: [Stage All] → dir a/ → a/tracked.txt → a/new.txt.
 			sidebar.handleInput("j");
 			expect(sidebar.selected?.kind).toBe("dir");
 			sidebar.handleInput("j");
 			expect(sidebar.selectedFile?.path).toBe("a/tracked.txt");
 			sidebar.handleInput("j");
-			expect(sidebar.selected?.kind).toBe("dir");
-			sidebar.handleInput("j");
 			expect(sidebar.selectedFile?.path).toBe("a/new.txt");
 
-			// Space on the additions-list a/ dir stages only the new file, not the modified sibling.
+			// Space on the a/ dir stages the modified and the untracked file alike.
+			sidebar.handleInput("k");
 			sidebar.handleInput("k");
 			sidebar.handleInput(" ");
 			expect(actions.at(-1)).toEqual({
 				type: "stage",
-				selection: { files: [expect.objectContaining({ path: "a/new.txt" })], label: "a/" },
+				selection: {
+					files: [
+						expect.objectContaining({ path: "a/tracked.txt" }),
+						expect.objectContaining({ path: "a/new.txt" }),
+					],
+					label: "a/",
+				},
 			});
 			await harness.applyLastAction();
-			expect(model.staged.map(file => file.path)).toEqual(["a/new.txt"]);
-			expect(model.unstaged.map(file => file.path)).toEqual(["a/tracked.txt"]);
+			expect(model.staged.map(file => file.path).sort()).toEqual(["a/new.txt", "a/tracked.txt"]);
+			expect(model.unstaged).toEqual([]);
 		});
 	});
 	test("clicking the section header label folds it instead of staging everything", async () => {
@@ -236,6 +242,29 @@ describe("git tui sidebar staging", () => {
 		});
 	});
 
+	test("wheel scroll away from the selection survives idle re-renders", async () => {
+		await withDirtyRepo(async ({ sidebar }) => {
+			const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, "");
+			// Select the last file so the follow-selection clamp scrolls the list down.
+			for (let i = 0; i < 5; i++) sidebar.handleInput("j");
+			expect(sidebar.selectedFile?.path).toBe("b/three.txt");
+			const scrolled = sidebar.render(40, 12);
+			expect(strip(scrolled[0] ?? "")).not.toContain("file change");
+
+			// Wheel back to the top; an idle re-render (2s refresh tick) must not
+			// snap the viewport back down to keep the selection visible.
+			sidebar.handleWheel(-4);
+			sidebar.render(40, 12);
+			const idle = sidebar.render(40, 12);
+			expect(strip(idle[0] ?? "")).toContain("file change");
+
+			// An explicit selection change still pulls the row into view.
+			sidebar.handleInput("j");
+			const followed = sidebar.render(40, 12);
+			expect(followed.some(line => strip(line).includes("Staged Files"))).toBe(true);
+		});
+	});
+
 	test("empty commit action generates before a populated action commits", async () => {
 		await withDirtyRepo(async ({ sidebar, actions }) => {
 			sidebar.handleInput("G");
@@ -262,5 +291,82 @@ describe("git tui sidebar staging", () => {
 				stageAll: true,
 			});
 		});
+	});
+	test("wand pill opens the AI textbox; enter raises stage-ai with the typed prompt", async () => {
+		await withDirtyRepo(async ({ sidebar, actions }) => {
+			sidebar.setFocused(true);
+			const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, "");
+			const lines = sidebar.render(44, 30);
+			const headerRow = lines.findIndex(line => strip(line).includes("Unstaged Files"));
+			const header = strip(lines[headerRow] ?? "");
+			// Non-nerd preset renders the wand pill as ✦ next to Stage All.
+			const wandCol = header.indexOf("✦");
+			expect(wandCol).toBeGreaterThan(header.indexOf("Stage All"));
+
+			// Clicking the wand opens the textbox row under the header without staging anything.
+			sidebar.handleClick(headerRow, wandCol);
+			expect(actions).toEqual([]);
+			expect(sidebar.editing).toBe(true);
+
+			for (const ch of "all comment changes") sidebar.handleInput(ch);
+			sidebar.handleInput("\r");
+			expect(actions).toEqual([{ type: "stage-ai", prompt: "all comment changes" }]);
+			// Submission closes the box and clears the typed prompt.
+			expect(sidebar.aiInput.getValue()).toBe("");
+			expect(sidebar.render(44, 30).some(line => strip(line).includes("What should we stage?"))).toBe(false);
+		});
+	});
+
+	test("escape closes the AI textbox without raising an action and clears the draft", async () => {
+		await withDirtyRepo(async ({ sidebar, actions }) => {
+			sidebar.setFocused(true);
+			const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, "");
+			const lines = sidebar.render(44, 30);
+			const headerRow = lines.findIndex(line => strip(line).includes("Unstaged Files"));
+			sidebar.handleClick(headerRow, strip(lines[headerRow] ?? "").indexOf("✦"));
+			for (const ch of "abc") sidebar.handleInput(ch);
+
+			expect(sidebar.handleEscape()).toBe(true);
+			expect(actions).toEqual([]);
+			expect(sidebar.aiInput.getValue()).toBe("");
+			// Empty prompt + enter must not raise an action either.
+			sidebar.handleClick(headerRow, strip(lines[headerRow] ?? "").indexOf("✦"));
+			sidebar.handleInput("\r");
+			expect(actions).toEqual([]);
+		});
+	});
+});
+
+describe("git tui ai-stage file selection parsing", () => {
+	const paths = ["src/a.ts", "src/b.ts", "docs/notes.md"];
+
+	test("verbatim echoes pick, with or without list decoration", () => {
+		expect(parseFileSelection("src/a.ts\ndocs/notes.md", paths)).toEqual([1, 3]);
+		// Bullets and the "(kind, +a −d)" annotation from the presented list survive.
+		expect(parseFileSelection("- src/b.ts (modified, +4 −2)", paths)).toEqual([2]);
+		expect(parseFileSelection("none", paths)).toEqual([]);
+		expect(parseFileSelection("", paths)).toEqual([]);
+	});
+
+	test("prose mentions pick on path boundaries only", () => {
+		expect(parseFileSelection("I would stage src/a.ts and nothing else", paths)).toEqual([1]);
+		// `src/a.ts` inside a longer path is a different file, not a pick.
+		expect(parseFileSelection("- vendored/src/a.ts", paths)).toEqual([]);
+		expect(parseFileSelection("maybe src/a.ts.bak", paths)).toEqual([]);
+	});
+});
+
+describe("git tui ai-stage verdict parsing", () => {
+	test("earliest bare yes accepts; no, mixed order, and noise reject", () => {
+		expect(parseVerdict("yes")).toBe(true);
+		expect(parseVerdict("Yes.")).toBe(true);
+		expect(parseVerdict("I would say yes")).toBe(true);
+		expect(parseVerdict("no")).toBe(false);
+		expect(parseVerdict("no, though parts could be yes")).toBe(false);
+		expect(parseVerdict("yes — but actually no")).toBe(true);
+		expect(parseVerdict("")).toBe(false);
+		expect(parseVerdict("maybe")).toBe(false);
+		// Substrings must not match: "eyes"/"nose" carry no verdict.
+		expect(parseVerdict("eyes nose")).toBe(false);
 	});
 });

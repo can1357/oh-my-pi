@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [18.0.9] - 2026-08-28
+
+### Fixed
+
+- Improved OAuth sign-in flows, including a fallback message when the browser cannot automatically close the OAuth success tab.
+- Fixed Cloudflare AI Gateway onboarding and routing so gateway account and endpoint configuration is preserved correctly while gateway credentials are not sent as upstream OpenAI authorization headers.
+- Fixed Codex OAuth quota handling so chat and Spark usage remain independent, legacy shared quota limits continue to work, and incomplete usage reports are not incorrectly treated as unlimited.
+
+## [18.0.8] - 2026-08-27
+
 ### Added
 
 - Added Z.AI GLM Coding Plan usage tracking: credit-based `CREDIT_LIMIT` windows (5h + weekly) now surface in `omp usage` and the status line with the plan tier (`plan: lite/pro/max`).

@@ -21,6 +21,7 @@ import type { OutputMeta } from "../tools/output-meta";
 import { normalizeLocalScheme } from "../tools/path-utils";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { callTool } from "./client";
+import { formatMCPToolFailure, MCPTransportError } from "./errors";
 import { renderMCPCall, renderMCPResult } from "./render";
 import type {
 	MCPAuthChallenge,
@@ -50,9 +51,19 @@ const RETRIABLE_PATTERNS = [
 	"transport closed",
 	"network error",
 ];
-
 export function isRetriableConnectionError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
+	if (error instanceof MCPTransportError) {
+		if (
+			error.failure === "connect" ||
+			error.failure === "reset" ||
+			error.failure === "eof" ||
+			error.failure === "closed"
+		) {
+			return error.retryable;
+		}
+		return error.failure === "http_status" && (error.code === 404 || error.code === 502 || error.code === 503);
+	}
 	const msg = error.message.toLowerCase();
 	// Stale session (server restarted, old session ID is gone)
 	if (/^http (404|502|503):/.test(msg)) return true;
@@ -267,9 +278,9 @@ function buildErrorResult(
 	provider?: string,
 	providerName?: string,
 ): CustomToolResult<MCPToolDetails> {
-	const message = error instanceof Error ? error.message : String(error);
+	const message = formatMCPToolFailure(error, serverName, mcpToolName);
 	return {
-		content: [{ type: "text", text: `MCP error: ${message}` }],
+		content: [{ type: "text", text: message }],
 		details: { serverName, mcpToolName, isError: true, provider, providerName },
 		isError: true,
 	};

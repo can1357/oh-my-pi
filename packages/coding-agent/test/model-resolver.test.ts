@@ -452,6 +452,46 @@ describe("pickDefaultAvailableModel", () => {
 		expect(pickDefaultAvailableModel([paid, oauth])?.provider).toBe("xai-oauth");
 		expect(pickDefaultAvailableModel([paid])?.provider).toBe("xai");
 	});
+
+	test("prefers a concretely-authed provider over a sentinel-only ambient provider (issue #9967)", () => {
+		const bedrockDefault = createBedrockDefaultModel();
+		const anthropicDefault = createOpusModel("anthropic", DEFAULT_MODEL_PER_PROVIDER.anthropic, "Claude Opus");
+		// amazon-bedrock leads in catalog/availability order, exactly as
+		// `getAvailable()` returns it when a stray ~/.aws profile makes Bedrock
+		// ambiently "available" alongside a real Anthropic OAuth login.
+		const models = [bedrockDefault, anthropicDefault];
+
+		// Without the credential hint the ambient provider still wins by order —
+		// this is the reported bug (403 on the first turn).
+		expect(pickDefaultAvailableModel(models)?.provider).toBe("amazon-bedrock");
+
+		// With the hint, the provider the user actually signed into wins.
+		const picked = pickDefaultAvailableModel(models, provider => provider === "anthropic");
+		expect(picked?.provider).toBe("anthropic");
+		expect(picked?.id).toBe(DEFAULT_MODEL_PER_PROVIDER.anthropic);
+	});
+
+	test("keeps a sentinel-only provider when it is the only credentialed option", () => {
+		const bedrockDefault = createBedrockDefaultModel();
+		const picked = pickDefaultAvailableModel([bedrockDefault], () => false);
+		expect(picked?.provider).toBe("amazon-bedrock");
+		expect(picked?.id).toBe(DEFAULT_MODEL_PER_PROVIDER["amazon-bedrock"]);
+	});
+
+	test("checks concrete auth once per provider", () => {
+		const bedrockDefault = createBedrockDefaultModel();
+		const secondBedrockModel = createBedrockDefaultModel({ id: "us.anthropic.claude-sonnet-4-6" });
+		const anthropicDefault = createOpusModel("anthropic", DEFAULT_MODEL_PER_PROVIDER.anthropic, "Claude Opus");
+		const checkedProviders: string[] = [];
+
+		const picked = pickDefaultAvailableModel([bedrockDefault, secondBedrockModel, anthropicDefault], provider => {
+			checkedProviders.push(provider);
+			return provider === "anthropic";
+		});
+
+		expect(picked?.provider).toBe("anthropic");
+		expect(checkedProviders).toEqual(["amazon-bedrock", "anthropic"]);
+	});
 });
 
 describe("parseModelPattern", () => {
