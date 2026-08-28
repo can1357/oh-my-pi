@@ -4,7 +4,7 @@
  * Extends the base AgentMessage type with coding-agent specific message types,
  * and provides a transformer to convert them to LLM-compatible messages.
  */
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, isSyntheticToolResultMessage } from "@oh-my-pi/pi-agent-core";
 import {
 	invalidateMessageCache,
 	registerMessageCacheInvalidator,
@@ -474,6 +474,46 @@ export function isUserInterruptAbort(message: Pick<AssistantMessage, "errorId" |
 
 export function shouldRenderAbortReason(message: Pick<AssistantMessage, "errorId" | "errorMessage">): boolean {
 	return !isSilentAbort(message) && !isUserInterruptAbort(message);
+}
+
+/**
+ * Find the user-interrupted assistant turn at the tail of `messages` that
+ * `/continue` can resume as assistant prefill.
+ *
+ * After an Esc abort the session appends sanctioned internal continuity records
+ * *after* the aborted assistant, so the literal tail is not always the assistant:
+ * - a hidden {@link INTERRUPTED_THINKING_MESSAGE_TYPE} continuity note when a
+ *   meaningful unsigned thinking run was demoted, and
+ * - one synthetic `tool_result` placeholder per tool call the abort interrupted
+ *   (see {@link createAbortedToolResult}).
+ *
+ * This helper walks back over those records and returns the aborted assistant
+ * only when it is a genuine user interrupt (`stopReason === "aborted"` AND
+ * {@link isUserInterruptAbort}). Internal/lifecycle aborts (plan-mode
+ * compaction, streaming-edit, TTSR `SilentAbort`) are deliberately excluded so
+ * `/continue` never advertises or replays a turn the runtime ended on its own.
+ *
+ * Returns `undefined` when the tail is not a resumable user-interrupt.
+ */
+export function findResumableAbortedAssistant(messages: readonly AgentMessage[]): AssistantMessage | undefined {
+	let index = messages.length - 1;
+	while (index >= 0) {
+		const candidate = messages[index];
+		if (candidate?.role === "custom" && candidate.customType === INTERRUPTED_THINKING_MESSAGE_TYPE) {
+			index--;
+			continue;
+		}
+		if (isSyntheticToolResultMessage(candidate)) {
+			index--;
+			continue;
+		}
+		break;
+	}
+	const tail = messages[index] as AssistantMessage | undefined;
+	if (tail?.role !== "assistant") return undefined;
+	if (tail.stopReason !== "aborted") return undefined;
+	if (!isUserInterruptAbort(tail)) return undefined;
+	return tail;
 }
 
 /** A provider-rejection turn carrying nothing but the error flag: stopReason

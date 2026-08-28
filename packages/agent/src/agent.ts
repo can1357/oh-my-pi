@@ -1248,7 +1248,16 @@ export class Agent {
 				}
 				throw new Error("No messages to continue from");
 			}
-			if (messages[messages.length - 1].role === "assistant") {
+			const lastMessage = messages[messages.length - 1] as AssistantMessage | undefined;
+			if (lastMessage?.role === "assistant" && !this.hasQueuedMessages() && lastMessage.stopReason === "aborted") {
+				// An aborted (user-interrupted) partial assistant turn is the one
+				// resumable assistant tail: runLoop replays it as prefill so the
+				// model continues where the stream was cut off. Any other assistant
+				// tail still requires queued messages or throws below.
+				await this.#runLoop(undefined, undefined, signal, true);
+				return;
+			}
+			if (lastMessage?.role === "assistant") {
 				const queuedSteering = await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal);
 				if (queuedSteering.length > 0) {
 					await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true }, signal, true);

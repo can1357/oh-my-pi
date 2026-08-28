@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- `/continue` command resumes a response you interrupted with Esc — the model picks up exactly where it stopped, with no extra message added to the conversation.
 
 ## [18.0.9] - 2026-08-28
 

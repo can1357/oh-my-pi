@@ -305,6 +305,7 @@ import {
 	demoteInterruptedThinking,
 	didSessionMessagesChange,
 	type FileMentionMessage,
+	findResumableAbortedAssistant,
 	type HookMessage,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	type InterruptedThinkingDetails,
@@ -7950,6 +7951,34 @@ export class AgentSession {
 	/** Retry the last failed assistant turn when the session is idle. */
 	retry(): Promise<boolean> {
 		return this.#recovery.retry();
+	}
+
+	/**
+	 * Resume a user-interrupted (aborted) assistant turn without appending any
+	 * user-visible message. Returns false when there is no aborted assistant
+	 * tail to resume or the session is busy.
+	 */
+	continueInterrupted(): boolean {
+		if (this.isStreaming || this.isCompacting || this.#recovery.isRetrying) return false;
+		const messages = this.agent.state.messages;
+		const tail = findResumableAbortedAssistant(messages);
+		if (!tail) return false;
+		// `findResumableAbortedAssistant` walks back over the sanctioned trailing
+		// continuity records the session appends after an Esc abort (the hidden
+		// `interrupted-thinking` note and synthetic tool-result placeholders).
+		// `Agent.continue()` only enters its assistant-prefill branch when the
+		// aborted assistant is the literal last message, so drop those records
+		// here — otherwise the provider request tail would be the continuity note
+		// / failed tool result instead of the partial assistant the user is
+		// actually resuming. Preserve tool-result placeholders when the assistant
+		// tail is itself a tool call: removing them would leave a dangling
+		// tool_call the provider rejects.
+		const tailIndex = messages.indexOf(tail);
+		if (tailIndex < messages.length - 1 && tail.content[tail.content.length - 1]?.type !== "toolCall") {
+			this.agent.replaceMessages(messages.slice(0, tailIndex + 1));
+		}
+		this.#scheduleAgentContinue();
+		return true;
 	}
 
 	// =========================================================================

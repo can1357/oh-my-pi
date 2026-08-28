@@ -556,11 +556,12 @@ export function agentLoop(
 
 /**
  * Continue an agent loop from the current context without adding a new message.
- * Used for retries - context already has user message or tool results.
+ * Used for retries and resuming queued messages.
  *
  * **Important:** The last message in context must convert to a `user` or `toolResult` message
- * via `convertToLlm`. If it doesn't, the LLM provider will reject the request.
- * This cannot be validated here since `convertToLlm` is only called once per turn.
+ * via `convertToLlm`. The one exception is a trailing assistant message with
+ * `stopReason: "aborted"` (a user-interrupted partial turn): it is replayed as
+ * assistant prefill so the model continues where the stream was cut off.
  */
 export function agentLoopContinue(
 	context: AgentContext,
@@ -572,8 +573,11 @@ export function agentLoopContinue(
 		throw new Error("Cannot continue: no messages in context");
 	}
 
-	if (context.messages[context.messages.length - 1].role === "assistant") {
-		throw new Error("Cannot continue from message role: assistant");
+	if (context.messages[context.messages.length - 1]?.role === "assistant") {
+		const tail = context.messages[context.messages.length - 1] as AssistantMessage;
+		if (tail.stopReason !== "aborted") {
+			throw new Error("Cannot continue from message role: assistant");
+		}
 	}
 
 	const stream = createAgentStream();
