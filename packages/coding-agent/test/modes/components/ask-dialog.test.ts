@@ -1665,7 +1665,6 @@ describe("AskDialogComponent", () => {
 		}
 		expect(lines.some(line => line.includes("○"))).toBe(true);
 		const footer = [...lines].reverse().find(line => line.includes("cancel") || line.includes("Enter")) ?? "";
-		expect(footer.trim().length).toBeGreaterThan(0);
 		expect(footer).toContain("cancel");
 	});
 
