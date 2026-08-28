@@ -2773,7 +2773,7 @@ async function installExtensionGraphHook(
 	commonJsPaths: Set<string>,
 	synchronousSourcePaths: ReadonlySet<string>,
 	cacheBustResolvedImportModules: ReadonlySet<string>,
-): Promise<{ asyncModules: Map<string, string> }> {
+): Promise<{ asyncModules: Map<string, string>; commonJsSources: Map<string, string> }> {
 	const asyncModules = new Map<string, string>();
 	const synchronousModuleSources = new Map<string, string>();
 	const commonJsSources = new Map<string, string>();
@@ -2850,6 +2850,7 @@ async function installExtensionGraphHook(
 					if (graphLoadTag(args.path) !== loadContext.loadTag) return;
 					const sourcePath = graphSourcePath(args.path);
 					let source = commonJsSources.get(sourcePath);
+					if (source !== undefined) commonJsSources.delete(sourcePath);
 					if (source === undefined) {
 						const pinned = loadContext.pinnedSources?.get(sourcePath);
 						if (pinned !== undefined) {
@@ -2895,7 +2896,7 @@ async function installExtensionGraphHook(
 			},
 		});
 	}
-	return { asyncModules };
+	return { asyncModules, commonJsSources };
 }
 
 /**
@@ -2940,7 +2941,7 @@ async function ensureExtensionGraphHook(
 		commonJsModuleSources.set(moduleKey, prepared);
 		commonJsGraphModulePaths.add(moduleKey);
 	}
-	const { asyncModules } = await installExtensionGraphHook(
+	const { asyncModules, commonJsSources } = await installExtensionGraphHook(
 		entryRealPath,
 		loadContext,
 		currentModules,
@@ -2951,6 +2952,7 @@ async function ensureExtensionGraphHook(
 	return {
 		clear() {
 			asyncModules.clear();
+			commonJsSources.clear();
 		},
 	};
 }
