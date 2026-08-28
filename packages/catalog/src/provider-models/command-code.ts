@@ -61,7 +61,7 @@ export function commandCodeModelManagerOptions(config?: ModelManagerConfig): Mod
 
 	return {
 		providerId: "command-code",
-		cacheProviderId: resolveModelCacheProviderId("command-code", { baseUrl: discoveryBaseUrl }),
+		cacheProviderId: resolveModelCacheProviderId("command-code", { apiKey, baseUrl: discoveryBaseUrl }),
 		dynamicModelsAuthoritative: true,
 		...(apiKey && {
 			fetchDynamicModels: () =>

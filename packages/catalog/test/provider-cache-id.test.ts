@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { PROVIDER_DESCRIPTORS, resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
+import {
+	isCredentialScopedModelCacheProvider,
+	PROVIDER_DESCRIPTORS,
+	resolveModelCacheProviderId,
+} from "@oh-my-pi/pi-catalog/provider-models";
 
 test("lightweight cache resolver matches every descriptor default", () => {
 	for (const descriptor of PROVIDER_DESCRIPTORS) {
@@ -35,12 +39,26 @@ test("ollama cache scope preserves reverse-proxy path prefixes", () => {
 
 test("command-code cache scope follows the normalized discovery endpoint", () => {
 	const teamA = resolveModelCacheProviderId("command-code", {
+		apiKey: "team-a-key",
 		baseUrl: "https://proxy.example/team-a/provider/v1/",
 	});
 	expect(teamA).toBe(
-		resolveModelCacheProviderId("command-code", { baseUrl: "https://proxy.example/team-a/provider" }),
+		resolveModelCacheProviderId("command-code", {
+			apiKey: "team-a-key",
+			baseUrl: "https://proxy.example/team-a/provider",
+		}),
 	);
 	expect(teamA).not.toBe(
-		resolveModelCacheProviderId("command-code", { baseUrl: "https://proxy.example/team-b/provider/v1" }),
+		resolveModelCacheProviderId("command-code", {
+			apiKey: "team-a-key",
+			baseUrl: "https://proxy.example/team-b/provider/v1",
+		}),
 	);
+	expect(teamA).not.toBe(
+		resolveModelCacheProviderId("command-code", {
+			apiKey: "team-b-key",
+			baseUrl: "https://proxy.example/team-a/provider/v1",
+		}),
+	);
+	expect(isCredentialScopedModelCacheProvider("command-code")).toBe(true);
 });

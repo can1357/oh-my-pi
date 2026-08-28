@@ -6,6 +6,7 @@ export interface ModelCacheProviderIdOptions {
 }
 
 const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = {
+	"command-code": true,
 	"opencode-go": true,
 	"opencode-zen": true,
 	"github-copilot": true,
@@ -57,7 +58,8 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			const configuredBaseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			const trimmedBaseUrl = configuredBaseUrl.trim().replace(/\/+$/, "");
 			const discoveryBaseUrl = trimmedBaseUrl.endsWith("/v1") ? trimmedBaseUrl : `${trimmedBaseUrl}/v1`;
-			return `command-code:models-v1:${Bun.hash(discoveryBaseUrl).toString(36)}`;
+			const scope = `${options.apiKey ?? ""}\u0000${discoveryBaseUrl}`;
+			return `command-code:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		case "ollama":
 			return resolveOllamaModelCacheProviderId(providerId, options.baseUrl);
