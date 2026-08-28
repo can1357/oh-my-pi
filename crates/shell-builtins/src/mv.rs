@@ -1164,7 +1164,7 @@ fn rename_symlink_fallback(host: &mut Host, from: &Path, to: &Path) -> io::Resul
 	unix::fs::symlink(path_symlink_points_to, host.resolve(to))?;
 	#[cfg(not(any(target_os = "macos", target_os = "redox")))]
 	{
-		let _ = copy_xattrs_if_supported(host, from, to);
+		let _ = copy_link_xattrs_if_supported(host, from, to);
 	}
 	fs::remove_file(host.resolve(from))
 }
@@ -1500,6 +1500,17 @@ fn rename_file_fallback(
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
 fn copy_xattrs_if_supported(host: &Host, from: &Path, to: &Path) -> io::Result<()> {
 	match fsxattr::copy_xattrs(host.resolve(from), host.resolve(to)) {
+		Ok(()) => Ok(()),
+		Err(e) if e.raw_os_error() == Some(libc::EOPNOTSUPP) => Ok(()),
+		Err(e) => Err(e),
+	}
+}
+
+/// Same as [`copy_xattrs_if_supported`] but for symlinks: the `l`-prefixed
+/// xattr syscalls operate on the link itself, never on the file it names.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+fn copy_link_xattrs_if_supported(host: &Host, from: &Path, to: &Path) -> io::Result<()> {
+	match fsxattr::copy_link_xattrs(host.resolve(from), host.resolve(to)) {
 		Ok(()) => Ok(()),
 		Err(e) if e.raw_os_error() == Some(libc::EOPNOTSUPP) => Ok(()),
 		Err(e) => Err(e),
