@@ -156,9 +156,9 @@ async fn run_inner(args: AcpArgs) -> miette::Result<()> {
 		&prompt_discovery_settings,
 	)
 	.content;
-	let catalog = snapshot::Catalog::try_embedded().into_diagnostic()?;
+	let catalog = omp_driver::registry::production_catalog(&data_dir).into_diagnostic()?;
 	let roles = omp_driver::discovery::roles::resolve_launch_roles(
-		catalog,
+		catalog.as_ref(),
 		&model_settings,
 		args.model.as_deref(),
 		args.smol.as_deref(),
@@ -169,25 +169,7 @@ async fn run_inner(args: AcpArgs) -> miette::Result<()> {
 	let model = roles
 		.primary
 		.ok_or_else(|| miette!("acp mode requires a configured default model role"))?;
-	let mut models = catalog
-		.models()
-		.iter()
-		.filter_map(|entry| {
-			let (provider, model) = entry.key.as_str().split_once('/')?;
-			model_settings
-				.model_allowed(provider, model)
-				.then(|| entry.key.as_str().to_owned())
-		})
-		.collect::<Vec<_>>();
-	models.sort_by_key(|selector| {
-		let (provider, model) = selector.split_once('/').unwrap_or(("", selector.as_str()));
-		(
-			model_settings
-				.model_rank(provider, model)
-				.unwrap_or(usize::MAX),
-			selector.clone(),
-		)
-	});
+	let models = admitted_models(catalog.as_ref(), &model_settings);
 	let cycle_selectors = args.models.as_ref().map_or_else(
 		|| {
 			model_settings
@@ -201,9 +183,13 @@ async fn run_inner(args: AcpArgs) -> miette::Result<()> {
 	let mut cycle_models = cycle_selectors
 		.iter()
 		.filter_map(|selector| {
-			omp_driver::discovery::roles::resolve_role_selector(catalog, &model_settings, selector)
-				.ok()
-				.map(|selected| selected.model.as_str().to_owned())
+			omp_driver::discovery::roles::resolve_role_selector(
+				catalog.as_ref(),
+				&model_settings,
+				selector,
+			)
+			.ok()
+			.map(|selected| selected.model.as_str().to_owned())
 		})
 		.collect::<Vec<_>>();
 	cycle_models.extend(models);
@@ -1301,6 +1287,20 @@ impl Runtime {
 		self.open_session(None, Some(source), &inherited).await
 	}
 
+	fn apply_acp_session_open(
+		launch_policy: &mut HeadlessLaunchPolicy,
+		resume: Option<Str>,
+		fork: Option<Str>,
+	) {
+		let Some(session) = fork
+			.map(HeadlessSessionOpen::Fork)
+			.or_else(|| resume.map(HeadlessSessionOpen::Resume))
+		else {
+			return;
+		};
+		launch_policy.session = session;
+	}
+
 	async fn open_session(
 		self: &Arc<Self>,
 		resume: Option<Str>,
@@ -1335,6 +1335,7 @@ impl Runtime {
 				generation,
 			)
 		};
+		Self::apply_acp_session_open(&mut launch_policy, resume, fork);
 		let root = canonical_session_root(required_text(params, "cwd")?)?;
 		let home = env::var_os("HOME").map_or_else(|| root.clone(), PathBuf::from);
 		let mut paths = SettingsPaths::discover(&data_dir, Some(&root));
@@ -1346,9 +1347,9 @@ impl Runtime {
 			.into_diagnostic()?
 			.get()
 			.resolve_path_scopes(&root, &home);
-		let catalog = snapshot::Catalog::try_embedded().into_diagnostic()?;
+		let catalog = omp_driver::registry::production_catalog(&data_dir).into_diagnostic()?;
 		let resolved = omp_driver::discovery::roles::resolve_launch_roles(
-			catalog,
+			catalog.as_ref(),
 			&model_settings,
 			explicit_model.as_deref(),
 			None,
@@ -1360,16 +1361,7 @@ impl Runtime {
 			.primary
 			.map(|model| model.as_str().to_owned())
 			.unwrap_or(default_model);
-		let models = catalog
-			.models()
-			.iter()
-			.filter_map(|entry| {
-				let (provider, model) = entry.key.as_str().split_once('/')?;
-				model_settings
-					.model_allowed(provider, model)
-					.then(|| entry.key.as_str().to_owned())
-			})
-			.collect::<Vec<_>>();
+		let models = admitted_models(catalog.as_ref(), &model_settings);
 		let mode = params
 			.get("modeId")
 			.and_then(Value::as_str)
@@ -1388,38 +1380,36 @@ impl Runtime {
 			.get("thinking")
 			.and_then(Value::as_str)
 			.unwrap_or(&default_thinking);
-		let thinking = clamp_thinking_level(model, requested)?.to_owned();
-		launch_policy.session = if let Some(source) = fork {
-			HeadlessSessionOpen::Fork(source)
-		} else if let Some(source) = resume {
-			HeadlessSessionOpen::Resume(source)
-		} else {
-			launch_policy.session
+		let options = HeadlessSessionOptions {
+			project: root.clone(),
+			settings_overlays,
+			additional_roots,
+			model: Str::from(model),
+			initial_regime: (mode == "plan").then_some("plan"),
+			initial_prompt_slot: None,
+			plan_handoff: None,
+			resume: None,
+			fork: None,
+			py_eval: false,
+			approval_mode: None,
+			pty_denied: false,
+			credential_provider: None,
+			api_key: None,
+			prompt_cache_affinity: None,
+			session_generation: generation,
 		};
-		let mut headless = HeadlessSession::open_with_policy(
-			data_dir,
-			HeadlessSessionOptions {
-				project: root.clone(),
-				settings_overlays,
-				additional_roots,
-				model: Str::from(model),
-				initial_regime: (mode == "plan").then_some("plan"),
-				initial_prompt_slot: None,
-				plan_handoff: None,
-				resume: None,
-				fork: None,
-				py_eval: false,
-				approval_mode: None,
-				pty_denied: false,
-				credential_provider: None,
-				api_key: None,
-				prompt_cache_affinity: None,
-				session_generation: generation,
-			},
-			launch_policy,
-		)
-		.await
-		.into_diagnostic()?;
+		let effective_model =
+			HeadlessSession::preview_effective_model(&data_dir, &options, &launch_policy)
+				.into_diagnostic()?
+				.as_str()
+				.to_owned();
+		validate_thinking_for_model(catalog.as_ref(), &effective_model, requested)?;
+		let mut headless = HeadlessSession::open_with_policy(data_dir, options, launch_policy)
+			.await
+			.into_diagnostic()?;
+		for notice in headless.take_notices() {
+			eprintln!("{notice}");
+		}
 		if mode == "plan" {
 			headless.publish(AgentEvent::PlanStateChanged {
 				from:               PlanState::Inactive,
@@ -1427,6 +1417,9 @@ impl Runtime {
 				session_generation: generation,
 			});
 		}
+		let effective_model = headless.model().as_str().to_owned();
+		let thinking =
+			clamp_thinking_level(catalog.as_ref(), &effective_model, requested)?.to_owned();
 		headless.set_thinking(reasoning_for(&thinking));
 		let session_id = Str::from(headless.session_id());
 		if capabilities.elicitation {
@@ -1473,7 +1466,7 @@ impl Runtime {
 			events,
 			meta: Mutex::new(AcpSessionMeta {
 				title: None,
-				model: model.to_owned(),
+				model: effective_model,
 				mode: mode.to_owned(),
 				thinking,
 				replay,
@@ -2065,8 +2058,10 @@ impl Runtime {
 		let requested = required_text(params, "thinking")?;
 		let session_id = Str::from(required_text(params, "sessionId")?);
 		let session = self.session(&session_id)?;
+		let data_dir = self.state.lock().data_dir.clone();
+		let catalog = omp_driver::registry::production_catalog(&data_dir).into_diagnostic()?;
 		let model = session.meta.lock().model.clone();
-		let thinking = clamp_thinking_level(&model, requested)?.to_owned();
+		let thinking = clamp_thinking_level(catalog.as_ref(), &model, requested)?.to_owned();
 		session
 			.asynchronous
 			.headless
@@ -3301,6 +3296,27 @@ fn session_config_response(
 	})
 }
 
+fn admitted_models(
+	catalog: &snapshot::Catalog,
+	settings: &omp_catalog::settings::ModelSettings,
+) -> Vec<String> {
+	let mut models = catalog
+		.models()
+		.iter()
+		.filter_map(|entry| {
+			let (provider, model) = entry.key.as_str().split_once('/')?;
+			settings
+				.model_allowed(provider, model)
+				.then(|| entry.key.as_str().to_owned())
+		})
+		.collect::<Vec<_>>();
+	models.sort_by_key(|selector| {
+		let (provider, model) = selector.split_once('/').unwrap_or(("", selector.as_str()));
+		(settings.model_rank(provider, model).unwrap_or(usize::MAX), selector.clone())
+	});
+	models
+}
+
 fn config_options(session: &AcpSessionMeta, models: &[String]) -> Vec<Value> {
 	vec![
 		json!({"id":"mode","name":"Mode","type":"select","currentValue":session.mode,"options":["default","plan"]}),
@@ -3309,14 +3325,40 @@ fn config_options(session: &AcpSessionMeta, models: &[String]) -> Vec<Value> {
 	]
 }
 
-fn clamp_thinking_level(model: &str, requested: &str) -> miette::Result<&'static str> {
+fn validate_thinking_for_model(
+	catalog: &snapshot::Catalog,
+	model: &str,
+	requested: &str,
+) -> miette::Result<()> {
+	if matches!(requested, "auto" | "none") {
+		// Auto and none are syntactically valid and will be clamped against the
+		// effective model after the session opens.
+		return Ok(());
+	}
+	let _ = resolve_thinking_effort(catalog, model, requested)?;
+	Ok(())
+}
+
+fn clamp_thinking_level(
+	catalog: &snapshot::Catalog,
+	model: &str,
+	requested: &str,
+) -> miette::Result<&'static str> {
 	if matches!(requested, "auto" | "none") {
 		return Ok(if requested == "none" { "none" } else { "auto" });
 	}
+	let effort = resolve_thinking_effort(catalog, model, requested)?;
+	Ok(<&'static str>::from(effort))
+}
+
+fn resolve_thinking_effort(
+	catalog: &snapshot::Catalog,
+	model: &str,
+	requested: &str,
+) -> miette::Result<ThinkingEffort> {
 	let requested = requested
 		.parse::<ThinkingEffort>()
 		.map_err(|_| miette!("unknown thinking level `{requested}`"))?;
-	let catalog = snapshot::Catalog::try_embedded().into_diagnostic()?;
 	let model = catalog
 		.model(ModelKey::from_ref(model))
 		.ok_or_else(|| miette!("unknown model `{model}`"))?;
@@ -3325,9 +3367,8 @@ fn clamp_thinking_level(model: &str, requested: &str) -> miette::Result<&'static
 		.as_ref()
 		.and_then(|id| catalog.thinking_policy(id))
 		.ok_or_else(|| miette!("model `{}` does not support thinking", model.key))?;
-	let effective = clamp_thinking_effort(policy, Some(requested), None)
-		.ok_or_else(|| miette!("model `{}` has no compatible thinking level", model.key))?;
-	Ok(<&'static str>::from(effective))
+	clamp_thinking_effort(policy, Some(requested), None)
+		.ok_or_else(|| miette!("model `{}` has no compatible thinking level", model.key))
 }
 
 fn ask_elicitation_params(session_id: &str, questions: &[omp_tools::ask::Question]) -> Value {
@@ -3647,6 +3688,22 @@ mod tests {
 	use super::*;
 
 	#[test]
+	fn explicit_acp_session_open_overrides_only_the_default() {
+		let mut policy = HeadlessLaunchPolicy::default();
+		Runtime::apply_acp_session_open(&mut policy, None, None);
+		assert_eq!(policy.session, HeadlessSessionOpen::New);
+
+		Runtime::apply_acp_session_open(&mut policy, Some(Str::new_static("resume")), None);
+		assert_eq!(policy.session, HeadlessSessionOpen::Resume(Str::new_static("resume")));
+
+		Runtime::apply_acp_session_open(
+			&mut policy,
+			Some(Str::new_static("resume")),
+			Some(Str::new_static("fork")),
+		);
+		assert_eq!(policy.session, HeadlessSessionOpen::Fork(Str::new_static("fork")));
+	}
+	#[test]
 	fn canonical_auth_methods_follow_client_terminal_capability() {
 		let agent_only = acp_auth_methods(false);
 		assert_eq!(agent_only.len(), 1);
@@ -3866,5 +3923,36 @@ mod tests {
 		.expect("terminal snapshot");
 		let status = snapshot.exit.expect("terminal exit");
 		assert_eq!(status.exit_code.or_else(|| status.signal.map(|_| 137)), Some(137));
+	}
+
+	#[test]
+	fn acp_pre_open_thinking_validation_rejects_unknown_level() {
+		let catalog = snapshot::Catalog::try_embedded().expect("catalog");
+		let error =
+			validate_thinking_for_model(catalog, "apple-intelligence/apple-intelligence", "bogus")
+				.expect_err("unknown level rejected");
+		assert!(error.to_string().contains("unknown thinking level"));
+	}
+
+	#[test]
+	fn acp_pre_open_thinking_validation_accepts_auto_and_none() {
+		let catalog = snapshot::Catalog::try_embedded().expect("catalog");
+		validate_thinking_for_model(catalog, "apple-intelligence/apple-intelligence", "auto")
+			.expect("auto valid");
+		validate_thinking_for_model(catalog, "apple-intelligence/apple-intelligence", "none")
+			.expect("none valid");
+	}
+
+	#[test]
+	fn acp_thinking_clamp_preserves_auto_and_none() {
+		let catalog = snapshot::Catalog::try_embedded().expect("catalog");
+		assert_eq!(
+			clamp_thinking_level(catalog, "apple-intelligence/apple-intelligence", "auto").unwrap(),
+			"auto"
+		);
+		assert_eq!(
+			clamp_thinking_level(catalog, "apple-intelligence/apple-intelligence", "none").unwrap(),
+			"none"
+		);
 	}
 }

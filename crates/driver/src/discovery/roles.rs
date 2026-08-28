@@ -34,7 +34,7 @@ pub fn resolve_launch_roles(
 	plan: Option<&str>,
 ) -> Result<LaunchRoles, SelectionError> {
 	let configured_roles = configured_roles(settings)?;
-	let models = eligible_models(catalog, settings);
+	let models = eligible_models(catalog, settings, None);
 	let resolve_selected = |cli: Option<&str>, variable: &str, role: &str| {
 		let environment = env::var(variable).ok();
 		let Some(selector) = cli
@@ -73,7 +73,7 @@ pub fn resolve_role_selector(
 	selector: &str,
 ) -> Result<SelectedModel, SelectionError> {
 	let roles = configured_roles(settings)?;
-	let models = eligible_models(catalog, settings);
+	let models = eligible_models(catalog, settings, None);
 	select_model(&models, catalog.routes(), catalog.aliases(), &roles, &Default::default(), selector)
 }
 
@@ -110,6 +110,17 @@ fn configured_roles(settings: &ModelSettings) -> Result<Vec<ModelRole>, Selectio
 /// Reports whether one concrete selector remains inside configured model and
 /// provider admission.
 pub fn model_selector_allowed(catalog: &Catalog, settings: &ModelSettings, selector: &str) -> bool {
+	model_selector_allowed_for_provider(catalog, settings, selector, None)
+}
+
+/// Reports whether one concrete selector remains inside configured admission
+/// on an optional credential-pinned provider route.
+pub fn model_selector_allowed_for_provider(
+	catalog: &Catalog,
+	settings: &ModelSettings,
+	selector: &str,
+	credential_provider: Option<&omp_catalog::ProviderId>,
+) -> bool {
 	catalog
 		.model(ModelKey::from_ref(selector))
 		.or_else(|| catalog.resolve_alias(selector))
@@ -121,22 +132,41 @@ pub fn model_selector_allowed(catalog: &Catalog, settings: &ModelSettings, selec
 						.as_str()
 						.split_once('/')
 						.map_or(model.key.as_str(), |(_, model)| model);
-					settings.model_allowed(route.provider.as_str(), model_id)
+					credential_route_allowed(settings, &route.provider, model_id, credential_provider)
 				})
 			})
 		})
 }
 
-/// Chooses the deterministic allowed fallback model.
-pub fn fallback_model_selector(catalog: &Catalog, settings: &ModelSettings) -> Option<Str> {
-	let models = eligible_models(catalog, settings);
+/// Chooses the deterministic allowed fallback model, optionally constrained to
+/// a provider.
+pub fn fallback_model_selector(
+	catalog: &Catalog,
+	settings: &ModelSettings,
+	credential_provider: Option<&omp_catalog::ProviderId>,
+) -> Option<Str> {
+	let models = eligible_models(catalog, settings, credential_provider);
 	let mru = Default::default();
 	omp_catalog::find_smol(&models, catalog.routes(), &mru)
 		.or_else(|| omp_catalog::pick_default(&models, catalog.routes(), &mru))
 		.map(|selected| Str::new(selected.model.as_str()))
 }
 
-fn eligible_models(catalog: &Catalog, settings: &ModelSettings) -> Vec<omp_catalog::ModelSpec> {
+fn credential_route_allowed(
+	settings: &ModelSettings,
+	route_provider: &omp_catalog::ProviderId,
+	model_id: &str,
+	credential_provider: Option<&omp_catalog::ProviderId>,
+) -> bool {
+	settings.model_allowed(route_provider.as_str(), model_id)
+		&& credential_provider.is_none_or(|provider| route_provider == provider)
+}
+
+fn eligible_models(
+	catalog: &Catalog,
+	settings: &ModelSettings,
+	credential_provider: Option<&omp_catalog::ProviderId>,
+) -> Vec<omp_catalog::ModelSpec> {
 	catalog
 		.models()
 		.iter()
@@ -148,7 +178,7 @@ fn eligible_models(catalog: &Catalog, settings: &ModelSettings) -> Vec<omp_catal
 						.as_str()
 						.split_once('/')
 						.map_or(model.key.as_str(), |(_, model)| model);
-					settings.model_allowed(route.provider.as_str(), model_id)
+					credential_route_allowed(settings, &route.provider, model_id, credential_provider)
 				})
 			})
 		})
@@ -189,6 +219,35 @@ mod tests {
 		settings.disabled_providers =
 			[omp_catalog::settings::PathScopedStringEntry::Bare(Str::new(provider.as_str()))].into();
 		assert!(resolve_launch_roles(catalog, &settings, None, None, None, None).is_err(),);
+	}
+
+	#[test]
+	fn credential_pinned_eligibility_requires_an_allowed_provider_route() {
+		let allowed_provider = omp_catalog::ProviderId::new("allowed");
+		let denied_provider = omp_catalog::ProviderId::new("denied");
+		let mut settings = ModelSettings::default();
+		settings.enabled_models =
+			[omp_catalog::settings::PathScopedStringEntry::Bare(Str::new_static("allowed/example"))]
+				.into();
+
+		assert!(credential_route_allowed(
+			&settings,
+			&allowed_provider,
+			"example",
+			Some(&allowed_provider),
+		));
+		assert!(!credential_route_allowed(
+			&settings,
+			&denied_provider,
+			"example",
+			Some(&denied_provider),
+		));
+		assert!(!credential_route_allowed(
+			&settings,
+			&allowed_provider,
+			"example",
+			Some(&denied_provider),
+		));
 	}
 
 	#[test]

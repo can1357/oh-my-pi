@@ -1,4 +1,3 @@
-#![feature(integer_atomics)]
 //! Transport-neutral foundations for durable, interruptible OMP agent loops.
 //!
 //! The crate composes immutable configuration snapshots, deterministic system
@@ -196,7 +195,9 @@ pub use regime::{
 	SubagentYieldRegime, WaitError, WaitSet, WaitTicket, autoresearch_regime_spec, core_regime,
 	goal_regime_spec, plan_regime_spec, prewalk_regime_spec, vibe_regime_spec,
 };
-pub use revival::{RevivalError, RevivedSession, revive, revive_existing};
+pub use revival::{
+	RevivalError, RevivedPreview, RevivedSession, revive, revive_existing, revive_preview,
+};
 pub use schedule::{
 	Firing, FiringOutcome, MissedRunPolicy, Schedule, ScheduleBudget, ScheduleDelivery,
 	ScheduleError, ScheduleJournal, ScheduleScope, Scheduler, Trigger, UpgradePolicy, firing_key,

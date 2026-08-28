@@ -780,7 +780,7 @@ impl<C: TurnClient + Clone> Agent<C> {
 	}
 
 	/// Replaces the registered hook union mask in one atomic publication.
-	pub fn replace_hook_mask(&self, mask: u128) {
+	pub fn replace_hook_mask(&self, mask: u64) {
 		self.hook_bus.replace_union_mask(mask);
 	}
 

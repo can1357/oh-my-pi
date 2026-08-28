@@ -742,6 +742,8 @@ pub struct ChatUiSession {
 	pub context_window: Option<u64>,
 	/// Current durable title authority restored from the sessions index.
 	pub title:          SessionTitleState,
+	/// Shared edit-attribution model updated by live model switches.
+	pub edit_model:     omp_tools::edit::observer::EditBlackboxModel,
 }
 
 enum UiCmd {
@@ -981,6 +983,7 @@ struct BridgeState {
 	catalog: Arc<Catalog>,
 	auth_control: Option<omp_inference::auth::AuthControlHandle>,
 	model: String,
+	edit_model: omp_tools::edit::observer::EditBlackboxModel,
 	model_settings: ModelSettings,
 	pending_session_delete: Option<std::time::Instant>,
 	git: Option<GitWorkbenchBackend>,
@@ -2109,6 +2112,7 @@ where
 		catalog,
 		auth_control: auth_control.clone(),
 		model,
+		edit_model: session.edit_model,
 		model_settings,
 		pending_session_delete: None,
 		git: None,
@@ -2567,6 +2571,7 @@ where
 									{
 										tracing::warn!(%error, "collaboration stream projection failed");
 									}
+									let live_model = agent_state.snapshot().turn.params.model.clone();
 									handle_agent_event(
 										&backend_tx,
 										&mut state,
@@ -2575,6 +2580,7 @@ where
 										renderers.as_ref(),
 										&bus,
 										0,
+										live_model.as_str(),
 									);
 								}
 							},
@@ -8035,6 +8041,7 @@ fn handle_agent_event(
 	renderers: &RenderRegistry,
 	bus: &omp_agent::EventBus,
 	dropped: u64,
+	live_model: &str,
 ) {
 	match event {
 		AgentEvent::Turn { turn_id, event } => match &event.event {
@@ -8423,13 +8430,30 @@ fn handle_agent_event(
 				let _ = modes.settle_plan_transition();
 			}
 		},
-		AgentEvent::Snapshot(_)
-		| AgentEvent::ToolObserved { .. }
+		AgentEvent::Snapshot(_) => {
+			refresh_snapshot_model(backend, state, live_model);
+		},
+		AgentEvent::ToolObserved { .. }
 		| AgentEvent::PlanStateChanged { .. }
 		| AgentEvent::PhaseChanged { .. }
 		| AgentEvent::RosterChanged { .. } => {},
 	}
 	send_status(backend, state, bus, dropped);
+}
+
+fn refresh_snapshot_model(
+	backend: &flume::Sender<BackendEvent>,
+	state: &mut BridgeState,
+	live_model: &str,
+) {
+	if live_model == state.model {
+		return;
+	}
+	state.model = live_model.to_owned();
+	state.edit_model.set(Str::new(&state.model));
+	state.context_window = resolve_model(state.catalog.as_ref(), &state.model)
+		.and_then(|spec| spec.limits.context_window);
+	send_models_updated(backend, state);
 }
 
 fn autoqa_consent_request(item: &Item) -> Option<omp_chat_ui::autoqa::ConsentRequest> {
@@ -9266,6 +9290,7 @@ async fn switch_model(
 			omp_driver::chat::interrupted_reasoning_dialect(catalog, &snapshot.turn.params.model);
 	});
 	state.model = key;
+	state.edit_model.set(Str::new(&state.model));
 	state.context_window = spec.limits.context_window;
 	send_models_updated(backend, state);
 	send_backend(
@@ -10178,6 +10203,7 @@ mod tests {
 			catalog: Arc::new(Catalog::embedded().clone()),
 			auth_control: None,
 			model: "test/model".to_owned(),
+			edit_model: omp_tools::edit::observer::EditBlackboxModel::default(),
 			model_settings: ModelSettings::default(),
 			pending_session_delete: None,
 			git: None,
@@ -10253,6 +10279,88 @@ mod tests {
 	}
 
 	#[test]
+	fn snapshot_model_change_refreshes_edit_attribution_without_duplicate_notices() {
+		let scratch = tempfile::tempdir().expect("scratch directory");
+		let (tx, rx) = flume::unbounded();
+		let mut state = test_bridge_state(scratch.path());
+		state.model = "launch/model".to_owned();
+		state.edit_model.set(Str::new("launch/model"));
+		let modes = RegimeHandle::new();
+		let renderers = RenderRegistry::new();
+		let bus = omp_agent::EventBus::new();
+		let mut snapshot = omp_agent::AgentSnapshot::default();
+		snapshot.turn.params.model = "plan/model".to_owned();
+		handle_agent_event(
+			&tx,
+			&mut state,
+			&AgentEvent::Snapshot(Arc::new(snapshot.clone())),
+			&modes,
+			&renderers,
+			&bus,
+			0,
+			"plan/model",
+		);
+		assert_eq!(state.model, "plan/model");
+		assert_eq!(state.edit_model.current().as_str(), "plan/model");
+		let first: Vec<_> = rx.drain().collect();
+		assert!(
+			first
+				.iter()
+				.any(|event| matches!(event, BackendEvent::ModelsUpdated { .. })),
+			"a changed snapshot model must refresh UI model metadata"
+		);
+
+		handle_agent_event(
+			&tx,
+			&mut state,
+			&AgentEvent::Snapshot(Arc::new(snapshot)),
+			&modes,
+			&renderers,
+			&bus,
+			0,
+			"plan/model",
+		);
+		let second: Vec<_> = rx.drain().collect();
+		assert!(
+			!second
+				.iter()
+				.any(|event| matches!(event, BackendEvent::ModelsUpdated { .. })),
+			"an unchanged snapshot model must not emit duplicate model notifications"
+		);
+	}
+
+	#[test]
+	fn stale_snapshot_cannot_overwrite_a_newer_manual_model() {
+		let scratch = tempfile::tempdir().expect("scratch directory");
+		let (tx, rx) = flume::unbounded();
+		let mut state = test_bridge_state(scratch.path());
+		state.model = "manual/model".to_owned();
+		state.edit_model.set(Str::new("manual/model"));
+		let modes = RegimeHandle::new();
+		let renderers = RenderRegistry::new();
+		let bus = omp_agent::EventBus::new();
+		let mut snapshot = omp_agent::AgentSnapshot::default();
+		snapshot.turn.params.model = "queued/model".to_owned();
+		handle_agent_event(
+			&tx,
+			&mut state,
+			&AgentEvent::Snapshot(Arc::new(snapshot)),
+			&modes,
+			&renderers,
+			&bus,
+			0,
+			"manual/model",
+		);
+		assert_eq!(state.model, "manual/model");
+		assert_eq!(state.edit_model.current().as_str(), "manual/model");
+		assert!(
+			!rx.drain()
+				.any(|event| matches!(event, BackendEvent::ModelsUpdated { .. })),
+			"a queued snapshot older than a manual switch must not refresh UI model metadata"
+		);
+	}
+
+	#[test]
 	fn active_turn_text_and_error_notices_project_into_viewport_or_retirement_rows() {
 		let scratch = tempfile::tempdir().expect("scratch directory");
 		let (tx, rx) = flume::unbounded();
@@ -10270,6 +10378,7 @@ mod tests {
 			Event::PartDelta(v1::PartDelta { index: 0, chunk: Bytes::from_static(b"banana") }),
 			Event::PartEnd(v1::PartEnd { index: 0, signature: Bytes::new() }),
 		] {
+			let live_model = state.model.clone();
 			handle_agent_event(
 				&tx,
 				&mut state,
@@ -10281,6 +10390,7 @@ mod tests {
 				&renderers,
 				&bus,
 				0,
+				&live_model,
 			);
 		}
 		send_backend(&tx, BackendEvent::Error(sf!("Compaction failed: unauthorized")));
@@ -10341,6 +10451,7 @@ mod tests {
 				chunk: Bytes::from_static(br#"{"command":"cd /w"#),
 			}),
 		] {
+			let live_model = state.model.clone();
 			handle_agent_event(
 				&tx,
 				&mut state,
@@ -10352,9 +10463,11 @@ mod tests {
 				&renderers,
 				&bus,
 				0,
+				&live_model,
 			);
 		}
 		assert!(state.tools.get("toolu_1").is_some_and(|tool| tool.started));
+		let live_model = state.model.clone();
 		handle_agent_event(
 			&tx,
 			&mut state,
@@ -10366,6 +10479,7 @@ mod tests {
 			&renderers,
 			&bus,
 			0,
+			&live_model,
 		);
 		assert!(state.active_parts.is_empty());
 		assert!(state.streaming_tools.is_empty());

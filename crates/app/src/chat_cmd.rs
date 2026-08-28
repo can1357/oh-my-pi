@@ -37,8 +37,8 @@ use omp_driver::{
 		SessionOpen, agent_snapshot, apply_launch_tool_selection, canonical_project,
 		ensure_state_directory, interrupted_reasoning_dialect, model_context_window,
 		model_selector_is_selectable, model_usable_context_window, now_ms, open_session,
-		resolve_model_provider, resolve_model_selector, resume_choices, session_blueprint,
-		strict_session_id, thinking_effort,
+		reproject_model_derived_snapshot, resolve_model_provider, resolve_model_selector,
+		resume_choices, session_blueprint, strict_session_id, thinking_effort,
 	},
 	collab::session::{self, CollabSessionAuthority},
 	discovery::{context, roles, runtime},
@@ -723,7 +723,7 @@ pub(crate) async fn run(
 			);
 		},
 		Ok(_) | Err(_) if explicit_model.is_none() => {
-			let fallback = roles::fallback_model_selector(catalog, &model_settings)
+			let fallback = roles::fallback_model_selector(catalog, &model_settings, None)
 				.ok_or_else(|| miette::miette!("no model is allowed by effective settings"))?;
 			eprintln!(
 				"Saved model `{}` is unavailable; using `{}` for this session without changing the \
@@ -782,6 +782,7 @@ pub(crate) async fn run(
 	} else {
 		None
 	};
+	let edit_model = omp_tools::edit::observer::EditBlackboxModel::new(model.clone());
 	let bridges = omp_driver::bridges::builtin_with_content(
 		&root,
 		Arc::clone(&search_bridge),
@@ -792,7 +793,7 @@ pub(crate) async fn run(
 	);
 	let bridges = omp_envd::RegistryBridges {
 		ask_presenter: Some(omp_chat_ui::ask::presenter()),
-		edit_model: Some(model.clone()),
+		edit_model: Some(edit_model.clone()),
 		edit_repair,
 		// A remote gateway serves search/media itself; leave the host
 		// bridge unbound so `bind_remote` can install the gateway client
@@ -945,39 +946,64 @@ pub(crate) async fn run(
 		identifier:        model.clone(),
 		codex_task_policy: prompt_policy::uses_codex_task_prompt(model.as_str()),
 	};
-	if let Some(level) = args.thinking
+	let explicit_thinking = if let Some(level) = args.thinking
 		&& level != crate::cli::ThinkingLevel::Auto
 		&& !args.external_thinking
 	{
 		let effort = thinking_effort(level.into(), auto_thinking);
-		snapshot.turn.params.thinking =
-			Some(inference_pb::Reasoning { effort: effort as i32, ..Default::default() });
-	}
-	if resume.is_some() {
+		Some(inference_pb::Reasoning { effort: effort as i32, ..Default::default() })
+	} else {
+		None
+	};
+	if resume.is_some() || fork.is_some() {
 		let path = sessions_dir.join(format!("{}.jsonl", session.id.as_str()));
 		let Session { id, journal, initial_items } = session;
 		let revived = omp_agent::revive_existing(&path, journal, snapshot)
 			.map_err(|error| miette::miette!(error))?;
 		session = Session { id, journal: revived.journal, initial_items };
 		snapshot = revived.snapshot;
+		let mut model_applied = false;
 		if let Some(model) = revived.model_override
 			&& !model.fallback
 		{
-			snapshot.turn.params.model = format!("{}/{}", model.model.provider.0, model.model.model.0);
+			snapshot.turn.params.model = model.model.model.0.to_string();
+			model_applied = true;
 		}
+		let mut substituted = false;
 		if !model_selector_is_selectable(catalog, &snapshot.turn.params.model)
-			|| !roles::model_selector_allowed(catalog, &model_settings, &snapshot.turn.params.model)
-		{
+			|| !roles::model_selector_allowed_for_provider(
+				catalog,
+				&model_settings,
+				&snapshot.turn.params.model,
+				credential_provider.as_ref(),
+			) {
 			let saved = snapshot.turn.params.model.clone();
-			let fallback = roles::fallback_model_selector(catalog, &model_settings)
-				.ok_or_else(|| miette::miette!("no selectable model is available to resume"))?;
+			let fallback =
+				roles::fallback_model_selector(catalog, &model_settings, credential_provider.as_ref())
+					.ok_or_else(|| miette::miette!("no selectable model is available to resume"))?;
 			snapshot.turn.params.model = fallback.as_str().to_owned();
+			substituted = true;
 			eprintln!(
 				"Session model `{saved}` is unavailable; resumed with `{fallback}` without changing \
 				 the session pin."
 			);
 		}
+		if model_applied || substituted {
+			reproject_model_derived_snapshot(
+				&mut snapshot,
+				catalog,
+				&root,
+				&args.add_dir,
+				revived.has_durable_tool_restriction,
+				explicit_thinking.clone(),
+			)
+			.map_err(|error| miette::miette!(error))?;
+		}
 	}
+	if let Some(thinking) = explicit_thinking {
+		snapshot.turn.params.thinking = Some(thinking);
+	}
+	edit_model.set(Str::new(&snapshot.turn.params.model));
 	snapshot.compaction = settings.compaction.method_order();
 	snapshot.unexpected_stop = settings.interaction.unexpected_stop_detection;
 	snapshot.reasoning_dialect = interrupted_reasoning_dialect(catalog, &snapshot.turn.params.model);
@@ -1098,6 +1124,7 @@ pub(crate) async fn run(
 			blueprint,
 			eval_control.clone(),
 			edit_repair_requests,
+			edit_model.clone(),
 			None,
 			goal_control.clone(),
 			None,
@@ -1183,6 +1210,7 @@ pub(crate) async fn run(
 			blueprint,
 			eval_control,
 			edit_repair_requests,
+			edit_model.clone(),
 			Some(inference_registry),
 			goal_control,
 			Some(auth_control),
@@ -1676,6 +1704,7 @@ async fn run_ui<C: TurnClient + Clone + Send + Sync + 'static>(
 	mut blueprint: SessionBlueprint,
 	eval_control: EvalSessionControl,
 	edit_repair_requests: Option<flume::Receiver<omp_tools::edit::observer::EditRepairRequest>>,
+	edit_model: omp_tools::edit::observer::EditBlackboxModel,
 	auth_registry: Option<InferenceRegistry>,
 	goal_control: AgentGoalControl,
 	auth_control: Option<omp_inference::auth::AuthControlHandle>,
@@ -2195,7 +2224,14 @@ async fn run_ui<C: TurnClient + Clone + Send + Sync + 'static>(
 		let outcome = chat_ui::run(
 			agent,
 			environment,
-			ChatUiSession { session_id: id, journal_path, initial_items, context_window, title },
+			ChatUiSession {
+				session_id: id,
+				journal_path,
+				initial_items,
+				context_window,
+				title,
+				edit_model: edit_model.clone(),
+			},
 			Some(advisor_engine),
 			advisor_notices,
 			Arc::clone(&catalog_owner),
