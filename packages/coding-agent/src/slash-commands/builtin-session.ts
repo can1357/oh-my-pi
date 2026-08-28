@@ -394,6 +394,14 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "reader",
+		description: "Open reader at latest final answer",
+		handleTui: (_command, runtime) => {
+			runtime.ctx.showCurrentTranscript();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "tools",
 		icon: "tools",
 		description: "Show tools currently visible to the agent",

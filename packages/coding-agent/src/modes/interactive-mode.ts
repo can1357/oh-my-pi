@@ -112,7 +112,7 @@ import {
 import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import { HistoryStorage } from "../session/history-storage";
-import { USER_INTERRUPT_LABEL } from "../session/messages";
+import { isUserTurnInitiator, USER_INTERRUPT_LABEL } from "../session/messages";
 import type { SessionContext } from "../session/session-context";
 import { getRecentSessions } from "../session/session-listing";
 import type { SessionManager } from "../session/session-manager";
@@ -5501,6 +5501,52 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.editor.setUseTerminalCursor(this.#voicePreviousUseTerminalCursor);
 			this.#voicePreviousUseTerminalCursor = null;
 		}
+	}
+
+	#currentTranscriptAnchor(): Component | undefined {
+		const messages = this.viewSession.state.messages;
+		let lastTurnInitiator = -1;
+		for (let index = 0; index < messages.length; index++) {
+			const message = messages[index]!;
+			const initiatesTurn =
+				(message.role === "user" && message.attribution !== "agent") ||
+				(message.role === "developer" && message.synthetic === true && message.userInitiated === true) ||
+				(message.role === "custom" && isUserTurnInitiator(message));
+			if (initiatesTurn) lastTurnInitiator = index;
+		}
+
+		if (lastTurnInitiator >= 0) {
+			if (this.streamingComponent && this.chatContainer.children.includes(this.streamingComponent)) {
+				return this.streamingComponent;
+			}
+			for (let index = messages.length - 1; index > lastTurnInitiator; index--) {
+				const message = messages[index]!;
+				if (message.role !== "assistant") continue;
+				const component = this.transcriptMessageComponents.get(message);
+				if (component && this.chatContainer.children.includes(component)) return component;
+			}
+			return undefined;
+		}
+
+		if (this.streamingComponent && this.chatContainer.children.includes(this.streamingComponent)) {
+			return this.streamingComponent;
+		}
+		for (let index = messages.length - 1; index >= 0; index--) {
+			const message = messages[index]!;
+			if (message.role !== "assistant") continue;
+			const component = this.transcriptMessageComponents.get(message);
+			if (component && this.chatContainer.children.includes(component)) return component;
+		}
+		return undefined;
+	}
+
+	showCurrentTranscript(): void {
+		const anchor = this.#currentTranscriptAnchor();
+		if (!anchor) {
+			this.showStatus("No agent response is available yet.");
+			return;
+		}
+		this.#selectorController.showCurrentTranscript(this.chatContainer, anchor);
 	}
 
 	async showDebugSelector(): Promise<void> {

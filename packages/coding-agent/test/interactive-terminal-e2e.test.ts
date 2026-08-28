@@ -28,12 +28,15 @@ describe("libkitty end-to-end", () => {
 	let session: AgentSession;
 	let mode: InteractiveMode;
 	let term: VirtualTerminal;
+	let stdoutRowsDescriptor: PropertyDescriptor | undefined;
 
 	beforeAll(() => {
 		initTheme();
 	});
 
 	beforeEach(async () => {
+		stdoutRowsDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 32 });
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-libkitty-e2e-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
@@ -58,6 +61,8 @@ describe("libkitty end-to-end", () => {
 		authStorage?.close();
 		tempDir?.removeSync();
 		resetSettingsForTest();
+		if (stdoutRowsDescriptor) Object.defineProperty(process.stdout, "rows", stdoutRowsDescriptor);
+		else Reflect.deleteProperty(process.stdout, "rows");
 	});
 
 	it("paints the submitted user message before any model reply", async () => {
@@ -163,6 +168,89 @@ describe("libkitty end-to-end", () => {
 		term.sendInput("X");
 		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("MARKER_DRAFTX")));
 		expect(plainRows(term.getViewport()).filter(row => row.includes("MARKER_DRAFTX")).length).toBe(1);
+	});
+
+	it("opens the final answer after completed tool work and restores the editor", async () => {
+		const usage: Usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const workingAssistant: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "WORKING_THINKING_MARKER" },
+				{ type: "text", text: "WORKING_CODE_MARKER" },
+				{ type: "toolCall", id: "reader-call", name: "read", arguments: { path: "example.ts" } },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet",
+			usage,
+			stopReason: "toolUse",
+			timestamp: 2,
+		};
+		const finalAssistant: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "FINAL_THINKING_MARKER" },
+				{
+					type: "text",
+					text: [
+						"RESPONSE_START",
+						...Array.from({ length: 60 }, (_, index) => `RESPONSE_BODY_${String(index).padStart(2, "0")}`),
+						"RESPONSE_END",
+					].join("\n"),
+				},
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet",
+			usage,
+			stopReason: "stop",
+			timestamp: 4,
+		};
+		session.sessionManager.appendMessage({ role: "user", content: "PROMPT_START", timestamp: 1 });
+		session.sessionManager.appendMessage(workingAssistant);
+		session.sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "reader-call",
+			toolName: "read",
+			content: [{ type: "text", text: "TOOL_RESULT_MARKER" }],
+			isError: false,
+			timestamp: 3,
+		});
+		session.sessionManager.appendMessage(finalAssistant);
+		session.agent.replaceMessages(session.sessionManager.buildSessionContext().messages);
+
+		await mode.init({ suppressWelcomeIntro: true });
+		await mode.renderInitialMessages();
+		void mode.getUserInput();
+		await term.waitForRender();
+		term.sendInput("EDITOR_FRAME_MARKER");
+		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("EDITOR_FRAME_MARKER")));
+
+		term.sendInput("\x1bu");
+		await term.waitForRender(() =>
+			plainRows(term.getViewport()).some(row => row.includes("Transcript") && row.includes("latest answer")),
+		);
+		const reader = plainRows(term.getViewport());
+		const headerRow = reader.findIndex(row => row.includes("Transcript") && row.includes("latest answer"));
+		const responseStartRow = reader.findIndex(row => row.includes("RESPONSE_START"));
+		if (headerRow < 0 || responseStartRow !== headerRow + 2) dump("latest answer reader", reader);
+		expect(responseStartRow).toBe(headerRow + 2);
+		expect(reader.some(row => row.includes("WORKING_CODE_MARKER"))).toBe(false);
+		expect(reader.some(row => row.includes("FINAL_THINKING_MARKER"))).toBe(false);
+		expect(reader.some(row => row.includes("RESPONSE_END"))).toBe(false);
+
+		term.sendInput("\x1b");
+		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("EDITOR_FRAME_MARKER")));
+		expect(
+			plainRows(term.getViewport()).some(row => row.includes("Transcript") && row.includes("latest answer")),
+		).toBe(false);
 	});
 
 	it("hides thinking already retired to native scrollback when Ctrl+T toggles", async () => {
