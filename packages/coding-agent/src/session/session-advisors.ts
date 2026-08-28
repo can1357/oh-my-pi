@@ -980,6 +980,7 @@ export class SessionAdvisors {
 				},
 				abort: reason => advisorAgent.abort(reason),
 				reset: () => {
+					advisorRequests = 0;
 					advisorLoopGuard.reset();
 					advisorLoopGuardStopped = false;
 					advisorAgent.reset();
