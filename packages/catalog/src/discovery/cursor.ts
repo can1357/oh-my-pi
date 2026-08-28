@@ -158,6 +158,8 @@ interface CursorH2PoolEntry {
 
 /** Normalized origin → live (non-draining) session with its lease count. */
 const cursorH2Pool = new Map<string, CursorH2PoolEntry>();
+/** Draining entries still carrying outstanding leases; kept reachable so disposal can destroy their live sessions. */
+const cursorH2Draining = new Set<CursorH2PoolEntry>();
 /** Idle eviction window: a pooled session unused for this long is evicted. */
 const CURSOR_H2_IDLE_EVICT_MS = 60_000;
 /** Test-only idle-eviction window override; undefined = production window. */
@@ -209,13 +211,16 @@ function destroyCursorH2Session(session: http2.ClientHttp2Session): void {
 /**
  * Mark an entry draining: stop issuing new streams (drop it from the pool) and,
  * when nothing is outstanding, destroy it now. A still-leased session is
- * destroyed by its final release. Identity-checked so a stale GOAWAY/error
- * callback can never evict a replacement entry sharing the key.
+ * destroyed by its final release; until then it is retained in
+ * {@link cursorH2Draining} so disposal can still reach and destroy it.
+ * Identity-checked so a stale GOAWAY/error callback can never evict a
+ * replacement entry sharing the key.
  */
 function drainCursorH2Entry(key: string, entry: CursorH2PoolEntry): void {
 	entry.draining = true;
 	if (cursorH2Pool.get(key) === entry) cursorH2Pool.delete(key);
 	if (entry.outstanding === 0) destroyCursorH2Session(entry.session);
+	else cursorH2Draining.add(entry);
 }
 
 /** Drop one lease; destroy a drained session or unref an idle one at zero. */
@@ -224,6 +229,7 @@ function releaseCursorH2Entry(key: string, entry: CursorH2PoolEntry): void {
 	if (entry.outstanding > 0) return;
 	if (entry.draining) {
 		if (cursorH2Pool.get(key) === entry) cursorH2Pool.delete(key);
+		cursorH2Draining.delete(entry);
 		destroyCursorH2Session(entry.session);
 		return;
 	}
@@ -478,7 +484,8 @@ async function acquireCursorH2(
 }
 
 /**
- * Destroys every pooled session and clears the pool. Intentional disposal seam
+ * Destroys every pooled session — and every draining session already removed
+ * from the pool mid-flight — then clears the pool. Intentional disposal seam
  * for embedders that want deterministic teardown and for tests to reset the
  * module-level singleton between cases. Idle sessions are already unref'd, so
  * calling this is optional in normal operation.
@@ -497,6 +504,13 @@ export function disposeCursorDiscoveryHttp2Pool(): void {
 		destroyCursorH2Session(entry.session);
 	}
 	cursorH2Pool.clear();
+	// GOAWAY/error drained entries out of the pool while their leases were
+	// still outstanding; cursorH2Draining is their only reachability, so
+	// destroy their sessions here or disposal returns leaving those sockets
+	// open until each caller's own timeout aborts the stream.
+	const draining = [...cursorH2Draining];
+	cursorH2Draining.clear();
+	for (const entry of draining) destroyCursorH2Session(entry.session);
 }
 
 /**

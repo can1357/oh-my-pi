@@ -700,4 +700,57 @@ describe("fetchCursorUsableModels", () => {
 			__setCursorDiscoveryRequestEndThrowGate(undefined);
 		}
 	});
+
+	it("destroys a GOAWAY-drained mid-flight session on disposal instead of leaving it to the caller timeout", async () => {
+		// GOAWAY while a lease is outstanding drains the entry out of the pool
+		// without destroying it — the final release owns that. Disposal must
+		// still reach the entry: it is retained in a draining set, so dispose
+		// destroys the session and settles the in-flight request now instead
+		// of leaving the socket open until the caller's own timeout fires.
+		const { promise, resolve, reject } = Promise.withResolvers<string>();
+		const srv = http2.createServer();
+		servers.add(srv);
+		srv.once("error", reject);
+		// The server holds the stream open — existing streams survive GOAWAY
+		// per h2 semantics — and sends GOAWAY only once the client-side
+		// snapshot below proves the lease is outstanding, so the drain
+		// provably happens mid-request.
+		const goGate = Promise.withResolvers<void>();
+		srv.on("stream", (stream: http2.ServerHttp2Stream) => {
+			stream.on("data", () => {});
+			void goGate.promise.then(() => {
+				(stream.session as http2.ServerHttp2Session).goaway(http2.constants.NGHTTP2_NO_ERROR, 0x7fffffff);
+			});
+		});
+		srv.listen(0, "127.0.0.1", () => {
+			resolve(`http://127.0.0.1:${requireTcpAddress(srv.address()).port}`);
+		});
+		const url = await promise;
+
+		const pending = fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 10_000 });
+		// Both waits are level-based against stable snapshot states on the
+		// platform clock — fake timers cannot advance the socket round trips,
+		// so a deadline loop is the only observer. `outstanding: 1` persists
+		// until the gate releases the GOAWAY, and the drained-empty state
+		// persists until the 10s timeout, so neither condition can be missed
+		// between samples.
+		const deadline = Date.now() + 5_000;
+		while (
+			Date.now() < deadline &&
+			!(__cursorDiscoveryHttp2Snapshot().length === 1 && __cursorDiscoveryHttp2Snapshot()[0]?.outstanding === 1)
+		) {
+			await Bun.sleep(2);
+		}
+		expect(__cursorDiscoveryHttp2Snapshot()).toEqual([expect.objectContaining({ outstanding: 1 })]);
+		goGate.resolve();
+		while (Date.now() < deadline && __cursorDiscoveryHttp2Snapshot().length !== 0) await Bun.sleep(2);
+		expect(__cursorDiscoveryHttp2Snapshot()).toEqual([]);
+
+		// Disposal must terminate the orphaned drained session: the request
+		// settles now, not at the 10s caller timeout.
+		const disposeAt = Date.now();
+		disposeCursorDiscoveryHttp2Pool();
+		expect(await pending).toBeNull();
+		expect(Date.now() - disposeAt).toBeLessThan(5_000);
+	});
 });
