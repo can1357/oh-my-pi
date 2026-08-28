@@ -7,8 +7,9 @@ import {
 	type TokenizerAndRendererExtension,
 	type Tokens,
 } from "@oh-my-pi/pi-utils/marked";
+import { mathBlockAt, mathSpanAt, mathStartIndex } from "@oh-my-pi/pi-utils/math-delimiters";
 import { latexToBlock } from "../latex-block";
-import { inlineMathSpanEnd, isBareMathEnvironment, latexToUnicode } from "../latex-to-unicode";
+import { isBareMathEnvironment, latexToUnicode } from "../latex-to-unicode";
 import type { SymbolTheme } from "../symbols";
 import { TERMINAL } from "../terminal-capabilities";
 import type { Component } from "../tui";
@@ -528,7 +529,7 @@ markdownParser.setOptions({
 // `math` inline token before markdown's escape/emphasis/link rules run, so
 // backslash commands (`\frac`, `\alpha`) and intraword underscores (`x_i`)
 // survive intact instead of being mangled or split. The `$…$` form uses
-// pandoc's anti-currency heuristic (`inlineMathSpanEnd`) so "$5 and $10" is
+// pandoc's anti-currency heuristic (`mathSpanAt`) so "$5 and $10" is
 // never math. Inline extensions run before marked's escape tokenizer, so
 // `\(…\)` becomes math while a genuinely escaped `\$` is left to `escape` and
 // renders as a literal dollar.
@@ -582,78 +583,33 @@ const customHrExtension: TokenizerAndRendererExtension = {
 	},
 };
 
-// Leftmost-match scan replacing /\$|\\\(|\\\[/ in mathExtension.start —
-// marked calls start() on the remaining source at every inline position, so
-// the regex alternation showed up in CPU profiles (part of a ~4.3% start()
-// tail). Three indexOf scans yield the identical leftmost index.
-/** @internal exported for tests — must stay index-identical to the old regex scan. */
-export function mathStartIndex(src: string): number | undefined {
-	let best = src.indexOf("$");
-	const paren = src.indexOf("\\(");
-	if (paren !== -1 && (best === -1 || paren < best)) best = paren;
-	const bracket = src.indexOf("\\[");
-	if (bracket !== -1 && (best === -1 || bracket < best)) best = bracket;
-	return best === -1 ? undefined : best;
-}
-
+// Delimiters come from `@oh-my-pi/pi-utils/math-delimiters`; rendering policy stays here.
 const mathExtension: TokenizerAndRendererExtension = {
 	name: "math",
 	level: "inline",
-	start(src) {
-		return mathStartIndex(src);
-	},
+	start: mathStartIndex,
 	tokenizer(src) {
-		if (src.startsWith("$$")) {
-			const end = src.indexOf("$$", 2);
-			if (end !== -1 && src.slice(2, end).trim().length > 0) {
-				return { type: "math", raw: src.slice(0, end + 2), text: src.slice(2, end), display: true };
-			}
-			return undefined;
-		}
-		if (src.startsWith("\\[")) {
-			const end = src.indexOf("\\]", 2);
-			if (end !== -1) return { type: "math", raw: src.slice(0, end + 2), text: src.slice(2, end), display: true };
-			return undefined;
-		}
-		if (src.startsWith("\\(")) {
-			const end = src.indexOf("\\)", 2);
-			if (end !== -1) return { type: "math", raw: src.slice(0, end + 2), text: src.slice(2, end), display: false };
-			return undefined;
-		}
-		if (src.charCodeAt(0) === 0x24 /* $ */) {
-			const end = inlineMathSpanEnd(src, 0);
-			if (end !== -1) return { type: "math", raw: src.slice(0, end + 1), text: src.slice(1, end), display: false };
-		}
-		return undefined;
+		const span = mathSpanAt(src, 0);
+		if (!span) return undefined;
+		return { type: "math", raw: src.slice(0, span.end), text: span.body, display: span.display };
 	},
 	renderer(token) {
-		return (token as { text?: string }).text ?? "";
+		return typeof token.text === "string" ? token.text : "";
 	},
 };
 
-// Display math blocks: opening `$$` / `\[` and closing `$$` / `\]` each alone on
-// their own line (≤3 leading spaces). Matched at the block level — before
-// paragraph/list parsing — so a multi-line equation (e.g. a matrix with `\\`
-// row breaks) renders across several lines instead of being collapsed onto one,
-// and blank lines inside the block don't split it. The own-line requirement
-// keeps inline `$$…$$` inside prose for the inline tokenizer above.
-const MATH_BLOCK_DOLLAR = /^ {0,3}\$\$[ \t]*\n([\s\S]+?)\n {0,3}\$\$[ \t]*(?:\n|$)/;
-const MATH_BLOCK_BRACKET = /^ {0,3}\\\[[ \t]*\n([\s\S]+?)\n {0,3}\\\][ \t]*(?:\n|$)/;
-const MATH_BLOCK_START = /(?:^|\n) {0,3}(?:\$\$|\\\[)[ \t]*\n/;
 const mathBlockExtension: TokenizerAndRendererExtension = {
 	name: "mathBlock",
 	level: "block",
-	start(src) {
-		const m = MATH_BLOCK_START.exec(src);
-		return m ? m.index : undefined;
-	},
+	// No `start` hint: marked only probes block extensions at a block boundary
+	// here and never consults their hints.
 	tokenizer(src) {
-		const m = MATH_BLOCK_DOLLAR.exec(src) ?? MATH_BLOCK_BRACKET.exec(src);
-		if (!m || m[1].trim().length === 0) return undefined;
-		return { type: "math", raw: m[0], text: m[1], display: true };
+		const block = mathBlockAt(src);
+		if (!block) return undefined;
+		return { type: "math", raw: block.raw, text: block.body, display: true };
 	},
 	renderer(token) {
-		return (token as { text?: string }).text ?? "";
+		return typeof token.text === "string" ? token.text : "";
 	},
 };
 
@@ -718,7 +674,7 @@ const mathEnvBlockExtension: TokenizerAndRendererExtension = {
 // (return undefined) to marked's own autolink handling unchanged.
 const AUTOLINK_SCHEME_REGEX = /^(?:www\.|https?:\/\/|ftp:\/\/)/i;
 // Case-insensitive scheme scan replacing /www\.|https?:\/\/|ftp:\/\//i in
-// boundedAutolinkExtension.start — like mathStartIndex above, this runs on the
+// boundedAutolinkExtension.start — like `mathStartIndex`, this runs on the
 // remaining source at every inline position (part of a ~4.3% CPU start() scan
 // tail in profiles). charCode-only: no allocation, no toLowerCase copies.
 // `| 32` lower-cases ASCII letters; `.`/`:`/`/` are compared exactly, matching

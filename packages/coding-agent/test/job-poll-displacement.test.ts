@@ -508,7 +508,7 @@ describe("UiHelpers.renderSessionContext collapses repeated todo snapshots", () 
 			get viewSession() {
 				return (this as { session: unknown }).session;
 			},
-			eventController: { inheritDisplaceableTodo },
+			eventController: { inheritDisplaceableTodo, inheritTurnStart: vi.fn() },
 			toolOutputExpanded: false,
 			hideThinkingBlock: false,
 			lastAssistantUsage: undefined,

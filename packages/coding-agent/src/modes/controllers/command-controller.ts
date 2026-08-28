@@ -72,6 +72,56 @@ function showMarkdownPanel(ctx: InteractiveModeContext, title: string, markdown:
 export class CommandController {
 	constructor(private readonly ctx: InteractiveModeContext) {}
 
+	async #restoreAfterMoveFailure(
+		previousState: Parameters<InteractiveModeContext["sessionManager"]["rollbackMove"]>[0],
+		initialError?: unknown,
+	): Promise<void> {
+		if (initialError !== undefined) {
+			this.ctx.showError(
+				`Failed to switch workspace: ${initialError instanceof Error ? initialError.message : String(initialError)}`,
+			);
+		}
+
+		try {
+			await this.ctx.sessionManager.rollbackMove(previousState);
+		} catch (rollbackError) {
+			const actual = this.ctx.sessionManager.getCwd();
+			let realigned = false;
+			try {
+				realigned = await this.ctx.applyCwdChange(actual);
+			} catch {}
+			if (!realigned) {
+				this.ctx.showError(
+					`Failed to roll back move: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)} (failed to re-align workspace to ${actual})`,
+				);
+				await this.ctx.shutdown();
+				return;
+			}
+			this.ctx.showError(
+				`Failed to roll back move: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)} (workspace remains at ${actual})`,
+			);
+			return;
+		}
+
+		let sourceRestored = false;
+		try {
+			sourceRestored = await this.ctx.applyCwdChange(previousState.cwd);
+		} catch {}
+		if (sourceRestored) return;
+
+		const actual = this.ctx.sessionManager.getCwd();
+		let realigned = false;
+		try {
+			realigned = await this.ctx.applyCwdChange(actual);
+		} catch {}
+		if (!realigned) {
+			this.ctx.showError(`Failed to restore source workspace after rollback: workspace remains at ${actual}`);
+			await this.ctx.shutdown();
+			return;
+		}
+		this.ctx.showError(`Failed to restore source workspace after rollback: workspace remains at ${actual}`);
+	}
+
 	openInBrowser(urlOrPath: string): void {
 		openPath(urlOrPath);
 	}
@@ -1103,13 +1153,24 @@ export class CommandController {
 			return;
 		}
 
+		const previousState = this.ctx.sessionManager.captureState();
 		try {
 			await this.ctx.session.moveSession(resolvedPath);
 		} catch (err) {
 			this.ctx.showError(`Move failed: ${err instanceof Error ? err.message : String(err)}`);
 			return;
 		}
-		await this.ctx.applyCwdChange(resolvedPath);
+		let applied = false;
+		try {
+			applied = await this.ctx.applyCwdChange(resolvedPath);
+		} catch (error) {
+			await this.#restoreAfterMoveFailure(previousState, error);
+			return;
+		}
+		if (!applied) {
+			await this.#restoreAfterMoveFailure(previousState);
+			return;
+		}
 
 		this.ctx.updateEditorBorderColor();
 		await this.ctx.reloadTodos();
@@ -1200,8 +1261,20 @@ export class CommandController {
 	}
 
 	async #moveInteractiveCwd(resolvedPath: string): Promise<void> {
+		const previousState = this.ctx.sessionManager.captureState();
 		await this.ctx.sessionManager.moveTo(resolvedPath);
-		await this.ctx.applyCwdChange(resolvedPath);
+		let applied = false;
+		try {
+			applied = await this.ctx.applyCwdChange(resolvedPath);
+		} catch (error) {
+			await this.#restoreAfterMoveFailure(previousState, error);
+			return;
+		}
+		if (!applied) {
+			await this.#restoreAfterMoveFailure(previousState);
+			return;
+		}
+
 		this.ctx.updateEditorBorderColor();
 		await this.ctx.reloadTodos();
 	}
