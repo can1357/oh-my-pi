@@ -308,6 +308,7 @@ class WorkerToolDefinition:
     streams_args: bool
     handler: object
     source_module: str
+    kind: str
     place: object
     legacy: bool = False
     # The device name this revision replaces, when its claim chain names one;
