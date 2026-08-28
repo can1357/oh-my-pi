@@ -12,7 +12,12 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { listXdevTools, xdevDocs, xdevDocsAll } from "@oh-my-pi/pi-coding-agent/tools/xdev";
+import {
+	listXdevTools,
+	resolveMountedXdevExecutable,
+	xdevDocs,
+	xdevDocsAll,
+} from "@oh-my-pi/pi-coding-agent/tools/xdev";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const EMPTY_TREE = { rootPath: "/tmp", rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] };
@@ -90,6 +95,24 @@ describe("device docs and catalog", () => {
 			const docs = xdevDocsAll(xdev, "catalog");
 			expect(docs).toContain("- MCP server `memory` (3): xd://mcp__memory_{read_note|write_note|search_notes}");
 			expect(docs).not.toContain("xd://mcp__memory_read_note,");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+});
+
+describe("fallback tool resolution", () => {
+	it("routes a call named xd://<tool> to the mounted device", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "xdev-compact-refs-"));
+		try {
+			const s = session(tempDir);
+			await createTools(s);
+			const xdev = s.xdev;
+			if (!xdev) throw new Error("expected xdev state");
+			const first = listXdevTools(xdev)[0]!;
+			expect(resolveMountedXdevExecutable(xdev, `xd://${first.name}`)?.name).toBe(first.name);
+			expect(resolveMountedXdevExecutable(xdev, first.name)?.name).toBe(first.name);
+			expect(resolveMountedXdevExecutable(xdev, "xd://no_such_device")).toBeUndefined();
 		} finally {
 			await removeWithRetries(tempDir);
 		}
