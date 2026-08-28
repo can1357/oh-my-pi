@@ -8428,6 +8428,10 @@ fn refresh_snapshot_model(
 	live_model: &str,
 ) {
 	if live_model == state.model {
+		// A streamed Outcome may already have carried an automatic
+		// transition into `state.model` without touching edit attribution;
+		// only the attribution refresh must survive the equality skip.
+		state.edit_model.set(Str::new(live_model));
 		return;
 	}
 	state.model = live_model.to_owned();
@@ -10145,6 +10149,60 @@ mod tests {
 		assert!(
 			!second
 				.iter()
+				.any(|event| matches!(event, BackendEvent::ModelsUpdated { .. })),
+			"an unchanged snapshot model must not emit duplicate model notifications"
+		);
+	}
+
+	#[test]
+	fn outcome_transition_before_snapshot_still_refreshes_edit_attribution() {
+		let scratch = tempfile::tempdir().expect("scratch directory");
+		let (tx, rx) = flume::unbounded();
+		let mut state = test_bridge_state(scratch.path());
+		state.model = "launch/model".to_owned();
+		state.edit_model.set(Str::new("launch/model"));
+		let modes = RegimeHandle::new();
+		let renderers = RenderRegistry::new();
+		let bus = omp_agent::EventBus::new();
+		// A streamed Outcome carries an automatic transition into the UI
+		// model before the authoritative Snapshot arrives, so the Snapshot
+		// sees an already-current model and must still refresh attribution.
+		handle_agent_event(
+			&tx,
+			&mut state,
+			&AgentEvent::Turn {
+				turn_id: TurnId::new("transition"),
+				event:   Box::new(v1::TurnEvent {
+					event: Some(Event::Outcome(v1::Outcome {
+						model: "promoted/model".to_owned(),
+						..Default::default()
+					})),
+				}),
+			},
+			&modes,
+			&renderers,
+			&bus,
+			0,
+			"",
+		);
+		assert_eq!(state.model, "promoted/model");
+		rx.drain();
+		let mut snapshot = omp_agent::AgentSnapshot::default();
+		snapshot.turn.params.model = "promoted/model".to_owned();
+		handle_agent_event(
+			&tx,
+			&mut state,
+			&AgentEvent::Snapshot(Arc::new(snapshot)),
+			&modes,
+			&renderers,
+			&bus,
+			0,
+			"promoted/model",
+		);
+		assert_eq!(state.model, "promoted/model");
+		assert_eq!(state.edit_model.current().as_str(), "promoted/model");
+		assert!(
+			!rx.drain()
 				.any(|event| matches!(event, BackendEvent::ModelsUpdated { .. })),
 			"an unchanged snapshot model must not emit duplicate model notifications"
 		);
