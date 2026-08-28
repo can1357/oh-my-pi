@@ -183,26 +183,6 @@ async fn run_inner(args: RpcArgs, ui_enabled: bool) -> miette::Result<()> {
 	)
 	.await
 	.into_diagnostic()?;
-	let mut models = registry
-		.catalog()
-		.models()
-		.iter()
-		.filter_map(|entry| {
-			let (provider, model) = entry.key.as_str().split_once('/')?;
-			model_settings
-				.model_allowed(provider, model)
-				.then(|| entry.key.as_str().to_owned())
-		})
-		.collect::<Vec<_>>();
-	models.sort_by_key(|selector| {
-		let (provider, model) = selector.split_once('/').unwrap_or(("", selector.as_str()));
-		(
-			model_settings
-				.model_rank(provider, model)
-				.unwrap_or(usize::MAX),
-			selector.clone(),
-		)
-	});
 	let cycle_selectors = args.models.as_ref().map_or_else(
 		|| {
 			model_settings
@@ -213,7 +193,7 @@ async fn run_inner(args: RpcArgs, ui_enabled: bool) -> miette::Result<()> {
 		},
 		|configured| configured.0.clone(),
 	);
-	let mut cycle_models = cycle_selectors
+	let cycle_models = cycle_selectors
 		.iter()
 		.filter_map(|selector| {
 			omp_driver::discovery::roles::resolve_role_selector(catalog, &model_settings, selector)
@@ -221,10 +201,6 @@ async fn run_inner(args: RpcArgs, ui_enabled: bool) -> miette::Result<()> {
 				.map(|selected| selected.model.as_str().to_owned())
 		})
 		.collect::<Vec<_>>();
-	cycle_models.extend(models);
-	let mut seen_models = HashSet::new();
-	cycle_models.retain(|model| seen_models.insert(model.clone()));
-	let models = cycle_models;
 	let authenticated = match auth
 		.execute(AuthRequest::ListAccounts { provider: None })
 		.await
@@ -319,6 +295,7 @@ async fn run_inner(args: RpcArgs, ui_enabled: bool) -> miette::Result<()> {
 	.await
 	.into_diagnostic()?;
 	let headless_model = headless.model().to_string();
+	let models = roster_models(registry.catalog(), &model_settings, cycle_models, &headless_model);
 	let notices = headless.take_notices();
 	let headless_id = headless.session_id().to_owned();
 	let headless_events = headless
@@ -410,6 +387,48 @@ async fn run_inner(args: RpcArgs, ui_enabled: bool) -> miette::Result<()> {
 	dispatch_result?;
 	read_result?;
 	write_result
+}
+
+/// Assembles the switchable-model roster: the resolved cycle list first, then
+/// every settings-admitted catalog key in routing order. The session's
+/// effective model is always admitted — resume recovery can select a model
+/// that never passed role resolution, and route-backed custom models
+/// (`models.toml`) carry bare catalog keys that the `provider/model`
+/// admission pass drops — because `set_string_config` validates selectors
+/// against this roster.
+fn roster_models(
+	catalog: &omp_catalog::snapshot::Catalog,
+	model_settings: &omp_catalog::settings::ModelSettings,
+	cycle_models: Vec<String>,
+	effective: &str,
+) -> Vec<String> {
+	let mut models = catalog
+		.models()
+		.iter()
+		.filter_map(|entry| {
+			let (provider, model) = entry.key.as_str().split_once('/')?;
+			model_settings
+				.model_allowed(provider, model)
+				.then(|| entry.key.as_str().to_owned())
+		})
+		.collect::<Vec<_>>();
+	models.sort_by_key(|selector| {
+		let (provider, model) = selector.split_once('/').unwrap_or(("", selector.as_str()));
+		(
+			model_settings
+				.model_rank(provider, model)
+				.unwrap_or(usize::MAX),
+			selector.clone(),
+		)
+	});
+	let mut roster = cycle_models;
+	roster.extend(models);
+	let mut seen_models = HashSet::new();
+	roster.retain(|model| seen_models.insert(model.clone()));
+	if !roster.iter().any(|selector| selector == effective) {
+		roster.push(effective.to_owned());
+	}
+	roster
 }
 
 #[must_use]
@@ -4929,5 +4948,35 @@ mod tests {
 		assert!(StdinClaim::claim().is_err());
 		drop(first);
 		assert!(StdinClaim::claim().is_ok());
+	}
+
+	#[test]
+	fn roster_admits_a_bare_key_effective_model() {
+		let directory = tempfile::tempdir().expect("temporary profile");
+		std::fs::write(
+			directory.path().join("models.toml"),
+			r#"
+[providers.local]
+baseUrl = "https://models.example.test"
+
+[providers.local.models."my-model"]
+name = "My Model"
+api = "openai"
+contextWindow = 8192
+maxTokens = 1024
+"#,
+		)
+		.expect("models.toml");
+		let catalog =
+			omp_driver::registry::production_catalog(directory.path()).expect("composed catalog");
+		let models = roster_models(
+			&catalog,
+			&omp_catalog::settings::ModelSettings::default(),
+			Vec::new(),
+			"my-model",
+		);
+		// A resumed session pinned to the bare-key custom model must find it
+		// in the roster `set_string_config` validates against.
+		assert!(models.iter().any(|model| model == "my-model"));
 	}
 }
