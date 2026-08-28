@@ -216,6 +216,19 @@ describe("zod-like parsing", () => {
 		inputAttachment.data = "resolved-bytes"; // the hydration write must still work
 		expect(inputAttachment.data).toBe("resolved-bytes");
 
+		// Non-plain parse output (reachable via z.unknown()/z.any()/transforms)
+		// has no non-destructive shallow clone: it passes through untouched —
+		// identity, prototype, and internal slots intact, and NOT frozen (an
+		// in-place freeze would mutate the caller's value).
+		const map = new Map([[1, 2]]);
+		const unknownReadonly = z.unknown().readonly();
+		expect(unknownReadonly.parse(map)).toBe(map);
+		expect(Object.isFrozen(map)).toBe(false);
+		expect(map.get(1)).toBe(2);
+		const date = new Date(0);
+		expect(unknownReadonly.parse(date)).toBe(date);
+		expect((unknownReadonly.parse(date) as Date).getTime()).toBe(0);
+
 		type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 		const jsonValue: z.ZodType<JsonValue> = z.lazy(() =>
 			z.union([z.string(), z.number(), z.boolean(), z.null(), z.array(jsonValue), z.record(z.string(), jsonValue)]),

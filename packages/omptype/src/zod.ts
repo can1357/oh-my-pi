@@ -326,13 +326,23 @@ function decorate<Out>(schema: Decoratable<Out>, optional = false): ZodLikeSchem
 		 * graph — e.g. a persisted session entry schema-validated before blob
 		 * hydration must stay mutable. Shallow-clone first (object spread uses
 		 * define semantics, so an own `__proto__` key survives), then freeze
-		 * the clone; non-objects pass through untouched, where `Object.freeze`
-		 * would have been a no-op anyway.
+		 * the clone.
+		 *
+		 * Only plain objects and arrays are cloned+frozen. A non-plain object
+		 * (a Date/Map/class instance reachable via `z.unknown()`/`z.any()`/a
+		 * transform) has no non-destructive shallow clone — spreading it would
+		 * produce a prototype-less husk with no internal slots — and freezing
+		 * it in place would mutate the caller's value, so it passes through
+		 * untouched: never-freeze-the-input outranks freeze-the-output for the
+		 * shim's JSON-oriented use. Primitives and functions pass through for
+		 * the same reason.
 		 */
 		readonly(): ZodLikeSchema<Readonly<Out>> {
 			return next(
 				schema.pipe(value => {
 					if (typeof value !== "object" || value === null) return value;
+					const proto = Object.getPrototypeOf(value);
+					if (!Array.isArray(value) && proto !== Object.prototype && proto !== null) return value;
 					const clone = Array.isArray(value) ? [...(value as unknown[])] : { ...(value as object) };
 					return Object.freeze(clone) as Out;
 				}),
