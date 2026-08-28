@@ -728,7 +728,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		},
 	};
 
-	#speculativeReads = new Map<string, { store: InMemorySnapshotStore; snapshotKey: string }>();
+	#speculativeReads = new Map<string, { store: InMemorySnapshotStore; snapshotKey: string; path: string }>();
 
 	#speculativeReadExecutions = new Map<string, { discarded: boolean }>();
 	readonly #autoResizeImages: boolean;
@@ -762,6 +762,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				writable: true,
 				configurable: true,
 			});
+			Object.defineProperty(speculativeSession, "conflictHistory", {
+				value: undefined,
+				writable: true,
+				configurable: true,
+			});
 			Object.defineProperty(speculativeSession, "getClientBridge", {
 				value: () => undefined,
 				configurable: true,
@@ -777,10 +782,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				normalizedText => {
 					snapshotDigest = digestSnapshotText(normalizedText);
 				},
+				() => {
+					throw new Error("Conflict-aware reads require authoritative execution");
+				},
 			);
 			const snapshotKey = canonicalSnapshotKey(context.effect.resources[0].path);
 			if (!signal.aborted && !execution.discarded && store.head(snapshotKey)) {
-				this.#speculativeReads.set(context.toolCall.id, { store, snapshotKey });
+				this.#speculativeReads.set(context.toolCall.id, {
+					store,
+					snapshotKey,
+					path: (context.args as ReadParams).path,
+				});
 			}
 			if (!snapshotDigest) throw new Error("Speculative read did not consume one stable buffered snapshot");
 			return {
@@ -807,13 +819,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		try {
 			if (outcome.kind !== "result") throw new Error("Speculative read produced a staged outcome");
 			const staged = this.#speculativeReads.get(context.toolCall.id);
-			if (staged) {
-				const snapshot = staged.store.head(staged.snapshotKey);
-				if (snapshot) {
-					getFileSnapshotStore(this.session).record(staged.snapshotKey, snapshot.text, snapshot.seenLines);
-				}
+			if (!staged) return outcome.result;
+			const snapshot = staged.store.head(staged.snapshotKey);
+			if (snapshot) {
+				getFileSnapshotStore(this.session).record(staged.snapshotKey, snapshot.text, snapshot.seenLines);
 			}
-			return outcome.result;
+			const result = outcome.result as AgentToolResult<ReadToolDetails>;
+			appendRepeatReadHint(this.session, staged.path, result);
+			return result;
 		} finally {
 			this.#speculativeReads.delete(context.toolCall.id);
 		}
@@ -1255,6 +1268,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		_onUpdate?: AgentToolUpdateCallback<ReadToolDetails>,
 		_toolContext?: AgentToolContext,
 		onBufferedFile?: (normalizedText: string) => void,
+		onConflictMarkers?: () => void,
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		let { path: readPath } = params;
 		if (readPath.startsWith("file://")) {
@@ -2013,6 +2027,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					if (!firstLineExceedsLimit && collectedLines.length > 0) {
 						const blocks = scanConflictLines(collectedLines, startLineDisplay);
 						if (blocks.length > 0) {
+							onConflictMarkers?.();
 							const history = getConflictHistory(this.session);
 							const displayPathForWarning = formatPathRelativeToCwd(absolutePath, this.session.cwd);
 							const entries = blocks.map(block =>

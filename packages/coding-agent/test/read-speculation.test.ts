@@ -6,6 +6,7 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { canonicalSnapshotKey } from "@oh-my-pi/pi-coding-agent/edit/file-snapshot-store";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { getConflictHistory } from "@oh-my-pi/pi-coding-agent/tools/conflict-detect";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -119,6 +120,66 @@ describe("read speculation assessment", () => {
 		const snapshot = session.fileSnapshotStore?.head(canonicalSnapshotKey(path.join(testDir, "plain.txt")));
 		expect(snapshot?.text).toBe("plain text");
 		expect(snapshot?.seenLines).toEqual(new Set([1]));
+	});
+
+	it("defers conflict-aware reads without mutating live conflict history", async () => {
+		const conflictPath = path.join(testDir, "conflict.txt");
+		fs.writeFileSync(conflictPath, "<<<<<<< ours\nnew ours\n=======\nnew theirs\n>>>>>>> theirs\n");
+		const session = createSession(testDir);
+		const history = getConflictHistory(session);
+		const existing = history.register({
+			absolutePath: conflictPath,
+			displayPath: "conflict.txt",
+			startLine: 1,
+			separatorLine: 3,
+			endLine: 5,
+			oursLines: ["old ours"],
+			theirsLines: ["old theirs"],
+		});
+		const tool = new ReadTool(session);
+		const policy = tool.speculation.finalized;
+		if (!policy) throw new Error("read tool has no finalized speculation policy");
+		const args = { path: "conflict.txt" };
+		const assessment = await policy.assess({ args });
+		if (!assessment.eligible) throw new Error("expected speculative read admission");
+		const context = {
+			toolCall: { type: "toolCall" as const, id: "conflict-read", name: "read", arguments: args },
+			args,
+			effect: assessment.effect,
+		};
+
+		await expect(policy.execute(context, new AbortController().signal)).rejects.toThrow(
+			"Conflict-aware reads require authoritative execution",
+		);
+		expect(history.get(existing.id)?.oursLines).toEqual(["old ours"]);
+
+		const result = await tool.execute("ordinary-conflict-read", args);
+		expect(result.content?.find(entry => entry.type === "text")?.text).toContain("──── #1");
+		expect(history.get(existing.id)?.oursLines).toEqual(["new ours"]);
+	});
+
+	it("tracks repeat reads only when speculative results commit", async () => {
+		const session = createSession(testDir);
+		const tool = new ReadTool(session);
+		const policy = tool.speculation.finalized;
+		if (!policy) throw new Error("read tool has no finalized speculation policy");
+		const args = { path: "plain.txt" };
+		const assessment = await policy.assess({ args });
+		if (!assessment.eligible) throw new Error("expected speculative read admission");
+		let text = "";
+
+		for (let index = 1; index <= 3; index++) {
+			const context = {
+				toolCall: { type: "toolCall" as const, id: `repeat-read-${index}`, name: "read", arguments: args },
+				args,
+				effect: assessment.effect,
+			};
+			const outcome = await policy.execute(context, new AbortController().signal);
+			const result = await policy.commit?.({ ...context, physicalOutcome: outcome }, outcome);
+			text = result?.content?.find(entry => entry.type === "text")?.text ?? "";
+		}
+
+		expect(text).toContain("You have received this identical output 3 times");
 	});
 
 	it("rejects non-local, selected, binary, missing, and escaping targets", async () => {
