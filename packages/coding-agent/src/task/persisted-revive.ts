@@ -100,6 +100,13 @@ export function createPersistedSubagentReviverFactory(
 			init.modelRole && init.modelRole !== "default"
 				? [formatModelRoleAlias(init.modelRole), ...(init.resolvedModel ? [init.resolvedModel] : [])]
 				: init.resolvedModel;
+		// Older session files persisted the synthetic xd:// write transport in the
+		// enabled set. A read-only agent definition could never grant full write,
+		// so remove that transport name before replaying tools as explicit grants.
+		const revivedToolNames =
+			init.readOnly === true && init.tools.includes("write")
+				? init.tools.filter(name => name !== "write")
+				: init.tools;
 		return async expectedRef => {
 			// Re-open fresh on every revive: park closes the writer, so this takes
 			// the single-writer lock cleanly and restores the full message history.
@@ -131,7 +138,7 @@ export function createPersistedSubagentReviverFactory(
 				// snapshot predates late registrations (extensions, MCP reconnects)
 				// and would permanently scope them out after a restart. Files from
 				// before `declaredTools` existed fall back to the snapshot.
-				toolNames: init.declaredTools ?? init.tools,
+				toolNames: init.declaredTools ?? revivedToolNames,
 				enforceToolAllowlist: init.enforceToolAllowlist || undefined,
 				disallowedTools: init.disallowedTools,
 				outputSchema: init.outputSchema,
@@ -166,7 +173,7 @@ export function createPersistedSubagentReviverFactory(
 			// drop one that is available again at revival time with no later
 			// registration event to re-activate it.
 			await session.setActiveToolsByName([
-				...(init.declaredTools ?? init.tools),
+				...(init.declaredTools ?? revivedToolNames),
 				...session.getMountedXdevToolNames(),
 			]);
 			// Wire the extension runtime exactly as the live executor does. Without
