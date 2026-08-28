@@ -113,6 +113,29 @@ describe("zod-like parsing", () => {
 				.nullable()
 				.parse(null),
 		).toBeNull();
+
+		// Discriminated unions with purely structural variants take the same
+		// structural path; a pipeline-carrying variant set keeps the ordered
+		// literal dispatcher (and its transform semantics).
+		const eventSchema = z.object({
+			evt: z.discriminatedUnion("kind", [
+				z.strictObject({ kind: z.literal("append"), n: z.number() }),
+				z.strictObject({ kind: z.literal("gap"), s: z.string() }),
+			]),
+		});
+		const eventJson = eventSchema.toJsonSchema() as {
+			properties?: { evt?: Record<string, unknown> };
+		};
+		expect(Object.keys(eventJson.properties?.evt ?? {}).length).toBeGreaterThan(0);
+		expect(JSON.stringify(eventJson.properties?.evt)).toContain("append");
+		expect(JSON.stringify(eventJson.properties?.evt)).toContain("gap");
+		expect(eventSchema.parse({ evt: { kind: "append", n: 1 } })).toEqual({ evt: { kind: "append", n: 1 } });
+		expect(eventSchema.safeParse({ evt: { kind: "nope" } }).success).toBe(false);
+		const steppedVariants = z.discriminatedUnion("kind", [
+			z.strictObject({ kind: z.literal("len"), v: z.string().transform(value => value.length) }),
+			z.strictObject({ kind: z.literal("raw"), v: z.number() }),
+		]);
+		expect(steppedVariants.parse({ kind: "len", v: "abc" })).toEqual({ kind: "len", v: 3 });
 	});
 
 	it("parses valid values and reports nested safeParse issues", () => {

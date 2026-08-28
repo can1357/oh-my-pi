@@ -475,6 +475,16 @@ export const discriminatedUnion = <
 	discriminator: Discriminator,
 	schemas: Schemas,
 ): ZodLikeSchema<UnionOutput<Schemas>> => {
+	const variantIrs = schemas.map(schema => schema.ir);
+	// Same pipeline gate as union() above: a purely structural variant set
+	// keeps a real structural union so JSON Schema export (provider tool
+	// definitions) survives — distinct discriminator literals make the
+	// variants disjoint, so any-match equals discriminator-dispatch for pure
+	// validators. The literal dispatcher below is reserved for variant sets
+	// carrying morphs or Type-attached steps.
+	if (schemas.every(schema => !schema.hasSteps) && variantIrs.every(ir => !hasMorph(ir))) {
+		return decorate(schemaFromIR<UnionOutput<Schemas>>({ k: "union", members: variantIrs }));
+	}
 	const variants = schemas.map(schema => ({
 		schema: schema as ZodLikeSchema<unknown>,
 		literal: discriminantLiteral(schema.ir, discriminator),
