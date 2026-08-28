@@ -75,6 +75,36 @@ async function withVirtualRoutesGateway(run: (url: string) => Promise<void>): Pr
 	}
 }
 
+const hotRouteId = "hot-route";
+
+async function withEmptyRoutesGateway(run: (url: string) => Promise<void>): Promise<void> {
+	registerMockApi();
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-routes-put-"));
+	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+	const primary = createMockModel({ provider: "openrouter", id: primaryId });
+	const backup = createMockModel({ provider: "openrouter", id: backupId });
+	const resolveModel = (id: string) => {
+		if (id === primaryId) return primary.model;
+		if (id === backupId) return backup.model;
+		return undefined;
+	};
+	const handle = startAuthGateway({
+		bind: "127.0.0.1:0",
+		bearerTokens: ["t"],
+		storage,
+		resolveModel,
+		listModels: () => [primary.model, backup.model],
+		version: "test",
+	});
+	try {
+		await run(handle.url);
+	} finally {
+		await handle.close();
+		storage.close();
+		await fs.rm(dir, { recursive: true, force: true });
+	}
+}
+
 describe("auth-gateway GET /v1/routes", () => {
 	it("lists two registered virtual ids with generation greater than 1", async () => {
 		registerMockApi();
@@ -298,6 +328,197 @@ describe("auth-gateway GET /v1/routes/:id", () => {
 			const listBody = (await listRes.json()) as RoutesListResponse;
 			expect(listBody.object).toBe("list");
 			expect(listBody.data).toEqual([row]);
+		});
+	});
+});
+
+describe("auth-gateway PUT /v1/routes/:id", () => {
+	it("registers a route so GET matches and list includes it", async () => {
+		await withEmptyRoutesGateway(async url => {
+			const missing = await fetch(`${url}/v1/routes/${hotRouteId}`, {
+				headers: { Authorization: "Bearer t" },
+			});
+			expect(missing.status).toBe(404);
+
+			const putRes = await fetch(`${url}/v1/routes/${hotRouteId}`, {
+				method: "PUT",
+				headers: { Authorization: "Bearer t", "Content-Type": "application/json" },
+				body: JSON.stringify({ root: { type: "target", model: primaryId } }),
+			});
+			expect(putRes.status).toBe(200);
+			const putBody = (await putRes.json()) as RouteRow;
+			expect(putBody).toEqual({
+				id: hotRouteId,
+				generation: 2,
+				targets: [primaryId],
+				fallbacks: {},
+			});
+
+			const getRes = await fetch(`${url}/v1/routes/${hotRouteId}`, {
+				headers: { Authorization: "Bearer t" },
+			});
+			expect(getRes.status).toBe(200);
+			expect(await getRes.json()).toEqual(putBody);
+
+			const listRes = await fetch(`${url}/v1/routes`, {
+				headers: { Authorization: "Bearer t" },
+			});
+			expect(listRes.status).toBe(200);
+			const listBody = (await listRes.json()) as RoutesListResponse;
+			expect(listBody.object).toBe("list");
+			expect(listBody.data).toEqual([putBody]);
+		});
+	});
+
+	it("replaces a registered route and bumps generation", async () => {
+		await withVirtualRoutesGateway(async url => {
+			const beforeRes = await fetch(`${url}/v1/routes/${virtualImplId}`, {
+				headers: { Authorization: "Bearer t" },
+			});
+			expect(beforeRes.status).toBe(200);
+			const before = (await beforeRes.json()) as RouteRow;
+			expect(before.generation).toBe(2);
+
+			const putRes = await fetch(`${url}/v1/routes/${virtualImplId}`, {
+				method: "PUT",
+				headers: { Authorization: "Bearer t", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					id: virtualImplId,
+					root: { type: "target", model: backupId },
+				}),
+			});
+			expect(putRes.status).toBe(200);
+			const putBody = (await putRes.json()) as RouteRow;
+			expect(putBody).toEqual({
+				id: virtualImplId,
+				generation: 3,
+				targets: [backupId],
+				fallbacks: {},
+			});
+			expect(putBody.generation).toBeGreaterThan(before.generation);
+
+			const afterRes = await fetch(`${url}/v1/routes/${virtualImplId}`, {
+				headers: { Authorization: "Bearer t" },
+			});
+			expect(afterRes.status).toBe(200);
+			expect(await afterRes.json()).toEqual(putBody);
+		});
+	});
+
+	it("returns 400 for an invalid node (negative)", async () => {
+		await withEmptyRoutesGateway(async url => {
+			const res = await fetch(`${url}/v1/routes/${hotRouteId}`, {
+				method: "PUT",
+				headers: { Authorization: "Bearer t", "Content-Type": "application/json" },
+				body: JSON.stringify({ root: { type: "weighted", model: primaryId } }),
+			});
+			expect(res.status).toBe(400);
+			const body = (await res.json()) as { error?: string };
+			expect(typeof body.error).toBe("string");
+			expect(body.error).toMatch(/type/i);
+
+			const getRes = await fetch(`${url}/v1/routes/${hotRouteId}`, {
+				headers: { Authorization: "Bearer t" },
+			});
+			expect(getRes.status).toBe(404);
+		});
+	});
+
+	it("returns 400 when body id does not match the path (negative)", async () => {
+		await withEmptyRoutesGateway(async url => {
+			const res = await fetch(`${url}/v1/routes/${hotRouteId}`, {
+				method: "PUT",
+				headers: { Authorization: "Bearer t", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					id: "other-id",
+					root: { type: "target", model: primaryId },
+				}),
+			});
+			expect(res.status).toBe(400);
+			const body = (await res.json()) as { error?: string };
+			expect(body.error).toBe(`Route definition id must equal path id "${hotRouteId}"`);
+
+			const getRes = await fetch(`${url}/v1/routes/${hotRouteId}`, {
+				headers: { Authorization: "Bearer t" },
+			});
+			expect(getRes.status).toBe(404);
+		});
+	});
+
+	it("returns 401 without a bearer token (negative)", async () => {
+		await withEmptyRoutesGateway(async url => {
+			const res = await fetch(`${url}/v1/routes/${hotRouteId}`, {
+				method: "PUT",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ root: { type: "target", model: primaryId } }),
+			});
+			expect(res.status).toBe(401);
+			const body = (await res.json()) as { error?: string };
+			expect(body.error).toBe("unauthorized");
+		});
+	});
+
+	it("returns 400 for malformed JSON (negative)", async () => {
+		await withEmptyRoutesGateway(async url => {
+			const res = await fetch(`${url}/v1/routes/${hotRouteId}`, {
+				method: "PUT",
+				headers: { Authorization: "Bearer t", "Content-Type": "application/json" },
+				body: "{not-json",
+			});
+			expect(res.status).toBe(400);
+			const body = (await res.json()) as { error?: string };
+			expect(typeof body.error).toBe("string");
+			expect(body.error).toMatch(/json/i);
+		});
+	});
+
+	it("returns 400 for a cyclic route from register (negative)", async () => {
+		await withEmptyRoutesGateway(async url => {
+			const res = await fetch(`${url}/v1/routes/${hotRouteId}`, {
+				method: "PUT",
+				headers: { Authorization: "Bearer t", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					root: {
+						type: "fallback",
+						on: ["provider_unavailable"],
+						children: [
+							{ type: "target", model: primaryId },
+							{ type: "target", model: primaryId },
+						],
+					},
+				}),
+			});
+			expect(res.status).toBe(400);
+			const body = (await res.json()) as { error?: string };
+			expect(typeof body.error).toBe("string");
+			expect(body.error).toMatch(/cycle/i);
+
+			const getRes = await fetch(`${url}/v1/routes/${hotRouteId}`, {
+				headers: { Authorization: "Bearer t" },
+			});
+			expect(getRes.status).toBe(404);
+		});
+	});
+
+	it("returns 404 for PUT of the list path (negative)", async () => {
+		await withEmptyRoutesGateway(async url => {
+			const listRes = await fetch(`${url}/v1/routes`, {
+				method: "PUT",
+				headers: { Authorization: "Bearer t", "Content-Type": "application/json" },
+				body: JSON.stringify({ root: { type: "target", model: primaryId } }),
+			});
+			expect(listRes.status).toBe(404);
+			const listBody = (await listRes.json()) as { error?: string };
+			expect(listBody.error).toBe("No route: PUT /v1/routes");
+
+			const slashRes = await fetch(`${url}/v1/routes/`, {
+				method: "PUT",
+				headers: { Authorization: "Bearer t", "Content-Type": "application/json" },
+				body: JSON.stringify({ root: { type: "target", model: primaryId } }),
+			});
+			expect(slashRes.status).toBe(404);
+			const slashBody = (await slashRes.json()) as { error?: string };
+			expect(slashBody.error).toBe("No route: PUT /v1/routes/");
 		});
 	});
 });

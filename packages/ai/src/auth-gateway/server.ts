@@ -15,13 +15,14 @@
  *   GET  /v1/models                        → list known models from the registry
  *   GET  /v1/routes                        → list registered virtual routes
  *   GET  /v1/routes/:id                    → one registered virtual route
+ *   PUT  /v1/routes/:id                    → register or replace a virtual route
  *   POST /v1/chat/completions              → OpenAI chat-completions in/out
  *   POST /v1/messages                      → Anthropic messages in/out
  *   POST /v1/responses                     → OpenAI Responses in/out
  */
 
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { extractHttpStatusFromError, extractRetryHint, logger } from "@oh-my-pi/pi-utils";
+import { extractHttpStatusFromError, extractRetryHint, isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { ApiKeyResolver } from "../auth-retry";
 import type { AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
@@ -48,6 +49,7 @@ import {
 	withCors,
 } from "./http";
 import { decideAttempt, type ExecutionState } from "./route-conductor";
+import { parseRouteDefinition } from "./route-definitions";
 import { type CompiledRoute, type RouteDefinition, RouteRegistry } from "./route-graph";
 import {
 	commitGateObservesDownstreamSse,
@@ -1502,6 +1504,33 @@ function handleRouteGet(registry: RouteRegistry, id: string): Response {
 	return json(200, row);
 }
 
+async function handleRoutePut(registry: RouteRegistry, id: string, req: Request): Promise<Response> {
+	let body: unknown;
+	try {
+		body = await req.json();
+	} catch (error) {
+		return json(400, { error: `Invalid JSON body: ${String(error)}` });
+	}
+
+	try {
+		if (isRecord(body) && Object.hasOwn(body, "id")) {
+			if (body.id !== id) {
+				throw new AIError.ValidationError(`Route definition id must equal path id "${id}"`);
+			}
+		} else if (isRecord(body)) {
+			body = { ...body, id };
+		}
+		const definition = parseRouteDefinition(body);
+		registry.register(definition);
+	} catch (error) {
+		if (error instanceof AIError.ValidationError) {
+			return json(400, { error: error.message });
+		}
+		throw error;
+	}
+	return handleRouteGet(registry, id);
+}
+
 export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
 	const registry = opts.routeRegistry ?? new RouteRegistry(opts.resolveModel);
 	for (const def of opts.routes ?? []) registry.register(def);
@@ -1577,6 +1606,13 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 						return withCors(handleRoutesList(registry), req);
 					}
 					return withCors(handleRouteGet(registry, id), req);
+				}
+				if (req.method === "PUT" && pathname.startsWith("/v1/routes/")) {
+					const id = pathname.slice("/v1/routes/".length);
+					if (id.length === 0) {
+						return withCors(json(404, { error: `No route: PUT ${pathname}` }), req);
+					}
+					return withCors(await handleRoutePut(registry, id, req), req);
 				}
 
 				// Route-table miss: no format module to defer to, so we emit a

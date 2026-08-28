@@ -49,7 +49,11 @@ function parseNode(input: unknown): RouteNode {
 	throw new AIError.ValidationError(`Unknown route node type: ${String(type)}`);
 }
 
-function parseRouteDefinition(input: unknown): RouteDefinition {
+/**
+ * Parse a single virtual route definition object.
+ * Does not detect model-id cycles — {@link RouteRegistry.register} does.
+ */
+export function parseRouteDefinition(input: unknown): RouteDefinition {
 	if (!isRecord(input)) {
 		throw new AIError.ValidationError("Route definition must be an object");
 	}
