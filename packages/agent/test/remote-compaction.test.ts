@@ -2546,11 +2546,11 @@ describe("compact() remote compaction failure handling", () => {
 		};
 	}
 
-	test("persists the active runtime replay target when compaction runs on a side model", async () => {
+	test("persists the active runtime replay target when compaction runs on the active model", async () => {
 		vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
 		const preparation = makePreparation();
 		const activeModel = makeOpenAiModel({ id: "gpt-5.4" });
-		const compactionModel = makeOpenAiModel({ id: "gpt-5-mini", remoteCompaction: { enabled: true } });
+		const compactionModel = makeOpenAiModel({ id: "gpt-5.4", remoteCompaction: { enabled: true } });
 		const fetchMock: FetchImpl = async () =>
 			Response.json({ output: [{ type: "compaction_summary", summary: "compact" }] });
 
@@ -2562,9 +2562,59 @@ describe("compact() remote compaction failure handling", () => {
 		const preserved = getPreservedOpenAiRemoteCompactionData(result.preserveData);
 		if (!preserved) throw new Error("expected preserved remote compaction data");
 		expect(preserved.replayTarget).toBe(getOpenAIResponsesReferenceTarget(activeModel));
-		expect(preserved.replayTarget).not.toBe(getOpenAIResponsesReferenceTarget(compactionModel));
 		expect(canReplayOpenAiCompactionHistory(preserved, activeModel)).toBe(true);
 		expect(canReuseOpenAiCompactionHistory(preserved, compactionModel, false)).toBe(true);
+	});
+
+	test("keeps the producing target when a V1 side model compacts on the active endpoint", async () => {
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
+		const preparation = makePreparation();
+		const activeModel = makeOpenAiModel({ id: "gpt-5.4" });
+		const compactionModel = makeOpenAiModel({ id: "gpt-5-mini", remoteCompaction: { enabled: true } });
+		const hostTarget = getOpenAIResponsesReferenceTarget(activeModel);
+		const fetchMock: FetchImpl = async () =>
+			Response.json({ output: [{ type: "compaction_summary", summary: "compact" }] });
+
+		const result = await compact(preparation, compactionModel, "test-key", undefined, undefined, {
+			fetch: fetchMock,
+			runtimeModel: activeModel,
+			activeRequestTarget: hostTarget,
+		});
+
+		const preserved = getPreservedOpenAiRemoteCompactionData(result.preserveData);
+		if (!preserved) throw new Error("expected preserved remote compaction data");
+		expect(preserved.replayTarget).toBe(getOpenAiCompactionReferenceTarget(compactionModel, false));
+		expect(preserved.replayTarget).not.toBe(hostTarget);
+		expect(preserved.requestTarget).toBeUndefined();
+		expect(canReplayOpenAiCompactionHistory(preserved, activeModel)).toBe(false);
+		expect(canReplayOpenAiCompactionHistory(preserved, activeModel, hostTarget)).toBe(false);
+		expect(canReuseOpenAiCompactionHistory(preserved, compactionModel, false)).toBe(true);
+	});
+
+	test("keeps the producing target when a compact-model override mints the history", async () => {
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
+		const preparation = makePreparation();
+		const model = makeOpenAiModel({
+			id: "gpt-5.4",
+			remoteCompaction: { enabled: true, model: "gpt-5-mini" },
+		});
+		const hostTarget = getOpenAIResponsesReferenceTarget(model);
+		const fetchMock: FetchImpl = async () =>
+			Response.json({ output: [{ type: "compaction", encrypted_content: "enc_compact_model" }] });
+
+		const result = await compact(preparation, model, "test-key", undefined, undefined, {
+			fetch: fetchMock,
+			runtimeModel: model,
+			activeRequestTarget: hostTarget,
+		});
+
+		const preserved = getPreservedOpenAiRemoteCompactionData(result.preserveData);
+		if (!preserved) throw new Error("expected preserved remote compaction data");
+		expect(preserved.replayTarget).toBe(getOpenAiCompactionReferenceTarget(model, false));
+		expect(preserved.replayTarget).not.toBe(hostTarget);
+		expect(canReplayOpenAiCompactionHistory(preserved, model)).toBe(false);
+		expect(canReplayOpenAiCompactionHistory(preserved, model, hostTarget)).toBe(false);
+		expect(canReuseOpenAiCompactionHistory(preserved, model, false)).toBe(true);
 	});
 
 	test("keeps the producing target when a V1 side model compacts on a foreign endpoint", async () => {
@@ -2716,7 +2766,7 @@ describe("compact() remote compaction failure handling", () => {
 			baseUrl: "https://api.githubcopilot.com",
 		});
 		const compactionModel = makeOpenAiModel({
-			id: "gpt-5-mini-copilot",
+			id: "gpt-5.4-copilot",
 			provider: "github-copilot",
 			baseUrl: "https://api.githubcopilot.com",
 			remoteCompaction: { enabled: true },
@@ -2751,13 +2801,13 @@ describe("compact() remote compaction failure handling", () => {
 			baseUrl: "https://api.githubcopilot.com",
 		});
 		const compactionModel = makeOpenAiModel({
-			id: "gpt-5-mini-copilot",
+			id: "gpt-5.4-copilot",
 			provider: "github-copilot",
 			baseUrl: "https://api.githubcopilot.com",
 			remoteCompaction: {
 				enabled: true,
 				v2StreamingEnabled: true,
-				v2Endpoint: "https://compact.example/v1/responses",
+				v2Endpoint: "https://api.githubcopilot.com/responses",
 			},
 		});
 		const apiKey = JSON.stringify({
@@ -2809,7 +2859,7 @@ describe("compact() remote compaction failure handling", () => {
 		// Side model on the SAME endpoint as the active model: its native result is
 		// readable there, so the host-resolved active target is the truthful stamp.
 		const compactionModel = makeOpenAiModel({
-			id: "gpt-5-mini-copilot",
+			id: "gpt-5.4-copilot",
 			provider: "github-copilot",
 			baseUrl: "https://api.githubcopilot.com",
 			remoteCompaction: { enabled: true },
@@ -2829,13 +2879,13 @@ describe("compact() remote compaction failure handling", () => {
 		const v2Preparation = makePreparation();
 		v2Preparation.settings = { ...v2Preparation.settings, remoteStreamingV2Enabled: true };
 		const v2Model = makeOpenAiModel({
-			id: "gpt-5-mini-copilot",
+			id: "gpt-5.4-copilot",
 			provider: "github-copilot",
 			baseUrl: "https://api.githubcopilot.com",
 			remoteCompaction: {
 				enabled: true,
 				v2StreamingEnabled: true,
-				v2Endpoint: "https://compact.example/v1/responses",
+				v2Endpoint: "https://api.githubcopilot.com/responses",
 			},
 		});
 		const v2 = await compact(v2Preparation, v2Model, "sk-openai-side-key", undefined, undefined, {

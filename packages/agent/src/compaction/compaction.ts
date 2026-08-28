@@ -1677,16 +1677,17 @@ export async function compact(
 	];
 	let usedRemoteCompaction = false;
 	let nativeCompactionError: unknown;
-	// Compaction may run on a side model. Its native result is only the ACTIVE
-	// model's to replay when the side model resolves the same endpoint and replay
-	// capabilities; otherwise the produced history stays stamped with the target
-	// that minted it, so the next turn re-expands the originals instead of
-	// shipping opaque foreign state to the active endpoint.
+	// Compaction may run on a side model or a compact-model override. Its native
+	// result is only the ACTIVE model's to replay when the producing request
+	// fingerprint matches the one the active model dispatches with; otherwise the
+	// produced history stays stamped with the target that minted it, so the next
+	// turn re-expands the originals instead of shipping another model's opaque
+	// state to the active endpoint.
 	const runtimeReplayModel = summaryOptions.runtimeModel ?? model;
-	const compactionReplayModel = producesRuntimeReplayableCompactionHistory(model, runtimeReplayModel)
-		? runtimeReplayModel
-		: model;
-	const compactionReplayIsActive = compactionReplayModel === runtimeReplayModel;
+	const resolveCompactionReplayStamp = (streamingV2: boolean) =>
+		producesRuntimeReplayableCompactionHistory(model, runtimeReplayModel, streamingV2)
+			? { replayTarget: getOpenAIResponsesReferenceTarget(runtimeReplayModel), runtimeOwned: true }
+			: { replayTarget: getOpenAiCompactionReferenceTarget(model, streamingV2), runtimeOwned: false };
 	if (
 		settings.remoteEnabled !== false &&
 		settings.remoteStreamingV2Enabled !== false &&
@@ -1735,15 +1736,17 @@ export async function compact(
 					promptCacheKey: summaryOptions.promptCacheKey,
 					retainedMessageBudget: settings.v2RetainedMessageBudget,
 				});
+				const v2ReplayStamp = resolveCompactionReplayStamp(true);
 				let v2RequestTarget: string | undefined;
 				const remote = await withAuth(
 					apiKey,
 					key => {
-						v2RequestTarget =
-							(compactionReplayIsActive ? summaryOptions.activeRequestTarget : undefined) ??
-							getOpenAIResponsesRequestTarget(compactionReplayModel, key, {
-								openrouterVariant: summaryOptions.openrouterVariant,
-							});
+						v2RequestTarget = v2ReplayStamp.runtimeOwned
+							? (summaryOptions.activeRequestTarget ??
+								getOpenAIResponsesRequestTarget(runtimeReplayModel, key, {
+									openrouterVariant: summaryOptions.openrouterVariant,
+								}))
+							: undefined;
 						return requestCompactionV2Streaming(model, key, request, signal, {
 							fetch: summaryOptions.fetch,
 							providerSessionState: summaryOptions.providerSessionState,
@@ -1759,7 +1762,7 @@ export async function compact(
 						remote,
 						model,
 						getOpenAiCompactionReferenceTarget(model, true),
-						getOpenAIResponsesReferenceTarget(compactionReplayModel),
+						v2ReplayStamp.replayTarget,
 						v2RequestTarget,
 					),
 				};
@@ -1795,6 +1798,7 @@ export async function compact(
 			openAiCompatSupportsImageDetailOriginal(model),
 		);
 		if (remoteHistory.length > 0) {
+			const v1ReplayStamp = resolveCompactionReplayStamp(false);
 			try {
 				const remote = await withAuth(
 					apiKey,
@@ -1810,12 +1814,13 @@ export async function compact(
 								sessionId: summaryOptions.sessionId,
 								providerSessionState: summaryOptions.providerSessionState,
 								codexCompaction: summaryOptions.codexCompaction,
-								replayTarget: getOpenAIResponsesReferenceTarget(compactionReplayModel),
-								requestTarget:
-									(compactionReplayIsActive ? summaryOptions.activeRequestTarget : undefined) ??
-									getOpenAIResponsesRequestTarget(compactionReplayModel, key, {
-										openrouterVariant: summaryOptions.openrouterVariant,
-									}),
+								replayTarget: v1ReplayStamp.replayTarget,
+								requestTarget: v1ReplayStamp.runtimeOwned
+									? (summaryOptions.activeRequestTarget ??
+										getOpenAIResponsesRequestTarget(runtimeReplayModel, key, {
+											openrouterVariant: summaryOptions.openrouterVariant,
+										}))
+									: undefined,
 							},
 						),
 					{ signal },

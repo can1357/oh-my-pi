@@ -340,26 +340,24 @@ export function getOpenAiCompactionReferenceTarget(model: Model, streamingV2: bo
 }
 
 /**
- * Whether compaction running on `compactionModel` mints replacement history that
- * `runtimeModel` can still read. Native compaction items are opaque outside the
- * endpoint that produced them, so a compaction override may swap the request
- * model or the compaction path on the same endpoint, but a side model resolving
- * a different provider, api, or endpoint produces history the active model can
- * never decrypt — persisting the active target on it would relabel foreign state
- * as its own.
+ * Whether the compaction request `compactionModel` is about to issue mints
+ * replacement history that `runtimeModel` can still read. `compaction` and
+ * `compaction_summary` items are opaque outside the exact request that produced
+ * them, so the producing fingerprint — endpoint, api, and compact request model
+ * alike — must equal the fingerprint the active model will dispatch with. A side
+ * model or a `remoteCompaction.model` override sharing an endpoint still mints
+ * model-owned state, and stamping the active target on it would relabel another
+ * model's history as the active model's own.
  */
-export function producesRuntimeReplayableCompactionHistory(compactionModel: Model, runtimeModel: Model): boolean {
-	if (compactionModel === runtimeModel) return true;
+export function producesRuntimeReplayableCompactionHistory(
+	compactionModel: Model,
+	runtimeModel: Model,
+	streamingV2: boolean,
+): boolean {
 	return (
-		compactionModel.provider === runtimeModel.provider &&
-		compactionModel.api === runtimeModel.api &&
-		resolveResponsesRuntimeEndpoint(compactionModel) === resolveResponsesRuntimeEndpoint(runtimeModel)
+		getOpenAiCompactionReferenceTarget(compactionModel, streamingV2) ===
+		getOpenAIResponsesReferenceTarget(runtimeModel)
 	);
-}
-
-function resolveResponsesRuntimeEndpoint(model: Model): string {
-	const baseUrl = model.api === "azure-openai-responses" ? resolveAzureOpenAIBaseUrl(model) : model.baseUrl;
-	return baseUrl ? canonicalizeOpenAIResponsesReferenceBaseUrl(baseUrl) : "";
 }
 
 /**
