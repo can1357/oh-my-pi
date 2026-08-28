@@ -7814,8 +7814,23 @@ export class AgentSession {
 	 */
 	continueInterrupted(): boolean {
 		if (this.isStreaming || this.isCompacting || this.#recovery.isRetrying) return false;
-		const tail = findResumableAbortedAssistant(this.agent.state.messages);
+		const messages = this.agent.state.messages;
+		const tail = findResumableAbortedAssistant(messages);
 		if (!tail) return false;
+		// `findResumableAbortedAssistant` walks back over the sanctioned trailing
+		// continuity records the session appends after an Esc abort (the hidden
+		// `interrupted-thinking` note and synthetic tool-result placeholders).
+		// `Agent.continue()` only enters its assistant-prefill branch when the
+		// aborted assistant is the literal last message, so drop those records
+		// here — otherwise the provider request tail would be the continuity note
+		// / failed tool result instead of the partial assistant the user is
+		// actually resuming. Preserve tool-result placeholders when the assistant
+		// tail is itself a tool call: removing them would leave a dangling
+		// tool_call the provider rejects.
+		const tailIndex = messages.indexOf(tail);
+		if (tailIndex < messages.length - 1 && tail.content[tail.content.length - 1]?.type !== "toolCall") {
+			this.agent.replaceMessages(messages.slice(0, tailIndex + 1));
+		}
 		this.#scheduleAgentContinue();
 		return true;
 	}
