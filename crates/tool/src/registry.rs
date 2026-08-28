@@ -1614,6 +1614,24 @@ impl Registry {
 		Self::default()
 	}
 
+	/// Rejects pre-populated claims that impersonate harness-owned core tools.
+	///
+	/// Native callers may construct [`Claims`] directly, so the claimant string
+	/// is not an authentication boundary. Production composition must reject a
+	/// preloaded `omp/core` claim before installing its own core protections.
+	pub fn reject_reserved_claims(&self) -> Result<(), RegistryError> {
+		let name = self.versions.iter().find_map(|(name, revisions)| {
+			(revisions
+				.values()
+				.any(|entry| entry.claims.claimant == "omp/core"))
+			.then_some(name.clone())
+		});
+		match name {
+			Some(name) => Err(RegistryError::ReservedClaimant { name }),
+			None => Ok(()),
+		}
+	}
+
 	/// Atomically replaces one attached host's complete model-visible tool
 	/// roster.
 	pub fn replace_host_tools(
@@ -3582,6 +3600,23 @@ mod tests {
 		assert!(matches!(
 			registry.replace_host_tools(sf!("rpc/client"), 2, Vec::new(), Arc::new(HostExecutor),),
 			Err(RegistryError::StaleHostRoster { .. })
+		));
+	}
+
+	#[test]
+	fn preloaded_core_claims_are_rejected_before_production_composition() {
+		let mut registry = Registry::new();
+		registry
+			.register(tool(1), Presentation::Slot, Claims {
+				precedence: Precedence::DEFAULT,
+				claimant:   sf!("omp/core"),
+				replaces:   None,
+			})
+			.expect("preloaded claimant registers before the composition gate");
+
+		assert!(matches!(
+			registry.reject_reserved_claims(),
+			Err(RegistryError::ReservedClaimant { ref name }) if name == "lift"
 		));
 	}
 

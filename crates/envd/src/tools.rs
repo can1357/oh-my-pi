@@ -1819,6 +1819,7 @@ pub(crate) fn production_registry<
 		content,
 	} = bridges;
 	let previews = StagedProposalRegistry::new();
+	registry.reject_reserved_claims()?;
 	let ask_presenter = PresenterSlot::new(
 		ask_presenter.unwrap_or_else(|| Arc::new(omp_tools::ask::HeadlessPresenter)),
 	);
