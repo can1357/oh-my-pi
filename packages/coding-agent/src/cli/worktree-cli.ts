@@ -6,6 +6,8 @@
  *   - **PR-checkout worktrees** (`tools/gh.ts`): a regular git worktree dir
  *     containing a `.git` *file* that points back at
  *     `<parent-repo>/.git/worktrees/<name>/`.
+ *   - **Main-session worktrees** (`--worktree`): regular linked Git worktrees
+ *     marked inside their per-worktree Git admin directory.
  *   - **Task-isolation dirs** (`task/worktree.ts`): a wrapper dir with a
  *     compact `m` subdir mounted/cloned by `natives.isoStart`. Legacy `merged`
  *     subdirs are still recognized. `ensureIsolation` writes an ownership
@@ -22,8 +24,9 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getWorktreesDir, isEnoent } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { hasLiveIsolationOwner, ISOLATION_OWNER_FILE } from "../task/isolation-ownership";
+import { MAIN_SESSION_WORKTREE_MARKER } from "./worktree-create";
 
-type WorktreeKind = "pr-checkout" | "task-isolation" | "empty" | "stray";
+type WorktreeKind = "pr-checkout" | "main-session" | "task-isolation" | "empty" | "stray";
 
 const TASK_ISOLATION_MOUNT_DIRS = ["m", "merged"] as const;
 
@@ -77,7 +80,11 @@ export async function listWorktrees(options: ListWorktreesOptions): Promise<void
 
 export async function clearWorktrees(options: ClearWorktreesOptions): Promise<void> {
 	const entries = await scanWorktrees();
-	const targets = options.all ? entries : entries.filter(entry => entry.orphanReason !== undefined);
+	const targets = options.all
+		? entries
+		: entries.filter(
+				entry => entry.orphanReason !== undefined && entry.kind !== "pr-checkout" && entry.kind !== "main-session",
+			);
 
 	if (targets.length === 0) {
 		if (options.json) {
@@ -104,14 +111,18 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<vo
 	const parentsToPrune = new Set<string>();
 	for (const target of targets) {
 		try {
-			if (target.kind === "pr-checkout" && target.parentRepo && !target.orphanReason) {
-				// Live worktree: ask git to remove it cleanly. If git refuses (locked,
-				// dirty, etc.), fall back to fs.rm and rely on `worktree prune` to
-				// clean the bookkeeping on the parent side.
-				const removed = await vcs.git(target.parentRepo)?.worktreeRemove(target.path, true);
+			if (
+				(target.kind === "pr-checkout" || target.kind === "main-session") &&
+				target.parentRepo &&
+				!target.orphanReason
+			) {
+				// Never discard dirty work: a user must clean or explicitly remove the
+				// linked checkout themselves before the managed-worktree GC can proceed.
+				const removed = await vcs.git(target.parentRepo)?.worktreeRemove(target.path, false);
 				if (!removed) {
-					await fs.rm(target.path, { recursive: true, force: true });
-					parentsToPrune.add(target.parentRepo);
+					throw new Error(
+						"Git refused to remove the linked worktree because it has uncommitted changes or is locked.",
+					);
 				}
 			} else {
 				await fs.rm(target.path, { recursive: true, force: true });
@@ -212,7 +223,7 @@ async function classifyDir(dir: string): Promise<WorktreeEntry | null> {
 	const gitEntry = path.join(dir, ".git");
 	const gitStat = await fs.stat(gitEntry).catch(() => null);
 	if (gitStat?.isFile()) {
-		return classifyPrCheckout(dir, gitEntry);
+		return classifyLinkedWorktree(dir, gitEntry);
 	}
 	// A task-isolation sandbox is identified by its ownership marker — written
 	// before the backend materialises the mount — or by the `m`/`merged` mount
@@ -240,7 +251,7 @@ async function classifyDir(dir: string): Promise<WorktreeEntry | null> {
 	};
 }
 
-async function classifyPrCheckout(dir: string, gitEntry: string): Promise<WorktreeEntry> {
+async function classifyLinkedWorktree(dir: string, gitEntry: string): Promise<WorktreeEntry> {
 	let contents: string;
 	try {
 		contents = await fs.readFile(gitEntry, "utf8");
@@ -256,11 +267,14 @@ async function classifyPrCheckout(dir: string, gitEntry: string): Promise<Worktr
 	if (!parentGitDir) {
 		return { path: dir, kind: "pr-checkout", orphanReason: "malformed .git file (no gitdir line)" };
 	}
+	const resolvedGitDir = path.isAbsolute(parentGitDir)
+		? parentGitDir
+		: path.resolve(path.dirname(gitEntry), parentGitDir);
 	// parentGitDir is `<parent-repo>/.git/worktrees/<name>`; back out the repo root.
-	const parentRepo = path.dirname(path.dirname(path.dirname(parentGitDir)));
-	const branch = await readWorktreeBranch(path.join(parentGitDir, "HEAD"));
+	const parentRepo = path.dirname(path.dirname(path.dirname(resolvedGitDir)));
+	const branch = await readWorktreeBranch(path.join(resolvedGitDir, "HEAD"));
 
-	const parentDirStat = await fs.stat(parentGitDir).catch(() => null);
+	const parentDirStat = await fs.stat(resolvedGitDir).catch(() => null);
 	if (!parentDirStat?.isDirectory()) {
 		return {
 			path: dir,
@@ -280,7 +294,8 @@ async function classifyPrCheckout(dir: string, gitEntry: string): Promise<Worktr
 			orphanReason: "parent repo missing",
 		};
 	}
-	return { path: dir, kind: "pr-checkout", parentRepo, branch };
+	const persistent = await Bun.file(path.join(resolvedGitDir, MAIN_SESSION_WORKTREE_MARKER)).exists();
+	return { path: dir, kind: persistent ? "main-session" : "pr-checkout", parentRepo, branch };
 }
 
 async function readWorktreeBranch(headFile: string): Promise<string | undefined> {
@@ -299,6 +314,8 @@ function formatEntryDetail(entry: WorktreeEntry): string {
 		const repo = entry.parentRepo ? path.basename(entry.parentRepo) : "unknown repo";
 		const branch = entry.branch ?? "unknown branch";
 		parts.push(`${repo} · ${branch}`);
+	} else if (entry.kind === "main-session") {
+		parts.push("persistent main-session workspace");
 	} else if (entry.kind === "task-isolation") {
 		parts.push("task-isolation sandbox");
 	} else if (entry.kind === "empty") {
