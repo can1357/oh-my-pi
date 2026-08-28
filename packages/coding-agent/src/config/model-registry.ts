@@ -2137,8 +2137,14 @@ export class ModelRegistry {
 
 	#restoreRuntimeDiscoveryAuthPrecedence(model: Model<Api>): Model<Api> {
 		if (!this.authStorage.getRuntimeApiKey(model.provider) || !model.headers) return model;
-		const headers = createLiveConfigHeaders([{ ...model.headers }], {
+		const fallbackHeaders = { ...model.headers };
+		for (const name in fallbackHeaders) {
+			if (name.toLowerCase() === "authorization") delete fallbackHeaders[name];
+		}
+		const providerOverride = this.#providerOverrides.get(model.provider);
+		const headers = createLiveConfigHeaders([fallbackHeaders, providerOverride?.headers], {
 			authHeader: true,
+			apiKeyConfig: providerOverride?.authHeader === true ? providerOverride.apiKey : undefined,
 			apiKeyOverride: () => this.authStorage.getRuntimeApiKey(model.provider),
 		});
 		return buildModel({ ...toModelSpec(model), headers });

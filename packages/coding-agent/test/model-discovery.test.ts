@@ -2562,6 +2562,11 @@ providers:
 			"X-Proxy": "configured",
 			Authorization: "Bearer runtime-token",
 		});
+		authStorage.removeRuntimeApiKey("proxy-test");
+		expect(model?.headers).toEqual({
+			authorization: "Bearer stale-token",
+			"X-Proxy": "configured",
+		});
 	});
 
 	test("proxy discovery uses proxy-reported name over bundled placeholder", async () => {
