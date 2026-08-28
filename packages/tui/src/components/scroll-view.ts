@@ -79,6 +79,18 @@ export class ScrollView implements Component {
 		this.#fastScrollLines = Math.max(1, Math.trunc(options.fastScrollLines ?? 5));
 		this.#clampScrollOffset();
 	}
+	/** Return viewport, content, and scroll position state for debug inspection. */
+	debugState(): Record<string, unknown> {
+		const rowCount = this.#totalRows ?? this.#lines.length;
+		return {
+			scrollOffset: this.#scrollOffset,
+			maxScrollOffset: this.getMaxScrollOffset(),
+			height: this.#height,
+			rowCount,
+			bufferedLineCount: this.#lines.length,
+			scrollbar: this.#scrollbar,
+		};
+	}
 
 	setLines(lines: readonly string[]): void {
 		this.#lines = [...lines];

@@ -225,7 +225,11 @@ function applyPreviewEdits(args: {
 	// previews stay lenient — a mid-typed op transiently violating sequencing
 	// must not flash an error frame.
 	if (!options.streaming) validateClipboardSequence(resolved, clipboard);
-	const applyOptions = { clipboard, ...(options.streaming ? { onEmptyPaste: "drop" as const } : {}) };
+	const applyOptions = {
+		clipboard,
+		path: absolutePath,
+		...(options.streaming ? { onEmptyPaste: "drop" as const } : {}),
+	};
 	if (options.skipHashValidation || expected === undefined || liveMatches) {
 		return applyEdits(normalized, resolved, applyOptions);
 	}

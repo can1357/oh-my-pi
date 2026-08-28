@@ -10,6 +10,19 @@ common --enable_platform_specific_config
 # PATH through crate annotations in MODULE.bazel.
 build --incompatible_strict_action_env
 
+# Third-party crate resolution (rules_rust crate_universe) shells out to
+# `cargo-bazel splice`, which runs `cargo metadata` + fetches every git/registry
+# dep. Two knobs matter on cold caches:
+#   1. CARGO_BAZEL_ISOLATED=0 — reuse the host's ~/.cargo registry/index instead
+#      of building a throwaway cargo home per invocation. Without this, every
+#      splice re-clones the entire crates.io index (~1 GiB, minutes on cold DNS).
+#   2. CARGO_BAZEL_TIMEOUT=1800 — cargo-bazel honors this to raise Bazel's
+#      default `repository_ctx.execute` 600s cap. Fresh machines / ephemeral
+#      runners with git-hosted forks (brush, uutils) blow past 600s and abort
+#      with `Timed out` (rules_rust common_utils.bzl:61) before we can help.
+common --repo_env=CARGO_BAZEL_ISOLATED=0
+common --repo_env=CARGO_BAZEL_TIMEOUT=1800
+
 # NOTE: rust pipelined_compilation stays OFF: handing dependents rmeta-only
 # crates breaks `rust_test(crate = ...)` harness compiles whose deps export
 # macro_rules! ("can't find crate" at macro expansion).
@@ -25,11 +38,20 @@ build --@rules_rust//rust/toolchain/channel=nightly
 # pi-iso, pi-natives, pi-shell, pi-voice, pi-walker) get the strict workspace
 # policy
 # (clippy-strict; bazel/clippy.bazelrc is generated from Cargo.toml); everything
-# else gets default clippy + -Dwarnings (clippy).
+# else gets default clippy + -Dwarnings (clippy). pi-builtins allows every
+# clippy group in its manifest (ported brush/uutils/jaq code) while keeping
+# rustc warnings at zero; the aspect ignores Cargo `[lints]`, so clippy-ported
+# re-states those allows on top of -Dwarnings.
 build:clippy --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
 build:clippy --output_groups=+clippy_checks
 build:clippy --@rules_rust//rust/settings:clippy_flag=-Dwarnings
 build:clippy-strict --config=clippy
+build:clippy-ported --config=clippy
+build:clippy-ported --@rules_rust//rust/settings:clippy_flag=-Aclippy::all
+build:clippy-ported --@rules_rust//rust/settings:clippy_flag=-Aclippy::pedantic
+build:clippy-ported --@rules_rust//rust/settings:clippy_flag=-Aclippy::nursery
+build:clippy-ported --@rules_rust//rust/settings:clippy_flag=-Aclippy::cargo
+build:clippy-ported --@rules_rust//rust/settings:clippy_flag=-Aunfulfilled_lint_expectations
 import %workspace%/bazel/clippy.bazelrc
 # rustfmt check via aspect, against the workspace rustfmt.toml.
 build:rustfmt --aspects=@rules_rust//rust:defs.bzl%rustfmt_aspect

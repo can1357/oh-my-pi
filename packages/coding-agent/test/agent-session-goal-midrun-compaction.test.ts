@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -44,10 +44,37 @@ function highUsage(input: number) {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 }
+// These tests await real cross-pipeline concurrency signals; fake timers cannot
+// drive those queues. Keep a failure-only watchdog, and cancel it as soon as
+// the signal wins so successful cases never leave a wall-clock delay behind.
+async function raceWithTimeout<T, F>(promise: Promise<T>, timeoutMs: number, timeoutValue: F): Promise<T | F> {
+	const timeout = Promise.withResolvers<F>();
+	const timer = setTimeout(() => timeout.resolve(timeoutValue), timeoutMs);
+	try {
+		return await Promise.race([promise, timeout.promise]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
 
 describe("AgentSession mid-run threshold compaction", () => {
 	let tempDir: TempDir;
+	let sharedDir: TempDir;
+	let sharedAuthStorage: AuthStorage;
+	let sharedModelRegistry: ModelRegistry;
 	const cleanups: Array<() => Promise<void>> = [];
+
+	beforeAll(async () => {
+		sharedDir = TempDir.createSync("@pi-agent-goal-midrun-compaction-shared-");
+		sharedAuthStorage = await AuthStorage.create(path.join(sharedDir.path(), "auth.db"));
+		sharedAuthStorage.setRuntimeApiKey("anthropic", "test-key");
+		sharedModelRegistry = new ModelRegistry(sharedAuthStorage, path.join(sharedDir.path(), "models.yml"));
+	});
+
+	afterAll(() => {
+		sharedAuthStorage.close();
+		sharedDir.removeSync();
+	});
 
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@pi-agent-goal-midrun-compaction-");
@@ -63,7 +90,12 @@ describe("AgentSession mid-run threshold compaction", () => {
 
 	async function createHarness(
 		settingsOverride: Record<string, unknown> = {},
-		options: { extensionRunner?: ExtensionRunner } = {},
+		options: {
+			extensionRunner?: ExtensionRunner;
+			onProviderCall?: (index: number) => void;
+			configureAgent?: (agent: Agent) => void;
+			toolResultDetails?: unknown;
+		} = {},
 	): Promise<{
 		session: AgentSession;
 		observedContexts: string[][];
@@ -73,12 +105,10 @@ describe("AgentSession mid-run threshold compaction", () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 
-		const authStorage = await AuthStorage.create(path.join(tempDir.path(), `testauth-${cleanups.length}.db`));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), `models-${cleanups.length}.yml`));
+		const modelRegistry = sharedModelRegistry;
 		const settings = Settings.isolated({
 			"compaction.enabled": true,
-			"compaction.strategy": "context-full",
+			"compaction.methodOrder": ["soft"],
 			"compaction.autoContinue": true,
 			"compaction.midTurnEnabled": true,
 			"compaction.thresholdTokens": 1000,
@@ -95,7 +125,10 @@ describe("AgentSession mid-run threshold compaction", () => {
 			label: "Bash",
 			description: "Mock bash tool",
 			parameters: type({}),
-			execute: async () => ({ content: [{ type: "text" as const, text: "tool output" }] }),
+			execute: async () => ({
+				content: [{ type: "text" as const, text: "tool output" }],
+				...(options.toolResultDetails === undefined ? {} : { details: options.toolResultDetails }),
+			}),
 		};
 
 		let call = 0;
@@ -105,6 +138,7 @@ describe("AgentSession mid-run threshold compaction", () => {
 			convertToLlm,
 			streamFn: (_model, context) => {
 				const index = call++;
+				options.onProviderCall?.(index);
 				observedContexts.push(context.messages.map(message => JSON.stringify(message)));
 				const stream = new AssistantMessageEventStream();
 				const isToolTurn = index === 0;
@@ -138,6 +172,7 @@ describe("AgentSession mid-run threshold compaction", () => {
 				return stream;
 			},
 		});
+		options.configureAgent?.(agent);
 
 		const session = new AgentSession({
 			agent,
@@ -148,10 +183,7 @@ describe("AgentSession mid-run threshold compaction", () => {
 			extensionRunner: options.extensionRunner,
 		});
 
-		cleanups.push(async () => {
-			await session.dispose();
-			authStorage.close();
-		});
+		cleanups.push(() => session.dispose());
 		return { session, sessionManager, observedContexts };
 	}
 
@@ -188,18 +220,167 @@ describe("AgentSession mid-run threshold compaction", () => {
 		expect(observedContexts[1].join("\n")).toContain("ACTIVE-GOAL-MID-RUN-COMPACTED");
 	});
 
-	it("falls back to in-place compaction for mid-run handoff strategy", async () => {
-		const { session, observedContexts } = await createHarness({ "compaction.strategy": "handoff" });
-		const handoffSpy = vi.spyOn(session, "handoff").mockImplementation(async () => {
-			throw new Error("mid-run compaction must not reset the session through handoff");
-		});
-		const compactSpy = mockCompaction("HANDOFF-MID-RUN-COMPACTED-IN-PLACE");
+	it("does not wait for message persistence below the mid-run threshold", async () => {
+		const releaseMessageEnd = Promise.withResolvers<void>();
+		const messageEndEntered = Promise.withResolvers<void>();
+		const nextProviderCall = Promise.withResolvers<void>();
+		const extensionRunner = {
+			hasHandlers: vi.fn((eventType: string) => eventType === "message_end"),
+			emitBeforeAgentStart: vi.fn(async () => undefined),
+			emit: vi.fn(async (event: { type: string; message?: AgentMessage }) => {
+				if (
+					event.type === "message_end" &&
+					event.message?.role === "assistant" &&
+					event.message.stopReason === "toolUse"
+				) {
+					messageEndEntered.resolve();
+					await releaseMessageEnd.promise;
+				}
+			}),
+		} as unknown as ExtensionRunner;
+		const { session } = await createHarness(
+			{ "compaction.thresholdTokens": 100_000 },
+			{
+				extensionRunner,
+				onProviderCall: index => {
+					if (index === 1) nextProviderCall.resolve();
+				},
+			},
+		);
+		const compactSpy = mockCompaction("SHOULD-NOT-RUN");
 
-		await session.prompt("work on the release");
+		const prompt = session.prompt("work below the maintenance threshold");
+		const messageEndOutcome = await raceWithTimeout(
+			messageEndEntered.promise.then(() => "entered" as const),
+			2_000,
+			"blocked" as const,
+		);
+		const providerOutcome =
+			messageEndOutcome === "entered"
+				? await raceWithTimeout(
+						nextProviderCall.promise.then(() => "dispatched" as const),
+						2_000,
+						"blocked" as const,
+					)
+				: "blocked";
+		releaseMessageEnd.resolve();
+		const promptOutcome = await raceWithTimeout(
+			prompt.then(() => "settled" as const),
+			2_000,
+			"blocked" as const,
+		);
 
-		expect(handoffSpy).not.toHaveBeenCalled();
-		expect(compactSpy).toHaveBeenCalledTimes(1);
-		expect(observedContexts[1].join("\n")).toContain("HANDOFF-MID-RUN-COMPACTED-IN-PLACE");
+		expect(messageEndOutcome).toBe("entered");
+		expect(providerOutcome).toBe("dispatched");
+		expect(promptOutcome).toBe("settled");
+		expect(compactSpy).not.toHaveBeenCalled();
+	});
+
+	it("persists a tool result when its message_end listener rejects below the mid-run threshold", async () => {
+		let rejected = false;
+		const extensionRunner = {
+			hasHandlers: vi.fn((eventType: string) => eventType === "message_end"),
+			emitBeforeAgentStart: vi.fn(async () => undefined),
+			emit: vi.fn(async (event: { type: string; message?: AgentMessage }) => {
+				if (!rejected && event.type === "message_end" && event.message?.role === "toolResult") {
+					rejected = true;
+					throw new Error("intentional message_end failure");
+				}
+			}),
+		} as unknown as ExtensionRunner;
+		const { session, sessionManager } = await createHarness(
+			{ "compaction.thresholdTokens": 100_000 },
+			{ extensionRunner },
+		);
+
+		await session.prompt("work below the maintenance threshold");
+
+		const persistedToolResults = sessionManager
+			.getBranch()
+			.filter(entry => entry.type === "message" && entry.message.role === "toolResult");
+		expect(rejected).toBe(true);
+		expect(persistedToolResults).toHaveLength(1);
+	});
+
+	it("isolates late message_end mutations from the next provider request", async () => {
+		const releaseMutation = Promise.withResolvers<void>();
+		const mutationApplied = Promise.withResolvers<void>();
+		const toolResultHookEntered = Promise.withResolvers<void>();
+		const secondModelCallEntered = Promise.withResolvers<void>();
+		const releaseSecondModelCall = Promise.withResolvers<void>();
+		const mutationMarker = `LATE-MESSAGE-END-MUTATION-${"x".repeat(500_000)}`;
+		const liveDetails = {
+			nested: { state: "original" },
+			nonCloneable: () => "third-party callback",
+		};
+		let interceptedToolResult = false;
+		const extensionRunner = {
+			hasHandlers: vi.fn((eventType: string) => eventType === "message_end"),
+			emitBeforeAgentStart: vi.fn(async () => undefined),
+			emit: vi.fn(async (event: { type: string; message?: AgentMessage }) => {
+				if (interceptedToolResult || event.type !== "message_end" || event.message?.role !== "toolResult") return;
+				interceptedToolResult = true;
+				toolResultHookEntered.resolve();
+				await releaseMutation.promise;
+				event.message.content = [{ type: "text", text: mutationMarker }];
+				(event.message.details as { nested: { state: string } }).nested.state = "mutated";
+				mutationApplied.resolve();
+			}),
+		} as unknown as ExtensionRunner;
+		let modelCall = 0;
+		const { session, observedContexts } = await createHarness(
+			{ "compaction.thresholdTokens": 100_000 },
+			{
+				extensionRunner,
+				toolResultDetails: liveDetails,
+				configureAgent: agent => {
+					agent.addBeforeModelCallHook(async () => {
+						if (modelCall++ !== 1) return;
+						secondModelCallEntered.resolve();
+						await releaseSecondModelCall.promise;
+					});
+				},
+			},
+		);
+
+		const prompt = session.prompt("keep notification mutations out of live context");
+		const toolResultHookOutcome = await raceWithTimeout(
+			toolResultHookEntered.promise.then(() => "entered" as const),
+			2_000,
+			"blocked" as const,
+		);
+		const secondModelCallOutcome =
+			toolResultHookOutcome === "entered"
+				? await raceWithTimeout(
+						secondModelCallEntered.promise.then(() => "dispatched" as const),
+						2_000,
+						"blocked" as const,
+					)
+				: "blocked";
+		releaseMutation.resolve();
+		const mutationOutcome = await raceWithTimeout(
+			mutationApplied.promise.then(() => "applied" as const),
+			2_000,
+			"blocked" as const,
+		);
+		releaseSecondModelCall.resolve();
+		const promptOutcome = await raceWithTimeout(
+			prompt.then(() => "settled" as const),
+			2_000,
+			"blocked" as const,
+		);
+
+		expect(toolResultHookOutcome).toBe("entered");
+		expect(secondModelCallOutcome).toBe("dispatched");
+		expect(mutationOutcome).toBe("applied");
+		expect(promptOutcome).toBe("settled");
+		expect(observedContexts).toHaveLength(2);
+		expect(observedContexts[1].join("\n")).not.toContain("LATE-MESSAGE-END-MUTATION");
+		expect(JSON.stringify(session.messages)).not.toContain("LATE-MESSAGE-END-MUTATION");
+		expect(liveDetails.nested.state).toBe("original");
+		const storedToolResult = session.messages.find(message => message.role === "toolResult");
+		if (!storedToolResult) throw new Error("Expected a stored tool result");
+		expect((storedToolResult.details as { nested: { state: string } }).nested.state).toBe("original");
 	});
 
 	it("preserves the just-finished tool turn when message_end hooks are still pending", async () => {
@@ -267,7 +448,7 @@ describe("AgentSession mid-run threshold compaction", () => {
 		expect(persistedToolTurnRoles).toEqual(["assistant", "toolResult"]);
 	});
 
-	it("treats same-key assistant content variants as persisted before mid-run compaction", async () => {
+	it("keeps synchronous message_end mutations notification-local during mid-run compaction", async () => {
 		const extensionRuntime = new ExtensionRuntime();
 		const extension = await loadExtensionFromFactory(
 			pi => {
@@ -283,16 +464,12 @@ describe("AgentSession mid-run threshold compaction", () => {
 			extensionRuntime,
 			"assistant-display-variant",
 		);
-		const extensionAuthStorage = await AuthStorage.create(path.join(tempDir.path(), "extension-auth-variant.db"));
-		cleanups.push(async () => {
-			extensionAuthStorage.close();
-		});
 		const extensionRunner = new ExtensionRunner(
 			[extension],
 			extensionRuntime,
 			tempDir.path(),
 			SessionManager.inMemory(),
-			new ModelRegistry(extensionAuthStorage, path.join(tempDir.path(), "extension-models-variant.yml")),
+			sharedModelRegistry,
 		);
 		const { session, observedContexts } = await createHarness({}, { extensionRunner });
 		const compactSpy = mockCompaction("MID-RUN-COMPACTED-WITH-CONTENT-VARIANT");
@@ -302,6 +479,72 @@ describe("AgentSession mid-run threshold compaction", () => {
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 		expect(observedContexts.length).toBeGreaterThanOrEqual(2);
 		expect(observedContexts[1].join("\n")).toContain("MID-RUN-COMPACTED-WITH-CONTENT-VARIANT");
+		expect(JSON.stringify(session.messages)).not.toContain("display-variant");
+	});
+
+	it.each([
+		["auto_compaction_end", "context-full", ["soft"]],
+		["session_compact", "context-full", ["soft"]],
+		["auto_compaction_end", "shake", ["shake", "soft"]],
+		["session_compact", "shake", ["shake", "soft"]],
+	] as const)("hung %s handlers do not pin the mid-run %s loop", async (handlerType, action, methodOrder) => {
+		const releaseHandler = Promise.withResolvers<void>();
+		const handlerEntered = Promise.withResolvers<void>();
+		const nextProviderCall = Promise.withResolvers<void>();
+		const extensionRunner = {
+			hasHandlers: vi.fn((eventType: string) => eventType === handlerType),
+			emitBeforeAgentStart: vi.fn(async () => undefined),
+			emit: vi.fn(async (event: { type: string }) => {
+				if (event.type === handlerType) {
+					handlerEntered.resolve();
+					await releaseHandler.promise;
+				}
+			}),
+		} as unknown as ExtensionRunner;
+		const { session, observedContexts } = await createHarness(
+			{ "compaction.methodOrder": methodOrder },
+			{
+				extensionRunner,
+				onProviderCall: index => {
+					if (index === 1) nextProviderCall.resolve();
+				},
+			},
+		);
+		const shakeSpy =
+			action === "shake"
+				? vi
+						.spyOn(session, "shake")
+						.mockResolvedValue({ mode: "elide", toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 })
+				: undefined;
+		const compactSpy = mockCompaction("MID-RUN-COMPACTED-WITHOUT-WAITING-ON-LIFECYCLE");
+
+		const prompt = session.prompt("work on the release");
+		const handlerOutcome = await raceWithTimeout(
+			handlerEntered.promise.then(() => "entered" as const),
+			2_000,
+			"blocked" as const,
+		);
+		const providerOutcome =
+			handlerOutcome === "entered"
+				? await raceWithTimeout(
+						nextProviderCall.promise.then(() => "dispatched" as const),
+						2_000,
+						"blocked" as const,
+					)
+				: "blocked";
+		const promptOutcome = await raceWithTimeout(
+			prompt.then(() => "settled" as const),
+			2_000,
+			"blocked" as const,
+		);
+		releaseHandler.resolve();
+
+		expect(handlerOutcome).toBe("entered");
+		expect(providerOutcome).toBe("dispatched");
+		expect(promptOutcome).toBe("settled");
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		if (shakeSpy) expect(shakeSpy).toHaveBeenCalledTimes(1);
+		expect(observedContexts[1].join("\n")).toContain("MID-RUN-COMPACTED-WITHOUT-WAITING-ON-LIFECYCLE");
 	});
 
 	it("does not compact mid-run outside goal mode when disabled", async () => {

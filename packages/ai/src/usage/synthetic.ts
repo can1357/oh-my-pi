@@ -9,22 +9,15 @@ import type {
 	UsageStatus,
 	UsageWindow,
 } from "../usage";
+import { HOUR_MS, parseIsoTimestamp, WEEK_MS } from "./shared";
 
 const QUOTAS_URL = "https://api.synthetic.new/v2/quotas";
-const FIVE_HOUR_MS = 5 * 60 * 60 * 1000;
-const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 function parseDollarAmount(value: unknown): number | undefined {
 	if (typeof value !== "string") return undefined;
 	const trimmed = value.replace(/^\$/, "").trim();
 	const parsed = Number(trimmed);
 	return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-function parseIsoMs(value: unknown): number | undefined {
-	if (typeof value !== "string" || !value) return undefined;
-	const ms = Date.parse(value);
-	return Number.isFinite(ms) ? ms : undefined;
 }
 
 function buildUsageAmount(args: {
@@ -61,7 +54,7 @@ function parseRollingFiveHourLimit(raw: unknown, provider: UsageFetchParams["pro
 	const remaining = typeof raw.remaining === "number" ? raw.remaining : undefined;
 	const max = typeof raw.max === "number" ? raw.max : undefined;
 	const limited = raw.limited === true;
-	const nextTickAt = parseIsoMs(raw.nextTickAt);
+	const nextTickAt = parseIsoTimestamp(raw.nextTickAt);
 	const tickPercent = typeof raw.tickPercent === "number" ? raw.tickPercent : undefined;
 
 	if (remaining === undefined && max === undefined) return null;
@@ -71,7 +64,7 @@ function parseRollingFiveHourLimit(raw: unknown, provider: UsageFetchParams["pro
 	const window: UsageWindow = {
 		id: "5h",
 		label: regenPercent !== undefined ? `5h · regen ${regenPercent}%/tick` : "5h",
-		durationMs: FIVE_HOUR_MS,
+		durationMs: 5 * HOUR_MS,
 		...(nextTickAt !== undefined ? { resetsAt: nextTickAt, resetLabel: "tick" } : {}),
 	};
 	const amount = buildUsageAmount({
@@ -97,7 +90,7 @@ function parseWeeklyTokenLimit(raw: unknown, provider: UsageFetchParams["provide
 	const remainingCredits = parseDollarAmount(raw.remainingCredits);
 	const maxCredits = parseDollarAmount(raw.maxCredits);
 	const percentRemaining = typeof raw.percentRemaining === "number" ? raw.percentRemaining : undefined;
-	const nextRegenAt = parseIsoMs(raw.nextRegenAt);
+	const nextRegenAt = parseIsoTimestamp(raw.nextRegenAt);
 
 	if (remainingCredits === undefined && maxCredits === undefined) return null;
 

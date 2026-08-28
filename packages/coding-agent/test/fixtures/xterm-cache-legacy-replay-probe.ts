@@ -13,10 +13,11 @@ const result: Extract<DaemonRpcResult, { op: "logs" }> = {
 };
 const terminalRows = await renderLaunchLogTerminalRows(result, { head: false, lines: 10 });
 const paths = Object.keys(require.cache)
-	.filter(modulePath => modulePath.replaceAll("\\", "/").includes("/node_modules/@xterm/headless/"))
+	.filter(modulePath => modulePath.replaceAll("\\", "/").includes("/packages/utils/src/vterm"))
 	.sort();
 const bytes = paths.reduce((total, modulePath) => total + fs.statSync(modulePath).size, 0);
 const memory = process.memoryUsage();
-process.stdout.write(
+await Bun.write(
+	Bun.stdout,
 	JSON.stringify({ modules: paths.length, bytes, rss: memory.rss, heapUsed: memory.heapUsed, paths, terminalRows }),
 );

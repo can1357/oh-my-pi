@@ -59,6 +59,12 @@ describe("read tool raw range exactness", () => {
 		expect(output.trimEnd()).toBe("L01\nL02");
 	});
 
+	it("records the source line count for an open-ended range that reaches EOF", async () => {
+		const result = await tool.execute("call-raw-tail", { path: `${filePath}:raw:31-` });
+
+		expect(result.details?.totalLines).toBe(60);
+	});
+
 	it("keeps context padding for numbered range reads", async () => {
 		// Numbered mode intentionally pads (leading anchor buffer + trailing
 		// disambiguation lines) — line numbers make the padding self-describing.

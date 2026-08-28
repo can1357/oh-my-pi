@@ -1,5 +1,286 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { untilAborted } from "@oh-my-pi/pi-utils/abortable";
+import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { ToolError, throwIfAborted } from "./tool-errors";
+
+const browserRunRejections = new WeakMap<object, object>();
+
+/** Associates a browser operation failure with its owning evaluated run. */
+export function markBrowserRunRejection<T>(reason: T, owner: object): T {
+	if (reason !== null && (typeof reason === "object" || typeof reason === "function")) {
+		browserRunRejections.set(reason, owner);
+	}
+	return reason;
+}
+
+/** Returns whether a rejection was marked for the specified evaluated run. */
+export function isBrowserRunRejection(reason: unknown, owner: object): boolean {
+	return (
+		reason !== null &&
+		(typeof reason === "object" || typeof reason === "function") &&
+		browserRunRejections.get(reason) === owner
+	);
+}
+
+/** Returns whether a rejection belongs to the marked browser run or its evaluated source file. */
+export function isBrowserRunOwnedRejection(reason: unknown, owner: object, filename: string): boolean {
+	if (isBrowserRunRejection(reason, owner)) return true;
+	return reason instanceof Error && typeof reason.stack === "string" && reason.stack.includes(filename);
+}
+
+type FloatingRejectionHandler = (reason: unknown) => void;
+
+interface ObservedPromiseState {
+	handled: boolean;
+	userContinuationFailed: boolean;
+}
+
+const observedBrowserPromises = new WeakMap<Promise<unknown>, ObservedPromiseState>();
+const observedPromiseConstructor = { [Symbol.species]: Promise };
+
+type PromiseCombinatorName = "all" | "race" | "allSettled" | "any";
+type PromiseCombinator = (this: PromiseConstructor, values: Iterable<unknown>) => Promise<unknown>;
+
+interface PromiseCombinatorTrackingContext {
+	owner: object;
+	onFloatingRejection: FloatingRejectionHandler;
+}
+
+const PROMISE_COMBINATORS: readonly PromiseCombinatorName[] = ["all", "race", "allSettled", "any"];
+const NativePromise = Promise;
+const nativePromiseCombinators: Record<PromiseCombinatorName, PromiseCombinator> = {
+	all: Promise.all,
+	race: Promise.race,
+	allSettled: Promise.allSettled,
+	any: Promise.any,
+};
+const promiseCombinatorTracking = new AsyncLocalStorage<PromiseCombinatorTrackingContext>();
+let previousPromiseDescriptor: PropertyDescriptor | undefined;
+let promiseCombinatorTrackingScopes = 0;
+
+/**
+ * Observes native promise-combinator results derived from browser promises for
+ * the duration of one evaluated run. Native `await` remains unchanged; dropped
+ * user continuations from `Promise.all` and `Promise.race` are routed to the
+ * owning run.
+ */
+export async function withBrowserPromiseCombinatorTracking<T>(
+	owner: object,
+	onFloatingRejection: FloatingRejectionHandler,
+	run: () => Promise<T>,
+): Promise<T> {
+	installPromiseCombinatorTracking();
+	try {
+		return await promiseCombinatorTracking.run({ owner, onFloatingRejection }, run);
+	} finally {
+		restorePromiseCombinatorTracking();
+	}
+}
+
+function installPromiseCombinatorTracking(): void {
+	if (promiseCombinatorTrackingScopes > 0) {
+		promiseCombinatorTrackingScopes++;
+		return;
+	}
+	const descriptor = Object.getOwnPropertyDescriptor(globalThis, "Promise");
+	if (!descriptor) throw new Error("Global Promise descriptor is unavailable");
+	const trackedPromise = createTrackedPromiseConstructor();
+	Object.defineProperty(globalThis, "Promise", { ...descriptor, value: trackedPromise });
+	previousPromiseDescriptor = descriptor;
+	promiseCombinatorTrackingScopes = 1;
+}
+
+function restorePromiseCombinatorTracking(): void {
+	if (promiseCombinatorTrackingScopes > 1) {
+		promiseCombinatorTrackingScopes--;
+		return;
+	}
+	const descriptor = previousPromiseDescriptor;
+	try {
+		if (!descriptor) throw new Error("Global Promise tracking scope is not installed");
+		Object.defineProperty(globalThis, "Promise", descriptor);
+	} finally {
+		previousPromiseDescriptor = undefined;
+		promiseCombinatorTrackingScopes = 0;
+	}
+}
+
+function createTrackedPromiseConstructor(): PromiseConstructor {
+	class TrackedPromise<T> extends NativePromise<T> {}
+	for (const name of PROMISE_COMBINATORS) {
+		const original = nativePromiseCombinators[name];
+		Object.defineProperty(TrackedPromise, name, {
+			configurable: true,
+			writable: true,
+			value(this: PromiseConstructor, values: Iterable<unknown>): Promise<unknown> {
+				let hasObservedInput = false;
+				const result = Reflect.apply(original, this, [
+					tapObservedBrowserPromises(values, () => {
+						hasObservedInput = true;
+					}),
+				]) as Promise<unknown>;
+				const context = promiseCombinatorTracking.getStore();
+				return hasObservedInput && context
+					? observeBrowserRunPromise(result, context.owner, context.onFloatingRejection)
+					: result;
+			},
+		});
+	}
+	return TrackedPromise;
+}
+
+function* tapObservedBrowserPromises(
+	values: Iterable<unknown>,
+	onObserved: () => void,
+): Generator<unknown, void, undefined> {
+	for (const value of values) {
+		if (observedBrowserPromises.has(value as Promise<unknown>)) onObserved();
+		yield value;
+	}
+}
+
+/**
+ * Observes every explicit continuation of a browser promise without replacing
+ * the native promise. Browser failures remain contained; an unhandled error
+ * created by user continuation code is reported to the owning run.
+ */
+export function observeBrowserRunPromise<T>(
+	promise: Promise<T>,
+	owner: object,
+	onFloatingRejection: FloatingRejectionHandler,
+): Promise<T> {
+	return observeBrowserRunPromiseWithState(promise, owner, onFloatingRejection, {
+		handled: false,
+		userContinuationFailed: false,
+	});
+}
+
+function observeBrowserRunPromiseWithState<T>(
+	promise: Promise<T>,
+	owner: object,
+	onFloatingRejection: FloatingRejectionHandler,
+	state: ObservedPromiseState,
+): Promise<T> {
+	if (observedBrowserPromises.has(promise)) return promise;
+	observedBrowserPromises.set(promise, state);
+	const originalThen = promise.then.bind(promise);
+	const originalFinally = promise.finally.bind(promise);
+	void originalThen(undefined, reason => {
+		setTimeout(() => {
+			if (!state.handled && (state.userContinuationFailed || !isBrowserRunRejection(reason, owner))) {
+				onFloatingRejection(reason);
+			}
+		}, 0);
+	});
+	Object.defineProperties(promise, {
+		constructor: { configurable: true, value: observedPromiseConstructor },
+		// biome-ignore lint/suspicious/noThenProperty: native Promise continuations must remain thenable.
+		then: {
+			configurable: true,
+			value: <TResult1 = T, TResult2 = never>(
+				onFulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null,
+				onRejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+			): Promise<TResult1 | TResult2> => {
+				state.handled = true;
+				const childState = createContinuationState();
+				return observeBrowserRunPromiseWithState(
+					originalThen(
+						recordContinuationFailure(onFulfilled, childState),
+						recordContinuationFailure(onRejected, childState),
+					),
+					owner,
+					onFloatingRejection,
+					childState,
+				);
+			},
+		},
+		catch: {
+			configurable: true,
+			value: <TResult = never>(
+				onRejected?: ((reason: unknown) => TResult | PromiseLike<TResult>) | null,
+			): Promise<T | TResult> => {
+				state.handled = true;
+				const childState = createContinuationState();
+				return observeBrowserRunPromiseWithState(
+					originalThen(undefined, recordContinuationFailure(onRejected, childState)),
+					owner,
+					onFloatingRejection,
+					childState,
+				);
+			},
+		},
+		finally: {
+			configurable: true,
+			value: (onFinally?: (() => void) | null): Promise<T> => {
+				state.handled = true;
+				const childState = createContinuationState();
+				return observeBrowserRunPromiseWithState(
+					originalFinally(recordContinuationFailure(onFinally, childState)),
+					owner,
+					onFloatingRejection,
+					childState,
+				);
+			},
+		},
+	});
+	return promise;
+}
+
+function createContinuationState(): ObservedPromiseState {
+	return { handled: false, userContinuationFailed: false };
+}
+
+function recordContinuationFailure<TArgs extends unknown[], TResult>(
+	continuation: ((...args: TArgs) => TResult | PromiseLike<TResult>) | null | undefined,
+	state: ObservedPromiseState,
+): ((...args: TArgs) => TResult | PromiseLike<TResult>) | null | undefined {
+	if (!continuation) return continuation;
+	return (...args) => {
+		try {
+			const result = continuation(...args);
+			if (!isThenable(result)) return result;
+			return Promise.resolve(result).catch(reason => {
+				state.userContinuationFailed = true;
+				throw reason;
+			}) as PromiseLike<TResult>;
+		} catch (reason) {
+			state.userContinuationFailed = true;
+			throw reason;
+		}
+	};
+}
+
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+	if (value === null || (typeof value !== "object" && typeof value !== "function")) return false;
+	return typeof Reflect.get(value, "then") === "function";
+}
+
+function trackBrowserRunPromise<T>(
+	promise: Promise<T>,
+	owner?: object,
+	onFloatingRejection?: FloatingRejectionHandler,
+): Promise<T> {
+	if (!owner) return markHandled(promise);
+	const tracked = promise.catch(error => {
+		throw markBrowserRunRejection(error, owner);
+	});
+	return onFloatingRejection ? observeBrowserRunPromise(tracked, owner, onFloatingRejection) : tracked;
+}
+
+/**
+ * Installs worker-realm rejection routing. Consumed browser-run failures stay in
+ * the worker; unrelated failures retain the default fatal worker behavior.
+ */
+export function installBrowserWorkerRejectionGuard(consume: (reason: unknown) => boolean): () => void {
+	const onRejection = (reason: unknown): void => {
+		if (postmortem.isExpectedCleanupError(reason) || consume(reason)) return;
+		setTimeout(() => {
+			throw reason;
+		}, 0);
+	};
+	process.on("unhandledRejection", onRejection);
+	return () => process.off("unhandledRejection", onRejection);
+}
 
 /**
  * Marks a run-scoped promise as observed without changing its behavior for awaited callers.
@@ -83,11 +364,16 @@ export function waitForRun(
 			await untilAborted(signal, async () => await Bun.sleep(interval));
 		}
 	})();
-	return markHandled(promise);
+	return trackBrowserRunPromise(promise);
 }
 
 /** Binds a long-lived scope facade (page/tab/desktop objects) to one evaluated run's abort signal. */
-export function bindRunFacade<T extends object>(target: T, signal: AbortSignal): T {
+export function bindRunFacade<T extends object>(
+	target: T,
+	signal: AbortSignal,
+	rejectionOwner?: object,
+	onFloatingRejection?: FloatingRejectionHandler,
+): T {
 	const cache = new Map<PropertyKey, unknown>();
 	return new Proxy(target, {
 		get(current, prop) {
@@ -102,11 +388,13 @@ export function bindRunFacade<T extends object>(target: T, signal: AbortSignal):
 					if (result && typeof result === "object") {
 						const then = Reflect.get(result, "then");
 						if (typeof then === "function") {
-							return markHandled(
+							return trackBrowserRunPromise(
 								Promise.resolve(result).then(resolved => {
 									throwIfAborted(signal);
 									return resolved;
 								}),
+								rejectionOwner,
+								onFloatingRejection,
 							);
 						}
 					}
@@ -121,7 +409,7 @@ export function bindRunFacade<T extends object>(target: T, signal: AbortSignal):
 				// brand-check internal slots that a Proxy cannot forward, and reading a
 				// signal needs no abort gating anyway.
 				if (value instanceof AbortSignal) return value;
-				const wrapped = bindRunFacade(value, signal);
+				const wrapped = bindRunFacade(value, signal, rejectionOwner, onFloatingRejection);
 				cache.set(prop, wrapped);
 				return wrapped;
 			}

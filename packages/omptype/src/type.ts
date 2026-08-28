@@ -3302,6 +3302,38 @@ export namespace type {
 		return buildOr<NaryOrOutput<definitions>, NaryOrInput<definitions>>(definitions);
 	}
 
+	/** Build an array schema from an element definition. */
+	export function array<const definition>(
+		definition: definition,
+	): FluentType<InferDef<definition>[], InferDefIn<definition>[]> {
+		return type(definition).array();
+	}
+
+	/** Build a union from a runtime array of definitions. */
+	export function union<const definitions extends readonly unknown[]>(
+		definitions: definitions,
+	): FluentType<NaryOrOutput<definitions>, NaryOrInput<definitions>> {
+		return buildOr<NaryOrOutput<definitions>, NaryOrInput<definitions>>(definitions);
+	}
+
+	/** Build a tuple schema from a runtime array of definitions. */
+	export function tuple<const definitions extends readonly unknown[]>(
+		definitions: definitions,
+	): FluentType<InferDef<definitions>, InferDefIn<definitions>> {
+		return type(definitions);
+	}
+
+	/** Build an open record schema from key and value definitions. */
+	export function record<const key, const value>(
+		key: key,
+		value: value,
+	): FluentType<
+		Record<Extract<InferDef<key>, PropertyKey>, InferDef<value>>,
+		Record<Extract<InferDefIn<key>, PropertyKey>, InferDefIn<value>>
+	> {
+		return keywords.Record(key, value);
+	}
+
 	/** Build an intersection from zero or more definitions. */
 	export function and<const definitions extends readonly unknown[]>(
 		...definitions: definitions
@@ -3566,6 +3598,11 @@ export namespace type {
 		return makeType<values[number]>(ir, [], {});
 	}
 
+	/** Build a literal union from a runtime array. */
+	export function enumeration<const values extends readonly unknown[]>(values: values): FluentType<values[number]> {
+		return enumerated(...values);
+	}
+
 	/** Enumerate an enum-like object's forward values, excluding numeric reverse mappings. */
 	// biome-ignore lint/suspicious/noShadowRestrictedNames: Object.prototype.valueOf method name API
 	export function valueOf<const values extends Record<PropertyKey, unknown>>(
@@ -3637,6 +3674,42 @@ export namespace type {
 	/** Untyped builder for runtime-assembled definitions. */
 	export function raw(def: unknown): BaseType {
 		return makeType(parseDef(def), [], {}) as unknown as BaseType;
+	}
+
+	/**
+	 * Return a validation-only schema that emits `json` verbatim — even when
+	 * embedded in an object, array, or union.
+	 *
+	 * A `.toJsonSchema()` method override cannot survive nesting: a parent schema
+	 * emits each child's IR directly and never calls the child's method, so the
+	 * override silently disappears from the wire schema. This stores the override
+	 * on the IR instead.
+	 *
+	 * # Errors
+	 *
+	 * Throws when `schema` has a default or output-changing morph/pipe. A refine
+	 * can preserve validation and the input value, but silently discarding a
+	 * transformed output would violate the returned {@link Type}.
+	 */
+	export function withJsonSchema<t, i = t>(schema: Type<t, i>, json: Record<string, unknown>): Type<t, i> {
+		const internal = schema as unknown as InternalType;
+		if (internal.hasDefault || hasMorph(internal.ir) || internal[kSteps].some(step => step.kind === "pipe")) {
+			throw new OmpTypeError("type.withJsonSchema cannot wrap schemas with defaults or output-changing morphs");
+		}
+		return makeType<t, i>(
+			{
+				k: "refine",
+				base: { k: "unknown" },
+				pred: value => {
+					const result = schema(value);
+					return result instanceof OmpErrors ? result : true;
+				},
+				expected: schema.expression,
+				json: { ...json },
+			},
+			[],
+			{},
+		);
 	}
 }
 

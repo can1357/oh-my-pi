@@ -3,20 +3,27 @@
  * post-edit lines plus any diagnostic warnings. Pure function: no FS, no
  * mutation of the input.
  *
- * Replacement groups are first normalized by {@link repairReplacementBoundaries},
- * which absorbs common model mistakes where a payload restates unchanged range
- * boundaries or duplicates/drops structural closers.
+ * Mis-set replacement range boundaries are repaired by bounded candidate
+ * search. Exact line equality, indentation, tree-sitter structure, and a
+ * narrow pure-closer shape gate constrain candidates; tree-sitter validates
+ * the selected result.
  */
 
 import { resolveClipboardEdits } from "./clipboard";
 import {
 	afterInsertLandingShiftWarning,
+	afterInsertOpenerEscapeWarning,
 	ambiguousBoundaryEchoMessage,
-	ambiguousCloserSpareMessage,
+	ambiguousBoundaryPlacementMessage,
 	blockInsertLandingShiftWarning,
+	boundaryVariantRepairWarning,
+	editBrokeParseWarning,
 	REPLACEMENT_INDENT_AUTO_SHIFT_WARNING,
+	textualBoundaryEchoWarning,
 	UNRESOLVED_BLOCK_INTERNAL,
+	UNRESOLVED_CLIPBOARD_INTERNAL,
 } from "./messages";
+import { enclosingBoundaries, nodeChain, parsesCleanly } from "./syntax";
 import { cloneCursor } from "./tokenizer";
 import type { Anchor, ApplyResult, Clipboard, Cursor, Edit } from "./types";
 
@@ -25,6 +32,14 @@ type LineOrigin = "original" | "insert" | "replacement";
 type InsertEdit = Extract<Edit, { kind: "insert" }>;
 type DeleteEdit = Extract<Edit, { kind: "delete" }>;
 type AppliedEdit = InsertEdit | DeleteEdit;
+
+function insertEditAt(edits: readonly AppliedEdit[], index: number): InsertEdit {
+	const edit = edits[index];
+	if (edit?.kind !== "insert") {
+		throw new Error("internal error: after-insert group contains a non-insert edit");
+	}
+	return edit;
+}
 
 interface IndexedEdit {
 	edit: AppliedEdit;
@@ -120,222 +135,68 @@ function bucketAnchorEditsByLine(edits: IndexedEdit[]): Map<number, IndexedEdit[
 	}
 	return byLine;
 }
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Replacement-boundary repair
 //
-// Models routinely miscount a replacement range's edges. Sometimes the payload
-// re-states unchanged lines that still live on both sides of the range
-// (duplicating a function header and final statement); sometimes it only
-// re-states or omits a structural closer, which leaves delimiter balance broken.
+// Models routinely miscount replacement edges: the range swallows an unchanged
+// boundary row, or the payload restates rows that survive just outside it.
+// Exact outside echoes are normalized from line equality alone. If the authored
+// result still does not parse, a bounded whole-patch search may retain the
+// selected range's first or effective-last row and may combine that retention
+// with exact echo removal.
 //
-// A balance-neutral boundary-echo repair fires only when both the leading and
-// trailing payload edges are exact copies of the surviving lines outside the
-// range. One-sided content echoes are left alone unless delimiter-balance repair
-// proves they are duplicated structural boundaries. This preserves intended
-// duplicate statements while absorbing the common "body includes the unchanged
-// wrapper" mistake.
+// Retention never follows parse success alone. On a valid baseline, deleting
+// the row must itself break syntax; every candidate also requires source-range
+// structure and indentation evidence. Distinct candidate texts tied at the
+// minimum repair cost are rejected rather than guessed. Pure structural-closer
+// rows are recognized only to verify sibling-depth placement.
 
 /** A line that is nothing but closing delimiters: `}`, `)`, `];`, `})`, `},`. */
 export const STRUCTURAL_CLOSER_RE = /^\s*[)\]}]+[;,]?\s*$/;
 
-/** A JSX/XML closing boundary that carries structure but no bracket tokens. */
-const JSX_CLOSER_RE = /^\s*(?:<\/>|<\/[A-Za-z][\w.:-]*>|\/>)\s*[;,]?\s*$/;
-const JSX_NAMED_CLOSER_RE = /^\s*<\/([A-Za-z][\w.:-]*)>\s*[;,]?\s*$/;
-const JSX_FRAGMENT_CLOSER_RE = /^\s*<\/>\s*[;,]?\s*$/;
-
-function isStructuralCloserLine(text: string): boolean {
-	return STRUCTURAL_CLOSER_RE.test(text) || JSX_CLOSER_RE.test(text);
-}
-
-function jsxCloserName(text: string): string | undefined {
-	if (JSX_FRAGMENT_CLOSER_RE.test(text)) return "";
-	const match = JSX_NAMED_CLOSER_RE.exec(text);
-	return match?.[1];
-}
-
-interface JsxPayloadTag {
-	readonly name: string;
-	readonly closing: boolean;
-	readonly selfClosing: boolean;
-}
-
-function isJsxTagStart(text: string, index: number): boolean {
-	const next = text[index + 1];
-	return next === ">" || next === "/" || (next >= "A" && next <= "Z") || (next >= "a" && next <= "z");
-}
-
-function findJsxTagEnd(text: string, start: number): number {
-	let quote: string | undefined;
-	let braces = 0;
-	for (let i = start + 1; i < text.length; i++) {
-		const ch = text[i];
-		if (quote) {
-			if (ch === "\\" && i + 1 < text.length) {
-				i++;
-			} else if (ch === quote) {
-				quote = undefined;
-			}
-			continue;
-		}
-		if (ch === '"' || ch === "'" || ch === "`") {
-			quote = ch;
-		} else if (ch === "{") {
-			braces++;
-		} else if (ch === "}" && braces > 0) {
-			braces--;
-		} else if (ch === ">" && braces === 0) {
-			return i;
-		}
-	}
-	return -1;
-}
-
-function parseJsxPayloadTag(raw: string): JsxPayloadTag | undefined {
-	if (raw === "<>") return { name: "", closing: false, selfClosing: false };
-	if (raw === "</>") return { name: "", closing: true, selfClosing: false };
-	const closing = raw.startsWith("</");
-	const nameStart = closing ? 2 : 1;
-	let nameEnd = nameStart;
-	while (nameEnd < raw.length && /[\w.:-]/.test(raw[nameEnd])) nameEnd++;
-	if (nameEnd === nameStart) return undefined;
-	return {
-		name: raw.slice(nameStart, nameEnd),
-		closing,
-		selfClosing: !closing && /\/>\s*$/.test(raw),
-	};
-}
-
-function readJsxPayloadTags(text: string): JsxPayloadTag[] {
-	const tags: JsxPayloadTag[] = [];
-	for (let start = text.indexOf("<"); start >= 0; start = text.indexOf("<", start + 1)) {
-		if (!isJsxTagStart(text, start)) continue;
-		const end = findJsxTagEnd(text, start);
-		if (end < 0) break;
-		const tag = parseJsxPayloadTag(text.slice(start, end + 1));
-		if (tag) tags.push(tag);
-		start = end;
-	}
-	return tags;
-}
-
-function payloadHasJsxOpenerForEcho(payloadPrefix: readonly string[], echoLines: readonly string[]): boolean {
-	const openTags: string[] = [];
-	for (const tag of readJsxPayloadTags(payloadPrefix.join("\n"))) {
-		if (tag.closing) {
-			if (openTags[openTags.length - 1] === tag.name) openTags.pop();
-		} else if (!tag.selfClosing) {
-			openTags.push(tag.name);
-		}
-	}
-	for (const line of echoLines) {
-		const name = jsxCloserName(line);
-		if (name !== undefined && openTags.includes(name)) return true;
-	}
-	return false;
-}
-
-interface DelimiterBalance {
-	paren: number;
-	bracket: number;
-	brace: number;
-}
-
 /**
- * Net `()` / `[]` / `{}` delta across `lines`, skipping delimiters inside line
- * comments (`//`), block comments, and string/template literals. Block-comment
- * and backtick-template state carry across lines; `"` / `'` reset at EOL since
- * they cannot span lines. Deliberately language-light: constructs it cannot
- * classify (e.g. regex literals) are counted naively, which can only suppress a
- * repair (the safe direction), never force one.
+ * Grammar node kinds for attribute/decorator/annotation rows, per bundled
+ * tree-sitter grammar. Statements may repeat verbatim on adjacent lines by
+ * intent, but annotations on one item never do — an exact adjacent copy is a
+ * boundary echo. This classification is the extra evidence that lets
+ * one-sided echo normalization act on single-line ranges (the
+ * doc-restoration incident: a `PUT N.=N` landed one line high and its body
+ * restated the `#[napi]` surviving just below the range, duplicating the
+ * attribute — a result that PARSES, attributes being repeatable syntax, so
+ * neither the probe advisory nor the variant search could catch it).
+ *
+ * Kinds are grammar-blessed names, verified against the bundled parsers —
+ * not lexical guesses; `@media` in CSS or `@x` inside a string never
+ * classify. Extend per grammar as needed.
  */
-function computeDelimiterBalance(lines: readonly string[]): DelimiterBalance {
-	const balance: DelimiterBalance = { paren: 0, bracket: 0, brace: 0 };
-	let inBlockComment = false;
-	let quote = "";
-	for (const line of lines) {
-		for (let i = 0; i < line.length; i++) {
-			const ch = line[i];
-			if (inBlockComment) {
-				if (ch === "*" && line[i + 1] === "/") {
-					inBlockComment = false;
-					i++;
-				}
-				continue;
-			}
-			if (quote) {
-				if (ch === "\\") i++;
-				else if (ch === quote) quote = "";
-				continue;
-			}
-			if (ch === '"' || ch === "'" || ch === "`") {
-				quote = ch;
-				continue;
-			}
-			if (ch === "/" && line[i + 1] === "/") break;
-			if (ch === "/" && line[i + 1] === "*") {
-				inBlockComment = true;
-				i++;
-				continue;
-			}
-			switch (ch) {
-				case "(":
-					balance.paren++;
-					break;
-				case ")":
-					balance.paren--;
-					break;
-				case "[":
-					balance.bracket++;
-					break;
-				case "]":
-					balance.bracket--;
-					break;
-				case "{":
-					balance.brace++;
-					break;
-				case "}":
-					balance.brace--;
-					break;
-			}
-		}
-		// `"` / `'` cannot span lines; only backtick templates and block comments do.
-		if (quote === '"' || quote === "'") quote = "";
-	}
-	return balance;
-}
+const ANNOTATION_NODE_KINDS: Record<string, true> = {
+	attribute_item: true, // rust `#[...]`
+	inner_attribute_item: true, // rust `#![...]`
+	decorator: true, // typescript/tsx/javascript/python
+	annotation: true, // kotlin, java `@Foo(...)`
+	marker_annotation: true, // java `@Override`
+	attribute_list: true, // c# `[Fact]`
+};
 
-function balanceDelta(a: DelimiterBalance, b: DelimiterBalance): DelimiterBalance {
-	return { paren: a.paren - b.paren, bracket: a.bracket - b.bracket, brace: a.brace - b.brace };
-}
-
-function balanceNegate(a: DelimiterBalance): DelimiterBalance {
-	return { paren: -a.paren, bracket: -a.bracket, brace: -a.brace };
-}
-
-function balanceEqual(a: DelimiterBalance, b: DelimiterBalance): boolean {
-	return a.paren === b.paren && a.bracket === b.bracket && a.brace === b.brace;
-}
-
-function balanceIsZero(a: DelimiterBalance): boolean {
-	return a.paren === 0 && a.bracket === 0 && a.brace === 0;
-}
-
-function balanceSum(a: DelimiterBalance, b: DelimiterBalance): DelimiterBalance {
-	return { paren: a.paren + b.paren, bracket: a.bracket + b.bracket, brace: a.brace + b.brace };
-}
-
-function balanceComponentCovers(candidate: number, target: number): boolean {
-	if (target === 0) return true;
-	return candidate > 0 === target > 0 && Math.abs(candidate) >= Math.abs(target);
-}
-
-function balanceCovers(candidate: DelimiterBalance, target: DelimiterBalance): boolean {
-	return (
-		balanceComponentCovers(candidate.paren, target.paren) &&
-		balanceComponentCovers(candidate.bracket, target.bracket) &&
-		balanceComponentCovers(candidate.brace, target.brace)
+/** File line `line` is exactly a single-line annotation node. */
+function isAnnotationLine(fileLines: readonly string[], path: string, line: number): boolean {
+	return nodeChain(fileLines, path, line).some(
+		node => node.startLine === line && node.endLine === line && ANNOTATION_NODE_KINDS[node.kind] === true,
 	);
+}
+
+/** Every file line in the inclusive range is an annotation node. */
+function isAnnotationEchoRun(
+	fileLines: readonly string[],
+	path: string | undefined,
+	first: number,
+	last: number,
+): boolean {
+	if (path === undefined) return false;
+	for (let line = first; line <= last; line++) {
+		if (!isAnnotationLine(fileLines, path, line)) return false;
+	}
+	return true;
 }
 
 interface ReplacementGroup {
@@ -451,222 +312,6 @@ function repairReplacementIndentation(edits: AppliedEdit[], fileLines: readonly 
 	return repaired ? [REPLACEMENT_INDENT_AUTO_SHIFT_WARNING] : [];
 }
 
-/**
- * Largest `k` such that the payload's last `k` lines exactly equal the `k`
- * surviving file lines just below the range AND dropping them zeroes `delta`.
- * Requires a non-zero `delta`: a zero-balance candidate can never account for
- * the imbalance, so intentional duplicates of ordinary statements stay intact,
- * while duplicated structural lines (closers like `});`, openers like `foo(`)
- * are dropped when they exactly explain the imbalance.
- */
-function findDuplicateSuffix(group: ReplacementGroup, fileLines: readonly string[], delta: DelimiterBalance): number {
-	if (balanceIsZero(delta)) return 0;
-	const { payload, endLine } = group;
-	const maxK = Math.min(payload.length, fileLines.length - endLine);
-	for (let k = maxK; k >= 1; k--) {
-		let matches = true;
-		for (let t = 0; t < k; t++) {
-			if (payload[payload.length - k + t] !== fileLines[endLine + t]) {
-				matches = false;
-				break;
-			}
-		}
-		if (!matches) continue;
-		if (balanceEqual(computeDelimiterBalance(payload.slice(payload.length - k)), delta)) return k;
-	}
-	return 0;
-}
-
-/**
- * Largest `j` such that the payload's first `j` lines exactly equal the `j`
- * surviving file lines just above the range AND dropping them zeroes `delta`.
- * Requires a non-zero `delta`; see {@link findDuplicateSuffix}.
- */
-function findDuplicatePrefix(group: ReplacementGroup, fileLines: readonly string[], delta: DelimiterBalance): number {
-	if (balanceIsZero(delta)) return 0;
-	const { payload, startLine } = group;
-	const maxJ = Math.min(payload.length, startLine - 1);
-	for (let j = maxJ; j >= 1; j--) {
-		let matches = true;
-		for (let t = 0; t < j; t++) {
-			if (payload[t] !== fileLines[startLine - 1 - j + t]) {
-				matches = false;
-				break;
-			}
-		}
-		if (!matches) continue;
-		if (balanceEqual(computeDelimiterBalance(payload.slice(0, j)), delta)) return j;
-	}
-	return 0;
-}
-interface DroppedSuffixClosers {
-	readonly startLine: number;
-	readonly count: number;
-	readonly balance: DelimiterBalance;
-}
-
-function countPayloadRestatedSuffixHead(payload: readonly string[], suffixLines: readonly string[]): number {
-	const maxCount = Math.min(payload.length, suffixLines.length);
-	for (let count = maxCount; count >= 1; count--) {
-		let matches = true;
-		for (let offset = 0; offset < count; offset++) {
-			if (payload[payload.length - count + offset] !== suffixLines[offset]) {
-				matches = false;
-				break;
-			}
-		}
-		if (matches) return count;
-	}
-	return 0;
-}
-
-function countProjectedBelowSuffixTail(
-	group: ReplacementGroup,
-	fileLines: readonly string[],
-	deletedLines: ReadonlySet<number>,
-	insertedLineMaps: InsertedLineMaps,
-	suffixLines: readonly string[],
-): number {
-	const below: string[] = [];
-	const appendCloserLines = (lines: readonly string[] | undefined): boolean => {
-		if (!lines) return true;
-		for (const text of lines) {
-			if (!STRUCTURAL_CLOSER_RE.test(text)) return false;
-			below.push(text);
-		}
-		return true;
-	};
-	if (!appendCloserLines(insertedLineMaps.after.get(group.endLine))) return 0;
-	for (let line = group.endLine + 1; line <= fileLines.length; line++) {
-		if (!appendCloserLines(insertedLineMaps.before.get(line))) break;
-		if (!deletedLines.has(line)) {
-			const text = fileLines[line - 1] ?? "";
-			if (!STRUCTURAL_CLOSER_RE.test(text)) break;
-			below.push(text);
-		}
-		if (!appendCloserLines(insertedLineMaps.after.get(line))) break;
-	}
-	const maxCount = Math.min(below.length, suffixLines.length);
-	for (let count = maxCount; count >= 1; count--) {
-		let matches = true;
-		for (let offset = 0; offset < count; offset++) {
-			if (below[offset] !== suffixLines[suffixLines.length - count + offset]) {
-				matches = false;
-				break;
-			}
-		}
-		if (matches) return count;
-	}
-	return 0;
-}
-
-interface InsertedLineMaps {
-	readonly before: ReadonlyMap<number, readonly string[]>;
-	readonly after: ReadonlyMap<number, readonly string[]>;
-}
-
-function computeProjectedPrefixBalance(
-	group: ReplacementGroup,
-	fileLines: readonly string[],
-	deletedLines: ReadonlySet<number>,
-	insertedByLine: ReadonlyMap<number, readonly string[]>,
-	insertedLineMaps: InsertedLineMaps,
-): DelimiterBalance {
-	const prefix: string[] = [];
-	for (let line = 1; line < group.startLine; line++) {
-		const inserted = insertedByLine.get(line);
-		if (inserted) prefix.push(...inserted);
-		if (!deletedLines.has(line)) prefix.push(fileLines[line - 1] ?? "");
-	}
-	const insertedAtStart = insertedLineMaps.before.get(group.startLine);
-	if (insertedAtStart) prefix.push(...insertedAtStart);
-	prefix.push(...group.payload);
-	return computeDelimiterBalance(prefix);
-}
-
-function prefixCanCoverSuffixClosers(
-	group: ReplacementGroup,
-	fileLines: readonly string[],
-	suffixBalance: DelimiterBalance,
-	coveredBelowBalance: DelimiterBalance,
-	deletedLines: ReadonlySet<number>,
-	insertedByLine: ReadonlyMap<number, readonly string[]>,
-	insertedLineMaps: InsertedLineMaps,
-): boolean {
-	const neededOpeners = balanceNegate(suffixBalance);
-	const prefixBalance = computeProjectedPrefixBalance(
-		group,
-		fileLines,
-		deletedLines,
-		insertedByLine,
-		insertedLineMaps,
-	);
-	const uncoveredPrefixBalance = balanceSum(prefixBalance, coveredBelowBalance);
-	return balanceCovers(uncoveredPrefixBalance, neededOpeners);
-}
-
-/**
- * Missing segment of the range's deleted structural-closer suffix that should
- * be spared. Payload lines that already restate the suffix head are not kept
- * again, and projected closers immediately below the range satisfy the suffix
- * tail. The remaining middle segment is kept only when backed by unmatched
- * openers plus the whole-patch residual.
- */
-function findDroppedSuffixClosers(
-	group: ReplacementGroup,
-	fileLines: readonly string[],
-	delta: DelimiterBalance,
-	remainingDelta: DelimiterBalance,
-	deletedPrefixBalance: DelimiterBalance,
-	deletedLines: ReadonlySet<number>,
-	insertedByLine: ReadonlyMap<number, readonly string[]>,
-	insertedLineMaps: InsertedLineMaps,
-): DroppedSuffixClosers | undefined {
-	let suffixLength = 0;
-	while (
-		suffixLength < group.deleteIndices.length &&
-		STRUCTURAL_CLOSER_RE.test(fileLines[group.endLine - suffixLength - 1] ?? "")
-	) {
-		suffixLength++;
-	}
-	if (suffixLength === 0) return undefined;
-
-	const suffixStartLine = group.endLine - suffixLength + 1;
-	const suffixLines = fileLines.slice(group.endLine - suffixLength, group.endLine);
-	const restatedHead = countPayloadRestatedSuffixHead(group.payload, suffixLines);
-	const coveredTail = countProjectedBelowSuffixTail(group, fileLines, deletedLines, insertedLineMaps, suffixLines);
-	const keepStart = restatedHead;
-	const keepEnd = suffixLength - coveredTail;
-	if (keepStart >= keepEnd) return undefined;
-
-	const keptLines = suffixLines.slice(keepStart, keepEnd);
-	const keptBalance = computeDelimiterBalance(keptLines);
-	const neededOpeners = balanceNegate(keptBalance);
-	const coveredBelowBalance = computeDelimiterBalance(suffixLines.slice(keepEnd));
-	if (!balanceCovers(delta, neededOpeners)) return undefined;
-	if (balanceCovers(deletedPrefixBalance, neededOpeners)) return undefined;
-	if (!balanceCovers(remainingDelta, neededOpeners)) return undefined;
-	if (
-		!prefixCanCoverSuffixClosers(
-			group,
-			fileLines,
-			keptBalance,
-			coveredBelowBalance,
-			deletedLines,
-			insertedByLine,
-			insertedLineMaps,
-		)
-	) {
-		return undefined;
-	}
-	return { startLine: suffixStartLine + keepStart, count: keepEnd - keepStart, balance: keptBalance };
-}
-
-interface BoundaryEcho {
-	leading: number;
-	trailing: number;
-}
-
 function hasNonWhitespace(text: string): boolean {
 	for (let i = 0; i < text.length; i++) {
 		const code = text.charCodeAt(i);
@@ -712,374 +357,540 @@ function countDuplicateTrailingBoundaryLines(group: ReplacementGroup, fileLines:
 	}
 	return 0;
 }
-
-function findBoundaryEcho(group: ReplacementGroup, fileLines: readonly string[]): BoundaryEcho | undefined {
-	const leadingMax = countDuplicateLeadingBoundaryLines(group, fileLines);
-	if (leadingMax === 0) return undefined;
-	const trailingMax = countDuplicateTrailingBoundaryLines(group, fileLines);
-	if (trailingMax === 0) return undefined;
-	// Bail when every payload line could be claimed by a boundary echo: any
-	// repair would strip explicit replacement content with no signal that the
-	// payload was a mistake rather than an intentional duplication.
-	if (leadingMax + trailingMax >= group.payload.length) return undefined;
-	// Balance-neutrality guard (see header comment): the dropped echo lines must
-	// either be delimiter-neutral on their own or exactly cancel the payload/range
-	// balance delta. In brace-heavy code where bare closer lines repeat, an
-	// "echo" that shifts delimiter balance is structural content the payload
-	// placed intentionally — stripping it would corrupt the result.
-	const leadingBalance = computeDelimiterBalance(group.payload.slice(0, leadingMax));
-	const trailingBalance = computeDelimiterBalance(group.payload.slice(group.payload.length - trailingMax));
-	const droppedBalance = balanceDelta(leadingBalance, balanceNegate(trailingBalance));
-	if (!balanceIsZero(droppedBalance)) {
-		const delta = balanceDelta(
-			computeDelimiterBalance(group.payload),
-			computeDelimiterBalance(fileLines.slice(group.startLine - 1, group.endLine)),
-		);
-		if (!balanceEqual(droppedBalance, delta)) return undefined;
-	}
-	return { leading: leadingMax, trailing: trailingMax };
+interface TextualBoundaryAmbiguity {
+	readonly startLine: number;
+	readonly endLine: number;
+	readonly side: "leading" | "trailing";
+	readonly count: number;
 }
 
-function describeBoundaryEchoRepair(group: ReplacementGroup, echo: BoundaryEcho): string {
-	return (
-		`Auto-repaired a replacement boundary echo at line ${group.startLine}: ` +
-		`dropped ${echo.leading} leading and ${echo.trailing} trailing payload line(s) already present outside the range. ` +
-		`Issue the payload as the final desired content for the selected range only — never restate unchanged lines bordering the range.`
-	);
-}
-
-function describeBoundaryRepair(group: ReplacementGroup, action: string): string {
-	return (
-		`Auto-repaired a delimiter-balance mismatch in the replacement at line ${group.startLine}: ${action}. ` +
-		`Issue the payload as the final desired content only — never restate or omit a closing bracket bordering the range.`
-	);
+interface TextualBoundaryNormalization {
+	readonly edits: AppliedEdit[];
+	readonly warnings: string[];
+	readonly ambiguities: TextualBoundaryAmbiguity[];
 }
 
 /**
- * A single-sided boundary echo in an otherwise delimiter-balanced *multi-line*
- * replacement: the payload's leading XOR trailing edge exactly restates the
- * surviving line(s) just outside the range — the off-by-one "range one line
- * short of the keeper I retyped" mistake (e.g. att: payload ends with
- * `const x = [];` and line B+1 is the same `const x = [];`). Two-sided echoes
- * are handled by {@link findBoundaryEcho}; delimiter-imbalanced one-sided echoes
- * by {@link findDuplicateSuffix}/{@link findDuplicatePrefix}.
+ * Normalize exact boundary echoes.
  *
- * Scoped broadly for multi-line ranges (a construct rewrite) because retouched
- * neutral keepers are usually boundary mistakes there. Single-line expansions
- * are riskier — ordinary duplicated statements may be intentional — so they are
- * only repaired when the duplicated edge is a structural closer line that
- * carries no delimiter-balance signal itself, such as a JSX `</section>` close.
- * The dropped lines must keep the already-balanced result balanced, and must
- * not consume the whole payload.
- *
- * A detected echo is only *repairable* when the payload is long enough to be
- * the widened range's full content (`payload ≥ range + echo`). Shorter
- * payloads are ambiguous — the echo may instead mean the range itself was
- * shifted by the echo, which keeps the far boundary line(s) the repair would
- * delete — and the caller rejects the edit instead of guessing.
+ * Two-sided echoes are removed when stripping both copies leaves one payload
+ * row per deleted range line. One-sided echoes are removed when the remaining
+ * payload still covers the full range — on multi-line ranges from line
+ * equality alone, on single-line ranges only when every echoed row is a
+ * grammar-classified annotation ({@link ANNOTATION_NODE_KINDS}), where an
+ * adjacent duplicate is never intentional. An under-filled one-sided echo is
+ * recorded as ambiguous so the syntax-probe search gets first chance to
+ * resolve it, then rejected rather than silently dropping unique range
+ * content.
  */
-function findOneSidedBoundaryEcho(
-	group: ReplacementGroup,
-	fileLines: readonly string[],
-): { side: "leading" | "trailing"; count: number } | undefined {
-	const leading = countDuplicateLeadingBoundaryLines(group, fileLines);
-	const trailing = countDuplicateTrailingBoundaryLines(group, fileLines);
-	if (leading > 0 === trailing > 0) return undefined;
-	const side = leading > 0 ? "leading" : "trailing";
-	const count = leading > 0 ? leading : trailing;
-	if (count >= group.payload.length) return undefined;
-	const echoLines =
-		side === "leading" ? group.payload.slice(0, count) : group.payload.slice(group.payload.length - count);
-	if (!balanceIsZero(computeDelimiterBalance(echoLines))) return undefined;
-	if (group.deleteIndices.length <= 1) {
-		if (side !== "trailing" || !echoLines.every(isStructuralCloserLine)) return undefined;
-		const payloadPrefix = group.payload.slice(0, group.payload.length - count);
-		if (payloadHasJsxOpenerForEcho(payloadPrefix, echoLines)) return undefined;
-	}
-	return { side, count };
-}
-
-function describeOneSidedEchoRepair(group: ReplacementGroup, side: "leading" | "trailing", count: number): string {
-	const where = side === "leading" ? "above" : "below";
-	return (
-		`Auto-repaired a replacement boundary echo at line ${group.startLine}: ` +
-		`dropped ${count} ${side} payload line(s) identical to the surviving line(s) just ${where} the range. ` +
-		`The range was one line short of the content you retyped — issue the payload as the final content for the ` +
-		`selected range only, and widen the range to consume any keeper you restate.`
-	);
-}
-
-/**
- * One pass-1 outcome per source position: resolved edits (with an optional
- * warning) or a deferred missing-closer candidate, resolved against the
- * whole-patch residual in pass 2.
- */
-type RepairSlot =
-	| { kind: "edits"; edits: AppliedEdit[]; warning?: string }
-	| {
-			kind: "candidate";
-			group: ReplacementGroup;
-			inserts: AppliedEdit[];
-			deletes: AppliedEdit[];
-			delta: DelimiterBalance;
-	  };
-
-/**
- * Delimiter balance of the lines immediately above a group's range that are
- * themselves deleted by other hunks, netted against any payload inserted at
- * those lines. When this covers the group's own delta the matching opener was
- * deleted (or replaced by an opener of the same shape) just above — a deliberate
- * wrapper removal — so the range's deleted closer must stay deleted, not be
- * "kept". Scanned over its own contiguous lines so quote/comment state never
- * bleeds in from elsewhere in the patch.
- */
-function netDeletedPrefixBalance(
-	group: ReplacementGroup,
-	deletedLines: ReadonlySet<number>,
-	insertedByLine: ReadonlyMap<number, readonly string[]>,
-	fileLines: readonly string[],
-): DelimiterBalance {
-	const deleted: string[] = [];
-	const inserted: string[] = [];
-	for (let line = group.startLine - 1; line >= 1 && deletedLines.has(line); line--) {
-		deleted.unshift(fileLines[line - 1] ?? "");
-		const insertedAtLine = insertedByLine.get(line);
-		if (insertedAtLine) inserted.unshift(...insertedAtLine);
-	}
-	return balanceDelta(computeDelimiterBalance(deleted), computeDelimiterBalance(inserted));
-}
-
-/**
- * Net delimiter balance a slot contributes, computed over the slot's own
- * contiguous insert/delete lines only. Summing these per-slot deltas — never one
- * concatenated scan across non-adjacent hunks — keeps backtick/block-comment
- * state local, so an unterminated quote in one hunk cannot mask a real delimiter
- * in another.
- */
-function slotPatchDelta(slot: RepairSlot, fileLines: readonly string[]): DelimiterBalance {
-	if (slot.kind === "candidate") return slot.delta;
-	const inserted: string[] = [];
-	const deleted: string[] = [];
-	for (const edit of slot.edits) {
-		if (edit.kind === "insert") inserted.push(edit.text);
-		else deleted.push(fileLines[edit.anchor.line - 1] ?? "");
-	}
-	return balanceDelta(computeDelimiterBalance(inserted), computeDelimiterBalance(deleted));
-}
-
-/**
- * Normalize replacement groups so common off-by-one boundaries do not duplicate
- * unchanged surrounding lines or wrongly drop/keep structural closers. Local
- * repairs run in pass 1; the missing-closer repair is deferred to pass 2 and
- * weighed against the whole-patch delimiter residual, so a closer the range
- * deleted is only kept when the patch as a whole is missing it — never when
- * another hunk already removed the matching opener. Returns the repaired edits
- * plus one warning per repaired group.
- *
- * Repairs fire only when exactly one reading explains the mistake. When the
- * evidence is ambiguous — a one-sided echo whose payload is too short for the
- * widened range, or a spared closer the payload neither opens nor indents
- * into — the function throws instead of guessing, so the author re-issues the
- * edit rather than shipping silently corrupted content.
- */
-function repairReplacementBoundaries(
+function normalizeTextualBoundaryEchoes(
 	edits: readonly AppliedEdit[],
 	fileLines: readonly string[],
-): {
-	edits: AppliedEdit[];
-	warnings: string[];
-} {
-	// Pass 1: apply every repair whose correctness is local to one group
-	// (boundary echo, duplicate prefix/suffix). Defer the missing-closer repair:
-	// it must weigh a group's imbalance against the whole patch, which is only
-	// known once the local repairs above have settled.
-	const slots: RepairSlot[] = [];
+	path: string | undefined,
+): TextualBoundaryNormalization {
+	const out: AppliedEdit[] = [];
+	const warnings: string[] = [];
+	const ambiguities: TextualBoundaryAmbiguity[] = [];
 	let i = 0;
 	while (i < edits.length) {
 		const group = findReplacementGroup(edits, i);
 		if (!group) {
-			slots.push({ kind: "edits", edits: [edits[i]] });
+			out.push(cloneAppliedEdit(edits[i], i));
 			i++;
 			continue;
 		}
-		const inserts = group.insertIndices.map(idx => edits[idx]);
-		const deletes = group.deleteIndices.map(idx => edits[idx]);
-		i = group.deleteIndices[group.deleteIndices.length - 1] + 1;
-
-		const boundaryEcho = findBoundaryEcho(group, fileLines);
-		if (boundaryEcho) {
-			slots.push({
-				kind: "edits",
-				edits: [...inserts.slice(boundaryEcho.leading, inserts.length - boundaryEcho.trailing), ...deletes],
-				warning: describeBoundaryEchoRepair(group, boundaryEcho),
-			});
-			continue;
-		}
-
-		const delta = balanceDelta(
-			computeDelimiterBalance(group.payload),
-			computeDelimiterBalance(fileLines.slice(group.startLine - 1, group.endLine)),
-		);
-		if (balanceIsZero(delta)) {
-			const oneSided = findOneSidedBoundaryEcho(group, fileLines);
-			if (oneSided) {
-				// A payload shorter than range+echo cannot be the widened
-				// range's full content: the repair would delete range line(s)
-				// the payload never restates, while the "shifted range"
-				// reading keeps them. Reject rather than guess.
-				if (group.payload.length < group.deleteIndices.length + oneSided.count) {
-					throw new Error(
-						ambiguousBoundaryEchoMessage(group.startLine, group.endLine, oneSided.side, oneSided.count),
-					);
-				}
-				const trimmed =
-					oneSided.side === "leading"
-						? inserts.slice(oneSided.count)
-						: inserts.slice(0, inserts.length - oneSided.count);
-				slots.push({
-					kind: "edits",
-					edits: [...trimmed, ...deletes],
-					warning: describeOneSidedEchoRepair(group, oneSided.side, oneSided.count),
+		const inserts = replacementInserts(group, edits);
+		const deletes = replacementDeletes(group, edits);
+		const leading = countDuplicateLeadingBoundaryLines(group, fileLines);
+		const trailing = countDuplicateTrailingBoundaryLines(group, fileLines);
+		const rangeLength = group.deleteIndices.length;
+		let dropLeading = 0;
+		let dropTrailing = 0;
+		if (leading > 0 && trailing > 0) {
+			if (group.payload.length - leading - trailing === rangeLength) {
+				dropLeading = leading;
+				dropTrailing = trailing;
+			}
+		} else if (
+			leading > 0 &&
+			(rangeLength > 1 || isAnnotationEchoRun(fileLines, path, group.startLine - leading, group.startLine - 1))
+		) {
+			if (group.payload.length - leading >= rangeLength) {
+				dropLeading = leading;
+			} else {
+				ambiguities.push({
+					startLine: group.startLine,
+					endLine: group.endLine,
+					side: "leading",
+					count: leading,
 				});
-				continue;
 			}
-			slots.push({ kind: "edits", edits: [...inserts, ...deletes] });
-			continue;
+		} else if (
+			trailing > 0 &&
+			(rangeLength > 1 || isAnnotationEchoRun(fileLines, path, group.endLine + 1, group.endLine + trailing))
+		) {
+			if (group.payload.length - trailing >= rangeLength) {
+				dropTrailing = trailing;
+			} else {
+				ambiguities.push({
+					startLine: group.startLine,
+					endLine: group.endLine,
+					side: "trailing",
+					count: trailing,
+				});
+			}
 		}
+		if (dropLeading > 0 || dropTrailing > 0) {
+			out.push(...inserts.slice(dropLeading, inserts.length - dropTrailing), ...deletes);
+			warnings.push(textualBoundaryEchoWarning(group.startLine, dropLeading, dropTrailing));
+		} else {
+			for (const idx of group.insertIndices) out.push(cloneAppliedEdit(edits[idx], idx));
+			for (const idx of group.deleteIndices) out.push(cloneAppliedEdit(edits[idx], idx));
+		}
+		i = group.deleteIndices[group.deleteIndices.length - 1] + 1;
+	}
+	return { edits: out, warnings, ambiguities };
+}
 
-		const dupSuffix = findDuplicateSuffix(group, fileLines, delta);
-		if (dupSuffix > 0) {
-			slots.push({
-				kind: "edits",
-				edits: [...inserts.slice(0, inserts.length - dupSuffix), ...deletes],
-				warning: describeBoundaryRepair(
-					group,
-					`dropped ${dupSuffix} duplicated trailing payload line(s) already present below the range`,
-				),
-			});
-			continue;
+interface KeepPlan {
+	readonly beforeLine?: number;
+	readonly afterLine?: number;
+	readonly kept: number;
+}
+
+interface GroupVariant {
+	readonly edits: AppliedEdit[];
+	/** Original boundary rows retained from the selected range. */
+	readonly kept: number;
+	/** Exact payload echoes removed from outside the selected range. */
+	readonly dropped: number;
+}
+
+interface GroupVariants {
+	readonly variants: GroupVariant[];
+	readonly ambiguous: boolean;
+}
+
+const INDENT_TAB_WIDTH = 4;
+
+function indentColumns(line: string): number {
+	let column = 0;
+	for (let i = 0; i < line.length; i++) {
+		const code = line.charCodeAt(i);
+		if (code === 32) {
+			column++;
+		} else if (code === 9) {
+			column += INDENT_TAB_WIDTH - (column % INDENT_TAB_WIDTH);
+		} else {
+			break;
 		}
-		const dupPrefix = findDuplicatePrefix(group, fileLines, delta);
-		if (dupPrefix > 0) {
-			slots.push({
-				kind: "edits",
-				edits: [...inserts.slice(dupPrefix), ...deletes],
-				warning: describeBoundaryRepair(
-					group,
-					`dropped ${dupPrefix} duplicated leading payload line(s) already present above the range`,
-				),
-			});
-			continue;
+	}
+	return column;
+}
+
+function nearestContentLine(fileLines: readonly string[], start: number, step: 1 | -1): string | undefined {
+	for (let index = start; index >= 0 && index < fileLines.length; index += step) {
+		const line = fileLines[index];
+		if (line !== undefined && hasNonWhitespace(line)) return line;
+	}
+	return undefined;
+}
+
+function payloadEdge(payload: readonly string[], side: "leading" | "trailing"): string | undefined {
+	if (side === "leading") {
+		for (const line of payload) {
+			if (hasNonWhitespace(line)) return line;
 		}
-		slots.push({ kind: "candidate", group, inserts, deletes, delta });
+		return undefined;
+	}
+	for (let index = payload.length - 1; index >= 0; index--) {
+		const line = payload[index];
+		if (line !== undefined && hasNonWhitespace(line)) return line;
+	}
+	return undefined;
+}
+
+function replacementInserts(group: ReplacementGroup, edits: readonly AppliedEdit[]): InsertEdit[] {
+	const inserts: InsertEdit[] = [];
+	for (const index of group.insertIndices) {
+		const edit = edits[index];
+		if (edit?.kind === "insert") inserts.push(edit);
+	}
+	return inserts;
+}
+
+function replacementDeletes(group: ReplacementGroup, edits: readonly AppliedEdit[]): DeleteEdit[] {
+	const deletes: DeleteEdit[] = [];
+	for (const index of group.deleteIndices) {
+		const edit = edits[index];
+		if (edit?.kind === "delete") deletes.push(edit);
+	}
+	return deletes;
+}
+
+function isSourceLineDeleted(edits: readonly AppliedEdit[], line: number): boolean {
+	return edits.some(edit => edit.kind === "delete" && edit.anchor.line === line);
+}
+
+/**
+ * Ignore a deleted trailing row only when the identical next source row
+ * survives every hunk. The preceding deleted row then becomes the effective
+ * range edge without resurrecting arbitrary interior content.
+ */
+function effectiveTrailingBoundary(
+	group: ReplacementGroup,
+	edits: readonly AppliedEdit[],
+	fileLines: readonly string[],
+): number {
+	let line = group.endLine;
+	let survivor = group.endLine + 1;
+	while (
+		line > group.startLine &&
+		survivor <= fileLines.length &&
+		!isSourceLineDeleted(edits, survivor) &&
+		fileLines[line - 1] === fileLines[survivor - 1]
+	) {
+		line--;
+		survivor++;
+	}
+	return line;
+}
+
+/** Whether deleting one source row from an otherwise valid file breaks it. */
+function isSyntaxEssentialRow(
+	fileLines: readonly string[],
+	path: string,
+	line: number,
+	baselineParses: boolean,
+): boolean {
+	if (!baselineParses) return true;
+	const without = [...fileLines.slice(0, line - 1), ...fileLines.slice(line)].join("\n");
+	return !parsesCleanly(path, without);
+}
+
+interface EdgeEvidence {
+	readonly first: boolean;
+	readonly last: boolean;
+	readonly leadingStructure: boolean;
+}
+
+function edgeEvidence(
+	fileLines: readonly string[],
+	path: string,
+	group: ReplacementGroup,
+	trailingLine: number,
+	baselineParses: boolean,
+): EdgeEvidence {
+	if (!baselineParses) {
+		return { first: true, last: true, leadingStructure: false };
+	}
+	const first = isSyntaxEssentialRow(fileLines, path, group.startLine, true);
+	const last = trailingLine === group.startLine ? first : isSyntaxEssentialRow(fileLines, path, trailingLine, true);
+	const innerStart = group.startLine + 1;
+	const leadingStructure =
+		innerStart <= trailingLine &&
+		enclosingBoundaries(fileLines, path, innerStart, trailingLine).includes(group.startLine);
+	return { first, last, leadingStructure };
+}
+
+/**
+ * Retention is limited to the selected range's first and effective-last rows.
+ * On a valid baseline, deleting the row must break syntax; every candidate
+ * must also satisfy source-range structure or indentation evidence.
+ */
+function buildKeepPlans(
+	group: ReplacementGroup,
+	trailingLine: number,
+	payload: readonly string[],
+	fileLines: readonly string[],
+	evidence: EdgeEvidence,
+	path: string,
+	baselineParses: boolean,
+): { plans: KeepPlan[]; ambiguous: boolean } {
+	const leadingPayload = payloadEdge(payload, "leading");
+	const trailingPayload = payloadEdge(payload, "trailing");
+	const plans: KeepPlan[] = [{ kept: 0 }];
+	if (leadingPayload === undefined || trailingPayload === undefined) return { plans, ambiguous: false };
+
+	const first = fileLines[group.startLine - 1] ?? "";
+	const last = fileLines[trailingLine - 1] ?? "";
+	const leadingIndent = indentColumns(leadingPayload);
+	const trailingIndent = indentColumns(trailingPayload);
+	const firstIndent = indentColumns(first);
+	const lastIndent = indentColumns(last);
+	let ambiguous = false;
+
+	if (group.startLine === trailingLine) {
+		const previous = nearestContentLine(fileLines, group.startLine - 2, -1);
+		const fitsBefore = previous === undefined || indentColumns(previous) === trailingIndent;
+		if (evidence.first && fitsBefore && trailingIndent > firstIndent) {
+			plans.push({ afterLine: group.startLine, kept: 1 });
+		} else if (baselineParses && evidence.first && trailingIndent === firstIndent) {
+			ambiguous = true;
+		}
+		return { plans, ambiguous };
 	}
 
-	const projected: AppliedEdit[] = [];
-	for (const slot of slots) {
-		projected.push(...(slot.kind === "candidate" ? [...slot.inserts, ...slot.deletes] : slot.edits));
+	const next = nearestContentLine(fileLines, group.startLine, 1);
+	const previous = nearestContentLine(fileLines, trailingLine - 2, -1);
+	const beforeFirst = nearestContentLine(fileLines, group.startLine - 2, -1);
+	const selectedLeadingBoundary = enclosingBoundaries(fileLines, path, group.startLine + 1, group.endLine).includes(
+		group.startLine,
+	);
+	const firstText = (fileLines[group.startLine - 1] ?? "").trim();
+	const selectedStructuralEdge =
+		STRUCTURAL_CLOSER_RE.test(firstText) &&
+		firstIndent === leadingIndent &&
+		firstIndent === indentColumns(fileLines[group.endLine - 1] ?? "");
+	const underfilledEffectiveEdge =
+		trailingLine < group.endLine && payload.length < group.endLine - group.startLine + 1;
+	const keepsLeading =
+		evidence.first &&
+		(evidence.leadingStructure || selectedLeadingBoundary || selectedStructuralEdge || underfilledEffectiveEdge) &&
+		(next === undefined || selectedStructuralEdge
+			? leadingIndent >= firstIndent
+			: indentColumns(next) === leadingIndent);
+	const keepsTrailing =
+		(evidence.last || underfilledEffectiveEdge) &&
+		!keepsLeading &&
+		trailingIndent > lastIndent &&
+		(previous === undefined || indentColumns(previous) === trailingIndent);
+	if (keepsLeading) plans.push({ beforeLine: group.startLine, kept: 1 });
+	if (keepsTrailing) plans.push({ afterLine: trailingLine, kept: 1 });
+	// Retaining both edges can silently resurrect an intentionally removed
+	// wrapper or signature; parsing cannot distinguish that from omission.
+	if (
+		baselineParses &&
+		evidence.first &&
+		beforeFirst !== undefined &&
+		firstIndent < indentColumns(beforeFirst) &&
+		leadingIndent > firstIndent
+	) {
+		ambiguous = true;
 	}
-	const deletedLines = new Set<number>();
-	for (const edit of projected) {
-		if (edit.kind === "delete") deletedLines.add(edit.anchor.line);
-	}
-	const insertedByLine = new Map<number, string[]>();
-	const insertedLineMaps: { before: Map<number, string[]>; after: Map<number, string[]> } = {
-		before: new Map(),
-		after: new Map(),
-	};
-	for (const edit of projected) {
-		if (edit.kind === "insert" && edit.cursor.kind === "bof") {
-			const inserted = insertedByLine.get(1);
-			if (inserted) inserted.push(edit.text);
-			else insertedByLine.set(1, [edit.text]);
-			const before = insertedLineMaps.before.get(1);
-			if (before) before.push(edit.text);
-			else insertedLineMaps.before.set(1, [edit.text]);
-			continue;
-		}
-		if (edit.kind !== "insert") continue;
-		for (const anchor of getCursorAnchors(edit.cursor)) {
-			const lines = insertedByLine.get(anchor.line);
-			if (lines) lines.push(edit.text);
-			else insertedByLine.set(anchor.line, [edit.text]);
-		}
-		if (edit.cursor.kind === "before_anchor" || edit.cursor.kind === "after_anchor") {
-			const bySide = edit.cursor.kind === "before_anchor" ? insertedLineMaps.before : insertedLineMaps.after;
-			const lines = bySide.get(edit.cursor.anchor.line);
-			if (lines) lines.push(edit.text);
-			else bySide.set(edit.cursor.anchor.line, [edit.text]);
-		}
-	}
-	let remainingDelta: DelimiterBalance = { paren: 0, bracket: 0, brace: 0 };
-	for (const slot of slots) remainingDelta = balanceSum(remainingDelta, slotPatchDelta(slot, fileLines));
+	return { plans, ambiguous };
+}
 
-	const out: AppliedEdit[] = [];
-	const warnings: string[] = [];
-	for (const slot of slots) {
-		if (slot.kind !== "candidate") {
-			if (slot.warning !== undefined) warnings.push(slot.warning);
-			out.push(...slot.edits);
-			continue;
-		}
-		const deletedPrefixBalance = netDeletedPrefixBalance(slot.group, deletedLines, insertedByLine, fileLines);
-		const droppedClosers = findDroppedSuffixClosers(
-			slot.group,
-			fileLines,
-			slot.delta,
-			remainingDelta,
-			deletedPrefixBalance,
-			deletedLines,
-			insertedByLine,
-			insertedLineMaps,
-		);
-		if (droppedClosers) {
-			// Sparing a closer re-inserts it *after* the payload, which claims
-			// the payload lives inside the block the closer terminates. That
-			// claim needs evidence: the payload carries the closer's unmatched
-			// opener itself, or its indentation sits deeper than the closer.
-			// Without either, "before or after the closer" is a coin flip —
-			// reject rather than guess (e.g. a statement swapped onto a lone
-			// `}` at the closer's own depth belongs after the block).
-			const keptIndent = leadingIndent(fileLines[droppedClosers.startLine - 1] ?? "");
-			const payloadIndent = bodyTargetIndent(slot.group.payload);
-			const payloadOpens = balanceCovers(
-				computeDelimiterBalance(slot.group.payload),
-				balanceNegate(droppedClosers.balance),
-			);
-			if (!payloadOpens && !(payloadIndent !== undefined && isIndentDeeper(payloadIndent, keptIndent))) {
-				throw new Error(
-					ambiguousCloserSpareMessage(
-						slot.group.startLine,
-						slot.group.endLine,
-						droppedClosers.startLine,
-						droppedClosers.count,
+/**
+ * Enumerate repair hypotheses for one replacement group. Exact outside echoes
+ * may be removed; edge retention requires syntax, source structure,
+ * indentation, or the narrow pure-closer sibling-depth shape. Tree-sitter
+ * validates every candidate result.
+ */
+function buildGroupVariants(
+	group: ReplacementGroup,
+	edits: readonly AppliedEdit[],
+	fileLines: readonly string[],
+	path: string,
+	baselineParses: boolean,
+): GroupVariants {
+	const inserts = replacementInserts(group, edits);
+	const deletes = replacementDeletes(group, edits);
+	const trailingLine = effectiveTrailingBoundary(group, edits, fileLines);
+	const evidence = edgeEvidence(fileLines, path, group, trailingLine, baselineParses);
+	const dropJ = countDuplicateLeadingBoundaryLines(group, fileLines);
+	const dropK = countDuplicateTrailingBoundaryLines(group, fileLines);
+	const leadingDrops = dropJ > 0 ? [0, dropJ] : [0];
+	const trailingDrops = dropK > 0 ? [0, dropK] : [0];
+	const variants: GroupVariant[] = [];
+	let ambiguous = false;
+
+	for (const leadingDrop of leadingDrops) {
+		for (const trailingDrop of trailingDrops) {
+			const dropped = leadingDrop + trailingDrop;
+			if (dropped >= inserts.length) continue;
+			const payload = group.payload.slice(leadingDrop, group.payload.length - trailingDrop);
+			const keepResult = buildKeepPlans(group, trailingLine, payload, fileLines, evidence, path, baselineParses);
+			ambiguous ||= keepResult.ambiguous;
+			for (const keep of keepResult.plans) {
+				if (keep.kept === 0 && dropped === 0) continue;
+				if (keep.kept > 0 && group.deleteIndices.length > 1 && payload.length > group.deleteIndices.length) {
+					continue;
+				}
+				variants.push({
+					kept: keep.kept,
+					dropped,
+					edits: applyGroupVariant(
+						inserts,
+						deletes,
+						keep.beforeLine,
+						keep.afterLine,
+						leadingDrop,
+						trailingDrop,
+						fileLines.length,
 					),
-				);
+				});
 			}
-			warnings.push(
-				describeBoundaryRepair(
-					slot.group,
-					`kept ${droppedClosers.count} structural closing line(s) the range deleted without restating`,
-				),
-			);
-			out.push(
-				...slot.inserts,
-				...slot.deletes.filter(
-					edit =>
-						edit.kind !== "delete" ||
-						edit.anchor.line < droppedClosers.startLine ||
-						edit.anchor.line >= droppedClosers.startLine + droppedClosers.count,
-				),
-			);
-			for (let line = droppedClosers.startLine; line < droppedClosers.startLine + droppedClosers.count; line++) {
-				deletedLines.delete(line);
+		}
+	}
+	variants.sort(compareGroupVariant);
+	return { variants, ambiguous };
+}
+
+function compareGroupVariant(a: GroupVariant, b: GroupVariant): number {
+	return a.kept - b.kept || a.dropped - b.dropped;
+}
+
+function applyGroupVariant(
+	inserts: readonly InsertEdit[],
+	deletes: readonly DeleteEdit[],
+	beforeLine: number | undefined,
+	afterLine: number | undefined,
+	dropLeading: number,
+	dropTrailing: number,
+	fileLineCount: number,
+): AppliedEdit[] {
+	let retainedInserts = inserts.slice(dropLeading, inserts.length - dropTrailing);
+	const retainedDeletes = deletes.filter(edit => edit.anchor.line !== beforeLine && edit.anchor.line !== afterLine);
+	if (beforeLine !== undefined) {
+		const cursor: Cursor =
+			beforeLine >= fileLineCount ? { kind: "eof" } : { kind: "before_anchor", anchor: { line: beforeLine + 1 } };
+		retainedInserts = retainedInserts.map(edit => ({ ...edit, cursor }));
+	}
+	return [...retainedInserts, ...retainedDeletes];
+}
+
+/** One choice per broken group; `null` keeps the group as authored. */
+interface BoundaryCombo {
+	readonly variants: readonly (GroupVariant | null)[];
+	readonly touched: number;
+	readonly kept: number;
+	readonly dropped: number;
+}
+
+/** Combinatorial cap after each group is added to the candidate beam. */
+const MAX_BOUNDARY_COMBOS = 512;
+
+function compareBoundaryCombo(a: BoundaryCombo, b: BoundaryCombo): number {
+	return a.touched - b.touched || a.kept - b.kept || a.dropped - b.dropped;
+}
+
+/**
+ * Search boundary hypotheses across the whole patch. Parsing is the semantic
+ * filter; the deterministic cost prefers fewer touched groups, retained rows,
+ * then exact echo drops. Different texts tied at that full cost are not
+ * guessed.
+ */
+function repairBoundaryVariants(
+	edits: readonly AppliedEdit[],
+	fileLines: readonly string[],
+	path: string | undefined,
+	baselineParses: boolean,
+): { edits: AppliedEdit[]; warnings: string[] } | undefined {
+	if (path === undefined) return undefined;
+
+	const groups: { group: ReplacementGroup; variants: GroupVariant[] }[] = [];
+	let ambiguousGroup: ReplacementGroup | undefined;
+	let i = 0;
+	while (i < edits.length) {
+		const group = findReplacementGroup(edits, i);
+		if (group) {
+			const built = buildGroupVariants(group, edits, fileLines, path, baselineParses);
+			if (built.ambiguous && ambiguousGroup === undefined) ambiguousGroup = group;
+			if (built.variants.length > 0) groups.push({ group, variants: built.variants });
+			i = group.deleteIndices[group.deleteIndices.length - 1] + 1;
+		} else {
+			i++;
+		}
+	}
+	if (groups.length === 0) {
+		if (ambiguousGroup) {
+			throw new Error(ambiguousBoundaryPlacementMessage(ambiguousGroup.startLine, ambiguousGroup.endLine));
+		}
+		return undefined;
+	}
+
+	let combos: BoundaryCombo[] = [{ variants: [], touched: 0, kept: 0, dropped: 0 }];
+	for (const { variants } of groups) {
+		const next: BoundaryCombo[] = [];
+		for (const combo of combos) {
+			next.push({ ...combo, variants: [...combo.variants, null] });
+			for (const variant of variants) {
+				next.push({
+					variants: [...combo.variants, variant],
+					touched: combo.touched + 1,
+					kept: combo.kept + variant.kept,
+					dropped: combo.dropped + variant.dropped,
+				});
 			}
-			remainingDelta = balanceSum(remainingDelta, droppedClosers.balance);
+		}
+		next.sort(compareBoundaryCombo);
+		combos = next.slice(0, MAX_BOUNDARY_COMBOS);
+	}
+
+	const authored = materializeEdits(
+		fileLines,
+		edits.map((edit, index) => cloneAppliedEdit(edit, index)),
+	).text;
+	const candidates = combos.filter(combo => combo.touched > 0).sort(compareBoundaryCombo);
+
+	let bestText: string | undefined;
+	let bestCombo: BoundaryCombo | undefined;
+	for (const combo of candidates) {
+		if (bestCombo !== undefined && compareBoundaryCombo(combo, bestCombo) > 0) break;
+		const candidate = spliceBoundaryCombo(edits, groups, combo);
+		const text = materializeEdits(fileLines, candidate).text;
+		if (text === authored || !parsesCleanly(path, text)) continue;
+		if (bestCombo === undefined) {
+			bestCombo = combo;
+			bestText = text;
 			continue;
 		}
-		out.push(...slot.inserts, ...slot.deletes);
+		if (text !== bestText) {
+			if (ambiguousGroup) {
+				throw new Error(ambiguousBoundaryPlacementMessage(ambiguousGroup.startLine, ambiguousGroup.endLine));
+			}
+			return undefined;
+		}
 	}
-	return { edits: out, warnings };
+	if (bestCombo === undefined) {
+		if (ambiguousGroup) {
+			throw new Error(ambiguousBoundaryPlacementMessage(ambiguousGroup.startLine, ambiguousGroup.endLine));
+		}
+		return undefined;
+	}
+
+	const warnings: string[] = [];
+	groups.forEach((entry, index) => {
+		const variant = bestCombo.variants[index];
+		if (variant) warnings.push(boundaryVariantRepairWarning(entry.group.startLine, variant.kept, variant.dropped));
+	});
+	return { edits: spliceBoundaryCombo(edits, groups, bestCombo), warnings };
+}
+
+/** Replace each group's authored edits with its combo variant (or the authored
+ *  edits where the combo leaves a group untouched). Groups are keyed by their
+ *  first insert index — `findReplacementGroup` builds fresh objects per scan,
+ *  so object identity cannot be the key. */
+function spliceBoundaryCombo(
+	edits: readonly AppliedEdit[],
+	groups: readonly { group: ReplacementGroup; variants: GroupVariant[] }[],
+	combo: BoundaryCombo,
+): AppliedEdit[] {
+	const chosen = new Map<number, GroupVariant>();
+	groups.forEach((entry, idx) => {
+		const variant = combo.variants[idx];
+		if (variant) chosen.set(entry.group.insertIndices[0], variant);
+	});
+	const out: AppliedEdit[] = [];
+	let i = 0;
+	while (i < edits.length) {
+		const group = findReplacementGroup(edits, i);
+		if (!group) {
+			out.push(cloneAppliedEdit(edits[i], i));
+			i++;
+			continue;
+		}
+		const variant = chosen.get(group.insertIndices[0]);
+		if (variant) {
+			out.push(...variant.edits);
+		} else {
+			for (const idx of group.insertIndices) out.push(cloneAppliedEdit(edits[idx], idx));
+			for (const idx of group.deleteIndices) out.push(cloneAppliedEdit(edits[idx], idx));
+		}
+		i = group.deleteIndices[group.deleteIndices.length - 1] + 1;
+	}
+	return out;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1193,6 +1004,37 @@ function resolveShiftedLanding(
 }
 
 /**
+ * Body shape required for an opener-escape relocation: the rows tile into
+ * leading single-line nodes (comments, attributes) followed by one multi-line
+ * construct reaching the last content row — i.e. the body parses standalone
+ * as one self-contained `mod`/`fn`/`class` that can be moved past the block
+ * it was mis-anchored into without re-parenting anything. Bare statements and
+ * multi-statement bodies fail it and stay literal: an under-indented one-line
+ * body more likely names the inside of the block.
+ */
+function bodyIsRelocatableConstruct(rows: readonly string[], path: string): boolean {
+	let last = rows.length;
+	while (last > 0 && !hasNonWhitespace(rows[last - 1])) last--;
+	if (last === 0) return false;
+	let line = 1;
+	while (line <= last) {
+		if (!hasNonWhitespace(rows[line - 1])) {
+			line++;
+			continue;
+		}
+		const spans = nodeChain(rows, path, line);
+		let end = 0;
+		for (const span of spans) {
+			if (span.startLine === line && span.endLine > end) end = span.endLine;
+		}
+		if (end === 0) return false; // no node begins here — body does not parse as items
+		if (end >= last) return end > line; // final node must be one multi-line construct
+		line = end + 1;
+	}
+	return false;
+}
+
+/**
  * Resolve where a block-lowered after-insert anchored on the block's closing
  * line should land given a body depth `target` deeper than that closer: just
  * above the block's trailing run of closer lines, bounded below by
@@ -1235,14 +1077,17 @@ function resolveInwardLanding(
 /**
  * Slide mis-anchored after-insert hunks to the depth their body indentation
  * claims: outward past the structural closer lines that follow the anchor
- * when the body is shallower, or — for `insert_after_block N:` lowerings —
- * inward across the block's trailing closers when the body is deeper than
- * the block's closing line. Returns the corrected edit list plus one warning
- * per shifted hunk.
+ * when the body is shallower; for plain inserts anchored on a block opener,
+ * past the whole block when the body is a balanced construct claiming a
+ * depth strictly above the opener (syntax-probe verified via `path`); or — for
+ * `insert_after_block N:` lowerings — inward across the block's trailing
+ * closers when the body is deeper than the block's closing line. Returns the
+ * corrected edit list plus one warning per shifted hunk.
  */
 function repairAfterInsertLandings(
 	edits: readonly AppliedEdit[],
 	fileLines: readonly string[],
+	path: string | undefined,
 ): { edits: readonly AppliedEdit[]; warnings: string[] } {
 	// Group plain (non-replacement) after-anchor inserts per authored hunk:
 	// rows of one hunk share the anchor line and the patch header line.
@@ -1271,12 +1116,12 @@ function repairAfterInsertLandings(
 	const retarget = (group: AfterInsertGroup, line: number): void => {
 		out ??= [...edits];
 		for (const idx of group.members) {
-			const edit = out[idx] as InsertEdit;
+			const edit = insertEditAt(out, idx);
 			out[idx] = { ...edit, cursor: { kind: "after_anchor", anchor: { line } } };
 		}
 	};
 	for (const group of groups.values()) {
-		const target = bodyTargetIndent(group.members.map(idx => (edits[idx] as InsertEdit).text));
+		const target = bodyTargetIndent(group.members.map(idx => insertEditAt(edits, idx).text));
 		if (target === undefined) continue;
 		const outward = resolveShiftedLanding(group, target, fileLines, targetedLines);
 		if (outward !== undefined) {
@@ -1284,7 +1129,59 @@ function repairAfterInsertLandings(
 			warnings.push(afterInsertLandingShiftWarning(group.anchor, outward.line, outward.crossed));
 			continue;
 		}
-		if (group.blockStart === undefined) continue;
+		if (group.blockStart === undefined) {
+			// Opener-escape: `PUT >N:` anchored on a line that OPENS a construct,
+			// with a self-contained construct body claiming a column depth
+			// strictly above the opener — a landing between the opener and its
+			// first statement, which no such body can intend, yet one that can
+			// parse (items are legal inside Rust fn bodies). Candidates are the
+			// enclosing constructs' end lines from the node chain, innermost
+			// first, kept only when the construct's own opening depth sits at or
+			// above the body's claim (the body could be its sibling); the first
+			// candidate whose relocated result passes the syntax probe wins.
+			// Equal-depth bodies stay literal, matching the outward shift.
+			if (path === undefined) continue;
+			const anchorText = fileLines[group.anchor - 1] ?? "";
+			const targetCols = indentColumns(target);
+			if (targetCols >= indentColumns(anchorText)) continue;
+			const chain = nodeChain(fileLines, path, group.anchor);
+			if (!chain.some(node => node.startLine === group.anchor && node.endLine > group.anchor)) continue;
+			const rows = group.members.map(idx => insertEditAt(edits, idx).text);
+			if (!bodyIsRelocatableConstruct(rows, path)) continue;
+			const candidates = [
+				...new Set(
+					chain
+						.filter(
+							node =>
+								node.endLine > group.anchor && indentColumns(fileLines[node.startLine - 1] ?? "") <= targetCols,
+						)
+						.map(node => node.endLine),
+				),
+			].sort((a, b) => a - b);
+			for (const landing of candidates) {
+				// Never relocate across another hunk's target; farther
+				// candidates cross the same line, so stop outright.
+				let blocked = false;
+				for (const targeted of targetedLines) {
+					if (targeted > group.anchor && targeted <= landing) {
+						blocked = true;
+						break;
+					}
+				}
+				if (blocked) break;
+				const trial = [...(out ?? edits)];
+				for (const idx of group.members) {
+					const edit = insertEditAt(trial, idx);
+					trial[idx] = { ...edit, cursor: { kind: "after_anchor", anchor: { line: landing } } };
+				}
+				if (parsesCleanly(path, materializeEdits(fileLines, trial).text)) {
+					out = trial;
+					warnings.push(afterInsertOpenerEscapeWarning(group.anchor, landing));
+					break;
+				}
+			}
+			continue;
+		}
 		const inward = resolveInwardLanding(group, target, group.blockStart, fileLines, targetedLines);
 		if (inward === undefined) continue;
 		retarget(group, inward);
@@ -1301,35 +1198,30 @@ export interface ApplyEditsOptions {
 	 * across files; omitted, the call gets a private register.
 	 */
 	clipboard?: Clipboard;
-	/** `PASTE` with an empty register: `throw` (default) or `drop` (streaming previews). */
+	/** Anonymous `PASTE` with an empty register: `throw` (default) or `drop` (streaming previews). An empty named-register paste never throws — it warns and pastes nothing. */
 	onEmptyPaste?: "throw" | "drop";
+	/**
+	 * Target path used to infer a language for the tree-sitter syntax probe.
+	 * Required for syntax-essential boundary retention and post-apply syntax
+	 * advisories. Without it, only exact-text boundary normalization and its
+	 * evidence-complete rejections run.
+	 */
+	path?: string;
+}
+
+interface Materialized {
+	text: string;
+	firstChangedLine: number | undefined;
 }
 
 /**
- * Apply a parsed list of edits to a text body. Pure function — no I/O.
- *
- * Returns the post-edit text and the first changed line number (1-indexed).
- * Throws if an anchor is out of bounds.
+ * Splice one candidate edit list into `originalLines` and return the resulting
+ * text. Pure and repeatable: the caller materializes the authored edits, probes
+ * that result, and only materializes a repaired candidate if the probe casts no
+ * veto.
  */
-export function applyEdits(text: string, edits: readonly Edit[], options: ApplyEditsOptions = {}): ApplyResult {
-	if (edits.length === 0) return { text, firstChangedLine: undefined };
-
-	const fileLines = text.split("\n");
-
-	// Clipboard pre-pass: capture `cut` ranges from the original lines and
-	// expand `paste` edits into plain inserts in authored order.
-	const concrete = resolveClipboardEdits(edits, fileLines, options.clipboard ?? {}, {
-		...(options.onEmptyPaste === undefined ? {} : { onEmptyPaste: options.onEmptyPaste }),
-	});
-
-	// Block edits are deferred until `resolveBlockEdits` expands them into
-	// concrete inserts + deletes. Reaching the applier with one still present
-	// is an internal wiring bug, not authored-input error.
-	for (const edit of concrete) {
-		if (edit.kind === "block") throw new Error(UNRESOLVED_BLOCK_INTERNAL);
-	}
-	const appliedEdits = concrete as readonly AppliedEdit[];
-
+function materializeEdits(originalLines: readonly string[], edits: readonly AppliedEdit[]): Materialized {
+	const fileLines = [...originalLines];
 	const lineOrigins: LineOrigin[] = fileLines.map(() => "original");
 
 	let firstChangedLine: number | undefined;
@@ -1337,21 +1229,11 @@ export function applyEdits(text: string, edits: readonly Edit[], options: ApplyE
 		if (firstChangedLine === undefined || line < firstChangedLine) firstChangedLine = line;
 	};
 
-	const targetEdits = dropTrailingPhantomDeletes(
-		appliedEdits.map((edit, index) => cloneAppliedEdit(edit, index)),
-		fileLines,
-	);
-	validateLineBounds(targetEdits, fileLines);
-	const indentationWarnings = repairReplacementIndentation(targetEdits, fileLines);
-	const { edits: repaired, warnings: boundaryWarnings } = repairReplacementBoundaries(targetEdits, fileLines);
-	const { edits: landed, warnings: landingWarnings } = repairAfterInsertLandings(repaired, fileLines);
-	const warnings = [...indentationWarnings, ...boundaryWarnings, ...landingWarnings];
-
 	// Partition edits into bof, eof, and anchor-targeted buckets.
 	const bofLines: string[] = [];
 	const eofLines: string[] = [];
 	const anchorEdits: IndexedEdit[] = [];
-	landed.forEach((edit, idx) => {
+	edits.forEach((edit, idx) => {
 		if (edit.kind === "insert" && edit.cursor.kind === "bof") {
 			bofLines.push(edit.text);
 		} else if (edit.kind === "insert" && edit.cursor.kind === "eof") {
@@ -1415,9 +1297,94 @@ export function applyEdits(text: string, edits: readonly Edit[], options: ApplyE
 	const eofChangedLine = insertAtEnd(fileLines, lineOrigins, eofLines);
 	if (eofChangedLine !== undefined) trackFirstChanged(eofChangedLine);
 
-	return {
-		text: fileLines.join("\n"),
-		firstChangedLine,
-		...(warnings.length > 0 ? { warnings } : {}),
+	return { text: fileLines.join("\n"), firstChangedLine };
+}
+
+/**
+ * Apply a parsed list of edits to a text body. Pure function — no I/O.
+ *
+ * Returns the post-edit text and the first changed line number (1-indexed).
+ * Throws if an anchor is out of bounds.
+ *
+ * Mis-set replacement boundaries are repaired by {@link repairBoundaryVariants}
+ * when `options.path` lets tree-sitter judge the result. A parsing authored
+ * result is never second-guessed. For a broken result, only syntax-essential
+ * edge retention with matching indentation and exact outside-row echo removal
+ * are considered; every selected candidate must parse.
+ */
+export function applyEdits(text: string, edits: readonly Edit[], options: ApplyEditsOptions = {}): ApplyResult {
+	if (edits.length === 0) return { text, firstChangedLine: undefined };
+
+	const fileLines = text.split("\n");
+
+	// Clipboard pre-pass: capture `cut` ranges from the original lines and
+	// expand `paste` edits into plain inserts in authored order.
+	const clipboardWarnings: string[] = [];
+	const concrete = resolveClipboardEdits(edits, fileLines, options.clipboard ?? {}, {
+		...(options.onEmptyPaste === undefined ? {} : { onEmptyPaste: options.onEmptyPaste }),
+		onWarning: message => clipboardWarnings.push(message),
+	});
+
+	// Block edits are deferred until `resolveBlockEdits` expands them into
+	// concrete inserts + deletes. Reaching the applier with one still present
+	// is an internal wiring bug, not authored-input error.
+	const appliedEdits: AppliedEdit[] = [];
+	for (const edit of concrete) {
+		if (edit.kind === "block") throw new Error(UNRESOLVED_BLOCK_INTERNAL);
+		if (edit.kind === "cut" || edit.kind === "paste") throw new Error(UNRESOLVED_CLIPBOARD_INTERNAL);
+		appliedEdits.push(edit);
+	}
+
+	const targetEdits = dropTrailingPhantomDeletes(
+		appliedEdits.map((edit, index) => cloneAppliedEdit(edit, index)),
+		fileLines,
+	);
+	validateLineBounds(targetEdits, fileLines);
+	const indentationWarnings = repairReplacementIndentation(targetEdits, fileLines);
+	const landed = repairAfterInsertLandings(targetEdits, fileLines, options.path);
+	const normalized = normalizeTextualBoundaryEchoes(landed.edits, fileLines, options.path);
+	const leading = [...clipboardWarnings, ...indentationWarnings, ...landed.warnings, ...normalized.warnings];
+	const authoredResult = materializeEdits(fileLines, normalized.edits);
+	const baselineParses = parsesCleanly(options.path, text);
+	const authoredParses = parsesCleanly(options.path, authoredResult.text);
+	const finish = (result: Materialized, warnings: string[]): ApplyResult => {
+		const merged = [...warnings];
+		// Post-apply syntax advisory: the result stopped parsing while the
+		// pre-edit text parsed, so this patch demonstrably introduced the
+		// error. Catches misplacements no boundary variant can explain.
+		if (!parsesCleanly(options.path, result.text) && baselineParses) {
+			merged.push(editBrokeParseWarning(result.firstChangedLine));
+		}
+		return {
+			text: result.text,
+			firstChangedLine: result.firstChangedLine,
+			...(merged.length > 0 ? { warnings: merged } : {}),
+		};
 	};
+	const ambiguity = normalized.ambiguities[0];
+	// Exact-text normalization is evidence-complete. If it leaves a parsing
+	// result, no speculative keep/drop variant may second-guess it.
+	if (authoredParses) {
+		if (ambiguity) {
+			throw new Error(
+				ambiguousBoundaryEchoMessage(ambiguity.startLine, ambiguity.endLine, ambiguity.side, ambiguity.count),
+			);
+		}
+		return finish(authoredResult, leading);
+	}
+	const repaired = repairBoundaryVariants(normalized.edits, fileLines, options.path, baselineParses);
+	if (repaired) {
+		const repairedResult = materializeEdits(fileLines, repaired.edits);
+		if (parsesCleanly(options.path, repairedResult.text)) {
+			return finish(repairedResult, [...leading, ...repaired.warnings]);
+		}
+	}
+	if (ambiguity) {
+		throw new Error(
+			ambiguousBoundaryEchoMessage(ambiguity.startLine, ambiguity.endLine, ambiguity.side, ambiguity.count),
+		);
+	}
+	// Nothing proven: leave the authored edit exactly as written. Report the
+	// damage — the baseline parsed, so this edit demonstrably caused it.
+	return finish(authoredResult, leading);
 }

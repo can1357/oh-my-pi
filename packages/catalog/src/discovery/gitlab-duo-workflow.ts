@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { z } from "zod/v4";
+import { type } from "@oh-my-pi/omptype";
 import type { FetchImpl, ModelSpec } from "../types";
 import { discoveryFetch, isRecord } from "../utils";
 
@@ -54,20 +54,28 @@ const ProjectRootNamespaceQuery = `query omp_gitlabDuoWorkflowProjectRootNamespa
   }
 }`;
 
-const modelRefSchema = z
-	.object({
-		name: z.string().optional().catch(undefined),
-		ref: z.string().optional().catch(undefined),
-	})
-	.loose();
+const resilientString = type("unknown").pipe(value => {
+	if (value === undefined) return undefined;
+	const parsed = type("string")(value);
+	return parsed instanceof type.errors ? undefined : parsed;
+});
 
-const aiChatAvailableModelsSchema = z
-	.object({
-		defaultModel: z.unknown().nullable().optional(),
-		selectableModels: z.array(z.unknown()).nullable().optional().catch([]),
-		pinnedModel: z.unknown().nullable().optional(),
-	})
-	.loose();
+const resilientUnknownArray = type("unknown").pipe(value => {
+	if (value === undefined || value === null) return value;
+	const parsed = type("unknown[]")(value);
+	return parsed instanceof type.errors ? [] : parsed;
+});
+
+const modelRefSchema = type({
+	"name?": resilientString,
+	"ref?": resilientString,
+});
+
+const aiChatAvailableModelsSchema = type({
+	"defaultModel?": "unknown",
+	"selectableModels?": resilientUnknownArray,
+	"pinnedModel?": "unknown",
+});
 
 type GitLabDuoWorkflowCandidateSource = "override" | "project" | "remote" | "group";
 
@@ -540,17 +548,15 @@ async function postGraphQL(
 }
 
 function parseAvailability(value: unknown): GitLabDuoWorkflowAvailability | null {
-	const parsed = aiChatAvailableModelsSchema.safeParse(value);
-	if (!parsed.success) {
-		return null;
-	}
+	const parsed = aiChatAvailableModelsSchema(value);
+	if (parsed instanceof type.errors) return null;
 	return {
-		defaultModel: parseModelRef(parsed.data.defaultModel),
-		selectableModels: (parsed.data.selectableModels ?? []).flatMap(model => {
+		defaultModel: parseModelRef(parsed.defaultModel),
+		selectableModels: (parsed.selectableModels ?? []).flatMap(model => {
 			const parsedModel = parseModelRef(model);
 			return parsedModel ? [parsedModel] : [];
 		}),
-		pinnedModel: parseModelRef(parsed.data.pinnedModel),
+		pinnedModel: parseModelRef(parsed.pinnedModel),
 	};
 }
 
@@ -558,15 +564,13 @@ function parseModelRef(value: unknown): GitLabDuoWorkflowModelRef | null {
 	if (value === null || value === undefined) {
 		return null;
 	}
-	const parsed = modelRefSchema.safeParse(value);
-	if (!parsed.success) {
-		return null;
-	}
-	const ref = normalizeIdentifier(parsed.data.ref);
+	const parsed = modelRefSchema(value);
+	if (parsed instanceof type.errors) return null;
+	const ref = normalizeIdentifier(parsed.ref);
 	if (!ref) {
 		return null;
 	}
-	const name = normalizeIdentifier(parsed.data.name) ?? ref;
+	const name = normalizeIdentifier(parsed.name) ?? ref;
 	return { name, ref };
 }
 

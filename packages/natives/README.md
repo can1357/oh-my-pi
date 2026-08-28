@@ -10,6 +10,7 @@ Native Rust functionality via N-API.
 - **Audio**: Cross-platform low-latency microphone capture and gapless speaker playback
 - **WebRTC**: Native Opus media, SDP offer/answer negotiation, and data-channel events for live sessions
 - **File locking**: Process-owned cross-process locks with in-memory kernel names on Linux/Windows and `flock(2)` sidecars on other Unix platforms
+- **PDF**: In-memory PDF-to-Markdown extraction with OCR-page classification via `pdf-inspector`
 
 General-purpose image processing (decode/resize/encode for files and buffers)
 lives in [`Bun.Image`](https://bun.com/docs/runtime/image) on the JS side; this
@@ -19,7 +20,7 @@ that terminal protocol.
 ## Usage
 
 ```typescript
-import { grep, find, encodeSixel } from "@oh-my-pi/pi-natives";
+import { encodeSixel, grep, pdfToMarkdown } from "@oh-my-pi/pi-natives";
 
 // Grep for a pattern
 const results = await grep({
@@ -38,6 +39,10 @@ const files = await find({
 
 // SIXEL encode for a terminal cell box (px)
 const sequence = encodeSixel(pngBytes, widthPx, heightPx);
+
+// Extract PDF text and identify pages that still need OCR
+const pdf = await pdfToMarkdown(pdfBytes);
+console.log(pdf.markdown, pdf.pagesNeedingOcr);
 ```
 
 ## Building

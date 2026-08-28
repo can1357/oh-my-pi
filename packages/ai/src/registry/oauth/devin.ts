@@ -33,7 +33,7 @@ class DevinOAuthFlow extends OAuthCallbackFlow {
 		});
 	}
 
-	generateState(): string {
+	override generateState(): string {
 		return crypto.randomUUID();
 	}
 

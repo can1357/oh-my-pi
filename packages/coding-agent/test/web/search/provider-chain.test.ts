@@ -9,7 +9,11 @@ import {
 } from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import { SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
 
-const authStorage = {} as AuthStorage;
+const authStorage = {
+	hasAuth(provider: string): boolean {
+		return provider === "jina" && Boolean(process.env.JINA_API_KEY);
+	},
+} as AuthStorage;
 const originalBraveApiKey = process.env.BRAVE_API_KEY;
 const originalJinaApiKey = process.env.JINA_API_KEY;
 

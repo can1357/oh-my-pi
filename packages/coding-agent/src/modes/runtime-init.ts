@@ -8,7 +8,7 @@
  */
 import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
-import type { ExtensionError, ExtensionUIContext } from "../extensibility/extensions/types";
+import type { ExtensionError, ExtensionMode, ExtensionUIContext } from "../extensibility/extensions/types";
 import type { AgentSession } from "../session/agent-session";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 
@@ -22,6 +22,8 @@ export interface InitializeExtensionsOptions {
 	reportRuntimeError: (error: ExtensionError) => void;
 	/** Optional shutdown hook (rpc mode signals its loop; print mode is a no-op). */
 	onShutdown?: () => void;
+	/** Pi-compatible mode exposed to extension contexts. Defaults to `"print"`. */
+	mode?: ExtensionMode;
 	/** Optional UI context (rpc supplies one; print runs headless). */
 	uiContext?: ExtensionUIContext;
 	/** Optional lifecycle hook for extension-originated messages that can start an agent turn. */
@@ -44,6 +46,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 		reportSendError,
 		reportRuntimeError,
 		onShutdown,
+		mode = "print",
 		uiContext,
 		markAgentInvokingMessage,
 		trackAgentInvokingMessage,
@@ -84,7 +87,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 				session.sessionManager.appendLabelChange(targetId, label);
 			},
 			getActiveTools: () => session.getEnabledToolNames(),
-			getAllTools: () => session.getAllToolNames(),
+			getAllTools: () => session.getAllToolInfos(),
 			setActiveTools: (toolNames: string[]) => session.setActiveToolsByName(toolNames),
 			getCommands: () => getSessionSlashCommands(session),
 			setModel: model => runExtensionSetModel(session, model),
@@ -137,6 +140,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			compact: instructionsOrOptions => runExtensionCompact(session, instructionsOrOptions),
 		},
 		uiContext,
+		mode,
 	);
 
 	runner.onError(reportRuntimeError);

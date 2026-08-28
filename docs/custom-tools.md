@@ -70,8 +70,8 @@ const factory: CustomToolFactory = (pi) => ({
   name: "repo_stats",
   label: "Repo Stats",
   description: "Counts tracked TypeScript files",
-  parameters: pi.arktype({
-    glob: "string?",
+  parameters: pi.zod.object({
+    glob: pi.zod.string().optional(),
   }),
 
   async execute(toolCallId, params, onUpdate, ctx, signal) {
@@ -109,7 +109,7 @@ const factory: CustomToolFactory = (pi) => ({
 export default factory;
 ```
 
-Parameter schemas may use ArkType (`pi.arktype`), Zod (`pi.zod`), or the legacy-compatible TypeBox shim (`pi.typebox`); ArkType is preferred for new tools. Schemas flow through the shared validation/wire pipeline.
+Parameter schemas may use the Zod-compatible omptype builder (`pi.zod`), native omptype builder (`pi.arktype`), or legacy-compatible TypeBox shim (`pi.typebox`) and flow through the shared validation/wire pipeline.
 
 Factory return type:
 
@@ -126,9 +126,8 @@ From `types.ts` and `loader.ts`:
 - `ui`: UI context (can be no-op in headless modes)
 - `hasUI`: `false` in non-interactive flows
 - `logger`: shared file logger
-- `arktype`: injected ArkType module (preferred for new schemas)
+- `arktype`: injected omptype `type(...)` builder
 - `typebox`: compatibility shim for legacy TypeBox-style schemas
-- `zod`: injected `zod/v4` module
 - `pi`: injected `@oh-my-pi/pi-coding-agent` exports
 - `pushPendingAction(action)`: stage a preview action that is finalized by writing a plain-text reason to `xd://resolve` or `xd://reject`
 
@@ -142,7 +141,7 @@ The loader starts with a no-op UI context and requires host code to call `setUIC
 execute(toolCallId, params, onUpdate, ctx, signal);
 ```
 
-- `params` is statically typed from its ArkType, Zod, or TypeBox schema via `Static<TParams>`.
+- `params` is statically typed from its omptype or TypeBox schema via `Static<TParams>`.
 - Runtime argument validation happens before execution in the agent loop.
 - `onUpdate` emits partial results for UI streaming.
 - `ctx` includes `sessionManager`, `modelRegistry`, current `model`, `isIdle()`, `hasQueuedMessages()`, `abort()`, and optional `settings`, `fetch`, `localProtocolOptions`, and `autoApprove`.

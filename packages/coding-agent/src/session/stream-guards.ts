@@ -1,24 +1,27 @@
-import * as fs from "node:fs";
 import type { Agent, AgentEvent, AgentMessage, AgentTurnEndContext } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, AssistantMessageEvent, Model, ToolCall } from "@oh-my-pi/pi-ai";
-import { GeminiHeaderRunDetector, isGeminiThinkingModel } from "@oh-my-pi/pi-ai/utils/thinking-loop";
+import { GeminiHeaderRunDetector } from "@oh-my-pi/pi-ai/utils/thinking-loop";
 import { type RepeatedToolCallDetection, ToolCallLoopGuard } from "@oh-my-pi/pi-ai/utils/tool-call-loop-guard";
-import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
+import { modelFamilyToken } from "@oh-my-pi/pi-catalog/identity";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import { normalizeDiff, normalizeToLF, ParseError, previewPatch, stripBom } from "../edit";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import geminiToolReminderTemplate from "../prompts/system/gemini-tool-call-reminder.md" with { type: "text" };
-import toolCallLoopRedirectTemplate from "../prompts/system/tool-call-loop-redirect.md" with { type: "text" };
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { assertEditableFile } from "../tools/auto-generated-guard";
 import { isInternalUrlPath, normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import { ToolError } from "../tools/tool-errors";
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
+import {
+	renderToolCallLoopRedirect,
+	TOOL_CALL_LOOP_REDIRECT_TYPE,
+	toolCallLoopRedirectDetails,
+} from "./tool-call-loop-redirect";
 
 const GEMINI_HEADER_INTERRUPT_REASON = "Interrupted: emit a tool call instead of more planning";
 const GEMINI_TOOL_REMINDER_TYPE = "gemini-tool-call-reminder";
-const TOOL_CALL_LOOP_REDIRECT_TYPE = "tool-call-loop-redirect";
 
 /** Capabilities borrowed by the session's streaming and loop guards. */
 export interface StreamGuardsHost {
@@ -41,8 +44,26 @@ export class StreamingEditGuard {
 	#abortTriggered = false;
 	#checkedLineCounts = new Map<string, number>();
 	#precheckedToolCallIds = new Set<string>();
-	#fileCache = new Map<string, string>();
+	// Promise of the target's LF-normalized text; concurrent loads dedupe onto one
+	// promise and read failures resolve to `undefined` so a missing/unreadable
+	// target does not retry on every delta (the edit tool surfaces read errors).
+	#fileCache = new Map<string, Promise<string | undefined>>();
+	// Removed lines already confirmed present in the cached content, per file.
+	// Sound because cached content is immutable until invalidate() drops both the
+	// cache entry and its memo, and diff line counts only grow within a turn.
+	#confirmedRemovedLines = new Map<string, Set<string>>();
+	// Serializes per-file verifications: interleaved delta checks must not stack
+	// their time-sliced scans within a single event-loop tick.
+	#verificationChain = new Map<string, Promise<void>>();
+	// Per-file invalidation token: queued checks from before an edit result must
+	// not validate their old diff against the newly written file.
+	#fileEpoch = new Map<string, number>();
 	#lastToolCallId: string | undefined;
+	// Internal invalidation token, bumped by reset(). Unlike the session's
+	// promptGeneration — which only advances on abort/session-reset — this moves
+	// at every turn boundary, so a removed-lines check queued before reset()
+	// cannot start under the next turn and abort it on the previous edit.
+	#epoch = 0;
 
 	constructor(host: StreamGuardsHost) {
 		this.#host = host;
@@ -53,12 +74,16 @@ export class StreamingEditGuard {
 		return this.#abortTriggered;
 	}
 
-	/** Clears all turn-scoped streaming edit state. */
+	/** Clears all turn-scoped streaming edit state and invalidates queued checks. */
 	reset(): void {
 		this.#abortTriggered = false;
 		this.#checkedLineCounts.clear();
 		this.#precheckedToolCallIds.clear();
 		this.#fileCache.clear();
+		this.#confirmedRemovedLines.clear();
+		this.#verificationChain.clear();
+		this.#fileEpoch.clear();
+		this.#epoch += 1;
 	}
 
 	/** Pre-caches and validates a streamed edit as its arguments arrive. */
@@ -86,14 +111,20 @@ export class StreamingEditGuard {
 		}
 
 		// File-cache priming feeds maybeAbort's removed-lines check, which is the
-		// optional patch-preview verification gated by edit.streamingAbort.
-		if (this.#host.settings.get("edit.streamingAbort")) this.#ensureFileCache(streamingEdit.resolvedPath);
+		// optional patch-preview verification gated by edit.streamingAbort. The
+		// load is async: the guard evaluates on completion without blocking the
+		// streaming path, so an abort decision may lag one stream tick.
+		if (this.#host.settings.get("edit.streamingAbort")) void this.#ensureFileCache(streamingEdit.resolvedPath);
 	}
 
 	/** Invalidates cached source text after an edit tool result lands. */
 	invalidate(filePath: string): void {
 		const resolvedPath = this.#resolveSessionFsPath(filePath);
-		if (resolvedPath !== undefined) this.#fileCache.delete(resolvedPath);
+		if (resolvedPath === undefined) return;
+		this.#fileCache.delete(resolvedPath);
+		this.#confirmedRemovedLines.delete(resolvedPath);
+		this.#verificationChain.delete(resolvedPath);
+		this.#fileEpoch.set(resolvedPath, (this.#fileEpoch.get(resolvedPath) ?? 0) + 1);
 	}
 
 	/** Aborts a streamed edit whose completed patch preview cannot apply. */
@@ -129,18 +160,7 @@ export class StreamingEditGuard {
 			.filter(line => line.startsWith("-") && !line.startsWith("--- "))
 			.map(line => line.slice(1));
 		if (removedLines.length > 0) {
-			let cachedContent = this.#fileCache.get(resolvedPath);
-			if (cachedContent === undefined) {
-				this.#ensureFileCache(resolvedPath);
-				cachedContent = this.#fileCache.get(resolvedPath);
-			}
-			if (cachedContent !== undefined) {
-				const missing = removedLines.find(line => !cachedContent.includes(normalizeToLF(line)));
-				if (missing) this.#abortPatch(toolCall.id, path, `Failed to find expected lines in ${path}:\n${missing}`);
-				return;
-			}
-			if (assistantEvent.type === "toolcall_delta") return;
-			void this.#checkRemovedLines(toolCall.id, path, resolvedPath, removedLines);
+			this.#queueRemovedLinesCheck(toolCall.id, path, resolvedPath, removedLines);
 			return;
 		}
 		if (assistantEvent.type === "toolcall_delta") return;
@@ -197,16 +217,23 @@ export class StreamingEditGuard {
 			}
 		});
 	}
-
-	#ensureFileCache(resolvedPath: string): void {
-		if (this.#fileCache.has(resolvedPath)) return;
-		try {
-			const rawText = fs.readFileSync(resolvedPath, "utf-8");
-			const { text } = stripBom(rawText);
-			this.#fileCache.set(resolvedPath, normalizeToLF(text));
-		} catch {
-			// Read errors are handled by the edit tool itself.
-		}
+	/** Kicks off (or joins) the async load of a target's normalized text. */
+	#ensureFileCache(resolvedPath: string): Promise<string | undefined> {
+		const existing = this.#fileCache.get(resolvedPath);
+		if (existing) return existing;
+		const load = Bun.file(resolvedPath)
+			.text()
+			.then(text => {
+				const { text: stripped } = stripBom(text);
+				return normalizeToLF(stripped);
+			})
+			.catch(() => {
+				// Read errors (ENOENT and otherwise) are handled by the edit tool
+				// itself; cache the failure so deltas do not re-read per tick.
+				return undefined;
+			});
+		this.#fileCache.set(resolvedPath, load);
+		return load;
 	}
 
 	#resolveSessionFsPath(filePath: string): string | undefined {
@@ -218,6 +245,11 @@ export class StreamingEditGuard {
 		return resolveToCwd(normalized, this.#host.sessionManager.getCwd());
 	}
 
+	/**
+	 * Verifies removed lines against the cached file text once its async load
+	 * settles. The abort decision may lag one stream tick — acceptable, since the
+	 * edit tool re-verifies the real patch before applying anything.
+	 */
 	async #checkRemovedLines(
 		toolCallId: string,
 		filePath: string,
@@ -225,17 +257,69 @@ export class StreamingEditGuard {
 		removedLines: string[],
 	): Promise<void> {
 		if (this.#abortTriggered) return;
-		try {
-			const { text } = stripBom(await Bun.file(resolvedPath).text());
-			const normalizedContent = normalizeToLF(text);
-			const missing = removedLines.find(line => !normalizedContent.includes(normalizeToLF(line)));
-			if (missing)
-				this.#abortPatch(toolCallId, filePath, `Failed to find expected lines in ${filePath}:\n${missing}`);
-		} catch (error) {
-			if (!isEnoent(error)) {
-				// Unexpected fallback read errors remain non-fatal.
+		const cached = this.#ensureFileCache(resolvedPath);
+		const content = await cached;
+		if (content === undefined || this.#abortTriggered) return;
+		// Cache was invalidated (edit landed / turn reset) while loading: drop this
+		// stale evaluation rather than judging outdated content.
+		if (this.#fileCache.get(resolvedPath) !== cached) return;
+
+		const confirmed = this.#confirmedRemovedLines.get(resolvedPath) ?? new Set<string>();
+		const seen = new Set<string>();
+		const unconfirmed: string[] = [];
+		for (const line of removedLines) {
+			const lf = normalizeToLF(line);
+			if (!confirmed.has(lf) && !seen.has(lf)) {
+				seen.add(lf);
+				unconfirmed.push(lf);
 			}
 		}
+		if (unconfirmed.length === 0) return;
+
+		// Time-slice the scans: a missing line forces includes() to walk the whole
+		// file, so an unbounded batch would block the event loop on large targets.
+		let sliceStart = performance.now();
+		for (const lf of unconfirmed) {
+			if (!content.includes(lf)) {
+				this.#abortPatch(toolCallId, filePath, `Failed to find expected lines in ${filePath}:\n${lf}`);
+				return;
+			}
+			confirmed.add(lf);
+			this.#confirmedRemovedLines.set(resolvedPath, confirmed);
+			if (performance.now() - sliceStart > 2) {
+				await Bun.sleep(0);
+				if (this.#abortTriggered || this.#fileCache.get(resolvedPath) !== cached) return;
+				sliceStart = performance.now();
+			}
+		}
+	}
+
+	/** Chains a removed-lines verification behind any in-flight one for the same file. */
+	#queueRemovedLinesCheck(toolCallId: string, filePath: string, resolvedPath: string, removedLines: string[]): void {
+		// Turn-scoped token: a check still queued when reset() runs must not start
+		// under the next turn and abort it with the previous turn's verdict. The
+		// guard's own epoch moves at every turn boundary, unlike promptGeneration,
+		// which only advances on abort/session-reset.
+		const epoch = this.#epoch;
+		const fileEpoch = this.#fileEpoch.get(resolvedPath) ?? 0;
+		const prior = this.#verificationChain.get(resolvedPath) ?? Promise.resolve();
+		const next = prior
+			.catch(() => {})
+			.then(() => {
+				if (
+					this.#abortTriggered ||
+					this.#epoch !== epoch ||
+					(this.#fileEpoch.get(resolvedPath) ?? 0) !== fileEpoch
+				) {
+					return;
+				}
+				return this.#checkRemovedLines(toolCallId, filePath, resolvedPath, removedLines);
+			})
+			.catch(() => {});
+		this.#verificationChain.set(resolvedPath, next);
+		void next.then(() => {
+			if (this.#verificationChain.get(resolvedPath) === next) this.#verificationChain.delete(resolvedPath);
+		});
 	}
 
 	async #checkPreviewPatch(
@@ -322,19 +406,9 @@ export class LoopGuards {
 	}
 
 	#injectToolCallLoopRedirect(messages: AgentMessage[], detection: RepeatedToolCallDetection): void {
-		const content = prompt.render(toolCallLoopRedirectTemplate, {
-			tool_name: detection.toolName,
-			count: detection.count,
-			arguments_summary: detection.argumentsSummary,
-			result_summary: detection.resultSummary || "(no text result)",
-		});
-		const details = {
-			toolName: detection.toolName,
-			count: detection.count,
-			argumentsSummary: detection.argumentsSummary,
-			resultSummary: detection.resultSummary,
-		};
 		logger.warn("cross-turn tool-call loop detected", { toolName: detection.toolName, count: detection.count });
+		const content = renderToolCallLoopRedirect(detection);
+		const details = toolCallLoopRedirectDetails(detection);
 		const redirectMessage: CustomMessage = {
 			role: "custom",
 			customType: TOOL_CALL_LOOP_REDIRECT_TYPE,
@@ -362,7 +436,7 @@ export class LoopGuards {
 			this.#host.settings.get("model.loopGuard.enabled") === true &&
 			this.#host.settings.get("model.loopGuard.toolCallReminder") === true &&
 			model !== undefined &&
-			isGeminiThinkingModel(model)
+			modelFamilyToken(model.id) === "gemini"
 		);
 	}
 

@@ -138,18 +138,33 @@ export async function refreshCursorToken(apiKeyOrRefreshToken: string): Promise<
 	};
 }
 
+function decodeCursorAccessTokenPayload(token: string): unknown | undefined {
+	const parts = token.split(".");
+	if (parts.length !== 3) return undefined;
+	const payload = parts[1];
+	if (!payload) return undefined;
+	return JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
+}
+
+export function extractCursorAccessTokenUserId(accessToken: string): string | undefined {
+	try {
+		const payload = decodeCursorAccessTokenPayload(accessToken);
+		if (!payload || typeof payload !== "object" || !("sub" in payload) || typeof payload.sub !== "string") {
+			return undefined;
+		}
+		const { sub } = payload;
+		const parts = sub.split("|");
+		const userId = (parts.length > 1 ? parts[1] : sub).trim();
+		return userId || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 function getTokenExpiry(token: string): number {
 	try {
-		const parts = token.split(".");
-		if (parts.length !== 3) {
-			return Date.now() + 3600 * 1000;
-		}
-		const payload = parts[1];
-		if (!payload) {
-			return Date.now() + 3600 * 1000;
-		}
-		const decoded = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
-		if (decoded && typeof decoded === "object" && typeof decoded.exp === "number") {
+		const decoded = decodeCursorAccessTokenPayload(token);
+		if (decoded && typeof decoded === "object" && "exp" in decoded && typeof decoded.exp === "number") {
 			return decoded.exp * 1000 - 5 * 60 * 1000;
 		}
 	} catch {
@@ -160,9 +175,10 @@ function getTokenExpiry(token: string): number {
 
 export function isCursorTokenExpiringSoon(token: string, thresholdSeconds = 300): boolean {
 	try {
-		const [, payload] = token.split(".");
-		if (!payload) return true;
-		const decoded = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
+		const decoded = decodeCursorAccessTokenPayload(token);
+		if (!decoded || typeof decoded !== "object" || !("exp" in decoded) || typeof decoded.exp !== "number") {
+			return true;
+		}
 		const currentTime = Math.floor(Date.now() / 1000);
 		return decoded.exp - currentTime < thresholdSeconds;
 	} catch {

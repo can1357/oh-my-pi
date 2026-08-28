@@ -128,11 +128,16 @@ function Configure-BashShell {
                 New-Item -ItemType Directory -Force -Path $settingsDir | Out-Null
             }
 
-            # Read existing settings or create new
+            # Read existing settings or create new. ConvertFrom-Json -AsHashtable
+            # requires PowerShell 6+; build the hashtable manually so Windows
+            # PowerShell 5.1 merges instead of clobbering existing settings.
             $settings = @{}
             if (Test-Path $settingsFile) {
                 try {
-                    $settings = Get-Content $settingsFile -Raw | ConvertFrom-Json -AsHashtable
+                    $parsed = Get-Content $settingsFile -Raw | ConvertFrom-Json
+                    foreach ($prop in $parsed.PSObject.Properties) {
+                        $settings[$prop.Name] = $prop.Value
+                    }
                 } catch {
                     $settings = @{}
                 }
@@ -143,7 +148,7 @@ function Configure-BashShell {
 
             # Write settings
             $settings | ConvertTo-Json -Depth 10 | Set-Content $settingsFile -Encoding UTF8
-            Write-Host "✓ Configured shell path in $settingsFile" -ForegroundColor Green
+            Write-Host "[OK] Configured shell path in $settingsFile" -ForegroundColor Green
         } else {
             Write-Host ""
             Write-Host "No bash shell found - OMP will use its built-in shell." -ForegroundColor Cyan
@@ -154,7 +159,7 @@ function Configure-BashShell {
             Write-Host '    { "shellPath": "C:\\path\\to\\bash.exe" }' -ForegroundColor Cyan
         }
     } catch {
-        Write-Host "⚠ Could not configure bash shell: $_" -ForegroundColor Yellow
+        Write-Host "[WARN] Could not configure bash shell: $_" -ForegroundColor Yellow
     }
 }
 
@@ -226,7 +231,7 @@ function Install-ViaBun {
     }
 
     Write-Host ""
-    Write-Host "✓ Installed omp via bun" -ForegroundColor Green
+    Write-Host "[OK] Installed omp via bun" -ForegroundColor Green
 
     Configure-BashShell
 
@@ -261,7 +266,7 @@ function Install-Binary {
     Invoke-WebRequest -Uri $BinaryUrl -OutFile $OutPath -TimeoutSec 900
 
     Write-Host ""
-    Write-Host "✓ Installed omp to $OutPath" -ForegroundColor Green
+    Write-Host "[OK] Installed omp to $OutPath" -ForegroundColor Green
 
     # Add to PATH if not already there
     $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")

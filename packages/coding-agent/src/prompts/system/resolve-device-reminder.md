@@ -1,3 +1,3 @@
 <system-reminder>
-The `{{toolName}}` result above is a PREVIEW — no files were changed. Finalize it now with the `write` tool: write a one-sentence reason as plain text to `xd://resolve` to APPLY it, or to `xd://reject` to DISCARD it.
+`{{toolName}}` result above: PREVIEW — no files changed. Finalize now with `write`: write a one-sentence plain-text reason to `xd://resolve` to APPLY, or `xd://reject` to DISCARD.
 </system-reminder>

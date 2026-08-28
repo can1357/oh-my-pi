@@ -18,7 +18,7 @@
  * plan is delivered exactly once.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
@@ -81,7 +81,17 @@ function createAssistantResponse(text: string) {
 
 describe("AgentSession plan-reference delivery tracking (issue #4094)", () => {
 	let tempDir: TempDir;
+	let fixtureDir: TempDir;
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
 	const cleanups: Array<() => Promise<void>> = [];
+
+	beforeAll(async () => {
+		fixtureDir = TempDir.createSync("@pi-agent-session-plan-ref-setup-bail-fixture-");
+		authStorage = await AuthStorage.create(path.join(fixtureDir.path(), "testauth.db"));
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		modelRegistry = new ModelRegistry(authStorage, path.join(fixtureDir.path(), "models.yml"));
+	});
 
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@pi-agent-session-plan-ref-setup-bail-");
@@ -95,6 +105,11 @@ describe("AgentSession plan-reference delivery tracking (issue #4094)", () => {
 		vi.restoreAllMocks();
 	});
 
+	afterAll(() => {
+		authStorage.close();
+		fixtureDir.removeSync();
+	});
+
 	async function createHarness(): Promise<Harness> {
 		const observedCalls: ObservedPromptCall[] = [];
 
@@ -102,9 +117,6 @@ describe("AgentSession plan-reference delivery tracking (issue #4094)", () => {
 		if (!bundled) throw new Error("Expected claude-sonnet-4-5 model to exist");
 		const model = { ...bundled, contextWindow: 200_000, maxTokens: 64_000 };
 
-		const authStorage = await AuthStorage.create(path.join(tempDir.path(), `testauth-${cleanups.length}.db`));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), `models-${cleanups.length}.yml`));
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"task.eager": "off",
@@ -134,10 +146,7 @@ describe("AgentSession plan-reference delivery tracking (issue #4094)", () => {
 
 		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
 
-		cleanups.push(async () => {
-			await session.dispose();
-			authStorage.close();
-		});
+		cleanups.push(() => session.dispose());
 		return { session, sessionManager, observedCalls };
 	}
 

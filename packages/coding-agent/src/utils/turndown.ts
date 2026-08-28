@@ -1,5 +1,4 @@
-import TurndownService from "turndown";
-import { gfm } from "turndown-plugin-gfm";
+import TurndownService, { gfm } from "@oh-my-pi/pi-utils/turndown";
 
 type TurndownListParent = {
 	nodeName: string;

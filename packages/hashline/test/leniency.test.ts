@@ -82,10 +82,39 @@ describe("hashline core — verb header forms", () => {
 		expect(applyPatch(FILE, "CUT 2")).toBe("a\nc\nd\ne");
 	});
 
+	it("recovers a dangling range separator as a single-line range", () => {
+		expect(applyPatch(FILE, "PUT 2.=:\n+X")).toBe("a\nX\nc\nd\ne");
+		expect(applyPatch(FILE, "PUT 2-:\n+X")).toBe("a\nX\nc\nd\ne");
+		expect(applyPatch(FILE, "CUT 2.=")).toBe("a\nc\nd\ne");
+	});
+
+	it("still rejects a dangling separator followed by junk", () => {
+		expect(() => parsePatch("PUT 2.= junk:\n+X")).toThrow();
+	});
+
 	it("recovers top-level numbered snapshot rows as single-line replacements", () => {
-		const result = parsePatch("2:B\n4:D");
-		expect(applyEdits(FILE, result.edits).text).toBe("a\nB\nc\nD\ne");
-		expect(result.warnings.some(w => /snapshot row.*single-line `PUT N\.=N:`/i.test(w))).toBe(true);
+		for (const separator of [":", "|"]) {
+			const result = parsePatch(`2${separator}B\n4${separator}D`);
+			expect(applyEdits(FILE, result.edits).text).toBe("a\nB\nc\nD\ne");
+			expect(result.warnings.some(w => /snapshot row.*single-line `PUT N\.=N:`/i.test(w))).toBe(true);
+		}
+	});
+	// The xutf incident: a body written as consecutive lines under one number
+	// (`4:` four times). Each row lowers to `PUT 4.=4:`, so the same-range
+	// coalescer kept only the last — silently replacing the block opener with
+	// `}` and dropping the rest. Recovery cannot read this; reject it.
+	it("rejects repeated snapshot-row line numbers instead of keeping only the last", () => {
+		expect(() => parsePatch("2:B\n4:first\n4:second")).toThrow(/name line 4/);
+		expect(() => parsePatch("2:B\n4:first\n4:second")).toThrow(/keep only the last row/);
+	});
+	// The xutf `native.rs` incident: `+CUT 1266.=1277` inside a `PUT` body is a
+	// literal row by spec, so it was inserted into the Rust file as text. That
+	// reading is correct, but it must be named — the agent that hit this filed a
+	// bug against the tool instead of repairing the line it had just planted.
+	it("warns when a body row is itself a hunk header written with the payload prefix", () => {
+		const result = parsePatch("PUT >1:\n+inserted();\n+CUT 1266.=1277");
+		expect(applyEdits(FILE, result.edits).text).toBe("a\ninserted();\nCUT 1266.=1277\nb\nc\nd\ne");
+		expect(result.warnings.some(w => /is itself a valid hunk header/.test(w))).toBe(true);
 	});
 
 	it("recovers a bare range header as an implicit PUT", () => {
@@ -133,10 +162,12 @@ describe("hashline body contracts", () => {
 		expect(result.warnings.some(w => /Auto-prefixed bare body row/.test(w))).toBe(true);
 	});
 
-	it("strips read-output line number prefix from auto-piped bare body rows", () => {
-		const result = parsePatch("PUT 2-2:\n2:hello");
-		expect(applyEdits(FILE, result.edits).text).toBe("a\nhello\nc\nd\ne");
-		expect(result.warnings.some(w => /Auto-prefixed bare body row/.test(w))).toBe(true);
+	it("strips read-output line number prefixes from auto-piped bare body rows", () => {
+		for (const separator of [":", "|"]) {
+			const result = parsePatch(`PUT 2-2:\n2${separator}hello`);
+			expect(applyEdits(FILE, result.edits).text).toBe("a\nhello\nc\nd\ne");
+			expect(result.warnings.some(w => /Auto-prefixed bare body row/.test(w))).toBe(true);
+		}
 	});
 	it("preserves `+N:` literal payloads without stripping", () => {
 		const result = parsePatch("PUT 2-2:\n+3:keep");

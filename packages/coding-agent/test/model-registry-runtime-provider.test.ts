@@ -35,7 +35,7 @@ describe("ModelRegistry runtime provider registration", () => {
 		tempDir = path.join(os.tmpdir(), `pi-test-model-registry-runtime-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
 		modelsJsonPath = path.join(tempDir, "models.json");
-		authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
+		authStorage = await AuthStorage.create(":memory:");
 		registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: offlineFetch });
 	});
 
@@ -109,7 +109,6 @@ describe("ModelRegistry runtime provider registration", () => {
 		headerValue: string | undefined,
 	): Promise<void> {
 		const model = registry.find(providerName, modelId);
-		expect(model).toBeDefined();
 		expect(model?.baseUrl).toBe(baseUrl);
 		expect(model?.headers?.[headerName]).toBe(headerValue);
 		await registry.refresh("offline");
@@ -302,6 +301,30 @@ describe("ModelRegistry runtime provider registration", () => {
 			model: "model-compact",
 		});
 	});
+	test("combines static fallback models with dynamic provider discovery", async () => {
+		const providerName = "combined-runtime-provider";
+		let dynamicFetches = 0;
+		registry.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				models: [{ ...baseModel, id: "fallback-model" }],
+				fetchDynamicModels: async () => {
+					dynamicFetches++;
+					return [{ ...baseModel, id: "dynamic-model" }];
+				},
+			},
+			"ext://runtime",
+		);
+
+		await registry.refreshRuntimeProviders("online");
+
+		expect(dynamicFetches).toBe(1);
+		expect(registry.find(providerName, "dynamic-model")).toBeDefined();
+		expect(registry.find(providerName, "fallback-model")).toBeDefined();
+	});
 
 	test("configured discovery suppresses extension fetchDynamicModels for the same provider", async () => {
 		const providerName = "runtime-configured-provider";
@@ -347,6 +370,84 @@ describe("ModelRegistry runtime provider registration", () => {
 
 		expect(runtimeFetchCalls).toBe(0);
 		expect(configuredRegistry.find(providerName, "shared-runtime-model")?.contextWindow).toBe(32_768);
+	});
+
+	test("runtime provider manager supersedes the built-in shared catalog manager", async () => {
+		let catalogFetches = 0;
+		const catalogFetch: FetchImpl = async input => {
+			catalogFetches++;
+			throw new Error(`Unexpected built-in catalog fetch: ${String(input)}`);
+		};
+		const overrideRegistry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: catalogFetch });
+		let runtimeFetches = 0;
+		overrideRegistry.registerProvider(
+			"anthropic",
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				api: "anthropic-messages",
+				fetchDynamicModels: async () => {
+					runtimeFetches++;
+					return [{ ...baseModel, id: "runtime-anthropic-model" }];
+				},
+			},
+			"ext://runtime",
+		);
+
+		await overrideRegistry.refreshProvider("anthropic", "online");
+
+		expect(runtimeFetches).toBe(1);
+		expect(catalogFetches).toBe(0);
+		expect(getProviderModels(overrideRegistry, "anthropic").map(model => model.id)).toEqual([
+			"runtime-anthropic-model",
+		]);
+	});
+
+	test("refreshProvider aborts and retries inherited shared-catalog fetches", async () => {
+		vi.useFakeTimers();
+		// Pin the keyless premise: a host ANTHROPIC_API_KEY (dev machines, agent
+		// harnesses) gives the anthropic manager a fetchDynamicModels hook whose
+		// endpoint fetch starts only after the catalog abort — its deadline timer
+		// arms after the last advanceTimersByTime and the refresh hangs forever.
+		const peekSpy = vi.spyOn(authStorage, "peekApiKey").mockResolvedValue(undefined);
+		let catalogFetches = 0;
+		let abortedFetches = 0;
+		const stalledFetch: FetchImpl = (_input, init) => {
+			catalogFetches++;
+			const { promise, reject } = Promise.withResolvers<Response>();
+			const signal = init?.signal;
+			if (!signal) {
+				reject(new Error("catalog fetch did not receive an abort signal"));
+				return promise;
+			}
+			const rejectAborted = () => {
+				abortedFetches++;
+				reject(signal.reason);
+			};
+			if (signal.aborted) {
+				rejectAborted();
+			} else {
+				signal.addEventListener("abort", rejectAborted, { once: true });
+			}
+			return promise;
+		};
+		const stalledRegistry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: stalledFetch });
+
+		const firstRefresh = stalledRegistry.refreshProvider("anthropic", "online");
+		await drainMicrotasksUntil(() => catalogFetches === 1, "first shared-catalog fetch did not start");
+		vi.advanceTimersByTime(9_999);
+		await Promise.resolve();
+		expect(abortedFetches).toBe(0);
+		vi.advanceTimersByTime(1);
+		await firstRefresh;
+		expect(abortedFetches).toBe(1);
+
+		const secondRefresh = stalledRegistry.refreshProvider("anthropic", "online");
+		await drainMicrotasksUntil(() => catalogFetches === 2, "second shared-catalog fetch did not start");
+		vi.advanceTimersByTime(10_000);
+		await secondRefresh;
+		expect(abortedFetches).toBe(2);
+		expect(catalogFetches).toBe(2);
+		peekSpy.mockRestore();
 	});
 
 	test("refreshRuntimeProviders times out extension fetchDynamicModels that never resolves", async () => {
@@ -419,6 +520,34 @@ describe("ModelRegistry runtime provider registration", () => {
 		});
 	});
 
+	test("registerProvider preserves a standalone Codex WebSocket opt-out across refresh", async () => {
+		const config: ProviderConfigInput = {
+			baseUrl: "https://chatgpt.com/backend-api/codex",
+			apiKey: "RUNTIME_KEY",
+			api: "openai-codex-responses",
+			models: [{ ...baseModel, id: "gpt-5.6-sol", preferWebsockets: false }],
+		};
+
+		registry.registerProvider("runtime-codex", config, "ext://runtime");
+		expect(registry.find("runtime-codex", "gpt-5.6-sol")?.preferWebsockets).toBe(false);
+
+		await registry.refresh("offline");
+		expect(registry.find("runtime-codex", "gpt-5.6-sol")?.preferWebsockets).toBe(false);
+	});
+
+	test("registerProvider lets an extension disable WebSockets on a bundled Codex model", () => {
+		const config: ProviderConfigInput = {
+			baseUrl: "https://chatgpt.com/backend-api/codex",
+			apiKey: "RUNTIME_KEY",
+			api: "openai-codex-responses",
+			models: [{ ...baseModel, id: "gpt-5.4", preferWebsockets: false }],
+		};
+
+		registry.registerProvider("openai-codex", config, "ext://runtime");
+
+		expect(registry.find("openai-codex", "gpt-5.4")?.preferWebsockets).toBe(false);
+	});
+
 	test("extension-registered models survive refresh('offline') cycle", async () => {
 		const config: ProviderConfigInput = {
 			baseUrl: "https://runtime.example.com/v1",
@@ -433,7 +562,6 @@ describe("ModelRegistry runtime provider registration", () => {
 		await registry.refresh("offline");
 
 		const model = registry.find("runtime-provider", "runtime-model");
-		expect(model).toBeDefined();
 		expect(model?.baseUrl).toBe("https://runtime.example.com/v1");
 		expect(model?.api).toBe("openai-completions");
 	});
@@ -456,7 +584,6 @@ describe("ModelRegistry runtime provider registration", () => {
 		await registry.refresh("online");
 
 		const model = registry.find("runtime-provider", "online-survivor");
-		expect(model).toBeDefined();
 		expect(model?.api).toBe("openai-completions");
 	});
 
@@ -524,6 +651,42 @@ describe("ModelRegistry runtime provider registration", () => {
 
 		configuredRegistry.clearSourceRegistrations("ext://runtime");
 		expect(configuredRegistry.find("anthropic", modelId)?.headers?.[sharedHeader]).toBe(configHeaderValue);
+	});
+
+	test("runtime-registered models inherit configured provider guardrails", () => {
+		const providerName = "amazon-bedrock";
+		const modelId = "runtime-bedrock-model";
+		const guardrailIdentifier = "arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234";
+
+		fs.writeFileSync(
+			modelsJsonPath,
+			JSON.stringify({
+				providers: {
+					[providerName]: {
+						guardrailIdentifier,
+						guardrailVersion: "1",
+						guardrailTrace: "enabled",
+					},
+				},
+			}),
+		);
+		const configuredRegistry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: offlineFetch });
+
+		configuredRegistry.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+				apiKey: "RUNTIME_KEY",
+				api: "bedrock-converse-stream",
+				models: [{ ...baseModel, id: modelId }],
+			},
+			"ext://runtime",
+		);
+
+		const model = configuredRegistry.find(providerName, modelId);
+		expect(model?.guardrailIdentifier).toBe(guardrailIdentifier);
+		expect(model?.guardrailVersion).toBe("1");
+		expect(model?.guardrailTrace).toBe("enabled");
 	});
 
 	test("extension-registered API keys survive refresh cycle for auth resolution", async () => {
@@ -950,7 +1113,6 @@ describe("ModelRegistry runtime provider registration", () => {
 
 	test("provider-scoped lookups preserve whole-catalog modifyModels projections", async () => {
 		const hiddenModel = registry.getAll().find(model => model.provider === "anthropic");
-		expect(hiddenModel).toBeDefined();
 		await authStorage.set("filtering-provider", {
 			type: "oauth",
 			access: "access-token",
@@ -989,7 +1151,6 @@ describe("ModelRegistry runtime provider registration", () => {
 
 	test("provider-scoped lookups do not intern other providers' transient projections", async () => {
 		const anthropicId = registry.getAll().find(model => model.provider === "anthropic")?.id;
-		expect(anthropicId).toBeDefined();
 		await authStorage.set("changing-provider", {
 			type: "oauth",
 			access: "access-token",
@@ -1103,7 +1264,6 @@ describe("ModelRegistry runtime provider registration", () => {
 
 	test("online discovery reapplies modifiers to an unprojected full catalog", async () => {
 		const target = registry.getAll().find(model => model.provider === "anthropic");
-		expect(target).toBeDefined();
 		await authStorage.set("renaming-provider", {
 			type: "oauth",
 			access: "access-token",
@@ -1160,7 +1320,6 @@ describe("ModelRegistry runtime provider registration", () => {
 
 		try {
 			const targetBefore = registry.getAll()[0];
-			expect(targetBefore).toBeDefined();
 			const targetSnapshot = structuredClone(targetBefore!);
 			const anthropicBefore = registry.getAll().filter(model => model.provider === "anthropic").length;
 			expect(anthropicBefore).toBeGreaterThan(0);

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
+import { $which } from "@oh-my-pi/pi-utils";
 
 interface RunnerFrame {
 	type?: string;
@@ -8,12 +9,17 @@ interface RunnerFrame {
 	status?: string;
 }
 
-const pythonPath = Bun.env.PYTHON ?? "python3";
+const pythonPath = Bun.env.PYTHON ?? ($which("python3") ? "python3" : "python");
 const runnerPath = path.resolve(import.meta.dir, "../../../src/eval/py/runner.py");
 const repoRoot = path.resolve(import.meta.dir, "../../../../..");
 const encoder = new TextEncoder();
 
 function shellQuote(value: string): string {
+	// `!cmd` runs through cmd.exe on Windows (shell=True) and a POSIX shell
+	// elsewhere; quote for the shell that will actually parse the command.
+	if (process.platform === "win32") {
+		return `"${value.replaceAll('"', '""')}"`;
+	}
 	return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
@@ -41,7 +47,10 @@ async function runCell(code: string): Promise<RunnerFrame[]> {
 			if (newline >= 0) {
 				const line = pending.slice(0, newline);
 				pending = pending.slice(newline + 1);
-				return JSON.parse(line) as RunnerFrame;
+				const frame = JSON.parse(line) as RunnerFrame;
+				// Child processes write \r\n on Windows.
+				if (typeof frame.data === "string") frame.data = frame.data.replaceAll("\r\n", "\n");
+				return frame;
 			}
 			const { value, done } = await reader.read();
 			if (done) {
@@ -137,6 +146,26 @@ describe("Python runner shell output streaming", () => {
 		expect(stdout).toContain("[output truncated: shell helper exceeded");
 		expect(stdout).toContain("capturedChars=1048576 return=0");
 		expect(stdout).not.toContain("capturedChars=1048593");
+	});
+
+	it("isolates !cmd children from the runner's stdin control channel", async () => {
+		// The runner's stdin carries the host's NDJSON frames. A child that
+		// inherits it can steal frames or block forever waiting for input;
+		// with stdin=DEVNULL a stdin-reading child sees immediate EOF instead.
+		const child = ["import sys", "data = sys.stdin.read()", "print('read=' + repr(data))"].join(";");
+		const frames = await runCell(
+			[
+				`result = !${pythonPath} -c ${shellQuote(child)}`,
+				"print('return=' + str(result.returncode) + ' lines=' + repr(list(result)))",
+			].join("\n"),
+		);
+		const stdout = frames
+			.filter(frame => frame.type === "stdout")
+			.map(frame => frame.data)
+			.join("");
+
+		expect(stdout).toContain("read=''");
+		expect(stdout).toContain("return=0");
 	});
 
 	it("streams newline-free %%bash output without waiting for EOF", async () => {

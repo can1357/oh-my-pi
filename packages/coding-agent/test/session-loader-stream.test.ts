@@ -16,6 +16,7 @@ import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-ti
 
 const ISO = "2026-06-29T12:00:00.000Z";
 const HEADER = { type: "session", version: 3, id: "s1", timestamp: ISO, cwd: "/tmp" };
+
 const msg = (id: string, parentId: string, text: string) => ({
 	type: "message",
 	id,
@@ -86,11 +87,45 @@ describe("loadEntriesFromFileStream (Bun.JSONL parity)", () => {
 		].join("\n");
 		const file = await writeTemp(content);
 		const visited: FileEntry[] = [];
-		const titleSlot = await sessionLoader.visitEntriesFromFileStream(file, entry => visited.push(entry));
+		const titleSlot = await sessionLoader.visitEntriesFromFileStream(file, entry => {
+			visited.push(entry);
+		});
 
 		expect(titleSlot?.title).toBe("Visitor");
 		expect(entryIds(visited)).toEqual(["s1", "m1", "m2"]);
+		expect(visited[0]).toMatchObject({ title: "Visitor", titleSource: "user" });
+		expect((await sessionLoader.loadEntriesFromFileStream(file)).malformedRecords).toBe(1);
 	});
+
+	it("visits a large journal before reading its tail", async () => {
+		const largeText = "x".repeat(1024 * 1024);
+		const slotLine = serializeTitleSlot({ title: "Visitor", source: "user", updatedAt: ISO });
+		const lines = [slotLine, JSON.stringify({ ...HEADER, title: "stale", titleSource: "generated" })];
+		for (let index = 1; index <= 9; index++) {
+			lines.push(JSON.stringify(msg(`m${index}`, index === 1 ? "s1" : `m${index - 1}`, largeText)));
+		}
+		const file = await writeTemp(`${lines.join("\n")}\n`);
+		expect(fs.statSync(file).size).toBeGreaterThan(8 * 1024 * 1024);
+
+		let visited = 0;
+		let headerTitle: string | undefined;
+		let headerTitleSource: string | undefined;
+		await sessionLoader.visitEntriesFromFile(file, entry => {
+			visited++;
+			if (entry.type === "session") {
+				headerTitle = entry.title;
+				headerTitleSource = entry.titleSource;
+			}
+			if (visited === 1) fs.truncateSync(file, 0);
+		});
+
+		// A collecting load reads the tail before the first callback and would
+		// still visit every in-memory entry after the file is truncated.
+		expect(visited).toBeLessThan(10);
+		expect(headerTitle).toBe("Visitor");
+		expect(headerTitleSource).toBe("user");
+	});
+
 	it("does not revisit entries before a malformed line spanning stream chunks", async () => {
 		const content = [
 			JSON.stringify(HEADER),
@@ -101,9 +136,33 @@ describe("loadEntriesFromFileStream (Bun.JSONL parity)", () => {
 		const file = await writeTemp(content);
 		const visited: FileEntry[] = [];
 
-		await sessionLoader.visitEntriesFromFileStream(file, entry => visited.push(entry));
+		await sessionLoader.visitEntriesFromFileStream(file, entry => {
+			visited.push(entry);
+		});
 
 		expect(entryIds(visited)).toEqual(["s1", "m1", "m2"]);
+	});
+
+	it("bounds visitor scans by physical records, including malformed lines", async () => {
+		const content = [
+			JSON.stringify(HEADER),
+			"{ malformed one",
+			"{ malformed two",
+			"{ malformed three",
+			JSON.stringify(msg("after-bad", "s1", "must not be visited")),
+		].join("\n");
+		const file = await writeTemp(content);
+		const visited: FileEntry[] = [];
+
+		await sessionLoader.visitEntriesFromFileStream(
+			file,
+			entry => {
+				visited.push(entry);
+			},
+			{ maxRecords: 2 },
+		);
+
+		expect(entryIds(visited)).toEqual(["s1"]);
 	});
 
 	it("propagates ENOENT errors thrown by the visitor", async () => {
@@ -141,6 +200,7 @@ describe("loadEntriesFromFileStream (Bun.JSONL parity)", () => {
 		expect(entryTypes(stream.entries)).toEqual(["session", "message", "message"]);
 		const ids = messageIds(stream.entries);
 		expect(ids).toEqual(["m1", "m2"]); // valid entries kept in order, malformed skipped
+		expect(stream.malformedRecords).toBe(1);
 	});
 
 	it("matches parseSessionContent when there is no title slot (header is the first line)", async () => {
@@ -191,5 +251,6 @@ describe("loadEntriesFromFileStream (Bun.JSONL parity)", () => {
 		const stream = await sessionLoader.loadEntriesFromFileStream(missing);
 		expect(stream.entries).toEqual([]);
 		expect(stream.titleSlot).toBeUndefined();
+		expect(stream.malformedRecords).toBe(0);
 	});
 });

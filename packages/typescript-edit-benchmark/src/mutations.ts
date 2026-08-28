@@ -489,7 +489,7 @@ class CallArgumentSwapMutation extends BaseAstMutation {
 		return out;
 	}
 
-	mutate(content: string, rng: () => number): [string, MutationInfo] {
+	override mutate(content: string, rng: () => number): [string, MutationInfo] {
 		const parsed = parseCode(content);
 		if (!parsed) return [content, noopInfo()];
 		const candidates = this.collectCandidates(parsed);
@@ -722,7 +722,7 @@ class IdentifierMultiEditMutation extends BaseAstMutation {
 		return out;
 	}
 
-	mutate(content: string, rng: () => number): [string, MutationInfo] {
+	override mutate(content: string, rng: () => number): [string, MutationInfo] {
 		const parsed = parseCode(content);
 		if (!parsed) return [content, noopInfo()];
 		const candidates = this.collectCandidates(parsed);
@@ -1036,7 +1036,7 @@ class SwapAdjacentLinesMutation extends BaseAstMutation {
 		return out;
 	}
 
-	mutate(content: string, rng: () => number): [string, MutationInfo] {
+	override mutate(content: string, rng: () => number): [string, MutationInfo] {
 		const parsed = parseCode(content);
 		if (!parsed) return [content, noopInfo()];
 		const candidates = this.collectCandidates(parsed);

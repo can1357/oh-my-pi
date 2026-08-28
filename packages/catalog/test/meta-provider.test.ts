@@ -26,8 +26,47 @@ describe("Meta Model API provider", () => {
 					includeEncryptedReasoning: true,
 				},
 			},
+			{
+				id: "muse-spark-1.2",
+				name: "Muse Spark 1.2",
+				api: "openai-responses",
+				provider: "meta",
+				baseUrl: "https://api.meta.ai/v1",
+				reasoning: true,
+				input: ["text", "image"],
+				cost: { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
+				contextWindow: 1_048_576,
+				maxTokens: 131_072,
+				thinking: {
+					mode: "effort",
+					efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+				},
+				compat: {
+					supportsReasoningEffort: true,
+					includeEncryptedReasoning: true,
+				},
+			},
+			{
+				id: "muse-spark-1.2-contributor",
+				name: "Muse Spark 1.2 Contributor (Data Used for Training)",
+				api: "openai-responses",
+				provider: "meta",
+				baseUrl: "https://api.meta.ai/v1",
+				reasoning: true,
+				input: ["text", "image"],
+				cost: { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
+				contextWindow: 1_048_576,
+				maxTokens: 131_072,
+				thinking: {
+					mode: "effort",
+					efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+				},
+				compat: {
+					supportsReasoningEffort: true,
+					includeEncryptedReasoning: true,
+				},
+			},
 		]);
-
 		const options = metaModelManagerOptions();
 		expect(options.providerId).toBe("meta");
 		expect(options.staticModels).toEqual(META_MUSE_STATIC_MODELS);

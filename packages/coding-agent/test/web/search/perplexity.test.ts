@@ -75,11 +75,13 @@ describe("Perplexity API-key request shape", () => {
 	const savedOpenRouterKey = process.env.OPENROUTER_API_KEY;
 	const savedCookies = process.env.PERPLEXITY_COOKIES;
 	const savedResponsesMode = process.env.PI_PERPLEXITY_RESPONSES;
+	const savedApiModel = process.env.PI_PERPLEXITY_API_MODEL;
 
 	beforeEach(() => {
 		process.env.PERPLEXITY_API_KEY = "test-key";
 		delete process.env.PERPLEXITY_COOKIES;
 		delete process.env.PI_PERPLEXITY_RESPONSES;
+		delete process.env.PI_PERPLEXITY_API_MODEL;
 	});
 
 	afterEach(() => {
@@ -92,6 +94,8 @@ describe("Perplexity API-key request shape", () => {
 		else process.env.PERPLEXITY_COOKIES = savedCookies;
 		if (savedResponsesMode === undefined) delete process.env.PI_PERPLEXITY_RESPONSES;
 		else process.env.PI_PERPLEXITY_RESPONSES = savedResponsesMode;
+		if (savedApiModel === undefined) delete process.env.PI_PERPLEXITY_API_MODEL;
+		else process.env.PI_PERPLEXITY_API_MODEL = savedApiModel;
 	});
 
 	it("requests comprehensive defaults: 20 results, high context, related questions", async () => {
@@ -102,6 +106,18 @@ describe("Perplexity API-key request shape", () => {
 		expect(body?.num_search_results).toBe(20);
 		expect(body?.web_search_options).toMatchObject({ search_type: "pro", search_context_size: "high" });
 		expect(body?.return_related_questions).toBe(true);
+	});
+
+	it("accepts a configured direct API model", async () => {
+		process.env.PI_PERPLEXITY_API_MODEL = "sonar-deep-research";
+		let body: Record<string, unknown> | undefined;
+		await searchPerplexity({
+			query: "quic vs tcp",
+			authStorage: apiKeyAuthStorage,
+			fetch: mockApi(b => (body = b), baseResponse()),
+		});
+
+		expect(body?.model).toBe("sonar-deep-research");
 	});
 
 	it("honors a caller-supplied num_search_results over the default", async () => {
@@ -306,7 +322,10 @@ const anonymousAuthStorage = {
 	},
 } as unknown as AuthStorage;
 
-function mockOAuth(capture: (body: Record<string, unknown>, headers: Headers) => void): FetchImpl {
+function mockOAuth(
+	capture: (body: Record<string, unknown>, headers: Headers) => void,
+	eventOverrides: Record<string, unknown> = {},
+): FetchImpl {
 	const event = {
 		final: true,
 		display_model: "turbo",
@@ -318,6 +337,7 @@ function mockOAuth(capture: (body: Record<string, unknown>, headers: Headers) =>
 				web_result_block: { web_results: [{ name: "T", url: "https://example.com", snippet: "s" }] },
 			},
 		],
+		...eventOverrides,
 	};
 	const sseBody = `data: ${JSON.stringify(event)}\n\n`;
 	return async (input, init) => {
@@ -356,15 +376,19 @@ function mockAnonymous(capture: (body: Record<string, unknown>, headers: Headers
 
 describe("Perplexity OAuth request shape", () => {
 	const savedCookies = process.env.PERPLEXITY_COOKIES;
+	const savedModel = process.env.PI_PERPLEXITY_MODEL;
 
 	beforeEach(() => {
 		delete process.env.PERPLEXITY_COOKIES; // cookies take precedence over oauth; keep them out
+		delete process.env.PI_PERPLEXITY_MODEL;
 	});
 
 	afterEach(() => {
 		vi.restoreAllMocks();
 		if (savedCookies === undefined) delete process.env.PERPLEXITY_COOKIES;
 		else process.env.PERPLEXITY_COOKIES = savedCookies;
+		if (savedModel === undefined) delete process.env.PI_PERPLEXITY_MODEL;
+		else process.env.PI_PERPLEXITY_MODEL = savedModel;
 	});
 
 	it("sends the bare query, never the API-style system prompt, to the ask endpoint", async () => {
@@ -395,6 +419,55 @@ describe("Perplexity OAuth request shape", () => {
 		expect(headers?.has("authorization")).toBe(false);
 		expect(response.authMode).toBe("oauth");
 		expect(response.answer).toBe("OAuth answer");
+		// Authenticated streams sometimes report only the generic `turbo` alias;
+		// preserve the requested subscription model instead of misreporting it.
+		expect(response.model).toBe("experimental");
+	});
+
+	it("accepts a subscription model preference and reports it when the stream returns turbo", async () => {
+		let body: Record<string, unknown> | undefined;
+		const response = await searchPerplexity({
+			query: "latest model",
+			subscription_model: "pplx_reasoning",
+			authStorage: oauthAuthStorage,
+			fetch: mockOAuth(b => (body = b)),
+		});
+
+		expect((body!.params as Record<string, unknown>).model_preference).toBe("pplx_reasoning");
+		expect(response.model).toBe("pplx_reasoning");
+	});
+
+	it("prefers the concrete user-selected model over the generic display alias", async () => {
+		const response = await searchPerplexity({
+			query: "latest model",
+			authStorage: oauthAuthStorage,
+			fetch: mockOAuth(() => {}, { user_selected_model: "pplx_pro_upgraded" }),
+		});
+
+		expect(response.model).toBe("pplx_pro_upgraded");
+	});
+
+	it("deduplicates equivalent subscription source URLs", async () => {
+		const response = await searchPerplexity({
+			query: "latest model",
+			authStorage: oauthAuthStorage,
+			fetch: mockOAuth(() => {}, {
+				blocks: [
+					{ intended_usage: "ask_text", markdown_block: { answer: "OAuth answer" } },
+					{
+						intended_usage: "web_results",
+						web_result_block: {
+							web_results: [
+								{ name: "First", url: "https://EXAMPLE.com/path/" },
+								{ name: "Duplicate", url: "https://example.com/path" },
+							],
+						},
+					},
+				],
+			}),
+		});
+
+		expect(response.sources).toHaveLength(1);
 	});
 
 	it("maps directives onto ask-endpoint native filters and rewrites query_str", async () => {

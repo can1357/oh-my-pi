@@ -144,8 +144,6 @@ describe("Brave provider hard-timeout wiring", () => {
 	});
 
 	it("hands fetch a composed signal even with no caller signal — confirms the rollout reaches non-Anthropic providers", async () => {
-		process.env.BRAVE_API_KEY = "brave-test-key";
-
 		let capturedSignal: AbortSignal | null | undefined;
 		const fetchMock: FetchImpl = async (_input, init) => {
 			capturedSignal = init?.signal;
@@ -155,7 +153,13 @@ describe("Brave provider hard-timeout wiring", () => {
 			});
 		};
 
-		await searchBrave({ query: "ping", fetch: fetchMock });
+		await searchBrave({
+			query: "ping",
+			fetch: fetchMock,
+			authStorage: {
+				resolver: vi.fn(() => async () => "brave-test-key"),
+			} as unknown as AuthStorage,
+		});
 
 		expect(capturedSignal).toBeInstanceOf(AbortSignal);
 		expect(capturedSignal?.aborted).toBe(false);

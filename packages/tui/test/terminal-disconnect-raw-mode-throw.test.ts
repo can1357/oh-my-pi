@@ -76,6 +76,25 @@ describe("ProcessTerminal disconnect with a revoked pty", () => {
 		expect(signals).toContain("SIGHUP");
 	});
 
+	it("treats an initial EIO enabling raw mode as a terminal disconnect", () => {
+		Object.defineProperty(process.stdin, "setRawMode", {
+			value: () => {
+				throw new Error("setRawMode failed with errno: 5");
+			},
+			configurable: true,
+		});
+
+		const terminal = new ProcessTerminal();
+		expect(() =>
+			terminal.start(
+				() => {},
+				() => {},
+				() => terminal.stop(),
+			),
+		).not.toThrow();
+		expect(signals).toContain("SIGHUP");
+	});
+
 	it("propagates a raw-mode restore failure while the terminal is still live", () => {
 		let started = false;
 		Object.defineProperty(process.stdin, "setRawMode", {

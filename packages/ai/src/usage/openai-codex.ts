@@ -1,4 +1,6 @@
 import { Buffer } from "node:buffer";
+import { toNumber } from "@oh-my-pi/pi-catalog/utils";
+import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import type {
 	CredentialRankingContext,
 	CredentialRankingStrategy,
@@ -14,7 +16,7 @@ import type {
 import { isRecord } from "../utils";
 import { normalizeCodexBaseUrl } from "./openai-codex-base-url";
 import { listCodexResetCredits } from "./openai-codex-reset";
-import { toNumber } from "./shared";
+import { HOUR_MS } from "./shared";
 
 const CODEX_USAGE_PATH = "wham/usage";
 const JWT_AUTH_CLAIM = "https://api.openai.com/auth";
@@ -263,11 +265,10 @@ function buildUsageAmount(window: ParsedUsageWindow): UsageAmount {
 	};
 }
 
-function buildUsageStatus(usedFraction?: number, limitReached?: boolean): UsageLimit["status"] {
-	if (limitReached) return "exhausted";
-	if (usedFraction === undefined) return "unknown";
-	if (usedFraction >= 1) return "exhausted";
-	if (usedFraction >= 0.9) return "warning";
+function buildUsageStatus(args: { usedFraction?: number; explicitlyAllowed: boolean }): UsageLimit["status"] {
+	if (args.usedFraction === undefined) return "unknown";
+	if (args.usedFraction >= 1) return args.explicitlyAllowed ? "warning" : "exhausted";
+	if (args.usedFraction >= 0.9) return "warning";
 	return "ok";
 }
 
@@ -276,6 +277,8 @@ function buildUsageLimit(args: {
 	window: ParsedUsageWindow;
 	accountId?: string;
 	planType?: string;
+	allowed?: boolean;
+	limitReached?: boolean;
 	nowMs: number;
 }): UsageLimit {
 	const usageWindow = buildUsageWindow(args.window, args.key, args.nowMs);
@@ -290,16 +293,14 @@ function buildUsageLimit(args: {
 		},
 		window: usageWindow,
 		amount,
-		// Each chat window's status reflects ONLY its own usage. The account-level
-		// `rate_limit.limit_reached` flag is intentionally not applied here: Codex
-		// returns a single shared flag for the whole account, so threading it into
-		// both the primary (5h) and secondary (weekly) windows marked a window with
-		// real headroom `exhausted` purely because a different window (or a separate
-		// metered feature) was at its limit, which over-blocked sibling accounts
-		// during credential selection. `usedFraction >= 1` already marks a window
-		// that is genuinely full; a real enforced limit not reflected in
-		// `used_percent` is caught when the live request returns usage_limit_reached.
-		status: buildUsageStatus(amount.usedFraction),
+		// The shared account-level rejection flag cannot identify which window
+		// is binding, but an explicit positive verdict applies to both windows.
+		// Preserve 100% as a warning when Codex still allows requests; live
+		// usage_limit_reached responses remain authoritative for blocking.
+		status: buildUsageStatus({
+			usedFraction: amount.usedFraction,
+			explicitlyAllowed: args.allowed === true && args.limitReached === false,
+		}),
 	};
 }
 function additionalLimitSlug(args: { limitName?: string; meteredFeature?: string }): string {
@@ -331,6 +332,8 @@ function buildAdditionalUsageLimit(args: {
 	accountId?: string;
 	limitName?: string;
 	meteredFeature?: string;
+	allowed?: boolean;
+	limitReached?: boolean;
 	nowMs: number;
 }): UsageLimit {
 	const usageWindow = buildUsageWindow(args.window, args.key, args.nowMs);
@@ -348,10 +351,12 @@ function buildAdditionalUsageLimit(args: {
 		},
 		window: usageWindow,
 		amount,
-		// The additional meter exposes one account-level flag for both windows.
-		// Status must follow this window's own usage or a full weekly meter marks
-		// the shorter window exhausted and schedules a premature retry.
-		status: buildUsageStatus(amount.usedFraction),
+		// A positive meter verdict is authoritative even when the advisory
+		// percentage rounds to 100; negative shared verdicts remain window-local.
+		status: buildUsageStatus({
+			usedFraction: amount.usedFraction,
+			explicitlyAllowed: args.allowed === true && args.limitReached === false,
+		}),
 	};
 }
 
@@ -413,7 +418,7 @@ export const openaiCodexUsageProvider: UsageProvider = {
 
 		const headers: Record<string, string> = {
 			Authorization: `Bearer ${accessToken}`,
-			"User-Agent": "OpenCode-Status-Plugin/1.0",
+			"User-Agent": USER_AGENT,
 		};
 		if (accountId) {
 			headers["ChatGPT-Account-Id"] = accountId;
@@ -449,6 +454,8 @@ export const openaiCodexUsageProvider: UsageProvider = {
 					window: parsed.primary,
 					accountId,
 					planType,
+					allowed: parsed.allowed,
+					limitReached: parsed.limitReached,
 					nowMs,
 				}),
 			);
@@ -460,6 +467,8 @@ export const openaiCodexUsageProvider: UsageProvider = {
 					window: parsed.secondary,
 					accountId,
 					planType,
+					allowed: parsed.allowed,
+					limitReached: parsed.limitReached,
 					nowMs,
 				}),
 			);
@@ -478,6 +487,8 @@ export const openaiCodexUsageProvider: UsageProvider = {
 						accountId,
 						limitName: extra.limitName,
 						meteredFeature: extra.meteredFeature,
+						allowed: extra.allowed,
+						limitReached: extra.limitReached,
 						nowMs,
 					}),
 				);
@@ -492,6 +503,8 @@ export const openaiCodexUsageProvider: UsageProvider = {
 						accountId,
 						limitName: extra.limitName,
 						meteredFeature: extra.meteredFeature,
+						allowed: extra.allowed,
+						limitReached: extra.limitReached,
 						nowMs,
 					}),
 				);
@@ -547,8 +560,6 @@ export const openaiCodexUsageProvider: UsageProvider = {
 	},
 };
 
-const FIVE_HOUR_MS = 5 * 60 * 60 * 1000;
-
 // A Codex request gates only on the chat windows it actually consumes. A
 // "-spark" model spends the separate Spark meter; every other Codex model spends
 // the 5h/weekly chat windows. Scoping the gating set this way keeps an exhausted
@@ -600,15 +611,18 @@ export const codexRankingStrategy: CredentialRankingStrategy = {
 		return { primary: findLimit("primary"), secondary: findLimit("secondary") };
 	},
 	windowDefaults: { primaryMs: 60 * 60 * 1000, secondaryMs: 7 * 24 * 60 * 60 * 1000 },
-	hasPriorityBoost(primary) {
-		if (!primary) return false;
+	hasPriorityBoost(primary, primaryUncapped = false, context) {
+		// Chat plans can omit an uncapped primary window while retaining their
+		// weekly window. Spark always has a capped primary meter, so a missing
+		// Spark primary is incomplete rather than uncapped.
+		if (!primary) return primaryUncapped && !isCodexSparkRequest(context);
 		const windowId = primary.scope.windowId?.toLowerCase();
 		const durationMs = primary.window?.durationMs;
 		const isFiveHourWindow =
 			windowId === "5h" ||
 			(typeof durationMs === "number" &&
 				Number.isFinite(durationMs) &&
-				Math.abs(durationMs - FIVE_HOUR_MS) <= 60_000);
+				Math.abs(durationMs - 5 * HOUR_MS) <= 60_000);
 		if (!isFiveHourWindow) return false;
 		const usedFraction = primary.amount.usedFraction;
 		return typeof usedFraction === "number" && Number.isFinite(usedFraction) && usedFraction === 0;

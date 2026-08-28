@@ -178,7 +178,177 @@ describe("AgentSession message pipeline", () => {
 			isError: false,
 		});
 
-		expect(session.getImageAttachments()).toEqual([{ label: "Image #1", uri: "attachment://1", image: userImage }]);
+		const attachments = session.getImageAttachments();
+		const sourcePath = attachments[0]?.sourcePath;
+		if (!sourcePath) {
+			throw new Error("Expected attachment sourcePath to be populated");
+		}
+		expect(attachments).toEqual([{ label: "Image #1", uri: "attachment://1", image: userImage, sourcePath }]);
+	});
+
+	it("normalizes historical WebP on the main provider request path", async () => {
+		using tempDir = TempDir.createSync("@pi-stb-main-path-");
+		const api = "test-stb-main-path";
+		const contexts: Context[] = [];
+		registerCustomApi(api, (_model, context) => {
+			contexts.push(context);
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage("ok");
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "ok", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		});
+		const seed = Buffer.from(
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+			"base64",
+		);
+		const webpData = Buffer.from(await new Bun.Image(seed).resize(2, 2).webp({ quality: 90 }).bytes()).toBase64();
+		const historicalImage: ImageContent = {
+			type: "image",
+			data: webpData,
+			// Confirm byte sniffing catches persisted blocks with stale metadata.
+			mimeType: "image/png",
+		};
+		const model = buildModel({
+			id: "stb-main-path",
+			name: "STB main path",
+			api,
+			provider: "managed-primary",
+			baseUrl: "http://127.0.0.1:8080/v1",
+			reasoning: false,
+			input: ["text", "image"],
+			imageInputDecoder: "stb",
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		authStorage.setRuntimeApiKey(model.provider, "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const { session } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			model,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			taskDepth: 1,
+			agentId: "SubAgent",
+		});
+		try {
+			session.agent.appendMessage({
+				role: "toolResult",
+				toolCallId: "read-1",
+				toolName: "read",
+				content: [{ type: "text", text: "screenshot" }, historicalImage],
+				isError: false,
+				timestamp: 1,
+			});
+
+			await session.sendUserMessage("continue");
+
+			expect(contexts).toHaveLength(1);
+			const outboundImages: ImageContent[] = [];
+			for (const message of contexts[0]!.messages) {
+				if (typeof message.content === "string") continue;
+				for (const part of message.content) {
+					if (part.type === "image") outboundImages.push(part);
+				}
+			}
+			expect(outboundImages).toHaveLength(1);
+			expect(outboundImages[0]!.mimeType).not.toBe("image/webp");
+			expect(Buffer.from(outboundImages[0]!.data.slice(0, 16), "base64").toString("ascii", 8, 12)).not.toBe("WEBP");
+			expect(historicalImage.mimeType).toBe("image/png");
+			expect(Buffer.from(historicalImage.data.slice(0, 16), "base64").toString("ascii", 8, 12)).toBe("WEBP");
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
+	});
+
+	it("continues a user turn when an attached WebP is undecodable by an STB model", async () => {
+		using tempDir = TempDir.createSync("@pi-stb-corrupt-attachment-");
+		const api = "test-stb-corrupt-attachment";
+		const contexts: Context[] = [];
+		registerCustomApi(api, (_model, context) => {
+			contexts.push(context);
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage("ok");
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "ok", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		});
+		const model = buildModel({
+			id: "stb-corrupt-attachment",
+			name: "STB corrupt attachment",
+			api,
+			provider: "managed-primary",
+			baseUrl: "http://127.0.0.1:8080/v1",
+			reasoning: false,
+			input: ["text", "image"],
+			imageInputDecoder: "stb",
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		authStorage.setRuntimeApiKey(model.provider, "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const { session } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			model,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			taskDepth: 1,
+			agentId: "SubAgent",
+		});
+		try {
+			// Session persistence accepts historical image blocks without MIME
+			// metadata, so exercise that runtime shape through the real provider path.
+			const corrupt = {
+				type: "image",
+				data: Buffer.from("RIFF0000WEBPbroken-attachment").toBase64(),
+			} as unknown as ImageContent;
+
+			await session.sendUserMessage([{ type: "text", text: "inspect this" }, corrupt]);
+
+			expect(contexts).toHaveLength(1);
+			const userMessage = contexts[0]!.messages.find(message => message.role === "user");
+			// The date/cwd reminder rides on the first user turn (#7404); the contract
+			// here is that the undecodable WebP is replaced by the placeholder text.
+			expect(userMessage?.content).toEqual([
+				{ type: "text", text: expect.stringContaining("<system-reminder>") },
+				{ type: "text", text: "inspect this" },
+				{ type: "text", text: "[image omitted: WebP could not be decoded for this model]" },
+			]);
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
 	});
 
 	it("keeps stored steering text raw while pre-LLM conversion wraps it", async () => {
@@ -998,7 +1168,7 @@ describe("AgentSession message pipeline", () => {
 				name: "bash",
 				label: "Bash",
 				description: "wrapped bash",
-				parameters: pi.zod.object({ command: pi.zod.string() }),
+				parameters: pi.arktype({ command: pi.arktype("string") }),
 				async execute(
 					_toolCallId: string,
 					_params: unknown,

@@ -299,11 +299,6 @@ impl Worker {
 			Request::ListDisplays { .. } => Ok(Response::Displays(self.backend()?.displays()?)),
 			Request::ListWindows { .. } => Ok(Response::Windows(self.backend()?.windows()?)),
 			Request::Capture { target, caps, .. } => {
-				if let Target::Window(id) = target {
-					id.parse::<u64>().map_err(|_| {
-						DesktopError::invalid_target(format!("invalid window target '{id}'"))
-					})?;
-				}
 				let (image, mut geometry) = self.backend()?.capture(target, caps)?;
 				let source_width = image.width();
 				let source_height = image.height();
@@ -1077,5 +1072,151 @@ impl DesktopSession {
 			}
 			.map_err(Into::into)
 		})
+	}
+}
+
+#[cfg(test)]
+mod capture_tests {
+	use image::RgbaImage;
+
+	use super::*;
+	use crate::desktop::{
+		backend::{AxBackend, Backend},
+		error::ErrorCode,
+		keys::KeyName,
+	};
+
+	const WAYLAND_ID: &str = "atspi::1.31:/org/a11y/atspi/accessible/1";
+
+	/// Backend that mints a composite AT-SPI window id, mirroring the Wayland
+	/// `AtSpiAx` path. Exists to exercise `Worker::process` without a display.
+	struct FakeWaylandBackend {
+		window: DesktopWindow,
+	}
+
+	impl FakeWaylandBackend {
+		fn new() -> Self {
+			Self {
+				window: DesktopWindow {
+					id:      WAYLAND_ID.to_string(),
+					title:   "Obsidian".to_string(),
+					app:     "obsidian".to_string(),
+					pid:     Some(1234),
+					x:       0,
+					y:       0,
+					width:   64,
+					height:  48,
+					focused: true,
+				},
+			}
+		}
+	}
+
+	impl Backend for FakeWaylandBackend {
+		fn capabilities(&mut self) -> DesktopCapabilities {
+			DesktopCapabilities {
+				backend: "wayland".to_string(),
+				display_server: Some("wayland".to_string()),
+				capture: true,
+				..DesktopCapabilities::unavailable()
+			}
+		}
+
+		fn displays(&mut self) -> CoreResult<Vec<DesktopDisplay>> {
+			Ok(Vec::new())
+		}
+
+		fn windows(&mut self) -> CoreResult<Vec<DesktopWindow>> {
+			Ok(vec![self.window.clone()])
+		}
+
+		fn capture(
+			&mut self,
+			target: &Target,
+			_caps: &CaptureCaps,
+		) -> CoreResult<(RgbaImage, FrameGeometry)> {
+			match target {
+				Target::Window(id) if id == &self.window.id => {
+					let image = RgbaImage::new(self.window.width, self.window.height);
+					let geometry =
+						FrameGeometry::for_window(&self.window, image.width(), image.height());
+					Ok((image, geometry))
+				},
+				Target::Window(id) => {
+					Err(DesktopError::window_not_found(format!("Wayland window {id} not found")))
+				},
+				Target::Desktop => Err(DesktopError::capture_failed("desktop capture not exercised")),
+			}
+		}
+
+		fn pointer(
+			&mut self,
+			_: &Target,
+			_: PointerEvent,
+			_: &FrameGeometry,
+			_: DeliveryMode,
+		) -> CoreResult<()> {
+			unreachable!("pointer not exercised")
+		}
+
+		fn type_text(&mut self, _: &Target, _: &str, _: DeliveryMode) -> CoreResult<()> {
+			unreachable!("type_text not exercised")
+		}
+
+		fn key_chord(&mut self, _: &Target, _: &[KeyName], _: DeliveryMode) -> CoreResult<()> {
+			unreachable!("key_chord not exercised")
+		}
+
+		fn raise_window(&mut self, _: &str) -> CoreResult<()> {
+			unreachable!("raise_window not exercised")
+		}
+
+		fn ax(&mut self) -> Option<&mut dyn AxBackend> {
+			None
+		}
+	}
+
+	fn worker_with(backend: impl Backend + 'static) -> Worker {
+		Worker {
+			backend:      Ok(Box::new(backend)),
+			registry:     AxRegistry::default(),
+			frames:       HashMap::new(),
+			capabilities: Arc::new(Mutex::new(DesktopCapabilities::unavailable())),
+		}
+	}
+
+	fn capture_request(target: Target) -> Request {
+		let (reply, _rx) = flume::bounded(1);
+		Request::Capture { target, caps: CaptureCaps::default(), reply }
+	}
+
+	/// Regression for #7701: a composite AT-SPI window id minted by the Wayland
+	/// backend's own `windows()` must reach the backend, not be rejected by a
+	/// `u64` pre-parse in the shared request path.
+	#[test]
+	fn capture_accepts_non_numeric_wayland_window_id() {
+		let mut worker = worker_with(FakeWaylandBackend::new());
+		let response = worker
+			.process(&capture_request(Target::Window(WAYLAND_ID.to_string())))
+			.expect("wayland window id should be accepted by capture");
+		let Response::Capture(capture) = response else {
+			panic!("expected a capture response");
+		};
+		assert_eq!(capture.target, WAYLAND_ID);
+		assert_eq!(capture.width, 64);
+		assert_eq!(capture.height, 48);
+		assert_eq!(capture.backend, "wayland");
+	}
+
+	/// Unknown ids still fail — but as `WindowNotFound` from the backend lookup,
+	/// never as an `InvalidTarget` pre-parse rejection of a non-`u64` id.
+	#[test]
+	fn capture_rejects_unknown_window_id_via_backend_lookup() {
+		let mut worker = worker_with(FakeWaylandBackend::new());
+		let Err(err) = worker.process(&capture_request(Target::Window("does-not-exist".to_string())))
+		else {
+			panic!("unknown window id should fail");
+		};
+		assert_eq!(err.code, ErrorCode::WindowNotFound);
 	}
 }

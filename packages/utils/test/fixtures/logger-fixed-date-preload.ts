@@ -13,7 +13,7 @@ class FixedDate extends NativeDate {
 		super(value === undefined ? fixtureNow() : value);
 	}
 
-	static now(): number {
+	static override now(): number {
 		return fixtureNow();
 	}
 }

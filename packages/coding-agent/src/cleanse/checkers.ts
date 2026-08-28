@@ -1,8 +1,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { $which, isRecord, ptree, sanitizeText } from "@oh-my-pi/pi-utils";
-import * as git from "../utils/git";
-import { type CleanseParserKind, parseCleanseDiagnostics } from "./parsers";
+import { CLEANSE_PARSER_KINDS, type CleanseParserKind, parseCleanseDiagnostics } from "./parsers";
 import type { CleanseCheckResult, CleanseDiagnostic, CleanseDiagnosticReport, SkippedCleanseCheck } from "./types";
 
 const IGNORED_DIRECTORIES: Record<string, true> = {
@@ -19,6 +19,7 @@ const IGNORED_DIRECTORIES: Record<string, true> = {
 	vendor: true,
 };
 const MAX_FAILURE_OUTPUT = 12_000;
+const DEFAULT_FLUSH_MS = 5_000;
 const SHELLCHECK_BATCH_SIZE = 200;
 
 interface CheckerPlan {
@@ -43,6 +44,8 @@ interface PlanRequest {
 	parser: CleanseParserKind;
 	executable?: string;
 	mutates?: boolean;
+	/** Skip silently instead of recording a skip when the binary is missing (alternative toolings). */
+	optional?: boolean;
 }
 
 interface DiscoveryState {
@@ -58,11 +61,45 @@ export interface CleanseDiagnosticSuiteOptions {
 	includeTests?: boolean;
 }
 
+/** Identity and display metadata for one runnable checker. */
+export interface CleanseCheckerDescriptor {
+	id: string;
+	label: string;
+	language: string;
+	/** Project-relative working directory the checker command runs in. */
+	cwd: string;
+	command: string;
+}
+
+/** Lifecycle notifications for one {@link CleanseDiagnosticSuite.run} pass, used by the CLI status board. */
+export interface CleanseCheckerRunEvents {
+	onCheckerStart?(checker: CleanseCheckerDescriptor): void;
+	/**
+	 * New diagnostics parsed from streaming or final checker output. Each
+	 * diagnostic is delivered exactly once per run; partial-output batches for
+	 * long-running checkers arrive before {@link onCheckerEnd}.
+	 */
+	onDiagnostics?(checker: CleanseCheckerDescriptor, diagnostics: readonly CleanseDiagnostic[]): void;
+	onCheckerEnd?(check: CleanseCheckResult, durationMs: number): void;
+}
+/** Inputs for one {@link CleanseDiagnosticSuite.run} pass. */
+export interface CleanseSuiteRunOptions {
+	signal?: AbortSignal;
+	events?: CleanseCheckerRunEvents;
+	/** Interval between partial-output parses for streaming checkers; default 5s. */
+	flushMs?: number;
+}
+
 /** Re-runnable checker set discovered from one project snapshot. */
 export interface CleanseDiagnosticSuite {
-	readonly checkCount: number;
+	/** Every discovered checker; unaffected by {@link CleanseDiagnosticSuite.select}. */
+	readonly checkers: readonly CleanseCheckerDescriptor[];
+	/** Checkers the next {@link CleanseDiagnosticSuite.run} will execute; narrowed by {@link CleanseDiagnosticSuite.select}. */
+	readonly selected: readonly CleanseCheckerDescriptor[];
 	readonly skipped: readonly SkippedCleanseCheck[];
-	run(signal?: AbortSignal): Promise<CleanseDiagnosticReport>;
+	/** Narrow subsequent {@link CleanseDiagnosticSuite.run} calls to the named checker ids. */
+	select(ids: readonly string[]): void;
+	run(options?: CleanseSuiteRunOptions): Promise<CleanseDiagnosticReport>;
 }
 
 /** Discover configured language checkers without installing missing tools. */
@@ -81,7 +118,7 @@ export async function discoverCleanseDiagnosticSuite(
 	};
 	await discoverRust(state);
 	discoverGo(state);
-	discoverPython(state);
+	await discoverPython(state);
 	await discoverJavaScript(state);
 	discoverRuby(state);
 	discoverPhp(state);
@@ -96,32 +133,154 @@ export async function discoverCleanseDiagnosticSuite(
 	discoverDotnet(state);
 	discoverZig(state);
 	discoverJvm(state);
+	discoverGitHubActions(state);
 
-	const allowedFiles = new Set(state.files);
+	return createSuite(resolvedCwd, state.plans, state.skipped, new Set(state.files));
+}
+
+function createSuite(
+	projectCwd: string,
+	plans: readonly CheckerPlan[],
+	skipped: SkippedCleanseCheck[],
+	allowedFiles: ReadonlySet<string>,
+): CleanseDiagnosticSuite {
+	let active = [...plans];
+	const toDescriptor = (plan: CheckerPlan): CleanseCheckerDescriptor => ({
+		id: plan.id,
+		label: plan.label,
+		language: plan.language,
+		cwd: path.relative(projectCwd, plan.cwd) || ".",
+		command: plan.command,
+	});
 	return {
-		checkCount: state.plans.length,
-		skipped: state.skipped,
-		async run(signal?: AbortSignal): Promise<CleanseDiagnosticReport> {
+		checkers: plans.map(toDescriptor),
+		get selected(): readonly CleanseCheckerDescriptor[] {
+			return active.map(toDescriptor);
+		},
+		skipped,
+		select(ids: readonly string[]): void {
+			const wanted = new Set(ids);
+			active = plans.filter(plan => wanted.has(plan.id));
+		},
+		async run(options?: CleanseSuiteRunOptions): Promise<CleanseDiagnosticReport> {
+			const { signal, events, flushMs = DEFAULT_FLUSH_MS } = options ?? {};
+			const execute = async (
+				plan: CheckerPlan,
+				onDiagnostics?: (diagnostics: readonly CleanseDiagnostic[]) => void,
+			): Promise<CleanseCheckResult> => {
+				events?.onCheckerStart?.(toDescriptor(plan));
+				const startedAt = Date.now();
+				const check = await runChecker(plan, projectCwd, allowedFiles, { signal, flushMs, onDiagnostics });
+				events?.onCheckerEnd?.(check, Date.now() - startedAt);
+				return check;
+			};
+			// Mutating checkers rewrite files, so their diagnostics are held until
+			// every mutator has finished; otherwise a repair worker could edit a
+			// file a formatter is still rewriting.
+			const mutating = active.filter(plan => plan.mutates);
 			const mutatingChecks: CleanseCheckResult[] = [];
-			for (const plan of state.plans) {
-				if (plan.mutates) mutatingChecks.push(await runChecker(plan, resolvedCwd, allowedFiles, signal));
+			for (const plan of mutating) mutatingChecks.push(await execute(plan));
+			if (events?.onDiagnostics) {
+				for (let index = 0; index < mutating.length; index += 1) {
+					const check = mutatingChecks[index];
+					if (check.diagnostics.length > 0) events.onDiagnostics(toDescriptor(mutating[index]), check.diagnostics);
+				}
 			}
 			const parallelChecks = await Promise.all(
-				state.plans.filter(plan => !plan.mutates).map(plan => runChecker(plan, resolvedCwd, allowedFiles, signal)),
+				active
+					.filter(plan => !plan.mutates)
+					.map(plan =>
+						execute(
+							plan,
+							events?.onDiagnostics
+								? diagnostics => events.onDiagnostics?.(toDescriptor(plan), diagnostics)
+								: undefined,
+						),
+					),
 			);
 			const checks = [...mutatingChecks, ...parallelChecks];
 			return {
 				checks,
 				diagnostics: deduplicateProjectDiagnostics(checks.flatMap(check => check.diagnostics)),
-				skipped: [...state.skipped],
+				skipped: [...skipped],
 			};
 		},
 	};
 }
 
+/** One checker proposed by the prompted discovery agent. */
+export interface CustomCleanseCheckerSpec {
+	label: string;
+	language?: string;
+	cwd?: string;
+	command: string[];
+	parser?: string;
+}
+
+/** Build a runnable suite from discovery-agent checker specs, dropping unrunnable entries into `skipped`. */
+export async function buildCustomCleanseSuite(
+	projectCwd: string,
+	specs: readonly CustomCleanseCheckerSpec[],
+): Promise<CleanseDiagnosticSuite> {
+	const absoluteCwd = path.resolve(projectCwd);
+	const resolvedCwd = await fs.realpath(absoluteCwd).catch(() => absoluteCwd);
+	const files = await listProjectFiles(resolvedCwd);
+	const plans: CheckerPlan[] = [];
+	const skipped: SkippedCleanseCheck[] = [];
+	for (const [index, spec] of specs.entries()) {
+		const [binary, ...args] = spec.command;
+		const label = spec.label.trim() || `custom checker ${index + 1}`;
+		const language = spec.language?.trim() || "Custom";
+		if (!binary) {
+			skipped.push({ label, language, reason: "empty command" });
+			continue;
+		}
+		const root = normalizeCustomRoot(resolvedCwd, spec.cwd);
+		if (root === undefined) {
+			skipped.push({ label, language, reason: `working directory escapes the project: ${spec.cwd}` });
+			continue;
+		}
+		let executable: string | undefined;
+		if (/[\\/]/.test(binary)) {
+			const candidate = path.resolve(resolvedCwd, root, binary);
+			executable = (await Bun.file(candidate).exists()) ? candidate : undefined;
+		} else {
+			executable = resolveBinary(resolvedCwd, root, [binary]);
+		}
+		if (!executable) {
+			skipped.push({ label, language, reason: `executable not found: ${binary}` });
+			continue;
+		}
+		plans.push({
+			id: `custom-${index + 1}`,
+			label,
+			language,
+			cwd: path.resolve(resolvedCwd, root),
+			executable,
+			args,
+			parser: CLEANSE_PARSER_KINDS.find(kind => kind === spec.parser) ?? "generic",
+			command: formatCommand([path.basename(executable), ...args]),
+			mutates: false,
+		});
+	}
+	return createSuite(resolvedCwd, plans, skipped, new Set(files));
+}
+
+function normalizeCustomRoot(projectCwd: string, cwd: string | undefined): string | undefined {
+	const trimmed = cwd?.trim();
+	if (!trimmed || trimmed === ".") return ".";
+	const relative = path.relative(projectCwd, path.resolve(projectCwd, trimmed));
+	if (relative.startsWith("..") || path.isAbsolute(relative)) return undefined;
+	return relative.split(path.sep).join("/") || ".";
+}
+
 async function listProjectFiles(cwd: string): Promise<string[]> {
 	try {
-		const [tracked, untracked] = await Promise.all([git.ls.files(cwd), git.ls.untracked(cwd)]);
+		const repository = vcs.require(cwd);
+		const [tracked, untracked] = await Promise.all([
+			repository.lsFiles(false, false),
+			repository.lsFiles(true, true),
+		]);
 		return normalizeFiles([...tracked, ...untracked]);
 	} catch {
 		const files: string[] = [];
@@ -187,8 +346,8 @@ function rootsForPattern(files: readonly string[], pattern: RegExp): string[] {
 	return markerRoots(files, file => pattern.test(file));
 }
 
-function resolveBinary(state: DiscoveryState, root: string, names: readonly string[]): string | undefined {
-	const cwd = path.resolve(state.projectCwd, root);
+function resolveBinary(projectCwd: string, root: string, names: readonly string[]): string | undefined {
+	const cwd = path.resolve(projectCwd, root);
 	const searchDirectories: string[] = [];
 	let current = cwd;
 	while (true) {
@@ -198,10 +357,9 @@ function resolveBinary(state: DiscoveryState, root: string, names: readonly stri
 			path.join(current, "venv", process.platform === "win32" ? "Scripts" : "bin"),
 			path.join(current, "vendor", "bin"),
 		);
-		if (current === state.projectCwd) break;
+		if (current === projectCwd) break;
 		const parent = path.dirname(current);
-		if (parent === current || (!parent.startsWith(`${state.projectCwd}${path.sep}`) && parent !== state.projectCwd))
-			break;
+		if (parent === current || (!parent.startsWith(`${projectCwd}${path.sep}`) && parent !== projectCwd)) break;
 		current = parent;
 	}
 	const searchPath = [...new Set(searchDirectories), Bun.env.PATH ?? ""].filter(Boolean).join(path.delimiter);
@@ -214,9 +372,10 @@ function resolveBinary(state: DiscoveryState, root: string, names: readonly stri
 
 function addPlan(state: DiscoveryState, request: PlanRequest): void {
 	const cwd = path.resolve(state.projectCwd, request.root);
-	const executable = request.executable ?? resolveBinary(state, request.root, request.binaries);
+	const executable = request.executable ?? resolveBinary(state.projectCwd, request.root, request.binaries);
 	const rootLabel = request.root === "." ? "." : request.root;
 	if (!executable) {
+		if (request.optional) return;
 		state.skipped.push({
 			label: `${request.label} (${rootLabel})`,
 			language: request.language,
@@ -244,7 +403,7 @@ function formatCommand(argv: readonly string[]): string {
 
 async function discoverRust(state: DiscoveryState): Promise<void> {
 	for (const root of rootsForBasenames(state.files, { "Cargo.toml": true })) {
-		const cargo = resolveBinary(state, root, ["cargo"]);
+		const cargo = resolveBinary(state.projectCwd, root, ["cargo"]);
 		if (!cargo) {
 			addPlan(state, {
 				id: "clippy",
@@ -363,6 +522,7 @@ function discoverGo(state: DiscoveryState): void {
 	const workRoots = rootsForBasenames(state.files, { "go.work": true });
 	const roots = workRoots.length > 0 ? workRoots : rootsForBasenames(state.files, { "go.mod": true });
 	for (const root of roots) {
+		const prefix = root === "." ? "" : `${root}/`;
 		addPlan(state, {
 			id: "go-vet",
 			label: "go vet",
@@ -371,6 +531,16 @@ function discoverGo(state: DiscoveryState): void {
 			binaries: ["go"],
 			args: ["vet", "-json", "./..."],
 			parser: "go",
+		});
+		addPlan(state, {
+			id: "staticcheck",
+			label: "staticcheck",
+			language: "Go",
+			root,
+			binaries: ["staticcheck"],
+			args: ["-f", "json", "./..."],
+			parser: "staticcheck",
+			optional: !state.files.includes(`${prefix}staticcheck.conf`),
 		});
 		if (state.includeTests) {
 			addPlan(state, {
@@ -384,9 +554,20 @@ function discoverGo(state: DiscoveryState): void {
 			});
 		}
 	}
+	for (const root of rootsForPattern(state.files, /(?:^|\/)\.golangci\.(?:ya?ml|toml|json)$/)) {
+		addPlan(state, {
+			id: "golangci",
+			label: "golangci-lint",
+			language: "Go",
+			root,
+			binaries: ["golangci-lint"],
+			args: ["run"],
+			parser: "golangci",
+		});
+	}
 }
 
-function discoverPython(state: DiscoveryState): void {
+async function discoverPython(state: DiscoveryState): Promise<void> {
 	if (!containsExtension(state.files, [".py", ".pyi"])) return;
 	const roots = rootsForBasenames(state.files, {
 		".ruff.toml": true,
@@ -423,9 +604,68 @@ function discoverPython(state: DiscoveryState): void {
 			label: "pyright",
 			language: "Python",
 			root,
-			binaries: ["pyright"],
+			binaries: ["pyright", "basedpyright"],
 			args: ["--outputjson"],
 			parser: "pyright",
+		});
+	}
+	const pyprojectRoots = rootsForBasenames(state.files, { "pyproject.toml": true });
+	const pyprojectContent = new Map<string, string>();
+	for (const root of pyprojectRoots) {
+		const file = root === "." ? "pyproject.toml" : `${root}/pyproject.toml`;
+		pyprojectContent.set(
+			root,
+			await Bun.file(path.resolve(state.projectCwd, file))
+				.text()
+				.catch(() => ""),
+		);
+	}
+	const withSection = (section: string): string[] =>
+		pyprojectRoots.filter(root => pyprojectContent.get(root)?.includes(section) === true);
+	const toolRoots = (basenames: Record<string, true>, section: string): string[] =>
+		topmostRoots([...rootsForBasenames(state.files, basenames), ...withSection(section)]);
+	for (const root of toolRoots({ "mypy.ini": true, ".mypy.ini": true }, "[tool.mypy")) {
+		addPlan(state, {
+			id: "mypy",
+			label: "mypy",
+			language: "Python",
+			root,
+			binaries: ["mypy"],
+			args: ["--no-error-summary", "--no-pretty", "."],
+			parser: "mypy",
+		});
+	}
+	for (const root of toolRoots({ ".pylintrc": true, pylintrc: true }, "[tool.pylint")) {
+		addPlan(state, {
+			id: "pylint",
+			label: "pylint",
+			language: "Python",
+			root,
+			binaries: ["pylint"],
+			args: ["--output-format=json", "--recursive=y", "."],
+			parser: "pylint",
+		});
+	}
+	for (const root of rootsForBasenames(state.files, { ".flake8": true })) {
+		addPlan(state, {
+			id: "flake8",
+			label: "flake8",
+			language: "Python",
+			root,
+			binaries: ["flake8"],
+			args: ["."],
+			parser: "flake8",
+		});
+	}
+	for (const root of toolRoots({ "ty.toml": true }, "[tool.ty")) {
+		addPlan(state, {
+			id: "ty",
+			label: "ty check",
+			language: "Python",
+			root,
+			binaries: ["ty"],
+			args: ["check", "--output-format", "concise"],
+			parser: "ty",
 		});
 	}
 }
@@ -457,14 +697,51 @@ async function discoverJavaScript(state: DiscoveryState): Promise<void> {
 		});
 	}
 	for (const root of rootsForBasenames(state.files, { "tsconfig.json": true })) {
+		const prefix = root === "." ? "" : `${root}/`;
+		const hasVue = state.files.some(file => file.startsWith(prefix) && file.endsWith(".vue"));
 		addPlan(state, {
 			id: "typescript",
-			label: "TypeScript",
+			label: hasVue ? "Vue TypeScript" : "TypeScript",
 			language: "TypeScript",
 			root,
-			binaries: ["tsgo", "tsc"],
+			binaries: hasVue ? ["vue-tsc", "tsgo", "tsc"] : ["tsgo", "tsc"],
 			args: ["--noEmit", "--pretty", "false"],
 			parser: "generic",
+		});
+	}
+	for (const root of rootsForBasenames(state.files, { ".oxlintrc.json": true })) {
+		addPlan(state, {
+			id: "oxlint",
+			label: "oxlint",
+			language: "JavaScript/TypeScript",
+			root,
+			binaries: ["oxlint"],
+			args: ["--format=unix"],
+			parser: "oxlint",
+		});
+	}
+	for (const root of rootsForBasenames(state.files, { "deno.json": true, "deno.jsonc": true })) {
+		addPlan(state, {
+			id: "deno-lint",
+			label: "deno lint",
+			language: "JavaScript/TypeScript",
+			root,
+			binaries: ["deno"],
+			args: ["lint", "--json"],
+			parser: "deno-lint",
+		});
+	}
+	const stylelintConfig =
+		/(?:^|\/)(?:\.stylelintrc(?:\.(?:json|ya?ml|js|cjs|mjs))?|stylelint\.config\.(?:js|cjs|mjs|ts))$/;
+	for (const root of rootsForPattern(state.files, stylelintConfig)) {
+		addPlan(state, {
+			id: "stylelint",
+			label: "stylelint",
+			language: "CSS",
+			root,
+			binaries: ["stylelint"],
+			args: ["**/*.{css,scss,sass,less}", "--formatter", "json", "--allow-empty-input"],
+			parser: "stylelint",
 		});
 	}
 	if (state.includeTests) await discoverPackageTests(state);
@@ -905,56 +1182,140 @@ function discoverJvm(state: DiscoveryState): void {
 	}
 }
 
+function discoverGitHubActions(state: DiscoveryState): void {
+	const roots = new Set<string>();
+	for (const file of state.files) {
+		const match = /^(?:(.*)\/)?\.github\/workflows\/[^/]+\.ya?ml$/.exec(file);
+		if (match) roots.add(match[1] ?? ".");
+	}
+	for (const root of topmostRoots([...roots])) {
+		addPlan(state, {
+			id: "actionlint",
+			label: "actionlint",
+			language: "GitHub Actions",
+			root,
+			binaries: ["actionlint"],
+			args: ["-format", "{{json .}}"],
+			parser: "actionlint",
+			optional: true,
+		});
+	}
+}
+
+interface RunCheckerOptions {
+	signal?: AbortSignal;
+	/** New diagnostics parsed from partial or final output; each delivered exactly once. */
+	onDiagnostics?: (diagnostics: readonly CleanseDiagnostic[]) => void;
+	/** Interval between partial-output parses; only used with `onDiagnostics`. */
+	flushMs?: number;
+}
+
 async function runChecker(
 	plan: CheckerPlan,
 	projectCwd: string,
 	allowedFiles: ReadonlySet<string>,
-	signal?: AbortSignal,
+	options: RunCheckerOptions = {},
 ): Promise<CleanseCheckResult> {
-	try {
-		const result = await ptree.exec([plan.executable, ...plan.args], {
-			cwd: plan.cwd,
-			signal,
-			stderr: "full",
-			allowNonZero: true,
-			allowAbort: false,
+	const { signal, onDiagnostics, flushMs = DEFAULT_FLUSH_MS } = options;
+	const emitted = new Set<string>();
+	const emit = (diagnostics: readonly CleanseDiagnostic[]): void => {
+		if (!onDiagnostics) return;
+		const fresh = diagnostics.filter(diagnostic => {
+			const key = diagnosticKey(diagnostic);
+			if (emitted.has(key)) return false;
+			emitted.add(key);
+			return true;
 		});
-		const parsedDiagnostics = parseCleanseDiagnostics(plan.parser, {
+		if (fresh.length > 0) onDiagnostics(fresh);
+	};
+	const parse = (stdout: string, stderr: string): CleanseDiagnostic[] =>
+		parseCleanseDiagnostics(plan.parser, {
 			checker: plan.label,
 			projectCwd,
 			checkerCwd: plan.cwd,
-			stdout: result.stdout,
-			stderr: result.stderr,
+			stdout,
+			stderr,
 		});
-		const diagnostics = parsedDiagnostics.filter(
-			diagnostic => diagnostic.file === undefined || allowedFiles.has(diagnostic.file),
-		);
-		if (!result.ok && parsedDiagnostics.length === 0) {
-			diagnostics.push(checkerFailureDiagnostic(plan, result.exitCode, result.stdout, result.stderr));
+	const inProject = (diagnostics: CleanseDiagnostic[]): CleanseDiagnostic[] =>
+		diagnostics.filter(diagnostic => diagnostic.file === undefined || allowedFiles.has(diagnostic.file));
+	const result = (exitCode: number | null, diagnostics: CleanseDiagnostic[]): CleanseCheckResult => ({
+		id: plan.id,
+		label: plan.label,
+		language: plan.language,
+		cwd: path.relative(projectCwd, plan.cwd) || ".",
+		command: plan.command,
+		exitCode,
+		diagnostics,
+	});
+	try {
+		using child = ptree.spawn([plan.executable, ...plan.args], { cwd: plan.cwd, signal, stderr: "full" });
+		const stdout: OutputAccumulator = { text: "" };
+		const stderr: OutputAccumulator = { text: "" };
+		const pumps = Promise.all([pumpStream(child.stdout, stdout), pumpStream(child.stderr, stderr)]);
+		let running = true;
+		// Mutating checkers rewrite files while running; only stream partials
+		// from read-only checkers so repair work never races an in-flight edit.
+		const poller =
+			onDiagnostics && !plan.mutates
+				? (async () => {
+						while (running) {
+							await Bun.sleep(flushMs);
+							if (!running) break;
+							// Cut at the last newline: truncated trailing lines and
+							// unterminated JSON documents parse as garbage or nothing.
+							emit(inProject(parse(completeLines(stdout.text), completeLines(stderr.text))));
+						}
+					})()
+				: undefined;
+		let exitCode: number | null;
+		try {
+			exitCode = await child.exited;
+		} finally {
+			running = false;
 		}
-		return {
-			id: plan.id,
-			label: plan.label,
-			language: plan.language,
-			cwd: path.relative(projectCwd, plan.cwd) || ".",
-			command: plan.command,
-			exitCode: result.exitCode,
-			diagnostics,
-		};
+		await pumps;
+		await poller;
+		const parsedDiagnostics = parse(stdout.text, stderr.text);
+		const diagnostics = inProject(parsedDiagnostics);
+		if (exitCode !== 0 && parsedDiagnostics.length === 0) {
+			diagnostics.push(checkerFailureDiagnostic(plan, exitCode, stdout.text, stderr.text));
+		}
+		emit(diagnostics);
+		return result(exitCode, diagnostics);
 	} catch (error) {
 		if (signal?.aborted) throw error;
-		return {
-			id: plan.id,
-			label: plan.label,
-			language: plan.language,
-			cwd: path.relative(projectCwd, plan.cwd) || ".",
-			command: plan.command,
-			exitCode: null,
-			diagnostics: [
-				checkerFailureDiagnostic(plan, null, "", error instanceof Error ? error.message : String(error)),
-			],
-		};
+		const failure = checkerFailureDiagnostic(plan, null, "", error instanceof Error ? error.message : String(error));
+		emit([failure]);
+		return result(null, [failure]);
 	}
+}
+
+interface OutputAccumulator {
+	text: string;
+}
+
+async function pumpStream(stream: ReadableStream<Uint8Array> | undefined, into: OutputAccumulator): Promise<void> {
+	if (!stream) return;
+	const decoder = new TextDecoder();
+	for await (const chunk of stream) into.text += decoder.decode(chunk, { stream: true });
+	into.text += decoder.decode();
+}
+
+/** Truncate to the last complete line so partial parses never see a torn record. */
+function completeLines(text: string): string {
+	const cut = text.lastIndexOf("\n");
+	return cut < 0 ? "" : text.slice(0, cut + 1);
+}
+
+/** Identity key matching {@link deduplicateProjectDiagnostics}; used for exactly-once streaming emission. */
+export function diagnosticKey(diagnostic: CleanseDiagnostic): string {
+	return [
+		diagnostic.file ?? "",
+		diagnostic.line ?? "",
+		diagnostic.column ?? "",
+		diagnostic.code ?? "",
+		diagnostic.message,
+	].join("\u0000");
 }
 
 function checkerFailureDiagnostic(
@@ -976,13 +1337,7 @@ function deduplicateProjectDiagnostics(diagnostics: CleanseDiagnostic[]): Cleans
 	const seen = new Set<string>();
 	const unique: CleanseDiagnostic[] = [];
 	for (const diagnostic of diagnostics) {
-		const key = [
-			diagnostic.file ?? "",
-			diagnostic.line ?? "",
-			diagnostic.column ?? "",
-			diagnostic.code ?? "",
-			diagnostic.message,
-		].join("\u0000");
+		const key = diagnosticKey(diagnostic);
 		if (seen.has(key)) continue;
 		seen.add(key);
 		unique.push(diagnostic);

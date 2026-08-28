@@ -220,7 +220,11 @@ function tString(opts?: StringOpts): TString {
 		const valid = formatPredicate(format);
 		schema = schema.narrow((value, ctx) => valid(value) || ctx.mustBe(`a string in ${format} format`));
 	}
-	return applyMeta(schema, opts);
+	const result = applyMeta(schema, opts);
+	const keywords: Record<string, unknown> = {};
+	if (opts?.pattern !== undefined) keywords.pattern = opts.pattern;
+	if (opts?.format !== undefined) keywords.format = opts.format === "url" ? "uri" : opts.format;
+	return opts?.pattern !== undefined || opts?.format !== undefined ? withJsonSchemaKeywords(result, keywords) : result;
 }
 
 function formatPredicate(format: string): (value: string) => boolean {
@@ -267,9 +271,19 @@ function tNumber(opts?: NumberOpts, integer = false): TNumber {
 		upper = { value: opts.exclusiveMaximum, exclusive: true };
 	}
 	const keyword = integer ? "number.integer" : "number";
-	const lowerDsl = lower ? `${lower.value} ${lower.exclusive ? "<" : "<="} ` : "";
-	const upperDsl = upper ? ` ${upper.exclusive ? "<" : "<="} ${upper.value}` : "";
-	let schema = asRuntime<number>(type.raw(`${lowerDsl}${keyword}${upperDsl}`));
+	// The `LO <= TYPE <= HI` range spelling requires both bounds; a min-only
+	// bound must use the postfix `TYPE >= LO` form (see parseBounded in ir.ts).
+	let src: string;
+	if (lower && upper) {
+		src = `${lower.value} ${lower.exclusive ? "<" : "<="} ${keyword} ${upper.exclusive ? "<" : "<="} ${upper.value}`;
+	} else if (lower) {
+		src = `${keyword} ${lower.exclusive ? ">" : ">="} ${lower.value}`;
+	} else if (upper) {
+		src = `${keyword} ${upper.exclusive ? "<" : "<="} ${upper.value}`;
+	} else {
+		src = keyword;
+	}
+	let schema = asRuntime<number>(type.raw(src));
 	if (opts?.multipleOf !== undefined) {
 		const divisor = opts.multipleOf;
 		schema = schema.narrow((value, ctx) => {
@@ -280,7 +294,8 @@ function tNumber(opts?: NumberOpts, integer = false): TNumber {
 			);
 		});
 	}
-	return applyMeta(schema, opts);
+	const result = applyMeta(schema, opts);
+	return opts?.multipleOf !== undefined ? withJsonSchemaKeywords(result, { multipleOf: opts.multipleOf }) : result;
 }
 
 function tLiteral<const V extends string | number | boolean | null>(value: V, opts?: Meta): TLiteral<V> {
@@ -401,7 +416,11 @@ function tObject<const P extends Record<string, AnySchema>>(properties: P, opts?
 	for (const key in properties) {
 		const schema = properties[key];
 		const inner = asRuntime<unknown>(schema)[OPTIONAL_INNER];
-		def[inner ? `${key}?` : key] = inner ?? schema;
+		// A defaulted `Type.Optional(...)` maps to a plain defaulted key:
+		// omptype (like ArkType) rejects `key?` with a default, and a default
+		// already makes the key omittable on input.
+		const optionalKey = inner !== undefined && !asRuntime<unknown>(inner).hasDefault;
+		def[optionalKey ? `${key}?` : key] = inner ?? schema;
 		props[key] = schema;
 	}
 	if (opts?.additionalProperties === false) def["+"] = "reject";

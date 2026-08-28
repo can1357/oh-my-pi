@@ -1,4 +1,5 @@
-Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that model used. You MUST build on the work already done and NEVER duplicate it. Here is that summary:
+Prior model work/tool state available.
+MUST build on prior work; NEVER duplicate prior work.
 
 <summary>
 {{summary}}

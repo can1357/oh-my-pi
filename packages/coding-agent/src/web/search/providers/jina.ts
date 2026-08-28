@@ -5,19 +5,24 @@
  * cleaned content.
  */
 
-import { type AuthStorage, type FetchImpl, getEnvApiKey } from "@oh-my-pi/pi-ai";
+import { type ApiKey, type AuthStorage, type FetchImpl, withAuth } from "@oh-my-pi/pi-ai";
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatQuery, parseSearchQuery } from "../query";
+import { clampNumResults } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
 const JINA_SEARCH_URL = "https://s.jina.ai";
+const DEFAULT_NUM_RESULTS = 5;
+const MAX_NUM_RESULTS = 20;
 type SearchParamsWithFetch = SearchParams & { fetch?: FetchImpl };
 
 export interface JinaSearchParams {
 	query: string;
+	authStorage: AuthStorage;
+	sessionId?: string;
 	num_results?: number;
 	/** Single bare host for Jina's `X-Site` in-site search header. */
 	site?: string;
@@ -29,31 +34,37 @@ export interface JinaSearchParams {
 interface JinaSearchResult {
 	title?: string | null;
 	url?: string | null;
+	description?: string | null;
 	content?: string | null;
 }
 
-type JinaSearchResponse = JinaSearchResult[];
-
-/** Find JINA_API_KEY from environment or .env files. */
-export function findApiKey(): string | null {
-	return getEnvApiKey("jina") ?? null;
+interface JinaSearchEnvelope {
+	code?: unknown;
+	data?: unknown;
 }
+
+type JinaSearchResponse = JinaSearchResult[];
 
 /** Call Jina Reader search API. */
 async function callJinaSearch(
 	apiKey: string,
 	query: string,
+	numResults: number,
 	site?: string,
 	signal?: AbortSignal,
 	fetchImpl: FetchImpl = fetch,
 	timeoutMs?: number,
 ): Promise<JinaSearchResponse> {
-	const requestUrl = `${JINA_SEARCH_URL}/${encodeURIComponent(query)}`;
+	const requestUrl = new URL(`${JINA_SEARCH_URL}/${encodeURIComponent(query)}`);
+	requestUrl.searchParams.set("count", String(numResults));
+
 	const headers: Record<string, string> = {
 		Accept: "application/json",
 		Authorization: `Bearer ${apiKey}`,
 	};
 	if (site) headers["X-Site"] = site;
+	headers["X-Respond-With"] = "no-content";
+	headers["X-Retain-Images"] = "none";
 	const response = await fetchImpl(requestUrl, {
 		headers,
 		signal: withHardTimeout(signal, timeoutMs),
@@ -66,24 +77,34 @@ async function callJinaSearch(
 		throw new SearchProviderError("jina", `Jina API error (${response.status}): ${errorText}`, response.status);
 	}
 
-	const payload = (await response.json()) as { data?: JinaSearchResponse } | null;
-	return Array.isArray(payload?.data) ? payload.data : [];
+	const payload = (await response.json()) as JinaSearchEnvelope | JinaSearchResponse | null;
+	if (Array.isArray(payload)) return payload;
+	if (!payload || typeof payload !== "object") {
+		throw new SearchProviderError("jina", "Jina API returned invalid response: expected an object or array");
+	}
+	if (typeof payload.code === "number" && payload.code !== 200) {
+		throw new SearchProviderError("jina", `Jina API response reported failure (${payload.code})`, payload.code);
+	}
+	if (!Array.isArray(payload.data)) {
+		throw new SearchProviderError("jina", "Jina API returned invalid response: expected data array");
+	}
+	return payload.data as JinaSearchResponse;
 }
 
 /** Execute Jina web search. */
 export async function searchJina(params: JinaSearchParams): Promise<SearchResponse> {
-	const apiKey = findApiKey();
-	if (!apiKey) {
-		throw new Error("JINA_API_KEY not found. Set it in environment or .env file.");
-	}
-
-	const response = await callJinaSearch(
-		apiKey,
-		params.query,
-		params.site,
-		params.signal,
-		params.fetch,
-		params.timeoutMs,
+	const numResults = clampNumResults(params.num_results, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS);
+	const keyOrResolver: ApiKey = params.authStorage.resolver("jina", {
+		sessionId: params.sessionId,
+	});
+	const response = await withAuth(
+		keyOrResolver,
+		apiKey =>
+			callJinaSearch(apiKey, params.query, numResults, params.site, params.signal, params.fetch, params.timeoutMs),
+		{
+			signal: params.signal,
+			missingKeyMessage: 'Jina credentials not found. Set JINA_API_KEY or configure an API key for provider "jina".',
+		},
 	);
 	const sources: SearchSource[] = [];
 
@@ -92,11 +113,11 @@ export async function searchJina(params: JinaSearchParams): Promise<SearchRespon
 		sources.push({
 			title: result.title ?? result.url,
 			url: result.url,
-			snippet: result.content ?? undefined,
+			snippet: result.description?.trim() || result.content?.trim() || undefined,
 		});
 	}
 
-	const limitedSources = params.num_results ? sources.slice(0, params.num_results) : sources;
+	const limitedSources = sources.slice(0, numResults);
 
 	return {
 		provider: "jina",
@@ -109,8 +130,8 @@ export class JinaProvider extends SearchProvider {
 	readonly id = "jina";
 	readonly label = "Jina";
 
-	isAvailable(_authStorage: AuthStorage): boolean {
-		return !!findApiKey();
+	isAvailable(authStorage: AuthStorage): boolean {
+		return authStorage.hasAuth("jina");
 	}
 
 	search(params: SearchParamsWithFetch): Promise<SearchResponse> {
@@ -134,6 +155,8 @@ export class JinaProvider extends SearchProvider {
 
 		return searchJina({
 			query,
+			authStorage: params.authStorage,
+			sessionId: params.sessionId,
 			num_results: params.numSearchResults ?? params.limit,
 			site,
 			signal: params.signal,

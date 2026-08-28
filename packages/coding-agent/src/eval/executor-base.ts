@@ -61,7 +61,6 @@ export interface GenericKernel<TEnv> {
 			env?: TEnv;
 			id: string;
 			signal?: AbortSignal;
-			timeoutMs?: number;
 			onChunk: (text: string) => Promise<void> | void;
 			onDisplay: (output: KernelDisplayOutput) => Promise<void> | void;
 		},
@@ -116,9 +115,13 @@ export async function waitForPromiseWithCancellation<T>(
 	promise: Promise<T>,
 	options: { signal?: AbortSignal; deadlineMs?: number },
 	cancelledErrorClass: CancelledErrorClass,
+	timedOutResolver?: (error: unknown, signal?: AbortSignal) => boolean,
 ): Promise<T> {
 	if (options.signal?.aborted) {
-		throw new cancelledErrorClass(isTimedOutCancellation(options.signal.reason, cancelledErrorClass, options.signal));
+		throw new cancelledErrorClass(
+			timedOutResolver?.(options.signal.reason, options.signal) ??
+				isTimedOutCancellation(options.signal.reason, cancelledErrorClass, options.signal),
+		);
 	}
 	const remainingMs = getRemainingTimeoutMs(options.deadlineMs);
 	if (remainingMs !== undefined && remainingMs <= 0) {
@@ -139,7 +142,8 @@ export async function waitForPromiseWithCancellation<T>(
 			finish(() =>
 				reject(
 					new cancelledErrorClass(
-						isTimedOutCancellation(options.signal?.reason, cancelledErrorClass, options.signal),
+						timedOutResolver?.(options.signal?.reason, options.signal) ??
+							isTimedOutCancellation(options.signal?.reason, cancelledErrorClass, options.signal),
 					),
 				),
 			);
@@ -276,9 +280,32 @@ interface ManagedKernelEnvOptions {
 	bridge?: { url: string; token: string };
 	localRoots?: Record<string, string>;
 }
+interface ManagedKernelEnvPolicy {
+	sparse?: boolean;
+}
 
-export function buildManagedKernelEnvPatch(options: ManagedKernelEnvOptions): Record<string, string | null> {
+export function buildManagedKernelEnvPatch(options: ManagedKernelEnvOptions): Record<string, string | null>;
+export function buildManagedKernelEnvPatch(
+	options: ManagedKernelEnvOptions,
+	policy: { sparse: true },
+): Record<string, string | undefined>;
+export function buildManagedKernelEnvPatch(
+	options: ManagedKernelEnvOptions,
+	policy?: ManagedKernelEnvPolicy,
+): KernelEnvPatch {
 	const localRoots = options.localRoots;
+	if (policy?.sparse) {
+		const patch: Record<string, string | undefined> = {};
+		if (options.sessionFile) patch.PI_SESSION_FILE = options.sessionFile;
+		if (options.artifactsDir) patch.PI_ARTIFACTS_DIR = options.artifactsDir;
+		if (options.bridge) {
+			patch.PI_TOOL_BRIDGE_URL = options.bridge.url;
+			patch.PI_TOOL_BRIDGE_TOKEN = options.bridge.token;
+			patch.PI_TOOL_BRIDGE_SESSION = options.bridgeSessionId ?? "";
+		}
+		if (localRoots) patch.PI_EVAL_LOCAL_ROOTS = JSON.stringify(localRoots);
+		return patch;
+	}
 	return {
 		PI_SESSION_FILE: options.sessionFile ?? null,
 		PI_ARTIFACTS_DIR: options.artifactsDir ?? null,
@@ -289,13 +316,18 @@ export function buildManagedKernelEnvPatch(options: ManagedKernelEnvOptions): Re
 	};
 }
 
-export function buildManagedKernelEnv(options: ManagedKernelEnvOptions): Record<string, string> | undefined {
-	const patch = buildManagedKernelEnvPatch(options);
+export function buildManagedKernelEnv(
+	options: ManagedKernelEnvOptions,
+	policy?: ManagedKernelEnvPolicy,
+): Record<string, string> | undefined {
+	const patch = policy?.sparse
+		? buildManagedKernelEnvPatch(options, { sparse: true })
+		: buildManagedKernelEnvPatch(options);
 	const env: Record<string, string> = {};
 	let hasKeys = false;
 	for (const key of MANAGED_KERNEL_ENV_KEYS) {
 		const value = patch[key];
-		if (value !== null) {
+		if (typeof value === "string") {
 			env[key] = value;
 			hasKeys = true;
 		}
@@ -422,8 +454,24 @@ export async function executeWithKernelBase<
 
 	const displayOutputs: KernelDisplayOutput[] = [];
 	const deadlineMs = (resolveDeadlineMs ?? getExecutionDeadlineMs)(options);
-	let executionTimeoutMs: number | undefined;
-	const abortShield = createBridgeAbortShield(options?.signal);
+	const remainingMs = getRemainingTimeoutMs(deadlineMs);
+	const executionTimeoutMs = remainingMs !== undefined && remainingMs > 0 ? remainingMs : undefined;
+	// The wall-clock timeout must abort through the same shield the bridge
+	// watches. A kernel-internal timer SIGINTs the runner but leaves in-flight
+	// bridge calls (parallel() fan-outs of agent()/completion()/tool.*) blocked
+	// in urllib worker threads; the runner then wedges in the pool's
+	// shutdown(wait=True), never emits `done`, and the SIGINT escalation kills
+	// the kernel — losing every variable. Expiring via the shield rejects those
+	// bridge calls, so the workers unwind and the cell settles as a clean
+	// KeyboardInterrupt. It also inherits critical-phase deferral: a timeout
+	// landing mid-merge waits for the resume instead of settling the cell on
+	// top of a half-applied git operation.
+	const timeoutSignal = executionTimeoutMs !== undefined ? AbortSignal.timeout(executionTimeoutMs) : undefined;
+	const abortSource =
+		options?.signal && timeoutSignal
+			? AbortSignal.any([options.signal, timeoutSignal])
+			: (timeoutSignal ?? options?.signal);
+	const abortShield = createBridgeAbortShield(abortSource);
 
 	const collectDisplay = (output: KernelDisplayOutput): void => {
 		if (output.type === "status") {
@@ -460,12 +508,8 @@ export async function executeWithKernelBase<
 			: null;
 
 	try {
-		const remainingMs = getRemainingTimeoutMs(deadlineMs);
-		if (remainingMs !== undefined) {
-			if (remainingMs <= 0) {
-				throw new cancelledErrorClass(true);
-			}
-			executionTimeoutMs = remainingMs;
+		if (remainingMs !== undefined && remainingMs <= 0) {
+			throw new cancelledErrorClass(true);
 		}
 
 		const result = await kernel.execute(code, {
@@ -473,7 +517,6 @@ export async function executeWithKernelBase<
 			env: buildKernelEnvPatch(options ?? ({} as TOptions)),
 			id: runId,
 			signal: abortShield.signal,
-			timeoutMs: executionTimeoutMs,
 			onChunk: text => sink.push(text),
 			onDisplay: output => collectDisplay(output),
 		});

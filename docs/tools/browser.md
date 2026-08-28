@@ -65,8 +65,8 @@
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `all` | `boolean` | No | Close every known tab. Omitted closes only `name`. |
-| `kill` | `boolean` | No | When a tab release drops a spawned-app browser handle to refcount 0, also terminate its process tree. Has no effect on headless shutdown and only disconnects connected CDP browsers. |
+| `all` | `boolean` | No | Release every known managed tab. Omitted releases only `name`. Tool-owned headless pages and owned cmux surfaces close; spawned, connected, and relay pages remain open unless `kill: true` terminates a spawned browser. |
+| `kill` | `boolean` | No | When a tab release drops a spawned-app browser handle to refcount 0, also terminate its process tree. Has no effect on headless shutdown; connected and relay browsers are only disconnected. |
 
 ### `action: "run"`
 
@@ -116,8 +116,8 @@ The tool returns one result per call; no streaming partial output is emitted fro
 6. New tabs build a `WorkerInitPayload` in `buildInitPayload()`:
    - headless mode sends `url`, `waitUntil`, `viewport`, `dialogs`, and timeout; the worker defaults missing `waitUntil` to `"load"`.
    - attached, spawned, and relay modes resolve a page with `pickElectronTarget()`, get its target id, and send `targetId` plus `dialogs`. When no `target` is supplied for connected/relay mode, target selection prefers the visible usable page and screenshots do not activate it; an explicit matcher may select and activate a background page for target-correct pixels.
-7. `acquireTab()` spawns a dedicated Bun `Worker` from `tab-worker-entry.ts`; if that fails it falls back to inline execution in the main thread (`spawnInlineWorker()`), preserving behavior but losing protection against synchronous infinite loops.
-8. `WorkerCore.#init()` (`packages/coding-agent/src/tools/browser/tab-worker.ts`) connects back to the browser websocket endpoint. Headless mode opens a new page, applies stealth patches, applies viewport, installs dialog handling if requested, and optionally navigates. Attach mode resolves the requested target page and optionally installs dialog handling.
+7. `acquireTab()` spawns a dedicated Bun `Worker` from `tab-worker-entry.ts`; if that fails it falls back to inline execution in the main thread (`spawnInlineWorker()`), preserving behavior but losing protection against synchronous infinite loops. Worker init runs under the caller's `timeoutMs` deadline (plus a small supervisor grace) instead of any fixed floor: callers that started their own deadline before browser acquisition pass it through `deadlineStartMs`, so the clock starts with the caller's budget and time already spent acquiring the browser counts against init instead of restarting it. The `setup` handshake is bounded by `min(10 s, remaining/3)` with a `2 s` floor, the ready wait gets what is left, and the inline-fallback retry only happens while budget remains — once the caller's deadline is exhausted, init fails fast instead of restarting the clock.
+8. `WorkerCore.#init()` (`packages/coding-agent/src/tools/browser/tab-worker.ts`) connects back to the browser websocket endpoint. Headless mode opens a new page and reports the new target (`page-created`) to the supervisor before the slow post-creation CDP work (stealth patches, viewport) — so a supervisor that kills the worker mid-init can close exactly that target — applies stealth patches, applies viewport, installs dialog handling if requested, and optionally navigates. Attach mode resolves the requested target page and optionally installs dialog handling.
 9. On success the worker sends `ready` with `{ url, title, viewport, targetId }`; the supervisor stores a `TabSession`, increments browser-handle refcount with `holdBrowser()`, and keeps the tab in a process-global `Map<string, TabSession>`.
 10. `run` requires non-empty `code`, looks up the tab with `getTab()`, then delegates to `runInTab()`.
 11. `runInTabWithSnapshot()` rejects dead tabs and concurrent runs (`Tab ... is busy`), captures session cwd plus optional `browser.screenshotDir`, registers an abort hook, sends a `run` message to the worker, and races the result against `timeoutMs + 750` ms. Timeouts force-kill the tab worker and, for headless tabs, close the orphaned page target.
@@ -160,7 +160,7 @@ The tool returns one result per call; no streaming partial output is emitted fro
 18. `tab.click()` uses a custom retry loop for `text/...` selectors to find an actionable visible match; other selectors use `page.locator(...).click()`. Interactive actions (`click`/`fill`/`type`/`press`/`scroll`/`drag`/`scrollIntoView`/`select`/`uploadFile`) and the `waitFor*` helpers run under a per-op deadline (`min(cellBudget − slack, ceiling)`) threaded into both the puppeteer `signal` and `.setTimeout()`, so a stalled helper aborts the CDP action and rejects with a named `tab.<op> timed out after <ms>ms` that leaves cell budget — never the opaque whole-cell timeout. `goto`/`evaluate` stay uncapped.
 19. `tab.screenshot()` captures the page or selected element as PNG, resizes a model copy, saves under `browser.screenshotDir` or the OS temp directory, returns that path, records metadata, and optionally emits text plus image content.
 20. `display()` calls accumulate in an array. After code finishes, the worker posts `{ displays, returnValue, screenshots }`; `BrowserTool.#run()` appends the return value as trailing text content when not `undefined`.
-21. `close` releases one tab or all tabs via `releaseTab()` / `releaseAllTabs()`. Each tab aborts pending runs, asks the worker to close, waits up to `750` ms for a `closed` ack, terminates the worker, decrements browser refcount, and disposes the browser handle when refcount reaches zero.
+21. `close` releases one managed tab handle or all handles via `releaseTab()` / `releaseAllTabs()`. Each tab aborts pending runs, asks the worker to clean up, waits up to `750` ms for a `closed` ack, terminates the worker, decrements browser refcount, and disposes the browser handle when refcount reaches zero. Headless workers close their tool-owned page; attach workers disconnect without closing spawned, connected, or relay pages.
 
 ## Modes / Variants
 - **Action dispatch**
@@ -197,7 +197,7 @@ The tool returns one result per call; no streaming partial output is emitted fro
 - Network
   - CDP attach paths poll `http://127.0.0.1:<port>/json/version` or the supplied `cdp_url` `/json/version`.
   - Headless/browser-attach sessions create CDP websocket connections.
-  - Headless first-use Chromium download uses `@puppeteer/browsers`.
+  - Headless first-use Chromium download uses the in-house `@oh-my-pi/pi-utils/browsers` installer.
   - Loopback relay mode may start the machine-global `omp.browser.relay` daemon. The extension connects outbound to the relay, and Puppeteer connects to its CDP-compatible endpoint.
   - User `page` / `tab` operations perform normal browser network traffic.
 - Subprocesses / native bindings
@@ -251,14 +251,14 @@ The tool returns one result per call; no streaming partial output is emitted fro
 - Use `read` for static URLs; use `browser` when JavaScript execution, authentication, or interaction is required. A tab must be opened before `run`, and named tabs persist until closed.
 - `run` code has full Node/Bun and session-tool access; it is not sandboxed.
 - `loadPuppeteer()` and `loadPuppeteerInWorker()` temporarily redirect `cwd` to a safe Puppeteer directory before importing `puppeteer-core`, because Puppeteer probes the current working directory during module load.
-- Headless launch prefers a detected system Chrome/Chromium, then `PUPPETEER_EXECUTABLE_PATH`, and only then downloads Chromium.
+- Headless launch resolves its executable in this order: `PUPPETEER_EXECUTABLE_PATH` always wins; otherwise, on macOS the isolated Chrome for Testing binary (`com.google.chrome.for.testing`) is preferred over a detected system Chrome and downloaded on first use, falling back to system Chrome only when Chrome for Testing cannot be obtained (a headless daemon launched from a system `Google Chrome.app` bundle shares its `com.google.Chrome` LaunchServices identity, so macOS can route the user's link clicks to the daemon — #8673). On other platforms a detected system Chrome/Chromium is preferred, then a downloaded Chrome for Testing.
 - Headless launch always passes `--no-sandbox`, `--disable-setuid-sandbox`, `--disable-blink-features=AutomationControlled`, and a `--window-size=...` matching the initial viewport. It also ignores Puppeteer default args `--disable-extensions`, `--disable-default-apps`, and `--disable-component-extensions-with-background-pages`.
 - Proxy-related env vars only affect headless launch argv (shared and local): `PUPPETEER_PROXY`, `PUPPETEER_PROXY_BYPASS_LOOPBACK`, and `PUPPETEER_PROXY_IGNORE_CERT_ERRORS`. For the shared daemon they are baked in at first launch and take effect again after the daemon's next cold start.
 - Stealth patches are applied only in headless mode. Spawned or externally connected browsers are intentionally left untouched.
 - Relay mode drives an existing user browser and receives no stealth patches. Anything that can reach the relay endpoint can drive logged-in tabs; the built-in server binds loopback, and an optional shared token gates the extension connection.
 - `applyStealthPatches()` also strips Puppeteer's `//# sourceURL=__puppeteer_evaluation_script__` suffix from CDP `Runtime.evaluate` / `Runtime.callFunctionOn` payloads.
 - `tab.extract()` reads `page.content()`, runs Readability first, then falls back to the first non-empty of `[data-pagefind-body]`/`main article`/`article`/`main`/`[role='main']`/`body`, and returns `null` if neither extraction path yields content.
-- `close(all: true, kill: false)` disconnects from spawned, connected, and relay browsers when the last tab closes but leaves spawned app processes and the user's Chrome running.
-- Headless orphan cleanup is best-effort: if a worker dies before closing its page, the supervisor searches browser targets by `targetId` and closes that page.
+- `close(all: true, kill: false)` disconnects from spawned, connected, and relay browsers when the last managed tab is released but leaves their pages, spawned app processes, and the user's Chrome running. `kill: true` additionally terminates spawned-app processes; it never closes or kills connected or relay browsers.
+- Headless orphan cleanup is best-effort: if a worker dies before closing its page, the supervisor searches browser targets by `targetId` and closes that page. A worker killed mid-init (init budget exhausted, aborted open) is covered the same way through the target the worker reported in `page-created` — a killed worker can't clean up after itself, and a shared browser's other targets are never touched.
 - Console methods inside `run` do not appear in tool output; they are forwarded as debug/warn/error logs through the worker transport.
 - Raw page request interception is run-scoped. At run end the worker removes user `request` handlers, disables interception, and releases held requests; cleanup failure marks the tab for recovery.

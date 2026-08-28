@@ -1,21 +1,18 @@
 ## Code Review Request
 
-### Mode
+Mode: custom instructions.
 
-Custom review instructions
+## Distribution
 
-### Distribution Guidelines
+Use `task`: `agent: "reviewer"`, `tasks` array. Create exactly **1 reviewer task**; assignment MUST include custom instructions.
 
-Use the `task` tool with `agent: "reviewer"` and a `tasks` array.
-Create exactly **1 reviewer task**. Its assignment MUST include the custom instructions below.
-
-### Reviewer Instructions
+## Reviewer Instructions
 
 Reviewer MUST:
-1. Follow the custom instructions below
-2. Read the referenced files or workspace context needed to evaluate them
-3. Use incremental `yield` sections for findings and verdict fields; do NOT call a separate finding tool
+1. Follow custom instructions.
+2. Read referenced files/workspace context needed to evaluate them.
+3. Use incremental `yield` sections for findings and verdict fields; do NOT call a separate finding tool.
 
-### Custom Instructions
+## Custom Instructions
 
 {{instructions}}

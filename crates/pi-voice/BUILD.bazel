@@ -5,8 +5,8 @@ package(default_visibility = ["//visibility:public"])
 
 exports_files(["Cargo.toml"])
 
-# napi-free voice engine (miniaudio capture/playback + WebRTC/Opus live peer).
-# Keeping the webrtc/opus/maudio graph behind this rlib means the pi_natives
+# napi-free voice engine (in-house capture/playback backends + WebRTC/Opus live
+# peer). Keeping the webrtc/opus graph behind this rlib means the pi_natives
 # leaf — which recompiles on every release (version-sentinel edit in lib.rs) —
 # no longer pays for the voice stack's monomorphization.
 rust_library(
@@ -28,12 +28,3 @@ rust_test(
     deps = all_crate_deps(normal_dev = True),
 )
 
-# Direct C/Rust ABI comparison for miniaudio's opaque device state on the host.
-# The patched crate also carries paired target-gated C and Rust static assertions
-# so every cross-built Linux binding gets equivalent compile-time validation.
-rust_test(
-    name = "maudio_layout_test",
-    srcs = ["bazel/maudio_layout.rs"],
-    edition = "2024",
-    deps = ["@crates//:maudio"],
-)

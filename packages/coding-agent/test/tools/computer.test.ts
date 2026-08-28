@@ -1,7 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { type as arkType } from "@oh-my-pi/omptype";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ComputerTool, computerApproval, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { ComputerTool, computerApproval } from "@oh-my-pi/pi-coding-agent/tools/computer";
 import type {
 	ComputerSessionSnapshot,
 	ComputerWorkerInbound,

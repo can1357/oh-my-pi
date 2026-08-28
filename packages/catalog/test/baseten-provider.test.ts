@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { basetenModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
@@ -29,6 +30,20 @@ describe("Baseten provider discovery", () => {
 							},
 						},
 						{
+							id: "moonshotai/Kimi-K3",
+							object: "model",
+							name: "Kimi K3",
+							context_length: 1048576,
+							max_completion_tokens: 262144,
+							supported_features: ["tools", "json_mode", "structured_outputs", "reasoning_effort"],
+							input_modalities: ["text", "image"],
+							pricing: {
+								prompt: "0.000003",
+								completion: "0.000015",
+								input_cache_read: "0.0000003",
+							},
+						},
+						{
 							id: "deepseek-ai/DeepSeek-V4-Pro",
 							object: "model",
 							name: "DeepSeek V4 Pro",
@@ -40,6 +55,20 @@ describe("Baseten provider discovery", () => {
 								prompt: "0.00000174",
 								completion: "0.00000348",
 								input_cache_read: "0.000000145",
+							},
+						},
+						{
+							id: "zai-org/GLM-5.2-Fast",
+							object: "model",
+							name: "GLM 5.2 Fast",
+							context_length: 524288,
+							max_completion_tokens: 262144,
+							supported_features: ["tools", "json_mode", "structured_outputs", "reasoning"],
+							input_modalities: ["text"],
+							pricing: {
+								prompt: "0.0000021",
+								completion: "0.0000066",
+								input_cache_read: "0.00000021",
 							},
 						},
 					],
@@ -76,6 +105,15 @@ describe("Baseten provider discovery", () => {
 			},
 		});
 
+		const kimiK3 = models?.find(model => model.id === "moonshotai/Kimi-K3");
+		if (!kimiK3) throw new Error("Baseten Kimi K3 was not discovered");
+		expect(kimiK3.reasoning).toBe(true);
+		expect(buildModel(kimiK3).thinking).toMatchObject({
+			mode: "effort",
+			efforts: ["low", "high", "max"],
+			defaultLevel: "max",
+		});
+
 		const deepseek = models?.find(model => model.id === "deepseek-ai/DeepSeek-V4-Pro");
 		expect(deepseek).toBeDefined();
 		expect(deepseek).toMatchObject({
@@ -92,6 +130,14 @@ describe("Baseten provider discovery", () => {
 				cacheRead: 0.145,
 				cacheWrite: 0,
 			},
+		});
+
+		const glmFast = models?.find(model => model.id === "zai-org/GLM-5.2-Fast");
+		expect(glmFast).toBeDefined();
+		if (!glmFast) throw new Error("Baseten GLM-5.2 Fast was not discovered");
+		expect(buildModel(glmFast).thinking).toMatchObject({
+			mode: "effort",
+			efforts: ["high", "max"],
 		});
 	});
 });

@@ -73,7 +73,7 @@ describe.serial("commit extension provider resolution", () => {
 				noChangelog: true,
 				model: SELECTOR,
 			}),
-		).resolves.toBeUndefined();
+		).resolves.toEqual({ usedFallback: false });
 	});
 
 	test("legacy pipeline resolves the project commit role from an extension provider", async () => {
@@ -84,6 +84,6 @@ describe.serial("commit extension provider resolution", () => {
 				noChangelog: true,
 				legacy: true,
 			}),
-		).resolves.toBeUndefined();
+		).resolves.toEqual({ usedFallback: false });
 	});
 });

@@ -2,6 +2,7 @@
  * LSP-based linter client.
  * Uses the Language Server Protocol for formatting and diagnostics.
  */
+import { untilAborted } from "@oh-my-pi/pi-utils";
 import { getOrCreateClient, notifySaved, sendRequest, syncContent } from "../../lsp/client";
 import { applyTextEditsToString } from "../../lsp/edits";
 import { resolveFormatOptions } from "../../lsp/format-options";
@@ -25,9 +26,9 @@ export class LspLinterClient implements LinterClient {
 		private readonly cwd: string,
 	) {}
 
-	async #getClient(): Promise<LspClient> {
+	async #getClient(signal?: AbortSignal): Promise<LspClient> {
 		if (!this.#client) {
-			this.#client = await getOrCreateClient(this.config, this.cwd);
+			this.#client = await getOrCreateClient(this.config, this.cwd, undefined, signal);
 		}
 		return this.#client;
 	}
@@ -58,12 +59,12 @@ export class LspLinterClient implements LinterClient {
 		return applyTextEditsToString(content, edits);
 	}
 
-	async lint(filePath: string): Promise<Diagnostic[]> {
-		const client = await this.#getClient();
+	async lint(filePath: string, signal?: AbortSignal): Promise<Diagnostic[]> {
+		const client = await this.#getClient(signal);
 		const uri = fileToUri(filePath);
 
 		// Notify that file was saved to trigger diagnostics
-		await notifySaved(client, filePath);
+		await notifySaved(client, filePath, signal);
 
 		// Wait for diagnostics with timeout
 		const timeoutMs = 3000;
@@ -73,7 +74,7 @@ export class LspLinterClient implements LinterClient {
 			if (publishedDiagnostics !== undefined) {
 				return publishedDiagnostics.diagnostics;
 			}
-			await Bun.sleep(100);
+			await untilAborted(signal, () => Bun.sleep(100));
 		}
 
 		return client.diagnostics.get(uri)?.diagnostics ?? [];

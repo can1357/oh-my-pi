@@ -16,6 +16,7 @@ export class TtsrNotificationComponent extends Container {
 	#box: Box;
 	#expanded = false;
 	#rules: Rule[];
+	#toolActivityVisible = true;
 
 	constructor(rules: Rule[]) {
 		super();
@@ -29,6 +30,17 @@ export class TtsrNotificationComponent extends Container {
 		this.addChild(this.#box);
 
 		this.#rebuild();
+	}
+
+	setToolActivityVisible(visible: boolean): void {
+		if (this.#toolActivityVisible === visible) return;
+		this.#toolActivityVisible = visible;
+		this.invalidate();
+	}
+
+	override render(width: number): readonly string[] {
+		if (!this.#toolActivityVisible) return [];
+		return super.render(width);
 	}
 
 	/** Merge additional rules into this block (deduped by rule name). */

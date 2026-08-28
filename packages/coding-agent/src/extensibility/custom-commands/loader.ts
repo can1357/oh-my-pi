@@ -6,10 +6,11 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import * as arktype from "@oh-my-pi/omptype";
-import * as zodModule from "@oh-my-pi/omptype/zod";
+import { type } from "@oh-my-pi/omptype";
+import * as zod from "@oh-my-pi/omptype/zod";
 import { getAgentDir, getProjectDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { getConfigDirs } from "../../config";
+
 import { execCommand } from "../../exec/exec";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
 import * as PiCodingAgent from "../../index";
@@ -24,6 +25,8 @@ import type {
 	CustomCommandsLoadResult,
 	LoadedCustomCommand,
 } from "./types";
+
+const arktype = Object.assign(Function.prototype.bind.call(type, undefined) as typeof type, type, { type });
 
 /**
  * Load a single command module using native Bun import.
@@ -188,7 +191,7 @@ export async function loadCustomCommands(options: LoadCustomCommandsOptions = {}
 			execCommand(command, args, execOptions?.cwd ?? cwd, execOptions),
 		typebox,
 		arktype,
-		zod: zodModule,
+		zod,
 		pi: PiCodingAgent,
 	};
 

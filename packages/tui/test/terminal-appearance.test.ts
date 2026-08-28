@@ -47,6 +47,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
 		Object.defineProperty(process.stdin, "setRawMode", { value: vi.fn(), configurable: true });
 		previousHeadless = setTerminalHeadless(false);
+		delete Bun.env.TMUX;
 	});
 
 	afterEach(() => {
@@ -64,7 +65,10 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		restoreEnv("TMUX", originalTmux);
 	});
 
-	function setupTerminal() {
+	// conpty defaults false so kitty-flag assertions stay hermetic under WSL,
+	// where isConPTYHosted() would otherwise read the live WSL_* env. The two
+	// ConPTY cases opt in explicitly.
+	function setupTerminal({ conpty = false }: { conpty?: boolean } = {}) {
 		const writes: string[] = [];
 		const received: string[] = [];
 		vi.spyOn(process, "kill").mockReturnValue(true);
@@ -76,7 +80,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 			return true;
 		});
 
-		const terminal = new ProcessTerminal();
+		const terminal = new ProcessTerminal({ conpty });
 		terminal.start(
 			data => received.push(data),
 			() => {},
@@ -371,9 +375,62 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
 		terminal.refreshAppearance?.();
 
-		expect(writes).toContain("\x1bPtmux;\x1b\x1b]11;?\x07\x1b\x1b[c\x1b\\");
+		expect(writes).toContain("\x1bPtmux;\x1b\x1b]11;?\x07\x1b\\");
 
 		terminal.stop();
+	});
+
+	it("reads tmux's refreshed cache without passing a DA1 reply through tmux", () => {
+		vi.useFakeTimers();
+		Bun.env.TMUX = "/tmp/tmux-1000/default,1234,0";
+		const { terminal, received, queryCount } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		const reports: Array<{ appearance: string; token: number | undefined }> = [];
+		terminal.onAppearanceReport?.((appearance, token) => reports.push({ appearance, token }));
+		const beforeRefresh = queryCount();
+
+		const token = 42;
+		terminal.refreshAppearance?.(token);
+		expect(queryCount()).toBe(beforeRefresh);
+
+		// A fragmented outer DA1 reply can be decoded by tmux as an Alt+[ key
+		// followed by printable capability bytes. Wait for the OSC 11 response to
+		// reach tmux's cache, then query that cache directly with a local sentinel.
+		vi.advanceTimersByTime(99);
+		expect(queryCount()).toBe(beforeRefresh);
+		vi.advanceTimersByTime(1);
+		expect(queryCount()).toBe(beforeRefresh + 1);
+
+		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+		const detected = terminal.appearance;
+		terminal.stop();
+
+		expect(detected).toBe("light");
+		expect(reports).toEqual([{ appearance: "light", token }]);
+		expect(received).toEqual([]);
+	});
+
+	it("cancels a pending tmux appearance cache read during teardown", () => {
+		vi.useFakeTimers();
+		Bun.env.TMUX = "/tmp/tmux-1000/default,1234,0";
+		const { terminal, queryCount, sentinelCount } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		const directQueriesBeforeRefresh = queryCount();
+		const directSentinelsBeforeRefresh = sentinelCount();
+
+		terminal.refreshAppearance?.();
+		expect(vi.getTimerCount()).toBe(1);
+		terminal.stop();
+		expect(vi.getTimerCount()).toBe(0);
+		vi.advanceTimersByTime(100);
+
+		expect(queryCount()).toBe(directQueriesBeforeRefresh);
+		expect(sentinelCount()).toBe(directSentinelsBeforeRefresh);
 	});
 
 	it("refreshAppearance() re-evaluates a changed background through the callback pipeline", () => {
@@ -571,9 +628,12 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		process.stdin.emit("data", "\x1b[?1;2c");
 		expect(received).toEqual([]);
 
-		// An eighth stray DA1 has no owner and must reach the input handler — it is
+		// An eighth stray DA1 has no owner, yet is still swallowed: `CSI ? … c` is
+		// exclusively a terminal->host report, never a keystroke, so a reply that
+		// lands after the sentinel FIFO drains (slow SSH/PTY links) must not leak
+		// into the composer as literal text (#8542).
 		process.stdin.emit("data", "\x1b[?1;2c");
-		expect(received).toEqual(["\x1b[?1;2c"]);
+		expect(received).toEqual([]);
 
 		terminal.stop();
 	});
@@ -592,6 +652,26 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		// OSC 11's own DA1 sentinel drains the FIFO without re-entering the bug path.
 		process.stdin.emit("data", "\x1b[?1;2c");
 
+		terminal.stop();
+	});
+
+	it("uses disambiguation-only keyboard reporting on ConPTY", () => {
+		const { terminal, writes } = setupTerminal({ conpty: true });
+		writes.length = 0;
+		process.stdin.emit("data", "\x1b[?0u");
+
+		expect(writes).toContain("\x1b[>1u");
+		expect(writes).not.toContain("\x1b[>5u");
+		terminal.stop();
+	});
+
+	it("avoids alternate-key reporting on ConPTY while preserving parent event reporting", () => {
+		const { terminal, writes } = setupTerminal({ conpty: true });
+		writes.length = 0;
+		process.stdin.emit("data", "\x1b[?3u");
+
+		expect(writes).toContain("\x1b[>3u");
+		expect(writes).not.toContain("\x1b[>7u");
 		terminal.stop();
 	});
 
@@ -955,9 +1035,9 @@ describe("OSC 66 text-sizing capability", () => {
 	it("advertises text sizing only for Kitty", () => {
 		// OSC 66 is a Kitty-only protocol; any other terminal must report the
 		// capability as false so the renderer never emits raw escape bytes there.
-		expect(getTerminalInfo("kitty").textSizing).toBe(true);
+		expect(getTerminalInfo("kitty").supportsTextSizing).toBe(true);
 		for (const id of ["ghostty", "wezterm", "iterm2", "vscode", "alacritty", "base", "trueColor"] as const) {
-			expect(getTerminalInfo(id).textSizing).toBe(false);
+			expect(getTerminalInfo(id).supportsTextSizing).toBe(false);
 		}
 	});
 });

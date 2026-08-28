@@ -3,7 +3,7 @@
  */
 import { scheduler } from "node:timers/promises";
 import { ptree } from "@oh-my-pi/pi-utils";
-import type TurndownService from "turndown";
+import type TurndownService from "@oh-my-pi/pi-utils/turndown";
 
 import type { AgentStorage } from "../../session/agent-storage";
 import { ToolAbortError } from "../../tools/tool-errors";

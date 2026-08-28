@@ -103,21 +103,21 @@ library's public boolean path after 20,000 warmup calls.
 
 Representative result on an Apple M4 Max with Darwin 25.6.0 and Bun 1.3.14:
 
-| Phase                   |    omptype |           ArkType |               Zod |         TypeBox |
-| ----------------------- | ---------: | ----------------: | ----------------: | --------------: |
-| Compile `type()`        |  **509ns** | 271.08µs (532.3×) |  77.95µs (153.1×) | 27.36µs (53.7×) |
-| Compile + 2 validations | **2.18µs** | 526.46µs (241.5×) | 222.55µs (102.1×) | 46.90µs (21.5×) |
+| Phase                   |    omptype |           ArkType |         TypeBox |
+| ----------------------- | ---------: | ----------------: | --------------: |
+| Compile `type()`        |  **509ns** | 271.08µs (532.3×) | 27.36µs (53.7×) |
+| Compile + 2 validations | **2.18µs** | 526.46µs (241.5×) | 46.90µs (21.5×) |
 
-| Hot workload               |  omptype |         ArkType |             Zod |         TypeBox |
-| -------------------------- | -------: | --------------: | --------------: | --------------: |
-| `flat-small`               | **25ns** | 5.10µs (203.7×) | 4.55µs (181.4×) |  1.23µs (49.2×) |
-| `enum-union`               | **27ns** | 4.92µs (185.0×) | 4.38µs (164.7×) |  2.20µs (83.0×) |
-| `nested-arrays`            | **29ns** | 4.80µs (163.0×) | 7.05µs (239.6×) | 3.01µs (102.2×) |
-| `strict-defaults`          | **40ns** | 4.85µs (122.1×) | 6.71µs (169.2×) | 4.92µs (123.9×) |
-| `delete-extras`            | **22ns** | 4.12µs (191.6×) | 2.55µs (118.6×) |  2.07µs (96.0×) |
-| `record-mixed`             | **43ns** | 4.32µs (100.4×) | 8.80µs (204.5×) |  3.35µs (77.9×) |
-| `deep-message`             | **31ns** | 6.32µs (202.5×) | 9.16µs (293.7×) | 5.13µs (164.5×) |
-| `nested-arrays` valid-only | **15ns** |     28ns (1.8×) |  1.05µs (68.3×) |     45ns (2.9×) |
+| Hot workload               |  omptype |         ArkType |         TypeBox |
+| -------------------------- | -------: | --------------: | --------------: |
+| `flat-small`               | **25ns** | 5.10µs (203.7×) |  1.23µs (49.2×) |
+| `enum-union`               | **27ns** | 4.92µs (185.0×) |  2.20µs (83.0×) |
+| `nested-arrays`            | **29ns** | 4.80µs (163.0×) | 3.01µs (102.2×) |
+| `strict-defaults`          | **40ns** | 4.85µs (122.1×) | 4.92µs (123.9×) |
+| `delete-extras`            | **22ns** | 4.12µs (191.6×) |  2.07µs (96.0×) |
+| `record-mixed`             | **43ns** | 4.32µs (100.4×) |  3.35µs (77.9×) |
+| `deep-message`             | **31ns** | 6.32µs (202.5×) | 5.13µs (164.5×) |
+| `nested-arrays` valid-only | **15ns** |     28ns (1.8×) |     45ns (2.9×) |
 
 Lower times are better. Parenthetical values show how many times slower each
 candidate was than omptype in this run. Results vary with hardware, runtime,

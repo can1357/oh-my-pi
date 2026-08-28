@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, test, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { InteractiveModeContext, RenderSessionContextOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { buildSessionContext, type SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { type Component, Container } from "@oh-my-pi/pi-tui";
@@ -38,10 +38,13 @@ function createInitialRenderHarness(): { ctx: InteractiveModeContext; helpers: U
 		},
 		statusLine: { invalidate: vi.fn() },
 		updateEditorBorderColor: vi.fn(),
-		renderSessionContext: (
+		renderSessionContext: (context: SessionContext, options?: RenderSessionContextOptions) =>
+			helpers.renderSessionContext(context, options),
+		renderSessionContextIncrementally: (
 			context: SessionContext,
-			options?: { updateFooter?: boolean; populateHistory?: boolean },
-		) => helpers.renderSessionContext(context, options),
+			options: RenderSessionContextOptions,
+			renderChunk?: () => void,
+		) => helpers.renderSessionContextIncrementally(context, options, renderChunk),
 		addMessageToChat: (message: AgentMessage) => helpers.addMessageToChat(message),
 		settings: { get: () => false },
 		session: {
@@ -131,7 +134,7 @@ describe("InteractiveMode.showStatus", () => {
 			const { ctx, helpers } = createInitialRenderHarness();
 
 			helpers.showWarning("startup notification probe");
-			helpers.renderInitialMessages({ preserveExistingChat: true });
+			await helpers.renderInitialMessages({ preserveExistingChat: true });
 
 			expect(renderContainer(ctx.chatContainer)).toContain("startup notification probe");
 		} finally {

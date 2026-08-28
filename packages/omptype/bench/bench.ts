@@ -6,11 +6,10 @@ import type { Candidate } from "./candidate";
 import { arktypeCandidate } from "./candidates/arktype";
 import { omptypeCandidate } from "./candidates/omptype";
 import { typeboxCandidate } from "./candidates/typebox";
-import { zodCandidate } from "./candidates/zod";
 import { FIXTURES, generateUniqueDefs } from "./fixtures";
 import type { Def } from "./ir";
 
-const registry: Candidate[] = [omptypeCandidate, arktypeCandidate, zodCandidate, typeboxCandidate];
+const registry: Candidate[] = [omptypeCandidate, arktypeCandidate, typeboxCandidate];
 const filter = process.argv.slice(2);
 const candidates = filter.length ? registry.filter(candidate => filter.includes(candidate.name)) : registry;
 

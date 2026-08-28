@@ -308,12 +308,16 @@ function replayRemappedAnchorsOnCurrent(
 	edits: readonly Edit[],
 	recoveryWarning: string,
 	clipboard: Clipboard | undefined,
+	path: string,
 ): RecoveryResult | null {
 	const remapped = remapEditsToCurrent(previousText, currentText, edits);
 	if (remapped === null) return null;
 	let applied: ApplyResult;
 	try {
-		applied = applyEdits(currentText, remapped.edits, clipboard === undefined ? {} : { clipboard });
+		applied = applyEdits(currentText, remapped.edits, {
+			...(clipboard === undefined ? {} : { clipboard }),
+			path,
+		});
 	} catch {
 		return null;
 	}
@@ -348,6 +352,6 @@ export class Recovery {
 		if (!snapshot) return null;
 		const recoveryWarning =
 			this.store.head(path) === snapshot ? RECOVERY_EXTERNAL_WARNING : RECOVERY_SESSION_CHAIN_WARNING;
-		return replayRemappedAnchorsOnCurrent(snapshot.text, currentText, edits, recoveryWarning, clipboard);
+		return replayRemappedAnchorsOnCurrent(snapshot.text, currentText, edits, recoveryWarning, clipboard, path);
 	}
 }

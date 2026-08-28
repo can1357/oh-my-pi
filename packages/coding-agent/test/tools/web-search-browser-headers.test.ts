@@ -1,8 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import * as path from "node:path";
 import { buildBrowserNavigationHeaders } from "@oh-my-pi/pi-coding-agent/web/search/providers/browser-headers";
-
-// The child process owns the mock, so this test never mutates a shared dependency.
 
 const CHROME_FALLBACK_HEADERS: Record<string, string> = {
 	Accept:
@@ -23,34 +20,22 @@ const CHROME_FALLBACK_HEADERS: Record<string, string> = {
 		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
 };
 
-const packageRoot = path.join(import.meta.dir, "../..");
-
 describe("browser navigation headers", () => {
 	it("returns the stable Mac Chrome profile when randomization is disabled", () => {
 		expect(buildBrowserNavigationHeaders({ randomized: false })).toEqual(CHROME_FALLBACK_HEADERS);
 	});
 
-	it("imports cleanly and falls back when header-generator data files are absent", async () => {
-		const script = [
-			'import { mock } from "bun:test";',
-			'mock.module("header-generator", () => ({ HeaderGenerator: class { constructor() { throw new Error("ENOENT: data_files/headers-order.json"); } } }));',
-			"// Deliberate dynamic import: install the mock before loading the source under test.",
-			'const { buildBrowserNavigationHeaders } = await import("@oh-my-pi/pi-coding-agent/web/search/providers/browser-headers");',
-			"process.stdout.write(JSON.stringify(buildBrowserNavigationHeaders()));",
-		].join("\n");
-		const proc = Bun.spawn([process.execPath, "--no-install", "--eval", script], {
-			cwd: packageRoot,
-			stdout: "pipe",
-			stderr: "pipe",
-		});
-		const [exitCode, stdout, stderr] = await Promise.all([
-			proc.exited,
-			new Response(proc.stdout).text(),
-			new Response(proc.stderr).text(),
-		]);
+	it("returns a complete randomized navigation profile", () => {
+		const headers = buildBrowserNavigationHeaders();
 
-		expect(exitCode).toBe(0);
-		expect(stderr).toBe("");
-		expect(JSON.parse(stdout)).toEqual(CHROME_FALLBACK_HEADERS);
+		expect(headers["User-Agent"]).toMatch(/^Mozilla\/5\.0 /);
+		expect(headers.Accept).toContain("text/html");
+		expect(headers["Accept-Language"]).toBe("en-US,en;q=0.9");
+		expect(headers["Accept-Encoding"]).toContain("gzip");
+		expect(headers["Upgrade-Insecure-Requests"]).toBe("1");
+		expect(headers["Sec-Fetch-Dest"]).toBe("document");
+		expect(headers["Sec-Fetch-Mode"]).toBe("navigate");
+		expect(headers["Sec-Fetch-Site"]).toBe("none");
+		expect(headers["Sec-Fetch-User"]).toBe("?1");
 	});
 });

@@ -16,7 +16,7 @@ import type {
 } from "../types";
 import { normalizeSystemPrompts } from "../utils";
 import { clearStreamingPartialJson, kStreamingPartialJson } from "../utils/block-symbols";
-import { withEmptyCompletionRetry } from "../utils/empty-completion-retry";
+import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { CapturedHttpErrorResponse, RawHttpRequestDump } from "../utils/http-inspector";
 import {
@@ -328,15 +328,27 @@ function createChatBody(model: Model<"ollama-chat">, context: Context, options: 
 	const toolChoice = mapToolChoice(options?.toolChoice);
 	const selectedTools = selectToolsForToolChoice(context.tools, options?.toolChoice);
 	const tools = convertTools(selectedTools);
+	const runtimeOptions: { num_predict?: number; temperature?: number; top_p?: number } = {};
+	let hasRuntimeOptions = false;
+	if (options?.maxTokens !== undefined && !model.omitMaxOutputTokens) {
+		runtimeOptions.num_predict = resolveNumPredict(model, options.maxTokens);
+		hasRuntimeOptions = true;
+	}
+	if (options?.temperature !== undefined) {
+		runtimeOptions.temperature = options.temperature;
+		hasRuntimeOptions = true;
+	}
+	if (options?.topP !== undefined) {
+		runtimeOptions.top_p = options.topP;
+		hasRuntimeOptions = true;
+	}
 	return {
 		model: model.id,
 		messages: convertMessages(model, context),
 		...(tools ? { tools } : {}),
 		...(think !== undefined ? { think } : {}),
 		...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
-		...(options?.maxTokens !== undefined && !model.omitMaxOutputTokens
-			? { options: { num_predict: resolveNumPredict(model, options.maxTokens) } }
-			: {}),
+		...(hasRuntimeOptions ? { options: runtimeOptions } : {}),
 		stream: true,
 	};
 }
@@ -773,4 +785,6 @@ const streamOllamaOnce = (
 
 /** Retry EOS-only Ollama completions before the agent loop sees an empty stop. */
 export const streamOllama: StreamFunction<"ollama-chat"> = (model, context, options) =>
-	withEmptyCompletionRetry(model, context, options, streamOllamaOnce);
+	withReplaySafeStreamRetry(model, context, options, streamOllamaOnce, {
+		retryEmptyCompletion: true,
+	});

@@ -10,6 +10,7 @@
  * - generateAuthUrl(): Build provider-specific authorization URL
  * - exchangeToken(): Exchange authorization code for tokens
  */
+import * as os from "node:os";
 import * as AIError from "../../error";
 import templateHtml from "./oauth.html" with { type: "text" };
 import type { OAuthController, OAuthCredentials } from "./types";
@@ -17,6 +18,15 @@ import type { OAuthController, OAuthCredentials } from "./types";
 const DEFAULT_TIMEOUT = 300_000;
 const DEFAULT_HOSTNAME = "localhost";
 const CALLBACK_PATH = "/callback";
+const IPV4_LOOPBACK = "127.0.0.1";
+const IPV6_LOOPBACK = "::1";
+/**
+ * How many times a random-port bind may be redrawn when the ephemeral port it
+ * landed on is already held on {@link IPV6_LOOPBACK} by that exact address.
+ * Small on purpose: each redraw picks a fresh port, so a repeat collision is
+ * vanishingly unlikely.
+ */
+const IPV6_COMPANION_ATTEMPTS = 4;
 /**
  * Path served by {@link OAuthCallbackFlow} that 302-redirects to the pending
  * authorization URL. Kept out of {@link OAuthCallbackFlowOptions} because it
@@ -27,6 +37,48 @@ const CALLBACK_PATH = "/callback";
 const LAUNCH_PATH = "/launch";
 
 export type CallbackResult = { code: string; state: string };
+
+/**
+ * Subset of {@link Bun.Server} this flow depends on, so a `localhost` flow can
+ * hand back one listener per loopback address family while still looking like a
+ * single server to callers.
+ */
+interface CallbackServer {
+	readonly port: Bun.Server<unknown>["port"];
+	stop: Bun.Server<unknown>["stop"];
+}
+
+/**
+ * Whether a failed bind means "another process already holds this port".
+ * Bun surfaces `EADDRINUSE` on the error's `code` where the platform reports
+ * it, and otherwise only in the message, so both are checked.
+ */
+function isAddressInUse(error: unknown): boolean {
+	const code = (error as { code?: unknown } | null | undefined)?.code;
+	if (typeof code === "string") return code === "EADDRINUSE";
+	return error instanceof Error && /EADDRINUSE|in use/i.test(error.message);
+}
+
+/**
+ * Whether this host exposes an IPv6 loopback (`::1`) the companion listener can
+ * bind. A kernel with IPv6 disabled (`ipv6.disable=1`) lists no internal IPv6
+ * address, and the `::1` companion bind there fails with a generic Bun error
+ * {@link isAddressInUse} cannot distinguish from a real collision — Bun reuses
+ * its "Is port X in use?" message for every listen failure (oven-sh/bun#7187) —
+ * so the dual-bind path must be skipped up front rather than misread as a
+ * conflict (issue #8814).
+ */
+function ipv6LoopbackAvailable(): boolean {
+	const interfaces = os.networkInterfaces();
+	for (const name in interfaces) {
+		const addresses = interfaces[name];
+		if (!addresses) continue;
+		for (const address of addresses) {
+			if (address.internal && address.family === "IPv6") return true;
+		}
+	}
+	return false;
+}
 
 export interface OAuthCallbackFlowOptions {
 	preferredPort: number;
@@ -192,7 +244,7 @@ export abstract class OAuthCallbackFlow {
 	 */
 	async #startCallbackServer(
 		expectedState: string,
-	): Promise<{ server: Bun.Server<unknown>; redirectUri: string; launchUrl: string | undefined }> {
+	): Promise<{ server: CallbackServer; redirectUri: string; launchUrl: string | undefined }> {
 		try {
 			const server = this.#createServer(this.preferredPort, expectedState);
 			// `preferredPort: 0` opts into a random port — read the actual bound
@@ -233,7 +285,7 @@ export abstract class OAuthCallbackFlow {
 	 * but every callback flow uses TCP; a missing port here indicates a
 	 * configuration error rather than a fallback case.
 	 */
-	#resolveServerPort(server: Bun.Server<unknown>): number {
+	#resolveServerPort(server: CallbackServer): number {
 		const port = server.port;
 		if (typeof port !== "number") {
 			throw new AIError.ConfigurationError(
@@ -277,10 +329,77 @@ export abstract class OAuthCallbackFlow {
 	}
 
 	/**
-	 * Create HTTP server for OAuth callback.
+	 * Create the HTTP listener(s) for the OAuth callback.
+	 *
+	 * `localhost` is not a single endpoint: it resolves to both
+	 * {@link IPV4_LOOPBACK} and {@link IPV6_LOOPBACK}, and clients commonly try
+	 * `::1` first. Binding only the IPv4 literal hands the authorization code to
+	 * whatever holds the IPv6 loopback on the same port — a dev server on
+	 * `*:3000` is the common case — which answers from its own routes while this
+	 * flow waits out the full {@link DEFAULT_TIMEOUT}. Nothing detects it either:
+	 * a specific-address bind coexists with another process's wildcard bind, so
+	 * `Bun.serve` reports the port as free and the random-port fallback in
+	 * {@link #startCallbackServer} never runs.
+	 *
+	 * Binding both loopback literals fixes the delivery rather than dodging it:
+	 * the kernel routes a connection to the most specific matching bind, so our
+	 * `::1` listener receives `localhost` traffic that would otherwise reach a
+	 * process bound to the `::` wildcard. Both listeners answer the same routes,
+	 * so which family the client resolves stops mattering.
+	 *
+	 * A genuine collision — another process on exactly this loopback address and
+	 * port — still raises EADDRINUSE and reaches the caller's in-use policy. A
+	 * host that cannot bind `::1` at all (IPv6 disabled, address unavailable) is
+	 * not a collision: the IPv4 listener is the only reachable endpoint there, so
+	 * it serves alone.
 	 */
-	#createServer(port: number, expectedState: string): Bun.Server<unknown> {
-		const hostname = this.callbackHostname === DEFAULT_HOSTNAME ? "127.0.0.1" : this.callbackHostname;
+	#createServer(port: number, expectedState: string): CallbackServer {
+		if (this.callbackHostname !== DEFAULT_HOSTNAME) {
+			return this.#serve(this.callbackHostname, port, expectedState);
+		}
+		// A host with IPv6 disabled at the kernel exposes no `::1`, so the
+		// companion bind cannot succeed there. Bun reports that failure with the
+		// same generic "Is port X in use?" message it uses for a real collision
+		// (oven-sh/bun#7187), which the catch below would misread — tearing down
+		// the healthy IPv4 listener and, for a pinned port, throwing a bogus
+		// "port in use" ConfigurationError. Detecting the missing stack up front
+		// lets the IPv4 listener serve alone (issue #8814).
+		const dualStack = ipv6LoopbackAvailable();
+		for (let attempt = 0; ; attempt++) {
+			const primary = this.#serve(IPV4_LOOPBACK, port, expectedState);
+			const boundPort = primary.port;
+			// A non-TCP endpoint has no port for the companion to target;
+			// #resolveServerPort reports that case precisely.
+			if (typeof boundPort !== "number") return primary;
+			if (!dualStack) return primary;
+			let companion: Bun.Server<unknown>;
+			try {
+				companion = this.#serve(IPV6_LOOPBACK, boundPort, expectedState);
+			} catch (cause) {
+				if (!isAddressInUse(cause)) return primary;
+				void primary.stop(true);
+				// A pinned port has no alternative, so surface it as in use and let
+				// the caller apply its fallback or diagnostic policy. A random port
+				// can just be redrawn, since only that one number clashed.
+				if (port !== 0 || attempt >= IPV6_COMPANION_ATTEMPTS) throw cause;
+				continue;
+			}
+			// One server to callers. The IPv4 listener stays authoritative for
+			// `port` because the companion was bound to the port it resolved.
+			return {
+				get port() {
+					return primary.port;
+				},
+				stop: (closeActiveConnections?: boolean) => {
+					void companion.stop(closeActiveConnections);
+					return primary.stop(closeActiveConnections);
+				},
+			};
+		}
+	}
+
+	/** Bind one loopback listener serving the callback and launch routes. */
+	#serve(hostname: string, port: number, expectedState: string): Bun.Server<unknown> {
 		return Bun.serve({
 			hostname,
 			port,

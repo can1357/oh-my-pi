@@ -475,6 +475,11 @@ export interface DapClientState {
 	capabilities?: DapCapabilities;
 }
 
+export interface DapAttachDefaults extends Record<string, unknown> {
+	/** When true, the adapter is already attached and needs no DAP attach request. */
+	skipAttachRequest?: boolean;
+}
+
 export interface DapAdapterConfig {
 	command: string;
 	args?: string[];
@@ -482,7 +487,7 @@ export interface DapAdapterConfig {
 	fileTypes?: string[];
 	rootMarkers?: string[];
 	launchDefaults?: Record<string, unknown>;
-	attachDefaults?: Record<string, unknown>;
+	attachDefaults?: DapAttachDefaults;
 	/** "stdio" (default): communicate via stdin/stdout pipes.
 	 *  "socket": adapter-specific socket launch (currently Delve).
 	 *  "tcp": spawn a DAP server with `${port}` substituted in `args`, then connect to it. */
@@ -502,7 +507,7 @@ export interface DapResolvedAdapter {
 	fileTypes: string[];
 	rootMarkers: string[];
 	launchDefaults: Record<string, unknown>;
-	attachDefaults: Record<string, unknown>;
+	attachDefaults: DapAttachDefaults;
 	connectMode: "stdio" | "socket" | "tcp";
 	acceptsDirectoryProgram: boolean;
 }

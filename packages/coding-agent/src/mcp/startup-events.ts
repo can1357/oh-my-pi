@@ -3,15 +3,21 @@ import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../
 
 export const MCP_CONNECTION_STATUS_EVENT_CHANNEL = "mcp:connection-status";
 
+export type McpConnectionFailure = {
+	serverName: string;
+	error: string;
+	sourcePath?: string;
+};
+
 export type McpConnectionStatusEvent =
 	| { type: "connecting"; serverNames: string[] }
 	| { type: "connected"; serverName: string }
-	| { type: "failed"; serverName: string; error: string };
+	| ({ type: "failed" } & McpConnectionFailure);
 
 export type McpConnectionStatusSnapshot = {
 	pendingServers: readonly string[];
 	connectedServers: readonly string[];
-	failedServers: readonly { serverName: string; error: string }[];
+	failedServers: readonly McpConnectionFailure[];
 };
 
 function sanitizeMcpStatusText(value: string, maxWidth: number): string {
@@ -55,8 +61,11 @@ export function formatMCPConnectingMessage(serverNames: readonly string[]): stri
 	return `Connecting to MCP servers: ${formatServerList(serverNames)}…`;
 }
 
-function formatFailedServer({ serverName, error }: { serverName: string; error: string }): string {
-	return `${sanitizeMcpServerName(serverName)}: ${sanitizeMcpStatusError(error)}`;
+function formatFailedServer({ serverName, error, sourcePath }: McpConnectionFailure): string {
+	const source = sourcePath
+		? ` [config: ${sanitizeMcpStatusText(shortenPath(sourcePath), TRUNCATE_LENGTHS.CONTENT)}]`
+		: "";
+	return `${sanitizeMcpServerName(serverName)}${source}: ${sanitizeMcpStatusError(error)}`;
 }
 
 export function formatMCPConnectionStatusMessage(snapshot: McpConnectionStatusSnapshot): string {
@@ -109,7 +118,11 @@ export function isMcpConnectionStatusEvent(data: unknown): data is McpConnection
 		case "connected":
 			return typeof data.serverName === "string";
 		case "failed":
-			return typeof data.serverName === "string" && typeof data.error === "string";
+			return (
+				typeof data.serverName === "string" &&
+				typeof data.error === "string" &&
+				(data.sourcePath === undefined || typeof data.sourcePath === "string")
+			);
 		default:
 			return false;
 	}

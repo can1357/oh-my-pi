@@ -1,4 +1,4 @@
-import type { Type } from "@oh-my-pi/omptype";
+import type { type as ArkType } from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import type * as zod from "@oh-my-pi/omptype/zod";
 import type { ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
@@ -86,8 +86,8 @@ export interface HookUIContext {
 	/**
 	 * Set status text in the footer/status bar.
 	 * Pass undefined as text to clear the status for this key.
-	 * Text can include ANSI escape codes for styling.
-	 * Note: Newlines, tabs, and carriage returns are replaced with spaces.
+	 * ANSI/VT escape sequences and most control characters are stripped; tabs and newlines become spaces.
+	 * Repeated spaces are collapsed and surrounding whitespace is trimmed.
 	 * The combined status line is truncated to terminal width.
 	 * @param key - Unique key to identify this status (e.g., hook name)
 	 * @param text - Status text to display, or undefined to clear
@@ -156,12 +156,7 @@ export interface HookUIContext {
 	): Promise<string | undefined>;
 
 	/**
-	 * Get the current theme for styling text with ANSI codes.
-	 * Use theme.fg() and theme.bg() to style status text.
-	 *
-	 * @example
-	 * const theme = ctx.ui.theme;
-	 * ctx.ui.setStatus("my-hook", theme.fg("success", theme.status.success) + " Ready");
+	 * Get the current theme for styling custom components.
 	 */
 	readonly theme: Theme;
 }
@@ -582,11 +577,11 @@ export interface HookAPI {
 
 	/** File logger for error/warning/debug messages */
 	logger: typeof PiLogger;
-	/** Injected zod-backed typebox shim (legacy/compat — prefer `arktype`). */
+	/** Injected TypeBox shim (legacy/compat — prefer `arktype`). */
 	typebox: typeof TypeBox;
-	/** Injected arktype module for arktype-authored hooks. */
-	arktype: typeof Type;
-	/** Injected omptype-backed zod facade for hook validation. */
+	/** Injected omptype schema builder for hooks. */
+	arktype: typeof ArkType;
+	/** Injected Zod-compatible omptype builder for hooks. */
 	zod: typeof zod;
 	/** Injected pi-coding-agent exports */
 	pi: typeof PiCodingAgent;

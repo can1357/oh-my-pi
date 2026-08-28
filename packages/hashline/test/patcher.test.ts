@@ -158,7 +158,7 @@ describe("Patcher snapshot tag integrity", () => {
 // call returned), but `writeText` echoes back a *reformatted* copy — spaces
 // turned into tabs, exactly the corruption reported against the ACP bridge.
 class DriftingFilesystem extends InMemoryFilesystem {
-	async writeText(path: string, content: string): Promise<WriteResult> {
+	override async writeText(path: string, content: string): Promise<WriteResult> {
 		const drifted = content.replace(/^ {4}/gm, "\t");
 		await super.writeText(path, drifted);
 		return { text: drifted };

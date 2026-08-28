@@ -52,7 +52,7 @@ function withFrozenNow<T>(iso: string, fn: () => T): T {
 			else super(value);
 		}
 
-		static now(): number {
+		static override now(): number {
 			return fixedMs;
 		}
 	}

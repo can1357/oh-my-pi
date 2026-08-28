@@ -488,7 +488,7 @@ fn wrapper_invoked_tool<'a>(ctx: &'a MinimizerCtx<'_>, tools: &[&'a str]) -> Opt
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::minimizer::MinimizerConfig;
+	use crate::minimizer::{MinimizerConfig, engine::MIN_MINIMIZE_CHARS};
 
 	fn ctx<'a>(
 		program: &'a str,
@@ -497,6 +497,14 @@ mod tests {
 		config: &'a MinimizerConfig,
 	) -> MinimizerCtx<'a> {
 		MinimizerCtx { program, subcommand, command, config }
+	}
+
+	fn minimizable_input(input: &str) -> String {
+		let mut output = input.to_string();
+		while output.chars().count() < MIN_MINIMIZE_CHARS {
+			output.push('\n');
+		}
+		output
 	}
 
 	#[test]
@@ -975,9 +983,11 @@ mod tests {
 	fn bundle_exec_rails_db_migrate_routes_to_def() {
 		let config = MinimizerConfig { enabled: true, ..Default::default() };
 		let context = ctx("bundle", Some("exec"), "bundle exec rails db:migrate", &config);
-		let input = "== 20240115 CreateUsers: migrating\n-- create_table(:users)\n   -> 0.0234s\n== \
-		             20240115 CreateUsers: migrated\n";
-		let out = filter(&context, input, 0);
+		let input = minimizable_input(
+			"== 20240115 CreateUsers: migrating\n-- create_table(:users)\n   -> 0.0234s\n== 20240115 \
+			 CreateUsers: migrated\n",
+		);
+		let out = filter(&context, &input, 0);
 		assert!(out.changed);
 		assert!(out.text.contains("CreateUsers"));
 		assert!(!out.text.contains("-- create_table"));
@@ -987,8 +997,10 @@ mod tests {
 	fn bundle_exec_rails_routes_routes_to_def() {
 		let config = MinimizerConfig { enabled: true, ..Default::default() };
 		let context = ctx("bundle", Some("exec"), "bundle exec rails routes", &config);
-		let input = "                                  Prefix Verb   URI Pattern                                                                                       Controller#Action\n                                    root GET    /                                                                                                 home#index\n";
-		let out = filter(&context, input, 0);
+		let input = minimizable_input(
+			"                                  Prefix Verb   URI Pattern                                                                                       Controller#Action\n                                    root GET    /                                                                                                 home#index\n",
+		);
+		let out = filter(&context, &input, 0);
 		assert!(out.changed);
 		assert!(!out.text.contains("Prefix"));
 		assert!(out.text.contains("root GET"));
@@ -998,9 +1010,11 @@ mod tests {
 	fn bundle_exec_rspec_routes_to_ruby_filter() {
 		let config = MinimizerConfig { enabled: true, ..Default::default() };
 		let context = ctx("bundle", Some("exec"), "bundle exec rspec", &config);
-		let input = "Randomized with seed 12345\n\nUserController\n  GET /users\n    returns a list \
-		             of users\n\nFinished in 0.45 seconds\n5 examples, 0 failures\n";
-		let out = filter(&context, input, 0);
+		let input = minimizable_input(
+			"Randomized with seed 12345\n\nUserController\n  GET /users\n    returns a list of \
+			 users\n\nFinished in 0.45 seconds\n5 examples, 0 failures\n",
+		);
+		let out = filter(&context, &input, 0);
 		assert!(out.changed);
 		assert!(out.text.contains("5 examples, 0 failures"));
 		assert!(!out.text.contains("returns a list of users"));

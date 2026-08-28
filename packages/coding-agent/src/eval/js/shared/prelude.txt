@@ -104,8 +104,8 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			"agent",
 			opts,
 			rest,
-			["agent", "model", "label", "schema", "isolated", "apply", "merge", "schemaMode"],
-			"{ agent, model, label, schema, isolated, apply, merge, schemaMode, handle }",
+			["agent", "label", "schema", "isolated", "apply", "merge", "schemaMode"],
+			"{ agent, label, schema, isolated, apply, merge, schemaMode, handle }",
 		);
 		const { handle, ...callArgs } = o;
 		const res = await globalThis.__omp_call_tool__("__agent__", { prompt, ...callArgs, handle: Boolean(handle) });

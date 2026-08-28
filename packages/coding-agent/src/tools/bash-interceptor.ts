@@ -96,10 +96,14 @@ function withoutLeadingEnvironmentAssignments(command: string): string | null {
 
 function interceptionCandidates(command: string): string[] {
 	const candidates = [command.trim()];
-	const segments = extractFlatShellCommandSegments(command);
-	candidates.push(...segments.map(segment => segment.trim()));
-	for (const segment of segments) {
-		const withoutAssignments = withoutLeadingEnvironmentAssignments(segment);
+	for (const segment of extractFlatShellCommandSegments(command)) {
+		// A segment that consumes the previous stage's stdout via `|` reads piped
+		// stdin, which no path-based dedicated tool (read/grep/glob) — nor any
+		// other dedicated tool — can replace, so it is not an interception
+		// candidate. Standalone and first-stage commands still match.
+		if (segment.pipedStdin) continue;
+		candidates.push(segment.text);
+		const withoutAssignments = withoutLeadingEnvironmentAssignments(segment.text);
 		if (withoutAssignments) candidates.push(withoutAssignments);
 	}
 	return candidates;

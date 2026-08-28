@@ -220,7 +220,7 @@ No fallback search is performed for missing assets.
 - **Skills**: named, optional capability packs selected by task context or explicitly requested
 - **AGENTS.md/context files**: persistent instruction files loaded as context-file capability and merged by level/depth rules
 
-`src/discovery/agents-md.ts` specifically walks ancestor directories from `cwd` to discover standalone `AGENTS.md` files (stopping at the repo root, or home when no repo root is known), skipping files whose containing directory name starts with a dot.
+`src/discovery/agents-md.ts` walks ancestor directories from `cwd` to discover standalone `AGENTS.md` files. For repositories nested under the user's home directory, it continues through enclosing workspace directories up to but not including the home directory. With no repository root under home, the home boundary remains included. Otherwise it stops at the repository root, or at the filesystem root when no repository root is known outside home. Files in hidden owner directories are skipped.
 
 ### Skills vs slash commands
 

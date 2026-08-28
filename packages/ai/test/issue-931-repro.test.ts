@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { Context, Model, OpenAICompat } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 
 const testContext: Context = {
@@ -29,7 +30,9 @@ function captureResponsesPayload(
 }
 
 function customResponsesModel(compat: OpenAICompat): Model<"openai-responses"> {
-	return {
+	// Resolve compat through the production constructor: sparse user overrides on
+	// top of host detection, exactly as a configured custom model is built.
+	return buildModel<"openai-responses">({
 		id: "deepseek-v4-flash:cloud",
 		name: "deepseek-v4-flash:cloud",
 		api: "openai-responses",
@@ -46,7 +49,7 @@ function customResponsesModel(compat: OpenAICompat): Model<"openai-responses"> {
 			effortMap: compat.reasoningEffortMap,
 		},
 		compat,
-	} as unknown as Model<"openai-responses">;
+	});
 }
 
 describe("issue #931 — openai-responses reasoning effort mapping", () => {

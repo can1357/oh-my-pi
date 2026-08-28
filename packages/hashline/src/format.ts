@@ -139,8 +139,20 @@ export function formatNumberedLine(lineNumber: number, line: string): string {
 	return `${lineNumber}${HL_LINE_BODY_SEP}${line}`;
 }
 
+/**
+ * Split LF-delimited file text into lines hashline anchors can address.
+ * A terminal newline terminates the preceding line; it is not content.
+ */
+export function splitAddressableFileLines(text: string): string[] {
+	const lines = text.split("\n");
+	if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+	return lines;
+}
+
 /** Format file text with hashline-mode line-number prefixes for display. */
 export function formatNumberedLines(text: string, startLine = 1): string {
-	const lines = text.split("\n");
-	return lines.map((line, i) => formatNumberedLine(startLine + i, line)).join("\n");
+	return text
+		.split("\n")
+		.map((line, i) => formatNumberedLine(startLine + i, line))
+		.join("\n");
 }

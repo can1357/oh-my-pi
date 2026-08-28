@@ -24,7 +24,12 @@ describe("buildFireworksFastSeed", () => {
 	const byId = new Map(seed.map(model => [model.id, model]));
 
 	it("emits one fireworks fast variant per curated base", () => {
-		expect([...byId.keys()].sort()).toEqual(["glm-5.1-fast", "kimi-k2.6-fast", "kimi-k2.7-code-fast"]);
+		expect([...byId.keys()].sort()).toEqual([
+			"glm-5.1-fast",
+			"glm-5.2-fast",
+			"kimi-k2.6-fast",
+			"kimi-k2.7-code-fast",
+		]);
 		for (const model of seed) {
 			expect(model.provider).toBe("fireworks");
 			expect(isFireworksFastModelId(model.id)).toBe(true);
@@ -35,6 +40,7 @@ describe("buildFireworksFastSeed", () => {
 		expect(byId.get("kimi-k2.6-fast")?.cost).toEqual({ input: 2, output: 8, cacheRead: 0.3, cacheWrite: 0 });
 		expect(byId.get("kimi-k2.7-code-fast")?.cost).toEqual({ input: 1.9, output: 8, cacheRead: 0.38, cacheWrite: 0 });
 		expect(byId.get("glm-5.1-fast")?.cost).toEqual({ input: 2.8, output: 8.8, cacheRead: 0.52, cacheWrite: 0 });
+		expect(byId.get("glm-5.2-fast")?.cost).toEqual({ input: 2.1, output: 6.6, cacheRead: 0.21, cacheWrite: 0 });
 	});
 
 	it("inherits limits and modalities from the base model", () => {

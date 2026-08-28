@@ -348,7 +348,7 @@ describe("HookEditorComponent prompt-style mode", () => {
 		expect(onCancel).not.toHaveBeenCalled();
 	});
 
-	it("renders prompt-style editor with legacy ask chrome", () => {
+	it("renders prompt-style editor with rounded overlay chrome", () => {
 		const component = new HookEditorComponent(createTui(), "Prompt", undefined, vi.fn(), vi.fn(), {
 			promptStyle: true,
 		});
@@ -356,9 +356,9 @@ describe("HookEditorComponent prompt-style mode", () => {
 		const rendered = renderText(component);
 		const lines = renderLines(component);
 
-		expect(lines[0]).toMatch(/^─+$/);
-		expect(lines.at(-1)).toMatch(/^─+$/);
-		expect(lines[4]?.startsWith("> ")).toBe(true);
+		expect(lines[0]).toMatch(/^╭─ Prompt .*╮$/);
+		expect(lines.at(-1)).toMatch(/^╰.*╯$/);
+		expect(lines.some(line => line.includes("> "))).toBe(true);
 		expect(rendered).toContain("enter or ctrl+q submit  esc cancel");
 		expect(rendered).not.toContain("shift+enter newline");
 		expect(rendered).toContain("ctrl+g external editor");
@@ -386,8 +386,9 @@ describe("HookEditorComponent prompt-style mode", () => {
 		}
 
 		const lines = renderLines(component);
-		expect(lines[4]?.startsWith("> hello")).toBe(true);
-		expect(lines[4]?.startsWith("hello")).toBe(false);
+
+		expect(lines.some(line => line.includes("> hello"))).toBe(true);
+		expect(lines.some(line => line.includes("hello") && !line.includes(">"))).toBe(false);
 	});
 
 	it("aligns wrapped prompt-style continuation rows under the text column", () => {
@@ -396,9 +397,11 @@ describe("HookEditorComponent prompt-style mode", () => {
 		});
 
 		const lines = renderLines(component, 12);
-		expect(lines[4]).toBe("> abcdefghij");
-		expect(lines[5]?.startsWith("  klm")).toBe(true);
-		expect(lines[5]?.startsWith(">")).toBe(false);
+
+		expect(lines.some(line => line.includes("> abcdef"))).toBe(true);
+		const continuation = lines.find(line => line.includes("ghijkl"));
+		expect(continuation).toBeDefined();
+		expect(continuation).not.toContain(">");
 	});
 
 	it("cancels on Escape", () => {
@@ -432,24 +435,20 @@ describe("HookEditorComponent prompt-style mode", () => {
 		expect(onSubmit).not.toHaveBeenCalled();
 	});
 
-	it("aligns the title and hint with the editor prompt gutter at column zero (#5313)", () => {
+	it("renders the title in the border, detail lines, hint, and prompt gutter", () => {
 		const title = "◆ Other (type your own)\nEnter your response:";
 		const component = new HookEditorComponent(createTui(), title, "不太清楚，", vi.fn(), vi.fn(), {
 			promptStyle: true,
 		});
 		const lines = renderLines(component);
 
-		const titleRow = lines.find(line => line.includes("Enter your response:"));
-		const gutterRow = lines.find(line => line.startsWith("> "));
-		const hintRow = lines.find(line => line.includes("esc cancel"));
-
-		expect(titleRow).toBeDefined();
-		expect(gutterRow).toBeDefined();
-		expect(hintRow).toBeDefined();
-		// The borderless prompt-style editor renders `> ` starting at column 0, so
-		// the surrounding title/hint chrome must not carry a leading indent.
-		expect(titleRow!.startsWith("Enter your response:")).toBe(true);
-		expect(hintRow!.startsWith(" ")).toBe(false);
+		// First title line insets into the top border row.
+		expect(lines[0]).toContain("Other (type your own)");
+		// Remaining title lines, gutter, and hint are body rows.
+		const content = component.renderContent(80).map(line => Bun.stripANSI(line));
+		expect(content.some(line => line.startsWith("Enter your response:"))).toBe(true);
+		expect(content.some(line => line.startsWith("> "))).toBe(true);
+		expect(content.some(line => line.includes("esc cancel"))).toBe(true);
 	});
 });
 

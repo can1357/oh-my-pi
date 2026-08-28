@@ -6,7 +6,12 @@
  */
 import { describe, expect, it } from "bun:test";
 import { getCapability } from "@oh-my-pi/pi-coding-agent/capability";
-import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule, ruleCapability } from "@oh-my-pi/pi-coding-agent/capability/rule";
+import {
+	BUILTIN_DEFAULTS_PROVIDER_ID,
+	compileRuleCondition,
+	type Rule,
+	ruleCapability,
+} from "@oh-my-pi/pi-coding-agent/capability/rule";
 import type { LoadContext } from "@oh-my-pi/pi-coding-agent/capability/types";
 // Register all discovery providers as a side effect.
 import "@oh-my-pi/pi-coding-agent/discovery";
@@ -181,6 +186,57 @@ describe("builtin-defaults rule provider", () => {
 			}),
 		).toEqual([]);
 	});
+	it("opens every bundled regex condition that uses a bare line anchor with the multiline inline flag", async () => {
+		// Without the (?m) inline flag a bare ^ or $ anchors to the absolute
+		// start/end of input, so a rule whose condition is anchored to a line
+		// silently stops matching in real files (see #6890). Enforce the pairing
+		// at load time so the failure class stays closed.
+		const rules = await loadBuiltinRules();
+		for (const rule of rules) {
+			for (const condition of rule.condition ?? []) {
+				const outsideCharClasses = condition.replace(/\[[^\]]*\]/g, "");
+				const hasBareAnchor = /(^|[^\\])[\^$]/.test(outsideCharClasses);
+				const hasMultilineSemantics = compileRuleCondition(condition).multiline;
+				expect(
+					hasBareAnchor ? hasMultilineSemantics : true,
+					`${rule.name}: a condition with a bare ^ or $ anchor must open with the multiline inline flag`,
+				).toBe(true);
+			}
+		}
+	});
+
+	it("fires ts-no-tiny-functions on one-line arrow functions even with a trailing newline", async () => {
+		const rules = await loadBuiltinRules();
+		const rule = rules.find(r => r.name === "ts-no-tiny-functions");
+		if (!rule) throw new Error("ts-no-tiny-functions rule missing");
+
+		const manager = new TtsrManager();
+		expect(manager.addRule(rule)).toBe(true);
+		const ctx: TtsrMatchContext = { source: "tool", toolName: "edit", filePaths: ["src/foo.ts"] };
+
+		// Real files end with a newline, so the arrow alternative must match
+		// before the line terminator, not only at the absolute end of input.
+		const hits = [
+			"const getName = (u) => u.profile.name;\n",
+			"const getName = (u) => u.profile.name;",
+			"const a = 1;\nconst getName = (u) => u.profile.name;\nconst b = 2;",
+		];
+		for (const snippet of hits) {
+			manager.resetBuffer();
+			expect(
+				manager.checkDelta(snippet, ctx).map(m => m.name),
+				snippet,
+			).toEqual(["ts-no-tiny-functions"]);
+		}
+
+		// Multi-statement functions (block bodies) are not tiny wrappers.
+		const misses = ["function f(v) { const x = v.a; return x; }", "const f = (v) => { const x = v.a; return x; };"];
+		for (const snippet of misses) {
+			manager.resetBuffer();
+			expect(manager.checkDelta(snippet, ctx), snippet).toEqual([]);
+		}
+	});
+
 	it("go-new-expr matches value→pointer helpers (named + generic) but not real functions, only on *.go", async () => {
 		const rules = await loadBuiltinRules();
 		const rule = rules.find(r => r.name === "go-new-expr");

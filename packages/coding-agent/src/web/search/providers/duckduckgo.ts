@@ -372,7 +372,7 @@ export class DuckDuckGoProvider extends SearchProvider {
 		return true;
 	}
 
-	isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
+	override isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
 		return true;
 	}
 

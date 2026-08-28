@@ -27,6 +27,7 @@ import {
 import { interceptUnhandledRejections } from "@oh-my-pi/pi-utils/postmortem";
 import { setProcessName } from "@oh-my-pi/pi-utils/process-name";
 import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
+import { BLOB_BROKER_WORKER_ARG } from "./blob-broker/protocol";
 import { installProfileAlias, resolveProfileAliasCommandFromProcess } from "./cli/profile-alias";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
 import { startJsEvalProcess } from "./eval/js/process-entry";
@@ -34,6 +35,8 @@ import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbou
 import { DAEMON_BROKER_WORKER_ARG } from "./launch/protocol";
 import { TERMINAL_OUTPUT_WORKER_ARG } from "./launch/terminal-output-worker-protocol";
 import { LSP_MUX_WORKER_ARG } from "./lsp/mux/protocol";
+import rootLicense from "./tools/browser/relay/extension-assets/LICENSE.txt" with { type: "text" };
+import thirdPartyNotices from "./tools/browser/relay/extension-assets/THIRD-PARTY-NOTICES.txt" with { type: "text" };
 import { COMPUTER_WORKER_ARG } from "./tools/computer/protocol";
 import { smokeTestComputerWorker } from "./tools/computer/supervisor";
 import { startComputerWorker } from "./tools/computer/worker-entry";
@@ -54,6 +57,10 @@ setProcessName(APP_NAME);
 // CLI builds are unaffected. A compiled binary's entry module is by definition
 // the process entry, so the define-folded PI_COMPILED marker stands in.
 const isProcessEntry = import.meta.main || process.env.PI_COMPILED === "true";
+
+function formatLicenseOutput(): string {
+	return `OMP License and Third-Party Notices\n\n${rootLicense.trimEnd()}\n\n${thirdPartyNotices.trimEnd()}\n`;
+}
 
 // Worker-host entry declaration (Worker threads and worker subprocesses
 // re-enter `Bun.main` with a hidden argv selector instead of loading separate
@@ -95,6 +102,7 @@ async function runSmokeTest(): Promise<void> {
 	// Other smoke dependencies stay lazy so normal CLI startup does not load their worker clients.
 	const { smokeTestDaemonBroker } = await import("./launch/client");
 	const { smokeTestLspMux } = await import("./lsp/mux/daemon");
+	const { smokeTestBlobBroker } = await import("./blob-broker/daemon");
 	const { smokeTestTerminalOutputWorker } = await import("./launch/terminal-output-worker-client");
 	await smokeTestSyncWorker();
 
@@ -118,6 +126,7 @@ async function runSmokeTest(): Promise<void> {
 	await smokeTestMnemopiEmbedWorker();
 	await smokeTestDaemonBroker();
 	await smokeTestLspMux();
+	await smokeTestBlobBroker();
 	await smokeTestTerminalOutputWorker();
 	process.stdout.write("smoke-test: ok\n");
 }
@@ -220,6 +229,11 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === LSP_MUX_WORKER_ARG) {
 		const { startLspMuxFromEnvironment } = await import("./lsp/mux/server");
 		await startLspMuxFromEnvironment();
+		return true;
+	}
+	if (arg === BLOB_BROKER_WORKER_ARG) {
+		const { startBlobBrokerFromEnvironment } = await import("./blob-broker/server");
+		await startBlobBrokerFromEnvironment();
 		return true;
 	}
 	return false;
@@ -393,23 +407,56 @@ export async function runCli(argv: string[]): Promise<void> {
 	// browser workers onto the same-realm inline fallback.
 	if (isProcessEntry) declareWorkerHostEntry();
 
+	// `PI_PROXY` must reach the bare global `fetch` before any provider call:
+	// OAuth refresh/login and usage probes never pass through
+	// `wrapFetchForProxy`, so without this they bypass the proxy and fail
+	// wherever the provider blocks the caller's region. Dynamically imported
+	// like every other dependency in this entry module: a static `pi-ai` import
+	// would load the provider graph before profile bootstrap and on paths
+	// (`--version`, worker selectors) that never touch the network.
+	const { installGlobalProxyFetch } = await import("@oh-my-pi/pi-ai/utils/proxy");
+	installGlobalProxyFetch();
+
 	if (resolvedArgv[0] === "--smoke-test") {
 		await runSmokeTest();
 		return;
 	}
-	const [{ run }, { commands, resolveCliArgv }] = await Promise.all([
-		import("@oh-my-pi/pi-utils/cli"),
-		import("./cli-commands"),
-	]);
-	// --help and --version are handled by run() directly, don't rewrite those.
-	// Everything else that isn't a known subcommand routes to "launch".
-	const resolved = resolveCliArgv(resolvedArgv);
-	if ("error" in resolved) {
-		process.stderr.write(`error: ${resolved.error}\n`);
-		process.exitCode = 1;
+	if (resolvedArgv[0] === "--license") {
+		process.stdout.write(formatLicenseOutput());
 		return;
 	}
-	return run({ bin: APP_NAME, version: VERSION, argv: resolved.argv, commands, metadataHelp: showHelp });
+	let stopStartupComposer: (() => void) | undefined;
+	if (
+		!process.env.PI_TIMING &&
+		process.stdin.isTTY === true &&
+		process.stdout.isTTY === true &&
+		(resolvedArgv.length === 0 || (resolvedArgv.length === 1 && resolvedArgv[0] === "--no-session"))
+	) {
+		// Intentional exception to the static-import convention: this latency boundary
+		// keeps the TUI graph out of worker, subcommand, help, and version launches.
+		// Loading it statically would erase the measured cold-start improvement.
+		const { beginStartupComposer, stopPendingStartupComposer } = await import("./modes/startup-composer");
+		beginStartupComposer({ version: VERSION });
+		stopStartupComposer = stopPendingStartupComposer;
+	}
+
+	try {
+		const [{ run }, { commands, resolveCliArgv }] = await Promise.all([
+			import("@oh-my-pi/pi-utils/cli"),
+			import("./cli-commands"),
+		]);
+		// --help and --version are handled by run() directly; --license returned above.
+		// Everything else that isn't a known subcommand routes to "launch".
+		const resolved = resolveCliArgv(resolvedArgv);
+		if ("error" in resolved) {
+			process.stderr.write(`error: ${resolved.error}\n`);
+			process.exitCode = 1;
+			return;
+		}
+		await run({ bin: APP_NAME, version: VERSION, argv: resolved.argv, commands, metadataHelp: showHelp });
+	} finally {
+		stopStartupComposer?.();
+	}
 }
 
 // Floating call instead of top-level await: TLA forces `--bytecode` (CJS

@@ -98,7 +98,10 @@ describe("InteractiveMode.handleResumeSession outer preflight flush", () => {
 
 			expect(mode.settings.flush).toHaveBeenCalled();
 			expect(resetSpy).toHaveBeenCalled();
-			expect(switchSpy).toHaveBeenCalledWith("/tmp/some-session.jsonl");
+			expect(switchSpy).toHaveBeenCalledWith(
+				"/tmp/some-session.jsonl",
+				expect.objectContaining({ onCwdChange: expect.any(Function) }),
+			);
 		} finally {
 			await cleanup();
 		}

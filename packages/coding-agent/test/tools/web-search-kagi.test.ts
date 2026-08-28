@@ -58,6 +58,34 @@ describe("Kagi web search error handling", () => {
 			"Kagi API error (502)",
 		);
 	});
+
+	it("reports malformed success responses as Kagi API errors", async () => {
+		const invalidJsonFetch: FetchImpl = async () => new Response("<html>not json</html>", { status: 200 });
+		const invalidEnvelopeFetch: FetchImpl = async () =>
+			new Response(JSON.stringify(["unexpected"]), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+
+		await expect(searchWithKagi("invalid json", { fetch: invalidJsonFetch }, fakeAuthStorage)).rejects.toThrow(
+			"Kagi API returned an invalid response: invalid JSON",
+		);
+		await expect(
+			searchWithKagi("invalid envelope", { fetch: invalidEnvelopeFetch }, fakeAuthStorage),
+		).rejects.toThrow("Kagi API returned an invalid response: expected an object envelope");
+	});
+
+	it("recognizes errors plural in a successful HTTP envelope", async () => {
+		const fetchMock: FetchImpl = async () =>
+			new Response(JSON.stringify({ errors: [{ code: 429, message: "quota exceeded" }] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+
+		await expect(searchWithKagi("envelope error", { fetch: fetchMock }, fakeAuthStorage)).rejects.toThrow(
+			"Kagi API error (429): quota exceeded",
+		);
+	});
 	it("applies the configured timeout at the provider fetch boundary", async () => {
 		const timeoutSignal = new AbortController().signal;
 		const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeoutSignal);
@@ -156,6 +184,39 @@ describe("Kagi search result parsing", () => {
 		expect(result.sources[2]).toMatchObject({ title: "[News] Breaking News", url: "https://example.com/news" });
 		expect(result.relatedQuestions).toEqual(["related query one", "related query two"]);
 		expect(result.answer).toBeUndefined();
+	});
+
+	it("accepts documented result aliases and skips malformed items", async () => {
+		const fetchMock: FetchImpl = async () =>
+			new Response(
+				JSON.stringify({
+					data: {
+						search: [
+							null,
+							{ title: "Missing URL" },
+							{
+								href: "https://example.com/alias",
+								name: "Alias Result",
+								description: "Alias description",
+							},
+						],
+						related_search: { invalid: true },
+					},
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+
+		const result = await searchWithKagi("aliases", { fetch: fetchMock }, fakeAuthStorage);
+
+		expect(result.sources).toEqual([
+			{
+				title: "Alias Result",
+				url: "https://example.com/alias",
+				snippet: "Alias description",
+				publishedDate: undefined,
+			},
+		]);
+		expect(result.relatedQuestions).toEqual([]);
 	});
 
 	it("parses direct_answer into the answer field", async () => {

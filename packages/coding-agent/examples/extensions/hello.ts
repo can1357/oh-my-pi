@@ -1,12 +1,12 @@
 /**
  * Hello Tool - Minimal custom tool example
  *
- * Demonstrates using ExtensionAPI's logger, injected `pi.zod`, and pi module access.
+ * Demonstrates using ExtensionAPI's logger and injected schema builder.
  */
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
-	const { z } = pi.zod;
+	const z = pi.zod;
 
 	pi.registerTool({
 		name: "hello",

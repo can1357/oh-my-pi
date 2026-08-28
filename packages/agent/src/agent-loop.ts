@@ -31,7 +31,11 @@ import {
 	wrapInbandToolStream,
 } from "@oh-my-pi/pi-ai/dialect";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { type CursorExecResolvedCarrier, kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import {
+	type CursorExecResolvedCarrier,
+	copyCursorExecResolved,
+	kCursorExecResolved,
+} from "@oh-my-pi/pi-ai/utils/block-symbols";
 import {
 	createHarmonyAuditEvent,
 	detectHarmonyLeakInAssistantMessage,
@@ -356,12 +360,18 @@ function snapshotAssistantContentBlock(block: AssistantContentBlock): AssistantC
 			return { ...block, block: structuredCloneJSON(block.block) };
 		case "fallback":
 			return { ...block, from: { ...block.from }, to: { ...block.to } };
-		case "toolCall":
-			return {
+		case "toolCall": {
+			const snap = {
 				...block,
 				arguments: structuredCloneJSON(block.arguments),
 				providerMetadata: snapshotToolCallProviderMetadata(block.providerMetadata),
 			};
+			// Object spread copies enumerable symbols in Bun, but the Cursor
+			// exec-resolved marker is load-bearing for skip-on-dispatch — copy
+			// it explicitly so a projector/snapshot path cannot drop it.
+			copyCursorExecResolved(snap, block);
+			return snap;
+		}
 	}
 }
 
@@ -545,12 +555,35 @@ export function agentLoop(
 }
 
 /**
+ * Trailing assistant message whose runnable tool calls have no results yet.
+ *
+ * A harness that strips failed/aborted tool results in order to re-execute
+ * the calls (e.g. `AgentSession.retry`'s tool replay) leaves the transcript
+ * in this shape; {@link agentLoopContinue} resumes it by running those calls
+ * before the next model call. Cursor exec-resolved blocks are excluded — the
+ * provider already executed those server-side. `length`-truncated turns never
+ * qualify: their trailing call arguments may be incomplete.
+ */
+export function unpairedToolCallTail(messages: readonly AgentMessage[]): AssistantMessage | undefined {
+	const tail = messages[messages.length - 1];
+	if (tail?.role !== "assistant") return undefined;
+	// Mirrors the loop's `runnableStop` rule for fresh turns.
+	if (tail.stopReason !== "toolUse" && tail.stopReason !== "stop") return undefined;
+	const hasRunnable = tail.content.some(
+		c => c.type === "toolCall" && (c as CursorExecResolvedCarrier)[kCursorExecResolved] !== true,
+	);
+	return hasRunnable ? tail : undefined;
+}
+
+/**
  * Continue an agent loop from the current context without adding a new message.
  * Used for retries - context already has user message or tool results.
  *
  * **Important:** The last message in context must convert to a `user` or `toolResult` message
- * via `convertToLlm`. If it doesn't, the LLM provider will reject the request.
- * This cannot be validated here since `convertToLlm` is only called once per turn.
+ * via `convertToLlm` — except for an assistant tail with unpaired runnable
+ * tool calls (see {@link unpairedToolCallTail}), which resumes by executing
+ * those calls first. Any other assistant tail is rejected here; other invalid
+ * tails cannot be validated since `convertToLlm` is only called once per turn.
  */
 export function agentLoopContinue(
 	context: AgentContext,
@@ -562,7 +595,7 @@ export function agentLoopContinue(
 		throw new Error("Cannot continue: no messages in context");
 	}
 
-	if (context.messages[context.messages.length - 1].role === "assistant") {
+	if (context.messages[context.messages.length - 1].role === "assistant" && !unpairedToolCallTail(context.messages)) {
 		throw new Error("Cannot continue from message role: assistant");
 	}
 
@@ -613,6 +646,15 @@ function buildAgentEndEvent(
  * Push a `turn_end` event and run the awaited per-turn hook when the run is
  * still healthy. The hook is skipped for externally aborted or errored turns so
  * a user interrupt does not hang on a background backlog wait.
+ *
+ * A {@link TERMINAL_TOOL_RESULT_ABORT_REASON} abort is the exception: it is a
+ * graceful yield (e.g. a subagent's final `yield` tool), not a user interrupt.
+ * The completed tool batch is persisted and the turn must still reach
+ * `onTurnEnd` so per-turn bookkeeping — notably advisor review of the yield
+ * delta (#9505) — runs exactly as it does for a plain end-of-turn message. The
+ * hook receives no signal in that case so downstream waits (advisor catch-up)
+ * behave identically to a normal final turn instead of short-circuiting on the
+ * spent abort.
  */
 async function emitTurnEnd(
 	stream: EventStream<AgentEvent, AgentMessage[]>,
@@ -625,10 +667,16 @@ async function emitTurnEnd(
 	runHookOnAbortedMessage = false,
 ): Promise<void> {
 	stream.push({ type: "turn_end", message, toolResults });
+	const terminalYield = signal?.reason === TERMINAL_TOOL_RESULT_ABORT_REASON;
 	const isAbortedOrError =
 		message.role === "assistant" && (message.stopReason === "aborted" || message.stopReason === "error");
-	if (signal?.aborted || (isAbortedOrError && !runHookOnAbortedMessage)) return;
-	await config.onTurnEnd?.(currentContext.messages, signal, { message, toolResults, willContinue: false, ...context });
+	if ((signal?.aborted && !terminalYield) || (isAbortedOrError && !runHookOnAbortedMessage)) return;
+	await config.onTurnEnd?.(currentContext.messages, terminalYield ? undefined : signal, {
+		message,
+		toolResults,
+		willContinue: false,
+		...context,
+	});
 }
 
 function createGateStopMessage(model: Model, reason: string | undefined): AssistantMessage {
@@ -1016,7 +1064,7 @@ async function runLoopBody(
 		// Skip when the run is already externally aborted — dequeuing would strand
 		// the messages in a run that is about to die.
 		try {
-			pendingMessages = signal?.aborted ? [] : (await config.getSteeringMessages?.()) || [];
+			pendingMessages = signal?.aborted ? [] : (await config.getSteeringMessages?.(signal)) || [];
 		} catch (error) {
 			stream.push({ type: "turn_start" });
 			emitInputMessages(stream, messagesToEmit);
@@ -1036,6 +1084,43 @@ async function runLoopBody(
 		let softSatisfies: SoftToolRequirement["satisfies"];
 		let directiveResolvedForTurn = false;
 		let turnOpen = false;
+		// A trailing assistant message with unpaired tool calls: the harness
+		// stripped the failed/aborted results so this run re-executes the calls
+		// (AgentSession.retry's tool replay). Run them before the first model
+		// call; the loop then continues normally on the fresh results. Queued
+		// steering stays parked until after the batch — injecting a message
+		// between the tool_use blocks and their results would break the
+		// provider's pairing invariant.
+		const resumeTail = unpairedToolCallTail(currentContext.messages);
+		if (resumeTail) {
+			stream.push({ type: "turn_start" });
+			emitInputMessages(stream, messagesToEmit);
+			messagesToEmit = [];
+			turnOpen = true;
+			const executionResult = await executeToolCalls(
+				currentContext,
+				resumeTail,
+				signal,
+				stream,
+				config,
+				telemetry,
+				invokeAgentSpan,
+			);
+			for (const result of executionResult.toolResults) {
+				currentContext.messages.push(result);
+				newMessages.push(result);
+			}
+			await emitTurnEnd(stream, currentContext, resumeTail, executionResult.toolResults, config, signal, {
+				willContinue: !isDeadlineExceeded(config.deadline),
+			});
+			turnOpen = false;
+			// A tool hook may mark its completed result as terminal (e.g. subagent
+			// yield) — same stop-before-next-model-call rule as the main loop.
+			if (signal?.reason === TERMINAL_TOOL_RESULT_ABORT_REASON) {
+				endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+				return;
+			}
+		}
 
 		// Outer loop: continues when queued follow-up messages arrive after agent would stop
 		while (true) {
@@ -1075,7 +1160,7 @@ async function runLoopBody(
 				let gateResult: AgentPreModelCallResult;
 				try {
 					if (config.syncContextBeforeModelCall) {
-						await config.syncContextBeforeModelCall(currentContext);
+						await config.syncContextBeforeModelCall(currentContext, signal);
 					}
 
 					if (!directiveResolvedForTurn) {
@@ -1421,7 +1506,7 @@ async function runLoopBody(
 				// instantly aborts — message lands in history, agent never responds. The
 				// mid-batch interrupt poll only peeks (hasSteeringMessages), so the queue
 				// still owns every message until this dequeue.
-				const steering = signal?.aborted ? [] : (await config.getSteeringMessages?.()) || [];
+				const steering = signal?.aborted ? [] : (await config.getSteeringMessages?.(signal)) || [];
 				if (hasMoreToolCalls) {
 					// Mid-work: fold any non-interrupting asides into the next turn alongside steering.
 					const asides = signal?.aborted ? [] : resolveAsides(await config.getAsideMessages?.());
@@ -1450,9 +1535,9 @@ async function runLoopBody(
 			// Re-poll steering too: a steer can land between the stop-boundary dequeue
 			// above and this yield point (e.g. queued while onBeforeYield ran). Without
 			// this poll it would strand in the queue until the next manual prompt.
-			const lateSteering = signal?.aborted ? [] : (await config.getSteeringMessages?.()) || [];
+			const lateSteering = signal?.aborted ? [] : (await config.getSteeringMessages?.(signal)) || [];
 			const asideMessages = signal?.aborted ? [] : resolveAsides(await config.getAsideMessages?.());
-			const followUpMessages = signal?.aborted ? [] : (await config.getFollowUpMessages?.()) || [];
+			const followUpMessages = signal?.aborted ? [] : (await config.getFollowUpMessages?.(signal)) || [];
 			if (lateSteering.length > 0 || asideMessages.length > 0 || followUpMessages.length > 0) {
 				// Set as pending so the inner loop processes them before stopping.
 				pendingMessages = [...lateSteering, ...asideMessages, ...followUpMessages];

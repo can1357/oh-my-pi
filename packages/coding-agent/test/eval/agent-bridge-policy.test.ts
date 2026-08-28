@@ -290,10 +290,7 @@ describe("runEvalAgent", () => {
 			}),
 		});
 
-		await runEvalAgent(
-			{ prompt: " hello ", label: "My Agent", model: "p/override", schema },
-			{ session, signal: abortController.signal },
-		);
+		await runEvalAgent({ prompt: " hello ", label: "My Agent", schema }, { session, signal: abortController.signal });
 		await runEvalAgent({ prompt: "plain" }, { session });
 
 		const firstOptions = runSpy.mock.calls[0]?.[0];
@@ -306,9 +303,25 @@ describe("runEvalAgent", () => {
 		expect(firstOptions.outputSchemaOverridesAgent).toBe(true);
 		expect(firstOptions.assignment).toBe("hello");
 		expect(firstOptions.description).toBe("My Agent");
-		expect(firstOptions.modelOverride).toEqual(["p/override"]);
+		// No per-call override: the agent's own frontmatter model applies.
+		expect(firstOptions.modelOverride).toEqual(["p/current"]);
 		expect(secondOptions.outputSchema).toBeUndefined();
 		expect(secondOptions.outputSchemaOverridesAgent).toBeUndefined();
+	});
+
+	it("drops a per-call model argument on agent() (removed, issue #6438)", async () => {
+		mockAgents();
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+
+		// The schema strips unknown keys; a legacy `model` argument is silently
+		// discarded so resolution is identical to omitting it — the agent's own
+		// frontmatter model applies (issue #6438).
+		await runEvalAgent({ prompt: "work", model: "default" }, { session: makeSession() });
+		await runEvalAgent({ prompt: "work" }, { session: makeSession() });
+
+		const withModel = runSpy.mock.calls[0]?.[0];
+		const withoutModel = runSpy.mock.calls[1]?.[0];
+		expect(withModel?.modelOverride).toEqual(withoutModel?.modelOverride);
 	});
 	it("returns host-parsed data for caller, agent, and inherited schemas", async () => {
 		const agentSchema = { type: "object" };
@@ -355,7 +368,7 @@ describe("runEvalAgent", () => {
 		]);
 	});
 
-	it("inherits non-plan LSP and IRC policy for bridge subagents", async () => {
+	it("keeps bridge kernels independent while inheriting non-plan LSP and IRC policy", async () => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 		// makeSession() defaults to enableLsp: true and task.enableLsp: true.
@@ -368,6 +381,7 @@ describe("runEvalAgent", () => {
 		expect(options.enableLsp).toBe(true);
 		expect(options.enableIrc).toBe(true);
 		expect(options.keepAlive).toBe(false);
+		expect(options.parentEvalSessionId).toBeUndefined();
 	});
 
 	it("registers temp artifact dirs for in-memory handle results so agent URLs resolve", async () => {
@@ -388,9 +402,18 @@ describe("runEvalAgent", () => {
 	it("unregisters eval subagents through the bridge cleanup path", async () => {
 		AgentRegistry.resetGlobalForTests();
 		mockAgents();
+		const order: string[] = [];
 		let disposed = false;
 		const cleanupSession = {
+			prepareForHeadlessAdvisorDrain: () => {
+				order.push("prepare");
+			},
+			waitForAdvisorCatchup: async () => {
+				order.push("catchup");
+				return true;
+			},
 			dispose: async () => {
+				order.push("dispose");
 				disposed = true;
 			},
 		} as unknown as AgentSession;
@@ -417,6 +440,9 @@ describe("runEvalAgent", () => {
 		await runEvalAgent({ prompt: "hello", label: "Cleanup" }, { session: makeSession() });
 
 		expect(disposed).toBe(true);
+		// The advisor's final-turn review is drained before the runtime is torn
+		// down (#9505): a graceful subagent finish must not abandon the yield.
+		expect(order).toEqual(["prepare", "catchup", "dispose"]);
 		expect(AgentRegistry.global().get("Cleanup")).toBeUndefined();
 		expect(
 			AgentRegistry.global()

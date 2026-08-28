@@ -150,6 +150,24 @@ describe("FileSessionStorage writer", () => {
 		await expect(writer.append("two\n")).rejects.toThrow("disk full");
 		await expect(writer.close()).rejects.toThrow("disk full");
 	});
+
+	it("rolls back bytes from a partial append before surfacing the error", () => {
+		const sessionPath = path.join(tempDir, "partial-append.jsonl");
+		fs.writeFileSync(sessionPath, "complete\n");
+		const writer = storage.openWriter(sessionPath);
+		vi.spyOn(fs, "writeSync")
+			.mockImplementationOnce(() => {
+				fs.appendFileSync(sessionPath, "par");
+				return 3;
+			})
+			.mockImplementation(() => {
+				throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+			});
+		const appendSync = writer.appendSync?.bind(writer);
+		if (!appendSync) throw new Error("File writer must expose appendSync");
+		expect(() => appendSync("partial entry\n")).toThrow("ENOSPC");
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("complete\n");
+	});
 });
 
 describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
@@ -374,5 +392,36 @@ describe("IndexedSessionStorage.writeTextAtomic commitGuard", () => {
 		await second;
 
 		expect(backend.writeFullCalls.map(call => call.content)).toEqual(["seed"]);
+	});
+
+	it("drain waits for an in-flight atomic publish that passed its guard before the seal", async () => {
+		const backend = new PausableWriteFullBackend();
+		const storage = new IndexedSessionStorage(backend);
+		await storage.initialize();
+
+		// The guard passes at enqueue time, then the backend write parks on the
+		// wire (Redis/SQL). A terminal seal lands while it is in flight. drain()
+		// — what SessionManager.close() awaits before dispose returns — must not
+		// resolve until the publish settles, or a revival could reopen the path
+		// and be overwritten afterwards.
+		let sealed = false;
+		const write = storage.writeTextAtomic("/sessions/s.jsonl", "pre-seal body", {
+			commitGuard: () => !sealed,
+		});
+		await backend.firstWriteStarted.promise;
+		sealed = true;
+
+		let drained = false;
+		const drainP = storage.drain().then(() => {
+			drained = true;
+		});
+		for (let i = 0; i < 10; i++) await Promise.resolve();
+		expect(drained).toBe(false);
+
+		backend.firstWriteRelease.resolve();
+		await drainP;
+		await write;
+		expect(drained).toBe(true);
+		expect(backend.writeFullCalls.map(call => call.content)).toEqual(["pre-seal body"]);
 	});
 });

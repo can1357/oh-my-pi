@@ -50,12 +50,19 @@ function buildSpawnEnv(shell: string): Record<string, string> {
 
 /**
  * Get shell args for the resolved shell.
- * cmd.exe takes `/c`; POSIX shells take `-c`, with `-l` unless
- * PI_BASH_NO_LOGIN / CLAUDE_BASH_NO_LOGIN is set.
+ * cmd.exe takes `/c`; PowerShell (powershell.exe / pwsh) takes
+ * `-NoLogo -Command`, with `-NoProfile` when PI_BASH_NO_LOGIN /
+ * CLAUDE_BASH_NO_LOGIN is set (profile scripts are PowerShell's login-shell
+ * analog); POSIX shells take `-c`, with `-l` unless the same env is set.
+ *
+ * Exported for tests; `env` overrides the process env gate.
  */
-function getShellArgs(shell: string): string[] {
+export function getShellArgs(shell: string, env: Record<string, string | undefined> = $env): string[] {
 	if (isCmdShell(shell)) return ["/c"];
-	const noLogin = $env.PI_BASH_NO_LOGIN || $env.CLAUDE_BASH_NO_LOGIN;
+	const noLogin = env.PI_BASH_NO_LOGIN || env.CLAUDE_BASH_NO_LOGIN;
+	if (isPowerShell(shell)) {
+		return noLogin ? ["-NoLogo", "-NoProfile", "-Command"] : ["-NoLogo", "-Command"];
+	}
 	return noLogin ? ["-c"] : ["-l", "-c"];
 }
 
@@ -63,6 +70,16 @@ function getShellArgs(shell: string): string[] {
 export function isCmdShell(shell: string): boolean {
 	const basename = shell.replace(/\\/g, "/").split("/").pop()?.toLowerCase();
 	return basename === "cmd.exe" || basename === "cmd";
+}
+
+/**
+ * Whether the shell is Windows PowerShell or PowerShell Core (pwsh). Spawn
+ * paths must use `-Command`: passing the POSIX `-l -c` pair makes PowerShell
+ * parse `-l` as the command and fail with `The term '-l' is not recognized`.
+ */
+export function isPowerShell(shell: string): boolean {
+	const basename = shell.replace(/\\/g, "/").split("/").pop()?.toLowerCase();
+	return basename === "powershell.exe" || basename === "powershell" || basename === "pwsh.exe" || basename === "pwsh";
 }
 
 /**

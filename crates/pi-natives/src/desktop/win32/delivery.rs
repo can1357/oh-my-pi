@@ -4,7 +4,7 @@
 //! exercised by the host test suite on every platform.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum EventKind {
+pub enum EventKind {
 	MouseClick,
 	MouseMove,
 	MouseScroll,
@@ -26,34 +26,34 @@ impl EventKind {
 	}
 }
 
-pub(crate) fn is_chromium_class(class: &str) -> bool {
+pub fn is_chromium_class(class: &str) -> bool {
 	class
 		.strip_prefix("Chrome_WidgetWin_")
 		.is_some_and(|suffix| !suffix.is_empty())
 }
 
-pub(crate) fn is_winui3_class(class: &str) -> bool {
+pub fn is_winui3_class(class: &str) -> bool {
 	class == "WinUIDesktopWin32WindowClass"
 }
 
-pub(crate) fn is_wpf_class(class: &str) -> bool {
+pub fn is_wpf_class(class: &str) -> bool {
 	class
 		.strip_prefix("HwndWrapper[")
 		.is_some_and(|body| !body.is_empty() && body.ends_with(']'))
 }
 
-pub(crate) fn is_tk_class(class: &str) -> bool {
+pub fn is_tk_class(class: &str) -> bool {
 	class == "TkTopLevel"
 		|| class
 			.strip_prefix("TkTopLevel.")
 			.is_some_and(|suffix| !suffix.is_empty())
 }
 
-pub(crate) fn is_gtk_class(class: &str) -> bool {
+pub fn is_gtk_class(class: &str) -> bool {
 	class == "gdkWindowToplevel" || class == "gdkSurfaceToplevel"
 }
 
-pub(crate) fn is_vcl_class(class: &str) -> bool {
+pub fn is_vcl_class(class: &str) -> bool {
 	class
 		.strip_prefix("SAL")
 		.is_some_and(|suffix| !suffix.is_empty())
@@ -61,7 +61,7 @@ pub(crate) fn is_vcl_class(class: &str) -> bool {
 
 /// Returns the empirical reason that a posted event would be accepted by
 /// Win32 but silently ignored by the target toolkit.
-pub(crate) fn would_be_silently_dropped(class: &str, kind: EventKind) -> Option<&'static str> {
+pub fn would_be_silently_dropped(class: &str, kind: EventKind) -> Option<&'static str> {
 	use EventKind::{KeyCombo, Keystroke, MouseClick, MouseMove, MouseScroll, TextInput};
 
 	if is_chromium_class(class) {

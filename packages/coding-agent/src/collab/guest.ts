@@ -25,6 +25,7 @@ import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { SessionEntry } from "../session/session-entries";
 import { shouldDisableReasoning, toReasoningEffort } from "../thinking";
+import { emitSubagentFrame } from "../utils/event-bus";
 import { setSessionTerminalTitle } from "../utils/title-generator";
 import { importRoomKey } from "./crypto";
 import { collabDisplayName } from "./display-name";
@@ -437,12 +438,13 @@ export class CollabGuestLink {
 		const lines = [pending.header, ...pending.entries].map(entry => JSON.stringify(entry)).join("\n");
 		await Bun.write(replicaPath, `${lines}\n`);
 
-		// Resume sequence (selector-controller.handleResumeSession) minus
-		// applyCwdChange: the guest process never chdirs to a host path. The
-		// SessionManager still adopts the header cwd for display/relativization.
+		// Resume through AgentSession without adopting the host's cwd.
+		const switched = await this.#ctx.session.switchSession(replicaPath, { preserveLocalCwd: true });
+		if (switched === false) {
+			throw new Error("Collab replica activation was cancelled");
+		}
 		this.#clearTransientUi();
 		this.#clearAgentMirror();
-		await this.#ctx.session.switchSession(replicaPath);
 		this.state = pending.state;
 		reconcileGuestSnapshotHostState(this.#ctx, pending.state.isStreaming);
 		this.#applyHostState(pending.state);
@@ -451,8 +453,8 @@ export class CollabGuestLink {
 		this.#ctx.syncRunningSubagentBadge();
 		this.#assistantStreamSynced = false;
 		setSessionTerminalTitle(pending.state.sessionName ?? pending.header.title, pending.state.cwd);
-		this.#ctx.chatContainer.clear();
-		this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
+		this.#ctx.chatContainer.disposeChildren();
+		await this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
 		await this.#ctx.reloadTodos();
 		this.#updateStatusSegment();
 		this.#readOnly = pending.readOnly;
@@ -504,6 +506,14 @@ export class CollabGuestLink {
 				this.#ctx.sessionManager.ingestReplicatedEntry(frame.entry);
 				if (frame.entry.type === "message") {
 					this.#ctx.session.agent.replaceMessages([...this.#ctx.session.messages, frame.entry.message]);
+				} else if (frame.entry.type === "compaction" || frame.entry.type === "branch_summary") {
+					// Compaction/branch entries rewrite the host's model context: the
+					// pre-boundary transcript collapses behind a summary. Appending
+					// the entry alone leaves the replica holding the stale full
+					// history, so rebuild the message array from the ingested entries
+					// exactly as the host does after appendCompaction/branchWithSummary
+					// (session-maintenance.ts, agent-session.ts).
+					this.#ctx.session.agent.replaceMessages(this.#ctx.session.buildDisplaySessionContext().messages);
 				}
 				break;
 			}
@@ -522,8 +532,9 @@ export class CollabGuestLink {
 			}
 			case "bus":
 				// Mirrored host EventBus traffic (task subagent lifecycle/progress)
-				// feeding the observer HUD and Agent Hub progress columns.
-				this.#ctx.eventBus?.emit(frame.channel, frame.data);
+				// feeding the observer HUD and Agent Hub progress columns. The
+				// observer registry listens on the shared observability bus.
+				emitSubagentFrame(this.#ctx.eventBus, this.#ctx.subagentEventBus, frame.channel, frame.data);
 				break;
 			case "agents":
 				this.#applyAgentSnapshots(frame.agents);
@@ -749,7 +760,7 @@ export class CollabGuestLink {
 		this.#ctx.statusLine.resetActiveTime();
 		this.#ctx.ui.requestRender();
 		this.#ctx.updateEditorBorderColor();
-		this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
+		await this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
 		await this.#ctx.reloadTodos();
 		this.#ctx.ui.requestRender(true, { clearScrollback: true });
 	}

@@ -14,5 +14,6 @@ export * from "./prefixes";
 export * from "./recovery";
 export * from "./snapshots";
 export * from "./stream";
+export * from "./syntax";
 export * from "./tokenizer";
 export * from "./types";

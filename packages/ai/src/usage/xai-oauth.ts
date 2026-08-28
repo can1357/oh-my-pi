@@ -9,6 +9,7 @@
  * product and must never be sent here.
  */
 
+import { toNumber } from "@oh-my-pi/pi-catalog/utils";
 import {
 	buildXAICliBillingUrl,
 	extractXAIAccessTokenSubject,
@@ -22,15 +23,12 @@ import type {
 	UsageLimit,
 	UsageProvider,
 	UsageReport,
-	UsageStatus,
 	UsageWindow,
 } from "../usage";
 import { isRecord } from "../utils";
-import { toNumber } from "./shared";
+import { DAY_MS, parseIsoTimestamp, usageStatus, WEEK_MS } from "./shared";
 
 const PROVIDER_ID = "xai-oauth";
-const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-const DAY_MS = 24 * 60 * 60 * 1000;
 const BILLING_SOURCE = "cli-chat-proxy.grok.com/v1/billing";
 
 interface XaiBillingPeriod {
@@ -52,6 +50,7 @@ interface XaiWeeklyBillingConfig {
 	productUsage: XaiProductUsage[];
 	onDemandCap?: number;
 	onDemandUsed?: number;
+	inferredPercent?: boolean;
 }
 
 /**
@@ -70,11 +69,6 @@ interface XaiMonthlyBillingConfig {
 }
 
 type XaiBillingConfig = XaiWeeklyBillingConfig | XaiMonthlyBillingConfig;
-
-function parseIsoMs(value: string): number | undefined {
-	const parsed = Date.parse(value);
-	return Number.isFinite(parsed) ? parsed : undefined;
-}
 
 function parsePercent(value: unknown): number | undefined {
 	const percent = toNumber(value);
@@ -99,12 +93,6 @@ function buildPercentAmount(usagePercent: number): UsageAmount {
 	};
 }
 
-function buildUsageStatus(usedFraction: number): UsageStatus {
-	if (usedFraction >= 1) return "exhausted";
-	if (usedFraction >= 0.9) return "warning";
-	return "ok";
-}
-
 function slugifyProduct(product: string): string {
 	return product
 		.trim()
@@ -118,13 +106,13 @@ function buildPeriodWindow(period: XaiBillingPeriod): UsageWindow {
 		id: "1w",
 		label: "Weekly",
 		durationMs: WEEK_MS,
-		resetsAt: parseIsoMs(period.end),
+		resetsAt: parseIsoTimestamp(period.end),
 	};
 }
 
 function buildMonthlyWindow(periodStart: string, periodEnd: string): UsageWindow | undefined {
-	const startMs = parseIsoMs(periodStart);
-	const endMs = parseIsoMs(periodEnd);
+	const startMs = parseIsoTimestamp(periodStart);
+	const endMs = parseIsoTimestamp(periodEnd);
 	if (startMs === undefined || endMs === undefined || endMs <= startMs) return undefined;
 	// Real calendar months vary; use the observed period length from the API.
 	const durationMs = endMs - startMs;
@@ -140,8 +128,8 @@ function buildMonthlyWindow(periodStart: string, periodEnd: string): UsageWindow
 function parseWeeklyBillingConfig(raw: Record<string, unknown>): XaiWeeklyBillingConfig | null {
 	if (!isRecord(raw.currentPeriod)) return null;
 
-	const start = typeof raw.currentPeriod.start === "string" ? parseIsoMs(raw.currentPeriod.start) : undefined;
-	const end = typeof raw.currentPeriod.end === "string" ? parseIsoMs(raw.currentPeriod.end) : undefined;
+	const start = typeof raw.currentPeriod.start === "string" ? parseIsoTimestamp(raw.currentPeriod.start) : undefined;
+	const end = typeof raw.currentPeriod.end === "string" ? parseIsoTimestamp(raw.currentPeriod.end) : undefined;
 	const type = typeof raw.currentPeriod.type === "string" ? raw.currentPeriod.type : "";
 	// Keep recently-ended weekly windows so /usage still renders across period
 	// rollover while the billing API is mid-refresh. Reject only inverted ranges
@@ -150,7 +138,16 @@ function parseWeeklyBillingConfig(raw: Record<string, unknown>): XaiWeeklyBillin
 		return null;
 	}
 
-	const creditUsagePercent = parsePercent(raw.creditUsagePercent);
+	// Fresh weekly periods (or accounts with 0 usage) omit creditUsagePercent;
+	// default to 0 only when the weekly period is active (end > now).
+	// Expired periods without explicit usage data are rejected to retain last good cache.
+	const inferredPercent = raw.creditUsagePercent === undefined || raw.creditUsagePercent === null;
+	let creditUsagePercent: number | undefined;
+	if (inferredPercent) {
+		creditUsagePercent = end > Date.now() ? 0 : undefined;
+	} else {
+		creditUsagePercent = parsePercent(raw.creditUsagePercent);
+	}
 	if (creditUsagePercent === undefined) return null;
 
 	const productUsage: XaiProductUsage[] = [];
@@ -159,7 +156,8 @@ function parseWeeklyBillingConfig(raw: Record<string, unknown>): XaiWeeklyBillin
 		for (const item of raw.productUsage) {
 			if (!isRecord(item)) continue;
 			const product = typeof item.product === "string" ? item.product.trim() : "";
-			const usagePercent = parsePercent(item.usagePercent);
+			const usagePercent =
+				item.usagePercent === undefined || item.usagePercent === null ? 0 : parsePercent(item.usagePercent);
 			if (!product || usagePercent === undefined) continue;
 			productUsage.push({ product, usagePercent });
 		}
@@ -176,14 +174,15 @@ function parseWeeklyBillingConfig(raw: Record<string, unknown>): XaiWeeklyBillin
 		productUsage,
 		onDemandCap: parseOnDemandAmount(raw.onDemandCap),
 		onDemandUsed: parseOnDemandAmount(raw.onDemandUsed),
+		inferredPercent,
 	};
 }
 
 function parseMonthlyBillingConfig(raw: Record<string, unknown>): XaiMonthlyBillingConfig | null {
 	const periodStart = typeof raw.billingPeriodStart === "string" ? raw.billingPeriodStart : "";
 	const periodEnd = typeof raw.billingPeriodEnd === "string" ? raw.billingPeriodEnd : "";
-	const startMs = parseIsoMs(periodStart);
-	const endMs = parseIsoMs(periodEnd);
+	const startMs = parseIsoTimestamp(periodStart);
+	const endMs = parseIsoTimestamp(periodEnd);
 	if (!periodStart || !periodEnd || startMs === undefined || endMs === undefined || endMs <= startMs) {
 		return null;
 	}
@@ -202,6 +201,13 @@ function parseMonthlyBillingConfig(raw: Record<string, unknown>): XaiMonthlyBill
 		onDemandCap: parseOnDemandAmount(raw.onDemandCap),
 		onDemandUsed: parseOnDemandAmount(raw.onDemandUsed),
 	};
+}
+
+function confirmsNoMonthlyQuota(raw: Record<string, unknown>): boolean {
+	const limit = parseOnDemandAmount(raw.monthlyLimit);
+	if (limit !== undefined) return limit === 0;
+	// Some weekly accounts return the credits shape from the default endpoint too.
+	return parseWeeklyBillingConfig(raw)?.inferredPercent === true;
 }
 
 function buildOnDemandLimit(
@@ -227,7 +233,7 @@ function buildOnDemandLimit(
 			remainingFraction: 1 - usedFraction,
 			unit: "unknown",
 		},
-		status: buildUsageStatus(usedFraction),
+		status: usageStatus(usedFraction),
 	};
 }
 
@@ -248,7 +254,7 @@ function buildLimits(config: XaiBillingConfig, accountId: string | undefined): U
 				scope,
 				window,
 				amount: overall,
-				status: buildUsageStatus(overall.usedFraction ?? 0),
+				status: usageStatus(overall.usedFraction ?? 0),
 			},
 		];
 
@@ -262,7 +268,7 @@ function buildLimits(config: XaiBillingConfig, accountId: string | undefined): U
 				scope,
 				window,
 				amount,
-				status: buildUsageStatus(amount.usedFraction ?? 0),
+				status: usageStatus(amount.usedFraction ?? 0),
 			});
 		}
 		const onDemand = buildOnDemandLimit(config.onDemandCap, config.onDemandUsed, accountId);
@@ -293,7 +299,7 @@ function buildLimits(config: XaiBillingConfig, accountId: string | undefined): U
 				// xAI does not label the unit; amounts match the dashboard quota points.
 				unit: "unknown",
 			},
-			status: buildUsageStatus(usedFraction),
+			status: usageStatus(usedFraction),
 		},
 	];
 	const onDemand = buildOnDemandLimit(config.onDemandCap, config.onDemandUsed, accountId);
@@ -374,10 +380,31 @@ export const xaiOauthUsageProvider: UsageProvider = {
 					: null;
 		}
 
-		if (!weekly && !monthly) return null;
+		// When an account is marked unified billing and weekly credits were only inferred
+		// from an omitted percentage field:
+		// - If a positive monthly quota is returned, use the monthly quota alone.
+		// - If the monthly endpoint returned a valid config without positive monthly quota,
+		//   confirm that this account relies on the weekly reset cycle and use weekly.
+		// - If the monthly fetch failed (transient network error), reject inferred weekly
+		//   so AuthStorage's retain-last-good cache preserves the previous valid snapshot.
+		let effectiveWeekly = weekly;
+		if (weekly?.inferredPercent && creditsLooksUnified) {
+			if (monthly) {
+				effectiveWeekly = null;
+			} else {
+				const monthlyConfig =
+					monthlyPayload && isRecord(monthlyPayload) && isRecord(monthlyPayload.config)
+						? monthlyPayload.config
+						: null;
+				if (!monthlyConfig || !confirmsNoMonthlyQuota(monthlyConfig)) {
+					effectiveWeekly = null;
+				}
+			}
+		}
+		if (!effectiveWeekly && !monthly) return null;
 
 		const limits: UsageLimit[] = [];
-		if (weekly) limits.push(...buildLimits(weekly, accountId));
+		if (effectiveWeekly) limits.push(...buildLimits(effectiveWeekly, accountId));
 		if (monthly) limits.push(...buildLimits(monthly, accountId));
 		// Deduplicate on-demand if both shapes carried the same cap (keep first).
 		const seen = new Set<string>();
@@ -388,12 +415,13 @@ export const xaiOauthUsageProvider: UsageProvider = {
 		});
 		if (deduped.length === 0) return null;
 
-		const billingKind = weekly && monthly ? "unified" : weekly ? "weekly" : "monthly";
-		const endpoint = weekly && monthly ? `${creditsUrl} + ${monthlyUrl}` : weekly ? creditsUrl : monthlyUrl;
+		const billingKind = effectiveWeekly && monthly ? "unified" : effectiveWeekly ? "weekly" : "monthly";
+		const endpoint =
+			effectiveWeekly && monthly ? `${creditsUrl} + ${monthlyUrl}` : effectiveWeekly ? creditsUrl : monthlyUrl;
 		const raw =
-			weekly && monthly
+			effectiveWeekly && monthly
 				? { credits: creditsPayload, monthly: monthlyPayload }
-				: weekly
+				: effectiveWeekly
 					? creditsPayload
 					: monthlyPayload;
 

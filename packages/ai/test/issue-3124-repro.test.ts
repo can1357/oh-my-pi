@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import { streamBedrock } from "@oh-my-pi/pi-ai/providers/amazon-bedrock";
 import { crc32 } from "@oh-my-pi/pi-ai/providers/aws-eventstream";
 import type { Context, FetchImpl, Model, Tool } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { z } from "zod/v4";
 
 const originalSkipAuth = process.env.AWS_BEDROCK_SKIP_AUTH;
 
@@ -195,7 +195,7 @@ describe("issue #3124 — Bedrock /btw with tool history", () => {
 		const userTool: Tool = {
 			name: "__no_tools__",
 			description: "Caller-registered tool that collides with the sentinel name.",
-			parameters: z.object({ query: z.string() }),
+			parameters: type({ query: type("string") }),
 		};
 		const context: Context = {
 			messages: [{ role: "user", content: "Use my tool", timestamp: 0 }],

@@ -64,8 +64,8 @@ function createFixture(streamingMessage: AssistantMessage) {
 		chatContainer: { addChild: vi.fn((child: { seal?(): void }) => mountedComponents.push(child)) },
 		toolOutputExpanded: false,
 		settings,
-		session: { getToolByName: () => undefined },
-		viewSession: { getToolByName: () => undefined },
+		session: { getToolByName: () => undefined, hasBuiltInTool: () => true },
+		viewSession: { getToolByName: () => undefined, hasBuiltInTool: () => true },
 		clearTransientSessionUi: () => {},
 		sessionManager: { getCwd: () => process.cwd() },
 	} as unknown as InteractiveModeContext;

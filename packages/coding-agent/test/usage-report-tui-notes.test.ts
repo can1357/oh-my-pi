@@ -49,23 +49,23 @@ function report(provider: string, email: string, limits: UsageReport["limits"], 
 
 describe("renderUsageReports (#3268 TUI aggregate)", () => {
 	it("renders provider-wide UsageReport.notes exactly once for multiple accounts", () => {
-		const disclaimer = "OMP-observed spend only; OpenCode usage outside OMP is not included.";
+		const providerNote = "Usage data can be delayed by up to five minutes.";
 		const reports: UsageReport[] = [
 			report(
-				"opencode-go",
+				"github-copilot",
 				"acct-a@example.test",
 				[limit("5 Hour limit", "rolling-5h", 5 * HOUR, 0.3)],
-				[disclaimer],
+				[providerNote],
 			),
 			report(
-				"opencode-go",
+				"github-copilot",
 				"acct-b@example.test",
 				[limit("5 Hour limit", "rolling-5h", 5 * HOUR, 0.6)],
-				[disclaimer],
+				[providerNote],
 			),
 		];
 		const text = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 120));
-		const occurrences = text.split(disclaimer).length - 1;
+		const occurrences = text.split(providerNote).length - 1;
 		expect(occurrences).toBe(1);
 	});
 

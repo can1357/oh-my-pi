@@ -20,6 +20,7 @@ import {
 	fetchLmStudioNativeModelMetadata,
 	OPENAI_COMPAT_DISCOVERY_DEFAULT_CONTEXT_WINDOW,
 	OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS,
+	resolveLiteLLMApi,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
@@ -182,7 +183,7 @@ type LlamaCppDiscoveredServerMetadata = {
 	maxTokens?: "contextWindow";
 };
 
-type LlamaCppDiscoveredModelRuntimeMetadata = {
+type DiscoveredModelRuntimeMetadata = {
 	contextWindow?: number;
 	maxTokens?: number;
 	input?: ("text" | "image")[];
@@ -645,7 +646,7 @@ export async function discoverLlamaCppModels(
 					name: id,
 					api: providerConfig.api,
 					provider: providerConfig.provider,
-					baseUrl,
+					baseUrl: ensureLlamaCppV1BaseUrl(baseUrl),
 					reasoning: false,
 					input: item.input ?? serverMetadata?.input ?? ["text"],
 					imageInputDecoder: "stb",
@@ -669,7 +670,7 @@ export async function discoverLlamaCppModelRuntimeMetadata(
 	model: Pick<Model<Api>, "provider" | "id" | "baseUrl" | "headers">,
 	ctx: DiscoveryContext,
 	customTimeoutMs?: number,
-): Promise<LlamaCppDiscoveredModelRuntimeMetadata | undefined> {
+): Promise<DiscoveredModelRuntimeMetadata | undefined> {
 	const baseUrl = normalizeLlamaCppBaseUrl(model.baseUrl);
 	// Probe the native `/models` endpoint (not the OpenAI-compatible `/v1/models`)
 	// so the runtime `meta`, `status.args`, and `architecture.input_modalities`
@@ -724,6 +725,86 @@ export async function discoverLlamaCppModelRuntimeMetadata(
 	}
 }
 
+/**
+ * Re-probe LM Studio's native `/api/v0/models` for a single selected model so
+ * its context window tracks the runtime lifecycle rather than the snapshot
+ * captured at discovery time.
+ *
+ * A model discovered while unloaded is registered with `max_context_length`
+ * (the architectural ceiling). When LM Studio JIT-loads it on first inference,
+ * the running instance may serve a smaller `loaded_context_length` (user load
+ * settings or context auto-fit). `getLmStudioNativeContextWindow` — invoked
+ * inside `fetchLmStudioNativeModelMetadata` — prefers `loaded_context_length`
+ * once `state === "loaded"`, so refreshing after selection swaps the stale
+ * ceiling for the window the backend actually accepts (issue #9001). A later
+ * unload re-probes back to `max_context_length`. This mirrors the llama.cpp
+ * lazy-load refresh from #3310/#3311.
+ *
+ * `maxTokens` is carried through so the caller can re-cap output at the new
+ * (possibly smaller) window; LM Studio native metadata reports no output cap
+ * of its own.
+ */
+export async function discoverLmStudioModelRuntimeMetadata(
+	model: Pick<Model<Api>, "provider" | "id" | "baseUrl" | "headers" | "maxTokens">,
+	ctx: DiscoveryContext,
+	customTimeoutMs?: number,
+): Promise<DiscoveredModelRuntimeMetadata | undefined> {
+	const baseUrl = normalizeOpenAIModelsListBaseUrl(model.baseUrl);
+	const timeoutMs = customTimeoutMs ?? 10_000;
+	const baseHeaders: Record<string, string> = { ...(model.headers ?? {}) };
+	const attempt = async (headers: Record<string, string>) => {
+		const metadata = await withTimeoutSignal(timeoutMs, signal =>
+			fetchLmStudioNativeModelMetadata(baseUrl, ctx.fetch, { headers, signal }),
+		);
+		const entry = metadata?.get(model.id);
+		if (!entry) {
+			return undefined;
+		}
+		const contextWindow = entry.contextWindow;
+		if (contextWindow === undefined) {
+			return entry.input === undefined ? undefined : { input: entry.input };
+		}
+		return {
+			contextWindow,
+			...(typeof model.maxTokens === "number" ? { maxTokens: model.maxTokens } : {}),
+			...(entry.input !== undefined ? { input: entry.input } : {}),
+		};
+	};
+	try {
+		const apiKey = await ctx.getBearerApiKeyResolver(model.provider);
+		return apiKey
+			? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
+			: await attempt(baseHeaders);
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Read image-input support from an OpenAI-compatible `/v1/models` row. Handles
+ * direct `input` arrays, Synthetic-style top-level `input_modalities`, and
+ * OpenRouter-style `architecture.input_modalities`; returns undefined when none
+ * is present so the bundled reference (or the `["text"]` default) can take over.
+ */
+function extractOpenAIModelsListInputCapabilities(item: {
+	input?: unknown;
+	input_modalities?: unknown;
+	architecture?: unknown;
+}): ("text" | "image")[] | undefined {
+	const modalities = new Set<string>();
+	const collect = (value: unknown): void => {
+		if (!Array.isArray(value)) return;
+		for (const entry of value) {
+			if (typeof entry === "string") modalities.add(entry.toLowerCase());
+		}
+	};
+	collect(item.input);
+	collect(item.input_modalities);
+	if (isRecord(item.architecture)) collect(item.architecture.input_modalities);
+	if (modalities.size === 0) return undefined;
+	return modalities.has("image") ? ["text", "image"] : ["text"];
+}
+
 export async function discoverOpenAIModelsList(
 	providerConfig: DiscoveryProviderConfig,
 	ctx: DiscoveryContext,
@@ -752,7 +833,14 @@ export async function discoverOpenAIModelsList(
 				}
 				headers = h;
 				return (await res.json()) as {
-					data?: Array<{ id?: string; max_model_len?: unknown; context_length?: unknown }>;
+					data?: Array<{
+						id?: string;
+						max_model_len?: unknown;
+						context_length?: unknown;
+						input?: unknown;
+						input_modalities?: unknown;
+						architecture?: unknown;
+					}>;
 				};
 			}),
 			nativeMetadataPromise,
@@ -781,6 +869,10 @@ export async function discoverOpenAIModelsList(
 		// headers/baseUrl/cost stay local.
 		const reference = resolveModelReference(id, references) as ModelSpec<Api> | undefined;
 		const referenceCompat = reference?.compat as OpenAICompat | undefined;
+		const api =
+			providerConfig.discovery.type === "litellm"
+				? resolveLiteLLMApi(undefined, id, providerConfig.api)
+				: providerConfig.api;
 		const contextWindow =
 			toPositiveNumberOrUndefined(item.max_model_len) ??
 			toPositiveNumberOrUndefined(item.context_length) ??
@@ -791,12 +883,14 @@ export async function discoverOpenAIModelsList(
 			buildModel({
 				id,
 				name: reference?.name ?? id,
-				api: providerConfig.api,
+				api,
 				provider: providerConfig.provider,
 				baseUrl,
 				reasoning: reference?.reasoning ?? false,
 				thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
-				input: nativeMetadataForModel?.input ?? reference?.input ?? ["text"],
+				input: nativeMetadataForModel?.input ??
+					extractOpenAIModelsListInputCapabilities(item) ??
+					reference?.input ?? ["text"],
 				...(providerConfig.discovery.type === "lm-studio" ? { imageInputDecoder: "stb" as const } : {}),
 				// Proxy/gateway pricing is provider-specific and rarely matches
 				// upstream bundled catalogs, so keep costs local-unknown even
@@ -806,7 +900,7 @@ export async function discoverOpenAIModelsList(
 				// Cap the reference's output limit at the discovered context
 				// window so an ID collision with a larger bundled model can
 				// never request more tokens than the local runtime advertises.
-				maxTokens: Math.min(reference?.maxTokens ?? discoveryDefaultMaxTokens(providerConfig.api), contextWindow),
+				maxTokens: Math.min(reference?.maxTokens ?? discoveryDefaultMaxTokens(api), contextWindow),
 				headers,
 				compat: {
 					supportsStore: false,
@@ -847,13 +941,14 @@ export async function discoverLiteLLMModels(
 			return response;
 		};
 		const models = await withTimeoutSignal(timeoutMs, signal =>
-			fetchLiteLLMRichModels({
+			fetchLiteLLMRichModels<Api>({
 				api: providerConfig.api,
 				provider: providerConfig.provider,
 				baseUrl,
 				headers: h,
 				fetch: authAwareFetch,
 				referenceResolver: resolveReference,
+				resolveApi: (entry, id) => resolveLiteLLMApi(entry, id, providerConfig.api),
 				signal,
 			}),
 		);
@@ -940,8 +1035,8 @@ export async function discoverProxyModels(
 		const reference = resolveModelReference(id, getBundledModelReferenceIndex());
 		const discoveryName = typeof item.name === "string" ? item.name.trim() : "";
 		const displayName =
-			reference?.name ??
 			(discoveryName && discoveryName !== id ? discoveryName : undefined) ??
+			reference?.name ??
 			stripBracketedModelIdAffixes(id) ??
 			id;
 		discovered.push(
@@ -984,7 +1079,7 @@ export async function discoverProxyModels(
 	return discovered;
 }
 
-function normalizeLlamaCppBaseUrl(baseUrl?: string): string {
+export function normalizeLlamaCppBaseUrl(baseUrl?: string): string {
 	const defaultBaseUrl = "http://127.0.0.1:8080";
 	const raw = baseUrl || defaultBaseUrl;
 	try {
@@ -999,7 +1094,7 @@ function normalizeLlamaCppBaseUrl(baseUrl?: string): string {
 // ensureLlamaCppV1BaseUrl appends the OpenAI-compatible `/v1` prefix a
 // chat-completions request needs; native discovery keeps the bare root, which
 // serves `/models` and `/props` but not `/chat/completions`.
-function ensureLlamaCppV1BaseUrl(baseUrl: string): string {
+export function ensureLlamaCppV1BaseUrl(baseUrl: string): string {
 	return baseUrl.endsWith("/v1") ? baseUrl : `${baseUrl}/v1`;
 }
 

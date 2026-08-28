@@ -1,7 +1,11 @@
-import { describe, expect, it, type Mock, vi } from "bun:test";
+import { beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { AskDialogComponent } from "@oh-my-pi/pi-coding-agent/modes/components/ask-dialog";
+import { TreeSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tree-selector";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
+import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { type KeyId, matchesKey } from "@oh-my-pi/pi-tui";
 import manualContinuePrompt from "../src/prompts/system/manual-continue.md" with { type: "text" };
 
@@ -29,6 +33,8 @@ type FakeEditor = {
 	setText(text: string): void;
 	getText(): string;
 	getExpandedText(): string;
+	setCollapsedText(text: string): void;
+	composerChips(): unknown[];
 	addToHistory(text: string): void;
 	setActionKeys(action: string, keys: string[]): void;
 	setCustomKeyHandler(key: string, handler: () => void): void;
@@ -64,6 +70,7 @@ async function createContext() {
 		"app.retry": ["alt+r"],
 		"app.clipboard.pasteImage": ["ctrl+v"],
 		"app.tools.toggleVisibility": ["ctrl+shift+o"],
+		"app.tools.expand": ["ctrl+o"],
 	};
 	const customHandlers = new Map<string, () => void>();
 	const setActionKeys = vi.fn();
@@ -79,6 +86,7 @@ async function createContext() {
 	const requestRender = vi.fn();
 	const showError = vi.fn();
 	let focused: unknown;
+	let overlayVisible = false;
 	const addInputListener = vi.fn((listener: InputListener) => {
 		void listener;
 	});
@@ -121,6 +129,12 @@ async function createContext() {
 		getExpandedText() {
 			return editorText;
 		},
+		setCollapsedText(text: string) {
+			editorText = text;
+		},
+		composerChips() {
+			return [];
+		},
 		addToHistory: vi.fn(),
 		pasteText(text: string) {
 			editorText += text;
@@ -149,6 +163,7 @@ async function createContext() {
 			addInputListener,
 			addStartListener,
 			getFocused: vi.fn(() => focused),
+			hasOverlay: vi.fn(() => overlayVisible),
 			terminal: { write: terminalWrite, refreshAppearance },
 		} as unknown as InteractiveModeContext["ui"],
 		loadingAnimation: undefined,
@@ -199,7 +214,7 @@ async function createContext() {
 		hideToolActivity: false,
 		toolOutputExpanded: false,
 		settings: { set: vi.fn() },
-		chatContainer: { children: [] },
+		chatContainer: { children: [], setToolActivityVisible: vi.fn() },
 		handleHotkeysCommand: vi.fn(),
 		handlePlanModeCommand: vi.fn(),
 		handleClearCommand: vi.fn(),
@@ -229,6 +244,12 @@ async function createContext() {
 		customHandlers,
 		setFocused(target: unknown) {
 			focused = target;
+		},
+		setOverlayVisible(visible: boolean) {
+			overlayVisible = visible;
+		},
+		setKeybinding(action: string, keys: KeyId[]) {
+			keyMap[action] = keys;
 		},
 		spies: {
 			setActionKeys,
@@ -292,7 +313,8 @@ describe("InputController keybinding setup", () => {
 		expect(ctx.hideToolActivity).toBe(true);
 		expect(ctx.settings.set).toHaveBeenCalledWith("display.hideToolActivity", true);
 		expect(spies.clearInlineImages).toHaveBeenCalledTimes(1);
-		expect(spies.resetDisplay).toHaveBeenCalledTimes(1);
+		expect(spies.requestRender).toHaveBeenCalledWith(true);
+		expect(ctx.chatContainer.setToolActivityVisible).toHaveBeenCalledWith(false);
 	});
 
 	it("does not mark pasted shell prompts as Python mode while editing", async () => {
@@ -659,5 +681,131 @@ describe("InputController keybinding setup", () => {
 				userInitiated: true,
 			});
 		}
+	});
+});
+
+describe("InputController global tool-output expand (ctrl+o)", () => {
+	const CTRL_O = "\x0f";
+
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+
+	async function setup() {
+		const context = await createContext();
+		const controller = new context.InputController(context.ctx);
+		controller.setupKeyHandlers();
+		return { ...context, listeners: registeredInputListeners(context.spies.addInputListener) };
+	}
+
+	it("toggles tool-output expansion when a non-editor prompt holds focus (#7837)", async () => {
+		const { ctx, listeners, setFocused } = await setup();
+		// An approval / select prompt owns keyboard focus, not the editor.
+		setFocused({ handleInput() {} });
+		expect(ctx.toolOutputExpanded).toBe(false);
+
+		expect(dispatchInput(listeners, CTRL_O)).toEqual({ consume: true });
+		expect(ctx.toolOutputExpanded).toBe(true);
+	});
+
+	it("still toggles when the editor holds focus", async () => {
+		const { ctx, listeners } = await setup();
+		// The editor is the default focus target in the harness.
+		expect(dispatchInput(listeners, CTRL_O)).toEqual({ consume: true });
+		expect(ctx.toolOutputExpanded).toBe(true);
+	});
+
+	it("defers while a fullscreen/anchored overlay owns the surface", async () => {
+		const { ctx, listeners, setOverlayVisible } = await setup();
+		setOverlayVisible(true);
+
+		expect(dispatchInput(listeners, CTRL_O)).toBeUndefined();
+		expect(ctx.toolOutputExpanded).toBe(false);
+	});
+
+	it("defers to the tree selector's own ctrl+o filter cycle", async () => {
+		const { ctx, listeners, setFocused } = await setup();
+		const tree = [
+			{
+				entry: { id: "root", type: "message", parentId: null, message: { role: "user", content: "hi" } },
+				children: [],
+			},
+		] as unknown as SessionTreeNode[];
+		setFocused(
+			new TreeSelectorComponent(
+				tree,
+				"root",
+				20,
+				() => {},
+				() => {},
+			),
+		);
+
+		expect(dispatchInput(listeners, CTRL_O)).toBeUndefined();
+		expect(ctx.toolOutputExpanded).toBe(false);
+	});
+
+	it("honors a remapped expand key while the tree selector has focus", async () => {
+		const context = await createContext();
+		context.setKeybinding("app.tools.expand", ["ctrl+x"]);
+		const controller = new context.InputController(context.ctx);
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+		const tree = [
+			{
+				entry: { id: "root", type: "message", parentId: null, message: { role: "user", content: "hi" } },
+				children: [],
+			},
+		] as unknown as SessionTreeNode[];
+		context.setFocused(
+			new TreeSelectorComponent(
+				tree,
+				"root",
+				20,
+				() => {},
+				() => {},
+			),
+		);
+
+		expect(dispatchInput(listeners, "\x18")).toEqual({ consume: true });
+		expect(context.ctx.toolOutputExpanded).toBe(true);
+	});
+
+	it("expands a truncated ask question instead of tool output when the ask dialog is focused", async () => {
+		const { ctx, listeners, setFocused } = await setup();
+		const dialog = new AskDialogComponent(
+			[
+				{
+					id: "q1",
+					question: "This is a very long question ".repeat(30),
+					options: [{ label: "Option A" }, { label: "Option B" }],
+				},
+			],
+			{ onSubmit: () => {}, onCancel: () => {}, onPrompt: async () => undefined },
+		);
+		const collapsed = dialog.render(80).join("\n");
+		setFocused(dialog);
+
+		expect(dispatchInput(listeners, "\x0f")).toEqual({ consume: true });
+		expect(ctx.toolOutputExpanded).toBe(false);
+		const expanded = dialog.render(80).join("\n");
+		const collapsedCount = collapsed.match(/This is a very long question/g)?.length ?? 0;
+		const expandedCount = expanded.match(/This is a very long question/g)?.length ?? 0;
+		expect(collapsedCount).toBeLessThan(10);
+		expect(expandedCount).toBeGreaterThan(collapsedCount);
+	});
+
+	it("still expands tool output when a short ask question has nothing to reveal", async () => {
+		const { ctx, listeners, setFocused } = await setup();
+		const dialog = new AskDialogComponent([{ id: "q1", question: "Choose one?", options: [{ label: "Option A" }] }], {
+			onSubmit: () => {},
+			onCancel: () => {},
+			onPrompt: async () => undefined,
+		});
+		dialog.render(80);
+		setFocused(dialog);
+
+		expect(dispatchInput(listeners, "\x0f")).toEqual({ consume: true });
+		expect(ctx.toolOutputExpanded).toBe(true);
 	});
 });

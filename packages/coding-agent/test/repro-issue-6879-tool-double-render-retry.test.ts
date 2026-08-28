@@ -1,5 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import * as path from "node:path";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolCall } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -66,15 +65,22 @@ function countCommand(mode: InteractiveMode): number {
 
 describe("issue #6879 — tool output appears twice after a superseded turn", () => {
 	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
 	let mode: InteractiveMode;
 	let session: AgentSession;
 	let tempDir: TempDir;
+	let settingsDir: TempDir;
 
-	beforeAll(() => {
+	beforeAll(async () => {
 		initTheme();
+		resetSettingsForTest();
+		settingsDir = TempDir.createSync("@pi-issue-6879-settings-");
+		await Settings.init({ inMemory: true, cwd: settingsDir.path() });
+		authStorage = await AuthStorage.create(":memory:");
+		modelRegistry = new ModelRegistry(authStorage);
 	});
 
-	beforeEach(async () => {
+	beforeEach(() => {
 		vi.spyOn(process.stdout, "write").mockReturnValue(true);
 		vi.spyOn(process.stdin, "resume").mockReturnValue(process.stdin);
 		vi.spyOn(process.stdin, "pause").mockReturnValue(process.stdin);
@@ -83,11 +89,7 @@ describe("issue #6879 — tool output appears twice after a superseded turn", ()
 			vi.spyOn(process.stdin, "setRawMode").mockReturnValue(process.stdin);
 		}
 
-		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-issue-6879-");
-		await Settings.init({ inMemory: true, cwd: tempDir.path() });
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		const modelRegistry = new ModelRegistry(authStorage);
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 test model");
 
@@ -97,6 +99,9 @@ describe("issue #6879 — tool output appears twice after a superseded turn", ()
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
+		// The session is constructed with no tools; bash is a built-in in real
+		// sessions, so provenance-gated rendering must treat it as one here.
+		vi.spyOn(session, "hasBuiltInTool").mockReturnValue(true);
 		mode = new InteractiveMode(session, "test");
 		mode.ui.requestRender = vi.fn();
 		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => true });
@@ -106,8 +111,12 @@ describe("issue #6879 — tool output appears twice after a superseded turn", ()
 		mode?.stop();
 		vi.restoreAllMocks();
 		await session?.dispose();
-		authStorage?.close();
 		tempDir?.removeSync();
+	});
+
+	afterAll(() => {
+		authStorage.close();
+		settingsDir.removeSync();
 		resetSettingsForTest();
 	});
 

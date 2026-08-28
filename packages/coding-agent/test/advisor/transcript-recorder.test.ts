@@ -164,6 +164,117 @@ describe("AdvisorTranscriptRecorder", () => {
 		});
 	});
 
+	it("skips a retried batch but keeps every billed assistant turn", async () => {
+		await withTempDir(async dir => {
+			const sessionFile = path.join(dir, "sess.jsonl");
+			const recorder = new AdvisorTranscriptRecorder(
+				() => sessionFile,
+				() => dir,
+			);
+			// A failing advisor re-sends the identical batch each attempt; the turn
+			// only commits once it finally succeeds (issue #9553).
+			for (let attempt = 0; attempt < 5; attempt++) {
+				recorder.beginTurn();
+				recorder.record({ ...userMessage("### Session update"), timestamp: attempt + 1 } as AgentMessage);
+				recorder.record(assistantMessage(`attempt ${attempt}`, 1, 0.1));
+			}
+			recorder.commitTurn();
+			await recorder.close();
+
+			const messages = await readMessageEntries(path.join(dir, "sess", ADVISOR_TRANSCRIPT_FILENAME));
+			expect(messages.filter(m => m.message?.role === "user")).toHaveLength(1);
+			expect(messages.filter(m => m.message?.role === "assistant")).toHaveLength(5);
+			expect((await loadAdvisorTranscriptCosts(sessionFile)).get("")).toBeCloseTo(0.5, 8);
+		});
+	});
+
+	it("keeps identical deltas that belong to distinct committed turns", async () => {
+		await withTempDir(async dir => {
+			const sessionFile = path.join(dir, "sess.jsonl");
+			const recorder = new AdvisorTranscriptRecorder(
+				() => sessionFile,
+				() => dir,
+			);
+			// The user re-submits the same prompt across three separate turns: each
+			// renders an identical "Session update" yet is genuinely new content.
+			for (let turn = 0; turn < 3; turn++) {
+				recorder.beginTurn();
+				recorder.record(userMessage("### Session update"));
+				recorder.record(assistantMessage(`review ${turn}`, 1, 0.1));
+				recorder.commitTurn();
+			}
+			await recorder.close();
+
+			const messages = await readMessageEntries(path.join(dir, "sess", ADVISOR_TRANSCRIPT_FILENAME));
+			expect(messages.filter(m => m.message?.role === "user")).toHaveLength(3);
+		});
+	});
+
+	it("keeps a repeated delta after the prior batch is abandoned", async () => {
+		await withTempDir(async dir => {
+			const sessionFile = path.join(dir, "sess.jsonl");
+			const recorder = new AdvisorTranscriptRecorder(
+				() => sessionFile,
+				() => dir,
+			);
+			recorder.beginTurn();
+			recorder.record(userMessage("### Session update"));
+			recorder.abandonTurn();
+			recorder.beginTurn();
+			recorder.record(userMessage("### Session update"));
+			recorder.commitTurn();
+			await recorder.close();
+
+			const messages = await readMessageEntries(path.join(dir, "sess", ADVISOR_TRANSCRIPT_FILENAME));
+			expect(messages.filter(m => m.message?.role === "user")).toHaveLength(2);
+		});
+	});
+
+	it("holds post-snapshot records behind a byte boundary", async () => {
+		await withTempDir(async dir => {
+			const sessionFile = path.join(dir, "sess.jsonl");
+			const recorder = new AdvisorTranscriptRecorder(
+				() => sessionFile,
+				() => dir,
+			);
+			recorder.record(assistantMessage("before", 1, 0.25));
+			const gate = Promise.withResolvers<void>();
+			const ready = recorder.blockWritesUntil(gate.promise);
+			recorder.record(assistantMessage("after", 1, 0.5));
+			await ready;
+
+			const transcript = path.join(dir, "sess", ADVISOR_TRANSCRIPT_FILENAME);
+			const beforeRelease = await readMessageEntries(transcript);
+			expect(beforeRelease.filter(m => m.message?.role === "assistant")).toHaveLength(1);
+
+			gate.resolve();
+			await recorder.close();
+			const afterRelease = await readMessageEntries(transcript);
+			expect(afterRelease.filter(m => m.message?.role === "assistant")).toHaveLength(2);
+		});
+	});
+
+	it("keeps identical deltas delivered within one turn", async () => {
+		await withTempDir(async dir => {
+			const sessionFile = path.join(dir, "sess.jsonl");
+			const recorder = new AdvisorTranscriptRecorder(
+				() => sessionFile,
+				() => dir,
+			);
+			// Two tool runs with byte-identical output render two identical chunks in
+			// one delivery; both must persist (they are distinct positions, not a replay).
+			recorder.beginTurn();
+			recorder.record(userMessage("### Session update"));
+			recorder.record(userMessage("### Session update"));
+			recorder.record(assistantMessage("review", 1, 0.1));
+			recorder.commitTurn();
+			await recorder.close();
+
+			const messages = await readMessageEntries(path.join(dir, "sess", ADVISOR_TRANSCRIPT_FILENAME));
+			expect(messages.filter(m => m.message?.role === "user")).toHaveLength(2);
+		});
+	});
+
 	it("loads cumulative costs by advisor slug", async () => {
 		await withTempDir(async dir => {
 			const sessionFile = path.join(dir, "sess.jsonl");
@@ -185,6 +296,56 @@ describe("AdvisorTranscriptRecorder", () => {
 				"": 0.25,
 				security: 0.75,
 			});
+		});
+	});
+
+	it("yields before snapshotting transcript metadata", async () => {
+		await withTempDir(async dir => {
+			const sessionFile = path.join(dir, "sess.jsonl");
+			const recorder = new AdvisorTranscriptRecorder(
+				() => sessionFile,
+				() => dir,
+			);
+			recorder.record(assistantMessage("persisted", 1, 0.25));
+			await recorder.close();
+
+			let snapshotTaken = false;
+			const costs = loadAdvisorTranscriptCosts(sessionFile, {
+				onSnapshot: () => {
+					snapshotTaken = true;
+				},
+			});
+			expect(snapshotTaken).toBe(false);
+			expect((await costs).get("")).toBeCloseTo(0.25, 8);
+			expect(snapshotTaken).toBe(true);
+		});
+	});
+
+	it("excludes transcript entries appended after the cost snapshot", async () => {
+		await withTempDir(async dir => {
+			const sessionFile = path.join(dir, "sess.jsonl");
+			const recorder = new AdvisorTranscriptRecorder(
+				() => sessionFile,
+				() => dir,
+			);
+			recorder.record(assistantMessage("persisted before snapshot", 1, 0.25));
+			await recorder.close();
+
+			const transcript = path.join(dir, "sess", ADVISOR_TRANSCRIPT_FILENAME);
+			const appended = Promise.withResolvers<void>();
+			const costs = loadAdvisorTranscriptCosts(sessionFile, {
+				onSnapshot: () => {
+					const entry = JSON.stringify({
+						type: "message",
+						message: assistantMessage("billed after snapshot", 1, 0.5),
+					});
+					void fs.appendFile(transcript, `${entry}\n`).then(appended.resolve, appended.reject);
+				},
+			});
+			await appended.promise;
+
+			expect((await costs).get("")).toBeCloseTo(0.25, 8);
+			expect((await loadAdvisorTranscriptCosts(sessionFile)).get("")).toBeCloseTo(0.75, 8);
 		});
 	});
 

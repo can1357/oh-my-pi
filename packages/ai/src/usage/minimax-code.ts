@@ -1,18 +1,11 @@
-import type {
-	UsageFetchContext,
-	UsageFetchParams,
-	UsageLimit,
-	UsageProvider,
-	UsageReport,
-	UsageStatus,
-} from "../usage";
+import { toNumber } from "@oh-my-pi/pi-catalog/utils";
+import type { UsageFetchContext, UsageFetchParams, UsageLimit, UsageProvider, UsageReport } from "../usage";
 import { isRecord } from "../utils";
-import { toNumber } from "./shared";
+import { HOUR_MS, parsePositiveTimestamp, usageStatus } from "./shared";
 
 const INTL_PROVIDER = "minimax-code";
 const INTL_BASE_URL = "https://api.minimax.io";
 const REMAINS_PATH = "/v1/token_plan/remains";
-const HOUR_MS = 60 * 60 * 1000;
 /** `current_*_status` enum reported per window: 1 normal, 2 exhausted, 3 unlimited. */
 const STATUS_EXHAUSTED = 2;
 const STATUS_UNLIMITED = 3;
@@ -42,13 +35,6 @@ interface TokenPlanBucket {
 	weeklyStatus?: number;
 }
 
-/** MiniMax reports epoch milliseconds; tolerate seconds in case a deployment differs. */
-function parseTimestamp(value: unknown): number | undefined {
-	const parsed = toNumber(value);
-	if (parsed === undefined || parsed <= 0) return undefined;
-	return parsed < 1_000_000_000_000 ? parsed * 1000 : parsed;
-}
-
 /** `current_*_remaining_percent` is 0..100 remaining; usage fractions are 0..1 used. */
 function usedFractionFromRemainingPercent(value: unknown): number | undefined {
 	const parsed = toNumber(value);
@@ -57,26 +43,20 @@ function usedFractionFromRemainingPercent(value: unknown): number | undefined {
 	return Math.min(1, Math.max(0, (100 - parsed) / 100));
 }
 
-function usageStatus(usedFraction: number): UsageStatus {
-	if (usedFraction >= 1) return "exhausted";
-	if (usedFraction >= 0.9) return "warning";
-	return "ok";
-}
-
 function parseBucket(value: unknown): TokenPlanBucket | null {
 	if (!isRecord(value)) return null;
 	const modelName = typeof value.model_name === "string" ? value.model_name.trim() : "";
 	if (!modelName) return null;
 	return {
 		modelName,
-		intervalStart: parseTimestamp(value.start_time),
-		intervalEnd: parseTimestamp(value.end_time),
+		intervalStart: parsePositiveTimestamp(value.start_time),
+		intervalEnd: parsePositiveTimestamp(value.end_time),
 		intervalRemainingPercent: toNumber(value.current_interval_remaining_percent),
 		intervalTotalCount: toNumber(value.current_interval_total_count),
 		intervalUsageCount: toNumber(value.current_interval_usage_count),
 		intervalStatus: toNumber(value.current_interval_status),
-		weeklyStart: parseTimestamp(value.weekly_start_time),
-		weeklyEnd: parseTimestamp(value.weekly_end_time),
+		weeklyStart: parsePositiveTimestamp(value.weekly_start_time),
+		weeklyEnd: parsePositiveTimestamp(value.weekly_end_time),
 		weeklyRemainingPercent: toNumber(value.current_weekly_remaining_percent),
 		weeklyTotalCount: toNumber(value.current_weekly_total_count),
 		weeklyUsageCount: toNumber(value.current_weekly_usage_count),

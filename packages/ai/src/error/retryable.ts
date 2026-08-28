@@ -33,7 +33,7 @@ function isTransientTransportMessage(message: string): boolean {
 export interface ProviderRetryableHooks {
 	/** Provider id of the failing request, used to gate provider-specific checks. */
 	provider?: string;
-	/** Provider-specific transient predicate (e.g. Copilot `model_not_supported`). */
+	/** Provider-specific transient predicate (e.g. Copilot model-availability 400s). */
 	isProviderTransient?: (error: Error) => boolean;
 }
 

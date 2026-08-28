@@ -5,7 +5,7 @@ scope: "tool:edit(*.ts), tool:edit(*.tsx), tool:write(*.ts), tool:write(*.tsx)"
 interruptMode: never
 ---
 
-Use `Promise.withResolvers()` instead of `new Promise((resolve, reject) => ...)`. It keeps control flow linear and exposes typed resolver functions without callback nesting.
+Prefer `Promise.withResolvers()` over `new Promise((resolve, reject) => ...)`: linear control flow; typed resolvers without callback nesting.
 
 ## Basic operation
 
@@ -63,4 +63,4 @@ class Gate {
 }
 ```
 
-Use the constructor only when an API specifically requires the executor form.
+Constructor only if an API specifically requires executor form.

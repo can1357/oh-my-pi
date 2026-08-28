@@ -12,6 +12,7 @@ import type {
 	UsageStatus,
 	UsageWindow,
 } from "../usage";
+import { DAY_MS, parseIsoTimestamp, WEEK_MS } from "./shared";
 
 // (Refresh is the sole responsibility of AuthStorage; no provider-direct refresh here.)
 
@@ -47,9 +48,6 @@ interface AntigravityUsageResponse {
 const DEFAULT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const FETCH_AVAILABLE_MODELS_PATH = "/v1internal:fetchAvailableModels";
 
-const ONE_DAY_MS = 24 * 60 * 60 * 1000;
-const ONE_WEEK_MS = 7 * ONE_DAY_MS;
-
 interface AntigravityWindowDescriptor {
 	id: string;
 	label: string;
@@ -59,25 +57,20 @@ interface AntigravityWindowDescriptor {
 function classifyWindow(id: string | undefined, label: string | undefined): AntigravityWindowDescriptor | undefined {
 	const source = `${id ?? ""} ${label ?? ""}`.toLowerCase();
 	if (source.includes("week") || source.includes("7d") || /7[\s_-]*day/.test(source)) {
-		return { id: "weekly", label: "Weekly", durationMs: ONE_WEEK_MS };
+		return { id: "weekly", label: "Weekly", durationMs: WEEK_MS };
 	}
 	if (source.includes("day") || source.includes("daily") || source.includes("24h")) {
-		return { id: "daily", label: "Daily", durationMs: ONE_DAY_MS };
+		return { id: "daily", label: "Daily", durationMs: DAY_MS };
 	}
 	if (id || label) return { id: id ?? label ?? "default", label: label ?? id ?? "Default" };
 	return undefined;
 }
 
-function parseResetTime(info: AntigravityQuotaInfo): number | undefined {
-	const resetAt = info.resetTime ? Date.parse(info.resetTime) : undefined;
-	return resetAt !== undefined && Number.isFinite(resetAt) ? resetAt : undefined;
-}
-
 function inferWindowFromReset(resetAt: number | undefined, nowMs: number): AntigravityWindowDescriptor {
-	if (resetAt !== undefined && resetAt - nowMs > ONE_DAY_MS) {
-		return { id: "weekly", label: "Weekly", durationMs: ONE_WEEK_MS };
+	if (resetAt !== undefined && resetAt - nowMs > DAY_MS) {
+		return { id: "weekly", label: "Weekly", durationMs: WEEK_MS };
 	}
-	return { id: "daily", label: "Daily", durationMs: ONE_DAY_MS };
+	return { id: "daily", label: "Daily", durationMs: DAY_MS };
 }
 
 function quotaInferenceKey(info: AntigravityQuotaInfo): string {
@@ -98,7 +91,7 @@ function inferWindowDescriptors(
 			continue;
 		}
 		const group = groups.get(quotaInferenceKey(info)) ?? [];
-		group.push({ info, resetAt: parseResetTime(info) });
+		group.push({ info, resetAt: parseIsoTimestamp(info.resetTime) });
 		groups.set(quotaInferenceKey(info), group);
 	}
 
@@ -110,7 +103,7 @@ function inferWindowDescriptors(
 		for (const entry of group) {
 			const descriptor =
 				latestReset !== undefined && entry.resetAt === latestReset
-					? { id: "weekly", label: "Weekly", durationMs: ONE_WEEK_MS }
+					? { id: "weekly", label: "Weekly", durationMs: WEEK_MS }
 					: inferWindowFromReset(entry.resetAt, nowMs);
 			descriptors.set(entry.info, descriptor);
 		}
@@ -149,7 +142,7 @@ function parseWindow(
 	info: AntigravityQuotaInfo,
 	descriptor: AntigravityWindowDescriptor | undefined,
 ): UsageWindow | undefined {
-	const resetAt = parseResetTime(info);
+	const resetAt = parseIsoTimestamp(info.resetTime);
 	const hasResetAt = resetAt !== undefined;
 	if (!descriptor && !hasResetAt) return undefined;
 	return {
@@ -433,12 +426,19 @@ export const antigravityUsageProvider: UsageProvider = {
 	supports: params => params.provider === "google-antigravity",
 };
 
-function getAntigravityCounterKeyForModel(context: CredentialRankingContext | undefined): string | undefined {
-	const modelId = context?.modelId?.toLowerCase();
-	if (!modelId) return undefined;
-	if (modelId.startsWith("claude-")) return "anthropic";
-	if (modelId.startsWith("gemini-") || modelId.startsWith("gemma-")) return "google";
-	if (modelId.startsWith("gpt-") || modelId.startsWith("openai/")) return "openai";
+/** Map an Antigravity model id to its backend quota-counter key. */
+export function getAntigravityCounterKeyForModel(modelId: string | undefined): string | undefined {
+	const normalizedModelId = modelId?.toLowerCase();
+	if (!normalizedModelId) return undefined;
+	if (normalizedModelId.startsWith("claude-")) return "anthropic";
+	if (
+		normalizedModelId.startsWith("gemini-") ||
+		normalizedModelId.startsWith("gemma-") ||
+		normalizedModelId.startsWith("tab_")
+	) {
+		return "google";
+	}
+	if (normalizedModelId.startsWith("gpt-") || normalizedModelId.startsWith("openai/")) return "openai";
 	return undefined;
 }
 
@@ -447,14 +447,19 @@ function getAntigravityCounterLimits(report: UsageReport, counterKey: string): U
 	return report.limits.filter(limit => limit.id.toLowerCase().startsWith(prefix));
 }
 
-// Exhaustion checks are only safe with a concrete backend counter. A no-model
-// Antigravity credential lookup (for example image-provider discovery) must
-// not turn one exhausted family into a provider-wide block.
-function scopeAntigravityLimitsForModel(
+/**
+ * Scope an Antigravity report to the active model's backend counter, falling
+ * back to legacy default counters only when that backend has no limits.
+ *
+ * Exhaustion checks are only safe with a concrete backend counter. A no-model
+ * credential lookup (for example image-provider discovery) must not turn one
+ * exhausted family into a provider-wide block.
+ */
+export function scopeAntigravityLimitsForModel(
 	report: UsageReport,
 	context: CredentialRankingContext | undefined,
 ): UsageLimit[] {
-	const counterKey = getAntigravityCounterKeyForModel(context);
+	const counterKey = getAntigravityCounterKeyForModel(context?.modelId);
 	if (!counterKey) return [];
 	const backendLimits = getAntigravityCounterLimits(report, counterKey);
 	if (backendLimits.length > 0) return backendLimits;
@@ -462,7 +467,7 @@ function scopeAntigravityLimitsForModel(
 }
 
 function rankAntigravityLimits(report: UsageReport, context: CredentialRankingContext | undefined): UsageLimit[] {
-	const counterKey = getAntigravityCounterKeyForModel(context);
+	const counterKey = getAntigravityCounterKeyForModel(context?.modelId);
 	if (!counterKey) return report.limits;
 	return scopeAntigravityLimitsForModel(report, context);
 }
@@ -487,11 +492,11 @@ export const antigravityRankingStrategy: CredentialRankingStrategy = {
 	// Always return a scope for Antigravity so missing/unknown model context
 	// cannot fall through to AuthStorage's provider-wide block bucket.
 	blockScope(context) {
-		const counterKey = getAntigravityCounterKeyForModel(context);
+		const counterKey = getAntigravityCounterKeyForModel(context?.modelId);
 		return `counter:${counterKey ?? "unknown"}`;
 	},
 	// Antigravity windows carry `durationMs` when the response identifies them
 	// as daily/weekly. Fall back to daily for legacy unlabelled quotaInfo
 	// entries from `daily-cloudcode-pa.googleapis.com`.
-	windowDefaults: { primaryMs: ONE_DAY_MS, secondaryMs: ONE_DAY_MS },
+	windowDefaults: { primaryMs: DAY_MS, secondaryMs: DAY_MS },
 };

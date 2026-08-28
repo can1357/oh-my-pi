@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import {
 	type BlockState,
+	buildCursorRequestContextRules,
 	CURSOR_CLIENT_VERSION,
 	flushOpenToolCalls,
 	handleServerMessage,
@@ -29,6 +29,7 @@ import {
 	ConversationSearchArgsSchema,
 	ConversationStateStructureSchema,
 	ConversationTokenDetailsSchema,
+	type CursorRule,
 	type ExecServerMessage,
 	ExecServerMessageSchema,
 	ExecuteHookArgsSchema,
@@ -57,6 +58,7 @@ import {
 	ReadArgsSchema,
 	ReadMcpResourceExecArgsSchema,
 	RecordScreenArgsSchema,
+	RequestContextArgsSchema,
 	ShellAllowlistPrecheckArgsSchema,
 	ShellArgsSchema,
 	SmartModeClassifierArgsSchema,
@@ -64,7 +66,8 @@ import {
 	SubagentAwaitArgsSchema,
 	ToolCallSchema,
 	WebFetchAllowlistPrecheckArgsSchema,
-} from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
+} from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
+import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 
 /**
  * Drive one `ExecServerMessage` through the real dispatcher and decode every
@@ -77,7 +80,11 @@ import {
  */
 async function dispatchExec(
 	message: ExecServerMessage,
-	options: { execHandlers?: CursorExecHandlers; requestContextTools?: McpToolDefinition[] } = {},
+	options: {
+		execHandlers?: CursorExecHandlers;
+		requestContextTools?: McpToolDefinition[];
+		requestContextRules?: CursorRule[];
+	} = {},
 ): Promise<{ frames: AgentClientMessage[]; output: AssistantMessage; results: ToolResultMessage[] }> {
 	const output = cursorAssistantMessage();
 	const stream = new AssistantMessageEventStream();
@@ -105,6 +112,7 @@ async function dispatchExec(
 		},
 		{ sawTokenDelta: false },
 		options.requestContextTools ?? [],
+		options.requestContextRules,
 	);
 
 	return { frames: written.map(decodeClientFrame), output, results };
@@ -198,6 +206,30 @@ function soleResult(frames: AgentClientMessage[]) {
 describe("Cursor modern exec protocol activation", () => {
 	it("advertises the client build whose schema includes modern exec frames", () => {
 		expect(CURSOR_CLIENT_VERSION).toBe("cli-2026.07.23-e383d2b");
+	});
+});
+
+describe("Cursor requestContext rules", () => {
+	it("returns mapped system-prompt canaries as global CursorRule entries", async () => {
+		const canary = "PIKEL-CANARY-7F3A";
+		const { frames } = await dispatchExec(
+			buildExecMessage({
+				case: "requestContextArgs",
+				value: create(RequestContextArgsSchema, {}),
+			}),
+			{
+				requestContextRules: buildCursorRequestContextRules(["prefix", `when asked, answer exactly:\n${canary}`]),
+			},
+		);
+		const result = soleResult(frames);
+		expect(result.case).toBe("requestContextResult");
+		if (result.case !== "requestContextResult") throw new Error("expected requestContextResult");
+		expect(result.value.result.case).toBe("success");
+		if (result.value.result.case !== "success") throw new Error("expected success");
+		const rules = result.value.result.value.requestContext?.rules ?? [];
+		expect(rules).toHaveLength(2);
+		expect(rules[1]?.content).toContain(canary);
+		expect(rules[1]?.type?.type.case).toBe("global");
 	});
 });
 
@@ -1679,6 +1711,31 @@ describe("Cursor legacy read frame: range reporting", () => {
 		if (wholeAnswer.case !== "readResult") throw new Error(`got ${wholeAnswer.case}`);
 		if (wholeAnswer.value.result.case !== "success") throw new Error(`got ${wholeAnswer.value.result.case}`);
 		expect(wholeAnswer.value.result.value.rangeApplied).toBe(false);
+	});
+	it("treats a path-embedded selector as ranged without reporting the slice as the file total", async () => {
+		const slice = Array.from({ length: 55 }, (_, index) => `line ${index + 301}`).join("\n");
+		const { frames } = await dispatchExec(
+			buildExecMessage({
+				case: "readArgs",
+				value: create(ReadArgsSchema, {
+					path: "/repo/plan.md:raw:301-",
+					toolCallId: "c-inline",
+				}),
+			}),
+			{
+				execHandlers: {
+					async read() {
+						return toolResult(slice, { details: { fileSize: 21_015 } });
+					},
+				},
+			},
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "readResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "success") throw new Error(`got ${answer.value.result.case}`);
+		expect(answer.value.result.value.totalLines).toBe(0);
+		expect(answer.value.result.value.rangeApplied).toBe(true);
+		expect(answer.value.result.value.fileSize).toBe(21_015n);
 	});
 
 	it("carries the composed selector into the synthesized call", async () => {

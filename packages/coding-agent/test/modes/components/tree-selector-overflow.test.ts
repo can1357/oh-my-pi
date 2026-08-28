@@ -39,7 +39,7 @@ function renderSelector(tree: SessionTreeNode, leafId: string, width: number): s
 		() => {},
 		() => {},
 	);
-	return selector.render(width).map(line => Bun.stripANSI(line));
+	return selector.renderContent(width).map(line => Bun.stripANSI(line));
 }
 
 describe("TreeSelectorComponent deep branching overflow", () => {

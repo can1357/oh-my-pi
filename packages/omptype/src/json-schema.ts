@@ -273,7 +273,10 @@ function emitObject(
 	const properties: Record<string, unknown> = {};
 	const required: string[] = [];
 	const filled = (prop: PropIR): boolean => !prop.opt && (ctx.options?.io === "output" || !prop.hasDefault);
-	for (const prop of props) {
+	// ArkType emits required properties first (each group in declaration
+	// order); downstream wire consumers rely on that stable ordering.
+	const ordered = [...props.filter(filled), ...props.filter(prop => !filled(prop))];
+	for (const prop of ordered) {
 		if (typeof prop.key === "symbol") throw new TypeError("Cannot convert a symbol to a string");
 		const key = String(prop.key);
 		const propertySchema = emit(prop.val, ctx);

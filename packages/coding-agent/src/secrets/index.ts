@@ -4,8 +4,10 @@ import * as path from "node:path";
 import { SENSITIVE_TOKEN_RE } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { getSecretPlaceholderKeyPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
-import { regexHasUnresolvableShortMatchFallback, type SecretEntry, sanitizeSecretFriendlyName } from "./obfuscator";
+import { type SecretEntry, SecretObfuscator } from "./obfuscator";
+import { sanitizeSecretFriendlyName, secretEntriesNeedPlaceholderKey } from "./placeholder";
 import { compileSecretRegex } from "./regex";
+import { regexHasUnresolvableShortMatchFallback } from "./replacement";
 
 const PLACEHOLDER_KEY_RE = /^[A-Za-z0-9_-]{43}$/;
 const cachedPlaceholderKeys = new Map<string, string>();
@@ -152,11 +154,9 @@ export {
 	deobfuscateToolArguments,
 	obfuscateMessages,
 	obfuscateProviderContext,
-	type SecretEntry,
-	SecretObfuscator,
-	secretEntriesNeedPlaceholderKey,
-	secretEntryNeedsPlaceholderKey,
-} from "./obfuscator";
+} from "./message-transform";
+export { type SecretEntry, SecretObfuscator } from "./obfuscator";
+export { secretEntriesNeedPlaceholderKey, secretEntryNeedsPlaceholderKey } from "./placeholder";
 
 /**
  * Load secrets from project-local and global secrets.yml files.
@@ -221,6 +221,51 @@ export function builtinCredentialSecretEntries(): SecretEntry[] {
 			friendlyName: "Credential",
 		},
 	];
+}
+
+/**
+ * Build the session secret obfuscator from every configured source: secrets.yml
+ * (project + global), secret-shaped environment variables, and the built-in
+ * credential patterns. Callers gate on `secrets.enabled`.
+ *
+ * Only CONFIGURED entries force startup key creation: a configured
+ * obfuscate-mode secret — or a default (no custom `replacement`) replace-mode
+ * regex whose key-derived idempotent fallback marker needs a stable key across
+ * restarts (see `secretEntryNeedsPlaceholderKey`) — mints placeholders as soon
+ * as the obfuscator is built. The built-in credential-pattern entry matches
+ * dynamically, so it resolves the persisted key lazily on first match instead
+ * of creating the key file for every secrets-enabled session.
+ *
+ * When no configured entry produced an active secret but a persisted key
+ * exists, returns a redaction-only obfuscator so a tool read of the key file
+ * does not ship the reusable HMAC key to the provider. Returns undefined when
+ * there is nothing to protect.
+ *
+ * `keyDir` is the explicit agent dir override for the placeholder-key file
+ * (default XDG/agent location when omitted).
+ */
+export async function buildSecretObfuscator(
+	cwd: string,
+	agentDir: string,
+	keyDir?: string,
+): Promise<SecretObfuscator | undefined> {
+	const fileEntries = await logger.time("loadSecrets", loadSecrets, cwd, agentDir);
+	const envEntries = collectEnvSecrets();
+	// Built-in credential-pattern entries come last so user-configured entries
+	// (plain literals, custom regexes) take precedence in the scan order.
+	const allEntries = [...envEntries, ...fileEntries, ...builtinCredentialSecretEntries()];
+	const needsPlaceholderKey = secretEntriesNeedPlaceholderKey([...envEntries, ...fileEntries]);
+	const placeholderKey = needsPlaceholderKey
+		? await getSecretPlaceholderKey(keyDir)
+		: await getExistingSecretPlaceholderKey(keyDir);
+	let obfuscator: SecretObfuscator | undefined;
+	if (allEntries.length > 0) {
+		obfuscator = new SecretObfuscator(allEntries, placeholderKey ?? (() => getSecretPlaceholderKeySync(keyDir)));
+	}
+	if (obfuscator?.hasSecrets() !== true && placeholderKey !== undefined) {
+		obfuscator = new SecretObfuscator([{ type: "plain", mode: "replace", content: placeholderKey }], placeholderKey);
+	}
+	return obfuscator;
 }
 
 async function loadSecretsFile(filePath: string): Promise<SecretEntry[]> {

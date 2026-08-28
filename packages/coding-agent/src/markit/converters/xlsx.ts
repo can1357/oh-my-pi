@@ -1,6 +1,7 @@
 // Adapted from markit-ai (MIT). See ../NOTICE.
-import { XMLParser } from "fast-xml-parser";
-import { unzip, unzipText } from "../../utils/zip";
+
+import { archiveEntryText, readArchiveEntries } from "@oh-my-pi/pi-utils/ar";
+import { XMLParser } from "@oh-my-pi/pi-utils/xml";
 import type { ConversionResult, Converter, StreamInfo } from "../types";
 
 const EXTENSIONS = [".xlsx"];
@@ -55,7 +56,7 @@ export class XlsxConverter implements Converter {
 	}
 
 	async convert(input: Buffer, _streamInfo: StreamInfo): Promise<ConversionResult> {
-		const entries = unzip(input);
+		const entries = await readArchiveEntries({ bytes: input, format: "zip" });
 		const parser = new XMLParser({
 			ignoreAttributes: false,
 			attributeNamePrefix: "@_",
@@ -63,17 +64,17 @@ export class XlsxConverter implements Converter {
 			processEntities: { maxTotalExpansions: 1_000_000 },
 		});
 		// Parse shared strings
-		const ssXml = unzipText(entries, "xl/sharedStrings.xml");
+		const ssXml = archiveEntryText(entries, "xl/sharedStrings.xml");
 		const ss = ssXml ? (parser.parse(ssXml) as SharedStringsDoc) : null;
 		const siList = ss?.sst?.si;
 		const shared = toArray(siList);
 		// Parse workbook for sheet names
-		const wbXml = unzipText(entries, "xl/workbook.xml");
+		const wbXml = archiveEntryText(entries, "xl/workbook.xml");
 		if (!wbXml) throw new Error("Invalid XLSX: missing workbook.xml");
 		const wb = parser.parse(wbXml) as WorkbookDoc;
 		const sheets = toArray(wb.workbook?.sheets?.sheet);
 		// Parse workbook rels to map rIds to sheet files
-		const relsXml = unzipText(entries, "xl/_rels/workbook.xml.rels");
+		const relsXml = archiveEntryText(entries, "xl/_rels/workbook.xml.rels");
 		const rels = relsXml ? (parser.parse(relsXml) as RelationshipsDoc) : null;
 		const relList = toArray(rels?.Relationships?.Relationship);
 		const relMap = new Map<string, string>();
@@ -87,7 +88,7 @@ export class XlsxConverter implements Converter {
 			const target = relMap.get(rId);
 			if (!target) continue;
 			const sheetPath = target.startsWith("/") ? target.slice(1) : `xl/${target}`;
-			const sheetXml = unzipText(entries, sheetPath);
+			const sheetXml = archiveEntryText(entries, sheetPath);
 			if (!sheetXml) continue;
 			const parsed = parser.parse(sheetXml) as WorksheetDoc;
 			const rows = toArray(parsed.worksheet?.sheetData?.row);

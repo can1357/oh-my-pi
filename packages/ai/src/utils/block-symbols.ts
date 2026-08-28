@@ -59,6 +59,24 @@ export const kCursorExecResolved = Symbol("provider.block.cursorExecResolved");
 /** Carries the resolved marker without exposing a string-keyed property. */
 export type CursorExecResolvedCarrier = object & { [kCursorExecResolved]?: true };
 
+/** True when a toolCall block was already executed by Cursor's exec channel. */
+export function isCursorExecResolved(block: CursorExecResolvedCarrier | null | undefined): boolean {
+	return block?.[kCursorExecResolved] === true;
+}
+
+/**
+ * Copy {@link kCursorExecResolved} onto a cloned/projected toolCall block.
+ *
+ * Stream projectors (owned/in-band dialect, leaked-thinking heal) rebuild
+ * toolCall objects field-by-field. Dropping this marker lets `agent-loop.ts`
+ * re-execute a call Cursor already settled — duplicate toolResults and a
+ * second bash/write/delete. Partial-JSON is already copied explicitly; this
+ * marker is the other load-bearing symbol that must survive the same way.
+ */
+export function copyCursorExecResolved(target: CursorExecResolvedCarrier, source: CursorExecResolvedCarrier): void {
+	if (source[kCursorExecResolved] === true) target[kCursorExecResolved] = true;
+}
+
 /**
  * Marks a text block synthesized by cross-model thinking demotion in
  * `transformMessages`. Converters that flatten adjacent text blocks into one

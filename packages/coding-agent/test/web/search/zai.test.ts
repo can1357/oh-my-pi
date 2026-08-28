@@ -9,7 +9,7 @@ interface CapturedRequest {
 }
 
 describe("Z.AI web search provider", () => {
-	it("initializes a Streamable HTTP MCP session before calling web_search_prime", async () => {
+	it("initializes a Streamable HTTP MCP session and parses doubly encoded results", async () => {
 		const capturedRequests: CapturedRequest[] = [];
 		const fetchImpl: FetchImpl = (_input, init) => {
 			const request = {
@@ -53,16 +53,20 @@ describe("Z.AI web search provider", () => {
 							content: [
 								{
 									type: "text",
-									text: JSON.stringify({
-										search_result: [
+									text: JSON.stringify(
+										JSON.stringify([
 											{
 												title: "Z.AI search result",
 												content: "Search result content",
 												link: "https://example.com/zai",
 												media: "Example",
 											},
-										],
-									}),
+										]),
+									),
+								},
+								{
+									type: "text",
+									text: "Plain prose answer.",
 								},
 							],
 						},
@@ -107,6 +111,7 @@ describe("Z.AI web search provider", () => {
 				author: "Example",
 			},
 		]);
+		expect(response.answer).toBe("Plain prose answer.");
 	});
 
 	function createMcpFetch(): { fetchImpl: FetchImpl; capturedRequests: CapturedRequest[] } {

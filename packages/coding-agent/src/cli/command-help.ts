@@ -15,7 +15,8 @@ export const authGatewayHelp = {
 } satisfies CommandMetadata;
 
 export const benchHelp = {
-	description: "Benchmark models with the same prompt: time-to-first-token and generation throughput (tokens/s)",
+	description:
+		"Benchmark models: TTFT/prefill vs decode throughput with p50/p95, across chat, prefill, generation, and prompt-cache workloads",
 } satisfies CommandMetadata;
 
 export const browserRelayHelp = {
@@ -34,6 +35,10 @@ export const completionsHelp = {
 
 export const completeHelp = { hidden: true } satisfies CommandMetadata;
 
+export const compressHelp = {
+	description: "Rewrite a text file into the dense prompt register, reporting what it drops",
+} satisfies CommandMetadata;
+
 export const configHelp = { description: "Manage configuration settings" } satisfies CommandMetadata;
 
 export const dryBalanceHelp = {
@@ -45,11 +50,22 @@ export const galleryHelp = {
 } satisfies CommandMetadata;
 
 export const gcHelp = { description: "Run storage garbage collection" } satisfies CommandMetadata;
+export const ifBenchHelp = {
+	description:
+		"Benchmark instruction following and working memory: one cached thread of glyph array actions with a moving cat-sound directive",
+} satisfies CommandMetadata;
+export const gitHelp = {
+	description: "Interactive fullscreen git UI: split diff viewer, staging sidebar, and commit composer",
+} satisfies CommandMetadata;
 
 export const grepHelp = { description: "Test grep tool" } satisfies CommandMetadata;
 
 export const grievancesHelp = {
 	description: "View, clean, or push reported tool issues (auto-QA grievances)",
+} satisfies CommandMetadata;
+
+export const imagesHelp = {
+	description: "Inspect, diagnose, probe, and purge image publication backends",
 } satisfies CommandMetadata;
 
 export const installHelp = {
@@ -62,8 +78,15 @@ export const modelsHelp = { description: "List, search, and refresh available mo
 
 export const pluginHelp = { description: "Manage plugins (install, uninstall, list, etc.)" } satisfies CommandMetadata;
 
+export const psHelp = {
+	description: "List and control daemon-supervised background processes (logs, stop, kill, restart)",
+} satisfies CommandMetadata;
+
 export const readHelp = {
 	description: "Show what the read tool will return for a path, URL, or internal URI",
+} satisfies CommandMetadata;
+export const renderHelp = {
+	description: "Draw a session's entire thread through the production transcript pipeline (with repaint timing)",
 } satisfies CommandMetadata;
 
 export const sayHelp = {
@@ -71,6 +94,10 @@ export const sayHelp = {
 } satisfies CommandMetadata;
 
 export const searchHelp = { description: "Test web search providers" } satisfies CommandMetadata;
+
+export const shareHelp = {
+	description: "Share a saved session via an encrypted link (same as /share)",
+} satisfies CommandMetadata;
 
 export const setupHelp = {
 	description: "Run onboarding setup or install dependencies for optional features",

@@ -72,6 +72,30 @@ interface OpenAIResponsesReplaySanitizeOptions {
 	supportsImageDetailOriginal?: boolean;
 	supportsComputerUse?: boolean;
 }
+/**
+ * Removes response-only lifecycle status from item types that reject it when replayed as input.
+ *
+ * Returns the original array when no item needs sanitization.
+ */
+export function stripOpenAIResponsesOutputOnlyStatusesForReplay<TItem extends { type?: unknown; status?: unknown }>(
+	items: TItem[],
+): TItem[] {
+	let sanitized: TItem[] | undefined;
+	for (let index = 0; index < items.length; index++) {
+		const item = items[index]!;
+		const rejectsOutputStatus =
+			item.type === "message" || item.type === "function_call" || item.type === "custom_tool_call";
+		if (!rejectsOutputStatus || !Object.hasOwn(item, "status")) {
+			sanitized?.push(item);
+			continue;
+		}
+		if (!sanitized) sanitized = items.slice(0, index);
+		const withoutStatus = { ...item };
+		delete withoutStatus.status;
+		sanitized.push(withoutStatus);
+	}
+	return sanitized ?? items;
+}
 
 /**
  * Clamp `detail: "original"` only where Responses input_image parts live —
@@ -184,19 +208,20 @@ export function sanitizeOpenAIResponsesHistoryItemsForReplay(
 		options.supportsComputerUse === false
 			? undefined
 			: collectOpenAIResponsesComputerLinkedReasoningItems(items, false);
-	return items.flatMap(item => {
+	const sanitized = items.flatMap(item => {
 		const preserveForComputer = computerLinkedReasoningItems?.has(item) === true;
-		const sanitized = sanitizeOpenAIResponsesHistoryItemForReplay(
+		const sanitizedItem = sanitizeOpenAIResponsesHistoryItemForReplay(
 			item,
 			normalizedCallIds,
 			supportsImageDetailOriginal,
 			preserveForComputer,
 		);
-		if (preserveForComputer && sanitized?.type === "reasoning") {
-			provisionalOpenAIResponsesComputerReasoningItems.add(sanitized);
+		if (preserveForComputer && sanitizedItem?.type === "reasoning") {
+			provisionalOpenAIResponsesComputerReasoningItems.add(sanitizedItem);
 		}
-		return sanitized ? [sanitized] : [];
+		return sanitizedItem ? [sanitizedItem] : [];
 	});
+	return stripOpenAIResponsesOutputOnlyStatusesForReplay(sanitized);
 }
 
 function collectOpenAIResponsesReasoningItemsWithSurvivingOutputIds(
@@ -369,12 +394,7 @@ function sanitizeOpenAIResponsesHistoryItemForReplay(
 	if (item.type === "reasoning") {
 		return sanitizeOpenAIResponsesReasoningItemForReplay(item, preserveReasoningItemIds);
 	}
-	// Strip status only from item types whose replay input rejects output
-	// lifecycle metadata. Hosted built-in tool items require status for replay.
 	const { id: _id, ...sanitizedItem } = item;
-	if (item.type === "message" || item.type === "function_call" || item.type === "custom_tool_call") {
-		delete sanitizedItem.status;
-	}
 	if (item.type === "computer_call" && typeof item.id === "string") sanitizedItem.id = item.id;
 	if (typeof item.call_id === "string") {
 		sanitizedItem.call_id = normalizeReplayedResponsesHistoryCallId(item.call_id, normalizedCallIds);

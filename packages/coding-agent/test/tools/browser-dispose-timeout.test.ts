@@ -11,7 +11,7 @@
  * on timeout so cleanup always completes.
  */
 
-import { describe, expect, it, spyOn } from "bun:test";
+import { describe, expect, it, spyOn, vi } from "bun:test";
 import * as attach from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import { type BrowserHandle, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 
@@ -40,33 +40,39 @@ function makeHangingHeadlessHandle(pid: number | undefined): {
 
 describe("browser dispose — headless close must not hang forever (issue #5260)", () => {
 	it("bounds a wedged browser.close() and force-kills the process tree", async () => {
+		vi.useFakeTimers();
 		const killSpy = spyOn(attach, "gracefulKillTreeOnce").mockResolvedValue(undefined);
 		try {
 			const { handle, closeCalls } = makeHangingHeadlessHandle(4242);
-			const start = Date.now();
-			await releaseBrowser(handle, { kill: false });
-			const elapsed = Date.now() - start;
+			const released = releaseBrowser(handle, { kill: false });
 
-			// close() was attempted, but the release still returned rather than
-			// hanging on the never-resolving promise.
 			expect(closeCalls()).toBe(1);
-			expect(elapsed).toBeLessThan(15_000);
-			// On timeout, the Chromium process tree is force-killed by pid.
+			vi.advanceTimersByTime(4_999);
+			await Promise.resolve();
+			expect(killSpy).not.toHaveBeenCalled();
+
+			vi.advanceTimersByTime(1);
+			await released;
 			expect(killSpy).toHaveBeenCalledTimes(1);
 			expect(killSpy.mock.calls[0]?.[0]).toBe(4242);
 		} finally {
 			killSpy.mockRestore();
+			vi.useRealTimers();
 		}
-	}, 20_000);
+	});
 
 	it("does not attempt a force-kill when no process handle is available", async () => {
+		vi.useFakeTimers();
 		const killSpy = spyOn(attach, "gracefulKillTreeOnce").mockResolvedValue(undefined);
 		try {
 			const { handle } = makeHangingHeadlessHandle(undefined);
-			await releaseBrowser(handle, { kill: false });
+			const released = releaseBrowser(handle, { kill: false });
+			vi.advanceTimersByTime(5_000);
+			await released;
 			expect(killSpy).not.toHaveBeenCalled();
 		} finally {
 			killSpy.mockRestore();
+			vi.useRealTimers();
 		}
-	}, 20_000);
+	});
 });

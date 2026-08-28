@@ -193,7 +193,7 @@ function retentionPrefixKey(messages: HindsightMessage[], count: number): string
 	for (let i = 0; i < count; i++) {
 		const m = messages[i];
 		if (m === undefined) break;
-		key = Bun.hash(`${key}\u0000${m.role}\u0000${m.content}`).toString(36);
+		key = Bun.hash(`${key}\u0000${m.role}\u0000${m.content}\u0000${m.timestamp ?? ""}`).toString(36);
 	}
 	return key;
 }
@@ -313,8 +313,19 @@ export class HindsightSessionState {
 		}
 	}
 
+	#sessionSourceTimestamp(): Date | undefined {
+		const header = this.session.sessionManager?.getHeader?.();
+		const timestamp = header?.timestamp;
+		if (typeof timestamp !== "string") return undefined;
+		const trimmed = timestamp.trim();
+		if (!trimmed) return undefined;
+		const parsed = new Date(trimmed);
+		return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+	}
+
 	async retainSession(messages: HindsightMessage[]): Promise<void> {
 		const retainedAt = new Date();
+		const sourceTimestamp = this.#sessionSourceTimestamp() ?? retainedAt;
 		const retainFullWindow = this.config.retainMode === "full-session";
 		let documentId: string;
 		let transcript: string;
@@ -329,7 +340,7 @@ export class HindsightSessionState {
 				this.#lastRetainedPrefixKey = "";
 			}
 			const newMessages = messages.slice(this.#lastRetainedMessageIndex);
-			const { transcript: newPart } = prepareRetentionTranscript(newMessages, true);
+			const { transcript: newPart } = prepareRetentionTranscript(newMessages, true, { includeTimestamps: true });
 			if (!newPart) return;
 			nextCachedTranscript = this.#cachedTranscript ? `${this.#cachedTranscript}\n\n${newPart}` : newPart;
 			transcript = nextCachedTranscript;
@@ -340,7 +351,7 @@ export class HindsightSessionState {
 			this.#lastRetainedMessageIndex = 0;
 			this.#cachedTranscript = "";
 			this.#lastRetainedPrefixKey = "";
-			const { transcript: windowTranscript } = prepareRetentionTranscript(target, true);
+			const { transcript: windowTranscript } = prepareRetentionTranscript(target, true, { includeTimestamps: true });
 			if (!windowTranscript) return;
 			transcript = windowTranscript;
 		}
@@ -351,7 +362,7 @@ export class HindsightSessionState {
 			context: this.config.retainContext,
 			metadata: { session_id: this.sessionId },
 			tags: this.retainTags,
-			timestamp: retainedAt,
+			timestamp: sourceTimestamp,
 			async: true,
 		});
 		if (nextCachedTranscript !== undefined) {
@@ -409,24 +420,6 @@ export class HindsightSessionState {
 				error: String(err),
 			});
 		}
-	}
-
-	async maybeRecallOnAgentStart(): Promise<void> {
-		if (!this.config.autoRecall || this.hasRecalledForFirstTurn) return;
-		const messages = extractMessages(this.session.sessionManager);
-		const lastUser = messages.findLast(m => m.role === "user");
-		if (!lastUser) return;
-
-		const query = composeRecallQuery(lastUser.content, messages, this.config.recallContextTurns);
-		const truncated = truncateRecallQuery(query, lastUser.content, this.config.recallMaxQueryChars);
-		const { context, ok } = await this.recallForContext(truncated);
-		if (!ok) return;
-
-		this.hasRecalledForFirstTurn = true;
-		if (!context) return;
-
-		this.lastRecallSnippet = context;
-		await this.#refreshBaseSystemPromptAfter("recall");
 	}
 
 	async beforeAgentStartPrompt(promptText: string): Promise<string | undefined> {
@@ -509,9 +502,7 @@ export class HindsightSessionState {
 	attachSessionListeners(): void {
 		this.unsubscribe?.();
 		this.unsubscribe = this.session.subscribe(event => {
-			if (event.type === "agent_start") {
-				void this.maybeRecallOnAgentStart();
-			} else if (event.type === "agent_end") {
+			if (event.type === "agent_end") {
 				void this.maybeRetainOnAgentEnd();
 				// Drain any queued tool-initiated retain calls now that the turn
 				// is settled. The queue is also debounced/size-bounded, but
@@ -540,7 +531,7 @@ export class HindsightSessionState {
 		this.retainQueue.dispose();
 	}
 
-	async #refreshBaseSystemPromptAfter(reason: "recall" | "MM load" | "MM reload" | "MM TTL reload"): Promise<void> {
+	async #refreshBaseSystemPromptAfter(reason: "MM load" | "MM reload" | "MM TTL reload"): Promise<void> {
 		try {
 			await this.session.refreshBaseSystemPrompt();
 		} catch (err) {

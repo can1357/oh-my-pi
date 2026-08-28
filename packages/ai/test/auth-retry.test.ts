@@ -8,7 +8,7 @@ import {
 	withAuth,
 	withOAuthAccess,
 } from "@oh-my-pi/pi-ai";
-import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { OAuthError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 
 function authError(status = 401): Error & { status: number } {
 	return Object.assign(new Error(`${status} authentication_error`), { status });
@@ -45,6 +45,25 @@ describe("isApiKeyResolver / resolveApiKeyOnce", () => {
 });
 
 describe("isAuthRetryableError", () => {
+	it("retries typed token-refresh requests without treating other OAuth failures as retryable", () => {
+		expect(
+			isAuthRetryableError(
+				new OAuthError("OAuth token expired before request", {
+					kind: "token-refresh",
+					provider: "google-antigravity",
+				}),
+			),
+		).toBe(true);
+		expect(
+			isAuthRetryableError(
+				new OAuthError("OAuth provider is misconfigured", {
+					kind: "configuration",
+					provider: "google-antigravity",
+				}),
+			),
+		).toBe(false);
+	});
+
 	it("treats 401/403 and usage-limit phrasing as retryable, everything else as not", () => {
 		expect(isAuthRetryableError(authError(401))).toBe(true);
 		expect(isAuthRetryableError(usageLimitError())).toBe(true);
@@ -275,6 +294,32 @@ describe("withAuth", () => {
 		expect(contexts.map(ctx => ctx.lastChance)).toEqual([false, true, true, true]);
 	});
 
+	it("leaves a 403 concurrency cap to the transient retry layer", async () => {
+		const keys: string[] = [];
+		const contexts: ApiKeyResolveContext[] = [];
+		const pool = ["k0", "k1", "k2", "k3"];
+		let resolveIndex = 0;
+		const concurrencyCap = Object.assign(new Error("concurrent requests limit reached"), { status: 403 });
+
+		await expect(
+			withAuth(
+				ctx => {
+					contexts.push(ctx);
+					return ctx.error === undefined ? pool[0] : pool[++resolveIndex];
+				},
+				async key => {
+					keys.push(key);
+					throw concurrencyCap;
+				},
+			),
+		).rejects.toBe(concurrencyCap);
+
+		// The outer transient retry/backoff layer owns concurrency caps. The auth
+		// retry layer must not refresh or select a sibling credential.
+		expect(keys).toEqual(["k0"]);
+		expect(contexts.map(ctx => ctx.lastChance)).toEqual([false]);
+	});
+
 	it("surfaces the last 403 when every sibling is denied", async () => {
 		const errors = [authError(403), authError(403)];
 		const resolved = ["k0", "k1", "k0"];
@@ -496,6 +541,64 @@ describe("withOAuthAccess", () => {
 		expect(result).toBe("proj-2");
 		expect(attempts.map(a => a.accessToken)).toEqual(["stale", "fresh"]);
 		expect(storage.calls).toEqual([{ forceRefresh: undefined }, { forceRefresh: true }]);
+	});
+
+	it("allows one token-refresh replay without rotating to a sibling", async () => {
+		const storage = fakeStorage({
+			initial: access("stale", { credentialId: 7 }),
+			forced: access("fresh", { credentialId: 7 }),
+			rotated: access("sibling", { credentialId: 8 }),
+		});
+		const firstError = new OAuthError("First token expired before request", {
+			kind: "token-refresh",
+			provider: "prov",
+		});
+		const secondError = new OAuthError("Refreshed token also expired before request", {
+			kind: "token-refresh",
+			provider: "prov",
+		});
+		const attempts: string[] = [];
+		await expect(
+			withOAuthAccess(storage, "prov", async a => {
+				attempts.push(a.accessToken);
+				throw attempts.length === 1 ? firstError : secondError;
+			}),
+		).rejects.toBe(secondError);
+
+		expect(attempts).toEqual(["stale", "fresh"]);
+		expect(storage.calls).toEqual([{ forceRefresh: undefined }, { forceRefresh: true }]);
+	});
+
+	it("honors a token-refresh request after an earlier 401 refresh", async () => {
+		const attempts: string[] = [];
+		const calls: Array<{ forceRefresh: boolean | undefined } | "rotate"> = [];
+		const forced = [access("fresh-but-expired", { credentialId: 7 }), access("renewed", { credentialId: 7 })];
+		const storage: OAuthAccessSource = {
+			async getOAuthAccess(_provider, _sessionId, options) {
+				calls.push({ forceRefresh: options?.forceRefresh });
+				if (options?.forceRefresh) return forced.shift();
+				return access("stale", { credentialId: 7 });
+			},
+			async rotateSessionCredential() {
+				calls.push("rotate");
+				return true;
+			},
+		};
+		const refreshRequest = new OAuthError("Refreshed token expired before request", {
+			kind: "token-refresh",
+			provider: "prov",
+		});
+
+		const result = await withOAuthAccess(storage, "prov", async a => {
+			attempts.push(a.accessToken);
+			if (a.accessToken === "stale") throw authError();
+			if (a.accessToken === "fresh-but-expired") throw refreshRequest;
+			return "ok";
+		});
+
+		expect(result).toBe("ok");
+		expect(attempts).toEqual(["stale", "fresh-but-expired", "renewed"]);
+		expect(calls).toEqual([{ forceRefresh: undefined }, { forceRefresh: true }, { forceRefresh: true }]);
 	});
 
 	it("tries a refreshed bearer for the same credential id on 401 before rotating", async () => {

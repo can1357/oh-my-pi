@@ -1,8 +1,8 @@
-Searches the web for up-to-date information beyond knowledge cutoff.
+Web search: current information beyond knowledge cutoff.
 
 <instruction>
-- You SHOULD prefer primary sources (papers, official docs) and corroborate key claims with multiple sources
-- You MUST include links for cited sources in the final response
-- NEVER use for content that is programmatically accessible or whose URL you already know (GitHub repos/issues, a known arXiv paper, a Wikipedia page, official docs) — `read` the URL directly instead
-- `query` supports Google-style directives on every provider: `site:`/`-site:`, `after:`/`before:` (`YYYY-MM-DD`), `inurl:`, `intitle:`, `filetype:`, `"exact phrase"`, `-term`, `OR`. Constraints map to native provider filters where available; otherwise results are filtered leniently — a constraint matching nothing is relaxed and reported instead of returning zero results.
+- SHOULD prefer primary sources (papers, official docs); corroborate key claims with multiple sources.
+- MUST link cited sources in final response.
+- NEVER use for programmatically accessible content or known URLs (GitHub repos/issues, known arXiv papers, Wikipedia pages, official docs) — `read` URL directly.
+- `query`: every provider supports Google-style `site:`/`-site:`, `after:`/`before:` (`YYYY-MM-DD`), `inurl:`, `intitle:`, `filetype:`, `"exact phrase"`, `-term`, `OR`. Map constraints to native filters when available; otherwise filter results leniently. If a constraint matches nothing, relax and report it; do not return zero results.
 </instruction>

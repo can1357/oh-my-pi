@@ -20,6 +20,7 @@ import "../capability/ssh";
 import "../capability/system-prompt";
 import "../capability/tool";
 // Import providers (each registers itself on import)
+import "./agent-plugins";
 import "./agents-md";
 import "./builtin";
 import "./builtin-defaults";

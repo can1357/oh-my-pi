@@ -57,6 +57,20 @@ const xaiOAuthResponsesModel: Model<"openai-responses"> = {
 		reasoning: true,
 	}),
 };
+const xaiApiKeyResponsesModel: Model<"openai-responses"> = {
+	...model,
+	id: "grok-code-fast-1",
+	name: "Grok Code Fast 1",
+	provider: "xai",
+	baseUrl: "https://api.x.ai/v1",
+	compat: buildOpenAIResponsesCompat({
+		id: "grok-code-fast-1",
+		name: "Grok Code Fast 1",
+		provider: "xai",
+		baseUrl: "https://api.x.ai/v1",
+		reasoning: true,
+	}),
+};
 
 const openAI56ResponsesModel: Model<"openai-responses"> = {
 	...model,
@@ -673,6 +687,16 @@ describe("openai-responses cache affinity", () => {
 			expect(captured.body?.existing).toBe(true);
 			expect(captured.body?.reasoning).toBeUndefined();
 		}
+	});
+
+	it("sets x-grok-conv-id cache affinity for paid xai Responses requests", async () => {
+		const captured = await captureDispatchedOpenAIResponseHeaders(
+			{ sessionId: "session-fallback" },
+			xaiApiKeyResponsesModel,
+		);
+
+		expect(getHeader(captured.headers, "x-grok-conv-id")).toBe("session-fallback");
+		expect(captured.body?.prompt_cache_key).toBe("session-fallback");
 	});
 
 	it("sets OpenRouter Responses session_id from sessionId in the body", async () => {

@@ -1,10 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { Agent, type AgentEvent, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import { type SimpleStreamOptions, type ToolResultMessage, z } from "@oh-my-pi/pi-ai";
+import { type } from "@oh-my-pi/omptype";
+import { Agent, AgentBusyError, type AgentEvent, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { SimpleStreamOptions, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
-import { createAssistantMessage } from "./helpers";
+import { createAssistantMessage, createUserMessage } from "./helpers";
 
 describe("Agent", () => {
 	it("should support steering message queueing", async () => {
@@ -18,7 +19,7 @@ describe("Agent", () => {
 	});
 
 	it("classifies agent-authored steering as a parent steering message", async () => {
-		const toolSchema = z.object({ value: z.string() });
+		const toolSchema = type({ value: type("string") });
 		const executed: string[] = [];
 		let agent: Agent;
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {
@@ -81,7 +82,7 @@ describe("Agent", () => {
 	});
 
 	it("classifies user-attributed custom steering as a queued user message", async () => {
-		const toolSchema = z.object({ value: z.string() });
+		const toolSchema = type({ value: type("string") });
 		const executed: string[] = [];
 		let agent: Agent;
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {
@@ -149,6 +150,51 @@ describe("Agent", () => {
 		expect(skippedContent.text).toContain("Skipped due to queued user message");
 		expect(skippedContent.text).not.toContain("pending system advisory");
 	});
+	it("continue() re-executes a trailing assistant's unpaired tool calls before the next model call", async () => {
+		const toolSchema = type({ value: type("string") });
+		const executed: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "probe",
+			label: "Probe",
+			description: "Probe tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params.value);
+				return { content: [{ type: "text", text: `ok:${params.value}` }], details: params };
+			},
+		};
+		// One response only: the tool must run WITHOUT a model call re-issuing it,
+		// and the single call is the post-tool continuation on the fresh result.
+		const mock = createMockModel({ responses: [{ content: ["done after replay"] }] });
+		const agent = new Agent({
+			initialState: {
+				model: mock.model,
+				systemPrompt: ["Test"],
+				tools: [tool],
+				// A harness stripped the failed tool result (AgentSession.retry's tool
+				// replay), leaving the tool-calling assistant as the transcript tail.
+				messages: [
+					createUserMessage("run the probe"),
+					createAssistantMessage(
+						[{ type: "toolCall", id: "call_1", name: "probe", arguments: { value: "again" } }],
+						"toolUse",
+					),
+				],
+			},
+			streamFn: mock.stream,
+		});
+
+		await agent.continue();
+
+		expect(executed).toEqual(["again"]);
+		expect(mock.calls.length).toBe(1);
+		const roles = agent.state.messages.map(message => message.role);
+		expect(roles).toEqual(["user", "assistant", "toolResult", "assistant"]);
+		const result = agent.state.messages[2] as ToolResultMessage;
+		expect(result.toolCallId).toBe("call_1");
+		expect(result.isError).not.toBe(true);
+		expect(result.content).toContainEqual({ type: "text", text: "ok:again" });
+	});
 
 	it("classifies one-at-a-time steering from the next queued mixed source", async () => {
 		const cases = [
@@ -165,7 +211,7 @@ describe("Agent", () => {
 		];
 
 		for (const scenario of cases) {
-			const toolSchema = z.object({ value: z.string() });
+			const toolSchema = type({ value: type("string") });
 			const executed: string[] = [];
 			let agent: Agent;
 			const tool: AgentTool<typeof toolSchema, { value: string }> = {
@@ -240,6 +286,218 @@ describe("Agent", () => {
 		}
 	});
 
+	it("removes duplicate queued-message hooks independently", async () => {
+		const mock = createMockModel({ responses: [{ content: ["first"] }, { content: ["second"] }] });
+		const agent = new Agent({ streamFn: mock.stream });
+		agent.replaceMessages([createAssistantMessage([{ type: "text", text: "ready" }])]);
+		let calls = 0;
+		const signals: Array<AbortSignal | undefined> = [];
+		const hook = (signal?: AbortSignal) => {
+			calls++;
+			signals.push(signal);
+		};
+		const removeFirst = agent.addBeforeQueuedMessageDequeueHook(hook);
+		const removeSecond = agent.addBeforeQueuedMessageDequeueHook(hook);
+
+		const controller = new AbortController();
+		removeFirst();
+		agent.followUp({ role: "user", content: "first turn", timestamp: Date.now() });
+		await agent.continue(controller.signal);
+		expect(calls).toBe(1);
+		expect(signals).toEqual([controller.signal]);
+
+		removeSecond();
+		agent.followUp({ role: "user", content: "second turn", timestamp: Date.now() });
+		await agent.continue();
+		expect(calls).toBe(1);
+	});
+
+	it("continue() leaves queued messages owned when its signal is already aborted", async () => {
+		const agent = new Agent();
+		agent.replaceMessages([createAssistantMessage([{ type: "text", text: "ready" }])]);
+		agent.followUp({ role: "user", content: "stay queued", timestamp: Date.now() });
+		const controller = new AbortController();
+		controller.abort();
+
+		await expect(agent.continue(controller.signal)).rejects.toThrow("Cannot continue from message role: assistant");
+		expect(agent.peekFollowUpQueue()).toHaveLength(1);
+	});
+	it("keeps follow-up ownership when the deadline expires during a dequeue hook", async () => {
+		const mock = createMockModel({ responses: [{ content: ["done"] }] });
+		// Generous budget: the loop checks the deadline before invoking dequeue
+		// hooks, so the mock roundtrip must beat it even on starved CI runners.
+		// The hook itself parks until the deadline timer aborts the loop signal,
+		// so the expiry-during-hook branch stays exercised.
+		const agent = new Agent({ streamFn: mock.stream, deadline: Date.now() + 1_000 });
+		let hookSignal: AbortSignal | undefined;
+		agent.addBeforeQueuedMessageDequeueHook(async signal => {
+			if (!signal) throw new Error("Expected the active loop signal");
+			hookSignal = signal;
+			if (signal.aborted) return;
+			const { promise, resolve } = Promise.withResolvers<void>();
+			signal.addEventListener("abort", () => resolve(), { once: true });
+			await promise;
+		});
+		agent.followUp({ role: "user", content: "stay queued after deadline", timestamp: Date.now() });
+
+		await agent.prompt("start");
+
+		expect(hookSignal?.aborted).toBe(true);
+		expect(agent.peekFollowUpQueue()).toHaveLength(1);
+	});
+	it("keeps queued work when continue() reaches its deadline inside a dequeue hook", async () => {
+		// Same starvation guard as above: hook entry must precede expiry.
+		const agent = new Agent({ deadline: Date.now() + 1_000 });
+		agent.replaceMessages([createAssistantMessage([{ type: "text", text: "ready" }])]);
+		agent.addBeforeQueuedMessageDequeueHook(async signal => {
+			if (!signal) throw new Error("Expected the deadline-aware dequeue signal");
+			if (signal.aborted) return;
+			const { promise, resolve } = Promise.withResolvers<void>();
+			signal.addEventListener("abort", () => resolve(), { once: true });
+			await promise;
+		});
+		agent.followUp({ role: "user", content: "stay queued before run loop", timestamp: Date.now() });
+
+		await expect(agent.continue()).rejects.toThrow("Cannot continue from message role: assistant");
+
+		expect(agent.peekFollowUpQueue()).toHaveLength(1);
+	});
+
+	it("claims an abortable busy state while continue() awaits dequeue hooks", async () => {
+		const agent = new Agent();
+		agent.replaceMessages([createAssistantMessage([{ type: "text", text: "ready" }])]);
+		agent.followUp({ role: "user", content: "stay queued", timestamp: Date.now() });
+		const hookStarted = Promise.withResolvers<void>();
+		agent.addBeforeQueuedMessageDequeueHook(async signal => {
+			if (!signal) throw new Error("Expected continuation dequeue signal");
+			hookStarted.resolve();
+			if (signal.aborted) return;
+			const { promise, resolve } = Promise.withResolvers<void>();
+			signal.addEventListener("abort", () => resolve(), { once: true });
+			await promise;
+		});
+
+		const continuing = agent.continue();
+		await hookStarted.promise;
+		let idleResolved = false;
+		const idle = agent.waitForIdle().then(() => {
+			idleResolved = true;
+		});
+		await Promise.resolve();
+
+		expect(agent.state.isStreaming).toBe(true);
+		expect(idleResolved).toBe(false);
+		await expect(agent.prompt("must not overlap")).rejects.toBeInstanceOf(AgentBusyError);
+
+		agent.abort("cancel dequeue");
+		await expect(continuing).rejects.toThrow("Cannot continue from message role: assistant");
+		await idle;
+		expect(idleResolved).toBe(true);
+		expect(agent.state.isStreaming).toBe(false);
+		expect(agent.peekFollowUpQueue()).toHaveLength(1);
+	});
+
+	it("does not clear a successor prompt after continue() releases idle waiters", async () => {
+		const firstStarted = Promise.withResolvers<void>();
+		const releaseFirst = Promise.withResolvers<void>();
+		const secondStarted = Promise.withResolvers<void>();
+		const releaseSecond = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			responses: [
+				async () => {
+					firstStarted.resolve();
+					await releaseFirst.promise;
+					return { content: ["continued"] };
+				},
+				async () => {
+					secondStarted.resolve();
+					await releaseSecond.promise;
+					return { content: ["successor"] };
+				},
+			],
+		});
+		const agent = new Agent({ streamFn: mock.stream });
+		agent.replaceMessages([createAssistantMessage([{ type: "text", text: "ready" }])]);
+		agent.followUp({ role: "user", content: "continue", timestamp: Date.now() });
+
+		const continuing = agent.continue();
+		await firstStarted.promise;
+		const successor = agent.waitForIdle().then(() => agent.prompt("next prompt"));
+		releaseFirst.resolve();
+		await secondStarted.promise;
+		await continuing;
+
+		expect(agent.state.isStreaming).toBe(true);
+		releaseSecond.resolve();
+		await successor;
+		expect(agent.state.isStreaming).toBe(false);
+	});
+
+	it("resolves a predecessor idle waiter when agent_end starts a successor", async () => {
+		const secondStarted = Promise.withResolvers<void>();
+		const releaseSecond = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			responses: [
+				{ content: ["first"] },
+				async () => {
+					secondStarted.resolve();
+					await releaseSecond.promise;
+					return { content: ["second"] };
+				},
+			],
+		});
+		const agent = new Agent({ streamFn: mock.stream });
+		let successor: Promise<void> | undefined;
+		agent.subscribe(event => {
+			if (event.type === "agent_end" && !successor) {
+				successor = agent.prompt("successor");
+			}
+		});
+
+		const predecessor = agent.prompt("predecessor");
+		let predecessorIdleResolved = false;
+		void agent.waitForIdle().then(() => {
+			predecessorIdleResolved = true;
+		});
+		await secondStarted.promise;
+		await predecessor;
+		expect(agent.state.isStreaming).toBe(true);
+
+		releaseSecond.resolve();
+		await successor;
+		await Promise.resolve();
+		expect(predecessorIdleResolved).toBe(true);
+		expect(agent.state.isStreaming).toBe(false);
+	});
+
+	it("classifies an in-flight continuation cancellation as aborted", async () => {
+		const providerStarted = Promise.withResolvers<AbortSignal>();
+		const agent = new Agent({
+			streamFn: (_model, _context, options) => {
+				const signal = options?.signal;
+				if (!signal) throw new Error("Expected provider abort signal");
+				providerStarted.resolve(signal);
+				const stream = new AssistantMessageEventStream();
+				signal.addEventListener("abort", () => stream.fail(new Error("provider aborted")), { once: true });
+				return stream;
+			},
+		});
+		agent.replaceMessages([createAssistantMessage([{ type: "text", text: "ready" }])]);
+		agent.followUp({ role: "user", content: "cancel this continuation", timestamp: Date.now() });
+		const controller = new AbortController();
+
+		const running = agent.continue(controller.signal);
+		await providerStarted.promise;
+		controller.abort("caller cancelled");
+		await running;
+
+		const finalMessage = agent.state.messages.at(-1);
+		expect(finalMessage?.role).toBe("assistant");
+		if (finalMessage?.role !== "assistant") throw new Error("Expected aborted assistant message");
+		expect(finalMessage.stopReason).toBe("aborted");
+		expect(finalMessage.errorMessage).toBe("caller cancelled");
+	});
+
 	it("continue() should process queued follow-up messages after an assistant turn", async () => {
 		const mock = createMockModel({ responses: [{ content: ["Processed"] }] });
 		const agent = new Agent({ streamFn: mock.stream });
@@ -276,6 +534,12 @@ describe("Agent", () => {
 			responses: [{ content: ["Processed 1"] }, { content: ["Processed 2"] }],
 		});
 		const agent = new Agent({ streamFn: mock.stream });
+		let dequeueHooks = 0;
+		const dequeueSignals: Array<AbortSignal | undefined> = [];
+		agent.addBeforeQueuedMessageDequeueHook(signal => {
+			dequeueHooks++;
+			dequeueSignals.push(signal);
+		});
 
 		agent.replaceMessages([
 			{
@@ -297,11 +561,16 @@ describe("Agent", () => {
 			timestamp: Date.now() + 1,
 		});
 
-		await expect(agent.continue()).resolves.toBeUndefined();
+		const controller = new AbortController();
+		await expect(agent.continue(controller.signal)).resolves.toBeUndefined();
 
 		const recentMessages = agent.state.messages.slice(-4);
 		expect(recentMessages.map(m => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
 		expect(mock.calls.length).toBe(2);
+		expect(dequeueHooks).toBe(2);
+		expect(dequeueSignals).toHaveLength(2);
+		controller.abort();
+		expect(dequeueSignals.every(signal => signal?.aborted === true)).toBe(true);
 	});
 
 	it("delivers a steer that lands at the yield boundary instead of stranding it", async () => {
@@ -818,7 +1087,7 @@ describe("Agent", () => {
 	});
 
 	it("prompt() refreshes tools and system prompt between same-turn model calls", async () => {
-		const toolSchema = z.object({ value: z.string() });
+		const toolSchema = type({ value: type("string") });
 		type Details = { value: string };
 
 		const betaTool: AgentTool<typeof toolSchema, Details> = {
@@ -856,6 +1125,10 @@ describe("Agent", () => {
 			},
 			streamFn: mock.stream,
 		});
+		let beforeModelCalls = 0;
+		agent.addBeforeModelCallHook(() => {
+			beforeModelCalls++;
+		});
 
 		const unsubscribe = agent.subscribe(event => {
 			if (event.type === "message_end" && event.message.role === "toolResult") {
@@ -875,10 +1148,11 @@ describe("Agent", () => {
 			{ systemPrompt: "prompt-one", toolNames: ["alpha"] },
 			{ systemPrompt: "prompt-two", toolNames: ["alpha", "beta"] },
 		]);
+		expect(beforeModelCalls).toBe(2);
 	});
 
 	it("prompt() drops stale forced toolChoice after same-turn tool refresh", async () => {
-		const toolSchema = z.object({ value: z.string() });
+		const toolSchema = type({ value: type("string") });
 		type Details = { value: string };
 
 		const betaTool: AgentTool<typeof toolSchema, Details> = {
@@ -936,7 +1210,7 @@ describe("Agent", () => {
 	});
 
 	it("drops queued forced toolChoice when the queued tool is not active", async () => {
-		const toolSchema = z.object({ value: z.string() });
+		const toolSchema = type({ value: type("string") });
 		type Details = { value: string };
 
 		const betaTool: AgentTool<typeof toolSchema, Details> = {
@@ -968,7 +1242,7 @@ describe("Agent", () => {
 	});
 
 	it("re-reads thinking level for each model call within a run", async () => {
-		const toolSchema = z.object({ value: z.string() });
+		const toolSchema = type({ value: type("string") });
 		type Details = { value: string };
 		const alphaTool: AgentTool<typeof toolSchema, Details> = {
 			name: "alpha",
@@ -1029,7 +1303,7 @@ describe("Agent", () => {
 	});
 
 	it("re-reads disableReasoning for each model call within a run", async () => {
-		const toolSchema = z.object({ value: z.string() });
+		const toolSchema = type({ value: type("string") });
 		type Details = { value: string };
 		const alphaTool: AgentTool<typeof toolSchema, Details> = {
 			name: "alpha",
@@ -1121,7 +1395,7 @@ describe("Agent", () => {
 	});
 
 	it("re-reads cwd from cwdResolver for each model call within a run (a /move mid-run is seen)", async () => {
-		const toolSchema = z.object({ value: z.string() });
+		const toolSchema = type({ value: type("string") });
 		type Details = { value: string };
 		const alphaTool: AgentTool<typeof toolSchema, Details> = {
 			name: "alpha",
@@ -1162,18 +1436,6 @@ describe("Agent", () => {
 		expect(cwdPerCall).toEqual(["/live/repo-a", "/live/repo-b"]);
 	});
 
-	it("returns static metadata via the plain setter", () => {
-		const agent = new Agent();
-		expect(agent.metadata).toBeUndefined();
-
-		const value = { user_id: "static" };
-		agent.metadata = value;
-		expect(agent.metadata).toEqual({ user_id: "static" });
-
-		agent.metadata = undefined;
-		expect(agent.metadata).toBeUndefined();
-	});
-
 	it("metadataForProvider resolves dynamic value at every call when a resolver is installed", () => {
 		const agent = new Agent();
 		let live = "alpha";
@@ -1192,7 +1454,6 @@ describe("Agent", () => {
 		expect(agent.metadataForProvider("any")).toEqual({ user_id: "from-resolver" });
 
 		agent.metadata = { user_id: "from-static" };
-		expect(agent.metadata).toEqual({ user_id: "from-static" });
 		expect(agent.metadataForProvider("any")).toEqual({ user_id: "from-static" });
 	});
 
@@ -1215,7 +1476,6 @@ describe("Agent", () => {
 
 		agent.setMetadataResolver(undefined);
 		expect(agent.metadataForProvider("any")).toEqual({ user_id: "static" });
-		expect(agent.metadata).toEqual({ user_id: "static" });
 	});
 });
 

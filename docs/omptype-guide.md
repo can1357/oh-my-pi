@@ -4,9 +4,6 @@ Internal schemas use **`@oh-my-pi/omptype`** — an ArkType-compatible validator
 with a lazy JIT runtime (`packages/omptype`). Author types with
 `import { type } from "@oh-my-pi/omptype"`.
 
-> **Scope rule.** Zod stays supported at the **external boundary** — `Tool.parameters`
-> accepts Zod _or_ omptype _or_ JSON Schema, and the public `pi.zod` extension API is
-> untouched. Internal schemas use omptype.
 
 ## Why omptype (perf contract)
 
@@ -19,10 +16,9 @@ with a lazy JIT runtime (`packages/omptype`). Author types with
 
 ## The detection contract (don't break it)
 
-`packages/ai/src/utils/schema/wire.ts` distinguishes the three schema kinds:
+`packages/ai/src/utils/schema/wire.ts` distinguishes two schema kinds:
 
-- **omptype** = a _callable function_ with `.toJsonSchema` and `.assert` methods (`isArkSchema`).
-- **Zod** = a non-callable object carrying `_zod` + `.parse` (`isZodSchema`).
+- **omptype** = a callable function with `.toJsonSchema` and `.assert` methods (`isArkSchema`).
 - **JSON Schema** = a plain object.
 
 At the provider boundary, `toolWireSchema()` calls `toJsonSchema()`, prunes
@@ -80,30 +76,17 @@ if (out instanceof type.errors) {
 Note on `.or()` typing: schema and string operands infer precisely;
 object-literal operands degrade — wrap them with `type({...})` first.
 
-## Zod → omptype translation (for new code)
-
-| Zod                                | omptype                                                    |
-| ---------------------------------- | ----------------------------------------------------------- |
-| `z.object({ a: ... })`             | `type({ a: ... })`                                          |
-| `z.enum(["a","b"])` (static)       | `"'a' \| 'b'"`                                              |
-| `z.enum(RUNTIME_ARRAY)`            | `type.enumerated(...RUNTIME_ARRAY)`                         |
-| `z.record(z.string(), z.number())` | `type({ "[string]": "number" })`                            |
-| `.optional()`                      | optional key `{ "a?": "string" }`                           |
-| `.strict()` / `.strip()`           | `"+": "reject"` / `"+": "delete"`                           |
-| `.refine(fn, msg)`                 | `.narrow((d, ctx) => fn(d) \|\| ctx.mustBe("<expect>"))`    |
-| `.transform(fn)`                   | `.pipe(fn)`                                                 |
-| `.catch(fallback)`                 | `type("unknown").pipe(raw => { const out = inner(raw); return out instanceof type.errors ? FALLBACK : out; })` |
-| `z.infer<typeof S>`                | `typeof S.infer`                                            |
-
 ## Adapters
 
-For TypeBox-style or Zod-style authoring backed by the omptype runtime:
+TypeBox-style and Zod-style authoring are backed by the omptype runtime:
 
 ```ts
 import { Type, type Static } from "@oh-my-pi/omptype/typebox";
 import { z } from "@oh-my-pi/omptype/zod";
+
+const User = z.object({ name: z.string() });
+type User = z.infer<typeof User>;
 ```
 
-Both produce real omptype schemas (JIT validation, `toJsonSchema`, wire
-detection). Use them for extension-facing surfaces; internal code authors
-the string DSL directly.
+These produce real omptype schemas with JIT validation and `toJsonSchema`.
+Internal code authors the string DSL directly.

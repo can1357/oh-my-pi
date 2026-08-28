@@ -1,8 +1,8 @@
 /**
  * MCP (Model Context Protocol) type definitions.
  *
- * Based on MCP specification 2025-03-26:
- * https://modelcontextprotocol.io/specification/2025-03-26/
+ * Based on MCP specification 2025-11-25:
+ * https://modelcontextprotocol.io/specification/2025-11-25/
  */
 
 // =============================================================================
@@ -86,6 +86,7 @@ interface MCPServerConfigBase {
 	oauth?: {
 		clientId?: string;
 		clientSecret?: string;
+		scope?: string;
 		redirectUri?: string;
 		callbackPort?: number;
 		callbackPath?: string;
@@ -100,6 +101,13 @@ export interface MCPStdioServerConfig extends MCPServerConfigBase {
 	command: string;
 	args?: string[];
 	env?: Record<string, string>;
+	/**
+	 * `literal`: env values are opaque plugin package data (Agent Plugins
+	 * §§4.1/9.2) — no env-name lookup, no `!command` execution, no dropping of
+	 * empty values. The provider already applied the only permitted expansion
+	 * (`${PLUGIN_ROOT}`/`${PLUGIN_DATA}`).
+	 */
+	envPolicy?: "literal";
 	cwd?: string;
 }
 
@@ -108,6 +116,12 @@ export interface MCPHttpServerConfig extends MCPServerConfigBase {
 	type: "http";
 	url: string;
 	headers?: Record<string, string>;
+	/**
+	 * `origin-locked`: configured headers are literal package data pinned to the
+	 * configured URL's origin (Agent Plugins §7.2.1) — never expanded, never
+	 * forwarded cross-origin, and client-generated headers win case-insensitively.
+	 */
+	headerPolicy?: "origin-locked";
 }
 
 /** SSE server configuration (deprecated, use HTTP) */
@@ -115,6 +129,8 @@ export interface MCPSseServerConfig extends MCPServerConfigBase {
 	type: "sse";
 	url: string;
 	headers?: Record<string, string>;
+	/** See {@link MCPHttpServerConfig.headerPolicy}. */
+	headerPolicy?: "origin-locked";
 }
 
 export type MCPServerConfig = MCPStdioServerConfig | MCPHttpServerConfig | MCPSseServerConfig;
@@ -136,10 +152,35 @@ export interface MCPConfigFile {
 // MCP Protocol Types
 // =============================================================================
 
-/** MCP implementation info */
+/**
+ * Latest MCP protocol revision this client negotiates.
+ *
+ * Sent as `protocolVersion` in the `initialize` request and, for Streamable
+ * HTTP, echoed back to the server in the `MCP-Protocol-Version` header on every
+ * subsequent request (per the MCP HTTP transport spec). Must track the current
+ * stable revision: AWS Bedrock AgentCore Gateway refuses tool calls on an
+ * outbound per-user OAuth (`AUTHORIZATION_CODE`) target below `2025-11-25`, and
+ * it checks the version *before* consulting its token vault, so an older client
+ * is refused even for a caller whose consent is already stored.
+ */
+export const MCP_PROTOCOL_VERSION = "2025-11-25";
+
+/** Optionally-sized icon for MCP UI metadata (implementation, tools, resources). */
+export interface MCPIcon {
+	src: string;
+	mimeType?: string;
+	sizes?: string[];
+	theme?: "light" | "dark";
+}
+
+/** MCP implementation info (`InitializeRequest.params.clientInfo` / `InitializeResult.serverInfo`). */
 export interface MCPImplementation {
 	name: string;
+	title?: string;
 	version: string;
+	description?: string;
+	websiteUrl?: string;
+	icons?: MCPIcon[];
 }
 
 /** MCP client capabilities */
@@ -173,16 +214,36 @@ export interface MCPInitializeResult {
 	instructions?: string;
 }
 
+/** Tool annotations from the 2025-11-25 tools spec. */
+export interface MCPToolAnnotations {
+	title?: string;
+	readOnlyHint?: boolean;
+	destructiveHint?: boolean;
+	idempotentHint?: boolean;
+	openWorldHint?: boolean;
+}
+
+/** Execution metadata from the 2025-11-25 tools spec. */
+export interface MCPToolExecution {
+	taskSupport?: "forbidden" | "optional" | "required";
+}
+
 /** MCP tool definition */
 export interface MCPToolDefinition {
 	name: string;
+	title?: string;
 	description?: string;
+	icons?: MCPIcon[];
 	inputSchema: {
 		type: "object";
 		properties?: Record<string, unknown>;
 		required?: string[];
 		[key: string]: unknown;
 	};
+	outputSchema?: Record<string, unknown>;
+	execution?: MCPToolExecution;
+	annotations?: MCPToolAnnotations;
+	_meta?: Record<string, unknown>;
 }
 
 /** tools/list response */
@@ -253,6 +314,14 @@ export interface MCPTransport {
 
 	/** Close the transport */
 	close(): Promise<void>;
+
+	/**
+	 * Record the protocol version negotiated in the `initialize` response.
+	 * Streamable HTTP transports echo it in the `MCP-Protocol-Version` header on
+	 * every subsequent request; transports that need no per-request version
+	 * (stdio) omit this.
+	 */
+	setProtocolVersion?(version: string): void;
 
 	/** Whether the transport is connected */
 	readonly connected: boolean;

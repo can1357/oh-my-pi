@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { type DaemonOperation, parseDaemonRpcResult, parseDaemonWireRequest } from "../../src/launch/protocol";
+import {
+	type DaemonOperation,
+	parseDaemonRpcResult,
+	parseDaemonSnapshot,
+	parseDaemonWireRequest,
+} from "../../src/launch/protocol";
 
 const operation: Extract<DaemonOperation, { op: "logs" }> = {
 	op: "logs",
@@ -16,6 +21,18 @@ const baseResult = {
 	cursor: 42,
 	timedOut: false,
 	state: "running" as const,
+};
+
+const baseSnapshot = {
+	name: "web",
+	id: "daemon-1",
+	state: "ready" as const,
+	createdAt: 1,
+	startedAt: 1,
+	restartCount: 0,
+	outputBytes: 5,
+	persist: false,
+	detached: false,
 };
 
 describe("launch logs protocol", () => {
@@ -72,5 +89,33 @@ describe("launch logs compatibility", () => {
 		const result = parseDaemonRpcResult(operation, { ...baseResult, terminalText: "progress\rready" });
 		if (result.op !== "logs") throw new Error("unexpected result");
 		expect("terminalText" in result ? result.terminalText : undefined).toBe("progress\rready");
+	});
+});
+
+describe("regex-derived protocol fields", () => {
+	it("preserves an empty readiness match", () => {
+		expect(parseDaemonSnapshot({ ...baseSnapshot, readyMatch: "" }).readyMatch).toBe("");
+	});
+
+	it("preserves an empty wait pattern match", () => {
+		const waitOperation: Extract<DaemonOperation, { op: "wait" }> = {
+			op: "wait",
+			name: "web",
+			for: "ready",
+			pattern: "^",
+			timeoutMs: 1_000,
+		};
+		expect(
+			parseDaemonRpcResult(waitOperation, {
+				daemon: baseSnapshot,
+				matched: "",
+				timedOut: false,
+			}),
+		).toEqual({
+			op: "wait",
+			daemon: baseSnapshot,
+			matched: "",
+			timedOut: false,
+		});
 	});
 });

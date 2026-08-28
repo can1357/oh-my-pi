@@ -5,10 +5,7 @@
  * THAT session, and `hasPendingAsyncWork()` / `settleAsyncWork()` define the
  * run quiescence the task executor's barrier is built on.
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -21,27 +18,29 @@ import type { AsyncResultEntry } from "@oh-my-pi/pi-coding-agent/session/async-j
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+
+function observeAsyncResultEnqueue(session: AgentSession): Promise<void> {
+	const queued = Promise.withResolvers<void>();
+	const enqueue = session.yieldQueue.enqueueWithReceipt.bind(session.yieldQueue);
+	vi.spyOn(session.yieldQueue, "enqueueWithReceipt").mockImplementation((kind, entry) => {
+		const receipt = enqueue(kind, entry);
+		if (kind === "async-result") queued.resolve();
+		return receipt;
+	});
+	return queued.promise;
+}
 
 describe("AgentSession owner-routed async delivery", () => {
 	let session: AgentSession;
-	let tempDir: string;
 	const authStorages: AuthStorage[] = [];
 
-	beforeEach(() => {
-		tempDir = path.join(os.tmpdir(), `pi-async-delivery-test-${Snowflake.next()}`);
-		fs.mkdirSync(tempDir, { recursive: true });
-	});
-
 	afterEach(async () => {
+		vi.useRealTimers();
 		if (session) {
 			await session.dispose();
 		}
 		for (const authStorage of authStorages.splice(0)) {
 			authStorage.close();
-		}
-		if (tempDir && fs.existsSync(tempDir)) {
-			removeSyncWithRetries(tempDir);
 		}
 		AsyncJobManager.resetForTests();
 	});
@@ -55,7 +54,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			convertToLlm,
 			streamFn: mock.stream,
 		});
-		const authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const manager = new AsyncJobManager({});
@@ -105,7 +104,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			convertToLlm,
 			streamFn: mock.stream,
 		});
-		const authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const sessionManager = SessionManager.inMemory();
@@ -159,7 +158,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			convertToLlm,
 			streamFn: mock.stream,
 		});
-		const authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const manager = new AsyncJobManager({ retentionMs: 60_000 });
@@ -213,7 +212,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			convertToLlm,
 			streamFn: mock.stream,
 		});
-		const authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const manager = new AsyncJobManager({ retentionMs: 60_000 });
@@ -227,18 +226,21 @@ describe("AgentSession owner-routed async delivery", () => {
 			agentId: "Main",
 			ownedAsyncJobManager: manager,
 		});
+		const resultQueued = observeAsyncResultEnqueue(session);
 
-		// Complete a job and push its result all the way onto the yield queue, so a
-		// follow-up turn is pending injection into the (soon-to-be-replaced) session.
+		// Complete a job while no turn is available to inject its queued result.
+		// The job body stays retained until either the queue commits it or a hub
+		// snapshot recovers it.
 		manager.register("task", "prior session", async () => "STALE ASYNC RESULT", {
 			id: "prior-session-job",
 			ownerId: "Main",
 		});
 		await manager.waitForOwnerJobs("Main");
-		await manager.drainDeliveries({ filter: { ownerId: "Main" } });
+		await resultQueued;
 		expect(session.hasPendingAsyncWork()).toBe(true);
 
 		expect(await session.newSession()).toBe(true);
+		await manager.drainDeliveries({ timeoutMs: 1_000, filter: { ownerId: "Main" } });
 		expect(session.hasPendingAsyncWork()).toBe(false);
 
 		// A fresh turn in the replacement session must not carry the prior result.
@@ -265,7 +267,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			convertToLlm,
 			streamFn: mock.stream,
 		});
-		const authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const manager = new AsyncJobManager({ retentionMs: 60_000 });
@@ -313,7 +315,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(session.hasPendingAsyncWork()).toBe(false);
 	});
 
-	it("still reports pending async work while a delivered result awaits injection", async () => {
+	it("keeps delivery pending until the queued follow-up is injected", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
 		const agent = new Agent({
@@ -322,7 +324,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			convertToLlm,
 			streamFn: mock.stream,
 		});
-		const authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const manager = new AsyncJobManager({});
@@ -337,23 +339,69 @@ describe("AgentSession owner-routed async delivery", () => {
 			asyncJobManager: manager,
 		});
 
+		const resultQueued = observeAsyncResultEnqueue(session);
 		const gate = Promise.withResolvers<string>();
 		manager.register("bash", "gated job", () => gate.promise, { id: "sub-job", ownerId: "SubAgent" });
 		gate.resolve("job finished: QUEUED RESULT");
 		await manager.waitForOwnerJobs("SubAgent");
-		await manager.drainDeliveries({ filter: { ownerId: "SubAgent" } });
 
-		// The manager has fully handed off — no running jobs, no queued or
-		// in-flight deliveries — but the async-result follow-up still sits on
-		// the session's yield queue awaiting the (delayed) idle flush / next
-		// step boundary. A terminal yield observed in this window MUST still
-		// count as pending async work, or the run driver terminates and the
-		// delivered result is silently dropped from the final report.
+		await resultQueued;
 		expect(session.hasPendingAsyncWork()).toBe(true);
+		expect(manager.isJobResultConsumed("sub-job")).toBe(false);
 
-		// Settling drains the queued follow-up into a real turn and only then
-		// reaches quiescence.
 		await session.settleAsyncWork();
+
 		expect(session.hasPendingAsyncWork()).toBe(false);
+		expect(manager.isJobResultConsumed("sub-job")).toBe(true);
+		expect(mock.calls.some(call => JSON.stringify(call.context.messages).includes("QUEUED RESULT"))).toBe(true);
+	});
+
+	it("keeps the event loop live until a delayed idle flush runs", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "SubAgent",
+			asyncJobManager: manager,
+		});
+
+		let flushed = false;
+		session.yieldQueue.register("keepalive-probe", {
+			isStale: () => {
+				flushed = true;
+				return true;
+			},
+			build: () => null,
+		});
+		vi.useFakeTimers();
+		const baselineTimers = vi.getTimerCount();
+		session.yieldQueue.enqueue("keepalive-probe", {});
+
+		// The 1ms flush timer and a keepalive must both remain armed until the
+		// flush runs. Without the keepalive, Bun can park here until unrelated
+		// TTY I/O wakes the loop.
+		expect(vi.getTimerCount()).toBeGreaterThanOrEqual(baselineTimers + 2);
+
+		vi.advanceTimersByTime(1);
+		await Promise.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(flushed).toBe(true);
+		expect(vi.getTimerCount()).toBe(baselineTimers + 1);
 	});
 });

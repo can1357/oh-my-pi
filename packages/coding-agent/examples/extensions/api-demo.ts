@@ -1,14 +1,13 @@
 /**
  * API Demo Extension
  *
- * Demonstrates using ExtensionAPI's logger, injected `pi.zod`, and pi module access.
- * These features are now exposed directly on the ExtensionAPI, matching
- * the CustomToolAPI interface.
+ * Demonstrates using ExtensionAPI's logger, injected schema builder, and pi
+ * module access.
  */
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
-	const { z } = pi.zod;
+	const z = pi.zod;
 
 	// Access the logger for debugging
 	pi.logger.debug("API demo extension loaded");
@@ -16,7 +15,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "api_demo",
 		label: "API Demo",
-		description: "Demonstrates ExtensionAPI capabilities: logger, zod, and pi module access",
+		description: "Demonstrates ExtensionAPI capabilities: logger, schema validation, and pi module access",
 		parameters: z.object({
 			message: z.string().describe("Test message"),
 			logLevel: z.enum(["error", "warn", "debug"]).default("debug").describe("Log level to use"),
@@ -48,7 +47,7 @@ export default function (pi: ExtensionAPI) {
 							``,
 							`Features demonstrated:`,
 							`1. ✓ Logger access via pi.logger`,
-							`2. ✓ Zod access via pi.zod`,
+							`2. ✓ Schema builder access via pi.arktype`,
 							`3. ✓ Pi module access via pi.pi`,
 							``,
 							`Context:`,

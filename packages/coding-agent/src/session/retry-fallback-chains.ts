@@ -50,6 +50,20 @@ export interface ActiveRetryFallbackState {
 	originalThinkingLevel: ConfiguredThinkingLevel | undefined;
 	lastAppliedFallbackThinkingLevel: ConfiguredThinkingLevel | undefined;
 	pinned: boolean;
+	/**
+	 * Set once a turn on the fallback target settles successfully. Until then the
+	 * switch is only a routing decision — nothing has been produced by the new
+	 * model, so no observer may report the run as having used it.
+	 */
+	served?: boolean;
+}
+
+/** Model a session's produced work is attributed to. */
+export interface ServingModel {
+	/** Full selector including routing and thinking level. */
+	selector: string;
+	/** Whether fallback routing, rather than the configured primary, owns it. */
+	isFallback: boolean;
 }
 
 const RETRY_BACKOFF_MAX_DELAY_MS = 8_000;
@@ -238,7 +252,8 @@ function selectorMatchesCurrent(
 
 /**
  * Resolve the chain key for a concrete selector by specificity: exact model,
- * longest matching wildcard, hinted/configured role, then default.
+ * longest matching wildcard, hinted role, then matching role keys with
+ * `default` preferred over other shared assignments, then default.
  */
 export function resolveRetryFallbackChainKey(
 	context: RetryFallbackResolutionContext,
@@ -300,7 +315,11 @@ export function resolveRetryFallbackChainKey(
 	if (wildcardMatch) return wildcardMatch;
 
 	// 3. The hinted role, then role keys matched by their assigned model.
+	// A shared assignment (default and vision both the same model) must not
+	// let yaml insertion order steal the live role's chain. Prefer the hint,
+	// then `default` when it also matches.
 	if (roleHint && Array.isArray(context.chains[roleHint])) return roleHint;
+	let matchedRole: string | undefined;
 	for (const key in context.chains) {
 		if (isRetryFallbackModelKey(key)) continue;
 		if (
@@ -312,9 +331,11 @@ export function resolveRetryFallbackChainKey(
 				currentPlainBaseSelector,
 			)
 		) {
-			return key;
+			if (key === "default") return "default";
+			matchedRole ??= key;
 		}
 	}
+	if (matchedRole) return matchedRole;
 
 	// 4. The default chain, when default has no explicit role primary.
 	const defaultChain = context.chains.default;

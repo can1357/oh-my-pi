@@ -27,6 +27,7 @@ import { inspectImageToolRenderer } from "./inspect-image-renderer";
 import { recallToolRenderer, reflectToolRenderer, retainToolRenderer } from "./memory-render";
 import { readToolRenderer } from "./read";
 import { resolveRenderer } from "./resolve";
+import { thinkToolRenderer } from "./think";
 import { todoToolRenderer } from "./todo";
 import { createVibeToolRenderer } from "./vibe";
 import { writeToolRenderer } from "./write";
@@ -41,6 +42,21 @@ import { setXdevRendererLookup } from "./xdev";
  */
 export type FirstResultViewportRepaint = boolean | ((args: unknown, options: RenderResultOptions) => boolean);
 
+/** Semantic activity text consumed by the transcript's generic compact card. */
+export interface ToolActivitySummary {
+	label: string;
+	detail?: string;
+}
+
+/** Live execution fields that are safe for compact transcript presentation. */
+export interface ToolActivityContext {
+	readonly expanded: boolean;
+	readonly isPartial: boolean;
+	readonly spinnerFrame?: number;
+	/** Tool-specific render context (same shape `renderCall` receives), when available. */
+	readonly renderContext?: Record<string, unknown>;
+}
+
 export type ToolRenderer = {
 	renderCall: (args: unknown, options: RenderResultOptions, theme: Theme) => Component;
 	renderResult: (
@@ -50,6 +66,8 @@ export type ToolRenderer = {
 		args?: unknown,
 	) => Component;
 	mergeCallAndResult?: boolean;
+	/** Describes current activity without coupling a renderer to terminal layout. */
+	activitySummary?: (args: unknown, context: ToolActivityContext) => ToolActivitySummary;
 	/** Render without background box, inline in the response flow */
 	inline?: boolean;
 	/**
@@ -115,6 +133,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	get task(): ToolRenderer {
 		return taskToolRenderer as ToolRenderer;
 	},
+	think: thinkToolRenderer as ToolRenderer,
 	todo: todoToolRenderer as ToolRenderer,
 	github: githubToolRenderer as ToolRenderer,
 	goal: goalToolRenderer as ToolRenderer,

@@ -25,12 +25,14 @@ import {
 	$env,
 	classifyJsonPrefix,
 	extractHttpStatusFromError,
+	isRecord,
 	logger,
 	parseImageMetadata,
 	parseStreamingJson,
 	parseStreamingJsonThrottled,
 	stringifyJson,
 	structuredCloneJSON,
+	USER_AGENT,
 } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import {
@@ -77,6 +79,7 @@ import {
 	kStreamingLastParseLen,
 	kStreamingPartialJson,
 } from "../utils/block-symbols";
+import { hasVisibleAssistantContent } from "../utils/empty-completion-retry";
 import type { AssistantMessageEventStream } from "../utils/event-stream";
 import {
 	escapeHarmonyControlTokens,
@@ -313,6 +316,10 @@ export function resolveOpenAIRequestSetup(
 
 	if (options.defaultBaseUrl !== undefined) {
 		baseUrl = baseUrl ?? ($env.OPENAI_BASE_URL?.trim() || options.defaultBaseUrl);
+	}
+	// Attribute xAI traffic as omp unless a User-Agent is already set.
+	if (model.provider === "xai" || model.provider === "xai-oauth") {
+		setHeaderIfAbsent(headers, "User-Agent", USER_AGENT);
 	}
 	const requestHeaders = { ...headers };
 	// A keyless provider (`auth: none` in models.yml) resolves to the `N/A`
@@ -708,17 +715,27 @@ export interface OpenAIExtraBodyOptions {
 }
 
 /**
- * Merge a compat/options `extraBody` blob into the request params. When
- * `dropThinkingWhenReasoningEffort` is set and `reasoning_effort` is present,
- * delete the conflicting `thinking` toggle (Fireworks rejects both together).
+ * Merge a compat/options `extraBody` blob into the request params. An encoded
+ * Venice disable signal takes precedence over static `venice_parameters`, so
+ * an explicit per-turn Thinking Off selection cannot be re-enabled by config.
+ * When `dropThinkingWhenReasoningEffort` is set and `reasoning_effort` is
+ * present, delete the conflicting `thinking` toggle (Fireworks rejects both).
  */
 export function applyOpenAIExtraBody<P extends object>(
-	params: P,
+	params: P & { venice_parameters?: Record<string, unknown> },
 	extraBody: Record<string, unknown> | undefined,
 	options?: OpenAIExtraBodyOptions,
 ): void {
 	if (!extraBody) return;
+	const encodedVeniceParameters = params.venice_parameters;
 	Object.assign(params, extraBody);
+	if (encodedVeniceParameters?.disable_thinking === true) {
+		const configuredVeniceParameters = extraBody.venice_parameters;
+		params.venice_parameters = {
+			...(isRecord(configuredVeniceParameters) ? configuredVeniceParameters : {}),
+			...encodedVeniceParameters,
+		};
+	}
 	if (options?.dropThinkingWhenReasoningEffort) {
 		const shaped = params as { reasoning_effort?: unknown; thinking?: unknown };
 		if (shaped.reasoning_effort !== undefined) {
@@ -729,10 +746,10 @@ export function applyOpenAIExtraBody<P extends object>(
 
 /**
  * Chat Completions streaming request body shaped by the OpenAI-family providers.
- * Extends the vendored SDK params with the compat dialect fields pi-ai emits
- * (binary `thinking`, Qwen `enable_thinking`/`chat_template_kwargs`, nested
- * `reasoning`, gateway `provider`/`providerOptions`, sampling extras). Lives in
- * the shared module beside the request-shaping helpers that mutate it.
+ * (binary `thinking`, Qwen `enable_thinking`/`chat_template_kwargs`, Venice
+ * `venice_parameters`, nested `reasoning`, gateway `provider`/`providerOptions`,
+ * sampling extras). Lives in the shared module beside the request-shaping
+ * helpers that mutate it.
  */
 export type OpenAICompletionsParams = Omit<ChatCompletionCreateParamsStreaming, "reasoning_effort" | "service_tier"> & {
 	top_k?: number;
@@ -741,8 +758,14 @@ export type OpenAICompletionsParams = Omit<ChatCompletionCreateParamsStreaming, 
 	thinking?: { type: "enabled" | "disabled"; effort?: string; keep?: "all" };
 	enable_thinking?: boolean;
 	preserve_thinking?: boolean;
-	chat_template_kwargs?: { enable_thinking?: boolean; preserve_thinking?: boolean };
+	chat_template_kwargs?: {
+		enable_thinking?: boolean;
+		thinking?: boolean;
+		preserve_thinking?: boolean;
+		reasoning_effort?: string;
+	};
 	reasoning?: { effort?: string } | { enabled: false };
+	venice_parameters?: { disable_thinking?: boolean; [key: string]: unknown };
 	reasoning_effort?: string | null;
 	service_tier?: ServiceTier;
 	tool_stream?: boolean;
@@ -834,7 +857,31 @@ function isImplicitDisableWhenNotRequested(disableMode: OpenAIReasoningDisableMo
 	return (
 		disableMode === "zai-thinking-disabled" ||
 		disableMode === "qwen-enable-thinking-false" ||
-		disableMode === "qwen-template-false"
+		disableMode === "qwen-template-false" ||
+		disableMode === "chat-template-thinking-false"
+	);
+}
+
+/**
+ * Whether a redundant `tool_choice: "auto"` should be dropped to keep
+ * reasoning alive. Hosts with `disableReasoningOnToolChoice` (DeepSeek family
+ * on e.g. Fireworks) silently turn reasoning off whenever any `tool_choice`
+ * is present. "auto" is already the provider default, so omitting it is
+ * wire-neutral for tool selection; forced and "none" choices are semantic and
+ * still win over reasoning (#1207).
+ */
+export function shouldDropAutoToolChoiceForReasoning(
+	model: Pick<Model, "reasoning">,
+	compat: { disableReasoningOnToolChoice: boolean },
+	toolChoice: unknown,
+	options: { reasoning?: string; disableReasoning?: boolean } | undefined,
+): boolean {
+	return (
+		toolChoice === "auto" &&
+		compat.disableReasoningOnToolChoice &&
+		Boolean(model.reasoning) &&
+		options?.reasoning !== undefined &&
+		!options.disableReasoning
 	);
 }
 
@@ -889,19 +936,18 @@ export function resolveOpenAICompatPolicy<TApi extends Api>(
 		conflictDisableReason !== undefined ||
 		(modelSupported && disabledWithoutRequest) ||
 		disabledByNoneEffort;
-	if (
-		disabled &&
-		disableReason === "caller" &&
-		requestedEffort === undefined &&
-		disableMode === "lowest-effort" &&
-		compat.supportsReasoningEffort &&
-		!omitReasoningEffort
-	) {
-		const minEffort = getSupportedEfforts(model)[0];
-		if (minEffort === undefined) {
-			throw new AIError.ConfigurationError(`Model ${model.provider}/${model.id} has no supported reasoning efforts`);
+	if (disabled && compat.supportsReasoningEffort && !omitReasoningEffort) {
+		if (disableMode === "none-effort") {
+			wireEffort = "none";
+		} else if (disableReason === "caller" && requestedEffort === undefined && disableMode === "lowest-effort") {
+			const minEffort = getSupportedEfforts(model)[0];
+			if (minEffort === undefined) {
+				throw new AIError.ConfigurationError(
+					`Model ${model.provider}/${model.id} has no supported reasoning efforts`,
+				);
+			}
+			wireEffort = mapOpenAIReasoningEffort(model, compat, minEffort);
 		}
-		wireEffort = mapOpenAIReasoningEffort(model, compat, minEffort);
 	}
 
 	return {
@@ -954,6 +1000,9 @@ function encodeChatCompletionsDisabledReasoning(
 ): void {
 	delete params.reasoning_effort;
 	switch (disableMode) {
+		case "none-effort":
+			params.reasoning_effort = "none";
+			break;
 		case "zai-thinking-disabled":
 			params.thinking = { type: "disabled" };
 			break;
@@ -963,10 +1012,16 @@ function encodeChatCompletionsDisabledReasoning(
 		case "qwen-template-false":
 			params.chat_template_kwargs = { ...params.chat_template_kwargs, enable_thinking: false };
 			break;
+		case "chat-template-thinking-false":
+			params.chat_template_kwargs = { ...params.chat_template_kwargs, thinking: false };
+			break;
 		case "openrouter-enabled-false":
 			(params as typeof params & { reasoning?: { effort?: string } | { enabled: false } }).reasoning = {
 				enabled: false,
 			};
+			break;
+		case "venice-disable-thinking":
+			params.venice_parameters = { ...params.venice_parameters, disable_thinking: true };
 			break;
 		default:
 			delete params.reasoning;
@@ -1041,12 +1096,41 @@ export function applyChatCompletionsCompatPolicy(params: OpenAICompletionsParams
 				break;
 			case "qwen-enable-thinking-false":
 				params.enable_thinking = true;
+				// Qwen 3.8+ templates steer thinking depth via the
+				// `reasoning_effort` kwarg (low/medium/xhigh, template default
+				// xhigh) — without it every effort selection lands on xhigh.
+				// Twin emission mirrors `preserve_thinking` above: newer
+				// llama.cpp builds map the top-level OpenAI field into the
+				// template, older builds and Alibaba-style local servers read
+				// only the kwargs copy. The `qwen-chat-template` dialect (NIM,
+				// vLLM/SGLang) rides kwargs alone — NIM's request schema
+				// rejects unknown top-level fields (#2299).
+				if (policy.compat.qwenTemplateReasoningEffort && reasoning.wireEffort !== undefined) {
+					params.reasoning_effort = reasoning.wireEffort;
+					params.chat_template_kwargs = {
+						...params.chat_template_kwargs,
+						reasoning_effort: reasoning.wireEffort,
+					};
+				}
 				break;
 			case "qwen-template-false":
 				// Spread so the `preserve_thinking` kwarg hoisted above
 				// survives the merge — a bare `{ enable_thinking: true }`
 				// would clobber it.
-				params.chat_template_kwargs = { ...params.chat_template_kwargs, enable_thinking: true };
+				params.chat_template_kwargs = {
+					...params.chat_template_kwargs,
+					enable_thinking: true,
+					...(policy.compat.qwenTemplateReasoningEffort && reasoning.wireEffort !== undefined
+						? { reasoning_effort: reasoning.wireEffort }
+						: {}),
+				};
+				break;
+			case "chat-template-thinking-false":
+				params.chat_template_kwargs = {
+					...params.chat_template_kwargs,
+					thinking: true,
+					...(reasoning.wireEffort !== undefined ? { reasoning_effort: reasoning.wireEffort } : {}),
+				};
 				break;
 			case "openrouter-enabled-false":
 				if (reasoning.wireEffort !== undefined) {
@@ -1067,7 +1151,7 @@ export function applyChatCompletionsCompatPolicy(params: OpenAICompletionsParams
 	if (
 		reasoning.disableReason === "caller" &&
 		reasoning.requestedEffort === undefined &&
-		reasoning.disableMode === "lowest-effort" &&
+		(reasoning.disableMode === "lowest-effort" || reasoning.disableMode === "none-effort") &&
 		reasoning.wireEffort !== undefined
 	) {
 		params.reasoning_effort = reasoning.wireEffort as Effort;
@@ -1492,6 +1576,77 @@ export function repairOrphanResponsesToolCalls(input: ResponseInput): ResponseIn
 	return repaired;
 }
 
+type ResponsesBatchItemKind = "call" | "output" | "assistant-message" | "other";
+
+/** Classify a Responses input item for tool-call/output batch normalization. */
+function classifyResponsesBatchItem(item: object): ResponsesBatchItemKind {
+	const type = "type" in item ? item.type : undefined;
+	if (responsesToolCallKind(type) !== undefined) return "call";
+	if (responsesToolOutputKind(type) !== undefined) return "output";
+	const role = "role" in item ? item.role : undefined;
+	if (type === "message" && role === "assistant") return "assistant-message";
+	return "other";
+}
+
+/**
+ * Relocate assistant `message` items wedged inside a tool-call → tool-output
+ * batch to before the batch, yielding canonical `message(s) → calls → outputs`
+ * order. Idempotent; returns the same array reference when nothing moves.
+ *
+ * OpenAI's Responses API pairs tool outputs by `call_id` and tolerates any item
+ * order, but stricter gateways (notably opencode-go's "Console Go") reject a
+ * shape where an assistant message interrupts a `function_call` →
+ * `function_call_output` run, 400ing with `No tool output found for tool call …`
+ * (naming a random call of the batch on each retry). This arises whenever a
+ * model streams a trailing text / demoted-thinking block *after* its tool calls:
+ * the block-encode path preserves stream order, emitting the message between the
+ * calls and the outputs appended afterward. Moving the already-model-owned
+ * message ahead of its call batch keeps content identical while satisfying the
+ * strict validator. See #8789.
+ */
+export function hoistInterleavedResponsesToolBatchMessages<T extends object>(items: readonly T[]): T[] {
+	const moved = new Set<number>();
+	const insertBefore = new Map<number, number[]>();
+	for (let index = 0; index < items.length; index++) {
+		if (classifyResponsesBatchItem(items[index]) !== "output") continue;
+		// Only anchor on the first output of a run.
+		if (index > 0 && classifyResponsesBatchItem(items[index - 1]) === "output") continue;
+		// Walk back over the batch body (calls interleaved with assistant messages).
+		let start = index;
+		let sawCall = false;
+		const messageIndexes: number[] = [];
+		while (start > 0) {
+			const kind = classifyResponsesBatchItem(items[start - 1]);
+			if (kind === "call") {
+				sawCall = true;
+			} else if (kind === "assistant-message") {
+				messageIndexes.push(start - 1);
+			} else {
+				break;
+			}
+			start -= 1;
+		}
+		// Nothing to hoist unless a message actually sits among the calls.
+		if (!sawCall || messageIndexes.length === 0) continue;
+		messageIndexes.reverse();
+		const target = insertBefore.get(start) ?? [];
+		for (const messageIndex of messageIndexes) {
+			moved.add(messageIndex);
+			target.push(messageIndex);
+		}
+		insertBefore.set(start, target);
+	}
+	if (moved.size === 0) return items.slice();
+	const result: T[] = [];
+	for (let index = 0; index < items.length; index++) {
+		const pending = insertBefore.get(index);
+		if (pending) for (const messageIndex of pending) result.push(items[messageIndex]);
+		if (moved.has(index)) continue;
+		result.push(items[index]);
+	}
+	return result;
+}
+
 /**
  * Some Responses backends (notably GitHub Copilot) reject the OpenAI image
  * `detail: "original"` value with a 400. When the model does not advertise
@@ -1504,6 +1659,18 @@ function clampResponsesImageDetail(
 ): ResponseInputImage["detail"] {
 	const resolved = detail ?? "auto";
 	return resolved === "original" && !supportsImageDetailOriginal ? "auto" : resolved;
+}
+
+function convertResponsesInputImage(image: ImageContent, supportsImageDetailOriginal: boolean): ResponseInputImage {
+	const detail = clampResponsesImageDetail(image.detail, supportsImageDetailOriginal);
+	if (image.providerFile?.provider === "openai" && image.providerFile.id) {
+		return { type: "input_image", detail, file_id: image.providerFile.id };
+	}
+	return {
+		type: "input_image",
+		detail,
+		image_url: image.url ?? `data:${image.mimeType};base64,${image.data}`,
+	};
 }
 
 export function convertResponsesInputContent(
@@ -1535,11 +1702,7 @@ export function convertResponsesInputContent(
 		} satisfies ResponseInputText);
 	}
 	for (const item of imageBlocks) {
-		normalizedContent.push({
-			type: "input_image",
-			detail: clampResponsesImageDetail(item.detail, supportsImageDetailOriginal),
-			image_url: `data:${item.mimeType};base64,${item.data}`,
-		} satisfies ResponseInputImage);
+		normalizedContent.push(convertResponsesInputImage(item, supportsImageDetailOriginal));
 	}
 	if (omittedImages) {
 		normalizedContent.push({
@@ -1635,6 +1798,14 @@ export interface BuildResponsesInputOptions<TApi extends Api> {
 	repairOrphanOutputs?: boolean;
 	/** Preserve assistant message item IDs from text signatures during fallback replay. */
 	preserveAssistantMessageIds?: boolean;
+	/**
+	 * Synthesize a reasoning item for every replayed assistant turn that carries
+	 * content but no reasoning item. Set for DeepSeek-family Responses targets
+	 * that reject a thinking-mode continuation lacking `reasoning_text`.
+	 */
+	requiresReasoningReplayForAllTurns?: boolean;
+	/** As {@link requiresReasoningReplayForAllTurns}, but only for turns that contain a tool call. */
+	requiresReasoningReplayForToolCalls?: boolean;
 }
 
 /**
@@ -1660,8 +1831,25 @@ export interface BuildResponsesInputOptions<TApi extends Api> {
  */
 export function escapeReplayedControlTokens(items: ResponseInput): ResponseInput {
 	return items.map(item => {
-		if (item.type === "function_call_output" || item.type === "custom_tool_call_output") {
-			return typeof item.output === "string" ? { ...item, output: escapeHarmonyControlTokens(item.output) } : item;
+		if (item.type === "function_call_output") {
+			return typeof item.output === "string"
+				? { ...item, output: escapeHarmonyControlTokens(item.output) }
+				: {
+						...item,
+						output: item.output.map(part =>
+							part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
+						),
+					};
+		}
+		if (item.type === "custom_tool_call_output") {
+			return typeof item.output === "string"
+				? { ...item, output: escapeHarmonyControlTokens(item.output) }
+				: {
+						...item,
+						output: item.output.map(part =>
+							part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
+						),
+					};
 		}
 		if (item.type === "function_call") {
 			return typeof item.arguments === "string"
@@ -1861,6 +2049,8 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				supportsCustomToolCalls,
 				customToolWireNameMap,
 				computerCallIds,
+				options.requiresReasoningReplayForAllTurns ?? false,
+				options.requiresReasoningReplayForToolCalls ?? false,
 			);
 			const outputItems = suppressHiddenEmptyFallback
 				? sanitizeOpenAIResponsesAssistantFallbackItemsForReplay(convertedOutputItems)
@@ -1883,7 +2073,8 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 		msgIndex++;
 	}
 
-	const withRepairedOutputs = options.repairOrphanOutputs ? repairOrphanResponsesToolOutputs(messages) : messages;
+	const hoisted = hoistInterleavedResponsesToolBatchMessages(messages);
+	const withRepairedOutputs = options.repairOrphanOutputs ? repairOrphanResponsesToolOutputs(hoisted) : hoisted;
 	const withRepairedCalls = repairOrphanResponsesToolCalls(withRepairedOutputs);
 	return stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay(withRepairedCalls);
 }
@@ -1914,6 +2105,8 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 	supportsCustomToolCalls = true,
 	customToolWireNameMap?: ReadonlyMap<string, string>,
 	computerCallIds?: Set<string>,
+	requiresReasoningReplayForAllTurns = false,
+	requiresReasoningReplayForToolCalls = false,
 ): ResponseInput {
 	const outputItems: ResponseInput = [];
 	let unsignedTextBlocks = 0;
@@ -1925,14 +2118,36 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 		);
 	const isDifferentModel =
 		assistantMsg.model !== model.id && assistantMsg.provider === model.provider && assistantMsg.api === model.api;
+	// DeepSeek-family Responses targets (e.g. opencode-go) reject a thinking-mode
+	// continuation whose replayed assistant turns carry no reasoning item: "The
+	// reasoning_text in the thinking mode must be passed back to the API." After a
+	// cross-model prewalk hand-off or a compaction that drops the native replay
+	// payload, the block re-encode below demotes reasoning to text and emits no
+	// reasoning item. Track reasoning emission so a placeholder can be synthesized,
+	// mirroring the chat-completions `requiresReasoningContentForAllAssistantTurns`
+	// empty-`reasoning_content` safety net.
+	const requiresReasoningItem =
+		assistantMsg.stopReason !== "error" &&
+		(requiresReasoningReplayForAllTurns ||
+			(requiresReasoningReplayForToolCalls && assistantMsg.content.some(block => block.type === "toolCall")));
+	let reasoningItemEmitted = false;
+	const carriedReasoningTexts: string[] = [];
+	let synthesizedReasoningItemId: string | undefined;
 
 	for (const block of assistantMsg.content) {
 		if (block.type === "thinking" && assistantMsg.stopReason !== "error") {
+			if (requiresReasoningItem) {
+				if (block.itemId) synthesizedReasoningItemId ??= block.itemId;
+				if (block.thinking.trim().length > 0) carriedReasoningTexts.push(block.thinking);
+			}
 			if (!includeThinkingSignatures) {
 				continue;
 			}
 			const reasoningItem = parseResponseReasoningReplayItem(block.thinkingSignature);
-			if (reasoningItem) outputItems.push(reasoningItem);
+			if (reasoningItem) {
+				outputItems.push(reasoningItem);
+				reasoningItemEmitted = true;
+			}
 			continue;
 		}
 
@@ -2033,24 +2248,88 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 		});
 	}
 
+	if (requiresReasoningItem && !reasoningItemEmitted && outputItems.length > 0) {
+		// Replay the demoted reasoning (already present in `content` as visible
+		// text) as a structured reasoning item so the thinking-mode continuation
+		// carries the `reasoning_text` the provider requires. The text may be empty
+		// when the source turn was minted by another model and its reasoning is
+		// already folded into the message text; the item's presence is what
+		// satisfies the provider contract, mirroring the empty `reasoning_content`
+		// placeholder used on the chat-completions path.
+		const reasoningText = carriedReasoningTexts.join("\n");
+		const reasoningId =
+			synthesizedReasoningItemId ?? `rs_${Bun.hash(`${model.id}:${msgIndex}:${reasoningText}`).toString(36)}`;
+		const reasoningItem: ResponseReasoningItem = {
+			type: "reasoning",
+			id: reasoningId,
+			summary: [],
+			content: [{ type: "reasoning_text", text: reasoningText }],
+		};
+		outputItems.unshift(reasoningItem);
+	}
+
 	return outputItems;
 }
 
-const syntheticToolImageMessages = new WeakSet<object>();
-
-function insertResponsesToolOutput(messages: ResponseInput, output: ResponseInput[number]): void {
-	let index = messages.length;
-	while (index > 0) {
-		const previous = messages[index - 1];
-		if (typeof previous !== "object" || previous === null || !syntheticToolImageMessages.has(previous)) {
-			break;
-		}
-		index -= 1;
-	}
-	messages.splice(index, 0, output);
+/**
+ * Responses wire output for a tool result plus its text-only fallback.
+ *
+ * `output` preserves native image blocks for paired function/custom outputs.
+ * `outputText` feeds orphan and unsupported-computer fallback messages, which
+ * cannot carry the native output array.
+ */
+export interface ResponsesToolResultOutputEncoding {
+	output: string | ResponseInputContent[];
+	outputText: string;
 }
 
-/** Appends one tool result while keeping consecutive outputs ahead of its synthetic image messages. */
+/**
+ * Encodes one canonical tool result for OpenAI Responses replay.
+ *
+ * Image-capable models receive an ordered native content array; text-only
+ * models and callers without images receive the compatible string form.
+ */
+export function encodeResponsesToolResultOutput<TApi extends Api>(
+	toolResult: ToolResultMessage,
+	model: Model<TApi>,
+	supportsImageDetailOriginal: boolean,
+): ResponsesToolResultOutputEncoding {
+	const supportsImages = model.input.includes("image");
+	const textResult = toolResult.content
+		.filter((block): block is TextContent => block.type === "text")
+		.map(block => block.text)
+		.join("\n");
+	const hasImages = toolResult.content.some((block): block is ImageContent => block.type === "image");
+	const omittedImages = hasImages && !supportsImages;
+	const rawOutput = (
+		omittedImages
+			? joinTextWithImagePlaceholder(textResult, true)
+			: textResult.length > 0
+				? textResult
+				: hasImages
+					? "(see attached image)"
+					: ""
+	).toWellFormed();
+	const escapeControlTokens = isHarmonyDialectModel(model);
+	// Harmony-server models reject reserved control-token spellings even as tool
+	// data; escape the transport copy so a grep/read result cannot poison the
+	// session (#6913). Covers every downstream branch that consumes `output`.
+	const outputText = escapeControlTokens ? escapeHarmonyControlTokens(rawOutput) : rawOutput;
+	const output: string | ResponseInputContent[] =
+		hasImages && supportsImages
+			? toolResult.content.map((block): ResponseInputContent => {
+					if (block.type === "image") return convertResponsesInputImage(block, supportsImageDetailOriginal);
+					const text = block.text.toWellFormed();
+					return {
+						type: "input_text",
+						text: escapeControlTokens ? escapeHarmonyControlTokens(text) : text,
+					};
+				})
+			: outputText;
+	return { output, outputText };
+}
+
+/** Appends one Responses tool result. */
 export function appendResponsesToolResultMessages<TApi extends Api>(
 	messages: ResponseInput,
 	toolResult: ToolResultMessage,
@@ -2062,32 +2341,8 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 	supportsCustomToolCalls = true,
 	computerCallIds?: ReadonlySet<string>,
 ): void {
-	const supportsImages = model.input.includes("image");
-	const textResult = toolResult.content
-		.filter((block): block is TextContent => block.type === "text")
-		.map(block => block.text)
-		.join("\n");
-	const hasImages = toolResult.content.some((block): block is ImageContent => block.type === "image");
-	const omittedImages = hasImages && !supportsImages;
+	const { output, outputText } = encodeResponsesToolResultOutput(toolResult, model, supportsImageDetailOriginal);
 	const normalized = normalizeResponsesToolCallId(toolResult.toolCallId);
-	// "(see attached image)" is only truthful when the result actually carries
-	// images (they ride as a separate user message on the Responses API). A
-	// genuinely empty text result (empty file read, silent tool) must stay
-	// empty — the placeholder sent models chasing an attachment that never
-	// existed.
-	const rawOutput = (
-		omittedImages
-			? joinTextWithImagePlaceholder(textResult, true)
-			: textResult.length > 0
-				? textResult
-				: hasImages
-					? "(see attached image)"
-					: ""
-	).toWellFormed();
-	// Harmony-server models reject reserved control-token spellings even as tool
-	// data; escape the transport copy so a grep/read result cannot poison the
-	// session (#6913). Covers every downstream branch that consumes `output`.
-	const output = isHarmonyDialectModel(model) ? escapeHarmonyControlTokens(rawOutput) : rawOutput;
 	if (toolResult.providerMetadata?.type === "computer" && model.supportsComputerUse !== true) {
 		messages.push({
 			type: "message",
@@ -2099,7 +2354,7 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 	if (computerCallIds?.has(normalized.callId)) {
 		if (toolResult.providerMetadata?.type !== "computer") {
 			const limit = 16_000;
-			const noteText = output.length > limit ? `${output.slice(0, limit)}\n...[truncated]` : output;
+			const noteText = outputText.length > limit ? `${outputText.slice(0, limit)}\n...[truncated]` : outputText;
 			messages.push({
 				type: "message",
 				role: "assistant",
@@ -2115,7 +2370,7 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 			} as ResponseInput[number]);
 			return;
 		}
-		insertResponsesToolOutput(messages, {
+		messages.push({
 			type: "computer_call_output",
 			call_id: normalized.callId,
 			output: structuredCloneJSON(toolResult.providerMetadata.screenshot),
@@ -2128,7 +2383,7 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		// silently dropping the result loses information the model needs. Fold it
 		// into an assistant note instead (same shape as repairOrphanResponsesToolOutputs).
 		const limit = 16_000;
-		const noteText = output.length > limit ? `${output.slice(0, limit)}\n...[truncated]` : output;
+		const noteText = outputText.length > limit ? `${outputText.slice(0, limit)}\n...[truncated]` : outputText;
 		messages.push({
 			type: "message",
 			role: "assistant",
@@ -2137,38 +2392,18 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		return;
 	}
 	if (supportsCustomToolCalls && customCallIds?.has(normalized.callId)) {
-		insertResponsesToolOutput(messages, {
+		messages.push({
 			type: "custom_tool_call_output",
 			call_id: normalized.callId,
 			output,
 		} as ResponseInput[number]);
 	} else {
-		insertResponsesToolOutput(messages, {
+		messages.push({
 			type: "function_call_output",
 			call_id: normalized.callId,
 			output,
 		});
 	}
-
-	if (!hasImages || !supportsImages) {
-		return;
-	}
-
-	const contentParts: ResponseInputContent[] = [
-		{ type: "input_text", text: "Attached image(s) from tool result:" } satisfies ResponseInputText,
-	];
-	for (const block of toolResult.content) {
-		if (block.type === "image") {
-			contentParts.push({
-				type: "input_image",
-				detail: clampResponsesImageDetail(block.detail, supportsImageDetailOriginal),
-				image_url: `data:${block.mimeType};base64,${block.data}`,
-			} satisfies ResponseInputImage);
-		}
-	}
-	const imageMessage = { role: "user", content: contentParts } satisfies ResponseInput[number];
-	syntheticToolImageMessages.add(imageMessage);
-	messages.push(imageMessage);
 }
 
 /**
@@ -2183,6 +2418,17 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
  * each decoder's existing behavior byte-for-byte.
  */
 type ResponsesToolCallBlock = ToolCall & { [kStreamingPartialJson]: string; [kStreamingLastParseLen]?: number };
+
+function ensureReasoningSummaryPart(
+	item: ResponseReasoningItem,
+	summaryIndex: number,
+): ResponseReasoningItem["summary"][number] {
+	item.summary = item.summary || [];
+	while (item.summary.length <= summaryIndex) {
+		item.summary.push({ type: "summary_text", text: "" });
+	}
+	return item.summary[summaryIndex]!;
+}
 
 export function appendReasoningSummaryPart(
 	item: ResponseReasoningItem,
@@ -2271,13 +2517,42 @@ export function appendReasoningSummaryTextDelta(
 	stream: AssistantMessageEventStream,
 	output: AssistantMessage,
 	contentIndex: number,
+	summaryIndex = 0,
 ): void {
-	item.summary = item.summary || [];
-	const lastPart = item.summary[item.summary.length - 1];
-	if (!lastPart) return;
+	const part = ensureReasoningSummaryPart(item, summaryIndex);
 	block.thinking += delta;
-	lastPart.text += delta;
+	part.text += delta;
 	stream.push({ type: "thinking_delta", contentIndex, delta, partial: output });
+}
+
+/**
+ * Applies a completed reasoning-summary snapshot, including providers that omit
+ * the preceding summary-part event.
+ */
+export function applyReasoningSummaryTextDone(
+	item: ResponseReasoningItem,
+	block: ThinkingContent,
+	text: string,
+	summaryIndex: number,
+	stream: AssistantMessageEventStream,
+	output: AssistantMessage,
+	contentIndex: number,
+): void {
+	const part = ensureReasoningSummaryPart(item, summaryIndex);
+	const previous = part.text;
+	part.text = text;
+	if (!text || text === previous) return;
+	if (!block.thinking) {
+		block.thinking = text;
+		stream.push({ type: "thinking_delta", contentIndex, delta: text, partial: output });
+		return;
+	}
+	if (text.startsWith(block.thinking)) {
+		const delta = text.slice(block.thinking.length);
+		if (!delta) return;
+		block.thinking += delta;
+		stream.push({ type: "thinking_delta", contentIndex, delta, partial: output });
+	}
 }
 
 export function appendReasoningSummaryPartDone(
@@ -2373,6 +2648,20 @@ export function appendMessageTextDelta(
 export function finalizeMessageText(item: ResponseOutputMessage, streamedText: string): string {
 	if (!item.content?.length) return streamedText || "";
 	return item.content.map(part => (part.type === "output_text" ? (part.text ?? "") : (part.refusal ?? ""))).join("");
+}
+export const JUICE_EFFORT_MAP: Record<string, number> = {
+	none: 0,
+	minimal: 2,
+	low: 4,
+	medium: 8,
+	high: 48,
+	xhigh: 112,
+	max: 960,
+};
+
+export function getJuiceValue(effort?: string): number {
+	if (!effort) return 8;
+	return JUICE_EFFORT_MAP[effort] ?? 8;
 }
 
 export function accumulateToolCallArgumentsDelta(
@@ -2705,6 +2994,10 @@ export async function processResponsesStream<TApi extends Api>(
 		output.content.indexOf(block);
 
 	let sawFirstToken = false;
+	// Whether the current stream produced a completed native `web_search_call`
+	// output item. A provider-hosted search that finishes without yield is
+	// progress evidence: the turn should pause for continuation rather than end.
+	let sawCompletedWebSearchCall = false;
 
 	for await (const event of openaiStream) {
 		const terminalEvent = getOpenAIResponsesTerminalEvent(event);
@@ -2794,6 +3087,20 @@ export async function processResponsesStream<TApi extends Api>(
 					entry.item,
 					entry.block,
 					event.delta,
+					stream,
+					output,
+					contentIndexOf(entry.block),
+					event.summary_index,
+				);
+			}
+		} else if (event.type === "response.reasoning_summary_text.done") {
+			const entry = lookupOpenItem(event);
+			if (entry?.item.type === "reasoning" && entry.block.type === "thinking") {
+				applyReasoningSummaryTextDone(
+					entry.item,
+					entry.block,
+					event.text,
+					event.summary_index,
 					stream,
 					output,
 					contentIndexOf(entry.block),
@@ -2991,6 +3298,10 @@ export async function processResponsesStream<TApi extends Api>(
 				}
 				closeOpenItem(event.output_index, item.id, entry, item.call_id, prefixedFunctionCallItemKey(item.call_id));
 				stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
+			} else if (item.type === "web_search_call" && (item.status === undefined || item.status === "completed")) {
+				// A completed provider-hosted web search is progress evidence even when
+				// the model never surfaced an answer; the agent loop continues from it.
+				sawCompletedWebSearchCall = true;
 			} else if (item.type === "image_generation_call" && item.status === "completed" && item.result) {
 				appendResponsesImageResult(output, stream, item.result);
 			}
@@ -3041,6 +3352,14 @@ export async function processResponsesStream<TApi extends Api>(
 				(response as { end_turn?: boolean } | undefined)?.end_turn,
 				shouldPromoteIncompleteToolUse,
 			);
+			// A completed provider-hosted web search that yielded no visible answer
+			// (no text, image, or client tool call) is progress, not a dead end:
+			// pause the turn so the agent loop re-samples with the search results
+			// instead of silently ending. Reasoning/native output items are preserved
+			// for replay. A search followed by visible output stays a normal stop.
+			if (sawCompletedWebSearchCall && output.stopReason === "stop" && !hasVisibleAssistantContent(output)) {
+				output.stopDetails = { type: "pause_turn" };
+			}
 			options?.onCompleted?.();
 			// `response.completed`/`response.incomplete`/`response.done` is the last event of a
 			// Responses stream. Stop pulling instead of waiting for the server to
@@ -3221,7 +3540,7 @@ export function applyCommonResponsesSamplingParams<P extends CommonResponsesPara
 	params: P,
 	options: CommonSamplingOptions | undefined,
 	model: Pick<Model, "provider" | "api" | "id" | "omitMaxOutputTokens" | "maxTokens"> & {
-		compat: Pick<ResolvedOpenAISharedCompat, "supportsSamplingParams">;
+		compat: Pick<ResolvedOpenAISharedCompat, "supportsSamplingParams" | "supportsPenaltyAndStopParams">;
 	},
 ): void {
 	if (options?.maxTokens && !model.omitMaxOutputTokens) {
@@ -3238,8 +3557,10 @@ export function applyCommonResponsesSamplingParams<P extends CommonResponsesPara
 		if (options?.topP !== undefined) params.top_p = options.topP;
 		if (options?.topK !== undefined) params.top_k = options.topK;
 		if (options?.minP !== undefined) params.min_p = options.minP;
-		if (options?.presencePenalty !== undefined) params.presence_penalty = options.presencePenalty;
-		if (options?.repetitionPenalty !== undefined) params.repetition_penalty = options.repetitionPenalty;
+		if (model.compat.supportsPenaltyAndStopParams) {
+			if (options?.presencePenalty !== undefined) params.presence_penalty = options.presencePenalty;
+			if (options?.repetitionPenalty !== undefined) params.repetition_penalty = options.repetitionPenalty;
+		}
 	}
 	applyOpenAIServiceTier(params, options?.serviceTier, model);
 }
@@ -3254,6 +3575,14 @@ type ReasoningOptions = {
 export interface ApplyResponsesCompatPolicyOptions {
 	reasoningSummary?: "auto" | "detailed" | "concise" | null;
 	mapEffort?: (effort: string) => string;
+	/**
+	 * Suppress native reasoning by sending `reasoning.effort: "none"` — the only
+	 * disable level the Responses API defines (`"off"` is not a wire value and
+	 * 400s everywhere). Gateways that reject `none` for a given model are
+	 * handled by the reasoning-effort fallback retry, which clamps to the
+	 * lowest level the error reports as allowed.
+	 */
+	forceReasoningOff?: boolean;
 }
 
 export function applyResponsesCompatPolicy<P extends ResponseCreateParamsStreaming>(
@@ -3262,6 +3591,10 @@ export function applyResponsesCompatPolicy<P extends ResponseCreateParamsStreami
 	options: ApplyResponsesCompatPolicyOptions | undefined,
 ): void {
 	const reasoning = policy.reasoning;
+	if (options?.forceReasoningOff) {
+		params.reasoning = { effort: "none" } as P["reasoning"];
+		return;
+	}
 	if (!reasoning.modelSupported) return;
 	if (reasoning.includeEncryptedReasoning) {
 		const include = params.include ?? [];
@@ -3275,7 +3608,7 @@ export function applyResponsesCompatPolicy<P extends ResponseCreateParamsStreami
 			return;
 		}
 		if (
-			reasoning.disableMode === "lowest-effort" &&
+			(reasoning.disableMode === "lowest-effort" || reasoning.disableMode === "none-effort") &&
 			reasoning.wireEffort !== undefined &&
 			!reasoning.omitReasoningEffort
 		) {
@@ -3430,18 +3763,23 @@ export function populateResponsesUsageFromResponse(
  * A defined value differing across sides IS a difference; a key undefined or
  * absent on both stays equal. Nested values use full {@link Bun.deepEquals}.
  */
-function deepEqualsWithout(a: unknown, b: unknown, omitKeys?: Record<string, boolean>): boolean {
+function deepEqualsWithout(
+	a: unknown,
+	b: unknown,
+	omitKeys?: Readonly<Record<string, boolean>>,
+	additionalOmitKeys?: Readonly<Record<string, boolean>>,
+): boolean {
 	if (!a || !b || typeof a !== "object" || typeof b !== "object") return Bun.deepEquals(a, b);
 	const ao = a as Record<string, unknown>;
 	const bo = b as Record<string, unknown>;
 	for (const key in ao) {
-		if (omitKeys?.[key]) continue;
+		if (omitKeys?.[key] || additionalOmitKeys?.[key]) continue;
 		const av = ao[key];
 		const bv = bo[key];
 		if (av !== bv && !Bun.deepEquals(av, bv)) return false;
 	}
 	for (const key in bo) {
-		if (omitKeys?.[key]) continue;
+		if (omitKeys?.[key] || additionalOmitKeys?.[key]) continue;
 		if (bo[key] !== undefined && !(key in ao)) return false;
 	}
 	return true;
@@ -3463,6 +3801,17 @@ const ITEM_LIFECYCLE_EXCLUDE_MAP = {
 };
 
 /**
+ * Replay sanitization strips output item IDs from message/function/custom
+ * assistant items. A live transcript rebuilt from the corresponding agent
+ * message may still retain that ID; it is output-only identity, while call_id
+ * remains the semantic tool/result pairing key.
+ */
+const REPLAY_SANITIZED_ITEM_EXCLUDE_MAP = {
+	status: true,
+	id: true,
+};
+
+/**
  * Strict-prefix delta for stateful `previous_response_id` chaining (used by the
  * platform Responses provider and the Codex provider on both transports):
  * returns the input items the current request appends beyond the previous
@@ -3475,10 +3824,11 @@ export function buildResponsesDeltaInput<TItem extends ResponseInputItem | Input
 	previous: { input?: TItem[] } | undefined,
 	previousResponseItems: readonly TItem[] | undefined,
 	current: { input?: TItem[] },
+	additionalTopLevelExcludeMap?: Readonly<Record<string, boolean>>,
 ): TItem[] | null {
 	if (!previous) return null;
 	if (!Array.isArray(previous.input) || !Array.isArray(current.input)) return null;
-	if (!deepEqualsWithout(previous, current, TOP_LEVEL_EXCLUDE_MAP)) {
+	if (!deepEqualsWithout(previous, current, TOP_LEVEL_EXCLUDE_MAP, additionalTopLevelExcludeMap)) {
 		return null;
 	}
 
@@ -3489,7 +3839,12 @@ export function buildResponsesDeltaInput<TItem extends ResponseInputItem | Input
 	for (const series of [previous.input, previousResponseItems]) {
 		if (!series) continue;
 		for (const item of series) {
-			if (deepEqualsWithout(item, current.input[index], ITEM_LIFECYCLE_EXCLUDE_MAP)) {
+			const type = item.type;
+			const omitKeys =
+				type === "message" || type === "function_call" || type === "custom_tool_call"
+					? REPLAY_SANITIZED_ITEM_EXCLUDE_MAP
+					: ITEM_LIFECYCLE_EXCLUDE_MAP;
+			if (deepEqualsWithout(item, current.input[index], omitKeys)) {
 				index++;
 			} else {
 				return null;

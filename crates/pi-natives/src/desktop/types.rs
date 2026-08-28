@@ -24,8 +24,10 @@ pub struct DesktopDisplay {
 #[napi(object)]
 #[derive(Debug, Clone)]
 pub struct DesktopWindow {
-	/// Stable numeric window id, valid as a capture target while the window
-	/// lives.
+	/// Backend-defined opaque window id, valid as a capture target while the
+	/// window lives. Numeric on X11/Win32/macOS; a composite AT-SPI string on
+	/// Wayland (e.g. `atspi::1.31:/org/a11y/atspi/accessible/1`). Never parse
+	/// it.
 	pub id:      String,
 	/// Window title; may be empty for untitled windows.
 	pub title:   String,

@@ -189,7 +189,7 @@ export class PublicWebProvider extends SearchProvider {
 		return false;
 	}
 
-	isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
+	override isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
 		return true;
 	}
 

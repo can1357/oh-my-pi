@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -20,11 +20,13 @@ import { SessionManager } from "../../src/session/session-manager";
 
 const MOCK_SOURCE_ID = "security-coordinator-test";
 let temporaryRoot = "";
+let registryRoot = "";
 let repositoryRoot = "";
 let stateRoot = "";
 let credentialStore: AuthCredentialStore | null = null;
 let authStorage: AuthStorage;
 let settings: Settings;
+let modelRegistry: ModelRegistry;
 let credentialId = 0;
 
 const gitAdapter: SecurityGitAdapter = {
@@ -37,13 +39,11 @@ const gitAdapter: SecurityGitAdapter = {
 	untracked: async () => [],
 };
 
-beforeEach(async () => {
-	temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-security-coordinator-"));
-	repositoryRoot = path.join(temporaryRoot, "repo");
-	stateRoot = path.join(temporaryRoot, "state");
-	await fs.mkdir(path.join(repositoryRoot, "src"), { recursive: true });
-	await Bun.write(path.join(repositoryRoot, "src", "app.ts"), "export const app = true;\n");
-	credentialStore = await SqliteAuthCredentialStore.open(path.join(temporaryRoot, "agent.db"));
+// Credentials and the bundled-model view are immutable fixtures. Keep their SQLite
+// store and registry for the suite; repository/store state remains fresh per test.
+beforeAll(async () => {
+	registryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-security-coordinator-auth-"));
+	credentialStore = await SqliteAuthCredentialStore.open(path.join(registryRoot, "agent.db"));
 	authStorage = new AuthStorage(credentialStore);
 	await authStorage.set("openai-codex", {
 		type: "oauth",
@@ -58,6 +58,15 @@ beforeEach(async () => {
 	const account = authStorage.listOAuthAccounts("openai-codex")[0];
 	if (!account) throw new Error("expected fixture OAuth account");
 	credentialId = account.credentialId;
+	modelRegistry = new ModelRegistry(authStorage, path.join(registryRoot, "models.yml"));
+});
+
+beforeEach(async () => {
+	temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-security-coordinator-"));
+	repositoryRoot = path.join(temporaryRoot, "repo");
+	stateRoot = path.join(temporaryRoot, "state");
+	await fs.mkdir(path.join(repositoryRoot, "src"), { recursive: true });
+	await Bun.write(path.join(repositoryRoot, "src", "app.ts"), "export const app = true;\n");
 	settings = Settings.isolated({ "security.enabled": true, "compaction.enabled": false });
 	registerMockApi(MOCK_SOURCE_ID);
 });
@@ -66,9 +75,13 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 	unregisterCustomApis(MOCK_SOURCE_ID);
 	settings.cancelPendingSaves();
+	await fs.rm(temporaryRoot, { recursive: true, force: true });
+});
+
+afterAll(async () => {
 	credentialStore?.close();
 	credentialStore = null;
-	await fs.rm(temporaryRoot, { recursive: true, force: true });
+	await fs.rm(registryRoot, { recursive: true, force: true });
 });
 
 function storeFactory(): Promise<SecurityStore> {
@@ -81,7 +94,6 @@ function coordinatorWithMockSession(responses: MockResponseSource) {
 		provider: "openai-codex",
 		responses,
 	});
-	const modelRegistry = new ModelRegistry(authStorage, path.join(temporaryRoot, "models.yml"));
 	const coordinator = new SecurityCoordinator(
 		{
 			cwd: repositoryRoot,
@@ -152,7 +164,7 @@ describe("native security coordinator", () => {
 				cwd: repositoryRoot,
 				settings,
 				authStorage,
-				modelRegistry: new ModelRegistry(authStorage, path.join(temporaryRoot, "models.yml")),
+				modelRegistry,
 				activeModel: mock.model,
 			},
 			{
@@ -176,7 +188,6 @@ describe("native security coordinator", () => {
 	test("cancellation before session launch has no inference side effects", async () => {
 		let sessionCreations = 0;
 		const mock = createMockModel({ id: "security-mock", provider: "openai-codex" });
-		const modelRegistry = new ModelRegistry(authStorage, path.join(temporaryRoot, "models.yml"));
 		const coordinator = new SecurityCoordinator(
 			{
 				cwd: repositoryRoot,
@@ -211,7 +222,6 @@ describe("native security coordinator", () => {
 		const promptFinished = Promise.withResolvers<void>();
 		let abortCalls = 0;
 		const mock = createMockModel({ id: "security-mock", provider: "openai-codex" });
-		const modelRegistry = new ModelRegistry(authStorage, path.join(temporaryRoot, "models.yml"));
 		const coordinator = new SecurityCoordinator(
 			{
 				cwd: repositoryRoot,
@@ -270,7 +280,7 @@ describe("native security coordinator", () => {
 				cwd: repositoryRoot,
 				settings,
 				authStorage,
-				modelRegistry: new ModelRegistry(authStorage, path.join(temporaryRoot, "models.yml")),
+				modelRegistry,
 				activeModel: mock.model,
 			},
 			{
@@ -352,7 +362,7 @@ describe("native security coordinator", () => {
 				cwd: repositoryRoot,
 				settings,
 				authStorage,
-				modelRegistry: new ModelRegistry(authStorage, path.join(temporaryRoot, "models.yml")),
+				modelRegistry,
 				activeModel: mock.model,
 			},
 			{ openStore: storeFactory, gitAdapter },

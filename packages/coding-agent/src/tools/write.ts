@@ -9,11 +9,18 @@ import type {
 	AgentToolContext,
 	AgentToolResult,
 	AgentToolUpdateCallback,
-	ToolTier,
+	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
-
+import {
+	type ArchiveMemberContent,
+	archiveFormatFromPath,
+	isWritableArchiveFormat,
+	parseArchivePathCandidates,
+	readArchiveEntries,
+	writeArchive,
+} from "@oh-my-pi/pi-utils/ar";
 import { canonicalSnapshotKey, getFileSnapshotStore } from "../edit/file-snapshot-store";
 import { normalizeToLF } from "../edit/normalize";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
@@ -25,16 +32,10 @@ import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
 import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
 import { getLanguageFromPath, highlightCode, type Theme } from "../modes/theme/theme";
 import writeDescription from "../prompts/tools/write.md" with { type: "text" };
+import writeDeviceOnlyDescription from "../prompts/tools/write-device-only.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 import { fileHyperlink, framedBlock, renderStatusLine } from "../tui";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
-import {
-	type ArchiveMemberContent,
-	archiveFormatFromPath,
-	parseArchivePathCandidates,
-	readArchiveEntries,
-	writeArchive,
-} from "../utils/zip";
 import { routeWriteThroughBridge } from "./acp-bridge";
 import { resolveToolTier, truncateForPrompt } from "./approval";
 import { assertEditableFile } from "./auto-generated-guard";
@@ -51,13 +52,18 @@ import { invalidateFsScanAfterWrite } from "./fs-cache-invalidation";
 import { type OutputMeta, outputMeta } from "./output-meta";
 import {
 	formatPathRelativeToCwd,
-	isInternalUrlPath,
 	pathTargetsSsh,
 	peelWriteUrlSelector,
 	probeLiteralPathExists,
+	resolveFileWriteApprovalTier,
 	splitPathAndSel,
 } from "./path-utils";
-import { enforcePlanModeWrite, resolvePlanPath, unwrapHashlineHeaderPath } from "./plan-mode-guard";
+import {
+	enforcePlanModeWrite,
+	resolvePlanPath,
+	targetsLocalSandbox,
+	unwrapHashlineHeaderPath,
+} from "./plan-mode-guard";
 import {
 	cachedRenderedString,
 	createRenderedStringCache,
@@ -74,6 +80,7 @@ import {
 	TRUNCATE_LENGTHS,
 	truncateToWidth,
 } from "./render-utils";
+import type { ToolActivityContext, ToolActivitySummary } from "./renderers";
 import { dispatchReportIssueDevice, REPORT_ISSUE_DEVICE_NAME, renderReportIssueDeviceCall } from "./report-tool-issue";
 import { dispatchResolutionDevice, isResolutionDeviceName, renderResolutionDeviceCall } from "./resolve";
 import {
@@ -94,6 +101,7 @@ import {
 	renderXdevResult,
 	resolveXdevTool,
 	type XdevDispatch,
+	xdevActivitySummary,
 	xdevListing,
 } from "./xdev";
 
@@ -360,12 +368,16 @@ function stripWriteContent(session: ToolSession, content: string): { text: strin
  * when the session is not in hashline mode so callers can no-op cheaply.
  *
  * Mirrors the post-commit snapshot recording the hashline patcher performs
- * after a successful edit: the model gets a tag without an extra `read`.
+ * after a successful edit — the model gets a tag without an extra `read` —
+ * but with EMPTY seen-line provenance: a write displays no numbered lines,
+ * so anchored edits against this tag must first see the anchor content (the
+ * patcher rejects them with an inline reveal). Authoring content is not
+ * knowing its line numbers.
  */
 function maybeWriteSnapshotHeader(session: ToolSession, absolutePath: string, content: string): string | undefined {
 	if (!resolveFileDisplayMode(session).hashLines) return undefined;
 	const normalized = normalizeToLF(content);
-	const tag = getFileSnapshotStore(session).record(canonicalSnapshotKey(absolutePath), normalized);
+	const tag = getFileSnapshotStore(session).record(canonicalSnapshotKey(absolutePath), normalized, []);
 	return formatHashlineHeader(formatPathRelativeToCwd(absolutePath, session.cwd), tag);
 }
 
@@ -500,7 +512,7 @@ function parseSqliteWriteTarget(subPath: string, queryString: string): { table: 
  */
 export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails> {
 	readonly name = "write";
-	readonly approval = (args: unknown): ToolTier => {
+	readonly approval = (args: unknown): ToolApprovalDecision => {
 		const rawPath = (args as Partial<WriteParams>).path;
 		if (typeof rawPath !== "string") return "write";
 		// Unwrap a hashline `[path#TAG]` wrapper first (parity with execute) so a
@@ -532,7 +544,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			}
 			if (!isRecord(parsed)) return "exec";
 			try {
-				return resolveToolTier(inst, parsed);
+				// The tier is the mounted tool's own (argument-dependent) approval; the
+				// policyKey makes the outer gate consult `tools.approval.<device>` for
+				// this dispatch before falling back to `tools.approval.write`, so users
+				// can scope allow/deny/prompt to a single device (issue #7923).
+				return { tier: resolveToolTier(inst, parsed), policyKey: xdevTarget.name! };
 			} catch {
 				return "exec";
 			}
@@ -541,14 +557,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// gate them like the exec-tier `ssh` tool, ahead of the handler-write
 		// logic. Substring match also covers selector-suffixed targets.
 		if (pathTargetsSsh(path)) return "exec";
-		if (!isInternalUrlPath(path)) return "write";
-		// Internal URLs are usually session-local artifacts (read tier), but a
-		// scheme whose handler exposes a `write` hook mutates handler-owned user
-		// data (e.g. vault:// notes) and must take the write tier so always-ask
-		// mode actually prompts.
-		const match = /^([a-z][a-z0-9+.-]*):\/\//i.exec(path.trim());
-		const handler = match ? InternalUrlRouter.instance().getHandler(match[1]!.toLowerCase()) : undefined;
-		return handler?.write ? "write" : "read";
+		return resolveFileWriteApprovalTier(path);
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<WriteParams>;
@@ -557,7 +566,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		return [`Path: ${truncateForPrompt(targetPath)}`, `Content:\n${truncateForPrompt(content)}`];
 	};
 	readonly label = "Write";
-	readonly description: string;
+	get description(): string {
+		const deviceOnly = this.session.deviceOnlyWrite === true && this.session.pendingFullWriteDescription !== true;
+		return prompt.render(deviceOnly ? writeDeviceOnlyDescription : writeDescription);
+	}
 	readonly parameters = writeSchema;
 	readonly strict = true;
 	readonly concurrency = "exclusive";
@@ -588,7 +600,6 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 						: undefined,
 				})
 			: writethroughNoop;
-		this.description = prompt.render(writeDescription);
 	}
 
 	async #resolveArchiveWritePath(writePath: string): Promise<ResolvedArchiveWritePath | null> {
@@ -640,9 +651,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			? await fs.realpath(resolvedArchivePath.absolutePath).catch(() => resolvedArchivePath.absolutePath)
 			: resolvedArchivePath.absolutePath;
 		// A realpath swap can land on a name without an archive extension; a
-		// whole-archive rewrite then defaults to an uncompressed tar, matching the
-		// previous `isZip`/`isGzip`/else fallthrough.
-		const format = archiveFormatFromPath(finalPath) ?? "tar";
+		// whole-archive rewrite then defaults to an uncompressed tar.
+		const inferredFormat = archiveFormatFromPath(finalPath);
+		const format = inferredFormat ?? "tar";
+		if (!isWritableArchiveFormat(format)) {
+			throw new ToolError(`Writing entries inside ${format} archives is not supported (read-only format).`);
+		}
 		// Rewrites are whole-archive: write to a temp file and rename so a
 		// crash/disk-full mid-write can't destroy the original archive.
 		const tmpPath = `${finalPath}.tmp-${process.pid}`;
@@ -655,7 +669,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		const entries = new Map<string, ArchiveMemberContent>();
 		if (resolvedArchivePath.exists) {
 			try {
-				const existing = await readArchiveEntries({ bytes: await Bun.file(finalPath).bytes(), format });
+				const existing = await readArchiveEntries({ path: finalPath, format });
 				for (const [entryPath, data] of existing) {
 					entries.set(entryPath, data);
 				}
@@ -1105,6 +1119,20 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// Peel a read-tool selector (`:raw`, `:1-20`, …) so the write target matches
 		// what `read` resolves for the same URL; line-range/malformed selectors throw.
 		const path = peelWriteUrlSelector(unwrapHashlineHeaderPath(rawPath));
+		// A device-only session grants `write` purely as the xd:// transport (see
+		// createTools): device dispatches proceed, every other target is rejected
+		// before any handler, guard, conflict resolver, or bridge sees it. Active
+		// plan mode additionally permits its local artifact sandbox, but does not
+		// relax the restriction for working-tree or non-xd internal URLs.
+		if (
+			this.session.deviceOnlyWrite === true &&
+			!parseXdUrl(path) &&
+			!(this.session.getPlanModeState?.()?.enabled === true && targetsLocalSandbox(this.session, path))
+		) {
+			throw new ToolError(
+				"This `write` tool is limited to the xd:// device transport: call it with path `xd://<tool>` and the device's JSON arguments in `content` (`read xd://` lists mounted devices). Active plan mode additionally permits local:// sandbox drafts. Filesystem writes are not available elsewhere.",
+			);
+		}
 		return untilAborted(signal, async () => {
 			// Strip hashline display prefixes ([PATH#HASH] + LINE:) if the model copied them from read output
 			const { text: cleanContent, stripped } = stripWriteContent(this.session, content);
@@ -1390,12 +1418,87 @@ function normalizeDisplayText(text: unknown): string {
  * Minimum line-number gutter width for write previews. The streaming preview's
  * gutter must stay byte-stable as the line count grows: a width derived purely
  * from `String(totalLines).length` widens at the 10/100/1000-line crossings,
- * rewriting every already-rendered row — which forces the transcript's commit
- * audit to recommit the block's committed prefix (a full duplicate in native
- * scrollback). Reserving 3 digits keeps the gutter constant through 999 lines
- * and keeps the streamed rows byte-identical to the final result render.
+ * causing the live preview to jitter. Reserving 3 digits keeps the gutter
+ * constant through 999 lines and keeps the streamed rows aligned with the
+ * final result render.
  */
 const WRITE_GUTTER_MIN_WIDTH = 3;
+
+/**
+ * Per-component streaming line index for {@link formatStreamingContent}.
+ * Keyed on the ToolExecutionComponent's persistent render-state object (the
+ * `options` argument renderers receive on every rebuild), so the entry lives
+ * exactly as long as the component and never leaks across tool calls.
+ *
+ * Why: streamed write content is append-only, but the formatter used to
+ * normalize + `split("\n")` the ENTIRE accumulated payload on every reveal
+ * tick — O(n) per tick, O(n²) per stream, which was a measurable main-thread
+ * stall on long writes (and multiplied across concurrent subagent writes).
+ * Tracking the newline count incrementally and extracting only the tail
+ * window makes each tick O(delta + preview lines).
+ */
+interface WriteStreamingLineIndex {
+	/** Number of content code units scanned so far. */
+	length: number;
+	/** Bounded suffix used to detect a restarted/non-append stream. */
+	suffix: string;
+	/** `1 + count("\n")` over the scanned content. */
+	lineCount: number;
+}
+
+const writeStreamingLineIndex = new WeakMap<object, WriteStreamingLineIndex>();
+
+/** Keep append validation constant-time instead of comparing the entire prior payload. */
+const WRITE_STREAMING_APPEND_GUARD_LENGTH = 64;
+
+/** Total logical line count of `content`, resuming from the cached prefix scan when append-only. */
+function streamingTotalLines(streamKey: object | undefined, content: string): number {
+	if (streamKey === undefined) {
+		let lines = 1;
+		for (let i = 0; i < content.length; i++) if (content.charCodeAt(i) === 10) lines++;
+		return lines;
+	}
+	let entry = writeStreamingLineIndex.get(streamKey);
+	const continuesPrevious =
+		entry !== undefined &&
+		content.length >= entry.length &&
+		content.startsWith(entry.suffix, entry.length - entry.suffix.length);
+	if (entry !== undefined && continuesPrevious) {
+		let lines = entry.lineCount;
+		for (let i = entry.length; i < content.length; i++) if (content.charCodeAt(i) === 10) lines++;
+		entry.length = content.length;
+		entry.suffix = content.slice(-WRITE_STREAMING_APPEND_GUARD_LENGTH);
+		entry.lineCount = lines;
+		return lines;
+	}
+	let lines = 1;
+	for (let i = 0; i < content.length; i++) if (content.charCodeAt(i) === 10) lines++;
+	entry = {
+		length: content.length,
+		suffix: content.slice(-WRITE_STREAMING_APPEND_GUARD_LENGTH),
+		lineCount: lines,
+	};
+	writeStreamingLineIndex.set(streamKey, entry);
+	return lines;
+}
+
+/**
+ * Raw offset just after the (totalLines - previewLines)-th newline — i.e. the
+ * start of the last `previewLines` logical lines — scanning back from the end.
+ * Returns 0 when the whole content fits in the window. Equivalent to
+ * `content.split("\n").slice(-previewLines).join("\n")` without materializing
+ * the full line array.
+ */
+function tailWindowStart(content: string, previewLines: number): number {
+	let newlinesSeen = 0;
+	for (let i = content.length - 1; i >= 0; i--) {
+		if (content.charCodeAt(i) === 10) {
+			newlinesSeen++;
+			if (newlinesSeen === previewLines) return i + 1;
+		}
+	}
+	return 0;
+}
 
 function formatStreamingContent(
 	content: string,
@@ -1404,19 +1507,32 @@ function formatStreamingContent(
 	uiTheme: Theme,
 	spinnerFrame?: number,
 	cache?: RenderedStringCache,
+	streamKey?: object,
 ): string {
 	if (!content) return "";
 	const bodyText = cachedRenderedString(cache, uiTheme, expanded, language ?? "", content, () => {
-		const lines = normalizeDisplayText(content).split("\n");
-		const totalLines = lines.length;
 		// Collapsed: follow the streaming edge with a bounded tail window so the box
 		// stays short enough not to strand its scrolled-off head above the viewport
 		// while the block is volatile. `Ctrl+O` (expanded) lifts the cap for a
 		// deliberate full view — matching the eval streaming preview.
-		const startIndex = expanded ? 0 : Math.max(0, totalLines - WRITE_STREAMING_PREVIEW_LINES);
-		const visibleLines = lines.slice(startIndex);
+		let totalLines: number;
+		let startIndex: number;
+		let visibleText: string;
+		if (expanded) {
+			visibleText = normalizeDisplayText(content);
+			totalLines = 1;
+			for (let i = 0; i < visibleText.length; i++) if (visibleText.charCodeAt(i) === 10) totalLines++;
+			startIndex = 0;
+		} else {
+			totalLines = streamingTotalLines(streamKey, content);
+			startIndex = Math.max(0, totalLines - WRITE_STREAMING_PREVIEW_LINES);
+			const tail =
+				startIndex === 0 ? content : content.slice(tailWindowStart(content, WRITE_STREAMING_PREVIEW_LINES));
+			visibleText = tail.replace(/\r/g, "");
+		}
+		if (visibleText.length === 0) return "";
 		const hidden = startIndex;
-		const highlighted = highlightCode(visibleLines.join("\n"), language);
+		const highlighted = highlightCode(visibleText, language);
 		const lineNumberWidth = Math.max(WRITE_GUTTER_MIN_WIDTH, String(totalLines).length);
 
 		let text = "\n\n";
@@ -1431,6 +1547,7 @@ function formatStreamingContent(
 		}
 		return text;
 	});
+	if (bodyText.length === 0) return "";
 	// The animated glyph lives on this trailing line — inside the transcript's
 	// volatile-tail holdback — never in the header: an animating head row pins
 	// the native-scrollback commit boundary at the top of the block, so a long
@@ -1478,6 +1595,24 @@ export interface WriteRenderContext {
 }
 
 export const writeToolRenderer = {
+	/** Compact one-line activity: device writes read as the mounted tool (`LSP · references foo`), file writes as `Write · <path>`. */
+	activitySummary(args: unknown, context: ToolActivityContext): ToolActivitySummary {
+		const writeArgs = (args ?? {}) as WriteRenderArgs;
+		const rawPath =
+			typeof writeArgs.file_path === "string"
+				? writeArgs.file_path
+				: typeof writeArgs.path === "string"
+					? writeArgs.path
+					: "";
+		if (!rawPath) return { label: "Write" };
+		const xdev = parseXdUrl(rawPath);
+		if (xdev?.name) {
+			const resolveMounted = (context.renderContext as WriteRenderContext | undefined)?.resolveXdevMounted;
+			return xdevActivitySummary(xdev.name, writeArgs.content, resolveMounted);
+		}
+		return { label: "Write", detail: shortenPath(rawPath) };
+	},
+
 	renderCall(
 		args: WriteRenderArgs,
 		options: RenderResultOptions & { renderContext?: WriteRenderContext },
@@ -1486,7 +1621,8 @@ export const writeToolRenderer = {
 		const rawPath =
 			typeof args.file_path === "string" ? args.file_path : typeof args.path === "string" ? args.path : "";
 		// Render NOTHING until the streamed path arrives and provably is not an
-		// xd:// device; xd:// writes then delegate to the mounted tool's renderer.
+		// xd:// device. Device writes then render as queued until execution starts,
+		// after which they delegate to the mounted tool's renderer.
 		// A present-but-malformed path (array/object from a bad provider parse)
 		// is definitively not xd:// — fall through to the legacy frame.
 		if (args.path === undefined && args.file_path === undefined) return undefined;
@@ -1514,7 +1650,12 @@ export const writeToolRenderer = {
 			},
 			uiTheme,
 		);
-		const content = normalizeDisplayText(args.content);
+		// Raw content, not normalizeDisplayText(args.content): the collapsed
+		// streaming path normalizes only its tail window, so a full-payload
+		// normalize on every reveal tick would re-introduce the O(n²) streaming
+		// cost formatStreamingContent avoids. Non-string content still falls
+		// back to the normalizing stringify.
+		const content = typeof args.content === "string" ? args.content : normalizeDisplayText(args.content);
 		const streamingCache = createRenderedStringCache();
 		return framedBlock(uiTheme, width => {
 			const body = content
@@ -1525,6 +1666,10 @@ export const writeToolRenderer = {
 						uiTheme,
 						options?.spinnerFrame,
 						streamingCache,
+						// `options` is the ToolExecutionComponent's persistent
+						// render-state object — a stable identity across reveal ticks
+						// that keys the incremental line index.
+						options,
 					)
 				: "";
 			const bodyLines = body ? body.split("\n") : [];

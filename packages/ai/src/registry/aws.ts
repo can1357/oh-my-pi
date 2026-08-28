@@ -1,5 +1,5 @@
 import * as fs from "node:fs";
-import { $env } from "@oh-my-pi/pi-utils";
+import { $env, $flag } from "@oh-my-pi/pi-utils";
 import { hasConfiguredAwsProfile } from "../utils/aws-profile";
 import { AUTHENTICATED_SENTINEL } from "./types";
 
@@ -13,14 +13,21 @@ export interface AwsBedrockProviderOptions extends Readonly<Record<string, unkno
 }
 
 function isEc2Host(): boolean {
-	for (const candidate of [
-		"/sys/hypervisor/uuid",
-		"/sys/devices/virtual/dmi/id/product_uuid",
-		"/sys/devices/virtual/dmi/id/board_asset_tag",
-	]) {
+	// Xen instances tag DMI/hypervisor UUIDs with an `ec2` prefix. Nitro instances
+	// (EKS, modern EC2) expose the instance id in board_asset_tag (`i-...`) and
+	// "Amazon EC2" in the DMI vendor fields; cover both so Nitro/EKS hosts aren't
+	// misread as non-EC2 (product_uuid is often mode 0400 and unreadable there).
+	const checks: Array<[path: string, matches: (value: string) => boolean]> = [
+		["/sys/hypervisor/uuid", v => v.startsWith("ec2")],
+		["/sys/devices/virtual/dmi/id/product_uuid", v => v.startsWith("ec2")],
+		["/sys/devices/virtual/dmi/id/board_asset_tag", v => v.startsWith("ec2") || v.startsWith("i-")],
+		["/sys/devices/virtual/dmi/id/sys_vendor", v => v.includes("amazon ec2")],
+		["/sys/devices/virtual/dmi/id/bios_vendor", v => v.includes("amazon ec2")],
+	];
+	for (const [candidate, matches] of checks) {
 		try {
 			const value = fs.readFileSync(candidate, "utf8").trim().toLowerCase();
-			if (value.startsWith("ec2")) return true;
+			if (matches(value)) return true;
 		} catch {
 			// Missing/unreadable DMI metadata means this probe is inconclusive.
 		}
@@ -46,7 +53,8 @@ export function hasAwsCredentialSource(): boolean {
 }
 
 /** Registry key marker for AWS transports that resolve their own bearer/IAM credentials. */
-export function resolveAwsRegistryApiKey(): string | undefined {
+export function resolveAwsRegistryApiKey(options?: { allowSkipAuth?: boolean }): string | undefined {
+	if (options?.allowSkipAuth && $flag("AWS_BEDROCK_SKIP_AUTH")) return AUTHENTICATED_SENTINEL;
 	return hasAwsCredentialSource() ? AUTHENTICATED_SENTINEL : undefined;
 }
 

@@ -14,6 +14,7 @@
  */
 
 import * as path from "node:path";
+import { USER_AGENT } from "@oh-my-pi/pi-utils";
 
 const PROVIDER_FILE = path.join(import.meta.dir, "../packages/catalog/src/wire/gemini-headers.ts");
 
@@ -36,7 +37,7 @@ async function fetchLatestGitHubRelease(
 	try {
 		// /releases/latest only returns non-prerelease, non-draft releases
 		const res = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
-			headers: { Accept: "application/vnd.github+json", "User-Agent": "oh-my-pi/version-check" },
+			headers: { Accept: "application/vnd.github+json", "User-Agent": USER_AGENT },
 		});
 		if (!res.ok) return null;
 		const data = (await res.json()) as { tag_name?: string };

@@ -87,7 +87,6 @@ export function detectCompiledBinary({ embeddedAddon, env, importMetaUrl }) {
 	}
 	return false;
 }
-
 /**
  * @param {{ tag: string; arch: string; variant: "modern" | "baseline" | null | undefined }} input
  * @returns {string[]}
@@ -196,6 +195,26 @@ function isOlderReleaseVersion(candidate, current) {
 	return false;
 }
 
+// A concurrently starting older OMP binary creates or refreshes this directory
+// before extracting its addon. Keep fresh directories long enough for that
+// startup to finish; a later launch can reclaim them once they are genuinely
+// stale.
+const NATIVE_CACHE_CLEANUP_GRACE_MS = 10 * 60_000;
+
+/**
+ * Create a version cache directory and refresh its activity timestamp before
+ * extraction or staging begins. Recursive mkdir does not update the mtime of
+ * an existing directory, so the explicit touch is what protects interrupted
+ * or partially populated caches from concurrent cleanup.
+ *
+ * @param {string} versionedDir
+ */
+export function prepareNativeVersionDir(versionedDir) {
+	fs.mkdirSync(versionedDir, { recursive: true });
+	const now = new Date();
+	fs.utimesSync(versionedDir, now, now);
+}
+
 /**
  * Remove version-pinned native cache directories older than the loaded package.
  * Best-effort by design: permission errors and concurrent processes must not
@@ -217,6 +236,8 @@ export function cleanupStaleNativeVersions({ nativesDir, currentVersion }) {
 		if (!entry.isDirectory() || !isOlderReleaseVersion(entry.name, currentVersion)) continue;
 		const targetPath = path.join(nativesDir, entry.name);
 		try {
+			const stat = fs.statSync(targetPath);
+			if (Date.now() - stat.mtimeMs < NATIVE_CACHE_CLEANUP_GRACE_MS) continue;
 			fs.rmSync(targetPath, { recursive: true, force: true });
 			removed.push(targetPath);
 		} catch {
@@ -302,13 +323,39 @@ function detectAvx2Support() {
 	}
 
 	if (process.platform === "win32") {
-		const output = runCommand("powershell.exe", [
-			"-NoProfile",
-			"-NonInteractive",
-			"-Command",
-			"[System.Runtime.Intrinsics.X86.Avx2]::IsSupported",
-		]);
-		return output && output.toLowerCase() === "true";
+		// Under Bun, ask the kernel: PF_AVX2_INSTRUCTIONS_AVAILABLE == 40. Exact,
+		// and ~0.5 ms against ~270 ms for the PowerShell spawn it replaces on the
+		// startup path.
+		if (typeof Bun !== "undefined") {
+			try {
+				const { dlopen, FFIType } = createRequire(import.meta.url)("bun:ffi");
+				const kernel32 = dlopen("kernel32.dll", {
+					IsProcessorFeaturePresent: { args: [FFIType.u32], returns: FFIType.i32 },
+				});
+				try {
+					return kernel32.symbols.IsProcessorFeaturePresent(40) !== 0;
+				} finally {
+					kernel32.close();
+				}
+			} catch {
+				// No FFI (embedder policy, unusual host): fall through to the shell probe.
+			}
+		}
+		// Node embeds have no `bun:ffi`. `[System.Runtime.Intrinsics.X86.Avx2]`
+		// exists only on .NET Core, so `pwsh` (PowerShell 7) answers correctly
+		// while a stock `powershell.exe` (Windows PowerShell 5.1, .NET Framework)
+		// raises TypeNotFound and pins such hosts to the baseline addon.
+		for (const shell of ["pwsh.exe", "powershell.exe"]) {
+			const output = runCommand(shell, [
+				"-NoProfile",
+				"-NonInteractive",
+				"-Command",
+				"[System.Runtime.Intrinsics.X86.Avx2]::IsSupported",
+			]);
+			if (output && output.toLowerCase() === "true") return true;
+			if (output && output.toLowerCase() === "false") return false;
+		}
+		return false;
 	}
 
 	return false;
@@ -514,7 +561,7 @@ function maybeExtractEmbeddedAddon(ctx, errors) {
 
 	startupMarker("native:extractEmbeddedAddon:start");
 	try {
-		fs.mkdirSync(ctx.versionedDir, { recursive: true });
+		prepareNativeVersionDir(ctx.versionedDir);
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		errors.push(`embedded addon dir: ${message}`);
@@ -581,7 +628,7 @@ function maybeStageNodeModulesAddon(ctx, errors) {
 		if (!fs.existsSync(sourcePath)) continue;
 
 		try {
-			fs.mkdirSync(ctx.versionedDir, { recursive: true });
+			prepareNativeVersionDir(ctx.versionedDir);
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
 			errors.push(`staged addon dir: ${message}`);
@@ -599,6 +646,27 @@ function maybeStageNodeModulesAddon(ctx, errors) {
 		}
 	}
 	return stagedPath;
+}
+
+
+/**
+ * Before version sentinels were exported, published native addons still shared
+ * this stable core ABI. Let those on-disk addons bridge a package-version bump
+ * when they expose the signature; keep every versioned addon and a current
+ * on-disk file paired with resident old exports on the strict path below.
+ */
+function isCompatiblePreSentinelNativeAddon(bindings, diskHasExpectedSentinel) {
+	if (diskHasExpectedSentinel) return false;
+	if (Object.keys(bindings).some(key => /^__piNativesV[A-Za-z0-9_]+$/.test(key))) return false;
+	return (
+		typeof bindings.countTokens === "function" &&
+		typeof bindings.executeShell === "function" &&
+		typeof bindings.visibleWidth === "function" &&
+		typeof bindings.DesktopSession === "function" &&
+		typeof bindings.DesktopSession.prototype?.capture === "function" &&
+		typeof bindings.DesktopSession.prototype?.execute === "function" &&
+		typeof bindings.DesktopSession.prototype?.close === "function"
+	);
 }
 
 export function validateLoadedBindings(ctx, bindings, candidate) {
@@ -633,6 +701,7 @@ export function validateLoadedBindings(ctx, bindings, candidate) {
 		// The successful require above normally guarantees readability. If the
 		// file disappears concurrently, retain the safe reinstall diagnosis.
 	}
+	if (isCompatiblePreSentinelNativeAddon(bindings, diskHasExpectedSentinel)) return;
 	if (residentSentinel && diskHasExpectedSentinel) {
 		const residentVersion = residentSentinel.slice("__piNativesV".length).replace(/_/g, ".");
 		throw new Error(

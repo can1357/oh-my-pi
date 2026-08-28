@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import { jsonSchemaToTypeScript, toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
-import { z } from "zod/v4";
 
 describe("jsonSchemaToTypeScript", () => {
 	it("renders objects with optional markers and JSDoc descriptions", () => {
@@ -99,9 +99,9 @@ describe("jsonSchemaToTypeScript", () => {
 	});
 
 	it("converts a Zod schema through the wire pipeline", () => {
-		const parameters = z.object({
-			name: z.string().describe("the name"),
-			count: z.number().int().optional(),
+		const parameters = type({
+			name: type("string").describe("the name"),
+			count: type("number.integer").optional(),
 		});
 		const ts = jsonSchemaToTypeScript(toolWireSchema({ name: "t", description: "", parameters }));
 		expect(ts).toContain("/** the name */");

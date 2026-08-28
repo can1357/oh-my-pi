@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [17.3.1] - 2026-08-13
+
+### Fixed
+
+- Fixed TypeBox adapter omitting pattern, non-URL format, and multipleOf constraints from the emitted JSON Schema.
+
+## [17.3.0] - 2026-08-13
+
+### Added
+
+- Added `type.withJsonSchema(schema, json)` to wrap a validation-only schema, ensuring JSON Schema emission yields the provided `json` verbatim even when nested inside objects, arrays, or unions. Schemas with defaults or output-changing morphs are rejected to prevent transformed outputs from being discarded.
+
+## [17.2.10] - 2026-08-06
+
+### Changed
+
+- Reimplemented the Zod compatibility facade (`@oh-my-pi/omptype/zod`) to run purely on internal mechanics, removing the dependency on `zod`.
+
+## [17.2.9] - 2026-08-05
+
+### Fixed
+
+- Fixed the TypeBox adapter emitting an invalid left-bound-only DSL for min-only numeric schemas (e.g. `Type.Integer({ minimum: 1 })`), which threw `left bound requires a corresponding right bound` and broke extension tool loading ([#7648](https://github.com/can1357/oh-my-pi/issues/7648)).
+
 ## [17.2.8] - 2026-08-04
 
 ### Added

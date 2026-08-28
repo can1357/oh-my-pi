@@ -732,7 +732,7 @@ export class Patcher {
 			if (expected !== undefined && this.#enforceSeenLines) {
 				this.#assertSeenLines(section, expected, matchedSnapshot);
 			}
-			const result = applyEdits(normalized, resolved, { clipboard });
+			const result = applyEdits(normalized, resolved, { clipboard, path: canonicalPath });
 			return withResolveWarnings(blockResolutions.length > 0 ? { ...result, blockResolutions } : result);
 		}
 		// Head/tail-only inserts are position-stable: "start"/"end" cannot move
@@ -740,7 +740,7 @@ export class Patcher {
 		// content and warn instead of hard-failing — unlike an anchored
 		// mismatch, which cannot be safely relocated and must reject.
 		if (!hasAnchorScopedEdit(resolved)) {
-			const result = applyEdits(normalized, resolved, { clipboard });
+			const result = applyEdits(normalized, resolved, { clipboard, path: canonicalPath });
 			return withResolveWarnings({ ...result, warnings: [HEADTAIL_DRIFT_WARNING, ...(result.warnings ?? [])] });
 		}
 		// File drifted: map every anchor from the tagged snapshot to unchanged

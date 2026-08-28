@@ -45,7 +45,8 @@ function startCapturedTerminal() {
 		return true;
 	});
 
-	const terminal = new ProcessTerminal();
+	// conpty: false keeps kitty flags at >5u regardless of ambient WSL env.
+	const terminal = new ProcessTerminal({ conpty: false });
 	terminal.start(
 		() => {},
 		() => {},

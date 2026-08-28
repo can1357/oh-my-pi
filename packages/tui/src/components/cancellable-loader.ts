@@ -25,6 +25,13 @@ export class CancellableLoader extends Loader {
 	get aborted(): boolean {
 		return this.#abortController.signal.aborted;
 	}
+	/** Return loader state including whether cancellation was requested. */
+	override debugState(): Record<string, unknown> {
+		return {
+			...super.debugState(),
+			cancelled: this.aborted,
+		};
+	}
 
 	handleInput(data: string): void {
 		const kb = getKeybindings();
@@ -34,7 +41,7 @@ export class CancellableLoader extends Loader {
 		}
 	}
 
-	dispose(): void {
+	override dispose(): void {
 		this.stop();
 	}
 }

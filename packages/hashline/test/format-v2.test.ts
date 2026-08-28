@@ -1,5 +1,13 @@
 import { describe, expect, it } from "bun:test";
-import { applyEdits, parseLid, parsePatch, parsePatchStreaming, Tokenizer } from "@oh-my-pi/hashline";
+import {
+	applyEdits,
+	formatNumberedLines,
+	parseLid,
+	parsePatch,
+	parsePatchStreaming,
+	splitAddressableFileLines,
+	Tokenizer,
+} from "@oh-my-pi/hashline";
 
 function applyPatch(text: string, diff: string): string {
 	return applyEdits(text, parsePatch(diff).edits).text;
@@ -96,6 +104,16 @@ describe("hashline format v4", () => {
 		// "a\nb\n" splits into ["a", "b", ""]; line 3 is the phantom sentinel.
 		const edits = parsePatch("CUT 3").edits;
 		expect(applyEdits("a\nb\n", edits).text).toBe("a\nb\n");
+	});
+
+	it("separates terminal newline sentinels from addressable file lines", () => {
+		expect(splitAddressableFileLines("a\nb\n")).toEqual(["a", "b"]);
+		expect(splitAddressableFileLines("a\nb\n\n")).toEqual(["a", "b", ""]);
+	});
+
+	it("keeps a selected terminal blank line when formatting", () => {
+		const selected = splitAddressableFileLines("a\n\nb\n").slice(0, 2).join("\n");
+		expect(formatNumberedLines(selected)).toBe("1:a\n2:");
 	});
 
 	it("treats a cut range ending at the trailing sentinel as ending at the last real line", () => {

@@ -205,6 +205,7 @@ describe("Raw 0x08 backspace disambiguation", () => {
 		"TMUX",
 		"STY",
 		"ZELLIJ",
+		"HERDR_ENV",
 		"TERM",
 		"CMUX_WORKSPACE_ID",
 		"CMUX_SURFACE_ID",

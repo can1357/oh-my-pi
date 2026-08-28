@@ -12,10 +12,10 @@ import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-comm
 function createPlanHarness(opts: { planModeEnabled: boolean; confirmExit: boolean }) {
 	const state = { planModeEnabled: opts.planModeEnabled };
 	const addToHistory = mock((_text: string) => {});
-	const setText = mock((_text: string) => {});
+	const clearDraft = mock((_historyText?: string) => {});
 
 	const ctx = {
-		editor: { addToHistory, setText } as unknown as InteractiveModeContext["editor"],
+		editor: { addToHistory, clearDraft } as unknown as InteractiveModeContext["editor"],
 		get planModeEnabled() {
 			return state.planModeEnabled;
 		},
@@ -33,17 +33,17 @@ function createPlanHarness(opts: { planModeEnabled: boolean; confirmExit: boolea
 		runtime: { ctx },
 		state,
 		addToHistory,
-		setText,
+		clearDraft,
 	};
 }
 
 function createGoalHarness(opts: { goalModeEnabled: boolean; dropOnCall: boolean }) {
 	const state = { goalModeEnabled: opts.goalModeEnabled };
 	const addToHistory = mock((_text: string) => {});
-	const setText = mock((_text: string) => {});
+	const clearDraft = mock((_historyText?: string) => {});
 
 	const ctx = {
-		editor: { addToHistory, setText } as unknown as InteractiveModeContext["editor"],
+		editor: { addToHistory, clearDraft } as unknown as InteractiveModeContext["editor"],
 		get goalModeEnabled() {
 			return state.goalModeEnabled;
 		},
@@ -57,7 +57,7 @@ function createGoalHarness(opts: { goalModeEnabled: boolean; dropOnCall: boolean
 		runtime: { ctx },
 		state,
 		addToHistory,
-		setText,
+		clearDraft,
 	};
 }
 
@@ -70,7 +70,7 @@ describe("/plan handler when already active", () => {
 		expect(handled).toBe(true);
 		// Sanity check: exit was confirmed, so plan mode is now off.
 		expect(h.state.planModeEnabled).toBe(false);
-		expect(h.setText).toHaveBeenCalledWith("");
+		expect(h.clearDraft).toHaveBeenCalled();
 	});
 
 	it("keeps plan mode active when user cancels exit", async () => {
@@ -81,7 +81,7 @@ describe("/plan handler when already active", () => {
 		expect(handled).toBe(true);
 		// Cancel: plan mode stays active.
 		expect(h.state.planModeEnabled).toBe(true);
-		expect(h.setText).toHaveBeenCalledWith("");
+		expect(h.clearDraft).toHaveBeenCalled();
 	});
 
 	it("enters plan mode when invoked for the first time", async () => {
@@ -90,7 +90,7 @@ describe("/plan handler when already active", () => {
 		await executeBuiltinSlashCommand("/plan hello world", h.runtime);
 
 		expect(h.state.planModeEnabled).toBe(true);
-		expect(h.setText).toHaveBeenCalledWith("");
+		expect(h.clearDraft).toHaveBeenCalled();
 	});
 });
 

@@ -1,5 +1,5 @@
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
-import { untilAborted } from "@oh-my-pi/pi-utils";
+import { getProjectDir, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Page } from "puppeteer-core";
 import { applyStealthPatches, applyViewport } from "../../../tools/browser/launch";
 import { acquireBrowser, holdBrowser, releaseBrowser } from "../../../tools/browser/registry";
@@ -34,6 +34,13 @@ export interface BrowserFetchOptions {
 	browser?: BrowserFallbackOptions;
 }
 
+/**
+ * Upper bound on `page.close()` during teardown. A dead CDP session leaves
+ * puppeteer's close pending forever; `.catch()` only covers rejection, not a
+ * hang, so cleanup needs its own deadline (issue #8865).
+ */
+const PAGE_CLOSE_TIMEOUT_MS = 5_000;
+
 async function fetchHtmlPage(url: string, options: BrowserFetchOptions, fetchImpl: FetchImpl): Promise<LoadedHtmlPage> {
 	const response = await fetchImpl(url, {
 		...options.init,
@@ -59,7 +66,7 @@ async function browseHtmlPage(
 		acquireBrowser(
 			{ kind: "headless", headless: true },
 			{
-				cwd: process.cwd(),
+				cwd: getProjectDir(),
 				signal,
 			},
 		),
@@ -74,8 +81,14 @@ async function browseHtmlPage(
 	try {
 		const activePage = await untilAborted(signal, () => handle.browser.newPage());
 		page = activePage;
-		await applyViewport(activePage);
-		await applyStealthPatches(handle.browser, activePage, handle.stealth);
+		// Viewport and stealth setup talk to the same CDP session as the
+		// navigations below but were previously awaited raw. When the shared
+		// daemon or the page's target dies mid-setup, those puppeteer calls
+		// never settle and the provider promise hangs past
+		// SEARCH_HARD_TIMEOUT_MS — the abort signal had no listener at these
+		// await points (issue #8865).
+		await untilAborted(signal, () => applyViewport(activePage));
+		await untilAborted(signal, () => applyStealthPatches(handle.browser, activePage, handle.stealth));
 		if (homeUrl) {
 			await untilAborted(signal, () =>
 				activePage.goto(homeUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs }),
@@ -102,7 +115,12 @@ async function browseHtmlPage(
 		}
 		throw new Error("Browser fallback exhausted without a response");
 	} finally {
-		await page?.close().catch(() => undefined);
+		// Teardown must complete even when the caller's signal already fired
+		// (navigating away from a dead session leaves `close()` pending), so
+		// bound it with a fresh deadline instead of reusing `signal`.
+		if (page) {
+			await untilAborted(AbortSignal.timeout(PAGE_CLOSE_TIMEOUT_MS), () => page!.close()).catch(() => undefined);
+		}
 		await releaseBrowser(handle, { kill: false });
 	}
 }

@@ -26,6 +26,7 @@ export interface DetectCompiledBinaryInput {
 
 export function detectCompiledBinary(input: DetectCompiledBinaryInput): boolean;
 
+
 export interface GetAddonFilenamesInput {
 	tag: string;
 	arch: string;
@@ -87,6 +88,8 @@ export interface CleanupStaleNativeVersionsInput {
 }
 
 export function cleanupStaleNativeVersions(input: CleanupStaleNativeVersionsInput): string[];
+
+export function prepareNativeVersionDir(versionedDir: string): void;
 
 export interface ExtractEmbeddedAddonArchiveInput {
 	archivePath: string;

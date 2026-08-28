@@ -19,6 +19,7 @@ import type { AgentSessionEvent } from "./agent-session-events";
 import type { SessionManager } from "./session-manager";
 
 interface TtsrContinueOptions {
+	source: string;
 	delayMs?: number;
 	generation?: number;
 	shouldContinue?: () => boolean;
@@ -281,6 +282,7 @@ export class TtsrCoordinator {
 		});
 		this.#ensureResumePromise();
 		this.#host.scheduleAgentContinue({
+			source: "ttsr-injection",
 			delayMs: 1,
 			generation: this.#host.promptGeneration(),
 			onSkip: () => this.resolveResume(),

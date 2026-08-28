@@ -63,7 +63,7 @@ function zhipuGlm52ByOfficialBaseUrl(): ModelSpec<"openai-completions"> {
 describe("zhipu-coding-plan descriptor", () => {
 	it("defaults to the same Zhipu-hosted model used by login validation", () => {
 		expect(DEFAULT_MODEL_PER_PROVIDER["zhipu-coding-plan"]).toBe("glm-5.1");
-		expect(DEFAULT_MODEL_PER_PROVIDER.zai).toBe("glm-5.2");
+		expect(DEFAULT_MODEL_PER_PROVIDER.zai).toBe("glm-5.3");
 	});
 });
 
@@ -174,5 +174,34 @@ describe("zhipu-coding-plan model discovery", () => {
 		expect(requestedUrl).toBe("https://open.bigmodel.cn/api/coding/paas/v4/models");
 		expect(models?.[0]?.id).toBe("glm-5.1");
 		expect(models?.[0]?.baseUrl).toBe("https://open.bigmodel.cn/api/coding/paas/v4");
+	});
+
+	it("maps glm-5.3-flash as a reasoning model with native image input", async () => {
+		const mockFetch: FetchImpl = Object.assign(
+			async (): Promise<Response> =>
+				new Response(
+					JSON.stringify({
+						data: [
+							{ id: "glm-5.3-flash", name: "GLM-5.3-Flash" },
+							{ id: "glm-4.7-flash", name: "GLM-4.7-Flash" },
+						],
+					}),
+					{ headers: { "content-type": "application/json" } },
+				),
+			{ preconnect: fetch.preconnect },
+		);
+
+		const options = zhipuCodingPlanModelManagerOptions({ apiKey: "test-key", fetch: mockFetch });
+		const models = await options.fetchDynamicModels?.();
+		const flash53 = models?.find(model => model.id === "glm-5.3-flash");
+		const flash47 = models?.find(model => model.id === "glm-4.7-flash");
+
+		// GLM-5.3-Flash is the first natively multimodal, mandatory-thinking
+		// flash SKU; its id carries no `v` marker.
+		expect(flash53?.reasoning).toBe(true);
+		expect(flash53?.input).toEqual(["text", "image"]);
+		// Older flash SKUs stay non-reasoning and text-only.
+		expect(flash47?.reasoning).toBe(false);
+		expect(flash47?.input).toEqual(["text"]);
 	});
 });

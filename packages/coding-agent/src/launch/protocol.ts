@@ -168,6 +168,11 @@ function optionalString(value: unknown, label: string): string | undefined {
 	return stringValue(value, label);
 }
 
+function optionalRawString(value: unknown, label: string): string | undefined {
+	if (value === undefined) return undefined;
+	return rawString(value, label);
+}
+
 function booleanValue(value: unknown, label: string): boolean {
 	if (typeof value !== "boolean") throw new Error(`${label} must be a boolean`);
 	return value;
@@ -272,7 +277,7 @@ export function parseDaemonSnapshot(value: unknown): DaemonSnapshot {
 		restartCount: numberValue(source.restartCount, "daemon.restartCount"),
 		outputBytes: numberValue(source.outputBytes, "daemon.outputBytes"),
 		owner: optionalString(source.owner, "daemon.owner"),
-		readyMatch: optionalString(source.readyMatch, "daemon.readyMatch"),
+		readyMatch: optionalRawString(source.readyMatch, "daemon.readyMatch"),
 		readyPending: source.readyPending === undefined ? undefined : readyPendingList(source.readyPending),
 		persist: booleanValue(source.persist, "daemon.persist"),
 		detached: source.detached === undefined ? false : booleanValue(source.detached, "daemon.detached"),
@@ -427,7 +432,7 @@ export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown)
 			return {
 				op: "wait",
 				daemon: parseDaemonSnapshot(source.daemon),
-				matched: optionalString(source.matched, "result.matched"),
+				matched: optionalRawString(source.matched, "result.matched"),
 				timedOut: booleanValue(source.timedOut, "result.timedOut"),
 			};
 		case "send":

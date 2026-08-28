@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+
 /**
  * Generate aggregated release notes from per-package CHANGELOG.md files.
  *
@@ -29,6 +30,7 @@
  */
 
 import { $, Glob } from "bun";
+import { compareVersions } from "../packages/utils/src/version";
 
 const changelogGlob = new Glob("packages/*/CHANGELOG.md");
 const REPO = process.env.OMP_REPO ?? process.env.GITHUB_REPOSITORY ?? "can1357/oh-my-pi";
@@ -36,22 +38,6 @@ const REPO = process.env.OMP_REPO ?? process.env.GITHUB_REPOSITORY ?? "can1357/o
 // Canonical ordering used by `fix-changelogs`; unknown categories sort
 // alphabetically after these.
 const CATEGORY_ORDER = ["Breaking Changes", "Added", "Changed", "Fixed", "Removed"] as const;
-
-/** Compare two `X.Y.Z` (or `vX.Y.Z`) version strings; non-semver returns 0. */
-export function compareVersions(a: string, b: string): number {
-	const am = a
-		.replace(/^v/, "")
-		.trim()
-		.match(/^(\d+)\.(\d+)\.(\d+)$/);
-	const bm = b
-		.replace(/^v/, "")
-		.trim()
-		.match(/^(\d+)\.(\d+)\.(\d+)$/);
-	if (!am || !bm) return 0;
-	if (am[1] !== bm[1]) return Number(am[1]) - Number(bm[1]);
-	if (am[2] !== bm[2]) return Number(am[2]) - Number(bm[2]);
-	return Number(am[3]) - Number(bm[3]);
-}
 
 export interface ChangelogVersionSpan {
 	version: string;
@@ -233,6 +219,7 @@ async function resolvePublishedFloorTag(targetVersion: string): Promise<string |
 	const candidates = (raw as Array<{ tagName?: unknown; isDraft?: unknown; isPrerelease?: unknown }>)
 		.filter(t => t.isDraft !== true && t.isPrerelease !== true)
 		.map(t => (typeof t.tagName === "string" ? t.tagName : ""))
+		.filter(tag => !tag.includes("-canary."))
 		.filter(tag => /^v\d+\.\d+\.\d+$/.test(tag))
 		.filter(tag => compareVersions(tag, targetVersion) < 0)
 		.sort((a, b) => compareVersions(b, a));
@@ -247,6 +234,15 @@ async function main(): Promise<void> {
 	}
 	const version = tagInput.replace(/^v/, "").trim();
 	const outputPath = process.argv[3] ?? "release-notes.md";
+	if (/^\d+\.\d+\.\d+-canary\.\d+$/.test(version)) {
+		const upcomingVersion = version.replace(/-canary\.\d+$/, "");
+		await Bun.write(
+			outputPath,
+			`This is a canary prerelease of ${upcomingVersion}. Install it with \`omp update --canary\`.\n`,
+		);
+		console.log(`Wrote canary release notes to ${outputPath}.`);
+		return;
+	}
 	const floor = await resolvePublishedFloorTag(version);
 	if (floor) {
 		console.log(`Aggregating CHANGELOG sections in (${floor}, ${version}].`);

@@ -43,7 +43,7 @@
 | `frame_id` | `number` | No | Frame selector for `evaluate`, `scopes`, `data_breakpoint_info`. `scopes` and `evaluate` default to the current stopped frame when omitted. |
 | `scope_id` | `number` | No | Variables reference from a scope. Accepted by `variables`; also used as a fallback variables reference for `data_breakpoint_info`. |
 | `variable_ref` | `number` | No | Variables reference for `variables`; preferred over `scope_id` when both are present. |
-| `pid` | `number` | No | Local process id for `attach`. `attach` requires `pid` or `port`. |
+| `pid` | `number` | No | Local process id for `attach`. Required with `port` only when no explicit adapter is selected. |
 | `port` | `number` | No | Remote attach port. If no adapter is forced, attach prefers `debugpy` when `port` is present. |
 | `host` | `string` | No | Remote attach host for `attach`. |
 | `levels` | `number` | No | Max stack frames for `stack_trace`. |
@@ -66,7 +66,7 @@
 
 ### Action-specific requirements
 - `launch`: `program`
-- `attach`: `pid` or `port`
+- `attach`: `pid` or `port`, unless an explicit adapter supplies its attach arguments
 - `set_breakpoint` / `remove_breakpoint`: `function`, or `file` + `line`
 - `set_instruction_breakpoint` / `remove_instruction_breakpoint`: `instruction_reference`
 - `data_breakpoint_info`: `name`
@@ -123,7 +123,7 @@ Side-channel artifacts outside the model tool result:
 
 1. Tool registration is conditional: `DebugTool.createIf()` in `packages/coding-agent/src/tools/debug.ts` returns `null` unless `session.settings.get("debug.enabled")` is true (default `true`). `packages/coding-agent/src/tools/index.ts` wires the factory and rechecks the same setting in tool filtering.
 2. `DebugTool.execute()` clamps `params.timeout` through `clampTimeout("debug", params.timeout)`, applying the optional positive `tools.maxTimeout` cap before the tool's 5-second floor and 300-second ceiling, and composes the caller `AbortSignal` with `AbortSignal.timeout(...)`.
-3. `launch` resolves cwd/program paths, classifies the target as file/directory/missing, rejects directories unless the chosen adapter sets `acceptsDirectoryProgram`, and delegates to `dapSessionManager.launch()`. `attach` requires `pid` or `port`, resolves cwd, selects an adapter, and delegates to `.attach()`.
+3. `launch` resolves cwd/program paths, classifies the target as file/directory/missing, rejects directories unless the chosen adapter sets `acceptsDirectoryProgram`, and delegates to `dapSessionManager.launch()`. `attach` resolves cwd and selects an adapter; it requires `pid` or `port` only without an explicit adapter.
 4. `DapSessionManager.launch()` / `.attach()` enforce one root session, spawn the adapter through `DapClient.spawn()`, register listeners, send `initialize`, cache capabilities, subscribe for tree-wide stop events, send `launch`/`attach`, then complete the `initialized` → `configurationDone` handshake.
 5. `DapClient.spawn()` starts adapters detached with `NON_INTERACTIVE_ENV`. `stdio` uses the adapter pipes; `socket` uses a Unix socket on Linux or an adapter callback to a local TCP listener elsewhere; `tcp` substitutes `${port}` in adapter args, starts its local server, then connects. Child sessions reuse a root `tcp` server through `DapClient.connect()`.
 6. `#registerSession()` in `packages/coding-agent/src/dap/session.ts` installs reverse-request handlers:
@@ -170,7 +170,7 @@ Side-channel artifacts outside the model tool result:
     - `fileTypes`: lowercase file extensions used for launch auto-selection.
     - `rootMarkers`: files/directories used to rank adapters for a project.
     - `launchDefaults`: default DAP launch arguments merged before the selected program/cwd/args.
-    - `attachDefaults`: default DAP attach arguments merged before pid/port/host/cwd.
+    - `attachDefaults`: default DAP attach arguments. An explicit adapter may attach without a PID or port; its adapter validates these arguments.
     - `connectMode`: `"stdio"` (default), `"socket"` (Delve-style platform-dependent socket/callback), or `"tcp"` (spawn a local DAP server with `${port}` substituted into `args`).
     - `acceptsDirectoryProgram`: set `true` for adapters such as `dlv` that can launch a package/project directory.
 
@@ -192,6 +192,28 @@ Example `.omp/dap.json`:
       "attachDefaults": {
         "request": "attach",
         "host": "127.0.0.1"
+      }
+    }
+  }
+}
+```
+
+GDB example for an OpenOCD remote target:
+
+```json
+{
+  "adapters": {
+    "pico-openocd": {
+      "command": "gdb",
+      "args": [
+        "-q",
+        "-ex",
+        "file zig-out/firmware/gc9a01-test.elf",
+        "-i",
+        "dap"
+      ],
+      "attachDefaults": {
+        "target": ":3334"
       }
     }
   }
@@ -298,7 +320,7 @@ Example `.omp/dap.json`:
 ## Errors
 - Parameter validation in `packages/coding-agent/src/tools/debug.ts` throws `ToolError` with explicit messages such as:
   - `program is required for launch`
-  - `attach requires pid or port`
+  - `attach requires pid or port` when no explicit adapter is selected
   - `set_breakpoint requires file+line or function`
   - `variables requires variable_ref or scope_id`
   - `instruction_count is required for disassemble`
@@ -330,7 +352,17 @@ Example `.omp/dap.json`:
 
 ## Notes
 - `packages/coding-agent/src/prompts/tools/debug.md` tells the model only one active root session is supported. Adapter-requested child sessions belong to that root tree.
-- The default JavaScript/TypeScript adapter runs vscode-js-debug’s `dapDebugServer.js` over TCP. Install it with Mason or set `JS_DEBUG_DAP_SERVER` to a release-tarball server path.
+- The default JavaScript/TypeScript adapter runs vscode-js-debug's `dapDebugServer.js` over TCP. Install it one of these ways; the first and last are auto-discovered by `resolveJsDebugServerPath()` in `packages/coding-agent/src/dap/config.ts`. (Don't try `npm i -g js-debug-adapter` — it 404s; `js-debug-adapter` is the omp adapter id, not an npm package.)
+  - Release tarball, extracted so `dapDebugServer.js` lands at `~/.local/opt/js-debug/src/dapDebugServer.js`:
+    ```sh
+    curl -sL -o js-debug-dap.tar.gz \
+      https://github.com/microsoft/vscode-js-debug/releases/download/v1.117.0/js-debug-dap-v1.117.0.tar.gz
+    mkdir -p ~/.local/opt && tar -xzf js-debug-dap.tar.gz -C ~/.local/opt
+    ```
+    Replace `v1.117.0` with the latest tag from the [releases page](https://github.com/microsoft/vscode-js-debug/releases).
+  - Any other location via `JS_DEBUG_DAP_SERVER=<path-to-dapDebugServer.js>`.
+  - Neovim users with Mason: `:MasonInstall js-debug-adapter` → discovered at `~/.local/share/nvim/mason/packages/js-debug-adapter/js-debug/src/dapDebugServer.js`.
+- The adapter runs under `node` if on `PATH`, otherwise under the omp host (Bun); `resolveDefaultJsDebugAdapter()` falls back to `process.execPath`, so a Bun-only setup is supported.
 - `configurationDone` is sent automatically during root and child launch/attach handshakes and lazily before later requests if the initial handshake did not complete.
 - `startDebugging` reverse requests create recursive child sessions on the same TCP server; a stopped child becomes the target for thread-level actions.
 - `output` exposes the active session’s merged `output` event stream only; the tool does not distinguish stdout, stderr, and console categories.

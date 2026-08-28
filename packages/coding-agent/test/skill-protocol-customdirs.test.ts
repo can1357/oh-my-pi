@@ -2,9 +2,12 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadSkills, resetActiveSkillsForTests, setActiveSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { SkillProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/skill-protocol";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 
 function makeSkillMd(name: string, dir: string) {
 	return `---\nname: ${name}\ndescription: ${name} skill.\n---\n\n# ${name} from ${dir}\n`;
@@ -46,6 +49,49 @@ describe("skill:// resolution honors skills.customDirectories (#7190)", () => {
 		const resource = await handler.resolve(parseInternalUrl("skill://my-custom-skill/"));
 		expect(resource.sourcePath).toBe(path.join(skillDir, "SKILL.md"));
 		expect(resource.content).toContain(`from ${tempDir}`);
+	});
+
+	it("reads semicolon-delimited lists across routed URL schemes", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-delimited-skills-"));
+		tempDirs.push(tempDir);
+		for (const name of ["first-skill", "second-skill"]) {
+			const skillDir = path.join(tempDir, name);
+			await fs.mkdir(skillDir, { recursive: true });
+			await Bun.write(path.join(skillDir, "SKILL.md"), makeSkillMd(name, tempDir));
+		}
+
+		const { skills } = await loadSkills({
+			...ALL_DEFAULT_SOURCES_DISABLED,
+			customDirectories: [tempDir],
+		});
+		setActiveSkills(skills);
+		const session: ToolSession = {
+			cwd: tempDir,
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated(),
+		};
+		const result = await new ReadTool(session).execute("read-delimited-skills", {
+			path: "skill://first-skill:1-3; skill://second-skill:1-3",
+		});
+		const text = result.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+
+		expect(text).toContain("Note: interpreted as 2 paths: skill://first-skill:1-3, skill://second-skill:1-3");
+		expect(text).toContain("first-skill skill.");
+		expect(text).toContain("second-skill skill.");
+
+		const historyResult = await new ReadTool(session).execute("read-delimited-history", {
+			path: "history://missing-first:1-3; history://missing-second:1-3",
+		});
+		const historyText = historyResult.content
+			.flatMap(block => (block.type === "text" ? [block.text] : []))
+			.join("\n");
+		expect(historyText).toContain(
+			"Note: interpreted as 2 paths: history://missing-first:1-3, history://missing-second:1-3",
+		);
+		expect(historyText).toContain("Could not read history://missing-first:1-3");
+		expect(historyText).toContain("Could not read history://missing-second:1-3");
 	});
 
 	it("keeps first-wins across multiple custom directories", async () => {

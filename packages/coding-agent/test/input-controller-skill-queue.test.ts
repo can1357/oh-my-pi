@@ -27,6 +27,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 
 type StubEditor = {
 	setText: (text: string) => void;
+	setCollapsedText: (text: string) => void;
 	getText: () => string;
 	getExpandedText: () => string;
 	clearDraft: (historyText?: string) => void;
@@ -66,6 +67,10 @@ function createStubInputControllerContext(opts: {
 		setText(text) {
 			editorText = text;
 		},
+		// The stub skips chip collapsing so assertions read the wire-format text.
+		setCollapsedText(text) {
+			editorText = text;
+		},
 		getText() {
 			return editorText;
 		},
@@ -89,6 +94,9 @@ function createStubInputControllerContext(opts: {
 	const updatePendingMessagesDisplay = vi.fn();
 	const requestRender = vi.fn();
 	const showError = vi.fn();
+	const renderOptimisticSkillMessage = vi.fn();
+	const reconcileOptimisticSkillMessage = vi.fn();
+	const clearOptimisticSkillMessage = vi.fn();
 	const queueCompactionMessage = vi.fn((_text: string, _mode: "steer" | "followUp", _images?: ImageContent[]) => {});
 	const ctx = {
 		editor,
@@ -117,6 +125,10 @@ function createStubInputControllerContext(opts: {
 		locallySubmittedUserSignatures: new Set<string>(),
 		withLocalSubmission: async (_text: string, fn: () => unknown) => fn(),
 		queueCompactionMessage,
+		optimisticSkillMessagePending: false,
+		renderOptimisticSkillMessage,
+		reconcileOptimisticSkillMessage,
+		clearOptimisticSkillMessage,
 	} as unknown as InteractiveModeContext;
 
 	return {
@@ -128,6 +140,10 @@ function createStubInputControllerContext(opts: {
 		updatePendingMessagesDisplay,
 		requestRender,
 		queueCompactionMessage,
+		showError,
+		renderOptimisticSkillMessage,
+		reconcileOptimisticSkillMessage,
+		clearOptimisticSkillMessage,
 	};
 }
 
@@ -207,7 +223,7 @@ describe("InputController skill queue chip metadata", () => {
 		editor.setText("/goal set Ship the release");
 		await controller.handleFollowUp();
 
-		expect(handleGoalModeCommand).toHaveBeenCalledWith("set Ship the release");
+		expect(handleGoalModeCommand.mock.calls[0]?.[0]).toBe("set Ship the release");
 		expect(prompt).not.toHaveBeenCalled();
 		expect(editor.getText()).toBe("");
 	});
@@ -239,11 +255,11 @@ describe("InputController skill queue chip metadata", () => {
 		const controller = new InputController(ctx);
 
 		controller.setupEditorSubmitHandler();
-		editor.setText("/skill:test-skill inspect this");
+		editor.setText("/skill:test-skill inspect this [Image #1]");
 		editor.pendingImages = [image];
 		editor.pendingImageLinks = ["file:///tmp/skill-image.png"];
 		editor.imageLinks = editor.pendingImageLinks;
-		await editor.onSubmit?.("/skill:test-skill inspect this");
+		await editor.onSubmit?.("/skill:test-skill inspect this [Image #1]");
 
 		expect(promptCustomMessage).toHaveBeenCalledTimes(1);
 		const message = promptCustomMessage.mock.calls[0]?.[0];
@@ -256,6 +272,83 @@ describe("InputController skill queue chip metadata", () => {
 		expect(editor.pendingImages).toEqual([]);
 		expect(editor.pendingImageLinks).toEqual([]);
 		expect(editor.imageLinks).toBeUndefined();
+	});
+});
+
+describe("InputController optimistic skill row (#8895)", () => {
+	let tempDir: TempDir;
+	let skillCommands: Map<string, Skill>;
+
+	beforeEach(async () => {
+		tempDir = TempDir.createSync("@pi-skill-optimistic-stub-");
+		const skill = await writeSkillFile(tempDir.path(), "test-skill", "Do the thing.");
+		skillCommands = new Map<string, Skill>([["skill:test-skill", skill]]);
+	});
+
+	afterEach(() => {
+		tempDir.removeSync();
+		vi.restoreAllMocks();
+	});
+
+	it("paints the optimistic row before dispatching the idle skill turn", async () => {
+		const { ctx, editor, promptCustomMessage, renderOptimisticSkillMessage } = createStubInputControllerContext({
+			skillCommands,
+			isStreaming: false,
+		});
+		// A slow preflight (memory recall, before_agent_start hooks, auto-thinking)
+		// lives inside promptCustomMessage; the row must already be painted when the
+		// dispatch begins, so it stays visible while that preflight runs.
+		const order: string[] = [];
+		renderOptimisticSkillMessage.mockImplementation(() => order.push("render"));
+		promptCustomMessage.mockImplementation(async () => {
+			order.push("dispatch");
+		});
+
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+		editor.setText("/skill:test-skill go");
+		await editor.onSubmit?.("/skill:test-skill go");
+
+		expect(order).toEqual(["render", "dispatch"]);
+		expect(renderOptimisticSkillMessage.mock.calls[0]?.[0]).toMatchObject({
+			role: "custom",
+			customType: SKILL_PROMPT_MESSAGE_TYPE,
+			attribution: "user",
+			display: true,
+			details: { name: "test-skill" },
+		});
+	});
+
+	it("skips the optimistic row when the skill submission queues while streaming", async () => {
+		const { ctx, editor, promptCustomMessage, renderOptimisticSkillMessage } = createStubInputControllerContext({
+			skillCommands,
+			isStreaming: true,
+		});
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+		editor.setText("/skill:test-skill go");
+		await editor.onSubmit?.("/skill:test-skill go");
+
+		expect(renderOptimisticSkillMessage).not.toHaveBeenCalled();
+		expect(promptCustomMessage).toHaveBeenCalledTimes(1);
+	});
+
+	it("drops the optimistic row and restores the draft when dispatch throws", async () => {
+		const { ctx, editor, promptCustomMessage, renderOptimisticSkillMessage, clearOptimisticSkillMessage, showError } =
+			createStubInputControllerContext({ skillCommands, isStreaming: false });
+		promptCustomMessage.mockImplementation(async () => {
+			throw new Error("preflight failed");
+		});
+
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+		editor.setText("/skill:test-skill go");
+		await editor.onSubmit?.("/skill:test-skill go");
+
+		expect(renderOptimisticSkillMessage).toHaveBeenCalledTimes(1);
+		expect(clearOptimisticSkillMessage).toHaveBeenCalledTimes(1);
+		expect(showError).toHaveBeenCalledTimes(1);
+		expect(editor.getText()).toBe("/skill:test-skill go");
 	});
 });
 
@@ -630,6 +723,10 @@ function createStubInteractiveModeContextForUiHelpers(session: AgentSession) {
 		setText(text) {
 			editorText = text;
 		},
+		// The stub skips chip collapsing so assertions read the wire-format text.
+		setCollapsedText(text) {
+			editorText = text;
+		},
 		getText() {
 			return editorText;
 		},
@@ -761,10 +858,11 @@ describe("UiHelpers / InputController against derived queued custom display", ()
 	});
 });
 
-function createEventControllerFixture() {
+function createEventControllerFixture(opts?: { optimisticSkillMessagePending?: boolean }) {
 	const updatePendingMessagesDisplay = vi.fn();
 	const addMessageToChat = vi.fn();
 	const requestRender = vi.fn();
+	const reconcileOptimisticSkillMessage = vi.fn();
 	const ctx = {
 		isInitialized: true,
 		init: vi.fn(async () => {}),
@@ -776,13 +874,15 @@ function createEventControllerFixture() {
 		transcriptMessageComponents: new WeakMap(),
 		pendingTools: new Map(),
 		session: {},
+		optimisticSkillMessagePending: opts?.optimisticSkillMessagePending ?? false,
+		reconcileOptimisticSkillMessage,
 		get viewSession() {
 			return (this as typeof ctx).session;
 		},
 	} as unknown as InteractiveModeContext;
 
 	const controller = new EventController(ctx);
-	return { controller, updatePendingMessagesDisplay, addMessageToChat };
+	return { controller, updatePendingMessagesDisplay, addMessageToChat, reconcileOptimisticSkillMessage };
 }
 
 describe("EventController custom queued-message refresh", () => {
@@ -828,5 +928,50 @@ describe("EventController custom queued-message refresh", () => {
 
 		expect(updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
 		expect(addMessageToChat).toHaveBeenCalledTimes(2);
+	});
+
+	it("reconciles the optimistic skill row instead of duplicating it on the canonical message_start", async () => {
+		const { controller, addMessageToChat, reconcileOptimisticSkillMessage } = createEventControllerFixture({
+			optimisticSkillMessagePending: true,
+		});
+		const event: Extract<AgentSessionEvent, { type: "message_start" }> = {
+			type: "message_start",
+			message: {
+				role: "custom",
+				customType: SKILL_PROMPT_MESSAGE_TYPE,
+				content: "skill body",
+				display: true,
+				attribution: "user",
+				details: { name: "test-skill", path: "/s.md", lineCount: 1 } satisfies SkillPromptDetails,
+				timestamp: Date.now(),
+			},
+		};
+		await controller.handleEvent(event);
+
+		expect(reconcileOptimisticSkillMessage).toHaveBeenCalledTimes(1);
+		expect(reconcileOptimisticSkillMessage.mock.calls[0]?.[0]).toBe(event.message);
+		expect(addMessageToChat).not.toHaveBeenCalled();
+	});
+
+	it("renders normally when no optimistic skill row is pending", async () => {
+		const { controller, addMessageToChat, reconcileOptimisticSkillMessage } = createEventControllerFixture({
+			optimisticSkillMessagePending: false,
+		});
+		const event: Extract<AgentSessionEvent, { type: "message_start" }> = {
+			type: "message_start",
+			message: {
+				role: "custom",
+				customType: SKILL_PROMPT_MESSAGE_TYPE,
+				content: "skill body",
+				display: true,
+				attribution: "user",
+				details: { name: "test-skill", path: "/s.md", lineCount: 1 } satisfies SkillPromptDetails,
+				timestamp: Date.now(),
+			},
+		};
+		await controller.handleEvent(event);
+
+		expect(reconcileOptimisticSkillMessage).not.toHaveBeenCalled();
+		expect(addMessageToChat).toHaveBeenCalledTimes(1);
 	});
 });

@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { KeybindingsManager as AppKeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
+import {
+	KeybindingsManager as AppKeybindingsManager,
+	setKeyHintPlatform,
+} from "@oh-my-pi/pi-coding-agent/config/keybindings";
 import { createPromptActionAutocompleteProvider } from "@oh-my-pi/pi-coding-agent/modes/prompt-action-autocomplete";
 import { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@oh-my-pi/pi-tui";
 
@@ -12,10 +15,12 @@ describe("prompt action autocomplete", () => {
 				"tui.editor.undo": { defaultKeys: "f8", description: "Undo" },
 			}),
 		);
+		setKeyHintPlatform("linux");
 	});
 
 	afterEach(() => {
 		setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+		setKeyHintPlatform(undefined);
 	});
 
 	it("shows prompt actions with configured shortcut hints", async () => {

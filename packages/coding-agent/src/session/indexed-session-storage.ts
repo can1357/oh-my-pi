@@ -120,8 +120,13 @@ export class IndexedSessionStorage implements SessionStorage {
 	}
 
 	async drain(): Promise<void> {
-		while (this.#drainPending.size > 0) {
-			await Promise.allSettled(this.#drainPending);
+		// Quiesce EVERY pending backend operation, not just the drain-tracked
+		// fire-and-forget publishes: an atomic write whose commit guard passed
+		// just before a terminal seal is still on the wire with
+		// `trackDrain: false`, and a graceful shutdown (SessionManager.close)
+		// must not return while it can still publish under a reopened path.
+		while (this.#drainPending.size > 0 || this.#pathPending.size > 0) {
+			await Promise.allSettled([...this.#drainPending, ...this.#pathPending.values()]);
 		}
 		const error = this.#firstDrainError;
 		this.#firstDrainError = undefined;

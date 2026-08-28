@@ -100,13 +100,12 @@ describe("system prompt tool inventory", () => {
 	}
 
 	function inventoryFrom(text: string): string {
-		// Tolerate either prompt layout: the merge-base "# Inventory" / "ENV" framing and the
-		// reordered "# Tool Inventory" / "TOOL POLICY" framing on current main. The slice just
-		// needs to isolate the rendered tool list from the rest of the prompt.
+		// Isolate the tool list across prompt layouts by stopping at the next
+		// top-level or regular section heading.
 		const inventoryStart =
 			["# Tool Inventory", "# Inventory"].map(header => text.indexOf(header)).find(index => index >= 0) ?? -1;
 		expect(inventoryStart).toBeGreaterThan(-1);
-		const sectionEnds = ["\nENV\n", "\nTOOL POLICY", "\n# "]
+		const sectionEnds = ["\nENV\n", "\nTOOL POLICY", "\n§ ", "\n# "]
 			.map(marker => text.indexOf(marker, inventoryStart + 1))
 			.filter(index => index > inventoryStart);
 		const inventoryEnd = sectionEnds.length > 0 ? Math.min(...sectionEnds) : text.length;
@@ -482,6 +481,33 @@ describe("system prompt tool inventory", () => {
 		if (!nativeTools) expect(inventory).toContain(DIRECT_WEB_SEARCH.description);
 	});
 
+	it("keeps bridge-only Code Mode tools out of the inventory while safety gates see them", async () => {
+		const tools = new Map(TOOLS);
+		tools.set("eval", {
+			label: "Eval",
+			description: "Runs code cells.",
+			parameters: { type: "object", properties: {} },
+		});
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			toolNames: ["eval", "read", "computer"],
+			directToolNames: ["eval"],
+			tools,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+			nativeTools: true,
+			inlineToolDescriptors: true,
+		});
+		const text = systemPrompt.join("\n\n");
+		// Only the direct keep-set renders as provider-callable functions.
+		expect(text).toContain("Runs code cells.");
+		expect(text).not.toContain("Reads files from disk.");
+		// Safety gates still fire for bridge-reachable tools.
+		expect(text).toContain("Only direct user messages authorize consequential computer actions.");
+	});
+
 	it("uses a conservative fallback inventory when no tools map is provided", async () => {
 		const { systemPrompt } = await buildSystemPrompt({
 			cwd: tempDir,
@@ -680,7 +706,7 @@ describe("system prompt tool inventory", () => {
 			})
 		).systemPrompt.join("\n\n");
 
-		expect(withScout).toContain("a single read-only scout while you keep working is fine");
+		expect(withScout).toContain("one read-only scout while working is allowed");
 		expect(withoutScout).not.toContain("read-only scout");
 	});
 
@@ -771,5 +797,71 @@ describe("system prompt tool inventory", () => {
 			expect(text).not.toContain("Scan descriptions for your task domain.");
 			expect(text).toContain("Skills are specialized knowledge.\nIf a skill applies");
 		}
+	});
+
+	it("does not require browser verification when the browser tool is absent (issue #8139)", async () => {
+		const opts = {
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		};
+		const tools = new Map(TOOLS);
+		const withoutBrowser = (
+			await buildSystemPrompt({
+				...opts,
+				toolNames: ["read", "bash"],
+				tools,
+				nativeTools: true,
+				inlineToolDescriptors: false,
+			})
+		).systemPrompt.join("\n\n");
+
+		expect(withoutBrowser).not.toContain("browser-drive with `browser`");
+		expect(withoutBrowser).not.toContain("browser-drive with browser");
+		expect(withoutBrowser).toContain("TUI/CLI");
+		expect(withoutBrowser).toContain("behavioral test or smoke test");
+
+		tools.set("browser", {
+			label: "Browser",
+			description: "Drives a real Chromium tab.",
+			parameters: { type: "object", properties: {} },
+		});
+		const withBrowser = (
+			await buildSystemPrompt({
+				...opts,
+				toolNames: ["read", "bash", "browser"],
+				tools,
+				nativeTools: true,
+				inlineToolDescriptors: false,
+			})
+		).systemPrompt.join("\n\n");
+
+		expect(withBrowser).toContain("browser-drive with `browser`");
+		// A browser-only session still needs the smoke-test fallback for
+		// native-desktop surfaces (no computer tool).
+		expect(withBrowser).toContain("behavioral test or smoke test");
+	});
+
+	it("omits todo workflow guidance when the todo tool is absent", async () => {
+		const opts = {
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+			tools: TOOLS,
+			nativeTools: true,
+			inlineToolDescriptors: false,
+		};
+		const withoutTodo = (await buildSystemPrompt({ ...opts, toolNames: ["read", "bash"] })).systemPrompt.join("\n\n");
+		expect(withoutTodo).not.toContain("Todo calls NEVER alone");
+		expect(withoutTodo).not.toContain("batch each with turn's real calls");
+
+		const withTodo = (await buildSystemPrompt({ ...opts, toolNames: ["read", "bash", "todo"] })).systemPrompt.join(
+			"\n\n",
+		);
+		expect(withTodo).toContain("Todo calls NEVER alone");
 	});
 });

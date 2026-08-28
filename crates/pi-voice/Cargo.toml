@@ -2,7 +2,7 @@
 name = "pi-voice"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "MIT"
 authors.workspace = true
 repository.workspace = true
 
@@ -14,20 +14,15 @@ workspace = true
 audiopus_sys.workspace = true
 bytes.workspace = true
 flume.workspace = true
-maudio.workspace = true
 opus.workspace = true
 parking_lot.workspace = true
 tokio.workspace = true
 webrtc.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
-# Regenerate miniaudio FFI bindings from the compiled headers on macOS only.
-# The maudio-sys pregenerated `unix.rs` bindings are Linux-shaped: their
-# `ma_device`/`ma_context` backend-state unions omit the `#ifdef
-# MA_SUPPORT_COREAUDIO` members that the macOS build of miniaudio.c actually
-# contains, so shipping them on darwin is an ABI mismatch that silently breaks
-# CoreAudio capture (device init/start succeed but no render callbacks fire).
-# darwin builds with host Xcode (libclang available), so bindgen is fine here;
-# the hermetic zig/musl/windows toolchains keep the bindgen-free pregen path,
-# whose bindings are correct for those platforms.
-maudio = { workspace = true, features = ["generate-bindings"] }
+[target.'cfg(target_os = "linux")'.dependencies]
+# dlopen/dlsym for the PulseAudio and ALSA backends: no link-time dependency
+# on libpulse/libasound, so the prebuilt addon loads on systems without them.
+libc.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys.workspace = true

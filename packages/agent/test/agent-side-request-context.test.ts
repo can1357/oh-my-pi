@@ -1,5 +1,6 @@
 import { describe, expect, it, mock } from "bun:test";
-import { type AssistantMessage, type Context, z } from "@oh-my-pi/pi-ai";
+import { type } from "@oh-my-pi/omptype";
+import type { AssistantMessage, Context } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -59,7 +60,7 @@ describe("Agent — buildSideRequestContext", () => {
 		name: "test_tool",
 		label: "Test Tool",
 		description: "a cool tool",
-		parameters: z.object({ arg: z.string() }) as unknown as AgentTool["parameters"],
+		parameters: type({ arg: type("string") }) as unknown as AgentTool["parameters"],
 		execute: async () => ({ content: [{ type: "text", text: "success" }], details: { value: "success" } }),
 	};
 

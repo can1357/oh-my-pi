@@ -1,4 +1,4 @@
-import { getGeminiCliHeaders } from "../providers/google-gemini-cli";
+import { getGeminiCliHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import type {
 	UsageAmount,
 	UsageFetchContext,
@@ -8,6 +8,7 @@ import type {
 	UsageReport,
 	UsageWindow,
 } from "../usage";
+import { parseIsoTimestamp } from "./shared";
 
 // (Refresh is the sole responsibility of AuthStorage; no provider-direct refresh here.)
 
@@ -79,8 +80,8 @@ function parseWindow(resetTime: string | undefined): UsageWindow {
 			label: "Quota window",
 		};
 	}
-	const resetsAt = Date.parse(resetTime);
-	if (Number.isNaN(resetsAt)) {
+	const resetsAt = parseIsoTimestamp(resetTime);
+	if (resetsAt === undefined) {
 		return {
 			id: "quota",
 			label: "Quota window",

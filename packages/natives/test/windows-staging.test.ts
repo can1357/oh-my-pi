@@ -27,6 +27,7 @@ import {
 	cleanupStaleNativeVersions,
 	getAddonFilenames,
 	initLoaderContext,
+	prepareNativeVersionDir,
 	resolveLoaderCandidates,
 	shouldStageNodeModulesAddon,
 } from "../native/loader-state.js";
@@ -195,18 +196,24 @@ describe("windows native addon staging", () => {
 		const nativesDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-natives-cache-"));
 		const currentMajor = Number.parseInt(packageJson.version, 10);
 		const futureVersion = `${currentMajor + 1}.0.0`;
+		const staleVersion = "15.10.11";
+		const freshVersion = "15.10.12";
 		try {
-			await fs.mkdir(path.join(nativesDir, "15.10.11"));
+			await fs.mkdir(path.join(nativesDir, staleVersion));
+			await fs.mkdir(path.join(nativesDir, freshVersion));
 			await fs.mkdir(path.join(nativesDir, packageJson.version));
 			await fs.mkdir(path.join(nativesDir, futureVersion));
 			await fs.mkdir(path.join(nativesDir, "not-a-version"));
 			await Bun.write(path.join(nativesDir, "README.txt"), "not a version directory");
+			await fs.utimes(path.join(nativesDir, staleVersion), new Date(0), new Date(0));
+			await fs.utimes(path.join(nativesDir, freshVersion), new Date(0), new Date(0));
+			prepareNativeVersionDir(path.join(nativesDir, freshVersion));
 
 			const removed = cleanupStaleNativeVersions({ nativesDir, currentVersion: packageJson.version });
 
-			expect(removed.map(filePath => path.basename(filePath))).toEqual(["15.10.11"]);
+			expect(removed.map(filePath => path.basename(filePath))).toEqual([staleVersion]);
 			expect((await fs.readdir(nativesDir)).sort()).toEqual(
-				["README.txt", packageJson.version, futureVersion, "not-a-version"].sort(),
+				["README.txt", freshVersion, packageJson.version, futureVersion, "not-a-version"].sort(),
 			);
 		} finally {
 			await fs.rm(nativesDir, { recursive: true, force: true });

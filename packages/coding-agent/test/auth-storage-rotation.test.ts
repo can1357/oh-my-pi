@@ -26,7 +26,7 @@ describe("AuthStorage account rotation", () => {
 		initialCredentials: OAuthCredential[],
 		finalCredentials: OAuthCredential[],
 	): Promise<{ sessionId: string; stickyKey: string; freshKey: string }> => {
-		const control = await AuthStorage.create(path.join(tempDir, `issue-4982-control-${Snowflake.next()}.db`), {
+		const control = await AuthStorage.create(":memory:", {
 			usageProviderResolver: () => undefined,
 		});
 		try {
@@ -66,10 +66,13 @@ describe("AuthStorage account rotation", () => {
 			};
 		},
 	};
+	const createRotationStorage = (dbPath: string) =>
+		AuthStorage.create(dbPath, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+		});
 
 	beforeEach(async () => {
-		tempDir = path.join(os.tmpdir(), `pi-test-auth-rotation-${Snowflake.next()}`);
-		fs.mkdirSync(tempDir, { recursive: true });
+		tempDir = "";
 		usageExhausted = false;
 		nextLoginCredential = undefined;
 		for (const provider of [targetProvider, unrelatedProvider]) {
@@ -86,9 +89,7 @@ describe("AuthStorage account rotation", () => {
 			});
 		}
 
-		authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"), {
-			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
-		});
+		authStorage = await createRotationStorage(":memory:");
 
 		// Stub the refresh path so AuthStorage doesn't hit a real OAuth endpoint
 		// when the credential lands inside the 60s skew. Returning the credential
@@ -289,7 +290,7 @@ describe("AuthStorage account rotation", () => {
 			throw new Error("Expected bundled Codex test model to exist");
 		}
 
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		const modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
 		const attemptedKeys: string[] = [];
 		const result = await withAuth(modelRegistry.resolver(model, "codex-four-oauth-session"), async key => {
 			attemptedKeys.push(key);
@@ -306,6 +307,10 @@ describe("AuthStorage account rotation", () => {
 	});
 
 	test("provider login invalidates only that provider's persisted session stickiness", async () => {
+		tempDir = path.join(os.tmpdir(), `pi-test-auth-rotation-${Snowflake.next()}`);
+		fs.mkdirSync(tempDir, { recursive: true });
+		authStorage.close();
+		authStorage = await createRotationStorage(path.join(tempDir, "testauth.db"));
 		const targetInitialCredentials: OAuthCredential[] = [
 			{
 				type: "oauth",
@@ -370,9 +375,7 @@ describe("AuthStorage account rotation", () => {
 		nextLoginCredential = undefined;
 
 		authStorage.close();
-		authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"), {
-			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
-		});
+		authStorage = await createRotationStorage(path.join(tempDir, "testauth.db"));
 		await authStorage.reload();
 
 		const reloadedTargetKey = await authStorage.getApiKey(targetProvider, sessionId);

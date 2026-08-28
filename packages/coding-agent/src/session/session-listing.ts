@@ -2,9 +2,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@oh-my-pi/pi-ai";
 import { getAgentDir as getDefaultAgentDir, logger, parseJsonlLenient, toError } from "@oh-my-pi/pi-utils";
-import { LRUCache } from "lru-cache/raw";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
+import { lookupSessionTitle, recordSessionTitle } from "./title-index";
 
 /**
  * Coarse lifecycle status of a session, derived from its last persisted message.
@@ -639,17 +640,63 @@ export async function findMostRecentSession(
 	return sessions[0]?.path ?? null;
 }
 
-/** Get recent sessions for display in the welcome screen. */
+/** Session id embedded in a `<file-safe-timestamp>_<id>.jsonl` filename, if present. */
+function sessionIdFromSessionPath(file: string): string | undefined {
+	const base = path.basename(file);
+	if (!base.endsWith(".jsonl")) return undefined;
+	const sep = base.lastIndexOf("_");
+	if (sep <= 0) return undefined;
+	return base.slice(sep + 1, -".jsonl".length) || undefined;
+}
+
+/**
+ * Get recent sessions for display in the welcome screen.
+ *
+ * Deliberately avoids {@link scanSessionDir}'s full-directory content scan
+ * (multi-hundred-ms with thousands of sessions): lists files, sorts by mtime,
+ * and resolves names for the newest `limit` files from the history.db title
+ * index. Files without an indexed title (legacy sessions, branch/fork copies)
+ * fall back to a per-file header scan whose title — when present — is
+ * backfilled into the index so the next launch skips the read.
+ */
 export async function getRecentSessions(
 	sessionDir: string,
 	limit = 4,
 	storage: SessionStorage = new FileSessionStorage(),
 ): Promise<RecentSessionInfo[]> {
-	const sessions = await scanSessionDir(sessionDir, storage, false);
+	let files: string[];
+	try {
+		files = storage.listFilesSync(sessionDir, "*.jsonl");
+	} catch {
+		return [];
+	}
+	const byMtime: Array<{ file: string; stat: SessionStorageStat }> = [];
+	for (const file of files) {
+		try {
+			byMtime.push({ file, stat: storage.statSync(file) });
+		} catch {
+			// Vanished between glob and stat; skip.
+		}
+	}
+	byMtime.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
+
+	// The index is keyed by real session ids; in-memory test storages must not
+	// touch the process-wide history.db.
+	const useIndex = storage instanceof FileSessionStorage;
 	const recent: RecentSessionInfo[] = [];
-	for (let i = 0; i < sessions.length && i < limit; i++) {
-		const info = sessions[i];
-		recent.push({ path: info.path, name: sessionDisplayName(info), timeAgo: formatTimeAgo(info.modified) });
+	for (const { file, stat } of byMtime) {
+		if (recent.length >= limit) break;
+		const id = useIndex ? sessionIdFromSessionPath(file) : undefined;
+		const indexed = id ? lookupSessionTitle(id) : undefined;
+		if (indexed) {
+			recent.push({ path: file, name: indexed, timeAgo: formatTimeAgo(stat.mtime) });
+			continue;
+		}
+		const info = await scanSessionFile(file, storage, false);
+		if (!info) continue;
+		const title = sanitizeSessionName(info.title);
+		if (useIndex && title && info.id) recordSessionTitle(info.id, title);
+		recent.push({ path: file, name: sessionDisplayName(info), timeAgo: formatTimeAgo(info.modified) });
 	}
 	return recent;
 }

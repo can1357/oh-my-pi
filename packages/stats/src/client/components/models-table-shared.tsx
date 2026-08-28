@@ -5,7 +5,7 @@
  * the shared plugin/scale config consumed by multi-line detail charts.
  */
 
-import { format } from "date-fns";
+import { format } from "@oh-my-pi/pi-utils/dates";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { Line } from "react-chartjs-2";
 import type { ChartTheme } from "./chart-shared";

@@ -37,6 +37,7 @@ function session(
 		maxDepth?: number;
 		isolationMode?: "none" | "worktree";
 		isolationApply?: boolean;
+		modelRoles?: Record<string, string>;
 	} = {},
 ): ToolSession {
 	return {
@@ -47,6 +48,7 @@ function session(
 			"task.maxRecursionDepth": options.maxDepth ?? 2,
 			"task.isolation.mode": options.isolationMode ?? "none",
 			"task.enableLsp": true,
+			...(options.modelRoles ? { modelRoles: options.modelRoles } : {}),
 			...(options.isolationApply !== undefined ? { "task.isolation.apply": options.isolationApply } : {}),
 		}),
 		getSessionFile: () => null,
@@ -165,6 +167,168 @@ describe("structured subagent primitive", () => {
 		).rejects.toThrow("isolation, apply, and merge controls are unavailable in plan mode");
 		expect(discover).not.toHaveBeenCalled();
 	});
+	it("reloads model roles before resolving an agent added during the session", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-hot-reload-"));
+		const projectDir = path.join(root, "project");
+		const agentDir = path.join(root, "agent");
+		await fs.mkdir(projectDir, { recursive: true });
+		const liveSettings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+		const liveSession = {
+			...session(),
+			cwd: projectDir,
+			settings: liveSettings,
+		} as ToolSession;
+
+		try {
+			await Bun.write(path.join(projectDir, ".omp", "config.yml"), "modelRoles:\n  hot_worker: kimi-code/k3:max\n");
+			await Bun.write(
+				path.join(projectDir, ".omp", "agents", "hot-worker.md"),
+				'---\nname: hot-worker\ndescription: Newly added worker.\nmodel: "@hot_worker"\n---\n\nInspect the assignment.\n',
+			);
+
+			const policy = await resolveEffectiveSubagentPolicy(request({ session: liveSession, agent: "hot-worker" }));
+
+			expect(policy.modelRole).toBe("hot_worker");
+			expect(policy.modelOverride).toEqual(["kimi-code/k3:max"]);
+		} finally {
+			liveSettings.cancelPendingSaves();
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it("propagates a custom thinking-suffixed role alias through policy, dispatch, and settlement", async () => {
+		const customAgent = { ...AGENT, model: ["@reviewer:high"] };
+		mockDiscovery(customAgent);
+		const childSession = session({ modelRoles: { reviewer: "openai/gpt-4o" } });
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return { ...result(), modelRole: options.modelRole };
+		});
+
+		const settled = await runStructuredSubagent(
+			request({ session: childSession, agent: "worker", retainArtifacts: true }),
+		);
+
+		expect(settled.policy.modelRole).toBe("reviewer");
+		expect(dispatched[0]?.modelRole).toBe("reviewer");
+		expect(settled.result.modelRole).toBe("reviewer");
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+	it("does not treat a spawn handle as the HUD description", async () => {
+		mockDiscovery();
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		const handleOnly = await runStructuredSubagent(
+			request({ identity: { id: "AuthLoader", label: "AuthLoader" }, retainArtifacts: true }),
+		);
+		expect(dispatched[0]?.description).toBeUndefined();
+		expect(dispatched[0]?.id).toBe("AuthLoader");
+		await fs.rm(handleOnly.artifactsDir, { recursive: true, force: true });
+
+		dispatched.length = 0;
+		const evalLabeled = await runStructuredSubagent(
+			request({
+				invocationKind: "eval",
+				identity: { label: "Refactor the auth flow" },
+				retainArtifacts: true,
+			}),
+		);
+		expect(dispatched[0]?.description).toBe("Refactor the auth flow");
+		await fs.rm(evalLabeled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("derives modelRole from the raw selector source in request, override, definition order", async () => {
+		const customAgent = { ...AGENT, model: ["@definition"] };
+		mockDiscovery(customAgent);
+		const roleSession = session({
+			modelRoles: {
+				request: "openai/gpt-4o",
+				override: "openai/gpt-4o",
+				definition: "openai/gpt-4o",
+			},
+		});
+		roleSession.settings.override("task.agentModelOverrides", { worker: "@override" });
+
+		const requestPolicy = await resolveEffectiveSubagentPolicy(request({ session: roleSession, model: "@request" }));
+		expect(requestPolicy.modelRole).toBe("request");
+
+		const overridePolicy = await resolveEffectiveSubagentPolicy(request({ session: roleSession }));
+		expect(overridePolicy.modelRole).toBe("override");
+
+		const concreteOverrideSession = session({
+			modelRoles: {
+				override: "openai/gpt-4o",
+				definition: "openai/gpt-4o",
+			},
+		});
+		concreteOverrideSession.settings.override("task.agentModelOverrides", { worker: "openai/gpt-4o" });
+		const concreteOverridePolicy = await resolveEffectiveSubagentPolicy(
+			request({ session: concreteOverrideSession }),
+		);
+		expect(concreteOverridePolicy.modelRole).toBeUndefined();
+
+		const definitionPolicy = await resolveEffectiveSubagentPolicy(
+			request({ session: session({ modelRoles: { definition: "openai/gpt-4o" } }) }),
+		);
+		expect(definitionPolicy.modelRole).toBe("definition");
+	});
+	it("falls through an empty request selector to the agent definition role", async () => {
+		const customAgent = { ...AGENT, model: ["@definition"] };
+		mockDiscovery(customAgent);
+		const childSession = session({ modelRoles: { definition: "openai/gpt-4o" } });
+
+		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession, model: "" }));
+
+		expect(policy.modelRole).toBe("definition");
+		expect(policy.modelOverride).toEqual(["openai/gpt-4o"]);
+	});
+
+	it("falls through an empty configured override to the agent definition role", async () => {
+		const customAgent = { ...AGENT, model: ["@definition"] };
+		mockDiscovery(customAgent);
+		const childSession = session({ modelRoles: { definition: "openai/gpt-4o" } });
+		childSession.settings.override("task.agentModelOverrides", { worker: "" });
+
+		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
+
+		expect(policy.modelRole).toBe("definition");
+		expect(policy.modelOverride).toEqual(["openai/gpt-4o"]);
+	});
+	it("falls through a configured alias that expands to no patterns", async () => {
+		const customAgent = { ...AGENT, model: ["@definition"] };
+		mockDiscovery(customAgent);
+		const childSession = session({ modelRoles: { empty: "", definition: "openai/gpt-4o" } });
+		childSession.settings.override("task.agentModelOverrides", { worker: "@empty" });
+
+		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
+
+		expect(policy.modelRole).toBe("definition");
+		expect(policy.modelOverride).toEqual(["openai/gpt-4o"]);
+	});
+
+	it("does not assign a role when a child uses an explicit model selector", async () => {
+		mockDiscovery();
+		const childSession = session({ modelRoles: { reviewer: "openai/gpt-4o" } });
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		const settled = await runStructuredSubagent(
+			request({ session: childSession, model: "openai/gpt-4o", retainArtifacts: true }),
+		);
+
+		expect(settled.policy.modelRole).toBeUndefined();
+		expect(dispatched[0]?.modelRole).toBeUndefined();
+		expect(settled.result.modelRole).toBeUndefined();
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
 
 	it("leases temporary artifacts for a retained invocation and registers them for agent URLs", async () => {
 		mockDiscovery();
@@ -267,7 +431,7 @@ describe("structured subagent primitive", () => {
 			runStructuredSubagent(
 				request({ session: session({ isolationMode: "worktree" }), isolation: { requested: true } }),
 			),
-		).rejects.toThrow("Isolated subagent execution requires a git repository");
+		).rejects.toThrow("Isolated subagent execution could not be prepared: not a repository");
 		expect(artifactsDirsFromRegistry()).toEqual([]);
 	});
 
@@ -298,13 +462,34 @@ describe("structured subagent primitive", () => {
 		mockDiscovery();
 		const mcpManager = {} as NonNullable<ToolSession["mcpManager"]>;
 		const extensionPaths = ["/plugins/example.ts"];
+		const preparedExtensions = [
+			{
+				path: extensionPaths[0]!,
+				resolvedPath: extensionPaths[0]!,
+				factory: () => {},
+				error: null,
+			},
+		] as NonNullable<ToolSession["preparedExtensions"]>;
 		const customToolPaths = [{ path: "/tools/example.ts", source: "project" }] as unknown as NonNullable<
 			ToolSession["customToolPaths"]
 		>;
 		const planSession = session({ planMode: true });
 		Object.assign(planSession, { mcpManager, extensionPaths, customToolPaths });
 		const nonPlanSession = session();
-		Object.assign(nonPlanSession, { mcpManager, extensionPaths, customToolPaths });
+		let explicitRoot = "/plugins/explicit";
+		const extensionRoots = () => ({
+			explicit: [explicitRoot],
+			mode: "explicit-only" as const,
+			configured: ["/plugins/configured"],
+			configuredLevel: "project" as const,
+		});
+		Object.assign(nonPlanSession, {
+			mcpManager,
+			extensionPaths,
+			customToolPaths,
+			preparedExtensions,
+			effectiveExtensionRoots: extensionRoots,
+		});
 		const mcpDisabledSession = session();
 		mcpDisabledSession.enableMCP = false;
 		const restrictedSession = session();
@@ -340,9 +525,13 @@ describe("structured subagent primitive", () => {
 			enableMCP: true,
 			mcpManager,
 			preloadedExtensionPaths: extensionPaths,
+			preloadedPreparedExtensions: preparedExtensions,
 			preloadedCustomToolPaths: customToolPaths,
 		});
 		expect(options[1]?.restrictToolNames).toBe(false);
+		expect(options[1]?.extensionRoots?.()).toEqual(extensionRoots());
+		explicitRoot = "/plugins/explicit-after-spawn";
+		expect(options[1]?.extensionRoots?.().explicit).toEqual([explicitRoot]);
 		expect(options[2]).toMatchObject({ enableMCP: false });
 		expect(options[2]?.mcpManager).toBeUndefined();
 		expect(options[3]).toMatchObject({

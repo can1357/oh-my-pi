@@ -17,6 +17,7 @@ import {
 	EMPTY_INSERT,
 	EMPTY_PUT_AUTO_CUT_WARNING,
 	invalidAbsoluteRangeMessage,
+	literalOpRowWarning,
 	MINUS_BULLET_AUTO_PIPED_WARNING,
 	MINUS_ROW_REJECTED,
 	MOVE_TAKES_NO_BODY,
@@ -24,10 +25,11 @@ import {
 	REGISTER_PUT_TAKES_NO_BODY,
 	REM_TAKES_NO_BODY,
 	REPLACE_PAIR_COALESCED_WARNING,
+	repeatedSnapshotRowMessage,
 	SNAPSHOT_ROWS_AUTO_PUT_WARNING,
 } from "./messages";
 import { isReadMetadataLine, stripOneLeadingHashlinePrefix } from "./prefixes";
-import { type BlockTarget, cloneCursor, type ParsedRange, type Token, Tokenizer } from "./tokenizer";
+import { type BlockTarget, cloneCursor, isHunkHeaderText, type ParsedRange, type Token, Tokenizer } from "./tokenizer";
 import type { Anchor, BlockSpan, Cursor, Edit, FileOp, PasteTarget } from "./types";
 
 /** Bounds parser amplification before the target file's line count is available. */
@@ -112,7 +114,7 @@ function bodylessTargetMessage(target: BlockTarget, hadColon: boolean): string |
  */
 const BARE_LITERAL_VALUE_RE = /^\s*(?:"[^"]*"|'[^']*'|[-+]?\d+(?:\.\d+)?)\s*,?\s*$/;
 
-const TOP_LEVEL_SNAPSHOT_ROW_RE = /^\s*([1-9]\d*):(.*)$/;
+const TOP_LEVEL_SNAPSHOT_ROW_RE = /^\s*([1-9]\d*)[:|](.*)$/;
 
 function parseTopLevelSnapshotRow(text: string): { line: number; text: string } | null {
 	const match = TOP_LEVEL_SNAPSHOT_ROW_RE.exec(text);
@@ -210,6 +212,8 @@ export class Executor {
 	#fileOp: FileOp | undefined;
 	#terminated = false;
 	#skippableComments: PendingComment[] = [];
+	/** Source lines already recovered from top-level `N:TEXT` rows in this section. */
+	#recoveredSnapshotLines = new Set<number>();
 
 	#discardPendingSkippableComments(): void {
 		this.#skippableComments = [];
@@ -458,6 +462,10 @@ export class Executor {
 		const noBodyOnLiteral = bodylessTargetMessage(pending.target, pending.hadColon);
 		if (noBodyOnLiteral !== null) throw new Error(`line ${lineNum}: ${noBodyOnLiteral}`);
 		this.#commitDeferredBlanks(pending);
+		// An op written with the payload prefix is inserted as literal text. That
+		// is the correct reading of `+TEXT`, but it silently plants a `CUT …` line
+		// in the file, so name it at the moment it happens.
+		if (isHunkHeaderText(text)) this.#warnings.push(literalOpRowWarning(lineNum, text));
 		pending.payloads.push({ kind: "literal", text, lineNum });
 	}
 
@@ -513,6 +521,14 @@ export class Executor {
 		}
 		const snapshotRow = parseTopLevelSnapshotRow(text);
 		if (snapshotRow !== null) {
+			// Each recovered row becomes a single-line replacement, so a repeated
+			// line number is never a set of replacements — it is a body written as
+			// consecutive lines under one number. Collapsing it would silently keep
+			// only the last row and drop the rest.
+			if (this.#recoveredSnapshotLines.has(snapshotRow.line)) {
+				throw new Error(`line ${lineNum}: ${repeatedSnapshotRowMessage(snapshotRow.line)}`);
+			}
+			this.#recoveredSnapshotLines.add(snapshotRow.line);
 			const range = { start: { line: snapshotRow.line }, end: { line: snapshotRow.line } };
 			validateRange(range, lineNum, "replace");
 			this.#pushInsert(
@@ -595,11 +611,11 @@ export class Executor {
 	}
 
 	/**
-	 * Strip a single read-output line-number prefix (`N:`) from every bare body
-	 * row, but only when *all* bare rows carry one. A uniform set of prefixes is
-	 * the signature of content pasted straight from `read`/`search` output; a
-	 * mixed set means the `N:` is genuine payload content and must stay. Rows
-	 * authored with an explicit `+` are not bare and are never touched.
+	 * Strip a single read-output line-number prefix (`N:` or `N|`) from every
+	 * bare body row, but only when *all* bare rows carry one. A uniform set of
+	 * prefixes is the signature of content pasted straight from `read`/`search`
+	 * output; a mixed set means the prefix is genuine payload content and must
+	 * stay. Rows authored with an explicit `+` are not bare and are never touched.
 	 */
 	#stripBarePrefixesIfUniform(payloads: PayloadRow[]): void {
 		let sawBare = false;

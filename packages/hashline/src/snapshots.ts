@@ -15,11 +15,11 @@
  *
  * The abstract base class lets callers plug in whatever storage they like
  * (LRU, persistent SQLite, etc.). {@link InMemorySnapshotStore} ships as a
- * sensible default backed by `lru-cache`: a bounded set of paths, each with a
+ * sensible default backed by a bounded LRU: a limited set of paths, each with a
  * short history of full-file versions so in-session edit chains can still
  * recover against the version a stale tag names.
  */
-import { LRUCache } from "lru-cache/raw";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { computeFileHash } from "./format";
 
 /**
@@ -111,7 +111,11 @@ export abstract class SnapshotStore {
 	abstract clear(): void;
 }
 
-const DEFAULT_MAX_PATHS = 30;
+// Wide sessions routinely touch far more than a few dozen files; evicting a
+// path downgrades a genuinely in-session tag to the misleading "hash is not
+// from this session" rejection. Retention is still bounded by
+// DEFAULT_MAX_TOTAL_BYTES, so a high path count costs little.
+const DEFAULT_MAX_PATHS = 256;
 const DEFAULT_MAX_VERSIONS_PER_PATH = 4;
 /** Global ceiling on retained snapshot text across all paths (UTF-16 code units). */
 const DEFAULT_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
@@ -124,7 +128,7 @@ function mergeSeenLines(snapshot: Snapshot, lines: Iterable<number> | undefined)
 }
 
 export interface InMemorySnapshotStoreOptions {
-	/** Maximum number of distinct paths tracked at once (default 30). LRU eviction. */
+	/** Maximum number of distinct paths tracked at once (default 256). LRU eviction. */
 	maxPaths?: number;
 	/** Maximum full-file versions retained per path (default 4). Oldest dropped first. */
 	maxVersionsPerPath?: number;
@@ -137,7 +141,7 @@ export interface InMemorySnapshotStoreOptions {
 }
 
 /**
- * In-memory {@link SnapshotStore} backed by `lru-cache`. Per-path history is a
+ * In-memory {@link SnapshotStore} backed by a bounded LRU. Per-path history is a
  * short ring of full-file versions (oldest dropped first); per-session path
  * tracking is LRU-bounded so cold paths age out automatically.
  *
@@ -180,7 +184,7 @@ export class InMemorySnapshotStore extends SnapshotStore {
 		return history?.find(version => version.text === fullText) ?? null;
 	}
 
-	findByHash(hash: string): Snapshot[] {
+	override findByHash(hash: string): Snapshot[] {
 		const matches: Snapshot[] = [];
 		for (const history of this.#versions.values()) {
 			for (const version of history) {

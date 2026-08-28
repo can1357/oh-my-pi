@@ -1,6 +1,7 @@
 /**
  * Read the Docs handler for web-fetch
  */
+import type { Element } from "@oh-my-pi/pi-utils/dom";
 import { buildResult, htmlToBasicMarkdown, loadPage, type RenderResult, type SpecialHandler } from "./types";
 
 export const handleReadTheDocs: SpecialHandler = async (
@@ -38,7 +39,7 @@ export const handleReadTheDocs: SpecialHandler = async (
 	}
 
 	// Parse HTML
-	const { parseHTML } = await import("linkedom");
+	const { parseHTML } = await import("@oh-my-pi/pi-utils/dom");
 	const root = parseHTML(result.content).document;
 
 	// Extract main content from common Read the Docs selectors

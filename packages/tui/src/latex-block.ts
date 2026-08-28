@@ -146,6 +146,16 @@ const HBRACE_COMMANDS: Record<string, HBraceSpec> = {
 	underparen: { left: "╰", mid: "─", center: "─", right: "╯", over: false },
 };
 
+/**
+ * Number of required arguments each display command consumes. Shared by
+ * {@link readArg} and {@link splitLines} so nested command atoms consume exactly
+ * their own arguments while preserving any outer command's pending arity.
+ */
+const COMMAND_ARITY: Record<string, number> = { overset: 2, underset: 2, stackrel: 2, sqrt: 1 };
+for (const name in FRAC_COMMANDS) COMMAND_ARITY[name] = 2;
+for (const name in BINOM_COMMANDS) COMMAND_ARITY[name] = 2;
+for (const name in HBRACE_COMMANDS) COMMAND_ARITY[name] = 1;
+
 // Vertical delimiter piece characters: `only` for single-line content, then
 // top/mid/bot columns for stretched forms; `axis` replaces `mid` at the
 // baseline row (the brace point).
@@ -516,11 +526,13 @@ function readBraceGroup(src: string, i: number): Span {
 
 /**
  * Read one command argument: a `{…}` group, a single char, or a `\command`
- * together with its attached `[…]`/`{…}` arguments (or whole `\begin…\end`
- * block), so e.g. `\frac\sqrt{a}{b}` reads `\sqrt{a}` as the numerator.
+ * together with its arguments (or whole `\begin…\end` block). Commands whose
+ * arity is known consume exactly that many arguments, including across source
+ * whitespace, so `\frac\sqrt {a} {b}` reads `\sqrt {a}` as the numerator and
+ * leaves `{b}` for the denominator.
  */
 function readArg(src: string, i: number): Span {
-	while (src[i] === " ") i++;
+	while (src[i] === " " || src[i] === "\t" || src[i] === "\n") i++;
 	if (i >= src.length) return { text: "", end: i };
 	if (src[i] === "{") return readBraceGroup(src, i);
 	if (src[i] !== "\\") return { text: src[i], end: i + 1 };
@@ -535,6 +547,22 @@ function readArg(src: string, i: number): Span {
 		if (env) return env;
 	}
 	if (!name) return { text: src.slice(i, i + 2), end: i + 2 }; // non-letter command (\,, \{, …)
+
+	const arity = COMMAND_ARITY[name];
+	if (arity !== undefined) {
+		let end = j;
+		// Optional command arguments (e.g. the degree in `\sqrt[3]{x}`) do not
+		// consume a required-argument slot.
+		for (;;) {
+			while (src[end] === " " || src[end] === "\t" || src[end] === "\n") end++;
+			if (src[end] !== "[") break;
+			const close = src.indexOf("]", end);
+			end = close === -1 ? src.length : close + 1;
+		}
+		for (let arg = 0; arg < arity; arg++) end = readArg(src, end).end;
+		return { text: src.slice(i, end), end };
+	}
+
 	let end = j;
 	while (src[end] === "[" || src[end] === "{") {
 		if (src[end] === "{") end = readBraceGroup(src, end).end;
@@ -1271,6 +1299,80 @@ function parseExpr(src: string, ctx: Ctx = ROOT_CTX): Box {
 	return hconcat(boxes);
 }
 
+/**
+ * Count the command arguments still owed at the end of `seg` — non-zero when
+ * the row ends mid-construct (`\frac{a}` awaiting its denominator, or
+ * `\frac`/`x^` awaiting any argument). Pending arities form a stack: an
+ * unbraced nested command consumes one outer argument, then retains its own
+ * pending arguments without discarding the outer command's remaining arity.
+ * Used to keep a command joined to an argument written on the next source line
+ * while still treating an ordinary next row (`a\n{b+c}`) as a real row break.
+ */
+function bracesOwed(seg: string): number {
+	const pending: number[] = [];
+	const consumeArg = (): void => {
+		const top = pending.length - 1;
+		if (top < 0) return;
+		if (pending[top] === 1) pending.pop();
+		else pending[top]--;
+	};
+
+	let i = 0;
+	while (i < seg.length) {
+		const c = seg[i];
+		if (c === "\\") {
+			let j = i + 1;
+			let name = "";
+			while (j < seg.length && /[A-Za-z]/.test(seg[j])) name += seg[j++];
+			// A command plus its immediately attached `[…]`/`{…}` groups is one
+			// atom for an enclosing argument, matching readArg. Consume that outer
+			// argument first, then retain only the command's own missing arguments
+			// in a nested frame. Attached groups beyond the known arity still stay
+			// part of the atom and cannot consume another outer argument.
+			consumeArg();
+			const arity = name ? (COMMAND_ARITY[name] ?? 0) : 0;
+			let attached = 0;
+			if (name) {
+				while (seg[j] === "[" || seg[j] === "{") {
+					if (seg[j] === "{") {
+						j = readBraceGroup(seg, j).end;
+						if (attached < arity) attached++;
+					} else {
+						const close = seg.indexOf("]", j);
+						j = close === -1 ? seg.length : close + 1;
+					}
+				}
+			} else {
+				j = i + 2; // non-letter command (`\,`, `\{`, …)
+			}
+			const missing = arity - attached;
+			if (missing > 0) pending.push(missing);
+			i = j;
+			continue;
+		}
+		if (c === "{") {
+			i = readBraceGroup(seg, i).end;
+			consumeArg();
+			continue;
+		}
+		if (c === "^" || c === "_") {
+			pending.push(1);
+			i++;
+			continue;
+		}
+		if (c === " " || c === "\t" || c === "\n") {
+			i++;
+			continue;
+		}
+		consumeArg(); // a bare atom satisfies one pending argument
+		i++;
+	}
+
+	let owed = 0;
+	for (const remaining of pending) owed += remaining;
+	return owed;
+}
+
 /** Split on top-level `\n` and `\\` row separators (outside braces and environments). */
 function splitLines(src: string): string[] {
 	const lines: string[] = [];
@@ -1308,8 +1410,16 @@ function splitLines(src: string): string[] {
 		if (c === "{") braceDepth++;
 		else if (c === "}") braceDepth--;
 		else if (c === "\n" && braceDepth === 0 && envDepth === 0) {
-			lines.push(src.slice(last, i));
-			last = i + 1;
+			// A top-level newline is a row break UNLESS the current row ends with a
+			// command still awaiting an argument (e.g. `\frac{num}\n{den}`,
+			// `\frac{num}\n\sqrt{x}`, or `x^\n2`). Splitting there would sever the
+			// command from its argument, so keep both in one segment; latexToBlock
+			// collapses the interior newline to a space before parsing. A row that
+			// merely opens with a braced group (`a\n{b+c}`) stays a break.
+			if (bracesOwed(src.slice(last, i)) === 0) {
+				lines.push(src.slice(last, i));
+				last = i + 1;
+			}
 		}
 		i++;
 	}
@@ -1327,7 +1437,7 @@ function splitLines(src: string): string[] {
 export function latexToBlock(src: string): string[] {
 	if (typeof src !== "string" || src.trim() === "") return [];
 	const rows = splitLines(src.trim())
-		.map(line => line.trim())
+		.map(line => line.replace(/[ \t]*\n[ \t]*/g, " ").trim())
 		.filter(line => line !== "")
 		.map(line => parseExpr(line));
 	if (rows.length === 0) return [];

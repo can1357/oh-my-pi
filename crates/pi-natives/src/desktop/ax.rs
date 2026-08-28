@@ -467,7 +467,7 @@ pub fn normalize_role_macos(native: &str) -> String {
 	.to_ascii_lowercase()
 }
 #[cfg(any(target_os = "windows", test))]
-pub(crate) fn normalize_role_uia(native: &str) -> String {
+pub fn normalize_role_uia(native: &str) -> String {
 	match native {
 		"Edit" => "textfield",
 		"Document" => "textarea",

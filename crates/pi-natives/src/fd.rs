@@ -3,7 +3,7 @@
 //! Searches for files and directories whose paths match a query string via
 //! subsequence scoring. Uses `pi-walker` for directory traversal and caching.
 
-use std::path::Path;
+use std::{cmp::Ordering, collections::BinaryHeap, path::Path};
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -159,6 +159,97 @@ fn path_depth(path: &str) -> usize {
 	path.trim_end_matches('/').matches('/').count()
 }
 
+/// A scored match carrying its precomputed depth, ordered worst-first.
+///
+/// The ordering is the exact inverse of the final result comparator (score
+/// descending, then `path_depth` ascending, then `path` ascending), so the
+/// greatest element of a `BinaryHeap<RankedMatch>` is the candidate that must
+/// be evicted first, and `into_sorted_vec` yields the final best-first order.
+struct RankedMatch {
+	depth: usize,
+	entry: FuzzyFindMatch,
+}
+
+impl RankedMatch {
+	fn new(entry: FuzzyFindMatch) -> Self {
+		let depth = path_depth(&entry.path);
+		Self { depth, entry }
+	}
+}
+
+impl Ord for RankedMatch {
+	fn cmp(&self, other: &Self) -> Ordering {
+		other
+			.entry
+			.score
+			.cmp(&self.entry.score)
+			.then_with(|| self.depth.cmp(&other.depth))
+			.then_with(|| self.entry.path.cmp(&other.entry.path))
+	}
+}
+
+impl PartialOrd for RankedMatch {
+	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+		Some(self.cmp(other))
+	}
+}
+
+impl PartialEq for RankedMatch {
+	fn eq(&self, other: &Self) -> bool {
+		self.cmp(other) == Ordering::Equal
+	}
+}
+
+impl Eq for RankedMatch {}
+
+/// Bounded collector retaining at most `capacity` best matches while counting
+/// every hit, so `totalMatches` stays exact even when it exceeds `maxResults`.
+struct TopMatches {
+	capacity: usize,
+	total:    u64,
+	heap:     BinaryHeap<RankedMatch>,
+}
+
+impl TopMatches {
+	fn new(capacity: usize) -> Self {
+		Self { capacity, total: 0, heap: BinaryHeap::with_capacity(capacity.min(256)) }
+	}
+
+	fn push(&mut self, entry: FuzzyFindMatch) {
+		self.total = self.total.saturating_add(1);
+		if self.capacity == 0 {
+			return;
+		}
+		let candidate = RankedMatch::new(entry);
+		if self.heap.len() < self.capacity {
+			self.heap.push(candidate);
+			return;
+		}
+		// The root is the worst retained candidate; replace it only when the new
+		// candidate outranks it under the final comparator.
+		if self.heap.peek().is_some_and(|worst| candidate < *worst) {
+			self.heap.pop();
+			self.heap.push(candidate);
+		}
+	}
+
+	/// Exact number of scoring hits, clamped to the `u32` wire type.
+	const fn total_matches(&self) -> u32 {
+		crate::utils::clamp_u32(self.total)
+	}
+
+	/// Retained matches ordered by score descending, then shallower paths, then
+	/// path ascending.
+	fn into_sorted_matches(self) -> Vec<FuzzyFindMatch> {
+		self
+			.heap
+			.into_sorted_vec()
+			.into_iter()
+			.map(|ranked| ranked.entry)
+			.collect()
+	}
+}
+
 struct FuzzyFindConfig {
 	query:       String,
 	path:        String,
@@ -168,14 +259,18 @@ struct FuzzyFindConfig {
 	cache:       Option<bool>,
 }
 
-fn score_entries(
-	entries: &[iofs::GlobMatch],
+fn score_entries<I>(
+	entries: I,
 	query_lower: &str,
 	normalized_query: &str,
 	query_chars: &[char],
+	max_results: usize,
 	ct: &task::CancelToken,
-) -> Result<Vec<FuzzyFindMatch>> {
-	let mut scored = Vec::with_capacity(entries.len().min(256));
+) -> Result<TopMatches>
+where
+	I: IntoIterator<Item = iofs::GlobMatch>,
+{
+	let mut scored = TopMatches::new(max_results);
 	for entry in entries {
 		ct.heartbeat()?;
 		if entry.file_type == iofs::FileType::Symlink {
@@ -189,7 +284,7 @@ fn score_entries(
 			continue;
 		}
 
-		let mut path = entry.path.clone();
+		let mut path = entry.path;
 		if is_directory {
 			path.push('/');
 		}
@@ -229,21 +324,17 @@ fn fuzzy_find_sync(config: FuzzyFindConfig, ct: task::CancelToken) -> Result<Fuz
 		.empty_recheck(pi_walker::EmptyRecheck::Configured)
 		.collect_with_heartbeat(|| ct.heartbeat())
 		.map_err(iofs::map_walker_error)?;
-	let entries: Vec<iofs::GlobMatch> = outcome
-		.entries
-		.into_iter()
-		.map(iofs::GlobMatch::from)
-		.collect();
-	let mut scored = score_entries(&entries, &query_lower, &normalized_query, &query_chars, &ct)?;
+	let scored = score_entries(
+		outcome.entries.into_iter().map(iofs::GlobMatch::from),
+		&query_lower,
+		&normalized_query,
+		&query_chars,
+		max_results,
+		&ct,
+	)?;
 
-	scored.sort_by(|a, b| {
-		b.score
-			.cmp(&a.score)
-			.then_with(|| path_depth(&a.path).cmp(&path_depth(&b.path)))
-			.then_with(|| a.path.cmp(&b.path))
-	});
-	let total_matches = crate::utils::clamp_u32(scored.len() as u64);
-	let matches = scored.into_iter().take(max_results).collect();
+	let total_matches = scored.total_matches();
+	let matches = scored.into_sorted_matches();
 	Ok(FuzzyFindResult { matches, total_matches })
 }
 
@@ -380,5 +471,153 @@ mod tests {
 			Some(&"scripts/"),
 			"expected cwd-root scripts/ to rank first, got {paths:?}"
 		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn fuzzy_find_reports_exact_total_beyond_max_results() {
+		let root = TempDirGuard::new();
+		for index in 0..12 {
+			fs::write(root.path().join(format!("needle-{index}.txt")), "needle\n")
+				.expect("write fixture file");
+		}
+
+		let result = fuzzy_find_sync(
+			FuzzyFindConfig {
+				query:       "needle".to_string(),
+				path:        root.path().to_string_lossy().into_owned(),
+				hidden:      Some(true),
+				gitignore:   Some(false),
+				max_results: Some(3),
+				cache:       Some(false),
+			},
+			task::CancelToken::default(),
+		)
+		.expect("fuzzy find succeeds");
+
+		assert_eq!(result.matches.len(), 3, "retained matches must honor maxResults");
+		assert_eq!(result.total_matches, 12, "total must count every hit, not the retained ones");
+		let paths: Vec<&str> = result
+			.matches
+			.iter()
+			.map(|entry| entry.path.as_str())
+			.collect();
+		assert_eq!(
+			paths,
+			vec!["needle-0.txt", "needle-1.txt", "needle-10.txt"],
+			"bounded retention must keep the same order as the full sort"
+		);
+	}
+
+	#[test]
+	fn bounded_retention_matches_reference_ordering_and_total() {
+		use super::{FuzzyFindMatch, TopMatches, path_depth};
+
+		// Score ties across depths and directories are the cases where a bounded
+		// heap can diverge from the full sort, so cover them explicitly.
+		let candidates = [
+			("packages/ai/scripts/", true, 130u32),
+			("scripts/", true, 130),
+			(".omp/skills/opt/scripts/", true, 130),
+			("src/scripts.ts", false, 120),
+			("src/deep/nested/scripts.ts", false, 120),
+			("a/scripts.ts", false, 120),
+			("notes/script-notes.md", false, 80),
+			("z.txt", false, 51),
+		];
+
+		let mut reference: Vec<(u32, usize, String)> = candidates
+			.iter()
+			.map(|(path, _, score)| (*score, path_depth(path), (*path).to_string()))
+			.collect();
+		reference.sort_by(|a, b| {
+			b.0.cmp(&a.0)
+				.then_with(|| a.1.cmp(&b.1))
+				.then_with(|| a.2.cmp(&b.2))
+		});
+
+		for max_results in 1..=candidates.len() + 2 {
+			let mut bounded = TopMatches::new(max_results);
+			for (path, is_directory, score) in candidates {
+				bounded.push(FuzzyFindMatch { path: path.to_string(), is_directory, score });
+			}
+			let total = bounded.total_matches();
+			let bounded_paths: Vec<String> = bounded
+				.into_sorted_matches()
+				.into_iter()
+				.map(|entry| entry.path)
+				.collect();
+			let expected_paths: Vec<String> = reference
+				.iter()
+				.take(max_results)
+				.map(|(_, _, path)| path.clone())
+				.collect();
+
+			assert_eq!(total, candidates.len() as u32, "total must count every pushed hit");
+			assert_eq!(
+				bounded_paths, expected_paths,
+				"bounded order must match the full sort for max_results={max_results}"
+			);
+		}
+	}
+
+	#[test]
+	fn bounded_retention_matches_full_sort_on_large_corpus() {
+		use super::{FuzzyFindMatch, TopMatches, path_depth};
+
+		const CANDIDATE_COUNT: usize = 100_000;
+		const MAX_RESULTS: usize = 128;
+
+		let mut reference = Vec::with_capacity(CANDIDATE_COUNT);
+		let mut bounded = TopMatches::new(MAX_RESULTS);
+		for index in 0..CANDIDATE_COUNT {
+			let depth = index % 7;
+			let path = format!("{}{index:06}-item.txt", "nested/".repeat(depth));
+			let score = 50 + (index % 83) as u32;
+			reference.push((score, path_depth(&path), path.clone()));
+			bounded.push(FuzzyFindMatch { path, is_directory: false, score });
+			assert!(
+				bounded.heap.len() <= MAX_RESULTS,
+				"retention exceeded maxResults after candidate {index}"
+			);
+		}
+		assert_eq!(reference.len(), CANDIDATE_COUNT);
+		assert_eq!(bounded.heap.len(), MAX_RESULTS);
+		assert_eq!(bounded.total_matches(), CANDIDATE_COUNT as u32);
+
+		reference.sort_by(|a, b| {
+			b.0.cmp(&a.0)
+				.then_with(|| a.1.cmp(&b.1))
+				.then_with(|| a.2.cmp(&b.2))
+		});
+		let expected: Vec<String> = reference
+			.into_iter()
+			.take(MAX_RESULTS)
+			.map(|(_, _, path)| path)
+			.collect();
+		let actual: Vec<String> = bounded
+			.into_sorted_matches()
+			.into_iter()
+			.map(|entry| entry.path)
+			.collect();
+
+		assert_eq!(actual, expected, "bounded top-K must match the complete baseline sort");
+	}
+
+	#[test]
+	fn bounded_retention_counts_hits_with_zero_capacity() {
+		use super::{FuzzyFindMatch, TopMatches};
+
+		let mut bounded = TopMatches::new(0);
+		for index in 0..5 {
+			bounded.push(FuzzyFindMatch {
+				path:         format!("file-{index}.txt"),
+				is_directory: false,
+				score:        10,
+			});
+		}
+
+		assert_eq!(bounded.total_matches(), 5);
+		assert!(bounded.into_sorted_matches().is_empty());
 	}
 }

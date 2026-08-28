@@ -17,10 +17,9 @@ import {
 	type UsageWindow,
 } from "../usage";
 import { isRecord } from "../utils";
+import { HOUR_MS, parseIsoTimestamp, WEEK_MS } from "./shared";
 
 const DEFAULT_ENDPOINT = "https://api.anthropic.com/api/oauth";
-const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
-const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_ATTEMPTS = 3;
 const BASE_RETRY_DELAY_MS = 500;
 
@@ -123,16 +122,10 @@ interface ParsedApiLimitEntry {
 	displayName?: string;
 }
 
-function parseIsoTime(value: string | undefined): number | undefined {
-	if (!value) return undefined;
-	const parsed = Date.parse(value);
-	return Number.isFinite(parsed) ? parsed : undefined;
-}
-
 function parseBucket(bucket: unknown): ParsedUsageBucket | undefined {
 	if (!isRecord(bucket)) return undefined;
 	const utilization = toNumber(bucket.utilization);
-	const resetsAt = parseIsoTime(typeof bucket.resets_at === "string" ? bucket.resets_at : undefined);
+	const resetsAt = parseIsoTimestamp(typeof bucket.resets_at === "string" ? bucket.resets_at : undefined);
 	if (utilization === undefined && resetsAt === undefined) {
 		return undefined;
 	}
@@ -168,7 +161,7 @@ function parseApiLimitEntries(raw: unknown): ParsedApiLimitEntry[] {
 		const entry = rawEntry as ClaudeApiLimitEntry;
 		if (typeof entry.kind !== "string") continue;
 		const utilization = toNumber(entry.percent);
-		const resetsAt = parseIsoTime(typeof entry.resets_at === "string" ? entry.resets_at : undefined);
+		const resetsAt = parseIsoTimestamp(typeof entry.resets_at === "string" ? entry.resets_at : undefined);
 		if (utilization === undefined && resetsAt === undefined) continue;
 		const displayName = getApiLimitDisplayName(entry.scope);
 		entries.push({
@@ -554,7 +547,7 @@ function buildScopedWeeklyUsageLimits(entries: readonly ParsedApiLimitEntry[]): 
 			label: `Claude 7 Day (${entry.displayName})`,
 			windowId: "7d",
 			windowLabel: "7 Day",
-			durationMs: SEVEN_DAYS_MS,
+			durationMs: WEEK_MS,
 			bucket: entry.bucket,
 			provider: "anthropic",
 			tier: slug,
@@ -574,7 +567,7 @@ export function parseClaudeRateLimitHeaders(headers: Record<string, string>, now
 			label: "Claude 5 Hour",
 			windowId: "5h",
 			windowLabel: "5 Hour",
-			durationMs: FIVE_HOURS_MS,
+			durationMs: 5 * HOUR_MS,
 			bucket: fiveHour,
 			provider: "anthropic",
 			shared: true,
@@ -584,7 +577,7 @@ export function parseClaudeRateLimitHeaders(headers: Record<string, string>, now
 			label: "Claude 7 Day",
 			windowId: "7d",
 			windowLabel: "7 Day",
-			durationMs: SEVEN_DAYS_MS,
+			durationMs: WEEK_MS,
 			bucket: sevenDay,
 			provider: "anthropic",
 			shared: true,
@@ -594,7 +587,7 @@ export function parseClaudeRateLimitHeaders(headers: Record<string, string>, now
 			label: "Claude 7 Day (Fable)",
 			windowId: "7d",
 			windowLabel: "7 Day",
-			durationMs: SEVEN_DAYS_MS,
+			durationMs: WEEK_MS,
 			bucket: modelScopedSevenDay,
 			provider: "anthropic",
 			tier: "fable",
@@ -638,7 +631,7 @@ async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext
 			label: "Claude 5 Hour",
 			windowId: "5h",
 			windowLabel: "5 Hour",
-			durationMs: FIVE_HOURS_MS,
+			durationMs: 5 * HOUR_MS,
 			bucket: fiveHour,
 			provider: "anthropic",
 			shared: true,
@@ -648,7 +641,7 @@ async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext
 			label: "Claude 7 Day",
 			windowId: "7d",
 			windowLabel: "7 Day",
-			durationMs: SEVEN_DAYS_MS,
+			durationMs: WEEK_MS,
 			bucket: sevenDay,
 			provider: "anthropic",
 			shared: true,
@@ -658,7 +651,7 @@ async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext
 			label: "Claude 7 Day (Opus)",
 			windowId: "7d",
 			windowLabel: "7 Day",
-			durationMs: SEVEN_DAYS_MS,
+			durationMs: WEEK_MS,
 			bucket: sevenDayOpus,
 			provider: "anthropic",
 			tier: "opus",
@@ -668,7 +661,7 @@ async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext
 			label: "Claude 7 Day (Sonnet)",
 			windowId: "7d",
 			windowLabel: "7 Day",
-			durationMs: SEVEN_DAYS_MS,
+			durationMs: WEEK_MS,
 			bucket: sevenDaySonnet,
 			provider: "anthropic",
 			tier: "sonnet",
@@ -720,7 +713,9 @@ function getClaudeModelKind(context: CredentialRankingContext | undefined): Clau
  * Claude model-scoped rows are only relevant to the matching model family.
  * Credential-wide exhaustion checks stay on shared umbrella windows unless the
  * request model parses to a concrete Anthropic kind, preventing a Fable cap from
- * suppressing unrelated Opus/Sonnet traffic.
+ * suppressing unrelated Opus/Sonnet traffic. Feeds ranking pressure and the
+ * opt-in reserve-health scope (`scopeLimitsForReserve`); credential-wide hard
+ * blocks use {@link scopeClaudeLimitsForModelHardBlock} instead.
  */
 function scopeClaudeLimitsForModel(report: UsageReport, context: CredentialRankingContext | undefined): UsageLimit[] {
 	const kind = getClaudeModelKind(context);
@@ -749,7 +744,7 @@ function isConfirmedExhaustedTierRow(limit: UsageLimit, nowMs: number): boolean 
  * weekly caps participate only when {@link isConfirmedExhaustedTierRow}
  * confirms them, so a confirmed-dead account is skipped up front and a
  * reactive 429 block extends to the tier reset in markUsageLimitReached,
- * while unconfirmed rows remain ranking pressure only via
+ * while unconfirmed rows remain ranking pressure and opt-in reserve health via
  * scopeClaudeLimitsForModel.
  */
 function scopeClaudeLimitsForModelHardBlock(
@@ -774,7 +769,7 @@ function rankingUsedFraction(limit: UsageLimit): number {
 
 function rankingDrainRate(limit: UsageLimit, nowMs: number): number {
 	const usedFraction = rankingUsedFraction(limit);
-	const durationMs = limit.window?.durationMs ?? SEVEN_DAYS_MS;
+	const durationMs = limit.window?.durationMs ?? WEEK_MS;
 	if (!Number.isFinite(durationMs) || durationMs <= 0) return usedFraction;
 	const resetAt = limit.window?.resetsAt;
 	if (typeof resetAt !== "number" || !Number.isFinite(resetAt)) return usedFraction;
@@ -817,6 +812,11 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 		return { primary, secondary };
 	},
 	scopeLimits: scopeClaudeLimitsForModelHardBlock,
+	// Reserve health is a non-destructive fallback, not a credential hard
+	// block, so it trusts the mapped tier row before confirmed exhaustion: a
+	// Fable/Mythos weekly cap inside the reserve margin should move the turn to
+	// a healthy candidate rather than serve until 100%.
+	scopeLimitsForReserve: scopeClaudeLimitsForModel,
 	/**
 	 * Fable/Mythos usage-limit errors map to tier-local weekly counters. Scope
 	 * reactive backoff blocks for those tiers, mirroring the per-counter

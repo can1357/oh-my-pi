@@ -20,7 +20,9 @@
 //! 6. `truncate_lines_at`    — per-line Unicode-safe char cap
 //! 7. `head_lines` / `tail_lines` — keep first/last N lines with a marker
 //! 8. `max_lines`            — hard cap after head/tail
-//! 9. `on_empty`             — replace an empty result with a sentinel
+//! 9. `preserve_if_empty`    — keep the original input when filtering removes
+//!    every line
+//! 10. `on_empty`            — replace an empty result with a sentinel
 //!
 //! Pipelines never panic for the caller: regex compilation errors are
 //! surfaced when the pipeline is loaded, and runtime application is total.
@@ -66,6 +68,11 @@ pub struct PipelineDef {
 	pub tail_lines:           Option<usize>,
 	pub max_lines:            Option<usize>,
 	pub on_empty:             Option<String>,
+	/// Return the original input unchanged when all filtering stages remove it.
+	/// Useful for diagnostic filters that must not discard an unrecognized
+	/// successful output, such as a compiler query response.
+	#[serde(default)]
+	pub preserve_if_empty:    bool,
 	/// Apply only when the command exit code is in this list. Empty = always.
 	#[serde(default)]
 	pub only_on_exit:         Vec<i32>,
@@ -146,6 +153,7 @@ pub struct CompiledPipeline {
 	pub tail_lines:        Option<usize>,
 	pub max_lines:         Option<usize>,
 	pub on_empty:          Option<String>,
+	pub preserve_if_empty: bool,
 	pub only_on_exit:      Vec<i32>,
 	pub except_on_exit:    Vec<i32>,
 }
@@ -225,6 +233,7 @@ pub fn compile(name: String, def: PipelineDef) -> Result<CompiledPipeline, Strin
 		tail_lines: def.tail_lines,
 		max_lines: def.max_lines,
 		on_empty: def.on_empty,
+		preserve_if_empty: def.preserve_if_empty,
 		only_on_exit: def.only_on_exit,
 		except_on_exit: def.except_on_exit,
 	})
@@ -258,7 +267,7 @@ impl CompiledPipeline {
 		false
 	}
 
-	/// Apply the full 9-stage pipeline to `input`.
+	/// Apply the full 10-stage pipeline to `input`.
 	#[must_use]
 	pub fn apply<'a>(&self, input: &'a str) -> Cow<'a, str> {
 		// Stage 1: strip_ansi
@@ -330,7 +339,14 @@ impl CompiledPipeline {
 			stage7
 		};
 
-		// Stage 9: on_empty
+		// Stage 9: preserve the source when a keep-only filter removed every line.
+		// This prevents a successful query/diagnostic command's meaningful output
+		// from being replaced by the engine's generic "OK" sentinel.
+		if self.preserve_if_empty && stage8.trim().is_empty() {
+			return Cow::Borrowed(input);
+		}
+
+		// Stage 10: on_empty
 		if let Some(msg) = self.on_empty.as_deref()
 			&& stage8.trim().is_empty()
 		{
@@ -590,6 +606,20 @@ replacement = ""
 		// ran first, the pattern would no longer match the clipped line.
 		let out = pipeline.apply("/workspace/project/deep/file.rs\n");
 		assert_eq!(out.as_ref(), "file.rs\n");
+	}
+
+	#[test]
+	fn preserve_if_empty_returns_original_when_filter_drops_every_line() {
+		let src = r#"
+schema_version = 1
+[filters.keep]
+match_command = "^keep$"
+keep_lines_matching = ["^diagnostic:"]
+preserve_if_empty = true
+"#;
+		let pipeline = compile_one(src);
+		let input = "query result\n";
+		assert_eq!(pipeline.apply(input).as_ref(), input);
 	}
 
 	#[test]

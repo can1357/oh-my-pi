@@ -1,16 +1,16 @@
 import { describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import type { Tool } from "@oh-my-pi/pi-ai/types";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
-import { z } from "zod/v4";
 
 describe("Tool argument whitespace normalization", () => {
 	it("trims trailing whitespace from enum strings before validation", () => {
 		const tool: Tool = {
 			name: "todo",
 			description: "",
-			parameters: z.object({
-				op: z.enum(["append", "done", "drop", "init", "rm", "start", "view"]),
-				items: z.array(z.string()).optional(),
+			parameters: type({
+				op: type.enumeration(["append", "done", "drop", "init", "rm", "start", "view"]),
+				items: type("string").array().optional(),
 			}),
 		};
 
@@ -59,8 +59,8 @@ describe("Tool argument whitespace normalization", () => {
 		const tool: Tool = {
 			name: "tuple-op",
 			description: "",
-			parameters: z.object({
-				args: z.tuple([z.enum(["init"])]),
+			parameters: type({
+				args: type.tuple([type.enumeration(["init"])]),
 			}),
 		};
 
@@ -78,9 +78,9 @@ describe("Tool argument whitespace normalization", () => {
 		const tool: Tool = {
 			name: "read",
 			description: "",
-			parameters: z.object({
-				path: z.string(),
-				offset: z.number().optional(),
+			parameters: type({
+				path: type("string"),
+				offset: type("number").optional(),
 			}),
 		};
 
@@ -98,9 +98,9 @@ describe("Tool argument whitespace normalization", () => {
 		const tool: Tool = {
 			name: "search",
 			description: "",
-			parameters: z.object({
-				pattern: z.string(),
-				paths: z.array(z.string()),
+			parameters: type({
+				pattern: type("string"),
+				paths: type("string").array(),
 			}),
 		};
 
@@ -124,8 +124,8 @@ describe("Tool argument whitespace normalization", () => {
 		const tool: Tool = {
 			name: "search",
 			description: "",
-			parameters: z.object({
-				paths: z.union([z.string(), z.array(z.string())]),
+			parameters: type({
+				paths: type.union([type("string"), type("string").array()]),
 			}),
 		};
 
@@ -145,9 +145,9 @@ describe("Tool argument whitespace normalization", () => {
 		const tool: Tool = {
 			name: "write",
 			description: "",
-			parameters: z.object({
-				path: z.string(),
-				content: z.string(),
+			parameters: type({
+				path: type("string"),
+				content: type("string"),
 			}),
 		};
 
@@ -165,9 +165,9 @@ describe("Tool argument whitespace normalization", () => {
 		const tool: Tool = {
 			name: "http",
 			description: "",
-			parameters: z.object({
-				body: z.object({
-					title: z.string(),
+			parameters: type({
+				body: type({
+					title: type("string"),
 				}),
 			}),
 		};
@@ -186,10 +186,10 @@ describe("Tool argument whitespace normalization", () => {
 		const tool: Tool = {
 			name: "eval",
 			description: "",
-			parameters: z.object({
-				language: z.enum(["py", "js", "rb", "jl"]),
-				code: z.string(),
-				title: z.string().optional(),
+			parameters: type({
+				language: type.enumeration(["py", "js", "rb", "jl"]),
+				code: type("string"),
+				title: type("string").optional(),
 			}),
 		};
 

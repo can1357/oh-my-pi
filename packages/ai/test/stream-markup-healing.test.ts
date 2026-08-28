@@ -450,6 +450,44 @@ describe("StreamMarkupHealing DSML envelope pattern", () => {
 	});
 });
 
+describe("StreamMarkupHealing Qwen XML pattern", () => {
+	const leaked = '<tool_calls>\n<read path="/etc/hostname" />\n</tool_calls>';
+
+	it("parses a self-closing tool element into a structured call", () => {
+		const healing = new StreamMarkupHealing({ pattern: "qwen" });
+		expect(healing.feed(leaked)).toBe("");
+
+		const calls = healing.drainCompleted();
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.name).toBe("read");
+		expect(JSON.parse(calls[0]!.arguments)).toEqual({ path: "/etc/hostname" });
+	});
+
+	it("reconstructs markup split across arbitrary chunk boundaries", () => {
+		const healing = new StreamMarkupHealing({ pattern: "qwen" });
+		let visible = "";
+		for (const char of leaked) visible += healing.feed(char);
+		visible += healing.flushPending();
+
+		expect(visible).toBe("");
+		expect(healing.drainCompleted()).toHaveLength(1);
+	});
+
+	it("preserves text around a complete tool-call section", () => {
+		const healing = new StreamMarkupHealing({ pattern: "qwen" });
+		const events = healing.feedEvents(`Before\n${leaked}\nAfter`);
+
+		expect(events.map(event => event.type)).toEqual(["text", "toolCall", "text"]);
+	});
+
+	it("drops an incomplete tool-call section", () => {
+		const healing = new StreamMarkupHealing({ pattern: "qwen" });
+		expect(healing.feed('<tool_calls><read path="/etc/host')).toBe("");
+		expect(healing.flushPending()).toBe("");
+		expect(healing.drainCompleted()).toHaveLength(0);
+	});
+});
+
 describe("StreamMarkupHealing thinking pattern", () => {
 	it("parses plain think tags as thinking events across chunk boundaries", () => {
 		const healing = new StreamMarkupHealing({ pattern: "thinking" });
@@ -632,8 +670,6 @@ describe("Kimi K2 leaked markup healing", () => {
 		const split = "<|tool_ca";
 		const a = full.slice(0, full.indexOf(split) + split.length);
 		const b = full.slice(a.length);
-		expect(a + b).toBe(full);
-		expect(a.endsWith("<|tool_ca")).toBe(true);
 
 		const fetchMock = mockFetch([
 			chunk(model.id, { content: a }),
@@ -1078,7 +1114,6 @@ describe("OpenAI completions provider DSML envelope healing", () => {
 
 	it("heals NanoGPT-hosted DeepSeek V4 Pro DSML leaks (issue #1488)", async () => {
 		const model = getBundledModel<"openai-completions">("nanogpt", "deepseek/deepseek-v4-pro");
-		expect(model.provider).toBe("nanogpt");
 
 		let payload: Record<string, unknown> | undefined;
 		const fetchMock = mockFetch([

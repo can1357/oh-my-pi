@@ -1,48 +1,99 @@
 use std::{
 	os::unix::net::UnixStream,
-	time::{SystemTime, UNIX_EPOCH},
+	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use ashpd::desktop::{
-	PersistMode,
+	PersistMode, Session,
 	remote_desktop::{DeviceType, RemoteDesktop},
 };
+use futures::StreamExt;
 use reis::{
 	ei,
-	event::{Device, DeviceCapability, EiConvertEventIterator, EiEvent},
+	event::{Device, DeviceCapability, EiEvent},
+	tokio::EiConvertEventStream,
 };
 
-use super::portal::{REMOTE_DESKTOP_TOKEN, read_token, store_token};
 use crate::desktop::{
 	backend::{Modifiers, MouseButton, PointerEvent},
 	error::{CoreResult, DesktopError},
 	keys::KeyName,
 };
 
+const DEVICE_DISCOVERY_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
+
+#[derive(Clone, Copy)]
+struct DiscoveryTargets {
+	pointer:  bool,
+	keyboard: bool,
+}
+
+impl DiscoveryTargets {
+	const ALL: Self = Self { pointer: true, keyboard: true };
+
+	const fn is_complete(self, pointer: bool, keyboard: bool) -> bool {
+		(!self.pointer || pointer) && (!self.keyboard || keyboard)
+	}
+}
+
 struct EiDevice {
 	device: Device,
 	serial: u32,
 }
 
+type RemoteDesktopSession = Session<'static, RemoteDesktop<'static>>;
+
+struct PortalSession {
+	runtime: &'static tokio::runtime::Runtime,
+	session: RemoteDesktopSession,
+}
+
 pub(super) struct Libei {
-	context:  ei::Context,
-	pointer:  Option<EiDevice>,
-	keyboard: Option<EiDevice>,
-	sequence: u32,
+	context:        ei::Context,
+	pointer:        Option<EiDevice>,
+	keyboard:       Option<EiDevice>,
+	sequence:       u32,
+	portal_session: Option<PortalSession>,
+}
+
+impl Drop for Libei {
+	fn drop(&mut self) {
+		let Some(portal) = self.portal_session.take() else {
+			return;
+		};
+		close_session(portal.runtime, &portal.session);
+	}
+}
+
+/// Closes a `RemoteDesktop` portal session, bounded by `CLOSE_TIMEOUT` so an
+/// unresponsive `xdg-desktop-portal` cannot hang teardown indefinitely.
+fn close_session(runtime: &tokio::runtime::Runtime, session: &RemoteDesktopSession) {
+	let _ = runtime.block_on(async {
+		tokio::time::timeout(crate::desktop::CLOSE_TIMEOUT, session.close()).await
+	});
 }
 
 impl Libei {
 	pub(super) fn new() -> CoreResult<Self> {
-		let context = match ei::Context::connect_to_env() {
-			Ok(Some(context)) => context,
-			Ok(None) => Self::portal_context()?,
+		let runtime = super::portal::portal_runtime()?;
+		let (context, portal_session, targets) = match ei::Context::connect_to_env() {
+			Ok(Some(context)) => (context, None, DiscoveryTargets::ALL),
+			Ok(None) => {
+				let (context, session, targets) = Self::portal_context(runtime)?;
+				(context, Some(session), targets)
+			},
 			Err(err) => return Err(DesktopError::permission_denied(format!("LIBEI_SOCKET: {err}"))),
 		};
-		let (_connection, mut events) = context
-			.handshake_blocking("omp-computer", ei::handshake::ContextType::Sender)
+		let mut backend =
+			Self { context, pointer: None, keyboard: None, sequence: 1, portal_session };
+		let (_connection, mut events) = runtime
+			.block_on(
+				backend
+					.context
+					.handshake_tokio("omp-computer", ei::handshake::ContextType::Sender),
+			)
 			.map_err(|err| DesktopError::input_failed(format!("libei handshake: {err}")))?;
-		let mut backend = Self { context, pointer: None, keyboard: None, sequence: 1 };
-		backend.discover_devices(&mut events)?;
+		backend.discover_devices(runtime, &mut events, targets)?;
 		if backend.pointer.is_none() && backend.keyboard.is_none() {
 			return Err(DesktopError::permission_denied(
 				"RemoteDesktop portal granted no libei keyboard or pointer devices",
@@ -51,14 +102,10 @@ impl Libei {
 		Ok(backend)
 	}
 
-	fn portal_context() -> CoreResult<ei::Context> {
-		let runtime = tokio::runtime::Builder::new_current_thread()
-			.enable_all()
-			.build()
-			.map_err(|err| {
-				DesktopError::input_failed(format!("RemoteDesktop portal runtime: {err}"))
-			})?;
-		let fd = runtime
+	fn portal_context(
+		runtime: &'static tokio::runtime::Runtime,
+	) -> CoreResult<(ei::Context, PortalSession, DiscoveryTargets)> {
+		let (fd, session, targets) = runtime
 			.block_on(async {
 				let portal = RemoteDesktop::new()
 					.await
@@ -67,93 +114,130 @@ impl Libei {
 					.create_session()
 					.await
 					.map_err(|err| format!("RemoteDesktop CreateSession: {err}"))?;
-				let restore_token = read_token(REMOTE_DESKTOP_TOKEN);
-				portal
-					.select_devices(
-						&session,
-						DeviceType::Keyboard | DeviceType::Pointer,
-						restore_token.as_deref(),
-						PersistMode::ExplicitlyRevoked,
-					)
-					.await
-					.map_err(|err| format!("RemoteDesktop SelectDevices: {err}"))?;
-				let response = portal
-					.start(&session, None)
-					.await
-					.map_err(|err| format!("RemoteDesktop Start: {err}"))?
-					.response()
-					.map_err(|err| format!("RemoteDesktop permission: {err}"))?;
-				store_token(REMOTE_DESKTOP_TOKEN, response.restore_token());
-				portal
-					.connect_to_eis(&session)
-					.await
-					.map_err(|err| format!("RemoteDesktop ConnectToEIS: {err}"))
+				let fd = async {
+					portal
+						.select_devices(
+							&session,
+							DeviceType::Keyboard | DeviceType::Pointer,
+							None,
+							PersistMode::DoNot,
+						)
+						.await
+						.map_err(|err| format!("RemoteDesktop SelectDevices: {err}"))?;
+					let response = portal
+						.start(&session, None)
+						.await
+						.map_err(|err| format!("RemoteDesktop Start: {err}"))?
+						.response()
+						.map_err(|err| format!("RemoteDesktop permission: {err}"))?;
+					let devices = response.devices();
+					let targets = DiscoveryTargets {
+						pointer:  devices.contains(DeviceType::Pointer),
+						keyboard: devices.contains(DeviceType::Keyboard),
+					};
+					portal
+						.connect_to_eis(&session)
+						.await
+						.map(|fd| (fd, targets))
+						.map_err(|err| format!("RemoteDesktop ConnectToEIS: {err}"))
+				}
+				.await;
+				match fd {
+					Ok((fd, targets)) => Ok((fd, session, targets)),
+					Err(err) => {
+						// Already inside `runtime.block_on`, so the `close_session`
+						// helper (itself a `block_on`) would abort with a nested-runtime
+						// panic; bound this consent-denied close inline instead.
+						let _ =
+							tokio::time::timeout(crate::desktop::CLOSE_TIMEOUT, session.close()).await;
+						Err(err)
+					},
+				}
 			})
 			.map_err(DesktopError::permission_denied)?;
-		ei::Context::new(UnixStream::from(fd))
-			.map_err(|err| DesktopError::input_failed(format!("libei portal socket: {err}")))
+		let context = match ei::Context::new(UnixStream::from(fd)) {
+			Ok(context) => context,
+			Err(err) => {
+				close_session(runtime, &session);
+				return Err(DesktopError::input_failed(format!("libei portal socket: {err}")));
+			},
+		};
+		Ok((context, PortalSession { runtime, session }, targets))
 	}
 
-	fn discover_devices(&mut self, events: &mut EiConvertEventIterator) -> CoreResult<()> {
-		let mut pending_pointer = None;
-		let mut pending_keyboard = None;
-		for _ in 0..128 {
-			let event = events
-				.next()
+	fn discover_devices(
+		&mut self,
+		runtime: &tokio::runtime::Runtime,
+		events: &mut EiConvertEventStream,
+		targets: DiscoveryTargets,
+	) -> CoreResult<()> {
+		runtime.block_on(async {
+			let mut pending_pointer = None;
+			let mut pending_keyboard = None;
+			let mut drain_deadline = None;
+			for _ in 0..128 {
+				let event = if let Some(deadline) = drain_deadline {
+					match tokio::time::timeout_at(deadline, events.next()).await {
+						Ok(event) => event,
+						Err(_) => break,
+					}
+				} else {
+					events.next().await
+				}
 				.ok_or_else(|| {
 					DesktopError::input_failed("libei disconnected during device discovery")
 				})?
 				.map_err(|err| DesktopError::input_failed(format!("libei device discovery: {err}")))?;
-			match event {
-				EiEvent::SeatAdded(event) => {
-					event.seat.bind_capabilities(&[
-						DeviceCapability::PointerAbsolute,
-						DeviceCapability::Pointer,
-						DeviceCapability::Button,
-						DeviceCapability::Scroll,
-						DeviceCapability::Keyboard,
-					]);
-					self
-						.context
-						.flush()
-						.map_err(|err| DesktopError::input_failed(format!("libei bind seat: {err}")))?;
-				},
-				EiEvent::DeviceAdded(event) => {
-					if event
-						.device
-						.has_capability(DeviceCapability::PointerAbsolute)
-					{
-						pending_pointer = Some(event.device.clone());
-					}
-					if event.device.has_capability(DeviceCapability::Keyboard) {
-						pending_keyboard = Some(event.device);
-					}
-				},
-				EiEvent::DeviceResumed(event) => {
-					if pending_pointer.as_ref() == Some(&event.device) {
-						self.pointer =
-							Some(EiDevice { device: event.device.clone(), serial: event.serial });
-					}
-					if pending_keyboard.as_ref() == Some(&event.device) {
-						self.keyboard = Some(EiDevice { device: event.device, serial: event.serial });
-					}
-				},
-				EiEvent::Disconnected(event) => {
-					return Err(DesktopError::input_failed(format!(
-						"libei disconnected: {}",
-						event.explanation
-					)));
-				},
-				_ => {},
+				match event {
+					EiEvent::SeatAdded(event) => {
+						event.seat.bind_capabilities(&[
+							DeviceCapability::PointerAbsolute,
+							DeviceCapability::Pointer,
+							DeviceCapability::Button,
+							DeviceCapability::Scroll,
+							DeviceCapability::Keyboard,
+						]);
+						self.context.flush().map_err(|err| {
+							DesktopError::input_failed(format!("libei bind seat: {err}"))
+						})?;
+					},
+					EiEvent::DeviceAdded(event) => {
+						if event
+							.device
+							.has_capability(DeviceCapability::PointerAbsolute)
+						{
+							pending_pointer = Some(event.device.clone());
+						}
+						if event.device.has_capability(DeviceCapability::Keyboard) {
+							pending_keyboard = Some(event.device);
+						}
+					},
+					EiEvent::DeviceResumed(event) => {
+						if pending_pointer.as_ref() == Some(&event.device) {
+							self.pointer =
+								Some(EiDevice { device: event.device.clone(), serial: event.serial });
+						}
+						if pending_keyboard.as_ref() == Some(&event.device) {
+							self.keyboard = Some(EiDevice { device: event.device, serial: event.serial });
+						}
+					},
+					EiEvent::Disconnected(event) => {
+						return Err(DesktopError::input_failed(format!(
+							"libei disconnected: {}",
+							event.explanation
+						)));
+					},
+					_ => {},
+				}
+				if targets.is_complete(self.pointer.is_some(), self.keyboard.is_some()) {
+					break;
+				}
+				if drain_deadline.is_none() && (self.pointer.is_some() || self.keyboard.is_some()) {
+					drain_deadline = Some(tokio::time::Instant::now() + DEVICE_DISCOVERY_DRAIN_TIMEOUT);
+				}
 			}
-			if (pending_pointer.is_none() || self.pointer.is_some())
-				&& (pending_keyboard.is_none() || self.keyboard.is_some())
-				&& (self.pointer.is_some() || self.keyboard.is_some())
-			{
-				break;
-			}
-		}
-		Ok(())
+			Ok(())
+		})
 	}
 
 	fn timestamp() -> u64 {
@@ -487,4 +571,17 @@ fn evdev_char(character: char) -> Option<(u32, bool)> {
 				| ')'
 		);
 	Some((code, shift))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn discovery_waits_for_every_granted_device() {
+		let targets = DiscoveryTargets { pointer: true, keyboard: true };
+
+		assert!(!targets.is_complete(false, true));
+		assert!(targets.is_complete(true, true));
+	}
 }

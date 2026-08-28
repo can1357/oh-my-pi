@@ -44,6 +44,16 @@ function createUnauthorizedResponse(): Response {
 	});
 }
 
+const INTEGRATOR_ENTITLEMENT_BODY = {
+	error: {
+		message:
+			'The requested model is not available for integrator "opencode". Available models: [gpt-4.1 claude-opus-4.7 gpt-5.5]',
+		code: "model_not_available_for_integrator",
+		param: "model",
+		type: "invalid_request_error",
+	},
+};
+
 const testToken = "ghu_test_copilot_token";
 const enterpriseApiKey = JSON.stringify({ token: testToken, enterpriseUrl: "ghe.example.com" });
 const businessApiKey = JSON.stringify({
@@ -84,6 +94,28 @@ describe("GitHub Copilot OpenAI transport base URL", () => {
 
 		expect(result.stopReason).toBe("error");
 		expect(requestedUrls[0]).toBe("https://api.githubcopilot.com/responses");
+	});
+
+	it("surfaces responses API integrator entitlement details without retrying", async () => {
+		const fetchMock = vi.fn(
+			async () =>
+				new Response(JSON.stringify(INTEGRATOR_ENTITLEMENT_BODY), {
+					status: 400,
+					headers: { "Content-Type": "application/json" },
+				}),
+		);
+
+		const model = getBundledModel("github-copilot", "gpt-5.6-sol") as Model<"openai-responses">;
+		const result = await streamOpenAIResponses(model, testContext, {
+			apiKey: testToken,
+			fetch: fetchMock as unknown as typeof fetch,
+		}).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain('not available for integrator "opencode"');
+		expect(result.errorMessage).toContain("Available models: [gpt-4.1 claude-opus-4.7 gpt-5.5]");
+		expect(result.errorMessage).not.toContain("only part of its fleet");
 	});
 
 	it("omits OpenAI priority service tier while native OpenAI keeps it", async () => {

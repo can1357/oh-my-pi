@@ -1,15 +1,18 @@
-You MUST incorporate the new messages above into the existing handoff summary in <previous-summary> tags, used by another LLM to resume the task.
-RULES:
-- MUST preserve all information from the previous summary
-- MUST add new progress, decisions, and context from new messages
-- MUST update Progress: move items from "In Progress" to "Done" when completed
-- MUST update "Next Steps" based on what was accomplished
-- MUST preserve exact file paths, function names, and error messages
-- You MAY remove anything no longer relevant
+Update existing handoff summary in <previous-summary> tags from new messages above for another LLM to resume.
 
-IMPORTANT: If the new messages end with an unanswered question or request to the user, you MUST add it to Critical Context (replacing any previous pending question if answered).
+MUST:
+- preserve all previous-summary information; add new progress, decisions, context.
+- Progress: move completed "In Progress" items to "Done".
+- update "Next Steps" for completed work.
+- preserve exact file paths, function names, error messages.
+- MAY remove irrelevant content.
+- If new messages end with an unanswered user question/request: add it to Critical Context; replace any previous pending question if answered.
+- output only the structured summary; NEVER extra text.
+- keep sections concise.
+- preserve relevant tool outputs/command results.
+- include mentioned repository state changes (branch, uncommitted changes).
 
-You MUST use this format (omit sections if not applicable):
+Format (omit inapplicable sections):
 
 ## Goal
 [Preserve existing goals; add new ones if task expanded]
@@ -39,7 +42,3 @@ You MUST use this format (omit sections if not applicable):
 
 ## Additional Notes
 [Other important info not fitting above]
-
-You MUST output only the structured summary; you NEVER include extra text.
-
-Sections MUST be kept concise. You MUST preserve relevant tool outputs/command results. You MUST include repository state changes (branch, uncommitted changes) if mentioned.

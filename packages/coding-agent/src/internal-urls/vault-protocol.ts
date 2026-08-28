@@ -787,7 +787,7 @@ export class VaultProtocolHandler implements ProtocolHandler {
 		const cacheKey = parsed.ref.active ? "_" : (parsed.ref.vault ?? "_");
 		let cliInfo = cachedVaultInfo.get(cacheKey);
 		if (cliInfo === undefined) {
-			const result = await this.#spawn(["vault", "info", ...this.#vaultCliArg(parsed.ref)], context);
+			const result = await this.#spawn([...this.#vaultCliArg(parsed.ref), "vault", "info"], context);
 			assertCliSuccess("vault info", result);
 			cliInfo = result.stdout.trim();
 			cachedVaultInfo.set(cacheKey, cliInfo);
@@ -926,7 +926,7 @@ export class VaultProtocolHandler implements ProtocolHandler {
 		context?: ResolveContext,
 	): Promise<InternalResource> {
 		const invocation = buildObsidianCliInvocation(parsed);
-		const args = [...invocation.args, ...this.#vaultCliArg(parsed.ref)];
+		const args = [...this.#vaultCliArg(parsed.ref), ...invocation.args];
 		const result = await this.#spawn(args, context);
 		assertCliSuccess(invocation.opLabel, result);
 		return {

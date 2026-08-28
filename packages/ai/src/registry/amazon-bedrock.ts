@@ -5,7 +5,7 @@ export const amazonBedrockProvider = {
 	id: "amazon-bedrock",
 	name: "Amazon Bedrock",
 	// Amazon Bedrock accepts bearer tokens, IAM keys, profiles, ECS/IRSA credential chains.
-	envKeys: resolveAwsRegistryApiKey,
+	envKeys: () => resolveAwsRegistryApiKey({ allowSkipAuth: true }),
 	mapSimpleOptions: options => {
 		const awsOptions = options.providerOptions as AwsBedrockProviderOptions | undefined;
 		return {

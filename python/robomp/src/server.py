@@ -21,6 +21,7 @@ from robomp.dashboard import render_index, static_dir, tail_jsonl
 from robomp.db import (
     INACTIVE_EVENT_STATES,
     Database,
+    ReleaseRow,
     get_database,
     iso_seconds_ago,
 )
@@ -43,6 +44,23 @@ from robomp.queue import WorkerPool
 from robomp.sandbox import SandboxManager
 
 log = logging.getLogger(__name__)
+
+
+def _release_payload(row: ReleaseRow) -> dict[str, Any]:
+    return {
+        "key": row.key,
+        "repo": row.repo,
+        "tag": row.tag,
+        "version": row.version,
+        "state": row.state,
+        "current_sha": row.current_sha,
+        "last_failed_sha": row.last_failed_sha,
+        "rounds": row.rounds,
+        "last_error": row.last_error,
+        "session_dir": row.session_dir,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
 
 
 @dataclass(slots=True)
@@ -356,6 +374,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             maintainers=cfg.maintainer_logins,
             reviewer_bots=cfg.reviewer_bots,
             pr_review_enabled=cfg.pr_review_enabled,
+            release_sentinel_enabled=cfg.release_sentinel_enabled,
+            release_commit_prefix=cfg.release_commit_prefix,
             resolve_issue_from_pr=_resolve,
         )
 
@@ -721,6 +741,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ]
         }
 
+    @app.get("/releases")
+    async def releases(request: Request, limit: int = 50) -> dict[str, Any]:
+        capped = max(1, min(int(limit), 500))
+        rows = request.app.state.bag["db"].list_releases(limit=capped)
+        return {"releases": [_release_payload(row) for row in rows]}
+
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request) -> HTMLResponse:
         cfg: Settings = request.app.state.bag["settings"]
@@ -742,6 +768,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # would block the loop and stall every other endpoint — including
             # /healthz — which is how the dashboard ends up "never loading".
             issues_rows = db.list_issues(limit=200)
+            release_rows = db.list_releases(limit=50)
             latest_events = db.latest_events_for_issues(r.key for r in issues_rows)
 
             def _latest_event_payload(key: str) -> dict[str, Any] | None:
@@ -793,6 +820,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     }
                     for r in issues_rows
                 ],
+                "releases": [_release_payload(row) for row in release_rows],
                 "recent_events": [
                     {
                         "delivery_id": r.delivery_id,

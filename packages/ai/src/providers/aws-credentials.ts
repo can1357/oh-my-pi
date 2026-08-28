@@ -5,8 +5,9 @@
  *  1. Static credentials from the environment
  *     (`AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` [+ `AWS_SESSION_TOKEN`]).
  *  2. Web identity (`AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`).
- *  3. Profile in `~/.aws/credentials` (and `~/.aws/config` for SSO):
- *      - static keys, SSO, or `credential_process`.
+ *  3. Profile in `~/.aws/credentials` (and `~/.aws/config` for SSO/roles):
+ *      - static keys, SSO, `credential_process`, or `role_arn` role chaining
+ *        (`source_profile` recursion, `web_identity_token_file`, `credential_source`).
  *  4. ECS/container credentials from `AWS_CONTAINER_CREDENTIALS_*`.
  *  5. EC2 IMDSv2 when metadata is enabled.
  *
@@ -29,7 +30,7 @@ import {
 	shouldLoadAwsSharedConfig,
 } from "../utils/aws-profile";
 import { isLocalOrMetadataHost } from "../utils/proxy";
-import type { AwsCredentials } from "./aws-sigv4";
+import { type AwsCredentials, signRequest } from "./aws-sigv4";
 
 export interface ResolvedCredentials extends AwsCredentials {
 	/** Absolute expiration timestamp in ms. `undefined` for non-expiring static creds. */
@@ -60,8 +61,8 @@ const SHARED_RESOLVE_TIMEOUT_MS = 30_000;
 
 function requireDynamicCredentialExpiration(
 	value: string | undefined,
-	source: "AWS web identity" | "AWS container credential",
-	kind: "web-identity" | "container",
+	source: string,
+	kind: AIError.AwsCredentialsErrorKind,
 ): number {
 	const expiresAt = value ? Date.parse(value) : Number.NaN;
 	if (Number.isFinite(expiresAt)) return expiresAt;
@@ -179,7 +180,16 @@ async function readIniFile(p: string): Promise<AwsIniFile | undefined> {
 	}
 }
 
-// ---------- Profile / SSO ----------
+// ---------- Profile / SSO / role chaining ----------
+
+/** Shared-config view and resolution context threaded through role-chain recursion. */
+interface ProfileResolveContext {
+	credentialsIni: AwsIniFile | undefined;
+	configIni: AwsIniFile | undefined;
+	region: string;
+	signal: AbortSignal | undefined;
+	fetchImpl: FetchImpl;
+}
 
 async function readProfileCredentials(
 	profile: string,
@@ -195,10 +205,35 @@ async function readProfileCredentials(
 	const credentialsIni = await readIniFile(credentialsPath);
 	const configIni = loadSharedConfig ? await readIniFile(configPath) : undefined;
 
-	// Static credentials live in ~/.aws/credentials; SSO config lives in
+	return resolveProfileChain(profile, { credentialsIni, configIni, region, signal, fetchImpl }, new Set());
+}
+
+/**
+ * Resolve one profile, following `role_arn` chains. A `role_arn` profile derives
+ * base credentials from `source_profile` (recursive), `web_identity_token_file`,
+ * or `credential_source`, then exchanges them via STS. Non-role profiles resolve
+ * directly from static keys, SSO, or `credential_process`. `seen` guards against
+ * `source_profile` cycles.
+ */
+async function resolveProfileChain(
+	profile: string,
+	ctx: ProfileResolveContext,
+	seen: Set<string>,
+): Promise<ResolvedCredentials | undefined> {
+	if (seen.has(profile)) {
+		throw new AIError.AwsCredentialsError(`AWS profile role chain contains a cycle at '${profile}'.`, "profile");
+	}
+	seen.add(profile);
+
+	// Static credentials live in ~/.aws/credentials; SSO/role config lives in
 	// ~/.aws/config under `[profile foo]`. Merge into a single view.
-	const merged: Record<string, string> = { ...(configIni?.[profile] ?? {}), ...(credentialsIni?.[profile] ?? {}) };
+	const merged: Record<string, string> = {
+		...(ctx.configIni?.[profile] ?? {}),
+		...(ctx.credentialsIni?.[profile] ?? {}),
+	};
 	if (Object.keys(merged).length === 0) return undefined;
+
+	if (merged.role_arn) return assumeRoleFromProfile(profile, merged, ctx, seen);
 
 	if (merged.aws_access_key_id && merged.aws_secret_access_key) {
 		const out: ResolvedCredentials = {
@@ -215,14 +250,156 @@ async function readProfileCredentials(
 	}
 
 	if (merged.sso_account_id && merged.sso_role_name) {
-		return readSsoCredentials(merged, configIni, region, signal, fetchImpl);
+		return readSsoCredentials(merged, ctx.configIni, ctx.region, ctx.signal, ctx.fetchImpl);
 	}
 
 	if (merged.credential_process) {
-		return readCredentialProcess(profile, merged.credential_process, signal);
+		return readCredentialProcess(profile, merged.credential_process, ctx.signal);
 	}
 
 	return undefined;
+}
+
+/**
+ * Resolve base credentials for a `role_arn` profile and exchange them for the
+ * target role. `web_identity_token_file` is a self-contained
+ * AssumeRoleWithWebIdentity; otherwise the base comes from `source_profile`
+ * (recursive) or `credential_source`, followed by an STS `AssumeRole`.
+ */
+async function assumeRoleFromProfile(
+	profile: string,
+	merged: Record<string, string>,
+	ctx: ProfileResolveContext,
+	seen: Set<string>,
+): Promise<ResolvedCredentials> {
+	const roleArn = merged.role_arn;
+	const region = ctx.region;
+
+	if (merged.web_identity_token_file) {
+		return assumeRoleWithWebIdentity(
+			{ roleArn, tokenFile: merged.web_identity_token_file, sessionName: merged.role_session_name },
+			region,
+			ctx.signal,
+			ctx.fetchImpl,
+		);
+	}
+
+	if (merged.mfa_serial) {
+		// MFA-gated roles need an interactive token code, which a non-interactive
+		// resolver cannot supply. Fail with a clear message instead of a confusing
+		// STS AccessDenied.
+		throw new AIError.AwsCredentialsError(
+			`AWS profile '${profile}' requires MFA (mfa_serial), which is not supported for non-interactive credential resolution.`,
+			"profile",
+		);
+	}
+
+	let base: ResolvedCredentials | undefined;
+	if (merged.source_profile) {
+		base = await resolveProfileChain(merged.source_profile, ctx, seen);
+		if (!base) {
+			throw new AIError.AwsCredentialsError(
+				`AWS profile '${profile}' references source_profile '${merged.source_profile}', which has no usable credentials.`,
+				"profile",
+			);
+		}
+	} else if (merged.credential_source) {
+		base = await resolveCredentialSource(merged.credential_source, region, ctx.signal, ctx.fetchImpl);
+		if (!base) {
+			throw new AIError.AwsCredentialsError(
+				`AWS profile '${profile}' credential_source '${merged.credential_source}' produced no credentials.`,
+				"profile",
+			);
+		}
+	} else {
+		throw new AIError.AwsCredentialsError(
+			`AWS profile '${profile}' sets role_arn without source_profile, credential_source, or web_identity_token_file.`,
+			"profile",
+		);
+	}
+
+	return stsAssumeRole(
+		base,
+		roleArn,
+		region,
+		{
+			sessionName: merged.role_session_name,
+			durationSeconds: merged.duration_seconds,
+			externalId: merged.external_id,
+		},
+		ctx.signal,
+		ctx.fetchImpl,
+	);
+}
+
+/** Resolve the base credentials named by a profile `credential_source` directive. */
+async function resolveCredentialSource(
+	source: string,
+	_region: string,
+	signal: AbortSignal | undefined,
+	fetchImpl: FetchImpl,
+): Promise<ResolvedCredentials | undefined> {
+	switch (source) {
+		case "Environment":
+			return readEnvCredentials();
+		case "Ec2InstanceMetadata":
+			return $env.AWS_EC2_METADATA_DISABLED?.toLowerCase() === "true"
+				? undefined
+				: readImdsCredentials(signal, fetchImpl);
+		case "EcsContainer":
+			return readContainerCredentials(signal, fetchImpl);
+		default:
+			throw new AIError.AwsCredentialsError(`Unsupported AWS credential_source '${source}'.`, "profile");
+	}
+}
+
+/**
+ * Exchange base credentials for a target role via STS `AssumeRole`. The request
+ * is SigV4-signed with the base credentials.
+ */
+async function stsAssumeRole(
+	base: ResolvedCredentials,
+	roleArn: string,
+	region: string,
+	opts: { sessionName?: string; durationSeconds?: string; externalId?: string },
+	signal: AbortSignal | undefined,
+	fetchImpl: FetchImpl,
+): Promise<ResolvedCredentials> {
+	const body = new URLSearchParams({
+		Action: "AssumeRole",
+		Version: "2011-06-15",
+		RoleArn: roleArn,
+		RoleSessionName: opts.sessionName || `omp-${process.pid}`,
+	});
+	if (opts.durationSeconds) body.set("DurationSeconds", opts.durationSeconds);
+	if (opts.externalId) body.set("ExternalId", opts.externalId);
+	const payload = new TextEncoder().encode(body.toString());
+	const endpoint = new URL(stsEndpoint(region));
+	const contentType = "application/x-www-form-urlencoded";
+	const signed = await signRequest({
+		method: "POST",
+		host: endpoint.host,
+		path: endpoint.pathname,
+		body: payload,
+		region,
+		service: "sts",
+		credentials: base,
+		headers: { "content-type": contentType },
+	});
+	const response = await fetchImpl(endpoint, {
+		method: "POST",
+		headers: { ...signed, "content-type": contentType },
+		body: payload,
+		signal,
+	});
+	const xml = await response.text();
+	if (!response.ok) {
+		throw new AIError.AwsCredentialsError(
+			`AWS AssumeRole failed: ${response.status} ${xmlTag(xml, "Message") ?? xml.slice(0, 200)}`,
+			"assume-role",
+		);
+	}
+	return parseStsCredentials(xml, "AWS AssumeRole", "assume-role");
 }
 
 interface SsoCachedToken {
@@ -543,6 +720,18 @@ function stsEndpoint(region: string): string {
 	return `https://sts.${region}.${dnsSuffix}/`;
 }
 
+/** Parse `<Credentials>` from an STS AssumeRole/WithWebIdentity XML response. */
+function parseStsCredentials(xml: string, source: string, kind: AIError.AwsCredentialsErrorKind): ResolvedCredentials {
+	const accessKeyId = xmlTag(xml, "AccessKeyId");
+	const secretAccessKey = xmlTag(xml, "SecretAccessKey");
+	const sessionToken = xmlTag(xml, "SessionToken");
+	if (!accessKeyId || !secretAccessKey || !sessionToken) {
+		throw new AIError.AwsCredentialsError(`${source} response is missing credentials.`, kind);
+	}
+	const expiresAt = requireDynamicCredentialExpiration(xmlTag(xml, "Expiration"), source, kind);
+	return { accessKeyId, secretAccessKey, sessionToken, expiresAt };
+}
+
 async function readWebIdentityCredentials(
 	region: string,
 	signal: AbortSignal | undefined,
@@ -551,9 +740,28 @@ async function readWebIdentityCredentials(
 	const tokenFile = $env.AWS_WEB_IDENTITY_TOKEN_FILE;
 	const roleArn = $env.AWS_ROLE_ARN;
 	if (!tokenFile || !roleArn) return undefined;
+	return assumeRoleWithWebIdentity(
+		{ roleArn, tokenFile, sessionName: $env.AWS_ROLE_SESSION_NAME },
+		region,
+		signal,
+		fetchImpl,
+	);
+}
+
+/**
+ * Exchange a web-identity token file for role credentials via STS
+ * `AssumeRoleWithWebIdentity`. Used by the env chain (`AWS_WEB_IDENTITY_TOKEN_FILE`)
+ * and by `role_arn` + `web_identity_token_file` profiles.
+ */
+async function assumeRoleWithWebIdentity(
+	params: { roleArn: string; tokenFile: string; sessionName?: string },
+	region: string,
+	signal: AbortSignal | undefined,
+	fetchImpl: FetchImpl,
+): Promise<ResolvedCredentials> {
 	let token: string;
 	try {
-		token = (await Bun.file(tokenFile).text()).trim();
+		token = (await Bun.file(params.tokenFile).text()).trim();
 	} catch (err) {
 		throw new AIError.AwsCredentialsError(
 			`Unable to read AWS web identity token file: ${String(err)}`,
@@ -569,8 +777,8 @@ async function readWebIdentityCredentials(
 	const body = new URLSearchParams({
 		Action: "AssumeRoleWithWebIdentity",
 		Version: "2011-06-15",
-		RoleArn: roleArn,
-		RoleSessionName: $env.AWS_ROLE_SESSION_NAME || `omp-${process.pid}`,
+		RoleArn: params.roleArn,
+		RoleSessionName: params.sessionName || `omp-${process.pid}`,
 		WebIdentityToken: token,
 	});
 	const response = await fetchImpl(stsEndpoint(region), {
@@ -586,22 +794,7 @@ async function readWebIdentityCredentials(
 			"web-identity",
 		);
 	}
-	const accessKeyId = xmlTag(xml, "AccessKeyId");
-	const secretAccessKey = xmlTag(xml, "SecretAccessKey");
-	const sessionToken = xmlTag(xml, "SessionToken");
-	if (!accessKeyId || !secretAccessKey || !sessionToken) {
-		throw new AIError.AwsCredentialsError(
-			"AWS AssumeRoleWithWebIdentity response is missing credentials.",
-			"web-identity",
-		);
-	}
-	const expiresAt = requireDynamicCredentialExpiration(xmlTag(xml, "Expiration"), "AWS web identity", "web-identity");
-	return {
-		accessKeyId,
-		secretAccessKey,
-		sessionToken,
-		expiresAt,
-	};
+	return parseStsCredentials(xml, "AWS web identity", "web-identity");
 }
 
 // ---------- ECS/container credentials ----------

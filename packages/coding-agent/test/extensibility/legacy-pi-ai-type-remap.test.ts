@@ -97,33 +97,14 @@ describe("legacy-pi @(scope)/pi-ai root `Type` remap (issue #1437)", () => {
 		expect(loaded.probe).toBe(TypeBoxShimType);
 	});
 
-	it("preserves canonical pi-ai exports alongside the shimmed Type (z is still re-exported)", async () => {
-		const entry = await writeFixtureExtension(
-			[
-				'import { Type, z } from "@earendil-works/pi-ai";',
-				"export const obj = Type.Object({ name: Type.String() });",
-				"export const zodObj = z.object({ name: z.string() });",
-			].join("\n"),
-		);
-
-		const loaded = (await loadLegacyPiModule(entry)) as {
-			obj: { safeParse: (input: unknown) => { success: boolean } };
-			zodObj: { safeParse: (input: unknown) => { success: boolean } };
-		};
-
-		expect(loaded.obj.safeParse({ name: "ok" }).success).toBe(true);
-		expect(loaded.zodObj.safeParse({ name: "ok" }).success).toBe(true);
-		expect(loaded.zodObj.safeParse({}).success).toBe(false);
-	});
-
 	it("does not redirect subpath imports such as @oh-my-pi/pi-ai/utils/schema", async () => {
 		const entry = await writeFixtureExtension(
 			[
-				// `zodToWireSchema` is only exported from the subpath, not the root,
+				// `arkToWireSchema` is only exported from the subpath, not the root,
 				// so a successful import proves the subpath still resolves directly
 				// against the bundled pi-ai package rather than the shim.
-				'import { zodToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";',
-				"export const fn = zodToWireSchema;",
+				'import { arkToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";',
+				"export const fn = arkToWireSchema;",
 			].join("\n"),
 		);
 
@@ -131,91 +112,41 @@ describe("legacy-pi @(scope)/pi-ai root `Type` remap (issue #1437)", () => {
 		expect(typeof loaded.fn).toBe("function");
 	});
 
-	it("exports getModel as getBundledModel", async () => {
-		const loaded = (await loadLegacyPiModule(
-			await writeFixtureExtension(
-				'import { getModel } from "@oh-my-pi/pi-ai"; export const testGetModel = getModel;',
-			),
-		)) as { testGetModel: unknown };
-		expect(loaded.testGetModel).toBe(getBundledModel);
-	});
-
-	it("exports getModels as getBundledModels", async () => {
-		const loaded = (await loadLegacyPiModule(
-			await writeFixtureExtension(
-				'import { getModels } from "@oh-my-pi/pi-ai"; export const testGetModels = getModels;',
-			),
-		)) as { testGetModels: unknown };
-		expect(loaded.testGetModels).toBe(getBundledModels);
-	});
-
-	it("re-exports calculateCost from @oh-my-pi/pi-catalog/models (issue #4584)", async () => {
-		// `calculateCost` was moved from the `@oh-my-pi/pi-ai` barrel to
-		// `@oh-my-pi/pi-catalog/models` in the catalog split. Legacy extensions
-		// still import it from the pi-ai root, so the shim must bridge it back
-		// to the catalog implementation. The historical regression was a plain
-		// `SyntaxError: Export named 'calculateCost' not found in module
-		// '.../legacy-pi-ai-shim.ts'` at extension-validation time.
-		const loaded = (await loadLegacyPiModule(
-			await writeFixtureExtension(
-				'import { calculateCost } from "@oh-my-pi/pi-ai"; export const probe = calculateCost;',
-			),
-		)) as { probe: unknown };
-		expect(loaded.probe).toBe(calculateCost);
-	});
-
-	it("re-exports modelsAreEqual and getBundledProviders from @oh-my-pi/pi-catalog/models", async () => {
+	it("re-exports the legacy model catalog and schema helpers from the root", async () => {
 		const loaded = (await loadLegacyPiModule(
 			await writeFixtureExtension(
 				[
-					'import { modelsAreEqual, getBundledProviders } from "@oh-my-pi/pi-ai";',
-					"export const eq = modelsAreEqual;",
-					"export const providers = getBundledProviders;",
-				].join("\n"),
-			),
-		)) as { eq: unknown; providers: unknown };
-		expect(loaded.eq).toBe(modelsAreEqual);
-		expect(loaded.providers).toBe(getBundledProviders);
-	});
-
-	it("re-exports getBundledModel and getBundledModels from @oh-my-pi/pi-catalog/models", async () => {
-		const loaded = (await loadLegacyPiModule(
-			await writeFixtureExtension(
-				[
-					'import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-ai";',
-					"export const model = getBundledModel;",
-					"export const models = getBundledModels;",
-				].join("\n"),
-			),
-		)) as { model: unknown; models: unknown };
-		expect(loaded.model).toBe(getBundledModel);
-		expect(loaded.models).toBe(getBundledModels);
-	});
-
-	it("exports clampThinkingLevel with the historical off fallback", async () => {
-		const loaded = await loadLegacyPiModule(
-			await writeFixtureExtension(
-				[
-					'import { clampThinkingLevel } from "@earendil-works/pi-ai";',
+					'import { calculateCost, clampThinkingLevel, getBundledModel, getBundledModels, getBundledProviders, getModel, getModels, modelsAreEqual, StringEnum } from "@oh-my-pi/pi-ai";',
+					"export const helpers = { calculateCost, getBundledModel, getBundledModels, getBundledProviders, getModel, getModels, modelsAreEqual };",
 					"export const supported = clampThinkingLevel({ reasoning: true, thinking: { efforts: ['low', 'high'] } }, 'high');",
 					"export const disabled = clampThinkingLevel({ reasoning: false }, 'high');",
-				].join("\n"),
-			),
-		);
-
-		expect(loaded).toMatchObject({ supported: "high", disabled: "off" });
-	});
-
-	it("exports StringEnum as a schema builder with options support", async () => {
-		const loaded = (await loadLegacyPiModule(
-			await writeFixtureExtension(
-				[
-					'import { StringEnum } from "@oh-my-pi/pi-ai";',
 					'export const schema = StringEnum(["red", "green"] as const, { description: "primary colors" });',
 				].join("\n"),
 			),
-		)) as { schema: { safeParse: (input: unknown) => { success: boolean }; toJSON?: () => any } };
+		)) as {
+			helpers: {
+				calculateCost: unknown;
+				getBundledModel: unknown;
+				getBundledModels: unknown;
+				getBundledProviders: unknown;
+				getModel: unknown;
+				getModels: unknown;
+				modelsAreEqual: unknown;
+			};
+			supported: string;
+			disabled: string;
+			schema: { safeParse: (input: unknown) => { success: boolean }; toJSON?: () => any };
+		};
 
+		expect(loaded.helpers.calculateCost).toBe(calculateCost);
+		expect(loaded.helpers.getModel).toBe(getBundledModel);
+		expect(loaded.helpers.getModels).toBe(getBundledModels);
+		expect(loaded.helpers.getBundledModel).toBe(getBundledModel);
+		expect(loaded.helpers.getBundledModels).toBe(getBundledModels);
+		expect(loaded.helpers.getBundledProviders).toBe(getBundledProviders);
+		expect(loaded.helpers.modelsAreEqual).toBe(modelsAreEqual);
+		expect(loaded.supported).toBe("high");
+		expect(loaded.disabled).toBe("off");
 		expect(loaded.schema.safeParse("red").success).toBe(true);
 		expect(loaded.schema.safeParse("blue").success).toBe(false);
 		expect(loaded.schema.toJSON?.()?.description).toBe("primary colors");

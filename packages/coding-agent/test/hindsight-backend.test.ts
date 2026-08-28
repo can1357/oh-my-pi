@@ -134,7 +134,6 @@ describe("hindsightBackend.start", () => {
 			taskDepth: 0,
 		});
 
-		expect(session.getHindsightSessionState()).toBeDefined();
 		(session as { sessionId: string | null }).sessionId = "s-after";
 		session.getHindsightSessionState()?.setSessionId("s-after");
 		expect(session.getHindsightSessionState()?.sessionId).toBe("s-after");
@@ -193,7 +192,6 @@ describe("hindsightBackend.start", () => {
 			taskDepth: 0,
 		});
 		const parentState = parentSession.getHindsightSessionState();
-		expect(parentState).toBeDefined();
 
 		// Subagent runs with taskDepth > 0 should alias the parent.
 		const subSession = makeFakeSession({ sessionId: "sub" });
@@ -206,7 +204,6 @@ describe("hindsightBackend.start", () => {
 			parentHindsightSessionState: parentState,
 		});
 		const subState = subSession.getHindsightSessionState();
-		expect(subState).toBeDefined();
 		expect(subState?.aliasOf).toBe(parentState);
 		expect(subState?.bankId).toBe(parentState?.bankId);
 		expect(subState?.client).toBe(parentState?.client);
@@ -272,7 +269,6 @@ describe("hindsightBackend.preCompactionContext", () => {
 
 		const messages: AgentMessage[] = [{ role: "user", content: "What did we decide?", timestamp: 0 } as never];
 		const ctx = await hindsightBackend.preCompactionContext?.(messages, settings, session as never);
-		expect(ctx).toBeDefined();
 		expect(ctx).toContain("<memories>");
 		expect(ctx).toContain("remembered fact");
 	});
@@ -338,6 +334,42 @@ describe("hindsightBackend first-turn injection", () => {
 		expect(session.getHindsightSessionState()?.lastRecallSnippet).toBe(block);
 	});
 
+	it("does not let agent_start preempt first-turn recall injection", async () => {
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+		});
+		const session = makeFakeSession({
+			sessionId: "s-race",
+			entries: [{ role: "user", text: "What is the canary phrase?" }],
+		});
+		await hindsightBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+
+		vi.spyOn(HindsightApi.prototype, "recall").mockResolvedValue({
+			results: [{ id: "1", text: "The canary phrase is PURPLE-OTTER-9931." }],
+		} as never);
+
+		// The agent loop fires agent_start once the turn begins. This must NOT run
+		// its own recall: doing so consumed the shared first-turn flag and left
+		// injection to a racing background prompt rebuild that a fast turn outran,
+		// dropping recalled memory from the model's prompt (#7568).
+		session.emit({ type: "agent_start" });
+		for (let i = 0; i < 50; i++) await Promise.resolve();
+
+		expect(session.getHindsightSessionState()?.hasRecalledForFirstTurn).toBe(false);
+
+		// beforeAgentStartPrompt is the sole, awaited injection path.
+		const block = await hindsightBackend.beforeAgentStartPrompt?.(session as never, "What is the canary phrase?");
+		expect(block).toContain("PURPLE-OTTER-9931");
+		expect(session.getHindsightSessionState()?.hasRecalledForFirstTurn).toBe(true);
+	});
+
 	it("keeps the <memories> wrapper in buildDeveloperInstructions", async () => {
 		const settings = Settings.isolated({
 			"memory.backend": "hindsight",
@@ -353,7 +385,6 @@ describe("hindsightBackend first-turn injection", () => {
 		});
 
 		const state = session.getHindsightSessionState();
-		expect(state).toBeDefined();
 		state!.lastRecallSnippet = "<memories>\nremembered fact\n</memories>";
 
 		const prompt = await hindsightBackend.buildDeveloperInstructions("/tmp", settings, session as never);
@@ -380,12 +411,10 @@ describe("hindsightBackend first-turn injection", () => {
 			taskDepth: 0,
 		});
 		const state = session.getHindsightSessionState();
-		expect(state).toBeDefined();
 		state!.mentalModelsSnippet = "<mental_models>\n# User Preferences\nprefers tabs\n</mental_models>";
 		state!.lastRecallSnippet = "<memories>\nrecalled fact\n</memories>";
 
 		const prompt = await hindsightBackend.buildDeveloperInstructions("/tmp", settings, session as never);
-		expect(prompt).toBeDefined();
 		// `<memories>` and `<mental_models>` are mentioned in STATIC_INSTRUCTIONS
 		// bullets too. Match the actual injected block opener (tag + newline)
 		// to disambiguate documentation prose from the injected payloads.
@@ -420,7 +449,6 @@ describe("hindsightBackend first-turn injection", () => {
 		// Wait for the kicked-off load to settle.
 		await session.getHindsightSessionState()?.mentalModelsLoadPromise;
 		const state = session.getHindsightSessionState();
-		expect(state).toBeDefined();
 		expect(state!.mentalModelsSnippet).toBeUndefined();
 		expect(state!.mentalModelsLoadedAt).toBeDefined();
 		const initialLoadedAt = state!.mentalModelsLoadedAt!;
@@ -443,7 +471,6 @@ describe("hindsightBackend first-turn injection", () => {
 
 		const ok = await reloadMentalModelsForSession(session as never);
 		expect(ok).toBe(true);
-		expect(state!.mentalModelsSnippet).toBeDefined();
 		expect(state!.mentalModelsSnippet).toContain("# User Preferences");
 		expect(state!.mentalModelsSnippet).toContain("prefers concise prose");
 		expect(state!.mentalModelsLoadedAt).toBeGreaterThan(initialLoadedAt - 1000);
@@ -580,7 +607,6 @@ describe("hindsightBackend live bank routing", () => {
 		await Bun.sleep(0);
 
 		const next = session.getHindsightSessionState();
-		expect(next).toBeDefined();
 		expect(next?.bankId).toBe("Minigames");
 		// Must be a brand-new state — the old one was disposed.
 		expect(next).not.toBe(initial);
@@ -613,7 +639,6 @@ describe("hindsightBackend live bank routing", () => {
 		await Bun.sleep(0);
 
 		const next = session.getHindsightSessionState();
-		expect(next).toBeDefined();
 		expect(next?.bankId).toBe("omp-proj");
 		expect(next).not.toBe(initial);
 	});
@@ -670,7 +695,7 @@ describe("hindsightBackend live bank routing", () => {
 			taskDepth: 0,
 		});
 		const initial = session.getHindsightSessionState();
-		expect(initial?.bankId).toBe("Minigames-_NEW_XenGameKit");
+		expect(initial?.bankId).toBe("Minigames-_new_xengamekit");
 
 		// Operator clears the bankId via the TUI — `settings.set(path, "")` is
 		// the same call shape `#setSettingValue` uses for an empty text input.
@@ -678,17 +703,16 @@ describe("hindsightBackend live bank routing", () => {
 		await Bun.sleep(0);
 
 		const next = session.getHindsightSessionState();
-		expect(next).toBeDefined();
 		expect(next).not.toBe(initial);
 		// With scoping=per-project the base falls back to the default ("omp"),
 		// so the reset bank id picks up the project suffix from cwd.
-		expect(next?.bankId).toBe("omp-_NEW_XenGameKit");
+		expect(next?.bankId).toBe("omp-_new_xengamekit");
 
 		next!.enqueueRetain("post-reset fact", "reset routing");
 		await next!.flushRetainQueue();
 
 		expect(retainBatchSpy).toHaveBeenCalledTimes(1);
-		expect(retainBatchSpy.mock.calls[0][0]).toBe("omp-_NEW_XenGameKit");
+		expect(retainBatchSpy.mock.calls[0][0]).toBe("omp-_new_xengamekit");
 	});
 
 	// Companion case: when `hindsight.scoping` is `global`, clearing the
@@ -861,7 +885,6 @@ describe("hindsightBackend retain queue flush on session teardown", () => {
 			taskDepth: 0,
 		});
 		const state = session.getHindsightSessionState();
-		expect(state).toBeDefined();
 
 		state!.enqueueRetain("durable fact", "test context");
 

@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentDir, MAIN_CONFIG_FILENAMES } from "../src/dirs";
-import { getShellConfig, resolveWindowsShell } from "../src/procmgr";
+import { getShellArgs, getShellConfig, resolveWindowsShell } from "../src/procmgr";
 
 describe("getShellConfig", () => {
 	it("directs invalid custom shell paths to the canonical config file", () => {
@@ -12,6 +12,30 @@ describe("getShellConfig", () => {
 		expect(() => getShellConfig(missingShell)).toThrow(
 			`Custom shell path not found: ${missingShell}\nPlease update shellPath in ${configPath}`,
 		);
+	});
+});
+
+describe("getShellArgs", () => {
+	it("uses -Command for PowerShell shells instead of the POSIX -l -c pair", () => {
+		// `powershell -l -c <cmd>` parses `-l` as the command and fails with
+		// `The term '-l' is not recognized`, breaking every spawn path for a
+		// shellPath pointed at PowerShell.
+		expect(getShellArgs("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", {})).toEqual([
+			"-NoLogo",
+			"-Command",
+		]);
+		expect(getShellArgs("C:\\Program Files\\PowerShell\\7\\pwsh.exe", {})).toEqual(["-NoLogo", "-Command"]);
+		expect(getShellArgs("/usr/bin/pwsh", {})).toEqual(["-NoLogo", "-Command"]);
+	});
+
+	it("maps the no-login env gate to -NoProfile for PowerShell", () => {
+		expect(getShellArgs("pwsh.exe", { PI_BASH_NO_LOGIN: "1" })).toEqual(["-NoLogo", "-NoProfile", "-Command"]);
+	});
+
+	it("keeps cmd.exe and POSIX shell args unchanged", () => {
+		expect(getShellArgs("C:\\Windows\\System32\\cmd.exe", {})).toEqual(["/c"]);
+		expect(getShellArgs("/bin/bash", {})).toEqual(["-l", "-c"]);
+		expect(getShellArgs("/bin/bash", { PI_BASH_NO_LOGIN: "1" })).toEqual(["-c"]);
 	});
 });
 
@@ -57,10 +81,13 @@ describe("resolveWindowsShell", () => {
 		expect(resolveWindowsShell({ ProgramFiles: programFiles, ComSpec: "C:\\Windows\\System32\\cmd.exe" })).toBe(bash);
 	});
 
-	// On a real Windows host bash.exe/sh.exe may resolve from PATH before the
-	// cmd.exe fallback is reached, so the fallback contract is only
-	// deterministic off-Windows.
-	it.skipIf(process.platform === "win32")("falls back to cmd.exe instead of failing when no bash exists", () => {
+	// On a real Windows host — or under WSL, which inherits the Windows PATH —
+	// bash.exe/sh.exe may resolve from PATH before the cmd.exe fallback is
+	// reached, so the fallback contract is only deterministic off-Windows.
+	const isWindowsHost =
+		process.platform === "win32" ||
+		(process.platform === "linux" && Boolean(process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP));
+	it.skipIf(isWindowsHost)("falls back to cmd.exe instead of failing when no bash exists", () => {
 		expect(resolveWindowsShell({})).toBe("C:\\Windows\\System32\\cmd.exe");
 		expect(resolveWindowsShell({ ComSpec: "D:\\win\\cmd.exe" })).toBe("D:\\win\\cmd.exe");
 	});

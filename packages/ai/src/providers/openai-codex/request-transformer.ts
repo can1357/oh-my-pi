@@ -32,8 +32,10 @@ export interface ReasoningConfig {
 export interface CodexRequestOptions {
 	/** User-facing effort; maps 1:1 onto the wire tier of the same name. */
 	reasoningEffort?: CodexCallerEffort | "none";
+	/** Suppress native reasoning by sending `reasoning.effort: "none"`. */
+	reasoningOff?: boolean;
 	reasoningSummary?: ReasoningConfig["summary"] | null;
-	/** Explicit `reasoning.context` override; defaults to `all_turns` when unset. Gated to gpt-5.4+ Codex models (older ids reject it, so it is suppressed and `context` omitted). Note that under Responses Lite (`responsesLite`), the server strictly requires `reasoning.context` to be `all_turns`, which overrides this option and forces `all_turns`. */
+	/** Explicit `reasoning.context` override. Omitted by default; Responses Lite forces `all_turns` as required by that transport. */
 	reasoningContext?: CodexReasoningContext;
 	textVerbosity?: "low" | "medium" | "high";
 	include?: string[];
@@ -110,6 +112,22 @@ export function resolveCodexResponsesLite(
 }
 
 /**
+ * Whether to request `stream_options.reasoning_summary_delivery =
+ * "sequential_cutoff"` (codex-rs `concurrent_reasoning_summaries`), enabled by
+ * `PI_CODEX_CONCURRENT_SUMMARIES=1`.
+ *
+ * Off by default because the mode cancels summary sections still in flight when
+ * the reasoning item closes: measured over 12 interleaved turns it halved
+ * visible thinking (0.83 vs 1.67 summary parts, 37 vs 69 chars per turn) and
+ * produced no summary at all on 3 of 12 turns. codex-rs ships it disabled too
+ * (`Stage::UnderDevelopment`, `default_enabled: false`).
+ */
+function concurrentSummariesEnabled(): boolean {
+	const env = $env.PI_CODEX_CONCURRENT_SUMMARIES?.trim().toLowerCase();
+	return env === "1" || env === "true";
+}
+
+/**
  * Clamp a user-facing effort to the model's ladder, then remap to the wire
  * tier. User efforts map 1:1 onto wire tiers; the effort map only covers
  * host quirks where a wire tier genuinely does not exist (e.g. `minimal→none`).
@@ -145,13 +163,14 @@ function getReasoningConfig(
 	const config: ReasoningConfig = {
 		effort: effort === "none" ? "none" : mapCodexWireEffort(model, effort),
 	};
-	// `reasoning.summary` is accepted only from gpt-5.4 onward; earlier Codex ids
-	// (gpt-5.1-codex, gpt-5.3-codex, gpt-5.3-codex-spark) reject it with
-	// "Unsupported parameter: 'reasoning.summary' is not supported with this model".
-	// Mirrors the all_turns gate: an explicit summary is suppressed on unsupported
-	// ids, letting the server skip the human-readable summary stream.
+	// The backend only emits reasoning summaries when `reasoning.summary` is
+	// present: omitting it yields zero `response.reasoning_summary_text.*`
+	// events (measured against gpt-5.5, gpt-5.6-sol and gpt-5.6-terra). So
+	// `undefined` means "default on" — matching `applyResponsesCompatPolicy`
+	// on the plain Responses path — and only an explicit `null` (the caller
+	// hiding thinking) opts out.
 	if (options.reasoningSummary !== null && supportsCodexReasoningSummary(model.id)) {
-		config.summary = options.reasoningSummary ?? "detailed";
+		config.summary = options.reasoningSummary ?? "auto";
 	}
 	return config;
 }
@@ -437,28 +456,26 @@ export async function transformRequestBody(
 		applyCodexResponsesLiteShape(body);
 	}
 
-	if (options.reasoningEffort !== undefined || responsesLite) {
-		const reasoningConfig =
-			options.reasoningEffort !== undefined ? getReasoningConfig(model, options.reasoningEffort, options) : {};
+	if (options.reasoningOff || options.reasoningEffort !== undefined || responsesLite) {
+		const reasoningConfig: Partial<ReasoningConfig> = options.reasoningOff
+			? { effort: "none" }
+			: options.reasoningEffort !== undefined
+				? getReasoningConfig(model, options.reasoningEffort, options)
+				: {};
 		body.reasoning = {
 			...body.reasoning,
 			...reasoningConfig,
 		};
-		// Default reasoning replay to `all_turns`, mirroring codex-rs; an
-		// explicit `reasoningContext` overrides the default. The `all_turns`
-		// value is only accepted from gpt-5.4 onward — earlier Codex ids
-		// (gpt-5.1-codex, gpt-5.3-codex, gpt-5.3-codex-spark) reject it with
-		// "Unsupported value: 'all_turns' is not supported with this model".
-		// For those, drop `context` so the server applies its `current_turn`
-		// default. The version gate is authoritative: even an explicit
-		// `all_turns` override is suppressed on unsupported models, while
-		// `current_turn`/`auto` (universally supported) always pass through.
-		// Note: Responses Lite forces `all_turns` to satisfy the transport's server invariant.
-		const context = responsesLite ? "all_turns" : (options.reasoningContext ?? "all_turns");
-		if (context === "all_turns" && !supportsAllTurnsReasoningContext(model.id)) {
-			delete body.reasoning.context;
-		} else {
-			body.reasoning.context = context;
+		// Lite requires `all_turns` even for opaque/codenamed model ids. Only explicit
+		// full-transport overrides are gated by the known model wire generation.
+		if (responsesLite) {
+			body.reasoning.context = "all_turns";
+		} else if (options.reasoningContext !== undefined) {
+			if (options.reasoningContext === "all_turns" && !supportsAllTurnsReasoningContext(model.id)) {
+				delete body.reasoning.context;
+			} else {
+				body.reasoning.context = options.reasoningContext;
+			}
 		}
 	} else {
 		delete body.reasoning;
@@ -466,25 +483,28 @@ export async function transformRequestBody(
 	// Catalog pro aliases (`gpt-5.6-*-pro`): applied after the effort branch so
 	// the mode is sent even when no effort is set (the branch above deletes
 	// `body.reasoning` in that case) — mode and effort are independent fields.
-	if (model.reasoningMode) {
+	if (model.reasoningMode && !options.reasoningOff) {
 		body.reasoning = { ...body.reasoning, mode: model.reasoningMode };
 	}
 
-	// Concurrent reasoning summaries (codex-rs `concurrent_reasoning_summaries`
-	// feature): `sequential_cutoff` lets the server stream output without
-	// blocking on summary generation. Only meaningful when a summary is
-	// requested; codex-rs additionally gates on its OpenAI provider check,
-	// which is inherent here.
-	if (body.reasoning?.summary !== undefined) {
+	// Concurrent reasoning summaries (codex-rs `concurrent_reasoning_summaries`):
+	// `sequential_cutoff` lets the server stream output without blocking on
+	// summary generation, delivering each completed section as an atomic
+	// `response.reasoning_summary_text.done`. Opt-in only — see
+	// {@link concurrentSummariesEnabled} for why. Requires a requested summary;
+	// codex-rs additionally gates on its OpenAI provider check, inherent here.
+	if (body.reasoning?.summary !== undefined && concurrentSummariesEnabled()) {
 		body.stream_options = { reasoning_summary_delivery: "sequential_cutoff" };
 	} else {
 		delete body.stream_options;
 	}
 
-	body.text = {
-		...body.text,
-		verbosity: options.textVerbosity || "medium",
-	};
+	if (options.textVerbosity !== undefined) {
+		body.text = {
+			...body.text,
+			verbosity: options.textVerbosity,
+		};
+	}
 
 	const include = Array.isArray(options.include) ? [...options.include] : [];
 	include.push("reasoning.encrypted_content");

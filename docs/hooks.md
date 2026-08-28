@@ -48,7 +48,7 @@ The factory can:
 - register slash commands via `pi.registerCommand(...)`
 - register custom message renderers via `pi.registerMessageRenderer(...)`
 - run shell commands via `pi.exec(...)` and log through `pi.logger`
-- use injected `pi.zod`, the legacy-compatible `pi.typebox`, and package exports via `pi.pi`; `pi.arktype` is the ArkType `Type` runtime, not the `type(...)` schema builder
+- use the injected Zod-compatible builder `pi.zod`, native omptype builder `pi.arktype`, legacy `pi.typebox`, and package exports via `pi.pi`
 
 ## Discovery and loading
 

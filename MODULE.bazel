@@ -121,6 +121,17 @@ register_toolchains(
     "@zig_sdk//libc_aware/toolchain:linux_arm64_musl",
 )
 
+# --- Host tools (crate_universe splicing / lockfile generation) ----------------
+# Must be nightly: cargo's rustc target probe inherits user-level RUSTFLAGS
+# (~/.cargo/config.toml commonly carries -Z flags on this repo's nightly
+# toolchain), and a stable host rustc rejects them. Match rust.toolchain.
+rust_host_tools = use_extension("@rules_rust//rust:extensions.bzl", "rust_host_tools")
+rust_host_tools.host_tools(
+    name = "rust_host_tools_nightly",
+    version = "nightly/2026-04-29",
+)
+use_repo(rust_host_tools, "rust_host_tools_nightly")
+
 # --- Third-party crates (crate_universe over the cargo workspace) --------------
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 crate.render_config(
@@ -131,6 +142,9 @@ crate.render_config(
 crate.from_cargo(
     name = "crates",
     cargo_lockfile = "//:Cargo.lock",
+    # Nightly host tools (see the rust_host_tools extension above): the
+    # splice's rustc probe must accept user-level -Z RUSTFLAGS.
+    host_tools = "@rust_host_tools_nightly",
     # Exactly the shipped addon triples: crate BUILD files get
     # target_compatible_with selects over this set (defaults omit darwin-x64
     # and musl), and features/deps resolve per-triple from Cargo.lock.
@@ -145,7 +159,7 @@ crate.from_cargo(
     ],
     # The root manifest covers all workspace members, including the vendored
     # brush fork (members so their sources render hermetically; the
-    # [patch.crates-io] entries redirect brush-builtins' registry dep to them).
+    # [patch.crates-io] entry redirects brush-core's registry dep to it).
     manifests = ["//:Cargo.toml"],
 )
 
@@ -191,23 +205,25 @@ crate.annotation(
     crate = "pcre2-sys",
     build_script_env = {"PCRE2_SYS_STATIC": "1"},
 )
+# sha2-asm's build script compiles SHA-256 assembly with cc-rs flags zig cc
+# rejects (the launcher appends its glibc suffix to the rust-style --target
+# triple; -march values parse as zig's cpu+feature syntax). The shim rewrites
+# both and execs the real $CC. Scoped to the zig-built linux aarch64 triples,
+# so apple (host Xcode) builds never see it.
+crate.annotation(
+    crate = "sha2-asm",
+    build_script_data = ["@@//bazel/toolchains:sha2-asm-cc.sh"],
+    build_script_env = {
+        "CC_aarch64_unknown_linux_gnu": "$${pwd}/bazel/toolchains/sha2-asm-cc.sh",
+        "CC_aarch64_unknown_linux_musl": "$${pwd}/bazel/toolchains/sha2-asm-cc.sh",
+    },
+)
 
 # tree-sitter-just's scanner.c hard-errors when NDEBUG is set (opt-mode cc
 # default). cc-rs appends env CFLAGS after its computed flags, so -UNDEBUG wins.
 crate.annotation(
     crate = "tree-sitter-just",
     build_script_env = {"CFLAGS": "-UNDEBUG"},
-)
-
-# `generate-bindings` is enabled for darwin so miniaudio's Rust bindings match
-# its CoreAudio C layout. Build scripts execute for the host, however, so a
-# macOS-hosted Linux cross-build also sees that feature. Use Cargo's TARGET to
-# keep bindgen darwin-only and select checked GNU/musl bindings by compilation
-# target, including ARM64's larger glibc pthread layouts.
-crate.annotation(
-    crate = "maudio-sys",
-    patches = ["//bazel/patches:maudio-sys-target-bindings.patch"],
-    patch_args = ["-p1"],
 )
 
 use_repo(crate, "crates")

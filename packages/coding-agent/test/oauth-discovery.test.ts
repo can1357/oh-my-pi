@@ -326,6 +326,52 @@ describe("resource_metadata chain", () => {
 		});
 	});
 
+	it("prefers RFC 9728 resource scopes over the auth server's broad scopes_supported", async () => {
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			const url = String(input);
+
+			if (url === "https://ws.cloud.databricks.com/.well-known/oauth-protected-resource/api/2.0/mcp/genie") {
+				return new Response(
+					JSON.stringify({
+						resource: "https://ws.cloud.databricks.com/api/2.0/mcp/genie",
+						scopes_supported: ["genie", "offline_access"],
+						authorization_servers: ["https://ws.cloud.databricks.com/oidc"],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+
+			if (url === "https://ws.cloud.databricks.com/oidc/.well-known/oauth-authorization-server") {
+				return new Response(
+					JSON.stringify({
+						issuer: "https://ws.cloud.databricks.com/oidc",
+						authorization_endpoint: "https://ws.cloud.databricks.com/oidc/v1/authorize",
+						token_endpoint: "https://ws.cloud.databricks.com/oidc/v1/token",
+						// Tenant-wide catalogue the pre-registered client is not provisioned for.
+						scopes_supported: ["email", "openid", "profile", "workspace"],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+
+			return new Response("not found", { status: 404 });
+		});
+
+		const oauth = await discoverOAuthEndpoints(
+			"https://ws.cloud.databricks.com/api/2.0/mcp/genie",
+			undefined,
+			"https://ws.cloud.databricks.com/.well-known/oauth-protected-resource/api/2.0/mcp/genie",
+			{ fetch: fetchImpl },
+		);
+
+		expect(oauth).toEqual({
+			authorizationUrl: "https://ws.cloud.databricks.com/oidc/v1/authorize",
+			tokenUrl: "https://ws.cloud.databricks.com/oidc/v1/token",
+			scopes: "genie offline_access",
+			resource: "https://ws.cloud.databricks.com/api/2.0/mcp/genie",
+		});
+	});
+
 	it("threads challenge-derived scopes into endpoints discovered via resource metadata", async () => {
 		const fetchImpl = mockFetch((input: FetchInput) => {
 			const url = String(input);

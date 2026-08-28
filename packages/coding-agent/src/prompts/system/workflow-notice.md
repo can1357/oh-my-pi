@@ -1,30 +1,30 @@
 <system-notice>
-The user's message above contains the **workflowz** keyword: drive this task as a deterministic multi-subagent workflow. Author the orchestration in the `eval` tool and fan out subagents — to be comprehensive (decompose and cover in parallel), to be confident (independent perspectives and adversarial checks before you commit), or to take on scale one context can't hold (audits, migrations, broad sweeps). This overrides any default tendency to do the whole task inline when fanning out would be more thorough.
+User message contains **workflowz** → deterministic multi-subagent workflow. Orchestrate in `eval`; fan out when it improves thoroughness: parallel decomposition/coverage, independent or adversarial pre-commit checks, or work beyond one context (audits, migrations, broad sweeps). Overrides doing work inline when fan-out is more thorough.
 
 <when>
-Worth it when the task benefits from decomposition + parallel coverage, or from independent/adversarial cross-checking before you commit. For a quick lookup or single edit, just do it directly — don't spin up agents.{{#if scoutAvailable}} Scout inline FIRST{{else}} Explore inline FIRST{{/if}} (list the files, scope the diff, find the call sites) to discover the work-list, then fan out over it — you don't need to know the shape before the *task*, only before the *fan-out*. Common shapes, each a well-scoped `eval` call you can chain across turns:
-- **Understand** — parallel readers over subsystems → structured map
-- **Design** — judge panel of N independent approaches → scored synthesis
-- **Review** — split into dimensions → find per dimension → adversarially verify each finding
-- **Research** — multi-modal sweep → deep-read the hits → synthesize
-- **Migrate** — discover sites → transform each → verify
+Use for decomposition + parallel coverage or independent/adversarial pre-commit cross-checks. Quick lookup/single edit: direct; no agents. {{#if scoutAvailable}} Scout inline FIRST{{else}} Explore inline FIRST{{/if}} — list files, scope diff, find call sites — to discover work-list; know its shape before fan-out, not task start. Chain well-scoped `eval` calls across turns:
+- **Understand**: parallel subsystem readers → structured map
+- **Design**: N independent approaches, judge panel → scored synthesis
+- **Review**: dimensions → findings per dimension → adversarial verification
+- **Research**: multi-modal sweep → deep-read hits → synthesize
+- **Migrate**: discover sites → transform each → verify
 </when>
 
 <helpers>
-State persists across eval calls,{{#if scoutAvailable}} so scout in one call and fan out in the next.{{else}} so explore in one call and fan out in the next.{{/if}} Every eval call has:
+State persists across `eval` calls;{{#if scoutAvailable}} scout one call, fan out next.{{else}} explore one call, fan out next.{{/if}} Every call provides:
 
-- `agent(prompt, *, agent="task", label=None, schema=None, isolated=None, apply=None, merge=None, handle=False)` — run ONE subagent; returns its final text, or the validated object when `schema` (a JSON Schema dict) is given. With `schema` the subagent is forced to emit structured output that is validated for you — branch on the object, not on parsed prose. `agent` picks a discovered agent{{#if scoutAvailable}} ("scout", "reviewer", …){{/if}}; `label` names the artifact. Shared background goes in a `local://` file referenced from each prompt, not a parameter. Subagents are told their final text IS the return value, so they hand back raw data. `agent()` blocks until the subagent finishes. Recursion follows `task.maxRecursionDepth` (default 2; a negative value disables the cap); deeper ca…
-- `parallel(thunks)` — run zero-arg callables concurrently through a bounded pool, preserving input order; returns once all finish. The pool is bounded by the session's `task` concurrency — don't hand-tune it; fan out as wide as the work divides. A thunk that raises propagates — wrap risky work in `try/except` inside the thunk to keep partial results. In a loop, bind each closure's value with a default arg (`lambda d=d: …`) or every thunk captures the last one.
-- `pipeline(items, *stages)` — map items through `stages` left-to-right. There is a BARRIER between stages: ALL items clear stage N before stage N+1 begins. Each stage is a one-arg callable; stage 1 gets the original item, later stages get the previous result. Same pool width as `parallel()`.
-- `completion(prompt, *, model="default", system=None, schema=None)` — oneshot, stateless model call (no tools, no history). Tiers: "smol", "default", "slow". Cheap classification/scoring inside a fan-out.
-- `log(message)` — emit a progress line above the status tree. `phase(title)` — start a phase; the status lines that follow group under it.
-- `budget` — `budget.total` (output-token ceiling, or `None` when none is set), `budget.spent()` (tokens spent this turn — main loop + eval subagents), `budget.remaining()` (`math.inf` when total is `None`), `budget.hard` (whether it's enforced). A ceiling is set by the user: `+Nk` in their message is advisory (you self-limit via `budget.remaining()`), `+Nk!` (or Goal Mode) is hard — `agent()` refuses to spawn once spent reaches it. Gate loops on `budget.total` first, since it's `None` when the user set no budget.
+- `agent(prompt, *, agent="task", label=None, schema=None, isolated=None, apply=None, merge=None, handle=False)`: run ONE subagent; return final text, or validated object with `schema` (JSON Schema dict). `schema` forces validated structured output: branch on object, not parsed prose. `agent` selects discovered agent{{#if scoutAvailable}} (`"scout"`, `"reviewer"`, …){{/if}}; `label`: artifact name. Put shared background in `local://` file referenced by each prompt, not a parameter. Subagents' final text is return value: raw data. `agent()` blocks. Recursion: `task.maxRecursionDepth`, default 2; negative disables cap.
+- `parallel(thunks)`: concurrently run zero-arg callables in bounded pool; preserve input order; return after all finish. Pool: session `task` concurrency — do not hand-tune; fan out as work divides. Raised thunk propagates; risky thunk: `try/except` for partial results. Loop closures: bind default arg (`lambda d=d: …`), else all capture final value.
+- `pipeline(items, *stages)`: map items through stages left→right; BARRIER between stages — ALL items complete N before N+1. Stages: one-arg callable; stage 1 gets original item, later stages prior result. Same pool width as `parallel()`.
+- `completion(prompt, *, model="default", system=None, schema=None)`: oneshot stateless model call; no tools/history. Tiers: `"smol"`, `"default"`, `"slow"`. Use for cheap fan-out classification/scoring.
+- `log(message)`: progress line above status tree. `phase(title)`: phase; following status lines group under it.
+- `budget`: `budget.total` output-token ceiling/`None` if unset; `budget.spent()` tokens spent this turn (main loop + eval subagents); `budget.remaining()`/`math.inf` if total `None`; `budget.hard` enforcement. User `+Nk`: advisory, self-limit via `budget.remaining()`; `+Nk!`/Goal Mode: hard, `agent()` refuses spawn at spent ceiling. Gate loops on `budget.total` first: no user budget → `None`.
 
-Everything runs INLINE and synchronously inside the eval call — no background mode, no resume, no separate progress app. Each eval call is one well-scoped fan-out; chain several across calls and turns for multi-phase work, reading each result before you decide the next phase.
+All execution INLINE, synchronous within `eval`: no background mode, resume, separate progress app. One call: one well-scoped fan-out. Chain calls/turns for phases; read each result before next-phase decision.
 </helpers>
 
 <structure>
-For independent per-item chains (review → verify, fetch → extract → score), wrap the WHOLE chain in one function and run it with `parallel()` — then each item flows through its own steps without waiting on the others:
+Independent per-item chains (review → verify, fetch → extract → score): wrap WHOLE chain in one function; `parallel()` functions so items proceed independently.
 
 **Python (`eval`, Python backend):**
 
@@ -61,7 +61,8 @@ phase("Review");
 const results = await parallel(DIMENSIONS.map((d) => async () => reviewAndVerify(d)));
 const confirmed = results.flat().filter((f) => f.verdict.is_real);
 ```
-Reach for `pipeline()` only when a stage genuinely needs ALL of the previous stage first — dedup/merge across the whole set, early-exit on zero, or "compare against the other findings" — because its inter-stage barrier makes every item wait for the slowest peer:
+
+`pipeline()` only if a stage needs ALL prior-stage results: whole-set dedup/merge, zero early exit, or comparison with other findings. Its barrier waits for slowest peer.
 
 **Python (`eval`, Python backend):**
 
@@ -86,27 +87,28 @@ const verdicts = await parallel(findings.map((f) => async () =>
     await agent(verifyPrompt(f), { schema: VERDICT_SCHEMA }),
 ));
 ```
-Use ordinary code between calls to flatten/map/filter; don't add a barrier just for that. Nested `parallel()` pools each cap independently, so keep total fan-out sane.
+
+Flatten/map/filter with ordinary code between calls; no barrier merely for that. Nested `parallel()` pools cap independently: keep total fan-out sane.
 </structure>
 
 <patterns>
-Compose the harness the task calls for:
-- **Adversarial verify** — N independent skeptics per finding, each prompted to REFUTE; keep it only if a majority survive. `votes = parallel([lambda i=i: agent(f"Refute: {claim}. refuted=true if unsure.", schema=VERDICT) for i in range(3)])`, then keep when `sum(not v["refuted"] for v in votes) ≥ 2`.
-- **Perspective-diverse verify** — give each verifier a distinct lens (correctness, security, perf, does-it-reproduce) instead of N identical refuters.
-- **Judge panel** — N attempts from different angles, scored by parallel judges; synthesize from the winner, graft the best of the rest.
-- **Loop-until-dry** — for unknown-size discovery, keep spawning finders until K consecutive rounds surface nothing new; dedup against everything SEEN, not just what was confirmed, or it never converges.
-- **Multi-modal sweep** — parallel finders each searching a different way (by-container, by-content, by-entity, by-time), each blind to the others.
-- **Completeness critic** — a final agent that asks "what's missing — modality not run, claim unverified, file unread?"; its answer is the next round.
-- **Budget/count loops** — Python: `while len(bugs) < 10:`; JavaScript: `while (bugs.length < 10) { … }`. In Python, gate an explicit budget with `budget.total` and `budget.remaining()`; in JavaScript, use `await budget.total()` and `await budget.remaining()`. `log()` each round.
-- **No silent caps** — if you bound coverage (top-N, no-retry, sampling), `log()` what you dropped; silent truncation reads as "covered everything" when it didn't.
+Use task-appropriate harness:
+- **Adversarial verify**: N independent skeptics/finding, prompted REFUTE; retain only majority survivors. `votes = parallel([lambda i=i: agent(f"Refute: {claim}. refuted=true if unsure.", schema=VERDICT) for i in range(3)])`; retain when `sum(not v["refuted"] for v in votes) ≥ 2`.
+- **Perspective-diverse verify**: distinct verifier lenses — correctness, security, perf, does-it-reproduce — not N identical refuters.
+- **Judge panel**: N angle-diverse attempts; parallel judges score; synthesize winner, graft best remainder.
+- **Loop-until-dry**: unknown-size discovery: spawn finders until K consecutive rounds yield nothing new; dedup against all SEEN, not only confirmed, or no convergence.
+- **Multi-modal sweep**: parallel mutually blind finders by-container/by-content/by-entity/by-time.
+- **Completeness critic**: final agent asks `"what's missing — modality not run, claim unverified, file unread?"`; answer drives next round.
+- **Budget/count loops**: Python `while len(bugs) < 10:`; JavaScript `while (bugs.length < 10) { … }`. Python explicit-budget gate: `budget.total`, `budget.remaining()`; JavaScript: `await budget.total()`, `await budget.remaining()`. `log()` every round.
+- **No silent caps**: bounded coverage (top-N, no-retry, sampling) → `log()` dropped work; otherwise truncation falsely implies complete coverage.
 
-Scale to the ask: "find any bugs" → a few finders, single-vote verify. "thoroughly audit / be comprehensive" → larger finder pool, 3–5-vote adversarial pass, a synthesis stage.
+Scale: `"find any bugs"` → few finders, single-vote verify. `"thoroughly audit / be comprehensive"` → larger finder pool, 3–5-vote adversarial pass, synthesis.
 </patterns>
 
 <execution>
-- Decompose the surface first; capture it in `todo` when it spans phases.
-- Prefer `schema=` for any agent whose output you branch on.
-- After a fan-out returns, YOU own correctness: read the artifacts, run the gate, verify before acting. Subagents do the legwork; they don't get the last word.
-- Keep going until the task is closed — a returned fan-out is a step, not a stopping point.
+- Decompose surface first; multi-phase work: capture in `todo`.
+- Agent output branched on → prefer `schema=`.
+- Fan-out return: YOU own correctness — read artifacts, gate, verify before action. Subagents do legwork, not final word.
+- Continue until closed; returned fan-out is a step, not endpoint.
 </execution>
 </system-notice>

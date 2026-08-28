@@ -1,5 +1,5 @@
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
-import { parseHTML } from "linkedom";
+import { parseHTML } from "@oh-my-pi/pi-utils/dom";
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatScraperQuery } from "../query";
@@ -173,7 +173,7 @@ export class EcosiaProvider extends SearchProvider {
 		return true;
 	}
 
-	isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
+	override isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
 		return true;
 	}
 

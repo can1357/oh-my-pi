@@ -7,17 +7,14 @@ use std::{
 
 use anyhow::Result;
 use parking_lot::Mutex;
+/// Current state of a process reference.
+///
+/// Defined in `pi-builtins` alongside the process-table snapshots its process
+/// builtins read, and re-exported here so this module — and `pi-natives`
+/// through it — keeps one status type for both concerns.
+pub use pi_builtins::ProcessStatus;
 
 use crate::cancel::CancelToken;
-
-/// Current state of a process reference.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProcessStatus {
-	/// The referenced process is still running.
-	Running,
-	/// The referenced process has exited or is no longer observable.
-	Exited,
-}
 
 #[cfg(target_os = "linux")]
 mod platform {
@@ -1937,7 +1934,7 @@ mod tests {
 
 		// Treat the child's pid as protected (standing in for the harness/an
 		// ancestor). The sweep must refuse to signal it.
-		let protected: HashSet<i32> = [child_pid].into_iter().collect();
+		let protected: HashSet<i32> = HashSet::from([child_pid]);
 		let signaled = root.signal_tree_excluding(KILL_SIGNAL, &protected);
 		assert_eq!(signaled, 0, "a protected root must never be signalled");
 
@@ -1965,8 +1962,8 @@ mod tests {
 	#[test]
 	fn protected_subtree_is_pruned_not_just_the_pid() {
 		// root(1) -> host(2, protected) -> worker(3); root(1) -> real_child(4).
-		let parents: HashMap<i32, i32> = [(2, 1), (3, 2), (4, 1)].into_iter().collect();
-		let protected: HashSet<i32> = [2].into_iter().collect();
+		let parents: HashMap<i32, i32> = HashMap::from([(2, 1), (3, 2), (4, 1)]);
+		let protected: HashSet<i32> = HashSet::from([2]);
 
 		assert!(
 			pid_in_protected_subtree(2, &protected, &parents),

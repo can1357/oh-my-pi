@@ -48,6 +48,13 @@ describe("AgentSession.setComputerToolEnabled", () => {
 			settings,
 			model: getBundledModel("openai", "gpt-4o-mini"),
 			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
 		});
 		sessions.push(session);
 

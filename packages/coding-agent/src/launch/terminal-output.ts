@@ -1,5 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
-import xterm, { type Terminal as XtermTerminal } from "@xterm/headless";
+import xterm, { type Terminal as XtermTerminal } from "@oh-my-pi/pi-utils/vterm";
 import { readTerminalRows } from "../tools/terminal-output";
 import { DAEMON_PTY_COLUMNS, DAEMON_PTY_ROWS } from "./protocol";
 

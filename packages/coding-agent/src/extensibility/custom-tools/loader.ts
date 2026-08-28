@@ -1,12 +1,12 @@
 /**
  * Custom tool loader - loads TypeScript tool modules using native Bun import.
  *
- * Dependencies (the zod-backed typebox shim and pi-coding-agent) are injected via the
- * CustomToolAPI to avoid import resolution issues with custom tools loaded from user directories.
+ * Dependencies are injected through CustomToolAPI so tools loaded from user
+ * directories do not depend on workspace module resolution.
  */
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import * as zodModule from "@oh-my-pi/omptype/zod";
+import * as zod from "@oh-my-pi/omptype/zod";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import { toolCapability } from "../../capability/tool";
@@ -149,7 +149,7 @@ export class CustomToolLoader {
 			logger,
 			typebox,
 			arktype: type,
-			zod: zodModule,
+			zod,
 			pi,
 			pushPendingAction: action => {
 				if (!pushPendingAction) {

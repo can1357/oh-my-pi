@@ -259,6 +259,14 @@ async function readTextViaPowerShell(): Promise<string | null> {
 	}
 }
 
+async function readTextFromX11Clipboard(): Promise<string> {
+	try {
+		return await spawnCapture(["xclip", "-selection", "clipboard", "-o"]);
+	} catch {
+		return await spawnCapture(["xsel", "--clipboard", "--output"]);
+	}
+}
+
 /**
  * Read an image from the system clipboard.
  *
@@ -310,7 +318,17 @@ export async function readImageFromClipboard(): Promise<ClipboardImage | null> {
 		return null;
 	}
 
-	return (await nativeReadImageFromClipboard()) ?? null;
+	try {
+		return (await nativeReadImageFromClipboard()) ?? null;
+	} catch (error) {
+		// Some selection owners make the native image read throw instead of
+		// reporting "no image" — e.g. an xclip-written text-only selection
+		// (arboard: "Unknown error ... incorrect type received from clipboard").
+		// Treat a failed image read as "no image" so the caller's smart-paste
+		// text fallback still delivers the clipboard content.
+		logger.warn("clipboard: failed to read clipboard image", { error: String(error) });
+		return null;
+	}
 }
 
 /**
@@ -340,11 +358,11 @@ export async function readTextFromClipboard(): Promise<string> {
 				return await spawnCapture(["wl-paste", "--type", "text/plain", "--no-newline"]);
 			} catch {
 				if (hasX11Display) {
-					return await spawnCapture(["xclip", "-selection", "clipboard", "-o"]);
+					return await readTextFromX11Clipboard();
 				}
 			}
 		} else if (hasX11Display) {
-			return await spawnCapture(["xclip", "-selection", "clipboard", "-o"]);
+			return await readTextFromX11Clipboard();
 		}
 	} catch (error) {
 		logger.warn("clipboard: failed to read clipboard text", { error: String(error) });

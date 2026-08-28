@@ -8,7 +8,12 @@
  * (`lines`) is batch-local and resets between calls.
  */
 import { HL_CUT_KEYWORD, HL_PUT_KEYWORD, HL_RANGE_SEP } from "./format";
-import { ambiguousAnonymousPasteMessage, EMPTY_PASTE, unknownRegisterMessage } from "./messages";
+import {
+	ambiguousAnonymousPasteMessage,
+	EMPTY_PASTE,
+	emptyRegisterPasteWarning,
+	emptyRegisterSpanPasteMessage,
+} from "./messages";
 import { cloneCursor } from "./tokenizer";
 import type { Clipboard, Edit } from "./types";
 
@@ -33,25 +38,36 @@ export function hasClipboardEdit(edits: readonly Edit[]): boolean {
 
 /** Optional knobs for {@link resolveClipboardEdits}. */
 export interface ResolveClipboardEditsOptions {
-	/** `PUT` with an empty register: `throw` (default) or `drop` (streaming previews). */
+	/** `PUT` with an empty register: `throw` (default) or `drop` (streaming previews). Named registers never throw — an empty named paste warns and pastes nothing. */
 	onEmptyPaste?: "throw" | "drop";
+	/** Receives non-fatal diagnostics (e.g. an empty named-register paste). */
+	onWarning?: (message: string) => void;
 }
 
 /**
- * Read lines from a register. Throws on missing/ambiguous register unless `onEmptyPaste === "drop"`.
+ * Read lines from a register. A missing named register reads as empty for a gap
+ * paste (a harmless no-op, warned) but throws for a `span` target, where pasting
+ * empty would delete the range; anonymous misuse throws unless
+ * `onEmptyPaste === "drop"`.
  */
 function readRegister(
 	register: string | undefined,
+	target: "gap" | "span",
 	clipboard: Clipboard,
 	lineNum: number,
 	onEmptyPaste: "throw" | "drop",
+	onWarning?: (message: string) => void,
 ): readonly string[] | null {
 	if (register !== undefined) {
 		const lines = clipboard.named?.get(register);
 		if (lines !== undefined) return lines;
 		if (onEmptyPaste === "drop") return null;
 		const known = clipboard.named ? [...clipboard.named.keys()] : [];
-		throw new Error(`line ${lineNum}: ${unknownRegisterMessage(register, known)}`);
+		if (target === "span") {
+			throw new Error(`line ${lineNum}: ${emptyRegisterSpanPasteMessage(register, known)}`);
+		}
+		onWarning?.(`line ${lineNum}: ${emptyRegisterPasteWarning(register, known)}`);
+		return [];
 	}
 
 	const pending = clipboard.pendingAnonCuts ?? [];
@@ -112,7 +128,14 @@ export function resolveClipboardEdits(
 			continue;
 		}
 		if (edit.kind === "paste") {
-			const lines = readRegister(edit.register, clipboard, edit.lineNum, onEmptyPaste);
+			const lines = readRegister(
+				edit.register,
+				edit.at.kind,
+				clipboard,
+				edit.lineNum,
+				onEmptyPaste,
+				options.onWarning,
+			);
 			if (lines === null) continue;
 
 			if (edit.at.kind === "gap") {
@@ -187,8 +210,9 @@ export function commitClipboard(fork: Clipboard, target: Clipboard): void {
 }
 
 /**
- * Validate that every paste has a preceding or persisted capture without
- * mutating the register or reading file content.
+ * Validate anonymous clipboard sequencing (empty or ambiguous unlabeled paste)
+ * without mutating the register or reading file content. Empty named-register
+ * pastes are non-fatal — they surface as apply-time warnings instead.
  */
 export function validateClipboardSequence(edits: readonly Edit[], clipboard: Clipboard): void {
 	const fork = forkClipboard(clipboard);
@@ -203,7 +227,7 @@ export function validateClipboardSequence(edits: readonly Edit[], clipboard: Cli
 				fork.pendingAnonCuts.push(describeCutEdit(edit));
 			}
 		} else if (edit.kind === "paste") {
-			readRegister(edit.register, fork, edit.lineNum, "throw");
+			readRegister(edit.register, edit.at.kind, fork, edit.lineNum, "throw");
 		}
 	}
 }

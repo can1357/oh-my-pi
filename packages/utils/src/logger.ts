@@ -1,5 +1,3 @@
-/// <reference path="./winston-daily-rotate-file.d.ts" />
-
 /**
  * Centralized logger for omp.
  *
@@ -16,11 +14,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { isPromise } from "node:util/types";
-import type DailyRotateFile from "winston-daily-rotate-file";
-// Import the implementation directly because the package index imports and mutates
-// Winston. The exact workspace catalog pin protects this internal entrypoint.
-import DailyRotateFileImplementation from "winston-daily-rotate-file/daily-rotate-file.js";
 import { getLogsDir } from "./dirs";
+import { RotatingFileSink } from "./logger/rotating-file";
 import { drainModuleLoadEvents } from "./timing-buffer";
 /** Severity names accepted by the centralized logger. */
 export type LogLevel = "error" | "warn" | "info" | "debug";
@@ -58,9 +53,11 @@ function emitToSinks(level: LogLevel, message: string, context: Record<string, u
 	}
 }
 
-const PROCESS_LOG_PATTERN = /^omp\.\d{4}-\d{2}-\d{2}\.(\d+)\.log(?:\.\d+)?$/;
+const PROCESS_LOG_PATTERN = /^omp\.(\d{4}-\d{2}-\d{2})\.(\d+)\.log(?:\.(\d+))?$/;
 const PROCESS_AUDIT_PATTERN = /^\.omp\.(\d+)-audit\.json$/;
-const RETAINED_STALE_LOG_FILES = 5;
+const RETAINED_STALE_LOGS_PER_PROCESS_DAY = 1;
+const RETAINED_STALE_AUDIT_FILES = 0;
+const RETAINED_STALE_LOG_DAYS = 5;
 
 function processIsRunning(pid: number): boolean {
 	try {
@@ -72,8 +69,10 @@ function processIsRunning(pid: number): boolean {
 }
 
 /**
- * Retain the newest completed-process logs globally and remove their one-use
- * audit files. Live PID namespaces are never touched.
+ * Retain one newest completed-process log per process/day within the current
+ * and previous four local calendar days, and remove one-use audit files. Live
+ * PID namespaces are never touched. The calendar-day boundary preserves daily
+ * diagnostic coverage while bounding completed-process storage and scans.
  */
 function pruneStaleProcessLogs(dir: string): void {
 	let entries: fs.Dirent[];
@@ -82,38 +81,73 @@ function pruneStaleProcessLogs(dir: string): void {
 	} catch {
 		return;
 	}
+	const current = new Date();
+	const currentDate =
+		`${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, "0")}-` +
+		String(current.getDate()).padStart(2, "0");
+	const cutoff = new Date(current);
+	cutoff.setDate(cutoff.getDate() - (RETAINED_STALE_LOG_DAYS - 1));
+	const cutoffDate =
+		`${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, "0")}-` +
+		String(cutoff.getDate()).padStart(2, "0");
 
-	const staleLogs: Array<{ path: string; mtimeMs: number }> = [];
+	const staleLogsByProcessDay = new Map<string, Array<{ path: string; rollover: number }>>();
 	for (const entry of entries) {
 		if (!entry.isFile()) continue;
 		const logMatch = PROCESS_LOG_PATTERN.exec(entry.name);
 		const auditMatch = PROCESS_AUDIT_PATTERN.exec(entry.name);
-		const pidText = logMatch?.[1] ?? auditMatch?.[1];
+		const pidText = logMatch?.[2] ?? auditMatch?.[1];
 		if (!pidText || processIsRunning(Number(pidText))) continue;
 		const entryPath = path.join(dir, entry.name);
 
 		if (auditMatch) {
+			if (RETAINED_STALE_AUDIT_FILES === 0) {
+				try {
+					fs.rmSync(entryPath, { force: true });
+				} catch {
+					// Retention is best-effort; logging must still initialize.
+				}
+			}
+			continue;
+		}
+		if (!logMatch?.[1]) continue;
+		if (logMatch[1] < cutoffDate || logMatch[1] > currentDate) {
 			try {
 				fs.rmSync(entryPath, { force: true });
 			} catch {
-				// Retention is best-effort; logging must still initialize.
+				// Another process may have pruned the same stale namespace.
 			}
 			continue;
 		}
 
-		try {
-			staleLogs.push({ path: entryPath, mtimeMs: fs.statSync(entryPath).mtimeMs });
-		} catch {
-			// Another process may have pruned the same stale namespace.
-		}
+		const key = `${pidText}:${logMatch[1]}`;
+		const staleLogs = staleLogsByProcessDay.get(key) ?? [];
+		staleLogs.push({
+			path: entryPath,
+			rollover: Number(logMatch[3] ?? 0),
+		});
+		staleLogsByProcessDay.set(key, staleLogs);
 	}
 
-	staleLogs.sort((a, b) => b.mtimeMs - a.mtimeMs);
-	for (const stale of staleLogs.slice(RETAINED_STALE_LOG_FILES)) {
-		try {
-			fs.rmSync(stale.path, { force: true });
-		} catch {
-			// Another process may have pruned the same stale namespace.
+	for (const staleLogs of staleLogsByProcessDay.values()) {
+		if (staleLogs.length <= RETAINED_STALE_LOGS_PER_PROCESS_DAY) continue;
+		const ranked: Array<{ path: string; mtimeMs: number; rollover: number }> = [];
+		for (const stale of staleLogs) {
+			try {
+				ranked.push({ ...stale, mtimeMs: fs.statSync(stale.path).mtimeMs });
+			} catch {
+				// Another process may have pruned the same stale namespace.
+			}
+		}
+		ranked.sort(
+			(a, b) => b.mtimeMs - a.mtimeMs || b.rollover - a.rollover || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
+		);
+		for (const stale of ranked.slice(RETAINED_STALE_LOGS_PER_PROCESS_DAY)) {
+			try {
+				fs.rmSync(stale.path, { force: true });
+			} catch {
+				// Another process may have pruned the same stale namespace.
+			}
 		}
 	}
 }
@@ -200,24 +234,18 @@ function formatLogInfo(info: NormalizedLogInfo): string {
 	return JSON.stringify(entry, jsonReplacer) as string;
 }
 
-type FileTransport = DailyRotateFile & {
-	log(info: Record<symbol, string>, callback: () => void): void;
-	close(): void;
-};
-
-/** Build a rotating file transport with process-local rotation and shared retention. */
-function makeFileTransport(dir?: string): FileTransport {
+/** Build a rotating file sink with process-local rotation and shared retention. */
+function makeFileTransport(dir?: string): RotatingFileSink {
 	const logsDir = ensureDir(dir ?? getLogsDir());
 	pruneStaleProcessLogs(logsDir);
-	return new DailyRotateFileImplementation({
-		dirname: logsDir,
-		filename: `omp.%DATE%.${process.pid}.log`,
-		datePattern: "YYYY-MM-DD",
-		maxSize: "10m",
+	return new RotatingFileSink({
+		directory: logsDir,
+		filenamePrefix: "omp",
+		filenameSuffix: String(process.pid),
+		maxBytes: 10 * 1024 * 1024,
 		maxFiles: 5,
-		zippedArchive: false,
 		auditFile: path.join(logsDir, `.omp.${process.pid}-audit.json`),
-	}) as FileTransport;
+	});
 }
 
 /**
@@ -227,15 +255,12 @@ function makeFileTransport(dir?: string): FileTransport {
 let transportOpts: { console?: boolean; file?: boolean | string } = { file: true };
 
 interface LocalTransports {
-	readonly file: FileTransport | undefined;
+	readonly file: RotatingFileSink | undefined;
 	readonly console: boolean;
 }
 
 /** Local transports, constructed lazily on first log emission. */
 let activeTransports: LocalTransports | undefined;
-
-const TRANSPORT_MESSAGE = Symbol.for("message");
-const onTransportLogged = (): void => {};
 
 function buildTransports(opts: { console?: boolean; file?: boolean | string }): LocalTransports {
 	return {
@@ -254,11 +279,9 @@ function emitLocally(level: LogLevel, message: string, context: Record<string, u
 	const info = normalizeLogInfo(level, message, context);
 	if (!transports.file && !transports.console) return;
 
-	// Winston applied the shared format before dispatch, then the same format a
-	// second time inside Console. Keep those evaluation and timestamp semantics.
 	const line = formatLogInfo(info);
-	if (transports.file) transports.file.log({ [TRANSPORT_MESSAGE]: line }, onTransportLogged);
-	if (transports.console) process.stdout.write(`${formatLogInfo(info)}${os.EOL}`);
+	if (transports.file) transports.file.write(line);
+	if (transports.console) fs.writeSync(1, `${formatLogInfo(info)}${os.EOL}`);
 }
 
 /**

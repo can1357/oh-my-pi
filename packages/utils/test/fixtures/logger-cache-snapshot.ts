@@ -12,9 +12,9 @@ export interface CacheFamily {
 }
 
 export interface LoggerCacheSnapshot {
-	readonly winston: CacheFamily;
-	readonly fileStreamRotator: CacheFamily;
-	readonly moment: CacheFamily;
+	readonly rotatingFile: CacheFamily;
+	readonly externalLogger: CacheFamily;
+	readonly externalRotator: CacheFamily;
 }
 
 const moduleCache = (nodeModule.Module as unknown as ModuleConstructorWithCache)._cache;
@@ -32,8 +32,8 @@ function snapshotFamily(segment: string): CacheFamily {
 
 export function snapshotLoggerRuntime(): LoggerCacheSnapshot {
 	return {
-		winston: snapshotFamily("/node_modules/winston/"),
-		fileStreamRotator: snapshotFamily("/node_modules/file-stream-rotator/"),
-		moment: snapshotFamily("/node_modules/moment/"),
+		rotatingFile: snapshotFamily("/packages/utils/src/logger/rotating-file.ts"),
+		externalLogger: snapshotFamily("/node_modules/winston/"),
+		externalRotator: snapshotFamily("/node_modules/file-stream-rotator/"),
 	};
 }

@@ -7,7 +7,17 @@ import { getHeadersFromError, getRetryAfterMsFromHeaders } from "./retry-after";
 // home). Re-exported here so existing `../utils/retry` importers keep working.
 export { isCopilotTransientModelError };
 
-const COPILOT_MODEL_RETRY_MAX_ATTEMPTS = 3;
+// Copilot's model-availability flap is a per-request coin flip across fleet
+// replicas, not backpressure. Measured per-attempt rejection rates for models
+// mid-rollout reach ~70% (gpt-5.4, 2026-08-04), and a live 10-turn run needed 6
+// attempts on one turn — so a small budget just pushes the failure up to the
+// agent-level retry, which restarts the whole turn. Eight attempts on a flat
+// delay keep the residual near 5% at p=0.7 and under 1% at p=0.5, bounded at
+// ~2.8s of dead time in the pathological case.
+const COPILOT_MODEL_RETRY_MAX_ATTEMPTS = 8;
+// Transport blips and status-bearing failures keep the pre-flap budget: they are
+// not coin flips, so a longer ramp only delays surfacing a persistent fault.
+const COPILOT_GENERIC_RETRY_MAX_ATTEMPTS = 3;
 const COPILOT_MODEL_RETRY_BASE_DELAY_MS = 400;
 /** Longest server-requested backoff we are willing to sit out before giving up. */
 const COPILOT_RETRY_AFTER_MAX_WAIT_MS = 30_000;
@@ -38,8 +48,16 @@ export async function callWithCopilotModelRetry<T>(
 			if (options.signal?.aborted) throw error;
 			const transientModelError = isCopilotTransientModelError(error);
 			if (!transientModelError && !isRetryableError(error)) throw error;
-			if (attempt === COPILOT_MODEL_RETRY_MAX_ATTEMPTS - 1) break;
-			let delayMs = retryBaseDelayMs * (attempt + 1);
+			// Budget is per failure kind, counted over attempts already spent: the
+			// eight-attempt allowance only covers the cheap model-availability reroll.
+			const maxAttempts = transientModelError
+				? COPILOT_MODEL_RETRY_MAX_ATTEMPTS
+				: COPILOT_GENERIC_RETRY_MAX_ATTEMPTS;
+			if (attempt >= maxAttempts - 1) break;
+			// Reroll the model flap on a flat delay: a ramp only adds dead time to a
+			// coin flip the next attempt is equally likely to win. Generic retryable
+			// failures (429/5xx/transport) keep the linear backoff below.
+			let delayMs = transientModelError ? retryBaseDelayMs : retryBaseDelayMs * (attempt + 1);
 			if (!transientModelError) {
 				const errorStatus = status(error);
 				if (errorStatus !== undefined) {

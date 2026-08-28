@@ -1,10 +1,10 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-catalog",
-  "version": "17.2.8",
+  "version": "18.0.10",
   "description": "Model catalog for omp: bundled model database, provider discovery descriptors, model identity, classification, and equivalence",
   "homepage": "https://omp.sh",
-  "author": "Can Boluk",
+  "author": "Stencil Labs, Inc.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -31,13 +31,11 @@
     "fix": "biome check --write --unsafe .",
     "fmt": "biome format --write .",
     "gen:models": "bun scripts/generate-models.ts",
-    "gen:cursor-proto": "protoc --plugin=protoc-gen-es=../../node_modules/.bin/protoc-gen-es --es_out=src/discovery/cursor-gen --es_opt=target=ts -I ../ai/src/providers/cursor/proto ../ai/src/providers/cursor/proto/agent.proto"
+    "gen:proto": "bun scripts/generate-protocols.ts"
   },
   "dependencies": {
-    "@bufbuild/protobuf": "catalog:",
     "@oh-my-pi/omptype": "catalog:",
-    "@oh-my-pi/pi-utils": "catalog:",
-    "zod": "catalog:"
+    "@oh-my-pi/pi-utils": "catalog:"
   },
   "devDependencies": {
     "@oh-my-pi/pi-ai": "catalog:",

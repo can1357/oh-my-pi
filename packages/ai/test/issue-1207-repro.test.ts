@@ -75,9 +75,9 @@ describe("issue #1207 — DeepSeek V4 keeps reasoning with tools", () => {
 		expect(compat.extraBody).toBeUndefined();
 		expect(compat.reasoningDisableMode).toBe("zai-thinking-disabled");
 		expect(compat.whenThinking?.extraBody).toEqual({ thinking: { type: "enabled" } });
-		// DeepSeek's reasoning_effort is the honest wire-exact high/max pair;
-		// no synthetic lower tiers, no alias map.
-		expect(model.thinking?.efforts).toEqual([Effort.High, Effort.Max]);
+		// DeepSeek V4 Flash's reasoning_effort is the honest wire-exact
+		// low/high/max ladder (#7668); no synthetic tiers, no alias map.
+		expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
 		expect(model.thinking?.effortMap).toBeUndefined();
 	});
 
@@ -86,8 +86,8 @@ describe("issue #1207 — DeepSeek V4 keeps reasoning with tools", () => {
 
 		expect(model.compat.supportsToolChoice).toBe(false);
 		// The stale user `xhigh` alias targets a tier the wire-exact
-		// [high, max] ladder no longer exposes, so it is filtered out.
-		expect(model.thinking?.efforts).toEqual([Effort.High, Effort.Max]);
+		// [low, high, max] flash ladder does not expose, so it is filtered out.
+		expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
 		expect(model.thinking?.effortMap).toBeUndefined();
 	});
 

@@ -1,9 +1,9 @@
 import { describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { Context, Model, ModelSpec, Tool, ToolChoice } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { z } from "zod/v4";
 
 interface ChatCompletionsPayload {
 	tool_choice?: unknown;
@@ -18,13 +18,13 @@ interface ResponsesPayload {
 const resolveTool: Tool = {
 	name: "resolve",
 	description: "Apply or discard a pending preview",
-	parameters: z.object({ action: z.enum(["apply", "discard"]), reason: z.string() }),
+	parameters: type({ action: type.enumeration(["apply", "discard"]), reason: type("string") }),
 };
 
 const todoTool: Tool = {
 	name: "todo",
 	description: "Track work items",
-	parameters: z.object({ note: z.string() }),
+	parameters: type({ note: type("string") }),
 };
 
 const multiToolContext: Context = {

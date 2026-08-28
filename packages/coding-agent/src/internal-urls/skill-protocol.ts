@@ -11,6 +11,7 @@ import type * as fsTypes from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { resolveContainedPath } from "../discovery/contained-path";
 import { getActiveSkills } from "../extensibility/skills";
 import { isMarkdownPath } from "../utils/lang-from-path";
 import { buildDirectoryResource } from "./filesystem-resource";
@@ -75,6 +76,19 @@ export class SkillProtocolHandler implements ProtocolHandler {
 			const resolvedBaseDir = path.resolve(skill.baseDir);
 			if (!resolvedPath.startsWith(resolvedBaseDir + path.sep) && resolvedPath !== resolvedBaseDir) {
 				throw new Error("Path traversal is not allowed");
+			}
+			// Agent Plugin skills (§4.1): the resource must canonically resolve
+			// within the plugin root; a dangling or unresolvable path fails closed.
+			// Symlinks may target other files inside the same package.
+			if (skill.containRoot) {
+				const contained = await resolveContainedPath(skill.containRoot, resolvedPath);
+				if (contained.status === "outside") {
+					throw new Error(`skill:// path resolves outside the plugin root: ${url.href}`);
+				}
+				if (contained.status === "missing") {
+					throw new Error(`File not found: ${resolvedPath}`);
+				}
+				targetPath = contained.realPath;
 			}
 		} else {
 			targetPath = context?.pathOnly === true ? skill.baseDir : skill.filePath;

@@ -153,7 +153,7 @@ export async function renderGalleryState(
 	const component = new ToolExecutionComponent(
 		componentName,
 		streamingArgs,
-		{ showImages: false },
+		{ showImages: false, useBuiltInRenderer: !fixture.customRendered },
 		tool,
 		ui,
 		getProjectDir(),
@@ -162,6 +162,7 @@ export async function renderGalleryState(
 
 	if (state !== "streaming") {
 		component.setArgsComplete();
+		component.setExecutionStarted();
 	}
 	if (state === "success") {
 		component.updateResult(fixture.result, false);

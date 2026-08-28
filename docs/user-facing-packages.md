@@ -22,18 +22,6 @@ Sources: [`python/robomp/README.md`](../python/robomp/README.md), [`python/robom
 - Root commands: `bun run robomp:install` installs the Python package for host development; `bun run robomp:serve` runs it on the host; `bun run robomp:build`/`bun run robomp:rebuild`, `bun run robomp:up`, `bun run robomp:down`, `bun run robomp:restart`, `bun run robomp:logs`, `bun run robomp:dev`, and `bun run robomp:reset` manage the container deployment.
 - Prerequisites: Docker Compose v2, a host-reachable LiteLLM-style model proxy, container model configuration, a GitHub webhook endpoint, and a bot PAT with write access to every allowlisted repository. The default two-container deployment keeps the PAT in an HMAC-authenticated `gh-proxy` sidecar rather than the orchestrator.
 
-### `packages/swarm-extension` — swarm orchestration
-
-Sources: [`packages/swarm-extension/README.md`](../packages/swarm-extension/README.md), [`packages/swarm-extension/package.json`](../packages/swarm-extension/package.json), [`packages/swarm-extension/src/cli.ts`](../packages/swarm-extension/src/cli.ts), [`packages/swarm-extension/src/extension.ts`](../packages/swarm-extension/src/extension.ts).
-
-- Package: `@oh-my-pi/swarm-extension`; bin: `omp-swarm`.
-- Feature: multi-agent DAG orchestration from YAML swarms, supporting `pipeline`, `parallel`, and `sequential` modes.
-- Standalone CLI: `omp-swarm path/to/swarm.yaml` runs until completion or process termination.
-- TUI extension mode: add the package path to `extensions`, then use `/swarm run <file.yaml>`, `/swarm status <name>`, or `/swarm help`.
-- Inputs: YAML under top-level `swarm` with `name`, `workspace`, `mode`, optional `target_count`/`model`, and `agents` with `role`, `task`, optional `model`, `waits_for`, and `reports_to`.
-- Side effects/output: creates the workspace if needed and persists state/logs under `<workspace>/.swarm_<name>/`.
-- Limits/errors: validates the YAML definition, dependency graph, and cycles before execution; standalone runs have no built-in timeout.
-
 ### `packages/stats` — local usage dashboard
 
 Sources: [`packages/stats/README.md`](../packages/stats/README.md), [`packages/stats/package.json`](../packages/stats/package.json), [`packages/coding-agent/src/cli/stats-cli.ts`](../packages/coding-agent/src/cli/stats-cli.ts).
@@ -52,7 +40,7 @@ Sources: [`packages/omptype/README.md`](../packages/omptype/README.md), [`packag
 
 - Package: public `@oh-my-pi/omptype`; install with `bun add @oh-my-pi/omptype`; requires Bun 1.3.14 or newer.
 - Feature: callable ArkType-compatible schemas with cheap interpreted startup, lazy hot-path compilation, validation errors, defaults and morphs, and JSON Schema emission.
-- Public surfaces: `@oh-my-pi/omptype` for native authoring, `@oh-my-pi/omptype/typebox` and `/zod` for compatibility builders, and `/ark` for the alias-free ArkType compatibility facade.
+- Public surfaces: `@oh-my-pi/omptype` for native authoring, `/typebox` and `/zod` for compatibility builders, and `/ark` for the alias-free ArkType compatibility facade.
 - Runtime behavior: schema calls return the validated value or `type.errors`; `.assert()` returns the value or throws; `.allows()` performs a boolean check.
 - Limits: this is an intentionally focused compatibility surface rather than a complete implementation of every ArkType, TypeBox, or Zod API.
 
@@ -86,7 +74,9 @@ Sources: [`packages/browser-relay/README.md`](../packages/browser-relay/README.m
 
 - Package: private `@oh-my-pi/browser-relay`; user command: `omp browser-relay`.
 - Setup: run `omp browser-relay install`, load the unpacked extension from
-  `~/.omp/browser-relay/extension`, then set `browser.relay` or use `app.relay: true`.
+  `~/.omp/browser-relay/extension`, then opt in per call with `app.relay: true` — or set
+  `browser.relay`, which makes the relay the profile-wide default across projects (scope
+  details in the package README).
 - Behavior: the relay auto-starts through the global daemon broker; `app.target` selects a tab by
   URL/title substring, otherwise the visible tab is adopted.
 - Security/limits: it binds loopback; use `--token` when local processes are untrusted. Chrome

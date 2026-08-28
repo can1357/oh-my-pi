@@ -6,6 +6,7 @@
  * lifecycle hook dispatch.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import { agentLoop } from "@oh-my-pi/pi-agent-core/agent-loop";
 import {
 	type AgentTelemetryConfig,
@@ -23,7 +24,6 @@ import {
 } from "@oh-my-pi/pi-agent-core/telemetry";
 import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core/types";
 import type { Message } from "@oh-my-pi/pi-ai";
-import { z } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import type { EventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { context, SpanStatusCode, trace } from "@opentelemetry/api";
@@ -218,7 +218,7 @@ describe("agent-loop OTEL instrumentation", () => {
 			convertToLlm: identityConverter,
 			telemetry: {},
 		};
-		const alphaSchema = z.object({ value: z.string() });
+		const alphaSchema = type({ value: type("string") });
 		const alphaTool: AgentTool<typeof alphaSchema> = {
 			name: "alpha",
 			label: "Alpha",
@@ -263,7 +263,7 @@ describe("agent-loop OTEL instrumentation", () => {
 			convertToLlm: identityConverter,
 			telemetry: {},
 		};
-		const probeSchema = z.object({ value: z.string() });
+		const probeSchema = type({ value: type("string") });
 		const probeTool: AgentTool<typeof probeSchema> = {
 			name: "probe",
 			label: "Probe",
@@ -299,7 +299,7 @@ describe("agent-loop OTEL instrumentation", () => {
 			convertToLlm: identityConverter,
 			telemetry: {},
 		};
-		const failSchema = z.object({ value: z.string() });
+		const failSchema = type({ value: type("string") });
 		const failTool: AgentTool<typeof failSchema> = {
 			name: "fail",
 			label: "Fail",
@@ -694,7 +694,7 @@ describe("agent-loop OTEL instrumentation", () => {
 				onSpanEnd: ctx => ends.push(ctx),
 			},
 		};
-		const echoSchema = z.object({ value: z.string() });
+		const echoSchema = type({ value: type("string") });
 		const echoTool: AgentTool<typeof echoSchema> = {
 			name: "echo",
 			label: "Echo",
@@ -797,7 +797,7 @@ describe("agent-loop OTEL instrumentation", () => {
 			convertToLlm: identityConverter,
 			telemetry: cfg,
 		};
-		const echoSchema = z.object({ value: z.string() });
+		const echoSchema = type({ value: type("string") });
 		const tool: AgentTool<typeof echoSchema> = {
 			name: "echo",
 			label: "Echo",

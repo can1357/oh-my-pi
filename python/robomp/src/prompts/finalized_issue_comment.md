@@ -1,1 +1,1 @@
-This issue is closed. If the bug is back, please reopen and I'll triage again from scratch.
+Issue closed. If bug recurs, reopen; I'll re-triage from scratch.

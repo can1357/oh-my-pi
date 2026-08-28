@@ -14,7 +14,7 @@
 import type { Api, Effort, Model } from "@oh-my-pi/pi-ai";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
-import chalk from "chalk";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { discoverAndLoadExtensions, ExtensionRunner, emitSessionShutdownEvent } from "../extensibility/extensions";
@@ -304,7 +304,7 @@ export async function runModelsListing(options: RunModelsListingOptions): Promis
 		cwd,
 		eventBus,
 		disableExtensionDiscovery ? undefined : disabledExtensionIds,
-		{ ambient: !disableExtensionDiscovery },
+		{ ambient: !disableExtensionDiscovery, includeAmbientHooks: false },
 	);
 	const extensionRunner =
 		extensionsResult.extensions.length > 0

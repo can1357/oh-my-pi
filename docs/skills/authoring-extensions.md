@@ -162,7 +162,9 @@ pi.registerCommand("my-cmd", {
 
 ## Registering tools
 
-Tools are called by the LLM. Parameter definitions accept ArkType or Zod schemas; `pi.typebox` remains available as a compatibility shim for legacy TypeBox-style extensions. The following example uses the injected `zod/v4` module:
+Tools are called by the LLM. Parameter definitions may use the injected
+Zod-compatible omptype builder; `pi.arktype` and the legacy-compatible
+`pi.typebox` are also available:
 
 ```ts
 const z = pi.zod;
@@ -173,7 +175,7 @@ pi.registerTool({
   description: "Full-text search through project notes",
   parameters: z.object({
     query: z.string().describe("Search query"),
-    limit: z.number().default(10).describe("Max results").optional(),
+    limit: z.number().default(10).optional().describe("Max results"),
   }),
   async execute(toolCallId, params, signal, onUpdate, ctx) {
     if (signal?.aborted) {

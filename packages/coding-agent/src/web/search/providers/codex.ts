@@ -4,7 +4,6 @@
  * Uses the configured Codex Responses transport for proxy/API-key setups and
  * the official ChatGPT backend for OAuth logins.
  */
-import * as os from "node:os";
 import {
 	type AuthStorage,
 	type FetchImpl,
@@ -13,21 +12,17 @@ import {
 	withAuth,
 	withOAuthAccess,
 } from "@oh-my-pi/pi-ai";
-import { applyCodexResponsesLiteShape } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
-import {
-	createOpenAICodexCompatibilityMetadata,
-	resolveCodexResponsesUrl,
-} from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { resolveCodexResponsesUrl } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import {
+	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
 	CODEX_CLIENT_VERSION,
 	getCodexAccountId,
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
-import { $env, readSseJson } from "@oh-my-pi/pi-utils";
-import packageJson from "../../../../package.json" with { type: "json" };
+import { $env, readSseJson, USER_AGENT } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../../config/model-registry";
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
@@ -155,6 +150,13 @@ export interface CodexSearchParams {
 }
 
 /** Codex API response structure */
+interface CodexWebSearchSource {
+	url?: string;
+	source_website_url?: string;
+	title?: string;
+	caption?: string;
+}
+
 interface CodexResponseItem {
 	type: string;
 	id?: string;
@@ -165,6 +167,9 @@ interface CodexResponseItem {
 	arguments?: string;
 	content?: CodexContentPart[];
 	summary?: Array<{ type: string; text: string }>;
+	action?: { sources?: CodexWebSearchSource[] };
+	sources?: CodexWebSearchSource[];
+	results?: CodexWebSearchSource[];
 }
 
 interface CodexContentPart {
@@ -225,10 +230,43 @@ function isImagePlaceholderAnswer(text: string): boolean {
 	return IMAGE_PLACEHOLDER_ANSWERS.has(normalized);
 }
 
-function addSource(sources: SearchSource[], source: SearchSource): void {
-	if (!sources.some(existing => existing.url === source.url)) {
-		sources.push(source);
+function cleanSourceUrl(rawUrl: string): string {
+	try {
+		const url = new URL(rawUrl);
+		if (url.searchParams.get("utm_source") === "openai") {
+			url.searchParams.delete("utm_source");
+		}
+		return url.toString();
+	} catch {
+		return rawUrl.replace(/[?&]utm_source=openai$/u, "");
 	}
+}
+
+function addSource(sources: SearchSource[], source: SearchSource): void {
+	const normalizedSource = { ...source, url: cleanSourceUrl(source.url) };
+	const existing = sources.find(candidate => candidate.url === normalizedSource.url);
+	if (!existing) {
+		sources.push(normalizedSource);
+		return;
+	}
+	if (existing.title === existing.url && normalizedSource.title !== normalizedSource.url) {
+		existing.title = normalizedSource.title;
+	}
+	if (!existing.snippet && normalizedSource.snippet) {
+		existing.snippet = normalizedSource.snippet;
+	}
+}
+
+function extractCitationSnippet(text: string, start: number | undefined, end: number | undefined): string | undefined {
+	if (start === undefined || end === undefined || !text) return undefined;
+	const before = Math.max(0, start - 100);
+	const after = Math.min(text.length, end + 100);
+	const snippet = text
+		.slice(before, after)
+		.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+		.trim();
+	if (!snippet) return undefined;
+	return snippet.length > 300 ? `${snippet.slice(0, 297)}...` : snippet;
 }
 
 function countCharacter(text: string, target: string): number {
@@ -399,10 +437,11 @@ function buildCodexHeaders(
 	} else {
 		headers.delete(OPENAI_HEADERS.ACCOUNT_ID);
 	}
+	applyCodexResidencyHeader(headers, accessToken);
 	headers.set(OPENAI_HEADERS.BETA, OPENAI_HEADER_VALUES.BETA_RESPONSES);
 	headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
 	headers.set(OPENAI_HEADERS.VERSION, CODEX_CLIENT_VERSION);
-	headers.set("User-Agent", `pi/${packageJson.version} (${os.platform()} ${os.release()}; ${os.arch()})`);
+	headers.set("User-Agent", USER_AGENT);
 	headers.set("Accept", "text/event-stream");
 	headers.set("Content-Type", "application/json");
 	return headers;
@@ -432,6 +471,15 @@ function extractCodexSseError(rawEvent: Record<string, unknown>): { code: string
 	return { code, message };
 }
 
+function classifyCodexSseErrorStatus(code: string, message: string): number {
+	const detail = `${code} ${message}`.toLowerCase();
+	if (/rate[- ]?limit|too many requests|quota|\b429\b/u.test(detail)) return 429;
+	if (/unauthori[sz]ed|\b401\b/u.test(detail)) return 401;
+	if (/forbidden|\b403\b/u.test(detail)) return 403;
+	if (/timeout|timed out/u.test(detail)) return 504;
+	return 500;
+}
+
 /**
  * Calls the Codex Responses API with web search tool enabled.
  * The caller provides the exact model id to send; retry / fallback policy
@@ -447,7 +495,6 @@ async function callCodexSearch(
 		systemPrompt?: string;
 		searchContextSize?: "low" | "medium" | "high";
 		model: CodexModelCandidate;
-		sessionId?: string;
 		fetch?: FetchImpl;
 		transport: CodexSearchTransport;
 	},
@@ -455,12 +502,13 @@ async function callCodexSearch(
 	const headers = buildCodexHeaders(auth.accessToken, auth.accountId, options.transport.headers);
 
 	const requestedModel = options.model.modelId;
-	const usesResponsesLite = options.model.catalogModel?.useResponsesLite === true;
 
 	const body: Record<string, unknown> = {
 		model: requestedModel,
 		stream: true,
 		store: false,
+		include: ["web_search_call.action.sources"],
+		parallel_tool_calls: true,
 		input: [
 			{
 				type: "message",
@@ -477,21 +525,6 @@ async function callCodexSearch(
 		tool_choice: { type: "web_search" },
 		instructions: options.systemPrompt ?? DEFAULT_INSTRUCTIONS,
 	};
-	if (usesResponsesLite) {
-		const metadata = createOpenAICodexCompatibilityMetadata({
-			sessionId: options.sessionId,
-			requestKind: "turn",
-			startNewTurn: true,
-		});
-		for (const name in metadata.headers) {
-			const value = metadata.headers[name];
-			if (value !== undefined) headers.set(name, value);
-		}
-		headers.set(OPENAI_HEADERS.RESPONSES_LITE, "true");
-		body.client_metadata = metadata.clientMetadata;
-		body.reasoning = { context: "all_turns" };
-		applyCodexResponsesLiteShape(body);
-	}
 
 	const fetchImpl = options.fetch ?? fetch;
 	const response = await fetchImpl(options.transport.url, {
@@ -519,9 +552,8 @@ async function callCodexSearch(
 	let model = requestedModel;
 	let requestId = "";
 	let usage: { inputTokens: number; outputTokens: number; totalTokens: number } | undefined;
-	// Evidence that the hosted web_search tool actually ran. Lite models get
-	// `tool_choice: "auto"` and may answer without searching (#6988); a search
-	// command must reject that rather than return a non-search completion.
+	// A search command must reject a completion that did not invoke the hosted
+	// tool rather than returning an answer from the model's own knowledge (#6988).
 	let webSearchInvoked = false;
 
 	for await (const rawEvent of readSseJson<Record<string, unknown>>(response.body, options.signal)) {
@@ -532,7 +564,11 @@ async function callCodexSearch(
 			webSearchInvoked = true;
 		}
 
-		if (eventType === "response.output_text.delta") {
+		if (eventType === "response.created") {
+			const resp = (rawEvent as { response?: CodexResponse }).response;
+			if (resp?.id) requestId = resp.id;
+			if (resp?.model) model = resp.model;
+		} else if (eventType === "response.output_text.delta") {
 			const delta = typeof rawEvent.delta === "string" ? rawEvent.delta : "";
 			if (delta) {
 				streamedAnswerParts.push(delta);
@@ -540,7 +576,20 @@ async function callCodexSearch(
 		} else if (eventType === "response.output_item.done") {
 			const item = rawEvent.item as CodexResponseItem | undefined;
 			if (!item) continue;
-			if (item.type === "web_search_call") webSearchInvoked = true;
+			if (item.type === "web_search_call") {
+				webSearchInvoked = true;
+				const sourceGroups = [item.action?.sources, item.sources, item.results];
+				for (const group of sourceGroups) {
+					for (const source of group ?? []) {
+						const url = source.url ?? source.source_website_url;
+						if (!url) continue;
+						addSource(sources, {
+							title: source.title ?? source.caption ?? url,
+							url,
+						});
+					}
+				}
+			}
 
 			// Handle text message content and extract sources from annotations
 			if (item.type === "message" && item.content) {
@@ -552,8 +601,11 @@ async function callCodexSearch(
 						if (part.annotations) {
 							for (const annotation of part.annotations) {
 								if (annotation.type === "url_citation" && annotation.url) {
-									// Deduplicate by URL
-									addSource(sources, { title: annotation.title ?? annotation.url, url: annotation.url });
+									addSource(sources, {
+										title: annotation.title ?? annotation.url,
+										url: annotation.url,
+										snippet: extractCitationSnippet(part.text, annotation.start_index, annotation.end_index),
+									});
 								}
 							}
 						}
@@ -585,13 +637,17 @@ async function callCodexSearch(
 			}
 		} else if (eventType === "error") {
 			const { code, message } = extractCodexSseError(rawEvent);
-			throw new SearchProviderError("codex", `Codex error (${code}): ${message || "Unknown error"}`, 500);
+			throw new SearchProviderError(
+				"codex",
+				`Codex error (${code}): ${message || "Unknown error"}`,
+				classifyCodexSseErrorStatus(code, message),
+			);
 		} else if (eventType === "response.failed") {
 			const { code, message } = extractCodexSseError(rawEvent);
 			const detail = code
 				? `Codex request failed (${code}): ${message || "Request failed"}`
 				: `Codex request failed: ${message || "Request failed"}`;
-			throw new SearchProviderError("codex", detail, 500);
+			throw new SearchProviderError("codex", detail, classifyCodexSseErrorStatus(code, message));
 		}
 	}
 
@@ -651,7 +707,6 @@ async function runCodexSearchCandidates(options: {
 				systemPrompt: options.params.systemPrompt,
 				searchContextSize: "high",
 				model: candidate,
-				sessionId: options.params.sessionId,
 				fetch: options.params.fetch,
 				transport: options.transport,
 			});

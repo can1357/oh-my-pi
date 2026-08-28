@@ -8,13 +8,15 @@ astCondition:
   - "($X as { $$$BODY })[$IDX]"
 ---
 
-**Don't assert an inline object type just to read a property.** `(value as { content: unknown }).content` fabricates a shape the compiler never verified, then trusts it for exactly one access. If `value` isn't that shape, the read is silently wrong and no type error ever fires.
+## Don't inline-cast an object type for member access
 
-## Why it's wrong
+`(value as { content: unknown }).content` fabricates an unchecked shape, then trusts it for the access. If `value` lacks that shape, the read is silently wrong; no type error fires.
 
-- The cast is an unchecked assertion — it suppresses the type error instead of proving the shape.
-- It localizes the lie to one expression, so the next reader can't tell whether the value was ever validated.
-- It almost always stands in for the real fix: runtime narrowing or a validated type at the boundary.
+## Why
+
+- Unchecked assertion: suppresses the error; proves no shape.
+- Localizes the lie; readers cannot tell whether `value` was validated.
+- Usually replace with runtime narrowing or a validated boundary type.
 
 ## Avoid
 
@@ -27,18 +29,18 @@ const flag = (opts as { enabled: boolean })["enabled"];
 
 ## Use
 
-Prefer a schema parse at the boundary when a validator is available (Zod, Valibot, …) — validate once, then read from a fully typed value. If Zod is already in the project (e.g. Zod v4):
+At a boundary, prefer a schema parse when a validator exists: validate once, then read a fully typed value.
 
 ```ts
-import { z } from "zod/v4";
+import { type } from "@oh-my-pi/omptype";
 
-const Resp = z.object({ data: z.object({ id: z.string() }) });
+const Resp = type({ data: { id: "string" } });
 
-const resp = Resp.parse(raw); // throws on bad input; resp.data.id is typed string
+const resp = Resp.assert(raw); // throws on bad input; resp.data.id is typed string
 const id = resp.data.id;
 ```
 
-For a one-off read of a single field, narrow with `in` / `typeof` so the access is actually checked — TypeScript infers `unknown` for the property after `"content" in value`:
+For a one-off field read, narrow with `in` / `typeof`; access is checked. After `"content" in value`, TypeScript infers the property as `unknown`:
 
 ```ts
 if (value && typeof value === "object" && "content" in value) {
@@ -46,10 +48,8 @@ if (value && typeof value === "object" && "content" in value) {
 }
 ```
 
-## Choosing: guard vs schema vs unchecked cast
+## Choose: guard vs schema vs unchecked cast
 
-| Situation | Reach for |
-| --- | --- |
-| Data from outside your control — network/RPC, parsed JSON, config files, env vars, CLI/IPC, persisted blobs — or a shape reused across the codebase | **Schema parse** (Zod/Valibot/…): runtime validation, typed output, and a clear error on bad shape |
-| In-process value the compiler merely lost track of — an `unknown` from a generic, a union to discriminate, a one-off read of a field or two | **Type guard** (`in` / `typeof`): no dependency, but it only checks what you write, so keep the checked surface small |
-| You genuinely know more than the compiler *and* a runtime check is impossible or meaningless — a well-known DOM node (`as HTMLElement`), structurally-identical types inference can't unify, a library type that's wrong or unexpressible, `as const` | **Unchecked cast** (`as`): assign to a named const with a one-line reason; never for raw external input, never inlined into a member access |
+- Outside-controlled data—network/RPC, parsed JSON, config files, env vars, CLI/IPC, persisted blobs—or codebase-reused shapes: **Schema parse** (Zod/Valibot/…): runtime validation, typed output, clear bad-shape error.
+- In-process values the compiler lost—generic `unknown`, union discrimination, one-off reads of one or two fields: **Type guard** (`in` / `typeof`): no dependency; checks only what you write, so keep its surface small.
+- You know more than the compiler **and** runtime checking is impossible or meaningless—well-known DOM node (`as HTMLElement`), structurally-identical types inference cannot unify, wrong or unexpressible library type, `as const`: **Unchecked cast** (`as`): assign to a named const with a one-line reason; never raw external input or inline member access.

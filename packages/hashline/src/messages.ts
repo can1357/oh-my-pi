@@ -1,6 +1,13 @@
 /** Centralized error/warning text for the hashline parser, applier, and patcher. */
 
-import { formatNumberedLine, HL_FILE_HASH_SEP, HL_FILE_PREFIX, HL_FILE_SUFFIX, HL_RANGE_SEP } from "./format";
+import {
+	formatNumberedLine,
+	HL_FILE_HASH_SEP,
+	HL_FILE_PREFIX,
+	HL_FILE_SUFFIX,
+	HL_PAYLOAD_REPLACE,
+	HL_RANGE_SEP,
+} from "./format";
 import type { BlockSpan } from "./types";
 
 /** Lines of context shown either side of a hash mismatch. */
@@ -118,6 +125,34 @@ export const BARE_BODY_AUTO_PIPED_WARNING =
 
 /** Top-level read-output rows recovered as single-line replacements. */
 export const SNAPSHOT_ROWS_AUTO_PUT_WARNING = `Recovered top-level \`N:TEXT\` snapshot row(s) as single-line \`PUT N${HL_RANGE_SEP}N:\` replacements. Use explicit \`PUT\` headers for reliable edits.`;
+/**
+ * Two or more top-level `N:TEXT` read-output rows named the same source line.
+ * Each recovered row lowers to a single-line `PUT N.=N:`, so the coalescer would
+ * keep only the last and silently drop the others — reject and teach the format
+ * instead.
+ */
+export function repeatedSnapshotRowMessage(line: number): string {
+	return (
+		`two or more pasted \`${line}:TEXT\` read-output rows name line ${line}. ` +
+		`Such rows are recovered as single-line \`PUT ${line}${HL_RANGE_SEP}${line}:\` replacements, so repeating a ` +
+		`number would keep only the last row and drop the rest. Write the hunk explicitly: one ` +
+		`\`PUT ${line}${HL_RANGE_SEP}M:\` header covering exactly the lines that change, followed by \`+TEXT\` body ` +
+		`rows holding their complete final content.`
+	);
+}
+/**
+ * A `+` body row whose text is itself a valid hunk header — the op was written
+ * with the payload prefix, so it is inserted into the file as literal text
+ * instead of executing. Warned rather than rejected: a literal `CUT …` line is
+ * legitimate content in documentation and test fixtures.
+ */
+export function literalOpRowWarning(line: number, text: string): string {
+	return (
+		`line ${line}: body row \`${HL_PAYLOAD_REPLACE}${text}\` is itself a valid hunk header, so it was inserted ` +
+		`into the file as literal text rather than executed. Ops are never \`${HL_PAYLOAD_REPLACE}\`-prefixed — drop ` +
+		`the \`${HL_PAYLOAD_REPLACE}\` to run it, and re-issue if this line landed in the file by mistake.`
+	);
+}
 /** Bare range header recovered as an implicit replacement hunk. */
 export const BARE_RANGE_AUTO_PUT_WARNING = `Recovered a bare \`N${HL_RANGE_SEP}M:\` header as \`PUT N${HL_RANGE_SEP}M:\`. Prefix replacement ranges with \`PUT\`.`;
 
@@ -246,11 +281,10 @@ export function pasteAfterBlockUnresolvedLoweredWarning(line: number): string {
 	return unresolvedLoweredWarning(`PUT >${line}*`, line, `PUT >${line}`);
 }
 /**
- * A one-sided boundary echo whose payload is too short to be the widened
- * range's full content: dropping the echo deletes range line(s) the payload
- * never restates (the "widened range" reading), while the "range shifted by
- * the echo" reading keeps them. The readings produce different files, so the
- * edit is rejected instead of repaired.
+ * A one-sided exact boundary echo cannot cover the selected range after the
+ * duplicated body rows are removed. Applying or dropping it would lose
+ * distinct range content, so the edit is rejected unless a parse-restoring
+ * boundary combination proves another reading.
  */
 export function ambiguousBoundaryEchoMessage(
 	startLine: number,
@@ -264,34 +298,67 @@ export function ambiguousBoundaryEchoMessage(
 			: `ends by restating the ${count} line(s) just below the range`;
 	return (
 		`\`PUT ${startLine}${HL_RANGE_SEP}${endLine}:\` rejected: the body ${where}, ` +
-		`but is too short to be the full final content of the widened range — applying it as-is or ` +
-		`auto-repairing would delete range line(s) the body never restates. ` +
-		`Re-issue with the range covering exactly the lines that change and the body as their complete ` +
-		`final content: drop the restated keeper from the body, or widen the range to consume it.`
+		`but is too short to be the full final content of the selected range. ` +
+		`Re-issue with the range covering exactly the lines that change and the body as their complete final content.`
 	);
 }
 
 /**
- * A replacement range deletes trailing structural closer(s) the payload never
- * restates, and nothing anchors the payload inside the block those closers
- * terminate: the payload has no unmatched opener for them and its indentation
- * is not deeper than the closer. Sparing the closer would have to guess
- * whether the payload belongs before it (inside the block) or after it (a
- * sibling), so the edit is rejected instead of repaired.
+ * A syntax-essential selected edge can be retained on either side of the
+ * payload, but indentation does not establish which placement was intended.
  */
-export function ambiguousCloserSpareMessage(
-	startLine: number,
-	endLine: number,
-	closerLine: number,
-	count: number,
-): string {
-	const closers = count === 1 ? `line ${closerLine}` : `lines ${closerLine}-${closerLine + count - 1}`;
+export function ambiguousBoundaryPlacementMessage(startLine: number, endLine: number): string {
 	return (
-		`\`PUT ${startLine}${HL_RANGE_SEP}${endLine}:\` rejected: the range deletes the closing-delimiter ` +
-		`${closers} but the body never restates it, and the body claims no position inside that block ` +
-		`(no unmatched opener, indentation not deeper than the closer) — whether the new content belongs ` +
-		`before or after the closer is ambiguous. Restate the closer in the body at the intended position, ` +
-		`or use \`PUT <${closerLine}:\` / \`PUT >${closerLine}:\` instead.`
+		`\`PUT ${startLine}${HL_RANGE_SEP}${endLine}:\` rejected: a selected boundary row is required for the file to parse, ` +
+		`but the body indentation does not establish whether it belongs before or after that row. ` +
+		`Re-read the region and re-issue with a range that excludes every unchanged boundary row.`
+	);
+}
+
+/**
+ * Exact-text boundary rows were removed because the remaining payload covers
+ * the selected range and the same rows already survive immediately outside it.
+ */
+export function textualBoundaryEchoWarning(startLine: number, leading: number, trailing: number): string {
+	const parts: string[] = [];
+	if (leading > 0) parts.push(`${leading} leading`);
+	if (trailing > 0) parts.push(`${trailing} trailing`);
+	return (
+		`Auto-repaired a replacement boundary echo at line ${startLine}: dropped ${parts.join(" and ")} body line(s) ` +
+		`already present outside the range. Issue the body as final content for the selected range only.`
+	);
+}
+
+/**
+ * A replacement range's boundary disposition was corrected by the
+ * syntax-probe-judged search: syntax-essential source boundary rows were
+ * retained, or exact body echoes of surviving outside rows were removed. The
+ * authored result did not parse and the selected result does.
+ */
+export function boundaryVariantRepairWarning(startLine: number, kept: number, dropped: number): string {
+	const keptPart = kept === 0 ? "" : `retained ${kept} syntax-essential source boundary row(s) selected by the range`;
+	const droppedPart = dropped === 0 ? "" : `dropped ${dropped} body row(s) duplicated just outside the range`;
+	const action = [keptPart, droppedPart].filter(Boolean).join(" and ");
+	return (
+		`Auto-repaired replacement boundaries at line ${startLine}: ${action}. ` +
+		`The result was verified by the syntax probe — re-issue with the range covering exactly the changed ` +
+		`lines and the body as their complete final content.`
+	);
+}
+
+/**
+ * The applied result no longer parses while the pre-edit content did: the
+ * patch introduced a syntax error. Advisory, never a rejection — the applier
+ * honors the authored edit — but the breakage is machine-confirmed by
+ * tree-sitter and surfaced in the same response instead of waiting for a
+ * compiler pass.
+ */
+export function editBrokeParseWarning(firstChangedLine: number | undefined): string {
+	const at = firstChangedLine === undefined ? "" : ` near line ${firstChangedLine}`;
+	return (
+		`This edit introduced a syntax error${at}: the file parsed before the patch and no longer does. ` +
+		`It was applied exactly as written, so a line number or range endpoint is likely wrong — ` +
+		`re-read the touched region and re-issue a correcting edit.`
 	);
 }
 
@@ -301,6 +368,10 @@ export function ambiguousCloserSpareMessage(
  */
 export const UNRESOLVED_BLOCK_INTERNAL =
 	"internal error: unresolved block edit reached the applier (resolveBlockEdits was not run).";
+
+/** Internal invariant: clipboard edits must be concrete before application. */
+export const UNRESOLVED_CLIPBOARD_INTERNAL =
+	"internal error: unresolved clipboard edit reached the applier (resolveClipboardEdits was not run).";
 
 /** `REM` received a body row or coexists with line edits. */
 export const REM_TAKES_NO_BODY =
@@ -331,9 +402,22 @@ export const COLONLESS_SPAN_PUT = `Colonless \`PUT\` is clipboard-backed, and sp
 /** Anonymous paste ran with an empty anonymous register. */
 export const EMPTY_PASTE = `Nothing to paste: no unlabeled \`CUT\` precedes this \`PUT\` in this call, and the anonymous register never carries across calls. Put \`CUT N${HL_RANGE_SEP}M\` / \`CUT N*\` above it, or use named registers (\`CUT … @name\` → \`PUT … @name\`) for cross-call moves.`;
 
-/** Named paste read a register that holds nothing. */
-export function unknownRegisterMessage(name: string, known: readonly string[]): string {
-	const base = `\`@${name}\` is empty: no \`CUT … @${name}\` precedes this op in this call and no persisted register has that name.`;
+/** Named paste read a register that holds nothing; a gap paste applies as empty. */
+export function emptyRegisterPasteWarning(name: string, known: readonly string[]): string {
+	const base = `\`@${name}\` was empty — no \`CUT … @${name}\` precedes this op in this call and no persisted register has that name — so nothing was pasted.`;
+	return known.length === 0 ? base : `${base} Available registers: ${known.map(k => `\`@${k}\``).join(", ")}.`;
+}
+
+/**
+ * Named paste over a *span* read a register that holds nothing. Pasting empty
+ * would delete the span, which the author never asked for — almost always a
+ * mistyped or never-captured register name — so the edit is rejected instead.
+ */
+export function emptyRegisterSpanPasteMessage(name: string, known: readonly string[]): string {
+	const base =
+		`\`@${name}\` is empty — no \`CUT … @${name}\` precedes this op in this call and no persisted register ` +
+		`has that name — so pasting it over a range would delete those lines and write nothing back. ` +
+		`Capture the register first (\`CUT … @${name}\`), or use \`CUT\` if deleting the range is what you meant.`;
 	return known.length === 0 ? base : `${base} Available registers: ${known.map(k => `\`@${k}\``).join(", ")}.`;
 }
 
@@ -373,6 +457,20 @@ export function afterInsertLandingShiftWarning(anchorLine: number, landingLine: 
  */
 export function blockInsertLandingShiftWarning(blockStart: number, closerLine: number, landingLine: number): string {
 	return `PUT >${blockStart}*: body indented deeper than closing line ${closerLine}, so it was placed inside the block, after line ${landingLine}. \`PUT >N*\` lands AFTER the block at sibling depth — if inside was intended, use plain \`PUT >${closerLine}:\`.`;
+}
+
+/**
+ * Plain `PUT >N:` anchored on a block-opener line with a shallower construct
+ * body: the landing was moved past the whole block — anchoring on an opener
+ * places the body between the opener and its first statement, a position a
+ * body at the opener's depth or above never intends.
+ */
+export function afterInsertOpenerEscapeWarning(anchorLine: number, landingLine: number): string {
+	return (
+		`PUT >${anchorLine}: line ${anchorLine} opens a block, and the body's indentation claims a position ` +
+		`outside it, so the body was landed after line ${landingLine} (verified by the syntax probe). ` +
+		`To insert after a whole construct, anchor on its closing line or use \`PUT >N*:\`.`
+	);
 }
 
 /** `Recovery`: an external write matched a cached snapshot. */

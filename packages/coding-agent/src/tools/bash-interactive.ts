@@ -11,8 +11,8 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import type * as XtermModule from "@xterm/headless";
-import type { Terminal as XtermTerminalType } from "@xterm/headless";
+import type * as XtermModule from "@oh-my-pi/pi-utils/vterm";
+import type { Terminal as XtermTerminalType } from "@oh-my-pi/pi-utils/vterm";
 import { Settings } from "../config/settings";
 import type { Theme } from "../modes/theme/theme";
 import { OutputSink, type OutputSummary } from "../session/streaming-output";
@@ -36,13 +36,14 @@ function normalizeCaptureChunk(chunk: string): string {
 // source of truth for the final captured output.
 const MAX_LIVE_WRITE_QUEUE_CHUNKS = 512;
 
-// @xterm/headless is only needed once an interactive PTY session actually starts,
+// The virtual terminal is only needed once an interactive PTY session actually starts,
 // so it is loaded lazily (and memoized) instead of weighing down CLI startup.
 let xtermTerminalCtor: typeof XtermModule.Terminal | undefined;
 
-async function loadXtermTerminal(): Promise<typeof XtermModule.Terminal> {
+/** Lazily load the headless xterm Terminal shared by PTY render paths. */
+export async function loadXtermTerminal(): Promise<typeof XtermModule.Terminal> {
 	if (!xtermTerminalCtor) {
-		const mod = (await import("@xterm/headless")) as typeof XtermModule & { default?: typeof XtermModule };
+		const mod = (await import("@oh-my-pi/pi-utils/vterm")) as typeof XtermModule & { default?: typeof XtermModule };
 		xtermTerminalCtor = (mod.default ?? mod).Terminal;
 	}
 	return xtermTerminalCtor;

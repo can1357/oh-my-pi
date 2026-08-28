@@ -29,6 +29,9 @@
  */
 export const WIDE_PAD = '\u0000'
 
+/** Opaque label-space placeholder that serializes back to a regular space. */
+export const LABEL_SPACE = '\u0001'
+
 const graphemeSegmenter = new Intl.Segmenter()
 
 /**

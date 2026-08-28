@@ -19,6 +19,14 @@ describe("hasLinuxDesktopSession", () => {
 		expect(hasLinuxDesktopSession("darwin", LINUX_ENV)).toBe(false);
 		expect(hasLinuxDesktopSession("win32", LINUX_ENV)).toBe(false);
 	});
+
+	it("accepts the systemd user bus socket when the address is not exported", () => {
+		const env = { XDG_RUNTIME_DIR: "/run/user/1000" };
+		const fileExists = (path: string) => path === "/run/user/1000/bus";
+
+		expect(hasLinuxDesktopSession("linux", env, fileExists)).toBe(true);
+		expect(hasLinuxDesktopSession("linux", env, () => false)).toBe(false);
+	});
 });
 
 describe("shouldDeliverDesktopNotification", () => {

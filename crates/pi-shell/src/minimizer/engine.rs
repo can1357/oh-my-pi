@@ -13,6 +13,11 @@ use crate::minimizer::{
 	pipeline::{self, CompiledPipeline, PipelineRegistry},
 	plan,
 };
+/// Captured outputs shorter than this are returned verbatim without filtering.
+pub const MIN_MINIMIZE_CHARS: usize = 1_000;
+fn is_below_minimize_threshold(captured: &str) -> bool {
+	captured.chars().take(MIN_MINIMIZE_CHARS).count() < MIN_MINIMIZE_CHARS
+}
 
 /// Minimization strategy for a shell command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -305,6 +310,9 @@ fn apply_identity(
 	let subcommand = identity.subcommand.as_deref();
 
 	if filters::supports(&identity.program, subcommand) {
+		if is_below_minimize_threshold(captured) {
+			return MinimizerOutput::passthrough(captured).labeled("too-short");
+		}
 		let ctx = MinimizerCtx { program: &identity.program, subcommand, command, config };
 		let Ok(rust_output) =
 			catch_unwind(AssertUnwindSafe(|| filters::filter(&ctx, captured, exit_code)))
@@ -328,6 +336,9 @@ fn apply_identity(
 	if let Some(pipeline) = resolve_pipeline(config, &identity.program, subcommand) {
 		if pipeline.skipped_by_exit(exit_code) {
 			return MinimizerOutput::passthrough(captured).labeled("exit-skip");
+		}
+		if is_below_minimize_threshold(captured) {
+			return MinimizerOutput::passthrough(captured).labeled("too-short");
 		}
 		let text = catch_unwind(AssertUnwindSafe(|| pipeline.apply(captured).into_owned()))
 			.unwrap_or_else(|_| captured.to_string());
@@ -526,6 +537,15 @@ pub fn verify_builtin_filters() -> Vec<pipeline::TestOutcome> {
 }
 
 #[cfg(test)]
+fn minimizable_input(input: &str) -> String {
+	let mut output = input.to_string();
+	while output.chars().count() < MIN_MINIMIZE_CHARS {
+		output.push('\n');
+	}
+	output
+}
+
+#[cfg(test)]
 mod tests {
 	use std::{
 		fmt::Write as _,
@@ -549,6 +569,29 @@ mod tests {
 		});
 		let _ = fs::remove_file(path);
 		cfg
+	}
+
+	#[test]
+	fn output_below_minimum_is_not_minimized() {
+		let cfg = config_from_settings(
+			r#"
+schema_version = 1
+[filters.printf]
+match_command = "^printf$"
+replace = [{ pattern = "x", replacement = "y" }]
+"#,
+		);
+		let short = "x".repeat(MIN_MINIMIZE_CHARS - 1);
+		let exact = "x".repeat(MIN_MINIMIZE_CHARS);
+
+		let short_result = apply("printf", &short, 0, &cfg);
+		assert_eq!(short_result.text, short);
+		assert!(!short_result.changed);
+		assert_eq!(short_result.filter, "too-short");
+
+		let exact_result = apply("printf", &exact, 0, &cfg);
+		assert!(exact_result.changed);
+		assert_ne!(exact_result.text, exact);
 	}
 	#[test]
 	fn disabled_config_does_not_minimize() {
@@ -594,16 +637,17 @@ on_empty = "OVERLAY"
 only_on_exit = [0]
 "#,
 		);
-		let diff_input = "diff --git a/file.rs b/file.rs\n@@\n-old\n+new\n";
-		let diff = apply("git diff", diff_input, 0, &cfg);
+		let diff_input = minimizable_input("diff --git a/file.rs b/file.rs\n@@\n-old\n+new\n");
+		let diff = apply("git diff", &diff_input, 0, &cfg);
 		assert_eq!(diff.filter, "pipeline+builtin");
 		assert_eq!(diff.text, "OVERLAY");
 
-		let status = apply("git status", "## main\n M file.rs\n", 0, &cfg);
+		let status_input = minimizable_input("## main\n M file.rs\n");
+		let status = apply("git status", &status_input, 0, &cfg);
 		assert_ne!(status.filter, "pipeline+builtin");
 		assert!(status.text.contains("unstaged 1"));
 
-		let failed = apply("git diff", diff_input, 1, &cfg);
+		let failed = apply("git diff", &diff_input, 1, &cfg);
 		assert_ne!(failed.filter, "pipeline+builtin");
 		assert!(failed.text.contains("file changed"));
 	}
@@ -620,9 +664,11 @@ only_on_exit = [0]
 		// and strip the NX banner; the bare npx def must not claim subcommand
 		// `nx`.
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
-		let input = "\n >  NX   Running target build for 3 projects\n\n> nx run app:build\nError: \
-		             build failed\n\n >  NX   Ran target build for 3 projects (2s)\n";
-		let out = apply("npx nx build", input, 0, &cfg);
+		let input = minimizable_input(
+			"\n >  NX   Running target build for 3 projects\n\n> nx run app:build\nError: build \
+			 failed\n\n >  NX   Ran target build for 3 projects (2s)\n",
+		);
+		let out = apply("npx nx build", &input, 0, &cfg);
 		assert!(
 			!out.text.contains("NX   Running target"),
 			"npx def shadowed nx-wrapped; NX banner survived: {:?}",
@@ -662,9 +708,11 @@ only_on_exit = [0]
 		// for genuinely UNKNOWN tools (its whole purpose). cowsay is not routed
 		// or owned by any other def, so the npx pipeline claims it.
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
-		let input = "Need to install the following packages:\ncowsay@1.6.0\nOk to proceed? \
-		             (y)\n\nnpm warn deprecated foo@1.0.0: use bar instead\n< Hello >\n";
-		let out = apply("npx cowsay hello", input, 0, &cfg);
+		let input = minimizable_input(
+			"Need to install the following packages:\ncowsay@1.6.0\nOk to proceed? (y)\n\nnpm warn \
+			 deprecated foo@1.0.0: use bar instead\n< Hello >\n",
+		);
+		let out = apply("npx cowsay hello", &input, 0, &cfg);
 		assert!(out.changed);
 		assert!(!out.text.contains("Need to install"));
 		assert!(!out.text.contains("Ok to proceed"));
@@ -676,7 +724,8 @@ only_on_exit = [0]
 	fn enabled_known_filter_minimizes() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		assert!(should_minimize("git diff", &cfg));
-		let out = apply("git diff", "diff --git a/file.rs b/file.rs\n@@\n-old\n+new\n", 0, &cfg);
+		let input = minimizable_input("diff --git a/file.rs b/file.rs\n@@\n-old\n+new\n");
+		let out = apply("git diff", &input, 0, &cfg);
 		assert!(out.changed);
 		assert!(out.text.contains("file changed"));
 	}
@@ -685,8 +734,8 @@ only_on_exit = [0]
 	fn enabled_config_minimizes_git_status() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		assert!(should_minimize("git status", &cfg));
-		let input = "## main\n M file.rs\n";
-		let out = apply("git status", input, 0, &cfg);
+		let input = minimizable_input("## main\n M file.rs\n");
+		let out = apply("git status", &input, 0, &cfg);
 		assert!(out.changed);
 		assert!(out.text.contains("unstaged 1"));
 		assert_eq!(out.filter, "git");
@@ -695,18 +744,26 @@ only_on_exit = [0]
 	#[test]
 	fn successful_minimization_keeps_visible_ok_when_filter_removes_all_lines() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
-		let out = apply(
-			"cargo build",
-			"   Compiling app v0.1.0\n    Finished `dev` profile [unoptimized + debuginfo] target(s) \
-			 in 1.23s\n",
-			0,
-			&cfg,
+		let input = format!(
+			"{}    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.23s\n",
+			"   Compiling app v0.1.0\n".repeat(200),
 		);
+		let out = apply("cargo build", &input, 0, &cfg);
 
 		assert!(out.changed);
 		assert_eq!(out.text, "OK\n");
 		assert_eq!(out.output_bytes, out.text.len());
 		assert!(out.original_text.is_some());
+	}
+
+	#[test]
+	fn rustc_query_output_is_not_collapsed_to_ok() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = "/opt/rust/lib/rustlib\n";
+		let out = apply("rustc --print sysroot", input, 0, &cfg);
+
+		assert_eq!(out.text, input);
+		assert!(!out.changed);
 	}
 
 	#[test]
@@ -720,20 +777,21 @@ strip_lines_matching = [".*"]
 "#,
 		);
 
-		assert!(should_minimize("printf done", &cfg));
-		let out = apply("printf done", "drop me\n", 0, &cfg);
+		let input = minimizable_input("drop me\n");
+		let out = apply("printf done", &input, 0, &cfg);
 
 		assert!(out.changed);
 		assert_eq!(out.text, "OK\n");
 		assert_eq!(out.filter, "pipeline");
 		assert_eq!(out.output_bytes, out.text.len());
-		assert_eq!(out.original_text.as_deref(), Some("drop me\n"));
+		assert_eq!(out.original_text.as_deref(), Some(input.as_str()));
 	}
 
 	#[test]
 	fn failed_minimization_does_not_invent_ok_for_empty_output() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
-		let out = apply("cargo build", "   Compiling app v0.1.0\n", 1, &cfg);
+		let input = "   Compiling app v0.1.0\n".repeat(200);
+		let out = apply("cargo build", &input, 1, &cfg);
 
 		assert!(out.changed);
 		assert_eq!(out.text, "");
@@ -797,25 +855,21 @@ strip_lines_matching = [".*"]
 		assert!(should_minimize("ctest --output-on-failure", &cfg));
 		assert!(should_minimize("./build/foo_test --gtest_filter=Foo.*", &cfg));
 
-		let ctest = apply(
-			"ctest --output-on-failure",
+		let ctest_input = minimizable_input(
 			"Test project /tmp/build\n1/2 Test #1: ok ........   Passed    0.01 sec\n2/2 Test #2: \
 			 bad .......***Failed    0.02 sec\nThe following tests FAILED:\n",
-			8,
-			&cfg,
 		);
+		let ctest = apply("ctest --output-on-failure", &ctest_input, 8, &cfg);
 		assert!(ctest.changed);
 		assert_eq!(ctest.filter, "ctest");
 		assert!(!ctest.text.contains("Test #1"));
 		assert!(ctest.text.contains("Test #2: bad"));
 
-		let gtest = apply(
-			"./build/foo_test",
+		let gtest_input = minimizable_input(
 			"[ RUN      ] Foo.Pass\n[       OK ] Foo.Pass (0 ms)\nfoo_test.cc:42: Failure\nExpected: \
 			 1\n[  FAILED  ] Foo.Fails\n",
-			1,
-			&cfg,
 		);
+		let gtest = apply("./build/foo_test", &gtest_input, 1, &cfg);
 		assert!(gtest.changed);
 		assert_eq!(gtest.filter, "gtest");
 		assert!(!gtest.text.contains("Foo.Pass"));
@@ -1037,10 +1091,12 @@ strip_lines_matching = [".*"]
 	#[test]
 	fn rails_db_migrate_routes_to_standalone_def() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
-		let input = "== 20240115 CreateUsers: migrating\n-- create_table(:users)\n   -> 0.0234s\n== \
-		             20240115 CreateUsers: migrated\n\n== 20240116 AddIndexToOrders: migrating\n-- \
-		             add_index(:orders)\n   -> 0.0123s\n== 20240116 AddIndexToOrders: migrated\n";
-		let out = apply("rails db:migrate", input, 0, &cfg);
+		let input = minimizable_input(
+			"== 20240115 CreateUsers: migrating\n-- create_table(:users)\n   -> 0.0234s\n== 20240115 \
+			 CreateUsers: migrated\n\n== 20240116 AddIndexToOrders: migrating\n-- \
+			 add_index(:orders)\n   -> 0.0123s\n== 20240116 AddIndexToOrders: migrated\n",
+		);
+		let out = apply("rails db:migrate", &input, 0, &cfg);
 		assert!(out.changed);
 		assert!(out.text.contains("✓ CreateUsers"));
 		assert!(out.text.contains("✓ AddIndexToOrders"));
@@ -1053,8 +1109,10 @@ strip_lines_matching = [".*"]
 	#[test]
 	fn rails_routes_routes_to_standalone_def() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
-		let input = "                                  Prefix Verb   URI Pattern                                                                                       Controller#Action\n                                    root GET    /                                                                                                 home#index\n";
-		let out = apply("rails routes", input, 0, &cfg);
+		let input = minimizable_input(
+			"                                  Prefix Verb   URI Pattern                                                                                       Controller#Action\n                                    root GET    /                                                                                                 home#index\n",
+		);
+		let out = apply("rails routes", &input, 0, &cfg);
 		assert!(out.changed);
 		assert!(!out.text.contains("Prefix"));
 		assert!(out.text.contains("root GET"));
@@ -1064,8 +1122,10 @@ strip_lines_matching = [".*"]
 	#[test]
 	fn rake_routes_regression_unminimized() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
-		let input = "                                  Prefix Verb   URI Pattern                                                                                       Controller#Action\n                                    root GET    /                                                                                                 home#index\n";
-		let out = apply("rake routes", input, 0, &cfg);
+		let input = minimizable_input(
+			"                                  Prefix Verb   URI Pattern                                                                                       Controller#Action\n                                    root GET    /                                                                                                 home#index\n",
+		);
+		let out = apply("rake routes", &input, 0, &cfg);
 		assert!(out.changed, "rake routes should be minimized by the rails-routes def");
 		assert!(!out.text.contains("Prefix"));
 		assert!(out.text.contains("root GET"));
@@ -1074,9 +1134,11 @@ strip_lines_matching = [".*"]
 	#[test]
 	fn bundle_exec_rails_db_migrate_reaches_def() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
-		let input = "== 20240115 CreateUsers: migrating\n-- create_table(:users)\n   -> 0.0234s\n== \
-		             20240115 CreateUsers: migrated\n";
-		let out = apply("bundle exec rails db:migrate", input, 0, &cfg);
+		let input = minimizable_input(
+			"== 20240115 CreateUsers: migrating\n-- create_table(:users)\n   -> 0.0234s\n== 20240115 \
+			 CreateUsers: migrated\n",
+		);
+		let out = apply("bundle exec rails db:migrate", &input, 0, &cfg);
 		assert!(out.changed);
 		assert!(out.text.contains("CreateUsers"));
 		assert!(!out.text.contains("-- create_table"));
@@ -1085,8 +1147,10 @@ strip_lines_matching = [".*"]
 	#[test]
 	fn bundle_exec_rails_routes_reaches_def() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
-		let input = "                                  Prefix Verb   URI Pattern                                                                                       Controller#Action\n                                    root GET    /                                                                                                 home#index\n";
-		let out = apply("bundle exec rails routes", input, 0, &cfg);
+		let input = minimizable_input(
+			"                                  Prefix Verb   URI Pattern                                                                                       Controller#Action\n                                    root GET    /                                                                                                 home#index\n",
+		);
+		let out = apply("bundle exec rails routes", &input, 0, &cfg);
 		assert!(out.changed);
 		assert!(!out.text.contains("Prefix"));
 		assert!(out.text.contains("root GET"));
@@ -1119,11 +1183,13 @@ strip_lines_matching = [".*"]
 	#[test]
 	fn rails_db_migrate_keyword_in_name_not_dropped() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
-		let input = "== 20240115 CreateTestResults: migrating\n-- create_table(:test_results)\n   \
-		             -> 0.0234s\n== 20240115 CreateTestResults: migrated\n\n== 20240116 \
-		             AddIndexToOrders: migrating\n-- add_index(:orders)\n   -> 0.0123s\n== 20240116 \
-		             AddIndexToOrders: migrated\n";
-		let out = apply("rails db:migrate", input, 0, &cfg);
+		let input = minimizable_input(
+			"== 20240115 CreateTestResults: migrating\n-- create_table(:test_results)\n   -> \
+			 0.0234s\n== 20240115 CreateTestResults: migrated\n\n== 20240116 AddIndexToOrders: \
+			 migrating\n-- add_index(:orders)\n   -> 0.0123s\n== 20240116 AddIndexToOrders: \
+			 migrated\n",
+		);
+		let out = apply("rails db:migrate", &input, 0, &cfg);
 		assert!(out.changed);
 		// Both migrations must survive; the old overlay-on-rake would keep only
 		// lines containing "test" and silently drop AddIndexToOrders.
@@ -1209,12 +1275,10 @@ mod pipeline_integration_tests {
 			enabled: Some(true),
 			..Default::default()
 		});
-		let out = apply(
-			"gradle build",
+		let input = minimizable_input(
 			"> Task :app:compileJava UP-TO-DATE\n> Task :app:test\nBUILD SUCCESSFUL in 8s\n",
-			0,
-			&cfg,
 		);
+		let out = apply("gradle build", &input, 0, &cfg);
 		// gradle.toml is deleted; gradle now dispatches to the Rust jvm Build
 		// filter, which strips `> Task :…UP-TO-DATE` task-progress noise (the
 		// carried-over defs/gradle.toml behaviour, now as a Rust filter — NOT a

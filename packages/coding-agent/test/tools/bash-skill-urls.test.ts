@@ -20,6 +20,13 @@ function createSkill(name: string, baseDir: string): Skill {
 	};
 }
 
+const imageAttachment = {
+	label: "Image #1",
+	uri: "attachment://1",
+	sourcePath: "/tmp/session blobs/image 1.png",
+	image: { type: "image", data: "image-bytes", mimeType: "image/png" },
+} as const;
+
 function createInternalRouter(resources: Record<string, { sourcePath?: string; error?: string }>): {
 	canHandle: (input: string) => boolean;
 	resolve: (
@@ -206,6 +213,29 @@ describe("expandInternalUrls", () => {
 		);
 	});
 
+	it("expands attachment URLs and shell-escapes source paths with spaces", async () => {
+		await expect(
+			expandInternalUrls("cp attachment://1 saved.png", { skills: [], attachments: [imageAttachment] }),
+		).resolves.toBe(`cp ${shellEscape(imageAttachment.sourcePath)} saved.png`);
+	});
+
+	it("expands attachment URLs used as quoted command arguments", async () => {
+		const command = `cmp "attachment://1" 'attachment://1'`;
+		await expect(expandInternalUrls(command, { skills: [], attachments: [imageAttachment] })).resolves.toBe(
+			`cmp ${shellEscape(imageAttachment.sourcePath)} ${shellEscape(imageAttachment.sourcePath)}`,
+		);
+	});
+
+	it("leaves unknown attachment references unchanged", async () => {
+		const command = "cp attachment://2 saved.png";
+		await expect(expandInternalUrls(command, { skills: [], attachments: [imageAttachment] })).resolves.toBe(command);
+	});
+
+	it("preserves attachment mentions embedded in quoted text", async () => {
+		const command = `printf '%s\\n' 'copy attachment://1 to save the original'`;
+		await expect(expandInternalUrls(command, { skills: [], attachments: [imageAttachment] })).resolves.toBe(command);
+	});
+
 	it("expands an unquoted URL inside a double-quoted command substitution", async () => {
 		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
 		const command = 'echo "$(realpath skill://valid-skill/SKILL.md 2>&1)"';
@@ -300,6 +330,16 @@ describe("expandInternalUrls", () => {
 		);
 	});
 
+	it("keeps query parameters in an unquoted internal URL", async () => {
+		const router = createInternalRouter({
+			"agent://reviewer?q=needle": { sourcePath: "/tmp/session/reviewer.md" },
+		});
+
+		await expect(
+			expandInternalUrls("cat agent://reviewer?q=needle", { skills: [], internalRouter: router }),
+		).resolves.toBe(`cat ${shellEscape("/tmp/session/reviewer.md")}`);
+	});
+
 	it("expands local:// URLs to filesystem paths without requiring preexisting files", async () => {
 		const localOptions = {
 			getArtifactsDir: () => "/tmp/session-artifacts",
@@ -310,6 +350,19 @@ describe("expandInternalUrls", () => {
 
 		await expect(expandInternalUrls(command, { skills: [], localOptions })).resolves.toBe(
 			`mv /tmp/source.json ${shellEscape(expectedPath)}`,
+		);
+	});
+
+	it("preserves an adjacent command separator after an unquoted local URL", async () => {
+		const localOptions = {
+			getArtifactsDir: () => "/tmp/session-artifacts",
+			getSessionId: () => "session-1",
+		};
+		const command = 'bb review-packet gates --body-file local://body.txt; echo "exit=$?"';
+		const expectedPath = resolveLocalUrlToPath("local://body.txt", localOptions);
+
+		await expect(expandInternalUrls(command, { skills: [], localOptions })).resolves.toBe(
+			`bb review-packet gates --body-file ${shellEscape(expectedPath)}; echo "exit=$?"`,
 		);
 	});
 

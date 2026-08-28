@@ -730,6 +730,28 @@ describe("terminal title runtime", () => {
 		}
 	});
 
+	it("keeps the working title static under WSL", () => {
+		const originalPlatform = process.platform;
+		const originalWslDistro = process.env.WSL_DISTRO_NAME;
+		try {
+			Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+			process.env.WSL_DISTRO_NAME = "Ubuntu";
+			setSessionTerminalTitle("wsl-project");
+			writes.length = 0;
+
+			setTerminalTitleState("working");
+			expect(emittedTitles()).toEqual(["π : wsl-project"]);
+
+			writes.length = 0;
+			vi.advanceTimersByTime(400);
+			expect(writes).toEqual([]);
+		} finally {
+			if (originalWslDistro === undefined) delete process.env.WSL_DISTRO_NAME;
+			else process.env.WSL_DISTRO_NAME = originalWslDistro;
+			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+		}
+	});
+
 	it("uses SetConsoleTitleW without an OSC write on Windows", () => {
 		const originalPlatform = process.platform;
 		const native = windowsTitleMock;

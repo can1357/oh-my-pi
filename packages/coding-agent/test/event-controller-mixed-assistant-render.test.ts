@@ -6,7 +6,7 @@ import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/eve
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { TUI } from "@oh-my-pi/pi-tui";
+import type { Component, TUI } from "@oh-my-pi/pi-tui";
 
 const TOOL_CALL_A_ID = "toolu_mixed_text_order_a";
 const TOOL_CALL_B_ID = "toolu_mixed_text_order_b";
@@ -53,6 +53,7 @@ function lineContaining(lines: string[], marker: string): number {
 
 function createFixture(hideToolActivity = false) {
 	const chatContainer = new TranscriptContainer();
+	chatContainer.setToolActivityVisible(!hideToolActivity);
 	const pendingTools = new Map();
 	const ui = {
 		requestRender: vi.fn(),
@@ -61,6 +62,7 @@ function createFixture(hideToolActivity = false) {
 	} as unknown as TUI;
 	const viewSession = {
 		getToolByName: () => undefined,
+		hasBuiltInTool: () => true,
 		extensionRunner: undefined,
 		isTtsrAbortPending: false,
 		retryAttempt: 0,
@@ -113,6 +115,37 @@ describe("EventController mixed assistant text/tool rendering", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 		resetSettingsForTest();
+	});
+
+	it("finalizes and removes an orphaned streaming component on the next message_start", async () => {
+		// Regression: a stream that died between message_start and message_end
+		// (transport drop, hook throw) left its component live in the transcript.
+		// One unfinalized block at the retirement frontier blocks history commits
+		// for everything after it, so the whole transcript tail stayed in the
+		// mutable viewport in pressure mode (no separators, compacted blocks).
+		const { controller, chatContainer } = createFixture();
+
+		await controller.handleEvent({ type: "message_start", message: assistantMessage([]) } as Extract<
+			AgentSessionEvent,
+			{ type: "message_start" }
+		>);
+		await controller.handleEvent({
+			type: "message_update",
+			message: assistantMessage([{ type: "thinking", thinking: "**dead attempt**" }]),
+		} as Extract<AgentSessionEvent, { type: "message_update" }>);
+		const orphan = chatContainer.children.at(-1) as Component & {
+			isTranscriptBlockFinalized(): boolean;
+		};
+		expect(orphan.isTranscriptBlockFinalized()).toBe(false);
+
+		// Retry attempt streams a fresh message without the dead one ever ending.
+		await controller.handleEvent({ type: "message_start", message: assistantMessage([]) } as Extract<
+			AgentSessionEvent,
+			{ type: "message_start" }
+		>);
+
+		expect(chatContainer.children).not.toContain(orphan);
+		expect(orphan.isTranscriptBlockFinalized()).toBe(true);
 	});
 
 	it("renders assistant text segments in order around two tool results from one mixed message", async () => {

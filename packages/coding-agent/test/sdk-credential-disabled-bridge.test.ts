@@ -107,6 +107,11 @@ describe("createAgentSession credential_disabled subscription", () => {
 		contextFiles: [],
 		promptTemplates: [],
 		workspaceTree: emptyWorkspaceTree(dirs.cwd),
+		// This suite exercises the SDK's credential event bridge, not ambient tools.
+		// Avoid rebuilding the full built-in/custom-tool surface for every session.
+		toolNames: ["read"],
+		preloadedCustomToolPaths: [],
+		skipPythonPreflight: true,
 		slashCommands: [],
 		enableMCP: false,
 		enableLsp: false,
@@ -501,7 +506,10 @@ describe("createAgentSession credential_disabled subscription", () => {
 				]),
 				tools: new Map(),
 				assistantThinkingRenderers: [],
+				fileWriteFallbackHandlers: [],
+				fileDeleteFallbackHandlers: [],
 				messageRenderers: new Map(),
+				composerShapes: new Map(),
 				commands: new Map(),
 				flags: new Map(),
 				shortcuts: new Map(),
@@ -546,18 +554,16 @@ describe("createAgentSession credential_disabled subscription", () => {
 
 			// 3. Synchronous onError registration — must land before the deferred flush
 			// invokes the throwing handler. This is the contract this test defends.
-			const errors: ExtensionError[] = [];
+			const receivedError = Promise.withResolvers<ExtensionError>();
 			runner.onError(error => {
-				errors.push(error);
+				receivedError.resolve(error);
 			});
 
-			// 4. Let the deferred flush microtask run, then the handler's async throw,
-			// then emitError, which calls our listener. A handful of microtask turns
-			// covers the await Promise.race inside #runHandlerWithTimeout.
-			for (let i = 0; i < 5; i++) await Promise.resolve();
+			// 4. Await the observable callback instead of assuming a fixed number of
+			// microtask turns inside the lifecycle runner.
+			const error = await receivedError.promise;
 
-			expect(errors).toHaveLength(1);
-			expect(errors[0]).toMatchObject({
+			expect(error).toMatchObject({
 				extensionPath: "test://throwing-credential-disabled",
 				event: "credential_disabled",
 				error: "boom",

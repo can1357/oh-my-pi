@@ -353,11 +353,20 @@ function parseSearchPayload(rawResult: unknown): {
 			for (const part of content) {
 				const text = isRecord(part) ? asString(part.text) : null;
 				if (!text) continue;
-				textParts.push(text);
 				try {
-					candidates.push(JSON.parse(text));
+					let parsed: unknown = JSON.parse(text);
+					if (typeof parsed === "string") {
+						try {
+							parsed = JSON.parse(parsed);
+						} catch {
+							// The decoded string is answer text rather than another JSON payload.
+						}
+					}
+					candidates.push(parsed);
+					if (getSearchResults(parsed).length === 0) textParts.push(text);
 				} catch {
-					// Not JSON payload; keep as fallback answer text.
+					// Non-JSON content is preserved as answer text.
+					textParts.push(text);
 				}
 			}
 		}

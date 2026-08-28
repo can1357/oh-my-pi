@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { createLspWritethrough } from "@oh-my-pi/pi-coding-agent/lsp";
+import { createLspWritethrough, FileFormatResult } from "@oh-my-pi/pi-coding-agent/lsp";
 import * as lspConfig from "@oh-my-pi/pi-coding-agent/lsp/config";
 import type { LinterClient, ServerConfig } from "@oh-my-pi/pi-coding-agent/lsp/types";
+import { addFileWriteFallback } from "@oh-my-pi/pi-coding-agent/tools/file-write-fallback";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 function createFormatter(format: (filePath: string, content: string) => Promise<string>): ServerConfig {
@@ -134,6 +136,29 @@ describe("createLspWritethrough batching", () => {
 		expect([...bytes.subarray(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
 		expect(Buffer.from(bytes).toString("utf8")).toBe("\uFEFFconst value = 1;\n");
 	});
+	it("preserves formatter failures when merging batch results", async () => {
+		const formatter = createFormatter(async () => {
+			throw new Error("formatter crashed");
+		});
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["broken-formatter", formatter]]);
+		const writethrough = createLspWritethrough(tempDir.path(), {
+			enableFormat: true,
+			enableDiagnostics: false,
+		});
+
+		const batchId = "formatter-failure";
+		await writethrough(path.join(tempDir.path(), "a.ts"), "const a=1\n", undefined, undefined, {
+			id: batchId,
+			flush: false,
+		});
+		const result = await writethrough(path.join(tempDir.path(), "b.ts"), "const b=1\n", undefined, undefined, {
+			id: batchId,
+			flush: true,
+		});
+
+		expect(result?.formatter).toBe(FileFormatResult.FAILED);
+	});
 
 	it("flushes earlier entries when the final batch write fails", async () => {
 		const loadConfigSpy = vi
@@ -178,5 +203,63 @@ describe("createLspWritethrough batching", () => {
 		expect(getServersSpy).toHaveBeenCalledTimes(1);
 		expect(loadConfigSpy).toHaveBeenCalledTimes(1);
 		expect(await Bun.file(filePath).text()).toBe("const single = true;\n");
+	});
+});
+
+// A privileged user is not constrained by mode bits: a 0o000 file stays both
+// writable and readable, so the write would never be denied and the seam under
+// test would never engage.
+describe.skipIf(process.getuid?.() === 0)("createLspWritethrough batching with a brokered write", () => {
+	let tempDir: TempDir;
+	let root = "";
+	const disposers: Array<() => void> = [];
+
+	beforeEach(async () => {
+		tempDir = TempDir.createSync("@omp-lsp-batch-broker-");
+		// The seam hands handlers a symlink-resolved path and `os.tmpdir()` sits
+		// under `/var` — itself a link — on macOS, so a lexical fixture root would
+		// differ from the brokered path for a reason unrelated to this test.
+		root = await fs.realpath(tempDir.path());
+	});
+
+	afterEach(async () => {
+		for (const dispose of disposers.splice(0)) dispose();
+		vi.restoreAllMocks();
+		await fs.chmod(path.join(root, "opaque.ts"), 0o600).catch(() => {});
+		tempDir.removeSync();
+	});
+
+	it("flushes a batch whose brokered destination cannot be read back", async () => {
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([]);
+		const writethrough = createLspWritethrough(root, { enableFormat: true, enableDiagnostics: true });
+
+		// Denied for writing and for reading at once, which is what a sandbox that
+		// hides a path produces: the direct write fails, a privileged helper lands
+		// the bytes, and this process still cannot read them back.
+		const opaque = path.join(root, "opaque.ts");
+		await Bun.write(opaque, "const before = true;\n");
+		await fs.chmod(opaque, 0o000);
+
+		const brokered: Array<{ dst: string; content: string }> = [];
+		disposers.push(
+			addFileWriteFallback(async req => {
+				brokered.push({ dst: req.dst, content: req.content });
+				await fs.chmod(req.dst, 0o600);
+				await Bun.write(req.dst, req.content);
+				await fs.chmod(req.dst, 0o000);
+				return true;
+			}),
+		);
+
+		const sibling = path.join(root, "sibling.ts");
+		const batchId = `brokered-${Date.now()}`;
+		await writethrough(opaque, "const after = true;\n", undefined, undefined, { id: batchId, flush: false });
+		await writethrough(sibling, "const other = true;\n", undefined, undefined, { id: batchId, flush: true });
+
+		expect(brokered).toEqual([{ dst: opaque, content: "const after = true;\n" }]);
+		expect(await Bun.file(sibling).text()).toBe("const other = true;\n");
+		await fs.chmod(opaque, 0o400);
+		expect(await Bun.file(opaque).text()).toBe("const after = true;\n");
 	});
 });

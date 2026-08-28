@@ -390,7 +390,7 @@ describe("setup wizard short terminals", () => {
 				component.handleInput(key);
 				const frame = component.render(80).map(line => Bun.stripANSI(line));
 				expect(frame.length).toBe(24);
-				expect(frame.some(line => line.trimStart().startsWith(theme.nav.cursor))).toBe(true);
+				expect(frame.some(line => line.includes(`${theme.nav.cursor} `))).toBe(true);
 			}
 		} finally {
 			nowSpy.mockRestore();

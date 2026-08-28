@@ -8,6 +8,7 @@
  * @see https://datatracker.ietf.org/doc/html/rfc8927
  */
 
+import { isRecord } from "@oh-my-pi/pi-utils";
 import type { JTDPrimitive } from "./jtd-utils.js";
 import {
 	isJTDDiscriminator,
@@ -134,6 +135,18 @@ function convertSchema(schema: unknown): unknown {
 	return {};
 }
 
+const jtdOnlyPrimitiveTypes: Record<string, true> = {
+	timestamp: true,
+	float32: true,
+	float64: true,
+	int8: true,
+	uint8: true,
+	int16: true,
+	uint16: true,
+	int32: true,
+	uint32: true,
+};
+
 /**
  * Detect if a schema is JTD format (vs JSON Schema).
  *
@@ -155,11 +168,8 @@ export function isJTDSchema(schema: unknown): boolean {
 	if ("ref" in obj) return true;
 
 	// JTD type primitives (JSON Schema doesn't have int32, float64, etc.)
-	if ("type" in obj) {
-		const jtdPrimitives = ["timestamp", "float32", "float64", "int8", "uint8", "int16", "uint16", "int32", "uint32"];
-		if (jtdPrimitives.includes(obj.type as string)) {
-			return true;
-		}
+	if (typeof obj.type === "string" && Object.hasOwn(jtdOnlyPrimitiveTypes, obj.type)) {
+		return true;
 	}
 
 	// JTD properties form without type: "object" (JSON Schema requires it)
@@ -170,36 +180,128 @@ export function isJTDSchema(schema: unknown): boolean {
 	return false;
 }
 
-function normalizeMixedSchemaNode(schema: unknown): unknown {
-	if (schema === null || typeof schema !== "object") {
-		return schema;
+function isUnambiguousJTDSchema(schema: unknown): boolean {
+	if (!isRecord(schema)) return false;
+
+	if (isRecord(schema.elements) || isRecord(schema.values) || isRecord(schema.optionalProperties)) {
+		return true;
+	}
+	if (typeof schema.ref === "string") return true;
+	if (typeof schema.type === "string" && Object.hasOwn(jtdOnlyPrimitiveTypes, schema.type)) {
+		return true;
+	}
+	if (typeof schema.discriminator !== "string" || !isRecord(schema.mapping)) {
+		return false;
 	}
 
-	if (Array.isArray(schema)) {
-		return schema.map(item => normalizeMixedSchemaNode(item));
+	for (const key in schema.mapping) {
+		if (!Object.hasOwn(schema.mapping, key)) continue;
+		const mapping = schema.mapping[key];
+		if (!isRecord(mapping)) return false;
+
+		let hasSchemaProperties = false;
+		if (Object.hasOwn(mapping, "properties")) {
+			if (!isRecord(mapping.properties)) return false;
+			hasSchemaProperties = true;
+		}
+		if (Object.hasOwn(mapping, "optionalProperties")) {
+			if (!isRecord(mapping.optionalProperties)) return false;
+			hasSchemaProperties = true;
+		}
+		if (!hasSchemaProperties) return false;
 	}
 
-	if (isJTDSchema(schema)) {
-		// `convertSchema` is itself fully recursive and emits pure JSON Schema, so
-		// re-walking the result with `normalizeMixedSchemaNode` is unnecessary and
-		// unsafe: it would treat user-named properties whose keys happen to be JTD
-		// keywords (e.g. `ref`, `elements`) as nested JTD forms (#1345).
-		return convertSchema(schema);
-	}
-
-	const normalized: Record<string, unknown> = {};
-	for (const [key, value] of Object.entries(schema)) {
-		normalized[key] = normalizeMixedSchemaNode(value);
-	}
-
-	return normalized;
+	return true;
 }
+
+function normalizeJsonSchemaArray(value: unknown): unknown {
+	if (!Array.isArray(value)) return value;
+
+	let normalized: unknown[] | undefined;
+	for (let index = 0; index < value.length; index++) {
+		const item = value[index];
+		const converted = normalizeJsonSchemaNode(item);
+		if (converted === item) continue;
+		normalized ??= value.slice();
+		normalized[index] = converted;
+	}
+	return normalized ?? value;
+}
+
+function normalizeJsonSchemaMap(value: unknown): unknown {
+	if (!isRecord(value)) return value;
+
+	let normalized: Record<string, unknown> | undefined;
+	for (const key in value) {
+		if (!Object.hasOwn(value, key)) continue;
+		const item = value[key];
+		const converted = normalizeJsonSchemaNode(item);
+		if (converted === item) continue;
+		normalized ??= { ...value };
+		normalized[key] = converted;
+	}
+	return normalized ?? value;
+}
+
+function normalizeJsonSchemaNode(schema: unknown): unknown {
+	if (!isRecord(schema)) return schema;
+	if (isUnambiguousJTDSchema(schema)) return convertSchema(schema);
+
+	let normalized: Record<string, unknown> | undefined;
+	for (const key in schema) {
+		if (!Object.hasOwn(schema, key)) continue;
+
+		const value = schema[key];
+		let converted: unknown;
+		switch (key) {
+			case "not":
+			case "if":
+			case "then":
+			case "else":
+			case "items":
+			case "contains":
+			case "propertyNames":
+			case "additionalProperties":
+			case "unevaluatedProperties":
+			case "unevaluatedItems":
+			case "contentSchema":
+				converted = normalizeJsonSchemaNode(value);
+				break;
+			case "allOf":
+			case "anyOf":
+			case "oneOf":
+			case "prefixItems":
+				converted = normalizeJsonSchemaArray(value);
+				break;
+			case "properties":
+			case "patternProperties":
+			case "$defs":
+			case "definitions":
+			case "dependentSchemas":
+				converted = normalizeJsonSchemaMap(value);
+				break;
+			default:
+				continue;
+		}
+
+		if (converted === value) continue;
+		normalized ??= { ...schema };
+		normalized[key] = converted;
+	}
+
+	return normalized ?? schema;
+}
+
 /**
  * Convert JTD schema to JSON Schema.
  * If already JSON Schema, returns as-is.
  */
 export function jtdToJsonSchema(schema: unknown): unknown {
-	return normalizeMixedSchemaNode(schema);
+	if (isJTDSchema(schema)) {
+		// convertSchema is recursive; re-walking its JSON Schema output caused #1345.
+		return convertSchema(schema);
+	}
+	return normalizeJsonSchemaNode(schema);
 }
 
 /**

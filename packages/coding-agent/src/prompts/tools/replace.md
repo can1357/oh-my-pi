@@ -1,30 +1,32 @@
-Performs a single string replacement in a file with fuzzy whitespace matching.
+Single file string replacement; fuzzy whitespace matching.
 
 <instruction>
-- You MUST use the smallest `old_string` that uniquely identifies the change
-- If `old_string` is not unique, you MUST expand it with more context or use `replace_all: true` to replace all occurrences
-- Use `replace_all: true` when renaming a string across the file
-- You SHOULD prefer editing existing files over creating new ones
+- MUST use smallest `old_string` uniquely identifying change.
+- Nonunique `old_string` → MUST add context or use `replace_all: true` for all occurrences.
+- Rename a string across file → use `replace_all: true`.
+- SHOULD edit existing files, not create new.
 </instruction>
 
 <output>
-Returns success/failure status. On success, file modified in place with replacement applied. On failure (e.g., `old_string` not found or matches multiple locations without `replace_all: true`), returns error describing issue.
+Success/failure status.
+Success: file modified in place; replacement applied.
+Failure — e.g., `old_string` absent or multiple matches without `replace_all: true`: error describes issue.
 </output>
 
 <critical>
-- You MUST read the file at least once in the conversation before editing. Tool errors if you attempt edit without reading file first.
+- MUST read file at least once in conversation before editing. Tool errors on edit before read.
 </critical>
 
 <bash-alternatives>
-Replace is content-addressed — you identify *what* to change by its text.
+Replace content-addressed — identify change by text.
 
-For pattern-addressed bulk changes, bash is more efficient:
+Pattern-addressed bulk changes: bash more efficient:
 
 |Operation|Command|
 |---|---|
 |Regex replace|`sd 'pattern' 'replacement' file`|
 |Bulk replace across files|`sd 'pattern' 'replacement' **/*.ts`|
 
-Use Replace when _content itself_ identifies location; use `ast_edit` for structure-aware codemods.
-For in-place edits prefer this tool or `write` — you get a diff preview and fuzzy matching.
+Use Replace when content identifies location; `ast_edit` for structure-aware codemods.
+For in-place edits prefer Replace or `write` — diff preview and fuzzy matching.
 </bash-alternatives>

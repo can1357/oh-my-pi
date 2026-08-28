@@ -2,7 +2,7 @@
 mod ax;
 #[cfg(target_os = "windows")]
 mod capture;
-pub(crate) mod delivery;
+pub mod delivery;
 #[cfg(target_os = "windows")]
 mod input;
 

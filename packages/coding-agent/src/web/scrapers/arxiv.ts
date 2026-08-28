@@ -30,7 +30,7 @@ export const handleArxiv: SpecialHandler = async (
 		if (!result.ok) return null;
 
 		// Parse the Atom feed response
-		const { parseHTML } = await import("linkedom");
+		const { parseHTML } = await import("@oh-my-pi/pi-utils/dom");
 		const doc = parseHTML(result.content).document;
 		const entry = doc.querySelector("entry");
 

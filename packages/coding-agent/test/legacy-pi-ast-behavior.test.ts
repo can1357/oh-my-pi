@@ -241,6 +241,32 @@ const rewriteCases: RewriteCase[] = [
 				`require(${JSON.stringify(requirePath)});`,
 			].join("\n"),
 	},
+	{
+		name: "createRequire factory invocation pins its bare dependency, leaving relative and non-createRequire calls alone",
+		source: [
+			'import { createRequire as makeNodeRequire } from "node:module";',
+			'import * as nodeModule from "node:module";',
+			'const direct = makeNodeRequire(import.meta.url)("tracked-dep");',
+			'const viaModule = nodeModule.createRequire("./anchor")("tracked-dep");',
+			'const relative = makeNodeRequire(import.meta.url)("./sibling");',
+			"const createRequire = () => makeRequire;",
+			'const shadowed = createRequire(import.meta.url)("tracked-dep");',
+			'const unrelated = other.createRequire(import.meta.url)("tracked-dep");',
+			'const otherFactory = makeRequire(import.meta.url)("tracked-dep");',
+		].join("\n"),
+		expected: (_importPath, requirePath) =>
+			[
+				'import { createRequire as makeNodeRequire } from "node:module";',
+				'import * as nodeModule from "node:module";',
+				`const direct = makeNodeRequire(import.meta.url)(${JSON.stringify(requirePath)});`,
+				`const viaModule = nodeModule.createRequire("./anchor")(${JSON.stringify(requirePath)});`,
+				'const relative = makeNodeRequire(import.meta.url)("./sibling");',
+				"const createRequire = () => makeRequire;",
+				'const shadowed = createRequire(import.meta.url)("tracked-dep");',
+				'const unrelated = other.createRequire(import.meta.url)("tracked-dep");',
+				'const otherFactory = makeRequire(import.meta.url)("tracked-dep");',
+			].join("\n"),
+	},
 ];
 
 async function loadCommonJsCase(testCase: CommonJsCase): Promise<{ keys: string[]; named: Record<string, unknown> }> {
@@ -373,6 +399,32 @@ describe("legacy Pi Babel AST behavior baseline", () => {
 			const actual = await __rewriteLegacyExtensionSourceForTests(testCase.source, rewriteImporter);
 			expect(actual, testCase.name).toBe(testCase.expected(importTarget, requireTarget));
 		}
+	});
+
+	test("keeps mixed import and require rewrites byte-identical after a cached analysis", async () => {
+		const source = [
+			'import value from "tracked-dep";',
+			'export { value as named } from "tracked-dep";',
+			'const required = require("tracked-dep");',
+		].join("\n");
+		const expected = [
+			`import value from ${JSON.stringify(importTarget)};`,
+			`export { value as named } from ${JSON.stringify(importTarget)};`,
+			`const required = require(${JSON.stringify(requireTarget)});`,
+		].join("\n");
+		expect(await __rewriteLegacyExtensionSourceForTests(source, rewriteImporter)).toBe(expected);
+		expect(await __rewriteLegacyExtensionSourceForTests(source, rewriteImporter)).toBe(expected);
+	});
+
+	test("uses a fresh analysis when extension source content changes", async () => {
+		const original = 'import value from "tracked-dep";';
+		const changed = 'const value = require("tracked-dep");';
+		expect(await __rewriteLegacyExtensionSourceForTests(original, rewriteImporter)).toBe(
+			`import value from ${JSON.stringify(importTarget)};`,
+		);
+		expect(await __rewriteLegacyExtensionSourceForTests(changed, rewriteImporter)).toBe(
+			`const value = require(${JSON.stringify(requireTarget)});`,
+		);
 	});
 
 	test("discovers exact CommonJS named exports with Babel binding semantics", async () => {

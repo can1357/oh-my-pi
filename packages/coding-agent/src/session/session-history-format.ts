@@ -55,6 +55,14 @@ export interface HistoryFormatOptions {
 	 */
 	toolResultIndex?: ReadonlyMap<string, ToolResultMessage>;
 	consumedToolCallIds?: Set<string>;
+	/**
+	 * Chunked rendering state: a mutable holder for the watched-role label
+	 * (`**user**:` / `**agent**:`) that ended the previous chunk. Lets a caller
+	 * formatting one logical transcript across several calls (advisor
+	 * multi-message split) keep consecutive same-role collapsing byte-identical
+	 * to the single-block render: pass one object across all chunk calls.
+	 */
+	watchedRoleState?: { lastLabel: string | undefined };
 }
 
 /** Max length of the primary-arg summary inside `→ tool(...)` lines. */
@@ -313,7 +321,9 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 	// (the watched agent emits one assistant message per tool call, so otherwise
 	// every call repeats `**agent**:`). Cleared whenever a
 	// non-role-labeled line is emitted so the next turn re-labels.
-	let lastWatchedLabel: string | undefined;
+	// Chunked callers seed the previous chunk's trailing label so collapsing
+	// stays byte-identical to the single-block render.
+	let lastWatchedLabel: string | undefined = opts?.watchedRoleState?.lastLabel;
 	// Emit a watched-mode role label, collapsing consecutive same-role turns
 	// under one label (matching the user/assistant paths). Used for the
 	// user-attributed `!`/`$` execution lines so the advisor never reads them
@@ -453,6 +463,10 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 				break;
 			}
 		}
+	}
+
+	if (opts?.watchedRoleState) {
+		opts.watchedRoleState.lastLabel = lastWatchedLabel;
 	}
 
 	return `${lines.join("\n").trim()}\n`;

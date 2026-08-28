@@ -1,16 +1,18 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { Model } from "@oh-my-pi/pi-ai";
+import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { GoalTool } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { normalizeCustomMessagePayload } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -133,16 +135,16 @@ async function waitForMicrotasks(): Promise<void> {
 
 async function armInputWaiter(mode: InteractiveMode): Promise<{
 	inputPromise: Promise<void>;
-	getResolvedText: () => string | undefined;
+	getResolvedInput: () => SubmittedUserInput | undefined;
 }> {
-	let resolvedText: string | undefined;
+	let resolvedInput: SubmittedUserInput | undefined;
 	const inputPromise = mode.getUserInput().then(input => {
-		resolvedText = input.text;
+		resolvedInput = input;
 	});
 	await waitForMicrotasks();
 	return {
 		inputPromise,
-		getResolvedText: () => resolvedText,
+		getResolvedInput: () => resolvedInput,
 	};
 }
 
@@ -204,41 +206,182 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(await toolNamesFor(harness)).toContain("goal");
 	});
 
-	it("defers initial goal objective submission while streaming", async () => {
-		let streaming = true;
-		Object.defineProperty(harness.session, "isStreaming", { configurable: true, get: () => streaming });
+	it("steers initial goal objective attachments while streaming", async () => {
+		Object.defineProperty(harness.session, "isStreaming", { configurable: true, get: () => true });
 		const sendGoalModeContext = vi.spyOn(harness.session, "sendGoalModeContext").mockResolvedValue();
-		const waiter = await armInputWaiter(harness.mode);
+		const promptSpy = vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
+		const images: ImageContent[] = [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }];
+		const objective = "[Image #1, 10x10] Ship the release";
 
-		await harness.mode.handleGoalModeCommand("Ship the release");
-		await waitForMicrotasks();
+		await harness.mode.handleGoalModeCommand(objective, { images, imageLinks: ["file:///shot.png"] });
 
-		expect(harness.session.getGoalModeState()?.goal.objective).toBe("Ship the release");
+		expect(harness.session.getGoalModeState()?.goal.objective).toBe(objective);
 		expect(sendGoalModeContext).toHaveBeenCalledWith({ deliverAs: "steer" });
-		expect(waiter.getResolvedText()).toBeUndefined();
-
-		streaming = false;
-		harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "cleanup" }));
-		await waiter.inputPromise;
+		expect(promptSpy).toHaveBeenCalledWith(objective, { streamingBehavior: "steer", images });
 	});
 
-	it("defers replacement goal objective submission while streaming", async () => {
+	it("steers replacement goal objective attachments while streaming", async () => {
 		await harness.mode.handleGoalModeCommand("Ship the release");
-		let streaming = true;
-		Object.defineProperty(harness.session, "isStreaming", { configurable: true, get: () => streaming });
+		Object.defineProperty(harness.session, "isStreaming", { configurable: true, get: () => true });
 		const sendGoalModeContext = vi.spyOn(harness.session, "sendGoalModeContext").mockResolvedValue();
-		const waiter = await armInputWaiter(harness.mode);
+		const promptSpy = vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
+		const images: ImageContent[] = [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }];
+		const objective = "[Image #1, 10x10] Replace the objective";
 
-		await harness.mode.handleGoalModeCommand("set Replace the objective");
-		await waitForMicrotasks();
+		await harness.mode.handleGoalModeCommand(`set ${objective}`, { images, imageLinks: ["file:///shot.png"] });
 
-		expect(harness.session.getGoalModeState()?.goal.objective).toBe("Replace the objective");
+		expect(harness.session.getGoalModeState()?.goal.objective).toBe(objective);
 		expect(sendGoalModeContext).toHaveBeenCalledWith({ deliverAs: "steer" });
-		expect(waiter.getResolvedText()).toBeUndefined();
+		expect(promptSpy).toHaveBeenCalledWith(objective, { streamingBehavior: "steer", images });
+	});
+	it("steers plan prompt attachments while streaming", async () => {
+		Object.defineProperty(harness.session, "isStreaming", { configurable: true, get: () => true });
+		const sendPlanModeContext = vi.spyOn(harness.session, "sendPlanModeContext").mockResolvedValue();
+		const promptSpy = vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
+		const images: ImageContent[] = [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }];
+		const text = "[Image #1, 10x10] Plan this";
 
-		streaming = false;
-		harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "cleanup" }));
+		expect(await harness.mode.handlePlanModeCommand(text, { images, imageLinks: ["file:///shot.png"] })).toBe(true);
+
+		expect(sendPlanModeContext).toHaveBeenCalledWith({ deliverAs: "steer" });
+		expect(promptSpy).toHaveBeenCalledWith(text, { streamingBehavior: "steer", images });
+	});
+
+	it("steers vibe prompt attachments while streaming", async () => {
+		vi.spyOn(harness.session, "activateVibeTools").mockResolvedValue();
+		Object.defineProperty(harness.session, "isStreaming", { configurable: true, get: () => true });
+		const sendVibeModeContext = vi.spyOn(harness.session, "sendVibeModeContext").mockResolvedValue();
+		const promptSpy = vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
+		const images: ImageContent[] = [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }];
+		const text = "[Image #1, 10x10] Delegate this";
+
+		expect(await harness.mode.handleVibeModeCommand(text, { images, imageLinks: ["file:///shot.png"] })).toBe(true);
+
+		expect(sendVibeModeContext).toHaveBeenCalledWith({ deliverAs: "steer" });
+		expect(promptSpy).toHaveBeenCalledWith(text, { streamingBehavior: "steer", images });
+	});
+
+	const attachmentCases: Array<{
+		name: string;
+		text: string;
+		prepare?: (mode: InteractiveMode) => Promise<boolean | void>;
+		submit: (mode: InteractiveMode, input: Pick<SubmittedUserInput, "images" | "imageLinks">) => Promise<boolean>;
+	}> = [
+		{
+			name: "/goal",
+			text: "[Image #1, 10x10] fix this",
+			submit: (mode: InteractiveMode, input: Pick<SubmittedUserInput, "images" | "imageLinks">) =>
+				mode.handleGoalModeCommand("[Image #1, 10x10] fix this", input),
+		},
+		{
+			name: "/goal set",
+			text: "[Image #1, 10x10] replace this",
+			prepare: (mode: InteractiveMode) => mode.handleGoalModeCommand("Ship the release"),
+			submit: (mode: InteractiveMode, input: Pick<SubmittedUserInput, "images" | "imageLinks">) =>
+				mode.handleGoalModeCommand("set [Image #1, 10x10] replace this", input),
+		},
+		{
+			name: "/plan",
+			text: "[Image #1, 10x10] plan this",
+			submit: (mode: InteractiveMode, input: Pick<SubmittedUserInput, "images" | "imageLinks">) =>
+				mode.handlePlanModeCommand("[Image #1, 10x10] plan this", input),
+		},
+		{
+			name: "/vibe",
+			text: "[Image #1, 10x10] delegate this",
+			prepare: async mode => {
+				vi.spyOn(mode.session, "activateVibeTools").mockResolvedValue();
+			},
+			submit: (mode: InteractiveMode, input: Pick<SubmittedUserInput, "images" | "imageLinks">) =>
+				mode.handleVibeModeCommand("[Image #1, 10x10] delegate this", input),
+		},
+	];
+
+	for (const testCase of attachmentCases) {
+		it(`carries the submitted attachment snapshot through ${testCase.name}`, async () => {
+			await testCase.prepare?.(harness.mode);
+			const images: ImageContent[] = [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }];
+			const imageLinks = ["file:///shot.png"];
+			const waiter = await armInputWaiter(harness.mode);
+
+			await testCase.submit(harness.mode, { images, imageLinks });
+			await waiter.inputPromise;
+
+			const input = waiter.getResolvedInput();
+			expect(input?.text).toBe(testCase.text);
+			expect(input?.images).toBe(images);
+			expect(input?.imageLinks).toBe(imageLinks);
+		});
+	}
+	it("restores the goal draft when setup fails", async () => {
+		const images: ImageContent[] = [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }];
+		const imageLinks = ["file:///shot.png"];
+		const commandText = "/goal [Image #1, 10x10] fix this";
+		harness.mode.editor.setText(commandText);
+		harness.mode.editor.pendingImages = images;
+		harness.mode.editor.pendingImageLinks = imageLinks;
+		vi.spyOn(harness.session.goalRuntime, "createGoal").mockRejectedValueOnce(new Error("goal setup failed"));
+		const showError = vi.spyOn(harness.mode, "showError");
+
+		await executeBuiltinSlashCommand(commandText, {
+			ctx: harness.mode,
+			input: { images, imageLinks },
+		});
+
+		expect(showError).toHaveBeenCalledWith("goal setup failed");
+		expect(harness.mode.editor.getText()).toBe(commandText);
+		expect(harness.mode.editor.pendingImages).toEqual(images);
+		expect(harness.mode.editor.pendingImageLinks).toEqual(imageLinks);
+	});
+
+	it("keeps images pasted while delayed plan setup completes in the later draft", async () => {
+		const submittedImages: ImageContent[] = [{ type: "image", data: "b2xk", mimeType: "image/png" }];
+		const submittedLinks = ["file:///submitted.png"];
+		harness.mode.editor.pendingImages = submittedImages;
+		harness.mode.editor.pendingImageLinks = submittedLinks;
+		const waiter = await armInputWaiter(harness.mode);
+		const setupStarted = Promise.withResolvers<void>();
+		const continueSetup = Promise.withResolvers<void>();
+		const setActiveTools = harness.session.setActiveToolsByName.bind(harness.session);
+		vi.spyOn(harness.session, "setActiveToolsByName").mockImplementationOnce(async toolNames => {
+			setupStarted.resolve();
+			await continueSetup.promise;
+			await setActiveTools(toolNames);
+		});
+
+		const command = executeBuiltinSlashCommand("/plan [Image #1, 10x10] plan this", {
+			ctx: harness.mode,
+			input: { images: submittedImages, imageLinks: submittedLinks },
+		});
+		await setupStarted.promise;
+		const laterImage: ImageContent = { type: "image", data: "bmV3", mimeType: "image/png" };
+		harness.mode.editor.pendingImages = [laterImage];
+		harness.mode.editor.pendingImageLinks = ["file:///later.png"];
+		continueSetup.resolve();
+		await command;
 		await waiter.inputPromise;
+
+		expect(waiter.getResolvedInput()?.images).toBe(submittedImages);
+		expect(harness.mode.editor.pendingImages).toEqual([laterImage]);
+		expect(harness.mode.editor.pendingImageLinks).toEqual(["file:///later.png"]);
+	});
+
+	it("keeps a later draft when a preserve-draft submission is cancelled", () => {
+		const submittedImage: ImageContent = { type: "image", data: "b2xk", mimeType: "image/png" };
+		const laterImage: ImageContent = { type: "image", data: "bmV3", mimeType: "image/png" };
+		harness.mode.editor.setText("later draft");
+		harness.mode.editor.pendingImages = [laterImage];
+		harness.mode.editor.pendingImageLinks = ["file:///later.png"];
+
+		harness.mode.startPendingSubmission(
+			{ text: "submitted draft", images: [submittedImage], imageLinks: ["file:///submitted.png"] },
+			{ preserveDraft: true },
+		);
+
+		expect(harness.mode.cancelPendingSubmission()).toBe(true);
+		expect(harness.mode.editor.getText()).toBe("later draft");
+		expect(harness.mode.editor.pendingImages).toEqual([laterImage]);
+		expect(harness.mode.editor.pendingImageLinks).toEqual(["file:///later.png"]);
 	});
 
 	it("includes escaped live todo state in hidden goal context during continuations", async () => {
@@ -344,7 +487,7 @@ describe("InteractiveMode goal mode integration", () => {
 		vi.advanceTimersByTime(800);
 		await waitForMicrotasks();
 
-		expect(waiter.getResolvedText()).toBeUndefined();
+		expect(waiter.getResolvedInput()).toBeUndefined();
 
 		streaming = false;
 		harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "cleanup" }));

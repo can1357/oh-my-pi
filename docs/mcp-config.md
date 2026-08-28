@@ -39,7 +39,7 @@ OMP also translates these current tool-native sources:
 - VS Code: project-only `.vscode/mcp.json` using `mcp.servers`
 - installed Claude marketplace plugins and OMP extension packages that declare MCP servers
 
-For translated providers with both scopes, a same-named user entry is encountered before its project entry. OMP-native config is the exception: its project entry precedes its active-profile user entry. Cross-provider priority is listed in [Discovery and precedence](#discovery-and-precedence).
+For Claude Code, Codex, Gemini CLI, Cursor, and Windsurf, the project entry is encountered before its same-named user entry — matching OMP-native config, whose project entry precedes its active-profile user entry — so a project `enabled: false` suppresses a same-named user server. OpenCode currently encounters the user entry first. Cross-provider priority is listed in [Discovery and precedence](#discovery-and-precedence).
 
 ### Profiles
 

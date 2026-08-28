@@ -79,7 +79,8 @@ const BURSTS: readonly FireworkBurst[] = [
  * precedence when both changes arrive in the same report. A verified decrease,
  * or a prior positive balance becoming unavailable, suppresses the weekly event
  * because the user may have redeemed a credit. Other weekly usage drops are
- * celebrated only before the previously scheduled reset deadline.
+ * celebrated only when the provider advances the quota deadline before the
+ * previously scheduled reset.
  */
 export function detectCodexResetFireworks(
 	previous: CodexResetUsageSnapshot,
@@ -111,9 +112,13 @@ export function detectCodexResetFireworks(
 	if (previousWeeklyPercent === 0 || currentWeeklyPercent >= previousWeeklyPercent) return undefined;
 
 	const scheduledResetAt = previous.sevenDay.resetsAt;
+	const nextResetAt = current.sevenDay.resetsAt;
 	if (
 		scheduledResetAt === undefined ||
 		!Number.isFinite(scheduledResetAt) ||
+		nextResetAt === undefined ||
+		!Number.isFinite(nextResetAt) ||
+		nextResetAt <= scheduledResetAt ||
 		typeof current.observedAt !== "number" ||
 		!Number.isFinite(current.observedAt) ||
 		current.observedAt >= scheduledResetAt

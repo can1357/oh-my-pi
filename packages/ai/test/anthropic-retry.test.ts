@@ -105,4 +105,20 @@ describe("isProviderRetryableError", () => {
 		expect(isProviderRetryableError(err, "anthropic")).toBe(false);
 		expect(isProviderRetryableError(err)).toBe(false);
 	});
+
+	it("does not retry Copilot's per-integrator entitlement response", () => {
+		const body = {
+			error: {
+				message:
+					'The requested model is not available for integrator "opencode". Available models: [gpt-4.1 claude-opus-4.7].',
+				code: "model_not_available_for_integrator",
+				param: "model",
+				type: "invalid_request_error",
+			},
+		};
+		const err = new Error(`400 ${JSON.stringify(body)}`);
+		Object.assign(err, { status: 400, error: body });
+		expect(isProviderRetryableError(err, "github-copilot")).toBe(false);
+		expect(isProviderRetryableError(err, "anthropic")).toBe(false);
+	});
 });

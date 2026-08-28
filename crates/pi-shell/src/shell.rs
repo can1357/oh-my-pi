@@ -1,31 +1,27 @@
 //! Runtime-agnostic brush shell execution.
 
+#[cfg(windows)]
+use std::collections::HashSet;
 use std::{
-	collections::{HashMap, HashSet},
-	fmt::Write as _,
+	collections::HashMap,
 	fs,
-	io::{self, BufRead, Write},
-	path::{Path, PathBuf},
+	io::{self},
 	str,
 	sync::Arc,
-	time::{Duration, SystemTime, UNIX_EPOCH},
+	time::Duration,
 };
 
 use anyhow::{Error, Result};
-use brush_builtins::{BuiltinSet, default_builtins};
 use brush_core::{
-	ExecutionContext, ExecutionControlFlow, ExecutionExitCode, ExecutionParameters, ExecutionResult,
+	ExecutionControlFlow, ExecutionExitCode, ExecutionParameters, ExecutionResult,
 	ProcessGroupPolicy, ProfileLoadBehavior, RcLoadBehavior, Shell as BrushShell, ShellValue,
-	ShellVariable, SourceInfo, SpawnObserver, builtins,
+	ShellVariable, SourceInfo, SpawnObserver,
 	env::EnvironmentScope,
 	openfiles::{self, OpenFile, OpenFiles},
-	sys,
-	traps::{self, TrapSignal},
 };
 use bytes::Bytes;
-use clap::Parser;
 use flume::Sender;
-use jiff::{Timestamp, fmt::strtime, tz::TimeZone};
+use pi_builtins::{BuiltinSet, default_builtins};
 #[cfg(not(unix))]
 use tokio::io::AsyncReadExt as _;
 use tokio::{sync::Mutex as TokioMutex, time};
@@ -40,6 +36,12 @@ use crate::{
 
 struct ShellSessionCore {
 	shell: BrushShell,
+}
+
+impl Drop for ShellSessionCore {
+	fn drop(&mut self) {
+		terminate_internal_background_jobs(&mut self.shell);
+	}
 }
 
 #[derive(Clone, Default)]
@@ -585,122 +587,37 @@ async fn create_session(config: &ShellConfig) -> Result<ShellSessionCore> {
 	create_session_for_run(config, None, None).await
 }
 
-async fn create_session_for_run(
-	config: &ShellConfig,
-	spawn_registry: Option<Arc<process::SpawnRegistry>>,
-	cancel_token: Option<CancellationToken>,
-) -> Result<ShellSessionCore> {
-	let mut shell = BrushShell::builder()
-		.do_not_inherit_env(true)
-		.profile(ProfileLoadBehavior::Skip)
-		.rc(RcLoadBehavior::Skip)
-		.builtins(default_builtins(BuiltinSet::BashMode))
-		.build()
-		.await
-		.map_err(|err| Error::msg(format!("Failed to initialize shell: {err}")))?;
-
-	if let Some(exec_builtin) = shell.builtin_mut("exec") {
-		exec_builtin.disabled = true;
-	}
-	if let Some(suspend_builtin) = shell.builtin_mut("suspend") {
-		suspend_builtin.disabled = true;
-	}
-	shell.register_builtin("sleep", builtins::builtin::<SleepCommand, _>());
-	shell.register_builtin("timeout", builtins::builtin::<TimeoutCommand, _>());
-	shell.register_builtin("ps", builtins::builtin::<PsCommand, _>());
-	shell.register_builtin("top", builtins::builtin::<TopCommand, _>());
-	shell.register_builtin("pgrep", builtins::builtin::<ProcMatchCommand, _>());
-	shell.register_builtin("pkill", builtins::builtin::<ProcMatchCommand, _>());
-	shell.register_builtin("pidwait", builtins::builtin::<ProcMatchCommand, _>());
-	shell.register_builtin("kill", builtins::builtin::<KillCommand, _>());
-	// In-process uutils-backed builtins (vendored + patched): consistent,
-	// cross-platform implementations that run without spawning a process and
-	// resolve paths against the shell working directory. The whole set can be
-	// disabled (falling back to system binaries) via PI_DISABLE_UUTILS_BUILTINS;
-	// the destructive pair additionally honors PI_DISABLE_UUTILS_DESTRUCTIVE.
-	if !uutils_env_disabled(config, "PI_DISABLE_UUTILS_BUILTINS") {
-		shell.register_builtin("mkdir", crate::coreutils::mkdir_builtin());
-		shell.register_builtin("head", crate::coreutils::head_builtin());
-		shell.register_builtin("tail", crate::coreutils::tail_builtin());
-		shell.register_builtin("wc", crate::coreutils::wc_builtin());
-		shell.register_builtin("sort", crate::coreutils::sort_builtin());
-		shell.register_builtin("ls", crate::coreutils::ls_builtin());
-		shell.register_builtin("find", crate::coreutils::find_builtin());
-		shell.register_builtin("grep", crate::coreutils::grep_builtin());
-		shell.register_builtin("rg", crate::coreutils::rg_builtin());
-		shell.register_builtin("fd", crate::fd::fd_builtin());
-		shell.register_builtin("cat", crate::coreutils::cat_builtin());
-		shell.register_builtin("uniq", crate::coreutils::uniq_builtin());
-		shell.register_builtin("base64", crate::coreutils::base64_builtin());
-		shell.register_builtin("cmp", crate::coreutils::cmp_builtin());
-		shell.register_builtin("md5sum", crate::coreutils::md5sum_builtin());
-		shell.register_builtin("sha1sum", crate::coreutils::sha1sum_builtin());
-		shell.register_builtin("sha224sum", crate::coreutils::sha224sum_builtin());
-		shell.register_builtin("sha256sum", crate::coreutils::sha256sum_builtin());
-		shell.register_builtin("sha384sum", crate::coreutils::sha384sum_builtin());
-		shell.register_builtin("sha512sum", crate::coreutils::sha512sum_builtin());
-		shell.register_builtin("b2sum", crate::coreutils::b2sum_builtin());
-		shell.register_builtin("basename", crate::coreutils::basename_builtin());
-		shell.register_builtin("dirname", crate::coreutils::dirname_builtin());
-		shell.register_builtin("readlink", crate::coreutils::readlink_builtin());
-		shell.register_builtin("realpath", crate::coreutils::realpath_builtin());
-		shell.register_builtin("touch", crate::coreutils::touch_builtin());
-		shell.register_builtin("stat", crate::coreutils::stat_builtin());
-		shell.register_builtin("date", crate::coreutils::date_builtin());
-		shell.register_builtin("mktemp", crate::coreutils::mktemp_builtin());
-		shell.register_builtin("seq", crate::coreutils::seq_builtin());
-		shell.register_builtin("yes", crate::coreutils::yes_builtin());
-		shell.register_builtin("printenv", crate::coreutils::printenv_builtin());
-		shell.register_builtin("truncate", crate::coreutils::truncate_builtin());
-		shell.register_builtin("tac", crate::coreutils::tac_builtin());
-		shell.register_builtin("nproc", crate::coreutils::nproc_builtin());
-		shell.register_builtin("uname", crate::coreutils::uname_builtin());
-		shell.register_builtin("whoami", crate::coreutils::whoami_builtin());
-		shell.register_builtin("hostname", crate::coreutils::hostname_builtin());
-		shell.register_builtin("which", crate::which::which_builtin());
-		shell.register_builtin("diff", crate::coreutils::diff_builtin());
-		shell.register_builtin("cut", crate::coreutils::cut_builtin());
-		shell.register_builtin("tee", crate::coreutils::tee_builtin());
-		shell.register_builtin("tr", crate::coreutils::tr_builtin());
-		shell.register_builtin("paste", crate::coreutils::paste_builtin());
-		shell.register_builtin("comm", crate::coreutils::comm_builtin());
-		shell.register_builtin("sed", crate::coreutils::sed_builtin());
-		shell.register_builtin("xargs", crate::coreutils::xargs_builtin());
-		shell.register_builtin("jq", crate::coreutils::jq_builtin());
-		// moreutils-inspired in-process builtins (see crate::moreutils).
-		shell.register_builtin("ts", crate::coreutils::ts_builtin());
-		shell.register_builtin("sponge", crate::coreutils::sponge_builtin());
-		shell.register_builtin("ifne", crate::coreutils::ifne_builtin());
-		shell.register_builtin("isutf8", crate::coreutils::isutf8_builtin());
-		shell.register_builtin("combine", crate::coreutils::combine_builtin());
-		#[cfg(unix)]
-		shell.register_builtin("errno", crate::coreutils::errno_builtin());
-		if !uutils_env_disabled(config, "PI_DISABLE_UUTILS_DESTRUCTIVE") {
-			if !uutils_env_disabled(config, "PI_DISABLE_RM_BUILTIN") {
-				shell.register_builtin("rm", crate::coreutils::rm_builtin());
-			}
-			if !uutils_env_disabled(config, "PI_DISABLE_MV_BUILTIN") {
-				shell.register_builtin("mv", crate::coreutils::mv_builtin());
-			}
-			// ln can clobber existing files via -f; gate it with the destructive set.
-			shell.register_builtin("ln", crate::coreutils::ln_builtin());
-		}
-	}
-
+/// Copies the host environment into `shell`, merging duplicate `PATH` values
+/// and registering the merged `PATH` last.
+///
+/// Entries whose key or value is not valid Unicode are skipped: a corrupt
+/// entry carries no usable meaning, and `std::env::vars()` — the naive way to
+/// read the host environment — panics on the first one before any command can
+/// run. `vars_os()` yields the raw entries without panicking, leaving the
+/// skip decision here.
+fn copy_env_into_shell(
+	shell: &mut BrushShell,
+	env: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Result<()> {
 	let mut merged_path: Option<String> = None;
-	for (key, value) in std::env::vars() {
-		let normalized_key = normalize_env_key(&key);
+	for (key, value) in env {
+		// A key or value that cannot be decoded as Unicode is unusable; drop
+		// it rather than panicking startup for a corrupt host environment.
+		let (Some(key), Some(value)) = (key.to_str(), value.to_str()) else {
+			continue;
+		};
+		let normalized_key = normalize_env_key(key);
 		if should_skip_env_var(normalized_key) {
 			continue;
 		}
 		if normalized_key == "PATH" {
 			merged_path = Some(match merged_path {
-				Some(existing) => merge_path_values(&existing, &value),
-				None => value,
+				Some(existing) => merge_path_values(&existing, value),
+				None => value.to_string(),
 			});
 			continue;
 		}
-		let mut var = ShellVariable::new(ShellValue::String(value));
+		let mut var = ShellVariable::new(ShellValue::String(value.to_string()));
 		var.export();
 		shell
 			.env_mut()
@@ -724,6 +641,67 @@ async fn create_session_for_run(
 			.map_err(|err| Error::msg(format!("Failed to set env: {err}")))?;
 	}
 
+	Ok(())
+}
+
+async fn create_session_for_run(
+	config: &ShellConfig,
+	spawn_registry: Option<Arc<process::SpawnRegistry>>,
+	cancel_token: Option<CancellationToken>,
+) -> Result<ShellSessionCore> {
+	let mut shell = BrushShell::builder()
+		.do_not_inherit_env(true)
+		.profile(ProfileLoadBehavior::Skip)
+		.rc(RcLoadBehavior::Skip)
+		.builtins(default_builtins(BuiltinSet::BashMode))
+		.build()
+		.await
+		.map_err(|err| Error::msg(format!("Failed to initialize shell: {err}")))?;
+
+	if let Some(exec_builtin) = shell.builtin_mut("exec") {
+		exec_builtin.disabled = true;
+	}
+	if let Some(suspend_builtin) = shell.builtin_mut("suspend") {
+		suspend_builtin.disabled = true;
+	}
+	// Process inspection and control (see `pi_builtins::process_builtins`).
+	// `nohup` is withheld when PI_DISABLE_NOHUP_BUILTIN asks for the system one;
+	// `kill` already comes from the default set, where our richer implementation
+	// replaced brush's.
+	for (name, registration) in pi_builtins::process_builtins() {
+		if name == "nohup" && nohup_builtin_disabled(config) {
+			continue;
+		}
+		shell.register_builtin(name, registration);
+	}
+	// In-process command-line utility builtins (see
+	// `pi_builtins::utility_builtins`): consistent, cross-platform implementations
+	// that run without spawning a process and resolve paths against the shell
+	// working directory. The whole set can be disabled (falling back to system
+	// binaries) via PI_DISABLE_UUTILS_BUILTINS; the destructive trio additionally
+	// honors PI_DISABLE_UUTILS_DESTRUCTIVE, and `rm`/`mv` have their own switches.
+	if !uutils_env_disabled(config, "PI_DISABLE_UUTILS_BUILTINS") {
+		let destructive_disabled = uutils_env_disabled(config, "PI_DISABLE_UUTILS_DESTRUCTIVE");
+		let rm_disabled =
+			destructive_disabled || uutils_env_disabled(config, "PI_DISABLE_RM_BUILTIN");
+		let mv_disabled =
+			destructive_disabled || uutils_env_disabled(config, "PI_DISABLE_MV_BUILTIN");
+		for (name, registration) in pi_builtins::utility_builtins() {
+			let disabled = match name {
+				"rm" => rm_disabled,
+				"mv" => mv_disabled,
+				// ln can clobber existing files via -f; gate it with the destructive set.
+				"ln" => destructive_disabled,
+				_ => false,
+			};
+			if !disabled {
+				shell.register_builtin(name, registration);
+			}
+		}
+	}
+
+	copy_env_into_shell(&mut shell, std::env::vars_os())?;
+
 	if let Some(env) = config.session_env.as_ref() {
 		for (key, value) in env {
 			let normalized_key = normalize_env_key(key);
@@ -739,27 +717,7 @@ async fn create_session_for_run(
 		}
 	}
 	apply_env_fallback(&mut shell)?;
-	// The nohup builtin detaches its operand into a new session (see
-	// NohupCommand) so a backgrounded server survives this embedded shell's
-	// kill-on-drop teardown. It therefore shadows any system `nohup` (which does
-	// NOT escape the process-group kill) — unless explicitly opted out via
-	// PI_DISABLE_NOHUP_BUILTIN (session env or process env), in which case bare
-	// `nohup` resolves to the real coreutils binary.
-	let nohup_builtin_disabled = {
-		let raw = config
-			.session_env
-			.as_ref()
-			.and_then(|env| env.get("PI_DISABLE_NOHUP_BUILTIN").cloned())
-			.or_else(|| std::env::var("PI_DISABLE_NOHUP_BUILTIN").ok());
-		matches!(raw.as_deref(), Some(v) if !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
-	};
-	let should_register_nohup = !nohup_builtin_disabled;
-	if should_register_nohup {
-		shell.register_builtin(
-			"nohup",
-			builtins::builtin::<NohupCommand, _>().transparent_background_wrapper(),
-		);
-	}
+	// `nohup` is registered above, with the rest of the process builtins.
 
 	#[cfg(windows)]
 	configure_windows_path(&mut shell)?;
@@ -1478,10 +1436,16 @@ async fn terminate_run(registry: &process::SpawnRegistry) {
 		}
 	}
 }
-fn terminate_background_jobs(shell: &mut BrushShell) {
-	let mut targets = process::TerminationTargets::new();
+fn terminate_internal_background_jobs(shell: &mut BrushShell) {
 	for job in &mut shell.jobs_mut().jobs {
 		job.abort_internal_tasks();
+	}
+}
+
+fn terminate_background_jobs(shell: &mut BrushShell) {
+	let mut targets = process::TerminationTargets::new();
+	terminate_internal_background_jobs(shell);
+	for job in &shell.jobs().jobs {
 		if let Some(pgid) = job.process_group_id() {
 			targets.add_pgid(pgid);
 		}
@@ -1956,4218 +1920,14 @@ fn pipe_to_files(label: &str) -> Result<(fs::File, fs::File)> {
 	Ok((r, w))
 }
 
-#[cfg(target_os = "linux")]
-mod proc_snapshot {
-	use std::{
-		fs,
-		os::fd::{AsRawFd, FromRawFd, OwnedFd},
-		time::Duration,
-	};
-
-	use crate::process::ProcessStatus;
-
-	#[derive(Clone)]
-	pub struct ProcInfo {
-		pid:  i32,
-		stat: Stat,
-		args: Vec<String>,
-		uid:  Option<(u32, u32)>,
-		gid:  Option<(u32, u32)>,
-	}
-
-	#[derive(Clone)]
-	struct Stat {
-		comm:       String,
-		state:      char,
-		ppid:       i32,
-		pgrp:       i32,
-		session:    i32,
-		tty:        i64,
-		tpgid:      i32,
-		flags:      u64,
-		minflt:     u64,
-		majflt:     u64,
-		utime:      u64,
-		stime:      u64,
-		priority:   i32,
-		nice:       i32,
-		threads:    u32,
-		start_time: u64,
-		virtual_:   u64,
-		rss_pages:  i64,
-	}
-
-	#[allow(
-		clippy::unnecessary_wraps,
-		reason = "Option returns match the cross-platform ProcInfo contract"
-	)]
-	impl ProcInfo {
-		pub fn all() -> Vec<Self> {
-			let Ok(entries) = fs::read_dir("/proc") else {
-				return Vec::new();
-			};
-			let mut result = Vec::new();
-			for entry in entries.flatten() {
-				let Some(pid) = entry
-					.file_name()
-					.to_str()
-					.and_then(|name| name.parse::<i32>().ok())
-				else {
-					continue;
-				};
-				if let Some(process) = Self::from_pid(pid) {
-					result.push(process);
-				}
-			}
-			result
-		}
-
-		fn from_pid(pid: i32) -> Option<Self> {
-			if pid <= 0 {
-				return None;
-			}
-			let stat = read_stat(pid)?;
-			let args = fs::read(format!("/proc/{pid}/cmdline"))
-				.ok()
-				.map(|bytes| {
-					bytes
-						.split(|byte| *byte == 0)
-						.filter(|part| !part.is_empty())
-						.map(|part| String::from_utf8_lossy(part).into_owned())
-						.collect()
-				})
-				.unwrap_or_default();
-			let uid = status_ids(pid, "Uid:").map(|ids| (ids.0, ids.1));
-			let gid = status_ids(pid, "Gid:");
-			(read_stat(pid)?.start_time == stat.start_time).then_some(Self {
-				pid,
-				stat,
-				args,
-				uid,
-				gid,
-			})
-		}
-
-		pub const fn pid(&self) -> i32 {
-			self.pid
-		}
-
-		pub const fn ppid(&self) -> Option<i32> {
-			Some(self.stat.ppid)
-		}
-
-		pub fn args(&self) -> Vec<String> {
-			self.args.clone()
-		}
-
-		pub const fn group_id(&self) -> Option<i32> {
-			Some(self.stat.pgrp)
-		}
-
-		pub const fn session_id(&self) -> Option<i32> {
-			Some(self.stat.session)
-		}
-
-		pub fn real_user_id(&self) -> Option<u32> {
-			self.uid.map(|ids| ids.0)
-		}
-
-		pub fn effective_user_id(&self) -> Option<u32> {
-			self.uid.map(|ids| ids.1)
-		}
-
-		pub fn real_group_id(&self) -> Option<u32> {
-			self.gid.map(|ids| ids.0)
-		}
-
-		pub fn effective_group_id(&self) -> Option<u32> {
-			self.gid.map(|ids| ids.1)
-		}
-
-		pub fn terminal_id(&self) -> Option<u64> {
-			(self.stat.tty != 0).then_some(self.stat.tty as u32 as u64)
-		}
-
-		pub fn terminal_group_id(&self) -> Option<i32> {
-			(self.stat.tpgid > 0).then_some(self.stat.tpgid)
-		}
-
-		pub const fn priority(&self) -> Option<i32> {
-			Some(self.stat.priority)
-		}
-
-		pub const fn flags(&self) -> Option<u64> {
-			Some(self.stat.flags)
-		}
-
-		pub const fn minor_faults(&self) -> Option<u64> {
-			Some(self.stat.minflt)
-		}
-
-		pub const fn major_faults(&self) -> Option<u64> {
-			Some(self.stat.majflt)
-		}
-
-		pub fn wchan(&self) -> Option<String> {
-			let value = fs::read_to_string(format!("/proc/{}/wchan", self.pid)).ok()?;
-			let value = value.trim();
-			(!value.is_empty() && value != "0" && value != "-").then(|| value.to_string())
-		}
-
-		pub const fn state(&self) -> char {
-			self.stat.state
-		}
-
-		pub const fn start_time(&self) -> u64 {
-			self.stat.start_time
-		}
-
-		pub fn age(&self) -> Option<Duration> {
-			let uptime = fs::read_to_string("/proc/uptime")
-				.ok()?
-				.split_whitespace()
-				.next()?
-				.parse::<f64>()
-				.ok()?;
-			let ticks = clock_ticks()? as f64;
-			Some(Duration::from_secs_f64((uptime - self.stat.start_time as f64 / ticks).max(0.0)))
-		}
-
-		pub fn match_name(&self) -> String {
-			self.stat.comm.clone()
-		}
-
-		pub fn command_name(&self) -> String {
-			self.stat.comm.clone()
-		}
-
-		pub fn status(&self) -> ProcessStatus {
-			match read_stat(self.pid) {
-				Some(stat) if stat.start_time == self.stat.start_time && stat.state != 'Z' => {
-					ProcessStatus::Running
-				},
-				_ => ProcessStatus::Exited,
-			}
-		}
-
-		pub fn signal(&self, signal: i32, queue: Option<i32>) -> bool {
-			if signal == 0 {
-				return read_stat(self.pid).is_some_and(|stat| stat.start_time == self.stat.start_time);
-			}
-			let Some(pidfd) = open_pidfd(self.pid) else {
-				return false;
-			};
-			if read_stat(self.pid).is_none_or(|stat| stat.start_time != self.stat.start_time) {
-				return false;
-			}
-			if let Some(value) = queue {
-				let mut value_arg = libc::sigval { sival_ptr: std::ptr::null_mut() };
-				// SAFETY: sigval is a C union; writing its integer member initializes
-				// the bytes consumed by sigqueue while the remaining bytes stay zero.
-				unsafe {
-					(&raw mut value_arg).cast::<i32>().write(value);
-					return libc::sigqueue(self.pid, signal, value_arg) == 0;
-				}
-			}
-			// SAFETY: pidfd is valid and pidfd_send_signal reads no optional pointers.
-			unsafe {
-				libc::syscall(
-					libc::SYS_pidfd_send_signal,
-					pidfd.as_raw_fd(),
-					signal,
-					std::ptr::null::<libc::siginfo_t>(),
-					0,
-				) == 0
-			}
-		}
-
-		pub fn cpu_time(&self) -> Option<Duration> {
-			let ticks = clock_ticks()?;
-			Some(Duration::from_secs_f64((self.stat.utime + self.stat.stime) as f64 / ticks as f64))
-		}
-
-		pub fn resident_bytes(&self) -> Option<u64> {
-			let pages = u64::try_from(self.stat.rss_pages).ok()?;
-			Some(pages.saturating_mul(page_size()?))
-		}
-
-		pub const fn virtual_bytes(&self) -> Option<u64> {
-			Some(self.stat.virtual_)
-		}
-
-		pub const fn thread_count(&self) -> Option<u32> {
-			Some(self.stat.threads)
-		}
-
-		pub const fn nice(&self) -> Option<i32> {
-			Some(self.stat.nice)
-		}
-	}
-
-	fn open_pidfd(pid: i32) -> Option<OwnedFd> {
-		// SAFETY: pidfd_open takes scalar arguments and returns a new owned fd.
-		let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as i32;
-		(fd >= 0).then(|| {
-			// SAFETY: successful pidfd_open returned a uniquely owned descriptor.
-			unsafe { OwnedFd::from_raw_fd(fd) }
-		})
-	}
-
-	fn read_stat(pid: i32) -> Option<Stat> {
-		let content = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-		let open = content.find('(')?;
-		let close = content.rfind(')')?;
-		let comm = content[open + 1..close].to_string();
-		let fields: Vec<&str> = content[close + 1..].split_whitespace().collect();
-		Some(Stat {
-			comm,
-			state: fields.first()?.chars().next()?,
-			ppid: fields.get(1)?.parse().ok()?,
-			pgrp: fields.get(2)?.parse().ok()?,
-			session: fields.get(3)?.parse().ok()?,
-			tty: fields.get(4)?.parse().ok()?,
-			tpgid: fields.get(5)?.parse().ok()?,
-			flags: fields.get(6)?.parse().ok()?,
-			minflt: fields.get(7)?.parse().ok()?,
-			majflt: fields.get(9)?.parse().ok()?,
-			utime: fields.get(11)?.parse().ok()?,
-			stime: fields.get(12)?.parse().ok()?,
-			priority: fields.get(15)?.parse().ok()?,
-			nice: fields.get(16)?.parse().ok()?,
-			threads: fields.get(17)?.parse().ok()?,
-			start_time: fields.get(19)?.parse().ok()?,
-			virtual_: fields.get(20)?.parse().ok()?,
-			rss_pages: fields.get(21)?.parse().ok()?,
-		})
-	}
-
-	fn status_ids(pid: i32, prefix: &str) -> Option<(u32, u32)> {
-		let content = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
-		let mut ids = content
-			.lines()
-			.find(|line| line.starts_with(prefix))?
-			.split_whitespace()
-			.skip(1)
-			.filter_map(|value| value.parse().ok());
-		Some((ids.next()?, ids.next()?))
-	}
-
-	fn clock_ticks() -> Option<u64> {
-		// SAFETY: sysconf reads a process-global constant.
-		u64::try_from(unsafe { libc::sysconf(libc::_SC_CLK_TCK) })
-			.ok()
-			.filter(|v| *v > 0)
-	}
-	fn page_size() -> Option<u64> {
-		// SAFETY: sysconf reads a process-global constant.
-		u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) })
-			.ok()
-			.filter(|v| *v > 0)
-	}
-}
-
-#[cfg(target_os = "macos")]
-mod proc_snapshot {
-	use std::{
-		ffi::CStr,
-		mem::size_of,
-		path::Path,
-		ptr,
-		time::{Duration, SystemTime, UNIX_EPOCH},
-	};
-
-	use crate::process::ProcessStatus;
-
-	const KERN_PROCARGS2: libc::c_int = 49;
-
-	#[link(name = "proc", kind = "dylib")]
-	unsafe extern "C" {
-		fn proc_listallpids(buffer: *mut i32, buffersize: i32) -> i32;
-	}
-
-	#[derive(Clone)]
-	pub struct ProcInfo {
-		pid:  i32,
-		info: libc::proc_bsdinfo,
-		task: Option<libc::proc_taskinfo>,
-		args: Vec<String>,
-	}
-
-	#[allow(
-		clippy::unnecessary_wraps,
-		reason = "Option returns match the cross-platform ProcInfo contract"
-	)]
-	impl ProcInfo {
-		pub fn all() -> Vec<Self> {
-			// SAFETY: null/zero is libproc's documented sizing query.
-			let reported = unsafe { proc_listallpids(ptr::null_mut(), 0) };
-			if reported <= 0 {
-				return Vec::new();
-			}
-			let count = (reported as usize).saturating_mul(2).max(2048);
-			let mut pids = vec![0i32; count];
-			// SAFETY: pids is writable for the supplied byte size.
-			let actual =
-				unsafe { proc_listallpids(pids.as_mut_ptr(), (pids.len() * size_of::<i32>()) as i32) };
-			if actual <= 0 {
-				return Vec::new();
-			}
-			pids.truncate((actual as usize).min(pids.len()));
-			pids.into_iter().filter_map(Self::from_pid).collect()
-		}
-
-		fn from_pid(pid: i32) -> Option<Self> {
-			let info = read_bsdinfo(pid)?;
-			Some(Self { pid, info, task: read_taskinfo(pid), args: process_args(pid) })
-		}
-
-		fn live_info(&self) -> Option<libc::proc_bsdinfo> {
-			let info = read_bsdinfo(self.pid())?;
-			(info.pbi_start_tvsec == self.info.pbi_start_tvsec
-				&& info.pbi_start_tvusec == self.info.pbi_start_tvusec)
-				.then_some(info)
-		}
-
-		pub const fn pid(&self) -> i32 {
-			self.pid
-		}
-
-		pub fn ppid(&self) -> Option<i32> {
-			i32::try_from(self.info.pbi_ppid).ok()
-		}
-
-		pub fn args(&self) -> Vec<String> {
-			self.args.clone()
-		}
-
-		pub fn group_id(&self) -> Option<i32> {
-			i32::try_from(self.info.pbi_pgid).ok()
-		}
-
-		pub fn session_id(&self) -> Option<i32> {
-			// SAFETY: getsid takes only a scalar process id.
-			let sid = unsafe { libc::getsid(self.pid()) };
-			(sid >= 0).then_some(sid)
-		}
-
-		pub const fn real_user_id(&self) -> Option<u32> {
-			Some(self.info.pbi_ruid)
-		}
-
-		pub const fn effective_user_id(&self) -> Option<u32> {
-			Some(self.info.pbi_uid)
-		}
-
-		pub const fn real_group_id(&self) -> Option<u32> {
-			Some(self.info.pbi_rgid)
-		}
-
-		pub fn terminal_id(&self) -> Option<u64> {
-			(!matches!(self.info.e_tdev, 0 | u32::MAX)).then_some(self.info.e_tdev as u64)
-		}
-
-		pub fn terminal_group_id(&self) -> Option<i32> {
-			i32::try_from(self.info.e_tpgid)
-				.ok()
-				.filter(|tpgid| *tpgid > 0)
-		}
-
-		pub const fn effective_group_id(&self) -> Option<u32> {
-			Some(self.info.pbi_gid)
-		}
-
-		pub fn priority(&self) -> Option<i32> {
-			Some(self.task.as_ref()?.pti_priority)
-		}
-
-		pub const fn flags(&self) -> Option<u64> {
-			Some(self.info.pbi_flags as u64)
-		}
-
-		pub fn minor_faults(&self) -> Option<u64> {
-			u64::try_from(self.task.as_ref()?.pti_faults).ok()
-		}
-
-		pub fn major_faults(&self) -> Option<u64> {
-			u64::try_from(self.task.as_ref()?.pti_pageins).ok()
-		}
-
-		#[allow(clippy::unused_self, reason = "matches the cross-platform ProcInfo contract")]
-		pub const fn wchan(&self) -> Option<String> {
-			None
-		}
-
-		pub const fn state(&self) -> char {
-			match self.info.pbi_status {
-				1 => 'I',
-				2 => 'R',
-				3 => 'S',
-				4 => 'T',
-				5 => 'Z',
-				_ => '?',
-			}
-		}
-
-		pub const fn start_time(&self) -> u64 {
-			self
-				.info
-				.pbi_start_tvsec
-				.saturating_mul(1_000_000)
-				.saturating_add(self.info.pbi_start_tvusec)
-		}
-
-		pub fn age(&self) -> Option<Duration> {
-			let start = UNIX_EPOCH
-				+ Duration::from_secs(self.info.pbi_start_tvsec)
-				+ Duration::from_micros(self.info.pbi_start_tvusec);
-			SystemTime::now().duration_since(start).ok()
-		}
-
-		pub fn match_name(&self) -> String {
-			self
-				.args
-				.first()
-				.and_then(|arg| Path::new(arg).file_name())
-				.map(|name| name.to_string_lossy().into_owned())
-				.filter(|name| !name.is_empty())
-				.unwrap_or_else(|| self.command_name())
-		}
-
-		pub fn command_name(&self) -> String {
-			// SAFETY: pbi_comm is a kernel-filled fixed buffer with NUL termination.
-			unsafe { CStr::from_ptr(self.info.pbi_comm.as_ptr()) }
-				.to_string_lossy()
-				.into_owned()
-		}
-
-		pub fn status(&self) -> ProcessStatus {
-			match self.live_info() {
-				Some(info) if info.pbi_status != 5 => ProcessStatus::Running,
-				_ => ProcessStatus::Exited,
-			}
-		}
-
-		pub fn signal(&self, signal: i32, _queue: Option<i32>) -> bool {
-			if self.live_info().is_none() {
-				return false;
-			}
-			// SAFETY: identity was rechecked immediately before the scalar kill call.
-			unsafe { libc::kill(self.pid(), signal) == 0 }
-		}
-
-		pub fn cpu_time(&self) -> Option<Duration> {
-			let task = self.task.as_ref()?;
-			Some(Duration::from_nanos(task.pti_total_user.saturating_add(task.pti_total_system)))
-		}
-
-		pub fn resident_bytes(&self) -> Option<u64> {
-			Some(self.task.as_ref()?.pti_resident_size)
-		}
-
-		pub fn virtual_bytes(&self) -> Option<u64> {
-			Some(self.task.as_ref()?.pti_virtual_size)
-		}
-
-		pub fn thread_count(&self) -> Option<u32> {
-			u32::try_from(self.task.as_ref()?.pti_threadnum).ok()
-		}
-
-		pub const fn nice(&self) -> Option<i32> {
-			Some(self.info.pbi_nice)
-		}
-	}
-
-	fn read_bsdinfo(pid: i32) -> Option<libc::proc_bsdinfo> {
-		if pid <= 0 {
-			return None;
-		}
-		// SAFETY: proc_bsdinfo is a C integer record valid when zeroed.
-		let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
-		// SAFETY: info is writable for the exact supplied size.
-		let actual = unsafe {
-			libc::proc_pidinfo(
-				pid,
-				libc::PROC_PIDTBSDINFO,
-				0,
-				(&raw mut info).cast(),
-				size_of::<libc::proc_bsdinfo>() as i32,
-			)
-		};
-		(actual >= size_of::<libc::proc_bsdinfo>() as i32).then_some(info)
-	}
-
-	fn read_taskinfo(pid: i32) -> Option<libc::proc_taskinfo> {
-		// SAFETY: proc_taskinfo is a C integer record valid when zeroed.
-		let mut info = unsafe { std::mem::zeroed::<libc::proc_taskinfo>() };
-		// SAFETY: info is writable for the exact supplied size.
-		let actual = unsafe {
-			libc::proc_pidinfo(
-				pid,
-				libc::PROC_PIDTASKINFO,
-				0,
-				(&raw mut info).cast(),
-				size_of::<libc::proc_taskinfo>() as i32,
-			)
-		};
-		(actual >= size_of::<libc::proc_taskinfo>() as i32).then_some(info)
-	}
-
-	fn process_args(pid: i32) -> Vec<String> {
-		let mut mib = [libc::CTL_KERN, KERN_PROCARGS2, pid];
-		let mut size = 0usize;
-		// SAFETY: null old-value is the sysctl sizing form.
-		if unsafe {
-			libc::sysctl(mib.as_mut_ptr(), 3, ptr::null_mut(), &raw mut size, ptr::null_mut(), 0)
-		} != 0 || size <= size_of::<libc::c_int>()
-		{
-			return Vec::new();
-		}
-		let mut buffer = vec![0u8; size];
-		// SAFETY: buffer is writable for size bytes.
-		if unsafe {
-			libc::sysctl(
-				mib.as_mut_ptr(),
-				3,
-				buffer.as_mut_ptr().cast(),
-				&raw mut size,
-				ptr::null_mut(),
-				0,
-			)
-		} != 0
-		{
-			return Vec::new();
-		}
-		buffer.truncate(size);
-		let argc_size = size_of::<libc::c_int>();
-		let Some(argc_bytes) = buffer.get(..argc_size) else {
-			return Vec::new();
-		};
-		let Ok(argc_bytes) = <[u8; 4]>::try_from(argc_bytes) else {
-			return Vec::new();
-		};
-		let argc = i32::from_ne_bytes(argc_bytes);
-		let mut offset = argc_size;
-		while offset < buffer.len() && buffer[offset] != 0 {
-			offset += 1;
-		}
-		while offset < buffer.len() && buffer[offset] == 0 {
-			offset += 1;
-		}
-		let mut args = Vec::new();
-		while offset < buffer.len() && args.len() < argc.max(0) as usize {
-			let end = buffer[offset..]
-				.iter()
-				.position(|byte| *byte == 0)
-				.map_or(buffer.len(), |position| offset + position);
-			if end == offset {
-				break;
-			}
-			args.push(String::from_utf8_lossy(&buffer[offset..end]).into_owned());
-			offset = end + 1;
-		}
-		args
-	}
-}
-
-#[cfg(target_os = "windows")]
-mod proc_snapshot {
-	use std::{collections::HashMap, ffi::c_void, mem::size_of, sync::Arc, time::Duration};
-
-	use crate::process::ProcessStatus;
-
-	type Handle = *mut c_void;
-	const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
-	const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
-	const PROCESS_TERMINATE: u32 = 0x0001;
-	const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-	const SYNCHRONIZE: u32 = 0x0010_0000;
-	const WAIT_TIMEOUT: u32 = 0x0000_0102;
-
-	#[repr(C)]
-	#[derive(Clone, Copy)]
-	struct ProcessEntry32W {
-		size:          u32,
-		usage:         u32,
-		pid:           u32,
-		default_heap:  usize,
-		module_id:     u32,
-		threads:       u32,
-		ppid:          u32,
-		base_priority: i32,
-		flags:         u32,
-		exe:           [u16; 260],
-	}
-
-	#[repr(C)]
-	#[derive(Clone, Copy, Default)]
-	struct FileTime {
-		low:  u32,
-		high: u32,
-	}
-
-	#[repr(C)]
-	struct UnicodeString {
-		length:         u16,
-		maximum_length: u16,
-		buffer:         *const u16,
-	}
-
-	#[repr(C)]
-	struct ProcessMemoryCounters {
-		cb: u32,
-		page_fault_count: u32,
-		peak_working_set_size: usize,
-		working_set_size: usize,
-		quota_peak_paged_pool_usage: usize,
-		quota_paged_pool_usage: usize,
-		quota_peak_non_paged_pool_usage: usize,
-		quota_non_paged_pool_usage: usize,
-		pagefile_usage: usize,
-		peak_pagefile_usage: usize,
-	}
-
-	#[link(name = "kernel32")]
-	unsafe extern "system" {
-		fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> Handle;
-		fn Process32FirstW(snapshot: Handle, entry: *mut ProcessEntry32W) -> i32;
-		fn Process32NextW(snapshot: Handle, entry: *mut ProcessEntry32W) -> i32;
-		fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
-		fn CloseHandle(handle: Handle) -> i32;
-		fn TerminateProcess(handle: Handle, exit_code: u32) -> i32;
-		fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
-		fn GetProcessTimes(
-			handle: Handle,
-			creation: *mut FileTime,
-			exit: *mut FileTime,
-			kernel: *mut FileTime,
-			user: *mut FileTime,
-		) -> i32;
-		fn GetSystemTimeAsFileTime(time: *mut FileTime);
-		fn K32GetProcessMemoryInfo(
-			handle: Handle,
-			counters: *mut ProcessMemoryCounters,
-			size: u32,
-		) -> i32;
-	}
-
-	#[link(name = "ntdll")]
-	unsafe extern "system" {
-		fn NtQueryInformationProcess(
-			handle: Handle,
-			class: u32,
-			information: *mut c_void,
-			information_length: u32,
-			return_length: *mut u32,
-		) -> i32;
-	}
-
-	struct OwnedHandle(Handle);
-	// SAFETY: kernel process handles are safe to wait/query from any thread.
-	unsafe impl Send for OwnedHandle {}
-	unsafe impl Sync for OwnedHandle {}
-	impl Drop for OwnedHandle {
-		fn drop(&mut self) {
-			// SAFETY: this wrapper uniquely owns the valid handle.
-			unsafe {
-				CloseHandle(self.0);
-			}
-		}
-	}
-
-	#[derive(Clone)]
-	pub struct ProcInfo {
-		pid:           i32,
-		handle:        Arc<OwnedHandle>,
-		ppid:          i32,
-		threads:       u32,
-		base_priority: i32,
-		name:          String,
-		command_line:  String,
-		creation:      u64,
-	}
-
-	#[allow(
-		clippy::unnecessary_wraps,
-		reason = "Option returns match the cross-platform ProcInfo contract"
-	)]
-	impl ProcInfo {
-		pub fn all() -> Vec<Self> {
-			let mut handles = HashMap::new();
-			for entry in snapshot_entries() {
-				if let Some(identity) = open_process_identity(entry.pid) {
-					handles.insert(entry.pid, identity);
-				}
-			}
-
-			snapshot_entries()
-				.into_iter()
-				.filter_map(|entry| {
-					let (handle, creation) = handles.remove(&entry.pid)?;
-					Self::from_entry(&entry, handle, creation)
-				})
-				.collect()
-		}
-
-		fn from_entry(
-			entry: &ProcessEntry32W,
-			handle: Arc<OwnedHandle>,
-			creation: u64,
-		) -> Option<Self> {
-			let pid = i32::try_from(entry.pid).ok().filter(|pid| *pid > 0)?;
-			// A PID reused after the handle was opened appears in the refreshed
-			// snapshot, but the pinned predecessor is already signalled as exited.
-			if unsafe { WaitForSingleObject(handle.0, 0) } != WAIT_TIMEOUT {
-				return None;
-			}
-			let end = entry
-				.exe
-				.iter()
-				.position(|unit| *unit == 0)
-				.unwrap_or(entry.exe.len());
-			let name = String::from_utf16_lossy(&entry.exe[..end]);
-			let command_line = process_command_line(handle.0).unwrap_or_else(|| name.clone());
-			Some(Self {
-				pid,
-				handle,
-				ppid: i32::try_from(entry.ppid).unwrap_or(0),
-				threads: entry.threads,
-				base_priority: entry.base_priority,
-				name,
-				command_line,
-				creation,
-			})
-		}
-
-		pub fn pid(&self) -> i32 {
-			self.pid
-		}
-
-		pub fn ppid(&self) -> Option<i32> {
-			Some(self.ppid)
-		}
-
-		pub fn args(&self) -> Vec<String> {
-			vec![self.command_line.clone()]
-		}
-
-		pub fn group_id(&self) -> Option<i32> {
-			None
-		}
-
-		pub fn session_id(&self) -> Option<i32> {
-			None
-		}
-
-		pub fn real_user_id(&self) -> Option<u32> {
-			None
-		}
-
-		pub fn effective_user_id(&self) -> Option<u32> {
-			None
-		}
-
-		pub fn real_group_id(&self) -> Option<u32> {
-			None
-		}
-
-		pub fn terminal_id(&self) -> Option<u64> {
-			None
-		}
-
-		pub fn terminal_group_id(&self) -> Option<i32> {
-			None
-		}
-
-		pub fn effective_group_id(&self) -> Option<u32> {
-			None
-		}
-
-		pub fn priority(&self) -> Option<i32> {
-			None
-		}
-
-		pub fn flags(&self) -> Option<u64> {
-			None
-		}
-
-		pub fn minor_faults(&self) -> Option<u64> {
-			None
-		}
-
-		pub fn major_faults(&self) -> Option<u64> {
-			None
-		}
-
-		pub fn wchan(&self) -> Option<String> {
-			None
-		}
-
-		pub fn state(&self) -> char {
-			if self.status() == ProcessStatus::Running {
-				'R'
-			} else {
-				'?'
-			}
-		}
-
-		pub fn start_time(&self) -> u64 {
-			self.creation
-		}
-
-		pub fn age(&self) -> Option<Duration> {
-			let mut now = FileTime::default();
-			// SAFETY: now is writable for one FILETIME.
-			unsafe { GetSystemTimeAsFileTime(&raw mut now) };
-			Some(Duration::from_nanos(
-				filetime_ticks(now)
-					.saturating_sub(self.creation)
-					.saturating_mul(100),
-			))
-		}
-
-		pub fn match_name(&self) -> String {
-			self.name.clone()
-		}
-
-		pub fn command_name(&self) -> String {
-			self.name.clone()
-		}
-
-		pub fn status(&self) -> ProcessStatus {
-			// SAFETY: the retained process handle remains valid until drop.
-			if unsafe { WaitForSingleObject(self.handle.0, 0) } == WAIT_TIMEOUT {
-				ProcessStatus::Running
-			} else {
-				ProcessStatus::Exited
-			}
-		}
-
-		pub fn signal(&self, signal: i32, _queue: Option<i32>) -> bool {
-			if signal == 0 {
-				return self.status() == ProcessStatus::Running;
-			}
-			// SAFETY: OpenProcess returns a fresh owned termination/query handle or null.
-			let handle = unsafe {
-				OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, 0, self.pid as u32)
-			};
-			if handle.is_null() {
-				return false;
-			}
-			let handle = OwnedHandle(handle);
-			if process_times(handle.0).map(|times| times.0) != Some(self.creation) {
-				return false;
-			}
-			// SAFETY: identity was verified on a handle with PROCESS_TERMINATE access.
-			unsafe { TerminateProcess(handle.0, 1) != 0 }
-		}
-
-		pub fn cpu_time(&self) -> Option<Duration> {
-			let (_, kernel, user) = process_times(self.handle.0)?;
-			Some(Duration::from_nanos(kernel.saturating_add(user).saturating_mul(100)))
-		}
-
-		pub fn resident_bytes(&self) -> Option<u64> {
-			Some(process_memory(self.handle.0)?.working_set_size as u64)
-		}
-
-		pub fn virtual_bytes(&self) -> Option<u64> {
-			None
-		}
-
-		pub fn thread_count(&self) -> Option<u32> {
-			Some(self.threads)
-		}
-
-		pub fn nice(&self) -> Option<i32> {
-			Some(self.base_priority)
-		}
-	}
-
-	fn snapshot_entries() -> Vec<ProcessEntry32W> {
-		// SAFETY: documented scalar Toolhelp snapshot call.
-		let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
-		if snapshot == INVALID_HANDLE_VALUE {
-			return Vec::new();
-		}
-		let snapshot = OwnedHandle(snapshot);
-		// SAFETY: the all-zero entry is initialized with its ABI size below.
-		let mut entry = unsafe { std::mem::zeroed::<ProcessEntry32W>() };
-		entry.size = size_of::<ProcessEntry32W>() as u32;
-		let mut result = Vec::new();
-		// SAFETY: snapshot and entry are valid.
-		let mut ok = unsafe { Process32FirstW(snapshot.0, &raw mut entry) };
-		while ok != 0 {
-			result.push(entry);
-			// SAFETY: snapshot and entry remain valid.
-			ok = unsafe { Process32NextW(snapshot.0, &raw mut entry) };
-		}
-		result
-	}
-
-	fn open_process_identity(pid: u32) -> Option<(Arc<OwnedHandle>, u64)> {
-		i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
-		// SAFETY: OpenProcess returns a new owned query/synchronize handle or null.
-		let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid) };
-		if handle.is_null() {
-			return None;
-		}
-		let handle = Arc::new(OwnedHandle(handle));
-		let creation = process_times(handle.0)?.0;
-		Some((handle, creation))
-	}
-
-	fn process_command_line(handle: Handle) -> Option<String> {
-		const PROCESS_COMMAND_LINE_INFORMATION: u32 = 60;
-		let mut bytes = 0u32;
-		// SAFETY: a null sizing query writes only the required byte count.
-		unsafe {
-			NtQueryInformationProcess(
-				handle,
-				PROCESS_COMMAND_LINE_INFORMATION,
-				std::ptr::null_mut(),
-				0,
-				&raw mut bytes,
-			);
-		}
-		if bytes < size_of::<UnicodeString>() as u32 {
-			return None;
-		}
-		let words = (bytes as usize).div_ceil(size_of::<usize>());
-		let mut storage = vec![0usize; words];
-		// SAFETY: storage is aligned and writable for at least `bytes` bytes.
-		let status = unsafe {
-			NtQueryInformationProcess(
-				handle,
-				PROCESS_COMMAND_LINE_INFORMATION,
-				storage.as_mut_ptr().cast(),
-				bytes,
-				&raw mut bytes,
-			)
-		};
-		if status < 0 {
-			return None;
-		}
-		// SAFETY: a successful query initializes a UnicodeString at the buffer head.
-		let command = unsafe { &*storage.as_ptr().cast::<UnicodeString>() };
-		let length = usize::from(command.length);
-		if length == 0 || length % size_of::<u16>() != 0 {
-			return None;
-		}
-		let base = storage.as_ptr() as usize;
-		let end = base.checked_add(storage.len().checked_mul(size_of::<usize>())?)?;
-		let command_start = command.buffer as usize;
-		let command_end = command_start.checked_add(length)?;
-		if command_start < base || command_end > end {
-			return None;
-		}
-		// SAFETY: the validated range is aligned for UTF-16 within the query buffer.
-		let units = unsafe { std::slice::from_raw_parts(command.buffer, length / size_of::<u16>()) };
-		Some(String::from_utf16_lossy(units)).filter(|command| !command.is_empty())
-	}
-
-	fn filetime_ticks(time: FileTime) -> u64 {
-		(u64::from(time.high) << 32) | u64::from(time.low)
-	}
-
-	fn process_times(handle: Handle) -> Option<(u64, u64, u64)> {
-		let mut creation = FileTime::default();
-		let mut exit = FileTime::default();
-		let mut kernel = FileTime::default();
-		let mut user = FileTime::default();
-		// SAFETY: all FILETIME output pointers are valid and writable.
-		let ok = unsafe {
-			GetProcessTimes(handle, &raw mut creation, &raw mut exit, &raw mut kernel, &raw mut user)
-		};
-		(ok != 0).then(|| (filetime_ticks(creation), filetime_ticks(kernel), filetime_ticks(user)))
-	}
-
-	fn process_memory(handle: Handle) -> Option<ProcessMemoryCounters> {
-		// SAFETY: the C record is valid when zeroed and cb is set before the call.
-		let mut counters = unsafe { std::mem::zeroed::<ProcessMemoryCounters>() };
-		counters.cb = size_of::<ProcessMemoryCounters>() as u32;
-		// SAFETY: counters is writable for the supplied exact size.
-		let ok = unsafe {
-			K32GetProcessMemoryInfo(
-				handle,
-				&raw mut counters,
-				size_of::<ProcessMemoryCounters>() as u32,
-			)
-		};
-		(ok != 0).then_some(counters)
-	}
-}
-
-#[derive(Parser)]
-#[command(disable_help_flag = true, disable_version_flag = true)]
-struct ProcMatchCommand {
-	#[arg(num_args = 0.., trailing_var_arg = true, allow_hyphen_values = true)]
-	argv: Vec<String>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ProcMatchMode {
-	Grep,
-	Kill,
-	Wait,
-}
-
-#[derive(Default)]
-struct ProcMatchOptions {
-	patterns:          Vec<String>,
-	full:              bool,
-	exact:             bool,
-	ignore_case:       bool,
-	invert:            bool,
-	newest:            bool,
-	oldest:            bool,
-	parents:           Vec<i32>,
-	groups:            Vec<i32>,
-	sessions:          Vec<i32>,
-	effective_users:   Vec<u32>,
-	real_users:        Vec<u32>,
-	real_groups:       Vec<u32>,
-	terminals:         Vec<Option<u64>>,
-	pids:              Vec<i32>,
-	pid_files:         Vec<String>,
-	explicit_pid:      bool,
-	require_lock:      bool,
-	older:             Option<Duration>,
-	states:            HashSet<char>,
-	ignore_ancestors:  bool,
-	include_ancestors: bool,
-	count:             bool,
-	list_name:         bool,
-	list_full:         bool,
-	quiet:             bool,
-	delimiter:         String,
-	signal:            i32,
-	queue:             Option<i32>,
-	echo:              bool,
-	echo_command:      bool,
-	interactive:       bool,
-}
-
-impl builtins::Command for ProcMatchCommand {
-	type Error = brush_core::Error;
-
-	fn execute<SE: brush_core::ShellExtensions>(
-		&self,
-		context: ExecutionContext<'_, SE>,
-	) -> impl Future<Output = std::result::Result<ExecutionResult, brush_core::Error>> + Send {
-		let argv = self.argv.clone();
-		let command_name = context.command_name.clone();
-		let cwd = context.shell.working_dir().to_path_buf();
-		async move {
-			let mode = match command_name.as_str() {
-				"pkill" => ProcMatchMode::Kill,
-				"pidwait" => ProcMatchMode::Wait,
-				_ => ProcMatchMode::Grep,
-			};
-			#[cfg(unix)]
-			let stdin_watcher = context.try_fd(OpenFiles::STDIN_FD).and_then(|stdin| {
-				let fd = stdin.try_borrow_as_fd().ok()?.try_clone_to_owned().ok()?;
-				tokio::io::unix::AsyncFd::new(fd).ok()
-			});
-			let mut stdin = io::BufReader::new(context.stdin());
-			let mut options = match parse_proc_match_args(mode, &argv, &cwd, &mut stdin) {
-				Ok(ParseProcResult::Options(options)) => *options,
-				Ok(ParseProcResult::Help) => {
-					write_proc_match_help(context.stdout(), &command_name, mode)?;
-					return Ok(ExecutionResult::success());
-				},
-				Ok(ParseProcResult::Version) => {
-					writeln!(context.stdout(), "{command_name} {}", env!("CARGO_PKG_VERSION"))?;
-					return Ok(ExecutionResult::success());
-				},
-				Err((code, message)) => {
-					writeln!(context.stderr(), "{command_name}: {message}")?;
-					return Ok(ExecutionResult::new(code));
-				},
-			};
-
-			if context.is_cancelled() {
-				return Ok(ExecutionExitCode::Interrupted.into());
-			}
-
-			let processes = match select_processes(&mut options) {
-				Ok(processes) => processes,
-				Err(message) => {
-					writeln!(context.stderr(), "{command_name}: {message}")?;
-					return Ok(ExecutionResult::new(2));
-				},
-			};
-			if processes.is_empty() {
-				if options.count && !options.quiet {
-					writeln!(context.stdout(), "0")?;
-				}
-				return Ok(ExecutionResult::new(1));
-			}
-
-			match mode {
-				ProcMatchMode::Grep => {
-					if options.quiet {
-						return Ok(ExecutionResult::success());
-					}
-					if options.count {
-						writeln!(context.stdout(), "{}", processes.len())?;
-					} else {
-						let mut output = Vec::with_capacity(processes.len());
-						for process in &processes {
-							let line = if options.list_full
-								|| (cfg!(target_os = "macos") && options.list_name && options.full)
-							{
-								format!("{} {}", process.pid(), process.args().join(" "))
-							} else if options.list_name {
-								format!("{} {}", process.pid(), process.command_name())
-							} else {
-								process.pid().to_string()
-							};
-							output.push(line);
-						}
-						writeln!(context.stdout(), "{}", output.join(&options.delimiter))?;
-					}
-				},
-				ProcMatchMode::Kill => {
-					if options.count && !options.quiet {
-						writeln!(context.stdout(), "{}", processes.len())?;
-					}
-					let mut succeeded = false;
-					for process in &processes {
-						if context.is_cancelled() {
-							return Ok(ExecutionExitCode::Interrupted.into());
-						}
-						if options.interactive {
-							{
-								let mut stderr = context.stderr();
-								write!(stderr, "kill process {}? ", process.pid())?;
-								stderr.flush()?;
-							}
-							#[cfg(unix)]
-							let response = read_proc_confirmation(
-								&mut stdin,
-								context.cancel_token(),
-								stdin_watcher.as_ref(),
-							)
-							.await?;
-							#[cfg(not(unix))]
-							let response = read_proc_confirmation(&mut stdin, context.cancel_token()).await?;
-							let Some(response) = response else {
-								return Ok(ExecutionExitCode::Interrupted.into());
-							};
-							if !matches!(response.trim(), "y" | "Y" | "yes" | "YES") {
-								continue;
-							}
-						}
-						if context.is_cancelled() {
-							return Ok(ExecutionExitCode::Interrupted.into());
-						}
-						if !process.signal(options.signal, options.queue) {
-							if !options.quiet {
-								writeln!(
-									context.stderr(),
-									"{command_name}: signalling pid {} failed",
-									process.pid()
-								)?;
-							}
-							continue;
-						}
-						succeeded = true;
-						if options.echo_command && !options.quiet {
-							writeln!(context.stdout(), "kill -{} {}", options.signal, process.pid())?;
-						} else if options.echo && !options.quiet {
-							writeln!(
-								context.stdout(),
-								"{} killed (pid {})",
-								process.command_name(),
-								process.pid()
-							)?;
-						}
-					}
-					if !succeeded {
-						return Ok(ExecutionResult::new(1));
-					}
-				},
-				ProcMatchMode::Wait => {
-					if options.count && !options.quiet {
-						writeln!(context.stdout(), "{}", processes.len())?;
-					}
-					if options.echo && !options.quiet {
-						for process in &processes {
-							writeln!(
-								context.stdout(),
-								"waiting for {} (pid {})",
-								process.command_name(),
-								process.pid()
-							)?;
-						}
-					}
-					loop {
-						if processes
-							.iter()
-							.all(|process| process.status() == process::ProcessStatus::Exited)
-						{
-							break;
-						}
-						if context.is_cancelled() {
-							return Ok(ExecutionExitCode::Interrupted.into());
-						}
-						if let Some(cancel_token) = context.cancel_token() {
-							tokio::select! {
-								() = time::sleep(Duration::from_millis(50)) => {},
-								() = cancel_token.cancelled() => {
-									return Ok(ExecutionExitCode::Interrupted.into());
-								},
-							}
-						} else {
-							time::sleep(Duration::from_millis(50)).await;
-						}
-					}
-				},
-			}
-			Ok(ExecutionResult::success())
-		}
-	}
-}
-
-#[cfg(unix)]
-async fn read_proc_confirmation<R: io::Read>(
-	stdin: &mut io::BufReader<R>,
-	cancel_token: Option<CancellationToken>,
-	watcher: Option<&tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>>,
-) -> io::Result<Option<String>> {
-	if cancel_token
-		.as_ref()
-		.is_some_and(CancellationToken::is_cancelled)
-	{
-		return Ok(None);
-	}
-	if let Some(watcher) = watcher {
-		if let Some(cancel_token) = cancel_token {
-			let ready = tokio::select! {
-				ready = watcher.readable() => ready,
-				() = cancel_token.cancelled() => return Ok(None),
-			};
-			drop(ready?);
-		} else {
-			drop(watcher.readable().await?);
-		}
-	}
-	let mut response = String::new();
-	stdin.read_line(&mut response)?;
-	Ok(Some(response))
-}
-
-#[cfg(not(unix))]
-async fn read_proc_confirmation<R: io::Read>(
-	stdin: &mut io::BufReader<R>,
-	cancel_token: Option<CancellationToken>,
-) -> io::Result<Option<String>> {
-	if cancel_token
-		.as_ref()
-		.is_some_and(CancellationToken::is_cancelled)
-	{
-		return Ok(None);
-	}
-	let mut response = String::new();
-	stdin.read_line(&mut response)?;
-	Ok(Some(response))
-}
-
-enum ParseProcResult {
-	Options(Box<ProcMatchOptions>),
-	Help,
-	Version,
-}
-
-fn parse_proc_match_args(
-	mode: ProcMatchMode,
-	argv: &[String],
-	cwd: &Path,
-	stdin: &mut impl BufRead,
-) -> std::result::Result<ParseProcResult, (u8, String)> {
-	let mut options =
-		ProcMatchOptions { delimiter: "\n".to_string(), signal: 15, ..Default::default() };
-	let mut index = 0;
-	let mut options_done = false;
-	while index < argv.len() {
-		let arg = &argv[index];
-		if !options_done && arg == "--" {
-			options_done = true;
-			index += 1;
-			continue;
-		}
-		if !options_done && matches!(arg.as_str(), "--help" | "-h") {
-			return Ok(ParseProcResult::Help);
-		}
-		if !options_done && arg == "--version" {
-			return Ok(ParseProcResult::Version);
-		}
-		if mode == ProcMatchMode::Kill
-			&& !options_done
-			&& index == 0
-			&& arg.starts_with('-')
-			&& !arg.starts_with("--")
-			&& signal_number(&arg[1..]).is_some()
-		{
-			options.signal = signal_number(&arg[1..]).unwrap_or(15);
-			index += 1;
-			continue;
-		}
-		if !options_done && arg.starts_with("--") {
-			let (name, inline_value) = arg
-				.split_once('=')
-				.map_or((arg.as_str(), None), |(name, value)| (name, Some(value)));
-			let takes_value =
-				matches!(
-					name,
-					"--parent"
-						| "--pgroup" | "--session"
-						| "--euid" | "--uid"
-						| "--group" | "--terminal"
-						| "--pidfile"
-						| "--pid" | "--older"
-						| "--runstates"
-						| "--delimiter"
-						| "--signal" | "--queue"
-				);
-			let value = if takes_value {
-				if let Some(value) = inline_value {
-					Some(value)
-				} else {
-					index += 1;
-					argv.get(index).map(String::as_str)
-				}
-			} else {
-				None
-			};
-			if takes_value && value.is_none() {
-				return Err((2, format!("option '{name}' requires an argument")));
-			}
-			match name {
-				"--full" => options.full = true,
-				"--exact" => options.exact = true,
-				"--ignore-case" => options.ignore_case = true,
-				"--inverse" => options.invert = true,
-				"--newest" => options.newest = true,
-				"--oldest" => options.oldest = true,
-				"--parent" => parse_i32_list(value.unwrap_or_default(), &mut options.parents)?,
-				"--pgroup" => parse_i32_list(value.unwrap_or_default(), &mut options.groups)?,
-				"--session" => parse_i32_list(value.unwrap_or_default(), &mut options.sessions)?,
-				"--euid" => parse_user_list(value.unwrap_or_default(), &mut options.effective_users)?,
-				"--uid" => parse_user_list(value.unwrap_or_default(), &mut options.real_users)?,
-				"--group" => parse_group_list(value.unwrap_or_default(), &mut options.real_groups)?,
-				"--terminal" => parse_terminal_list(value.unwrap_or_default(), &mut options.terminals)?,
-				"--pidfile" => options
-					.pid_files
-					.push(value.unwrap_or_default().to_string()),
-				"--pid" => {
-					options.explicit_pid = true;
-					parse_i32_list(value.unwrap_or_default(), &mut options.pids)?;
-				},
-				"--older" => {
-					options.older = Some(Duration::from_secs(
-						value
-							.unwrap_or_default()
-							.parse()
-							.map_err(|_| (2, "invalid age".to_string()))?,
-					));
-				},
-				"--runstates" => parse_states(value.unwrap_or_default(), &mut options.states)?,
-				"--ignore-ancestors" => options.ignore_ancestors = true,
-				"--count" => options.count = true,
-				"--list-name" => options.list_name = true,
-				"--list-full" => options.list_full = true,
-				"--quiet" => options.quiet = true,
-				"--delimiter" => options.delimiter = value.unwrap_or_default().to_string(),
-				"--signal" if mode == ProcMatchMode::Kill => {
-					options.signal = signal_number(value.unwrap_or_default())
-						.ok_or_else(|| (2, "invalid signal".to_string()))?;
-				},
-				"--queue" if mode == ProcMatchMode::Kill && cfg!(target_os = "linux") => {
-					options.queue = Some(
-						value
-							.unwrap_or_default()
-							.parse()
-							.map_err(|_| (2, "invalid queue value".to_string()))?,
-					);
-				},
-				"--echo" if mode != ProcMatchMode::Grep => options.echo = true,
-				"--logpidfile" => options.require_lock = true,
-				"--lightweight" | "--ns" | "--nslist" | "--cgroup" | "--env" => {
-					return Err((2, format!("unsupported option '{name}'")));
-				},
-				_ => return Err((2, format!("unrecognized option '{name}'"))),
-			}
-			index += 1;
-			continue;
-		}
-		if !options_done && arg.starts_with('-') && arg != "-" {
-			let chars: Vec<char> = arg[1..].chars().collect();
-			let mut short_index = 0;
-			while short_index < chars.len() {
-				let option = chars[short_index];
-				let takes_value =
-					matches!(
-						option,
-						'P' | 'g' | 's' | 'u' | 'U' | 'G' | 't' | 'F' | 'p' | 'O' | 'r' | 'd'
-					) || (option == 'q' && mode == ProcMatchMode::Kill && cfg!(target_os = "linux"));
-				let owned_value;
-				let value = if takes_value {
-					if short_index + 1 < chars.len() {
-						owned_value = chars[short_index + 1..].iter().collect::<String>();
-						short_index = chars.len();
-						owned_value.as_str()
-					} else {
-						index += 1;
-						argv
-							.get(index)
-							.map(String::as_str)
-							.ok_or_else(|| (2, format!("option '-{option}' requires an argument")))?
-					}
-				} else {
-					""
-				};
-				match option {
-					'f' => options.full = true,
-					'x' => options.exact = true,
-					'i' => options.ignore_case = true,
-					'v' if mode == ProcMatchMode::Kill && !cfg!(target_os = "macos") => {
-						return Err((2, "unrecognized option '-v'".to_string()));
-					},
-					'v' => options.invert = true,
-					'n' => options.newest = true,
-					'o' => options.oldest = true,
-					'P' => parse_i32_list(value, &mut options.parents)?,
-					'g' => parse_i32_list(value, &mut options.groups)?,
-					's' => parse_i32_list(value, &mut options.sessions)?,
-					'u' => parse_user_list(value, &mut options.effective_users)?,
-					'U' => parse_user_list(value, &mut options.real_users)?,
-					'G' => parse_group_list(value, &mut options.real_groups)?,
-					't' => parse_terminal_list(value, &mut options.terminals)?,
-					'F' => options.pid_files.push(value.to_string()),
-					'L' => options.require_lock = true,
-					'p' => {
-						options.explicit_pid = true;
-						parse_i32_list(value, &mut options.pids)?;
-					},
-					'O' => {
-						options.older = Some(Duration::from_secs(
-							value.parse().map_err(|_| (2, "invalid age".to_string()))?,
-						));
-					},
-					'r' => parse_states(value, &mut options.states)?,
-					'a' => {
-						if cfg!(target_os = "macos") {
-							options.include_ancestors = true;
-						} else {
-							options.list_full = true;
-						}
-					},
-					'A' => options.ignore_ancestors = true,
-					'c' => options.count = true,
-					'l' if mode == ProcMatchMode::Kill && cfg!(target_os = "macos") => {
-						options.echo_command = true;
-					},
-					'l' => options.list_name = true,
-					'q' if mode == ProcMatchMode::Kill && cfg!(target_os = "linux") => {
-						options.queue = Some(
-							value
-								.parse()
-								.map_err(|_| (2, "invalid queue value".to_string()))?,
-						);
-					},
-					'q' if mode == ProcMatchMode::Grep && cfg!(target_os = "macos") => {
-						options.quiet = true;
-					},
-					'q' => return Err((2, "unrecognized option '-q'".to_string())),
-					'd' => options.delimiter = value.to_string(),
-					'e' if mode != ProcMatchMode::Grep => options.echo = true,
-					'I' if mode == ProcMatchMode::Kill && cfg!(target_os = "macos") => {
-						options.interactive = true;
-					},
-					'I' if mode == ProcMatchMode::Kill => {
-						return Err((2, "unrecognized option '-I'".to_string()));
-					},
-					'w' | 'H' => {
-						return Err((2, format!("unsupported option '-{option}'")));
-					},
-					_ => return Err((2, format!("unrecognized option '-{option}'"))),
-				}
-				short_index += 1;
-			}
-			index += 1;
-			continue;
-		}
-		options.patterns.push(arg.clone());
-		index += 1;
-	}
-
-	#[cfg(target_os = "windows")]
-	if !options.groups.is_empty()
-		|| !options.sessions.is_empty()
-		|| !options.effective_users.is_empty()
-		|| !options.real_users.is_empty()
-		|| !options.real_groups.is_empty()
-		|| !options.terminals.is_empty()
-	{
-		return Err((2, "selected process metadata is unavailable on Windows".to_string()));
-	}
-
-	if options.explicit_pid && !options.pid_files.is_empty() {
-		return Err((2, "-F and -p cannot be combined".to_string()));
-	}
-	if options.require_lock && options.pid_files.is_empty() {
-		return Err((2, "-L requires -F".to_string()));
-	}
-	for file in &options.pid_files {
-		let contents = if file == "-" {
-			if options.require_lock {
-				return Err((2, "-L cannot be used with '-F -'".to_string()));
-			}
-			let mut contents = String::new();
-			stdin
-				.read_to_string(&mut contents)
-				.map_err(|err| (3, format!("cannot read pidfile from standard input: {err}")))?;
-			contents
-		} else {
-			let path = resolve_shell_path(cwd, file);
-			let mut pidfile = fs::File::open(&path)
-				.map_err(|err| (3, format!("cannot read pidfile '{}': {err}", path.display())))?;
-			if options.require_lock
-				&& !pidfile_is_locked(&pidfile)
-					.map_err(|err| (3, format!("cannot inspect pidfile '{}': {err}", path.display())))?
-			{
-				return Err((3, format!("pidfile '{}' is not locked", path.display())));
-			}
-			let mut contents = String::new();
-			io::Read::read_to_string(&mut pidfile, &mut contents)
-				.map_err(|err| (3, format!("cannot read pidfile '{}': {err}", path.display())))?;
-			contents
-		};
-		let pid = contents
-			.split_whitespace()
-			.next()
-			.and_then(|value| value.parse::<i32>().ok())
-			.filter(|pid| *pid > 0)
-			.ok_or_else(|| (3, format!("invalid pidfile '{file}'")))?;
-		options.pids.push(pid);
-	}
-	if !cfg!(target_os = "macos") && options.patterns.len() > 1 {
-		return Err((2, "only one pattern can be provided".to_string()));
-	}
-	if options.patterns.is_empty() && !has_proc_selectors(&options) {
-		return Err((2, "no matching criteria specified".to_string()));
-	}
-	if options.invert && (options.newest || options.oldest) {
-		return Err((2, "-v cannot be combined with -n or -o".to_string()));
-	}
-	if options.newest && options.oldest {
-		return Err((2, "-n and -o are mutually exclusive".to_string()));
-	}
-	if mode != ProcMatchMode::Grep
-		&& (options.list_name || options.list_full || options.delimiter != "\n")
-	{
-		return Err((2, "unsupported output-format option for this command".to_string()));
-	}
-	Ok(ParseProcResult::Options(Box::new(options)))
-}
-
-fn has_proc_selectors(options: &ProcMatchOptions) -> bool {
-	!options.parents.is_empty()
-		|| !options.groups.is_empty()
-		|| !options.sessions.is_empty()
-		|| !options.effective_users.is_empty()
-		|| !options.real_users.is_empty()
-		|| !options.real_groups.is_empty()
-		|| !options.terminals.is_empty()
-		|| !options.pids.is_empty()
-		|| options.older.is_some()
-		|| !options.states.is_empty()
-}
-
-fn select_processes(
-	options: &mut ProcMatchOptions,
-) -> std::result::Result<Vec<proc_snapshot::ProcInfo>, String> {
-	let all = proc_snapshot::ProcInfo::all();
-	let host_pid = std::process::id() as i32;
-	let host_group = all
-		.iter()
-		.find(|process| process.pid() == host_pid)
-		.and_then(proc_snapshot::ProcInfo::group_id);
-	let host_session = all
-		.iter()
-		.find(|process| process.pid() == host_pid)
-		.and_then(proc_snapshot::ProcInfo::session_id);
-	if let Some(host_group) = host_group {
-		for group in &mut options.groups {
-			if *group == 0 {
-				*group = host_group;
-			}
-		}
-	}
-	if let Some(host_session) = host_session {
-		for session in &mut options.sessions {
-			if *session == 0 {
-				*session = host_session;
-			}
-		}
-	}
-	let by_pid: HashMap<i32, Option<i32>> = all
-		.iter()
-		.map(|process| (process.pid(), process.ppid()))
-		.collect();
-	let exclude_ancestors = options.ignore_ancestors
-		|| (cfg!(target_os = "macos") && !options.include_ancestors && !options.invert);
-	let mut forbidden = HashSet::from([host_pid]);
-	if exclude_ancestors {
-		let mut current = by_pid.get(&host_pid).copied().flatten();
-		while let Some(pid) = current {
-			if !forbidden.insert(pid) {
-				break;
-			}
-			current = by_pid.get(&pid).copied().flatten();
-		}
-	}
-	let regex = if options.patterns.is_empty() {
-		None
-	} else {
-		let source = options
-			.patterns
-			.iter()
-			.map(|pattern| {
-				if options.exact {
-					format!("^(?:{pattern})$")
-				} else {
-					format!("(?:{pattern})")
-				}
-			})
-			.collect::<Vec<_>>()
-			.join("|");
-		Some(
-			regex::RegexBuilder::new(&source)
-				.case_insensitive(options.ignore_case)
-				.build()
-				.map_err(|err| format!("invalid regular expression: {err}"))?,
-		)
-	};
-	let mut selected = Vec::new();
-	for process in all {
-		if forbidden.contains(&process.pid()) {
-			continue;
-		}
-		let pattern_matches = regex.as_ref().is_none_or(|regex| {
-			let subject = if options.full {
-				process.args().join(" ")
-			} else {
-				process.match_name()
-			};
-			regex.is_match(&subject)
-		});
-		let selectors_match = (options.parents.is_empty()
-			|| process
-				.ppid()
-				.is_some_and(|value| options.parents.contains(&value)))
-			&& (options.groups.is_empty()
-				|| process
-					.group_id()
-					.is_some_and(|value| options.groups.contains(&value)))
-			&& (options.sessions.is_empty()
-				|| process
-					.session_id()
-					.is_some_and(|value| options.sessions.contains(&value)))
-			&& (options.effective_users.is_empty()
-				|| process
-					.effective_user_id()
-					.is_some_and(|value| options.effective_users.contains(&value)))
-			&& (options.real_users.is_empty()
-				|| process
-					.real_user_id()
-					.is_some_and(|value| options.real_users.contains(&value)))
-			&& (options.real_groups.is_empty()
-				|| process
-					.real_group_id()
-					.is_some_and(|value| options.real_groups.contains(&value)))
-			&& (options.terminals.is_empty() || options.terminals.contains(&process.terminal_id()))
-			&& (options.pids.is_empty() || options.pids.contains(&process.pid()))
-			&& options
-				.older
-				.is_none_or(|age| process.age().is_some_and(|process_age| process_age >= age))
-			&& (options.states.is_empty() || options.states.contains(&process.state()));
-		let matches = pattern_matches && selectors_match;
-		if matches != options.invert {
-			selected.push(process);
-		}
-	}
-	selected.sort_by_key(|process| (process.start_time(), process.pid()));
-	if options.newest {
-		selected = selected.into_iter().next_back().into_iter().collect();
-	} else if options.oldest {
-		selected.truncate(1);
-	}
-	Ok(selected)
-}
-
-fn parse_i32_list(value: &str, target: &mut Vec<i32>) -> std::result::Result<(), (u8, String)> {
-	for item in value.split(',') {
-		let parsed = item
-			.parse::<i32>()
-			.map_err(|_| (2, format!("invalid numeric selector '{item}'")))?;
-		target.push(parsed);
-	}
-	Ok(())
-}
-
-fn parse_user_list(value: &str, target: &mut Vec<u32>) -> std::result::Result<(), (u8, String)> {
-	for item in value.split(',') {
-		target.push(resolve_user(item).ok_or_else(|| (2, format!("unknown user '{item}'")))?);
-	}
-	Ok(())
-}
-
-fn parse_group_list(value: &str, target: &mut Vec<u32>) -> std::result::Result<(), (u8, String)> {
-	for item in value.split(',') {
-		target.push(resolve_group(item).ok_or_else(|| (2, format!("unknown group '{item}'")))?);
-	}
-	Ok(())
-}
-
-#[cfg(unix)]
-fn resolve_user(value: &str) -> Option<u32> {
-	use std::ffi::CString;
-	if let Ok(id) = value.parse() {
-		return Some(id);
-	}
-	let name = CString::new(value).ok()?;
-	let mut record = std::mem::MaybeUninit::<libc::passwd>::zeroed();
-	let mut result = std::ptr::null_mut();
-	let mut buffer = vec![0u8; 16 * 1024];
-	// SAFETY: all pointers refer to live, writable storage for this call.
-	let status = unsafe {
-		libc::getpwnam_r(
-			name.as_ptr(),
-			record.as_mut_ptr(),
-			buffer.as_mut_ptr().cast(),
-			buffer.len(),
-			&raw mut result,
-		)
-	};
-	if status != 0 || result.is_null() {
-		return None;
-	}
-	// SAFETY: a successful getpwnam_r call initialized `record`.
-	Some(unsafe { record.assume_init() }.pw_uid)
-}
-
-#[cfg(not(unix))]
-fn resolve_user(value: &str) -> Option<u32> {
-	value.parse().ok()
-}
-
-#[cfg(unix)]
-fn resolve_group(value: &str) -> Option<u32> {
-	use std::ffi::CString;
-	if let Ok(id) = value.parse() {
-		return Some(id);
-	}
-	let name = CString::new(value).ok()?;
-	let mut record = std::mem::MaybeUninit::<libc::group>::zeroed();
-	let mut result = std::ptr::null_mut();
-	let mut buffer = vec![0u8; 16 * 1024];
-	// SAFETY: all pointers refer to live, writable storage for this call.
-	let status = unsafe {
-		libc::getgrnam_r(
-			name.as_ptr(),
-			record.as_mut_ptr(),
-			buffer.as_mut_ptr().cast(),
-			buffer.len(),
-			&raw mut result,
-		)
-	};
-	if status != 0 || result.is_null() {
-		return None;
-	}
-	// SAFETY: a successful getgrnam_r call initialized `record`.
-	Some(unsafe { record.assume_init() }.gr_gid)
-}
-
-#[cfg(not(unix))]
-fn resolve_group(value: &str) -> Option<u32> {
-	value.parse().ok()
-}
-
-fn parse_terminal_list(
-	value: &str,
-	target: &mut Vec<Option<u64>>,
-) -> std::result::Result<(), (u8, String)> {
-	for item in value.split(',') {
-		if matches!(item, "?" | "-") {
-			target.push(None);
-		} else if let Some(id) = resolve_terminal(item) {
-			target.push(Some(id));
-		} else if let Ok(id) = item.parse() {
-			target.push(Some(id));
-		} else {
-			return Err((2, format!("unknown terminal '{item}'")));
-		}
-	}
-	Ok(())
-}
-
-#[cfg(unix)]
-fn resolve_terminal(value: &str) -> Option<u64> {
-	use std::os::unix::fs::MetadataExt;
-	let primary = if value.starts_with('/') {
-		PathBuf::from(value)
-	} else {
-		Path::new("/dev").join(value)
-	};
-	fs::metadata(&primary)
-		.or_else(|_| fs::metadata(Path::new("/dev").join(format!("tty{value}"))))
-		.ok()
-		.map(|metadata| metadata.rdev())
-}
-
-#[cfg(not(unix))]
-fn resolve_terminal(_value: &str) -> Option<u64> {
-	None
-}
-
-fn parse_states(value: &str, target: &mut HashSet<char>) -> std::result::Result<(), (u8, String)> {
-	for state in value.split(',').flat_map(str::chars) {
-		if !state.is_ascii_alphabetic() {
-			return Err((2, format!("invalid process state '{state}'")));
-		}
-		target.insert(state.to_ascii_uppercase());
-	}
-	Ok(())
-}
-
-#[derive(Parser)]
-struct KillCommand {
-	#[arg(short = 's', value_name = "SIG_NAME")]
-	signal_name:      Option<String>,
-	#[arg(short = 'n', value_name = "SIG_NUM")]
-	signal_number:    Option<usize>,
-	#[arg(short = 'l', short_alias = 'L')]
-	list_signals:     bool,
-	#[arg(allow_hyphen_values = true)]
-	args:             Vec<String>,
-	#[arg(last = true, allow_hyphen_values = true)]
-	post_marker_args: Vec<String>,
-}
-
-#[derive(Clone, Copy)]
-enum KillSignal {
-	Probe,
-	Signal(TrapSignal),
-}
-
-impl KillSignal {
-	fn parse(value: &str) -> std::result::Result<Self, brush_core::Error> {
-		if let Ok(number) = value.parse::<i32>() {
-			if number == 0 {
-				Ok(Self::Probe)
-			} else {
-				TrapSignal::try_from(number).map(Self::Signal)
-			}
-		} else {
-			TrapSignal::try_from(value).map(Self::Signal)
-		}
-	}
-
-	const fn sends_signal(self) -> bool {
-		matches!(self, Self::Signal(_))
-	}
-}
-
-impl builtins::Command for KillCommand {
-	type Error = brush_core::Error;
-
-	#[allow(unknown_lints, reason = "unused_async_trait_impl is unknown to the pinned CI nightly")]
-	#[allow(
-		clippy::unused_async_trait_impl,
-		reason = "the builtin Command trait declares execute as async"
-	)]
-	async fn execute<SE: brush_core::ShellExtensions>(
-		&self,
-		context: ExecutionContext<'_, SE>,
-	) -> std::result::Result<ExecutionResult, Self::Error> {
-		let default_signal = if let Some(signal_name) = &self.signal_name {
-			if let Ok(signal) = KillSignal::parse(signal_name) {
-				signal
-			} else {
-				writeln!(
-					context.stderr(),
-					"{}: invalid signal name: {}",
-					context.command_name,
-					signal_name
-				)?;
-				return Ok(ExecutionExitCode::InvalidUsage.into());
-			}
-		} else {
-			KillSignal::parse("TERM")?
-		};
-		let mut signal = match self.signal_number {
-			Some(signal_number) => {
-				let Ok(signal_number) = i32::try_from(signal_number) else {
-					writeln!(
-						context.stderr(),
-						"{}: invalid signal number: {}",
-						context.command_name,
-						signal_number
-					)?;
-					return Ok(ExecutionExitCode::InvalidUsage.into());
-				};
-				if let Ok(signal) = KillSignal::parse(&signal_number.to_string()) {
-					signal
-				} else {
-					writeln!(
-						context.stderr(),
-						"{}: invalid signal number: {}",
-						context.command_name,
-						signal_number
-					)?;
-					return Ok(ExecutionExitCode::InvalidUsage.into());
-				}
-			},
-			None => default_signal,
-		};
-
-		let mut operands: Vec<&String> = Vec::new();
-		let mut options_done = self.signal_name.is_some() || self.signal_number.is_some();
-		let mut consumed_marker = false;
-		for arg in &self.args {
-			if !consumed_marker && arg == "--" {
-				consumed_marker = true;
-				options_done = true;
-				continue;
-			}
-			if !options_done && let Some(spec) = arg.strip_prefix('-').filter(|spec| !spec.is_empty())
-			{
-				signal = if let Ok(signal) = KillSignal::parse(spec) {
-					signal
-				} else {
-					writeln!(context.stderr(), "{}: invalid signal name", context.command_name)?;
-					return Ok(ExecutionExitCode::InvalidUsage.into());
-				};
-				options_done = true;
-				continue;
-			}
-			options_done = true;
-			operands.push(arg);
-		}
-		operands.extend(&self.post_marker_args);
-
-		if self.list_signals {
-			return print_kill_signals(&context, operands);
-		}
-		if operands.is_empty() {
-			writeln!(context.stderr(), "{}: invalid usage", context.command_name)?;
-			return Ok(ExecutionExitCode::InvalidUsage.into());
-		}
-
-		let mut had_failure = false;
-		for operand in operands {
-			if context.is_cancelled() {
-				return Ok(ExecutionExitCode::Interrupted.into());
-			}
-			if operand.starts_with('%') {
-				let Some(job) = context.shell.jobs_mut().resolve_job_spec(operand) else {
-					writeln!(context.stderr(), "{}: {}: no such job", context.command_name, operand)?;
-					had_failure = true;
-					continue;
-				};
-				#[cfg(unix)]
-				{
-					let mut targets: Vec<i32> = job
-						.process_ids()
-						.filter_map(|pid| {
-							// SAFETY: getpgid reads process-group metadata for a managed child.
-							let pgid = unsafe { libc::getpgid(pid) };
-							(pgid > 0).then_some(-pgid)
-						})
-						.collect();
-					if targets.is_empty()
-						&& let Some(pgid) = job.process_group_id()
-					{
-						targets.push(-pgid);
-					}
-					targets.sort_unstable();
-					targets.dedup();
-					if signal.sends_signal() && targets.iter().copied().any(kill_target_includes_host) {
-						writeln!(
-							context.stderr(),
-							"{}: {}: refusing to signal the shell process",
-							context.command_name,
-							operand
-						)?;
-						had_failure = true;
-						continue;
-					}
-					let succeeded = match signal {
-						KillSignal::Probe => targets.iter().copied().any(probe_kill_target),
-						KillSignal::Signal(signal) => {
-							let mut succeeded = false;
-							for target in targets {
-								if sys::signal::kill_process(target, signal).is_ok() {
-									succeeded = true;
-								}
-							}
-							succeeded
-						},
-					};
-					if !succeeded {
-						writeln!(
-							context.stderr(),
-							"{}: {}: failed to send signal",
-							context.command_name,
-							operand
-						)?;
-						had_failure = true;
-					}
-				}
-				#[cfg(windows)]
-				{
-					let job_group = job.process_group_id();
-					if signal.sends_signal()
-						&& (job_group.is_some_and(kill_job_group_includes_host)
-							|| job.process_ids().any(kill_pid_is_host))
-					{
-						writeln!(
-							context.stderr(),
-							"{}: {}: refusing to signal the shell process",
-							context.command_name,
-							operand
-						)?;
-						had_failure = true;
-						continue;
-					}
-					let expected_handles = job.external_process_count();
-					let handles = job.duplicate_kill_handles();
-					let mut succeeded = expected_handles != 0 && handles.len() == expected_handles;
-					for handle in &handles {
-						let handled = match signal {
-							KillSignal::Probe => brush_core::processes::process_handle_is_running(handle),
-							KillSignal::Signal(_) => {
-								brush_core::processes::terminate_process_handle(handle)
-							},
-						};
-						if !handled {
-							succeeded = false;
-						}
-					}
-					if !succeeded {
-						writeln!(
-							context.stderr(),
-							"{}: {}: failed to send signal",
-							context.command_name,
-							operand
-						)?;
-						had_failure = true;
-					}
-				}
-				#[cfg(all(not(unix), not(windows)))]
-				{
-					let job_group = job.process_group_id();
-					let representative = job.representative_pid();
-					if signal.sends_signal()
-						&& (job_group.is_some_and(kill_job_group_includes_host)
-							|| representative.is_some_and(kill_pid_is_host))
-					{
-						writeln!(
-							context.stderr(),
-							"{}: {}: refusing to signal the shell process",
-							context.command_name,
-							operand
-						)?;
-						had_failure = true;
-						continue;
-					}
-					match signal {
-						KillSignal::Probe => {
-							if !representative.is_some_and(probe_kill_target) {
-								writeln!(
-									context.stderr(),
-									"{}: {}: failed to send signal",
-									context.command_name,
-									operand
-								)?;
-								had_failure = true;
-							}
-						},
-						KillSignal::Signal(signal) => {
-							if let Err(err) = job.kill(signal) {
-								writeln!(
-									context.stderr(),
-									"{}: {}: {}",
-									context.command_name,
-									operand,
-									err
-								)?;
-								had_failure = true;
-							}
-						},
-					}
-				}
-				continue;
-			}
-
-			let pid = match brush_core::int_utils::parse(operand, 10) {
-				Ok(pid) => pid,
-				Err(err) => {
-					writeln!(context.stderr(), "{}: {}: {}", context.command_name, operand, err)?;
-					had_failure = true;
-					continue;
-				},
-			};
-			if signal.sends_signal() && kill_target_includes_host(pid) {
-				writeln!(
-					context.stderr(),
-					"{}: {}: refusing to signal the shell process",
-					context.command_name,
-					operand
-				)?;
-				had_failure = true;
-				continue;
-			}
-			match signal {
-				KillSignal::Probe => {
-					if !probe_kill_target(pid) {
-						writeln!(
-							context.stderr(),
-							"{}: {}: failed to send signal",
-							context.command_name,
-							operand
-						)?;
-						had_failure = true;
-					}
-				},
-				KillSignal::Signal(signal) => {
-					if let Err(err) = sys::signal::kill_process(pid, signal) {
-						writeln!(context.stderr(), "{}: {}: {}", context.command_name, operand, err)?;
-						had_failure = true;
-					}
-				},
-			}
-		}
-
-		if had_failure {
-			Ok(ExecutionResult::general_error())
-		} else {
-			Ok(ExecutionResult::success())
-		}
-	}
-}
-
-fn kill_pid_is_host(pid: i32) -> bool {
-	i32::try_from(std::process::id()).ok() == Some(pid)
-}
-
-#[cfg(not(unix))]
-fn kill_job_group_includes_host(pgid: i32) -> bool {
-	kill_pid_is_host(pgid)
-}
-
-fn kill_target_includes_host(target: i32) -> bool {
-	if target == -1 || target == 0 || kill_pid_is_host(target) {
-		return true;
-	}
-	#[cfg(unix)]
-	{
-		// SAFETY: getpgrp has no arguments or memory access.
-		target.checked_neg() == Some(unsafe { libc::getpgrp() })
-	}
-	#[cfg(not(unix))]
-	{
-		false
-	}
-}
-
-#[cfg(unix)]
-fn probe_kill_target(target: i32) -> bool {
-	// SAFETY: signal 0 only checks target existence and permission.
-	unsafe { libc::kill(target, 0) == 0 }
-}
-
-#[cfg(not(unix))]
-fn probe_kill_target(target: i32) -> bool {
-	target > 0
-		&& proc_snapshot::ProcInfo::all().into_iter().any(|process| {
-			process.pid() == target && process.status() == process::ProcessStatus::Running
-		})
-}
-
-fn print_kill_signals<'a>(
-	context: &ExecutionContext<'_, impl brush_core::ShellExtensions>,
-	signals: impl IntoIterator<Item = &'a String>,
-) -> std::result::Result<ExecutionResult, brush_core::Error> {
-	let mut result = ExecutionResult::success();
-	let mut signals = signals.into_iter().peekable();
-	if signals.peek().is_none() {
-		return traps::format_signals(
-			context.stdout(),
-			TrapSignal::iterator().filter(|signal| !matches!(signal, TrapSignal::Exit)),
-		)
-		.map(|()| ExecutionResult::success());
-	}
-	for value in signals {
-		enum PrintedSignal {
-			Name(&'static str),
-			Number(i32),
-		}
-		let signal = if let Ok(number) = value.parse::<i32>() {
-			TrapSignal::try_from(number).map(|signal| {
-				PrintedSignal::Name(
-					signal
-						.as_str()
-						.strip_prefix("SIG")
-						.unwrap_or(signal.as_str()),
-				)
-			})
-		} else {
-			TrapSignal::try_from(value.as_str()).map(|signal| {
-				i32::try_from(signal)
-					.map_or(PrintedSignal::Name(signal.as_str()), PrintedSignal::Number)
-			})
-		};
-		match signal {
-			Ok(PrintedSignal::Name(name)) => writeln!(context.stdout(), "{name}")?,
-			Ok(PrintedSignal::Number(number)) => writeln!(context.stdout(), "{number}")?,
-			Err(err) => {
-				writeln!(context.stderr(), "{err}")?;
-				result = ExecutionResult::general_error();
-			},
-		}
-	}
-	Ok(result)
-}
-
-fn signal_number(value: &str) -> Option<i32> {
-	let value = value
-		.strip_prefix("SIG")
-		.or_else(|| value.strip_prefix("sig"))
-		.unwrap_or(value);
-	if let Ok(number) = value.parse::<i32>() {
-		#[cfg(target_os = "linux")]
-		return (0..=libc::SIGRTMAX()).contains(&number).then_some(number);
-		#[cfg(target_os = "macos")]
-		return (0..=31).contains(&number).then_some(number);
-		#[cfg(not(unix))]
-		return (0..=64).contains(&number).then_some(number);
-	}
-	match KillSignal::parse(value).ok()? {
-		KillSignal::Probe => Some(0),
-		KillSignal::Signal(signal) => i32::try_from(signal).ok(),
-	}
-}
-
-fn resolve_shell_path(cwd: &Path, value: &str) -> PathBuf {
-	let path = Path::new(value);
-	if path.is_absolute() {
-		path.to_path_buf()
-	} else {
-		cwd.join(path)
-	}
-}
-
-#[cfg(unix)]
-fn pidfile_is_locked(file: &fs::File) -> io::Result<bool> {
-	use std::os::fd::AsRawFd;
-	let mut lock = libc::flock {
-		l_type:   libc::F_WRLCK as libc::c_short,
-		l_whence: libc::SEEK_SET as libc::c_short,
-		l_start:  0,
-		l_len:    0,
-		l_pid:    0,
-	};
-	// SAFETY: `file` owns a valid fd and `lock` is writable for F_GETLK.
-	if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &raw mut lock) } == -1 {
-		return Err(io::Error::last_os_error());
-	}
-	Ok(lock.l_type != libc::F_UNLCK as libc::c_short)
-}
-
-#[cfg(not(unix))]
-fn pidfile_is_locked(_file: &fs::File) -> io::Result<bool> {
-	Err(io::Error::new(
-		io::ErrorKind::Unsupported,
-		"pidfile lock validation is unavailable on this platform",
-	))
-}
-
-fn write_proc_match_help(
-	mut output: impl Write,
-	name: &str,
-	mode: ProcMatchMode,
-) -> io::Result<()> {
-	let action = match mode {
-		ProcMatchMode::Grep => "print matching process IDs",
-		ProcMatchMode::Kill => "signal matching processes",
-		ProcMatchMode::Wait => "wait for matching processes",
-	};
-	writeln!(output, "Usage: {name} [options] [pattern ...]")?;
-	writeln!(output, "{action}")?;
-	writeln!(
-		output,
-		"  -f full command  -x exact  -i ignore case  -v invert  -n newest  -o oldest"
-	)?;
-	#[cfg(not(target_os = "windows"))]
-	writeln!(
-		output,
-		"  -P ppid  -g pgrp  -s sid  -u euid  -U uid  -G gid  -t tty  -p pid  -F pidfile"
-	)?;
-	#[cfg(target_os = "windows")]
-	writeln!(output, "  -P ppid  -p pid  -F pidfile  -O seconds  -r states")?;
-	if mode == ProcMatchMode::Kill {
-		writeln!(output, "  -SIGNAL, --signal SIGNAL  choose signal (default TERM)")?;
-	}
-	#[cfg(target_os = "linux")]
-	if mode == ProcMatchMode::Kill {
-		writeln!(output, "  -q value, --queue value  send an integer with sigqueue")?;
-	}
-	#[cfg(target_os = "macos")]
-	if mode == ProcMatchMode::Grep {
-		writeln!(output, "  -q  suppress output")?;
-	}
-	Ok(())
-}
-
-#[derive(Parser)]
-#[command(disable_help_flag = true)]
-struct SleepCommand {
-	#[arg(required = true)]
-	durations: Vec<String>,
-}
-
-impl builtins::Command for SleepCommand {
-	type Error = brush_core::Error;
-
-	fn execute<SE: brush_core::ShellExtensions>(
-		&self,
-		context: ExecutionContext<'_, SE>,
-	) -> impl Future<Output = std::result::Result<ExecutionResult, brush_core::Error>> + Send {
-		let durations = self.durations.clone();
-		async move {
-			if context.is_cancelled() {
-				return Ok(ExecutionExitCode::Interrupted.into());
-			}
-			let mut total = Duration::from_millis(0);
-			for duration in &durations {
-				let Some(parsed) = parse_duration(duration) else {
-					let _ = writeln!(context.stderr(), "sleep: invalid time interval '{duration}'");
-					return Ok(ExecutionResult::new(1));
-				};
-				total += parsed;
-			}
-			let sleep = time::sleep(total);
-			tokio::pin!(sleep);
-			if let Some(cancel_token) = context.cancel_token() {
-				tokio::select! {
-					() = &mut sleep => Ok(ExecutionResult::success()),
-					() = cancel_token.cancelled() => Ok(ExecutionExitCode::Interrupted.into()),
-				}
-			} else {
-				sleep.await;
-				Ok(ExecutionResult::success())
-			}
-		}
-	}
-}
-
-#[derive(Parser)]
-#[command(disable_help_flag = true)]
-struct TimeoutCommand {
-	#[arg(required = true)]
-	duration: String,
-	#[arg(required = true, num_args = 1.., trailing_var_arg = true)]
-	command:  Vec<String>,
-}
-
-impl builtins::Command for TimeoutCommand {
-	type Error = brush_core::Error;
-
-	fn execute<SE: brush_core::ShellExtensions>(
-		&self,
-		context: ExecutionContext<'_, SE>,
-	) -> impl Future<Output = std::result::Result<ExecutionResult, brush_core::Error>> + Send {
-		let duration = self.duration.clone();
-		let command = self.command.clone();
-		async move {
-			if context.is_cancelled() {
-				return Ok(ExecutionExitCode::Interrupted.into());
-			}
-			let Some(timeout) = parse_duration(&duration) else {
-				let _ = writeln!(context.stderr(), "timeout: invalid time interval '{duration}'");
-				return Ok(ExecutionResult::new(125));
-			};
-			if command.is_empty() {
-				let _ = writeln!(context.stderr(), "timeout: missing command");
-				return Ok(ExecutionResult::new(125));
-			}
-
-			let child_cancel = CancellationToken::new();
-			let mut params = context.params.clone();
-			params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
-			params.set_cancel_token(child_cancel.clone());
-
-			let mut command_line = String::new();
-			for (idx, arg) in command.iter().enumerate() {
-				if idx > 0 {
-					command_line.push(' ');
-				}
-				command_line.push_str(&quote_arg(arg));
-			}
-
-			let cancel_token = context.cancel_token();
-			let source_info = SourceInfo::from("pi-natives:timeout");
-			let run_future = context
-				.shell
-				.run_string(command_line, &source_info, &params);
-			tokio::pin!(run_future);
-
-			if let Some(cancel_token) = cancel_token {
-				tokio::select! {
-					result = &mut run_future => result,
-					() = time::sleep(timeout) => {
-						child_cancel.cancel();
-						// Wait briefly for the child to exit after cancellation.
-						let _ = time::timeout(Duration::from_secs(2), &mut run_future).await;
-						Ok(ExecutionResult::new(124))
-					},
-					() = cancel_token.cancelled() => {
-						child_cancel.cancel();
-						Ok(ExecutionExitCode::Interrupted.into())
-					},
-				}
-			} else {
-				tokio::select! {
-					result = &mut run_future => result,
-					() = time::sleep(timeout) => {
-						child_cancel.cancel();
-						// Wait briefly for the child to exit after cancellation.
-						let _ = time::timeout(Duration::from_secs(2), &mut run_future).await;
-						Ok(ExecutionResult::new(124))
-					},
-				}
-			}
-		}
-	}
-}
-
-#[derive(Parser)]
-#[command(disable_help_flag = true, disable_version_flag = true)]
-struct PsCommand {
-	#[arg(num_args = 0.., trailing_var_arg = true, allow_hyphen_values = true)]
-	argv: Vec<String>,
-}
-
-#[derive(Default)]
-struct PsOptions {
-	all:                 bool,
-	other_users:         bool,
-	include_no_terminal: bool,
-	full_format:         bool,
-	long_format:         bool,
-	user_format:         bool,
-	job_format:          bool,
-	memory_format:       bool,
-	bsd_syntax:          bool,
-	command_only:        bool,
-	running_only:        bool,
-	no_headers:          bool,
-	custom_format:       bool,
-	pids:                Vec<i32>,
-	parents:             Vec<i32>,
-	groups:              Vec<i32>,
-	sessions:            Vec<i32>,
-	effective_users:     Vec<u32>,
-	real_users:          Vec<u32>,
-	real_groups:         Vec<u32>,
-	terminals:           Vec<Option<u64>>,
-	columns:             Vec<PsColumn>,
-	sort:                Vec<PsSort>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PsField {
-	User,
-	Uid,
-	Pid,
-	Ppid,
-	Pgid,
-	Sid,
-	Tty,
-	State,
-	Start,
-	LongStart,
-	Elapsed,
-	ElapsedSeconds,
-	CpuTime,
-	CpuPercent,
-	CpuInteger,
-	MemPercent,
-	VirtualSize,
-	ResidentSize,
-	Nice,
-	Threads,
-	Command,
-	Args,
-	Tpgid,
-	StateChar,
-	Priority,
-	Flags,
-	Ruser,
-	Ruid,
-	Rgroup,
-	Rgid,
-	Egroup,
-	Egid,
-	Wchan,
-	MinorFaults,
-	MajorFaults,
-	CpuSeconds,
-	Size,
-}
-
-impl PsField {
-	const fn header(self) -> &'static str {
-		match self {
-			Self::User => "USER",
-			Self::Uid => "UID",
-			Self::Pid => "PID",
-			Self::Ppid => "PPID",
-			Self::Pgid => "PGID",
-			Self::Sid => "SID",
-			Self::Tty => "TTY",
-			Self::State => "STAT",
-			Self::Start => "START",
-			Self::LongStart => "STARTED",
-			Self::Elapsed => "ELAPSED",
-			Self::ElapsedSeconds => "ELAPSED",
-			Self::CpuTime => "TIME",
-			Self::CpuPercent => "%CPU",
-			Self::CpuInteger => "C",
-			Self::MemPercent => "%MEM",
-			Self::VirtualSize => "VSZ",
-			Self::ResidentSize => "RSS",
-			Self::Nice => "NI",
-			Self::Threads => "NLWP",
-			Self::Command => "COMMAND",
-			Self::Args => "COMMAND",
-			Self::Tpgid => "TPGID",
-			Self::StateChar => "S",
-			Self::Priority => "PRI",
-			Self::Flags => "F",
-			Self::Ruser => "RUSER",
-			Self::Ruid => "RUID",
-			Self::Rgroup => "RGROUP",
-			Self::Rgid => "RGID",
-			Self::Egroup => "GROUP",
-			Self::Egid => "GID",
-			Self::Wchan => "WCHAN",
-			Self::MinorFaults => "MINFL",
-			Self::MajorFaults => "MAJFL",
-			Self::CpuSeconds => "TIME",
-			Self::Size => "SZ",
-		}
-	}
-
-	const fn right_aligned(self) -> bool {
-		matches!(
-			self,
-			Self::Uid
-				| Self::Pid
-				| Self::Ppid
-				| Self::Pgid
-				| Self::Sid
-				| Self::ElapsedSeconds
-				| Self::CpuPercent
-				| Self::CpuInteger
-				| Self::MemPercent
-				| Self::VirtualSize
-				| Self::ResidentSize
-				| Self::Nice
-				| Self::Threads
-				| Self::Tpgid
-				| Self::Priority
-				| Self::Flags
-				| Self::Ruid
-				| Self::Rgid
-				| Self::Egid
-				| Self::MinorFaults
-				| Self::MajorFaults
-				| Self::CpuSeconds
-				| Self::Size
-		)
-	}
-}
-
-#[derive(Clone)]
-struct PsColumn {
-	field:     PsField,
-	header:    String,
-	min_width: usize,
-}
-
-impl PsColumn {
-	fn new(field: PsField) -> Self {
-		Self { field, header: field.header().to_string(), min_width: 0 }
-	}
-
-	fn with_header(field: PsField, header: &str) -> Self {
-		Self { field, header: header.to_string(), min_width: 0 }
-	}
-}
-
-#[derive(Clone, Copy)]
-enum PsSortField {
-	Pid,
-	Ppid,
-	Cpu,
-	Mem,
-	Time,
-	Start,
-	Command,
-}
-
-struct PsSort {
-	field:      PsSortField,
-	descending: bool,
-}
-
-enum ParsePsResult {
-	Options(Box<PsOptions>),
-	Help,
-	Version,
-}
-
-struct PsProcessRow {
-	pid:           i32,
-	ppid:          Option<i32>,
-	pgid:          Option<i32>,
-	sid:           Option<i32>,
-	tpgid:         Option<i32>,
-	user:          Option<u32>,
-	ruid:          Option<u32>,
-	rgid:          Option<u32>,
-	egid:          Option<u32>,
-	terminal:      Option<u64>,
-	state:         char,
-	start_time:    u64,
-	started_at:    Option<SystemTime>,
-	age:           Option<Duration>,
-	cpu_time:      Option<Duration>,
-	virtual_size:  Option<u64>,
-	resident_size: Option<u64>,
-	threads:       Option<u32>,
-	nice:          Option<i32>,
-	priority:      Option<i32>,
-	flags:         Option<u64>,
-	minor_faults:  Option<u64>,
-	major_faults:  Option<u64>,
-	wchan:         Option<String>,
-	command:       String,
-	args:          String,
-}
-
-impl PsProcessRow {
-	fn from_process(process: proc_snapshot::ProcInfo, now: SystemTime, command_only: bool) -> Self {
-		let command = sanitize_process_command(process.command_name());
-		let argv = process.args();
-		let args = if command_only || argv.is_empty() {
-			command.clone()
-		} else {
-			sanitize_process_command(argv.join(" "))
-		};
-		let age = process.age();
-		Self {
-			pid: process.pid(),
-			ppid: process.ppid(),
-			pgid: process.group_id(),
-			sid: process.session_id(),
-			tpgid: process.terminal_group_id(),
-			user: process
-				.effective_user_id()
-				.or_else(|| process.real_user_id()),
-			ruid: process.real_user_id(),
-			rgid: process.real_group_id(),
-			egid: process.effective_group_id(),
-			terminal: process.terminal_id(),
-			state: process.state(),
-			start_time: process.start_time(),
-			started_at: age.and_then(|age| now.checked_sub(age)),
-			age,
-			cpu_time: process.cpu_time(),
-			virtual_size: process.virtual_bytes(),
-			resident_size: process.resident_bytes(),
-			threads: process.thread_count(),
-			nice: process.nice(),
-			priority: process.priority(),
-			flags: process.flags(),
-			minor_faults: process.minor_faults(),
-			major_faults: process.major_faults(),
-			wchan: process.wchan(),
-			command,
-			args,
-		}
-	}
-
-	fn cpu_percent(&self) -> Option<f64> {
-		let age = self.age?.as_secs_f64();
-		let cpu_time = self.cpu_time?.as_secs_f64();
-		(age > 0.0).then_some(100.0 * cpu_time / age)
-	}
-
-	fn memory_percent(&self, total_memory: Option<u64>) -> Option<f64> {
-		let total = total_memory.filter(|total| *total > 0)?;
-		Some(100.0 * self.resident_size? as f64 / total as f64)
-	}
-}
-
-impl builtins::Command for PsCommand {
-	type Error = brush_core::Error;
-
-	fn execute<SE: brush_core::ShellExtensions>(
-		&self,
-		context: ExecutionContext<'_, SE>,
-	) -> impl Future<Output = std::result::Result<ExecutionResult, brush_core::Error>> + Send {
-		let argv = self.argv.clone();
-		async move {
-			let options = match parse_ps_args(&argv) {
-				Ok(ParsePsResult::Options(options)) => *options,
-				Ok(ParsePsResult::Help) => {
-					write_ps_help(context.stdout())?;
-					return Ok(ExecutionResult::success());
-				},
-				Ok(ParsePsResult::Version) => {
-					writeln!(context.stdout(), "ps {}", env!("CARGO_PKG_VERSION"))?;
-					return Ok(ExecutionResult::success());
-				},
-				Err((code, message)) => {
-					writeln!(context.stderr(), "ps: {message}")?;
-					return Ok(ExecutionResult::new(code));
-				},
-			};
-			if context.is_cancelled() {
-				return Ok(ExecutionExitCode::Interrupted.into());
-			}
-
-			let mut processes = proc_snapshot::ProcInfo::all();
-			let current_pid = i32::try_from(std::process::id()).ok();
-			let current =
-				current_pid.and_then(|pid| processes.iter().find(|process| process.pid() == pid));
-			let current_user = current.and_then(|process| {
-				process
-					.effective_user_id()
-					.or_else(|| process.real_user_id())
-			});
-			let current_terminal = current.and_then(proc_snapshot::ProcInfo::terminal_id);
-			let current_session = current.and_then(proc_snapshot::ProcInfo::session_id);
-			processes.retain(|process| {
-				ps_process_selected(
-					process,
-					&options,
-					current_pid,
-					current_user,
-					current_terminal,
-					current_session,
-				)
-			});
-
-			let now = SystemTime::now();
-			let mut rows: Vec<_> = processes
-				.into_iter()
-				.map(|process| PsProcessRow::from_process(process, now, options.command_only))
-				.collect();
-			sort_ps_rows(&mut rows, &options.sort);
-			let columns = ps_columns(&options);
-			let output = render_ps_table(&rows, &columns, options.no_headers);
-			if let Err(err) = write!(context.stdout(), "{output}") {
-				if err.kind() == io::ErrorKind::BrokenPipe {
-					return Ok(ExecutionResult::success());
-				}
-				return Err(err.into());
-			}
-			Ok(if rows.is_empty() {
-				ExecutionResult::new(1)
-			} else {
-				ExecutionResult::success()
-			})
-		}
-	}
-}
-
-fn parse_ps_args(argv: &[String]) -> std::result::Result<ParsePsResult, (u8, String)> {
-	let mut options = PsOptions::default();
-	let mut index = 0;
-	let mut options_done = false;
-	while index < argv.len() {
-		let arg = &argv[index];
-		if !options_done && arg == "--" {
-			options_done = true;
-			index += 1;
-			continue;
-		}
-		if options_done {
-			parse_i32_list(arg, &mut options.pids)?;
-			index += 1;
-			continue;
-		}
-		match arg.as_str() {
-			"--help" => return Ok(ParsePsResult::Help),
-			"--version" => return Ok(ParsePsResult::Version),
-			"--all" | "--everyone" => options.all = true,
-			"--no-headers" => options.no_headers = true,
-			"--headers" => options.no_headers = false,
-			_ if arg == "--pid" || arg.starts_with("--pid=") => {
-				let value = take_ps_value(argv, &mut index, arg.strip_prefix("--pid="), "--pid")?;
-				parse_i32_list(&value, &mut options.pids)?;
-			},
-			_ if arg == "--ppid" || arg.starts_with("--ppid=") => {
-				let value = take_ps_value(argv, &mut index, arg.strip_prefix("--ppid="), "--ppid")?;
-				parse_i32_list(&value, &mut options.parents)?;
-			},
-			_ if arg == "--group" || arg.starts_with("--group=") => {
-				let value = take_ps_value(argv, &mut index, arg.strip_prefix("--group="), "--group")?;
-				parse_i32_list(&value, &mut options.groups)?;
-			},
-			_ if arg == "--sid" || arg.starts_with("--sid=") => {
-				let value = take_ps_value(argv, &mut index, arg.strip_prefix("--sid="), "--sid")?;
-				parse_i32_list(&value, &mut options.sessions)?;
-			},
-			_ if arg == "--user" || arg.starts_with("--user=") => {
-				let value = take_ps_value(argv, &mut index, arg.strip_prefix("--user="), "--user")?;
-				parse_user_list(&value, &mut options.effective_users)?;
-			},
-			_ if arg == "--User" || arg.starts_with("--User=") => {
-				let value = take_ps_value(argv, &mut index, arg.strip_prefix("--User="), "--User")?;
-				parse_user_list(&value, &mut options.real_users)?;
-			},
-			_ if arg == "--tty" || arg.starts_with("--tty=") => {
-				let value = take_ps_value(argv, &mut index, arg.strip_prefix("--tty="), "--tty")?;
-				parse_terminal_list(&value, &mut options.terminals)?;
-			},
-			_ if arg == "--format" || arg.starts_with("--format=") => {
-				let value = take_ps_value(argv, &mut index, arg.strip_prefix("--format="), "--format")?;
-				parse_ps_format(&value, &mut options.columns)?;
-				options.custom_format = true;
-			},
-			_ if arg == "--sort" || arg.starts_with("--sort=") => {
-				let value = take_ps_value(argv, &mut index, arg.strip_prefix("--sort="), "--sort")?;
-				parse_ps_sort(&value, &mut options.sort)?;
-			},
-			_ if let Some(group) = arg.strip_prefix('-') => {
-				if group.is_empty() {
-					return Err((1, "invalid option '-'".to_string()));
-				}
-				let bsd = group.contains('x');
-				parse_ps_flag_group(group, bsd, argv, &mut index, &mut options)?;
-			},
-			_ if arg
-				.chars()
-				.all(|character| character.is_ascii_digit() || character == ',') =>
-			{
-				parse_i32_list(arg, &mut options.pids)?;
-			},
-			_ if arg.chars().all(|character| character.is_ascii_alphabetic()) => {
-				parse_ps_flag_group(arg, true, argv, &mut index, &mut options)?;
-			},
-			_ => return Err((1, format!("unsupported operand '{arg}'"))),
-		}
-		index += 1;
-	}
-	Ok(ParsePsResult::Options(Box::new(options)))
-}
-
-fn take_ps_value(
-	argv: &[String],
-	index: &mut usize,
-	inline: Option<&str>,
-	option: &str,
-) -> std::result::Result<String, (u8, String)> {
-	if let Some(value) = inline {
-		if value.is_empty() {
-			return Err((1, format!("option '{option}' requires an argument")));
-		}
-		return Ok(value.to_string());
-	}
-	*index += 1;
-	argv
-		.get(*index)
-		.filter(|value| !value.is_empty())
-		.cloned()
-		.ok_or_else(|| (1, format!("option '{option}' requires an argument")))
-}
-
-fn parse_ps_flag_group(
-	group: &str,
-	bsd: bool,
-	argv: &[String],
-	index: &mut usize,
-	options: &mut PsOptions,
-) -> std::result::Result<(), (u8, String)> {
-	if bsd {
-		options.bsd_syntax = true;
-	}
-	let mut offset = 0;
-	while offset < group.len() {
-		let option = group.as_bytes()[offset] as char;
-		offset += 1;
-		let remainder = &group[offset..];
-		match option {
-			'A' => options.all = true,
-			'e' if !bsd => options.all = true,
-			'e' => {},
-			'a' => options.other_users = true,
-			'x' => {
-				options.include_no_terminal = true;
-				options.bsd_syntax = true;
-			},
-			'f' => options.full_format = true,
-			'l' => options.long_format = true,
-			'j' => options.job_format = true,
-			'v' => options.memory_format = true,
-			'u' if bsd => options.user_format = true,
-			'w' => {},
-			'c' => options.command_only = true,
-			'r' => options.running_only = true,
-			'h' => options.no_headers = true,
-			'o' => {
-				let value =
-					take_ps_value(argv, index, (!remainder.is_empty()).then_some(remainder), "-o")?;
-				parse_ps_format(&value, &mut options.columns)?;
-				options.custom_format = true;
-				return Ok(());
-			},
-			'p' | 'q' => {
-				let value = take_ps_value(
-					argv,
-					index,
-					(!remainder.is_empty()).then_some(remainder),
-					if option == 'p' { "-p" } else { "-q" },
-				)?;
-				parse_i32_list(&value, &mut options.pids)?;
-				return Ok(());
-			},
-			'P' => {
-				let value =
-					take_ps_value(argv, index, (!remainder.is_empty()).then_some(remainder), "-P")?;
-				parse_i32_list(&value, &mut options.parents)?;
-				return Ok(());
-			},
-			'g' => {
-				let value =
-					take_ps_value(argv, index, (!remainder.is_empty()).then_some(remainder), "-g")?;
-				parse_i32_list(&value, &mut options.groups)?;
-				return Ok(());
-			},
-			's' => {
-				let value =
-					take_ps_value(argv, index, (!remainder.is_empty()).then_some(remainder), "-s")?;
-				parse_i32_list(&value, &mut options.sessions)?;
-				return Ok(());
-			},
-			't' => {
-				let value =
-					take_ps_value(argv, index, (!remainder.is_empty()).then_some(remainder), "-t")?;
-				parse_terminal_list(&value, &mut options.terminals)?;
-				return Ok(());
-			},
-			'u' => {
-				let value =
-					take_ps_value(argv, index, (!remainder.is_empty()).then_some(remainder), "-u")?;
-				parse_user_list(&value, &mut options.effective_users)?;
-				return Ok(());
-			},
-			'U' => {
-				let value =
-					take_ps_value(argv, index, (!remainder.is_empty()).then_some(remainder), "-U")?;
-				parse_user_list(&value, &mut options.real_users)?;
-				return Ok(());
-			},
-			'G' => {
-				let value =
-					take_ps_value(argv, index, (!remainder.is_empty()).then_some(remainder), "-G")?;
-				parse_group_list(&value, &mut options.real_groups)?;
-				return Ok(());
-			},
-			_ => return Err((1, format!("unsupported option '-{option}'"))),
-		}
-	}
-	Ok(())
-}
-
-fn parse_ps_format(
-	value: &str,
-	columns: &mut Vec<PsColumn>,
-) -> std::result::Result<(), (u8, String)> {
-	let start_len = columns.len();
-	for spec in value.split(',').flat_map(str::split_ascii_whitespace) {
-		let (field_spec, header) = spec
-			.split_once('=')
-			.map_or((spec, None), |(field, header)| (field, Some(header)));
-		let (name, min_width) = field_spec
-			.rsplit_once(':')
-			.and_then(|(name, width)| width.parse::<usize>().ok().map(|width| (name, width)))
-			.unwrap_or((field_spec, 0));
-		let field = match name.to_ascii_lowercase().as_str() {
-			"user" | "uname" | "euser" => PsField::User,
-			"uid" | "euid" => PsField::Uid,
-			"pid" | "lwp" | "tid" | "spid" | "tgid" => PsField::Pid,
-			"ppid" => PsField::Ppid,
-			"pgid" | "pgrp" => PsField::Pgid,
-			"sid" | "sess" => PsField::Sid,
-			"tpgid" => PsField::Tpgid,
-			"tty" | "tt" | "tname" => PsField::Tty,
-			"stat" | "state" => PsField::State,
-			"s" => PsField::StateChar,
-			"start" | "stime" | "bsdstart" => PsField::Start,
-			"lstart" | "start_time" => PsField::LongStart,
-			"etime" | "elapsed" => PsField::Elapsed,
-			"etimes" => PsField::ElapsedSeconds,
-			"time" | "cputime" | "bsdtime" => PsField::CpuTime,
-			"times" | "cputimes" => PsField::CpuSeconds,
-			"pcpu" | "%cpu" => PsField::CpuPercent,
-			"c" => PsField::CpuInteger,
-			"pmem" | "%mem" => PsField::MemPercent,
-			"vsz" | "vsize" => PsField::VirtualSize,
-			"rss" | "rssize" | "rsz" => PsField::ResidentSize,
-			"sz" => PsField::Size,
-			"ni" | "nice" => PsField::Nice,
-			"pri" | "opri" | "priority" => PsField::Priority,
-			"f" | "flag" | "flags" => PsField::Flags,
-			"ruser" | "logname" => PsField::Ruser,
-			"ruid" => PsField::Ruid,
-			"rgroup" => PsField::Rgroup,
-			"rgid" => PsField::Rgid,
-			"group" | "egroup" => PsField::Egroup,
-			"gid" | "egid" => PsField::Egid,
-			"wchan" | "mwchan" => PsField::Wchan,
-			"min_flt" | "minflt" => PsField::MinorFaults,
-			"maj_flt" | "majflt" => PsField::MajorFaults,
-			"nlwp" | "thcount" => PsField::Threads,
-			"comm" | "ucomm" | "fname" => PsField::Command,
-			"args" | "command" | "cmd" => PsField::Args,
-			_ => return Err((1, format!("unknown output format specifier '{name}'"))),
-		};
-		let mut column = PsColumn::new(field);
-		if let Some(header) = header {
-			column.header = header.to_string();
-		}
-		column.min_width = min_width;
-		columns.push(column);
-	}
-	if columns.len() == start_len {
-		return Err((1, "output format must name at least one column".to_string()));
-	}
-	Ok(())
-}
-
-fn parse_ps_sort(value: &str, sort: &mut Vec<PsSort>) -> std::result::Result<(), (u8, String)> {
-	for spec in value.split(',').flat_map(str::split_ascii_whitespace) {
-		let (descending, name) = if let Some(name) = spec.strip_prefix('-') {
-			(true, name)
-		} else {
-			(false, spec.strip_prefix('+').unwrap_or(spec))
-		};
-		let field = match name.to_ascii_lowercase().as_str() {
-			"pid" => PsSortField::Pid,
-			"ppid" => PsSortField::Ppid,
-			"pcpu" | "%cpu" | "cpu" => PsSortField::Cpu,
-			"pmem" | "%mem" | "mem" | "rss" => PsSortField::Mem,
-			"time" | "cputime" => PsSortField::Time,
-			"start" | "lstart" => PsSortField::Start,
-			"comm" | "command" | "cmd" => PsSortField::Command,
-			_ => return Err((1, format!("unknown sort specifier '{name}'"))),
-		};
-		sort.push(PsSort { field, descending });
-	}
-	if sort.is_empty() {
-		return Err((1, "sort must name at least one column".to_string()));
-	}
-	Ok(())
-}
-
-fn ps_process_selected(
-	process: &proc_snapshot::ProcInfo,
-	options: &PsOptions,
-	current_pid: Option<i32>,
-	current_user: Option<u32>,
-	current_terminal: Option<u64>,
-	current_session: Option<i32>,
-) -> bool {
-	if options.running_only && process.state() != 'R' {
-		return false;
-	}
-	let has_selectors = !options.pids.is_empty()
-		|| !options.parents.is_empty()
-		|| !options.groups.is_empty()
-		|| !options.sessions.is_empty()
-		|| !options.effective_users.is_empty()
-		|| !options.real_users.is_empty()
-		|| !options.real_groups.is_empty()
-		|| !options.terminals.is_empty();
-	if options.all {
-		return true;
-	}
-	if has_selectors {
-		return options.pids.contains(&process.pid())
-			|| process
-				.ppid()
-				.is_some_and(|value| options.parents.contains(&value))
-			|| process
-				.group_id()
-				.is_some_and(|value| options.groups.contains(&value))
-			|| process
-				.session_id()
-				.is_some_and(|value| options.sessions.contains(&value))
-			|| process
-				.effective_user_id()
-				.is_some_and(|value| options.effective_users.contains(&value))
-			|| process
-				.real_user_id()
-				.is_some_and(|value| options.real_users.contains(&value))
-			|| process
-				.real_group_id()
-				.is_some_and(|value| options.real_groups.contains(&value))
-			|| options.terminals.contains(&process.terminal_id());
-	}
-	if options.other_users {
-		return options.include_no_terminal || process.terminal_id().is_some();
-	}
-	if current_user.is_some_and(|user| {
-		process.effective_user_id() != Some(user) && process.real_user_id() != Some(user)
-	}) {
-		return false;
-	}
-	if options.include_no_terminal {
-		return true;
-	}
-	if cfg!(target_os = "macos") {
-		return process.terminal_id().is_some();
-	}
-	if let Some(terminal) = current_terminal {
-		return process.terminal_id() == Some(terminal);
-	}
-	if let Some(session) = current_session {
-		return process.session_id() == Some(session);
-	}
-	current_pid.is_none_or(|pid| process.pid() == pid)
-}
-
-fn ps_columns(options: &PsOptions) -> Vec<PsColumn> {
-	if options.custom_format {
-		return options.columns.clone();
-	}
-	let columns = if options.user_format {
-		vec![
-			(PsField::User, "USER"),
-			(PsField::Pid, "PID"),
-			(PsField::CpuPercent, "%CPU"),
-			(PsField::MemPercent, "%MEM"),
-			(PsField::VirtualSize, "VSZ"),
-			(PsField::ResidentSize, "RSS"),
-			(PsField::Tty, "TTY"),
-			(PsField::State, "STAT"),
-			(PsField::Start, "START"),
-			(PsField::CpuTime, "TIME"),
-			(PsField::Args, "COMMAND"),
-		]
-	} else if options.long_format {
-		vec![
-			(PsField::StateChar, "S"),
-			(PsField::Uid, "UID"),
-			(PsField::Pid, "PID"),
-			(PsField::Ppid, "PPID"),
-			(PsField::Pgid, "PGID"),
-			(PsField::Sid, "SID"),
-			(PsField::Nice, "NI"),
-			(PsField::VirtualSize, "VSZ"),
-			(PsField::ResidentSize, "RSS"),
-			(PsField::Tty, "TTY"),
-			(PsField::CpuTime, "TIME"),
-			(PsField::Args, "CMD"),
-		]
-	} else if options.job_format {
-		vec![
-			(PsField::User, "USER"),
-			(PsField::Pid, "PID"),
-			(PsField::Ppid, "PPID"),
-			(PsField::Pgid, "PGID"),
-			(PsField::Sid, "SID"),
-			(PsField::Tpgid, "TPGID"),
-			(PsField::State, "STAT"),
-			(PsField::Tty, "TTY"),
-			(PsField::CpuTime, "TIME"),
-			(PsField::Args, "COMMAND"),
-		]
-	} else if options.memory_format {
-		vec![
-			(PsField::Pid, "PID"),
-			(PsField::MemPercent, "%MEM"),
-			(PsField::VirtualSize, "VSZ"),
-			(PsField::ResidentSize, "RSS"),
-			(PsField::Tty, "TTY"),
-			(PsField::State, "STAT"),
-			(PsField::Start, "START"),
-			(PsField::CpuTime, "TIME"),
-			(PsField::Args, "COMMAND"),
-		]
-	} else if options.full_format {
-		vec![
-			(PsField::Uid, "UID"),
-			(PsField::Pid, "PID"),
-			(PsField::Ppid, "PPID"),
-			(PsField::CpuInteger, "C"),
-			(PsField::Start, "STIME"),
-			(PsField::Tty, "TTY"),
-			(PsField::CpuTime, "TIME"),
-			(PsField::Args, "CMD"),
-		]
-	} else if options.bsd_syntax {
-		vec![
-			(PsField::Pid, "PID"),
-			(PsField::Tty, "TTY"),
-			(PsField::State, "STAT"),
-			(PsField::CpuTime, "TIME"),
-			(PsField::Args, "COMMAND"),
-		]
-	} else {
-		vec![
-			(PsField::Pid, "PID"),
-			(PsField::Tty, "TTY"),
-			(PsField::CpuTime, "TIME"),
-			(PsField::Args, "CMD"),
-		]
-	};
-	columns
-		.into_iter()
-		.map(|(field, header)| PsColumn::with_header(field, header))
-		.collect()
-}
-
-fn sort_ps_rows(rows: &mut [PsProcessRow], sort: &[PsSort]) {
-	rows.sort_by(|left, right| {
-		for key in sort {
-			let ordering = match key.field {
-				PsSortField::Pid => left.pid.cmp(&right.pid),
-				PsSortField::Ppid => left.ppid.cmp(&right.ppid),
-				PsSortField::Cpu => match (left.cpu_percent(), right.cpu_percent()) {
-					(Some(left), Some(right)) => left.total_cmp(&right),
-					(left, right) => left.is_some().cmp(&right.is_some()),
-				},
-				PsSortField::Mem => left.resident_size.cmp(&right.resident_size),
-				PsSortField::Time => left.cpu_time.cmp(&right.cpu_time),
-				PsSortField::Start => left.start_time.cmp(&right.start_time),
-				PsSortField::Command => left.command.cmp(&right.command),
-			};
-			let ordering = if key.descending {
-				ordering.reverse()
-			} else {
-				ordering
-			};
-			if ordering != std::cmp::Ordering::Equal {
-				return ordering;
-			}
-		}
-		left.pid.cmp(&right.pid)
-	});
-}
-
-fn render_ps_table(rows: &[PsProcessRow], columns: &[PsColumn], no_headers: bool) -> String {
-	let has_field = |wanted| columns.iter().any(|column| column.field == wanted);
-	let total_memory = has_field(PsField::MemPercent)
-		.then(ps_total_memory_bytes)
-		.flatten();
-	let timezone = (has_field(PsField::Start) || has_field(PsField::LongStart))
-		.then(|| TimeZone::try_system().unwrap_or(TimeZone::UTC));
-	let terminal_names = if has_field(PsField::Tty) {
-		ps_terminal_names(rows)
-	} else {
-		HashMap::new()
-	};
-	let mut user_names = HashMap::new();
-	if has_field(PsField::User) || has_field(PsField::Ruser) {
-		let uids = rows.iter().flat_map(|row| [row.user, row.ruid]).flatten();
-		for uid in uids {
-			user_names
-				.entry(uid)
-				.or_insert_with(|| ps_user_name(uid).unwrap_or_else(|| uid.to_string()));
-		}
-	}
-	let mut group_names = HashMap::new();
-	if has_field(PsField::Rgroup) || has_field(PsField::Egroup) {
-		let gids = rows.iter().flat_map(|row| [row.rgid, row.egid]).flatten();
-		for gid in gids {
-			group_names
-				.entry(gid)
-				.or_insert_with(|| ps_group_name(gid).unwrap_or_else(|| gid.to_string()));
-		}
-	}
-	let values: Vec<Vec<String>> = rows
-		.iter()
-		.map(|row| {
-			columns
-				.iter()
-				.map(|column| {
-					render_ps_value(
-						row,
-						column.field,
-						total_memory,
-						timezone.as_ref(),
-						&terminal_names,
-						&user_names,
-						&group_names,
-					)
-				})
-				.collect()
-		})
-		.collect();
-	let widths: Vec<usize> = columns
-		.iter()
-		.enumerate()
-		.map(|(index, column)| {
-			values
-				.iter()
-				.map(|row| row[index].chars().count())
-				.fold(column.header.chars().count().max(column.min_width), usize::max)
-		})
-		.collect();
-	let mut output = String::new();
-	if !no_headers && columns.iter().any(|column| !column.header.is_empty()) {
-		write_ps_line(
-			&mut output,
-			columns.iter().map(|column| column.header.as_str()),
-			columns,
-			&widths,
-		);
-	}
-	for row in &values {
-		write_ps_line(&mut output, row.iter().map(String::as_str), columns, &widths);
-	}
-	output
-}
-
-fn write_ps_line<'a>(
-	output: &mut String,
-	values: impl Iterator<Item = &'a str>,
-	columns: &[PsColumn],
-	widths: &[usize],
-) {
-	for (index, value) in values.enumerate() {
-		if index > 0 {
-			output.push(' ');
-		}
-		let width = widths[index];
-		if columns[index].field.right_aligned() {
-			let _ = write!(output, "{value:>width$}");
-		} else if index + 1 == columns.len() {
-			output.push_str(value);
-		} else {
-			let _ = write!(output, "{value:<width$}");
-		}
-	}
-	output.push('\n');
-}
-
-fn render_ps_value(
-	row: &PsProcessRow,
-	field: PsField,
-	total_memory: Option<u64>,
-	timezone: Option<&TimeZone>,
-	terminal_names: &HashMap<u64, String>,
-	user_names: &HashMap<u32, String>,
-	group_names: &HashMap<u32, String>,
-) -> String {
-	match field {
-		PsField::User => row
-			.user
-			.and_then(|uid| user_names.get(&uid).cloned())
-			.unwrap_or_else(|| "?".to_string()),
-		PsField::Uid => row
-			.user
-			.map_or_else(|| "?".to_string(), |value| value.to_string()),
-		PsField::Pid => row.pid.to_string(),
-		PsField::Ppid => row
-			.ppid
-			.map_or_else(|| "?".to_string(), |value| value.to_string()),
-		PsField::Pgid => row
-			.pgid
-			.map_or_else(|| "?".to_string(), |value| value.to_string()),
-		PsField::Sid => row
-			.sid
-			.map_or_else(|| "?".to_string(), |value| value.to_string()),
-		PsField::Tpgid => row
-			.tpgid
-			.map_or_else(|| "-1".to_string(), |value| value.to_string()),
-		PsField::Tty => row
-			.terminal
-			.and_then(|terminal| terminal_names.get(&terminal).cloned())
-			.unwrap_or_else(|| "?".to_string()),
-		PsField::State => format_ps_state(row),
-		PsField::StateChar => row.state.to_string(),
-		PsField::Start => timezone.map_or_else(
-			|| "?".to_string(),
-			|timezone| format_ps_start(row.started_at, row.age, timezone, false),
-		),
-		PsField::LongStart => timezone.map_or_else(
-			|| "?".to_string(),
-			|timezone| format_ps_start(row.started_at, row.age, timezone, true),
-		),
-		PsField::Elapsed => row.age.map_or_else(|| "?".to_string(), format_ps_elapsed),
-		PsField::ElapsedSeconds => row
-			.age
-			.map_or_else(|| "?".to_string(), |age| age.as_secs().to_string()),
-		PsField::CpuTime => row
-			.cpu_time
-			.map_or_else(|| "?".to_string(), format_ps_elapsed),
-		PsField::CpuPercent => row
-			.cpu_percent()
-			.map_or_else(|| "?".to_string(), |percent| format!("{percent:.1}")),
-		PsField::CpuInteger => row
-			.cpu_percent()
-			.map_or_else(|| "?".to_string(), |percent| format!("{percent:.0}")),
-		PsField::MemPercent => row
-			.memory_percent(total_memory)
-			.map_or_else(|| "?".to_string(), |percent| format!("{percent:.1}")),
-		PsField::VirtualSize => row
-			.virtual_size
-			.map_or_else(|| "?".to_string(), |bytes| (bytes / 1024).to_string()),
-		PsField::ResidentSize => row
-			.resident_size
-			.map_or_else(|| "?".to_string(), |bytes| (bytes / 1024).to_string()),
-		PsField::Nice => row
-			.nice
-			.map_or_else(|| "?".to_string(), |value| value.to_string()),
-		PsField::Threads => row
-			.threads
-			.map_or_else(|| "?".to_string(), |value| value.to_string()),
-		PsField::Priority => row
-			.priority
-			.map_or_else(|| "?".to_string(), |value| value.to_string()),
-		PsField::Flags => row
-			.flags
-			.map_or_else(|| "?".to_string(), |value| format!("{value:x}")),
-		PsField::Ruser => row
-			.ruid
-			.and_then(|uid| user_names.get(&uid).cloned())
-			.unwrap_or_else(|| "?".to_string()),
-		PsField::Ruid => row
-			.ruid
-			.map_or_else(|| "?".to_string(), |value| value.to_string()),
-		PsField::Rgroup => row
-			.rgid
-			.and_then(|gid| group_names.get(&gid).cloned())
-			.unwrap_or_else(|| "?".to_string()),
-		PsField::Rgid => row
-			.rgid
-			.map_or_else(|| "?".to_string(), |value| value.to_string()),
-		PsField::Egroup => row
-			.egid
-			.and_then(|gid| group_names.get(&gid).cloned())
-			.unwrap_or_else(|| "?".to_string()),
-		PsField::Egid => row
-			.egid
-			.map_or_else(|| "?".to_string(), |value| value.to_string()),
-		PsField::Wchan => row.wchan.clone().unwrap_or_else(|| "-".to_string()),
-		PsField::MinorFaults => row
-			.minor_faults
-			.map_or_else(|| "?".to_string(), |value| value.to_string()),
-		PsField::MajorFaults => row
-			.major_faults
-			.map_or_else(|| "?".to_string(), |value| value.to_string()),
-		PsField::CpuSeconds => row
-			.cpu_time
-			.map_or_else(|| "?".to_string(), |time| time.as_secs().to_string()),
-		PsField::Size => row
-			.virtual_size
-			.zip(ps_page_size())
-			.map_or_else(|| "?".to_string(), |(bytes, page)| bytes.div_ceil(page).to_string()),
-		PsField::Command => row.command.clone(),
-		PsField::Args => row.args.clone(),
-	}
-}
-
-fn format_ps_state(row: &PsProcessRow) -> String {
-	let mut state = row.state.to_string();
-	match row.nice {
-		Some(value) if value < 0 => state.push('<'),
-		Some(value) if value > 0 => state.push('N'),
-		_ => {},
-	}
-	if row.sid == Some(row.pid) {
-		state.push('s');
-	}
-	if row.threads.is_some_and(|threads| threads > 1) {
-		state.push('l');
-	}
-	if row.terminal.is_some() && row.tpgid.is_some() && row.tpgid == row.pgid {
-		state.push('+');
-	}
-	state
-}
-
-fn format_ps_start(
-	started_at: Option<SystemTime>,
-	age: Option<Duration>,
-	timezone: &TimeZone,
-	long: bool,
-) -> String {
-	const DAY_SECONDS: u64 = 24 * 60 * 60;
-	const SIX_MONTH_SECONDS: u64 = 180 * DAY_SECONDS;
-	let Some(started_at) = started_at else {
-		return "?".to_string();
-	};
-	let Ok(since_epoch) = started_at.duration_since(UNIX_EPOCH) else {
-		return "?".to_string();
-	};
-	let Ok(nanoseconds) = i128::try_from(since_epoch.as_nanos()) else {
-		return "?".to_string();
-	};
-	let Ok(timestamp) = Timestamp::from_nanosecond(nanoseconds) else {
-		return "?".to_string();
-	};
-	let format = if long {
-		"%a %b %e %H:%M:%S %Y"
-	} else if age.is_some_and(|age| age.as_secs() < DAY_SECONDS) {
-		"%H:%M"
-	} else if age.is_some_and(|age| age.as_secs() < SIX_MONTH_SECONDS) {
-		"%b%d"
-	} else {
-		"%Y"
-	};
-	strtime::format(format, &timestamp.to_zoned(timezone.clone()))
-		.unwrap_or_else(|_| "?".to_string())
-}
-
-fn format_ps_elapsed(duration: Duration) -> String {
-	let total_seconds = duration.as_secs();
-	let days = total_seconds / 86_400;
-	let hours = total_seconds % 86_400 / 3_600;
-	let minutes = total_seconds % 3_600 / 60;
-	let seconds = total_seconds % 60;
-	if days > 0 {
-		format!("{days}-{hours:02}:{minutes:02}:{seconds:02}")
-	} else if hours > 0 {
-		format!("{hours:02}:{minutes:02}:{seconds:02}")
-	} else {
-		format!("{minutes:02}:{seconds:02}")
-	}
-}
-
-#[cfg(target_os = "linux")]
-fn ps_total_memory_bytes() -> Option<u64> {
-	let value = fs::read_to_string("/proc/meminfo")
-		.ok()?
-		.lines()
-		.find_map(|line| line.strip_prefix("MemTotal:"))?
-		.split_ascii_whitespace()
-		.next()?
-		.parse::<u64>()
-		.ok()?;
-	value.checked_mul(1024)
-}
-
-#[cfg(target_os = "macos")]
-fn ps_total_memory_bytes() -> Option<u64> {
-	let mut value = 0_u64;
-	let mut size = std::mem::size_of::<u64>();
-	// SAFETY: the output pointer names a writable u64 and `size` reports its
-	// exact capacity; hw.memsize has no input buffer.
-	let status = unsafe {
-		libc::sysctlbyname(
-			c"hw.memsize".as_ptr(),
-			(&raw mut value).cast(),
-			&raw mut size,
-			std::ptr::null_mut(),
-			0,
-		)
-	};
-	(status == 0 && size == std::mem::size_of::<u64>()).then_some(value)
-}
-
-#[cfg(target_os = "windows")]
-fn ps_total_memory_bytes() -> Option<u64> {
-	None
-}
-
-#[cfg(unix)]
-fn ps_user_name(uid: u32) -> Option<String> {
-	use std::ffi::CStr;
-	let mut record = std::mem::MaybeUninit::<libc::passwd>::zeroed();
-	let mut result = std::ptr::null_mut();
-	let mut buffer = vec![0_u8; 16 * 1024];
-	// SAFETY: all pointers refer to live storage for this call; a non-null
-	// result guarantees `record` and its pw_name pointer were initialized.
-	let status = unsafe {
-		libc::getpwuid_r(
-			uid,
-			record.as_mut_ptr(),
-			buffer.as_mut_ptr().cast(),
-			buffer.len(),
-			&raw mut result,
-		)
-	};
-	if status != 0 || result.is_null() {
-		return None;
-	}
-	// SAFETY: getpwuid_r succeeded and the backing buffer remains alive.
-	let name = unsafe { CStr::from_ptr(record.assume_init().pw_name) };
-	Some(name.to_string_lossy().into_owned())
-}
-
-#[cfg(not(unix))]
-fn ps_user_name(_uid: u32) -> Option<String> {
-	None
-}
-
-#[cfg(unix)]
-fn ps_group_name(gid: u32) -> Option<String> {
-	use std::ffi::CStr;
-	let mut record = std::mem::MaybeUninit::<libc::group>::zeroed();
-	let mut result = std::ptr::null_mut();
-	let mut buffer = vec![0_u8; 16 * 1024];
-	// SAFETY: all pointers refer to live storage for this call; a non-null
-	// result guarantees `record` and its gr_name pointer were initialized.
-	let status = unsafe {
-		libc::getgrgid_r(
-			gid,
-			record.as_mut_ptr(),
-			buffer.as_mut_ptr().cast(),
-			buffer.len(),
-			&raw mut result,
-		)
-	};
-	if status != 0 || result.is_null() {
-		return None;
-	}
-	// SAFETY: getgrgid_r succeeded and the backing buffer remains alive.
-	let name = unsafe { CStr::from_ptr(record.assume_init().gr_name) };
-	Some(name.to_string_lossy().into_owned())
-}
-
-#[cfg(not(unix))]
-fn ps_group_name(_gid: u32) -> Option<String> {
-	None
-}
-
-/// System memory page size in bytes, used for the SZ (pages) column.
-#[cfg(unix)]
-fn ps_page_size() -> Option<u64> {
-	// SAFETY: sysconf reads a process-global constant.
-	u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) })
-		.ok()
-		.filter(|value| *value > 0)
-}
-
-#[cfg(not(unix))]
-fn ps_page_size() -> Option<u64> {
-	None
-}
-
-#[cfg(unix)]
-fn ps_terminal_names(rows: &[PsProcessRow]) -> HashMap<u64, String> {
-	use std::os::unix::fs::MetadataExt;
-	let wanted: HashSet<u64> = rows.iter().filter_map(|row| row.terminal).collect();
-	let mut names = HashMap::new();
-	for directory in [Path::new("/dev"), Path::new("/dev/pts")] {
-		let Ok(entries) = fs::read_dir(directory) else {
-			continue;
-		};
-		for entry in entries.flatten() {
-			let path = entry.path();
-			let Ok(metadata) = fs::metadata(&path) else {
-				continue;
-			};
-			let id = metadata.rdev();
-			if !wanted.contains(&id) || names.contains_key(&id) {
-				continue;
-			}
-			let name = path
-				.strip_prefix("/dev")
-				.ok()
-				.map(|path| path.to_string_lossy().trim_start_matches('/').to_string());
-			if let Some(name) = name.filter(|name| !name.is_empty()) {
-				names.insert(id, name);
-			}
-		}
-	}
-	names
-}
-
-#[cfg(not(unix))]
-fn ps_terminal_names(_rows: &[PsProcessRow]) -> HashMap<u64, String> {
-	HashMap::new()
-}
-
-fn write_ps_help(mut output: impl Write) -> io::Result<()> {
-	writeln!(
-		output,
-		"Usage: ps [options]\n\nSelection:\n-A, -e, --all       select every process\n-p, --pid \
-		 LIST      select process IDs\n-P, --ppid LIST     select parent process IDs\n-u, --user \
-		 LIST     select effective users\n-U, --User LIST     select real users\n-t, --tty LIST      \
-		 select terminals\n\nOutput:\n-f                  full format\n-l                  long \
-		 format\n-o, --format LIST   custom columns\n--sort LIST     sort by columns; prefix \
-		 descending keys with '-'\n--no-headers    omit column headings\n\nBSD forms such as 'ps \
-		 ax', 'ps aux', and 'ps axo pid,command' are supported."
-	)
-}
-
-#[derive(Clone, Copy, Debug, clap::ValueEnum)]
-enum TopSortKey {
-	Pid,
-	Command,
-	#[value(alias = "%cpu")]
-	Cpu,
-	#[value(alias = "%mem", alias = "memory")]
-	Mem,
-	#[value(alias = "time+")]
-	Time,
-}
-
-#[derive(Parser)]
-#[command(name = "top", version, about = "Display processes", disable_help_flag = false)]
-struct TopCommand {
-	/// Write plain-text snapshots suitable for pipes and files.
-	#[arg(short = 'b', long)]
-	batch: bool,
-
-	/// Number of snapshots to produce.
-	#[cfg(target_os = "macos")]
-	#[arg(short = 'l', long = "samples", value_parser = clap::value_parser!(u64).range(1..))]
-	iterations: Option<u64>,
-
-	/// Number of snapshots to produce.
-	#[cfg(not(target_os = "macos"))]
-	#[arg(short = 'n', long = "iterations", value_parser = clap::value_parser!(u64).range(1..))]
-	iterations: Option<u64>,
-
-	/// Seconds between snapshots.
-	#[cfg(target_os = "macos")]
-	#[arg(short = 's', long = "delay", default_value_t = 1.0)]
-	delay: f64,
-
-	/// Seconds between snapshots.
-	#[cfg(not(target_os = "macos"))]
-	#[arg(short = 'd', long = "delay", default_value_t = 3.0)]
-	delay: f64,
-
-	/// Maximum number of process rows per snapshot.
-	#[cfg(target_os = "macos")]
-	#[arg(short = 'n', long = "rows")]
-	rows: Option<usize>,
-
-	/// Maximum number of process rows per snapshot.
-	#[cfg(not(target_os = "macos"))]
-	#[arg(short = 'r', long = "rows")]
-	rows: Option<usize>,
-
-	/// Only show these process IDs (may be repeated or comma-separated).
-	#[arg(short = 'p', long = "pid", value_delimiter = ',')]
-	pids: Vec<i32>,
-
-	/// Only show processes with this numeric real or effective user ID.
-	#[arg(short = 'u', long = "user")]
-	user: Option<u32>,
-
-	#[arg(short = 'o', long = "sort", value_enum, ignore_case = true)]
-	#[cfg_attr(target_os = "macos", arg(default_value_t = TopSortKey::Pid))]
-	#[cfg_attr(not(target_os = "macos"), arg(default_value_t = TopSortKey::Cpu))]
-	sort: TopSortKey,
-
-	/// Show the complete command line instead of the executable name.
-	#[arg(short = 'c', long = "full-command")]
-	full_command: bool,
-}
-
-#[derive(Clone)]
-struct TopProcessRow {
-	pid:           i32,
-	user:          Option<u32>,
-	state:         char,
-	cpu_percent:   f64,
-	cpu_time:      Option<Duration>,
-	virtual_size:  Option<u64>,
-	resident_size: Option<u64>,
-	threads:       Option<u32>,
-	nice:          Option<i32>,
-	command:       String,
-}
-
-impl builtins::Command for TopCommand {
-	type Error = brush_core::Error;
-
-	fn execute<SE: brush_core::ShellExtensions>(
-		&self,
-		context: ExecutionContext<'_, SE>,
-	) -> impl Future<Output = std::result::Result<ExecutionResult, brush_core::Error>> + Send {
-		let iterations = self.iterations;
-		let delay = self.delay;
-		let row_limit = self.rows;
-		let pids = self.pids.clone();
-		let user = self.user;
-		let sort = self.sort;
-		let full_command = self.full_command;
-		let _ = self.batch;
-		async move {
-			if !delay.is_finite() || delay < 0.0 || delay > Duration::MAX.as_secs_f64() {
-				writeln!(context.stderr(), "top: invalid delay '{delay}'")?;
-				return Ok(ExecutionResult::new(1));
-			}
-			if row_limit == Some(0) {
-				writeln!(context.stderr(), "top: row count must be greater than zero")?;
-				return Ok(ExecutionResult::new(1));
-			}
-			#[cfg(target_os = "windows")]
-			if user.is_some() {
-				writeln!(context.stderr(), "top: user filtering is unavailable on Windows")?;
-				return Ok(ExecutionResult::new(2));
-			}
-
-			let delay = Duration::from_secs_f64(delay);
-			let pid_filter: std::collections::HashSet<i32> = pids.into_iter().collect();
-			let mut previous = HashMap::<i32, (u64, Duration)>::new();
-			let mut previous_sample = std::time::Instant::now();
-			let mut sample = 0_u64;
-
-			loop {
-				if context.is_cancelled() {
-					return Ok(ExecutionExitCode::Interrupted.into());
-				}
-
-				let now = std::time::Instant::now();
-				let elapsed = now.duration_since(previous_sample);
-				let mut next_previous = HashMap::new();
-				let mut rows = Vec::new();
-
-				for process in proc_snapshot::ProcInfo::all() {
-					if !pid_filter.is_empty() && !pid_filter.contains(&process.pid()) {
-						continue;
-					}
-					let real_user = process.real_user_id();
-					let effective_user = process.effective_user_id();
-					if let Some(wanted) = user
-						&& real_user != Some(wanted)
-						&& effective_user != Some(wanted)
-					{
-						continue;
-					}
-
-					let start_time = process.start_time();
-					let cpu_time = process.cpu_time();
-					let cpu_percent = cpu_time
-						.and_then(|current| {
-							previous
-								.get(&process.pid())
-								.filter(|(previous_start, _)| *previous_start == start_time)
-								.map(|(_, old)| current.saturating_sub(*old))
-						})
-						.map_or(0.0, |delta| {
-							if elapsed.is_zero() {
-								0.0
-							} else {
-								100.0 * delta.as_secs_f64() / elapsed.as_secs_f64()
-							}
-						});
-					if let Some(cpu_time) = cpu_time {
-						next_previous.insert(process.pid(), (start_time, cpu_time));
-					}
-
-					let command = sanitize_process_command(if full_command {
-						let args = process.args();
-						if args.is_empty() {
-							process.command_name()
-						} else {
-							args.join(" ")
-						}
-					} else {
-						process.command_name()
-					});
-					rows.push(TopProcessRow {
-						pid: process.pid(),
-						user: effective_user.or(real_user),
-						state: process.state(),
-						cpu_percent,
-						cpu_time,
-						virtual_size: process.virtual_bytes(),
-						resident_size: process.resident_bytes(),
-						threads: process.thread_count(),
-						nice: process.nice(),
-						command,
-					});
-				}
-
-				sort_top_rows(&mut rows, sort);
-				let output = render_top_snapshot(&rows, row_limit, sample + 1);
-				if let Err(err) = write!(context.stdout(), "{output}") {
-					if err.kind() == io::ErrorKind::BrokenPipe {
-						return Ok(ExecutionResult::success());
-					}
-					return Err(err.into());
-				}
-
-				sample += 1;
-				if iterations.is_some_and(|count| sample >= count) {
-					return Ok(ExecutionResult::success());
-				}
-				previous = next_previous;
-				previous_sample = now;
-
-				let sleep = time::sleep(delay);
-				tokio::pin!(sleep);
-				if let Some(cancel_token) = context.cancel_token() {
-					tokio::select! {
-						() = &mut sleep => {},
-						() = cancel_token.cancelled() => {
-							return Ok(ExecutionExitCode::Interrupted.into());
-						},
-					}
-				} else {
-					sleep.await;
-				}
-			}
-		}
-	}
-}
-
-fn sort_top_rows(rows: &mut [TopProcessRow], key: TopSortKey) {
-	rows.sort_by(|left, right| {
-		let primary = match key {
-			TopSortKey::Pid => right.pid.cmp(&left.pid),
-			TopSortKey::Command => left.command.cmp(&right.command),
-			TopSortKey::Cpu => right.cpu_percent.total_cmp(&left.cpu_percent),
-			TopSortKey::Mem => right.resident_size.cmp(&left.resident_size),
-			TopSortKey::Time => right.cpu_time.cmp(&left.cpu_time),
-		};
-		primary.then_with(|| right.pid.cmp(&left.pid))
-	});
-}
-
-fn render_top_snapshot(rows: &[TopProcessRow], row_limit: Option<usize>, sample: u64) -> String {
-	let mut running = 0_usize;
-	let mut sleeping = 0_usize;
-	let mut stopped = 0_usize;
-	let mut zombie = 0_usize;
-	let mut resident = 0_u64;
-	let mut virtual_size = 0_u64;
-	let mut cpu = 0.0;
-	for row in rows {
-		match row.state {
-			'R' => running += 1,
-			'S' | 'I' | 'D' => sleeping += 1,
-			'T' => stopped += 1,
-			'Z' => zombie += 1,
-			_ => {},
-		}
-		resident = resident.saturating_add(row.resident_size.unwrap_or(0));
-		virtual_size = virtual_size.saturating_add(row.virtual_size.unwrap_or(0));
-		cpu += row.cpu_percent;
-	}
-
-	let mut output = String::new();
-	let _ = writeln!(output, "top - snapshot {sample}");
-	#[cfg(target_os = "macos")]
-	let _ = writeln!(
-		output,
-		"Processes: {:>5} total, {:>5} running, {:>5} sleeping, {:>5} stopped, {:>5} zombie",
-		rows.len(),
-		running,
-		sleeping,
-		stopped,
-		zombie
-	);
-	#[cfg(not(target_os = "macos"))]
-	let _ = writeln!(
-		output,
-		"Tasks: {:>5} total, {:>5} running, {:>5} sleeping, {:>5} stopped, {:>5} zombie",
-		rows.len(),
-		running,
-		sleeping,
-		stopped,
-		zombie
-	);
-	let _ = writeln!(output, "%Cpu(s): {cpu:>6.1} process");
-	let _ = writeln!(
-		output,
-		"Process memory: {} resident, {} virtual",
-		format_top_bytes(resident),
-		format_top_bytes(virtual_size)
-	);
-	let _ = writeln!(
-		output,
-		"{:>7} {:>8} {:>2} {:>3} {:>4} {:>9} {:>9} {:>10} {:>4} {:>4} COMMAND",
-		"PID", "USER", "S", "NI", "TH", "VIRT", "RES", "TIME+", "%CPU", "%MEM"
-	);
-
-	for row in rows.iter().take(row_limit.unwrap_or(usize::MAX)) {
-		let user = row
-			.user
-			.map_or_else(|| "?".to_string(), |value| value.to_string());
-		let nice = row
-			.nice
-			.map_or_else(|| "?".to_string(), |value| value.to_string());
-		let threads = row
-			.threads
-			.map_or_else(|| "?".to_string(), |value| value.to_string());
-		let virtual_size = row
-			.virtual_size
-			.map_or_else(|| "?".to_string(), format_top_bytes);
-		let resident_size = row
-			.resident_size
-			.map_or_else(|| "?".to_string(), format_top_bytes);
-		let cpu_time = row
-			.cpu_time
-			.map_or_else(|| "?".to_string(), format_top_time);
-		let _ = writeln!(
-			output,
-			"{:>7} {:>8} {:>2} {:>3} {:>4} {:>9} {:>9} {:>10} {:>4.1} {:>4} {}",
-			row.pid,
-			user,
-			row.state,
-			nice,
-			threads,
-			virtual_size,
-			resident_size,
-			cpu_time,
-			row.cpu_percent,
-			"?",
-			if row.command.is_empty() {
-				"?"
-			} else {
-				&row.command
-			}
-		);
-	}
-	output.push('\n');
-	output
-}
-
-fn sanitize_process_command(command: String) -> String {
-	command
-		.chars()
-		.map(|character| {
-			if character.is_control() {
-				' '
-			} else {
-				character
-			}
-		})
-		.collect()
-}
-
-fn format_top_bytes(bytes: u64) -> String {
-	const KIB: f64 = 1024.0;
-	const MIB: f64 = KIB * 1024.0;
-	const GIB: f64 = MIB * 1024.0;
-	let bytes = bytes as f64;
-	if bytes >= GIB {
-		format!("{:.1}g", bytes / GIB)
-	} else if bytes >= MIB {
-		format!("{:.1}m", bytes / MIB)
-	} else if bytes >= KIB {
-		format!("{:.1}k", bytes / KIB)
-	} else {
-		format!("{bytes:.0}")
-	}
-}
-
-fn format_top_time(duration: Duration) -> String {
-	let total_seconds = duration.as_secs();
-	let minutes = total_seconds / 60;
-	let seconds = total_seconds % 60;
-	let hundredths = duration.subsec_millis() / 10;
-	format!("{minutes}:{seconds:02}.{hundredths:02}")
-}
-
-#[derive(Parser)]
-#[command(disable_help_flag = true)]
-struct NohupCommand {
-	#[arg(num_args = 0.., trailing_var_arg = true, allow_hyphen_values = true)]
-	command: Vec<String>,
-}
-
-impl builtins::Command for NohupCommand {
-	type Error = brush_core::Error;
-
-	fn execute<SE: brush_core::ShellExtensions>(
-		&self,
-		context: ExecutionContext<'_, SE>,
-	) -> impl Future<Output = std::result::Result<ExecutionResult, brush_core::Error>> + Send {
-		let command = self.command.clone();
-		async move {
-			if context.is_cancelled() {
-				return Ok(ExecutionExitCode::Interrupted.into());
-			}
-			// coreutils `nohup` with no operand fails with exit code 125.
-			if command.is_empty() {
-				let _ = writeln!(context.stderr(), "nohup: missing operand");
-				return Ok(ExecutionResult::new(125));
-			}
-
-			// `nohup <cmd>` (foreground) runs the operand directly and surfaces its
-			// exit status — the contract pinned by
-			// `nohup_builtin_propagates_command_exit_code`. Persistence across the
-			// host's teardown is a *background* concern that never reaches this
-			// builtin: the agent writes `nohup <server> &`, and brush's
-			// `transparent_background_wrapper` unwraps that to spawn the operand
-			// directly with `detach_reparent`, double-forking it out of the shell's
-			// descendant tree (see `execute_external_command` / `detach_session_reparent`).
-			// Like coreutils, we run the operand here; we only differ by not masking
-			// SIGHUP (see `nohup_builtin_does_not_mask_sighup`).
-			let mut command_line = String::new();
-			for (idx, arg) in command.iter().enumerate() {
-				if idx > 0 {
-					command_line.push(' ');
-				}
-				command_line.push_str(&quote_arg(arg));
-			}
-
-			let mut params = context.params.clone();
-			params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
-			let source_info = SourceInfo::from("pi-natives:nohup");
-			context
-				.shell
-				.run_string(command_line, &source_info, &params)
-				.await
-		}
-	}
-}
-fn parse_duration(input: &str) -> Option<Duration> {
-	let trimmed = input.trim();
-	if trimmed.is_empty() {
-		return None;
-	}
-	let (number, multiplier) = match trimmed.chars().last()? {
-		's' => (&trimmed[..trimmed.len() - 1], 1.0),
-		'm' => (&trimmed[..trimmed.len() - 1], 60.0),
-		'h' => (&trimmed[..trimmed.len() - 1], 3600.0),
-		'd' => (&trimmed[..trimmed.len() - 1], 86400.0),
-		ch if ch.is_ascii_alphabetic() => return None,
-		_ => (trimmed, 1.0),
-	};
-	let value = number.parse::<f64>().ok()?;
-	if value.is_sign_negative() {
-		return None;
-	}
-	let millis = value * multiplier * 1000.0;
-	if !millis.is_finite() || millis < 0.0 {
-		return None;
-	}
-	Some(Duration::from_millis(millis.round() as u64))
-}
-
-fn quote_arg(arg: &str) -> String {
-	if arg.is_empty() {
-		return "''".to_string();
-	}
-	let safe = arg
-		.chars()
-		.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '+'));
-	if safe {
-		return arg.to_string();
-	}
-	let escaped = arg.replace('\'', "'\"'\"'");
-	format!("'{escaped}'")
+/// Whether the `nohup` builtin should stand aside for the system binary.
+///
+/// The builtin detaches its operand into a new session so a backgrounded server
+/// survives this embedded shell's kill-on-drop teardown, which a system `nohup`
+/// does not do. It therefore shadows the real one unless
+/// `PI_DISABLE_NOHUP_BUILTIN` (session env or process env) asks otherwise.
+fn nohup_builtin_disabled(config: &ShellConfig) -> bool {
+	uutils_env_disabled(config, "PI_DISABLE_NOHUP_BUILTIN")
 }
 
 /// Reads a boolean "disable" flag for the uutils builtins from the session
@@ -6203,6 +1963,25 @@ mod tests {
 		(session, params)
 	}
 
+	/// Shell-quotes an argument when building a command string for a test.
+	///
+	/// Mirrors what the `timeout`/`nohup` builtins do when they rebuild a
+	/// command line; kept local because it exists only to construct these
+	/// fixtures.
+	fn quote_arg(arg: &str) -> String {
+		if arg.is_empty() {
+			return "''".to_string();
+		}
+		if arg
+			.chars()
+			.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '+'))
+		{
+			return arg.to_string();
+		}
+		let escaped = arg.replace('\'', "'\"'\"'");
+		format!("'{escaped}'")
+	}
+
 	async fn execute_captured(command: String) -> (ShellExecuteResult, String) {
 		let (tx, rx) = flume::unbounded();
 		let result = execute_shell(
@@ -6216,14 +1995,66 @@ mod tests {
 		(result, output)
 	}
 
+	/// Regression for issue #8925: a host env entry whose key or value is not
+	/// valid Unicode must be skipped, not fatal. `std::env::vars()` panics on
+	/// the first one (e.g. the corrupt `GHOSTTY_BIN_DIR` cmux/Ghostty stages,
+	/// bytes `9d d9 50`) before any command runs; `copy_env_into_shell` reads
+	/// via `vars_os()` and drops corrupt entries while still copying the rest
+	/// and merging duplicate `PATH` values.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn copy_env_skips_non_utf8_entries_and_merges_path() {
+		use std::os::unix::ffi::OsStringExt;
+
+		let mut shell = BrushShell::builder()
+			.do_not_inherit_env(true)
+			.profile(ProfileLoadBehavior::Skip)
+			.rc(RcLoadBehavior::Skip)
+			.builtins(default_builtins(BuiltinSet::BashMode))
+			.build()
+			.await
+			.expect("build shell");
+
+		// GHOSTTY_BIN_DIR with the corrupt bytes, a normal var, a corrupt key,
+		// and a duplicate PATH — in host-env iteration order.
+		let entries = vec![
+			(std::ffi::OsString::from("PATH"), std::ffi::OsString::from("/usr/bin:/bin")),
+			(
+				std::ffi::OsString::from("GHOSTTY_BIN_DIR"),
+				std::ffi::OsString::from_vec(vec![0x9d, 0xd9, 0x50]),
+			),
+			(std::ffi::OsString::from("HOME"), std::ffi::OsString::from("/home/tester")),
+			(
+				std::ffi::OsString::from_vec(vec![0xff, b'B', b'A', b'D']),
+				std::ffi::OsString::from("x"),
+			),
+			(std::ffi::OsString::from("PATH"), std::ffi::OsString::from("/opt/bin")),
+		];
+		copy_env_into_shell(&mut shell, entries.into_iter()).expect("copy host env");
+
+		let value = |name: &str| {
+			shell
+				.env()
+				.get(name)
+				.and_then(|(_, var)| match var.value() {
+					ShellValue::String(value) => Some(value.clone()),
+					_ => None,
+				})
+		};
+		assert_eq!(value("PATH").as_deref(), Some("/opt/bin"), "PATH is merged/preserved");
+		assert_eq!(value("HOME").as_deref(), Some("/home/tester"), "valid entry copied");
+		assert!(value("GHOSTTY_BIN_DIR").is_none(), "non-UTF-8 value must be skipped");
+		assert!(value("BAD").is_none(), "non-UTF-8 key must be skipped");
+	}
+
 	#[cfg(unix)]
 	async fn wait_for_process_name(pid: i32, expected: &str) {
 		time::timeout(Duration::from_secs(2), async {
 			loop {
-				if proc_snapshot::ProcInfo::all().into_iter().any(|process| {
+				if pi_builtins::ProcInfo::all().into_iter().any(|process| {
 					process.pid() == pid
 						&& process.match_name() == expected
-						&& process.status() == process::ProcessStatus::Running
+						&& process.status() == pi_builtins::ProcessStatus::Running
 				}) {
 					return;
 				}
@@ -6235,11 +2066,29 @@ mod tests {
 	}
 
 	#[cfg(unix)]
+	fn test_executable(name: &str) -> std::path::PathBuf {
+		use std::os::unix::fs::PermissionsExt as _;
+
+		std::env::var_os("PATH")
+			.and_then(|path| {
+				std::env::split_paths(&path)
+					.map(|directory| directory.join(name))
+					.find(|candidate| {
+						candidate.metadata().is_ok_and(|metadata| {
+							metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+						})
+					})
+			})
+			.unwrap_or_else(|| panic!("{name} executable on PATH"))
+	}
+
+	#[cfg(unix)]
 	fn process_test_command(prefix: &str) -> (tempfile::TempDir, std::path::PathBuf, String) {
 		let dir = tempfile::tempdir().expect("process test directory");
 		let name = format!("{prefix}{}", std::process::id());
 		let command = dir.path().join(&name);
-		std::os::unix::fs::symlink("/bin/sleep", &command).expect("sleep symlink");
+		let sleep = test_executable("sleep");
+		std::os::unix::fs::symlink(sleep, &command).expect("sleep symlink");
 		(dir, command, name)
 	}
 
@@ -6282,7 +2131,7 @@ mod tests {
 		assert_eq!(pgrep_result.exit_code, Some(0));
 		assert_eq!(output, format!("{pid}\n"));
 		assert_eq!(pkill_result.exit_code, Some(0));
-		assert!(pkill_output.is_empty());
+		assert_eq!(pkill_output, "");
 		assert!(still_running, "signal 0 must not terminate a matching process");
 	}
 
@@ -6483,7 +2332,7 @@ mod tests {
 			let _ = second.wait().await;
 		}
 		assert_eq!(result.exit_code, Some(0));
-		assert!(output.is_empty());
+		assert_eq!(output, "");
 		assert!(statuses.is_ok(), "pkill did not signal every matching process");
 	}
 
@@ -6505,7 +2354,7 @@ mod tests {
 			let _ = child.wait().await;
 		}
 		assert_eq!(result.exit_code, Some(0));
-		assert!(output.is_empty());
+		assert_eq!(output, "");
 		assert!(status.is_some(), "pidwait returned while its matching process was still running");
 	}
 
@@ -6557,7 +2406,10 @@ mod tests {
 		let pid = std::process::id();
 		let (result, output) = execute_captured(format!("ps -p {pid} -o lstart=")).await;
 		assert_eq!(result.exit_code, Some(0));
-		assert!(strtime::parse("%a %b %e %H:%M:%S %Y", output.trim()).is_ok(), "{output:?}");
+		assert!(
+			jiff::fmt::strtime::parse("%a %b %e %H:%M:%S %Y", output.trim()).is_ok(),
+			"{output:?}"
+		);
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
@@ -7107,6 +2959,40 @@ mod tests {
 		assert!(output.contains("survived"), "{output:?}");
 	}
 
+	/// An agent that runs `kill <terminal pid>` or `pkill <terminal>` must not
+	/// be able to take down the terminal the session lives in. Self-kill was
+	/// already refused, but an ancestor is a different process in a different
+	/// process group and session, so it slipped straight through.
+	///
+	/// Uses `CONT` rather than a lethal signal: the guard runs for any real
+	/// signal (only `-0` is exempt), so `CONT` exercises exactly the same code
+	/// path while staying harmless if the guard ever regresses. A lethal signal
+	/// here could terminate the test harness. `TERM` appears once, aimed only
+	/// at a child this test spawned, to prove the guard has not over-blocked
+	/// into uselessness.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn kill_builtin_refuses_ancestors_but_not_unrelated_processes() {
+		let sleep = test_executable("sleep");
+		let command = format!(
+			"parent=$(ps -o ppid= -p $$ | tr -d ' ')\nkill -CONT \"$parent\"; printf \
+			 'ancestor=%s\\n' \"$?\"\n{} 30 &\nchild=$!\nkill -TERM \"$child\"; printf 'child=%s\\n' \
+			 \"$?\"\nprintf 'survived\\n'",
+			quote_arg(sleep.to_str().expect("utf8 sleep path"))
+		);
+		let (result, output) = execute_captured(command).await;
+		assert_eq!(result.exit_code, Some(0), "the shell must survive: {output:?}");
+		assert!(output.contains("survived"), "{output:?}");
+		assert!(
+			output.contains("refusing to signal the shell process"),
+			"signalling an ancestor must be refused: {output:?}"
+		);
+		assert!(output.contains("ancestor=1"), "the ancestor kill must report failure: {output:?}");
+		// The same guard must leave a process outside our ancestry alone, or `kill`
+		// would be useless.
+		assert!(output.contains("child=0"), "an unrelated child must remain signallable: {output:?}");
+	}
+
 	/// `pkill` removes the shell PID from the candidate set before sending the
 	/// selected signal, even when that PID is requested explicitly.
 	#[tokio::test(flavor = "multi_thread")]
@@ -7211,6 +3097,97 @@ mod tests {
 		}
 	}
 
+	/// `sort --compress-program` spawns real children from inside the
+	/// external-sort temp-file machinery. Those children must inherit the
+	/// *shell's* context, not the host process's: the program is resolved
+	/// against the shell's exported `PATH` (here a directory that exists only
+	/// there), it runs in the shell working directory, and its stderr is
+	/// forwarded to the command's own fd 2 instead of being inherited — an
+	/// inherited fd 2 belongs to the TUI and would corrupt the rendered frame.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn uutils_sort_compress_program_uses_shell_path_and_stderr() {
+		use std::os::unix::fs::PermissionsExt as _;
+
+		let tmp = std::env::temp_dir().join(format!("pi-sort-compress-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&tmp);
+		let bin = tmp.join("bin");
+		std::fs::create_dir_all(&bin).expect("bin dir");
+
+		// An identity "compressor" that also proves it was started with the
+		// shell's working directory and reaches the command's stderr.
+		let shim = bin.join("pi-test-compress");
+		let shell = test_executable("sh");
+		let cat = test_executable("cat");
+		let shim_source = format!(
+			"#!{}\nprintf 'compressor cwd=%s\\n' \"$PWD\" >&2\nexec {}\n",
+			shell.display(),
+			quote_arg(cat.to_str().expect("utf8 cat path"))
+		);
+		std::fs::write(&shim, shim_source).expect("write shim");
+		std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).expect("chmod shim");
+
+		// Enough distinct lines that the 1K buffer forces spilling through the
+		// compressor rather than sorting entirely in memory.
+		let mut input = String::new();
+		for n in (0..400).rev() {
+			use std::fmt::Write as _;
+			let _ = writeln!(input, "line{n:04}");
+		}
+		std::fs::write(tmp.join("in.txt"), &input).expect("write input");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session
+			.shell
+			.set_working_dir(tmp.to_str().expect("utf8 temp path"))
+			.expect("set cwd");
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
+		let source_info = SourceInfo::from("pi-natives:test");
+
+		// `PATH` holds only the shim directory, so the compressor is reachable
+		// solely through the shell's exported environment.
+		let script = format!(
+			"export PATH={}\nsort -S 1K --compress-program=pi-test-compress in.txt > out.txt 2> \
+			 err.txt",
+			bin.to_str().expect("utf8 bin path")
+		);
+		let exec = session
+			.shell
+			.run_string(script, &source_info, &params)
+			.await
+			.expect("run sort");
+		assert_eq!(exit_code(&exec), 0, "sort --compress-program failed");
+
+		let out = std::fs::read_to_string(tmp.join("out.txt")).expect("out.txt");
+		let mut expected: Vec<&str> = input.lines().collect();
+		expected.sort_unstable();
+		assert_eq!(out.lines().collect::<Vec<_>>(), expected, "compressed external sort misordered");
+
+		// The compressor really ran (so the spill path was exercised), its
+		// stderr reached the command's redirected fd 2, and it started in the
+		// shell working directory.
+		let err = std::fs::read_to_string(tmp.join("err.txt")).expect("err.txt");
+		assert!(
+			err.contains("compressor cwd="),
+			"compressor stderr never reached the command's fd 2: {err:?}"
+		);
+		// The shell reports the working directory as it was set; macOS also
+		// exposes it under `/private`, so accept either spelling.
+		let canonical = std::fs::canonicalize(&tmp).expect("canonical tmp");
+		assert!(
+			err.contains(&format!("cwd={}\n", tmp.display()))
+				|| err.contains(&format!("cwd={}\n", canonical.display())),
+			"compressor did not start in the shell working directory ({}): {err:?}",
+			tmp.display()
+		);
+
+		let _ = std::fs::remove_dir_all(&tmp);
+	}
+
 	/// The uutils-backed `mkdir` builtin must (1) create directories under the
 	/// shell's working directory rather than the host process cwd, (2) route
 	/// `-v` output through the command's (here redirected) stdout, and (3)
@@ -7250,6 +3227,205 @@ mod tests {
 		let out = std::fs::read_to_string(tmp.join("out.txt")).expect("out.txt");
 		assert!(out.contains("'rel'"), "verbose output missing operand `rel`: {out:?}");
 		assert!(!out.contains(tmp_str), "verbose output leaked absolute path: {out:?}");
+
+		let _ = std::fs::remove_dir_all(&tmp);
+	}
+
+	/// Every utility `pi-builtins` offers must actually be dispatchable in
+	/// process, under the name it is registered as.
+	///
+	/// The registry (`pi_builtins::utility_builtins`) maps a name to a
+	/// `Registration`, and each registration renders its help from its own
+	/// `clap` command. Wiring a name to the wrong module — easy to do, since the
+	/// mapping is written by hand — still compiles and still runs; the only
+	/// visible symptom is that `NAME --help` describes some other utility. With
+	/// `PATH` emptied there is no binary to fall back on, so this also proves
+	/// the whole set resolves as builtins rather than as system commands.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn every_utility_builtin_is_registered_under_its_own_name() {
+		let tmp = std::env::temp_dir().join(format!("pi-utility-help-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&tmp);
+		std::fs::create_dir_all(&tmp).expect("temp dir");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session
+			.shell
+			.set_working_dir(tmp.to_str().expect("utf8 temp path"))
+			.expect("set cwd");
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
+		let source_info = SourceInfo::from("pi-natives:test");
+
+		// Pin the registry contents rather than iterating whatever it happens to
+		// contain: a loop over the registry cannot notice a name missing from it.
+		// Adding a utility is expected to update this list.
+		let expected = [
+			"b2sum",
+			"base32",
+			"base64",
+			"basename",
+			"cat",
+			"cksum",
+			"cmp",
+			"combine",
+			"comm",
+			"cut",
+			"date",
+			"diff",
+			"dirname",
+			"errno",
+			"fd",
+			"find",
+			"grep",
+			"head",
+			"hostname",
+			"ifne",
+			"isutf8",
+			"jq",
+			"ln",
+			"ls",
+			"md5sum",
+			"mkdir",
+			"mktemp",
+			"mv",
+			"nproc",
+			"paste",
+			"printenv",
+			"readlink",
+			"realpath",
+			"rg",
+			"rm",
+			"sed",
+			"seq",
+			"sha1sum",
+			"sha224sum",
+			"sha256sum",
+			"sha384sum",
+			"sha512sum",
+			"sort",
+			"sponge",
+			"stat",
+			"tac",
+			"tail",
+			"tee",
+			"touch",
+			"tr",
+			"truncate",
+			"ts",
+			"uname",
+			"uniq",
+			"wc",
+			"which",
+			"whoami",
+			"xargs",
+			"yes",
+		];
+		let mut names: Vec<&'static str> =
+			pi_builtins::utility_builtins::<brush_core::extensions::DefaultShellExtensions>()
+				.into_iter()
+				.map(|(name, _)| name)
+				.collect();
+		names.sort_unstable();
+		assert_eq!(names, expected, "the utility builtin registry changed");
+
+		for name in names {
+			let exec = session
+				.shell
+				.run_string(format!("PATH= {name} --help > help.txt 2> err.txt"), &source_info, &params)
+				.await
+				.unwrap_or_else(|err| panic!("{name} --help failed to run: {err}"));
+			assert_eq!(exit_code(&exec), 0, "{name} --help exited nonzero");
+
+			let help = std::fs::read_to_string(tmp.join("help.txt")).expect("help.txt");
+			let err = std::fs::read_to_string(tmp.join("err.txt")).expect("err.txt");
+			assert!(err.is_empty(), "{name} --help wrote to stderr: {err:?}");
+			// Two builtins are registered under the familiar command name but keep
+			// their implementation's own help text, exactly as the standalone
+			// versions did: `rg` is ripgrep, `jq` is jaq.
+			let expected = match name {
+				"rg" => "ripgrep",
+				"jq" => "jaq",
+				other => other,
+			};
+			assert!(
+				help.contains(expected),
+				"{name} --help does not mention {expected:?}, so it is wired to the wrong utility: \
+				 {help:.200?}"
+			);
+		}
+
+		let _ = std::fs::remove_dir_all(&tmp);
+	}
+
+	/// Every process builtin `pi-builtins` offers must be installed and
+	/// dispatch in process.
+	///
+	/// `factory.rs` maps each name to a struct by hand, so a mis-wire compiles
+	/// and runs — and with `PATH` emptied there is no binary to silently fall
+	/// back to, which is the failure this catches. Each command gets an
+	/// invocation that is benign but must reach the builtin: exit 127 means the
+	/// name never resolved.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn every_process_builtin_is_installed_and_dispatches() {
+		let tmp = std::env::temp_dir().join(format!("pi-process-builtins-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&tmp);
+		std::fs::create_dir_all(&tmp).expect("temp dir");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session
+			.shell
+			.set_working_dir(tmp.to_str().expect("utf8 temp path"))
+			.expect("set cwd");
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
+		let source_info = SourceInfo::from("pi-natives:test");
+
+		// Bounded, side-effect-free invocations. `pgrep`/`pkill`/`pidwait` render
+		// their own help; `sleep`/`timeout`/`top` are given the smallest amount of
+		// work that still exercises dispatch; `nohup` with no operand is a usage
+		// error, which is still the builtin answering.
+		let probes = [
+			("nohup", "nohup"),
+			("pgrep", "pgrep --help"),
+			("pidwait", "pidwait --help"),
+			("pkill", "pkill --help"),
+			("ps", "ps --help"),
+			("sleep", "sleep 0"),
+			("timeout", "timeout 1 true"),
+			("top", "top -n 0"),
+		];
+
+		// Pin the registry contents rather than deriving the probe list from it:
+		// a test that skips whatever the registry omits cannot notice an omission.
+		let mut registered: Vec<&'static str> =
+			pi_builtins::process_builtins::<brush_core::extensions::DefaultShellExtensions>()
+				.into_iter()
+				.map(|(name, _)| name)
+				.collect();
+		registered.sort_unstable();
+		let expected: Vec<&'static str> = probes.iter().map(|(name, _)| *name).collect();
+		assert_eq!(registered, expected, "the process builtin registry changed");
+
+		// `kill` comes from the default builtin set, where our implementation
+		// replaced brush's, so it is checked alongside but not listed above.
+		for (name, command) in probes.iter().copied().chain([("kill", "kill -l")]) {
+			let exec = session
+				.shell
+				.run_string(format!("PATH= {command}"), &source_info, &params)
+				.await
+				.unwrap_or_else(|err| panic!("{name} failed to run: {err}"));
+			assert_ne!(
+				exit_code(&exec),
+				127,
+				"{name} resolved to nothing: it is not registered as a builtin"
+			);
+		}
 
 		let _ = std::fs::remove_dir_all(&tmp);
 	}
@@ -7429,11 +3605,7 @@ mod tests {
 			.await
 			.expect("run_string head bad flag");
 		assert_ne!(exit_code(&bad), 0, "invalid flag should be a usage error");
-		assert!(
-			!std::fs::read_to_string(tmp.join("err.txt"))
-				.expect("err.txt")
-				.is_empty()
-		);
+		assert_ne!(std::fs::read_to_string(tmp.join("err.txt")).expect("err.txt"), "");
 
 		let _ = std::fs::remove_dir_all(&tmp);
 	}
@@ -8338,7 +4510,7 @@ mod tests {
 		.expect("process substitution should not hang");
 
 		assert_eq!(result.exit_code, Some(1));
-		assert!(output.contains("-a\n+b\n"), "diff output missing changed lines: {output:?}");
+		assert!(output.contains("< a\n---\n> b\n"), "diff output missing changed lines: {output:?}");
 	}
 
 	#[cfg(unix)]
@@ -8365,13 +4537,40 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		}
 	}
 
+	#[tokio::test(flavor = "multi_thread")]
+	async fn one_shot_completion_aborts_internal_background_jobs() {
+		let marker = tempfile::NamedTempFile::new().expect("marker file");
+		let marker_path = marker.path().to_string_lossy();
+		std::fs::remove_file(marker.path()).expect("remove initial marker");
+		let command = format!("{{ sleep 1; echo leaked > {}; }} &", quote_arg(&marker_path));
+
+		execute_shell(
+			ShellExecuteOptions { command, ..Default::default() },
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("one-shot shell execution");
+		// `execute_shell` returns after its short post-exit idle drain (~250ms),
+		// while the background job cannot write the marker until its 1s sleep
+		// elapses. Wait well past that delay so a job that outlived the dropped
+		// session has demonstrably had its chance to run — the pre-fix leak fires
+		// at ~1s and is caught here; the fixed path aborts the task on drop and the
+		// marker never appears.
+		time::sleep(Duration::from_millis(2000)).await;
+
+		assert!(
+			!marker.path().exists(),
+			"an internal background job outlived its one-shot shell session"
+		);
+	}
+
 	/// `live_background_job_count` reports 0 when the session has no live
 	/// external background jobs and 1 while one is running. The host relies on
 	/// this to retain a per-call shell whose `&`/`nohup` child is still alive
 	/// instead of dropping it (which would SIGKILL the child via kill-on-drop).
-	/// Path-qualified `/bin/sleep` is used so it spawns a real external process
-	/// (the bare `sleep` builtin runs in-process and is intentionally not
-	/// counted).
+	/// `sh -c` forces an external process because the bare `sleep` builtin runs
+	/// in-process and is intentionally not counted.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn live_background_job_count_tracks_external_background_jobs() {
@@ -8395,7 +4594,7 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		// An external background process is tracked while it runs.
 		shell
 			.run(
-				ShellRunOptions { command: "/bin/sleep 30 &".into(), ..Default::default() },
+				ShellRunOptions { command: "sh -c 'sleep 30' &".into(), ..Default::default() },
 				None,
 				CancelToken::default(),
 			)
@@ -8434,20 +4633,17 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 	async fn segmented_false_semicolon_printf_continues_and_returns_last_code() {
 		let root = unique_temp_dir("false-semi");
 		let minimizer = printf_minimizer(&root.join("minimizer.toml"), None);
-		let (result, output) = run_command_capture(
-			"false ; printf 'hello\n'",
-			None,
-			Some(minimizer),
-			CancelToken::default(),
-		)
-		.await;
+		let expected = "hello\n".repeat(200);
+		let command = format!("false ; printf '{}'", "hello\\n".repeat(200));
+		let (result, output) =
+			run_command_capture(&command, None, Some(minimizer), CancelToken::default()).await;
 		let _ = std::fs::remove_dir_all(&root);
-		let minimized = result.minimized.expect("minimized result");
+		let minimized = result.minimized.expect("long output should be minimized");
 		assert_eq!(result.exit_code, Some(0));
-		assert_eq!(output, "hello\n");
+		assert_eq!(output, expected);
 		assert_eq!(minimized.filter, "chain");
-		assert_eq!(minimized.original_text, "hello\n");
-		assert_eq!(minimized.text, "HI\n");
+		assert_eq!(minimized.original_text, expected);
+		assert_eq!(minimized.text, "HI\n".repeat(200));
 	}
 
 	#[cfg(unix)]
@@ -8479,12 +4675,9 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			run_command_capture("cd tmp && pwd", Some(&root), Some(minimizer), CancelToken::default())
 				.await;
 		let _ = std::fs::remove_dir_all(&root);
-		let minimized = result.minimized.expect("minimized result");
+		assert!(result.minimized.is_none(), "short pwd output must not be minimized");
 		assert_eq!(result.exit_code, Some(0));
 		assert_eq!(output, expected);
-		assert_eq!(minimized.filter, "chain");
-		assert_eq!(minimized.text, "PWD\n");
-		assert_eq!(minimized.original_text, expected);
 	}
 
 	#[cfg(unix)]
@@ -8510,22 +4703,21 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	async fn segmented_printf_chain_preserves_raw_original_text() {
 		let root = unique_temp_dir("minimizer");
 		let minimizer = printf_minimizer(&root.join("minimizer.toml"), None);
-		let (result, output) = run_command_capture(
-			"printf 'hello\n' ; printf 'world\n'",
-			None,
-			Some(minimizer),
-			CancelToken::default(),
-		)
-		.await;
+		let hello = "hello\n".repeat(200);
+		let world = "world\n".repeat(200);
+		let command =
+			format!("printf '{}' ; printf '{}'", "hello\\n".repeat(200), "world\\n".repeat(200));
+		let (result, output) =
+			run_command_capture(&command, None, Some(minimizer), CancelToken::default()).await;
 		let _ = std::fs::remove_dir_all(&root);
-		let minimized = result.minimized.expect("minimized result");
+		let minimized = result.minimized.expect("long output should be minimized");
 		assert_eq!(result.exit_code, Some(0));
-		assert_eq!(output, "hello\nworld\n");
+		assert_eq!(output, format!("{hello}{world}"));
 		assert_eq!(minimized.filter, "chain");
-		assert_eq!(minimized.original_text, "hello\nworld\n");
-		assert_eq!(minimized.text, "HI\nworld\n");
-		assert_eq!(minimized.input_bytes, 12);
-		assert_eq!(minimized.output_bytes, 9);
+		assert_eq!(minimized.original_text, format!("{hello}{world}"));
+		assert_eq!(minimized.text, format!("{}{}", "HI\n".repeat(200), world));
+		assert_eq!(minimized.input_bytes, (hello.len() + world.len()) as u32);
+		assert_eq!(minimized.output_bytes, ("HI\n".repeat(200).len() + world.len()) as u32);
 	}
 
 	/// Regression: a quoted here-doc followed by another command must execute
@@ -8540,7 +4732,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		let root = unique_temp_dir("heredoc-chain");
 		let minimizer = printf_minimizer(&root.join("minimizer.toml"), None);
 		let (result, output) = run_command_capture(
-			"/bin/cat <<'PY'\nhello $USER\nPY\nprintf 'after\\n'",
+			"cat <<'PY'\nhello $USER\nPY\nprintf 'after\\n'",
 			None,
 			Some(minimizer),
 			CancelToken::default(),
@@ -8583,35 +4775,30 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 
 	/// A segment that carries a file redirect is still segmented, and the brush
 	/// `Display` reconstruction the runner executes must round-trip through
-	/// brush's own parser **without losing the redirect**. `echo hidden
-	/// >/dev/null` suppresses its own stdout: if the reconstruction dropped the
-	/// redirect, `hidden` would leak into the captured output. Proves the
-	/// reconstruction path is semantically sound for the redirect-bearing
-	/// shapes the per-stage whitelist accepts (not just syntactically
-	/// parseable).
+	/// brush's own parser **without losing the redirect**.
+	/// `echo hidden >/dev/null` suppresses its own stdout: if the reconstruction
+	/// dropped the redirect, `hidden` would leak into the captured output.
+	/// Proves the reconstruction path is semantically sound for the
+	/// redirect-bearing shapes the per-stage whitelist accepts (not just
+	/// syntactically parseable).
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn segmented_chain_with_redirect_executes_correctly() {
 		let root = unique_temp_dir("redirect-chain");
 		let minimizer = printf_minimizer(&root.join("minimizer.toml"), None);
-		let (result, output) = run_command_capture(
-			"echo hidden >/dev/null && printf 'hello\\n'",
-			None,
-			Some(minimizer),
-			CancelToken::default(),
-		)
-		.await;
+		let expected = "hello\n".repeat(200);
+		let command = format!("echo hidden >/dev/null && printf '{}'", "hello\\n".repeat(200));
+		let (result, output) =
+			run_command_capture(&command, None, Some(minimizer), CancelToken::default()).await;
 		let _ = std::fs::remove_dir_all(&root);
 		assert_eq!(result.exit_code, Some(0));
 		// The redirect survived reconstruction: segment 1's stdout went to
 		// /dev/null, so only segment 2's output is captured.
 		assert!(!output.contains("hidden"), "redirect must suppress segment-1 stdout");
-		assert_eq!(output, "hello\n");
-		let minimized = result
-			.minimized
-			.expect("redirect chain should be minimized");
-		assert_eq!(minimized.original_text, "hello\n");
-		assert_eq!(minimized.text, "HI\n");
+		assert_eq!(output, expected);
+		let minimized = result.minimized.expect("long output should be minimized");
+		assert_eq!(minimized.original_text, expected);
+		assert_eq!(minimized.text, "HI\n".repeat(200));
 		assert!(!output.contains("syntax error"));
 	}
 
@@ -8750,7 +4937,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			// `printf '%d\n' "$$"` then `sleep 0.5`. Long enough for our `getsid`.
 			let exec = session
 				.shell
-				.run_string("/bin/sh -c 'printf \"%d\\n\" \"$$\"; sleep 0.5'", &source_info, &params)
+				.run_string("sh -c 'printf \"%d\\n\" \"$$\"; sleep 0.5'", &source_info, &params)
 				.await
 				.expect("run_string");
 			drop(params);
@@ -8815,7 +5002,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			shell_b
 				.run(
 					ShellRunOptions {
-						command: "/bin/sh -c 'printf \"ready\\n\"; sleep 30'".into(),
+						command: "sh -c 'printf \"ready\\n\"; sleep 30'".into(),
 						..Default::default()
 					},
 					Some(tx_b),
@@ -8847,7 +5034,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			shell_a
 				.run(
 					ShellRunOptions {
-						command: "/bin/sh -c 'printf \"%d\\n\" \"$$\"; sleep 2'".into(),
+						command: "sh -c 'printf \"%d\\n\" \"$$\"; sleep 2'".into(),
 						..Default::default()
 					},
 					Some(tx_a),
@@ -8908,9 +5095,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		let escaped_pid_path = pid_path.to_string_lossy().replace('\'', "'\\''");
 		std::fs::write(
 			&snapshot_path,
-			format!(
-				"/bin/sh -c 'printf \"%d\\n\" \"$$\" > \"$1\"; sleep 30' sh '{escaped_pid_path}'\n"
-			),
+			format!("sh -c 'printf \"%d\\n\" \"$$\" > \"$1\"; sleep 30' sh '{escaped_pid_path}'\n"),
 		)
 		.expect("write snapshot file");
 
@@ -8963,7 +5148,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 
 		let child_dead = time::timeout(Duration::from_secs(5), async {
 			loop {
-				// SAFETY: `child_pid` came from the foreground `/bin/sh` spawned by the
+				// SAFETY: `child_pid` came from the foreground `sh` spawned by the
 				// snapshot; `kill(pid, 0)` only probes whether that process still exists.
 				let kill_result = unsafe { libc::kill(child_pid, 0) };
 				if kill_result == -1 {
@@ -9053,14 +5238,14 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 
 		let shell_handle = tokio::spawn(async move {
 			let source_info = SourceInfo::from("pi-natives:test");
-			// First stage prints its own PID and sleeps; `cat` forwards the PID
-			// line to our reader and exits on EOF. The first stage leads the
-			// pipeline's process group, the second (`cat`) is the join-or-detach
-			// stage that would EPERM without the wiring fix.
+			// First stage prints its own PID and sleeps; `sh -c cat` forwards
+			// the PID line to our reader and exits on EOF. The first stage
+			// leads the pipeline's process group, while the second stage is the
+			// join-or-detach process that would EPERM without the wiring fix.
 			let exec = session
 				.shell
 				.run_string(
-					"/bin/sh -c 'printf \"%d\\n\" \"$$\"; sleep 1' | /bin/cat",
+					"sh -c 'printf \"%d\\n\" \"$$\"; sleep 1' | sh -c cat",
 					&source_info,
 					&params,
 				)
@@ -9115,7 +5300,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn wait_accepts_last_background_process_id() {
 		let options = ShellExecuteOptions {
-			command: "/bin/sh -c 'exit 7' & mover=$!; wait \"$mover\"".to_string(),
+			command: "sh -c 'exit 7' & mover=$!; wait \"$mover\"".to_string(),
 			..Default::default()
 		};
 
@@ -9132,9 +5317,9 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn wait_n_p_records_completed_process_id() {
 		let options = ShellExecuteOptions {
-			command: "/bin/sh -c 'sleep 0.2; exit 42' & slow=$!; /bin/sh -c 'exit 13' & fast=$!; \
-			          wait -n -p hit \"$slow\" \"$fast\"; status=$?; wait \"$slow\"; [ \"$status\" \
-			          -eq 13 ] && [ \"$hit\" = \"$fast\" ]"
+			command: "sh -c 'sleep 0.2; exit 42' & slow=$!; sh -c 'exit 13' & fast=$!; wait -n -p \
+			          hit \"$slow\" \"$fast\"; status=$?; wait \"$slow\"; [ \"$status\" -eq 13 ] && \
+			          [ \"$hit\" = \"$fast\" ]"
 				.to_string(),
 			..Default::default()
 		};
@@ -9152,7 +5337,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn wait_f_accepts_process_id() {
 		let options = ShellExecuteOptions {
-			command: "/bin/sh -c 'exit 5' & child=$!; wait -f \"$child\"".to_string(),
+			command: "sh -c 'exit 5' & child=$!; wait -f \"$child\"".to_string(),
 			..Default::default()
 		};
 
@@ -9295,13 +5480,9 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn quoted_heredoc_without_trailing_newline_runs() {
-		let (result, output) = run_command_capture(
-			"/bin/cat <<'PY'\nhello $USER\nPY",
-			None,
-			None,
-			CancelToken::default(),
-		)
-		.await;
+		let (result, output) =
+			run_command_capture("cat <<'PY'\nhello $USER\nPY", None, None, CancelToken::default())
+				.await;
 
 		assert_eq!(result.exit_code, Some(0));
 		assert_eq!(output, "hello $USER\n");
@@ -9342,7 +5523,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		let command = if cfg!(windows) {
 			"nohup cmd /C exit 7"
 		} else {
-			"nohup /bin/sh -c 'exit 7'"
+			"nohup sh -c 'exit 7'"
 		};
 		let options = ShellExecuteOptions { command: command.to_string(), ..Default::default() };
 		let result = execute_shell(options, None, CancelToken::default())
@@ -9360,8 +5541,8 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	async fn nohup_background_captures_operand_pid() {
 		let (tx, rx) = flume::unbounded::<String>();
 		let options = ShellExecuteOptions {
-			command: "nohup /bin/sh -c 'exit 0' >/dev/null 2>&1 & pid=$!; printf 'pid=%s\n' \
-			          \"$pid\"; test -n \"$pid\""
+			command: "nohup sh -c 'exit 0' >/dev/null 2>&1 & pid=$!; printf 'pid=%s\n' \"$pid\"; \
+			          test -n \"$pid\""
 				.to_string(),
 			..Default::default()
 		};

@@ -254,8 +254,16 @@ export function thinkingLevelGlyph(level: ConfiguredThinkingLevel): string {
 }
 
 /**
- * A slim role chip: `●default ◉` — solid dot for configured assignments,
+ * A slim role chip: `● default ◉` — solid dot for configured assignments,
  * hollow for auto-selected fallbacks, thinking glyph attached when set.
+ *
+ * The space after the status glyph is load-bearing. Under the `nerd` preset
+ * these are Nerd Font private-use icons (U+F111 / U+F10C) whose glyphs are
+ * drawn two cells wide, while `visibleWidth` counts them as one
+ * (`ambiguousIsNarrow: true` in tui/utils.ts — the PUA block is
+ * East_Asian_Width=Ambiguous). Without a separator the icon overhangs and
+ * eats the label's first character (`● default` renders as `●efault`).
+ * Mirrors the spacing already used for `status.success` in model-hub.
  */
 export function formatRoleChip(role: string, assignment: RoleAssignment, settings: Settings): string {
 	const info = getRoleInfo(role, settings);
@@ -263,9 +271,9 @@ export function formatRoleChip(role: string, assignment: RoleAssignment, setting
 	const glyph = thinkingLevelGlyph(assignment.thinkingLevel);
 	const suffix = glyph ? ` ${theme.fg("dim", glyph)}` : "";
 	if (assignment.autoSelected) {
-		return theme.fg("dim", `${theme.status.shadowed}${label}`) + suffix;
+		return theme.fg("dim", `${theme.status.shadowed} ${label}`) + suffix;
 	}
-	return theme.fg(info.color ?? "muted", `${theme.status.enabled}${label}`) + suffix;
+	return theme.fg(info.color ?? "muted", `${theme.status.enabled} ${label}`) + suffix;
 }
 
 /** `$in/out` per-million cost pair; `free` when both legs are zero. */

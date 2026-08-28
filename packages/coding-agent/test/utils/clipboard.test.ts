@@ -33,7 +33,7 @@ function fakeProcess(stdout: SpawnOutput, exitCode = 0): Subprocess {
 	} as unknown as Subprocess;
 }
 
-function spySpawn(calls: SpawnCall[], stdout: SpawnOutput | SpawnOutput[], exitCode = 0) {
+function spySpawn(calls: SpawnCall[], stdout: SpawnOutput | SpawnOutput[], exitCode: number | number[] = 0) {
 	function mockSpawn(opts: SpawnOptions & { cmd: string[] }): Subprocess;
 	function mockSpawn(cmd: string[], opts?: SpawnOptions): Subprocess;
 	function mockSpawn(first: string[] | (SpawnOptions & { cmd: string[] }), second?: SpawnOptions): Subprocess {
@@ -41,7 +41,8 @@ function spySpawn(calls: SpawnCall[], stdout: SpawnOutput | SpawnOutput[], exitC
 		const options = Array.isArray(first) ? (second ?? ({} as SpawnOptions)) : (first as SpawnOptions);
 		calls.push({ cmd, options });
 		const output = Array.isArray(stdout) ? (stdout[calls.length - 1] ?? "") : stdout;
-		return fakeProcess(output, exitCode);
+		const code = Array.isArray(exitCode) ? (exitCode[calls.length - 1] ?? 0) : exitCode;
+		return fakeProcess(output, code);
 	}
 	return vi.spyOn(Bun, "spawn").mockImplementation(mockSpawn);
 }
@@ -196,6 +197,21 @@ describe("readImageFromClipboard dispatch", () => {
 		expect(nativeSpy).toHaveBeenCalledTimes(1);
 	});
 
+	it("treats a throwing native image read as no image on linux with a display", async () => {
+		// Regression: an xclip-written text-only selection makes arboard's
+		// image read throw ("Unknown error ... incorrect type received from
+		// clipboard") instead of reporting no image. readImageFromClipboard
+		// must not propagate that — the smart-paste text fallback depends on
+		// a null return.
+		setPlatform("linux");
+		process.env.DISPLAY = ":0";
+		vi.spyOn(native, "readImageFromClipboard").mockRejectedValue(
+			new Error("Unknown error while interacting with the clipboard: incorrect type received from clipboard"),
+		);
+
+		expect(await readImageFromClipboard()).toBeNull();
+	});
+
 	it.each(["image/png", "image/jpeg", "image/gif", "image/webp"] as const)(
 		"reads %s bytes through wl-paste before the native bridge on Wayland-only Linux",
 		async mimeType => {
@@ -264,6 +280,34 @@ describe("readMacFileUrlsFromClipboard", () => {
 });
 
 describe("readTextFromClipboard", () => {
+	it("falls back to xsel when xclip is unavailable on X11", async () => {
+		setPlatform("linux");
+		process.env.DISPLAY = ":0";
+		const calls: SpawnCall[] = [];
+		spySpawn(calls, ["", "from xsel"], [1, 0]);
+
+		expect(await readTextFromClipboard()).toBe("from xsel");
+		expect(calls.map(call => call.cmd)).toEqual([
+			["xclip", "-selection", "clipboard", "-o"],
+			["xsel", "--clipboard", "--output"],
+		]);
+	});
+
+	it("uses the xsel fallback when wl-paste fails in a mixed Wayland/X11 session", async () => {
+		setPlatform("linux");
+		process.env.WAYLAND_DISPLAY = "wayland-0";
+		process.env.DISPLAY = ":0";
+		const calls: SpawnCall[] = [];
+		spySpawn(calls, ["", "", "from xsel"], [1, 1, 0]);
+
+		expect(await readTextFromClipboard()).toBe("from xsel");
+		expect(calls.map(call => call.cmd)).toEqual([
+			["wl-paste", "--type", "text/plain", "--no-newline"],
+			["xclip", "-selection", "clipboard", "-o"],
+			["xsel", "--clipboard", "--output"],
+		]);
+	});
+
 	it("returns pbpaste stdout on darwin without touching execSync", async () => {
 		setPlatform("darwin");
 		const calls: SpawnCall[] = [];
@@ -319,7 +363,9 @@ describe("readTextFromClipboard", () => {
 			clearInterval(timer);
 		}
 		// If the read blocked the loop, ticks would stay at 0. A yielding
-		// implementation fires several ticks in the ~80ms window.
-		expect(ticks).toBeGreaterThanOrEqual(2);
+		// implementation must turn the loop to resolve the 80ms sleep, which
+		// fires the expired interval at least once — even under heavy parallel
+		// test load, where wall-clock tick counts are unreliable.
+		expect(ticks).toBeGreaterThanOrEqual(1);
 	});
 });

@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
-import "./setup";
+
 import {
 	buildFtsQuery,
 	cjkFtsTerms,

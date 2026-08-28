@@ -71,7 +71,7 @@ class BlockingFilesystem extends InMemoryFilesystem {
 		for (const filePath of blocked) this.#blocked.add(filePath);
 	}
 
-	async preflightWrite(filePath: string): Promise<void> {
+	override async preflightWrite(filePath: string): Promise<void> {
 		if (this.#blocked.has(filePath)) throw new Error(`blocked write: ${filePath}`);
 	}
 }

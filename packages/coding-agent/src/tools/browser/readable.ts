@@ -1,5 +1,5 @@
-import type * as ReadabilityNs from "@mozilla/readability";
-import type * as LinkedomNs from "linkedom";
+import type * as DomNs from "@oh-my-pi/pi-utils/dom";
+import type * as ReadabilityNs from "@oh-my-pi/pi-utils/readability";
 import { htmlToBasicMarkdown } from "../../web/scrapers/types";
 
 export type ReadableFormat = "text" | "markdown";
@@ -23,17 +23,17 @@ function normalize(text: string | null | undefined): string | undefined {
 let readabilityModule: typeof ReadabilityNs | undefined;
 async function loadReadability(): Promise<typeof ReadabilityNs> {
 	if (!readabilityModule) {
-		readabilityModule = await import("@mozilla/readability");
+		readabilityModule = await import("@oh-my-pi/pi-utils/readability");
 	}
 	return readabilityModule;
 }
 
-let linkedomModule: typeof LinkedomNs | undefined;
-async function loadLinkedom(): Promise<typeof LinkedomNs> {
-	if (!linkedomModule) {
-		linkedomModule = await import("linkedom");
+let domModule: typeof DomNs | undefined;
+async function loadDom(): Promise<typeof DomNs> {
+	if (!domModule) {
+		domModule = await import("@oh-my-pi/pi-utils/dom");
 	}
-	return linkedomModule;
+	return domModule;
 }
 
 /**
@@ -47,7 +47,7 @@ export async function extractReadableFromHtml(
 	url: string,
 	format: ReadableFormat,
 ): Promise<ReadableResult | null> {
-	const [{ parseHTML }, { Readability }] = await Promise.all([loadLinkedom(), loadReadability()]);
+	const [{ parseHTML }, { Readability }] = await Promise.all([loadDom(), loadReadability()]);
 	const { document } = parseHTML(html);
 
 	// --- Primary: Readability article extraction ---

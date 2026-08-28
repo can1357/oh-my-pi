@@ -27,12 +27,23 @@ export interface MCPServer {
 	args?: string[];
 	/** Environment variables */
 	env?: Record<string, string>;
+	/**
+	 * `literal`: env values are opaque plugin package data (Agent Plugins
+	 * §§4.1/9.2) — exempt from env-name lookup and `!command` resolution.
+	 */
+	envPolicy?: "literal";
 	/** Working directory for stdio transport */
 	cwd?: string;
 	/** URL (for HTTP/SSE transport) */
 	url?: string;
 	/** HTTP headers (for HTTP transport) */
 	headers?: Record<string, string>;
+	/**
+	 * `origin-locked`: configured headers are literal package data pinned to the
+	 * configured URL's origin (Agent Plugins §7.2.1) — never expanded, never
+	 * forwarded cross-origin, and client-generated headers win case-insensitively.
+	 */
+	headerPolicy?: "origin-locked";
 	/** Authentication configuration */
 	auth?: {
 		type: "oauth" | "apikey";
@@ -42,10 +53,11 @@ export interface MCPServer {
 		clientSecret?: string;
 		resource?: string;
 	};
-	/** OAuth configuration (clientId, clientSecret, redirectUri, callbackPort, callbackPath, prompt) for servers requiring explicit client credentials */
+	/** OAuth configuration for servers requiring explicit client credentials */
 	oauth?: {
 		clientId?: string;
 		clientSecret?: string;
+		scope?: string;
 		redirectUri?: string;
 		callbackPort?: number;
 		callbackPath?: string;

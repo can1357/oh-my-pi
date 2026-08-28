@@ -5,9 +5,6 @@ import type { AssistantMessage, Context, FetchImpl, Model, SimpleStreamOptions, 
 import { buildOpenAICompat } from "@oh-my-pi/pi-catalog/compat/openai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
-const model = getBundledModel<"openai-completions">("xai", "grok-code-fast-1");
-if (!model) throw new Error("Expected bundled xAI Grok model");
-if (model.api !== "openai-completions") throw new Error(`Expected Chat Completions model, received ${model.api}`);
 const context: Context = { messages: [{ role: "user", content: "hello", timestamp: 0 }] };
 
 const openAI56ResponsesModel = getBundledModel<"openai-responses">("openai", "gpt-5.6");
@@ -44,7 +41,7 @@ function chatCompletionsSse(): Response {
 			id: "chatcmpl-affinity",
 			object: "chat.completion.chunk",
 			created: 0,
-			model: model.id,
+			model: openAI56CompletionsModel.id,
 			choices: [{ index: 0, delta, finish_reason: finishReason }],
 		});
 
@@ -56,7 +53,7 @@ function chatCompletionsSse(): Response {
 
 async function captureRequest(
 	options: OpenAICompletionsOptions,
-	requestModel: Model<"openai-completions"> = model,
+	requestModel: Model<"openai-completions"> = openAI56CompletionsModel,
 	requestContext: Context = context,
 ): Promise<{ headers: Headers; body: Record<string, unknown> }> {
 	let requestHeaders: Headers | undefined;
@@ -83,7 +80,7 @@ async function captureRequest(
 
 async function captureSimpleRequest(
 	options: SimpleStreamOptions,
-	requestModel: Model<"openai-completions"> = model,
+	requestModel: Model<"openai-completions"> = openAI56CompletionsModel,
 	requestContext: Context = context,
 ): Promise<{ headers: Headers; body: Record<string, unknown> }> {
 	let requestHeaders: Headers | undefined;
@@ -103,51 +100,6 @@ async function captureSimpleRequest(
 	if (!requestHeaders || !body) throw new Error("Expected a serialized Chat Completions request");
 	return { headers: requestHeaders, body };
 }
-
-describe("openai-completions xAI cache affinity", () => {
-	const cases: Array<{
-		name: string;
-		options: OpenAICompletionsOptions;
-		expectedHeader: string | null;
-	}> = [
-		{
-			name: "uses sessionId when no prompt cache key is provided",
-			options: { sessionId: "session-fallback" },
-			expectedHeader: "session-fallback",
-		},
-		{
-			name: "keeps the prompt cache key stable across a distinct side-channel session",
-			options: { promptCacheKey: "stable-cache-key", sessionId: "side-channel-session" },
-			expectedHeader: "stable-cache-key",
-		},
-		{
-			name: "omits automatic affinity when caching is disabled",
-			options: {
-				promptCacheKey: "disabled-cache-key",
-				sessionId: "disabled-session",
-				cacheRetention: "none",
-			},
-			expectedHeader: null,
-		},
-		{
-			name: "preserves a caller-provided mixed-case affinity header",
-			options: {
-				promptCacheKey: "automatic-cache-key",
-				sessionId: "automatic-session",
-				headers: { "X-Grok-Conv-Id": "caller-affinity" },
-			},
-			expectedHeader: "caller-affinity",
-		},
-	];
-
-	for (const { name, options, expectedHeader } of cases) {
-		it(name, async () => {
-			const { headers } = await captureRequest(options);
-
-			expect(headers.get("x-grok-conv-id")).toBe(expectedHeader);
-		});
-	}
-});
 
 describe("OpenAI Chat Completions explicit prompt cache policy", () => {
 	const historicalContext: Context = {

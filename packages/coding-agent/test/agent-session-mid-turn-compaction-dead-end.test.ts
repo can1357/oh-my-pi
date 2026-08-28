@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
-import { z } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -15,7 +15,7 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
-const noopSchema = z.object({});
+const noopSchema = type({});
 const noopTool: AgentTool<typeof noopSchema, undefined> = {
 	name: "noop",
 	label: "No-op",
@@ -67,7 +67,7 @@ describe("AgentSession mid-turn compaction dead-end", () => {
 			const extensionPath = path.join(extensionsDir, "compaction-short-circuit.ts");
 			const extensionLines = ["export default function(pi) {"];
 			if (options.delayMessageEndPersistence) {
-				extensionLines.push('\tpi.on("message_end", async () => {', "\t\tawait Bun.sleep(50);", "\t});");
+				extensionLines.push('\tpi.on("message_end", async () => {', "\t\tawait Promise.resolve();", "\t});");
 			}
 			if (options.shortCircuitCompaction) {
 				extensionLines.push(
@@ -101,7 +101,7 @@ describe("AgentSession mid-turn compaction dead-end", () => {
 			streamFn: mock.stream,
 		});
 		const settings = Settings.isolated({
-			"compaction.strategy": "context-full",
+			"compaction.methodOrder": ["soft"],
 			"compaction.thresholdTokens": 100_000,
 			"compaction.midTurnEnabled": true,
 			"compaction.autoContinue": false,

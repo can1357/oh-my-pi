@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import "./setup";
+
 import {
 	embed,
 	resetEmbeddingProviderForTests,

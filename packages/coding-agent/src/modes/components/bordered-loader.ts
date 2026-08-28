@@ -35,7 +35,7 @@ export class BorderedLoader extends Container {
 		this.#loader.handleInput(data);
 	}
 
-	dispose(): void {
+	override dispose(): void {
 		this.#loader.dispose();
 	}
 }

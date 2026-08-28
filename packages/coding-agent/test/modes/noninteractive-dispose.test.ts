@@ -40,6 +40,7 @@ describe("print-mode error exit disposes the session before exit", () => {
 			state: { messages: [errorMsg] },
 			getLastAssistantMessage: () => errorMsg,
 			prepareForHeadlessAdvisorDrain: () => {},
+			setTextOutputCommitted: () => {},
 			waitForAdvisorCatchup: async () => {
 				order.push("catchup");
 				return true;

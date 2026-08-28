@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
+import { toolWireSchema } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -11,6 +12,7 @@ import {
 	resolveTodoMarkdownPath,
 	selectCollapsedTodos,
 	TODO_STRIKE_HOLD_FRAMES,
+	TODO_STRIKE_TOTAL_FRAMES,
 	type TodoItem,
 	type TodoPhase,
 	TodoTool,
@@ -309,6 +311,21 @@ describe("TodoTool operations", () => {
 		expect(parsedA?.blocker).toBe("x");
 	});
 
+	it("parses checklist items with backslash-escaped brackets from /todo edit", () => {
+		// Editors/serializers (e.g. content pasted from a markdown renderer) escape
+		// `[` and `]`; the line still renders as a checkbox, so it must parse rather
+		// than error out and drop the user's edits (issue #9188).
+		const md = ["# Todos", "* \\[x] first", "- \\[ \\] second", "+ \\[/\\] third"].join("\n");
+		const { phases, errors } = markdownToPhases(md);
+		expect(errors).toEqual([]);
+		const tasks = phases[0]?.tasks ?? [];
+		expect(tasks).toEqual([
+			{ content: "first", status: "completed" },
+			{ content: "second", status: "pending" },
+			{ content: "third", status: "in_progress" },
+		]);
+	});
+
 	it("normalizes a multi-line blocker reason so the markdown round-trip survives", async () => {
 		const tool = new TodoTool(createSession());
 		await tool.execute("call-1", { op: "init", list: [{ phase: "Work", items: ["a"] }] });
@@ -422,6 +439,18 @@ describe("TodoTool operations", () => {
 		if (summary?.type !== "text") throw new Error("Expected text summary");
 		expect(summary.text).toContain("Todo list is empty.");
 		expect(result.isError).toBeUndefined();
+	});
+});
+
+describe("TodoTool provider schema", () => {
+	it("advertises items for single-phase init and append", () => {
+		expect(toolWireSchema(new TodoTool(createSession()))).toMatchObject({
+			properties: {
+				items: {
+					description: "tasks for single-phase init or append",
+				},
+			},
+		});
 	});
 });
 
@@ -626,10 +655,13 @@ describe("todoToolRenderer.renderResult phase collapsing", () => {
 			task: "a1",
 		});
 		const rendered = Bun.stripANSI(component.render(100).join("\n"));
-		// Active phase's collapsed viewport omits the completed task and shows the
-		// promoted current one (#5873).
-		expect(rendered).not.toContain("a1");
+		// Active phase's collapsed viewport keeps the just-closed task as the lead
+		// row and shows the promoted current one (#5873), and its header carries
+		// progress so the phase being worked on is not the one phase with no
+		// completion signal.
+		expect(rendered).toContain("a1");
 		expect(rendered).toContain("a2");
+		expect(rendered).toContain("I. Alpha  1/2");
 		// Untouched phases collapse: headers + progress counts, no task contents.
 		expect(rendered).toContain("II. Beta");
 		expect(rendered).toContain("III. Gamma");
@@ -638,6 +670,24 @@ describe("todoToolRenderer.renderResult phase collapsing", () => {
 		expect(rendered).not.toContain("b2");
 		expect(rendered).not.toContain("c1");
 		expect(rendered).not.toContain("c2");
+	});
+	it("sweeps the just-completed row's strike in the collapsed view", async () => {
+		const result = await buildThreePhaseAfterDone();
+		// The card's default view is collapsed, so the completion animation the
+		// `completedTasks` plumbing drives has to land there — while the viewport
+		// dropped every closed row, the animation ran against a row nobody rendered.
+		const strikeSpan = (spinnerFrame: number): string => {
+			const rendered = todoToolRenderer
+				.renderResult(result, { expanded: false, isPartial: false, spinnerFrame }, theme, {
+					op: "done",
+					task: "a1",
+				})
+				.render(100)
+				.join("\n");
+			return /\x1b\[9m(.*?)\x1b\[29m/.exec(rendered)?.[1] ?? "";
+		};
+		expect(strikeSpan(0)).toBe("");
+		expect(strikeSpan(TODO_STRIKE_TOTAL_FRAMES)).toBe("a1");
 	});
 	it("falls back to in_progress / completed signals when call args are unavailable", async () => {
 		const result = await buildThreePhaseAfterDone();
@@ -696,7 +746,7 @@ describe("selectCollapsedTodos walking viewport (#5873)", () => {
 		expect(sel.summary).toContain("6 more todos");
 	});
 
-	it("omits completed and abandoned tasks in collapsed mode", () => {
+	it("leads with the last closed task and omits the rest in collapsed mode", () => {
 		const tasks: TodoItem[] = [
 			{ content: "done", status: "completed" },
 			{ content: "dropped", status: "abandoned" },
@@ -704,7 +754,27 @@ describe("selectCollapsedTodos walking viewport (#5873)", () => {
 			{ content: "next", status: "pending" },
 		];
 		const sel = selectCollapsedTodos(tasks, never, 5);
-		expect(contents(sel)).toEqual(["current", "next"]);
+		// One closed row survives so a completion is visible as it lands; earlier
+		// closed work stays hidden.
+		expect(contents(sel)).toEqual(["dropped", "current", "next"]);
+		expect(sel.summary).toBe("");
+	});
+
+	it("keeps an out-of-order completion as the closed lead row", () => {
+		const tasks: TodoItem[] = [
+			{ content: "current", status: "in_progress" },
+			{ content: "next", status: "pending" },
+			{ content: "finished early", status: "completed" },
+		];
+		const sel = selectCollapsedTodos(tasks, never, 5);
+		expect(contents(sel)).toEqual(["finished early", "current", "next"]);
+	});
+
+	it("keeps the closed lead row additive to the open-task cap", () => {
+		const tasks: TodoItem[] = [{ content: "closed", status: "completed" }, ...mk(5, [1])];
+		const sel = selectCollapsedTodos(tasks, never, 5);
+		// All 5 open tasks fit the cap; the closed context row does not evict one.
+		expect(contents(sel)).toEqual(["closed", "Task 1", "Task 2", "Task 3", "Task 4", "Task 5"]);
 		expect(sel.summary).toBe("");
 	});
 

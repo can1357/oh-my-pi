@@ -38,16 +38,18 @@ type ModelsEndpointValidation = {
 export type ApiKeyLoginConfig = {
 	/** Display name used in error messages, e.g. "Cerebras", "NanoGPT". */
 	providerLabel: string;
-	/** URL opened in browser for the user to grab their key. */
-	authUrl: string;
-	/** Instructions shown with the onAuth callback. */
-	instructions: string;
+	/** URL opened in browser for the user to grab their key, or omitted to skip onAuth. */
+	authUrl?: string;
+	/** Instructions shown with the onAuth callback, or omitted to skip onAuth. */
+	instructions?: string;
 	/** Prompt message shown when asking for the key paste. */
 	promptMessage: string;
 	/** Placeholder string for the prompt (e.g. "sk-...", "csk-..."). */
 	placeholder: string;
 	/** Validation strategy, or `null` to skip validation. */
 	validation: ChatCompletionsValidation | AnthropicMessagesValidation | ModelsEndpointValidation | null;
+	/** Value returned for an empty key; also allows an empty prompt response. */
+	emptyKeyFallback?: string;
 };
 
 export function createApiKeyLogin(config: ApiKeyLoginConfig): (options: OAuthController) => Promise<string> {
@@ -56,15 +58,24 @@ export function createApiKeyLogin(config: ApiKeyLoginConfig): (options: OAuthCon
 			throw new AIError.OnPromptRequiredError(config.providerLabel);
 		}
 
-		options.onAuth?.({
-			url: config.authUrl,
-			instructions: config.instructions,
-		});
+		if (config.authUrl && config.instructions) {
+			options.onAuth?.({
+				url: config.authUrl,
+				instructions: config.instructions,
+			});
+		}
 
-		const apiKey = await options.onPrompt({
-			message: config.promptMessage,
-			placeholder: config.placeholder,
-		});
+		const apiKey =
+			config.emptyKeyFallback === undefined
+				? await options.onPrompt({
+						message: config.promptMessage,
+						placeholder: config.placeholder,
+					})
+				: await options.onPrompt({
+						message: config.promptMessage,
+						placeholder: config.placeholder,
+						allowEmpty: true,
+					});
 
 		if (options.signal?.aborted) {
 			throw new AIError.LoginCancelledError();
@@ -72,6 +83,9 @@ export function createApiKeyLogin(config: ApiKeyLoginConfig): (options: OAuthCon
 
 		const trimmed = apiKey.trim();
 		if (!trimmed) {
+			if (config.emptyKeyFallback !== undefined) {
+				return config.emptyKeyFallback;
+			}
 			throw new AIError.ApiKeyRequiredError();
 		}
 

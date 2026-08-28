@@ -132,7 +132,7 @@ Supported formats:
 
 Behavior:
 
-- Validates parsed data against a provided Zod schema.
+- Validates parsed data against a provided omptype schema.
 - Caches load result until `invalidate()`.
 - Returns tri-state result via `tryLoad()`:
   - `ok`

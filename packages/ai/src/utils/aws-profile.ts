@@ -78,7 +78,45 @@ export function hasConfiguredAwsProfile(profile?: string): boolean {
 	const configPath = $env.AWS_CONFIG_FILE || path.join(os.homedir(), ".aws", "config");
 	const credentialsIni = readAwsIniSync(credentialsPath);
 	const configIni = shouldLoadAwsSharedConfig(profile) ? readAwsIniSync(configPath) : undefined;
-	const merged = { ...(configIni?.[selectedProfile] ?? {}), ...(credentialsIni?.[selectedProfile] ?? {}) };
+	return profileHasCredentialSource(selectedProfile, credentialsIni, configIni, new Set());
+}
+
+/**
+ * Whether a profile terminates in a usable credential source. Mirrors the
+ * resolver's per-profile dispatch (static keys, SSO, `credential_process`,
+ * `role_arn` chaining) so the availability probe never diverges from what
+ * `resolveAwsCredentials` can actually resolve. `role_arn` chains follow
+ * `source_profile` recursively (cycle-guarded by `seen`); MFA-gated roles are
+ * treated as unusable because non-interactive resolution cannot supply a token.
+ */
+function profileHasCredentialSource(
+	profile: string,
+	credentialsIni: AwsIniFile | undefined,
+	configIni: AwsIniFile | undefined,
+	seen: Set<string>,
+): boolean {
+	if (seen.has(profile)) return false;
+	seen.add(profile);
+	const merged = { ...(configIni?.[profile] ?? {}), ...(credentialsIni?.[profile] ?? {}) };
+	if (merged.role_arn) {
+		if (merged.web_identity_token_file) return true;
+		if (merged.mfa_serial) return false;
+		if (merged.credential_source) {
+			switch (merged.credential_source) {
+				case "Environment":
+					return !!($env.AWS_ACCESS_KEY_ID && $env.AWS_SECRET_ACCESS_KEY);
+				case "EcsContainer":
+					return !!($env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI || $env.AWS_CONTAINER_CREDENTIALS_FULL_URI);
+				case "Ec2InstanceMetadata":
+					return $env.AWS_EC2_METADATA_DISABLED?.toLowerCase() !== "true";
+				default:
+					return false;
+			}
+		}
+		if (merged.source_profile)
+			return profileHasCredentialSource(merged.source_profile, credentialsIni, configIni, seen);
+		return false;
+	}
 	if (merged.aws_access_key_id && merged.aws_secret_access_key) return true;
 	if (merged.credential_process) return true;
 	if (!merged.sso_account_id || !merged.sso_role_name) return false;

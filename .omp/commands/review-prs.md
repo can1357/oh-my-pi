@@ -1,61 +1,54 @@
-# Review PRs Command
+# Review PRs
 
-Triage incoming pull requests in parallel: decide what's worth merging, prep clean rebased worktrees, fix any blockers, and hand them back ready for human merge.
+Parallel PR triage: decide merge-worthiness, prepare rebased worktrees, fix blockers, return them for human merge.
 
 ## Arguments
 
-- `$ARGUMENTS` — optional. Either:
-  - a space- or comma-separated list of PR numbers / URLs, OR
-  - GitHub-search qualifiers (`is:open`, `author:foo`, `label:bug`, `draft:false`, ...) and/or a relative time window like `3d`, `2w`, `12h`.
+`$ARGUMENTS` optional:
+- space/comma-separated PR numbers/URLs; or
+- GitHub-search qualifiers (`is:open`, `author:foo`, `label:bug`, `draft:false`, ...) and/or time window (`3d`, `2w`, `12h`).
 
-If no PRs and no flags are passed, default to **all open PRs opened in the last 3 days**.
+No PRs or flags: all open PRs opened in last 3 days.
 
-## Steps
+## 1. Resolve PRs
 
-### 1. Resolve the PR set
+Parse `$ARGUMENTS`. Explicit numbers/URLs: use verbatim. Otherwise `github` `op: search_prs`; no-args default:
 
-Parse `$ARGUMENTS`.
+```
+github { op: "search_prs", query: "is:open", since: "3d", limit: 50 }
+```
 
-- If explicit PR numbers/URLs given, use them verbatim.
-- Otherwise call the `github` tool with `op: search_prs`. Default (no args):
+Pass supplied qualifiers verbatim in `query`; add `is:open` unless present. Time window (`3d`, `2w`, `12h`, ISO date; see `github` docs): `since`. `dateField` defaults `created`; set `"updated"` only on explicit request for recently-touched PRs. Print resolved set before fan-out for scope confirmation.
 
-  ```
-  github { op: "search_prs", query: "is:open", since: "3d", limit: 50 }
-  ```
+## 2. One parallel `task` subagent/PR
 
-  Pass any user-supplied qualifiers verbatim through `query` (combine with `is:open` if not already present). Use `since` for the time window (`3d`, `2w`, `12h`, ISO date — see the `github` tool docs); set `dateField: "updated"` instead of the `created` default only when the user explicitly asks for recently-touched PRs.
+Assign each PR's number, head ref, author, and workflow. Agents isolate; use `irc` only if a fix on PR A obviously conflicts with PR B.
 
-Print the resolved set before fanning out so the user can confirm scope.
+### Required subagent workflow
 
-### 2. Fan out one subagent per PR
+#### Read and decide
 
-Use **`task` with parallel subagents** — one task per PR. Pass the PR number, head ref, author, and the workflow below as the assignment. Each subagent works in isolation; they coordinate via `irc` only if a fix on PR A would obviously conflict with PR B.
+1. Read `pr://<N>` (comments default; `?comments=0` skips) and `pr://<N>/diff` (changed-file listing). Full unified diff: `pr://<N>/diff/all`; file slice: `pr://<N>/diff/<i>`.
+2. Check `git log origin/main` and `gh search prs` for an already-landed equivalent.
+3. Decision:
+   - `slop`: AI-generated noise, broken, off-spec, or net-negative. Drop; 1–2-line justification; no checkout.
+   - `superseded`: fixed/merged in main or newer PR. Drop with pointer.
+   - `worthy`: proceed.
 
-Each subagent **MUST** follow this exact workflow:
+Ambiguous: `worthy`; human decides on a real branch.
 
-#### a. Read & decide
-
-1. Read `pr://<N>` (with comments by default; append `?comments=0` to skip) and `pr://<N>/diff` for the changed-files listing — use `pr://<N>/diff/all` when you need the full unified diff, or `pr://<N>/diff/<i>` for a single file slice.
-2. Check `git log origin/main` and `gh search prs` for whether the same change already landed.
-3. Classify into one of:
-   - **slop** — AI-generated noise, broken, off-spec, or net-negative. Drop, write a 1–2 line justification, do not check out.
-   - **superseded** — already fixed/merged in main or by a newer PR. Drop with a pointer.
-   - **worthy** — proceed.
-
-Anything ambiguous defaults to `worthy` — let the human decide on a real branch.
-
-#### b. Check out into a worktree
+#### Checkout
 
 ```bash
 gh_PR=<NUMBER>
 # pr_checkout creates ~/.omp/wt/<encoded-repo>/pr-<N>/ and configures push remote
 ```
 
-Use the `github pr_checkout` tool, **not** raw `gh pr checkout`. That gives a dedicated worktree wired up for `pr_push` later.
+MUST use `github pr_checkout`, not raw `gh pr checkout`: it creates a dedicated worktree wired for later `pr_push`.
 
-#### c. Symlink build artifacts (skip native rebuilds)
+#### Symlink build artifacts
 
-From inside the new worktree, link the heavy build outputs from the main checkout so `bun check` / `cargo build` / native loaders do not recompile:
+Before any worktree build/test, from the worktree symlink main-checkout outputs to avoid `bun check` / `cargo build` / native-loader recompilation:
 
 ```bash
 MAIN="<absolute path to main worktree, e.g. ~/Projects/pi>"
@@ -73,35 +66,26 @@ for f in "$MAIN"/packages/natives/native/*.node; do
 done
 ```
 
-Resolve `$MAIN` from the original cwd before `pr_checkout` (`git rev-parse --show-toplevel`). Use absolute paths in symlinks; the worktree lives outside the main repo so relative paths break.
+Before `pr_checkout`, derive `$MAIN` from original cwd: `git rev-parse --show-toplevel`. Symlinks MUST use absolute paths: worktree is outside main repo; relative paths break. MUST NOT symlink whole `packages/natives/native/`: it shadows tracked PR changes.
 
-#### d. Rebase onto main
+#### Rebase
 
 ```bash
 git fetch origin main
 git rebase origin/main
 ```
 
-If the rebase conflicts:
-- Resolve trivially mechanical conflicts (formatting, import order, adjacent-line edits) and continue.
-- Anything semantic → abort the rebase, leave a note in the final report, do not commit.
+Mechanical conflicts (formatting, import order, adjacent edits): resolve, continue. Semantic conflicts: abort, note final report, do not commit.
 
-#### e. Review & fix critical issues
+#### Review and fix
 
-Inside the worktree, review the diff with the lens of: correctness, security, regressions, breaking-change impact, test coverage of the new path.
+Review for correctness, security, regressions, breaking-change impact, and new-path test coverage. Fix merge blockers only: build/test failure, obvious PR-introduced bugs, or edge cases required by the PR's goal. Do NOT taste-rewrite, unrelated-refactor, or expand scope.
 
-Only fix things that **block merge**: build/test breakage, obvious bugs introduced by the PR, missing edge-case handling the PR's own goal demands. Do **not** rewrite for taste, refactor unrelated code, or expand scope.
+Each fix: read existing patterns; follow `AGENTS.md` conventions; add/update behavior-change tests; run targeted area test files only—no project-wide subagent tests. End with `bun fmt` over union of edited files.
 
-For every fix:
-- Read existing patterns first; match repo conventions (see `AGENTS.md`).
-- Add or update tests for the actual behavior change.
-- Run only the targeted test file(s) for the area touched. No project-wide test runs from subagents.
+#### Commit
 
-Format/lint at the end with `bun fmt` over the union of files you edited.
-
-#### f. Commit
-
-One conventional commit per logical fix on top of the rebased PR branch:
+One conventional commit/logical fix atop rebased PR branch:
 
 ```bash
 git add -A
@@ -110,11 +94,11 @@ git commit -m "fix(<scope>): <what & why>
 Addresses review feedback on #<PR>."
 ```
 
-Do **not** amend the PR author's commits. Do **not** push — the human merges.
+Do NOT amend author commits, push, merge, or force-push author history; human reviews/merges.
 
-#### g. Report back
+#### Report
 
-Each subagent returns a short structured report:
+Return:
 
 ```
 PR #<N>  <title>
@@ -125,23 +109,20 @@ Fixes:    <commit shas + one-liners>   (or: none needed)
 Blockers: <anything the human must decide>
 ```
 
-### 3. Aggregate
+## 3. Aggregate
 
-After all subagents finish, print a single summary table:
+After all agents finish, print:
 
 ```
 | PR | Title | Decision | Rebase | Fixes | Blockers |
 |----|-------|----------|--------|-------|----------|
 ```
 
-Followed by the worktree paths grouped by decision, so the user can `cd` and merge in one go.
+Then worktree paths grouped by decision for `cd` and merge.
 
 ## Rules
 
-- **MUST** use parallel subagents — one per PR — not a serial loop.
-- **MUST** use `github pr_checkout` (carries push metadata) — not raw `gh pr checkout`.
-- **MUST** symlink `target`, `node_modules`, and the native `*.node` binaries before any build/test runs in the worktree. **MUST NOT** symlink the whole `packages/natives/native/` directory that would shadow tracked PR changes.
-- **MUST NOT** push or merge. Human reviews and merges.
-- **MUST NOT** expand scope: fixes are limited to merge blockers on this PR's diff.
-- **MUST NOT** force-push over the PR author's history.
-- If a PR is `slop`/`superseded`, skip checkout entirely — just record the decision.
+- MUST use parallel subagents, one/PR; NEVER serial loop.
+- `slop`/`superseded`: skip checkout; record decision only.
+- Fixes limited to merge blockers in that PR's diff.
+- MUST NOT push or merge; human reviews and merges.

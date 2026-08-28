@@ -8,7 +8,7 @@
  * - Interact with the user via UI primitives
  */
 
-import type { Type as arktype } from "@oh-my-pi/omptype";
+import type { type as ArkType } from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import type * as zod from "@oh-my-pi/omptype/zod";
 import type {
@@ -36,9 +36,20 @@ import type {
 	Static,
 	TextContent,
 	TSchema,
+	UsageProvider,
 } from "@oh-my-pi/pi-ai";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
-import type { AutocompleteItem, AutocompleteProvider, Component, EditorTheme, KeyId, TUI } from "@oh-my-pi/pi-tui";
+import type {
+	AutocompleteItem,
+	AutocompleteProvider,
+	Component,
+	ComposerStyle,
+	EditorTheme,
+	KeyId,
+	OverlayHandle,
+	OverlayOptions,
+	TUI,
+} from "@oh-my-pi/pi-tui";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
 import type { KeybindingsManager } from "../../config/keybindings";
 import type { ModelRegistry } from "../../config/model-registry";
@@ -67,6 +78,7 @@ import type {
 	WriteToolInput,
 } from "../../tools";
 import type { ApprovalMode } from "../../tools/approval";
+import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import type { EventBus } from "../../utils/event-bus";
 import type {
 	AgentEndEvent,
@@ -77,6 +89,8 @@ import type {
 	AutoRetryStartEvent,
 	ContextEvent,
 	GoalUpdatedEvent,
+	RetryFallbackAppliedEvent,
+	RetryFallbackSucceededEvent,
 	SessionBeforeBranchEvent,
 	SessionBeforeBranchResult,
 	SessionBeforeCompactEvent,
@@ -105,6 +119,7 @@ import type {
 } from "../shared-events";
 import type { SlashCommandInfo } from "../slash-commands";
 
+export type { OverlayHandle, OverlayOptions } from "@oh-my-pi/pi-tui";
 export type { AppKeybinding, KeybindingsManager } from "../../config/keybindings";
 export type { ExecOptions, ExecResult } from "../../exec/exec";
 export type { AgentToolResult, AgentToolUpdateCallback };
@@ -214,6 +229,18 @@ export type ExtensionUiComponent = Component & { dispose?(): void };
 export type ExtensionUiComponentFactory = (tui: TUI, theme: Theme) => ExtensionUiComponent;
 export type ExtensionWidgetContent = string[] | ExtensionUiComponentFactory | undefined;
 
+/** Options for `ExtensionUIContext.custom()` (overlay rendering of a custom component). */
+export interface ExtensionCustomOptions {
+	/** Render the component as an overlay over the transcript instead of replacing the editor area. */
+	overlay?: boolean;
+	/** Static or lazily resolved overlay positioning/sizing options forwarded to `showOverlay`. */
+	overlayOptions?: OverlayOptions | (() => OverlayOptions);
+	/** Invoked with the overlay handle once the overlay is created (overlay mode only). */
+	onHandle?: (handle: OverlayHandle) => void;
+	/** Abort the custom UI and reject its promise. */
+	signal?: AbortSignal;
+}
+
 /** Wrap the current autocomplete provider with additional behavior (pi-compatible). */
 export type AutocompleteProviderFactory = (current: AutocompleteProvider) => AutocompleteProvider;
 
@@ -280,7 +307,7 @@ export interface ExtensionUIContext {
 			keybindings: KeybindingsManager,
 			done: (result: T) => void,
 		) => ExtensionUiComponent | Promise<ExtensionUiComponent>,
-		options?: { overlay?: boolean },
+		options?: ExtensionCustomOptions,
 	): Promise<T>;
 
 	/** Set the text in the core input editor. */
@@ -343,6 +370,16 @@ export interface ExtensionUIContext {
 	setToolsExpanded(expanded: boolean): void;
 }
 
+/** Visual composer style and selector copy registered by an extension. */
+export interface ComposerShapeDefinition {
+	/** User-facing name shown in composer-shape selectors. */
+	label: string;
+	/** Optional detail shown under the selector label. */
+	description?: string;
+	/** Renderer contract; its id becomes the persisted `composer.shape` value. */
+	style: ComposerStyle;
+}
+
 // ============================================================================
 // Extension Context
 // ============================================================================
@@ -359,9 +396,9 @@ export interface CompactOptions {
 	onComplete?: (result: CompactionResult) => void;
 	onError?: (error: Error) => void;
 	/**
-	 * Force a one-off compaction mode for this invocation, overriding the
-	 * configured `compaction.strategy` / `remoteEnabled` (the `/compact`
-	 * subcommands: `soft` | `remote` | `snapcompact`). Omitted = configured behavior.
+	 * Force a one-off compaction mode for this invocation, replacing the
+	 * configured `compaction.methodOrder` (`/compact soft`, `remote`, or
+	 * `snapcompact`). Omitted = configured preference order.
 	 */
 	mode?: CompactMode;
 	/**
@@ -412,9 +449,14 @@ export interface ExtensionModelQuery {
 	family(model: Model): string;
 }
 
+/** Runtime host mode exposed to Pi-compatible extensions. */
+export type ExtensionMode = "tui" | "rpc" | "json" | "print";
+
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
+	/** Current run mode. Use `"tui"` to guard terminal-only UI such as custom components. */
+	mode: ExtensionMode;
 	/** Get current context usage for the active model. */
 	getContextUsage(): ContextUsage | undefined;
 	/** Get a read-only snapshot of async jobs owned by this session. */
@@ -480,6 +522,21 @@ export interface ExtensionContext {
 		params: Record<string, unknown>,
 		options?: { signal?: AbortSignal; onUpdate?: AgentToolUpdateCallback<TDetails> },
 	): Promise<AgentToolResult<TDetails>>;
+
+	/**
+	 * Whether project-local inputs for the current working directory (extensions, settings,
+	 * skills, resources) are trusted. Upstream `@earendil-works/pi-coding-agent` (>=0.79) asks the
+	 * user once per directory before loading project-local inputs and exposes the saved decision
+	 * here; extensions written against that API (e.g. Plannotator) feature-detect this method to
+	 * decide whether project-local config is safe to load, and warn when it is absent.
+	 *
+	 * OMP has no equivalent per-directory trust gate: `.omp/extensions`, `.omp/config.yml`, and
+	 * other project-local inputs are already discovered and loaded unconditionally (see
+	 * `docs/extension-loading.md`). This method exists for compatibility with that upstream surface
+	 * and always returns `true`, truthfully reflecting that OMP already trusts project-local inputs
+	 * by default -- it does not narrow or widen OMP's own security model.
+	 */
+	isProjectTrusted(): boolean;
 }
 
 /**
@@ -541,6 +598,16 @@ export interface ToolSessionEvent {
 	previousSessionFile: string | undefined;
 }
 
+/** Shell invocation details supplied to a registered tool's environment hook. */
+export interface ToolShellEnvironmentContext {
+	command: string;
+	cwd: string;
+	env: Record<string, string | undefined>;
+}
+
+/** Supplies environment values for a user-initiated shell invocation. */
+export type ToolShellEnvironmentHook = (context: ToolShellEnvironmentContext) => Record<string, string> | undefined;
+
 /**
  * Tool definition for registerTool().
  */
@@ -572,6 +639,10 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	mcpServerName?: string;
 	/** Original MCP tool name for discovery/search metadata. */
 	mcpToolName?: string;
+	/** Optional environment hook applied when the interactive user shell invokes this tool's shell surface. */
+	shellEnv?: ToolShellEnvironmentHook;
+	/** Authoritative originating file for a discovered custom-tool module. */
+	sourcePath?: string;
 	/** Execute the tool. */
 	execute(
 		toolCallId: string,
@@ -594,6 +665,36 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 		theme: Theme,
 		args?: Static<TParams>,
 	) => Component;
+}
+
+/** Whether a tool's source is scoped to the user, the project, or a transient runtime session. */
+export type SourceScope = "user" | "project" | "temporary";
+
+/** Whether a tool's source came from an installed package or a top-level (loose) file. */
+export type SourceOrigin = "package" | "top-level";
+
+/**
+ * Provenance metadata describing where a registered tool came from. Mirrors the
+ * `@earendil-works/pi-coding-agent` `SourceInfo` contract so extensions authored
+ * against upstream pi (e.g. gentle-pi) can read `sourceInfo.source` unchanged.
+ */
+export interface SourceInfo {
+	/** Synthetic or on-disk identifier for the tool's origin (e.g. `<builtin:read>`). */
+	path: string;
+	/** Origin class: `"builtin"`, `"sdk"`, `"mcp"`, or `"extension"`. */
+	source: string;
+	scope: SourceScope;
+	origin: SourceOrigin;
+	baseDir?: string;
+}
+
+/** Tool metadata returned by {@link ExtensionAPI.getAllTools}: identity, schema, and source provenance. */
+export interface ToolInfo {
+	name: string;
+	description: string;
+	parameters: TSchema;
+	promptGuidelines?: string[];
+	sourceInfo: SourceInfo;
 }
 
 // ============================================================================
@@ -681,7 +782,10 @@ export interface MessageUpdateEvent {
 	assistantMessageEvent: AssistantMessageEvent;
 }
 
-/** Fired when a message ends */
+/**
+ * Fired when a message ends. Notification-only: the message is a detached
+ * snapshot, so in-place changes do not rewrite agent or provider context.
+ */
 export interface MessageEndEvent {
 	type: "message_end";
 	message: AgentMessage;
@@ -719,6 +823,8 @@ export type {
 	AutoCompactionStartEvent,
 	AutoRetryEndEvent,
 	AutoRetryStartEvent,
+	RetryFallbackAppliedEvent,
+	RetryFallbackSucceededEvent,
 	TodoReminderEvent,
 	TtsrTriggeredEvent,
 } from "../shared-events";
@@ -981,6 +1087,8 @@ export type ExtensionEvent =
 	| AutoCompactionEndEvent
 	| AutoRetryStartEvent
 	| AutoRetryEndEvent
+	| RetryFallbackAppliedEvent
+	| RetryFallbackSucceededEvent
 	| TtsrTriggeredEvent
 	| TodoReminderEvent
 	| GoalUpdatedEvent
@@ -1109,12 +1217,13 @@ export interface ExtensionAPI {
 	/** File logger for error/warning/debug messages */
 	logger: typeof PiLogger;
 
-	/** Injected zod-backed typebox shim for legacy `Type.Object(...)` parameter authoring. */
+	/** Injected TypeBox shim for legacy `Type.Object(...)` parameter authoring. */
 	typebox: typeof TypeBox;
 
-	/** Injected arktype module for arktype-authored extension tools (canonical going forward). */
-	arktype: typeof arktype;
-	/** Injected omptype-backed zod facade for extension tool parameter schemas. */
+	/** Injected omptype schema builder for extension tools. */
+	arktype: typeof ArkType;
+
+	/** Injected Zod-compatible omptype builder for extension tools. */
 	zod: typeof zod;
 
 	/** Injected pi-coding-agent exports for accessing SDK utilities */
@@ -1167,6 +1276,8 @@ export interface ExtensionAPI {
 	on(event: "auto_compaction_end", handler: ExtensionHandler<AutoCompactionEndEvent>): void;
 	on(event: "auto_retry_start", handler: ExtensionHandler<AutoRetryStartEvent>): void;
 	on(event: "auto_retry_end", handler: ExtensionHandler<AutoRetryEndEvent>): void;
+	on(event: "retry_fallback_applied", handler: ExtensionHandler<RetryFallbackAppliedEvent>): void;
+	on(event: "retry_fallback_succeeded", handler: ExtensionHandler<RetryFallbackSucceededEvent>): void;
 	on(event: "ttsr_triggered", handler: ExtensionHandler<TtsrTriggeredEvent>): void;
 	on(event: "todo_reminder", handler: ExtensionHandler<TodoReminderEvent>): void;
 	on(event: "goal_updated", handler: ExtensionHandler<GoalUpdatedEvent>): void;
@@ -1186,6 +1297,63 @@ export interface ExtensionAPI {
 
 	/** Register a tool that the LLM can call. */
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void;
+
+	/**
+	 * Register a fallback writer consulted when a native `write`/`edit` byte-write is
+	 * denied with a permission error (`EPERM`/`EACCES`/`EROFS`). Every other write
+	 * error is unaffected. Handlers run in registration order; the first one to
+	 * resolve `true` counts as the bytes being durably on disk, and the native tool
+	 * continues as if its own write had succeeded — including recording its file
+	 * snapshot under the real destination path, so a later hashline `edit` on that
+	 * path keeps working. Intended for a host embedding the agent inside a sandbox
+	 * that denies direct filesystem writes but exposes a privileged write channel.
+	 *
+	 * A denial that `Bun.write` masks as `ENOENT` — a write into a directory the host
+	 * may not create — also diverts here, with `req.dst`'s parent absent and the
+	 * handler responsible for creating it.
+	 *
+	 * `req.dst` is symlink-RESOLVED: the path the failed write itself acted on, not
+	 * the one the tool was given. A link anywhere in a lexical path redirects the
+	 * bytes while still passing a prefix allowlist, so treat `req.dst` as
+	 * authoritative. A destination that cannot be resolved is never brokered.
+	 *
+	 * Call this during extension load, like the other `register*` methods: handlers
+	 * are installed when the runner initializes, so an extension that has registered
+	 * none by then is skipped and a first registration made later never takes effect.
+	 *
+	 * The underlying registry is process-wide, so a handler may be consulted for a
+	 * denied write from any session in the process, not only its own.
+	 * `req.sessionId` names the session that issued the write and
+	 * `ctx.sessionManager.getSessionId()` names the handler's own; compare them
+	 * before prompting, because `ctx.ui` belongs to the latter. See
+	 * `docs/extensions.md`.
+	 */
+	registerFileWriteFallback(handler: FileWriteFallbackHandler): void;
+
+	/**
+	 * Register a fallback deleter consulted when a native `edit`/`apply_patch` unlink is
+	 * denied with a permission error (`EPERM`/`EACCES`/`EROFS`). Covers `edit`'s `REM`,
+	 * the source side of a hashline `MV`, and `apply_patch`'s delete op. Return `true`
+	 * once `dst` is gone from disk.
+	 *
+	 * A handler MUST remove `dst` with a plain unlink and MUST NOT fall back to a
+	 * recursive removal. `unlink` on a directory reports `EPERM` on Darwin, so the seam
+	 * checks the target before diverting — but when the target's own metadata is behind
+	 * the same boundary that denied the unlink, which is the common sandbox case, that
+	 * check cannot be resolved and `dst` may be a directory. `req.confirmedFile` says
+	 * which situation the handler is in.
+	 *
+	 * `req.dst` resolves every component ABOVE the last, for the same reason the
+	 * write seam resolves all of them; the last is left alone because `unlink`
+	 * removes a link rather than its target, so `req.dst` may name a link.
+	 *
+	 * Separate from {@link registerFileWriteFallback} on purpose. A write handler
+	 * brokers `req.content` to `req.dst`, so a delete request reaching it with no
+	 * content invites brokering an empty write and truncating the file instead of
+	 * removing it. Registering for deletes is therefore an explicit opt-in, and the
+	 * same load-time and process-wide notes above apply.
+	 */
+	registerFileDeleteFallback(handler: FileDeleteFallbackHandler): void;
 
 	// =========================================================================
 	// Command, Shortcut, Flag Registration
@@ -1236,6 +1404,14 @@ export interface ExtensionAPI {
 	/** Register a renderer for assistant thinking blocks. Rendered after the original thinking text. */
 	registerAssistantThinkingRenderer(renderer: AssistantThinkingRenderer): void;
 
+	/**
+	 * Register a composer shape for the interactive editor.
+	 *
+	 * Registration happens during extension load. Built-in ids cannot be
+	 * replaced; when extensions reuse an id, the later extension wins.
+	 */
+	registerComposerShape(definition: ComposerShapeDefinition): void;
+
 	// =========================================================================
 	// Actions
 	// =========================================================================
@@ -1267,8 +1443,8 @@ export interface ExtensionAPI {
 	/** Get the list of currently active tool names. */
 	getActiveTools(): string[];
 
-	/** Get all configured tools (built-in + extension tools). */
-	getAllTools(): string[];
+	/** Get all configured tools (built-in + extension tools) with schema and source metadata. */
+	getAllTools(): ToolInfo[];
 
 	/** Set the active tools by name. */
 	setActiveTools(toolNames: string[]): Promise<void>;
@@ -1342,6 +1518,14 @@ export interface ExtensionAPI {
 	 */
 	registerProvider(name: string, config: ProviderConfig): void;
 
+	/**
+	 * Unregister a provider previously registered by an extension.
+	 *
+	 * Removes extension-provided models and restores overridden built-in models.
+	 * Has no effect when the provider is not registered.
+	 */
+	unregisterProvider(name: string): void;
+
 	/** Shared event bus for extension communication. */
 	events: EventBus;
 }
@@ -1366,6 +1550,8 @@ export interface ProviderConfig {
 	authHeader?: boolean;
 	/** Models to register. If provided, replaces all existing models for this provider. */
 	models?: ProviderModelConfig[];
+	/** Optional normalized usage fetcher used by AuthStorage for this provider. */
+	usage?: UsageProvider;
 	/** OAuth provider for /login support. */
 	oauth?: {
 		/** Display name in login UI. */
@@ -1383,7 +1569,8 @@ export interface ProviderConfig {
 	 * Async factory that fetches the live model list from the provider endpoint.
 	 * Runs through the same SQLite model-cache as built-in providers (keyed by
 	 * provider name, default 24 h TTL). Receives the resolved API key (undefined
-	 * when unauthenticated). Mutually exclusive with `models`.
+	 * when unauthenticated). When combined with `models`, the static models remain as fallbacks
+	 * alongside the live catalog.
 	 */
 	fetchDynamicModels?: (apiKey: string | undefined) => Promise<readonly ProviderModelConfig[]>;
 }
@@ -1410,6 +1597,8 @@ export interface ProviderModelConfig {
 	contextWindow: number;
 	/** Maximum output tokens. */
 	maxTokens: number;
+	/** Whether Codex requests should prefer WebSocket transport. */
+	preferWebsockets?: boolean;
 	/** Custom headers for this model. */
 	headers?: Record<string, string>;
 	/** OpenAI compatibility settings. */
@@ -1427,6 +1616,9 @@ export interface RegisteredTool<TParams extends TSchema = TSchema, TDetails = un
 	definition: ToolDefinition<TParams, TDetails>;
 	extensionPath: string;
 }
+
+/** Internal observer invoked when an already-loaded extension registers or replaces a tool. */
+export type ToolRegistrationListener = (toolName: string) => void;
 
 export interface ExtensionFlag {
 	name: string;
@@ -1464,7 +1656,7 @@ export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => 
 
 export type GetActiveToolsHandler = () => string[];
 
-export type GetAllToolsHandler = () => string[];
+export type GetAllToolsHandler = () => ToolInfo[];
 
 export type GetCommandsHandler = () => SlashCommandInfo[];
 
@@ -1485,6 +1677,10 @@ export interface ExtensionRuntimeState {
 	flagValues: Map<string, boolean | string>;
 	/** Provider registrations queued during extension loading, processed during session initialization */
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }>;
+	/** Queue a provider registration until initialization, then apply it immediately. */
+	registerProvider(name: string, config: ProviderConfig, sourceId: string): void;
+	/** Remove a queued or initialized provider registration. */
+	unregisterProvider(name: string, sourceId: string): void;
 }
 
 /** Action implementations for ExtensionAPI methods. */
@@ -1546,11 +1742,27 @@ export interface Extension {
 	label?: string;
 	handlers: Map<string, HandlerFn[]>;
 	tools: Map<string, RegisteredTool<any, any>>;
+	toolRegistrationListeners?: Set<ToolRegistrationListener>;
 	assistantThinkingRenderers: AssistantThinkingRenderer[];
+	fileWriteFallbackHandlers: FileWriteFallbackHandler[];
+	fileDeleteFallbackHandlers: FileDeleteFallbackHandler[];
 	messageRenderers: Map<string, MessageRenderer>;
+	composerShapes: Map<string, ComposerShapeDefinition>;
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
+}
+
+/**
+ * Imported extension factory detached from any session runtime. The same
+ * prepared module may be rebound to multiple session-scoped ExtensionAPI
+ * instances without evaluating its module graph again.
+ */
+export interface PreparedExtension {
+	path: string;
+	resolvedPath: string;
+	factory: ExtensionFactory | null;
+	error: string | null;
 }
 
 /** Result of loading extensions. */
@@ -1558,6 +1770,8 @@ export interface LoadExtensionsResult {
 	extensions: Extension[];
 	errors: Array<{ path: string; error: string }>;
 	runtime: ExtensionRuntime;
+	/** Session-independent imported factories safe to rebind in child sessions. */
+	preparedExtensions?: PreparedExtension[];
 }
 
 // ============================================================================

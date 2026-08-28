@@ -182,6 +182,37 @@ function scanRangeSeparator(line: string, index: number, end: number): number | 
 	return cursor;
 }
 
+/**
+ * Recover a dangling range separator: the run after `N` contains at least one
+ * non-whitespace separator char but no end number (`244.=:`, `5-`, `12.. @reg`).
+ * Models write this intending an open range; it collapses to `N.=N`. Returns
+ * the index past the run only when what follows is `:`, `@`, or end-of-header —
+ * anything else keeps the header on the strict rejection path.
+ */
+function scanDanglingSeparator(line: string, index: number, end: number): number | null {
+	let cursor = index;
+	let sawSeparatorChar = false;
+	while (cursor < end) {
+		const code = line.charCodeAt(cursor);
+		if (code === CHAR_HYPHEN || code === CHAR_DOT || code === CHAR_EQUALS || code === CHAR_ELLIPSIS) {
+			sawSeparatorChar = true;
+			cursor++;
+			continue;
+		}
+		if (isWhitespaceCode(code)) {
+			cursor++;
+			continue;
+		}
+		break;
+	}
+	if (!sawSeparatorChar) return null;
+	if (cursor < end) {
+		const code = line.charCodeAt(cursor);
+		if (code !== CHAR_COLON && code !== CHAR_AT) return null;
+	}
+	return cursor;
+}
+
 function scanHeaderRange(line: string, index = 0, end = trimEndIndex(line), allowSingle = false): RangeScan | null {
 	const numberStart = skipWhitespace(line, index, end);
 	const start = scanLineNumber(line, numberStart, end);
@@ -189,6 +220,14 @@ function scanHeaderRange(line: string, index = 0, end = trimEndIndex(line), allo
 	const afterFirst = scanRangeSeparator(line, start.nextIndex, end);
 	if (afterFirst === null) {
 		if (!allowSingle) return null;
+		const dangling = scanDanglingSeparator(line, start.nextIndex, end);
+		if (dangling !== null) {
+			return {
+				range: { start: { line: start.line }, end: { line: start.line } },
+				nextIndex: dangling,
+				hadSeparator: true,
+			};
+		}
 		return {
 			range: { start: { line: start.line }, end: { line: start.line } },
 			nextIndex: skipWhitespace(line, start.nextIndex, end),
@@ -427,6 +466,21 @@ function tryParseHunkHeader(line: string): ParsedHunkHeader | null {
 	if (scan === null) return null;
 	if (scan.nextIndex !== end) return null;
 	return { target: scan.target, hadColon: scan.hadColon };
+}
+/**
+ * Whether `text` would parse as a hunk header on its own (`PUT …`, `CUT …`,
+ * `REM`, `MV …`). Used to catch an op row mistakenly written as a `+` body row,
+ * which the applier would otherwise insert into the file as literal text.
+ */
+export function isHunkHeaderText(text: string): boolean {
+	const end = trimEndIndex(text);
+	const lead = skipWhitespace(text, 0, end);
+	const isHunkLead =
+		text.startsWith(HL_PUT_KEYWORD, lead) ||
+		text.startsWith(HL_CUT_KEYWORD, lead) ||
+		text.startsWith(HL_REM_KEYWORD, lead) ||
+		text.startsWith(HL_MOVE_KEYWORD, lead);
+	return isHunkLead && tryParseHunkHeader(text) !== null;
 }
 
 function tryParseHeader(line: string): { path: string; fileHash?: string } | null {

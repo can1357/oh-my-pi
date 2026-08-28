@@ -1,11 +1,12 @@
 /**
  * CLI argument parsing and help display
  */
+import * as path from "node:path";
 import { $env, APP_NAME, logger } from "@oh-my-pi/pi-utils";
-import chalk from "chalk";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { ServiceTierOpenAISettingValue } from "../config/service-tier";
 import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "../thinking";
-import { BUILTIN_TOOL_NAMES, HIDDEN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
+import { normalizeToolNames } from "../tools/builtin-names";
 import {
 	OPTIONAL_FLAGS,
 	OPTIONAL_VALUE_FLAGS,
@@ -47,6 +48,7 @@ export interface Args {
 	serviceTier?: ServiceTierOpenAISettingValue;
 	hideThinking?: boolean;
 	advisor?: boolean;
+	externalThinking?: boolean;
 	continue?: boolean;
 	resume?: string | true;
 	fromClaude?: boolean;
@@ -68,6 +70,7 @@ export interface Args {
 	noPty?: boolean;
 	hooks?: string[];
 	extensions?: string[];
+	trustedExtensions?: string[];
 	noExtensions?: boolean;
 	pluginDirs?: string[];
 	print?: boolean;
@@ -105,12 +108,11 @@ export interface Args {
 const PARSE_DEPS: ParseDeps = {
 	logger,
 	parseThinking: parseCliThinkingLevel,
-	builtinToolNames: [...BUILTIN_TOOL_NAMES, ...HIDDEN_TOOL_NAMES],
 	normalizeToolNames,
 	thinkingEfforts: CLI_THINKING_LEVELS,
 };
 
-const WINDOWS_PATH_VALUE_FLAGS: ReadonlySet<string> = new Set(["--extension", "-e", "--hook"]);
+const WINDOWS_PATH_VALUE_FLAGS = new Set(["--extension", "-e", "--hook", "--trusted-extension"]);
 const WINDOWS_PATH_START_RE =
 	/^(?:[A-Za-z]:[\\/]|\\\\[?]\\(?:[A-Za-z]:[\\/]|UNC[\\/])|\\\\[^\\/]+[\\/][^\\/]+[\\/]|\/\/[?]\/(?:[A-Za-z]:\/|UNC\/)|\/\/[^/]+\/[^/]+\/)/;
 const WINDOWS_MODULE_PATH_SUFFIX_RE = /\.(?:[cm]?[jt]sx?)$/i;
@@ -145,6 +147,7 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 	// reparse in `runRootCommand` parses it a second time). Mutating the input
 	// would corrupt that later parse, so never touch the caller's array.
 	const args = [...inputArgs];
+	const parseDeps = PARSE_DEPS;
 	const result: Args = {
 		messages: [],
 		fileArgs: [],
@@ -156,6 +159,7 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 	// `--` ends option parsing (POSIX end-of-options). Everything after it is
 	// literal positional text, so flag-shaped messages are not parsed or rejected.
 	let sawSeparator = false;
+	let trustedFlagCount = 0;
 	for (let i = 0; i < args.length; i++) {
 		let arg = args[i];
 		if (sawSeparator) {
@@ -200,6 +204,7 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 				}
 			}
 		} else if (STRING_VALUE_FLAGS.has(arg)) {
+			if (arg === "--trusted-extension") trustedFlagCount++;
 			// Built-in string flags consume the next token even when it is flag-looking
 			// (`--system-prompt --profile foo` ⇒ the prompt is the literal "--profile").
 			// The one token they must never absorb is the profile bootstrap's internal
@@ -209,7 +214,7 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			if (i + 1 < args.length && args[i + 1] !== PROFILE_BOOTSTRAP_BOUNDARY_ARG) {
 				const consumed = consumeBuiltInStringValue(arg, args, i + 1);
 				i = consumed.index;
-				STRING_SETTERS[arg](result, consumed.value, PARSE_DEPS);
+				STRING_SETTERS[arg](result, consumed.value, parseDeps);
 			}
 		} else if (OPTIONAL_VALUE_FLAGS.has(arg)) {
 			const config = OPTIONAL_FLAGS[arg];
@@ -251,6 +256,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.hideThinking = true;
 		} else if (arg === "--advisor") {
 			result.advisor = true;
+		} else if (arg === "--external-thinking") {
+			result.externalThinking = true;
 		} else if (arg === "--prewalk") {
 			result.prewalk = true;
 		} else if (arg === "--no-prewalk") {
@@ -304,7 +311,36 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 		}
 	}
 
+	const swallowedTrustedFlag = [...(result.extensions ?? []), ...(result.hooks ?? [])].some(
+		value => value === "--trusted-extension" || value.startsWith("--trusted-extension="),
+	);
+	if ((result.trustedExtensions?.length ?? 0) !== trustedFlagCount || swallowedTrustedFlag) {
+		throw new CliUsageError("--trusted-extension requires a non-empty, non-flag value");
+	}
+	if (trustedFlagCount > 0 && ((result.extensions?.length ?? 0) > 0 || (result.hooks?.length ?? 0) > 0)) {
+		throw new CliUsageError("--trusted-extension cannot be combined with --extension, -e, or --hook");
+	}
+	for (const trustedPath of result.trustedExtensions ?? []) {
+		if (trustedPath.length === 0) {
+			throw new CliUsageError("--trusted-extension requires a non-empty, non-flag value");
+		}
+		if (!path.isAbsolute(trustedPath)) {
+			throw new CliUsageError(`--trusted-extension requires an absolute path: ${trustedPath}`);
+		}
+	}
+
 	return result;
+}
+
+/** Reject requested tool names absent from the fully discovered session registry. */
+export function validateToolNames(requested: readonly string[] | undefined, known: readonly string[]): void {
+	if (!requested) return;
+	const knownNames = new Set(known);
+	const unknown = requested.filter(name => !knownNames.has(name));
+	if (unknown.length === 0) return;
+	throw new CliUsageError(
+		`Unknown tool${unknown.length === 1 ? "" : "s"} in --tools: ${unknown.join(", ")}. Valid tools: ${known.join(", ")}.`,
+	);
 }
 
 /**

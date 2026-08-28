@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -99,7 +99,9 @@ describe("AgentSession eager todo enforcement", () => {
 	let session: AgentSession;
 	let streamCallCount = 0;
 	let scriptedResponses: AssistantMessage[] = [];
-	let authStorage: AuthStorage | undefined;
+	let sharedDir: TempDir;
+	let sharedAuthStorage: AuthStorage;
+	let sharedModelRegistry: ModelRegistry;
 	const observedCalls: ObservedPromptCall[] = [];
 
 	async function createSession(
@@ -109,9 +111,7 @@ describe("AgentSession eager todo enforcement", () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		const modelRegistry = sharedModelRegistry;
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"todo.enabled": true,
@@ -196,8 +196,6 @@ describe("AgentSession eager todo enforcement", () => {
 		sessionOverride: Partial<AgentSessionConfig> = {},
 	): Promise<void> {
 		await session.dispose();
-		authStorage?.close();
-		authStorage = undefined;
 		streamCallCount = 0;
 		scriptedResponses = [];
 		observedCalls.length = 0;
@@ -215,6 +213,18 @@ describe("AgentSession eager todo enforcement", () => {
 		return promise;
 	}
 
+	beforeAll(async () => {
+		sharedDir = TempDir.createSync("@pi-agent-session-eager-todo-shared-");
+		sharedAuthStorage = await AuthStorage.create(path.join(sharedDir.path(), "auth.db"));
+		sharedAuthStorage.setRuntimeApiKey("anthropic", "test-key");
+		sharedModelRegistry = new ModelRegistry(sharedAuthStorage, path.join(sharedDir.path(), "models.yml"));
+	});
+
+	afterAll(() => {
+		sharedAuthStorage.close();
+		sharedDir.removeSync();
+	});
+
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-agent-session-eager-todo-");
 		streamCallCount = 0;
@@ -227,9 +237,7 @@ describe("AgentSession eager todo enforcement", () => {
 		if (session) {
 			await session.dispose();
 		}
-		authStorage?.close();
 		vi.restoreAllMocks();
-		authStorage = undefined;
 		tempDir.removeSync();
 	});
 
@@ -508,7 +516,6 @@ describe("AgentSession eager todo enforcement", () => {
 
 	it("prepends the eager todo reminder without forcing the todo tool when todo.eager is preferred", async () => {
 		await session.dispose();
-		authStorage?.close();
 		await createSession({ "todo.eager": "preferred" });
 
 		await session.prompt("list all work trees");

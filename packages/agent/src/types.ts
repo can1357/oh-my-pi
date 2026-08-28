@@ -208,7 +208,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * @example
 	 * ```typescript
 	 * transformContext: async (messages) => {
-	 *   if (estimateTokens(messages) > MAX_TOKENS) {
+	 *   if (agent.tokenizer.countMessages(messages) > MAX_TOKENS) {
 	 *     return pruneOldMessages(messages);
 	 *   }
 	 *   return messages;
@@ -240,7 +240,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * mid-batch interrupt poll uses {@link hasSteeringMessages} instead and
 	 * never consumes the queue.
 	 */
-	getSteeringMessages?: () => Promise<AgentMessage[]>;
+	getSteeringMessages?: (signal?: AbortSignal) => Promise<AgentMessage[]>;
 
 	/**
 	 * Peeks whether steering messages are queued, without consuming them.
@@ -285,7 +285,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * If messages are returned, they're added to the context and the agent
 	 * continues with another turn.
 	 */
-	getFollowUpMessages?: () => Promise<AgentMessage[]>;
+	getFollowUpMessages?: (signal?: AbortSignal) => Promise<AgentMessage[]>;
 	/**
 	 * Returns non-interrupting "aside" messages to inject at a step boundary.
 	 *
@@ -319,7 +319,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Mutate the agent context here; use `beforeModelCall` to inspect the
 	 * provider-bound context.
 	 */
-	syncContextBeforeModelCall?: (context: AgentContext) => void | Promise<void>;
+	syncContextBeforeModelCall?: (context: AgentContext, signal?: AbortSignal) => void | Promise<void>;
 
 	/**
 	 * Asked after the complete provider context has been built, including
@@ -728,7 +728,17 @@ export type ToolLoadMode = "essential" | "discoverable";
  */
 export type ToolApprovalDecision =
 	| ToolTier
-	| { tier: ToolTier; reason?: string; override?: boolean; policy?: "allow" | "deny" | "prompt" };
+	| {
+			tier: ToolTier;
+			reason?: string;
+			override?: boolean;
+			policy?: "allow" | "deny" | "prompt";
+			/** User-policy key for this decision. When set, `tools.approval.<policyKey>`
+			 *  is consulted instead of `tools.approval.<tool.name>`. Lets a dispatcher
+			 *  tool (e.g. `write` for an `xd://` device call) scope user allow/deny/
+			 *  prompt policies to the tool it dispatches into. */
+			policyKey?: string;
+	  };
 export type ToolApproval = ToolApprovalDecision | ((args: unknown) => ToolApprovalDecision);
 
 /**

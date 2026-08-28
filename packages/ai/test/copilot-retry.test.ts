@@ -1,14 +1,29 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import { scheduler } from "node:timers/promises";
 import { callWithCopilotModelRetry, isCopilotTransientModelError } from "@oh-my-pi/pi-ai/utils/retry";
 import { isRetryableError } from "@oh-my-pi/pi-utils";
 
-type ErrorShape = { status: number; code?: string; error?: { code?: string; message?: string }; message: string };
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
-function copilotError({ status, code, error, message }: ErrorShape): Error {
+type ErrorShape = {
+	status: number;
+	code?: string;
+	error?: { code?: string; message?: string } | { error: { code?: string; message?: string } };
+	message: string;
+	headers?: Record<string, string>;
+};
+
+function copilotError({ status, code, error, message, headers }: ErrorShape): Error {
 	const err = new Error(message);
-	(err as unknown as ErrorShape).status = status;
-	if (code !== undefined) (err as unknown as ErrorShape).code = code;
-	if (error !== undefined) (err as unknown as ErrorShape).error = error;
+	// Single sanctioned assertion point: `Error` carries no provider fields, and
+	// every test reads them back through the real classifier.
+	const shaped = err as unknown as ErrorShape;
+	shaped.status = status;
+	if (code !== undefined) shaped.code = code;
+	if (error !== undefined) shaped.error = error;
+	if (headers !== undefined) shaped.headers = headers;
 	return err;
 }
 
@@ -31,6 +46,29 @@ describe("isCopilotTransientModelError", () => {
 		expect(isCopilotTransientModelError(err)).toBe(true);
 	});
 
+	it("does not match per-integrator entitlement errors nested two envelopes deep", () => {
+		const err = copilotError({
+			status: 400,
+			error: {
+				error: {
+					code: "model_not_available_for_integrator",
+					message: 'The requested model is not available for integrator "opencode".',
+				},
+			},
+			message:
+				'400 {"error":{"message":"The requested model is not available for integrator \\"opencode\\". Available models: [gpt-4.1 claude-opus-4.7]","code":"model_not_available_for_integrator","param":"model","type":"invalid_request_error"}}',
+		});
+		expect(isCopilotTransientModelError(err)).toBe(false);
+	});
+
+	it("does not infer fleet skew from per-integrator entitlement text", () => {
+		const err = copilotError({
+			status: 400,
+			message: '400 {"error":{"message":"The requested model is not available for integrator \\"opencode\\"."}}',
+		});
+		expect(isCopilotTransientModelError(err)).toBe(false);
+	});
+
 	it("does not match other 400 codes", () => {
 		const err = copilotError({
 			status: 400,
@@ -38,6 +76,13 @@ describe("isCopilotTransientModelError", () => {
 			message: "Unsupported value: 'minimal'",
 		});
 		expect(isCopilotTransientModelError(err)).toBe(false);
+	});
+
+	it("does not match 400 codes that collide with Object.prototype keys", () => {
+		for (const code of ["__proto__", "constructor", "toString", "hasOwnProperty"]) {
+			const err = copilotError({ status: 400, code, message: "bad request" });
+			expect(isCopilotTransientModelError(err)).toBe(false);
+		}
 	});
 
 	it("does not match 401/403/500 regardless of code", () => {
@@ -74,7 +119,7 @@ describe("callWithCopilotModelRetry", () => {
 		expect(calls).toBe(1);
 	});
 
-	it("retries up to 3 attempts for Copilot transient errors and eventually throws the last error", async () => {
+	it("retries up to 8 attempts for Copilot transient errors and eventually throws the last error", async () => {
 		let calls = 0;
 		const err = copilotError({ status: 400, code: "model_not_supported", message: "transient" });
 		await expect(
@@ -86,7 +131,7 @@ describe("callWithCopilotModelRetry", () => {
 				{ provider: "github-copilot", retryBaseDelayMs: 0 },
 			),
 		).rejects.toBe(err);
-		expect(calls).toBe(3);
+		expect(calls).toBe(8);
 	});
 
 	it("succeeds on the second attempt when the first is transient", async () => {
@@ -120,6 +165,26 @@ describe("callWithCopilotModelRetry", () => {
 		expect(calls).toBe(1);
 	});
 
+	it("does not retry per-integrator entitlement errors", async () => {
+		let calls = 0;
+		const err = copilotError({
+			status: 400,
+			code: "model_not_available_for_integrator",
+			message:
+				'400 The requested model is not available for integrator "opencode". Available models: [gpt-4.1 claude-opus-4.7]',
+		});
+		await expect(
+			callWithCopilotModelRetry(
+				async () => {
+					calls += 1;
+					throw err;
+				},
+				{ provider: "github-copilot", retryBaseDelayMs: 0 },
+			),
+		).rejects.toBe(err);
+		expect(calls).toBe(1);
+	});
+
 	it("does not blind-retry a 429 that carries no Retry-After guidance", async () => {
 		let calls = 0;
 		const err = copilotError({ status: 429, message: "rate limited" });
@@ -141,9 +206,7 @@ describe("callWithCopilotModelRetry", () => {
 			async () => {
 				calls += 1;
 				if (calls === 1) {
-					const err = copilotError({ status: 429, message: "rate limited" });
-					(err as unknown as { headers: Record<string, string> }).headers = { "retry-after": "0.01" };
-					throw err;
+					throw copilotError({ status: 429, message: "rate limited", headers: { "retry-after": "0.01" } });
 				}
 				return "ok" as const;
 			},
@@ -151,6 +214,21 @@ describe("callWithCopilotModelRetry", () => {
 		);
 		expect(result).toBe("ok");
 		expect(calls).toBe(2);
+	});
+
+	it("does not stretch a persistent Retry-After 429 across the flap budget", async () => {
+		let calls = 0;
+		const err = copilotError({ status: 429, message: "rate limited", headers: { "retry-after": "0.01" } });
+		await expect(
+			callWithCopilotModelRetry(
+				async () => {
+					calls += 1;
+					throw err;
+				},
+				{ provider: "github-copilot", retryBaseDelayMs: 0 },
+			),
+		).rejects.toBe(err);
+		expect(calls).toBe(3);
 	});
 
 	it("still retries status-less transport blips with the linear backoff", async () => {
@@ -169,6 +247,62 @@ describe("callWithCopilotModelRetry", () => {
 		);
 		expect(result).toBe("ok");
 		expect(calls).toBe(2);
+	});
+
+	it("caps persistent generic retryable failures at the pre-flap budget", async () => {
+		let calls = 0;
+		const err = new Error(
+			'HTTP2StreamReset fetching "https://api.example.com/x". For more information, pass `verbose: true` in the second argument to fetch()',
+		);
+		await expect(
+			callWithCopilotModelRetry(
+				async () => {
+					calls += 1;
+					throw err;
+				},
+				{ provider: "github-copilot", retryBaseDelayMs: 0 },
+			),
+		).rejects.toBe(err);
+		expect(calls).toBe(3);
+	});
+
+	it("keeps the flat delay and the larger budget scoped to model flaps", async () => {
+		const flatWaits: number[] = [];
+		const rampWaits: number[] = [];
+		const record = (into: number[]) => {
+			const spy = vi.spyOn(scheduler, "wait");
+			spy.mockImplementation(async (delay?: number) => {
+				into.push(delay ?? 0);
+			});
+			return spy;
+		};
+
+		record(flatWaits);
+		await expect(
+			callWithCopilotModelRetry(
+				async () => {
+					throw copilotError({ status: 400, code: "model_not_supported", message: "flap" });
+				},
+				{ provider: "github-copilot", retryBaseDelayMs: 100 },
+			),
+		).rejects.toBeInstanceOf(Error);
+		vi.restoreAllMocks();
+
+		record(rampWaits);
+		await expect(
+			callWithCopilotModelRetry(
+				async () => {
+					throw new Error(
+						'HTTP2StreamReset fetching "https://api.example.com/x". For more information, pass `verbose: true` in the second argument to fetch()',
+					);
+				},
+				{ provider: "github-copilot", retryBaseDelayMs: 100 },
+			),
+		).rejects.toBeInstanceOf(Error);
+		vi.restoreAllMocks();
+
+		expect(flatWaits).toEqual([100, 100, 100, 100, 100, 100, 100]);
+		expect(rampWaits).toEqual([100, 200]);
 	});
 
 	it("stops retrying when the caller aborts during backoff", async () => {

@@ -7,6 +7,7 @@
  */
 
 import { describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import { agentLoop, agentLoopDetailed } from "@oh-my-pi/pi-agent-core/agent-loop";
 import {
 	type AgentRunSummary,
@@ -18,7 +19,6 @@ import {
 import { EXECUTE_TOOL_STATUS_ATTR, GenAIAttr, PiGenAIAggregateAttr } from "@oh-my-pi/pi-agent-core/telemetry";
 import type { AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core/types";
 import type { AssistantMessage, Message } from "@oh-my-pi/pi-ai";
-import { z } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import type {
 	AttributeValue,
@@ -132,7 +132,7 @@ function buildTool(spec: TestTool): AgentTool {
 			name: spec.name,
 			label: spec.name,
 			description: `test tool ${spec.name}`,
-			parameters: z.object({ value: z.string().optional() }),
+			parameters: type({ value: type("string").optional() }),
 			intent: "omit",
 			execute: async () => {
 				if (spec.behavior === "throw") throw new Error(`${spec.name} boom`);
@@ -145,7 +145,7 @@ function buildTool(spec: TestTool): AgentTool {
 		name: spec.name,
 		label: spec.name,
 		description: `blocked tool ${spec.name}`,
-		parameters: z.object({ value: z.string().optional() }),
+		parameters: type({ value: type("string").optional() }),
 		intent: "omit",
 		execute: async () => ({ content: [{ type: "text", text: "should not run" }], details: {} }),
 	} satisfies AgentTool;
@@ -545,7 +545,7 @@ describe("skipped tools without spans", () => {
 			name: "fast",
 			label: "fast",
 			description: "fast",
-			parameters: z.object({ value: z.string().optional() }),
+			parameters: type({ value: type("string").optional() }),
 			intent: "omit",
 			execute: async () => {
 				fastDone = true;
@@ -556,7 +556,7 @@ describe("skipped tools without spans", () => {
 			name: "slow",
 			label: "slow",
 			description: "slow",
-			parameters: z.object({ value: z.string().optional() }),
+			parameters: type({ value: type("string").optional() }),
 			intent: "omit",
 			// concurrency: shared (default) — both run in parallel. Interruptible:
 			// queued steering hard-aborts only interruptible waits; non-interruptible
@@ -636,7 +636,7 @@ describe("regressions: agent loop telemetry/run summary", () => {
 			name: "fast",
 			label: "fast",
 			description: "fast",
-			parameters: z.object({ value: z.string().optional() }),
+			parameters: type({ value: type("string").optional() }),
 			intent: "omit",
 			concurrency: "exclusive",
 			execute: async () => {
@@ -762,7 +762,7 @@ describe("regressions: agent loop telemetry/run summary", () => {
 			name: "cyclic",
 			label: "cyclic",
 			description: "returns cyclic details",
-			parameters: z.object({ value: z.string().optional() }),
+			parameters: type({ value: type("string").optional() }),
 			intent: "omit",
 			execute: async () => ({
 				content: [{ type: "text", text: "ok" }],

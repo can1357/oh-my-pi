@@ -104,16 +104,6 @@ impl AtSpiAx {
 		})
 	}
 
-	pub(crate) fn raise_window(&mut self, id: &str) -> CoreResult<()> {
-		let windows = self.windows()?;
-		let window = windows
-			.into_iter()
-			.find(|window| window.id == id)
-			.ok_or_else(|| DesktopError::window_not_found(format!("Wayland window {id} not found")))?;
-		let root = self.window_root(&window)?;
-		self.focus(&root)
-	}
-
 	async fn apps(
 		connection: &atspi::AccessibilityConnection,
 	) -> Result<Vec<ObjectRefOwned>, String> {

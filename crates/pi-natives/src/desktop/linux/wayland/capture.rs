@@ -147,11 +147,11 @@ fn rgba_from_buffer(
 fn grab_pipewire_frame(node: u32, fd: OwnedFd) -> Result<RgbaImage, String> {
 	pw::init();
 	let mainloop =
-		pw::main_loop::MainLoop::new(None).map_err(|err| format!("PipeWire main loop: {err}"))?;
-	let context =
-		pw::context::Context::new(&mainloop).map_err(|err| format!("PipeWire context: {err}"))?;
+		pw::main_loop::MainLoopRc::new(None).map_err(|err| format!("PipeWire main loop: {err}"))?;
+	let context = pw::context::ContextRc::new(&mainloop, None)
+		.map_err(|err| format!("PipeWire context: {err}"))?;
 	let core = context
-		.connect_fd(fd, None)
+		.connect_fd_rc(fd, None)
 		.map_err(|err| format!("PipeWire remote: {err}"))?;
 	let stream = pw::stream::StreamBox::new(&core, "omp-computer-capture", properties! {
 		*pw::keys::MEDIA_TYPE => "Video",
@@ -245,10 +245,7 @@ fn grab_pipewire_frame(node: u32, fd: OwnedFd) -> Result<RgbaImage, String> {
 }
 
 pub(super) fn capture() -> CoreResult<RgbaImage> {
-	let runtime = tokio::runtime::Builder::new_current_thread()
-		.enable_all()
-		.build()
-		.map_err(|err| DesktopError::capture_failed(format!("wayland screencast runtime: {err}")))?;
+	let runtime = super::portal::portal_runtime()?;
 	let (node, fd) = runtime.block_on(open_screencast()).map_err(|err| {
 		DesktopError::capture_failed(format!("wayland screencast unavailable: {err}"))
 	})?;

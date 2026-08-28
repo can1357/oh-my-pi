@@ -5,14 +5,14 @@ scope: "tool:edit(*.go), tool:write(*.go)"
 interruptMode: never
 ---
 
-Go 1.24 added `runtime.AddCleanup`, a finalization mechanism that is more flexible and less error-prone than `runtime.SetFinalizer`. The release notes state plainly: **new code should prefer `AddCleanup` over `SetFinalizer`.**
+Go 1.24 added `runtime.AddCleanup`; new code SHOULD prefer it over `runtime.SetFinalizer`.
 
 ## Why AddCleanup wins
 
-- Multiple cleanups may attach to one object; `SetFinalizer` allows only one.
-- Cleanups may attach to interior pointers.
-- Objects that form a reference cycle still get cleaned up — finalizers leak them.
-- A cleanup does not resurrect its object or delay freeing it (and what it points to) by an extra GC cycle.
+- One object — multiple cleanups; `SetFinalizer`: one.
+- Cleanups MAY attach to interior pointers.
+- Reference cycles: cleanups run; finalizers leak.
+- Cleanup neither resurrects object nor delays freeing it or its referents an extra GC cycle.
 
 ## Migration
 
@@ -25,9 +25,9 @@ runtime.SetFinalizer(obj, func(o *T) { o.release() })
 runtime.AddCleanup(obj, func(h handle) { h.release() }, obj.handle)
 ```
 
-The cleanup argument must not reference `obj` itself (that would keep it reachable forever). Capture only the data the cleanup needs — a file descriptor, handle, or pointer that is independent of `obj`.
+Cleanup argument MUST NOT reference `obj` itself: it remains reachable forever. Capture only needed data: file descriptor, handle, or pointer independent of `obj`.
 
 ## Keep SetFinalizer only when
 
-- The module targets a Go release older than 1.24.
-- You depend on finalizer-specific behavior (e.g. object resurrection) that `AddCleanup` deliberately does not provide.
+- Module targets Go <1.24.
+- Finalizer-specific behavior required, e.g. object resurrection, which `AddCleanup` does not provide.

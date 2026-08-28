@@ -1,8 +1,8 @@
 /**
- * When a hashline payload is authored against `read`/`search` output, each
- * line is prefixed with either a hashline-mode line number (`123:`) or, for
- * diff-style echoes, a leading `+`. These helpers detect that and recover
- * the raw text. Two strip modes are exposed:
+ * When a payload is authored against `read`/`search` output, each line is
+ * prefixed with either a line number (`123:` in hashline mode or `123|`
+ * otherwise) or, for diff-style echoes, a leading `+`. These helpers detect
+ * that and recover the raw text. Two strip modes are exposed:
  *
  * - {@link stripNewLinePrefixes} — opportunistic: strips when the input
  *   clearly carries hashline or diff prefixes, leaves it alone otherwise.
@@ -16,7 +16,7 @@
 
 import { HL_FILE_HASH_LENGTH } from "./format";
 
-const HL_PREFIX_RE = /^\s*(?:>>>|>>)?\s*(?:[+*-]\s*)?\d+:/;
+const HL_PREFIX_RE = /^\s*(?:>>>|>>)?\s*(?:[+*-]\s*)?\d+[:|]/;
 const HL_PREFIX_PLUS_RE = /^\s*(?:>>>|>>)?\s*\+\s*\d+:/;
 const HL_HEADER_RE = new RegExp(`^\\s*\\[[^#\\r\\n]+#[0-9a-fA-F]{${HL_FILE_HASH_LENGTH}}\\]\\s*$`);
 const DIFF_PLUS_RE = /^[+](?![+])/;
@@ -41,10 +41,10 @@ function stripLeadingHashlinePrefixes(line: string): string {
 }
 /**
  * Single-pass variant of {@link stripLeadingHashlinePrefixes} that strips at
- * most one leading hashline prefix (`N:`, `>>>N:`, `+N:` etc.) and does NOT
- * loop. Use this when the input carries at most one snapshot prefix (e.g. a
- * bare body row paste from `read` output) — recursive stripping would corrupt
- * content whose own text starts with `digits:`.
+ * most one leading line-number prefix (`N:`, `N|`, `>>>N:`, `+N:` etc.) and
+ * does NOT loop. Use this when the input carries at most one snapshot prefix
+ * (e.g. a bare body row paste from `read` output) — recursive stripping would
+ * corrupt content whose own text starts with a line-number prefix.
  */
 export function stripOneLeadingHashlinePrefix(line: string): string {
 	return line.replace(HL_PREFIX_RE, "");
@@ -90,7 +90,7 @@ function collectLinePrefixStats(lines: string[]): LinePrefixStats {
 
 /**
  * Strip whichever prefix scheme the lines appear to be carrying:
- * - hashline line-number prefixes (`123:`) when every content line has one
+ * - line-number prefixes (`123:` or `123|`) when every content line has one
  * - leading `+` (diff style) when at least half the lines have one
  * - mixed `+<n>:` form when present
  *

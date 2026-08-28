@@ -11,7 +11,7 @@ import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cach
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import type { Api, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 function completionsSpec(overrides: Partial<ModelSpec<"openai-completions">> = {}): ModelSpec<"openai-completions"> {
 	return {
@@ -56,6 +56,16 @@ describe("buildModel", () => {
 		expect(typeof model.compat.isOpenRouterHost).toBe("boolean");
 		expect(model.compat.isOpenRouterHost).toBe(false);
 		expect(model.compatConfig).toBeUndefined();
+	});
+
+	it("built models survive a JSON roundtrip, so generator-materialized rows need no rebuild", () => {
+		// models.ts consumes models.json rows verbatim as complete Models; this
+		// holds only if buildModel output is pure JSON (no functions, no
+		// undefined-valued fields that JSON would drop).
+		const generated = [buildModel(completionsSpec({ reasoning: true })), buildModel(openrouterSpec())];
+		for (const model of generated) {
+			expect(JSON.parse(JSON.stringify(model)) as Model<Api>).toEqual(model);
+		}
 	});
 
 	it("lets sparse overrides win over detection and keeps the verbatim config", () => {
@@ -109,6 +119,39 @@ describe("buildModel", () => {
 		expect(model.compat.supportsStrictMode).toBe(true);
 		expect(model.compat.strictResponsesPairing).toBe(false);
 		expect(model.compat.openRouterRouting).toEqual({ only: ["anthropic"], order: ["anthropic"] });
+	});
+	it("materializes glyph-tokenization eligibility for Anthropic-compatible wire models", () => {
+		const anthropic = buildModel({
+			id: "claude-opus-4-8",
+			name: "Some Model",
+			api: "anthropic-messages",
+			provider: "anthropic-compatible",
+			baseUrl: "https://api.example.com/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 8_192,
+		});
+
+		expect(anthropic.requiresGlyphTokenization).toBe(true);
+		expect(buildModel(completionsSpec()).requiresGlyphTokenization).toBe(false);
+		expect(buildModel({ ...completionsSpec(), id: "claude-opus-4-8" }).requiresGlyphTokenization).toBe(true);
+		expect(
+			buildModel({
+				id: "other-model",
+				name: "Other Model",
+				api: "anthropic-messages",
+				provider: "anthropic-compatible",
+				baseUrl: "https://api.example.com/v1",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 8_192,
+			}).requiresGlyphTokenization,
+		).toBe(false);
+		expect(getBundledModel("anthropic", "claude-opus-4-8").requiresGlyphTokenization).toBe(true);
 	});
 
 	it("loads bundled OpenRouter models with resolved compat", () => {
@@ -223,12 +266,15 @@ describe("buildModel", () => {
 	});
 });
 
-describe("xAI-OAuth Responses reasoning-effort suppression", () => {
-	const grokResponsesSpec = (id: string): ModelSpec<"openai-responses"> => ({
+describe("xAI Responses reasoning-effort suppression", () => {
+	const grokResponsesSpec = (
+		id: string,
+		provider: "xai" | "xai-oauth" = "xai-oauth",
+	): ModelSpec<"openai-responses"> => ({
 		id,
 		name: id,
 		api: "openai-responses",
-		provider: "xai-oauth",
+		provider,
 		baseUrl: "https://api.x.ai/v1",
 		reasoning: true,
 		input: ["text"],
@@ -248,6 +294,66 @@ describe("xAI-OAuth Responses reasoning-effort suppression", () => {
 		expect(buildOpenAIResponsesCompat(grokResponsesSpec("grok-4.3")).supportsReasoningEffort).toBe(true);
 	});
 
+	it("applies the same Responses dialect to paid xai and xai-oauth", () => {
+		const paid = buildOpenAIResponsesCompat(grokResponsesSpec("grok-4.3", "xai"));
+		const oauth = buildOpenAIResponsesCompat(grokResponsesSpec("grok-4.3", "xai-oauth"));
+		expect(paid.promptCacheSessionHeader).toBe("x-grok-conv-id");
+		expect(oauth.promptCacheSessionHeader).toBe("x-grok-conv-id");
+		expect(paid.includeEncryptedReasoning).toBe(true);
+		expect(oauth.includeEncryptedReasoning).toBe(true);
+		expect(paid.filterReasoningHistory).toBe(false);
+		expect(oauth.filterReasoningHistory).toBe(false);
+		expect(paid.supportsImageDetailOriginal).toBe(false);
+		expect(oauth.supportsImageDetailOriginal).toBe(false);
+		expect(paid.supportsReasoningEffort).toBe(true);
+		expect(oauth.supportsReasoningEffort).toBe(true);
+		expect(paid.reasoningEffortMap).toEqual({ minimal: "low", xhigh: "high", max: "high" });
+		expect(oauth.reasoningEffortMap).toEqual({ minimal: "low", xhigh: "high", max: "high" });
+		expect(
+			buildOpenAIResponsesCompat(grokResponsesSpec("grok-4.20-multi-agent-0309", "xai")).reasoningEffortMap,
+		).toEqual({ minimal: "low" });
+		expect(paid.supportsPenaltyAndStopParams).toBe(false);
+		expect(oauth.supportsPenaltyAndStopParams).toBe(false);
+		expect(paid.supportsReasoningSummary).toBe(false);
+		expect(oauth.supportsReasoningSummary).toBe(false);
+	});
+
+	it("suppresses penalty params on every first-party xAI Responses model", () => {
+		const reasoning = buildOpenAIResponsesCompat(grokResponsesSpec("grok-4.5", "xai"));
+		const nonReasoning = buildOpenAIResponsesCompat({
+			...grokResponsesSpec("grok-2", "xai"),
+			reasoning: false,
+		});
+		expect(reasoning.supportsPenaltyAndStopParams).toBe(false);
+		expect(nonReasoning.supportsPenaltyAndStopParams).toBe(false);
+	});
+
+	it("omits effort for paid xai models off the Grok allowlist", () => {
+		const compat = buildOpenAIResponsesCompat(grokResponsesSpec("grok-code-fast-1", "xai"));
+		expect(compat.supportsReasoningEffort).toBe(false);
+		expect(compat.omitReasoningEffort).toBe(true);
+		expect(buildModel(grokResponsesSpec("grok-code-fast-1", "xai")).thinking).toBeUndefined();
+	});
+
+	it("exposes the grok-4.6 low..xhigh ladder and rejects max", () => {
+		const model = buildModel(grokResponsesSpec("grok-4.6"));
+		expect(model.compat.supportsReasoningEffort).toBe(true);
+		expect(model.compat.omitReasoningEffort).toBe(false);
+		expect(model.thinking?.efforts).toEqual([Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]);
+		expect(model.thinking?.efforts).not.toContain(Effort.Max);
+	});
+
+	it("lets the grok-4.6 allowlist beat a stale cached omitReasoningEffort flag", () => {
+		const model = buildModel({
+			...grokResponsesSpec("grok-4.6"),
+			compat: { omitReasoningEffort: true },
+		});
+		expect(model.compat.supportsReasoningEffort).toBe(true);
+		expect(model.compat.omitReasoningEffort).toBe(false);
+		expect(model.thinking?.efforts).toContain(Effort.XHigh);
+		expect(model.thinking?.efforts).not.toContain(Effort.Max);
+	});
+
 	it("lets an explicit compat.supportsReasoningEffort override the allowlist default", () => {
 		const compat = buildOpenAIResponsesCompat({
 			...grokResponsesSpec("grok-build"),
@@ -256,7 +362,7 @@ describe("xAI-OAuth Responses reasoning-effort suppression", () => {
 		expect(compat.supportsReasoningEffort).toBe(true);
 	});
 
-	it("does not suppress effort for a non-xai-oauth provider with a grok-like id", () => {
+	it("does not suppress effort for a non-xAI provider with a grok-like id", () => {
 		const compat = buildOpenAIResponsesCompat({
 			...grokResponsesSpec("grok-build"),
 			provider: "openai",
@@ -370,6 +476,32 @@ describe("openai-completions wire-quirk compat detection", () => {
 					reasoning: false,
 				}),
 			).supportsForcedToolChoice,
+		).toBe(true);
+	});
+	it("downgrades forced tool choice for OpenCode gateways on Responses API", () => {
+		expect(
+			buildOpenAIResponsesCompat({
+				id: "muse-spark-1.2-contributor",
+				provider: "opencode-go",
+				name: "Muse Spark",
+				baseUrl: "https://opencode.ai/zen/go/v1",
+			}).supportsForcedToolChoice,
+		).toBe(false);
+		expect(
+			buildOpenAIResponsesCompat({
+				id: "muse-spark-1.2",
+				provider: "opencode-zen",
+				name: "Muse Spark",
+				baseUrl: "https://opencode.ai/zen/v1",
+			}).supportsForcedToolChoice,
+		).toBe(false);
+		expect(
+			buildOpenAIResponsesCompat({
+				id: "gpt-5",
+				provider: "openai",
+				name: "GPT-5",
+				baseUrl: "https://api.openai.com/v1",
+			}).supportsForcedToolChoice,
 		).toBe(true);
 	});
 
@@ -657,7 +789,7 @@ describe("OpenRouter model discovery", () => {
 		}
 	});
 
-	it("maps OpenRouter's advertised reasoning effort ladder and default", async () => {
+	it("maps OpenRouter's advertised reasoning effort ladder, default, and mandatory state", async () => {
 		const options = openrouterModelManagerOptions({
 			fetch: async () =>
 				Response.json({
@@ -669,6 +801,7 @@ describe("OpenRouter model discovery", () => {
 							reasoning: {
 								supported_efforts: ["max", "high", "low"],
 								default_effort: "high",
+								mandatory: true,
 							},
 						},
 					],
@@ -682,6 +815,7 @@ describe("OpenRouter model discovery", () => {
 			mode: "effort",
 			efforts: [Effort.Low, Effort.High, Effort.Max],
 			defaultLevel: Effort.High,
+			requiresEffort: true,
 		});
 	});
 
@@ -758,6 +892,52 @@ describe("model cache spec round trip", () => {
 			expect(model?.compat.supportsDeveloperRole).toBe(true);
 			expect(model?.compat.isOpenRouterHost).toBe(false);
 			expect(model?.compatConfig).toEqual(sparse);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves static long-context pricing through dynamic refresh and cache restore", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-tiered-cost-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const staticModel = completionsSpec({
+			id: "tiered-model",
+			provider: "tiered-cost-test",
+			cost: {
+				input: 1,
+				output: 2,
+				cacheRead: 0.1,
+				cacheWrite: 1.25,
+				longContext: {
+					inputThreshold: 272_000,
+					input: 2,
+					output: 3,
+					cacheRead: 0.2,
+					cacheWrite: 2.5,
+				},
+			},
+		});
+		const dynamicModel = completionsSpec({
+			...staticModel,
+			cost: { input: 3, output: 4, cacheRead: 0.3, cacheWrite: 3.75 },
+		});
+		const options = {
+			providerId: "tiered-cost-test",
+			staticModels: [staticModel],
+			cacheDbPath: dbPath,
+		};
+		try {
+			const online = await resolveProviderModels<"openai-completions">(
+				{ ...options, fetchDynamicModels: async () => [dynamicModel] },
+				"online",
+			);
+			expect(online.models[0]?.cost).toEqual({
+				...dynamicModel.cost,
+				longContext: staticModel.cost.longContext,
+			});
+
+			const offline = await resolveProviderModels<"openai-completions">(options, "offline");
+			expect(offline.models[0]?.cost.longContext).toEqual(staticModel.cost.longContext);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}

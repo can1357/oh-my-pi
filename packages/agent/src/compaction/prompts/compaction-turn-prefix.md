@@ -1,6 +1,6 @@
-This is the PREFIX of a turn that was too large to keep. The SUFFIX (recent work) is retained.
+Turn prefix too large; recent-work suffix retained.
 
-You MUST summarize the prefix to provide context for the retained suffix:
+MUST summarize prefix for retained suffix:
 
 ## Original Request
 
@@ -12,6 +12,6 @@ You MUST summarize the prefix to provide context for the retained suffix:
 ## Context for Suffix
 - [Information needed to understand the retained recent work]
 
-You MUST output only the structured summary. You NEVER include extra text.
+MUST output only the structured summary; NEVER extra text.
 
-You MUST be concise. You MUST preserve exact file paths, function names, error messages, and relevant tool outputs or command results if they appear. You MUST focus on what's needed to understand the kept suffix.
+MUST concise. MUST preserve exact file paths, function names, error messages, relevant tool outputs, and command results if present. MUST focus on information needed to understand the retained suffix.

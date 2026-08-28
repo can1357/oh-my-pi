@@ -1,7 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import { $which } from "@oh-my-pi/pi-utils";
 import { PYTHON_PRELUDE } from "../../../src/eval/py/prelude";
 
-const pythonPath = Bun.env.PYTHON ?? "python3";
+const pythonPath = Bun.env.PYTHON ?? ($which("python3") ? "python3" : "python");
 
 async function runPrelude(
 	code: string,
@@ -22,7 +23,8 @@ async function runPrelude(
 		new Response(proc.stderr).text(),
 		proc.exited,
 	]);
-	return { stdout, stderr, exitCode };
+	// Python's text-mode stdout emits \r\n on Windows.
+	return { stdout: stdout.replaceAll("\r\n", "\n"), stderr: stderr.replaceAll("\r\n", "\n"), exitCode };
 }
 
 describe("python prelude", () => {

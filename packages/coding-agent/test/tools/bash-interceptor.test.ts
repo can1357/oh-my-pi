@@ -77,11 +77,17 @@ describe("compound command interception", () => {
 		"git add file && git commit -m message",
 		"git add file; git commit -m message",
 		"git add file || git commit -m message",
-		"git add file | git commit -m message",
 		"git add file & git commit -m message",
 		"git add file\ngit commit -m message",
 	])("blocks a later command after %s", command => {
 		expect(checkBashInterception(command, ["commit"], rules).block).toBe(true);
+	});
+
+	it("does not intercept a downstream pipe stage that consumes piped stdin", () => {
+		// `git commit` after a single `|` reads the previous stage's stdout, so
+		// the dedicated tool cannot replace it. `||` still starts a fresh command.
+		expect(checkBashInterception("git add file | git commit -m message", ["commit"], rules).block).toBe(false);
+		expect(checkBashInterception("git add file || git commit -m message", ["commit"], rules).block).toBe(true);
 	});
 
 	it("removes one or more leading environment assignments before matching", () => {
@@ -200,6 +206,40 @@ describe("default echo/printf redirect rule", () => {
 		expect(checkBashInterception('echo "<p>hi</p>"', tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
 		expect(checkBashInterception("printf 'use 2>&1'", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
 		expect(checkBashInterception('echo "err" >&2', tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
+	});
+});
+
+describe("default grep rule and pipeline stdin", () => {
+	const tools = ["grep"];
+
+	it("blocks standalone file searches", () => {
+		expect(checkBashInterception("grep pattern path", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
+		expect(checkBashInterception("rg pattern src", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
+	});
+
+	it("blocks a first-stage grep that produces pipeline input", () => {
+		expect(checkBashInterception("grep x file | wc -l", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
+	});
+
+	it("does not block grep consuming pipeline stdin", () => {
+		expect(checkBashInterception("printf 'x\\n' | grep x", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
+		expect(
+			checkBashInterception("tr -d '\\r' < input.log | grep -v '^ *foo'", tools, DEFAULT_BASH_INTERCEPTOR_RULES)
+				.block,
+		).toBe(false);
+		expect(checkBashInterception("printf 'x\\n' |\n grep x", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(
+			false,
+		);
+		expect(
+			checkBashInterception("printf 'x\\n' |\n # filter\n grep x", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block,
+		).toBe(false);
+		expect(checkBashInterception("printf 'x\\n' |& grep x", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
+	});
+
+	it("still blocks a standalone grep sequenced after a pipeline", () => {
+		expect(
+			checkBashInterception("cat log | tr a b && grep err file", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block,
+		).toBe(true);
 	});
 });
 

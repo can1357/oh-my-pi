@@ -1,1 +1,10 @@
-Plan, start, inspect, cancel, and validate OMP-native repository security scans. `preflight` creates an immutable plan pinned to the repository snapshot, model, and exact OAuth credential. `start` runs the plan as a background OMP job. `status` and `cancel` use the returned operation ID. `cloud_scans` lists Codex Security cloud configurations for the exact selected ChatGPT OAuth account. `cloud_start` creates and enables a cloud scan configuration using `repository_id`, `repository_url`, and `environment_id`; this consumes the account's separate Codex Security cloud allowance and is never a fallback from a native scan. `cloud_status` reads cloud progress. `cloud_pull` imports cloud findings into the canonical OMP security store, where they are available through `security://`. Cloud actions use `cloud_configuration_id` and may use `credential_id` to pin an account. Security must be enabled in settings.
+OMP-native repository security scans: plan, start, inspect, cancel, validate.
+`preflight`: immutable plan pinned to repository snapshot, model, exact OAuth credential.
+`start`: plan → background OMP job.
+`status`, `cancel`: returned operation ID.
+`cloud_scans`: Codex Security cloud configurations for exact selected ChatGPT OAuth account.
+`cloud_start`: creates/enables configuration using `repository_id`, `repository_url`, `environment_id`; consumes account's separate Codex Security cloud allowance; NEVER native-scan fallback.
+`cloud_status`: cloud progress.
+`cloud_pull`: cloud findings → canonical OMP security store, available through `security://`.
+Cloud actions: `cloud_configuration_id` required; `credential_id` MAY pin account.
+Security MUST be enabled in settings.

@@ -9,8 +9,18 @@ import type { Api, Model, ModelSpec } from "../types";
  * manager, which rebuilds via `buildModel`.
  */
 export function toModelSpec<TApi extends Api>(model: Model<TApi>): ModelSpec<TApi> {
-	const { compat: _compat, compatConfig, ...rest } = model;
-	return { ...rest, compat: compatConfig } as ModelSpec<TApi>;
+	const {
+		compat: _compat,
+		compatConfig,
+		supportsComputerUse: _derivedComputerUse,
+		supportsComputerUseConfig,
+		...rest
+	} = model;
+	return {
+		...rest,
+		...(supportsComputerUseConfig !== undefined ? { supportsComputerUse: supportsComputerUseConfig } : {}),
+		compat: compatConfig,
+	} as ModelSpec<TApi>;
 }
 
 export function createBundledReferenceMap<TApi extends Api>(
@@ -67,9 +77,11 @@ export function createReferenceResolver<TApi extends Api>(
 			? () => (lazyProviderReferences ??= providerReferenceSource())
 			: () => providerReferenceSource;
 	return (modelId: string) => {
-		const providerRef = getProviderReferences().get(modelId);
+		const providerRefs = getProviderReferences();
+		const globalRefs = getGlobalReferences();
+		const providerRef = providerRefs.get(modelId);
 		if (providerRef) return providerRef;
-		const globalRef = getGlobalReferences().get(modelId);
+		const globalRef = globalRefs.get(modelId);
 		return globalRef ? toModelSpec(globalRef as Model<TApi>) : undefined;
 	};
 }

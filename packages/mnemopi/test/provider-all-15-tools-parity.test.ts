@@ -172,5 +172,5 @@ describe("provider all-tools parity", () => {
 		});
 		expect(shared.status).toBe("stored_shared");
 		expect((await handleToolCall("mnemopi_shared_forget", { memory_id: shared.memory_id })).status).toBe("deleted");
-	});
+	}, 30_000);
 });

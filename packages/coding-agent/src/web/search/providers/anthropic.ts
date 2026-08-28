@@ -130,7 +130,6 @@ function buildSystemBlocks(
 	return buildAnthropicSystemBlocks(systemPrompt ? [systemPrompt] : undefined, {
 		includeClaudeCodeInstruction: includeClaudeCode,
 		extraInstructions,
-		cacheControl: { type: "ephemeral" },
 	});
 }
 

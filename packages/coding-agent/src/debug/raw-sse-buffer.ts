@@ -335,6 +335,26 @@ export class RawSseDebugBuffer {
 		return body.length > 0 ? `${dropped}${body}` : dropped;
 	}
 
+	/**
+	 * Drop every retained record and reset accounting. Called from
+	 * {@link AgentSession} teardown so a disposed (e.g. parked subagent) session
+	 * stops pinning captured wire frames — each trimmed record holds a
+	 * `slice()` of its parent SSE frame, which under JSC keeps the whole
+	 * multi-MB frame alive. Notifies subscribers so a live debug viewer redraws
+	 * empty.
+	 */
+	clear(): void {
+		this.#records = [];
+		this.#recordChars = [];
+		this.#head = 0;
+		this.#totalChars = 0;
+		this.#droppedRecords = 0;
+		this.#droppedChars = 0;
+		this.#totalEvents = 0;
+		this.#lastUpdatedAt = undefined;
+		this.#emit();
+	}
+
 	#append(record: RawSseDebugRecord, chars: number): void {
 		this.#records.push(record);
 		this.#recordChars.push(chars);

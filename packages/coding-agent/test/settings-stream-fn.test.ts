@@ -81,7 +81,17 @@ describe("createSettingsAwareStreamFn", () => {
 		expect(calls[0]?.options?.hideThinkingSummary).toBe(true);
 	});
 
-	it("applies Responses-family text verbosity from settings while preserving caller overrides", () => {
+	it("applies Codex text verbosity only when settings or caller options configure it", () => {
+		const unconfiguredSettings = Settings.isolated({});
+		const { fn: unconfiguredBase, calls: unconfiguredCalls } = captureBase();
+		const unconfiguredWrapped = createSettingsAwareStreamFn(unconfiguredSettings, unconfiguredBase);
+
+		unconfiguredWrapped(stubCodexModel, stubContext, undefined);
+		unconfiguredWrapped(stubCodexModel, stubContext, { textVerbosity: "medium" });
+
+		expect(unconfiguredCalls[0]?.options?.textVerbosity).toBeUndefined();
+		expect(unconfiguredCalls[1]?.options?.textVerbosity).toBe("medium");
+
 		const settings = Settings.isolated({ textVerbosity: "low" });
 		const { fn: base, calls } = captureBase();
 		const wrapped = createSettingsAwareStreamFn(settings, base);
@@ -135,6 +145,22 @@ describe("createSettingsAwareStreamFn", () => {
 		wrapped(stubModel, stubContext, undefined);
 
 		expect(calls[0]?.options?.openrouterVariant).toBeUndefined();
+	});
+
+	it("forwards configured cache retention, leaves auto unset, and lets callers override", () => {
+		const auto = captureBase();
+		createSettingsAwareStreamFn(Settings.isolated({}), auto.fn)(stubModel, stubContext, undefined);
+		// auto must stay unset so provider defaults and PI_CACHE_RETENTION apply
+		expect(auto.calls[0]?.options?.cacheRetention).toBeUndefined();
+
+		const long = captureBase();
+		const settings = Settings.isolated({ "providers.cacheRetention": "long" });
+		const wrapped = createSettingsAwareStreamFn(settings, long.fn);
+		wrapped(stubModel, stubContext, undefined);
+		expect(long.calls[0]?.options?.cacheRetention).toBe("long");
+
+		wrapped(stubModel, stubContext, { cacheRetention: "none" });
+		expect(long.calls[1]?.options?.cacheRetention).toBe("none");
 	});
 
 	it("lets caller-supplied options override the session settings", () => {
