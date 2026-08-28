@@ -11,12 +11,9 @@
  * rule the history domain follows.
  */
 
-import * as fs from "node:fs";
-import * as path from "node:path";
-import { getSessionsDir, logger } from "@oh-my-pi/pi-utils";
-import { sessionDirNameForCwd } from "../../session/session-paths";
+import { logger } from "@oh-my-pi/pi-utils";
 import { mergeRemote, scanChangedSinceForSessionIds } from "../../session/title-index";
-import { listSyncedProjects } from "../project-scope";
+import { scanOwnedSessionFiles } from "../session-files";
 import type { ReplicatedDomain } from "../replica";
 import type { StateEntry } from "../wire";
 
@@ -53,37 +50,42 @@ function sessionIdFromFileName(file: string): string | undefined {
 }
 
 /**
- * Session ids that belong to a sync-enabled project, memoized briefly. A title
- * carries no cwd, so its project is derived from which synced project's session
- * dir the session file lives in. A project name or task title is exactly the
- * kind of thing a user disables sync to protect, so this set is the strict gate
- * for OUTBOUND titles.
+ * Session ids that belong to a sync-enabled project, memoized briefly.
+ *
+ * A title carries no cwd, so its project is derived from WHICH session file
+ * holds that id. This uses the same confirmed enumeration as the `sessions`
+ * domain, which matters twice over: it covers sessions started in a project
+ * SUBDIRECTORY (a separate encoded directory, and in a monorepo most sessions),
+ * and it confirms ownership from the body's header rather than trusting the
+ * directory name, so an unsynced sibling project like `~/projects/foobar` can
+ * never smuggle its titles out under `~/projects/foo`.
+ *
+ * A project name or task title is exactly the kind of thing a user disables
+ * sync to protect, so this set is the strict gate for OUTBOUND titles.
  */
-function syncedSessionIds(): Set<string> {
+function syncedSessionIds(sessionsDir: string | undefined): Set<string> {
 	const now = Date.now();
 	if (syncedIdsCache && now - syncedIdsCache.at < SYNCED_IDS_TTL_MS) return syncedIdsCache.ids;
 	const ids = new Set<string>();
-	const root = getSessionsDir();
-	for (const project of listSyncedProjects()) {
-		// sessionDirNameForCwd canonicalizes internally, so localPath is fine.
-		const dir = path.join(root, sessionDirNameForCwd(project.localPath));
-		let files: string[];
-		try {
-			files = fs.readdirSync(dir);
-		} catch {
-			continue; // project may have no sessions yet
-		}
-		for (const file of files) {
-			const id = sessionIdFromFileName(file);
-			if (id) ids.add(id);
-		}
+	for (const owned of scanOwnedSessionFiles(sessionsDir)) {
+		const id = sessionIdFromFileName(owned.file);
+		if (id) ids.add(id);
 	}
 	syncedIdsCache = { at: now, ids };
 	return ids;
 }
 
-/** Build the titles {@link ReplicatedDomain}. */
-export function createTitlesDomain(): ReplicatedDomain {
+/** Drop the memoized synced-session-id set. Exported for tests and registry changes. */
+export function invalidateSyncedTitleIds(): void {
+	syncedIdsCache = undefined;
+}
+
+/**
+ * Build the titles {@link ReplicatedDomain}. `sessionsDir` defaults to the
+ * process-wide sessions directory; it is a parameter so a test can point the
+ * domain at a fixture without mutating global agent-dir state.
+ */
+export function createTitlesDomain(sessionsDir?: string): ReplicatedDomain {
 	return {
 		id: "titles",
 
@@ -91,7 +93,7 @@ export function createTitlesDomain(): ReplicatedDomain {
 			// `afterRev` is epoch millis; the column is epoch seconds. Revs are
 			// always `updated_at * 1000`, so flooring recovers the exact second.
 			const afterSeconds = Math.floor(afterRev / 1000);
-			const ids = syncedSessionIds();
+			const ids = syncedSessionIds(sessionsDir);
 			if (ids.size === 0) return [];
 			const entries: StateEntry[] = [];
 			for (const row of scanChangedSinceForSessionIds(afterSeconds, limit, ids)) {

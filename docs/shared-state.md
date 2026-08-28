@@ -35,7 +35,9 @@ Replication tracks two independent counters. Conflating them corrupts convergenc
 - **`rev`** — a **per-entry logical clock** (epoch milliseconds). It is the last-writer-wins merge key: an incoming entry is accepted only when its `rev` is strictly greater than the stored `rev` for that key. Every domain reuses a column that **already exists** in its table (`history.created_at`, `session_titles.updated_at`, `model_usage.last_used_at`, or a file's mtime), so replication adds no columns and bumps no schema version. An entry whose `value` is `null` is a **tombstone**.
 - **`seq`** — a **per-domain monotonic broker sequence**. It is only a delta cursor: a client passes the `seq` from its last pull as the next `since=`, and the broker returns everything accepted after it. `seq` says nothing about which write is newer; only `rev` decides that.
 
-`changedSince(afterRev, limit)` returns entries ordered by **ascending `rev`**, because the sync engine advances its watermark to the last entry's `rev` — an out-of-order page would permanently skip rows. `applyRemote` is idempotent (LWW makes replays safe) and drops a single malformed entry with a log line rather than aborting the batch.
+`changedSince(afterRev, limit)` returns entries ordered by **ascending `rev`**, because the sync engine advances its watermark to the last entry's `rev` — an out-of-order page would permanently skip rows. A domain that filters (project scoping, size caps) must filter **during** the scan, not on an already-capped page, or the watermark stalls while eligible rows sit just beyond the limit. `applyRemote` is idempotent (LWW makes replays safe) and drops a single malformed entry with a log line rather than aborting the batch.
+
+The outbound watermark only ever moves on the **push** path, and never past the local clock. Merging a remote entry deliberately leaves it alone: remote `rev`s carry the originating machine's clock, so letting one drag the watermark forward would mute every local write below it until this machine's clock caught up. Echoes are suppressed with a per-key ledger instead, which is an optimization — losing it costs a redundant push that the broker rejects, never a lost row.
 
 ## Replicated domains
 
@@ -43,11 +45,11 @@ Each domain is a thin adapter over an existing local store. It answers exactly t
 
 | Domain          | Replicates                              | Local store                    | `rev` column               | Merge rule                                                        |
 | --------------- | --------------------------------------- | ------------------------------ | -------------------------- | ---------------------------------------------------------------- |
-| `history`       | Prompt history entries                  | `history.db` (`HistoryStorage`)| `history.created_at`       | LWW by `rev`; tombstone deletes                                  |
+| `history`       | Prompt history entries                  | `history.db` (`HistoryStorage`)| `history.created_at`       | LWW by `rev`; no delete path, so tombstones are ignored           |
 | `titles`        | Session current titles                  | `title-index` (`agent.db`)     | `session_titles.updated_at`| LWW by `rev`; a `user` title is never overwritten by an `auto` one|
 | `model-usage`   | Most-recently-used model ordering       | `agent.db` (`AgentStorage`)    | `model_usage.last_used_at` | LWW by `rev` (keep the greater last-used timestamp)              |
 | `command-usage` | Slash-command usage counts/recency      | `agent.db` (`AgentStorage`)    | usage `last_used_at`       | LWW by `rev`                                                     |
-| `config`        | Agent config files (see exclusions)     | files under `~/.omp/agent/`    | file mtime                 | LWW by `rev`; path-traversal-guarded writes; tombstone deletes  |
+| `config`        | Agent config files (see exclusions)     | files under `~/.omp/agent/`    | file mtime                 | LWW by `rev`; inbound keys re-checked against the replicable set; deleting a file publishes a tombstone |
 | `sessions`      | Session JSONL index rows                | session index (`agent.db`)     | file mtime                 | LWW by `rev`; bodies replicate out-of-band via the object store |
 
 ### What is intentionally NOT replicated

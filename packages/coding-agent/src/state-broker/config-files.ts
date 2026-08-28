@@ -98,11 +98,28 @@ const EXCLUDED_DIRS: Record<string, true> = {
 export const MAX_CONFIG_FILE_BYTES = 1024 * 1024;
 
 /**
- * Resolve `rel` against `agentDir` and reject anything that escapes it.
+ * Resolve `rel` against `agentDir` to an absolute path that is provably inside
+ * the *physical* agent dir, rejecting anything that escapes it.
  *
- * A broker peer is not fully trusted, so an incoming `rel` (`../`, absolute, or
- * a symlink target outside the dir once normalized) must never be written or
- * read. Returns the absolute path; throws for a traversal attempt.
+ * A broker peer is not fully trusted, so an incoming `rel` must never let a
+ * write, read, or unlink land outside the agent dir. Two layers guard this:
+ *
+ *  1. A cheap lexical pre-filter rejects an absolute path or a `../` chain that
+ *     escapes once normalized.
+ *  2. Because the lexical check is blind to symlinks, we then resolve the
+ *     deepest *existing* ancestor of the target with `fs.realpathSync` and
+ *     require it to stay within `fs.realpathSync(agentDir)`. This catches the
+ *     dangerous case where a parent component (e.g. `agents/`) — or the leaf
+ *     itself — is a symlink whose target lives outside the dir, which a purely
+ *     lexical check would happily wave through.
+ *
+ * A non-existent leaf (or non-existent intermediate dirs) is normal — that is
+ * the create case — so only components that actually exist are symlink-checked.
+ * The returned path is rebuilt on top of the resolved real ancestor, so callers
+ * that then `mkdir`/`rename`/`write` operate relative to a verified absolute
+ * directory rather than re-walking the untrusted symlinked chain.
+ *
+ * Throws for a traversal or symlink-escape attempt.
  */
 function resolveInsideAgentDir(agentDir: string, rel: string): string {
 	if (path.isAbsolute(rel)) {
@@ -114,7 +131,34 @@ function resolveInsideAgentDir(agentDir: string, rel: string): string {
 	if (abs !== base && !abs.startsWith(base + path.sep)) {
 		throw new Error(`config replication: path escapes agent dir: ${rel}`);
 	}
-	return abs;
+	// If the agent dir itself does not exist yet, nothing beneath it can exist
+	// either, so there is no symlink to follow — the lexical check above already
+	// guarantees the create target is inside. `path.resolve` output is safe.
+	let realBase: string;
+	try {
+		realBase = fs.realpathSync(base);
+	} catch {
+		return abs;
+	}
+	// Find the deepest ancestor of `abs` that exists on disk. `existsSync`
+	// follows symlinks, so a symlinked component is treated as existing and gets
+	// resolved below; a dangling/absent leaf is skipped as a create target.
+	// `abs` is lexically inside `base`, so this walk always halts at `base`.
+	let existing = abs;
+	while (!fs.existsSync(existing)) {
+		const parent = path.dirname(existing);
+		if (parent === existing) break;
+		existing = parent;
+	}
+	const realExisting = fs.realpathSync(existing);
+	if (realExisting !== realBase && !realExisting.startsWith(realBase + path.sep)) {
+		throw new Error(`config replication: path escapes agent dir via symlink: ${rel}`);
+	}
+	// Rebuild the target on the resolved real ancestor. `path.relative` yields
+	// only forward components (never `..`) because `existing` is an ancestor of
+	// `abs`, so the not-yet-created remainder cannot re-escape the verified dir.
+	const rest = path.relative(existing, abs);
+	return rest === "" ? realExisting : path.join(realExisting, rest);
 }
 
 /** One replicable file with the metadata `enumerateConfigFiles` cares about. */
@@ -138,6 +182,45 @@ function statReplicable(abs: string): fs.Stats | null {
 	if (!st.isFile()) return null;
 	if (st.size > MAX_CONFIG_FILE_BYTES) return null;
 	return st;
+}
+
+/**
+ * True when `rel` (local `path.sep` form) is a path this machine is willing to
+ * replicate, judged by NAME ALONE.
+ *
+ * This is the inbound half of the policy that {@link enumerateConfigFiles}
+ * applies outbound, and it exists because the two directions are not
+ * symmetric: enumeration can only ever offer files that already exist locally,
+ * whereas a merge is handed an arbitrary key by a peer. Without this check the
+ * only thing standing between a peer and `~/.omp/agent/.env`,
+ * `auth-broker.token`, `projects.yml` or a live `agent.db` is the traversal
+ * guard, which happily allows any of them because they are all inside the agent
+ * dir.
+ *
+ * Deliberately independent of what is on disk: a tombstone names a file that is
+ * supposed to disappear, so an existence check here would let a peer delete
+ * whatever it liked and only be stopped for files it could not have deleted
+ * anyway.
+ */
+export function isReplicableConfigRel(rel: string): boolean {
+	if (rel.length === 0) return false;
+	if (path.isAbsolute(rel)) return false;
+	const segments = rel.split(path.sep);
+	if (segments.some(segment => segment.length === 0 || segment === "." || segment === "..")) return false;
+
+	const basename = segments[segments.length - 1];
+	if (Object.hasOwn(EXCLUDED_BASENAMES, basename)) return false;
+
+	// Top-level single files: exact membership, no extension test — these are
+	// named individually and are not inside any replicated directory.
+	if (segments.length === 1) return REPLICATED_CONFIG_FILES.includes(rel);
+
+	// Anything deeper must live under a replicated subtree and carry a
+	// replicable extension, matching `walkDir`'s filter exactly.
+	const root = segments[0];
+	if (Object.hasOwn(EXCLUDED_DIRS, root)) return false;
+	if (!REPLICATED_CONFIG_DIRS.includes(root)) return false;
+	return Object.hasOwn(REPLICABLE_EXTENSIONS, path.extname(basename).toLowerCase());
 }
 
 /** Recursively collect replicable files under `dirAbs`, pushing `{rel,...}` rows. */

@@ -2,19 +2,14 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
-
-// The projects registry (`ProjectsConfigFile`) freezes its path from
-// `getAgentDir()` the first time `projects-config` is imported. Point the agent
-// dir at a throwaway temp dir BEFORE that import so the registry never reads or
-// writes the developer's real `~/.omp/agent`, then defer the import.
-const AGENT_DIR = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "omp-scope-agent-")));
-setAgentDir(AGENT_DIR);
-
-const { ProjectsConfigFile, getProjectsConfigPath, loadProjects, projectIdFromRemoteUrl, saveProjects } = await import(
-	"@oh-my-pi/pi-coding-agent/config/projects-config"
-);
-const {
+import {
+	ProjectsConfigFile,
+	getProjectsConfigPath,
+	loadProjects,
+	projectIdFromRemoteUrl,
+	saveProjects,
+} from "@oh-my-pi/pi-coding-agent/config/projects-config";
+import {
 	decodeWireKey,
 	encodeWireKey,
 	fromWirePath,
@@ -22,7 +17,16 @@ const {
 	projectObjectSlug,
 	resolveProject,
 	toWirePath,
-} = await import("@oh-my-pi/pi-coding-agent/state-broker/project-scope");
+} from "@oh-my-pi/pi-coding-agent/state-broker/project-scope";
+import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+
+// A throwaway agent dir for this file. `resolveProject`, `toWirePath` and
+// `loadProjects()` (its no-arg default path — exercised deliberately here) have
+// NO injection seam and read the process-wide agent dir, so it must point here.
+// It is set in `beforeEach` and restored in `afterEach` so this file's temp dir
+// never redirects a later test file (the reviewer's load-order finding).
+const AGENT_DIR = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "omp-scope-agent-")));
+const SAVED_AGENT_DIR = process.env.PI_CODING_AGENT_DIR;
 
 type Entry = { id: string; path: string; sync: boolean };
 
@@ -43,6 +47,7 @@ function makeWorkspace(): string {
 }
 
 beforeEach(() => {
+	setAgentDir(AGENT_DIR);
 	fs.rmSync(getProjectsConfigPath(AGENT_DIR), { force: true });
 	ProjectsConfigFile.invalidate();
 	invalidateProjectScope();
@@ -53,6 +58,11 @@ afterEach(async () => {
 	ProjectsConfigFile.invalidate();
 	invalidateProjectScope();
 	for (const root of cleanupRoots.splice(0)) await removeWithRetries(root);
+	// Restore the process-wide agent dir so this file's temp dir never redirects
+	// a later test file: put the env var back exactly and rebuild the resolver.
+	if (SAVED_AGENT_DIR === undefined) delete process.env.PI_CODING_AGENT_DIR;
+	else process.env.PI_CODING_AGENT_DIR = SAVED_AGENT_DIR;
+	__resetDirsFromEnvForTests();
 });
 
 describe("projectIdFromRemoteUrl", () => {

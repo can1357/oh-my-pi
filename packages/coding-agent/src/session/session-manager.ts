@@ -61,7 +61,13 @@ import {
 	type TtsrInjectionEntry,
 	type UsageStatistics,
 } from "./session-entries";
-import { findMostRecentSession, listAllSessions, listSessions, type SessionInfo } from "./session-listing";
+import {
+	findMostRecentSession,
+	type ListAllSessionsOptions,
+	listAllSessions,
+	listSessions,
+	type SessionInfo,
+} from "./session-listing";
 import {
 	loadEntriesFromFile,
 	loadSessionFile,
@@ -3076,9 +3082,19 @@ export class SessionManager {
 		return sortPinnedFirst(sessions, await loadPinnedSessionIds());
 	}
 
-	/** List all sessions across all project directories, pinned sessions first. */
-	static async listAll(storage: SessionStorage = new FileSessionStorage()): Promise<SessionInfo[]> {
-		const sessions = await listAllSessions(storage);
+	/**
+	 * List all sessions across all project directories, pinned sessions first.
+	 *
+	 * Remote-only sessions are EXCLUDED by default: callers such as the ACP
+	 * bridge assume every listed session has a readable local `.jsonl`. Opt in
+	 * with `includeRemoteOnly` only from a caller that can handle a stub whose
+	 * body downloads on open, such as the resume picker.
+	 */
+	static async listAll(
+		storage: SessionStorage = new FileSessionStorage(),
+		options: ListAllSessionsOptions = {},
+	): Promise<SessionInfo[]> {
+		const sessions = await listAllSessions(storage, options);
 		return sortPinnedFirst(sessions, await loadPinnedSessionIds());
 	}
 }

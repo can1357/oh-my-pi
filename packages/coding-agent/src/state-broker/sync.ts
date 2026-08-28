@@ -17,6 +17,25 @@ import { STATE_MAX_WAIT_MS, STATE_PAGE_LIMIT, type StateDomainId } from "./wire"
 
 const DEFAULT_INTERVAL_MS = 30_000;
 
+/**
+ * Coarsest granularity of any domain's `rev` clock, in millis.
+ *
+ * Most domains use epoch millis, but `history` derives its rev from a column
+ * stored in epoch SECONDS (`created_at * 1000`), so a prompt written at
+ * `now = 1800` still gets `rev = 1000`. The outbound watermark must therefore
+ * never reach into the current second, or a write landing later in that second
+ * would come back with a rev at or below the watermark and be skipped forever.
+ */
+const REV_CLOCK_GRANULARITY_MS = 1000;
+
+/**
+ * Cap on remembered (key -> rev) pairs per domain. The ledger only needs to
+ * cover rows sitting ABOVE the outbound watermark, which is bounded by clock
+ * skew plus one sync interval; the cap is a safety valve, and an eviction costs
+ * one redundant push that the broker rejects, never a lost row.
+ */
+const MAX_LEDGER_ENTRIES = 4096;
+
 export interface StateSyncEngineOptions {
 	client: StateBrokerClient;
 	domains: readonly ReplicatedDomain[];
@@ -43,6 +62,16 @@ export class StateSyncEngine {
 	#idle = false;
 	/** Domains currently in a failure state; used to warn once per transition. */
 	readonly #failing = new Set<StateDomainId>();
+	/**
+	 * Per-domain `key -> rev` ledger of rows this process must not push: rows it
+	 * already pushed, and rows it just merged FROM the broker.
+	 *
+	 * Purely an echo suppressor, never a correctness mechanism. Losing it (fresh
+	 * process, eviction) costs one redundant push per row, which the broker
+	 * rejects because the rev is not newer. Correctness comes from the watermark
+	 * rules in {@link #pushDomain} alone.
+	 */
+	readonly #ledgers = new Map<StateDomainId, Map<string, number>>();
 
 	constructor(opts: StateSyncEngineOptions) {
 		this.#client = opts.client;
@@ -116,21 +145,91 @@ export class StateSyncEngine {
 	}
 
 	/**
-	 * Push local pages until a short page proves the backlog is drained. On
-	 * success `outboundRev` advances to the last entry's `rev` and is persisted;
-	 * because `changedSince` is ascending-`rev`, a mid-loop failure simply leaves
-	 * the cursor where it was and the same page retries next cycle.
+	 * Largest value the outbound watermark may take right now.
+	 *
+	 * The watermark's whole job is "every local row above this has been dealt
+	 * with", so it must never pass a rev that a FUTURE local write could still
+	 * be assigned. Local revs come from the local clock, so the bound is the
+	 * current clock floored to the coarsest domain granularity, minus one.
+	 *
+	 * This is what stops a clock-skewed peer from silently disabling our own
+	 * writes. Remote rows carry the ORIGINATING machine's clock, and merging one
+	 * lands it in our local store; if the watermark were allowed to follow a rev
+	 * from a peer whose clock is ahead of ours, every local write below that rev
+	 * would fail the `rev > outboundRev` scan and never be pushed until our
+	 * clock caught up.
+	 */
+	#watermarkCeiling(): number {
+		return Math.floor(Date.now() / REV_CLOCK_GRANULARITY_MS) * REV_CLOCK_GRANULARITY_MS - 1;
+	}
+
+	#ledgerFor(id: StateDomainId): Map<string, number> {
+		let ledger = this.#ledgers.get(id);
+		if (!ledger) {
+			ledger = new Map<string, number>();
+			this.#ledgers.set(id, ledger);
+		}
+		return ledger;
+	}
+
+	/**
+	 * Forget rows the watermark now covers — the `rev > outboundRev` scan already
+	 * excludes them, so remembering them buys nothing. Also enforces the cap, in
+	 * ledger iteration order (oldest insertion first), because those are the
+	 * rows the watermark reaches soonest.
+	 */
+	#pruneLedger(ledger: Map<string, number>, outboundRev: number): void {
+		for (const [key, rev] of ledger) {
+			if (rev <= outboundRev) ledger.delete(key);
+		}
+		if (ledger.size <= MAX_LEDGER_ENTRIES) return;
+		const excess = ledger.size - MAX_LEDGER_ENTRIES;
+		let dropped = 0;
+		for (const key of ledger.keys()) {
+			ledger.delete(key);
+			if (++dropped >= excess) break;
+		}
+	}
+
+	/**
+	 * Push local pages until a short page proves the backlog is drained.
+	 *
+	 * Three rules keep this convergent, and each one is load-bearing:
+	 *
+	 * 1. The watermark advances to the last SCANNED rev, not the last pushed
+	 *    one, so a page consisting entirely of suppressed echoes still makes
+	 *    progress instead of being rescanned forever.
+	 * 2. It is clamped to {@link #watermarkCeiling}, so it can never move past a
+	 *    rev that a later local write could still be assigned.
+	 * 3. If those two leave the watermark where it was, we stop. Without this
+	 *    the loop would spin on a full page of future-dated rows that the clamp
+	 *    refuses to skip. Retrying next cycle is correct and eventually
+	 *    succeeds, since the ceiling rises with the clock.
+	 *
+	 * Because `changedSince` is ascending-`rev`, a mid-loop failure simply
+	 * leaves the cursor where it was and the same page retries next cycle.
 	 */
 	async #pushDomain(cursor: SyncCursor, domain: ReplicatedDomain, signal?: AbortSignal): Promise<boolean> {
 		let pushed = false;
+		const ledger = this.#ledgerFor(domain.id);
 		for (;;) {
 			if (signal?.aborted) break;
 			const page = domain.changedSince(cursor.outboundRev, STATE_PAGE_LIMIT);
 			if (page.length === 0) break;
-			await this.#client.push(domain.id, page, signal);
-			cursor.outboundRev = page[page.length - 1].rev;
+			const scannedRev = page[page.length - 1].rev;
+			// Drop rows we already sent at this exact rev, and rows we merged from
+			// the broker at this exact rev — pushing either back is pure noise.
+			const sendable = page.filter(entry => ledger.get(entry.key) !== entry.rev);
+			if (sendable.length > 0) {
+				await this.#client.push(domain.id, sendable, signal);
+				for (const entry of sendable) ledger.set(entry.key, entry.rev);
+				pushed = true;
+			}
+			const nextRev = Math.min(scannedRev, this.#watermarkCeiling());
+			if (nextRev <= cursor.outboundRev) break;
+			cursor.outboundRev = nextRev;
 			this.#store.set(domain.id, cursor);
-			pushed = true;
+			this.#pruneLedger(ledger, cursor.outboundRev);
 			if (page.length < STATE_PAGE_LIMIT) break;
 		}
 		return pushed;
@@ -140,6 +239,13 @@ export class StateSyncEngine {
 	 * Pull remote deltas and merge them, advancing `inboundSeq` as we go and
 	 * repeating while the broker reports `more`. Only the first request may
 	 * long-poll; once entries arrive we drain the rest with `waitMs=0`.
+	 *
+	 * Note what this does NOT touch: `outboundRev`. Merged rows land in our own
+	 * local store and so would reappear in the next `changedSince`, and the
+	 * tempting fix is to jump the outbound watermark past every rev just
+	 * applied. That silently drops local writes whenever a peer's clock runs
+	 * ahead of ours — see {@link #watermarkCeiling}. Echo suppression is the
+	 * ledger's job, and only the ledger's.
 	 */
 	async #pullDomain(
 		cursor: SyncCursor,
@@ -161,16 +267,13 @@ export class StateSyncEngine {
 			if (delta.entries.length > 0) {
 				domain.applyRemote(delta.entries);
 				pulled = true;
-				// ECHO-STORM SUPPRESSION: applyRemote writes these rows into our own
-				// local store, so they would reappear in the next changedSince() and
-				// be pushed straight back to the broker — an endless echo between
-				// peers. Advance outboundRev past every rev we just applied so those
-				// rows are treated as already-pushed and never bounce back.
-				let maxRev = cursor.outboundRev;
-				for (const entry of delta.entries) {
-					if (entry.rev > maxRev) maxRev = entry.rev;
-				}
-				cursor.outboundRev = maxRev;
+				// Remember what we merged, at the rev we merged it at, so the next
+				// push does not bounce it straight back. Domains that write a real
+				// file pin its mtime to the remote rev for exactly this reason, so
+				// the rev a later scan reports matches what we record here.
+				const ledger = this.#ledgerFor(domain.id);
+				for (const entry of delta.entries) ledger.set(entry.key, entry.rev);
+				this.#pruneLedger(ledger, cursor.outboundRev);
 			}
 			cursor.inboundSeq = delta.seq;
 			this.#store.set(domain.id, cursor);

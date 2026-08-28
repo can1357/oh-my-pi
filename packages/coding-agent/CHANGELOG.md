@@ -8,6 +8,7 @@
 - Session bodies and content-addressed blobs can replicate through an S3-compatible object store (`objects.backend: s3`), including MinIO and Garage via `objects.s3.endpoint` plus `objects.s3.pathStyle`. Uses Bun's builtin S3 client, so no new dependency.
 - `omp project` registers which projects take part in replication, mapping a machine-independent project id to this machine's checkout path in `~/.omp/agent/projects.yml`. Ids are derived from the git origin remote (ssh and https clones of the same repo normalise to one id), so two machines that keep a project at different paths agree without coordinating. Unregistered projects, and registered ones with sync off, replicate nothing.
 - Sessions started on another machine appear in the all-projects resume picker and download on open.
+- Deleting a replicated config file (`config.yml`, an agent, a managed skill) now propagates the deletion to other machines instead of leaving the old copy in place.
 
 ### Fixed
 

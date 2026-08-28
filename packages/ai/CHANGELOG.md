@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `startAuthBroker` accepts a `routes` list of `BrokerRouteHandler`s, dispatched after bearer authentication and before the 404, so a host can serve additional authenticated surfaces on the broker without forking it.
+
 ## [18.0.8] - 2026-08-27
 
 ### Added

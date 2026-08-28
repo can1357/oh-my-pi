@@ -20,6 +20,20 @@ export interface SessionPickerOptions {
 }
 
 /**
+ * Label sessions whose body lives on another machine.
+ *
+ * Their preview line is rendered dim by the selector, so plain marker text
+ * inherits the existing styling; the body downloads on open. Applied to both
+ * the lazily loaded all-projects list and a caller-preloaded one, because a
+ * remote-only row rendered without the marker looks like an ordinary local
+ * session that then pauses to download.
+ */
+function markRemoteSessions(sessions: readonly SessionInfo[]): SessionInfo[] {
+	const marker = `${theme.icon.host} on another machine — downloads on open`;
+	return sessions.map(session => (session.remoteOnly ? { ...session, firstMessage: marker } : session));
+}
+
+/**
  * Show the TUI session selector and return the selected session, or null if
  * cancelled. The default OMP picker supports deletion, transcript-history
  * search, and an all-projects scope; foreign import pickers disable those
@@ -90,16 +104,12 @@ export async function selectSession(
 								// whose ACP consumers assume a readable local file). Pinned-first ordering
 								// mirrors `SessionManager.listAll`, using the pins already loaded above.
 								const all = await listAllSessions(storage, { includeRemoteOnly: true });
-								const ordered = sortPinnedFirst(all, pinnedIds);
-								// Surface a dim marker for sessions living on another machine. Their
-								// preview line is rendered dim by the selector, so plain marker text
-								// inherits the existing styling; the body downloads on open.
-								const marker = `${theme.icon.host} on another machine — downloads on open`;
-								return ordered.map(session =>
-									session.remoteOnly ? { ...session, firstMessage: marker } : session,
-								);
+								return markRemoteSessions(sortPinnedFirst(all, pinnedIds));
 							},
-				allSessions: options.allSessions,
+				// The caller may preload the same list to make the Tab switch instant,
+				// and it may legitimately contain remote-only rows, so it needs the
+				// same marker treatment the lazy loader applies.
+				allSessions: options.allSessions ? markRemoteSessions(options.allSessions) : undefined,
 				getTerminalRows: () => ui.terminal.rows,
 				fillHeight: true,
 				title: options.title,

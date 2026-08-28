@@ -16,10 +16,11 @@ import {
 	configFileMtimeMs,
 	deleteConfigFile,
 	enumerateConfigFiles,
+	isReplicableConfigRel,
 	readConfigFile,
 	writeConfigFileAtomic,
 } from "../config-files";
-import type { ReplicatedDomain } from "../replica";
+import type { ReplicatedDomain, StateSyncStore } from "../replica";
 import type { StateEntry } from "../wire";
 
 /** Payload carried in a config {@link StateEntry.value} (null value is a tombstone). */
@@ -58,8 +59,13 @@ function parseValue(value: unknown): ConfigFileValue | null {
 /**
  * Create the `config` domain replicating files under `agentDir`
  * (default: `getAgentDir()`).
+ *
+ * `store` is the replica's own cursor database, used here to remember which
+ * keys were published so a local DELETION can be turned into a tombstone. Pass
+ * `undefined` to run the domain without deletion propagation (a live file
+ * enumeration alone cannot see a file that is no longer there).
  */
-export function createConfigDomain(agentDir: string = getAgentDir()): ReplicatedDomain {
+export function createConfigDomain(agentDir: string = getAgentDir(), store?: StateSyncStore): ReplicatedDomain {
 	return {
 		id: "config",
 
@@ -70,23 +76,59 @@ export function createConfigDomain(agentDir: string = getAgentDir()): Replicated
 			// before both the watermark comparison and publication: comparing the
 			// raw float against a floored watermark would re-emit the same file on
 			// every cycle forever, since 100.9 > floor(100.9).
-			const fresh = enumerateConfigFiles(agentDir)
-				.map(f => ({ rel: f.rel, mtimeMs: Math.floor(f.mtimeMs) }))
+			const live = enumerateConfigFiles(agentDir).map(f => ({
+				rel: f.rel,
+				mtimeMs: Math.floor(f.mtimeMs),
+			}));
+
+			// Deletions: anything we published before that is absent now. Latching
+			// the tombstone in `store` is what makes it survive a failed push; the
+			// row is only forgotten once the watermark proves it was delivered.
+			const pending: Array<{ rel: string; rev: number; deleted: boolean }> = live
 				.filter(f => f.mtimeMs > afterRev)
-				.sort((a, b) => a.mtimeMs - b.mtimeMs)
-				.slice(0, Math.max(0, limit));
+				.map(f => ({ rel: f.rel, rev: f.mtimeMs, deleted: false }));
+			if (store) {
+				const liveKeys = new Set(live.map(f => toPosixKey(f.rel)));
+				const now = Date.now();
+				for (const prior of store.published("config")) {
+					if (liveKeys.has(prior.key)) continue;
+					// Absent locally. Latch a tombstone rev on first sight, then keep
+					// re-offering the same rev until the watermark passes it.
+					const rev = prior.deleted ? prior.rev : now;
+					if (!prior.deleted) store.recordDeleted("config", prior.key, rev);
+					if (rev > afterRev) {
+						pending.push({ rel: fromPosixKey(prior.key), rev, deleted: true });
+					} else {
+						// Watermark is past it, so the tombstone reached the broker.
+						store.forgetPublished("config", prior.key);
+					}
+				}
+			}
+
+			// Sort and cap AFTER assembling both kinds, and note that filtering
+			// already happened above: a page must never be post-filtered to empty
+			// while eligible rows sit beyond the limit, or the watermark stalls.
+			pending.sort((a, b) => a.rev - b.rev);
+			const page = pending.slice(0, Math.max(0, limit));
 
 			const entries: StateEntry[] = [];
-			for (const file of fresh) {
-				const content = readConfigFile(agentDir, file.rel);
-				if (content === null) {
-					// Deleted or became unreadable between enumerate and read; skip
-					// rather than emit a bogus entry.
-					logger.debug("config domain: skipping unreadable file", { rel: file.rel });
+			for (const item of page) {
+				const key = toPosixKey(item.rel);
+				if (item.deleted) {
+					entries.push({ key, rev: item.rev, value: null });
 					continue;
 				}
-				const value: ConfigFileValue = { rel: toPosixKey(file.rel), content, mtimeMs: file.mtimeMs };
-				entries.push({ key: toPosixKey(file.rel), rev: file.mtimeMs, value });
+				const content = readConfigFile(agentDir, item.rel);
+				if (content === null) {
+					// Deleted or became unreadable between enumerate and read; skip
+					// rather than emit a bogus entry. The next scan sees it as a
+					// deletion via the published-key diff.
+					logger.debug("config domain: skipping unreadable file", { rel: item.rel });
+					continue;
+				}
+				const value: ConfigFileValue = { rel: key, content, mtimeMs: item.rev };
+				entries.push({ key, rev: item.rev, value });
+				store?.recordPublished("config", key, item.rev);
 			}
 			return entries;
 		},
@@ -94,6 +136,16 @@ export function createConfigDomain(agentDir: string = getAgentDir()): Replicated
 		applyRemote(entries: readonly StateEntry[]): void {
 			for (const entry of entries) {
 				const rel = fromPosixKey(entry.key);
+
+				// A peer chooses this key, so the outbound policy has to be enforced
+				// again here — the traversal guard alone would happily accept
+				// `.env`, `auth-broker.token`, `projects.yml` or a live `agent.db`,
+				// since every one of those sits inside the agent dir. Checked before
+				// the tombstone branch too: otherwise a peer could delete them.
+				if (!isReplicableConfigRel(rel)) {
+					logger.warn("config domain: rejecting non-replicable remote key", { key: entry.key });
+					continue;
+				}
 
 				// Tombstone: unlink only when our copy is not newer than the
 				// deletion. If we hold a newer edit, LWW keeps it.

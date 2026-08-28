@@ -44,6 +44,7 @@ import {
 	type ScopedModel,
 } from "./config/model-resolver";
 import { ModelsConfigFile } from "./config/models-config";
+import { resolveConfigValue } from "./config/resolve-config-value";
 import { serviceTierSettingToTier } from "./config/service-tier";
 import { getDefault, type SettingPath, Settings, type SettingValue, settings } from "./config/settings";
 import { initializeWithSettings } from "./discovery";
@@ -101,6 +102,7 @@ import { resolveResumableSession, type SessionInfo } from "./session/session-lis
 import { SessionManager } from "./session/session-manager";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { shouldShowStartupSplash } from "./startup-splash";
+import { startStateSync } from "./state-broker/registry";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
@@ -1605,6 +1607,19 @@ export async function runRootCommand(
 		// id from UUID-shaped values owned by later extension flags.
 		normalizeContinueSessionArgs(parsedArgs, rawArgs);
 
+		// Shared-state replication must be live BEFORE any session is resolved.
+		// Startup decides whether to show a picker (and whether to exit with "no
+		// sessions found") from a local listing, then opens the choice
+		// immediately, so a runtime started later cannot make a remote-only
+		// session listable, cannot fetch its body, and cannot back the `BlobStore`
+		// the first session has already constructed. Awaited because those
+		// decisions are moments away; a no-op returning `undefined` when
+		// `state.sync.enabled` is not set, which is the default.
+		await logger.time("startStateSync", startStateSync, {
+			settings: settingsInstance,
+			resolveConfigValue,
+		});
+
 		// Resolve native resume/fork flags or import one foreign transcript into a
 		// fresh persisted OMP session before constructing the AgentSession.
 		let sessionManager: SessionManager | undefined;
@@ -1737,7 +1752,14 @@ export async function runRootCommand(
 				// silently surfaced other projects' history when the cwd was empty
 				// (issue #3099). The preloaded list also makes the user's Tab switch
 				// instant on the way in.
-				preloadedAllSessions = await logger.time("SessionManager.listAll", SessionManager.listAll);
+				//
+				// Remote-only sessions count here. On a machine that has just joined
+				// a synced project every session is remote, and a local-only probe
+				// would exit with "No sessions found" before the picker that can
+				// actually list and download them ever opened.
+				preloadedAllSessions = await logger.time("SessionManager.listAll", SessionManager.listAll, undefined, {
+					includeRemoteOnly: true,
+				});
 				if (preloadedAllSessions.length === 0) {
 					writeStartupNotice(parsedArgs, `${chalk.dim("No sessions found")}\n`);
 					stopStartupWatchdog();

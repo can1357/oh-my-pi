@@ -125,13 +125,52 @@ class S3ObjectStore implements ObjectStore {
  * is off or unconfigured. Returning `undefined` (rather than throwing) lets every
  * caller degrade to local-only operation; a single `warn` naming the first
  * missing key is emitted when the backend is requested but cannot be satisfied.
+ *
+ * The credential- and connection-bearing settings are passed through
+ * `resolveValue` — the same config-value indirection the rest of the subsystem
+ * uses (see `resolveStateBrokerConfig`) — so a documented form like
+ * `accessKeyId: !cat ~/.omp/s3-key` or an env-var name yields the real value
+ * rather than the literal string being handed to `Bun.S3Client` as a credential.
  */
-export function resolveObjectStore(settings: SettingsLike): ObjectStore | undefined {
+export async function resolveObjectStore(
+	settings: SettingsLike,
+	resolveValue: (raw: string) => Promise<string | undefined>,
+): Promise<ObjectStore | undefined> {
 	if (settings.get("objects.backend") !== "s3") return undefined;
 
-	const bucket = optString(settings, "objects.s3.bucket");
-	const accessKeyId = optString(settings, "objects.s3.accessKeyId");
-	const secretAccessKey = optString(settings, "objects.s3.secretAccessKey");
+	// Resolve every string setting through the indirection layer BEFORE the
+	// missing-key check, so a value that is present but resolves to empty (or to
+	// nothing at all) is reported as missing rather than silently forwarded as an
+	// empty credential. An unreadable `!cat` file (resolver throw) must degrade to
+	// local-only just like a missing key — never crash startup — so resolution is
+	// guarded and the first offending key is remembered for the single warn below.
+	let failedKey: string | undefined;
+	const resolve = async (key: string): Promise<string | undefined> => {
+		if (failedKey) return undefined;
+		const raw = optString(settings, key);
+		if (raw === undefined) return undefined;
+		try {
+			const resolved = await resolveValue(raw);
+			return resolved && resolved.length > 0 ? resolved : undefined;
+		} catch {
+			failedKey = key;
+			return undefined;
+		}
+	};
+
+	// Sequential rather than concurrent: `failedKey` short-circuits the rest, and
+	// six local reads are not worth interleaving.
+	const bucket = await resolve("objects.s3.bucket");
+	const accessKeyId = await resolve("objects.s3.accessKeyId");
+	const secretAccessKey = await resolve("objects.s3.secretAccessKey");
+	const endpoint = await resolve("objects.s3.endpoint");
+	const region = await resolve("objects.s3.region");
+	const keyPrefix = (await resolve("objects.s3.keyPrefix")) ?? "";
+
+	if (failedKey) {
+		logger.warn(`objects.backend=s3 but ${failedKey} could not be resolved; falling back to local-only storage`);
+		return undefined;
+	}
 
 	const missing = !bucket
 		? "objects.s3.bucket"
@@ -145,9 +184,6 @@ export function resolveObjectStore(settings: SettingsLike): ObjectStore | undefi
 		return undefined;
 	}
 
-	const endpoint = optString(settings, "objects.s3.endpoint");
-	const region = optString(settings, "objects.s3.region");
-	const keyPrefix = optString(settings, "objects.s3.keyPrefix") ?? "";
 	// `pathStyle` (MinIO/Garage) is the inverse of Bun's `virtualHostedStyle`
 	// option — path-style is Bun's default (false), so only opt into virtual
 	// hosting when the user explicitly disables path style.

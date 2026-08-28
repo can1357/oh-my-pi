@@ -105,7 +105,11 @@ export class SessionReplicator {
 
 	async #withSlot<T>(fn: () => Promise<T>): Promise<T> {
 		while (this.#active >= MAX_CONCURRENT_TRANSFERS) {
-			await new Promise<void>(resolve => this.#waiters.push(resolve));
+			// Park behind the concurrency cap until a running transfer releases a
+			// slot; the resolver is stored FIFO so waiters wake in arrival order.
+			const { promise, resolve } = Promise.withResolvers<void>();
+			this.#waiters.push(resolve);
+			await promise;
 		}
 		this.#active++;
 		try {
@@ -122,10 +126,31 @@ export class SessionReplicator {
 	}
 
 	/**
-	 * Upload the local body when the remote copy is absent or behind. Session
-	 * JSONL is append-only, so its byte length only ever grows; "local size >
-	 * remote size" is therefore a sound staleness test that avoids downloading
-	 * the remote body just to compare it.
+	 * Upload the local body when the remote copy is absent or is not newer than
+	 * this machine's.
+	 *
+	 * Staleness is decided by mtime, NOT byte length. `ensureLocal` REWRITES the
+	 * downloaded header's `cwd` to this machine's checkout path, so identical
+	 * logical content occupies a DIFFERENT number of bytes on machines whose
+	 * project paths differ in length — a shorter local path makes the file
+	 * smaller for the same (or more) turns. A "bigger is newer" size test would
+	 * therefore let a genuinely new turn on a short-path machine satisfy
+	 * `remote.size >= local.size` and silently drop the upload. File mtime is
+	 * invariant to the header rewrite and advances on every append, so it orders
+	 * versions correctly; it is the SAME last-writer-wins clock the sessions
+	 * index domain publishes as `rev` (domains/sessions.ts), keeping the body
+	 * archive and the index in agreement.
+	 *
+	 * FAILURE MODE: mtime is a wall clock, so this inherits LWW's clock-skew
+	 * caveat — a machine whose clock lags the last uploader's could under-upload
+	 * a real edit until its own clock passes the remote's recorded time. That is
+	 * the tradeoff the sessions domain already accepts, and it is strictly safer
+	 * than the size test it replaces, which lost writes with no skew at all.
+	 *
+	 * `mtimeMs` is FRACTIONAL from `fs.stat` while a `rev` is contractually an
+	 * integer, so both sides are floored before comparison — a raw float against
+	 * a floored remote value (100.9 vs 100) would re-upload forever. Only the
+	 * `list()` metadata is read to compare, never the remote body itself.
 	 */
 	async uploadIfStale(rel: string): Promise<void> {
 		const scoped = this.#projectForRel(rel);
@@ -149,8 +174,10 @@ export class SessionReplicator {
 			try {
 				const remote = await this.#store.list(key);
 				const match = remote.find(item => item.key === key);
-				// Absent remote, or a shorter remote (local appended since) → push.
-				if (match && match.size >= local.size) return;
+				// Skip only when a remote exists AND is at least as new as the local
+				// body. Floor both sides: mtimeMs is fractional and a raw
+				// `100.9 > 100` would re-upload every cycle (see doc).
+				if (match && Math.floor(local.mtimeMs) <= Math.floor(match.mtimeMs)) return;
 				const bytes = await fsp.readFile(abs);
 				await this.#store.put(key, bytes, "application/x-ndjson");
 			} catch (err) {

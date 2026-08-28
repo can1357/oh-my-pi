@@ -19,6 +19,7 @@ import {
 	getStateSyncDbPath,
 	isEnoent,
 	logger,
+	postmortem,
 } from "@oh-my-pi/pi-utils";
 import { AgentStorage } from "../session/agent-storage";
 import { setDefaultBlobObjectStore } from "../session/blob-store";
@@ -179,6 +180,72 @@ export class StateSyncRuntime {
 }
 
 /**
+ * Process-wide replication runtime, plus its teardown registration.
+ *
+ * Replication has to be running BEFORE the first session is resolved. Startup
+ * decides whether a session even exists by listing local sessions, and it opens
+ * the chosen one immediately; a runtime created later cannot retroactively make
+ * a remote-only session listable or fetch its body, and the `BlobStore` the
+ * first session already built would never receive its object-store backing.
+ */
+let activeRuntime: StateSyncRuntime | undefined;
+let cancelTeardownHook: (() => void) | undefined;
+
+/**
+ * Budget for the shutdown flush. Replication is best-effort: a broker that has
+ * gone away must not hold the process open, since anything unflushed is picked
+ * up by the next run's first sync cycle.
+ */
+const STATE_SYNC_DRAIN_BUDGET_MS = 2_000;
+
+/** The running replication runtime, if replication is enabled and started. */
+export function activeStateSync(): StateSyncRuntime | undefined {
+	return activeRuntime;
+}
+
+/**
+ * Resolve configuration, start replication, and publish it process-wide.
+ *
+ * Safe and cheap to call unconditionally: it returns `undefined` without
+ * touching disk or the network when `state.sync.enabled` is not `true`.
+ * Idempotent — a second call returns the already-running runtime.
+ *
+ * Teardown is registered here rather than left to the caller because every mode
+ * (interactive, print, rpc, acp) needs the same flush, and a signal or a
+ * `process.exit` can end any of them. {@link stopStateSync} is the explicit
+ * path for a mode that shuts down gracefully.
+ */
+export async function startStateSync(opts: CreateStateSyncOptions): Promise<StateSyncRuntime | undefined> {
+	if (activeRuntime) return activeRuntime;
+	const runtime = await createStateSyncRuntime(opts);
+	if (!runtime) return undefined;
+	activeRuntime = runtime;
+	runtime.start();
+	cancelTeardownHook = postmortem.register("state-sync", async () => {
+		await stopStateSync();
+	});
+	return runtime;
+}
+
+/**
+ * Flush and release the running runtime. Bounded, never throws, and idempotent
+ * so the graceful path and the postmortem hook cannot double-drain or wedge
+ * shutdown behind an unreachable broker.
+ */
+export async function stopStateSync(): Promise<void> {
+	const runtime = activeRuntime;
+	if (!runtime) return;
+	activeRuntime = undefined;
+	cancelTeardownHook?.();
+	cancelTeardownHook = undefined;
+	activeReplicator = undefined;
+	await Promise.race([runtime.drain(), Bun.sleep(STATE_SYNC_DRAIN_BUDGET_MS)]).catch(error =>
+		logger.debug("state sync drain failed", { error: String(error) }),
+	);
+	await runtime.stop().catch(error => logger.debug("state sync stop failed", { error: String(error) }));
+}
+
+/**
  * Domains whose contents are filtered by project, and which therefore have to
  * be re-scanned when the set of synced projects changes.
  */
@@ -245,7 +312,7 @@ export async function createStateSyncRuntime(opts: CreateStateSyncOptions): Prom
 			return undefined;
 		}
 
-		const objectStore = resolveObjectStore(settings);
+		const objectStore = await resolveObjectStore(settings, opts.resolveConfigValue);
 		const sessionsDir = getSessionsDir(agentDir);
 		const replicator =
 			objectStore && settings.get("objects.sessions") !== false
@@ -257,12 +324,14 @@ export async function createStateSyncRuntime(opts: CreateStateSyncOptions): Prom
 		// this run is fetchable rather than only on the next one.
 		activeReplicator = replicator;
 
-		const scanned = await buildDomains(enabled, agentDir, sessionsDir);
+		// The cursor store must exist before the domains: the config domain uses
+		// it to remember publications so deletions become tombstones.
+		const syncStore = new StateSyncStore(getStateSyncDbPath(agentDir));
+		const scanned = await buildDomains(enabled, agentDir, sessionsDir, syncStore);
 		// Body replication rides along with the sessions index scan.
 		const domains = replicator
 			? scanned.map(domain => (domain.id === "sessions" ? withBodyUploads(domain, replicator) : domain))
 			: scanned;
-		const syncStore = new StateSyncStore(getStateSyncDbPath(agentDir));
 		const client = new StateBrokerClient({ url: config.url, token: config.token });
 		const intervalMs = settings.get("state.sync.intervalMs");
 		const engine = new StateSyncEngine({
@@ -341,6 +410,7 @@ async function buildDomains(
 	enabled: readonly StateDomainId[],
 	agentDir: string,
 	sessionsDir: string,
+	syncStore: StateSyncStore,
 ): Promise<ReplicatedDomain[]> {
 	// AgentStorage is a per-path singleton the runtime has already opened by the
 	// time sync starts, so `open()` resolves to the live handle rather than a
@@ -364,7 +434,10 @@ async function buildDomains(
 				domains.push(createCommandUsageDomain(agentStorage, getInstallId()));
 				break;
 			case "config":
-				domains.push(createConfigDomain(agentDir));
+				// The sync store doubles as the config domain's memory of what it
+				// has published, which is the only way a live file enumeration can
+				// notice a DELETION and emit a tombstone for it.
+				domains.push(createConfigDomain(agentDir, syncStore));
 				break;
 			case "sessions":
 				domains.push(createSessionsDomain(sessionsDir));

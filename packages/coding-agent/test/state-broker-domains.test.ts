@@ -2,36 +2,40 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-// Type-only, so it is erased and loads nothing at runtime.
+import { ProjectsConfigFile, getProjectsConfigPath, saveProjects } from "@oh-my-pi/pi-coding-agent/config/projects-config";
+import {
+	MAX_CONFIG_FILE_BYTES,
+	configFileMtimeMs,
+	enumerateConfigFiles,
+	readConfigFile,
+	writeConfigFileAtomic,
+} from "@oh-my-pi/pi-coding-agent/state-broker/config-files";
+import { createConfigDomain } from "@oh-my-pi/pi-coding-agent/state-broker/domains/config";
+import { createHistoryDomain } from "@oh-my-pi/pi-coding-agent/state-broker/domains/history";
+import { createSessionsDomain, readRemoteSessionIndex } from "@oh-my-pi/pi-coding-agent/state-broker/domains/sessions";
+import { createTitlesDomain, invalidateSyncedTitleIds } from "@oh-my-pi/pi-coding-agent/state-broker/domains/titles";
+import { encodeWireKey, invalidateProjectScope } from "@oh-my-pi/pi-coding-agent/state-broker/project-scope";
+import { invalidateSessionOwnerCache } from "@oh-my-pi/pi-coding-agent/state-broker/session-files";
+import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
+// Type-only alias for the fixture field type; erased at runtime.
 import type { HistoryStorage as HistoryStorageInstance } from "@oh-my-pi/pi-coding-agent/session/history-storage";
-import { removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { sessionDirNameForCwd } from "@oh-my-pi/pi-coding-agent/session/session-paths";
+import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
+import {
+	lookupSessionTitle,
+	recordSessionTitle,
+	resetSessionTitleIndexForTests,
+} from "@oh-my-pi/pi-coding-agent/session/title-index";
+import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
-// Point the agent dir at a throwaway temp dir before loading anything that
-// reads it, then defer those imports. `projects-config` now resolves its path
-// per call, but session dirs and db paths are still derived from the agent dir
-// at first use, so this ordering keeps the whole file off the real `~/.omp`.
+// A throwaway agent dir for this file. `project-scope`'s `resolveProject` and
+// `loadProjects()` (its no-arg default path) and the title-index db path have
+// NO injection seam, so the domains that resolve projects require the
+// process-wide agent dir to point here. It is set in `beforeEach` and restored
+// in `afterEach` so it never redirects a later test file (the reviewer's
+// load-order finding). Session dirs and config dirs ARE injected per test.
 const AGENT_DIR = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "omp-domains-agent-")));
-setAgentDir(AGENT_DIR);
-
-const { ProjectsConfigFile, getProjectsConfigPath, saveProjects } = await import(
-	"@oh-my-pi/pi-coding-agent/config/projects-config"
-);
-const { encodeWireKey, invalidateProjectScope } = await import("@oh-my-pi/pi-coding-agent/state-broker/project-scope");
-const { createHistoryDomain } = await import("@oh-my-pi/pi-coding-agent/state-broker/domains/history");
-const { createTitlesDomain } = await import("@oh-my-pi/pi-coding-agent/state-broker/domains/titles");
-const { createSessionsDomain, readRemoteSessionIndex } = await import(
-	"@oh-my-pi/pi-coding-agent/state-broker/domains/sessions"
-);
-const { createConfigDomain } = await import("@oh-my-pi/pi-coding-agent/state-broker/domains/config");
-const { MAX_CONFIG_FILE_BYTES, configFileMtimeMs, enumerateConfigFiles, readConfigFile, writeConfigFileAtomic } =
-	await import("@oh-my-pi/pi-coding-agent/state-broker/config-files");
-const { HistoryStorage } = await import("@oh-my-pi/pi-coding-agent/session/history-storage");
-const { lookupSessionTitle, recordSessionTitle, resetSessionTitleIndexForTests } = await import(
-	"@oh-my-pi/pi-coding-agent/session/title-index"
-);
-const { serializeTitleSlot } = await import("@oh-my-pi/pi-coding-agent/session/session-title-slot");
-const { sessionDirNameForCwd } = await import("@oh-my-pi/pi-coding-agent/session/session-paths");
-const { getSessionsDir } = await import("@oh-my-pi/pi-utils");
+const SAVED_AGENT_DIR = process.env.PI_CODING_AGENT_DIR;
 
 interface Entry {
 	id: string;
@@ -55,9 +59,12 @@ function makeDir(prefix: string): string {
 let homedirSpy: { mockRestore: () => void } | undefined;
 
 beforeEach(() => {
+	setAgentDir(AGENT_DIR);
 	fs.rmSync(getProjectsConfigPath(AGENT_DIR), { force: true });
 	ProjectsConfigFile.invalidate();
 	invalidateProjectScope();
+	invalidateSessionOwnerCache();
+	invalidateSyncedTitleIds();
 	HistoryStorage.resetInstance();
 	resetSessionTitleIndexForTests();
 });
@@ -70,7 +77,14 @@ afterEach(async () => {
 	fs.rmSync(getProjectsConfigPath(AGENT_DIR), { force: true });
 	ProjectsConfigFile.invalidate();
 	invalidateProjectScope();
+	invalidateSessionOwnerCache();
+	invalidateSyncedTitleIds();
 	for (const root of cleanupRoots.splice(0)) await removeWithRetries(root);
+	// Restore the process-wide agent dir so this file's temp dir never redirects
+	// a later test file: put the env var back exactly and rebuild the resolver.
+	if (SAVED_AGENT_DIR === undefined) delete process.env.PI_CODING_AGENT_DIR;
+	else process.env.PI_CODING_AGENT_DIR = SAVED_AGENT_DIR;
+	__resetDirsFromEnvForTests();
 });
 
 /** Build a physical session body: real fixed-width title slot + JSON header. */
@@ -229,24 +243,32 @@ describe("history domain", () => {
 });
 
 describe("titles domain", () => {
-	test("outbound is STRICT (only synced-project sessions) but inbound is PERMISSIVE", () => {
+	// A synced project under a mocked home plus a per-test temp sessions dir that
+	// is INJECTED into the domain, so the outbound-title scan never reads the
+	// process-wide sessions directory.
+	function setupTitlesHome(): { home: string; foo: string; sessionsDir: string } {
 		const home = makeDir("omp-titles-home-");
 		homedirSpy = spyOn(os, "homedir").mockReturnValue(home);
 		const foo = path.join(home, "projects", "foo");
 		fs.mkdirSync(foo, { recursive: true });
 		setProjects([{ id: "proj:foo", path: foo, sync: true }]);
+		const sessionsDir = path.join(makeDir("omp-titles-root-"), "sessions");
+		fs.mkdirSync(sessionsDir, { recursive: true });
+		return { home, foo, sessionsDir };
+	}
 
-		// A session file inside the synced project's session dir makes its id
-		// "synced"; an id with no such file is not.
-		const sessionsDir = getSessionsDir();
+	test("outbound is STRICT (only synced-project sessions) but inbound is PERMISSIVE", () => {
+		const { foo, sessionsDir } = setupTitlesHome();
+		// A session body inside the synced project's session dir makes its id
+		// "synced" (ownership is confirmed from the body header's cwd); an id with
+		// no such body is not.
 		const fooSessionDir = path.join(sessionsDir, sessionDirNameForCwd(foo));
-		fs.mkdirSync(fooSessionDir, { recursive: true });
-		fs.writeFileSync(path.join(fooSessionDir, "20250101-000000_sIN.jsonl"), "{}\n");
+		writeSessionBody(fooSessionDir, "20250101-000000_sIN.jsonl", foo, "Inside Title");
 
 		recordSessionTitle("sIN", "Inside Title");
 		recordSessionTitle("sOUT", "Outside Title");
 
-		const emitted = createTitlesDomain().changedSince(0, 100);
+		const emitted = createTitlesDomain(sessionsDir).changedSince(0, 100);
 		expect(emitted.map(e => e.key)).toEqual(["sIN"]);
 		expect(Number.isInteger(emitted[0].rev)).toBe(true);
 		// Shape produced by the titles domain itself; named const per cast rule.
@@ -254,13 +276,63 @@ describe("titles domain", () => {
 		expect(value.title).toBe("Inside Title");
 
 		// Inbound accepts a title for a session with no local body at all.
-		createTitlesDomain().applyRemote([
+		createTitlesDomain(sessionsDir).applyRemote([
 			{ key: "sUNKNOWN", rev: 9_000_000, value: { sessionId: "sUNKNOWN", title: "Remote Title", updatedAt: 9000 } },
 		]);
 		expect(lookupSessionTitle("sUNKNOWN")).toBe("Remote Title");
+	});
 
-		// Clean the global sessions dir subtree we created.
-		fs.rmSync(path.dirname(fooSessionDir), { recursive: true, force: true });
+	test("emits a title for a session started in a project SUBDIRECTORY", () => {
+		// Regression: the titles domain once scanned only the project ROOT's
+		// encoded dir, so a session under `~/projects/foo/pkg/a` (encoded dir
+		// `-projects-foo-pkg-a`, not `-projects-foo`) never had its id in the
+		// outbound set and its title never replicated — most sessions in a
+		// monorepo. It now shares `scanOwnedSessionFiles` with the sessions domain.
+		const { foo, sessionsDir } = setupTitlesHome();
+		const subCwd = path.join(foo, "pkg", "a");
+		fs.mkdirSync(subCwd, { recursive: true });
+		const subDir = path.join(sessionsDir, sessionDirNameForCwd(subCwd));
+		expect(path.basename(subDir)).toBe("-projects-foo-pkg-a");
+		writeSessionBody(subDir, "20250102-000000_sSUB.jsonl", subCwd, "Sub Title");
+
+		recordSessionTitle("sSUB", "Sub Title");
+
+		const emitted = createTitlesDomain(sessionsDir).changedSince(0, 100);
+		expect(emitted.map(e => e.key)).toContain("sSUB");
+		// Shape produced by the titles domain itself; named const per cast rule.
+		const value = emitted.find(e => e.key === "sSUB")?.value as { title: string };
+		expect(value.title).toBe("Sub Title");
+	});
+
+	test("does NOT emit a title for a session under a name-prefix sibling project (leak guard)", () => {
+		// `~/projects/foobar` -> `-projects-foobar` shares the name prefix of the
+		// synced `~/projects/foo` (`-projects-foo`) but is a different,
+		// unregistered project. The trailing-dash dir guard AND ownership
+		// confirmation from the body header's cwd must both exclude it: a project
+		// name or task title is exactly what a user disables sync to protect.
+		const { home, foo, sessionsDir } = setupTitlesHome();
+		const foobarCwd = path.join(home, "projects", "foobar");
+		fs.mkdirSync(foobarCwd, { recursive: true });
+		const foobarDir = path.join(sessionsDir, sessionDirNameForCwd(foobarCwd));
+		expect(path.basename(foobarDir)).toBe("-projects-foobar");
+		writeSessionBody(foobarDir, "20250103-000000_sLEAK.jsonl", foobarCwd, "Secret Title");
+
+		// Seed a legitimate foo session so the scan is not trivially empty.
+		writeSessionBody(
+			path.join(sessionsDir, sessionDirNameForCwd(foo)),
+			"20250103-000001_sOK.jsonl",
+			foo,
+			"Ok Title",
+		);
+
+		recordSessionTitle("sLEAK", "Secret Title");
+		recordSessionTitle("sOK", "Ok Title");
+
+		const keys = createTitlesDomain(sessionsDir)
+			.changedSince(0, 100)
+			.map(e => e.key);
+		expect(keys).toContain("sOK");
+		expect(keys).not.toContain("sLEAK");
 	});
 });
 

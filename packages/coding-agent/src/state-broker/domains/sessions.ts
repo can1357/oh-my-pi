@@ -17,9 +17,10 @@ import * as path from "node:path";
 import { getSessionsDir, logger } from "@oh-my-pi/pi-utils";
 import { SESSION_TITLE_SLOT_BYTES } from "../../session/session-entries";
 import { sessionDirNameForCwd } from "../../session/session-paths";
-import { parseTitleSlotFromContent, parseTitleSlotLine } from "../../session/session-title-slot";
-import { decodeWireKey, encodeWireKey, listSyncedProjects, projectById, resolveProject } from "../project-scope";
+import { parseTitleSlotFromContent } from "../../session/session-title-slot";
+import { decodeWireKey, encodeWireKey, projectById } from "../project-scope";
 import type { ReplicatedDomain } from "../replica";
+import { scanOwnedSessionFiles } from "../session-files";
 import type { StateEntry } from "../wire";
 
 /** Metadata a remote-only session needs to appear in the resume picker. */
@@ -107,64 +108,6 @@ function readTitleSlot(absPath: string): string | undefined {
 	}
 }
 
-/**
- * Bytes read from the head of a session body when confirming ownership: the
- * fixed-width title slot plus a generous window for the variable-width session
- * header line. A header longer than this cannot be confirmed (and is rejected),
- * but real headers are a few hundred bytes, so 64 KiB is comfortably safe.
- */
-const HEADER_SCAN_BYTES = SESSION_TITLE_SLOT_BYTES + 64 * 1024;
-
-/**
- * Ceiling on the per-process ownership-confirmation cache. Sessions accumulate
- * over a long-lived TUI, so the cache is bounded and evicts oldest-first rather
- * than growing without limit.
- */
-const CONFIRM_CACHE_MAX = 4_096;
-
-/**
- * Read the origin `cwd` from a session body's header (the first JSON record
- * after the title slot) without loading the whole file. Legacy bodies omit the
- * slot and start with the header. Returns undefined when the header is missing,
- * unparseable, not a session record, or lacks a `cwd`.
- */
-function readHeaderCwd(absPath: string): string | undefined {
-	let fd: number | undefined;
-	try {
-		fd = fs.openSync(absPath, "r");
-		const buf = Buffer.allocUnsafe(HEADER_SCAN_BYTES);
-		const read = fs.readSync(fd, buf, 0, HEADER_SCAN_BYTES, 0);
-		const text = utf8Decoder.decode(buf.subarray(0, read));
-		const firstNl = text.indexOf("\n");
-		if (firstNl < 0) return undefined;
-		// The header follows the title slot when present, else starts at byte 0.
-		let headerStart = 0;
-		let headerEnd = firstNl;
-		if (parseTitleSlotLine(text.slice(0, firstNl))) {
-			const secondNl = text.indexOf("\n", firstNl + 1);
-			if (secondNl < 0) return undefined;
-			headerStart = firstNl + 1;
-			headerEnd = secondNl;
-		}
-		const parsed: unknown = JSON.parse(text.slice(headerStart, headerEnd));
-		if (!parsed || typeof parsed !== "object" || !("type" in parsed) || parsed.type !== "session") {
-			return undefined;
-		}
-		const cwd = "cwd" in parsed ? parsed.cwd : undefined;
-		return typeof cwd === "string" && cwd ? cwd : undefined;
-	} catch {
-		return undefined;
-	} finally {
-		if (fd !== undefined) {
-			try {
-				fs.closeSync(fd);
-			} catch {
-				// fd already gone; nothing to recover.
-			}
-		}
-	}
-}
-
 class SessionsDomain implements ReplicatedDomain {
 	readonly id = "sessions" as const;
 
@@ -175,14 +118,6 @@ class SessionsDomain implements ReplicatedDomain {
 	 * enabled) still touches no disk until there is something to record.
 	 */
 	#index: Record<string, SessionIndexEntry> | undefined;
-	/**
-	 * Per-process cache of session-ownership confirmations, keyed by
-	 * `<abs>\0<mtimeMs>\0<size>` so a body that changes on disk is re-confirmed.
-	 * A value of `null` records a confirmed non-owner (unregistered cwd) so we
-	 * do not re-read its header every sync cycle. Bounded by
-	 * {@link CONFIRM_CACHE_MAX}; oldest insertions are evicted first.
-	 */
-	readonly #confirmCache = new Map<string, { projectId: string; relCwd: string } | null>();
 
 	constructor(sessionsDir: string) {
 		this.#sessionsDir = sessionsDir;
@@ -192,22 +127,9 @@ class SessionsDomain implements ReplicatedDomain {
 	 * Session bodies of SYNC-ENABLED projects only, whose mtime is strictly
 	 * newer than `afterRev`, ascending by mtime, capped at `limit`.
 	 *
-	 * A session may start in any SUBDIRECTORY of a project, which lands it in a
-	 * distinct encoded dir (`~/projects/foo/pkg/a` -> `-projects-foo-pkg-a`),
-	 * not the project root's dir. In a monorepo that is most sessions. We must
-	 * therefore scan the project root dir AND every child dir whose encoded name
-	 * extends it. The trailing `-` in the prefix test is essential: a bare
-	 * `startsWith(base)` would also swallow a sibling project such as
-	 * `~/projects/foobar` (`-projects-foobar`) when base is `-projects-foo`.
-	 *
-	 * The encoding is NOT losslessly reversible (`-projects-foo-pkg-a` is
-	 * ambiguous between `foo/pkg/a`, `foo-pkg/a`, and `foo/pkg-a`), so each
-	 * candidate is CONFIRMED against the project by reading its header `cwd` and
-	 * checking `resolveProject(cwd)?.project.id`. Confirmation is cached per
-	 * `(path, mtime, size)` so a sync cycle does not re-read every header.
-	 *
-	 * FAIL CLOSED: an unregistered / sync-disabled project is never enumerated,
-	 * and a candidate whose header resolves to a different project is rejected.
+	 * Directory enumeration and project-ownership confirmation live in
+	 * {@link scanOwnedSessionFiles}, shared with the `titles` domain so the two
+	 * cannot disagree about which sessions belong to a synced project.
 	 *
 	 * Ascending order is mandatory: the engine advances its watermark to the
 	 * last returned entry's `rev`. Filtering (mtime AND ownership) happens
@@ -215,53 +137,7 @@ class SessionsDomain implements ReplicatedDomain {
 	 * down to empty while newer eligible rows wait beyond it.
 	 */
 	changedSince(afterRev: number, limit: number): StateEntry[] {
-		const changed: Array<{
-			projectId: string;
-			relCwd: string;
-			file: string;
-			abs: string;
-			size: number;
-			mtimeMs: number;
-		}> = [];
-		const rootDirs = this.#readRootDirs();
-		for (const project of listSyncedProjects()) {
-			const base = sessionDirNameForCwd(project.localPath);
-			for (const dirName of rootDirs) {
-				// Root dir OR a subdirectory session dir (`<base>-<...>`).
-				if (dirName !== base && !dirName.startsWith(`${base}-`)) continue;
-				const dir = path.join(this.#sessionsDir, dirName);
-				let files: string[];
-				try {
-					files = Array.from(new Bun.Glob("*.jsonl").scanSync(dir));
-				} catch {
-					// This dir vanished between readdir and scan — skip it.
-					continue;
-				}
-				for (const file of files) {
-					const abs = path.join(dir, file);
-					let stat: fs.Stats;
-					try {
-						stat = fs.statSync(abs);
-					} catch {
-						continue;
-					}
-					// `mtimeMs` is a float with sub-millisecond precision, but a
-					// `rev` is contractually an integer (`stateEntrySchema` rejects
-					// non-integers). Floor before the watermark test as well as
-					// before publication: comparing the raw float against a floored
-					// watermark would re-emit every session forever, since
-					// 100.9 > floor(100.9).
-					const mtimeMs = Math.floor(stat.mtimeMs);
-					if (!stat.isFile() || mtimeMs <= afterRev) continue;
-					// Confirm this file actually belongs to `project` (see method
-					// doc): the encoded dir name alone cannot be trusted.
-					const owner = this.#confirmOwner(abs, mtimeMs, stat.size);
-					if (!owner || owner.projectId !== project.id) continue;
-					changed.push({ projectId: project.id, relCwd: owner.relCwd, file, abs, size: stat.size, mtimeMs });
-				}
-			}
-		}
-
+		const changed = scanOwnedSessionFiles(this.#sessionsDir, { afterRev });
 		changed.sort((a, b) => a.mtimeMs - b.mtimeMs);
 		const page = changed.slice(0, Math.max(0, limit));
 		return page.map(entry => ({
@@ -282,48 +158,6 @@ class SessionsDomain implements ReplicatedDomain {
 				title: readTitleSlot(entry.abs),
 			},
 		}));
-	}
-
-	/** Immediate child dir names of the sessions root; `[]` when it is absent. */
-	#readRootDirs(): string[] {
-		try {
-			return fs
-				.readdirSync(this.#sessionsDir, { withFileTypes: true })
-				.filter(e => e.isDirectory())
-				.map(e => e.name);
-		} catch {
-			return [];
-		}
-	}
-
-	/**
-	 * Confirm which synced project (if any) owns the session body at `abs`, plus
-	 * its project-relative cwd, by reading the header `cwd` and resolving it.
-	 * Cached by `(path, mtime, size)`; `null` records a confirmed non-owner so a
-	 * later cycle does not re-read the header. The cache is bounded.
-	 */
-	#confirmOwner(abs: string, mtimeMs: number, size: number): { projectId: string; relCwd: string } | null {
-		const cacheKey = `${abs}\u0000${mtimeMs}\u0000${size}`;
-		const cached = this.#confirmCache.get(cacheKey);
-		if (cached !== undefined) return cached;
-
-		let result: { projectId: string; relCwd: string } | null = null;
-		const cwd = readHeaderCwd(abs);
-		if (!cwd) {
-			logger.debug(`[state:sessions] ownership unconfirmed, no header cwd: ${abs}`);
-		} else {
-			const resolved = resolveProject(cwd);
-			if (resolved) result = { projectId: resolved.project.id, relCwd: resolved.rel };
-			else logger.debug(`[state:sessions] ownership unconfirmed, cwd not in any project: ${cwd}`);
-		}
-
-		// Bound the cache: evict oldest insertion (Map preserves order) first.
-		if (this.#confirmCache.size >= CONFIRM_CACHE_MAX) {
-			const oldest = this.#confirmCache.keys().next().value;
-			if (oldest !== undefined) this.#confirmCache.delete(oldest);
-		}
-		this.#confirmCache.set(cacheKey, result);
-		return result;
 	}
 
 	/**

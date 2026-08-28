@@ -2,33 +2,23 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ProjectsConfigFile, getProjectsConfigPath, saveProjects } from "@oh-my-pi/pi-coding-agent/config/projects-config";
+import { BlobStore, setDefaultBlobObjectStore } from "@oh-my-pi/pi-coding-agent/session/blob-store";
+import { sessionDirNameForCwd } from "@oh-my-pi/pi-coding-agent/session/session-paths";
+import { parseTitleSlotFromContent, serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 import type { ObjectStore, SettingsLike } from "@oh-my-pi/pi-coding-agent/state-broker/object-store";
-// Type-only import (fully erased): used for the Fixture field type without a
-// `InstanceType<typeof ...>` alias and without a runtime module load.
-import type { SessionReplicator as SessionReplicatorT } from "@oh-my-pi/pi-coding-agent/state-broker/session-replicator";
-import { removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { blobKey, resolveObjectStore, sessionKey } from "@oh-my-pi/pi-coding-agent/state-broker/object-store";
+import { invalidateProjectScope, projectObjectSlug } from "@oh-my-pi/pi-coding-agent/state-broker/project-scope";
+import { SessionReplicator } from "@oh-my-pi/pi-coding-agent/state-broker/session-replicator";
+import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
-// The projects registry freezes its path from `getAgentDir()` at first import
-// (see project-scope.test.ts). Redirect the agent dir to a throwaway temp dir
-// BEFORE importing anything that transitively loads `projects-config`
-// (SessionReplicator does), then defer those imports — the module-loading
-// -boundary exception to the no-dynamic-import rule.
+// A throwaway agent dir for this file. `SessionReplicator` resolves projects
+// through `project-scope`, which reads the process-wide agent dir with no
+// injection seam, so it must point here. Set in `beforeEach` and restored in
+// `afterEach` so this file's temp dir never redirects a later test file (the
+// reviewer's load-order finding).
 const AGENT_DIR = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "omp-objects-agent-")));
-setAgentDir(AGENT_DIR);
-
-const { blobKey, resolveObjectStore, sessionKey } = await import("@oh-my-pi/pi-coding-agent/state-broker/object-store");
-const { BlobStore, setDefaultBlobObjectStore } = await import("@oh-my-pi/pi-coding-agent/session/blob-store");
-const { SessionReplicator } = await import("@oh-my-pi/pi-coding-agent/state-broker/session-replicator");
-const { ProjectsConfigFile, getProjectsConfigPath, saveProjects } = await import(
-	"@oh-my-pi/pi-coding-agent/config/projects-config"
-);
-const { invalidateProjectScope, projectObjectSlug } = await import(
-	"@oh-my-pi/pi-coding-agent/state-broker/project-scope"
-);
-const { serializeTitleSlot, parseTitleSlotFromContent } = await import(
-	"@oh-my-pi/pi-coding-agent/session/session-title-slot"
-);
-const { sessionDirNameForCwd } = await import("@oh-my-pi/pi-coding-agent/session/session-paths");
+const SAVED_AGENT_DIR = process.env.PI_CODING_AGENT_DIR;
 
 /** In-memory {@link ObjectStore} so no test touches the network. */
 class FakeObjectStore implements ObjectStore {
@@ -75,6 +65,7 @@ function makeDir(prefix: string): string {
 let homedirSpy: { mockRestore: () => void } | undefined;
 
 beforeEach(() => {
+	setAgentDir(AGENT_DIR);
 	setDefaultBlobObjectStore(undefined);
 	fs.rmSync(getProjectsConfigPath(AGENT_DIR), { force: true });
 	ProjectsConfigFile.invalidate();
@@ -89,6 +80,11 @@ afterEach(async () => {
 	ProjectsConfigFile.invalidate();
 	invalidateProjectScope();
 	for (const root of cleanupRoots.splice(0)) await removeWithRetries(root);
+	// Restore the process-wide agent dir so this file's temp dir never redirects
+	// a later test file: put the env var back exactly and rebuild the resolver.
+	if (SAVED_AGENT_DIR === undefined) delete process.env.PI_CODING_AGENT_DIR;
+	else process.env.PI_CODING_AGENT_DIR = SAVED_AGENT_DIR;
+	__resetDirsFromEnvForTests();
 });
 
 describe("resolveObjectStore", () => {
@@ -96,28 +92,37 @@ describe("resolveObjectStore", () => {
 		return { get: (key: string) => values[key] };
 	}
 
-	test("returns undefined when the backend is off", () => {
-		expect(resolveObjectStore(settings({ "objects.backend": "off" }))).toBeUndefined();
-		expect(resolveObjectStore(settings({}))).toBeUndefined();
+	// These cases exercise backend-off and missing-field short-circuits, which
+	// return before any resolution; a passthrough async resolver keeps the call
+	// arity correct without affecting the outcome. Indirection-resolution
+	// behaviour is covered separately in state-broker-object-store-config.test.ts.
+	const passthrough = async (raw: string): Promise<string> => raw;
+
+	test("returns undefined when the backend is off", async () => {
+		expect(await resolveObjectStore(settings({ "objects.backend": "off" }), passthrough)).toBeUndefined();
+		expect(await resolveObjectStore(settings({}), passthrough)).toBeUndefined();
 	});
 
-	test("returns undefined when a required s3 field is missing", () => {
+	test("returns undefined when a required s3 field is missing", async () => {
 		// Bucket missing.
 		expect(
-			resolveObjectStore(
+			await resolveObjectStore(
 				settings({ "objects.backend": "s3", "objects.s3.accessKeyId": "a", "objects.s3.secretAccessKey": "s" }),
+				passthrough,
 			),
 		).toBeUndefined();
 		// Access key missing.
 		expect(
-			resolveObjectStore(
+			await resolveObjectStore(
 				settings({ "objects.backend": "s3", "objects.s3.bucket": "b", "objects.s3.secretAccessKey": "s" }),
+				passthrough,
 			),
 		).toBeUndefined();
 		// Secret missing.
 		expect(
-			resolveObjectStore(
+			await resolveObjectStore(
 				settings({ "objects.backend": "s3", "objects.s3.bucket": "b", "objects.s3.accessKeyId": "a" }),
+				passthrough,
 			),
 		).toBeUndefined();
 	});
@@ -199,7 +204,7 @@ describe("SessionReplicator", () => {
 		foo: string;
 		sessionsDir: string;
 		fake: FakeObjectStore;
-		replicator: SessionReplicatorT;
+		replicator: SessionReplicator;
 	}
 
 	function setup(sync: boolean): Fixture {

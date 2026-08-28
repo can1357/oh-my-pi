@@ -113,11 +113,17 @@ export function createStateBrokerRoutes(store: StateBrokerStore): BrokerRouteHan
 			const limit = parseLimit(url);
 			const waitMs = parseWaitMs(url);
 
+			// Snapshot the domain's sequence BEFORE the delta read so a push that
+			// lands in the window between this empty read and the subscription
+			// below is not lost: waitForAdvance re-checks against this baseline
+			// once it is registered and wakes immediately if the sequence already
+			// moved past it.
+			const observedSeq = store.currentSeq(domain);
 			let delta = store.delta(domain, since, limit);
 			// Long-poll only when the immediate read is empty: hold the request
 			// until the domain advances, the window elapses, or the client aborts.
 			if (delta.entries.length === 0 && waitMs > 0) {
-				const outcome = await waitForAdvance(store, domain, req.signal, waitMs);
+				const outcome = await waitForAdvance(store, domain, observedSeq, req.signal, waitMs);
 				if (outcome === "aborted") return new Response(null, { status: 499 });
 				if (outcome === "changed") delta = store.delta(domain, since, limit);
 			}
@@ -153,10 +159,19 @@ export function createStateBrokerRoutes(store: StateBrokerStore): BrokerRouteHan
 /**
  * Park until the domain's sequence advances, the wait window elapses, or the
  * request aborts. Fed by the store's in-process notifier — never polls SQLite.
+ *
+ * `observedSeq` is the sequence the caller sampled *before* its empty delta
+ * read. Subscribing first and only then re-checking against that baseline is
+ * what closes the lost-wakeup race: a push that advanced the sequence between
+ * the caller's read and this subscription either already fired our notifier
+ * (settling "changed") or is caught by the re-check — there is no gap in which
+ * a wake-up can be dropped, so a busy broker never parks a request for the full
+ * window on data that was already available.
  */
 function waitForAdvance(
 	store: StateBrokerStore,
 	domain: StateDomainId,
+	observedSeq: number,
 	signal: AbortSignal,
 	waitMs: number,
 ): Promise<"changed" | "timeout" | "aborted"> {
@@ -178,6 +193,15 @@ function waitForAdvance(
 	const unsubscribe = store.subscribe(domain, () => settle("changed"));
 	const onAbort = (): void => settle("aborted");
 	signal.addEventListener("abort", onAbort, { once: true });
+
+	// Registered above; now re-check the baseline. If a push advanced the
+	// sequence before the subscription existed, its notifier fired into the
+	// void — settle "changed" here so the caller re-reads the delta instead of
+	// blocking for the full window. `settle` is idempotent, so a notifier that
+	// raced this check is harmless. This runs synchronously before the promise
+	// is awaited, so `settle` has already torn down the timer and subscription
+	// on the fast path — nothing leaks and no timer pins the process.
+	if (store.currentSeq(domain) > observedSeq) settle("changed");
 
 	return done.promise;
 }

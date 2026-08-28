@@ -37,8 +37,14 @@ export interface ReplicatedDomain {
 	 * ordered by ascending `rev`, capped at `limit`.
 	 *
 	 * Ascending order is load-bearing: the engine advances its outbound
-	 * watermark to the last pushed entry's `rev`, so an out-of-order page would
-	 * skip rows permanently.
+	 * watermark to the last entry's `rev`, so an out-of-order page would skip
+	 * rows permanently.
+	 *
+	 * A filtered domain (project scoping, size caps) MUST apply its filter
+	 * DURING the scan rather than to an already-limited page. The watermark
+	 * follows the last row returned, so a page whose rows were all dropped after
+	 * the fact stalls the cursor while eligible rows sit just beyond it, and the
+	 * same window is rescanned forever.
 	 */
 	changedSince(afterRev: number, limit: number): StateEntry[];
 
@@ -56,7 +62,14 @@ export interface ReplicatedDomain {
 export interface SyncCursor {
 	/** Highest broker `seq` already pulled and applied. */
 	inboundSeq: number;
-	/** Highest local entry `rev` already pushed. */
+	/**
+	 * Highest local entry `rev` already scanned for pushing.
+	 *
+	 * Only ever moved by the push path, and never past the local clock. Merging
+	 * a remote row deliberately leaves this alone: remote revs come from another
+	 * machine's clock, and letting one drag this forward would mute every local
+	 * write below it. See `StateSyncEngine`'s watermark ceiling.
+	 */
 	outboundRev: number;
 }
 
@@ -69,6 +82,36 @@ CREATE TABLE IF NOT EXISTS sync_cursor (
 `;
 
 /**
+ * Keys a domain has already published, so a LOCAL DELETION is detectable.
+ *
+ * A domain that enumerates live state (files on disk, rows in a table) can only
+ * ever report what still exists, so on its own it can never emit the tombstone
+ * that tells peers something was removed. Remembering what was published turns
+ * "absent from this scan" into a deletion event.
+ *
+ * `deleted` latches the tombstone: it stays set, and the row stays, until the
+ * outbound watermark passes `rev`, which only happens once a push carrying the
+ * tombstone has actually succeeded. A failed push therefore retries instead of
+ * losing the deletion.
+ */
+const PUBLISHED_TABLE_DDL = `
+CREATE TABLE IF NOT EXISTS published_key (
+	domain TEXT NOT NULL,
+	key TEXT NOT NULL,
+	rev INTEGER NOT NULL,
+	deleted INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (domain, key)
+);
+`;
+
+/** One remembered publication; `deleted` marks a pending tombstone. */
+export interface PublishedKey {
+	key: string;
+	rev: number;
+	deleted: boolean;
+}
+
+/**
  * Cursor persistence for the replica, in its own `state-sync.db`.
  *
  * Deliberately a separate file from every domain database: cursors are written
@@ -79,6 +122,10 @@ export class StateSyncStore {
 	#db: Database;
 	#read: Statement;
 	#write: Statement;
+	#readPublished: Statement;
+	#writePublished: Statement;
+	#markDeleted: Statement;
+	#forgetPublished: Statement;
 
 	constructor(dbPath: string = getStateSyncDbPath()) {
 		fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -90,12 +137,22 @@ export class StateSyncStore {
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
 ${CURSOR_TABLE_DDL}
+${PUBLISHED_TABLE_DDL}
 		`);
 		this.#read = this.#db.prepare("SELECT inbound_seq, outbound_rev FROM sync_cursor WHERE domain = ?");
 		this.#write = this.#db.prepare(`
 INSERT INTO sync_cursor (domain, inbound_seq, outbound_rev) VALUES (?, ?, ?)
 ON CONFLICT(domain) DO UPDATE SET inbound_seq = excluded.inbound_seq, outbound_rev = excluded.outbound_rev
 		`);
+		this.#readPublished = this.#db.prepare("SELECT key, rev, deleted FROM published_key WHERE domain = ?");
+		this.#writePublished = this.#db.prepare(`
+INSERT INTO published_key (domain, key, rev, deleted) VALUES (?, ?, ?, 0)
+ON CONFLICT(domain, key) DO UPDATE SET rev = excluded.rev, deleted = 0
+		`);
+		this.#markDeleted = this.#db.prepare(`
+UPDATE published_key SET rev = ?, deleted = 1 WHERE domain = ? AND key = ?
+		`);
+		this.#forgetPublished = this.#db.prepare("DELETE FROM published_key WHERE domain = ? AND key = ?");
 	}
 
 	get(domain: StateDomainId): SyncCursor {
@@ -119,9 +176,55 @@ ON CONFLICT(domain) DO UPDATE SET inbound_seq = excluded.inbound_seq, outbound_r
 		}
 	}
 
+	/**
+	 * Everything this domain has published, live rows and pending tombstones
+	 * alike. Returns `[]` on a read failure: the caller then sees no prior
+	 * publications and simply re-publishes what exists, which LWW absorbs.
+	 */
+	published(domain: StateDomainId): PublishedKey[] {
+		try {
+			const rows = this.#readPublished.all(domain) as Array<{ key: string; rev: number; deleted: number }>;
+			return rows.map(row => ({ key: row.key, rev: row.rev, deleted: row.deleted !== 0 }));
+		} catch (error) {
+			logger.warn("state sync published read failed", { domain, error: String(error) });
+			return [];
+		}
+	}
+
+	/** Record that `key` was published at `rev`, clearing any pending tombstone. */
+	recordPublished(domain: StateDomainId, key: string, rev: number): void {
+		try {
+			this.#writePublished.run(domain, key, rev);
+		} catch (error) {
+			logger.warn("state sync published write failed", { domain, key, error: String(error) });
+		}
+	}
+
+	/** Latch a pending tombstone for `key` at `rev`. */
+	recordDeleted(domain: StateDomainId, key: string, rev: number): void {
+		try {
+			this.#markDeleted.run(rev, domain, key);
+		} catch (error) {
+			logger.warn("state sync tombstone latch failed", { domain, key, error: String(error) });
+		}
+	}
+
+	/** Drop a remembered publication, once its tombstone is known delivered. */
+	forgetPublished(domain: StateDomainId, key: string): void {
+		try {
+			this.#forgetPublished.run(domain, key);
+		} catch (error) {
+			logger.warn("state sync published delete failed", { domain, key, error: String(error) });
+		}
+	}
+
 	close(): void {
 		this.#read.finalize();
 		this.#write.finalize();
+		this.#readPublished.finalize();
+		this.#writePublished.finalize();
+		this.#markDeleted.finalize();
+		this.#forgetPublished.finalize();
 		this.#db.close();
 	}
 }
