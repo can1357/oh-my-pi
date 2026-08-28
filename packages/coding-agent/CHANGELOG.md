@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added idle recap updates to JSONL RPC sessions, including reconnect state and bundled TypeScript/Python client listeners ([#10085](https://github.com/can1357/oh-my-pi/pull/10085) by [@rhlsthrm](https://github.com/rhlsthrm)).
+
 ### Fixed
 
 - `edit` and `write` no longer refuse handwritten files named `generated.go`, `generated.ts`, `generated.js`, or `generated.py`; these are treated as auto-generated only when their header carries a generated-code marker ([#13138](https://github.com/can1357/oh-my-pi/issues/13138), [#13139](https://github.com/can1357/oh-my-pi/pull/13139) by [@radkawar](https://github.com/radkawar))

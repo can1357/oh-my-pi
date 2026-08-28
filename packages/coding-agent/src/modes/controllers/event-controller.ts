@@ -2,7 +2,7 @@ import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { type Component, Loader, TERMINAL } from "@oh-my-pi/pi-tui";
-import { formatDuration, isRecord, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDuration, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { extractTextContent } from "../../commit/utils";
 import { settings } from "../../config/settings";
@@ -22,7 +22,7 @@ import { createUsageRowBlock, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/us
 import { getSymbolTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
-import idleRecapPrompt from "../../prompts/system/recap-user.md" with { type: "text" };
+import { generateIdleRecap, idleRecapDelayMs } from "../../modes/idle-recap";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import {
 	isSilentAbort,
@@ -83,8 +83,6 @@ const IRC_MESSAGE_VISIBLE_TTL_MS = 10_000;
  * oldest live-region card retires as soon as a new one would exceed the cap.
  */
 const MAX_LIVE_IRC_CARDS = 4;
-const IDLE_RECAP_MIN_SECONDS = 1;
-const IDLE_RECAP_MAX_SECONDS = 3600;
 
 const RAW_PARTIAL_JSON_RENDERERS: Record<string, true> = { bash: true, edit: true, apply_patch: true };
 
@@ -2472,8 +2470,7 @@ export class EventController {
 		if (!recapSettings.enabled) return;
 		if (this.ctx.editor.getText().trim()) return;
 
-		const timeoutMs =
-			Math.max(IDLE_RECAP_MIN_SECONDS, Math.min(IDLE_RECAP_MAX_SECONDS, recapSettings.idleSeconds)) * 1000;
+		const timeoutMs = idleRecapDelayMs(recapSettings.idleSeconds);
 		this.#idleRecapTimer = setTimeout(() => {
 			this.#idleRecapTimer = undefined;
 			this.#idleRecapPending = false;
@@ -2497,21 +2494,20 @@ export class EventController {
 		if (!this.ctx.viewSession.model) return;
 		if (this.ctx.viewSession.messages.length === 0) return;
 
-		const promptText = prompt.render(idleRecapPrompt, {
-			goal: this.#idleRecapGoalText() ?? "",
-			task: nextActionableTask(this.ctx.todoPhases)?.content ?? "",
-		});
+		const hints = {
+			goal: this.#idleRecapGoalText(),
+			task: nextActionableTask(this.ctx.todoPhases)?.content,
+		};
 
 		const abort = new AbortController();
 		this.#idleRecapAbort = abort;
 		try {
 			const session = this.ctx.viewSession;
-			const { replyText } = await session.runEphemeralTurn({ promptText, signal: abort.signal });
+			const recap = await generateIdleRecap(session, hints, abort.signal);
 			if (this.#idleRecapAbort !== abort || abort.signal.aborted || !this.#idleConditionsHold()) return;
-			const recap = previewLine(replyText, TRUNCATE_LENGTHS.RECAP);
 			if (!recap) return;
-			session.sessionManager.recordRecap(replyText);
-			this.ctx.showStatus(theme.fg("dim", theme.italic(`※ recap: ${recap}`)), { dim: false });
+			session.sessionManager.recordRecap(recap.replyText);
+			this.ctx.showStatus(theme.fg("dim", theme.italic(`※ recap: ${recap.text}`)), { dim: false });
 		} catch (error) {
 			if (!abort.signal.aborted) logger.debug("Idle recap turn failed", { error: String(error) });
 		} finally {

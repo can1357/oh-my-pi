@@ -34,6 +34,8 @@ import type {
 	RpcHostToolUpdate,
 	RpcOpenSessionResult,
 	RpcPromptResultFrame,
+	RpcRecap,
+	RpcRecapUpdateFrame,
 	RpcResponse,
 	RpcSessionSettledFrame,
 	RpcSessionState,
@@ -105,6 +107,7 @@ export type RpcSubagentEventListener = (payload: RpcSubagentEventFrame["payload"
 export type RpcAvailableCommandsUpdateListener = (commands: RpcAvailableSlashCommand[]) => void;
 export type RpcPromptResultListener = (result: RpcPromptResultFrame) => void;
 export type RpcSessionSettledListener = () => void;
+export type RpcRecapUpdateListener = (recap: RpcRecap | null) => void;
 
 export interface RpcClientToolContext<TDetails = unknown> {
 	toolCallId: string;
@@ -229,6 +232,17 @@ function isRpcAvailableCommandsUpdateFrame(value: unknown): value is RpcAvailabl
 	return value.type === "available_commands_update" && Array.isArray(value.commands);
 }
 
+function isRpcRecapUpdateFrame(value: unknown): value is RpcRecapUpdateFrame {
+	if (!isRecord(value) || value.type !== "recap_update") return false;
+	if (value.recap === null) return true;
+	return (
+		isRecord(value.recap) &&
+		typeof value.recap.text === "string" &&
+		value.recap.trigger === "idle" &&
+		typeof value.recap.timestamp === "number"
+	);
+}
+
 function isRpcHostToolCallRequest(value: unknown): value is RpcHostToolCallRequest {
 	if (!isRecord(value)) return false;
 	return (
@@ -296,6 +310,7 @@ export class RpcClient {
 	#sessionSettledListeners = new Set<RpcSessionSettledListener>();
 	/** `promptAndWait` completions keyed by request id; registered before the prompt is sent. */
 	#promptResultWaiters = new Map<string, (result: RpcPromptResultFrame) => void>();
+	#recapUpdateListeners = new Set<RpcRecapUpdateListener>();
 	#pendingRequests: Map<string, { resolve: (response: RpcResponse) => void; reject: (error: Error) => void }> =
 		new Map();
 	#customTools: RpcClientCustomTool[] = [];
@@ -603,6 +618,14 @@ export class RpcClient {
 		this.#sessionSettledListeners.add(listener);
 		return () => {
 			this.#sessionSettledListeners.delete(listener);
+		};
+	}
+
+	/** Subscribe to `recap_update` frames: idle recaps, or `null` when the recap is cleared. */
+	onRecapUpdate(listener: RpcRecapUpdateListener): () => void {
+		this.#recapUpdateListeners.add(listener);
+		return () => {
+			this.#recapUpdateListeners.delete(listener);
 		};
 	}
 
@@ -1248,6 +1271,13 @@ export class RpcClient {
 		if (isRpcAvailableCommandsUpdateFrame(data)) {
 			for (const listener of this.#availableCommandsUpdateListeners) {
 				listener(data.commands);
+			}
+			return;
+		}
+
+		if (isRpcRecapUpdateFrame(data)) {
+			for (const listener of this.#recapUpdateListeners) {
+				listener(data.recap);
 			}
 			return;
 		}
