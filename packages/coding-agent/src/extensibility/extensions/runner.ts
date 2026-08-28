@@ -1544,6 +1544,21 @@ export class ExtensionRunner {
 		event: ToolApprovalReviewEvent,
 		signal?: AbortSignal,
 	): Promise<ToolApprovalReviewResult> {
+		// Host invariant: the material input reviewed must be the material input
+		// executed. Dispatch an immutable snapshot instead of the live object so a
+		// mutation attempt cannot reach later handlers or eventual execution. A
+		// non-JSON input (cannot happen for schema-validated tool params) fails
+		// closed to the native approval path.
+		let reviewedInput: Record<string, unknown>;
+		try {
+			reviewedInput = deepFreeze(structuredClone(event.input));
+		} catch (error) {
+			return {
+				decision: "escalate",
+				reason: `tool input could not be snapshotted for review: ${error instanceof Error ? error.message : String(error)}`,
+			};
+		}
+		const reviewedEvent: ToolApprovalReviewEvent = { ...event, input: reviewedInput };
 		let ctx: ExtensionContext | undefined;
 		let participated = false;
 		let hasEscalation = false;
@@ -1562,7 +1577,7 @@ export class ExtensionRunner {
 						event: ToolApprovalReviewEvent,
 						ctx: ExtensionContext,
 					) => Promise<ToolApprovalReviewResult | undefined>,
-					event,
+					reviewedEvent,
 					ctx,
 					ext,
 					normalizeHandlerTimeout(
@@ -1848,4 +1863,14 @@ export class ExtensionRunner {
 
 		return undefined;
 	}
+}
+/** Recursively freezes a JSON value so event handlers cannot mutate it. */
+function deepFreeze<T>(value: T): T {
+	if (typeof value === "object" && value !== null) {
+		for (const key of Object.keys(value as Record<string, unknown>)) {
+			deepFreeze((value as Record<string, unknown>)[key]);
+		}
+		Object.freeze(value);
+	}
+	return value;
 }

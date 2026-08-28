@@ -51,6 +51,7 @@ import type {
 	ToolDefinition,
 	ToolInfo,
 } from "./types";
+import { EXTENSION_EVENT_NAMES } from "./types";
 
 installLegacyPiSpecifierShim();
 
@@ -156,6 +157,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	readonly typebox = TypeBox;
 	readonly arktype = type;
 	readonly zod = zod;
+	readonly supportedEvents = EXTENSION_EVENT_NAMES;
 	readonly flagValues = new Map<string, boolean | string>();
 	readonly pendingProviderRegistrations: Array<{
 		name: string;

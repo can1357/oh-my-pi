@@ -931,8 +931,9 @@ export interface ToolApprovalResolvedEvent {
  * Fired after final tool-input resolution for an eligible mode-derived prompt,
  * before the native approval selector. The review may approve the call
  * (skipping the ordinary prompt), escalate back to it, or deny the call. It
- * cannot rewrite the input. `input` is the exact object that will reach
- * execution.
+ * cannot rewrite the input. `input` is an immutable snapshot, identical to the
+ * input that will reach execution; mutation attempts throw and escalate to the
+ * native approval path.
  */
 export interface ToolApprovalReviewEvent {
 	type: "tool_approval_review";
@@ -1230,6 +1231,62 @@ export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family exte
 		: ServiceTier;
 
 /**
+ * Event names the host dispatches to extension handlers. Plugins use this to
+ * detect whether the running host supports a given seam (e.g.
+ * `tool_approval_review`) — registering a handler for an event an older host
+ * does not dispatch is a silent no-op. Keep in sync with the `on` overloads
+ * below.
+ */
+export const EXTENSION_EVENT_NAMES: readonly string[] = Object.freeze([
+	"resources_discover",
+	"session_start",
+	"session_before_switch",
+	"session_switch",
+	"session_before_branch",
+	"session_branch",
+	"session_before_compact",
+	"session.compacting",
+	"session_compact",
+	"session_shutdown",
+	"session_before_tree",
+	"session_tree",
+	"context",
+	"before_provider_request",
+	"after_provider_response",
+	"before_agent_start",
+	"agent_start",
+	"agent_end",
+	"session_stop",
+	"turn_start",
+	"turn_end",
+	"message_start",
+	"message_update",
+	"message_end",
+	"tool_execution_start",
+	"tool_execution_update",
+	"tool_execution_end",
+	"auto_compaction_start",
+	"auto_compaction_end",
+	"auto_retry_start",
+	"auto_retry_end",
+	"retry_fallback_applied",
+	"retry_fallback_succeeded",
+	"ttsr_triggered",
+	"todo_reminder",
+	"goal_updated",
+	"credential_disabled",
+	"input",
+	"tool_approval_requested",
+	"tool_approval_resolved",
+	"tool_approval_review",
+	"tool_call",
+	"tool_result",
+	"user_bash",
+	"user_python",
+	"mcp_notification",
+]);
+
+/**
  * ExtensionAPI passed to extension factory functions.
  */
 export interface ExtensionAPI {
@@ -1251,6 +1308,9 @@ export interface ExtensionAPI {
 
 	/** Injected pi-coding-agent exports for accessing SDK utilities */
 	pi: typeof PiCodingAgent;
+
+	/** Event names the host dispatches to extension handlers; plugins use it to detect seam support on older hosts. */
+	supportedEvents: readonly string[];
 
 	// =========================================================================
 	// Event Subscription

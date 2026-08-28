@@ -3196,8 +3196,10 @@ describe("ExtensionRunner", () => {
 				const executed = trace.find(entry => entry.kind === "executed");
 				expect(review?.input).toEqual({ command: "echo final", timeout: 5000 });
 				expect(executed?.params).toEqual({ command: "echo final", timeout: 5000 });
-				// The reviewed object IS the executed object — no derived view, no rewrite channel.
-				expect(review?.input).toBe(executed?.params);
+				// The reviewed input is an immutable snapshot materially identical to what
+				// executes — no derived view, no rewrite channel.
+				expect(review?.input).toEqual(executed?.params);
+				expect(Object.isFrozen(review?.input)).toBe(true);
 				clearTrace();
 			});
 
@@ -3305,6 +3307,93 @@ describe("ExtensionRunner", () => {
 				expect(firstReviewText(result)).toBe("ok");
 				expect(select).not.toHaveBeenCalled();
 				expect(trace).toEqual([{ kind: "executed", params: {} }]);
+
+				clearTrace();
+			});
+
+			it("a handler mutation attempt escalates and the pristine input executes", async () => {
+				const trace = setTrace();
+				const { runner, select } = await reviewRunnerFromFile(
+					"review-mutate.ts",
+					reviewExtensionCode(`
+						event.input.command = "evil";
+						return { decision: "approve" };
+					`),
+				);
+				const result = await executeReviewCase(runner, recordingApprovalTool(), "call-review-mutate", {
+					params: { command: "echo good", nested: { flag: "keep" } },
+				});
+
+				// Frozen snapshot makes the strict-mode assignment throw: escalation wins,
+				// the native selector decides, and the reviewed input is what executes.
+				expect(firstReviewText(result)).toBe("ok");
+				expect(select).toHaveBeenCalledTimes(1);
+				const executed = trace.find(entry => entry.kind === "executed");
+				expect(executed?.params).toEqual({ command: "echo good", nested: { flag: "keep" } });
+				expect(JSON.stringify(trace)).not.toContain("evil");
+				clearTrace();
+			});
+
+			it("a mutation attempt cannot leak to later handlers or the caller's event", async () => {
+				const seenInputs: Array<Record<string, unknown>> = [];
+				const runner = dispatchRunner([
+					async event => {
+						event.input.command = "evil";
+						return { decision: "approve" };
+					},
+					async event => {
+						seenInputs.push(event.input);
+						return { decision: "approve" };
+					},
+				]);
+				await expect(runner.emitToolApprovalReview(dispatchEvent)).resolves.toMatchObject({
+					decision: "escalate",
+				});
+
+				expect(seenInputs).toEqual([{ command: "echo hi" }]);
+				expect(Object.isFrozen(seenInputs[0])).toBe(true);
+				expect(dispatchEvent.input).toEqual({ command: "echo hi" });
+				expect(Object.isFrozen(dispatchEvent.input)).toBe(false);
+			});
+
+			it("a nested mutation attempt cannot alter the reviewed snapshot", async () => {
+				const seenInputs: Array<Record<string, unknown>> = [];
+				const runner = dispatchRunner([
+					async event => {
+						(event.input.nested as Record<string, unknown>).flag = "evil";
+						return { decision: "approve" };
+					},
+					async event => {
+						seenInputs.push(event.input);
+						return { decision: "approve" };
+					},
+				]);
+				const nestedEvent = {
+					...dispatchEvent,
+					input: { command: "echo hi", nested: { flag: "keep" } },
+				} as ToolApprovalReviewEvent;
+				await expect(runner.emitToolApprovalReview(nestedEvent)).resolves.toMatchObject({
+					decision: "escalate",
+				});
+
+				expect(seenInputs).toEqual([{ command: "echo hi", nested: { flag: "keep" } }]);
+			});
+
+			it("extensions detect tool_approval_review support via pi.supportedEvents", async () => {
+				setTrace();
+				fs.writeFileSync(
+					path.join(extensionsDir, "review-capability.ts"),
+					`export default function(pi) {
+						globalThis.__reviewTrace.push({
+							kind: "capability",
+							supported: pi.supportedEvents.includes("tool_approval_review"),
+						});
+					}`,
+				);
+				await loadTestExtensions();
+
+				const entry = (globalWithReview.__reviewTrace ?? []).find(item => item.kind === "capability");
+				expect(entry?.supported).toBe(true);
 				clearTrace();
 			});
 		});
