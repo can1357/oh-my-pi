@@ -63,8 +63,14 @@ function fnmatchRegex(pattern: string): RegExp {
 					cls += "^";
 					i++;
 				}
-				// a leading ] is a literal member
-				if (pattern[i] === "]") {
+				// a leading ^ is a literal member in fnmatch (only ! negates);
+				// escape it so JavaScript doesn't read the class as negated
+				if (pattern[i] === "^") {
+					cls += "\\^";
+					i++;
+				}
+				// a leading ] (first class body char) is a literal member
+				if (cls === "" && pattern[i] === "]") {
 					cls += "\\]";
 					i++;
 				}

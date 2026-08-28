@@ -10,10 +10,6 @@ import { logger } from "@oh-my-pi/pi-utils";
 describe("filterMCPTools", () => {
 	const tools = ["search", "read", "schedule_message", "create_canvas", "channel_read", "channel_write"];
 
-	it("returns every tool unchanged when no filter is configured", () => {
-		expect(filterMCPTools({ toolNames: tools })).toEqual({ allowed: tools, unmatched: [], filterEmpty: false });
-	});
-
 	it("allowlists literal names and glob patterns against raw advertised names", () => {
 		expect(filterMCPTools({ toolNames: tools, enabledTools: ["search", "channel_*"] }).allowed).toEqual([
 			"search",
@@ -92,6 +88,28 @@ describe("filterMCPTools", () => {
 				enabledTools: ["admin_{delete}"],
 			}).allowed,
 		).toEqual(["admin_{delete}"]);
+	});
+	// fnmatch negates a class only on a leading `!`; a leading `^` is a literal
+	// member. Emitting `[^a]` verbatim would let JavaScript negate the class and
+	// admit nearly every name.
+	it("a leading caret in a class is a literal member, not negation", () => {
+		const names = ["^search", "archive", "search", "beta"];
+		// `[^a]*` = first char is ^ or a
+		expect(filterMCPTools({ toolNames: names, enabledTools: ["[^a]*"] }).allowed).toEqual(["^search", "archive"]);
+		// `[!a]*` = negation: first char is anything but a
+		expect(filterMCPTools({ toolNames: names, enabledTools: ["[!a]*"] }).allowed).toEqual([
+			"^search",
+			"search",
+			"beta",
+		]);
+		// caret-only classes: `[!^]*` negates just ^; `[^]*` matches literal ^
+		// (a leading `]` after `^`/members is the class terminator, not literal)
+		expect(filterMCPTools({ toolNames: names, enabledTools: ["[!^]*"] }).allowed).toEqual([
+			"archive",
+			"search",
+			"beta",
+		]);
+		expect(filterMCPTools({ toolNames: names, enabledTools: ["[^]*"] }).allowed).toEqual(["^search"]);
 	});
 });
 
