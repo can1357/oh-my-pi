@@ -464,4 +464,58 @@ describe("Zed Model Discovery", () => {
 			vi.useRealTimers();
 		}
 	});
+
+	it("times out a stalled models request and retries on the next discovery attempt", async () => {
+		vi.useFakeTimers();
+		const pendingModels = Promise.withResolvers<Response>();
+		let modelsAttempts = 0;
+		const fetcher: FetchImpl = async (input, init) => {
+			const url = String(input);
+			if (url.endsWith("/models")) {
+				modelsAttempts++;
+				if (modelsAttempts === 1) {
+					const signal = init?.signal;
+					signal?.addEventListener(
+						"abort",
+						() => pendingModels.reject(signal.reason ?? new Error("models request aborted")),
+						{ once: true },
+					);
+					return pendingModels.promise;
+				}
+				return new Response(
+					JSON.stringify({ models: [{ provider: "anthropic", id: "claude-after-model-timeout" }] }),
+					{
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					},
+				);
+			}
+			return new Response("Not Found", { status: 404 });
+		};
+
+		try {
+			const firstAttempt = fetchZedModels({
+				token: "direct_pre_minted_llm_token",
+				fetcher,
+			});
+			await Promise.resolve();
+			expect(modelsAttempts).toBe(1);
+
+			vi.advanceTimersByTime(10_000);
+			const firstResult = await resolveAfterMicrotasks(
+				firstAttempt,
+				"Zed discovery models request did not settle after its timeout",
+			);
+			expect(firstResult).toBeNull();
+
+			const retryResult = await fetchZedModels({
+				token: "direct_pre_minted_llm_token",
+				fetcher,
+			});
+			expect(retryResult?.map(model => model.id)).toEqual(["claude-after-model-timeout"]);
+			expect(modelsAttempts).toBe(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });

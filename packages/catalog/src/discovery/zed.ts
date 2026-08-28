@@ -42,7 +42,31 @@ export interface FetchZedModelsOptions {
 }
 
 const FALLBACK_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High] as const;
+const ZED_DISCOVERY_TIMEOUT_MS = 10_000;
 const ZED_LLM_TOKEN_TIMEOUT_MS = 10_000;
+
+/**
+ * Uses a cancellable timer rather than the native abort-timeout helper so
+ * successful fast discovery requests do not leave armed timeout signals for
+ * concurrent GC to trip over later.
+ */
+async function withZedDiscoveryTimeout<T>(
+	timeoutMs: number,
+	signal: AbortSignal | undefined,
+	run: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+	const timeoutController = new AbortController();
+	const timer = setTimeout(
+		() => timeoutController.abort(new DOMException("The operation timed out.", "TimeoutError")),
+		timeoutMs,
+	);
+	const requestSignal = signal ? AbortSignal.any([signal, timeoutController.signal]) : timeoutController.signal;
+	try {
+		return await run(requestSignal);
+	} finally {
+		clearTimeout(timer);
+	}
+}
 
 /**
  * Official Zed token rates from zed.dev/pricing (+10% markup over upstream list price).
@@ -109,39 +133,33 @@ async function mintZedLlmToken(
 	fetcher: FetchImpl,
 	signal?: AbortSignal,
 ): Promise<string | null> {
-	const timeoutController = new AbortController();
-	const timer = setTimeout(
-		() => timeoutController.abort(new DOMException("The operation timed out.", "TimeoutError")),
-		ZED_LLM_TOKEN_TIMEOUT_MS,
-	);
-	const requestSignal = signal ? AbortSignal.any([signal, timeoutController.signal]) : timeoutController.signal;
 	try {
-		const response = await fetcher(`${ZED_CLOUD_URL}/client/llm_tokens`, {
-			method: "POST",
-			headers: {
-				Authorization: `${userId} ${accessToken}`,
-				"Content-Type": "application/json",
-				[ZED_HEADERS.VERSION]: ZED_APP_VERSION,
-			},
-			body: JSON.stringify({ organization_id: null }),
-			signal: requestSignal,
+		return await withZedDiscoveryTimeout(ZED_LLM_TOKEN_TIMEOUT_MS, signal, async requestSignal => {
+			const response = await fetcher(`${ZED_CLOUD_URL}/client/llm_tokens`, {
+				method: "POST",
+				headers: {
+					Authorization: `${userId} ${accessToken}`,
+					"Content-Type": "application/json",
+					[ZED_HEADERS.VERSION]: ZED_APP_VERSION,
+				},
+				body: JSON.stringify({ organization_id: null }),
+				signal: requestSignal,
+			});
+
+			if (!response.ok) {
+				return null;
+			}
+
+			const payload: unknown = await response.json();
+			const parsed = zedLlmTokenResponseSchema(payload);
+			if (parsed instanceof type.errors || !parsed.token.trim()) {
+				return null;
+			}
+
+			return parsed.token;
 		});
-
-		if (!response.ok) {
-			return null;
-		}
-
-		const payload: unknown = await response.json();
-		const parsed = zedLlmTokenResponseSchema(payload);
-		if (parsed instanceof type.errors || !parsed.token.trim()) {
-			return null;
-		}
-
-		return parsed.token;
 	} catch {
 		return null;
-	} finally {
-		clearTimeout(timer);
 	}
 }
 
@@ -175,17 +193,24 @@ export async function fetchZedModels(options: FetchZedModelsOptions = {}): Promi
 			headers.Authorization = `Bearer ${bearerToken}`;
 		}
 
-		const response = await fetcher(`${ZED_CLOUD_URL}/models`, {
-			method: "GET",
-			headers,
-			signal: options.signal,
+		const payload = await withZedDiscoveryTimeout(ZED_DISCOVERY_TIMEOUT_MS, options.signal, async signal => {
+			const response = await fetcher(`${ZED_CLOUD_URL}/models`, {
+				method: "GET",
+				headers,
+				signal,
+			});
+
+			if (!response.ok) {
+				return null;
+			}
+
+			return (await response.json()) as unknown;
 		});
 
-		if (!response.ok) {
+		if (payload === null) {
 			return null;
 		}
 
-		const payload: unknown = await response.json();
 		const parsed = zedListModelsResponseSchema(payload);
 		if (parsed instanceof type.errors) {
 			return null;

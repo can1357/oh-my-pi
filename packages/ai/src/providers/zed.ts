@@ -1374,6 +1374,20 @@ export function streamZed(
 					>;
 
 					const eventType = event.type as string | undefined;
+					const promptFeedback =
+						typeof event.promptFeedback === "object" && event.promptFeedback !== null
+							? (event.promptFeedback as { blockReason?: unknown; blockReasonMessage?: unknown })
+							: undefined;
+					if (typeof promptFeedback?.blockReason === "string" && promptFeedback.blockReason.length > 0) {
+						const detail =
+							typeof promptFeedback.blockReasonMessage === "string"
+								? promptFeedback.blockReasonMessage
+								: undefined;
+						throw new ProviderResponseError(
+							`Request blocked by Google (${promptFeedback.blockReason})${detail ? `: ${detail}` : ""}`,
+							{ provider: model.provider, kind: "content-blocked" },
+						);
+					}
 
 					// ─── ANTHROPIC EVENT FLAVOR ───
 					if (eventType === "content_block_start") {
@@ -1701,6 +1715,30 @@ export function streamZed(
 							throw new ProviderResponseError("incomplete: content_filter", { kind: "content-blocked" });
 						}
 						outputMessage.stopReason = "length";
+					} else if (eventType === "response.failed") {
+						const responseObj = (event.response ?? event) as {
+							id?: string;
+							incomplete_details?: { reason?: string };
+							error?: { code?: string; message?: string };
+							status_details?: {
+								reason?: string;
+								error?: { code?: string; message?: string };
+							};
+						};
+						if (responseObj.id) {
+							outputMessage.responseId = responseObj.id;
+						}
+						const error = responseObj.error ?? responseObj.status_details?.error;
+						const details = responseObj.incomplete_details;
+						const statusDetailsReason = responseObj.status_details?.reason;
+						const message = error
+							? `${error.code || "unknown"}: ${error.message || "no message"}`
+							: details?.reason
+								? `incomplete: ${details.reason}`
+								: statusDetailsReason
+									? `status_details: ${statusDetailsReason}`
+									: "Unknown error (no error details in response)";
+						throw new ProviderResponseError(message, { provider: model.provider, kind: "output" });
 					}
 
 					// ─── OPENAI CHAT & GOOGLE GEMINI EVENT FLAVORS ───

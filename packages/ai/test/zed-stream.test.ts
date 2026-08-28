@@ -487,6 +487,47 @@ describe("Zed provider protocol regressions", () => {
 		expect(run.events.at(-1)?.type).toBe("error");
 	});
 
+	it("surfaces OpenAI Responses response.failed errors instead of completing", async () => {
+		const run = await runZedStream(makeModel("gpt-5.6-luna"), [
+			{
+				event: {
+					type: "response.failed",
+					response: {
+						status: "failed",
+						error: { code: "server_error", message: "Zed Responses backend exploded" },
+					},
+				},
+			},
+			{ status: "stream_ended" },
+		]);
+
+		expect(run.result.stopReason).toBe("error");
+		expect(run.result.errorMessage).toContain("server_error");
+		expect(run.result.errorMessage).toContain("Zed Responses backend exploded");
+		expect(run.events.some(event => event.type === "done")).toBe(false);
+		expect(run.events.at(-1)?.type).toBe("error");
+	});
+
+	it("rejects prompt-level Gemini safety blocks instead of completing", async () => {
+		const run = await runZedStream(makeModel("gemini-3-flash", true), [
+			{
+				event: {
+					candidates: [],
+					promptFeedback: {
+						blockReason: "SAFETY",
+						blockReasonMessage: "Prompt blocked by safety policy",
+					},
+				},
+			},
+			{ status: "stream_ended" },
+		]);
+
+		expect(run.result.stopReason).toBe("error");
+		expect(run.result.errorMessage).toContain("SAFETY");
+		expect(run.events.some(event => event.type === "done")).toBe(false);
+		expect(run.events.at(-1)?.type).toBe("error");
+	});
+
 	it("maps OpenAI Responses incomplete reasons and never promotes a truncated tool call", async () => {
 		const cases = [
 			{ reason: "max_output_tokens", stopReason: "length" },
