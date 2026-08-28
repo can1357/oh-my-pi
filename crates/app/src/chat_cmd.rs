@@ -113,6 +113,23 @@ fn absolute_invocation_deadline(now: Instant, max_time: Option<Duration>) -> Opt
 	max_time.and_then(|duration| now.checked_add(duration))
 }
 
+/// Guards fork and resume revival before a child journal is persisted.
+///
+/// A revived session whose pinned selector is no longer admitted needs a
+/// fallback; when effective model settings and the credential provider pin
+/// admit none, fail before `open_session` creates the child journal and
+/// session-index row so no durable orphan session is left behind.
+fn ensure_revival_model_available(
+	catalog: &snapshot::Catalog,
+	model_settings: &omp_catalog::settings::ModelSettings,
+	credential_provider: Option<&omp_catalog::ProviderId>,
+) -> miette::Result<()> {
+	if roles::fallback_model_selector(catalog, model_settings, credential_provider).is_some() {
+		return Ok(());
+	}
+	Err(miette::miette!("no selectable model is available to resume"))
+}
+
 /// Complete app-owned CONTROL factory bundle for one production chat session.
 ///
 /// Keeping every field required makes it impossible for a session entry point
@@ -898,6 +915,16 @@ pub(crate) async fn run(
 	} else {
 		SessionOpen::New
 	};
+	// Revival substitutes a fallback when the journaled pin is no longer
+	// admitted under the provider pin. Resolve that availability before
+	// `open_session` persists the fork's child journal and index row so a
+	// failed revival cannot leave a durable orphan behind.
+	if matches!(
+		session_open,
+		SessionOpen::Fork(_) | SessionOpen::Resume(_) | SessionOpen::ResumeMoved(_)
+	) {
+		ensure_revival_model_available(catalog, &model_settings, credential_provider.as_ref())?;
+	}
 	let mut session = open_session(
 		&root,
 		&sessions_dir,
@@ -2475,5 +2502,33 @@ mod tests {
 			absolute_invocation_deadline(now, Some(Duration::from_secs(30))).expect("deadline");
 		assert_eq!(deadline.duration_since(now), Duration::from_secs(30));
 		assert_eq!(absolute_invocation_deadline(now, None), None);
+	}
+
+	#[test]
+	fn revival_preflight_rejects_when_no_model_is_admitted() {
+		let catalog = snapshot::Catalog::try_embedded().expect("embedded catalog");
+		ensure_revival_model_available(
+			catalog,
+			&omp_catalog::settings::ModelSettings::default(),
+			None,
+		)
+		.expect("default settings admit a selectable model");
+
+		let mut denied = omp_catalog::settings::ModelSettings::default();
+		denied.enabled_models =
+			sync::Arc::from([omp_catalog::settings::PathScopedStringEntry::Bare(Str::new_static(
+				"nonexistent/unavailable",
+			))]);
+		let error = ensure_revival_model_available(catalog, &denied, None)
+			.expect_err("no admitted model must fail before a fork persists");
+		assert!(
+			error
+				.to_string()
+				.contains("no selectable model is available to resume")
+		);
+
+		let pinned = omp_catalog::ProviderId::new("nonexistent-provider");
+		ensure_revival_model_available(catalog, &denied, Some(&pinned))
+			.expect_err("credential pin cannot admit models either");
 	}
 }
