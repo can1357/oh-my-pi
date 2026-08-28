@@ -68,9 +68,12 @@ impl ProcessToolFactory {
 }
 
 impl omp_envd::DynamicToolFactory for ProcessToolFactory {
-	fn register(&self, registry: &mut omp_tool::Registry) -> Result<(), omp_tool::RegistryError> {
+	fn register(
+		&self,
+		registrar: &mut omp_envd::DynamicToolRegistrar<'_>,
+	) -> Result<(), omp_tool::RegistryError> {
 		for declaration in &self.tools {
-			registry.register(
+			registrar.register(
 				ProcessCustomTool::new(declaration.clone(), Arc::clone(&self.binding)),
 				Presentation::Device,
 				omp_tool::Claims {

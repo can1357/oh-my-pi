@@ -108,8 +108,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 pub use tools::{
 	ActiveContentInputs, CommandCredentialExecutorFactory, ContentResolver, DynamicTool,
-	DynamicToolFactory, GoalAuthority, HostResourceResult, HostResources, RegistryBridges,
-	SearchInference, TelemetryUpload,
+	DynamicToolFactory, DynamicToolRegistrar, GoalAuthority, HostResourceResult, HostResources,
+	RegistryBridges, SearchInference, TelemetryUpload,
 };
 #[cfg(windows)]
 use windows::OwnerPipeListener;

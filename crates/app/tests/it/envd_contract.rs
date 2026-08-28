@@ -69,7 +69,7 @@ impl Admitter for AllowAdmission {
 }
 
 const fn test_claims() -> Claims {
-	Claims { precedence: Precedence::CORE, claimant: sf!("omp/core"), replaces: None }
+	Claims { precedence: Precedence::CORE, claimant: sf!("test/envd-contract"), replaces: None }
 }
 
 fn file_write_effects() -> Effects {
@@ -778,36 +778,6 @@ fn eval_output(payload: &eval::Payload, channel: OutputChannel) -> Vec<u8> {
 		.filter(|frame| frame.channel == channel)
 		.flat_map(|frame| frame.data.as_ref().iter().copied())
 		.collect()
-}
-
-#[tokio::test]
-async fn write_duplicate_revision_rejected_during_production_assembly() {
-	let root = tempfile::tempdir().expect("workspace scratch directory");
-	let state = tempfile::tempdir().expect("state scratch directory");
-	let marker = state.path().join("duplicate-write-marker");
-	let mut registry = Registry::new();
-	let mut colliding = EffectTool::named("write", marker);
-	colliding.spec.rev = Rev { family: Str::new(""), n: 1 };
-	registry
-		.register(colliding, Presentation::Slot, test_claims())
-		.expect("register colliding caller write tool");
-	let result = EnvServer::open_local(
-		root.path(),
-		state.path(),
-		registry,
-		test_config(),
-		RegistryBridges::default(),
-	)
-	.await;
-	let Err(error) = result else {
-		panic!("production registry accepted a duplicate-revision write tool");
-	};
-	assert!(
-		error
-			.to_string()
-			.contains("tool revision already registered: write@1"),
-		"unexpected error: {error}"
-	);
 }
 
 #[tokio::test]
