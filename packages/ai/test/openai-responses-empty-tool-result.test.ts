@@ -77,13 +77,24 @@ describe("Responses API empty tool result", () => {
 	it("encodes an image-only result as native output content", () => {
 		const items = buildResponsesInput({
 			model,
-			context: makeContext([{ type: "image", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", mimeType: "image/png" }]),
+			context: makeContext([
+				{
+					type: "image",
+					data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+					mimeType: "image/png",
+				},
+			]),
 			strictResponsesPairing: true,
 			supportsImageDetailOriginal: true,
 		});
 
 		expect(findFunctionCallOutput(items)).toEqual([
-			{ type: "input_image", detail: "auto", image_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" },
+			{
+				type: "input_image",
+				detail: "auto",
+				image_url:
+					"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+			},
 		]);
 	});
 });

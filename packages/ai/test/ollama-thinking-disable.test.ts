@@ -320,7 +320,11 @@ describe("Ollama chat thinking controls", () => {
 			toolName: "browser",
 			content: [
 				{ type: "text", text: "Screenshot captured" },
-				{ type: "image", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", mimeType: "image/png" },
+				{
+					type: "image",
+					data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+					mimeType: "image/png",
+				},
 			],
 			isError: false,
 			timestamp: now + 1,
@@ -372,7 +376,11 @@ describe("Ollama chat thinking controls", () => {
 			toolName: "browser",
 			content: [
 				{ type: "text", text: "Screenshot captured" },
-				{ type: "image", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", mimeType: "image/png" },
+				{
+					type: "image",
+					data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+					mimeType: "image/png",
+				},
 			],
 			isError: false,
 			timestamp: now + 1,
@@ -390,7 +398,9 @@ describe("Ollama chat thinking controls", () => {
 		if (!toolMessage) {
 			throw new Error("Expected converted Ollama tool message");
 		}
-		expect(toolMessage.images).toEqual(["iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="]);
+		expect(toolMessage.images).toEqual([
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+		]);
 		expect(toolMessage.content).toContain("Screenshot captured");
 		expect(toolMessage.content).not.toContain(NON_VISION_IMAGE_PLACEHOLDER);
 	});

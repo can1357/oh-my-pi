@@ -12,8 +12,7 @@ import { createCodexModel } from "./helpers";
 
 const DEFAULT_PROMPT_PREFIX =
 	"You are an expert coding assistant. You help users with coding tasks by reading files, executing commands";
-const PNG_B64 =
-	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 describe("openai-codex oauth", () => {
 	it("uses the same default originator for browser login and API requests", () => {

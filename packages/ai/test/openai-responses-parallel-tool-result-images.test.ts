@@ -8,8 +8,7 @@ import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
-const PNG_B64 =
-	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 const genericModel = buildModel({
 	id: "moonshotai/kimi-k3",

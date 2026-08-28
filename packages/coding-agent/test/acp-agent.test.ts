@@ -1192,8 +1192,7 @@ describe("ACP agent", () => {
 
 		const replayedText = harness.updates
 			.filter(
-				update =>
-					update.sessionId === stored.sessionId && update.update.sessionUpdate === "user_message_chunk",
+				update => update.sessionId === stored.sessionId && update.update.sessionUpdate === "user_message_chunk",
 			)
 			.flatMap(update =>
 				update.update.sessionUpdate === "user_message_chunk" && update.update.content.type === "text"

@@ -131,7 +131,12 @@ describe("GitHub Copilot Responses image detail clamp (#2822)", () => {
 				role: "user",
 				content: [
 					{ type: "text", text: "describe this frame" },
-					{ type: "image", mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", detail: "original" },
+					{
+						type: "image",
+						mimeType: "image/png",
+						data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+						detail: "original",
+					},
 				],
 				timestamp: FIXED_TIMESTAMP,
 			},
