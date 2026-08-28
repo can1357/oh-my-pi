@@ -707,6 +707,23 @@ describe("model thinking derivation", () => {
 		expect(sonnet5Bedrock.thinking?.supportsDisplay).toBe(true);
 	});
 
+	it("classifies OpenAI-schema Bedrock models as effort, leaving gpt-oss on budget", () => {
+		// Bedrock serves the GPT-5.x SKUs through OpenAI's own request schema,
+		// which rejects Anthropic's budget block: `unknown_parameter: 'thinking'`.
+		for (const id of ["global.openai.gpt-5.6-luna", "global.openai.gpt-5.6-sol", "global.openai.gpt-5.6-terra"]) {
+			expect(createModel({ id, api: "bedrock-converse-stream", provider: "amazon-bedrock" }).thinking?.mode).toBe(
+				"effort",
+			);
+		}
+
+		// gpt-oss is not a `gpt-<digits>` id, so it stays unclassified and keeps
+		// the budget path it ships with today.
+		expect(
+			createModel({ id: "openai.gpt-oss-120b", api: "bedrock-converse-stream", provider: "amazon-bedrock" }).thinking
+				?.mode,
+		).toBe("budget");
+	});
+
 	it("backfills wire facts onto explicit thinking, explicit values winning", () => {
 		// Authored partial ladders on wire-exact models normalize to the
 		// model-defined ladder, and the wire map is re-derived alongside:

@@ -307,7 +307,7 @@ function geminiLevelFlashFamily(version: "3.6" | "3.7", ...additionalMembers: st
 }
 
 const GEMINI_36_FLASH_FAMILY = geminiLevelFlashFamily("3.6", "gemini-3.6-flash-tiered");
-const GEMINI_37_FLASH_FAMILY = geminiLevelFlashFamily("3.7");
+const GEMINI_37_FLASH_FAMILY = geminiLevelFlashFamily("3.7", "gemini-3.7-flash-tiered");
 
 function geminiProFamily(mode: "budget" | "google-level"): EffortVariantFamily {
 	const budget = mode === "budget";

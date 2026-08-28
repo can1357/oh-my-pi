@@ -86,8 +86,8 @@ export interface HookUIContext {
 	/**
 	 * Set status text in the footer/status bar.
 	 * Pass undefined as text to clear the status for this key.
-	 * Text can include ANSI escape codes for styling.
-	 * Note: Newlines, tabs, and carriage returns are replaced with spaces.
+	 * ANSI/VT escape sequences and most control characters are stripped; tabs and newlines become spaces.
+	 * Repeated spaces are collapsed and surrounding whitespace is trimmed.
 	 * The combined status line is truncated to terminal width.
 	 * @param key - Unique key to identify this status (e.g., hook name)
 	 * @param text - Status text to display, or undefined to clear
@@ -156,12 +156,7 @@ export interface HookUIContext {
 	): Promise<string | undefined>;
 
 	/**
-	 * Get the current theme for styling text with ANSI codes.
-	 * Use theme.fg() and theme.bg() to style status text.
-	 *
-	 * @example
-	 * const theme = ctx.ui.theme;
-	 * ctx.ui.setStatus("my-hook", theme.fg("success", theme.status.success) + " Ready");
+	 * Get the current theme for styling custom components.
 	 */
 	readonly theme: Theme;
 }

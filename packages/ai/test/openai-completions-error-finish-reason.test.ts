@@ -108,6 +108,84 @@ describe("finish_reason: error", () => {
 	}, 10_000);
 });
 
+describe("in-band SSE error envelope", () => {
+	it("surfaces a queue-full error carried inside a successful HTTP stream", async () => {
+		const fetchMock = createSseFetch([
+			{
+				error: {
+					object: "error",
+					message: "The request queue is full.",
+					type: "SERVICE_UNAVAILABLE",
+					param: null,
+					code: 503,
+				},
+			},
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(503);
+		expect(result.errorMessage).toContain("The request queue is full.");
+	}, 10_000);
+
+	it("surfaces a flat error string carried inside a successful HTTP stream", async () => {
+		const fetchMock = createSseFetch([{ error: "rate limit exceeded" }, "[DONE]"]);
+
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("rate limit exceeded");
+	}, 10_000);
+
+	it("surfaces a flat message-only error carried inside a successful HTTP stream", async () => {
+		const fetchMock = createSseFetch([{ message: "provider temporarily unavailable" }, "[DONE]"]);
+
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("provider temporarily unavailable");
+	}, 10_000);
+
+	it("does not replay after content precedes an in-band error", async () => {
+		let attempts = 0;
+		const baseFetch = createSseFetch([
+			completionChunk({ choices: [{ index: 0, delta: { role: "assistant", content: "Partial" } }] }),
+			{
+				error: {
+					message: "Request timed out in the queue.",
+					type: "REQUEST_TIMEOUT",
+				},
+			},
+			"[DONE]",
+		]);
+		const fetchMock: FetchImpl = async (input, init) => {
+			attempts++;
+			return baseFetch(input, init);
+		};
+
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(attempts).toBe(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(408);
+		expect(result.content).toEqual([{ type: "text", text: "Partial" }]);
+	}, 10_000);
+});
+
 describe("finish_reason: insufficient_system_resource", () => {
 	// DeepSeek interrupts the generation mid-stream when its inference system
 	// runs out of resources; the terminal chunk carries

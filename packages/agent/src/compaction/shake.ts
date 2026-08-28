@@ -1,9 +1,10 @@
 /**
  * Context-reducing surgical compaction ("shake").
  *
- * `shake` drops heavy content out of the live context mechanically: whole
- * tool-call results and large fenced/XML blocks are replaced with short
- * placeholders. This module is the pure layer — region detection and in-place
+ * `shake` drops heavy content out of the live context mechanically:
+ * tool-result text and large fenced/XML blocks are replaced with short
+ * placeholders while non-text tool-result content is preserved. This module
+ * is the pure layer — region detection and in-place
  * mutation only. Artifact offload, persistence, and provider-session teardown
  * are orchestrated by the caller (`AgentSession.shake`).
  *
@@ -80,6 +81,7 @@ const PLACEHOLDER_TOKEN_ESTIMATE = 16;
 export interface ToolResultShakeRegion {
 	kind: "toolResult";
 	entry: SessionMessageEntry;
+	/** Estimated tokens in the removable text only; retained images are excluded. */
 	tokens: number;
 	originalText: string;
 	/** Human label for the offload doc (tool name). */
@@ -114,11 +116,19 @@ function getToolResultMessage(entry: SessionEntry): ToolResultMessage | undefine
 	return message as ToolResultMessage;
 }
 
-function toolResultText(message: ToolResultMessage): string {
-	return message.content
-		.filter((block): block is TextContent => block.type === "text")
-		.map(block => block.text)
-		.join("\n");
+function toolResultText(
+	message: ToolResultMessage,
+	tokenizer: Tokenizer,
+): { originalText: string; tokens: number } | undefined {
+	const fragments: string[] = [];
+	for (const block of message.content) {
+		if (block.type === "text" && block.text.length > 0) fragments.push(block.text);
+	}
+	if (fragments.length === 0) return undefined;
+	return {
+		originalText: fragments.join("\n"),
+		tokens: tokenizer.countTokens(fragments),
+	};
 }
 
 /** Estimate the token contribution of an entry for the protect-recent window. */
@@ -292,10 +302,11 @@ function scanContentBlocks(
  * Pure detection: locate every eligible shake region on a branch.
  *
  * Walks the protect-recent window (most recent `protectTokens` of context is
- * kept intact), collects whole tool-result messages (honoring `protectedTools`
- * and skipping already-pruned results) and large fenced/XML blocks inside
- * user/developer/assistant/custom messages. Tool results flagged contextually
- * useless by their tool bypass the protect window — there is nothing recent
+ * kept intact), collects the text from eligible tool-result messages
+ * (honoring `protectedTools` and skipping already-pruned results) and large
+ * fenced/XML blocks inside user/developer/assistant/custom messages.
+ * Contextually useless tool results bypass the protect window — there is
+ * nothing recent
  * worth keeping in them. Returns regions in document order.
  *
  * `toolCall` blocks are never touched (tool-call/result pairing is preserved)
@@ -339,13 +350,13 @@ export function collectShakeRegions(entries: SessionEntry[], tokenizer: Tokenize
 			if (toolResult.prunedAt !== undefined) continue;
 			if (isProtectedToolResult(toolResult, toolCallsById.get(toolResult.toolCallId), config.protectedTools))
 				continue;
-			const text = toolResultText(toolResult);
-			if (text.length === 0) continue;
+			const text = toolResultText(toolResult, tokenizer);
+			if (!text) continue;
 			regions.push({
 				kind: "toolResult",
 				entry: entry as SessionMessageEntry,
-				tokens: tokenizer.countMessage(toolResult as AgentMessage),
-				originalText: text,
+				tokens: text.tokens,
+				originalText: text.originalText,
 				label: toolResult.toolName,
 			});
 			continue;
@@ -414,8 +425,9 @@ function getBlockTextSlot(entry: SessionMessageEntry | CustomMessageEntry, block
 /**
  * Pure mutation: replace a single region's content in place.
  *
- * Tool-result: replaces the message content with the placeholder text and
- * stamps `prunedAt`. Block: splices `replacement` over `[start, end)` of the
+ * Tool-result: replaces its first non-empty text block with the placeholder,
+ * removes its other text blocks, preserves every non-text block, and stamps
+ * `prunedAt`. Block: splices `replacement` over `[start, end)` of the
  * target text block. When several block regions share one text block they MUST
  * be applied highest-start-first so earlier offsets stay valid — use
  * {@link applyShakeRegions}, which orders them correctly.
@@ -423,7 +435,15 @@ function getBlockTextSlot(entry: SessionMessageEntry | CustomMessageEntry, block
 export function applyShakeRegion(region: ShakeRegion, replacement: string): void {
 	if (region.kind === "toolResult") {
 		const message = region.entry.message as ToolResultMessage;
-		message.content = [{ type: "text", text: replacement }];
+		const replacementIndex = message.content.findIndex(block => block.type === "text" && block.text.length > 0);
+		if (replacementIndex < 0) return;
+		const kept: typeof message.content = [];
+		for (let index = 0; index < message.content.length; index++) {
+			const block = message.content[index];
+			if (block.type !== "text") kept.push(block);
+			else if (index === replacementIndex) kept.push({ type: "text", text: replacement });
+		}
+		message.content = kept;
 		message.prunedAt = Date.now();
 		invalidateMessageCache(message as AgentMessage);
 		return;

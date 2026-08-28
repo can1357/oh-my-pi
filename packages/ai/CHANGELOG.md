@@ -2,9 +2,49 @@
 
 ## [Unreleased]
 
+## [18.0.9] - 2026-08-28
+
 ### Fixed
 
 - Fixed auth-gateway OpenAI Responses requests rejecting multimodal function-call outputs containing input text and images; inline and remote images are preserved as tool-result content, while OpenAI file-backed images are preserved for Responses-family targets and rejected before dispatch to incompatible APIs.
+- Improved OAuth sign-in flows, including a fallback message when the browser cannot automatically close the OAuth success tab.
+- Fixed Cloudflare AI Gateway onboarding and routing so gateway account and endpoint configuration is preserved correctly while gateway credentials are not sent as upstream OpenAI authorization headers.
+- Fixed Codex OAuth quota handling so chat and Spark usage remain independent, legacy shared quota limits continue to work, and incomplete usage reports are not incorrectly treated as unlimited.
+
+## [18.0.8] - 2026-08-27
+
+### Added
+
+- Added Z.AI GLM Coding Plan usage tracking: credit-based `CREDIT_LIMIT` windows (5h + weekly) now surface in `omp usage` and the status line with the plan tier (`plan: lite/pro/max`).
+
+### Fixed
+
+- Fixed Amazon Bedrock requests to OpenAI-schema models (the `gpt-5.x` SKUs) failing with HTTP 400 `unknown_parameter: 'thinking'` when reasoning was enabled, by sending `reasoning.effort` instead of Anthropic's `thinking` budget block for models the catalog marks as effort-controlled.
+- Fixed Cursor replay rejecting sessions with orphaned tool results while preserving their output as assistant context.
+
+## [18.0.7] - 2026-08-26
+
+### Added
+
+- Added application-level usage attribution for billing and usage reporting, with per-application aggregation and automatic client identification. Applications can set their label with `OMP_APP_NAME` (default: `omp`); update the broker before clients to support the new usage reports.
+
+### Fixed
+
+- Fixed Anthropic Claude subscription OAuth requests being rejected by the upstream service ([#9801](https://github.com/can1357/oh-my-pi/pull/9801)).
+- Fixed OpenAI-compatible streaming errors being reported as empty successful completions, enabling retries and model fallback when queue admission fails.
+- Fixed multimodal tool results in OpenAI Responses requests so inline, remote, and OpenAI file-backed images are preserved correctly.
+- Fixed resumed and forked Cursor sessions failing when their history came from a Responses-based provider such as Codex ([#9754](https://github.com/can1357/oh-my-pi/issues/9754)).
+- Fixed Cursor `composer-2.5` selections using the Fast variant instead of the Standard tier ([#9012](https://github.com/can1357/oh-my-pi/issues/9012)).
+
+## [18.0.6] - 2026-08-26
+
+### Added
+
+- Added the `backgroundIdleMs` option to customize how long background auth-broker activity remains active before automatically parking.
+
+### Fixed
+
+- Fixed auth-broker background activity keeping processes alive unnecessarily, so unused broker-backed auth storage now parks automatically and no longer prevents CLI exit.
 
 ## [18.0.5] - 2026-08-25
 

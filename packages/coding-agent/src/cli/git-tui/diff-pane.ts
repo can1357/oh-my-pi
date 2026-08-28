@@ -16,7 +16,7 @@
 import type { DiffStreamResult, HighlightStream } from "@oh-my-pi/pi-natives";
 import { diffWords, structuredPatchHunks } from "@oh-my-pi/pi-natives";
 import { Image, type ImageBudget, replaceTabs, sliceWithWidth, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
-import { formatBytes } from "@oh-my-pi/pi-utils";
+import { formatBytes, sanitizeText } from "@oh-my-pi/pi-utils";
 import { createHighlightStream, getLanguageFromPath, theme } from "../../modes/theme/theme";
 import { bgAnsi, canvasHex, fgAnsi, mixHex, pill, selectionBgAnsi, textHex, withBg } from "./colors";
 import { DIFF_CONTEXT_LINES, type FileAssetSide, type FileStreamUpdate } from "./state";
@@ -87,6 +87,18 @@ export type HunkAction = "stage" | "unstage" | "discard";
 const HIGHLIGHT_BATCH_LINES = 32;
 /** Cap on intraline word-diff pairs per document. */
 const INTRALINE_PAIR_LIMIT = 1_500;
+
+/**
+ * Turn one raw source line into a terminal-safe display string: strip C0/C1
+ * control bytes (via {@link sanitizeText}) then expand tabs. Windows worktree
+ * files use CRLF, so lines split on `\n` retain a trailing `\r`; emitting that
+ * raw carriage return snaps the cursor to column 0 mid-row and corrupts the
+ * render (issue #9734). The line has no `\n` (already split), so nothing else
+ * is affected.
+ */
+function displayLine(line: string): string {
+	return replaceTabs(sanitizeText(line));
+}
 
 function intralineMarks(oldLine: string, newLine: string): { old: MarkRanges; new: MarkRanges } {
 	const oldRanges: [number, number][] = [];
@@ -195,8 +207,8 @@ export function buildDiffDocument(
 		ignoreFormatting && dot >= 0 ? (IMPORT_LANG_BY_EXT[filePath.slice(dot + 1).toLowerCase()] ?? null) : null;
 	const oldLines = oldRaw.length === 0 ? [] : oldRaw.replace(/\n$/, "").split("\n");
 	const newLines = newRaw.length === 0 ? [] : newRaw.replace(/\n$/, "").split("\n");
-	const oldPlain = oldLines.map(replaceTabs);
-	const newPlain = newLines.map(replaceTabs);
+	const oldPlain = oldLines.map(displayLine);
+	const newPlain = newLines.map(displayLine);
 
 	// Alignment basis: raw lines, or trimmed lines when ignoring whitespace.
 	// Line numbers stay 1:1 with the raw text either way.
@@ -635,18 +647,12 @@ export class DiffPane {
 	updateStream(update: FileStreamUpdate): void {
 		const streaming = this.#streaming;
 		if (!streaming) return;
-		streaming.oldLines.splice(
-			update.oldLineOffset,
-			streaming.oldLines.length - update.oldLineOffset,
-			...update.oldLines,
-		);
-		streaming.newLines.splice(
-			update.newLineOffset,
-			streaming.newLines.length - update.newLineOffset,
-			...update.newLines,
-		);
-		for (const line of update.oldLines) streaming.maxLineWidth = Math.max(streaming.maxLineWidth, line.length);
-		for (const line of update.newLines) streaming.maxLineWidth = Math.max(streaming.maxLineWidth, line.length);
+		const oldLines = update.oldLines.map(displayLine);
+		const newLines = update.newLines.map(displayLine);
+		streaming.oldLines.splice(update.oldLineOffset, streaming.oldLines.length - update.oldLineOffset, ...oldLines);
+		streaming.newLines.splice(update.newLineOffset, streaming.newLines.length - update.newLineOffset, ...newLines);
+		for (const line of oldLines) streaming.maxLineWidth = Math.max(streaming.maxLineWidth, line.length);
+		for (const line of newLines) streaming.maxLineWidth = Math.max(streaming.maxLineWidth, line.length);
 		streaming.stableCommonLines = update.progress.stableCommonLines;
 		this.#clampScroll();
 	}

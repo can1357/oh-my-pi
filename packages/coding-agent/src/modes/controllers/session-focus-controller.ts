@@ -107,6 +107,15 @@ export class SessionFocusController {
 			}
 			await this.ctx.eventController.handleEvent(event);
 		});
+		// Events emitted while another session was focused had no TUI listener,
+		// but their message_end handlers still persist authoritative transcript
+		// state asynchronously. Subscribe first, then settle the persistence
+		// already in flight at this boundary before replay: an already-emitted
+		// tool completion becomes a persisted toolResult, so the rebuild can't
+		// resurrect a result-less toolCall whose only completion was lost during
+		// the blackout (#9816). Later events reach the newly installed listener.
+		await target.settleInFlightMessagePersistence();
+		if (generation !== this.#attachGeneration) return false;
 		this.ctx.statusLine.setSession(target, this.#focusedAgentId);
 		await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 		if (generation !== this.#attachGeneration) return false;

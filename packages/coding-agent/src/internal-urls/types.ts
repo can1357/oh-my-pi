@@ -89,6 +89,15 @@ export interface InternalUrl extends URL {
 export interface ResolveContext {
 	/** Working directory of the calling session. */
 	cwd?: string;
+	/**
+	 * Calling session's session file. Handlers that resolve agent ids which may
+	 * be parked (`history://<id>`, `agent://<id>`) refresh the caller's
+	 * persisted roster against this root before registry lookup, so a
+	 * same-named id restored by another root's scan never shadows this
+	 * caller's own transcript or output. Absent when the caller has no session
+	 * file: those handlers keep their existing in-memory behavior.
+	 */
+	sessionFile?: string;
 	/** Settings of the calling session (used by `issue://`/`pr://` for cache TTLs). */
 	settings?: unknown;
 	/** Caller's abort signal. */

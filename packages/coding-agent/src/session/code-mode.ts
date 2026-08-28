@@ -20,6 +20,11 @@ export const CODE_MODE_KEEP_TOOLS: Record<string, true> = {
 	todo: true,
 	yield: true,
 	think: true,
+	// checkpoint/rewind results drive session state machinery keyed on the
+	// toolResult's toolName (see session/checkpoint-entries.ts); wrapped inside
+	// an eval result they are invisible to it, so they must stay direct.
+	checkpoint: true,
+	rewind: true,
 	__agent__: true,
 	__budget__: true,
 	__completion__: true,

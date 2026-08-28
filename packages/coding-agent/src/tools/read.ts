@@ -2217,6 +2217,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			cwd: this.session.cwd,
 			settings: this.session.settings,
 			signal,
+			sessionFile: this.session.getSessionFile() ?? undefined,
 			localProtocolOptions: this.session.localProtocolOptions,
 			skills: this.session.skills,
 			xd: {

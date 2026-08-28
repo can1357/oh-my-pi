@@ -4,12 +4,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
+import { filterModelsDevCatalogRows } from "@oh-my-pi/pi-catalog/provider-models/models-dev-policies";
 import {
 	BEDROCK_MANTLE_STATIC_MODELS,
 	bedrockMantleModelManagerOptions,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
-import { dropBedrockMantleOpenAIModels } from "../scripts/generated-policies";
 
 const MANTLE_MODEL_IDS = [
 	"openai.gpt-5.4",
@@ -119,7 +119,7 @@ describe("Amazon Bedrock OpenAI routing", () => {
 			bedrockModel("bedrock-mantle", "openai.gpt-5.6-sol"),
 		];
 
-		expect(dropBedrockMantleOpenAIModels(input).map(model => `${model.provider}/${model.id}`)).toEqual([
+		expect(filterModelsDevCatalogRows(input).map(model => `${model.provider}/${model.id}`)).toEqual([
 			"amazon-bedrock/openai.gpt-oss-120b",
 			"bedrock-mantle/openai.gpt-5.6-sol",
 		]);

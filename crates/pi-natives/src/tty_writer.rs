@@ -38,7 +38,7 @@ use crate::js;
 struct Inner {
 	/// Bytes accepted from JS but not yet claimed by the pump thread. The
 	/// pump swaps this out wholesale, so enqueue cost is an in-place append
-	/// and chunks coalesce into one `write(2)` per drain cycle.
+	/// and chunks coalesce into one contiguous drain buffer per drain cycle.
 	back:    Mutex<Vec<u8>>,
 	/// Bytes accepted but not yet written to the fd.
 	pending: AtomicUsize,
@@ -48,23 +48,45 @@ struct Inner {
 	dead:    AtomicBool,
 }
 
+/// Keep each Unix PTY syscall small enough for terminal emulators to consume
+/// incrementally. In particular, Terminal.app can stop draining a PTY when a
+/// large normal-screen history replay arrives as one multi-hundred-KiB write,
+/// leaving the writer blocked and every later frame queued behind it.
 #[cfg(unix)]
-fn write_all(fd: i32, buf: &[u8]) -> std::io::Result<()> {
+const MAX_TTY_WRITE_CHUNK_BYTES: usize = 16 * 1024;
+
+#[cfg(unix)]
+fn write_all_with(
+	mut write: impl FnMut(&[u8]) -> std::io::Result<usize>,
+	buf: &[u8],
+) -> std::io::Result<()> {
 	let mut off = 0usize;
 	while off < buf.len() {
-		// SAFETY: `buf[off..]` is a valid initialized slice; `fd` is owned by
-		// the writer (dup'd at construction) and stays open until drop.
-		let rc = unsafe { libc::write(fd, buf[off..].as_ptr().cast(), buf.len() - off) };
-		if rc < 0 {
-			let err = std::io::Error::last_os_error();
-			if err.kind() == std::io::ErrorKind::Interrupted {
-				continue;
-			}
-			return Err(err);
+		let end = (off + MAX_TTY_WRITE_CHUNK_BYTES).min(buf.len());
+		match write(&buf[off..end]) {
+			Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+			Ok(written) => off += written,
+			Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {},
+			Err(err) => return Err(err),
 		}
-		off += rc as usize;
 	}
 	Ok(())
+}
+
+#[cfg(unix)]
+fn write_all(fd: i32, buf: &[u8]) -> std::io::Result<()> {
+	write_all_with(
+		|chunk| {
+			// SAFETY: `chunk` is a valid initialized slice; `fd` is owned by
+			// the writer (dup'd at construction) and stays open until drop.
+			let rc = unsafe { libc::write(fd, chunk.as_ptr().cast(), chunk.len()) };
+			if rc < 0 {
+				return Err(std::io::Error::last_os_error());
+			}
+			Ok(rc as usize)
+		},
+		buf,
+	)
 }
 
 #[cfg(unix)]
@@ -268,6 +290,26 @@ impl Drop for TtyWriter {
 #[cfg(all(test, unix))]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn large_frame_is_split_into_bounded_tty_writes() {
+		let frame = vec![b'x'; MAX_TTY_WRITE_CHUNK_BYTES * 2 + 7];
+		let mut requested = Vec::new();
+		let mut output = Vec::new();
+		write_all_with(
+			|chunk| {
+				requested.push(chunk.len());
+				output.extend_from_slice(chunk);
+				Ok(chunk.len())
+			},
+			&frame,
+		)
+		.unwrap();
+
+		assert_eq!(requested, [MAX_TTY_WRITE_CHUNK_BYTES, MAX_TTY_WRITE_CHUNK_BYTES, 7]);
+		assert_eq!(output, frame);
+	}
+
 	fn push(writer: &TtyWriter, data: &[u8]) {
 		writer.append(|back| {
 			back.extend_from_slice(data);

@@ -8,8 +8,8 @@ import type { HookCommandContext } from "@oh-my-pi/pi-coding-agent/extensibility
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { PrDiffPayload, ViewLookupResult } from "@oh-my-pi/pi-coding-agent/tools/gh";
 import * as gh from "@oh-my-pi/pi-coding-agent/tools/gh";
-import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
-import * as jj from "@oh-my-pi/pi-coding-agent/utils/jj";
+import type { VcsGitRepo, VcsRepo } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const SAMPLE_JJ_DIFF = `diff --git a/src/workspace.ts b/src/workspace.ts
@@ -192,10 +192,12 @@ describe("ReviewCommand", () => {
 
 	it("uses JJ diff for uncommitted review prompts", async () => {
 		const dir = await createTempDir();
-		const jjRepoSpy = spyOn(jj.repo, "is").mockResolvedValue(true);
-		const jjDiffSpy = spyOn(jj, "diff").mockResolvedValue(SAMPLE_JJ_DIFF);
-		const gitStatusSpy = spyOn(git, "status").mockResolvedValue(" M src/workspace.ts\n");
-		const gitDiffSpy = spyOn(git, "diff").mockResolvedValue("");
+		const jjDiffSpy = vi.fn(async () => SAMPLE_JJ_DIFF);
+		const jjRepoSpy = spyOn(vcs, "require").mockReturnValue({
+			kind: () => "jj",
+			uncommittedDiff: jjDiffSpy,
+		} as unknown as VcsRepo);
+		const gitRepoSpy = spyOn(vcs, "requireGit");
 		try {
 			const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
 			const ctx = createContext({
@@ -209,23 +211,23 @@ describe("ReviewCommand", () => {
 			expect(promptText).toContain("src/workspace.ts");
 			expect(promptText).toContain("+1/-1");
 			expect(promptText).toContain("MAY read full file context as needed via `read`");
-			expect(jjDiffSpy).toHaveBeenCalledWith(dir);
-			expect(gitStatusSpy).not.toHaveBeenCalled();
-			expect(gitDiffSpy).not.toHaveBeenCalled();
+			expect(jjDiffSpy).toHaveBeenCalledWith([]);
+			expect(gitRepoSpy).not.toHaveBeenCalled();
 		} finally {
 			jjRepoSpy.mockRestore();
 			jjDiffSpy.mockRestore();
-			gitStatusSpy.mockRestore();
-			gitDiffSpy.mockRestore();
+			gitRepoSpy.mockRestore();
 		}
 	});
 
 	it("includes JJ diff context for custom review prompts", async () => {
 		const dir = await createTempDir();
-		const jjRepoSpy = spyOn(jj.repo, "is").mockResolvedValue(true);
-		const jjDiffSpy = spyOn(jj, "diff").mockResolvedValue(SAMPLE_JJ_DIFF);
-		const gitStatusSpy = spyOn(git, "status").mockResolvedValue("");
-		const gitDiffSpy = spyOn(git, "diff").mockResolvedValue("");
+		const jjDiffSpy = vi.fn(async () => SAMPLE_JJ_DIFF);
+		const jjRepoSpy = spyOn(vcs, "require").mockReturnValue({
+			kind: () => "jj",
+			uncommittedDiff: jjDiffSpy,
+		} as unknown as VcsRepo);
+		const gitRepoSpy = spyOn(vcs, "requireGit");
 		try {
 			const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
 			const ctx = createContext({
@@ -238,13 +240,11 @@ describe("ReviewCommand", () => {
 			const promptText = result!;
 			expect(promptText).toContain("Check workspace state transitions");
 			expect(promptText).toContain("src/workspace.ts");
-			expect(gitStatusSpy).not.toHaveBeenCalled();
-			expect(gitDiffSpy).not.toHaveBeenCalled();
+			expect(gitRepoSpy).not.toHaveBeenCalled();
 		} finally {
 			jjRepoSpy.mockRestore();
 			jjDiffSpy.mockRestore();
-			gitStatusSpy.mockRestore();
-			gitDiffSpy.mockRestore();
+			gitRepoSpy.mockRestore();
 		}
 	});
 
@@ -560,9 +560,14 @@ describe("ReviewCommand", () => {
 
 	it("keeps base branch review mode working", async () => {
 		const dir = await createTempDir();
-		spyOn(git.branch, "list").mockResolvedValue(["main"]);
-		spyOn(git.branch, "current").mockResolvedValue("feature");
-		const diffSpy = spyOn(git, "diff").mockResolvedValue(SAMPLE_PR_DIFF);
+		const diffSpy = vi.fn(async () => SAMPLE_PR_DIFF);
+		const repository = {
+			currentBranch: async () => "feature",
+			diffText: diffSpy,
+			listBranches: async () => ["main"],
+		} as unknown as VcsGitRepo;
+		spyOn(vcs, "git").mockReturnValue(repository);
+		spyOn(vcs, "requireGit").mockReturnValue(repository);
 		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
 		const ctx = createContext({
 			selectResults: ["1. Review against a base branch (PR Style)", "main"],
@@ -573,13 +578,18 @@ describe("ReviewCommand", () => {
 		expect(result).toBeDefined();
 		expect(result!).toContain("Reviewing changes between `main` and `feature`");
 		expect(result!).toContain("src/pr.ts");
-		expect(diffSpy).toHaveBeenCalledWith(dir, { base: "main...feature" });
+		expect(diffSpy).toHaveBeenCalledWith({ base: "main...feature" });
 	});
 
 	it("keeps specific commit review mode working", async () => {
 		const dir = await createTempDir();
-		spyOn(git.log, "onelines").mockResolvedValue(["abc1234 Fix review command"]);
-		const showSpy = spyOn(git, "show").mockResolvedValue(SAMPLE_PR_DIFF);
+		const showSpy = vi.fn(async () => ({ data: Buffer.from(SAMPLE_PR_DIFF), truncated: false }));
+		spyOn(vcs, "require").mockReturnValue({
+			logOnelines: async () => ["abc1234 Fix review command"],
+		} as unknown as VcsRepo);
+		spyOn(vcs, "requireGit").mockReturnValue({
+			showCommit: showSpy,
+		} as unknown as VcsGitRepo);
 		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
 		const ctx = createContext({
 			selectResults: ["3. Review a specific commit", "abc1234 Fix review command"],
@@ -590,7 +600,7 @@ describe("ReviewCommand", () => {
 		expect(result).toBeDefined();
 		expect(result!).toContain("Reviewing commit `abc1234`");
 		expect(result!).toContain("src/pr.ts");
-		expect(showSpy).toHaveBeenCalledWith(dir, "abc1234", { format: "" });
+		expect(showSpy).toHaveBeenCalledWith("abc1234");
 	});
 	it("renders headless review requests through the reviewer task prompt", async () => {
 		const command = new ReviewCommand({ cwd: "/tmp" } as unknown as CustomCommandAPI);
