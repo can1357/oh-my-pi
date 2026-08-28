@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.0.9] - 2026-08-28
+
+### Fixed
+
+- Fixed `/shake elide` handling of mixed tool results so images are preserved and token savings are reported accurately.
+
 ## [18.0.7] - 2026-08-26
 
 ### Fixed

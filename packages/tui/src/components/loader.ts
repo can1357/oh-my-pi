@@ -54,6 +54,16 @@ export class Loader extends Text {
 		this.#layoutFrame = this.#layoutFrames[0];
 		this.start();
 	}
+	/** Return the current message and animation state for debug inspection. */
+	override debugState(): Record<string, unknown> {
+		const message = this.#resolveMessage();
+		return {
+			message: message.slice(0, 120),
+			messageLength: message.length,
+			running: this.#intervalId !== undefined,
+			frame: this.#currentFrame,
+		};
+	}
 
 	override render(width: number): readonly string[] {
 		const source = super.render(width);

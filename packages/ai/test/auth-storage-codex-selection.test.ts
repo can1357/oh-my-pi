@@ -217,10 +217,15 @@ async function countApiKeySelections(
 	provider: string,
 	sessionPrefix: string,
 	samples = 150,
+	modelId?: string,
 ): Promise<Map<string, number>> {
 	const counts = new Map<string, number>();
 	for (let index = 0; index < samples; index += 1) {
-		const apiKey = await authStorage.getApiKey(provider, `${sessionPrefix}-${index}`);
+		const apiKey = await authStorage.getApiKey(
+			provider,
+			`${sessionPrefix}-${index}`,
+			modelId === undefined ? undefined : { modelId },
+		);
 		if (!apiKey) continue;
 		counts.set(apiKey, (counts.get(apiKey) ?? 0) + 1);
 	}
@@ -389,6 +394,139 @@ describe("AuthStorage codex oauth ranking", () => {
 		const counts = await countApiKeySelections(authStorage, "openai-codex", "weighted-codex-zero");
 		expectExclusivePreference(counts, "api-acct-zero", "api-acct-progress");
 	});
+	test("preserves the uncapped-Pro priority signal when only the secondary window is reported", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-uncapped-pro", "uncapped-pro@example.com") },
+			{ type: "oauth", ...createCredential("acct-capped", "capped@example.com") },
+		]);
+
+		const uncapped = createCodexUsageReport({
+			accountId: "acct-uncapped-pro",
+			primary: { usedFraction: 0, resetInMs: FIVE_HOUR_MS },
+			secondary: { usedFraction: 0.9, resetInMs: WEEK_MS },
+			metadata: { planType: "pro", allowed: true, limitReached: false },
+		});
+		uncapped.limits = uncapped.limits.filter(limit => limit.id !== "openai-codex:primary");
+		usageByAccount.set("acct-uncapped-pro", uncapped);
+		usageByAccount.set(
+			"acct-capped",
+			createCodexUsageReport({
+				accountId: "acct-capped",
+				primary: { usedFraction: 0, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.5, resetInMs: WEEK_MS },
+			}),
+		);
+
+		const counts = await countApiKeySelections(authStorage, "openai-codex", "uncapped-pro");
+		expectExclusivePreference(counts, "api-acct-uncapped-pro", "api-acct-capped");
+	});
+
+	test("does not boost incomplete or differently-scoped Codex usage over measured quota", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-status", "status@example.com") },
+			{ type: "oauth", ...createCredential("acct-chat", "chat@example.com") },
+			{ type: "oauth", ...createCredential("acct-chat-only", "chat-only@example.com") },
+			{ type: "oauth", ...createCredential("acct-spark", "spark@example.com") },
+		]);
+
+		usageByAccount.set("acct-status", {
+			provider: "openai-codex",
+			fetchedAt: Date.now(),
+			limits: [],
+			metadata: { accountId: "acct-status", allowed: true, limitReached: false },
+		});
+		usageByAccount.set(
+			"acct-chat",
+			createCodexUsageReport({
+				accountId: "acct-chat",
+				primary: { usedFraction: 0.8, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.8, resetInMs: WEEK_MS },
+			}),
+		);
+		const sparkOnlyReport = addSparkUsage(
+			createCodexUsageReport({
+				accountId: "acct-spark",
+				primary: { usedFraction: 0.1, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.1, resetInMs: WEEK_MS },
+			}),
+			0.1,
+			0.1,
+		);
+		sparkOnlyReport.limits = sparkOnlyReport.limits.filter(limit => limit.id.includes(":spark:"));
+		usageByAccount.set("acct-spark", sparkOnlyReport);
+		const otherMeterReport = addSparkUsage(
+			createCodexUsageReport({
+				accountId: "acct-chat-only",
+				primary: { usedFraction: 0.9, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.9, resetInMs: WEEK_MS },
+			}),
+			0.9,
+			0.9,
+		);
+		otherMeterReport.limits = otherMeterReport.limits.filter(limit => limit.id.includes(":spark:"));
+		usageByAccount.set("acct-chat-only", otherMeterReport);
+
+		const chatCounts = await countApiKeySelections(authStorage, "openai-codex", "incomplete-chat");
+		expectExclusivePreference(chatCounts, "api-acct-chat", "api-acct-status");
+		expect(countFor(chatCounts, "api-acct-spark")).toBe(0);
+		expect(countFor(chatCounts, "api-acct-chat-only")).toBe(0);
+
+		const sparkCounts = await countApiKeySelections(
+			authStorage,
+			"openai-codex",
+			"incomplete-spark",
+			150,
+			"gpt-5.3-codex-spark",
+		);
+		expectExclusivePreference(sparkCounts, "api-acct-spark", "api-acct-chat-only");
+	});
+
+	test("does not treat a secondary-only Spark report as an uncapped primary meter", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-incomplete", "incomplete@example.com") },
+			{ type: "oauth", ...createCredential("acct-measured", "measured@example.com") },
+		]);
+
+		const incomplete = addSparkUsage(
+			createCodexUsageReport({
+				accountId: "acct-incomplete",
+				primary: { usedFraction: 0.9, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.9, resetInMs: WEEK_MS },
+			}),
+			0.9,
+			0.9,
+		);
+		incomplete.limits = incomplete.limits.filter(limit => limit.id === "openai-codex:spark:secondary");
+		usageByAccount.set("acct-incomplete", incomplete);
+		usageByAccount.set(
+			"acct-measured",
+			addSparkUsage(
+				createCodexUsageReport({
+					accountId: "acct-measured",
+					primary: { usedFraction: 0.1, resetInMs: HOUR_MS },
+					secondary: { usedFraction: 0.1, resetInMs: WEEK_MS },
+				}),
+				0.1,
+				0.1,
+			),
+		);
+
+		const counts = await countApiKeySelections(
+			authStorage,
+			"openai-codex",
+			"incomplete-spark-primary",
+			150,
+			"gpt-5.3-codex-spark",
+		);
+		expectExclusivePreference(counts, "api-acct-measured", "api-acct-incomplete");
+	});
+
 	test("skips exhausted weekly account even when reset is near", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 

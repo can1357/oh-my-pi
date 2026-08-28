@@ -664,7 +664,7 @@ function pickUsageColor(percent: number): "muted" | "warning" | "error" {
 
 function formatUsageReset(value: number, unit: "m" | "h"): string {
 	if (unit === "m") {
-		// total minutes (5h window: max 300)
+		// Short-window reset timers retain minute precision.
 		if (value < 60) return `${value}m`;
 		const hours = Math.floor(value / 60);
 		const mins = value % 60;
@@ -681,7 +681,7 @@ const usageSegment: StatusLineSegment = {
 	id: "usage",
 	render(ctx) {
 		const u = ctx.usage;
-		if (!u || (!u.fiveHour && !u.sevenDay && !u.monthly)) {
+		if (!u || (!u.fiveHour && !u.daily && !u.sevenDay && !u.monthly)) {
 			return { content: "", visible: false };
 		}
 		const parts: string[] = [];
@@ -697,6 +697,15 @@ const usageSegment: StatusLineSegment = {
 					? theme.fg("muted", ` (${formatUsageReset(u.fiveHour.resetMinutes, "m")})`)
 					: "";
 			parts.push(`5h ${pctText}${reset}`);
+		}
+		if (u.daily) {
+			const pct = u.daily.percent;
+			const pctText = theme.fg(pickUsageColor(pct), `${Math.round(pct)}%`);
+			const reset =
+				u.daily.resetMinutes !== undefined
+					? theme.fg("muted", ` (${formatUsageReset(u.daily.resetMinutes, "m")})`)
+					: "";
+			parts.push(`1d ${pctText}${reset}`);
 		}
 		if (u.sevenDay) {
 			const pct = u.sevenDay.percent;
