@@ -550,19 +550,41 @@ export const discriminatedUnion = <
 	});
 	return decorate(dispatch as Decoratable<unknown>) as ZodLikeSchema<UnionOutput<Schemas>>;
 };
+let lazyCounter = 0;
 /** Defer schema construction until first parse — required for recursive shapes. */
 export const lazy = <Out>(getter: () => ZodLikeSchema<Out>): ZodLikeSchema<Out> => {
 	let resolved: ZodLikeSchema<Out> | undefined;
-	return decorate(
-		schemaFromIR<Out>({
-			k: "morph",
-			input: { k: "unknown" },
-			fn: value => {
-				resolved ??= getter();
-				return resolved(value);
-			},
-		}),
-	);
+	let resolving = false;
+	// Unique per instance so concurrent lazies land on distinct `$defs` keys.
+	const name = `lazy${++lazyCounter}`;
+	const ir: IR = {
+		k: "alias",
+		name,
+		deferred: true,
+		resolve: () => {
+			if (resolved !== undefined) return resolved.ir;
+			// Re-entrant resolve while the getter is still building the schema
+			// (recursive definitions — the getter references this very schema):
+			// resolve to the alias itself. Every walker is cycle-safe on alias
+			// re-entry, and later resolves return the memoized real IR.
+			if (resolving) return ir;
+			resolving = true;
+			try {
+				resolved = getter();
+			} finally {
+				resolving = false;
+			}
+			return resolved.ir;
+		},
+	};
+	// The IR's cycle-safe alias node, not a runtime morph closure: the emitter
+	// registers the alias before recursing and emits `$ref: "#/$defs/<name>"`,
+	// so recursive parameter schemas export as real `$ref`/`$defs` documents
+	// instead of erasing to an unconstrained `{}`. `deferred` keeps
+	// construction-time scans from calling the getter — resolving earlier
+	// would break recursive `const` definitions (TDZ) and violate zod's
+	// defer-to-first-parse contract.
+	return decorate(schemaFromIR<Out>(ir));
 };
 export const array = <Element>(element: ZodLikeSchema<Element>): ZodLikeSchema<Element[]> =>
 	decorate(schemaFromIR({ k: "array", el: embed(element) }));

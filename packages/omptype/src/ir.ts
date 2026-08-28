@@ -156,6 +156,21 @@ export type IR = IRAnalysis &
 				k: "alias";
 				name: string;
 				resolve: () => IR;
+				/**
+				 * Set when `resolve` must not run until validation or emission — a
+				 * `z.lazy` getter: resolving earlier breaks recursive `const`
+				 * definitions via TDZ and violates zod's defer-to-first-parse
+				 * contract.
+				 *
+				 * Invariant: resolve-on-demand paths MUST NOT consult this flag —
+				 * `walk`/`checks` (interp.ts), `compile` (compile.ts), `emit`
+				 * (json-schema.ts), and error-path resolvers all run after the
+				 * definition is complete. Construction-time scan paths MUST:
+				 * `scanMorph` (conservative morph=true), `scanExportable`
+				 * (conservative exportable=false), `scanAlias` (true, unresolved),
+				 * `morphIdentities` (skip), `assertDeterminateMorphUnions` (skip).
+				 */
+				deferred?: boolean;
 				desc?: string;
 		  }
 		/** Embedded schema with runtime steps; validated by calling `run`. */
@@ -1619,6 +1634,9 @@ function scanMorph(ir: IR, activeAliases?: Set<IR>): boolean {
 			result = true;
 			break;
 		case "alias": {
+			// Deferred alias (z.lazy): conservatively a morph without resolving —
+			// the getter must not run during construction-time scans.
+			if (ir.deferred === true) return true;
 			if (activeAliases?.has(ir)) return false;
 			const aliases = activeAliases ?? new Set<IR>();
 			aliases.add(ir);
@@ -1709,6 +1727,9 @@ function scanExportable(ir: IR, activeAliases?: Set<IR>): boolean {
 			result = false;
 			break;
 		case "alias": {
+			// Deferred alias (z.lazy): not exportable without resolving — the
+			// gates then keep the ordered dispatcher, as before the alias reuse.
+			if (ir.deferred === true) return false;
 			if (activeAliases?.has(ir)) return true;
 			const aliases = activeAliases ?? new Set<IR>();
 			aliases.add(ir);

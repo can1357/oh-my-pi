@@ -137,3 +137,85 @@ describe("zod shim JSON Schema structure", () => {
 		expect(nested.parse({ list: [{ name: "x" }] })).toEqual({ list: [{ name: "x" }] });
 	});
 });
+
+describe("z.lazy deferred alias", () => {
+	it("constructs and parses directly self-referential schemas without TDZ", () => {
+		// Regression: construction-time scans resolved the alias eagerly, so a
+		// getter closing over the const being defined threw
+		// "Cannot access 'jsonValue' before initialization".
+		type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+		const jsonValue: z.ZodType<JsonValue> = z.lazy(() =>
+			z.union([z.string(), z.number(), z.boolean(), z.null(), z.array(jsonValue), z.record(z.string(), jsonValue)]),
+		);
+		const deep = { b: [2, { c: "d" }] };
+		expect(jsonValue.parse(["a", 1, true, null, deep])).toEqual(["a", 1, true, null, deep]);
+		expect(jsonValue.safeParse([() => {}]).success).toBe(false);
+	});
+
+	it("emits self-consistent $ref/$defs for plainly nested recursive schemas", () => {
+		// Regression: lazy used to be a runtime morph, so a recursive
+		// parameter schema reached the model as an unconstrained `{}`. The
+		// emitted document must carry real definitions and every `$ref` must
+		// resolve within them.
+		type Tree = { name: string; children?: Tree[] };
+		const tree: z.ZodType<Tree> = z.lazy(() => z.object({ name: z.string(), children: z.array(tree) }));
+		const json = asObjectSchema(tree.toJsonSchema());
+		const def = resolveRef(json, json.$ref);
+		expect(def?.properties?.name).toEqual({ type: "string" });
+		const children = asObjectSchema(def?.properties?.children);
+		// The self-reference cycles back through the same definition instead
+		// of recursing — this terminating is the point of the assertion.
+		expect(resolveRef(json, asObjectSchema(children.items)?.$ref)).toBe(def);
+		expect(tree.parse({ name: "a", children: [{ name: "b", children: [{ name: "c", children: [] }] }] })).toEqual({
+			name: "a",
+			children: [{ name: "b", children: [{ name: "c", children: [] }] }],
+		});
+	});
+
+	it("invokes the getter exactly once across parses and exports", () => {
+		// A re-invoking getter would rebuild the IR per parse and silently
+		// kill throughput; memoization is part of the contract.
+		let calls = 0;
+		const schema = z.lazy(() => {
+			calls++;
+			return z.object({ v: z.string() });
+		});
+		schema.parse({ v: "a" });
+		schema.parse({ v: "b" });
+		const exported = asObjectSchema(schema.toJsonSchema());
+		expect(resolveRef(exported, exported.$ref)).toBeDefined();
+		expect(calls).toBe(1);
+	});
+
+	it("gives distinct lazies distinct $defs entries", () => {
+		// Regression: a fixed "$defs" key made one lazy silently win the
+		// collision and the other $ref dangle.
+		const a = z.lazy(() => z.object({ x: z.string() }));
+		const b = z.lazy(() => z.object({ y: z.number() }));
+		const both = z.object({ a, b });
+		const json = asObjectSchema(both.toJsonSchema());
+		const refA = asObjectSchema(json.properties?.a)?.$ref;
+		const refB = asObjectSchema(json.properties?.b)?.$ref;
+		expect(typeof refA).toBe("string");
+		expect(refB).not.toBe(refA);
+		expect(resolveRef(json, refA)?.properties?.x).toEqual({ type: "string" });
+		expect(resolveRef(json, refB)?.properties?.y).toEqual({ type: "number" });
+		expect(both.parse({ a: { x: "1" }, b: { y: 2 } })).toEqual({ a: { x: "1" }, b: { y: 2 } });
+	});
+
+	it("keeps pipeline-unknown lazies on the ordered dispatcher without changing runtime", () => {
+		// Conservative consequence of deferral: a union whose members may
+		// carry unseen morphs must not become an unordered native union (the
+		// determinism check cannot see through the alias), and widening over a
+		// lazy keeps the dispatcher. Runtime must stay zod-first-match.
+		const first = z.lazy(() => z.object({ v: z.string() }));
+		const second = z.lazy(() => z.object({ n: z.number() }));
+		const union = z.union([first, second]);
+		expect(union.parse({ n: 1 })).toEqual({ n: 1 });
+		expect(union.safeParse("nope").success).toBe(false);
+
+		const widened = z.object({ t: first.optional() });
+		expect(widened.parse({})).toEqual({});
+		expect(widened.parse({ t: { v: "x" } })).toEqual({ t: { v: "x" } });
+	});
+});

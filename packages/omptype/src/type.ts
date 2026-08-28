@@ -1444,6 +1444,9 @@ function morphIdentities(ir: IR, identities: unknown[] = [], seen = new Set<IR>(
 			morphIdentities(ir.base, identities, seen);
 			break;
 		case "alias":
+			// Deferred alias (z.lazy): no identities known without resolving the
+			// getter, and resolving here would run user code during construction.
+			if (ir.deferred === true) break;
 			morphIdentities(ir.resolve(), identities, seen);
 			break;
 	}
@@ -1496,6 +1499,9 @@ function assertDeterminateMorphUnions(ir: IR, seen = new Set<IR>()): void {
 	}
 	switch (ir.k) {
 		case "alias":
+			// Deferred alias (z.lazy): skip — content unknown until first parse;
+			// its morph-ness is already handled conservatively by hasMorph.
+			if (ir.deferred === true) return;
 			assertDeterminateMorphUnions(ir.resolve(), seen);
 			break;
 		case "morph":
