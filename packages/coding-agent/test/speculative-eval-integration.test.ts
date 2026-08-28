@@ -504,6 +504,75 @@ describe("streamed eval speculation", () => {
 		await shadow.discard("test complete");
 	});
 
+	it("discards admitted shadow work when a streamed cell later sets reset", async () => {
+		const projected: jsContextManager.JavaScriptShadowPlanningResult = {
+			snapshot: { revision: 1, values: {} },
+			digest: "snapshot",
+			plan: {
+				operations: [
+					{
+						kind: "tool",
+						call: {
+							id: "js:0::0",
+							siteId: "js:0",
+							dynamicPath: [],
+							occurrence: 0,
+							name: "read",
+							args: {
+								kind: "object",
+								entries: [{ key: "path", value: { kind: "literal", value: "note.txt" } }],
+							},
+							dependencies: [],
+							controlDependencies: [],
+							sourceOrder: 0,
+							span: { start: 0, end: 32 },
+						},
+					},
+				],
+			},
+		};
+		const plan = vi.spyOn(jsContextManager, "shadowPlanIfPresent").mockResolvedValue(projected);
+		const settings = Settings.isolated({});
+		const session: ToolSession = {
+			cwd: process.cwd(),
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			getToolForEvalBridge: name => (name === "read" ? eraseToolSchema(read) : undefined),
+			settings,
+		};
+		const read = new ReadTool(session);
+		const admitted = Promise.withResolvers<void>();
+		const closeReasons: string[] = [];
+		const shadow = new EvalShadowCellSession({
+			coordinator: {
+				maxInFlight: 2,
+				async admit() {
+					admitted.resolve();
+					return undefined;
+				},
+				close(reason) {
+					closeReasons.push(reason);
+				},
+			},
+			parentToolCallId: "eval-reset",
+			session,
+			cwd: session.cwd,
+			sessionId: "speculative-eval-reset-test",
+		});
+		const code = 'tool.read({ path: "note.txt" })';
+		const args = { language: "js", code, reset: true };
+		const prefix = JSON.stringify({ language: "js", code }).slice(0, -1);
+		const toolCall = { type: "toolCall" as const, id: "eval-reset", name: "eval", arguments: args };
+
+		await shadow.update(toolCall, prefix);
+		await admitted.promise;
+		await shadow.update(toolCall, JSON.stringify(args));
+
+		expect(plan).toHaveBeenCalledTimes(1);
+		expect(closeReasons).toEqual(["reset eval cells cannot use retained shadow state"]);
+	});
+
 	it("falls back when a speculative child returns or throws an error", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-eval-failure-"));
 		temporaryDirectories.push(directory);

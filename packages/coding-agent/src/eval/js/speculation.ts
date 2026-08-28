@@ -149,6 +149,10 @@ function isDefinitelyString(expression: ShadowExpression): boolean {
 	);
 }
 
+function taintsCompletionEgress(value: ShadowValue): boolean {
+	return value.origins.some(origin => origin.kind !== "provider_literal");
+}
+
 type ProjectionState = {
 	readonly snapshot: Readonly<Record<string, unknown>>;
 	readonly environment: Map<string, ShadowExpression>;
@@ -156,6 +160,7 @@ type ProjectionState = {
 	readonly controls: ShadowControlNode[];
 	readonly occurrences: Map<string, number>;
 	barrier?: ShadowPlan["barrier"];
+	completionEgressTainted: boolean;
 	sourceOrder: number;
 };
 
@@ -337,6 +342,7 @@ function addOperation(
 	if (!isCallExpression(call)) return undefined;
 	const name = callKind(call);
 	if (name !== "read" && name !== "completion") return undefined;
+	if (name === "completion" && state.completionEgressTainted) return undefined;
 	if (call.arguments.some(argument => !isExpression(argument))) return undefined;
 	const args = call.arguments as Expression[];
 	if ((name === "read" && args.length !== 1) || (name === "completion" && args.length === 0)) return undefined;
@@ -476,6 +482,7 @@ function projectStatement(
 		const conditionalId = `${siteId(statement)}:if`;
 		const evaluated = staticValue(test, state);
 		if (evaluated) {
+			state.completionEgressTainted ||= taintsCompletionEgress(evaluated);
 			const selected = evaluated.value ? statement.consequent : statement.alternate;
 			if (!selected) return true;
 			for (const child of statements(selected)) {
@@ -541,6 +548,7 @@ function projectStatement(
 		) {
 			return addBarrier(state, "unbounded or dynamic JavaScript loop", statement);
 		}
+		state.completionEgressTainted ||= taintsCompletionEgress(evaluated);
 		const loop: ShadowLoop = {
 			kind: "loop",
 			id: `${siteId(statement)}:loop`,
@@ -586,6 +594,7 @@ export async function projectJavaScriptShadowPlan(
 		controls: [],
 		occurrences: new Map(),
 		sourceOrder: 0,
+		completionEgressTainted: false,
 	};
 	for (const statement of program.body) {
 		if (!projectStatement(statement, state, [], [])) break;

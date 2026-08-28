@@ -63,6 +63,18 @@ await tool.read({ path });
 		});
 	});
 
+	it("blocks completion egress after snapshot-selected control flow", async () => {
+		const selected = await projectJavaScriptShadowPlan('if (secretBit) await completion("constant");', {
+			snapshot: { secretBit: true },
+		});
+		expect(selected.operations).toEqual([]);
+		expect(selected.barrier?.reason).toBe("unsupported JavaScript statement");
+
+		const providerLiteral = await projectJavaScriptShadowPlan('if (true) await completion("constant");');
+		expect(providerLiteral.barrier).toBeUndefined();
+		expect(providerLiteral.operations).toHaveLength(1);
+	});
+
 	it("expands deterministic branches and bounded loops with dynamic paths", async () => {
 		const plan = await projectJavaScriptShadowPlan(
 			`

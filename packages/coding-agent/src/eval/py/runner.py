@@ -311,6 +311,24 @@ def _shadow_dependencies(expression: dict[str, Any], output: set[str] | None = N
     return output
 
 
+def _shadow_uses_snapshot(expression: dict[str, Any]) -> bool:
+    kind = expression.get("kind")
+    if kind == "snapshot":
+        return True
+    if kind in ("array", "concat"):
+        return any(_shadow_uses_snapshot(item) for item in expression["items"])
+    if kind == "object":
+        return any(_shadow_uses_snapshot(entry["value"]) for entry in expression["entries"])
+    if kind == "property":
+        return _shadow_uses_snapshot(expression["target"])
+    if kind == "transform":
+        return _shadow_uses_snapshot(expression["input"]) or (
+            expression.get("argument") is not None
+            and _shadow_uses_snapshot(expression["argument"])
+        )
+    return False
+
+
 def _shadow_expression_is_string(expression: dict[str, Any]) -> bool:
     kind = expression.get("kind")
     if kind == "literal":
@@ -519,6 +537,7 @@ def _emit_shadow_plan(req: dict) -> None:
     occurrences: dict[str, int] = {}
     source_order = 0
     barrier: dict[str, Any] | None = None
+    completion_egress_tainted = False
 
     def add_operation(
         expression_node: ast.AST,
@@ -529,6 +548,8 @@ def _emit_shadow_plan(req: dict) -> None:
         call_node = expression_node.value if isinstance(expression_node, ast.Await) else expression_node
         kind = _shadow_call_kind(call_node)
         if not isinstance(call_node, ast.Call) or kind not in ("read", "completion"):
+            return None
+        if kind == "completion" and completion_egress_tainted:
             return None
         if call_node.keywords or not call_node.args or (kind == "read" and len(call_node.args) != 1):
             return None
@@ -617,7 +638,7 @@ def _emit_shadow_plan(req: dict) -> None:
         dynamic_path: list[str],
         control_dependencies: list[str],
     ) -> bool:
-        nonlocal barrier
+        nonlocal barrier, completion_egress_tainted
         for statement in statements:
             if isinstance(statement, (ast.Assign, ast.AnnAssign)):
                 target = statement.targets[0] if isinstance(statement, ast.Assign) and len(statement.targets) == 1 else getattr(statement, "target", None)
@@ -658,6 +679,7 @@ def _emit_shadow_plan(req: dict) -> None:
                 ok, selected = _shadow_static_value(test, snapshot)
                 conditional_id = f"py:{_shadow_span(statement, line_offsets)['start']}:if"
                 if ok:
+                    completion_egress_tainted = completion_egress_tainted or _shadow_uses_snapshot(test)
                     branch = statement.body if selected else statement.orelse
                     if not project_statements(branch, [*dynamic_path, "if:true" if selected else "if:false"], control_dependencies):
                         return False
@@ -681,6 +703,7 @@ def _emit_shadow_plan(req: dict) -> None:
                 if not ok or type(values) is not list or len(values) > 32:
                     barrier = {"kind": "barrier", "reason": "unbounded or dynamic Python loop", "span": _shadow_span(statement, line_offsets)}
                     return False
+                completion_egress_tainted = completion_egress_tainted or _shadow_uses_snapshot(iterable)
                 controls.append({
                     "kind": "loop",
                     "id": f"py:{_shadow_span(statement, line_offsets)['start']}:loop",

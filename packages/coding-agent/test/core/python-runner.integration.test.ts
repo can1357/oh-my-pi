@@ -227,6 +227,13 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 			const stringAddition = await kernel.shadowPlan("tool.read({'path': 'src/' + 'a.py'})");
 			expect(stringAddition?.barrier).toBeUndefined();
 			expect(stringAddition?.operations).toHaveLength(1);
+			await executePythonWithKernel(kernel, "secret_bit = True");
+			const selectedCompletion = await kernel.shadowPlan("if secret_bit:\n    completion('constant')");
+			expect(selectedCompletion?.operations).toEqual([]);
+			expect(selectedCompletion?.barrier?.reason).toBe("unsupported Python statement");
+			const literalCompletion = await kernel.shadowPlan("if True:\n    completion('constant')");
+			expect(literalCompletion?.barrier).toBeUndefined();
+			expect(literalCompletion?.operations).toHaveLength(1);
 			const loop = await kernel.shadowPlan(
 				["for path in ['a', 'b']:", "    await tool.read({'path': path})"].join("\n"),
 			);

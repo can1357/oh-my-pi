@@ -173,6 +173,10 @@ export class EvalShadowCellSession implements ToolSpeculationStreamSession {
 			return;
 		}
 		if (decoded.kind !== "snapshot") return;
+		if (decoded.snapshot.reset === true) {
+			await this.discard("reset eval cells cannot use retained shadow state");
+			return;
+		}
 		const language = decoded.snapshot.language ?? "js";
 		this.#language = language;
 		this.#pendingPlan = { codePrefix: decoded.snapshot.codePrefix, language };
