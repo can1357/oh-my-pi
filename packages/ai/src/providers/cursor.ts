@@ -267,6 +267,17 @@ export { buildCursorUnaryHeaders, CURSOR_API_URL, CURSOR_CLIENT_VERSION, mapH2Tr
 /** Bound on waiting for in-flight exec dispatches at turn end. */
 const CURSOR_TURN_END_DRAIN_TIMEOUT_MS = 5000;
 
+/**
+ * Bounded wait for trailing HEADERS behind a clean HTTP/2 end envelope. The
+ * Connect envelope is the protocol's terminal frame, but a nonzero
+ * grpc-status in trailing HEADERS stays authoritative and must fail the turn,
+ * so settling waits briefly for trailers to land. 1000ms covers normal
+ * cross-segment trailer jitter while keeping a half-open peer that never
+ * sends trailers well inside the 2500ms prompt-settle budget pinned by
+ * cursor-terminal-error.test.ts.
+ */
+const CURSOR_H2_TRAILER_GRACE_MS = 1000;
+
 const NOT_IMPLEMENTED_SUFFIX = "not implemented by this client";
 /** Bare gRPC `resource_exhausted` end-streams (also inside a Connect error message). */
 const RESOURCE_EXHAUSTED_PATTERN = /resource.?exhausted/i;
@@ -846,6 +857,22 @@ function streamCursorWithWireMode(
 				})
 				.catch(() => {});
 
+			// A clean end envelope settles the frame stream, but trailing HEADERS
+			// stay authoritative: give them a short window to land before the
+			// envelope settles the turn as success. A half-open peer that never
+			// sends trailers (#9852) still settles within the grace budget.
+			const awaitTerminalTrailers = async (): Promise<void> => {
+				const trailersSettled = transport.trailers().then(
+					() => undefined,
+					() => undefined,
+				);
+				const grace = Promise.withResolvers<void>();
+				const graceTimer = setTimeout(grace.resolve, CURSOR_H2_TRAILER_GRACE_MS);
+				graceTimer.unref();
+				void trailersSettled.then(() => clearTimeout(graceTimer));
+				await Promise.race([trailersSettled, grace.promise]);
+			};
+
 			void (async () => {
 				try {
 					for await (const frame of transport.frames()) {
@@ -861,7 +888,12 @@ function streamCursorWithWireMode(
 								break;
 							}
 							if (transport.responseHeaders) {
-								// An HTTP/2 end envelope is terminal. Trailers resolve independently above.
+								// The envelope is terminal for the frame stream, but trailing
+								// HEADERS remain the authoritative terminal status: a nonzero
+								// grpc-status behind a clean envelope must still fail the turn.
+								// Wait bounded — a peer that never sends trailers (the half-open
+								// shape this break exists for) must still settle promptly.
+								await awaitTerminalTrailers();
 								break;
 							}
 							// HTTP/1 publishes end before its append drain; keep reading so drain errors propagate.

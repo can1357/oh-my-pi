@@ -28,6 +28,7 @@ type Scenario =
 	| { kind: "connect-detailed-error-after-turn" }
 	| { kind: "connect-classification-detail-after-turn" }
 	| { kind: "grpc-trailer-after-turn" }
+	| { kind: "grpc-trailer-after-clean-end" }
 	| { kind: "end-before-turn" }
 	| { kind: "hang-after-turn" }
 	| { kind: "exec-in-final-chunk"; responseFinished: PromiseWithResolvers<void> }
@@ -179,6 +180,29 @@ async function startServer(): Promise<string> {
 			stream.write(textDeltaFrame("hello"));
 			stream.write(turnEndedFrame());
 			stream.end();
+			return;
+		}
+		if (scenario.kind === "grpc-trailer-after-clean-end") {
+			stream.respond(
+				{
+					":status": 200,
+					"content-type": "application/connect+proto",
+				},
+				{ waitForTrailers: true },
+			);
+			stream.on("wantTrailers", () => {
+				stream.sendTrailers({
+					"grpc-status": "13",
+					"grpc-message": encodeURIComponent("post-envelope trailer failure"),
+				});
+			});
+			stream.write(textDeltaFrame("hello"));
+			stream.write(turnEndedFrame());
+			// The terminal envelope must land well before the trailers: the
+			// trailing HEADERS flush in a later segment so the clean envelope
+			// cannot win the settle race by accident.
+			stream.write(frameConnectMessage(Buffer.from("{}", "utf8"), CONNECT_END_STREAM_FLAG));
+			setTimeout(() => stream.end(), 25);
 			return;
 		}
 
@@ -433,6 +457,17 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(eventTypes).not.toContain("done");
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("gRPC error 13: post-turn trailer failure");
+	});
+
+	it("surfaces nonzero gRPC trailers that trail a clean end envelope", async () => {
+		scenario = { kind: "grpc-trailer-after-clean-end" };
+		const baseUrl = await startServer();
+		const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+		expect(eventTypes[0]).toBe("start");
+		expect(eventTypes.at(-1)).toBe("error");
+		expect(eventTypes).not.toContain("done");
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("gRPC error 13: post-envelope trailer failure");
 	});
 
 	it("rejects when the stream ends before turnEnded", async () => {
