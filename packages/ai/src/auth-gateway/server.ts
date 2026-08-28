@@ -44,6 +44,7 @@ import {
 	resolvePeer,
 	withCors,
 } from "./http";
+import { commitGateObservesDownstreamSse, observeSseCommit, StreamCommitGate } from "./stream-commit-gate";
 import type {
 	AuthGatewayParsedRequestOptions,
 	AuthGatewayServerHandle,
@@ -488,6 +489,19 @@ async function handleFormatEndpoint(
 		route.label,
 		peer,
 	);
+	const commitGate = new StreamCommitGate();
+	// openai-responses wraps the downstream body in observeSseCommit. Feeding
+	// onSseEvent as well double-counts prelude bytes and trips the 4 MiB cap at ~2 MiB.
+	if (!commitGateObservesDownstreamSse(route.label)) {
+		const previousSse = streamOpts.onSseEvent;
+		streamOpts.onSseEvent = (event, sseModel) => {
+			const raw = event.raw;
+			let bytes = 0;
+			for (const line of raw) bytes += line.length + 1;
+			commitGate.classifyAndObserve(event.event ?? "", bytes);
+			previousSse?.(event, sseModel);
+		};
+	}
 
 	logger.info("auth-gateway request", {
 		requestId,
@@ -552,7 +566,7 @@ async function handleFormatEndpoint(
 		.then(message => recordGatewayUsage(bootOpts.storage, model, client, message))
 		.catch(() => {});
 
-	const sseStream = route.module.encodeStream(events, parsed.modelId, parsed.options, {
+	let sseStream = route.module.encodeStream(events, parsed.modelId, parsed.options, {
 		signal: controller.signal,
 		onCancel: reason => {
 			if (!controller.signal.aborted) {
@@ -560,6 +574,9 @@ async function handleFormatEndpoint(
 			}
 		},
 	});
+	if (route.label === "openai-responses") {
+		sseStream = observeSseCommit(sseStream, commitGate);
+	}
 	return new Response(sseStream, {
 		status: 200,
 		headers: {
