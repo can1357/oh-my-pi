@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { connectToServer } from "@oh-my-pi/pi-coding-agent/mcp/client";
+import { MCPTransportError } from "@oh-my-pi/pi-coding-agent/mcp/errors";
 import { HttpTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/http";
 import { postmortem } from "@oh-my-pi/pi-utils";
 
@@ -103,6 +104,125 @@ describe("MCP Streamable HTTP initialization", () => {
 	});
 });
 
+describe("MCP Streamable HTTP failure diagnostics", () => {
+	it("classifies an abrupt socket reset without leaking Bun fetch advice", async () => {
+		const tcp = Bun.listen({
+			hostname: "127.0.0.1",
+			port: 0,
+			socket: {
+				open(socket) {
+					socket.end();
+				},
+				data() {},
+			},
+		});
+		const transport = new HttpTransport({
+			type: "http",
+			url: `http://127.0.0.1:${tcp.port}/mcp`,
+			timeout: GUARD_TIMEOUT_MS,
+		});
+		try {
+			await transport.connect();
+			const error = await transport.request("tools/list").then(
+				() => undefined,
+				reason => reason,
+			);
+			if (!(error instanceof MCPTransportError)) throw error;
+			expect(error).toMatchObject({
+				transport: "http",
+				stage: "send",
+				failure: "reset",
+				retryable: true,
+				code: "ECONNRESET",
+			});
+			expect(error.message).not.toContain("verbose");
+		} finally {
+			await transport.close();
+			tcp.stop(true);
+		}
+	});
+
+	it("distinguishes connection refusal from a reset", async () => {
+		const unused = Bun.listen({
+			hostname: "127.0.0.1",
+			port: 0,
+			socket: { data() {} },
+		});
+		const port = unused.port;
+		unused.stop(true);
+		const transport = new HttpTransport({
+			type: "http",
+			url: `http://127.0.0.1:${port}/mcp`,
+			timeout: GUARD_TIMEOUT_MS,
+		});
+		await transport.connect();
+
+		await expect(transport.request("tools/list")).rejects.toMatchObject({
+			transport: "http",
+			stage: "connect",
+			failure: "connect",
+			retryable: true,
+		});
+		await transport.close();
+	});
+
+	it("classifies malformed JSON-RPC responses at the decode stage", async () => {
+		server = Bun.serve({
+			port: 0,
+			fetch() {
+				return new Response("{not-json", { headers: { "Content-Type": "application/json" } });
+			},
+		});
+		const transport = await connectedTransport();
+
+		await expect(transport.request("tools/list")).rejects.toMatchObject({
+			transport: "http",
+			stage: "decode",
+			failure: "malformed_response",
+			retryable: false,
+		});
+	});
+
+	it("preserves bounded redacted JSON-RPC data and a response trace ID", async () => {
+		server = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				const body = (await req.json()) as { id: string | number };
+				return Response.json(
+					{
+						jsonrpc: "2.0",
+						id: body.id,
+						error: {
+							code: -32042,
+							message: "upstream rejected the call",
+							data: { detail: "x".repeat(3_000), token: "server-secret", traceId: "data-trace" },
+						},
+					},
+					{ headers: { "X-Request-Id": "request-abc123" } },
+				);
+			},
+		});
+		const transport = await connectedTransport();
+		const error = await transport.request("tools/list").then(
+			() => undefined,
+			reason => reason,
+		);
+		if (!(error instanceof MCPTransportError)) throw error;
+
+		expect(error).toMatchObject({
+			transport: "http",
+			stage: "protocol",
+			failure: "json_rpc",
+			retryable: false,
+			code: -32042,
+			traceId: "request-abc123",
+		});
+		expect(error.data?.length).toBeLessThanOrEqual(2_000);
+		expect(error.data).toContain("[redacted]");
+		expect(error.data).not.toContain("server-secret");
+	});
+});
+
 describe("MCP Streamable HTTP transport timeouts", () => {
 	it("keeps the request timeout active until a JSON response body is fully read", async () => {
 		server = Bun.serve({
@@ -115,9 +235,13 @@ describe("MCP Streamable HTTP transport timeouts", () => {
 		});
 		const transport = await connectedTransport();
 
-		await expect(withPendingGuard(transport.request("tools/list"), "request")).rejects.toThrow(
-			`Request timeout after ${REQUEST_TIMEOUT_MS}ms`,
-		);
+		await expect(withPendingGuard(transport.request("tools/list"), "request")).rejects.toMatchObject({
+			transport: "http",
+			stage: "decode",
+			failure: "timeout",
+			retryable: false,
+			message: `Request timeout after ${REQUEST_TIMEOUT_MS}ms`,
+		});
 	});
 
 	it("keeps the timeout result when the caller aborts before the JSON body rejection propagates", async () => {
@@ -454,6 +578,63 @@ describe("MCP Streamable HTTP POST response resumption", () => {
 		expect(observed.gets).toBe(2);
 		expect(observed.auth).toEqual(["Bearer stale", "Bearer fresh"]);
 		expect(observed.lastEventId).toBe("stream-1");
+	});
+
+	it("never replays the POST when a resume GET stays unauthorized", async () => {
+		const observed = { posts: 0, gets: 0, refreshes: 0 };
+		server = Bun.serve({
+			port: 0,
+			fetch(req) {
+				if (req.method === "POST") {
+					observed.posts++;
+					return new Response("id: stream-1\nretry: 10\ndata:\n\n", {
+						headers: { "Content-Type": "text/event-stream" },
+					});
+				}
+				observed.gets++;
+				return new Response("expired", { status: 401 });
+			},
+		});
+		if (!server) throw new Error("Test server was not started");
+		const transport = new HttpTransport({
+			type: "http",
+			url: `http://127.0.0.1:${server.port}/mcp`,
+			timeout: GUARD_TIMEOUT_MS,
+			headers: { Authorization: "Bearer stale" },
+		});
+		// A live refresh would tempt #requestWithAuthRetry to re-POST if the
+		// SSEResumeError identity were lost during normalization.
+		transport.onAuthError = async () => {
+			observed.refreshes++;
+			return { Authorization: "Bearer fresh" };
+		};
+		await transport.connect();
+
+		await expect(withPendingGuard(transport.request("tools/call"), "request")).rejects.toBeDefined();
+		// The server accepted the POST once; auth refresh happens inside the resume
+		// GET only, and the originating POST is never replayed.
+		expect(observed.posts).toBe(1);
+		expect(observed.gets).toBe(2);
+		expect(observed.refreshes).toBe(1);
+	});
+	it("marks a clean accepted SSE EOF without an event ID as non-replayable", async () => {
+		let posts = 0;
+		server = Bun.serve({
+			port: 0,
+			fetch() {
+				posts++;
+				return new Response("", { headers: { "Content-Type": "text/event-stream" } });
+			},
+		});
+		const transport = await connectedTransport();
+
+		await expect(withPendingGuard(transport.request("tools/call"), "request")).rejects.toMatchObject({
+			transport: "http",
+			stage: "receive",
+			failure: "eof",
+			retryable: false,
+		});
+		expect(posts).toBe(1);
 	});
 });
 

@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [18.0.10] - 2026-08-28
+
+### Added
+
+- Added the Sharpshooter memory backend for tracking friction-earned project decisions, with `/memory queue` and `/memory sync` controls.
+- Added `/restart` to relaunch omp with its original launch flags and resume the current session in place.
+- Added the `band` composer shape, a flush powerline status band above the prompt; it is now the default while existing `composer.shape` settings remain unchanged.
+- Added in-place retry for interrupted or failed tool calls: use F5, Alt+R (`app.retry`), or `/retry` to replay an intact failed batch without an additional model round trip.
+- Improved the working status display with a timed braille spinner, streamed intent, session accent colors across relevant status elements, and theme-aware session accent generation.
+- Updated the `unicode` and `ascii` symbol presets to use `π`/`pi` for the brand icon, avoiding tofu on fonts without the nerd-font glyph.
+
+### Changed
+
+- The `/review` command's PR-style comparison now uses the merge base against the current branch, excluding commits that exist only on the base branch; selecting the current branch reports no changes.
+- Prompt history is now persisted immediately when submitted, and session database state is checkpointed on exit to improve durability and prevent unbounded WAL growth.
+
 ### Fixed
 
 - Fixed browser-relay reconnects failing to re-attach tabs that still had live session holders after the extension's orphan sweep detached them, so an extension/service-worker restart no longer strands active relay-controlled tabs in a permanently detached state until the next manual claim ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
@@ -11,6 +27,12 @@
 - Fixed browser-relay recovery minting fresh auto-attach sessions for a tab the user detached (dismissed the debugger infobar) while the final subscription-replay RPC was in flight: the replay continuation now revalidates that the tab is still attached, unbanned, and on the same extension socket before emitting replacement sessions, so downstream clients no longer receive sessions whose every command fails ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
 - Fixed a second, concurrent subscription replay being launched when another tab's delayed guard detach triggered a same-socket hello while a replay was still in flight, which could double-issue journaled subscriptions and let a stale task retract sessions after commands resumed: same-socket hellos now preserve the active replay instead of discarding its task pointer ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
 - Fixed `import numpy` (and other native-extension imports) hanging indefinitely in the Python eval tool on Windows, where the runner's always-on background stdin reader deadlocked native DLL loading; Windows now reads the control channel serially between requests while POSIX keeps concurrent request dispatch ([#7985](https://github.com/can1357/oh-my-pi/issues/7985)).
+- Fixed edit-tool parsing of `－`-prefixed MATCH lines so they correctly represent whole-line deletions and can be replaced by a following `＋` run.
+- Fixed interrupted and failed Python evaluation cells being reported as successful results instead of errors, improving model handling, telemetry, retries, and background-job failure reporting.
+- Fixed native-extension imports such as `numpy` hanging indefinitely in the Python evaluation tool on Windows.
+- Fixed a macOS composer display issue where undercurl could remain attached to stale text after rapid typing.
+- Improved `xd://` MCP failure messages with actionable transport stages, failure categories, server and tool context, retryability, trace IDs, and redacted JSON-RPC details.
+- Fixed ACP `read` tool-call locations so clients such as Zed Follow receive the resolved filesystem path rather than the OMP line-range selector.
 
 ## [18.0.9] - 2026-08-28
 

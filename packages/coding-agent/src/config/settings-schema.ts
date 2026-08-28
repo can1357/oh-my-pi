@@ -105,8 +105,13 @@ export type ComposerShape = string;
 /** Built-in composer choices and their shared settings/setup copy. */
 export const BUILTIN_COMPOSER_SHAPES = [
 	{
+		value: "band",
+		label: "Status Band (Default)",
+		description: "Flush soft-capped status band above a curved prompt, no frame",
+	},
+	{
 		value: "box",
-		label: "Rounded Box (Default)",
+		label: "Rounded Box",
 		description: "Status line embedded in top border, compact 2-line prompt",
 	},
 	{
@@ -211,7 +216,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Git",
 	],
 	context: ["General", "Compaction", "Rules (TTSR)", "Experimental"],
-	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight"],
+	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight", "Sharpshooter"],
 	files: ["Editing", "Reading", "Read Summaries", "LSP"],
 	shell: ["Bash", "Eval & Runtimes"],
 	tools: [
@@ -727,7 +732,7 @@ export const SETTINGS_SCHEMA = {
 	// Composer
 	"composer.shape": {
 		type: "string",
-		default: "box",
+		default: "band",
 		ui: {
 			tab: "appearance",
 			group: "Composer",
@@ -2937,17 +2942,18 @@ export const SETTINGS_SCHEMA = {
 	"memories.summaryInjectionTokenLimit": { type: "number", default: 5000 },
 
 	// Memory backend selector — picks between local memories pipeline,
-	// Mnemopi local SQLite, Hindsight remote memory, or off. The legacy
+	// Mnemopi local SQLite, Hindsight remote memory, Sharpshooter project
+	// decisions, or off. The legacy
 	// `memories.enabled` flag is migration input only; see config/settings.ts.
 	"memory.backend": {
 		type: "enum",
-		values: ["off", "local", "hindsight", "mnemopi"] as const,
+		values: ["off", "local", "hindsight", "mnemopi", "sharpshooter"] as const,
 		default: "off",
 		ui: {
 			tab: "memory",
 			group: "General",
 			label: "Memory Backend",
-			description: "Off, local summary pipeline, Mnemopi SQLite, or Hindsight remote memory",
+			description: "Off, local summary pipeline, Mnemopi SQLite, Hindsight remote memory, or Sharpshooter",
 			options: [
 				{ value: "off", label: "Off", description: "No memory subsystem runs" },
 				{ value: "local", label: "Local", description: "Local rollout summarisation pipeline (memory_summary.md)" },
@@ -2957,9 +2963,27 @@ export const SETTINGS_SCHEMA = {
 					label: "Mnemopi",
 					description: "Local SQLite recall/retain backend with optional embeddings",
 				},
+				{
+					value: "sharpshooter",
+					label: "Sharpshooter",
+					description:
+						"Friction-gated project decision files (architecture/product/style), consolidated in the background",
+				},
 			],
 		},
 	},
+	"sharpshooter.model": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Sharpshooter",
+			label: "Sharpshooter Model",
+			description: "Model selector for extraction/consolidation, empty = smol role",
+		},
+	},
+	"sharpshooter.intervalMinutes": { type: "number", default: 5 },
+	"sharpshooter.injectionTokenLimit": { type: "number", default: 15000 },
 
 	// Auto-Learn (experimental): post-stop nudge to capture lessons to memory
 	// and mint/enhance isolated managed skills under ~/.omp/agent/managed-skills.

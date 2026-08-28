@@ -877,6 +877,17 @@ impl VcsGitRepo {
 		})
 	}
 
+	/// Best common ancestor of two revisions.
+	#[napi]
+	pub fn merge_base(
+		&self,
+		a: String,
+		b: String,
+		signal: Option<Unknown>,
+	) -> Promise<Option<String>> {
+		blocking("vcs.mergeBase", self.inner.clone(), signal, move |r| r.merge_base(&a, &b))
+	}
+
 	/// Commits touching a file.
 	#[napi]
 	pub fn rev_list_touching(

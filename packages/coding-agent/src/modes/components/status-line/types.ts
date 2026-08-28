@@ -121,6 +121,19 @@ export interface SegmentContext {
 	 * `Date.now() - sessionStart`.
 	 */
 	activeMs: number;
+	/**
+	 * Elapsed ms of the currently-running turn (the open `agent_start` window),
+	 * or null when the agent is idle. Drives the `pi` segment's working
+	 * spinner + turn timer.
+	 */
+	turnElapsedMs: number | null;
+	/**
+	 * Sampled foreground ANSI for the `pi` brand segment — tweened between dim
+	 * gray (idle) and the accent (working) across turn edges (rust omp's
+	 * status-band brand fade). Absent in direct-segment fixtures and previews,
+	 * which fall back to the static dim color.
+	 */
+	brandFgAnsi?: string;
 	git: {
 		branch: string | null;
 		status: { staged: number; unstaged: number; untracked: number } | null;

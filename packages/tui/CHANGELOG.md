@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [18.0.10] - 2026-08-28
+
+### Added
+
+- Press the Right Arrow at the end of a line to accept autocomplete suggestions, inline ghost-text completions, and spelling corrections, just like Tab.
+- Added a smooth brand-color transition and an elapsed turn timer to the status line while the agent is working.
+- Added a full-width “band” composer style for flush status lines.
+
 ## [18.0.9] - 2026-08-28
 
 ### Added

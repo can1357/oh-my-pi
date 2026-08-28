@@ -205,17 +205,17 @@
     url = "https://registry.npmjs.org/@huggingface/blake3-jit/-/blake3-jit-0.0.2.tgz";
     hash = "sha512-Bq7B5qabyjrJfhBsl85Jd2QBtf+HzRD7h7A9GfN2lzrrsABhOa5evVPgzoCTxR7Ub0QFj7YDK1YkYRWBU25+2w==";
   };
-  "@huggingface/hub@2.15.0" = fetchurl {
-    url = "https://registry.npmjs.org/@huggingface/hub/-/hub-2.15.0.tgz";
-    hash = "sha512-+sHWNz0YpqTvwuIYDxpyrhyk1o2j9lIJuPzbhUT0kxU8IHP9ZOzeajk/O6RRbZyvAM9h6m219FghDLi0Ayblww==";
+  "@huggingface/hub@2.16.0" = fetchurl {
+    url = "https://registry.npmjs.org/@huggingface/hub/-/hub-2.16.0.tgz";
+    hash = "sha512-03sZFAiuxCuxWs2WC1w4s1uKCghvfxLsNm053EWDezk/eefvaiRpNjIKXNe7vbO8NBtLDAmlN6/cyf5n3IGaqw==";
   };
   "@huggingface/jinja@0.5.9" = fetchurl {
     url = "https://registry.npmjs.org/@huggingface/jinja/-/jinja-0.5.9.tgz";
     hash = "sha512-uWTG+l3VJRsl7EXxYizuL3P+cCPoc3cRqbWWRcQN0FhejRfbdq0RNhCmbY/YDtnTcz9icdLYuLDjsnz4d8JMuw==";
   };
-  "@huggingface/tasks@0.21.35" = fetchurl {
-    url = "https://registry.npmjs.org/@huggingface/tasks/-/tasks-0.21.35.tgz";
-    hash = "sha512-Nqw/E01EE8Ykxp44qpsgxyu8g486mAiCWHdkHD6+c0aFU1kdtxsUUrv1AD4Zp4ePlV5sf95A/gKbLLoXP0NXqw==";
+  "@huggingface/tasks@0.21.37" = fetchurl {
+    url = "https://registry.npmjs.org/@huggingface/tasks/-/tasks-0.21.37.tgz";
+    hash = "sha512-W+kgNexZai8vet3GvWESgJ8jx+KRHn9o6iFTKY8WKiA19E1bvPcgUUcUl9Qh6cgQ2khOJfhvBeKLGqNFGHn/jg==";
   };
   "@huggingface/tokenizers@0.1.3" = fetchurl {
     url = "https://registry.npmjs.org/@huggingface/tokenizers/-/tokenizers-0.1.3.tgz";
@@ -225,9 +225,9 @@
     url = "https://registry.npmjs.org/@huggingface/transformers/-/transformers-4.2.0.tgz";
     hash = "sha512-8BRCoBMH0XsWaEIamuR0LrJGAfftgHAfb2Vrffy0VKlSAE/MnUJ5/h/zTfEP3fDIft+nk7TqB8xXEyABGitBjQ==";
   };
-  "@huggingface/xetchunk-wasm@0.1.0" = fetchurl {
-    url = "https://registry.npmjs.org/@huggingface/xetchunk-wasm/-/xetchunk-wasm-0.1.0.tgz";
-    hash = "sha512-wWpp2qwPgf9kv1KLJjcDUk/OrpDOsFoQ3Qpz0U5LGn20csoymBf8eneOv6wm/GzPBzlWac1OYiR0aa1vT6aM2Q==";
+  "@huggingface/xetchunk-wasm@0.2.0" = fetchurl {
+    url = "https://registry.npmjs.org/@huggingface/xetchunk-wasm/-/xetchunk-wasm-0.2.0.tgz";
+    hash = "sha512-cmp7oAAWeCpZGrVQTP/LxDtJdzGMfpxwkEVsZsk5jZQ2FwP2njm8LnyobhnQvLpkSAcJJwUzFJC0PYS9ZsqeTg==";
   };
   "@img/colour@1.1.0" = fetchurl {
     url = "https://registry.npmjs.org/@img/colour/-/colour-1.1.0.tgz";

@@ -39,7 +39,6 @@ import { SpeechEnhancer } from "../../tts/speech-enhancer";
 import { vocalizer } from "../../tts/vocalizer";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { setTerminalTitleState } from "../../utils/title-generator";
-import { interruptHint } from "../shared";
 import { createAssistantMessageComponent } from "../utils/interactive-context-helpers";
 import {
 	assistantHasVisibleContent,
@@ -127,6 +126,12 @@ export class EventController {
 	// retracted card below the rewind's fresh blocks (#6879).
 	#retractedToolCallIds = new Set<string>();
 	#executionStartedCallIds = new Set<string>();
+	// Settled tool cards from the turn that just ended, keyed by call id. A
+	// repeated toolCallId in the next run can only be a tool-replay retry
+	// (AgentSession.retry re-executing a stripped failed batch);
+	// #handleToolExecutionStart evicts the stale aborted card so the fresh
+	// execution replaces it in the transcript instead of stacking a duplicate.
+	#priorTurnToolComponents = new Map<string, Component>();
 	// Cards settled by a synthetic aborted/error `tool_execution_end` (agent-loop
 	// emits one per never-run call on a terminal error/abort). They stay visible
 	// for a genuinely terminal failure, but if an auto-retry then supersedes the
@@ -522,7 +527,7 @@ export class EventController {
 		const trimmed = intent.trim();
 		if (!trimmed || trimmed === this.#lastIntent) return;
 		this.#lastIntent = trimmed;
-		this.ctx.setWorkingMessage(`${trimmed}${interruptHint()}`);
+		this.ctx.setWorkingMessage(trimmed);
 	}
 
 	subscribeToAgent(): void {
@@ -1458,6 +1463,14 @@ export class EventController {
 		}
 		this.#resolveDisplaceablePoll(event.toolName);
 		if (!this.ctx.pendingTools.has(event.toolCallId)) {
+			const stale = this.#priorTurnToolComponents.get(event.toolCallId);
+			if (stale) {
+				this.#priorTurnToolComponents.delete(event.toolCallId);
+				// Never evict a shared read-group card: it may still carry sibling reads.
+				if (stale instanceof ToolExecutionComponent && this.ctx.chatContainer.children.includes(stale)) {
+					this.ctx.chatContainer.removeChild(stale);
+				}
+			}
 			if (event.toolName === "read" && readArgsCollapseIntoGroup(event.args)) {
 				this.#trackReadToolCall(event.toolCallId, event.args);
 				const component = this.ctx.pendingTools.get(event.toolCallId);
@@ -1855,6 +1868,7 @@ export class EventController {
 		this.#approvalAttentionToolCallIds.clear();
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
+		this.#priorTurnToolComponents = new Map(this.#toolTimelineComponents);
 		this.#toolTimelineComponents.clear();
 		this.#streamedToolCallIdByIndex.clear();
 		this.#retractedToolCallIds.clear();
@@ -1869,6 +1883,9 @@ export class EventController {
 		this.#resolveDisplaceableTodo();
 		this.ctx.flushPendingCommandOutput();
 		this.#lastAssistantComponent = undefined;
+		// When the interrupted/failed turn died on a tool call, this replaces the
+		// torn-down "Working…" row with the "F5 to Retry" affordance.
+		this.ctx.syncRetryHintRow();
 		this.ctx.ui.requestRender();
 		this.#scheduleIdleCompaction();
 		this.#scheduleIdleRecap();

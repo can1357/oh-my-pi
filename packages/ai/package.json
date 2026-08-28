@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-ai",
-  "version": "18.0.9",
+  "version": "18.0.10",
   "description": "Unified LLM API with automatic model discovery and provider configuration",
   "homepage": "https://omp.sh",
   "author": "Stencil Labs, Inc.",

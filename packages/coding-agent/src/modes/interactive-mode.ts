@@ -14,6 +14,7 @@ import {
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Message, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { execReplace } from "@oh-my-pi/pi-natives";
 import type {
 	AutocompleteProvider,
 	Component,
@@ -53,9 +54,10 @@ import {
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "../capability";
+import { restartArgv } from "../cli/flag-tables";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
-import { KeybindingsManager } from "../config/keybindings";
+import { formatKeyHint, KeybindingsManager } from "../config/keybindings";
 import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import {
@@ -118,6 +120,7 @@ import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { formatDuration } from "../slash-commands/helpers/format";
 import { STTController, type SttState } from "../stt";
+import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { labelEchoesHandle } from "../task/label";
 import { agentTypeBadge, formatTaskId } from "../task/render";
@@ -164,6 +167,7 @@ import { ChatBlock, type ChatBlockHost } from "./components/chat-block";
 import { CodexResetFireworksController } from "./components/codex-reset-fireworks";
 import { CustomEditor } from "./components/custom-editor";
 import { DynamicBorder } from "./components/dynamic-border";
+import { EditorTopGap } from "./components/editor-top-gap";
 import { ErrorBannerComponent } from "./components/error-banner";
 import type { EvalExecutionComponent } from "./components/eval-execution";
 import type { HookEditorComponent } from "./components/hook-editor";
@@ -210,15 +214,14 @@ import {
 } from "./session-observer-registry";
 import { createSessionTeardown, type SessionTeardown } from "./session-teardown";
 import { runProviderSetupWizard } from "./setup-wizard/lazy";
-import { interruptHint } from "./shared";
+import { sanitizeStatusText } from "./shared";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "./skill-command";
 import { clearMermaidCache } from "./theme/mermaid-cache";
-import { type ShimmerPalette, shimmerEnabled, shimmerSegments, shimmerText } from "./theme/shimmer";
+import { type ShimmerPalette, shimmerEnabled, shimmerText } from "./theme/shimmer";
 import type { Theme } from "./theme/theme";
 import {
 	getEditorTheme,
 	getMarkdownTheme,
-	getSymbolTheme,
 	onTerminalAppearanceChange,
 	onThemeChange,
 	setMarkdownMermaidRendering,
@@ -239,16 +242,19 @@ import type {
 import { UiHelpers } from "./utils/ui-helpers";
 
 const STILL_CLOSING_DELAY_MS = 3_000;
-
-const HINT_SHIMMER_PALETTE: ShimmerPalette = {
-	low: "dim",
-	mid: "muted",
-	high: "borderAccent",
-};
+const DEFAULT_WORKING_MESSAGE = "Working…";
 
 interface WorkingMessageAccent {
 	main: string;
 	dim: string;
+	/**
+	 * Interned shimmer palette for this accent so `compile()` inside
+	 * `shimmerText` sees a stable palette object between animation ticks.
+	 * A fresh palette literal every frame guaranteed a cache miss on the
+	 * Symbol-keyed compiled-ANSI slot and forced `resolveTierAnsi` to walk
+	 * every tier open/close for the ~30fps loader redraw (issue #4377).
+	 */
+	palette?: ShimmerPalette;
 }
 
 interface WorkingMessageAccentCacheKey {
@@ -257,40 +263,10 @@ interface WorkingMessageAccentCacheKey {
 	sessionAccentEnabled: boolean;
 }
 
-/**
- * Intern the shimmer palettes for each `WorkingMessageAccent` so `compile()`
- * inside `shimmerSegments` sees a stable palette object between animation
- * ticks. Allocating fresh palette literals every frame guaranteed a cache miss
- * on the Symbol-keyed compiled-ANSI slot and forced `resolveTierAnsi` to walk
- * every tier open/close for the ~30fps loader redraw (issue #4377).
- */
-const workingMessagePaletteCache = new WeakMap<WorkingMessageAccent, { main: ShimmerPalette; hint: ShimmerPalette }>();
-
-function workingMessagePalettes(accent: WorkingMessageAccent): { main: ShimmerPalette; hint: ShimmerPalette } {
-	let entry = workingMessagePaletteCache.get(accent);
-	if (!entry) {
-		entry = {
-			main: { low: "dim", mid: { ansi: accent.main }, high: { ansi: accent.main }, bold: true },
-			hint: { low: "dim", mid: { ansi: accent.dim }, high: { ansi: accent.dim } },
-		};
-		workingMessagePaletteCache.set(accent, entry);
-	}
-	return entry;
-}
-
 function renderWorkingMessage(message: string, accent?: WorkingMessageAccent): string {
-	const palettes = accent ? workingMessagePalettes(accent) : undefined;
-	const palette = palettes?.main;
-	const hint = interruptHint();
-	if (!message.endsWith(hint)) return shimmerText(message, theme, palette);
-	const header = message.slice(0, -hint.length);
-	return shimmerSegments(
-		[
-			{ text: header, palette },
-			{ text: hint, palette: palettes?.hint ?? HINT_SHIMMER_PALETTE },
-		],
-		theme,
-	);
+	if (!accent) return shimmerText(message, theme);
+	accent.palette ??= { low: "dim", mid: { ansi: accent.main }, high: { ansi: accent.main }, bold: true };
+	return shimmerText(message, theme, accent.palette);
 }
 
 const EDITOR_MAX_HEIGHT_MIN = 6;
@@ -455,8 +431,18 @@ class StatusHudContainer extends AnchoredLiveContainer {
 	}
 
 	override render(width: number): readonly string[] {
+		const lines = this.#renderLines(width);
+		this.mode.statusRowOccupied = lines.length > 0;
+		return lines;
+	}
+
+	#renderLines(width: number): readonly string[] {
 		const childLines = super.render(width);
 		if (!this.mode.isCompactTodoMode()) {
+			if (childLines.length === 0) {
+				const idle = this.mode.renderIdleStatusHud(width);
+				if (idle) return idle;
+			}
 			return childLines;
 		}
 		return this.mode.renderCompactStatusLine(width, childLines);
@@ -583,6 +569,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	chatContainer: TranscriptContainer;
 	pendingMessagesContainer: Container;
 	statusContainer: Container;
+	/** Whether {@link statusContainer} rendered lines in the latest frame; the band composer's editor top gap collapses only then. */
+	statusRowOccupied = false;
 	todoContainer: Container;
 	subagentContainer: Container;
 	btwContainer: Container;
@@ -669,11 +657,24 @@ export class InteractiveMode implements InteractiveModeContext {
 	autoCompactionLoader: Loader | undefined = undefined;
 	retryLoader: Loader | undefined = undefined;
 	#pendingWorkingMessage: string | undefined;
+	#retryHintRow: Text | undefined;
 	#workingMessageAccentCacheKey?: WorkingMessageAccentCacheKey;
 	#workingMessageAccentCacheValue?: WorkingMessageAccent;
 	#workingMessageAccentCacheHasValue = false;
-	get #defaultWorkingMessage(): string {
-		return `Working…${interruptHint()}`;
+	/** Band composer: the status band hides `session_name`, so the title docks
+	 * onto the working row instead — right-aligned, dim, italic. */
+	#workingTitleTrailer(): string | undefined {
+		if (settings.get("composer.shape") !== "band") return undefined;
+		const name = this.sessionManager.getSessionName();
+		if (!name) return undefined;
+		return `\x1b[2;3m${sanitizeStatusText(name)}\x1b[23;22m`;
+	}
+	/** Idle stand-in for the working row in band mode: the docked title stays
+	 * readable between turns, in the same spot the loader's trailer uses. */
+	renderIdleStatusHud(width: number): readonly string[] | undefined {
+		const trailer = this.#workingTitleTrailer();
+		if (!trailer) return undefined;
+		return ["", " ".repeat(Math.max(0, width - visibleWidth(trailer))) + trailer];
 	}
 	unsubscribe?: () => void;
 	onInputCallback?: (input: SubmittedUserInput) => void;
@@ -855,7 +856,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.settings = session.settings;
 		const preferences = {
 			quiet: settings.get("startup.quiet"),
-			composerShape: settings.get("composer.shape") ?? "box",
+			composerShape: settings.get("composer.shape") ?? "band",
 			showHardwareCursor: settings.get("showHardwareCursor"),
 			maxInlineImages: settings.get("tui.maxInlineImages"),
 			resizeScrollback: settings.get("tui.resizeScrollback"),
@@ -966,7 +967,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			logger.warn("History storage unavailable", { error: String(error) });
 		}
 		this.hookWidgetContainerAbove = new Container();
-		this.hookWidgetContainerAbove.addChild(new Spacer(1));
+		this.hookWidgetContainerAbove.addChild(new EditorTopGap(() => this.statusRowOccupied));
 		this.hookWidgetContainerBelow = new Container();
 		this.attachmentChipsContainer = new Container();
 		this.attachmentChipsContainer.addChild(
@@ -1205,7 +1206,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.deferredCommandContainer,
 			// Working loader / transient status sits below the sticky todo + subagent
 			// HUDs, just above the editor's hook-widget top margin — so it reads next to
-			// the prompt while keeping the one-line gap above the editor.
+			// the prompt while keeping the one-line gap above the editor (the band
+			// composer collapses that gap so its status band sits flush).
 			this.statusContainer,
 			this.attachmentChipsContainer,
 			this.hookWidgetContainerAbove,
@@ -2120,13 +2122,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 	}
 	syncComposerShape(): void {
-		const shape = settings.get("composer.shape") ?? "box";
+		const shape = settings.get("composer.shape") ?? "band";
 		const style = getComposerStyle(shape);
 		this.composer.setPreferences({ composerShape: shape });
 		this.statusLine.setAutocompleteActiveProbe(() => this.editor.isAutocompleteActive());
 		switch (style.statusAttachment) {
 			case "top-border":
 				this.editor.setTopBorderProvider(availableWidth => this.statusLine.getTopBorder(availableWidth));
+				break;
+			case "top-band":
+				this.editor.setTopBorderProvider(availableWidth => this.statusLine.getBandTopBorder(availableWidth));
 				break;
 			case "top-rule-chip":
 				this.editor.setTopBorderProvider(availableWidth => this.statusLine.getStandaloneTopBorder(availableWidth));
@@ -2155,9 +2160,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		} else {
 			const accentEnabled = !isSettingsInitialized() || settings.get("statusLine.sessionAccent") !== false;
 			const sessionName = accentEnabled ? this.sessionManager.getSessionName() : undefined;
-			const hex = sessionName
-				? getSessionAccentHex(sessionName, theme.getMajorThemeColorHexes(), theme.accentSurfaceLuminance)
-				: undefined;
+			const hex = sessionName ? getSessionAccentHex(sessionName, theme.sessionAccentInputs) : undefined;
 			const ansi = getSessionAccentAnsi(hex);
 			if (ansi) {
 				this.editor.borderColor = (str: string) => `${ansi}${str}\x1b[39m`;
@@ -4720,7 +4723,64 @@ export class InteractiveMode implements InteractiveModeContext {
 	async shutdown(): Promise<void> {
 		if (this.#isShuttingDown) return;
 		this.#isShuttingDown = true;
+		await this.#teardown();
 
+		// Print resumption hint only if the session was actually materialized to
+		// durable storage — `--resume <id>` fails on a never-written file (see
+		// #resumableSessionId).
+		const sessionId = this.#resumableSessionId();
+		if (sessionId) {
+			process.stderr.write(`\n${chalk.dim(`Resume this session with ${resumeCommand(sessionId)}`)}\n`);
+		}
+
+		await postmortem.quit(0);
+	}
+
+	/**
+	 * Tear down like {@link shutdown}, then relaunch the CLI with the original
+	 * launch argv (session-source flags and positional prompts stripped, see
+	 * {@link restartArgv}), resuming this session when it exists on disk.
+	 *
+	 * On POSIX the relaunch is a true `execvp(3)` image replacement: same PID,
+	 * same terminal, no lingering parent. Postmortem cleanups and stdout are
+	 * flushed first because nothing in this process runs after a successful
+	 * exec. On Windows (no exec semantics) or on exec failure, falls back to
+	 * spawning the replacement and lingering only to forward its exit code.
+	 */
+	async restart(): Promise<void> {
+		if (this.#isShuttingDown) return;
+		this.#isShuttingDown = true;
+		await this.#teardown();
+
+		const cmd = [...resolveCliEntryCmd(), ...restartArgv(process.argv.slice(2), this.#resumableSessionId())];
+		await postmortem.cleanup();
+		await postmortem.drainStdout();
+		if (process.platform !== "win32") {
+			try {
+				execReplace(cmd); // never returns on success
+			} catch (err) {
+				process.stderr.write(`${chalk.red(`Restart exec failed: ${err instanceof Error ? err.message : err}`)}\n`);
+			}
+		}
+		const child = Bun.spawn(cmd, { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+		await postmortem.quit(await child.exited);
+	}
+
+	/**
+	 * Session id when the session was actually materialized to durable storage —
+	 * the only case `--resume <id>` can load. Persistence is lazy: a session that
+	 * exits before its first assistant message (or dies early to an auth error, a
+	 * mid-flight Ctrl+C, or a launch-then-quit) never wrote its JSONL, so the path
+	 * is allocated but the file does not exist (issue #8860).
+	 */
+	#resumableSessionId(): string | undefined {
+		const sessionId = this.sessionManager.getSessionId();
+		const sessionFile = this.sessionManager.getSessionFile();
+		return sessionId && sessionFile && this.sessionManager.isSessionOnDisk() ? sessionId : undefined;
+	}
+
+	/** Shared `shutdown()`/`restart()` teardown: dispose the session and hand the terminal back. */
+	async #teardown(): Promise<void> {
 		await this.#liveCommandController.stop();
 
 		this.#btwController.dispose();
@@ -4767,20 +4827,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		disposeTerminalTitleState();
 		popTerminalTitle();
 		this.stop();
-
-		// Print resumption hint only if the session was actually materialized to
-		// durable storage. Persistence is lazy — a session that exits before its
-		// first assistant message (or dies early to an auth error, a mid-flight
-		// Ctrl+C, or a launch-then-quit) never wrote its JSONL, so the path is
-		// allocated but the file does not exist and `--resume <id>` would fail
-		// (issue #8860).
-		const sessionId = this.sessionManager.getSessionId();
-		const sessionFile = this.sessionManager.getSessionFile();
-		if (sessionId && sessionFile && this.sessionManager.isSessionOnDisk()) {
-			process.stderr.write(`\n${chalk.dim(`Resume this session with ${resumeCommand(sessionId)}`)}\n`);
-		}
-
-		await postmortem.quit(0);
 	}
 
 	async checkShutdownRequested(): Promise<void> {
@@ -5063,7 +5109,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!key.sessionAccentEnabled || !key.sessionName) {
 			return this.#cacheWorkingMessageAccent(key, undefined);
 		}
-		const hex = getSessionAccentHex(key.sessionName, theme.getMajorThemeColorHexes(), key.accentSurfaceLuminance);
+		const hex = getSessionAccentHex(key.sessionName, theme.sessionAccentInputs);
 		const main = getSessionAccentAnsi(hex);
 		const dim = getSessionAccentAnsi(adjustHsv(hex, { s: 0.55, v: 0.65 }));
 		return this.#cacheWorkingMessageAccent(key, main && dim ? { main, dim } : undefined);
@@ -5085,12 +5131,17 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.ui,
 				spinner => {
 					const accent = this.#getWorkingMessageAccent();
-					return accent ? `${accent.main}${spinner}\x1b[39m` : theme.fg("accent", spinner);
+					return accent ? `${accent.dim}${spinner}\x1b[39m` : theme.fg("muted", spinner);
 				},
 				messageColorFn,
-				this.#defaultWorkingMessage,
-				getSymbolTheme().spinnerFrames,
+				DEFAULT_WORKING_MESSAGE,
+				// The brand spinner lives in the status line while working; this row
+				// leads with the interrupt affordance instead of a second spinner.
+				// The leading space nudges the row one column right of the flush-left
+				// status rows so the interrupt glyph reads as indented.
+				[` ${theme.icon.esc}`],
 			);
+			this.loadingAnimation.setTrailer(() => this.#workingTitleTrailer());
 			this.statusContainer.addChild(this.loadingAnimation);
 		} else if (!this.statusContainer.children.includes(this.loadingAnimation)) {
 			this.statusContainer.disposeChildren();
@@ -5114,7 +5165,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (message === undefined) {
 			this.#pendingWorkingMessage = undefined;
 			if (this.loadingAnimation) {
-				this.loadingAnimation.setMessage(this.#defaultWorkingMessage);
+				this.loadingAnimation.setMessage(DEFAULT_WORKING_MESSAGE);
 			}
 			return;
 		}
@@ -5199,6 +5250,34 @@ export class InteractiveMode implements InteractiveModeContext {
 		clearTerminalHistory?: boolean;
 	}): Promise<void> {
 		await this.#uiHelpers.renderInitialMessages(options);
+		this.syncRetryHintRow();
+	}
+	/**
+	 * Reconcile the idle "F5 to Retry" status row with the transcript tail:
+	 * mount it when the last turn died on a tool call (Esc mid-execution,
+	 * stream failure) and the status row is free, remove it when stale. Runs at
+	 * turn end and after every transcript replay (startup resume, `/tree`,
+	 * session switch). The advertised key is the live `app.retry` binding,
+	 * dispatched by the editor to `InputController.handleRetry`.
+	 */
+	syncRetryHintRow(): void {
+		const show = !this.collabGuest && !this.viewSession.isStreaming && this.viewSession.hasAbortedToolCallTail;
+		if (this.#retryHintRow) {
+			const mounted = this.statusContainer.children.includes(this.#retryHintRow);
+			if (mounted && show) return;
+			if (mounted) this.statusContainer.removeChild(this.#retryHintRow);
+			this.#retryHintRow = undefined;
+		}
+		// Never contend with a live loader (working/auto-retry/compaction).
+		if (!show || this.statusContainer.children.length > 0) return;
+		const retryKey = this.keybindings.getKeys("app.retry")[0] ?? "f5";
+		this.#retryHintRow = new Text(
+			`${theme.fg("muted", theme.icon.loop)} ${theme.fg("dim", `${formatKeyHint(retryKey)} to Retry`)}`,
+			1,
+			0,
+		);
+		this.statusContainer.addChild(this.#retryHintRow);
+		this.ui.requestRender();
 	}
 
 	truncateTranscriptFromMessage(message: AgentMessage): boolean {

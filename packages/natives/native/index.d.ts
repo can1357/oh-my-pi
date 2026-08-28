@@ -392,6 +392,8 @@ export declare class VcsGitRepo {
   logOnelines(count: number, signal?: unknown | undefined | null): Promise<Array<string>>
   /** Commits in a range. */
   revListRange(base: string, head: string, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Best common ancestor of two revisions. */
+  mergeBase(a: string, b: string, signal?: unknown | undefined | null): Promise<string | undefined | null>
   /** Commits touching a file. */
   revListTouching(rev: string, file: string, limit: number, signal?: unknown | undefined | null): Promise<Array<string>>
   /** Commit details. */
@@ -571,7 +573,7 @@ export declare function __ompInstallTokioRuntime(): void
  * `packages/natives/native/index.js` (which derives the name from
  * `package.json#version`).
  */
-export declare function __piNativesV18_0_9(): void
+export declare function __piNativesV18_0_10(): void
 
 /**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
@@ -1203,6 +1205,22 @@ export declare enum Encoding {
   /** GLM-5.x exact; GLM-4.x near-exact. */
   Glm5 = 'Glm5'
 }
+
+/**
+ * Replace the current process image via `execvp(3)`.
+ *
+ * On success this never returns: the kernel tears down every other thread and
+ * the new program takes over this PID, controlling terminal, and inherited
+ * (non-`CLOEXEC`) file descriptors. Callers must flush logs and restore the
+ * terminal first — no JS or native cleanup runs after a successful call.
+ *
+ * # Errors
+ * Returns an error, leaving the process untouched, when `argv` is empty, an
+ * argument contains an interior NUL byte, or the exec itself fails (e.g.
+ * executable not found). Windows has no exec-replace semantics, so this
+ * always errors there; callers fall back to spawn-and-wait.
+ */
+export declare function execReplace(argv: Array<string>): void
 
 /**
  * Execute a brush shell command.
