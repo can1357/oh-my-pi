@@ -970,7 +970,7 @@ export class AskDialogComponent implements Component, Focusable {
 		if (getKeybindings().matches(keyData, "app.ask.expand")) {
 			const rowItem = rows[state.cursorIndex];
 			if (rowItem) {
-				state.expandedRowKey = state.expandedRowKey === rowItem.key ? undefined : rowItem.key;
+				state.expandedRowKey = rowItem.key;
 				this.#requestRender();
 			}
 			return;

@@ -1734,6 +1734,48 @@ describe("AskDialogComponent", () => {
 		expect(expanded).toContain("NARROW-PREVIEW-TEXT");
 	});
 
+	it("expands idempotently: a second Right on the expanded row does not collapse it", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const component = new AskDialogComponent(
+				[
+					{
+						id: "q1",
+						question: "Pick?",
+						options: [
+							{
+								label: "Alpha",
+								description: Array.from({ length: 5 }, (_, index) => `DESC-LINE-${index + 1}`).join("\n"),
+							},
+							{ label: "Bravo" },
+						],
+					},
+				],
+				{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+			);
+			component.focused = true;
+			// Collapsed: the focused description hides its tail behind a counted cue.
+			const collapsed = render(component);
+			expect(collapsed).toContain("more");
+			expect(collapsed).not.toContain("DESC-LINE-4");
+			// First Right expands the focused row.
+			component.handleInput(RIGHT);
+			expect(render(component)).toContain("DESC-LINE-4");
+			// Expand must be idempotent, not a toggle: a second Right on the
+			// already-expanded row keeps it expanded (collapse belongs to Left).
+			component.handleInput(RIGHT);
+			expect(render(component)).toContain("DESC-LINE-4");
+			// The dedicated collapse action still collapses.
+			component.handleInput(LEFT);
+			const recollapsed = render(component);
+			expect(recollapsed).not.toContain("DESC-LINE-4");
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
 	it("reveals a preview longer than the side facet through the expanded row when split", () => {
 		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
 		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
