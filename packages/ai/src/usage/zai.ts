@@ -331,7 +331,6 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 			// Prefer the exact ratio when both absolute meter values exist. Keep an
 			// absolute remaining value in credits and use percentages only by themselves.
 			const window = buildZaiWindow(parsed);
-			const hasAbsoluteMeter = parsed.currentValue !== undefined && parsed.usage !== undefined && parsed.usage > 0;
 			const usePercentUnit =
 				parsed.currentValue === undefined &&
 				parsed.usage === undefined &&
@@ -341,7 +340,7 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 				used: parsed.currentValue,
 				limit: parsed.usage,
 				remaining: parsed.remaining,
-				percentage: hasAbsoluteMeter ? undefined : parsed.percentage,
+				percentage: usePercentUnit ? parsed.percentage : undefined,
 				unit: usePercentUnit ? "percent" : "credits",
 			});
 			limits.push({

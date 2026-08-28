@@ -261,15 +261,18 @@ describe("zai usage provider", () => {
 					limits: [
 						{ type: "CREDIT_LIMIT", currentValue: 1200, percentage: 12, unit: 3, number: 5 },
 						{ type: "CREDIT_LIMIT", usage: 10000, percentage: 12, unit: 6, number: 1 },
+						{ type: "CREDIT_LIMIT", remaining: 1234, percentage: 42, unit: 3, number: 5 },
 					],
 				},
 			}),
 		);
 
 		expect(report).not.toBeNull();
-		expect(report!.limits.map(limit => limit.amount.unit)).toEqual(["credits", "credits"]);
-		expect(report!.limits.map(limit => limit.amount.used)).toEqual([1200, undefined]);
-		expect(report!.limits.map(limit => limit.amount.limit)).toEqual([undefined, 10000]);
+		expect(report!.limits.map(limit => limit.amount.unit)).toEqual(["credits", "credits", "credits"]);
+		expect(report!.limits.map(limit => limit.amount.used)).toEqual([1200, undefined, undefined]);
+		expect(report!.limits.map(limit => limit.amount.limit)).toEqual([undefined, 10000, undefined]);
+		expect(report!.limits.map(limit => limit.amount.remaining)).toEqual([undefined, undefined, 1234]);
+		expect(report!.limits.map(limit => limit.amount.usedFraction)).toEqual([undefined, undefined, undefined]);
 	});
 	it("keeps one ranked limit per window when tokens and credits meters coexist", async () => {
 		const report = await zaiUsageProvider.fetchUsage!(
