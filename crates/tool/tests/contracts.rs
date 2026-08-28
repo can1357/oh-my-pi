@@ -930,6 +930,107 @@ fn protect_live_claims_reserves_slot_and_device_names() {
 }
 
 #[test]
+fn protect_live_claims_restores_core_and_evicts_foreign_qualified_claims() {
+	let mut registry = Registry::new();
+	registry
+		.register(
+			fake_tool(1, "core", Arc::new(AtomicUsize::new(0))).named("github"),
+			Presentation::Device,
+			claims("omp/core", Precedence::ENHANCEMENT),
+		)
+		.expect("core device");
+	registry
+		.register(
+			fake_tool(2, "low", Arc::new(AtomicUsize::new(0))).named("github"),
+			Presentation::Device,
+			claims("publisher/low", Precedence::DEFAULT),
+		)
+		.expect("lower foreign shadow");
+	registry
+		.register(
+			fake_tool(3, "high", Arc::new(AtomicUsize::new(0))).named("github"),
+			Presentation::Device,
+			claims("publisher/high", Precedence(999)),
+		)
+		.expect("higher foreign winner");
+
+	assert_eq!(registry.claim("github").expect("live claim").claimant, "publisher/high");
+	for claimant in ["omp/core", "publisher/low", "publisher/high"] {
+		assert!(
+			registry
+				.live_identity(&format!("github@{claimant}"))
+				.is_some(),
+			"{claimant} must be reachable before the freeze"
+		);
+	}
+
+	registry.protect_live_claims();
+
+	let claim = registry.claim("github").expect("core claim restored");
+	assert_eq!(claim.claimant, "omp/core");
+	assert_eq!(claim.rev.n, 1);
+	assert!(claim.shadowed.is_empty(), "foreign qualified claims must be evicted");
+	assert_eq!(
+		registry
+			.live_identity("github@omp/core")
+			.expect("core identity")
+			.1
+			.n,
+		1
+	);
+	for claimant in ["publisher/low", "publisher/high"] {
+		assert!(
+			registry
+				.live_identity(&format!("github@{claimant}"))
+				.is_none(),
+			"{claimant} must be unreachable after the freeze"
+		);
+	}
+}
+
+#[test]
+fn protect_live_claims_keeps_a_restored_core_claim_unlisted() {
+	let mut registry = Registry::new();
+	registry
+		.register(
+			fake_tool(1, "core", Arc::new(AtomicUsize::new(0))).named("report_issue"),
+			Presentation::Device,
+			claims("omp/core", Precedence::ENHANCEMENT),
+		)
+		.expect("core device");
+	registry
+		.unlist_from_roster("report_issue")
+		.expect("live claim can be unlisted");
+	registry
+		.register(
+			fake_tool(2, "high", Arc::new(AtomicUsize::new(0))).named("report_issue"),
+			Presentation::Device,
+			claims("publisher/high", Precedence(999)),
+		)
+		.expect("higher foreign winner");
+
+	registry.protect_live_claims();
+
+	assert_eq!(
+		registry
+			.claim("report_issue")
+			.expect("core claim restored")
+			.claimant,
+		"omp/core"
+	);
+	assert!(
+		registry.is_unlisted("report_issue"),
+		"the core unlist preference must survive foreign eviction"
+	);
+	assert!(
+		!registry
+			.roster()
+			.any(|(name, _)| name.as_str() == "report_issue"),
+		"the restored core claim must stay off the user roster"
+	);
+}
+
+#[test]
 fn protect_core_claims_evicts_preexisting_non_core_claim() {
 	let mut registry = Registry::new();
 	// A non-core claimant occupies the name before protection is applied.

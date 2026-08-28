@@ -1809,8 +1809,23 @@ impl Registry {
 		}
 	}
 
-	/// Reserves every currently-live claim name as a protected core claim.
+	/// Finalizes every currently-live claim as a protected name.
+	///
+	/// Names with a trusted `omp/core` revision first discard foreign live and
+	/// shadow claims. Foreign-only names keep their normal claimant-qualified
+	/// resolution when the remaining live roster is frozen.
 	pub fn protect_live_claims(&mut self) {
+		let core_names = self
+			.versions
+			.iter()
+			.filter(|(_, versions)| {
+				versions
+					.values()
+					.any(|entry| entry.claims.claimant == "omp/core")
+			})
+			.map(|(name, _)| name.clone())
+			.collect::<Vec<_>>();
+		self.protect_core_claims(core_names);
 		self.protected_core.extend(self.live.keys().cloned());
 	}
 
@@ -1837,7 +1852,7 @@ impl Registry {
 					.into_iter()
 					.filter(|shadow| shadow.claimant == "omp/core"),
 			);
-			if let Some(winner) = core_claims.first().cloned() {
+			let core_restored = if let Some(winner) = core_claims.first().cloned() {
 				core_claims.remove(0);
 				self.live.insert(Str::new(name), Claim {
 					rev:        winner.rev,
@@ -1846,8 +1861,15 @@ impl Registry {
 					replaces:   winner.replaces,
 					shadowed:   core_claims,
 				});
-			}
-			if foreign_winner {
+				true
+			} else {
+				false
+			};
+			// An unlist recorded while the trusted core claim was live states
+			// the core tool's roster preference and must survive a foreign
+			// takeover being evicted; only a fully evicted foreign-only name
+			// drops its now-stale unlist entry.
+			if foreign_winner && !core_restored {
 				self.unlisted.remove(name);
 			}
 			// Protection rewrites availability only where it evicts foreign
