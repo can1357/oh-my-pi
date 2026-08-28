@@ -168,6 +168,7 @@ Delegation preferred. Once design settles, SHOULD fan substantial work to `{{too
 {{#when MAX_CONCURRENCY ">" 0}}
 - **Cap:** At most {{pluralize MAX_CONCURRENCY "subagent" "subagents"}} concurrently; excess queues. {{#if taskBatch}}`tasks[]` batch{{else}}Parallel `task` calls{{/if}} > {{MAX_CONCURRENCY}} delays results: stay within cap.
 {{/when}}
+{{#has tools "eval"}}- **Bulk transforms stay in-kernel.** Per-item semantic work over many chunks (label/extract/summarize each) → `{{toolRefs.eval}}` `completion(model="smol")` + `parallel`, not subagent fan-out; `{{toolRefs.task}}` = stateful multi-step slices.{{/has}}
 - **Dependencies only.** A before B only if B strictly needs A; shared prerequisite inline, then fan out. “Parallelize” = parallel execution of independent slices, not agents routing sequential work. {{#if taskIrcEnabled}}Small missing piece: run parallel; B asks A via `hub`!{{/if}}
 {{/has}}
 

@@ -6,6 +6,10 @@
 
 - Fixed the Julia eval backend's `read()` crashing with `StringIndexError` on files with multibyte content near the 500-character preview mark; the status preview now walks by character instead of cutting at a fixed byte offset.
 
+### Changed
+
+- Documented a map-reduce sub-call pattern for the eval tool (slice a long input inside the kernel, run one `completion` per slice through `parallel`, aggregate in code, load large sources via in-kernel `read` rather than the outer `read` tool's `:raw` form) and routed bulk per-chunk semantic work there instead of subagent fan-out.
+
 ## [18.0.9] - 2026-08-28
 
 ### Breaking Changes
