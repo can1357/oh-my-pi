@@ -9,6 +9,7 @@
  */
 import { createHash } from "node:crypto";
 import { $env, $envExact, extractRetryHint, getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
+import { QuotaProbeLeaseBook } from "./auth/probe-lease";
 import {
 	isSqliteCorruptionError,
 	resolveCredentialIdentityKey,
@@ -93,6 +94,42 @@ const OAUTH_BEARER_FINGERPRINT_HISTORY_LIMIT = 8;
 function fingerprintOAuthBearer(bearer: string): string {
 	return createHash("sha256").update(bearer).digest("base64url");
 }
+
+/** Stable identity of an OAuth row. Missing/malformed fields yield null (not a switch). */
+function fingerprintOAuthPhysicalIdentity(credential: AuthCredential): string | null {
+	if (credential.type !== "oauth") return null;
+	const parts: string[] = [];
+	const accountId = credential.accountId?.trim();
+	const email = credential.email?.trim().toLowerCase();
+	const orgId = credential.orgId?.trim();
+	if (accountId) parts.push(`account:${accountId}`);
+	if (email) parts.push(`email:${email}`);
+	if (orgId) parts.push(`org:${orgId}`);
+	if (parts.length === 0) return null;
+	return parts.join("|");
+}
+
+function identityFieldMap(fingerprint: string): Map<string, string> {
+	const fields = new Map<string, string>();
+	for (const part of fingerprint.split("|")) {
+		const sep = part.indexOf(":");
+		if (sep <= 0) continue;
+		fields.set(part.slice(0, sep), part.slice(sep + 1));
+	}
+	return fields;
+}
+
+/** True when every old field is still present with the same value (new fields only). */
+function isConservativeIdentityEnrichment(oldFingerprint: string, newFingerprint: string): boolean {
+	const oldFields = identityFieldMap(oldFingerprint);
+	const newFields = identityFieldMap(newFingerprint);
+	for (const [key, value] of oldFields) {
+		if (newFields.get(key) !== value) return false;
+	}
+	return true;
+}
+
+const WORKSPACE_DEACTIVATED_PATTERN = /\bdeactivated_workspace\b|\bdeactivated[_ ](?:org|organization|workspace)\b/i;
 const SESSION_STICKY_CACHE_PREFIX = "session:sticky:";
 /**
  * Anthropic-only idle window after which a session's pinned credential no
@@ -829,6 +866,8 @@ type AuthApiKeyOptions = {
 	 * that a peer/broker rotated out from under us is replaced before retrying.
 	 */
 	forceRefresh?: boolean;
+	/** Gateway / concurrent selector identity for in-flight turn reservations. */
+	requestId?: string;
 };
 type OAuthResolutionResult = { apiKey: string; credential: OAuthCredential; credentialId?: number };
 
@@ -1360,6 +1399,9 @@ export class AuthStorage {
 	#oauthRefreshInFlight: Map<number, Promise<AuthCredentialSnapshotEntry>> = new Map();
 	#oauthCredentialRefreshInFlight: Map<number, Promise<OAuthCredentials>> = new Map();
 	#closed = false;
+	#probeLeases = new QuotaProbeLeaseBook();
+	#credentialIncarnation = new Map<number, number>();
+	#inflightProbes = new Map<string, { credentialId: number; blockScope: string; leaseId: string }>();
 
 	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}) {
 		this.#store = store;
@@ -1623,6 +1665,10 @@ export class AuthStorage {
 	#setStoredCredentials(provider: string, credentials: StoredCredential[]): void {
 		const current = this.#data.get(provider) ?? [];
 		if (storedCredentialArraysEqual(current, credentials)) return;
+		for (const next of credentials) {
+			const previous = current.find(entry => entry.id === next.id);
+			if (previous) this.#maybeBumpIncarnation(provider, next.id, previous.credential, next.credential);
+		}
 		const trackedBearerFingerprints = this.#oauthBearerFingerprints.get(provider);
 		if (trackedBearerFingerprints) {
 			const activeOAuthIds = new Set(
@@ -1639,6 +1685,62 @@ export class AuthStorage {
 			this.#data.set(provider, credentials);
 		}
 		this.#bumpGeneration("credentials");
+	}
+
+	#maybeBumpIncarnation(provider: string, credentialId: number, previous: AuthCredential, next: AuthCredential): void {
+		const oldFp = fingerprintOAuthPhysicalIdentity(previous);
+		const newFp = fingerprintOAuthPhysicalIdentity(next);
+		if (!oldFp || !newFp || oldFp === newFp) return;
+		if (isConservativeIdentityEnrichment(oldFp, newFp)) return;
+		const incarnation = (this.#credentialIncarnation.get(credentialId) ?? 1) + 1;
+		this.#credentialIncarnation.set(credentialId, incarnation);
+		this.#clearSessionStickiesForCredential(provider, credentialId);
+		this.#clearCredentialBlocks(provider, credentialId);
+		this.#probeLeases.purgeCredential(credentialId);
+		this.#invalidateUsageReportCache(provider);
+		logger.info("auth-storage credential incarnation bumped after identity change", {
+			provider,
+			credentialId,
+			incarnation,
+		});
+	}
+
+	#clearSessionStickiesForCredential(provider: string, credentialId: number): void {
+		const index = this.#getStoredCredentials(provider).findIndex(entry => entry.id === credentialId);
+		if (index < 0) return;
+		const sessionMap = this.#sessionLastCredential.get(provider);
+		if (sessionMap) {
+			for (const [sessionId, sticky] of sessionMap) {
+				if (sticky.index === index) sessionMap.delete(sessionId);
+			}
+		}
+		this.#clearProviderSessionCredentialCache(provider);
+	}
+
+	#fanOutWorkspaceDeactivation(
+		provider: string,
+		credentialId: number,
+		blockedUntil: number,
+		retryAfter: boolean,
+	): void {
+		const entries = this.#getStoredCredentials(provider);
+		const source = entries.find(entry => entry.id === credentialId);
+		if (source === undefined || source.credential.type !== "oauth") return;
+		const sourceKey = resolveCredentialIdentityKey(provider, source.credential);
+		const sourceAccount = source.credential.accountId?.trim();
+		const providerKey = this.#getProviderTypeKey(provider, "oauth");
+		for (let index = 0; index < entries.length; index += 1) {
+			const entry = entries[index]!;
+			if (entry.id === credentialId || entry.credential.type !== "oauth") continue;
+			const key = resolveCredentialIdentityKey(provider, entry.credential);
+			const account = entry.credential.accountId?.trim();
+			const sameIdentity =
+				(sourceKey !== null && key !== null && sourceKey === key) ||
+				(sourceAccount !== undefined && account !== undefined && sourceAccount === account);
+			if (!sameIdentity) continue;
+			if (retryAfter) this.#probeLeases.noteRetryAfterBlock(entry.id, "", blockedUntil);
+			this.#markCredentialBlocked(provider, providerKey, index, blockedUntil);
+		}
 	}
 
 	#recordOAuthBearerCredentialId(provider: string, bearer: string, credentialId: number | undefined): void {
@@ -1842,8 +1944,6 @@ export class AuthStorage {
 		blockScopeOrScopes: string | readonly string[] | undefined = undefined,
 	): number | undefined {
 		const nowMs = Date.now();
-		// A request honours its own scope plus any legacy catch-all scope, so a
-		// block written before backoff was scoped still applies to everything.
 		const scopes = (
 			typeof blockScopeOrScopes === "string" ? [blockScopeOrScopes] : (blockScopeOrScopes ?? [])
 		).filter(scope => scope.length > 0);
@@ -1906,13 +2006,18 @@ export class AuthStorage {
 		this.#credentialBackoff.set(backoffKey, backoffMap);
 		const probeAfterMap = this.#credentialBackoffProbeAfter.get(backoffKey) ?? new Map<number, number>();
 		probeAfterMap.set(credentialIndex, Math.min(nextBlockedUntil, Date.now() + USAGE_REPORT_TTL_MS));
-		this.#credentialBackoffProbeAfter.set(backoffKey, probeAfterMap);
 		this.#invalidateUsageReportCache(provider);
 
-		const upsertCredentialBlock = this.#store.upsertCredentialBlock?.bind(this.#store);
-		if (!upsertCredentialBlock || this.#persistedBlockStoreDamaged) return;
 		const credentialId = this.#getStoredCredentials(provider)[credentialIndex]?.id;
-		if (credentialId === undefined) return;
+		if (credentialId !== undefined) {
+			const scope = blockScope ?? "";
+			if (!this.#probeLeases.isRetryAfterSourced(credentialId, scope)) {
+				this.#probeLeases.noteHardCooldown(credentialId, scope);
+			}
+		}
+
+		const upsertCredentialBlock = this.#store.upsertCredentialBlock?.bind(this.#store);
+		if (!upsertCredentialBlock || this.#persistedBlockStoreDamaged || credentialId === undefined) return;
 		try {
 			upsertCredentialBlock({
 				credentialId,
@@ -4597,12 +4702,47 @@ export class AuthStorage {
 		}
 		options?.signal?.throwIfAborted();
 
-		// Usage lookup may refresh, disable, or remove a row. Re-resolve its
-		// durable id before applying positional in-memory and persisted blocks.
 		const targetIndex = this.#getStoredCredentials(provider).findIndex(
 			entry => entry.id === targetCredentialId && entry.credential.type === credentialType,
 		);
+		const probeScope = routing.blockScope ?? "";
+		if (options?.retryAfterMs !== undefined) {
+			this.#probeLeases.noteRetryAfterBlock(targetCredentialId, probeScope, blockedUntil);
+		} else {
+			this.#probeLeases.noteHardCooldown(targetCredentialId, probeScope);
+		}
 		return this.#blockCredentialForRotation(provider, credentialType, targetIndex, blockedUntil, routing);
+	}
+
+	tryAcquireQuotaProbeLease(credentialId: number, blockScope: string): string | null {
+		return this.#probeLeases.tryAcquire(credentialId, blockScope);
+	}
+
+	recordQuotaProbeSuccess(credentialId: number, blockScope: string, leaseId: string | null): boolean {
+		if (!this.#probeLeases.recordSuccess(credentialId, blockScope, leaseId)) return false;
+		for (const [provider, entries] of this.#data) {
+			const index = entries.findIndex(entry => entry.id === credentialId);
+			if (index < 0) continue;
+			const providerKey = this.#getProviderTypeKey(provider, entries[index]!.credential.type);
+			this.#clearCredentialBlockScope(provider, credentialId, index, providerKey, blockScope || undefined);
+			return true;
+		}
+		return true;
+	}
+
+	noteTransientSoftAvoid(credentialId: number, blockScope: string, untilMs: number): void {
+		this.#probeLeases.noteSoftAvoid(credentialId, blockScope, untilMs);
+	}
+
+	getCredentialIncarnation(credentialId: number): number {
+		return this.#credentialIncarnation.get(credentialId) ?? 1;
+	}
+
+	settleQuotaProbeSuccess(requestId: string): boolean {
+		const probe = this.#inflightProbes.get(requestId);
+		if (!probe) return false;
+		this.#inflightProbes.delete(requestId);
+		return this.recordQuotaProbeSuccess(probe.credentialId, probe.blockScope, probe.leaseId);
 	}
 
 	#resolveWindowResetAt(window: UsageLimit["window"]): number | undefined {
@@ -4946,6 +5086,7 @@ export class AuthStorage {
 				candidates.unshift(preferred);
 			}
 		}
+
 		// Step (b) of the auth-retry policy: when `forceRefresh` is set, re-mint
 		// the session-preferred credential (or the first candidate when no
 		// session preference exists yet) even if its cached token still looks
@@ -5405,7 +5546,30 @@ export class AuthStorage {
 			!allowBlocked &&
 			this.#isCredentialBlocked(provider, providerKey, selection.index, blockScopes ?? blockScope)
 		) {
-			return undefined;
+			const entries = this.#getStoredCredentials(provider);
+			const blockedId = entries[selection.index]?.id;
+			if (blockedId === undefined) return undefined;
+			// A live block must never hijack rotation: while any same-type sibling
+			// is still usable, fall through so the caller rotates to it. Probing a
+			// cooled-down credential is a last resort for requests that have no
+			// unblocked sibling at all (one lease per cooldown generation).
+			const hasUsableSibling = entries.some(
+				(entry, index) =>
+					index !== selection.index &&
+					entry.credential.type === selection.credential.type &&
+					!this.#isCredentialBlocked(provider, providerKey, index, blockScopes ?? blockScope),
+			);
+			if (hasUsableSibling) return undefined;
+			const probeScope = blockScope ?? "";
+			const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
+			if (!lease) return undefined;
+			if (options?.requestId) {
+				this.#inflightProbes.set(options.requestId, {
+					credentialId: blockedId,
+					blockScope: probeScope,
+					leaseId: lease,
+				});
+			}
 		}
 
 		if (!(await this.#prepareOAuthCredentialForRequest(provider, selection, options))) {
@@ -5650,7 +5814,6 @@ export class AuthStorage {
 		if (runtimeKey) {
 			return runtimeKey;
 		}
-
 		// Config override: explicit apiKey pinned in models.yml beats the broker's
 		// OAuth credentials. The user redirected a provider at a custom baseUrl
 		// (e.g. an auth-gateway) and supplied the bearer for that endpoint —
@@ -6466,20 +6629,43 @@ export class AuthStorage {
 		const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
 		const exactCursorModelPolicy = AIError.isCursorPlanAccountPolicyError(error, provider);
 		const accountPolicy = exactCursorModelPolicy || AIError.isAccountPolicyError(error);
-		if (!accountPolicy && (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message))) {
+		const workspaceDeactivated =
+			status === 402 && typeof message === "string" && WORKSPACE_DEACTIVATED_PATTERN.test(message);
+		if (
+			!accountPolicy &&
+			(workspaceDeactivated || AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message))
+		) {
 			// Thread the provider-specified reset window (e.g. Devin "Your limit
 			// will reset in 13 minutes") into the block duration so the credential
 			// is not reselected and hammered while the cap remains active.
 			const retryAfterMs = extractRetryHint(undefined, message);
-			return (
-				await this.markUsageLimitReached(provider, sessionId, {
-					retryAfterMs,
-					modelId: options?.modelId,
-					apiKey: options?.apiKey,
+			const marked = await this.markUsageLimitReached(provider, sessionId, {
+				retryAfterMs,
+				modelId: options?.modelId,
+				apiKey: options?.apiKey,
+				credentialId: options?.credentialId,
+				signal: options?.signal,
+			});
+			if (workspaceDeactivated) {
+				const target = await this.#resolveCredentialTarget(provider, sessionId, {
 					credentialId: options?.credentialId,
-					signal: options?.signal,
-				})
-			).switched;
+					apiKey: options?.apiKey,
+				});
+				const credentialId =
+					options?.credentialId ?? (target ? this.#getStoredCredentials(provider)[target.index]?.id : undefined);
+				if (credentialId !== undefined) {
+					const sourceIndex = this.#getStoredCredentials(provider).findIndex(entry => entry.id === credentialId);
+					const providerKey = this.#getProviderTypeKey(provider, "oauth");
+					const until =
+						sourceIndex >= 0
+							? (this.#getCredentialBlockedUntil(provider, providerKey, sourceIndex) ??
+								Date.now() + AuthStorage.#defaultBackoffMs)
+							: Date.now() + AuthStorage.#defaultBackoffMs;
+					this.#probeLeases.noteRetryAfterBlock(credentialId, "", until);
+					this.#fanOutWorkspaceDeactivation(provider, credentialId, until, true);
+				}
+			}
+			return marked.switched;
 		}
 
 		const sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
