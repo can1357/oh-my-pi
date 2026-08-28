@@ -356,6 +356,8 @@ describe("OpenAI provider-file capability", () => {
 			"https://example.invalid/image.png",
 			"https://generativelanguage.googleapis.com/v1beta/files",
 			"https://generativelanguage.googleapis.com/v1beta/files/vision/extra",
+			"https://generativelanguage.googleapis.com/v1beta999/files/vision",
+			"https://generativelanguage.googleapis.com/v2/files/vision",
 			"http://generativelanguage.googleapis.com/v1beta/files/vision",
 			"https://generativelanguage.googleapis.com.evil.invalid/v1beta/files/vision",
 			"not-a-url",

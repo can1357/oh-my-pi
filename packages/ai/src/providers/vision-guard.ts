@@ -199,7 +199,7 @@ export function isOfficialGeminiFilesUri(uri: string): boolean {
 			url.search.length === 0 &&
 			url.hash.length === 0 &&
 			url.port.length === 0 &&
-			/^\/v1(beta\d*)?\/files\/[^/]+$/.test(url.pathname)
+			/^\/v1(beta)?\/files\/[^/]+$/.test(url.pathname)
 		);
 	} catch {
 		return false;

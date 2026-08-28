@@ -786,6 +786,21 @@ export function applyOpenAIGatewayRouting(
 	}
 }
 
+/**
+ * Gateway routing selectors the Responses serializer writes for `model`, in the
+ * exact wire shape dispatch uses. Side requests that fingerprint themselves as
+ * the model's routing target — remote compaction above all — must send the same
+ * selectors or they reach the gateway's default upstream while claiming the
+ * pinned one produced their state.
+ */
+export function resolveOpenAIModelWireRouting(model: Model, cacheEnabled = true): OpenAIGatewayRoutingParams {
+	const compat = model.compat as OpenAIGatewayRoutingCompat | undefined;
+	if (!compat) return {};
+	const params: OpenAIGatewayRoutingParams = {};
+	applyOpenAIGatewayRouting(params, compat, cacheEnabled);
+	return params;
+}
+
 export interface VercelResponsesCacheParams {
 	caching?: "auto";
 	cache_anchor_items?: number;

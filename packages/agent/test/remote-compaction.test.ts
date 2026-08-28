@@ -1312,6 +1312,89 @@ describe("buildOpenAiNativeHistory computer calls", () => {
 	});
 });
 
+describe("remote compaction gateway routing", () => {
+	function makeRoutedOpenRouterModel(): Model<"openai-responses"> {
+		const base = makeOpenAiModel({
+			id: "openai/gpt-5.5",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			remoteCompaction: {
+				enabled: true,
+				v2StreamingEnabled: true,
+				v2Endpoint: "https://openrouter.ai/api/v1/responses",
+			},
+		});
+		return {
+			...base,
+			compat: { ...base.compat, isOpenRouterHost: true, openRouterRouting: { only: ["anthropic"] } },
+		};
+	}
+
+	test("sends the configured OpenRouter routing on a V1 compaction request", async () => {
+		const model = makeRoutedOpenRouterModel();
+		let body: Record<string, unknown> | undefined;
+		const fetchMock: FetchImpl = async (_input, init) => {
+			const parsed: unknown = JSON.parse(String(init?.body));
+			if (!isRecord(parsed)) throw new Error("expected a V1 compaction request body");
+			body = parsed;
+			return Response.json({ output: [{ type: "compaction_summary", summary: "compact" }] });
+		};
+
+		await requestOpenAiRemoteCompaction(model, "test-key", [], "compact", undefined, { fetch: fetchMock });
+
+		// The producer fingerprint folds this routing, so the request that mints the
+		// opaque state must reach the same pinned upstream rather than the gateway
+		// default.
+		expect(body?.provider).toEqual({ only: ["anthropic"] });
+		expect(getOpenAiCompactionReferenceTarget(model, false)).toBe(getOpenAIResponsesReferenceTarget(model));
+	});
+
+	test("sends the configured OpenRouter routing on a V2 streaming compaction request", async () => {
+		const model = makeRoutedOpenRouterModel();
+		const request = buildCompactionV2Request(
+			model,
+			[{ type: "message", role: "user", content: [{ type: "input_text", text: "real user" }] }],
+			"instructions",
+		);
+		let body: Record<string, unknown> | undefined;
+		const fetchMock: FetchImpl = async (_input, init) => {
+			const parsed: unknown = JSON.parse(String(init?.body));
+			if (!isRecord(parsed)) throw new Error("expected a V2 compaction request body");
+			body = parsed;
+			return sseResponse([
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { type: "compaction", encrypted_content: "enc_routed" },
+				},
+				{ type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } },
+			]);
+		};
+
+		await requestCompactionV2Streaming(model, "test-key", request, undefined, { fetch: fetchMock });
+
+		expect(body?.provider).toEqual({ only: ["anthropic"] });
+		expect(getOpenAiCompactionReferenceTarget(model, true)).toBe(getOpenAIResponsesReferenceTarget(model));
+	});
+
+	test("omits routing selectors for models without configured gateway routing", async () => {
+		let body: Record<string, unknown> | undefined;
+		const fetchMock: FetchImpl = async (_input, init) => {
+			const parsed: unknown = JSON.parse(String(init?.body));
+			if (!isRecord(parsed)) throw new Error("expected a V1 compaction request body");
+			body = parsed;
+			return Response.json({ output: [{ type: "compaction_summary", summary: "compact" }] });
+		};
+
+		await requestOpenAiRemoteCompaction(makeOpenAiModel(), "test-key", [], "compact", undefined, {
+			fetch: fetchMock,
+		});
+
+		expect(body && "provider" in body).toBe(false);
+		expect(body && "providerOptions" in body).toBe(false);
+	});
+});
+
 describe("remote compaction input forwarding", () => {
 	test("rewrites an oversized trailing tool output without dropping native history", async () => {
 		// The compact endpoint still receives every call/result item. Only the

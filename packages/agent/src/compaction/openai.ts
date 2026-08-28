@@ -26,7 +26,9 @@ import {
 	encodeResponsesOrphanToolResultOutput,
 	encodeResponsesToolResultOutput,
 	hoistInterleavedResponsesToolBatchMessages,
+	type OpenAIGatewayRoutingParams,
 	parseTextSignature,
+	resolveOpenAIModelWireRouting,
 	resolveResponsesComputerScreenshot,
 	splitResponsesOrphanOutput,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
@@ -279,7 +281,7 @@ export interface OpenAiRemoteCompactionPreserveData {
 	compactionItem: OpenAiRemoteCompactionItem;
 }
 
-export interface OpenAiRemoteCompactionRequest {
+export interface OpenAiRemoteCompactionRequest extends OpenAIGatewayRoutingParams {
 	model: string;
 	input: Array<Record<string, unknown>>;
 	instructions: string;
@@ -1154,6 +1156,9 @@ export async function requestOpenAiRemoteCompaction(
 		// reasoning, or call/result pairing.
 		input: trimmed.input,
 		instructions,
+		// The producer fingerprint folds the model's configured gateway routing, so
+		// the request has to reach the same upstream that fingerprint names.
+		...resolveOpenAIModelWireRouting(model, false),
 	};
 	const isAzureOpenAiResponses = (model.remoteCompaction?.api ?? model.api) === "azure-openai-responses";
 	const isCodexResponses =

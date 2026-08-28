@@ -20,6 +20,7 @@ import {
 import {
 	getOpenAIPromptCacheKey,
 	getOpenAIResponsesRoutingSessionId,
+	resolveOpenAIModelWireRouting,
 	resolveOpenAIRequestSetup,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { resolveAzureOpenAIBaseUrl, resolveOpenAIResponsesRequestModel } from "@oh-my-pi/pi-ai/utils";
@@ -329,6 +330,9 @@ async function attemptCompactionV2Streaming(
 			: {}),
 		...(promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
 		...(request.tools && request.tools.length > 0 ? { tools: request.tools, tool_choice: "auto" } : {}),
+		// The producer fingerprint folds the model's configured gateway routing, so
+		// the stream has to reach the same upstream that fingerprint names.
+		...resolveOpenAIModelWireRouting(model, false),
 	};
 	if (options.codexMetadata) {
 		body.client_metadata = options.codexMetadata.clientMetadata;
