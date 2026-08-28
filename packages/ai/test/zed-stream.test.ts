@@ -349,6 +349,37 @@ describe("Zed provider protocol regressions", () => {
 			{ type: "toolCall", id: "call_math", name: "calculate", arguments: { expr: "2+2" } },
 		]);
 	});
+	it("treats an xAI content filter finish as an error without promoting tool calls", async () => {
+		const run = await runZedStream(makeModel("grok-4.6"), [
+			{
+				event: {
+					choices: [
+						{
+							delta: {
+								tool_calls: [
+									{
+										index: 0,
+										id: "call_filtered",
+										type: "function",
+										function: { name: "write_file", arguments: '{"path":"secret.txt"}' },
+									},
+								],
+							},
+						},
+					],
+				},
+			},
+			{ event: { choices: [{ delta: {}, finish_reason: "content_filter" }] } },
+			{ status: "stream_ended" },
+		]);
+
+		expect(run.result.stopReason).toBe("error");
+		expect(run.result.errorMessage).toContain("content_filter");
+		expect(run.result.content.some(block => block.type === "toolCall")).toBe(false);
+		expect(run.events.filter(event => event.type === "toolcall_end")).toHaveLength(0);
+		expect(run.events.some(event => event.type === "done")).toBe(false);
+		expect(run.events.at(-1)?.type).toBe("error");
+	});
 
 	it("emits Gemini thought text as ThinkingContent and retains its signature", async () => {
 		const run = await runZedStream(makeModel("gemini-3-flash", true), [
@@ -546,6 +577,38 @@ describe("Zed provider protocol regressions", () => {
 		expect(run.result.errorMessage).toBe("Zed stream closed before stream_ended status was received");
 		expect(run.events.at(-1)?.type).toBe("error");
 		expect(run.events.some(event => event.type === "done")).toBe(false);
+	});
+
+	it("reads nested xAI cached-token usage before completing the stream", async () => {
+		const model: Model<"zed-agent"> = {
+			...makeModel("grok-4.6"),
+			cost: { input: 1, output: 2, cacheRead: 0.25, cacheWrite: 0 },
+		};
+		const run = await runZedStream(model, [
+			{ event: { choices: [{ delta: { content: "answer" } }] } },
+			{ event: { choices: [{ delta: {}, finish_reason: "stop" }] } },
+			{
+				event: {
+					usage: {
+						prompt_tokens: 120,
+						completion_tokens: 8,
+						prompt_tokens_details: { cached_tokens: 75 },
+					},
+				},
+			},
+			{ status: "stream_ended" },
+		]);
+
+		expect(run.result.stopReason).toBe("stop");
+		expect(run.result.usage).toMatchObject({
+			input: 45,
+			output: 8,
+			cacheRead: 75,
+			cacheWrite: 0,
+			totalTokens: 128,
+		});
+		expect(run.result.usage.cost.input).toBeCloseTo(45 / 1_000_000, 12);
+		expect(run.result.usage.cost.cacheRead).toBeCloseTo((75 * 0.25) / 1_000_000, 12);
 	});
 
 	it("reads nested OpenAI cached-token usage before completing the stream", async () => {

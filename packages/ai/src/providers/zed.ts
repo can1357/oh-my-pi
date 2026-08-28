@@ -92,7 +92,8 @@ function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, opti
 	const messages: Array<{ role: "user" | "assistant"; content: unknown }> = [];
 	const effectiveMaxTokens = options?.maxTokens ?? model.maxTokens ?? 8192;
 
-	for (const msg of context.messages) {
+	for (let i = 0; i < context.messages.length; i++) {
+		const msg = context.messages[i];
 		if (msg.role === "user" || msg.role === "developer") {
 			if (typeof msg.content === "string") {
 				messages.push({ role: "user", content: msg.content });
@@ -152,9 +153,38 @@ function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, opti
 			}
 			messages.push({ role: "assistant", content: contentBlocks });
 		} else if (msg.role === "toolResult") {
-			const hasImage = msg.content.some(block => block.type === "image");
-			const toolResultContent = hasImage
-				? msg.content.map(block => {
+			const toolResults: unknown[] = [];
+			const hoistedImages: unknown[] = [];
+
+			let j = i;
+			for (; j < context.messages.length; j++) {
+				const toolMsg = context.messages[j];
+				if (toolMsg.role !== "toolResult") break;
+
+				const hasImages = toolMsg.content.some(block => block.type === "image");
+				let toolResultContent: unknown;
+
+				if (toolMsg.isError) {
+					const textBlocks = toolMsg.content.filter((b): b is TextContent => b.type === "text");
+					for (const block of toolMsg.content) {
+						if (block.type === "image") {
+							hoistedImages.push({
+								type: "image",
+								source: {
+									type: "base64",
+									media_type: block.mimeType,
+									data: block.data,
+								},
+							});
+						}
+					}
+					if (textBlocks.length === 0) {
+						toolResultContent = "Tool failed with no output.";
+					} else {
+						toolResultContent = textBlocks.map(b => ({ type: "text", text: b.text }));
+					}
+				} else if (hasImages) {
+					toolResultContent = toolMsg.content.map(block => {
 						if (block.type === "text") {
 							return { type: "text", text: block.text };
 						}
@@ -166,21 +196,34 @@ function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, opti
 								data: block.data,
 							},
 						};
-					})
-				: msg.content
+					});
+				} else {
+					toolResultContent = toolMsg.content
 						.filter((block): block is TextContent => block.type === "text")
 						.map(block => block.text)
 						.join("\n");
+				}
+
+				toolResults.push({
+					type: "tool_result",
+					tool_use_id: toolMsg.toolCallId,
+					content: toolResultContent,
+					is_error: toolMsg.isError,
+				});
+			}
+
+			i = j - 1;
+
+			if (hoistedImages.length > 0) {
+				toolResults.push(
+					{ type: "text", text: "Attached image(s) from the tool result(s) above:" },
+					...hoistedImages,
+				);
+			}
+
 			messages.push({
 				role: "user",
-				content: [
-					{
-						type: "tool_result",
-						tool_use_id: msg.toolCallId,
-						content: toolResultContent,
-						is_error: msg.isError,
-					},
-				],
+				content: toolResults,
 			});
 		}
 	}
@@ -194,7 +237,29 @@ function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, opti
 					input_schema: t.parameters ?? { type: "object", properties: {} },
 				}));
 
-	const isReasoning = model.reasoning && !options?.disableReasoning;
+	let toolChoiceParam: Record<string, unknown> | undefined;
+	let isForcedToolChoice = false;
+
+	if (options?.toolChoice) {
+		if (typeof options.toolChoice === "string") {
+			if (options.toolChoice === "required" || options.toolChoice === "any") {
+				toolChoiceParam = { type: "any" };
+				isForcedToolChoice = true;
+			} else {
+				toolChoiceParam = { type: options.toolChoice };
+			}
+		} else {
+			const toolName = extractToolChoiceFunctionName(options.toolChoice);
+			if (toolName) {
+				toolChoiceParam = { type: "tool", name: toolName };
+				isForcedToolChoice = true;
+			}
+		}
+	}
+
+	const isClaudeBudgetThinking = model.id.includes("4-5");
+	const isReasoning = model.reasoning && !options?.disableReasoning && !isForcedToolChoice;
+
 	const body: Record<string, unknown> = {
 		model: model.id,
 		messages,
@@ -209,23 +274,15 @@ function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, opti
 		body.tools = tools;
 	}
 
-	if (options?.toolChoice) {
-		if (typeof options.toolChoice === "string") {
-			if (options.toolChoice === "required") {
-				body.tool_choice = { type: "any" };
-			} else {
-				body.tool_choice = { type: options.toolChoice };
-			}
-		} else {
-			const toolName = extractToolChoiceFunctionName(options.toolChoice);
-			if (toolName) {
-				body.tool_choice = { type: "tool", name: toolName };
-			}
-		}
+	if (toolChoiceParam) {
+		body.tool_choice = toolChoiceParam;
 	}
 
-	if (isReasoning) {
-		if (model.id.includes("4-5")) {
+	if (isForcedToolChoice) {
+		// Forced tool choice disables Anthropic thinking; neither thinking nor
+		// adaptive effort is emitted.
+	} else if (isReasoning) {
+		if (isClaudeBudgetThinking) {
 			const effort = options?.reasoning ?? Effort.Medium;
 			const targetBudget = ANTHROPIC_THINKING[effort] ?? 8192;
 			body.thinking = {
@@ -239,6 +296,15 @@ function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, opti
 			body.output_config = {
 				effort: options?.reasoning ?? "medium",
 			};
+		}
+	} else if (model.reasoning && options?.disableReasoning) {
+		// Adaptive-only Claude models cannot be disabled by omission: pin the
+		// lowest fixed effort instead. Budget-based Claude uses the explicit
+		// disabled thinking mode and must not receive output_config.effort.
+		if (isClaudeBudgetThinking) {
+			body.thinking = { type: "disabled" };
+		} else {
+			body.output_config = { effort: "low" };
 		}
 	}
 
@@ -272,10 +338,20 @@ function mapContextToOpenAiResponses(context: Context, model: Model<"zed-agent">
 					if (block.type === "text") {
 						parts.push({ type: "input_text", text: block.text });
 					} else if (block.type === "image") {
-						parts.push({
-							type: "input_image",
-							image_url: `data:${block.mimeType};base64,${block.data}`,
-						});
+						const detail = block.detail ?? "auto";
+						if (block.providerFile?.provider === "openai" && block.providerFile.id) {
+							parts.push({
+								type: "input_image",
+								detail,
+								file_id: block.providerFile.id,
+							});
+						} else {
+							parts.push({
+								type: "input_image",
+								detail,
+								image_url: block.url ?? `data:${block.mimeType};base64,${block.data}`,
+							});
+						}
 					}
 				}
 			}
@@ -1643,9 +1719,22 @@ export function streamZed(
 							finish_reason?: string;
 						};
 						if (choice.finish_reason) {
-							if (choice.finish_reason === "length") outputMessage.stopReason = "length";
-							else if (choice.finish_reason === "tool_calls" || choice.finish_reason === "function_call")
+							const fr = String(choice.finish_reason).toLowerCase();
+							if (fr === "content_filter") {
+								throw new ProviderResponseError("Provider finish_reason: content_filter", {
+									kind: "content-blocked",
+								});
+							}
+							if (fr === "length" || fr === "max_tokens") {
+								outputMessage.stopReason = "length";
+							} else if (fr === "tool_calls" || fr === "function_call") {
 								outputMessage.stopReason = "toolUse";
+							} else if (fr === "stop" || fr === "end") {
+								outputMessage.stopReason = "stop";
+							} else {
+								outputMessage.stopReason = "error";
+								outputMessage.errorMessage = `Provider finish_reason: ${choice.finish_reason}`;
+							}
 						}
 						if (
 							typeof choice.delta?.reasoning_content === "string" &&
@@ -1874,9 +1963,38 @@ export function streamZed(
 							outputMessage.usage.reasoningTokens = thinkingTokens;
 						}
 					} else if (event.usage && typeof event.usage === "object" && outputMessage.usage) {
-						const u = event.usage as { prompt_tokens?: number; completion_tokens?: number };
-						if (u.prompt_tokens) outputMessage.usage.input = u.prompt_tokens;
-						if (u.completion_tokens) outputMessage.usage.output = u.completion_tokens;
+						const u = event.usage as {
+							prompt_tokens?: number;
+							completion_tokens?: number;
+							cached_tokens?: number;
+							prompt_tokens_details?: {
+								cached_tokens?: number;
+							};
+							input_tokens_details?: {
+								cached_tokens?: number;
+							};
+							completion_tokens_details?: {
+								reasoning_tokens?: number;
+							};
+						};
+						const cached =
+							u.prompt_tokens_details?.cached_tokens ??
+							u.input_tokens_details?.cached_tokens ??
+							u.cached_tokens ??
+							0;
+						if (cached > 0) {
+							outputMessage.usage.cacheRead = cached;
+						}
+						if (u.prompt_tokens !== undefined) {
+							outputMessage.usage.input = Math.max(0, u.prompt_tokens - cached);
+						}
+						if (u.completion_tokens !== undefined) {
+							outputMessage.usage.output = u.completion_tokens;
+						}
+						const reasoningTokens = u.completion_tokens_details?.reasoning_tokens;
+						if (reasoningTokens !== undefined && reasoningTokens > 0) {
+							outputMessage.usage.reasoningTokens = reasoningTokens;
+						}
 					} else if (eventType === "message_start") {
 						const message = event.message as
 							| {

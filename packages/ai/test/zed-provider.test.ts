@@ -100,6 +100,65 @@ describe("Zed Provider Payload Construction", () => {
 			},
 		]);
 	});
+	it("preserves OpenAI Responses image detail and native image references", () => {
+		const model: Model<"zed-agent"> = {
+			id: "gpt-5.6-luna",
+			name: "GPT-5.6 Luna",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: "https://cloud.zed.dev",
+			reasoning: true,
+			contextWindow: 400000,
+			maxTokens: 128000,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			compat: undefined,
+		};
+		const imageData = "AQID";
+		const imageUrl = "https://blob.example.invalid/screenshot.png";
+		const providerFileId = "file_screenshot_123";
+		const payload = buildZedProviderRequest(
+			"open_ai",
+			{
+				messages: [
+					{
+						role: "user",
+						content: [
+							{ type: "text", text: "Inspect this frame." },
+							{ type: "image", data: imageData, mimeType: "image/png", detail: "original" },
+							{ type: "image", data: imageData, mimeType: "image/png", detail: "high", url: imageUrl },
+							{
+								type: "image",
+								data: imageData,
+								mimeType: "image/png",
+								detail: "low",
+								providerFile: { provider: "openai", id: providerFileId },
+							},
+						],
+						timestamp: 1,
+					},
+				],
+			},
+			model,
+		) as { input: Array<Record<string, unknown>> };
+
+		expect(payload.input).toEqual([
+			{
+				type: "message",
+				role: "user",
+				content: [
+					{ type: "input_text", text: "Inspect this frame." },
+					{
+						type: "input_image",
+						detail: "original",
+						image_url: `data:image/png;base64,${imageData}`,
+					},
+					{ type: "input_image", detail: "high", image_url: imageUrl },
+					{ type: "input_image", detail: "low", file_id: providerFileId },
+				],
+			},
+		]);
+	});
 
 	it("replaces images with the standard placeholder for text-only Zed xAI models", () => {
 		const model: Model<"zed-agent"> = {
@@ -295,6 +354,69 @@ describe("Zed Provider Payload Construction", () => {
 				],
 			},
 		]);
+	});
+	it("hoists images out of Anthropic error tool results", () => {
+		const model: Model<"zed-agent"> = {
+			id: "claude-sonnet-5",
+			name: "Claude Sonnet 5",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: "https://cloud.zed.dev",
+			reasoning: true,
+			contextWindow: 1000000,
+			maxTokens: 128000,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			compat: undefined,
+		};
+		const payload = buildZedProviderRequest(
+			"anthropic",
+			{
+				messages: [
+					{
+						role: "toolResult",
+						toolCallId: "call_failed_screenshot",
+						toolName: "capture",
+						content: [
+							{ type: "text", text: "Screenshot capture failed." },
+							{ type: "image", data: "AQID", mimeType: "image/png" },
+						],
+						isError: true,
+						timestamp: 1,
+					},
+				],
+			},
+			model,
+		) as { messages: Array<{ role: string; content: unknown }> };
+
+		const entries = payload.messages.flatMap(message => {
+			if (!Array.isArray(message.content)) return [];
+			return message.content.map(block => ({ role: message.role, block: block as Record<string, unknown> }));
+		});
+		const toolResultIndex = entries.findIndex(entry => entry.block.type === "tool_result");
+		const toolResultEntry = entries[toolResultIndex];
+		if (!toolResultEntry) throw new Error("Anthropic error tool result was not emitted");
+
+		expect(toolResultEntry.block).toMatchObject({
+			type: "tool_result",
+			tool_use_id: "call_failed_screenshot",
+			is_error: true,
+		});
+		expect(toolResultEntry.block.content).toEqual([{ type: "text", text: "Screenshot capture failed." }]);
+
+		const imageIndex = entries.findIndex(entry => entry.block.type === "image");
+		const imageEntry = entries[imageIndex];
+		if (!imageEntry) throw new Error("Anthropic error tool image was not hoisted");
+		expect(imageIndex).toBeGreaterThan(toolResultIndex);
+		expect(imageEntry.role).toBe("user");
+		expect(imageEntry.block).toEqual({
+			type: "image",
+			source: {
+				type: "base64",
+				media_type: "image/png",
+				data: "AQID",
+			},
+		});
 	});
 
 	it("maps Claude 4.5 reasoning effort to budget and clamps it below maxTokens", () => {
@@ -502,6 +624,54 @@ describe("Zed Provider Payload Construction", () => {
 		expect(messages[0].role).toBe("user");
 		expect(messages[0].content).toBe("Hello world");
 	});
+	it("disables Anthropic thinking for required and named tool choices", () => {
+		const model: Model<"zed-agent"> = {
+			id: "claude-sonnet-5",
+			name: "Claude Sonnet 5",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: "https://cloud.zed.dev",
+			reasoning: true,
+			thinking: {
+				mode: "anthropic-adaptive",
+				efforts: [Effort.Low, Effort.Medium, Effort.High],
+				defaultLevel: Effort.Medium,
+			},
+			contextWindow: 1000000,
+			maxTokens: 128000,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			compat: undefined,
+		};
+		const context: Context = {
+			messages: [{ role: "user", content: "Use the search tool.", timestamp: 1 }],
+			tools: [
+				{
+					name: "search",
+					description: "Search the web",
+					parameters: { type: "object", properties: { query: { type: "string" } } },
+				},
+			],
+		};
+		const cases = [
+			{ toolChoice: "required" as const, expectedToolChoice: { type: "any" } },
+			{
+				toolChoice: { type: "function", name: "search" } as const,
+				expectedToolChoice: { type: "tool", name: "search" },
+			},
+		] as const;
+
+		for (const testCase of cases) {
+			const payload = buildZedProviderRequest("anthropic", context, model, {
+				reasoning: Effort.High,
+				toolChoice: testCase.toolChoice,
+			}) as Record<string, unknown>;
+
+			expect(payload.tool_choice).toEqual(testCase.expectedToolChoice);
+			expect(payload.thinking).toBeUndefined();
+			expect(payload.output_config).toBeUndefined();
+		}
+	});
 
 	it("demotes foreign and unsigned thinking when switching Zed models to Claude", () => {
 		const model: Model<"zed-agent"> = {
@@ -626,6 +796,40 @@ describe("Zed Provider Payload Construction", () => {
 		expect(restrictedDisabledThinking.temperature).toBeUndefined();
 		expect(restrictedDisabledThinking.top_p).toBeUndefined();
 		expect(restrictedDisabledThinking.stop_sequences).toEqual(["<END>", "<STOP>", "<DONE>", "<HALT>"]);
+	});
+	it("pins adaptive Claude effort to low when reasoning is disabled", () => {
+		for (const [id, name] of [
+			["claude-sonnet-4-6", "Claude Sonnet 4.6"],
+			["claude-sonnet-5", "Claude Sonnet 5"],
+		] as const) {
+			const model: Model<"zed-agent"> = {
+				id,
+				name,
+				api: "zed-agent",
+				provider: "zed-agent",
+				baseUrl: "https://cloud.zed.dev",
+				reasoning: true,
+				thinking: {
+					mode: "anthropic-adaptive",
+					efforts: [Effort.Low, Effort.Medium, Effort.High],
+					defaultLevel: Effort.Medium,
+				},
+				contextWindow: 1000000,
+				maxTokens: 128000,
+				input: ["text", "image"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				compat: undefined,
+			};
+			const payload = buildZedProviderRequest(
+				"anthropic",
+				{ messages: [{ role: "user", content: "Keep this short.", timestamp: 1 }] },
+				model,
+				{ reasoning: Effort.High, disableReasoning: true },
+			) as Record<string, unknown>;
+
+			expect(payload.thinking).toBeUndefined();
+			expect(payload.output_config).toEqual({ effort: "low" });
+		}
 	});
 
 	it("formats Google AI GenerateContentRequest payload and forwards all Gemini sampling controls", () => {

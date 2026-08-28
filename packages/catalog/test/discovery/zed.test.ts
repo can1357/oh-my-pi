@@ -1,8 +1,28 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import { fetchZedModels } from "../../src/discovery/zed";
 import { Effort } from "../../src/effort";
 import type { FetchImpl } from "../../src/types";
 import { ZED_APP_VERSION, ZED_CLOUD_URL, ZED_HEADERS } from "../../src/wire/zed";
+
+type PromiseOutcome<T> = { kind: "fulfilled"; value: T } | { kind: "rejected"; error: unknown };
+
+async function resolveAfterMicrotasks<T>(promise: Promise<T>, errorMessage: string): Promise<T> {
+	let outcome: PromiseOutcome<T> | undefined;
+	promise.then(
+		value => {
+			outcome = { kind: "fulfilled", value };
+		},
+		error => {
+			outcome = { kind: "rejected", error };
+		},
+	);
+	for (let i = 0; i < 1000 && !outcome; i++) {
+		await Promise.resolve();
+	}
+	if (!outcome) throw new Error(errorMessage);
+	if (outcome.kind === "rejected") throw outcome.error;
+	return outcome.value;
+}
 
 describe("Zed Model Discovery", () => {
 	it("executes the full two-tier auth chain with master credentials (userId + accessToken)", async () => {
@@ -381,5 +401,67 @@ describe("Zed Model Discovery", () => {
 		expect(models).not.toBeNull();
 		expect(models?.length).toBe(1);
 		expect(models?.[0].id).toBe("claude-active");
+	});
+
+	it("times out a stalled token mint and retries on the next discovery attempt", async () => {
+		vi.useFakeTimers();
+		const pendingMint = Promise.withResolvers<Response>();
+		let mintAttempts = 0;
+		let modelRequests = 0;
+		const fetcher: FetchImpl = async (input, init) => {
+			const url = String(input);
+			if (url.endsWith("/client/llm_tokens")) {
+				mintAttempts++;
+				if (mintAttempts === 1) {
+					const signal = init?.signal;
+					signal?.addEventListener(
+						"abort",
+						() => pendingMint.reject(signal.reason ?? new Error("token mint aborted")),
+						{ once: true },
+					);
+					return pendingMint.promise;
+				}
+				return new Response(JSON.stringify({ token: "retry-llm-token" }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			if (url.endsWith("/models")) {
+				modelRequests++;
+				expect(new Headers(init?.headers).get("authorization")).toBe("Bearer retry-llm-token");
+				return new Response(JSON.stringify({ models: [{ provider: "anthropic", id: "claude-after-timeout" }] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			return new Response("Not Found", { status: 404 });
+		};
+
+		try {
+			const firstAttempt = fetchZedModels({
+				token: "12345 master_token",
+				fetcher,
+			});
+			await Promise.resolve();
+			expect(mintAttempts).toBe(1);
+
+			vi.advanceTimersByTime(10_000);
+			const firstResult = await resolveAfterMicrotasks(
+				firstAttempt,
+				"Zed discovery token mint did not settle after its timeout",
+			);
+			expect(firstResult).toBeNull();
+			expect(modelRequests).toBe(0);
+
+			const retryResult = await fetchZedModels({
+				token: "12345 master_token",
+				fetcher,
+			});
+			expect(retryResult?.map(model => model.id)).toEqual(["claude-after-timeout"]);
+			expect(mintAttempts).toBe(2);
+			expect(modelRequests).toBe(1);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

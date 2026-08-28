@@ -42,6 +42,7 @@ export interface FetchZedModelsOptions {
 }
 
 const FALLBACK_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High] as const;
+const ZED_LLM_TOKEN_TIMEOUT_MS = 10_000;
 
 /**
  * Official Zed token rates from zed.dev/pricing (+10% markup over upstream list price).
@@ -108,6 +109,12 @@ async function mintZedLlmToken(
 	fetcher: FetchImpl,
 	signal?: AbortSignal,
 ): Promise<string | null> {
+	const timeoutController = new AbortController();
+	const timer = setTimeout(
+		() => timeoutController.abort(new DOMException("The operation timed out.", "TimeoutError")),
+		ZED_LLM_TOKEN_TIMEOUT_MS,
+	);
+	const requestSignal = signal ? AbortSignal.any([signal, timeoutController.signal]) : timeoutController.signal;
 	try {
 		const response = await fetcher(`${ZED_CLOUD_URL}/client/llm_tokens`, {
 			method: "POST",
@@ -117,7 +124,7 @@ async function mintZedLlmToken(
 				[ZED_HEADERS.VERSION]: ZED_APP_VERSION,
 			},
 			body: JSON.stringify({ organization_id: null }),
-			signal,
+			signal: requestSignal,
 		});
 
 		if (!response.ok) {
@@ -133,6 +140,8 @@ async function mintZedLlmToken(
 		return parsed.token;
 	} catch {
 		return null;
+	} finally {
+		clearTimeout(timer);
 	}
 }
 
