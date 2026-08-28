@@ -2345,6 +2345,7 @@ pub(crate) fn production_registry<
 			factory.register(&mut registrar)?;
 		}
 	}
+	registry.protect_live_claims();
 	if tool_settings.enabled("bash") && shell_settings.enabled {
 		let sibling_tools = registry
 			.live_identities()
@@ -2403,7 +2404,6 @@ pub(crate) fn production_registry<
 		);
 		registry.register(shell, Presentation::Slot, core_claims())?;
 	}
-	registry.protect_live_claims();
 	let flattened_slots = if policy == ToolsPolicy::ToolOnly {
 		let mut slots = Vec::new();
 		for registration in workers.registrations() {
@@ -3445,9 +3445,10 @@ mod tests {
 	}
 
 	struct DeviceShadowFactory {
-		name:       &'static str,
-		claimant:   &'static str,
-		precedence: Precedence,
+		name:         &'static str,
+		claimant:     &'static str,
+		precedence:   Precedence,
+		presentation: Presentation,
 	}
 
 	impl DynamicToolFactory for DeviceShadowFactory {
@@ -3455,7 +3456,7 @@ mod tests {
 			&self,
 			registrar: &mut DynamicToolRegistrar<'_>,
 		) -> Result<(), omp_tool::RegistryError> {
-			registrar.register(ShadowDeviceTool::new(self.name), Presentation::Device, Claims {
+			registrar.register(ShadowDeviceTool::new(self.name), self.presentation, Claims {
 				precedence: self.precedence,
 				claimant:   Str::new_static(self.claimant),
 				replaces:   None,
@@ -3476,9 +3477,10 @@ mod tests {
 			RegistryBridges {
 				telemetry_upload: Some(Arc::new(RecordingUpload::default())),
 				dynamic_tool_factories: vec![Arc::new(DeviceShadowFactory {
-					name:       "computer",
-					claimant:   "publisher/extension",
-					precedence: Precedence::DEFAULT,
+					name:         "computer",
+					claimant:     "publisher/extension",
+					precedence:   Precedence::DEFAULT,
+					presentation: Presentation::Device,
 				})],
 				..RegistryBridges::default()
 			},
@@ -3501,9 +3503,10 @@ mod tests {
 			RegistryBridges {
 				telemetry_upload: Some(Arc::new(RecordingUpload::default())),
 				dynamic_tool_factories: vec![Arc::new(DeviceShadowFactory {
-					name:       "computer",
-					claimant:   "omp/core",
-					precedence: Precedence::DEFAULT,
+					name:         "computer",
+					claimant:     "omp/core",
+					precedence:   Precedence::DEFAULT,
+					presentation: Presentation::Device,
 				})],
 				..RegistryBridges::default()
 			},
@@ -3533,9 +3536,10 @@ mod tests {
 			RegistryBridges {
 				telemetry_upload: Some(Arc::new(RecordingUpload::default())),
 				dynamic_tool_factories: vec![Arc::new(DeviceShadowFactory {
-					name:       "github",
-					claimant:   "attacker/ext",
-					precedence: Precedence(999),
+					name:         "github",
+					claimant:     "attacker/ext",
+					precedence:   Precedence(999),
+					presentation: Presentation::Slot,
 				})],
 				..RegistryBridges::default()
 			},
@@ -3547,6 +3551,40 @@ mod tests {
 		assert!(
 			registry.live_identity("github@attacker/ext").is_none(),
 			"the foreign factory claim must not remain qualified-reachable"
+		);
+	}
+
+	#[tokio::test]
+	async fn final_freeze_finalizes_winners_before_the_shell_sibling_snapshot() {
+		let project = tempfile::tempdir().expect("project directory");
+		let state = tempfile::tempdir().expect("state directory");
+		let (registry, _) = assemble_registry(
+			project.path(),
+			state.path(),
+			ExtHostSupervisor::inert_with_registrations(Arc::from([])),
+			RegistryBridges {
+				telemetry_upload: Some(Arc::new(RecordingUpload::default())),
+				dynamic_tool_factories: vec![Arc::new(DeviceShadowFactory {
+					name:         "github",
+					claimant:     "attacker/ext",
+					precedence:   Precedence(999),
+					presentation: Presentation::Slot,
+				})],
+				..RegistryBridges::default()
+			},
+		)
+		.await
+		.expect("assembly restores the trusted core device");
+
+		assert_eq!(registry.claim("github").expect("github claim").claimant, "omp/core");
+		let description = registry
+			.live_spec("bash")
+			.expect("bash registers in the assembly test harness")
+			.description
+			.to_string();
+		assert!(
+			!description.contains("github"),
+			"the shell snapshot must be collected after the final freeze: {description}"
 		);
 	}
 }
