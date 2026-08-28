@@ -6,12 +6,10 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import {
 	installProviderApiKeys,
-	type ProviderApiKeyEntries,
 	readProviderApiKeyBundle,
 	readProviderApiKeyBundleFd,
 } from "@oh-my-pi/pi-coding-agent/cli/provider-api-keys";
 import { mergeAuthHeaderSources } from "@oh-my-pi/pi-coding-agent/config/custom-models";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as helpers from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { getPreloadedPluginRoots } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
@@ -160,22 +158,19 @@ const argv = ["--cwd", ${JSON.stringify(missingCwd)}, "--provider-api-keys-fd", 
 const parsed = parseArgs(argv);
 parsed.mode = "acp";
 parsed.noExtensions = true;
-let threw = false;
-try {
-  await runRootCommand(parsed, argv, {
-    discoverAuthStorage: async () => ({ close() {} }),
-  });
-} catch {
-  threw = true;
-}
-let fdOpenAfter = true;
-try {
-  fs.fstatSync(fd);
-} catch {
-  fdOpenAfter = false;
-}
-console.log(JSON.stringify({ threw, fdOpenAfter }));
-process.exitCode = 0;`;
+process.on("exit", () => {
+  let fdOpenAfter = true;
+  try {
+    fs.fstatSync(fd);
+  } catch {
+    fdOpenAfter = false;
+  }
+  console.log(JSON.stringify({ fdOpenAfter }));
+});
+await runRootCommand(parsed, argv, {
+  discoverAuthStorage: async () => ({ close() {} }),
+});
+throw new Error("expected invalid --cwd to exit");`;
 		const proc = Bun.spawn({
 			cmd: [process.execPath, "--eval", script],
 			cwd: process.cwd(),
@@ -187,9 +182,10 @@ process.exitCode = 0;`;
 			new Response(proc.stdout).text(),
 			new Response(proc.stderr).text(),
 		]);
-		expect(exitCode, stderr).toBe(0);
+		expect(exitCode).toBe(1);
+		expect(stderr).toContain("Cannot change working directory");
 		const result = JSON.parse(stdout.trim().split("\n").at(-1) ?? "{}");
-		expect(result).toEqual({ threw: true, fdOpenAfter: false });
+		expect(result).toEqual({ fdOpenAfter: false });
 	});
 
 	it("rejects an explicitly empty credential-file path, disarms the watchdog and releases stdin", async () => {
@@ -632,52 +628,59 @@ console.log(JSON.stringify({ before, after: { cwd: process.cwd(), projectDir: ge
 			const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-provider-api-keys-order-"));
 			roots.push(root);
 			const bundle = path.join(root, "bundle.json");
-			fs.writeFileSync(bundle, JSON.stringify({ anthropic: "selected-token" }));
-			fs.chmodSync(bundle, 0o600);
-			const fd = fs.openSync(bundle, fs.constants.O_RDONLY);
-			const parsed = parseArgs(["--provider-api-keys-fd", String(fd)]);
-			// A protocol mode skips readPipedInput without claiming the RPC stdin
-			// singleton, so this test cannot strand the lock for later files.
-			parsed.mode = "acp";
-			parsed.noExtensions = true;
-			const continued = new Error("continued past auth discovery");
-			const installed: ProviderApiKeyEntries = [];
-			const authStorage = {
-				close: () => {},
-				setRuntimeApiKey: (provider: string, value: string) => {
-					(installed as (readonly [string, string])[]).push([provider, value]);
-				},
-			} as unknown as AuthStorage;
-			// discoverAuthStorage resolves `!command` broker URL/token values
-			// through a shell. Any inheritable descriptor still open at that
-			// moment is readable by that child through its own /proc/self/fd.
-			let openAtDiscovery: boolean | undefined;
-			const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-			const exitCode = process.exitCode;
-			// Settings init is the first startup boundary awaited AFTER the
-			// descriptor is consumed and the keys reach AuthStorage; rejecting
-			// there stops the run past both events without racing them.
-			const settingsInit = vi.spyOn(Settings, "init").mockRejectedValue(continued);
-			try {
-				await expect(
-					runRootCommand(parsed, ["--provider-api-keys-fd", String(fd)], {
-						discoverAuthStorage: async () => {
-							openAtDiscovery = fdIsOpen(fd);
-							return authStorage;
-						},
-					}),
-				).rejects.toBe(continued);
-				expect(openAtDiscovery).toBe(false);
-				// The keys still reach AuthStorage, which only exists after discovery.
-				expect(installed).toEqual([["anthropic", "selected-token"]]);
-			} finally {
-				// Only close before ownership transfer. Once discovery observes
-				// the consumed fd, its number may already have been reused.
-				if (openAtDiscovery === undefined && fdIsOpen(fd)) fs.closeSync(fd);
-				process.exitCode = exitCode ?? 0;
-				settingsInit.mockRestore();
-				stderr.mockRestore();
-			}
+			fs.writeFileSync(bundle, JSON.stringify({ anthropic: "selected-token" }), { mode: 0o600 });
+			const script = `
+import * as fs from "node:fs";
+import { parseArgs } from ${JSON.stringify(argsModuleUrl)};
+import { runRootCommand } from ${JSON.stringify(mainModuleUrl)};
+import { Settings } from ${JSON.stringify(settingsModuleUrl)};
+const bundle = ${JSON.stringify(bundle)};
+const fd = fs.openSync(bundle, fs.constants.O_RDONLY);
+const parsed = parseArgs(["--provider-api-keys-fd", String(fd)]);
+parsed.mode = "acp";
+parsed.noExtensions = true;
+const continued = new Error("continued past auth discovery");
+const installed = [];
+let openAtDiscovery;
+Settings.init = () => Promise.reject(continued);
+try {
+  await runRootCommand(parsed, ["--provider-api-keys-fd", String(fd)], {
+    discoverAuthStorage: async () => {
+      try {
+        fs.fstatSync(fd);
+        openAtDiscovery = true;
+      } catch {
+        openAtDiscovery = false;
+      }
+      return {
+        close() {},
+        setRuntimeApiKey(provider, value) { installed.push([provider, value]); },
+      };
+    },
+  });
+  throw new Error("startup returned before the post-install boundary");
+} catch (error) {
+  if (error !== continued) throw error;
+}
+console.log(JSON.stringify({ openAtDiscovery, installed }));`;
+			const proc = Bun.spawn({
+				cmd: [process.execPath, "--eval", script],
+				cwd: process.cwd(),
+				stdout: "pipe",
+				stderr: "pipe",
+				timeout: 10_000,
+			});
+			const [exitCode, stdout, stderr] = await Promise.all([
+				proc.exited,
+				new Response(proc.stdout).text(),
+				new Response(proc.stderr).text(),
+			]);
+			expect(exitCode, stderr).toBe(0);
+			const result = JSON.parse(stdout.trim().split("\n").at(-1) ?? "{}");
+			expect(result).toEqual({
+				openAtDiscovery: false,
+				installed: [["anthropic", "selected-token"]],
+			});
 		},
 	);
 

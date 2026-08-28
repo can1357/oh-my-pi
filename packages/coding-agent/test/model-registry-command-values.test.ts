@@ -241,6 +241,37 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 
 		expect(await registry.getApiKey(model)).toBe("runtime-api-key");
 		expect({ ...model.headers }.Authorization).toBe("Bearer runtime-api-key");
+		authStorage.removeRuntimeApiKey("anthropic");
+		expect(await registry.getApiKey(model)).toBe("cmd-api-key");
+		expect({ ...model.headers }.Authorization).toBe("Bearer stale-override-key");
+	});
+
+	test("removing a preinstalled runtime API key restores the configured modelOverride header", async () => {
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					anthropic: {
+						apiKey: `!${stdoutCommand("cmd-api-key")}`,
+						authHeader: true,
+						modelOverrides: {
+							"claude-sonnet-4-5": { headers: { Authorization: "Bearer configured-override-key" } },
+						},
+					},
+				},
+			}),
+		);
+		authStorage.setRuntimeApiKey("anthropic", "runtime-api-key");
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry
+			.getAll()
+			.find(candidate => candidate.provider === "anthropic" && candidate.id === "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected anthropic claude-sonnet-4-5");
+		expect({ ...model.headers }.Authorization).toBe("Bearer runtime-api-key");
+
+		authStorage.removeRuntimeApiKey("anthropic");
+		expect(await registry.getApiKey(model)).toBe("cmd-api-key");
+		expect({ ...model.headers }.Authorization).toBe("Bearer configured-override-key");
 	});
 
 	test("modelOverrides headers resolve from command stdout", async () => {
