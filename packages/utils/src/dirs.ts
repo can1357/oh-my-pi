@@ -854,6 +854,20 @@ export function getModelDbPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "models.db", "data");
 }
 
+/**
+ * Replica sync bookkeeping db (~/.omp/agent/state-sync.db). Holds only
+ * per-domain state-broker cursors, kept out of the domain databases so
+ * replication never forces a schema bump on history.db/agent.db.
+ */
+export function getStateSyncDbPath(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "state-sync.db", "data");
+}
+
+/** Broker-side shared state db (~/.omp/agent/state.db), written only by `omp auth-broker serve`. */
+export function getStateDbPath(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "state.db", "data");
+}
+
 /** Get the tiny title model cache directory (~/.omp/agent/cache/tiny-models). */
 export function getTinyModelsCacheDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, path.join("cache", "tiny-models"), "cache");

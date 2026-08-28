@@ -50,6 +50,21 @@ import {
 
 const DEFAULT_EXTERNAL_CHANGE_POLL_MS = 250;
 
+/**
+ * Extra route handler mounted into the broker listener after bearer auth has
+ * already been enforced. Return `null` to fall through to the next handler (and
+ * ultimately the 404), or a `Response` to answer the request.
+ *
+ * Lets higher layers (`@oh-my-pi/pi-coding-agent`'s state broker) serve their
+ * own `/v1/state/*` surface from this listener without `packages/ai` taking a
+ * dependency on coding-agent concepts.
+ */
+export type BrokerRouteHandler = (
+	req: Request,
+	url: URL,
+	ctx: { peer: string },
+) => Promise<Response | null> | Response | null;
+
 export interface AuthBrokerServerOptions {
 	/** Underlying credential storage (wraps the local SQLite store on the broker). */
 	storage: AuthStorage;
@@ -76,6 +91,11 @@ export interface AuthBrokerServerOptions {
 	 * Internal-only — tests use a short interval. Default 250ms.
 	 */
 	externalChangePollMs?: number;
+	/**
+	 * Additional authenticated route handlers, tried in order after the built-in
+	 * credential routes and before the 404. See {@link BrokerRouteHandler}.
+	 */
+	routes?: readonly BrokerRouteHandler[];
 }
 
 export interface AuthBrokerServerHandle {
@@ -651,6 +671,7 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 	const version = opts.version;
 	const streamKeepaliveMs = opts.streamKeepaliveMs ?? DEFAULT_STREAM_KEEPALIVE_MS;
 	const externalChangePollMs = opts.externalChangePollMs ?? DEFAULT_EXTERNAL_CHANGE_POLL_MS;
+	const extraRoutes = opts.routes ?? [];
 
 	const refresher = opts.disableRefresher
 		? undefined
@@ -875,6 +896,10 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						logger.warn("auth-broker upload failed", { provider, peer, error: message });
 						return json(500, { error: message });
 					}
+				}
+				for (const route of extraRoutes) {
+					const response = await route(req, url, { peer });
+					if (response) return response;
 				}
 				return json(404, { error: `No route: ${req.method} ${pathname}` });
 			} catch (error) {

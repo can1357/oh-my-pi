@@ -13,6 +13,7 @@ import {
 	type CompactionMethod,
 	DEFAULT_COMPACTION_METHOD_ORDER,
 } from "../session/compaction-methods";
+import { STATE_DOMAIN_IDS, type StateDomainId } from "../state-broker/wire";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS, STT_MODEL_VALUES } from "../stt/models";
 import { STT_SUBMIT_TRIGGER_OPTIONS, STT_SUBMIT_TRIGGER_VALUES } from "../stt/submit-trigger";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking";
@@ -482,6 +483,42 @@ export const SETTINGS_SCHEMA = {
 	// per-machine overrides remain trivial.
 	"auth.broker.url": { type: "string", default: undefined },
 	"auth.broker.token": { type: "string", default: undefined, credential: true },
+
+	// Shared state broker — replicates prompt history, session titles, model/
+	// command usage ranking, and agent config files through the same
+	// `omp auth-broker serve` host that already holds credentials. The local
+	// SQLite databases stay authoritative for reads; this only adds a background
+	// push/pull loop. Falls back to `auth.broker.*` when unset, so a single
+	// broker URL/token pair configures both surfaces.
+	"state.broker.url": { type: "string", default: undefined },
+	"state.broker.token": { type: "string", default: undefined, credential: true },
+	"state.sync.enabled": { type: "boolean", default: false },
+	"state.sync.domains": {
+		type: "array",
+		default: [...STATE_DOMAIN_IDS] as StateDomainId[],
+	},
+	"state.sync.intervalMs": { type: "number", default: 30_000 },
+
+	// Bulk content replication (session JSONL bodies, blob bytes) to an
+	// S3-compatible object store. Separate from `state.broker.*` because these
+	// payloads are large and append-heavy — wrong shape for a JSON HTTP broker.
+	// Uses Bun's builtin S3 client, so MinIO/Garage/R2 need no extra dependency.
+	"objects.backend": {
+		type: "enum",
+		values: ["off", "s3"] as const,
+		default: "off",
+	},
+	"objects.s3.bucket": { type: "string", default: undefined },
+	"objects.s3.endpoint": { type: "string", default: undefined },
+	"objects.s3.region": { type: "string", default: "us-east-1" },
+	"objects.s3.pathStyle": { type: "boolean", default: true },
+	"objects.s3.keyPrefix": { type: "string", default: "omp" },
+	"objects.s3.accessKeyId": { type: "string", default: undefined, credential: true },
+	"objects.s3.secretAccessKey": { type: "string", default: undefined, credential: true },
+	/** Replicate session JSONL bodies. Requires `objects.backend`. */
+	"objects.sessions": { type: "boolean", default: true },
+	/** Replicate content-addressed blobs (externalized images). Requires `objects.backend`. */
+	"objects.blobs": { type: "boolean", default: true },
 
 	autoResume: {
 		type: "boolean",

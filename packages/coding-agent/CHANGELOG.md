@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+### Added
+
+- `omp auth-broker serve` now also serves a `/v1/state` surface that replicates prompt history, session titles, model MRU, command usage and the agent config files between machines. The local SQLite databases stay the authoritative read path; a background loop pushes and pulls deltas, so everything keeps working offline. Off by default via `state.sync.enabled`; `state.broker.*` falls back to `auth.broker.*` so one broker URL and token configures both.
+- Session bodies and content-addressed blobs can replicate through an S3-compatible object store (`objects.backend: s3`), including MinIO and Garage via `objects.s3.endpoint` plus `objects.s3.pathStyle`. Uses Bun's builtin S3 client, so no new dependency.
+- `omp project` registers which projects take part in replication, mapping a machine-independent project id to this machine's checkout path in `~/.omp/agent/projects.yml`. Ids are derived from the git origin remote (ssh and https clones of the same repo normalise to one id), so two machines that keep a project at different paths agree without coordinating. Unregistered projects, and registered ones with sync off, replicate nothing.
+- Sessions started on another machine appear in the all-projects resume picker and download on open. Resuming waits briefly for the first sync so a machine that has just joined a project can see them on its first run.
+- Deleting a replicated config file (`config.yml`, an agent, a managed skill) now propagates the deletion to other machines instead of leaving the old copy in place.
+- Deleting a session now removes it on other machines too, instead of the row lingering and the session reappearing locally as a downloadable remote entry.
+
+### Fixed
+
+- Slash-command autocomplete ranking now includes command usage replicated from other machines.
+- Attachments no longer go missing on other machines when an upload hits a transient error or the process exits mid-upload.
+- Session bodies stranded by a failed upload are now retried by a periodic reconcile, so a peer's index row no longer points at a missing archive object. Bodies that predate switching on object storage get uploaded too.
+- Turning off sync for a project, or a momentary failure to read the sessions directory, no longer deletes that project's sessions from your other machines.
+- A session written to while it was being uploaded is no longer archived truncated, so resuming it on another machine gets the whole conversation.
+- A replica now recovers instead of going permanently deaf when the broker's `state.db` is recreated or restored from an older backup.
+- Prompts from a project with sync turned off are no longer replicated when it sits inside an enabled parent project.
+- `omp --resume <id>` and `--fork <id>` now reach a session whose body is still on another machine, matching what the resume picker already offered.
+- Long prompt histories no longer lose prompts that share a second with the last replicated one.
+- Repointing a project with `omp project path` no longer leaves a duplicate entry in the resume picker.
+- The resume picker no longer lists sessions from projects whose sync has since been turned off, which could not be opened.
+- A recreated broker no longer leaves some domains permanently deaf while others recover, so history and titles come back together rather than one at a time.
+- A session written to while it was being uploaded is now repaired after a restart too, not only while the process that uploaded it is still running.
+- Extra workspace directories now resolve on the other machine when the session was started in a subdirectory of the project.
+- Choosing Delete on a session whose body is still on another machine now says so instead of reporting a missing file.
+- Prompts from subdirectories of a project now replicate on Windows, where only the project root itself used to match.
+- An oversized config file from a peer is refused rather than written, so one bad entry cannot fill a replica's disk with a file replication could never take back.
+- Deleting a session on one machine now also removes the copy on machines that had already opened it, instead of leaving it in their session list.
+- A large batch of changed config files is now sent as several smaller requests, instead of one oversized request that failed on every attempt and stopped that data replicating at all.
+- A peer can no longer place replicated prompts outside the project they belong to, or make the broker accept an unbounded request body.
+- `omp project enable`, `disable` and `rm` now work from any subdirectory of a project, instead of only from its root.
+
 ## [18.0.10] - 2026-08-28
 
 ### Added

@@ -44,6 +44,7 @@ import {
 	type ScopedModel,
 } from "./config/model-resolver";
 import { ModelsConfigFile } from "./config/models-config";
+import { resolveConfigValue } from "./config/resolve-config-value";
 import { serviceTierSettingToTier } from "./config/service-tier";
 import { getDefault, type SettingPath, Settings, type SettingValue, settings } from "./config/settings";
 import { initializeWithSettings } from "./discovery";
@@ -101,6 +102,7 @@ import { resolveResumableSession, type SessionInfo } from "./session/session-lis
 import { SessionManager } from "./session/session-manager";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { shouldShowStartupSplash } from "./startup-splash";
+import { awaitInitialStateSync, startStateSync } from "./state-broker/registry";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
@@ -945,7 +947,9 @@ export async function createSessionManager(
 		if (forkSource.includes("/") || forkSource.includes("\\") || forkSource.endsWith(".jsonl")) {
 			return await SessionManager.forkFrom(forkSource, cwd, parsed.sessionDir);
 		}
-		const match = await resolveResumableSession(forkSource, cwd, parsed.sessionDir);
+		// `forkFrom` fetches a peer-hosted body before reading it, so a session
+		// that exists here only as a replicated index row is forkable.
+		const match = await resolveResumableSession(forkSource, cwd, parsed.sessionDir, { includeRemoteOnly: true });
 		if (!match) {
 			throw new SessionResolutionError(
 				`Session "${forkSource}" not found.`,
@@ -965,7 +969,11 @@ export async function createSessionManager(
 		if (sessionArg.includes("/") || sessionArg.includes("\\") || sessionArg.endsWith(".jsonl")) {
 			return await SessionManager.open(sessionArg, parsed.sessionDir);
 		}
-		const match = await resolveResumableSession(sessionArg, cwd, parsed.sessionDir);
+		// `SessionManager.open` downloads a peer-hosted body, so `--resume <id>`
+		// reaches a session whose body has not been fetched here yet. Without this
+		// the initial sync populates the index and explicit resume still reports
+		// "not found" while the picker can open the very same session.
+		const match = await resolveResumableSession(sessionArg, cwd, parsed.sessionDir, { includeRemoteOnly: true });
 		if (!match) {
 			throw new SessionResolutionError(
 				`Session "${sessionArg}" not found.`,
@@ -1607,6 +1615,31 @@ export async function runRootCommand(
 		// id from UUID-shaped values owned by later extension flags.
 		normalizeContinueSessionArgs(parsedArgs, rawArgs);
 
+		// Shared-state replication must be live BEFORE any session is resolved.
+		// Startup decides whether to show a picker (and whether to exit with "no
+		// sessions found") from a local listing, then opens the choice
+		// immediately, so a runtime started later cannot make a remote-only
+		// session listable, cannot fetch its body, and cannot back the `BlobStore`
+		// the first session has already constructed. Awaited because those
+		// decisions are moments away; a no-op returning `undefined` when
+		// `state.sync.enabled` is not set, which is the default.
+		await logger.time("startStateSync", startStateSync, {
+			settings: settingsInstance,
+			resolveConfigValue,
+		});
+
+		// Resolving an EXISTING session means reading replicated state, so wait
+		// (bounded) for the first exchange rather than racing it. `startStateSync`
+		// is deliberately fire-and-forget — the initial cycle is what writes the
+		// remote session index, and session resolution is only microseconds away,
+		// so without this a machine that just joined a project resolves `--resume`
+		// against an index that has not arrived and reports no match, or exits with
+		// "no sessions found". A fresh start reads nothing replicated and so is
+		// never gated on the network.
+		if (parsedArgs.resume || parsedArgs.continue || parsedArgs.fork) {
+			await logger.time("awaitInitialStateSync", awaitInitialStateSync);
+		}
+
 		// Resolve native resume/fork flags or import one foreign transcript into a
 		// fresh persisted OMP session before constructing the AgentSession.
 		let sessionManager: SessionManager | undefined;
@@ -1739,7 +1772,14 @@ export async function runRootCommand(
 				// silently surfaced other projects' history when the cwd was empty
 				// (issue #3099). The preloaded list also makes the user's Tab switch
 				// instant on the way in.
-				preloadedAllSessions = await logger.time("SessionManager.listAll", SessionManager.listAll);
+				//
+				// Remote-only sessions count here. On a machine that has just joined
+				// a synced project every session is remote, and a local-only probe
+				// would exit with "No sessions found" before the picker that can
+				// actually list and download them ever opened.
+				preloadedAllSessions = await logger.time("SessionManager.listAll", SessionManager.listAll, undefined, {
+					includeRemoteOnly: true,
+				});
 				if (preloadedAllSessions.length === 0) {
 					writeStartupNotice(parsedArgs, `${chalk.dim("No sessions found")}\n`);
 					stopStartupWatchdog();

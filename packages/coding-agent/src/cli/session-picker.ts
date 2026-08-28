@@ -1,11 +1,11 @@
 import { ProcessTerminal, TUI } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import { SessionSelectorComponent } from "../modes/components/session-selector";
+import { theme } from "../modes/theme/theme";
 import { HistoryStorage } from "../session/history-storage";
-import type { SessionInfo } from "../session/session-listing";
-import { SessionManager } from "../session/session-manager";
-import { loadPinnedSessionIds } from "../session/session-pins";
-import { FileSessionStorage } from "../session/session-storage";
+import { listAllSessions, type SessionInfo } from "../session/session-listing";
+import { loadPinnedSessionIds, sortPinnedFirst } from "../session/session-pins";
+import { FileSessionStorage, type SessionStorage } from "../session/session-storage";
 
 /** Presentation and capability controls for the standalone session picker. */
 export interface SessionPickerOptions {
@@ -17,6 +17,46 @@ export interface SessionPickerOptions {
 	allowGlobalScope?: boolean;
 	historySearch?: boolean;
 	pinnedIds?: ReadonlySet<string>;
+}
+
+/**
+ * Label sessions whose body lives on another machine.
+ *
+ * Their preview line is rendered dim by the selector, so plain marker text
+ * inherits the existing styling; the body downloads on open. Applied to both
+ * the lazily loaded all-projects list and a caller-preloaded one, because a
+ * remote-only row rendered without the marker looks like an ordinary local
+ * session that then pauses to download.
+ */
+function markRemoteSessions(sessions: readonly SessionInfo[]): SessionInfo[] {
+	const marker = `${theme.icon.host} on another machine — downloads on open`;
+	return sessions.map(session => (session.remoteOnly ? { ...session, firstMessage: marker } : session));
+}
+
+/**
+ * Delete a picked session's local body, or refuse with a reason.
+ *
+ * A remote-only row is an index stub with no local file, so the unconditional
+ * `unlink` inside `deleteSessionWithArtifacts` fails with a bare ENOENT that
+ * reads as a bug and leaves the row on screen.
+ *
+ * Deleting the SHARED copy is deliberately not implemented here. Publishing a
+ * tombstone for a body this machine never owned would erase the session on
+ * every peer from a keypress in a list, and the sessions domain derives
+ * tombstones from what this machine has published — it has no notion of
+ * retracting someone else's row. That is a destructive cross-machine primitive,
+ * not a picker detail.
+ *
+ * Throws rather than returning `false` because the selector renders a thrown
+ * message inline, while `false` closes the dialog silently and looks like the
+ * delete was accepted and ignored.
+ */
+export async function deletePickedSession(storage: SessionStorage, session: SessionInfo): Promise<boolean> {
+	if (session.remoteOnly) {
+		throw new Error("This session lives on another machine. Open it here first, or delete it there.");
+	}
+	await storage.deleteSessionWithArtifacts(session.path);
+	return true;
 }
 
 /**
@@ -77,13 +117,22 @@ export async function selectSession(
 				onDelete:
 					options.allowDelete === false
 						? undefined
-						: async (session: SessionInfo) => {
-								await storage.deleteSessionWithArtifacts(session.path);
-								return true;
-							},
+						: (session: SessionInfo) => deletePickedSession(storage, session),
 				historyMatcher,
-				loadAllSessions: options.allowGlobalScope === false ? undefined : () => SessionManager.listAll(storage),
-				allSessions: options.allSessions,
+				loadAllSessions:
+					options.allowGlobalScope === false
+						? undefined
+						: async () => {
+								// Remote-only stubs are folded in here (not into `SessionManager.listAll`,
+								// whose ACP consumers assume a readable local file). Pinned-first ordering
+								// mirrors `SessionManager.listAll`, using the pins already loaded above.
+								const all = await listAllSessions(storage, { includeRemoteOnly: true });
+								return markRemoteSessions(sortPinnedFirst(all, pinnedIds));
+							},
+				// The caller may preload the same list to make the Tab switch instant,
+				// and it may legitimately contain remote-only rows, so it needs the
+				// same marker treatment the lazy loader applies.
+				allSessions: options.allSessions ? markRemoteSessions(options.allSessions) : undefined,
 				getTerminalRows: () => ui.terminal.rows,
 				fillHeight: true,
 				title: options.title,

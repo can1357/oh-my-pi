@@ -157,6 +157,20 @@ export class AgentStorage {
 	#perfDrain = new AsyncDrain<ModelPerfInsert>(MODEL_PERF_FLUSH_DELAY_MS);
 	#closing = false;
 
+	// ─── Cross-machine replication (state broker, slice D) ─────────────────
+	// These members back the model-usage / command-usage replicated domains.
+	// Every one of them is prepared lazily and the remote command-usage table
+	// is created lazily, so a run with `state.sync.enabled=false` (the default)
+	// never prepares a statement or materializes a table here — the local-only
+	// path stays byte-identical to today.
+	#scanModelUsageStmt: Statement | null = null;
+	#mergeModelUsageStmt: Statement | null = null;
+	#scanCommandUsageStmt: Statement | null = null;
+	/** Set once {@link #ensureCommandUsageRemote} has created the table + statements this process. */
+	#commandUsageRemoteReady = false;
+	#upsertCommandUsageRemoteStmt: Statement | null = null;
+	#listCommandUsageRemoteStmt: Statement | null = null;
+
 	private constructor(dbPath: string) {
 		this.#autoPerfBackfill = dbPath === getAgentDbPath();
 		this.#ensureDir(dbPath);
@@ -440,6 +454,12 @@ FROM model_usage_legacy
 		this.#listModelPerfStmt.finalize();
 		this.#upsertCommandUsageStmt.finalize();
 		this.#listCommandUsageStmt.finalize();
+		// Replication statements are prepared lazily, so guard each finalize.
+		this.#scanModelUsageStmt?.finalize();
+		this.#mergeModelUsageStmt?.finalize();
+		this.#scanCommandUsageStmt?.finalize();
+		this.#upsertCommandUsageRemoteStmt?.finalize();
+		this.#listCommandUsageRemoteStmt?.finalize();
 		// SqliteAuthCredentialStore.close() finalizes its own statements and
 		// closes the shared #db handle — must run after our statements finalize.
 		this.#authStore.close();
@@ -528,12 +548,178 @@ FROM model_usage_legacy
 		}
 	}
 
+	// ─── Cross-machine replication accessors (state broker, slice D) ───────
+
+	/**
+	 * Replication scan: model_usage rows whose last-used timestamp is strictly
+	 * greater than `afterRev`, oldest first, capped at `limit`.
+	 *
+	 * Ascending order is mandatory — the sync engine advances its outbound
+	 * watermark to the last returned row, so an unordered page would skip rows
+	 * permanently. `last_used_at` (and `afterRev`) are epoch SECONDS, the unit
+	 * the table stores; the domain converts to/from wire millis.
+	 */
+	scanModelUsageChangedSince(afterRev: number, limit: number): Array<{ model_key: string; last_used_at: number }> {
+		this.#scanModelUsageStmt ??= this.#db.prepare(
+			"SELECT model_key, last_used_at FROM model_usage WHERE last_used_at > ? ORDER BY last_used_at ASC LIMIT ?",
+		);
+		return this.#scanModelUsageStmt.all(afterRev, limit) as Array<{ model_key: string; last_used_at: number }>;
+	}
+
+	/**
+	 * Replication merge for model usage: pure last-writer-wins by timestamp.
+	 * For an MRU ordering signal "used most recently on any machine" is exactly
+	 * the desired convergence, so we keep the greatest `last_used_at` per model.
+	 * `lastUsedAt` is epoch SECONDS (table unit; the domain converts from wire
+	 * millis). Whole batch runs in one transaction.
+	 *
+	 * Invalidates {@link #modelUsageCache} exactly like {@link recordModelUsage}:
+	 * without it the picker keeps serving the stale pre-merge MRU order.
+	 */
+	mergeRemoteModelUsage(rows: Array<{ modelKey: string; lastUsedAt: number }>): void {
+		if (rows.length === 0) return;
+		this.#mergeModelUsageStmt ??= this.#db.prepare(
+			`INSERT INTO model_usage (model_key, last_used_at) VALUES (?, ?)
+ON CONFLICT(model_key) DO UPDATE SET last_used_at = excluded.last_used_at WHERE excluded.last_used_at > model_usage.last_used_at`,
+		);
+		const stmt = this.#mergeModelUsageStmt;
+		try {
+			this.#db.transaction((batch: Array<{ modelKey: string; lastUsedAt: number }>) => {
+				for (const row of batch) stmt.run(row.modelKey, row.lastUsedAt);
+			})(rows);
+			this.#modelUsageCache = null;
+		} catch (error) {
+			logger.warn("AgentStorage failed to merge remote model usage", { error: String(error) });
+		}
+	}
+
+	/**
+	 * Replication scan: this install's local command_usage rows whose last-used
+	 * timestamp is strictly greater than `afterRev`, oldest first, capped at
+	 * `limit`. Ascending order is mandatory (see
+	 * {@link scanModelUsageChangedSince}). `last_used_at`/`afterRev` are epoch
+	 * SECONDS; the domain converts to/from wire millis and tags each row with
+	 * this machine's install id so counters stay partitioned per install.
+	 */
+	scanCommandUsageChangedSince(
+		afterRev: number,
+		limit: number,
+	): Array<{ name: string; count: number; last_used_at: number }> {
+		this.#scanCommandUsageStmt ??= this.#db.prepare(
+			"SELECT name, count, last_used_at FROM command_usage WHERE last_used_at > ? ORDER BY last_used_at ASC LIMIT ?",
+		);
+		return this.#scanCommandUsageStmt.all(afterRev, limit) as Array<{
+			name: string;
+			count: number;
+			last_used_at: number;
+		}>;
+	}
+
+	/**
+	 * Replication merge for command usage coming from OTHER installs. Command
+	 * counts are counters, not LWW values, so a naive merge into the shared
+	 * `command_usage` table would equal whichever machine wrote last and would
+	 * double-count when summed counts get pushed back. Instead each remote
+	 * install's counter lives in its own `command_usage_remote` row keyed by
+	 * `(install_id, name)`, where LWW-per-key is correct and commutative. The
+	 * local `command_usage` table stays authoritative for this install's own
+	 * counter; {@link listCommandUsageMerged} sums the two.
+	 *
+	 * The table + statements are created lazily on the first merge so a
+	 * sync-disabled run never materializes them. `lastUsedAt` is epoch MILLIS
+	 * (wire unit); only relative ordering matters for the LWW guard.
+	 */
+	mergeRemoteCommandUsage(rows: Array<{ installId: string; name: string; count: number; lastUsedAt: number }>): void {
+		if (rows.length === 0) return;
+		this.#ensureCommandUsageRemote();
+		const stmt = this.#upsertCommandUsageRemoteStmt;
+		if (!stmt) return;
+		try {
+			this.#db.transaction(
+				(batch: Array<{ installId: string; name: string; count: number; lastUsedAt: number }>) => {
+					for (const row of batch) stmt.run(row.installId, row.name, row.count, row.lastUsedAt);
+				},
+			)(rows);
+		} catch (error) {
+			logger.warn("AgentStorage failed to merge remote command usage", { error: String(error) });
+		}
+	}
+
+	/**
+	 * Command usage counts summed across this install's authoritative
+	 * `command_usage` table and every other install's partitioned rows in
+	 * `command_usage_remote`. Used by the fleet-wide autocomplete ranker;
+	 * {@link listCommandUsage} keeps its local-only signature and behaviour so
+	 * the integration owner can switch the call site deliberately.
+	 *
+	 * Cost-free superset of {@link listCommandUsage} when replication never
+	 * ran: the remote table is only read when it actually exists.
+	 */
+	listCommandUsageMerged(): Record<string, number> {
+		const counts = this.listCommandUsage();
+		if (!this.#commandUsageRemoteExists()) return counts;
+		try {
+			this.#listCommandUsageRemoteStmt ??= this.#db.prepare("SELECT name, count FROM command_usage_remote");
+			for (const row of this.#listCommandUsageRemoteStmt.all() as Array<{ name: string; count: number }>) {
+				counts[row.name] = (counts[row.name] ?? 0) + row.count;
+			}
+		} catch (error) {
+			logger.warn("AgentStorage failed to list merged command usage", { error: String(error) });
+		}
+		return counts;
+	}
+
+	/**
+	 * Lazily create the per-install remote command-usage table and its
+	 * statements. Called only from the merge path, so a sync-disabled install
+	 * never creates the table. The LWW guard keeps the newest counter version
+	 * per `(install_id, name)`; since each install's own count is monotonic,
+	 * this converges to that install's latest total without double-counting.
+	 */
+	#ensureCommandUsageRemote(): void {
+		if (this.#commandUsageRemoteReady) return;
+		this.#db.run(
+			`CREATE TABLE IF NOT EXISTS command_usage_remote (
+	install_id TEXT NOT NULL,
+	name TEXT NOT NULL,
+	count INTEGER NOT NULL,
+	last_used_at INTEGER NOT NULL,
+	PRIMARY KEY (install_id, name)
+)`,
+		);
+		this.#upsertCommandUsageRemoteStmt = this.#db.prepare(
+			`INSERT INTO command_usage_remote (install_id, name, count, last_used_at) VALUES (?, ?, ?, ?)
+ON CONFLICT(install_id, name) DO UPDATE SET count = excluded.count, last_used_at = excluded.last_used_at WHERE excluded.last_used_at > command_usage_remote.last_used_at`,
+		);
+		this.#listCommandUsageRemoteStmt = this.#db.prepare("SELECT name, count FROM command_usage_remote");
+		this.#commandUsageRemoteReady = true;
+	}
+
+	/**
+	 * Whether `command_usage_remote` exists without creating it — a prior
+	 * sync-enabled run may have left it behind. Uses a throwaway query so a
+	 * sync-disabled process prepares no persistent statement.
+	 */
+	#commandUsageRemoteExists(): boolean {
+		if (this.#commandUsageRemoteReady) return true;
+		const row = this.#db
+			.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'command_usage_remote'")
+			.get();
+		return row !== null && row !== undefined;
+	}
+
 	/**
 	 * Folds one completed request's timing into the model's perf aggregates.
 	 * TPS is measured over the total request duration — not the post-TTFT
 	 * decode window, which undercounts generation time (and so inflates the
 	 * rate) when reasoning tokens are generated before the first visible
 	 * token. Invalid samples (no tokens, no duration) are dropped.
+	 *
+	 * NOT replicated across machines by the state broker (unlike model_usage /
+	 * command_usage): model_perf measures THIS machine's observed throughput to
+	 * a provider, network path included. Averaging a fiber link with a tethered
+	 * connection would describe neither, and it feeds TPS-based model selection,
+	 * so it is intentionally machine-local.
 	 *
 	 * Deferred like prompt history: samples are batched and written in one
 	 * transaction after {@link MODEL_PERF_FLUSH_DELAY_MS}, keeping SQLite off

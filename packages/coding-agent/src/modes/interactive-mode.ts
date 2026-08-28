@@ -119,6 +119,7 @@ import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { formatDuration } from "../slash-commands/helpers/format";
+import { stopStateSync } from "../state-broker/registry";
 import { STTController, type SttState } from "../stt";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
@@ -562,7 +563,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	keybindings: KeybindingsManager;
 	agent: Agent;
 	historyStorage?: HistoryStorage;
-
 	/** Canonical composer shared by cold prepaint and the session-aware runtime. */
 	readonly composer: Composer;
 	ui: TUI;
@@ -966,6 +966,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		} catch (error) {
 			logger.warn("History storage unavailable", { error: String(error) });
 		}
+		// Shared-state replication is started by the launch path, before any
+		// session is resolved, so a remote-only session can be listed and fetched
+		// on the run that picks it. Nothing to start here.
 		this.hookWidgetContainerAbove = new Container();
 		this.hookWidgetContainerAbove.addChild(new EditorTopGap(() => this.statusRowOccupied));
 		this.hookWidgetContainerBelow = new Container();
@@ -4813,6 +4816,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		} finally {
 			clearTimeout(stillClosingTimer);
 		}
+
+		// Replicate the final turn now that the session JSONL is fully written.
+		// `stopStateSync` owns the time budget and the no-op case, and cancels its
+		// own postmortem hook so this graceful path does not drain twice.
+		await stopStateSync();
 
 		// Do not force a final render during teardown: disposed session/UI state can
 		// collapse to an empty frame, clearing the viewport and leaving the parent

@@ -23,7 +23,10 @@ export function loadSlashCommandUsage(): Promise<void> {
 	loadPromise ??= (async () => {
 		try {
 			const opened = await AgentStorage.open();
-			const persisted = opened.listCommandUsage();
+			// Merged = local + replicated counts, so ranking reflects usage across
+			// every synced machine. Called once per process, not per keystroke, so
+			// the merged accessor's one-time sqlite_master probe is off the hot path.
+			const persisted = opened.listCommandUsageMerged();
 			// Keep hits recorded while the load was in flight visible in ranking.
 			for (const name in counts) persisted[name] = (persisted[name] ?? 0) + counts[name]!;
 			counts = persisted;

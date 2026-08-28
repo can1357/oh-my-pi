@@ -74,6 +74,13 @@ export class HistoryStorage {
 	#searchStmt: Statement;
 	// Cache substring-fallback prepared statements keyed by token count.
 	#substringStmts = new Map<number, Statement>();
+	// Cache project-scoped scan statements keyed by path-prefix count and whether
+	// the (created_at, id) tie-breaker is bound, mirroring #substringStmts.
+	// Prepared lazily on first scoped sync use.
+	#scanChangedForPathsStmts = new Map<string, Statement>();
+	// Replication merge statement — prepared lazily on first sync use so the
+	// local-only open path (sync disabled) prepares nothing extra.
+	#mergeRowStmt?: Statement;
 
 	private constructor(dbPath: string) {
 		this.#ensureDir(dbPath);
@@ -152,9 +159,12 @@ ON CONFLICT(prompt) DO UPDATE SET
 		checkpointWal(this.#db);
 		for (const stmt of this.#substringStmts.values()) stmt.finalize();
 		this.#substringStmts.clear();
+		for (const stmt of this.#scanChangedForPathsStmts.values()) stmt.finalize();
+		this.#scanChangedForPathsStmts.clear();
 		this.#upsertRowStmt.finalize();
 		this.#recentStmt.finalize();
 		this.#searchStmt.finalize();
+		this.#mergeRowStmt?.finalize();
 		this.#db.close();
 	}
 
@@ -270,6 +280,108 @@ ON CONFLICT(prompt) DO UPDATE SET
 			ids.push(id);
 		}
 		return ids;
+	}
+
+	/**
+	 * Replication read path: unique prompts belonging to sync-enabled projects,
+	 * ordered ASCENDING by `(created_at, id)` and capped at `limit`.
+	 * `afterRev`/`created_at` are epoch SECONDS here (the domain adapter converts
+	 * to the wire's epoch-millis `rev` at the boundary).
+	 *
+	 * `cwd` is restricted to the given absolute path prefixes so only prompts
+	 * belonging to sync-enabled projects are ever read. The predicate is applied
+	 * IN SQL (before the LIMIT): post-filtering a limited page could return an
+	 * all-dropped page while newer eligible rows sit beyond it, stalling the sync
+	 * watermark forever. Each prefix matches the project root exactly OR anything
+	 * strictly under `<root>/`. Rows with `cwd IS NULL` are excluded — a null cwd
+	 * cannot be attributed to a project, so it must never leave this machine. An
+	 * empty `pathPrefixes` returns `[]` without touching the db.
+	 *
+	 * `afterId` makes the cursor composite: rows are taken strictly after
+	 * `(afterRev, afterId)` rather than strictly after `afterRev`, which is the
+	 * only way to page THROUGH a second rather than over it. `created_at` has
+	 * one-second granularity, so a burst of prompts routinely shares a value and
+	 * a page can end mid-second; a caller that advanced by `created_at` alone
+	 * would skip whatever else that second holds. Statements are cached by prefix
+	 * count and cursor shape, mirroring {@link #getSubstringStmt}.
+	 */
+	scanChangedSinceForPaths(
+		afterRev: number,
+		limit: number,
+		pathPrefixes: readonly string[],
+		afterId?: number,
+	): HistoryEntry[] {
+		if (pathPrefixes.length === 0) return [];
+		try {
+			const stmt = this.#getScanChangedForPathsStmt(pathPrefixes.length, afterId !== undefined);
+			const params: unknown[] = afterId === undefined ? [afterRev] : [afterRev, afterRev, afterId];
+			for (const prefix of pathPrefixes) {
+				// Exact root, then everything below it. `path.sep`, not a literal
+				// `/`: `cwd` is stored as a native path, so on Windows a hardcoded
+				// slash builds `C:\repo/%` and matches nothing under the root —
+				// every subdirectory prompt would be silently unreplicable there.
+				// The separator goes through the escaper too, since a backslash is
+				// itself the LIKE `ESCAPE` character.
+				params.push(prefix);
+				params.push(`${escapeLikePattern(prefix + path.sep)}%`);
+			}
+			params.push(this.#normalizeLimit(limit));
+			const rows = stmt.all(...(params as [unknown, ...unknown[]])) as HistoryRow[];
+			return rows.map(row => this.#toEntry(row));
+		} catch (error) {
+			logger.warn("HistoryStorage scanChangedSinceForPaths failed", { error: String(error) });
+			return [];
+		}
+	}
+
+	#getScanChangedForPathsStmt(prefixCount: number, withTieBreaker: boolean): Statement {
+		const cacheKey = `${prefixCount}:${withTieBreaker ? "tie" : "rev"}`;
+		let stmt = this.#scanChangedForPathsStmts.get(cacheKey);
+		if (stmt) return stmt;
+		const pathClause = Array(prefixCount).fill("(cwd = ? OR cwd LIKE ? ESCAPE '\\')").join(" OR ");
+		const cursorClause = withTieBreaker ? "(created_at > ? OR (created_at = ? AND id > ?))" : "created_at > ?";
+		stmt = this.#db.prepare(
+			`SELECT id, prompt, created_at, cwd, session_id FROM history WHERE ${cursorClause} AND cwd IS NOT NULL AND (${pathClause}) ORDER BY created_at ASC, id ASC LIMIT ?`,
+		);
+		this.#scanChangedForPathsStmts.set(cacheKey, stmt);
+		return stmt;
+	}
+
+	/**
+	 * Replication merge path: last-writer-wins upsert of remote prompts. Unlike
+	 * {@link add}, this preserves the REMOTE `created_at` instead of stamping
+	 * "now", so the clock replicated across machines is comparable and LWW
+	 * converges. The `WHERE excluded.created_at > history.created_at` guard means
+	 * an older remote submission can never clobber a newer local one.
+	 *
+	 * FTS note: the `history_ai` AFTER INSERT trigger maintains `history_fts` for
+	 * brand-new prompts, but a conflict-UPDATE does NOT fire it. That is fine
+	 * here: the FTS content column is `prompt`, which is the ON CONFLICT KEY and
+	 * therefore never changes on the update path — only `created_at`/`cwd`/
+	 * `session_id` do — so there is nothing for FTS to re-index on a merge update.
+	 */
+	mergeRemote(rows: Array<{ prompt: string; createdAt: number; cwd?: string; sessionId?: string }>): void {
+		this.#mergeRowStmt ??= this.#db.prepare(`
+INSERT INTO history (prompt, created_at, cwd, session_id)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(prompt) DO UPDATE SET
+	created_at = excluded.created_at,
+	cwd = excluded.cwd,
+	session_id = excluded.session_id
+WHERE excluded.created_at > history.created_at
+		`);
+		const stmt = this.#mergeRowStmt;
+		try {
+			this.#db.transaction((batch: typeof rows) => {
+				for (const row of batch) {
+					const prompt = normalizePrompt(row.prompt);
+					if (!prompt) continue;
+					stmt.run(prompt, row.createdAt, row.cwd ?? null, row.sessionId ?? null);
+				}
+			})(rows);
+		} catch (error) {
+			logger.warn("HistoryStorage mergeRemote failed", { error: String(error) });
+		}
 	}
 
 	#ensureDir(dbPath: string): void {
