@@ -106,6 +106,24 @@ Dedup key is skill name. First item with a given name wins.
 - `ignoredSkills` (exclude; glob patterns)
 - `includeSkills` (include allowlist; glob patterns; empty means include all)
 
+### Prompt description budget
+
+`skills.catalogDescriptionBudgetChars` caps how many characters of skill
+descriptions reach the system prompt. It does not filter: every skill keeps its
+catalogue entry and stays readable through `skill://<name>`.
+
+- `-1` (default) renders every description. Any negative or non-finite value is
+  treated the same way, so a malformed setting fails open rather than blanking
+  the catalogue.
+- `0` renders names only.
+- A positive value is spent in catalogue order, which is alphabetical by skill
+  name. Once exhausted, every later skill renders name-only even if its own
+  description would have fit, so which skills keep their text depends on where
+  they sort.
+
+`/context` accounts for the budget, so the Skills category reflects what the
+prompt actually carries.
+
 Filter order is:
 
 1. not disabled by `disabledExtensions`
