@@ -809,6 +809,7 @@ const LEGACY_ENV_KEYS: Record<string, KeyResolver> = {
 	brave: "BRAVE_API_KEY",
 	tinyfish: "TINYFISH_API_KEY",
 	firecrawl: "FIRECRAWL_API_KEY",
+	anysearch: "ANYSEARCH_API_KEY",
 };
 
 /**

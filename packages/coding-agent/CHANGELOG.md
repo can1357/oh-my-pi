@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added AnySearch as a `web_search` provider (`ANYSEARCH_API_KEY` for the auto chain; explicit selection works keyless via the anonymous tier).
+
 ### Fixed
 
 - Fixed `import numpy` (and other native-extension imports) hanging indefinitely in the Python eval tool on Windows, where the runner's always-on background stdin reader deadlocked native DLL loading; Windows now reads the control channel serially between requests while POSIX keeps concurrent request dispatch ([#7985](https://github.com/can1357/oh-my-pi/issues/7985)).
