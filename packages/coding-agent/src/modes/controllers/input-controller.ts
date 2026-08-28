@@ -205,6 +205,11 @@ export class InputController {
 		this.ctx.ui.requestRender();
 	}
 
+	/** Drop text and image payloads retained for a terminal agent generation. */
+	discardComposerDraft(agentId: string): void {
+		this.#sessionDrafts.delete(agentId);
+	}
+
 	/** Return Main's draft even when teardown begins from a focused subagent. */
 	getDraftText(): string {
 		if (!this.ctx.focusedAgentId) return this.#draftText ?? this.ctx.editor.getExpandedText();

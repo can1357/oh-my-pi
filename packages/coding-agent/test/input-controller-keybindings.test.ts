@@ -336,6 +336,24 @@ describe("InputController keybinding setup", () => {
 		expect(editor.pendingImages).toEqual([workerImage]);
 	});
 
+	it("drops terminal agent composer text and image payloads", async () => {
+		const { InputController, ctx, editor } = await createContext();
+		const controller = new InputController(ctx);
+		const workerImage: ImageContent = { type: "image", mimeType: "image/png", data: "worker" };
+
+		editor.setText("main draft");
+		controller.switchComposerDraft(undefined, "Worker");
+		editor.setText("worker draft");
+		editor.pendingImages = [workerImage];
+		controller.switchComposerDraft("Worker", undefined);
+
+		controller.discardComposerDraft("Worker");
+		controller.switchComposerDraft(undefined, "Worker");
+
+		expect(editor.getText()).toBe("");
+		expect(editor.pendingImages).toEqual([]);
+	});
+
 	it("registers the tool activity visibility action", async () => {
 		const { InputController, ctx, editor, spies } = await createContext();
 		const controller = new InputController(ctx);

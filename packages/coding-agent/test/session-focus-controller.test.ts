@@ -48,6 +48,7 @@ interface Harness {
 	setSessionCalls: Array<[AgentSession, string | undefined]>;
 	reloadTodoSessions: AgentSession[];
 	composerSwitches: Array<[string | undefined, string | undefined]>;
+	discardedComposerDrafts: string[];
 	counts: {
 		clearTransientSessionUi: () => number;
 		resetTranscriptAnchors: () => number;
@@ -62,6 +63,7 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 	const setSessionCalls: Array<[AgentSession, string | undefined]> = [];
 	const reloadTodoSessions: AgentSession[] = [];
 	const composerSwitches: Array<[string | undefined, string | undefined]> = [];
+	const discardedComposerDrafts: string[] = [];
 	let clearTransientSessionUi = 0;
 	let resetTranscriptAnchors = 0;
 	let renderInitialMessages = 0;
@@ -99,6 +101,9 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 		switchComposerDraft: (fromAgentId: string | undefined, toAgentId: string | undefined) => {
 			composerSwitches.push([fromAgentId, toAgentId]);
 		},
+		discardComposerDraft: (agentId: string) => {
+			discardedComposerDrafts.push(agentId);
+		},
 		updateEditorBorderColor() {},
 		ui: { requestRender() {} },
 		showStatus() {},
@@ -118,6 +123,7 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 		setSessionCalls,
 		reloadTodoSessions,
 		composerSwitches,
+		discardedComposerDrafts,
 		counts: {
 			clearTransientSessionUi: () => clearTransientSessionUi,
 			resetTranscriptAnchors: () => resetTranscriptAnchors,
@@ -282,5 +288,32 @@ describe("SessionFocusController", () => {
 			[worker.session, "Worker"],
 			[h.main.session, undefined],
 		]);
+		expect(h.discardedComposerDrafts).toEqual([]);
+	});
+
+	it("discards the focused agent draft when a hard kill becomes terminal", async () => {
+		const h = makeHarness();
+		const worker = makeSessionStub();
+		const ref = registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
+
+		await h.controller.focusAgent("Worker");
+		h.registry.setStatus("Worker", "aborted", ref);
+		await flushAsync();
+
+		expect(h.controller.focusedAgentId).toBeUndefined();
+		expect(h.composerSwitches.at(-1)).toEqual(["Worker", undefined]);
+		expect(h.discardedComposerDrafts).toEqual(["Worker"]);
+	});
+
+	it("discards an unfocused agent draft when its registry generation is removed", async () => {
+		const h = makeHarness();
+		const worker = makeSessionStub();
+		const ref = registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
+
+		await h.controller.focusAgent("Worker");
+		await h.controller.unfocus();
+		h.registry.unregister("Worker", ref);
+
+		expect(h.discardedComposerDrafts).toEqual(["Worker"]);
 	});
 });

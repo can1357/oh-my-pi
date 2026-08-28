@@ -63,9 +63,15 @@ export class SessionFocusController {
 	}
 
 	/** Return to the main session. No-op when unfocused. */
-	async unfocus(): Promise<void> {
+	unfocus(): Promise<void> {
+		return this.#unfocus(false);
+	}
+
+	async #unfocus(discardFocusedDraft: boolean): Promise<void> {
 		if (!this.#focusedAgentId) return;
-		this.ctx.switchComposerDraft(this.#focusedAgentId, undefined);
+		const focusedAgentId = this.#focusedAgentId;
+		this.ctx.switchComposerDraft(focusedAgentId, undefined);
+		if (discardFocusedDraft) this.ctx.discardComposerDraft(focusedAgentId);
 		this.#focusedAgentId = undefined;
 		this.#attachedSession = undefined;
 		const attached = await this.#attach(this.ctx.session);
@@ -78,11 +84,16 @@ export class SessionFocusController {
 	}
 
 	#onRegistryEvent(event: RegistryEvent): void {
-		if (event.ref.id !== this.#focusedAgentId) return;
 		const gone = event.type === "removed";
-		const dead = event.type === "status_changed" && (event.ref.status === "parked" || event.ref.status === "aborted");
-		if (!gone && !dead) return;
-		void this.unfocus().then(() => {
+		const aborted = event.type === "status_changed" && event.ref.status === "aborted";
+		const parked = event.type === "status_changed" && event.ref.status === "parked";
+		const terminal = gone || aborted;
+		if (event.ref.id !== this.#focusedAgentId) {
+			if (terminal) this.ctx.discardComposerDraft(event.ref.id);
+			return;
+		}
+		if (!terminal && !parked) return;
+		void this.#unfocus(terminal).then(() => {
 			this.ctx.showStatus(`Agent ${event.ref.id} is ${gone ? "gone" : event.ref.status}; returned to main session`);
 		});
 	}

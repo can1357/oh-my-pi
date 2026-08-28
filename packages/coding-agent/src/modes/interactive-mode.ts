@@ -792,8 +792,13 @@ export class InteractiveMode implements InteractiveModeContext {
 	unfocusSession(): Promise<void> {
 		return this.#focusController.unfocus();
 	}
+	/** Save the current session's composer draft and restore the target session's draft. */
 	switchComposerDraft(fromAgentId: string | undefined, toAgentId: string | undefined): void {
 		this.#inputController.switchComposerDraft(fromAgentId, toAgentId);
+	}
+	/** Drop text and image payloads retained for a terminal agent generation. */
+	discardComposerDraft(agentId: string): void {
+		this.#inputController.discardComposerDraft(agentId);
 	}
 	clearTransientSessionUi(): void {
 		this.#hideSessionInfo();
