@@ -10,6 +10,8 @@ import {
 	nextActionableTask,
 	phasesToMarkdown,
 	resolveTodoMarkdownPath,
+	isClosedTodo,
+	isSettledTodo,
 	selectCollapsedTodos,
 	TODO_STRIKE_HOLD_FRAMES,
 	TODO_STRIKE_TOTAL_FRAMES,
@@ -724,6 +726,18 @@ describe("todoToolRenderer.renderResult phase collapsing", () => {
 		});
 		// No empty body line survives between phases.
 		expect(innerLines(component).every(line => line.length > 0)).toBe(true);
+	});
+});
+
+describe("isClosedTodo vs isSettledTodo", () => {
+	it("counts only completed as HUD done; abandoned is settled for collapse", () => {
+		expect(isClosedTodo({ content: "x", status: "completed" })).toBe(true);
+		expect(isClosedTodo({ content: "x", status: "abandoned" })).toBe(false);
+		expect(isClosedTodo({ content: "x", status: "pending" })).toBe(false);
+		expect(isSettledTodo({ content: "x", status: "completed" })).toBe(true);
+		expect(isSettledTodo({ content: "x", status: "abandoned" })).toBe(true);
+		expect(isSettledTodo({ content: "x", status: "pending" })).toBe(false);
+		expect(isSettledTodo({ content: "x", status: "blocked" })).toBe(false);
 	});
 });
 

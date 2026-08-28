@@ -236,10 +236,13 @@ export function todoMatchesAnyDescription(content: string, descriptions: readonl
 	return false;
 }
 
-/** Whether a todo is settled: completed or deliberately abandoned. Shared so
- *  the collapsed viewport, the HUD progress counters, and the HUD's closed-todo
- *  auto-clear can never disagree about what "done" hides. */
+/** HUD "done": completed only. Abandoned is a handoff, not progress. */
 export function isClosedTodo<T extends { status: TodoStatus }>(task: T): boolean {
+	return task.status === "completed";
+}
+
+/** Hidden from the open collapsed viewport: completed or deliberately abandoned. */
+export function isSettledTodo<T extends { status: TodoStatus }>(task: T): boolean {
 	return task.status === "completed" || task.status === "abandoned";
 }
 
@@ -334,11 +337,11 @@ export function selectCollapsedTodos<T extends { status: TodoStatus }>(
 	isMatched: (task: T) => boolean,
 	cap: number,
 ): CollapsedTodoSelection<T> {
-	const open = tasks.filter(task => !isClosedTodo(task));
-	// Closed tasks are never active, so a settled phase selects over itself.
+	const open = tasks.filter(task => !isSettledTodo(task));
+	// Settled tasks are never active, so a fully settled phase selects over itself.
 	if (open.length === 0) return selectWithinCap(tasks, isMatched, cap);
-	// `done` accepts any named task, so closed tasks are not necessarily a prefix.
-	const lead = tasks.filter(isClosedTodo).slice(-COLLAPSED_CLOSED_CONTEXT);
+	// `done`/`drop` accept any named task, so settled tasks are not necessarily a prefix.
+	const lead = tasks.filter(isSettledTodo).slice(-COLLAPSED_CLOSED_CONTEXT);
 	const selected = selectWithinCap(open, isMatched, cap);
 	return { items: [...lead, ...selected.items], summary: selected.summary };
 }
@@ -1095,9 +1098,7 @@ function computeTouchedPhases(
 }
 
 /**
- * Dim `closed/total` suffix for a phase header. Counts closed tasks, not just
- * completed ones: the collapsed viewport hides both, so an abandoned task has to
- * move the counter or its phase reads as permanently stuck.
+ * Dim `completed/total` suffix for a phase header. Abandoned is not done.
  */
 function formatPhaseProgress(phase: TodoPhase, uiTheme: Theme): string {
 	const done = phase.tasks.filter(isClosedTodo).length;
