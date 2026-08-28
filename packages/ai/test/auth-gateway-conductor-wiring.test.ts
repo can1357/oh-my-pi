@@ -458,6 +458,7 @@ describe("auth-gateway conductor wiring", () => {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
+
 	it("prefers remembered model when cache identity is only a header (negative if remember ignores headers)", async () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-conductor-wire-cache-hdr-"));
@@ -524,6 +525,11 @@ describe("auth-gateway conductor wiring", () => {
 			expect(second.status).toBe(200);
 			expect(primary.calls.length).toBe(1);
 			expect(backup.calls.length).toBe(2);
+
+			const other = await post("other");
+			expect(other.status).toBe(200);
+			expect(primary.calls.length).toBe(2);
+			expect(primary.calls.length).not.toBe(1);
 		} finally {
 			await handle.close();
 			storage.close();

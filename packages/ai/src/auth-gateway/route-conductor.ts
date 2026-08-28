@@ -85,7 +85,9 @@ export function decideAttempt(args: {
 		case "provider_unavailable":
 		case "model_unavailable":
 		case "context_overflow": {
-			const next = firstUnused(route.fallbacks[disposition], state.attemptedTargets);
+			const next =
+				firstUnused(route.fallbacks[disposition], state.attemptedTargets) ??
+				firstUnused(route.targets, state.attemptedTargets);
 			return next === undefined ? { type: "terminal" } : { type: "fallback_target", targetModelId: next };
 		}
 		default: {

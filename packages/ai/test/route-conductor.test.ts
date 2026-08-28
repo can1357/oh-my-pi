@@ -85,6 +85,21 @@ describe("decideAttempt", () => {
 		expect(action).not.toEqual({ type: "dispatch", targetModelId: "other" });
 	});
 
+	it("falls back to an unused earlier target after a preferred later target fails", () => {
+		const action = decideAttempt({
+			route: route({
+				targets: ["primary", "backup"],
+				fallbacks: { provider_unavailable: ["backup"] },
+			}),
+			state: state({ attemptedTargets: new Set(["backup"]), currentTarget: "backup" }),
+			classification: classification("provider_unavailable"),
+			commitState: "probing",
+			preferredTargetId: "backup",
+		});
+		expect(action).toEqual({ type: "fallback_target", targetModelId: "primary" });
+		expect(action).not.toEqual({ type: "terminal" });
+	});
+
 	it("returns terminal after commit even when fallbacks remain (negative)", () => {
 		const fallbacks = { provider_unavailable: ["backup"] as const };
 		const probingCommitted = decideAttempt({
