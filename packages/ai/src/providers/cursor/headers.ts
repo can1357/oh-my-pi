@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type http2 from "node:http2";
+import type * as http2 from "node:http2";
 import {
 	buildCursorUnaryHeaders as buildCatalogCursorUnaryHeaders,
 	CURSOR_CLIENT_VERSION,

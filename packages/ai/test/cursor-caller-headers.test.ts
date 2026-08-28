@@ -1,7 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import * as fs from "node:fs/promises";
 import * as http2 from "node:http2";
-import * as os from "node:os";
 import * as path from "node:path";
 import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
@@ -191,27 +189,23 @@ describe("Cursor caller headers reach the wire", () => {
 	});
 
 	it("records the same x-request-id on the wire and in the request-debug dump", async () => {
-		const previousDebugFlag = Bun.env.PI_REQ_DEBUG;
-		const previousCwd = process.cwd();
-		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-req-debug-"));
-		try {
-			process.chdir(tempDir);
-			Bun.env.PI_REQ_DEBUG = "1";
-			const sent = await send({ "x-trace": "debug-id" });
-			const entries = await fs.readdir(tempDir);
-			const jsonFiles = entries.filter(name => /^rr-session-\d+\.json$/.test(name));
-			expect(jsonFiles.length).toBe(1);
-			const dump = JSON.parse(await fs.readFile(path.join(tempDir, jsonFiles[0]!), "utf8")) as {
-				headers?: Record<string, string>;
-			};
-			expect(typeof sent["x-request-id"]).toBe("string");
-			expect(String(sent["x-request-id"]).length).toBeGreaterThan(0);
-			expect(sent["x-request-id"]).toBe(dump.headers?.["x-request-id"]);
-		} finally {
-			process.chdir(previousCwd);
-			if (previousDebugFlag === undefined) delete Bun.env.PI_REQ_DEBUG;
-			else Bun.env.PI_REQ_DEBUG = previousDebugFlag;
-			await fs.rm(tempDir, { recursive: true, force: true });
+		const child = Bun.spawn([process.execPath, path.join(import.meta.dir, "fixtures/cursor-request-debug.ts")], {
+			cwd: path.resolve(import.meta.dir, "../../.."),
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		if (exitCode !== 0) {
+			throw new Error(`request-debug fixture exited ${exitCode}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
 		}
-	});
+		expect(stderr).toBe("");
+		const result = JSON.parse(stdout) as { requestId?: string; dumpRequestId?: string };
+		expect(typeof result.requestId).toBe("string");
+		expect(result.requestId?.length).toBeGreaterThan(0);
+		expect(result.requestId).toBe(result.dumpRequestId);
+	}, 60_000);
 });

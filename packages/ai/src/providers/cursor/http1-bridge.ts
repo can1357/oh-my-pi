@@ -320,9 +320,11 @@ class FrameQueue implements AsyncIterable<ConnectFrame> {
 	push(frame: ConnectFrame): void {
 		if (this.#done || this.#error) return;
 		const size = "payload" in frame ? frame.payload.length : 0;
-		if (this.#bytes + size > (__pollQueueByteLimit ?? POLL_QUEUE_BYTE_LIMIT)) {
-			this.fail(new Error(`Cursor HTTP/1 poll frame queue exceeded ${POLL_QUEUE_BYTE_LIMIT} bytes`));
-			return;
+		const byteLimit = __pollQueueByteLimit ?? POLL_QUEUE_BYTE_LIMIT;
+		if (this.#bytes + size > byteLimit) {
+			const error = new Error(`Cursor HTTP/1 poll frame queue exceeded ${byteLimit} queued bytes`);
+			this.fail(error);
+			throw error;
 		}
 		this.#values.push(frame);
 		this.#bytes += size;

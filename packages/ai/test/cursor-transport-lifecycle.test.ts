@@ -1,9 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { EventEmitter } from "node:events";
-import * as fs from "node:fs/promises";
 import * as http from "node:http";
 import * as http2 from "node:http2";
-import * as os from "node:os";
 import * as path from "node:path";
 import { ProviderResponseError } from "@oh-my-pi/pi-ai/error";
 import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
@@ -31,6 +29,34 @@ const RUN_PATH = "/agent.v1.AgentService/Run";
 const GET_SERVER_CONFIG_PATH = "/agent.v1.AgentService/GetServerConfig";
 const CONNECT_END_STREAM_FLAG = 0b00000010;
 const API_KEY = "transport-lifecycle-key";
+
+async function runRequestDebugFixture(mode: "h2-body" | "h1-body"): Promise<{
+	protocol?: string;
+	bodyContainsPayload: boolean;
+}> {
+	const fixture = path.join(
+		import.meta.dir,
+		mode === "h1-body" ? "fixtures/cursor-request-debug-h1.fixture.ts" : "fixtures/cursor-request-debug.ts",
+	);
+	const argv = mode === "h1-body" ? [process.execPath, "test", fixture] : [process.execPath, fixture];
+	const child = Bun.spawn(argv, {
+		cwd: path.resolve(import.meta.dir, "../../.."),
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const [stdout, stderr, exitCode] = await Promise.all([
+		new Response(child.stdout).text(),
+		new Response(child.stderr).text(),
+		child.exited,
+	]);
+	if (exitCode !== 0) {
+		throw new Error(`request-debug ${mode} fixture exited ${exitCode}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+	}
+	const json = mode === "h1-body" ? stdout.match(/^REQUEST_DEBUG_RESULT=(.+)$/m)?.[1] : stdout.trim();
+	if (!json)
+		throw new Error(`request-debug ${mode} fixture produced no result\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+	return JSON.parse(json) as { protocol?: string; bodyContainsPayload: boolean };
+}
 
 function testRunHeaders() {
 	return buildCursorRunHeaders({
@@ -451,6 +477,54 @@ describe("openCursorTransport lifecycle", () => {
 			await closed.promise;
 		}
 	}, 10_000);
+
+	it("accepts more than 1024 tiny frames when decoded bytes stay within budget", async () => {
+		let server: http2.Http2Server | undefined;
+		const sessions = new Set<http2.Http2Session>();
+		server = http2.createServer();
+		server.on("session", session => {
+			sessions.add(session);
+			session.on("close", () => sessions.delete(session));
+		});
+		server.on("stream", (stream: http2.ServerHttp2Stream) => {
+			stream.on("data", () => {});
+			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+			const parts: Buffer[] = [];
+			for (let index = 0; index < 1025; index++) parts.push(frameConnectMessage(Buffer.from([index & 0xff])));
+			parts.push(endFrame());
+			stream.end(Buffer.concat(parts));
+		});
+		const listening = Promise.withResolvers<void>();
+		server.once("error", listening.reject);
+		server.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
+		const address = server.address();
+		if (!address || typeof address === "string") throw new Error("expected live h2 fixture");
+
+		__setCursorH2FrameQueueBytes(2048);
+		try {
+			const attempt = await openCursorTransport({
+				baseUrl: `http://127.0.0.1:${address.port}`,
+				apiKey: API_KEY,
+				requestPath: RUN_PATH,
+				runHeaders: testRunHeaders(),
+				gzipRequest: false,
+				provider: "cursor",
+			});
+			attempt.write(encodeConnectFrame(Buffer.from("client-request"), false));
+			const frames = [];
+			for await (const frame of attempt.frames()) frames.push(frame);
+			expect(frames.filter(frame => frame.kind === "data")).toHaveLength(1025);
+			expect(frames.at(-1)).toEqual({ kind: "end", error: null });
+			attempt.close();
+		} finally {
+			__setCursorH2FrameQueueBytes(undefined);
+			for (const session of sessions) session.destroy();
+			const closed = Promise.withResolvers<void>();
+			server.close(error => (error ? closed.reject(error) : closed.resolve()));
+			await closed.promise;
+		}
+	}, 10_000);
 });
 
 function turnEndedPayload(): Uint8Array {
@@ -803,131 +877,16 @@ describe("cursor heartbeat and outbound write lifecycle", () => {
 	}, 15_000);
 
 	it("writes Connect data-frame payloads into the PI_REQ_DEBUG response log", async () => {
-		const previousDebugFlag = Bun.env.PI_REQ_DEBUG;
-		const previousCwd = process.cwd();
-		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-req-debug-body-"));
-		const sessions = new Set<http2.Http2Session>();
-		const server = http2.createServer();
-		server.on("session", session => {
-			sessions.add(session);
-			session.on("close", () => sessions.delete(session));
-		});
-		const payload = turnEndedPayload();
-		server.on("stream", (stream: http2.ServerHttp2Stream, headers: http2.IncomingHttpHeaders) => {
-			stream.on("data", () => {});
-			stream.on("error", () => {});
-			if (headers[":path"] !== RUN_PATH) {
-				stream.respond({ ":status": 404 });
-				stream.end();
-				return;
-			}
-			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
-			stream.write(frameConnectMessage(payload));
-			stream.end();
-		});
-		const listening = Promise.withResolvers<void>();
-		server.once("error", listening.reject);
-		server.listen(0, "127.0.0.1", listening.resolve);
-		await listening.promise;
-		const address = server.address();
-		if (!address || typeof address === "string") throw new Error("expected h2 run fixture to bind a tcp port");
-		const baseUrl = `http://127.0.0.1:${address.port}`;
-
-		try {
-			process.chdir(tempDir);
-			Bun.env.PI_REQ_DEBUG = "1";
-			const stream = streamCursor(makeModel(baseUrl), streamContext, { apiKey: API_KEY });
-			for await (const _event of stream) {
-				/* drain */
-			}
-			const entries = await fs.readdir(tempDir);
-			const jsonFiles = entries.filter(name => /^rr-session-\d+\.json$/.test(name));
-			const requestDumpName = jsonFiles[0];
-			if (!requestDumpName) throw new Error("expected request dump");
-			const dump = JSON.parse(await fs.readFile(path.join(tempDir, requestDumpName), "utf8")) as {
-				protocol?: string;
-			};
-			expect(dump.protocol).toBe("http2");
-			const resLogs = entries.filter(name => /^rr-session-\d+\.res\.log$/.test(name));
-			expect(resLogs.length).toBeGreaterThan(0);
-			const responseLogName = resLogs[0];
-			if (!responseLogName) throw new Error("expected response log");
-			const bytes = await fs.readFile(path.join(tempDir, responseLogName));
-			const separator = Buffer.from("\r\n\r\n");
-			const separatorIndex = bytes.indexOf(separator);
-			expect(separatorIndex).toBeGreaterThanOrEqual(0);
-			const body = bytes.subarray(separatorIndex + separator.length);
-			expect(body.length).toBeGreaterThan(0);
-			expect(body.includes(payload)).toBe(true);
-		} finally {
-			process.chdir(previousCwd);
-			if (previousDebugFlag === undefined) delete Bun.env.PI_REQ_DEBUG;
-			else Bun.env.PI_REQ_DEBUG = previousDebugFlag;
-			await fs.rm(tempDir, { recursive: true, force: true });
-			for (const session of sessions) session.destroy();
-			const closed = Promise.withResolvers<void>();
-			server.close(error => (error ? closed.reject(error) : closed.resolve()));
-			await closed.promise;
-		}
-	});
+		const result = await runRequestDebugFixture("h2-body");
+		expect(result.protocol).toBe("http2");
+		expect(result.bodyContainsPayload).toBe(true);
+	}, 60_000);
 
 	it("writes poll-stream payloads into the HTTP/1 bridge PI_REQ_DEBUG response log", async () => {
-		const previousDebugFlag = Bun.env.PI_REQ_DEBUG;
-		const previousCwd = process.cwd();
-		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-req-debug-h1-body-"));
-		const turnBytes = turnEndedPayload();
-		const turnB64 = Buffer.from(turnBytes).toString("base64");
-
-		const h1Url = await startH1Fixture((req, res) => {
-			if (req.url?.includes("RunPoll")) {
-				const body = Buffer.concat([
-					encodeConnectFrame(encodePollResponse(0n, turnB64, false), false),
-					encodeConnectFrame(encodePollResponse(1n, "", true), false),
-					frameConnectMessage(Buffer.from("{}", "utf8"), CONNECT_END_STREAM_FLAG),
-				]);
-				res.writeHead(200, { "content-type": "application/connect+proto" });
-				res.end(body);
-				return;
-			}
-			res.statusCode = 200;
-			res.end();
-		});
-		vi.spyOn(h2Pool, "acquireCursorH2").mockResolvedValue(alpnUnavailable());
-		vi.spyOn(serverConfig, "fetchCursorBidiAvailability").mockResolvedValue("bidi-disabled");
-
-		try {
-			process.chdir(tempDir);
-			Bun.env.PI_REQ_DEBUG = "1";
-			const stream = streamCursor(makeModel(h1Url), streamContext, { apiKey: API_KEY });
-			for await (const _event of stream) {
-				/* drain */
-			}
-			const entries = await fs.readdir(tempDir);
-			const jsonFiles = entries.filter(name => /^rr-session-\d+\.json$/.test(name));
-			const requestDumpName = jsonFiles[0];
-			if (!requestDumpName) throw new Error("expected request dump");
-			const dump = JSON.parse(await fs.readFile(path.join(tempDir, requestDumpName), "utf8")) as {
-				protocol?: string;
-			};
-			expect(dump.protocol).toBe("http");
-			const resLogs = entries.filter(name => /^rr-session-\d+\.res\.log$/.test(name));
-			if (resLogs.length === 0) throw new Error("expected at least one response log");
-			const responseLogName = resLogs[0];
-			if (!responseLogName) throw new Error("expected response log");
-			const bytes = await fs.readFile(path.join(tempDir, responseLogName));
-			const separator = Buffer.from("\r\n\r\n");
-			const separatorIndex = bytes.indexOf(separator);
-			expect(separatorIndex).toBeGreaterThanOrEqual(0);
-			const body = bytes.subarray(separatorIndex + separator.length);
-			expect(body.length).toBeGreaterThan(0);
-			expect(body.includes(turnBytes)).toBe(true);
-		} finally {
-			process.chdir(previousCwd);
-			if (previousDebugFlag === undefined) delete Bun.env.PI_REQ_DEBUG;
-			else Bun.env.PI_REQ_DEBUG = previousDebugFlag;
-			await fs.rm(tempDir, { recursive: true, force: true });
-		}
-	});
+		const result = await runRequestDebugFixture("h1-body");
+		expect(result.protocol).toBe("http");
+		expect(result.bodyContainsPayload).toBe(true);
+	}, 60_000);
 
 	it("does not emit an unhandled rejection when HTTP/2 trailers reject", async () => {
 		const rejections: unknown[] = [];

@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import * as http from "node:http";
+import * as path from "node:path";
 import { type ConnectFrame, ConnectProtocolError, encodeConnectFrame } from "../src/providers/cursor/connect-frame";
 import { buildCursorRunHeaders } from "../src/providers/cursor/headers";
 import {
@@ -8,7 +9,6 @@ import {
 	openCursorHttp1Bridge,
 	pendingCursorHttp1BridgePolls,
 } from "../src/providers/cursor/http1-bridge";
-import { __resetProxyCache } from "../src/utils/proxy";
 
 const RUN_PATH = "/agent.v1.AgentService/Run";
 const CONNECT_END_STREAM_FLAG = 0b00000010;
@@ -763,107 +763,30 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 });
 
 describe("cursor HTTP/1.1 bridge provider proxy routing", () => {
-	let proxyServer: http.Server | undefined;
-	let savedProxyEnv: Record<string, string | undefined> = {};
-	const PROXY_ENV_NAMES = ["PI_PROXY_CURSOR", "PI_PROXY", "NO_PROXY", "no_proxy"] as const;
-	let proxiedPolls = 0;
-	let proxiedAppends = 0;
-	let pollTarget = "";
-	let appendTarget = "";
-
-	beforeEach(() => {
-		proxiedPolls = 0;
-		proxiedAppends = 0;
-		pollTarget = "";
-		appendTarget = "";
-		savedProxyEnv = {};
-		for (const name of PROXY_ENV_NAMES) {
-			savedProxyEnv[name] = Bun.env[name];
-		}
-	});
-
-	afterEach(async () => {
-		for (const name of PROXY_ENV_NAMES) {
-			const saved = savedProxyEnv[name];
-			if (saved === undefined) delete Bun.env[name];
-			else Bun.env[name] = saved;
-		}
-		// Drop the memoized "cursor" proxy resolution after the env restore so
-		// no sibling suite inherits this test's throwaway proxy.
-		__resetProxyCache();
-		await settleStragglerPollTasks();
-		if (proxyServer) {
-			const closing = proxyServer;
-			proxyServer = undefined;
-			const closed = Promise.withResolvers<void>();
-			closing.close(error => (error ? closed.reject(error) : closed.resolve()));
-			await closed.promise;
-		}
-	});
-
-	it("routes poll and append through PI_PROXY_CURSOR", async () => {
-		// A plain HTTP proxy: Bun's proxied fetch sends the absolute-form
-		// request line, so `req.url` carries the unreachable origin's full URL.
-		proxyServer = http.createServer((req, res) => {
-			const url = req.url ?? "";
-			if (url.includes("RunPoll")) {
-				proxiedPolls++;
-				pollTarget = url;
-				res.writeHead(200, { "content-type": "application/connect+proto" });
-				res.end(
-					Buffer.concat([
-						encodeConnectFrame(
-							encodePollResponse(0n, Buffer.from("proxied-frame").toString("base64"), true),
-							false,
-						),
-						frameConnectMessage(Buffer.from("{}", "utf8"), CONNECT_END_STREAM_FLAG),
-					]),
-				);
-				return;
-			}
-			if (url.includes("BidiAppend")) {
-				proxiedAppends++;
-				appendTarget = url;
-				res.statusCode = 200;
-				res.end();
-				return;
-			}
-			res.statusCode = 404;
-			res.end();
+	it("routes poll and append through PI_PROXY_CURSOR in an isolated process", async () => {
+		const child = Bun.spawn([process.execPath, path.join(import.meta.dir, "fixtures/cursor-http1-proxy.ts")], {
+			cwd: path.resolve(import.meta.dir, "../../.."),
+			stdout: "pipe",
+			stderr: "pipe",
 		});
-		const listening = Promise.withResolvers<void>();
-		proxyServer.once("error", listening.reject);
-		proxyServer.listen(0, "127.0.0.1", listening.resolve);
-		await listening.promise;
-		const address = proxyServer.address();
-		if (!address || typeof address === "string") throw new Error("expected proxy fixture to bind");
-		delete Bun.env.PI_PROXY;
-		delete Bun.env.NO_PROXY;
-		delete Bun.env.no_proxy;
-		Bun.env.PI_PROXY_CURSOR = `http://127.0.0.1:${address.port}`;
-		// The provider proxy resolution is memoized; re-resolve after the env.
-		__resetProxyCache();
-		// A non-local origin that cannot be reached directly: honoring the
-		// proxy delivers the bridge's requests to the local fixture, while a
-		// direct fetch fails and the attempt settles as a failure.
-		const baseUrl = "http://cursor-bridge-proxy.invalid:1";
-		const bridge = openCursorHttp1Bridge({
-			baseUrl,
-			requestPath: RUN_PATH,
-			runHeaders: testRunHeaders(),
-			gzipRequest: false,
-		});
-		bridge.write(encodeConnectFrame(Buffer.from("client-request"), false));
-
-		const frames: ConnectFrame[] = [];
-		for await (const frame of bridge.frames()) frames.push(frame);
-		expect(frames.filter(frame => frame.kind === "data")).toHaveLength(1);
-		expect(frames.at(-1)?.kind).toBe("end");
-		await expect(bridge.trailers()).resolves.toEqual({});
-		expect(proxiedAppends).toBe(1);
-		expect(proxiedPolls).toBe(1);
-		expect(pollTarget).toContain(`${RUN_PATH}Poll`);
-		expect(appendTarget).toContain("/aiserver.v1.BidiService/BidiAppend");
-		bridge.close();
-	});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		expect(exitCode).toBe(0);
+		expect(stderr).toBe("");
+		const result = JSON.parse(stdout) as {
+			proxiedPolls: number;
+			proxiedAppends: number;
+			pollTarget: string;
+			appendTarget: string;
+			kinds: string[];
+		};
+		expect(result.proxiedAppends).toBe(1);
+		expect(result.proxiedPolls).toBe(1);
+		expect(result.pollTarget).toContain(`${RUN_PATH}Poll`);
+		expect(result.appendTarget).toContain("/aiserver.v1.BidiService/BidiAppend");
+		expect(result.kinds).toEqual(["data", "end"]);
+	}, 60_000);
 });

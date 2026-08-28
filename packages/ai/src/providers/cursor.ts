@@ -519,6 +519,7 @@ function streamCursorWithWireMode(
 		// late results regardless, so skipping the rest of the drain loses
 		// nothing that could still be delivered.
 		let abortSettled: Promise<void> | undefined;
+		let detachAbortListener: (() => void) | undefined;
 		let drainTimedOut = false;
 		const drainInFlightDispatches = async (): Promise<void> => {
 			if (inFlightDispatches.size === 0) return;
@@ -543,7 +544,11 @@ function streamCursorWithWireMode(
 					}
 					abortSettled ??= (() => {
 						const abortWait = Promise.withResolvers<void>();
-						signal.addEventListener("abort", () => abortWait.resolve(), { once: true });
+						const onAbort = (): void => abortWait.resolve();
+						signal.addEventListener("abort", onAbort, { once: true });
+						// Long-lived caller signals outlive the drain; without this
+						// every completed turn leaves another listener attached.
+						detachAbortListener = () => signal.removeEventListener("abort", onAbort);
 						return abortWait.promise;
 					})();
 					const winner = await Promise.race([settled, abortSettled.then(() => "abort" as const), timeout.promise]);
@@ -555,6 +560,7 @@ function streamCursorWithWireMode(
 				}
 			} finally {
 				clearTimeout(timeoutId);
+				detachAbortListener?.();
 			}
 		};
 		// Deferred synthetic pairing, shared by the success and terminal-error

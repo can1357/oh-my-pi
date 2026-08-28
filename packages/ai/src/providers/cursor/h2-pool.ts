@@ -181,13 +181,18 @@ function releaseEntryLease(key: string, entry: PoolEntry): void {
 }
 
 /** Evict oldest-idle entries while the pool holds more sessions than
- * {@link MAX_RETAINED_SESSIONS}. Never touches a leased or draining entry;
- * if every over-cap entry is leased, the bound re-applies when one releases. */
-function evictBeyondCap(): void {
+ * {@link MAX_RETAINED_SESSIONS}. Never touches a leased or draining entry.
+ * `protect` exempts a just-published session: it has no lease yet, so with
+ * every older entry leased it would be the only candidate — evicting it
+ * destroys the session the handshake is about to hand out, and reacquisition
+ * reconnects straight into the same eviction until some lease releases. The
+ * bound re-applies on the next release. */
+function evictBeyondCap(protect?: string): void {
 	while (pool.size > MAX_RETAINED_SESSIONS) {
 		let victimKey: string | undefined;
 		let victimSince: number | undefined;
 		for (const [key, entry] of pool) {
+			if (key === protect) continue;
 			if (entry.outstanding > 0 || entry.draining || entry.idleSince === undefined) continue;
 			if (victimSince === undefined || entry.idleSince < victimSince) {
 				victimSince = entry.idleSince;
@@ -473,7 +478,7 @@ function establishSession(options: CursorH2AcquireOptions, key: string): CursorE
 			// issuance failure must not pin a zero-outstanding idle entry.
 			connect.unref();
 			pool.set(key, { session: connect, outstanding: 0, draining: false, referenced: false, idleSince: Date.now() });
-			evictBeyondCap();
+			evictBeyondCap(key);
 			handshake.resolve({ kind: "ok", session: connect });
 		};
 		const onGoaway = (): void => {

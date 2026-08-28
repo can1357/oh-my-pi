@@ -206,10 +206,7 @@ interface H2FramePump {
 	stop(): void;
 }
 
-/** Fail the pump if decoded frames outrun the consumer this far. A frame
- * count alone cannot bound memory: payloads may legally reach
- * MAX_CONNECT_FRAME_PAYLOAD each, so the queue also carries a byte budget. */
-const H2_FRAME_QUEUE_LIMIT = 1024;
+/** Fail the pump if decoded payload bytes outrun the consumer this far. */
 const H2_FRAME_QUEUE_BYTES = 64 * 1024 * 1024;
 
 let __frameQueueBytes: number | undefined;
@@ -254,15 +251,9 @@ function startH2FramePump(request: http2.ClientHttp2Stream, decoder: ConnectFram
 			const frames = decoder.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
 			if (frames.length === 0) return;
 			const incomingBytes = framePayloadBytes(frames);
-			if (
-				pump.pending.length - pump.head + frames.length > H2_FRAME_QUEUE_LIMIT ||
-				pump.queuedBytes + incomingBytes > (__frameQueueBytes ?? H2_FRAME_QUEUE_BYTES)
-			) {
-				fail(
-					new Error(
-						`Cursor HTTP/2 frame queue exceeded ${H2_FRAME_QUEUE_LIMIT} frames or ${H2_FRAME_QUEUE_BYTES} queued bytes`,
-					),
-				);
+			const queueByteLimit = __frameQueueBytes ?? H2_FRAME_QUEUE_BYTES;
+			if (pump.queuedBytes + incomingBytes > queueByteLimit) {
+				fail(new Error(`Cursor HTTP/2 frame queue exceeded ${queueByteLimit} queued bytes`));
 				return;
 			}
 			pump.pending.push(...frames);

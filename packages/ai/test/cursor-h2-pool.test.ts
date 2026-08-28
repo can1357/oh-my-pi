@@ -75,12 +75,11 @@ async function stopServer(): Promise<void> {
 	sessions.clear();
 	const closing = servers.splice(0);
 	await Promise.all(
-		closing.map(
-			srv =>
-				new Promise<void>(resolve => {
-					srv.close(() => resolve());
-				}),
-		),
+		closing.map(srv => {
+			const closed = Promise.withResolvers<void>();
+			srv.close(() => closed.resolve());
+			return closed.promise;
+		}),
 	);
 }
 
@@ -173,6 +172,35 @@ describe("cursor HTTP/2 session pool", () => {
 		// The first-established session is the oldest idle entry and is the
 		// one evicted; Map iteration order breaks Date.now() ties the same way.
 		expect(snapshot.map(entry => entry.key)).not.toContain(`${urls[0]}|`);
+	});
+
+	it("never evicts the ninth session before its first lease when older entries are leased", async () => {
+		serveStream = respondOk;
+		// Hold eight leases, then publish a ninth origin. Before acquire returns,
+		// that new entry is the only zero-lease candidate; cap enforcement must
+		// protect it long enough to issue its first lease.
+		const urls: string[] = [];
+		for (let index = 0; index < 9; index++) urls.push(await startServer());
+		const leases = [];
+		for (const url of urls) {
+			const acquired = await acquireCursorH2(runArgs(url));
+			expect(acquired.ok).toBe(true);
+			if (!acquired.ok) return;
+			leases.push(acquired.lease);
+		}
+		const overCap = __cursorH2PoolSnapshot();
+		expect(overCap).toHaveLength(9);
+		expect(overCap.map(entry => entry.key)).toContain(`${urls[8]}|`);
+		expect(overCap.find(entry => entry.key === `${urls[8]}|`)?.outstanding).toBe(1);
+
+		// Once an older entry becomes idle it is eligible, so the deferred cap
+		// enforcement removes that older victim without touching the leased ninth.
+		leases[0]?.release();
+		const settled = __cursorH2PoolSnapshot();
+		expect(settled).toHaveLength(8);
+		expect(settled.map(entry => entry.key)).not.toContain(`${urls[0]}|`);
+		expect(settled.map(entry => entry.key)).toContain(`${urls[8]}|`);
+		for (const lease of leases.slice(1)) lease.release();
 	});
 
 	it("refs the idle session for a lease, unrefs at zero, and re-refs on the next acquire", async () => {
