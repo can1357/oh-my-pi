@@ -74,6 +74,7 @@ import {
 	normalizeSystemPrompts,
 	resolveCacheRetention,
 	resolveOpenAIResponsesRoutingIdentity,
+	resolveOpenAIResponsesRoutingOverrides,
 	resolveOpenAIResponsesWireRouting,
 	sanitizeOpenAIResponsesAssistantFallbackItemsForReplay,
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
@@ -260,10 +261,12 @@ export function getOpenAIResponsesRequestTarget(
 		routing?.openrouterVariant,
 		routing?.extraBody,
 	);
-	return getOpenAIResponsesReferenceTarget(model, wireModelId, resolveOpenAIRequestBaseUrl(model, apiKey), {
-		provider: routing?.extraBody?.provider,
-		providerOptions: routing?.extraBody?.providerOptions,
-	});
+	return getOpenAIResponsesReferenceTarget(
+		model,
+		wireModelId,
+		resolveOpenAIRequestBaseUrl(model, apiKey),
+		resolveOpenAIResponsesRoutingOverrides(routing?.extraBody),
+	);
 }
 
 /**

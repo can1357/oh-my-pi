@@ -182,6 +182,25 @@ function isExactOfficialOpenAIEndpoint(baseUrl: string | undefined): boolean {
 	}
 }
 
+const DEFAULT_GOOGLE_GENERATIVE_LANGUAGE_BASE = "https://generativelanguage.googleapis.com/v1beta";
+
+/**
+ * Whether a Files API path segment names a resource verbatim. `URL.pathname`
+ * keeps percent-encoding, so validating it directly would admit ids such as
+ * `a%2Fb` or `%00` that decode into a different resource path or a control
+ * character; require the decoded segment to round-trip to the same unreserved
+ * characters the Files API mints.
+ */
+function isOfficialGeminiFileIdSegment(segment: string): boolean {
+	let decoded: string;
+	try {
+		decoded = decodeURIComponent(segment);
+	} catch {
+		return false;
+	}
+	return decoded === segment && /^[A-Za-z0-9._~-]+$/.test(decoded);
+}
+
 /**
  * Whether `uri` is an official Gemini Files API resource reference. The Files
  * API is the only producer of Google image handles, and Google serialization
@@ -191,16 +210,19 @@ function isExactOfficialOpenAIEndpoint(baseUrl: string | undefined): boolean {
 export function isOfficialGeminiFilesUri(uri: string): boolean {
 	try {
 		const url = new URL(uri);
-		return (
-			url.protocol === "https:" &&
-			url.hostname.toLowerCase() === "generativelanguage.googleapis.com" &&
-			url.username.length === 0 &&
-			url.password.length === 0 &&
-			url.search.length === 0 &&
-			url.hash.length === 0 &&
-			url.port.length === 0 &&
-			/^\/v1(beta)?\/files\/[^/]+$/.test(url.pathname)
-		);
+		if (
+			url.protocol !== "https:" ||
+			url.hostname.toLowerCase() !== "generativelanguage.googleapis.com" ||
+			url.username.length > 0 ||
+			url.password.length > 0 ||
+			url.search.length > 0 ||
+			url.hash.length > 0 ||
+			url.port.length > 0
+		) {
+			return false;
+		}
+		const resource = /^\/(?:v1|v1beta)\/files\/([^/]+)$/.exec(url.pathname);
+		return resource !== null && isOfficialGeminiFileIdSegment(resource[1]);
 	} catch {
 		return false;
 	}
@@ -208,10 +230,13 @@ export function isOfficialGeminiFilesUri(uri: string): boolean {
 
 export function isOfficialGoogleProviderFileEndpoint(model: Model): boolean {
 	if (model.provider !== "google" || model.api !== "google-generative-ai") return false;
-	const value = model.baseUrl?.trim() ?? "";
-	if (value.length === 0) return false;
+	// Google dispatch resolves an unset base URL to the official `/v1beta` host,
+	// so resolve it the same way here or a bundled catalog model would reject its
+	// own Files handles.
+	const value = model.baseUrl?.trim() || DEFAULT_GOOGLE_GENERATIVE_LANGUAGE_BASE;
 	try {
 		const url = new URL(value);
+		const path = url.pathname.replace(/\/+$/, "");
 		return (
 			url.protocol === "https:" &&
 			url.hostname.toLowerCase() === "generativelanguage.googleapis.com" &&
@@ -220,7 +245,7 @@ export function isOfficialGoogleProviderFileEndpoint(model: Model): boolean {
 			url.search.length === 0 &&
 			url.hash.length === 0 &&
 			url.port.length === 0 &&
-			url.pathname.replace(/\/+$/, "") === "/v1beta"
+			(path === "/v1" || path === "/v1beta")
 		);
 	} catch {
 		return false;

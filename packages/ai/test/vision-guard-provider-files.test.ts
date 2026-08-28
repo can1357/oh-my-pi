@@ -360,18 +360,57 @@ describe("OpenAI provider-file capability", () => {
 			"https://generativelanguage.googleapis.com/v2/files/vision",
 			"http://generativelanguage.googleapis.com/v1beta/files/vision",
 			"https://generativelanguage.googleapis.com.evil.invalid/v1beta/files/vision",
+			// Percent-encoded segments decode into another resource path or a
+			// control character, so the still-encoded pathname must not qualify.
+			"https://generativelanguage.googleapis.com/v1beta/files/a%2Fb",
+			"https://generativelanguage.googleapis.com/v1beta/files/%00",
+			"https://generativelanguage.googleapis.com/v1beta/files/%2e%2e",
 			"not-a-url",
 			"",
 		]) {
 			expect(supportsProviderFileReference(model, { provider: "google", uri }, image)).toBe(false);
 		}
+		for (const uri of [
+			"https://generativelanguage.googleapis.com/v1beta/files/vision",
+			"https://generativelanguage.googleapis.com/v1/files/vision",
+		]) {
+			expect(supportsProviderFileReference(model, { provider: "google", uri }, image)).toBe(true);
+		}
+	});
+
+	it("resolves an unset Google base URL to the official Files endpoint", () => {
+		const image = { mimeType: "image/png" };
+		const reference = { provider: "google", uri: "https://generativelanguage.googleapis.com/v1beta/files/vision" };
+		const spec = {
+			id: "vision-model",
+			name: "Vision Model",
+			api: "google-generative-ai",
+			provider: "google",
+			baseUrl: "",
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"google-generative-ai">;
+
+		// Dispatch resolves an unset base URL to the official `/v1beta` host, and
+		// the official `/v1` base serves the same Files resources.
+		expect(supportsProviderFileReference(buildModel(spec), reference, image)).toBe(true);
 		expect(
 			supportsProviderFileReference(
-				model,
-				{ provider: "google", uri: "https://generativelanguage.googleapis.com/v1beta/files/vision" },
+				buildModel({ ...spec, baseUrl: "https://generativelanguage.googleapis.com/v1" }),
+				reference,
 				image,
 			),
 		).toBe(true);
+		expect(
+			supportsProviderFileReference(
+				buildModel({ ...spec, baseUrl: "https://proxy.invalid/v1beta" }),
+				reference,
+				image,
+			),
+		).toBe(false);
 	});
 
 	it("accepts parameterized MIME types for replayable Google references", () => {

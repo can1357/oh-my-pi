@@ -674,6 +674,65 @@ describe("OpenAI responses history payload", () => {
 		expect(containsAssistantOutputText(rerouted.input, "stamped answer")).toBe(true);
 	});
 
+	it("drops configured routing from the target when an extraBody key removes it", async () => {
+		const routedSpec = {
+			id: "openai/gpt-5-stamped",
+			name: "GPT-5.5 Stamped",
+			api: "openai-responses",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_768,
+			maxTokens: 4_096,
+		} satisfies ModelSpec<"openai-responses">;
+		const model = buildModel({ ...routedSpec, compat: { openRouterRouting: { only: ["anthropic"] } } });
+		const unrouted = buildModel(routedSpec);
+
+		const stream = streamOpenAIResponses(
+			model,
+			{ messages: [{ role: "user", content: "ping", timestamp: 0 }] },
+			{
+				apiKey: "test-key",
+				extraBody: { provider: undefined },
+				fetch: async () => createStampedSseResponse(),
+			},
+		);
+		let message: Awaited<ReturnType<typeof stream.result>> | undefined;
+		for await (const event of stream) {
+			if (event.type === "done") message = event.message;
+			if (event.type === "error") throw event.error;
+		}
+		if (!message) throw new Error("expected a completed assistant message");
+
+		// The override removed `provider` from the serialized body, so the request
+		// reached the gateway's default upstream, not the pinned one.
+		expect(message.providerPayload).toMatchObject({
+			referenceTarget: getOpenAIResponsesReferenceTarget(unrouted),
+		});
+		expect(message.providerPayload).not.toMatchObject({
+			referenceTarget: getOpenAIResponsesReferenceTarget(model),
+		});
+
+		const followUp: Context = { messages: [message, { role: "user", content: "continue", timestamp: 1 }] };
+		const sameRoute = (await captureResponsesPayload(model, followUp, undefined, {
+			extraBody: { provider: undefined },
+		})) as { input?: unknown[]; provider?: unknown };
+		expect(JSON.parse(JSON.stringify(sameRoute))).not.toHaveProperty("provider");
+		expect(containsEncryptedReasoning(sameRoute.input)).toBe(true);
+
+		// Restoring the configured route changes the upstream, so default-upstream
+		// history must not follow it.
+		const pinnedRoute = (await captureResponsesPayload(model, followUp)) as {
+			input?: unknown[];
+			provider?: unknown;
+		};
+		expect(pinnedRoute.provider).toEqual({ only: ["anthropic"] });
+		expect(containsEncryptedReasoning(pinnedRoute.input)).toBe(false);
+		expect(containsAssistantOutputText(pinnedRoute.input, "stamped answer")).toBe(true);
+	});
+
 	it("fingerprints Vercel gateway routing in the shape that reaches the wire", async () => {
 		const model = buildVercelGatewayResponsesModel({ only: ["bedrock"] });
 		const stream = streamOpenAIResponses(

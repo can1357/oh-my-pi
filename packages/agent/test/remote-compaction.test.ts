@@ -9,6 +9,7 @@ import {
 	NativeCompactionError,
 	prepareCompaction,
 	type SessionEntry,
+	StrandedCompactionHistoryError,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	buildCompactionV2Request,
@@ -2718,6 +2719,72 @@ describe("compact() remote compaction failure handling", () => {
 		expect(remoteRequests).toBe(0);
 		expect(getCompactionV2PreserveData(result.preserveData)).toBeUndefined();
 		expect(getPreservedOpenAiRemoteCompactionData(result.preserveData)).toBeUndefined();
+		expect(result.summary).toContain("local summary");
+	});
+
+	test("fails closed instead of summarizing away a boundary the producer can no longer extend", async () => {
+		const localSummary = vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
+		const model = makeOpenAiModel({ id: "gpt-5.4", remoteCompaction: { enabled: true } });
+		let remoteRequests = 0;
+		const fetchMock: FetchImpl = async () => {
+			remoteRequests++;
+			return Response.json({ output: [{ type: "compaction", encrypted_content: "enc_producer_bound" }] });
+		};
+
+		// A first compaction hides its originals behind opaque provider-native
+		// state; only that payload carries them forward.
+		const first = await compact(makePreparation(), model, "test-key", undefined, undefined, {
+			fetch: fetchMock,
+			runtimeModel: model,
+		});
+		const preserved = getPreservedOpenAiRemoteCompactionData(first.preserveData);
+		if (!preserved) throw new Error("expected preserved remote compaction data");
+		expect(remoteRequests).toBe(1);
+
+		const followUp = makePreparation();
+		followUp.previousSummary = first.summary;
+		followUp.previousPreserveData = first.preserveData;
+		// The prepared boundary only covers the recent tail because the originals
+		// live inside the preserved payload above.
+		followUp.messagesToSummarize = [{ role: "user", content: "tail only", timestamp: 3 }];
+
+		// The credential now resolves the runtime request to another endpoint, so
+		// the producer can neither extend nor re-mint readable state.
+		const movedRuntimeTarget = getOpenAIResponsesReferenceTarget(
+			makeOpenAiModel({ id: "gpt-5.4", baseUrl: "https://resolved.example.invalid/v1" }),
+		);
+		localSummary.mockClear();
+
+		await expect(
+			compact(followUp, model, "test-key", undefined, undefined, {
+				fetch: fetchMock,
+				runtimeModel: model,
+				activeRequestTarget: movedRuntimeTarget,
+			}),
+		).rejects.toBeInstanceOf(StrandedCompactionHistoryError);
+
+		expect(remoteRequests).toBe(1);
+		expect(localSummary).not.toHaveBeenCalled();
+	});
+
+	test("still summarizes locally when no preserved native history hides originals", async () => {
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
+		const model = makeOpenAiModel({ id: "gpt-5.4", remoteCompaction: { enabled: true } });
+		const movedRuntimeTarget = getOpenAIResponsesReferenceTarget(
+			makeOpenAiModel({ id: "gpt-5.4", baseUrl: "https://resolved.example.invalid/v1" }),
+		);
+		let remoteRequests = 0;
+
+		const result = await compact(makePreparation(), model, "test-key", undefined, undefined, {
+			fetch: async () => {
+				remoteRequests++;
+				return Response.json({ output: [{ type: "compaction", encrypted_content: "enc" }] });
+			},
+			runtimeModel: model,
+			activeRequestTarget: movedRuntimeTarget,
+		});
+
+		expect(remoteRequests).toBe(0);
 		expect(result.summary).toContain("local summary");
 	});
 

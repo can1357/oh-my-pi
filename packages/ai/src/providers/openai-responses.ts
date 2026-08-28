@@ -22,8 +22,8 @@ import {
 	createOpenAIResponsesHistoryPayload,
 	getOpenAIResponsesReferenceTarget,
 	normalizeSystemPrompts,
-	type OpenAIResponsesRoutingOverrides,
 	resolveCacheRetention,
+	resolveOpenAIResponsesRoutingOverrides,
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
 } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
@@ -477,10 +477,7 @@ const streamOpenAIResponsesOnce = (
 				options?.openrouterVariant,
 				options?.extraBody,
 			);
-			const routingOverrides: OpenAIResponsesRoutingOverrides = {
-				provider: options?.extraBody?.provider,
-				providerOptions: options?.extraBody?.providerOptions,
-			};
+			const routingOverrides = resolveOpenAIResponsesRoutingOverrides(options?.extraBody);
 			const referenceTarget = getOpenAIResponsesReferenceTarget(
 				model,
 				wireModelId,

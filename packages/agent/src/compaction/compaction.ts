@@ -54,7 +54,7 @@ import {
 	V2_RETAINED_MESSAGE_TOKEN_BUDGET,
 } from "./compaction-v2-streaming";
 import type { CompactionEntry, SessionEntry } from "./entries";
-import { NativeCompactionError } from "./errors";
+import { NativeCompactionError, StrandedCompactionHistoryError } from "./errors";
 import { type ConvertToLlm, createBranchSummaryMessage, createCustomMessage, defaultConvertToLlm } from "./messages";
 import {
 	buildOpenAiNativeHistory,
@@ -1712,6 +1712,13 @@ export async function compact(
 		? createSnapcompactArchiveMigrationMessage(previousSnapcompactArchiveText)
 		: undefined;
 
+	// The boundary the preparation chose can sit behind a provider-native
+	// compaction whose originals live only inside that opaque payload, which this
+	// reset drops. Whenever it does, the messages this call can still summarize
+	// are the recent tail alone.
+	const preservedNativeHistoryHidesOriginals =
+		getCompactionV2PreserveData(previousPreserveData) !== undefined ||
+		getPreservedOpenAiRemoteCompactionData(previousPreserveData) !== undefined;
 	let preserveData = withOpenAiRemoteCompactionPreserveData(previousPreserveData, undefined);
 	const remoteMessages: AgentMessage[] = [
 		...(snapcompactArchiveMigrationMessage ? [snapcompactArchiveMigrationMessage] : []),
@@ -1721,6 +1728,7 @@ export async function compact(
 	];
 	let usedRemoteCompaction = false;
 	let nativeCompactionError: unknown;
+	let unreplayableProducerTarget = false;
 	// Compaction may run on a side model or a compact-model override. Its native
 	// result is opaque, endpoint- and model-owned state that only the producing
 	// request target can read back, so a producer whose fingerprint differs from
@@ -1729,8 +1737,11 @@ export async function compact(
 	// billed and reduce nothing. Those producers fall through to portable local
 	// summarization instead, which every target can read.
 	const runtimeReplayModel = summaryOptions.runtimeModel ?? model;
-	const producesRuntimeOwnedHistory = (streamingV2: boolean) =>
-		producesRuntimeReplayableCompactionHistory(model, runtimeReplayModel, streamingV2);
+	const producesRuntimeOwnedHistory = (streamingV2: boolean) => {
+		if (producesRuntimeReplayableCompactionHistory(model, runtimeReplayModel, streamingV2)) return true;
+		unreplayableProducerTarget = true;
+		return false;
+	};
 	const resolveRuntimeRequestTarget = (key: string) =>
 		summaryOptions.activeRequestTarget ??
 		getOpenAIResponsesRequestTarget(runtimeReplayModel, key, {
@@ -1829,6 +1840,7 @@ export async function compact(
 				// summarization" and keep compaction running on an aborted signal.
 				if (signal?.aborted) throw err;
 				if (err instanceof UnreplayableCompactionProducerError) {
+					unreplayableProducerTarget = true;
 					logger.info("Skipped OpenAI V2 remote compaction: producer target is not runtime-replayable", {
 						model: model.id,
 						provider: model.provider,
@@ -1895,6 +1907,7 @@ export async function compact(
 				// summarization" and keep compaction running on an aborted signal.
 				if (signal?.aborted) throw err;
 				if (err instanceof UnreplayableCompactionProducerError) {
+					unreplayableProducerTarget = true;
 					logger.info("Skipped OpenAI remote compaction: producer target is not runtime-replayable", {
 						model: model.id,
 						provider: model.provider,
@@ -1913,6 +1926,10 @@ export async function compact(
 
 	if (!usedRemoteCompaction && nativeCompactionError !== undefined && !summaryOptions.remoteEndpoint) {
 		throw new NativeCompactionError(nativeCompactionError);
+	}
+
+	if (!usedRemoteCompaction && unreplayableProducerTarget && preservedNativeHistoryHidesOriginals) {
+		throw new StrandedCompactionHistoryError();
 	}
 
 	// Generate summaries (can be parallel if both needed) and merge into one

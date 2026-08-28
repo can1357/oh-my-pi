@@ -567,6 +567,27 @@ export interface OpenAIResponsesRoutingOverrides {
 	providerOptions?: unknown;
 }
 
+const OPENAI_RESPONSES_ROUTING_FIELDS = ["provider", "providerOptions"] as const;
+
+/**
+ * Routing selectors an `extraBody` supplies, carried by key presence rather than
+ * by value. The serializer merges `extraBody` with `Object.assign`, so an
+ * explicitly `undefined` key overwrites the configured selector and
+ * `JSON.stringify` then drops the field entirely — the request reaches the
+ * gateway's default upstream. The identity hash has to drop it too, or the
+ * response is stamped for the configured upstream that never served it.
+ */
+export function resolveOpenAIResponsesRoutingOverrides(
+	extraBody: Record<string, unknown> | undefined,
+): OpenAIResponsesRoutingOverrides {
+	const overrides: OpenAIResponsesRoutingOverrides = {};
+	if (!extraBody) return overrides;
+	for (const field of OPENAI_RESPONSES_ROUTING_FIELDS) {
+		if (Object.hasOwn(extraBody, field)) overrides[field] = extraBody[field];
+	}
+	return overrides;
+}
+
 interface OpenAIResponsesGatewayRoutingShape {
 	only?: unknown;
 	order?: unknown;
@@ -612,8 +633,14 @@ export function getOpenAIResponsesReferenceTarget(
 	const routing: Record<string, unknown> = {};
 	if (configuredRouting.provider !== undefined) routing.provider = configuredRouting.provider;
 	if (configuredRouting.providerOptions !== undefined) routing.providerOptions = configuredRouting.providerOptions;
-	if (routingOverrides?.provider !== undefined) routing.provider = routingOverrides.provider;
-	if (routingOverrides?.providerOptions !== undefined) routing.providerOptions = routingOverrides.providerOptions;
+	if (routingOverrides) {
+		for (const field of OPENAI_RESPONSES_ROUTING_FIELDS) {
+			if (!Object.hasOwn(routingOverrides, field)) continue;
+			const override = routingOverrides[field];
+			if (override === undefined) delete routing[field];
+			else routing[field] = override;
+		}
+	}
 	const identity = JSON.stringify({
 		api: model.api,
 		provider: model.provider,
