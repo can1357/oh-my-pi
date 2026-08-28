@@ -312,9 +312,20 @@ export function resolveXdevTool(state: XdevState, name: string): Tool | undefine
 	return state.tools.get(name);
 }
 
-/** Resolve a mounted tool for top-level fallback execution. */
+/**
+ * A tool call named after a device path. The compact profile refers to mounted
+ * tools as `xd://grep`, and a local model then calls `xd://grep` as if it were
+ * a tool name (five "Tool not found" results in one benchmark run). The device
+ * is the intended target, so the prefix is accepted here.
+ */
+function stripXdevPrefix(name: string): string {
+	return name.startsWith(XD_URL_PREFIX) ? (name.slice(XD_URL_PREFIX.length).split("/")[0] ?? "") : name;
+}
+
+/** Resolve a mounted tool for top-level fallback execution; accepts `xd://<tool>` as the name. */
 export function resolveMountedXdevTool(state: XdevState, name: string): Tool | undefined {
-	return state.mountedNames.has(name) ? state.tools.get(name) : undefined;
+	const canonical = stripXdevPrefix(name);
+	return state.mountedNames.has(canonical) ? state.tools.get(canonical) : undefined;
 }
 
 /** Resolve a mounted tool with its execution-only permission decorator. */
