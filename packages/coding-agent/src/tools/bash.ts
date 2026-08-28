@@ -1391,6 +1391,9 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 
 		// Allocate artifact for truncated output storage
 		const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
+		// The eval kernel consumes this capture programmatically, so the sink's
+		// model-facing spill budget and per-line column cap must not shred it.
+		const unboundedOutput = ctx?.programmaticCaller === true;
 
 		const interactiveUi = canUseInteractiveBashPty(pty, ctx) ? ctx?.ui : undefined;
 		if (pty && !interactiveUi) {
@@ -1409,6 +1412,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					env: backendPreflight?.env ?? resolvedEnv,
 					artifactPath,
 					artifactId,
+					unboundedOutput,
 				})
 			: // executeBash runs its OWN direnv preflight internally — pass the RAW
 				// command + resolvedEnv here so the unset prefix / env merge is not
@@ -1421,6 +1425,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					env: resolvedEnv,
 					artifactPath,
 					artifactId,
+					unboundedOutput,
 					onChunk: streamTailUpdates(tailBuffer, onUpdate),
 					onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 				});
