@@ -253,6 +253,8 @@ Rejected, with measurements, so nobody re-litigates them: **sccache** (cannot ca
 
 ## Testing Guidance
 
+In a fresh clone/worktree, `bun test` in `packages/coding-agent` fails every test with a `pi_natives` native-addon load error until the addon is built: `bun --cwd=packages/natives run build` (see `packages/natives/README.md`). On macOS that build needs `cmake` and `ninja` on `PATH` (for the bundled Opus/audio bindings) in addition to Rust — `brew install cmake ninja` if missing.
+
 Test the contract the system exposes — not the easiest internal detail to assert.
 
 - Every new test must defend one **concrete, externally observable contract**: behavior, output shape, state transition, error mapping, or a regression-prone parsing boundary. If you cannot name the contract, do not add the test.
