@@ -513,6 +513,47 @@ describe("cursor HTTP/2 session pool", () => {
 		expect(result.poolEmptyAfterDispose).toBe(true);
 		expect(result.poolEmptyAfterAcquirer).toBe(true);
 	}, 60_000);
+	it("destroys the tunneled socket when http2.connect throws synchronously after a proxy tunnel succeeds", async () => {
+		// The failure class: the proxy CONNECT + TLS tunnel completes and
+		// negotiates h2, but `http2.connect(baseUrl, { createConnection })`
+		// throws synchronously (e.g. an unsupported URL scheme). At that point
+		// `session` is still undefined — the top-level rejection arm's
+		// `session?.destroy()` is a no-op — and the tunneled TLSSocket is local
+		// to the establishment body with no owner. Pre-fix it leaked: the socket
+		// stayed open, the acquisition rejected, but the proxy socket was never
+		// destroyed. The proxy env vars are process-global, so the scenario runs
+		// in a child process (pattern: cursor-proxy-env.ts).
+		const child = Bun.spawn(
+			[process.execPath, path.join(import.meta.dir, "fixtures/cursor-h2-proxy-sync-throw.ts")],
+			{
+				cwd: path.resolve(import.meta.dir, "../../.."),
+				env: { ...process.env, NODE_NO_WARNINGS: "1" },
+				stdout: "pipe",
+				stderr: "pipe",
+			},
+		);
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		expect(exitCode).toBe(0);
+		expect(stderr).toBe("");
+		const result = JSON.parse(stdout) as {
+			acquisitionRejected: boolean;
+			socketDestroyed: boolean;
+			poolEmptyAfterAcquire: boolean;
+			connectingEmptyAfterAcquire: boolean;
+		};
+		// The acquisition must reject (not hang or resolve with a lease).
+		expect(result.acquisitionRejected).toBe(true);
+		// The tunneled socket must be destroyed — no proxy socket survives the
+		// synchronous setup failure.
+		expect(result.socketDestroyed).toBe(true);
+		// No pool entry or connecting reservation survives.
+		expect(result.poolEmptyAfterAcquire).toBe(true);
+		expect(result.connectingEmptyAfterAcquire).toBe(true);
+	}, 60_000);
 
 	it("dispose does not resolve until the establishment body's done-teardown has fully run", async () => {
 		// Frames the exact audit race: `cancel` rejects the outward acquisition

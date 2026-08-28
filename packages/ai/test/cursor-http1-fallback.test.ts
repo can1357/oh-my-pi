@@ -49,6 +49,14 @@ const heldAppendResponses: http.ServerResponse[] = [];
 function releaseAllHeldAppends(): void {
 	for (const res of heldAppendResponses.splice(0)) res.end();
 }
+// Finding gate: when armed, append responses flush their 2xx headers
+// immediately but the body never completes, so only an explicit client
+// cancel (or completion) settles them server-side. Each such close is
+// recorded with the response's writableFinished flag, distinguishing a
+// teardown mid-response from a graceful finish.
+let appendOpenBody = false;
+const appendResponsesClosed: Array<{ writableFinished: boolean }> = [];
+let liveAppendResponses = 0;
 let holdPollResponse = false;
 let pendingPoll: (() => void) | undefined;
 function releasePoll(): void {
@@ -119,6 +127,16 @@ async function startServer(): Promise<string> {
 			res.statusCode = appendStatus;
 			if (holdAppendResponses) {
 				heldAppendResponses.push(res);
+				return;
+			}
+			if (appendOpenBody) {
+				liveAppendResponses++;
+				res.writeHead(res.statusCode, { "content-type": "application/proto" });
+				res.flushHeaders();
+				res.on("close", () => {
+					liveAppendResponses--;
+					appendResponsesClosed.push({ writableFinished: res.writableFinished });
+				});
 				return;
 			}
 			res.end();
@@ -276,6 +294,9 @@ async function stopServer(): Promise<void> {
 	server = undefined;
 	const closed = Promise.withResolvers<void>();
 	closing.close(error => (error ? closed.reject(error) : closed.resolve()));
+	// Destroy any socket still holding a response open (an armed open-append-
+	// body gate in a failing test, say) so server.close() cannot wedge.
+	closing.closeAllConnections();
 	await closed.promise;
 }
 
@@ -288,6 +309,9 @@ afterEach(async () => {
 	holdAppendResponses = false;
 	holdPollResponse = false;
 	plan = { kind: "success" };
+	appendOpenBody = false;
+	appendResponsesClosed.length = 0;
+	liveAppendResponses = 0;
 	await settleStragglerPollTasks();
 	await stopServer();
 	__setCursorHttp1AppendTimeoutMs(undefined);
@@ -902,6 +926,51 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 			surfaced = cause;
 		}
 		expect(surfaced).toBeInstanceOf(Error);
+	});
+
+	it("cancels a 2xx append response whose body stays open before the append settles", async () => {
+		// A successful BidiAppend must not settle on 2xx headers alone: every
+		// server message arrives on the poll stream, so the append body carries
+		// nothing the bridge consumes, and it must be cancelled before this
+		// chain link resolves and the next append may advance — while the
+		// per-append deadline still owns the operation. The fixture flushes
+		// headers and then holds each body open forever, so only an explicit
+		// cancellation can settle a response server-side; a leaked response
+		// would leave a live socket behind for every append.
+		plan = { kind: "success" };
+		appendOpenBody = true;
+		holdPollResponse = true;
+		await settleStragglerPollTasks();
+		expect(pendingCursorHttp1BridgePolls()).toBe(0);
+		const baseUrl = await startServer();
+		const bridge = openCursorHttp1Bridge({
+			baseUrl,
+			requestPath: RUN_PATH,
+			runHeaders: testRunHeaders(),
+			gzipRequest: false,
+		});
+		bridge.write(encodeConnectFrame(Buffer.from("frameA"), false));
+		bridge.write(encodeConnectFrame(Buffer.from("frameB"), false));
+		while (appendHits < 2) await nextTick();
+		// Both open-body responses must be torn down, not left live.
+		for (let i = 0; i < 200 && appendResponsesClosed.length < 2; i++) await nextTick();
+		expect(appendResponsesClosed).toHaveLength(2);
+		// Mid-response teardown (writableFinished false), never a graceful
+		// finish: the fixture's bodies have no end.
+		for (const closed of appendResponsesClosed) expect(closed.writableFinished).toBe(false);
+		expect(liveAppendResponses).toBe(0);
+		// With both bodies cancelled the poll may run and the turn completes
+		// cleanly — later append work did not leak another live response.
+		while (pollHits < 1) await nextTick();
+		releasePoll();
+		const frames = [];
+		for await (const frame of bridge.frames()) frames.push(frame);
+		expect(frames.at(-1)?.kind).toBe("end");
+		await expect(bridge.trailers()).resolves.toEqual({});
+		expect(appendHits).toBe(2);
+		expect(appendResponsesClosed).toHaveLength(2);
+		expect(liveAppendResponses).toBe(0);
+		bridge.close();
 	});
 });
 

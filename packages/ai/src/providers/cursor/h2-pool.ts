@@ -315,6 +315,16 @@ function establishSession(options: CursorH2AcquireOptions, key: string): CursorE
 	const { promise, resolve, reject } = Promise.withResolvers<CursorH2Readiness>();
 	let done = false;
 	let session: http2.ClientHttp2Session | undefined;
+	/**
+	 * The tunneled `TLSSocket` handed to `http2.connect` as its
+	 * `createConnection`. It is retained at establishment scope — not just
+	 * inside `runBody` — so the top-level rejection arm can destroy it when
+	 * `http2.connect` throws synchronously before `session` is assigned. On
+	 * the normal path ownership transfers to the HTTP/2 session (which owns
+	 * the underlying socket); this is only the fallback owner for the
+	 * synchronous-setup-failure exit.
+	 */
+	let tunneledSocket: TLSSocket | undefined;
 
 	const finish = (readiness: CursorH2Readiness): void => {
 		if (done) return;
@@ -404,6 +414,10 @@ function establishSession(options: CursorH2AcquireOptions, key: string): CursorE
 				return;
 			}
 			createConnection = () => socket;
+			// Retain at establishment scope so the top-level rejection arm can
+			// destroy it if `http2.connect` throws synchronously before `session`
+			// is assigned and takes ownership.
+			tunneledSocket = socket;
 		}
 
 		const gen = generation;
@@ -419,6 +433,12 @@ function establishSession(options: CursorH2AcquireOptions, key: string): CursorE
 		}
 		const connect = http2.connect(options.baseUrl, createConnection ? { createConnection } : undefined);
 		session = connect;
+		// Ownership of the tunneled socket transfers to the HTTP/2 session
+		// here. Clear the establishment-scope fallback so the rejection arm
+		// does not double-destroy a socket the session now owns;
+		// `destroy()` is idempotent but this keeps the ownership rule
+		// explicit.
+		tunneledSocket = undefined;
 		// Bind cancel to the raw TCP/TLS socket as well as the http2 session.
 		// During Bun TLS/preface, `session.destroy()` may not emit error/connect
 		// and may not close the accepted peer socket.
@@ -618,12 +638,18 @@ function establishSession(options: CursorH2AcquireOptions, key: string): CursorE
 		finish({ ok: true });
 	};
 	// runBody settles its result on every internal exit path, but a top-level
-	// throw — e.g. `http2.connect` throwing synchronously — is not caught inside
-	// the body. The rejection arm MUST also reject the outward readiness result:
-	// otherwise the error is swallowed, the acquisition stays pending forever,
-	// and the `connecting` reservation remains installed for the key, hanging
-	// every subsequent acquisition for it. `settled` always resolves on both
-	// arms so no teardown await can surface an unhandled rejection.
+	// throw — e.g. `http2.connect` throwing synchronously — is not caught
+	// inside the body. The rejection arm MUST also reject the outward
+	// readiness result: otherwise the error is swallowed, the acquisition
+	// stays pending forever, and the `connecting` reservation remains
+	// installed for the key, hanging every subsequent acquisition for it.
+	// When the throw is from `http2.connect` itself, `session` is still
+	// undefined and the tunneled `TLSSocket` (retained at establishment
+	// scope) has no owner — destroy it here so no proxy socket survives a
+	// synchronous setup failure. On every other throw `tunneledSocket` is
+	// already undefined (ownership transferred to the session) so this is a
+	// no-op. `settled` always resolves on both arms so no teardown await can
+	// surface an unhandled rejection.
 	void runBody().then(
 		() => settled.resolve(),
 		(error: unknown) => {
@@ -631,6 +657,13 @@ function establishSession(options: CursorH2AcquireOptions, key: string): CursorE
 				session?.destroy();
 			} catch {
 				/* already closed */
+			}
+			if (tunneledSocket) {
+				try {
+					tunneledSocket.destroy();
+				} catch {
+					/* already closed */
+				}
 			}
 			fail(error);
 			settled.resolve();

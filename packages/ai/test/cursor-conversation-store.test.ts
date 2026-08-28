@@ -334,6 +334,46 @@ describe("cursor conversation store — rotation", () => {
 		for (const rotated of rotatedPins) unpinCursorConversation(rotated);
 	});
 
+	it("keeps a successful rotation mapping through the rotated id's overflow unpin after success cleared freshness", () => {
+		// 64 older retained bases whose rotated ids are pinned: every older
+		// candidate is pin-protected, so the overflow scan must walk past all
+		// of them and reach the tail.
+		const olderRotations: string[] = [];
+		for (let i = 0; i < CURSOR_RETAINED_CONVERSATION_LIMIT; i++) {
+			const base = `prot-${i}`;
+			pinCursorConversation(base);
+			const older = requireRotation(rotateCursorConversation(base));
+			pinCursorConversation(older);
+			unpinCursorConversation(base);
+			olderRotations.push(older);
+		}
+		// The turn under test: pin the rotated retry id and complete the turn —
+		// success clears the mapping's freshness — then unpin the rotated id
+		// into the overflowing retained set.
+		pinCursorConversation("retry-base");
+		const rotated = requireRotation(rotateCursorConversation("retry-base"));
+		unpinCursorConversation("retry-base");
+		const entry = pinCursorConversation(rotated);
+		entry.blobs.set("turn", new Uint8Array([7]));
+		markCursorRotationSucceeded(rotated);
+		unpinCursorConversation(rotated);
+
+		// The unpin's overflow scan must not select "retry-base" (it resolves
+		// to the just-unpinned id) nor the rotated id itself: pre-fix the base
+		// was evicted, deleting the successful base→rotated mapping together
+		// with its success mark.
+		expect(resolveCursorConversationId("retry-base")).toBe(rotated);
+		expect(isCursorRotationMarked(rotated)).toBe(true);
+		expect(isCursorRotationFresh(rotated)).toBe(false);
+		// The mapping is usable: the resolved id still returns this turn's
+		// entry with its cached blobs, not a recreated empty one.
+		const reused = pinCursorConversation(resolveCursorConversationId("retry-base"));
+		expect(reused).toBe(entry);
+		expect(reused.blobs.get("turn")).toEqual(new Uint8Array([7]));
+		unpinCursorConversation(rotated);
+		for (const older of olderRotations) unpinCursorConversation(older);
+	});
+
 	it("recent rotated use keeps the base mapping owned when later admissions overflow the retained LRU", () => {
 		// Regression: a turn after rotation pins and refreshes only the rotated
 		// id, so the base's retained slot used to age at its pre-rotation

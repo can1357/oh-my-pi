@@ -33,7 +33,8 @@ type Scenario =
 	| { kind: "route-required" }
 	| { kind: "gated"; released: Promise<void> }
 	| { kind: "raw-unary" }
-	| { kind: "double-data" };
+	| { kind: "double-data" }
+	| { kind: "trailer-failure" };
 
 let server: http2.Http2Server | undefined;
 const sessions = new Set<http2.Http2Session>();
@@ -145,6 +146,17 @@ async function startServer(): Promise<string> {
 					endFrame(),
 				]),
 			);
+			stream.end();
+			return;
+		}
+		if (scenario.kind === "trailer-failure") {
+			// A valid force-disable directive body, but the terminal grpc-status
+			// trailer reports failure: the body must never become authoritative.
+			stream.respond({ ":status": 200, "content-type": "application/proto" }, { waitForTrailers: true });
+			stream.once("wantTrailers", () => {
+				stream.sendTrailers({ "grpc-status": "8", "grpc-message": "resource_exhausted" });
+			});
+			stream.write(Buffer.concat([responseFrame({ http2Config: Http2Config.FORCE_BIDI_DISABLED }), endFrame()]));
 			stream.end();
 			return;
 		}
@@ -298,6 +310,23 @@ describe("fetchCursorBidiAvailability", () => {
 		// must serve the first answer.
 		scenario = { kind: "all-disabled" };
 		expect(await fetchFor(baseUrl)).toBe("bidi-disabled");
+		expect(invocations).toBe(1);
+	});
+
+	it("fails open to unspecified when the terminal grpc-status trailer reports failure", async () => {
+		// Trailers are the END_STREAM HEADERS frame: the client reads the valid
+		// force-disable body first and only then the failed terminal status. The
+		// reader must consult the trailers before trusting the body — only a
+		// successful RPC status can authorize a downgrade directive.
+		scenario = { kind: "trailer-failure" };
+		const baseUrl = await startServer();
+		expect(await fetchFor(baseUrl)).toBe("unspecified");
+		// The failed RPC's directive body was never published as authority: the
+		// cached answer is fail-open `unspecified`, so the re-fetch within the
+		// TTL serves the cache (one wire request) and would disagree with the
+		// freshly served scenario.
+		scenario = { kind: "all-disabled" };
+		expect(await fetchFor(baseUrl)).toBe("unspecified");
 		expect(invocations).toBe(1);
 	});
 

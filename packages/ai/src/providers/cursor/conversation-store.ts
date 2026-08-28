@@ -72,9 +72,9 @@ export function pinCursorConversation(id: string): CursorConversationEntry {
  * LRU: its base→rotated mapping and rotation count, its current rotated id
  * from the success/fresh sets, and the base id itself from those sets. Only
  * called for a base genuinely evicted from `retainedLru`. Entries whose
- * resolved (rotated) id is still active or fresh are skipped by the overflow
- * loop so an in-flight or not-yet-retried rotated request cannot lose its
- * mapping.
+ * resolved (rotated) id is still active, fresh, or is the id currently being
+ * unpinned are skipped by the overflow loop so an in-flight, not-yet-retried,
+ * or just-completed rotated request cannot lose its mapping.
  */
 function evictCursorRotationState(baseId: string): void {
 	const rotated = rotatedConversationIds.get(baseId);
@@ -91,6 +91,8 @@ function evictCursorRotationState(baseId: string): void {
 /**
  * Releases one pin. On the final unpin the entry moves to the retained LRU,
  * which evicts oldest-first beyond `CURSOR_RETAINED_CONVERSATION_LIMIT`.
+ * Candidates of the turn that just finished — the unpinned id and any base
+ * resolving to it — are never victims of that unpin's overflow eviction.
  * Unknown ids are a no-op (reset-first discipline: this is an exit-path gate
  * and must run on every path without itself failing).
  */
@@ -118,6 +120,14 @@ export function unpinCursorConversation(id: string): void {
 			// must stay side-effect-free — resolving here would re-admit its own
 			// candidate at the LRU tail mid-iteration.
 			const resolved = rotatedConversationIds.get(candidate) ?? candidate;
+			// Candidates of the turn that just finished are never victims of
+			// their own unpin: the id itself (the LRU tail) and any base whose
+			// resolved wire id is that id — the owner of the base→rotated
+			// mapping this turn resolved through. A completed turn has usually
+			// cleared the mapping's freshness by unpin time, so the fresh check
+			// below no longer sees it; the resolved-id comparison is what keeps
+			// the mapping reachable.
+			if (candidate === id || resolved === id) continue;
 			if ((activePinCounts.get(resolved) ?? 0) > 0) continue;
 			if (freshRotatedConversationIds.has(resolved)) {
 				freshVictim ??= candidate;
@@ -126,11 +136,10 @@ export function unpinCursorConversation(id: string): void {
 			victim = candidate;
 			break;
 		}
-		// The just-unpinned id sits at the LRU tail. If every older candidate is
-		// protected, `freshVictim` is that new mapping — evicting it would drop
-		// the retry id we just created. Leave a one-slot overflow until an older
-		// fresh or unprotected entry exists.
-		victim ??= freshVictim === id ? undefined : freshVictim;
+		// No plain victim: fall back to the oldest fresh mapping, or leave the
+		// overflow in place when every candidate is protected until an older
+		// evictable entry exists.
+		victim ??= freshVictim;
 		if (victim === undefined) break;
 		retainedLru.delete(victim);
 		entries.delete(victim);

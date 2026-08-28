@@ -274,6 +274,16 @@ export function openCursorHttp1Bridge(args: {
 						...(proxy ? { proxy } : {}),
 					});
 					if (!response.ok) throw new Error(`Cursor HTTP/1 append failed with HTTP ${response.status}`);
+					// 2xx headers alone do not settle this append. The poll stream
+					// carries every server message, so the append body carries
+					// nothing the bridge consumes — cancel it here, before this
+					// chain link resolves and the next append may advance, while
+					// the deadline above is still armed: the timer only clears in
+					// the finally below, so a body that cannot be torn down inside
+					// the deadline trips the timeout abort, which fails this
+					// append instead of letting the serialized chain park behind
+					// an indefinitely live response.
+					await response.body?.cancel();
 				} finally {
 					clearTimeout(timer);
 					signal.removeEventListener("abort", onCallerAbort);

@@ -1,3 +1,4 @@
+import type * as http2 from "node:http2";
 import {
 	GetServerConfigRequestSchema,
 	GetServerConfigResponseSchema,
@@ -367,12 +368,24 @@ function rejectTrailingEnvelopeBytes(bytes: Uint8Array): void {
 }
 
 /**
+ * Terminal RPC status check over the response trailers, following the same
+ * response-status convention as the Run stream reader in `cursor.ts`: a
+ * present `grpc-status` other than `"0"` is a failed RPC; an absent or zero
+ * status is success.
+ */
+function trailersReportFailure(trailers: http2.IncomingHttpHeaders): boolean {
+	const status = trailers["grpc-status"];
+	return Boolean(status) && status !== "0";
+}
+
+/**
  * Drives one `GetServerConfig` unary response over the leased stream. The
  * request is the raw serialized `GetServerConfigRequest` — Connect unary
  * sends the message itself, not a streaming envelope — and the completed
  * response body is decoded by the shared unary decoder (envelope-shaped or
- * raw). Every failure path — non-2xx status, a truncated or unparseable
- * body, an aborted/destroyed stream, or a close without a clean end — yields
+ * raw). Every failure path — non-2xx status, a nonzero terminal
+ * `grpc-status` trailer, a truncated or unparseable body, an
+ * aborted/destroyed stream, or a close without a clean end — yields
  * `"unspecified"`. Exported as a test seam so a suite can hand the reader a
  * lease whose stream was already closed when the reader began — the
  * deterministic way to exercise the closed-at-entry branch.
@@ -393,6 +406,11 @@ export async function readServerConfigResponse(lease: CursorH2Lease): Promise<Cu
 	}
 	const chunks: Uint8Array[] = [];
 	let cumulativeBytes = 0;
+	// Terminal response trailers. HTTP/2 delivers them ahead of the body's
+	// `end` — they are the END_STREAM HEADERS frame — so the object is final
+	// by the time the `end` handler consults it. A peer that sends no
+	// trailers leaves it empty: the absent-status path is unchanged.
+	let terminalTrailers: http2.IncomingHttpHeaders = {};
 	const { promise, resolve } = Promise.withResolvers<CursorBidiAvailability>();
 	let settled = false;
 	let ended = false;
@@ -421,9 +439,19 @@ export async function readServerConfigResponse(lease: CursorH2Lease): Promise<Cu
 		}
 		chunks.push(bytes);
 	});
+	request.on("trailers", headers => {
+		terminalTrailers = headers;
+	});
 	request.on("end", () => {
-		// Clean end of the response body: decode whatever arrived.
+		// Clean end of the response body. Trailers precede `end`, so the
+		// terminal status is final here. A failed RPC must not have its body
+		// decoded as transport policy — only a successful terminal status can
+		// authorize a downgrade directive — so fail open before decoding.
 		ended = true;
+		if (trailersReportFailure(terminalTrailers)) {
+			finish("unspecified");
+			return;
+		}
 		finish(decodeUnaryServerConfigBody(concatBytes(chunks)));
 	});
 	request.on("error", () => finish("unspecified"));
