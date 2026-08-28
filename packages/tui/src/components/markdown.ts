@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import {
 	Lexer,
@@ -3974,7 +3975,7 @@ export class Markdown implements Component {
 				const headingLevel = token.depth;
 				const headingPrefix = `${"#".repeat(headingLevel)} `;
 				const headingText = this.#renderInlineTokens(token.tokens || [], this.#proseFgExemptContext(styleContext));
-				const headingPlainText = plainInlineTokens(token.tokens || []);
+				const headingPlainText = stripVTControlCharacters(plainInlineTokens(token.tokens || []));
 				let styledHeading: string;
 				// A sized heading draws plain text, which would drop a clickable extension link's marker.
 				if (headingLevel === 1 && TERMINAL.textSizing && stripExtensionLinkMarkers(headingText) === headingText) {

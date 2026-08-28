@@ -63,6 +63,30 @@ describe("latexToUnicode ANSI colors", () => {
 		expect(rendered).toContain(fg("#ff0000"));
 	});
 
+	it("keeps synthetic wrappers in the caller style across nested styles", () => {
+		const rendered = latexToUnicode(String.raw`\textbf{\frac{\textit{ab}}{c}}`);
+
+		expect(rendered).toBe("\x1b[1m(\x1b[3mab\x1b[23m)/c\x1b[22m");
+	});
+
+	it("keeps fallback script markers in the caller style across nested colors", () => {
+		setTrueColor(true);
+		const rendered = latexToUnicode(String.raw`\textit{x^{\textcolor{red}{q}}}`);
+
+		expect(rendered).toBe(`\x1b[3mx^(${fg("#ff0000")}q${FG_RESET})\x1b[23m`);
+	});
+
+	it("preserves the active color while parsing optional arguments", () => {
+		setTrueColor(true);
+		expect(latexToUnicode(String.raw`\color{red}\xrightarrow[n]{x}`)).toBe(`${fg("#ff0000")}→ˣₙ${FG_RESET}`);
+	});
+
+	it("resets bold and italic inside textnormal", () => {
+		const rendered = latexToUnicode(String.raw`\textbf{\textit{A\textnormal{B}C}}`);
+
+		expect(rendered).toBe("\x1b[1m\x1b[3mA\x1b[22m\x1b[23mB\x1b[1m\x1b[3mC\x1b[22m\x1b[23m");
+	});
+
 	it("renders text-mode styles with terminal attributes", () => {
 		setTrueColor(true);
 		const rendered = latexToUnicode(String.raw`\textcolor{red}{\textbf{strongest}}`);

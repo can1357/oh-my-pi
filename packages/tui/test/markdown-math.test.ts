@@ -112,4 +112,18 @@ describe("Markdown math rendering", () => {
 		expect(lines[barRow - 1]).toContain("a+b");
 		expect(lines[barRow + 1]).toContain("c");
 	});
+
+	it("preserves ANSI styles through Markdown math wrappers", () => {
+		const markdown = String.raw`$\boxed{\textcolor{red}{x}}+y_{\textit{word}}+\textcolor{red}{\sqrt[n]{x}}$
+
+$$\textbf{\frac{a}{b}}$$`;
+		const rendered = new Markdown(markdown, 0, 0, defaultMarkdownTheme).render(100).join("\n");
+		const red = Bun.color("#ff0000", "ansi-16m") ?? "";
+
+		expect(rendered).toContain(`[${red}x\x1b[39m]`);
+		expect(rendered).toContain(`y_(\x1b[3mword\x1b[23m)`);
+		expect(rendered).toContain(`${red}ⁿ√x\x1b[39m`);
+		expect(rendered).toContain("\x1b[1ma\x1b[22m");
+		expect(rendered).toContain("\x1b[1mb\x1b[22m");
+	});
 });

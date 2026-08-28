@@ -1532,6 +1532,12 @@ class LatexParser {
 			return attribute === null ? text : scopeRendered(text, attribute, style[attribute]);
 		}
 
+		if (name === "textnormal") {
+			return styledText(
+				unescapeText(this.#rawArgument()),
+				this.#renderStyle({ ...style, bold: false, italic: false }),
+			);
+		}
 		if (TEXT_COMMANDS[name]) return styledText(unescapeText(this.#rawArgument()), current);
 		if (name === "operatorname") {
 			const fn = unescapeText(this.#rawArgument());
@@ -1893,7 +1899,10 @@ class LatexParser {
 	#optionalArgument(style: ParseStyle): Argument | null {
 		const source = this.#optionalRawArgument();
 		if (source === null) return null;
-		return { text: new LatexParser(source).parse(style, false), group: true };
+		const parser = new LatexParser(source);
+		parser.#foreground = this.#foreground;
+		parser.#background = this.#background;
+		return { text: parser.parse(style, false), group: true };
 	}
 
 	#optionalRawArgument(): string | null {
@@ -1933,12 +1942,13 @@ class LatexParser {
 		const index = this.#optionalArgument(style);
 		if (index !== null) {
 			const indexText = plainText(index.text);
+			const indexMatchesStyle = index.text.every(chunk => sameRenderStyle(chunk.style, current));
 			radical =
-				indexText === "2"
+				indexMatchesStyle && indexText === "2"
 					? styledText("√", current)
-					: indexText === "3"
+					: indexMatchesStyle && indexText === "3"
 						? styledText("∛", current)
-						: indexText === "4"
+						: indexMatchesStyle && indexText === "4"
 							? styledText("∜", current)
 							: concatRendered(toSuperscript(index.text, true, current), styledText("√", current));
 		}
@@ -1964,6 +1974,7 @@ class LatexParser {
 			this.#optionalRawArgument();
 			if (this.#s[this.#i] === "{") this.#rawArgument(); // column count
 		}
+		const fallback = this.#renderStyle(style);
 		const body: Rendered = [];
 		while (this.#i < this.#s.length) {
 			if (this.#s.startsWith("\\end", this.#i)) {
@@ -1989,8 +2000,7 @@ class LatexParser {
 		}
 		const delims = ENV_DELIMS[env];
 		if (!delims) return renderedBody;
-		const current = this.#renderStyle(style);
-		return concatRendered(styledText(delims[0], current), renderedBody, styledText(delims[1], current));
+		return concatRendered(styledText(delims[0], fallback), renderedBody, styledText(delims[1], fallback));
 	}
 
 	/** A separator space when the next glyph is alphanumeric or a command. */
