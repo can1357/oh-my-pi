@@ -2462,6 +2462,11 @@ impl Registry {
 
 	/// Returns the BLAKE3-256 digest of every registered revision and its
 	/// projection implementation.
+	///
+	/// Retired native revisions and evicted host tools remain reachable for
+	/// historical replay, so their identities and decoders belong here too:
+	/// two registries that render the same historical identity with different
+	/// retired implementations must not share one projection identity.
 	pub fn projection_hash(&self) -> Hash32 {
 		let mut hasher = Hash32::hasher();
 		hasher.update(b"omp-tool/projections/v1\0");
@@ -2470,6 +2475,10 @@ impl Registry {
 				hash_identity(&mut hasher, name, rev);
 				hash_field(&mut hasher, &entry.tool.spec().projection_code);
 			}
+		}
+		for (identity, tool) in &self.retired {
+			hash_identity(&mut hasher, &identity.name, &identity.rev);
+			hash_field(&mut hasher, &tool.spec().projection_code);
 		}
 		let host_tools = self.host_tools.read();
 		for (name, claimant) in &host_tools.live {
@@ -2481,6 +2490,10 @@ impl Registry {
 				hash_identity(&mut hasher, name, &entry.tool.spec().rev);
 				hash_field(&mut hasher, &entry.tool.spec().projection_code);
 			}
+		}
+		for (identity, tool) in &host_tools.history {
+			hash_identity(&mut hasher, &identity.name, &identity.rev);
+			hash_field(&mut hasher, &tool.spec().projection_code);
 		}
 		hasher.finalize()
 	}
@@ -3702,5 +3715,82 @@ mod tests {
 			.projection_tool(&ToolIdentity { name: sf!("guarded"), rev: core_rev })
 			.expect("active core entry is projectable");
 		assert_eq!(active.spec().projection_code, [2; 32]);
+	}
+
+	#[test]
+	fn projection_hash_covers_retired_projection_implementations() {
+		let evicted = |projection_code: [u8; 32]| {
+			let mut registry = Registry::new();
+			let foreign_rev = Rev { family: sf!("foreign"), n: 1 };
+			registry
+				.register(
+					LiftTool {
+						spec: ToolSpec {
+							name: sf!("guarded"),
+							rev: foreign_rev,
+							description: sf!("foreign"),
+							schema: Bytes::from_static(b"{}"),
+							constraint: Constraint::None,
+							effects: Effects::empty(),
+							projection_code,
+						},
+					},
+					Presentation::Slot,
+					Claims {
+						precedence: Precedence::DEFAULT,
+						claimant:   sf!("test/foreign"),
+						replaces:   None,
+					},
+				)
+				.expect("foreign native tool registers");
+			registry.protect_core_claims(["guarded"]);
+			assert!(
+				registry.live_identity("guarded").is_none(),
+				"protection must evict the foreign claim into retirement",
+			);
+			registry
+		};
+
+		// Identical live versions, different retired projection code.
+		let first = evicted([1; 32]);
+		let second = evicted([2; 32]);
+		assert_ne!(
+			first.projection_hash(),
+			second.projection_hash(),
+			"retired decoders must participate in the projection identity",
+		);
+		assert_eq!(first.projection_hash(), first.projection_hash());
+	}
+
+	#[test]
+	fn projection_hash_covers_evicted_host_tools() {
+		let evicted = |description: &str| {
+			let mut registry = Registry::new();
+			registry
+				.replace_host_tools(
+					sf!("rpc/client"),
+					1,
+					vec![HostToolSpec {
+						name:        sf!("read"),
+						description: Str::new(description),
+						parameters:  serde_json::json!({"type": "object"}),
+					}],
+					Arc::new(HostExecutor),
+				)
+				.expect("host read installs before protection");
+			registry.protect_core_claims(["read"]);
+			assert!(registry.host_tool_specs().is_empty(), "host tool must be evicted");
+			registry
+		};
+
+		// No live entries at all: only the evicted host decoder differs.
+		let first = evicted("first host read");
+		let second = evicted("second host read");
+		assert_ne!(
+			first.projection_hash(),
+			second.projection_hash(),
+			"evicted host decoders must participate in the projection identity",
+		);
+		assert_eq!(evicted("first host read").projection_hash(), first.projection_hash());
 	}
 }
