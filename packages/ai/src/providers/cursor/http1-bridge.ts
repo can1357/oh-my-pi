@@ -58,6 +58,25 @@ export function __setCursorHttp1AppendTimeoutMs(ms: number | undefined): void {
 	__appendTimeoutMs = ms;
 }
 
+/** Bound on bytes retained in the pending append chain before the bridge
+ * fails the stream. Mirrors the poll queue's byte budget: without it, a slow
+ * gateway lets outbound frames queue without backpressure — every write()
+ * chains another closure+payload onto the serialized append promise, delaying
+ * terminal drain by one append latency per queued frame and growing memory
+ * without limit. */
+const APPEND_PENDING_BYTE_LIMIT = 64 * 1024 * 1024;
+
+/** Fixed retained cost per queued append, mirroring the poll frame estimate:
+ * object and closure overhead a payload-only tally would not count. */
+const APPEND_FRAME_RETAINED_BYTES = 64;
+
+let __appendPendingByteLimit: number | undefined;
+
+/** Test seam: override (or restore) the pending append byte budget. */
+export function __setCursorAppendPendingByteLimit(bytes: number | undefined): void {
+	__appendPendingByteLimit = bytes;
+}
+
 /**
  * Opens Cursor's HTTP/1.1 append/poll bridge. Not a public provider export —
  * only {@link openCursorTransport} may choose this after an authoritative
@@ -79,6 +98,7 @@ export function openCursorHttp1Bridge(args: {
 	let terminal = false;
 	let nextAppendSeqno = 0n;
 	let appendTail = Promise.resolve();
+	let pendingAppendBytes = 0;
 	let admitting = true;
 	let firstWrite = true;
 	const initialAppendReady = Promise.withResolvers<void>();
@@ -242,6 +262,14 @@ export function openCursorHttp1Bridge(args: {
 			const seqno = nextAppendSeqno++;
 			const isInitial = firstWrite;
 			if (isInitial) firstWrite = false;
+			const retainedBytes = APPEND_FRAME_RETAINED_BYTES + payload.length;
+			const appendByteLimit = __appendPendingByteLimit ?? APPEND_PENDING_BYTE_LIMIT;
+			if (pendingAppendBytes + retainedBytes > appendByteLimit) {
+				const error = new Error(`Cursor HTTP/1 append chain exceeded ${appendByteLimit} pending bytes`);
+				settleFailure(error);
+				throw error;
+			}
+			pendingAppendBytes += retainedBytes;
 			appendTail = appendTail.then(async () => {
 				const headers: Record<string, string> = { ...baseHeaders, "content-type": "application/proto" };
 				delete headers["connect-content-encoding"];
@@ -279,6 +307,7 @@ export function openCursorHttp1Bridge(args: {
 					// an indefinitely live response.
 					await response.body?.cancel();
 				} finally {
+					pendingAppendBytes -= retainedBytes;
 					clearTimeout(timer);
 					signal.removeEventListener("abort", onCallerAbort);
 				}

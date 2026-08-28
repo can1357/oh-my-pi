@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { type ConnectFrame, ConnectProtocolError, encodeConnectFrame } from "../src/providers/cursor/connect-frame";
 import { buildCursorRunHeaders } from "../src/providers/cursor/headers";
 import {
+	__setCursorAppendPendingByteLimit,
 	__setCursorHttp1AppendTimeoutMs,
 	__setCursorPollQueueByteLimit,
 	openCursorHttp1Bridge,
@@ -330,6 +331,7 @@ afterEach(async () => {
 	await stopServer();
 	__setCursorHttp1AppendTimeoutMs(undefined);
 	__setCursorPollQueueByteLimit(undefined);
+	__setCursorAppendPendingByteLimit(undefined);
 	appendStatus = 200;
 });
 
@@ -805,6 +807,46 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 		expect(appendHits).toBe(2);
 		releaseAllHeldAppends();
 		bridge.close();
+	});
+
+	it("fails the append chain on its pending byte budget while the gateway stalls", async () => {
+		// Hold every append response so the serialized chain backs up: each
+		// write() queues another closure+payload without backpressure. A slow
+		// gateway would otherwise grow the chain without limit. The byte
+		// budget must fail the stream once pending appends exceed it.
+		plan = { kind: "success" };
+		holdAppendResponses = true;
+		holdPollResponse = true;
+		// Budget fits the initial request but not a second frame: the first
+		// write's payload (12 B "client-request" + 64 B overhead = 76 B) fits
+		// exactly, so the second write's 64+6 = 70 B must tip it over 80.
+		__setCursorAppendPendingByteLimit(80);
+		const baseUrl = await startServer();
+		const bridge = openCursorHttp1Bridge({
+			baseUrl,
+			requestPath: RUN_PATH,
+			runHeaders: testRunHeaders(),
+			gzipRequest: false,
+		});
+		bridge.write(encodeConnectFrame(Buffer.from("client-request"), false));
+		while (appendHits < 1) await nextTick();
+		// The second write exceeds the budget: settleFailure is called and
+		// write() throws.
+		let writeError: unknown;
+		try {
+			bridge.write(encodeConnectFrame(Buffer.from("frame"), false));
+		} catch (cause) {
+			writeError = cause;
+		}
+		expect(writeError).toBeInstanceOf(Error);
+		expect(String(writeError)).toContain("append chain exceeded");
+		// The bridge is now terminal: trailers reject and further writes throw.
+		await expect(bridge.trailers()).rejects.toBeTruthy();
+		expect(() => bridge.write(encodeConnectFrame(Buffer.from("late"), false))).toThrow();
+		// Only the first append was issued; the budget-exceeding write never
+		// reached the server.
+		expect(appendHits).toBe(1);
+		releaseAllHeldAppends();
 	});
 
 	it("delivers a >64-frame burst in order across frame queue compaction", async () => {
