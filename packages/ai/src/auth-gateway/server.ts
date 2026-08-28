@@ -524,7 +524,7 @@ async function handleFormatEndpoint(
 			requestId,
 			routeId: compiled.id,
 			generation: compiled.generation,
-			selectedTarget: compiled.root.model,
+			selectedTarget: compiled.targets[0] ?? compiled.id,
 			disposition: "skipped",
 			reason: "credential_unavailable",
 		});
@@ -539,7 +539,7 @@ async function handleFormatEndpoint(
 		requestId,
 		routeId: compiled.id,
 		generation: compiled.generation,
-		selectedTarget: compiled.root.model,
+		selectedTarget: compiled.targets[0] ?? compiled.id,
 		disposition: "dispatched",
 	});
 	logger.debug("auth-gateway route decision", redactedDecisionSummary(dispatched));
@@ -754,7 +754,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 			requestId,
 			routeId: compiled.id,
 			generation: compiled.generation,
-			selectedTarget: compiled.root.model,
+			selectedTarget: compiled.targets[0] ?? compiled.id,
 			disposition: "skipped",
 			reason: "credential_unavailable",
 		});
@@ -769,7 +769,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		requestId,
 		routeId: compiled.id,
 		generation: compiled.generation,
-		selectedTarget: compiled.root.model,
+		selectedTarget: compiled.targets[0] ?? compiled.id,
 		disposition: "dispatched",
 	});
 	logger.debug("auth-gateway route decision", redactedDecisionSummary(dispatched));
