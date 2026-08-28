@@ -263,6 +263,7 @@ describe("auth-gateway openai-chat: encodeResponse", () => {
 	it("serializes text + tool calls with finish_reason=tool_calls", () => {
 		const message: AssistantMessage = {
 			...emptyAssistant(),
+			model: "gpt-5.2",
 			content: [
 				{ type: "text", text: "the answer is " },
 				{ type: "thinking", thinking: "private reasoning" }, // dropped

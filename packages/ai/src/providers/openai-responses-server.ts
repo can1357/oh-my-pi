@@ -882,7 +882,7 @@ export function encodeResponse(message: AssistantMessage, requestedModelId: stri
 	const items = buildOutputItems(message);
 	return buildResponseEnvelope(
 		message,
-		requestedModelId,
+		message.model || requestedModelId,
 		makeRespId(),
 		responseStatusForStopReason(message),
 		items,
@@ -948,6 +948,7 @@ export function encodeStream(
 	};
 	control?.signal?.addEventListener("abort", markCancelled, { once: true });
 	const seq = () => sequenceNumber++;
+	let effectiveModelId = requestedModelId;
 
 	return new ReadableStream<Uint8Array>({
 		async start(controller) {
@@ -979,7 +980,7 @@ export function encodeStream(
 				object: "response",
 				created_at: createdAt,
 				status,
-				model: requestedModelId,
+				model: effectiveModelId,
 				output,
 				usage: null,
 				incomplete_details: incompleteDetailsForStatus(status),
@@ -1214,6 +1215,9 @@ export function encodeStream(
 				}
 				for await (const ev of events) {
 					if (cancelled) return;
+					if ("partial" in ev && ev.partial.model && ev.partial.model !== effectiveModelId) {
+						effectiveModelId = ev.partial.model;
+					}
 					switch (ev.type) {
 						case "start": {
 							createdAt = Math.floor((ev.partial.timestamp || Date.now()) / 1000);
@@ -1458,7 +1462,7 @@ export function encodeStream(
 								object: "response",
 								created_at: createdAt,
 								status,
-								model: requestedModelId,
+								model: effectiveModelId,
 								output: items,
 								usage,
 								incomplete_details: incompleteDetailsForStatus(status),
@@ -1483,7 +1487,7 @@ export function encodeStream(
 									object: "response",
 									created_at: Math.floor(Date.now() / 1000),
 									status: "failed",
-									model: requestedModelId,
+									model: effectiveModelId,
 									output: [],
 									error: { message: err instanceof Error ? err.message : String(err) },
 									incomplete_details: null,

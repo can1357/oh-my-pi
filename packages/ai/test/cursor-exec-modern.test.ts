@@ -205,7 +205,7 @@ function soleResult(frames: AgentClientMessage[]) {
 
 describe("Cursor modern exec protocol activation", () => {
 	it("advertises the client build whose schema includes modern exec frames", () => {
-		expect(CURSOR_CLIENT_VERSION).toBe("cli-2026.07.23-e383d2b");
+		expect(CURSOR_CLIENT_VERSION).toBe("cli-2026.08.11-e8db854");
 	});
 });
 
@@ -263,6 +263,89 @@ describe("Cursor conversation checkpoints", () => {
 			output: 0,
 			totalTokens: 0,
 		});
+	});
+
+	it("extracts routed model from assistant message JSON in pendingToolCalls", async () => {
+		// In auto mode, Cursor's backend routes to a specific model and surfaces
+		// the actual model name via providerOptions.cursor.modelName in the
+		// assistant message JSON stored in the checkpoint's pendingToolCalls.
+		// This is the only place the routed model appears — the
+		// RoutedModelUpdate proto field is never sent by the real CLI.
+		// output.model is initialized from the catalog model id, which is
+		// "auto" for CURSOR_AUTO_MODEL — the sentinel the extraction replaces.
+		const output = cursorAssistantMessage();
+		output.model = "auto";
+
+		const assistantJson = JSON.stringify({
+			id: "msg_test",
+			role: "assistant",
+			content: [
+				{
+					type: "reasoning",
+					text: "",
+					signature: "sig",
+					providerOptions: { cursor: { modelName: "cursor-grok-4.5-high" } },
+				},
+				{ type: "text", text: "4" },
+			],
+			providerOptions: { cursor: { modelProviderMessageId: "msg_test" } },
+		});
+
+		await handleServerMessage(
+			create(AgentServerMessageSchema, {
+				message: {
+					case: "conversationCheckpointUpdate",
+					value: create(ConversationStateStructureSchema, {
+						pendingToolCalls: [assistantJson],
+					}),
+				},
+			}),
+			output,
+			new AssistantMessageEventStream(),
+			newBlockState(),
+			new Map(),
+			{ write: () => true } as unknown as Parameters<typeof handleServerMessage>[5],
+			undefined,
+			undefined,
+			{ sawTokenDelta: false },
+			[],
+		);
+
+		expect(output.model).toBe("cursor-grok-4.5-high");
+	});
+
+	it("does not override model when output.model is not the auto sentinel", async () => {
+		// The extraction only fires when output.model is "auto" (auto mode).
+		// For explicit model selections, the checkpoint should not override.
+		const output = cursorAssistantMessage();
+		output.model = "cursor-claude-sonnet-5";
+
+		const assistantJson = JSON.stringify({
+			role: "assistant",
+			content: [{ type: "text", text: "hi", providerOptions: { cursor: { modelName: "cursor-grok-4.5-high" } } }],
+		});
+
+		await handleServerMessage(
+			create(AgentServerMessageSchema, {
+				message: {
+					case: "conversationCheckpointUpdate",
+					value: create(ConversationStateStructureSchema, {
+						pendingToolCalls: [assistantJson],
+					}),
+				},
+			}),
+			output,
+			new AssistantMessageEventStream(),
+			newBlockState(),
+			new Map(),
+			{ write: () => true } as unknown as Parameters<typeof handleServerMessage>[5],
+			undefined,
+			undefined,
+			{ sawTokenDelta: false },
+			[],
+		);
+
+		expect(output.model).toBe("cursor-claude-sonnet-5");
 	});
 });
 

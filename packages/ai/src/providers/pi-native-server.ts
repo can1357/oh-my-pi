@@ -82,6 +82,16 @@ const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
 	"openrouterVariant",
 	"loopGuard",
 	"acceptEmptyResponse",
+	"cursorAutoMode",
+	"cursorToolPassthrough",
+	"cursorExcludeTools",
+	"cursorLocalCliMode",
+	"cursorDevExperimentOverrides",
+	"cursorClientSupportsInlineImages",
+	"cursorClientSupportsRoutedModelUpdate",
+	"cursorClientSupportsPromptContextUsageRpc",
+	"cursorRunId",
+	"cursorAgentSessionId",
 ] as const satisfies readonly (keyof SimpleStreamOptions)[]);
 
 // ---------------------------------------------------------------------------

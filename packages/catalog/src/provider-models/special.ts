@@ -1,9 +1,10 @@
 import { once } from "@oh-my-pi/pi-utils";
+import { buildModel } from "../build";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
 import type { ModelManagerOptions } from "../model-manager";
-import type { FetchImpl, ModelSpec } from "../types";
+import type { FetchImpl, Model, ModelSpec } from "../types";
 import { DEVIN_DEFAULT_BASE_URL } from "../wire/devin";
 import { resolveModelCacheProviderId } from "./cache-provider-id";
 
@@ -113,6 +114,32 @@ export function cursorModelManagerOptions(config: CursorModelManagerConfig = {})
 }
 
 const cursorDiscovery = once(() => import("../discovery/cursor"));
+
+/**
+ * Synthetic Cursor "auto" model. Cursor's backend routes the wire id "default"
+ * to a per-turn model selection (the same way Cursor's own UI does). The
+ * cursor provider translates the external id "auto" to the wire id "default"
+ * (see `resolveCursorWireModel` in providers/cursor.ts).
+ *
+ * Exposed as a prebuilt catalog entry so id-resolving callers — notably the
+ * auth-gateway, where an external OpenAI-compatible client can send
+ * `{"model":"auto"}` — get a valid `Model<"cursor-agent">` instead of a 404,
+ * and so "auto" can surface in `/v1/models` listings. Limits are conservative
+ * defaults because the routed model is unknown upfront; cost is zero since
+ * Cursor does not bill per-token for auto routing.
+ */
+export const CURSOR_AUTO_MODEL: Model<"cursor-agent"> = buildModel({
+	id: "auto",
+	name: "Cursor Auto",
+	api: "cursor-agent",
+	provider: "cursor",
+	baseUrl: "https://api2.cursor.sh",
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 200_000,
+	maxTokens: 16_384,
+});
 
 // ---------------------------------------------------------------------------
 // GitLab Duo Workflow

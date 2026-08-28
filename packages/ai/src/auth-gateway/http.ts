@@ -122,6 +122,18 @@ const PASSTHROUGH_HEADER_NAMES: Record<string, true> = {
 	"x-prompt-cache-key": true,
 	"x-session-id": true,
 	"x-conversation-id": true,
+	// Cursor-specific gateway control headers. `x-cursor-auto-mode` enables
+	// Cursor's per-turn model selection; `x-cursor-tool-passthrough` surfaces
+	// tool calls as OpenAI `tool_calls` without local execution.
+	// `x-cursor-agent-exclude-tools` is the complement to `allowed-tools`,
+	// dropping named tools from the model's tool set; `local-cli-mode` signals
+	// local CLI mode to Cursor's backend; `x-dev-experiment-overrides` carries
+	// Statsig experiment overrides for feature-flag testing.
+	"x-cursor-auto-mode": true,
+	"x-cursor-tool-passthrough": true,
+	"x-cursor-agent-exclude-tools": true,
+	"local-cli-mode": true,
+	"x-dev-experiment-overrides": true,
 };
 
 /**

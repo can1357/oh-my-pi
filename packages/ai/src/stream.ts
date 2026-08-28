@@ -1971,6 +1971,14 @@ function mapOptionsForApi<TApi extends Api>(
 		fallbacks: options?.fallbacks,
 		acceptEmptyResponse: options?.acceptEmptyResponse,
 		anthropicCacheRefreshRequest: options?.anthropicCacheRefreshRequest,
+		cursorExcludeTools: options?.cursorExcludeTools,
+		cursorLocalCliMode: options?.cursorLocalCliMode,
+		cursorDevExperimentOverrides: options?.cursorDevExperimentOverrides,
+		cursorClientSupportsInlineImages: options?.cursorClientSupportsInlineImages,
+		cursorClientSupportsRoutedModelUpdate: options?.cursorClientSupportsRoutedModelUpdate,
+		cursorClientSupportsPromptContextUsageRpc: options?.cursorClientSupportsPromptContextUsageRpc,
+		cursorRunId: options?.cursorRunId,
+		cursorAgentSessionId: options?.cursorAgentSessionId,
 		...simpleProviderOptions,
 	};
 
@@ -2360,7 +2368,9 @@ function mapOptionsForApi<TApi extends Api>(
 				...base,
 				execHandlers,
 				onToolResult,
-				wireModelId: resolveWireModelId(cursorModel, effort),
+				cursorToolPassthrough: options?.cursorToolPassthrough,
+				// Auto mode sends the "default" wire id; otherwise resolve after thinking-effort routing.
+				wireModelId: options?.cursorAutoMode ? "default" : resolveWireModelId(cursorModel, effort),
 			});
 		}
 

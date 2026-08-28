@@ -244,7 +244,17 @@ import {
 import { handleInteractionQuery } from "./cursor/interaction-query";
 
 export const CURSOR_API_URL = "https://api2.cursor.sh";
-export const CURSOR_CLIENT_VERSION = "cli-2026.07.23-e383d2b";
+export const CURSOR_CLIENT_VERSION = "cli-2026.08.11-e8db854";
+
+/**
+ * Resolves the Cursor client version at runtime. An explicit
+ * `CURSOR_CLIENT_VERSION` env var overrides the compile-time default so users
+ * can bump the version when Cursor version-gates old clients without waiting
+ * for a new omp release.
+ */
+function resolveCursorClientVersion(): string {
+	return $env.CURSOR_CLIENT_VERSION || CURSOR_CLIENT_VERSION;
+}
 
 /**
  * HTTP/1 connection-specific headers that HTTP/2 forbids. Node's `http2.request()`
@@ -273,6 +283,7 @@ const CURSOR_RESERVED_HEADERS = new Set([
 	"x-ghost-mode",
 	"x-cursor-client-version",
 	"x-cursor-client-type",
+	"x-cursor-agent-allowed-tools",
 	"x-request-id",
 	// Transport-owned even though this request never sets it: node's http2 client
 	// suppresses the `:authority` it derives from the URL when a plain `host`
@@ -344,6 +355,14 @@ export interface CursorOptions extends StreamOptions {
 	onToolResult?: CursorToolResultHandler;
 	/** Wire model id selected after thinking-effort routing (`resolveWireModelId`). */
 	wireModelId?: string;
+	/**
+	 * When true, tool calls from Cursor's backend are surfaced as `ToolCall`
+	 * blocks in the output and the stream ends with `stopReason: "toolUse"`
+	 * after the first tool call batch. No exec handler responses are sent back
+	 * to Cursor; the caller executes tools and replays results as
+	 * `role: "tool"` messages on the next request.
+	 */
+	cursorToolPassthrough?: boolean;
 }
 
 type CursorWireMode = "normalized" | "discovered";
@@ -721,7 +740,7 @@ function streamCursorWithWireMode(
 			// HTTP/2 allows it only as `trailers`, which is exactly what the fixed
 			// set below re-applies over anything a caller sent.
 			const callerHeaders = sanitizeCursorCallerHeaders(options?.headers);
-			const requestHeaders = {
+			const requestHeaders: Record<string, string> = {
 				...callerHeaders,
 				":method": "POST",
 				":path": requestPath,
@@ -730,10 +749,22 @@ function streamCursorWithWireMode(
 				te: "trailers",
 				authorization: `Bearer ${apiKey}`,
 				"x-ghost-mode": "true",
-				"x-cursor-client-version": CURSOR_CLIENT_VERSION,
+				"x-cursor-client-version": resolveCursorClientVersion(),
 				"x-cursor-client-type": "cli",
 				"x-request-id": crypto.randomUUID(),
 			};
+			// In passthrough mode, restrict the model's tool view to only the
+			// client-declared tools. This hides Cursor's 41 native tools so the
+			// model sees exactly what the external caller advertised.
+			if (options?.cursorToolPassthrough && context.tools && context.tools.length > 0) {
+				const allowedTools = context.tools
+					.filter(tool => !CURSOR_NATIVE_TOOL_NAMES.has(tool.name))
+					.map(tool => tool.name)
+					.join(",");
+				if (allowedTools) {
+					requestHeaders["x-cursor-agent-allowed-tools"] = allowedTools;
+				}
+			}
 			const debugSession = isRequestDebugEnabled()
 				? await createRequestDebugSession({
 						protocol: "http2",
@@ -868,6 +899,7 @@ function streamCursorWithWireMode(
 							requestContextTools,
 							requestContextRules,
 							onConversationCheckpoint,
+							options?.cursorToolPassthrough,
 						).catch(error => {
 							log("error", "handleServerMessage", { error: String(error) });
 						});
@@ -877,6 +909,13 @@ function streamCursorWithWireMode(
 						// Application completion is not protocol success; wait for a clean HTTP/2 end.
 						if (isTurnEnded) {
 							sawTurnEnded = true;
+						}
+						// In passthrough mode, a tool call sets `stopReason: "toolUse"`.
+						// Treat that as turn completion so `settleH2` doesn't throw
+						// when the HTTP/2 stream ends without a server `turnEnded`.
+						if (output.stopReason === "toolUse") {
+							sawTurnEnded = true;
+							h2Request?.close();
 						}
 					} catch (e) {
 						log("error", "parseServerMessage", { error: String(e) });
@@ -1154,6 +1193,7 @@ export async function handleServerMessage(
 	requestContextTools: McpToolDefinition[],
 	requestContextRules: CursorRule[] = [],
 	onConversationCheckpoint?: (checkpoint: ConversationStateStructure) => void,
+	cursorToolPassthrough?: boolean,
 ): Promise<void> {
 	const msgCase = msg.message.case;
 
@@ -1179,8 +1219,16 @@ export async function handleServerMessage(
 				output,
 				stream,
 				state,
+				cursorToolPassthrough,
 			),
 		);
+		// In passthrough mode, end the stream after the first tool call batch.
+		// The exec handler synthesized the ToolCall block and sent a rejection
+		// back to Cursor; the caller will execute the tool and replay the
+		// result as a `role: "tool"` message on the next request.
+		if (cursorToolPassthrough && output.content.some(c => c.type === "toolCall")) {
+			output.stopReason = "toolUse";
+		}
 	} else if (msgCase === "interactionQuery") {
 		// Cursor asks the client to approve native web search / Exa fetch / etc.
 		// before it will continue the turn. Dropping the frame leaves the server
@@ -1597,6 +1645,7 @@ async function handleExecServerMessage(
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	state: BlockState,
+	_cursorToolPassthrough?: boolean,
 ): Promise<void> {
 	const execCase = execMsg.message.case;
 	log("exec", "dispatch", { execCase, execId: execMsg.execId, hasHandlers: !!execHandlers });
@@ -4536,6 +4585,32 @@ function handleConversationCheckpointUpdate(
 	onConversationCheckpoint?: (checkpoint: ConversationStateStructure) => void,
 ): void {
 	onConversationCheckpoint?.(checkpoint);
+	// Extract the routed model from the assistant message JSON in pendingToolCalls.
+	// In auto mode, Cursor's backend routes to a specific model per-turn and
+	// surfaces the actual model name via providerOptions.cursor.modelName in the
+	// assistant message JSON. This is the only place the routed model appears —
+	// the RoutedModelUpdate proto field (InteractionUpdate field 24) is never
+	// sent by the real cursor-agent CLI (confirmed via mitmproxy capture).
+	// Only the auto sentinel (catalog id "auto", which output.model is
+	// initialized from) may be replaced; explicit selections stay untouched.
+	for (const entry of checkpoint.pendingToolCalls) {
+		if (!entry || output.model !== "auto") continue;
+		try {
+			const parsed = JSON.parse(entry) as {
+				role?: string;
+				content?: Array<{ providerOptions?: { cursor?: { modelName?: string } } }>;
+			};
+			if (parsed.role !== "assistant") continue;
+			const modelName = parsed.content?.find(c => c.providerOptions?.cursor?.modelName)?.providerOptions?.cursor
+				?.modelName;
+			if (modelName) {
+				output.model = modelName;
+				break;
+			}
+		} catch {
+			// Not JSON or unexpected shape — skip
+		}
+	}
 	if (usageState.sawTokenDelta) {
 		return;
 	}

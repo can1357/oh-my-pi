@@ -509,7 +509,7 @@ export function encodeResponse(message: AssistantMessage, requestedModelId: stri
 		id: message.responseId ?? newMessageId(),
 		type: "message",
 		role: "assistant",
-		model: requestedModelId,
+		model: message.model || requestedModelId,
 		content: encodeContentBlocks(message),
 		stop_reason: mapStopReasonOut(message.stopReason),
 		// TODO: surface the matched stop sequence once pi-ai's
@@ -567,6 +567,7 @@ export function encodeStream(
 			pingTimer = undefined;
 		}
 	};
+	let effectiveModelId = requestedModelId;
 	return new ReadableStream<Uint8Array>({
 		async start(controller) {
 			const messageId = newMessageId();
@@ -584,7 +585,7 @@ export function encodeStream(
 							id: messageId,
 							type: "message",
 							role: "assistant",
-							model: requestedModelId,
+							model: effectiveModelId,
 							content: [],
 							stop_reason: null,
 							// TODO: same as encodeResponse — surface matched stop sequence
@@ -641,6 +642,9 @@ export function encodeStream(
 				}
 				for await (const ev of events) {
 					if (cancelled) return;
+					if ("partial" in ev && ev.partial.model && ev.partial.model !== effectiveModelId) {
+						effectiveModelId = ev.partial.model;
+					}
 					switch (ev.type) {
 						case "start":
 							ensureStart(ev.partial);

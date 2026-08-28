@@ -433,7 +433,7 @@ export function encodeResponse(message: AssistantMessage, requestedModelId: stri
 		id: makeId(),
 		object: "chat.completion",
 		created: Math.floor(Date.now() / 1000),
-		model: requestedModelId,
+		model: message.model || requestedModelId,
 		// Real OpenAI always emits this key, even when the value is null. Mirror
 		// the contract so probing SDKs do not throw on a missing field.
 		system_fingerprint: null,
@@ -535,6 +535,7 @@ export function encodeStream(
 	const id = makeId();
 	const created = Math.floor(Date.now() / 1000);
 	const includeUsage = options?.extra?.includeStreamingUsage === true;
+	let effectiveModelId = requestedModelId;
 	let cancelled = control?.signal?.aborted === true;
 	const markCancelled = () => {
 		cancelled = true;
@@ -545,7 +546,7 @@ export function encodeStream(
 		id,
 		object: "chat.completion.chunk",
 		created,
-		model: requestedModelId,
+		model: effectiveModelId,
 		system_fingerprint: null,
 		choices: [{ index: 0, delta, finish_reason: finishReason, logprobs: null }],
 		...(includeUsage ? { usage: null } : {}),
@@ -560,7 +561,7 @@ export function encodeStream(
 			id,
 			object: "chat.completion.chunk",
 			created,
-			model: requestedModelId,
+			model: effectiveModelId,
 			system_fingerprint: null,
 			choices: [],
 			usage: buildUsage(message),
@@ -588,6 +589,9 @@ export function encodeStream(
 
 				for await (const event of events) {
 					if (cancelled) return;
+					if ("partial" in event && event.partial.model && event.partial.model !== effectiveModelId) {
+						effectiveModelId = event.partial.model;
+					}
 					switch (event.type) {
 						case "text_delta":
 							if (event.delta.length > 0) {

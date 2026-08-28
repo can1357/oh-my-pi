@@ -32,6 +32,7 @@ import {
 } from "@oh-my-pi/pi-ai/auth-broker";
 import { DEFAULT_AUTH_GATEWAY_BIND, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { type GeneratedProvider, getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { CURSOR_AUTO_MODEL } from "@oh-my-pi/pi-catalog/provider-models";
 import { getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
@@ -154,6 +155,12 @@ const CATALOG_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
  * provider-qualified `provider/id` (always) and the bare `id` (first-write-wins
  * fallback for legacy clients). Scoped to providers the gateway holds broker
  * credentials for, since only those are routable.
+ *
+ * Cursor's "auto" wire id is a valid per-turn router that `GetUsableModels`
+ * never enumerates, so it isn't part of the discovered/bundled catalog. Inject
+ * the synthetic {@link CURSOR_AUTO_MODEL} when the gateway holds Cursor
+ * credentials so a clean `{"model":"auto"}` request resolves instead of 404ing,
+ * and "auto" surfaces in `/v1/models` listings.
  */
 export function indexModelsByRequestId(
 	models: readonly Model<Api>[],
@@ -164,6 +171,10 @@ export function indexModelsByRequestId(
 		if (!providersWithCreds.has(model.provider)) continue;
 		modelById.set(`${model.provider}/${model.id}`, model);
 		if (!modelById.has(model.id)) modelById.set(model.id, model);
+	}
+	if (providersWithCreds.has("cursor")) {
+		modelById.set("cursor/auto", CURSOR_AUTO_MODEL);
+		if (!modelById.has("auto")) modelById.set("auto", CURSOR_AUTO_MODEL);
 	}
 	return modelById;
 }

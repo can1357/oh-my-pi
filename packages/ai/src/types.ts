@@ -627,6 +627,35 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	/** Cursor exec handlers for local tool execution */
 	cursorExecHandlers?: CursorExecHandlers;
 	/**
+	 * Cursor auto mode: when true, passes `"auto"` as the model id to Cursor's
+	 * backend, letting Cursor select the model per-turn instead of omp's role
+	 * system. Ignored by non-Cursor providers.
+	 */
+	cursorAutoMode?: boolean;
+	/**
+	 * Cursor tool passthrough: when true, tool calls from Cursor's backend are
+	 * surfaced as OpenAI `tool_calls` in the response without local execution.
+	 * The caller executes tools and replays results as `role: "tool"` messages
+	 * on the next request. Ignored by non-Cursor providers.
+	 */
+	cursorToolPassthrough?: boolean;
+	/** Comma-separated tool names to exclude from the model's tool set (Cursor only). */
+	cursorExcludeTools?: string;
+	/** Signal local CLI mode to Cursor's backend (Cursor only). */
+	cursorLocalCliMode?: boolean;
+	/** Statsig experiment overrides for feature flag testing (Cursor only). */
+	cursorDevExperimentOverrides?: string;
+	/** Capability flag: client supports inline images (Cursor only). */
+	cursorClientSupportsInlineImages?: boolean;
+	/** Capability flag: client supports routed model updates (Cursor only). */
+	cursorClientSupportsRoutedModelUpdate?: boolean;
+	/** Capability flag: client supports prompt context usage RPC (Cursor only). */
+	cursorClientSupportsPromptContextUsageRpc?: boolean;
+	/** Unique run identifier for session tracking (Cursor only). */
+	cursorRunId?: string;
+	/** Agent session identifier for session tracking (Cursor only). */
+	cursorAgentSessionId?: string;
+	/**
 	 * Optional rewrite of Cursor exec-channel tool results. May return a Promise.
 	 *
 	 * The Agent reserves the original result in its buffer before awaiting this

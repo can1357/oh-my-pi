@@ -742,7 +742,7 @@ describe("openai-responses encodeResponse", () => {
 			role: "assistant",
 			api: "openai-responses",
 			provider: "openai",
-			model: "gpt-5",
+			model: "gpt-5-requested",
 			content: [
 				{
 					type: "thinking",
@@ -931,7 +931,7 @@ describe("openai-responses encodeStream", () => {
 			role: "assistant",
 			api: "openai-responses",
 			provider: "openai",
-			model: "gpt-5",
+			model: "gpt-5-requested",
 			content: [],
 			usage: zeroUsage(),
 			stopReason: "stop",
@@ -942,7 +942,7 @@ describe("openai-responses encodeStream", () => {
 			role: "assistant",
 			api: "openai-responses",
 			provider: "openai",
-			model: "gpt-5",
+			model: "gpt-5-requested",
 			content: [
 				{ type: "thinking", thinking: "step 1", thinkingSignature: "rs_s1", itemId: "rs_s1" },
 				{ type: "text", text: "Hi!" },
