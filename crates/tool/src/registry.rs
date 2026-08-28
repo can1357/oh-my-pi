@@ -1909,6 +1909,16 @@ impl Registry {
 		Ok(())
 	}
 
+	/// Returns whether `name` is explicitly stored in the unlisted set via
+	/// [`Self::unlist_from_roster`].
+	///
+	/// Unlike [`Self::user_visible`], this query considers only the explicit
+	/// unlisted set: names that merely lack a live claim still report `false`
+	/// so settings-derived roster keys remain visible as disabled entries.
+	pub fn is_unlisted(&self, name: &str) -> bool {
+		self.unlisted.contains(name)
+	}
+
 	/// Iterates the policy-resolved tool roster in stable name order.
 	pub fn roster(
 		&self,

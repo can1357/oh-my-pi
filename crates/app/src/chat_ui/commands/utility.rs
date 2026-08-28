@@ -78,8 +78,11 @@ pub(crate) fn render_tools(
 	settings: &omp_envd::tool_settings::ToolSettings,
 	declarations: &[omp_driver::discovery::manifest::DiscoveredCapability],
 ) -> Str {
-	// The roster policy owns user visibility: live claims unlisted via
-	// `unlist_from_roster` must not re-enter the listing as active markers.
+	// Live/active sources follow registry user visibility: live claims
+	// unlisted via `unlist_from_roster` must not re-enter the listing as
+	// active markers. Settings-derived keys stay listed as disabled unless
+	// the registry explicitly unlisted them, so unknown configured tools
+	// remain visible in the roster.
 	let mut active = BTreeSet::new();
 	active.extend(
 		enabled_tools
@@ -103,11 +106,20 @@ pub(crate) fn render_tools(
 	);
 	all.extend(registry.disabled_roster().map(Str::as_str));
 	all.extend(active.iter().copied());
-	all.extend(settings.enabled.keys().map(Str::as_str));
+	all.extend(
+		settings
+			.enabled
+			.keys()
+			.filter(|name| {
+				!registry.is_unlisted(name.as_str())
+					&& !matches!(registry.presentation(name.as_str()), Ok(Presentation::Hidden))
+			})
+			.map(Str::as_str),
+	);
 	all.extend(declarations.iter().filter_map(|declaration| {
 		if let omp_driver::discovery::manifest::CapabilityPayload::Tools(tool) = &declaration.payload
 		{
-			Some(tool.name.as_str())
+			(!registry.is_unlisted(tool.name.as_str())).then(|| tool.name.as_str())
 		} else {
 			None
 		}
@@ -388,6 +400,43 @@ mod tests {
 		assert!(
 			!rendered.lines().any(|line| line.ends_with("report_issue")),
 			"unlisted live tool must not be rendered active: {rendered}"
+		);
+	}
+
+	#[test]
+	fn tools_do_not_render_unlisted_names_from_settings() {
+		let mut registry = roster_registry();
+		registry
+			.register_worker(stub_spec("think"), Presentation::Slot, core_claims())
+			.expect("think");
+		registry
+			.unlist_from_roster("think")
+			.expect("live claim can be unlisted");
+		let settings = omp_envd::tool_settings::ToolSettings {
+			enabled: std::collections::BTreeMap::from([
+				(sf!("think"), true),
+				(sf!("secret"), true),
+				(sf!("custom_report"), true),
+			]),
+			..Default::default()
+		};
+		let rendered = render_tools(&registry, &[], &[sf!("read")], &settings, &[]);
+		assert!(rendered.lines().any(|line| line == "* read"));
+		assert!(
+			!rendered.lines().any(|line| line.ends_with("think")),
+			"unlisted settings key must not re-enter the listing: {rendered}"
+		);
+		assert!(
+			!rendered.lines().any(|line| line.ends_with("secret")),
+			"hidden registered settings key must stay off the listing: {rendered}"
+		);
+		assert!(
+			rendered.lines().any(|line| line == "- custom_report"),
+			"unknown configured custom tool stays listed as disabled: {rendered}"
+		);
+		assert!(
+			!rendered.lines().any(|line| line == "* custom_report"),
+			"unknown configured custom tool is never active: {rendered}"
 		);
 	}
 
