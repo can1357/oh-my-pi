@@ -69,6 +69,11 @@ export class RouteRegistry {
 		return [...this.#routes.values()];
 	}
 
+	/** Lookup a registered virtual route by id. Never wraps concrete catalog models. */
+	get(id: string): CompiledRoute | undefined {
+		return this.#routes.get(id);
+	}
+
 	resolve(modelId: string): CompiledRoute | undefined {
 		const virtual = this.#routes.get(modelId);
 		if (virtual) return virtual;

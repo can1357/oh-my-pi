@@ -14,6 +14,7 @@
  *   GET  /v1/credentials/check             → per-credential auth probe (diagnose 401s in a multi-account pool)
  *   GET  /v1/models                        → list known models from the registry
  *   GET  /v1/routes                        → list registered virtual routes
+ *   GET  /v1/routes/:id                    → one registered virtual route
  *   POST /v1/chat/completions              → OpenAI chat-completions in/out
  *   POST /v1/messages                      → Anthropic messages in/out
  *   POST /v1/responses                     → OpenAI Responses in/out
@@ -1487,6 +1488,20 @@ function handleRoutesList(registry: RouteRegistry): Response {
 	return json(200, { object: "list", generation: registry.generation, data });
 }
 
+function handleRouteGet(registry: RouteRegistry, id: string): Response {
+	const route = registry.get(id);
+	if (!route) {
+		return json(404, { error: `Unknown route: ${id}` });
+	}
+	const row: RouteListRow = {
+		id: route.id,
+		generation: route.generation,
+		targets: route.targets,
+		fallbacks: route.fallbacks,
+	};
+	return json(200, row);
+}
+
 export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
 	const registry = opts.routeRegistry ?? new RouteRegistry(opts.resolveModel);
 	for (const def of opts.routes ?? []) registry.register(def);
@@ -1555,6 +1570,13 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				// Virtual routes — registered ids only, not catalog models.
 				if (req.method === "GET" && pathname === "/v1/routes") {
 					return withCors(handleRoutesList(registry), req);
+				}
+				if (req.method === "GET" && pathname.startsWith("/v1/routes/")) {
+					const id = pathname.slice("/v1/routes/".length);
+					if (id.length === 0) {
+						return withCors(handleRoutesList(registry), req);
+					}
+					return withCors(handleRouteGet(registry, id), req);
 				}
 
 				// Route-table miss: no format module to defer to, so we emit a
