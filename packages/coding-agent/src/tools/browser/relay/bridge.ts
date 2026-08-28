@@ -69,6 +69,9 @@ interface SessionRootSubscription {
 
 function subscriptionKey(method: string): string {
 	switch (method) {
+		case "Emulation.setTouchEmulationEnabled":
+		case "Page.setTouchEmulationEnabled":
+			return "TouchEmulationEnabled";
 		case "Emulation.setDeviceMetricsOverride":
 		case "Page.setDeviceMetricsOverride":
 		case "Emulation.clearDeviceMetricsOverride":
@@ -851,7 +854,10 @@ export class RelayBridge {
 			}
 			case "Emulation.setEmulatedMedia":
 			case "Emulation.setLocaleOverride":
-				if (!hasObjectKeys(msg.params)) {
+				if (
+					!hasObjectKeys(msg.params) ||
+					(msg.method === "Emulation.setLocaleOverride" && msg.params?.locale === "")
+				) {
 					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
 					return;
 				}
@@ -905,6 +911,7 @@ export class RelayBridge {
 			case "Network.setBypassServiceWorker":
 			case "Network.setUserAgentOverride":
 			case "Emulation.setUserAgentOverride":
+			case "Security.setIgnoreCertificateErrors":
 				// Persistent root setters survive as long as the shared debugger root.
 				// When a guard-authorized detach swaps that root, replay the latest
 				// winning command for each setter so preserved pseudo-sessions keep the
@@ -928,7 +935,7 @@ export class RelayBridge {
 				case "Page.setBypassCSP":
 				case "Emulation.setTouchEmulationEnabled":
 				case "Page.setTouchEmulationEnabled":
-					tab.subscriptions.delete(msg.method);
+					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
 					break;
 				default:
 					this.#forgetSessionSubscription(tab, msg.method, ownerSessionId);
@@ -937,7 +944,7 @@ export class RelayBridge {
 			return;
 		}
 		if (!ownerIsCurrent) return;
-		this.#rememberSessionSubscription(tab, msg.method, ownerSessionId, {
+		this.#rememberSessionSubscription(tab, subscriptionKey(msg.method), ownerSessionId, {
 			method: msg.method,
 			params: msg.params,
 			ownerSessionId,
@@ -1133,6 +1140,8 @@ export class RelayBridge {
 				return { method: subscription.method, params: { cacheDisabled: false } };
 			case "Network.setBypassServiceWorker":
 				return { method: subscription.method, params: { bypass: false } };
+			case "Security.setIgnoreCertificateErrors":
+				return { method: subscription.method, params: { ignore: false } };
 			case "Page.setBypassCSP":
 			case "Emulation.setTouchEmulationEnabled":
 			case "Page.setTouchEmulationEnabled":

@@ -1759,6 +1759,66 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send")).toHaveLength(0);
 	});
 
+	it("replays preserved certificate-error overrides across recovery and clears orphaned owners", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Security.setIgnoreCertificateErrors",
+				params: { ignore: true },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.rpcs("send").length === 1, "certificate override replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Security.setIgnoreCertificateErrors"]);
+		expect(ext2.rpcs("send")[0]!.params).toEqual({ ignore: true });
+
+		bridge.cdpClosed(ownerConn);
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.rpcs("send").length === 2, "certificate override cleanup");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Security.setIgnoreCertificateErrors",
+			"Security.setIgnoreCertificateErrors",
+		]);
+		expect(ext2.rpcs("send")[1]!.params).toEqual({ ignore: false });
+		ack(bridge, ext2, "send");
+		await flush();
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			holderConn,
+			JSON.stringify({ id: commandId, sessionId: holderSession, method: "Network.getCookies" }),
+		);
+		await flush();
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Security.setIgnoreCertificateErrors",
+			"Security.setIgnoreCertificateErrors",
+			"Network.getCookies",
+		]);
+		ack(bridge, ext2, "send", { cookies: [] });
+		await flush();
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+	});
+
 	it("replays preserved service-worker bypass across recovery and clears orphaned owners", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
@@ -2054,12 +2114,51 @@ describe("RelayBridge tab grouping", () => {
 
 		await sendRootCommand(ownerConn, ownerSession, "Emulation.setLocaleOverride", { locale: "fr-FR" });
 		await sendRootCommand(clearerConn, clearerSession, "Emulation.setLocaleOverride", {});
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setLocaleOverride", { locale: "de-DE" });
+		await sendRootCommand(clearerConn, clearerSession, "Emulation.setLocaleOverride", { locale: "" });
 
 		await sendRootCommand(ownerConn, ownerSession, "Emulation.setEmulatedMedia", {
 			media: "print",
 			features: [{ name: "prefers-color-scheme", value: "dark" }],
 		});
 		await sendRootCommand(clearerConn, clearerSession, "Emulation.setEmulatedMedia", {});
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await flush();
+
+		expect(ext2.rpcs("send")).toHaveLength(0);
+	});
+
+	it("clears touch emulation across Page and Emulation aliases before recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const clearer = new FakeCdpSocket();
+		const clearerConn = bridge.cdpConnected(clearer);
+		const clearerSession = await attachPage(bridge, ext, clearer, clearerConn, 1);
+
+		const sendRootCommand = async (
+			connId: number,
+			sessionId: string,
+			method: string,
+			params?: Record<string, unknown>,
+		): Promise<void> => {
+			const id = ++msgSeq;
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+		};
+
+		await sendRootCommand(ownerConn, ownerSession, "Page.setTouchEmulationEnabled", { enabled: true });
+		await sendRootCommand(clearerConn, clearerSession, "Emulation.setTouchEmulationEnabled", { enabled: false });
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
