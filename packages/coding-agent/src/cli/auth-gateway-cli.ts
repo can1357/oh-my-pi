@@ -30,7 +30,12 @@ import {
 	RemoteAuthCredentialStore,
 	type SnapshotResponse,
 } from "@oh-my-pi/pi-ai/auth-broker";
-import { DEFAULT_AUTH_GATEWAY_BIND, loadRouteDefinitionsFile, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import {
+	DEFAULT_AUTH_GATEWAY_BIND,
+	loadRouteDefinitionsFile,
+	type RouteDefinition,
+	startAuthGateway,
+} from "@oh-my-pi/pi-ai/auth-gateway";
 import { type GeneratedProvider, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -217,7 +222,14 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	await registry.refresh();
 	let modelById = indexModelsByRequestId(registry.getAll(), providersWithCreds);
 
-	const routes = flags.routes ? await loadRouteDefinitionsFile(flags.routes) : undefined;
+	let routes: readonly RouteDefinition[] | undefined;
+	if (flags.routes !== undefined) {
+		const routePath = flags.routes.trim();
+		if (routePath.length === 0) {
+			throw new Error("`omp auth-gateway serve --routes` requires a file path");
+		}
+		routes = await loadRouteDefinitionsFile(routePath);
+	}
 	const handle = startAuthGateway({
 		storage,
 		bind,
