@@ -681,12 +681,11 @@ function recordProviderHealthFailure(
 
 function rememberPromptCacheHit(
 	cacheStore: PromptCacheAffinityStore,
-	body: unknown,
-	requestId: string,
+	fingerprint: string,
 	model: Model<Api>,
 	sessionId: string,
 ): void {
-	cacheStore.remember(resolvePromptCacheKey(body) ?? requestId, {
+	cacheStore.remember(fingerprint, {
 		provider: model.provider,
 		model: model.id,
 		accountId: sessionId,
@@ -1052,7 +1051,7 @@ async function handleFormatEndpoint(
 						return formatError(classified.status, classified.type, errorMessage);
 					}
 					bootOpts.storage.settleQuotaProbeSuccess(requestId);
-					rememberPromptCacheHit(cacheStore, body, requestId, model, sessionId);
+					rememberPromptCacheHit(cacheStore, fingerprint, model, sessionId);
 					await runHook(bootOpts.hooks?.afterRequest, {
 						requestId,
 						routeId: compiled.id,
@@ -1176,7 +1175,7 @@ async function handleFormatEndpoint(
 			return clientClosedResponse(route);
 		}
 		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId, commitGate);
-		rememberPromptCacheHit(cacheStore, body, requestId, model, sessionId);
+		rememberPromptCacheHit(cacheStore, fingerprint, model, sessionId);
 		await runHook(bootOpts.hooks?.afterRequest, {
 			requestId,
 			routeId: compiled.id,
@@ -1540,7 +1539,7 @@ async function handlePiNative(
 						return formatError(classified.status, classified.type, errorMessage);
 					}
 					bootOpts.storage.settleQuotaProbeSuccess(requestId);
-					rememberPromptCacheHit(cacheStore, body, requestId, model, sessionId);
+					rememberPromptCacheHit(cacheStore, fingerprint, model, sessionId);
 					return json(200, { message }, gatewayResponseHeaders(model, { requestId, message, startedAt }));
 				} catch (error) {
 					if (controller.signal.aborted) return aborted();
@@ -1651,7 +1650,7 @@ async function handlePiNative(
 			return aborted();
 		}
 		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId, commitGate);
-		rememberPromptCacheHit(cacheStore, body, requestId, model, sessionId);
+		rememberPromptCacheHit(cacheStore, fingerprint, model, sessionId);
 		return new Response(sseStream, {
 			status: 200,
 			headers: {
