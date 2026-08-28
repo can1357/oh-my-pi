@@ -467,14 +467,15 @@ describe("Agent hub row ordering", () => {
 			// selected message with its full raw body and metadata line.
 			hub.handleInput("3");
 			const frame = hub.render(120).map(Bun.stripANSI);
-			const alphaRow = frame.findIndex(line => line.includes("❯ Main ⇄ Alpha"));
+			const alphaRow = frame.findIndex(line => line.includes("❯") && line.includes("Main ⇄ Alpha"));
 			expect(alphaRow).toBeGreaterThanOrEqual(0);
 			hub.handleInput(`\x1b[<65;10;${alphaRow + 1}M`);
 			const afterListWheel = Bun.stripANSI(hub.render(120).join("\n"));
-			expect(afterListWheel).toContain("Main ⇄ Beta · 0 messages");
+			expect(afterListWheel).toContain("Main ⇄ Beta");
+			expect(afterListWheel).toMatch(/Main ⇄ Beta.*0.*new/u);
 			hub.handleInput(`\x1b[<64;10;${alphaRow + 1}M`);
 			const alphaThread = Bun.stripANSI(hub.render(120).join("\n"));
-			expect(alphaThread).toContain("❯ Main ⇄ Alpha");
+			expect(alphaThread).toContain("Main ⇄ Alpha");
 			// List wheel keeps list focus (no expansion yet)...
 			expect(alphaThread).not.toContain("id a1 · injected");
 			// ...while a wheel over the thread pane focuses it and expands.
@@ -1274,7 +1275,7 @@ describe("Agent hub row ordering", () => {
 			id: "m2",
 			from: "Worker",
 			to: "Main",
-			body: "Found one issue",
+			body: "Found one issue\n- auth bypass",
 			ts: 2_000,
 			replyTo: "m1",
 		});
@@ -1285,9 +1286,11 @@ describe("Agent hub row ordering", () => {
 			const wide = Bun.stripANSI(hub.render(120).join("\n"));
 			expect(wide).toContain("3 Messages");
 			expect(wide).toContain("Conversations");
-			expect(wide).toContain("Worker · 2 messages");
+			expect(wide).toContain("Main ⇄ Worker");
+			expect(wide).toContain("2 messages");
+			expect(wide).toContain("2 delivered");
 			expect(wide).toContain("Found one issue");
-			expect(wide).toContain("↳m1");
+			expect(wide).toContain("↳ m1");
 
 			const narrowList = Bun.stripANSI(hub.render(80).join("\n"));
 			expect(narrowList).toContain("Conversations");
@@ -1295,6 +1298,14 @@ describe("Agent hub row ordering", () => {
 			const narrowThread = Bun.stripANSI(hub.render(80).join("\n"));
 			expect(narrowThread).toContain("Inspect auth");
 			expect(narrowThread).toContain("Found one issue");
+			expect(narrowThread).toContain("│ - auth bypass");
+			expect(narrowThread).toContain("id m2 · injected · ↳ m1");
+			hub.handleInput(" ");
+			expect(Bun.stripANSI(hub.render(80).join("\n"))).not.toContain("id m2 · injected");
+			hub.handleInput(" ");
+			const open = vi.spyOn(hub, "openChat");
+			hub.handleInput("o");
+			expect(open).toHaveBeenCalledWith("Worker");
 
 			hub.handleInput("R");
 			for (const key of "Please patch it") hub.handleInput(key);
@@ -1408,7 +1419,9 @@ describe("Agent hub row ordering", () => {
 		try {
 			await firstRender.promise;
 			const rendered = Bun.stripANSI(hub.render(120).join("\n"));
-			expect(rendered).toContain("Worker · 2 messages");
+			expect(rendered).toContain("Main ⇄ Worker");
+			expect(rendered).toContain("2 messages");
+			expect(rendered).toContain("2 delivered");
 			expect(rendered).toContain("Found one issue");
 
 			records.push({
@@ -1453,16 +1466,16 @@ describe("Agent hub row ordering", () => {
 			expect(list).toContain("Main ⇄ Worker");
 			// The list shows participant pairs only — bodies live in the thread pane.
 			expect(list).not.toContain("Needs attention");
-			expect(list).toMatch(/Worker\s+1/);
+			expect(list).toMatch(/Worker.*●1/u);
 			// Periodic/history refresh and list navigation must not clear unread while only the list is visible.
 			hub.handleInput("k"); // up to the pinned All-agents row
 			hub.handleInput("j"); // back down to the Worker thread
 			const stillUnread = Bun.stripANSI(hub.render(80).join("\n"));
-			expect(stillUnread).toMatch(/Worker\s+1/);
+			expect(stillUnread).toMatch(/Worker.*●1/u);
 			hub.handleInput("\r");
 			const thread = Bun.stripANSI(hub.render(80).join("\n"));
 			expect(thread).toContain("Needs attention");
-			expect(thread).not.toMatch(/Worker\s+1/);
+			expect(thread).not.toMatch(/Worker.*●1/u);
 		} finally {
 			hub.dispose();
 		}
