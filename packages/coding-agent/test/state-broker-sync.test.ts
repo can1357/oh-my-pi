@@ -228,6 +228,58 @@ describe("StateSyncEngine", () => {
 		expect(storeB.get("history").inboundSeq).toBe(total);
 	});
 
+	/**
+	 * A group of rows sharing one `rev` can straddle a page boundary. Every scan
+	 * filters `rev > outboundRev` STRICTLY, so advancing the cursor onto that
+	 * shared rev permanently skips whatever part of the group did not fit.
+	 *
+	 * Not exotic: four domains derive their rev from a whole-second column, and
+	 * a bulk copy or archive extraction stamps many config files with one mtime.
+	 */
+	test("a rev tie straddling the page boundary is not skipped", async () => {
+		const storeA = newSyncStore();
+		const domainA = new FakeDomain("history");
+		const total = STATE_PAGE_LIMIT + 5;
+		// Distinct revs except the pair at the page boundary: row 1000 (the last
+		// of page one) and row 1001 (the first of page two) share rev 1000.
+		for (let i = 1; i <= total; i += 1) {
+			domainA.setLocal({ key: `k${i}`, rev: i === STATE_PAGE_LIMIT + 1 ? STATE_PAGE_LIMIT : i, value: i });
+		}
+
+		await engineFor(storeA, [domainA]).syncOnce();
+
+		// The tied row must not be lost, so every key reaches the broker.
+		expect(brokerStore!.currentSeq("history")).toBe(total);
+		const storeB = newSyncStore();
+		const domainB = new FakeDomain("history");
+		await engineFor(storeB, [domainB]).syncOnce();
+		const keys = new Set(domainB.applied.flat().map(entry => entry.key));
+		expect(keys.size).toBe(total);
+		expect(keys.has(`k${STATE_PAGE_LIMIT + 1}`)).toBe(true);
+	});
+
+	/**
+	 * The degenerate shape: a saturated page entirely at one rev. A rev-only
+	 * cursor cannot page within a single rev, so the engine must push what it
+	 * has and STALL rather than advance and drop the remainder. Asserting
+	 * termination matters as much as the rows: the guard that prevents the skip
+	 * must not turn into a spin.
+	 */
+	test("a full page sharing one rev is pushed without advancing the cursor", async () => {
+		const storeA = newSyncStore();
+		const domainA = new FakeDomain("history");
+		for (let i = 1; i <= STATE_PAGE_LIMIT + 5; i += 1) {
+			domainA.setLocal({ key: `k${i}`, rev: 7, value: i });
+		}
+
+		await engineFor(storeA, [domainA]).syncOnce();
+
+		// A page's worth was delivered, and the cursor stayed put so nothing was
+		// silently skipped past.
+		expect(brokerStore!.currentSeq("history")).toBe(STATE_PAGE_LIMIT);
+		expect(storeA.get("history").outboundRev).toBe(0);
+	});
+
 	test("failure isolation: a throwing domain does not stop a sibling from syncing", async () => {
 		const store = newSyncStore();
 		const good = new FakeDomain("history");

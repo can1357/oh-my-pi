@@ -13,7 +13,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { HTTP_CLIENT_CLOSED, type StateBrokerClient, StateBrokerError } from "./client";
 import type { ReplicatedDomain, StateSyncStore, SyncCursor } from "./replica";
-import { STATE_MAX_WAIT_MS, STATE_PAGE_LIMIT, type StateDomainId } from "./wire";
+import { STATE_MAX_WAIT_MS, STATE_PAGE_LIMIT, type StateDomainId, type StateEntry } from "./wire";
 
 const DEFAULT_INTERVAL_MS = 30_000;
 
@@ -256,23 +256,80 @@ export class StateSyncEngine {
 			if (signal?.aborted) break;
 			const page = domain.changedSince(cursor.outboundRev, STATE_PAGE_LIMIT);
 			if (page.length === 0) break;
-			const scannedRev = page[page.length - 1].rev;
-			// Drop rows we already sent at this exact rev, and rows we merged from
-			// the broker at this exact rev — pushing either back is pure noise.
-			const sendable = page.filter(entry => ledger.get(entry.key) !== entry.rev);
-			if (sendable.length > 0) {
-				await this.#client.push(domain.id, sendable, signal);
-				for (const entry of sendable) ledger.set(entry.key, entry.rev);
-				pushed = true;
+			// A saturated page can cut a group of rows sharing one `rev` in half.
+			// Since every scan filters `rev > outboundRev` STRICTLY, advancing onto
+			// that shared rev would permanently skip the rest of the group. So stop
+			// at the last rev the page covers completely.
+			//
+			// Ties are not exotic: `history`, `titles`, `model-usage` and
+			// `command-usage` derive their rev from a whole-second column, and a
+			// bulk copy or archive extraction can stamp thousands of config files
+			// with one mtime (a filesystem with 1s mtime granularity guarantees it).
+			const batch = this.#completeRevPrefix(page);
+			if (batch.length === 0) {
+				// One rev fills the whole page, so there is no complete rev to stop
+				// at and no way to page within a single rev through a rev-only
+				// cursor. Push what we have, then STALL this domain rather than
+				// advance and lose the remainder. Recoverable: any later write to
+				// one of these rows gives it a new rev.
+				await this.#pushBatch(domain.id, page, ledger, signal);
+				logger.warn(
+					`[state:${domain.id}] ${page.length} rows share rev ${page[0].rev}; replication of this domain is paused until one of them changes`,
+				);
+				return true;
 			}
+			const scannedRev = batch[batch.length - 1].rev;
+			if (await this.#pushBatch(domain.id, batch, ledger, signal)) pushed = true;
 			const nextRev = Math.min(scannedRev, this.#watermarkCeiling());
 			if (nextRev <= cursor.outboundRev) break;
 			cursor.outboundRev = nextRev;
 			this.#store.set(domain.id, cursor);
 			this.#pruneLedger(ledger, cursor.outboundRev);
+			// Saturation is a property of the PAGE, not of the trimmed batch: a
+			// trailing tie shortens the batch while more rows plainly remain, so
+			// testing the batch here would stop the drain one page in.
 			if (page.length < STATE_PAGE_LIMIT) break;
 		}
 		return pushed;
+	}
+
+	/**
+	 * The leading run of `page` that covers only revs the page holds in FULL.
+	 *
+	 * A page is only known to be complete for a rev if the page ends after that
+	 * rev's last row. When the page is saturated its final rev may continue past
+	 * the limit, so those trailing rows are excluded and re-read next iteration.
+	 * An unsaturated page is complete by definition: the scan had nothing more
+	 * to give.
+	 *
+	 * Returns `[]` only when a saturated page is entirely one rev, which no
+	 * rev-only cursor can page through.
+	 */
+	#completeRevPrefix(page: readonly StateEntry[]): readonly StateEntry[] {
+		if (page.length < STATE_PAGE_LIMIT) return page;
+		const lastRev = page[page.length - 1].rev;
+		let end = page.length;
+		while (end > 0 && page[end - 1].rev === lastRev) end--;
+		return end === 0 ? [] : page.slice(0, end);
+	}
+
+	/**
+	 * Push the rows of `batch` the ledger does not already account for, and
+	 * record what was sent. Returns whether anything went out.
+	 */
+	async #pushBatch(
+		id: StateDomainId,
+		batch: readonly StateEntry[],
+		ledger: Map<string, number>,
+		signal?: AbortSignal,
+	): Promise<boolean> {
+		// Drop rows we already sent at this exact rev, and rows we merged from
+		// the broker at this exact rev — pushing either back is pure noise.
+		const sendable = batch.filter(entry => ledger.get(entry.key) !== entry.rev);
+		if (sendable.length === 0) return false;
+		await this.#client.push(id, sendable, signal);
+		for (const entry of sendable) ledger.set(entry.key, entry.rev);
+		return true;
 	}
 
 	/**

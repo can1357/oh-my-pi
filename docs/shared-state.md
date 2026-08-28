@@ -39,6 +39,8 @@ Replication tracks two independent counters. Conflating them corrupts convergenc
 
 The outbound watermark only ever moves on the **push** path, and never past the local clock. Merging a remote entry deliberately leaves it alone: remote `rev`s carry the originating machine's clock, so letting one drag the watermark forward would mute every local write below it until this machine's clock caught up. Echoes are suppressed with a per-key ledger instead, which is an optimization — losing it costs a redundant push that the broker rejects, never a lost row.
 
+A page also never advances the watermark onto a `rev` it covers only partly. Rows sharing one `rev` are common (four domains derive theirs from a whole-second column, and an archive extraction can stamp thousands of files with one mtime), and since the next scan filters `rev > outboundRev` strictly, stopping mid-group would skip the remainder for good. The engine therefore trims the trailing tie and re-reads it next iteration. One shape is beyond a rev-only cursor: a full page in which *every* row shares a `rev`. That is pushed, then the domain pauses with a warning rather than advancing and dropping rows, and it resumes as soon as any of those rows is written again.
+
 ## Replicated domains
 
 Each domain is a thin adapter over an existing local store. It answers exactly two questions — "which of my rows changed after `rev` X?" and "merge these rows into me" — and owns no sync bookkeeping (cursors live in `state-sync.db`).
@@ -50,7 +52,7 @@ Each domain is a thin adapter over an existing local store. It answers exactly t
 | `model-usage`   | Most-recently-used model ordering       | `agent.db` (`AgentStorage`)    | `model_usage.last_used_at` | LWW by `rev` (keep the greater last-used timestamp)              |
 | `command-usage` | Slash-command usage counts/recency      | `agent.db` (`AgentStorage`)    | usage `last_used_at`       | LWW by `rev`                                                     |
 | `config`        | Agent config files (see exclusions)     | files under `~/.omp/agent/`    | file mtime                 | LWW by `rev`; inbound keys re-checked against the replicable set; deleting a file publishes a tombstone |
-| `sessions`      | Session JSONL index rows                | session index (`agent.db`)     | file mtime                 | LWW by `rev`; bodies replicate out-of-band via the object store |
+| `sessions`      | Session JSONL index rows                | session index (`agent.db`)     | file mtime                 | LWW by `rev`; deleting a session publishes a tombstone; bodies replicate out-of-band via the object store |
 
 ### What is intentionally NOT replicated
 
@@ -190,6 +192,8 @@ Key layout under the configured `keyPrefix` (default `omp`):
 ```
 
 The object store is a **replicated archive, not the live write path**. S3 has no append operation, so the local JSONL file stays the authoritative, appendable log that the session runtime writes to; the archive is reconciled in the background. Blobs are content-addressed by `sha256`, so an upload is idempotent and a missing blob is fetched by hash on demand. Body/blob replication is gated by `objects.sessions` and `objects.blobs` respectively and requires `objects.backend: s3`.
+
+Bodies are offered for upload when their index row changes, and separately by a **reconcile pass** every few minutes that compares every owned body against one `list()` per project. The pass is what keeps the archive honest: the index cursor advances as soon as the metadata push succeeds, so a transfer that failed transiently would otherwise never be retried and peers would hold a row pointing at an object that does not exist. It also covers bodies that already existed when object storage was first switched on. A body's owning project always comes from the header-confirmed scan, never from the encoded directory name, which is ambiguous between a subdirectory session and a sibling project's root.
 
 ## Setup
 

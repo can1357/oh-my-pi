@@ -15,6 +15,7 @@ import { createHistoryDomain } from "@oh-my-pi/pi-coding-agent/state-broker/doma
 import { createSessionsDomain, readRemoteSessionIndex } from "@oh-my-pi/pi-coding-agent/state-broker/domains/sessions";
 import { createTitlesDomain, invalidateSyncedTitleIds } from "@oh-my-pi/pi-coding-agent/state-broker/domains/titles";
 import { encodeWireKey, invalidateProjectScope } from "@oh-my-pi/pi-coding-agent/state-broker/project-scope";
+import { StateSyncStore } from "@oh-my-pi/pi-coding-agent/state-broker/replica";
 import { invalidateSessionOwnerCache } from "@oh-my-pi/pi-coding-agent/state-broker/session-files";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 // Type-only alias for the fixture field type; erased at runtime.
@@ -505,6 +506,101 @@ describe("sessions domain", () => {
 		]);
 
 		expect(readRemoteSessionIndex(sessionsDir)).toHaveLength(0);
+	});
+
+	/**
+	 * A live enumeration cannot see a session that is gone, so without a
+	 * publication ledger a delete never reaches the broker. The row then stays
+	 * on the wire, this replica pulls its OWN stale row back, and the deleted
+	 * session reappears as a remote-only stub whose body is still archived, so
+	 * selecting it downloads the session the user just deleted.
+	 */
+	test("emits a tombstone for a session it published and no longer has", () => {
+		const { foo, sessionsDir } = setupHome();
+		const store = new StateSyncStore(path.join(makeDir("omp-sess-sync-"), "sync.db"));
+		try {
+			const dir = path.join(sessionsDir, sessionDirNameForCwd(foo));
+			writeSessionBody(dir, "dddd4444.jsonl", foo, "Doomed");
+			const domain = createSessionsDomain(sessionsDir, store);
+
+			// Publish it, which is what records the key in the ledger.
+			const first = domain.changedSince(0, 100);
+			expect(first).toHaveLength(1);
+			const published = first[0];
+			expect(published.value).not.toBeNull();
+
+			// The user deletes the session.
+			fs.rmSync(path.join(dir, "dddd4444.jsonl"));
+			invalidateSessionOwnerCache();
+
+			const after = domain.changedSince(published.rev, 100);
+			expect(after).toHaveLength(1);
+			expect(after[0].key).toBe(published.key);
+			expect(after[0].value).toBeNull(); // tombstone
+			// The tombstone must be newer than the row it retracts, or LWW on the
+			// receiving side would ignore it.
+			expect(after[0].rev).toBeGreaterThan(published.rev);
+		} finally {
+			store.close();
+		}
+	});
+
+	test("re-offers an undelivered tombstone instead of dropping it", () => {
+		const { foo, sessionsDir } = setupHome();
+		const store = new StateSyncStore(path.join(makeDir("omp-sess-sync-"), "sync.db"));
+		try {
+			const dir = path.join(sessionsDir, sessionDirNameForCwd(foo));
+			writeSessionBody(dir, "eeee5555.jsonl", foo, "Doomed");
+			const domain = createSessionsDomain(sessionsDir, store);
+			const published = domain.changedSince(0, 100)[0];
+
+			fs.rmSync(path.join(dir, "eeee5555.jsonl"));
+			invalidateSessionOwnerCache();
+
+			// Two scans at the same watermark, as happens when a push fails and the
+			// cursor therefore never advanced: the same tombstone rev comes back.
+			const a = domain.changedSince(published.rev, 100);
+			const b = domain.changedSince(published.rev, 100);
+			expect(a).toHaveLength(1);
+			expect(b).toHaveLength(1);
+			expect(b[0].rev).toBe(a[0].rev);
+			expect(b[0].value).toBeNull();
+		} finally {
+			store.close();
+		}
+	});
+
+	/**
+	 * A tombstone must outrank the row it retracts. Deleting a session in the
+	 * same millisecond it was published makes `Date.now()` equal to the
+	 * published rev (which is the body's floored mtime), and an equal rev both
+	 * fails the domain's own `rev > afterRev` emit test and loses to LWW on the
+	 * receiving side. The clock is pinned here so the race is deterministic
+	 * rather than dependent on how fast the suite runs.
+	 */
+	test("a deletion in the same millisecond as its publication still tombstones", () => {
+		const { foo, sessionsDir } = setupHome();
+		const store = new StateSyncStore(path.join(makeDir("omp-sess-sync-"), "sync.db"));
+		const nowSpy = spyOn(Date, "now");
+		try {
+			const dir = path.join(sessionsDir, sessionDirNameForCwd(foo));
+			writeSessionBody(dir, "ffff6666.jsonl", foo, "Doomed");
+			const domain = createSessionsDomain(sessionsDir, store);
+			const published = domain.changedSince(0, 100)[0];
+
+			fs.rmSync(path.join(dir, "ffff6666.jsonl"));
+			invalidateSessionOwnerCache();
+			// The worst case: the wall clock reads exactly the published rev.
+			nowSpy.mockReturnValue(published.rev);
+
+			const after = domain.changedSince(published.rev, 100);
+			expect(after).toHaveLength(1);
+			expect(after[0].value).toBeNull();
+			expect(after[0].rev).toBeGreaterThan(published.rev);
+		} finally {
+			nowSpy.mockRestore();
+			store.close();
+		}
 	});
 });
 

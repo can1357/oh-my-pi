@@ -94,7 +94,13 @@ export function createConfigDomain(agentDir: string = getAgentDir(), store?: Sta
 					if (liveKeys.has(prior.key)) continue;
 					// Absent locally. Latch a tombstone rev on first sight, then keep
 					// re-offering the same rev until the watermark passes it.
-					const rev = prior.deleted ? prior.rev : now;
+					//
+					// Strictly ABOVE the row it retracts: a file's published rev is
+					// its floored mtime, so deleting it within the same millisecond
+					// makes `Date.now()` equal to that rev, the `rev > afterRev` test
+					// below fails, and the tombstone is dropped AND forgotten. An
+					// equal rev would also lose to LWW on the receiving side.
+					const rev = prior.deleted ? prior.rev : Math.max(now, prior.rev + 1);
 					if (!prior.deleted) store.recordDeleted("config", prior.key, rev);
 					if (rev > afterRev) {
 						pending.push({ rel: fromPosixKey(prior.key), rev, deleted: true });

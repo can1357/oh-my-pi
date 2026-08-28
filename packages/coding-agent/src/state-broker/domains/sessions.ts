@@ -19,8 +19,13 @@ import { SESSION_TITLE_SLOT_BYTES } from "../../session/session-entries";
 import { sessionDirNameForCwd } from "../../session/session-paths";
 import { parseTitleSlotFromContent } from "../../session/session-title-slot";
 import { decodeWireKey, encodeWireKey, projectById } from "../project-scope";
-import type { ReplicatedDomain } from "../replica";
-import { isValidWireRelCwd, isValidWireSessionFile, scanOwnedSessionFiles } from "../session-files";
+import type { ReplicatedDomain, StateSyncStore } from "../replica";
+import {
+	isValidWireRelCwd,
+	isValidWireSessionFile,
+	type OwnedSessionFile,
+	scanOwnedSessionFiles,
+} from "../session-files";
 import type { StateEntry } from "../wire";
 
 /** Metadata a remote-only session needs to appear in the resume picker. */
@@ -119,13 +124,22 @@ class SessionsDomain implements ReplicatedDomain {
 	 */
 	#index: Record<string, SessionIndexEntry> | undefined;
 
-	constructor(sessionsDir: string) {
+	/**
+	 * The replica's own cursor database, used to remember published keys so a
+	 * local deletion becomes a tombstone. Undefined runs the domain without
+	 * deletion propagation.
+	 */
+	readonly #store: StateSyncStore | undefined;
+
+	constructor(sessionsDir: string, store?: StateSyncStore) {
 		this.#sessionsDir = sessionsDir;
+		this.#store = store;
 	}
 
 	/**
 	 * Session bodies of SYNC-ENABLED projects only, whose mtime is strictly
-	 * newer than `afterRev`, ascending by mtime, capped at `limit`.
+	 * newer than `afterRev`, ascending by mtime, capped at `limit`, plus
+	 * tombstones for sessions this replica published and no longer has.
 	 *
 	 * Directory enumeration and project-ownership confirmation live in
 	 * {@link scanOwnedSessionFiles}, shared with the `titles` domain so the two
@@ -135,29 +149,69 @@ class SessionsDomain implements ReplicatedDomain {
 	 * last returned entry's `rev`. Filtering (mtime AND ownership) happens
 	 * DURING the scan, before the limit, so a capped page is never post-filtered
 	 * down to empty while newer eligible rows wait beyond it.
+	 *
+	 * A live enumeration alone cannot see a session that is gone, so deleting
+	 * one through the picker used to leave its row on the broker forever. Worse,
+	 * this replica then pulled its OWN published row back and the deleted
+	 * session reappeared as a remote-only stub whose body was still in the
+	 * archive, so selecting it downloaded the session the user had just deleted.
+	 * The published-key ledger is what makes the deletion expressible.
 	 */
 	changedSince(afterRev: number, limit: number): StateEntry[] {
-		const changed = scanOwnedSessionFiles(this.#sessionsDir, { afterRev });
-		changed.sort((a, b) => a.mtimeMs - b.mtimeMs);
-		const page = changed.slice(0, Math.max(0, limit));
-		return page.map(entry => ({
-			// The wire key is `<projectId>\0<file>`: the filename carries a UUID so
-			// it is unique across a project's subdirectories, and the key therefore
-			// need NOT encode location. `relCwd` in the value carries location.
-			key: encodeWireKey(entry.projectId, entry.file),
-			rev: entry.mtimeMs,
-			value: {
-				projectId: entry.projectId,
-				// Where the session lives inside the project; the receiver needs it
-				// to place the body in the right local subdirectory.
-				relCwd: entry.relCwd,
-				file: entry.file,
-				size: entry.size,
-				mtimeMs: entry.mtimeMs,
-				// Read the title only for the capped page, not every scanned file.
-				title: readTitleSlot(entry.abs),
-			},
-		}));
+		const owned = scanOwnedSessionFiles(this.#sessionsDir, { afterRev: 0 });
+		const pending: Array<{ key: string; rev: number; file?: OwnedSessionFile }> = [];
+		for (const file of owned) {
+			if (file.mtimeMs > afterRev) {
+				// The wire key is `<projectId>\0<file>`: the filename carries a UUID
+				// so it is unique across a project's subdirectories, and the key
+				// therefore need NOT encode location. `relCwd` carries location.
+				pending.push({ key: encodeWireKey(file.projectId, file.file), rev: file.mtimeMs, file });
+			}
+		}
+		if (this.#store) {
+			const liveKeys = new Set(owned.map(f => encodeWireKey(f.projectId, f.file)));
+			const now = Date.now();
+			for (const prior of this.#store.published("sessions")) {
+				if (liveKeys.has(prior.key)) continue;
+				// Absent locally. Latch a tombstone rev on first sight, then keep
+				// re-offering the same rev until the watermark passes it, so a
+				// failed push retries instead of dropping the deletion.
+				//
+				// The rev must be strictly ABOVE the row it retracts, and
+				// `Date.now()` alone is not: a body's published rev is its floored
+				// mtime, so deleting a session in the same millisecond it was
+				// published yields `now === prior.rev`, the `rev > afterRev` test
+				// below fails, and the tombstone is dropped AND forgotten. LWW on
+				// the receiving side would ignore an equal rev anyway.
+				const rev = prior.deleted ? prior.rev : Math.max(now, prior.rev + 1);
+				if (!prior.deleted) this.#store.recordDeleted("sessions", prior.key, rev);
+				if (rev > afterRev) pending.push({ key: prior.key, rev });
+				else this.#store.forgetPublished("sessions", prior.key);
+			}
+		}
+
+		// Sort and cap AFTER assembling both kinds; the filtering above already
+		// happened, so a capped page is never post-filtered to empty.
+		pending.sort((a, b) => a.rev - b.rev);
+		return pending.slice(0, Math.max(0, limit)).map(item => {
+			if (!item.file) return { key: item.key, rev: item.rev, value: null };
+			this.#store?.recordPublished("sessions", item.key, item.rev);
+			return {
+				key: item.key,
+				rev: item.rev,
+				value: {
+					projectId: item.file.projectId,
+					// Where the session lives inside the project; the receiver needs
+					// it to place the body in the right local subdirectory.
+					relCwd: item.file.relCwd,
+					file: item.file.file,
+					size: item.file.size,
+					mtimeMs: item.file.mtimeMs,
+					// Read the title only for the capped page, not every scanned file.
+					title: readTitleSlot(item.file.abs),
+				},
+			};
+		});
 	}
 
 	/**
@@ -288,20 +342,28 @@ class SessionsDomain implements ReplicatedDomain {
  * Build the sessions replication domain. Constructing it touches no disk; the
  * index cache is created only when a remote row is actually merged.
  */
-export function createSessionsDomain(sessionsDir: string = getSessionsDir()): ReplicatedDomain {
-	return new SessionsDomain(sessionsDir);
+export function createSessionsDomain(
+	sessionsDir: string = getSessionsDir(),
+	store?: StateSyncStore,
+): ReplicatedDomain {
+	return new SessionsDomain(sessionsDir, store);
 }
 
 /**
  * Map a wire index entry from {@link SessionsDomain.changedSince} to this
- * machine's local session rel (`<localDirName>/<file>`), or undefined when the
- * entry's project is not registered/synced here. The registry's body uploader
- * uses it to schedule the matching body: the local dir name is derived from the
- * project mapping PLUS the session's project-relative cwd (from the value), so a
- * subdirectory session resolves to its own local subdir — never read from a
- * machine-specific path on the wire.
+ * machine's local session rel (`<localDirName>/<file>`) plus the project id
+ * that owns it, or undefined when the entry's project is not registered/synced
+ * here. The registry's body uploader uses it to schedule the matching body: the
+ * local dir name is derived from the project mapping PLUS the session's
+ * project-relative cwd (from the value), so a subdirectory session resolves to
+ * its own local subdir — never read from a machine-specific path on the wire.
+ *
+ * The id is returned rather than left for the caller to re-derive, because the
+ * encoded dir name is ambiguous between a subdirectory session and a sibling
+ * project's root; deriving ownership from it can key a body under the wrong
+ * project.
  */
-export function localSessionRelForEntry(entry: StateEntry): string | undefined {
+export function localSessionRelForEntry(entry: StateEntry): { rel: string; projectId: string } | undefined {
 	const decoded = typeof entry.key === "string" ? decodeWireKey(entry.key) : undefined;
 	if (!decoded) return undefined;
 	const project = projectById(decoded.id);
@@ -312,5 +374,5 @@ export function localSessionRelForEntry(entry: StateEntry): string | undefined {
 	const localDir = sessionDirNameForCwd(
 		relCwd ? path.join(project.localPath, ...relCwd.split("/")) : project.localPath,
 	);
-	return `${localDir}/${decoded.rel}`;
+	return { rel: `${localDir}/${decoded.rel}`, projectId: project.id };
 }

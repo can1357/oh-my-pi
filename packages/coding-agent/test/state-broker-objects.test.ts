@@ -234,15 +234,15 @@ describe("SessionReplicator", () => {
 	test("uploadIfStale uploads a synced project's body", async () => {
 		const fx = setup(true);
 		const rel = seedLocalBody(fx, "sess.jsonl", path.join(fx.foo, "pkg", "a"), "T");
-		await fx.replicator.uploadIfStale(rel);
+		await fx.replicator.uploadIfStale(rel, "proj:foo");
 		expect(fx.fake.map.has(sessionKey(`${projectObjectSlug("proj:foo")}/sess.jsonl`))).toBe(true);
 	});
 
 	test("uploadIfStale / scheduleUpload are NO-OPS for a sync:false project", async () => {
 		const fx = setup(false);
 		const rel = seedLocalBody(fx, "sess.jsonl", path.join(fx.foo, "pkg", "a"), "T");
-		await fx.replicator.uploadIfStale(rel);
-		fx.replicator.scheduleUpload(rel);
+		await fx.replicator.uploadIfStale(rel, "proj:foo");
+		fx.replicator.scheduleUpload(rel, "proj:foo");
 		await fx.replicator.drain();
 		expect(fx.fake.puts).toBe(0);
 		expect(fx.fake.map.size).toBe(0);
@@ -251,7 +251,7 @@ describe("SessionReplicator", () => {
 	test("drain() flushes a debounced scheduleUpload", async () => {
 		const fx = setup(true);
 		const rel = seedLocalBody(fx, "sess.jsonl", path.join(fx.foo, "pkg", "a"), "T");
-		fx.replicator.scheduleUpload(rel); // debounced 3s; drain must fast-flush it
+		fx.replicator.scheduleUpload(rel, "proj:foo"); // debounced 3s; drain must fast-flush it
 		await fx.replicator.drain();
 		expect(fx.fake.map.has(sessionKey(`${projectObjectSlug("proj:foo")}/sess.jsonl`))).toBe(true);
 	});
@@ -272,7 +272,7 @@ describe("SessionReplicator", () => {
 
 		const localDir = sessionDirNameForCwd(path.join(fx.foo, "pkg", "a"));
 		const rel = `${localDir}/${file}`;
-		expect(await fx.replicator.ensureLocal(rel, { relCwd })).toBe(true);
+		expect(await fx.replicator.ensureLocal(rel, { projectId: "proj:foo", relCwd })).toBe(true);
 
 		const landed = fs.readFileSync(path.join(fx.sessionsDir, localDir, file), "utf-8");
 		// Title slot preserved byte-for-byte (first 256 bytes) and still parses.
@@ -292,7 +292,9 @@ describe("SessionReplicator", () => {
 		const localDir = sessionDirNameForCwd(path.join(fx.foo, "pkg", "a"));
 		// Even if a matching remote object existed, an unsynced rel must not pull.
 		await fx.fake.put(sessionKey(`${projectObjectSlug("proj:foo")}/${file}`), Buffer.from("{}"));
-		expect(await fx.replicator.ensureLocal(`${localDir}/${file}`, { relCwd: "pkg/a" })).toBe(false);
+		expect(await fx.replicator.ensureLocal(`${localDir}/${file}`, { projectId: "proj:foo", relCwd: "pkg/a" })).toBe(
+			false,
+		);
 		expect(fs.existsSync(path.join(fx.sessionsDir, localDir, file))).toBe(false);
 	});
 });

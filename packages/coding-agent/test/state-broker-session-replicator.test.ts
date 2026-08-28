@@ -136,7 +136,7 @@ describe("SessionReplicator.uploadIfStale staleness", () => {
 		expect(localBytes.length).toBeLessThan(remoteBody.length); // the trap precondition
 		fs.utimesSync(local.abs, new Date(5_000), new Date(5_000));
 
-		await fx.replicator.uploadIfStale(local.rel);
+		await fx.replicator.uploadIfStale(local.rel, "proj:foo");
 
 		// The upload happened and replaced the remote with the newer local body,
 		// even though it is fewer bytes — proving mtime, not size, drove it.
@@ -149,7 +149,7 @@ describe("SessionReplicator.uploadIfStale staleness", () => {
 		const local = writeLocalBody(fx, "new.jsonl", `${JSON.stringify({ type: "session" })}\n`);
 		expect(fx.fake.map.has(keyFor("new.jsonl"))).toBe(false);
 
-		await fx.replicator.uploadIfStale(local.rel);
+		await fx.replicator.uploadIfStale(local.rel, "proj:foo");
 
 		expect(fx.fake.puts).toBe(1);
 		expect(fx.fake.map.has(keyFor("new.jsonl"))).toBe(true);
@@ -162,11 +162,11 @@ describe("SessionReplicator.uploadIfStale staleness", () => {
 		const fx = setup();
 		const local = writeLocalBody(fx, "steady.jsonl", `${JSON.stringify({ type: "session" })}\n`);
 
-		await fx.replicator.uploadIfStale(local.rel);
+		await fx.replicator.uploadIfStale(local.rel, "proj:foo");
 		expect(fx.fake.puts).toBe(1);
 		// Second and third cycles with no local change: no further uploads.
-		await fx.replicator.uploadIfStale(local.rel);
-		await fx.replicator.uploadIfStale(local.rel);
+		await fx.replicator.uploadIfStale(local.rel, "proj:foo");
+		await fx.replicator.uploadIfStale(local.rel, "proj:foo");
 		expect(fx.fake.puts).toBe(1);
 	});
 });
@@ -239,7 +239,7 @@ describe("SessionReplicator concurrency cap", () => {
 		const dirName = sessionDirNameForCwd(foo);
 		// Ten distinct, not-yet-local sessions: each ensureLocal must take a slot
 		// and block in the gated `get`. Files intentionally do NOT exist on disk.
-		const pending = Array.from({ length: 10 }, (_, i) => replicator.ensureLocal(`${dirName}/s${i}.jsonl`));
+		const pending = Array.from({ length: 10 }, (_, i) => replicator.ensureLocal(`${dirName}/s${i}.jsonl`, { projectId: "proj:foo" }));
 
 		// Await the exact moment four transfers are in flight. The gate is closed,
 		// so no slot can free and no fifth `get` can be admitted — the state is
@@ -254,5 +254,113 @@ describe("SessionReplicator concurrency cap", () => {
 		// stayed at the cap across all three waves (4 + 4 + 2) — never exceeded 4.
 		expect(results).toEqual(Array.from({ length: 10 }, () => false));
 		expect(gated.peak).toBe(4);
+	});
+});
+
+describe("SessionReplicator project identity", () => {
+	/**
+	 * The encoded directory name is ambiguous: a session in `<home>/p/foo/bar`
+	 * and one at the root of the sibling project `<home>/p/foo-bar` both encode
+	 * to `-p-foo-bar`. Deriving ownership from that name by longest prefix picks
+	 * `foo-bar` for both, so the body lands under the wrong project's key while
+	 * the index row stays keyed to `foo`, and peers cannot fetch the body they
+	 * were told about. Identity must come from the confirmed id instead.
+	 */
+	test("uploads a subdirectory session under its own project, not a name-sibling", async () => {
+		const home = makeDir("omp-amb-home-");
+		homedirSpy = spyOn(os, "homedir").mockReturnValue(home);
+		const foo = path.join(home, "p", "foo");
+		const fooBar = path.join(home, "p", "foo-bar");
+		fs.mkdirSync(path.join(foo, "bar"), { recursive: true });
+		fs.mkdirSync(fooBar, { recursive: true });
+		saveProjects(
+			[
+				{ id: "proj:foo", path: foo, sync: true },
+				{ id: "proj:foo-bar", path: fooBar, sync: true },
+			],
+			AGENT_DIR,
+		);
+		ProjectsConfigFile.invalidate();
+		invalidateProjectScope();
+
+		// Both of these encode to the SAME directory name.
+		const shared = sessionDirNameForCwd(path.join(foo, "bar"));
+		expect(shared).toBe(sessionDirNameForCwd(fooBar));
+
+		const sessionsDir = path.join(makeDir("omp-amb-root-"), "sessions");
+		fs.mkdirSync(path.join(sessionsDir, shared), { recursive: true });
+		const file = "aaaa1111.jsonl";
+		fs.writeFileSync(path.join(sessionsDir, shared, file), "{}\n");
+
+		const fake = new FakeObjectStore();
+		const replicator = new SessionReplicator({ store: fake, sessionsDir });
+		// The id the owning scan confirmed from the body's header, not the one the
+		// directory name suggests.
+		await replicator.uploadIfStale(`${shared}/${file}`, "proj:foo");
+
+		const keys = [...fake.map.keys()];
+		expect(keys).toEqual([sessionKey(`${projectObjectSlug("proj:foo")}/${file}`)]);
+		expect(keys[0]).not.toContain(projectObjectSlug("proj:foo-bar"));
+	});
+});
+
+describe("SessionReplicator.maybeReconcile", () => {
+	/**
+	 * Uploads are scheduled from `changedSince` index rows, and the outbound
+	 * cursor advances once the METADATA push succeeds. So a body whose transfer
+	 * failed was never offered again: peers held an index row pointing at an
+	 * object that does not exist, until that session happened to be written
+	 * again. Reconcile has to be able to repair it with no index change at all.
+	 */
+	test("re-uploads a body whose first transfer failed, with no index change", async () => {
+		const fx = setup();
+		const file = "bbbb2222.jsonl";
+		// A real session body: reconcile only considers files whose header cwd
+		// confirms them as owned by a synced project.
+		const dirName = sessionDirNameForCwd(fx.foo);
+		fs.mkdirSync(path.join(fx.sessionsDir, dirName), { recursive: true });
+		fs.writeFileSync(
+			path.join(fx.sessionsDir, dirName, file),
+			`${JSON.stringify({ type: "session", version: 1, id: "bbbb2222", cwd: fx.foo })}\n`,
+		);
+
+		// First attempt fails, exactly as a transient object-store error would.
+		let failNext = true;
+		const original = fx.fake.put.bind(fx.fake);
+		const putSpy = spyOn(fx.fake, "put").mockImplementation(async (key, data) => {
+			if (failNext) {
+				failNext = false;
+				throw new Error("transient");
+			}
+			await original(key, data);
+		});
+		try {
+			await fx.replicator.uploadIfStale(`${dirName}/${file}`, "proj:foo");
+			expect(fx.fake.map.size).toBe(0);
+
+			// No index row changes; reconcile alone must notice and repair.
+			fx.replicator.maybeReconcile();
+			await fx.replicator.drain();
+
+			expect(fx.fake.map.has(keyFor(file))).toBe(true);
+		} finally {
+			putSpy.mockRestore();
+		}
+	});
+
+	test("skips a body the store already holds at the same mtime", async () => {
+		const fx = setup();
+		const file = "cccc3333.jsonl";
+		const dirName = sessionDirNameForCwd(fx.foo);
+		fs.mkdirSync(path.join(fx.sessionsDir, dirName), { recursive: true });
+		const abs = path.join(fx.sessionsDir, dirName, file);
+		fs.writeFileSync(abs, `${JSON.stringify({ type: "session", version: 1, id: "cccc3333", cwd: fx.foo })}\n`);
+		// Remote already at or past the local mtime.
+		fx.fake.seed(keyFor(file), Buffer.from("{}"), Math.floor(fs.statSync(abs).mtimeMs) + 1_000);
+
+		fx.replicator.maybeReconcile();
+		await fx.replicator.drain();
+
+		expect(fx.fake.puts).toBe(0);
 	});
 });

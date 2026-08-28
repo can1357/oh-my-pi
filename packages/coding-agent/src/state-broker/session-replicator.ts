@@ -26,12 +26,20 @@ import { sessionDirNameForCwd } from "../session/session-paths";
 import { parseTitleSlotLine } from "../session/session-title-slot";
 import { type ObjectStore, sessionKey } from "./object-store";
 import { listSyncedProjects, projectObjectSlug, type ScopedProject } from "./project-scope";
+import { type OwnedSessionFile, scanOwnedSessionFiles } from "./session-files";
 
 /** Quiet period before a scheduled upload fires, coalescing a burst of appends. */
 const UPLOAD_DEBOUNCE_MS = 3_000;
 
 /** Ceiling on concurrent object-store transfers, shared by uploads and downloads. */
 const MAX_CONCURRENT_TRANSFERS = 4;
+
+/**
+ * Minimum gap between full reconcile passes. Long enough that the per-project
+ * `list()` is negligible next to the sync interval, short enough that a body
+ * stranded by a transient failure is repaired within the same session.
+ */
+const RECONCILE_INTERVAL_MS = 5 * 60_000;
 
 export interface SessionReplicatorOptions {
 	store: ObjectStore;
@@ -42,14 +50,20 @@ export class SessionReplicator {
 	readonly #store: ObjectStore;
 	readonly #sessionsDir: string;
 
-	/** Per-path debounce timers, coalescing repeated `scheduleUpload` calls. */
-	readonly #timers = new Map<string, Timer>();
+	/**
+	 * Per-path debounce timers, coalescing repeated `scheduleUpload` calls. The
+	 * confirmed project id rides along because {@link drain} fires the pending
+	 * uploads itself, and ownership must never be re-derived from the path.
+	 */
+	readonly #timers = new Map<string, { timer: Timer; projectId: string }>();
 	/** In-flight transfer promises, awaited by {@link drain}. */
 	readonly #inflight = new Set<Promise<void>>();
 
 	/** Simple counting semaphore bounding concurrent transfers. */
 	#active = 0;
 	readonly #waiters: Array<() => void> = [];
+	/** Epoch millis of the last reconcile pass; 0 so the first call always runs. */
+	#lastReconcileAt = 0;
 
 	constructor(opts: SessionReplicatorOptions) {
 		this.#store = opts.store;
@@ -62,36 +76,30 @@ export class SessionReplicator {
 	}
 
 	/**
-	 * Resolve a local session `rel` (`<encodedDir>/<file>.jsonl`) to the synced
-	 * project that owns it, plus the bare file name. Returns undefined when the
-	 * rel's directory maps to no sync-enabled project — the enforcement point
-	 * for the per-project toggle on session BODIES: a rel outside a synced
-	 * project is never uploaded, downloaded, or keyed into the object store.
+	 * Resolve a CONFIRMED project id to the synced project that owns it, plus
+	 * the bare file name from `rel`.
 	 *
-	 * A session may live in a SUBDIRECTORY of a project, whose encoded dir name
-	 * extends the project root's (`~/projects/foo/pkg/a` -> `-projects-foo-pkg-a`
-	 * vs `-projects-foo`), so we match the project root name OR a `<base>-...`
-	 * extension. The trailing `-` is essential: a bare `startsWith(base)` would
-	 * also claim a sibling project like `~/projects/foobar` (`-projects-foobar`)
-	 * for `~/projects/foo`. When a nested project is also registered, the DEEPEST
-	 * (longest) base wins — the body belongs to the innermost project. The object
-	 * key is project+file only (filenames are UUID-unique), so identifying the
-	 * project is sufficient; the in-project subdir does not affect the key.
+	 * The id must come from the scan that read the body's header `cwd`
+	 * (`scanOwnedSessionFiles`) or from an index row keyed by it. This class
+	 * used to re-derive the project from the encoded directory name by longest
+	 * prefix, which is unsound: the encoding is not reversible, so a session in
+	 * `~/u/foo/bar` and one at the root of a sibling project `~/u/foo-bar` share
+	 * the encoded name `-u-foo-bar`. Longest-prefix then picked `foo-bar` for
+	 * both, and the body was uploaded under one project's key while the index
+	 * row it belongs to was published under the other's, so peers resolved the
+	 * advertised body to a key that does not exist.
+	 *
+	 * Returns undefined when the project is unregistered here or has sync off,
+	 * which is the enforcement point for the per-project toggle on BODIES.
 	 */
-	#projectForRel(rel: string): { project: ScopedProject; file: string } | undefined {
+	#scopeFor(rel: string, projectId: string): { project: ScopedProject; file: string } | undefined {
 		const slash = rel.indexOf("/");
 		if (slash <= 0) return undefined;
-		const dirName = rel.slice(0, slash);
 		const file = rel.slice(slash + 1);
 		// Session files live directly under the per-cwd dir; reject nesting.
 		if (!file || file.includes("/")) return undefined;
-		let best: { project: ScopedProject; baseLen: number } | undefined;
-		for (const project of listSyncedProjects()) {
-			const base = sessionDirNameForCwd(project.localPath);
-			if (dirName !== base && !dirName.startsWith(`${base}-`)) continue;
-			if (!best || base.length > best.baseLen) best = { project, baseLen: base.length };
-		}
-		return best ? { project: best.project, file } : undefined;
+		const project = listSyncedProjects().find(p => p.id === projectId);
+		return project ? { project, file } : undefined;
 	}
 
 	/**
@@ -152,8 +160,8 @@ export class SessionReplicator {
 	 * a floored remote value (100.9 vs 100) would re-upload forever. Only the
 	 * `list()` metadata is read to compare, never the remote body itself.
 	 */
-	async uploadIfStale(rel: string): Promise<void> {
-		const scoped = this.#projectForRel(rel);
+	async uploadIfStale(rel: string, projectId: string): Promise<void> {
+		const scoped = this.#scopeFor(rel, projectId);
 		if (!scoped) {
 			// Per-project toggle / unregistered project: bodies stay local-only.
 			logger.debug(`[session-replicator] upload skipped, not a synced project: ${rel}`);
@@ -196,14 +204,14 @@ export class SessionReplicator {
 	 * root). The header is rewritten to `<project.localPath>/<relCwd>` — the
 	 * session's local SUBDIRECTORY, not the project root — so a session started
 	 * deep in a monorepo resumes in the right directory here. The resume path
-	 * passes it from the index; when absent (older caller) we fall back to the
-	 * project root, since the encoded dir name is not losslessly reversible.
+	 * passes it from the index; when absent we fall back to the project root,
+	 * since the encoded dir name is not losslessly reversible.
 	 */
-	async ensureLocal(rel: string, opts?: { relCwd?: string }): Promise<boolean> {
+	async ensureLocal(rel: string, opts: { projectId: string; relCwd?: string }): Promise<boolean> {
 		const abs = this.#localPath(rel);
 		if (fs.existsSync(abs)) return true;
 
-		const scoped = this.#projectForRel(rel);
+		const scoped = this.#scopeFor(rel, opts.projectId);
 		if (!scoped) {
 			// Not a synced project here — there is no project-keyed object to pull.
 			logger.debug(`[session-replicator] download skipped, not a synced project: ${rel}`);
@@ -211,11 +219,11 @@ export class SessionReplicator {
 		}
 
 		// The session's local root is the project path plus its in-project subdir.
-		let relCwd = opts?.relCwd;
+		let relCwd = opts.relCwd;
 		if (relCwd === undefined) {
-			// Fall back to the rel's own dir name: only the project-root dir maps
-			// back unambiguously (relCwd ""); a deeper encoded name is not
-			// losslessly reversible, so we degrade to the project root and note it.
+			// Only the project-root dir maps back unambiguously (relCwd ""); a
+			// deeper encoded name is not losslessly reversible, so we degrade to
+			// the project root and note it.
 			const dirName = rel.slice(0, rel.indexOf("/"));
 			relCwd = "";
 			if (dirName !== sessionDirNameForCwd(scoped.project.localPath)) {
@@ -223,7 +231,6 @@ export class SessionReplicator {
 			}
 		}
 		const localRoot = relCwd ? path.join(scoped.project.localPath, ...relCwd.split("/")) : scoped.project.localPath;
-
 		return this.#withSlot(async () => {
 			try {
 				const bytes = await this.#store.get(this.#objectKey(scoped.project, scoped.file));
@@ -250,24 +257,83 @@ export class SessionReplicator {
 	}
 
 	/**
-	 * Debounce and coalesce an upload for `rel`. Fire-and-forget: the timer is
-	 * `unref`'d so it never keeps the process alive, and its eventual work is
-	 * tracked so {@link drain} can await it.
+	 * Debounce and coalesce an upload for `rel`, whose owning project id must
+	 * already be confirmed. Fire-and-forget: the timer is `unref`'d so it never
+	 * keeps the process alive, and its eventual work is tracked so
+	 * {@link drain} can await it.
 	 */
-	scheduleUpload(rel: string): void {
-		if (!this.#projectForRel(rel)) {
+	scheduleUpload(rel: string, projectId: string): void {
+		if (!this.#scopeFor(rel, projectId)) {
 			// Enforce the per-project body toggle at the debounce entry point too,
 			// so a non-synced session never even schedules a transfer.
 			logger.debug(`[session-replicator] schedule skipped, not a synced project: ${rel}`);
 			return;
 		}
-		clearTimeout(this.#timers.get(rel));
+		clearTimeout(this.#timers.get(rel)?.timer);
 		const timer = setTimeout(() => {
 			this.#timers.delete(rel);
-			this.#track(this.uploadIfStale(rel));
+			this.#track(this.uploadIfStale(rel, projectId));
 		}, UPLOAD_DEBOUNCE_MS);
 		timer.unref?.();
-		this.#timers.set(rel, timer);
+		this.#timers.set(rel, { timer, projectId });
+	}
+
+	/**
+	 * Upload every owned body the object store is missing or holds an older copy
+	 * of, independently of the index watermark. Throttled to
+	 * {@link RECONCILE_INTERVAL_MS}; the first call always runs.
+	 *
+	 * Scheduled uploads alone are not enough to keep bodies and index rows in
+	 * agreement, because they are driven by `changedSince` rows and the outbound
+	 * cursor advances once the METADATA push succeeds. So a transfer that failed
+	 * transiently was never retried: peers held an index row whose body did not
+	 * exist, until that session happened to be written again. The same gap
+	 * appeared when body replication was switched on after the cursor had
+	 * already passed the existing sessions — none of them were ever offered.
+	 *
+	 * Costs one `list()` per project rather than one per session: the remote
+	 * mtimes come back in a single call and the comparison is local.
+	 *
+	 * Tracked in {@link drain} rather than left detached, so a shutdown that
+	 * lands mid-pass still waits for the transfers it started.
+	 */
+	maybeReconcile(): void {
+		const now = Date.now();
+		if (now - this.#lastReconcileAt < RECONCILE_INTERVAL_MS) return;
+		this.#lastReconcileAt = now;
+		this.#track(this.#reconcile());
+	}
+
+	async #reconcile(): Promise<void> {
+		// afterRev 0: every owned body, with ownership confirmed by header cwd.
+		const owned = scanOwnedSessionFiles(this.#sessionsDir, { afterRev: 0 });
+		if (owned.length === 0) return;
+		const byProject = new Map<string, OwnedSessionFile[]>();
+		for (const file of owned) {
+			const bucket = byProject.get(file.projectId);
+			if (bucket) bucket.push(file);
+			else byProject.set(file.projectId, [file]);
+		}
+
+		for (const [projectId, files] of byProject) {
+			const slug = projectObjectSlug(projectId);
+			let remote: Map<string, number>;
+			try {
+				const listed = await this.#store.list(sessionKey(`${slug}/`));
+				remote = new Map(listed.map(item => [item.key, Math.floor(item.mtimeMs)]));
+			} catch (err) {
+				// A dead store degrades to local-only; the next pass retries.
+				logger.warn(`[session-replicator] reconcile list failed for ${projectId}: ${String(err)}`);
+				continue;
+			}
+			for (const file of files) {
+				const at = remote.get(sessionKey(`${slug}/${file.file}`));
+				if (at !== undefined && Math.floor(file.mtimeMs) <= at) continue;
+				// Reuse the scheduled path so the concurrency cap, the staleness
+				// re-check and drain tracking all apply unchanged.
+				this.#track(this.uploadIfStale(`${path.basename(path.dirname(file.abs))}/${file.file}`, projectId));
+			}
+		}
 	}
 
 	/**
@@ -277,10 +343,10 @@ export class SessionReplicator {
 	 */
 	async drain(): Promise<void> {
 		while (this.#timers.size > 0 || this.#inflight.size > 0) {
-			for (const [rel, timer] of this.#timers) {
-				clearTimeout(timer);
+			for (const [rel, pending] of this.#timers) {
+				clearTimeout(pending.timer);
 				this.#timers.delete(rel);
-				this.#track(this.uploadIfStale(rel));
+				this.#track(this.uploadIfStale(rel, pending.projectId));
 			}
 			await Promise.allSettled([...this.#inflight]);
 		}

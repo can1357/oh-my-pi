@@ -131,7 +131,9 @@ export async function fetchRemoteSessionIfMissing(filePath: string): Promise<voi
 		const posixRel = rel.split(path.sep).join("/");
 		const entry = readRemoteSessionIndex(sessionsDir).find(item => item.rel === posixRel);
 		if (!entry) return;
-		await replicator.ensureLocal(posixRel, { relCwd: entry.relCwd });
+		// The index row carries the project id the publisher CONFIRMED for this
+		// body, so ownership is never re-derived from the encoded directory name.
+		await replicator.ensureLocal(posixRel, { projectId: entry.projectId, relCwd: entry.relCwd });
 	} catch (error) {
 		logger.debug("remote session fetch skipped", { filePath, error: String(error) });
 	}
@@ -419,9 +421,14 @@ function withBodyUploads(domain: ReplicatedDomain, replicator: SessionReplicator
 		changedSince(afterRev, limit) {
 			const entries = domain.changedSince(afterRev, limit);
 			for (const entry of entries) {
-				const rel = localSessionRelForEntry(entry);
-				if (rel) replicator.scheduleUpload(rel);
+				const local = localSessionRelForEntry(entry);
+				if (local) replicator.scheduleUpload(local.rel, local.projectId);
 			}
+			// Index-driven scheduling alone strands a body whose transfer failed
+			// after its metadata push, since the cursor has already moved past it.
+			// The reconcile pass is throttled and self-tracking, so this is a cheap
+			// no-op on most cycles.
+			replicator.maybeReconcile();
 			return entries;
 		},
 		applyRemote(entries) {
@@ -472,7 +479,10 @@ async function buildDomains(
 				domains.push(createConfigDomain(agentDir, syncStore));
 				break;
 			case "sessions":
-				domains.push(createSessionsDomain(sessionsDir));
+				// Same reason as `config`: without the published-key ledger a deleted
+				// session has no representation on the wire, and this replica pulls
+				// its own stale row back as a remote-only stub.
+				domains.push(createSessionsDomain(sessionsDir, syncStore));
 				break;
 		}
 	}

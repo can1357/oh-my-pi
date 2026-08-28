@@ -9,11 +9,13 @@
 - `omp project` registers which projects take part in replication, mapping a machine-independent project id to this machine's checkout path in `~/.omp/agent/projects.yml`. Ids are derived from the git origin remote (ssh and https clones of the same repo normalise to one id), so two machines that keep a project at different paths agree without coordinating. Unregistered projects, and registered ones with sync off, replicate nothing.
 - Sessions started on another machine appear in the all-projects resume picker and download on open. Resuming waits briefly for the first sync so a machine that has just joined a project can see them on its first run.
 - Deleting a replicated config file (`config.yml`, an agent, a managed skill) now propagates the deletion to other machines instead of leaving the old copy in place.
+- Deleting a session now removes it on other machines too, instead of the row lingering and the session reappearing locally as a downloadable remote entry.
 
 ### Fixed
 
 - Slash-command autocomplete ranking now includes command usage replicated from other machines.
 - Attachments no longer go missing on other machines when an upload hits a transient error or the process exits mid-upload.
+- Session bodies stranded by a failed upload are now retried by a periodic reconcile, so a peer's index row no longer points at a missing archive object. Bodies that predate switching on object storage get uploaded too.
 
 ## [18.0.8] - 2026-08-27
 
