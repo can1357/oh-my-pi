@@ -1,6 +1,10 @@
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
+import {
+	getAntigravityCounterKeyForModel,
+	scopeAntigravityLimitsForModel,
+} from "@oh-my-pi/pi-ai/usage/google-antigravity";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import {
 	type Component,
@@ -47,7 +51,7 @@ const WATCHER_FAILURE_POLL_TTL_MS = 5000;
 /** A displayable limit after provider, account, model, and window filtering. */
 interface UsageWindowCandidate {
 	id?: string;
-	windowClass: "5h" | "7d" | "monthly";
+	windowClass: "5h" | "daily" | "7d" | "monthly";
 	fraction: number;
 	resetsAt?: number;
 }
@@ -324,6 +328,11 @@ function removeContextSegments(parts: string[], segments: StatusLineSegmentId[])
 function formatEmbeddedContextPercent(percent: number): string {
 	return `${percent > 0 && percent < 1 ? percent.toFixed(1) : Math.round(percent)}%`;
 }
+
+function embeddedContextGaugeMinWidth(percent: number, contextWindow: number): number {
+	return formatEmbeddedContextPercent(percent).length + formatNumber(contextWindow).length + 4;
+}
+
 function hasGitSegment(segments: readonly StatusLineSegmentId[]): boolean {
 	return segments.includes("git");
 }
@@ -384,6 +393,7 @@ export class StatusLineComponent implements Component {
 	#speculationBlinkOn = true;
 	#hookStatuses: Map<string, string> = new Map();
 	#subagentCount: number = 0;
+	#runningSubagentIds = new Set<string>();
 	/**
 	 * Active-processing accounting for the `time_spent` segment, keyed per
 	 * {@link AgentSession} so the focus-controller mid-turn attach path
@@ -451,6 +461,7 @@ export class StatusLineComponent implements Component {
 	#cachedUsage: {
 		tier?: string;
 		fiveHour?: { percent: number; resetMinutes?: number };
+		daily?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
 		monthly?: { percent: number; resetHours?: number };
 	} | null = null;
@@ -558,8 +569,9 @@ export class StatusLineComponent implements Component {
 		this.#autoCompactEnabled = enabled;
 	}
 
-	setSubagentCount(count: number): void {
-		this.#subagentCount = count;
+	setRunningSubagents(agentIds: readonly string[]): void {
+		this.#subagentCount = agentIds.length;
+		this.#runningSubagentIds = new Set(agentIds);
 	}
 
 	/**
@@ -1421,22 +1433,29 @@ export class StatusLineComponent implements Component {
 	): {
 		tier?: string;
 		fiveHour?: { percent: number; resetMinutes?: number };
+		daily?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
 		monthly?: { percent: number; resetHours?: number };
 	} | null {
 		if (!Array.isArray(reports)) return null;
 		const now = Date.now();
 		const activeModelId = normalizeUsageScopeValue(context.modelId);
+		const activeAntigravityCounter =
+			context.provider === "google-antigravity" ? getAntigravityCounterKeyForModel(context.modelId) : undefined;
 		const scopeGroups = new Map<string, UsageScopeGroup>();
 		for (const report of reports) {
 			if (!report || typeof report !== "object") continue;
 			const provider = "provider" in report ? report.provider : undefined;
 			if (context.provider && provider !== context.provider) continue;
-			const limits = "limits" in report ? report.limits : undefined;
-			if (!Array.isArray(limits)) continue;
+			const reportLimits = "limits" in report ? report.limits : undefined;
+			if (!Array.isArray(reportLimits)) continue;
 			// fetchUsageReports supplies normalized rows; the guards above protect
 			// the unknown session boundary before the account matcher reads metadata.
 			const usageReport = report as UsageReport;
+			const limits =
+				provider === "google-antigravity" && activeAntigravityCounter
+					? scopeAntigravityLimitsForModel(usageReport, context)
+					: reportLimits;
 			for (const limit of limits) {
 				if (
 					!limit ||
@@ -1467,11 +1486,15 @@ export class StatusLineComponent implements Component {
 				const subscriptionWindow =
 					windowId === "5h" || windowId === "7d"
 						? windowId
-						: durationMs !== undefined && Math.abs(durationMs - 5 * 3_600_000) <= 60_000
-							? "5h"
-							: durationMs !== undefined && Math.abs(durationMs - 7 * 86_400_000) <= 60_000
-								? "7d"
-								: undefined;
+						: windowId === "daily" || windowId === "24h" || windowId === "1d"
+							? "daily"
+							: durationMs !== undefined && Math.abs(durationMs - 5 * 3_600_000) <= 60_000
+								? "5h"
+								: durationMs !== undefined && Math.abs(durationMs - 86_400_000) <= 60_000
+									? "daily"
+									: durationMs !== undefined && Math.abs(durationMs - 7 * 86_400_000) <= 60_000
+										? "7d"
+										: undefined;
 				const windowClass =
 					subscriptionWindow ??
 					((context.provider === "cursor" || context.provider === "opencode-go") &&
@@ -1518,6 +1541,7 @@ export class StatusLineComponent implements Component {
 		if (!selectedGroup) return null;
 
 		let fiveHour: { percent: number; resetMinutes?: number } | undefined;
+		let daily: { percent: number; resetMinutes?: number } | undefined;
 		let sevenDay: { percent: number; resetHours?: number } | undefined;
 		let monthly: { percent: number; resetHours?: number } | undefined;
 		let monthlyPriority = Number.POSITIVE_INFINITY;
@@ -1532,6 +1556,15 @@ export class StatusLineComponent implements Component {
 		for (const candidate of selectedGroup.candidates) {
 			if (candidate.windowClass === "5h" && !fiveHour) {
 				fiveHour = {
+					percent: candidate.fraction * 100,
+					resetMinutes:
+						typeof candidate.resetsAt === "number"
+							? Math.max(0, Math.round((candidate.resetsAt - now) / 60_000))
+							: undefined,
+				};
+			}
+			if (candidate.windowClass === "daily" && !daily) {
+				daily = {
 					percent: candidate.fraction * 100,
 					resetMinutes:
 						typeof candidate.resetsAt === "number"
@@ -1562,8 +1595,8 @@ export class StatusLineComponent implements Component {
 				}
 			}
 		}
-		if (!fiveHour && !sevenDay && !monthly) return null;
-		return { tier: selectedGroup.tier, fiveHour, sevenDay, monthly };
+		if (!fiveHour && !daily && !sevenDay && !monthly) return null;
+		return { tier: selectedGroup.tier, fiveHour, daily, sevenDay, monthly };
 	}
 
 	/**
@@ -1857,7 +1890,15 @@ export class StatusLineComponent implements Component {
 		}
 
 		if (layout !== "plain-left") {
-			const runningBackgroundJobs = this.session.getAsyncJobSnapshot()?.running.length ?? 0;
+			// Count task jobs only until their AgentRegistry ref appears. Once it is
+			// running, the subagent badge represents that same agent; bash and eval
+			// jobs always remain independent background work.
+			const runningBackgroundJobs =
+				this.session
+					.getAsyncJobSnapshot()
+					?.running.filter(
+						job => job.type !== "task" || job.agentId === undefined || !this.#runningSubagentIds.has(job.agentId),
+					).length ?? 0;
 			if (runningBackgroundJobs > 0) {
 				rightParts.unshift(theme.fg("statusLineSubagents", `${theme.icon.job} ${runningBackgroundJobs}`));
 			}
@@ -1885,7 +1926,24 @@ export class StatusLineComponent implements Component {
 
 		let leftWidth = groupWidth(left, leftCapWidth, leftSepWidth);
 		let rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
-		const totalWidth = () => leftWidth + rightWidth + (left.length > 0 && right.length > 0 ? 1 : 0);
+		// Embedded mode removes the standalone context segment before overflow
+		// handling, so the gauge must reserve enough room for both labels. Without
+		// this budget a long path/session title can leave a one-cell gap: the
+		// context segment is gone, and the gauge silently omits its labels too.
+		const embeddedContextWidth = embedContext
+			? embeddedContextGaugeMinWidth(ctx.contextPercent ?? 0, ctx.contextWindow)
+			: 0;
+		const minimumGapWidth = (): number => {
+			if (!embeddedContextWidth) return left.length > 0 && right.length > 0 ? 1 : 0;
+			// If the labels cannot coexist with the last surviving segment, fall
+			// back to the original one-cell gauge instead of dropping the entire
+			// status line. At this width the labels cannot render either way.
+			if (left.length + right.length === 1 && leftWidth + rightWidth + embeddedContextWidth > topFillWidth) {
+				return 1;
+			}
+			return embeddedContextWidth;
+		};
+		const totalWidth = () => leftWidth + rightWidth + minimumGapWidth();
 
 		if (topFillWidth > 0) {
 			// Truncate the session-name segment before dropping right segments —
@@ -2044,7 +2102,7 @@ export class StatusLineComponent implements Component {
 		if (embedContext) {
 			const candidatePercent = formatEmbeddedContextPercent(percentOverflow ? pct : clampedPct);
 			const candidateWindow = formatNumber(ctx.contextWindow);
-			if (gapWidth >= candidatePercent.length + candidateWindow.length + 4) {
+			if (gapWidth >= embeddedContextGaugeMinWidth(percentOverflow ? pct : clampedPct, ctx.contextWindow)) {
 				percentLabel = candidatePercent;
 				windowLabel = candidateWindow;
 				if (percentOverflow) {
@@ -2233,7 +2291,7 @@ export class StatusLineComponent implements Component {
 				paddingX: 0,
 				borderColor: str => theme.fg("border", str),
 				accentColor: str => theme.fg("accent", str),
-				surfaceColor: str => theme.bgFill("userMessageBg", str),
+				surfaceColor: str => theme.bgFill("userMessageBg", theme.fgOnBg("userMessageText", "userMessageBg", str)),
 				box: theme.boxRound,
 				topBorder: this.getStandaloneTopBorder(width),
 			});

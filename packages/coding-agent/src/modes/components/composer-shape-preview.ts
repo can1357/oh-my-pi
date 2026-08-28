@@ -65,7 +65,8 @@ export function renderComposerShapePreview(
 		paddingX,
 		borderColor: (str: string) => theme.fg("borderAccent", str),
 		accentColor: (str: string) => theme.fg("accent", str),
-		surfaceColor: (str: string) => theme.bgFill("userMessageBg", str),
+		surfaceColor: (str: string) =>
+			theme.bgFill("userMessageBg", theme.fgOnBg("userMessageText", "userMessageBg", str)),
 		box: theme.boxRound,
 		topBorder,
 	};

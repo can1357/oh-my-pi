@@ -2474,7 +2474,7 @@ export const SETTINGS_SCHEMA = {
 	// compaction kicks in before any request crosses into premium billing.
 	extendedContext: {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "context",
 			group: "General",

@@ -163,7 +163,7 @@ describe("StatusLineComponent effective settings cache", () => {
 	it("surfaces active subagents even when custom segments omit subagents", () => {
 		const component = makeComponent({ preset: "custom", leftSegments: [], rightSegments: [] });
 
-		component.setSubagentCount(2);
+		component.setRunningSubagents(["sub-1", "sub-2"]);
 
 		const content = stripVTControlCharacters(component.getTopBorder(120).content);
 		expect(content).toContain("2 agents");

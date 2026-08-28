@@ -263,23 +263,27 @@ const EXPECTED_CLEANUP = Symbol.for("omp.expectedCleanupError");
  * consumer. Returns the same error for inline use at the `abort()` callsite.
  */
 export function markExpectedCleanupError<T extends object>(reason: T): T {
-	(reason as Record<PropertyKey, unknown>)[EXPECTED_CLEANUP] = true;
+	Reflect.set(reason, EXPECTED_CLEANUP, true);
 	return reason;
 }
 
-/**
- * Whether `reason` (or any error in its `cause` chain) was marked via
- * {@link markExpectedCleanupError}. Walks the chain because the unhandled
- * reason is often a wrapper (`AbortError`) with the marked abort reason as
- * its `cause`.
- */
-export function isExpectedCleanupError(reason: unknown): boolean {
+function hasExpectedCleanupMarker(reason: unknown): boolean {
 	let current: unknown = reason;
 	for (let depth = 0; depth < 8 && current !== null && typeof current === "object"; depth++) {
-		if ((current as Record<PropertyKey, unknown>)[EXPECTED_CLEANUP] === true) return true;
-		current = (current as { cause?: unknown }).cause;
+		if (Reflect.get(current, EXPECTED_CLEANUP) === true) return true;
+		current = Reflect.get(current, "cause");
 	}
 	return false;
+}
+
+/**
+ * Whether `reason` (or any object in its bounded `cause` chain) was explicitly
+ * marked via {@link markExpectedCleanupError}. Runtime error names and codes
+ * are intentionally insufficient: unmarked `AbortError` and socket failures
+ * can originate from application code and must remain fatal when unhandled.
+ */
+export function isExpectedCleanupError(reason: unknown): boolean {
+	return hasExpectedCleanupMarker(reason);
 }
 
 /** Interceptors consulted by the global `unhandledRejection` handler before the fatal path. */
@@ -366,7 +370,10 @@ if (isMainThread) {
 			process.stderr.write(`Inspector opened: ${url}\n`);
 		})
 		.on("uncaughtException", async thrown => {
-			if (isExpectedCleanupError(thrown)) {
+			// Only explicitly marked exceptions are safe here. Structural
+			// AbortError/socket classification is limited to promise rejections:
+			// a synchronously thrown error may indicate an application bug.
+			if (hasExpectedCleanupMarker(thrown)) {
 				logger.warn("Ignoring expected cleanup exception", { err: thrown });
 				return;
 			}
