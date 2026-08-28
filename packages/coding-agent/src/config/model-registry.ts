@@ -263,6 +263,11 @@ export class ModelRegistry {
 	#ignoreLocalModelConfig: boolean;
 	#fetch: FetchImpl;
 	#settings: Settings | undefined;
+	// Pre-clamp context window of every model `extendedContext: false` capped at
+	// its premium long-context threshold, keyed `provider\0id`. Without it the
+	// full window is unrecoverable after the cap and the shrink is invisible:
+	// a 1M Codex window silently reports 272K and compaction starts firing.
+	#cappedExtendedWindows: Map<string, number> = new Map();
 
 	#resolveCommandBackedApiKey(provider: string, options?: { forceCommandRefresh?: boolean }): CommandApiKeyResolution {
 		const keyConfig = this.#customProviderApiKeys.get(provider);
@@ -2044,6 +2049,8 @@ export class ModelRegistry {
 	}
 	#applyHardcodedModelPolicies(models: Model<Api>[]): Model<Api>[] {
 		const extendedContext = isExtendedContextEnabledFromSettings(this.#settings);
+		// Setting on: nothing is capped, so no model may keep advertising an unlock.
+		if (extendedContext) this.#cappedExtendedWindows.clear();
 		return models.map(model => {
 			// Extended context off: cap models with a premium long-context price
 			// tier (e.g. GPT-5.6 bills 2x input above 272K) at the standard-pricing
@@ -2055,8 +2062,15 @@ export class ModelRegistry {
 			// this cap.
 			if (!extendedContext && model.provider !== "xai-oauth") {
 				const threshold = model.cost.longContext?.inputThreshold;
+				const key = `${model.provider}\u0000${model.id}`;
 				if (threshold !== undefined && model.contextWindow !== null && model.contextWindow > threshold) {
+					this.#cappedExtendedWindows.set(key, model.contextWindow);
 					model = applyModelOverride(model, { contextWindow: threshold });
+				} else {
+					// A model can stop being capped mid-session (setting toggled,
+					// upstream window shrank); a stale entry would keep advertising
+					// an unlock that no longer applies.
+					this.#cappedExtendedWindows.delete(key);
 				}
 			}
 			if (model.provider === "ollama-cloud" && model.omitMaxOutputTokens !== true) {
@@ -2273,6 +2287,21 @@ export class ModelRegistry {
 	 */
 	find(provider: string, modelId: string): Model<Api> | undefined {
 		return resolveProviderModelReference(provider, modelId, this.#modelsForProviderLookup(provider));
+	}
+
+	/**
+	 * Context window `extendedContext: true` would unlock for this model, or
+	 * `undefined` when the setting is not currently capping it.
+	 *
+	 * Returns the pre-clamp window recorded by the long-context cap, and only
+	 * while the model still reports a smaller one — an explicit per-model
+	 * `contextWindow` override reapplies after the cap and wins over it, so the
+	 * recorded value alone does not prove the model is capped today.
+	 */
+	cappedExtendedContextWindow(model: Pick<Model<Api>, "provider" | "id" | "contextWindow">): number | undefined {
+		const full = this.#cappedExtendedWindows.get(`${model.provider}\u0000${model.id}`);
+		if (full === undefined) return undefined;
+		return model.contextWindow !== null && model.contextWindow < full ? full : undefined;
 	}
 
 	/**

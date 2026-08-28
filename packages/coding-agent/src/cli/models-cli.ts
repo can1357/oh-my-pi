@@ -69,6 +69,8 @@ interface ModelJson {
 	selector: string;
 	name: string;
 	contextWindow: number | null;
+	/** Window `extendedContext: true` would restore, when the setting caps this model. */
+	cappedExtendedContextWindow: number | null;
 	maxTokens: number | null;
 	reasoning: boolean;
 	/** Supported thinking efforts when the model thinks, otherwise null. */
@@ -103,13 +105,14 @@ function byProviderThenId(left: Model<Api>, right: Model<Api>): number {
 	return left.id.localeCompare(right.id);
 }
 
-function toModelJson(model: Model<Api>): ModelJson {
+function toModelJson(model: Model<Api>, modelRegistry: ModelRegistry): ModelJson {
 	return {
 		provider: model.provider,
 		id: model.id,
 		selector: `${model.provider}/${model.id}`,
 		name: model.name,
 		contextWindow: model.contextWindow,
+		cappedExtendedContextWindow: modelRegistry.cappedExtendedContextWindow(model) ?? null,
 		maxTokens: model.maxTokens,
 		reasoning: model.reasoning,
 		thinking: model.thinking ? getSupportedEfforts(model) : null,
@@ -204,7 +207,12 @@ function renderProviderModels(
 				`Warning: models.yml validation failed — custom providers disabled\n${configError.message}\n`,
 			);
 		}
-		const output: ModelsJson = { models: filtered.slice().sort(byProviderThenId).map(toModelJson) };
+		const output: ModelsJson = {
+			models: filtered
+				.slice()
+				.sort(byProviderThenId)
+				.map(model => toModelJson(model, modelRegistry)),
+		};
 		writeLine(JSON.stringify(output));
 		return;
 	}
@@ -234,17 +242,24 @@ function renderProviderModels(
 	}
 
 	let firstProvider = true;
+	let sawCappedWindow = false;
 	for (const [provider, models] of byProvider) {
 		if (!firstProvider) writeLine();
 		firstProvider = false;
 		writeLine(`${chalk.bold.cyan(provider)} ${chalk.dim(`(${models.length})`)}`);
-		const rows = models.map(model => [
-			model.id,
-			formatLimit(model.contextWindow),
-			formatLimit(model.maxTokens),
-			model.thinking ? getSupportedEfforts(model).join(",") : model.reasoning ? "yes" : "-",
-			model.input.includes("image") ? "yes" : "no",
-		]);
+		const rows = models.map(model => {
+			// A capped window is the setting's doing, not the model's; without the
+			// marker the listing looks like the model simply has a smaller window.
+			const fullWindow = modelRegistry.cappedExtendedContextWindow(model);
+			if (fullWindow !== undefined) sawCappedWindow = true;
+			return [
+				model.id,
+				fullWindow === undefined ? formatLimit(model.contextWindow) : `${formatLimit(model.contextWindow)}*`,
+				formatLimit(model.maxTokens),
+				model.thinking ? getSupportedEfforts(model).join(",") : model.reasoning ? "yes" : "-",
+				model.input.includes("image") ? "yes" : "no",
+			];
+		});
 		for (const line of boxTable(
 			[
 				{ header: "model" },
@@ -257,6 +272,10 @@ function renderProviderModels(
 		)) {
 			writeLine(line);
 		}
+	}
+	if (sawCappedWindow) {
+		writeLine();
+		writeLine(chalk.dim("* capped by extendedContext=off; /extended-context on restores the full premium window"));
 	}
 }
 

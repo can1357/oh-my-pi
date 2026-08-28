@@ -52,7 +52,7 @@ import type { AssistantMessage, CodexCompactionContext, Message, Model, Provider
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { formatNumber, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { ModelRegistry } from "../config/model-registry";
 import { MODEL_ROLE_IDS } from "../config/model-roles";
@@ -365,6 +365,14 @@ export class SessionMaintenance {
 	/** In-flight or armed background speculative compaction, if any. */
 	#speculation: SpeculationRun | undefined;
 	#skipPostTurnMaintenanceAssistantTimestamp: number | undefined;
+	/**
+	 * Whether this session already explained that `extendedContext: false` is
+	 * what shrank the active model's window. Compaction that fires only because
+	 * of the cap is otherwise indistinguishable from a genuinely full context —
+	 * the user sees the smaller number in the status line with no way to learn
+	 * it is a setting, not the model.
+	 */
+	#extendedContextCapExplained = false;
 	readonly #host: SessionMaintenanceHost;
 
 	get #model(): Model | undefined {
@@ -1626,6 +1634,7 @@ export class SessionMaintenance {
 			contextWindow,
 			model: `${model.provider}/${model.id}`,
 		});
+		this.#explainExtendedContextCapOnce(model, contextTokens);
 		await this.runAutoCompaction("threshold", false, false, false, {
 			autoContinue: false,
 			triggerContextTokens: contextTokens,
@@ -1633,6 +1642,26 @@ export class SessionMaintenance {
 			preparedContextTokens: this.#estimateStoredContextTokens(),
 			phase: "pre_turn",
 		});
+	}
+
+	/**
+	 * Explain, at most once per session, that compaction is firing because
+	 * `extendedContext: false` capped the model's window — not because the
+	 * model ran out of context. Stays silent when the full window would not
+	 * have avoided this compaction anyway, so the notice always names a
+	 * setting change that would actually have helped.
+	 */
+	#explainExtendedContextCapOnce(model: Model, contextTokens: number): void {
+		if (this.#extendedContextCapExplained) return;
+		const fullWindow = this.#host.modelRegistry.cappedExtendedContextWindow(model);
+		if (fullWindow === undefined || contextTokens >= fullWindow) return;
+		this.#extendedContextCapExplained = true;
+		this.#host.emitNotice(
+			"warning",
+			`${model.id} is capped at ${formatNumber(model.contextWindow ?? 0)} tokens because extendedContext is off; ` +
+				`/extended-context on restores its ${formatNumber(fullWindow)} window (input past the cap bills at the premium long-context rate).`,
+			"compaction",
+		);
 	}
 
 	/**

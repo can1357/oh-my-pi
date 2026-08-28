@@ -1694,6 +1694,25 @@ describe("ModelRegistry", () => {
 			expect(registry.find("openai", "gpt-5.6-terra")?.contextWindow).toBe(1_050_000);
 			expect(registry.find("openai-codex", "gpt-5.6-terra")?.contextWindow).toBe(1_000_000);
 		});
+
+		test("cappedExtendedContextWindow reports the unlock only while the cap is what shrank the window", async () => {
+			await Settings.init({ inMemory: true });
+			settings.set("extendedContext", false);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+
+			const capped = registry.find("openai-codex", "gpt-5.6-sol");
+			expect(capped?.contextWindow).toBe(272_000);
+			expect(registry.cappedExtendedContextWindow(capped!)).toBe(1_000_000);
+			// A model with no premium long-context tier was never capped.
+			const uncapped = registry.find("anthropic", "claude-opus-4-8");
+			expect(registry.cappedExtendedContextWindow(uncapped!)).toBeUndefined();
+
+			settings.set("extendedContext", true);
+			await registry.reapplyModelPolicies();
+			const restored = registry.find("openai-codex", "gpt-5.6-sol");
+			expect(restored?.contextWindow).toBe(1_000_000);
+			expect(registry.cappedExtendedContextWindow(restored!)).toBeUndefined();
+		});
 	});
 	describe("bundled Anthropic catalog availability", () => {
 		let anthropicAuth: AuthStorage;
