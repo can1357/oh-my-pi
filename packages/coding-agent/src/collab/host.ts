@@ -21,6 +21,7 @@ import type {
 	AgentEvent as WireAgentEvent,
 	SessionEntry as WireSessionEntry,
 } from "@oh-my-pi/pi-wire";
+import type { CollabStartEvent } from "../extensibility/extensions/types";
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
@@ -41,6 +42,7 @@ import {
 	formatCollabLink,
 	formatCollabWebLink,
 	generateRoomId,
+	normalizeCollabWebBaseUrl,
 	parseCollabLink,
 } from "./protocol";
 import { CollabSocket } from "./relay-client";
@@ -120,6 +122,9 @@ const SNAPSHOT_CHUNK_BYTES = 512 * 1024;
  */
 export type CollabGuestUiResult = { kind: "answered"; value: CollabUiResponseValue } | { kind: "unavailable" };
 
+/** Shared shape of the `collab_start`/`collab_end` extension event payloads. */
+type CollabExtensionEventPayload = Omit<CollabStartEvent, "type">;
+
 export class CollabHost {
 	#ctx: InteractiveModeContext;
 	#socket: CollabSocket | null = null;
@@ -140,6 +145,8 @@ export class CollabHost {
 	#busUnsubscribers: (() => void)[] = [];
 	#registryUnsubscribe?: () => void;
 	#stopped = false;
+	/** Set once `start()` reaches a live socket; backs the `collab_end` event payload on teardown. */
+	#collabEventPayload: CollabExtensionEventPayload | null = null;
 
 	constructor(ctx: InteractiveModeContext) {
 		this.#ctx = ctx;
@@ -286,6 +293,16 @@ export class CollabHost {
 			this.#scheduleStateBroadcast();
 		};
 		this.#updateStatusSegment();
+
+		this.#collabEventPayload = {
+			roomId,
+			relayUrl,
+			webLink: normalizeCollabWebBaseUrl(relayUrl, webUrl),
+			hasWriteToken: true,
+		};
+		const runner = this.#ctx.session.extensionRunner;
+		runner?.setCollabState({ hosting: true, roomId });
+		void runner?.emit({ type: "collab_start", ...this.#collabEventPayload });
 	}
 
 	/** Broadcast a goodbye, detach all taps, and close the socket. */
@@ -298,6 +315,11 @@ export class CollabHost {
 	async #teardown(): Promise<void> {
 		if (this.#stopped) return;
 		this.#stopped = true;
+		const collabEventPayload = this.#collabEventPayload;
+		this.#collabEventPayload = null;
+		const runner = this.#ctx.session.extensionRunner;
+		runner?.setCollabState({ hosting: false, roomId: undefined });
+		if (collabEventPayload) void runner?.emit({ type: "collab_end", ...collabEventPayload });
 		this.#ctx.sessionManager.onEntryAppended = undefined;
 		this.#unsubscribe?.();
 		this.#unsubscribe = undefined;

@@ -252,6 +252,15 @@ const contrasting = ctx.models
   .find((m) => current && ctx.models.family(m) !== ctx.models.family(current));
 ```
 
+### Collab state (`ctx.collab`)
+
+`ctx.collab` is a live, read-only snapshot of whether this session is currently hosting a `/collab` session:
+
+- `hosting` — `true` while a `/collab` host session is up.
+- `roomId` — the active room id, or `undefined` when not hosting.
+
+It never carries the room key or write token that make the collab link joinable — see the `collab_start`/`collab_end` events below for why. Combine it with those events when an extension needs to react to the transition rather than just poll the current state.
+
 ## 3) Command context (`ExtensionCommandContext`)
 
 Command handlers additionally get:
@@ -333,6 +342,22 @@ pi.on("mcp_notification", (event) => {
 ```
 
 The runtime handles the JSON-RPC transport and its own list/update refresh first; the handler runs afterwards and can inject a mid-turn steer via `pi.sendMessage` / `pi.sendUserMessage`.
+
+### Collab lifecycle
+
+- `collab_start` — fired once a `/collab` host session is live and broadcasting to guests. Payload: `{ roomId: string; relayUrl: string; webLink: string; hasWriteToken: boolean }`.
+- `collab_end` — fired when a `/collab` host session tears down (`/collab stop`, relay drop, or session switch). Same payload shape as `collab_start`.
+
+Both events deliberately exclude the room key and write token that make `CollabHost.link`/`CollabHost.webLink` joinable: extensions run trusted in-process — the same trust level as the terminal user who already sees the raw link — but there is no reason to widen the blast radius of a future extension bug (or a malicious extension) by handing every loaded extension the literal secret on every event fire. `webLink` is the collab web UI's base origin only, with no room-secret fragment attached; `roomId` plus `ctx.collab` (see above) is enough for an extension to know a session is live and which room it is.
+
+```ts
+pi.on("collab_start", (event) => {
+  pi.logger.info(`collab session live: room ${event.roomId} on ${event.relayUrl}`);
+});
+pi.on("collab_end", (event) => {
+  pi.logger.info(`collab session ended: room ${event.roomId}`);
+});
+```
 
 ### User command interception
 
