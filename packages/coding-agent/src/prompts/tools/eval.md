@@ -47,6 +47,7 @@ await tool.<name>(args) — session tool; `args` is its parameter object
 More globals; `read` the linked docs before first use:
 - `judge`, `{{#if py}}judge_batch{{else}}judgeBatch{{/if}}`, `completion`: classification, bulk judgment, model calls → `xd://eval/judge`
 - `%load`{{#if py}}, `%pip`{{/if}}{{#if js}}, `%bun add`{{/if}}, `budget`{{#if evalTools}}, `@tool`/`tool(fn)`{{/if}}: setup, installs, utilities → `xd://eval/helpers`
+- Bulk per-chunk semantic work (label/extract/summarize every slice of a long input): one `completion` per slice{{#if spawns}}, not `workpool`/`agent`{{/if}} → `xd://eval/map-reduce`
 {{#if spawns}}
 - `agent`, `workpool`: background subagents, DAG waves → `xd://eval/agents`
 {{/if}}
