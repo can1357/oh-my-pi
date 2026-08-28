@@ -82,11 +82,13 @@ CREATE TABLE IF NOT EXISTS sync_cursor (
 `;
 
 /**
- * Small key/value side table for facts about the BROKER, not about a domain.
+ * Small key/value side table for facts about the BROKER rather than about
+ * local state.
  *
- * Currently the last broker epoch this replica synced against. An inbound
- * cursor is only meaningful relative to the database that issued it, so the
- * epoch has to be remembered next to the cursors it qualifies.
+ * Currently the broker epoch each domain's inbound cursor was issued by, under
+ * `broker_epoch:<domain>`. An inbound cursor is only meaningful relative to the
+ * database that issued it, so the epoch has to be remembered next to the
+ * cursors it qualifies — and per domain, because the cursors are per domain.
  */
 const META_TABLE_DDL = `
 CREATE TABLE IF NOT EXISTS sync_meta (
@@ -175,7 +177,6 @@ export class StateSyncStore {
 	#writeUploaded: Statement;
 	#readMeta: Statement;
 	#writeMeta: Statement;
-	#resetInbound: Statement;
 
 	constructor(dbPath: string = getStateSyncDbPath()) {
 		fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -215,44 +216,40 @@ ON CONFLICT(key) DO UPDATE SET mtime = excluded.mtime, size = excluded.size
 INSERT INTO sync_meta (key, value) VALUES (?, ?)
 ON CONFLICT(key) DO UPDATE SET value = excluded.value
 		`);
-		this.#resetInbound = this.#db.prepare("UPDATE sync_cursor SET inbound_seq = 0");
 	}
 
-	/** Broker epoch this replica's inbound cursors were last valid against. */
-	brokerEpoch(): string | undefined {
+	/**
+	 * Broker epoch `domain`'s inbound cursor was last valid against.
+	 *
+	 * Scoped per domain because the cursor it qualifies is: domains sync
+	 * CONCURRENTLY, so one shared row cannot work. The first domain to see a new
+	 * epoch would record it for everyone, and every other domain would then find
+	 * its own recorded epoch already equal to the broker's and keep replaying a
+	 * cursor the new database never issued.
+	 */
+	brokerEpoch(domain: StateDomainId): string | undefined {
 		try {
-			const row = this.#readMeta.get("broker_epoch") as { value: string } | null;
+			const row = this.#readMeta.get(`broker_epoch:${domain}`) as { value: string } | null;
 			return row?.value ?? undefined;
 		} catch (error) {
-			logger.warn("state sync broker epoch read failed", { error: String(error) });
+			logger.warn("state sync broker epoch read failed", { domain, error: String(error) });
 			return undefined;
 		}
 	}
 
-	/** Record the broker's identity WITHOUT disturbing any cursor. */
-	rememberBrokerEpoch(epoch: string): void {
-		try {
-			this.#writeMeta.run("broker_epoch", epoch);
-		} catch (error) {
-			logger.warn("state sync broker epoch write failed", { epoch, error: String(error) });
-		}
-	}
-
 	/**
-	 * Adopt `epoch` and replay every inbound cursor from zero.
+	 * Record the broker identity `domain`'s cursor is now valid against.
 	 *
-	 * Called when the broker's identity or sequence proves the persisted cursors
-	 * describe a database this one is not. Replaying is safe rather than
-	 * merely tolerable: every domain merges under last-writer-wins by `rev`, so
-	 * re-applying an entry we already hold is a no-op, and `outboundRev` is
-	 * deliberately untouched so local writes are not re-pushed either.
+	 * Deliberately does not touch the cursor. The caller resets its own cursor
+	 * FIRST and records the epoch after, so a crash in between leaves a
+	 * replayable cursor with the old epoch — which is detected and reset again,
+	 * idempotently — rather than a stale cursor blessed by the new epoch.
 	 */
-	adoptBrokerEpoch(epoch: string): void {
+	rememberBrokerEpoch(domain: StateDomainId, epoch: string): void {
 		try {
-			this.#resetInbound.run();
-			this.#writeMeta.run("broker_epoch", epoch);
+			this.#writeMeta.run(`broker_epoch:${domain}`, epoch);
 		} catch (error) {
-			logger.warn("state sync broker epoch adopt failed", { epoch, error: String(error) });
+			logger.warn("state sync broker epoch write failed", { domain, epoch, error: String(error) });
 		}
 	}
 
@@ -344,7 +341,6 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value
 		}
 	}
 
-
 	close(): void {
 		this.#read.finalize();
 		this.#write.finalize();
@@ -356,7 +352,6 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value
 		this.#writeUploaded.finalize();
 		this.#readMeta.finalize();
 		this.#writeMeta.finalize();
-		this.#resetInbound.finalize();
 		this.#db.close();
 	}
 }

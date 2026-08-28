@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -379,7 +379,7 @@ describe("StateSyncEngine", () => {
 		// Forge a cursor above the broker's head, exactly as a restored backup
 		// would leave it, and record the epoch so identity alone cannot explain it.
 		const cursor = store.get("history");
-		store.rememberBrokerEpoch(brokerStore!.epoch);
+		store.rememberBrokerEpoch("history", brokerStore!.epoch);
 		store.set("history", { ...cursor, inboundSeq: cursor.inboundSeq + 500 });
 
 		brokerStore!.push("history", [{ key: "peer", rev: 40, value: "restored" }]);
@@ -387,5 +387,86 @@ describe("StateSyncEngine", () => {
 		await engineFor(store, [fresh]).syncOnce();
 
 		expect(fresh.get("peer")).toEqual({ key: "peer", rev: 40, value: "restored" });
+	});
+
+	/**
+	 * Domains sync CONCURRENTLY against their own cursors, so the broker epoch
+	 * that validates a cursor has to be recorded per domain.
+	 *
+	 * With one replica-wide epoch, the first domain to notice a recreated broker
+	 * records the new identity for everybody. Every other domain then finds its
+	 * epoch already equal, falls through to the sequence signal — which cannot
+	 * fire once the rebuilt broker's head has climbed past the stale cursor — and
+	 * resumes from that stale cursor, skipping every entry the new database
+	 * issued below it. Permanently: nothing ever revisits an inbound cursor.
+	 *
+	 * The global cursor reset that used to accompany adoption does not save it,
+	 * because a domain already mid-cycle holds its cursor in memory and writes
+	 * that stale value straight back when its own pull finishes.
+	 */
+	test("a second domain still recovers after the first adopts a new broker epoch", async () => {
+		const store = newSyncStore();
+		const firstHistory = new FakeDomain("history");
+		const firstTitles = new FakeDomain("titles");
+		for (const rev of [10, 20, 30]) {
+			firstHistory.setLocal({ key: `h${rev}`, rev, value: "x" });
+			firstTitles.setLocal({ key: `t${rev}`, rev, value: "x" });
+		}
+		await engineFor(store, [firstHistory, firstTitles]).syncOnce();
+		const staleHistory = store.get("history").inboundSeq;
+		const staleTitles = store.get("titles").inboundSeq;
+		expect(staleHistory).toBeGreaterThan(0);
+		expect(staleTitles).toBeGreaterThan(0);
+
+		// Rebuild the broker from scratch: new database, new identity, seq at 0.
+		await handle?.close();
+		brokerStore?.close();
+		await fs.rm(path.join(tempDir, "state.db"), { force: true });
+		brokerStore = StateBrokerStore.open(path.join(tempDir, "state.db"));
+		handle = startAuthBroker({
+			storage: storage!,
+			bind: "127.0.0.1:0",
+			bearerTokens: [TOKEN],
+			disableRefresher: true,
+			routes: [createStateBrokerRoutes(brokerStore)],
+		});
+		client = new StateBrokerClient({ url: handle.url, token: TOKEN, maxRetries: 0 });
+
+		// A peer row at seq 1 of the NEW database, below both stale cursors, then
+		// enough filler that each domain's head climbs PAST them — so the sequence
+		// signal is blind and only the epoch can reveal the rollback.
+		brokerStore.push("history", [{ key: "peer-h", rev: 100, value: "elsewhere" }]);
+		brokerStore.push("titles", [{ key: "peer-t", rev: 100, value: "elsewhere" }]);
+		for (let i = 0; i < Math.max(staleHistory, staleTitles) + 2; i++) {
+			brokerStore.push("history", [{ key: `fill${i}`, rev: 200 + i, value: "x" }]);
+			brokerStore.push("titles", [{ key: `fill${i}`, rev: 200 + i, value: "x" }]);
+		}
+
+		// Pin the interleaving the bug needs: `titles` may only ask after
+		// `history` has adopted the new epoch. Racing them makes the failure
+		// intermittent, and a sleep would only guess at the ordering — so gate on
+		// the adopt itself, which is observable as the cursor reset write.
+		const historyAdopted = Promise.withResolvers<void>();
+		const realSet = store.set.bind(store);
+		const setSpy = spyOn(store, "set").mockImplementation((domain, cursor) => {
+			realSet(domain, cursor);
+			if (domain === "history" && cursor.inboundSeq === 0) historyAdopted.resolve();
+		});
+		const realDelta = client.delta.bind(client);
+		const deltaSpy = spyOn(client, "delta").mockImplementation(async (domain, sinceSeq, opts) => {
+			if (domain === "titles") await historyAdopted.promise;
+			return await realDelta(domain, sinceSeq, opts);
+		});
+		try {
+			const secondHistory = new FakeDomain("history");
+			const secondTitles = new FakeDomain("titles");
+			await engineFor(store, [secondHistory, secondTitles], client).syncOnce();
+
+			expect(secondHistory.get("peer-h")).toEqual({ key: "peer-h", rev: 100, value: "elsewhere" });
+			expect(secondTitles.get("peer-t")).toEqual({ key: "peer-t", rev: 100, value: "elsewhere" });
+		} finally {
+			deltaSpy.mockRestore();
+			setSpy.mockRestore();
+		}
 	});
 });

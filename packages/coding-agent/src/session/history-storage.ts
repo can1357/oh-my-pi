@@ -298,10 +298,14 @@ ON CONFLICT(prompt) DO UPDATE SET
 			const stmt = this.#getScanChangedForPathsStmt(pathPrefixes.length, afterId !== undefined);
 			const params: unknown[] = afterId === undefined ? [afterRev] : [afterRev, afterRev, afterId];
 			for (const prefix of pathPrefixes) {
-				// Exact root, then everything below it. Wildcards in the prefix
-				// itself are escaped so a literal `%`/`_` in a path stays literal.
+				// Exact root, then everything below it. `path.sep`, not a literal
+				// `/`: `cwd` is stored as a native path, so on Windows a hardcoded
+				// slash builds `C:\repo/%` and matches nothing under the root —
+				// every subdirectory prompt would be silently unreplicable there.
+				// The separator goes through the escaper too, since a backslash is
+				// itself the LIKE `ESCAPE` character.
 				params.push(prefix);
-				params.push(`${escapeLikePattern(prefix)}/%`);
+				params.push(`${escapeLikePattern(prefix + path.sep)}%`);
 			}
 			params.push(this.#normalizeLimit(limit));
 			const rows = stmt.all(...(params as [unknown, ...unknown[]])) as HistoryRow[];

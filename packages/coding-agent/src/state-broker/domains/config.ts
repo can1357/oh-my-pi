@@ -17,6 +17,7 @@ import {
 	deleteConfigFile,
 	enumerateConfigFiles,
 	isReplicableConfigRel,
+	MAX_CONFIG_FILE_BYTES,
 	readConfigFile,
 	writeConfigFileAtomic,
 } from "../config-files";
@@ -170,6 +171,19 @@ export function createConfigDomain(agentDir: string = getAgentDir(), store?: Sta
 				const value = parseValue(entry.value);
 				if (!value) {
 					logger.debug("config domain: dropping malformed entry", { key: entry.key });
+					continue;
+				}
+
+				// Cap inbound too, not only on the way out. Outbound enumeration
+				// skips files over the cap, but `content` arrives as an unbounded
+				// string from a peer the trust model treats as authenticated rather
+				// than trusted, and it is written straight to disk. An oversized
+				// file would then also be invisible to every later outbound scan, so
+				// replication could never correct or retract what it just wrote.
+				// Bytes, not code units: the cap describes the file on disk.
+				const bytes = Buffer.byteLength(value.content, "utf-8");
+				if (bytes > MAX_CONFIG_FILE_BYTES) {
+					logger.warn("config domain: rejecting oversized remote value", { key: entry.key, bytes });
 					continue;
 				}
 

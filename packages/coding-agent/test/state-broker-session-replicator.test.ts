@@ -321,6 +321,39 @@ describe("SessionReplicator project identity", () => {
 	});
 });
 
+describe("SessionReplicator.ensureLocal header rewrite", () => {
+	/**
+	 * A session started in a subdirectory has extra workspaces that are SIBLINGS
+	 * of that subdirectory, so relativizing them against the session cwd yields
+	 * `../pkg-b`, which reads as "outside the project" and leaves the origin
+	 * machine's absolute path in a header we otherwise localized. Resume then
+	 * points a workspace at a directory that does not exist here.
+	 */
+	test("remaps a sibling workspace of a subdirectory session onto this machine", async () => {
+		const fx = setup();
+		const relCwd = "pkg-a";
+		const originRoot = "/origin/checkout/foo";
+		const body = `${JSON.stringify({
+			type: "session",
+			version: 1,
+			id: "gggg7777",
+			cwd: `${originRoot}/${relCwd}`,
+			additionalDirectories: [`${originRoot}/pkg-b`, "/unrelated/elsewhere"],
+		})}\n`;
+		const dirName = sessionDirNameForCwd(path.join(fx.foo, relCwd));
+		const file = "gggg7777.jsonl";
+		fx.fake.seed(keyFor(file), Buffer.from(body), 1_000);
+
+		expect(await fx.replicator.ensureLocal(`${dirName}/${file}`, { projectId: "proj:foo", relCwd })).toBe(true);
+
+		const landed = JSON.parse(fs.readFileSync(path.join(fx.sessionsDir, dirName, file), "utf8").split("\n")[0]);
+		expect(landed.cwd).toBe(path.join(fx.foo, relCwd));
+		// The sibling package is inside the PROJECT, so it localizes too; a dir
+		// genuinely outside the project is left alone rather than invented.
+		expect(landed.additionalDirectories).toEqual([path.join(fx.foo, "pkg-b"), "/unrelated/elsewhere"]);
+	});
+});
+
 describe("SessionReplicator.maybeReconcile", () => {
 	/**
 	 * Uploads are scheduled from `changedSince` index rows, and the outbound
@@ -432,5 +465,42 @@ describe("SessionReplicator.maybeReconcile", () => {
 		expect(fx.fake.puts).toBe(1);
 		await fx.replicator.uploadIfStale(rel, "proj:foo");
 		expect(fx.fake.puts).toBe(1);
+	});
+
+	/**
+	 * The same torn body, repaired after a RESTART rather than in-process.
+	 *
+	 * The in-process repair rides on the append that caused the tear scheduling
+	 * another upload. A hard kill loses that, so reconcile is the only path left
+	 * — and it used to pre-filter on `local mtime <= remote stamp`, the exact
+	 * comparison a completion timestamp cannot answer: the archive is stamped
+	 * AFTER the append it is missing, so it looked current forever and the peer
+	 * kept resuming a truncated conversation.
+	 */
+	test("reconcile repairs a torn body after a restart, with no further appends", async () => {
+		const fx = setup();
+		const file = "ffff6666.jsonl";
+		const header = `${JSON.stringify({ type: "session", version: 1, id: "ffff6666", cwd: fx.foo })}\n`;
+		const { rel, abs } = writeLocalBody(fx, file, header);
+		const key = keyFor(file);
+
+		// Append during the transfer, and stamp the completed object later than
+		// the append, exactly as a real store would.
+		fx.fake.onPut = () => fs.appendFileSync(abs, `${JSON.stringify({ type: "message" })}\n`);
+		fx.fake.nextPutMtimeMs = Math.floor(fs.statSync(abs).mtimeMs) + 60_000;
+		await fx.replicator.uploadIfStale(rel, "proj:foo");
+		expect(new TextDecoder().decode((await fx.fake.get(key)) ?? new Uint8Array())).toBe(header);
+
+		fx.fake.onPut = undefined;
+		fx.fake.nextPutMtimeMs = undefined;
+		// A new replicator over the SAME sync store and sessions dir: the process
+		// died, the queued retry is gone, the upload record survives on disk.
+		const restarted = new SessionReplicator({ store: fx.fake, sessionsDir: fx.sessionsDir, sync: fx.sync });
+		restarted.maybeReconcile();
+		await restarted.drain();
+
+		expect(new TextDecoder().decode((await fx.fake.get(key)) ?? new Uint8Array())).toBe(
+			fs.readFileSync(abs, "utf8"),
+		);
 	});
 });

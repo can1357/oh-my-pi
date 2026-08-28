@@ -24,6 +24,12 @@
 - Long prompt histories no longer lose prompts that share a second with the last replicated one.
 - Repointing a project with `omp project path` no longer leaves a duplicate entry in the resume picker.
 - The resume picker no longer lists sessions from projects whose sync has since been turned off, which could not be opened.
+- A recreated broker no longer leaves some domains permanently deaf while others recover, so history and titles come back together rather than one at a time.
+- A session written to while it was being uploaded is now repaired after a restart too, not only while the process that uploaded it is still running.
+- Extra workspace directories now resolve on the other machine when the session was started in a subdirectory of the project.
+- Choosing Delete on a session whose body is still on another machine now says so instead of reporting a missing file.
+- Prompts from subdirectories of a project now replicate on Windows, where only the project root itself used to match.
+- An oversized config file from a peer is refused rather than written, so one bad entry cannot fill a replica's disk with a file replication could never take back.
 - Fixed `import numpy` (and other native-extension imports) hanging indefinitely in the Python eval tool on Windows, where the runner's always-on background stdin reader deadlocked native DLL loading; Windows now reads the control channel serially between requests while POSIX keeps concurrent request dispatch ([#7985](https://github.com/can1357/oh-my-pi/issues/7985)).
 
 ## [18.0.9] - 2026-08-28

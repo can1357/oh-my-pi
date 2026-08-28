@@ -5,7 +5,7 @@ import { theme } from "../modes/theme/theme";
 import { HistoryStorage } from "../session/history-storage";
 import { listAllSessions, type SessionInfo } from "../session/session-listing";
 import { loadPinnedSessionIds, sortPinnedFirst } from "../session/session-pins";
-import { FileSessionStorage } from "../session/session-storage";
+import { FileSessionStorage, type SessionStorage } from "../session/session-storage";
 
 /** Presentation and capability controls for the standalone session picker. */
 export interface SessionPickerOptions {
@@ -31,6 +31,32 @@ export interface SessionPickerOptions {
 function markRemoteSessions(sessions: readonly SessionInfo[]): SessionInfo[] {
 	const marker = `${theme.icon.host} on another machine — downloads on open`;
 	return sessions.map(session => (session.remoteOnly ? { ...session, firstMessage: marker } : session));
+}
+
+/**
+ * Delete a picked session's local body, or refuse with a reason.
+ *
+ * A remote-only row is an index stub with no local file, so the unconditional
+ * `unlink` inside `deleteSessionWithArtifacts` fails with a bare ENOENT that
+ * reads as a bug and leaves the row on screen.
+ *
+ * Deleting the SHARED copy is deliberately not implemented here. Publishing a
+ * tombstone for a body this machine never owned would erase the session on
+ * every peer from a keypress in a list, and the sessions domain derives
+ * tombstones from what this machine has published — it has no notion of
+ * retracting someone else's row. That is a destructive cross-machine primitive,
+ * not a picker detail.
+ *
+ * Throws rather than returning `false` because the selector renders a thrown
+ * message inline, while `false` closes the dialog silently and looks like the
+ * delete was accepted and ignored.
+ */
+export async function deletePickedSession(storage: SessionStorage, session: SessionInfo): Promise<boolean> {
+	if (session.remoteOnly) {
+		throw new Error("This session lives on another machine. Open it here first, or delete it there.");
+	}
+	await storage.deleteSessionWithArtifacts(session.path);
+	return true;
 }
 
 /**
@@ -91,10 +117,7 @@ export async function selectSession(
 				onDelete:
 					options.allowDelete === false
 						? undefined
-						: async (session: SessionInfo) => {
-								await storage.deleteSessionWithArtifacts(session.path);
-								return true;
-							},
+						: (session: SessionInfo) => deletePickedSession(storage, session),
 				historyMatcher,
 				loadAllSessions:
 					options.allowGlobalScope === false

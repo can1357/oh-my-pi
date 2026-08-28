@@ -14,6 +14,7 @@ import { StateBrokerClient } from "@oh-my-pi/pi-coding-agent/state-broker/client
 import {
 	enumerateConfigFiles,
 	isReplicableConfigRel,
+	MAX_CONFIG_FILE_BYTES,
 	readConfigFile,
 } from "@oh-my-pi/pi-coding-agent/state-broker/config-files";
 import { createConfigDomain } from "@oh-my-pi/pi-coding-agent/state-broker/domains/config";
@@ -187,6 +188,36 @@ describe("replication safety", () => {
 		domain.applyRemote([{ key: "auth-broker.token", rev: Date.now() + 1000, value: null }]);
 
 		expect(await Bun.file(victim).text()).toBe("bearer-token");
+	});
+
+	/**
+	 * The outbound scan skips files over the cap, but inbound `content` is an
+	 * unbounded string from a peer the trust model treats as authenticated rather
+	 * than trusted, and it is written straight to disk. Worse than the write
+	 * itself: an oversized file is then invisible to every later outbound scan,
+	 * so replication can never correct or retract what it just wrote.
+	 */
+	test("config merge refuses an oversized remote value", async () => {
+		const agentDir = path.join(tempDir, "agent-huge");
+		await fs.mkdir(agentDir, { recursive: true });
+		const domain = createConfigDomain(agentDir);
+		const rev = Date.now();
+		const oversized = "x".repeat(MAX_CONFIG_FILE_BYTES + 1);
+
+		domain.applyRemote([{ key: "config.yml", rev, value: { rel: "config.yml", content: oversized, mtimeMs: rev } }]);
+		expect(await fs.exists(path.join(agentDir, "config.yml"))).toBe(false);
+
+		// The cap counts BYTES, not code units: a multi-byte payload that fits in
+		// fewer characters than the cap must still be refused.
+		const multibyte = "é".repeat(MAX_CONFIG_FILE_BYTES - 1);
+		expect(multibyte.length).toBeLessThan(MAX_CONFIG_FILE_BYTES);
+		domain.applyRemote([{ key: "mcp.json", rev, value: { rel: "mcp.json", content: multibyte, mtimeMs: rev } }]);
+		expect(await fs.exists(path.join(agentDir, "mcp.json"))).toBe(false);
+
+		// A value AT the cap still lands, so the guard is a bound and not a ban.
+		const atCap = "y".repeat(MAX_CONFIG_FILE_BYTES);
+		domain.applyRemote([{ key: "config.yml", rev, value: { rel: "config.yml", content: atCap, mtimeMs: rev } }]);
+		expect((await Bun.file(path.join(agentDir, "config.yml")).text()).length).toBe(MAX_CONFIG_FILE_BYTES);
 	});
 
 	/** A replicable file still merges, so the gate is not simply refusing everything. */

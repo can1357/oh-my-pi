@@ -18,7 +18,6 @@
  * to the caller, so a dead object store degrades to local-only operation.
  */
 
-import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -261,7 +260,7 @@ export class SessionReplicator {
 	 */
 	async ensureLocal(rel: string, opts: { projectId: string; relCwd?: string }): Promise<boolean> {
 		const abs = this.#localPath(rel);
-		if (fs.existsSync(abs)) return true;
+		if (await Bun.file(abs).exists()) return true;
 
 		const scoped = this.#scopeFor(rel, opts.projectId);
 		if (!scoped) {
@@ -290,7 +289,11 @@ export class SessionReplicator {
 				// Translate the origin machine's absolute cwd in the session header
 				// to THIS machine's session directory before landing the file, so
 				// resume adopts the directory instead of degrading to runtime-only.
-				const rewritten = rewriteSessionHeaderCwd(bytes, localRoot);
+				const rewritten = rewriteSessionHeaderCwd(bytes, {
+					localCwd: localRoot,
+					localProjectRoot: scoped.project.localPath,
+					relCwd,
+				});
 				await fsp.mkdir(path.dirname(abs), { recursive: true });
 				const tmp = `${abs}.${process.pid}.${Date.now()}.tmp`;
 				try {
@@ -379,8 +382,23 @@ export class SessionReplicator {
 				continue;
 			}
 			for (const file of files) {
-				const at = remote.get(sessionKey(`${slug}/${file.file}`));
-				if (at !== undefined && Math.floor(file.mtimeMs) <= at) continue;
+				const key = sessionKey(`${slug}/${file.file}`);
+				// Same precedence as `uploadIfStale`, and for the same reason: an
+				// object's timestamp is the time its `put` COMPLETED, so for a body
+				// that was appended to mid-transfer the archive is stamped after the
+				// append it is missing. Pre-filtering on that stamp is exactly the
+				// comparison that cannot see a torn upload, and it is the only repair
+				// path left once the process that queued the retry is gone — so a
+				// hard kill used to strand the truncated body in the store forever.
+				const recorded = this.#sync?.uploadedSnapshot(key);
+				if (recorded) {
+					if (recorded.mtime === file.mtimeMs && recorded.size === file.size) continue;
+				} else {
+					// No record of our own (another machine archived it, or ours was
+					// lost): the remote timestamp is all there is to compare.
+					const at = remote.get(key);
+					if (at !== undefined && file.mtimeMs <= at) continue;
+				}
 				// Reuse the scheduled path so the concurrency cap, the staleness
 				// re-check and drain tracking all apply unchanged.
 				this.#track(this.uploadIfStale(`${path.basename(path.dirname(file.abs))}/${file.file}`, projectId));
@@ -405,15 +423,33 @@ export class SessionReplicator {
 	}
 }
 
+/** Where a downloaded session's header should point on THIS machine. */
+interface HeaderRewriteTarget {
+	/** Local absolute cwd for the session itself (project root plus `relCwd`). */
+	localCwd: string;
+	/** Local absolute project root, which `additionalDirectories` remap against. */
+	localProjectRoot: string;
+	/** The session's project-relative POSIX cwd; `""` at the project root. */
+	relCwd: string;
+}
+
 /**
  * Rewrite the origin machine's absolute `cwd` — and any `additionalDirectories`
  * that lay inside the origin project root — in a downloaded session body's
- * header to THIS machine's project path, returning the re-encoded bytes.
+ * header to THIS machine's paths, returning the re-encoded bytes.
  *
  * WHY: resume (session-manager.ts:1435-1445) adopts `header.cwd` only when the
  * directory is enterable; an origin-only path forces `#fallbackRuntimeOnly` and
  * a degraded session. Cross-machine resume therefore requires translating the
  * header to the local project path.
+ *
+ * EXTRA DIRS ARE PROJECT-RELATIVE, NOT CWD-RELATIVE. A session started in a
+ * subdirectory has extra workspaces that are typically SIBLINGS of that
+ * subdirectory, so relativizing them against the session cwd yields `../pkg-b`,
+ * which fails the "inside the root" test and leaves an origin-machine absolute
+ * path in a header we otherwise localized. The origin project root is recovered
+ * by climbing `relCwd`'s depth out of the origin cwd — depth rather than string
+ * surgery, so it holds whichever separator the origin used.
  *
  * FORMAT: line 0 is a fixed-width title slot, line 1 the variable-width session
  * header; legacy sessions omit the slot and start with the header. Only the
@@ -422,7 +458,7 @@ export class SessionReplicator {
  * (no re-padding is needed because the slot bytes are preserved exactly). A body
  * whose header line is unparseable or not a session header is returned as-is.
  */
-function rewriteSessionHeaderCwd(bytes: Uint8Array, localRoot: string): Uint8Array {
+function rewriteSessionHeaderCwd(bytes: Uint8Array, target: HeaderRewriteTarget): Uint8Array {
 	const text = Buffer.from(bytes).toString("utf-8");
 	const firstNl = text.indexOf("\n");
 	if (firstNl < 0) {
@@ -459,17 +495,21 @@ function rewriteSessionHeaderCwd(bytes: Uint8Array, localRoot: string): Uint8Arr
 		return bytes;
 	}
 
-	const originRoot = typeof header.cwd === "string" ? path.resolve(header.cwd) : undefined;
-	header.cwd = localRoot;
-	if (originRoot && Array.isArray(header.additionalDirectories)) {
+	const originCwd = typeof header.cwd === "string" ? path.resolve(header.cwd) : undefined;
+	header.cwd = target.localCwd;
+	if (originCwd && Array.isArray(header.additionalDirectories)) {
+		// Climb out of the session's subdirectory to the origin PROJECT root; at
+		// the root itself the depth is 0 and this is the cwd.
+		const depth = target.relCwd ? target.relCwd.split("/").length : 0;
+		const originRoot = depth > 0 ? path.resolve(originCwd, ...Array<string>(depth).fill("..")) : originCwd;
 		header.additionalDirectories = (header.additionalDirectories as unknown[]).map(dir => {
 			if (typeof dir !== "string") return dir;
 			// Best-effort, native-separator remap (the supported scenario is
 			// same-OS machines); only paths INSIDE the origin project root are
 			// translated, unrelated absolute dirs are left untouched.
 			const rel = path.relative(originRoot, path.resolve(dir));
-			if (rel === "") return localRoot;
-			if (!rel.startsWith("..") && !path.isAbsolute(rel)) return path.join(localRoot, rel);
+			if (rel === "") return target.localProjectRoot;
+			if (!rel.startsWith("..") && !path.isAbsolute(rel)) return path.join(target.localProjectRoot, rel);
 			return dir;
 		});
 	}

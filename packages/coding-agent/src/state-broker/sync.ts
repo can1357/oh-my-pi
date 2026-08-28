@@ -376,12 +376,14 @@ export class StateSyncEngine {
 			// in an empty page while we ignored every entry the broker accepted.
 			// Recover at most once per pass, so a broker that reports nonsense
 			// cannot spin us.
-			if (!recovered && this.#rollbackDetected(delta, cursor.inboundSeq)) {
+			if (!recovered && this.#rollbackDetected(delta, cursor.inboundSeq, domain.id)) {
 				recovered = true;
 				const stale = cursor.inboundSeq;
-				if (delta.epoch) this.#store.adoptBrokerEpoch(delta.epoch);
+				// Reset BEFORE recording the epoch: a crash in between must leave a
+				// cursor that is replayed again, never one the new epoch blesses.
 				cursor.inboundSeq = 0;
 				this.#store.set(domain.id, cursor);
+				if (delta.epoch) this.#store.rememberBrokerEpoch(domain.id, delta.epoch);
 				logger.warn("state sync broker sequence rolled back; replaying inbound from zero", {
 					domain: domain.id,
 					staleCursor: stale,
@@ -408,7 +410,8 @@ export class StateSyncEngine {
 	}
 
 	/**
-	 * Whether `delta` proves our persisted inbound cursor cannot be honoured.
+	 * Whether `delta` proves `domain`'s persisted inbound cursor cannot be
+	 * honoured.
 	 *
 	 * Two independent signals, because neither covers the other:
 	 *
@@ -418,16 +421,23 @@ export class StateSyncEngine {
 	 * - **Head went backwards.** Same database, restored from an older backup,
 	 *   so the epoch is unchanged but entries we were told about are gone.
 	 *
+	 * Both are judged per DOMAIN. Domains run concurrently against their own
+	 * cursors, so a replica-wide epoch would let the first domain to notice a
+	 * recreated broker answer for all six: the others would compare their (now
+	 * updated) epoch equal, fall through to a head that has already climbed past
+	 * their stale cursor, and skip every entry the rebuilt broker issued below
+	 * it — permanently, since nothing revisits an inbound cursor.
+	 *
 	 * A broker predating these fields sends neither, and this returns false, so
 	 * behaviour against an older broker is exactly what it was before.
 	 */
-	#rollbackDetected(delta: StateDeltaResponse, inboundSeq: number): boolean {
+	#rollbackDetected(delta: StateDeltaResponse, inboundSeq: number, domain: StateDomainId): boolean {
 		if (delta.epoch) {
-			const known = this.#store.brokerEpoch();
+			const known = this.#store.brokerEpoch(domain);
 			// First sight is not a rollback: an existing replica upgrading from a
 			// broker that did not report an epoch has perfectly good cursors, so
 			// record the identity WITHOUT resetting them.
-			if (known === undefined) this.#store.rememberBrokerEpoch(delta.epoch);
+			if (known === undefined) this.#store.rememberBrokerEpoch(domain, delta.epoch);
 			else if (known !== delta.epoch) return true;
 		}
 		return delta.head !== undefined && delta.head < inboundSeq;

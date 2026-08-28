@@ -11,6 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { type AuthBrokerServerHandle, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
+import { deletePickedSession } from "@oh-my-pi/pi-coding-agent/cli/session-picker";
 import { ProjectsConfigFile, getProjectsConfigPath, saveProjects } from "@oh-my-pi/pi-coding-agent/config/projects-config";
 import { drainBlobUploads } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import { BlobStore } from "@oh-my-pi/pi-coding-agent/session/blob-store";
@@ -18,6 +19,7 @@ import { mergeRemoteOnlySessions, resolveResumableSession } from "@oh-my-pi/pi-c
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { sessionDirNameForCwd } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
+import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { StateBrokerClient } from "@oh-my-pi/pi-coding-agent/state-broker/client";
 import { createSessionsDomain, readRemoteSessionIndex } from "@oh-my-pi/pi-coding-agent/state-broker/domains/sessions";
 import type { ObjectStore } from "@oh-my-pi/pi-coding-agent/state-broker/object-store";
@@ -195,6 +197,42 @@ describe("remote-only session stubs", () => {
 		expect(match?.scope).toBe("global");
 		expect(match?.session.remoteOnly).toBe(true);
 		expect(match?.session.path).toBe(path.join(sessionsDir, dirName, "2026-01-01T00-00-00_bbbb2222.jsonl"));
+	});
+
+	/**
+	 * The all-projects picker lists remote-only rows, and its delete action ran
+	 * an unconditional `unlink` on the stub's `path` — a file that does not
+	 * exist here — so choosing Delete surfaced a bare ENOENT and left the row on
+	 * screen. Deleting the SHARED copy is deliberately not offered: retracting a
+	 * body this machine never published would erase the session on every peer
+	 * from a keypress in a list.
+	 */
+	test("deleting a remote-only row is refused with a reason, not an ENOENT", async () => {
+		const storage = new FileSessionStorage();
+		const deleteSpy = spyOn(storage, "deleteSessionWithArtifacts");
+		const base: SessionInfo = {
+			path: path.join(makeDir("omp-del-"), "never-downloaded.jsonl"),
+			id: "cccc3333",
+			cwd: "",
+			created: new Date(),
+			modified: new Date(),
+			messageCount: 1,
+			size: 10,
+			firstMessage: "",
+			allMessagesText: "",
+		};
+
+		await expect(deletePickedSession(storage, { ...base, remoteOnly: true })).rejects.toThrow(/another machine/);
+		// Refused BEFORE touching storage, so no ENOENT can escape.
+		expect(deleteSpy).not.toHaveBeenCalled();
+
+		// A real local session still deletes, so the guard is not a blanket veto.
+		const dir = makeDir("omp-del-local-");
+		writeSessionBody(dir, "local.jsonl", dir, "t");
+		const local: SessionInfo = { ...base, path: path.join(dir, "local.jsonl") };
+		expect(await deletePickedSession(storage, local)).toBe(true);
+		expect(fs.existsSync(local.path)).toBe(false);
+		deleteSpy.mockRestore();
 	});
 });
 

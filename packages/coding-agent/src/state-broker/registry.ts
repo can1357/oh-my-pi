@@ -9,7 +9,6 @@
  * install pays nothing for this subsystem existing.
  */
 
-import * as fs from "node:fs";
 import * as path from "node:path";
 import {
 	getAgentDir,
@@ -115,7 +114,7 @@ let activeReplicator: SessionReplicator | undefined;
  * Called before a session file is read, so remote-only sessions become
  * resumable from every entry point rather than only the picker. A no-op when
  * replication is off, when the file is already local, or when the path is not
- * in the remote index — so the common case costs one `existsSync`.
+ * in the remote index — so the common case costs one stat.
  *
  * Never throws: a session that cannot be fetched must surface as the normal
  * "missing session" path, not as a crash during resume.
@@ -124,7 +123,7 @@ export async function fetchRemoteSessionIfMissing(filePath: string): Promise<voi
 	const replicator = activeReplicator;
 	if (!replicator) return;
 	try {
-		if (fs.existsSync(filePath)) return;
+		if (await Bun.file(filePath).exists()) return;
 		const sessionsDir = getSessionsDir();
 		const rel = path.relative(sessionsDir, path.resolve(filePath));
 		if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return;
