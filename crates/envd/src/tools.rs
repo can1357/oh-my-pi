@@ -2272,6 +2272,12 @@ pub(crate) fn production_registry<
 		dynamic.register(&mut registry)?;
 	}
 	registry.protect_core_claims(["hub", "vibe"]);
+	// vibe stays callable and model-visible but is omitted from the
+	// user-facing roster; users drive it through the /vibe mode command.
+	// Compositions without the dynamic vibe device (tests) skip the unlist.
+	if registry.live_identity("vibe").is_some() {
+		registry.unlist_from_roster("vibe")?;
+	}
 	for factory in dynamic_tool_factories {
 		factory.register(&mut registry)?;
 	}
@@ -3070,8 +3076,7 @@ mod tests {
 		project: &Path,
 		state: &Path,
 		workers: ExtHostSupervisor,
-		upload: Arc<RecordingUpload>,
-		factories: Vec<Arc<dyn DynamicToolFactory>>,
+		bridges: RegistryBridges,
 	) -> Result<Arc<Registry>, EnvdError> {
 		let documents = handshake_document_host(project).await;
 		let exec = ExecHost::new();
@@ -3135,11 +3140,7 @@ mod tests {
 			UnusedPreludeInvoker,
 			ToolsPolicy::Auto,
 			Registry::new(),
-			RegistryBridges {
-				dynamic_tool_factories: factories,
-				telemetry_upload: Some(upload),
-				..RegistryBridges::default()
-			},
+			bridges,
 		)?;
 		Ok(registry)
 	}
@@ -3155,12 +3156,12 @@ mod tests {
 			declaration: ToolDecl { rev: "helper.1".to_owned(), ..ToolDecl::default() },
 		};
 		let upload = Arc::new(RecordingUpload::default());
+		let telemetry_upload: Arc<dyn TelemetryUpload> = upload.clone();
 		let Err(error) = assemble_registry(
 			project.path(),
 			state.path(),
 			ExtHostSupervisor::inert_with_registrations(Arc::from([malformed])),
-			Arc::clone(&upload),
-			Vec::new(),
+			RegistryBridges { telemetry_upload: Some(telemetry_upload), ..RegistryBridges::default() },
 		)
 		.await
 		else {
@@ -3179,12 +3180,12 @@ mod tests {
 		let project = tempfile::tempdir().expect("project directory");
 		let state = tempfile::tempdir().expect("state directory");
 		let upload = Arc::new(RecordingUpload::default());
+		let telemetry_upload: Arc<dyn TelemetryUpload> = upload.clone();
 		let registry = assemble_registry(
 			project.path(),
 			state.path(),
 			ExtHostSupervisor::inert_with_registrations(Arc::from([])),
-			Arc::clone(&upload),
-			Vec::new(),
+			RegistryBridges { telemetry_upload: Some(telemetry_upload), ..RegistryBridges::default() },
 		)
 		.await
 		.expect("empty worker assembly succeeds");
@@ -3220,14 +3221,51 @@ mod tests {
 			project.path(),
 			state.path(),
 			ExtHostSupervisor::inert_with_registrations(Arc::from([vibe])),
-			Arc::new(RecordingUpload::default()),
-			Vec::new(),
+			RegistryBridges {
+				telemetry_upload: Some(Arc::new(RecordingUpload::default())),
+				..RegistryBridges::default()
+			},
 		)
 		.await
 		else {
 			panic!("a worker cannot claim the reserved vibe name");
 		};
 		assert!(error.to_string().contains("vibe"), "unexpected assembly failure: {error}");
+	}
+
+	#[tokio::test]
+	async fn dynamic_vibe_device_stays_model_visible_but_off_the_user_roster() {
+		let project = tempfile::tempdir().expect("project directory");
+		let state = tempfile::tempdir().expect("state directory");
+		let registry = assemble_registry(
+			project.path(),
+			state.path(),
+			ExtHostSupervisor::inert_with_registrations(Arc::from([])),
+			RegistryBridges {
+				dynamic_tools: vec![DynamicTool::new(
+					VibeDeviceTool::new(),
+					Presentation::Device,
+					Claims {
+						precedence: Precedence::ENHANCEMENT,
+						claimant:   sf!("omp/core"),
+						replaces:   None,
+					},
+				)],
+				..RegistryBridges::default()
+			},
+		)
+		.await
+		.expect("assembly with the dynamic vibe device succeeds");
+		assert!(registry.live_identity("vibe").is_some(), "the dynamic vibe device stays registered");
+		assert_ne!(
+			registry.presentation("vibe").expect("vibe presentation"),
+			Presentation::Hidden,
+			"vibe stays model-visible"
+		);
+		assert!(
+			!registry.roster().any(|(name, _)| name.as_str() == "vibe"),
+			"vibe must be omitted from the user-facing roster"
+		);
 	}
 
 	struct ShadowComputerTool {
@@ -3282,6 +3320,58 @@ mod tests {
 		}
 	}
 
+	struct VibeDeviceTool {
+		spec: ToolSpec,
+	}
+
+	impl VibeDeviceTool {
+		fn new() -> Self {
+			Self {
+				spec: ToolSpec {
+					name:            sf!("vibe"),
+					rev:             Rev { family: sf!("vibe-device"), n: 1 },
+					description:     sf!("dynamic vibe device fixture"),
+					schema:          bytes::Bytes::from_static(br#"{"type":"object"}"#),
+					constraint:      Constraint::None,
+					effects:         Effects::empty(),
+					projection_code: [0; 32],
+				},
+			}
+		}
+	}
+
+	impl Tool for VibeDeviceTool {
+		type Fault = JsonValue;
+		type Params = JsonValue;
+		type Payload = JsonValue;
+		type Update = JsonValue;
+
+		fn spec(&self) -> &ToolSpec {
+			&self.spec
+		}
+
+		fn call<'c>(
+			&'c self,
+			params: IncomingParams<'c>,
+		) -> impl Stream<Item = Ev<Self::Update, Self::Payload, Self::Fault>> + Send + 'c {
+			drop(params);
+			stream! {
+				yield Ev::Done(ToolTerminal::Done {
+					result: Ok(JsonValue::Null),
+					useless: false,
+				});
+			}
+		}
+
+		fn prompt(
+			&self,
+			_view: Result<&Self::Payload, &Self::Fault>,
+			_caps: &PromptCaps,
+		) -> Vec<Part> {
+			Vec::new()
+		}
+	}
+
 	struct ComputerShadowFactory;
 
 	impl DynamicToolFactory for ComputerShadowFactory {
@@ -3304,8 +3394,11 @@ mod tests {
 			project.path(),
 			state.path(),
 			ExtHostSupervisor::inert_with_registrations(Arc::from([])),
-			Arc::new(RecordingUpload::default()),
-			vec![Arc::new(ComputerShadowFactory)],
+			RegistryBridges {
+				telemetry_upload: Some(Arc::new(RecordingUpload::default())),
+				dynamic_tool_factories: vec![Arc::new(ComputerShadowFactory)],
+				..RegistryBridges::default()
+			},
 		)
 		.await
 		else {

@@ -1083,6 +1083,35 @@ fn protecting_a_core_winning_device_clears_the_stale_unmount_tombstone() {
 }
 
 #[test]
+fn protecting_a_core_only_device_preserves_a_legitimate_unmount_tombstone() {
+	let mut registry = Registry::new();
+	registry
+		.register(
+			fake_tool(1, "core", Arc::new(AtomicUsize::new(0))).named("browser"),
+			Presentation::Device,
+			claims("omp/core", Precedence::ENHANCEMENT),
+		)
+		.expect("core device");
+
+	registry.apply_availability(&[AvailabilityDelta {
+		name:    sf!("browser"),
+		mounted: false,
+		reason:  Some(sf!("worker gone")),
+	}]);
+	assert!(registry.devices().next().is_none(), "tombstone hides the unavailable core-only device");
+
+	registry.protect_core_claims(["browser"]);
+	assert!(
+		registry.devices().next().is_none(),
+		"protection must preserve the tombstone when no foreign claim is evicted"
+	);
+	assert!(
+		registry.live_identity("browser").is_some(),
+		"the core-only claim itself survives protection"
+	);
+}
+
+#[test]
 fn disabled_builtin_name_cannot_be_claimed_by_extension() {
 	let mut registry = Registry::new();
 	registry.protect_core_claims(["shell"]);

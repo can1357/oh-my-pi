@@ -1227,7 +1227,7 @@ async fn production_registry_omits_internal_tools_from_user_roster() {
 		.filter(|(_, presentation)| *presentation != Presentation::Hidden)
 		.map(|(name, _)| name.as_str())
 		.collect::<Vec<_>>();
-	for name in ["think", "report_issue", "learn", "manage_skill"] {
+	for name in ["think", "report_issue", "learn", "manage_skill", "vibe"] {
 		assert!(!visible.contains(&name), "{name} must be omitted from the /tools roster");
 	}
 	for name in ["think", "report_issue"] {

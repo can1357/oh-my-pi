@@ -1800,6 +1800,10 @@ impl Registry {
 	fn evict_foreign_live_claim(&mut self, name: &str) {
 		if let Some(claim) = self.live.remove(name) {
 			let foreign_winner = claim.claimant != "omp/core";
+			let foreign_shadow = claim
+				.shadowed
+				.iter()
+				.any(|shadow| shadow.claimant != "omp/core");
 			let mut core_claims = SmallVec::<ShadowClaim, 1>::new();
 			if !foreign_winner {
 				core_claims.push(ShadowClaim {
@@ -1828,10 +1832,15 @@ impl Registry {
 			if foreign_winner {
 				self.unlisted.remove(name);
 			}
-			// A stale unmount tombstone must never survive protection: the
-			// remaining live claim is core-owned, and the tombstone would keep
-			// hiding it from devices()/resolve_device.
-			self.unmounted.write().remove(name);
+			// Protection rewrites availability only where it evicts foreign
+			// ownership: clear a stale tombstone left behind by an evicted
+			// foreign claim so the surviving core device becomes visible, but
+			// keep a legitimate tombstone from a core-only unmount so an
+			// unavailable core device stays hidden from devices() and
+			// resolve_device.
+			if foreign_winner || foreign_shadow {
+				self.unmounted.write().remove(name);
+			}
 			if let Some(versions) = self.versions.get_mut(name) {
 				let retired_name = Str::new(name);
 				for (rev, entry) in versions.iter() {
