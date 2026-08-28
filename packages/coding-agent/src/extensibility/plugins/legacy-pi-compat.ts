@@ -2794,7 +2794,7 @@ async function installExtensionGraphHook(
 
 	if (asyncModules.size > 0) {
 		const alternation = [...asyncModules.keys()].map(escapeRegExp).join("|");
-		const filter = new RegExp(`^(?:${alternation})(?:\\?mtime=\\d+)?$`);
+		const filter = new RegExp(`^(?:${alternation})\\?mtime=${escapeRegExp(loadContext.loadTag)}$`);
 		const hookId = Bun.hash(
 			`${entryRealPath}\0async\0${loadContext.loadTag}\0${[...asyncModules.keys()].join("\0")}`,
 		).toString(36);
@@ -2839,7 +2839,7 @@ async function installExtensionGraphHook(
 
 	if (commonJsPaths.size > 0) {
 		const alternation = [...commonJsPaths].map(escapeRegExp).join("|");
-		const filter = new RegExp(`^(?:${alternation})(?:\\?mtime=\\d+)?$`);
+		const filter = new RegExp(`^(?:${alternation})\\?mtime=${escapeRegExp(loadContext.loadTag)}$`);
 		const hookId = Bun.hash(
 			`${entryRealPath}\0commonjs\0${loadContext.loadTag}\0${[...commonJsPaths].join("\0")}`,
 		).toString(36);
@@ -2876,7 +2876,7 @@ async function installExtensionGraphHook(
 
 	if (synchronousSourcePaths.size > 0) {
 		const alternation = [...synchronousSourcePaths].map(escapeRegExp).join("|");
-		const filter = new RegExp(`^(?:${alternation})(?:\\?mtime=\\d+)?$`);
+		const filter = new RegExp(`^(?:${alternation})\\?mtime=${escapeRegExp(loadContext.loadTag)}$`);
 		const hookId = Bun.hash(
 			`${entryRealPath}\0sync-source\0${loadContext.loadTag}\0${[...synchronousSourcePaths].join("\0")}`,
 		).toString(36);
