@@ -1486,6 +1486,105 @@ describe("RelayBridge tab grouping", () => {
 		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
+	it("replays preserved timezone overrides across recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		const timezone = { timezoneId: "Asia/Shanghai" };
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: commandId,
+				sessionId: pageSession,
+				method: "Emulation.setTimezoneOverride",
+				params: timezone,
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+		expect(cdp.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
+		ack(bridge, ext2, "attach");
+
+		await waitFor(() => ext2.rpcs("send").length === 1, "timezone replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Emulation.setTimezoneOverride"]);
+		expect(ext2.rpcs("send")[0]!.params).toEqual(timezone);
+		ack(bridge, ext2, "send");
+		await flush();
+
+		expect(ext2.rpcs("send")).toHaveLength(1);
+	});
+
+	it("clears replayed timezone overrides when their owner disconnects during recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Emulation.setTimezoneOverride",
+				params: { timezoneId: "Asia/Shanghai" },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.rpcs("send").length === 1, "timezone replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Emulation.setTimezoneOverride"]);
+		expect(ext2.rpcs("send")[0]!.params).toEqual({ timezoneId: "Asia/Shanghai" });
+
+		bridge.cdpClosed(ownerConn);
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.rpcs("send").length === 2, "orphaned timezone cleanup");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Emulation.setTimezoneOverride",
+			"Emulation.setTimezoneOverride",
+		]);
+		expect(ext2.rpcs("send")[1]!.params).toEqual({ timezoneId: "" });
+		ack(bridge, ext2, "send");
+		await flush();
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			holderConn,
+			JSON.stringify({ id: commandId, sessionId: holderSession, method: "Network.getCookies" }),
+		);
+		await flush();
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Emulation.setTimezoneOverride",
+			"Emulation.setTimezoneOverride",
+			"Network.getCookies",
+		]);
+		ack(bridge, ext2, "send", { cookies: [] });
+		await flush();
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+	});
+
 	it("does not replay a cleared persistent root setter after recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

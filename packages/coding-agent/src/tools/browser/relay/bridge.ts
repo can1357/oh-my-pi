@@ -853,6 +853,7 @@ export class RelayBridge {
 			case "Page.setDeviceMetricsOverride":
 			case "Emulation.setGeolocationOverride":
 			case "Page.setGeolocationOverride":
+			case "Emulation.setTimezoneOverride":
 			case "Network.emulateNetworkConditions":
 			case "Network.setUserAgentOverride":
 			case "Emulation.setUserAgentOverride":
@@ -1085,6 +1086,11 @@ export class RelayBridge {
 			case "Emulation.setEmulatedMedia":
 			case "Emulation.setLocaleOverride":
 				return { method: subscription.method, params: {} };
+			case "Emulation.setTimezoneOverride":
+				// Timezone override is another persistent root setter without a paired
+				// disable RPC. When its preserved owner disappears after replay, reset
+				// the shared root back to the browser default timezone.
+				return { method: subscription.method, params: { timezoneId: "" } };
 			case "Emulation.setDeviceMetricsOverride":
 				return { method: "Emulation.clearDeviceMetricsOverride" };
 			case "Page.setDeviceMetricsOverride":
