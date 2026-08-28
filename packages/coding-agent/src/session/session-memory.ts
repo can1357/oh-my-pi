@@ -7,6 +7,12 @@ import type { Settings } from "../config/settings";
 import type { HindsightSessionState } from "../hindsight/state";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
+import {
+	activateMemoryFabric,
+	type MemoryFabricRuntime,
+	type MemoryFabricStage,
+} from "../memory-fabric/session-integration/activation";
+import type { MemorySessionScope } from "../memory-fabric/session-integration/types";
 import type { MnemopiSessionState } from "../mnemopi/state";
 
 /** Capabilities borrowed from the owning AgentSession. */
@@ -31,9 +37,12 @@ export class SessionMemory {
 	readonly #memoryAgentDir: string | undefined;
 	readonly #memoryTaskDepth: number;
 	readonly #createMemoryTools: (() => Promise<AgentTool[]>) | undefined;
+	readonly #memoryFabricStage: MemoryFabricStage | undefined;
+	readonly #memoryFabricEnv: Record<string, string | undefined> | undefined;
 	#memoryBackendTransition: Promise<void> = Promise.resolve();
 	#localMemoryStartupAbort: AbortController | undefined;
 	#baseSystemPromptBeforeMemoryPromotion: string[] | undefined;
+	#memoryFabric: MemoryFabricRuntime | null = null;
 
 	constructor(
 		host: SessionMemoryHost,
@@ -41,17 +50,32 @@ export class SessionMemory {
 			memoryAgentDir?: string;
 			memoryTaskDepth?: number;
 			createMemoryTools?: () => Promise<AgentTool[]>;
+			/** Overrides the `OMP_MEMORY_FABRIC` stage. Intended for tests and flags. */
+			memoryFabricStage?: MemoryFabricStage;
+			/** Overrides the environment the fabric stage is read from. */
+			memoryFabricEnv?: Record<string, string | undefined>;
 		},
 	) {
 		this.#host = host;
 		this.#memoryAgentDir = options.memoryAgentDir;
 		this.#memoryTaskDepth = options.memoryTaskDepth ?? 0;
 		this.#createMemoryTools = options.createMemoryTools;
+		this.#memoryFabricStage = options.memoryFabricStage;
+		this.#memoryFabricEnv = options.memoryFabricEnv;
 	}
 
 	/** Current serialized backend transition, used by prompt and disposal drains. */
 	get transition(): Promise<void> {
 		return this.#memoryBackendTransition;
+	}
+
+	/**
+	 * The Memory Fabric runtime for this session, or `null` while the fabric is
+	 * switched off (the default). Follows the backend lifecycle: rebuilt on
+	 * every {@link applyMemoryBackend} and torn down with the backend state.
+	 */
+	get memoryFabric(): MemoryFabricRuntime | null {
+		return this.#memoryFabric;
 	}
 
 	/** Base prompt captured before a per-turn memory promotion. */
@@ -145,6 +169,8 @@ export class SessionMemory {
 
 	async #disposeMemoryBackendState(consolidateMnemopi = true): Promise<void> {
 		this.cancelLocalMemoryStartup();
+		this.#memoryFabric?.dispose();
+		this.#memoryFabric = null;
 		const hindsight = this.#host.getHindsightSessionState();
 		if (hindsight) {
 			try {
@@ -163,6 +189,33 @@ export class SessionMemory {
 			} catch (error) {
 				logger.warn("Memory lifecycle: Mnemopi dispose failed", { error: String(error) });
 			}
+		}
+	}
+
+	/**
+	 * Construct the Memory Fabric for this session, when enabled.
+	 *
+	 * Off by default: with `OMP_MEMORY_FABRIC` unset (and no override) this
+	 * constructs nothing at all. Activation failures are logged and swallowed —
+	 * the fabric is an observer and must never break the memory backend
+	 * transition it rides on.
+	 */
+	#activateMemoryFabric(): void {
+		if (this.#memoryTaskDepth !== 0 || this.#host.isDisposed()) return;
+		try {
+			const scope: MemorySessionScope = {
+				projectId: this.#memoryAgentDir ?? process.cwd(),
+				sessionId: this.#host.agent.sessionId ?? `memory-fabric-${Date.now().toString(36)}`,
+				cwd: process.cwd(),
+			};
+			this.#memoryFabric = activateMemoryFabric({
+				scope,
+				...(this.#memoryFabricStage !== undefined ? { stage: this.#memoryFabricStage } : {}),
+				...(this.#memoryFabricEnv !== undefined ? { env: this.#memoryFabricEnv } : {}),
+			});
+		} catch (error) {
+			logger.warn("Memory lifecycle: Memory Fabric activation failed", { error: String(error) });
+			this.#memoryFabric = null;
 		}
 	}
 
@@ -195,6 +248,7 @@ export class SessionMemory {
 				});
 			}
 			if (this.#host.isDisposed()) return;
+			this.#activateMemoryFabric();
 			await this.#refreshMemoryTools();
 			if (this.#host.isDisposed()) return;
 			await this.#host.refreshBaseSystemPrompt();
