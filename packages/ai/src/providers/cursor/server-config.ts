@@ -137,10 +137,12 @@ export async function fetchCursorBidiAvailability(args: {
  * Cache and in-flight key: `apiKey` + `baseUrl` plus a canonical serialization
  * of the sanitized caller headers. A gateway can answer `GetServerConfig`
  * per caller header, so two callers that differ only in headers must not
- * share a cached or coalesced result. Header names are sorted so insertion
- * order cannot split one header set into two keys, and `JSON.stringify`
- * escaping keeps the encoding unambiguous. Undefined or empty headers keep
- * the bare `apiKey|baseUrl` shape so the no-header path keeps one key.
+ * share a cached or coalesced result. The tuple is structurally serialized
+ * with `JSON.stringify`: component values never frame each other, so a `|`
+ * in an API key, URL, or header value cannot make two distinct tuples
+ * collide. Header names are sorted so insertion order cannot split one
+ * header set into two keys, and `undefined` and empty header sets
+ * serialize to the same key.
  */
 function serverConfigCacheKey(
 	apiKey: string,
@@ -148,9 +150,8 @@ function serverConfigCacheKey(
 	callerHeaders: Record<string, string> | undefined,
 ): string {
 	const names = Object.keys(callerHeaders ?? {}).sort();
-	if (names.length === 0) return `${apiKey}|${baseUrl}`;
 	const entries = names.map(name => [name, callerHeaders?.[name] ?? ""]);
-	return `${apiKey}|${baseUrl}|${JSON.stringify(entries)}`;
+	return JSON.stringify([apiKey, baseUrl, entries]);
 }
 
 /**
