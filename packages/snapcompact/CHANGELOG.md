@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [17.4.1] - 2026-08-21
+
+### Added
+
+- Restored `providerFrameBudget()` to allow callers to size archives according to the maximum frame budget the provider will send.
+
+### Fixed
+
+- Fixed an issue where character-based truncation could split inline base64 data URLs into corrupted payloads that were rejected by OpenAI-compatible providers. Data URLs are now replaced atomically with placeholders before truncation, and previously affected archives are healed during re-compaction.
+
 ## [17.3.8] - 2026-08-19
 
 ### Fixed

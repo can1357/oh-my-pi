@@ -106,6 +106,7 @@ export function validateXAIBillingEndpoint(url: string, field: string = "billing
 async function xaiOAuthDiscovery(
 	timeoutMs: number = DISCOVERY_TIMEOUT_MS,
 	fetchOverride?: FetchImpl,
+	signal?: AbortSignal,
 ): Promise<XAIOAuthDiscovery> {
 	const fetchImpl = fetchOverride ?? fetch;
 	let response: Response;
@@ -113,7 +114,7 @@ async function xaiOAuthDiscovery(
 		response = await fetchImpl(XAI_OAUTH_DISCOVERY_URL, {
 			method: "GET",
 			headers: { Accept: "application/json" },
-			signal: AbortSignal.timeout(timeoutMs),
+			signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
 		});
 	} catch (error) {
 		throw new AIError.OAuthError(
@@ -482,7 +483,7 @@ async function pollXAIDeviceToken(
 /** Log in to xAI Grok with the RFC 8628 device authorization grant. */
 export async function loginXAIOAuth(ctrl: OAuthController): Promise<OAuthCredentials> {
 	const fetchImpl = ctrl.fetch ?? fetch;
-	const discovery = await xaiOAuthDiscovery(DISCOVERY_TIMEOUT_MS, fetchImpl);
+	const discovery = await xaiOAuthDiscovery(DISCOVERY_TIMEOUT_MS, fetchImpl, ctrl.signal);
 	const device = await requestXAIDeviceAuthorization(fetchImpl, ctrl.signal);
 	ctrl.onAuth?.({
 		url: device.verificationUriComplete,
@@ -503,15 +504,19 @@ export async function loginXAIOAuth(ctrl: OAuthController): Promise<OAuthCredent
  * Refresh an xAI OAuth access token using a stored refresh_token.
  *
  * Re-runs OIDC discovery and re-validates the token endpoint before sending
- * the stored refresh token.
+ * the stored refresh token. Caller cancellation aborts every network request.
  */
-export async function refreshXAIOAuthToken(refreshToken: string, fetchOverride?: FetchImpl): Promise<OAuthCredentials> {
+export async function refreshXAIOAuthToken(
+	refreshToken: string,
+	fetchOverride?: FetchImpl,
+	signal?: AbortSignal,
+): Promise<OAuthCredentials> {
 	const fetchImpl = fetchOverride ?? fetch;
 	if (typeof refreshToken !== "string" || !refreshToken.trim()) {
 		throw new AIError.OAuthError("missing refresh_token", { kind: "validation", provider: "xai" });
 	}
 
-	const discovery = await xaiOAuthDiscovery(DISCOVERY_TIMEOUT_MS, fetchImpl);
+	const discovery = await xaiOAuthDiscovery(DISCOVERY_TIMEOUT_MS, fetchImpl, signal);
 	const tokenEndpoint = validateXAIEndpoint(discovery.token_endpoint, "token_endpoint");
 
 	const body = new URLSearchParams({
@@ -528,7 +533,9 @@ export async function refreshXAIOAuthToken(refreshToken: string, fetchOverride?:
 		},
 		body,
 		redirect: "error",
-		signal: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
+		signal: signal
+			? AbortSignal.any([signal, AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS)])
+			: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
 	});
 
 	if (!response.ok) {
@@ -555,5 +562,5 @@ export async function refreshXAIOAuthToken(refreshToken: string, fetchOverride?:
 		);
 	}
 	const credentials = parseXAITokenResponse(payload, "xAI token refresh response", refreshToken);
-	return withXAIOAuthIdentity(credentials, fetchImpl);
+	return withXAIOAuthIdentity(credentials, fetchImpl, signal);
 }

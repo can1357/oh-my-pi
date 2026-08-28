@@ -100,6 +100,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		getMcpServerInstructions?: () => Map<string, string> | undefined;
 		xdev?: XdevState;
 		lazyWrite?: boolean;
+		deviceOnlyWrite?: boolean;
 		/** Scripted mock model responses; enables driving `session.prompt()`. */
 		responses?: MockResponseSource;
 		/** Persisted history seeded into the agent, e.g. to model a resumed session. */
@@ -125,11 +126,16 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		systemPrompts: string[][];
 		/** Mutable registry shared with the session, for lifecycle-only mount fixtures. */
 		toolRegistry: Map<string, AgentTool>;
+		isDeviceOnlyWrite: () => boolean;
+		isPendingFullWriteDescription: () => boolean;
+		isToolActive: (name: string) => boolean;
 	} {
 		const readTool = createBasicTool("read", "Read");
 		const initialMcp = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
 		const writeTool = createBasicTool("write", "Write");
 		const toolRegistry = options.xdev?.tools ?? new Map<string, AgentTool>();
+		let deviceOnlyWrite = options.deviceOnlyWrite === true;
+		let pendingFullWriteDescription = false;
 		toolRegistry.set(readTool.name, readTool);
 		toolRegistry.set(initialMcp.name, initialMcp as unknown as AgentTool);
 		if (options.xdev && !options.lazyWrite) toolRegistry.set(writeTool.name, writeTool);
@@ -157,6 +163,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 					}
 				: undefined,
 		});
+		const activeToolNames = new Set(agent.state.tools.map(tool => tool.name));
 		const session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -168,6 +175,17 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 				if (!options.xdev) return false;
 				if (!toolRegistry.has("write")) toolRegistry.set("write", writeTool);
 				return true;
+			},
+			setActiveToolNames: names => {
+				activeToolNames.clear();
+				for (const name of names) activeToolNames.add(name);
+			},
+			isDeviceOnlyWrite: () => deviceOnlyWrite,
+			setDeviceOnlyWrite: enabled => {
+				deviceOnlyWrite = enabled;
+			},
+			setPendingFullWriteDescription: enabled => {
+				pendingFullWriteDescription = enabled;
 			},
 			extensionRunner: options.beforeAgentStartSystemPrompt
 				? ({
@@ -185,7 +203,15 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			xdev: options.xdev,
 		});
 		sessions.push(session);
-		return { session, contexts, systemPrompts, toolRegistry };
+		return {
+			session,
+			contexts,
+			systemPrompts,
+			toolRegistry,
+			isDeviceOnlyWrite: () => deviceOnlyWrite,
+			isPendingFullWriteDescription: () => pendingFullWriteDescription,
+			isToolActive: name => activeToolNames.has(name),
+		};
 	}
 
 	it("skips rebuild when an MCP refresh produces an identical tool set", async () => {
@@ -1202,6 +1228,107 @@ These tools became available:
 		const delivered = mountNoticesIn(contexts[0]);
 		expect(delivered).toHaveLength(1);
 		expect(delivered[0]).toContain("xd://mcp__nucleus_search");
+	});
+	it("keeps device-only write access until a full-write activation commits", async () => {
+		let blockRebuild = false;
+		const rebuildStarted = Promise.withResolvers<void>();
+		const releaseRebuild = Promise.withResolvers<void>();
+		const { session, isDeviceOnlyWrite, isPendingFullWriteDescription } = newSession(
+			async toolNames => {
+				if (blockRebuild) {
+					rebuildStarted.resolve();
+					await releaseRebuild.promise;
+				}
+				return `tools:${toolNames.join(",")}`;
+			},
+			{ xdev: createTestXdevState(), deviceOnlyWrite: true },
+		);
+
+		blockRebuild = true;
+		const activation = session.setActiveToolsByName(["read", "write"]);
+		try {
+			await rebuildStarted.promise;
+			expect(isDeviceOnlyWrite()).toBe(true);
+			expect(isPendingFullWriteDescription()).toBe(true);
+		} finally {
+			releaseRebuild.resolve();
+		}
+		await activation;
+
+		expect(isDeviceOnlyWrite()).toBe(false);
+		expect(isPendingFullWriteDescription()).toBe(false);
+	});
+
+	it("restores device-only write access when a full-write prompt rebuild fails", async () => {
+		let failRebuild = false;
+		const { session, isDeviceOnlyWrite } = newSession(
+			async toolNames => {
+				if (failRebuild) throw new Error("rebuild failed");
+				return `tools:${toolNames.join(",")}`;
+			},
+			{ xdev: createTestXdevState(), deviceOnlyWrite: true },
+		);
+		expect(isDeviceOnlyWrite()).toBe(true);
+		const activeBefore = session.getActiveToolNames();
+
+		failRebuild = true;
+		await expect(session.setActiveToolsByName(["read", "write"])).rejects.toThrow("rebuild failed");
+
+		expect(isDeviceOnlyWrite()).toBe(true);
+		expect(session.getActiveToolNames()).toEqual(activeBefore);
+	});
+
+	it("restores full write mode when transport reactivation fails", async () => {
+		let failRebuild = false;
+		const { session, isDeviceOnlyWrite } = newSession(
+			async toolNames => {
+				if (failRebuild) throw new Error("rebuild failed");
+				return `tools:${toolNames.join(",")}`;
+			},
+			{ xdev: createTestXdevState() },
+		);
+		await session.setActiveToolsByName(["read"]);
+		expect(isDeviceOnlyWrite()).toBe(false);
+		const activeBefore = session.getActiveToolNames();
+
+		session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
+		failRebuild = true;
+		await expect(session.setActiveToolsByName(["read", "write"])).rejects.toThrow("rebuild failed");
+
+		expect(isDeviceOnlyWrite()).toBe(false);
+		expect(session.getActiveToolNames()).toEqual(activeBefore);
+	});
+
+	it("revokes the active write predicate during rebuild and restores it on failure", async () => {
+		let blockRebuild = false;
+		const rebuildStarted = Promise.withResolvers<void>();
+		const releaseRebuild = Promise.withResolvers<void>();
+		const { session, isToolActive } = newSession(
+			async toolNames => {
+				if (blockRebuild) {
+					rebuildStarted.resolve();
+					await releaseRebuild.promise;
+					throw new Error("rebuild failed");
+				}
+				return `tools:${toolNames.join(",")}`;
+			},
+			{ xdev: createTestXdevState() },
+		);
+		expect(isToolActive("write")).toBe(true);
+
+		blockRebuild = true;
+		const deactivation = session.setActiveToolsByName(["read"]);
+		try {
+			await rebuildStarted.promise;
+			expect(isToolActive("write")).toBe(false);
+			expect(session.getActiveToolNames()).toContain("write");
+		} finally {
+			releaseRebuild.resolve();
+		}
+		await expect(deactivation).rejects.toThrow("rebuild failed");
+
+		expect(isToolActive("write")).toBe(true);
+		expect(session.getActiveToolNames()).toContain("write");
 	});
 
 	it("does not register write while rolling back a direct-tool rebuild failure", async () => {

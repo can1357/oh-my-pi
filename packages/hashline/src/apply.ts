@@ -12,6 +12,7 @@
 import { resolveClipboardEdits } from "./clipboard";
 import {
 	afterInsertLandingShiftWarning,
+	afterInsertOpenerEscapeWarning,
 	ambiguousBoundaryEchoMessage,
 	ambiguousBoundaryPlacementMessage,
 	blockInsertLandingShiftWarning,
@@ -22,7 +23,7 @@ import {
 	UNRESOLVED_BLOCK_INTERNAL,
 	UNRESOLVED_CLIPBOARD_INTERNAL,
 } from "./messages";
-import { enclosingBoundaries, parsesCleanly } from "./syntax";
+import { enclosingBoundaries, nodeChain, parsesCleanly } from "./syntax";
 import { cloneCursor } from "./tokenizer";
 import type { Anchor, ApplyResult, Clipboard, Cursor, Edit } from "./types";
 
@@ -152,6 +153,51 @@ function bucketAnchorEditsByLine(edits: IndexedEdit[]): Map<number, IndexedEdit[
 
 /** A line that is nothing but closing delimiters: `}`, `)`, `];`, `})`, `},`. */
 export const STRUCTURAL_CLOSER_RE = /^\s*[)\]}]+[;,]?\s*$/;
+
+/**
+ * Grammar node kinds for attribute/decorator/annotation rows, per bundled
+ * tree-sitter grammar. Statements may repeat verbatim on adjacent lines by
+ * intent, but annotations on one item never do — an exact adjacent copy is a
+ * boundary echo. This classification is the extra evidence that lets
+ * one-sided echo normalization act on single-line ranges (the
+ * doc-restoration incident: a `PUT N.=N` landed one line high and its body
+ * restated the `#[napi]` surviving just below the range, duplicating the
+ * attribute — a result that PARSES, attributes being repeatable syntax, so
+ * neither the probe advisory nor the variant search could catch it).
+ *
+ * Kinds are grammar-blessed names, verified against the bundled parsers —
+ * not lexical guesses; `@media` in CSS or `@x` inside a string never
+ * classify. Extend per grammar as needed.
+ */
+const ANNOTATION_NODE_KINDS: Record<string, true> = {
+	attribute_item: true, // rust `#[...]`
+	inner_attribute_item: true, // rust `#![...]`
+	decorator: true, // typescript/tsx/javascript/python
+	annotation: true, // kotlin, java `@Foo(...)`
+	marker_annotation: true, // java `@Override`
+	attribute_list: true, // c# `[Fact]`
+};
+
+/** File line `line` is exactly a single-line annotation node. */
+function isAnnotationLine(fileLines: readonly string[], path: string, line: number): boolean {
+	return nodeChain(fileLines, path, line).some(
+		node => node.startLine === line && node.endLine === line && ANNOTATION_NODE_KINDS[node.kind] === true,
+	);
+}
+
+/** Every file line in the inclusive range is an annotation node. */
+function isAnnotationEchoRun(
+	fileLines: readonly string[],
+	path: string | undefined,
+	first: number,
+	last: number,
+): boolean {
+	if (path === undefined) return false;
+	for (let line = first; line <= last; line++) {
+		if (!isAnnotationLine(fileLines, path, line)) return false;
+	}
+	return true;
+}
 
 interface ReplacementGroup {
 	/** Positions in the edit array of the payload inserts, in payload order. */
@@ -325,18 +371,22 @@ interface TextualBoundaryNormalization {
 }
 
 /**
- * Normalize exact boundary echoes without interpreting language tokens.
+ * Normalize exact boundary echoes.
  *
  * Two-sided echoes are removed when stripping both copies leaves one payload
- * row per deleted range line. One-sided echoes on multi-line ranges are
- * removed when the remaining payload still covers the full range; an
- * under-filled one-sided echo is recorded as ambiguous so the syntax-probe
- * search gets first chance to resolve it, then rejected rather than silently
- * dropping unique range content.
+ * row per deleted range line. One-sided echoes are removed when the remaining
+ * payload still covers the full range — on multi-line ranges from line
+ * equality alone, on single-line ranges only when every echoed row is a
+ * grammar-classified annotation ({@link ANNOTATION_NODE_KINDS}), where an
+ * adjacent duplicate is never intentional. An under-filled one-sided echo is
+ * recorded as ambiguous so the syntax-probe search gets first chance to
+ * resolve it, then rejected rather than silently dropping unique range
+ * content.
  */
 function normalizeTextualBoundaryEchoes(
 	edits: readonly AppliedEdit[],
 	fileLines: readonly string[],
+	path: string | undefined,
 ): TextualBoundaryNormalization {
 	const out: AppliedEdit[] = [];
 	const warnings: string[] = [];
@@ -361,7 +411,10 @@ function normalizeTextualBoundaryEchoes(
 				dropLeading = leading;
 				dropTrailing = trailing;
 			}
-		} else if (leading > 0 && rangeLength > 1) {
+		} else if (
+			leading > 0 &&
+			(rangeLength > 1 || isAnnotationEchoRun(fileLines, path, group.startLine - leading, group.startLine - 1))
+		) {
 			if (group.payload.length - leading >= rangeLength) {
 				dropLeading = leading;
 			} else {
@@ -372,7 +425,10 @@ function normalizeTextualBoundaryEchoes(
 					count: leading,
 				});
 			}
-		} else if (trailing > 0 && rangeLength > 1) {
+		} else if (
+			trailing > 0 &&
+			(rangeLength > 1 || isAnnotationEchoRun(fileLines, path, group.endLine + 1, group.endLine + trailing))
+		) {
 			if (group.payload.length - trailing >= rangeLength) {
 				dropTrailing = trailing;
 			} else {
@@ -948,6 +1004,37 @@ function resolveShiftedLanding(
 }
 
 /**
+ * Body shape required for an opener-escape relocation: the rows tile into
+ * leading single-line nodes (comments, attributes) followed by one multi-line
+ * construct reaching the last content row — i.e. the body parses standalone
+ * as one self-contained `mod`/`fn`/`class` that can be moved past the block
+ * it was mis-anchored into without re-parenting anything. Bare statements and
+ * multi-statement bodies fail it and stay literal: an under-indented one-line
+ * body more likely names the inside of the block.
+ */
+function bodyIsRelocatableConstruct(rows: readonly string[], path: string): boolean {
+	let last = rows.length;
+	while (last > 0 && !hasNonWhitespace(rows[last - 1])) last--;
+	if (last === 0) return false;
+	let line = 1;
+	while (line <= last) {
+		if (!hasNonWhitespace(rows[line - 1])) {
+			line++;
+			continue;
+		}
+		const spans = nodeChain(rows, path, line);
+		let end = 0;
+		for (const span of spans) {
+			if (span.startLine === line && span.endLine > end) end = span.endLine;
+		}
+		if (end === 0) return false; // no node begins here — body does not parse as items
+		if (end >= last) return end > line; // final node must be one multi-line construct
+		line = end + 1;
+	}
+	return false;
+}
+
+/**
  * Resolve where a block-lowered after-insert anchored on the block's closing
  * line should land given a body depth `target` deeper than that closer: just
  * above the block's trailing run of closer lines, bounded below by
@@ -990,14 +1077,17 @@ function resolveInwardLanding(
 /**
  * Slide mis-anchored after-insert hunks to the depth their body indentation
  * claims: outward past the structural closer lines that follow the anchor
- * when the body is shallower, or — for `insert_after_block N:` lowerings —
- * inward across the block's trailing closers when the body is deeper than
- * the block's closing line. Returns the corrected edit list plus one warning
- * per shifted hunk.
+ * when the body is shallower; for plain inserts anchored on a block opener,
+ * past the whole block when the body is a balanced construct claiming a
+ * depth strictly above the opener (syntax-probe verified via `path`); or — for
+ * `insert_after_block N:` lowerings — inward across the block's trailing
+ * closers when the body is deeper than the block's closing line. Returns the
+ * corrected edit list plus one warning per shifted hunk.
  */
 function repairAfterInsertLandings(
 	edits: readonly AppliedEdit[],
 	fileLines: readonly string[],
+	path: string | undefined,
 ): { edits: readonly AppliedEdit[]; warnings: string[] } {
 	// Group plain (non-replacement) after-anchor inserts per authored hunk:
 	// rows of one hunk share the anchor line and the patch header line.
@@ -1039,7 +1129,59 @@ function repairAfterInsertLandings(
 			warnings.push(afterInsertLandingShiftWarning(group.anchor, outward.line, outward.crossed));
 			continue;
 		}
-		if (group.blockStart === undefined) continue;
+		if (group.blockStart === undefined) {
+			// Opener-escape: `PUT >N:` anchored on a line that OPENS a construct,
+			// with a self-contained construct body claiming a column depth
+			// strictly above the opener — a landing between the opener and its
+			// first statement, which no such body can intend, yet one that can
+			// parse (items are legal inside Rust fn bodies). Candidates are the
+			// enclosing constructs' end lines from the node chain, innermost
+			// first, kept only when the construct's own opening depth sits at or
+			// above the body's claim (the body could be its sibling); the first
+			// candidate whose relocated result passes the syntax probe wins.
+			// Equal-depth bodies stay literal, matching the outward shift.
+			if (path === undefined) continue;
+			const anchorText = fileLines[group.anchor - 1] ?? "";
+			const targetCols = indentColumns(target);
+			if (targetCols >= indentColumns(anchorText)) continue;
+			const chain = nodeChain(fileLines, path, group.anchor);
+			if (!chain.some(node => node.startLine === group.anchor && node.endLine > group.anchor)) continue;
+			const rows = group.members.map(idx => insertEditAt(edits, idx).text);
+			if (!bodyIsRelocatableConstruct(rows, path)) continue;
+			const candidates = [
+				...new Set(
+					chain
+						.filter(
+							node =>
+								node.endLine > group.anchor && indentColumns(fileLines[node.startLine - 1] ?? "") <= targetCols,
+						)
+						.map(node => node.endLine),
+				),
+			].sort((a, b) => a - b);
+			for (const landing of candidates) {
+				// Never relocate across another hunk's target; farther
+				// candidates cross the same line, so stop outright.
+				let blocked = false;
+				for (const targeted of targetedLines) {
+					if (targeted > group.anchor && targeted <= landing) {
+						blocked = true;
+						break;
+					}
+				}
+				if (blocked) break;
+				const trial = [...(out ?? edits)];
+				for (const idx of group.members) {
+					const edit = insertEditAt(trial, idx);
+					trial[idx] = { ...edit, cursor: { kind: "after_anchor", anchor: { line: landing } } };
+				}
+				if (parsesCleanly(path, materializeEdits(fileLines, trial).text)) {
+					out = trial;
+					warnings.push(afterInsertOpenerEscapeWarning(group.anchor, landing));
+					break;
+				}
+			}
+			continue;
+		}
 		const inward = resolveInwardLanding(group, target, group.blockStart, fileLines, targetedLines);
 		if (inward === undefined) continue;
 		retarget(group, inward);
@@ -1070,7 +1212,6 @@ export interface ApplyEditsOptions {
 interface Materialized {
 	text: string;
 	firstChangedLine: number | undefined;
-	warnings: string[];
 }
 
 /**
@@ -1080,7 +1221,6 @@ interface Materialized {
  * veto.
  */
 function materializeEdits(originalLines: readonly string[], edits: readonly AppliedEdit[]): Materialized {
-	const { edits: landed, warnings } = repairAfterInsertLandings(edits, originalLines);
 	const fileLines = [...originalLines];
 	const lineOrigins: LineOrigin[] = fileLines.map(() => "original");
 
@@ -1093,7 +1233,7 @@ function materializeEdits(originalLines: readonly string[], edits: readonly Appl
 	const bofLines: string[] = [];
 	const eofLines: string[] = [];
 	const anchorEdits: IndexedEdit[] = [];
-	landed.forEach((edit, idx) => {
+	edits.forEach((edit, idx) => {
 		if (edit.kind === "insert" && edit.cursor.kind === "bof") {
 			bofLines.push(edit.text);
 		} else if (edit.kind === "insert" && edit.cursor.kind === "eof") {
@@ -1157,7 +1297,7 @@ function materializeEdits(originalLines: readonly string[], edits: readonly Appl
 	const eofChangedLine = insertAtEnd(fileLines, lineOrigins, eofLines);
 	if (eofChangedLine !== undefined) trackFirstChanged(eofChangedLine);
 
-	return { text: fileLines.join("\n"), firstChangedLine, warnings };
+	return { text: fileLines.join("\n"), firstChangedLine };
 }
 
 /**
@@ -1201,13 +1341,14 @@ export function applyEdits(text: string, edits: readonly Edit[], options: ApplyE
 	);
 	validateLineBounds(targetEdits, fileLines);
 	const indentationWarnings = repairReplacementIndentation(targetEdits, fileLines);
-	const normalized = normalizeTextualBoundaryEchoes(targetEdits, fileLines);
-	const leading = [...clipboardWarnings, ...indentationWarnings, ...normalized.warnings];
+	const landed = repairAfterInsertLandings(targetEdits, fileLines, options.path);
+	const normalized = normalizeTextualBoundaryEchoes(landed.edits, fileLines, options.path);
+	const leading = [...clipboardWarnings, ...indentationWarnings, ...landed.warnings, ...normalized.warnings];
 	const authoredResult = materializeEdits(fileLines, normalized.edits);
 	const baselineParses = parsesCleanly(options.path, text);
 	const authoredParses = parsesCleanly(options.path, authoredResult.text);
 	const finish = (result: Materialized, warnings: string[]): ApplyResult => {
-		const merged = [...warnings, ...result.warnings];
+		const merged = [...warnings];
 		// Post-apply syntax advisory: the result stopped parsing while the
 		// pre-edit text parsed, so this patch demonstrably introduced the
 		// error. Catches misplacements no boundary variant can explain.

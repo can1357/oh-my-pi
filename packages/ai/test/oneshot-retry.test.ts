@@ -148,6 +148,27 @@ describe("retryTransientCompletion", () => {
 		expect(final.stopReason).toBe("error");
 	});
 
+	it("does not retry a transient-wrapped payload rejection", async () => {
+		let calls = 0;
+		const final = await retryTransientCompletion(
+			() => {
+				calls += 1;
+				return Promise.resolve(
+					message({
+						stopReason: "error",
+						errorStatus: 413,
+						errorMessage: "Provider returned error: 413 Payload Too Large",
+					}),
+				);
+			},
+			{ ...fast, maxAttempts: 5 },
+		);
+
+		expect(calls).toBe(1);
+		expect(final.stopReason).toBe("error");
+		expect(final.errorMessage).toContain("413");
+	});
+
 	it("does not retry a deterministic llama.cpp tool-call parse failure reported as 500", async () => {
 		let calls = 0;
 		const final = await retryTransientCompletion(

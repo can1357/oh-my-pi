@@ -449,7 +449,7 @@ export async function discoverOAuthEndpoints(
 								: typeof metadata.public_client_id === "string"
 									? metadata.public_client_id
 									: undefined,
-				scopes: readMetadataScopes(metadata) ?? protectedScopes,
+				scopes: protectedScopes ?? readMetadataScopes(metadata),
 				resource,
 			};
 		}
@@ -473,7 +473,7 @@ export async function discoverOAuthEndpoints(
 									: typeof oauthData.public_client_id === "string"
 										? oauthData.public_client_id
 										: undefined,
-					scopes: readMetadataScopes(oauthData) ?? protectedScopes,
+					scopes: protectedScopes ?? readMetadataScopes(oauthData),
 					resource,
 				};
 			}

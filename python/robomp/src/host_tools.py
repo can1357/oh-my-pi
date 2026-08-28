@@ -44,6 +44,7 @@ from robomp.sandbox import (
 log = logging.getLogger(__name__)
 _PRE_PR_FIX_COMMAND = ("bun", "run", "fix")
 _PRE_PR_CHECK_COMMAND = ("bun", "check")
+_PRE_PR_TEST_COMMAND = ("bun", "run", "test")
 _BUN_INSTALL_COMMAND = ("bun", "install", "--frozen-lockfile", "--ignore-scripts")
 _BUN_INSTALL_TIMEOUT_SECONDS = 300.0
 _REPO_COMMAND_SCRUBBED_ENV_KEYS: tuple[str, ...] = (
@@ -57,6 +58,10 @@ _AGENT_HOME = Path("/srv/agent-home")
 _PRE_PR_FIX_TIMEOUT_SECONDS = 600.0
 _PRE_PR_CHECK_TIMEOUT_SECONDS = 600.0
 _PRE_PR_CHECK_MAX_OUTPUT = 12_000
+# The suite is the slowest gate by an order of magnitude — CI splits this repo's
+# run across five 20-25 minute jobs — so it gets its own budget rather than
+# sharing the formatter/typecheck one.
+_PRE_PR_TEST_TIMEOUT_SECONDS = 3600.0
 _DIFF_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
@@ -89,6 +94,18 @@ class AbortController:
 
 
 @dataclass(slots=True, frozen=True)
+class ReleaseToolContext:
+    """Release identity and remote-drift snapshot for host tools."""
+
+    repo: str
+    tag: str
+    version: str
+    key: str
+    expected_sha: str
+    default_branch: str
+
+
+@dataclass(slots=True, frozen=True)
 class ToolBindings:
     """Per-task closure that the host tools capture."""
 
@@ -96,7 +113,7 @@ class ToolBindings:
     github: GitHubBackend
     git_transport: GitTransport
     repo: RepoInfo
-    issue: IssueInfo
+    issue: IssueInfo | None
     workspace: Workspace
     loop: asyncio.AbstractEventLoop
     author_name: str
@@ -125,14 +142,19 @@ class ToolBindings:
     # back out to the worker; `None` for unit tests that exercise tools
     # without a live RpcClient.
     abort: AbortController | None = None
+    release: ReleaseToolContext | None = None
 
     @property
     def issue_key(self) -> str:
-        return issue_key(self.issue.repo, self.issue.number)
+        if self.release is not None:
+            return self.release.key
+        issue = _require_issue(self)
+        return issue_key(issue.repo, issue.number)
 
     @property
     def default_comment_number(self) -> int:
-        return self.inbound_thread_number if self.inbound_thread_number is not None else self.issue.number
+        issue = _require_issue(self)
+        return self.inbound_thread_number if self.inbound_thread_number is not None else issue.number
 
 
 def _run_coro(loop: asyncio.AbstractEventLoop, coro: Any) -> Any:
@@ -154,7 +176,9 @@ def _remove_needs_info_label(bindings: ToolBindings) -> bool:
     try:
         _run_coro(
             bindings.loop,
-            bindings.github.remove_issue_label(bindings.repo.full_name, bindings.issue.number, _NEEDS_INFO_LABEL),
+            bindings.github.remove_issue_label(
+                bindings.repo.full_name, _require_issue(bindings).number, _NEEDS_INFO_LABEL
+            ),
         )
     except GitHubError as exc:
         if exc.status == 404:
@@ -192,6 +216,18 @@ def _audit(
 
 def _raise_command(message: str) -> NoReturn:
     raise RpcCommandError(message, error={"message": message})
+
+
+def _require_issue(bindings: ToolBindings) -> IssueInfo:
+    if bindings.issue is None:
+        _raise_command("this tool requires issue context")
+    return bindings.issue
+
+
+def _require_release(bindings: ToolBindings) -> ReleaseToolContext:
+    if bindings.release is None:
+        _raise_command("this tool requires release context")
+    return bindings.release
 
 
 def _git_identity_env(author_name: str, author_email: str) -> dict[str, str]:
@@ -529,6 +565,59 @@ def _run_pre_publish_bun_check(
         _raise_command(msg)
 
 
+def _run_pre_publish_bun_test(
+    bindings: ToolBindings,
+    args: Mapping[str, Any],
+    *,
+    tool_name: str,
+    stage: str,
+    skip_checks: bool = False,
+) -> None:
+    """Run `bun run test` before opening a PR.
+
+    Same shape as the `bun check` gate: no-op when the repository defines no
+    `scripts.test`, bypassed by `skip_checks=True` for breakage the agent's
+    diff did not cause, and any failure comes back to the agent as a
+    `RpcCommandError` instead of becoming a red PR.
+    """
+    if skip_checks:
+        _audit(
+            bindings,
+            tool_name,
+            args,
+            result={"skipped": "bun_run_test", "reason": "skip_checks=true"},
+        )
+        return
+    if not _has_bun_script(bindings.workspace.repo_dir, "test"):
+        return
+    try:
+        proc = _run_repo_command(bindings, _PRE_PR_TEST_COMMAND, timeout=_PRE_PR_TEST_TIMEOUT_SECONDS)
+    except FileNotFoundError:
+        msg = f"refusing to {stage}: `bun run test` is required before {stage}, but `bun` is not on PATH."
+        _audit(bindings, tool_name, args, error=msg)
+        _raise_command(msg)
+    except subprocess.TimeoutExpired as exc:
+        output = _format_process_output(exc.stdout, exc.stderr)
+        msg = (
+            f"refusing to {stage}: `bun run test` timed out after "
+            f"{_PRE_PR_TEST_TIMEOUT_SECONDS:.0f}s.\n"
+            f"{output}\n\n"
+            f"Investigate the hang (a test that never exits blocks every future run), "
+            f"rerun `bun run test`, and retry."
+        )
+        _audit(bindings, tool_name, args, error=msg)
+        _raise_command(msg)
+    if proc.returncode != 0:
+        output = _format_process_output(proc.stdout, proc.stderr)
+        msg = (
+            f"refusing to {stage}: `bun run test` failed before {stage} (exit {proc.returncode}).\n"
+            f"{output}\n\n"
+            f"Fix the failing tests, commit, and retry — no PR is opened while the suite is red."
+        )
+        _audit(bindings, tool_name, args, error=msg)
+        _raise_command(msg)
+
+
 _AUTOCLOSE_INELIGIBLE_STATES: frozenset[str] = frozenset({"closed", "merged", "needs_info", "abandoned"})
 
 
@@ -544,7 +633,7 @@ def _should_schedule_autoclose(bindings: ToolBindings, target_number: int) -> fl
     hours = float(settings.question_autoclose_hours)
     if hours <= 0:
         return None
-    if target_number != bindings.issue.number:
+    if target_number != _require_issue(bindings).number:
         return None
     if bindings.inbound_is_pr:
         return None
@@ -568,10 +657,10 @@ def _schedule_autoclose(bindings: ToolBindings, *, comment_id: int, hours: float
     try:
         bindings.db.upsert_pending_closure(
             issue_key=bindings.issue_key,
-            repo=bindings.issue.repo,
-            number=bindings.issue.number,
+            repo=_require_issue(bindings).repo,
+            number=_require_issue(bindings).number,
             comment_id=comment_id,
-            issue_author=bindings.issue.author,
+            issue_author=_require_issue(bindings).author,
             close_at=close_at,
         )
     except Exception as exc:  # pragma: no cover - defensive
@@ -840,7 +929,7 @@ def _guarded_push_branch(bindings: ToolBindings, args: Mapping[str, Any], tool_n
     try:
         result = bindings.git_transport.push_branch(
             repo=bindings.repo.full_name,
-            workspace_key=workspace_key(bindings.repo.full_name, bindings.issue.number),
+            workspace_key=workspace_key(bindings.repo.full_name, _require_issue(bindings).number),
             repo_dir=repo_dir_path,
             branch=branch,
             expected_head=head_sha,
@@ -866,6 +955,277 @@ def _guarded_push_branch(bindings: ToolBindings, args: Mapping[str, Any], tool_n
     return result.head
 
 
+_NON_FAILURE_JOB_CONCLUSIONS = frozenset({"success", "skipped", "neutral"})
+
+
+# ---------- release_ci_status ----------
+def _build_release_ci_status(bindings: ToolBindings) -> HostTool[Any, Any]:
+    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+        release = _require_release(bindings)
+        try:
+            runs = _run_coro(
+                bindings.loop,
+                bindings.github.list_workflow_runs(release.repo, head_sha=release.expected_sha),
+            )
+            rendered_runs: list[dict[str, Any]] = []
+            for run in runs:
+                jobs = _run_coro(
+                    bindings.loop,
+                    bindings.github.list_workflow_jobs(release.repo, run.id),
+                )
+                failed_jobs = [
+                    {
+                        "id": job.id,
+                        "name": job.name,
+                        "conclusion": job.conclusion,
+                        "failed_steps": list(job.failed_steps),
+                        "url": job.html_url,
+                    }
+                    for job in jobs
+                    if job.conclusion not in _NON_FAILURE_JOB_CONCLUSIONS
+                ]
+                rendered_runs.append(
+                    {
+                        "id": run.id,
+                        "name": run.name,
+                        "status": run.status,
+                        "conclusion": run.conclusion,
+                        "url": run.html_url,
+                        "failed_jobs": failed_jobs,
+                    }
+                )
+        except GitHubError as exc:
+            msg = f"GitHub Actions lookup failed: {exc.status} {exc.message}"
+            _audit(bindings, "release_ci_status", args, error=msg)
+            _raise_command(msg)
+        result = {"sha": release.expected_sha, "runs": rendered_runs}
+        _audit(bindings, "release_ci_status", args, result=result)
+        return json.dumps(result)
+
+    return host_tool(
+        name="release_ci_status",
+        description=persona.host_tool_description("release_ci_status"),
+        parameters={"type": "object", "properties": {}, "additionalProperties": False},
+        execute=execute,
+    )
+
+
+# ---------- release_job_log ----------
+def _build_release_job_log(bindings: ToolBindings) -> HostTool[Any, Any]:
+    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+        release = _require_release(bindings)
+        job_id = args.get("job_id")
+        if not isinstance(job_id, int) or isinstance(job_id, bool):
+            _raise_command("release_job_log requires an integer 'job_id'.")
+        tail_raw = args.get("tail_lines", 200)
+        if not isinstance(tail_raw, int) or isinstance(tail_raw, bool):
+            _raise_command("release_job_log 'tail_lines' must be an integer.")
+        tail_lines = max(1, min(tail_raw, 1000))
+        try:
+            log_tail = _run_coro(
+                bindings.loop,
+                bindings.github.get_job_log_tail(release.repo, job_id, tail_lines=tail_lines),
+            )
+        except GitHubError as exc:
+            msg = f"GitHub Actions log lookup failed: {exc.status} {exc.message}"
+            _audit(bindings, "release_job_log", args, error=msg)
+            _raise_command(msg)
+        _audit(
+            bindings,
+            "release_job_log",
+            args,
+            result={"job_id": job_id, "tail_lines": tail_lines, "returned_lines": len(log_tail.splitlines())},
+        )
+        return log_tail
+
+    return host_tool(
+        name="release_job_log",
+        description=persona.host_tool_description("release_job_log"),
+        parameters={
+            "type": "object",
+            "properties": {
+                "job_id": {
+                    "type": "integer",
+                    "description": persona.host_tool_parameter_description("release_job_log", "job_id"),
+                },
+                "tail_lines": {
+                    "type": "integer",
+                    "description": persona.host_tool_parameter_description("release_job_log", "tail_lines"),
+                },
+            },
+            "required": ["job_id"],
+            "additionalProperties": False,
+        },
+        execute=execute,
+    )
+
+
+# ---------- release_retag ----------
+def _build_release_retag(bindings: ToolBindings) -> HostTool[Any, Any]:
+    def refuse(args: Mapping[str, Any], message: str) -> NoReturn:
+        _audit(bindings, "release_retag", args, error=message)
+        _raise_command(message)
+
+    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> dict[str, Any]:
+        release = _require_release(bindings)
+        summary = args.get("summary")
+        if not isinstance(summary, str) or not summary.strip():
+            _raise_command("release_retag requires a non-empty 'summary'.")
+        summary = summary.strip()
+        if bindings.workspace.branch != release.default_branch:
+            refuse(
+                args,
+                "refusing to retag: workspace branch "
+                f"{bindings.workspace.branch!r} does not match release branch {release.default_branch!r}.",
+            )
+
+        skip_checks = bool(args.get("skip_checks", False))
+        _run_pre_publish_bun_fix(
+            bindings,
+            args,
+            tool_name="release_retag",
+            stage="retag",
+            skip_checks=skip_checks,
+        )
+        _run_pre_publish_bun_check(
+            bindings,
+            args,
+            tool_name="release_retag",
+            stage="retag",
+            skip_checks=skip_checks,
+        )
+
+        status = _run_repo_command(bindings, ["git", "status", "--porcelain", "--untracked-files=normal"])
+        if status.returncode != 0:
+            err = (status.stderr or status.stdout).strip() or f"exit {status.returncode}"
+            refuse(args, f"refusing to retag: could not inspect working tree: {err}")
+        if status.stdout.strip():
+            dirty = "\n  ".join(status.stdout.strip().splitlines())
+            refuse(
+                args,
+                "refusing to retag: working tree is dirty.\n  "
+                f"{dirty}\n"
+                "Commit (or `git stash`) every change before retagging.",
+            )
+
+        identities = _run_repo_command(
+            bindings,
+            ["git", "log", "--format=%H%x09%ae%x09%an", f"origin/{release.default_branch}..HEAD"],
+        )
+        if identities.returncode != 0:
+            err = (identities.stderr or identities.stdout).strip() or f"exit {identities.returncode}"
+            refuse(
+                args,
+                f"refusing to retag: could not inspect commit authors for origin/{release.default_branch}..HEAD: {err}",
+            )
+        offending: list[str] = []
+        for line in identities.stdout.strip().splitlines():
+            parts = line.split("\t")
+            if len(parts) < 3:
+                continue
+            sha, email, name = parts[0], parts[1], parts[2]
+            if email != bindings.author_email or name != bindings.author_name:
+                offending.append(f"{sha[:12]} {name} <{email}>")
+        if offending:
+            details = "\n  ".join(offending)
+            refuse(
+                args,
+                "refusing to retag: commit author identity mismatch. "
+                f"Expected `{bindings.author_name} <{bindings.author_email}>`. "
+                f"Offending commits:\n  {details}\n"
+                "Amend each commit with `git commit --amend --reset-author --no-edit` "
+                f"(or rebase with `git rebase -i origin/{release.default_branch} --exec "
+                "'git commit --amend --reset-author --no-edit'`) and try again.",
+            )
+
+        subject_proc = _run_repo_command(bindings, ["git", "log", "-1", "--format=%s"])
+        if subject_proc.returncode != 0:
+            err = (subject_proc.stderr or subject_proc.stdout).strip() or f"exit {subject_proc.returncode}"
+            refuse(args, f"refusing to retag: could not inspect HEAD subject: {err}")
+        prefix = bindings.settings.release_commit_prefix if bindings.settings is not None else "chore: bump version to "
+        if not subject_proc.stdout.strip().startswith(prefix):
+            refuse(
+                args,
+                f"refusing to retag: HEAD subject must start with {prefix!r} — "
+                "CI's release concurrency group keys on it (#2564); reword the body, not the subject.",
+            )
+
+        head_proc = _run_repo_command(bindings, ["git", "rev-parse", "HEAD"])
+        if head_proc.returncode != 0:
+            err = (head_proc.stderr or head_proc.stdout).strip() or f"exit {head_proc.returncode}"
+            refuse(args, f"refusing to retag: git rev-parse failed: {err}")
+        new_head = head_proc.stdout.strip()
+        if new_head == release.expected_sha:
+            refuse(args, "refusing to retag: HEAD still points at the failing release sha; commit the fix first.")
+
+        try:
+            remote_tag_sha = _run_coro(
+                bindings.loop,
+                bindings.github.get_tag_sha(release.repo, release.tag),
+            )
+        except GitHubError as exc:
+            refuse(args, f"GitHub tag lookup failed: {exc.status} {exc.message}")
+        if remote_tag_sha != release.expected_sha:
+            refuse(args, "refusing to retag: tag moved remotely — a human intervened; aborting.")
+
+        try:
+            pushed = bindings.git_transport.push_release(
+                repo=release.repo,
+                workspace_key=workspace_key(release.repo, "release"),
+                repo_dir=bindings.workspace.repo_dir,
+                branch=release.default_branch,
+                tag=release.tag,
+                expected_head=new_head,
+                slot_uid=bindings.slot_uid,
+            )
+        except HeadDriftError:
+            refuse(
+                args,
+                "refusing to retag: HEAD changed between preflight and push "
+                "(another commit landed; rerun the gate by re-issuing release_retag).",
+            )
+        except GitCommandError as exc:
+            err = (exc.stderr or exc.stdout).strip() or f"exit {exc.returncode}"
+            refuse(args, f"git push failed: {err}")
+        except GitHubError as exc:
+            refuse(args, f"gh-proxy rejected push: {exc.status} {exc.message}")
+
+        _share_git_metadata_with_slots(bindings.workspace.repo_dir, bindings.slot_uid)
+        row = bindings.db.get_release(release.key)
+        if row is None:
+            refuse(args, f"release state missing for {release.key}")
+        bindings.db.set_release_sha(release.key, pushed.head)
+        bindings.db.set_release_state(release.key, "awaiting_ci")
+        result: dict[str, Any] = {
+            "pushed": pushed.head,
+            "tag": release.tag,
+            "round": row.rounds,
+        }
+        _audit(bindings, "release_retag", args, result={**result, "summary": summary})
+        return result
+
+    return host_tool(
+        name="release_retag",
+        description=persona.host_tool_description("release_retag"),
+        parameters={
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": persona.host_tool_parameter_description("release_retag", "summary"),
+                },
+                "skip_checks": {
+                    "type": "boolean",
+                    "description": persona.host_tool_parameter_description("release_retag", "skip_checks"),
+                },
+            },
+            "required": ["summary"],
+            "additionalProperties": False,
+        },
+        execute=execute,
+    )
+
+
 # ---------- gh_push_branch ----------
 def _build_push_branch(bindings: ToolBindings) -> HostTool[Any, Any]:
     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
@@ -881,6 +1241,9 @@ def _build_push_branch(bindings: ToolBindings) -> HostTool[Any, Any]:
         # pass auto-commits any formatter diff so the push includes it.
         # `skip_checks=true` bypasses the formatter/check (e.g. when `main`
         # itself is broken); dirty-tree gate still runs unconditionally.
+        # The suite itself is gated at `gh_open_pr`, not here: a push is not
+        # yet a PR, and running it on every intermediate push would cost an
+        # hour each time.
         _run_pre_publish_bun_fix(bindings, args, tool_name="gh_push_branch", stage="push", skip_checks=skip)
         _run_pre_publish_bun_check(bindings, args, tool_name="gh_push_branch", stage="push", skip_checks=skip)
         head = _guarded_push_branch(bindings, args, "gh_push_branch", branch)
@@ -930,7 +1293,7 @@ def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
                 )
         # Auto-close keyword. GitHub closes the linked issue on merge only when
         # one of `Fixes / Closes / Resolves #<n>` is present in the PR body.
-        n = bindings.issue.number
+        n = _require_issue(bindings).number
         accepted = [f"{kw} #{n}" for kw in ("Fixes", "Closes", "Resolves", "fixes", "closes", "resolves")]
         if not any(form in body for form in accepted):
             _raise_command(
@@ -941,6 +1304,9 @@ def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
         skip = bool(args.get("skip_checks", False))
         _run_pre_publish_bun_fix(bindings, args, tool_name="gh_open_pr", stage="open PR", skip_checks=skip)
         _run_pre_publish_bun_check(bindings, args, tool_name="gh_open_pr", stage="open PR", skip_checks=skip)
+        # Last and slowest: the suite runs against the tree that is actually
+        # published, after the formatter amend, so a red PR cannot be created.
+        _run_pre_publish_bun_test(bindings, args, tool_name="gh_open_pr", stage="open PR", skip_checks=skip)
         # Make sure the branch is pushed (idempotent) using the same preflight as gh_push_branch.
         _guarded_push_branch(bindings, args, "gh_open_pr", bindings.workspace.branch)
         base = args.get("base") or bindings.repo.default_branch
@@ -1138,7 +1504,7 @@ def _build_mark_unable(bindings: ToolBindings) -> HostTool[Any, Any]:
         try:
             comment = _run_coro(
                 bindings.loop,
-                bindings.github.post_comment(bindings.repo.full_name, bindings.issue.number, body),
+                bindings.github.post_comment(bindings.repo.full_name, _require_issue(bindings).number, body),
             )
         except GitHubError as exc:
             _audit(bindings, "mark_unable_to_reproduce", args, error=str(exc))
@@ -1147,7 +1513,9 @@ def _build_mark_unable(bindings: ToolBindings) -> HostTool[Any, Any]:
         try:
             labels = _run_coro(
                 bindings.loop,
-                bindings.github.add_issue_labels(bindings.repo.full_name, bindings.issue.number, [_NEEDS_INFO_LABEL]),
+                bindings.github.add_issue_labels(
+                    bindings.repo.full_name, _require_issue(bindings).number, [_NEEDS_INFO_LABEL]
+                ),
             )
             result["labels"] = list(labels)
         except GitHubError as exc:
@@ -1194,7 +1562,10 @@ def _build_abort_task(bindings: ToolBindings) -> HostTool[Any, Any]:
             "task_aborted",
             extra={"issue": bindings.issue_key, "reason": reason},
         )
-        bindings.db.set_issue_state(bindings.issue_key, "abandoned")
+        if bindings.release is not None:
+            bindings.db.set_release_state(bindings.release.key, "failed", error=reason)
+        else:
+            bindings.db.set_issue_state(bindings.issue_key, "abandoned")
         if bindings.abort is not None:
             bindings.abort.signal(reason)
         return "aborted"
@@ -1220,11 +1591,11 @@ def _build_fetch_thread(bindings: ToolBindings) -> HostTool[Any, Any]:
         try:
             issue = _run_coro(
                 bindings.loop,
-                bindings.github.get_issue(bindings.repo.full_name, bindings.issue.number),
+                bindings.github.get_issue(bindings.repo.full_name, _require_issue(bindings).number),
             )
             comments = _run_coro(
                 bindings.loop,
-                bindings.github.list_comments(bindings.repo.full_name, bindings.issue.number),
+                bindings.github.list_comments(bindings.repo.full_name, _require_issue(bindings).number),
             )
         except GitHubError as exc:
             _audit(bindings, "fetch_issue_thread", args, error=str(exc))
@@ -1311,7 +1682,7 @@ def _build_search_issues(bindings: ToolBindings) -> HostTool[Any, Any]:
                 author=parsed.author,
                 limit=limit + 1,  # headroom for the self-filter below
             )
-            entries = [e for e in entries if e.is_pull_request or e.number != bindings.issue.number][:limit]
+            entries = [e for e in entries if e.is_pull_request or e.number != _require_issue(bindings).number][:limit]
             rows = []
             for e in entries:
                 if e.is_pull_request and e.merged_at:
@@ -1332,7 +1703,7 @@ def _build_search_issues(bindings: ToolBindings) -> HostTool[Any, Any]:
             except GitHubError as exc:
                 _audit(bindings, "gh_search_issues", args, error=str(exc))
                 _raise_command(f"GitHub search failed: {exc.status} {exc.message}")
-            found = [s for s in found if s.is_pull_request or s.number != bindings.issue.number]
+            found = [s for s in found if s.is_pull_request or s.number != _require_issue(bindings).number]
             rows = [
                 (
                     s.is_pull_request,
@@ -1499,7 +1870,7 @@ def _enforce_impl_authorization(
         classification = None
     classification_phrase = f"classified `{classification}`" if classification else "not classified"
     msg = (
-        f"refusing to {action}: issue #{bindings.issue.number} is {classification_phrase}; "
+        f"refusing to {action}: issue #{_require_issue(bindings).number} is {classification_phrase}; "
         "a repo OWNER or allowlisted maintainer must @-mention you with an explicit go-ahead "
         "before any branch/PR. Post your analysis with `gh_post_comment` and stop."
     )
@@ -2000,7 +2371,7 @@ def _build_set_issue_labels(bindings: ToolBindings) -> HostTool[Any, Any]:
         cleaned = [str(lbl).strip() for lbl in labels if isinstance(lbl, str) and lbl.strip()]
         if not cleaned:
             _raise_command("set_issue_labels requires at least one non-empty label.")
-        target_number = bindings.issue.number
+        target_number = _require_issue(bindings).number
         if isinstance(args.get("number"), int):
             target_number = int(args["number"])
         try:
@@ -2043,7 +2414,7 @@ def _build_classify_issue(bindings: ToolBindings) -> HostTool[Any, Any]:
         if bindings.inbound_is_pr:
             note = (
                 f"no-op: classify_issue is not applicable on PR threads. "
-                f"Issue #{bindings.issue.number} is already classified"
+                f"Issue #{_require_issue(bindings).number} is already classified"
             )
             if existing is not None and existing.classification:
                 note += f" as {existing.classification!r}"
@@ -2053,7 +2424,7 @@ def _build_classify_issue(bindings: ToolBindings) -> HostTool[Any, Any]:
         if existing is not None and existing.classification:
             _audit(bindings, "classify_issue", args, result={"skipped": "already_classified"})
             return (
-                f"no-op: issue #{bindings.issue.number} is already classified as "
+                f"no-op: issue #{_require_issue(bindings).number} is already classified as "
                 f"{existing.classification!r}. Continue with that workflow; do not re-classify."
             )
         primary = args.get("primary")
@@ -2133,7 +2504,7 @@ def _build_classify_issue(bindings: ToolBindings) -> HostTool[Any, Any]:
                 bindings.loop,
                 bindings.github.add_issue_labels(
                     bindings.repo.full_name,
-                    bindings.issue.number,
+                    _require_issue(bindings).number,
                     labels,
                 ),
             )
@@ -2224,6 +2595,9 @@ def build(bindings: ToolBindings) -> tuple[HostTool[Any, Any], ...]:
         _build_submit_pr_review(bindings),
         _build_post_comment(bindings),
         _build_push_branch(bindings),
+        _build_release_ci_status(bindings),
+        _build_release_job_log(bindings),
+        _build_release_retag(bindings),
         _build_open_pr(bindings),
         _build_request_review(bindings),
         _build_repro_record(bindings),
@@ -2235,4 +2609,4 @@ def build(bindings: ToolBindings) -> tuple[HostTool[Any, Any], ...]:
     )
 
 
-__all__ = ["AbortController", "ToolBindings", "build"]
+__all__ = ["AbortController", "ReleaseToolContext", "ToolBindings", "build"]

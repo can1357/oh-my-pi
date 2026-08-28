@@ -25,6 +25,53 @@ describe("cursor usage provider", () => {
 			expect(parseCursorUsage(payload)).toBeNull();
 		});
 
+		it("emits an uncapped used-only bucket when the request limit is null", () => {
+			// Exact sanitized payload reported in #6381: the plan has no legacy cap.
+			const payload = {
+				"gpt-4": {
+					numRequests: 0,
+					numRequestsTotal: 0,
+					numTokens: 0,
+					maxTokenUsage: null,
+					maxRequestUsage: null,
+				},
+				startOfMonth: "2026-07-23T01:19:45.000Z",
+			};
+
+			const report = parseCursorUsage(payload);
+			expect(report).not.toBeNull();
+			expect(report?.limits).toHaveLength(1);
+
+			const limit = report?.limits[0];
+			expect(limit?.id).toBe("cursor:requests:gpt-4");
+			expect(limit?.label).toBe("gpt-4 requests");
+			expect(limit?.amount).toEqual({ used: 0, unit: "requests" });
+			expect(limit?.status).toBeUndefined();
+			expect(limit?.window?.resetsAt).toBe(Date.parse("2026-08-23T01:19:45.000Z"));
+		});
+
+		it("keeps capped and uncapped buckets side by side", () => {
+			const payload = {
+				"gpt-4": {
+					numRequests: 12,
+					maxRequestUsage: null,
+				},
+				"claude-3-5-sonnet": {
+					used: 80,
+					limit: 100,
+				},
+			};
+
+			const report = parseCursorUsage(payload);
+			expect(report?.limits.map(limit => limit.id)).toEqual([
+				"cursor:requests:gpt-4",
+				"cursor:requests:claude-3-5-sonnet",
+			]);
+			expect(report?.limits[0]?.amount).toEqual({ used: 12, unit: "requests" });
+			expect(report?.limits[1]?.amount.limit).toBe(100);
+			expect(report?.limits[1]?.status).toBe("ok");
+		});
+
 		it("parses request-count buckets with stable IDs and labels", () => {
 			const payload = {
 				"gpt-4": {
@@ -602,8 +649,14 @@ describe("cursor usage provider", () => {
 				accountId: "account_123",
 				projectId: "project_123",
 			});
-			expect(report?.limits).toHaveLength(1);
-			expect(report?.limits[0]).toMatchObject({
+			// The legacy bucket is uncapped (`maxRequestUsage: null`) but still reported,
+			// so it merges ahead of the personal summary instead of vanishing (#6381).
+			expect(report?.limits.map(limit => limit.id)).toEqual([
+				"cursor:requests:gpt-4",
+				"cursor:usd:individual-overall",
+			]);
+			expect(report?.limits[0]?.amount).toEqual({ used: 0, unit: "requests" });
+			expect(report?.limits[1]).toMatchObject({
 				id: "cursor:usd:individual-overall",
 				amount: {
 					used: 20,
@@ -612,7 +665,10 @@ describe("cursor usage provider", () => {
 					unit: "usd",
 				},
 			});
-			expect(report?.raw).toEqual(usageSummaryPayload);
+			expect(report?.raw).toEqual({
+				authUsage: authUsagePayload,
+				usageSummary: usageSummaryPayload,
+			});
 		});
 
 		it("ignores a profile email returned for a different subject", async () => {

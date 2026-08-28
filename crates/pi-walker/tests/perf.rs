@@ -1,8 +1,8 @@
 //! Ignored deterministic timing harness for pi-walker.
 //!
 //! Run with:
-//! cargo test --profile ci -p pi-walker --test perf -- --ignored --nocapture
-//! --test-threads=1
+//! cargo nextest run --cargo-profile ci -p pi-walker --test perf \
+//!     --run-ignored ignored-only --no-capture --test-threads=1
 
 use std::{
 	fmt::Write as _,
@@ -24,8 +24,8 @@ const MEASURED_ITERATIONS: usize = 5;
 static SYNTHETIC_ROOT: LazyLock<PathBuf> = LazyLock::new(build_synthetic_tree);
 
 #[test]
-#[ignore = "run with: cargo test --profile ci -p pi-walker --test perf -- --ignored --nocapture \
-            --test-threads=1"]
+#[ignore = "run with: cargo nextest run --cargo-profile ci -p pi-walker --test perf --run-ignored \
+            ignored-only --no-capture --test-threads=1"]
 fn perf_walk_candidates_unordered_gitignore() {
 	let root = SYNTHETIC_ROOT.as_path();
 	run_bench("perf_walk_candidates_unordered_gitignore", || {
@@ -44,8 +44,8 @@ fn perf_walk_candidates_unordered_gitignore() {
 }
 
 #[test]
-#[ignore = "run with: cargo test --profile ci -p pi-walker --test perf -- --ignored --nocapture \
-            --test-threads=1"]
+#[ignore = "run with: cargo nextest run --cargo-profile ci -p pi-walker --test perf --run-ignored \
+            ignored-only --no-capture --test-threads=1"]
 fn perf_walk_candidates_path_order_no_gitignore() {
 	let root = SYNTHETIC_ROOT.as_path();
 	run_bench("perf_walk_candidates_path_order_no_gitignore", || {
@@ -64,8 +64,8 @@ fn perf_walk_candidates_path_order_no_gitignore() {
 }
 
 #[test]
-#[ignore = "run with: cargo test --profile ci -p pi-walker --test perf -- --ignored --nocapture \
-            --test-threads=1"]
+#[ignore = "run with: cargo nextest run --cargo-profile ci -p pi-walker --test perf --run-ignored \
+            ignored-only --no-capture --test-threads=1"]
 fn perf_walk_collect_full_detail() {
 	let root = SYNTHETIC_ROOT.as_path();
 	run_bench("perf_walk_collect_full_detail", || {

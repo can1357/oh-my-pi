@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { Settings } from "../../../../src/config/settings";
 import { StatusLineComponent } from "../../../../src/modes/components/status-line/component";
+import { loadTheme } from "../../../../src/modes/theme/loader";
 import { getThemeByName, setThemeInstance } from "../../../../src/modes/theme/theme";
 import type { AgentSession } from "../../../../src/session/agent-session";
 
@@ -19,7 +20,8 @@ function makeSessionWithLastMessage(
 		cost = 0,
 		advisorCost = 0,
 		usingSubscription = false,
-	}: { cost?: number; advisorCost?: number; usingSubscription?: boolean } = {},
+		advisorUsingSubscription = false,
+	}: { cost?: number; advisorCost?: number; usingSubscription?: boolean; advisorUsingSubscription?: boolean } = {},
 ) {
 	return {
 		messages: lastMessage ? [lastMessage] : [],
@@ -57,6 +59,7 @@ function makeSessionWithLastMessage(
 			advisors: advisorCost > 0 ? [{ name: "test", status: "running" as const }] : [],
 		}),
 		getAdvisorCost: () => advisorCost,
+		isAdvisorUsingSubscription: () => advisorUsingSubscription,
 		isFastModeActive: () => false,
 		configuredThinkingLevel: () => undefined,
 		modelRegistry: {
@@ -101,7 +104,7 @@ describe("StatusLineComponent", () => {
 		const stripped = border.content.replace(/\x1b\[[0-9;]*m/g, "");
 		expect(stripped).toContain("Prewalk");
 	});
-	it("renders primary and advisor costs separately", () => {
+	it("renders primary and advisor costs separately with subscription indicator in Unicode preset", () => {
 		const statusLine = new StatusLineComponent(
 			makeSessionWithLastMessage(null, false, {
 				cost: 2.67,
@@ -111,7 +114,42 @@ describe("StatusLineComponent", () => {
 		);
 
 		const stripped = statusLine.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content.replace(/\x1b\[[0-9;]*m/g, "");
-		expect(stripped).toContain("$2.67 (sub) + $0.41 (adv)");
+		expect(stripped).toContain("S2.67 + 👁 $0.41");
+	});
+
+	it("renders advisor cost with subscription prefix when advisor is on subscription in Unicode preset", () => {
+		const statusLine = new StatusLineComponent(
+			makeSessionWithLastMessage(null, false, {
+				cost: 2.67,
+				advisorCost: 0.41,
+				usingSubscription: true,
+				advisorUsingSubscription: true,
+			}) as unknown as AgentSession,
+		);
+
+		const stripped = statusLine.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content.replace(/\x1b\[[0-9;]*m/g, "");
+		expect(stripped).toContain("S2.67 + 👁 S0.41");
+	});
+
+	it("renders ASCII preset fallback with (adv) for advisor costs", async () => {
+		const baseTheme = await getThemeByName("dark");
+		if (!baseTheme) throw new Error("theme unavailable");
+		const asciiTheme = await loadTheme("dark", { symbolPresetOverride: "ascii" });
+		setThemeInstance(asciiTheme);
+		try {
+			const statusLine = new StatusLineComponent(
+				makeSessionWithLastMessage(null, false, {
+					cost: 2.67,
+					advisorCost: 0.41,
+					usingSubscription: true,
+					advisorUsingSubscription: true,
+				}) as unknown as AgentSession,
+			);
+			const stripped = statusLine.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content.replace(/\x1b\[[0-9;]*m/g, "");
+			expect(stripped).toContain("S2.67 + S0.41 (adv)");
+		} finally {
+			setThemeInstance(baseTheme);
+		}
 	});
 
 	it("omits advisor cost when the advisor has never been active", () => {
@@ -123,7 +161,28 @@ describe("StatusLineComponent", () => {
 		);
 
 		const stripped = statusLine.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content.replace(/\x1b\[[0-9;]*m/g, "");
-		expect(stripped).toContain("$2.67 (sub)");
+		expect(stripped).toContain("S2.67");
 		expect(stripped).not.toContain("(adv)");
+	});
+
+	it("renders Nerd Font symbols for subscription and advisor costs", async () => {
+		const baseTheme = await getThemeByName("dark");
+		if (!baseTheme) throw new Error("theme unavailable");
+		const nerdTheme = await loadTheme("dark", { symbolPresetOverride: "nerd" });
+		setThemeInstance(nerdTheme);
+		try {
+			const statusLine = new StatusLineComponent(
+				makeSessionWithLastMessage(null, false, {
+					cost: 2.67,
+					advisorCost: 0.41,
+					usingSubscription: true,
+					advisorUsingSubscription: true,
+				}) as unknown as AgentSession,
+			);
+			const stripped = statusLine.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content.replace(/\x1b\[[0-9;]*m/g, "");
+			expect(stripped).toContain("\u{f067a} 2.67 + \uea70 \u{f067a} 0.41");
+		} finally {
+			setThemeInstance(baseTheme);
+		}
 	});
 });

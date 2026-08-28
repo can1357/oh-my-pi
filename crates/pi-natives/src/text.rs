@@ -16,8 +16,8 @@ use std::{
 use napi::{JsString, bindgen_prelude::*};
 use napi_derive::napi;
 use smallvec::{SmallVec, smallvec};
-use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+use crate::js;
 
 const MIN_TAB_WIDTH: u32 = 1;
 const MAX_TAB_WIDTH: u32 = 16;
@@ -45,8 +45,7 @@ fn build_utf16_string(mut data: Vec<u16>) -> Utf16String {
 	while data.last() == Some(&0) {
 		data.pop();
 	}
-	// SAFETY: we know Utf16String == struct(Vec<u16>)
-	unsafe { std::mem::transmute(data) }
+	Utf16String::from(data)
 }
 
 // ============================================================================
@@ -642,7 +641,7 @@ fn apply_hangul_compat_jamo_delta(width: usize, c: char) -> usize {
 	let Some(target) = hangul_compat_jamo_target_width() else {
 		return width;
 	};
-	let unicode_width = UnicodeWidthChar::width(c).unwrap_or(0);
+	let unicode_width = xutf::width_char(c);
 	// The zero-width filler (U+3164 HANGUL FILLER) is an invisible placeholder.
 	// The target is set for *visible* jamo, so only the narrow correction
 	// (target 1) applies to the filler; a wide terminal renders it at its
@@ -659,7 +658,7 @@ fn apply_hangul_compat_jamo_delta(width: usize, c: char) -> usize {
 }
 
 #[inline]
-fn char_width_corrected(c: char) -> Option<usize> {
+fn char_width_corrected(c: char) -> usize {
 	// Hangul Compatibility Jamo U+3131..=U+318E render as 1 cell on some
 	// terminals (Terminal.app, iTerm2) but follow UAX#11 at 2 cells on others
 	// (Ghostty, most Linux terminals). The width is resolved at runtime from the
@@ -671,13 +670,13 @@ fn char_width_corrected(c: char) -> Option<usize> {
 		// Zero-width filler (U+3164): only the narrow correction applies — a
 		// wide terminal renders it at its Unicode width (0), not the effective
 		// wide target set for visible jamo. See apply_hangul_compat_jamo_delta.
-		let unicode_width = UnicodeWidthChar::width(c).unwrap_or(0);
+		let unicode_width = xutf::width_char(c);
 		if unicode_width == 0 && target > 1 {
-			return Some(unicode_width);
+			return unicode_width;
 		}
-		return Some(target);
+		return target;
 	}
-	UnicodeWidthChar::width(c)
+	xutf::width_char(c)
 }
 
 #[inline]
@@ -690,14 +689,14 @@ fn grapheme_width_str(g: &str, tab_width: usize) -> usize {
 		return 0;
 	};
 	if it.next().is_none() {
-		return char_width_corrected(c0).unwrap_or(0);
+		return char_width_corrected(c0);
 	}
 	// Multi-char grapheme: keep UnicodeWidthStr as the source of truth for
 	// sequence-level width rules (VS16 emoji presentation, keycaps, ZWJ emoji,
 	// CRLF, script ligatures). A per-char sum is not equivalent. Apply only the
 	// same local Compatibility Jamo delta that char_width_corrected applies to
 	// standalone code points; the delta is a no-op when no correction is active.
-	let mut width = UnicodeWidthStr::width(g);
+	let mut width = xutf::width_str(g);
 	for c in g.chars() {
 		width = apply_hangul_compat_jamo_delta(width, c);
 	}
@@ -729,7 +728,7 @@ where
 		}
 
 		let mut utf16_pos = 0usize;
-		for g in scratch.graphemes(true) {
+		for g in xutf::graphemes_str(scratch) {
 			let w = grapheme_width_str(g, tab_width);
 
 			let g_u16_len: usize = g.chars().map(|c| c.len_utf16()).sum();
@@ -1255,10 +1254,12 @@ fn wrap_text_with_ansi_impl(
 /// Returns UTF-16 lines with active SGR codes carried across line boundaries.
 #[napi]
 pub fn wrap_text_with_ansi(text: JsString, width: u32, tab_width: u32) -> Result<Vec<Utf16String>> {
-	let text_u16 = text.into_utf16()?;
+	let text = js::utf16(text)?;
 	let tab_width = clamp_tab_width_for_ops(tab_width);
-	let lines = wrap_text_with_ansi_impl(text_u16.as_slice(), width as usize, tab_width);
-	Ok(lines.into_iter().map(build_utf16_string).collect())
+	Ok(wrap_text_with_ansi_impl(&text, width as usize, tab_width)
+		.into_iter()
+		.map(build_utf16_string)
+		.collect())
 }
 
 // ============================================================================
@@ -1280,30 +1281,36 @@ pub fn truncate_to_width(
 	let ellipsis_kind = ellipsis_kind.unwrap_or(Ellipsis::Unicode);
 	let pad = pad.unwrap_or(false);
 	let tab_width = clamp_tab_width_for_ops(tab_width);
-
-	// Keep original handle so we can return it without allocating.
 	let original = text;
+	let text = js::utf16(text)?;
+	Ok(truncate_to_width_impl(original, &text, max_width, ellipsis_kind, pad, tab_width))
+}
 
-	let text_u16 = text.into_utf16()?;
-	let text = text_u16.as_slice();
-
+fn truncate_to_width_impl<'env>(
+	original: JsString<'env>,
+	text: &[u16],
+	max_width: usize,
+	ellipsis_kind: Ellipsis,
+	pad: bool,
+	tab_width: usize,
+) -> Either<JsString<'env>, Utf16String> {
 	// Fast path: early-exit width check
 	let (text_w, exceeded) = visible_width_u16_up_to(text, max_width, tab_width);
 	if !exceeded {
 		if !pad {
 			// Return original JsString handle: zero output allocation.
-			return Ok(Either::A(original));
+			return Either::A(original);
 		}
 
 		if text_w < max_width {
 			let mut out = Vec::with_capacity(text.len() + (max_width - text_w));
 			out.extend_from_slice(text);
 			out.resize(out.len() + (max_width - text_w), b' ' as u16);
-			return Ok(Either::B(build_utf16_string(out)));
+			return Either::B(build_utf16_string(out));
 		}
 
 		// Exactly fits and padding requested: return original is still fine.
-		return Ok(Either::A(original));
+		return Either::A(original);
 	}
 
 	// Map ellipsis kind to UTF-16 data and width
@@ -1335,7 +1342,7 @@ pub fn truncate_to_width(
 		if pad && w < max_width {
 			out.resize(out.len() + (max_width - w), b' ' as u16);
 		}
-		return Ok(Either::B(build_utf16_string(out)));
+		return Either::B(build_utf16_string(out));
 	}
 
 	// Main truncation
@@ -1439,7 +1446,7 @@ pub fn truncate_to_width(
 		}
 	}
 
-	Ok(Either::B(build_utf16_string(out)))
+	Either::B(build_utf16_string(out))
 }
 
 // ============================================================================
@@ -1590,19 +1597,16 @@ pub fn slice_with_width(
 	strict: Option<bool>,
 	tab_width: u32,
 ) -> Result<SliceResult> {
-	let line_u16 = line.into_utf16()?;
-	let line = line_u16.as_slice();
-	let strict = strict.unwrap_or(false);
-
 	if length == 0 {
 		return Ok(SliceResult { text: build_utf16_string(vec![]), width: 0 });
 	}
 
+	let line = js::utf16(line)?;
+	let strict = strict.unwrap_or(false);
 	let tab_width = clamp_tab_width_for_ops(tab_width);
-	let (out, w) =
-		slice_with_width_impl(line, start_col as usize, length as usize, strict, tab_width);
-
-	Ok(SliceResult { text: build_utf16_string(out), width: crate::utils::clamp_u32(w as u64) })
+	let (out, width) =
+		slice_with_width_impl(&line, start_col as usize, length as usize, strict, tab_width);
+	Ok(SliceResult { text: build_utf16_string(out), width: crate::utils::clamp_u32(width as u64) })
 }
 
 // ============================================================================
@@ -1812,12 +1816,10 @@ pub fn extract_segments(
 	strict_after: bool,
 	tab_width: u32,
 ) -> Result<ExtractSegmentsResult> {
-	let line_u16 = line.into_utf16()?;
-	let line = line_u16.as_slice();
-
+	let line = js::utf16(line)?;
 	let tab_width = clamp_tab_width_for_ops(tab_width);
-	let (before, bw, after, aw) = extract_segments_impl(
-		line,
+	let (before, before_width, after, after_width) = extract_segments_impl(
+		&line,
 		before_end as usize,
 		after_start as usize,
 		after_len as usize,
@@ -1827,9 +1829,9 @@ pub fn extract_segments(
 
 	Ok(ExtractSegmentsResult {
 		before:       build_utf16_string(before),
-		before_width: crate::utils::clamp_u32(bw as u64),
+		before_width: crate::utils::clamp_u32(before_width as u64),
 		after:        build_utf16_string(after),
-		after_width:  crate::utils::clamp_u32(aw as u64),
+		after_width:  crate::utils::clamp_u32(after_width as u64),
 	})
 }
 
@@ -1842,9 +1844,9 @@ pub fn extract_segments(
 /// Tabs count as a fixed-width cell.
 #[napi]
 pub fn visible_width(text: JsString, tab_width: u32) -> Result<u32> {
-	let text_u16 = text.into_utf16()?;
+	let text = js::utf16(text)?;
 	let tab_width = clamp_tab_width_for_ops(tab_width);
-	Ok(crate::utils::clamp_u32(visible_width_u16(text_u16.as_slice(), tab_width) as u64))
+	Ok(crate::utils::clamp_u32(visible_width_u16(&text, tab_width) as u64))
 }
 
 #[cfg(test)]

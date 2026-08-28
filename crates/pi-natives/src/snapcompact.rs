@@ -48,10 +48,10 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use fontdue::{Font as TtfFace, FontSettings, Metrics};
-use napi::bindgen_prelude::*;
+use napi::{JsString, bindgen_prelude::*};
 use napi_derive::napi;
 
-use crate::task;
+use crate::{js, task};
 
 /// Upper bound on the frame edge: a hard stop against absurd allocations
 /// (`size * size` pixel buffer), far above the 2576px production frame.
@@ -1162,14 +1162,17 @@ pub struct SnapcompactRenderOptions {
 /// the selected native font has a glyph for it; renderer control codes are
 /// considered renderable because they are interpreted outside font lookup.
 #[napi]
-pub fn snapcompact_supported_chars(font: String, chars: String) -> Result<String> {
-	let font = resolve_font(&font).ok_or_else(|| {
+pub fn snapcompact_supported_chars(font: JsString, chars: JsString) -> Result<String> {
+	let font_name = js::utf8(font)?;
+	let font = resolve_font(&font_name).ok_or_else(|| {
 		Error::from_reason(format!(
-			"Unknown snapcompact font {font:?}: expected \"5x8\", \"8x8\", \"6x12\", \"8x13\", or \
-			 \"silver\""
+			"Unknown snapcompact font {:?}: expected \"5x8\", \"8x8\", \"6x12\", \"8x13\", or \
+			 \"silver\"",
+			&*font_name
 		))
 	})?;
-	let mut supported = String::new();
+	let chars = js::utf8(chars)?;
+	let mut supported = String::with_capacity(chars.len());
 	for ch in chars.chars() {
 		if matches!(ch as u32, DIM_ON | DIM_OFF | FULL_BLOCK | 0x0a) || font.supports(ch as u32) {
 			supported.push(ch);

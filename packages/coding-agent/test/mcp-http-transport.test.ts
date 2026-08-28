@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { connectToServer } from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { HttpTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/http";
+import { postmortem } from "@oh-my-pi/pi-utils";
 
 const encoder = new TextEncoder();
 const REQUEST_TIMEOUT_MS = 50;
@@ -119,6 +120,88 @@ describe("MCP Streamable HTTP transport timeouts", () => {
 		);
 	});
 
+	it("keeps the timeout result when the caller aborts before the JSON body rejection propagates", async () => {
+		vi.useFakeTimers();
+		const caller = new AbortController();
+		const originalFetch = globalThis.fetch;
+		const jsonStarted = Promise.withResolvers<void>();
+		globalThis.fetch = (async (_input, init) => {
+			const response = new Response(null, { headers: { "Content-Type": "application/json" } });
+			Object.assign(response, {
+				json: () => {
+					const { promise, reject } = Promise.withResolvers<unknown>();
+					const rejectBodyRead = () => {
+						caller.abort();
+						reject(new SyntaxError("Unexpected end of JSON input"));
+					};
+					if (init?.signal?.aborted) rejectBodyRead();
+					else init?.signal?.addEventListener("abort", rejectBodyRead, { once: true });
+					jsonStarted.resolve();
+					return promise;
+				},
+			});
+			return response;
+		}) as typeof globalThis.fetch;
+		try {
+			const transport = new HttpTransport({
+				type: "http",
+				url: "http://mcp.invalid",
+				timeout: REQUEST_TIMEOUT_MS,
+			});
+			await transport.connect();
+			const request = transport.request("tools/list", undefined, { signal: caller.signal });
+			await jsonStarted.promise;
+			vi.advanceTimersByTime(REQUEST_TIMEOUT_MS);
+
+			await expect(request).rejects.toThrow(`Request timeout after ${REQUEST_TIMEOUT_MS}ms`);
+		} finally {
+			globalThis.fetch = originalFetch;
+			vi.useRealTimers();
+		}
+	});
+
+	it("does not report a timeout when caller cancellation wins a delayed JSON body rejection", async () => {
+		vi.useFakeTimers();
+		const caller = new AbortController();
+		const originalFetch = globalThis.fetch;
+		const jsonStarted = Promise.withResolvers<void>();
+		globalThis.fetch = (async (_input, init) => {
+			const response = new Response(null, { headers: { "Content-Type": "application/json" } });
+			Object.assign(response, {
+				json: () => {
+					const { promise, reject } = Promise.withResolvers<unknown>();
+					init?.signal?.addEventListener(
+						"abort",
+						() => {
+							setTimeout(() => reject(new SyntaxError("Unexpected end of JSON input")), REQUEST_TIMEOUT_MS + 20);
+						},
+						{ once: true },
+					);
+					jsonStarted.resolve();
+					return promise;
+				},
+			});
+			return response;
+		}) as typeof globalThis.fetch;
+		try {
+			const transport = new HttpTransport({
+				type: "http",
+				url: "http://mcp.invalid",
+				timeout: REQUEST_TIMEOUT_MS,
+			});
+			await transport.connect();
+			const request = transport.request("tools/list", undefined, { signal: caller.signal });
+			await jsonStarted.promise;
+			caller.abort();
+			vi.advanceTimersByTime(REQUEST_TIMEOUT_MS + 20);
+
+			await expect(request).rejects.toThrow("Unexpected end of JSON input");
+		} finally {
+			globalThis.fetch = originalFetch;
+			vi.useRealTimers();
+		}
+	});
+
 	it("keeps the notify timeout active while reading HTTP error bodies", async () => {
 		server = Bun.serve({
 			port: 0,
@@ -152,6 +235,69 @@ describe("MCP Streamable HTTP transport timeouts", () => {
 		await expect(withPendingGuard(transport.request<ToolList>("tools/list"), "request")).resolves.toEqual({
 			tools: [{ name: "fast", inputSchema: { type: "object" } }],
 		});
+	});
+
+	it("close aborts and drains an in-flight SSE POST request", async () => {
+		const requestReceived = Promise.withResolvers<void>();
+		server = Bun.serve({
+			port: 0,
+			fetch() {
+				requestReceived.resolve();
+				return stalledBodyResponse("", {
+					headers: { "Content-Type": "text/event-stream" },
+				});
+			},
+		});
+		if (!server) throw new Error("Test server was not started");
+		const transport = new HttpTransport({
+			type: "http",
+			url: `http://127.0.0.1:${server.port}/mcp`,
+			timeout: GUARD_TIMEOUT_MS,
+		});
+		await transport.connect();
+
+		const request = transport.request("tools/list");
+		await requestReceived.promise;
+		const closing = transport.close();
+
+		const requestError = await withPendingGuard(request, "aborted request").then(
+			() => undefined,
+			error => error,
+		);
+		expect(requestError).toMatchObject({ name: "AbortError" });
+		expect(postmortem.isExpectedCleanupError(requestError)).toBe(true);
+		await withPendingGuard(closing, "transport close");
+	});
+
+	it("keeps an abandoned SSE request rejection observed after caller cancellation", async () => {
+		const requestReceived = Promise.withResolvers<void>();
+		const caller = new AbortController();
+		server = Bun.serve({
+			port: 0,
+			fetch() {
+				requestReceived.resolve();
+				return stalledBodyResponse("", {
+					headers: { "Content-Type": "text/event-stream" },
+				});
+			},
+		});
+		const transport = await connectedTransport();
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown) => unhandled.push(reason);
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			void transport.request("tools/list", undefined, { signal: caller.signal });
+			await requestReceived.promise;
+			caller.abort();
+			const nextTurn = Promise.withResolvers<void>();
+			setImmediate(nextTurn.resolve);
+			await nextTurn.promise;
+
+			expect(unhandled).toEqual([]);
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+			await transport.close();
+		}
 	});
 });
 

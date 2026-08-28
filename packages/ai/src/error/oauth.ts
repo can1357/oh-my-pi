@@ -37,7 +37,8 @@ export interface OAuthErrorOptions {
 /**
  * A failure inside an interactive OAuth / device-code login flow. The `kind`
  * pinpoints the stage. Timeout/polling are classified transient; everything
- * else is a hard auth failure so the credential layer does not silently retry.
+ * else is a hard auth failure. The auth-retry classifier separately treats
+ * `token-refresh` as an explicit request to refresh and replay once.
  */
 export class OAuthError extends Error {
 	readonly kind: OAuthErrorKind;

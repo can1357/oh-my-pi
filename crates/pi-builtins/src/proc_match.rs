@@ -513,7 +513,7 @@ fn parse_proc_match_args(
 								.map_err(|_| (2, "invalid queue value".to_string()))?,
 						);
 					},
-					'q' if mode == ProcMatchMode::Grep && cfg!(target_os = "macos") => {
+					'q' if mode == ProcMatchMode::Grep => {
 						options.quiet = true;
 					},
 					'q' => return Err((2, "unrecognized option '-q'".to_string())),
@@ -950,7 +950,6 @@ fn write_proc_match_help(
 	if mode == ProcMatchMode::Kill {
 		writeln!(output, "  -q value, --queue value  send an integer with sigqueue")?;
 	}
-	#[cfg(target_os = "macos")]
 	if mode == ProcMatchMode::Grep {
 		writeln!(output, "  -q  suppress output")?;
 	}

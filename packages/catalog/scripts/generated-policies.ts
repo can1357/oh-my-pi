@@ -54,36 +54,6 @@ export const CLOUDFLARE_FALLBACK_MODEL: ModelSpec<"anthropic-messages"> = {
 	maxTokens: 64000,
 };
 
-/**
- * `stencil.so` currently lists `jp.anthropic.claude-opus-5`, but AWS's own
- * Bedrock model card documents only `anthropic.claude-opus-5` plus the `us.`,
- * `eu.`, `au.`, and `global.` Geo/Global inference-profile IDs under
- * Programmatic Access; Japan regions are marked unsupported for Geo inference
- * in the same card's regional-availability table. Bedrock rejects an
- * undocumented inference-profile ID outright, so drop this specific upstream
- * row rather than ship a selector that 4xxs on first use (PR #6591 review).
- * https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-opus-5.html
- */
-export function dropUnsupportedBedrockGeoIds(models: readonly ModelSpec[]): ModelSpec[] {
-	return models.filter(model => !(model.provider === "amazon-bedrock" && model.id === "jp.anthropic.claude-opus-5"));
-}
-
-const BEDROCK_MANTLE_OPENAI_MODEL_IDS: Record<string, true> = {
-	"openai.gpt-5.4": true,
-	"openai.gpt-5.5": true,
-	"openai.gpt-5.6-luna": true,
-	"openai.gpt-5.6-sol": true,
-	"openai.gpt-5.6-terra": true,
-};
-
-/**
- * models.dev exposes these Responses-only models under amazon-bedrock, whose
- * descriptor uses Converse. The working Mantle rows come from the static seed.
- */
-export function dropBedrockMantleOpenAIModels(models: readonly ModelSpec[]): ModelSpec[] {
-	return models.filter(model => !(model.provider === "amazon-bedrock" && BEDROCK_MANTLE_OPENAI_MODEL_IDS[model.id]));
-}
-
 /** True when any component of a model's per-million-token cost is nonzero. */
 export function hasBillableCost(cost: ModelSpec["cost"]): boolean {
 	return cost.input !== 0 || cost.output !== 0 || cost.cacheRead !== 0 || cost.cacheWrite !== 0;
@@ -208,12 +178,20 @@ export function applyGeneratedModelPolicies(models: ModelSpec<Api>[]): void {
 export function rebakeModelThinking(model: ModelSpec<Api>): void {
 	if (isVariantCollapsedSpec(model)) return;
 	if (
+		model.compat &&
+		"thinkingFormat" in model.compat &&
+		model.compat.thinkingFormat === "chat-template" &&
+		model.thinking
+	)
+		return;
+	if (
 		model.provider === "alibaba-token-plan" &&
 		(model.id === "qwen3.8-max-preview" || model.id === "qwen3.8-max") &&
 		model.thinking
 	) {
 		return;
 	}
+	if (model.provider === "openrouter" && model.thinking?.requiresEffort === true) return;
 	const requiresProviderAuthoredEffort =
 		model.provider === "umans" && (model.thinking?.requiresEffort === true || model.id === "umans-kimi-k2.7");
 	const thinking = resolveModelThinking({ ...model, thinking: undefined }, buildCompat(model));
@@ -374,13 +352,18 @@ function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
 
 	// GLM Coding Plan: the selectable 1M-context served ids; pin them so
 	// endpoint discovery or older bundled fallbacks cannot regress to 200k.
-	// GLM-5.3 succeeds GLM-5.2 with the same 1M context window.
+	// GLM-5.3 succeeds GLM-5.2 with the same 1M context window, and
+	// GLM-5.3-Flash shares the tier while adding native image input that
+	// upstream metadata still reports as text-only.
 	if (
 		(model.provider === "zai" || model.provider === "zhipu-coding-plan") &&
-		(model.id === "glm-5.2" || model.id === "glm-5.3")
+		(model.id === "glm-5.2" || model.id === "glm-5.3" || model.id === "glm-5.3-flash")
 	) {
 		model.contextWindow = 1_000_000;
 		model.maxTokens = 131_072;
+		if (model.id === "glm-5.3-flash") {
+			model.input = ["text", "image"];
+		}
 	}
 	// MiniMax-M3: 512K is the standard pricing tier boundary, not the
 	// model ceiling. Pin every long-context provider that serves the model
@@ -508,12 +491,17 @@ function inferGeneratedApplyPatchToolType(
 
 function applyOpenAICatalogPolicy(model: ModelSpec<Api>, parsedModel: OpenAIModel): void {
 	const isFirstPartyResponses = model.provider === "openai" && model.api === "openai-responses";
+	// Subscription Codex rates usage at the same >272K long-context tier as the
+	// API (openai/codex#32486), so first-party Codex SKUs carry the tier too —
+	// it drives both cost attribution and the extended-context window clamp.
+	const isFirstPartyCodex = model.provider === "openai-codex" && model.api === "openai-codex-responses";
 	if (isFirstPartyResponses && modelOrRequestIdValue(model, OPENAI_NONE_EFFORT_MODEL_IDS)) {
 		model.compat = { ...(model.compat ?? {}), reasoningDisableMode: "none-effort" };
 	}
-	const longContextCost = isFirstPartyResponses
-		? modelOrRequestIdValue(model, OPENAI_GPT_5_6_LONG_CONTEXT_COST_BY_MODEL_ID)
-		: undefined;
+	const longContextCost =
+		isFirstPartyResponses || isFirstPartyCodex
+			? modelOrRequestIdValue(model, OPENAI_GPT_5_6_LONG_CONTEXT_COST_BY_MODEL_ID)
+			: undefined;
 	if (longContextCost) {
 		model.cost = { ...model.cost, longContext: longContextCost };
 	}

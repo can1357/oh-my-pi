@@ -2,13 +2,22 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { ApiKeyResolveContext, AssistantMessage, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type {
+	ApiKeyResolveContext,
+	AssistantMessage,
+	TextContent,
+	ThinkingContent,
+	ToolCall,
+	ToolResultMessage,
+} from "@oh-my-pi/pi-ai";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel, type MockResponse, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import * as aiStream from "@oh-my-pi/pi-ai/stream";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
@@ -77,7 +86,7 @@ describe("AgentSession retry delay cap", () => {
 		for (const provider of ["anthropic", "openai-codex"]) {
 			await authStorage.remove(provider);
 		}
-		for (const provider of ["anthropic", "openai", "openai-codex", "openrouter", "cursor"]) {
+		for (const provider of ["anthropic", "openai", "openai-codex", "openrouter", "github-copilot", "cursor"]) {
 			authStorage.removeRuntimeApiKey(provider);
 		}
 		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
@@ -2084,38 +2093,75 @@ describe("AgentSession retry delay cap", () => {
 		expect(last.stopReason).toBe("aborted");
 	});
 
-	it("caps repeated OpenRouter stream closes after streamed thinking at one retry", async () => {
-		const model = getBundledModel("openrouter", "~google/gemini-flash-latest");
-		if (!model) {
-			throw new Error("Expected bundled OpenRouter Gemini test model to exist");
-		}
-		authStorage.setRuntimeApiKey("openrouter", "openrouter-test-key");
-
-		const mock = createMockModel({
-			provider: "openrouter",
-			responses: [
-				{
-					content: [{ type: "thinking", thinking: "reasoning attempt 1" }],
-					stopReason: "error",
-					errorMessage: "server_error: stream closed with reason: error",
-				},
-				{
-					content: [{ type: "thinking", thinking: "reasoning attempt 2" }],
-					stopReason: "error",
-					errorMessage: "server_error: stream closed with reason: error",
-				},
-				{ content: ["must remain unused"] },
-			],
-		});
+	async function expectThinkingStreamCloseRetryCap(options: {
+		model: Model;
+		errorMessage: string;
+		prompt: string;
+	}): Promise<void> {
+		authStorage.setRuntimeApiKey(options.model.provider, `${options.model.provider}-test-key`);
+		let calls = 0;
 		const agent = new Agent({
 			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
 			initialState: {
-				model,
+				model: options.model,
 				systemPrompt: ["Test"],
 				tools: [],
 				messages: [],
 			},
-			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
+			streamFn: requestedModel => {
+				calls++;
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const usage: AssistantMessage["usage"] = {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					};
+					if (calls > 2) {
+						const text: TextContent = { type: "text", text: "must remain unused" };
+						const message: AssistantMessage = {
+							role: "assistant",
+							content: [text],
+							api: requestedModel.api,
+							provider: requestedModel.provider,
+							model: requestedModel.id,
+							usage,
+							stopReason: "stop",
+							timestamp: Date.now(),
+						};
+						stream.push({ type: "start", partial: message });
+						stream.push({ type: "text_start", contentIndex: 0, partial: message });
+						stream.push({ type: "text_delta", contentIndex: 0, delta: text.text, partial: message });
+						stream.push({ type: "text_end", contentIndex: 0, content: text.text, partial: message });
+						stream.push({ type: "done", reason: "stop", message });
+						return;
+					}
+					const thinking: ThinkingContent = { type: "thinking", thinking: "" };
+					const message: AssistantMessage = {
+						role: "assistant",
+						content: [thinking],
+						api: requestedModel.api,
+						provider: requestedModel.provider,
+						model: requestedModel.id,
+						usage,
+						stopReason: "error",
+						errorMessage: options.errorMessage,
+						errorId: AIError.create(AIError.Flag.Transient),
+						timestamp: Date.now(),
+					};
+					const delta = `reasoning attempt ${calls}`;
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "thinking_start", contentIndex: 0, partial: message });
+					thinking.thinking = delta;
+					stream.push({ type: "thinking_delta", contentIndex: 0, delta, partial: message });
+					stream.push({ type: "thinking_end", contentIndex: 0, content: thinking.thinking, partial: message });
+					stream.push({ type: "error", reason: "error", error: message });
+				});
+				return stream;
+			},
 		});
 
 		const settings = Settings.isolated({
@@ -2124,7 +2170,7 @@ describe("AgentSession retry delay cap", () => {
 			"retry.maxRetries": 10,
 			"retry.modelFallback": false,
 		});
-		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		settings.setModelRole("default", `${options.model.provider}/${options.model.id}`);
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -2140,18 +2186,40 @@ describe("AgentSession retry delay cap", () => {
 			if (event.type === "auto_retry_end") retryEndEvents.push(event);
 		});
 
-		await session.prompt("Trigger OpenRouter reasoning transition failure");
+		await session.prompt(options.prompt);
 		await session.waitForIdle();
 
-		expect(mock.calls).toHaveLength(2);
+		expect(calls).toBe(2);
 		expect(retryStartEvents).toHaveLength(1);
 		expect(retryStartEvents[0]).toMatchObject({ attempt: 1, maxAttempts: 1 });
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({ success: false, attempt: 1 });
-		expect(lastAssistant(session).errorMessage).toBe(
-			"Retry budget exhausted after 1 retry: server_error: stream closed with reason: error",
-		);
+		expect(lastAssistant(session).errorMessage).toBe(`Retry budget exhausted after 1 retry: ${options.errorMessage}`);
 		expect(session.isRetrying).toBe(false);
+	}
+
+	it("caps repeated OpenRouter stream closes after streamed thinking at one retry", async () => {
+		const model = getBundledModel("openrouter", "~google/gemini-flash-latest");
+		if (!model) {
+			throw new Error("Expected bundled OpenRouter Gemini test model to exist");
+		}
+		await expectThinkingStreamCloseRetryCap({
+			model,
+			errorMessage: "server_error: stream closed with reason: error",
+			prompt: "Trigger OpenRouter reasoning transition failure",
+		});
+	});
+
+	it("caps repeated Copilot Grok Responses closes after streamed thinking at one retry", async () => {
+		const model = getBundledModel("github-copilot", "grok-4.6");
+		if (!model) {
+			throw new Error("Expected bundled Copilot Grok 4.6 test model to exist");
+		}
+		await expectThinkingStreamCloseRetryCap({
+			model,
+			errorMessage: "OpenAI responses stream closed before a terminal response event was received",
+			prompt: "Trigger Copilot Grok Responses incomplete stream",
+		});
 	});
 
 	it("defaults 502 auto-retry to ten capped backoff attempts", async () => {

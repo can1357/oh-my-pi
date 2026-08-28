@@ -32,6 +32,12 @@ export type SymbolKey =
 	| "tree.vertical"
 	| "tree.horizontal"
 	| "tree.hook"
+	// Progress Bar
+	| "progress.filled"
+	| "progress.empty"
+	// Context gauge boundaries
+	| "context.speculation"
+	| "context.compaction"
 	// Box Drawing - Rounded
 	| "boxRound.topLeft"
 	| "boxRound.topRight"
@@ -80,9 +86,12 @@ export type SymbolKey =
 	| "icon.git"
 	| "icon.branch"
 	| "icon.pr"
+	| "icon.pin"
 	| "icon.tokens"
 	| "icon.context"
 	| "icon.cost"
+	| "icon.subscription"
+	| "icon.advisor"
 	| "icon.time"
 	| "icon.pi"
 	| "icon.ghost"
@@ -109,6 +118,52 @@ export type SymbolKey =
 	| "icon.extensionPrompt"
 	| "icon.extensionContextFile"
 	| "icon.extensionInstruction"
+	// Slash-command type indicators (autocomplete); names without an existing
+	// icon.* equivalent — see SlashCommandIconName for the full vocabulary.
+	| "cmd.action"
+	| "cmd.prompt"
+	| "cmd.extension"
+	| "cmd.settings"
+	| "cmd.gear"
+	| "cmd.shield"
+	| "cmd.wave"
+	| "cmd.compass"
+	| "cmd.inbox"
+	| "cmd.swap"
+	| "cmd.expand"
+	| "cmd.computer"
+	| "cmd.eye"
+	| "cmd.todo"
+	| "cmd.stats"
+	| "cmd.news"
+	| "cmd.keyboard"
+	| "cmd.export"
+	| "cmd.clipboard"
+	| "cmd.share"
+	| "cmd.broadcast"
+	| "cmd.globe"
+	| "cmd.copy"
+	| "cmd.plus"
+	| "cmd.restart"
+	| "cmd.eraser"
+	| "cmd.trash"
+	| "cmd.compress"
+	| "cmd.vibrate"
+	| "cmd.handoff"
+	| "cmd.history"
+	| "cmd.question"
+	| "cmd.rocket"
+	| "cmd.stethoscope"
+	| "cmd.redo"
+	| "cmd.bug"
+	| "cmd.memory"
+	| "cmd.pencil"
+	| "cmd.folderMove"
+	| "cmd.folderPlus"
+	| "cmd.folderMinus"
+	| "cmd.hammer"
+	| "cmd.power"
+	| "cmd.cart"
 	// STT
 	| "icon.mic"
 	// Compaction divider
@@ -177,6 +232,9 @@ export type SymbolKey =
 	| "lang.pdf"
 	| "lang.archive"
 	| "lang.binary"
+	// Composer attachment chips (image paste / large text paste)
+	| "chip.image"
+	| "chip.paste"
 	// Settings tab icons
 	| "tab.appearance"
 	| "tab.model"
@@ -216,6 +274,83 @@ export type SymbolKey =
 	| "tool.move";
 
 export type SymbolMap = Record<SymbolKey, string>;
+/**
+ * Icon vocabulary for slash-command autocomplete type indicators. Each name
+ * resolves through `Theme.cmd` to either a dedicated `cmd.*` symbol or an
+ * existing `icon.*` symbol shared with the rest of the UI.
+ */
+export type SlashCommandIconName =
+	// Dedicated cmd.* symbols
+	| "action"
+	| "prompt"
+	| "extension"
+	| "settings"
+	| "gear"
+	| "shield"
+	| "wave"
+	| "compass"
+	| "inbox"
+	| "swap"
+	| "expand"
+	| "computer"
+	| "eye"
+	| "todo"
+	| "stats"
+	| "news"
+	| "keyboard"
+	| "export"
+	| "clipboard"
+	| "share"
+	| "broadcast"
+	| "globe"
+	| "copy"
+	| "plus"
+	| "restart"
+	| "eraser"
+	| "trash"
+	| "compress"
+	| "vibrate"
+	| "handoff"
+	| "history"
+	| "question"
+	| "rocket"
+	| "stethoscope"
+	| "redo"
+	| "bug"
+	| "memory"
+	| "pencil"
+	| "folderMove"
+	| "folderPlus"
+	| "folderMinus"
+	| "hammer"
+	| "power"
+	| "cart"
+	// Shared icon.* symbols
+	| "model"
+	| "plan"
+	| "prewalk"
+	| "goal"
+	| "pause"
+	| "loop"
+	| "session"
+	| "jobs"
+	| "gauge"
+	| "context"
+	| "agents"
+	| "branch"
+	| "tree"
+	| "signIn"
+	| "signOut"
+	| "advisor"
+	| "host"
+	| "package"
+	| "fast"
+	| "voice"
+	| "tools"
+	| "rule"
+	| "skill"
+	| "mcp"
+	| "pin";
 
 const UNICODE_SYMBOLS: SymbolMap = {
 	// Status
@@ -242,6 +377,12 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"tree.vertical": "│",
 	"tree.horizontal": "─",
 	"tree.hook": "└",
+	// Progress bar
+	"progress.filled": "━",
+	"progress.empty": "─",
+	// Context gauge boundaries
+	"context.speculation": "╎",
+	"context.compaction": "┃",
 	// Box (rounded)
 	"boxRound.topLeft": "╭",
 	"boxRound.topRight": "╮",
@@ -290,9 +431,12 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"icon.git": "⎇",
 	"icon.branch": "⑂",
 	"icon.pr": "⤴",
+	"icon.pin": "📌",
 	"icon.tokens": "🪙",
 	"icon.context": "◫",
 	"icon.cost": "💲",
+	"icon.subscription": "(sub)",
+	"icon.advisor": "👁",
 	"icon.time": "⏱",
 	"icon.pi": "π",
 	"icon.ghost": "👻",
@@ -319,6 +463,51 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"icon.extensionPrompt": "✎",
 	"icon.extensionContextFile": "📎",
 	"icon.extensionInstruction": "📘",
+	// Slash-command type indicators
+	"cmd.action": "❯",
+	"cmd.prompt": "✎",
+	"cmd.extension": "🧩",
+	"cmd.settings": "🎛",
+	"cmd.gear": "⚙",
+	"cmd.shield": "🛡",
+	"cmd.wave": "∿",
+	"cmd.compass": "🧭",
+	"cmd.inbox": "📥",
+	"cmd.swap": "⇄",
+	"cmd.expand": "⤢",
+	"cmd.computer": "🖥",
+	"cmd.eye": "👁",
+	"cmd.todo": "☑",
+	"cmd.stats": "📊",
+	"cmd.news": "📰",
+	"cmd.keyboard": "⌨",
+	"cmd.export": "📤",
+	"cmd.clipboard": "📋",
+	"cmd.share": "↗",
+	"cmd.broadcast": "📡",
+	"cmd.globe": "🌐",
+	"cmd.copy": "⧉",
+	"cmd.plus": "✚",
+	"cmd.restart": "↻",
+	"cmd.eraser": "🧹",
+	"cmd.trash": "🗑",
+	"cmd.compress": "🗜",
+	"cmd.vibrate": "📳",
+	"cmd.handoff": "➦",
+	"cmd.history": "🕘",
+	"cmd.question": "❓",
+	"cmd.rocket": "🚀",
+	"cmd.stethoscope": "🩺",
+	"cmd.redo": "🔁",
+	"cmd.bug": "🐛",
+	"cmd.memory": "🧠",
+	"cmd.pencil": "✏",
+	"cmd.folderMove": "📂",
+	"cmd.folderPlus": "📁",
+	"cmd.folderMinus": "📁",
+	"cmd.hammer": "🔨",
+	"cmd.power": "⏻",
+	"cmd.cart": "🛒",
 	// STT
 	"icon.mic": "🎤",
 	// Compaction divider
@@ -387,6 +576,9 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"lang.pdf": "📕",
 	"lang.archive": "🗜",
 	"lang.binary": "⚙",
+	// Composer attachment chips
+	"chip.image": "🖼",
+	"chip.paste": "📄",
 	// Settings tabs
 	"tab.appearance": "🎨",
 	"tab.model": "🤖",
@@ -472,6 +664,14 @@ const NERD_SYMBOLS: SymbolMap = {
 	"tree.horizontal": "─",
 	// pick: └ | alt: ╰ ⎿ ↳
 	"tree.hook": "└",
+	// Progress Bar (same as unicode)
+	// pick: ━ | alt: ▰ ▮ ■
+	"progress.filled": "━",
+	// pick: ─ | alt: ▱ ▯ ╌
+	"progress.empty": "─",
+	// Context gauge boundaries — vector intersection starts async speculation; auto-fix applies compaction.
+	"context.speculation": "\u{f055d}",
+	"context.compaction": "\u{f0068}",
 	// Box Drawing - Rounded (same as unicode)
 	// pick: ╭ | alt: ┌ ┏ ╔
 	"boxRound.topLeft": "╭",
@@ -562,12 +762,18 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.branch": "\uf126",
 	// pick:  (nf-cod-git_pull_request) | alt:  (nf-oct-git_pull_request)
 	"icon.pr": "\uea64",
+	// pick:  (nf-fa-thumb_tack) | alt:  󰐃
+	"icon.pin": "\uf08d",
 	// pick:  | alt: ⊛ ◍ 
 	"icon.tokens": "\ue26b",
 	// pick:  | alt: ◫ ▦
 	"icon.context": "\ue70f",
 	// pick:  | alt: $ ¢
 	"icon.cost": "\uf155",
+	// pick: 󰙺 (nf-md-currency_usd_off)
+	"icon.subscription": "\u{f067a}",
+	// pick:  (nf-cod-eye)
+	"icon.advisor": "\uea70",
 	// pick:  | alt: ◷ ◴
 	"icon.time": "\uf017",
 	// pick:  | alt: π ∏ ∑
@@ -618,6 +824,95 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.extensionContextFile": "\uf0f6",
 	// pick:  | alt:  
 	"icon.extensionInstruction": "\uf02d",
+	// Slash-command type indicators
+	// pick:  (nf-cod-terminal) | alt:  (nf-fa-terminal)
+	"cmd.action": "\uea85",
+	// pick: 󰺫 (nf-md-text_box_plus_outline) | alt:  (nf-fa-comment, matches icon.extensionPrompt)
+	"cmd.prompt": "\u{f0eab}",
+	// pick:  (nf-fa-puzzle_piece) | alt: 󰐱 (nf-md-puzzle)
+	"cmd.extension": "\uf12e",
+	// pick:  (nf-fa-sliders) | alt:  (nf-cod-settings)
+	"cmd.settings": "\uf1de",
+	// pick:  (nf-cod-settings_gear)
+	"cmd.gear": "\ueb51",
+	// pick:  (nf-fa-shield) | alt:  (nf-cod-shield)
+	"cmd.shield": "\uf132",
+	// pick: 󰥛 (nf-md-sine_wave)
+	"cmd.wave": "\u{f095b}",
+	// pick:  (nf-fa-compass) | alt: 󰆌 (nf-md-compass)
+	"cmd.compass": "\uf14e",
+	// pick:  (nf-fa-inbox) | alt:  (nf-cod-inbox)
+	"cmd.inbox": "\uf01c",
+	// pick: 󰓡 (nf-md-swap_horizontal)
+	"cmd.swap": "\u{f04e1}",
+	// pick: 󰁌 (nf-md-arrow_expand_all) | alt: 󰘖 (nf-md-arrow_expand)
+	"cmd.expand": "\u{f004c}",
+	// pick:  (nf-fa-desktop) | alt:  (nf-oct-device_desktop)
+	"cmd.computer": "\uf108",
+	// pick:  (nf-fa-eye) | alt:  (nf-cod-eye, matches icon.advisor)
+	"cmd.eye": "\uf06e",
+	// pick:  (nf-fa-tasks) | alt:  (nf-cod-checklist)
+	"cmd.todo": "\uf0ae",
+	// pick:  (nf-fa-bar_chart) | alt: 󰄨 (nf-md-chart_bar)
+	"cmd.stats": "\uf080",
+	// pick:  (nf-fa-newspaper_o) | alt: 󰎕 (nf-md-newspaper)
+	"cmd.news": "\uf1ea",
+	// pick:  (nf-fa-keyboard_o) | alt: 󰌌 (nf-md-keyboard)
+	"cmd.keyboard": "\uf11c",
+	// pick:  (nf-fa-external_link) | alt:  (nf-cod-link_external)
+	"cmd.export": "\uf08e",
+	// pick:  (nf-fa-clipboard) | alt: 󰅇 (nf-md-clipboard)
+	"cmd.clipboard": "\uf0ea",
+	// pick:  (nf-fa-share_alt)
+	"cmd.share": "\uf1e0",
+	// pick:  (nf-cod-broadcast) | alt: 󱜠 (nf-md-broadcast)
+	"cmd.broadcast": "\ueaad",
+	// pick:  (nf-fa-globe) | alt:  (nf-cod-globe)
+	"cmd.globe": "\uf0ac",
+	// pick:  (nf-fa-copy) | alt:  (nf-cod-copy)
+	"cmd.copy": "\uf0c5",
+	// pick:  (nf-fa-circle_plus) | alt:  (nf-cod-add)
+	"cmd.plus": "\uf055",
+	// pick: 󰜉 (nf-md-restart) | alt:  (nf-cod-sync)
+	"cmd.restart": "\u{f0709}",
+	// pick:  (nf-fa-eraser) | alt: 󰇾 (nf-md-eraser)
+	"cmd.eraser": "\uf12d",
+	// pick:  (nf-fa-trash_can) | alt: 󰩹 (nf-md-trash_can)
+	"cmd.trash": "\uf014",
+	// pick:  (nf-fa-compress)
+	"cmd.compress": "\uf066",
+	// pick: 󰕦 (nf-md-vibrate)
+	"cmd.vibrate": "\u{f0566}",
+	// pick:  (nf-fa-mail_forward)
+	"cmd.handoff": "\uf064",
+	// pick: 󰋚 (nf-md-history) | alt:  (nf-fa-history)
+	"cmd.history": "\u{f02da}",
+	// pick:  (nf-fa-question_circle) | alt: 󰋗 (nf-md-help_circle)
+	"cmd.question": "\uf059",
+	// pick:  (nf-fa-rocket) | alt:  (nf-cod-rocket)
+	"cmd.rocket": "\uf135",
+	// pick:  (nf-fa-stethoscope) | alt: 󰓙 (nf-md-stethoscope)
+	"cmd.stethoscope": "\uf0f1",
+	// pick: 󰑎 (nf-md-redo) | alt:  (nf-cod-redo)
+	"cmd.redo": "\u{f044e}",
+	// pick:  (nf-fa-bug) | alt:  (nf-cod-bug)
+	"cmd.bug": "\uf188",
+	// pick: 󰍛 (nf-md-memory) | alt:  (nf-oct-cpu)
+	"cmd.memory": "\u{f035b}",
+	// pick:  (nf-fa-edit) | alt:  (nf-cod-edit)
+	"cmd.pencil": "\uf044",
+	// pick: 󰉒 (nf-md-folder_move)
+	"cmd.folderMove": "\u{f0252}",
+	// pick: 󰉗 (nf-md-folder_plus)
+	"cmd.folderPlus": "\u{f0257}",
+	// pick: 󰉘 (nf-md-folder_remove)
+	"cmd.folderMinus": "\u{f0258}",
+	// pick: 󰣪 (nf-md-hammer)
+	"cmd.hammer": "\u{f08ea}",
+	// pick:  (nf-fa-power_off) | alt: 󰤆 (nf-md-power_off)
+	"cmd.power": "\uf011",
+	// pick:  (nf-fa-shopping_cart) | alt: 󰄋 (nf-md-cart)
+	"cmd.cart": "\uf07a",
 	// STT - fa-microphone
 	"icon.mic": "\uf130",
 	// Compaction divider - fa-camera-retro
@@ -670,7 +965,7 @@ const NERD_SYMBOLS: SymbolMap = {
 	"lang.java": "\u{E738}",
 	"lang.c": "\u{E61E}",
 	"lang.cpp": "\u{E61D}",
-	"lang.csharp": "\u{E7BC}",
+	"lang.csharp": "\u{E7B2}",
 	"lang.ruby": "\u{E791}",
 	"lang.julia": "\u{E624}",
 	"lang.php": "\u{E608}",
@@ -698,6 +993,11 @@ const NERD_SYMBOLS: SymbolMap = {
 	"lang.pdf": "\u{F0226}",
 	"lang.archive": "\u{F187}",
 	"lang.binary": "\u{F019A}",
+	// Composer attachment chips
+	// pick:  (fa-image, matches omp2) | alt: 󰋩 (md-image) 󰈟 (md-file_image)
+	"chip.image": "\uf03e",
+	// pick:  (fa-file_text, matches omp2) | alt: 󰈙 (md-file_document)  (cod-file)
+	"chip.paste": "\uf15c",
 	// Settings tab icons
 	"tab.appearance": "󰃣",
 	"tab.model": "󰚩",
@@ -762,6 +1062,12 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"tree.vertical": "|",
 	"tree.horizontal": "-",
 	"tree.hook": "`-",
+	// Progress Bar
+	"progress.filled": "=",
+	"progress.empty": "-",
+	// Context gauge boundaries
+	"context.speculation": ":",
+	"context.compaction": "|",
 	// Box Drawing - Rounded (ASCII fallback)
 	"boxRound.topLeft": "+",
 	"boxRound.topRight": "+",
@@ -810,9 +1116,12 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"icon.git": "git:",
 	"icon.branch": "@",
 	"icon.pr": "PR",
+	"icon.pin": "*",
 	"icon.tokens": "tok:",
 	"icon.context": "ctx:",
 	"icon.cost": "$",
+	"icon.subscription": "(sub)",
+	"icon.advisor": "(adv)",
 	"icon.time": "t:",
 	"icon.pi": "pi",
 	"icon.ghost": "@",
@@ -839,6 +1148,51 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"icon.extensionPrompt": "PR",
 	"icon.extensionContextFile": "CF",
 	"icon.extensionInstruction": "IN",
+	// Slash-command type indicators — unused; the icon column is disabled in ASCII mode
+	"cmd.action": "",
+	"cmd.prompt": "",
+	"cmd.extension": "",
+	"cmd.settings": "",
+	"cmd.gear": "",
+	"cmd.shield": "",
+	"cmd.wave": "",
+	"cmd.compass": "",
+	"cmd.inbox": "",
+	"cmd.swap": "",
+	"cmd.expand": "",
+	"cmd.computer": "",
+	"cmd.eye": "",
+	"cmd.todo": "",
+	"cmd.stats": "",
+	"cmd.news": "",
+	"cmd.keyboard": "",
+	"cmd.export": "",
+	"cmd.clipboard": "",
+	"cmd.share": "",
+	"cmd.broadcast": "",
+	"cmd.globe": "",
+	"cmd.copy": "",
+	"cmd.plus": "",
+	"cmd.restart": "",
+	"cmd.eraser": "",
+	"cmd.trash": "",
+	"cmd.compress": "",
+	"cmd.vibrate": "",
+	"cmd.handoff": "",
+	"cmd.history": "",
+	"cmd.question": "",
+	"cmd.rocket": "",
+	"cmd.stethoscope": "",
+	"cmd.redo": "",
+	"cmd.bug": "",
+	"cmd.memory": "",
+	"cmd.pencil": "",
+	"cmd.folderMove": "",
+	"cmd.folderPlus": "",
+	"cmd.folderMinus": "",
+	"cmd.hammer": "",
+	"cmd.power": "",
+	"cmd.cart": "",
 	// STT
 	"icon.mic": "MIC",
 	// Compaction divider
@@ -904,6 +1258,9 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"lang.pdf": "pdf",
 	"lang.archive": "zip",
 	"lang.binary": "bin",
+	// Composer attachment chips
+	"chip.image": "img",
+	"chip.paste": "txt",
 	// Settings tab icons
 	"tab.appearance": "[A]",
 	"tab.model": "[M]",

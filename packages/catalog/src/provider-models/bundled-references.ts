@@ -9,8 +9,18 @@ import type { Api, Model, ModelSpec } from "../types";
  * manager, which rebuilds via `buildModel`.
  */
 export function toModelSpec<TApi extends Api>(model: Model<TApi>): ModelSpec<TApi> {
-	const { compat: _compat, compatConfig, ...rest } = model;
-	return { ...rest, compat: compatConfig } as ModelSpec<TApi>;
+	const {
+		compat: _compat,
+		compatConfig,
+		supportsComputerUse: _derivedComputerUse,
+		supportsComputerUseConfig,
+		...rest
+	} = model;
+	return {
+		...rest,
+		...(supportsComputerUseConfig !== undefined ? { supportsComputerUse: supportsComputerUseConfig } : {}),
+		compat: compatConfig,
+	} as ModelSpec<TApi>;
 }
 
 export function createBundledReferenceMap<TApi extends Api>(

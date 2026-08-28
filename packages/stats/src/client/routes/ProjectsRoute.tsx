@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { getFolderStats } from "../api";
-import { formatCost, formatDurationMs, formatInteger, formatPercent } from "../data/formatters";
+import { formatDurationMs, formatEstimatedCost, formatInteger, formatPercent } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import { buildFolderRows, type FolderRowView } from "../data/view-models";
 import type { TimeRange } from "../types";
@@ -60,11 +60,11 @@ export function ProjectsRoute({ active, range, refreshTrigger }: ProjectsRoutePr
 			},
 			{
 				key: "totalCost",
-				header: "Cost",
+				header: "API-equivalent estimate",
 				numeric: true,
 				render: (item: FolderRowView) => (
 					<div className="stats-text-right">
-						<div className="font-mono">{formatCost(item.totalCost)}</div>
+						<div className="font-mono">{formatEstimatedCost(item.totalCost, item.unpricedRequests)}</div>
 						<div className="stats-progress-bar-track mt-1 ml-auto w-24 h-1">
 							<div
 								className="stats-progress-bar-fill"
@@ -133,8 +133,10 @@ export function ProjectsRoute({ active, range, refreshTrigger }: ProjectsRoutePr
 					<div className="stats-mobile-card-value font-mono">{formatInteger(item.totalRequests)}</div>
 				</div>
 				<div>
-					<div className="stats-mobile-card-label">Cost</div>
-					<div className="stats-mobile-card-value font-mono">{formatCost(item.totalCost)}</div>
+					<div className="stats-mobile-card-label">API-equivalent estimate</div>
+					<div className="stats-mobile-card-value font-mono">
+						{formatEstimatedCost(item.totalCost, item.unpricedRequests)}
+					</div>
 				</div>
 				<div>
 					<div className="stats-mobile-card-label">Cache Rate</div>

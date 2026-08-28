@@ -6,6 +6,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("AgentSession session stats", () => {
 	let authStorage: AuthStorage;
@@ -85,6 +86,91 @@ describe("AgentSession session stats", () => {
 			percent: (120_000 / model.contextWindow) * 100,
 		});
 		expect(stats.contextUsage).toEqual(directUsage);
+	});
+
+	it("treats persisted assistant messages without usage as zero-cost history", async () => {
+		const model = modelRegistry.getAll().find(candidate => candidate.contextWindow && candidate.contextWindow > 0);
+		if (!model) {
+			throw new Error("Expected bundled model with a context window");
+		}
+
+		using tempDir = TempDir.createSync("@omp-session-stats-");
+		const sessionFile = `${tempDir.path()}/repro.jsonl`;
+		await Bun.write(
+			sessionFile,
+			[
+				{
+					type: "session",
+					version: 3,
+					id: "00000000-0000-4000-8000-000000000001",
+					timestamp: "2026-01-01T00:00:00.000Z",
+					cwd: tempDir.path(),
+				},
+				{
+					type: "message",
+					id: "u1",
+					parentId: null,
+					timestamp: "2026-01-01T00:00:01.000Z",
+					message: { role: "user", content: "Initial question", timestamp: 1 },
+				},
+				{
+					type: "message",
+					id: "a1",
+					parentId: "u1",
+					timestamp: "2026-01-01T00:00:02.000Z",
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "Prior answer" }],
+						timestamp: 2,
+					},
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n"),
+		);
+		const sessionManager = await SessionManager.open(sessionFile, undefined, undefined, {
+			initialCwd: tempDir.path(),
+			suppressBreadcrumb: true,
+		});
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: sessionManager.buildSessionContext().messages,
+			},
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+		});
+
+		const stats = session.getSessionStats();
+
+		expect(stats.assistantMessages).toBe(1);
+		expect(stats.tokens).toEqual({
+			input: 0,
+			output: 0,
+			reasoning: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			total: 0,
+		});
+		expect(stats.cost).toBe(0);
+
+		const lifecycleEvents: string[] = [];
+		const agentEnd = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "turn_start" || event.type === "agent_end") lifecycleEvents.push(event.type);
+			if (event.type === "agent_end") agentEnd.resolve();
+		});
+		agent.emitExternalEvent({ type: "turn_start" });
+		agent.emitExternalEvent({ type: "agent_end", messages: [] });
+		await agentEnd.promise;
+
+		expect(lifecycleEvents).toEqual(["turn_start", "agent_end"]);
 	});
 
 	it("reconstructs persisted and active tool-loop context when provider prompt usage is unavailable", async () => {

@@ -33,7 +33,7 @@ export interface SessionStartEvent {
 export interface SessionBeforeSwitchEvent {
 	type: "session_before_switch";
 	/** Reason for the switch */
-	reason: "new" | "resume" | "fork" | "handoff";
+	reason: "new" | "resume" | "fork";
 	/** Session file we're switching to (only for "resume") */
 	targetSessionFile?: string;
 }
@@ -42,7 +42,7 @@ export interface SessionBeforeSwitchEvent {
 export interface SessionSwitchEvent {
 	type: "session_switch";
 	/** Reason for the switch */
-	reason: "new" | "resume" | "fork" | "handoff";
+	reason: "new" | "resume" | "fork";
 	/** Session file we came from */
 	previousSessionFile: string | undefined;
 }
@@ -224,13 +224,13 @@ export interface TurnEndEvent {
 export interface AutoCompactionStartEvent {
 	type: "auto_compaction_start";
 	reason: "threshold" | "overflow" | "idle" | "incomplete";
-	action: "context-full" | "handoff" | "shake" | "snapcompact";
+	action: "context-full" | "remote" | "handoff" | "shake" | "snapcompact";
 }
 
 /** Fired when auto-compaction ends */
 export interface AutoCompactionEndEvent {
 	type: "auto_compaction_end";
-	action: "context-full" | "handoff" | "shake" | "snapcompact";
+	action: "context-full" | "remote" | "handoff" | "shake" | "snapcompact";
 	result: CompactionResult | undefined;
 	aborted: boolean;
 	willRetry: boolean;

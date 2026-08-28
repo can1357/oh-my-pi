@@ -133,6 +133,24 @@ disabledExtensions:
   - extension-module:foo
 ```
 
+### Disable specific items of other capabilities
+
+`disabledExtensions` is not limited to extension modules. Every capability that
+defines `toExtensionId` contributes ids to the same list, and loading filters
+them out before the item reaches the session.
+
+Context files use `context-file:<level>:<basename>`, where `<level>` is `user`
+or `project`:
+
+```yaml
+disabledExtensions:
+  - context-file:user:CLAUDE.md
+```
+
+The id carries no directory and no depth, so a `project` entry disables files of
+that name at every depth the discovery walk reaches. See
+[Context files](./context-files.md#disabling-a-single-context-file).
+
 ---
 
 ## Path and entry resolution

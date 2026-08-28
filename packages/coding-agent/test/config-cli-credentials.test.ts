@@ -37,10 +37,10 @@ describe("credential settings", () => {
 		}
 	});
 
-	it("only marks string settings as credentials", () => {
+	it("only marks string or record settings as credentials", () => {
 		for (const path of paths) {
 			if (!isCredential(path)) continue;
-			expect(SETTINGS_SCHEMA[path].type).toBe("string");
+			expect(["string", "record"]).toContain(SETTINGS_SCHEMA[path].type);
 		}
 	});
 });

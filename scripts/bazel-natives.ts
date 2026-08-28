@@ -18,17 +18,18 @@
  * Extra args after `--` are passed to bazel verbatim (cache configs, endpoints,
  * headers — see .bazelrc for the cache-rw/cache-ro policy configs).
  *
+ * The `host` pseudo-target builds through the local Cargo/N-API path
+ * (packages/natives/scripts/build-bindings.ts) by default — no bazel needed
+ * for plain host iteration. Bazel is opt-in for host via
+ * `OMP_NATIVE_BUILD_BACKEND=bazel` or by passing extra bazel args after `--`;
+ * explicit //:natives-* targets and aggregates always build through bazel
+ * (the CI path, which runs bazelisk).
+ *
  * Windows hosts: the msvc cc toolchain in bazel/toolchains/msvc only supports
  * linux/mac exec hosts (its clang-cl+xwin wrappers replace the MSVC a Windows
- * box already has), so a win32 host cannot run any bazel addon build. The
- * `host` pseudo-target instead delegates to the local napi build
- * (packages/natives/scripts/build-bindings.ts) against the installed VS Build
- * Tools; every other target on a win32 host fails fast with guidance.
- *
- * Set `OMP_NATIVE_BUILD_BACKEND=cargo` to route the host target through the
- * same local N-API build on systems where Bazel's prebuilt host tools cannot run.
- * The host target also selects that backend automatically when neither bazelisk
- * nor bazel is available on PATH.
+ * box already has), so a win32 host cannot run any bazel addon build. `host`
+ * always uses the local napi build there (against installed VS Build Tools);
+ * every other target on a win32 host fails fast with guidance.
  *
  * Note: musl addons intentionally reuse the plain linux-<arch> filenames, so a
  * `linux-all` copy overwrites the gnu addon with the musl one (and vice versa);
@@ -136,8 +137,6 @@ export interface CliOptions {
 	dest: string | null;
 	source: string | null;
 	bazelArgs: string[];
-	/** Force the local Cargo/N-API host build path, skipping bazel. Same semantics as `OMP_NATIVE_BUILD_BACKEND=cargo`. */
-	cargo: boolean;
 }
 
 /** Parse target names and the mutually exclusive build or artifact source options. */
@@ -145,7 +144,6 @@ export function parseCliArgs(argv: string[]): CliOptions {
 	const targets: string[] = [];
 	let dest: string | null = null;
 	let source: string | null = null;
-	let cargo = false;
 	const bazelArgs: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
@@ -163,10 +161,6 @@ export function parseCliArgs(argv: string[]): CliOptions {
 			}
 			continue;
 		}
-		if (arg === "--cargo") {
-			cargo = true;
-			continue;
-		}
 		if (arg.startsWith("-")) {
 			throw new Error(`Unknown flag ${arg} (extra bazel args go after \`--\`)`);
 		}
@@ -174,19 +168,13 @@ export function parseCliArgs(argv: string[]): CliOptions {
 	}
 	if (targets.length === 0) {
 		throw new Error(
-			"Usage: bun scripts/bazel-natives.ts <target>... [--cargo] [--dest <dir>] [--source <dir>] [-- <extra bazel args>]",
+			"Usage: bun scripts/bazel-natives.ts <target>... [--dest <dir>] [--source <dir>] [-- <extra bazel args>]",
 		);
 	}
 	if (source && bazelArgs.length > 0) {
 		throw new Error("--source cannot be combined with extra bazel arguments");
 	}
-	if (cargo && source) {
-		throw new Error("--cargo cannot be combined with --source");
-	}
-	if (cargo && bazelArgs.length > 0) {
-		throw new Error("--cargo cannot be combined with extra bazel arguments");
-	}
-	return { targets, dest, source, bazelArgs, cargo };
+	return { targets, dest, source, bazelArgs };
 }
 
 function resolveBazelBinary(): string | null {
@@ -259,9 +247,22 @@ async function main(): Promise<void> {
 	const host: HostInfo = { platform: process.platform, arch: process.arch, avx2: detectHostAvx2Support() };
 	const destDir = options.dest ? path.resolve(options.dest) : path.join(repoRoot, "packages/natives/native");
 
-	const cargoBackend = options.cargo || Bun.env.OMP_NATIVE_BUILD_BACKEND === "cargo";
-	if ((host.platform === "win32" || cargoBackend) && !options.source) {
-		if (options.targets.length !== 1 || options.targets[0] !== "host") {
+	const backend = Bun.env.OMP_NATIVE_BUILD_BACKEND?.trim();
+	if (backend && backend !== "cargo" && backend !== "bazel") {
+		throw new Error(`Unknown OMP_NATIVE_BUILD_BACKEND "${backend}" (expected "cargo" or "bazel")`);
+	}
+	const hostOnly = options.targets.length === 1 && options.targets[0] === "host";
+	// Backend selection: the host build defaults to the local Cargo/N-API
+	// path; bazel is opt-in for host via OMP_NATIVE_BUILD_BACKEND=bazel or
+	// extra bazel args after `--`. Explicit //:natives-* targets always go
+	// through bazel. win32 hosts can only build `host`, locally (see the msvc
+	// toolchain note in the header).
+	const cargoBackend =
+		backend === "cargo" ||
+		host.platform === "win32" ||
+		(backend !== "bazel" && hostOnly && options.bazelArgs.length === 0);
+	if (cargoBackend && !options.source) {
+		if (!hostOnly) {
 			if (host.platform === "win32") {
 				throw new Error(
 					`Cannot bazel-build [${options.targets.join(", ")}] on a Windows host: the msvc cross ` +
@@ -269,7 +270,7 @@ async function main(): Promise<void> {
 						"(local napi build via VS Build Tools), or run this script from WSL/linux for cross targets.",
 				);
 			}
-			throw new Error("--cargo / OMP_NATIVE_BUILD_BACKEND=cargo supports only the host target");
+			throw new Error("OMP_NATIVE_BUILD_BACKEND=cargo supports only the host target");
 		}
 		await buildLocalHostAddon(host, destDir);
 		return;

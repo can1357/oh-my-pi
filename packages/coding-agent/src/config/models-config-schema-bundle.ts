@@ -50,6 +50,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"supportsStrictMode?": "boolean",
 		"toolStrictMode?": '"all_strict" | "none"',
 		"streamIdleTimeoutMs?": "number >= 0",
+		"streamMarkupHealingPattern?": '"kimi" | "dsml" | "qwen" | "thinking"',
 		"supportsLongPromptCacheRetention?": "boolean",
 		"supportsReasoningParams?": "boolean",
 		"alwaysSendMaxTokens?": "boolean",
@@ -104,6 +105,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"defaultLevel?": EffortSchema,
 		"effortMap?": ReasoningEffortMapSchema,
 		"supportsDisplay?": "boolean",
+		"requiresEffort?": "boolean",
 		// Legacy range vocabulary (pre-efforts configs).
 		"minLevel?": EffortSchema,
 		"maxLevel?": EffortSchema,
@@ -129,8 +131,13 @@ export const getModelsConfigSchemaBundle = once(() => {
 				...(value.defaultLevel !== undefined && { defaultLevel: value.defaultLevel }),
 				...(value.effortMap !== undefined && { effortMap: value.effortMap }),
 				...(value.supportsDisplay !== undefined && { supportsDisplay: value.supportsDisplay }),
+				...(value.requiresEffort !== undefined && { requiresEffort: value.requiresEffort }),
 			};
 		});
+
+	const ModelTokenizerSchema = type(
+		'"claude-v3" | "claude-v47" | "claude-v5" | "claude-v5-sonnet" | "qwen3" | "deepseek-v3" | "kimi-k2" | "glm5"',
+	);
 
 	const RemoteCompactionSchema = type({
 		"enabled?": "boolean",
@@ -169,6 +176,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"thinking?": ModelThinkingSchema,
 		"input?": '("text" | "image")[]',
 		"imageInputDecoder?": '"stb"',
+		"tokenizer?": ModelTokenizerSchema,
 		"supportsTools?": "boolean",
 		"cost?": {
 			input: "number",
@@ -180,6 +188,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"contextWindow?": "number",
 		"maxTokens?": "number",
 		"omitMaxOutputTokens?": "boolean",
+		"preferWebsockets?": "boolean",
 		"headers?": { "[string]": "string" },
 		"compat?": ApiCompatSchema,
 		"contextPromotionTarget?": "string",
@@ -219,6 +228,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"thinking?": ModelThinkingSchema,
 		"input?": '("text" | "image")[]',
 		"imageInputDecoder?": '"stb"',
+		"tokenizer?": ModelTokenizerSchema,
 		"supportsTools?": "boolean",
 		"cost?": {
 			"input?": "number",
@@ -230,6 +240,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"contextWindow?": "number",
 		"maxTokens?": "number",
 		"omitMaxOutputTokens?": "boolean",
+		"preferWebsockets?": "boolean",
 		"headers?": { "[string]": "string" },
 		"compat?": ApiCompatSchema,
 		"contextPromotionTarget?": "string",
@@ -284,6 +295,16 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"models?": ModelDefinitionSchema.array(),
 		"modelOverrides?": { "[string]": ModelOverrideSchema },
 		"disableStrictTools?": "boolean",
+		/**
+		 * Amazon Bedrock Guardrail id or ARN attached to every Converse request under
+		 * this provider. Required by accounts that gate `bedrock:InvokeModel*` on the
+		 * `bedrock:GuardrailIdentifier` condition key.
+		 */
+		"guardrailIdentifier?": "string",
+		/** Bedrock guardrail version (defaults to `"DRAFT"` when a guardrail is set). */
+		"guardrailVersion?": "string",
+		/** Bedrock guardrail trace verbosity. */
+		"guardrailTrace?": '"enabled" | "disabled" | "enabled_full"',
 		/**
 		 * Streaming transport override. When set to `"pi-native"`, omp dispatches
 		 * every model under this provider via the auth-gateway's

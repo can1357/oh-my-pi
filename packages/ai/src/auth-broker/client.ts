@@ -30,21 +30,40 @@ import type {
 	UsageStaleResponse,
 } from "./types";
 import { AUTH_BROKER_CAPABILITIES_HEADER, AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES } from "./types";
-import { getAuthBrokerWireSchemas } from "./wire-schema-resource";
+import {
+	clientUsageReportResponseSchema,
+	clientUsageSummaryResponseSchema,
+	credentialBlockResponseSchema,
+	credentialBlocksDeleteResponseSchema,
+	credentialDisableResponseSchema,
+	credentialRefreshResponseSchema,
+	credentialUploadResponseSchema,
+	disabledCredentialsResponseSchema,
+	healthzResponseSchema,
+	snapshotResponseSchema,
+	snapshotStreamEventSchema,
+	usageHistoryResponseSchema,
+	usageResponseSchema,
+	usageStaleResponseSchema,
+} from "./wire-schemas";
 
-type AuthBrokerResponseSchemaName =
-	| "clientUsageReportResponseSchema"
-	| "clientUsageSummaryResponseSchema"
-	| "credentialBlockResponseSchema"
-	| "credentialBlocksDeleteResponseSchema"
-	| "credentialDisableResponseSchema"
-	| "credentialRefreshResponseSchema"
-	| "credentialUploadResponseSchema"
-	| "disabledCredentialsResponseSchema"
-	| "healthzResponseSchema"
-	| "usageHistoryResponseSchema"
-	| "usageResponseSchema"
-	| "usageStaleResponseSchema";
+/** Response schema per endpoint, keyed by the name `#request` callers pass. */
+const RESPONSE_SCHEMAS = {
+	clientUsageReportResponseSchema,
+	clientUsageSummaryResponseSchema,
+	credentialBlockResponseSchema,
+	credentialBlocksDeleteResponseSchema,
+	credentialDisableResponseSchema,
+	credentialRefreshResponseSchema,
+	credentialUploadResponseSchema,
+	disabledCredentialsResponseSchema,
+	healthzResponseSchema,
+	usageHistoryResponseSchema,
+	usageResponseSchema,
+	usageStaleResponseSchema,
+} as const;
+
+type AuthBrokerResponseSchemaName = keyof typeof RESPONSE_SCHEMAS;
 
 export interface AuthBrokerClientOptions {
 	/** Base URL (e.g. `https://broker.tailnet:8765`). Trailing slashes are trimmed. */
@@ -155,7 +174,7 @@ export class AuthBrokerClient {
 		}
 		const text = await response.text();
 		const raw = this.#parseJson(text, response.status);
-		const validated = getAuthBrokerWireSchemas().snapshotResponseSchema(raw);
+		const validated = snapshotResponseSchema(raw);
 		if (validated instanceof type.errors) {
 			throw new AuthBrokerError("Auth broker response failed schema validation", {
 				status: response.status,
@@ -224,7 +243,7 @@ export class AuthBrokerClient {
 					cause: err,
 				});
 			}
-			const validated = getAuthBrokerWireSchemas().snapshotStreamEventSchema(parsed);
+			const validated = snapshotStreamEventSchema(parsed);
 			if (validated instanceof type.errors) {
 				throw new AuthBrokerError("Auth broker stream event failed schema validation", {
 					body: validated.summary,
@@ -391,7 +410,7 @@ export class AuthBrokerClient {
 		const response = await this.#fetchRaw(method, path, opts);
 		const text = await response.text();
 		const raw = this.#parseJson(text, response.status);
-		const validated = getAuthBrokerWireSchemas()[opts.schema](raw);
+		const validated = RESPONSE_SCHEMAS[opts.schema](raw);
 		if (validated instanceof type.errors) {
 			throw new AuthBrokerError("Auth broker response failed schema validation", {
 				status: response.status,

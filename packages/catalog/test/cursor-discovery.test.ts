@@ -4,11 +4,11 @@ import * as http2 from "node:http2";
 import type * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { create, toBinary } from "@bufbuild/protobuf";
 // Import from source, not the package specifier: the workspace `node_modules`
 // copy resolves to the primary checkout, not this worktree.
 import { fetchCursorUsableModels } from "../src/discovery/cursor";
-import { GetUsableModelsResponseSchema, ModelDetailsSchema } from "../src/discovery/cursor-gen/agent_pb";
+import { GetUsableModelsResponseSchema, ModelDetailsSchema } from "../src/discovery/cursor-proto";
+import { create, toBinary } from "../src/discovery/protobuf";
 import { resolveProviderModels } from "../src/model-manager";
 import { cursorModelManagerOptions } from "../src/provider-models/special";
 import type { ModelSpec } from "../src/types";

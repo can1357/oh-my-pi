@@ -1,17 +1,32 @@
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
-import { type OpenAICodexAccount, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
+import type { ModelResolutionSource } from "@oh-my-pi/pi-catalog/model-manager";
+import {
+	MODELS_DEV_CATALOG_PROVIDER_IDS,
+	type OpenAICodexAccount,
+	PROVIDER_DESCRIPTORS,
+} from "@oh-my-pi/pi-catalog/provider-models";
 import type { AuthStorage, OAuthCredential } from "../session/auth-storage";
 
-const SPECIAL_MODEL_MANAGER_PROVIDER_IDS: readonly string[] = [
+/**
+ * Built-in providers whose discovery requires provider-specific credentials
+ * or account expansion and therefore cannot use the standard descriptor path.
+ */
+export const SPECIAL_MODEL_MANAGER_PROVIDER_IDS: readonly string[] = [
 	"google-antigravity",
 	"google-gemini-cli",
 	"openai-codex",
 ];
 
-export const STARTUP_MODEL_CACHE_PROVIDER_IDS: readonly string[] = [
+const STARTUP_MODEL_CACHE_PROVIDER_IDS_RECORD: Record<string, true> = Object.create(null);
+for (const providerId of [
 	...PROVIDER_DESCRIPTORS.map(descriptor => descriptor.providerId),
 	...SPECIAL_MODEL_MANAGER_PROVIDER_IDS,
-];
+	...MODELS_DEV_CATALOG_PROVIDER_IDS,
+]) {
+	STARTUP_MODEL_CACHE_PROVIDER_IDS_RECORD[providerId] = true;
+}
+
+export const STARTUP_MODEL_CACHE_PROVIDER_IDS: readonly string[] = Object.keys(STARTUP_MODEL_CACHE_PROVIDER_IDS_RECORD);
 
 // Sentinels for local-only OAuth tokens — declared inline to avoid loading
 // provider modules at startup. Must match packages/ai/src/registry/llama-cpp.ts,
@@ -41,15 +56,15 @@ export function isDiscoveryBearerApiKey(apiKey: string | undefined | null): apiK
 }
 
 /**
- * Wraps an extension-provided fetchDynamicModels call with a hard timeout.
- * Uses a cancellable manual timer (not AbortSignal.timeout) so that a fast
- * successful path does not leave an armed timeout signal for concurrent GC.
- * The inner fetcher does not receive a signal (extension contract has none).
+ * Wraps a model-discovery operation with a hard timeout. Uses a cancellable
+ * manual timer (not AbortSignal.timeout) so that a fast successful path does
+ * not leave an armed timeout signal for concurrent GC. The inner operation
+ * does not receive a signal because not every discovery contract accepts one.
  */
-export async function withRuntimeDynamicModelsTimeout<T>(timeoutMs: number, run: () => Promise<T>): Promise<T> {
+export async function withModelDiscoveryTimeout<T>(timeoutMs: number, run: () => Promise<T>): Promise<T> {
 	const { promise: timeoutPromise, reject: timeoutReject } = Promise.withResolvers<never>();
 	const timer = setTimeout(() => {
-		timeoutReject(new Error(`fetchDynamicModels timed out after ${timeoutMs}ms`));
+		timeoutReject(new Error(`model discovery timed out after ${timeoutMs}ms`));
 	}, timeoutMs);
 	try {
 		return await Promise.race([run(), timeoutPromise]);
@@ -71,6 +86,7 @@ export interface ProviderDiscoveryState {
 	optional: boolean;
 	stale: boolean;
 	fetchedAt?: number;
+	source?: ModelResolutionSource;
 	models: string[];
 	error?: string;
 }
@@ -89,6 +105,27 @@ export function extractGoogleOAuthToken(value: string | undefined): string | und
 		// OAuth values for Google providers are expected to be JSON, but custom setups may already provide raw token.
 	}
 	return value;
+}
+
+/**
+ * Pull the GCP project id out of a Google structured discovery key
+ * (`{ token, projectId, ... }` or `{ token, project_id, ... }`). Runtime/config API-key overrides and
+ * refreshed OAuth credentials carry the project inline; raw bare tokens do
+ * not. Returns `undefined` when the value is not structured or omits the id.
+ */
+export function extractGoogleOAuthProjectId(value: string | undefined): string | undefined {
+	if (!isAuthenticated(value)) return undefined;
+	try {
+		const parsed = JSON.parse(value) as { projectId?: unknown; project_id?: unknown };
+		const rawProjectId = typeof parsed.projectId === "string" ? parsed.projectId : parsed.project_id;
+		if (typeof rawProjectId === "string") {
+			const projectId = rawProjectId.trim();
+			return projectId.length > 0 ? projectId : undefined;
+		}
+	} catch {
+		// Raw (non-JSON) tokens carry no project id.
+	}
+	return undefined;
 }
 
 export function getOAuthCredentialsForProvider(authStorage: AuthStorage, provider: string): OAuthCredential[] {

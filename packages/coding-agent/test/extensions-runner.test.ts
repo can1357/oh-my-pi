@@ -26,6 +26,7 @@ import type {
 	ExtensionUIContext,
 	InputEvent,
 	InputEventResult,
+	ProviderModelConfig,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -491,6 +492,46 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("composer shapes", () => {
+		it("collects extension-defined renderer contracts and selector copy", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.registerComposerShape({
+						label: "Extension Dock",
+						description: "Custom extension composer",
+						style: {
+							id: "extension-dock",
+							sideBorders: false,
+							verticalChrome: 0,
+							statusAttachment: "none",
+							bottomBar: "full",
+							bottomBarGap: false,
+							defaultPaddingX: () => 0,
+							sideChromeWidth: () => 0,
+							renderTop: () => undefined,
+							renderRow: context => [context.gutter + context.text + context.pad],
+							renderBottom: () => undefined,
+						},
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "composer-shape.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			const [definition] = runner.getComposerShapes();
+			expect(definition.label).toBe("Extension Dock");
+			expect(definition.description).toBe("Custom extension composer");
+			expect(definition.style.id).toBe("extension-dock");
+		});
+	});
 	describe("flags", () => {
 		it("collects flags from extensions", async () => {
 			const extCode = `
@@ -2014,6 +2055,12 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("provider model API", () => {
+		it("accepts a per-model WebSocket preference", () => {
+			expectTypeOf<ProviderModelConfig["preferWebsockets"]>().toEqualTypeOf<boolean | undefined>();
+		});
+	});
+
 	describe("service tier API", () => {
 		it("restricts tiers to values supported by each provider family", () => {
 			expectTypeOf<"scale">().toExtend<ExtensionServiceTier<"openai">>();
@@ -2875,7 +2922,7 @@ describe("ExtensionRunner", () => {
 			// resolves against the revised args and blocks — the tool never runs.
 			await expect(
 				wrapped.execute("tool-call-id", { command: "echo original" }, undefined, undefined, yoloContext),
-			).rejects.toThrow(/blocked by user policy/);
+			).rejects.toThrow('Tool "bash" is blocked by tool policy.\nReason: dangerous');
 			expect(fs.existsSync(recordPath)).toBe(false); // tool never executed
 		});
 
@@ -3816,6 +3863,7 @@ describe("ExtensionRunner", () => {
 				fileWriteFallbackHandlers: [],
 				fileDeleteFallbackHandlers: [],
 				messageRenderers: new Map(),
+				composerShapes: new Map(),
 				commands: new Map(),
 				flags: new Map(),
 				shortcuts: new Map(),

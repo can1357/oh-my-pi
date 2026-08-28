@@ -1,7 +1,8 @@
 // Adapted from markit-ai (MIT). See ../NOTICE.
+
+import { archiveEntryText, readArchiveEntries } from "@oh-my-pi/pi-utils/ar";
 import { XMLParser } from "@oh-my-pi/pi-utils/xml";
 import { createTurndown, normalizeTablesHtml } from "../../utils/turndown";
-import { unzip, unzipText } from "../../utils/zip";
 import type { ConversionResult, Converter, StreamInfo } from "../types";
 
 const EXTENSIONS = [".epub"];
@@ -52,7 +53,7 @@ export class EpubConverter implements Converter {
 	}
 
 	async convert(input: Buffer, _streamInfo: StreamInfo): Promise<ConversionResult> {
-		const entries = unzip(input);
+		const entries = await readArchiveEntries({ bytes: input, format: "zip" });
 		const parser = new XMLParser({
 			ignoreAttributes: false,
 			attributeNamePrefix: "@_",
@@ -60,14 +61,14 @@ export class EpubConverter implements Converter {
 			processEntities: { maxTotalExpansions: 1_000_000 },
 		});
 		// Find content.opf path from container.xml
-		const containerXml = unzipText(entries, "META-INF/container.xml");
+		const containerXml = archiveEntryText(entries, "META-INF/container.xml");
 		if (!containerXml) throw new Error("Invalid EPUB: missing container.xml");
 		const container = parser.parse(containerXml) as ContainerDoc;
 		const rootfile = container.container?.rootfiles?.rootfile;
 		const opfPath = Array.isArray(rootfile) ? rootfile[0]["@_full-path"] : rootfile?.["@_full-path"];
 		if (!opfPath) throw new Error("Invalid EPUB: missing rootfile path");
 		// Parse content.opf
-		const opfXml = unzipText(entries, opfPath);
+		const opfXml = archiveEntryText(entries, opfPath);
 		if (!opfXml) throw new Error("Invalid EPUB: missing content.opf");
 		const opf = parser.parse(opfXml) as OpfDoc;
 		// Extract metadata
@@ -107,7 +108,7 @@ export class EpubConverter implements Converter {
 			const href = manifest.get(idref);
 			if (!href) continue;
 			const filePath = basePath ? `${basePath}/${href}` : href;
-			const html = unzipText(entries, filePath);
+			const html = archiveEntryText(entries, filePath);
 			if (!html) continue;
 			// Strip script/style, convert to markdown
 			const cleaned = html.replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "");

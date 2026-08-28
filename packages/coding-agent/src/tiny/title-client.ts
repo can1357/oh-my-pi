@@ -4,6 +4,7 @@ import {
 	createUnavailableWorker,
 	createWorkerHandle,
 	createWorkerSubprocess,
+	inferenceWorkerEnv,
 	logWorkerMessage,
 	type RefCountedWorkerHandle,
 	resolveWorkerSpawnCmd,
@@ -11,7 +12,6 @@ import {
 	type SpawnedSubprocess,
 	smokeTestWorker,
 	spawnWorkerOrUnavailable,
-	workerEnvFromParent,
 } from "../subprocess/worker-client";
 import { safeSend } from "../utils/ipc";
 import { tinyModelDeviceSettingToEnv } from "./device";
@@ -116,7 +116,7 @@ export function tinyWorkerEnvOverlay(
  * subprocess).
  */
 export function tinyWorkerEnv(): Record<string, string> {
-	return workerEnvFromParent(
+	return inferenceWorkerEnv(
 		tinyWorkerEnvOverlay(
 			$env,
 			readTinyModelSetting("providers.tinyModelDevice"),

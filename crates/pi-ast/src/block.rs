@@ -274,6 +274,72 @@ pub fn enclosing_block_boundaries(options: EnclosingBoundaryOptions) -> Result<O
 	Ok(Some(boundaries.into_iter().collect()))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NodeSpan {
+	/// 1-indexed inclusive first line of the node.
+	pub start_line: u32,
+	/// 1-indexed inclusive last content line of the node.
+	pub end_line:   u32,
+	/// Tree-sitter grammar node kind (e.g. `attribute_item`, `function_item`).
+	pub kind:       String,
+}
+
+/// Named-node chain containing `options.line`, innermost-first, excluding the
+/// whole-file root.
+///
+/// The chain descends through the line's first content character, so
+/// single-line nodes beginning on the line (attributes, decorators, one-line
+/// statements) come first, followed by every enclosing construct up to — but
+/// not including — the file root. Callers use it to classify a line by grammar
+/// node kind and to enumerate enclosing construct end lines.
+///
+/// ERROR and MISSING recovery nodes are skipped rather than failing the whole
+/// chain: an unrelated syntax error elsewhere in the file leaves healthy
+/// ancestors' spans meaningful.
+///
+/// Returns `None` when the language is unrecognized, the line is out of
+/// range / blank, or the source fails to parse entirely.
+pub fn node_chain_at(options: BlockRangeOptions) -> Result<Option<Vec<NodeSpan>>> {
+	let BlockRangeOptions { code, lang, path, line } = options;
+	if line == 0 || code.is_empty() {
+		return Ok(None);
+	}
+	let Some(language) = resolve_language(lang.as_deref(), path.as_deref()) else {
+		return Ok(None);
+	};
+	let row = (line - 1) as usize;
+	let Some(col) = first_content_column(&code, row) else {
+		return Ok(None);
+	};
+	let Some(tree) = parse_cached(&code, language)? else {
+		return Ok(None);
+	};
+	let root = tree.root_node();
+	// One-column-wide range for the same zero-width-node reason as
+	// `block_range_at` above.
+	let point = Point::new(row, col);
+	let point_end = Point::new(row, col + 1);
+	let Some(leaf) = root.named_descendant_for_point_range(point, point_end) else {
+		return Ok(None);
+	};
+	let mut chain = Vec::new();
+	let mut node = Some(leaf);
+	while let Some(current) = node {
+		if current.id() == root.id() {
+			break;
+		}
+		if current.is_named() && !current.is_error() && !current.is_missing() {
+			chain.push(NodeSpan {
+				start_line: node_start_line(current),
+				end_line:   node_content_end_line(current),
+				kind:       current.kind().to_string(),
+			});
+		}
+		node = current.parent();
+	}
+	Ok(Some(chain))
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -286,6 +352,86 @@ mod tests {
 			line,
 		})
 		.expect("block resolution succeeds")
+	}
+
+	fn chain(code: &str, path: &str, line: u32) -> Vec<NodeSpan> {
+		node_chain_at(BlockRangeOptions {
+			code: code.to_string(),
+			lang: None,
+			path: Some(path.to_string()),
+			line,
+		})
+		.expect("chain resolution succeeds")
+		.expect("language recognized and line non-blank")
+	}
+
+	const RUST_ANNOTATED: &str = "mod m {\n   impl S {\n      #[napi]\n      fn f(&self) -> u32 \
+	                              {\n         1\n      }\n   }\n}\n";
+
+	/// A consumer classifying an attribute row must find a single-line
+	/// `attribute_item` in the chain at that line.
+	#[test]
+	fn chain_names_rust_attribute_row() {
+		let spans = chain(RUST_ANNOTATED, "x.rs", 3);
+		assert!(
+			spans
+				.iter()
+				.any(|s| s.kind == "attribute_item" && s.start_line == 3 && s.end_line == 3),
+			"{spans:?}"
+		);
+	}
+
+	/// A consumer relocating past enclosing constructs needs the chain at a
+	/// construct's opening line to carry every enclosing end line,
+	/// innermost-first. Wrapper nodes (`block`, `declaration_list`) share end
+	/// lines with their construct; consumers dedupe.
+	#[test]
+	fn chain_orders_enclosing_ends_innermost_first() {
+		let spans = chain(RUST_ANNOTATED, "x.rs", 4);
+		let mut ends: Vec<u32> = spans
+			.iter()
+			.filter(|s| s.end_line > 4)
+			.map(|s| s.end_line)
+			.collect();
+		ends.dedup();
+		// fn f ends on 6, impl on 7, mod on 8.
+		assert_eq!(ends, vec![6, 7, 8]);
+	}
+
+	/// TypeScript decorators are children of the declaration they precede; the
+	/// chain at the decorator line must still surface the single-line
+	/// `decorator` node.
+	#[test]
+	fn chain_names_ts_decorator_row() {
+		let code = "/** d */\n@Injectable()\nclass Service {}\n";
+		let spans = chain(code, "x.ts", 2);
+		assert!(
+			spans
+				.iter()
+				.any(|s| s.kind == "decorator" && s.start_line == 2 && s.end_line == 2),
+			"{spans:?}"
+		);
+	}
+
+	/// Blank lines carry no chain; unknown languages resolve to `None`.
+	#[test]
+	fn chain_declines_blank_lines_and_unknown_languages() {
+		let blank = node_chain_at(BlockRangeOptions {
+			code: "a\n\nb\n".to_string(),
+			lang: None,
+			path: Some("x.ts".to_string()),
+			line: 2,
+		})
+		.unwrap();
+		assert_eq!(blank, None);
+		let unknown = node_chain_at(BlockRangeOptions {
+			code: "a\n".to_string(),
+			lang: None,
+			path: Some("x.unknownext".to_string()),
+			line: 1,
+		})
+		.unwrap();
+		assert_eq!(unknown, None);
 	}
 
 	const TS_EXAMPLE: &str = "function x() {\n  if (y) {\n  }\n}\n";
@@ -910,7 +1056,8 @@ mod tests {
 	}
 
 	#[test]
-	#[ignore = "full repository sweep; run with `cargo test --release -p pi-ast -- --ignored`"]
+	#[ignore = "full repository sweep; run with `cargo nextest run --release -p pi-ast \
+	            --run-ignored ignored-only`"]
 	fn pruned_walk_matches_unpruned_on_full_repo_corpus() {
 		let files = repo_files(None);
 		assert!(files.len() > 3000, "expected the whole corpus, got {}", files.len());

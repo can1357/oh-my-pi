@@ -62,6 +62,8 @@ function createCtx(activeMs: number): SegmentContext {
 		contextTokens: 0,
 		contextWindow: 0,
 		autoCompactEnabled: false,
+		compactionSpeculation: "idle",
+		speculationBlinkOn: true,
 		subagentCount: 0,
 		activeMs,
 		activeRepo: null,

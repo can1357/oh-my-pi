@@ -309,9 +309,9 @@ export function writeModelCache<TApi extends Api>(
 					const staticHeaderSource =
 						staticById.get(model.id) ?? (model.requestModelId ? staticById.get(model.requestModelId) : undefined);
 					// A model with no static source is still restorable when its live
-					// headers equal the provider's trusted constant (a compile-time,
-					// non-credential value the reader can reattach by value). This keeps
-					// reference-less Copilot models (e.g. claude-opus-5) alive offline.
+					// headers equal a trusted provider-wide fallback that the reader can
+					// re-derive without persisting it. This keeps reference-less models
+					// with constant or configured headers alive offline.
 					const matchesStatic = staticHeaderSource
 						? headersEqual(model.headers, staticHeaderSource.headers)
 						: headersEqual(model.headers, restorableHeaderFallback);

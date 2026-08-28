@@ -252,7 +252,8 @@ function selectorMatchesCurrent(
 
 /**
  * Resolve the chain key for a concrete selector by specificity: exact model,
- * longest matching wildcard, hinted/configured role, then default.
+ * longest matching wildcard, hinted role, then matching role keys with
+ * `default` preferred over other shared assignments, then default.
  */
 export function resolveRetryFallbackChainKey(
 	context: RetryFallbackResolutionContext,
@@ -314,7 +315,11 @@ export function resolveRetryFallbackChainKey(
 	if (wildcardMatch) return wildcardMatch;
 
 	// 3. The hinted role, then role keys matched by their assigned model.
+	// A shared assignment (default and vision both the same model) must not
+	// let yaml insertion order steal the live role's chain. Prefer the hint,
+	// then `default` when it also matches.
 	if (roleHint && Array.isArray(context.chains[roleHint])) return roleHint;
+	let matchedRole: string | undefined;
 	for (const key in context.chains) {
 		if (isRetryFallbackModelKey(key)) continue;
 		if (
@@ -326,9 +331,11 @@ export function resolveRetryFallbackChainKey(
 				currentPlainBaseSelector,
 			)
 		) {
-			return key;
+			if (key === "default") return "default";
+			matchedRole ??= key;
 		}
 	}
+	if (matchedRole) return matchedRole;
 
 	// 4. The default chain, when default has no explicit role primary.
 	const defaultChain = context.chains.default;

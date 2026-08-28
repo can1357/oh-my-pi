@@ -124,7 +124,8 @@ mod base64;
 mod basename;
 #[cfg(feature = "util.cat")]
 mod cat;
-/// Shared checksum machinery behind `md5sum`, `sha*sum`, and `b2sum`.
+/// The `cksum` builtin plus the shared checksum machinery behind `md5sum`,
+/// `sha*sum`, and `b2sum`.
 #[cfg(feature = "util.cksum")]
 mod cksum;
 #[cfg(feature = "util.md5sum")]

@@ -44,7 +44,7 @@ function renderStripped(tree: SessionTreeNode[], leafId: string, width = 120): s
 		() => {},
 		() => {},
 	);
-	return selector.render(width).map(line => Bun.stripANSI(line));
+	return selector.renderContent(width).map(line => Bun.stripANSI(line));
 }
 
 // A terminal branch whose linear chain branches again must keep every row at

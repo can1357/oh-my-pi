@@ -136,12 +136,20 @@ function tryCoerceBooleanToNumber(value: unknown, expectedTypes: string[]): { va
 	return { value: value ? 1 : 0, changed: true };
 }
 
-function tryCoerceString(value: unknown, expectedTypes: string[]): { value: unknown; changed: boolean } {
+function tryCoerceString(
+	value: unknown,
+	expectedTypes: string[],
+	allowLossy: boolean,
+): { value: unknown; changed: boolean } {
 	if (!expectedTypes.includes("string") || typeof value === "string" || value === null || value === undefined) {
 		return { value, changed: false };
 	}
 
 	if (Array.isArray(value) || typeof value === "object") {
+		// JSON.stringify is irreversible (downstream consumers receive encoded
+		// text where they expected structure), so it requires an authoritative
+		// diagnosis — never a union-branch guess.
+		if (!allowLossy) return { value, changed: false };
 		try {
 			const stringified = JSON.stringify(value);
 			if (stringified === undefined) return { value, changed: false };
@@ -158,7 +166,16 @@ function tryCoerceString(value: unknown, expectedTypes: string[]): { value: unkn
 	return { value: String(value), changed: true };
 }
 
-function tryCoerceForExpectedTypes(value: unknown, expectedTypes: string[]): { value: unknown; changed: boolean } {
+/**
+ * Schema-directed value repair for a single type issue. `allowLossy` gates the
+ * irreversible repairs (container→string stringification); lossless repairs
+ * (JSON parsing, boolean spellings, scalar stringification) always apply.
+ */
+function tryCoerceForExpectedTypes(
+	value: unknown,
+	expectedTypes: string[],
+	allowLossy: boolean,
+): { value: unknown; changed: boolean } {
 	if (typeof value === "string") {
 		const parsed = tryParseJsonForTypes(value, expectedTypes);
 		if (parsed.changed) return parsed;
@@ -171,7 +188,7 @@ function tryCoerceForExpectedTypes(value: unknown, expectedTypes: string[]): { v
 	const numericCoercion = tryCoerceBooleanToNumber(value, expectedTypes);
 	if (numericCoercion.changed) return numericCoercion;
 
-	return tryCoerceString(value, expectedTypes);
+	return tryCoerceString(value, expectedTypes, allowLossy);
 }
 
 function tryParseLeadingJsonContainer(value: string): unknown | undefined {
@@ -1576,9 +1593,11 @@ function coerceArgsFromIssues(args: unknown, issues: FlatIssue[]): { value: unkn
 	// a type coercion actually needs to write into a leaf.
 	let owned = false;
 	let nextArgs: unknown = args;
-
 	for (const issue of issues) {
+		// Failed union branches still contribute schema-directed type repairs.
+		// Container-to-string conversion remains enabled for string branches.
 		if (issue.keyword === "unrecognized") {
+			if (issue.unionBranch) continue;
 			const previous = nextArgs;
 			nextArgs = deleteValueAtPointer(nextArgs, issue.instancePath);
 			if (nextArgs !== previous) changed = true;
@@ -1588,7 +1607,7 @@ function coerceArgsFromIssues(args: unknown, issues: FlatIssue[]): { value: unkn
 		if (issue.expectedTypes.length === 0) continue;
 
 		const currentValue = getValueAtPointer(nextArgs, issue.instancePath);
-		const result = tryCoerceForExpectedTypes(currentValue, issue.expectedTypes);
+		const result = tryCoerceForExpectedTypes(currentValue, issue.expectedTypes, true);
 		let coercedValue = result.changed ? result.value : undefined;
 		if (
 			coercedValue === undefined &&

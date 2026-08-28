@@ -34,7 +34,7 @@ function renderStripped(tree: SessionTreeNode[], leafId: string, width = 120): s
 		() => {},
 		() => {},
 	);
-	return selector.render(width).map(line => Bun.stripANSI(line));
+	return selector.renderContent(width).map(line => Bun.stripANSI(line));
 }
 
 describe("issue #7332: linear branch continuations stay compact", () => {

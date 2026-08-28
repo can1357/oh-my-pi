@@ -5,7 +5,7 @@
   "version": "0.0.1",
   "description": "Edit benchmark suite using TypeScript source code mutations",
   "homepage": "https://omp.sh",
-  "author": "Can Boluk",
+  "author": "Stencil Labs, Inc.",
   "license": "MIT",
   "repository": {
     "type": "git",

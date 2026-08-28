@@ -20,10 +20,10 @@
  */
 import * as path from "node:path";
 import type * as natives from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { generateCommitMessage } from "../utils/commit-message-generator";
-import * as git from "../utils/git";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import type { ExecutorOptions } from "./executor";
 import { runSubprocess } from "./executor";
@@ -52,6 +52,42 @@ function rememberAgentArtifacts(result: SingleResult): SingleResult {
 		branchName: result.branchName,
 	});
 	return result;
+}
+
+/**
+ * Decide the fate of a half-built task branch after apply-back threw.
+ *
+ * Returns the branch name when it carries at least one commit past `baseSha`
+ * — the caller must keep it, because the isolation worktree that also held
+ * those objects is about to be torn down. Returns `undefined` after deleting
+ * a branch that is absent, empty, or still pinned at the baseline, preserving
+ * the original stale-branch cleanup for the cases where nothing is at stake.
+ *
+ * `revList.range` throws when the branch does not exist, which is the common
+ * "commitToBranch failed before it created anything" path; that is treated as
+ * "nothing to rescue" only after confirming the ref is absent. Other probe
+ * failures preserve the branch because deleting it could lose the only reachable
+ * copy of the agent's commits.
+ */
+async function rescueTaskBranch(repoRoot: string, branchName: string, baseSha: string): Promise<string | undefined> {
+	const repo = vcs.git(repoRoot);
+	try {
+		const carriedCommits = (await vcs.requireGit(repoRoot).revListRange(baseSha, branchName)).length;
+		if (carriedCommits > 0) return branchName;
+	} catch {
+		try {
+			if (await repo?.refExists(`refs/heads/${branchName}`)) return branchName;
+		} catch {
+			// An inconclusive recovery probe must never risk deleting the only ref.
+			return branchName;
+		}
+	}
+	try {
+		await repo?.deleteBranch(branchName, true);
+	} catch {
+		// Best-effort cleanup matches the old façade's tryDelete semantics.
+	}
+	return undefined;
 }
 
 /** Resolved repo + baseline used by every isolated spawn in a single call. */
@@ -99,7 +135,7 @@ export function makeIsolationCommitMessage(session: ToolSession): BuildCommitMes
 export interface IsolatedRunOptions {
 	/**
 	 * Base run options handed to the subagent subprocess. This helper sets
-	 * `worktree`, clears `preloadedExtensionPaths` / `preloadedCustomToolPaths`
+	 * `worktree`, clears prepared/path extension preloads and custom-tool paths
 	 * (isolated runs re-discover inside the worktree), and forwards everything
 	 * else unchanged.
 	 */
@@ -124,6 +160,8 @@ export interface IsolatedRunOptions {
 	 * build a result shape consistent with their non-isolated path.
 	 */
 	buildFailureResult: (err: unknown) => SingleResult;
+	/** Observe the real child result before post-run isolation work. */
+	onSubprocessResult?: (result: SingleResult) => void;
 }
 
 async function writeIsolationPatch(
@@ -142,9 +180,10 @@ async function writeIsolationPatch(
  * Run a subagent inside an isolation worktree and capture its changes.
  *
  * Branch mode: on success, commits the diff onto `omp/task/${agentId}` and
- * returns `branchName` + `nestedPatches`. On commit failure the branch is
- * deleted, the still-live isolation diff is written to `${artifactsDir}/${agentId}.patch`,
- * and `result.error` carries the merge-failure message.
+ * returns `branchName` + `nestedPatches`. On commit failure the still-live
+ * isolation diff is written to `${artifactsDir}/${agentId}.patch`, the task
+ * branch is kept when it already carries commits (deleted otherwise), and
+ * `result.error` carries the merge-failure message plus recovery hint.
  *
  * Patch mode: on success, writes `${artifactsDir}/${agentId}.patch` and
  * returns `patchPath` + `nestedPatches`.
@@ -166,13 +205,20 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			...opts.baseOptions,
 			worktree: isolationDir,
 			preloadedExtensionPaths: undefined,
+			preloadedPreparedExtensions: undefined,
 			preloadedCustomToolPaths: undefined,
 			onCleanupDeferred: completion => {
 				deferredCleanup = completion;
 				opts.baseOptions.onCleanupDeferred?.(completion);
 			},
 		});
-		if (deferredCleanup) return result;
+		opts.onSubprocessResult?.(result);
+		// A successful result cannot be captured while deferred owner jobs or
+		// shutdown hooks may still write the worktree. Failed runs skip capture,
+		// so their cleanup remains asynchronous.
+		if (deferredCleanup && result.exitCode === 0) {
+			await deferredCleanup;
+		}
 		if (opts.mergeMode === "branch" && result.exitCode === 0) {
 			try {
 				const commitResult = await commitToBranch(
@@ -189,9 +235,22 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 					nestedPatches: commitResult?.nestedPatches,
 				});
 			} catch (mergeErr) {
-				// Agent succeeded but branch commit failed — clean up stale branch.
+				// Agent succeeded but the branch commit failed. `commitToBranch`
+				// is not atomic: the clean-baseline path fetches the agent's
+				// commits into the parent ODB and creates `omp/task/<id>` before
+				// it commits the leftover working-tree delta, so a throw from
+				// that trailing step leaves behind a branch that already holds
+				// every commit the agent made. The isolation worktree — the only
+				// other copy of those objects — is destroyed by the `finally`
+				// below, so deleting the branch unconditionally turned a
+				// recoverable merge conflict into permanent loss of committed
+				// work (#8868). Delete only when nothing is at stake.
+				const baseSha = taskBaseline.root.headCommit;
 				const branchName = `omp/task/${opts.agentId}`;
-				await git.branch.tryDelete(opts.context.repoRoot, branchName);
+				const rescueBranch = await rescueTaskBranch(opts.context.repoRoot, branchName, baseSha);
+				const rescueNote = rescueBranch
+					? ` The agent's commits are preserved on branch ${rescueBranch} — merge or cherry-pick it manually.`
+					: "";
 				const msg = mergeErr instanceof Error ? mergeErr.message : String(mergeErr);
 				try {
 					const patchResult = await writeIsolationPatch(
@@ -204,13 +263,13 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 						...result,
 						patchPath: patchResult.patchPath,
 						nestedPatches: patchResult.nestedPatches,
-						error: `Merge failed: ${msg}`,
+						error: `Merge failed: ${msg}.${rescueNote}`,
 					});
 				} catch (patchErr) {
 					const patchMsg = patchErr instanceof Error ? patchErr.message : String(patchErr);
 					return rememberAgentArtifacts({
 						...result,
-						error: `Merge failed: ${msg}; patch capture failed: ${patchMsg}`,
+						error: `Merge failed: ${msg}; patch capture failed: ${patchMsg}.${rescueNote}`,
 					});
 				}
 			}
@@ -280,12 +339,13 @@ export interface IsolationMergeOutcome {
  */
 export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise<IsolationMergeOutcome> {
 	const { result, repoRoot, mergeMode } = opts;
+	const repo = vcs.requireGit(repoRoot);
 	try {
 		if (mergeMode === "branch") {
 			if (!result.branchName && result.exitCode === 0 && !result.aborted && result.error) {
 				const patchList = result.patchPath ? `\nPatch artifact:\n- ${result.patchPath}` : "";
 				return {
-					summary: `\n\n<system-notification>Branch merge failed before a task branch could be created: ${result.error}\nTask outputs are preserved but changes were not applied.${patchList}</system-notification>`,
+					summary: `\n\n<system-notification>Branch merge failed while capturing the task branch: ${result.error}\nTask outputs are preserved but changes were not applied.${patchList}</system-notification>`,
 					changesApplied: false,
 					hadAnyChanges: false,
 					mergedBranchForNestedPatches: false,
@@ -360,8 +420,8 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 				// `--3way --check`, which exits 0 even when the real apply would
 				// leave conflict markers and unmerged index entries.
 				const [alreadyApplied, forwardApplies] = await Promise.all([
-					git.patch.canApplyText(repoRoot, normalized, { reverse: true }),
-					git.patch.canApplyText(repoRoot, normalized),
+					repo.canApplyPatch(normalized, { reverse: true }).catch(() => false),
+					repo.canApplyPatch(normalized, {}).catch(() => false),
 				]);
 				hadAnyChanges = false;
 				if (alreadyApplied && !forwardApplies) {
@@ -369,7 +429,7 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 				} else if (forwardApplies) {
 					changesApplied = true;
 					try {
-						await git.patch.applyText(repoRoot, normalized);
+						await repo.applyPatch(normalized, {});
 						hadAnyChanges = true;
 					} catch {
 						changesApplied = false;

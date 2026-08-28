@@ -43,6 +43,16 @@ const WS_KEEPALIVE_MS = 30_000;
 const MAX_PAYLOAD_BYTES = 256 * 1024 * 1024;
 /** Default appearance of the omp tab group. */
 const DEFAULT_GROUP = { title: "omp", color: "cyan" } as const;
+/** True when `raw` can serve as the authority of a `ws://` URL: no whitespace,
+ *  slashes, userinfo, fragments, or control characters, and URL-parseable. */
+function isWsAuthority(raw: string): boolean {
+	if (/[\s/\\@#?]|[\x00-\x1f]/.test(raw)) return false;
+	try {
+		return new URL(`ws://${raw}`).host.length > 0;
+	} catch {
+		return false;
+	}
+}
 
 /** Start the relay server on 127.0.0.1. Throws if the port is taken. */
 export function startRelayServer(opts: RelayServerOptions): RelayServer {
@@ -56,7 +66,14 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 		hostname: "127.0.0.1",
 		port: opts.port,
 		fetch(req, srv): Response | undefined {
-			const url = new URL(req.url);
+			const fallback = `127.0.0.1:${opts.port}`;
+			const rawHost = req.headers.get("host")?.trim();
+			const host = rawHost && isWsAuthority(rawHost) ? rawHost : fallback;
+			const requestUrl =
+				rawHost && rawHost !== host && req.url.startsWith(`http://${rawHost}`)
+					? req.url.slice(`http://${rawHost}`.length)
+					: req.url;
+			const url = new URL(requestUrl, `http://${fallback}`);
 			const path = url.pathname.replace(/\/+$/, "") || "/";
 			if (path === "/cdp") {
 				// Browsers set Origin on websocket upgrades; native CDP clients
@@ -83,7 +100,7 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 				if (!bridge.ready) {
 					return Response.json({ error: "relay extension is not connected" }, { status: 503 });
 				}
-				return Response.json(bridge.versionInfo(`ws://127.0.0.1:${opts.port}/cdp`));
+				return Response.json(bridge.versionInfo(`ws://${host}/cdp`));
 			}
 			if (path === "/json" || path === "/json/list") {
 				return Response.json(bridge.listTargets());

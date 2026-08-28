@@ -1,0 +1,25 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "pi-vcs",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    crate_name = "pi_vcs",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    version = "17.1.5",
+    deps = all_crate_deps(normal = True),
+)
+
+rust_test(
+    name = "pi-vcs_test",
+    crate = ":pi-vcs",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True),
+)

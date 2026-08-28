@@ -31,6 +31,7 @@ function createCtx(overrides?: {
 	branch?: string | null;
 	sessionName?: string;
 	sessionAccent?: boolean;
+	previewTitle?: string;
 }): SegmentContext {
 	const hasName = overrides?.sessionName !== undefined;
 	return {
@@ -41,6 +42,7 @@ function createCtx(overrides?: {
 			sessionManager: hasName ? { getSessionName: () => overrides.sessionName } : undefined,
 		} as unknown as SegmentContext["session"],
 		sessionAccent: overrides?.sessionAccent,
+		previewTitle: overrides?.previewTitle,
 		width: 120,
 		compactThinkingLevel: false,
 		options: {
@@ -73,6 +75,8 @@ function createCtx(overrides?: {
 		contextTokens: 0,
 		contextWindow: 0,
 		autoCompactEnabled: false,
+		compactionSpeculation: "idle",
+		speculationBlinkOn: true,
 		subagentCount: 0,
 		activeMs: 0,
 		activeRepo: null,
@@ -187,6 +191,36 @@ describe("status line session accent", () => {
 		const enabled = renderSegment("session_name", createCtx({ sessionName: "Named session", sessionAccent: true }));
 		expect(enabled.visible).toBe(true);
 		expect(enabled.content).toContain(ansi);
+	});
+});
+
+describe("session_name preview-title fallback", () => {
+	it("renders the stand-in title when the session is unnamed", () => {
+		const seg = renderSegment("session_name", createCtx({ previewTitle: "omp" }));
+		expect(seg.visible).toBe(true);
+		expect(stripAnsi(seg.content)).toBe("omp");
+	});
+
+	it("prefers the real session name over the stand-in", () => {
+		const seg = renderSegment("session_name", createCtx({ sessionName: "Named session", previewTitle: "omp" }));
+		expect(stripAnsi(seg.content)).toBe("Named session");
+	});
+
+	it("right-aligns the stand-in title through the box border pipeline", () => {
+		const component = new StatusLineComponent(createStatusLineSession(""));
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["pi"],
+			rightSegments: ["session_name"],
+			separator: "powerline-thin",
+			sessionAccent: false,
+		});
+		const withTitle = component.getTopBorder(80, "omp");
+		// The gauge fill pads the group gap, so the title chip lands flush right.
+		expect(withTitle.width).toBe(80);
+		expect(stripAnsi(withTitle.content).trimEnd().endsWith("omp")).toBe(true);
+		// Live render path passes no preview title: unnamed sessions show none.
+		expect(stripAnsi(component.getTopBorder(80).content)).not.toContain("omp");
 	});
 });
 

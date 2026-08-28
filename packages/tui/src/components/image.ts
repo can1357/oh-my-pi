@@ -363,11 +363,8 @@ export class ImageBudget {
 	 * Restart every placement epoch after a destructive history clear (`CSI 3 J`
 	 * full paint). The clear destroys all placement cells — scrollback rows are
 	 * gone and the replay rewrites the viewport — so no archive remains to
-	 * protect. Reverting to epoch 1 lets the replay's placements replace the
-	 * terminal's stale registry entries; the returned list names every image
-	 * and the highest epoch it reached so the caller can delete all of its
-	 * registry entries explicitly (`d=i` keeps the transmitted data) — an image
-	 * absent from the replay never re-places, so even its epoch-1 entry must go.
+	 * protect. Reverting to epoch 1 lets the replay recreate every visible
+	 * placement after the terminal-wide cleanup.
 	 */
 	resetPlacementEpochs(): ReadonlyArray<{ imageId: number; lastEpoch: number }> {
 		let stale: Array<{ imageId: number; lastEpoch: number }> | undefined;
@@ -508,6 +505,17 @@ export class Image implements Component {
 		this.#budget = options.budget;
 		this.#imageId = options.budget ? options.budget.acquireId(options.imageKey) : undefined;
 	}
+	/** Return source metadata without exposing the encoded image buffer. */
+	debugState(): Record<string, unknown> {
+		return {
+			mimeType: this.#mimeType,
+			widthPx: this.#dimensions.widthPx,
+			heightPx: this.#dimensions.heightPx,
+			filename: this.#options.filename ?? null,
+			imageId: this.#imageId ?? null,
+			suppressed: this.#cachedSuppressed,
+		};
+	}
 
 	invalidate(): void {
 		this.#cachedLines = undefined;
@@ -532,7 +540,8 @@ export class Image implements Component {
 			this.#cachedImageProtocol === imageProtocol &&
 			this.#cachedCellWidthPx === cellDimensions.widthPx &&
 			this.#cachedCellHeightPx === cellDimensions.heightPx &&
-			this.#cachedKittyUnicodePlaceholders === kittyUnicodePlaceholders
+			this.#cachedKittyUnicodePlaceholders === kittyUnicodePlaceholders &&
+			(this.#imageId == null || this.#budget?.shouldTransmit(this.#imageId) !== true)
 		) {
 			return this.#cachedLines;
 		}

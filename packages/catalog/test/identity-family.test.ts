@@ -12,6 +12,7 @@ import {
 	isKimiModelId,
 	isMinimaxM2FamilyModelId,
 	isMinimaxM3FamilyModelId,
+	isMuseSparkModelId,
 	isOpenAIGptOssModelId,
 	isOpenAIModelId,
 	isQwen38PlusTemplateEffortModelId,
@@ -19,6 +20,7 @@ import {
 	modelFamilyToken,
 	parseAnthropicModel,
 	supportsAdaptiveThinkingDisplay,
+	supportsHashlineEdits,
 	supportsMidConversationSystemMessages,
 } from "@oh-my-pi/pi-catalog/identity";
 
@@ -28,6 +30,20 @@ describe("isKimiModelId", () => {
 		expect(isKimiModelId("kimi-k2.6")).toBe(true);
 		expect(isKimiModelId("vendor/kimi.x")).toBe(true);
 		expect(isKimiModelId("akimbo-model")).toBe(false);
+	});
+});
+
+describe("supportsHashlineEdits", () => {
+	test("declines the families that miscount line anchors", () => {
+		expect(supportsHashlineEdits("openrouter/moonshotai/Kimi-K2-Instruct")).toBe(false);
+		expect(supportsHashlineEdits("xiaomi/MiMo-V2.5-Pro")).toBe(false);
+		expect(supportsHashlineEdits("tensormesh/deepseek-ai/DeepSeek-V4-Flash")).toBe(false);
+		expect(supportsHashlineEdits("kilo/stepfun/step-3.7-flash:free")).toBe(false);
+	});
+	test("vouches for structured-edit-capable models", () => {
+		expect(supportsHashlineEdits("google/gemini-3.5-flash")).toBe(true);
+		expect(supportsHashlineEdits("claude-fable-5")).toBe(true);
+		expect(supportsHashlineEdits("moonshot/moonshot-v1-128k")).toBe(true);
 	});
 });
 
@@ -217,6 +233,22 @@ describe("isMinimaxM3FamilyModelId", () => {
 	});
 });
 
+describe("isMuseSparkModelId", () => {
+	test("matches Muse Spark ids across namespaces and contributor SKUs", () => {
+		expect(isMuseSparkModelId("muse-spark-1.1")).toBe(true);
+		expect(isMuseSparkModelId("muse-spark-1.2")).toBe(true);
+		expect(isMuseSparkModelId("muse-spark-1.2-contributor")).toBe(true);
+		expect(isMuseSparkModelId("meta/muse-spark-1.2")).toBe(true);
+	});
+
+	test("rejects adjacent spark or muse names", () => {
+		expect(isMuseSparkModelId("spark-1.2")).toBe(false);
+		expect(isMuseSparkModelId("muse-1.2")).toBe(false);
+		expect(isMuseSparkModelId("amuse-spark-1.2")).toBe(false);
+		expect(isMuseSparkModelId("gpt-5.3-codex-spark")).toBe(false);
+	});
+});
+
 describe("isOpenAIGptOssModelId", () => {
 	test("matches gpt-oss across catalog id shapes", () => {
 		expect(isOpenAIGptOssModelId("gpt-oss-120b")).toBe(true);
@@ -255,15 +287,18 @@ describe("isReasoningGlmModelId", () => {
 		// Family match is future-proof: new integers need no allowlist entry.
 		expect(isReasoningGlmModelId("glm-5.3")).toBe(true);
 		expect(isReasoningGlmModelId("glm-6")).toBe(true);
+		// GLM-5.3-Flash is the first `-flash` SKU with mandatory thinking.
+		expect(isReasoningGlmModelId("glm-5.3-flash")).toBe(true);
 		// Namespaced ids are stripped before classification.
 		expect(isReasoningGlmModelId("z-ai/glm-5-turbo")).toBe(true);
 	});
 
-	test("excludes pre-4.5, vision, flash, and preview SKUs", () => {
+	test("excludes pre-4.5, vision, pre-5.3 flash, flashx, and preview SKUs", () => {
 		expect(isReasoningGlmModelId("glm-4")).toBe(false);
 		expect(isReasoningGlmModelId("glm-4.4")).toBe(false);
 		expect(isReasoningGlmModelId("glm-5-preview")).toBe(false);
 		expect(isReasoningGlmModelId("glm-4.5-flash")).toBe(false);
+		expect(isReasoningGlmModelId("glm-4.7-flash")).toBe(false);
 		expect(isReasoningGlmModelId("glm-4.7-flashx")).toBe(false);
 		expect(isReasoningGlmModelId("glm-4.5v")).toBe(false);
 		expect(isReasoningGlmModelId("qwen3.5")).toBe(false);
@@ -286,6 +321,17 @@ describe("isGlmVisionModelId", () => {
 		expect(isGlmVisionModelId("glm-4v")).toBe(true);
 		expect(isGlmVisionModelId("glm-4.5v")).toBe(true);
 		expect(isGlmVisionModelId("glm-4v-plus")).toBe(true);
+	});
+
+	test("matches the natively multimodal flash line from GLM-5.3-Flash on", () => {
+		// GLM-5.3-Flash accepts image blocks without carrying a `v` marker.
+		expect(isGlmVisionModelId("glm-5.3-flash")).toBe(true);
+		expect(isGlmVisionModelId("zai-org/GLM-5.3-Flash")).toBe(true);
+		// Earlier flash SKUs stay text-only.
+		expect(isGlmVisionModelId("glm-4.5-flash")).toBe(false);
+		expect(isGlmVisionModelId("glm-4.7-flash")).toBe(false);
+		// The text-only base line is unaffected.
+		expect(isGlmVisionModelId("glm-5.3")).toBe(false);
 	});
 
 	test("excludes non-vision GLM ids (the old `includes('v')` false positives)", () => {

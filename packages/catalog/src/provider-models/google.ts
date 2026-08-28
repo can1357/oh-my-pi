@@ -1,5 +1,7 @@
 import { fetchAntigravityDiscoveryModels } from "../discovery/antigravity";
 import { fetchGeminiModels } from "../discovery/gemini";
+import { fetchGeminiCliQuotaModels } from "../discovery/gemini-cli";
+import { isGeminiModelId } from "../identity/family";
 import type { ModelManagerOptions } from "../model-manager";
 import type { FetchImpl } from "../types";
 import { GEMINI_CLI_VARIANT_COLLAPSE_TABLE } from "../variant-collapse";
@@ -25,6 +27,8 @@ export interface GoogleAntigravityModelManagerConfig {
 
 export interface GoogleGeminiCliModelManagerConfig {
 	oauthToken?: string;
+	/** GCP project id required by Workspace/Standard credentials for quota discovery. */
+	projectId?: string;
 	endpoint?: string;
 	fetch?: FetchImpl;
 }
@@ -86,20 +90,26 @@ export function googleGeminiCliModelManagerOptions(
 		...(token
 			? {
 					fetchDynamicModels: async () => {
+						const fetcher = toDiscoveryFetch(config?.fetch);
 						const models = await fetchAntigravityDiscoveryModels({
 							token,
-							endpoint,
-							fetcher: toDiscoveryFetch(config?.fetch),
+							fetcher,
 							collapseTable: GEMINI_CLI_VARIANT_COLLAPSE_TABLE,
 						});
+						// Antigravity's fetchAvailableModels is unreachable for
+						// credentials without Antigravity entitlement (Code Assist
+						// Standard returns HTTP 403). Fall back to the account's own
+						// retrieveUserQuota list on Cloud Code Assist.
 						if (models === null) {
-							return null;
+							return fetchGeminiCliQuotaModels({ token, projectId: config?.projectId, endpoint, fetcher });
 						}
-						return models.map(m => ({
-							...m,
-							provider: "google-gemini-cli" as const,
-							baseUrl: endpoint,
-						}));
+						return models
+							.filter(m => isGeminiModelId(m.id))
+							.map(m => ({
+								...m,
+								provider: "google-gemini-cli" as const,
+								baseUrl: endpoint,
+							}));
 					},
 				}
 			: undefined),

@@ -48,6 +48,7 @@ import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import {
 	ImageInputTooLargeError,
 	loadImageInput,
+	loadSvgImageInput,
 	MAX_IMAGE_INPUT_BYTES,
 	webpExclusionForModel,
 } from "../utils/image-loading";
@@ -520,6 +521,8 @@ async function streamLinesFromFile(
 	};
 }
 
+const IMAGE_ATTACHMENT_URI_REGEX = /^attachment:\/\/[1-9]\d*$/;
+
 // Maximum image file size (20MB) - larger images will be rejected to prevent OOM during serialization
 const MAX_IMAGE_SIZE = MAX_IMAGE_INPUT_BYTES;
 
@@ -566,6 +569,44 @@ export interface ReadToolDetails {
 	displayReadTargets?: string[];
 }
 type ReadParams = ReadToolInput;
+
+/** Identical reads tolerated before the loop hint is appended. */
+const REPEAT_READ_HINT_THRESHOLD = 3;
+/** Per-session cap on tracked read keys; the map resets when exceeded. */
+const REPEAT_READ_TRACKER_CAP = 64;
+
+const kRepeatReadTracker = Symbol("read.repeatTracker");
+
+interface SessionWithRepeatReadTracker extends ToolSession {
+	[kRepeatReadTracker]?: Map<string, { hash: bigint; count: number }>;
+}
+
+/**
+ * Append a loop-breaking hint when the same read selector returns
+ * byte-identical output repeatedly. Weak models re-issue an unchanged read
+ * dozens of times (observed: 29 bare re-reads of one file, ~645k tokens);
+ * naming the repetition breaks the loop the same way the edit no-op guard
+ * does. Tracking is per session and resets whenever the output changes.
+ */
+function appendRepeatReadHint(session: ToolSession, path: string, result: AgentToolResult<ReadToolDetails>): void {
+	const block = result.content?.find(entry => entry.type === "text");
+	if (!block || typeof block.text !== "string" || block.text.length === 0 || result.isError) return;
+
+	const holder = session as SessionWithRepeatReadTracker;
+	holder[kRepeatReadTracker] ??= new Map();
+	const tracker = holder[kRepeatReadTracker];
+	if (tracker.size > REPEAT_READ_TRACKER_CAP) tracker.clear();
+
+	const hash = Bun.hash.xxHash64(block.text);
+	const entry = tracker.get(path);
+	if (!entry || entry.hash !== hash) {
+		tracker.set(path, { hash, count: 1 });
+		return;
+	}
+	entry.count++;
+	if (entry.count < REPEAT_READ_HINT_THRESHOLD) return;
+	block.text += `\n\n[You have received this identical output ${entry.count} times. Re-reading '${path}' will not change it — use a narrower selector (path:A-B), or proceed with the edit.]`;
+}
 
 /**
  * Read tool implementation.
@@ -763,11 +804,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	}
 
 	/**
-	 * Build content blocks for an on-disk image file: an `inspect_image`
-	 * metadata note when inspection is active, otherwise the decoded image
-	 * block. Shared by the plain-file read path and the `local://` image fast
-	 * path so both honor the effective inspect_image state, the size cap, and
-	 * auto-resize identically. Too-large / unsupported images surface as {@link ToolError}.
+	 * Build content blocks for a vision-ready image: an `inspect_image` metadata
+	 * note when inspection is active, otherwise the decoded image block. Shared
+	 * by the plain-file read path, `local://` image fast path, and explicit SVG
+	 * rasterization so all honor inspect_image state, size caps, and auto-resize
+	 * identically. Too-large / unsupported images surface as {@link ToolError}.
 	 */
 	async #loadImageContent(options: {
 		readPath: string;
@@ -775,10 +816,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		mimeType: string;
 		imageMetadata: ImageMetadata | null;
 		fileSize: number;
+		imageKind?: "svg";
+		inspectPath?: string;
 	}): Promise<{ content: Array<TextContent | ImageContent>; details: ReadToolDetails; sourcePath: string }> {
-		const { readPath, absolutePath, mimeType, imageMetadata, fileSize } = options;
+		const { readPath, absolutePath, mimeType, imageMetadata, fileSize, imageKind, inspectPath } = options;
 		if (this.syncInspectImageState()) {
 			const outputMime = imageMetadata?.mimeType ?? mimeType;
+			const inspectImagePath = inspectPath ?? formatPathRelativeToCwd(absolutePath, this.session.cwd);
 			const metadataLines = [
 				"Image metadata:",
 				`- MIME: ${outputMime}`,
@@ -793,31 +837,34 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						? "- Alpha: no"
 						: "- Alpha: unknown",
 				"",
-				`If you want to analyze the image, call inspect_image with path="${formatPathRelativeToCwd(
-					absolutePath,
-					this.session.cwd,
-				)}" and a question describing what to inspect and the desired output format.`,
+				`If you want to analyze the image, call inspect_image with path="${inspectImagePath}" and a question describing what to inspect and the desired output format.`,
 			];
 			return { content: [{ type: "text", text: metadataLines.join("\n") }], details: {}, sourcePath: absolutePath };
 		}
-
 		if (fileSize > MAX_IMAGE_SIZE) {
 			const sizeStr = formatBytes(fileSize);
 			const maxStr = formatBytes(MAX_IMAGE_SIZE);
 			throw new ToolError(`Image file too large: ${sizeStr} exceeds ${maxStr} limit.`);
 		}
 		try {
-			const imageInput = await loadImageInput({
+			const imageLoadOptions = {
 				path: readPath,
 				cwd: this.session.cwd,
 				autoResize: this.#autoResizeImages,
 				maxBytes: MAX_IMAGE_SIZE,
 				resolvedPath: absolutePath,
-				detectedMimeType: mimeType,
 				excludeWebP: webpExclusionForModel(this.session.getActiveModel?.()),
-			});
+			};
+			const imageInput =
+				imageKind === "svg"
+					? await loadSvgImageInput(imageLoadOptions)
+					: await loadImageInput({ ...imageLoadOptions, detectedMimeType: mimeType });
 			if (!imageInput) {
-				throw new ToolError(`Read image file [${mimeType}] failed: unsupported image format.`);
+				throw new ToolError(
+					imageKind === "svg"
+						? "The ':img' selector only supports .svg and .svgz files."
+						: `Read image file [${mimeType}] failed: unsupported image format.`,
+				);
 			}
 			return {
 				content: [
@@ -1016,6 +1063,18 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	}
 
 	async execute(
+		toolCallId: string,
+		params: ReadParams,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<ReadToolDetails>,
+		toolContext?: AgentToolContext,
+	): Promise<AgentToolResult<ReadToolDetails>> {
+		const result = await this.#executeInner(toolCallId, params, signal, onUpdate, toolContext);
+		appendRepeatReadHint(this.session, params.path, result);
+		return result;
+	}
+
+	async #executeInner(
 		_toolCallId: string,
 		params: ReadParams,
 		signal?: AbortSignal,
@@ -1025,6 +1084,18 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		let { path: readPath } = params;
 		if (readPath.startsWith("file://")) {
 			readPath = expandPath(readPath);
+		}
+
+		if (IMAGE_ATTACHMENT_URI_REGEX.test(readPath)) {
+			const attachments = this.session.getImageAttachments?.() ?? [];
+			const attachment = attachments.find(entry => entry.uri === readPath);
+			if (!attachment) {
+				const availableUris = attachments.map(entry => entry.uri).join(", ") || "none";
+				throw new ToolError(
+					`Could not resolve image attachment '${readPath}'. Available attachment URIs: ${availableUris}. Use one of the listed attachment URIs, or attach an image first when none are available.`,
+				);
+			}
+			readPath = attachment.sourcePath;
 		}
 
 		const conflictUri = parseConflictUri(readPath);
@@ -1088,11 +1159,15 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			const parsed = parseSel(internalTarget.sel);
 			if (internalTarget.sel !== undefined && parsed.kind === "none") {
 				throw new ToolError(
-					`Invalid selector ':${internalTarget.sel}' on '${internalTarget.path}'. Use :N, :N-M, :N+K, :N- (open-ended), a comma-separated list of ranges, :raw, or a range combined with raw (e.g. :raw:50-100).`,
+					`Invalid selector ':${internalTarget.sel}' on '${internalTarget.path}'. Use :N, :N-M, :N+K, :N- (open-ended), a comma-separated list of ranges, :raw, :img for SVG rendering, or a range combined with raw (e.g. :raw:50-100).`,
 				);
 			}
 			const urlMeta = parseInternalUrl(internalTarget.path);
 			const scheme = urlMeta.protocol.replace(/:$/, "").toLowerCase();
+			const imageSelectorMessage = "The ':img' selector only supports local .svg and .svgz files.";
+			if (parsed.kind === "image" && scheme !== "local") {
+				throw new ToolError(imageSelectorMessage);
+			}
 			if (scheme === "local") {
 				const localFile = await resolveLocalUrlToFile(urlMeta, {
 					cwd: this.session.cwd,
@@ -1107,6 +1182,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					// cannot shadow the URL's selector semantics during filesystem routing.
 					promotedSelector = internalTarget.sel;
 				} else {
+					if (parsed.kind === "image") throw new ToolError(imageSelectorMessage);
 					return this.#handleInternalUrl(internalTarget.path, parsed, signal);
 				}
 			} else {
@@ -1177,6 +1253,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			isDirectory = stat.isDirectory();
 		} catch (error) {
 			if (isNotFoundError(error)) {
+				// A documented semicolon list is explicit user scope, while suffix
+				// matching is only fuzzy recovery. Fan the list out before a broad
+				// workspace scan, but only after literal/archive/sqlite resolution so
+				// real resources containing semicolons retain precedence.
+				if (readPath.includes(";")) {
+					const delimitedResult = await this.#tryReadDelimitedPaths(readPath, signal);
+					if (delimitedResult) return delimitedResult;
+				}
 				// Attempt unique suffix resolution before falling back to the approved-plan
 				// alias or fuzzy suggestions. Existing workspace files retain precedence.
 				if (!isRemoteMountPath(absolutePath)) {
@@ -1291,7 +1375,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			| { result: TruncationResult; options: { direction: "head"; startLine?: number; totalFileLines?: number } }
 			| undefined;
 
-		if (mimeType) {
+		if (parsed.kind === "image") {
+			({ content, details, sourcePath } = await this.#loadImageContent({
+				readPath: localReadPath,
+				absolutePath,
+				mimeType: "image/svg+xml",
+				imageMetadata: null,
+				fileSize,
+				imageKind: "svg",
+				inspectPath: `${resolvedDisplayPath}:img`,
+			}));
+		} else if (mimeType) {
 			({ content, details, sourcePath } = await this.#loadImageContent({
 				readPath,
 				absolutePath,
@@ -2123,6 +2217,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			cwd: this.session.cwd,
 			settings: this.session.settings,
 			signal,
+			sessionFile: this.session.getSessionFile() ?? undefined,
 			localProtocolOptions: this.session.localProtocolOptions,
 			skills: this.session.skills,
 			xd: {

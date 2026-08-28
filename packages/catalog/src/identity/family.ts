@@ -9,6 +9,7 @@
 
 import {
 	bareModelId,
+	type GlmModel,
 	isAnthropicAdaptiveGenAtLeast,
 	isFableOrMythos,
 	parseAnthropicModel,
@@ -119,6 +120,11 @@ export const isMimoModelIdOrName = memo((value: string): boolean => {
 	return value.toLowerCase().includes("mimo");
 });
 
+/** StepFun Step 3.7 Flash SKU in any namespace form (`kilo/stepfun/step-3.7-flash:free`). */
+export const isStep37FlashModelId = memo((modelId: string): boolean => {
+	return modelId.toLowerCase().includes("step-3.7-flash");
+});
+
 /** Gemini family ids in any namespace form (`gemini-*`, `google/gemini-*`, `openrouter/google/gemini-…`). */
 export const isGeminiModelId = memo((modelId: string): boolean => {
 	return /(^|\/)gemini[-.]?/i.test(modelId);
@@ -204,6 +210,16 @@ export const isOpenAIGptOssModelId = memo((modelId: string): boolean => {
 	return /(^|\/)gpt-oss[-:]/i.test(modelId);
 });
 
+/**
+ * Meta Muse Spark ids (`muse-spark-1.1`, `muse-spark-1.2`,
+ * `muse-spark-1.2-contributor`, `meta/muse-spark-1.2`). The Responses
+ * `reasoning.effort` wire accepts `none` (thinking-off) plus
+ * `minimal`/`low`/`medium`/`high`/`xhigh`.
+ */
+export const isMuseSparkModelId = memo((modelId: string): boolean => {
+	return /(^|\/)muse-spark(?:[-.]|$)/i.test(modelId);
+});
+
 /** OpenAI model ids (gpt-*, chatgpt-*, o1/o3/o4 SKUs, codex-*, or openai/*). */
 export const isOpenAIModelId = memo((modelId: string): boolean => {
 	return (
@@ -269,18 +285,34 @@ export const isOpenAISamplingRestrictedModelId = memo((modelId: string): boolean
 });
 
 /**
+ * GLM SKU shapes that carry the reasoning ladders. `base`/`air`/`turbo` have
+ * always been reasoning lines; `flash` joins at GLM-5.3-Flash, the first flash
+ * SKU whose thinking is mandatory (pre-5.3 `-flash` SKUs are non-reasoning).
+ * `flashx` and `preview` stay out.
+ */
+function isGlmReasoningVariant(glm: GlmModel): boolean {
+	switch (glm.variant) {
+		case "base":
+		case "air":
+		case "turbo":
+			return true;
+		case "flash":
+			return semverGte(glm.version, "5.3");
+		default:
+			return false;
+	}
+}
+
+/**
  * Reasoning-capable GLM coding SKUs: glm-4.5 and up on the base / `-air` /
- * `-turbo` lines. Excludes the vision (`…v`) shape, the non-reasoning
- * `-flash`/`-flashx`/`-preview` variants, and pre-4.5 ids. Matching the family
- * keeps newly-bumped integers (`glm-5.3`, `glm-6`, …) covered without a per-id
- * allowlist.
+ * `-turbo` lines, plus `-flash` from GLM-5.3-Flash on. Excludes the vision
+ * (`…v`) shape, the non-reasoning `-flashx`/`-preview` variants, and pre-4.5
+ * ids. Matching the family keeps newly-bumped integers (`glm-5.4`, `glm-6`, …)
+ * covered without a per-id allowlist.
  */
 export const isReasoningGlmModelId = memo((modelId: string): boolean => {
 	const glm = parseGlmModel(bareModelId(modelId));
-	if (!glm || glm.vision) {
-		return false;
-	}
-	if (glm.variant !== "base" && glm.variant !== "air" && glm.variant !== "turbo") {
+	if (!glm || glm.vision || !isGlmReasoningVariant(glm)) {
 		return false;
 	}
 	return semverGte(glm.version, "4.5");
@@ -289,37 +321,39 @@ export const isReasoningGlmModelId = memo((modelId: string): boolean => {
 /** GLM-5.2+ coding SKUs accept `reasoning_effort` in addition to binary thinking. */
 export const isGlm52ReasoningEffortModelId = memo((modelId: string): boolean => {
 	const glm = parseGlmModel(bareModelId(modelId));
-	if (!glm || glm.vision) {
-		return false;
-	}
-	if (glm.variant !== "base" && glm.variant !== "air" && glm.variant !== "turbo") {
+	if (!glm || glm.vision || !isGlmReasoningVariant(glm)) {
 		return false;
 	}
 	return semverGte(glm.version, "5.2");
 });
 
 /**
- * GLM-5.3+ coding SKUs. Unlike GLM-5.2 (whose reasoning_effort dialect is
- * host-specific), GLM-5.3+ exposes a uniform wire-exact `low`/`high`/`max`
- * ladder on every host, and thinking can no longer be disabled —
- * `thinking.type` must always be `enabled`. Matching the family keeps future
- * bumps (`glm-5.4`, `glm-6`, …) covered while excluding the vision (`…v`)
- * shape and the non-reasoning `-flash`/`-flashx`/`-preview` variants.
+ * GLM-5.3+ reasoning-effort SKUs. Unlike GLM-5.2 (whose dialect is
+ * host-specific), the base, `-air`, `-turbo`, and `-flash` variants expose a
+ * uniform wire-exact `low`/`high`/`max` ladder on every host, and thinking can
+ * no longer be disabled — `thinking.type` must always be `enabled`. Matching
+ * the family keeps future bumps (`glm-5.4`, `glm-6`, …) covered while excluding
+ * the vision (`…v`) shape and the non-reasoning `-flashx`/`-preview` variants.
  */
 export const isGlm53ReasoningEffortModelId = memo((modelId: string): boolean => {
 	const glm = parseGlmModel(bareModelId(modelId));
-	if (!glm || glm.vision) {
-		return false;
-	}
-	if (glm.variant !== "base" && glm.variant !== "air" && glm.variant !== "turbo") {
+	if (!glm || glm.vision || !isGlmReasoningVariant(glm)) {
 		return false;
 	}
 	return semverGte(glm.version, "5.3");
 });
 
-/** GLM vision SKUs — the `v` that attaches to the version (`glm-4v`, `glm-4.5v`). */
+/**
+ * GLM SKUs that accept image input: the `v` that attaches to the version
+ * (`glm-4v`, `glm-4.5v`) and the natively multimodal `-flash` line from
+ * GLM-5.3-Flash on, whose id carries no `v` marker.
+ */
 export const isGlmVisionModelId = memo((modelId: string): boolean => {
-	return parseGlmModel(bareModelId(modelId))?.vision === true;
+	const glm = parseGlmModel(bareModelId(modelId));
+	if (!glm) {
+		return false;
+	}
+	return glm.vision || (glm.variant === "flash" && semverGte(glm.version, "5.3"));
 });
 
 /**
@@ -397,6 +431,22 @@ export const hasOpus47ApiRestrictions = memo((modelId: string): boolean => {
 export const supportsMidConversationSystemMessages = memo((modelId: string): boolean => {
 	const parsed = parseAnthropicModel(bareModelId(modelId));
 	return parsed !== null && isAnthropicAdaptiveGenAtLeast(parsed, "4.8");
+});
+
+/**
+ * Models that reliably follow the hashline line-anchored edit dialect
+ * (`[path#TAG]` headers plus 1-indexed anchors). Kimi, MiMo, DeepSeek V4
+ * Flash, and Step 3.7 Flash miscount anchors or drop the tag header often
+ * enough that hosts fall back to the sloppy edit format for
+ * them.
+ */
+export const supportsHashlineEdits = memo((modelId: string): boolean => {
+	return !(
+		isKimiModelId(modelId) ||
+		isMimoModelIdOrName(modelId) ||
+		isDeepseekV4FlashModelId(modelId) ||
+		isStep37FlashModelId(modelId)
+	);
 });
 
 export const isAnthropicFableOrMythosModel = memo((modelId: string): boolean => {
