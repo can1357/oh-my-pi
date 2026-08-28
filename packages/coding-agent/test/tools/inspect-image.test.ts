@@ -18,6 +18,8 @@ import { removeSyncWithRetries, sanitizeText } from "@oh-my-pi/pi-utils";
 
 const TINY_PNG_BASE64 =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+const TINY_SVG =
+	'<svg xmlns="http://www.w3.org/2000/svg" width="12" height="7"><rect width="12" height="7" fill="red"/></svg>';
 
 const visionModel: Model<"openai-responses"> = buildModel({
 	id: "gpt-4o",
@@ -195,6 +197,21 @@ describe("InspectImageTool", () => {
 		const contentParts = (Array.isArray(content) ? content : []) as Array<{ type: string; text?: string }>;
 		expect(contentParts[0]?.type).toBe("image");
 		expect(contentParts[1]).toEqual({ type: "text", text: "Extract visible UI labels." });
+	});
+	it("rasterizes a selected SVG before sending it to the vision model", async () => {
+		const svgPath = path.join(testDir, "diagram.svg");
+		fs.writeFileSync(svgPath, TINY_SVG);
+		const stub = createCompleteSimpleSuccessStub("Red rectangle");
+		const tool = new InspectImageTool(createSession(testDir, visionModel), stub.fn);
+
+		const result = await tool.execute("call-svg", {
+			path: `${svgPath}:img`,
+			question: "Describe the diagram.",
+		});
+
+		expect(stub.calls).toHaveLength(1);
+		expect(result.details?.imagePath).toBe(svgPath);
+		expect(result.details?.mimeType).toBe("image/png");
 	});
 
 	it("passes the vision role's configured thinking effort into the oneshot", async () => {

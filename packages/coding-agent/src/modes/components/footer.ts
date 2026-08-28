@@ -28,8 +28,8 @@ export class FooterComponent implements Component {
 
 	/**
 	 * Set extension status text to display in the footer.
-	 * Text is sanitized (newlines/tabs replaced with spaces) and truncated to terminal width.
-	 * ANSI escape codes for styling are preserved.
+	 * ANSI/VT escape sequences and most control characters are stripped; tabs and newlines become spaces.
+	 * The combined status line is trimmed and truncated to terminal width.
 	 * @param key - Unique key to identify this status
 	 * @param text - Status text, or undefined to clear
 	 */

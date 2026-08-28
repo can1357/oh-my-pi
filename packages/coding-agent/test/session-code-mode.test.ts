@@ -20,7 +20,19 @@ import { buildToolNamespacesInfo, resolveCodeMode } from "../src/session/code-mo
 import { SessionManager } from "../src/session/session-manager";
 import { generateCodeModeDeclarations } from "../src/tools/eval-format/code-mode-declarations";
 
-const ENABLED = ["eval", "ask", "todo", "yield", "think", "read", "bash", "edit", "mcp__gmail__search"];
+const ENABLED = [
+	"eval",
+	"ask",
+	"todo",
+	"yield",
+	"think",
+	"checkpoint",
+	"rewind",
+	"read",
+	"bash",
+	"edit",
+	"mcp__gmail__search",
+];
 
 describe("resolveCodeMode", () => {
 	test("off: inactive regardless of catalog flag", () => {
@@ -43,7 +55,7 @@ describe("resolveCodeMode", () => {
 			evalTransportAvailable: true,
 		});
 		expect(r.active).toBe(true);
-		expect([...r.directToolNames].sort()).toEqual(["ask", "eval", "think", "todo", "yield"]);
+		expect([...r.directToolNames].sort()).toEqual(["ask", "checkpoint", "eval", "rewind", "think", "todo", "yield"]);
 	});
 	test("auto without flag: inactive", () => {
 		expect(

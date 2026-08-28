@@ -94,6 +94,8 @@ function resolveReasoningDisableMode(
 			return "qwen-enable-thinking-false";
 		case "qwen-chat-template":
 			return "qwen-template-false";
+		case "chat-template":
+			return "chat-template-thinking-false";
 		default:
 			return "lowest-effort";
 	}

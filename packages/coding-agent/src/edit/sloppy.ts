@@ -6,7 +6,6 @@ import type { FileDiagnosticsResult, WritethroughCallback, WritethroughDeferredH
 import type { ToolSession } from "../tools";
 import { routeWriteThroughBridge } from "../tools/acp-bridge";
 import { invalidateFsScanAfterWrite } from "../tools/fs-cache-invalidation";
-import { outputMeta } from "../tools/output-meta";
 import { enforcePlanModeWrite, resolvePlanPath } from "../tools/plan-mode-guard";
 import type { AppliedEditObserver } from "./blackbox";
 import { type DiffError, type DiffResult, generateDiffString } from "./diff";
@@ -14,9 +13,16 @@ import { levenshteinDistance } from "./modes/replace";
 import { detectLineEnding, normalizeToLF, normalizeUnicode, restoreLineEndings, stripBom } from "./normalize";
 import { readEditFileText, serializeEditFileText } from "./read-file";
 import type { EditToolDetails, EditToolPerFileResult, LspBatchRequest } from "./renderer";
+import {
+	createAggregateEditDetails,
+	createAggregateEditToolResult,
+	createEditResult,
+	type EditResult,
+	joinEditResultText,
+	toEditToolResult,
+} from "./result";
 import sloppyGrammarSource from "./sloppy.lark" with { type: "text" };
 import description from "./sloppy.md" with { type: "text" };
-import { pruneOversizedEditSnapshots } from "./snapshot-details";
 
 /** Context handed to a {@link SloppyVariant} apply call. */
 export interface SloppyApplyContext {
@@ -3907,6 +3913,7 @@ export async function executeSloppy(
 	// Phase 2 — write every prepared section; only the last write flushes the LSP batch.
 	const perFileResults: EditToolPerFileResult[] = [];
 	const contentTexts: string[] = [];
+	let singleResult: EditResult | undefined;
 	let firstChangedLine: number | undefined;
 	for (let index = 0; index < prepared.length; index++) {
 		const entry = prepared[index];
@@ -3938,51 +3945,29 @@ export async function executeSloppy(
 
 		const diffResult = generateDiffString(entry.normalizedContent, entry.newContent, undefined, { path: entry.path });
 		await onApplied?.({ path: entry.absolutePath, prev: entry.rawContent, next: finalContent });
-		const meta = outputMeta()
-			.diagnostics(diagnostics?.summary ?? "", diagnostics?.messages ?? [])
-			.get();
-		firstChangedLine ??= diffResult.firstChangedLine;
-		contentTexts.push(
-			entry.notes.length > 0
-				? `Successfully edited ${entry.path}.\n${entry.notes.join("\n")}`
-				: `Successfully edited ${entry.path}.`,
-		);
-		perFileResults.push({
-			path: entry.absolutePath,
+		const editResult = createEditResult({
+			displayPath: entry.path,
+			resultPath: entry.absolutePath,
 			diff: diffResult.diff,
 			firstChangedLine: diffResult.firstChangedLine,
 			diagnostics,
-			meta,
 			oldText: entry.rawContent,
 			newText: finalContent,
+			afterPreview: entry.notes,
 		});
+		firstChangedLine ??= diffResult.firstChangedLine;
+		singleResult ??= editResult;
+		contentTexts.push(editResult.text);
+		perFileResults.push(editResult.perFileResult);
 	}
 
 	if (!multiFile) {
-		const only = perFileResults[0];
-		return {
-			content: [{ type: "text", text: contentTexts[0] }],
-			details: pruneOversizedEditSnapshots({
-				diff: only.diff,
-				path: only.path,
-				firstChangedLine: only.firstChangedLine,
-				diagnostics: only.diagnostics,
-				meta: only.meta,
-				oldText: only.oldText,
-				newText: only.newText,
-			}),
-		};
+		if (!singleResult) throw new Error("Sloppy edit completed without a result.");
+		return toEditToolResult(singleResult);
 	}
 
-	return {
-		content: [{ type: "text", text: contentTexts.join("\n") }],
-		details: pruneOversizedEditSnapshots({
-			diff: perFileResults
-				.map(entry => entry.diff)
-				.filter(Boolean)
-				.join("\n"),
-			firstChangedLine,
-			perFileResults,
-		}),
-	};
+	return createAggregateEditToolResult(
+		joinEditResultText(contentTexts),
+		createAggregateEditDetails({ firstChangedLine, perFileResults }),
+	);
 }

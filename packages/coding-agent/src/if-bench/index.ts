@@ -1,7 +1,7 @@
 /**
  * `omp if-bench` — instruction-following and working-memory benchmark.
  *
- * One cacheable conversation per model: turn N issues N glyph opcodes over the
+ * One cacheable conversation per model: turn N issues N glyph actions over the
  * array the model itself reported last turn, while a `nya{1,N}` directive
  * rotates through the start, middle, and end of the prompt. A model's score is
  * the depth it reaches before it either loses the array or drops the cat sound,
@@ -43,6 +43,7 @@ export interface IfBenchDependencies {
 	streamSimple?: StreamSimpleFn;
 	now?: () => number;
 	randomSessionId?: () => string;
+	sleep?: (ms: number) => Promise<void>;
 	writeStdout?: (text: string) => void;
 	writeStderr?: (text: string) => void;
 	setExitCode?: (code: number) => void;
@@ -122,6 +123,7 @@ export async function runIfBenchCommand(
 			stream: deps.streamSimple ?? streamSimple,
 			now: deps.now ?? (() => performance.now()),
 			randomSessionId: deps.randomSessionId ?? (() => Bun.randomUUIDv7()),
+			sleep: deps.sleep,
 			observer: board,
 		});
 		board?.close();

@@ -23,14 +23,22 @@ each render the provider receives the current `ViewportSize` and returns a
 `TerminalFramePlan`:
 
 ```ts
+interface HistoryBatch {
+  id: number;
+  rows: string[];
+  kind?: "append" | "replay";
+}
+
 interface TerminalFramePlan {
   history?: HistoryBatch;
   viewport: string[];
 }
 ```
 
-`viewport` is the complete mutable screen image for this frame. `history`, when
-present, is an ordered batch of rows that the product has finalized. Finality
+`viewport` is the complete mutable screen image for this frame. An `append`
+history batch contains finalized rows or a stable append-only head row. A
+`replay` batch contains the complete logical ledger, including any naturally
+emitted prefix of the active append-only head. Finality
 is therefore an application decision, never an inference from a row crossing
 the top of the terminal.
 
@@ -41,9 +49,12 @@ makes retries and coalesced renders safe without requiring the renderer to
 compare a new transcript with terminal scrollback.
 
 The coding agent's `TranscriptContainer` owns the active, pending, and committed
-block lifecycle. It renders active blocks into the viewport and exposes
-finalized blocks as explicit history batches. Content does not enter history
-merely because viewport pressure moved it offscreen.
+block lifecycle. Blocks are mutable by default. Assistant/thinking producers
+explicitly opt into append-only presentation and publish only a monotonically
+extending prefix of complete stable semantic rows. Each row re-renders at the
+current width; open Markdown and the current partial suffix remain mutable. Under pressure,
+only the current logical head can emit one such row without finalizing. Final
+retirement writes only its un-emitted suffix.
 
 ## 2. Rendering a frame
 
@@ -60,8 +71,11 @@ For every frame the TUI:
 
 History and viewport have deliberately different update rules. History is an
 ordered append stream; viewport rows are replaceable and diffed against the
-previous viewport. Ordinary renders never audit, rewrite, rebuild, or replay
-terminal history.
+previous viewport. A replay is one atomic exception: the renderer moves the
+ledger suffix that fits into leading blank viewport rows, retains the prefix as
+history remainder, prepares `remainder || finalViewport`, and performs one
+synchronous `terminal.write`. No block-at-a-time replay frames are observable.
+Ordinary renders never audit or rewrite terminal history.
 
 Visible overlays are screen-coordinate content. They composite over the
 viewport and never become history. Showing, updating, or closing an overlay
@@ -84,10 +98,11 @@ shrink may have pushed before the resize callback ran):
 - `preserve` repaints only the viewport and leaves old-width history unchanged.
 
 The raw TUI defaults to `preserve` and accepts
-`PI_TUI_RESIZE_SCROLLBACK`; the coding agent defaults to `rebuild`. Replays
-walk the immutable committed prefix through a separate cursor and consume fresh
-monotonic history ids without rewinding logical retirement state. They do not
-compare physical row counts across widths or infer a commit boundary.
+`PI_TUI_RESIZE_SCROLLBACK`; the coding agent defaults to `rebuild`. Append and
+rebuild resize policies each prepare one complete bottom-first replay
+transaction; preserve prepares none. Replay consumes one fresh monotonic history
+id without rewinding logical retirement state, and acknowledgement happens only
+after the synchronous write returns.
 
 The renderer never probes the user's scroll position. This keeps updates safe
 while the user is reading older terminal history and avoids terminal- or

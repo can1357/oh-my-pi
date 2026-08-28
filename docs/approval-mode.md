@@ -33,8 +33,14 @@ tools:
   approval:
     bash: prompt
     read: allow
-    mcp__filesystem__delete: deny
+    mcp__filesystem_delete: deny
 ```
+
+For MCP tools, key the policy by the exact final registered name. The ordinary form is
+`mcp__<sanitized_server>_<sanitized_tool>`. A redundant `<server>_` prefix is removed from the tool name,
+so server `echo` tool `echo_it` is registered as `mcp__echo_it`. Names longer than 64 characters are
+capped with a deterministic hash suffix; use the final capped name rather than the uncapped pattern. See
+[MCP tool naming](./mcp-server-tool-authoring.md#naming-and-collision-domain).
 
 Resolution per tool call:
 

@@ -286,4 +286,30 @@ describe("Loader component", () => {
 		expect(container.children).toEqual([]);
 		tui.stop();
 	});
+	it("re-evaluates a dynamic message function on each spinner tick", () => {
+		vi.useFakeTimers();
+		const ui = { requestDirectWrite: vi.fn(), requestComponentRender: vi.fn() };
+		let step = 0;
+		const loader = new Loader(
+			ui as unknown as TUI,
+			t => t,
+			t => t,
+			() => `step ${step}`,
+			["0", "1", "2", "3"],
+		);
+
+		// Initial sync at construction evaluates the function once.
+		expect(loader.render(20).join("\n")).toContain("step 0");
+
+		// Mutating the closure source alone does not repaint — the function
+		// is only re-evaluated when the spinner ticks and #syncText runs.
+		step = 1;
+		expect(loader.render(20).join("\n")).toContain("step 0");
+
+		vi.advanceTimersByTime(80); // first spinner advance re-evaluates the fn
+		expect(loader.render(20).join("\n")).toContain("step 1");
+		expect(loader.render(20).join("\n")).not.toContain("step 0");
+
+		loader.stop();
+	});
 });

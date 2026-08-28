@@ -30,6 +30,14 @@ import { executePatchSingle, type PatchEditEntry, type PatchParams, patchEditSch
 import { executeReplace, type ReplaceBatchParams, type ReplaceParams, replaceEditSchema } from "./modes/replace";
 import { type EditToolDetails, type EditToolPerFileResult, getLspBatchRequest, type LspBatchRequest } from "./renderer";
 import {
+	createAggregateEditDetails,
+	createAggregateEditToolResult,
+	createFailedEditResult,
+	getEditResultText,
+	joinEditResultText,
+	toEditPerFileResult,
+} from "./result";
+import {
 	executeSloppy,
 	type SloppyParams,
 	type SloppySection,
@@ -38,7 +46,6 @@ import {
 	sloppyVariant,
 	splitSloppySections,
 } from "./sloppy";
-import { pruneOversizedEditSnapshots } from "./snapshot-details";
 import { EDIT_MODE_STRATEGIES } from "./streaming";
 
 export * from "@oh-my-pi/hashline";
@@ -52,6 +59,7 @@ export * from "./modes/patch";
 export * from "./modes/replace";
 export * from "./normalize";
 export * from "./renderer";
+export * from "./result";
 export * from "./sloppy";
 export * from "./snapshot-details";
 export * from "./streaming";
@@ -189,26 +197,13 @@ async function executeApplyPatchPerFile(
 
 		try {
 			const result = await run(batchRequest);
-			const details = result.details;
-			perFileResults.push({
-				path: details?.path ?? path,
-				diff: details?.diff ?? "",
-				firstChangedLine: details?.firstChangedLine,
-				diagnostics: details?.diagnostics,
-				op: details?.op,
-				move: details?.move,
-				sourcePath: details?.sourcePath,
-				meta: details?.meta,
-				oldText: details?.oldText,
-				newText: details?.newText,
-				snapshotsPruned: details?.snapshotsPruned,
-			});
-			const text = result.content?.find(c => c.type === "text")?.text ?? "";
+			perFileResults.push(toEditPerFileResult(result.details, path));
+			const text = getEditResultText(result);
 			if (text) contentTexts.push(text);
 		} catch (err) {
 			const errorText = err instanceof Error ? err.message : String(err);
 			const displayErrorText = err instanceof HashlineMismatchError ? err.displayMessage : undefined;
-			perFileResults.push({ path, diff: "", isError: true, errorText, displayErrorText });
+			perFileResults.push(createFailedEditResult(path, errorText, displayErrorText));
 			contentTexts.push(`Error editing ${path}: ${errorText}`);
 			hasError = true;
 			// Later entries were authored assuming this file's post-state; a
@@ -244,35 +239,23 @@ async function executeApplyPatchPerFile(
 
 		// Emit partial result after each file so UI shows progressive completion
 		if (!isLast && onUpdate) {
-			onUpdate({
-				content: [{ type: "text", text: contentTexts.join("\n") }],
-				details: {
-					diff: perFileResults
-						.map(r => r.diff)
-						.filter(Boolean)
-						.join("\n"),
-					firstChangedLine: perFileResults.find(r => r.firstChangedLine)?.firstChangedLine,
-					perFileResults: [...perFileResults],
-				},
-			});
+			onUpdate(
+				createAggregateEditToolResult(
+					joinEditResultText(contentTexts),
+					createAggregateEditDetails({ perFileResults }),
+				),
+			);
 		}
 	}
 
-	return {
-		content: [{ type: "text", text: contentTexts.join("\n") }],
-		details: pruneOversizedEditSnapshots({
-			diff: perFileResults
-				.map(r => r.diff)
-				.filter(Boolean)
-				.join("\n"),
-			firstChangedLine: perFileResults.find(r => r.firstChangedLine)?.firstChangedLine,
-			perFileResults,
-		}),
-		// Any per-file failure marks the aggregate result as an error so the
-		// agent loop and renderer take the error branch instead of treating
-		// a mixed partial application as a successful edit.
-		...(hasError ? { isError: true } : {}),
-	};
+	// Any per-file failure marks the aggregate result as an error so the agent
+	// loop and renderer take the error branch instead of treating a mixed
+	// partial application as a successful edit.
+	return createAggregateEditToolResult(
+		joinEditResultText(contentTexts),
+		createAggregateEditDetails({ perFileResults }),
+		hasError,
+	);
 }
 
 async function executeSinglePathEntries(
@@ -325,7 +308,7 @@ async function executeSinglePathEntries(
 				hasLastNewText = true;
 			}
 			if (details?.snapshotsPruned) snapshotsPruned = true;
-			const text = result.content?.find(c => c.type === "text")?.text ?? "";
+			const text = getEditResultText(result);
 			if (text) contentTexts.push(text);
 		} catch (err) {
 			const errorText = err instanceof Error ? err.message : String(err);
@@ -352,36 +335,38 @@ async function executeSinglePathEntries(
 		}
 
 		if (!isLast && onUpdate) {
-			onUpdate({
-				content: [{ type: "text", text: contentTexts.join("\n") }],
-				details: {
-					diff: diffTexts.join("\n"),
-					firstChangedLine,
-				},
-				...(hasError ? { isError: true } : {}),
-			});
+			onUpdate(
+				createAggregateEditToolResult(
+					joinEditResultText(contentTexts),
+					createAggregateEditDetails({
+						diff: diffTexts.join("\n"),
+						firstChangedLine,
+					}),
+					hasError,
+				),
+			);
 		}
 	}
 
-	return {
-		content: [{ type: "text", text: contentTexts.join("\n") }],
-		details: pruneOversizedEditSnapshots({
+	// Any per-entry failure marks the aggregate result as an error so the
+	// renderer takes the error branch instead of falling through to the
+	// streaming-edit preview (which displays the *proposed* diff and looks
+	// indistinguishable from success).
+	return createAggregateEditToolResult(
+		joinEditResultText(contentTexts),
+		createAggregateEditDetails({
 			diff: diffTexts.join("\n"),
 			firstChangedLine,
 			path: metadataPath ?? path,
 			...(snapshotsPruned
-				? { snapshotsPruned: true as const }
+				? { snapshotsPruned: true }
 				: {
 						...(hasFirstOldText ? { oldText: firstOldText } : {}),
 						...(hasLastNewText ? { newText: lastNewText } : {}),
 					}),
 		}),
-		// Any per-entry failure marks the aggregate result as an error so the
-		// renderer takes the error branch instead of falling through to the
-		// streaming-edit preview (which displays the *proposed* diff and looks
-		// indistinguishable from success).
-		...(hasError ? { isError: true } : {}),
-	};
+		hasError,
+	);
 }
 
 /**

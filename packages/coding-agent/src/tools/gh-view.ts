@@ -8,10 +8,12 @@ import {
 	buildTextResult,
 	formatAuthor,
 	formatLabels,
+	ghApiHostArgs,
 	normalizeOptionalString,
 	normalizeText,
 	parseIssueUrl,
 	parsePositiveDecimalInt,
+	parseRepoRef,
 	pushLine,
 	requireNonEmpty,
 	resolveDefaultRepoMemoized,
@@ -177,6 +179,7 @@ export async function fetchPrReviewComments(
 	prNumber: number,
 	signal?: AbortSignal,
 ): Promise<GhPrReviewComment[]> {
+	const ref = parseRepoRef(repo);
 	const reviewComments: GhPrReviewComment[] = [];
 	let page = 1;
 
@@ -185,9 +188,10 @@ export async function fetchPrReviewComments(
 			cwd,
 			[
 				"api",
+				...ghApiHostArgs(ref),
 				"--method",
 				"GET",
-				`/repos/${repo}/pulls/${prNumber}/comments`,
+				`/repos/${ref.slug}/pulls/${prNumber}/comments`,
 				"-F",
 				`per_page=${REVIEW_COMMENTS_PAGE_SIZE}`,
 				"-F",
