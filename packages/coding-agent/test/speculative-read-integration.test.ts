@@ -28,7 +28,6 @@ function createSession(cwd: string): ToolSession {
 			"images.autoResize": false,
 			"inspect_image.enabled": false,
 			"tools.speculativeExecution.enabled": true,
-			"tools.speculativeExecution.allowedOperations": ["direct.read"],
 		}),
 	};
 }

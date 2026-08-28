@@ -4560,18 +4560,20 @@ export const SETTINGS_SCHEMA = {
 			group: "Execution",
 			label: "Experimental Speculative Execution",
 			description:
-				"Master switch for experimental speculative execution. Enabling this alone starts nothing: tools.speculativeExecution.allowedOperations is empty by default, and every operation must be granted explicitly. Speculation is not a sandbox or rollback guarantee; discarded work can still consume local resources, spend provider tokens, or cause externally visible network and filesystem activity.",
+				"Enable the discard-safe first slice: validated local reads through direct read calls and nested eval. Network requests, provider completions, and live filesystem writes are not part of this baseline.",
 		},
 	},
-	"tools.speculativeExecution.allowedOperations": {
+	"tools.speculativeExecution.allowedRiskyOperations": {
 		type: "array",
 		default: EMPTY_STRING_ARRAY,
 		ui: {
 			tab: "tools",
 			group: "Execution",
-			label: "Speculative Operation Allowlist",
+			label: "Risk-Bearing Speculative Operations",
+			warning:
+				"At your own risk: discarded operations can still create observable filesystem activity, spend provider tokens, consume rate limits, or send data externally",
 			description:
-				"Exact operations permitted to start early: direct.read, direct.write, direct.edit, eval.read, and eval.completion. Reads can perform stale or expensive I/O; staged writes can race concurrent changes or escape isolation through bugs and observers; completions can irreversibly spend tokens, consume rate limits, and send data even when discarded. Unknown entries and wildcards grant nothing.",
+				"Explicitly permit non-trivial operations to start early: direct.write, direct.edit, and eval.completion. Remote GET is unsupported; any future network operation must require this risk-bearing gate. Unknown entries and wildcards grant nothing.",
 		},
 	},
 

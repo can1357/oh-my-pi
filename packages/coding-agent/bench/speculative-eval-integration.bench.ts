@@ -46,7 +46,6 @@ async function episode(directory: string, speculative: boolean, index: number): 
 		"images.autoResize": false,
 		"inspect_image.enabled": false,
 		"tools.speculativeExecution.enabled": true,
-		"tools.speculativeExecution.allowedOperations": ["eval.read"],
 	});
 	let read!: ReadTool;
 	const session: ToolSession = {

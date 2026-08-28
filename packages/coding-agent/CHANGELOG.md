@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added default-off speculative execution for explicitly allowlisted local reads, isolated write/edit transactions, and nested JavaScript or Python eval reads or completions.
+- Added default-off speculative execution with validated local reads as the discard-safe baseline and a separately warned opt-in for staged writes, edits, and nested model completions.
 
 ## [18.0.6] - 2026-08-26
 

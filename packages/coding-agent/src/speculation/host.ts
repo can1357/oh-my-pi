@@ -70,17 +70,18 @@ export type CodingAgentSpeculativeOperation =
 	| "eval.read"
 	| "eval.completion";
 
+function isBaselineOperation(operation: CodingAgentSpeculativeOperation): operation is "direct.read" | "eval.read" {
+	return operation === "direct.read" || operation === "eval.read";
+}
+
 /**
- * Maps one exact built-in tool/effect pair to the grant a user must opt into.
+ * Maps one exact built-in tool/effect pair to its operation identifier.
  *
- * A grant is informed consent, not a claim that the operation is harmless:
- * reads can trigger expensive or externally observable filesystem I/O; PAL
- * writes can consume resources, race concurrent source changes, or escape
- * isolation through implementation bugs and filesystem observers; completions
- * irreversibly spend tokens, consume rate limits, and send data even when the
- * authoritative eval never claims their result. Keep this mapping exhaustive
- * so unknown tools, effects, wildcards, and future capabilities fail closed
- * instead of inheriting an older broad permission.
+ * Only validated local reads belong to the discard-safe baseline. PAL writes
+ * remain isolated from the live source, but staging is still observable and
+ * rollback has non-trivial race semantics. Completions irreversibly spend
+ * tokens, consume rate limits, and send data. Keep this mapping exhaustive so
+ * remote GETs, unknown tools, wildcards, and future capabilities fail closed.
  */
 function operationGrant(context: SpeculativeOperationContext): CodingAgentSpeculativeOperation | undefined {
 	if (context.source === "direct") {
@@ -155,12 +156,11 @@ function matchesHashlineEditResources(context: SpeculativeOperationContext, cwd:
 }
 
 /**
- * Session-scoped policy boundary for explicitly granted speculative effects.
+ * Session-scoped policy boundary for speculative effects.
  *
- * Speculation is only a latency optimization. Discard and cancellation cannot
- * undo provider spend, remote observations, or every effect of filesystem I/O.
- * The empty-by-default operation allowlist exists to make those consequences a
- * deliberate user choice rather than an implication of ordinary tool approval.
+ * Enabling speculation admits only validated local reads. Every operation
+ * whose effects are not trivial to discard requires a second, explicit risk
+ * opt-in. Ordinary tool approval never supplies that opt-in.
  */
 export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecutionHost {
 	#evidence = new Map<string, LocalReadEvidence>();
@@ -179,8 +179,11 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 		if (!operation) {
 			return { allowed: false, reason: "tool and effect pair is not supported for speculative execution" };
 		}
-		if (!this.settings.get("tools.speculativeExecution.allowedOperations").includes(operation)) {
-			return { allowed: false, reason: `speculative operation "${operation}" is not allowlisted` };
+		if (
+			!isBaselineOperation(operation) &&
+			!this.settings.get("tools.speculativeExecution.allowedRiskyOperations").includes(operation)
+		) {
+			return { allowed: false, reason: `speculative operation "${operation}" requires explicit risk opt-in` };
 		}
 		if (hasLifecycleHandlers(this.extensionRunner)) {
 			return { allowed: false, reason: "active extension lifecycle handler" };

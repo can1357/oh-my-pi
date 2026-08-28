@@ -75,7 +75,6 @@ describe("streamed eval speculation", () => {
 			"images.autoResize": false,
 			"inspect_image.enabled": false,
 			"tools.speculativeExecution.enabled": true,
-			"tools.speculativeExecution.allowedOperations": ["eval.read"],
 		});
 		const session: ToolSession = {
 			cwd: directory,
@@ -666,7 +665,6 @@ pythonIt("claims a Python read started before the outer eval call finishes strea
 		"images.autoResize": false,
 		"inspect_image.enabled": false,
 		"tools.speculativeExecution.enabled": true,
-		"tools.speculativeExecution.allowedOperations": ["eval.read"],
 	});
 	const session: ToolSession = {
 		cwd: directory,
@@ -756,7 +754,7 @@ it("gates a JavaScript completion until final-call reconciliation and claims its
 		"inspect_image.enabled": false,
 		"tools.approvalMode": "yolo",
 		"tools.speculativeExecution.enabled": true,
-		"tools.speculativeExecution.allowedOperations": ["eval.completion"],
+		"tools.speculativeExecution.allowedRiskyOperations": ["eval.completion"],
 	});
 	const model = {
 		id: "nested",
