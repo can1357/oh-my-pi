@@ -148,6 +148,13 @@ describe("read and write route xd:// device URLs", () => {
 		await expect(write.execute("write-xdev-no-payload", { path: "xd://echo" })).rejects.toThrow(
 			"requires `content`, or typed `args`",
 		);
+		// resolve/reject/propose and report_issue consume the string as prose, so an object would be
+		// recorded verbatim as the reason, proposal, or issue text.
+		for (const device of ["resolve", "reject", "propose", "report_issue"]) {
+			await expect(
+				write.execute(`write-xdev-text-device-${device}`, { path: `xd://${device}`, args: { title: "auth" } }),
+			).rejects.toThrow("takes plain text");
+		}
 	});
 
 	it("records a read tier on the dispatch of a read-only device", async () => {

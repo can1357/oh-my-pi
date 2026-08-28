@@ -1146,6 +1146,18 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		if (args !== undefined && !isRecord(args)) {
 			throw new ToolError("Typed `args` for an xd:// device must be a JSON object.");
 		}
+		// The resolution devices and report_issue take PROSE, not a payload: dispatchResolutionDevice
+		// consumes the string as a reason / a proposal, and dispatchReportIssueDevice as an issue
+		// description. Serializing an object into them would record `{"title":"auth"}` as the title, so
+		// typed args have nothing to bind to here and `content` stays their only surface.
+		const deviceName = xdevTarget?.name ?? undefined;
+		if (
+			args !== undefined &&
+			deviceName !== undefined &&
+			(isResolutionDeviceName(deviceName) || deviceName === REPORT_ISSUE_DEVICE_NAME)
+		) {
+			throw new ToolError(`xd://${deviceName} takes plain text, not typed \`args\`: pass the text in \`content\`.`);
+		}
 		if (content === undefined && args === undefined) {
 			throw new ToolError("write requires `content`, or typed `args` for an xd:// device.");
 		}
