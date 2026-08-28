@@ -512,6 +512,19 @@ export class SelectorController {
 					this.ctx.showError(`Failed to apply xd:// prompt docs setting: ${err}`);
 				});
 				break;
+			// Both budgets are read while the prompt is built, so the cached copy
+			// has to be rebuilt for the change to reach the provider. refreshSkills
+			// also re-reads the skills group that /context accounting keys on.
+			case "skills.catalogDescriptionBudgetChars":
+				void this.ctx.refreshSkillState().catch(err => {
+					this.ctx.showError(`Failed to apply skill catalogue budget: ${err}`);
+				});
+				break;
+			case "task.agentCatalogDescriptionBudgetChars":
+				void this.ctx.session.refreshBaseSystemPrompt().catch(err => {
+					this.ctx.showError(`Failed to apply agent catalogue budget: ${err}`);
+				});
+				break;
 			case "memory.backend":
 				void this.ctx.session.applyMemoryBackend().catch(err => {
 					this.ctx.showError(`Failed to apply memory backend: ${err}`);
