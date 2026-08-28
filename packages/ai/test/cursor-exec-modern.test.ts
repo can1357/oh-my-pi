@@ -205,7 +205,7 @@ function soleResult(frames: AgentClientMessage[]) {
 
 describe("Cursor modern exec protocol activation", () => {
 	it("advertises the client build whose schema includes modern exec frames", () => {
-		expect(CURSOR_CLIENT_VERSION).toBe("cli-2026.07.23-e383d2b");
+		expect(CURSOR_CLIENT_VERSION).toBe("cli-2026.08.11-e8db854");
 	});
 });
 

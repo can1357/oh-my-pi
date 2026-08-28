@@ -52,8 +52,14 @@ function turnEndedFrame(): Buffer {
 }
 
 /** Decode the wire conversationId from the first client frame of a request. */
+function connectPayload(chunk: Buffer): Uint8Array {
+	const length = chunk.readUInt32BE(1);
+	const body = chunk.subarray(5, 5 + length);
+	return (chunk[0] & 0x01) !== 0 ? Bun.gunzipSync(new Uint8Array(body)) : body;
+}
+
 function decodeConversationId(chunk: Buffer): string | undefined {
-	const msg = fromBinary(AgentClientMessageSchema, chunk.subarray(5));
+	const msg = fromBinary(AgentClientMessageSchema, connectPayload(chunk));
 	if (msg.message.case !== "runRequest") return undefined;
 	return msg.message.value.conversationId;
 }
@@ -66,7 +72,7 @@ type WireRequest = {
 };
 
 function decodeRunRequest(chunk: Buffer): WireRequest | undefined {
-	const msg = fromBinary(AgentClientMessageSchema, chunk.subarray(5));
+	const msg = fromBinary(AgentClientMessageSchema, connectPayload(chunk));
 	if (msg.message.case !== "runRequest") return undefined;
 	const req = msg.message.value;
 	const action = req.action?.action;

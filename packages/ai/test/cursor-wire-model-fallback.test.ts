@@ -107,7 +107,9 @@ function connectErrorFrame(code: string, message: string): Buffer {
 
 function decodeRunRequest(frame: Buffer): AgentRunRequest {
 	const length = frame.readUInt32BE(1);
-	const clientMessage = fromBinary(AgentClientMessageSchema, frame.subarray(5, 5 + length));
+	const body = frame.subarray(5, 5 + length);
+	const payload = (frame[0] & 0x01) !== 0 ? Bun.gunzipSync(new Uint8Array(body)) : body;
+	const clientMessage = fromBinary(AgentClientMessageSchema, payload);
 	if (clientMessage.message.case !== "runRequest") {
 		throw new Error(`expected runRequest, received ${clientMessage.message.case ?? "empty message"}`);
 	}

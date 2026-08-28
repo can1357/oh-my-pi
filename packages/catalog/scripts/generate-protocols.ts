@@ -14,7 +14,7 @@ const CURSOR_CONSUMER_DIRS = [
 	path.join(PACKAGES_DIR, "coding-agent/test"),
 ];
 
-const CURSOR_ENUMS = ["ForceBackgroundShellStatus", "ForceBackgroundSubagentStatus"];
+const CURSOR_ENUMS = ["CursorRuleSource", "ForceBackgroundShellStatus", "ForceBackgroundSubagentStatus", "Http2Config"];
 const DEVIN_MESSAGES = [
 	"exa.chat_pb.ChatMessagePrompt",
 	"exa.codeium_common_pb.ChatToolCall",

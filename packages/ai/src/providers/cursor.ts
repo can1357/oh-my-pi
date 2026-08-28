@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
-import http2 from "node:http2";
 import type {
 	ConversationStep,
 	CursorRule,
@@ -207,10 +206,17 @@ import {
 } from "../utils/block-symbols";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { connectProxiedSocket, getProxyForUrl } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { toolWireSchema } from "../utils/schema/wire";
-import { formatConnectEndStreamError } from "./connect-error-detail";
+import { ConnectEndStreamError, ConnectProtocolError, encodeConnectFrame } from "./cursor/connect-frame";
+import {
+	isCursorRotationFresh,
+	markCursorRotationSucceeded,
+	pinCursorConversation,
+	resolveCursorConversationId,
+	rotateCursorConversation,
+	unpinCursorConversation,
+} from "./cursor/conversation-store";
 import {
 	buildMcpStateResult,
 	buildNeutralHookResult,
@@ -241,79 +247,26 @@ import {
 	piReadPathHasRange,
 	piTimeout,
 } from "./cursor/exec-modern";
+import {
+	buildCursorRunHeaders,
+	buildCursorUnaryHeaders,
+	CURSOR_API_URL,
+	CURSOR_CLIENT_VERSION,
+} from "./cursor/headers";
 import { handleInteractionQuery } from "./cursor/interaction-query";
+import {
+	type CursorFrameSink,
+	type CursorTransportAttempt,
+	mapH2TransportError,
+	openCursorTransport,
+} from "./cursor/transport";
 
-export const CURSOR_API_URL = "https://api2.cursor.sh";
-export const CURSOR_CLIENT_VERSION = "cli-2026.07.23-e383d2b";
+export { acquireCursorH2, type CursorH2Lease } from "./cursor/h2-pool";
+export { buildCursorUnaryHeaders, CURSOR_API_URL, CURSOR_CLIENT_VERSION, mapH2TransportError };
 
-/**
- * HTTP/1 connection-specific headers that HTTP/2 forbids. Node's `http2.request()`
- * throws `ERR_HTTP2_INVALID_CONNECTION_HEADERS` on these rather than dropping
- * them, so a caller sending one would kill the request outright.
- */
-const HTTP2_FORBIDDEN_HEADERS = new Set([
-	"connection",
-	"keep-alive",
-	"proxy-connection",
-	"transfer-encoding",
-	"upgrade",
-	"http2-settings",
-]);
+/** Bound on waiting for in-flight exec dispatches at turn end. */
+const CURSOR_TURN_END_DRAIN_TIMEOUT_MS = 5000;
 
-/**
- * Header names the Cursor request sets for itself. A caller copy in ANY casing
- * has to go: the spread below adds the fixed lower-case name regardless, and two
- * spellings of one field are a duplicate rather than an override.
- */
-const CURSOR_RESERVED_HEADERS = new Set([
-	"content-type",
-	"connect-protocol-version",
-	"te",
-	"authorization",
-	"x-ghost-mode",
-	"x-cursor-client-version",
-	"x-cursor-client-type",
-	"x-request-id",
-	// Transport-owned even though this request never sets it: node's http2 client
-	// suppresses the `:authority` it derives from the URL when a plain `host`
-	// header is present, so a caller value here silently retargets the request at
-	// a different virtual host.
-	"host",
-	// The Connect body is streamed after the headers (initial frame, heartbeats,
-	// tool responses), so no caller-supplied length can describe it and an HTTP/2
-	// peer resets the stream once the body diverges.
-	"content-length",
-]);
-
-/**
- * Reduce caller-supplied headers to what this HTTP/2 request can legally carry.
- *
- * Everything is lower-cased, because HTTP/2 field names are lower-case and node
- * compares them that way. A caller `Authorization` next to the fixed
- * `authorization` does not lose to it, it DUPLICATES it, and node throws
- * `ERR_HTTP2_HEADER_SINGLE_VALUE` before the request goes out. Same for a `TE`
- * that is not `trailers`. Node throws on all three classes here rather than
- * ignoring them, so a miss turns a harmless header into a dead request.
- */
-function sanitizeCursorCallerHeaders(headers: Record<string, string> | undefined): Record<string, string> {
-	const sanitized: Record<string, string> = {};
-	for (const [name, value] of Object.entries(headers ?? {})) {
-		const field = name.toLowerCase();
-		if (field.startsWith(":")) continue;
-		if (HTTP2_FORBIDDEN_HEADERS.has(field)) continue;
-		if (CURSOR_RESERVED_HEADERS.has(field)) continue;
-		sanitized[field] = value;
-	}
-	return sanitized;
-}
-
-const CURSOR_PROXY_TUNNEL_TIMEOUT_MS = 30_000;
-
-/**
- * Text for a recognised frame this client answers with its own typed error
- * variant. Phrased as a client capability statement, not a tool failure: the
- * model reads it and should route around the capability, not retry the call.
- */
 const NOT_IMPLEMENTED_SUFFIX = "not implemented by this client";
 /** Bare gRPC `resource_exhausted` end-streams (also inside a Connect error message). */
 const RESOURCE_EXHAUSTED_PATTERN = /resource.?exhausted/i;
@@ -321,21 +274,7 @@ const RESOURCE_EXHAUSTED_PATTERN = /resource.?exhausted/i;
 const CURSOR_MODEL_NOT_FOUND_PATTERN = /^(?:Connect error not_found:|gRPC error 5:)/i;
 const NOT_IMPLEMENTED = `Not implemented by this client`;
 
-const conversationStateCache = new Map<string, ConversationStateStructure>();
-const conversationBlobStores = new Map<string, Map<string, Uint8Array>>();
 const warnedCursorKimiK3ReplayMessages = new Set<string>();
-/**
- * Base conversation id → rotated wire id (#8345). Cursor's backend can pin a
- * per-conversation rejection (bare `resource_exhausted`, zero tokens) to one
- * conversationId forever. On such a failure the id is rotated and the next
- * attempt rebuilds a fresh conversation from `context` (no cached-state
- * migration). A failed rotation is not repeated, so real account exhaustion
- * is not hidden. After the rotated id completes a turn, a later poison of
- * that id is allowed to rotate again.
- */
-const rotatedConversationIds = new Map<string, string>();
-const successfulRotatedConversationIds = new Set<string>();
-const freshRotatedConversationIds = new Set<string>();
 
 export interface CursorOptions extends StreamOptions {
 	customSystemPrompt?: string;
@@ -371,8 +310,6 @@ interface CursorTransportRequest extends CursorGrpcRequest {
 	fallbackWireModelId?: string;
 }
 
-const CONNECT_END_STREAM_FLAG = 0b00000010;
-
 interface CursorLogEntry {
 	ts: number;
 	type: string;
@@ -398,67 +335,6 @@ function log(type: string, subtype?: string, data?: unknown): void {
 	const dataStr = verbose && normalizedData ? ` ${JSON.stringify(normalizedData, debugReplacer)?.slice(0, 500)}` : "";
 	console.error(`[CURSOR] ${type}${subtype ? `: ${subtype}` : ""}${dataStr}`);
 	void appendCursorDebugLog(entry);
-}
-
-function frameConnectMessage(data: Uint8Array, flags = 0): Buffer {
-	const frame = Buffer.alloc(5 + data.length);
-	frame[0] = flags;
-	frame.writeUInt32BE(data.length, 1);
-	frame.set(data, 5);
-	return frame;
-}
-
-class ConnectEndStreamError extends AIError.ProviderResponseError {
-	readonly diagnosticMessage: string;
-
-	constructor(classificationMessage: string, diagnosticMessage: string) {
-		super(classificationMessage, { kind: "envelope" });
-		this.diagnosticMessage = diagnosticMessage;
-	}
-}
-
-function parseConnectEndStream(data: Uint8Array): Error | null {
-	try {
-		const payload = JSON.parse(new TextDecoder().decode(data));
-		const error = payload?.error;
-		if (error) {
-			const code = typeof error.code === "string" ? error.code : "unknown";
-			const message = typeof error.message === "string" ? error.message : "Unknown error";
-			const classificationMessage = `Connect error ${code}: ${message}`;
-			return new ConnectEndStreamError(classificationMessage, formatConnectEndStreamError(error));
-		}
-		return null;
-	} catch {
-		return new AIError.ProviderResponseError("Failed to parse Connect end stream", { kind: "envelope" });
-	}
-}
-
-/**
- * Maps an opaque HTTP/2 negotiation failure into an actionable error.
- *
- * bun only opens an HTTP/2 session when TLS-ALPN negotiates `h2`. Behind a
- * TLS-intercepting proxy that strips ALPN (e.g. Zscaler), the handshake yields
- * no `h2` protocol and bun throws `ERR_HTTP2_ERROR: h2 is not supported`. The
- * Cursor run RPC is HTTP/2-only (the ALB rejects HTTP/1.1 with 464), so there
- * is no h1 fallback the way model discovery has one — the run simply cannot
- * proceed. Replace the opaque message with one that names the cause and points
- * at the `providers.cursor.baseUrl` workaround.
- *
- * Non-ALPN errors pass through untouched.
- */
-export function mapH2TransportError(error: unknown, baseUrl: string): unknown {
-	const code = (error as { code?: unknown } | null)?.code;
-	const message = error instanceof Error ? error.message : String(error);
-	if (code === "ERR_HTTP2_ERROR" && /h2 is not supported/i.test(message)) {
-		return new AIError.ProviderResponseError(
-			`Cursor run transport could not negotiate HTTP/2 with ${baseUrl}: "h2 is not supported". ` +
-				"This host serves the run RPC over HTTP/2 only, and the TLS handshake did not negotiate " +
-				"h2 via ALPN — typically an ALPN-stripping TLS-intercepting proxy (e.g. Zscaler). " +
-				"Front the provider with a local HTTP/2 bridge and set providers.cursor.baseUrl to it.",
-			{ provider: "cursor", kind: "runtime", cause: error },
-		);
-	}
-	return error;
 }
 
 function debugBytes(bytes: Uint8Array, asHex: boolean): string {
@@ -602,6 +478,35 @@ function streamCursorWithWireMode(
 		// transport fails, and the error path finalizes the synthesized call just
 		// like the success path does.
 		const inFlightDispatches = new Set<Promise<void>>();
+		// Exec toolCall.id values owned by each dispatch in `inFlightDispatches`.
+		// Populated at the same moment the dispatch promise enters that set (after
+		// handleServerMessage's synchronous prefix has synthesized the block) and
+		// cleared in the same `finally` that removes the promise. The drain-timeout
+		// pairing below defers through this map — never `kCursorExecResolved`,
+		// which is stamped when the block is opened, before the handler completes.
+		const dispatchExecToolCallIds = new Map<Promise<void>, string[]>();
+		// toolCall.id values that already received a `toolResult` through the
+		// sink. The deferred drain-timeout pairing consults this so a handler
+		// that settles after the drain keeps its real result — never a second,
+		// synthetic failure layered over it.
+		const pairedToolCallIds = new Set<string>();
+		// The stream's onToolResult transformer, wrapped to record which call ids
+		// have been paired. Every pair path in this stream flows through the sink
+		// argument threaded into `handleServerMessage` (or its
+		// `state.onToolResult` fallback), so wrapping here covers them all; the
+		// transformer's return value is passed through untouched.
+		//
+		// The sink is defined even when the caller supplies no transformer:
+		// `resolveExecHandler` pairs through `applyToolResultHandler` either way,
+		// so leaving it undefined would keep pairing while recording nothing, and
+		// the deferred drain-timeout pairing below would then read every id as
+		// unpaired and layer a synthetic failure over results that did land.
+		const upstreamOnToolResult = options?.onToolResult;
+		const resultSink: CursorToolResultHandler = async result => {
+			const out = upstreamOnToolResult ? await upstreamOnToolResult(result) : result;
+			pairedToolCallIds.add(result.toolCallId);
+			return out;
+		};
 		// A dispatch can spawn another (a handler that decodes a nested frame), so
 		// re-check rather than awaiting one snapshot. Each dispatch already
 		// swallows its own rejection, so this only waits.
@@ -614,30 +519,92 @@ function streamCursorWithWireMode(
 		// late results regardless, so skipping the rest of the drain loses
 		// nothing that could still be delivered.
 		let abortSettled: Promise<void> | undefined;
+		let drainTimedOut = false;
 		const drainInFlightDispatches = async (): Promise<void> => {
+			if (inFlightDispatches.size === 0) return;
 			const signal = options?.signal;
-			while (inFlightDispatches.size > 0) {
-				if (signal?.aborted) return;
-				const settled = Promise.all([...inFlightDispatches]);
-				if (!signal) {
-					await settled;
-					continue;
+			let timeoutId: NodeJS.Timeout | undefined;
+			const timeout = Promise.withResolvers<"timeout">();
+			timeoutId = setTimeout(() => timeout.resolve("timeout"), CURSOR_TURN_END_DRAIN_TIMEOUT_MS);
+			// A bounded drain must not become the reason a completed print-mode
+			// process stays alive.
+			timeoutId.unref();
+			try {
+				while (inFlightDispatches.size > 0) {
+					if (signal?.aborted) return;
+					const settled = Promise.all([...inFlightDispatches]).then(() => "settled" as const);
+					if (!signal) {
+						const winner = await Promise.race([settled, timeout.promise]);
+						if (winner === "timeout") {
+							drainTimedOut = true;
+							return;
+						}
+						continue;
+					}
+					abortSettled ??= (() => {
+						const abortWait = Promise.withResolvers<void>();
+						signal.addEventListener("abort", () => abortWait.resolve(), { once: true });
+						return abortWait.promise;
+					})();
+					const winner = await Promise.race([settled, abortSettled.then(() => "abort" as const), timeout.promise]);
+					if (winner === "timeout") {
+						drainTimedOut = true;
+						return;
+					}
+					if (winner === "abort") return;
 				}
-				abortSettled ??= new Promise<void>(resolve =>
-					signal.addEventListener("abort", () => resolve(), { once: true }),
-				);
-				await Promise.race([settled, abortSettled]);
+			} finally {
+				clearTimeout(timeoutId);
+			}
+		};
+		// Deferred synthetic pairing, shared by the success and terminal-error
+		// paths so both apply one completion policy. A still-pending id means its
+		// handler is still executing and cannot be cancelled: pairing "Tool not
+		// available" now would persist a synthetic failure whose real result then
+		// lands late — dropped once the agent detached, or observed as a second
+		// result for the same call id. Each pair therefore waits for its own
+		// dispatch to settle; a settling handler has already paired its result
+		// through every `resolveExecHandler` exit, so this fires only for a
+		// dispatch that exits without delivering one. A handler that never
+		// settles gets no synthetic result at all: the real result must win.
+		const deferSyntheticExecPairs = (pairState: BlockState, output: AssistantMessage): void => {
+			for (const dispatch of [...inFlightDispatches]) {
+				const ownedIds = dispatchExecToolCallIds.get(dispatch);
+				if (!ownedIds || ownedIds.length === 0) continue;
+				void dispatch.finally(() => {
+					for (const toolCallId of ownedIds) {
+						if (pairedToolCallIds.has(toolCallId)) continue;
+						const toolCall = output.content.find(
+							(block): block is ToolCallState =>
+								block.type === "toolCall" &&
+								(block as ToolCallState).id === toolCallId &&
+								(block as ToolCallState)[kStreamingBlockKind] === "cursor-exec",
+						);
+						if (!toolCall) continue;
+						void pairSynthesizedExecResult(
+							pairState,
+							resultSink,
+							toolCallId,
+							toolCall.name,
+							"Tool not available",
+							true,
+						).catch(error => {
+							log("error", "pairSynthesizedExecResult", { error: String(error) });
+						});
+					}
+				});
 			}
 		};
 
-		let h2Client: http2.ClientHttp2Session | null = null;
-		let h2Request: http2.ClientHttp2Stream | null = null;
+		let attempt: CursorTransportAttempt | undefined;
+		let attemptClosed = false;
 		let heartbeatTimer: NodeJS.Timeout | null = null;
 		let debugResponseLogPromise: Promise<RequestDebugResponseLog | undefined> | undefined;
 		const h2Completion = Promise.withResolvers<void>();
 		let h2Settled = false;
 		let sawTurnEnded = false;
 		let endStreamError: Error | null = null;
+		let protocolSealed = false;
 		// Blocks the discovered-id retry once the turn produced observable output or
 		// ran a side effect (streamed content/tool call, exec bridge, permission
 		// reply). Pure keepalive heartbeats never set it, so a `not_found` that
@@ -647,9 +614,36 @@ function streamCursorWithWireMode(
 		// and pair the blocks it left open, and `state` itself is scoped to the
 		// try below.
 		let openBlockState: BlockState | undefined;
+		const disarmHeartbeat = (): void => {
+			if (heartbeatTimer) {
+				clearTimeout(heartbeatTimer);
+				heartbeatTimer = null;
+			}
+		};
+		let outboundClosed = false;
+		const closeOutboundWrites = (): void => {
+			if (outboundClosed) return;
+			outboundClosed = true;
+			disarmHeartbeat();
+		};
+		const closeAttempt = (): void => {
+			if (attemptClosed) return;
+			attemptClosed = true;
+			closeOutboundWrites();
+			attempt?.close();
+		};
 		const settleH2 = (error?: unknown): void => {
+			disarmHeartbeat();
 			if (h2Settled) return;
 			h2Settled = true;
+			if (protocolSealed) {
+				h2Completion.reject(
+					error !== undefined
+						? error
+						: (endStreamError ?? new ConnectProtocolError("Cursor Connect protocol error", { kind: "envelope" })),
+				);
+				return;
+			}
 			if (error !== undefined) {
 				h2Completion.reject(error);
 				return;
@@ -682,11 +676,11 @@ function streamCursorWithWireMode(
 			}
 
 			baseConversationId = options?.conversationId ?? options?.sessionId ?? crypto.randomUUID();
-			conversationId = rotatedConversationIds.get(baseConversationId) ?? baseConversationId;
-			const rotatedFresh = freshRotatedConversationIds.has(conversationId);
-			const blobStore = conversationBlobStores.get(conversationId) ?? new Map<string, Uint8Array>();
-			conversationBlobStores.set(conversationId, blobStore);
-			const cachedState = rotatedFresh ? undefined : conversationStateCache.get(conversationId);
+			conversationId = resolveCursorConversationId(baseConversationId);
+			const rotatedFresh = isCursorRotationFresh(conversationId);
+			const conversationEntry = pinCursorConversation(conversationId);
+			const blobStore = conversationEntry.blobs;
+			const cachedState = rotatedFresh ? undefined : conversationEntry.state;
 			const builtRequest = await buildGrpcRequestForWireMode(
 				model,
 				context,
@@ -701,42 +695,33 @@ function streamCursorWithWireMode(
 			);
 			const { requestBytes, conversationState } = builtRequest;
 			serializedFallbackWireModelId = builtRequest.fallbackWireModelId;
-			conversationStateCache.set(conversationId, conversationState);
+			conversationEntry.state = conversationState;
 			const requestContextTools = buildMcpToolDefinitions(context.tools);
 			const requestContextRules = buildCursorRequestContextRules(context.systemPrompt);
 
 			const baseUrl = model.baseUrl || CURSOR_API_URL;
 			const requestPath = "/agent.v1.AgentService/Run";
-			// Caller headers are additive, and are spread FIRST so the protocol
-			// framing, auth, and request id below always win. Cursor built this map
-			// from scratch and never read `options.headers`, so tracing/attribution
-			// headers set by a caller (or a `before_provider_headers` extension) were
-			// silently dropped here while working on other providers.
-			//
-			// Two classes are stripped because node's http2 client THROWS on them
-			// rather than ignoring them, which would turn a harmless header into a
-			// dead request: pseudo-headers, which belong to the transport, and the
-			// HTTP/1 connection-specific headers HTTP/2 forbids outright
-			// (ERR_HTTP2_INVALID_CONNECTION_HEADERS). `te` needs no filtering here —
-			// HTTP/2 allows it only as `trailers`, which is exactly what the fixed
-			// set below re-applies over anything a caller sent.
-			const callerHeaders = sanitizeCursorCallerHeaders(options?.headers);
-			const requestHeaders = {
-				...callerHeaders,
-				":method": "POST",
-				":path": requestPath,
-				"content-type": "application/connect+proto",
-				"connect-protocol-version": "1",
-				te: "trailers",
-				authorization: `Bearer ${apiKey}`,
-				"x-ghost-mode": "true",
-				"x-cursor-client-version": CURSOR_CLIENT_VERSION,
-				"x-cursor-client-type": "cli",
-				"x-request-id": crypto.randomUUID(),
-			};
+			const requestHeaders = buildCursorRunHeaders({
+				apiKey,
+				requestPath,
+				callerHeaders: options?.headers,
+				gzipRequest: true,
+			});
+			stream.push({ type: "start", partial: output });
+
+			attempt = await openCursorTransport({
+				baseUrl,
+				apiKey,
+				requestPath,
+				runHeaders: requestHeaders,
+				gzipRequest: true,
+				signal: options?.signal,
+				provider: model.provider,
+			});
+			const transport = attempt;
 			const debugSession = isRequestDebugEnabled()
 				? await createRequestDebugSession({
-						protocol: "http2",
+						protocol: attempt.responseHeaders ? "http2" : "http",
 						method: "POST",
 						url: new URL(requestPath, baseUrl).toString(),
 						headers: requestHeaders,
@@ -744,25 +729,6 @@ function streamCursorWithWireMode(
 					})
 				: undefined;
 
-			const proxyUrl = getProxyForUrl(model.provider, new URL(baseUrl));
-			if (proxyUrl) {
-				const tlsSocket = await connectProxiedSocket(proxyUrl, baseUrl, {
-					signal: options?.signal,
-					timeoutMs: CURSOR_PROXY_TUNNEL_TIMEOUT_MS,
-				});
-				h2Client = http2.connect(baseUrl, {
-					createConnection: () => tlsSocket,
-				});
-			} else {
-				h2Client = http2.connect(baseUrl);
-			}
-			h2Client.on("error", error => settleH2(mapH2TransportError(error, baseUrl)));
-
-			h2Request = h2Client.request(requestHeaders);
-
-			stream.push({ type: "start", partial: output });
-
-			let pendingBuffer: Buffer = Buffer.alloc(0);
 			let currentTextBlock: (TextContent & { [kStreamingBlockIndex]: number }) | null = null;
 			let currentThinkingBlock: (ThinkingContent & { [kStreamingBlockIndex]: number }) | null = null;
 			let currentToolCall: ToolCallState | null = null;
@@ -797,102 +763,38 @@ function streamCursorWithWireMode(
 					if (!firstTokenTime) firstTokenTime = performance.now();
 				},
 				onTodoSnapshot: options?.execHandlers?.todoSync?.bind(options.execHandlers),
-				onToolResult: options?.onToolResult,
+				onToolResult: resultSink,
 			};
 			openBlockState = state;
 
 			const onConversationCheckpoint = (checkpoint: ConversationStateStructure) => {
-				conversationStateCache.set(conversationId!, checkpoint);
+				conversationEntry.state = checkpoint;
 			};
 
-			h2Request.on("response", headers => {
-				debugResponseLogPromise = debugSession?.openResponseLog(
-					`HTTP/2 ${headers[":status"] ?? ""}`.trim(),
-					headers,
-				);
-			});
-
-			h2Request.on("data", (chunk: Buffer) => {
-				if (debugResponseLogPromise) {
-					void debugResponseLogPromise.then(log => {
-						log?.write(chunk);
-					});
-				}
-				// Steady state drains fully per chunk; alias the fresh h2 chunk instead
-				// of copying it through Buffer.concat (see aws-eventstream.ts).
-				pendingBuffer = pendingBuffer.length === 0 ? chunk : Buffer.concat([pendingBuffer, chunk]);
-
-				while (pendingBuffer.length >= 5) {
-					const flags = pendingBuffer[0];
-					const msgLen = pendingBuffer.readUInt32BE(1);
-					if (pendingBuffer.length < 5 + msgLen) break;
-
-					const messageBytes = pendingBuffer.subarray(5, 5 + msgLen);
-					pendingBuffer = pendingBuffer.subarray(5 + msgLen);
-
-					if (flags & CONNECT_END_STREAM_FLAG) {
-						const endError = parseConnectEndStream(messageBytes);
-						if (endError) {
-							endStreamError = endError;
-							h2Request?.close();
-						}
-						continue;
-					}
-
-					try {
-						const serverMessage = fromBinary(AgentServerMessageSchema, messageBytes);
-						const interaction =
-							serverMessage.message.case === "interactionUpdate" ? serverMessage.message.value : undefined;
-						const interactionCase = interaction?.message?.case;
-						// A heartbeat is a pure keepalive `processInteractionUpdate` ignores;
-						// every other frame is progress or a side effect that must block the
-						// discovered-id retry.
-						if (interactionCase !== "heartbeat") sawProgressOrSideEffect = true;
-						const isTurnEnded = interactionCase === "turnEnded";
-						// Dispatch is fire-and-forget so the socket keeps draining while a
-						// handler runs, but the promise is tracked: `done` must not be
-						// pushed while an exec handler is still resolving, or the Agent
-						// drains its Cursor result buffer before the handler reserved its
-						// entry and the call is left unpaired. Awaited after
-						// `h2Completion` below.
-						const dispatch = handleServerMessage(
-							serverMessage,
-							output,
-							stream,
-							state,
-							blobStore,
-							h2Request!,
-							options?.execHandlers,
-							options?.onToolResult,
-							usageState!,
-							requestContextTools,
-							requestContextRules,
-							onConversationCheckpoint,
-						).catch(error => {
-							log("error", "handleServerMessage", { error: String(error) });
-						});
-						inFlightDispatches.add(dispatch);
-						void dispatch.finally(() => inFlightDispatches.delete(dispatch));
-
-						// Application completion is not protocol success; wait for a clean HTTP/2 end.
-						if (isTurnEnded) {
-							sawTurnEnded = true;
-						}
-					} catch (e) {
-						log("error", "parseServerMessage", { error: String(e) });
-					}
-				}
-			});
-
-			const sendHeartbeat = () => {
-				if (!h2Request || h2Request.closed) {
+			const writeOutbound = (frame: Buffer): void => {
+				if (outboundClosed || attemptClosed || !attempt) return;
+				try {
+					attempt.write(frame);
+				} catch (error) {
+					closeAttempt();
+					void closeDebugLog().finally(() => settleH2(error));
 					return;
 				}
+				disarmHeartbeat();
+				heartbeatTimer = setTimeout(sendHeartbeat, 5000);
+			};
+			const sendHeartbeat = (): void => {
+				if (outboundClosed || attemptClosed || !attempt) return;
 				const heartbeatMessage = create(AgentClientMessageSchema, {
 					message: { case: "clientHeartbeat", value: create(ClientHeartbeatSchema, {}) },
 				});
 				const heartbeatBytes = toBinary(AgentClientMessageSchema, heartbeatMessage);
-				h2Request.write(frameConnectMessage(heartbeatBytes));
+				writeOutbound(encodeConnectFrame(heartbeatBytes, false));
+			};
+			const frameSink: CursorFrameSink = {
+				write(frame: Buffer) {
+					writeOutbound(frame);
+				},
 			};
 
 			const closeDebugLog = async (): Promise<void> => {
@@ -900,43 +802,145 @@ function streamCursorWithWireMode(
 				await log?.close();
 			};
 
-			h2Request.on("trailers", trailers => {
-				const status = trailers["grpc-status"];
-				const msg = trailers["grpc-message"];
-				if (status && status !== "0" && !endStreamError) {
-					endStreamError = new AIError.ProviderResponseError(
-						`gRPC error ${status}: ${decodeURIComponent(String(msg || ""))}`,
-						{ kind: "envelope" },
-					);
+			if (attempt.responseHeaders) {
+				debugResponseLogPromise = attempt
+					.responseHeaders()
+					.then(headers => debugSession?.openResponseLog(`HTTP/2 ${headers[":status"] ?? ""}`.trim(), headers));
+			} else {
+				// The HTTP/1 bridge surfaces no single response-headers moment —
+				// poll and append are separate HTTP responses — but the decoded
+				// poll frames below are still the response body a PI_REQ_DEBUG
+				// session needs. Open a minimal response log up front so those
+				// payloads are captured instead of leaving the dump body-empty.
+				debugResponseLogPromise = Promise.resolve(debugSession?.openResponseLog("HTTP/1.1 bridge"));
+			}
+
+			void attempt
+				.trailers()
+				.then(trailers => {
+					const status = trailers["grpc-status"];
+					const msg = trailers["grpc-message"];
+					if (status && status !== "0" && !endStreamError) {
+						const rawMessage = String(msg || "");
+						let messageText: string;
+						try {
+							messageText = decodeURIComponent(rawMessage);
+						} catch {
+							// A malformed percent-encoded message (e.g. a bare `%`)
+							// must never mask the nonzero status: this handler's
+							// rejection would be swallowed below, leaving a turn
+							// that already saw turnEnded reported successful. Keep
+							// the raw wire value so the failure is recorded.
+							messageText = rawMessage;
+						}
+						endStreamError = new AIError.ProviderResponseError(`gRPC error ${status}: ${messageText}`, {
+							kind: "envelope",
+						});
+					}
+				})
+				.catch(() => {});
+
+			void (async () => {
+				try {
+					for await (const frame of transport.frames()) {
+						if (frame.kind === "data") {
+							void debugResponseLogPromise?.then(log => log?.write(frame.payload));
+						}
+						if (frame.kind === "end") {
+							// Logical outbound close + heartbeat disarm. Do not
+							// destroy the transport here: h2 trailers still need
+							// to arrive. Physical teardown stays in finally.
+							closeOutboundWrites();
+							if (frame.error) {
+								endStreamError = frame.error;
+							}
+							continue;
+						}
+						try {
+							const serverMessage = fromBinary(AgentServerMessageSchema, frame.payload);
+							const interaction =
+								serverMessage.message.case === "interactionUpdate" ? serverMessage.message.value : undefined;
+							const interactionCase = interaction?.message?.case;
+							// A heartbeat is a pure keepalive `processInteractionUpdate` ignores;
+							// every other frame is progress or a side effect that must block the
+							// discovered-id retry.
+							if (interactionCase !== "heartbeat") sawProgressOrSideEffect = true;
+							const isTurnEnded = interactionCase === "turnEnded";
+							const execIdsBefore = new Set<string>();
+							for (const block of output.content) {
+								if (block.type !== "toolCall") continue;
+								const toolCall = block as ToolCallState;
+								if (toolCall[kStreamingBlockKind] === "cursor-exec") execIdsBefore.add(toolCall.id);
+							}
+							const dispatch = handleServerMessage(
+								serverMessage,
+								output,
+								stream,
+								state,
+								blobStore,
+								frameSink,
+								options?.execHandlers,
+								resultSink,
+								usageState!,
+								requestContextTools,
+								requestContextRules,
+								onConversationCheckpoint,
+							).catch(error => {
+								log("error", "handleServerMessage", { error: String(error) });
+							});
+							const ownedExecIds: string[] = [];
+							for (const block of output.content) {
+								if (block.type !== "toolCall") continue;
+								const toolCall = block as ToolCallState;
+								if (toolCall[kStreamingBlockKind] !== "cursor-exec") continue;
+								if (execIdsBefore.has(toolCall.id)) continue;
+								ownedExecIds.push(toolCall.id);
+							}
+							inFlightDispatches.add(dispatch);
+							dispatchExecToolCallIds.set(dispatch, ownedExecIds);
+							void dispatch.finally(() => {
+								inFlightDispatches.delete(dispatch);
+								dispatchExecToolCallIds.delete(dispatch);
+							});
+
+							if (isTurnEnded) {
+								sawTurnEnded = true;
+							}
+						} catch (e) {
+							log("error", "parseServerMessage", { error: String(e) });
+						}
+					}
+					void closeDebugLog()
+						.then(() => settleH2())
+						.catch(error => settleH2(error));
+				} catch (error) {
+					if (error instanceof ConnectProtocolError && error.kind === "incomplete-stream") {
+						void closeDebugLog()
+							.then(() => settleH2())
+							.catch(e => settleH2(e));
+						return;
+					}
+					if (error instanceof ConnectProtocolError) {
+						protocolSealed = true;
+					}
+					const mapped = mapH2TransportError(error, baseUrl);
+					void closeDebugLog().finally(() => settleH2(mapped));
 				}
-			});
-
-			h2Request.on("end", () => {
-				void closeDebugLog()
-					.then(() => settleH2())
-					.catch(error => settleH2(error));
-			});
-
-			h2Request.on("error", error => {
-				const mapped = mapH2TransportError(error, baseUrl);
-				void closeDebugLog().finally(() => settleH2(mapped));
-			});
+			})();
 
 			if (options?.signal) {
 				options.signal.addEventListener("abort", () => {
-					h2Request?.close();
+					closeAttempt();
 					void closeDebugLog().finally(() => {
 						settleH2(new AIError.AbortError());
 					});
 				});
 			}
 
-			h2Request.write(frameConnectMessage(requestBytes));
-			heartbeatTimer = setInterval(sendHeartbeat, 5000);
+			writeOutbound(encodeConnectFrame(requestBytes, true));
 			await h2Completion.promise;
 			if (conversationId && baseConversationId && conversationId !== baseConversationId) {
-				successfulRotatedConversationIds.add(conversationId);
-				freshRotatedConversationIds.delete(conversationId);
+				markCursorRotationSucceeded(conversationId);
 			}
 			// The transport is done, but a handler decoded from the last chunk may
 			// still be running: exec handlers and `onToolResult` transformers are
@@ -945,6 +949,7 @@ function streamCursorWithWireMode(
 			// unpaired and stripped from every rebuilt transcript. Each dispatch
 			// already swallows its own rejection, so this only waits.
 			await drainInFlightDispatches();
+			if (drainTimedOut) deferSyntheticExecPairs(state, output);
 
 			endCurrentTextBlock(output, stream, state);
 			endCurrentThinkingBlock(output, stream, state);
@@ -970,12 +975,7 @@ function streamCursorWithWireMode(
 					? serializedFallbackWireModelId
 					: undefined;
 			if (fallbackWireModelId !== undefined) {
-				if (heartbeatTimer) {
-					clearInterval(heartbeatTimer);
-					heartbeatTimer = null;
-				}
-				h2Request?.close();
-				h2Client?.close();
+				closeAttempt();
 
 				const fallbackStream = streamCursorWithWireMode(model, context, options, "discovered", {
 					startTime,
@@ -1006,6 +1006,10 @@ function streamCursorWithWireMode(
 			// (handlers have no cancellation contract and must not delay the
 			// terminal error the user asked for).
 			await drainInFlightDispatches();
+			// Same completion policy as the success path: a dispatch that outlived
+			// the drain and then exits without pairing still owes a result, and a
+			// terminal error must not leave that call stripped from the transcript.
+			if (drainTimedOut && openBlockState) deferSyntheticExecPairs(openBlockState, output);
 			// A stream that dies mid-turn leaves blocks open, and this is the path
 			// it takes: `settleH2` rejects when the transport closes without
 			// `turnEnded`, so the success-path flush above never runs. Closing
@@ -1027,26 +1031,14 @@ function streamCursorWithWireMode(
 			// side-state: pendingToolCalls from a mid-turn checkpoint re-poison
 			// the new id. One rotation per failure streak; a new rotation is
 			// allowed only after the current rotated id completed a turn.
-			const currentRotated =
-				baseConversationId === undefined ? undefined : rotatedConversationIds.get(baseConversationId);
-			const canRotate = currentRotated === undefined || successfulRotatedConversationIds.has(currentRotated);
 			if (
 				conversationId !== undefined &&
 				baseConversationId !== undefined &&
 				usageState !== undefined &&
 				!usageState.sawTokenDelta &&
-				RESOURCE_EXHAUSTED_PATTERN.test(result.message) &&
-				canRotate
+				RESOURCE_EXHAUSTED_PATTERN.test(result.message)
 			) {
-				const rotated = crypto.randomUUID();
-				if (currentRotated) successfulRotatedConversationIds.delete(currentRotated);
-				rotatedConversationIds.set(baseConversationId, rotated);
-				freshRotatedConversationIds.add(rotated);
-				logger.debug("cursor conversation rotated", {
-					base: baseConversationId,
-					from: conversationId,
-					to: rotated,
-				});
+				rotateCursorConversation(baseConversationId);
 			}
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
@@ -1062,14 +1054,10 @@ function streamCursorWithWireMode(
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		} finally {
+			if (conversationId) unpinCursorConversation(conversationId);
 			const log = await debugResponseLogPromise;
 			await log?.close();
-			if (heartbeatTimer) {
-				clearInterval(heartbeatTimer);
-				heartbeatTimer = null;
-			}
-			h2Request?.close();
-			h2Client?.close();
+			closeAttempt();
 		}
 	})();
 
@@ -1147,7 +1135,7 @@ export async function handleServerMessage(
 	stream: AssistantMessageEventStream,
 	state: BlockState,
 	blobStore: Map<string, Uint8Array>,
-	h2Request: http2.ClientHttp2Stream,
+	h2Request: CursorFrameSink,
 	execHandlers: CursorExecHandlers | undefined,
 	onToolResult: CursorToolResultHandler | undefined,
 	usageState: UsageState,
@@ -1245,7 +1233,7 @@ function protoUnknownFields(message: object): ProtoUnknownField[] {
 function handleKvServerMessage(
 	kvMsg: KvServerMessage,
 	blobStore: Map<string, Uint8Array>,
-	h2Request: http2.ClientHttp2Stream,
+	h2Request: CursorFrameSink,
 ): void {
 	const kvCase = kvMsg.message.case;
 
@@ -1268,7 +1256,7 @@ function handleKvServerMessage(
 		});
 
 		const responseBytes = toBinary(AgentClientMessageSchema, kvClientMessage);
-		h2Request.write(frameConnectMessage(responseBytes));
+		h2Request.write(encodeConnectFrame(responseBytes, false));
 
 		log("kvClient", "getBlobResult", { blobId: blobIdKey.slice(0, 40) });
 	} else if (kvCase === "setBlobArgs") {
@@ -1289,14 +1277,14 @@ function handleKvServerMessage(
 		});
 
 		const responseBytes = toBinary(AgentClientMessageSchema, kvClientMessage);
-		h2Request.write(frameConnectMessage(responseBytes));
+		h2Request.write(encodeConnectFrame(responseBytes, false));
 
 		log("kvClient", "setBlobResult", { blobId: blobIdKey.slice(0, 40) });
 	}
 }
 
 function sendShellStreamEvent(
-	h2Request: http2.ClientHttp2Stream,
+	h2Request: CursorFrameSink,
 	execMsg: ExecServerMessage,
 	event: ShellStream["event"],
 ): void {
@@ -1331,7 +1319,7 @@ function sanitizeShellExecResult(execResult: ShellResult): ShellResult {
 async function handleShellStreamArgs(
 	args: ShellArgs,
 	execMsg: ExecServerMessage,
-	h2Request: http2.ClientHttp2Stream,
+	h2Request: CursorFrameSink,
 	execHandlers: CursorExecHandlers | undefined,
 	onToolResult: CursorToolResultHandler | undefined,
 ): Promise<void> {
@@ -1480,7 +1468,7 @@ async function handleShellStreamArgs(
 }
 
 function sendShellStreamExitFromResult(
-	h2Request: http2.ClientHttp2Stream,
+	h2Request: CursorFrameSink,
 	execMsg: ExecServerMessage,
 	execResult: ShellResult,
 	sendBufferedOutput: boolean,
@@ -1589,7 +1577,7 @@ function sendShellStreamExitFromResult(
 
 async function handleExecServerMessage(
 	execMsg: ExecServerMessage,
-	h2Request: http2.ClientHttp2Stream,
+	h2Request: CursorFrameSink,
 	execHandlers: CursorExecHandlers | undefined,
 	onToolResult: CursorToolResultHandler | undefined,
 	requestContextTools: McpToolDefinition[],
@@ -2512,7 +2500,7 @@ async function handleExecServerMessage(
  * message the server rejects at runtime.
  */
 function sendExecClientMessage<TCase extends NonNullable<ExecClientMessage["message"]["case"]>>(
-	h2Request: http2.ClientHttp2Stream,
+	h2Request: CursorFrameSink,
 	execMsg: ExecServerMessage,
 	messageCase: TCase,
 	value: Extract<ExecClientMessage["message"], { case: TCase }>["value"],
@@ -2528,7 +2516,7 @@ function sendExecClientMessage<TCase extends NonNullable<ExecClientMessage["mess
 	});
 
 	const responseBytes = toBinary(AgentClientMessageSchema, clientMessage);
-	h2Request.write(frameConnectMessage(responseBytes));
+	h2Request.write(encodeConnectFrame(responseBytes, false));
 
 	log("execClientMessage", messageCase, value);
 }
@@ -2550,7 +2538,7 @@ function sendExecClientMessage<TCase extends NonNullable<ExecClientMessage["mess
  * result and cannot tell it apart from a malformed frame.
  */
 function sendExecClientThrow(
-	h2Request: http2.ClientHttp2Stream,
+	h2Request: CursorFrameSink,
 	execMsg: ExecServerMessage,
 	error: string,
 	errorCode?: string,
@@ -2564,12 +2552,12 @@ function sendExecClientThrow(
 	const clientMessage = create(AgentClientMessageSchema, {
 		message: { case: "execClientControlMessage", value: controlMessage },
 	});
-	h2Request.write(frameConnectMessage(toBinary(AgentClientMessageSchema, clientMessage)));
+	h2Request.write(encodeConnectFrame(toBinary(AgentClientMessageSchema, clientMessage), false));
 	log("execClientControl", "throw", { id: execMsg.id, execId: execMsg.execId, error, errorCode });
 	sendExecClientStreamClose(h2Request, execMsg);
 }
 
-function sendExecClientStreamClose(h2Request: http2.ClientHttp2Stream, execMsg: ExecServerMessage): void {
+function sendExecClientStreamClose(h2Request: CursorFrameSink, execMsg: ExecServerMessage): void {
 	const closeMessage = create(ExecClientControlMessageSchema, {
 		message: {
 			case: "streamClose",
@@ -2582,7 +2570,7 @@ function sendExecClientStreamClose(h2Request: http2.ClientHttp2Stream, execMsg: 
 		message: { case: "execClientControlMessage", value: closeMessage },
 	});
 	const responseBytes = toBinary(AgentClientMessageSchema, clientMessage);
-	h2Request.write(frameConnectMessage(responseBytes));
+	h2Request.write(encodeConnectFrame(responseBytes, false));
 	log("execClientControl", "streamClose", { id: execMsg.id, execId: execMsg.execId });
 }
 

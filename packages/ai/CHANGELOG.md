@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a pooled HTTP/2 transport for Cursor that negotiates gzip in both directions, fixing oversized and long-running turns over ALPN-preserving networks.
+- Added an HTTP/1.1 fallback for Cursor on proxies that strip HTTP/2, engaged only when the Cursor server config itself disables bidirectional streaming.
+
+### Changed
+
+- Bumped the Cursor client version to `cli-2026.08.11-e8db854`.
+
+### Fixed
+
+- Keyed the Cursor GetServerConfig cache by caller routing headers so one route cannot authorize the HTTP/1 bridge for another.
+- Routed Cursor HTTP/1 poll and append fetches through `PI_PROXY_CURSOR`.
+- Rejected Cursor HTTP/1 poll data envelopes after the poll EOF flag.
+- Fixed Cursor Connect streams mis-parsing compressed or end-of-stream frames, which previously surfaced as protobuf errors mid-stream.
+- Fixed long-lived Cursor sessions retaining conversation state without bound; cached conversations are now capped and rotation depth is limited.
+- Recorded the selected Cursor transport in `PI_REQ_DEBUG` dumps so HTTP/1 bridge sessions are not labeled `http2`.
+- Stopped a reset Cursor server-config probe from republishing into the cache.
+- Paired Cursor tool results only after the result sink succeeded.
+- Encoded Cursor interaction replies with the shared Connect frame helper.
+- Started the Cursor HTTP/2 frame pump when the lease is wrapped so a stream that ends before `frames()` is iterated cannot hang the turn.
+- Evicted the oldest fresh Cursor conversation rotation when every retained mapping was still in the retry window.
+
+
 ## [18.0.8] - 2026-08-27
 
 ### Added
@@ -26,6 +50,7 @@
 - Fixed multimodal tool results in OpenAI Responses requests so inline, remote, and OpenAI file-backed images are preserved correctly.
 - Fixed resumed and forked Cursor sessions failing when their history came from a Responses-based provider such as Codex ([#9754](https://github.com/can1357/oh-my-pi/issues/9754)).
 - Fixed Cursor `composer-2.5` selections using the Fast variant instead of the Standard tier ([#9012](https://github.com/can1357/oh-my-pi/issues/9012)).
+
 
 ## [18.0.6] - 2026-08-26
 

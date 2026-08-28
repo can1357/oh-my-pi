@@ -22,6 +22,13 @@ export enum ConversationSearchSource {
 	CLOUD_CACHE = 2,
 }
 
+/** Cursor agent enum CursorRuleSource. */
+export enum CursorRuleSource {
+	UNSPECIFIED = 0,
+	TEAM = 1,
+	USER = 2,
+}
+
 /** Cursor agent enum DiagnosticSeverity. */
 export enum DiagnosticSeverity {
 	UNSPECIFIED = 0,
@@ -29,13 +36,6 @@ export enum DiagnosticSeverity {
 	WARNING = 2,
 	INFORMATION = 3,
 	HINT = 4,
-}
-
-/** Cursor agent enum CursorRuleSource. */
-export enum CursorRuleSource {
-	UNSPECIFIED = 0,
-	TEAM = 1,
-	USER = 2,
 }
 
 /** Cursor agent enum ForceBackgroundShellStatus. */
@@ -66,6 +66,15 @@ export enum GitDiff_DiffType {
 	UNSPECIFIED = 0,
 	DIFF_TO_HEAD = 1,
 	DIFF_FROM_BRANCH_TO_MAIN = 2,
+}
+
+/** Cursor agent enum Http2Config. */
+export enum Http2Config {
+	UNSPECIFIED = 0,
+	FORCE_ALL_DISABLED = 1,
+	FORCE_ALL_ENABLED = 2,
+	FORCE_BIDI_DISABLED = 3,
+	FORCE_BIDI_ENABLED = 4,
 }
 
 /** Cursor agent enum ShellBackgroundReason. */
@@ -2862,6 +2871,22 @@ export const GetDiffResponse_SubmoduleDiffSchema: MessageCodec<GetDiffResponse_S
 	{ no: 1, name: "relativePath", kind: "string" },
 	{ no: 2, name: "diff", kind: "message", T: () => GitDiffSchema },
 	{ no: 3, name: "errored", kind: "bool" },
+]);
+
+/** Cursor agent message agent.v1.GetServerConfigRequest. */
+export interface GetServerConfigRequest extends ProtoMessage {
+}
+
+export const GetServerConfigRequestSchema: MessageCodec<GetServerConfigRequest> = pb<GetServerConfigRequest>("agent.v1.GetServerConfigRequest", [
+]);
+
+/** Cursor agent message agent.v1.GetServerConfigResponse. */
+export interface GetServerConfigResponse extends ProtoMessage {
+	http2Config: Http2Config;
+}
+
+export const GetServerConfigResponseSchema: MessageCodec<GetServerConfigResponse> = pb<GetServerConfigResponse>("agent.v1.GetServerConfigResponse", [
+	{ no: 7, name: "http2Config", kind: "enum" },
 ]);
 
 /** Cursor agent message agent.v1.GetUsableModelsRequest. */

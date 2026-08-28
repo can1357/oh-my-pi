@@ -2,10 +2,20 @@
 
 ## [Unreleased]
 
-## [18.0.8] - 2026-08-27
+### Changed
+
+- Routed Cursor model discovery through a pooled HTTP/2 transport.
 
 ### Fixed
 
+- Removed the Cursor discovery timeout abort listener after the request completes so a long timeout cannot retain the response buffer.
+- Discarded the Cursor discovery HTTP/2 session when GetUsableModels times out.
+- Shared Cursor unary request headers and client version with the AI package so discovery and Run cannot drift.
+
+
+## [18.0.8] - 2026-08-27
+
+### Fixed
 - Fixed the thinking control mode for OpenAI models served over Bedrock Converse (`global.openai.gpt-5.6-luna`, `-sol`, `-terra`), which are now classified as `effort` rather than `budget` so requests use OpenAI's reasoning schema.
 - Fixed LiteLLM discovery leaking a colliding bundled model's provider-specific transport onto custom endpoints: a discovered alias (e.g. `kimi-k3`) matching a bundled Fireworks model no longer inherits that model's wire-id transform, which had caused requests to POST a model id the endpoint never advertised and return HTTP 400 ([#9938](https://github.com/can1357/oh-my-pi/issues/9938)).
 
@@ -18,6 +28,7 @@
 ### Fixed
 
 - Fixed LiteLLM model discovery so model pricing is correctly populated when pricing information is provided by a later metadata endpoint.
+
 
 ## [18.0.5] - 2026-08-25
 

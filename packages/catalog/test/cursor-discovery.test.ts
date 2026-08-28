@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as http2 from "node:http2";
 import type * as net from "node:net";
@@ -6,7 +6,15 @@ import * as os from "node:os";
 import * as path from "node:path";
 // Import from source, not the package specifier: the workspace `node_modules`
 // copy resolves to the primary checkout, not this worktree.
-import { fetchCursorUsableModels } from "../src/discovery/cursor";
+import {
+	__cursorDiscoveryHttp2Snapshot,
+	__cursorH2ConnectingSize,
+	__setCursorDiscoveryHttp2EstablishBodyGate,
+	__setCursorDiscoveryHttp2IdleEvictMs,
+	__setCursorDiscoveryTimeoutSignal,
+	disposeCursorDiscoveryHttp2Pool,
+	fetchCursorUsableModels,
+} from "../src/discovery/cursor";
 import { GetUsableModelsResponseSchema, ModelDetailsSchema } from "../src/discovery/cursor-proto";
 import { create, toBinary } from "../src/discovery/protobuf";
 import { resolveProviderModels } from "../src/model-manager";
@@ -57,7 +65,10 @@ beforeAll(async () => {
 			stream.end(payload);
 		});
 	});
-	await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+	const listening = Promise.withResolvers<void>();
+	server.once("error", listening.reject);
+	server.listen(0, "127.0.0.1", listening.resolve);
+	await listening.promise;
 	const address = server.address();
 	if (!address || typeof address === "string") {
 		throw new Error("expected http2 fixture server to bind a tcp port");
@@ -67,6 +78,19 @@ beforeAll(async () => {
 
 afterAll(() => {
 	server?.close();
+});
+beforeEach(() => {
+	disposeCursorDiscoveryHttp2Pool();
+	__setCursorDiscoveryHttp2EstablishBodyGate(undefined);
+	__setCursorDiscoveryHttp2IdleEvictMs(undefined);
+	__setCursorDiscoveryTimeoutSignal(undefined);
+});
+
+afterEach(() => {
+	disposeCursorDiscoveryHttp2Pool();
+	__setCursorDiscoveryHttp2EstablishBodyGate(undefined);
+	__setCursorDiscoveryHttp2IdleEvictMs(undefined);
+	__setCursorDiscoveryTimeoutSignal(undefined);
 });
 
 async function discover(): Promise<Map<string, ModelSpec<"cursor-agent">>> {
@@ -153,12 +177,13 @@ function requireTcpAddress(address: string | net.AddressInfo | null): net.Addres
 	return address;
 }
 
-function startCursorDiscoveryServer(body: Uint8Array): Promise<string> {
+function startCursorDiscoveryServer(body: Uint8Array, seenHeaders?: http2.IncomingHttpHeaders[]): Promise<string> {
 	const { promise, resolve, reject } = Promise.withResolvers<string>();
 	const srv = http2.createServer();
 	servers.add(srv);
 	srv.once("error", reject);
-	srv.on("stream", (stream: http2.ServerHttp2Stream) => {
+	srv.on("stream", (stream: http2.ServerHttp2Stream, headers: http2.IncomingHttpHeaders) => {
+		seenHeaders?.push(headers);
 		stream.respond({ ":status": 200, "content-type": "application/proto" });
 		stream.end(Buffer.from(body));
 	});
@@ -378,5 +403,226 @@ describe("fetchCursorUsableModels", () => {
 				contextWindow: 1_000_000,
 			}),
 		]);
+	});
+
+	it("pins the shared client version on the wire and forwards explicit overrides", async () => {
+		const seen: http2.IncomingHttpHeaders[] = [];
+		const response = create(GetUsableModelsResponseSchema, {
+			models: [create(ModelDetailsSchema, { modelId: "claude-opus-4-8-high-fast" })],
+		});
+		const url = await startCursorDiscoveryServer(toBinary(GetUsableModelsResponseSchema, response), seen);
+
+		const defaulted = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 1_000 });
+		const overridden = await fetchCursorUsableModels({
+			apiKey: "test-token",
+			baseUrl: url,
+			clientVersion: "cli-0000.00.00-override",
+			timeoutMs: 1_000,
+		});
+
+		expect(defaulted).toEqual([expect.objectContaining({ id: "claude-opus-4-8-high-fast" })]);
+		expect(overridden).toEqual(defaulted);
+		expect(seen.map(headers => headers["x-cursor-client-version"])).toEqual([
+			"cli-2026.08.11-e8db854",
+			"cli-0000.00.00-override",
+		]);
+	});
+
+	it("reuses one HTTP/2 session for sequential GetUsableModels calls", async () => {
+		const response = create(GetUsableModelsResponseSchema, {
+			models: [create(ModelDetailsSchema, { modelId: "composer-3" })],
+		});
+		const body = toBinary(GetUsableModelsResponseSchema, response);
+		const { promise, resolve, reject } = Promise.withResolvers<string>();
+		const srv = http2.createServer();
+		servers.add(srv);
+		let sessions = 0;
+		srv.once("error", reject);
+		srv.on("session", () => {
+			sessions++;
+		});
+		srv.on("stream", (stream: http2.ServerHttp2Stream) => {
+			stream.respond({ ":status": 200, "content-type": "application/proto" });
+			stream.end(Buffer.from(body));
+		});
+		srv.listen(0, "127.0.0.1", () => {
+			resolve(`http://127.0.0.1:${requireTcpAddress(srv.address()).port}`);
+		});
+		const url = await promise;
+
+		const first = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 1_000 });
+		const second = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 1_000 });
+
+		expect(first).toEqual([expect.objectContaining({ id: "composer-3" })]);
+		expect(second).toEqual(first);
+		expect(sessions).toBe(1);
+	});
+
+	it("unrefs the pooled session once outstanding leases drop to zero", async () => {
+		const response = create(GetUsableModelsResponseSchema, {
+			models: [create(ModelDetailsSchema, { modelId: "composer-3" })],
+		});
+		const url = await startCursorDiscoveryServer(toBinary(GetUsableModelsResponseSchema, response));
+
+		const models = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 1_000 });
+
+		expect(models).toEqual([expect.objectContaining({ id: "composer-3" })]);
+		expect(__cursorDiscoveryHttp2Snapshot()).toEqual([
+			expect.objectContaining({ outstanding: 0, draining: false, referenced: false }),
+		]);
+	});
+	it("discards the pooled session when GetUsableModels times out", async () => {
+		const { promise, resolve, reject } = Promise.withResolvers<string>();
+		const srv = http2.createServer();
+		servers.add(srv);
+		srv.once("error", reject);
+		srv.on("stream", (stream: http2.ServerHttp2Stream) => {
+			stream.on("data", () => {});
+		});
+		srv.listen(0, "127.0.0.1", () => {
+			resolve(`http://127.0.0.1:${requireTcpAddress(srv.address()).port}`);
+		});
+		const url = await promise;
+		expect(await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 50 })).toBeNull();
+		expect(__cursorDiscoveryHttp2Snapshot()).toEqual([]);
+	});
+
+	it("removes the timeout signal's abort listener after a successful discovery", async () => {
+		const response = create(GetUsableModelsResponseSchema, {
+			models: [create(ModelDetailsSchema, { modelId: "composer-3" })],
+		});
+		const url = await startCursorDiscoveryServer(toBinary(GetUsableModelsResponseSchema, response));
+		// A long `timeoutMs` arms a signal that never fires: swap the module-local
+		// factory for a counting wrapper so the test can see the listener
+		// bookkeeping. The abort listener `readUnaryResponse` installs must come
+		// off when the read settles, or it retains `finish` — and through it the
+		// request, the lease, and every buffered chunk — until the timer's own GC.
+		const inner = new AbortController().signal;
+		let listeners = 0;
+		const counted = new Proxy(inner, {
+			get(target, prop) {
+				if (prop === "addEventListener") {
+					return (type: string, listener: EventListener, options?: unknown) => {
+						listeners++;
+						target.addEventListener(type, listener, options as AddEventListenerOptions);
+					};
+				}
+				if (prop === "removeEventListener") {
+					return (type: string, listener: EventListener, options?: unknown) => {
+						listeners--;
+						target.removeEventListener(type, listener, options as EventListenerOptions);
+					};
+				}
+				const value = Reflect.get(target, prop, target);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		}) as AbortSignal;
+		let timeoutFactoryCalls = 0;
+		__setCursorDiscoveryTimeoutSignal(() => {
+			timeoutFactoryCalls++;
+			return counted;
+		});
+		try {
+			const models = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 60_000 });
+			expect(timeoutFactoryCalls).toBe(1);
+			expect(models).toEqual([expect.objectContaining({ id: "composer-3" })]);
+			// Every listener taken on the timeout signal (the read's own plus
+			// the pool's connect-wait and lease guards) was removed on settle.
+			expect(listeners).toBe(0);
+		} finally {
+			__setCursorDiscoveryTimeoutSignal(undefined);
+		}
+	});
+
+	it("cancels a connect whose last waiter aborted mid-handshake instead of publishing it", async () => {
+		const response = create(GetUsableModelsResponseSchema, {
+			models: [create(ModelDetailsSchema, { modelId: "composer-3" })],
+		});
+		const url = await startCursorDiscoveryServer(toBinary(GetUsableModelsResponseSchema, response));
+		const { promise: released, resolve: releaseGate } = Promise.withResolvers<void>();
+		const { promise: gated, resolve: sawGate } = Promise.withResolvers<void>();
+		__setCursorDiscoveryHttp2EstablishBodyGate(async () => {
+			sawGate();
+			await released;
+		});
+
+		const pending = fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 20 });
+		await gated;
+		expect(__cursorDiscoveryHttp2Snapshot()).toEqual([]);
+		expect(await pending).toBeNull();
+		// The last live waiter left before the handshake completed, so the
+		// connect is cancelled and must never publish a session into the pool —
+		// nor leave a destroyed one reserved for the next discovery.
+		expect(__cursorH2ConnectingSize()).toBe(0);
+		expect(__cursorDiscoveryHttp2Snapshot()).toEqual([]);
+		releaseGate();
+		// The suspended establish body's post-gate continuation is pure
+		// microtasks (the settled guard returns before any connect), so drain
+		// them rather than sleeping.
+		for (let i = 0; i < 10; i++) await Promise.resolve();
+		expect(__cursorH2ConnectingSize()).toBe(0);
+		expect(__cursorDiscoveryHttp2Snapshot()).toEqual([]);
+		// A later discovery retries a fresh connect instead of joining the
+		// cancelled reservation.
+		const models = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 1_000 });
+		expect(models).toEqual([expect.objectContaining({ id: "composer-3" })]);
+	});
+
+	it("evicts an idle pooled session on a later acquisition instead of retaining it forever", async () => {
+		const response = create(GetUsableModelsResponseSchema, {
+			models: [create(ModelDetailsSchema, { modelId: "composer-3" })],
+		});
+		const body = toBinary(GetUsableModelsResponseSchema, response);
+		const { promise, resolve, reject } = Promise.withResolvers<string>();
+		const srv = http2.createServer();
+		servers.add(srv);
+		let sessions = 0;
+		srv.once("error", reject);
+		srv.on("session", () => {
+			sessions++;
+		});
+		srv.on("stream", (stream: http2.ServerHttp2Stream) => {
+			stream.respond({ ":status": 200, "content-type": "application/proto" });
+			stream.end(Buffer.from(body));
+		});
+		srv.listen(0, "127.0.0.1", () => {
+			resolve(`http://127.0.0.1:${requireTcpAddress(srv.address()).port}`);
+		});
+		const url = await promise;
+
+		const first = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 1_000 });
+		expect(first).toEqual([expect.objectContaining({ id: "composer-3" })]);
+		expect(__cursorDiscoveryHttp2Snapshot()).toHaveLength(1);
+
+		// Real platform clock: eviction is gated on Date.now() deltas and has
+		// no deterministic seam — faking timers would break the real http2
+		// fixture stack — so age the entry past a shrunken window instead.
+		__setCursorDiscoveryHttp2IdleEvictMs(20);
+		await Bun.sleep(40);
+		const second = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 1_000 });
+
+		expect(second).toEqual(first);
+		// The idle entry was destroyed before the pool was consulted, so this
+		// discovery opened a fresh session rather than reusing the stale one.
+		expect(sessions).toBe(2);
+	});
+
+	it("maps request failures to null", async () => {
+		const { promise, resolve, reject } = Promise.withResolvers<string>();
+		const srv = http2.createServer();
+		servers.add(srv);
+		srv.once("error", reject);
+		srv.on("stream", (stream: http2.ServerHttp2Stream) => {
+			stream.respond({ ":status": 500 });
+			stream.end();
+		});
+		srv.listen(0, "127.0.0.1", () => {
+			resolve(`http://127.0.0.1:${requireTcpAddress(srv.address()).port}`);
+		});
+		const url = await promise;
+
+		const models = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 1_000 });
+
+		expect(models).toBeNull();
 	});
 });
