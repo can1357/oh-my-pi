@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed strict-mode tool schemas silently closing a bare open object property (`type: "object"` with no `properties` or `additionalProperties`) into a `{}`-only shape while still reporting `strict: true`; such schemas now fail open to non-strict like other unrepresentable open shapes ([#10125](https://github.com/can1357/oh-my-pi/issues/10125)).
+
 ## [18.0.9] - 2026-08-28
 
 ### Fixed

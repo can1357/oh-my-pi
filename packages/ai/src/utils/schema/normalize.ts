@@ -1746,6 +1746,12 @@ function isUnrepresentableStrictBranch(value: unknown): boolean {
  *  - `patternProperties` (open keyset matched by regex),
  *  - `additionalProperties: true` or `additionalProperties: <schema>` (open
  *    keyset with optional further constraint).
+ *  - a bare open object (`type: "object"` with neither `properties`,
+ *    `patternProperties`, nor an `additionalProperties` keyword): it accepts
+ *    any object shape, but `enforceStrictSchema` would close it into
+ *    `{additionalProperties: false, properties: {}, required: []}` — a schema
+ *    that only matches `{}`, silently narrowing the field while `strict: true`
+ *    stays on (issue #10125).
  *  - boolean schemas (`true`/`false`) inside `anyOf`/`oneOf`/`allOf`/`items`/
  *    `prefixItems` — strict providers (OpenAI/Codex) reject the unconstrained
  *    branch, and `enforceStrictSchema` would otherwise wave the non-object
@@ -1770,6 +1776,18 @@ function hasUnrepresentableStrictObjectMap(schema: Record<string, unknown>, epoc
 	const additionalPropertiesValue = schema.additionalProperties;
 	const hasSchemaAdditionalProperties = additionalPropertiesValue === true || isJsonObject(additionalPropertiesValue);
 	if (hasPatternProperties || hasSchemaAdditionalProperties) {
+		return true;
+	}
+
+	// A bare open object closes into a `{}`-only shape under strict enforcement.
+	// `closeDeclaredObjects` only pins `additionalProperties: false` on nodes
+	// that declare `properties`, so a node with none survives the wire pass open;
+	// treat it as unrepresentable here so strict fails open instead of shipping a
+	// closed empty object (issue #10125). An explicit `additionalProperties`
+	// keyword (including `false`) or a `properties` map means the shape was
+	// declared, so those are left to normal enforcement.
+	const isObjectType = schema.type === "object" || (Array.isArray(schema.type) && schema.type.includes("object"));
+	if (isObjectType && !isJsonObject(schema.properties) && !("additionalProperties" in schema)) {
 		return true;
 	}
 

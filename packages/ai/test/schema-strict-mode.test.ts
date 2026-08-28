@@ -1055,6 +1055,35 @@ describe("adaptSchemaForStrict — unrepresentable open branches fall back to no
 		expect(adaptSchemaForStrict(schema, true).strict).toBe(false);
 	});
 
+	it("falls back when a property is a bare open object (type:object, no properties/additionalProperties)", () => {
+		// A bare `type("object")` property survives `toolWireSchema` as
+		// `{type:"object"}` (closeDeclaredObjects only closes nodes that declare
+		// `properties`). Strict enforcement would otherwise close it into
+		// `{additionalProperties:false, properties:{}, required:[]}` — matching only
+		// `{}` — while `strict:true` stayed on, so real calls fail provider-side
+		// (issue #10125). It must instead downgrade to non-strict.
+		const wire = toolWireSchema({
+			name: "t",
+			description: "d",
+			parameters: type({ path: type("string"), "args?": type("object") }),
+		} as Tool);
+		expect((wire.properties as Record<string, Record<string, unknown>>).args).toEqual({ type: "object" });
+		expect(adaptSchemaForStrict(wire, true).strict).toBe(false);
+	});
+
+	it("still enforces strict for a declared empty object (properties:{})", () => {
+		// A `properties:{}` object is a *declared* closed shape (no fields), not an
+		// open object — strict must stay on so the #10125 fail-open does not
+		// over-fire on legitimate no-field objects.
+		const schema: Record<string, unknown> = {
+			type: "object",
+			properties: { cfg: { type: "object", properties: {}, additionalProperties: false } },
+			required: ["cfg"],
+			additionalProperties: false,
+		};
+		expect(adaptSchemaForStrict(schema, true).strict).toBe(true);
+	});
+
 	it("still enforces strict for fully-typed schemas (no false positives)", () => {
 		const schema: Record<string, unknown> = {
 			type: "object",
