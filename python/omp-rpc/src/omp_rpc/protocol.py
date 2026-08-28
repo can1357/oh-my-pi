@@ -18,6 +18,7 @@ ThinkingLevel: TypeAlias = Literal[
 StreamingBehavior: TypeAlias = Literal["steer", "followUp"]
 SteeringMode: TypeAlias = Literal["all", "one-at-a-time"]
 InterruptMode: TypeAlias = Literal["immediate", "wait"]
+RecapTrigger: TypeAlias = Literal["idle"]
 StopReason: TypeAlias = Literal["stop", "length", "toolUse", "error", "aborted"]
 NotifyType: TypeAlias = Literal["info", "warning", "error"]
 WidgetPlacement: TypeAlias = Literal["aboveEditor", "belowEditor"]
@@ -72,6 +73,7 @@ _EFFORT_VALUES: Final[frozenset[str]] = frozenset(
 _THINKING_LEVEL_VALUES: Final[frozenset[str]] = _EFFORT_VALUES | frozenset({"off"})
 _STEERING_MODE_VALUES: Final[frozenset[str]] = frozenset({"all", "one-at-a-time"})
 _INTERRUPT_MODE_VALUES: Final[frozenset[str]] = frozenset({"immediate", "wait"})
+_RECAP_TRIGGER_VALUES: Final[frozenset[str]] = frozenset({"idle"})
 _STOP_REASON_VALUES: Final[frozenset[str]] = frozenset(
     {"stop", "length", "toolUse", "error", "aborted"}
 )
@@ -829,6 +831,13 @@ class ContextUsage:
 
 
 @dataclass(slots=True, frozen=True)
+class Recap:
+    text: str
+    trigger: RecapTrigger
+    timestamp: int
+
+
+@dataclass(slots=True, frozen=True)
 class SessionState:
     model: ModelInfo | None
     thinking_level: ThinkingLevel | None
@@ -850,6 +859,7 @@ class SessionState:
     fast_mode_active: bool = False
     tokens_per_second: float | None = None
     context_usage: ContextUsage | None = None
+    latest_recap: Recap | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -1136,6 +1146,12 @@ class TodoAutoClearEvent:
 
 
 @dataclass(slots=True, frozen=True)
+class RecapUpdateEvent:
+    recap: Recap | None
+    type: Literal["recap_update"] = "recap_update"
+
+
+@dataclass(slots=True, frozen=True)
 class UnknownNotification:
     payload: JsonObject
     type: Literal["unknown"] = "unknown"
@@ -1169,6 +1185,7 @@ RpcNotification: TypeAlias = (
     | ExtensionUiRequest
     | ExtensionError
     | RpcAgentEvent
+    | RecapUpdateEvent
     | UnknownNotification
 )
 
@@ -1378,6 +1395,24 @@ def parse_todo_phases(payload: JsonValue | None) -> tuple[TodoPhase, ...]:
     return tuple(parse_todo_phase(cast(JsonObject, item)) for item in payload)
 
 
+def parse_recap(payload: JsonObject) -> Recap:
+    timestamp = payload.get("timestamp")
+    if not isinstance(timestamp, int) or isinstance(timestamp, bool):
+        raise ValueError("recap.timestamp must be an integer")
+    return Recap(
+        text=_require_str(payload, "text"),
+        trigger=cast(
+            RecapTrigger,
+            _require_literal(
+                payload.get("trigger"),
+                _RECAP_TRIGGER_VALUES,
+                field="recap.trigger",
+            ),
+        ),
+        timestamp=timestamp,
+    )
+
+
 def parse_session_state(payload: JsonObject) -> SessionState:
     dump_tools = tuple(
         parse_tool_descriptor(_clone_json_object(item, field="dumpTools[]"))
@@ -1427,6 +1462,15 @@ def parse_session_state(payload: JsonObject) -> SessionState:
         queued_message_count=int(payload.get("queuedMessageCount", 0)),
         todo_phases=parse_todo_phases(
             cast(JsonValue | None, payload.get("todoPhases"))
+        ),
+        latest_recap=(
+            parse_recap(
+                _clone_json_object(
+                    payload.get("latestRecap"), field="sessionState.latestRecap"
+                )
+            )
+            if payload.get("latestRecap") is not None
+            else None
         ),
         system_prompt=_optional_str_list(payload, "systemPrompt"),
         dump_tools=dump_tools,
@@ -1825,6 +1869,17 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
         )
     if event_type == "todo_auto_clear":
         return TodoAutoClearEvent()
+    if event_type == "recap_update":
+        recap_payload = payload.get("recap")
+        return RecapUpdateEvent(
+            recap=(
+                parse_recap(
+                    _clone_json_object(recap_payload, field="recap_update.recap")
+                )
+                if recap_payload is not None
+                else None
+            )
+        )
     return UnknownNotification(
         payload=_clone_json_object(payload, field="notification")
     )

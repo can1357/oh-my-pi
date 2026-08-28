@@ -96,6 +96,12 @@ export type RpcCommand =
 // RPC State
 // ============================================================================
 
+export interface RpcRecap {
+	text: string;
+	trigger: "idle";
+	timestamp: number;
+}
+
 export interface RpcSessionState {
 	model?: Model;
 	thinkingLevel: ThinkingLevel | undefined;
@@ -114,6 +120,7 @@ export interface RpcSessionState {
 	messageCount: number;
 	queuedMessageCount: number;
 	todoPhases: TodoPhase[];
+	latestRecap?: RpcRecap;
 	/** For session dump / export (plain-text parity with /dump). */
 	systemPrompt?: string[];
 	dumpTools?: Array<{ name: string; description: string; parameters: unknown; examples?: readonly ToolExample[] }>;
@@ -128,6 +135,11 @@ export interface RpcAvailableSlashCommand {
 	input?: { hint?: string };
 	subcommands?: Array<{ name: string; description?: string; usage?: string }>;
 	source: AvailableSlashCommandSource;
+}
+
+export interface RpcRecapUpdateFrame {
+	type: "recap_update";
+	recap: RpcRecap | null;
 }
 
 export interface RpcAvailableCommandsUpdateFrame {
@@ -362,7 +374,7 @@ export interface RpcSubagentEventFrame {
 
 export type RpcSubagentFrame = RpcSubagentLifecycleFrame | RpcSubagentProgressFrame | RpcSubagentEventFrame;
 
-export type RpcSessionEventFrame = AgentSessionEvent | RpcSubagentFrame;
+export type RpcSessionEventFrame = AgentSessionEvent | RpcSubagentFrame | RpcRecapUpdateFrame;
 
 // ============================================================================
 // Extension UI Events (stdout)

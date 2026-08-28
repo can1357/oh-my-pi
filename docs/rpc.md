@@ -80,7 +80,8 @@ Legacy clients may ignore the added ready fields and remain on v1. V1 retains it
 8. Available-commands updates (`{ type: "available_commands_update", commands }`), emitted at startup and whenever command metadata changes
 9. Prompt lifecycle hints (`{ type: "prompt_result", id?, agentInvoked }`) for scheduled prompts that later resolve without invoking the agent
 10. Subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`), gated by `set_subagent_subscription`
-11. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
+11. Idle recap updates (`{ type: "recap_update", recap }`)
+12. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
 
 ### Inbound frame categories (stdin)
 
@@ -276,6 +277,11 @@ is re-armed.
       ]
     }
   ],
+  "latestRecap": {
+    "text": "Mapped the RPC surface. Next: implement the client adapter.",
+    "trigger": "idle",
+    "timestamp": 1787911200000
+  },
   "systemPrompt": ["..."],
   "dumpTools": [
     {
@@ -291,6 +297,30 @@ is re-armed.
   }
 }
 ```
+
+### Idle recap updates
+
+After a terminal `agent_end`, RPC mode applies the configured `recap.enabled`
+and `recap.idleSeconds` policy, then runs the same ephemeral recap model turn
+used by the TUI. A completed recap is emitted as:
+
+```json
+{
+  "type": "recap_update",
+  "recap": {
+    "text": "Mapped the RPC surface. Next: implement the client adapter.",
+    "trigger": "idle",
+    "timestamp": 1787911200000
+  }
+}
+```
+
+`timestamp` is Unix epoch milliseconds. A new agent turn or successful session
+change invalidates the current recap and emits
+`{ "type": "recap_update", "recap": null }`. `get_state.latestRecap` exposes the
+current value for reconnecting clients and is absent when no recap is active.
+The bundled TypeScript and Python clients expose these frames through
+`onRecapUpdate` and `on_recap_update`, respectively.
 
 ### `set_fast_mode` payload
 

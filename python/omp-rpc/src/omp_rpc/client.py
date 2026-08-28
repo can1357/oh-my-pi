@@ -43,6 +43,7 @@ from .protocol import (
     ModelCycleResult,
     ModelInfo,
     ReadyEvent,
+    RecapUpdateEvent,
     RetryFallbackAppliedEvent,
     RetryFallbackSucceededEvent,
     RpcAgentEvent,
@@ -87,6 +88,7 @@ NotificationListener = Callable[[RpcNotification], None]
 UiRequestListener = Callable[[ExtensionUiRequest], None]
 ExtensionErrorListener = Callable[[ExtensionError], None]
 ReadyListener = Callable[[ReadyEvent], None]
+RecapUpdateListener = Callable[[RecapUpdateEvent], None]
 UnknownNotificationListener = Callable[[UnknownNotification], None]
 AgentStartListener = Callable[[AgentStartEvent], None]
 AgentEndListener = Callable[[AgentEndEvent], None]
@@ -542,6 +544,7 @@ class RpcClient:
         self._typed_event_listeners: dict[str, list[AgentEventListener]] = {}
         self._ready_listeners: list[ReadyListener] = []
         self._unknown_notification_listeners: list[UnknownNotificationListener] = []
+        self._recap_update_listeners: list[RecapUpdateListener] = []
         self._ui_request_listeners: list[UiRequestListener] = []
         self._extension_error_listeners: list[ExtensionErrorListener] = []
         self._protocol_error_listeners: list[ProtocolErrorListener] = []
@@ -804,6 +807,10 @@ class RpcClient:
 
     def on_todo_auto_clear(self, listener: TodoAutoClearListener) -> Callable[[], None]:
         return self._add_typed_event_listener("todo_auto_clear", listener)
+
+    def on_recap_update(self, listener: RecapUpdateListener) -> Callable[[], None]:
+        self._recap_update_listeners.append(listener)
+        return lambda: self._remove_listener(self._recap_update_listeners, listener)
 
     def on_ui_request(self, listener: UiRequestListener) -> Callable[[], None]:
         self._ui_request_listeners.append(listener)
@@ -1955,6 +1962,15 @@ class RpcClient:
                     )
                     continue
 
+                if isinstance(notification, RecapUpdateEvent):
+                    self._dispatch_listeners(
+                        "recap_update",
+                        notification.type,
+                        self._recap_update_listeners,
+                        notification,
+                    )
+                    continue
+
                 if isinstance(notification, UnknownNotification):
                     self._dispatch_listeners(
                         "unknown_notification",
@@ -1966,10 +1982,7 @@ class RpcClient:
 
                 event = cast(RpcAgentEvent, notification)
                 self._append_event(payload)
-                if (
-                    isinstance(event, AgentEndEvent)
-                    and event.is_terminal is not False
-                ):
+                if isinstance(event, AgentEndEvent) and event.is_terminal is not False:
                     self._mark_agent_run_completed()
                 self._dispatch_listeners(
                     "event", event.type, self._event_listeners, event

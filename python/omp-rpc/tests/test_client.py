@@ -14,6 +14,7 @@ import unittest
 
 from omp_rpc import (
     AgentEndEvent,
+    RecapUpdateEvent,
     RpcClient,
     RpcCommandError,
     RpcConcurrencyError,
@@ -470,6 +471,20 @@ FAKE_SERVER = textwrap.dedent(
                 include_extra_events=message == "all events",
                 compact_terminal=message == "compacted turn",
             )
+            if message == "recap notification":
+                print(
+                    json.dumps(
+                        {
+                            "type": "recap_update",
+                            "recap": {
+                                "text": "Tests pass. Next: publish.",
+                                "trigger": "idle",
+                                "timestamp": 1787911200000,
+                            },
+                        }
+                    ),
+                    flush=True,
+                )
         elif command_type == "host_tool_update":
             print(
                 json.dumps(
@@ -1137,6 +1152,23 @@ class RpcClientTests(unittest.TestCase):
         self.assertIn("turn_start", notification_types)
         self.assertIn("agent_end", notification_types)
 
+    def test_recap_update_listener(self) -> None:
+        recaps: list[RecapUpdateEvent] = []
+        received = threading.Event()
+
+        def record(event: RecapUpdateEvent) -> None:
+            recaps.append(event)
+            received.set()
+
+        with self.make_client() as client:
+            client.on_recap_update(record)
+            client.prompt_and_wait("recap notification", timeout=2.0)
+            self.assertTrue(received.wait(2.0))
+
+        self.assertEqual(len(recaps), 1)
+        assert recaps[0].recap is not None
+        self.assertEqual(recaps[0].recap.text, "Tests pass. Next: publish.")
+
     def test_set_todos_supports_flat_items(self) -> None:
         with self.make_client() as client:
             phases = client.set_todos(["Map tools", "Exercise edits"])
@@ -1353,9 +1385,7 @@ class RpcClientTests(unittest.TestCase):
             client.on_unknown_notification(
                 lambda event: unknown_errors.append(event.parse_error)
             )
-            with self.assertRaisesRegex(
-                RpcError, "Failed to parse terminal agent_end"
-            ):
+            with self.assertRaisesRegex(RpcError, "Failed to parse terminal agent_end"):
                 client.prompt_and_wait("malformed terminal", timeout=1.0)
 
         self.assertEqual(len(unknown_errors), 1)
