@@ -623,11 +623,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	todoPhases: TodoPhase[] = [];
 	/**
 	 * Session that owns the plan currently in {@link todoPhases}. Subagent
-	 * reconciliation persists back to this session — never blindly to
-	 * `viewSession`. During a focus attach `viewSession` flips to the destination
-	 * before `reloadTodos` refreshes the snapshot, so an observer flush in that
-	 * window would otherwise write the previous session's plan into the
-	 * destination's canonical todos (#9575 review).
+	 * reconciliation persists to this session, not blindly to `viewSession`,
+	 * which flips to the destination before `reloadTodos` refreshes during
+	 * focus attach.
 	 */
 	#todoPhasesOwner?: AgentSession;
 	hideThinkingBlock = false;
@@ -1540,28 +1538,84 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * a session from another project). The SessionManager's cwd MUST already
 	 * reflect `newCwd` before this is called.
 	 */
-	async applyCwdChange(newCwd: string): Promise<void> {
-		setProjectDir(newCwd);
-		// Re-scope project settings (`.claude/settings.yml` etc.) to the new
-		// directory in place so the active session and every settings reader pick
-		// up the destination project's configuration.
-		if (isSettingsInitialized()) {
-			await settings.reloadForCwd(newCwd);
-			// Reapply provider preferences from the newly-loaded settings so the
-			// module-level search/image provider state reflects the destination
-			// project's configuration. Without this, the previous project's
-			// exclusions leak and newly-excluded providers are still used.
-			applyProviderGlobalsFromSettings(settings);
+	async applyCwdChange(newCwd: string): Promise<boolean> {
+		const previousCwd = getProjectDir();
+		try {
+			setProjectDir(newCwd);
+		} catch (error) {
+			this.showError(
+				`Cannot change working directory to ${newCwd}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return false;
 		}
-		// Re-warm plugin roots, capabilities, slash commands, and the ssh tool so
-		// the next prompt sees everything scoped to the new project directory.
-		clearClaudePluginRootsCache();
-		await this.refreshTitleSystemPrompt(newCwd);
-		resetCapabilities();
-		await this.refreshSkillState();
-		await this.refreshSlashCommandState(newCwd);
+		// Everything after chdir is a rescope of cwd-derived state. If any of it
+		// fails, undo the chdir so `false` reliably means "nothing committed";
+		// callers roll back their own session/manager state on false.
+		try {
+			// Re-scope project settings (`.claude/settings.yml` etc.) to the new
+			// directory in place so the active session and every settings reader pick
+			// up the destination project's configuration.
+			if (isSettingsInitialized()) {
+				await settings.reloadForCwd(newCwd);
+				// Reapply provider preferences from the newly-loaded settings so the
+				// module-level search/image provider state reflects the destination
+				// project's configuration. Without this, the previous project's
+				// exclusions leak and newly-excluded providers are still used.
+				applyProviderGlobalsFromSettings(settings);
+			}
+			// Re-warm plugin roots, capabilities, slash commands, and the ssh tool so
+			// the next prompt sees everything scoped to the new project directory.
+			clearClaudePluginRootsCache();
+			await this.refreshTitleSystemPrompt(newCwd);
+			resetCapabilities();
+			await this.refreshSkillState();
+			await this.refreshSlashCommandState(newCwd);
+		} catch (error) {
+			// Undo the whole transition: the process cwd, Settings scope, and
+			// cwd-derived caches (provider globals, plugin roots, capabilities,
+			// skills, slash commands) must all return to the source project so a
+			// `false` result reliably means nothing was committed.
+			this.sessionManager.setCwdWithoutRelocation(previousCwd);
+			try {
+				setProjectDir(previousCwd);
+				if (isSettingsInitialized()) {
+					await settings.reloadForCwd(previousCwd);
+					applyProviderGlobalsFromSettings(settings);
+				}
+				clearClaudePluginRootsCache();
+				await this.refreshTitleSystemPrompt(previousCwd);
+				resetCapabilities();
+				await this.refreshSkillState();
+				await this.refreshSlashCommandState(previousCwd);
+			} catch (restoreError) {
+				const actual = this.sessionManager.getCwd();
+				try {
+					setProjectDir(actual);
+					if (isSettingsInitialized()) {
+						await settings.reloadForCwd(actual);
+						applyProviderGlobalsFromSettings(settings);
+					}
+					clearClaudePluginRootsCache();
+					await this.refreshTitleSystemPrompt(actual);
+					resetCapabilities();
+					await this.refreshSkillState();
+					await this.refreshSlashCommandState(actual);
+				} catch {}
+				this.showError(
+					`Failed to switch to ${newCwd} (${error instanceof Error ? error.message : String(error)}), and restoring the previous workspace failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
+				);
+				throw new Error(
+					`Failed to restore workspace after failed switch to ${newCwd}: ${restoreError instanceof Error ? restoreError.message : String(restoreError)} (workspace may be inconsistent at ${actual})`,
+				);
+			}
+			this.showError(
+				`Cannot change working directory to ${newCwd}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return false;
+		}
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		this.statusLine.applyCwdChange();
+		return true;
 	}
 
 	async getUserInput(): Promise<SubmittedUserInput> {
@@ -1659,6 +1713,19 @@ export class InteractiveMode implements InteractiveModeContext {
 			clearTimeout(this.#goalContinuationTimer);
 			this.#goalContinuationTimer = undefined;
 		}
+	}
+
+	cancelGoalContinuation(): void {
+		this.#cancelGoalContinuation();
+	}
+
+	disableGoalMode(message = "Goal mode disabled."): void {
+		const was = this.goalModeEnabled;
+		this.goalModeEnabled = false;
+		this.goalModePaused = false;
+		this.#cancelGoalContinuation();
+		this.#updateGoalModeStatus();
+		if (was) this.showStatus(message);
 	}
 
 	#isAutoSubmitBlocked(): boolean {
@@ -3163,14 +3230,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!this.planModeEnabled) {
 			return;
 		}
-		// A mid-turn user exit must land on the CURRENTLY streaming turn, not only
-		// the next one. The turn-start `plan-mode-active.md` block orders the model
-		// to keep planning until it writes a plan to `xd://propose`, so without
-		// interrupting the live turn the agent keeps acting in plan mode until it
-		// emits a plan (issue #9699). Mirror `#exitVibeMode`: abort inside
-		// `runModeExitTeardown` so a queued steer/follow-up cannot restart on the
-		// still-live plan toolset before teardown restores the previous tools
-		// (issue #8326).
+		// A mid-turn exit must interrupt the currently streaming turn.
+		// The plan-mode prompt instructs the model to keep planning until it
+		// writes to `xd://propose`, so the live turn must be aborted inside
+		// `runModeExitTeardown` to avoid restarting on the stale toolset.
 		if (options?.interruptActiveTurn && this.session.isStreaming) {
 			await this.session.runModeExitTeardown(async () => {
 				await this.session.abort({ reason: USER_INTERRUPT_LABEL });
