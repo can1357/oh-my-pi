@@ -859,6 +859,12 @@ function streamCursorWithWireMode(
 							closeOutboundWrites();
 							if (frame.error) {
 								endStreamError = frame.error;
+								// An error-bearing end frame is terminal: a half-open peer
+								// may never close the stream, so waiting for the natural
+								// end would hang. Break now and let the post-loop settle
+								// surface the error with the existing precedence. Clean end
+								// frames (no error) still fall through to wait for trailers.
+								break;
 							}
 							continue;
 						}

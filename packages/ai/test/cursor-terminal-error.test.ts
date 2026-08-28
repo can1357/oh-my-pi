@@ -22,6 +22,7 @@ const CONNECT_END_STREAM_FLAG = 0b00000010;
 
 type Scenario =
 	| { kind: "success" }
+	| { kind: "connect-error-half-open" }
 	| { kind: "connect-error-after-turn" }
 	| { kind: "connect-detailed-error-after-turn" }
 	| { kind: "connect-classification-detail-after-turn" }
@@ -260,6 +261,14 @@ async function startServer(): Promise<string> {
 			return;
 		}
 
+		if (scenario.kind === "connect-error-half-open") {
+			stream.write(connectEndErrorFrame("unavailable", "half-open connect failure"));
+			// Deliberately do NOT call stream.end(): the H2 stream stays
+			// half-open, so the transport's frame loop never sees a stream
+			// close. Without the fix the client hangs waiting for one.
+			return;
+		}
+
 		if (scenario.kind === "hang-after-turn") {
 			return;
 		}
@@ -357,6 +366,24 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(eventTypes).not.toContain("done");
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("Connect error unavailable: post-turn connect failure");
+	});
+
+	it("settles promptly on an error end frame even when the stream stays half-open", async () => {
+		// The server sends a Connect end-of-stream envelope carrying an error
+		// after turnEnded, then deliberately keeps the H2 stream half-open
+		// (no `stream.end()`). Without the fix, the provider's frame loop
+		// continues past the error end frame and waits for a stream close
+		// that never arrives — the client hangs indefinitely. The error end
+		// frame must settle the attempt immediately, surfacing the same
+		// terminal error as a closed-stream end frame.
+		scenario = { kind: "connect-error-half-open" };
+		const baseUrl = await startServer();
+		const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+		expect(eventTypes[0]).toBe("start");
+		expect(eventTypes.at(-1)).toBe("error");
+		expect(eventTypes).not.toContain("done");
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("Connect error unavailable: half-open connect failure");
 	});
 
 	it("surfaces standard Connect detail values without changing recovery classification", async () => {

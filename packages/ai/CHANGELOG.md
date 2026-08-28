@@ -23,6 +23,8 @@
 - Paired Cursor tool results only after the result sink succeeded.
 - Encoded Cursor interaction replies with the shared Connect frame helper.
 - Started the Cursor HTTP/2 frame pump when the lease is wrapped so a stream that ends before `frames()` is iterated cannot hang the turn.
+- Settled Cursor Connect turns immediately when an error end frame arrives on a half-open HTTP/2 stream.
+- Bounded the Cursor HTTP/2 frame queue by retained bytes so a stalled consumer fails instead of buffering without limit.
 - Evicted the oldest fresh Cursor conversation rotation when every retained mapping was still in the retry window.
 
 

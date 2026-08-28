@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { EventEmitter } from "node:events";
 import * as http from "node:http";
 import * as http2 from "node:http2";
 import * as path from "node:path";
@@ -30,6 +29,31 @@ const GET_SERVER_CONFIG_PATH = "/agent.v1.AgentService/GetServerConfig";
 const CONNECT_END_STREAM_FLAG = 0b00000010;
 const API_KEY = "transport-lifecycle-key";
 
+async function runFixtureChild(
+	argv: string[],
+	label: string,
+	marker?: RegExp,
+	env?: Record<string, string>,
+): Promise<string> {
+	const child = Bun.spawn(argv, {
+		cwd: path.resolve(import.meta.dir, "../../.."),
+		stdout: "pipe",
+		stderr: "pipe",
+		...(env ? { env: { ...process.env, ...env } } : {}),
+	});
+	const [stdout, stderr, exitCode] = await Promise.all([
+		new Response(child.stdout).text(),
+		new Response(child.stderr).text(),
+		child.exited,
+	]);
+	if (exitCode !== 0) {
+		throw new Error(`${label} fixture exited ${exitCode}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+	}
+	const json = marker ? stdout.match(marker)?.[1] : stdout.trim();
+	if (!json) throw new Error(`${label} fixture produced no result\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+	return json;
+}
+
 async function runRequestDebugFixture(mode: "h2-body" | "h1-body"): Promise<{
 	protocol?: string;
 	bodyContainsPayload: boolean;
@@ -39,23 +63,34 @@ async function runRequestDebugFixture(mode: "h2-body" | "h1-body"): Promise<{
 		mode === "h1-body" ? "fixtures/cursor-request-debug-h1.fixture.ts" : "fixtures/cursor-request-debug.ts",
 	);
 	const argv = mode === "h1-body" ? [process.execPath, "test", fixture] : [process.execPath, fixture];
-	const child = Bun.spawn(argv, {
-		cwd: path.resolve(import.meta.dir, "../../.."),
-		stdout: "pipe",
-		stderr: "pipe",
-	});
-	const [stdout, stderr, exitCode] = await Promise.all([
-		new Response(child.stdout).text(),
-		new Response(child.stderr).text(),
-		child.exited,
-	]);
-	if (exitCode !== 0) {
-		throw new Error(`request-debug ${mode} fixture exited ${exitCode}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
-	}
-	const json = mode === "h1-body" ? stdout.match(/^REQUEST_DEBUG_RESULT=(.+)$/m)?.[1] : stdout.trim();
-	if (!json)
-		throw new Error(`request-debug ${mode} fixture produced no result\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+	const json = await runFixtureChild(
+		argv,
+		`request-debug ${mode}`,
+		mode === "h1-body" ? /^REQUEST_DEBUG_RESULT=(.+)$/m : undefined,
+	);
 	return JSON.parse(json) as { protocol?: string; bodyContainsPayload: boolean };
+}
+
+type LifecycleScenario = "heartbeat-drain" | "sync-write-failure" | "trailers-rejection";
+
+interface LifecycleFixtureResult {
+	uncaught: number;
+	unhandledRejections: number;
+	elapsedMs?: number;
+	eventTypes?: string[];
+	stopReason?: string;
+	errorMessage?: string;
+}
+
+async function runLifecycleFixture(scenario: LifecycleScenario): Promise<LifecycleFixtureResult> {
+	const fixture = path.join(import.meta.dir, "fixtures/cursor-transport-lifecycle.fixture.ts");
+	const json = await runFixtureChild(
+		[process.execPath, "test", fixture],
+		`lifecycle ${scenario}`,
+		/^LIFECYCLE_RESULT=(.+)$/m,
+		{ LIFECYCLE_SCENARIO: scenario },
+	);
+	return JSON.parse(json) as LifecycleFixtureResult;
 }
 
 function testRunHeaders() {
@@ -478,6 +513,67 @@ describe("openCursorTransport lifecycle", () => {
 		}
 	}, 10_000);
 
+	it("bounds retained zero-payload data frames when the consumer stalls", async () => {
+		let server: http2.Http2Server | undefined;
+		const sessions = new Set<http2.Http2Session>();
+		server = http2.createServer();
+		server.on("session", session => {
+			sessions.add(session);
+			session.on("close", () => sessions.delete(session));
+		});
+		server.on("stream", (stream: http2.ServerHttp2Stream) => {
+			stream.on("data", () => {});
+			stream.on("error", () => {});
+			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+			// 64 empty envelopes carry no payload bytes at all: only the fixed
+			// per-frame retained cost keeps the pump from retaining unbounded
+			// decoded objects. No end envelope — the budget is what stops the
+			// hostile stream.
+			const parts: Buffer[] = [];
+			for (let index = 0; index < 64; index++) parts.push(frameConnectMessage(Buffer.alloc(0)));
+			stream.end(Buffer.concat(parts));
+		});
+		const listening = Promise.withResolvers<void>();
+		server.once("error", listening.reject);
+		server.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
+		const address = server.address();
+		if (!address || typeof address === "string") throw new Error("expected live h2 fixture");
+		const h2Url = `http://127.0.0.1:${address.port}`;
+
+		__setCursorH2FrameQueueBytes(2048);
+		try {
+			const attempt = await openCursorTransport({
+				baseUrl: h2Url,
+				apiKey: API_KEY,
+				requestPath: RUN_PATH,
+				runHeaders: testRunHeaders(),
+				gzipRequest: false,
+				provider: "cursor",
+			});
+			attempt.write(encodeConnectFrame(Buffer.from("client-request", "utf8"), false));
+			// Do not drain: all 64 frames decode from one small chunk, so the
+			// admission check must fail on their retained-object cost alone.
+			let error: unknown;
+			try {
+				for await (const frame of attempt.frames()) void frame;
+			} catch (cause) {
+				error = cause;
+			}
+			expect(error).toBeInstanceOf(Error);
+			expect(String(error)).toContain("frame queue exceeded");
+			attempt.close();
+		} finally {
+			__setCursorH2FrameQueueBytes(undefined);
+			for (const session of sessions) session.destroy();
+			const closing = server;
+			server = undefined;
+			const closed = Promise.withResolvers<void>();
+			closing.close(error => (error ? closed.reject(error) : closed.resolve()));
+			await closed.promise;
+		}
+	}, 10_000);
+
 	it("accepts more than 1024 tiny frames when decoded bytes stay within budget", async () => {
 		let server: http2.Http2Server | undefined;
 		const sessions = new Set<http2.Http2Session>();
@@ -491,6 +587,7 @@ describe("openCursorTransport lifecycle", () => {
 			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
 			const parts: Buffer[] = [];
 			for (let index = 0; index < 1025; index++) parts.push(frameConnectMessage(Buffer.from([index & 0xff])));
+			parts.push(frameConnectMessage(Buffer.alloc(0)));
 			parts.push(endFrame());
 			stream.end(Buffer.concat(parts));
 		});
@@ -501,7 +598,10 @@ describe("openCursorTransport lifecycle", () => {
 		const address = server.address();
 		if (!address || typeof address === "string") throw new Error("expected live h2 fixture");
 
-		__setCursorH2FrameQueueBytes(2048);
+		// 1027 envelopes (1025 tiny + 1 empty + end) charge payload bytes plus
+		// the fixed per-frame retained cost; a 1024-frame count cap would fail
+		// this test, as would a budget that ignored the per-frame overhead.
+		__setCursorH2FrameQueueBytes(128 * 1024);
 		try {
 			const attempt = await openCursorTransport({
 				baseUrl: `http://127.0.0.1:${address.port}`,
@@ -514,7 +614,8 @@ describe("openCursorTransport lifecycle", () => {
 			attempt.write(encodeConnectFrame(Buffer.from("client-request"), false));
 			const frames = [];
 			for await (const frame of attempt.frames()) frames.push(frame);
-			expect(frames.filter(frame => frame.kind === "data")).toHaveLength(1025);
+			expect(frames.filter(frame => frame.kind === "data")).toHaveLength(1026);
+			expect(frames.filter(frame => frame.kind === "data" && frame.payload.length === 0)).toHaveLength(1);
 			expect(frames.at(-1)).toEqual({ kind: "end", error: null });
 			attempt.close();
 		} finally {
@@ -582,99 +683,24 @@ const streamContext: Context = {
 	messages: [{ role: "user", content: "lifecycle", timestamp: 1 }],
 };
 
-function alpnUnavailable(): { ok: false; unavailable: { reason: "alpn"; cause: Error } } {
-	return { ok: false, unavailable: { reason: "alpn", cause: alpnCause() } };
-}
-
 describe("cursor heartbeat and outbound write lifecycle", () => {
 	it("holds an h1 end-stream drain across the heartbeat boundary without an uncaught write", async () => {
-		const uncaught: unknown[] = [];
-		const onUncaught = (error: unknown): void => {
-			uncaught.push(error);
-		};
-		process.on("uncaughtException", onUncaught);
-		try {
-			const execB64 = Buffer.from(execReadPayload()).toString("base64");
-			const turnB64 = Buffer.from(turnEndedPayload()).toString("base64");
-			const h1Url = await startH1Fixture((req, res) => {
-				if (req.url?.includes("RunPoll")) {
-					const body = Buffer.concat([
-						encodeConnectFrame(encodePollResponse(0n, execB64, false), false),
-						encodeConnectFrame(encodePollResponse(1n, turnB64, false), false),
-						encodeConnectFrame(encodePollResponse(2n, "", true), false),
-						endFrame(),
-					]);
-					res.writeHead(200, { "content-type": "application/connect+proto" });
-					res.end(body);
-					return;
-				}
-				res.statusCode = 200;
-				res.end();
-			});
-			vi.spyOn(h2Pool, "acquireCursorH2").mockResolvedValue(alpnUnavailable());
-			vi.spyOn(serverConfig, "fetchCursorBidiAvailability").mockResolvedValue("bidi-disabled");
-
-			const started = Date.now();
-			const stream = streamCursor(makeModel(h1Url), streamContext, {
-				apiKey: API_KEY,
-				execHandlers: {
-					read: () => Promise.withResolvers<ToolResultMessage>().promise,
-				},
-			});
-			const eventTypes: string[] = [];
-			for await (const event of stream) eventTypes.push(event.type);
-			const elapsed = Date.now() - started;
-			const result = await stream.result();
-			expect(elapsed).toBeLessThan(7000);
-			expect(elapsed).toBeGreaterThanOrEqual(4500);
-			expect(eventTypes).toContain("done");
-			expect(eventTypes).not.toContain("error");
-			expect(result.stopReason).toBe("stop");
-			expect(uncaught).toHaveLength(0);
-		} finally {
-			process.off("uncaughtException", onUncaught);
-		}
-	}, 15_000);
+		const result = await runLifecycleFixture("heartbeat-drain");
+		expect(result.uncaught).toBe(0);
+		expect(result.elapsedMs).toBeGreaterThanOrEqual(4500);
+		expect(result.elapsedMs).toBeLessThan(7000);
+		expect(result.eventTypes).toContain("done");
+		expect(result.eventTypes).not.toContain("error");
+		expect(result.stopReason).toBe("stop");
+	}, 60_000);
 
 	it("surfaces a synchronous transport write failure through stream error output", async () => {
-		const uncaught: unknown[] = [];
-		const onUncaught = (error: unknown): void => {
-			uncaught.push(error);
-		};
-		process.on("uncaughtException", onUncaught);
-		try {
-			const request = new EventEmitter() as EventEmitter & {
-				write: (frame: Buffer) => boolean;
-				destroy: () => void;
-			};
-			request.write = () => {
-				throw new Error("forced synchronous write failure");
-			};
-			request.destroy = () => {
-				request.emit("close");
-			};
-			vi.spyOn(h2Pool, "acquireCursorH2").mockResolvedValue({
-				ok: true,
-				lease: {
-					request: request as unknown as http2.ClientHttp2Stream,
-					release() {
-						request.destroy();
-					},
-				},
-			});
-			const h1Url = await startH1Fixture();
-			const stream = streamCursor(makeModel(h1Url), streamContext, { apiKey: API_KEY });
-			const eventTypes: string[] = [];
-			for await (const event of stream) eventTypes.push(event.type);
-			const result = await stream.result();
-			expect(eventTypes.at(-1)).toBe("error");
-			expect(result.stopReason).toBe("error");
-			expect(result.errorMessage).toContain("forced synchronous write failure");
-			expect(uncaught).toHaveLength(0);
-		} finally {
-			process.off("uncaughtException", onUncaught);
-		}
-	});
+		const result = await runLifecycleFixture("sync-write-failure");
+		expect(result.uncaught).toBe(0);
+		expect(result.eventTypes?.at(-1)).toBe("error");
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("forced synchronous write failure");
+	}, 60_000);
 
 	it("lets a late handler result win over the drain-timeout synthesis", async () => {
 		const sessions = new Set<http2.Http2Session>();
@@ -889,49 +915,7 @@ describe("cursor heartbeat and outbound write lifecycle", () => {
 	}, 60_000);
 
 	it("does not emit an unhandled rejection when HTTP/2 trailers reject", async () => {
-		const rejections: unknown[] = [];
-		const onUnhandled = (reason: unknown): void => {
-			rejections.push(reason);
-		};
-		process.on("unhandledRejection", onUnhandled);
-		try {
-			const request = new EventEmitter() as EventEmitter & {
-				write: (frame: Buffer) => boolean;
-				destroy: () => void;
-			};
-			let failed = false;
-			request.write = () => {
-				if (!failed) {
-					failed = true;
-					queueMicrotask(() => {
-						request.emit("response", { ":status": "200" });
-						request.emit("error", new Error("mid-stream network error"));
-					});
-				}
-				return true;
-			};
-			request.destroy = () => {
-				request.emit("close");
-			};
-			vi.spyOn(h2Pool, "acquireCursorH2").mockResolvedValue({
-				ok: true,
-				lease: {
-					request: request as unknown as http2.ClientHttp2Stream,
-					release() {
-						request.destroy();
-					},
-				},
-			});
-			const h1Url = await startH1Fixture();
-			const stream = streamCursor(makeModel(h1Url), streamContext, { apiKey: API_KEY });
-			for await (const _event of stream) {
-				/* drain */
-			}
-			await Promise.resolve();
-			await Promise.resolve();
-			expect(rejections).toHaveLength(0);
-		} finally {
-			process.off("unhandledRejection", onUnhandled);
-		}
-	});
+		const result = await runLifecycleFixture("trailers-rejection");
+		expect(result.unhandledRejections).toBe(0);
+	}, 60_000);
 });

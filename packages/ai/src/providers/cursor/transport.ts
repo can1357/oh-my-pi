@@ -197,7 +197,7 @@ function wrapH2Lease(lease: h2Pool.CursorH2Lease): CursorTransportAttempt {
 interface H2FramePump {
 	pending: ConnectFrame[];
 	head: number;
-	/** Decoded payload bytes currently queued and unconsumed. */
+	/** Estimated retained bytes currently queued and unconsumed. */
 	queuedBytes: number;
 	waiters: Array<() => void>;
 	done: boolean;
@@ -206,8 +206,9 @@ interface H2FramePump {
 	stop(): void;
 }
 
-/** Fail the pump if decoded payload bytes outrun the consumer this far. */
+/** Fail the pump if decoded frames outrun the consumer by this retained-byte estimate. */
 const H2_FRAME_QUEUE_BYTES = 64 * 1024 * 1024;
+const H2_FRAME_RETAINED_BYTES = 64;
 
 let __frameQueueBytes: number | undefined;
 
@@ -216,9 +217,13 @@ export function __setCursorH2FrameQueueBytes(bytes: number | undefined): void {
 	__frameQueueBytes = bytes;
 }
 
-function framePayloadBytes(frames: readonly ConnectFrame[]): number {
+function frameRetainedBytes(frame: ConnectFrame): number {
+	return H2_FRAME_RETAINED_BYTES + ("payload" in frame ? frame.payload.length : 0);
+}
+
+function framesRetainedBytes(frames: readonly ConnectFrame[]): number {
 	let bytes = 0;
-	for (const frame of frames) bytes += "payload" in frame ? frame.payload.length : 0;
+	for (const frame of frames) bytes += frameRetainedBytes(frame);
 	return bytes;
 }
 
@@ -237,6 +242,9 @@ function startH2FramePump(request: http2.ClientHttp2Stream, decoder: ConnectFram
 			request.off("data", onData);
 			request.off("end", onEnd);
 			request.off("error", fail);
+			pump.pending.length = 0;
+			pump.head = 0;
+			pump.queuedBytes = 0;
 		},
 	};
 
@@ -250,7 +258,7 @@ function startH2FramePump(request: http2.ClientHttp2Stream, decoder: ConnectFram
 		try {
 			const frames = decoder.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
 			if (frames.length === 0) return;
-			const incomingBytes = framePayloadBytes(frames);
+			const incomingBytes = framesRetainedBytes(frames);
 			const queueByteLimit = __frameQueueBytes ?? H2_FRAME_QUEUE_BYTES;
 			if (pump.queuedBytes + incomingBytes > queueByteLimit) {
 				fail(new Error(`Cursor HTTP/2 frame queue exceeded ${queueByteLimit} queued bytes`));
@@ -297,7 +305,7 @@ async function* iterateH2FramePump(pump: H2FramePump): AsyncGenerator<ConnectFra
 				pump.head = 0;
 			}
 			if (frame) {
-				pump.queuedBytes -= "payload" in frame ? frame.payload.length : 0;
+				pump.queuedBytes -= frameRetainedBytes(frame);
 				yield frame;
 				continue;
 			}
