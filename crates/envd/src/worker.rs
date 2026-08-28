@@ -6285,10 +6285,21 @@ fn validate_registrations(tools: &[ToolDecl]) -> Result<(), WorkerError> {
 			))));
 		}
 		if !roots.insert((tool.extension_id.as_str(), definition.name.as_str())) {
-			return Err(WorkerError::DuplicateToolRoot {
-				name:         Str::from(definition.name.clone()),
-				extension_id: Str::from(tool.extension_id.clone()),
-			});
+			// One device root may publish several revisions when each later
+			// revision names the root it replaces; the sealing registry
+			// already rejected equal-precedence or chainless claims before
+			// emitting this payload, so an unchained repeat here can only be
+			// a genuinely conflicting duplicate root.
+			let chains = tool
+				.replaces
+				.iter()
+				.any(|replaced| replaced == definition.name.as_str());
+			if !chains {
+				return Err(WorkerError::DuplicateToolRoot {
+					name:         Str::from(definition.name.clone()),
+					extension_id: Str::from(tool.extension_id.clone()),
+				});
+			}
 		}
 	}
 	Ok(())
@@ -7455,8 +7466,12 @@ fn load_tools(
 						rev,
 						constraint: None,
 						extension_id: row.getattr("source_module")?.extract()?,
+						replaces: row
+							.getattr("replaces")?
+							.extract::<Option<String>>()?
+							.into_iter()
+							.collect(),
 						streams_args: row.getattr("streams_args")?.extract()?,
-						props: None,
 						..Default::default()
 					},
 					handler: handler.unbind(),
@@ -8257,5 +8272,39 @@ async def worker_prelude_round_trip(patches, *, strategy: str = "sequential"):
 			.expect_err("multiple revisions of the same root from one claimant are rejected");
 		assert!(matches!(error, WorkerError::DuplicateToolRoot { name, extension_id }
 				if name == "ambiguous" && extension_id == "extension/example"));
+	}
+
+	#[test]
+	fn validate_registrations_admits_replaces_chained_root_revisions() {
+		let chained_base = ToolDecl {
+			extension_id: "extension/example".to_owned(),
+			definition: Some(ToolDef {
+				name:        "chained".to_owned(),
+				description: "chained".to_owned(),
+				input:       Some(tool_def::Input::JsonSchema(tool_def::JsonSchema {
+					schema_json: Bytes::from_static(br#"{"type":"object"}"#),
+					strict:      None,
+				})),
+			}),
+			rev: "1".to_owned(),
+			constraint: None,
+			summary: String::new(),
+			docs: String::new(),
+			..ToolDecl::default()
+		};
+		let incumbent = chained_base.clone();
+		let mut replacement = chained_base.clone();
+		replacement.rev = "2".to_owned();
+		replacement.replaces = vec!["chained".to_owned()];
+		validate_registrations(&[chained_base, replacement])
+			.expect("a replaces-chained multi-revision root is admitted");
+
+		let mut misdirected = incumbent.clone();
+		misdirected.rev = "2".to_owned();
+		misdirected.replaces = vec!["unrelated".to_owned()];
+		let error = validate_registrations(&[incumbent, misdirected])
+			.expect_err("a repeat naming a different root is still a conflicting duplicate");
+		assert!(matches!(error, WorkerError::DuplicateToolRoot { name, extension_id }
+				if name == "chained" && extension_id == "extension/example"));
 	}
 }

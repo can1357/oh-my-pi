@@ -308,9 +308,11 @@ class WorkerToolDefinition:
     streams_args: bool
     handler: object
     source_module: str
-    kind: str
     place: object
     legacy: bool = False
+    # The device name this revision replaces, when its claim chain names one;
+    # the host admission gate verifies the chain from this projection.
+    replaces: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -765,6 +767,7 @@ class DeclarationRegistry:
                     source_module=source_module,
                     kind=kind,
                     place=str(definition.place),
+                    replaces=definition.replaces,
                 )
             )
         return tuple(projected)
