@@ -1535,7 +1535,23 @@ export class SessionAdvisors {
 			this.#host.sessionId(),
 			advisor.slug,
 		);
-		const preparation = prepareCompaction(pathEntries, compactionSettings, advisorModel, agent.tokenizer, candidates);
+		// The compaction-history reuse check reads the head of this list as the
+		// model that will actually run, so drop leading candidates the session
+		// cannot authenticate.
+		let orderedCandidates = candidates;
+		for (let i = 0; i < candidates.length; i++) {
+			if (await this.#host.modelRegistry.getApiKey(candidates[i], advisorProviderSessionId, { signal })) {
+				orderedCandidates = candidates.slice(i);
+				break;
+			}
+		}
+		const preparation = prepareCompaction(
+			pathEntries,
+			compactionSettings,
+			advisorModel,
+			agent.tokenizer,
+			orderedCandidates,
+		);
 		if (!preparation) {
 			// Cannot prepare compaction, fallback to re-prime
 			return true;
@@ -1563,7 +1579,7 @@ export class SessionAdvisors {
 			phase: "pre_turn",
 		});
 
-		for (const candidate of candidates) {
+		for (const candidate of orderedCandidates) {
 			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, advisorProviderSessionId, { signal });
 			if (!apiKey) continue;
 			if (

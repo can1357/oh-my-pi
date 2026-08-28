@@ -1320,8 +1320,12 @@ export function remotePreserveReusable(
 		const v1Candidate = v1Preserve ?? v2Preserve;
 		return !!v1Candidate && canReuseOpenAiCompactionHistory(v1Candidate, model, false);
 	};
-	const extensionModels = compactionModels.length > 0 ? compactionModels : [activeModel];
-	return extensionModels.every(reusableByModel);
+	// `compactionModels` is the runner's ordered preference list, and only its
+	// head actually performs the next compaction. Requiring every entry to match
+	// let an unrelated role fallback veto a boundary the selected candidate can
+	// extend, which re-expanded and re-summarized the whole original prefix on
+	// every compaction.
+	return reusableByModel(compactionModels[0] ?? activeModel);
 }
 
 export function remotePreserveReplayable(
@@ -1678,20 +1682,25 @@ export async function compact(
 	let usedRemoteCompaction = false;
 	let nativeCompactionError: unknown;
 	// Compaction may run on a side model or a compact-model override. Its native
-	// result is only the ACTIVE model's to replay when the producing request
-	// fingerprint matches the one the active model dispatches with; otherwise the
-	// produced history stays stamped with the target that minted it, so the next
-	// turn re-expands the originals instead of shipping another model's opaque
-	// state to the active endpoint.
+	// result is opaque, endpoint- and model-owned state that only the producing
+	// request target can read back, so a producer whose fingerprint differs from
+	// the one the active model dispatches with must not compact natively at all:
+	// the active model could never replay the result, so the request would be
+	// billed and reduce nothing. Those producers fall through to portable local
+	// summarization instead, which every target can read.
 	const runtimeReplayModel = summaryOptions.runtimeModel ?? model;
-	const resolveCompactionReplayStamp = (streamingV2: boolean) =>
-		producesRuntimeReplayableCompactionHistory(model, runtimeReplayModel, streamingV2)
-			? { replayTarget: getOpenAIResponsesReferenceTarget(runtimeReplayModel), runtimeOwned: true }
-			: { replayTarget: getOpenAiCompactionReferenceTarget(model, streamingV2), runtimeOwned: false };
+	const producesRuntimeOwnedHistory = (streamingV2: boolean) =>
+		producesRuntimeReplayableCompactionHistory(model, runtimeReplayModel, streamingV2);
+	const resolveRuntimeRequestTarget = (key: string) =>
+		summaryOptions.activeRequestTarget ??
+		getOpenAIResponsesRequestTarget(runtimeReplayModel, key, {
+			openrouterVariant: summaryOptions.openrouterVariant,
+		});
 	if (
 		settings.remoteEnabled !== false &&
 		settings.remoteStreamingV2Enabled !== false &&
-		shouldUseCompactionV2Streaming(model)
+		shouldUseCompactionV2Streaming(model) &&
+		producesRuntimeOwnedHistory(true)
 	) {
 		const previousRemoteCompaction = getCompactionV2PreserveData(previousPreserveData);
 		const previousReplacementHistory =
@@ -1736,17 +1745,11 @@ export async function compact(
 					promptCacheKey: summaryOptions.promptCacheKey,
 					retainedMessageBudget: settings.v2RetainedMessageBudget,
 				});
-				const v2ReplayStamp = resolveCompactionReplayStamp(true);
 				let v2RequestTarget: string | undefined;
 				const remote = await withAuth(
 					apiKey,
 					key => {
-						v2RequestTarget = v2ReplayStamp.runtimeOwned
-							? (summaryOptions.activeRequestTarget ??
-								getOpenAIResponsesRequestTarget(runtimeReplayModel, key, {
-									openrouterVariant: summaryOptions.openrouterVariant,
-								}))
-							: undefined;
+						v2RequestTarget = resolveRuntimeRequestTarget(key);
 						return requestCompactionV2Streaming(model, key, request, signal, {
 							fetch: summaryOptions.fetch,
 							providerSessionState: summaryOptions.providerSessionState,
@@ -1762,7 +1765,7 @@ export async function compact(
 						remote,
 						model,
 						getOpenAiCompactionReferenceTarget(model, true),
-						v2ReplayStamp.replayTarget,
+						getOpenAIResponsesReferenceTarget(runtimeReplayModel),
 						v2RequestTarget,
 					),
 				};
@@ -1782,7 +1785,12 @@ export async function compact(
 		}
 	}
 
-	if (!usedRemoteCompaction && settings.remoteEnabled !== false && shouldUseOpenAiRemoteCompaction(model)) {
+	if (
+		!usedRemoteCompaction &&
+		settings.remoteEnabled !== false &&
+		shouldUseOpenAiRemoteCompaction(model) &&
+		producesRuntimeOwnedHistory(false)
+	) {
 		const previousRemoteCompaction = getPreservedOpenAiRemoteCompactionData(previousPreserveData);
 		const previousV2Compaction = getCompactionV2PreserveData(previousPreserveData);
 		const previousReplacementHistory =
@@ -1798,7 +1806,6 @@ export async function compact(
 			openAiCompatSupportsImageDetailOriginal(model),
 		);
 		if (remoteHistory.length > 0) {
-			const v1ReplayStamp = resolveCompactionReplayStamp(false);
 			try {
 				const remote = await withAuth(
 					apiKey,
@@ -1814,13 +1821,8 @@ export async function compact(
 								sessionId: summaryOptions.sessionId,
 								providerSessionState: summaryOptions.providerSessionState,
 								codexCompaction: summaryOptions.codexCompaction,
-								replayTarget: v1ReplayStamp.replayTarget,
-								requestTarget: v1ReplayStamp.runtimeOwned
-									? (summaryOptions.activeRequestTarget ??
-										getOpenAIResponsesRequestTarget(runtimeReplayModel, key, {
-											openrouterVariant: summaryOptions.openrouterVariant,
-										}))
-									: undefined,
+								replayTarget: getOpenAIResponsesReferenceTarget(runtimeReplayModel),
+								requestTarget: resolveRuntimeRequestTarget(key),
 							},
 						),
 					{ signal },

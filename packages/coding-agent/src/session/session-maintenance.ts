@@ -821,6 +821,7 @@ export class SessionMaintenance {
 							shouldUseProviderNativeCompaction(candidate, effectiveSettings)
 					: undefined,
 			);
+			const orderedCandidates = await this.#candidatesFromFirstAuthenticated(compactionCandidates);
 			if (requireProviderRemote && compactionCandidates.length === 0) {
 				this.#host.emitNotice(
 					"warning",
@@ -835,7 +836,7 @@ export class SessionMaintenance {
 				effectiveSettings,
 				activeModel,
 				this.#tokenizer,
-				compactionCandidates,
+				orderedCandidates,
 				this.#host.activeRequestTarget(),
 			);
 			if (!preparation) {
@@ -1030,7 +1031,7 @@ export class SessionMaintenance {
 							convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 							codexCompaction,
 						},
-						compactionCandidates,
+						orderedCandidates,
 					);
 					summary = result.summary;
 					shortSummary = result.shortSummary;
@@ -1350,12 +1351,13 @@ export class SessionMaintenance {
 									shouldUseProviderNativeCompaction(candidate, effectiveSettings)
 							: undefined,
 					);
+		const orderedCandidates = await this.#candidatesFromFirstAuthenticated(candidates);
 		const preparation = prepareCompaction(
 			branch,
 			effectiveSettings,
 			model,
 			this.#tokenizer,
-			candidates,
+			orderedCandidates,
 			this.#host.activeRequestTarget(),
 		);
 		if (!preparation) return clear();
@@ -1408,7 +1410,7 @@ export class SessionMaintenance {
 					sessionId: `${this.#host.sessionId()}:spec:${Snowflake.next()}`,
 					preferWebsockets: false,
 				},
-				candidates,
+				orderedCandidates,
 				candidate => {
 					compactionModel = candidate;
 				},
@@ -2157,6 +2159,22 @@ export class SessionMaintenance {
 
 	#getCompactionModelCandidates(availableModels: Model[], filter?: (model: Model) => boolean): Model[] {
 		return this.resolveCompactionModelCandidates(this.#model, availableModels, filter);
+	}
+
+	/**
+	 * Drop the leading candidates that have no usable credentials so the head of
+	 * the list is the model `#compactWithFallbackModel` will actually run. The
+	 * compaction-history reuse check reads that head, so a configured target the
+	 * session cannot authenticate must not decide whether the previous native
+	 * replay payload can be extended.
+	 */
+	async #candidatesFromFirstAuthenticated(candidates: Model[]): Promise<Model[]> {
+		for (let i = 0; i < candidates.length; i++) {
+			if (await this.#host.modelRegistry.getApiKey(candidates[i], this.#host.sessionId())) {
+				return candidates.slice(i);
+			}
+		}
+		return candidates;
 	}
 
 	resolveCompactionModelCandidates(
@@ -3108,13 +3126,14 @@ export class SessionMaintenance {
 					: undefined,
 			);
 
+			const orderedCompactionCandidates = await this.#candidatesFromFirstAuthenticated(compactionCandidates);
 			let pathEntriesForCompaction = pathEntries;
 			let preparation = prepareCompaction(
 				pathEntriesForCompaction,
 				effectiveSettings,
 				this.#model,
 				this.#tokenizer,
-				compactionCandidates,
+				orderedCompactionCandidates,
 				this.#host.activeRequestTarget(),
 			);
 			if (!preparation) {
@@ -3171,7 +3190,7 @@ export class SessionMaintenance {
 									effectiveSettings,
 									this.#model,
 									this.#tokenizer,
-									compactionCandidates,
+									orderedCompactionCandidates,
 									this.#host.activeRequestTarget(),
 								);
 								return preparation !== undefined;
@@ -3467,7 +3486,7 @@ export class SessionMaintenance {
 				details = snapcompactResult.details;
 				preserveData = { ...(compactionPrep.preserveData ?? {}), ...(snapcompactResult.preserveData ?? {}) };
 			} else {
-				const candidates = compactionCandidates;
+				const candidates = orderedCompactionCandidates;
 				const retrySettings = this.#host.settings.getGroup("retry");
 				const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
 				let compactResult: CompactionResult | undefined;
