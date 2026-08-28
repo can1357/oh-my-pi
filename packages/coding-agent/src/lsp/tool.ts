@@ -21,7 +21,9 @@ import {
 	clearInitializationFailure,
 	ensureFileOpen,
 	getActiveClients,
+	getRustAnalyzerFlycheckCompletion,
 	getOrCreateClient,
+	isRustAnalyzerFlycheckActive,
 	isRustAnalyzerClient,
 	type LspServerStatus,
 	refreshFile,
@@ -56,7 +58,6 @@ import {
 } from "./edits";
 import { detectLspmux } from "./lspmux";
 import {
-	configCache,
 	getConfig,
 	getLspServerForFile,
 	getLspServers,
@@ -64,6 +65,7 @@ import {
 	isMethodNotFoundError,
 	isProjectAwareLspServer,
 	LSP_READONLY_ACTIONS,
+	refreshConfig,
 	reloadServer,
 } from "./servers";
 import {
@@ -107,6 +109,26 @@ import {
 import { runWorkspaceDiagnostics } from "./workspace-diagnostics";
 
 const MAX_RENAME_PAIRS = 1000;
+const RUST_FLYCHECK_START_WAIT_MS = 3_000;
+const RUST_FLYCHECK_START_POLL_MS = 100;
+const RUST_FLYCHECK_START_ATTEMPTS = 3;
+
+async function triggerRustAnalyzerFlycheck(client: LspClient, uri: string, signal: AbortSignal): Promise<number> {
+	const completion = getRustAnalyzerFlycheckCompletion(client);
+	for (let attempt = 0; attempt < RUST_FLYCHECK_START_ATTEMPTS; attempt++) {
+		await sendNotification(client, "rust-analyzer/runFlycheck", { textDocument: { uri } }, signal);
+		const deadline = Date.now() + RUST_FLYCHECK_START_WAIT_MS;
+		while (
+			getRustAnalyzerFlycheckCompletion(client) === completion &&
+			!isRustAnalyzerFlycheckActive(client) &&
+			Date.now() < deadline
+		) {
+			await untilAborted(signal, () => Bun.sleep(RUST_FLYCHECK_START_POLL_MS));
+		}
+		if (getRustAnalyzerFlycheckCompletion(client) > completion || isRustAnalyzerFlycheckActive(client)) break;
+	}
+	return completion;
+}
 
 interface FileRenamePair {
 	oldUri: string;
@@ -355,12 +377,28 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						const minVersion = client.diagnosticsVersion;
 						await refreshFile(client, resolved, signal);
 						const expectedDocumentVersion = client.openFiles.get(uri)?.version;
-						const diagnostics = await waitForDiagnostics(client, uri, {
-							timeoutMs: diagnosticsWaitTimeoutMs,
-							signal,
-							minVersion,
-							expectedDocumentVersion,
-						});
+						const rustAnalyzer = isRustAnalyzerClient(client);
+						const diagnostics = [
+							...(await waitForDiagnostics(client, uri, {
+								timeoutMs: diagnosticsWaitTimeoutMs,
+								signal,
+								minVersion,
+								expectedDocumentVersion,
+							})),
+						];
+						if (rustAnalyzer && !detailed) {
+							const flycheckDiagnosticsVersion = client.diagnosticsVersion;
+							const flycheckCompletion = await triggerRustAnalyzerFlycheck(client, uri, signal);
+							const flycheckDiagnostics = await waitForDiagnostics(client, uri, {
+								timeoutMs: timeoutSec * 1000,
+								signal,
+								minVersion: flycheckDiagnosticsVersion,
+								expectedDocumentVersion,
+								requirePublishForEmptyPull: true,
+								isComplete: () => getRustAnalyzerFlycheckCompletion(client) > flycheckCompletion,
+							});
+							diagnostics.push(...flycheckDiagnostics);
+						}
 						allDiagnostics.push(...diagnostics);
 						succeededServers++;
 						totalServerSuccesses++;
@@ -1081,13 +1119,9 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		}
 
 		if (action === "reload" && (isWorkspace || !resolvedFile)) {
-			// `reload *` is the user's explicit request to re-read config from
-			// disk. Drop the per-cwd cache entry so `.omp/lsp.json`, root markers,
-			// and plugin configs added after the first LSP call become visible —
-			// otherwise `getConfig` returns the first observation for the rest of
-			// the process lifetime (#3546).
-			configCache.delete(this.session.cwd);
-			const refreshedConfig = getConfig(this.session.cwd);
+			// `reload *` is an explicit refresh: re-read config and force executable
+			// resolution to replace stale positive or negative process-wide cache entries.
+			const refreshedConfig = refreshConfig(this.session.cwd);
 			const servers = getLspServers(refreshedConfig);
 			// Identity-aware client keys make a changed server resolve to a fresh
 			// client below, but the process spawned from the superseded config

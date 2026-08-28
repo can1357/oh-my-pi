@@ -434,7 +434,7 @@ function getConfigSources(cwd: string): ConfigSource[] {
  * }
  * ```
  */
-export function loadConfig(cwd: string): LspConfig {
+export function loadConfig(cwd: string, resolveOptions?: ResolveCommandOptions): LspConfig {
 	let mergedServers = coerceServerConfigs(DEFAULTS);
 
 	const configSources = getConfigSources(cwd).reverse();
@@ -464,7 +464,7 @@ export function loadConfig(cwd: string): LspConfig {
 			if (!hasRootMarkers(cwd, config.rootMarkers)) continue;
 
 			// Check if the language server binary is available (local or $PATH)
-			const resolved = resolveCommand(config.command, cwd);
+			const resolved = resolveCommand(config.command, cwd, resolveOptions);
 			if (!resolved) continue;
 
 			detected[name] = { ...config, resolvedCommand: resolved };
@@ -480,7 +480,7 @@ export function loadConfig(cwd: string): LspConfig {
 	for (const [name, config] of Object.entries(mergedWithRuntime)) {
 		if (config.disabled) continue;
 		if (!hasRootMarkers(cwd, config.rootMarkers)) continue;
-		const resolved = resolveCommand(config.command, cwd);
+		const resolved = resolveCommand(config.command, cwd, resolveOptions);
 		if (!resolved) continue;
 		available[name] = { ...config, resolvedCommand: resolved };
 	}

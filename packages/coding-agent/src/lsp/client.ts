@@ -34,6 +34,8 @@ const clientLocks = new Map<string, PendingClient>();
 const invalidatedClientKeys = new Set<string>();
 const clientReloadBarriers = new Map<string, Promise<unknown>>();
 const fileOperationLocks = new Map<string, Promise<void>>();
+const rustAnalyzerFlycheckCompletions = new WeakMap<LspClient, number>();
+const RUST_ANALYZER_FLYCHECK_TOKEN_PREFIX = "rust-analyzer/flycheck/";
 
 /** Negative cache of recent init failures so a broken server fails fast instead of re-spawning per call. */
 const INIT_FAILURE_BACKOFF_MS = 3 * 60 * 1000;
@@ -396,6 +398,15 @@ async function startMessageReader(client: LspClient): Promise<void> {
 									client.activeProgressTokens.add(params.token);
 								} else if (params.value?.kind === "end") {
 									client.activeProgressTokens.delete(params.token);
+									if (
+										typeof params.token === "string" &&
+										params.token.startsWith(RUST_ANALYZER_FLYCHECK_TOKEN_PREFIX)
+									) {
+										rustAnalyzerFlycheckCompletions.set(
+											client,
+											(rustAnalyzerFlycheckCompletions.get(client) ?? 0) + 1,
+										);
+									}
 									if (client.activeProgressTokens.size === 0) {
 										client.resolveProjectLoaded();
 									}
@@ -784,6 +795,19 @@ export function isRustAnalyzerClient(client: LspClient): boolean {
 		commandBasename(client.config.command) === "rust-analyzer" ||
 		(client.config.resolvedCommand ? commandBasename(client.config.resolvedCommand) === "rust-analyzer" : false)
 	);
+}
+
+/** Monotonic count of completed rust-analyzer flycheck progress cycles. */
+export function getRustAnalyzerFlycheckCompletion(client: LspClient): number {
+	return rustAnalyzerFlycheckCompletions.get(client) ?? 0;
+}
+
+/** Whether rust-analyzer currently reports an active flycheck progress token. */
+export function isRustAnalyzerFlycheckActive(client: LspClient): boolean {
+	for (const token of client.activeProgressTokens) {
+		if (typeof token === "string" && token.startsWith(RUST_ANALYZER_FLYCHECK_TOKEN_PREFIX)) return true;
+	}
+	return false;
 }
 
 function isRustAnalyzerStatusTimeout(err: unknown): boolean {

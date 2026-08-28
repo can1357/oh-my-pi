@@ -185,6 +185,10 @@ interface WaitForDiagnosticsOptions {
 	signal?: AbortSignal;
 	minVersion?: number;
 	expectedDocumentVersion?: number;
+	/** Treat an empty diagnostic pull as provisional until a fresh publish arrives. */
+	requirePublishForEmptyPull?: boolean;
+	/** Additional server-specific completion signal for an empty result. */
+	isComplete?: () => boolean;
 	/**
 	 * Quiescence window (ms). typescript-language-server never echoes the document
 	 * version (issue #983) and emits diagnostics from several sources at different
@@ -223,13 +227,22 @@ export async function waitForDiagnostics(
 	uri: string,
 	options: WaitForDiagnosticsOptions = {},
 ): Promise<Diagnostic[]> {
-	const { timeoutMs = 3000, signal, minVersion, expectedDocumentVersion, settleMs = DIAGNOSTICS_SETTLE_MS } = options;
+	const {
+		timeoutMs = 3000,
+		signal,
+		minVersion,
+		expectedDocumentVersion,
+		settleMs = DIAGNOSTICS_SETTLE_MS,
+		requirePublishForEmptyPull = false,
+		isComplete,
+	} = options;
 	const deadline = Date.now() + timeoutMs;
 	let pullAttempted = false;
 	let pullResultPromise: Promise<{ diagnostics: Diagnostic[] | undefined }> | undefined;
 	let pulled: Diagnostic[] | undefined;
 	let settledRef: PublishedDiagnostics | undefined;
 	let settledAt = 0;
+	let completionSettledAt = 0;
 	while (Date.now() < deadline) {
 		throwIfAborted(signal);
 		if (!pullAttempted && supportsDocumentDiagnostics(client)) {
@@ -255,6 +268,13 @@ export async function waitForDiagnostics(
 				return published.diagnostics;
 			}
 		}
+		if (isComplete?.()) {
+			if (completionSettledAt === 0) {
+				completionSettledAt = Date.now();
+			} else if (Date.now() - completionSettledAt >= settleMs) {
+				return pulled ?? [];
+			}
+		}
 
 		const pollMs = Math.min(DIAGNOSTICS_POLL_MS, Math.max(0, deadline - Date.now()));
 		if (!pullResultPromise) {
@@ -265,7 +285,7 @@ export async function waitForDiagnostics(
 		if (pullResult) {
 			pullResultPromise = undefined;
 			pulled = pullResult.diagnostics;
-			if (pulled !== undefined) break;
+			if (pulled !== undefined && (pulled.length > 0 || !requirePublishForEmptyPull)) break;
 		}
 	}
 
@@ -278,6 +298,10 @@ export async function waitForDiagnostics(
 		pulled = (await pullResultPromise).diagnostics;
 	}
 	throwIfAborted(signal);
+	if (isComplete?.()) return pulled ?? [];
+	if (requirePublishForEmptyPull && (pulled === undefined || pulled.length === 0)) {
+		throw new Error("Timed out waiting for the language server to publish complete diagnostics");
+	}
 	if (pulled === undefined) return [];
 	client.diagnostics.set(uri, {
 		diagnostics: pulled,

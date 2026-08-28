@@ -1,4 +1,4 @@
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, WhichCachePolicy } from "@oh-my-pi/pi-utils";
 import { throwIfAborted } from "../tools/tool-errors";
 import {
 	getActiveClients,
@@ -200,6 +200,14 @@ export function getConfig(cwd: string): LspConfig {
 		config = loadConfig(cwd);
 		configCache.set(cwd, config);
 	}
+	setIdleTimeout(config.idleTimeoutMs);
+	return config;
+}
+
+/** Re-read LSP configuration and refresh executable lookup results for an explicit reload. */
+export function refreshConfig(cwd: string): LspConfig {
+	const config = loadConfig(cwd, { cache: WhichCachePolicy.Fresh, PATH: process.env.PATH });
+	configCache.set(cwd, config);
 	setIdleTimeout(config.idleTimeoutMs);
 	return config;
 }
