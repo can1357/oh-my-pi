@@ -1827,8 +1827,11 @@ impl Registry {
 			}
 			if foreign_winner {
 				self.unlisted.remove(name);
-				self.unmounted.write().remove(name);
 			}
+			// A stale unmount tombstone must never survive protection: the
+			// remaining live claim is core-owned, and the tombstone would keep
+			// hiding it from devices()/resolve_device.
+			self.unmounted.write().remove(name);
 			if let Some(versions) = self.versions.get_mut(name) {
 				let retired_name = Str::new(name);
 				for (rev, entry) in versions.iter() {
