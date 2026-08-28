@@ -1,3 +1,4 @@
+import { mathSpanAt } from "@oh-my-pi/pi-utils/math-delimiters";
 import { TERMINAL } from "./terminal-capabilities";
 
 // LaTeX → Unicode/ANSI converter.
@@ -1934,23 +1935,16 @@ export function renderMathInText(text: string): string {
 				i += 2;
 				continue;
 			}
-			if (d === "(") {
-				const close = text.indexOf("\\)", i + 2);
-				if (close !== -1) {
-					out += conv(text.slice(i + 2, close));
-					i = close + 2;
-					continue;
-				}
-			} else if (d === "[") {
-				const close = text.indexOf("\\]", i + 2);
-				if (close !== -1) {
-					out += conv(text.slice(i + 2, close));
-					i = close + 2;
-					continue;
-				}
-			} else if (d === "$") {
+			if (d === "$") {
 				out += "$";
 				i += 2;
+				continue;
+			}
+			// `i` as the escape bound: the walk above already consumed `\\` and `\$`.
+			const span = mathSpanAt(text, i, i);
+			if (span) {
+				out += conv(span.body);
+				i = span.end;
 				continue;
 			}
 			out += c;
@@ -1958,21 +1952,15 @@ export function renderMathInText(text: string): string {
 			continue;
 		}
 		if (c === "$") {
-			if (text[i + 1] === "$") {
-				const close = text.indexOf("$$", i + 2);
-				if (close !== -1 && text.slice(i + 2, close).trim().length > 0) {
-					out += conv(text.slice(i + 2, close));
-					i = close + 2;
-					continue;
-				}
-				out += "$$";
-				i += 2;
+			const span = mathSpanAt(text, i, i);
+			if (span) {
+				out += conv(span.body);
+				i = span.end;
 				continue;
 			}
-			const close = inlineMathSpanEnd(text, i);
-			if (close !== -1) {
-				out += conv(text.slice(i + 1, close));
-				i = close + 1;
+			if (text[i + 1] === "$") {
+				out += "$$";
+				i += 2;
 				continue;
 			}
 			out += "$";
@@ -1983,35 +1971,4 @@ export function renderMathInText(text: string): string {
 		i++;
 	}
 	return renderBareMathInText(out);
-}
-
-/**
- * Index of the `$` that closes an inline math span opened at `open` (the index
- * of the opening `$`), or -1 when the run is not inline math. Applies pandoc's
- * anti-currency heuristics: the opener must not be followed by whitespace, the
- * closer must not be preceded by whitespace nor followed by a digit, `\$` is a
- * literal dollar, and the span may not span a newline. Shared by
- * `renderMathInText` and the markdown math tokenizer so the rule has one home.
- */
-export function inlineMathSpanEnd(text: string, open: number): number {
-	const after = text[open + 1];
-	if (after === undefined || after === " " || after === "\t" || after === "\n" || after === "$") {
-		return -1;
-	}
-	for (let j = open + 1; j < text.length; j++) {
-		const ch = text[j];
-		if (ch === "\\") {
-			j++;
-			continue;
-		}
-		if (ch === "\n") return -1;
-		if (ch === "$") {
-			const prev = text[j - 1];
-			if (prev === " " || prev === "\t") return -1;
-			const next = text[j + 1];
-			if (next !== undefined && next >= "0" && next <= "9") continue; // currency: keep scanning
-			return text.slice(open + 1, j).trim().length > 0 ? j : -1;
-		}
-	}
-	return -1;
 }

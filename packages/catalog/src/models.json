@@ -28688,7 +28688,7 @@
 			"contextWindow": 1050000,
 			"maxTokens": 128000,
 			"thinking": {
-				"mode": "budget",
+				"mode": "effort",
 				"efforts": [
 					"low",
 					"medium",
@@ -28727,7 +28727,7 @@
 			"contextWindow": 1050000,
 			"maxTokens": 128000,
 			"thinking": {
-				"mode": "budget",
+				"mode": "effort",
 				"efforts": [
 					"low",
 					"medium",
@@ -28766,7 +28766,7 @@
 			"contextWindow": 1050000,
 			"maxTokens": 128000,
 			"thinking": {
-				"mode": "budget",
+				"mode": "effort",
 				"efforts": [
 					"low",
 					"medium",
