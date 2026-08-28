@@ -1397,7 +1397,7 @@ describe("auth-gateway OpenAI Responses multimodal tool outputs", () => {
 			});
 			expect(response.status).toBe(400);
 			const body = (await response.json()) as { error: { message: string } };
-			expect(body.error.message).toContain("require a Responses-compatible upstream model");
+			expect(body.error.message).toContain("input_image.file_id cannot be forwarded");
 			expect(mock.calls).toHaveLength(0);
 		} finally {
 			await gateway.close();
