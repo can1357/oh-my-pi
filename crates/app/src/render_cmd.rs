@@ -85,10 +85,12 @@ fn render_session(args: &RenderArgs, data_dir: &Path, cwd: &Path) -> miette::Res
 	let open_start = Instant::now();
 	let path = resolve_target(args.session.as_deref(), data_dir, cwd)?;
 	let source_bytes = fs::metadata(&path).into_diagnostic()?.len();
-	let view = omp_storage::transcript::load_live(&path).into_diagnostic()?;
 	let open = open_start.elapsed();
 
+	// `load_live` folds the live chain, so the journal load is timed with the
+	// phase the report labels "journal live-set projection".
 	let project_start = Instant::now();
+	let view = omp_storage::transcript::load_live(&path).into_diagnostic()?;
 	let registry = Registry::new();
 	let renderers = builtin_renderers()?;
 	let projection = omp_agent::project_journal(&view, &registry, &omp_driver::chat::CHAT_CAPS_BASE)
