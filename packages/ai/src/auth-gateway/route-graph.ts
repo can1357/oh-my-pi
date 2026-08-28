@@ -74,6 +74,13 @@ export class RouteRegistry {
 		return this.#routes.get(id);
 	}
 
+	/** Unregister a virtual route. Bumps generation on success. Returns false if not registered. */
+	unregister(id: string): boolean {
+		if (!this.#routes.delete(id)) return false;
+		this.#generation += 1;
+		return true;
+	}
+
 	resolve(modelId: string): CompiledRoute | undefined {
 		const virtual = this.#routes.get(modelId);
 		if (virtual) return virtual;

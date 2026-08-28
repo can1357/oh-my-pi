@@ -522,3 +522,117 @@ describe("auth-gateway PUT /v1/routes/:id", () => {
 		});
 	});
 });
+
+describe("auth-gateway DELETE /v1/routes/:id", () => {
+	it("unregisters a PUT route so GET returns 404", async () => {
+		await withEmptyRoutesGateway(async url => {
+			const putRes = await fetch(`${url}/v1/routes/${hotRouteId}`, {
+				method: "PUT",
+				headers: { Authorization: "Bearer t", "Content-Type": "application/json" },
+				body: JSON.stringify({ root: { type: "target", model: primaryId } }),
+			});
+			expect(putRes.status).toBe(200);
+
+			const delRes = await fetch(`${url}/v1/routes/${hotRouteId}`, {
+				method: "DELETE",
+				headers: { Authorization: "Bearer t" },
+			});
+			expect(delRes.status).toBe(204);
+			expect(await delRes.text()).toBe("");
+
+			const getRes = await fetch(`${url}/v1/routes/${hotRouteId}`, {
+				headers: { Authorization: "Bearer t" },
+			});
+			expect(getRes.status).toBe(404);
+			const body = (await getRes.json()) as { error?: string };
+			expect(body.error).toBe(`Unknown route: ${hotRouteId}`);
+		});
+	});
+
+	it("returns 404 for an unknown id (negative)", async () => {
+		await withEmptyRoutesGateway(async url => {
+			const res = await fetch(`${url}/v1/routes/no-such-route`, {
+				method: "DELETE",
+				headers: { Authorization: "Bearer t" },
+			});
+			expect(res.status).toBe(404);
+			const body = (await res.json()) as { error?: string };
+			expect(body.error).toBe("Unknown route: no-such-route");
+		});
+	});
+
+	it("returns 404 for DELETE of the list path (negative)", async () => {
+		await withEmptyRoutesGateway(async url => {
+			const listRes = await fetch(`${url}/v1/routes`, {
+				method: "DELETE",
+				headers: { Authorization: "Bearer t" },
+			});
+			expect(listRes.status).toBe(404);
+			const listBody = (await listRes.json()) as { error?: string };
+			expect(listBody.error).toBe("No route: DELETE /v1/routes");
+
+			const slashRes = await fetch(`${url}/v1/routes/`, {
+				method: "DELETE",
+				headers: { Authorization: "Bearer t" },
+			});
+			expect(slashRes.status).toBe(404);
+			const slashBody = (await slashRes.json()) as { error?: string };
+			expect(slashBody.error).toBe("No route: DELETE /v1/routes/");
+		});
+	});
+
+	it("returns 401 without a bearer token (negative)", async () => {
+		await withEmptyRoutesGateway(async url => {
+			const res = await fetch(`${url}/v1/routes/${hotRouteId}`, {
+				method: "DELETE",
+			});
+			expect(res.status).toBe(401);
+			const body = (await res.json()) as { error?: string };
+			expect(body.error).toBe("unauthorized");
+		});
+	});
+
+	it("bumps list generation after a successful delete", async () => {
+		await withEmptyRoutesGateway(async url => {
+			const putRes = await fetch(`${url}/v1/routes/${hotRouteId}`, {
+				method: "PUT",
+				headers: { Authorization: "Bearer t", "Content-Type": "application/json" },
+				body: JSON.stringify({ root: { type: "target", model: primaryId } }),
+			});
+			expect(putRes.status).toBe(200);
+
+			const beforeRes = await fetch(`${url}/v1/routes`, {
+				headers: { Authorization: "Bearer t" },
+			});
+			expect(beforeRes.status).toBe(200);
+			const before = (await beforeRes.json()) as RoutesListResponse;
+			expect(before.data.map(row => row.id)).toEqual([hotRouteId]);
+
+			const delRes = await fetch(`${url}/v1/routes/${hotRouteId}`, {
+				method: "DELETE",
+				headers: { Authorization: "Bearer t" },
+			});
+			expect(delRes.status).toBe(204);
+
+			const afterRes = await fetch(`${url}/v1/routes`, {
+				headers: { Authorization: "Bearer t" },
+			});
+			expect(afterRes.status).toBe(200);
+			const after = (await afterRes.json()) as RoutesListResponse;
+			expect(after.generation).toBeGreaterThan(before.generation);
+			expect(after.data).toEqual([]);
+		});
+	});
+
+	it("returns 404 for a concrete catalog model id (negative)", async () => {
+		await withEmptyRoutesGateway(async url => {
+			const res = await fetch(`${url}/v1/routes/${primaryId}`, {
+				method: "DELETE",
+				headers: { Authorization: "Bearer t" },
+			});
+			expect(res.status).toBe(404);
+			const body = (await res.json()) as { error?: string };
+			expect(body.error).toBe(`Unknown route: ${primaryId}`);
+		});
+	});
+});

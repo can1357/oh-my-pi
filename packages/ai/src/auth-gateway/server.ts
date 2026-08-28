@@ -1531,6 +1531,13 @@ async function handleRoutePut(registry: RouteRegistry, id: string, req: Request)
 	return handleRouteGet(registry, id);
 }
 
+function handleRouteDelete(registry: RouteRegistry, id: string): Response {
+	if (!registry.unregister(id)) {
+		return json(404, { error: `Unknown route: ${id}` });
+	}
+	return new Response(null, { status: 204 });
+}
+
 export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
 	const registry = opts.routeRegistry ?? new RouteRegistry(opts.resolveModel);
 	for (const def of opts.routes ?? []) registry.register(def);
@@ -1613,6 +1620,13 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 						return withCors(json(404, { error: `No route: PUT ${pathname}` }), req);
 					}
 					return withCors(await handleRoutePut(registry, id, req), req);
+				}
+				if (req.method === "DELETE" && pathname.startsWith("/v1/routes/")) {
+					const id = pathname.slice("/v1/routes/".length);
+					if (id.length === 0) {
+						return withCors(json(404, { error: `No route: DELETE ${pathname}` }), req);
+					}
+					return withCors(handleRouteDelete(registry, id), req);
 				}
 
 				// Route-table miss: no format module to defer to, so we emit a
