@@ -409,4 +409,30 @@ describe("cursor conversation store — rotation", () => {
 		expect(pinCursorConversation(resolveCursorConversationId("used-base"))).toBe(entry);
 		unpinCursorConversation(resolveCursorConversationId("used-base"));
 	});
+
+	it("keeps a marked rotated id rotatable when the rotated entry is evicted while its base is pinned", () => {
+		// The base stays pinned for the whole scenario (an in-flight request),
+		// so it is never itself a retained-LRU candidate.
+		pinCursorConversation("victim-base");
+		const rotated = requireRotation(rotateCursorConversation("victim-base"));
+		markCursorRotationSucceeded(rotated);
+		// The rotated wire id completed a turn and was retained: it is now an
+		// ordinary — and soon oldest — unpinned, non-fresh retained entry.
+		pinCursorConversation(rotated);
+		unpinCursorConversation(rotated);
+
+		// Overflow the retained set so the rotated id is selected as victim.
+		for (let i = 0; i <= CURSOR_RETAINED_CONVERSATION_LIMIT; i++) {
+			const id = `rot-victim-churn-${i}`;
+			pinCursorConversation(id);
+			unpinCursorConversation(id);
+		}
+
+		// The base still resolves to the rotated id and the mapping's success
+		// marker survived the entry's eviction: a later poison of the rotated
+		// id may rotate again instead of being refused forever.
+		expect(resolveCursorConversationId("victim-base")).toBe(rotated);
+		expect(isCursorRotationMarked(rotated)).toBe(true);
+		expect(rotateCursorConversation("victim-base")).toBeDefined();
+	});
 });

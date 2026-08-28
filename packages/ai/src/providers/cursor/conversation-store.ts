@@ -68,24 +68,27 @@ export function pinCursorConversation(id: string): CursorConversationEntry {
 }
 
 /**
- * Purges rotation bookkeeping owned by a base id evicted from the retained
- * LRU: its base→rotated mapping and rotation count, its current rotated id
- * from the success/fresh sets, and the base id itself from those sets. Only
- * called for a base genuinely evicted from `retainedLru`. Entries whose
- * resolved (rotated) id is still active, fresh, or is the id currently being
- * unpinned are skipped by the overflow loop so an in-flight, not-yet-retried,
- * or just-completed rotated request cannot lose its mapping.
+ * Purges rotation bookkeeping owned by a victim evicted from the retained
+ * LRU: its base→rotated mapping and rotation count, and its current rotated
+ * id from the success/fresh sets. The victim's own success/fresh markers are
+ * cleared only when no base still maps to it: an evicted rotated wire id
+ * whose base lives on keeps its markers, because they belong to that
+ * mapping — clearing them would leave the base resolving to an unmarked id
+ * that `rotateCursorConversation()` refuses to replace forever.
  */
-function evictCursorRotationState(baseId: string): void {
-	const rotated = rotatedConversationIds.get(baseId);
+function evictCursorRotationState(victimId: string): void {
+	const rotated = rotatedConversationIds.get(victimId);
 	if (rotated !== undefined) {
 		successfulRotatedConversationIds.delete(rotated);
 		freshRotatedConversationIds.delete(rotated);
 	}
-	rotatedConversationIds.delete(baseId);
-	rotationCounts.delete(baseId);
-	successfulRotatedConversationIds.delete(baseId);
-	freshRotatedConversationIds.delete(baseId);
+	rotatedConversationIds.delete(victimId);
+	rotationCounts.delete(victimId);
+	for (const target of rotatedConversationIds.values()) {
+		if (target === victimId) return;
+	}
+	successfulRotatedConversationIds.delete(victimId);
+	freshRotatedConversationIds.delete(victimId);
 }
 
 /**
