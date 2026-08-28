@@ -168,8 +168,15 @@ async function searchWithAuthStorage(
 	sessionId?: string,
 	sourcePolicy?: ParallelSourcePolicy,
 ): Promise<ParallelSearchResult> {
+	const hasConfiguredAuth = authStorage.hasAuth("parallel");
 	const apiKey = await authStorage.getApiKey("parallel", sessionId, { signal: params.signal });
 	if (!apiKey) {
+		// A failed credential lookup must not admit anonymous search to the automatic chain.
+		if (hasConfiguredAuth) {
+			throw new ParallelApiError(
+				"Parallel credentials could not be resolved. Check your configured API key or credential helper.",
+			);
+		}
 		return searchWithPublicMcp(objective, [params.mcpQuery], params, sessionId);
 	}
 

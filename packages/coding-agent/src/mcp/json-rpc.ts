@@ -5,7 +5,7 @@
  * without maintaining persistent connections.
  */
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, readSseEvents } from "@oh-my-pi/pi-utils";
 
 /** Hard ceiling on a single MCP HTTP request when the caller provides no signal. */
 const MCP_DEFAULT_TIMEOUT_MS = 60_000;
@@ -94,6 +94,7 @@ export async function callMCP<T = unknown>(
 		method,
 		params: params ?? {},
 	};
+	const signal = options?.signal ?? AbortSignal.timeout(MCP_DEFAULT_TIMEOUT_MS);
 
 	const response = await (options?.fetch ?? fetch)(url, {
 		method: "POST",
@@ -103,7 +104,7 @@ export async function callMCP<T = unknown>(
 			...options?.headers,
 		},
 		body: JSON.stringify(body),
-		signal: options?.signal ?? AbortSignal.timeout(MCP_DEFAULT_TIMEOUT_MS),
+		signal,
 	});
 
 	if (!response.ok) {
@@ -115,8 +116,28 @@ export async function callMCP<T = unknown>(
 		throw new Error(errorMsg);
 	}
 
-	const text = await response.text();
-	const result = parseSSE(text) as JsonRpcResponse<T> | null;
+	let text = "";
+	let result: JsonRpcResponse<T> | null = null;
+	if (response.headers.get("Content-Type")?.includes("text/event-stream") && response.body) {
+		for await (const event of readSseEvents(response.body, signal)) {
+			text = event.data;
+			let message: JsonRpcResponse<T> | null;
+			try {
+				message = JSON.parse(text) as JsonRpcResponse<T> | null;
+			} catch {
+				continue;
+			}
+			// Notifications and replies to other requests are not this call's result.
+			if (message?.id === body.id && ("result" in message || "error" in message)) {
+				result = message;
+				break;
+			}
+		}
+		signal.throwIfAborted();
+	} else {
+		text = await response.text();
+		result = parseSSE(text) as JsonRpcResponse<T> | null;
+	}
 
 	if (!result) {
 		logger.error("Failed to parse MCP response", {

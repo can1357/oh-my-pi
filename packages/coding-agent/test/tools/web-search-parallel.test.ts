@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
-import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
+import { AuthStorage, type FetchImpl } from "@oh-my-pi/pi-ai";
+import { resolveConfigValue } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import type { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { searchWithParallel } from "@oh-my-pi/pi-coding-agent/web/parallel";
 import { ParallelProvider, searchParallel } from "@oh-my-pi/pi-coding-agent/web/search/providers/parallel";
@@ -356,12 +357,12 @@ describe("Parallel web search", () => {
 			search_id: "search-parallel-mcp-text",
 			results: [{ title: "Text result", url: "https://example.com/text", excerpts: ["Text excerpt"] }],
 		};
-		const fetchMock: FetchImpl = () =>
+		const fetchMock: FetchImpl = (_url, init) =>
 			Promise.resolve(
 				new Response(
 					`event: message\ndata: ${JSON.stringify({
 						jsonrpc: "2.0",
-						id: "parallel-mcp-text",
+						id: JSON.parse(init?.body as string).id,
 						result: {
 							content: [
 								{ type: "text", text: "Search completed successfully." },
@@ -436,6 +437,31 @@ describe("Parallel web search", () => {
 			"x-api-key": "stored-parallel-key",
 			"parallel-beta": "search-extract-2025-10-10",
 		});
+	});
+
+	it("does not switch to anonymous MCP when a configured credential helper fails", async () => {
+		delete process.env.PARALLEL_API_KEY;
+		const authStorage = await AuthStorage.create(":memory:", { configValueResolver: resolveConfigValue });
+		try {
+			await authStorage.set("parallel", { type: "api_key", key: "!false" });
+			const fetchMock = vi.fn(
+				mockFetch({
+					jsonrpc: "2.0",
+					id: "parallel-mcp-unexpected",
+					result: { structuredContent: { search_id: "unexpected-anonymous-search", results: [] } },
+				}),
+			);
+
+			await expect(
+				searchParallel({ query: "configured credential", fetch: fetchMock }, authStorage),
+			).rejects.toMatchObject({
+				provider: "parallel",
+				message: expect.stringMatching(/credentials.*resolved/i),
+			});
+			expect(fetchMock).not.toHaveBeenCalled();
+		} finally {
+			authStorage.close();
+		}
 	});
 
 	it("surfaces anonymous MCP JSON-RPC errors as Parallel provider errors", async () => {
