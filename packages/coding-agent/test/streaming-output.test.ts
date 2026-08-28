@@ -1050,6 +1050,31 @@ describe("OutputSink presentation feed", () => {
 		expect(truncationMetas(events)).toHaveLength(0);
 	});
 
+	test("replace() flushes throttled pending bytes to the presentation stream before realigning", async () => {
+		const { producer, events } = collectingProducer();
+		const sink = new OutputSink({ presentation: producer, chunkThrottleMs: 60_000 });
+		const first = "raw head\n"; // first push bypasses the throttle
+		sink.push(first);
+		const second = "raw tail\n"; // buffered by the throttle window
+		sink.push(second);
+
+		// A minimizer rewrites the BUFFER; the raw stream every presentation
+		// consumer watches must still end with the complete tail — clearing the
+		// throttle buffer without emitting would lose `second` irrecoverably
+		// (the freeze barrier can only flush what still exists).
+		sink.replace("minimized");
+		await producer.freeze();
+
+		expect(appendedBytes(events)).toBe(byteLengthOf(first) + byteLengthOf(second));
+		const streamed = events
+			.filter((event): event is Extract<ToolPresentationEvent, { type: "terminal_append" }> => {
+				return event.type === "terminal_append";
+			})
+			.map(event => event.data)
+			.join("");
+		expect(streamed).toBe(`${first}${second}`);
+	});
+
 	test("an ordinary chunk arriving mid-freeze is dropped wholesale by the freeze barrier, not by a byte cap", async () => {
 		const { producer, events } = collectingProducer();
 		const gate = Promise.withResolvers<void>();

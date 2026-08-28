@@ -1236,7 +1236,17 @@ export class OutputSink {
 	 * branch in `dump()` against stale totals.
 	 */
 	replace(text: string): void {
+		// A minimizer replaces the BUFFER, not the stream. A chunk still sitting
+		// in the throttle window is intentionally discarded from the `onChunk`
+		// PREVIEW channel (the replacement text supersedes it there), but the
+		// presentation producer's terminal stream is append-only raw process
+		// bytes: once the buffer is cleared the freeze barrier can no longer
+		// recover them, and every presentation consumer (ACP/TUI/RPC) would see
+		// a stream ending with a missing tail. Flush that channel alone.
+		const pending = this.#pendingChunk;
+		this.#pendingChunk = "";
 		this.#clearPendingChunkTimer();
+		if (pending.length > 0) this.#appendToPresentation(pending);
 		this.#buffer = text;
 		this.#bufferBytes = Buffer.byteLength(text, "utf-8");
 		this.#head = "";
@@ -1251,7 +1261,6 @@ export class OutputSink {
 		this.#columnEllipsisAdded = false;
 		this.#columnDroppedBytes = 0;
 		this.#columnTruncatedLines = 0;
-		this.#pendingChunk = "";
 		this.#pendingCarriageReturn = false;
 	}
 
