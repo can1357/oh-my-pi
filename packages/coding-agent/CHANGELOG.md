@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an ask dialog preview side panel, expandable option descriptions (`→`/`←`), number-key jumps to options, and `/` filtering for long option lists.
+
+### Changed
+
+- Unified ask option markers across the dialog, transcript, and legacy prompts, with a visible count whenever option text is clipped.
+
+### Fixed
+
+- Kept the ask filter available after a query that fits the viewport so `/` can reopen it.
+- Rechecked ask list overflow when the focused row changes so a short option is not rendered one column narrower.
+- Reserved the filter count suffix when measuring ask dialog height so opening the filter cannot grow the frozen panel.
 ## [18.0.8] - 2026-08-27
 
 ### Added

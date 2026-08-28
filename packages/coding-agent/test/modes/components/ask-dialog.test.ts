@@ -1,22 +1,26 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
 import type { ExtensionAskDialogQuestion } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { AskDialogComponent } from "@oh-my-pi/pi-coding-agent/modes/components/ask-dialog";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { setKeybindings } from "@oh-my-pi/pi-tui";
+import { getThemeByName, setThemeInstance, type Theme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { CURSOR_MARKER, setKeybindings } from "@oh-my-pi/pi-tui";
 
 const DOWN = "\x1b[B";
 const UP = "\x1b[A";
 const PAGE_DOWN = "\x1b[6~";
-const PAGE_UP = "\x1b[5~";
 const ENTER = "\n";
 const CANCEL = "\x07";
 const SPACE = " ";
 const TAB = "\t";
 const SHIFT_TAB = "\x1b[Z";
+const RIGHT = "\x1b[C";
 
 let darkTheme = await getThemeByName("dark");
+// setThemeInstance replaces process-wide theme state and disables
+// auto-detection, so capture the prior instance and restore it after the
+// file; otherwise later test files inherit this file's dark theme.
+let priorTheme: Theme | undefined;
 
 function render(component: AskDialogComponent): string {
 	return stripVTControlCharacters(component.render(80).join("\n"));
@@ -24,12 +28,14 @@ function render(component: AskDialogComponent): string {
 
 describe("AskDialogComponent", () => {
 	beforeAll(async () => {
+		priorTheme = theme;
 		darkTheme = await getThemeByName("dark");
 		if (!darkTheme) throw new Error("Failed to load dark theme");
 	});
 
 	beforeEach(() => {
-		setThemeInstance(darkTheme!);
+		if (!darkTheme) throw new Error("Failed to load dark theme");
+		setThemeInstance(darkTheme);
 		setKeybindings(KeybindingsManager.inMemory({ "tui.select.cancel": "ctrl+g" }));
 	});
 
@@ -37,6 +43,10 @@ describe("AskDialogComponent", () => {
 		setKeybindings(KeybindingsManager.inMemory());
 		vi.useRealTimers();
 		vi.restoreAllMocks();
+	});
+
+	afterAll(() => {
+		if (priorTheme) setThemeInstance(priorTheme);
 	});
 
 	it("single-question, single-select: Enter on option submits immediately", () => {
@@ -242,10 +252,10 @@ describe("AskDialogComponent", () => {
 		);
 
 		component.handleInput(SPACE);
-		expect(render(component)).toContain("❯ ☑ Generic MLE loop (Recommended)");
+		expect(render(component)).toContain("❯ 1 ☑ Generic MLE loop (Recommended)");
 
 		component.handleInput(SPACE);
-		expect(render(component)).toContain("❯ ☐ Generic MLE loop (Recommended)");
+		expect(render(component)).toContain("❯ 1 ☐ Generic MLE loop (Recommended)");
 
 		component.handleInput(SPACE);
 		component.handleInput(ENTER);
@@ -444,6 +454,38 @@ describe("AskDialogComponent", () => {
 		expect(onSubmit.mock.calls[0][0].results[0].note).toBe("My Custom Note");
 	});
 
+	it("uppercase N (Shift+N or Caps Lock) opens the note prompt under shipped defaults", async () => {
+		const onPrompt = vi.fn().mockReturnValue(Promise.resolve("Upper note"));
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Choose one?",
+				options: [{ label: "Option A" }, { label: "Option B" }],
+			},
+		];
+
+		const component = new AskDialogComponent(questions, {
+			onSubmit: vi.fn(),
+			onCancel: vi.fn(),
+			onPrompt,
+		});
+
+		// Terminals deliver Shift+N as a bare uppercase N; the manager
+		// canonicalizes it to `shift+n`, which the bare `n` default must not miss.
+		component.handleInput("N");
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(onPrompt).toHaveBeenCalledTimes(1);
+		expect(onPrompt.mock.calls[0][0]).toBe("Note for Option A: Choose one?");
+
+		// `n` and `shift+n` are one physical key, so the footer hint collapses
+		// the pair instead of advertising a second, nonexistent shortcut.
+		const out = render(component);
+		expect(out).toContain("N note");
+		expect(out).not.toContain("Shift+N");
+	});
+
 	it("note prefill is empty when editing a different row after noting another option", async () => {
 		const onPrompt = vi.fn();
 		const onSubmit = vi.fn();
@@ -484,7 +526,7 @@ describe("AskDialogComponent", () => {
 		expect(onPrompt.mock.calls[1][1]).toBeUndefined();
 
 		// Move back up to Option A and re-open its note.
-		component.handleInput("\x1b[A"); // UP
+		component.handleInput(UP); // UP
 		onPrompt.mockReturnValueOnce(Promise.resolve("Updated note"));
 		component.handleInput("n");
 		await Promise.resolve();
@@ -1029,7 +1071,8 @@ describe("AskDialogComponent", () => {
 			const initial = renderAt(60);
 			expect(initial).toContain("Option 01");
 			expect(initial).not.toContain("Option 30");
-			expect(initial).toContain("↓ scroll");
+			// Overflow drops the scroll hint before cancel (F9); the list still pages.
+			expect(initial).toContain("cancel");
 
 			for (let i = 0; i < 28; i++) component.handleInput(DOWN);
 			const scrolled = renderAt(60);
@@ -1093,7 +1136,7 @@ describe("AskDialogComponent", () => {
 		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual([]);
 	});
 
-	it("renders every option's preview inline, not only the highlighted one", () => {
+	it("renders the focused option preview in the side panel", () => {
 		const questions: ExtensionAskDialogQuestion[] = [
 			{
 				id: "q1",
@@ -1110,10 +1153,14 @@ describe("AskDialogComponent", () => {
 			onCancel: vi.fn(),
 			onPrompt: vi.fn(),
 		});
-		// Cursor defaults to option 0; both previews must be visible without navigating.
+		// Cursor defaults to option 0; only the focused preview appears in the facet.
 		const out = stripVTControlCharacters(component.render(80).join("\n"));
 		expect(out).toContain("PREVIEW-ALPHA");
-		expect(out).toContain("PREVIEW-BRAVO");
+		expect(out).not.toContain("PREVIEW-BRAVO");
+		component.handleInput(DOWN);
+		const next = stripVTControlCharacters(component.render(80).join("\n"));
+		expect(next).toContain("PREVIEW-BRAVO");
+		expect(next).not.toContain("PREVIEW-ALPHA");
 	});
 
 	it("refreshes cached preview styling after theme invalidation", async () => {
@@ -1130,7 +1177,7 @@ describe("AskDialogComponent", () => {
 		if (!lightTheme) throw new Error("Failed to load light theme");
 		const cachedComponent = createComponent();
 		const before = previewLine(cachedComponent);
-		expect(stripVTControlCharacters(before)).toContain("│ CACHE-PREVIEW");
+		expect(stripVTControlCharacters(before)).toContain("CACHE-PREVIEW");
 		try {
 			setThemeInstance(lightTheme);
 			const stale = previewLine(cachedComponent);
@@ -1187,8 +1234,9 @@ describe("AskDialogComponent", () => {
 			);
 			const out = render(component);
 
-			expect(out).toContain("PgUp/PgDn");
-			expect(out).toContain("Tab/←/→");
+			// Tall previews live in the side facet, so the list no longer pages them;
+			// the footer must still keep tab and cancel affordances.
+			expect(out).toContain("Tab/S-Tab");
 			expect(out).not.toContain(" tabs");
 			expect(out).toContain("Ctrl+G cancel");
 			setKeybindings(
@@ -1199,73 +1247,7 @@ describe("AskDialogComponent", () => {
 				}),
 			);
 			const remapped = render(component);
-			expect(remapped).toContain("Ctrl+U/Ctrl+D");
 			expect(remapped).toContain("Ctrl+G cancel");
-		} finally {
-			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
-			else Reflect.deleteProperty(process.stdout, "rows");
-		}
-	});
-
-	it("pages through an inline preview taller than the question viewport", () => {
-		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
-		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 24 });
-		try {
-			const previewLines = Array.from({ length: 80 }, (_, index) => {
-				if (index === 0) return "PREVIEW-FIRST";
-				if (index === 40) return "PREVIEW-MIDDLE";
-				if (index === 79) return "PREVIEW-LAST";
-				return `preview-line-${index}`;
-			});
-			const questions: ExtensionAskDialogQuestion[] = [
-				{
-					id: "q1",
-					question: "Inspect the preview?",
-					options: [{ label: "Plain" }, { label: "Alpha", preview: `\`\`\`\n${previewLines.join("\n")}\n\`\`\`` }],
-				},
-			];
-			const component = new AskDialogComponent(questions, {
-				onSubmit: vi.fn(),
-				onCancel: vi.fn(),
-				onPrompt: vi.fn(),
-			});
-
-			let out = render(component);
-			expect(out).toContain("PREVIEW-FIRST");
-			expect(out).not.toContain("PREVIEW-MIDDLE");
-			expect(out).not.toContain("PREVIEW-LAST");
-			expect(out).not.toContain("PgUp/PgDn");
-			expect(out).toContain("↓ scroll");
-			component.handleInput(DOWN);
-			for (let page = 0; page < 4; page++) component.handleInput(PAGE_DOWN);
-			out = render(component);
-			expect(out).toContain("PgUp/PgDn");
-			expect(out).toContain("PREVIEW-MIDDLE");
-			component.handleInput(DOWN);
-			out = render(component);
-			expect(out).toContain("Other (type your own)");
-			expect(out).not.toContain("PREVIEW-MIDDLE");
-			expect(out).not.toContain("PgUp/PgDn");
-			component.handleInput(UP);
-			out = render(component);
-			expect(out).toContain("PREVIEW-FIRST");
-			expect(out).toContain("PgUp/PgDn");
-			for (let page = 0; page < 10; page++) {
-				component.handleInput(PAGE_DOWN);
-				out = render(component);
-			}
-			expect(out).toContain("PREVIEW-LAST");
-			expect(out).not.toContain("Other (type your own)");
-			component.handleInput(DOWN);
-			out = render(component);
-			expect(out).toContain("Other (type your own)");
-			component.handleInput(UP);
-			out = render(component);
-			for (let page = 0; page < 10; page++) {
-				component.handleInput(PAGE_UP);
-				out = render(component);
-			}
-			expect(out).toContain("PREVIEW-FIRST");
 		} finally {
 			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
 			else Reflect.deleteProperty(process.stdout, "rows");
@@ -1422,6 +1404,59 @@ describe("AskDialogComponent", () => {
 		expect(render(component)).toBe(before);
 	});
 
+	it("recomputes header expansion at the filtered title width", () => {
+		const options = Array.from({ length: 22 }, (_, i) => ({ label: `Option ${i}` }));
+		const make = (n: number) =>
+			new AskDialogComponent([{ id: "q1", question: "xxxx ".repeat(n).trim(), options }], {
+				onSubmit: vi.fn(),
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+			});
+		let found = false;
+		for (let n = 8; n < 80; n++) {
+			const full = make(n);
+			full.render(80);
+			if (full.toggleQuestionExpansion()) continue;
+			const filtered = make(n);
+			filtered.render(80);
+			filtered.focused = true;
+			filtered.handleInput("/");
+			filtered.render(80);
+			if (!filtered.toggleQuestionExpansion()) continue;
+			found = true;
+			break;
+		}
+		expect(found).toBe(true);
+	});
+
+	it("collapses newlines in the preview facet title to a single line", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const component = new AskDialogComponent(
+				[
+					{
+						id: "q1",
+						question: "Pick?",
+						options: [
+							{ label: "Alpha\nBravo", preview: "body-one" },
+							{ label: "Other", preview: "body-two" },
+						],
+					},
+				],
+				{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+			);
+			const stripped = stripVTControlCharacters(component.render(80).join("\n"));
+			expect(stripped).toContain("Alpha Bravo");
+			expect(stripped).not.toMatch(/Alpha\nBravo/);
+			const previewLines = stripped.split("\n").filter(line => line.includes("│"));
+			expect(previewLines.some(line => /Alpha Bravo/.test(line))).toBe(true);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
 	it("wraps long option labels onto indented continuation lines instead of truncating", () => {
 		const onSubmit = vi.fn();
 		const tail = "UNIQUE_TAIL_MARKER_8654";
@@ -1441,9 +1476,20 @@ describe("AskDialogComponent", () => {
 		});
 
 		const output = render(component);
-		// The unique label tail must be present — no ellipsis truncation.
+		// The unique label tail must be present on the list side — no ellipsis truncation there.
 		expect(output).toContain(tail);
-		expect(output).not.toContain("…");
+		const listLines = output.split("\n").filter(line => {
+			const dividerAt = line.indexOf("│", 1);
+			const listPart = dividerAt > 0 ? line.slice(0, dividerAt) : line;
+			return listPart.includes("deliberately") || listPart.includes(tail) || listPart.includes("option label");
+		});
+		expect(
+			listLines.some(line => {
+				const dividerAt = line.indexOf("│", 1);
+				const listPart = dividerAt > 0 ? line.slice(0, dividerAt) : line;
+				return listPart.includes("…");
+			}),
+		).toBe(false);
 		// The first line carries the cursor glyph; continuation lines are
 		// indented under the marker so the cursor stays visually anchored.
 		const lines = output.split("\n");
@@ -1453,9 +1499,9 @@ describe("AskDialogComponent", () => {
 		expect(continuation).toMatch(/│ {3}/);
 	});
 
-	it("does not wrap an option label that fits the dialog content width", () => {
+	it("does not wrap an option label that fits the list facet width", () => {
 		const component = new AskDialogComponent(
-			[{ id: "q1", question: "Pick one?", options: [{ label: "x".repeat(70) }] }],
+			[{ id: "q1", question: "Pick one?", options: [{ label: "x".repeat(20) }] }],
 			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
 		);
 
@@ -1495,8 +1541,8 @@ describe("AskDialogComponent", () => {
 		expect(onCancel).not.toHaveBeenCalled();
 
 		// The dialog should still be usable: select Option A and submit.
-		component.handleInput("\x1b[A"); // UP to Option B
-		component.handleInput("\x1b[A"); // UP to Option A
+		component.handleInput(UP); // UP to Option B
+		component.handleInput(UP); // UP to Option A
 		component.handleInput(ENTER);
 
 		expect(onSubmit).toHaveBeenCalledTimes(1);
@@ -1596,5 +1642,855 @@ describe("AskDialogComponent", () => {
 		const result = onSubmit.mock.calls[0][0].results[0];
 		expect(result.question).toBe("");
 		expect(result.selectedOptions).toEqual(["Option A"]);
+	});
+
+	it("keeps markers and a non-empty footer at a 40-column width", () => {
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Pick?",
+				options: [{ label: "Alpha choice" }, { label: "Bravo choice" }, { label: "Charlie choice" }],
+			},
+		];
+		const component = new AskDialogComponent(questions, {
+			onSubmit: vi.fn(),
+			onCancel: vi.fn(),
+			onPrompt: vi.fn(),
+		});
+		const lines = stripVTControlCharacters(component.render(40).join("\n")).split("\n");
+		for (const label of ["Alpha", "Bravo", "Charlie"]) {
+			expect(lines.some(line => line.includes(label))).toBe(true);
+		}
+		expect(lines.some(line => line.includes("○"))).toBe(true);
+		const footer = [...lines].reverse().find(line => line.includes("cancel") || line.includes("Enter")) ?? "";
+		expect(footer.trim().length).toBeGreaterThan(0);
+		expect(footer).toContain("cancel");
+	});
+
+	it("renders preview inside the expanded row when the side facet collapses", () => {
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Pick?",
+				options: [{ label: "Alpha", preview: "NARROW-PREVIEW-TEXT" }, { label: "Bravo" }],
+			},
+		];
+		const component = new AskDialogComponent(questions, {
+			onSubmit: vi.fn(),
+			onCancel: vi.fn(),
+			onPrompt: vi.fn(),
+		});
+		const narrow = stripVTControlCharacters(component.render(50).join("\n"));
+		expect(narrow).not.toContain("NARROW-PREVIEW-TEXT");
+		const body = narrow.split("\n").filter(line => line.includes("Alpha") || line.includes("Bravo"));
+		expect(body.some(line => line.split("│").length > 3)).toBe(false);
+		component.handleInput(RIGHT);
+		const expanded = stripVTControlCharacters(component.render(50).join("\n"));
+		expect(expanded).toContain("NARROW-PREVIEW-TEXT");
+	});
+
+	it("reveals a preview longer than the side facet through the expanded row when split", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const preview = Array.from({ length: 40 }, (_, index) => `PREVIEW-LINE-${index + 1}`).join("\n");
+			const component = new AskDialogComponent(
+				[{ id: "q1", question: "Pick?", options: [{ label: "Alpha", preview }, { label: "Bravo" }] }],
+				{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+			);
+			// Wide enough for the side facet, which is a fixed-height glance: the
+			// tail lines are unreachable until the row is expanded.
+			const glance = stripVTControlCharacters(component.render(120).join("\n"));
+			expect(glance).toContain("PREVIEW-LINE-1");
+			expect(glance).not.toContain("PREVIEW-LINE-40");
+			expect(glance).toContain("more lines");
+			component.handleInput(RIGHT);
+			const expanded = stripVTControlCharacters(component.render(120).join("\n"));
+			// Expanding moves the whole preview into the scrollable list, so the
+			// keyboard can now page to the tail the fixed facet could never show.
+			expect(expanded).toContain("PREVIEW-LINE-1");
+			let reached = expanded.includes("PREVIEW-LINE-40");
+			for (let page = 0; page < 12 && !reached; page++) {
+				component.handleInput(PAGE_DOWN);
+				reached = stripVTControlCharacters(component.render(120).join("\n")).includes("PREVIEW-LINE-40");
+			}
+			expect(reached).toBe(true);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("keeps the expand key visible in the preview overflow cue at the narrowest split width", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const preview = Array.from({ length: 40 }, (_, index) => `PREVIEW-LINE-${index + 1}`).join("\n");
+			const component = new AskDialogComponent(
+				[{ id: "q1", question: "Pick?", options: [{ label: "Alpha", preview }, { label: "Bravo" }] }],
+				{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+			);
+			// Width 64 → 60 inner columns: the narrowest layout that still splits,
+			// leaving the preview facet 29 columns — one less than the full cue.
+			// The cue is the only expand hint here: split mode leaves the footer's
+			// preview-suppression hint off, so clipping its key would advertise
+			// hidden lines with no way to reach them.
+			const narrow = stripVTControlCharacters(component.render(64).join("\n"));
+			expect(narrow).toContain("PREVIEW-LINE-1");
+			expect(narrow).not.toContain("PREVIEW-LINE-40");
+			expect(narrow).toMatch(/more( lines)? · Right expand/);
+
+			// A longer user-configured binding sheds the count before the key.
+			setKeybindings(
+				KeybindingsManager.inMemory({ "tui.select.cancel": "ctrl+g", "app.ask.expand": "ctrl+shift+alt+right" }),
+			);
+			const custom = stripVTControlCharacters(component.render(64).join("\n"));
+			expect(custom).toContain("Ctrl+Shift+Alt+Right expand");
+			expect(custom).not.toMatch(/\d+ more/);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("jumps focus to the nth visible row with digit keys", () => {
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Pick?",
+				options: [{ label: "One" }, { label: "Two" }, { label: "Three" }, { label: "Four" }, { label: "Five" }],
+			},
+		];
+		const component = new AskDialogComponent(questions, {
+			onSubmit: vi.fn(),
+			onCancel: vi.fn(),
+			onPrompt: vi.fn(),
+		});
+		component.focused = true;
+		component.handleInput("4");
+		const lines = component.render(80);
+		const marked = lines.findIndex(line => line.includes(CURSOR_MARKER));
+		expect(marked).toBeGreaterThanOrEqual(0);
+		expect(stripVTControlCharacters(lines[marked] ?? "")).toContain("Four");
+	});
+
+	it("filters options, renumbers jump digits, and cancels only after clearing the filter", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const onCancel = vi.fn();
+			const options = Array.from({ length: 20 }, (_, index) => ({
+				label: `Option ${String(index + 1).padStart(2, "0")}`,
+			}));
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick many?", options }], {
+				onSubmit: vi.fn(),
+				onCancel,
+				onPrompt: vi.fn(),
+			});
+			component.focused = true;
+			component.handleInput("/");
+			component.handleInput("1");
+			let out = stripVTControlCharacters(component.render(80).join("\n")).replaceAll(CURSOR_MARKER, "");
+			expect(out).toContain("/ 1");
+			expect(out).toMatch(/\d+\/21/);
+			const focusedLine = out.split("\n").find(line => line.includes("❯"));
+			expect(focusedLine).toContain("Option 01");
+			component.handleInput(CANCEL);
+			out = stripVTControlCharacters(component.render(80).join("\n")).replaceAll(CURSOR_MARKER, "");
+			expect(out).not.toContain("/ 1");
+			expect(onCancel).not.toHaveBeenCalled();
+			component.handleInput(CANCEL);
+			expect(onCancel).toHaveBeenCalledTimes(1);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+	it("declares both cursors while filtering, the filter bar's marker last (bottom-most wins)", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const options = Array.from({ length: 8 }, (_, index) => ({
+				label: `Option ${String(index + 1).padStart(2, "0")}`,
+			}));
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick?", options }], {
+				onSubmit: vi.fn(),
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+			});
+			component.focused = true;
+			component.handleInput("/");
+			const frame = component.render(80);
+			const markerLines: number[] = [];
+			frame.forEach((line, index) => {
+				if (line.includes(CURSOR_MARKER)) markerLines.push(index);
+			});
+			expect(markerLines).toHaveLength(2);
+			// Focused row marker first; the bottom filter bar's marker follows it,
+			// so the TUI's bottom-most marker belongs to the filter while open.
+			expect(stripVTControlCharacters(frame[markerLines[0] ?? -1] ?? "")).toContain("❯");
+			expect(stripVTControlCharacters(frame[markerLines[1] ?? -1] ?? "")).toContain("/");
+			expect(markerLines[1] ?? -1).toBeGreaterThan(markerLines[0] ?? -1);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+	it("keeps the divider and preview facet continuous across the bottom filter bar when split", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			// At least 5 options so the filter is available and actually opens.
+			const options = [
+				{ label: "Alpha", preview: "FILTER-ROW-PREVIEW" },
+				{ label: "Bravo" },
+				{ label: "Charlie" },
+				{ label: "Delta" },
+				{ label: "Echo" },
+			];
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick?", options }], {
+				onSubmit: vi.fn(),
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+			});
+			// Dialog not focused: the focused row emits no cursor marker, so the
+			// filter input's marker uniquely locates the bottom bar.
+			component.handleInput("/");
+			const frame = component.render(80); // width 80 -> split facet active
+			const stripped = frame.map(line => stripVTControlCharacters(line));
+			// The APC cursor marker survives stripVTControlCharacters, so drop it
+			// before measuring columns (it inflates character indexes, not cells).
+			const clean = (line: string): string => stripVTControlCharacters(line).replaceAll(CURSOR_MARKER, "");
+			const facetDivider = (line: string): number => clean(line).indexOf("│", 1);
+			const barIdx = frame.findIndex(line => line.includes(CURSOR_MARKER));
+			expect(barIdx).toBeGreaterThanOrEqual(0);
+			const previewRowIdx = stripped.findIndex(line => line.includes("FILTER-ROW-PREVIEW"));
+			expect(previewRowIdx).toBeGreaterThanOrEqual(0);
+			expect(barIdx).toBeGreaterThan(previewRowIdx); // bar sits below the list/preview rows
+			// The bar spans only the list width, so the facet divider survives at
+			// the same column as a regular split row (finding 2: a full-width bar
+			// would push the divider and preview facet off this line).
+			const barDivider = facetDivider(stripped[barIdx] ?? "");
+			const rowDivider = facetDivider(stripped[previewRowIdx] ?? "");
+			expect(barDivider).toBeGreaterThan(0);
+			expect(barDivider).toBe(rowDivider);
+			// The bar composes the filter cell + divider + preview-facet cell.
+			const barList = (stripped[barIdx] ?? "").slice(0, barDivider);
+			expect(barList).toContain("/");
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("leaves only the focused-row cursor once Escape closes the filter", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const options = Array.from({ length: 6 }, (_, index) => ({
+				label: `Option ${String(index + 1).padStart(2, "0")}`,
+			}));
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick?", options }], {
+				onSubmit: vi.fn(),
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+			});
+			component.focused = true;
+			component.handleInput("/");
+			expect(component.render(80).filter(line => line.includes(CURSOR_MARKER))).toHaveLength(2);
+			component.handleInput(CANCEL);
+			const markers = component.render(80).filter(line => line.includes(CURSOR_MARKER));
+			expect(markers).toHaveLength(1);
+			// The surviving marker belongs to the focused option row after the filter input has closed.
+			expect(stripVTControlCharacters(markers[0] ?? "")).toContain("❯");
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("keeps a single cursor marker on the focused row and submits it on Enter", () => {
+		const onSubmit = vi.fn();
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Pick?",
+				options: [{ label: "Alpha", preview: "CURSOR-PREVIEW" }, { label: "Bravo" }],
+			},
+		];
+		const component = new AskDialogComponent(questions, {
+			onSubmit,
+			onCancel: vi.fn(),
+			onPrompt: vi.fn(),
+		});
+		component.focused = true;
+		const frame = component.render(80);
+		const markerLines = frame.filter(line => line.includes(CURSOR_MARKER));
+		expect(markerLines).toHaveLength(1);
+		expect(stripVTControlCharacters(markerLines[0] ?? "")).toContain("Alpha");
+		const previewOnly = frame.filter(
+			line => stripVTControlCharacters(line).includes("CURSOR-PREVIEW") && line.includes(CURSOR_MARKER),
+		);
+		expect(previewOnly).toHaveLength(0);
+		component.handleInput(ENTER);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Alpha"]);
+	});
+
+	it("clamps submit-tab scrolling to the rendered line count", () => {
+		const questions: ExtensionAskDialogQuestion[] = [
+			{ id: "q1", question: "Q1?", options: [{ label: "A" }], multi: true },
+			{ id: "q2", question: "Q2?", options: [{ label: "B" }] },
+		];
+		const component = new AskDialogComponent(questions, {
+			onSubmit: vi.fn(),
+			onCancel: vi.fn(),
+			onPrompt: vi.fn(),
+		});
+		component.handleInput(TAB);
+		component.handleInput(TAB);
+		expect(render(component)).toContain("Review answers");
+		for (let i = 0; i < 50; i++) component.handleInput(DOWN);
+		const out = render(component);
+		expect(out).toContain("Review answers");
+		expect(out).toContain("Submit");
+	});
+
+	it("timeout auto-select ignores an active filter and keeps the recommended option", () => {
+		vi.useFakeTimers();
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const onSubmit = vi.fn();
+			const onTimeout = vi.fn();
+			const options = [
+				{ label: "Recommended" },
+				...Array.from({ length: 20 }, (_, index) => ({ label: `Zzz ${index}` })),
+			];
+			const component = new AskDialogComponent(
+				[{ id: "q1", question: "Pick?", options, recommended: 0 }],
+				{ onSubmit, onCancel: vi.fn(), onPrompt: vi.fn() },
+				{ timeout: 1000, onTimeout },
+			);
+			component.handleInput("/");
+			for (const ch of "Zzz") component.handleInput(ch);
+			const filtered = stripVTControlCharacters(component.render(80).join("\n"));
+			expect(filtered).toMatch(/\d+\/22/);
+			expect(filtered).not.toContain("❯ 1 ○ Recommended");
+			vi.advanceTimersByTime(1000);
+			expect(onTimeout).toHaveBeenCalledTimes(1);
+			expect(onSubmit).toHaveBeenCalledTimes(1);
+			expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Recommended"]);
+			expect(onSubmit.mock.calls[0][0].results[0].timedOut).toBe(true);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("Enter after filtering submits the focused filtered option", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const onSubmit = vi.fn();
+			const options = [
+				{ label: "Alpha" },
+				{ label: "Bravo" },
+				{ label: "UniqueZebra" },
+				...Array.from({ length: 17 }, (_, index) => ({ label: `Filler ${index}` })),
+			];
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick?", options }], {
+				onSubmit,
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+			});
+			component.focused = true;
+			component.handleInput("/");
+			for (const ch of "UniqueZebra") component.handleInput(ch);
+			const filtered = stripVTControlCharacters(component.render(80).join("\n")).replaceAll(CURSOR_MARKER, "");
+			expect(filtered).toContain("/ UniqueZebra");
+			expect(filtered).toContain("UniqueZebra");
+			component.handleInput(ENTER);
+			expect(onSubmit).toHaveBeenCalledTimes(1);
+			expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["UniqueZebra"]);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("up/down while filtering move list focus without typing into the query", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const onSubmit = vi.fn();
+			const options = [
+				{ label: "Alpha match" },
+				{ label: "Bravo match" },
+				...Array.from({ length: 18 }, (_, index) => ({ label: `Other ${index}` })),
+			];
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick?", options }], {
+				onSubmit,
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+			});
+			component.focused = true;
+			component.handleInput("/");
+			for (const ch of "match") component.handleInput(ch);
+			component.handleInput(DOWN);
+			const out = stripVTControlCharacters(component.render(80).join("\n")).replaceAll(CURSOR_MARKER, "");
+			expect(out).toContain("/ match");
+			expect(out).toContain("❯ 2");
+			expect(out).toContain("Bravo match");
+			component.handleInput(ENTER);
+			expect(onSubmit).toHaveBeenCalledTimes(1);
+			expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Bravo match"]);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("pins the cancel hint when the footer overflows at a narrow width", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const options = Array.from({ length: 20 }, (_, index) => ({
+				label: `Option ${String(index + 1).padStart(2, "0")}`,
+				preview: "PREVIEW",
+			}));
+			const component = new AskDialogComponent(
+				[
+					{ id: "q1", question: "Pick many?", options, multi: true },
+					{ id: "q2", question: "Next?", options: [{ label: "X" }] },
+				],
+				{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+			);
+			const out = stripVTControlCharacters(component.render(50).join("\n"));
+			expect(out).toContain("cancel");
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("Space toggles a filtered multi-select option without closing the filter", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const onSubmit = vi.fn();
+			const options = [
+				{ label: "Alpha match" },
+				{ label: "Bravo match" },
+				...Array.from({ length: 18 }, (_, index) => ({ label: `Other ${index}` })),
+			];
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick many?", options, multi: true }], {
+				onSubmit,
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+			});
+			component.focused = true;
+			component.handleInput("/");
+			for (const ch of "match") component.handleInput(ch);
+			// Space while the filter is open must toggle the focused row, not
+			// become query text. The first filtered match ("Alpha match") is
+			// focused; toggling it selects it.
+			component.handleInput(SPACE);
+			const out = stripVTControlCharacters(component.render(80).join("\n")).replaceAll(CURSOR_MARKER, "");
+			expect(out).toContain("/ match");
+			expect(out).toContain("Alpha match");
+			// Submitting the dialog confirms the toggle took effect.
+			component.handleInput(ENTER);
+			expect(onSubmit).toHaveBeenCalledTimes(1);
+			expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Alpha match"]);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("expand acts on the focused filtered row and the filter key closes the editor keeping the query", async () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const onPrompt = vi.fn().mockReturnValue(Promise.resolve("kept note"));
+			const onSubmit = vi.fn();
+			const options = [
+				{
+					label: "Alpha match",
+					description: Array.from({ length: 5 }, (_, index) => `DESC-LINE-${index + 1}`).join("\n"),
+				},
+				{ label: "Bravo match" },
+				...Array.from({ length: 4 }, (_, index) => ({ label: `Filler ${index}` })),
+			];
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick?", options }], {
+				onSubmit,
+				onCancel: vi.fn(),
+				onPrompt,
+			});
+			component.focused = true;
+			component.handleInput("/");
+			for (const ch of "match") component.handleInput(ch);
+			// The collapsed focused description hides lines behind a counted
+			// cue; expand must act on the focused filtered row instead of
+			// moving the query caret, with the filter bar still open.
+			const collapsed = stripVTControlCharacters(component.render(80).join("\n"));
+			expect(collapsed).toContain("/ match");
+			expect(collapsed).toContain("2 more");
+			expect(collapsed).not.toContain("DESC-LINE-4");
+			component.handleInput(RIGHT);
+			const expanded = stripVTControlCharacters(component.render(80).join("\n"));
+			expect(expanded).toContain("/ match");
+			expect(expanded).toContain("DESC-LINE-4");
+			// The filter key closes the editor but keeps the query and the
+			// filtered focus, so the advertised note shortcut is reachable
+			// without activating (Enter) or discarding (Escape) the filter.
+			component.handleInput("/");
+			const closed = stripVTControlCharacters(component.render(80).join("\n"));
+			expect(closed).not.toContain("/ match");
+			expect(closed).toContain("Alpha match");
+			component.handleInput("n");
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(onPrompt).toHaveBeenCalledTimes(1);
+			expect(String(onPrompt.mock.calls[0][0])).toContain("Alpha match");
+			component.handleInput(ENTER);
+			expect(onSubmit).toHaveBeenCalledTimes(1);
+			expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Alpha match"]);
+			expect(onSubmit.mock.calls[0][0].results[0].note).toBe("kept note");
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("Tab switches tabs while the filter editor is open", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const component = new AskDialogComponent(
+				[
+					{
+						id: "q1",
+						question: "First?",
+						options: Array.from({ length: 8 }, (_, index) => ({ label: `Opt ${index}` })),
+					},
+					{ id: "q2", question: "Second?", options: [{ label: "B-target" }] },
+				],
+				{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+			);
+			component.focused = true;
+			component.handleInput("/");
+			const markerLineCount = (frame: readonly string[]): number =>
+				frame.filter(line => line.includes(CURSOR_MARKER)).length;
+			expect(markerLineCount(component.render(80))).toBe(2);
+			component.handleInput(TAB);
+			const switched = component.render(80);
+			// Switching tabs cleared the filter, so only the focused row keeps
+			// its cursor marker and the second question's option is on screen.
+			expect(markerLineCount(switched)).toBe(1);
+			expect(stripVTControlCharacters(switched.join("\n"))).toContain("B-target");
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("offers filtering when wrapped rows overflow the viewport despite the option count fitting", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const wrappedLabel = (prefix: string): string => `${prefix} ${"wrapped option label ".repeat(8)}`;
+			const options = [
+				{ label: wrappedLabel("Alpha xxqq") },
+				...Array.from({ length: 4 }, (_, index) => ({ label: wrappedLabel(`Beta ${index}`) })),
+			];
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick?", options }], {
+				onSubmit: vi.fn(),
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+			});
+			component.focused = true;
+			const out = stripVTControlCharacters(component.render(80).join("\n"));
+			// Five options plus Other fit the option-count bound, but their
+			// wrapped labels overflow the rendered body, so the filter must
+			// still be advertised and openable.
+			expect(out).toContain("filter");
+			component.handleInput("/");
+			for (const ch of "xxqq") component.handleInput(ch);
+			const filtered = stripVTControlCharacters(component.render(80).join("\n")).replaceAll(CURSOR_MARKER, "");
+			expect(filtered).toContain("/ xxqq");
+			expect(filtered).toContain("Alpha xxqq");
+			expect(filtered).not.toContain("Beta 0");
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("kitty keypad digit jumps focus to the nth visible row", () => {
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Pick?",
+				options: [{ label: "One" }, { label: "Two" }, { label: "Three" }, { label: "Four" }, { label: "Five" }],
+			},
+		];
+		const component = new AskDialogComponent(questions, {
+			onSubmit: vi.fn(),
+			onCancel: vi.fn(),
+			onPrompt: vi.fn(),
+		});
+		component.focused = true;
+		// Kitty CSI-u numpad "4" → codepoint 57403.
+		component.handleInput("\x1b[57403u");
+		const lines = component.render(80);
+		const marked = lines.findIndex(line => line.includes(CURSOR_MARKER));
+		expect(marked).toBeGreaterThanOrEqual(0);
+		expect(stripVTControlCharacters(lines[marked] ?? "")).toContain("Four");
+	});
+
+	it("Enter after narrowing the filter activates the clamped focused row, not a stale index", async () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const onPrompt = vi.fn().mockReturnValue(Promise.resolve(undefined));
+			const onSubmit = vi.fn();
+			const options = [
+				{ label: "Alpha match" },
+				{ label: "Bravo match" },
+				...Array.from({ length: 18 }, (_, index) => ({ label: `Other ${index}` })),
+			];
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick many?", options, multi: true }], {
+				onSubmit,
+				onCancel: vi.fn(),
+				onPrompt,
+			});
+			component.focused = true;
+			// Move cursor to index 10, well beyond the filtered array length.
+			for (let i = 0; i < 10; i++) component.handleInput(DOWN);
+			component.handleInput("/");
+			for (const ch of "match") component.handleInput(ch);
+			// Typing into the filter re-anchors the cursor to the first
+			// matching option row ("Alpha match"), so Enter activates it
+			// and advances — it must not clamp onto the trailing "Other"
+			// row and open the custom-input prompt.
+			component.handleInput(ENTER);
+			expect(onPrompt).not.toHaveBeenCalled();
+			expect(onSubmit).toHaveBeenCalledTimes(1);
+			await Promise.resolve();
+			await Promise.resolve();
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("filter reanchor: focus on a later row narrows to an earlier match and activates it, not Other", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const onPrompt = vi.fn();
+			const onSubmit = vi.fn();
+			const options = [
+				{ label: "Alpha zebra" },
+				{ label: "Bravo zebra" },
+				{ label: "Charlie zebra" },
+				{ label: "Delta zebra" },
+				{ label: "Echo zebra" },
+				...Array.from({ length: 18 }, (_, index) => ({ label: `Filler ${index}` })),
+			];
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick?", options }], {
+				onSubmit,
+				onCancel: vi.fn(),
+				onPrompt,
+			});
+			component.focused = true;
+			// Move focus to a later row (Delta zebra, index 3).
+			for (let i = 0; i < 3; i++) component.handleInput(DOWN);
+			// Open the filter and type a query that leaves an earlier
+			// matching option ("Alpha zebra") as the first visible row.
+			component.handleInput("/");
+			for (const ch of "Alpha") component.handleInput(ch);
+			// Enter must select the first matching option ("Alpha zebra")
+			// and advance — not open the custom-input prompt on "Other".
+			component.handleInput(ENTER);
+			expect(onPrompt).not.toHaveBeenCalled();
+			expect(onSubmit).toHaveBeenCalledTimes(1);
+			expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Alpha zebra"]);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("reopens the filter editor after `/` closes it with a query whose matches fit the viewport", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const options = [
+				{ label: "Zebra match one" },
+				{ label: "Zebra match two" },
+				...Array.from({ length: 20 }, (_, index) => ({ label: `Filler ${index}` })),
+			];
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick?", options }], {
+				onSubmit: vi.fn(),
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+			});
+			component.focused = true;
+			expect(stripVTControlCharacters(component.render(80).join("\n"))).toContain("filter");
+			component.handleInput("/");
+			for (const ch of "zebra") component.handleInput(ch);
+			const narrowed = stripVTControlCharacters(component.render(80).join("\n"));
+			expect(narrowed).toContain("/ zebra");
+			// The retained query leaves two matches plus Other, which fits the
+			// viewport — the very state where a rendered-height-only flag
+			// would stop advertising the filter.
+			component.handleInput("/");
+			const kept = stripVTControlCharacters(component.render(80).join("\n"));
+			expect(kept).not.toContain("/ zebra");
+			expect(kept).toContain("3/23");
+			expect(kept).toContain("filter");
+			// `/` must reopen the editor on the retained query; Escape (which
+			// discards it) must not be the only way back.
+			component.handleInput("/");
+			const reopened = stripVTControlCharacters(component.render(80).join("\n"));
+			expect(reopened).toContain("/ zebra");
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("renders short options at full width once focus leaves an overflowing description", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 40 });
+		try {
+			// Exactly 70 columns: one line at the width-80 list's content
+			// budget, two lines once the list renders one column narrower.
+			const exactFitLabel = `X${"k".repeat(68)}Z`;
+			const options = [
+				{
+					label: "Described",
+					description: Array.from({ length: 4 }, (_, index) => `DESC-LINE-${index + 1}`).join("\n"),
+				},
+				{ label: exactFitLabel },
+				...Array.from({ length: 4 }, (_, index) => ({ label: `Short ${index}` })),
+			];
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick?", options }], {
+				onSubmit: vi.fn(),
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+			});
+			component.focused = true;
+			const overflowing = stripVTControlCharacters(component.render(80).join("\n"));
+			// The focused four-line description overflows the body, so the
+			// list renders one column narrower with the tail behind a cue.
+			// PREVIEW_LIMITS.COLLAPSED_LINES = 3, so one line is hidden.
+			expect(overflowing).toContain("1 more");
+			component.handleInput(DOWN);
+			const refocused = stripVTControlCharacters(component.render(80).join("\n")).replaceAll(CURSOR_MARKER, "");
+			// The list now fits: the exact-fit label must stay whole on one
+			// full-width line instead of inheriting the previous focus's
+			// narrower overflow layout, and the filter hint must drop with
+			// the overflow.
+			expect(refocused).toContain(exactFitLabel);
+			expect(refocused).not.toContain("filter");
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("keeps the panel height frozen when the filter count suffix wraps the question title", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 24 });
+		try {
+			// 72 columns: one title line at full width, two once the "  5/5"
+			// count suffix reserves its columns.
+			const title = `${"t".repeat(70)} x`;
+			const options = [
+				{ label: "Alpha", description: Array.from({ length: 4 }, (_, index) => `D${index + 1}`).join("\n") },
+				{ label: "Bravo" },
+				{ label: "Charlie" },
+				{ label: "Delta" },
+			];
+			const component = new AskDialogComponent([{ id: "q1", question: title, options, multi: true }], {
+				onSubmit: vi.fn(),
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+			});
+			component.focused = true;
+			const before = component.render(80);
+			// The focused description overflows the min-height body, so `/`
+			// opens the filter and the header appends the "  5/5" count.
+			component.handleInput("/");
+			const after = component.render(80);
+			const stripped = stripVTControlCharacters(after.join("\n"));
+			expect(stripped).toContain("5/5");
+			expect(stripped).toContain("/ ");
+			// The suffix wraps the title onto a second header line; the
+			// frozen panel must absorb it by yielding a body row, not by
+			// growing past the height measured at spawn.
+			expect(after.length).toBe(before.length);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("renders a noted long row full-width after the note moves to a short row, with no stale filter cue", async () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 40 });
+		try {
+			// Exactly 70 columns: one line at the width-80 list's content
+			// budget, two lines once the list renders one column narrower.
+			const exactFitLabel = `X${"k".repeat(68)}Z`;
+			const options = [
+				{ label: exactFitLabel },
+				{ label: "Short" },
+				...Array.from({ length: 4 }, (_, index) => ({ label: `Fill ${index}` })),
+			];
+			const onPrompt = vi.fn();
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick?", options }], {
+				onSubmit: vi.fn(),
+				onCancel: vi.fn(),
+				onPrompt,
+			});
+			component.focused = true;
+
+			// Add a note to the long exact-fit row (cursor starts on it).
+			// The note marker adds a line, causing overflow and a one-column
+			// narrower list render.
+			onPrompt.mockReturnValueOnce(Promise.resolve("note on long"));
+			component.handleInput("n");
+			await Promise.resolve();
+			await Promise.resolve();
+			const noted = stripVTControlCharacters(component.render(80).join("\n")).replaceAll(CURSOR_MARKER, "");
+			expect(noted).toContain("✎ note");
+
+			// Move to the short row and add a note there, moving the note
+			// away from the long row.
+			component.handleInput(DOWN);
+			onPrompt.mockReturnValueOnce(Promise.resolve("note on short"));
+			component.handleInput("n");
+			await Promise.resolve();
+			await Promise.resolve();
+			const shortNoted = stripVTControlCharacters(component.render(80).join("\n")).replaceAll(CURSOR_MARKER, "");
+			expect(shortNoted).toContain("✎ note");
+
+			// Move back to the long row. The note is now on the short row,
+			// so the long row must render full-width — the exact-fit label
+			// stays whole on one line, no stale one-column-narrow overflow
+			// verdict is reused, and no filter cue persists.
+			component.handleInput(UP);
+			const refocused = stripVTControlCharacters(component.render(80).join("\n")).replaceAll(CURSOR_MARKER, "");
+			expect(refocused).toContain(exactFitLabel);
+			expect(refocused).not.toContain("filter");
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
 	});
 });

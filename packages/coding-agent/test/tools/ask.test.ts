@@ -80,6 +80,10 @@ function selectItemLabel(option: ExtensionUISelectItem | undefined): string | un
 	return typeof option === "string" ? option : option?.label;
 }
 
+function escapeRegex(text: string): string {
+	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 let darkTheme: Theme;
 
 beforeAll(async () => {
@@ -1476,6 +1480,86 @@ describe("AskTool option markers", () => {
 	});
 });
 
+describe("AskTool legacy path marker and truncation parity", () => {
+	it("multi-select custom-input window renders unchecked glyph for unchecked option alongside checked sibling", async () => {
+		const tool = new AskTool(createSession());
+		const editor = vi.fn(async (_prompt: string) => "custom");
+		const options = [{ label: "alpha" }, { label: "beta" }, { label: "gamma" }];
+		const questions = [{ id: "pick", question: "Pick many", options, multi: true }];
+		let call = 0;
+		const context = createContext({
+			select: async (_prompt, opts) => {
+				call += 1;
+				if (call === 1) return selectItemLabel(opts.find(o => selectItemLabel(o) === "alpha"));
+				return "Other (type your own)";
+			},
+			editor,
+		});
+
+		await tool.execute("call-multi-marker-parity", { questions }, undefined, undefined, context);
+
+		const title = editor.mock.calls[0]?.[0] ?? "";
+		const theme = darkTheme;
+		// alpha is checked; beta and gamma are not. The cursor sits on "Other",
+		// which is NOT a markable row — so focus must not bleed into the checkbox
+		// state of any markable option.
+		expect(title).toContain(theme!.checkbox.checked);
+		expect(title).toContain(theme!.checkbox.unchecked);
+		// The checked glyph should appear for alpha, the unchecked for beta/gamma.
+		// Verify the unchecked glyph appears at least twice (beta + gamma).
+		const uncheckedCount = (title.match(new RegExp(escapeRegex(theme!.checkbox.unchecked), "g")) ?? []).length;
+		expect(uncheckedCount).toBeGreaterThanOrEqual(2);
+	});
+
+	it("CJK description clamped mid-boundary reports hidden character count, not column count", async () => {
+		const originalColumns = process.stdout.columns;
+		// Force a narrow terminal so the CJK description is clamped.
+		// Content width = max(20, 40 - 8) = 32 columns. The description line is
+		// "    " (4 cols) + CJK text, so CJK text beyond 28 columns is clipped.
+		Object.defineProperty(process.stdout, "columns", { value: 40, configurable: true });
+		try {
+			const tool = new AskTool(createSession());
+			const editor = vi.fn(async (_prompt: string) => "custom");
+			// 20 CJK chars = 40 visible columns. The description line is 4 + 40 = 44
+			// columns, well over the 32-column budget. Each CJK char is 1 grapheme
+			// but 2 columns, so the character count must be roughly half the column
+			// count — the cue asserts the difference.
+			const cjkDescription = "言語設定の確認が必要です追加設定詳細情報表示設定確認";
+			const options = [{ label: "option-a", description: cjkDescription }, { label: "option-b" }];
+			const questions = [{ id: "pick", question: "Pick one", options }];
+			const context = createContext({
+				select: async () => "Other (type your own)",
+				editor,
+			});
+
+			await tool.execute("call-cjk-clamp", { questions }, undefined, undefined, context);
+
+			const title = editor.mock.calls[0]?.[0] ?? "";
+			expect(title).toContain("… (+");
+			expect(title).toContain("chars)");
+			// Extract the digit from the cue: "… (+N chars)"
+			const match = title.match(/\(\+(\d+)\s*chars\)/);
+			expect(match).not.toBeNull();
+			const reportedCount = Number(match?.[1] ?? 0);
+			// The description has 26 grapheme clusters; at 32-col content width
+			// with the 4-col indent the counted cue (now `(+N chars)` without a
+			// leading ellipsis) leaves room for 7 retained graphemes, so 19 are
+			// hidden. The cue must report the CHARACTER count, not the 40-column
+			// count a column-based measure would produce for 20 CJK chars × 2 cols.
+			expect(reportedCount).toBe(19);
+			// A column-based count would report 40 (20 chars × 2 columns each).
+			// Assert we got the character count, not the column count.
+			expect(reportedCount).toBeLessThan(40);
+		} finally {
+			if (originalColumns === undefined) {
+				Object.defineProperty(process.stdout, "columns", { value: undefined, configurable: true });
+			} else {
+				Object.defineProperty(process.stdout, "columns", { value: originalColumns, configurable: true });
+			}
+		}
+	});
+});
+
 describe("askToolRenderer malformed call args", () => {
 	it("renders double-encoded questions string instead of crashing the TUI", async () => {
 		const theme = darkTheme;
@@ -1493,6 +1577,57 @@ describe("askToolRenderer malformed call args", () => {
 		expect(text).toContain("[q1]");
 		expect(text).toContain("Pick one");
 		expect(text).toContain("Alpha");
+	});
+
+	it("renders single-choice result with the same radio glyph as the dialog row engine", async () => {
+		const rendered = askToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "" }],
+				details: { question: "Pick one", multi: false, options: ["Alpha", "Beta"], selectedOptions: ["Alpha"] },
+			},
+			{ expanded: true, isPartial: false },
+			darkTheme,
+		);
+		const text = stripAnsi(rendered.render(120).join("\n"));
+		// The dialog's askOptionMarker(false, true) returns theme.radio.selected.
+		expect(text).toContain(darkTheme.radio.selected);
+		expect(text).not.toContain(darkTheme.checkbox.checked);
+	});
+
+	it("renders multi-select result with the same checkbox glyph as the dialog row engine", async () => {
+		const rendered = askToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "" }],
+				details: { question: "Pick many", multi: true, options: ["Alpha", "Beta"], selectedOptions: ["Alpha"] },
+			},
+			{ expanded: true, isPartial: false },
+			darkTheme,
+		);
+		const text = stripAnsi(rendered.render(120).join("\n"));
+		// The dialog's askOptionMarker(true, true) returns theme.checkbox.checked.
+		expect(text).toContain(darkTheme.checkbox.checked);
+		expect(text).not.toContain(darkTheme.radio.selected);
+	});
+
+	it("shows a counted truncation cue on a windowed option description", async () => {
+		const tool = new AskTool(createSession());
+		const editor = vi.fn(async (_prompt: string) => "custom");
+		const longDescription = "x".repeat(400);
+		const options = [{ label: "Alpha", description: longDescription }];
+		const questions = [{ id: "pick", question: "Pick one", options }];
+		const context = createContext({
+			select: async () => "Other (type your own)",
+			editor,
+		});
+
+		await tool.execute("call-editor-truncation-cue", { questions }, undefined, undefined, context);
+
+		const title = editor.mock.calls[0]?.[0] ?? "";
+		const lines = title.split("\n");
+		const descriptionLine = lines.find(line => line.startsWith("    ") && line.includes("x"));
+		expect(descriptionLine).toBeDefined();
+		// The counted cue appears when the description is clamped.
+		expect(descriptionLine).toMatch(/\(\+\d+ chars\)/);
 	});
 
 	it("falls back to the error frame for unparseable questions without throwing", async () => {

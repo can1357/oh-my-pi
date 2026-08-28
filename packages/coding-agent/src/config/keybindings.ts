@@ -52,6 +52,10 @@ interface AppKeybindings {
 	"app.session.deleteNoninvasive": true;
 	"app.tree.foldOrUp": true;
 	"app.tree.unfoldOrDown": true;
+	"app.ask.expand": true;
+	"app.ask.collapse": true;
+	"app.ask.note": true;
+	"app.ask.filter": true;
 	"app.plan.toggle": true;
 	"app.history.search": true;
 	"app.stt.toggle": true;
@@ -218,6 +222,25 @@ export const KEYBINDINGS = {
 	"app.tree.unfoldOrDown": {
 		defaultKeys: ["ctrl+right", "alt+right"],
 		description: "Unfold or move down",
+	},
+	"app.ask.expand": {
+		defaultKeys: "right",
+		description: "Expand the focused ask option",
+	},
+	"app.ask.collapse": {
+		defaultKeys: "left",
+		description: "Collapse the focused ask option",
+	},
+	"app.ask.note": {
+		// Uppercase N (Shift+N or Caps Lock) reaches the manager canonicalized
+		// as `shift+n`, so a bare `n` default would silently drop the uppercase
+		// path the pre-configurable dialog handler matched (`n` and `N`).
+		defaultKeys: ["n", "shift+n"],
+		description: "Attach a note to the focused ask option",
+	},
+	"app.ask.filter": {
+		defaultKeys: "/",
+		description: "Filter ask options",
 	},
 	"app.plan.toggle": {
 		defaultKeys: "alt+shift+p",

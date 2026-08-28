@@ -21,6 +21,7 @@ import type { ToolExample } from "@oh-my-pi/pi-ai";
 import {
 	type Component,
 	Ellipsis,
+	getSegmenter,
 	Markdown,
 	type MarkdownTheme,
 	renderInlineMarkdown,
@@ -33,6 +34,7 @@ import {
 import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { ExtensionUISelectItem } from "../extensibility/extensions";
+import { askOptionMarker } from "../modes/components/ask-row";
 import { getMarkdownTheme, type Theme, theme } from "../modes/theme/theme";
 import askDescription from "../prompts/tools/ask.md" with { type: "text" };
 import { vocalizer } from "../tts/vocalizer";
@@ -215,8 +217,55 @@ function customInputContentWidth(): number {
 	return Math.max(MIN_CUSTOM_INPUT_CONTENT_WIDTH, cols - CUSTOM_INPUT_CHROME_COLUMNS);
 }
 
+/** Clamp a line to `width` surfacing the hidden count in a `(+N chars)` cue.
+ *  The count is the number of user-perceived characters beyond the truncation
+ *  boundary, not visible terminal columns — so a CJK or emoji tail reports its true character
+ *  count rather than an inflated column count. */
 function clampLineToWidth(line: string, width: number): string {
-	if (visibleWidth(line) <= width) return line;
+	const fullWidth = visibleWidth(line);
+	if (fullWidth <= width) return line;
+	const ellipsis = "…";
+	const ellipsisWidth = visibleWidth(ellipsis);
+
+	function cue(hidden: number): string {
+		// `truncated` already carries the ellipsis from truncateToWidth; the
+		// cue adds only the count so the line reads `<retained>… (+N chars)`.
+		return `(+${hidden} chars)`;
+	}
+
+	/** Count grapheme clusters in `text` using the shared Intl.Segmenter. */
+	function graphemeCount(text: string): number {
+		let count = 0;
+		for (const _seg of getSegmenter().segment(text)) count += 1;
+		return count;
+	}
+
+	// If a counted cue can fit, reserve space for it so the clip is visible.
+	const hiddenColumnsWithoutCue = fullWidth - width + ellipsisWidth;
+	let cueText = cue(hiddenColumnsWithoutCue);
+	let cueWidth = visibleWidth(cueText);
+	let availableTextWidth = Math.max(ellipsisWidth, width - cueWidth - 1);
+	let hiddenColumns = fullWidth - availableTextWidth + ellipsisWidth;
+
+	// One refinement is enough: the digit count in `hidden` only slightly changes cueWidth.
+	cueText = cue(hiddenColumns);
+	cueWidth = visibleWidth(cueText);
+	availableTextWidth = Math.max(ellipsisWidth, width - cueWidth - 1);
+	hiddenColumns = fullWidth - availableTextWidth + ellipsisWidth;
+
+	const truncated = truncateToWidth(line, availableTextWidth, Ellipsis.Unicode);
+	const truncatedWidth = visibleWidth(truncated);
+	if (truncatedWidth + 1 + cueWidth <= width) {
+		// Count the hidden *characters* (graphemes) from the source text beyond
+		// the truncation boundary, not the visible column delta. `truncateToWidth`
+		// appends an ellipsis; strip it to recover the retained source prefix,
+		// then count graphemes in the remaining tail.
+		const retained = truncated.endsWith(ellipsis) ? truncated.slice(0, -ellipsis.length) : truncated;
+		const hiddenChars = graphemeCount(line.slice(retained.length));
+		return `${truncated} ${cue(hiddenChars)}`;
+	}
+
+	// Not enough room for the cue; fall back to a plain ellipsis.
 	return truncateToWidth(line, width, Ellipsis.Unicode);
 }
 
@@ -336,15 +385,15 @@ function buildCustomInputRows(
 		const label = getSelectOptionLabel(option);
 		const isSelected = index === selectedIndex;
 		const isMarkable = index < context.markableCount;
-		const prefix =
-			context.selectionMarker === "radio" && (isMarkable || isSelected)
-				? `${isSelected ? theme.radio.selected : theme.radio.unselected} `
-				: context.selectionMarker === "checkbox" && isMarkable
-					? `${checked.has(index) ? theme.checkbox.checked : theme.checkbox.unchecked} `
-					: isSelected
-						? `${theme.nav.cursor} `
-						: "  ";
-		rows.push({ text: clampLineToWidth(prefix + label, contentWidth), priority: -1 });
+		const checkedThis = checked.has(index);
+		const multi = context.selectionMarker === "checkbox";
+		const marker =
+			isMarkable || (isSelected && context.selectionMarker !== "checkbox")
+				? askOptionMarker(theme, multi, multi ? checkedThis : isSelected)
+				: isSelected
+					? `${theme.nav.cursor} `
+					: "  ";
+		rows.push({ text: clampLineToWidth(`${marker} ${label}`, contentWidth), priority: -1 });
 		const description = getSelectOptionDescription(option);
 		if (description) {
 			const flat = flattenDescription(description);
@@ -449,6 +498,14 @@ interface UIContext {
 	): Promise<string | undefined>;
 }
 
+/**
+ * Fallback path for surfaces that cannot render the rich ask dialog.
+ *
+ * This path uses a simple editor title with windowed option rows. It does NOT
+ * implement the dialog's side preview panel, type-to-filter, jump digits,
+ * mouse handling, or expandable descriptions — those features are only available
+ * in the rich dialog via `ui.askDialog`.
+ */
 async function askSingleQuestion(
 	ui: UIContext,
 	question: string,
@@ -1209,15 +1266,6 @@ function renderNoteLines(uiTheme: Theme, note: string, width: number): string[] 
 		});
 }
 
-/**
- * Marker glyph for a question option. Single-choice questions render circular radio
- * buttons (pick one); multi-select questions render rectangular checkboxes (pick many).
- */
-function optionMarker(uiTheme: Theme, multi: boolean | undefined, selected: boolean): string {
-	if (multi) return selected ? uiTheme.checkbox.checked : uiTheme.checkbox.unchecked;
-	return selected ? uiTheme.radio.selected : uiTheme.radio.unselected;
-}
-
 /** Render the offered options for a question form as flat marker bullets (no tree guides). */
 function renderQuestionOptionLines(
 	uiTheme: Theme,
@@ -1228,7 +1276,7 @@ function renderQuestionOptionLines(
 	const out: string[] = [];
 	for (const opt of options) {
 		const optLabel = renderInlineMarkdown(opt.label, mdTheme, t => uiTheme.fg("muted", t));
-		out.push(` ${uiTheme.fg("dim", optionMarker(uiTheme, multi, false))} ${optLabel}`);
+		out.push(` ${uiTheme.fg("dim", askOptionMarker(uiTheme, multi, false))} ${optLabel}`);
 		if (opt.description?.trim()) {
 			const description = renderInlineMarkdown(opt.description.trim(), mdTheme, t => uiTheme.fg("dim", t));
 			out.push(`   ${uiTheme.fg("dim", "↳")} ${description}`);
@@ -1265,7 +1313,7 @@ function renderAnswerOptionLines(
 	const out: string[] = [];
 	for (const label of list) {
 		const isSelected = selected.has(label);
-		const marker = optionMarker(uiTheme, multi, isSelected);
+		const marker = askOptionMarker(uiTheme, multi, isSelected);
 		const markerStyled = isSelected ? uiTheme.fg("success", marker) : uiTheme.fg("dim", marker);
 		const labelStyled = renderInlineMarkdown(label, mdTheme, t =>
 			isSelected ? uiTheme.fg("toolOutput", t) : uiTheme.fg("muted", t),
