@@ -966,9 +966,11 @@ export class RelayBridge {
 			}
 			case "Emulation.setEmulatedMedia":
 			case "Emulation.setLocaleOverride":
+			case "Emulation.setEmulatedVisionDeficiency":
 				if (
 					!hasObjectKeys(msg.params) ||
-					(msg.method === "Emulation.setLocaleOverride" && msg.params?.locale === "")
+					(msg.method === "Emulation.setLocaleOverride" && msg.params?.locale === "") ||
+					(msg.method === "Emulation.setEmulatedVisionDeficiency" && msg.params?.type === "none")
 				) {
 					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
 					return;
@@ -1284,6 +1286,7 @@ export class RelayBridge {
 			case "Emulation.setEmulatedMedia":
 			case "Emulation.setLocaleOverride":
 			case "Emulation.setTimezoneOverride":
+			case "Emulation.setEmulatedVisionDeficiency":
 			case "Emulation.setCPUThrottlingRate":
 			case "Emulation.setScriptExecutionDisabled":
 			case "Emulation.clearDeviceMetricsOverride":
@@ -1437,6 +1440,8 @@ export class RelayBridge {
 				// disable RPC. When its preserved owner disappears after replay, reset
 				// the shared root back to the browser default timezone.
 				return { method: subscription.method, params: { timezoneId: "" } };
+			case "Emulation.setEmulatedVisionDeficiency":
+				return { method: subscription.method, params: { type: "none" } };
 			case "Emulation.setIdleOverride":
 				return { method: "Emulation.clearIdleOverride" };
 			case "Emulation.setCPUThrottlingRate":

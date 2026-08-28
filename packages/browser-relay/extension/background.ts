@@ -34,6 +34,7 @@ let pendingOperationGeneration = 0;
 const pendingAttachTabs = new Set<number>();
 const canceledPendingAttachTabs = new Set<number>();
 const guardDetachments = new Set<number>();
+const attachmentStateEpochs = new Map<number, number>();
 // Tabs the relay explicitly asked us to detach. onDetach reports these as
 // relay-initiated so the bridge doesn't misclassify them as user cancellations.
 const relayInitiatedDetachTabs = new Set<number>();
@@ -83,6 +84,23 @@ function forgetRecoverable(tabId: number): Promise<void> {
 	});
 }
 
+function noteAttachmentStateChange(tabId: number): void {
+	attachmentStateEpochs.set(tabId, (attachmentStateEpochs.get(tabId) ?? 0) + 1);
+}
+
+function snapshotAttachmentState(tabIds: number[]): Map<number, number> {
+	const snapshot = new Map<number, number>();
+	for (const tabId of tabIds) snapshot.set(tabId, attachmentStateEpochs.get(tabId) ?? 0);
+	return snapshot;
+}
+
+function attachmentStateMatches(snapshot: Map<number, number>): boolean {
+	for (const [tabId, epoch] of snapshot) {
+		if ((attachmentStateEpochs.get(tabId) ?? 0) !== epoch) return false;
+	}
+	return true;
+}
+
 /**
  * The extension owns its `chrome.debugger` attachments: it outlives the relay,
  * so it must detach tabs the relay can no longer speak for. The relay reconciles
@@ -119,10 +137,15 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 });
 
 /** Persist recovery authorization before a tab becomes eligible for a sweep. */
-async function trackAttachments(tabIds: number[], isFresh: () => boolean = () => true): Promise<void> {
+async function trackAttachments(
+	tabIds: number[],
+	isFresh: () => boolean = () => true,
+	attachmentState = snapshotAttachmentState(tabIds),
+): Promise<void> {
 	if (tabIds.length === 0) return;
-	await rememberRecoverable(tabIds, isFresh);
-	if (!isFresh()) return;
+	const stillFresh = (): boolean => isFresh() && attachmentStateMatches(attachmentState);
+	await rememberRecoverable(tabIds, stillFresh);
+	if (!stillFresh()) return;
 	for (const tabId of tabIds) attachmentGuard.track(tabId);
 }
 
@@ -370,6 +393,7 @@ async function attachTab(tabId: number, socket: WebSocket): Promise<void> {
 
 async function attachTabOperation(tabId: number, socket: WebSocket): Promise<void> {
 	await chrome.debugger.attach({ tabId }, "1.3");
+	noteAttachmentStateChange(tabId);
 	// The relay that requested this attachment disappeared while Chrome was
 	// still resolving attach(). Its pending RPC was rejected by RelayBridge,
 	// so no downstream session can own the resulting debugger attachment.
@@ -557,6 +581,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 
 chrome.debugger.onDetach.addListener((source, reason) => {
 	if (source.tabId === undefined) return;
+	noteAttachmentStateChange(source.tabId);
 	// The attachment is gone (user clicked Cancel, tab navigated to a
 	// non-attachable target, or Chrome tore it down); stop tracking it so a
 	// later orphan sweep never tries to detach a tab we no longer own.

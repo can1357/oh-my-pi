@@ -2546,6 +2546,76 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send")).toHaveLength(0);
 	});
 
+	it("replays vision-deficiency emulation after guard recovery and resets it when the owner disconnects", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
+
+		const sendRootCommand = async (
+			connId: number,
+			sessionId: string,
+			method: string,
+			params?: Record<string, unknown>,
+		): Promise<void> => {
+			const id = ++msgSeq;
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+		};
+
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setEmulatedVisionDeficiency", {
+			type: "blurredVision",
+		});
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.rpcs("send").length === 1, "vision deficiency replay");
+		expect(ext2.rpcs("send")[0]).toMatchObject({
+			method: "Emulation.setEmulatedVisionDeficiency",
+			params: { type: "blurredVision" },
+		});
+		ack(bridge, ext2, "send");
+		await flush();
+
+		bridge.cdpClosed(ownerConn);
+		await waitFor(() => ext2.rpcs("send").length === 2, "vision deficiency cleanup after owner loss");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Emulation.setEmulatedVisionDeficiency",
+			"Emulation.setEmulatedVisionDeficiency",
+		]);
+		expect(ext2.rpcs("send")[1]).toMatchObject({
+			method: "Emulation.setEmulatedVisionDeficiency",
+			params: { type: "none" },
+		});
+		ack(bridge, ext2, "send");
+		await flush();
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			holderConn,
+			JSON.stringify({ id: commandId, sessionId: holderSession, method: "Network.getCookies" }),
+		);
+		await flush();
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Emulation.setEmulatedVisionDeficiency",
+			"Emulation.setEmulatedVisionDeficiency",
+			"Network.getCookies",
+		]);
+		ack(bridge, ext2, "send", { cookies: [] });
+		await flush();
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+	});
+
 	it("drops tab-wide ignore-certificate-errors clears before recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
