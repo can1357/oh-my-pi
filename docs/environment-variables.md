@@ -525,6 +525,8 @@ These affect where coding-agent stores data and which process-local settings ove
 | `CLAUDE_BASH_NO_LOGIN`     | Legacy alias fallback for `PI_BASH_NO_LOGIN`                                   |
 | `PI_SHELL_PREFIX`          | Optional command prefix wrapper                                                |
 | `CLAUDE_CODE_SHELL_PREFIX` | Legacy alias fallback for `PI_SHELL_PREFIX`                                    |
+| `OMP_EDITOR`               | omp-specific external editor override; wins over `PI_EDITOR`/`VISUAL`/`EDITOR` |
+| `PI_EDITOR`                | omp-specific external editor override; wins over `VISUAL`/`EDITOR`             |
 | `VISUAL`                   | Preferred external editor command                                              |
 | `EDITOR`                   | Fallback external editor command                                               |
 

@@ -4,21 +4,25 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $env, $which, Snowflake } from "@oh-my-pi/pi-utils";
+import { $pickenv, $which, Snowflake } from "@oh-my-pi/pi-utils";
 
 /**
  * Returns the user's preferred editor command, or a platform default.
  *
  * Resolution order:
- *   1. `$VISUAL`
- *   2. `$EDITOR`
- *   3. `notepad` on Windows (always present in `%SystemRoot%\System32`)
+ *   1. `$OMP_EDITOR`
+ *   2. `$PI_EDITOR`
+ *   3. `$VISUAL`
+ *   4. `$EDITOR`
+ *   5. `notepad` on Windows (always present in `%SystemRoot%\System32`)
  *
- * POSIX returns `undefined` when neither variable is set so the caller can
- * surface a warning that nudges the user to configure one.
+ * `OMP_EDITOR`/`PI_EDITOR` are omp-specific overrides that win over the generic
+ * `VISUAL`/`EDITOR`, so they can be set in an omp `.env` file even when the
+ * shell already exports an editor. POSIX returns `undefined` when no variable is
+ * set so the caller can surface a warning that nudges the user to configure one.
  */
 export function getEditorCommand(): string | undefined {
-	const configured = $env.VISUAL?.trim() || $env.EDITOR?.trim();
+	const configured = $pickenv("OMP_EDITOR", "PI_EDITOR", "VISUAL", "EDITOR");
 	if (configured) return configured;
 	if (process.platform === "win32") return "notepad";
 	return undefined;
