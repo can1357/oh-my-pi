@@ -59,3 +59,64 @@ describe("reconcileUserScroll", () => {
 		expect(justInside).toEqual({ locked: true, jump: false, scrollTop: 1161 }); // gap 39
 	});
 });
+
+describe("pill + follow state machine (chained transitions)", () => {
+	it("follows the reviewer scenario: scroll up, pill, resize, jump back, keep following", () => {
+		// Transcript of 3000px in an 800px viewport; guest starts locked at the tail.
+		let view = { scrollTop: 2200, scrollHeight: 3000, clientHeight: 800 };
+		let locked = true;
+
+		// Streamed output lands while locked: entries effect pins to the tail.
+		view.scrollHeight += 200;
+		let decision = reconcileUserScroll({ ...view, scrollTop: view.scrollHeight });
+		expect(decision.locked).toBe(true);
+		locked = decision.locked;
+
+		// User scrolls up 1.5 viewports: lock releases, pill appears.
+		view.scrollTop = 1500;
+		decision = reconcileUserScroll(view);
+		locked = decision.locked;
+		expect(locked).toBe(false);
+		expect(decision.jump).toBe(true); // gap 1700 > 800
+
+		// Keyboard opens (viewport 800 -> 450) while unlocked: position kept, pill stays.
+		view.clientHeight = 450;
+		decision = reconcileResize(view, locked);
+		locked = decision.locked;
+		expect(locked).toBe(false);
+		expect(decision.jump).toBe(true); // gap 1700 > 450
+		expect(decision.scrollTop).toBe(1500);
+
+		// Guest taps the pill: instant jump, follow re-armed.
+		decision = reconcileResize({ ...view, scrollTop: view.scrollHeight }, true);
+		locked = decision.locked;
+		view.scrollTop = decision.scrollTop;
+		expect(locked).toBe(true);
+		expect(decision.jump).toBe(false);
+
+		// More output while locked + another keyboard resize: stays pinned at the tail.
+		view.scrollHeight += 300;
+		view.clientHeight = 800;
+		decision = reconcileResize({ ...view, scrollTop: view.scrollHeight }, true);
+		view.scrollTop = decision.scrollTop;
+		locked = decision.locked;
+		expect(locked).toBe(true);
+		expect(view.scrollTop).toBe(view.scrollHeight);
+		expect(decision.jump).toBe(false);
+	});
+
+	it("regression: keyboard shrink while locked no longer releases follow", () => {
+		// The exact sequence from the review: at the tail, viewport shrinks under it.
+		const view = { scrollTop: 2200, scrollHeight: 3000, clientHeight: 800 };
+		const shrunk = { ...view, clientHeight: 450 }; // keyboard eats 350px
+
+		// Pre-fix behavior routed this through the user-scroll path and unlocked.
+		const oldBehavior = reconcileUserScroll(shrunk);
+		expect(oldBehavior.locked).toBe(false); // gap 350 > 40 — the bug
+
+		const fixed = reconcileResize(shrunk, true);
+		expect(fixed.locked).toBe(true);
+		expect(fixed.scrollTop).toBe(3000); // pinned to the tail
+		expect(fixed.jump).toBe(false);
+	});
+});
