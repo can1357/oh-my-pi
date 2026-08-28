@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `OMP_EDITOR`/`PI_EDITOR` environment variables to override the external editor, taking precedence over `VISUAL`/`EDITOR` ([#9996](https://github.com/can1357/oh-my-pi/issues/9996)).
+
 ## [18.0.9] - 2026-08-28
 
 ### Breaking Changes
