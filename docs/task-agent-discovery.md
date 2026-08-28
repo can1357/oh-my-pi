@@ -229,6 +229,23 @@ The model-facing prompt (`src/prompts/tools/task.md`) tags read-only agents and 
 
 In `src/task/index.ts`, command helpers are re-exported with agent discovery helpers. Agent discovery itself does not depend on command discovery at runtime.
 
+## Prompt description budget
+
+`task.agentCatalogDescriptionBudgetChars` caps how many characters of agent
+descriptions reach the task tool prompt. It is a prompt-size control, not an
+availability control: every agent keeps its catalogue entry and stays spawnable.
+
+- `-1` (default) renders every description. Any negative or non-finite value is
+  treated the same way, so a malformed setting fails open.
+- `0` renders names only, keeping the `(READ-ONLY)` and `(BLOCKING)` markers.
+- A positive value is spent in catalogue order. `discoverAgents` returns
+  `[...loadedAgents, ...bundledAgents]`, so project, user, extension, and plugin
+  agents consume the budget before the bundled built-ins, and the built-ins are
+  the first to render name-only.
+
+Unlike skills there is no `skill://`-style fetch for an agent description, so a
+tight budget leaves the model picking from names alone.
+
 ## Availability constraints beyond discovery
 
 An agent can be discoverable but still unavailable to run because of execution guardrails.

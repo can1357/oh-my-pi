@@ -81,7 +81,7 @@ Agent spawning is currently disabled.
 Pick the most specific agent. Omit `agent` only when the spawn-policy default is that agent.
 {{#list agents join="\n"}}
 ### {{name}}{{#if readOnly}} (READ-ONLY){{/if}}{{#if blocking}} (BLOCKING: inline result){{/if}}
-{{description}}
-{{#if readOnly}}Use ONLY for investigation; do edits yourself or assign to a writing agent.{{/if}}
+{{#unless descriptionOmitted}}{{description}}
+{{/unless}}{{#if readOnly}}Use ONLY for investigation; do edits yourself or assign to a writing agent.{{/if}}
 {{/list}}
 {{/if}}

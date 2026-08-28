@@ -29,12 +29,16 @@ Main branch: {{git.mainBranch}}
 </project>
 {{/ifAny}}
 {{#if skills.length}}
+{{#if skillsDescriptionsOmitted}}
+Skills are specialized knowledge.
+{{else}}
 Skills are specialized knowledge. Scan descriptions for your task domain.
+{{/if}}
 If a skill applies, you MUST read `skill://<name>` before proceeding.
 <skills>
 {{#list skills join="\n"}}
-<skill name="{{name}}">
-{{description}}
+<skill name="{{name}}">{{#unless descriptionOmitted}}
+{{description}}{{/unless}}
 </skill>
 {{/list}}
 </skills>

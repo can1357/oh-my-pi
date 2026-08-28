@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `skills.catalogDescriptionBudgetChars` and `task.agentCatalogDescriptionBudgetChars` to bound how many characters of skill and agent descriptions reach the prompt. Both default to -1 (unlimited), 0 renders names only, and every skill and agent stays available at any budget ([#5964](https://github.com/can1357/oh-my-pi/issues/5964), [#6936](https://github.com/can1357/oh-my-pi/issues/6936), [#7194](https://github.com/can1357/oh-my-pi/issues/7194)).
+
 ## [18.0.10] - 2026-08-28
 
 ### Added
