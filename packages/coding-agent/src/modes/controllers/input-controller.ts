@@ -493,6 +493,8 @@ export class InputController {
 			this.ctx.keybindings.getKeys("app.model.selectTemporary"),
 		);
 		this.ctx.editor.onSelectModelTemporary = () => this.ctx.showModelSelector({ temporaryOnly: true });
+		this.ctx.editor.setActionKeys("app.provider.pinPrimary", this.ctx.keybindings.getKeys("app.provider.pinPrimary"));
+		this.ctx.editor.onTogglePrimaryProviderPin = () => this.togglePrimaryProviderPin();
 
 		// Global debug handler on TUI (works regardless of focus)
 		this.ctx.ui.onDebug = () => this.ctx.showDebugSelector();
@@ -2011,6 +2013,16 @@ export class InputController {
 			this.ctx.statusLine.invalidate();
 			this.ctx.updateEditorBorderColor();
 		}
+	}
+
+	togglePrimaryProviderPin(): void {
+		if (this.ctx.focusedAgentId) {
+			this.ctx.showStatus("Provider routing applies to the main session — press ←← to return first");
+			return;
+		}
+		const pinned = this.ctx.session.togglePrimaryProviderPin();
+		this.ctx.statusLine.invalidate();
+		this.ctx.showStatus(pinned ? "Primary provider pinned for this session" : "Primary provider fallback restored");
 	}
 
 	async cycleRoleModel(direction: "forward" | "backward" = "forward"): Promise<void> {

@@ -37,6 +37,7 @@ type ConfigurableEditorAction = Extract<
 	| "app.model.cycleBackward"
 	| "app.model.select"
 	| "app.model.selectTemporary"
+	| "app.provider.pinPrimary"
 	| "app.tools.toggleVisibility"
 	| "app.thinking.toggle"
 	| "app.editor.external"
@@ -59,6 +60,7 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.model.cycleBackward": ["shift+ctrl+p"],
 	"app.model.select": ["alt+m"],
 	"app.model.selectTemporary": ["alt+p"],
+	"app.provider.pinPrimary": ["alt+shift+r"],
 	"app.tools.toggleVisibility": ["ctrl+shift+o"],
 	"app.thinking.toggle": ["ctrl+t"],
 	"app.editor.external": ["ctrl+g"],
@@ -699,6 +701,7 @@ export class CustomEditor extends Editor {
 	onHistorySearch?: () => void;
 	onSuspend?: () => void;
 	onSelectModelTemporary?: () => void;
+	onTogglePrimaryProviderPin?: () => void;
 	/** Called when the configured copy-prompt shortcut is pressed. */
 	onCopyPrompt?: () => void;
 	/** Called when the configured image-paste shortcut is pressed. */
@@ -1015,6 +1018,12 @@ export class CustomEditor extends Editor {
 			// Intercept configured temporary model selector shortcut
 			if (this.#matchesAction(canonical, "app.model.selectTemporary") && this.onSelectModelTemporary) {
 				this.onSelectModelTemporary();
+				return;
+			}
+
+			// Intercept the session-local primary provider pin toggle.
+			if (this.#matchesAction(canonical, "app.provider.pinPrimary") && this.onTogglePrimaryProviderPin) {
+				this.onTogglePrimaryProviderPin();
 				return;
 			}
 

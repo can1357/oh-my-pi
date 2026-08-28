@@ -20,6 +20,7 @@ type FakeEditor = {
 	onCycleModelBackward?: () => void;
 	onSelectModelTemporary?: () => void;
 	onSelectModel?: () => void;
+	onTogglePrimaryProviderPin?: () => void;
 	onHistorySearch?: () => void;
 	onPasteImage?: () => Promise<boolean>;
 	onCopyPrompt?: () => void;
@@ -67,6 +68,7 @@ async function createContext() {
 		"app.display.reset": ["ctrl+l"],
 		"app.model.selectTemporary": ["ctrl+y"],
 		"app.model.select": ["alt+m"],
+		"app.provider.pinPrimary": ["alt+shift+r"],
 		"app.retry": ["alt+r"],
 		"app.clipboard.pasteImage": ["ctrl+v"],
 		"app.tools.toggleVisibility": ["ctrl+shift+o"],
@@ -100,6 +102,7 @@ async function createContext() {
 	const prompt = vi.fn(async () => {});
 	const retry = vi.fn(async () => true);
 	const abort = vi.fn(async () => {});
+	const togglePrimaryProviderPin = vi.fn(() => true);
 	const session = {
 		isStreaming: false,
 		isCompacting: false,
@@ -111,6 +114,7 @@ async function createContext() {
 		queuedMessageCount: 0,
 		abort,
 		retry,
+		togglePrimaryProviderPin,
 	};
 	const updatePendingMessagesDisplay = vi.fn();
 	const handleBtwBranchKey = vi.fn(async () => true);
@@ -153,9 +157,12 @@ async function createContext() {
 		},
 	};
 	focused = editor;
+	const showStatus = vi.fn();
+	const invalidateStatusLine = vi.fn();
 	const ctx = {
 		editor: editor as unknown as InteractiveModeContext["editor"],
 		resetDisplayAfterAppearanceRefresh,
+		statusLine: { invalidate: invalidateStatusLine } as unknown as InteractiveModeContext["statusLine"],
 		ui: {
 			requestRender,
 			resetDisplay,
@@ -234,7 +241,7 @@ async function createContext() {
 		canCopyBtw,
 		handleBtwCopyKey,
 		showError,
-		showStatus: vi.fn(),
+		showStatus,
 	} as unknown as InteractiveModeContext;
 
 	return {
@@ -271,6 +278,8 @@ async function createContext() {
 			handleBtwCopyKey,
 			canCopyBtw,
 			showError,
+			showStatus,
+			invalidateStatusLine,
 		},
 	};
 }
@@ -285,18 +294,23 @@ describe("InputController keybinding setup", () => {
 		expect(spies.setActionKeys).toHaveBeenCalledWith("app.display.reset", ["ctrl+l"]);
 		expect(spies.setActionKeys).toHaveBeenCalledWith("app.model.selectTemporary", ["ctrl+y"]);
 		expect(spies.setActionKeys).toHaveBeenCalledWith("app.model.select", ["alt+m"]);
+		expect(spies.setActionKeys).toHaveBeenCalledWith("app.provider.pinPrimary", ["alt+shift+r"]);
 		expect(editor.onDisplayReset).toBeDefined();
 		expect(editor.onSelectModelTemporary).toBeDefined();
 		expect(editor.onSelectModel).toBeDefined();
+		expect(editor.onTogglePrimaryProviderPin).toBeDefined();
 		expect(editor.onSelectModelTemporary).not.toBe(editor.onSelectModel);
 
 		editor.onDisplayReset?.();
 		editor.onSelectModelTemporary?.();
 		editor.onSelectModel?.();
+		editor.onTogglePrimaryProviderPin?.();
 
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(1, { temporaryOnly: true });
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(2);
 		expect(spies.resetDisplayAfterAppearanceRefresh).toHaveBeenCalledTimes(1);
+		expect(spies.showStatus).toHaveBeenCalledWith("Primary provider pinned for this session");
+		expect(spies.invalidateStatusLine).toHaveBeenCalledTimes(1);
 	});
 
 	it("registers the tool activity visibility action", async () => {

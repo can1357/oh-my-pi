@@ -29,6 +29,7 @@ interface AppKeybindings {
 	"app.model.cycleBackward": true;
 	"app.model.select": true;
 	"app.model.selectTemporary": true;
+	"app.provider.pinPrimary": true;
 	"app.tools.expand": true;
 	"app.tools.toggleVisibility": true;
 	"app.editor.external": true;
@@ -121,6 +122,10 @@ export const KEYBINDINGS = {
 	"app.model.selectTemporary": {
 		defaultKeys: "alt+p",
 		description: "Select temporary model for current session",
+	},
+	"app.provider.pinPrimary": {
+		defaultKeys: "alt+shift+r",
+		description: "Toggle primary provider pin for this session",
 	},
 	"app.tools.expand": {
 		defaultKeys: "ctrl+o",

@@ -50,6 +50,13 @@ describe("error-id classification", () => {
 		const id = AIError.classifyMessage(assistant);
 		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
 		expect(AIError.retriable(id)).toBe(true);
+		expect(AIError.isNetworkUnavailableText(assistant.errorMessage ?? "")).toBe(true);
+	});
+
+	it("does not mistake a provider service restart for local network loss", () => {
+		expect(
+			AIError.isNetworkUnavailableText("received 1012 (service restart); then sent 1012 (service restart)"),
+		).toBe(false);
 	});
 
 	it("keeps authenticated connection rejections non-retryable", () => {

@@ -19,6 +19,27 @@ describe("CustomEditor keybindings", () => {
 		expect(onRetry).toHaveBeenCalledTimes(1);
 	});
 
+	it("routes the shipped primary provider pin chord through handleInput", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onTogglePrimaryProviderPin = vi.fn();
+
+		editor.onTogglePrimaryProviderPin = onTogglePrimaryProviderPin;
+		editor.handleInput("\x1bR");
+
+		expect(onTogglePrimaryProviderPin).toHaveBeenCalledTimes(1);
+	});
+
+	it("routes the configured primary provider pin chord through handleInput", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onTogglePrimaryProviderPin = vi.fn();
+
+		editor.setActionKeys("app.provider.pinPrimary", ["alt+shift+r"]);
+		editor.onTogglePrimaryProviderPin = onTogglePrimaryProviderPin;
+		editor.handleInput("\x1bR");
+
+		expect(onTogglePrimaryProviderPin).toHaveBeenCalledTimes(1);
+	});
+
 	it("routes the configured tool activity visibility chord through handleInput", () => {
 		const editor = new CustomEditor(getEditorTheme());
 		const onToggleToolActivity = vi.fn();

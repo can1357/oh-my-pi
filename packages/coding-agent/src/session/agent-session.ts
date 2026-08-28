@@ -658,6 +658,7 @@ export class AgentSession {
 	#usagePreflightReadyModel: Model | undefined;
 	#detachUsageBeforeQueueDequeue: (() => void) | undefined;
 	#detachUsageBeforeModelCall: (() => void) | undefined;
+	#detachFallbackRestoreBeforeModelCall: (() => void) | undefined;
 
 	#transformContext: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	#onPayload: SimpleStreamOptions["onPayload"] | undefined;
@@ -1216,6 +1217,10 @@ export class AgentSession {
 				signal?.throwIfAborted();
 				throw new DOMException("Usage preflight cancelled", "AbortError");
 			}
+		});
+		this.#detachFallbackRestoreBeforeModelCall = this.agent.addBeforeModelCallHook(async signal => {
+			await this.#recovery.maybeRestoreRetryFallbackPrimary({ requireContextFit: true, signal });
+			signal?.throwIfAborted();
 		});
 		this.#detachUsageBeforeModelCall = this.agent.addBeforeModelCallHook(async signal => {
 			if (!this.settings.get("retry.usageAwareFallback")) return;
@@ -4173,6 +4178,8 @@ export class AgentSession {
 		this.#usagePreflightReadyForNextModelCall = false;
 		this.#detachUsageBeforeQueueDequeue?.();
 		this.#detachUsageBeforeQueueDequeue = undefined;
+		this.#detachFallbackRestoreBeforeModelCall?.();
+		this.#detachFallbackRestoreBeforeModelCall = undefined;
 		this.#detachUsageBeforeModelCall?.();
 		this.#detachUsageBeforeModelCall = undefined;
 		this.#memory.cancelLocalMemoryStartup();
@@ -4630,6 +4637,21 @@ export class AgentSession {
 	 */
 	get servingModel(): ServingModel | undefined {
 		return this.#recovery.servingModel;
+	}
+
+	/** Whether this session waits on its primary provider instead of using model fallback. */
+	get primaryProviderPinned(): boolean {
+		return this.#recovery.primaryProviderPinned;
+	}
+
+	/** Persist an explicit primary-provider pin for this session. */
+	setPrimaryProviderPinned(pinned: boolean): boolean {
+		return this.#recovery.setPrimaryProviderPinned(pinned);
+	}
+
+	/** Toggle the primary-provider pin for this session. */
+	togglePrimaryProviderPin(): boolean {
+		return this.#recovery.togglePrimaryProviderPin();
 	}
 
 	/** Install the interactive decision surface for reserve-triggered model changes. */

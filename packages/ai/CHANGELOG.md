@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Classified local DNS and network reachability failures separately so retry recovery can keep the current route instead of entering model fallback.
+
 ## [18.0.9] - 2026-08-28
 
 ### Fixed

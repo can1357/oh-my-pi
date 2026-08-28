@@ -70,6 +70,7 @@ const THINKING_LOOP_REDIRECT_TYPE = "thinking-loop-redirect";
 const UNEXPECTED_STOP_MAX_RETRIES = 3;
 const UNEXPECTED_STOP_TIMEOUT_MS = 4000;
 const EMPTY_STOP_MAX_RETRIES = 3;
+const PRIMARY_PROVIDER_PIN_CUSTOM_TYPE = "primary_provider_pin";
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
@@ -261,6 +262,32 @@ export class TurnRecovery {
 	get retryPromise(): Promise<void> | undefined {
 		return this.#retryPromise;
 	}
+	/** Whether this session must keep retrying its primary route instead of using model fallback. */
+	get primaryProviderPinned(): boolean {
+		const branch = this.#host.sessionManager.getBranch();
+		for (let index = branch.length - 1; index >= 0; index--) {
+			const entry = branch[index];
+			if (entry.type !== "custom" || entry.customType !== PRIMARY_PROVIDER_PIN_CUSTOM_TYPE) continue;
+			const data = entry.data;
+			if (data !== null && typeof data === "object" && "pinned" in data && typeof data.pinned === "boolean") {
+				return data.pinned;
+			}
+			return false;
+		}
+		return false;
+	}
+
+	/** Persist an idempotent session-local primary-route policy change. */
+	setPrimaryProviderPinned(pinned: boolean): boolean {
+		if (this.primaryProviderPinned === pinned) return pinned;
+		this.#host.sessionManager.appendCustomEntry(PRIMARY_PROVIDER_PIN_CUSTOM_TYPE, { pinned });
+		return pinned;
+	}
+
+	/** Toggle and persist the session-local primary-route policy. */
+	togglePrimaryProviderPin(): boolean {
+		return this.setPrimaryProviderPinned(!this.primaryProviderPinned);
+	}
 
 	/** Whether the CURRENT session's model was reached by fallback routing. */
 	get #fallbackRouted(): boolean {
@@ -436,12 +463,14 @@ export class TurnRecovery {
 
 	/**
 	 * Restores the configured primary after fallback cooldown expiry.
+	 * `requireContextFit` leaves the fallback active when an in-flight agent loop
+	 * cannot safely compact before its next provider request.
 	 * @returns true when the active model was actually switched back to the
 	 * primary, so callers can re-run the pre-send context-fit check against the
 	 * reverted (possibly smaller) window before issuing the next request.
 	 */
-	maybeRestoreRetryFallbackPrimary(): Promise<boolean> {
-		return this.#maybeRestoreRetryFallbackPrimary();
+	maybeRestoreRetryFallbackPrimary(options?: { requireContextFit?: boolean; signal?: AbortSignal }): Promise<boolean> {
+		return this.#maybeRestoreRetryFallbackPrimary(options);
 	}
 
 	/** Applies model fallback policy from live usage health before a turn starts. */
@@ -1406,6 +1435,7 @@ export class TurnRecovery {
 	}
 
 	async #maybeApplyUsageAwareFallback(signal: AbortSignal, confirmer?: UsageFallbackConfirmer): Promise<boolean> {
+		if (this.primaryProviderPinned) return false;
 		if (!this.#host.settings.get("retry.usageAwareFallback")) return false;
 		const currentModel = this.#host.model();
 		if (!currentModel) return false;
@@ -1808,10 +1838,14 @@ export class TurnRecovery {
 		return true;
 	}
 
-	async #maybeRestoreRetryFallbackPrimary(): Promise<boolean> {
+	async #maybeRestoreRetryFallbackPrimary(options?: {
+		requireContextFit?: boolean;
+		signal?: AbortSignal;
+	}): Promise<boolean> {
 		if (!this.#activeRetryFallback) return false;
-		if (this.#activeRetryFallback.pinned) return false;
-		if (this.#getRetryFallbackRevertPolicy() !== "cooldown-expiry") return false;
+		const forcePrimary = this.primaryProviderPinned;
+		if (this.#activeRetryFallback.pinned && !forcePrimary) return false;
+		if (!forcePrimary && this.#getRetryFallbackRevertPolicy() !== "cooldown-expiry") return false;
 
 		const {
 			originalSelector: originalSelectorRaw,
@@ -1833,12 +1867,12 @@ export class TurnRecovery {
 		if (!currentModel) return false;
 		const currentSelector = formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel());
 		if (currentSelector === originalSelector.raw) {
-			if (!this.isRetryFallbackSelectorSuppressed(originalSelector)) {
+			if (forcePrimary || !this.isRetryFallbackSelectorSuppressed(originalSelector)) {
 				this.clearActiveRetryFallback();
 			}
 			return false;
 		}
-		if (this.isRetryFallbackSelectorSuppressed(originalSelector)) return false;
+		if (!forcePrimary && this.isRetryFallbackSelectorSuppressed(originalSelector)) return false;
 
 		const resolvedPrimary = resolveModelOverride(
 			[originalSelector.raw],
@@ -1848,8 +1882,11 @@ export class TurnRecovery {
 		const primaryModel =
 			resolvedPrimary.model ?? this.#host.modelRegistry.find(originalSelector.provider, originalSelector.id);
 		if (!primaryModel) return false;
-		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, this.#host.sessionId());
-		if (!apiKey) return false;
+		if (options?.requireContextFit && !this.#host.contextFitsModel(primaryModel)) return false;
+		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, this.#host.sessionId(), {
+			signal: options?.signal,
+		});
+		if (!apiKey || options?.signal?.aborted) return false;
 
 		const currentThinkingLevel = this.#host.configuredThinkingLevel();
 		const thinkingToApply =
@@ -1936,10 +1973,12 @@ export class TurnRecovery {
 		},
 	): Promise<boolean> {
 		const retrySettings = this.#host.settings.getGroup("retry");
+		const primaryProviderPinned = this.primaryProviderPinned;
 		// The Fireworks Fast→base degrade is an intrinsic model-selection safety net,
 		// not a retry loop, so it runs even when the user disabled retries: it switches
-		// the model once and lets the base turn proceed.
-		if (!retrySettings.enabled && !options?.fireworksFastFallback) return false;
+		// the model once and lets the base turn proceed. A session-local primary pin
+		// explicitly keeps availability retries alive even when global retries are off.
+		if (!retrySettings.enabled && !options?.fireworksFastFallback && !primaryProviderPinned) return false;
 		const classifierRefusal = this.isClassifierRefusal(message);
 
 		const generation = this.#host.promptGeneration();
@@ -1953,19 +1992,19 @@ export class TurnRecovery {
 			this.#retryResolve = resolve;
 		}
 
-		// All attempts on the current model are spent. Don't fail yet: the
-		// fallback chain below gets one last consult. Credential rotation can
-		// consume the entire budget without the fallback branch ever running
-		// (every rotation sets switchedCredential and skips it), so without
-		// this last resort a provider-wide usage cap never fails over to the
-		// configured chain.
-		const maxRetries = this.#isBoundedThinkingStreamClose(message)
-			? Math.min(retrySettings.maxRetries, 1)
-			: retrySettings.maxRetries;
-		const retryBudgetExhausted = this.#retryAttempt > maxRetries;
-
 		const errorMessage = message.errorMessage || "Unknown error";
 		const id = this.#classifyRetryMessage(message);
+		const waitForNetworkRecovery = AIError.isNetworkUnavailableText(errorMessage);
+		const unboundedRouteWait = primaryProviderPinned || waitForNetworkRecovery;
+		// A pinned primary and a locally unavailable network are wait states, not
+		// provider failures. Keep retrying the same route until it recovers or the
+		// user aborts instead of exhausting the normal provider retry budget.
+		const maxRetries = unboundedRouteWait
+			? Number.MAX_SAFE_INTEGER
+			: this.#isBoundedThinkingStreamClose(message)
+				? Math.min(retrySettings.maxRetries, 1)
+				: retrySettings.maxRetries;
+		const retryBudgetExhausted = !unboundedRouteWait && this.#retryAttempt > maxRetries;
 		const preserveFailedTurn =
 			options?.preserveFailedTurn === true ||
 			((classifierRefusal || AIError.is(id, AIError.Flag.MalformedFunctionCall)) &&
@@ -2037,7 +2076,8 @@ export class TurnRecovery {
 			}
 		}
 
-		const allowModelFallback = options?.allowModelFallback !== false;
+		const allowModelFallback =
+			options?.allowModelFallback !== false && !primaryProviderPinned && !waitForNetworkRecovery;
 		const currentModel = this.#host.model();
 		const currentSelector = currentModel
 			? formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel())
@@ -2167,7 +2207,7 @@ export class TurnRecovery {
 		// assistant error message is preserved in agent state so the caller
 		// can act on it.
 		const maxDelayMs = retrySettings.maxDelayMs;
-		if (maxDelayMs > 0 && delayMs > maxDelayMs && !switchedCredential && !switchedModel) {
+		if (!unboundedRouteWait && maxDelayMs > 0 && delayMs > maxDelayMs && !switchedCredential && !switchedModel) {
 			await this.persistTerminalEmptyErrorTurn(message);
 			const attempt = this.#retryAttempt;
 			this.#retryAttempt = 0;
