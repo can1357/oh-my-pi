@@ -3,7 +3,14 @@ import { stripVTControlCharacters } from "node:util";
 import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
 import type { ExtensionAskDialogQuestion } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { AskDialogComponent } from "@oh-my-pi/pi-coding-agent/modes/components/ask-dialog";
-import { getThemeByName, setThemeInstance, snapshotThemeState } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import {
+	getCurrentThemeName,
+	getThemeByName,
+	initTheme,
+	onTerminalAppearanceChange,
+	setThemeInstance,
+	snapshotThemeState,
+} from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { CURSOR_MARKER, setKeybindings } from "@oh-my-pi/pi-tui";
 
 const DOWN = "\x1b[B";
@@ -2646,6 +2653,41 @@ describe("AskDialogComponent", () => {
 		} finally {
 			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
 			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("snapshot preserves the OSC 11 report so SIGWINCH keeps the reported auto theme", async () => {
+		if (!darkTheme) throw new Error("Failed to load dark theme");
+		const savedColorFgbg = Bun.env.COLORFGBG;
+		Bun.env.COLORFGBG = "15;0"; // pin the no-report fallback to dark
+		try {
+			// Production-shaped auto setup; initTheme is the only production
+			// path that registers the SIGWINCH listener the restore must serve.
+			await initTheme(true, undefined, undefined, "dark", "light");
+			expect(getCurrentThemeName()).toBe("dark");
+
+			// An OSC 11 light report flips the auto theme to light.
+			onTerminalAppearanceChange("light");
+			expect(getCurrentThemeName()).toBe("light");
+
+			const restore = snapshotThemeState();
+			// setThemeInstance stops the watcher, dropping the OSC 11 report.
+			setThemeInstance(darkTheme);
+			await restore();
+
+			// The next SIGWINCH must still see the restored report; losing it
+			// would re-evaluate from COLORFGBG and flip the session dark.
+			process.emit("SIGWINCH");
+			expect(getCurrentThemeName()).toBe("light");
+		} finally {
+			Bun.env.COLORFGBG = savedColorFgbg;
+			// One scheduler turn drains the in-flight auto-theme load (its
+			// completion is module-private) so its callback cannot overwrite
+			// the restored dark instance after this test yields.
+			const { promise, resolve } = Promise.withResolvers<void>();
+			setImmediate(resolve);
+			await promise;
+			setThemeInstance(darkTheme);
 		}
 	});
 });

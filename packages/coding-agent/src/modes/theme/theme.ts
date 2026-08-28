@@ -282,9 +282,10 @@ export function setThemeInstance(themeInstance: Theme): void {
 
 /**
  * Capture the module's theme state and return a thunk that restores it.
- * `setThemeInstance` alone cannot undo itself: auto-detection and the
- * custom-theme watcher are module-private, so a caller that swaps the theme
- * temporarily (tests, previews) restores the complete state through this seam.
+ * `setThemeInstance` alone cannot undo itself: auto-detection, the OSC 11
+ * terminal-reported appearance, and the custom-theme watcher are module-private,
+ * so a caller that swaps the theme temporarily (tests, previews) restores the
+ * complete state through this seam.
  */
 export function snapshotThemeState(): () => Promise<void> {
 	const priorTheme = theme;
@@ -292,12 +293,16 @@ export function snapshotThemeState(): () => Promise<void> {
 	const priorAuto = autoDetectedTheme;
 	const priorWatcher = themeWatcher !== undefined || themeReloadTimer !== undefined;
 	const priorSigwinch = sigwinchHandler !== undefined;
+	const priorTerminalAppearance = terminalReportedAppearance;
 	return async () => {
 		theme = priorTheme;
 		currentThemeName = priorName;
 		autoDetectedTheme = priorAuto;
 		if (priorWatcher) await startThemeWatcher();
 		else stopThemeWatcher();
+		// Both watcher paths above drop the OSC 11 report via stopThemeWatcher;
+		// reinstate it after them so a later SIGWINCH re-evaluation keeps it.
+		terminalReportedAppearance = priorTerminalAppearance;
 		if (priorSigwinch) startSigwinchListener();
 		notifyThemeChange({ ephemeral: true });
 	};
