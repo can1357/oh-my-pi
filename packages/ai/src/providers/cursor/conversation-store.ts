@@ -123,7 +123,11 @@ export function unpinCursorConversation(id: string): void {
 			victim = candidate;
 			break;
 		}
-		victim ??= freshVictim;
+		// The just-unpinned id sits at the LRU tail. If every older candidate is
+		// protected, `freshVictim` is that new mapping — evicting it would drop
+		// the retry id we just created. Leave a one-slot overflow until an older
+		// fresh or unprotected entry exists.
+		victim ??= freshVictim === id ? undefined : freshVictim;
 		if (victim === undefined) break;
 		retainedLru.delete(victim);
 		entries.delete(victim);

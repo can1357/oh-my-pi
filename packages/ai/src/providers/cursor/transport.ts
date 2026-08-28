@@ -204,6 +204,9 @@ interface H2FramePump {
 	stop(): void;
 }
 
+/** Fail the pump if decoded frames outrun the consumer this far. */
+const H2_FRAME_QUEUE_LIMIT = 1024;
+
 function startH2FramePump(request: http2.ClientHttp2Stream, decoder: ConnectFrameDecoder): H2FramePump {
 	const pump: H2FramePump = {
 		pending: [],
@@ -231,6 +234,10 @@ function startH2FramePump(request: http2.ClientHttp2Stream, decoder: ConnectFram
 		try {
 			const frames = decoder.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
 			if (frames.length === 0) return;
+			if (pump.pending.length - pump.head + frames.length > H2_FRAME_QUEUE_LIMIT) {
+				fail(new Error(`Cursor HTTP/2 frame queue exceeded ${H2_FRAME_QUEUE_LIMIT} frames`));
+				return;
+			}
 			pump.pending.push(...frames);
 			pump.wake();
 		} catch (cause) {

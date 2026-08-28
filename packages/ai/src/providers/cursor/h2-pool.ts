@@ -392,7 +392,12 @@ function establishSession(options: CursorH2AcquireOptions, key: string): CursorE
 		// Bind cancel to the raw TCP/TLS socket as well as the http2 session.
 		// During Bun TLS/preface, `session.destroy()` may not emit error/connect
 		// and may not close the accepted peer socket.
-		const rawSocket = connect.socket;
+		let rawSocket: { destroy(): void } | undefined;
+		try {
+			rawSocket = connect.socket;
+		} catch {
+			// Bun can throw from `session.socket` during handshake.
+		}
 		if (rawSocket) {
 			const destroyRaw = (): void => {
 				try {
@@ -591,6 +596,11 @@ function establishSession(options: CursorH2AcquireOptions, key: string): CursorE
 	void runBody().then(
 		() => settled.resolve(),
 		(error: unknown) => {
+			try {
+				session?.destroy();
+			} catch {
+				/* already closed */
+			}
 			fail(error);
 			settled.resolve();
 		},

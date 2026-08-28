@@ -48,6 +48,16 @@ export function pendingCursorHttp1BridgePolls(): number {
 	return livePollTasks;
 }
 
+/** Per-append header deadline, independent of the caller signal. */
+const APPEND_TIMEOUT_MS = 30_000;
+
+let __appendTimeoutMs: number | undefined;
+
+/** Test seam: override (or restore) the per-append header deadline. */
+export function __setCursorHttp1AppendTimeoutMs(ms: number | undefined): void {
+	__appendTimeoutMs = ms;
+}
+
 /**
  * Opens Cursor's HTTP/1.1 append/poll bridge. Not a public provider export —
  * only {@link openCursorTransport} may choose this after an authoritative
@@ -243,14 +253,31 @@ export function openCursorHttp1Bridge(args: {
 				delete headers["connect-content-encoding"];
 				delete headers["connect-accept-encoding"];
 				delete headers["connect-protocol-version"];
-				const response = await Bun.fetch(new URL("/aiserver.v1.BidiService/BidiAppend", args.baseUrl), {
-					method: "POST",
-					headers,
-					body: encodeAppendRequest(requestId, seqno, payload),
-					signal,
-					...(proxy ? { proxy } : {}),
-				});
-				if (!response.ok) throw new Error(`Cursor HTTP/1 append failed with HTTP ${response.status}`);
+				const timeoutAbort = new AbortController();
+				const onCallerAbort = (): void => {
+					timeoutAbort.abort(
+						signal.reason instanceof Error ? signal.reason : new Error("Cursor HTTP/1 append aborted"),
+					);
+				};
+				if (signal.aborted) onCallerAbort();
+				else signal.addEventListener("abort", onCallerAbort, { once: true });
+				const timer = setTimeout(() => {
+					timeoutAbort.abort(new Error("Cursor HTTP/1 append timed out"));
+				}, __appendTimeoutMs ?? APPEND_TIMEOUT_MS);
+				timer.unref();
+				try {
+					const response = await Bun.fetch(new URL("/aiserver.v1.BidiService/BidiAppend", args.baseUrl), {
+						method: "POST",
+						headers,
+						body: encodeAppendRequest(requestId, seqno, payload),
+						signal: timeoutAbort.signal,
+						...(proxy ? { proxy } : {}),
+					});
+					if (!response.ok) throw new Error(`Cursor HTTP/1 append failed with HTTP ${response.status}`);
+				} finally {
+					clearTimeout(timer);
+					signal.removeEventListener("abort", onCallerAbort);
+				}
 			});
 			if (isInitial) {
 				// Gate the poll behind the initial append's settlement. The latch settles

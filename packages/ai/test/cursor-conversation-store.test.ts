@@ -94,12 +94,17 @@ describe("cursor conversation store — active/retained split", () => {
 	});
 
 	it("unpinning an unknown id is a no-op", () => {
-		expect(() => unpinCursorConversation("never-pinned")).not.toThrow();
 		const entry = pinCursorConversation("known");
 		entry.blobs.set("x", new Uint8Array([9]));
+		unpinCursorConversation("never-pinned");
+		expect(pinCursorConversation("known")).toBe(entry);
+		expect(entry.blobs.get("x")).toEqual(new Uint8Array([9]));
 		unpinCursorConversation("known");
-		// Now unpinned (retained) — a second unpin on the unpinned id is still a no-op.
-		expect(() => unpinCursorConversation("known")).not.toThrow();
+		unpinCursorConversation("known");
+		const retained = pinCursorConversation("known");
+		expect(retained).toBe(entry);
+		expect(retained.blobs.get("x")).toEqual(new Uint8Array([9]));
+		unpinCursorConversation("known");
 	});
 
 	it("re-entrant pins keep the entry active until the final unpin", () => {
@@ -307,5 +312,23 @@ describe("cursor conversation store — rotation", () => {
 		if (newest === undefined || newestRotated === undefined) throw new Error("expected newest rotation");
 		expect(resolveCursorConversationId(newest)).toBe(newestRotated);
 		expect(isCursorRotationFresh(newestRotated)).toBe(true);
+	});
+
+	it("does not evict a just-created fresh mapping when every older retained base is pin-protected", () => {
+		const rotatedPins: string[] = [];
+		for (let i = 0; i < CURSOR_RETAINED_CONVERSATION_LIMIT; i++) {
+			const base = `prot-${i}`;
+			pinCursorConversation(base);
+			const rotated = requireRotation(rotateCursorConversation(base));
+			pinCursorConversation(rotated);
+			unpinCursorConversation(base);
+			rotatedPins.push(rotated);
+		}
+		pinCursorConversation("newest-base");
+		const newestRotated = requireRotation(rotateCursorConversation("newest-base"));
+		unpinCursorConversation("newest-base");
+		expect(resolveCursorConversationId("newest-base")).toBe(newestRotated);
+		expect(isCursorRotationFresh(newestRotated)).toBe(true);
+		for (const rotated of rotatedPins) unpinCursorConversation(rotated);
 	});
 });

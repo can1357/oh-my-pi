@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as http from "node:http";
 import { type ConnectFrame, ConnectProtocolError, encodeConnectFrame } from "../src/providers/cursor/connect-frame";
 import { buildCursorRunHeaders } from "../src/providers/cursor/headers";
-import { openCursorHttp1Bridge, pendingCursorHttp1BridgePolls } from "../src/providers/cursor/http1-bridge";
+import {
+	__setCursorHttp1AppendTimeoutMs,
+	openCursorHttp1Bridge,
+	pendingCursorHttp1BridgePolls,
+} from "../src/providers/cursor/http1-bridge";
 import { __resetProxyCache } from "../src/utils/proxy";
 
 const RUN_PATH = "/agent.v1.AgentService/Run";
@@ -270,6 +274,7 @@ afterEach(async () => {
 	plan = { kind: "success" };
 	await settleStragglerPollTasks();
 	await stopServer();
+	__setCursorHttp1AppendTimeoutMs(undefined);
 	appendStatus = 200;
 });
 
@@ -691,6 +696,29 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 		expect(pendingCursorHttp1BridgePolls()).toBe(0);
 		expect(appendHits).toBe(0);
 		expect(pollHits).toBe(0);
+	});
+
+	it("fails the bridge when an append never returns headers", async () => {
+		holdAppendResponses = true;
+		__setCursorHttp1AppendTimeoutMs(50);
+		const baseUrl = await startServer();
+		const bridge = openCursorHttp1Bridge({
+			baseUrl,
+			requestPath: RUN_PATH,
+			runHeaders: testRunHeaders(),
+			gzipRequest: false,
+		});
+		bridge.write(encodeConnectFrame(Buffer.from("client-request"), false));
+		await expect(bridge.trailers()).rejects.toBeDefined();
+		let surfaced: unknown;
+		try {
+			for await (const _frame of bridge.frames()) {
+				// hung append must not yield
+			}
+		} catch (cause) {
+			surfaced = cause;
+		}
+		expect(surfaced).toBeInstanceOf(Error);
 	});
 });
 
