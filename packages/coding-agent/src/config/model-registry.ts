@@ -1463,6 +1463,7 @@ export class ModelRegistry {
 		const configuredDiscovered = configuredDiscoveryResults
 			.filter(result => currentDiscoverableProviders.has(result.provider))
 			.flatMap(result => result.models);
+		const configuredDiscoveredModels = new Set(configuredDiscovered);
 		const discovered = [...configuredDiscovered, ...builtInDiscovery.models];
 		if (discovered.length === 0 && builtInDiscovery.authoritativeProviders.size === 0) {
 			return;
@@ -1473,13 +1474,14 @@ export class ModelRegistry {
 			? this.#unprojectedModels
 			: this.#composeUnprojectedStaticModels(touchedProviders);
 		const discoveredModels = this.#applyHardcodedModelPolicies(
-			discovered.map(model =>
-				mergeDiscoveredModel(
+			discovered.map(model => {
+				const merged = mergeDiscoveredModel(
 					model,
 					resolveProviderModelReference(model.provider, model.id, existingModels),
 					this.#providerOverrides.get(model.provider),
-				),
-			),
+				);
+				return configuredDiscoveredModels.has(model) ? this.#restoreRuntimeDiscoveryAuthPrecedence(merged) : merged;
+			}),
 		);
 		const authoritativeProviders = providersWithAuthoritativeProjectCatalog(discoveredModels);
 		for (const provider of builtInDiscovery.authoritativeProviders) {
@@ -2131,6 +2133,15 @@ export class ModelRegistry {
 			if (!override) return model;
 			return this.#restoreRuntimeAuthPrecedence(model.provider, override, applyModelOverride(model, override));
 		});
+	}
+
+	#restoreRuntimeDiscoveryAuthPrecedence(model: Model<Api>): Model<Api> {
+		if (!this.authStorage.getRuntimeApiKey(model.provider) || !model.headers) return model;
+		const headers = createLiveConfigHeaders([{ ...model.headers }], {
+			authHeader: true,
+			apiKeyOverride: () => this.authStorage.getRuntimeApiKey(model.provider),
+		});
+		return buildModel({ ...toModelSpec(model), headers });
 	}
 
 	/** `applyModelOverride` merges per-model `headers` with a plain spread, which

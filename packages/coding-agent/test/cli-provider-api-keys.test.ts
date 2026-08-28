@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -10,9 +10,6 @@ import {
 	readProviderApiKeyBundleFd,
 } from "@oh-my-pi/pi-coding-agent/cli/provider-api-keys";
 import { mergeAuthHeaderSources } from "@oh-my-pi/pi-coding-agent/config/custom-models";
-import * as helpers from "@oh-my-pi/pi-coding-agent/discovery/helpers";
-import { getPreloadedPluginRoots } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
-import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { $ } from "bun";
 
@@ -21,6 +18,7 @@ const argsModuleUrl = pathToFileURL(path.join(import.meta.dir, "../src/cli/args.
 const mainModuleUrl = pathToFileURL(path.join(import.meta.dir, "../src/main.ts")).href;
 const providerApiKeysModuleUrl = pathToFileURL(path.join(import.meta.dir, "../src/cli/provider-api-keys.ts")).href;
 const settingsModuleUrl = pathToFileURL(path.join(import.meta.dir, "../src/config/settings.ts")).href;
+const helpersModuleUrl = pathToFileURL(path.join(import.meta.dir, "../src/discovery/helpers.ts")).href;
 
 afterEach(() => {
 	for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
@@ -693,37 +691,52 @@ console.log(JSON.stringify({ openAtDiscovery, installed }));`;
 			path.join(pluginDir, ".claude-plugin", "plugin.json"),
 			JSON.stringify({ name: "rejected-run-plugin" }),
 		);
-		const parsed = parseArgs(["--provider-api-keys="]);
-		parsed.mode = "acp";
-		parsed.noExtensions = true;
-		parsed.pluginDirs = [pluginDir];
-		// Assert discovery never STARTS rather than sampling the process-global
-		// roots later: the mutation lands after awaited manifest reads, so any
-		// wall-clock wait would be racing the very thing under test.
-		const injectSpy = vi.spyOn(helpers, "injectPluginDirRoots");
-		const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-		const exitCode = process.exitCode;
-		process.exitCode = 0;
-		try {
-			await expect(
-				runRootCommand(parsed, ["--provider-api-keys=", "--plugin-dir", pluginDir], {
-					// Discovery must SUCCEED here. If it throws, the mutant dies
-					// before reaching the spy assertion below and this test
-					// silently stops covering the preload contract.
-					discoverAuthStorage: async () => ({ close: () => {} }) as unknown as AuthStorage,
-					get settings(): never {
-						throw new Error("unexpected settings init on a rejected bundle");
-					},
-				}),
-			).resolves.toBeUndefined();
-			expect(process.exitCode).toBe(2);
-			expect(injectSpy).not.toHaveBeenCalled();
-			expect(getPreloadedPluginRoots().some(entry => entry.id.startsWith("rejected-run-plugin@"))).toBe(false);
-		} finally {
-			process.exitCode = exitCode ?? 0;
-			stderr.mockRestore();
-			injectSpy.mockRestore();
-		}
+		const script = `
+import { vi } from "bun:test";
+import { parseArgs } from ${JSON.stringify(argsModuleUrl)};
+import * as helpers from ${JSON.stringify(helpersModuleUrl)};
+import { runRootCommand } from ${JSON.stringify(mainModuleUrl)};
+const pluginDir = ${JSON.stringify(pluginDir)};
+const parsed = parseArgs(["--provider-api-keys="]);
+parsed.mode = "acp";
+parsed.noExtensions = true;
+parsed.pluginDirs = [pluginDir];
+const injectSpy = vi.spyOn(helpers, "injectPluginDirRoots");
+const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+process.exitCode = 0;
+await runRootCommand(parsed, ["--provider-api-keys=", "--plugin-dir", pluginDir], {
+  discoverAuthStorage: async () => ({ close() {} }),
+  get settings() {
+    throw new Error("unexpected settings init on a rejected bundle");
+  },
+});
+const result = {
+  requestedExitCode: process.exitCode,
+  injectCalled: injectSpy.mock.calls.length > 0,
+  rootPresent: helpers.getPreloadedPluginRoots().some(entry => entry.id.startsWith("rejected-run-plugin@")),
+};
+process.exitCode = 0;
+stderr.mockRestore();
+injectSpy.mockRestore();
+console.log(JSON.stringify(result));`;
+		const proc = Bun.spawn({
+			cmd: [process.execPath, "--eval", script],
+			cwd: process.cwd(),
+			stdout: "pipe",
+			stderr: "pipe",
+			timeout: 10_000,
+		});
+		const [exitCode, stdout, stderr] = await Promise.all([
+			proc.exited,
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+		]);
+		expect(exitCode, stderr).toBe(0);
+		expect(JSON.parse(stdout.trim().split("\n").at(-1) ?? "{}")).toEqual({
+			requestedExitCode: 2,
+			injectCalled: false,
+			rootPresent: false,
+		});
 	});
 
 	it("materializes runtime-only auth headers for authHeader providers without a configured key", () => {

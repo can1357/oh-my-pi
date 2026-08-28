@@ -2536,6 +2536,34 @@ providers:
 		expect(zeroCtx?.contextWindow).toBe(128000);
 	});
 
+	test("runtime keys replace configured authorization headers case-insensitively during proxy discovery", async () => {
+		writeRawModelsJson({
+			"proxy-test": {
+				baseUrl: "http://127.0.0.1:9998",
+				headers: { authorization: "Bearer stale-token", "X-Proxy": "configured" },
+				discovery: { type: "proxy" },
+			},
+		});
+		authStorage.setRuntimeApiKey("proxy-test", "runtime-token");
+		const fetchMock: FetchImpl = async (input, init) => {
+			expect(String(input)).toBe("http://127.0.0.1:9998/v1/models");
+			expect(init?.headers).toEqual({
+				"X-Proxy": "configured",
+				Authorization: "Bearer runtime-token",
+			});
+			return Response.json({
+				data: [{ id: "anthropic-model", supported_endpoint_types: ["anthropic"], context_length: 200000 }],
+			});
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		const model = registry.find("proxy-test", "anthropic-model");
+		expect(model?.headers).toEqual({
+			"X-Proxy": "configured",
+			Authorization: "Bearer runtime-token",
+		});
+	});
+
 	test("proxy discovery uses proxy-reported name over bundled placeholder", async () => {
 		writeRawModelsJson({
 			"proxy-test": {

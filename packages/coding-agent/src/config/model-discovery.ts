@@ -170,6 +170,15 @@ export interface DiscoveryContext {
 	getBearerApiKeyResolver(provider: string): Promise<ApiKey | undefined>;
 }
 
+function replaceBearerAuthorization(headers: Record<string, string>, apiKey: string): Record<string, string> {
+	const authenticatedHeaders = { ...headers };
+	for (const name in authenticatedHeaders) {
+		if (name.toLowerCase() === "authorization") delete authenticatedHeaders[name];
+	}
+	authenticatedHeaders.Authorization = `Bearer ${apiKey}`;
+	return authenticatedHeaders;
+}
+
 type OllamaDiscoveredModelMetadata = {
 	reasoning: boolean;
 	input: ("text" | "image")[];
@@ -622,7 +631,7 @@ export async function discoverLlamaCppModels(
 	};
 	const apiKey = await ctx.getBearerApiKeyResolver(providerConfig.provider);
 	const [payload, serverMetadata] = apiKey
-		? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
+		? await withAuth(apiKey, key => attempt(replaceBearerAuthorization(baseHeaders, key)))
 		: await attempt(baseHeaders);
 	const models = parseLlamaCppModelList(payload);
 	const discovered: Model<Api>[] = [];
@@ -717,7 +726,7 @@ export async function discoverLlamaCppModelRuntimeMetadata(
 	try {
 		const apiKey = await ctx.getBearerApiKeyResolver(model.provider);
 		return apiKey
-			? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
+			? await withAuth(apiKey, key => attempt(replaceBearerAuthorization(baseHeaders, key)))
 			: await attempt(baseHeaders);
 	} catch {
 		return undefined;
@@ -772,7 +781,7 @@ export async function discoverLmStudioModelRuntimeMetadata(
 	try {
 		const apiKey = await ctx.getBearerApiKeyResolver(model.provider);
 		return apiKey
-			? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
+			? await withAuth(apiKey, key => attempt(replaceBearerAuthorization(baseHeaders, key)))
 			: await attempt(baseHeaders);
 	} catch {
 		return undefined;
@@ -857,7 +866,7 @@ export async function discoverOpenAIModelsList(
 	};
 	const apiKey = await ctx.getBearerApiKeyResolver(providerConfig.provider);
 	const [payload, nativeMetadata] = apiKey
-		? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
+		? await withAuth(apiKey, key => attempt(replaceBearerAuthorization(baseHeaders, key)))
 		: await attempt(baseHeaders);
 	const models = payload.data ?? [];
 	const references = getBundledModelReferenceIndex();
@@ -969,7 +978,7 @@ export async function discoverLiteLLMModels(
 	let richModels: ModelSpec<Api>[] | null;
 	try {
 		richModels = apiKey
-			? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
+			? await withAuth(apiKey, key => attempt(replaceBearerAuthorization(baseHeaders, key)))
 			: await attempt(baseHeaders);
 	} catch (error) {
 		const status = typeof error === "object" && error !== null && "status" in error ? error.status : undefined;
@@ -1025,7 +1034,7 @@ export async function discoverProxyModels(
 		});
 	const apiKey = await ctx.getBearerApiKeyResolver(providerConfig.provider);
 	const payload = apiKey
-		? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
+		? await withAuth(apiKey, key => attempt(replaceBearerAuthorization(baseHeaders, key)))
 		: await attempt(baseHeaders);
 	const items = payload.data ?? [];
 	const discovered: Model<Api>[] = [];
