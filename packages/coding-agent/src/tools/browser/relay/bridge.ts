@@ -191,6 +191,8 @@ class TabState {
 	restoring: Promise<void> | null = null;
 	/** Extension socket the in-flight `restoring` replay is bound to (null when idle). */
 	restoringExt: RelaySocket | null = null;
+	/** Serializes live root-state cleanup after owner loss while the tab stays attached. */
+	subscriptionReconciling: Promise<void> | null = null;
 	/** Recovery replay must complete, including after an extension socket replacement. */
 	restorePending = false;
 	/** Effective root-domain state by subscription key and owning page pseudo-session. */
@@ -365,6 +367,7 @@ export class RelayBridge {
 			tab.attaching = null;
 			tab.restoring = null;
 			tab.restoringExt = null;
+			tab.subscriptionReconciling = null;
 			this.#resetRuntime(tab);
 			// The extension dissolves omp groups on disconnect (or died along
 			// with them); grouping state is unknowable until the next hello.
@@ -934,12 +937,14 @@ export class RelayBridge {
 				return;
 			case "Emulation.clearGeolocationOverride":
 			case "Page.clearGeolocationOverride":
+			case "Emulation.clearIdleOverride":
 				this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
 				return;
 			case "Emulation.setDeviceMetricsOverride":
 			case "Page.setDeviceMetricsOverride":
 			case "Emulation.setGeolocationOverride":
 			case "Page.setGeolocationOverride":
+			case "Emulation.setIdleOverride":
 			case "Network.emulateNetworkConditions":
 			case "Network.setBypassServiceWorker":
 			case "Network.setUserAgentOverride":
@@ -1017,12 +1022,71 @@ export class RelayBridge {
 	#forgetSessionSubscriptions(tabId: number, sessionIds: Iterable<string>): void {
 		const tab = this.#tabs.get(tabId);
 		if (!tab) return;
+		const previousByKey = new Map<string, SessionRootSubscription | undefined>();
+		for (const key of tab.subscriptions.keys()) {
+			previousByKey.set(key, this.#latestSubscriptionForKey(tab, key));
+		}
 		for (const sessionId of sessionIds) {
 			for (const [key, owners] of tab.subscriptions) {
 				owners.delete(sessionId);
 				if (owners.size === 0) tab.subscriptions.delete(key);
 			}
 		}
+		const changes = [...previousByKey.entries()]
+			.map(([key, previous]) => ({ key, previous, next: this.#latestSubscriptionForKey(tab, key) }))
+			.filter(({ previous, next }) => !subscriptionEquals(previous, next));
+		this.#scheduleLiveSubscriptionReconcile(tab, changes);
+	}
+
+	#scheduleLiveSubscriptionReconcile(
+		tab: TabState,
+		changes: Array<{
+			key: string;
+			previous: SessionRootSubscription | undefined;
+			next: SessionRootSubscription | undefined;
+		}>,
+	): void {
+		if (changes.length === 0) return;
+		if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tab.tabId).length === 0) return;
+		const expectedExt = this.#ext;
+		if (!expectedExt) return;
+		const prior = tab.subscriptionReconciling ?? Promise.resolve();
+		const task = prior
+			.catch(() => {})
+			.then(async () => {
+				if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tab.tabId).length === 0) return;
+				this.#assertExtensionCurrent(expectedExt);
+				const ordered = [...changes].sort((left, right) => {
+					const leftSeq = left.next?.sequence ?? left.previous?.sequence ?? Number.MAX_SAFE_INTEGER;
+					const rightSeq = right.next?.sequence ?? right.previous?.sequence ?? Number.MAX_SAFE_INTEGER;
+					return leftSeq - rightSeq;
+				});
+				for (const change of ordered) {
+					if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tab.tabId).length === 0)
+						return;
+					const current = this.#latestSubscriptionForKey(tab, change.key);
+					if (!subscriptionEquals(current, change.next)) continue;
+					const command = current
+						? { method: current.method, params: current.params }
+						: change.previous
+							? this.#subscriptionDisableCommand(change.previous)
+							: null;
+					if (!command) continue;
+					this.#assertExtensionCurrent(expectedExt);
+					await this.#rpc({ op: "send", tabId: tab.tabId, method: command.method, params: command.params });
+					this.#assertExtensionCurrent(expectedExt);
+				}
+			})
+			.catch(err => {
+				if (err instanceof ExtensionReplacedError) return;
+				this.#log("live subscription cleanup failed", {
+					tabId: tab.tabId,
+					error: err instanceof Error ? err.message : String(err),
+				});
+			});
+		tab.subscriptionReconciling = task.finally(() => {
+			if (tab.subscriptionReconciling === task) tab.subscriptionReconciling = null;
+		});
 	}
 
 	#pruneSubscriptions(tab: TabState, keepPageSessions: CdpConnection[]): void {
@@ -1189,6 +1253,8 @@ export class RelayBridge {
 				// disable RPC. When its preserved owner disappears after replay, reset
 				// the shared root back to the browser default timezone.
 				return { method: subscription.method, params: { timezoneId: "" } };
+			case "Emulation.setIdleOverride":
+				return { method: "Emulation.clearIdleOverride" };
 			case "Emulation.setCPUThrottlingRate":
 				// CPU throttling is another persistent root setter without a paired
 				// disable RPC. When its preserved owner disappears after replay, reset
@@ -1915,6 +1981,7 @@ export class RelayBridge {
 			.then(() => {
 				tab.attached = false;
 				tab.restorePending = false;
+				tab.subscriptionReconciling = null;
 				tab.subscriptions.clear();
 				this.#resetRuntime(tab);
 			})
