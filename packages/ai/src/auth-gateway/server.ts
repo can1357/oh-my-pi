@@ -452,13 +452,9 @@ async function handleFormatEndpoint(
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
-	const supportsOpenAIImageFileReferences =
-		model.api === "openai-responses" ||
-		model.api === "azure-openai-responses" ||
-		model.api === "openai-codex-responses";
 	if (
 		route.label === "openai-responses" &&
-		!supportsOpenAIImageFileReferences &&
+		!supportsOpenAIImageFileReferences(model.api) &&
 		parsed.context.messages.some(
 			message =>
 				message.role === "toolResult" &&
