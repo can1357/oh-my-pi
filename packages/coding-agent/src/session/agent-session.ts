@@ -8183,6 +8183,7 @@ export class AgentSession {
 		const previousSystemPrompt = this.agent.state.systemPrompt;
 		const previousBaseSystemPromptBeforeMemoryPromotion = this.#memory.promotionSnapshot;
 		const previousFreshProviderSessionId = this.#freshProviderSessionId;
+		const previousActiveRequestTarget = this.#activeRequestTarget;
 		const previousInheritedProviderPromptCacheKey = this.#inheritedProviderPromptCacheKey;
 
 		// Snapshot the full checkpoint runtime state: the success path calls
@@ -8211,6 +8212,11 @@ export class AgentSession {
 			this.#bash.markSessionTransition(bashTransition);
 			if (switchingToDifferentSession) {
 				this.#freshProviderSessionId = undefined;
+				// The fingerprint belongs to the endpoint the previous session was
+				// dispatched to. Two sessions on the same model can resolve to
+				// different session-sticky endpoints, so carrying it into the target
+				// rebuilds its history against a target that never served it.
+				this.#activeRequestTarget = undefined;
 				this.#clearInheritedProviderPromptCacheKey();
 				this.#adoptInheritedProviderPromptCacheKey();
 			}
@@ -8358,6 +8364,7 @@ export class AgentSession {
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
+			this.#activeRequestTarget = previousActiveRequestTarget;
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
 			this.#memory.rekeyForCurrentSessionId();
 			this.agent.setTools(previousTools);

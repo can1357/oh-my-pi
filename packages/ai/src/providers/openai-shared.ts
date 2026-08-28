@@ -2778,6 +2778,46 @@ export function resolveResponsesComputerScreenshot<TApi extends Api>(
 	return computerScreenshotFromContent(toolResult, model, supportsImageDetailOriginal);
 }
 
+/**
+ * Note text for a computer result whose screenshot did not survive conversion.
+ * The converted output already resolved every image against the target — a
+ * format the target cannot replay became an `[unsupported image: …]` marker —
+ * so the note has to be built from it rather than from the pre-conversion text,
+ * which claims an attachment that no longer exists.
+ */
+function responsesComputerResultNoteText(
+	output: string | ResponseInputContent[],
+	orphanOutput: { text: string; images: ResponseInputImage[] },
+): string {
+	if (typeof output !== "string") {
+		const texts = output
+			.filter((part): part is ResponseInputText => part.type === "input_text" && part.text.length > 0)
+			.map(part => part.text);
+		if (texts.length > 0) return texts.join("\n");
+	}
+	return orphanOutput.text;
+}
+
+/**
+ * Replace an already-emitted `computer_call` with the note used for targets
+ * that cannot replay a computer exchange. A result whose screenshot did not
+ * survive conversion has no `computer_call_output` to pair with, and leaving
+ * the call behind makes orphan repair rewrite it into an "interrupted before a
+ * screenshot was recorded" note that discards the recorded actions.
+ */
+function demoteResponsesComputerCall(messages: ResponseInput, callId: string): void {
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const item = messages[index];
+		if (item.type !== "computer_call" || responseInputCallId(item) !== callId) continue;
+		messages[index] = {
+			type: "message",
+			role: "assistant",
+			content: `[Computer call failed before a screenshot was recorded; call_id=${callId}]: ${stringifyJson(item) ?? ""}`,
+		} as ResponseInput[number];
+		return;
+	}
+}
+
 /** Appends one Responses tool result. */
 export function appendResponsesToolResultMessages<TApi extends Api>(
 	messages: ResponseInput,
@@ -2826,17 +2866,21 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		} as ResponseInput[number]);
 		return;
 	}
-	const { output, outputText } = knownCallIds.has(normalized.callId)
+	const { output } = knownCallIds.has(normalized.callId)
 		? encodeResponsesToolResultOutput(toolResult, model, supportsImageDetailOriginal)
 		: encodeResponsesOrphanToolResultOutput(toolResult, model, supportsImageDetailOriginal);
 	if (isComputerCall && toolResult.providerMetadata?.type !== "computer") {
+		const orphanOutput = splitResponsesOrphanOutput(output, model, supportsImageDetailOriginal);
+		const resultText = responsesComputerResultNoteText(output, orphanOutput);
 		const limit = 16_000;
-		const noteText = outputText.length > limit ? `${outputText.slice(0, limit)}\n...[truncated]` : outputText;
+		const noteText = resultText.length > limit ? `${resultText.slice(0, limit)}\n...[truncated]` : resultText;
+		demoteResponsesComputerCall(messages, normalized.callId);
 		messages.push({
 			type: "message",
 			role: "assistant",
 			content: `[Computer tool failed before a screenshot was produced; call_id=${normalized.callId}]: ${noteText}`,
 		} as ResponseInput[number]);
+		appendResponsesOrphanImages(messages, orphanOutput.images);
 		return;
 	}
 	if (strictResponsesPairing && !knownCallIds.has(normalized.callId)) {

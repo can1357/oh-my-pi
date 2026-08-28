@@ -49,6 +49,7 @@ import {
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	getOpenAIResponsesReferenceTarget,
+	isOpenAIResponsesAssistantFallbackTargetOwned,
 	isOpenAIResponsesAssistantHistoryTargetOwned,
 	normalizeSystemPrompts,
 	sanitizeOpenAIResponsesAssistantFallbackItemsForReplay,
@@ -4597,6 +4598,13 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 				assistantMsg.providerPayload,
 				referenceTarget,
 			);
+			// Legacy turns reach the fallback with no payload at all, so their
+			// canonical signatures are the only record of the endpoint that minted
+			// the reasoning item and message id it would re-emit.
+			const targetOwnedFallbackRejected = isOpenAIResponsesAssistantFallbackTargetOwned(
+				assistantMsg,
+				referenceTarget,
+			);
 			const historyItems = providerPayload?.items as Array<Record<string, unknown>> | undefined;
 			let suppressHiddenEmptyFallback = false;
 			if (historyItems) {
@@ -4628,7 +4636,7 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 				model,
 				msgIndex,
 				knownCallIds,
-				!suppressHiddenEmptyFallback && !targetOwnedHistoryRejected,
+				!suppressHiddenEmptyFallback && !targetOwnedFallbackRejected,
 				customCallIds,
 				false,
 				true,

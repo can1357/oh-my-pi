@@ -68,6 +68,25 @@ function stampedAssistant(referenceTarget?: string): AssistantMessage {
 	} as unknown as AssistantMessage;
 }
 
+function portableAssistant(): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text: "portable answer" }],
+		timestamp: 0,
+		provider: "openai-codex",
+		model: "gpt-5.5",
+		api: "openai-codex-responses",
+		usage: ZERO_USAGE,
+		stopReason: "stop",
+	} as unknown as AssistantMessage;
+}
+
+function assistantMessage(items: unknown[]): { id?: string; content?: unknown } | undefined {
+	return items.find(
+		item => (item as { type?: string }).type === "message" && (item as { role?: string }).role === "assistant",
+	) as { id?: string; content?: unknown } | undefined;
+}
+
 function contextFor(assistant: AssistantMessage): Context {
 	return { messages: [assistant, { role: "user", content: "continue", timestamp: 1 }] };
 }
@@ -102,18 +121,22 @@ describe("Codex endpoint reroute signature replay", () => {
 		});
 	});
 
-	it("keeps portable unstamped reasoning and message ids on the fallback path", () => {
+	it("strips endpoint-owned canonical signatures when no trusted stamp exists", () => {
 		const items = convertCodexResponsesMessages(ENDPOINT_B, contextFor(stampedAssistant()));
 
-		expect(items.find(item => (item as { type?: string }).type === "reasoning")).toMatchObject({
-			id: "rs_endpoint_a",
-			encrypted_content: "enc_endpoint_a",
-		});
-		const message = items.find(
-			item =>
-				(item as { type?: string; role?: string }).type === "message" &&
-				(item as { role?: string }).role === "assistant",
-		) as { id?: string } | undefined;
-		expect(message?.id).toBe("msg_endpoint_a");
+		expect(items.some(item => (item as { type?: string }).type === "reasoning")).toBe(false);
+		expect(JSON.stringify(items)).not.toContain("enc_endpoint_a");
+		expect(JSON.stringify(items)).not.toContain("rs_endpoint_a");
+		const message = assistantMessage(items);
+		expect(message?.id).toBeUndefined();
+		expect(JSON.stringify(message?.content)).toContain("answer");
+	});
+
+	it("keeps portable unstamped content on the fallback path", () => {
+		const items = convertCodexResponsesMessages(ENDPOINT_B, contextFor(portableAssistant()));
+
+		const message = assistantMessage(items);
+		expect(message?.id).toBeUndefined();
+		expect(JSON.stringify(message?.content)).toContain("portable answer");
 	});
 });

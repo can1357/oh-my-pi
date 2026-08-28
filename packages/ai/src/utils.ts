@@ -739,6 +739,83 @@ export function isOpenAIResponsesAssistantHistoryTargetOwned(
 	return openAIResponsesHistoryItemsAreEndpointOwned(providerPayload.items);
 }
 
+/**
+ * Whether a canonical `textSignature` names an output item minted by the
+ * endpoint that served the turn. Current producers encode the message id as a
+ * versioned JSON envelope; pre-envelope history stored the raw `msg_…` id.
+ */
+function responsesTextSignatureIsEndpointOwned(signature: unknown): boolean {
+	if (typeof signature !== "string" || signature.length === 0) return false;
+	if (signature.startsWith("{")) {
+		try {
+			const parsed = JSON.parse(signature) as { v?: unknown; id?: unknown };
+			return parsed?.v === 1 && typeof parsed.id === "string" && parsed.id.length > 0;
+		} catch {
+			return false;
+		}
+	}
+	return signature.startsWith("msg_");
+}
+
+/**
+ * Whether a canonical `thinkingSignature` carries a Responses reasoning item.
+ * The serializer replays the parsed item verbatim, so its reasoning id and
+ * encrypted content belong to the endpoint that minted them.
+ */
+function responsesReasoningSignatureIsEndpointOwned(signature: unknown): boolean {
+	if (typeof signature !== "string" || signature.length === 0) return false;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(signature);
+	} catch {
+		return false;
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+	return openAIResponsesHistoryItemsAreEndpointOwned([parsed]);
+}
+
+/**
+ * Whether an assistant turn's canonical replay signatures are endpoint-owned.
+ * The canonical fallback re-encodes those signatures into the same reasoning
+ * item and output-item id the native payload would have carried, so history
+ * that reaches it without a trusted target stamp is foreign whenever either
+ * signature is present.
+ */
+export function openAIResponsesAssistantContentIsEndpointOwned(content: unknown): boolean {
+	if (!Array.isArray(content)) return false;
+	for (const block of content) {
+		if (!block || typeof block !== "object") continue;
+		const record = block as Record<string, unknown>;
+		if (record.type === "thinking" && responsesReasoningSignatureIsEndpointOwned(record.thinkingSignature)) {
+			return true;
+		}
+		if (record.type === "text" && responsesTextSignatureIsEndpointOwned(record.textSignature)) return true;
+	}
+	return false;
+}
+
+/**
+ * Whether the canonical fallback for `assistant` would replay state owned by
+ * another endpoint. A stamped payload settles the question on its own; without
+ * one, the canonical signatures are the only record of who minted the reasoning
+ * item and output-item ids the fallback is about to re-emit.
+ */
+export function isOpenAIResponsesAssistantFallbackTargetOwned(
+	assistant: { providerPayload?: ProviderPayload; content: unknown },
+	currentReferenceTarget?: string,
+): boolean {
+	if (isOpenAIResponsesAssistantHistoryTargetOwned(assistant.providerPayload, currentReferenceTarget)) return true;
+	const providerPayload = assistant.providerPayload;
+	if (
+		providerPayload?.type === "openaiResponsesHistory" &&
+		Array.isArray(providerPayload.items) &&
+		providerPayload.referenceTarget !== undefined
+	) {
+		return false;
+	}
+	return openAIResponsesAssistantContentIsEndpointOwned(assistant.content);
+}
+
 export function getOpenAIResponsesHistoryItems(
 	providerPayload: ProviderPayload | undefined,
 	currentProvider: string,
