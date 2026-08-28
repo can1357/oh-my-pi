@@ -109,7 +109,11 @@ function Base.read(path::AbstractString, offset::Integer=1, limit::Union{Integer
         end
     end
     
-    preview = length(content) > 500 ? content[1:500] : content
+    # length() counts characters but Julia String indices are byte offsets,
+    # so a fixed byte cut (content[1:500]) can land mid-character on any
+    # multibyte content and throw StringIndexError. first() walks by
+    # character, so it never lands on an invalid boundary.
+    preview = length(content) > 500 ? String(first(content, 500)) : content
     Main.emit_frame(Dict(
         "type" => "display",
         "id" => Main.current_rid,

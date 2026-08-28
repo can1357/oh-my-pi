@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the Julia eval backend's `read()` crashing with `StringIndexError` on files with multibyte content near the 500-character preview mark; the status preview now walks by character instead of cutting at a fixed byte offset.
+
 ## [18.0.9] - 2026-08-28
 
 ### Breaking Changes

@@ -99,4 +99,38 @@ nothing
 		// Frames are still present alongside the message.
 		expect(error.output).toContain("top-level scope");
 	}, 60_000);
+
+	it("reads multibyte content past the 500-char preview boundary without crashing", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-julia-prelude-mb-");
+		const artifactsDir = path.join(tempDir.path(), "session-artifacts");
+		// Regression (#9954 review): read()'s status-preview line sliced with a
+		// fixed byte offset (content[1:500]) while length() counts characters.
+		// Julia String indices are byte positions, so any multibyte content
+		// landing near the 500-character mark threw StringIndexError before the
+		// read ever returned — independent of any chunking the caller does.
+		const content = `${"a".repeat(480)}日本語テストです${"b".repeat(400)}`;
+		const filePath = path.join(tempDir.path(), "multibyte.md");
+		await Bun.write(filePath, content);
+		const sessionId = `julia-prelude-mb:${crypto.randomUUID()}`;
+
+		const result = await executeJulia(
+			`
+text = read(${JSON.stringify(filePath)})
+println("LEN=", length(text))
+println("TAIL=", text[end-2:end])
+nothing
+`,
+			{
+				cwd: tempDir.path(),
+				artifactsDir,
+				sessionId,
+				kernelOwnerId: OWNER_ID,
+				reset: true,
+			},
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain(`LEN=${content.length}`);
+		expect(result.output).toContain("TAIL=bbb");
+	}, 60_000);
 });
