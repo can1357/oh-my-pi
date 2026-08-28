@@ -118,8 +118,137 @@ describe("auth-gateway conductor wiring", () => {
 					stream: false,
 				}),
 			});
+			expect(res.status).toBe(502);
+			expect(res.status).not.toBe(404);
+			expect(primary.calls.length).toBe(1);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("fails over stream:true when primary is unavailable before any output", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-conductor-wire-stream-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openrouter", "test-key");
+		const primary = createMockModel({
+			provider: "openrouter",
+			id: "primary-id",
+			handler: () => {
+				throw new Error("service unavailable");
+			},
+		});
+		const backup = createMockModel({
+			provider: "openrouter",
+			id: "backup-id",
+			handler: { content: ["ok"] },
+		});
+		const resolveModel = (id: string) => {
+			if (id === "primary-id") return primary.model;
+			if (id === "backup-id") return backup.model;
+			return undefined;
+		};
+		const registry = new RouteRegistry(resolveModel);
+		registry.register({
+			id: "virtual-impl",
+			root: {
+				type: "fallback",
+				on: ["provider_unavailable"],
+				children: [
+					{ type: "target", model: "primary-id" },
+					{ type: "target", model: "backup-id" },
+				],
+			},
+		});
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["t"],
+			storage,
+			resolveModel,
+			routeRegistry: registry,
+			version: "test",
+		});
+		try {
+			const res = await fetch(`${handle.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				body: JSON.stringify({
+					model: "virtual-impl",
+					messages: [{ role: "user", content: "hi" }],
+					stream: true,
+				}),
+			});
+			expect(res.status).toBe(200);
+			expect(backup.calls.length).toBe(1);
+			expect(primary.calls.length).toBe(1);
+			const text = await res.text();
+			expect(text).toContain("ok");
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not call backup after completeSimple usage then error (negative)", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-conductor-wire-usage-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openrouter", "test-key");
+		const primary = createMockModel({
+			provider: "openrouter",
+			id: "primary-id",
+			handler: {
+				content: ["partial"],
+				usage: { input: 10, output: 4 },
+				stopReason: "error",
+				errorMessage: "service unavailable",
+			},
+		});
+		const backup = createMockModel({
+			provider: "openrouter",
+			id: "backup-id",
+			handler: { content: ["ok"] },
+		});
+		const resolveModel = (id: string) => {
+			if (id === "primary-id") return primary.model;
+			if (id === "backup-id") return backup.model;
+			return undefined;
+		};
+		const registry = new RouteRegistry(resolveModel);
+		registry.register({
+			id: "virtual-impl",
+			root: {
+				type: "fallback",
+				on: ["provider_unavailable"],
+				children: [
+					{ type: "target", model: "primary-id" },
+					{ type: "target", model: "backup-id" },
+				],
+			},
+		});
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["t"],
+			storage,
+			resolveModel,
+			routeRegistry: registry,
+			version: "test",
+		});
+		try {
+			const res = await fetch(`${handle.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				body: JSON.stringify({
+					model: "virtual-impl",
+					messages: [{ role: "user", content: "hi" }],
+					stream: false,
+				}),
+			});
 			expect(res.status).not.toBe(200);
-			expect(res.status).toBe(404);
+			expect(backup.calls.length).toBe(0);
 			expect(primary.calls.length).toBe(1);
 		} finally {
 			await handle.close();
