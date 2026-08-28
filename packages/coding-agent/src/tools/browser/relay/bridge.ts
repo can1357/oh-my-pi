@@ -96,6 +96,26 @@ function mergeSubscriptionParams(
 	return { ...(previous ?? {}), ...(next ?? {}) };
 }
 
+function subscriptionParamsEqual(
+	left: Record<string, unknown> | undefined,
+	right: Record<string, unknown> | undefined,
+): boolean {
+	return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}
+
+function subscriptionEquals(
+	left: SessionRootSubscription | undefined,
+	right: SessionRootSubscription | undefined,
+): boolean {
+	if (!left || !right) return left === right;
+	return (
+		left.method === right.method &&
+		left.ownerSessionId === right.ownerSessionId &&
+		left.sequence === right.sequence &&
+		subscriptionParamsEqual(left.params, right.params)
+	);
+}
+
 interface TargetInfo {
 	targetId: string;
 	type: "tab" | "page" | "browser";
@@ -882,6 +902,19 @@ export class RelayBridge {
 					sequence: ++this.#subscriptionSeq,
 				});
 				return;
+			case "Emulation.setCPUThrottlingRate":
+				if (msg.params?.rate === 1) {
+					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
+					return;
+				}
+				if (!ownerIsCurrent) return;
+				this.#rememberSessionSubscription(tab, subscriptionKey(msg.method), ownerSessionId, {
+					method: msg.method,
+					params: msg.params,
+					ownerSessionId,
+					sequence: ++this.#subscriptionSeq,
+				});
+				return;
 			case "Emulation.setScriptExecutionDisabled":
 				if (msg.params?.value === false) {
 					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
@@ -1017,11 +1050,13 @@ export class RelayBridge {
 	#latestSubscriptionForKey(tab: TabState, key: string): SessionRootSubscription | undefined {
 		const owners = tab.subscriptions.get(key);
 		if (!owners) return undefined;
-		let latest: SessionRootSubscription | undefined;
-		for (const subscription of owners.values()) {
-			if (!latest || subscription.sequence > latest.sequence) latest = subscription;
-		}
-		return latest;
+		const ordered = [...owners.values()].sort((left, right) => left.sequence - right.sequence);
+		const latest = ordered.at(-1);
+		if (!latest) return undefined;
+		if (key !== "Emulation.setEmulatedMedia") return latest;
+		let params: Record<string, unknown> | undefined;
+		for (const subscription of ordered) params = mergeSubscriptionParams(key, params, subscription.params);
+		return { ...latest, params };
 	}
 
 	#isCurrentPreservedSubscription(
@@ -1030,7 +1065,7 @@ export class RelayBridge {
 		subscription: SessionRootSubscription,
 		conns: CdpConnection[],
 	): boolean {
-		if (this.#latestSubscriptionForKey(tab, key) !== subscription) return false;
+		if (!subscriptionEquals(this.#latestSubscriptionForKey(tab, key), subscription)) return false;
 		return conns.some(conn => this.#sessionOwnsTab(conn, tab.tabId, subscription.ownerSessionId));
 	}
 
@@ -1043,7 +1078,7 @@ export class RelayBridge {
 		for (const key of tab.subscriptions.keys()) {
 			const subscription = this.#latestSubscriptionForKey(tab, key);
 			if (!subscription) continue;
-			if (replayed.get(key) === subscription) continue;
+			if (subscriptionEquals(replayed.get(key), subscription)) continue;
 			if (!conns.some(conn => this.#sessionOwnsTab(conn, tab.tabId, subscription.ownerSessionId))) continue;
 			subscriptions.push({ key, subscription });
 		}
@@ -1154,6 +1189,11 @@ export class RelayBridge {
 				// disable RPC. When its preserved owner disappears after replay, reset
 				// the shared root back to the browser default timezone.
 				return { method: subscription.method, params: { timezoneId: "" } };
+			case "Emulation.setCPUThrottlingRate":
+				// CPU throttling is another persistent root setter without a paired
+				// disable RPC. When its preserved owner disappears after replay, reset
+				// the shared root back to the default no-throttle rate.
+				return { method: subscription.method, params: { rate: 1 } };
 			case "Emulation.setScriptExecutionDisabled":
 				return { method: subscription.method, params: { value: false } };
 			case "Emulation.setDeviceMetricsOverride":
