@@ -1,6 +1,7 @@
 import * as AIError from "../error";
 import type { GatewayErrorDisposition } from "../error/gateway";
 import type { Api, Model } from "../types";
+import type { AffinityLevel, StatePortability } from "./affinity";
 
 export type TargetNode = { type: "target"; model: string };
 
@@ -38,6 +39,8 @@ export type RouteNode = TargetNode | FallbackNode | BalanceNode | ConditionalNod
 export interface RouteDefinition {
 	id: string;
 	root: RouteNode;
+	affinity?: AffinityLevel;
+	portability?: StatePortability;
 }
 
 export interface CompiledRoute {
@@ -48,6 +51,8 @@ export interface CompiledRoute {
 	targets: readonly string[];
 	/** Next unused target ids for this disposition; empty if none. */
 	fallbacks: Readonly<Partial<Record<GatewayErrorDisposition, readonly string[]>>>;
+	affinity?: AffinityLevel;
+	portability?: StatePortability;
 }
 
 type ResolveModel = (modelId: string) => Model<Api> | undefined;
@@ -146,6 +151,8 @@ function compileDefinition(
 		root: copyNode(root),
 		targets: Object.freeze([...compiled.targets]),
 		fallbacks: freezeFallbacks(compiled.fallbacks),
+		...(definition.affinity !== undefined ? { affinity: definition.affinity } : {}),
+		...(definition.portability !== undefined ? { portability: { ...definition.portability } } : {}),
 	};
 }
 

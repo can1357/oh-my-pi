@@ -26,6 +26,9 @@
  *   POST /v1/grok/chat/completions         → OpenAI chat-completions (xAI alias)
  *   POST /v1/messages                      → Anthropic messages in/out
  *   POST /v1/messages/count_tokens         → Anthropic Messages count_tokens
+ *   POST /v1/realtime                      → 501 not available on this gateway
+ *   POST /v1/audio/speech                  → 501 not available on this gateway
+ *   POST /v1/images/generations            → OpenAI Images generations
  *   POST /v1/responses                     → OpenAI Responses in/out
  *   POST /backend-api/codex/responses      → OpenAI Responses (Codex alias)
  *   POST /backend-api/responses            → OpenAI Responses (Codex alias)
@@ -44,6 +47,7 @@ import { handleCountTokens } from "../providers/anthropic-count-tokens-server";
 import * as anthropicMessages from "../providers/anthropic-messages-server";
 import * as geminiV1beta from "../providers/gemini-v1beta-server";
 import * as openaiChat from "../providers/openai-chat-server";
+import { handleImageGeneration } from "../providers/openai-images-server";
 import * as openaiResponses from "../providers/openai-responses-server";
 import * as piNative from "../providers/pi-native-server";
 import { completeSimple, streamSimple } from "../stream";
@@ -51,7 +55,13 @@ import type { Api, AssistantMessage, AssistantMessageEventStream, Context, Model
 import type { ClientUsageIdentity } from "../usage";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { parseBind } from "../utils/parse-bind";
-import { type RouteDecisionTrace, RouteDecisionTraceLog, redactedDecisionSummary } from "./decision-trace";
+import { candidateAllowed } from "./affinity";
+import {
+	type RouteDecisionTrace,
+	RouteDecisionTraceLog,
+	type RouteSkipReason,
+	redactedDecisionSummary,
+} from "./decision-trace";
 import { type GatewayHooks, runHook } from "./hooks";
 import {
 	captureRequestHeaders,
@@ -61,8 +71,11 @@ import {
 	json,
 	resolveClientIdentity,
 	resolvePeer,
+	resolvePromptCacheKey,
 	withCors,
 } from "./http";
+import { PromptCacheAffinityStore } from "./prompt-cache-store";
+import { ProviderHealthBook } from "./provider-health";
 import { decideAttempt, type ExecutionState } from "./route-conductor";
 import { parseRouteDefinition } from "./route-definitions";
 import { type CompiledRoute, type RouteDefinition, RouteRegistry } from "./route-graph";
@@ -626,11 +639,59 @@ function releaseTurnOnStreamEnd(
 	});
 }
 
+function targetSkipReason(
+	compiled: CompiledRoute,
+	health: ProviderHealthBook,
+	targetId: string,
+	model: Model<Api>,
+): RouteSkipReason | undefined {
+	if (
+		compiled.portability !== undefined &&
+		!candidateAllowed(
+			compiled.portability,
+			{ id: targetId, provider: model.provider },
+			compiled.affinity ?? "preferred",
+		)
+	) {
+		return "state_incompatible";
+	}
+	if (health.state(model.provider, model.id) === "open") {
+		return "circuit_open";
+	}
+	return undefined;
+}
+
+function recordProviderHealthFailure(
+	health: ProviderHealthBook,
+	model: Model<Api>,
+	classified: GatewayErrorClassification,
+): void {
+	if (classified.owner === "provider") {
+		health.recordFailure(model.provider, model.id, "provider");
+	}
+}
+
+function rememberPromptCacheHit(
+	cacheStore: PromptCacheAffinityStore,
+	body: unknown,
+	requestId: string,
+	model: Model<Api>,
+	sessionId: string,
+): void {
+	cacheStore.remember(resolvePromptCacheKey(body) ?? requestId, {
+		provider: model.provider,
+		model: model.id,
+		accountId: sessionId,
+	});
+}
+
 async function handleFormatEndpoint(
 	route: { module: FormatModule; label: string },
 	bootOpts: AuthGatewayBootOptions,
 	req: Request,
 	peer: string,
+	health: ProviderHealthBook,
+	cacheStore: PromptCacheAffinityStore,
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
@@ -759,6 +820,7 @@ async function handleFormatEndpoint(
 
 	const considerFallback = (classified: GatewayErrorClassification): boolean => {
 		lastClassified = classified;
+		recordProviderHealthFailure(health, model, classified);
 		if (commitGate.state === "committed") return false;
 		const action = decideAttempt({
 			route: compiled,
@@ -790,7 +852,7 @@ async function handleFormatEndpoint(
 		return false;
 	};
 
-	const bindCurrentTarget = (targetId: string): Response | undefined => {
+	const bindCurrentTarget = (targetId: string): Response | undefined | "skipped" => {
 		currentTarget = targetId;
 		const resolved = bootOpts.resolveModel(currentTarget);
 		if (!resolved) {
@@ -799,22 +861,66 @@ async function handleFormatEndpoint(
 				: formatError(502, "upstream_error", "Upstream request failed");
 		}
 		model = resolved;
+		const skip = targetSkipReason(compiled, health, currentTarget, model);
+		if (skip !== undefined) {
+			attemptedTargets.add(currentTarget);
+			const skipped = traces.record({
+				requestId,
+				routeId: compiled.id,
+				generation: compiled.generation,
+				selectedTarget: currentTarget,
+				disposition: "skipped",
+				reason: skip,
+			});
+			logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
+			return "skipped";
+		}
 		attemptedTargets.add(currentTarget);
 		return undefined;
 	};
 
 	const pickTarget = (): Response | undefined => {
-		if (pendingFallback !== undefined) {
-			const targetId = pendingFallback;
-			pendingFallback = undefined;
-			return bindCurrentTarget(targetId);
+		for (;;) {
+			let targetId: string | undefined;
+			if (pendingFallback !== undefined) {
+				targetId = pendingFallback;
+				pendingFallback = undefined;
+			} else {
+				targetId = dispatchTargetId(compiled, stateNow(), commitGate.state);
+			}
+			if (targetId === undefined) {
+				if (lastClassified) return classifiedError(lastClassified);
+				if (attemptedTargets.size > 0) {
+					return formatError(502, "upstream_error", "Upstream request failed");
+				}
+				return unknownModelResponse(formatError, modelId);
+			}
+			const bound = bindCurrentTarget(targetId);
+			if (bound === "skipped") {
+				if (lastClassified) {
+					const action = decideAttempt({
+						route: compiled,
+						state: conductorExecutionState(
+							compiled,
+							attemptedTargets,
+							attemptedCredentials,
+							retryCount,
+							fallbackCount,
+							currentTarget,
+							siblingsExhausted,
+							"probing",
+						),
+						classification: lastClassified,
+						commitState: "probing",
+					});
+					if (action.type === "fallback_target") {
+						pendingFallback = action.targetModelId;
+					}
+				}
+				continue;
+			}
+			return bound;
 		}
-		const targetId = dispatchTargetId(compiled, stateNow(), commitGate.state);
-		if (targetId === undefined) {
-			if (lastClassified) return classifiedError(lastClassified);
-			return unknownModelResponse(formatError, modelId);
-		}
-		return bindCurrentTarget(targetId);
 	};
 
 	const resolveCredential = async (): Promise<AttemptPrep> => {
@@ -926,6 +1032,7 @@ async function handleFormatEndpoint(
 							return formatError(499, "request_aborted", errorMessage);
 						}
 						const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
+						recordProviderHealthFailure(health, model, classified);
 						if (messageHasBillableUsage(message)) {
 							return formatError(classified.status, classified.type, errorMessage);
 						}
@@ -936,6 +1043,7 @@ async function handleFormatEndpoint(
 						return formatError(classified.status, classified.type, errorMessage);
 					}
 					bootOpts.storage.settleQuotaProbeSuccess(requestId);
+					rememberPromptCacheHit(cacheStore, body, requestId, model, sessionId);
 					await runHook(bootOpts.hooks?.afterRequest, {
 						requestId,
 						routeId: compiled.id,
@@ -1035,6 +1143,7 @@ async function handleFormatEndpoint(
 					return formatError(499, "request_aborted", errorMessage);
 				}
 				const classified = classifyGatewayError(held.message.errorClassificationMessage ?? errorMessage);
+				recordProviderHealthFailure(health, model, classified);
 				bootOpts.storage.releaseTurnReservation(requestId);
 				return formatError(classified.status, classified.type, errorMessage);
 			}
@@ -1058,6 +1167,7 @@ async function handleFormatEndpoint(
 			return clientClosedResponse(route);
 		}
 		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId, commitGate);
+		rememberPromptCacheHit(cacheStore, body, requestId, model, sessionId);
 		await runHook(bootOpts.hooks?.afterRequest, {
 			requestId,
 			routeId: compiled.id,
@@ -1097,7 +1207,13 @@ async function handleFormatEndpoint(
  * `parseRequest`/`encodeResponse`/`encodeStream` differ from the format-endpoint
  * path.
  */
-async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, peer: string): Promise<Response> {
+async function handlePiNative(
+	bootOpts: AuthGatewayBootOptions,
+	req: Request,
+	peer: string,
+	health: ProviderHealthBook,
+	cacheStore: PromptCacheAffinityStore,
+): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
 	const controller = mirrorRequestAbort(req);
@@ -1174,6 +1290,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 
 	const considerFallback = (classified: GatewayErrorClassification): boolean => {
 		lastClassified = classified;
+		recordProviderHealthFailure(health, model, classified);
 		if (commitGate.state === "committed") return false;
 		const action = decideAttempt({
 			route: compiled,
@@ -1205,7 +1322,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		return false;
 	};
 
-	const bindCurrentTarget = (targetId: string): Response | undefined => {
+	const bindCurrentTarget = (targetId: string): Response | undefined | "skipped" => {
 		currentTarget = targetId;
 		const resolved = bootOpts.resolveModel(currentTarget);
 		if (!resolved) {
@@ -1214,22 +1331,66 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 				: formatError(502, "upstream_error", "Upstream request failed");
 		}
 		model = resolved;
+		const skip = targetSkipReason(compiled, health, currentTarget, model);
+		if (skip !== undefined) {
+			attemptedTargets.add(currentTarget);
+			const skipped = traces.record({
+				requestId,
+				routeId: compiled.id,
+				generation: compiled.generation,
+				selectedTarget: currentTarget,
+				disposition: "skipped",
+				reason: skip,
+			});
+			logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
+			return "skipped";
+		}
 		attemptedTargets.add(currentTarget);
 		return undefined;
 	};
 
 	const pickTarget = (): Response | undefined => {
-		if (pendingFallback !== undefined) {
-			const targetId = pendingFallback;
-			pendingFallback = undefined;
-			return bindCurrentTarget(targetId);
+		for (;;) {
+			let targetId: string | undefined;
+			if (pendingFallback !== undefined) {
+				targetId = pendingFallback;
+				pendingFallback = undefined;
+			} else {
+				targetId = dispatchTargetId(compiled, stateNow(), commitGate.state);
+			}
+			if (targetId === undefined) {
+				if (lastClassified) return classifiedError(lastClassified);
+				if (attemptedTargets.size > 0) {
+					return formatError(502, "upstream_error", "Upstream request failed");
+				}
+				return unknownModelResponse(formatError, parsed.modelId);
+			}
+			const bound = bindCurrentTarget(targetId);
+			if (bound === "skipped") {
+				if (lastClassified) {
+					const action = decideAttempt({
+						route: compiled,
+						state: conductorExecutionState(
+							compiled,
+							attemptedTargets,
+							attemptedCredentials,
+							retryCount,
+							fallbackCount,
+							currentTarget,
+							siblingsExhausted,
+							"probing",
+						),
+						classification: lastClassified,
+						commitState: "probing",
+					});
+					if (action.type === "fallback_target") {
+						pendingFallback = action.targetModelId;
+					}
+				}
+				continue;
+			}
+			return bound;
 		}
-		const targetId = dispatchTargetId(compiled, stateNow(), commitGate.state);
-		if (targetId === undefined) {
-			if (lastClassified) return classifiedError(lastClassified);
-			return unknownModelResponse(formatError, parsed.modelId);
-		}
-		return bindCurrentTarget(targetId);
 	};
 
 	const resolveCredential = async (): Promise<AttemptPrep> => {
@@ -1358,6 +1519,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 							return formatError(499, "request_aborted", errorMessage);
 						}
 						const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
+						recordProviderHealthFailure(health, model, classified);
 						if (messageHasBillableUsage(message)) {
 							return formatError(classified.status, classified.type, errorMessage);
 						}
@@ -1368,6 +1530,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 						return formatError(classified.status, classified.type, errorMessage);
 					}
 					bootOpts.storage.settleQuotaProbeSuccess(requestId);
+					rememberPromptCacheHit(cacheStore, body, requestId, model, sessionId);
 					return json(200, { message }, gatewayResponseHeaders(model, { requestId, message, startedAt }));
 				} catch (error) {
 					if (controller.signal.aborted) return aborted();
@@ -1454,6 +1617,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 					return formatError(499, "request_aborted", errorMessage);
 				}
 				const classified = classifyGatewayError(held.message.errorClassificationMessage ?? errorMessage);
+				recordProviderHealthFailure(health, model, classified);
 				bootOpts.storage.releaseTurnReservation(requestId);
 				return formatError(classified.status, classified.type, errorMessage);
 			}
@@ -1477,6 +1641,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 			return aborted();
 		}
 		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId, commitGate);
+		rememberPromptCacheHit(cacheStore, body, requestId, model, sessionId);
 		return new Response(sseStream, {
 			status: 200,
 			headers: {
@@ -1722,6 +1887,8 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 	const registry = opts.routeRegistry ?? new RouteRegistry(opts.resolveModel);
 	for (const def of opts.routes ?? []) registry.register(def);
 	const traces = opts.decisionTraces ?? new RouteDecisionTraceLog();
+	const health = new ProviderHealthBook();
+	const cacheStore = new PromptCacheAffinityStore();
 	const boot: AuthGatewayBootOptions = {
 		...opts,
 		routeRegistry: registry,
@@ -1781,16 +1948,22 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				if (req.method === "POST" && pathname === "/v1/messages/count_tokens") {
 					return withCors(await handleCountTokens(req, boot.resolveModel), req);
 				}
+				if (req.method === "POST" && (pathname === "/v1/realtime" || pathname === "/v1/audio/speech")) {
+					return withCors(json(501, { error: "not available on this gateway" }), req);
+				}
+				if (req.method === "POST" && pathname === "/v1/images/generations") {
+					return withCors(await handleImageGeneration(req), req);
+				}
 				// Provider-format dispatch.
 				const formatRoute = FORMAT_ROUTES[pathname];
 				if (formatRoute && req.method === "POST") {
-					return withCors(await handleFormatEndpoint(formatRoute, boot, req, peer), req);
+					return withCors(await handleFormatEndpoint(formatRoute, boot, req, peer, health, cacheStore), req);
 				}
 
 				// Pi-native fast path. Same auth + provider plumbing as the
 				// foreign-wire routes, just without the wire-format translation.
 				if (req.method === "POST" && pathname === "/v1/pi/stream") {
-					return withCors(await handlePiNative(boot, req, peer), req);
+					return withCors(await handlePiNative(boot, req, peer, health, cacheStore), req);
 				}
 
 				// Model catalog.

@@ -241,6 +241,74 @@ describe("parseRouteDefinitions", () => {
 			]),
 		).toThrow(/when/i);
 	});
+
+	it("parses optional affinity and portability objects", () => {
+		const parsed = parseRouteDefinitions([
+			{
+				id: "sticky",
+				affinity: "required",
+				portability: { scope: "provider", origin: "anthropic" },
+				root: { type: "target", model: "anthropic:claude" },
+			},
+		]);
+		expect(parsed).toEqual([
+			{
+				id: "sticky",
+				affinity: "required",
+				portability: { scope: "provider", origin: "anthropic" },
+				root: { type: "target", model: "anthropic:claude" },
+			},
+		]);
+	});
+
+	it("parses portability without origin", () => {
+		const parsed = parseRouteDefinitions([
+			{
+				id: "portable",
+				affinity: "preferred",
+				portability: { scope: "portable" },
+				root: { type: "target", model: "openai:gpt-4o" },
+			},
+		]);
+		expect(parsed[0]?.affinity).toBe("preferred");
+		expect(parsed[0]?.portability).toEqual({ scope: "portable" });
+	});
+
+	it("rejects an unknown affinity level (negative)", () => {
+		expect(() =>
+			parseRouteDefinitions([
+				{
+					id: "bad",
+					affinity: "sticky",
+					root: { type: "target", model: "openai:gpt-4o" },
+				},
+			]),
+		).toThrow(AIError.ValidationError);
+	});
+
+	it("rejects an unknown portability scope (negative)", () => {
+		expect(() =>
+			parseRouteDefinitions([
+				{
+					id: "bad",
+					portability: { scope: "region", origin: "us" },
+					root: { type: "target", model: "openai:gpt-4o" },
+				},
+			]),
+		).toThrow(AIError.ValidationError);
+	});
+
+	it("rejects a non-object portability value (negative)", () => {
+		expect(() =>
+			parseRouteDefinitions([
+				{
+					id: "bad",
+					portability: "provider",
+					root: { type: "target", model: "openai:gpt-4o" },
+				},
+			]),
+		).toThrow(AIError.ValidationError);
+	});
 });
 
 describe("loadRouteDefinitionsFile", () => {

@@ -18,3 +18,21 @@ export function compareDisposition(a: CandidateDisposition, b: CandidateDisposit
 export function isSelectable(d: CandidateDisposition): boolean {
 	return d !== "blocked";
 }
+
+/** Map route flags to a disposition. `blocked` wins, then `saturated`, then `preferred`. */
+export function dispositionFor(flags: {
+	blocked?: boolean;
+	saturated?: boolean;
+	preferred?: boolean;
+}): CandidateDisposition {
+	if (flags.blocked) {
+		return "blocked";
+	}
+	if (flags.saturated) {
+		return "deprioritized";
+	}
+	if (flags.preferred) {
+		return "preferred";
+	}
+	return "eligible";
+}

@@ -1,6 +1,7 @@
 import { isEnoent, isRecord } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { GatewayErrorDisposition } from "../error/gateway";
+import type { AffinityLevel, StatePortability, StatePortabilityScope } from "./affinity";
 import type { RouteDefinition, RouteNode } from "./route-graph";
 
 const GATEWAY_ERROR_DISPOSITIONS = {
@@ -22,6 +23,43 @@ function parseDisposition(value: unknown): GatewayErrorDisposition {
 		throw new AIError.ValidationError(`Unknown gateway error disposition: ${String(value)}`);
 	}
 	return value as GatewayErrorDisposition;
+}
+
+const AFFINITY_LEVELS = {
+	none: true,
+	preferred: true,
+	required: true,
+} as const satisfies Record<AffinityLevel, true>;
+
+const PORTABILITY_SCOPES = {
+	portable: true,
+	provider: true,
+	account: true,
+	deployment: true,
+} as const satisfies Record<StatePortabilityScope, true>;
+
+function parseAffinity(value: unknown): AffinityLevel {
+	if (typeof value !== "string" || !Object.hasOwn(AFFINITY_LEVELS, value)) {
+		throw new AIError.ValidationError(`Unknown affinity level: ${String(value)}`);
+	}
+	return value as AffinityLevel;
+}
+
+function parsePortability(value: unknown): StatePortability {
+	if (!isRecord(value)) {
+		throw new AIError.ValidationError("Portability must be an object");
+	}
+	if (typeof value.scope !== "string" || !Object.hasOwn(PORTABILITY_SCOPES, value.scope)) {
+		throw new AIError.ValidationError(`Unknown portability scope: ${String(value.scope)}`);
+	}
+	const portability: StatePortability = { scope: value.scope as StatePortabilityScope };
+	if ("origin" in value) {
+		if (typeof value.origin !== "string") {
+			throw new AIError.ValidationError("Portability origin must be a string");
+		}
+		portability.origin = value.origin;
+	}
+	return portability;
 }
 
 function parseNode(input: unknown): RouteNode {
@@ -103,7 +141,14 @@ export function parseRouteDefinition(input: unknown): RouteDefinition {
 	if (!("root" in input)) {
 		throw new AIError.ValidationError("Route definition missing root");
 	}
-	return { id: input.id, root: parseNode(input.root) };
+	const definition: RouteDefinition = { id: input.id, root: parseNode(input.root) };
+	if ("affinity" in input) {
+		definition.affinity = parseAffinity(input.affinity);
+	}
+	if ("portability" in input) {
+		definition.portability = parsePortability(input.portability);
+	}
+	return definition;
 }
 
 /**

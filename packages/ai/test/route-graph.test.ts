@@ -378,4 +378,48 @@ describe("RouteRegistry", () => {
 		expect(registry.get("ok")).toBeUndefined();
 		expect(registry.get("bad")).toBeUndefined();
 	});
+
+	it("copies optional affinity and portability onto the compiled route", () => {
+		const registry = new RouteRegistry(id => (id === "gpt-5" ? fakeModel("gpt-5") : undefined));
+		registry.register({
+			id: "sticky",
+			affinity: "required",
+			portability: { scope: "provider", origin: "openai" },
+			root: { type: "target", model: "gpt-5" },
+		});
+		const route = registry.get("sticky");
+		expect(route?.affinity).toBe("required");
+		expect(route?.portability).toEqual({ scope: "provider", origin: "openai" });
+		expect(route?.targets).toEqual(["gpt-5"]);
+	});
+
+	it("omits affinity and portability when the definition has neither (negative)", () => {
+		const registry = new RouteRegistry(id => (id === "gpt-5" ? fakeModel("gpt-5") : undefined));
+		registry.register({
+			id: "plain",
+			root: { type: "target", model: "gpt-5" },
+		});
+		const route = registry.get("plain");
+		expect(route?.affinity).toBeUndefined();
+		expect(route?.portability).toBeUndefined();
+		expect(route).toEqual({
+			generation: 2,
+			id: "plain",
+			root: { type: "target", model: "gpt-5" },
+			targets: ["gpt-5"],
+			fallbacks: {},
+		});
+	});
+
+	it("copies portability so later mutation of the definition does not leak (negative)", () => {
+		const registry = new RouteRegistry(id => (id === "gpt-5" ? fakeModel("gpt-5") : undefined));
+		const portability = { scope: "provider" as const, origin: "openai" };
+		registry.register({
+			id: "copied",
+			portability,
+			root: { type: "target", model: "gpt-5" },
+		});
+		portability.origin = "anthropic";
+		expect(registry.get("copied")?.portability).toEqual({ scope: "provider", origin: "openai" });
+	});
 });

@@ -58,6 +58,9 @@
 - Auth gateway `POST /v1/messages/count_tokens` estimates Anthropic input tokens.
 - Auth gateway `POST /backend-api/codex/responses` and `POST /backend-api/responses` alias Codex clients onto OpenAI Responses.
 - Auth gateway `POST /v1/grok/chat/completions` aliases xAI clients onto OpenAI chat completions.
+- Auth gateway `POST /v1/realtime` and `POST /v1/audio/speech` return 501 after auth.
+- Auth gateway skips targets whose provider health circuit is open.
+- Auth gateway remembers prompt-cache affinity after a successful non-error stream.
 
 ## [18.0.8] - 2026-08-27
 

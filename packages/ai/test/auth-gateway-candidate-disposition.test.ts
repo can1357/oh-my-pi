@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { compareDisposition, isSelectable } from "../src/auth-gateway/candidate-disposition";
+import { compareDisposition, dispositionFor, isSelectable } from "../src/auth-gateway/candidate-disposition";
 
 const ORDER = ["preferred", "eligible", "deprioritized", "last_resort", "blocked"] as const;
 
@@ -46,5 +46,39 @@ describe("isSelectable", () => {
 		expect(isSelectable("preferred")).toBe(true);
 		expect(isSelectable("eligible")).toBe(true);
 		expect(isSelectable("deprioritized")).toBe(true);
+	});
+});
+
+describe("dispositionFor", () => {
+	it("maps blocked to blocked", () => {
+		expect(dispositionFor({ blocked: true })).toBe("blocked");
+	});
+
+	it("maps saturated to deprioritized", () => {
+		expect(dispositionFor({ saturated: true })).toBe("deprioritized");
+	});
+
+	it("maps preferred to preferred", () => {
+		expect(dispositionFor({ preferred: true })).toBe("preferred");
+	});
+
+	it("maps empty flags to eligible", () => {
+		expect(dispositionFor({})).toBe("eligible");
+	});
+
+	it("blocked wins over preferred (negative)", () => {
+		expect(dispositionFor({ blocked: true, preferred: true })).toBe("blocked");
+	});
+
+	it("saturated wins over preferred", () => {
+		expect(dispositionFor({ saturated: true, preferred: true })).toBe("deprioritized");
+	});
+
+	it("blocked wins over saturated", () => {
+		expect(dispositionFor({ blocked: true, saturated: true })).toBe("blocked");
+	});
+
+	it("false flags do not trigger mapping", () => {
+		expect(dispositionFor({ blocked: false, saturated: false, preferred: false })).toBe("eligible");
 	});
 });
