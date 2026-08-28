@@ -560,14 +560,19 @@ export class AskDialogComponent implements Component, Focusable {
 				this.#requestRender();
 				return;
 			}
-			// Expand/collapse are control keys with no query-text meaning, so
-			// they keep acting on the focused filtered row instead of moving
-			// the query caret. The note key is printable, so it stays query
-			// text while the editor is open — closing the editor with the
-			// filter key above is the route to it.
+			// Expand/collapse are control keys with no query-text meaning,
+			// so they keep acting on the focused filtered row instead of
+			// moving the query caret — unless the binding collides with the
+			// shared editor cursor keys (the default left/right): while the
+			// editor is open the caret wins, and closing the editor with the
+			// filter key above is the route to the row action.
 			if (
-				getKeybindings().matches(keyData, "app.ask.expand") ||
-				getKeybindings().matches(keyData, "app.ask.collapse")
+				!(
+					getKeybindings().matches(keyData, "tui.editor.cursorLeft") ||
+					getKeybindings().matches(keyData, "tui.editor.cursorRight")
+				) &&
+				(getKeybindings().matches(keyData, "app.ask.expand") ||
+					getKeybindings().matches(keyData, "app.ask.collapse"))
 			) {
 				this.#handleQuestionInput(keyData);
 				return;
@@ -803,7 +808,13 @@ export class AskDialogComponent implements Component, Focusable {
 		const inputGuard = this.options.inputGuard;
 		if (inputGuard?.isBlocked()) {
 			const expand = this.#expandHint();
-			return `${inputGuard.hint}${expand ? ` · ${expand}` : ""} · ${cancel}`;
+			// Same bounded rendering as the other branches: an over-long
+			// guard hint drops the expand hint before it ever clips the
+			// trailing cancel affordance.
+			return truncateFooter(
+				[...(expand ? [inputGuard.hint, expand] : [inputGuard.hint]), cancel],
+				this.#footerWidth,
+			);
 		}
 		if (this.#isSubmitTab()) {
 			return truncateFooter(
@@ -869,7 +880,13 @@ export class AskDialogComponent implements Component, Focusable {
 		if (rows.length === 0) return;
 		if (prevFocusedKey !== undefined) {
 			const idx = rows.findIndex(r => r.key === prevFocusedKey);
-			if (idx >= 0) {
+			// `Other` is appended to every filtered result, so a prior
+			// `Other` focus survives any query change even when real
+			// matches return; preserving it would strand Enter on the
+			// custom-answer editor. Only an option row is a stable prior
+			// match — the fallback below already lands on the first option,
+			// or on `Other` when it is the only visible row.
+			if (idx >= 0 && rows[idx].kind === "option") {
 				state.cursorIndex = idx;
 				state.manualScroll = false;
 				return;

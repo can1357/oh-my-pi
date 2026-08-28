@@ -15,6 +15,8 @@ const SPACE = " ";
 const TAB = "\t";
 const SHIFT_TAB = "\x1b[Z";
 const RIGHT = "\x1b[C";
+const LEFT = "\x1b[D";
+const BACKSPACE = "\x7f";
 
 let darkTheme = await getThemeByName("dark");
 // setThemeInstance replaces process-wide theme state and disables
@@ -2132,23 +2134,23 @@ describe("AskDialogComponent", () => {
 			component.handleInput("/");
 			for (const ch of "match") component.handleInput(ch);
 			// The collapsed focused description hides lines behind a counted
-			// cue; expand must act on the focused filtered row instead of
-			// moving the query caret, with the filter bar still open.
+			// cue, with the filter bar open and the query intact.
 			const collapsed = stripVTControlCharacters(component.render(80).join("\n"));
 			expect(collapsed).toContain("/ match");
 			expect(collapsed).toContain("2 more");
 			expect(collapsed).not.toContain("DESC-LINE-4");
-			component.handleInput(RIGHT);
-			const expanded = stripVTControlCharacters(component.render(80).join("\n"));
-			expect(expanded).toContain("/ match");
-			expect(expanded).toContain("DESC-LINE-4");
 			// The filter key closes the editor but keeps the query and the
-			// filtered focus, so the advertised note shortcut is reachable
-			// without activating (Enter) or discarding (Escape) the filter.
+			// filtered focus: while the editor is open Right moves the query
+			// caret, so closing it first is the route to the row action.
 			component.handleInput("/");
 			const closed = stripVTControlCharacters(component.render(80).join("\n"));
 			expect(closed).not.toContain("/ match");
 			expect(closed).toContain("Alpha match");
+			component.handleInput(RIGHT);
+			const expanded = stripVTControlCharacters(component.render(80).join("\n"));
+			expect(expanded).toContain("DESC-LINE-4");
+			// The advertised note shortcut is reachable without activating
+			// (Enter) or discarding (Escape) the filter.
 			component.handleInput("n");
 			await Promise.resolve();
 			await Promise.resolve();
@@ -2318,6 +2320,123 @@ describe("AskDialogComponent", () => {
 			expect(onPrompt).not.toHaveBeenCalled();
 			expect(onSubmit).toHaveBeenCalledTimes(1);
 			expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Alpha zebra"]);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("arrow keys move the filter caret instead of expanding the focused row", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const component = new AskDialogComponent(
+				[
+					{
+						id: "q1",
+						question: "Pick?",
+						options: [
+							{
+								label: "Alpha match",
+								description: Array.from({ length: 5 }, (_, index) => `DESC-LINE-${index + 1}`).join("\n"),
+							},
+							{ label: "Bravo match" },
+							...Array.from({ length: 4 }, (_, index) => ({ label: `Filler ${index}` })),
+						],
+					},
+				],
+				{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+			);
+			component.focused = true;
+			component.handleInput("/");
+			for (const ch of "match") component.handleInput(ch);
+			// With the editor open, the default expand binding (Right) must
+			// reach the editor as cursor movement, not expand the focused row.
+			component.handleInput(RIGHT);
+			const afterRight = stripVTControlCharacters(component.render(80).join("\n"));
+			expect(afterRight).toContain("/ match");
+			expect(afterRight).not.toContain("DESC-LINE-4");
+			// Left then a typed character inserts mid-query, proving the
+			// caret moved rather than the key being swallowed.
+			component.handleInput(LEFT);
+			component.handleInput("X");
+			expect(stripVTControlCharacters(component.render(80).join("\n"))).toContain("/ matcX");
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("filter reanchor: a no-match query focuses Other, and clearing the query returns focus to the first option", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const onPrompt = vi.fn();
+			const onSubmit = vi.fn();
+			const component = new AskDialogComponent(
+				[
+					{
+						id: "q1",
+						question: "Pick?",
+						options: [
+							{ label: "Alpha one" },
+							{ label: "Bravo two" },
+							{ label: "Charlie three" },
+							...Array.from({ length: 18 }, (_, index) => ({ label: `Filler ${index}` })),
+						],
+					},
+				],
+				{ onSubmit, onCancel: vi.fn(), onPrompt },
+			);
+			component.focused = true;
+			component.handleInput("/");
+			for (const ch of "zzz") component.handleInput(ch);
+			// No option matches, so the sole visible row is Other and it takes
+			// focus. Backspacing the query away must hand focus back to the
+			// first option — Other is always appended, so preserving it would
+			// strand Enter on the custom-answer editor.
+			for (let i = 0; i < 3; i++) component.handleInput(BACKSPACE);
+			component.handleInput(ENTER);
+			expect(onPrompt).not.toHaveBeenCalled();
+			expect(onSubmit).toHaveBeenCalledTimes(1);
+			expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Alpha one"]);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("keeps the cancel affordance in the guarded footer at narrow widths", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const component = new AskDialogComponent(
+				[
+					{
+						id: "q1",
+						question: `${"This is a very long question ".repeat(12)}?`,
+						options: [{ label: "Alpha" }],
+					},
+				],
+				{
+					onSubmit: vi.fn(),
+					onCancel: vi.fn(),
+					onPrompt: vi.fn(),
+				},
+				{
+					inputGuard: {
+						isBlocked: () => true,
+						handleInput: () => {},
+						hint: "Finish or clear the draft to continue",
+					},
+				},
+			);
+			component.focused = true;
+			// 80 columns minus the dialog chrome leaves 76 inner columns; the
+			// guard hint plus the expand hint exceeds that, and cancel is the
+			// affordance that must survive the truncation.
+			const frame = stripVTControlCharacters(component.render(80).join("\n"));
+			expect(frame).toContain("cancel");
 		} finally {
 			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
 			else Reflect.deleteProperty(process.stdout, "rows");
