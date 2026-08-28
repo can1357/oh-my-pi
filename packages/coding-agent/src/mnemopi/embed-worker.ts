@@ -19,7 +19,7 @@ import {
 import type { MnemopiEmbedModelId, MnemopiEmbedTransport, MnemopiEmbedWorkerInbound } from "./embed-protocol";
 
 /** Local embedding backend: ONNX fastembed (default) or ggml (llama.cpp GPU). */
-function selectedInitializer(): LocalModelInitializer {
+export function selectedInitializer(): LocalModelInitializer {
 	return embeddingBackend() === "ggml" ? ggmlLocalModelInitializer : defaultLocalModelInitializer;
 }
 
