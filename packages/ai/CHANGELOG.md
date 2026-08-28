@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Command Code API-key login with authenticated Provider API model validation and mixed-wire request routing ([#9564](https://github.com/can1357/oh-my-pi/pull/9564) by [@himomohi](https://github.com/himomohi)).
 ## [18.0.9] - 2026-08-28
 
 ### Fixed

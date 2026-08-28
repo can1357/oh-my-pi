@@ -6,6 +6,7 @@ export interface ModelCacheProviderIdOptions {
 }
 
 const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = {
+	"command-code": true,
 	"opencode-go": true,
 	"opencode-zen": true,
 	"github-copilot": true,
@@ -18,6 +19,8 @@ export function isCredentialScopedModelCacheProvider(providerId: string): boolea
 
 export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | undefined {
 	switch (providerId) {
+		case "command-code":
+			return "https://api.commandcode.ai/provider/v1";
 		case "ollama":
 			return "http://127.0.0.1:11434";
 		case "litellm":
@@ -51,6 +54,13 @@ export function resolveOllamaModelCacheProviderId(providerId: string, baseUrl?: 
 /** Resolve the cache namespace used by a provider's model-manager options without constructing those options. */
 export function resolveModelCacheProviderId(providerId: string, options: ModelCacheProviderIdOptions = {}): string {
 	switch (providerId) {
+		case "command-code": {
+			const configuredBaseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
+			const trimmedBaseUrl = configuredBaseUrl.trim().replace(/\/+$/, "");
+			const discoveryBaseUrl = trimmedBaseUrl.endsWith("/v1") ? trimmedBaseUrl : `${trimmedBaseUrl}/v1`;
+			const scope = `${options.apiKey ?? ""}\u0000${discoveryBaseUrl}`;
+			return `command-code:models-v1:${Bun.hash(scope).toString(36)}`;
+		}
 		case "ollama":
 			return resolveOllamaModelCacheProviderId(providerId, options.baseUrl);
 		case "cursor":
