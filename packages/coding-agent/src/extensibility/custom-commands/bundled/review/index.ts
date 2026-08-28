@@ -541,7 +541,17 @@ export class ReviewCommand implements CustomCommand {
 				const currentBranch = await getCurrentBranch(this.api);
 				let diffText: string;
 				try {
-					diffText = await vcs.requireGit(this.api.cwd).diffText({ base: `${baseBranch}...${currentBranch}` });
+					const repository = vcs.requireGit(this.api.cwd);
+					// PR-style review compares the merge base against the current
+					// branch (`base...head`), so base-only commits are excluded.
+					const mergeBase = await repository.mergeBase(baseBranch, currentBranch);
+					if (!mergeBase) {
+						// No common ancestor: `git diff base...head` aborts here
+						// rather than comparing unrelated trees tip-to-tip.
+						ctx.ui.notify(`No common history between ${baseBranch} and ${currentBranch}`, "error");
+						return undefined;
+					}
+					diffText = await repository.diffText({ base: mergeBase, head: currentBranch });
 				} catch (err) {
 					ctx.ui.notify(`Failed to get diff: ${err instanceof Error ? err.message : String(err)}`, "error");
 					return undefined;

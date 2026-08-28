@@ -254,7 +254,7 @@ describe("AgentSession advisor toggle", () => {
 			expect(customSession.getAdvisorAgent()?.state.model.id).toBe(replacementModel.id);
 		} finally {
 			await customSession.dispose();
-			AgentStorage.resetInstance();
+			AgentStorage.close();
 		}
 	});
 

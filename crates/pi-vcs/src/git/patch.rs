@@ -20,7 +20,7 @@ use gix::{
 	refs::transaction::PreviousValue,
 };
 
-use super::GitRepo;
+use super::{GitRepo, mutate::update_reference};
 use crate::{
 	error::{Error, Result},
 	types::{ApplyOptions, DiffOptions, HunkSelection, HunkSelectionError, HunkSpec},
@@ -1140,14 +1140,15 @@ fn drop_stash(
 			.delete()
 			.map_err(|err| Error::backend("git stash drop", err));
 	}
-	gix_repo
-		.reference(
-			"refs/stash",
-			previous,
-			PreviousValue::MustExistAndMatch(gix::refs::Target::Object(stash_id)),
-			"stash: drop",
-		)
-		.map_err(|err| Error::backend("git stash drop", err))?;
+	update_reference(
+		gix_repo,
+		"git stash drop",
+		"refs/stash",
+		previous,
+		PreviousValue::MustExistAndMatch(gix::refs::Target::Object(stash_id)),
+		"stash: drop",
+		false,
+	)?;
 	let log_path = repo.info().common_dir.join("logs/refs/stash");
 	fs::write(log_path, prior_log)?;
 	Ok(())
@@ -1159,24 +1160,15 @@ fn update_stash_ref(
 	message: String,
 	force_create_reflog: bool,
 ) -> Result<()> {
-	let name = gix::refs::FullName::try_from("refs/stash")
-		.map_err(|err| Error::backend("git stash ref name", err))?;
-	repo
-		.edit_reference(gix::refs::transaction::RefEdit {
-			change: gix::refs::transaction::Change::Update {
-				log: gix::refs::transaction::LogChange {
-					mode: gix::refs::transaction::RefLog::AndReference,
-					force_create_reflog,
-					message: message.into(),
-				},
-				expected,
-				new: gix::refs::Target::Object(id),
-			},
-			name,
-			deref: false,
-		})
-		.map_err(|err| Error::backend("git stash ref", err))?;
-	Ok(())
+	update_reference(
+		repo,
+		"git stash ref",
+		"refs/stash",
+		id,
+		expected,
+		&message,
+		force_create_reflog,
+	)
 }
 
 fn previous_stash_from_log(log: &[u8]) -> Option<(gix::ObjectId, &[u8])> {

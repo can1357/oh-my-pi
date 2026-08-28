@@ -103,6 +103,57 @@ function retryableAssistantTurnEnd(messages: readonly AgentMessage[]): number | 
 	if (message.stopReason !== "error" && message.stopReason !== "aborted") return undefined;
 	return turnEnd;
 }
+/** Whether `messages` ends in a failed/aborted turn whose most recent activity was a tool call. */
+function abortedToolCallTail(messages: readonly AgentMessage[]): boolean {
+	const turnEnd = retryableAssistantTurnEnd(messages);
+	if (turnEnd === undefined) return false;
+	// Synthetic tool results only ever trail a turn that emitted tool calls.
+	if (turnEnd < messages.length) return true;
+	const beforeTurn = messages[turnEnd - 2];
+	return beforeTurn?.role === "toolResult" && beforeTurn.isError === true;
+}
+/**
+ * Index of the first trailing failed tool result to strip for a tool replay,
+ * or undefined when the tail does not qualify.
+ *
+ * Qualifies when the transcript ends in a fully failed/aborted tool batch
+ * whose anchor assistant turn completed with runnable arguments
+ * (`toolUse`/`stop`) — optionally followed by an aborted boundary with no tool
+ * calls of its own (a live Esc; a restored session has already dropped it).
+ * Stripping from the returned index leaves that assistant as the transcript
+ * tail, which `Agent.continue()` resumes by re-executing the calls. A
+ * partially successful batch never qualifies: re-running a completed call
+ * would repeat its side effects. Synthetic placeholder tails never qualify
+ * either — their anchor is the aborted turn itself and its arguments may be
+ * truncated, so those are re-generated via a fresh model call instead.
+ */
+function toolReplayStart(messages: readonly AgentMessage[]): number | undefined {
+	let end = messages.length;
+	const tail = messages[end - 1];
+	if (tail?.role === "assistant") {
+		if (tail.stopReason !== "aborted" && tail.stopReason !== "error") return undefined;
+		if (tail.content.some(block => block.type === "toolCall")) return undefined;
+		end -= 1;
+	}
+	let start = end;
+	while (start > 0 && messages[start - 1].role === "toolResult") start--;
+	if (start === end) return undefined;
+	const anchor = messages[start - 1];
+	if (anchor?.role !== "assistant") return undefined;
+	if (anchor.stopReason !== "toolUse" && anchor.stopReason !== "stop") return undefined;
+	const callIds = new Set<string>();
+	for (const block of anchor.content) {
+		if (block.type === "toolCall") callIds.add(block.id);
+	}
+	if (end - start !== callIds.size) return undefined;
+	for (let i = start; i < end; i++) {
+		const result = messages[i];
+		if (result.role !== "toolResult" || result.isError !== true || !callIds.has(result.toolCallId)) {
+			return undefined;
+		}
+	}
+	return start;
+}
 
 /** Result shape shared with automatic maintenance recovery. */
 export interface RecoveryCompactionResult {
@@ -2375,6 +2426,25 @@ export class TurnRecovery {
 		this.#host.settings.set("retry.enabled", enabled);
 	}
 	/**
+	 * Whether the transcript tail is a failed/aborted assistant turn whose most
+	 * recent activity was a tool call: synthetic placeholder results trail the
+	 * failed turn (stream died mid-tool-call), or the message right before the
+	 * aborted boundary is an errored/aborted tool result (Esc landed during
+	 * tool execution). Drives the TUI's idle "F5 to Retry" status row;
+	 * {@link retry} is the matching action.
+	 */
+	get hasAbortedToolCallTail(): boolean {
+		const active = this.#host.agent.state.messages;
+		if (abortedToolCallTail(active)) return true;
+		// A trailing assistant message is authoritative for a live session: a
+		// settled successful turn leaves nothing to retry.
+		if (active.at(-1)?.role === "assistant") return false;
+		// A restored session omits the failed turn (and its synthetic results)
+		// from provider context, so — mirroring retry() — the persisted display
+		// transcript decides whether a retryable tool-call tail exists.
+		return abortedToolCallTail(this.#host.sessionManager.buildSessionContext({ transcript: true }).messages);
+	}
+	/**
 	 * Manually retry the last failed assistant turn.
 	 * Removes the error message from active agent state when present and
 	 * re-attempts with a fresh retry budget.
@@ -2392,6 +2462,13 @@ export class TurnRecovery {
 	 * context. In that case, the persisted display transcript remains the source
 	 * of truth for whether the current branch has a retryable failed tail.
 	 *
+	 * When the failure is a fully failed/aborted tool batch with complete
+	 * arguments (see {@link toolReplayStart}), the retry strips the failed
+	 * results (and the aborted boundary) instead of the whole turn, leaving the
+	 * tool-calling assistant as the tail — the continuation then re-executes
+	 * the same tool calls directly rather than paying a model call to re-issue
+	 * them.
+	 *
 	 * @returns true if retry was initiated, false if no failed turn to retry or agent is busy
 	 */
 	async retry(): Promise<boolean> {
@@ -2400,15 +2477,24 @@ export class TurnRecovery {
 		const messages = this.#host.agent.state.messages;
 		const activeTurnEnd = retryableAssistantTurnEnd(messages);
 		if (activeTurnEnd !== undefined) {
-			// Remove the failed/aborted assistant message plus its synthetic tool
-			// results (same as auto-retry does before re-attempting).
-			this.#host.agent.replaceMessages(messages.slice(0, activeTurnEnd - 1));
+			const replayStart = toolReplayStart(messages);
+			if (replayStart !== undefined) {
+				await this.#stripForToolReplay(messages, replayStart);
+			} else {
+				// Remove the failed/aborted assistant message plus its synthetic tool
+				// results (same as auto-retry does before re-attempting).
+				this.#host.agent.replaceMessages(messages.slice(0, activeTurnEnd - 1));
+			}
 		} else {
 			// A restored session already dropped the failed assistant turn (and its
 			// paired synthetic tool results) from provider context, so the persisted
 			// display transcript is the source of truth for a retryable failed tail.
 			const transcriptMessages = this.#host.sessionManager.buildSessionContext({ transcript: true }).messages;
 			if (retryableAssistantTurnEnd(transcriptMessages) === undefined) return false;
+			// The boundary is already gone from active context; when the intact
+			// failed batch is still the tail, replay the tools directly.
+			const replayStart = toolReplayStart(messages);
+			if (replayStart !== undefined) await this.#stripForToolReplay(messages, replayStart);
 		}
 
 		// Reset retry budget for a fresh attempt
@@ -2418,5 +2504,48 @@ export class TurnRecovery {
 		this.#host.scheduleAgentContinue({ source: "manual-retry", delayMs: 1 });
 
 		return true;
+	}
+	/**
+	 * Strip the failed tool batch (and any aborted boundary) for a tool replay:
+	 * reparent the persisted leaf onto the anchor assistant entry — so the
+	 * dropped results cannot resurface on reload or pair duplicate toolCallIds
+	 * on replay — then cut the active context to the same point.
+	 */
+	async #stripForToolReplay(messages: readonly AgentMessage[], replayStart: number): Promise<void> {
+		const tail = messages[messages.length - 1];
+		if (tail?.role === "assistant") {
+			try {
+				await this.#host.waitForSessionMessagePersistence(tail);
+			} catch (err) {
+				logger.debug("Tool replay: boundary persistence wait failed", {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
+		}
+		const anchor = messages[replayStart - 1] as AssistantMessage;
+		const branch = this.#host.sessionManager.getBranch();
+		const persistedEntryId = this.#host.persistedAssistantEntryId(anchor);
+		const anchorEntry =
+			(persistedEntryId === undefined
+				? undefined
+				: branch.find(
+						entry =>
+							entry.id === persistedEntryId && entry.type === "message" && entry.message.role === "assistant",
+					)) ??
+			branch
+				.slice()
+				.reverse()
+				.find(
+					entry =>
+						entry.type === "message" &&
+						entry.message.role === "assistant" &&
+						this.#isSameAssistantMessage(entry.message as AssistantMessage, anchor),
+				);
+		if (anchorEntry) {
+			this.#host.withBashBranchTransition(() => {
+				this.#host.sessionManager.branch(anchorEntry.id);
+			});
+		}
+		this.#host.agent.replaceMessages(messages.slice(0, replayStart));
 	}
 }

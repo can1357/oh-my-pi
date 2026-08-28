@@ -167,8 +167,10 @@ describe("FTS visibility predicate stays index-driven", () => {
 		);
 		expect(workingPlan).not.toContain("LIST SUBQUERY");
 		expect(workingPlan).not.toContain("SCAN working_memory");
-		expect(workingPlan).toContain("CORRELATED SCALAR SUBQUERY");
-		expect(workingPlan).toContain("SEARCH w");
+		// SQLite <= 3.51 plans the EXISTS as a correlated scalar subquery;
+		// 3.52+ flattens it into a join step ("SEARCH w EXISTS"). Both are
+		// per-candidate index probes, which is the contract.
+		expect(workingPlan).toMatch(/SEARCH w (EXISTS )?USING INDEX sqlite_autoindex_working_memory_1/);
 
 		const episodicPlan = plan(
 			db,
@@ -179,7 +181,7 @@ describe("FTS visibility predicate stays index-driven", () => {
 		);
 		expect(episodicPlan).not.toContain("LIST SUBQUERY");
 		expect(episodicPlan).not.toContain("SCAN episodic_memory");
-		expect(episodicPlan).toContain("CORRELATED SCALAR SUBQUERY");
+		expect(episodicPlan).toMatch(/SEARCH e (EXISTS )?USING INTEGER PRIMARY KEY/);
 
 		// Control: the rejected IN form really does produce what we are guarding against, so this
 		// test cannot pass vacuously if EXPLAIN output ever changes shape.

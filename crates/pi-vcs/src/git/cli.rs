@@ -34,7 +34,7 @@ pub const SYNC_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum captured bytes per stream before truncation.
 pub const OUTPUT_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
-const TERMINATE_GRACE: Duration = Duration::from_millis(5_000);
+const TERMINATE_GRACE: Duration = Duration::from_secs(5);
 const TRUNCATION_MARKER: &str = "\n[git subprocess output truncated after 8 MiB]\n";
 
 /// Captured result of a completed git invocation.
