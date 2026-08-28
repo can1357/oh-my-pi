@@ -616,7 +616,7 @@ describe("Zed Provider Payload Construction", () => {
 		expect(payload.system).toBe("You are an assistant.");
 		expect(payload.max_tokens).toBe(128000);
 		expect(payload.thinking).toEqual({ type: "adaptive" });
-		expect(payload.output_config).toEqual({ effort: "high" });
+		expect(payload.output_config).toEqual({ effort: "high", include: ["summary"] });
 
 		const messages = payload.messages as Array<{ role: string; content: string }>;
 		expect(messages).toBeArray();
@@ -759,6 +759,7 @@ describe("Zed Provider Payload Construction", () => {
 		const sampling = {
 			temperature: 0.25,
 			topP: 0.75,
+			topK: 32,
 			stopSequences: ["<END>", "<STOP>", "<DONE>", "<HALT>", "<EXTRA>"],
 		};
 		const disabledThinking = buildZedProviderRequest(
@@ -771,6 +772,7 @@ describe("Zed Provider Payload Construction", () => {
 		expect(disabledThinking).toMatchObject({
 			temperature: 0.25,
 			top_p: 0.75,
+			top_k: 32,
 			stop_sequences: ["<END>", "<STOP>", "<DONE>", "<HALT>"],
 		});
 		expect(disabledThinking.thinking).toBeUndefined();
@@ -784,6 +786,7 @@ describe("Zed Provider Payload Construction", () => {
 
 		expect(enabledThinking.temperature).toBeUndefined();
 		expect(enabledThinking.top_p).toBeUndefined();
+		expect(enabledThinking.top_k).toBeUndefined();
 		expect(enabledThinking.stop_sequences).toEqual(["<END>", "<STOP>", "<DONE>", "<HALT>"]);
 
 		const restrictedDisabledThinking = buildZedProviderRequest(
@@ -795,6 +798,7 @@ describe("Zed Provider Payload Construction", () => {
 
 		expect(restrictedDisabledThinking.temperature).toBeUndefined();
 		expect(restrictedDisabledThinking.top_p).toBeUndefined();
+		expect(restrictedDisabledThinking.top_k).toBeUndefined();
 		expect(restrictedDisabledThinking.stop_sequences).toEqual(["<END>", "<STOP>", "<DONE>", "<HALT>"]);
 	});
 	it("pins adaptive Claude effort to low when reasoning is disabled", () => {

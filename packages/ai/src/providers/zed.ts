@@ -295,6 +295,7 @@ function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, opti
 			};
 			body.output_config = {
 				effort: options?.reasoning ?? "medium",
+				include: ["summary"],
 			};
 		}
 	} else if (model.reasoning && options?.disableReasoning) {
@@ -315,6 +316,9 @@ function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, opti
 		}
 		if (options?.topP !== undefined) {
 			body.top_p = options.topP;
+		}
+		if (options?.topK !== undefined) {
+			body.top_k = options.topK;
 		}
 	}
 
