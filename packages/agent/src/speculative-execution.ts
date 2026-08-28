@@ -199,6 +199,26 @@ export function createExecutionFingerprint(
 	return canonicalJson({ name: toolCall.name, args: executionArgs, effect });
 }
 
+async function candidateMatchesFingerprint(
+	candidate: SpeculativeToolCandidate,
+	toolCall: AgentToolCall,
+	args: Readonly<Record<string, unknown>>,
+): Promise<boolean> {
+	let assessment: ToolSpeculationAssessment;
+	try {
+		assessment = await candidate.policy.assess({ toolCall, args });
+	} catch {
+		return false;
+	}
+	const effect = assessment.eligible ? normalizeSpeculationEffect(assessment.effect) : undefined;
+	if (!effect) return false;
+	try {
+		return createExecutionFingerprint(toolCall, args, effect) === candidate.fingerprint;
+	} catch {
+		return false;
+	}
+}
+
 /** Rejects malformed or ambiguous effects and returns a frozen logical identity. */
 export function normalizeSpeculationEffect(effect: unknown): ToolSpeculationEffect | undefined {
 	if (!isPlainRecord(effect) || typeof effect.kind !== "string") return undefined;
@@ -539,7 +559,15 @@ export class SpeculativeOperationCoordinator {
 		for (const candidate of this.#candidates.values()) {
 			if (candidate.source !== "direct") continue;
 			const finalCall = calls.get(candidate.candidateId);
-			if (!finalCall || finalCall.name !== candidate.toolCall.name) {
+			if (
+				!finalCall ||
+				finalCall.name !== candidate.toolCall.name ||
+				!(await candidateMatchesFingerprint(
+					candidate,
+					finalCall,
+					finalCall.arguments as Readonly<Record<string, unknown>>,
+				))
+			) {
 				await this.#discardCandidate(candidate, "fingerprint_mismatch", "final tool call changed");
 			}
 		}
@@ -556,20 +584,8 @@ export class SpeculativeOperationCoordinator {
 	): Promise<SpeculativeRawOutcome | undefined> {
 		if (candidate.claimed || candidate.state === "discarded") return undefined;
 		candidate.dispatchReachedAt = Date.now();
-		let assessment: ToolSpeculationAssessment;
-		try {
-			assessment = await candidate.policy.assess({ toolCall, args });
-		} catch {
-			assessment = { eligible: false, reason: "final speculation assessment failed" };
-		}
-		const effect = assessment.eligible ? normalizeSpeculationEffect(assessment.effect) : undefined;
-		let fingerprint: string | undefined;
-		try {
-			if (effect) fingerprint = createExecutionFingerprint(toolCall, args, effect);
-		} catch {
-			fingerprint = undefined;
-		}
-		if (candidate.tool !== tool || !effect || fingerprint !== candidate.fingerprint) {
+		const fingerprintMatches = await candidateMatchesFingerprint(candidate, toolCall, args);
+		if (candidate.tool !== tool || !fingerprintMatches) {
 			await this.#discardCandidate(candidate, "fingerprint_mismatch", "final speculation fingerprint changed");
 			return undefined;
 		}

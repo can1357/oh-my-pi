@@ -17,6 +17,7 @@ import {
 	openSpeculativePalTransaction,
 	parseIsolationMode,
 	SPECULATIVE_PAL_MAX_TARGET_BYTES,
+	SpeculativePalCommitConflictError,
 	SpeculativePalTargetTooLargeError,
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
 import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
@@ -103,6 +104,26 @@ describe("worktree isolation helpers", () => {
 		} finally {
 			await transaction.close();
 		}
+	});
+
+	it("rejects rollback snapshots whose bytes changed during capture", async () => {
+		const repo = await createGitRepo();
+		const source = path.join(repo, "note.txt");
+		await fs.writeFile(source, "before\n");
+		const readFile = fs.readFile;
+		let changed = false;
+		vi.spyOn(fs, "readFile").mockImplementation((async target => {
+			const content = await readFile(target);
+			if (!changed && target === source) {
+				changed = true;
+				await fs.writeFile(source, "intervening content\n");
+			}
+			return content;
+		}) as typeof fs.readFile);
+
+		await expect(openSpeculativePalTransaction(repo, "racing-snapshot", [source])).rejects.toBeInstanceOf(
+			SpeculativePalCommitConflictError,
+		);
 	});
 
 	it("refuses an unbounded speculative PAL rollback snapshot", async () => {

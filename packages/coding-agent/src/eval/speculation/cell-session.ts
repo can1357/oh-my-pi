@@ -336,11 +336,12 @@ export class EvalShadowCellSession implements ToolSpeculationStreamSession {
 				fingerprint: fingerprint(runtimeArgs),
 				occurrence: operation.call.occurrence,
 			};
+			const candidateId = `${this.#options.parentToolCallId}:${operation.call.id}`;
 			const handle = await this.#options.coordinator.admit({
-				candidateId: `${this.#options.parentToolCallId}:${operation.call.id}`,
+				candidateId,
 				parentToolCallId: this.#options.parentToolCallId,
 				dependencies: operation.call.dependencies.map(id => `${this.#options.parentToolCallId}:${id}`),
-				toolCall: { type: "toolCall", id: operation.call.id, name: operation.call.name, arguments: executionArgs },
+				toolCall: { type: "toolCall", id: candidateId, name: operation.call.name, arguments: executionArgs },
 				tool,
 				source: "eval_shadow",
 			});

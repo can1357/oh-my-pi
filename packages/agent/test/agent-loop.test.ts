@@ -5867,6 +5867,65 @@ describe("speculative tool execution", () => {
 		}
 	});
 
+	it("discards host-deferred work when beforeToolCall rewrites its arguments", async () => {
+		const schema = type({ value: "string" });
+		let speculativeExecutions = 0;
+		const ordinaryArguments: string[] = [];
+		const tool: AgentTool<typeof schema> = {
+			name: "rewritten",
+			label: "Rewritten",
+			description: "Exercises final-argument reconciliation",
+			parameters: schema,
+			speculation: {
+				finalized: {
+					assess: ({ args }) =>
+						typeof args.value === "string"
+							? {
+									eligible: true,
+									effect: {
+										kind: "local_read",
+										resources: [{ scheme: "file", path: args.value, access: "read" }],
+									},
+								}
+							: { eligible: false, reason: "value must be a string" },
+					async execute() {
+						speculativeExecutions++;
+						return { kind: "result", result: { content: [] }, isError: false };
+					},
+				},
+			},
+			async execute(_toolCallId, args) {
+				ordinaryArguments.push(args.value);
+				return { content: [] };
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "rewritten-1", name: "rewritten", arguments: { value: "before" } }] },
+				{ content: ["done"] },
+			],
+		});
+
+		await agentLoop(
+			[createUserMessage("run")],
+			{ systemPrompt: [""], messages: [], tools: [tool] },
+			{
+				model: mock.model,
+				convertToLlm: identityConverter,
+				beforeToolCall: async () => ({ args: { value: "after" } }),
+				speculativeToolExecution: {
+					enabled: true,
+					host: { authorize: () => ({ allowed: true, deferBeforeToolCall: true }) },
+				},
+			},
+			undefined,
+			mock.stream,
+		).result();
+
+		expect(speculativeExecutions).toBe(0);
+		expect(ordinaryArguments).toEqual(["after"]);
+	});
+
 	it("falls back from a structured error returned by direct speculative execution", async () => {
 		const schema = type({ value: "string" });
 		let speculativeExecutions = 0;

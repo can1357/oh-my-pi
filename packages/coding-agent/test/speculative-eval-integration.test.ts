@@ -216,6 +216,60 @@ describe("streamed eval speculation", () => {
 		await shadow.discard("test complete");
 	});
 
+	it("namespaces child tool-call IDs across outer eval calls", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-eval-child-ids-"));
+		temporaryDirectories.push(directory);
+		await fs.writeFile(path.join(directory, "note.txt"), "content");
+		const settings = Settings.isolated({
+			"eval.autoBackground.enabled": false,
+			"images.autoResize": false,
+			"inspect_image.enabled": false,
+		});
+		const session: ToolSession = {
+			cwd: directory,
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			getEvalSessionId: () => "speculative-eval-child-id-test",
+			getToolForEvalBridge: name => (name === "read" ? eraseToolSchema(read) : undefined),
+			getEvalBridgeToolNames: () => ["read"],
+			settings,
+		};
+		const read = new ReadTool(session);
+		const evalTool = new EvalTool(session);
+		await evalTool.execute("warm-child-ids", { language: "js", code: "globalThis.shadowWarm = true" });
+		const admitted: Array<{ candidateId: string; toolCallId: string }> = [];
+		const coordinator: SpeculativeOperationSink = {
+			maxInFlight: 2,
+			async admit(definition) {
+				admitted.push({ candidateId: definition.candidateId, toolCallId: definition.toolCall.id });
+				return undefined;
+			},
+			close() {},
+		};
+		const args = { language: "js", code: 'tool.read({ path: "note.txt" })' };
+
+		for (const parentToolCallId of ["eval-first", "eval-second"]) {
+			const shadow = new EvalShadowCellSession({
+				coordinator,
+				parentToolCallId,
+				session,
+				cwd: directory,
+				sessionId: "speculative-eval-child-id-test",
+			});
+			const toolCall = { type: "toolCall" as const, id: parentToolCallId, name: "eval", arguments: args };
+			shadow.update(toolCall, JSON.stringify(args));
+			await shadow.finalize({ args });
+			await shadow.discard("test complete");
+		}
+
+		expect(admitted).toHaveLength(2);
+		expect(admitted.map(entry => entry.toolCallId)).toEqual(admitted.map(entry => entry.candidateId));
+		expect(new Set(admitted.map(entry => entry.toolCallId)).size).toBe(2);
+		expect(admitted[0]?.toolCallId.startsWith("eval-first:")).toBe(true);
+		expect(admitted[1]?.toolCallId.startsWith("eval-second:")).toBe(true);
+	});
+
 	it("falls back immediately when shadow admission is denied", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-eval-denied-"));
 		temporaryDirectories.push(directory);

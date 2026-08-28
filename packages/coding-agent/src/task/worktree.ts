@@ -603,10 +603,49 @@ type SpeculativeTargetSnapshot = {
 };
 
 async function captureSpeculativeTargetSnapshot(target: string): Promise<SpeculativeTargetSnapshot> {
-	const evidence = await captureSpeculativeTargetEvidence(target);
-	return evidence.exists && evidence.digest !== undefined
-		? { evidence, content: new Uint8Array(await fs.readFile(target)) }
-		: { evidence };
+	try {
+		const before = await fs.lstat(target);
+		if (before.isSymbolicLink()) throw new Error(`Speculative target is a symbolic link: ${target}`);
+		if (!before.isFile()) {
+			return { evidence: { exists: true, mode: before.mode, size: before.size } };
+		}
+		if (before.size > SPECULATIVE_PAL_MAX_TARGET_BYTES) {
+			throw new SpeculativePalTargetTooLargeError(
+				`Speculative PAL target exceeds ${formatBytes(SPECULATIVE_PAL_MAX_TARGET_BYTES)}: ${target}`,
+			);
+		}
+		const content = await fs.readFile(target);
+		const after = await fs.lstat(target);
+		if (
+			after.isSymbolicLink() ||
+			!after.isFile() ||
+			before.dev !== after.dev ||
+			before.ino !== after.ino ||
+			before.mode !== after.mode ||
+			before.size !== after.size ||
+			before.mtimeMs !== after.mtimeMs ||
+			before.ctimeMs !== after.ctimeMs ||
+			content.byteLength !== before.size
+		) {
+			throw new SpeculativePalCommitConflictError(
+				`Speculative target changed while capturing rollback state: ${target}`,
+			);
+		}
+		const hash = new Bun.CryptoHasher("sha256");
+		hash.update(content);
+		return {
+			evidence: {
+				exists: true,
+				mode: before.mode,
+				size: content.byteLength,
+				digest: hash.digest("hex"),
+			},
+			content,
+		};
+	} catch (error) {
+		if (isEnoent(error)) return { evidence: { exists: false } };
+		throw error;
+	}
 }
 
 async function captureSpeculativeTargetEvidence(target: string): Promise<SpeculativeTargetEvidence> {
