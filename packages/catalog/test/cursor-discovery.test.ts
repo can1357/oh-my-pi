@@ -11,6 +11,7 @@ import {
 	__cursorH2ConnectingSize,
 	__setCursorDiscoveryHttp2EstablishBodyGate,
 	__setCursorDiscoveryHttp2IdleEvictMs,
+	__setCursorDiscoveryRequestEndThrowGate,
 	__setCursorDiscoveryTimeoutSignal,
 	disposeCursorDiscoveryHttp2Pool,
 	fetchCursorUsableModels,
@@ -83,6 +84,7 @@ beforeEach(() => {
 	disposeCursorDiscoveryHttp2Pool();
 	__setCursorDiscoveryHttp2EstablishBodyGate(undefined);
 	__setCursorDiscoveryHttp2IdleEvictMs(undefined);
+	__setCursorDiscoveryRequestEndThrowGate(undefined);
 	__setCursorDiscoveryTimeoutSignal(undefined);
 });
 
@@ -90,6 +92,7 @@ afterEach(() => {
 	disposeCursorDiscoveryHttp2Pool();
 	__setCursorDiscoveryHttp2EstablishBodyGate(undefined);
 	__setCursorDiscoveryHttp2IdleEvictMs(undefined);
+	__setCursorDiscoveryRequestEndThrowGate(undefined);
 	__setCursorDiscoveryTimeoutSignal(undefined);
 });
 
@@ -624,5 +627,77 @@ describe("fetchCursorUsableModels", () => {
 		const models = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 1_000 });
 
 		expect(models).toBeNull();
+	});
+	it("caps the pooled discovery response before buffering past 1 MiB", async () => {
+		// A custom endpoint streams a large successful response within the
+		// timeout and withholds EOF: without a cumulative cap every chunk is
+		// retained and Buffer.concat allocates another full copy at EOF,
+		// exhausting the heap before the timeout fires. The cap must discard
+		// the lease once 1 MiB is exceeded, settling null early without waiting
+		// for EOF or timeout.
+		const { promise, resolve, reject } = Promise.withResolvers<string>();
+		const srv = http2.createServer();
+		servers.add(srv);
+		srv.once("error", reject);
+		let heldStream: http2.ServerHttp2Stream | undefined;
+		srv.on("stream", (stream: http2.ServerHttp2Stream) => {
+			heldStream = stream;
+			stream.respond({ ":status": 200, "content-type": "application/proto" });
+			// Emit multiple chunks totaling well over 1 MiB, then withhold EOF.
+			const chunk = Buffer.alloc(256 * 1024, 0);
+			for (let i = 0; i < 8; i++) stream.write(chunk);
+		});
+		srv.listen(0, "127.0.0.1", () => {
+			resolve(`http://127.0.0.1:${requireTcpAddress(srv.address()).port}`);
+		});
+		const url = await promise;
+		try {
+			// Long timeout: the only way this settles before EOF is the cap.
+			const models = await fetchCursorUsableModels({
+				apiKey: "test-token",
+				baseUrl: url,
+				timeoutMs: 5_000,
+			});
+			expect(models).toBeNull();
+			// The overflow path releases the lease without draining (no abort),
+			// so the pooled session stays idle: no outstanding lease and not
+			// referenced. A timeout settle would have drained the pool to [].
+			expect(__cursorDiscoveryHttp2Snapshot()).toEqual([
+				expect.objectContaining({ outstanding: 0, draining: false, referenced: false }),
+			]);
+		} finally {
+			heldStream?.end();
+		}
+	});
+
+	it("releases the discovery lease when request.end throws", async () => {
+		// If the pooled stream closes after the initial closed check but before
+		// the empty-body write — for example, a concurrent RST_STREAM or GOAWAY —
+		// request.end() can throw synchronously and escape without invoking
+		// finish(). The try/catch around the end branch must settle through
+		// finish(null) so the lease is always released.
+		const response = create(GetUsableModelsResponseSchema, {
+			models: [create(ModelDetailsSchema, { modelId: "composer-3" })],
+		});
+		const url = await startCursorDiscoveryServer(toBinary(GetUsableModelsResponseSchema, response));
+		__setCursorDiscoveryRequestEndThrowGate(() => {
+			throw new Error("simulated synchronous end failure");
+		});
+		try {
+			// Empty body reaches the empty-body end branch where the gate throws.
+			const models = await fetchCursorUsableModels({
+				apiKey: "test-token",
+				baseUrl: url,
+				timeoutMs: 1_000,
+			});
+			expect(models).toBeNull();
+			// finish(null) released the lease: no outstanding lease and the
+			// session is not referenced (idle, not drained since no abort).
+			expect(__cursorDiscoveryHttp2Snapshot()).toEqual([
+				expect.objectContaining({ outstanding: 0, draining: false, referenced: false }),
+			]);
+		} finally {
+			__setCursorDiscoveryRequestEndThrowGate(undefined);
+		}
 	});
 });

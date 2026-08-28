@@ -389,6 +389,149 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 		await expect(bridge.trailers()).rejects.toBeTruthy();
 	});
 
+	it("charges the zero-payload terminal frame against the poll queue byte budget", async () => {
+		// The synthetic terminal frame carries no payload, so payload-only
+		// accounting would admit it for free. With per-frame overhead it must
+		// tip the retained total over a budget that fits the data payloads
+		// alone. The success plan queues two data frames ("hello-frame" 11 B,
+		// "bye-frame" 9 B) then the terminal end frame: (64+11) + (64+9) = 148 B
+		// of data overhead, exactly the limit, so the terminal frame's 64 B
+		// exceeds it and the queue fails before settling a clean turn.
+		plan = { kind: "success" };
+		__setCursorPollQueueByteLimit(148);
+		const baseUrl = await startServer();
+		const bridge = openCursorHttp1Bridge({
+			baseUrl,
+			requestPath: RUN_PATH,
+			runHeaders: testRunHeaders(),
+			gzipRequest: false,
+		});
+		bridge.write(encodeConnectFrame(Buffer.from("client-request"), false));
+
+		// The queue fails on the terminal push (no consumer needed); the
+		// failure settles the trailers before any frame is iterated.
+		let trailerError: unknown;
+		try {
+			await bridge.trailers();
+		} catch (cause) {
+			trailerError = cause;
+		}
+		expect(trailerError).toBeInstanceOf(Error);
+		expect(String(trailerError)).toContain("poll frame queue exceeded");
+
+		// Retained data frames still drain before the stored queue error, so
+		// the consumer observes both payloads and then the budget failure.
+		const consumed: ConnectFrame[] = [];
+		let error: unknown;
+		try {
+			for await (const frame of bridge.frames()) consumed.push(frame);
+		} catch (cause) {
+			error = cause;
+		}
+		expect(consumed.filter(frame => frame.kind === "data")).toHaveLength(2);
+		expect(error).toBeInstanceOf(Error);
+		expect(String(error)).toContain("poll frame queue exceeded");
+	});
+
+	it("reclaims per-frame overhead on dequeue so a later terminal frame is admitted at equality", async () => {
+		// Park the poll reader on a held append before the terminal push, drain
+		// both data frames (freeing 64+payload each), then tighten the budget to
+		// exactly the terminal frame's 64 B and release. Correct symmetric
+		// accounting drains #bytes to 0, so the terminal push lands at equality
+		// (64 > 64 is false) and the turn completes cleanly. Payload-only
+		// dequeue would leave 128 B of residual overhead, so the same push
+		// (192 B) would exceed the 64 B budget and the queue would fail instead.
+		plan = { kind: "success" };
+		holdAppendResponses = true;
+		holdPollResponse = true;
+		const baseUrl = await startServer();
+		const bridge = openCursorHttp1Bridge({
+			baseUrl,
+			requestPath: RUN_PATH,
+			runHeaders: testRunHeaders(),
+			gzipRequest: false,
+		});
+		bridge.write(encodeConnectFrame(Buffer.from("client-request"), false));
+		while (appendHits < 1) await nextTick();
+		releaseAllHeldAppends(); // append #0 settles → poll may start
+		bridge.write(encodeConnectFrame(Buffer.from("frameB"), false)); // append #1, held
+		while (appendHits < 2) await nextTick();
+		while (pollHits < 1) await nextTick();
+		releasePoll(); // deliver both data frames; reader parks awaiting append #1
+
+		const consumed: ConnectFrame[] = [];
+		const drained = Promise.withResolvers<void>();
+		void (async () => {
+			for await (const frame of bridge.frames()) consumed.push(frame);
+			drained.resolve();
+		})();
+		while (consumed.length < 2) await nextTick(); // both data frames dequeued → #bytes 0
+		__setCursorPollQueueByteLimit(64); // terminal push must land at equality
+		releaseAllHeldAppends(); // append #1 settles → reader pushes the terminal frame
+		await drained.promise;
+
+		expect(consumed.filter(frame => frame.kind === "data")).toHaveLength(2);
+		expect(consumed.at(-1)?.kind).toBe("end");
+		await expect(bridge.trailers()).resolves.toEqual({});
+		expect(appendHits).toBe(2);
+		expect(pollHits).toBe(1);
+		bridge.close();
+	});
+
+	it("does not double-subtract overhead on dequeue, so a drained queue still enforces its budget", async () => {
+		// Same park as the reclamation test, but the budget is set one byte
+		// below the terminal frame's 64 B. Correct accounting drains #bytes to
+		// 0, so the terminal push (64 B) exceeds the 63 B budget and the queue
+		// fails. Double-subtracting overhead on dequeue would drive #bytes
+		// negative, so the same push would be admitted and the turn would
+		// settle cleanly instead of failing.
+		plan = { kind: "success" };
+		holdAppendResponses = true;
+		holdPollResponse = true;
+		const baseUrl = await startServer();
+		const bridge = openCursorHttp1Bridge({
+			baseUrl,
+			requestPath: RUN_PATH,
+			runHeaders: testRunHeaders(),
+			gzipRequest: false,
+		});
+		bridge.write(encodeConnectFrame(Buffer.from("client-request"), false));
+		while (appendHits < 1) await nextTick();
+		releaseAllHeldAppends();
+		bridge.write(encodeConnectFrame(Buffer.from("frameB"), false));
+		while (appendHits < 2) await nextTick();
+		while (pollHits < 1) await nextTick();
+		releasePoll();
+
+		const consumed: ConnectFrame[] = [];
+		let error: unknown;
+		const settled = Promise.withResolvers<void>();
+		void (async () => {
+			try {
+				for await (const frame of bridge.frames()) consumed.push(frame);
+			} catch (cause) {
+				error = cause;
+			}
+			settled.resolve();
+		})();
+		while (consumed.length < 2) await nextTick();
+		__setCursorPollQueueByteLimit(63);
+		releaseAllHeldAppends();
+		await settled.promise;
+
+		expect(consumed.filter(frame => frame.kind === "data")).toHaveLength(2);
+		expect(error).toBeInstanceOf(Error);
+		expect(String(error)).toContain("poll frame queue exceeded");
+		let trailerError: unknown;
+		try {
+			await bridge.trailers();
+		} catch (cause) {
+			trailerError = cause;
+		}
+		expect(trailerError).toBeInstanceOf(Error);
+		expect(String(trailerError)).toContain("poll frame queue exceeded");
+	});
+
 	it("rejects a poll EOF that never delivered the Connect end-of-stream envelope", async () => {
 		plan = { kind: "eof-without-end" };
 		const baseUrl = await startServer();

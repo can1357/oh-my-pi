@@ -162,6 +162,8 @@ const cursorH2Pool = new Map<string, CursorH2PoolEntry>();
 const CURSOR_H2_IDLE_EVICT_MS = 60_000;
 /** Test-only idle-eviction window override; undefined = production window. */
 let cursorH2IdleEvictMsOverride: number | undefined;
+/** Catalog-local cumulative response ceiling for `GetUsableModels`: a fast local gateway streaming a large successful response within the timeout must not exhaust the heap before EOF. */
+const CURSOR_DISCOVERY_RESPONSE_BYTE_LIMIT = 1 * 1024 * 1024;
 /**
  * An in-flight connect alongside the handle that can terminate it. `cancel()`
  * is destructive: it destroys the underlying session and socket and settles
@@ -193,6 +195,8 @@ let cursorH2Generation = 0;
 let cursorH2EstablishBodyGate: ((key: string) => Promise<void>) | undefined;
 /** Test-only timeout-signal factory; undefined = AbortSignal.timeout. */
 let cursorDiscoveryTimeoutSignal: ((ms: number) => AbortSignal) | undefined;
+/** Test-only gate run immediately before the empty-body `request.end()` to simulate a synchronous write failure. */
+let cursorDiscoveryEmptyEndThrowGate: (() => void) | undefined;
 
 function destroyCursorH2Session(session: http2.ClientHttp2Session): void {
 	try {
@@ -538,6 +542,17 @@ export function __setCursorDiscoveryHttp2EstablishBodyGate(fn: ((key: string) =>
 export function __setCursorDiscoveryTimeoutSignal(fn: ((ms: number) => AbortSignal) | undefined): void {
 	cursorDiscoveryTimeoutSignal = fn;
 }
+/**
+ * Test seam: run (or restore) a gate immediately before the empty-body
+ * `request.end()` so a synchronous write failure — a stream closed between the
+ * closed check and the write by a concurrent RST_STREAM or GOAWAY — can be
+ * simulated without patching the stream prototype. The real `request.end()`
+ * still runs after a non-throwing gate. Affects only the next acquired request
+ * while set; reset to `undefined` in test teardown.
+ */
+export function __setCursorDiscoveryRequestEndThrowGate(fn: (() => void) | undefined): void {
+	cursorDiscoveryEmptyEndThrowGate = fn;
+}
 
 /** HTTP/2 transport required by Cursor API (HTTP/1.1 is rejected with 464). */
 async function fetchViaHttp2(
@@ -569,6 +584,8 @@ async function readUnaryResponse(
 	}
 	const { promise, resolve } = Promise.withResolvers<Uint8Array | null>();
 	let settled = false;
+	let accepted = 0;
+	const chunks: Buffer[] = [];
 	const onAbort = (): void => finish(null);
 	const finish = (value: Uint8Array | null): void => {
 		if (settled) return;
@@ -581,9 +598,20 @@ async function readUnaryResponse(
 		release();
 		resolve(value);
 	};
-	const chunks: Buffer[] = [];
-	request.on("data", (chunk: Buffer) => chunks.push(chunk));
-	request.on("end", () => finish(new Uint8Array(Buffer.concat(chunks))));
+	request.on("data", (chunk: Buffer) => {
+		if (settled) return;
+		if (chunk.length > CURSOR_DISCOVERY_RESPONSE_BYTE_LIMIT - accepted) {
+			chunks.length = 0;
+			finish(null);
+			return;
+		}
+		chunks.push(chunk);
+		accepted += chunk.length;
+	});
+	request.on("end", () => {
+		if (settled) return;
+		finish(new Uint8Array(Buffer.concat(chunks, accepted)));
+	});
 	request.on("error", () => finish(null));
 	request.on("response", (headers: { ":status"?: unknown }) => {
 		const status = Number(headers[":status"] ?? 0);
@@ -594,8 +622,15 @@ async function readUnaryResponse(
 		return promise;
 	}
 	signal.addEventListener("abort", onAbort, { once: true });
-	if (body.length > 0) request.end(Buffer.from(body));
-	else request.end();
+	try {
+		if (body.length > 0) request.end(Buffer.from(body));
+		else {
+			cursorDiscoveryEmptyEndThrowGate?.();
+			request.end();
+		}
+	} catch {
+		finish(null);
+	}
 	return promise;
 }
 
