@@ -1728,7 +1728,6 @@ export async function compact(
 	];
 	let usedRemoteCompaction = false;
 	let nativeCompactionError: unknown;
-	let unreplayableProducerTarget = false;
 	// Compaction may run on a side model or a compact-model override. Its native
 	// result is opaque, endpoint- and model-owned state that only the producing
 	// request target can read back, so a producer whose fingerprint differs from
@@ -1737,11 +1736,8 @@ export async function compact(
 	// billed and reduce nothing. Those producers fall through to portable local
 	// summarization instead, which every target can read.
 	const runtimeReplayModel = summaryOptions.runtimeModel ?? model;
-	const producesRuntimeOwnedHistory = (streamingV2: boolean) => {
-		if (producesRuntimeReplayableCompactionHistory(model, runtimeReplayModel, streamingV2)) return true;
-		unreplayableProducerTarget = true;
-		return false;
-	};
+	const producesRuntimeOwnedHistory = (streamingV2: boolean) =>
+		producesRuntimeReplayableCompactionHistory(model, runtimeReplayModel, streamingV2);
 	const resolveRuntimeRequestTarget = (key: string) =>
 		summaryOptions.activeRequestTarget ??
 		getOpenAIResponsesRequestTarget(runtimeReplayModel, key, {
@@ -1840,7 +1836,6 @@ export async function compact(
 				// summarization" and keep compaction running on an aborted signal.
 				if (signal?.aborted) throw err;
 				if (err instanceof UnreplayableCompactionProducerError) {
-					unreplayableProducerTarget = true;
 					logger.info("Skipped OpenAI V2 remote compaction: producer target is not runtime-replayable", {
 						model: model.id,
 						provider: model.provider,
@@ -1907,7 +1902,6 @@ export async function compact(
 				// summarization" and keep compaction running on an aborted signal.
 				if (signal?.aborted) throw err;
 				if (err instanceof UnreplayableCompactionProducerError) {
-					unreplayableProducerTarget = true;
 					logger.info("Skipped OpenAI remote compaction: producer target is not runtime-replayable", {
 						model: model.id,
 						provider: model.provider,
@@ -1928,7 +1922,7 @@ export async function compact(
 		throw new NativeCompactionError(nativeCompactionError);
 	}
 
-	if (!usedRemoteCompaction && unreplayableProducerTarget && preservedNativeHistoryHidesOriginals) {
+	if (!usedRemoteCompaction && preservedNativeHistoryHidesOriginals) {
 		throw new StrandedCompactionHistoryError();
 	}
 

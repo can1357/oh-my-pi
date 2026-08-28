@@ -14,19 +14,33 @@ import {
 import type { ModelSpec, ResolvedAnthropicCompat } from "../types";
 import { applyCompatOverrides } from "./apply";
 
-const OFFICIAL_ANTHROPIC_URL = "https://api.anthropic.com";
+const OFFICIAL_ANTHROPIC_HOST = "api.anthropic.com";
 
 /**
  * Official first-party Anthropic API. A missing baseUrl is official on purpose:
  * request dispatch falls back to `https://api.anthropic.com`. This is the one
  * auth-sensitive host check — OAuth credentials are attached based on it — so
- * it requires the exact origin or a path boundary (`/`) after it; a bare
- * prefix check would accept lookalikes like `https://api.anthropic.com.evil.com`.
+ * the origin is compared after URL normalization: the host must be exactly
+ * `api.anthropic.com` over https with no credentials and no non-default port,
+ * which rejects lookalikes like `https://api.anthropic.com.evil.com` and
+ * `https://api.anthropic.com@evil.com` while keeping the explicit default port
+ * (`https://api.anthropic.com:443/v1`) on the first-party path it dispatches to.
  */
 export function isOfficialAnthropicApiUrl(baseUrl?: string): boolean {
-	if (!baseUrl) return true;
-	const lower = baseUrl.toLowerCase();
-	return lower === OFFICIAL_ANTHROPIC_URL || lower.startsWith(`${OFFICIAL_ANTHROPIC_URL}/`);
+	const value = baseUrl?.trim();
+	if (!value) return true;
+	try {
+		const url = new URL(value);
+		return (
+			url.protocol === "https:" &&
+			url.hostname.toLowerCase() === OFFICIAL_ANTHROPIC_HOST &&
+			url.port.length === 0 &&
+			url.username.length === 0 &&
+			url.password.length === 0
+		);
+	} catch {
+		return false;
+	}
 }
 
 export function isOfficialAnthropicFilesApiBaseUrl(baseUrl?: string): boolean {

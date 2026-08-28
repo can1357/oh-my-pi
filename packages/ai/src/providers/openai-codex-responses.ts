@@ -4642,6 +4642,9 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 				true,
 				undefined,
 				computerCallIds,
+				false,
+				false,
+				targetOwnedFallbackRejected,
 			);
 			const outputItems = suppressHiddenEmptyFallback
 				? sanitizeOpenAIResponsesAssistantFallbackItemsForReplay(convertedOutputItems)

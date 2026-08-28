@@ -2446,6 +2446,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				computerCallIds,
 				options.requiresReasoningReplayForAllTurns ?? false,
 				options.requiresReasoningReplayForToolCalls ?? false,
+				targetOwnedFallbackRejected,
 			);
 			const outputItems = suppressHiddenEmptyFallback
 				? sanitizeOpenAIResponsesAssistantFallbackItemsForReplay(convertedOutputItems)
@@ -2506,6 +2507,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 	computerCallIds?: Set<string>,
 	requiresReasoningReplayForAllTurns = false,
 	requiresReasoningReplayForToolCalls = false,
+	endpointOwnedIdsRejected = false,
 ): ResponseInput {
 	const outputItems: ResponseInput = [];
 	let unsignedTextBlocks = 0;
@@ -2536,7 +2538,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 	for (const block of assistantMsg.content) {
 		if (block.type === "thinking" && assistantMsg.stopReason !== "error") {
 			if (requiresReasoningItem) {
-				if (block.itemId) synthesizedReasoningItemId ??= block.itemId;
+				if (block.itemId && !endpointOwnedIdsRejected) synthesizedReasoningItemId ??= block.itemId;
 				if (block.thinking.trim().length > 0) carriedReasoningTexts.push(block.thinking);
 			}
 			if (!includeThinkingSignatures) {
@@ -2598,9 +2600,10 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			const normalized = normalizeResponsesToolCallId(block.id, "ctc");
 			knownCallIds.add(normalized.callId);
 			computerCallIds?.add(normalized.callId);
+			const computerItemId = endpointOwnedIdsRejected ? undefined : block.providerMetadata.providerItemId;
 			outputItems.push({
 				type: "computer_call",
-				id: block.providerMetadata.providerItemId,
+				...(computerItemId ? { id: computerItemId } : {}),
 				call_id: normalized.callId,
 				actions: structuredCloneJSON(block.providerMetadata.actions),
 				pending_safety_checks: structuredCloneJSON(block.providerMetadata.pendingSafetyChecks),
@@ -2609,7 +2612,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			continue;
 		}
 		const normalized = normalizeResponsesToolCallId(block.id, block.customWireName ? "ctc" : "fc");
-		let itemId: string | undefined = normalized.itemId;
+		let itemId: string | undefined = endpointOwnedIdsRejected ? undefined : normalized.itemId;
 		if (
 			!hasReplayableReasoningItem &&
 			(itemId?.startsWith("fc_") || itemId?.startsWith("fcr_") || itemId?.startsWith("ctc_"))

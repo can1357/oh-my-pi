@@ -742,19 +742,12 @@ export function isOpenAIResponsesAssistantHistoryTargetOwned(
 /**
  * Whether a canonical `textSignature` names an output item minted by the
  * endpoint that served the turn. Current producers encode the message id as a
- * versioned JSON envelope; pre-envelope history stored the raw `msg_…` id.
+ * versioned JSON envelope, while pre-envelope history stored the raw id in any
+ * shape the endpoint used; `parseTextSignature` replays every non-empty
+ * signature as an output-item id, so every one of them is endpoint-owned.
  */
 function responsesTextSignatureIsEndpointOwned(signature: unknown): boolean {
-	if (typeof signature !== "string" || signature.length === 0) return false;
-	if (signature.startsWith("{")) {
-		try {
-			const parsed = JSON.parse(signature) as { v?: unknown; id?: unknown };
-			return parsed?.v === 1 && typeof parsed.id === "string" && parsed.id.length > 0;
-		} catch {
-			return false;
-		}
-	}
-	return signature.startsWith("msg_");
+	return typeof signature === "string" && signature.length > 0;
 }
 
 /**
