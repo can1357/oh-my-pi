@@ -2131,7 +2131,7 @@ mod tests {
 		assert_eq!(pgrep_result.exit_code, Some(0));
 		assert_eq!(output, format!("{pid}\n"));
 		assert_eq!(pkill_result.exit_code, Some(0));
-		assert!(pkill_output.is_empty());
+		assert_eq!(pkill_output, "");
 		assert!(still_running, "signal 0 must not terminate a matching process");
 	}
 
@@ -2332,7 +2332,7 @@ mod tests {
 			let _ = second.wait().await;
 		}
 		assert_eq!(result.exit_code, Some(0));
-		assert!(output.is_empty());
+		assert_eq!(output, "");
 		assert!(statuses.is_ok(), "pkill did not signal every matching process");
 	}
 
@@ -2354,7 +2354,7 @@ mod tests {
 			let _ = child.wait().await;
 		}
 		assert_eq!(result.exit_code, Some(0));
-		assert!(output.is_empty());
+		assert_eq!(output, "");
 		assert!(status.is_some(), "pidwait returned while its matching process was still running");
 	}
 
@@ -3605,11 +3605,7 @@ mod tests {
 			.await
 			.expect("run_string head bad flag");
 		assert_ne!(exit_code(&bad), 0, "invalid flag should be a usage error");
-		assert!(
-			!std::fs::read_to_string(tmp.join("err.txt"))
-				.expect("err.txt")
-				.is_empty()
-		);
+		assert_ne!(std::fs::read_to_string(tmp.join("err.txt")).expect("err.txt"), "");
 
 		let _ = std::fs::remove_dir_all(&tmp);
 	}

@@ -2275,6 +2275,26 @@ describe("directional selection markers", () => {
 		);
 	});
 
+	test("repairs a stray ⟫ typed in place of the │ divider", () => {
+		const content = "const value = oldValue;\nreport(value);\n";
+		const notes: string[] = [];
+		const input = inlineOperation("const value = ⟪oldValue⟫newValue⟫;\nreport(value)");
+
+		expect(variant.apply(content, input, { path: "src/example.ts", notes })).toBe(
+			"const value = newValue;\nreport(value);\n",
+		);
+		expect(notes.join("\n")).toMatch(/⟪old⟫new⟫ was read as ⟪old│new⟫/);
+	});
+
+	test("keeps the unmatched-close error when a stray ⟫ follows a proper selection", () => {
+		const content = "const value = oldValue;\nreport(value);\n";
+		const input = inlineOperation("const value = ⟪oldValue│newValue⟫;⟫\nreport(value)");
+
+		expect(() => variant.apply(content, input, context)).toThrow(
+			/unmatched closing selection marker ⟫; add opening ⟪/,
+		);
+	});
+
 	test("supports an empty directional selection at the exact line boundary", () => {
 		const content = "function run() {\n  finish();\n}\n";
 		const input = operation("function run() {\n⟪⟫  finish();\n}", "  start();\n");

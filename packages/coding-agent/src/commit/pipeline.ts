@@ -1,8 +1,8 @@
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getProjectDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
-import * as git from "../utils/git";
 import { runAgenticCommit } from "./agentic";
 import { runChangelogFlow } from "./changelog";
 import { formatConventionalCommit } from "./conventional/normalization";
@@ -29,7 +29,7 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 			onProgress: message => process.stdout.write(`${message}\n`),
 		});
 	} catch (error) {
-		if (error instanceof git.GitCommandError) abortOnGitFailure("Commit generation failed", error);
+		if (vcs.isVcsError(error)) abortOnGitFailure("Commit generation failed", error);
 		if (error instanceof Error && error.message === "No staged changes to analyze") {
 			if (args.push) {
 				process.stdout.write("No changes to commit; pushing existing commits...\n");
@@ -57,9 +57,9 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 
 	if (!args.noChangelog) await updateChangelog(cwd, args);
 	try {
-		await git.commit(cwd, commitMessage);
+		await vcs.requireGit(cwd).commitCreate(commitMessage, {});
 	} catch (error) {
-		if (error instanceof git.GitCommandError) abortOnGitFailure("Commit failed", error);
+		if (vcs.isVcsError(error)) abortOnGitFailure("Commit failed", error);
 		throw error;
 	}
 	process.stdout.write("Commit created.\n");
@@ -79,7 +79,7 @@ async function updateChangelog(cwd: string, args: CommitCommandArgs): Promise<vo
 		model: primary.model,
 		apiKey: primary.apiKey,
 		thinkingLevel: primary.thinkingLevel,
-		stagedFiles: await git.diff.changedFiles(cwd, { cached: true }),
+		stagedFiles: await vcs.requireGit(cwd).changedFiles({ cached: true }),
 		dryRun: false,
 		maxDiffChars: commitSettings.changelogMaxDiffChars,
 		onProgress: message => process.stdout.write(`${message}\n`),
