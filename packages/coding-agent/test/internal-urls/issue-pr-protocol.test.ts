@@ -254,14 +254,14 @@ describe("pr:// protocol handler", () => {
 		expect(first.content).toContain("# Pull Request #77: PR #77");
 		expect(first.immutable).toBe(true);
 		expect(first.notes).toContain("Diff: pr://owner/example/77/diff");
-		// First call hits gh twice (view JSON + review-comments page).
-		expect(spy).toHaveBeenCalledTimes(2);
+		// First call hits gh three times (view JSON + review-comments page + stacks).
+		expect(spy).toHaveBeenCalledTimes(3);
 
 		const second = await router.resolve("pr://owner/example/77");
 		expect(second.content).toBe(first.content);
 		expect(second.notes?.[0]).toMatch(/^Cached:/);
 		// Second call is a soft-TTL hit — no further gh invocations.
-		expect(spy).toHaveBeenCalledTimes(2);
+		expect(spy).toHaveBeenCalledTimes(3);
 	});
 
 	it("requests and renders formal reviews when comments are enabled", async () => {
@@ -278,6 +278,44 @@ describe("pr:// protocol handler", () => {
 		expect(resource.content).toContain("## Reviews (1)");
 		expect(resource.content).toContain("### @approver - 2026-04-01T12:00:00Z [APPROVED]");
 		expect(resource.content).toContain("Approved from the formal review flow.");
+	});
+
+	it("renders a stack map when the pull request belongs to a stack", async () => {
+		vi.spyOn(github, "json").mockImplementation(async (_cwd, args) => {
+			if (args.some(arg => typeof arg === "string" && arg.includes("/stacks"))) {
+				return [
+					{
+						number: 7,
+						open: true,
+						base: { ref: "main" },
+						pull_requests: [
+							{
+								number: 78,
+								state: "open",
+								draft: false,
+								head: { ref: "auth-layer" },
+							},
+							{
+								number: 79,
+								state: "open",
+								draft: true,
+								head: { ref: "api-routes" },
+							},
+						],
+					},
+				] as never;
+			}
+			if (args.includes("/repos/owner/example/pulls/78/comments")) {
+				return [] as never;
+			}
+			return prPayload(78, "pr body") as never;
+		});
+
+		const router = InternalUrlRouter.instance();
+		const resource = await router.resolve("pr://owner/example/78");
+		expect(resource.content).toContain("## Stack #7 (base: main, 2 PRs)");
+		expect(resource.content).toContain("1. pr://owner/example/78  auth-layer  open  ← bottom, this");
+		expect(resource.content).toContain("2. pr://owner/example/79  api-routes  draft  ← top");
 	});
 
 	it("rejects invalid pr:// URLs with a friendly message", async () => {
@@ -371,7 +409,7 @@ describe("pr:// protocol handler", () => {
 
 		const bare = await router.resolve("pr://owner/example/79");
 		// Both spellings key the same row, so the bare form is a cache hit.
-		expect(spy).toHaveBeenCalledTimes(2);
+		expect(spy).toHaveBeenCalledTimes(3);
 		expect(prefixed.notes?.[0]).toBe("Fetched live");
 		expect(bare.notes?.[0]).toMatch(/^Cached:/);
 	});
@@ -393,7 +431,7 @@ describe("pr:// protocol handler", () => {
 			// is a different pull request and must be fetched, not served from it.
 			const explicit = await router.resolve("pr://github.com/owner/example/81");
 			expect(explicit.notes?.[0]).toBe("Fetched live");
-			expect(spy).toHaveBeenCalledTimes(4);
+			expect(spy).toHaveBeenCalledTimes(6);
 		} finally {
 			if (saved === undefined) {
 				delete process.env.GH_HOST;

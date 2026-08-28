@@ -1,7 +1,7 @@
 /**
  * Types for the internal URL routing system.
  *
- * Internal URLs (`agent://`, `artifact://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `omp://`, `pr://`, `rule://`, `security://`, `skill://`, `ssh://`, `vault://`, and `xd://`) are resolved by tools like read,
+ * Internal URLs (`agent://`, `artifact://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `omp://`, `pr://`, `rule://`, `security://`, `skill://`, `ssh://`, `stack://`, `vault://`, and `xd://`) are resolved by tools like read,
  * providing access to agent outputs and server resources without exposing filesystem paths.
  */
 
@@ -193,7 +193,7 @@ export interface ProtocolHandler {
 	 * host/path portion of a `scheme://` URL while the user composes a prompt.
 	 *
 	 * Implementations **MUST** be fast and local — this runs on every keystroke.
-	 * Schemes backed by network or external CLIs (issue://, pr://, vault://,
+	 * Schemes backed by network or external CLIs (issue://, pr://, stack://, vault://,
 	 * mcp://) omit it. The caller fuzzy-filters the returned set against the
 	 * partially typed `query`, so handlers return their full (bounded) candidate
 	 * list; `query` is provided only so handlers can scope expensive enumeration.

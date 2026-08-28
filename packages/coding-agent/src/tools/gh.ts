@@ -36,6 +36,7 @@ import {
 	executeSearchPrs,
 	executeSearchRepos,
 } from "./gh-search";
+import { executeStack } from "./gh-stack";
 import { executeRepoView } from "./gh-view";
 import type { OutputMeta } from "./output-meta";
 import { ToolError } from "./tool-errors";
@@ -72,7 +73,7 @@ const GITHUB_READONLY_OPS: ReadonlySet<string> = new Set([
 
 const githubSchema = type({
 	op: type(
-		"'repo_view' | 'file_read' | 'pr_create' | 'pr_checkout' | 'pr_push' | 'search_issues' | 'search_prs' | 'search_code' | 'search_commits' | 'search_repos' | 'run_watch'",
+		"'repo_view' | 'file_read' | 'pr_create' | 'pr_checkout' | 'pr_push' | 'search_issues' | 'search_prs' | 'search_code' | 'search_commits' | 'search_repos' | 'run_watch' | 'stack'",
 	).describe("github operation"),
 	"repo?": type("string").describe("owner/repo"),
 	"branch?": type("string").describe("branch"),
@@ -96,6 +97,23 @@ const githubSchema = type({
 	"limit?": type("number").describe("max results"),
 	"run?": type("string").describe("actions run id or url"),
 	"tail?": type("number").describe("log lines per failed job"),
+	"command?": type(
+		"'init' | 'add' | 'view' | 'push' | 'submit' | 'sync' | 'rebase' | 'checkout' | 'merge' | 'unstack' | 'up' | 'down' | 'top' | 'bottom' | 'trunk' | 'link'",
+	).describe("stack subcommand; required when op is stack"),
+	"branches?": type("string[]").describe("stack branch names, bottom to top"),
+	"message?": type("string").describe("commit message for stack add"),
+	"remote?": type("string").describe("git remote for stack push/submit/sync/rebase/link"),
+	"prune?": type("boolean").describe("prune merged branches on stack sync"),
+	"upstack?": type("boolean").describe("rebase only from the current branch up"),
+	"downstack?": type("boolean").describe("rebase only from trunk to the current branch"),
+	"noTrunk?": type("boolean").describe("skip trunk when rebasing a stack"),
+	"resume?": type("boolean").describe("continue an interrupted stack rebase"),
+	"abort?": type("boolean").describe("abort an interrupted stack rebase"),
+	"mergeMethod?": type("'squash' | 'rebase' | 'merge'").describe("stack merge method"),
+	"stack?": type("string").describe("stack number"),
+	"open?": type("boolean").describe("mark stacked PRs ready for review on submit"),
+	"local?": type("boolean").describe("unstack locally only"),
+	"steps?": type("number").describe("layers to move on stack up/down"),
 });
 
 type GithubInput = typeof githubSchema.infer;
@@ -202,11 +220,12 @@ export interface GhRunWatchViewDetails {
 export class GithubTool implements AgentTool<typeof githubSchema, GhToolDetails> {
 	readonly name = "github";
 	readonly approval = (args: unknown): ToolApprovalDecision => {
-		const rawOp = (args as Partial<GithubInput>).op;
-		const op = typeof rawOp === "string" ? rawOp : "";
+		const parsed = args as Partial<GithubInput>;
+		const op = typeof parsed.op === "string" ? parsed.op : "";
+		if (op === "stack") return parsed.command === "view" ? "read" : "exec";
 		return GITHUB_READONLY_OPS.has(op) ? "read" : "exec";
 	};
-	readonly summary = "Interact with GitHub repositories, files, pull requests, and Actions";
+	readonly summary = "Interact with GitHub repositories, files, pull requests, stacked PRs, and Actions";
 	readonly loadMode = "discoverable";
 	readonly label = "GitHub";
 	readonly description = prompt.render(githubDescription);
@@ -251,6 +270,8 @@ export class GithubTool implements AgentTool<typeof githubSchema, GhToolDetails>
 					return executeSearchRepos(this.session, params, signal);
 				case "run_watch":
 					return executeRunWatch(this.session, this.name, params, signal, onUpdate);
+				case "stack":
+					return executeStack(this.session, params, signal);
 			}
 		});
 	}
