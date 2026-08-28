@@ -950,7 +950,6 @@ export class SessionAdvisors {
 			const advisorAgentFacade: AdvisorAgent = {
 				prompt: async input => {
 					let quarantined: string | undefined;
-					advisorRequests = 0;
 					advisorLoopGuard.reset();
 					advisorLoopGuardStopped = false;
 					try {
@@ -1026,6 +1025,7 @@ export class SessionAdvisors {
 				onTurnError: (error, failedMessages, signal) =>
 					this.#recoverAdvisorTurn(advisorRef, error, failedMessages, signal),
 				onTurnSuccess: async () => {
+					advisorRequests = 0;
 					// Commit the delivered batch so retries of a failed turn stay deduped
 					// while this successful turn's context is persisted once (issue #9553).
 					advisorRef.recorder.commitTurn();
@@ -1038,7 +1038,10 @@ export class SessionAdvisors {
 						role: fallback.role,
 					});
 				},
-				onTurnAbandoned: () => advisorRef.recorder.abandonTurn(),
+				onTurnAbandoned: () => {
+					advisorRequests = 0;
+					advisorRef.recorder.abandonTurn();
+				},
 				notifyFailure: error => {
 					this.#advisorStatuses.set(slug, { name: advisorName, status: "error" });
 					const message = error instanceof Error ? error.message : String(error);

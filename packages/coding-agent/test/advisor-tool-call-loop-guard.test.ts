@@ -62,6 +62,7 @@ describe("advisor tool-call loop guard", () => {
 	function createAdvisor(
 		guardSettings: Record<string, unknown>,
 		maxRepeatedTurns = 8,
+		failFirstRequest = false,
 	): { advisor: Agent; contexts: Context[] } {
 		const primaryMock = createMockModel({ provider: "anthropic", handler: { content: ["primary complete"] } });
 		const advisorMock = createMockModel({ provider: "anthropic" });
@@ -69,6 +70,27 @@ describe("advisor tool-call loop guard", () => {
 		let turn = 0;
 		const advisorStreamFn: typeof advisorMock.stream = (_model, context) => {
 			contexts.push(context);
+			const stream = new AssistantMessageEventStream();
+			if (failFirstRequest && turn === 0) {
+				turn++;
+				const message: AssistantMessage = {
+					role: "assistant",
+					content: [],
+					api: advisorMock.api,
+					provider: advisorMock.provider,
+					model: advisorMock.id,
+					usage: zeroUsage,
+					stopReason: "error",
+					errorMessage: "HTTP 503 Service Unavailable",
+					errorStatus: 503,
+					timestamp: Date.now(),
+				};
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "error", reason: "error", error: message });
+				});
+				return stream;
+			}
 			// Deliberately ignore the corrective. The enabled guard must hard-stop
 			// this stream; the finite ceiling keeps the disabled control bounded.
 			const repeating = turn < maxRepeatedTurns;
@@ -94,7 +116,6 @@ describe("advisor tool-call loop guard", () => {
 						stopReason: "stop",
 						timestamp: Date.now(),
 					};
-			const stream = new AssistantMessageEventStream();
 			queueMicrotask(() => {
 				stream.push({ type: "start", partial: message });
 				stream.push({ type: "done", reason: repeating ? "toolUse" : "stop", message });
@@ -228,6 +249,28 @@ describe("advisor tool-call loop guard", () => {
 		expect(contexts).toHaveLength(6);
 		expect(notices).toHaveLength(2);
 		expect(advisor.state.error).toBeUndefined();
+	});
+
+	it("preserves the request limit across a recoverable retry", async () => {
+		const { contexts } = createAdvisor(
+			{
+				"advisor.maxRequestsPerUpdate": 3,
+				"model.toolCallLoopGuard.enabled": false,
+			},
+			20,
+			true,
+		);
+
+		if (!session) throw new Error("Expected live session");
+		const capped = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "notice" && event.source === "advisor" && event.message.includes("request limit")) {
+				capped.resolve();
+			}
+		});
+		await session.prompt("review the current update");
+		await capped.promise;
+		expect(contexts).toHaveLength(3);
 	});
 
 	it("allows an advisor update to opt out of the request limit", async () => {
