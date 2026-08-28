@@ -36,7 +36,7 @@ export const VcsRepo = nativeBindings.VcsRepo;
 
 // functions
 export const __ompInstallTokioRuntime = nativeBindings.__ompInstallTokioRuntime;
-export const __piNativesV18_0_9 = nativeBindings.__piNativesV18_0_9;
+export const __piNativesV18_0_10 = nativeBindings.__piNativesV18_0_10;
 export const astEdit = nativeBindings.astEdit;
 export const astGrep = nativeBindings.astGrep;
 export const astMatch = nativeBindings.astMatch;
@@ -51,6 +51,7 @@ export const diffLines = nativeBindings.diffLines;
 export const diffWords = nativeBindings.diffWords;
 export const enclosingBlockBoundaries = nativeBindings.enclosingBlockBoundaries;
 export const encodeSixel = nativeBindings.encodeSixel;
+export const execReplace = nativeBindings.execReplace;
 export const executeShell = nativeBindings.executeShell;
 export const extractSegments = nativeBindings.extractSegments;
 export const fuzzyFind = nativeBindings.fuzzyFind;

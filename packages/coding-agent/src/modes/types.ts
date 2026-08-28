@@ -110,6 +110,8 @@ export interface InteractiveModeContext {
 	chatContainer: TranscriptContainer;
 	pendingMessagesContainer: Container;
 	statusContainer: Container;
+	/** Whether the status/working row rendered lines in the latest frame; the band composer's editor top gap collapses only then. */
+	readonly statusRowOccupied: boolean;
 	todoContainer: Container;
 	subagentContainer: Container;
 	btwContainer: Container;
@@ -241,6 +243,8 @@ export interface InteractiveModeContext {
 	init(options?: InteractiveModeInitOptions): Promise<void>;
 	playWelcomeIntro(): void;
 	shutdown(): Promise<void>;
+	/** Tear down like {@link shutdown}, then relaunch the CLI with the original launch flags, resuming this session. */
+	restart(): Promise<void>;
 	checkShutdownRequested(): Promise<void>;
 
 	// Extension UI integration
@@ -291,6 +295,8 @@ export interface InteractiveModeContext {
 	setWorkingMessage(message?: string): void;
 	applyPendingWorkingMessage(): void;
 	ensureLoadingAnimation(): void;
+	/** Reconcile the idle "F5 to Retry" status row with the transcript tail. */
+	syncRetryHintRow(): void;
 	startPendingSubmission(input: {
 		text: string;
 		images?: ImageContent[];

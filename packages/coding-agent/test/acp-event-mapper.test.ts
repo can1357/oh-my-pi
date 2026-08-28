@@ -1148,6 +1148,70 @@ describe("ACP event mapper", () => {
 		expect(update.locations).toEqual([{ path: path.resolve("/repo", "src/file.ts") }]);
 		expect("content" in update).toBe(false);
 	});
+	it("strips read selectors from the ACP location while preserving rawInput", () => {
+		const cases: Array<{ path: string; base: string }> = [
+			{ path: "src/file.ts:1-20", base: "src/file.ts" },
+			{ path: "src/file.ts:raw", base: "src/file.ts" },
+			{ path: "src/file.ts:1-20:raw", base: "src/file.ts" },
+			{ path: "src/file.ts:raw:1-20", base: "src/file.ts" },
+			{ path: "src/file.ts:5-16,960-973", base: "src/file.ts" },
+		];
+		for (const { path: readPath, base } of cases) {
+			const updates = mapAgentSessionEventToAcpSessionUpdates(
+				{
+					type: "tool_execution_start",
+					toolCallId: `toolu_read_sel_${base}`,
+					toolName: "read",
+					args: { path: readPath },
+				} as AgentSessionEvent,
+				"session-1",
+				{ cwd: "/repo" },
+			);
+			expectAcpNotifications(updates);
+			const update = updates[0]!.update as { locations?: { path: string }[]; rawInput?: unknown };
+			expect(update.locations).toEqual([{ path: path.resolve("/repo", base) }]);
+			// The full selector-bearing expression stays in rawInput so the client
+			// can still see exactly what the model asked for.
+			expect(update.rawInput).toEqual({ path: readPath });
+		}
+	});
+	it("keeps a real file literally named like a selector as the read location", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acp-read-literal-"));
+		const literalName = "report:1-20";
+		fs.writeFileSync(path.join(dir, literalName), "data\n");
+		try {
+			const updates = mapAgentSessionEventToAcpSessionUpdates(
+				{
+					type: "tool_execution_start",
+					toolCallId: "toolu_read_literal",
+					toolName: "read",
+					args: { path: literalName },
+				} as AgentSessionEvent,
+				"session-1",
+				{ cwd: dir },
+			);
+			expectAcpNotifications(updates);
+			const update = updates[0]!.update as { locations?: { path: string }[] };
+			expect(update.locations).toEqual([{ path: path.join(dir, literalName) }]);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+	it("does not strip selector-looking suffixes from non-read tool paths", () => {
+		const updates = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "tool_execution_start",
+				toolCallId: "tc-write-colon",
+				toolName: "write",
+				args: { path: "src/report:1-20", content: "x" },
+			} as AgentSessionEvent,
+			"session-1",
+			{ cwd: "/repo" },
+		);
+		expectAcpNotifications(updates);
+		const update = updates[0]!.update as { locations?: { path: string }[] };
+		expect(update.locations).toEqual([{ path: path.resolve("/repo", "src/report:1-20") }]);
+	});
 	it("emits distinct locations for move-style path arguments", () => {
 		const updates = mapAgentSessionEventToAcpSessionUpdates(
 			{

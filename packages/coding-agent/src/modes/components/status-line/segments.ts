@@ -1,7 +1,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import { TERMINAL } from "@oh-my-pi/pi-tui";
+import { SPINNER_ADVANCE_MS, TERMINAL } from "@oh-my-pi/pi-tui";
 import {
 	formatDuration,
 	formatNumber,
@@ -26,6 +26,26 @@ export type { SegmentContext } from "./types";
 
 function withIcon(icon: string, text: string): string {
 	return icon ? `${icon} ${text}` : text;
+}
+/**
+ * Hash-derived accent ANSI for the session title (or preview stand-in title).
+ * Undefined when `statusLine.sessionAccent` is off or the session is unnamed,
+ * so callers fall back to their theme color.
+ */
+function sessionAccentAnsi(ctx: SegmentContext): string | undefined {
+	if (ctx.sessionAccent === false) return undefined;
+	const name = ctx.session?.sessionManager?.getSessionName() || ctx.previewTitle;
+	if (!name) return undefined;
+	return getSessionAccentAnsi(getSessionAccentHex(name, theme.sessionAccentInputs));
+}
+/**
+ * `theme.fg` for accent-role text: the hash-derived session accent when
+ * enabled, else the given theme color. Callers route only the parts that
+ * should carry the session identity color through this (pi icon, model name,
+ * PR link, mode badges, session title) — status colors stay `theme.fg`.
+ */
+function accentFg(ctx: SegmentContext, color: ThemeColor, text: string): string {
+	return `${sessionAccentAnsi(ctx) ?? theme.getFgAnsi(color)}${text}\x1b[39m`;
 }
 
 /** Left-truncate a path/label to `maxLen`, prefixing an ellipsis when clipped. */
@@ -121,10 +141,33 @@ const piSegment: StatusLineSegment = {
 			const icon = theme.icon.ghost ? `${theme.icon.ghost} ` : "";
 			return { content: theme.fg("warning", `${icon}${ctx.focusedAgentId} `), visible: true };
 		}
-		const content = theme.icon.pi ? `${theme.icon.pi} ` : "";
-		return { content: theme.fg("accent", content), visible: true };
+		// Brand fg fades between dim gray (idle) and the accent (working) across
+		// turn edges; the component samples the tween into `brandFgAnsi`.
+		const fgAnsi = ctx.brandFgAnsi ?? theme.getFgAnsi("dim");
+		// While a turn runs the brand icon becomes a braille spinner plus a
+		// whole-unit turn timer (port of rust omp's status-band active brand).
+		const content =
+			ctx.turnElapsedMs != null
+				? `${brandSpinnerFrame()} ${brandTimer(ctx.turnElapsedMs)} `
+				: theme.icon.omp
+					? `${theme.icon.omp} `
+					: "";
+		return { content: `${fgAnsi}${content}\x1b[39m`, visible: true };
 	},
 };
+/** Current braille-spinner glyph on the shared clock, at the Loader's 80ms cadence. */
+function brandSpinnerFrame(): string {
+	const frames = theme.getSpinnerFrames("activity");
+	return frames[Math.floor(Date.now() / SPINNER_ADVANCE_MS) % frames.length] ?? "";
+}
+
+/** Turn timer in omp's brand format: whole seconds → minutes → hours (capped at 99h). */
+function brandTimer(elapsedMs: number): string {
+	const seconds = Math.floor(elapsedMs / 1000);
+	if (seconds < 60) return `${seconds}s`;
+	if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+	return `${Math.min(99, Math.floor(seconds / 3600))}h`;
+}
 
 const modelSegment: StatusLineSegment = {
 	id: "model",
@@ -177,7 +220,7 @@ const modelSegment: StatusLineSegment = {
 
 		// `statusLineModel` is aliased to `accent` in many themes, so the badge
 		// uses status colors to stay visibly distinct from the model name color.
-		let content = theme.fg("statusLineModel", withIcon(modelIcon, modelName));
+		let content = accentFg(ctx, "statusLineModel", withIcon(modelIcon, modelName));
 		// Advisor symbol, colored by the worst status in the roster:
 		// success = all running, warning = quota-exhausted, error = failed,
 		// dim = everything paused/no-model. Per-advisor detail lives in
@@ -198,7 +241,7 @@ const modelSegment: StatusLineSegment = {
 			content += theme.fg(badgeColor, ` ${advisorIcon}`);
 		}
 		if (tail) {
-			content += theme.fg("statusLineModel", tail);
+			content += accentFg(ctx, "statusLineModel", tail);
 		}
 
 		return { content, visible: true };
@@ -243,7 +286,10 @@ function renderGoalMode(ctx: SegmentContext, mode: { enabled: boolean; paused: b
 	if (showBudget && goal) {
 		parts.push(formatGoalBudget(goal.tokensUsed, goal.tokenBudget));
 	}
-	return { content: theme.fg(color, parts.join(" ")), visible: true };
+	return {
+		content: color === "accent" ? accentFg(ctx, color, parts.join(" ")) : theme.fg(color, parts.join(" ")),
+		visible: true,
+	};
 }
 
 function formatLoopLimit(limit: NonNullable<SegmentContext["loopMode"]>["limit"]): string | undefined {
@@ -268,14 +314,16 @@ const modeSegment: StatusLineSegment = {
 		if (plan && (plan.enabled || plan.paused)) {
 			const label = plan.paused ? `Plan${pauseSuffix}` : "Plan";
 			const content = withIcon(theme.icon.plan, label);
-			const color = plan.paused ? "warning" : "accent";
-			return { content: theme.fg(color, content), visible: true };
+			return {
+				content: plan.paused ? theme.fg("warning", content) : accentFg(ctx, "accent", content),
+				visible: true,
+			};
 		}
 
 		const prewalk = ctx.prewalk;
 		if (prewalk?.enabled) {
 			const content = withIcon(theme.icon.prewalk, "Prewalk");
-			return { content: theme.fg("accent", content), visible: true };
+			return { content: accentFg(ctx, "accent", content), visible: true };
 		}
 
 		const goal = ctx.goalMode;
@@ -286,7 +334,7 @@ const modeSegment: StatusLineSegment = {
 		const vibe = ctx.vibeMode;
 		if (vibe?.enabled) {
 			const content = withIcon(theme.icon.agents, "Vibe");
-			return { content: theme.fg("accent", content), visible: true };
+			return { content: accentFg(ctx, "accent", content), visible: true };
 		}
 
 		const loop = ctx.loopMode;
@@ -411,7 +459,7 @@ const prSegment: StatusLineSegment = {
 
 		const label = withIcon(theme.icon.pr, `#${pr.number}`);
 		const content = TERMINAL.hyperlinks ? `\x1b]8;;${pr.url}\x07${label}\x1b]8;;\x07` : label;
-		return { content: theme.fg("accent", content), visible: true };
+		return { content: accentFg(ctx, "accent", content), visible: true };
 	},
 };
 
@@ -537,15 +585,16 @@ const contextPctSegment: StatusLineSegment = {
 		let autoIcon = "";
 		if (ctx.autoCompactEnabled && theme.icon.auto) {
 			const speculation = ctx.compactionSpeculation;
-			const iconColor =
+			const accentIcon = accentFg(ctx, "accent", theme.icon.auto);
+			autoIcon = ` ${
 				speculation === "running"
 					? ctx.speculationBlinkOn
-						? "accent"
-						: "muted"
+						? accentIcon
+						: theme.fg("muted", theme.icon.auto)
 					: speculation === "armed"
-						? "accent"
-						: color;
-			autoIcon = ` ${theme.fg(iconColor, theme.icon.auto)}`;
+						? accentIcon
+						: theme.fg(color, theme.icon.auto)
+			}`;
 		}
 		const compact = ctx.options.context_pct?.compact === true;
 		const display = compact
@@ -623,9 +672,11 @@ const sessionSegment: StatusLineSegment = {
 
 const hostnameSegment: StatusLineSegment = {
 	id: "hostname",
-	render(_ctx) {
+	render(ctx) {
 		const name = os.hostname().split(".")[0];
-		return { content: withIcon(theme.icon.host, name), visible: true };
+		const content = withIcon(theme.icon.host, name);
+		const ansi = sessionAccentAnsi(ctx);
+		return { content: ansi ? `${ansi}${content}\x1b[39m` : content, visible: true };
 	},
 };
 
@@ -682,13 +733,7 @@ const sessionNameSegment: StatusLineSegment = {
 		const name = sessionManager?.getSessionName() || ctx.previewTitle;
 		if (!name) return { content: "", visible: false };
 
-		const accentEnabled = ctx.sessionAccent !== false;
-		const ansi = accentEnabled
-			? (getSessionAccentAnsi(
-					getSessionAccentHex(name, theme.getMajorThemeColorHexes(), theme.accentSurfaceLuminance),
-				) ?? theme.getFgAnsi("accent"))
-			: theme.getFgAnsi("accent");
-		return { content: `${ansi}${sanitizeStatusText(name)}\x1b[39m`, visible: true };
+		return { content: accentFg(ctx, "accent", sanitizeStatusText(name)), visible: true };
 	},
 };
 
@@ -700,7 +745,7 @@ const collabSegment: StatusLineSegment = {
 			ctx.collab.role === "host"
 				? `⇄ collab:${ctx.collab.participantCount}`
 				: `⇄ collab guest:${ctx.collab.participantCount}`;
-		return { content: theme.fg("accent", label), visible: true };
+		return { content: accentFg(ctx, "accent", label), visible: true };
 	},
 };
 
@@ -735,7 +780,7 @@ const usageSegment: StatusLineSegment = {
 		const parts: string[] = [];
 		if (u.tier) {
 			const tier = truncateToWidth(sanitizeStatusText(u.tier), TRUNCATE_LENGTHS.SHORT);
-			if (tier) parts.push(theme.fg("accent", tier));
+			if (tier) parts.push(accentFg(ctx, "accent", tier));
 		}
 		if (u.fiveHour) {
 			const pct = u.fiveHour.percent;

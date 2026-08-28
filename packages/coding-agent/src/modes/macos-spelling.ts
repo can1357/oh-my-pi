@@ -129,10 +129,17 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		if (!this.#sourceRangeIsProse(context, context.startCol, context.startCol + text.length)) {
 			return decorate(text);
 		}
-		const ranges = this.#typoCache.get(text) ?? this.#projectTypoRanges(text);
-		if (!this.#typoCache.has(text)) this.#scheduleTypoRanges(text, `${context.line}:${context.startCol}`);
+		const lane = `${context.line}:${context.startCol}`;
+		const cached = this.#typoCache.get(text);
+		// A cache hit obsoletes any older text queued for this lane. A miss must
+		// keep its just-scheduled entry alive: deleting it here used to cancel the
+		// verification check whenever a stale projection painted ranges while
+		// another check was in flight, freezing the projected undercurl (e.g. the
+		// "eac" of a fast-typed "each") until an unrelated repaint rescheduled it.
+		if (cached === undefined) this.#scheduleTypoRanges(text, lane);
+		else this.#automaticTypoQueue.delete(lane);
+		const ranges = cached ?? this.#projectTypoRanges(text);
 		if (!ranges) return decorate(text);
-		this.#automaticTypoQueue.delete(`${context.line}:${context.startCol}`);
 		if (ranges.length === 0) return decorate(text);
 		let rendered = "";
 		let cursor = 0;
