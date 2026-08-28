@@ -585,7 +585,8 @@ function mapContextToOpenAiChat(context: Context, model: Model<"zed-agent">, opt
 		messages.push({ role: "system", content: context.systemPrompt.join("\n\n") });
 	}
 
-	for (const msg of context.messages) {
+	for (let i = 0; i < context.messages.length; i++) {
+		const msg = context.messages[i];
 		if (msg.role === "user" || msg.role === "developer") {
 			if (typeof msg.content === "string") {
 				messages.push({ role: "user", content: msg.content });
@@ -631,23 +632,41 @@ function mapContextToOpenAiChat(context: Context, model: Model<"zed-agent">, opt
 			if (toolCalls.length > 0) assistantMsg.tool_calls = toolCalls;
 			messages.push(assistantMsg);
 		} else if (msg.role === "toolResult") {
-			const textResult = msg.content
-				.filter(b => b.type === "text")
-				.map(b => (b as TextContent).text)
-				.join("\n");
-			const hasImages = msg.content.some(b => b.type === "image");
-			const omittedImages = hasImages && !supportsImages;
-			const toolResultContent = omittedImages
-				? [textResult, NON_VISION_IMAGE_PLACEHOLDER].filter(Boolean).join("\n")
-				: hasImages && supportsImages
-					? msg.content.map(b => {
-							if (b.type === "text") {
-								return { type: "text" as const, text: b.text };
-							}
-							return convertChatImagePart(b);
-						})
-					: textResult;
-			messages.push({ role: "tool", tool_call_id: msg.toolCallId, content: toolResultContent });
+			const imageBlocks: Array<{ type: "image_url"; image_url: { url: string } }> = [];
+			let j = i;
+
+			for (; j < context.messages.length; j++) {
+				const toolMsg = context.messages[j];
+				if (toolMsg.role !== "toolResult") break;
+
+				const textResult = toolMsg.content
+					.filter(b => b.type === "text")
+					.map(b => (b as TextContent).text)
+					.join("\n");
+				const hasImages = toolMsg.content.some(b => b.type === "image");
+				const omittedImages = hasImages && !supportsImages;
+				const toolResultContent = omittedImages
+					? [textResult, NON_VISION_IMAGE_PLACEHOLDER].filter(Boolean).join("\n")
+					: textResult || (hasImages ? "(see attached image)" : "");
+
+				messages.push({ role: "tool", tool_call_id: toolMsg.toolCallId, content: toolResultContent });
+
+				if (hasImages && supportsImages) {
+					for (const block of toolMsg.content) {
+						if (block.type === "image") {
+							imageBlocks.push(convertChatImagePart(block));
+						}
+					}
+				}
+			}
+
+			i = j - 1;
+			if (imageBlocks.length > 0) {
+				messages.push({
+					role: "user",
+					content: [{ type: "text", text: "Attached image(s) from tool result:" }, ...imageBlocks],
+				});
+			}
 		}
 	}
 

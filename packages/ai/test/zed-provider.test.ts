@@ -144,7 +144,7 @@ describe("Zed Provider Payload Construction", () => {
 		]);
 	});
 
-	it("preserves xAI tool-result images for vision models and uses a placeholder otherwise", () => {
+	it("moves xAI vision tool-result images into a following user message", () => {
 		const context: Context = {
 			messages: [
 				{
@@ -180,8 +180,12 @@ describe("Zed Provider Payload Construction", () => {
 			{
 				role: "tool",
 				tool_call_id: "call_screenshot",
+				content: "Screenshot captured.",
+			},
+			{
+				role: "user",
 				content: [
-					{ type: "text", text: "Screenshot captured." },
+					{ type: "text", text: "Attached image(s) from tool result:" },
 					{
 						type: "image_url",
 						image_url: { url: "data:image/png;base64,AQID" },
