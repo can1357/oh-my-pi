@@ -114,9 +114,12 @@ interface SessionToolsOptions {
 	/** Launch `--agent` persona's exact `tools:` grant (see AgentSessionConfig). */
 	personaToolRestriction?: Set<string>;
 	/**
-	 * The CLI grant that survives leaving the launch persona (see
-	 * AgentSessionConfig.residualCliToolRestriction): the explicit
-	 * `--tools`/`--no-tools` list MINUS any tools the persona itself granted.
+	 * The CLI grant that survives leaving the launch persona (launch `--agent`
+	 * combined with an explicit `--tools`/`--no-tools`): the full CLI list —
+	 * NOT minus the persona's grant (the persona could also name a CLI-listed
+	 * tool; subtracting would wrongly drop it). The persona's live restriction
+	 * supersedes it while active; the residual re-installs on persona exit so
+	 * late MCP/RPC/memory refreshes cannot widen past the CLI grant.
 	 */
 	residualCliToolRestriction?: Set<string>;
 	rebuildSystemPrompt?: (

@@ -169,12 +169,15 @@ export interface AgentSessionConfig {
 	/**
 	 * Residual CLI tool restriction that survives leaving the launch persona:
 	 * when the launch combined `--agent` with an explicit `--tools`/
-	 * `--no-tools` (the `personaCliToolOverride` baseline), the CLI grant —
-	 * minus any tools the persona itself granted — must stay enforced after
-	 * `restoreBaselineTools` drops the persona restriction, or a later MCP /
-	 * RPC / memory refresh could auto-activate tools past the explicit CLI
-	 * grant (codex #3845551575). `undefined` = no residual restriction (a
-	 * persona-supplied restriction lifts completely when the persona is left).
+	 * `--no-tools` (the `personaCliToolOverride` baseline), the FULL CLI grant
+	 * stays enforced after `restoreBaselineTools` drops the persona
+	 * restriction, or a later MCP / RPC / memory refresh could auto-activate
+	 * tools past the explicit CLI grant (codex #3845551575). The persona's own
+	 * live restriction supersedes the residual while active; the residual is
+	 * not net of the persona grant, because the persona could also name a
+	 * CLI-listed tool and subtracting would wrongly drop it. `undefined` = no
+	 * residual restriction (a persona-supplied restriction lifts completely
+	 * when the persona is left).
 	 */
 	residualCliToolRestriction?: Set<string>;
 	/** Baseline tool set captured at creation (without the persona's `tools:` restriction). */

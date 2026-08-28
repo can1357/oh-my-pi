@@ -603,7 +603,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * binding, which clears the snapshot).
 	 */
 	#roster(): AgentDefinition[] {
-		const snapshot = getDiscoveredAgents(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.()));
+		const snapshot = getDiscoveredAgents(
+			discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.()),
+		);
 		return snapshot.length > 0 ? snapshot : this.#discoveredAgents;
 	}
 	/**
