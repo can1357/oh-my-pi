@@ -10,7 +10,7 @@ After each successful state-changing op: if nothing is `in_progress`, the earlie
 |`init`|`items: string[]`|Flattened single-phase init|
 |`start`|`task`|Mark in progress|
 |`done`|`task` or `phase`|Mark completed|
-|`drop`|`task` or `phase`|Mark abandoned|
+|`drop`|`task` or `phase`|Mark abandoned; still incomplete for the stop reminder. Use `block` when waiting on the user; `user-force` to settle with drops|
 |`block`|`task` or `phase`; optional `reason`|Mark blocked: awaiting external input; never auto-promotes; excluded from stop-time incomplete-todo reminder|
 |`unblock`|`task` or `phase`|Blocked task → `pending`|
 |`rm`|optional `task` or `phase`|Remove task/phase; omit both → clear|

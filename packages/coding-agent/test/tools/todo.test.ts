@@ -406,6 +406,11 @@ describe("TodoTool operations", () => {
 		const result = await tool.execute("call-2", { op: "drop", phase: "Work" });
 		const tasks = result.details?.phases[0]?.tasks ?? [];
 		expect(tasks.map(task => task.status)).toEqual(["abandoned", "abandoned"]);
+		const summary = result.content.find(part => part.type === "text");
+		if (summary?.type !== "text") throw new Error("Expected text summary");
+		expect(summary.text).toContain("0/2 done, 2 dropped, 0 open");
+		expect(summary.text).not.toContain("Remaining items: none.");
+		expect(summary.text).toContain("[abandoned]");
 	});
 
 	it("view echoes state without mutating it", async () => {

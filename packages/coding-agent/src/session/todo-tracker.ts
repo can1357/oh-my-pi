@@ -226,8 +226,8 @@ export class TodoTracker {
 				name: phase.name,
 				tasks: phase.tasks
 					.filter(
-						(task): task is TodoItem & { status: "pending" | "in_progress" } =>
-							task.status === "pending" || task.status === "in_progress",
+						(task): task is TodoItem & { status: "pending" | "in_progress" | "abandoned" } =>
+							task.status === "pending" || task.status === "in_progress" || task.status === "abandoned",
 					)
 					.map(task => ({ content: task.content, status: task.status })),
 			}))
@@ -252,7 +252,7 @@ export class TodoTracker {
 		}
 		this.#reminderCount++;
 		const todoList = incompleteByPhase
-			.map(phase => `- ${phase.name}\n${phase.tasks.map(task => `  - ${task.content}`).join("\n")}`)
+			.map(phase => `- ${phase.name}\n${phase.tasks.map(task => `  - ${task.content}${task.status === "abandoned" ? " (dropped)" : ""}`).join("\n")}`)
 			.join("\n");
 		const reminder =
 			`<system-reminder>\n` +

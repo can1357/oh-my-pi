@@ -727,17 +727,21 @@ function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false):
 	const remainingByPhase = phases
 		.map(phase => ({
 			name: phase.name,
-			tasks: phase.tasks.filter(task => task.status === "pending" || task.status === "in_progress"),
+			tasks: phase.tasks.filter(
+				task => task.status === "pending" || task.status === "in_progress" || task.status === "abandoned",
+			),
 		}))
 		.filter(phase => phase.tasks.length > 0);
 	const remainingTasks = remainingByPhase.flatMap(phase => phase.tasks.map(task => ({ ...task, phase: phase.name })));
 
 	let currentIdx = phases.findIndex(phase =>
-		phase.tasks.some(task => task.status === "pending" || task.status === "in_progress"),
+		phase.tasks.some(
+			task => task.status === "pending" || task.status === "in_progress" || task.status === "abandoned",
+		),
 	);
 	if (currentIdx === -1) currentIdx = phases.length - 1;
 	const current = phases[currentIdx];
-	const done = current.tasks.filter(task => task.status === "completed" || task.status === "abandoned").length;
+	const done = current.tasks.filter(task => task.status === "completed").length;
 
 	const lines: string[] = [];
 	if (errors.length > 0) lines.push(`Errors: ${errors.join("; ")}`);
@@ -749,9 +753,10 @@ function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false):
 			lines.push(`  - ${task.content} [${task.status}] (${task.phase})`);
 		}
 	}
-	// Closed = completed + abandoned, mirroring the per-phase `done` count.
-	const closedAll = tasks.filter(task => task.status === "completed" || task.status === "abandoned").length;
+	const completedAll = tasks.filter(task => task.status === "completed").length;
+	const droppedAll = tasks.filter(task => task.status === "abandoned").length;
 	const blockedAll = tasks.filter(task => task.status === "blocked").length;
+	const openAll = tasks.filter(task => task.status === "pending" || task.status === "in_progress").length;
 	// The active phase is the EARLIEST one still holding open work, so the
 	// in-progress pointer can sit in a phase whose successors already have
 	// completed tasks. Detect that "worked ahead" case to explain the
@@ -762,7 +767,7 @@ function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false):
 			idx > currentIdx && phase.tasks.some(task => task.status === "completed" || task.status === "abandoned"),
 	);
 	lines.push(
-		`Overall: ${closedAll}/${tasks.length} done, ${remainingTasks.length} open${blockedAll > 0 ? `, ${blockedAll} blocked` : ""}.`,
+		`Overall: ${completedAll}/${tasks.length} done${droppedAll > 0 ? `, ${droppedAll} dropped` : ""}, ${openAll} open${blockedAll > 0 ? `, ${blockedAll} blocked` : ""}.`,
 	);
 	lines.push(
 		`Active phase ${currentIdx + 1}/${phases.length} "${current.name}" (${done}/${current.tasks.length})${
