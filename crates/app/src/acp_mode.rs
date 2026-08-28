@@ -1418,8 +1418,11 @@ impl Runtime {
 			});
 		}
 		let effective_model = headless.model().as_str().to_owned();
+		// Clamp against the catalog this session was composed against: the
+		// outer catalog was loaded before `open_with_policy` and may have gone
+		// stale while the fork/resume open was awaited.
 		let thinking =
-			clamp_thinking_level(catalog.as_ref(), &effective_model, requested)?.to_owned();
+			clamp_thinking_level(headless.catalog(), &effective_model, requested)?.to_owned();
 		headless.set_thinking(reasoning_for(&thinking));
 		let session_id = Str::from(headless.session_id());
 		if capabilities.elicitation {
@@ -3949,5 +3952,30 @@ mod tests {
 			clamp_thinking_level(catalog, "apple-intelligence/apple-intelligence", "none").unwrap(),
 			"none"
 		);
+	}
+
+	#[test]
+	fn acp_thinking_clamp_requires_a_catalog_governing_the_model() {
+		let catalog = snapshot::Catalog::try_embedded().expect("catalog");
+		let levels = ["minimal", "low", "medium", "high", "xhigh", "max"];
+		let (key, requested, clamped) = catalog
+			.models()
+			.iter()
+			.find_map(|model| {
+				levels.iter().find_map(|level| {
+					clamp_thinking_level(catalog, model.key.as_str(), level)
+						.ok()
+						.map(|clamped| (model.key.clone(), *level, clamped))
+				})
+			})
+			.expect("a catalog model with a resolvable thinking policy");
+		assert_eq!(clamp_thinking_level(catalog, key.as_str(), requested).expect("clamped"), clamped);
+		// A catalog snapshot that predates the opened model — the stale
+		// outer-catalog failure mode — cannot clamp the session's effective
+		// model, which is why the post-open clamp must consult the opened
+		// session's own catalog.
+		let error = clamp_thinking_level(catalog, "nonexistent/unavailable", requested)
+			.expect_err("model outside the consulted catalog");
+		assert!(error.to_string().contains("unknown model"));
 	}
 }
