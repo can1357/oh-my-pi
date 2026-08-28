@@ -91,6 +91,21 @@ export function embeddingApiUrl(env: Env = process.env): string {
 	return envString("MNEMOPI_EMBEDDING_API_URL", envString("OPENROUTER_BASE_URL", DEFAULT_EMBEDDING_API_URL, env), env);
 }
 
+/**
+ * Local embedding backend: `"fastembed"` (ONNX, default) or `"ggml"`
+ * (llama.cpp via node-llama-cpp, GPU). `"ggml"` loads a GGUF embedding model.
+ */
+export type EmbeddingBackend = "fastembed" | "ggml";
+
+export function embeddingBackend(env: Env = process.env): EmbeddingBackend {
+	return envOneOf("MNEMOPI_EMBED_BACKEND", ["fastembed", "ggml"] as const, "fastembed", env);
+}
+
+/** Explicit GGUF model path for the ggml backend (`MNEMOPI_EMBED_GGUF_PATH`). */
+export function embeddingGgufPath(env: Env = process.env): string {
+	return envOptionalString("MNEMOPI_EMBED_GGUF_PATH", env) ?? "";
+}
+
 export function embeddingsViaApi(env: Env = process.env): boolean {
 	return envTruthy("MNEMOPI_EMBEDDINGS_VIA_API", env);
 }

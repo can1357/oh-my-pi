@@ -46,10 +46,14 @@
   },
   "peerDependencies": {
     "fastembed": "2.1.0",
+    "node-llama-cpp": "3.20.0",
     "onnxruntime-node": "1.21.0"
   },
   "peerDependenciesMeta": {
     "fastembed": {
+      "optional": true
+    },
+    "node-llama-cpp": {
       "optional": true
     },
     "onnxruntime-node": {
@@ -59,6 +63,7 @@
   "devDependencies": {
     "@types/bun": "catalog:",
     "fastembed": "catalog:",
+    "node-llama-cpp": "3.20.0",
     "onnxruntime-node": "catalog:"
   },
   "engines": {
