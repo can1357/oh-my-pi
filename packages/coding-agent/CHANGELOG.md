@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `write` accepts an `args` object for `xd://` device dispatch, so a device payload no longer has to be hand-escaped into the `content` string; `content` keeps working and a call may carry only one of the two.
+
 ## [18.0.10] - 2026-08-28
 
 ### Added

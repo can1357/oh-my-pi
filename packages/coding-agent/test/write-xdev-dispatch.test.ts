@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import { adaptSchemaForStrict, toolWireSchema } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as themeModule from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { ToolChoiceQueue } from "@oh-my-pi/pi-coding-agent/session/tool-choice-queue";
@@ -113,6 +114,49 @@ describe("read and write route xd:// device URLs", () => {
 		}
 	});
 
+	it("dispatches typed device arguments without nested JSON escaping", async () => {
+		let received: unknown;
+		const echoDevice: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Returns its payload",
+			parameters: type({ content: "string" }),
+			approval: () => "read",
+			async execute(_toolCallId, params) {
+				received = params;
+				return { content: [{ type: "text", text: "received" }] };
+			},
+		};
+		const write = new WriteTool(xdevSession(process.cwd(), { xdev: createTestXdevState([echoDevice]) }));
+		const payload = { content: 'first\tline\n"quoted" — \\backslash' };
+
+		expect(write.approval({ path: "xd://echo", args: payload })).toEqual({ tier: "read", policyKey: "echo" });
+		const result = await write.execute("write-xdev-typed-args", { path: "xd://echo", args: payload });
+
+		expect(result.isError).toBeUndefined();
+		expect(received).toEqual(payload);
+		await expect(
+			write.execute("write-xdev-both-payloads", { path: "xd://echo", content: "{}", args: payload }),
+		).rejects.toThrow("either `content` or typed `args`");
+		await expect(write.execute("write-xdev-args-on-file", { path: "notes.md", args: payload })).rejects.toThrow(
+			"valid only for an xd:// device",
+		);
+		// arktype's open record admits an array at the type level; isRecord is the guard that matters.
+		await expect(
+			write.execute("write-xdev-args-array", { path: "xd://echo", args: ["a", "b"] as never }),
+		).rejects.toThrow("must be a JSON object");
+		await expect(write.execute("write-xdev-no-payload", { path: "xd://echo" })).rejects.toThrow(
+			"requires `content`, or typed `args`",
+		);
+		// resolve/reject/propose and report_issue consume the string as prose, so an object would be
+		// recorded verbatim as the reason, proposal, or issue text.
+		for (const device of ["resolve", "reject", "propose", "report_issue"]) {
+			await expect(
+				write.execute(`write-xdev-text-device-${device}`, { path: `xd://${device}`, args: { title: "auth" } }),
+			).rejects.toThrow("takes plain text");
+		}
+	});
+
 	it("records a read tier on the dispatch of a read-only device", async () => {
 		const readDevice: AgentTool = {
 			name: "peek",
@@ -130,6 +174,117 @@ describe("read and write route xd:// device URLs", () => {
 		const result = await write.execute("write-xdev-read", { path: "xd://peek", content: JSON.stringify({ q: "x" }) });
 		expect(result.isError).toBeUndefined();
 		expect(result.details?.xdev).toMatchObject({ tool: "peek", mode: "execute", tier: "read" });
+	});
+
+	// A bare `type("object")` for `args` survives the wire pass untouched, and strict adaptation then
+	// CLOSES it — `additionalProperties: false` with an empty `properties` map — so an OpenAI/Codex
+	// strict path can only emit `args: {}` and every real device call fails validation. The open record
+	// disqualifies the schema from strict mode instead, which `adaptSchemaForStrict` reports by failing
+	// open to non-strict and returning the schema unchanged (the same trade `bash.env` makes).
+	it("keeps typed device args open in the provider wire schema", () => {
+		const write = new WriteTool(xdevSession(process.cwd()));
+		const wire = toolWireSchema(write as unknown as AgentTool);
+		const wireArgs = (wire.properties as Record<string, Record<string, unknown>>).args;
+
+		expect(wireArgs.type).toBe("object");
+		expect(wireArgs.additionalProperties).toBe(true);
+
+		const adapted = adaptSchemaForStrict(wire, true);
+		expect(adapted.strict).toBe(false);
+		const adaptedArgs = (adapted.schema.properties as Record<string, Record<string, unknown>>).args;
+		expect(adaptedArgs.additionalProperties).toBe(true);
+		expect(adaptedArgs.properties).toEqual({});
+	});
+
+	// `content` is decoded incrementally by the streamed-args reveal; a typed `args` object is not, so
+	// the renderer has to read the raw prefix or the mounted card sits blank between full parses.
+	it("renders a typed-args device dispatch while it is still streaming", async () => {
+		await themeModule.initTheme();
+		const uiTheme = (await themeModule.getThemeByName("dark")) ?? (await themeModule.getThemeByName("light"));
+		if (!uiTheme) throw new Error("expected an initialized theme");
+		const options = { expanded: false, isPartial: true };
+
+		// Mid-stream: `args` has not closed, so no parse has produced an object yet.
+		const streaming = writeToolRenderer.renderCall(
+			{
+				path: "xd://mcp__ecoport_search",
+				__partialJson: '{"path":"xd://mcp__ecoport_search","args":{"pattern":"Broken","scope":"game.Sta',
+			},
+			options,
+			uiTheme,
+		);
+		expect(streaming).toBeDefined();
+		const streamingText = Bun.stripANSI(streaming!.render(120).join("\n"));
+		expect(streamingText).toContain("ecoport/search");
+		expect(streamingText).toContain("Broken");
+
+		// The reveal controller hands renderers a parsed `args` object refreshed only on a throttled
+		// full parse AND a prefix refreshed every frame. The fresher prefix has to win, or the preview
+		// freezes on the last parse — the case the first attempt got backwards.
+		const stalePlusFresh = writeToolRenderer.renderCall(
+			{
+				path: "xd://mcp__ecoport_search",
+				args: { pattern: "Bro" },
+				__partialJson: '{"path":"xd://mcp__ecoport_search","args":{"pattern":"Broken","scope":"game.Sta',
+			},
+			options,
+			uiTheme,
+		);
+		expect(Bun.stripANSI(stalePlusFresh!.render(120).join("\n"))).toContain("Broken");
+
+		// Arguments final: no prefix, so the parsed object is the only source and still renders.
+		const settled = writeToolRenderer.renderCall(
+			{ path: "xd://mcp__ecoport_search", args: { pattern: "Broken" } },
+			options,
+			uiTheme,
+		);
+		expect(Bun.stripANSI(settled!.render(120).join("\n"))).toContain("Broken");
+
+		// No `args` in the prefix yet: still nothing to show, and nothing invented.
+		expect(
+			writeToolRenderer.renderCall(
+				{ path: "xd://mcp__ecoport_search", __partialJson: '{"path":"xd://mcp__ecoport_sea' },
+				options,
+				uiTheme,
+			),
+		).toBeUndefined();
+	});
+
+	// The payload slice must come from the TOP-LEVEL `args`. Two shapes could fool a plain regex: an
+	// injected intent whose prose contains JSON-looking text (harmless in practice — JSON escapes the
+	// quotes) and a sibling object carrying its own `args` key, which a hallucinated extra field can
+	// produce and which would poison the preview for the rest of the stream.
+	it("slices the top-level args even when another args key appears first", async () => {
+		await themeModule.initTheme();
+		const uiTheme = (await themeModule.getThemeByName("dark")) ?? (await themeModule.getThemeByName("light"));
+		if (!uiTheme) throw new Error("expected an initialized theme");
+		const options = { expanded: false, isPartial: true };
+		const render = (partial: string) =>
+			Bun.stripANSI(
+				writeToolRenderer
+					.renderCall({ path: "xd://mcp__ecoport_search", __partialJson: partial }, options, uiTheme)!
+					.render(120)
+					.join("\n"),
+			);
+
+		// Intent field first, prose shaped like JSON.
+		expect(
+			render(
+				JSON.stringify({
+					path: "xd://mcp__ecoport_search",
+					i: 'call with "args": {"pattern":"Decoy"}',
+					args: { pattern: "Real" },
+				}),
+			),
+		).toContain("Real");
+
+		// A sibling object holding its own args key, textually ahead of the real one.
+		expect(
+			render('{"path":"xd://mcp__ecoport_search","opts":{"args":{"pattern":"Decoy"}},"args":{"pattern":"Real"}}'),
+		).toContain("Real");
+
+		// Still streaming inside the real object: the partial tail is what the inner renderer gets.
+		expect(render('{"path":"xd://mcp__ecoport_search","args":{"pattern":"Rea')).toContain("Rea");
 	});
 
 	it("resolves device dispatches against the device's user policy, falling back to write's", async () => {
