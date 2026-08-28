@@ -234,16 +234,16 @@ fn apply_xattrs_with(
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn copy_xattrs(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
-	apply_xattrs_with(to.as_ref(), retrieve_xattrs_with(from.as_ref(), &FOLLOWING)?, &FOLLOWING)
+pub(crate) fn copy_xattrs(from: &Path, to: &Path) -> io::Result<()> {
+	apply_xattrs_with(to, retrieve_xattrs_with(from, &FOLLOWING)?, &FOLLOWING)
 }
 
 /// Copies the attributes a symlink itself carries. Neither operand is
 /// resolved, so moving a link across filesystems cannot read or write the
 /// file it points to.
 #[cfg(target_os = "linux")]
-pub(crate) fn copy_link_xattrs(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
-	apply_xattrs_with(to.as_ref(), retrieve_xattrs_with(from.as_ref(), &LINK)?, &LINK)
+pub(crate) fn copy_link_xattrs(from: &Path, to: &Path) -> io::Result<()> {
+	apply_xattrs_with(to, retrieve_xattrs_with(from, &LINK)?, &LINK)
 }
 
 #[cfg(all(test, target_os = "linux"))]
