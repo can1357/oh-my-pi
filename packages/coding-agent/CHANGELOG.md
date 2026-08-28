@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added ArkaneCloud to the `/login` provider list and the `ARKANECLOUD_API_KEY` env help.
+
 ## [18.0.9] - 2026-08-28
 
 ### Breaking Changes

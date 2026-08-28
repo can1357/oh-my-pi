@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added built-in ArkaneCloud provider support (`arkanecloud`, `ARKANECLOUD_API_KEY`) with live model discovery, including chat models, context windows, pricing, cache-read pricing, image input, tool calling, reasoning effort levels, and turning thinking on or off.
+
 ## [18.0.9] - 2026-08-28
 
 ### Added

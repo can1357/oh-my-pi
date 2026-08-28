@@ -5,6 +5,7 @@ import { alibabaCodingPlanProvider } from "./alibaba-coding-plan";
 import { alibabaTokenPlanProvider } from "./alibaba-token-plan";
 import { amazonBedrockProvider } from "./amazon-bedrock";
 import { anthropicProvider } from "./anthropic";
+import { arkaneCloudProvider } from "./arkanecloud";
 import { azureProvider } from "./azure";
 import { basetenProvider } from "./baseten";
 import { bedrockMantleProvider } from "./bedrock-mantle";
@@ -146,6 +147,7 @@ const ALL = [
 	opencodeZenProvider,
 	opencodeGoProvider,
 	yoloAutoProvider,
+	arkaneCloudProvider,
 	tavilyProvider,
 	kagiProvider,
 	exaProvider,

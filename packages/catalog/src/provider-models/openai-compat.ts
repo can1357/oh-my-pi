@@ -4925,6 +4925,171 @@ export function yoloAutoModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 16.8 ArkaneCloud (arkanecloud.com)
+// ---------------------------------------------------------------------------
+
+/**
+ * ArkaneCloud's OpenAI-compatible base. `GET /models` and
+ * `POST /chat/completions` hang off it, authenticated with
+ * `Authorization: Bearer <key>` — the form the API documents for OpenAI SDK
+ * clients (it also accepts `x-api-key` and `Authorization: Api-Key`).
+ */
+const ARKANECLOUD_BASE_URL = "https://console.arkanecloud.com/api/v2";
+
+export interface ArkaneCloudModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Build one ArkaneCloud model's thinking ladder from its published `reasoning`
+ * block.
+ *
+ * `supported_efforts` can be empty for a model that reasons but exposes no
+ * effort dial — orthogonal to `can_disable`, which says whether reasoning can
+ * be switched off at all. An empty list carries `thinking: undefined` here
+ * (ThinkingConfig's never-empty contract) while `reasoning` stays true; note
+ * that `buildModel` may then derive a canonical ladder from model identity, so
+ * this returns the published surface, not the final one. Efforts are re-ordered
+ * through `THINKING_EFFORTS` so the ladder is least → most intensive regardless
+ * of wire order; ArkaneCloud publishes the same spellings omp's `Effort` uses,
+ * so the wire values are compared directly (reintroduce a lookup table if omp
+ * ever renames one). `none` never appears in `supported_efforts`, so it is not
+ * a selectable level. `can_disable: false` documents an endpoint that rejects
+ * being switched off, which is exactly `requiresEffort`.
+ */
+function mapArkaneCloudThinkingConfig(value: unknown): ThinkingConfig | undefined {
+	if (!isRecord(value)) {
+		return undefined;
+	}
+	const wireEfforts = Array.isArray(value.supported_efforts) ? value.supported_efforts : [];
+	const efforts = THINKING_EFFORTS.filter(effort => wireEfforts.some(level => level === effort));
+	if (efforts.length === 0) {
+		return undefined;
+	}
+	const thinking: ThinkingConfig = { mode: "effort", efforts };
+	if (value.can_disable === false) {
+		thinking.requiresEffort = true;
+	}
+	return thinking;
+}
+
+/**
+ * Map one `GET /api/v2/models` row onto a chat model spec.
+ *
+ * The endpoint publishes everything omp needs — per-million-token prices
+ * (`ModelCost`'s unit, used verbatim), the context window, a recommended
+ * output cap that already leaves room for input, input modalities, tool-call
+ * support, and reasoning metadata — so discovery needs no bundled reference and
+ * is authoritative over *which models exist* and what they cost. The published
+ * effort ladder is the starting point rather than the last word: `buildModel`
+ * normalizes it against omp's canonical per-family ladder, which is deliberate
+ * and applies to every gateway. `type: "image"` rows are image-generation
+ * models served by `/images/generations` rather than the chat endpoint, so they
+ * are dropped.
+ */
+function mapArkaneCloudModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+): ModelSpec<"openai-completions"> | null {
+	if (entry.type !== "text") {
+		return null;
+	}
+	const pricing = isRecord(entry.pricing) ? entry.pricing : {};
+	const capabilities = isRecord(entry.capabilities) ? entry.capabilities : {};
+	const reasoning = isRecord(entry.reasoning) ? entry.reasoning : undefined;
+	const thinking = mapArkaneCloudThinkingConfig(entry.reasoning);
+	const compat: OpenAICompat | undefined = reasoning
+		? {
+				// ArkaneCloud documents one OpenAI-compatible reasoning contract for
+				// every family. `isQwen` in compat/openai.ts is id-based, so without
+				// this the `Qwen/...` ids resolve to the `qwen` dialect and would ship
+				// `enable_thinking`, which ArkaneCloud does not document.
+				thinkingFormat: "openai",
+				// Reasons but publishes no effort ladder: never send an
+				// identity-derived `reasoning_effort` it never advertised.
+				...(thinking === undefined && { supportsReasoningEffort: false }),
+				// Thinking-off rides the documented `reasoning: { enabled: false }`
+				// switch. Without it the `openai` dialect falls back to
+				// `lowest-effort`, which keeps reasoning ON at the bottom of the
+				// ladder — so asking for no thinking still pays for thinking. The
+				// enum value is named after OpenRouter but encodes exactly the
+				// generic `reasoning: { enabled: false }` body ArkaneCloud documents.
+				// `=== true` is deliberate: absent or malformed metadata must not
+				// produce a disable switch the route never advertised.
+				...(reasoning.can_disable === true && {
+					reasoningDisableMode: "openrouter-enabled-false",
+				}),
+				// The thinking-engaged variant has to exist whenever the base mode is
+				// set above: enabled requests read `whenThinking`, and inheriting
+				// `openrouter-enabled-false` there would move intensity into
+				// `reasoning: { effort }` instead of the top-level `reasoning_effort`
+				// ArkaneCloud documents.
+				whenThinking: {
+					reasoningDisableMode: "lowest-effort",
+					// A default-off model needs an explicit switch-on, or picking a
+					// thinking level would leave it silently not reasoning.
+					...(reasoning.enabled_by_default === false && {
+						extraBody: { reasoning: { enabled: true } },
+					}),
+				},
+			}
+		: undefined;
+	return {
+		...defaults,
+		name: toModelName(entry.name, defaults.name),
+		// The `reasoning` block is omitted entirely for models that do not
+		// reason, so its presence is the signal — independent of whether the
+		// model also exposes an effort dial.
+		reasoning: reasoning !== undefined,
+		...(thinking ? { thinking } : {}),
+		...(compat ? { compat } : {}),
+		input: toInputCapabilities(entry.input_modalities),
+		// `tool_calling` defaults to true upstream because tools are forwarded to
+		// the serving provider verbatim; only an explicit false is a real signal.
+		...(capabilities.tool_calling === false ? { supportsTools: false } : {}),
+		cost: {
+			input: toPositiveNumber(pricing.input, 0),
+			output: toPositiveNumber(pricing.output, 0),
+			// Text rows always carry a cache-read rate (it falls back to the input
+			// rate upstream); ArkaneCloud bills no separate cache-write.
+			cacheRead: toPositiveNumber(pricing.cache_read, 0),
+			cacheWrite: 0,
+		},
+		contextWindow: toPositiveNumber(entry.context_length, null),
+		maxTokens: toPositiveNumber(entry.max_output_tokens, null),
+	};
+}
+
+/**
+ * ArkaneCloud model manager.
+ *
+ * `GET /api/v2/models` is credential-gated (401 without a key), so there is no
+ * keyless catalog-generation path and nothing bundled in `models.json`: live
+ * discovery is the only source of ArkaneCloud models, and it is authoritative.
+ */
+export function arkaneCloudModelManagerOptions(
+	config?: ArkaneCloudModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = (config?.baseUrl ?? ARKANECLOUD_BASE_URL).replace(/\/$/, "");
+	return {
+		providerId: "arkanecloud",
+		dynamicModelsAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "arkanecloud",
+					baseUrl,
+					apiKey,
+					mapModel: mapArkaneCloudModel,
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
 
 // ---------------------------------------------------------------------------
 // 17. Qwen Portal

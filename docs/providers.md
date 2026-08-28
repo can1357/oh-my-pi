@@ -99,6 +99,7 @@ Each provider has one or more environment variables that supply a key when no st
 | Provider ID                      | Environment variable(s)                                                       |
 | -------------------------------- | ----------------------------------------------------------------------------- |
 | `aiand`                          | `AIAND_API_KEY`                                                               |
+| `arkanecloud`                    | `ARKANECLOUD_API_KEY`                                                         |
 | `cerebras`                       | `CEREBRAS_API_KEY`                                                            |
 | `alibaba-token-plan`             | `ALIBABA_TOKEN_PLAN_API_KEY`, then `BAILIAN_TOKEN_PLAN_API_KEY`               |
 | `baseten`                        | `BASETEN_API_KEY`                                                             |
