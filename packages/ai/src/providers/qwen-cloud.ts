@@ -12,10 +12,7 @@
  * available for callers that prefer it.
  */
 
-import {
-	QWEN_CLOUD_ANTHROPIC_BASE_URL,
-	QWEN_CLOUD_OPENAI_BASE_URL,
-} from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { QWEN_CLOUD_ANTHROPIC_BASE_URL } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { Api, Context, Model } from "../types";
 import type { AssistantMessageEventStream } from "../utils/event-stream";
 import {
@@ -41,8 +38,11 @@ export function streamQwenCloud(
 	options?: QwenCloudOptions,
 ): AssistantMessageEventStream {
 	return streamOpenAIAnthropicShim(model, context, options, {
+		// Leave `openaiBaseUrl` unset so the shim keeps the model's configured
+		// base URL. Discovery (`qwenCloudModelManagerOptions`) already bakes any
+		// `providers.qwen-cloud.baseUrl` override into each discovered model, so
+		// overriding here would silently discard proxy/gateway endpoints.
 		anthropicBaseUrl: QWEN_CLOUD_ANTHROPIC_BASE_URL,
-		openaiBaseUrl: QWEN_CLOUD_OPENAI_BASE_URL,
 		defaultFormat: "openai",
 	});
 }

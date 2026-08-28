@@ -3,7 +3,7 @@ import { afterEach, describe, expect, test, vi } from "bun:test";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { getEnvApiKey, streamSimple } from "@oh-my-pi/pi-ai/stream";
-import type { AssistantMessageEvent, FetchImpl, Model, ModelSpec, SimpleStreamOptions } from "@oh-my-pi/pi-ai/types";
+import type { FetchImpl, Model, ModelSpec, SimpleStreamOptions } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { QWEN_CLOUD_OPENAI_BASE_URL } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
@@ -38,7 +38,10 @@ function interceptingFetch(wire: "openai" | "anthropic"): {
 	const body =
 		wire === "anthropic"
 			? `event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","role":"assistant","type":"message","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}}\n\n` +
+				`event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n` +
 				`event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\n\n` +
+				`event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n` +
+				`event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}\n\n` +
 				`event: message_stop\ndata: {"type":"message_stop"}\n\n`
 			: `data: {"choices":[{"delta":{"reasoning_content":"th"},"finish_reason":null,"index":0}]}\n\n` +
 				`data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop","index":0}]}\n\ndata: [DONE]\n\n`;
@@ -51,11 +54,6 @@ function interceptingFetch(wire: "openai" | "anthropic"): {
 		return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
 	};
 	return { fetch, seen };
-}
-
-async function firstEvent(stream: AsyncIterable<AssistantMessageEvent>): Promise<AssistantMessageEvent | undefined> {
-	for await (const event of stream) return event;
-	return undefined;
 }
 
 describe("Qwen Cloud wiring", () => {
@@ -103,19 +101,27 @@ describe("Qwen Cloud wiring", () => {
 	test("default format streams against the OpenAI compatible-mode endpoint with bearer auth", async () => {
 		const { fetch, seen } = interceptingFetch("openai");
 		const options: SimpleStreamOptions = { apiKey: "sk-ws-test", fetch };
-		await firstEvent(
-			streamSimple(qwenCloudModel(), { messages: [{ role: "user", content: "hi", timestamp: 0 }] }, options),
-		);
+		const result = await streamSimple(
+			qwenCloudModel(),
+			{ messages: [{ role: "user", content: "hi", timestamp: 0 }] },
+			options,
+		).result();
 		expect(seen[0]?.auth).toBe("Bearer sk-ws-test");
 		expect(seen[0]?.url.startsWith(QWEN_CLOUD_OPENAI_BASE_URL)).toBe(true);
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toContainEqual({ type: "text", text: "ok" });
 	});
 
 	test("anthropic format routes to the apps/anthropic surface via x-api-key-compatible transport", async () => {
 		const { fetch, seen } = interceptingFetch("anthropic");
 		const options: SimpleStreamOptions = { apiKey: "sk-ws-test", fetch, qwenCloudApiFormat: "anthropic" };
-		await firstEvent(
-			streamSimple(qwenCloudModel(), { messages: [{ role: "user", content: "hi", timestamp: 0 }] }, options),
-		);
+		const result = await streamSimple(
+			qwenCloudModel(),
+			{ messages: [{ role: "user", content: "hi", timestamp: 0 }] },
+			options,
+		).result();
 		expect(seen[0]?.url).toBe("https://dashscope-intl.aliyuncs.com/apps/anthropic/v1/messages");
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toContainEqual({ type: "text", text: "ok" });
 	});
 });

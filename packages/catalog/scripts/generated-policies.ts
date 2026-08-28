@@ -221,6 +221,17 @@ export function rebakeModelThinking(model: ModelSpec<Api>): void {
 	) {
 		return;
 	}
+	// Qwen Cloud's curated seed mirrors the Token Plan surface: qwen3.8-max
+	// accepts disable, but qwen3.8-max-preview is thinking-only (requiresEffort)
+	// and its effort ladder must survive the re-bake or the mandatory-reasoning
+	// clamp at request time never fires.
+	if (
+		model.provider === "qwen-cloud" &&
+		(model.id === "qwen3.8-max-preview" || model.id === "qwen3.8-max") &&
+		model.thinking
+	) {
+		return;
+	}
 	if (model.provider === "openrouter" && model.thinking?.requiresEffort === true) return;
 	const requiresProviderAuthoredEffort =
 		model.provider === "umans" && (model.thinking?.requiresEffort === true || model.id === "umans-kimi-k2.7");

@@ -31,18 +31,24 @@ function qwenCloudModelsFetch(ids: string[]): { calls: string[]; authorizations:
 }
 
 describe("Qwen Cloud provider", () => {
-	test("static seed carries the documented caps for the headline models", () => {
+	test("keyless catalog is a populated chat-only seed", () => {
+		// Without credentials there is no live /models snapshot, so the provider
+		// must still present a usable chat catalog: dynamicModelsAuthoritative
+		// defers to the bundled seed, and every row is a chat-completions model
+		// on the focused DashScope surface.
 		const options = qwenCloudModelManagerOptions();
 		expect(options.providerId).toBe("qwen-cloud");
 		expect(options.dynamicModelsAuthoritative).toBe(true);
 
-		const max = options.staticModels?.find(model => model.id === "qwen3.8-max");
-		expect(max).toBeDefined();
-		expect(max?.contextWindow).toBe(1_000_000);
-		expect(max?.maxTokens).toBe(131_072);
-		expect(max?.input).toContain("image");
-		expect(max?.reasoning).toBe(true);
-		for (const model of options.staticModels ?? []) {
+		// No fetchDynamicModels is installed without a key: the picker relies
+		// solely on the static seed, so it must be non-empty and typed by the
+		// chat transport.
+		expect(options.fetchDynamicModels).toBeUndefined();
+		const staticModels = options.staticModels ?? [];
+		// The default model must be bundled so a keyless install has a usable
+		// headline entry (matches the provider's documented default).
+		expect(staticModels.some(model => model.id === "qwen3.8-max")).toBe(true);
+		for (const model of staticModels) {
 			expect(model.api).toBe("openai-completions");
 			expect(model.baseUrl).toBe(QWEN_CLOUD_OPENAI_BASE_URL);
 		}

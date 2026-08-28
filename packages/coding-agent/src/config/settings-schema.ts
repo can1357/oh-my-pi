@@ -5606,6 +5606,31 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"providers.qwenCloudApiFormat": {
+		type: "enum",
+		values: ["auto", "openai", "anthropic"] as const,
+		default: "auto",
+		ui: {
+			tab: "providers",
+			group: "Protocol",
+			label: "Qwen Cloud API Format",
+			description: "API format for Qwen Cloud provider (auto uses the OpenAI surface)",
+			options: [
+				{ value: "auto", label: "Auto", description: "Use the OpenAI-compatible surface" },
+				{
+					value: "openai",
+					label: "OpenAI",
+					description: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+				},
+				{
+					value: "anthropic",
+					label: "Anthropic",
+					description: "https://dashscope-intl.aliyuncs.com/apps/anthropic",
+				},
+			],
+		},
+	},
+
 	"providers.openaiWebsockets": {
 		type: "enum",
 		values: ["auto", "off", "on"] as const,

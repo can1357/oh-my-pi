@@ -3361,6 +3361,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		};
 		const kimiApiFormatSetting = settings.get("providers.kimiApiFormat");
 		const kimiApiFormat = kimiApiFormatSetting === "auto" ? undefined : kimiApiFormatSetting;
+		const qwenCloudApiFormatSetting = settings.get("providers.qwenCloudApiFormat");
+		const qwenCloudApiFormat = qwenCloudApiFormatSetting === "auto" ? undefined : qwenCloudApiFormatSetting;
 		agent = new Agent({
 			initialState: {
 				systemPrompt,
@@ -3395,6 +3397,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			repetitionPenalty: settings.get("repetitionPenalty") >= 0 ? settings.get("repetitionPenalty") : undefined,
 			hideThinkingSummary: settings.get("omitThinking"),
 			kimiApiFormat,
+			qwenCloudApiFormat,
 			preferWebsockets: preferOpenAICodexWebsockets,
 			getToolContext: tc => toolContextStore.getContext(tc),
 			getApiKey: options.getApiKey ?? (requestModel => modelRegistry.resolver(requestModel, agent.sessionId)),
@@ -3968,6 +3971,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					hideThinkingSummary: agent.hideThinkingSummary,
 					maxRetryDelayMs: agent.maxRetryDelayMs,
 					kimiApiFormat,
+					qwenCloudApiFormat,
 					preferWebsockets: preferOpenAICodexWebsockets,
 					getToolContext: toolCall => toolContextStore.getContext(toolCall),
 					streamFn: settingsAwareStreamFn,

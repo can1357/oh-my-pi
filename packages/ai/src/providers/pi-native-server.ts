@@ -78,6 +78,7 @@ const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
 	"guardrailTrace",
 	"kimiApiFormat",
 	"syntheticApiFormat",
+	"qwenCloudApiFormat",
 	"preferWebsockets",
 	"openrouterVariant",
 	"loopGuard",

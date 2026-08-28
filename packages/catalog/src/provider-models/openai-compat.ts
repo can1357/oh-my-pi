@@ -3544,6 +3544,11 @@ export const QWEN_CLOUD_OPENAI_BASE_URL = "https://dashscope-intl.aliyuncs.com/c
  */
 export const QWEN_CLOUD_ANTHROPIC_BASE_URL = "https://dashscope-intl.aliyuncs.com/apps/anthropic";
 
+// Pay-as-you-go, but `/models` exposes no per-token tariff, so rows carry the
+// repo's unknown-cost sentinel (`UNKNOWN_PROXY_COST`) rather than invented or
+// borrowed rates. This mirrors the Token Plan and GMI handling of unpriced
+// discovery; the model browser's "free" label is a display convention for any
+// zeroed cost object, not a claim these models are free.
 const QWEN_CLOUD_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
 const QWEN_CLOUD_COMPAT: OpenAICompat = { supportsDeveloperRole: false };
 const QWEN_CLOUD_EFFORT_REASONING: ThinkingConfig = {

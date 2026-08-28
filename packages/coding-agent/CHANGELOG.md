@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Qwen Cloud (Alibaba Model Studio / DashScope International) as a provider, reachable through `/login qwen-cloud` or `QWEN_CLOUD_API_KEY`, with an opt-in `providers.qwenCloudApiFormat` setting that routes requests to either the OpenAI-compatible or Anthropic-compatible endpoint.
+
 ## [18.0.6] - 2026-08-26
 
 ### Added

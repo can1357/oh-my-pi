@@ -138,6 +138,11 @@ export interface AgentOptions {
 	 */
 	kimiApiFormat?: "openai" | "anthropic";
 
+	/**
+	 * API format for Qwen Cloud provider: "openai" or "anthropic" (default: "openai")
+	 */
+	qwenCloudApiFormat?: "openai" | "anthropic";
+
 	/** Hint that websocket transport should be preferred when supported by the provider implementation. */
 	preferWebsockets?: boolean;
 
@@ -404,6 +409,7 @@ export class Agent {
 	#runningPrompt?: Promise<void>;
 	#resolveRunningPrompt?: () => void;
 	#kimiApiFormat?: "openai" | "anthropic";
+	#qwenCloudApiFormat?: "openai" | "anthropic";
 	#preferWebsockets?: boolean;
 	#transformToolCallArguments?: (args: Record<string, unknown>, toolName: string) => Record<string, unknown>;
 	#resolveFallbackTool?: (name: string) => AgentTool<any> | undefined;
@@ -493,6 +499,7 @@ export class Agent {
 		this.#cwd = opts.cwd;
 		this.#cwdResolver = opts.cwdResolver;
 		this.#kimiApiFormat = opts.kimiApiFormat;
+		this.#qwenCloudApiFormat = opts.qwenCloudApiFormat;
 		this.#preferWebsockets = opts.preferWebsockets;
 		this.#transformToolCallArguments = opts.transformToolCallArguments;
 		this.#resolveFallbackTool = opts.resolveFallbackTool;
@@ -1417,6 +1424,7 @@ export class Agent {
 			thinkingBudgets: this.#thinkingBudgets,
 			maxRetryDelayMs: this.#maxRetryDelayMs,
 			kimiApiFormat: this.#kimiApiFormat,
+			qwenCloudApiFormat: this.#qwenCloudApiFormat,
 			preferWebsockets: this.#preferWebsockets,
 			convertToLlm: this.#convertToLlm,
 			transformProviderContext: this.#transformProviderContext,

@@ -1697,7 +1697,13 @@ function streamSimpleRequest<TApi extends Api>(
 	// Qwen Cloud (Alibaba Model Studio) - route to dedicated handler that wraps
 	// OpenAI or Anthropic API. Defaults to the OpenAI surface, matching discovery.
 	if (isQwenCloudModel(model)) {
-		return withThinkingLoopGuard(model, requestOptions, opts =>
+		// `qwen3.8-max-preview` carries `thinking.requiresEffort`, so a request
+		// that omits or disables reasoning would be rejected by the mandatory-
+		// thinking endpoint. Clamp disabled/omitted reasoning to the lowest
+		// supported effort (mirrors the mapOptionsForApi path other providers
+		// take and the Kimi branch above).
+		const qwenOptions = normalizeMandatoryReasoningOptions(model, requestOptions);
+		return withThinkingLoopGuard(model, qwenOptions, opts =>
 			withProviderInFlightLimit(model, opts, () =>
 				streamQwenCloud(model as Model<"openai-completions">, context, {
 					...opts,
