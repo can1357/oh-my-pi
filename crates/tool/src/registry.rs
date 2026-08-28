@@ -1674,7 +1674,15 @@ impl Registry {
 				return Err(RegistryError::QualifiedToolName { name: spec.name.clone() });
 			}
 
-			if self.protected_core.contains(&spec.name) {
+			// A frozen name is protected against every new claim, but the
+			// host that owns it live at freeze time keeps replacing its own
+			// roster at runtime; that continuation is not a takeover.
+			if self.protected_core.contains(&spec.name)
+				&& !state
+					.live
+					.get(&spec.name)
+					.is_some_and(|owner| *owner == claimant)
+			{
 				return Err(RegistryError::CoreNameClaim {
 					name:       spec.name.clone(),
 					claimant:   claimant.clone(),
@@ -1827,7 +1835,10 @@ impl Registry {
 	///
 	/// Names with a trusted `omp/core` revision first discard foreign live and
 	/// shadow claims. Foreign-only names keep their normal claimant-qualified
-	/// resolution when the remaining live roster is frozen.
+	/// resolution when the remaining live roster is frozen. Frozen names cover
+	/// the native live roster and every live attached-host tool name, so a
+	/// later native or worker registration can no longer shadow an advertised
+	/// host tool under one model-visible name.
 	pub fn protect_live_claims(&mut self) {
 		let core_names = self
 			.versions
@@ -1841,6 +1852,14 @@ impl Registry {
 			.collect::<Vec<_>>();
 		self.protect_core_claims(core_names);
 		self.protected_core.extend(self.live.keys().cloned());
+		let host_names = self
+			.host_tools
+			.read()
+			.live
+			.keys()
+			.cloned()
+			.collect::<Vec<_>>();
+		self.protected_core.extend(host_names);
 	}
 
 	/// Retains only core ownership for a newly protected name.
@@ -2269,6 +2288,24 @@ impl Registry {
 			|| self.host_tools.read().history.contains_key(&identity)
 		{
 			return Err(RegistryError::Duplicate(name, rev));
+		}
+		// A model-visible name carries at most one live claim across the
+		// native and attached-host stores: `replace_host_tools` rejects host
+		// rosters colliding with a live native name, and this is the
+		// native-side mirror. Only a core claim retakes the name, retiring
+		// the host tool; any other claimant is rejected outright so
+		// `advertise_matching` can never lower two entries under one name.
+		let host_owner = self.host_tools.read().live.get(&name).cloned();
+		if let Some(owner) = host_owner {
+			if entry.claims.claimant == "omp/core" {
+				self.evict_foreign_host_tool(&name);
+			} else {
+				return Err(RegistryError::HostToolConflict {
+					name,
+					claimant: entry.claims.claimant.clone(),
+					owner,
+				});
+			}
 		}
 		let claim = resolve_claim(&name, self.live.get(&name), rev.clone(), &entry.claims)?;
 		self
@@ -3993,5 +4030,162 @@ mod tests {
 			"evicted host decoders must participate in the projection identity",
 		);
 		assert_eq!(evicted("first host read").projection_hash(), first.projection_hash());
+	}
+
+	#[test]
+	fn final_freeze_reserves_live_host_tool_names() {
+		let mut registry = Registry::new();
+		registry
+			.replace_host_tools(
+				sf!("rpc/client"),
+				1,
+				vec![HostToolSpec {
+					name:        sf!("alpha"),
+					description: sf!("alpha host tool"),
+					parameters:  serde_json::json!({"type": "object"}),
+				}],
+				Arc::new(HostExecutor),
+			)
+			.expect("host roster installs");
+		registry.protect_live_claims();
+
+		let err = registry
+			.register(
+				LiftTool {
+					spec: ToolSpec {
+						name:            sf!("alpha"),
+						rev:             Rev { family: sf!("native"), n: 1 },
+						description:     sf!("native impostor"),
+						schema:          Bytes::from_static(b"{}"),
+						constraint:      Constraint::None,
+						effects:         Effects::empty(),
+						projection_code: [3; 32],
+					},
+				},
+				Presentation::Slot,
+				Claims {
+					precedence: Precedence::DEFAULT,
+					claimant:   sf!("worker/ext"),
+					replaces:   None,
+				},
+			)
+			.expect_err("a frozen host name must reject later native claims");
+		assert!(
+			matches!(&err, RegistryError::CoreNameClaim { name, .. } if name == "alpha"),
+			"the freeze reservation must reject the claim, got {err:?}"
+		);
+		let lowered = registry
+			.advertise(LoweringCaps {
+				strict_schema:  false,
+				grammar:        GrammarBits::empty(),
+				maximum_tools:  None,
+				maximum_strict: None,
+			})
+			.expect("frozen roster still advertises");
+		assert_eq!(
+			lowered
+				.iter()
+				.filter(|tool| tool.definition.name == "alpha")
+				.count(),
+			1,
+			"exactly one model-visible alpha must remain"
+		);
+	}
+
+	#[test]
+	fn native_registration_rejects_a_live_host_tool_name() {
+		let mut registry = Registry::new();
+		registry
+			.replace_host_tools(
+				sf!("rpc/client"),
+				1,
+				vec![HostToolSpec {
+					name:        sf!("alpha"),
+					description: sf!("alpha host tool"),
+					parameters:  serde_json::json!({"type": "object"}),
+				}],
+				Arc::new(HostExecutor),
+			)
+			.expect("host roster installs");
+
+		let err = registry
+			.register(
+				LiftTool {
+					spec: ToolSpec {
+						name:            sf!("alpha"),
+						rev:             Rev { family: sf!("native"), n: 1 },
+						description:     sf!("native impostor"),
+						schema:          Bytes::from_static(b"{}"),
+						constraint:      Constraint::None,
+						effects:         Effects::empty(),
+						projection_code: [3; 32],
+					},
+				},
+				Presentation::Slot,
+				Claims {
+					precedence: Precedence::DEFAULT,
+					claimant:   sf!("worker/ext"),
+					replaces:   None,
+				},
+			)
+			.expect_err("a live host tool name must reject native claims before any freeze");
+		assert!(
+			matches!(
+				&err,
+				RegistryError::HostToolConflict { name, owner, .. }
+					if name == "alpha" && owner == "rpc/client"
+			),
+			"expected a host-tool conflict, got {err:?}"
+		);
+	}
+
+	#[test]
+	fn frozen_host_name_stays_replaceable_by_its_own_claimant() {
+		let mut registry = Registry::new();
+		let executor: Arc<dyn HostToolExecutor> = Arc::new(HostExecutor);
+		registry
+			.replace_host_tools(
+				sf!("rpc/client"),
+				1,
+				vec![HostToolSpec {
+					name:        sf!("alpha"),
+					description: sf!("alpha host tool"),
+					parameters:  serde_json::json!({"type": "object"}),
+				}],
+				Arc::clone(&executor),
+			)
+			.expect("host roster installs");
+		registry.protect_live_claims();
+
+		registry
+			.replace_host_tools(
+				sf!("rpc/client"),
+				2,
+				vec![HostToolSpec {
+					name:        sf!("alpha"),
+					description: sf!("alpha host tool, second generation"),
+					parameters:  serde_json::json!({"type": "object"}),
+				}],
+				executor,
+			)
+			.expect("the owning claimant keeps replacing its frozen name");
+		assert!(registry.resolved_identity("alpha").is_some());
+
+		let err = registry
+			.replace_host_tools(
+				sf!("rpc/other"),
+				1,
+				vec![HostToolSpec {
+					name:        sf!("alpha"),
+					description: sf!("takeover"),
+					parameters:  serde_json::json!({"type": "object"}),
+				}],
+				Arc::new(HostExecutor),
+			)
+			.expect_err("a different claimant cannot take the frozen host name");
+		assert!(
+			matches!(&err, RegistryError::CoreNameClaim { name, .. } if name == "alpha"),
+			"expected a core-name rejection, got {err:?}"
+		);
 	}
 }
