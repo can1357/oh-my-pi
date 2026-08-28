@@ -48,8 +48,14 @@ type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : n
 type RpcCommandBody = DistributiveOmit<RpcCommand, "id">;
 
 export interface RpcClientOptions {
-	/** Path to the CLI entry point (default: searches for dist/cli.js) */
+	/** Path to the CLI entry point (default: `dist/cli.js`). */
 	cliPath?: string;
+	/**
+	 * Agent launcher override. An argv prefix receives the normal RPC/model args
+	 * appended; a builder receives those args and returns the complete argv.
+	 * Builders support transports such as SSH that must quote the final argv.
+	 */
+	command?: string[] | ((agentArgs: string[]) => string[]);
 	/** Working directory for the agent */
 	cwd?: string;
 	/** Environment variables */
@@ -300,8 +306,12 @@ export class RpcClient {
 		if (this.options.args) {
 			args.push(...this.options.args);
 		}
+		const launch =
+			typeof this.options.command === "function"
+				? this.options.command(args)
+				: [...(this.options.command ?? ["bun", cliPath]), ...args];
 
-		const child = ptree.spawn(["bun", cliPath, ...args], {
+		const child = ptree.spawn(launch, {
 			cwd: this.options.cwd,
 			env: { ...Bun.env, ...this.options.env },
 			stdin: "pipe",

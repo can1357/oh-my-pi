@@ -777,6 +777,14 @@ function inferThinkingControlMode<TApi extends Api>(
 					return "anthropic-budget-effort";
 				}
 			}
+			// Bedrock serves the GPT-5.x models through OpenAI's own request
+			// schema, which rejects Anthropic's budget block outright:
+			// `unknown_parameter: 'thinking'`. It takes `reasoning.effort`
+			// instead. gpt-oss parses as `unknown` (no `gpt-<digits>`), so it
+			// keeps the budget path it ships with today.
+			if (parsedModel.family === "openai") {
+				return "effort";
+			}
 			return "budget";
 
 		default:

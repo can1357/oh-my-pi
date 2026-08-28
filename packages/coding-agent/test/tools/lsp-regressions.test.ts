@@ -1793,6 +1793,108 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("reports failure when every workspace-symbol server fails (#8387)", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-workspace-symbol-all-fail-");
+		try {
+			const firstConfig: ServerConfig = { command: "broken-first", fileTypes: ["ts"], rootMarkers: [] };
+			const secondConfig: ServerConfig = { command: "broken-second", fileTypes: ["ts"], rootMarkers: [] };
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { first: firstConfig, second: secondConfig },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspClient, "getOrCreateClient").mockImplementation(async config => {
+				throw new Error(`${config.command} exited`);
+			});
+
+			const result = await new LspTool(makeLspSession(tempDir.path())).execute("workspace-symbol-all-fail", {
+				action: "symbols",
+				file: "*",
+				query: "Target",
+			});
+
+			expect(result.details?.success).toBe(false);
+			const output = textResult(result);
+			expect(output).toContain("all language servers failed");
+			expect(output).toContain("first");
+			expect(output).toContain("second");
+			expect(output).not.toContain('No symbols matching "Target"');
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
+	it("treats an empty workspace-symbol response as a successful search (#8387)", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-workspace-symbol-empty-");
+		try {
+			const serverConfig: ServerConfig = { command: "empty-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { empty: serverConfig },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue({} as LspClient);
+			vi.spyOn(lspClient, "sendRequest").mockResolvedValue([]);
+
+			const result = await new LspTool(makeLspSession(tempDir.path())).execute("workspace-symbol-empty", {
+				action: "symbols",
+				file: "*",
+				query: "Missing",
+			});
+
+			expect(result.details?.success).toBe(true);
+			expect(result.details?.serverName).toBe("empty");
+			expect(textResult(result)).toBe('No symbols matching "Missing"');
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
+	it("keeps workspace-symbol results and reports partial server failures (#8387)", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-workspace-symbol-partial-");
+		try {
+			const brokenConfig: ServerConfig = { command: "broken-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			const healthyConfig: ServerConfig = { command: "healthy-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { broken: brokenConfig, healthy: healthyConfig },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspClient, "getOrCreateClient").mockImplementation(async config => {
+				if (config.command === "broken-lsp") throw new Error("server exited with code 7");
+				return {} as LspClient;
+			});
+			vi.spyOn(lspClient, "sendRequest").mockResolvedValue([
+				{
+					name: "TargetSymbol",
+					kind: 12,
+					location: {
+						uri: fileToUri(path.join(tempDir.path(), "target.ts")),
+						range: {
+							start: { line: 0, character: 0 },
+							end: { line: 0, character: 12 },
+						},
+					},
+				},
+			]);
+
+			const result = await new LspTool(makeLspSession(tempDir.path())).execute("workspace-symbol-partial", {
+				action: "symbols",
+				file: "*",
+				query: "Target",
+			});
+
+			expect(result.details?.success).toBe(true);
+			expect(result.details?.serverName).toBe("healthy");
+			const output = textResult(result);
+			expect(output).toContain("TargetSymbol");
+			expect(output).toContain("Server failures:");
+			expect(output).toContain("broken: server exited with code 7");
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
 	it("treats a go.work-only root as a Go workspace for workspace diagnostics", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-go-work-only-");
 		const spawnCalls: BunSpawnCall[] = [];
