@@ -16,6 +16,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { HistoryStorage } from "../../session/history-storage";
 import { listSyncedProjects, projectById, resolveProject } from "../project-scope";
 import type { ReplicatedDomain } from "../replica";
+import { isValidWireRelCwd } from "../session-files";
 import type { StateEntry } from "../wire";
 
 /** In-project location of a prompt on the wire (absolute cwds never leave). */
@@ -173,6 +174,16 @@ export function createHistoryDomain(storage: HistoryStorage = HistoryStorage.ope
 				if (value.prompt.length > MAX_KEY_LENGTH) continue; // mirrors the outbound key cap.
 				let cwd: string | undefined;
 				if (value.project) {
+					// `rel` is peer-controlled and about to be joined to a local root,
+					// so a `..` segment would place the prompt outside the project
+					// whose scoping is the entire point of the mapping. Same gate the
+					// sessions domain applies to its own `relCwd`.
+					if (!isValidWireRelCwd(value.project.rel)) {
+						logger.warn("history domain dropping entry with unsafe project rel", {
+							rel: value.project.rel,
+						});
+						continue;
+					}
 					// Reconstruct THIS machine's absolute cwd from the mapping. FAIL
 					// CLOSED: if the project is unknown here or has sync disabled, drop
 					// the prompt so an unmapped project's history never lands locally.
@@ -183,7 +194,9 @@ export function createHistoryDomain(storage: HistoryStorage = HistoryStorage.ope
 						});
 						continue;
 					}
-					cwd = value.project.rel ? path.join(local.localPath, value.project.rel) : local.localPath;
+					cwd = value.project.rel
+						? path.join(local.localPath, ...value.project.rel.split("/"))
+						: local.localPath;
 				} else {
 					// Backward tolerance: a pre-scoping peer still sends a bare `cwd`
 					// string naming a path on ITS machine. Accept the prompt but drop

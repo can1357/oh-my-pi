@@ -41,6 +41,8 @@ The outbound watermark only ever moves on the **push** path, and never past the 
 
 A page also never advances the watermark onto a `rev` it covers only partly. Rows sharing one `rev` are common (four domains derive theirs from a whole-second column, and an archive extraction can stamp thousands of files with one mtime), and since the next scan filters `rev > outboundRev` strictly, stopping mid-group would skip the remainder for good. The engine therefore trims the trailing tie and re-reads it next iteration. One shape is beyond a rev-only cursor: a full page in which *every* row shares a `rev`. That is pushed, then the domain pauses with a warning rather than advancing and dropping rows, and it resumes as soon as any of those rows is written again.
 
+A page is bounded by **bytes as well as rows**. `STATE_PAGE_LIMIT` caps the row count, which says nothing about size: a `config` value is a whole file, so a count-bounded page can reach hundreds of megabytes. An oversized body is worse than slow — the scan is deterministic, so the same body is rebuilt and refused on every cycle and that domain stops replicating for good. The engine cuts each page to `STATE_MAX_ENTRIES_BYTES` and the broker refuses anything above `STATE_MAX_BODY_BYTES` (the entries budget plus envelope slack, derived from it so the two cannot drift). A byte cut obeys the same rev rule as a count cut, with one advantage: it can see the next row's `rev`, so it only trims a group when the cut actually lands inside one.
+
 ## Replicated domains
 
 Each domain is a thin adapter over an existing local store. It answers exactly two questions — "which of my rows changed after `rev` X?" and "merge these rows into me" — and owns no sync bookkeeping (cursors live in `state-sync.db`).
@@ -52,7 +54,7 @@ Each domain is a thin adapter over an existing local store. It answers exactly t
 | `model-usage`   | Most-recently-used model ordering       | `agent.db` (`AgentStorage`)    | `model_usage.last_used_at` | LWW by `rev` (keep the greater last-used timestamp)              |
 | `command-usage` | Slash-command usage counts/recency      | `agent.db` (`AgentStorage`)    | usage `last_used_at`       | LWW by `rev`                                                     |
 | `config`        | Agent config files (see exclusions)     | files under `~/.omp/agent/`    | file mtime                 | LWW by `rev`; inbound keys re-checked against the replicable set; deleting a file publishes a tombstone |
-| `sessions`      | Session JSONL index rows                | session index (`agent.db`)     | file mtime                 | LWW by `rev`; deleting a session publishes a tombstone, but only for a project the scan can speak for; bodies replicate out-of-band via the object store |
+| `sessions`      | Session JSONL index rows                | session index (`agent.db`)     | file mtime                 | LWW by `rev`; deleting a session publishes a tombstone, but only for a project the scan can speak for; applying one also deletes a body this machine had materialized; bodies replicate out-of-band via the object store |
 
 ### What is intentionally NOT replicated
 
@@ -96,6 +98,8 @@ projects:
 ```
 
 The shape is defined by `config/projects-config.ts`: a `ProjectEntry` is exactly `{ id, path, sync }`, wrapped in `{ version, projects }` (`PROJECTS_CONFIG_VERSION` is `1`). A missing or malformed registry loads as an empty list — an unreadable registry degrades to "nothing is synced", never a crashed session. Writes are atomic (temp-file + rename) so a crash mid-write cannot strand a half-serialized registry that would silently stop all replication.
+
+The stored `path` is a project **root**, but the `omp project` subcommands are run from wherever you happen to be. `enable`, `disable` and `rm` therefore resolve the *containing* registered project rather than requiring an exact path match — the same resolution `omp project list` uses to mark the current directory. A directory under no registered project is still a genuine miss and is reported as one. `enable` keeps registering the repo root, so re-enabling from a subdirectory reuses the existing id and leaves the stored path pointing at the root; only `--id` registers a path you name yourself, which is how a nested project gets its own entry.
 
 ### Identity derivation
 
@@ -250,6 +254,9 @@ The broker is a **trusted-ish peer**, not an adversary — the same trust model 
 - **Path traversal on the config domain.** `applyRemote` on the `config` domain rejects any entry whose key would resolve outside the agent directory, so a compromised or buggy peer cannot write arbitrary paths on the host. Secret-bearing files (`.env`, `secrets.yml`, `secret-placeholder.key`) are excluded from replication entirely, so they are neither pushed nor accepted.
 - **Size cap on inbound config values.** A config entry's `content` arrives as an unbounded string and is written straight to disk, so it is rejected above the same 1 MiB ceiling the outbound scan enforces. Symmetry matters here beyond the write itself: an oversized file would also be invisible to every later outbound scan, so replication could never correct or retract what it had just written.
 - **Path traversal on the session index.** The `sessions` wire key carries a filename and its value carries a project-relative cwd, both joined into a local path by the receiver. `applyRemote` accepts only a bare `*.jsonl` filename and a cwd with no `..` segment, and the resume picker independently re-checks that each rebuilt path stays inside the sessions directory — so an index file written by an older build cannot name a path outside it either.
+- **Path traversal on the history domain.** A history entry carries `{ projectId, rel }` and the receiver joins `rel` to its own project root, so the same `..` gate the session index uses applies here: an entry whose `rel` is not a contained POSIX-relative path is dropped. Without it the one field that expresses project scoping could be used to place a prompt outside the project entirely.
+- **Request bodies are bounded.** `value` is `unknown` on the wire, so the entry schema cannot bound it. The broker refuses any state body over `STATE_MAX_BODY_BYTES` before parsing it, which is what stops an authenticated peer from making the broker and every pulling replica materialize an arbitrarily large page.
+- **A tombstone can delete a local session body.** Applying a `sessions` tombstone now removes a body this machine had downloaded, which is what makes cross-machine deletion actually work — and it means a peer that can push can destroy a local session file. Two things bound it: a body whose mtime is at or above the tombstone `rev` is kept (so a session being written to, or appended to after the delete was stamped, survives), and the archived copy in the object store is deliberately not reaped, so the body remains recoverable there.
 - **Transport TLS is the operator's responsibility.** As with the auth broker and gateway, encryption between clients and the broker (and to the object-store endpoint) is delegated to the operator — Tailscale, WireGuard, or a reverse proxy terminating TLS. The broker itself binds plain HTTP.
 
 ## See also

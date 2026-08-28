@@ -113,6 +113,26 @@ export interface StatePushResponse {
 /** Hard ceiling on entries per delta/push, protecting both peers from unbounded bodies. */
 export const STATE_PAGE_LIMIT = 1000;
 
+/**
+ * Byte budget for the `entries` of one push, enforced by the pushing client.
+ *
+ * {@link STATE_PAGE_LIMIT} bounds the row COUNT, which says nothing about the
+ * body size: a `config` value is a whole file, so a count-bounded page can
+ * reach hundreds of megabytes. That is not merely wasteful. A body the server
+ * refuses is rebuilt identically on the next cycle, because a domain scan is
+ * deterministic, so the domain stops replicating permanently rather than
+ * skipping one page.
+ */
+export const STATE_MAX_ENTRIES_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Server-side ceiling on an entire state request body. DERIVED from the entries
+ * budget plus envelope slack, so the two cannot drift into the one arrangement
+ * that breaks replication outright: a client whose full page is always a little
+ * larger than what the broker will accept.
+ */
+export const STATE_MAX_BODY_BYTES = STATE_MAX_ENTRIES_BYTES + 64 * 1024;
+
 /** Upper bound on `?wait=` long-poll, matching the credential snapshot route. */
 export const STATE_MAX_WAIT_MS = 30_000;
 

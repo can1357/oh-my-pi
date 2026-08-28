@@ -93,6 +93,26 @@ function commit(entries: readonly ProjectEntry[]): void {
 	resetProjectScopedCursors();
 }
 
+/**
+ * The registered entry governing `target`: an exact path match first, then the
+ * project that CONTAINS it.
+ *
+ * `enable` deliberately registers the repo ROOT so every machine agrees on one
+ * path, but the commands are run from wherever the user is. Requiring exact
+ * equality made every action fail from a subdirectory while `omp project list`,
+ * which resolves properly, marked that same directory as current.
+ *
+ * `resolveProject` returns the deepest registered match regardless of its sync
+ * flag, which is what we want: a disabled project is still the project you are
+ * standing in, and `disable` and `rm` must both be able to name it.
+ */
+function findGoverningEntry(entries: ProjectEntry[], target: string): ProjectEntry | undefined {
+	const exact = entries.find(e => resolveEquivalentPath(e.path) === target);
+	if (exact) return exact;
+	const containing = resolveProject(target)?.project.id;
+	return containing === undefined ? undefined : entries.find(e => e.id === containing);
+}
+
 /** Warn (never fail) when per-project settings are inert because sync is off. */
 async function warnIfSyncDisabled(cwd: string, configFiles: string[] | undefined): Promise<void> {
 	try {
@@ -163,7 +183,7 @@ async function runEnable(command: ProjectCommandArgs, cwd: string): Promise<void
 	if (command.flags.id) {
 		id = command.flags.id;
 	} else {
-		const existing = entries.find(e => resolveEquivalentPath(e.path) === target);
+		const existing = findGoverningEntry(entries, target);
 		if (existing) {
 			id = existing.id;
 			projectPath = resolveEquivalentPath(existing.path);
@@ -204,7 +224,7 @@ async function runEnable(command: ProjectCommandArgs, cwd: string): Promise<void
 async function runDisable(command: ProjectCommandArgs, cwd: string): Promise<void> {
 	const target = resolveEquivalentPath(command.target ?? cwd);
 	const entries = loadProjects();
-	const entry = entries.find(e => resolveEquivalentPath(e.path) === target);
+	const entry = findGoverningEntry(entries, target);
 	if (!entry) {
 		throw new CliUsageError(`No project registered at ${target}. Nothing to disable.`);
 	}
@@ -251,8 +271,11 @@ function runRemove(command: ProjectCommandArgs, cwd: string): void {
 		removedLabel = `id "${command.flags.id}"`;
 	} else {
 		const target = resolveEquivalentPath(command.target ?? cwd);
-		kept = entries.filter(e => resolveEquivalentPath(e.path) !== target);
-		removedLabel = target;
+		const entry = findGoverningEntry(entries, target);
+		kept = entry ? entries.filter(e => e.id !== entry.id) : entries;
+		// Name the project actually removed, not just the directory we were run
+		// from: from a subdirectory those are different paths.
+		removedLabel = entry ? `${target} (project "${entry.id}" at ${entry.path})` : target;
 	}
 
 	if (kept.length === entries.length) {

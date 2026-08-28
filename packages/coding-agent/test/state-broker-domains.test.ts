@@ -291,6 +291,47 @@ describe("history domain", () => {
 		expect(prompts).not.toContain("disabled");
 	});
 
+	/**
+	 * `rel` is peer-controlled and gets joined to THIS machine's project root,
+	 * so a `..` segment places the prompt outside the project entirely — the
+	 * receiving machine's per-project scoping is bypassed by the very field
+	 * that is supposed to express it. The sessions domain already gates its
+	 * `relCwd` this way; history joined without checking.
+	 */
+	test("applyRemote refuses a project rel that escapes the project root", () => {
+		const ws = makeDir("omp-hist-ws-");
+		const foo = path.join(ws, "foo");
+		fs.mkdirSync(path.join(foo, "pkg"), { recursive: true });
+		setProjects([{ id: "proj:foo", path: foo, sync: true }]);
+
+		const storage = openStorage();
+		createHistoryDomain(storage).applyRemote([
+			{
+				key: "escaped",
+				rev: 5000 * 1000,
+				value: { prompt: "escaped", createdAt: 5000, project: { id: "proj:foo", rel: "../outside" } },
+			},
+			// A peer's absolute path is not a project-relative cwd either.
+			{
+				key: "absolute",
+				rev: 5001 * 1000,
+				value: { prompt: "absolute", createdAt: 5001, project: { id: "proj:foo", rel: "/etc" } },
+			},
+			{
+				key: "kept",
+				rev: 5002 * 1000,
+				value: { prompt: "kept", createdAt: 5002, project: { id: "proj:foo", rel: "pkg" } },
+			},
+		]);
+
+		const rows = storage.getRecent(10);
+		const prompts = rows.map(r => r.prompt);
+		expect(prompts).not.toContain("escaped");
+		expect(prompts).not.toContain("absolute");
+		// Not a blanket refusal: a legitimate subdirectory prompt still lands.
+		expect(rows.find(r => r.prompt === "kept")?.cwd).toBe(path.join(foo, "pkg"));
+	});
+
 	test("applyRemote tolerates a legacy bare-cwd entry: accepted, cwd dropped", () => {
 		const storage = openStorage();
 		createHistoryDomain(storage).applyRemote([
@@ -607,6 +648,65 @@ describe("sessions domain", () => {
 		]);
 
 		expect(readRemoteSessionIndex(sessionsDir)).toHaveLength(0);
+	});
+
+	/**
+	 * A peer's deletion has to reach a machine that already DOWNLOADED the body.
+	 * Dropping only the cached index row leaves the physical `.jsonl` in the
+	 * normal local listing, so the session stays visible and resumable and the
+	 * cross-machine delete silently does nothing on every machine that opened
+	 * it.
+	 */
+	test("a tombstone deletes the materialized body, not just the index row", () => {
+		const { foo, sessionsDir } = setupHome();
+		const dir = path.join(sessionsDir, sessionDirNameForCwd(foo));
+		writeSessionBody(dir, "eeee5555.jsonl", foo, "Materialized");
+		const abs = path.join(dir, "eeee5555.jsonl");
+		fs.utimesSync(abs, new Date(1000), new Date(1000));
+		const key = encodeWireKey("proj:foo", "eeee5555.jsonl");
+		const domain = createSessionsDomain(sessionsDir);
+		domain.applyRemote([
+			{
+				key,
+				rev: 1000,
+				value: { projectId: "proj:foo", relCwd: "", file: "eeee5555.jsonl", size: 1, mtimeMs: 1000 },
+			},
+		]);
+		expect(readRemoteSessionIndex(sessionsDir)).toHaveLength(1);
+
+		domain.applyRemote([{ key, rev: 2000, value: null }]);
+
+		expect(readRemoteSessionIndex(sessionsDir)).toHaveLength(0);
+		expect(fs.existsSync(abs)).toBe(false);
+	});
+
+	/**
+	 * ...but a body appended to locally AFTER the deletion was stamped is newer
+	 * than the tombstone, and LWW must keep it. Unlinking it would destroy work
+	 * that never reached the deleting machine, and this is also what stops a
+	 * tombstone from yanking a file out from under a live session. The row
+	 * describes the body, so both survive or neither does.
+	 */
+	test("a tombstone leaves a locally newer body and its row alone", () => {
+		const { foo, sessionsDir } = setupHome();
+		const dir = path.join(sessionsDir, sessionDirNameForCwd(foo));
+		writeSessionBody(dir, "eeee6666.jsonl", foo, "Live");
+		const abs = path.join(dir, "eeee6666.jsonl");
+		const key = encodeWireKey("proj:foo", "eeee6666.jsonl");
+		const domain = createSessionsDomain(sessionsDir);
+		domain.applyRemote([
+			{
+				key,
+				rev: 1000,
+				value: { projectId: "proj:foo", relCwd: "", file: "eeee6666.jsonl", size: 1, mtimeMs: 1000 },
+			},
+		]);
+		fs.utimesSync(abs, new Date(9000), new Date(9000));
+
+		domain.applyRemote([{ key, rev: 2000, value: null }]);
+
+		expect(fs.existsSync(abs)).toBe(true);
+		expect(readRemoteSessionIndex(sessionsDir)).toHaveLength(1);
 	});
 
 	/**

@@ -14,7 +14,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getSessionsDir, logger } from "@oh-my-pi/pi-utils";
+import { getSessionsDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { SESSION_TITLE_SLOT_BYTES } from "../../session/session-entries";
 import { sessionDirNameForCwd } from "../../session/session-paths";
 import { parseTitleSlotFromContent } from "../../session/session-title-slot";
@@ -304,6 +304,14 @@ class SessionsDomain implements ReplicatedDomain {
 				// UUID-unique, so at most one matches).
 				for (const key of keysForSessionFile(index, project.id, file)) {
 					if (index[key].mtimeMs >= entry.rev) continue;
+					// The row is only a cache of what a peer advertises. If this
+					// machine actually DOWNLOADED the body, dropping the row alone
+					// leaves the session in the ordinary local listing, still
+					// resumable, and the delete silently does not cross the machine
+					// boundary at all. Retract them together or not at all: a body
+					// kept without its row would be advertised again by the next
+					// owned-session scan.
+					if (!this.#retractBody(key, entry.rev)) continue;
 					delete index[key];
 					dirty = true;
 				}
@@ -357,6 +365,48 @@ class SessionsDomain implements ReplicatedDomain {
 		}
 
 		if (dirty) this.#persistIndex(index);
+	}
+
+	/**
+	 * Delete the local body behind index key `key`, reporting whether the local
+	 * state is now safe to retract.
+	 *
+	 * `false` means keep the row: either the body is NEWER than the deletion, or
+	 * we could not remove it. A newer body is a session this machine appended to
+	 * after the peer's delete was stamped, so LWW keeps it — the same guard also
+	 * stops a tombstone from unlinking the file under a live session, since a
+	 * session being written to always has a newer mtime than a delete that
+	 * preceded it.
+	 *
+	 * A missing body is success: the row was a pure remote-only stub, which is
+	 * the common case and the only one this used to handle.
+	 */
+	#retractBody(key: string, rev: number): boolean {
+		const abs = path.join(this.#sessionsDir, ...key.split("/"));
+		// The key halves are validated on the way in, but the index itself is a
+		// plain JSON file on disk; never unlink through a key that a corrupted or
+		// hand-edited index could point outside the sessions dir.
+		const rel = path.relative(this.#sessionsDir, abs);
+		if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
+			logger.warn(`[state:sessions] refusing to delete a body outside the sessions dir: ${JSON.stringify(key)}`);
+			return false;
+		}
+		let mtimeMs: number;
+		try {
+			mtimeMs = Math.floor(fs.statSync(abs).mtimeMs);
+		} catch (err) {
+			if (isEnoent(err)) return true; // nothing materialized here.
+			logger.warn(`[state:sessions] could not stat a body for deletion: ${String(err)}`);
+			return false;
+		}
+		if (mtimeMs >= rev) return false;
+		try {
+			fs.rmSync(abs, { force: true });
+			return true;
+		} catch (err) {
+			logger.warn(`[state:sessions] could not delete a tombstoned body: ${String(err)}`);
+			return false;
+		}
 	}
 
 	#loadIndex(): Record<string, SessionIndexEntry> {

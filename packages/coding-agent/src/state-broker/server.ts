@@ -19,6 +19,7 @@ import type { StateBrokerStore } from "./store";
 import {
 	isStateDomainId,
 	STATE_API_PREFIX,
+	STATE_MAX_BODY_BYTES,
 	STATE_MAX_WAIT_MS,
 	STATE_PAGE_LIMIT,
 	type StateDomainId,
@@ -37,16 +38,31 @@ function json(status: number, body: unknown): Response {
  * 400 `Response` on any parse/validation failure so handlers can early-return.
  * A local copy of the auth broker's helper — kept private so the two brokers
  * stay independently editable.
+ *
+ * The size ceiling is part of the trust boundary, not an optimization: the
+ * entry schema bounds the row count and the `key` length but leaves `value`
+ * unbounded, so a peer (authenticated, not trusted) could otherwise force the
+ * broker and every pulling replica to materialize an arbitrarily large page.
  */
 async function parseBody<t>(
 	req: Request,
 	schema: Type<t>,
 ): Promise<{ ok: true; data: typeof schema.infer } | { ok: false; response: Response }> {
+	// Refuse before reading when the peer declares an oversized length; a
+	// chunked body without one is caught by the post-read check below. An absent
+	// header parses as 0 and falls through.
+	const declared = Number(req.headers.get("content-length"));
+	if (Number.isFinite(declared) && declared > STATE_MAX_BODY_BYTES) {
+		return { ok: false, response: json(413, { error: "Request body too large" }) };
+	}
 	let raw: string;
 	try {
 		raw = await req.text();
 	} catch (error) {
 		return { ok: false, response: json(400, { error: `Invalid request body: ${String(error)}` }) };
+	}
+	if (Buffer.byteLength(raw) > STATE_MAX_BODY_BYTES) {
+		return { ok: false, response: json(413, { error: "Request body too large" }) };
 	}
 	if (raw.length === 0) {
 		return { ok: false, response: json(400, { error: "Request body required" }) };

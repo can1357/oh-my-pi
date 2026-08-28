@@ -4,7 +4,7 @@
  * lose, leak, or refuse to converge on data.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -23,7 +23,12 @@ import { StateSyncStore } from "@oh-my-pi/pi-coding-agent/state-broker/replica";
 import { createStateBrokerRoutes } from "@oh-my-pi/pi-coding-agent/state-broker/server";
 import { StateBrokerStore } from "@oh-my-pi/pi-coding-agent/state-broker/store";
 import { StateSyncEngine } from "@oh-my-pi/pi-coding-agent/state-broker/sync";
-import type { StateDomainId, StateEntry } from "@oh-my-pi/pi-coding-agent/state-broker/wire";
+import {
+	STATE_MAX_BODY_BYTES,
+	STATE_MAX_ENTRIES_BYTES,
+	type StateDomainId,
+	type StateEntry,
+} from "@oh-my-pi/pi-coding-agent/state-broker/wire";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const TOKEN = "t";
@@ -320,5 +325,59 @@ describe("replication safety", () => {
 		await engineFor(receiverStore, [receiver]).syncOnce();
 
 		expect(readConfigFile(receiverDir, "mcp.json")).toBeNull();
+	});
+
+	/**
+	 * A page bounded only by entry COUNT can exceed any HTTP body limit: the
+	 * config domain's values are whole files, so a thousand of them is hundreds
+	 * of megabytes. Nothing capped the total, and the failure is not a one-off:
+	 * the scan is deterministic, so the same oversized page is rebuilt and
+	 * refused on every cycle and that domain stops replicating for good. The
+	 * engine must split a page by BYTES rather than trust the count alone.
+	 */
+	test("a page too large for one body is split across pushes", async () => {
+		const store = newSyncStore();
+		const domain = new FakeDomain("config");
+		// Three values that each fit comfortably but together exceed the budget.
+		const chunk = "x".repeat(Math.floor(STATE_MAX_ENTRIES_BYTES / 2));
+		for (let i = 0; i < 3; i++) {
+			domain.setLocal({ key: `big-${i}`, rev: 1000 + i, value: { content: chunk } });
+		}
+		// `spyOn` records and calls through, so the real pushes still happen.
+		// Sizes must be read BEFORE restoring: that resets the recorded calls.
+		const pushSpy = spyOn(client, "push");
+		let pushes: number[] = [];
+		try {
+			await engineFor(store, [domain]).syncOnce();
+			pushes = pushSpy.mock.calls.map(call => Buffer.byteLength(JSON.stringify(call[1])));
+		} finally {
+			pushSpy.mockRestore();
+		}
+
+		// More than one body, and every one of them deliverable.
+		expect(pushes.length).toBeGreaterThan(1);
+		for (const size of pushes) expect(size).toBeLessThanOrEqual(STATE_MAX_ENTRIES_BYTES);
+		// And the split lost nothing: a fresh replica sees all three rows.
+		const observerStore = newSyncStore();
+		const observer = new FakeDomain("config");
+		await engineFor(observerStore, [observer]).syncOnce();
+		expect(
+			observer
+				.changedSince(0, 100)
+				.map(e => e.key)
+				.sort(),
+		).toEqual(["big-0", "big-1", "big-2"]);
+	});
+
+	/**
+	 * The client-side split keeps an honest replica under the limit; the broker
+	 * still has to refuse an oversized body outright, since `value` is unbounded
+	 * on the wire and a peer is authenticated rather than trusted.
+	 */
+	test("the broker refuses a body over the size cap", async () => {
+		const oversized = "x".repeat(STATE_MAX_BODY_BYTES + 1024);
+		await expect(client.push("config", [{ key: "huge", rev: 1, value: { content: oversized } }])).rejects.toThrow();
+		// Nothing was stored, so the refusal is not a partial apply.
+		expect(brokerStore?.delta("config", 0, 10).entries).toHaveLength(0);
 	});
 });

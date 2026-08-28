@@ -450,10 +450,7 @@ describe("blob upload durability", () => {
 
 	test("drainBlobUploads waits for an in-flight upload instead of abandoning it", async () => {
 		const dir = makeDir("omp-blob-");
-		let released: (() => void) | undefined;
-		const gate = new Promise<void>(resolve => {
-			released = resolve;
-		});
+		const { promise: gate, resolve: release } = Promise.withResolvers<void>();
 		let landed = false;
 		const store: ObjectStore = {
 			async has() {
@@ -479,7 +476,7 @@ describe("blob upload durability", () => {
 			// Still in flight, so the blob has not landed yet.
 			expect(landed).toBe(false);
 			// Release it and drain: the drain must observe the completion.
-			released?.();
+			release();
 			await drainBlobUploads();
 			expect(landed).toBe(true);
 		} finally {

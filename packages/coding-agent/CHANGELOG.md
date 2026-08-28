@@ -30,6 +30,10 @@
 - Choosing Delete on a session whose body is still on another machine now says so instead of reporting a missing file.
 - Prompts from subdirectories of a project now replicate on Windows, where only the project root itself used to match.
 - An oversized config file from a peer is refused rather than written, so one bad entry cannot fill a replica's disk with a file replication could never take back.
+- Deleting a session on one machine now also removes the copy on machines that had already opened it, instead of leaving it in their session list.
+- A large batch of changed config files is now sent as several smaller requests, instead of one oversized request that failed on every attempt and stopped that data replicating at all.
+- A peer can no longer place replicated prompts outside the project they belong to, or make the broker accept an unbounded request body.
+- `omp project enable`, `disable` and `rm` now work from any subdirectory of a project, instead of only from its root.
 - Fixed `import numpy` (and other native-extension imports) hanging indefinitely in the Python eval tool on Windows, where the runner's always-on background stdin reader deadlocked native DLL loading; Windows now reads the control channel serially between requests while POSIX keeps concurrent request dispatch ([#7985](https://github.com/can1357/oh-my-pi/issues/7985)).
 
 ## [18.0.9] - 2026-08-28

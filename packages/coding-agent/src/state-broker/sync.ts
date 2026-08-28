@@ -14,6 +14,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { HTTP_CLIENT_CLOSED, type StateBrokerClient, StateBrokerError } from "./client";
 import type { ReplicatedDomain, StateSyncStore, SyncCursor } from "./replica";
 import {
+	STATE_MAX_ENTRIES_BYTES,
 	STATE_MAX_WAIT_MS,
 	STATE_PAGE_LIMIT,
 	type StateDeltaResponse,
@@ -262,25 +263,39 @@ export class StateSyncEngine {
 			if (signal?.aborted) break;
 			const page = domain.changedSince(cursor.outboundRev, STATE_PAGE_LIMIT);
 			if (page.length === 0) break;
-			// A saturated page can cut a group of rows sharing one `rev` in half.
-			// Since every scan filters `rev > outboundRev` STRICTLY, advancing onto
-			// that shared rev would permanently skip the rest of the group. So stop
-			// at the last rev the page covers completely.
+			// A page bounded only by row count can still be far too large to send
+			// (see STATE_MAX_ENTRIES_BYTES), so cut it to a deliverable size first.
+			const fitted = this.#fitBudget(domain.id, page);
+			// Either kind of cut can slice a group of rows sharing one `rev` in
+			// half. Since every scan filters `rev > outboundRev` STRICTLY,
+			// advancing onto that shared rev would permanently skip the rest of the
+			// group, so the batch must stop below any rev it does not hold in full.
+			//
+			// A byte cut knows exactly which rev comes next and can therefore keep
+			// a group the cut happened to land right after; a count-saturated page
+			// cannot see past its own limit, so it has to assume its final rev
+			// continues.
 			//
 			// Ties are not exotic: `history`, `titles`, `model-usage` and
 			// `command-usage` derive their rev from a whole-second column, and a
 			// bulk copy or archive extraction can stamp thousands of config files
 			// with one mtime (a filesystem with 1s mtime granularity guarantees it).
-			const batch = this.#completeRevPrefix(page);
+			const incompleteRev =
+				fitted.length < page.length
+					? page[fitted.length].rev
+					: page.length >= STATE_PAGE_LIMIT
+						? page[page.length - 1].rev
+						: undefined;
+			const batch = incompleteRev === undefined ? fitted : this.#trimRev(fitted, incompleteRev);
 			if (batch.length === 0) {
-				// One rev fills the whole page, so there is no complete rev to stop
-				// at and no way to page within a single rev through a rev-only
-				// cursor. Push what we have, then STALL this domain rather than
-				// advance and lose the remainder. Recoverable: any later write to
-				// one of these rows gives it a new rev.
-				await this.#pushBatch(domain.id, page, ledger, signal);
+				// One rev fills everything we can send, so there is no complete rev
+				// to stop at and no way to page within a single rev through a
+				// rev-only cursor. Push what fits, then STALL this domain rather
+				// than advance and lose the remainder. Recoverable: any later write
+				// to one of these rows gives it a new rev.
+				await this.#pushBatch(domain.id, fitted, ledger, signal);
 				logger.warn(
-					`[state:${domain.id}] ${page.length} rows share rev ${page[0].rev}; replication of this domain is paused until one of them changes`,
+					`[state:${domain.id}] ${fitted.length} rows share rev ${fitted[0].rev}; replication of this domain is paused until one of them changes`,
 				);
 				return true;
 			}
@@ -291,32 +306,59 @@ export class StateSyncEngine {
 			cursor.outboundRev = nextRev;
 			this.#store.set(domain.id, cursor);
 			this.#pruneLedger(ledger, cursor.outboundRev);
-			// Saturation is a property of the PAGE, not of the trimmed batch: a
-			// trailing tie shortens the batch while more rows plainly remain, so
-			// testing the batch here would stop the drain one page in.
-			if (page.length < STATE_PAGE_LIMIT) break;
+			// More may remain whenever this iteration did not see the end of the
+			// data: either the scan filled its row limit, or we cut the page for
+			// size. Testing the trimmed batch instead would stop the drain one page
+			// in, since a trailing tie shortens it while rows plainly remain.
+			if (fitted.length === page.length && page.length < STATE_PAGE_LIMIT) break;
 		}
 		return pushed;
 	}
 
 	/**
-	 * The leading run of `page` that covers only revs the page holds in FULL.
+	 * The leading rows of `page` whose encoded size stays within
+	 * {@link STATE_MAX_ENTRIES_BYTES}, or `page` itself when it already fits.
 	 *
-	 * A page is only known to be complete for a rev if the page ends after that
-	 * rev's last row. When the page is saturated its final rev may continue past
-	 * the limit, so those trailing rows are excluded and re-read next iteration.
-	 * An unsaturated page is complete by definition: the scan had nothing more
-	 * to give.
+	 * Measuring means serializing, which the client is about to do again for the
+	 * request body. That duplication is deliberate: threading a measurement back
+	 * out of the transport would couple the engine to how the body is framed, and
+	 * this runs once per domain per cycle, not per row of a hot loop.
 	 *
-	 * Returns `[]` only when a saturated page is entirely one rev, which no
-	 * rev-only cursor can page through.
+	 * A single row larger than the whole budget is returned anyway. Dropping it
+	 * would silently lose data, so it goes out and is refused by the broker,
+	 * which is a visible, diagnosable failure. The domain-level caps
+	 * (`MAX_CONFIG_FILE_BYTES`, the wire's `key` bound) are what keep that
+	 * unreachable in practice; the branch exists so the loop cannot stall on
+	 * zero progress if one is ever raised.
 	 */
-	#completeRevPrefix(page: readonly StateEntry[]): readonly StateEntry[] {
-		if (page.length < STATE_PAGE_LIMIT) return page;
-		const lastRev = page[page.length - 1].rev;
-		let end = page.length;
-		while (end > 0 && page[end - 1].rev === lastRev) end--;
-		return end === 0 ? [] : page.slice(0, end);
+	#fitBudget(id: StateDomainId, page: readonly StateEntry[]): readonly StateEntry[] {
+		let total = 0;
+		for (let i = 0; i < page.length; i++) {
+			// +1 for the comma this row costs inside the JSON array.
+			total += Buffer.byteLength(JSON.stringify(page[i])) + 1;
+			if (total <= STATE_MAX_ENTRIES_BYTES) continue;
+			if (i === 0) {
+				logger.warn(
+					`[state:${id}] row ${JSON.stringify(page[0].key)} alone exceeds the ${STATE_MAX_ENTRIES_BYTES}-byte push budget; it will be refused by the broker and this domain cannot advance past it`,
+				);
+				return page.slice(0, 1);
+			}
+			return page.slice(0, i);
+		}
+		return page;
+	}
+
+	/**
+	 * `rows` with any trailing run at `incompleteRev` removed.
+	 *
+	 * The watermark is a single rev, so it may only advance onto a rev whose rows
+	 * we have all seen. Returns `[]` when every row shares `incompleteRev`, which
+	 * no rev-only cursor can page through.
+	 */
+	#trimRev(rows: readonly StateEntry[], incompleteRev: number): readonly StateEntry[] {
+		let end = rows.length;
+		while (end > 0 && rows[end - 1].rev === incompleteRev) end--;
+		return end === 0 ? [] : rows.slice(0, end);
 	}
 
 	/**
