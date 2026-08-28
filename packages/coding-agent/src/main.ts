@@ -453,7 +453,7 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			preloadedExtensions: trustedExtensions,
 		});
 		const { session: nextSession, setToolUIContext } = result;
-		requiredExtensionOptions = result.extensionsResult.requiredExtensionOptions ?? requiredExtensionOptions;
+		requiredExtensionOptions = result.extensionsResult?.requiredExtensionOptions ?? requiredExtensionOptions;
 		if (args.parsedArgs.apiKey && !args.baseOptions.model && nextSession.model) {
 			args.authStorage.setRuntimeApiKey(nextSession.model.provider, args.parsedArgs.apiKey);
 		}
