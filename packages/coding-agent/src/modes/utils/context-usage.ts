@@ -93,7 +93,7 @@ export interface NonMessageTokenSource {
 	readonly skillsSettings?: { readonly catalogDescriptionBudgetChars?: number };
 	readonly settings?: {
 		get(key: "skillful"): boolean;
-		get(key: "task.agentCatalogDescriptionBudgetChars"): number;
+		get(key: "task.agentCatalogDescriptionBudgetChars" | "skills.catalogDescriptionBudgetChars"): number;
 	};
 }
 
@@ -101,9 +101,18 @@ const EMPTY_STRING_PARTS: string[] = [];
 const EMPTY_TOOLS: ReadonlyArray<Pick<Tool, "name" | "description" | "parameters">> = [];
 const EMPTY_SKILLS: readonly Skill[] = [];
 
-/** Mirrors the `?? -1` default `buildSystemPrompt` applies to the same setting. */
+/**
+ * Mirrors the `?? -1` default `buildSystemPrompt` applies to the same setting.
+ * Live settings win over the session snapshot: that snapshot freezes at
+ * construction when the skill list is not reloadable, while the prompt is still
+ * rebuilt from the live value, so reading it alone reports a stale budget.
+ */
 function skillsCatalogBudget(session: NonMessageTokenSource): number {
-	return session.skillsSettings?.catalogDescriptionBudgetChars ?? -1;
+	return (
+		session.settings?.get("skills.catalogDescriptionBudgetChars") ??
+		session.skillsSettings?.catalogDescriptionBudgetChars ??
+		-1
+	);
 }
 
 /**
