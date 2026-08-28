@@ -1031,6 +1031,36 @@ fn protect_live_claims_keeps_a_restored_core_claim_unlisted() {
 }
 
 #[test]
+fn registration_rejects_names_carrying_the_claimant_delimiter() {
+	let mut registry = Registry::new();
+	let native = registry
+		.register(
+			fake_tool(1, "native", Arc::new(AtomicUsize::new(0))).named("github@omp/core"),
+			Presentation::Slot,
+			claims("publisher/ext", Precedence::DEFAULT),
+		)
+		.expect_err("native registration must reject the claimant delimiter");
+	assert!(matches!(
+		native,
+		RegistryError::QualifiedToolName { ref name } if name == "github@omp/core"
+	));
+
+	let worker = registry
+		.register_worker(
+			worker_spec("tts@omp/core", [5; 32]),
+			Presentation::Device,
+			claims("publisher/ext", Precedence::DEFAULT),
+		)
+		.expect_err("worker registration must reject the claimant delimiter");
+	assert!(matches!(
+		worker,
+		RegistryError::QualifiedToolName { ref name } if name == "tts@omp/core"
+	));
+
+	assert_eq!(registry.roster().count(), 0, "rejected names must not register");
+}
+
+#[test]
 fn protect_core_claims_evicts_preexisting_non_core_claim() {
 	let mut registry = Registry::new();
 	// A non-core claimant occupies the name before protection is applied.

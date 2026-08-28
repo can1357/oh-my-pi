@@ -1118,6 +1118,12 @@ pub enum RegistryError {
 		/// Exact validation failure.
 		message: Str,
 	},
+	/// Tool name contains the reserved claimant-qualifier delimiter.
+	#[error("tool name must not contain the claimant qualifier '@': {name}")]
+	QualifiedToolName {
+		/// Rejected model-visible name.
+		name: Str,
+	},
 	/// Two distinct claimants declared the same precedence for one name.
 	#[error("tool precedence tie for {name}: {first} and {second}")]
 	PrecedenceTie {
@@ -1661,10 +1667,7 @@ impl Registry {
 			}
 
 			if spec.name.contains('@') {
-				return Err(RegistryError::InvalidHostToolSpec {
-					name:    spec.name.clone(),
-					message: sf!("name must not contain '@'"),
-				});
+				return Err(RegistryError::QualifiedToolName { name: spec.name.clone() });
 			}
 
 			if self.protected_core.contains(&spec.name) {
@@ -2227,6 +2230,9 @@ impl Registry {
 	}
 
 	fn insert(&mut self, name: Str, rev: Rev, entry: RegistryEntry) -> Result<(), RegistryError> {
+		if name.contains('@') {
+			return Err(RegistryError::QualifiedToolName { name });
+		}
 		if self.protected_core.contains(&name) && entry.claims.claimant != "omp/core" {
 			return Err(RegistryError::CoreNameClaim {
 				name,
@@ -3705,8 +3711,7 @@ mod tests {
 				.expect_err("claimant-qualified host name must be rejected");
 			assert!(matches!(
 				error,
-				RegistryError::InvalidHostToolSpec { name: ref rejected, ref message }
-					if rejected == name && message == "name must not contain '@'"
+				RegistryError::QualifiedToolName { name: ref rejected } if rejected == name
 			));
 		}
 
