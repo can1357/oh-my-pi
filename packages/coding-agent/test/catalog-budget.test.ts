@@ -8,14 +8,16 @@ describe("applyCatalogDescriptionBudget", () => {
 		{ name: "c", description: "CCCC", blocking: false },
 	];
 
-	it("returns descriptions untouched (and the same reference) when the budget is unlimited (-1)", () => {
+	it("retains every description when the budget is unlimited (-1)", () => {
 		const result = applyCatalogDescriptionBudget(entries, -1);
-		expect(result).toBe(entries);
 		expect(result.map(entry => entry.description)).toEqual(["AAAA", "BBBB", "CCCC"]);
+		expect(result.some(entry => entry.descriptionOmitted)).toBe(false);
 	});
 
-	it("returns the same reference when a positive budget fits every description", () => {
-		expect(applyCatalogDescriptionBudget(entries, 12)).toBe(entries);
+	it("retains every description when a positive budget fits all of them exactly", () => {
+		const result = applyCatalogDescriptionBudget(entries, 12);
+		expect(result.map(entry => entry.description)).toEqual(["AAAA", "BBBB", "CCCC"]);
+		expect(result.some(entry => entry.descriptionOmitted)).toBe(false);
 	});
 
 	it("omits every description at budget zero while keeping names and other fields", () => {
