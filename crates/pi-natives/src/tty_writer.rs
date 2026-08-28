@@ -208,11 +208,15 @@ impl TtyWriter {
 	/// Append into the back buffer under its lock, account the added bytes,
 	/// and wake the pump. `fill` returns the byte count it appended.
 	fn append(&self, fill: impl FnOnce(&mut Vec<u8>) -> usize) -> u32 {
-		let added = {
+		{
 			let mut back = self.inner.back.lock();
-			fill(&mut back)
-		};
-		self.inner.pending.fetch_add(added, Ordering::AcqRel);
+			let added = fill(&mut back);
+			// Publish the pending-byte accounting while `back` is still locked.
+			// Once this lock is released, the pump may claim and drain the buffer;
+			// accounting afterward lets its `fetch_sub` win the race and underflow
+			// the counter, permanently pinning JS-side render backpressure on.
+			self.inner.pending.fetch_add(added, Ordering::AcqRel);
+		}
 		self.inner.cv.notify_all();
 		self.pending()
 	}
@@ -377,6 +381,38 @@ mod tests {
 		assert_eq!(reader.join().unwrap(), 512 * 1024);
 		// SAFETY: closing test-owned fd.
 		unsafe { libc::close(read_fd) };
+	}
+
+	#[test]
+	fn rapid_small_writes_never_underflow_pending_accounting() {
+		let (read_fd, write_fd) = pipe_pair();
+		let mut writer = TtyWriter::new(write_fd).unwrap();
+		const WRITES: usize = 100_000;
+		let reader = std::thread::spawn(move || {
+			let mut buf = [0u8; 4096];
+			let mut total = 0usize;
+			while total < WRITES {
+				// SAFETY: buf is a valid out-buffer and read_fd stays open for this loop.
+				let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), buf.len()) };
+				if n <= 0 {
+					break;
+				}
+				total += n as usize;
+			}
+			// SAFETY: the reader thread owns read_fd.
+			unsafe { libc::close(read_fd) };
+			total
+		});
+
+		for _ in 0..WRITES {
+			push(&writer, b"x");
+		}
+		assert!(writer.flush_sync(5_000));
+		assert_eq!(writer.pending(), 0);
+		writer.stop(1_000);
+		// SAFETY: closing the test-owned original write fd lets the reader observe EOF.
+		unsafe { libc::close(write_fd) };
+		assert_eq!(reader.join().unwrap(), WRITES);
 	}
 
 	#[test]
