@@ -13,6 +13,7 @@
  *   GET  /v1/usage                         → aggregated provider usage (5-min per-credential cache via AuthStorage)
  *   GET  /v1/credentials/check             → per-credential auth probe (diagnose 401s in a multi-account pool)
  *   GET  /v1/models                        → list known models from the registry
+ *   GET  /v1/routes                        → list registered virtual routes
  *   POST /v1/chat/completions              → OpenAI chat-completions in/out
  *   POST /v1/messages                      → Anthropic messages in/out
  *   POST /v1/responses                     → OpenAI Responses in/out
@@ -1466,6 +1467,26 @@ function handleModelsList(opts: AuthGatewayBootOptions): Response {
 	return json(200, { object: "list", data });
 }
 
+interface RouteListRow {
+	id: string;
+	generation: number;
+	targets: readonly string[];
+	fallbacks: CompiledRoute["fallbacks"];
+}
+
+function handleRoutesList(registry: RouteRegistry): Response {
+	const data: RouteListRow[] = [];
+	for (const route of registry.list()) {
+		data.push({
+			id: route.id,
+			generation: route.generation,
+			targets: route.targets,
+			fallbacks: route.fallbacks,
+		});
+	}
+	return json(200, { object: "list", generation: registry.generation, data });
+}
+
 export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
 	const registry = opts.routeRegistry ?? new RouteRegistry(opts.resolveModel);
 	for (const def of opts.routes ?? []) registry.register(def);
@@ -1529,6 +1550,11 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				// Model catalog.
 				if (req.method === "GET" && pathname === "/v1/models") {
 					return withCors(handleModelsList(boot), req);
+				}
+
+				// Virtual routes — registered ids only, not catalog models.
+				if (req.method === "GET" && pathname === "/v1/routes") {
+					return withCors(handleRoutesList(registry), req);
 				}
 
 				// Route-table miss: no format module to defer to, so we emit a

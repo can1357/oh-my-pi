@@ -64,6 +64,11 @@ export class RouteRegistry {
 		});
 	}
 
+	/** Registered virtual routes in insertion order. Concrete catalog wraps are omitted. */
+	list(): readonly CompiledRoute[] {
+		return [...this.#routes.values()];
+	}
+
 	resolve(modelId: string): CompiledRoute | undefined {
 		const virtual = this.#routes.get(modelId);
 		if (virtual) return virtual;

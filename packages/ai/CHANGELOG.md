@@ -46,6 +46,7 @@
 - Auth gateway observes Responses SSE through a StreamCommitGate: metadata-only preludes stay failover-eligible, the first output event or 4 MiB cap commits, and post-commit terminals (`response.completed`/`response.failed`/`response.incomplete`/`response.error`) end failover eligibility instead of being misread as output.
 - Auth gateway virtual routes now fail over to a backup model when the primary is unavailable, as long as the response stream has not been committed.
 - Auth gateway can load virtual routes from a JSON/JSON5 file.
+- Auth gateway `GET /v1/routes` lists registered virtual routes.
 
 ## [18.0.8] - 2026-08-27
 
