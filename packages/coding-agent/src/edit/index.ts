@@ -1,18 +1,8 @@
 import * as nodePath from "node:path";
-import { forkClipboard, MismatchError as HashlineMismatchError, Patch } from "@oh-my-pi/hashline";
+import { MismatchError as HashlineMismatchError } from "@oh-my-pi/hashline";
 import hashlineGrammar from "@oh-my-pi/hashline/grammar.lark" with { type: "text" };
 import hashlineDescription from "@oh-my-pi/hashline/prompt.md" with { type: "text" };
-import type {
-	AgentTool,
-	AgentToolContext,
-	AgentToolResult,
-	AgentToolUpdateCallback,
-	SpeculativePhysicalOutcome,
-	ToolSpeculationAssessment,
-	ToolSpeculationCommitContext,
-	ToolSpeculationDiscardContext,
-	ToolSpeculationExecutionContext,
-} from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 import { isEnoent, isEnotdir, logger, prompt } from "@oh-my-pi/pi-utils";
 import { createLspWritethrough, flushLspWritethroughBatch, type WritethroughCallback, writethroughNoop } from "../lsp";
@@ -21,12 +11,6 @@ import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
 import applyPatchDescription from "../prompts/tools/apply-patch.md" with { type: "text" };
 import patchDescription from "../prompts/tools/patch.md" with { type: "text" };
 import replaceDescription from "../prompts/tools/replace.md" with { type: "text" };
-import {
-	openSpeculativePalTransaction,
-	SpeculativePalCommitConflictError,
-	type SpeculativePalTransaction,
-	speculativePalTargetsFitSnapshotLimit,
-} from "../task/worktree";
 import type { ToolSession } from "../tools";
 import { truncateForPrompt } from "../tools/approval";
 import { findUniqueWorkspaceSuffix, isInternalUrlPath, resolveFileWriteApprovalTier } from "../tools/path-utils";
@@ -104,43 +88,6 @@ type EditModeDefinition = {
 		onUpdate?: (partialResult: AgentToolResult<EditToolDetails, TInput>) => void,
 	) => Promise<AgentToolResult<EditToolDetails, TInput>>;
 };
-
-type StagedHashlineEdit = {
-	transaction: SpeculativePalTransaction;
-	params: HashlineParams;
-};
-
-async function assessHashlineSpeculation(cwd: string, input: unknown): Promise<ToolSpeculationAssessment> {
-	if (typeof input !== "string") return { eligible: false, reason: "hashline input is invalid" };
-	try {
-		const patch = Patch.parse(input, { cwd });
-		if (patch.sections.length === 0) return { eligible: false, reason: "hashline patch has no sections" };
-		const targets = new Set<string>();
-		for (const section of patch.sections) {
-			if (section.path.includes("://") || section.fileOp) {
-				return { eligible: false, reason: "hashline patch has a non-stageable target" };
-			}
-			targets.add(nodePath.resolve(cwd, section.path));
-		}
-		if (!(await speculativePalTargetsFitSnapshotLimit([...targets]))) {
-			return { eligible: false, reason: "hashline target exceeds the speculative rollback limit" };
-		}
-		return {
-			eligible: true,
-			effect: {
-				kind: "reversible_write",
-				isolation: "pal",
-				resources: [...targets].map(target => ({
-					scheme: "file" as const,
-					path: target,
-					access: "write" as const,
-				})),
-			},
-		};
-	} catch {
-		return { eligible: false, reason: "hashline patch is invalid" };
-	}
-}
 
 function resolveConfiguredEditMode(rawEditMode: string): EditMode | undefined {
 	if (!rawEditMode || rawEditMode === "auto") {
@@ -474,22 +421,6 @@ export class EditTool implements AgentTool<TInput> {
 	readonly loadMode = "essential";
 	readonly concurrency = "exclusive";
 	readonly strict = true;
-	#speculativeHashlineEdits = new Map<string, StagedHashlineEdit>();
-	#speculativeHashlineEditExecutions = new Map<string, { discarded: boolean }>();
-
-	readonly speculation = {
-		finalized: {
-			assess: ({ args }: { args: Readonly<Record<string, unknown>> }) =>
-				this.mode === "hashline"
-					? assessHashlineSpeculation(this.session.cwd, args.input)
-					: { eligible: false as const, reason: "edit mode is not hashline" },
-			execute: (context: ToolSpeculationExecutionContext, signal: AbortSignal) =>
-				this.#stageSpeculativeHashline(context, signal),
-			commit: (context: ToolSpeculationCommitContext, outcome: SpeculativePhysicalOutcome) =>
-				this.#commitSpeculativeHashline(context, outcome),
-			discard: (context: ToolSpeculationDiscardContext) => this.#discardSpeculativeHashline(context.toolCall.id),
-		},
-	};
 
 	readonly #allowFuzzy: boolean;
 	readonly #fuzzyThreshold: number;
@@ -523,84 +454,6 @@ export class EditTool implements AgentTool<TInput> {
 			session.settings.get("lsp.diagnosticsDeduplicate");
 		this.#deferredDiagnostics = new DeferredDiagnostics(session, deduplicateDiagnostics);
 		this.#writethrough = createEditWritethrough(session);
-	}
-
-	async #stageSpeculativeHashline(
-		context: ToolSpeculationExecutionContext,
-		signal: AbortSignal,
-	): Promise<SpeculativePhysicalOutcome> {
-		if (
-			context.effect.kind !== "reversible_write" ||
-			typeof context.args.input !== "string" ||
-			context.effect.resources.length === 0
-		) {
-			throw new Error("Invalid speculative hashline operation");
-		}
-		const execution = { discarded: false };
-		this.#speculativeHashlineEditExecutions.set(context.toolCall.id, execution);
-		let transaction: SpeculativePalTransaction | undefined;
-		try {
-			transaction = await openSpeculativePalTransaction(
-				this.session.cwd,
-				context.toolCall.id,
-				context.effect.resources.map(resource => resource.path),
-			);
-			if (signal.aborted || execution.discarded) {
-				throw new Error("Speculative hashline edit was discarded during staging");
-			}
-			const sandboxSession = Object.create(this.session) as ToolSession;
-			Object.defineProperties(sandboxSession, {
-				cwd: { value: transaction.isolation.mergedDir },
-				editClipboard: { value: forkClipboard(this.session.editClipboard), writable: true },
-				enableLsp: { value: false },
-			});
-			const stagedDiagnostics = new DeferredDiagnostics(sandboxSession, false);
-			await executeHashlineSingle({
-				session: sandboxSession,
-				input: context.args.input,
-				signal,
-				beginDeferredDiagnosticsForPath: target => stagedDiagnostics.begin(target),
-				writethrough: writethroughNoop,
-			});
-			if (signal.aborted || execution.discarded) {
-				throw new Error("Speculative hashline edit was discarded during staging");
-			}
-			const staged = { transaction, params: { input: context.args.input } } satisfies StagedHashlineEdit;
-			this.#speculativeHashlineEdits.set(context.toolCall.id, staged);
-			return { kind: "staged", token: staged };
-		} catch (error) {
-			await transaction?.close();
-			throw error;
-		} finally {
-			if (this.#speculativeHashlineEditExecutions.get(context.toolCall.id) === execution) {
-				this.#speculativeHashlineEditExecutions.delete(context.toolCall.id);
-			}
-		}
-	}
-
-	async #commitSpeculativeHashline(
-		context: ToolSpeculationCommitContext,
-		outcome: SpeculativePhysicalOutcome,
-	): Promise<AgentToolResult<EditToolDetails, TInput>> {
-		if (outcome.kind !== "staged") throw new Error("Speculative hashline edit did not produce a staged outcome");
-		const staged = outcome.token as StagedHashlineEdit;
-		try {
-			if (!(await staged.transaction.verify())) {
-				throw new SpeculativePalCommitConflictError("Speculative hashline source changed before commit");
-			}
-			return await this.execute(context.toolCall.id, staged.params);
-		} finally {
-			this.#speculativeHashlineEdits.delete(context.toolCall.id);
-			await staged.transaction.close();
-		}
-	}
-
-	async #discardSpeculativeHashline(toolCallId: string): Promise<void> {
-		const execution = this.#speculativeHashlineEditExecutions.get(toolCallId);
-		if (execution) execution.discarded = true;
-		const staged = this.#speculativeHashlineEdits.get(toolCallId);
-		this.#speculativeHashlineEdits.delete(toolCallId);
-		await staged?.transaction.close();
 	}
 
 	get mode(): EditMode {

@@ -2,8 +2,6 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { canonicalSnapshotKey, EditTool, getFileSnapshotStore } from "@oh-my-pi/pi-coding-agent/edit";
 import {
 	applyNestedPatches,
 	captureBaseline,
@@ -16,13 +14,8 @@ import {
 	ISOLATION_BASELINE_MAX_CONTENT_BYTES,
 	IsolationBaselineTooLargeError,
 	mergeTaskBranches,
-	openSpeculativePalTransaction,
 	parseIsolationMode,
-	SPECULATIVE_PAL_MAX_TARGET_BYTES,
-	SpeculativePalCommitConflictError,
-	SpeculativePalTargetTooLargeError,
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
 import * as jj from "@oh-my-pi/pi-coding-agent/utils/jj";
 import * as natives from "@oh-my-pi/pi-natives";
@@ -80,116 +73,6 @@ describe("worktree isolation helpers", () => {
 		expect(parseIsolationMode("block-clone")).toBe(natives.IsoBackendKind.WindowsBlockClone);
 		expect(parseIsolationMode("rcopy")).toBe(natives.IsoBackendKind.Rcopy);
 		expect(parseIsolationMode("worktree")).toBe(natives.IsoBackendKind.Rcopy);
-	});
-
-	it("stages a target in PAL without mutating its source and rejects stale source evidence", async () => {
-		const repo = await createGitRepo();
-		await runGit(repo, ["config", "user.email", "test@example.com"]);
-		await runGit(repo, ["config", "user.name", "Test User"]);
-		const source = path.join(repo, "note.txt");
-		await fs.writeFile(source, "before\n");
-		await runGit(repo, ["add", "note.txt"]);
-		await runGit(repo, ["commit", "-q", "-m", "init"]);
-
-		const transaction = await openSpeculativePalTransaction(repo, "speculative-target", ["note.txt"]);
-		try {
-			const sandbox = transaction.targets.get(source);
-			if (!sandbox) throw new Error("PAL transaction did not map its target");
-			await fs.writeFile(sandbox, "staged\n");
-			expect(await fs.readFile(source, "utf8")).toBe("before\n");
-			expect(await transaction.verify()).toBe(true);
-
-			await fs.writeFile(source, "changed\n");
-			expect(await transaction.verify()).toBe(false);
-			await transaction.restore();
-			expect(await fs.readFile(source, "utf8")).toBe("before\n");
-			expect(await transaction.verify()).toBe(true);
-		} finally {
-			await transaction.close();
-		}
-	});
-
-	it("rejects rollback snapshots whose bytes changed during capture", async () => {
-		const repo = await createGitRepo();
-		const source = path.join(repo, "note.txt");
-		await fs.writeFile(source, "before\n");
-		const readFile = fs.readFile;
-		let changed = false;
-		vi.spyOn(fs, "readFile").mockImplementation((async target => {
-			const content = await readFile(target);
-			if (!changed && target === source) {
-				changed = true;
-				await fs.writeFile(source, "intervening content\n");
-			}
-			return content;
-		}) as typeof fs.readFile);
-
-		await expect(openSpeculativePalTransaction(repo, "racing-snapshot", [source])).rejects.toBeInstanceOf(
-			SpeculativePalCommitConflictError,
-		);
-	});
-
-	it("refuses an unbounded speculative PAL rollback snapshot", async () => {
-		const repo = await createGitRepo();
-		const target = path.join(repo, "large.bin");
-		await fs.writeFile(target, "");
-		await fs.truncate(target, SPECULATIVE_PAL_MAX_TARGET_BYTES + 1);
-
-		await expect(openSpeculativePalTransaction(repo, "oversized-target", [target])).rejects.toBeInstanceOf(
-			SpeculativePalTargetTooLargeError,
-		);
-	});
-
-	it("isolates edit clipboard state and closes work discarded during staging", async () => {
-		const repo = await createGitRepo();
-		await runGit(repo, ["config", "user.email", "test@example.com"]);
-		await runGit(repo, ["config", "user.name", "Test User"]);
-		const source = path.join(repo, "note.txt");
-		await fs.writeFile(source, "before\n");
-		await runGit(repo, ["add", "note.txt"]);
-		await runGit(repo, ["commit", "-q", "-m", "init"]);
-		const session: ToolSession = {
-			cwd: repo,
-			hasUI: false,
-			enableLsp: false,
-			getSessionFile: () => null,
-			getSessionSpawns: () => "*",
-			settings: Settings.isolated({
-				"images.autoResize": false,
-				"inspect_image.enabled": false,
-			}),
-			editClipboard: { named: new Map([["saved", ["original"]]]) },
-		};
-		const tag = getFileSnapshotStore(session).record(canonicalSnapshotKey(source), "before\n", new Set([1]));
-		const args = {
-			input: ["*** Begin Patch", `[note.txt#${tag}]`, "CUT 1.=1 @saved", "*** End Patch"].join("\n"),
-		};
-		const tool = new EditTool(session, "hashline");
-		const policy = tool.speculation.finalized;
-		if (!policy) throw new Error("edit tool has no finalized speculation policy");
-		const assessment = await policy.assess({ args });
-		if (!assessment.eligible) throw new Error("expected speculative edit admission");
-		const createContext = (id: string) => ({
-			toolCall: { type: "toolCall" as const, id, name: "edit", arguments: args },
-			args,
-			effect: assessment.effect,
-		});
-
-		const racingContext = createContext("discarded-during-stage");
-		const racingOutcome = policy.execute(racingContext, new AbortController().signal);
-		await policy.discard?.({ ...racingContext, reason: "final arguments changed" });
-		await expect(racingOutcome).rejects.toThrow("discarded during staging");
-		expect(session.editClipboard?.named?.get("saved")).toEqual(["original"]);
-
-		const committedContext = createContext("committed-edit");
-		const committedOutcome = await policy.execute(committedContext, new AbortController().signal);
-		expect(session.editClipboard?.named?.get("saved")).toEqual(["original"]);
-		const result = await policy.commit?.(
-			{ ...committedContext, physicalOutcome: committedOutcome },
-			committedOutcome,
-		);
-		expect(result?.isError).not.toBe(true);
-		expect(session.editClipboard?.named?.get("saved")).toEqual(["before"]);
 	});
 
 	// Regression for #8939: baseline capture buffered every untracked byte into

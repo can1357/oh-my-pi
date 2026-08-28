@@ -221,19 +221,15 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 					},
 				],
 			});
-			const ambiguousAddition = await kernel.shadowPlan("if [] + []:\n    completion('wrong')");
+			const ambiguousAddition = await kernel.shadowPlan("if [] + []:\n    tool.read({'path': 'wrong'})");
 			expect(ambiguousAddition?.operations).toEqual([]);
 			expect(ambiguousAddition?.barrier?.reason).toBe("unsupported Python condition");
 			const stringAddition = await kernel.shadowPlan("tool.read({'path': 'src/' + 'a.py'})");
 			expect(stringAddition?.barrier).toBeUndefined();
 			expect(stringAddition?.operations).toHaveLength(1);
-			await executePythonWithKernel(kernel, "secret_bit = True");
-			const selectedCompletion = await kernel.shadowPlan("if secret_bit:\n    completion('constant')");
-			expect(selectedCompletion?.operations).toEqual([]);
-			expect(selectedCompletion?.barrier?.reason).toBe("unsupported Python statement");
-			const literalCompletion = await kernel.shadowPlan("if True:\n    completion('constant')");
-			expect(literalCompletion?.barrier).toBeUndefined();
-			expect(literalCompletion?.operations).toHaveLength(1);
+			const completion = await kernel.shadowPlan("completion('constant')");
+			expect(completion?.operations).toEqual([]);
+			expect(completion?.barrier?.reason).toBe("unsupported Python statement");
 			const loop = await kernel.shadowPlan(
 				["for path in ['a', 'b']:", "    await tool.read({'path': path})"].join("\n"),
 			);

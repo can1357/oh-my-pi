@@ -9,8 +9,7 @@ import {
 	type SpeculativeOperationSink,
 	type SpeculativePhysicalOutcome,
 } from "@oh-my-pi/pi-agent-core";
-import type { Api, AssistantMessage, Context, Message, Model } from "@oh-my-pi/pi-ai";
-import * as ai from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Context, Message } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { setStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -23,7 +22,6 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
-import type { ModelRegistry } from "../src/config/model-registry";
 
 const temporaryDirectories: string[] = [];
 const pythonIt = process.env.PI_PYTHON_INTEGRATION === "1" ? it : it.skip;
@@ -743,126 +741,4 @@ pythonIt("claims a Python read started before the outer eval call finishes strea
 
 	expect(startedBeforeProviderDone).toBe(true);
 	expect(executions).toBe(1);
-});
-
-it("gates a JavaScript completion until final-call reconciliation and claims its one provider result", async () => {
-	const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-eval-completion-"));
-	temporaryDirectories.push(directory);
-	const settings = Settings.isolated({
-		"eval.autoBackground.enabled": false,
-		"images.autoResize": false,
-		"inspect_image.enabled": false,
-		"tools.approvalMode": "yolo",
-		"tools.speculativeExecution.enabled": true,
-		"tools.speculativeExecution.allowedRiskyOperations": ["eval.completion"],
-	});
-	const model = {
-		id: "nested",
-		name: "nested",
-		api: "openai-responses",
-		provider: "example",
-		baseUrl: "https://api.example.test/v1",
-		reasoning: false,
-		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 128_000,
-		maxTokens: 4_096,
-	} as Model<Api>;
-	const modelRegistry = {
-		getAvailable: () => [model],
-		getApiKey: async () => "test-key",
-		resolver: () => async () => "test-key",
-	} as unknown as ModelRegistry;
-	const session: ToolSession = {
-		cwd: directory,
-		hasUI: false,
-		getSessionFile: () => null,
-		getSessionSpawns: () => "*",
-		getEvalSessionId: () => "speculative-completion-test",
-		getActiveModelString: () => "example/nested",
-		getSessionId: () => "speculative-completion-test",
-		getEvalBridgeToolNames: () => [],
-		modelRegistry,
-		settings,
-	};
-	const evalTool = new EvalTool(session);
-	const warm = await evalTool.execute("warm-completion", {
-		language: "js",
-		code: "globalThis.completionShadowWarm = true",
-	});
-	expect(warm.isError).not.toBe(true);
-
-	const completionStarted = Promise.withResolvers<void>();
-	let completionCalls = 0;
-	vi.spyOn(ai, "completeSimple").mockImplementation(async () => {
-		completionCalls += 1;
-		completionStarted.resolve();
-		return {
-			role: "assistant",
-			api: "openai-responses",
-			provider: "example",
-			model: "nested",
-			stopReason: "stop",
-			content: [{ type: "text", text: "nested result" }],
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			timestamp: Date.now(),
-		};
-	});
-
-	const host = new CodingAgentSpeculativeExecutionHost(settings, session, { hasHandlers: () => false });
-	const mock = createMockModel({ responses: [] });
-	const args = { language: "js", code: 'await completion("hello")' };
-	let turn = 0;
-	const streamFn = (_model: unknown, _context: Context) => {
-		const response = new AssistantMessageEventStream();
-		void (async () => {
-			if (turn++ === 0) {
-				const streamingCall = { type: "toolCall" as const, id: "eval-completion", name: "eval", arguments: {} };
-				setStreamingPartialJson(streamingCall, JSON.stringify(args));
-				const streamingPartial = assistant([streamingCall], "toolUse");
-				const toolCall = { ...streamingCall, arguments: args };
-				const finalPartial = assistant([toolCall], "toolUse");
-				response.push({ type: "start", partial: streamingPartial });
-				response.push({ type: "toolcall_start", contentIndex: 0, partial: streamingPartial });
-				response.push({
-					type: "toolcall_delta",
-					contentIndex: 0,
-					delta: JSON.stringify(args),
-					partial: streamingPartial,
-				});
-				await Bun.sleep(20);
-				expect(completionCalls).toBe(0);
-				response.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: finalPartial });
-				await Bun.sleep(20);
-				expect(completionCalls).toBe(0);
-				response.push({ type: "done", reason: "toolUse", message: finalPartial });
-				return;
-			}
-			const partial = assistant([{ type: "text", text: "done" }], "stop");
-			response.push({ type: "start", partial });
-			response.push({ type: "done", reason: "stop", message: partial });
-		})();
-		return response;
-	};
-
-	await agentLoop(
-		[{ role: "user", content: "Complete once", timestamp: Date.now() }],
-		{ systemPrompt: [""], messages: [], tools: [evalTool] },
-		{
-			model: mock.model,
-			convertToLlm: identityConverter,
-			speculativeToolExecution: { enabled: true, host },
-		},
-		undefined,
-		streamFn,
-	).result();
-
-	expect(completionCalls).toBe(1);
 });

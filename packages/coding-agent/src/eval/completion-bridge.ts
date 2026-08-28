@@ -61,16 +61,6 @@ export interface EvalCompletionResult {
 	details: { model: string; tier: CompletionTier; structured: boolean };
 }
 
-export interface PreparedEvalCompletion {
-	prompt: string;
-	tier: CompletionTier;
-	model: Model<Api>;
-	registry: NonNullable<ToolSession["modelRegistry"]>;
-	systemPrompt: string[];
-	schema?: Record<string, unknown>;
-	tools?: Tool[];
-}
-
 /**
  * Resolve a tier to a concrete {@link Model}. `default` prefers the session's
  * active model and falls back to the `@default` role; `smol`/`slow` resolve
@@ -110,25 +100,29 @@ function reasoningForTier(tier: CompletionTier, model: Model<Api>): Effort | und
 }
 
 /**
- * Validate and resolve a completion without issuing a provider request. Shadow
- * execution may perform this stage while outer eval arguments are streaming.
+ * Run a single stateless completion on behalf of an eval cell's `completion()` call.
+ * Returns a `{ text, details }` value shaped like a {@link callSessionTool}
+ * result so the existing bridge transport carries it to either runtime.
  */
-export async function prepareEvalCompletion(
+export async function runEvalCompletion(
 	args: unknown,
 	options: EvalCompletionBridgeOptions,
-): Promise<PreparedEvalCompletion> {
+): Promise<EvalCompletionResult> {
 	const parsed = completionArgsSchema(args);
 	if (parsed instanceof type.errors) {
 		throw new ToolError(`completion() received invalid arguments: ${parsed.summary}`);
 	}
 	const { prompt, model: modelTier, system, schema } = parsed;
-	const tier: CompletionTier = modelTier ?? "default";
-	const model = resolveTierModel(tier, options.session);
+	// Apply default value for model if not provided
+	const finalTier: CompletionTier = modelTier ?? "default";
+
+	const model = resolveTierModel(finalTier, options.session);
 	if (!model) {
 		throw new ToolError(
-			`completion() could not resolve a model for the "${tier}" tier. Configure modelRoles.${tier === "default" ? "default" : tier} or ensure a provider is available.`,
+			`completion() could not resolve a model for the "${finalTier}" tier. Configure modelRoles.${finalTier === "default" ? "default" : finalTier} or ensure a provider is available.`,
 		);
 	}
+
 	const registry = options.session.modelRegistry;
 	const apiKey = await registry?.getApiKey(model);
 	if (!registry || !apiKey) {
@@ -136,6 +130,7 @@ export async function prepareEvalCompletion(
 			`completion() has no API key for ${formatModelString(model)}. Configure credentials for this provider or choose another tier.`,
 		);
 	}
+
 	const tools: Tool[] | undefined = schema
 		? [
 				{
@@ -146,24 +141,17 @@ export async function prepareEvalCompletion(
 				},
 			]
 		: undefined;
-	return {
-		prompt,
-		tier,
-		model,
-		registry,
-		systemPrompt: system ? [system] : ["You are a helpful assistant."],
-		schema,
-		tools,
-	};
-}
 
-/** Issue and materialize one already-prepared provider completion. */
-export async function executePreparedEvalCompletion(
-	prepared: PreparedEvalCompletion,
-	options: EvalCompletionBridgeOptions,
-): Promise<EvalCompletionResult> {
-	const { model, prompt, registry, schema, systemPrompt, tier, tools } = prepared;
 	const telemetry = resolveTelemetry(options.session.getTelemetry?.(), options.session.getSessionId?.() ?? undefined);
+
+	// Some providers (notably openai-codex) require a non-empty `instructions`
+	// field on every Responses request and 400 with "Instructions are required"
+	// when it is missing. Fall back to a minimal default so `completion(prompt)` works
+	// without forcing every caller to pass a `system` prompt.
+	const systemPrompt = system ? [system] : ["You are a helpful assistant."];
+
+	// Suspend eval timeout accounting while the model request owns control. The
+	// timeout clock restarts once the bridge returns to the cell runtime.
 	const response = await withBridgeTimeoutPause(options.emitStatus, () =>
 		instrumentedCompleteSimple(
 			model,
@@ -175,18 +163,20 @@ export async function executePreparedEvalCompletion(
 			{
 				apiKey: registry.resolver(model, options.session.getSessionId?.() ?? undefined),
 				signal: options.signal,
-				reasoning: reasoningForTier(tier, model),
+				reasoning: reasoningForTier(finalTier, model),
 				toolChoice: schema ? { type: "tool", name: STRUCTURED_TOOL_NAME } : undefined,
 			},
 			{ telemetry, oneshotKind: "eval_completion" },
 		),
 	);
+
 	if (response.stopReason === "error") {
 		throw new ToolError(response.errorMessage ?? "completion() request failed.");
 	}
 	if (response.stopReason === "aborted") {
 		throw new ToolError("completion() request aborted.");
 	}
+
 	let resultText: string;
 	if (schema) {
 		const call = extractToolCall(response, STRUCTURED_TOOL_NAME);
@@ -207,24 +197,16 @@ export async function executePreparedEvalCompletion(
 		resultText = extractTextContent(response);
 		if (!resultText) throw new ToolError("completion() returned no text output.");
 	}
+
 	options.emitStatus?.({
 		op: "completion",
 		model: formatModelString(model),
-		tier,
+		tier: finalTier,
 		chars: resultText.length,
 	});
+
 	return {
 		text: resultText,
-		details: { model: formatModelString(model), tier, structured: Boolean(schema) },
+		details: { model: formatModelString(model), tier: finalTier, structured: Boolean(schema) },
 	};
-}
-
-/**
- * Run a single stateless completion on behalf of an eval cell's `completion()` call.
- */
-export async function runEvalCompletion(
-	args: unknown,
-	options: EvalCompletionBridgeOptions,
-): Promise<EvalCompletionResult> {
-	return await executePreparedEvalCompletion(await prepareEvalCompletion(args, options), options);
 }

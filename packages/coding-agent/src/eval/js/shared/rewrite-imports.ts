@@ -184,12 +184,11 @@ function rewriteImportNode(node: BabelImportDeclaration): string {
 	return `await ${importCall};`;
 }
 
-function runtimeCallKind(node: BabelNode): "read" | "completion" | undefined {
+function runtimeCallKind(node: BabelNode): "read" | undefined {
 	if (node.type !== "CallExpression") return undefined;
 	const callee = node.callee;
 	if (!callee || typeof callee !== "object") return undefined;
 	const calleeNode = callee as Record<string, unknown>;
-	if (calleeNode.type === "Identifier" && calleeNode.name === "completion") return "completion";
 	if (calleeNode.type !== "MemberExpression" || calleeNode.computed === true) return undefined;
 	const object = calleeNode.object;
 	const property = calleeNode.property;
@@ -219,7 +218,7 @@ function containsCallSiteUnsafeSyntax(value: unknown, root = true): boolean {
 }
 
 async function instrumentRuntimeCallSites(code: string): Promise<string> {
-	if (!code.includes("tool.read") && !code.includes("completion")) return code;
+	if (!code.includes("tool.read")) return code;
 	const ast = await parseProgram(code);
 	if (!ast) return code;
 	const edits: Array<{ offset: number; text: string; closing: boolean }> = [];

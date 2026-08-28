@@ -1,7 +1,6 @@
 import type * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { Patch } from "@oh-my-pi/hashline";
 import type {
 	AgentToolResult,
 	SpeculativeAuthorization,
@@ -14,7 +13,6 @@ import type {
 import type { Settings } from "../config/settings";
 import { SNAPSHOT_MAX_BYTES } from "../edit/file-snapshot-store";
 import { normalizeToLF } from "../edit/normalize";
-import { SpeculativePalCommitConflictError } from "../task/worktree";
 import type { ToolSession } from "../tools";
 import { type ApprovalMode, resolveApproval } from "../tools/approval";
 import type { LocalReadSpeculationEvidence } from "../tools/read";
@@ -28,23 +26,6 @@ type LocalReadEvidence = {
 	digest: string;
 	snapshotDigest: string;
 };
-
-type StagedTransactionToken = {
-	transaction: {
-		verify(): Promise<boolean>;
-		restore(): Promise<void>;
-	};
-};
-
-function isStagedTransactionToken(value: unknown): value is StagedTransactionToken {
-	return (
-		typeof value === "object" &&
-		value !== null &&
-		"transaction" in value &&
-		typeof (value as StagedTransactionToken).transaction?.verify === "function" &&
-		typeof (value as StagedTransactionToken).transaction?.restore === "function"
-	);
-}
 
 function isLocalReadSpeculationEvidence(value: unknown): value is LocalReadSpeculationEvidence {
 	return (
@@ -63,36 +44,12 @@ export interface SpeculationLifecycle {
 	hasHandlers(eventType: string): boolean;
 }
 
-export type CodingAgentSpeculativeOperation =
-	| "direct.read"
-	| "direct.write"
-	| "direct.edit"
-	| "eval.read"
-	| "eval.completion";
+export type CodingAgentSpeculativeOperation = "direct.read" | "eval.read";
 
-function isBaselineOperation(operation: CodingAgentSpeculativeOperation): operation is "direct.read" | "eval.read" {
-	return operation === "direct.read" || operation === "eval.read";
-}
-
-/**
- * Maps one exact built-in tool/effect pair to its operation identifier.
- *
- * Only validated local reads belong to the discard-safe baseline. PAL writes
- * remain isolated from the live source, but staging is still observable and
- * rollback has non-trivial race semantics. Completions irreversibly spend
- * tokens, consume rate limits, and send data. Keep this mapping exhaustive so
- * remote GETs, unknown tools, wildcards, and future capabilities fail closed.
- */
+/** Maps the two supported local-read paths to stable operation identifiers. */
 function operationGrant(context: SpeculativeOperationContext): CodingAgentSpeculativeOperation | undefined {
-	if (context.source === "direct") {
-		if (context.tool.name === "read" && context.effect.kind === "local_read") return "direct.read";
-		if (context.tool.name === "write" && context.effect.kind === "reversible_write") return "direct.write";
-		if (context.tool.name === "edit" && context.effect.kind === "reversible_write") return "direct.edit";
-		return undefined;
-	}
-	if (context.tool.name === "read" && context.effect.kind === "local_read") return "eval.read";
-	if (context.tool.name === "completion" && context.effect.kind === "model_completion") return "eval.completion";
-	return undefined;
+	if (context.tool.name !== "read" || context.effect.kind !== "local_read") return undefined;
+	return context.source === "direct" ? "direct.read" : "eval.read";
 }
 
 function hasLifecycleHandlers(runner: SpeculationLifecycle): boolean {
@@ -134,33 +91,11 @@ async function captureEvidence(target: string): Promise<LocalReadEvidence | unde
 	}
 }
 
-function matchesHashlineEditResources(context: SpeculativeOperationContext, cwd: string): boolean {
-	if (context.effect.kind !== "reversible_write" || typeof context.args.input !== "string") return false;
-	try {
-		const patch = Patch.parse(context.args.input, { cwd });
-		if (patch.sections.length === 0) return false;
-		const targets = new Set<string>();
-		for (const section of patch.sections) {
-			if (section.path.includes("://") || section.fileOp) return false;
-			targets.add(path.resolve(cwd, section.path));
-		}
-		return (
-			context.effect.resources.length === targets.size &&
-			context.effect.resources.every(
-				resource => resource.scheme === "file" && resource.access === "write" && targets.has(resource.path),
-			)
-		);
-	} catch {
-		return false;
-	}
-}
-
 /**
- * Session-scoped policy boundary for speculative effects.
+ * Session-scoped policy boundary for validated local reads.
  *
- * Enabling speculation admits only validated local reads. Every operation
- * whose effects are not trivial to discard requires a second, explicit risk
- * opt-in. Ordinary tool approval never supplies that opt-in.
+ * Ordinary approval and extension lifecycle hooks remain authoritative. Every
+ * other effect, including writes, completions, and remote GETs, fails closed.
  */
 export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecutionHost {
 	#evidence = new Map<string, LocalReadEvidence>();
@@ -179,11 +114,8 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 		if (!operation) {
 			return { allowed: false, reason: "tool and effect pair is not supported for speculative execution" };
 		}
-		if (
-			!isBaselineOperation(operation) &&
-			!this.settings.get("tools.speculativeExecution.allowedRiskyOperations").includes(operation)
-		) {
-			return { allowed: false, reason: `speculative operation "${operation}" requires explicit risk opt-in` };
+		if (context.effect.kind !== "local_read") {
+			return { allowed: false, reason: "tool and effect pair is not supported for speculative execution" };
 		}
 		if (hasLifecycleHandlers(this.extensionRunner)) {
 			return { allowed: false, reason: "active extension lifecycle handler" };
@@ -192,29 +124,6 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 		const policies = this.settings.get("tools.approval") as Record<string, unknown>;
 		const approval = resolveApproval(context.tool, context.args, approvalMode, policies);
 		if (approval.policy !== "allow") return { allowed: false, reason: "tool approval is not auto-allow" };
-		if (context.effect.kind === "model_completion") return { allowed: true };
-		if (context.effect.kind === "reversible_write") {
-			if (context.tool.name === "edit") {
-				if (!matchesHashlineEditResources(context, this.toolSession.cwd)) {
-					return { allowed: false, reason: "PAL edit resources changed" };
-				}
-				return { allowed: true, deferBeforeToolCall: true };
-			}
-			const resource = context.effect.resources[0];
-			if (
-				!resource ||
-				context.effect.resources.length !== 1 ||
-				resource.access !== "write" ||
-				typeof context.args.path !== "string" ||
-				resource.path !== path.resolve(this.toolSession.cwd, context.args.path)
-			) {
-				return { allowed: false, reason: "PAL write resource changed" };
-			}
-			return { allowed: true, deferBeforeToolCall: true };
-		}
-		if (context.effect.kind !== "local_read") {
-			return { allowed: false, reason: "unsupported speculative effect" };
-		}
 		const resource = context.effect.resources[0];
 		if (!resource || context.effect.resources.length !== 1 || resource.access !== "read") {
 			return { allowed: false, reason: "local read must have one read resource" };
@@ -234,14 +143,6 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 	}
 
 	async validate(context: SpeculativeCommitContext): Promise<boolean> {
-		if (context.effect.kind === "model_completion" && context.physicalOutcome.kind === "result") {
-			return (await this.authorize(context)).allowed;
-		}
-		if (context.physicalOutcome.kind === "staged") {
-			if (!isStagedTransactionToken(context.physicalOutcome.token)) return false;
-			const authorization = await this.authorize(context);
-			return authorization.allowed && (await context.physicalOutcome.token.transaction.verify());
-		}
 		const expected = this.#evidence.get(context.candidateId);
 		if (!expected) return false;
 		const consumed = context.physicalOutcome.evidence;
@@ -271,30 +172,9 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 		commitDefault: () => Promise<AgentToolResult<unknown>>,
 	): Promise<SpeculativeCommitDecision> {
 		try {
-			try {
-				return { kind: "committed" as const, result: await commitDefault() };
-			} catch (error) {
-				if (error instanceof SpeculativePalCommitConflictError) {
-					return {
-						kind: "fallback",
-						reason: "speculative commit was rejected because the source changed",
-						restored: false,
-					};
-				}
-				if (context.physicalOutcome.kind !== "staged" || !isStagedTransactionToken(context.physicalOutcome.token)) {
-					return { kind: "failed" as const, error };
-				}
-				try {
-					await context.physicalOutcome.token.transaction.restore();
-					return {
-						kind: "fallback",
-						reason: "speculative commit failed and source state was restored",
-						restored: true,
-					};
-				} catch {
-					return { kind: "failed", error };
-				}
-			}
+			return { kind: "committed" as const, result: await commitDefault() };
+		} catch (error) {
+			return { kind: "failed" as const, error };
 		} finally {
 			this.#evidence.delete(context.candidateId);
 		}

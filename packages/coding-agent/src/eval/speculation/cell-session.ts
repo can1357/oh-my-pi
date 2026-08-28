@@ -1,19 +1,11 @@
-import { type } from "@oh-my-pi/omptype";
 import type {
-	AgentTool,
 	AgentToolCall,
 	AgentToolResult,
 	SpeculativeChildHandle,
 	SpeculativeOperationSink,
-	ToolSpeculationEffect,
 	ToolSpeculationStreamSession,
 } from "@oh-my-pi/pi-agent-core";
 import type { ToolSession } from "../../tools";
-import {
-	executePreparedEvalCompletion,
-	type PreparedEvalCompletion,
-	prepareEvalCompletion,
-} from "../completion-bridge";
 import { namespaceSessionId as namespaceJavaScriptSessionId } from "../js";
 import { shadowPlanIfPresent } from "../js/context-manager";
 import type { RuntimeCallIdentity } from "../js/shared/runtime";
@@ -23,10 +15,8 @@ import { namespaceSessionId as namespacePythonSessionId } from "../py";
 import { shadowPlanPythonIfPresent } from "../py/executor";
 import { type ShadowClaimKey, ShadowClaimStore } from "./claim-store";
 import { EvalArgsStreamDecoder } from "./eval-args-stream";
-import { completionEgressIsSafe, evaluateShadowExpression } from "./evaluator";
-import type { ShadowOperation, ShadowOrigin, ShadowPlan, ShadowValue } from "./types";
-
-const completionParameters = type({ "[string]": "unknown" });
+import { evaluateShadowExpression } from "./evaluator";
+import type { ShadowOperation, ShadowPlan, ShadowValue } from "./types";
 
 interface ClaimedChild {
 	handle: SpeculativeChildHandle;
@@ -66,83 +56,6 @@ function fingerprint(args: unknown): string {
 function asArgs(value: unknown): Readonly<Record<string, unknown>> | undefined {
 	if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
 	return value as Readonly<Record<string, unknown>>;
-}
-
-function completionArgs(value: unknown): Readonly<Record<string, unknown>> | undefined {
-	if (Array.isArray(value)) {
-		const [prompt, options] = value;
-		const optionArgs = options === undefined ? {} : asArgs(options);
-		if (!optionArgs) return undefined;
-		return { prompt, ...optionArgs };
-	}
-	return { prompt: value };
-}
-
-function childOrigin(
-	name: string,
-	args: Readonly<Record<string, unknown>>,
-	prepared?: PreparedEvalCompletion,
-): ShadowOrigin {
-	if (name === "read") return { kind: "local_read", resource: String(args.path ?? "") };
-	return {
-		kind: "model_completion",
-		provider: prepared?.model.provider ?? "",
-		authority: prepared ? new URL(prepared.model.baseUrl).origin : "",
-	};
-}
-
-function effectOrigins(origins: readonly ShadowOrigin[]) {
-	return origins.map(origin => {
-		switch (origin.kind) {
-			case "provider_literal":
-			case "persistent_state":
-				return { kind: origin.kind } as const;
-			case "local_read":
-				return { kind: "local_read", resource: origin.resource } as const;
-			case "remote_read":
-				return { kind: "remote_read", authority: origin.authority } as const;
-			case "model_completion":
-				return { kind: "model_completion", provider: origin.provider, authority: origin.authority } as const;
-		}
-		throw new Error(`Unsupported shadow origin: ${String(origin)}`);
-	});
-}
-
-function completionTool(
-	prepared: PreparedEvalCompletion,
-	origins: readonly ShadowOrigin[],
-	session: ToolSession,
-): AgentTool {
-	const effect: ToolSpeculationEffect = {
-		kind: "model_completion",
-		provider: prepared.model.provider,
-		model: prepared.model.id,
-		baseUrl: new URL(prepared.model.baseUrl).origin,
-		egress: [{ authority: new URL(prepared.model.baseUrl).origin, origins: effectOrigins(origins) }],
-	};
-	return {
-		name: "completion",
-		label: "Completion",
-		description: "Runs one nested completion.",
-		parameters: completionParameters,
-		speculation: {
-			finalized: {
-				assess: () => ({ eligible: true, effect }),
-				async execute(_context, signal) {
-					const result = await executePreparedEvalCompletion(prepared, { session, signal });
-					return {
-						kind: "result",
-						result: { content: [{ type: "text", text: result.text }], details: result.details },
-						isError: false,
-					};
-				},
-			},
-		},
-		async execute(_toolCallId, _args, signal) {
-			const result = await executePreparedEvalCompletion(prepared, { session, signal });
-			return { content: [{ type: "text", text: result.text }], details: result.details };
-		},
-	};
 }
 
 export class EvalShadowCellSession implements ToolSpeculationStreamSession {
@@ -325,28 +238,12 @@ export class EvalShadowCellSession implements ToolSpeculationStreamSession {
 			} catch {
 				return;
 			}
-			const runtimeArgs = operation.call.name === "completion" ? completionArgs(evaluated.value) : evaluated.value;
-			if (runtimeArgs === undefined) return;
-			let executionArgs: Readonly<Record<string, unknown>> | undefined;
-			let tool: AgentTool | undefined;
-			let prepared: PreparedEvalCompletion | undefined;
-			if (operation.call.name === "read") {
-				executionArgs = asArgs(runtimeArgs);
-				if (!executionArgs) return;
-				tool = this.#options.session.getToolForEvalBridge?.("read");
-			} else {
-				try {
-					prepared = await prepareEvalCompletion(runtimeArgs, { session: this.#options.session });
-					const authority = new URL(prepared.model.baseUrl).origin;
-					if (!completionEgressIsSafe(evaluated, prepared.model.provider, authority)) return;
-					tool = completionTool(prepared, evaluated.origins, this.#options.session);
-					executionArgs = asArgs(runtimeArgs);
-					if (!executionArgs) return;
-				} catch {
-					return;
-				}
-			}
-			if (!tool || !executionArgs) return;
+			if (operation.call.name !== "read") return;
+			const runtimeArgs = evaluated.value;
+			const executionArgs = asArgs(runtimeArgs);
+			if (!executionArgs) return;
+			const tool = this.#options.session.getToolForEvalBridge?.("read");
+			if (!tool) return;
 			await previousOccurrenceAssignment;
 			const runtimeOccurrenceKey = `${operation.call.siteId}\0${operation.call.name}`;
 			const runtimeOccurrence = this.#runtimeOccurrences.get(runtimeOccurrenceKey) ?? 0;
@@ -387,7 +284,7 @@ export class EvalShadowCellSession implements ToolSpeculationStreamSession {
 				const value = bridgeValueFromToolResult(operation.call.name, runtimeArgs, outcome.result);
 				this.#results.set(operation.call.id, {
 					value,
-					origins: [childOrigin(operation.call.name, executionArgs, prepared)],
+					origins: [{ kind: "local_read", resource: String(executionArgs.path ?? "") }],
 				});
 				this.#claims.add(key, {
 					kind: "result",

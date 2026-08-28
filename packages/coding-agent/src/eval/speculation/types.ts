@@ -1,9 +1,7 @@
 export type ShadowOrigin =
 	| { kind: "provider_literal" }
 	| { kind: "persistent_state" }
-	| { kind: "local_read"; resource: string }
-	| { kind: "remote_read"; authority: string }
-	| { kind: "model_completion"; provider: string; authority: string };
+	| { kind: "local_read"; resource: string };
 
 export interface ShadowValue {
 	readonly value: unknown;
@@ -35,7 +33,7 @@ export interface ShadowToolCall {
 	readonly siteId: string;
 	readonly dynamicPath: readonly string[];
 	readonly occurrence: number;
-	readonly name: "read" | "completion";
+	readonly name: "read";
 	readonly args: ShadowExpression;
 	readonly dependencies: readonly string[];
 	readonly controlDependencies: readonly string[];

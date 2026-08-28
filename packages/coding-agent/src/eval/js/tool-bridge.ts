@@ -140,11 +140,6 @@ export function bridgeValueFromToolResult(
 
 export async function callSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
 	if (name === EVAL_COMPLETION_BRIDGE_NAME) {
-		const shadowCell = options.shadowCell ?? getActiveEvalShadowCell();
-		if (shadowCell && options.identity) {
-			const claimed = await shadowCell.claim("completion", args, options.identity, Number.MAX_SAFE_INTEGER);
-			if (claimed) return bridgeValueFromToolResult("completion", args, claimed, options.emitStatus);
-		}
 		return await runEvalCompletion(args, options);
 	}
 	if (name === EVAL_AGENT_BRIDGE_NAME) {

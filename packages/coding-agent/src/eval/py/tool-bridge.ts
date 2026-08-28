@@ -75,10 +75,9 @@ async function callSessionToolPromptOnAbort(
 	if (entry.abortRequested?.()) {
 		throw new Error(`bridge call ${JSON.stringify(name)} aborted: eval cell was interrupted`);
 	}
-	if (entry.shadowCell && identity) {
-		const logicalName = name === "__completion__" ? "completion" : name;
-		const claimed = await entry.shadowCell.claim(logicalName, args, identity, Number.MAX_SAFE_INTEGER);
-		if (claimed) return bridgeValueFromToolResult(logicalName, args, claimed, entry.emitStatus);
+	if (entry.shadowCell && identity && name === "read") {
+		const claimed = await entry.shadowCell.claim(name, args, identity, Number.MAX_SAFE_INTEGER);
+		if (claimed) return bridgeValueFromToolResult(name, args, claimed, entry.emitStatus);
 	}
 	const call = callSessionTool(name, args, {
 		session: entry.toolSession,

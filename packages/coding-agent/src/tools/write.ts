@@ -9,12 +9,7 @@ import type {
 	AgentToolContext,
 	AgentToolResult,
 	AgentToolUpdateCallback,
-	SpeculativePhysicalOutcome,
 	ToolApprovalDecision,
-	ToolSpeculationAssessment,
-	ToolSpeculationCommitContext,
-	ToolSpeculationDiscardContext,
-	ToolSpeculationExecutionContext,
 } from "@oh-my-pi/pi-agent-core";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
@@ -38,12 +33,6 @@ import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
 import { getLanguageFromPath, highlightCode, type Theme } from "../modes/theme/theme";
 import writeDescription from "../prompts/tools/write.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
-import {
-	openSpeculativePalTransaction,
-	SpeculativePalCommitConflictError,
-	type SpeculativePalTransaction,
-	speculativePalTargetsFitSnapshotLimit,
-} from "../task/worktree";
 import { fileHyperlink, framedBlock, renderStatusLine } from "../tui";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { routeWriteThroughBridge } from "./acp-bridge";
@@ -109,51 +98,6 @@ import {
 	xdevActivitySummary,
 	xdevListing,
 } from "./xdev";
-
-type StagedWrite = {
-	transaction: SpeculativePalTransaction;
-	params: WriteParams;
-};
-
-async function assessWriteSpeculation(
-	cwd: string,
-	args: Readonly<Record<string, unknown>>,
-): Promise<ToolSpeculationAssessment> {
-	if (typeof args.path !== "string" || typeof args.content !== "string") {
-		return { eligible: false, reason: "write arguments are invalid" };
-	}
-	let target: string;
-	try {
-		const writePath = peelWriteUrlSelector(unwrapHashlineHeaderPath(args.path));
-		if (
-			writePath.includes("://") ||
-			pathTargetsSsh(writePath) ||
-			parseConflictUri(writePath) ||
-			parseArchivePathCandidates(writePath).some(candidate => candidate.archivePath !== writePath) ||
-			(await isSqliteFile(writePath))
-		) {
-			return { eligible: false, reason: "write target is not a plain local file" };
-		}
-		target = path.resolve(cwd, writePath);
-	} catch {
-		return { eligible: false, reason: "write target is invalid" };
-	}
-	try {
-		if (!(await speculativePalTargetsFitSnapshotLimit([target]))) {
-			return { eligible: false, reason: "write target exceeds the speculative rollback limit" };
-		}
-	} catch {
-		return { eligible: false, reason: "write target cannot be safely snapshotted" };
-	}
-	return {
-		eligible: true,
-		effect: {
-			kind: "reversible_write",
-			isolation: "pal",
-			resources: [{ scheme: "file", path: target, access: "write" }],
-		},
-	};
-}
 
 const LOOSE_HASHLINE_HEADER_RE = /^\s*\[[^#\r\n]+#[^ \t\r\n]*\]\s*$/;
 const EXECUTABLE_NOTICE = "[Notice: Made executable via chmod +x]";
@@ -612,7 +556,6 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<WriteParams>;
 		const targetPath = typeof params.path === "string" ? params.path : "(missing)";
-
 		const content = typeof params.content === "string" ? params.content : "";
 		return [`Path: ${truncateForPrompt(targetPath)}`, `Content:\n${truncateForPrompt(content)}`];
 	};
@@ -622,19 +565,6 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 	readonly strict = true;
 	readonly concurrency = "exclusive";
 	readonly loadMode = "essential";
-	#speculativeWrites = new Map<string, StagedWrite>();
-
-	readonly speculation = {
-		finalized: {
-			assess: ({ args }: { args: Readonly<Record<string, unknown>> }) =>
-				assessWriteSpeculation(this.session.cwd, args),
-			execute: (context: ToolSpeculationExecutionContext, signal: AbortSignal) =>
-				this.#stageSpeculativeWrite(context, signal),
-			commit: (context: ToolSpeculationCommitContext, outcome: SpeculativePhysicalOutcome) =>
-				this.#commitSpeculativeWrite(context, outcome),
-			discard: (context: ToolSpeculationDiscardContext) => this.#discardSpeculativeWrite(context.toolCall.id),
-		},
-	};
 
 	/** Stream matchers should see the real file content, not its JSON-escaped argument encoding. */
 	matcherDigest(args: unknown): string | undefined {
@@ -662,59 +592,6 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				})
 			: writethroughNoop;
 		this.description = prompt.render(writeDescription);
-	}
-
-	async #stageSpeculativeWrite(
-		context: ToolSpeculationExecutionContext,
-		signal: AbortSignal,
-	): Promise<SpeculativePhysicalOutcome> {
-		const resource = context.effect.kind === "reversible_write" ? context.effect.resources[0] : undefined;
-		if (
-			resource?.access !== "write" ||
-			typeof context.args.path !== "string" ||
-			typeof context.args.content !== "string"
-		) {
-			throw new Error("Invalid speculative write operation");
-		}
-		const transaction = await openSpeculativePalTransaction(this.session.cwd, context.toolCall.id, [resource.path]);
-		try {
-			const sandboxTarget = transaction.targets.get(resource.path);
-			if (!sandboxTarget) throw new Error("PAL transaction did not map speculative write target");
-			const { text } = stripWriteContent(this.session, context.args.content);
-			await untilAborted(signal, () => Bun.write(sandboxTarget, text));
-			const staged = {
-				transaction,
-				params: { path: context.args.path, content: context.args.content },
-			} satisfies StagedWrite;
-			this.#speculativeWrites.set(context.toolCall.id, staged);
-			return { kind: "staged", token: staged };
-		} catch (error) {
-			await transaction.close();
-			throw error;
-		}
-	}
-
-	async #commitSpeculativeWrite(
-		context: ToolSpeculationCommitContext,
-		outcome: SpeculativePhysicalOutcome,
-	): Promise<AgentToolResult<WriteToolDetails>> {
-		if (outcome.kind !== "staged") throw new Error("Speculative write did not produce a staged outcome");
-		const staged = outcome.token as StagedWrite;
-		try {
-			if (!(await staged.transaction.verify())) {
-				throw new SpeculativePalCommitConflictError("Speculative write source changed before commit");
-			}
-			return await this.execute(context.toolCall.id, staged.params);
-		} finally {
-			this.#speculativeWrites.delete(context.toolCall.id);
-			await staged.transaction.close();
-		}
-	}
-
-	async #discardSpeculativeWrite(toolCallId: string): Promise<void> {
-		const staged = this.#speculativeWrites.get(toolCallId);
-		this.#speculativeWrites.delete(toolCallId);
-		await staged?.transaction.close();
 	}
 
 	async #resolveArchiveWritePath(writePath: string): Promise<ResolvedArchiveWritePath | null> {

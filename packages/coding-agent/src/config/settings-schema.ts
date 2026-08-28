@@ -4563,19 +4563,6 @@ export const SETTINGS_SCHEMA = {
 				"Enable the discard-safe first slice: validated local reads through direct read calls and nested eval. Network requests, provider completions, and live filesystem writes are not part of this baseline.",
 		},
 	},
-	"tools.speculativeExecution.allowedRiskyOperations": {
-		type: "array",
-		default: EMPTY_STRING_ARRAY,
-		ui: {
-			tab: "tools",
-			group: "Execution",
-			label: "Risk-Bearing Speculative Operations",
-			warning:
-				"At your own risk: discarded operations can still create observable filesystem activity, spend provider tokens, consume rate limits, or send data externally",
-			description:
-				"Explicitly permit non-trivial operations to start early: direct.write, direct.edit, and eval.completion. Remote GET is unsupported; any future network operation must require this risk-bearing gate. Unknown entries and wildcards grant nothing.",
-		},
-	},
 
 	"tools.speculativeExecution.maxInFlight": {
 		type: "number",
@@ -4584,7 +4571,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			group: "Execution",
 			label: "Speculative Execution Concurrency",
-			description: "Maximum number of experimental discard-safe operations allowed to run before normal dispatch.",
+			description: "Maximum number of validated local reads allowed to run before normal dispatch.",
 			options: [
 				{ value: "1", label: "1 operation" },
 				{ value: "2", label: "2 operations" },

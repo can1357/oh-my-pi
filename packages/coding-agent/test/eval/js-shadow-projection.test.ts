@@ -28,25 +28,25 @@ describe("projectJavaScriptShadowPlan", () => {
 		});
 	});
 
-	it("tracks data dependencies through declarations and safe transformations", async () => {
+	it("tracks read dependencies through declarations and safe transformations", async () => {
 		const interpolation = "$" + "{source.content[0].text}";
 		const plan = await projectJavaScriptShadowPlan(`
-const source = await tool.read({ path: "src/a.ts" });
-const prompt = \`Judge ${interpolation}\`;
-const verdict = await completion(prompt);
-display(verdict);
+const source = await tool.read({ path: "src/path.txt" });
+const path = \`src/${interpolation}\`;
+const target = await tool.read({ path });
+display(target);
 `);
 		expect(plan.barrier).toBeUndefined();
 		expect(plan.operations).toHaveLength(2);
-		const [read, completion] = plan.operations;
-		expect(completion?.call.dependencies).toEqual([read?.call.id]);
-		expect(completion?.call.args).toMatchObject({ kind: "concat" });
+		const [source, target] = plan.operations;
+		expect(target?.call.dependencies).toEqual([source?.call.id]);
+		expect(target?.call.args).toMatchObject({ kind: "object" });
 	});
 
 	it("rejects numeric addition while retaining proven string concatenation", async () => {
 		const numeric = await projectJavaScriptShadowPlan(`
 const value = 1 + 2;
-await completion(String(value));
+await tool.read({ path: String(value) });
 `);
 		expect(numeric.operations).toEqual([]);
 		expect(numeric.barrier?.reason).toBe("unsupported JavaScript declaration value");
@@ -63,16 +63,10 @@ await tool.read({ path });
 		});
 	});
 
-	it("blocks completion egress after snapshot-selected control flow", async () => {
-		const selected = await projectJavaScriptShadowPlan('if (secretBit) await completion("constant");', {
-			snapshot: { secretBit: true },
-		});
-		expect(selected.operations).toEqual([]);
-		expect(selected.barrier?.reason).toBe("unsupported JavaScript statement");
-
-		const providerLiteral = await projectJavaScriptShadowPlan('if (true) await completion("constant");');
-		expect(providerLiteral.barrier).toBeUndefined();
-		expect(providerLiteral.operations).toHaveLength(1);
+	it("does not project completion calls", async () => {
+		const plan = await projectJavaScriptShadowPlan('await completion("constant");');
+		expect(plan.operations).toEqual([]);
+		expect(plan.barrier?.reason).toBe("unsupported JavaScript statement");
 	});
 
 	it("expands deterministic branches and bounded loops with dynamic paths", async () => {

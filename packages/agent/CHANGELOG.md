@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added opt-in host authorization and exact-once streamed child execution for speculative filesystem operations, constrained HTTPS GET effects, and nested eval operations.
+- Added opt-in host authorization and exact-once streamed child execution for discard-safe local reads.
 
 ## [18.0.5] - 2026-08-25
 

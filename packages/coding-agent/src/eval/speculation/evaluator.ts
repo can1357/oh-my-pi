@@ -14,10 +14,6 @@ function originKey(origin: ShadowOrigin): string {
 			return origin.kind;
 		case "local_read":
 			return `${origin.kind}:${origin.resource}`;
-		case "remote_read":
-			return `${origin.kind}:${origin.authority}`;
-		case "model_completion":
-			return `${origin.kind}:${origin.provider}:${origin.authority}`;
 	}
 }
 
@@ -127,36 +123,21 @@ export interface EvaluatedShadowOperation {
 	readonly args: ShadowValue;
 }
 
-export function completionEgressIsSafe(args: ShadowValue, provider: string, authority: string): boolean {
-	return args.origins.every(origin => {
-		if (origin.kind === "provider_literal") return true;
-		return origin.kind === "model_completion" && origin.provider === provider && origin.authority === authority;
-	});
-}
-
 export function evaluateShadowOperation(
 	operation: ShadowOperation,
 	context: ShadowEvaluationContext,
-	completion?: { provider: string; authority: string },
 ): EvaluatedShadowOperation {
-	const args = evaluateShadowExpression(operation.call.args, context);
-	if (operation.call.name === "completion") {
-		if (!completion || !completionEgressIsSafe(args, completion.provider, completion.authority)) {
-			throw new Error("unsafe completion information flow");
-		}
-	}
-	return { operation, args };
+	return { operation, args: evaluateShadowExpression(operation.call.args, context) };
 }
 
 export function evaluateShadowPlan(
 	plan: ShadowPlan,
 	context: ShadowEvaluationContext,
-	completion?: { provider: string; authority: string },
 ): { operations: readonly EvaluatedShadowOperation[]; barrier?: ShadowPlan["barrier"] } {
 	const operations: EvaluatedShadowOperation[] = [];
 	for (const operation of plan.operations) {
 		try {
-			operations.push(evaluateShadowOperation(operation, context, completion));
+			operations.push(evaluateShadowOperation(operation, context));
 		} catch (error) {
 			return {
 				operations,

@@ -10,8 +10,6 @@ import type {
 	SpeculativeChildDefinition,
 	SpeculativeChildHandle,
 	SpeculativeCommitContext,
-	SpeculativeEgress,
-	SpeculativeInformationOrigin,
 	SpeculativeOperationContext,
 	SpeculativePhysicalOutcome,
 	SpeculativeResourceAccess,
@@ -82,84 +80,18 @@ function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): 
 	return actual.length === keys.length && actual.every(key => keys.includes(key));
 }
 
-function normalizeAuthority(value: unknown): string | undefined {
-	if (typeof value !== "string") return undefined;
-	try {
-		const url = new URL(value);
-		if (url.protocol !== "https:" || url.username || url.password || url.hash || url.pathname !== "/" || url.search) {
-			return undefined;
-		}
-		return url.origin;
-	} catch {
-		return undefined;
-	}
-}
-
 function normalizeResources(value: unknown): readonly SpeculativeResourceAccess[] | undefined {
 	if (!Array.isArray(value) || value.length === 0) return undefined;
 	const resources: SpeculativeResourceAccess[] = [];
-	const accesses = new Map<string, "read" | "write">();
+	const accesses = new Set<string>();
 	for (const item of value) {
 		if (!isPlainRecord(item) || !hasExactKeys(item, ["scheme", "path", "access"])) return undefined;
 		if (item.scheme !== "file" || typeof item.path !== "string" || !path.isAbsolute(item.path)) return undefined;
-		if (item.access !== "read" && item.access !== "write") return undefined;
-		if (accesses.has(item.path)) return undefined;
-		accesses.set(item.path, item.access);
-		resources.push(Object.freeze({ scheme: "file", path: item.path, access: item.access }));
+		if (item.access !== "read" || accesses.has(item.path)) return undefined;
+		accesses.add(item.path);
+		resources.push(Object.freeze({ scheme: "file", path: item.path, access: "read" }));
 	}
 	return Object.freeze(resources);
-}
-
-function normalizeEgress(value: unknown): readonly SpeculativeEgress[] | undefined {
-	if (!Array.isArray(value)) return undefined;
-	const seen = new Set<string>();
-	const egress: SpeculativeEgress[] = [];
-	for (const item of value) {
-		if (!isPlainRecord(item) || !hasExactKeys(item, ["authority", "origins"])) return undefined;
-		const authority = normalizeAuthority(item.authority);
-		if (!authority || seen.has(authority) || !Array.isArray(item.origins)) return undefined;
-		const origins: SpeculativeInformationOrigin[] = [];
-		for (const origin of item.origins) {
-			if (!isPlainRecord(origin) || typeof origin.kind !== "string") return undefined;
-			switch (origin.kind) {
-				case "provider_literal":
-				case "persistent_state":
-					if (!hasExactKeys(origin, ["kind"])) return undefined;
-					origins.push(Object.freeze({ kind: origin.kind }));
-					break;
-				case "local_read":
-					if (typeof origin.resource !== "string" || !hasExactKeys(origin, ["kind", "resource"])) return undefined;
-					origins.push(Object.freeze({ kind: origin.kind, resource: origin.resource }));
-					break;
-				case "remote_read": {
-					const originAuthority = normalizeAuthority(origin.authority);
-					if (!originAuthority || !hasExactKeys(origin, ["kind", "authority"])) return undefined;
-					origins.push(Object.freeze({ kind: origin.kind, authority: originAuthority }));
-					break;
-				}
-				case "model_completion": {
-					const originAuthority = normalizeAuthority(origin.authority);
-					if (
-						typeof origin.provider !== "string" ||
-						origin.provider.length === 0 ||
-						!originAuthority ||
-						!hasExactKeys(origin, ["kind", "provider", "authority"])
-					) {
-						return undefined;
-					}
-					origins.push(
-						Object.freeze({ kind: origin.kind, provider: origin.provider, authority: originAuthority }),
-					);
-					break;
-				}
-				default:
-					return undefined;
-			}
-		}
-		seen.add(authority);
-		egress.push(Object.freeze({ authority, origins: Object.freeze(origins) }));
-	}
-	return Object.freeze(egress);
 }
 
 /** JSON canonicalization shared by assessment and final reconciliation. */
@@ -227,81 +159,6 @@ export function normalizeSpeculationEffect(effect: unknown): ToolSpeculationEffe
 		const resources = normalizeResources(effect.resources);
 		return resources ? Object.freeze({ kind: "local_read", resources }) : undefined;
 	}
-	if (effect.kind === "reversible_write" && hasExactKeys(effect, ["kind", "isolation", "resources"])) {
-		const resources = normalizeResources(effect.resources);
-		return effect.isolation === "pal" && resources
-			? Object.freeze({ kind: "reversible_write", isolation: "pal", resources })
-			: undefined;
-	}
-	if (effect.kind === "irreversible_write" && hasExactKeys(effect, ["kind", "reason"])) {
-		return typeof effect.reason === "string" && effect.reason.length > 0
-			? Object.freeze({ kind: "irreversible_write", reason: effect.reason })
-			: undefined;
-	}
-	if (
-		effect.kind === "remote_read" &&
-		hasExactKeys(effect, ["kind", "transport", "egress"]) &&
-		isPlainRecord(effect.transport)
-	) {
-		const transport = effect.transport;
-		if (!hasExactKeys(transport, ["url", "headers", "credentials", "cache", "redirect"])) return undefined;
-		if (typeof transport.url !== "string" || !isPlainRecord(transport.headers)) return undefined;
-		let url: URL;
-		try {
-			url = new URL(transport.url);
-		} catch {
-			return undefined;
-		}
-		if (
-			url.protocol !== "https:" ||
-			url.username ||
-			url.password ||
-			url.hash ||
-			url.href !== transport.url ||
-			transport.credentials !== "omit" ||
-			transport.cache !== "no-store" ||
-			transport.redirect !== "error"
-		) {
-			return undefined;
-		}
-		const headers: Record<string, string> = {};
-		for (const [name, value] of Object.entries(transport.headers)) {
-			const normalizedName = name.toLowerCase();
-			if (
-				typeof value !== "string" ||
-				headers[normalizedName] !== undefined ||
-				!["accept", "cache-control", "pragma", "user-agent"].includes(normalizedName) ||
-				/[\r\n]/.test(name) ||
-				/[\r\n]/.test(value)
-			) {
-				return undefined;
-			}
-			headers[normalizedName] = value;
-		}
-		if (headers["cache-control"] !== "no-store" || headers.pragma !== "no-cache") return undefined;
-		const egress = normalizeEgress(effect.egress);
-		if (!egress) return undefined;
-		const normalizedTransport = Object.freeze({
-			url: url.href,
-			headers: Object.freeze(Object.fromEntries(Object.entries(headers).sort(([a], [b]) => a.localeCompare(b)))),
-			credentials: "omit" as const,
-			cache: "no-store" as const,
-			redirect: "error" as const,
-		});
-		return Object.freeze({ kind: "remote_read", transport: normalizedTransport, egress });
-	}
-	if (effect.kind === "model_completion" && hasExactKeys(effect, ["kind", "provider", "model", "baseUrl", "egress"])) {
-		const baseUrl = normalizeAuthority(effect.baseUrl);
-		const egress = normalizeEgress(effect.egress);
-		return typeof effect.provider === "string" &&
-			effect.provider.length > 0 &&
-			typeof effect.model === "string" &&
-			effect.model.length > 0 &&
-			baseUrl &&
-			egress
-			? Object.freeze({ kind: "model_completion", provider: effect.provider, model: effect.model, baseUrl, egress })
-			: undefined;
-	}
 	return undefined;
 }
 
@@ -314,11 +171,7 @@ function emitTelemetry(config: SpeculativeToolExecutionConfig, event: Speculativ
 }
 
 function resourceCount(effect: ToolSpeculationEffect): number {
-	return effect.kind === "local_read" || effect.kind === "reversible_write" ? effect.resources.length : 0;
-}
-
-function egressAuthority(effect: ToolSpeculationEffect): string | undefined {
-	return effect.kind === "remote_read" || effect.kind === "model_completion" ? effect.egress[0]?.authority : undefined;
+	return effect.kind === "local_read" ? effect.resources.length : 0;
 }
 
 class TrackedStreamSession implements ToolSpeculationStreamSession {
@@ -486,9 +339,7 @@ export class SpeculativeOperationCoordinator {
 				candidate.startedAt !== undefined
 					? Math.min(executionDurationMs, Math.max(0, candidate.dispatchReachedAt - candidate.startedAt))
 					: undefined,
-			staged: candidate.effect.kind === "reversible_write",
 			resourceCount: resourceCount(candidate.effect),
-			egressAuthority: egressAuthority(candidate.effect),
 		});
 	}
 
@@ -503,11 +354,9 @@ export class SpeculativeOperationCoordinator {
 			candidateId: toolCall.id,
 			parentToolCallId,
 			toolName: toolCall.name,
-			effectKind: "irreversible_write",
 			dependencyCount: 0,
 			outcome: "ineligible",
 			reason,
-			staged: false,
 			resourceCount: 0,
 		});
 		return false;
@@ -608,7 +457,7 @@ export class SpeculativeOperationCoordinator {
 			await this.#discardCandidate(candidate, "discarded", "speculative execution failed");
 			return undefined;
 		}
-		if (physicalOutcome.kind === "result" && physicalOutcome.isError) {
+		if (physicalOutcome.isError) {
 			candidate.claimed = false;
 			await this.#discardCandidate(candidate, "discarded", "speculative execution returned an error");
 			return undefined;
@@ -620,11 +469,8 @@ export class SpeculativeOperationCoordinator {
 				await this.#discardCandidate(candidate, "discarded", "host validation vetoed speculative result");
 				return undefined;
 			}
-			const commitDefault = async (): Promise<AgentToolResult<unknown>> => {
-				if (candidate.policy.commit) return candidate.policy.commit(context, physicalOutcome);
-				if (physicalOutcome.kind === "result") return physicalOutcome.result;
-				throw new Error("A staged speculative outcome requires a commit policy");
-			};
+			const commitDefault = async (): Promise<AgentToolResult<unknown>> =>
+				candidate.policy.commit ? candidate.policy.commit(context, physicalOutcome) : physicalOutcome.result;
 			const decision = this.config.host?.commit
 				? await this.config.host.commit(context, commitDefault)
 				: { kind: "committed" as const, result: await commitDefault() };
@@ -637,7 +483,7 @@ export class SpeculativeOperationCoordinator {
 			this.#report(candidate, "committed");
 			return {
 				result: decision.result,
-				isError: decision.result.isError === true || (physicalOutcome.kind === "result" && physicalOutcome.isError),
+				isError: decision.result.isError === true || physicalOutcome.isError,
 			};
 		} catch (error) {
 			this.#report(candidate, "commit_conflict", error instanceof Error ? error.message : String(error));
@@ -791,12 +637,12 @@ export class SpeculativeOperationCoordinator {
 			return undefined;
 		}
 		const effect = normalizeSpeculationEffect(assessment.effect);
-		if (!effect || effect.kind === "irreversible_write") {
-			this.ineligible(toolCall, "invalid or irreversible speculation effect", source, parentToolCallId);
+		if (!effect) {
+			this.ineligible(toolCall, "invalid speculation effect", source, parentToolCallId);
 			return undefined;
 		}
-		if (tool.concurrency === "exclusive" && effect.kind !== "reversible_write") {
-			this.ineligible(toolCall, "exclusive tool is not a reversible write", source, parentToolCallId);
+		if (tool.concurrency === "exclusive") {
+			this.ineligible(toolCall, "exclusive tool is not speculation-safe", source, parentToolCallId);
 			return undefined;
 		}
 		if (effect.kind !== "pure" && !this.config.host) {
@@ -898,16 +744,9 @@ export class SpeculativeOperationCoordinator {
 		for (const candidate of this.#candidates.values()) {
 			if (this.#running >= this.maxInFlight) return;
 			if (candidate.state !== "queued") continue;
-			// Provider completions have irreversible spend, while a host can defer
-			// any candidate until the finalized call survives validation and the
-			// consumer's beforeToolCall hook. Neither class may start while final
-			// admission is still open.
-			if (
-				(candidate.effect.kind === "model_completion" || candidate.deferBeforeToolCall) &&
-				!this.#admissionsFinalized
-			) {
-				continue;
-			}
+			// A host may defer a local read until the finalized call survives
+			// validation and the consumer's beforeToolCall hook.
+			if (candidate.deferBeforeToolCall && !this.#admissionsFinalized) continue;
 			const dependencies = candidate.dependencies.map(id => this.#candidates.get(id));
 			if (dependencies.some(value => value === undefined)) {
 				if (this.#admissionsFinalized) {
@@ -941,7 +780,6 @@ export class SpeculativeOperationCoordinator {
 		const signal = environmentSignal
 			? AbortSignal.any([environmentSignal, candidate.controller.signal])
 			: candidate.controller.signal;
-		const operationContext = this.#createContext(candidate);
 		const executionContext: ToolSpeculationExecutionContext = {
 			toolCall: candidate.toolCall,
 			args: candidate.executionArgs,
@@ -949,10 +787,7 @@ export class SpeculativeOperationCoordinator {
 		};
 		void (async () => {
 			try {
-				const executeDefault = () => candidate.policy.execute(executionContext, signal);
-				const outcome = this.config.host?.execute
-					? await this.config.host.execute(operationContext, executeDefault)
-					: await executeDefault();
+				const outcome = await candidate.policy.execute(executionContext, signal);
 				if (candidate.state === "discarded") return;
 				candidate.finishedAt = Date.now();
 				const duration =

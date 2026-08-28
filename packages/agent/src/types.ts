@@ -574,67 +574,13 @@ export type AgentToolCall = Extract<AssistantMessage["content"][number], { type:
 export interface SpeculativeResourceAccess {
 	scheme: "file";
 	path: string;
-	access: "read" | "write";
+	access: "read";
 }
 
-/**
- * Describes data crossing an authority boundary. This metadata lets a host make
- * an informed authorization decision; it does not make egress reversible.
- */
-export interface SpeculativeEgress {
-	authority: string;
-	origins: readonly SpeculativeInformationOrigin[];
-}
-
-export type SpeculativeInformationOrigin =
-	| { kind: "provider_literal" }
-	| { kind: "persistent_state" }
-	| { kind: "local_read"; resource: string }
-	| { kind: "remote_read"; authority: string }
-	| { kind: "model_completion"; provider: string; authority: string };
-
-/**
- * Constrained transport for hosts that deliberately allow speculative GETs.
- *
- * GET is not intrinsically harmless: URLs and explicit headers can contain
- * secrets, and a request can consume quotas, create audit events, trigger work,
- * or mutate a broken endpoint. `credentials: "omit"` only excludes ambient
- * credentials. It cannot retract a request or sanitize user-supplied data.
- */
-export interface HttpsGetSpeculationTransport {
-	url: string;
-	headers: Readonly<Record<string, string>>;
-	credentials: "omit";
-	cache: "no-store";
-	redirect: "error";
-}
-
-/**
- * Declares the externally relevant effect of starting a tool before normal
- * dispatch. Hosts MUST treat this as an authorization input, not a safety
- * guarantee. In particular, PAL writes can still consume resources, race
- * concurrent changes, or become observable outside the intended isolation;
- * remote reads can leak data and trigger server-side effects; model completions
- * irreversibly spend tokens, consume rate limits, and send their input even
- * when the speculative result is later discarded.
- */
+/** Declares an operation whose early execution can be discarded without rollback. */
 export type ToolSpeculationEffect =
 	| { kind: "pure" }
-	| { kind: "local_read"; resources: readonly SpeculativeResourceAccess[] }
-	| {
-			kind: "remote_read";
-			transport: HttpsGetSpeculationTransport;
-			egress: readonly SpeculativeEgress[];
-	  }
-	| {
-			kind: "model_completion";
-			provider: string;
-			model: string;
-			baseUrl: string;
-			egress: readonly SpeculativeEgress[];
-	  }
-	| { kind: "reversible_write"; isolation: "pal"; resources: readonly SpeculativeResourceAccess[] }
-	| { kind: "irreversible_write"; reason: string };
+	| { kind: "local_read"; resources: readonly SpeculativeResourceAccess[] };
 
 export type ToolSpeculationAssessment =
 	| { eligible: false; reason: string }
@@ -658,15 +604,13 @@ export interface ToolSpeculationDiscardContext extends ToolSpeculationExecutionC
 	reason: string;
 }
 
-export type SpeculativePhysicalOutcome =
-	| {
-			kind: "result";
-			result: AgentToolResult<unknown>;
-			isError: boolean;
-			/** Opaque evidence the host can bind to the bytes or remote response actually consumed. */
-			evidence?: unknown;
-	  }
-	| { kind: "staged"; token: unknown };
+export interface SpeculativePhysicalOutcome {
+	kind: "result";
+	result: AgentToolResult<unknown>;
+	isError: boolean;
+	/** Opaque evidence binding the result to the local bytes actually consumed. */
+	evidence?: unknown;
+}
 
 export interface SpeculativeToolReference {
 	name: string;
@@ -693,19 +637,13 @@ export type SpeculativeAuthorization =
 	| { allowed: false; reason: string }
 	| { allowed: true; deferBeforeToolCall?: boolean };
 
-export type SpeculativeHostOutcome = SpeculativePhysicalOutcome;
-
 export type SpeculativeCommitDecision =
 	| { kind: "committed"; result: AgentToolResult<unknown> }
-	| { kind: "fallback"; reason: string; restored: boolean }
+	| { kind: "fallback"; reason: string }
 	| { kind: "failed"; error: unknown };
 
 export interface SpeculativeExecutionHost {
 	authorize(context: SpeculativeOperationContext): SpeculativeAuthorization | Promise<SpeculativeAuthorization>;
-	execute?(
-		context: SpeculativeOperationContext,
-		executeDefault: () => Promise<SpeculativePhysicalOutcome>,
-	): Promise<SpeculativeHostOutcome>;
 	validate?(context: SpeculativeCommitContext): boolean | Promise<boolean>;
 	commit?(
 		context: SpeculativeCommitContext,
@@ -779,7 +717,7 @@ export interface SpeculativeToolTelemetry {
 	candidateId: string;
 	parentToolCallId?: string;
 	toolName: string;
-	effectKind: ToolSpeculationEffect["kind"];
+	effectKind?: ToolSpeculationEffect["kind"];
 	candidateStartedAt?: number;
 	candidateFinishedAt?: number;
 	dispatchReachedAt?: number;
@@ -789,9 +727,7 @@ export interface SpeculativeToolTelemetry {
 	overlapMs?: number;
 	outcome: "committed" | "discarded" | "ineligible" | "fingerprint_mismatch" | "aborted" | "commit_conflict";
 	reason?: string;
-	staged: boolean;
 	resourceCount: number;
-	egressAuthority?: string;
 }
 
 /** Opt-in configuration for discard-safe speculative tool execution. */
@@ -846,7 +782,7 @@ export interface BeforeToolCallContext {
 	/** The raw tool call block from `assistantMessage.content`. */
 	toolCall: AgentToolCall;
 	/** The resolved tool the call dispatches to. */
-	tool: AgentTool<any>;
+	tool: AgentTool;
 	/**
 	 * Validated tool arguments. The same reference is forwarded to `tool.execute`
 	 * (after any `transformToolCallArguments` pass), so in-place mutations stick;
