@@ -16,28 +16,32 @@ import { keywordIR, patternIR, templateIR } from "./keywords";
 /** Brand carried by `Type` instances so the parser can embed them in defs. */
 export const IR_BRAND: unique symbol = Symbol("omptype.schema");
 
-const kMorph: unique symbol = Symbol("omptype.hasMorph");
-const kMorphOwner: unique symbol = Symbol("omptype.hasMorphOwner");
+const kScan: unique symbol = Symbol("omptype.scan");
+const kScanOwner: unique symbol = Symbol("omptype.scanOwner");
 const kAlias: unique symbol = Symbol("omptype.hasAlias");
 const kAliasOwner: unique symbol = Symbol("omptype.hasAliasOwner");
-const kExportable: unique symbol = Symbol("omptype.exportable");
-const kExportableOwner: unique symbol = Symbol("omptype.exportableOwner");
 const kSimple: unique symbol = Symbol("omptype.simple");
 const kSimpleOwner: unique symbol = Symbol("omptype.simpleOwner");
 
 interface IRAnalysis {
-	[kMorph]?: boolean;
-	[kMorphOwner]?: object;
+	[kScan]?: ScanResult;
+	[kScanOwner]?: object;
 	[kAlias]?: boolean;
 	[kAliasOwner]?: object;
-	[kExportable]?: boolean;
-	[kExportableOwner]?: object;
 	[kSimple]?: boolean;
 	[kSimpleOwner]?: object;
 	/** Node-local metadata used for shallow error formatting. */
 	cfg?: ErrorConfig;
 	/** True when `desc` was derived from the node itself rather than authored via `.describe()`. */
 	descAuto?: boolean;
+}
+
+/** One traversal's answer to both scan questions (see {@link scanIR}). */
+interface ScanResult {
+	/** Validating this node can produce an output different from its input. */
+	changesOutput: boolean;
+	/** This node can be emitted without a dispatcher-morph wrapper. */
+	exportable: boolean;
 }
 
 /**
@@ -1615,178 +1619,129 @@ function scanSimpleIR(ir: IR): boolean {
 
 /** True when validating `ir` can produce an output different from its input. */
 export function hasMorph(ir: IR): boolean {
-	const cached = ir[kMorphOwner] === ir ? ir[kMorph] : undefined;
-	if (cached !== undefined) return cached;
-	const result = scanMorph(ir);
-	ir[kMorph] = result;
-	ir[kMorphOwner] = ir;
-	return result;
+	return scanIRCached(ir).changesOutput;
 }
 
-function scanMorph(ir: IR, activeAliases?: Set<IR>): boolean {
-	const cached = ir[kMorphOwner] === ir ? ir[kMorph] : undefined;
-	if (cached !== undefined) return cached;
+/**
+ * True when `ir` does not require a dispatcher-morph wrapper for JSON Schema
+ * emission — the question the zod-shim combinators gate on. Key-stripping
+ * objects are exportable (stripping is representable in the emitted schema),
+ * whereas {@link hasMorph} must report them because validation changes the
+ * output value. Deliberately NOT "the emitted schema is constrained":
+ * `z.unknown()` honestly emits `{}` and is exportable. Non-exportable:
+ * morphs, stepped embedded schemas (`sub`), default-filled properties, and
+ * deferred aliases.
+ */
+export function isStructurallyExportable(ir: IR): boolean {
+	return scanIRCached(ir).exportable;
+}
 
-	let result = false;
-	switch (ir.k) {
-		case "sub":
-		case "morph":
-			result = true;
-			break;
-		case "alias": {
-			// Deferred alias (z.lazy): conservatively a morph without resolving —
-			// the getter must not run during construction-time scans.
-			if (ir.deferred === true) return true;
-			if (activeAliases?.has(ir)) return false;
-			const aliases = activeAliases ?? new Set<IR>();
-			aliases.add(ir);
-			result = scanMorph(ir.resolve(), aliases);
-			aliases.delete(ir);
-			return result;
-		}
-		case "object":
-			result = ir.extras === "delete";
-			for (let index = 0; !result && index < ir.props.length; index++) {
-				const prop = ir.props[index];
-				result = prop.hasDefault === true || scanMorph(prop.val, activeAliases);
-			}
-			if (!result && ir.index !== undefined) result = scanMorph(ir.index, activeAliases);
-			if (!result && ir.symbolIndex !== undefined) result = scanMorph(ir.symbolIndex, activeAliases);
-			if (!result && ir.patternIndexes !== undefined) {
-				for (const pattern of ir.patternIndexes) {
-					if (scanMorph(pattern.val, activeAliases)) {
-						result = true;
-						break;
-					}
-				}
-			}
-			break;
-		case "array":
-			result = scanMorph(ir.el, activeAliases);
-			break;
-		case "union":
-		case "intersection":
-			for (const member of ir.members) {
-				if (scanMorph(member, activeAliases)) {
-					result = true;
-					break;
-				}
-			}
-			break;
-		case "refine":
-			result = scanMorph(ir.base, activeAliases);
-			break;
-		case "tuple":
-			for (const item of ir.prefix) {
-				if (item.hasDefault === true || scanMorph(item.val, activeAliases)) {
-					result = true;
-					break;
-				}
-			}
-			if (!result && ir.variadic !== undefined) result = scanMorph(ir.variadic, activeAliases);
-			if (!result) {
-				for (const item of ir.postfix) {
-					if (scanMorph(item, activeAliases)) {
-						result = true;
-						break;
-					}
-				}
-			}
-			break;
-	}
+function scanIRCached(ir: IR): ScanResult {
+	const cached = ir[kScanOwner] === ir ? ir[kScan] : undefined;
+	if (cached !== undefined) return cached;
+	const result = scanIR(ir);
+	ir[kScan] = result;
+	ir[kScanOwner] = ir;
 	return result;
 }
 
 /**
- * True when `ir` can be lowered to JSON Schema structurally — without routing
- * values through a dispatcher morph, whose emission erases the document to an
- * unconstrained `{}`. Key-stripping objects (`extras: "delete"`) are
- * exportable: stripping is representable (the schema still describes the
- * declared properties), whereas {@link hasMorph} must report them because
- * validation changes the output value. Everywhere else this deliberately
- * mirrors {@link scanMorph}: stepped embedded schemas (`sub`), morphs, and
- * default-filled properties stay non-exportable.
+ * One traversal answering the two questions the former independent scans
+ * (`scanMorph` / `scanExportable`) recomputed with near-identical walks. The
+ * asymmetry lives in exactly two places, on adjacent lines in the object and
+ * tuple arms: key-stripping (`extras: "delete"`) changes the output value but
+ * does NOT disqualify export, because stripping is representable in the
+ * emitted schema. A default-filled property does both: it changes the output
+ * and counts as non-exportable.
+ *
+ * Deferred aliases are conservatively `{ changesOutput: true, exportable:
+ * false }` — the getter must not run during construction-time scans.
  */
-export function isStructurallyExportable(ir: IR): boolean {
-	const cached = ir[kExportableOwner] === ir ? ir[kExportable] : undefined;
-	if (cached !== undefined) return cached;
-	const result = scanExportable(ir);
-	ir[kExportable] = result;
-	ir[kExportableOwner] = ir;
-	return result;
-}
-
-function scanExportable(ir: IR, activeAliases?: Set<IR>): boolean {
-	const cached = ir[kExportableOwner] === ir ? ir[kExportable] : undefined;
+function scanIR(ir: IR, activeAliases?: Set<IR>): ScanResult {
+	const cached = ir[kScanOwner] === ir ? ir[kScan] : undefined;
 	if (cached !== undefined) return cached;
 
-	let result = true;
+	const result: ScanResult = { changesOutput: false, exportable: true };
 	switch (ir.k) {
 		case "sub":
 		case "morph":
-			result = false;
+			result.changesOutput = true;
+			result.exportable = false;
 			break;
 		case "alias": {
-			// Deferred alias (z.lazy): not exportable without resolving — the
-			// gates then keep the ordered dispatcher, as before the alias reuse.
-			if (ir.deferred === true) return false;
-			if (activeAliases?.has(ir)) return true;
+			// Deferred alias (z.lazy): conservatively a morph without resolving
+			// — the getter must not run during construction-time scans.
+			if (ir.deferred === true) return { changesOutput: true, exportable: false };
+			if (activeAliases?.has(ir)) break;
 			const aliases = activeAliases ?? new Set<IR>();
 			aliases.add(ir);
-			result = scanExportable(ir.resolve(), aliases);
+			const inner = scanIR(ir.resolve(), aliases);
 			aliases.delete(ir);
-			return result;
+			result.changesOutput = inner.changesOutput;
+			result.exportable = inner.exportable;
+			break;
 		}
-		case "object":
+		case "object": {
+			// THE asymmetry of the whole scan, on adjacent lines: key-stripping
+			// (`extras: "delete"`) changes the output value but does not
+			// disqualify export; a default-filled property does both.
+			result.changesOutput = ir.extras === "delete";
 			for (const prop of ir.props) {
-				if (prop.hasDefault === true || !scanExportable(prop.val, activeAliases)) {
-					result = false;
-					break;
-				}
+				const inner = scanIR(prop.val, activeAliases);
+				result.changesOutput ||= prop.hasDefault === true || inner.changesOutput;
+				result.exportable &&= prop.hasDefault !== true && inner.exportable;
 			}
-			if (result && ir.index !== undefined) result = scanExportable(ir.index, activeAliases);
-			if (result && ir.symbolIndex !== undefined) result = scanExportable(ir.symbolIndex, activeAliases);
-			if (result && ir.patternIndexes !== undefined) {
-				for (const pattern of ir.patternIndexes) {
-					if (!scanExportable(pattern.val, activeAliases)) {
-						result = false;
-						break;
-					}
-				}
+			for (const index of [ir.index, ir.symbolIndex]) {
+				if (index === undefined) continue;
+				const inner = scanIR(index, activeAliases);
+				result.changesOutput ||= inner.changesOutput;
+				result.exportable &&= inner.exportable;
+			}
+			for (const pattern of ir.patternIndexes ?? []) {
+				const inner = scanIR(pattern.val, activeAliases);
+				result.changesOutput ||= inner.changesOutput;
+				result.exportable &&= inner.exportable;
 			}
 			break;
-		case "array":
-			result = scanExportable(ir.el, activeAliases);
+		}
+		case "array": {
+			const inner = scanIR(ir.el, activeAliases);
+			result.changesOutput = inner.changesOutput;
+			result.exportable = inner.exportable;
 			break;
+		}
 		case "union":
 		case "intersection":
 			for (const member of ir.members) {
-				if (!scanExportable(member, activeAliases)) {
-					result = false;
-					break;
-				}
+				const inner = scanIR(member, activeAliases);
+				result.changesOutput ||= inner.changesOutput;
+				result.exportable &&= inner.exportable;
 			}
 			break;
-		case "refine":
-			result = scanExportable(ir.base, activeAliases);
+		case "refine": {
+			const inner = scanIR(ir.base, activeAliases);
+			result.changesOutput = inner.changesOutput;
+			result.exportable = inner.exportable;
 			break;
-		case "tuple":
+		}
+		case "tuple": {
 			for (const item of ir.prefix) {
-				if (item.hasDefault === true || !scanExportable(item.val, activeAliases)) {
-					result = false;
-					break;
-				}
+				const inner = scanIR(item.val, activeAliases);
+				result.changesOutput ||= item.hasDefault === true || inner.changesOutput;
+				result.exportable &&= item.hasDefault !== true && inner.exportable;
 			}
-			if (result && ir.variadic !== undefined) result = scanExportable(ir.variadic, activeAliases);
-			if (result) {
-				for (const item of ir.postfix) {
-					if (!scanExportable(item, activeAliases)) {
-						result = false;
-						break;
-					}
-				}
+			if (ir.variadic !== undefined) {
+				const inner = scanIR(ir.variadic, activeAliases);
+				result.changesOutput ||= inner.changesOutput;
+				result.exportable &&= inner.exportable;
+			}
+			for (const item of ir.postfix) {
+				const inner = scanIR(item, activeAliases);
+				result.changesOutput ||= inner.changesOutput;
+				result.exportable &&= inner.exportable;
 			}
 			break;
+		}
 	}
 	return result;
 }
