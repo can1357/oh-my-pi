@@ -523,14 +523,7 @@ impl Reader {
 				break;
 			}
 			line.pop();
-			let appended = push_record_at(
-				&mut events,
-				&mut diagnostics,
-				&line,
-				event_index,
-				offset,
-				DiagnosticKind::Malformed,
-			);
+			let appended = push_record_at(&mut events, &mut diagnostics, &line, event_index, offset);
 			let Some(appended) = appended else {
 				tail_bytes = reader.get_ref().metadata()?.len().saturating_sub(offset);
 				tail_diagnostic = Some(ReadDiagnostic {
@@ -677,7 +670,6 @@ impl Reader {
 				&line,
 				first_event_index.saturating_add(records),
 				offset,
-				DiagnosticKind::Malformed,
 			);
 			let Some(appended) = appended else {
 				self.tail_bytes = file_len.saturating_sub(offset);
@@ -853,6 +845,10 @@ pub fn load_live(path: &Path) -> Result<LiveLog, Error> {
 /// `yield_batch` runs after each `batch_entries` records, allowing async owners
 /// to cooperatively yield without coupling storage to one executor. Returning
 /// `false` from `visit` stops after the current record.
+///
+/// An unterminated trailing record is reported as a truncated diagnostic and
+/// never visited, so a full scan observes the same event set as the
+/// incremental [`Reader`].
 pub fn visit_batched(
 	path: &Path,
 	batch_entries: usize,
@@ -880,10 +876,9 @@ pub fn visit_batched(
 		if read == 0 {
 			break;
 		}
-		let terminated = line.last() == Some(&b'\n');
-		if terminated {
-			line.pop();
-		} else if read_atomic_group(&line).is_some() {
+		// `read_until` drained the file, so an unterminated line is the torn
+		// tail: reported like the incremental Reader, never decoded or visited.
+		if line.last() != Some(&b'\n') {
 			diagnostics.push(ReadDiagnostic {
 				event_index: records,
 				byte_offset: offset,
@@ -892,13 +887,9 @@ pub fn visit_batched(
 			});
 			break;
 		}
-		let damage = if terminated {
-			DiagnosticKind::Malformed
-		} else {
-			DiagnosticKind::Truncated
-		};
+		line.pop();
 		let mut entries = Vec::with_capacity(1);
-		let appended = push_record_at(&mut entries, &mut diagnostics, &line, records, offset, damage);
+		let appended = push_record_at(&mut entries, &mut diagnostics, &line, records, offset);
 		if appended.is_none() {
 			diagnostics.push(ReadDiagnostic {
 				event_index: records,
@@ -920,9 +911,6 @@ pub fn visit_batched(
 				break 'records;
 			}
 		}
-		if !terminated {
-			break;
-		}
 	}
 	let mut counters = ReadCounters::default();
 	for diagnostic in &diagnostics {
@@ -940,7 +928,6 @@ fn push_record_at(
 	line: &[u8],
 	event_index: u64,
 	byte_offset: u64,
-	damage: DiagnosticKind,
 ) -> Option<usize> {
 	if let Some(group) = read_atomic_group(line) {
 		return match group {
@@ -955,7 +942,7 @@ fn push_record_at(
 	if let Ok(event) = read_line(line) {
 		events.push(Entry::Ok(Box::new(event)));
 	} else {
-		push_tombstone(events, diagnostics, line, event_index, byte_offset, damage);
+		push_tombstone(events, diagnostics, line, event_index, byte_offset);
 	}
 	Some(1)
 }
@@ -966,13 +953,14 @@ fn push_tombstone(
 	line: &[u8],
 	event_index: u64,
 	byte_offset: u64,
-	damage: DiagnosticKind,
 ) {
+	// Only a terminated line reaches decoding, so a tombstone is always a
+	// malformed record; truncated bytes stop at the torn-tail check instead.
 	diagnostics.push(ReadDiagnostic {
 		event_index,
 		byte_offset,
 		byte_len: u64::try_from(line.len()).expect("record length fits in u64"),
-		kind: damage,
+		kind: DiagnosticKind::Malformed,
 	});
 	let source = String::from_utf8_lossy(line);
 	let raw = to_raw_value(source.as_ref()).expect("a JSON string is always serializable");
@@ -981,14 +969,20 @@ fn push_tombstone(
 
 #[cfg(test)]
 mod tests {
-	use std::path::PathBuf;
+	use std::{
+		fs::{self, OpenOptions},
+		io::Write as _,
+		path::PathBuf,
+	};
 
 	use omp_core::{Hash32, Str, sf};
 	use omp_proto::inference::v1 as pb;
 	use tempfile::tempdir;
 
 	use super::{Reader, load_live};
-	use crate::transcript::{Event, Header, Kind, SessionId, TitleSource, TurnReceipt, Writer};
+	use crate::transcript::{
+		Event, Header, Kind, SessionId, TitleSource, TurnReceipt, Writer, write_line,
+	};
 
 	fn header() -> Header {
 		Header {
@@ -1044,5 +1038,35 @@ mod tests {
 			vec![0, 3],
 			"rewind must drop the discarded title while the incomplete receipt stays inert"
 		);
+	}
+
+	#[test]
+	fn load_live_excludes_an_unterminated_trailing_record_like_the_reader() {
+		let directory = tempdir().expect("temporary directory");
+		let path = directory.path().join("session.jsonl");
+		let mut writer = Writer::create(&path, &header()).expect("create transcript");
+		writer.append(&title(1, "kept")).expect("event zero");
+		drop(writer);
+		// A crash left an ordinary event line without its terminating newline:
+		// a torn tail that the live journal must never expose as an event.
+		let mut file = OpenOptions::new()
+			.append(true)
+			.open(&path)
+			.expect("open tail");
+		let mut torn = Vec::new();
+		write_line(&title(2, "torn"), &mut torn).expect("ordinary line encodes");
+		file.write_all(&torn).expect("torn tail writes");
+		drop(file);
+
+		let loaded = load_live(&path).expect("load_live pairs the fold");
+		let reader = Reader::open(&path).expect("open incremental reader");
+		assert!(reader.has_torn_tail(), "the unterminated record is a torn tail");
+		assert_eq!(
+			loaded.live(),
+			reader.live_log().live(),
+			"load_live must not expose an event the live journal excludes"
+		);
+		assert_eq!(loaded.log().len(), 1, "the torn record is not a durable event");
+		assert_eq!(loaded.live().iter().collect::<Vec<_>>(), vec![0]);
 	}
 }

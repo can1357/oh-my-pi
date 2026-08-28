@@ -94,7 +94,9 @@ fn bounded_visitor_preserves_indexes_and_reports_malformed_tail() {
 	)
 	.expect("visit journal");
 	assert_eq!(indexes.first(), Some(&0));
-	assert_eq!(indexes.last(), Some(&8_301));
+	// `{malformed}` is the last visited record; the unterminated `{truncated`
+	// tail is reported, not visited, matching the incremental Reader.
+	assert_eq!(indexes.last(), Some(&8_300));
 	assert_eq!(report.counters.malformed, 1);
 	assert_eq!(report.counters.truncated, 1);
 	assert!(batches >= 8);
