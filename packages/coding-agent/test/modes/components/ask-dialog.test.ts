@@ -2,7 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:
 import { stripVTControlCharacters } from "node:util";
 import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
 import type { ExtensionAskDialogQuestion } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
-import { AskDialogComponent } from "@oh-my-pi/pi-coding-agent/modes/components/ask-dialog";
+import { AskDialogComponent, createDraftFocusGuard } from "@oh-my-pi/pi-coding-agent/modes/components/ask-dialog";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { setKeybindings } from "@oh-my-pi/pi-tui";
 
@@ -12,6 +12,8 @@ const PAGE_DOWN = "\x1b[6~";
 const PAGE_UP = "\x1b[5~";
 const ENTER = "\n";
 const CANCEL = "\x07";
+const ALT_E = "\x1be";
+const BACKSPACE = "\x7f";
 const SPACE = " ";
 const TAB = "\t";
 const SHIFT_TAB = "\x1b[Z";
@@ -20,6 +22,28 @@ let darkTheme = await getThemeByName("dark");
 
 function render(component: AskDialogComponent): string {
 	return stripVTControlCharacters(component.render(80).join("\n"));
+}
+
+/** Minimal DraftFocusEditor stand-in: models the editor semantics the guard's
+ *  ownership rules observe. */
+function fakeDraft(text: string) {
+	const draft = {
+		text,
+		focused: false,
+		handleDraftEdit: vi.fn((data: string) => {
+			if ((data === "\n" || data === "\r") && draft.text.length > 0) {
+				draft.text = "";
+			} else if (data === BACKSPACE) {
+				draft.text = draft.text.slice(0, -1);
+			} else if (data.length === 1 && data !== "\n" && data !== "\r") {
+				draft.text += data;
+			}
+		}),
+		getText(): string {
+			return draft.text;
+		},
+	};
+	return draft;
 }
 
 describe("AskDialogComponent", () => {
@@ -1596,5 +1620,164 @@ describe("AskDialogComponent", () => {
 		const result = onSubmit.mock.calls[0][0].results[0];
 		expect(result.question).toBe("");
 		expect(result.selectedOptions).toEqual(["Option A"]);
+	});
+
+	it("routes input to a non-empty draft and hands it back after toggling", () => {
+		const onSubmit = vi.fn();
+		const draft = fakeDraft("hello");
+		const questions: ExtensionAskDialogQuestion[] = [
+			{ id: "q1", question: "Q1?", options: [{ label: "A1" }, { label: "B1" }] },
+			{ id: "q2", question: "Q2?", options: [{ label: "A2" }, { label: "B2" }] },
+		];
+
+		const component = new AskDialogComponent(
+			questions,
+			{ onSubmit, onCancel: vi.fn(), onPrompt: vi.fn() },
+			{ inputGuard: createDraftFocusGuard(draft) },
+		);
+
+		// The non-empty draft owns input: typing edits it, never the dialog.
+		component.handleInput("x");
+		expect(draft.handleDraftEdit).toHaveBeenCalledTimes(1);
+		expect(draft.handleDraftEdit).toHaveBeenCalledWith("x");
+		expect(onSubmit).not.toHaveBeenCalled();
+
+		// Alt+E moves ownership to the dialog: arrows navigate, Enter advances
+		// to Q2, and no keystroke leaks into the draft.
+		component.handleInput(ALT_E);
+		component.handleInput(DOWN);
+		component.handleInput(ENTER);
+		expect(render(component)).toContain("Q2?");
+		expect(onSubmit).not.toHaveBeenCalled();
+		expect(draft.handleDraftEdit).toHaveBeenCalledTimes(1);
+
+		// Alt+E again: typing lands back in the draft, dialog untouched.
+		component.handleInput(ALT_E);
+		component.handleInput("y");
+		expect(draft.handleDraftEdit).toHaveBeenCalledTimes(2);
+		expect(draft.handleDraftEdit).toHaveBeenLastCalledWith("y");
+		expect(draft.text).toBe("helloxy");
+	});
+
+	it("derives initial ownership from the draft text", () => {
+		const onSubmit = vi.fn();
+		const draft = fakeDraft("");
+		const questions: ExtensionAskDialogQuestion[] = [
+			{ id: "q1", question: "Choose one?", options: [{ label: "Option A" }, { label: "Option B" }] },
+		];
+
+		const component = new AskDialogComponent(
+			questions,
+			{ onSubmit, onCancel: vi.fn(), onPrompt: vi.fn() },
+			{ inputGuard: createDraftFocusGuard(draft) },
+		);
+
+		// Empty draft: the dialog owns input from the start — typing does not
+		// reach the draft.
+		component.handleInput("a");
+		expect(draft.handleDraftEdit).not.toHaveBeenCalled();
+
+		// Toggling hands input to the (still empty) draft.
+		component.handleInput(ALT_E);
+		component.handleInput("a");
+		expect(draft.handleDraftEdit).toHaveBeenCalledTimes(1);
+		expect(draft.text).toBe("a");
+
+		// Toggling back restores dialog ownership: Enter submits without
+		// touching the draft.
+		component.handleInput(ALT_E);
+		component.handleInput(DOWN);
+		component.handleInput(ENTER);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option B"]);
+		expect(draft.handleDraftEdit).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps cancel while the draft owns input (#7734 unchanged)", () => {
+		const onCancel = vi.fn();
+		const draft = fakeDraft("hello");
+		const questions: ExtensionAskDialogQuestion[] = [
+			{ id: "q1", question: "Choose one?", options: [{ label: "Option A" }, { label: "Option B" }] },
+		];
+
+		const component = new AskDialogComponent(
+			questions,
+			{ onSubmit: vi.fn(), onCancel, onPrompt: vi.fn() },
+			{ inputGuard: createDraftFocusGuard(draft) },
+		);
+
+		// The cancel chord is checked before the draft guard: canceling while a
+		// draft owns input cancels the whole ask (#7734 owns changing this).
+		component.handleInput(CANCEL);
+		expect(onCancel).toHaveBeenCalledTimes(1);
+		expect(draft.handleDraftEdit).not.toHaveBeenCalled();
+	});
+
+	it("mirrors ownership onto the draft cursor each render", () => {
+		const draft = fakeDraft("hello");
+		const questions: ExtensionAskDialogQuestion[] = [
+			{ id: "q1", question: "Choose one?", options: [{ label: "Option A" }, { label: "Option B" }] },
+		];
+
+		const component = new AskDialogComponent(
+			questions,
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+			{ inputGuard: createDraftFocusGuard(draft) },
+		);
+
+		// Blocked: the draft shows the insertion cursor.
+		render(component);
+		expect(draft.focused).toBe(true);
+
+		// After toggling to the dialog, the draft cursor drops.
+		component.handleInput(ALT_E);
+		render(component);
+		expect(draft.focused).toBe(false);
+	});
+
+	it("returns input to the dialog after the draft is sent", () => {
+		const questions: ExtensionAskDialogQuestion[] = [
+			{ id: "q1", question: "Choose one?", options: [{ label: "Option A" }, { label: "Option B" }] },
+		];
+
+		const onSubmit = vi.fn();
+		const draft = fakeDraft("hi");
+		const component = new AskDialogComponent(
+			questions,
+			{ onSubmit, onCancel: vi.fn(), onPrompt: vi.fn() },
+			{ inputGuard: createDraftFocusGuard(draft) },
+		);
+
+		// Sending clears the draft and hands input back to the dialog —
+		// Enter now submits the dialog's selection, not the empty editor.
+		component.handleInput(ENTER);
+		expect(draft.text).toBe("");
+		component.handleInput(ENTER);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(draft.handleDraftEdit).toHaveBeenCalledTimes(1);
+	});
+
+	it("hands input back to the dialog when the draft is erased", () => {
+		const onSubmit = vi.fn();
+		const draft = fakeDraft("hi");
+		const questions: ExtensionAskDialogQuestion[] = [
+			{ id: "q1", question: "Choose one?", options: [{ label: "Option A" }, { label: "Option B" }] },
+		];
+
+		const component = new AskDialogComponent(
+			questions,
+			{ onSubmit, onCancel: vi.fn(), onPrompt: vi.fn() },
+			{ inputGuard: createDraftFocusGuard(draft) },
+		);
+
+		// Backspacing the draft to empty hands input back: Enter then submits
+		// the dialog's selection instead of editing the draft.
+		component.handleInput(BACKSPACE);
+		expect(draft.text).toBe("h");
+		component.handleInput(BACKSPACE);
+		expect(draft.text).toBe("");
+		component.handleInput(ENTER);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(draft.handleDraftEdit).toHaveBeenCalledTimes(2);
 	});
 });

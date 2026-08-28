@@ -22,7 +22,7 @@ import type {
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
-import { AskDialogComponent, boundPromptTitle } from "../../modes/components/ask-dialog";
+import { AskDialogComponent, boundPromptTitle, createDraftFocusGuard } from "../../modes/components/ask-dialog";
 import { installExtensionComposerShape } from "../../modes/components/composer-shape-registry";
 import { EditorTopGap } from "../../modes/components/editor-top-gap";
 import { HookEditorComponent } from "../../modes/components/hook-editor";
@@ -644,29 +644,16 @@ export class ExtensionUiController {
 			let promptResolve: ((value: string | undefined) => void) | undefined;
 			let closed = false;
 			const draftEditor = this.ctx.editor;
-			const inputGuard =
-				draftEditor.getText().length > 0
-					? {
-							isBlocked: () => draftEditor.getText().length > 0,
-							handleInput: (keyData: string) => draftEditor.handleDraftEdit(keyData),
-							hint: "Finish or clear the current prompt to answer",
-							// Show the draft's insertion cursor while it owns input; drop it
-							// once the draft clears and the ask controls take over.
-							syncPresentation: () => {
-								draftEditor.focused = draftEditor.getText().length > 0;
-							},
-						}
-					: undefined;
+			const inputGuard = createDraftFocusGuard(draftEditor);
 
 			const restoreAskDialog = (): void => {
 				if (closed || !askDialog) return;
 				this.ctx.editorContainer.clear();
 				this.ctx.editorContainer.addChild(askDialog);
-				// Keep the draft editor mounted beneath the restored ask, matching the
-				// initial presentation: the guard re-blocks whenever the draft is
-				// non-empty (e.g. a failed submit restored its text while a nested
-				// prompt was open), and routed input must land on a visible surface.
-				if (inputGuard) this.ctx.editorContainer.addChild(this.ctx.editor);
+				// Keep the draft editor mounted beneath the restored ask, matching
+				// the initial presentation: focus can toggle to the draft at any
+				// time, and routed input must land on a visible surface.
+				this.ctx.editorContainer.addChild(this.ctx.editor);
 				this.ctx.ui.setFocus(askDialog);
 				this.ctx.ui.requestRender();
 			};
@@ -714,7 +701,7 @@ export class ExtensionUiController {
 			);
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(askDialog);
-			if (inputGuard) this.ctx.editorContainer.addChild(this.ctx.editor);
+			this.ctx.editorContainer.addChild(this.ctx.editor);
 			this.ctx.ui.setFocus(askDialog);
 			this.ctx.ui.requestRender();
 

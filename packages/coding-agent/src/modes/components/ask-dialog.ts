@@ -26,6 +26,7 @@ import { expandKeyHint } from "../../tools/render-utils";
 import { getTabBarTheme } from "../shared";
 import { getMarkdownTheme, highlightCode, theme } from "../theme/theme";
 import {
+	matchesAppDialogFocusToggle,
 	matchesAppToolsExpand,
 	matchesSelectCancel,
 	matchesSelectDown,
@@ -83,15 +84,54 @@ interface AskDialogCallbacks {
 	onCancel(): void;
 	onPrompt(title: string, prefill?: string): Promise<string | undefined>;
 }
-
-interface AskDialogInputGuard {
-	isBlocked(): boolean;
+/** Gate on the dialog's input stream. The dialog holds TUI focus, so every
+ *  keystroke arrives at its `handleInput` first; a guard can take over that
+ *  stream and reroute it — the draft-focus guard routes it to the chat draft.
+ *  Input ownership is the guard's single bit: while the guarded draft owns
+ *  it, the dialog forwards keystrokes instead of handling them itself. */
+export interface AskDialogInputGuard {
+	/** Does the guarded draft currently own input? */
+	draftOwnsInput(): boolean;
 	handleInput(keyData: string): void;
-	hint: string;
-	/** Mirror the guard's blocked state onto the proxied draft surface each
+	/** Move input ownership between the dialog and the guarded draft. */
+	toggleFocus(): void;
+	/** Mirror the guard's ownership state onto the proxied draft surface each
 	 *  render, so a draft that owns input shows a visible insertion cursor even
 	 *  though this dialog holds TUI focus. */
 	syncPresentation?(): void;
+}
+
+/** Structural subset of the main editor the draft-focus guard drives. */
+export interface DraftFocusEditor {
+	getText(): string;
+	handleDraftEdit(data: string): void;
+	focused: boolean;
+}
+
+/** Guard that routes dialog input to the chat draft. Ownership is explicit:
+ *  - Derived once from the draft text at creation
+ *  - Afterwards, either...
+ * 	  - The focus toggle (`app.dialog.toggleFocus`) moves it, or
+ * 		- Emptying the draft — by submitting or erasing — returns input to
+ *        the dialog */
+export function createDraftFocusGuard(draft: DraftFocusEditor): AskDialogInputGuard {
+	let draftOwnsInput = draft.getText().length > 0;
+	return {
+		draftOwnsInput: () => draftOwnsInput,
+		handleInput: keyData => {
+			const hadText = draft.getText().length > 0;
+			draft.handleDraftEdit(keyData);
+			if (draftOwnsInput && hadText && draft.getText().length === 0) {
+				draftOwnsInput = false;
+			}
+		},
+		toggleFocus: () => {
+			draftOwnsInput = !draftOwnsInput;
+		},
+		syncPresentation: () => {
+			draft.focused = draftOwnsInput;
+		},
+	};
 }
 
 interface AskDialogOptions {
@@ -475,6 +515,12 @@ export class AskDialogComponent implements Component {
 		// Reset the inactivity countdown on any key that reaches past the
 		// closed/prompt guards, matching HookSelector/HookInput semantics.
 		this.#countdown?.reset();
+		const focusGuard = this.options.inputGuard;
+		if (focusGuard && matchesAppDialogFocusToggle(keyData)) {
+			focusGuard.toggleFocus();
+			this.#requestRender();
+			return;
+		}
 		if (matchesSelectCancel(keyData)) {
 			this.#finishCancel();
 			return;
@@ -486,7 +532,7 @@ export class AskDialogComponent implements Component {
 			return;
 		}
 		const inputGuard = this.options.inputGuard;
-		if (inputGuard?.isBlocked()) {
+		if (inputGuard?.draftOwnsInput()) {
 			inputGuard.handleInput(keyData);
 			this.#requestRender();
 			return;
@@ -651,10 +697,13 @@ export class AskDialogComponent implements Component {
 	#footerHintText(indicator: string): string {
 		const cancel = `${cancelKeyLabel()} cancel`;
 		const inputGuard = this.options.inputGuard;
-		if (inputGuard?.isBlocked()) return `${inputGuard.hint}${this.#expandHint()} · ${cancel}`;
+		if (inputGuard?.draftOwnsInput()) {
+			return `${editorKey("app.dialog.toggleFocus")} switch to ask${this.#expandHint()} · ${cancel}`;
+		}
+		const draftHint = inputGuard ? ` · ${editorKey("app.dialog.toggleFocus")} switch to draft` : "";
 		if (this.#isSubmitTab()) {
 			const scroll = indicator ? ` ${indicator} scroll ·` : "";
-			return `Enter submit · ↑/↓ scroll ·${scroll} ${cancel}`;
+			return `Enter submit · ↑/↓ scroll ·${scroll} ${cancel}${draftHint}`;
 		}
 		const question = this.#questions[this.#currentQuestionIndex()];
 		// Enter advances in multi-question dialogs and submits single-question ones.
@@ -663,10 +712,10 @@ export class AskDialogComponent implements Component {
 		const tabs = this.#hasSubmitTab() ? " · Tab/←/→" : "";
 		const expand = this.#expandHint();
 		if (this.#questionCanPage && indicator) {
-			return `${action} · ↑/↓${tabs} · ${cancel}${expand} · ${pageKeysLabel()} ${indicator}`;
+			return `${action} · ↑/↓${tabs} · ${cancel}${expand} · ${pageKeysLabel()} ${indicator}${draftHint}`;
 		}
 		const scroll = indicator ? ` ${indicator} scroll ·` : "";
-		return `${action} · ↑/↓ move${tabs} ·${scroll} ${cancel}${expand}`;
+		return `${action} · ↑/↓ move${tabs} ·${scroll} ${cancel}${expand}${draftHint}`;
 	}
 
 	#questionRows(question: ExtensionAskDialogQuestion): QuestionRow[] {
