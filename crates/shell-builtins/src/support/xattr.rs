@@ -121,6 +121,53 @@ fn parse_default_acl_permissions(value: &[u8]) -> Option<u32> {
 	}
 	Some((owner? << 6) | (mask.or(group)? << 3) | other?)
 }
+#[cfg(target_os = "linux")]
+fn set_xattr(path: &Path, name: &[u8], value: &[u8]) -> io::Result<()> {
+	let path = path_cstring(path)?;
+	let name = ffi::CStr::from_bytes_with_nul(name)
+		.map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid attribute name"))?;
+	// SAFETY: both C strings are valid.
+	let rc = unsafe {
+		libc::setxattr(path.as_ptr(), name.as_ptr(), value.as_ptr().cast(), value.len(), 0)
+	};
+	if rc < 0 {
+		return Err(io::Error::last_os_error());
+	}
+	Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn retrieve_xattrs(
+	path: impl AsRef<Path>,
+) -> io::Result<omp_core::FastHashMap<Vec<u8>, Vec<u8>>> {
+	let path = path.as_ref();
+	let names = list_xattrs(path)?;
+	let mut map = omp_core::FastHashMap::default();
+	for name in names.split_inclusive(|b| *b == 0) {
+		if name.len() <= 1 {
+			continue;
+		}
+		map.insert(name.to_vec(), get_xattr(path, name)?);
+	}
+	Ok(map)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn apply_xattrs(
+	path: impl AsRef<Path>,
+	xattrs: omp_core::FastHashMap<Vec<u8>, Vec<u8>>,
+) -> io::Result<()> {
+	let path = path.as_ref();
+	for (name, value) in &xattrs {
+		set_xattr(path, name, value)?;
+	}
+	Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn copy_xattrs(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
+	apply_xattrs(to, retrieve_xattrs(from)?)
+}
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
@@ -135,5 +182,27 @@ mod tests {
 			value.extend_from_slice(&u32::MAX.to_le_bytes());
 		}
 		assert_eq!(parse_default_acl_permissions(&value), Some(0o741));
+	}
+
+	#[test]
+	fn retrieve_apply_round_trips_a_user_attribute() {
+		let dir = tempfile::tempdir().expect("tempdir");
+		let src = dir.path().join("src");
+		let dst = dir.path().join("dst");
+		std::fs::write(&src, b"").expect("src");
+		std::fs::write(&dst, b"").expect("dst");
+		if let Err(error) = set_xattr(&src, b"user.omp-test\0", b"value") {
+			if error.raw_os_error() == Some(libc::EOPNOTSUPP) {
+				return;
+			}
+			panic!("{error}");
+		}
+		let map = retrieve_xattrs(&src).expect("retrieve");
+		assert_eq!(
+			map.get(b"user.omp-test\0".as_slice()).map(Vec::as_slice),
+			Some(b"value".as_slice())
+		);
+		apply_xattrs(&dst, map).expect("apply");
+		assert_eq!(get_xattr(&dst, b"user.omp-test\0").expect("get"), b"value");
 	}
 }
