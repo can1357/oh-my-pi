@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed recall continuing to serve a stale, pre-embedding ranking for up to an hour after background embeddings finished, when the enhanced recall cache is enabled.
+
 ## [18.0.9] - 2026-08-28
 
 ### Fixed
