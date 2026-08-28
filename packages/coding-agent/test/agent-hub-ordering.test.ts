@@ -6,6 +6,7 @@
  * agents that appear while the hub is open are appended at the end.
  */
 import { afterEach, beforeAll, describe, expect, it, setSystemTime, vi } from "bun:test";
+import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
@@ -15,6 +16,7 @@ import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { AgentActivityIndex, type AgentActivityRow } from "../src/activity";
 
 interface GeometryStub {
@@ -1192,6 +1194,59 @@ describe("Agent hub row ordering", () => {
 			expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain("paused");
 			hub.handleInput("1");
 			expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain("Roster");
+		} finally {
+			hub.dispose();
+		}
+	});
+
+	it("loads the resumed session's durable IRC journal when the Hub opens", async () => {
+		geometry = stubStdoutGeometry(120);
+		geometry.setRows(28);
+		using tempDir = TempDir.createSync("@omp-agent-hub-irc-resume-");
+		const sessionFile = path.join(tempDir.path(), "main.jsonl");
+		await Bun.write(
+			sessionFile,
+			`${JSON.stringify({
+				type: "session",
+				version: 3,
+				id: "resumed-main",
+				timestamp: "2026-08-27T23:45:00.000Z",
+				cwd: tempDir.path(),
+			})}\n`,
+		);
+		await Bun.write(
+			`${sessionFile}.irc`,
+			[
+				JSON.stringify({
+					type: "irc",
+					v: 1,
+					event: "message",
+					message: {
+						id: "resumed-message",
+						from: "Worker",
+						to: "Main",
+						body: "Loaded from the resumed journal",
+						ts: 1_000,
+					},
+				}),
+				JSON.stringify({
+					type: "irc",
+					v: 1,
+					event: "delivery",
+					messageId: "resumed-message",
+					outcome: "injected",
+					ts: 1_001,
+				}),
+			].join("\n"),
+		);
+		const agents = new AgentRegistry();
+		const irc = new IrcBus(agents);
+		const hub = makeHub(agents, { irc, initialSection: "messages", sessionFile });
+
+		try {
+			await irc.history.ready();
+			const rendered = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(rendered).toContain("Loaded from the resumed journal");
 		} finally {
 			hub.dispose();
 		}

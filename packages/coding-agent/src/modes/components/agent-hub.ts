@@ -323,6 +323,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		this.#requestRender = deps.requestRender;
 		this.#hubKeys = deps.hubKeys;
 		this.#remote = deps.remote;
+		if (!this.#remote) this.#irc.configureHistory(deps.sessionFile);
 		this.#loadingPersistedSubagents = !this.#remote && Boolean(deps.sessionFile?.endsWith(".jsonl"));
 		this.#ui =
 			deps.ui ??
