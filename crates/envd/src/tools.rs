@@ -2426,11 +2426,31 @@ pub(crate) fn production_registry<
 	} else {
 		None
 	};
+	// A replacement that names its own root must reach the registry after the
+	// incumbent it replaces: the same-claimant claim fold keeps the last
+	// registration, so payload order would otherwise pick the winner. The
+	// claim also records the declared chain instead of discarding it.
+	let mut ordinary = Vec::new();
+	let mut root_replacements = Vec::new();
 	for registration in workers.registrations() {
 		let declaration = &registration.declaration;
 		if is_prelude_declaration(declaration)? {
 			continue;
 		}
+		let chains_own_root = declaration.definition.as_ref().is_some_and(|definition| {
+			declaration
+				.replaces
+				.iter()
+				.any(|replaced| replaced == &definition.name)
+		});
+		if chains_own_root {
+			root_replacements.push(registration);
+		} else {
+			ordinary.push(registration);
+		}
+	}
+	for registration in ordinary.into_iter().chain(root_replacements) {
+		let declaration = &registration.declaration;
 		let mut spec = worker_spec(declaration)?;
 		if flattened_slots.is_some() {
 			spec.name = Str::from(spec.name.as_str().replace('/', "_"));
@@ -2445,7 +2465,10 @@ pub(crate) fn production_registry<
 			Claims {
 				precedence: Precedence::DEFAULT,
 				claimant:   registration.owner.extension().clone(),
-				replaces:   None,
+				replaces:   declaration
+					.replaces
+					.first()
+					.map(|name| Str::from(name.as_str())),
 			},
 		)?;
 	}
@@ -3586,5 +3609,64 @@ mod tests {
 			!description.contains("github"),
 			"the shell snapshot must be collected after the final freeze: {description}"
 		);
+	}
+
+	fn chained_worker_rows(replacement_first: bool) -> Arc<[OwnedToolDecl]> {
+		let incumbent = OwnedToolDecl {
+			owner:       HostKey::new(sf!("workspace"), sf!("trusted"), sf!("fixture")),
+			declaration: ToolDecl {
+				extension_id: "publisher/extension".to_owned(),
+				definition: Some(omp_proto::inference::v1::ToolDef {
+					name:        "devtool".to_owned(),
+					description: "incumbent".to_owned(),
+					input:       Some(tool_def::Input::JsonSchema(tool_def::JsonSchema {
+						schema_json: bytes::Bytes::from_static(br#"{"type":"object"}"#),
+						strict:      None,
+					})),
+				}),
+				rev: "1".to_owned(),
+				..ToolDecl::default()
+			},
+		};
+		let mut replacement = incumbent.clone();
+		replacement.declaration.rev = "2".to_owned();
+		replacement.declaration.replaces = vec!["devtool".to_owned()];
+		if let Some(definition) = replacement.declaration.definition.as_mut() {
+			definition.description = "replacement".to_owned();
+		}
+		if replacement_first {
+			Arc::from([replacement, incumbent])
+		} else {
+			Arc::from([incumbent, replacement])
+		}
+	}
+
+	#[tokio::test]
+	async fn replacement_claim_wins_regardless_of_payload_order() {
+		for replacement_first in [true, false] {
+			let project = tempfile::tempdir().expect("project directory");
+			let state = tempfile::tempdir().expect("state directory");
+			let (registry, _) = assemble_registry(
+				project.path(),
+				state.path(),
+				ExtHostSupervisor::inert_with_registrations(chained_worker_rows(replacement_first)),
+				RegistryBridges {
+					telemetry_upload: Some(Arc::new(RecordingUpload::default())),
+					..RegistryBridges::default()
+				},
+			)
+			.await
+			.expect("a replaces-chained worker root assembles in either payload order");
+			let claim = registry.claim("devtool").expect("devtool claim");
+			assert_eq!(
+				claim.rev.n, 2,
+				"the declared replacement must win with replacement_first={replacement_first}"
+			);
+			assert_eq!(
+				claim.replaces.as_deref(),
+				Some("devtool"),
+				"the resolved claim must record the chain it was admitted under"
+			);
+		}
 	}
 }

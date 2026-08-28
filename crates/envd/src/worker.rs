@@ -6284,22 +6284,21 @@ fn validate_registrations(tools: &[ToolDecl]) -> Result<(), WorkerError> {
 				definition.name, tool.rev
 			))));
 		}
-		if !roots.insert((tool.extension_id.as_str(), definition.name.as_str())) {
-			// One device root may publish several revisions when each later
-			// revision names the root it replaces; the sealing registry
-			// already rejected equal-precedence or chainless claims before
-			// emitting this payload, so an unchained repeat here can only be
-			// a genuinely conflicting duplicate root.
-			let chains = tool
-				.replaces
-				.iter()
-				.any(|replaced| replaced == definition.name.as_str());
-			if !chains {
-				return Err(WorkerError::DuplicateToolRoot {
-					name:         Str::from(definition.name.clone()),
-					extension_id: Str::from(tool.extension_id.clone()),
-				});
-			}
+		// One device root may publish several revisions when each replacement
+		// names the root it replaces; the sealing registry already rejected
+		// equal-precedence or chainless claims before emitting this payload.
+		// A chained revision never occupies the root slot, so admission does
+		// not depend on payload order: only a second unchained claim for the
+		// same root is a genuinely conflicting duplicate.
+		let chains = tool
+			.replaces
+			.iter()
+			.any(|replaced| replaced == definition.name.as_str());
+		if !chains && !roots.insert((tool.extension_id.as_str(), definition.name.as_str())) {
+			return Err(WorkerError::DuplicateToolRoot {
+				name:         Str::from(definition.name.clone()),
+				extension_id: Str::from(tool.extension_id.clone()),
+			});
 		}
 	}
 	Ok(())
@@ -8304,6 +8303,41 @@ async def worker_prelude_round_trip(patches, *, strategy: str = "sequential"):
 		misdirected.replaces = vec!["unrelated".to_owned()];
 		let error = validate_registrations(&[incumbent, misdirected])
 			.expect_err("a repeat naming a different root is still a conflicting duplicate");
+		assert!(matches!(error, WorkerError::DuplicateToolRoot { name, extension_id }
+				if name == "chained" && extension_id == "extension/example"));
+	}
+
+	#[test]
+	fn validate_registrations_admits_chained_roots_in_any_payload_order() {
+		let base = ToolDecl {
+			extension_id: "extension/example".to_owned(),
+			definition: Some(ToolDef {
+				name:        "chained".to_owned(),
+				description: "chained".to_owned(),
+				input:       Some(tool_def::Input::JsonSchema(tool_def::JsonSchema {
+					schema_json: Bytes::from_static(br#"{"type":"object"}"#),
+					strict:      None,
+				})),
+			}),
+			rev: "1".to_owned(),
+			constraint: None,
+			summary: String::new(),
+			docs: String::new(),
+			..ToolDecl::default()
+		};
+		let incumbent = base.clone();
+		let mut replacement = base.clone();
+		replacement.rev = "2".to_owned();
+		replacement.replaces = vec!["chained".to_owned()];
+		// The projection sorts by (name, family, rev), so the replacement can
+		// precede its incumbent; validity must not depend on that order.
+		validate_registrations(&[replacement, incumbent.clone()])
+			.expect("a replacement sorting before its incumbent is admitted");
+
+		let mut second_incumbent = incumbent.clone();
+		second_incumbent.rev = "2".to_owned();
+		let error = validate_registrations(&[incumbent, second_incumbent])
+			.expect_err("two unchained claims for one root stay rejected");
 		assert!(matches!(error, WorkerError::DuplicateToolRoot { name, extension_id }
 				if name == "chained" && extension_id == "extension/example"));
 	}
