@@ -1,12 +1,13 @@
 # github
 
-> Dispatch GitHub CLI operations for repositories, repository files, pull requests, search, and Actions run watching.
+> Dispatch GitHub CLI operations for repositories, repository files, pull requests, stacked PRs, search, and Actions run watching.
 
 ## Source
 - Entry: `packages/coding-agent/src/tools/gh.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/github.md`
 - Key collaborators:
   - `packages/coding-agent/src/tools/gh-format.ts` — shorten commit SHAs for summaries.
+  - `packages/coding-agent/src/tools/gh-stack.ts` — stacked PR ops (`gh stack` + Stacks REST API) and stack maps on `pr://`.
   - `packages/coding-agent/src/tools/gh-renderer.ts` — TUI rendering, especially `run_watch` live/result views.
   - `packages/coding-agent/src/utils/git.ts` — `gh`/`git` process wrappers, repo locking, branch config writes.
   - `packages/utils/src/dirs.ts` — base directory for dedicated PR worktrees.
@@ -17,13 +18,13 @@
 
 - `github.enabled` defaults to `false`; enable the GitHub CLI tool in **Settings → Tools** before use.
 - The tool is discoverable and strict-schema, and is created only when `gh` is available on `PATH`. Authentication is checked by the CLI when an operation runs.
-- `repo_view`, `file_read`, every `search_*` operation, and `run_watch` request read approval. `pr_create`, `pr_checkout`, and `pr_push` request execution approval.
+- `repo_view`, `file_read`, every `search_*` operation, `run_watch`, and `stack` with `command: "view"` request read approval. `pr_create`, `pr_checkout`, `pr_push`, and other `stack` commands request execution approval.
 
 ## Inputs
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `op` | `"repo_view" \| "file_read" \| "pr_create" \| "pr_checkout" \| "pr_push" \| "search_issues" \| "search_prs" \| "search_code" \| "search_commits" \| "search_repos" \| "run_watch"` | Yes | Dispatch selector. `GithubTool.execute()` switches only on this field. |
+| `op` | `"repo_view" \| "file_read" \| "pr_create" \| "pr_checkout" \| "pr_push" \| "search_issues" \| "search_prs" \| "search_code" \| "search_commits" \| "search_repos" \| "run_watch" \| "stack"` | Yes | Dispatch selector. `GithubTool.execute()` switches only on this field. |
 | `repo` | `string` | No | `[host/]owner/repo` override. The host prefix is optional only when it matches the host `gh` defaults to (github.com, or `GH_HOST` when set); a repository on any other host — including github.com while `GH_HOST` names an enterprise instance — must be qualified, or `gh` sends the request to its default host. Ignored when the identifier argument is already a full GitHub URL. For `search_issues`/`search_prs`/`search_code`/`search_commits`, defaults to the current checkout's repository when omitted (skipped when the query already contains a `repo:`/`org:`/`user:`/`owner:` qualifier or when current-repo resolution fails). Required in practice when `gh` cannot infer repo context from the current checkout. |
 | `branch` | `string` | No | Used by `repo_view`, `file_read`, `pr_push`, and `run_watch`. `file_read` omits the ref to use the repository's default branch; `run_watch` falls back to the current git branch when `run` is omitted; `pr_push` falls back to the current branch. |
 | `path` | `string` | No | Required by `file_read`. Repository-relative path to a file in the GitHub repository; leading `/` is rejected. |
@@ -46,6 +47,21 @@
 | `limit` | `number` | No | Used by all `search_*` ops. Defaults to `10`, floored, clamped to `50`, and must be `> 0`. |
 | `run` | `string` | No | Used only by `run_watch`. Must be a numeric run ID or full GitHub Actions run URL. |
 | `tail` | `number` | No | Used only by `run_watch`. Defaults to `15`, floored, clamped to `200`, and must be `> 0`. |
+| `command` | `"init" \| "add" \| "view" \| "push" \| "submit" \| "sync" \| "rebase" \| "checkout" \| "merge" \| "unstack" \| "up" \| "down" \| "top" \| "bottom" \| "trunk" \| "link"` | No | Required when `op` is `stack`. |
+| `branches` | `string[]` | No | Stack branch names, bottom to top. Used by `init` and `link`. |
+| `message` | `string` | No | Commit message for `stack` `add -m`. |
+| `remote` | `string` | No | Git remote for `push`/`submit`/`sync`/`rebase`/`link`. |
+| `prune` | `boolean` | No | `stack sync --prune`. |
+| `upstack` | `boolean` | No | `stack rebase --upstack`. |
+| `downstack` | `boolean` | No | `stack rebase --downstack`. |
+| `noTrunk` | `boolean` | No | `stack rebase --no-trunk`. |
+| `resume` | `boolean` | No | `stack rebase --continue`. |
+| `abort` | `boolean` | No | `stack rebase --abort`. |
+| `mergeMethod` | `"squash" \| "rebase" \| "merge"` | No | Passed to `gh stack merge`. |
+| `stack` | `string` | No | Stack number for `view`/`checkout`/`merge`/`unstack`/`link`. |
+| `open` | `boolean` | No | `stack submit --open` (ready for review instead of draft). |
+| `local` | `boolean` | No | `stack unstack --local`. |
+| `steps` | `number` | No | Layers to move on `up`/`down`. |
 
 ## Outputs
 The tool returns a single text result built by `buildTextResult()` in `packages/coding-agent/src/tools/gh.ts`.
@@ -240,6 +256,18 @@ Watch flow:
 - Inline result includes only the last `tail` lines per failed job. The saved artifact contains full logs (`mode: "full"`).
 - In commit mode, success is intentionally double-checked: once all known runs are successful, the tool waits one more poll interval and succeeds only if the set of run IDs is unchanged. This avoids returning before late workflow runs appear for the same commit.
 - `details.watch` drives a specialized renderer in `packages/coding-agent/src/tools/gh-renderer.ts`; non-watch results fall back to generic text rendering.
+
+### `stack`
+
+| Aspect | Value |
+| --- | --- |
+| Required fields | `op`, `command` |
+| Optional fields | `repo`, `branch`, `branches`, `base`, `pr`, `stack`, `message`, `remote`, `prune`, `upstack`, `downstack`, `noTrunk`, `resume`, `abort`, `mergeMethod`, `open`, `local`, `steps` |
+| `gh` command | Local commands wrap `gh stack <command> …` with non-interactive flags. Remote `view` (when `stack` is set) and `stack://` use `GET /repos/{owner}/{repo}/stacks`. |
+| Batching | None |
+| Output | Command stdout, or a numbered stack map for `view`. |
+
+`command: "view"` without `stack` runs `gh stack view --json` for the current local stack. With `stack`, it reads that stack number from the GitHub Stacks API. `submit` always passes `--auto`. `merge` always passes `--yes`. `init`/`add`/`checkout` reject missing identifiers instead of prompting. Local commands require the `github/gh-stack` extension; missing it throws an install hint. `pr://` views best-effort attach a stack map from `GET /repos/{owner}/{repo}/stacks?pull_request=N`. Read `stack://` / `stack://<N>` / `stack://<owner>/<repo>/<N>` for remote stacks without a local checkout.
 
 ## Side Effects
 - Filesystem

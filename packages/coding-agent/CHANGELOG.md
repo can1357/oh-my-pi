@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- GitHub stacked pull requests: `github` `op: "stack"` wraps `gh stack` non-interactively, `pr://` shows a stack map, and `stack://` lists/views remote stacks.
+
 ## [18.0.9] - 2026-08-28
 
 ### Breaking Changes

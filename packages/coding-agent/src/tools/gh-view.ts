@@ -20,6 +20,7 @@ import {
 } from "./gh-common";
 import { formatShortSha } from "./gh-format";
 import { FILE_PREVIEW_LIMIT } from "./gh-search";
+import { fetchPrStack, formatStackMap } from "./gh-stack";
 import type {
 	GhComment,
 	GhIssueViewData,
@@ -401,6 +402,10 @@ export function formatPrView(data: GhPrViewData, input: { pr?: string; repo?: st
 	pushLine(lines, "Updated", data.updatedAt);
 	pushLine(lines, "Labels", formatLabels(data.labels));
 	pushLine(lines, "URL", data.url);
+	if (data.stack && input.repo) {
+		lines.push("");
+		lines.push(...formatStackMap(data.stack, input.repo, data.number));
+	}
 	lines.push("");
 	lines.push("## Body");
 	lines.push("");
@@ -529,6 +534,8 @@ export async function fetchPrViewFresh(
 	if (includeComments && typeof data.number === "number") {
 		data.reviewComments = await fetchPrReviewComments(cwd, repo, data.number, signal);
 	}
+	const prNumber = typeof data.number === "number" ? data.number : number;
+	data.stack = await fetchPrStack(cwd, repo, prNumber, signal);
 	const rendered = formatPrView(data, { pr: String(number), repo, comments: includeComments });
 	return { rendered, sourceUrl: data.url, payload: data };
 }

@@ -24,11 +24,13 @@ import {
 
 type GithubToolRenderArgs = {
 	op?: string;
+	command?: string;
 	run?: string;
 	branch?: string;
 	repo?: string;
 	pr?: string | string[];
 	query?: string;
+	stack?: string;
 };
 
 const SUCCESS_CONCLUSIONS = new Set(["success", "neutral", "skipped"]);
@@ -47,9 +49,11 @@ const OP_TITLES: Record<string, string> = {
 	search_commits: "GitHub Search Commits",
 	search_repos: "GitHub Search Repos",
 	run_watch: "GitHub Run Watch",
+	stack: "GitHub Stack",
 };
 
-function formatOpTitle(op: string | undefined): string {
+function formatOpTitle(op: string | undefined, command?: string): string {
+	if (op === "stack" && command) return `GitHub Stack ${command}`;
 	if (op && OP_TITLES[op]) return OP_TITLES[op];
 	return "GitHub";
 }
@@ -108,6 +112,13 @@ function buildOpMeta(args: GithubToolRenderArgs): string[] {
 		}
 		case "run_watch":
 			break;
+		case "stack": {
+			if (args.command) meta.push(args.command);
+			if (args.stack) meta.push(`#${args.stack}`);
+			else if (args.branch) meta.push(args.branch);
+			if (args.repo) meta.push(args.repo);
+			break;
+		}
 		default: {
 			if (args.repo) meta.push(args.repo);
 			break;
@@ -324,7 +335,7 @@ function renderFallbackComponent(
 	args: GithubToolRenderArgs,
 ): Component {
 	const text = extractText(result.content);
-	const title = formatOpTitle(args.op);
+	const title = formatOpTitle(args.op, args.command);
 	const meta = buildOpMeta(args);
 	const isError = result.isError === true;
 	const success = !isError && Boolean(text);
@@ -430,7 +441,7 @@ export const githubToolRenderer = {
 			{
 				icon: status,
 				spinnerFrame: options.spinnerFrame,
-				title: formatOpTitle(op),
+				title: formatOpTitle(op, args.command),
 				meta: buildOpMeta({ ...args, op }),
 			},
 			uiTheme,

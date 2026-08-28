@@ -1,3 +1,21 @@
+export type StackCommand =
+	| "init"
+	| "add"
+	| "view"
+	| "push"
+	| "submit"
+	| "sync"
+	| "rebase"
+	| "checkout"
+	| "merge"
+	| "unstack"
+	| "up"
+	| "down"
+	| "top"
+	| "bottom"
+	| "trunk"
+	| "link";
+
 export interface GithubInput {
 	op:
 		| "repo_view"
@@ -10,7 +28,8 @@ export interface GithubInput {
 		| "search_code"
 		| "search_commits"
 		| "search_repos"
-		| "run_watch";
+		| "run_watch"
+		| "stack";
 	repo?: string;
 	branch?: string;
 	path?: string;
@@ -33,6 +52,37 @@ export interface GithubInput {
 	limit?: number;
 	run?: string;
 	tail?: number;
+	command?: StackCommand;
+	branches?: string[];
+	message?: string;
+	remote?: string;
+	prune?: boolean;
+	upstack?: boolean;
+	downstack?: boolean;
+	noTrunk?: boolean;
+	resume?: boolean;
+	abort?: boolean;
+	mergeMethod?: "squash" | "rebase" | "merge";
+	stack?: string;
+	open?: boolean;
+	local?: boolean;
+	steps?: number;
+}
+
+export interface GhPrStackPullRequest {
+	number: number;
+	state: string;
+	draft: boolean;
+	mergedAt?: string | null;
+	headRef: string;
+}
+
+export interface GhPrStack {
+	number: number;
+	base: string;
+	open?: boolean;
+	url?: string;
+	pullRequests: GhPrStackPullRequest[];
 }
 
 // /search/<endpoint> API response shapes (subset). Used when projecting raw
@@ -195,6 +245,7 @@ export interface GhPrViewData extends GhIssueViewData {
 	reviewComments?: GhPrReviewComment[];
 	reviews?: GhPrReview[];
 	reviewDecision?: string;
+	stack?: GhPrStack;
 }
 
 export interface GhPrReviewCommit {
