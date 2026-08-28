@@ -47,6 +47,7 @@ type SpeculativeToolCandidate = {
 	executionArgs: Record<string, unknown>;
 	effect: ToolSpeculationEffect;
 	fingerprint: string;
+	deferBeforeToolCall: boolean;
 	virtualDurationMs?: number;
 	virtualStartedAt?: number;
 	virtualFinishedAt?: number;
@@ -581,6 +582,11 @@ export class SpeculativeOperationCoordinator {
 			await this.#discardCandidate(candidate, "discarded", "speculative execution failed");
 			return undefined;
 		}
+		if (physicalOutcome.kind === "result" && physicalOutcome.isError) {
+			candidate.claimed = false;
+			await this.#discardCandidate(candidate, "discarded", "speculative execution returned an error");
+			return undefined;
+		}
 		const context: SpeculativeCommitContext = { ...this.#createContext(candidate), physicalOutcome };
 		try {
 			if (this.config.host?.validate && !(await this.config.host.validate(context))) {
@@ -793,6 +799,7 @@ export class SpeculativeOperationCoordinator {
 			executionArgs,
 			effect,
 			fingerprint,
+			deferBeforeToolCall: false,
 			virtualDurationMs: definition.virtualDurationMs,
 			controller,
 			outcome: promise,
@@ -816,6 +823,8 @@ export class SpeculativeOperationCoordinator {
 			this.ineligible(toolCall, authorization.reason, source, parentToolCallId);
 			return undefined;
 		}
+		candidate.deferBeforeToolCall =
+			authorization.deferBeforeToolCall === true && environment.loopConfig.beforeToolCall !== undefined;
 		return candidate;
 	}
 
@@ -863,10 +872,16 @@ export class SpeculativeOperationCoordinator {
 		for (const candidate of this.#candidates.values()) {
 			if (this.#running >= this.maxInFlight) return;
 			if (candidate.state !== "queued") continue;
-			// Completion requests spend provider tokens and cannot be undone.
-			// Keep them queued until the final outer calls have been reconciled
-			// and admission closes.
-			if (candidate.effect.kind === "model_completion" && !this.#admissionsFinalized) continue;
+			// Provider completions have irreversible spend, while a host can defer
+			// any candidate until the finalized call survives validation and the
+			// consumer's beforeToolCall hook. Neither class may start while final
+			// admission is still open.
+			if (
+				(candidate.effect.kind === "model_completion" || candidate.deferBeforeToolCall) &&
+				!this.#admissionsFinalized
+			) {
+				continue;
+			}
 			const dependencies = candidate.dependencies.map(id => this.#candidates.get(id));
 			if (dependencies.some(value => value === undefined)) {
 				if (this.#admissionsFinalized) {

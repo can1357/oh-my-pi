@@ -58,18 +58,15 @@ describe("read speculation assessment", () => {
 		});
 	});
 
-	it("assesses sparse text files larger than the whole-file read limit from a bounded header", async () => {
+	it("rejects files too large to bind the result to one buffered snapshot", async () => {
 		const hugePath = path.join(testDir, "huge.txt");
 		fs.writeFileSync(hugePath, "a".repeat(8_192));
 		fs.truncateSync(hugePath, 3 * 1024 * 1024 * 1024);
 		const tool = new ReadTool(createSession(testDir));
 
 		await expect(tool.speculation.finalized?.assess({ args: { path: "huge.txt" } })).resolves.toEqual({
-			eligible: true,
-			effect: {
-				kind: "local_read",
-				resources: [{ scheme: "file", path: fs.realpathSync(hugePath), access: "read" }],
-			},
+			eligible: false,
+			reason: "read target is not a speculation-safe local path",
 		});
 	});
 

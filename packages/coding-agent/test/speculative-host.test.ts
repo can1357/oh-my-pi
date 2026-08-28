@@ -107,6 +107,48 @@ describe("CodingAgentSpeculativeExecutionHost", () => {
 		expect(await host.validate(commit)).toBe(false);
 	});
 
+	it("rejects bytes read during an ABA rewrite even after the original file is restored", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-host-"));
+		temporaryDirectories.push(directory);
+		const target = path.join(directory, "note.txt");
+		await fs.writeFile(target, "before");
+		const stableMtime = new Date(Math.floor(Date.now() / 1_000) * 1_000);
+		await fs.utimes(target, stableMtime, stableMtime);
+		const originalState = await fs.stat(target);
+		const session = createSession(directory);
+		const tool = new ReadTool(session);
+		const policy = tool.speculation.finalized;
+		if (!policy) throw new Error("read tool has no finalized speculation policy");
+		const args = { path: "note.txt" };
+		const assessment = await policy.assess({ args });
+		if (!assessment.eligible) throw new Error("expected local read assessment to succeed");
+		const context: SpeculativeOperationContext = {
+			candidateId: "aba-read",
+			source: "direct",
+			dependencies: [],
+			tool,
+			toolCall: { type: "toolCall", id: "aba-read", name: "read", arguments: args },
+			args,
+			effect: assessment.effect,
+		};
+		const host = new CodingAgentSpeculativeExecutionHost(session.settings, session, { hasHandlers: () => false });
+
+		expect(await host.authorize(context)).toMatchObject({ allowed: true });
+		await fs.writeFile(target, "during");
+		const physicalOutcome = await policy.execute(context, new AbortController().signal);
+		await fs.writeFile(target, "before");
+		await fs.utimes(target, originalState.atime, originalState.mtime);
+		const restoredState = await fs.stat(target);
+		expect({
+			inode: restoredState.ino,
+			mtimeMs: restoredState.mtimeMs,
+			size: restoredState.size,
+		}).toEqual({ inode: originalState.ino, mtimeMs: originalState.mtimeMs, size: originalState.size });
+
+		expect(await host.validate({ ...context, physicalOutcome })).toBe(false);
+		await policy.discard?.({ ...context, reason: "test complete" });
+	});
+
 	it("releases local-read evidence after a successful commit", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-host-"));
 		temporaryDirectories.push(directory);
@@ -114,15 +156,12 @@ describe("CodingAgentSpeculativeExecutionHost", () => {
 		await fs.writeFile(target, "before");
 		const session = createSession(directory);
 		const tool = new ReadTool(session);
+		const policy = tool.speculation.finalized;
+		if (!policy) throw new Error("read tool has no finalized speculation policy");
 		const args = { path: "note.txt" };
-		const assessment = await tool.speculation.finalized?.assess({ args });
-		if (!assessment?.eligible) throw new Error("expected local read assessment to succeed");
-		const physicalOutcome = {
-			kind: "result" as const,
-			result: { content: [{ type: "text" as const, text: "before" }] },
-			isError: false,
-		};
-		const context: SpeculativeCommitContext = {
+		const assessment = await policy.assess({ args });
+		if (!assessment.eligible) throw new Error("expected local read assessment to succeed");
+		const context: SpeculativeOperationContext = {
 			candidateId: "committed-read",
 			source: "direct",
 			dependencies: [],
@@ -130,16 +169,18 @@ describe("CodingAgentSpeculativeExecutionHost", () => {
 			toolCall: { type: "toolCall", id: "committed-read", name: "read", arguments: args },
 			args,
 			effect: assessment.effect,
-			physicalOutcome,
 		};
 		const host = new CodingAgentSpeculativeExecutionHost(session.settings, session, { hasHandlers: () => false });
 
 		expect(await host.authorize(context)).toMatchObject({ allowed: true });
-		expect(await host.validate(context)).toBe(true);
-		expect(await host.commit(context, async () => physicalOutcome.result)).toMatchObject({
+		const physicalOutcome = await policy.execute(context, new AbortController().signal);
+		if (physicalOutcome.kind !== "result") throw new Error("expected speculative read result");
+		const commitContext: SpeculativeCommitContext = { ...context, physicalOutcome };
+		expect(await host.validate(commitContext)).toBe(true);
+		expect(await host.commit(commitContext, async () => physicalOutcome.result)).toMatchObject({
 			kind: "committed",
 		});
-		expect(await host.validate(context)).toBe(false);
+		expect(await host.validate(commitContext)).toBe(false);
 	});
 
 	it("authorizes hashline edits only when every parsed target matches the staged resources", async () => {

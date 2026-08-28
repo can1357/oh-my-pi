@@ -12,9 +12,12 @@ import type {
 	SpeculativeOperationContext,
 } from "@oh-my-pi/pi-agent-core";
 import type { Settings } from "../config/settings";
+import { SNAPSHOT_MAX_BYTES } from "../edit/file-snapshot-store";
+import { normalizeToLF } from "../edit/normalize";
 import { SpeculativePalCommitConflictError } from "../task/worktree";
 import type { ToolSession } from "../tools";
 import { type ApprovalMode, resolveApproval } from "../tools/approval";
+import type { LocalReadSpeculationEvidence } from "../tools/read";
 
 type LocalReadEvidence = {
 	path: string;
@@ -22,7 +25,8 @@ type LocalReadEvidence = {
 	inode: number;
 	mtimeMs: number;
 	size: number;
-	digest?: string;
+	digest: string;
+	snapshotDigest: string;
 };
 
 type StagedTransactionToken = {
@@ -39,6 +43,19 @@ function isStagedTransactionToken(value: unknown): value is StagedTransactionTok
 		"transaction" in value &&
 		typeof (value as StagedTransactionToken).transaction?.verify === "function" &&
 		typeof (value as StagedTransactionToken).transaction?.restore === "function"
+	);
+}
+
+function isLocalReadSpeculationEvidence(value: unknown): value is LocalReadSpeculationEvidence {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"kind" in value &&
+		value.kind === "local_read" &&
+		"resource" in value &&
+		typeof value.resource === "string" &&
+		"snapshotDigest" in value &&
+		typeof value.snapshotDigest === "string"
 	);
 }
 
@@ -94,15 +111,23 @@ function sameResourceState(left: nodeFs.Stats, right: nodeFs.Stats): boolean {
 async function captureEvidence(target: string): Promise<LocalReadEvidence | undefined> {
 	try {
 		const state = await fs.lstat(target);
-		if (state.isSymbolicLink() || (!state.isFile() && !state.isDirectory())) return undefined;
-		let digest: string | undefined;
-		if (state.isFile()) {
-			const hasher = new Bun.CryptoHasher("sha256");
-			for await (const chunk of Bun.file(target).stream()) hasher.update(chunk);
-			digest = hasher.digest("hex");
-			if (!sameResourceState(state, await fs.lstat(target))) return undefined;
-		}
-		return { path: target, device: state.dev, inode: state.ino, mtimeMs: state.mtimeMs, size: state.size, digest };
+		if (state.isSymbolicLink() || !state.isFile() || state.size > SNAPSHOT_MAX_BYTES) return undefined;
+		const bytes = await fs.readFile(target);
+		if (!sameResourceState(state, await fs.lstat(target))) return undefined;
+		const digest = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+		const rawText = bytes.toString("utf8");
+		const strippedText = rawText.charCodeAt(0) === 0xfeff ? rawText.slice(1) : rawText;
+		const normalizedText = strippedText.includes("\r") ? normalizeToLF(strippedText) : strippedText;
+		const snapshotDigest = new Bun.CryptoHasher("sha256").update(normalizedText).digest("hex");
+		return {
+			path: target,
+			device: state.dev,
+			inode: state.ino,
+			mtimeMs: state.mtimeMs,
+			size: state.size,
+			digest,
+			snapshotDigest,
+		};
 	} catch {
 		return undefined;
 	}
@@ -216,6 +241,14 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 		}
 		const expected = this.#evidence.get(context.candidateId);
 		if (!expected) return false;
+		const consumed = context.physicalOutcome.evidence;
+		if (
+			!isLocalReadSpeculationEvidence(consumed) ||
+			consumed.resource !== expected.path ||
+			consumed.snapshotDigest !== expected.snapshotDigest
+		) {
+			return false;
+		}
 		const authorization = await this.authorize(context);
 		if (!authorization.allowed) return false;
 		const current = this.#evidence.get(context.candidateId);
@@ -225,7 +258,8 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 			current.inode === expected.inode &&
 			current.mtimeMs === expected.mtimeMs &&
 			current.size === expected.size &&
-			current.digest === expected.digest
+			current.digest === expected.digest &&
+			current.snapshotDigest === expected.snapshotDigest
 		);
 	}
 

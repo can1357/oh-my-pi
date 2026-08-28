@@ -1828,11 +1828,9 @@ async function streamAssistantResponse(
 						// revision is written back into this message's toolCall blocks,
 						// so history, the UI, persistence, provider replay, scheduling,
 						// and execution all carry the revised arguments.
-						if (finalMessage.content.some(c => c.type === "toolCall")) {
-							preparedDispatchByMessage.set(
-								finalMessage,
-								await prepareToolCallDispatch(finalMessage, context, config, requestSignal),
-							);
+						const preparedDispatch = await prepareToolCallDispatch(finalMessage, context, config, requestSignal);
+						if (preparedDispatch.size > 0) {
+							preparedDispatchByMessage.set(finalMessage, preparedDispatch);
 						}
 						if (speculationCoordinator) {
 							if (
@@ -1849,15 +1847,7 @@ async function streamAssistantResponse(
 								);
 							} else {
 								await speculationCoordinator.reconcileFinalCalls(
-									new Map(
-										finalMessage.content
-											.filter(
-												(content): content is AgentToolCall =>
-													content.type === "toolCall" &&
-													(content as CursorExecResolvedCarrier)[kCursorExecResolved] !== true,
-											)
-											.map(toolCall => [toolCall.id, toolCall]),
-									),
+									speculativeFinalCalls(finalMessage, preparedDispatch),
 								);
 								await speculationCoordinator.finalizeAdmissions();
 								speculationCoordinator.attach(finalMessage);
@@ -2019,7 +2009,14 @@ async function streamAssistantResponse(
 					throw new HarmonyLeakInterruption(detection, removed, recovered);
 				}
 			}
+			if (config.transformAssistantMessage) {
+				await config.transformAssistantMessage(trailing, requestSignal);
+			}
 			trailing = snapshotAssistantMessage(trailing);
+			const preparedDispatch = await prepareToolCallDispatch(trailing, context, config, requestSignal);
+			if (preparedDispatch.size > 0) {
+				preparedDispatchByMessage.set(trailing, preparedDispatch);
+			}
 			if (speculationCoordinator) {
 				if (
 					requestSignal?.aborted ||
@@ -2032,17 +2029,7 @@ async function streamAssistantResponse(
 						requestSignal?.aborted ? "aborted" : "discarded",
 					);
 				} else {
-					await speculationCoordinator.reconcileFinalCalls(
-						new Map(
-							trailing.content
-								.filter(
-									(content): content is AgentToolCall =>
-										content.type === "toolCall" &&
-										(content as CursorExecResolvedCarrier)[kCursorExecResolved] !== true,
-								)
-								.map(toolCall => [toolCall.id, toolCall]),
-						),
-					);
+					await speculationCoordinator.reconcileFinalCalls(speculativeFinalCalls(trailing, preparedDispatch));
 					await speculationCoordinator.finalizeAdmissions();
 					speculationCoordinator.attach(trailing);
 				}
@@ -2381,6 +2368,34 @@ async function prepareToolCallDispatch(
 		}
 	}
 	return prepared;
+}
+
+/**
+ * Final calls that can still reach tool execution after pre-dispatch policy.
+ * Omitting a call is deliberate: reconciliation discards its direct candidate
+ * and streamed children before final admission can release deferred work.
+ */
+function speculativeFinalCalls(
+	assistantMessage: AssistantMessage,
+	preparedDispatch: ReadonlyMap<string, PreparedToolCall>,
+): Map<string, AgentToolCall> {
+	const calls = new Map<string, AgentToolCall>();
+	for (const content of assistantMessage.content) {
+		if (content.type !== "toolCall" || (content as CursorExecResolvedCarrier)[kCursorExecResolved] === true) {
+			continue;
+		}
+		const prepared = preparedDispatch.get(content.id);
+		if (
+			!prepared ||
+			prepared.blocked ||
+			prepared.prepareError !== undefined ||
+			prepared.validationErrorMessage !== undefined
+		) {
+			continue;
+		}
+		calls.set(content.id, content);
+	}
+	return calls;
 }
 /**
  * Execute tool calls from an assistant message.

@@ -659,7 +659,13 @@ export interface ToolSpeculationDiscardContext extends ToolSpeculationExecutionC
 }
 
 export type SpeculativePhysicalOutcome =
-	| { kind: "result"; result: AgentToolResult<unknown>; isError: boolean }
+	| {
+			kind: "result";
+			result: AgentToolResult<unknown>;
+			isError: boolean;
+			/** Opaque evidence the host can bind to the bytes or remote response actually consumed. */
+			evidence?: unknown;
+	  }
 	| { kind: "staged"; token: unknown };
 
 export interface SpeculativeToolReference {

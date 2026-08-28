@@ -618,6 +618,16 @@ const LOCAL_READ_SPECULATION_INELIGIBLE: ToolSpeculationAssessment = {
 	reason: "read target is not a speculation-safe local path",
 };
 
+export interface LocalReadSpeculationEvidence {
+	kind: "local_read";
+	resource: string;
+	snapshotDigest: string;
+}
+
+function digestSnapshotText(text: string): string {
+	return new Bun.CryptoHasher("sha256").update(text).digest("hex");
+}
+
 async function assessLocalReadSpeculation(
 	cwd: string,
 	args: Readonly<Record<string, unknown>>,
@@ -649,6 +659,17 @@ async function assessLocalReadSpeculation(
 		const targetStat = await fs.stat(resolvedPath);
 		if (targetStat.isDirectory()) return LOCAL_READ_SPECULATION_INELIGIBLE;
 		if (!targetStat.isFile()) return LOCAL_READ_SPECULATION_INELIGIBLE;
+		if (
+			targetStat.size > SNAPSHOT_MAX_BYTES ||
+			isNotebookPath(resolvedPath) ||
+			isSampleProfilePath(resolvedPath) ||
+			isCpuProfilePath(resolvedPath) ||
+			CONVERTIBLE_EXTENSIONS.has(path.extname(resolvedPath).toLowerCase()) ||
+			resolvedPath.endsWith(".svg") ||
+			resolvedPath.endsWith(".svgz")
+		) {
+			return LOCAL_READ_SPECULATION_INELIGIBLE;
+		}
 		if (await readImageMetadata(resolvedPath)) return LOCAL_READ_SPECULATION_INELIGIBLE;
 		const bytes = await Bun.file(resolvedPath).slice(0, BINARY_SNIFF_BYTES).bytes();
 		const header = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -733,6 +754,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		}
 		const execution = { discarded: false };
 		this.#speculativeReadExecutions.set(context.toolCall.id, execution);
+		let snapshotDigest: string | undefined;
 		try {
 			const speculativeSession = Object.create(this.session) as ToolSession;
 			Object.defineProperty(speculativeSession, "fileSnapshotStore", {
@@ -740,14 +762,37 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				writable: true,
 				configurable: true,
 			});
+			Object.defineProperty(speculativeSession, "getClientBridge", {
+				value: () => undefined,
+				configurable: true,
+			});
 			const store = getFileSnapshotStore(speculativeSession);
 			const speculativeTool = new ReadTool(speculativeSession);
-			const result = await speculativeTool.#executeInner(context.toolCall.id, context.args as ReadParams, signal);
+			const result = await speculativeTool.#executeInner(
+				context.toolCall.id,
+				context.args as ReadParams,
+				signal,
+				undefined,
+				undefined,
+				normalizedText => {
+					snapshotDigest = digestSnapshotText(normalizedText);
+				},
+			);
 			const snapshotKey = canonicalSnapshotKey(context.effect.resources[0].path);
 			if (!signal.aborted && !execution.discarded && store.head(snapshotKey)) {
 				this.#speculativeReads.set(context.toolCall.id, { store, snapshotKey });
 			}
-			return { kind: "result", result, isError: result.isError === true };
+			if (!snapshotDigest) throw new Error("Speculative read did not consume one stable buffered snapshot");
+			return {
+				kind: "result",
+				result,
+				isError: result.isError === true,
+				evidence: {
+					kind: "local_read",
+					resource: context.effect.resources[0].path,
+					snapshotDigest,
+				} satisfies LocalReadSpeculationEvidence,
+			};
 		} finally {
 			if (this.#speculativeReadExecutions.get(context.toolCall.id) === execution) {
 				this.#speculativeReadExecutions.delete(context.toolCall.id);
@@ -1209,6 +1254,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<ReadToolDetails>,
 		_toolContext?: AgentToolContext,
+		onBufferedFile?: (normalizedText: string) => void,
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		let { path: readPath } = params;
 		if (readPath.startsWith("file://")) {
@@ -1604,6 +1650,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}
 			// Decode only what survived the sniff.
 			const buffered = wholeFileBytes ? deriveBufferedFileText(wholeFileBytes) : undefined;
+			if (buffered) onBufferedFile?.(buffered.normalizedText);
 
 			if (
 				parsed.kind === "none" &&

@@ -5803,4 +5803,113 @@ describe("speculative tool execution", () => {
 
 		expect(closeCalls).toBe(0);
 	});
+	it("discards blocked and preparation-failed calls before releasing host-deferred work", async () => {
+		for (const preparation of ["blocked", "failed"] as const) {
+			const schema = type({ value: "string" });
+			let speculativeExecutions = 0;
+			let ordinaryExecutions = 0;
+			const tool: AgentTool<typeof schema> = {
+				name: "deferred",
+				label: "Deferred",
+				description: "Exercises pre-dispatch speculation gating",
+				parameters: schema,
+				speculation: {
+					finalized: {
+						assess: () => ({ eligible: true, effect: { kind: "pure" } }),
+						async execute() {
+							speculativeExecutions++;
+							return { kind: "result", result: { content: [] }, isError: false };
+						},
+					},
+				},
+				async execute() {
+					ordinaryExecutions++;
+					return { content: [] };
+				},
+			};
+			const mock = createMockModel({
+				responses: [
+					{
+						content: [
+							{
+								type: "toolCall",
+								id: `deferred-${preparation}`,
+								name: "deferred",
+								arguments: { value: "run" },
+							},
+						],
+					},
+					{ content: ["done"] },
+				],
+			});
+
+			await agentLoop(
+				[createUserMessage("run")],
+				{ systemPrompt: [""], messages: [], tools: [tool] },
+				{
+					model: mock.model,
+					convertToLlm: identityConverter,
+					beforeToolCall: async () => {
+						if (preparation === "failed") throw new Error("policy failed");
+						return { block: true, reason: "policy denied execution" };
+					},
+					speculativeToolExecution: {
+						enabled: true,
+						host: { authorize: () => ({ allowed: true, deferBeforeToolCall: true }) },
+					},
+				},
+				undefined,
+				mock.stream,
+			).result();
+
+			expect(speculativeExecutions).toBe(0);
+			expect(ordinaryExecutions).toBe(0);
+		}
+	});
+
+	it("falls back from a structured error returned by direct speculative execution", async () => {
+		const schema = type({ value: "string" });
+		let speculativeExecutions = 0;
+		const tool: AgentTool<typeof schema> = {
+			name: "transient",
+			label: "Transient",
+			description: "Returns one speculative error",
+			parameters: schema,
+			speculation: {
+				finalized: {
+					assess: () => ({ eligible: true, effect: { kind: "pure" } }),
+					async execute() {
+						speculativeExecutions++;
+						return {
+							kind: "result",
+							result: { content: [{ type: "text", text: "temporary failure" }], isError: true },
+							isError: true,
+						};
+					},
+				},
+			},
+			async execute() {
+				return { content: [{ type: "text", text: "recovered" }] };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const loopConfig: AgentLoopConfig = {
+			model: createMockModel({ responses: [] }).model,
+			convertToLlm: identityConverter,
+		};
+		const coordinator = new SpeculativeOperationCoordinator({ enabled: true }, { context, loopConfig });
+		const toolCall = {
+			type: "toolCall" as const,
+			id: "transient-1",
+			name: "transient",
+			arguments: { value: "run" },
+		};
+
+		coordinator.admitFinalized(context, toolCall, loopConfig, undefined);
+		await coordinator.finalizeAdmissions();
+
+		await expect(coordinator.claim(tool, toolCall, { value: "run" })).resolves.toBeUndefined();
+		expect(speculativeExecutions).toBe(1);
+		await coordinator.close("test complete");
+	});
 });
