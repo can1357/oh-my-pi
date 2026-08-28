@@ -19,7 +19,7 @@ import {
 	TurnEndedUpdateSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
-import { encodeConnectFrame } from "../src/providers/cursor/connect-frame";
+import { type ConnectFrame, encodeConnectFrame } from "../src/providers/cursor/connect-frame";
 import * as h2Pool from "../src/providers/cursor/h2-pool";
 import { buildCursorRunHeaders } from "../src/providers/cursor/headers";
 import * as serverConfig from "../src/providers/cursor/server-config";
@@ -529,6 +529,81 @@ describe("openCursorTransport lifecycle", () => {
 			} catch (cause) {
 				error = cause;
 			}
+			expect(error).toBeInstanceOf(Error);
+			expect(String(error)).toContain("frame queue exceeded");
+			attempt.close();
+		} finally {
+			__setCursorH2FrameQueueBytes(undefined);
+			for (const session of sessions) session.destroy();
+			const closing = server;
+			server = undefined;
+			const closed = Promise.withResolvers<void>();
+			closing.close(error => (error ? closed.reject(error) : closed.resolve()));
+			await closed.promise;
+		}
+	}, 10_000);
+
+	it("drains admitted frames before surfacing the queued-byte budget failure", async () => {
+		let server: http2.Http2Server | undefined;
+		const overBudgetFrameFlushed = Promise.withResolvers<void>();
+		const sessions = new Set<http2.Http2Session>();
+		server = http2.createServer();
+		server.on("session", session => {
+			sessions.add(session);
+			session.on("close", () => sessions.delete(session));
+		});
+		server.on("stream", (stream: http2.ServerHttp2Stream) => {
+			stream.on("data", () => {});
+			stream.on("error", () => {});
+			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+			// Two 100-byte frames fit the 512-byte budget ((64+100)*2 = 328);
+			// the later 200-byte frame (64+200 = 264) tips admission over the
+			// limit. The stream stays open: the failure is what ends the turn.
+			// Real timers, deliberately: admission batches per 'data' event, so
+			// the over-budget frame must arrive in its own TCP segment — fake
+			// timers cannot force socket segmentation.
+			stream.write(
+				Buffer.concat([frameConnectMessage(Buffer.alloc(100, 0x61)), frameConnectMessage(Buffer.alloc(100, 0x62))]),
+			);
+			setTimeout(() => {
+				stream.write(frameConnectMessage(Buffer.alloc(200, 0x63)), () => overBudgetFrameFlushed.resolve());
+			}, 100);
+		});
+		const listening = Promise.withResolvers<void>();
+		server.once("error", listening.reject);
+		server.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
+		const address = server.address();
+		if (!address || typeof address === "string") throw new Error("expected live h2 fixture");
+		const h2Url = `http://127.0.0.1:${address.port}`;
+
+		__setCursorH2FrameQueueBytes(512);
+		try {
+			const attempt = await openCursorTransport({
+				baseUrl: h2Url,
+				apiKey: API_KEY,
+				requestPath: RUN_PATH,
+				runHeaders: testRunHeaders(),
+				gzipRequest: false,
+				provider: "cursor",
+			});
+			attempt.write(encodeConnectFrame(Buffer.from("client-request", "utf8"), false));
+			// Consume only after the over-budget frame was flushed: admitted
+			// frames drain first and the stored failure surfaces after — the
+			// same drain-before-error contract the HTTP/1 bridge pins, so the
+			// failure is delayed but never masked. The residual sleep is
+			// loopback delivery grace; the budget rejection never settles a
+			// public promise, so no awaitable signal exists on the client.
+			await overBudgetFrameFlushed.promise;
+			await Bun.sleep(100);
+			const consumed: ConnectFrame[] = [];
+			let error: unknown;
+			try {
+				for await (const frame of attempt.frames()) consumed.push(frame);
+			} catch (cause) {
+				error = cause;
+			}
+			expect(consumed.filter(frame => frame.kind === "data")).toHaveLength(2);
 			expect(error).toBeInstanceOf(Error);
 			expect(String(error)).toContain("frame queue exceeded");
 			attempt.close();
