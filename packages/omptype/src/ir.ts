@@ -20,6 +20,8 @@ const kMorph: unique symbol = Symbol("omptype.hasMorph");
 const kMorphOwner: unique symbol = Symbol("omptype.hasMorphOwner");
 const kAlias: unique symbol = Symbol("omptype.hasAlias");
 const kAliasOwner: unique symbol = Symbol("omptype.hasAliasOwner");
+const kExportable: unique symbol = Symbol("omptype.exportable");
+const kExportableOwner: unique symbol = Symbol("omptype.exportableOwner");
 const kSimple: unique symbol = Symbol("omptype.simple");
 const kSimpleOwner: unique symbol = Symbol("omptype.simpleOwner");
 
@@ -28,6 +30,8 @@ interface IRAnalysis {
 	[kMorphOwner]?: object;
 	[kAlias]?: boolean;
 	[kAliasOwner]?: object;
+	[kExportable]?: boolean;
+	[kExportableOwner]?: object;
 	[kSimple]?: boolean;
 	[kSimpleOwner]?: object;
 	/** Node-local metadata used for shallow error formatting. */
@@ -148,7 +152,12 @@ export type IR = IRAnalysis &
 				desc?: string;
 		  }
 		| { k: "instance"; ctor: Constructor; expected: string; desc?: string }
-		| { k: "alias"; name: string; resolve: () => IR; desc?: string }
+		| {
+				k: "alias";
+				name: string;
+				resolve: () => IR;
+				desc?: string;
+		  }
 		/** Embedded schema with runtime steps; validated by calling `run`. */
 		| { k: "sub"; schema: EmbeddableSchema; desc?: string }
 	);
@@ -1661,6 +1670,97 @@ function scanMorph(ir: IR, activeAliases?: Set<IR>): boolean {
 				for (const item of ir.postfix) {
 					if (scanMorph(item, activeAliases)) {
 						result = true;
+						break;
+					}
+				}
+			}
+			break;
+	}
+	return result;
+}
+
+/**
+ * True when `ir` can be lowered to JSON Schema structurally — without routing
+ * values through a dispatcher morph, whose emission erases the document to an
+ * unconstrained `{}`. Key-stripping objects (`extras: "delete"`) are
+ * exportable: stripping is representable (the schema still describes the
+ * declared properties), whereas {@link hasMorph} must report them because
+ * validation changes the output value. Everywhere else this deliberately
+ * mirrors {@link scanMorph}: stepped embedded schemas (`sub`), morphs, and
+ * default-filled properties stay non-exportable.
+ */
+export function isStructurallyExportable(ir: IR): boolean {
+	const cached = ir[kExportableOwner] === ir ? ir[kExportable] : undefined;
+	if (cached !== undefined) return cached;
+	const result = scanExportable(ir);
+	ir[kExportable] = result;
+	ir[kExportableOwner] = ir;
+	return result;
+}
+
+function scanExportable(ir: IR, activeAliases?: Set<IR>): boolean {
+	const cached = ir[kExportableOwner] === ir ? ir[kExportable] : undefined;
+	if (cached !== undefined) return cached;
+
+	let result = true;
+	switch (ir.k) {
+		case "sub":
+		case "morph":
+			result = false;
+			break;
+		case "alias": {
+			if (activeAliases?.has(ir)) return true;
+			const aliases = activeAliases ?? new Set<IR>();
+			aliases.add(ir);
+			result = scanExportable(ir.resolve(), aliases);
+			aliases.delete(ir);
+			return result;
+		}
+		case "object":
+			for (const prop of ir.props) {
+				if (prop.hasDefault === true || !scanExportable(prop.val, activeAliases)) {
+					result = false;
+					break;
+				}
+			}
+			if (result && ir.index !== undefined) result = scanExportable(ir.index, activeAliases);
+			if (result && ir.symbolIndex !== undefined) result = scanExportable(ir.symbolIndex, activeAliases);
+			if (result && ir.patternIndexes !== undefined) {
+				for (const pattern of ir.patternIndexes) {
+					if (!scanExportable(pattern.val, activeAliases)) {
+						result = false;
+						break;
+					}
+				}
+			}
+			break;
+		case "array":
+			result = scanExportable(ir.el, activeAliases);
+			break;
+		case "union":
+		case "intersection":
+			for (const member of ir.members) {
+				if (!scanExportable(member, activeAliases)) {
+					result = false;
+					break;
+				}
+			}
+			break;
+		case "refine":
+			result = scanExportable(ir.base, activeAliases);
+			break;
+		case "tuple":
+			for (const item of ir.prefix) {
+				if (item.hasDefault === true || !scanExportable(item.val, activeAliases)) {
+					result = false;
+					break;
+				}
+			}
+			if (result && ir.variadic !== undefined) result = scanExportable(ir.variadic, activeAliases);
+			if (result) {
+				for (const item of ir.postfix) {
+					if (!scanExportable(item, activeAliases)) {
+						result = false;
 						break;
 					}
 				}

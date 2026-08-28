@@ -1,5 +1,13 @@
 import { type OmpErrors, OmpTypeError } from "./errors";
-import { type EmbeddableSchema, type Extras, embed, hasMorph, type IR, IR_BRAND, type PropIR } from "./ir";
+import {
+	type EmbeddableSchema,
+	type Extras,
+	embed,
+	type IR,
+	IR_BRAND,
+	isStructurallyExportable,
+	type PropIR,
+} from "./ir";
 import { type NarrowContext, type Type, type } from "./type";
 
 interface OptionalSchemaMarker {
@@ -70,7 +78,7 @@ function schemaFromIR<Out>(ir: IR): Decoratable<Out> {
  * `value === undefined` short-circuit around an inner schema, as a dispatch
  * morph. Composing a real union (`schema | undefined`) instead would trip
  * omptype's unordered-union determinism check whenever the inner side carries
- * morphs — which every shim-level recursive/lazy schema does.
+ * morphs (dispatcher-wrapped unions, parse schemas, stepped members).
  */
 function undefinedDispatch<Out>(
 	schema: Decoratable<Out>,
@@ -209,14 +217,15 @@ function decorate<Out>(schema: Decoratable<Out>, optional = false): ZodLikeSchem
 			return next(restrictBase(schema, { ...schema.ir, url: true }));
 		},
 		optional(): ZodLikeSchema<Out | undefined> & OptionalSchemaMarker {
-			// Purely structural inner schemas keep a real union so structural
+			// Structurally exportable inner schemas keep a real union so structural
 			// metadata (JSON Schema export, descriptions) survives the widening.
 			// Anything carrying a runtime pipeline takes the dispatch morph below:
-			// `hasMorph(ir)` covers in-IR morphs (lazy, string.numeric.parse), and
-			// `hasSteps` covers Type-attached `.transform()`/`.refine()` steps the
-			// IR alone cannot see — rebuilding from `schema.ir` would silently
-			// DROP those steps, not just degrade the emitted JSON Schema.
-			if (!schema.hasSteps && !hasMorph(schema.ir)) {
+			// `isStructurallyExportable(ir)` rejects in-IR morphs and stepped
+			// embedded schemas, and `hasSteps` covers Type-attached
+			// `.transform()`/`.refine()` steps the IR alone cannot see — rebuilding
+			// from `schema.ir` would silently DROP those steps, not just degrade
+			// the emitted JSON Schema.
+			if (!schema.hasSteps && isStructurallyExportable(schema.ir)) {
 				return decorate(
 					schemaFromIR<Out | undefined>({ k: "union", members: [schema.ir, { k: "undefined" }] }),
 					true,
@@ -226,11 +235,11 @@ function decorate<Out>(schema: Decoratable<Out>, optional = false): ZodLikeSchem
 				OptionalSchemaMarker;
 		},
 		nullable(): ZodLikeSchema<Out | null> {
-			// Purely structural inner schemas keep a real union so structural
+			// Structurally exportable inner schemas keep a real union so structural
 			// metadata (JSON Schema export for provider tool definitions) survives
 			// the widening — the dispatcher morph below erases the IR, emitting
 			// `{}` for the member. Same pipeline gate as optional() above.
-			if (!schema.hasSteps && !hasMorph(schema.ir)) {
+			if (!schema.hasSteps && isStructurallyExportable(schema.ir)) {
 				return decorate(
 					schemaFromIR<Out | null>({ k: "union", members: [schema.ir, { k: "lit", v: null }] }),
 					optional,
@@ -253,9 +262,9 @@ function decorate<Out>(schema: Decoratable<Out>, optional = false): ZodLikeSchem
 			value: Exclude<Out, undefined> | (() => Exclude<Out, undefined>),
 		): ZodLikeSchema<Exclude<Out, undefined>> {
 			type DefaultOut = Exclude<Out, undefined>;
-			// Morph-free inner schemas keep the original union+pipe composition so
-			// structural metadata survives JSON-Schema export.
-			if (!hasMorph(schema.ir)) {
+			// Structurally exportable inner schemas keep the original union+pipe
+			// composition so structural metadata survives JSON-Schema export.
+			if (isStructurallyExportable(schema.ir)) {
 				const widened = schema.or(type.raw("undefined")) as Decoratable<Out | undefined>;
 				const pipedPlain = widened.pipe(output => {
 					if (output !== undefined) return output as DefaultOut;
@@ -411,17 +420,35 @@ const enumSchema = <const Values extends readonly [string, ...string[]]>(
 };
 
 export { enumSchema as enum };
+
+/**
+ * Matches omptype's unordered-union indeterminacy error. The structural build
+ * is only attempted for member sets that pass the exportability gate, so this
+ * error alone may fall back to the ordered dispatcher; any other construction
+ * error must surface. Deliberately text-matched and narrow: if omptype ever
+ * rewords the message, this stops matching and fails loudly (construction
+ * error) instead of silently erasing again.
+ */
+function isIndeterminateUnionError(error: unknown): boolean {
+	return (
+		error instanceof OmpTypeError &&
+		error.message.includes("unordered union") &&
+		error.message.includes("indeterminate")
+	);
+}
 // Ordered first-match dispatcher rather than an omptype union: zod unions try
 // branches in declaration order, while omptype's unordered unions reject
-// overlapping morph inputs — a shape recursive schemas (`lazy` is a morph)
-// hit constantly. Wrapping the members in one unknown-input morph keeps zod's
-// ordering and keeps member morphs invisible to the determinism check.
+// overlapping morph inputs — a shape recursive schemas with morph-carrying
+// members hit constantly. Wrapping the members in one unknown-input morph
+// keeps zod's ordering and keeps member morphs invisible to the determinism
+// check.
 //
-// The dispatcher is reserved for unions that actually contain a morph: a
-// morph-free union stays structural, because the morph wrapper erases the IR
-// and `toJsonSchema()` then emits `{}` for the member — a provider-facing
-// tool parameter would appear unconstrained. For pure validators any-match
-// equals first-match, so zod's ordering is not observable there.
+// The dispatcher is reserved for unions that actually carry a pipeline: a
+// structurally exportable union stays structural, because the morph wrapper
+// erases the IR and `toJsonSchema()` then emits `{}` for the member — a
+// provider-facing tool parameter would appear unconstrained. For pure
+// validators any-match equals first-match, so zod's ordering is not
+// observable there.
 export const union = <
 	const Schemas extends readonly [ZodLikeSchema<unknown>, ZodLikeSchema<unknown>, ...ZodLikeSchema<unknown>[]],
 >(
@@ -431,8 +458,17 @@ export const union = <
 	const irs = members.map(member => member.ir);
 	// Same pipeline gate as optional()/nullable(): `hasSteps` covers
 	// Type-attached transform/refine steps the member IR cannot see.
-	if (members.every(member => !member.hasSteps) && irs.every(ir => !hasMorph(ir))) {
-		return decorate(schemaFromIR<UnionOutput<Schemas>>({ k: "union", members: irs }));
+	if (members.every(member => !member.hasSteps) && irs.every(ir => isStructurallyExportable(ir))) {
+		try {
+			return decorate(schemaFromIR<UnionOutput<Schemas>>({ k: "union", members: irs }));
+		} catch (error) {
+			// Overlapping morph-carrying members (e.g. two key-stripping
+			// z.objects) have order-dependent output under omptype's unordered
+			// union, so the native build is rejected there. zod's union is
+			// first-match: keep the ordered dispatcher below — its JSON Schema
+			// export erases (known, documented limitation).
+			if (!isIndeterminateUnionError(error)) throw error;
+		}
 	}
 	return decorate(
 		schemaFromIR({
@@ -476,14 +512,21 @@ export const discriminatedUnion = <
 	schemas: Schemas,
 ): ZodLikeSchema<UnionOutput<Schemas>> => {
 	const variantIrs = schemas.map(schema => schema.ir);
-	// Same pipeline gate as union() above: a purely structural variant set
-	// keeps a real structural union so JSON Schema export (provider tool
+	// Same pipeline gate as union() above: a structurally exportable variant
+	// set keeps a real structural union so JSON Schema export (provider tool
 	// definitions) survives — distinct discriminator literals make the
 	// variants disjoint, so any-match equals discriminator-dispatch for pure
 	// validators. The literal dispatcher below is reserved for variant sets
 	// carrying morphs or Type-attached steps.
-	if (schemas.every(schema => !schema.hasSteps) && variantIrs.every(ir => !hasMorph(ir))) {
-		return decorate(schemaFromIR<UnionOutput<Schemas>>({ k: "union", members: variantIrs }));
+	if (schemas.every(schema => !schema.hasSteps) && variantIrs.every(ir => isStructurallyExportable(ir))) {
+		try {
+			return decorate(schemaFromIR<UnionOutput<Schemas>>({ k: "union", members: variantIrs }));
+		} catch (error) {
+			// Same fallback as union(): variants whose discriminators do not
+			// disjointly pin literals (e.g. optional discriminators overlapping
+			// another variant) are order-dependent — keep the literal dispatcher.
+			if (!isIndeterminateUnionError(error)) throw error;
+		}
 	}
 	const variants = schemas.map(schema => ({
 		schema: schema as ZodLikeSchema<unknown>,
