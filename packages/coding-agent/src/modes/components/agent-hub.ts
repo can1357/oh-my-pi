@@ -78,16 +78,7 @@ import {
 	treeMetadataIndent,
 } from "./agent-hub-renderer";
 import { AgentTranscriptViewer } from "./agent-transcript-viewer";
-import {
-	bottomBorder,
-	divider,
-	dividerSplit,
-	row,
-	splitBodyWidth,
-	splitRow,
-	topBorder,
-	topBorderSplit,
-} from "./overlay-box";
+import { bottomBorder, divider, dividerSplit, row, splitBodyWidth, splitRow, topBorder } from "./overlay-box";
 
 /** Two-pane mode needs a useful roster and a readable inspector. */
 const SPLIT_MIN_WIDTH = 96;
@@ -1213,20 +1204,22 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	#renderTable(width: number, termHeight: number): string[] {
 		this.#hitRows.length = 0;
 		const contentRows = Math.max(1, termHeight - 4);
+		const paneRows = Math.max(0, contentRows - 1);
 		const observedById = this.#observedById;
 		const split = this.#splitRosterWidth(width);
 		this.#lastRenderWasSplit = split !== undefined;
 		this.#lastSplitRosterWidth = split;
-		this.#lastDetailRows = contentRows;
+		this.#lastDetailRows = paneRows;
 		const selected = this.#rows[this.#selectedRow];
 		const lines: string[] = [];
 
 		if (split !== undefined) {
 			const detailWidth = splitBodyWidth(width, split);
-			const roster = this.#renderRosterPanel(split, contentRows, observedById);
-			const details = this.#renderDetailPanel(selected, detailWidth, contentRows, observedById);
-			lines.push(topBorderSplit(width, "Agent Hub", split));
-			for (let i = 0; i < contentRows; i++) {
+			const roster = this.#renderRosterPanel(split, paneRows, observedById);
+			const details = paneRows > 0 ? this.#renderDetailPanel(selected, detailWidth, paneRows, observedById) : [];
+			lines.push(topBorder(width, "Agent Hub"));
+			lines.push(row(this.#sectionTabs(), width));
+			for (let i = 0; i < paneRows; i++) {
 				const hit = roster.hitRows[i];
 				if (hit !== undefined) this.#hitRows[lines.length] = hit;
 				let detailLine = details[i] ?? "";
@@ -1243,13 +1236,15 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 
 		const innerWidth = Math.max(1, width - 4);
 		if (this.#narrowDetailsOpen && selected) {
-			const details = this.#renderDetailPanel(selected, innerWidth, contentRows, observedById);
+			const details = paneRows > 0 ? this.#renderDetailPanel(selected, innerWidth, paneRows, observedById) : [];
 			lines.push(topBorder(width, `Agent Hub · ${selected.id}`));
+			lines.push(row(this.#sectionTabs(), width));
 			for (const detail of details) lines.push(row(detail, width));
 		} else {
-			const roster = this.#renderRosterPanel(innerWidth, contentRows, observedById);
+			const roster = this.#renderRosterPanel(innerWidth, paneRows, observedById);
 			lines.push(topBorder(width, "Agent Hub"));
-			for (let i = 0; i < contentRows; i++) {
+			lines.push(row(this.#sectionTabs(), width));
+			for (let i = 0; i < paneRows; i++) {
 				const hit = roster.hitRows[i];
 				if (hit !== undefined) this.#hitRows[lines.length] = hit;
 				lines.push(row(roster.lines[i] ?? "", width));
@@ -1499,8 +1494,8 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		const addWrapped = (text: string, maxRows = 2): void => {
 			for (const wrapped of wrapTextWithAnsi(sanitizeLine(text), Math.max(1, width)).slice(0, maxRows)) add(wrapped);
 		};
-		const section = (label: string, contentRows = 0): void => {
-			if (lines.length > 0 && lines.length + 1 + contentRows < rows) add();
+		const section = (label: string, contentRows = 0, separated = true): void => {
+			if (separated && rows >= 10 && lines.length > 0 && lines.length + 1 + contentRows < rows) add();
 			add(theme.bold(theme.fg("accent", label)));
 		};
 
@@ -1522,7 +1517,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 
 		const task = observed?.description ?? progress?.task ?? ref.activity;
 		if (task) {
-			section("Task");
+			section("Task", 1);
 			addWrapped(task);
 		}
 
@@ -1530,7 +1525,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			? `${progress.currentTool}${progress.currentToolArgs ? ` · ${progress.currentToolArgs}` : ""}`
 			: (progress?.lastIntent ?? ref.activity);
 		if (current) {
-			section("Current");
+			section("Current", 1);
 			addWrapped(current);
 			if (progress?.retryState) {
 				add(theme.fg("warning", `retry ${progress.retryState.attempt}/${progress.retryState.maxAttempts}`));
@@ -1547,14 +1542,14 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			add(theme.fg("dim", "usage —"));
 		}
 
-		section("Lineage");
+		section("Lineage", 2);
 		add(
 			`Spawned by ${sanitizeDisplayText(ref.parentId ?? MAIN_AGENT_ID)}${children.length > 0 ? ` · ${children.length} children` : ""}`,
 		);
 		if (children.length > 0) add(theme.fg("dim", formatChildIds(children, width)));
 		add(theme.fg("dim", `Registered ${formatLocalDateTimeWithOffset(new Date(ref.createdAt))}`));
 
-		section("Changes");
+		section("Changes", 1, false);
 		add(
 			theme.fg(
 				"dim",
@@ -1719,10 +1714,11 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 				return true;
 			}
 			if (event.motion) {
-				// event.row is the 0-based frame line; detail content occupies
-				// frame lines 1..contentRows (line 0 is the top border).
+				// event.row is the 0-based frame line; the shared section tabs
+				// occupy line 1, so detail content starts at line 2.
 				const line = event.row;
-				const next = line >= 1 && line <= (this.#lastDetailRows ?? 0) ? line : null;
+				const detailRows = this.#lastDetailRows ?? 0;
+				const next = line >= 2 && line < 2 + detailRows ? line : null;
 				if (next !== this.#hoveredDetailLine) {
 					this.#hoveredDetailLine = next;
 					this.#requestRender();
@@ -2228,6 +2224,10 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			this.#viewMode = this.#viewMode === "roster" ? "tree" : "roster";
 			this.#refreshRows();
 			this.#requestRender();
+			return;
+		}
+		if (matchesKey(keyData, "right")) {
+			this.#switchSection("activity");
 			return;
 		}
 		if (matchesKey(keyData, "left")) {

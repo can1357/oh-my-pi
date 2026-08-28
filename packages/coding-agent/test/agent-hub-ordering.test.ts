@@ -155,6 +155,26 @@ describe("Agent hub row ordering", () => {
 		}
 	});
 
+	it("keeps section navigation visible in Agents and moves right to Activity", () => {
+		geometry = stubStdoutGeometry(120);
+		const agents = new AgentRegistry();
+		agents.register({ id: "Worker", displayName: "Worker", kind: "sub", session: null });
+		const hub = makeHub(agents);
+
+		try {
+			const agentsFrame = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(agentsFrame).toContain("1 Agents");
+			expect(agentsFrame).toContain("2 Activity");
+			expect(agentsFrame).toContain("3 Messages");
+
+			hub.handleInput("\x1b[C");
+			const activityFrame = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(activityFrame).toContain("No agent activity recorded yet");
+		} finally {
+			hub.dispose();
+		}
+	});
+
 	it("re-sorts rows by most-recent activity while the hub is open", () => {
 		vi.useFakeTimers();
 		let hub: AgentHubOverlayComponent | undefined;
@@ -454,12 +474,12 @@ describe("Agent hub row ordering", () => {
 			// Hovering a detail line highlights it; re-hovering the same line is
 			// stable; a roster hover replaces it (roster rows hover-highlight too).
 			const baseline = hub.render(120).join("\n");
-			hub.handleInput("\x1b[<35;110;8M");
+			hub.handleInput("\x1b[<35;110;9M");
 			const hovered = hub.render(120).join("\n");
 			expect(hovered).not.toBe(baseline);
-			hub.handleInput("\x1b[<35;110;8M");
+			hub.handleInput("\x1b[<35;110;9M");
 			expect(hub.render(120).join("\n")).toBe(hovered);
-			hub.handleInput("\x1b[<35;10;8M");
+			hub.handleInput("\x1b[<35;10;9M");
 			expect(Bun.stripANSI(hub.render(120).join("\n"))).toBe(Bun.stripANSI(baseline));
 
 			// Messages: wheel over the conversation list changes conversations;
