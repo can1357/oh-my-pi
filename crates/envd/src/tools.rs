@@ -1730,6 +1730,38 @@ pub trait TelemetryUpload: Send + Sync + 'static {
 	fn start(&self, index: Arc<TelemetryIndex>, credentials: Arc<GithubCredentialBridge>);
 }
 
+/// Deferred start of background telemetry delivery.
+///
+/// Registry assembly itself must not spawn the handle-less upload loop: both
+/// server construction paths continue with the fallible control-host
+/// activation after assembly, and a failed activation returns from
+/// construction while a spawned loop would keep retrying against the
+/// telemetry index and the credential bridge. Composition therefore returns
+/// the start instead of performing it, and the construction path runs it
+/// only after that final fallible step has succeeded.
+pub struct TelemetryUploadStart {
+	upload:      Option<Arc<dyn TelemetryUpload>>,
+	telemetry:   Arc<TelemetryIndex>,
+	credentials: Arc<GithubCredentialBridge>,
+}
+
+impl TelemetryUploadStart {
+	fn new(
+		upload: Option<Arc<dyn TelemetryUpload>>,
+		telemetry: &Arc<TelemetryIndex>,
+		credentials: &Arc<GithubCredentialBridge>,
+	) -> Self {
+		Self { upload, telemetry: Arc::clone(telemetry), credentials: Arc::clone(credentials) }
+	}
+
+	/// Starts background delivery exactly once, consuming the deferred start.
+	pub(crate) fn start(self) {
+		if let Some(upload) = self.upload {
+			upload.start(self.telemetry, self.credentials);
+		}
+	}
+}
+
 /// Runs one native tool stream under its authenticated invocation restrictions.
 pub(super) async fn with_invocation_scope<T>(
 	pty_denied: bool,
@@ -1828,6 +1860,7 @@ pub(crate) fn production_registry<
 		Arc<SearchBridgeHost>,
 		Arc<GithubCredentialBridge>,
 		PresenterSlot,
+		TelemetryUploadStart,
 	),
 	EnvdError,
 > {
@@ -2426,12 +2459,12 @@ pub(crate) fn production_registry<
 	eval_host
 		.bind_prelude(prelude, Arc::new(prelude_invoker))
 		.map_err(|error| EnvdError::Eval(Str::from(error.to_string())))?;
-	// Start background delivery only after every fallible assembly step has
-	// succeeded: a failed start must not leave an unowned upload task
-	// retaining the telemetry index and credentials.
-	if let Some(upload) = telemetry_upload {
-		upload.start(Arc::clone(telemetry), Arc::clone(&github_credentials));
-	}
+	// Assembly returns the telemetry start instead of performing it: the
+	// construction paths still cross the fallible control-host activation
+	// after this function, and a spawned upload loop must not outlive a
+	// failed construction.
+	let telemetry_upload_start =
+		TelemetryUploadStart::new(telemetry_upload, &telemetry, &github_credentials);
 	Ok((
 		registry,
 		eval_host,
@@ -2443,6 +2476,7 @@ pub(crate) fn production_registry<
 		search_bridge,
 		github_credentials,
 		ask_presenter,
+		telemetry_upload_start,
 	))
 }
 #[derive(Clone)]
@@ -3101,14 +3135,14 @@ mod tests {
 			.expect("document host handshake")
 	}
 
-	/// Assembles the production registry over throwaway hosts while counting
-	/// telemetry uploader starts.
+	/// Assembles the production registry over throwaway hosts and returns the
+	/// deferred telemetry uploader start for the construction path to run.
 	async fn assemble_registry(
 		project: &Path,
 		state: &Path,
 		workers: ExtHostSupervisor,
 		bridges: RegistryBridges,
-	) -> Result<Arc<Registry>, EnvdError> {
+	) -> Result<(Arc<Registry>, TelemetryUploadStart), EnvdError> {
 		let documents = handshake_document_host(project).await;
 		let exec = ExecHost::new();
 		let blobs = BlobHost::open(state.join("blobs")).expect("blob host");
@@ -3146,6 +3180,7 @@ mod tests {
 			_search_bridge,
 			_credentials,
 			_ask_presenter,
+			telemetry_upload_start,
 		) = production_registry(
 			&documents,
 			&blobs,
@@ -3173,7 +3208,7 @@ mod tests {
 			Registry::new(),
 			bridges,
 		)?;
-		Ok(registry)
+		Ok((registry, telemetry_upload_start))
 	}
 
 	#[tokio::test]
@@ -3207,12 +3242,12 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn successful_assembly_starts_the_telemetry_uploader_once() {
+	async fn assembly_defers_the_telemetry_uploader_start_to_the_construction_path() {
 		let project = tempfile::tempdir().expect("project directory");
 		let state = tempfile::tempdir().expect("state directory");
 		let upload = Arc::new(RecordingUpload::default());
 		let telemetry_upload: Arc<dyn TelemetryUpload> = upload.clone();
-		let registry = assemble_registry(
+		let (registry, telemetry_start) = assemble_registry(
 			project.path(),
 			state.path(),
 			ExtHostSupervisor::inert_with_registrations(Arc::from([])),
@@ -3223,8 +3258,14 @@ mod tests {
 		assert!(registry.live_identity("bash").is_some(), "core tools registered");
 		assert_eq!(
 			upload.0.load(Ordering::SeqCst),
+			0,
+			"assembly must leave the uploader unstarted for the construction path",
+		);
+		telemetry_start.start();
+		assert_eq!(
+			upload.0.load(Ordering::SeqCst),
 			1,
-			"successful assembly starts the uploader exactly once",
+			"the deferred start runs delivery exactly once",
 		);
 	}
 
@@ -3268,7 +3309,7 @@ mod tests {
 	async fn dynamic_vibe_device_stays_model_visible_but_off_the_user_roster() {
 		let project = tempfile::tempdir().expect("project directory");
 		let state = tempfile::tempdir().expect("state directory");
-		let registry = assemble_registry(
+		let (registry, _) = assemble_registry(
 			project.path(),
 			state.path(),
 			ExtHostSupervisor::inert_with_registrations(Arc::from([])),
@@ -3485,7 +3526,7 @@ mod tests {
 	async fn final_freeze_evicts_a_factory_takeover_of_a_core_device() {
 		let project = tempfile::tempdir().expect("project directory");
 		let state = tempfile::tempdir().expect("state directory");
-		let registry = assemble_registry(
+		let (registry, _) = assemble_registry(
 			project.path(),
 			state.path(),
 			ExtHostSupervisor::inert_with_registrations(Arc::from([])),
