@@ -44,6 +44,12 @@ export interface RequestDebugSession {
 	readonly id: number;
 	readonly requestPath: string;
 	readonly responsePath: string;
+	/**
+	 * Amend the persisted request record after creation — e.g. the selected
+	 * protocol once a transport attempt exists, or the terminal error when the
+	 * turn died before any response. Rewrites the request dump in place.
+	 */
+	annotateRequest(fields: { protocol?: string; error?: string }): Promise<void>;
 	openResponseLog(statusLine: string, headers?: RequestDebugHeaders): Promise<RequestDebugResponseLog>;
 	wrapResponse(response: Response): Promise<Response>;
 }
@@ -102,7 +108,7 @@ export async function createRequestDebugSession(payload: RequestDebugPayload): P
 		await handle.close();
 	}
 
-	return new FileRequestDebugSession(id, requestPath, responsePath, overwrite);
+	return new FileRequestDebugSession(id, requestPath, responsePath, overwrite, requestDump);
 }
 
 async function createFetchRequestDebugSession(
@@ -124,12 +130,26 @@ class FileRequestDebugSession implements RequestDebugSession {
 	readonly requestPath: string;
 	readonly responsePath: string;
 	readonly #overwriteResponseLog: boolean;
+	readonly #requestDump: Record<string, unknown>;
 
-	constructor(id: number, requestPath: string, responsePath: string, overwriteResponseLog: boolean) {
+	constructor(
+		id: number,
+		requestPath: string,
+		responsePath: string,
+		overwriteResponseLog: boolean,
+		requestDump: Record<string, unknown>,
+	) {
 		this.id = id;
 		this.requestPath = requestPath;
 		this.responsePath = responsePath;
 		this.#overwriteResponseLog = overwriteResponseLog;
+		this.#requestDump = requestDump;
+	}
+
+	async annotateRequest(fields: { protocol?: string; error?: string }): Promise<void> {
+		if (fields.protocol !== undefined) this.#requestDump.protocol = fields.protocol;
+		if (fields.error !== undefined) this.#requestDump.error = fields.error;
+		await fs.writeFile(this.requestPath, `${JSON.stringify(this.#requestDump, null, 2)}\n`, "utf8");
 	}
 
 	async openResponseLog(statusLine: string, headers?: RequestDebugHeaders): Promise<RequestDebugResponseLog> {

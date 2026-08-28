@@ -206,7 +206,12 @@ import {
 } from "../utils/block-symbols";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
+import {
+	createRequestDebugSession,
+	isRequestDebugEnabled,
+	type RequestDebugResponseLog,
+	type RequestDebugSession,
+} from "../utils/request-debug";
 import { toolWireSchema } from "../utils/schema/wire";
 import { ConnectEndStreamError, ConnectProtocolError, encodeConnectFrame } from "./cursor/connect-frame";
 import {
@@ -617,6 +622,7 @@ function streamCursorWithWireMode(
 		let attemptClosed = false;
 		let heartbeatTimer: NodeJS.Timeout | null = null;
 		let debugResponseLogPromise: Promise<RequestDebugResponseLog | undefined> | undefined;
+		let debugSession: RequestDebugSession | undefined;
 		const h2Completion = Promise.withResolvers<void>();
 		let h2Settled = false;
 		let sawTurnEnded = false;
@@ -726,6 +732,18 @@ function streamCursorWithWireMode(
 			});
 			stream.push({ type: "start", partial: output });
 
+			// Persist the request record before connecting: a transport-acquisition
+			// failure (ALPN negotiation, proxy tunneling) must still leave a
+			// PI_REQ_DEBUG artifact for the failed turn.
+			debugSession = isRequestDebugEnabled()
+				? await createRequestDebugSession({
+						protocol: "unknown",
+						method: "POST",
+						url: new URL(requestPath, baseUrl).toString(),
+						headers: requestHeaders,
+						bodyBase64: Buffer.from(requestBytes).toString("base64"),
+					})
+				: undefined;
 			attempt = await openCursorTransport({
 				baseUrl,
 				apiKey,
@@ -736,15 +754,12 @@ function streamCursorWithWireMode(
 				provider: model.provider,
 			});
 			const transport = attempt;
-			const debugSession = isRequestDebugEnabled()
-				? await createRequestDebugSession({
-						protocol: attempt.responseHeaders ? "http2" : "http",
-						method: "POST",
-						url: new URL(requestPath, baseUrl).toString(),
-						headers: requestHeaders,
-						bodyBase64: Buffer.from(requestBytes).toString("base64"),
-					})
-				: undefined;
+			// The selected protocol exists only once an attempt does.
+			if (debugSession) {
+				await debugSession
+					.annotateRequest({ protocol: attempt.responseHeaders ? "http2" : "http" })
+					.catch(() => undefined);
+			}
 
 			let currentTextBlock: (TextContent & { [kStreamingBlockIndex]: number }) | null = null;
 			let currentThinkingBlock: (ThinkingContent & { [kStreamingBlockIndex]: number }) | null = null;
@@ -1009,6 +1024,14 @@ function streamCursorWithWireMode(
 			});
 			stream.end();
 		} catch (error) {
+			// No response log promise means the turn died before any attempt
+			// existed (transport acquisition failed): record the terminal error
+			// in the request artifact so the failed turn is diagnosable.
+			if (debugSession && debugResponseLogPromise === undefined) {
+				await debugSession
+					.annotateRequest({ error: error instanceof Error ? error.message : String(error) })
+					.catch(() => undefined);
+			}
 			const fallbackWireModelId =
 				wireMode === "normalized" &&
 				!sawProgressOrSideEffect &&
