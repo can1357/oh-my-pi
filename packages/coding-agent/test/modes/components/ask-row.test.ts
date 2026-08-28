@@ -279,4 +279,28 @@ describe("askRow", () => {
 			if (darkTheme) setThemeInstance(darkTheme);
 		}
 	});
+
+	it("collapsed cue is bounded to the row width — an unbounded cue would be mid-word clipped by the dialog border chrome", () => {
+		// 20 wrapped description lines at contentWidth = 12 - 6 = 6, so hidden
+		// = 20 - PREVIEW_LIMITS.COLLAPSED_LINES(3) = 17 and the counted cue
+		// "17 more lines" plus glyph (15 visible columns) is wider than
+		// ctx.width = 12: it must render in truncated form.
+		const description = "ab ".repeat(40).trim();
+		const q = question(undefined, description);
+		const rendered = renderAskRow(row(), makeCtx({ question: q, focused: true, expanded: false, width: 12 }));
+
+		expect(rendered.hiddenDescriptionLines).toBe(17);
+		// Every emitted line stays within the caller's width budget. The dialog
+		// composes these rows through row()/fit(), which hard-clips overflow —
+		// an unbounded cue would lose its tail mid-word at the border.
+		for (const line of rendered.lines) {
+			expect(visibleWidth(strip(line))).toBeLessThanOrEqual(12);
+		}
+		// The last line is the cue: hidden count preserved, tail ellipsized by
+		// truncateToWidth — not amputated by the outer clip. (Glyph is
+		// theme-dependent, so assert the count and ellipsis only.)
+		const cue = strip(rendered.lines.at(-1) ?? "").trim();
+		expect(cue).toContain("17");
+		expect(cue.endsWith("…")).toBe(true);
+	});
 });

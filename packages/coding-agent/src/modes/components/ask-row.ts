@@ -160,7 +160,12 @@ export function renderAskRow(row: AskQuestionRow, ctx: AskRowRenderContext): Ask
 		if (!ctx.expanded && hiddenDescriptionLines > 0) {
 			const glyph = theme.nav.expand || "▾";
 			const noun = hiddenDescriptionLines === 1 ? "line" : "lines";
-			lines.push(`${indent}${theme.fg("dim", `${glyph} ${hiddenDescriptionLines} more ${noun}`)}`);
+			// Same width contract as the wrapped description above: the cue is
+			// bounded to contentWidth so the wording degrades to an ellipsis on
+			// narrow terminals instead of being mid-word clipped by the dialog
+			// border chrome (row()/fit()).
+			const cue = truncateToWidth(`${glyph} ${hiddenDescriptionLines} more ${noun}`, contentWidth, Ellipsis.Unicode);
+			lines.push(`${indent}${theme.fg("dim", cue)}`);
 		}
 	}
 
