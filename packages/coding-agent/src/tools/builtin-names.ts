@@ -121,7 +121,7 @@ function mcpWildcardServerSegment(pattern: string): string | undefined {
 export function mcpDisallowTargetsServer(patterns: readonly string[], serverName: string): boolean {
 	const sanitized = sanitizeMCPToolNamePart(serverName, "server");
 	for (const pattern of patterns) {
-		if (pattern === "mcp__*") return true;
+		if (pattern === "mcp__*" || pattern === "*") return true; // `mcp__*` = all MCP tools; bare `*` is deny-all and must close resource-only servers too.
 		const serverSegment = mcpWildcardServerSegment(pattern);
 		if (serverSegment !== undefined && serverSegment === sanitized) return true;
 	}

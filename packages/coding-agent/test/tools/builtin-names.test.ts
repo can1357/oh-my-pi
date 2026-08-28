@@ -122,6 +122,14 @@ describe("mcpDisallowTargetsServer", () => {
 		expect(mcpDisallowTargetsServer(["mcp__*"], "foo")).toBe(true);
 		expect(mcpDisallowTargetsServer(["mcp__*"], "bar")).toBe(true);
 	});
+	test("bare deny-all (*) targets every server, including resource-only ones", () => {
+		// `["*"]` must close a resource-only server's list/read surface too —
+		// `isToolDisallowed` matches "*" for registered tools but never runs for
+		// a server with no owned registry tool, so the server-level predicate is
+		// the only gate. Omitting it contradicted read-only-policy classification.
+		expect(mcpDisallowTargetsServer(["*"], "foo")).toBe(true);
+		expect(mcpDisallowTargetsServer(["*", "bash"], "bar")).toBe(true);
+	});
 
 	test("bare mcp__<server>_* targets only the server whose sanitized segment matches", () => {
 		expect(mcpDisallowTargetsServer(["mcp__foo_*"], "foo")).toBe(true);

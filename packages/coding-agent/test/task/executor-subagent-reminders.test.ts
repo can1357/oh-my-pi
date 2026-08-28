@@ -828,6 +828,37 @@ describe("runSubprocess yield reminders", () => {
 		expect(callArgs.disallowedTools).toEqual(["mcp__*"]);
 	});
 
+	it("does not expand a disallowed exec alias into eval/bash", async () => {
+		// `tools: [exec]` widens to eval+bash, but `disallowedTools: [exec]` (or
+		// a deny on either child) must close that expansion — otherwise a denied
+		// alias would still grant shell.
+		const session = createMockSession(({ emit }) => {
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "yield-exec-denied",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: { ok: true } },
+				},
+				isError: false,
+			});
+		});
+		const spy = mockCreateAgentSession(session);
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-exec-denied",
+			agent: { ...baseAgent, tools: ["exec"], disallowedTools: ["exec"] },
+		});
+
+		expect(result.exitCode).toBe(0);
+		const callArgs = spy.mock.calls[0][0] as { toolNames?: string[] };
+		expect(callArgs.toolNames).not.toContain("eval");
+		expect(callArgs.toolNames).not.toContain("bash");
+		expect(callArgs.toolNames).not.toContain("exec");
+	});
+
 	it("leaves scoping flags unset when the agent declares no tools", async () => {
 		const session = createMockSession(({ emit }) => {
 			emit({
